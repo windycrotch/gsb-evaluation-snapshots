@@ -359,11 +359,19 @@ Behaviour that differs from, or refines, the contracts above — kept because it
 * **Ensemble state during a pending load** reports the song being loaded (id, sections, parts), not the outgoing
   one — the Jam panel read the old id as "another song took over" and orphaned its own playback.
 * **JIT warm-up** (`processor.js` `warmup` message, sent by `audio.js`): the first demo song of a session rendered
-  ≈20–30 ms of cold (interpreted) DSP code in its first quanta (≈7 underruns at its first beat in Chrome). After the
-  part pool is built, while everything is silent, a private Synth plays ten factory presets that cover every
-  engine / phys model / filter type / FX (16 quanta each, one per `process()` call, output discarded). Measured in
-  Chrome (M5): first-song underruns 7 → 1 event; the startup underruns (part-pool construction, ≈18 events in the
-  first second) happen while nothing sounds.
+  ≈20–30 ms of cold (interpreted) DSP code in its first quanta (≈7 underruns at its first beat in Chrome). Once the
+  part pool is full, and only while the user's synth is silent (no voices, no FX tail, its sequencer stopped) and the
+  song engine is neither playing nor preparing, a free pool Synth plays ten factory presets that cover every
+  engine / phys model / filter type / FX (16 quanta each, one per `process()` call, output discarded). The borrowed
+  slot is marked (`slot.warm`) so the Ensemble never assigns it; any song message (load/play/stop/queue/part) hands
+  it back hard-reset — voices stopped, deferred starts dropped, FX tails cleared, patch key `''` — before the engine
+  sees the message. An empty queue drops the borrow, an interrupted one restarts at the next idle moment, and a
+  patch that throws is skipped (the rest of the queue still runs), so `warmQ` is never non-empty with nothing to
+  advance it. Measured in Chrome (M5): first-song underruns 7 → 1 event; the startup underruns (part-pool
+  construction, ≈18 events in the first second) happen while nothing sounds.
+* **Safety limiter hand-over** (worklet): while the song engine is active the final sum runs through the SafetyBus
+  (−0.3 dBFS); it stays engaged ≈2 s after the engine goes quiet and disengages only in a silent block, so a note
+  the user holds through a song ending is not comb-filtered and keeps its latency alignment.
 * **Measured in headless Chrome 152 (ANGLE Metal, M5), 1440×900**: while a demo song plays the worklet render load
   is 12–18 % median (max 20–32 % incl. the Jam), the hero visualizer costs 0.07–0.13 ms of main-thread time per
   frame at 60 fps, no long tasks, and `AudioContext.playbackStats` counts 0 underruns during playback.

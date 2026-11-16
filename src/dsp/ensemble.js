@@ -54,6 +54,7 @@ class Slot {
     this.reserved = null;  // part of a queued song pre-loaded into this (free) synth
     this.key = '';         // JSON key of the patch currently loaded
     this.quiet = true;     // no voices + FX tails done (skipped when unassigned or stopped)
+    this.warm = false;     // borrowed by the host for its JIT warm-up: never assign it to a part
     this.ul = 0; this.ur = 0;  // target gains without master
     this.tl = 0; this.tr = 0;  // target gains incl. master
     this.gl = 0; this.gr = 0;  // smoothed gains
@@ -350,8 +351,15 @@ export class Ensemble {
     const prep = this.next;
     if (!prep || this.nextMode !== MODE_LOAD) return false;
     if (this.slots.length < prep.parts.length) return false;
-    if (this.cur) for (const p of this.cur.parts) { if (p.slot && p.slot.part === p) p.slot.part = null; p.slot = null; }
+    const old = [];
+    if (this.cur) for (const p of this.cur.parts) { old.push(p, p.slot); if (p.slot && p.slot.part === p) p.slot.part = null; p.slot = null; }
     const map = this._assign(prep, false);
+    // Every free synth is borrowed by the host's JIT warm-up (the host hands one back before it sends a song
+    // message, so this only guards the invariant): leave the load pending and retry on the next process() call.
+    if (!map) {
+      for (let i = 0; i < old.length; i += 2) { old[i].slot = old[i + 1]; if (old[i + 1]) old[i + 1].part = old[i]; }
+      return false;
+    }
     for (let i = 0; i < prep.parts.length; i++) {
       const p = prep.parts[i], s = map[i];
       s.part = p; p.slot = s; p.loaded = false;
@@ -382,13 +390,13 @@ export class Ensemble {
         const p = prep.parts[i];
         for (let j = 0; j < ns; j++) {
           const s = slots[j];
-          if (s.claim >= 0 || !s.part || s.key !== p.key) continue;
+          if (s.claim >= 0 || s.warm || !s.part || s.key !== p.key) continue;
           map[i] = s; s.claim = i; break;
         }
       }
       for (let i = 0; i < n; i++) {
         const s = prep.parts[i].preSlot;
-        if (map[i] || !s || s.claim >= 0 || s.reserved !== prep.parts[i]) continue;
+        if (map[i] || !s || s.claim >= 0 || s.warm || s.reserved !== prep.parts[i]) continue;
         map[i] = s; s.claim = i;
       }
     }
@@ -398,15 +406,16 @@ export class Ensemble {
       let best = null, bestScore = Infinity;
       for (let j = 0; j < ns; j++) {
         const s = slots[j];
-        if (s.claim >= 0) continue;
+        if (s.claim >= 0 || s.warm) continue;
         if (seamless && s.reserved && s.reserved !== p) continue;
         let score = s.part ? (s.quiet ? 3 : 4) : s.quiet ? 0 : 2 - (s.fade < 1 ? 1 - s.fade : 0);
         if (s.key === p.key) score -= 0.5;
         if (score < bestScore) { bestScore = score; best = s; }
       }
-      if (!best) { // reserved synths of the queued song are the last resort
-        for (let j = 0; j < ns; j++) if (slots[j].claim < 0) { best = slots[j]; break; }
+      if (!best) { // reserved synths of the queued song are the last resort (a warm-up slot never is)
+        for (let j = 0; j < ns; j++) if (slots[j].claim < 0 && !slots[j].warm) { best = slots[j]; break; }
       }
+      if (!best) return null; // every free synth is borrowed for the warm-up: the host hands one back first
       map[i] = best; best.claim = i;
     }
     return map;
@@ -575,7 +584,7 @@ export class Ensemble {
       if (cont) continue;
       for (let j = 0; j < slots.length; j++) {
         const s = slots[j];
-        if (s.part || s.reserved || !s.quiet) continue;
+        if (s.part || s.reserved || s.warm || !s.quiet) continue;
         s.reserved = p;
         p.preSlot = s;
         if (s.key !== p.key) this._loadPatch(s, p);

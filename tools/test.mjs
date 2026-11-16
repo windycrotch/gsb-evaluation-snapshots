@@ -2230,6 +2230,366 @@ async function jobSongWorklet() {
   }
 }
 
+/**
+ * JIT warm-up + safety-limiter hand-over on the real processor (src/worklet/processor.js, shimmed): the warm-up
+ * advances only while the user's synth is idle, no song is playing/preparing and the part pool is full; any song
+ * message hands the borrowed Synth back hard-reset with its patch key cleared; an empty queue, an interrupt and an
+ * exception all leave the warm-up re-armable (never warmQ ≠ null with nothing to advance it); the SafetyBus stays
+ * engaged ≈2 s after the song engine goes quiet and only leaves in a silent block.
+ */
+async function jobWarmup() {
+  const file = path.join(ROOT, 'src/worklet/processor.js');
+  const registered = {};
+  globalThis.sampleRate = 48000; globalThis.currentTime = 0; globalThis.currentFrame = 0;
+  globalThis.AudioWorkletProcessor = class { constructor() { this.port = { postMessage() {}, onmessage: null, start() {}, close() {} }; } };
+  globalThis.registerProcessor = (name, cls) => { registered[name] = cls; };
+  const rows = [];
+  const sr = 48000, QUANTUM = 128;
+  const WARM_GIVE_UP_S_TEST = 4; // mirrors WARM_GIVE_UP_S in src/worklet/processor.js
+  const { PRESETS } = await import(url('src/presets/index.js'));
+  const { SONGS } = await import(url('src/demo/songs/index.js'));
+  const { resolveSong } = await import(url('src/demo/resolve.js'));
+  if (!fs.existsSync(file)) return [row("worklet", "warm-up: processor.js missing", "FAIL", "missing src/worklet/processor.js")];
+  await import(pathToFileURL(file).href);
+  const Cls = registered['aurora-synth'];
+  if (!Cls) return [row('songs', 'warm-up: processor not registered', 'FAIL', "registerProcessor('aurora-synth', …) was not called")];
+
+  /** Fresh processor + helpers. `silent` starts the user's synth silent (no notes at all). */
+  const mkProc = () => {
+    const proc = new Cls({ processorOptions: {} });
+    const L = new Float32Array(QUANTUM), R = new Float32Array(QUANTUM);
+    const send = data => proc.port.onmessage && proc.port.onmessage({ data });
+    const run = blocks => {
+      for (let k = 0; k < blocks; k++) {
+        proc.process([], [[L, R]], {});
+        globalThis.currentFrame += QUANTUM; globalThis.currentTime = globalThis.currentFrame / sr;
+      }
+    };
+    return { proc, L, R, send, run };
+  };
+  const pats = PRESETS.slice(0, 4).map(p => ({ params: p.params || {}, macros: p.macros || [] }));
+  const patch = { params: { 'osc1.level': 0.9, 'aenv.a': 0.002, 'aenv.r': 0.05 }, macros: [] };
+  /** What handing the borrowed Synth back must guarantee. */
+  const dirty = sl => {
+    const w = sl.synth;
+    const voices = w.voices.filter(v => v.active).length;
+    const q = w.qN;
+    return { voices, q, key: sl.key, tail: typeof w.fx.tailActive === 'function' ? w.fx.tailActive() : false };
+  };
+  const cleanProblem = sl => {
+    const d = dirty(sl);
+    const bad = [];
+    if (d.voices) bad.push(`${d.voices} active voices`);
+    if (d.q) bad.push(`${d.q} deferred starts`);
+    if (d.key !== '') bad.push(`patch key ${JSON.stringify(d.key)}`);
+    if (d.tail) bad.push('FX tail');
+    if (sl.warm) bad.push('still marked borrowed');
+    return bad;
+  };
+
+  // 1. normal completion: runs only while idle, covers every patch, hands the slot back clean
+  try {
+    const { proc, send, run } = mkProc();
+    const probs = [];
+    send({ type: 'warmup', patches: pats });
+    // pool is not full yet → no warm-up quantum may run (a partial pool is still being built)
+    let advancedEarly = 0, borrowed = null, maxStep = 0;
+    for (let k = 0; k < 12; k++) { run(1); if (proc.warmSlot || proc.warmI || proc.warmStep) advancedEarly++; }
+    if (advancedEarly) probs.push(`warm-up advanced ${advancedEarly}× before the part pool was full`);
+    // step through the whole warm-up one quantum at a time; the pool must be full by the end of every quantum
+    // that made warm-up progress (process() builds the last part, then runs the warm-up in the same quantum)
+    let guard = 0, startsWithoutPool = 0, lastPlayed = proc.warmPlayed, lastStep = proc.warmStep;
+    while (proc.warmQ !== null && guard++ < 900) {
+      run(1);
+      const progressed = proc.warmPlayed !== lastPlayed || proc.warmStep !== lastStep || proc.warmSlot;
+      if (progressed && proc.ensemble.built < proc.ensemble.maxParts) startsWithoutPool++;
+      lastPlayed = proc.warmPlayed; lastStep = proc.warmStep;
+      if (proc.warmSlot) {
+        borrowed = proc.warmSlot;
+        if (!borrowed.warm) probs.push('borrowed pool Synth is not marked as warm-up-held (the Ensemble could assign it)');
+        if (borrowed.key === '' && proc.warmStep > 0) probs.push('a borrowed slot with a loaded warm-up patch has an empty key (it could match a part)');
+        maxStep = Math.max(maxStep, proc.warmStep);
+      }
+    }
+    if (proc.warmQ !== null) probs.push(`warm-up did not finish after ${guard} idle quanta (${proc.warmPlayed} patches played)`);
+    if (!borrowed) probs.push('warm-up never started on an idle processor with a full pool');
+    if (startsWithoutPool) probs.push(`${startsWithoutPool} quanta ran before the part pool was full`);
+    if (proc.warmPlayed !== pats.length) probs.push(`${proc.warmPlayed}/${pats.length} patches warmed`);
+    if (!(maxStep > 0)) probs.push('no patch was played beyond its first quantum');
+    if (proc.warmSlot) probs.push('the borrowed Synth was not handed back after the last patch');
+    if (borrowed) for (const b of cleanProblem(borrowed)) probs.push(`handed back dirty: ${b}`);
+    // nothing was left sounding in any pool slot either
+    const busy = proc.ensemble.slots.filter(s => s.synth.voices.some(v => v.active));
+    if (busy.length) probs.push(`${busy.length} pool slot(s) still have active voices`);
+    rows.push(row('songs', 'warm-up: normal completion (idle + pool full only)', probs.length ? 'FAIL' : 'PASS',
+      [`${proc.warmPlayed} patches × ${16} quanta on one borrowed pool Synth · slot clean (0 voices, no deferred starts, key '')`, ...probs.map(p => `✗ ${p}`)].join('\n')));
+  } catch (e) { rows.push(row('songs', 'warm-up: normal completion', 'FAIL', `threw ${e?.message || e}`)); }
+
+  // 2. song message mid-warm-up: hard reset + it stays pending (resumes at the interrupted patch) and the part
+  //    that claims the slot afterwards must be clean (no warm-up notes / tails / patch)
+  try {
+    const { proc, send, run } = mkProc();
+    const probs = [];
+    send({ type: 'warmup', patches: pats });
+    let guard = 0;
+    while ((!proc.warmSlot || proc.warmStep < 3) && guard++ < 800) run(1); // get into the middle of a patch
+    const borrowed = proc.warmSlot;
+    if (!borrowed) probs.push('warm-up never started (cannot test the interrupt)');
+    const song = resolveSong(SONGS[1], PRESETS);
+    send({ type: 'songLoad', song });
+    if (proc.warmSlot) probs.push('songLoad did not hand the borrowed Synth back');
+    if (proc.warmQ === null) probs.push('a song message dropped the warm-up list instead of keeping it pending');
+    if (borrowed) {
+      if (borrowed.synth.voices.some(v => v.active)) probs.push(`the handed-back Synth still has ${borrowed.synth.voices.filter(v => v.active).length} active voices`);
+      if (borrowed.synth.qN) probs.push(`the handed-back Synth still has ${borrowed.synth.qN} deferred starts`);
+      if (borrowed.synth.fx.tailActive()) probs.push('the handed-back Synth still has an FX tail');
+      // the key must be '' (a real part key would let the Ensemble continue a part on this Synth without reloading)
+      if (borrowed.key !== '' && !song.parts.some(p => JSON.stringify(p.patch) === borrowed.key)) probs.push(`the warm-up patch key ${JSON.stringify(borrowed.key)} was not cleared (a part could match it)`);
+      if (borrowed.synth.voices.some(v => v.gate && !v.fading)) probs.push('a song part could inherit a gated warm-up note');
+      const perf = borrowed.synth.perf;
+      const held = perf.down.reduce((a, b) => a + (b ? 1 : 0), 0) + perf.sus.reduce((a, b) => a + (b ? 1 : 0), 0);
+      if (held || perf.pLen || perf.latchArmed) probs.push(`held/latched warm-up keys survived (${held} keys, ${perf.pLen} latched sources)`);
+    }
+    send({ type: 'songPlay' });
+    run(240);
+    if (!proc.ensemble.playing) probs.push('the song did not start after the interrupt');
+    if (proc.warmSlot) probs.push('the warm-up re-borrowed a Synth while the song played');
+    // while the song plays the pending warm-up must not advance
+    const playedWhileSong = proc.warmPlayed;
+    run(120);
+    if (proc.warmPlayed !== playedWhileSong || proc.warmSlot) probs.push('the pending warm-up advanced while the song played');
+    const songParts = proc.ensemble.cur ? proc.ensemble.cur.parts.map(p => p.slot) : [];
+    if (borrowed && songParts.includes(borrowed)) {
+      const d = dirty(borrowed);
+      if (d.voices || d.tail) probs.push(`the part that claimed the warm-up slot is not clean (${d.voices} voices, tail ${d.tail})`);
+    }
+    // …and it resumes (from the interrupted patch) once the song stops and everything is silent
+    send({ type: 'songStop' });
+    send({ type: 'allOff', hard: true });
+    run(60);
+    guard = 0;
+    while (proc.warmQ !== null && guard++ < 900) run(1);
+    if (proc.warmQ !== null) probs.push('the pending warm-up never resumed after the song stopped (warmQ stuck)');
+    if (proc.warmSlot) probs.push('the resumed warm-up did not hand its Synth back');
+    if (proc.warmPlayed !== pats.length) probs.push(`${proc.warmPlayed}/${pats.length} patches warmed across the interrupt`);
+    // an empty list (the UI going away) still clears a pending warm-up
+    send({ type: 'warmup', patches: pats });
+    run(20);
+    send({ type: 'warmup', patches: [] });
+    if (proc.warmQ !== null || proc.warmSlot) probs.push('an empty warm-up list did not clear the pending warm-up');
+    rows.push(row('songs', 'warm-up: interrupted by a song message', probs.length ? 'FAIL' : 'PASS',
+      ['slot hard-reset (0 voices, no deferred starts, key "") before songLoad; the list stays pending, does not advance during the song, and resumes afterwards', ...probs.map(p => `✗ ${p}`)].join('\n')));
+  } catch (e) { rows.push(row('songs', 'warm-up: interrupted by a song message', 'FAIL', `threw ${e?.message || e}`)); }
+
+  // 3. a patch that throws mid-warm-up: error reported, queue keeps advancing, slot handed back clean
+  try {
+    const { proc, send, run } = mkProc();
+    const probs = [];
+    send({ type: 'warmup', patches: pats });
+    let guard = 0;
+    while ((!proc.warmSlot || proc.warmStep < 2) && guard++ < 800) run(1);
+    if (!proc.warmSlot) probs.push('warm-up never started (cannot test the throwing patch)');
+    const player = proc.warmSlot && proc.warmSlot.synth;
+    const at = proc.warmI;
+    const playedBefore = proc.warmPlayed;
+    let threw = false;
+    // make the audio path of the currently warming patch throw once (as a cold/buggy DSP path would)
+    if (player) {
+      const orig = player.process;
+      player.process = function (...a) {
+        if (!threw) { threw = true; throw new Error('warm-up test: induced DSP failure'); }
+        return orig.apply(this, a);
+      };
+    }
+    guard = 0;
+    while (proc.warmQ !== null && guard++ < 1200) run(1);
+    if (!threw) probs.push('the induced failure never reached the warm-up (test setup)');
+    if (proc.warmQ !== null) probs.push('warmQ stuck non-null after a throwing patch');
+    if (proc.warmSlot) probs.push('the borrowed Synth was not handed back after the error');
+    // the failing patch was skipped (it never counted as warmed) and every other one was played
+    if (!(proc.warmFail >= 1)) probs.push(`the error was not counted (warmFail ${proc.warmFail})`);
+    const failCount = proc.warmFail;
+    if (proc.warmPlayed < pats.length - 1) probs.push(`only ${proc.warmPlayed} of ${pats.length - 1} good patches warmed after the error`);
+    if (proc.warmPlayed > pats.length - 1) probs.push(`warmPlayed ${proc.warmPlayed} > ${pats.length - 1} (the failing patch counted as warmed)`);
+    if (player) {
+      player.process = Object.getPrototypeOf(player).process.bind(player); // restore for later checks
+      const sl = proc.ensemble.slots.find(s => s.synth === player);
+      const d = dirty(sl);
+      if (d.voices || d.key !== '' || d.tail) probs.push(`after the error the Synth is dirty (${d.voices} voices, key ${JSON.stringify(d.key)}, tail ${d.tail})`);
+      if (sl && sl.warm) probs.push('the slot stayed marked as borrowed after the error');
+    }
+    // re-armable: a fresh list completes
+    send({ type: 'warmup', patches: pats });
+    guard = 0;
+    while (proc.warmQ !== null && guard++ < 800) run(1);
+    if (proc.warmQ !== null) probs.push('warm-up not re-armable after an error (warmQ stuck)');
+    if (proc.warmPlayed !== pats.length) probs.push(`after re-arming ${proc.warmPlayed}/${pats.length} patches warmed (counters not reset)`);
+    rows.push(row('songs', 'warm-up: patch throws mid-run', probs.length ? 'FAIL' : 'PASS',
+      [`the failing patch is skipped (warmFail ${failCount}), the other ${pats.length - failCount} run, the Synth is handed back clean, a new list re-arms`, ...probs.map(p => `✗ ${p}`)].join('\n')));
+  } catch (e) { rows.push(row('songs', 'warm-up: patch throws mid-run', 'FAIL', `threw ${e?.message || e}`)); }
+
+  // 4. empty queue while a Synth is borrowed: released (never a dangling borrow that a later message wipes)
+  try {
+    const { proc, send, run } = mkProc();
+    const probs = [];
+    send({ type: 'warmup', patches: pats });
+    let guard = 0;
+    while (!proc.warmSlot && guard++ < 800) run(1);
+    const borrowed = proc.warmSlot;
+    send({ type: 'warmup', patches: [] });
+    if (proc.warmSlot) probs.push('an empty warm-up list left the Synth borrowed');
+    if (proc.warmQ !== null) probs.push('an empty warm-up list left warmQ non-null');
+    if (borrowed) for (const b of cleanProblem(borrowed)) probs.push(`after the empty list: ${b}`);
+    // and the free slot is really available to a song again
+    send({ type: 'songLoad', song: resolveSong(SONGS[0], PRESETS) });
+    send({ type: 'songPlay' });
+    run(300);
+    if (!proc.ensemble.playing) probs.push('a song could not start after an empty warm-up list');
+    if (!(proc.ensemble.getState().parts.some(p => p.peak > 0))) probs.push('no song part sounds after an empty warm-up list');
+    rows.push(row('songs', 'warm-up: empty queue releases the borrowed Synth', probs.length ? 'FAIL' : 'PASS',
+      ['no dangling borrow (a later song message cannot wipe a playing part)', ...probs.map(p => `✗ ${p}`)].join('\n')));
+  } catch (e) { rows.push(row('songs', 'warm-up: empty queue', 'FAIL', `threw ${e?.message || e}`)); }
+
+  // 4b. a full part pool (8-part song) leaves no free Synth: the pending warm-up is dropped, never stuck forever
+  try {
+    const { proc, send, run } = mkProc();
+    const probs = [];
+    const ev = [{ beat: 0, type: 'on', note: 60, vel: 0.8, dur: 1 }];
+    const parts = Array.from({ length: proc.ensemble.maxParts }, (_, i) => ({ name: `p${i}`, patch: patch, events: ev }));
+    send({ type: 'songLoad', song: { bpm: 120, lengthBeats: 4, loop: true, parts } });
+    send({ type: 'songPlay' });
+    let guard = 0;
+    while (!proc.ensemble.playing && guard++ < 600) run(1);
+    if (!proc.ensemble.playing) probs.push('an 8-part song did not start (test setup)');
+    const free = proc.ensemble.slots.filter(s => !s.part).length;
+    if (free !== 0) probs.push(`${free} free pool slots for an 8-part song (test setup wants none)`);
+    send({ type: 'warmup', patches: pats });
+    if (proc.warmQ === null) probs.push('warm-up was not armed');
+    // while the song plays nothing may advance (a full pool is not "ready")
+    let p0 = proc.warmPlayed;
+    run(300);
+    if (proc.warmPlayed !== p0 || proc.warmSlot) probs.push('the warm-up advanced during an 8-part song');
+    if (proc.warmQ === null) probs.push('the warm-up was dropped during the song instead of waiting');
+    // after the song ends (parts stay loaded/assigned) every Synth is still taken: the pending list must give up
+    // within a bounded idle time instead of sitting non-empty forever
+    send({ type: 'songStop' });
+    send({ type: 'allOff', hard: true });
+    run(Math.ceil((WARM_GIVE_UP_S_TEST + 1) * sr / QUANTUM));
+    if (proc.warmQ !== null) probs.push('warmQ stayed non-empty with no free pool Synth (stuck forever)');
+    if (proc.warmSlot) probs.push('a slot was borrowed although all 8 are assigned');
+    if (proc.warmPlayed !== 0) probs.push(`the warm-up played ${proc.warmPlayed} patches without a free Synth`);
+    rows.push(row('songs', 'warm-up: no free Synth (8-part pool) → pending warm-up dropped', probs.length ? 'FAIL' : 'PASS',
+      ['never borrows an assigned part Synth; the pending list is dropped instead of waiting forever', ...probs.map(p => `✗ ${p}`)].join('\n')));
+  } catch (e) { rows.push(row('songs', 'warm-up: no free Synth', 'FAIL', `threw ${e?.message || e}`)); }
+
+  // 5. warm-up never runs while the user's synth sounds / its sequencer plays / a song plays
+  try {
+    const { proc, send, run } = mkProc();
+    const probs = [];
+    run(200); // build the pool first
+    // (a) the user holds a note: no quantum may advance the warm-up (warmPlayed is monotonic across releases)
+    send({ type: 'patch', patch });
+    send({ type: 'noteOn', note: 60, vel: 0.9 });
+    run(20);
+    const userLevel = proc.synth.voices.filter(v => v.active && v.gate).length;
+    send({ type: 'warmup', patches: pats });
+    let p0 = proc.warmPlayed;
+    run(120);
+    if (proc.warmSlot || proc.warmI || proc.warmStep || proc.warmPlayed !== p0) probs.push('warm-up advanced while the user held a note');
+    // the user's held note is untouched by the (idle-only) warm-up path
+    if (proc.synth.voices.filter(v => v.active && v.gate).length !== userLevel) probs.push("the user's held note changed while the warm-up waited");
+    send({ type: 'noteOff', note: 60 });
+    send({ type: 'allOff', hard: true });
+    run(60);
+    if (proc.warmQ === null) probs.push('warm-up was dropped instead of waiting for silence');
+    run(400);
+    if (proc.warmQ !== null) probs.push('warm-up never resumed after the user went silent');
+    if (proc.warmPlayed !== pats.length) probs.push(`${proc.warmPlayed}/${pats.length} patches warmed after the note was released`);
+    // (b) the user's sequencer plays
+    send({ type: 'seqLoad', song: getPhrase('pluck') });
+    send({ type: 'seqPlay' });
+    run(30);
+    send({ type: 'warmup', patches: pats });
+    p0 = proc.warmPlayed;
+    const i0 = proc.warmI, s0 = proc.warmStep;
+    run(60);
+    if (proc.warmI !== i0 || proc.warmStep !== s0 || proc.warmPlayed !== p0) probs.push("warm-up advanced while the user's sequencer played");
+    send({ type: 'seqStop' });
+    send({ type: 'allOff', hard: true });
+    run(80);
+    // (c) a song plays
+    send({ type: 'songLoad', song: resolveSong(SONGS[2], PRESETS) });
+    send({ type: 'songPlay' });
+    run(30);
+    send({ type: 'warmup', patches: pats }); // (re-arms; must not run while the song plays)
+    p0 = proc.warmPlayed;
+    const i1 = proc.warmI;
+    run(120);
+    if (proc.warmI !== i1 || proc.warmSlot || proc.warmPlayed !== p0) probs.push('warm-up advanced while a song played');
+    if (!proc.ensemble.playing) probs.push('the song stopped on its own (test setup)');
+    rows.push(row('songs', 'warm-up: gated by user voices / user sequencer / song', probs.length ? 'FAIL' : 'PASS',
+      ['user note, user phrase, song playback each block it; it resumes when everything is silent again', ...probs.map(p => `✗ ${p}`)].join('\n')));
+  } catch (e) { rows.push(row('songs', 'warm-up: gating', 'FAIL', `threw ${e?.message || e}`)); }
+
+  // 6. safety limiter hand-over: engaged while a song plays, held ≈2 s after the engine goes quiet, released only
+  //    in silence (a held note keeps it engaged; no comb filter / latency drop mid-note)
+  try {
+    const { proc, send, run } = mkProc();
+    const probs = [];
+    run(200);
+    const song = resolveSong(SONGS[0], PRESETS);
+    send({ type: 'songLoad', song });
+    send({ type: 'songPlay' });
+    run(60);
+    if (!proc.bus.engaged) probs.push('safety limiter not engaged while a song plays');
+    send({ type: 'songStop' });
+    send({ type: 'allOff', hard: true });
+    // 1) all silent: it must stay engaged for ≈2 s, then leave
+    let guard = 0;
+    while (proc.bus.engaged && guard++ < 2000) run(1); // ≤ 5.3 s
+    if (proc.bus.engaged) probs.push('the safety limiter never disengaged after everything went silent');
+    const silentQuanta = guard;
+    const holdS = (silentQuanta * QUANTUM) / sr;
+    if (holdS < 1.9) probs.push(`the bus left after ${holdS.toFixed(2)} s of silence (want ≈2 s)`);
+    if (holdS > 2.6) probs.push(`the bus left only after ${holdS.toFixed(2)} s of silence (want ≈2 s)`);
+    // 2) a fresh song re-engages it
+    send({ type: 'songPlay' });
+    run(20);
+    if (!proc.bus.engaged) probs.push('the safety limiter did not re-engage for the next song');
+    // 3) the user holds a note through the end of the song: never released while it sounds
+    send({ type: 'patch', patch });
+    send({ type: 'noteOn', note: 69, vel: 1 });
+    run(5);
+    send({ type: 'songStop' }); // (the user's note is not touched by a song stop)
+    let heldQuanta = 0;
+    while (heldQuanta < 1000) { // ≈2.7 s held, well past the 2 s hold
+      run(1); heldQuanta++;
+      if (!proc.bus.engaged) break;
+    }
+    if (!proc.bus.engaged) probs.push(`the bus disengaged after ${((heldQuanta * QUANTUM) / sr).toFixed(2)} s under a held note (comb / latency shift)`);
+    const stillHeld = proc.synth.voices.filter(v => v.active && v.gate).length;
+    if (!stillHeld) probs.push('test setup: the note stopped sounding on its own');
+    // release → the note tail rings; the bus already served its 2 s hold while the note sounded, so it leaves at the
+    // first silent block (never before)
+    send({ type: 'noteOff', note: 69 });
+    guard = 0;
+    let releasedWhileSounding = false;
+    while (proc.bus.engaged && guard++ < 2000) {
+      const sounding = proc.synth.voices.some(v => v.active) || (proc.synth.fx.tailActive && proc.synth.fx.tailActive()) || proc.ensemble.active;
+      run(1);
+      if (sounding && !proc.bus.engaged) releasedWhileSounding = true;
+    }
+    if (proc.bus.engaged) probs.push('the safety limiter never disengaged after the held note ended');
+    if (releasedWhileSounding) probs.push('the bus released on a block whose input was still sounding');
+    const afterReleaseS = (guard * QUANTUM) / sr; // from the note-off (tail + first silent block)
+    if (afterReleaseS > 6) probs.push(`the bus took ${afterReleaseS.toFixed(2)} s to leave after the note-off`);
+    rows.push(row('songs', 'limiter: engaged during songs · ≈2 s hold · released only in silence', probs.length ? 'FAIL' : 'PASS',
+      [`silent release after ${holdS.toFixed(2)} s · ${((heldQuanta * QUANTUM) / sr).toFixed(2)} s held note without release · release ${afterReleaseS.toFixed(2)} s after the note-off`, ...probs.map(p => `✗ ${p}`)].join('\n')));
+  } catch (e) { rows.push(row('songs', 'limiter: safety hand-over', 'FAIL', `threw ${e?.message || e}`)); }
+
+  return rows;
+}
+
 // Magic sound tools (tools/magic-checks.mjs): moods × presets, mood text parser, store transient API, morph, evolve.
 async function jobMagic() {
   try {
@@ -2264,7 +2624,7 @@ async function jobCompat({ part, mode }) {
 const JOBS = {
   engineConfig: jobEngineConfig, engineQuality: jobEngineQuality, filter: jobFilter, filterResponse: jobFilterResponse,
   fx: jobFx, fxTail: jobFxTailAndCpu, synthApi: jobSynthApi, synthStress: jobSynthStress, synthAlloc: jobSynthAlloc, preset: jobPreset, presetPlaying: jobPresetPlaying, worklet: jobWorklet,
-  songlib: jobSonglib, songRender: jobSongRender, ensemble: jobEnsemble, songWorklet: jobSongWorklet, magic: jobMagic,
+  songlib: jobSonglib, songRender: jobSongRender, ensemble: jobEnsemble, songWorklet: jobSongWorklet, warmup: jobWarmup, magic: jobMagic,
   compat: jobCompat, ui: jobUi,
 };
 
@@ -2322,6 +2682,7 @@ async function buildJobs(suites, mode, presetFilter) {
     jobs.push({ suite: 'songs', kind: 'songlib', weight: 1, args: {} });
     jobs.push({ suite: 'songs', kind: 'ensemble', weight: 8, args: {}, isolate: true });
     jobs.push({ suite: 'songs', kind: 'songWorklet', weight: 4, args: {}, isolate: true });
+    jobs.push({ suite: 'songs', kind: 'warmup', weight: 3, args: {}, isolate: true });
     const sm = await tryLoad('src/demo/songs/index.js');
     (sm?.SONGS || []).forEach((s, i) => jobs.push({ suite: 'songs', kind: 'songRender', name: `song ${s?.id ?? i}`, weight: 9, args: { index: i, mode } }));
     if (!sm) jobs.push({ suite: 'songs', kind: 'songlib', name: 'src/demo/songs/index.js', weight: 1, args: {} });

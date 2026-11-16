@@ -283,6 +283,11 @@ ens.tap = (partIndex, L, R, n, offset) => …;   // offline: post-fader stems ·
   parts ring out ≈8 s then fade. Mixer settings carry over for parts with the same name.
 * **Stop**: notes are released, tails ring `stopHold` (1.5 s), then fade over `stopFade` (1 s). A one-shot song
   (`loop: false`) ends when every part is silent (at most `maxEndTail` = 12 s after its last beat).
+* **Safety limiter hand-over** (worklet): the SafetyBus is engaged while the ensemble is active (playing or
+  preparing) and stays engaged for ≈2 s (`BUS_RELEASE_S`) after it goes quiet; it disengages only in a block that is
+  silent below −100 dBFS, so a note the user holds through the end of a song is never crossfaded (no comb) and never
+  loses its latency alignment mid-note. A song starting while the user holds a note engages the legacy crossfade
+  (see SafetyBus) — that path is unchanged.
 
 ## 6. Checklist for a finished song
 

@@ -29,12 +29,19 @@
 // playing never pay for them in one render quantum.
 //
 // JIT warm-up: the first time any Synth runs a code path (an engine, filter type, FX) V8 interprets it — the first
-// demo song of a session rendered ≈20 ms of cold code in its first quantum (7 underruns at its first beat). After
-// the part pool is built, and only while everything is silent, a free pool Synth plays each 'warmup' patch (sent by
-// the UI: a few factory presets that cover every engine/filter/FX family) for WARM_BLOCKS quanta, one quantum per
-// process() call, output discarded. The Synth is borrowed from the Ensemble (a private one kept ≈9 MB for the whole
-// session): it is hard-reset and its patch key cleared before any song message and when the warm-up is done, so a
-// song never inherits warm-up voices, FX tails or a stale patch.
+// demo song of a session rendered ≈20 ms of cold code in its first quantum (7 underruns at its first beat). The
+// warm-up advances only while the user's synth is idle, the song engine is neither playing nor preparing, and the
+// part pool is complete (`_warmIdle`). One free pool Synth is borrowed (marked `slot.warm`, so the Ensemble never
+// assigns it) and plays each 'warmup' patch (sent by the UI: a few factory presets that cover every
+// engine/filter/FX family) for WARM_BLOCKS quanta, one quantum per process() call, output discarded. A song message
+// hands the Synth back first: performance/voice/FX/sequencer state hard-reset and the patch key cleared, so no song
+// part can inherit warm-up notes, tails or a stale patch. The list itself stays pending and resumes at the
+// interrupted patch when everything is idle again; an empty list clears it, a throwing patch is skipped — the queue
+// can never be non-empty with nothing left to advance it.
+//
+// Safety limiter hand-over: while the song engine is active the sum goes through the SafetyBus (−0.3 dBFS). When
+// the engine goes quiet the bus stays engaged ≈2 s (BUS_RELEASE_S) and leaves only in a silent block, so a note the
+// user holds through a song ending is never crossfaded (no comb) and never loses its latency alignment mid-note.
 
 import { Synth } from '../dsp/synth.js';
 import { Ensemble, SafetyBus } from '../dsp/ensemble.js';
@@ -51,6 +58,9 @@ const GOV_HIGH = 0.72, GOV_LOW = 0.4, GOV_COOL_TICKS = 15, GOV_CALM_TICKS = 120;
 const WARM_BLOCKS = 16;                 // quanta per warm-up patch (chord held for the first 12)
 const WARM_NOTES = [48, 60, 64, 67];
 const WARM_MAX_PATCHES = 16;
+const WARM_GIVE_UP_S = 4;               // s of idle without a free pool Synth before the pending warm-up is dropped
+const WARM_KEY = '\u0000warm';          // slot.key while the borrowed Synth holds a warm-up patch (no real key)
+const BUS_SILENT = 1e-5;                // −100 dBFS (same threshold as SafetyBus)
 
 // AudioWorkletGlobalScope has no `performance` in some browsers; fall back to Date.now().
 const now = (typeof performance !== 'undefined' && performance && typeof performance.now === 'function')
@@ -79,10 +89,13 @@ class AuroraProcessor extends AudioWorkletProcessor {
     this.userBpm = 0;        // user's tempo before the song
     this.masterDb = NaN;
     this.govCap = 0; this.govCool = 0; this.govCalm = 0;
-    this.warmQ = null;       // warm-up patches still to play (null: none / done)
-    this.warmI = 0;
-    this.warmStep = 0;
+    this.warmQ = null;       // warm-up patches still to play (null: none to do right now)
+    this.warmI = 0;          // index of the patch being played / next to play
+    this.warmStep = 0;       // quanta of the current patch already played (0 = not started)
     this.warmSlot = null;    // Ensemble pool slot borrowed for the warm-up (null: none)
+    this.warmFail = 0;       // patches that threw (diagnostics)
+    this.warmPlayed = 0;     // patches fully warmed since the last 'warmup' (diagnostics)
+    this.warmWait = 0;       // samples spent idle but unable to borrow a pool Synth
     this.warmL = new Float32Array(128);
     this.warmR = new Float32Array(128);
 
@@ -132,14 +145,20 @@ class AuroraProcessor extends AudioWorkletProcessor {
         case 'seqLoad': s.sequencer.load(m.song); break;
         case 'seqPlay': s.sequencer.play(); break;
         case 'seqStop': s.sequencer.stop(); break;
-        case 'songLoad': this._ens().load(m.song); break;
-        case 'songPlay': this._ens().play(); break;
-        case 'songStop': this._ens().stop(!!m.hard); this._restoreTempo(); break;
-        case 'songQueue': this._ens().queue(m.song); break;
-        case 'songPart': this._ens().setPart(m.part, m); break;
+        // Any song message may claim the borrowed warm-up Synth: hand it back clean *before* the song engine sees
+        // the message, so a song part can never inherit warm-up voices, FX tails or the warm-up patch. The queue
+        // itself is kept: the interrupted patch restarts once everything is idle again (see _warmBlock).
+        case 'songLoad': this._releaseWarm(); this._ens().load(m.song); break;
+        case 'songPlay': this._releaseWarm(); this._ens().play(); break;
+        case 'songStop': this._releaseWarm(); this._ens().stop(!!m.hard); this._restoreTempo(); break;
+        case 'songQueue': this._releaseWarm(); this._ens().queue(m.song); break;
+        case 'songPart': this._releaseWarm(); this._ens().setPart(m.part, m); break;
         case 'warmup':
+          this._releaseWarm(true); // a new list always starts from a clean synth
+          this.warmFail = 0;
+          this.warmPlayed = 0;
+          this.warmWait = 0;
           this.warmQ = Array.isArray(m.patches) && m.patches.length ? m.patches.slice(0, WARM_MAX_PATCHES) : null;
-          this.warmI = 0; this.warmStep = 0;
           break;
         case 'getState': this._postState(); break;
         case 'dispose': this.alive = false; break;
@@ -152,17 +171,35 @@ class AuroraProcessor extends AudioWorkletProcessor {
 
   _ens() {
     if (!this.ensemble) throw new Error('song engine unavailable');
-    if (this.warmSlot) this._releaseWarm(); // a song message may claim any free synth: hand it back clean first
     return this.ensemble;
   }
 
-  /** Return the borrowed pool Synth: silent, FX cleared, patch key invalidated (the next part loads its patch). */
-  _releaseWarm() {
+  /**
+   * Stop the warm-up and give the borrowed pool Synth back: hard-reset (voices silent, FX cleared, sequencer
+   * stopped) and its patch key invalidated, so the next part loads its patch and nothing inherits warm-up state.
+   * Never throws. cancel → drop the queue (the warm-up is over); otherwise the interrupted patch restarts from its
+   * first quantum at the next idle moment.
+   */
+  _releaseWarm(cancel = false) {
     const slot = this.warmSlot;
     this.warmSlot = null;
-    slot.synth.reset();
-    slot.key = '';
-    this.warmStep = 0; // an interrupted warm-up patch restarts at the next idle moment
+    if (cancel) { this.warmQ = null; this.warmI = 0; }
+    this.warmStep = 0; // an interrupted patch restarts from its first quantum
+    if (!slot) return;
+    slot.warm = false;
+    try {
+      const w = slot.synth;
+      // allNotesOff(true): performance state (held/latched keys, sustain), sequencer and armed deferred starts
+      // dropped, every voice faded out, FX tails cleared. reset(): every DSP block back to its zero state.
+      w.allNotesOff(true);
+      w.reset();
+      slot.key = '';        // the next part must load its own patch
+      slot.quiet = true;
+      slot.holdLeft = -1; slot.fadeStep = 0; slot.resetAtZero = false; slot.fade = 1;
+    } catch (e) {
+      this._error(e, 'warmup release');
+      try { slot.key = ''; } catch { /* ignore */ }
+    }
   }
 
   /** Song tempo → user's synth (arp, synced LFOs/delays follow the song); remembered for restore. */
@@ -183,34 +220,90 @@ class AuroraProcessor extends AudioWorkletProcessor {
     this.songBpm = 0;
   }
 
-  /** One warm-up quantum (only called while the user's synth and the ensemble are silent). */
+  /**
+   * True when the warm-up may advance: the user's synth is silent (no voices, no FX tail, not its sequencer),
+   * the song engine is neither playing nor preparing a song, and the part pool is full (a partial pool must build
+   * first — building a Synth costs one audio quantum).
+   */
+  _warmIdle() {
+    const s = this.synth, ens = this.ensemble;
+    if (!s || !ens) return false;
+    if (this.warmQ === null) return false;
+    if (s.sequencer.playing) return false;
+    if (s.voices) for (let i = 0; i < s.voices.length; i++) if (s.voices[i].active) return false;
+    if (typeof s.fx.tailActive === 'function' && s.fx.tailActive()) return false;
+    if (s.idleSamples < s.idleAfter) return false;
+    if (ens.playing || ens.playReq || ens.ending) return false;
+    if (ens.next !== null) return false;
+    if (ens.cur && !ens.cur.ready) return false; // loading a song's patches: let the engine finish first
+    if (ens.liveCount > 0) return false;
+    if (ens.built < ens.maxParts) return false;
+    return true;
+  }
+
+  /** One warm-up quantum (only called while `_warmIdle()`). Never leaves warmQ non-null without a way to advance. */
   _warmBlock() {
-    try {
-      if (!this.warmSlot) {
-        // borrow a free, silent pool Synth (no part, no reservation); none free (an 8-part song loaded): wait
-        const slots = this.ensemble.slots;
-        for (let j = slots.length - 1; j >= 0; j--) {
-          const sl = slots[j];
-          if (!sl.part && !sl.reserved && sl.quiet) { this.warmSlot = sl; sl.key = ''; break; }
-        }
-        if (!this.warmSlot) return;
+    // re-check every quantum: the UI may have changed state between messages
+    if (!this._warmIdle()) return;
+    const q = this.warmQ;
+    if (!this.warmSlot) {
+      // borrow a free, silent pool Synth (no part, no reservation, not already borrowed); none free: wait — but not
+      // forever: a loaded 8-part song holds every synth, and warmQ must never sit non-empty without progress
+      const slots = this.ensemble.slots;
+      let sl = null;
+      for (let j = slots.length - 1; j >= 0; j--) {
+        const c = slots[j];
+        if (!c.part && !c.reserved && !c.warm && c.quiet) { sl = c; break; }
       }
+      if (!sl) {
+        this.warmWait += 128;
+        if (this.warmWait >= WARM_GIVE_UP_S * this.synth.sr) this._releaseWarm(true);
+        return;
+      }
+      sl.warm = true;
+      sl.key = WARM_KEY; // no real patch: must not match a part's key, and must be cleared on release
+      this.warmSlot = sl;
+      this.warmWait = 0;
+    }
+    if (this.warmI >= q.length) { this._releaseWarm(true); return; } // defensive: never a non-empty queue that cannot advance
+    try {
       const w = this.warmSlot.synth;
+      const patch = q[this.warmI];
       if (this.warmStep === 0) {
-        w.loadPatch(this.warmQ[this.warmI]);
+        w.allNotesOff(true); // a previous patch's tails/notes must not leak into this one
+        w.loadPatch(patch);
+        this.warmSlot.key = WARM_KEY;
         for (let i = 0; i < WARM_NOTES.length; i++) w.noteOn(WARM_NOTES[i], 0.9);
+        w.setController('wheel', 0.35); // exercise the held-controller path too
       } else if (this.warmStep === WARM_BLOCKS - 4) w.allNotesOff(false);
       w.process(this.warmL, this.warmR, 128);
-      if (++this.warmStep >= WARM_BLOCKS) {
-        w.allNotesOff(true);
-        this.warmStep = 0;
-        if (++this.warmI >= this.warmQ.length) { this.warmQ = null; this._releaseWarm(); }
+      this.warmStep = (this.warmStep + 1) % WARM_BLOCKS;
+      if (this.warmStep === 0) {
+        w.allNotesOff(true); // release + clear tails before the next patch
+        this.warmI++;
+        this.warmPlayed++;
+        if (this.warmI >= q.length) this._releaseWarm(true);
       }
     } catch (e) {
-      this.warmQ = null;
-      if (this.warmSlot) try { this._releaseWarm(); } catch { /* ignore */ }
+      // a bad patch must not take the warm-up down: skip it, keep the queue advancing
       this._error(e, 'warmup');
+      this.warmStep = 0;
+      this.warmFail++;
+      if (this.warmSlot) {
+        try { this.warmSlot.synth.allNotesOff(true); this.warmSlot.synth.reset(); this.warmSlot.key = ''; } catch { /* ignore */ }
+      }
+      this.warmI++;
+      if (this.warmI >= q.length || this.warmFail >= WARM_MAX_PATCHES) this._releaseWarm(true);
     }
+  }
+
+  /** True when every sample of L/R[0..n) is silent (below −100 dBFS, the SafetyBus threshold). */
+  _blockSilent(L, R, n) {
+    for (let i = 0; i < n; i++) {
+      const a = L[i], b = R[i];
+      if (a > BUS_SILENT || a < -BUS_SILENT || b > BUS_SILENT || b < -BUS_SILENT) return false;
+    }
+    return true;
   }
 
   /** CPU governor, evaluated at the state rate (≈30 Hz). */
@@ -291,11 +384,18 @@ class AuroraProcessor extends AudioWorkletProcessor {
         try { ens.stop(true); } catch { /* ignore */ }
       }
       const bus = this.bus;
+      // Safety limiter hand-over: engaged while the song engine is active (or preparing), then held for
+      // BUS_RELEASE_S after it went quiet, and released only in a silent block — a note the user holds through the
+      // end of a song keeps the bus engaged (a crossfade mid-note would be a gain change, and a latency drop would
+      // shift the note). SafetyBus keeps the aligned (latency-matched) path until the input has been silent.
       if (ens.active) { this.busIdle = 0; bus.engaged = true; }
-      else if (bus.engaged && (this.busIdle += n) >= this.busRelease) bus.engaged = false;
+      else if (bus.engaged) {
+        this.busIdle += n;
+        if (this.busIdle >= this.busRelease && this._blockSilent(L, R, n)) bus.engaged = false;
+      }
       bus.process(L, R, n);
-      // JIT warm-up, one quantum at a time, only in silence and once the part pool exists
-      if (this.warmQ !== null && ens.hostIdle && !ens.active && ens.built >= ens.maxParts && !s.sequencer.playing) this._warmBlock();
+      // JIT warm-up, one quantum at a time, only while everything is idle and the part pool is full
+      if (this.warmQ !== null) this._warmBlock();
     }
 
     if (out.length === 1) {
