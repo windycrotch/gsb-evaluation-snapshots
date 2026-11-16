@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createWebGLFixture, readGlyphInstance, renderRegion, webglOptions } from './helpers/webgl-fixture';
+import { GlyphAtlas } from '../../rendering/webgl/glyph-atlas';
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -61,8 +62,8 @@ describe('WebGLRenderer', () => {
         expect(characters[0].opacity).toBe(0.25);
     });
 
-    it('reuses glyphs across frames and colors, and rebuilds them only for font changes', () => {
-        const { renderer, initialize, gl, glyphContext, colorContext } = createWebGLFixture();
+    it('reuses glyphs across frames and color-only option changes', () => {
+        const { renderer, initialize, gl, colorContext } = createWebGLFixture();
         initialize();
 
         const characters = [{ x: 0, y: 0, char: 'B' }];
@@ -73,13 +74,50 @@ describe('WebGLRenderer', () => {
         renderer.options = { ...webglOptions, color: 'rebeccapurple' };
         renderer.render(characters, renderRegion);
         expect(gl.texSubImage2D).toHaveBeenCalledTimes(1);
-        renderer.options = { ...webglOptions, fontSize: 24, fontFamily: 'serif' };
-        expect(gl.deleteTexture).toHaveBeenCalledTimes(1);
-        renderer.clear('#1234');
+        expect(colorContext.getImageData).toHaveBeenCalledTimes(2);
+    });
+
+    it('rasterizes a new glyph when the font size changes and reuses the original glyph after switching back', () => {
+        const { renderer, initialize, gl, glyphContext } = createWebGLFixture();
+        initialize();
+
+        const characters = [{ x: 0, y: 0, char: 'B' }];
+        renderer.render(characters, renderRegion);
+        renderer.render(characters, renderRegion);
+        expect(gl.texSubImage2D).toHaveBeenCalledTimes(1);
+        expect(glyphContext.fillText).toHaveBeenCalledTimes(1);
+
+        renderer.options = { ...webglOptions, fontSize: 24 };
         renderer.render(characters, renderRegion);
         expect(gl.texSubImage2D).toHaveBeenCalledTimes(2);
-        expect(glyphContext.font).toBe('24px serif');
-        expect(renderer.options.fontSize).toBe(24);
+        expect(glyphContext.fillText).toHaveBeenCalledTimes(2);
+        expect(glyphContext.font).toBe('24px monospace');
+
+        renderer.options = { ...webglOptions };
+        renderer.render(characters, renderRegion);
+        expect(gl.texSubImage2D).toHaveBeenCalledTimes(2);
+        expect(glyphContext.fillText).toHaveBeenCalledTimes(2);
+        expect(gl.deleteTexture).not.toHaveBeenCalled();
+    });
+
+    it('rasterizes a new glyph when the font family changes and keeps the original glyph cached', () => {
+        const { renderer, initialize, gl, glyphContext } = createWebGLFixture();
+        initialize();
+
+        const characters = [{ x: 0, y: 0, char: 'B' }];
+        renderer.render(characters, renderRegion);
+
+        renderer.options = { ...webglOptions, fontFamily: 'serif' };
+        renderer.render(characters, renderRegion);
+        expect(gl.texSubImage2D).toHaveBeenCalledTimes(2);
+        expect(glyphContext.fillText).toHaveBeenCalledTimes(2);
+        expect(glyphContext.font).toBe('16px serif');
+
+        renderer.options = { ...webglOptions, fontFamily: 'monospace' };
+        renderer.render(characters, renderRegion);
+        expect(gl.texSubImage2D).toHaveBeenCalledTimes(2);
+        expect(glyphContext.fillText).toHaveBeenCalledTimes(2);
+        expect(gl.deleteTexture).not.toHaveBeenCalled();
     });
 
     it('clips partial regions in framebuffer coordinates and updates dimensions on resize', () => {
@@ -172,6 +210,74 @@ describe('WebGLRenderer', () => {
         renderer.destroy();
         expect(gl.deleteTexture).toHaveBeenCalledWith(textures[0]);
         expect(gl.deleteTexture).toHaveBeenCalledWith(textures[1]);
+    });
+
+    it('keeps each paged glyph bound to the page that holds it and reuses the cache across frames', () => {
+        const { renderer, initialize, gl } = createWebGLFixture(16);
+        initialize();
+
+        const characters = [
+            { x: 0, y: 0, char: 'A' },
+            { x: 0, y: 0, char: 'B' }
+        ];
+        renderer.render(characters, renderRegion);
+        expect(gl.createTexture).toHaveBeenCalledTimes(2);
+
+        const textures = gl.createTexture.mock.results.map(result => result.value as object);
+        const uploadCalls = gl.texSubImage2D.mock.invocationCallOrder;
+        const bindCalls = gl.bindTexture.mock;
+        const uploadTextures: unknown[] = [];
+
+        for (const uploadOrder of uploadCalls) {
+            let boundTexture: unknown;
+
+            for (let index = 0; index < bindCalls.invocationCallOrder.length; index++) {
+                if (bindCalls.invocationCallOrder[index] < uploadOrder)
+                    boundTexture = bindCalls.calls[index][1];
+            }
+
+            uploadTextures.push(boundTexture);
+        }
+
+        expect(uploadTextures).toEqual([textures[0], textures[1]]);
+
+        const firstFrameDraws = gl.drawArraysInstanced.mock.calls.length;
+        renderer.render(characters, renderRegion);
+        expect(gl.texSubImage2D).toHaveBeenCalledTimes(2);
+        expect(gl.createTexture).toHaveBeenCalledTimes(2);
+        expect(gl.drawArraysInstanced).toHaveBeenCalledTimes(firstFrameDraws * 2);
+    });
+
+    it('throws an explicit error instead of truncating a character larger than the atlas', () => {
+        const { renderer, initialize, gl } = createWebGLFixture(8);
+        initialize();
+
+        expect(() => renderer.render([{ x: 0, y: 0, char: 'A' }], renderRegion))
+            .toThrow('Character exceeds the WebGL glyph atlas size.');
+        expect(gl.texSubImage2D).not.toHaveBeenCalled();
+        expect(gl.createTexture).toHaveBeenCalledTimes(1);
+    });
+
+    it('places a re-rasterized glyph on a new page instead of reusing stale entries on the full page', () => {
+        const fixture = createWebGLFixture(16);
+        const glyphContext = fixture.glyphContext as unknown as CanvasRenderingContext2D;
+        const atlas = new GlyphAtlas(fixture.typedGl, fixture.glyphCanvas, glyphContext);
+        const { gl } = fixture;
+
+        const originalGlyph = atlas.getGlyph('A', 16, 'monospace');
+        atlas.getGlyph('B', 16, 'monospace');
+        expect(gl.createTexture).toHaveBeenCalledTimes(2);
+
+        const largerGlyph = atlas.getGlyph('A', 24, 'monospace');
+        expect(gl.createTexture).toHaveBeenCalledTimes(3);
+        const textures = gl.createTexture.mock.results.map(result => result.value as object);
+        expect(largerGlyph.page.texture).toBe(textures[2]);
+        expect(originalGlyph.page.texture).toBe(textures[0]);
+        expect(gl.texSubImage2D).toHaveBeenCalledTimes(3);
+
+        const cachedGlyph = atlas.getGlyph('A', 16, 'monospace');
+        expect(cachedGlyph.page.texture).toBe(textures[0]);
+        expect(gl.texSubImage2D).toHaveBeenCalledTimes(3);
     });
 
     it('splits large frames into bounded instance buffers', () => {

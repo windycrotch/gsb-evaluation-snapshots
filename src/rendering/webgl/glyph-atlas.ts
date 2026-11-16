@@ -22,7 +22,7 @@ export class GlyphAtlas {
     private _canvas: HTMLCanvasElement;
     private _context: CanvasRenderingContext2D;
     private _pages: AtlasPage[] = [];
-    private _glyphs = new Map<string, Glyph>();
+    private _glyphs = new Map<string, Map<number, Map<string, Glyph>>>();
 
     public constructor(gl: WebGL2RenderingContext, canvas: HTMLCanvasElement, context: CanvasRenderingContext2D) {
         this._gl = gl;
@@ -47,7 +47,7 @@ export class GlyphAtlas {
     }
 
     public getGlyph(character: string, fontSize: number, fontFamily: string): Glyph {
-        const cached = this._glyphs.get(character);
+        const cached = this._getCachedGlyph(character, fontSize, fontFamily);
 
         if (cached)
             return cached;
@@ -89,8 +89,25 @@ export class GlyphAtlas {
         const gl = this._gl;
         gl.bindTexture(gl.TEXTURE_2D, page.texture);
         gl.texSubImage2D(gl.TEXTURE_2D, 0, glyph.x, glyph.y, gl.RGBA, gl.UNSIGNED_BYTE, this._canvas);
-        this._glyphs.set(character, glyph);
+        this._cacheGlyph(character, fontSize, fontFamily, glyph);
         return glyph;
+    }
+
+    private _getCachedGlyph(character: string, fontSize: number, fontFamily: string): Glyph | undefined {
+        return this._glyphs.get(character)?.get(fontSize)?.get(fontFamily);
+    }
+
+    private _cacheGlyph(
+        character: string,
+        fontSize: number,
+        fontFamily: string,
+        glyph: Glyph
+    ): void {
+        const fontSizes = this._glyphs.get(character) ?? new Map<number, Map<string, Glyph>>();
+        const fontFamilies = fontSizes.get(fontSize) ?? new Map<string, Glyph>();
+        fontFamilies.set(fontFamily, glyph);
+        fontSizes.set(fontSize, fontFamilies);
+        this._glyphs.set(character, fontSizes);
     }
 
     private _createPage(): AtlasPage {

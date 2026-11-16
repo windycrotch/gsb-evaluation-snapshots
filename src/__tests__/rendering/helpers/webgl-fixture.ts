@@ -175,9 +175,10 @@ export function createWebGLFixture(maxTextureSize = 1024) {
     vi.spyOn(document, 'createElement').mockReturnValueOnce(glyphCanvas).mockReturnValueOnce(colorCanvas);
     const renderer = new WebGLRenderer();
     const initialize = () => renderer.initialize(canvas, webglOptions);
+    const typedGl = gl as unknown as WebGL2RenderingContext & typeof gl;
 
     return {
-        renderer, initialize, canvas, gl, glyphContext, colorContext,
+        renderer, initialize, canvas, gl, glyphContext, colorContext, typedGl,
         uploads, glyphCanvas, colorCanvas, getContext, loseContext,
     };
 }

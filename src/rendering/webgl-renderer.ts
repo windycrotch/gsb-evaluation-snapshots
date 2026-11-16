@@ -23,12 +23,7 @@ export class WebGLRenderer implements Renderer {
     }
 
     public set options(options: ASCIIRendererOptions) {
-        const fontChanged = options.fontSize !== this._options.fontSize ||
-            options.fontFamily !== this._options.fontFamily;
         this._options = options;
-
-        if (fontChanged)
-            this._atlas?.reset();
     }
 
     public initialize(canvas: HTMLCanvasElement, options: ASCIIRendererOptions): void {
