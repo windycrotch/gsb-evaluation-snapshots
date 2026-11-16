@@ -1,0 +1,1545 @@
+import { describe, expect, it, vi } from "vitest";
+import { CoordinateTransformer, ICamera, ItemCollection, type PathItem } from "@canvas-tile-engine/core";
+import { DrawContext, Layer } from "@canvas-tile-engine/renderer-shared/scene";
+import { createBrowserCanvasDraw, type BrowserContext2D } from "../../src/modules/createCanvasDraw";
+
+// Minimal fake 2D context that records state at every stroke()/fill() call.
+function makeRecordingCtx() {
+    const strokes: Array<{ lineWidth: number; globalAlpha: number }> = [];
+    const fills: Array<{ globalAlpha: number }> = [];
+    const ctx = {
+        lineWidth: 1,
+        globalAlpha: 1,
+        fillStyle: "#000",
+        strokeStyle: "#000",
+        save() {},
+        restore() {},
+        beginPath() {},
+        rect() {},
+        arc() {},
+        moveTo() {},
+        lineTo() {},
+        translate() {},
+        rotate() {},
+        fill() {
+            fills.push({ globalAlpha: ctx.globalAlpha });
+        },
+        stroke() {
+            strokes.push({ lineWidth: ctx.lineWidth, globalAlpha: ctx.globalAlpha });
+        },
+    };
+    return { ctx: ctx as unknown as CanvasRenderingContext2D, strokes, fills };
+}
+
+function setup() {
+    const camera = { x: 0, y: 0, scale: 10 } as unknown as ICamera;
+    const transformer = new CoordinateTransformer(camera);
+    const layers = new Layer<DrawContext<BrowserContext2D>>();
+    const draw = createBrowserCanvasDraw(layers, transformer, camera, () => 1);
+    const config = { size: { width: 100, height: 100 }, scale: 10 } as never;
+    const render = (ctx: CanvasRenderingContext2D) =>
+        layers.drawAll({ ctx, camera, transformer, config, topLeft: { x: 0, y: 0 } });
+    return { draw, render };
+}
+
+describe("CanvasDraw collection updates", () => {
+    it.each(["drawRect", "drawCircle"] as const)("%s refreshes a warmed index without re-registering", (method) => {
+        const { draw, render } = setup();
+        const { ctx, fills } = makeRecordingCtx();
+        const items = Array.from({ length: 600 }, (_, id) => ({
+            id,
+            x: 1000 + id,
+            y: 1000,
+            size: 1,
+            style: { fillStyle: "#f00" },
+        }));
+        const source = new ItemCollection(items, { keyOf: (item) => item.id });
+        const handle = draw[method](source.items as typeof items);
+        source.subscribe((changes) => draw.applyDrawChanges(handle, changes));
+        render(ctx);
+        expect(fills).toHaveLength(0);
+        source.update(0, { x: 2, y: 2 });
+        render(ctx);
+        expect(fills).toHaveLength(1);
+        source.batch(() => {
+            source.insert({ ...items[0], id: 700, x: 3, y: 3 });
+            source.remove(0);
+        });
+        fills.length = 0;
+        render(ctx);
+        expect(fills).toHaveLength(1);
+        draw.removeDrawHandle(handle);
+        source.update(700, { x: 5 });
+        fills.length = 0;
+        render(ctx);
+        expect(fills).toHaveLength(0);
+    });
+
+    it("updates image and text candidates after their first frame", () => {
+        const { draw, render } = setup();
+        const { ctx } = makeRecordingCtx();
+        ctx.drawImage = vi.fn();
+        ctx.fillText = vi.fn();
+        ctx.measureText = vi.fn(
+            () =>
+                ({
+                    actualBoundingBoxLeft: 5,
+                    actualBoundingBoxRight: 5,
+                    actualBoundingBoxAscent: 5,
+                    actualBoundingBoxDescent: 5,
+                }) as TextMetrics,
+        );
+        const img = { width: 10, height: 10 } as HTMLImageElement;
+        const items = Array.from({ length: 600 }, (_, id) => ({
+            id,
+            x: 1000 + id,
+            y: 1000,
+            img,
+            text: "old",
+            fontPx: 10,
+        }));
+        const source = new ItemCollection(items, { keyOf: (item) => item.id });
+        const imageHandle = draw.drawImage(source.items as typeof items);
+        const textHandle = draw.drawText(source.items as typeof items);
+        source.subscribe((changes) => {
+            draw.applyDrawChanges(imageHandle, changes);
+            draw.applyDrawChanges(textHandle, changes);
+        });
+        render(ctx);
+        expect(ctx.drawImage).not.toHaveBeenCalled();
+        expect(ctx.fillText).not.toHaveBeenCalled();
+        source.update(0, { x: 2, y: 2, text: "updated" });
+        render(ctx);
+        expect(ctx.drawImage).toHaveBeenCalledTimes(1);
+        expect(ctx.fillText).toHaveBeenCalledWith("updated", 25, 25);
+        draw.clearAll();
+        source.remove(0);
+        render(ctx);
+        expect(ctx.drawImage).toHaveBeenCalledTimes(1);
+        expect(ctx.fillText).toHaveBeenCalledTimes(1);
+    });
+
+    it("retains each path's bounds through removal, replacement and insertion", () => {
+        const { draw, render } = setup();
+        const { ctx, strokes } = makeRecordingCtx();
+        const path = (id: string, x: number): PathItem & { id: string } => ({
+            id,
+            points: [
+                { x, y: 1 },
+                { x: x + 2, y: 1 },
+            ],
+            style: { strokeStyle: "#f00" },
+        });
+        const items = [path("a", 0), path("b", 3)];
+        const source = new ItemCollection(items, { keyOf: (item) => item.id });
+        const handle = draw.drawPath(source.items as typeof items);
+        source.subscribe((changes) => draw.applyDrawChanges(handle, changes));
+        render(ctx);
+        expect(strokes).toHaveLength(2);
+        source.batch(() => {
+            source.remove("a");
+            source.update("b", path("b", 100));
+        });
+        strokes.length = 0;
+        render(ctx);
+        expect(strokes).toHaveLength(0);
+        source.insert(path("c", 2));
+        render(ctx);
+        expect(strokes).toHaveLength(1);
+
+        const removed = source.get("c")!;
+        source.remove("c");
+        removed.points = [
+            { x: 200, y: 1 },
+            { x: 202, y: 1 },
+        ];
+        source.insert(removed);
+        strokes.length = 0;
+        render(ctx);
+        expect(strokes).toHaveLength(0);
+    });
+});
+
+describe("CanvasDraw grid intervals", () => {
+    it.each([-1, -0.25, 0, -0, NaN, Infinity, -Infinity, "1", null, undefined])(
+        "rejects invalid cellSize %s synchronously without registering a draw",
+        (cellSize) => {
+            const { draw, render } = setup();
+            const { ctx, strokes } = makeRecordingCtx();
+
+            expect(() => draw.drawGridLines(cellSize as number, { lineWidth: 1, strokeStyle: "#000" })).toThrow(
+                new RangeError("[CanvasTileEngine] cellSize must be a positive finite number"),
+            );
+            render(ctx);
+            expect(strokes).toHaveLength(0);
+        },
+    );
+
+    it.each([0.5, 2])("renders positive cellSize %s and returns a removable handle", (cellSize) => {
+        const { draw, render } = setup();
+        const { ctx, strokes } = makeRecordingCtx();
+        const moveTo = vi.spyOn(ctx, "moveTo");
+
+        const handle = draw.drawGridLines(cellSize, { lineWidth: 1, strokeStyle: "#000" }, 3);
+        expect(handle.layer).toBe(3);
+        render(ctx);
+        expect(strokes).toHaveLength(1);
+        expect(moveTo).toHaveBeenCalledTimes(2 * (10 / cellSize + 1));
+
+        draw.removeDrawHandle(handle);
+        render(ctx);
+        expect(strokes).toHaveLength(1);
+    });
+});
+
+describe("CanvasDraw lineWidth handling", () => {
+    // Stroke unit contract shared by all renderers: lineWidth is world units
+    // (px = lineWidth * scale), lineWidthPx is screen pixels and wins.
+    it("scales world lineWidth by the camera scale", () => {
+        const { draw, render } = setup(); // scale 10
+        const { ctx, strokes } = makeRecordingCtx();
+
+        draw.drawRect([{ x: 1, y: 1, size: 1, style: { strokeStyle: "#f00", lineWidth: 0.5 } }], 1);
+        render(ctx);
+
+        expect(strokes).toHaveLength(1);
+        expect(strokes[0].lineWidth).toBe(5);
+        expect(strokes[0].globalAlpha).toBe(1);
+    });
+
+    it("uses lineWidthPx as a zoom-independent pixel width that wins over lineWidth", () => {
+        const { draw, render } = setup(); // scale 10
+        const { ctx, strokes } = makeRecordingCtx();
+
+        draw.drawRect(
+            [
+                { x: 1, y: 1, size: 1, style: { strokeStyle: "#f00", lineWidthPx: 3 } },
+                { x: 3, y: 3, size: 1, style: { strokeStyle: "#f00", lineWidth: 0.5, lineWidthPx: 3 } },
+            ],
+            1,
+        );
+        render(ctx);
+
+        expect(strokes.map((s) => s.lineWidth)).toEqual([3, 3]);
+    });
+
+    it("applies the sub-pixel lineWidth alpha to every item, not just the first", () => {
+        const { draw, render } = setup();
+        const { ctx, strokes } = makeRecordingCtx();
+
+        draw.drawRect(
+            [
+                { x: 1, y: 1, size: 1, style: { strokeStyle: "#f00", lineWidthPx: 0.5 } },
+                { x: 3, y: 3, size: 1, style: { strokeStyle: "#f00", lineWidthPx: 0.5 } },
+                { x: 5, y: 5, size: 1, style: { strokeStyle: "#f00", lineWidthPx: 0.5 } },
+            ],
+            1,
+        );
+        render(ctx);
+
+        expect(strokes).toHaveLength(3);
+        for (const stroke of strokes) {
+            expect(stroke.lineWidth).toBe(1);
+            expect(stroke.globalAlpha).toBe(0.5);
+        }
+    });
+
+    it("keeps fills opaque when a sub-pixel lineWidth is used for the stroke", () => {
+        const { draw, render } = setup();
+        const { ctx, fills } = makeRecordingCtx();
+
+        draw.drawRect(
+            [{ x: 1, y: 1, size: 1, style: { fillStyle: "#0f0", strokeStyle: "#f00", lineWidthPx: 0.5 } }],
+            1,
+        );
+        render(ctx);
+
+        expect(fills).toHaveLength(1);
+        expect(fills[0].globalAlpha).toBe(1);
+    });
+
+    it("defaults to a 1px hairline instead of leaking the previous item's width", () => {
+        const { draw, render } = setup();
+        const { ctx, strokes } = makeRecordingCtx();
+
+        draw.drawRect(
+            [
+                { x: 1, y: 1, size: 1, style: { strokeStyle: "#f00", lineWidthPx: 8 } },
+                { x: 3, y: 3, size: 1, style: { strokeStyle: "#00f" } }, // no lineWidth
+            ],
+            1,
+        );
+        render(ctx);
+
+        expect(strokes).toHaveLength(2);
+        expect(strokes[0].lineWidth).toBe(8);
+        expect(strokes[1].lineWidth).toBe(1);
+    });
+
+    it("handles circles the same way as rects", () => {
+        const { draw, render } = setup();
+        const { ctx, strokes } = makeRecordingCtx();
+
+        draw.drawCircle(
+            [
+                { x: 1, y: 1, size: 1, style: { strokeStyle: "#f00", lineWidth: 0.5 } },
+                { x: 3, y: 3, size: 1, style: { strokeStyle: "#f00", lineWidthPx: 0.5 } },
+            ],
+            1,
+        );
+        render(ctx);
+
+        expect(strokes).toHaveLength(2);
+        expect(strokes[0].lineWidth).toBe(5); // world: 0.5 * scale 10
+        expect(strokes[1].lineWidth).toBe(1); // sub-pixel px width -> alpha trick
+        expect(strokes[1].globalAlpha).toBe(0.5);
+    });
+});
+
+// Fake 2D context recording setLineDash calls and strokes for dash tests.
+function makeDashRecordingCtx() {
+    const dashes: number[][] = [];
+    let strokeCount = 0;
+    const ctx = {
+        lineWidth: 1,
+        globalAlpha: 1,
+        fillStyle: "#000",
+        strokeStyle: "#000",
+        save() {},
+        restore() {},
+        beginPath() {},
+        rect() {},
+        arc() {},
+        moveTo() {},
+        lineTo() {},
+        fill() {},
+        setLineDash(pattern: number[]) {
+            dashes.push(pattern);
+        },
+        stroke() {
+            strokeCount++;
+        },
+    };
+    return { ctx: ctx as unknown as CanvasRenderingContext2D, dashes, strokes: () => strokeCount };
+}
+
+// Dash unit contract shared by all renderers: lineDash is world units
+// (px = value * scale), lineDashPx is screen pixels and wins.
+describe("CanvasDraw line dash", () => {
+    const path = [
+        { x: 0, y: 0 },
+        { x: 5, y: 0 },
+    ];
+
+    it("scales world lineDash by the camera scale", () => {
+        const { draw, render } = setup(); // scale 10
+        const { ctx, dashes } = makeDashRecordingCtx();
+
+        draw.drawPath([{ points: path, style: { strokeStyle: "#f00", lineDash: [0.8, 0.4] } }], 1);
+        render(ctx);
+
+        expect(dashes).toEqual([[8, 4]]);
+    });
+
+    it("passes lineDashPx through unscaled and prefers it over lineDash", () => {
+        const { draw, render } = setup();
+        const { ctx, dashes } = makeDashRecordingCtx();
+
+        draw.drawLine(
+            [{ from: { x: 0, y: 0 }, to: { x: 5, y: 0 } }],
+            { strokeStyle: "#f00", lineDash: [0.8], lineDashPx: [6, 3] },
+            1,
+        );
+        render(ctx);
+
+        expect(dashes).toEqual([[6, 3]]);
+    });
+
+    it("stays solid (no setLineDash call) when no dash is given", () => {
+        const { draw, render } = setup();
+        const { ctx, dashes, strokes } = makeDashRecordingCtx();
+
+        draw.drawPath([{ points: path, style: { strokeStyle: "#f00", lineWidth: 0.2 } }], 1);
+        render(ctx);
+
+        expect(dashes).toEqual([]);
+        expect(strokes()).toBe(1);
+    });
+
+    it("dashes rect borders with the same unit contract and resets after the stroke", () => {
+        const { draw, render } = setup(); // scale 10
+        const { ctx, dashes } = makeDashRecordingCtx();
+
+        draw.drawRect([{ x: 1, y: 1, size: 1, style: { strokeStyle: "#f00", lineDash: [0.8, 0.4] } }], 1);
+        render(ctx);
+
+        expect(dashes).toEqual([[8, 4], []]);
+    });
+
+    it("dashes circle borders and prefers lineDashPx over lineDash", () => {
+        const { draw, render } = setup();
+        const { ctx, dashes } = makeDashRecordingCtx();
+
+        draw.drawCircle(
+            [{ x: 1, y: 1, size: 1, style: { strokeStyle: "#f00", lineDash: [0.8], lineDashPx: [6, 3] } }],
+            1,
+        );
+        render(ctx);
+
+        expect(dashes).toEqual([[6, 3], []]);
+    });
+
+    it("keeps rect/circle borders solid when no dash is given", () => {
+        const { draw, render } = setup();
+        const { ctx, dashes, strokes } = makeDashRecordingCtx();
+
+        draw.drawRect([{ x: 1, y: 1, size: 1, style: { strokeStyle: "#f00" } }], 1);
+        draw.drawCircle([{ x: 3, y: 3, size: 1, style: { fillStyle: "#0f0", strokeStyle: "#f00" } }], 1);
+        render(ctx);
+
+        expect(dashes).toEqual([]);
+        expect(strokes()).toBe(2);
+    });
+});
+
+// Transform contract shared by all renderers: worldToScreen takes item-space
+// coords (integers = cell centers), screenToWorld returns raw corner-space.
+describe("CanvasDraw custom draw transform", () => {
+    it("hands worldToScreen/screenToWorld helpers to draw functions", () => {
+        const { draw, render } = setup(); // scale 10, camera at (0,0)
+        const { ctx } = makeRecordingCtx();
+
+        let toScreen: { x: number; y: number } | undefined;
+        let toWorld: { x: number; y: number } | undefined;
+        draw.addDrawFunction((_ctx, _coords, _config, transform) => {
+            toScreen = transform.worldToScreen(2, 3);
+            toWorld = transform.screenToWorld(25, 35);
+        }, 1);
+        render(ctx);
+
+        // Item-space (2,3) is the center of cell (2,3): (2.5, 3.5) * 10
+        expect(toScreen).toEqual({ x: 25, y: 35 });
+        // screenToWorld reports raw corner-space, like event coords.raw
+        expect(toWorld).toEqual({ x: 2.5, y: 3.5 });
+    });
+});
+
+// Fake 2D context recording every rect(x, y, w, h) call.
+function makeRectRecordingCtx() {
+    const rects: Array<{ x: number; y: number; w: number; h: number }> = [];
+    const ctx = {
+        lineWidth: 1,
+        globalAlpha: 1,
+        fillStyle: "#000",
+        strokeStyle: "#000",
+        save() {},
+        restore() {},
+        beginPath() {},
+        translate() {},
+        rotate() {},
+        fill() {},
+        stroke() {},
+        rect(x: number, y: number, w: number, h: number) {
+            rects.push({ x, y, w, h });
+        },
+    };
+    return { ctx: ctx as unknown as CanvasRenderingContext2D, rects };
+}
+
+// Non-square rect contract shared by all renderers; the same fixture values
+// are asserted in the webgl, skia, and server suites.
+describe("CanvasDraw non-square rects", () => {
+    it("draws width/height boxes with per-axis origin anchoring", () => {
+        const { draw, render } = setup(); // scale 10, camera at (0,0)
+        const { ctx, rects } = makeRectRecordingCtx();
+
+        draw.drawRect(
+            [
+                // cell-center origin: world box [0,4]x[1,3] -> screen (5,15,40,20)
+                { x: 2, y: 2, width: 4, height: 2, style: { fillStyle: "#f00" } },
+                // square regression: size-only behavior is unchanged
+                { x: 2, y: 2, size: 1, style: { fillStyle: "#0f0" } },
+                // self origin {0,0}: top-left pinned to the coordinate
+                { x: 1, y: 1, width: 2, height: 1, origin: { mode: "self", x: 0, y: 0 }, style: { fillStyle: "#00f" } },
+            ],
+            1,
+        );
+        render(ctx);
+
+        expect(rects).toEqual([
+            { x: 5, y: 15, w: 40, h: 20 },
+            { x: 20, y: 20, w: 10, h: 10 },
+            { x: 15, y: 15, w: 20, h: 10 },
+        ]);
+    });
+
+    it("culls with the max(width, height) extent", () => {
+        const { draw, render } = setup();
+        const { ctx, rects } = makeRectRecordingCtx();
+
+        // Viewport spans 10 world units (+1 buffer). The anchor at x=20 is far
+        // outside, but a 30-wide bar reaches back into view.
+        draw.drawRect(
+            [
+                { x: 20, y: 0, width: 30, height: 1, style: { fillStyle: "#f00" } },
+                { x: 20, y: 0, size: 1, style: { fillStyle: "#0f0" } }, // stays culled
+            ],
+            1,
+        );
+        render(ctx);
+
+        expect(rects).toHaveLength(1);
+        expect(rects[0].w).toBe(300);
+    });
+});
+
+// Pixel-sized rect contract shared by all renderers; the same fixture values
+// are asserted in the webgl, skia, and server suites. Scale is 10, so one world unit is 10px
+// and the precedence chain widthPx -> sizePx -> width -> size is visible in
+// every box below.
+describe("CanvasDraw pixel-sized rects", () => {
+    it("resolves each axis against the live scale", () => {
+        const { draw, render } = setup(); // scale 10, camera at (0,0)
+        const { ctx, rects } = makeRectRecordingCtx();
+
+        draw.drawRect(
+            [
+                // sizePx wins over size: 30px square centered on cell (2,2)
+                { x: 2, y: 2, size: 4, sizePx: 30, style: { fillStyle: "#f00" } },
+                // widthPx wins over sizePx on its own axis
+                { x: 2, y: 2, size: 4, sizePx: 30, widthPx: 50, style: { fillStyle: "#0f0" } },
+                // a pixel width beside a world height
+                { x: 2, y: 2, widthPx: 50, height: 4, style: { fillStyle: "#00f" } },
+            ],
+            1,
+        );
+        render(ctx);
+
+        expect(rects).toEqual([
+            { x: 10, y: 10, w: 30, h: 30 },
+            { x: 0, y: 10, w: 50, h: 30 },
+            { x: 0, y: 5, w: 50, h: 40 },
+        ]);
+    });
+
+    it("keeps a pixel-sized rect the same size at any zoom", () => {
+        const item = { x: 2, y: 2, sizePx: 30, style: { fillStyle: "#f00" } };
+
+        const drawAt = (scale: number) => {
+            const { draw, render } = setupAtScale(scale);
+            const { ctx, rects } = makeRectRecordingCtx();
+            draw.drawRect([item], 1);
+            render(ctx);
+            return rects[0];
+        };
+
+        // The world-sized counterpart would double; the pixel-sized one holds
+        expect(drawAt(20)).toMatchObject({ w: 30, h: 30 });
+        expect(drawAt(10)).toMatchObject({ w: 30, h: 30 });
+    });
+});
+
+// Minimal fake 2D context that records the active font at every fillText() call.
+function makeTextRecordingCtx() {
+    const texts: Array<{ text: string; font: string }> = [];
+    const ctx = {
+        font: "",
+        fillStyle: "#000",
+        textAlign: "center",
+        textBaseline: "middle",
+        save() {},
+        restore() {},
+        translate() {},
+        rotate() {},
+        measureText(text: string) {
+            const px = Number(ctx.font.match(/([\d.]+)px/)?.[1] ?? 10);
+            const width = text.length * px * 0.6;
+            const left =
+                ctx.textAlign === "right" || ctx.textAlign === "end"
+                    ? width
+                    : ctx.textAlign === "center"
+                      ? width / 2
+                      : 0;
+            return {
+                width,
+                actualBoundingBoxLeft: left,
+                actualBoundingBoxRight: width - left,
+                actualBoundingBoxAscent: px / 2,
+                actualBoundingBoxDescent: px / 2,
+            };
+        },
+        fillText(text: string) {
+            texts.push({ text, font: ctx.font });
+        },
+    };
+    return { ctx: ctx as unknown as CanvasRenderingContext2D, texts };
+}
+
+function setupAtScale(scale: number) {
+    const camera = { x: 0, y: 0, scale } as unknown as ICamera;
+    const transformer = new CoordinateTransformer(camera);
+    const layers = new Layer<DrawContext<BrowserContext2D>>();
+    const draw = createBrowserCanvasDraw(layers, transformer, camera, () => 1);
+    const config = { size: { width: 100, height: 100 }, scale } as never;
+    const render = (ctx: CanvasRenderingContext2D) =>
+        layers.drawAll({ ctx, camera, transformer, config, topLeft: { x: 0, y: 0 } });
+    return { draw, render };
+}
+
+describe("CanvasDraw text color", () => {
+    it("resolves black per item after styleOf, without inheriting context or previous text colors", () => {
+        const { draw, render } = setupAtScale(10);
+        const { ctx } = makeTextRecordingCtx();
+        const colors: unknown[] = [];
+        ctx.fillText = () => colors.push(ctx.fillStyle);
+        let decorated = true;
+
+        draw.drawText(
+            [
+                { x: 1, y: 1, text: "default" },
+                { x: 2, y: 1, text: "explicit", style: { fillStyle: "#ff0000" } },
+                { x: 3, y: 1, text: "after", rotate: 30, style: {} },
+                { x: 4, y: 1, text: "font-only", style: { fillStyle: "#ff0000" } },
+                { x: 5, y: 1, text: "override", style: { fillStyle: "#ff0000" } },
+                { x: 6, y: 1, text: "reset", style: { fillStyle: "#ff0000" } },
+            ],
+            2,
+            {
+                styleOf: (item) => {
+                    if (item.text === "font-only") {
+                        return { fontWeight: "bold" };
+                    }
+                    if (item.text === "override" && decorated) {
+                        return { fillStyle: "#0000ff" };
+                    }
+                    if (item.text === "reset") {
+                        return { fillStyle: undefined };
+                    }
+                    return undefined;
+                },
+            },
+        );
+
+        ctx.fillStyle = "#ffffff";
+        render(ctx);
+        expect(colors).toEqual(["#000000", "#ff0000", "#000000", "#ff0000", "#0000ff", "#000000"]);
+
+        decorated = false;
+        colors.length = 0;
+        ctx.fillStyle = "#ffffff";
+        render(ctx);
+        expect(colors).toEqual(["#000000", "#ff0000", "#000000", "#ff0000", "#ff0000", "#000000"]);
+    });
+});
+
+// Font sizing contract shared by all renderers: px = fontPx ?? size * scale.
+// The same fixture values are asserted in the webgl, skia, and server suites.
+describe("CanvasDraw text font sizing", () => {
+    it("renders size in world units (px = size * scale)", () => {
+        const { draw, render } = setupAtScale(10);
+        const { ctx, texts } = makeTextRecordingCtx();
+
+        draw.drawText([
+            { x: 1, y: 1, text: "default" },
+            { x: 2, y: 1, text: "sized", size: 2 },
+        ]);
+        render(ctx);
+
+        expect(texts).toEqual([
+            { text: "default", font: "10px sans-serif" },
+            { text: "sized", font: "20px sans-serif" },
+        ]);
+    });
+
+    it("uses fontPx as a zoom-independent pixel size that wins over size", () => {
+        for (const scale of [10, 50]) {
+            const { draw, render } = setupAtScale(scale);
+            const { ctx, texts } = makeTextRecordingCtx();
+
+            draw.drawText([
+                { x: 1, y: 1, text: "fixed", fontPx: 14 },
+                { x: 2, y: 1, text: "both", size: 2, fontPx: 14 },
+            ]);
+            render(ctx);
+
+            expect(texts).toEqual([
+                { text: "fixed", font: "14px sans-serif" },
+                { text: "both", font: "14px sans-serif" },
+            ]);
+        }
+    });
+
+    it("culls with the fontPx world-space extent (fontPx / scale)", () => {
+        const { draw, render } = setupAtScale(10);
+        const { ctx, texts } = makeTextRecordingCtx();
+
+        // Viewport spans 10 world units (+1 tile buffer). x=20 with size 1 is
+        // out of reach, but a 140px label spans 14 world units and pokes in.
+        draw.drawText([
+            { x: 20, y: 1, text: "culled" },
+            { x: 20, y: 1, text: "visible", fontPx: 140 },
+        ]);
+        render(ctx);
+
+        expect(texts.map((t) => t.text)).toEqual(["visible"]);
+    });
+});
+
+// Minimal fake 2D context that records globalAlpha at every drawImage() call.
+function makeImageRecordingCtx() {
+    const blits: Array<{ alpha: number }> = [];
+    const ctx = {
+        globalAlpha: 1,
+        save() {},
+        restore() {},
+        translate() {},
+        rotate() {},
+        drawImage() {
+            blits.push({ alpha: ctx.globalAlpha });
+        },
+    };
+    return { ctx: ctx as unknown as CanvasRenderingContext2D, blits };
+}
+
+const fakeImage = { width: 10, height: 10 } as HTMLImageElement;
+
+// Image opacity contract shared by all renderers: alpha = opacity ?? 1.
+// The same fixture values are asserted in the webgl, skia, and server suites.
+describe("CanvasDraw image opacity", () => {
+    it("applies item opacity while drawing and restores globalAlpha", () => {
+        const { draw, render } = setup();
+        const { ctx, blits } = makeImageRecordingCtx();
+
+        draw.drawImage([
+            { x: 1, y: 1, img: fakeImage, opacity: 0.5 },
+            { x: 3, y: 3, img: fakeImage },
+            { x: 5, y: 5, img: fakeImage, sprite: { x: 0, y: 0, w: 5, h: 5 }, opacity: 0.25 },
+        ]);
+        render(ctx);
+
+        expect(blits.map((b) => b.alpha)).toEqual([0.5, 1, 0.25]);
+        expect(ctx.globalAlpha).toBe(1);
+    });
+});
+
+function makePathRecordingCtx() {
+    const ops: string[] = [];
+    const fillRules: string[] = [];
+    const ctx = {
+        lineWidth: 1,
+        globalAlpha: 1,
+        strokeStyle: "#000",
+        fillStyle: "#000",
+        save() {},
+        restore() {},
+        beginPath() {
+            ops.push("beginPath");
+        },
+        moveTo() {
+            ops.push("moveTo");
+        },
+        lineTo() {
+            ops.push("lineTo");
+        },
+        arc() {
+            ops.push("arc");
+        },
+        closePath() {
+            ops.push("closePath");
+        },
+        setLineDash() {},
+        fill(rule?: string) {
+            ops.push("fill");
+            fillRules.push(rule ?? "nonzero");
+        },
+        stroke() {
+            ops.push("stroke");
+        },
+    };
+    return { ctx: ctx as unknown as CanvasRenderingContext2D, ops, fillRules };
+}
+
+describe("CanvasDraw path items", () => {
+    const square = [
+        { x: 0, y: 0 },
+        { x: 4, y: 0 },
+        { x: 4, y: 4 },
+        { x: 0, y: 4 },
+    ];
+
+    it("fills a fill-only item without stroking and honors the fill rule", () => {
+        const { draw, render } = setup();
+        const { ctx, ops, fillRules } = makePathRecordingCtx();
+
+        draw.drawPath([{ points: square, fillRule: "evenodd", style: { fillStyle: "#0f0" } }], 1);
+        render(ctx);
+
+        expect(ops).toContain("fill");
+        expect(ops).not.toContain("stroke");
+        expect(fillRules).toEqual(["evenodd"]);
+    });
+
+    it("closes the outline and both fills and strokes when styled for both", () => {
+        const { draw, render } = setup();
+        const { ctx, ops } = makePathRecordingCtx();
+
+        draw.drawPath([{ points: square, closed: true, style: { fillStyle: "#0f0", strokeStyle: "#f00" } }], 1);
+        render(ctx);
+
+        expect(ops).toContain("closePath");
+        expect(ops.indexOf("fill")).toBeGreaterThan(-1);
+        expect(ops.indexOf("stroke")).toBeGreaterThan(ops.indexOf("fill"));
+    });
+
+    it("rounds corners through arcs when cornerRadius is set", () => {
+        const { draw, render } = setup();
+        const { ctx, ops } = makePathRecordingCtx();
+
+        draw.drawPath([{ points: square, closed: true, style: { strokeStyle: "#f00", cornerRadius: 0.5 } }], 1);
+        render(ctx);
+
+        expect(ops.filter((op) => op === "arc")).toHaveLength(4);
+    });
+
+    it("strokes each item with its own style in item order", () => {
+        const { draw, render } = setup();
+        const { ctx, ops } = makePathRecordingCtx();
+
+        draw.drawPath(
+            [
+                { points: square, style: { strokeStyle: "#f00" } },
+                { points: square.map((p) => ({ x: p.x + 1, y: p.y })), style: { strokeStyle: "#00f" } },
+            ],
+            1,
+        );
+        render(ctx);
+
+        expect(ops.filter((op) => op === "stroke")).toHaveLength(2);
+        expect(ops.filter((op) => op === "beginPath")).toHaveLength(2);
+    });
+
+    it("ignores width and cornerRadius smuggled into a styleOf decoration", () => {
+        const { draw, render } = setup(); // scale 10
+        const widths: number[] = [];
+        let arcs = 0;
+        const ctx = {
+            lineWidth: 1,
+            globalAlpha: 1,
+            strokeStyle: "#000",
+            fillStyle: "#000",
+            save() {},
+            restore() {},
+            beginPath() {},
+            moveTo() {},
+            lineTo() {},
+            arc() {
+                arcs++;
+            },
+            closePath() {},
+            setLineDash() {},
+            fill() {},
+            stroke() {
+                widths.push(ctx.lineWidth);
+            },
+        };
+
+        // Non-literal returns bypass TS excess-property checks — the exact
+        // hole this guards: geometry-feeding values must resolve from the
+        // registration-time item style hit testing reads.
+        const smuggled = { strokeStyle: "#0f0", lineWidthPx: 12, cornerRadiusPx: 30 };
+        draw.drawPath([{ points: square, closed: true, style: { strokeStyle: "#f00", lineWidthPx: 4 } }], 1, {
+            styleOf: () => smuggled,
+        });
+        render(ctx as unknown as CanvasRenderingContext2D);
+
+        expect(widths).toEqual([4]); // item width, not the smuggled 12
+        expect(arcs).toBe(0); // no smuggled corner rounding
+    });
+});
+
+// Fake 2D context recording arcs and image transforms.
+function makeMarkerRecordingCtx() {
+    const arcs: Array<{ x: number; y: number; r: number }> = [];
+    const scales: Array<{ x: number; y: number }> = [];
+    const images: Array<{ dx: number; dy: number; dw: number; dh: number }> = [];
+    const ctx = {
+        lineWidth: 1,
+        globalAlpha: 1,
+        fillStyle: "#000",
+        strokeStyle: "#000",
+        save() {},
+        restore() {},
+        beginPath() {},
+        translate() {},
+        rotate() {},
+        scale(x: number, y: number) {
+            scales.push({ x, y });
+        },
+        arc(x: number, y: number, r: number) {
+            arcs.push({ x, y, r });
+        },
+        moveTo() {},
+        lineTo() {},
+        fill() {},
+        stroke() {},
+        drawImage(_img: unknown, dx: number, dy: number, dw: number, dh: number) {
+            images.push({ dx, dy, dw, dh });
+        },
+    };
+    return { ctx: ctx as unknown as CanvasRenderingContext2D, arcs, scales, images };
+}
+
+describe("CanvasDraw sizePx and flip", () => {
+    it("draws a sizePx circle at fixed pixel size regardless of scale", () => {
+        const { draw, render } = setup(); // scale 10
+        const { ctx, arcs } = makeMarkerRecordingCtx();
+
+        draw.drawCircle(
+            [
+                { x: 2, y: 2, size: 2, sizePx: 24, style: { fillStyle: "#f00" } }, // sizePx wins
+                { x: 4, y: 4, size: 2, style: { fillStyle: "#f00" } }, // world size
+            ],
+            1,
+        );
+        render(ctx);
+
+        expect(arcs.map((a) => a.r)).toEqual([12, 10]);
+    });
+
+    it("keeps far-out sizePx markers visible (world extent grows as scale drops)", () => {
+        const { draw, render } = setupAtScale(2); // 100px viewport = 50 world units wide
+        const { ctx, arcs } = makeMarkerRecordingCtx();
+
+        // Anchor at x=60 is ~10 world units past the right edge, but a 60px
+        // marker spans 30 world units at scale 2 — its left half is visible.
+        draw.drawCircle([{ x: 60, y: 10, sizePx: 60, style: { fillStyle: "#f00" } }], 1);
+        render(ctx);
+
+        expect(arcs).toHaveLength(1);
+        expect(arcs[0].r).toBe(30);
+    });
+
+    it("draws a sizePx image in its pixel box", () => {
+        const { draw, render } = setup(); // scale 10
+        const { ctx, images } = makeMarkerRecordingCtx();
+        const img = { width: 100, height: 100 } as unknown as HTMLImageElement;
+
+        draw.drawImage([{ x: 2, y: 2, size: 3, sizePx: 20, img }], 1);
+        render(ctx);
+
+        expect(images).toHaveLength(1);
+        expect(images[0].dw).toBe(20);
+        expect(images[0].dh).toBe(20);
+    });
+
+    it("mirrors flipped images via a negative scale around the center", () => {
+        const { draw, render } = setup();
+        const { ctx, scales, images } = makeMarkerRecordingCtx();
+        const img = { width: 100, height: 100 } as unknown as HTMLImageElement;
+
+        draw.drawImage(
+            [
+                { x: 1, y: 1, size: 1, img, flipX: true },
+                { x: 3, y: 1, size: 1, img, flipY: true },
+                { x: 5, y: 1, size: 1, img }, // no flip: no scale call
+            ],
+            1,
+        );
+        render(ctx);
+
+        expect(scales).toEqual([
+            { x: -1, y: 1 },
+            { x: 1, y: -1 },
+        ]);
+        // Flipped items draw centered at the origin of the transformed frame
+        expect(images[0].dx).toBe(-5);
+        expect(images[2].dx).not.toBe(-5);
+    });
+});
+
+// Fake 2D context recording native path commands for command replay.
+function makeCommandRecordingCtx() {
+    const calls: Array<{ op: string; args: number[] }> = [];
+    const rec =
+        (op: string) =>
+        (...args: unknown[]) =>
+            calls.push({ op, args: args.filter((a) => typeof a === "number") as number[] });
+    const ctx = {
+        lineWidth: 1,
+        globalAlpha: 1,
+        fillStyle: "#000",
+        strokeStyle: "#000",
+        save() {},
+        restore() {},
+        beginPath() {},
+        setLineDash() {},
+        moveTo: rec("moveTo"),
+        lineTo: rec("lineTo"),
+        arc: rec("arc"),
+        quadraticCurveTo: rec("quadraticCurveTo"),
+        bezierCurveTo: rec("bezierCurveTo"),
+        closePath: rec("closePath"),
+        fill: rec("fill"),
+        stroke: rec("stroke"),
+    };
+    return { ctx: ctx as unknown as CanvasRenderingContext2D, calls };
+}
+
+describe("CanvasDraw command paths", () => {
+    it("replays commands natively with world→screen and degree→radian conversion", () => {
+        const { draw, render } = setup(); // scale 10, worldToScreen(k) centers cells
+        const { ctx, calls } = makeCommandRecordingCtx();
+
+        draw.drawPath(
+            [
+                {
+                    commands: [
+                        { type: "moveTo", x: 0, y: 0 },
+                        { type: "quadraticCurveTo", cpx: 2, cpy: 2, x: 4, y: 0 },
+                        { type: "arc", x: 0, y: 0, radius: 2, startAngle: 0, endAngle: 180 },
+                        { type: "closePath" },
+                    ],
+                    style: { strokeStyle: "#f00" },
+                },
+            ],
+            1,
+        );
+        render(ctx);
+
+        const ops = calls.map((c) => c.op);
+        expect(ops).toEqual(["moveTo", "quadraticCurveTo", "arc", "closePath", "stroke"]);
+        // arc: radius scaled to px (2 * 10), angles in radians
+        const arc = calls[2].args;
+        expect(arc[2]).toBe(20);
+        expect(arc[4]).toBeCloseTo(Math.PI);
+    });
+
+    it("fills multi-subpath commands under the item's fill rule (holes)", () => {
+        const { draw, render } = setup();
+        const { ctx, calls } = makeCommandRecordingCtx();
+
+        draw.drawPath(
+            [
+                {
+                    commands: [
+                        { type: "moveTo", x: 0, y: 0 },
+                        { type: "lineTo", x: 4, y: 0 },
+                        { type: "lineTo", x: 4, y: 4 },
+                        { type: "closePath" },
+                        { type: "moveTo", x: 1, y: 1 },
+                        { type: "lineTo", x: 2, y: 1 },
+                        { type: "lineTo", x: 2, y: 2 },
+                        { type: "closePath" },
+                    ],
+                    fillRule: "evenodd",
+                    style: { fillStyle: "#0f0" },
+                },
+            ],
+            1,
+        );
+        render(ctx);
+
+        const ops = calls.map((c) => c.op);
+        expect(ops.filter((op) => op === "moveTo")).toHaveLength(2);
+        expect(ops).toContain("fill");
+        expect(ops).not.toContain("stroke"); // fill-only
+    });
+});
+
+describe("styleOf paint-time decoration", () => {
+    // Records the ctx style active at every fill()/stroke() call, so tests can
+    // assert which style each item was actually painted with.
+    function makeStyleRecordingCtx() {
+        const fills: string[] = [];
+        const strokes: string[] = [];
+        const ctx = {
+            lineWidth: 1,
+            globalAlpha: 1,
+            fillStyle: "#000",
+            strokeStyle: "#000",
+            save() {},
+            restore() {},
+            beginPath() {},
+            rect() {},
+            arc() {},
+            moveTo() {},
+            lineTo() {},
+            closePath() {},
+            translate() {},
+            rotate() {},
+            setLineDash() {},
+            fill() {
+                fills.push(String(ctx.fillStyle));
+            },
+            stroke() {
+                strokes.push(String(ctx.strokeStyle));
+            },
+        };
+        return { ctx: ctx as unknown as CanvasRenderingContext2D, fills, strokes };
+    }
+
+    it("resolves styleOf against live external state on every frame", () => {
+        const { draw, render } = setup();
+        const { ctx, fills } = makeStyleRecordingCtx();
+
+        const selected = new Set<number>();
+        const items = [
+            { x: 1, y: 1, size: 1, style: { fillStyle: "#00f" }, data: { id: 0 } },
+            { x: 3, y: 3, size: 1, style: { fillStyle: "#00f" }, data: { id: 1 } },
+        ];
+        draw.drawRect(items, 1, {
+            styleOf: (item) => (selected.has((item.data as { id: number }).id) ? { fillStyle: "#f00" } : undefined),
+        });
+
+        render(ctx);
+        expect(fills).toEqual(["#00f", "#00f"]);
+
+        // Selection changes without any re-registration: the same registration
+        // must paint differently on the next frame.
+        selected.add(1);
+        fills.length = 0;
+        render(ctx);
+        expect(fills).toEqual(["#00f", "#f00"]);
+    });
+
+    it("overlays the decoration on the item's own style instead of replacing it", () => {
+        const { draw, render } = setup();
+        const { ctx, fills, strokes } = makeStyleRecordingCtx();
+
+        draw.drawRect([{ x: 1, y: 1, size: 1, style: { fillStyle: "#00f", strokeStyle: "#0f0" } }], 1, {
+            styleOf: () => ({ fillStyle: "#f00" }),
+        });
+        render(ctx);
+
+        expect(fills).toEqual(["#f00"]);
+        expect(strokes).toEqual(["#0f0"]); // untouched base field survives
+    });
+
+    it("decorates circles and text through the same path", () => {
+        const { draw, render } = setup();
+        const { ctx, fills } = makeStyleRecordingCtx();
+
+        draw.drawCircle([{ x: 1, y: 1, size: 1, style: { fillStyle: "#00f" } }], 1, {
+            styleOf: () => ({ fillStyle: "#f00" }),
+        });
+        render(ctx);
+        expect(fills).toEqual(["#f00"]);
+    });
+
+    it("strokes decorated lines individually while the rest stay batched", () => {
+        const { draw, render } = setup();
+        const { ctx, strokes } = makeStyleRecordingCtx();
+
+        const items = [
+            { from: { x: 0, y: 0 }, to: { x: 2, y: 2 }, data: { id: 0 } },
+            { from: { x: 1, y: 0 }, to: { x: 3, y: 2 }, data: { id: 1 } },
+        ];
+        draw.drawLine(items, { strokeStyle: "#123" }, 1, {
+            styleOf: (item) => ((item.data as { id: number }).id === 1 ? { strokeStyle: "#f00" } : undefined),
+        });
+        render(ctx);
+
+        // First stroke is the batched run with the call-level style, then the
+        // decorated item strokes on its own.
+        expect(strokes).toEqual(["#123", "#f00"]);
+    });
+
+    it("preserves array paint order when a decorated line comes before a plain one", () => {
+        const { draw, render } = setup();
+        const { ctx, strokes } = makeStyleRecordingCtx();
+
+        const items = [
+            { from: { x: 0, y: 0 }, to: { x: 2, y: 2 }, data: { id: 0 } },
+            { from: { x: 1, y: 0 }, to: { x: 3, y: 2 }, data: { id: 1 } },
+        ];
+        draw.drawLine(items, { strokeStyle: "#123" }, 1, {
+            styleOf: (item) => ((item.data as { id: number }).id === 0 ? { strokeStyle: "#f00" } : undefined),
+        });
+        render(ctx);
+
+        // The decorated item is FIRST in the array, so it must paint first —
+        // the plain line after it draws on top, matching hit-test priority.
+        expect(strokes).toEqual(["#f00", "#123"]);
+    });
+
+    it("batches contiguous undecorated runs around decorated items without reordering", () => {
+        const { draw, render } = setup();
+        const { ctx, strokes } = makeStyleRecordingCtx();
+
+        const items = [
+            { from: { x: 0, y: 0 }, to: { x: 1, y: 1 }, data: { id: 0 } },
+            { from: { x: 1, y: 0 }, to: { x: 2, y: 1 }, data: { id: 1 } },
+            { from: { x: 2, y: 0 }, to: { x: 3, y: 1 }, data: { id: 2 } },
+            { from: { x: 3, y: 0 }, to: { x: 4, y: 1 }, data: { id: 3 } },
+        ];
+        draw.drawLine(items, { strokeStyle: "#123" }, 1, {
+            styleOf: (item) => ((item.data as { id: number }).id === 1 ? { strokeStyle: "#f00" } : undefined),
+        });
+        render(ctx);
+
+        // 4 items, 3 strokes: run(#0) -> decorated(#1) -> run(#2, #3).
+        expect(strokes).toEqual(["#123", "#f00", "#123"]);
+    });
+
+    it("decorates paths at paint time, including the fill toggle staying visual-only", () => {
+        const { draw, render } = setup();
+        const { ctx, fills, strokes } = makeStyleRecordingCtx();
+
+        draw.drawPath(
+            [
+                {
+                    points: [
+                        { x: 0, y: 0 },
+                        { x: 2, y: 0 },
+                        { x: 2, y: 2 },
+                    ],
+                    closed: true,
+                    style: { fillStyle: "#00f", strokeStyle: "#0f0" },
+                },
+            ],
+            1,
+            { styleOf: () => ({ fillStyle: "#f00" }) },
+        );
+        render(ctx);
+
+        expect(fills).toEqual(["#f00"]);
+        expect(strokes).toEqual(["#0f0"]);
+    });
+});
+
+// Fake 2D context recording stroke style/width/dash at every stroke() call.
+function makeLineStyleRecordingCtx() {
+    const strokes: Array<{ strokeStyle: string; lineWidth: number; dash: number[] }> = [];
+    let currentDash: number[] = [];
+    const ctx = {
+        lineWidth: 1,
+        globalAlpha: 1,
+        strokeStyle: "#000",
+        save() {},
+        restore() {},
+        beginPath() {},
+        moveTo() {},
+        lineTo() {},
+        setLineDash(pattern: number[]) {
+            currentDash = pattern;
+        },
+        stroke() {
+            strokes.push({ strokeStyle: ctx.strokeStyle, lineWidth: ctx.lineWidth, dash: currentDash });
+        },
+    };
+    return { ctx: ctx as unknown as CanvasRenderingContext2D, strokes };
+}
+
+// Per-item line style contract shared by all renderers: item.style overlays
+// the call-level style field by field; styleOf decorations overlay both.
+describe("CanvasDraw per-item line style", () => {
+    it("strokes styled items solo with merged style while plain runs keep batching", () => {
+        const { draw, render } = setup(); // scale 10
+        const { ctx, strokes } = makeLineStyleRecordingCtx();
+
+        draw.drawLine(
+            [
+                { from: { x: 0, y: 0 }, to: { x: 1, y: 0 } },
+                { from: { x: 0, y: 1 }, to: { x: 1, y: 1 }, style: { strokeStyle: "#f00", lineWidthPx: 6 } },
+                { from: { x: 0, y: 2 }, to: { x: 1, y: 2 } },
+                { from: { x: 0, y: 3 }, to: { x: 1, y: 3 } },
+            ],
+            { strokeStyle: "#00f", lineWidthPx: 2 },
+            1,
+        );
+        render(ctx);
+
+        // flush(plain run) + solo(styled) + flush(trailing run) = 3 strokes
+        expect(strokes.map((s) => [s.strokeStyle, s.lineWidth])).toEqual([
+            ["#00f", 2],
+            ["#f00", 6],
+            ["#00f", 2],
+        ]);
+    });
+
+    it("resolves item world lineWidth and lineDash by the camera scale", () => {
+        const { draw, render } = setup(); // scale 10
+        const { ctx, strokes } = makeLineStyleRecordingCtx();
+
+        draw.drawLine(
+            [
+                { from: { x: 0, y: 0 }, to: { x: 1, y: 0 }, style: { lineWidth: 0.5, lineDash: [0.8, 0.4] } },
+                { from: { x: 0, y: 1 }, to: { x: 1, y: 1 } }, // batch style, solid
+            ],
+            { strokeStyle: "#00f", lineWidthPx: 2 },
+            1,
+        );
+        render(ctx);
+
+        expect(strokes[0].lineWidth).toBe(5); // 0.5 world * scale 10
+        expect(strokes[0].dash).toEqual([8, 4]);
+        expect(strokes[1].lineWidth).toBe(2); // batch width restored
+        expect(strokes[1].dash).toEqual([]);
+    });
+
+    it("ignores a width smuggled into a styleOf decoration (paint stays hit-consistent)", () => {
+        const { draw, render } = setup();
+        const { ctx, strokes } = makeLineStyleRecordingCtx();
+
+        // Non-literal returns bypass TS excess-property checks — the exact
+        // hole a runtime guard must cover. The decoration's color applies;
+        // its width must not (hit testing never sees decorations).
+        const smuggled = { strokeStyle: "#0f0", lineWidthPx: 12 };
+        draw.drawLine(
+            [{ from: { x: 0, y: 0 }, to: { x: 1, y: 0 }, style: { lineWidthPx: 4 } }],
+            { strokeStyle: "#00f", lineWidthPx: 2 },
+            1,
+            { styleOf: () => smuggled },
+        );
+        render(ctx);
+
+        expect(strokes).toHaveLength(1);
+        expect(strokes[0].strokeStyle).toBe("#0f0"); // decoration color applies
+        expect(strokes[0].lineWidth).toBe(4); // item width, not the smuggled 12
+    });
+
+    it("styleOf decorations overlay the item's own style", () => {
+        const { draw, render } = setup();
+        const { ctx, strokes } = makeLineStyleRecordingCtx();
+
+        draw.drawLine(
+            [{ from: { x: 0, y: 0 }, to: { x: 1, y: 0 }, style: { strokeStyle: "#f00" } }],
+            { strokeStyle: "#00f" },
+            1,
+            { styleOf: () => ({ strokeStyle: "#0f0" }) },
+        );
+        render(ctx);
+
+        expect(strokes).toHaveLength(1);
+        expect(strokes[0].strokeStyle).toBe("#0f0");
+    });
+});
+
+// Font weight contract shared by all renderers: an unset weight is omitted
+// entirely rather than emitted as "normal", so existing callers keep the exact
+// font they had. The same fixture values are asserted in the webgl, skia, and server suites.
+describe("CanvasDraw text font weight", () => {
+    it("puts the weight in the font shorthand", () => {
+        const { draw, render } = setupAtScale(10);
+        const { ctx, texts } = makeTextRecordingCtx();
+
+        draw.drawText([
+            { x: 1, y: 1, text: "plain" },
+            { x: 2, y: 1, text: "bold", style: { fontWeight: "bold" } },
+            { x: 3, y: 1, text: "numeric", fontPx: 14, style: { fontWeight: 700, fontFamily: "monospace" } },
+        ]);
+        render(ctx);
+
+        expect(texts).toEqual([
+            { text: "plain", font: "10px sans-serif" },
+            { text: "bold", font: "bold 10px sans-serif" },
+            { text: "numeric", font: "700 14px monospace" },
+        ]);
+    });
+
+    it("lets styleOf decorate the weight", () => {
+        const { draw, render } = setupAtScale(10);
+        const { ctx, texts } = makeTextRecordingCtx();
+
+        draw.drawText([{ x: 1, y: 1, text: "a", data: { hot: true } }], 2, {
+            styleOf: (item) => ((item.data as { hot: boolean }).hot ? { fontWeight: 800 } : undefined),
+        });
+        render(ctx);
+
+        expect(texts[0].font).toBe("800 10px sans-serif");
+    });
+});
+
+// Fake 2D context that records every gradient built and the fill it was used
+// for, so the axis a gradient runs along can be asserted directly.
+type FakeGradient = { id: number; axis: number[]; stops: Array<[number, string]> };
+
+function makeGradientRecordingCtx() {
+    const gradients: FakeGradient[] = [];
+    const fills: Array<FakeGradient | string> = [];
+    const ctx = {
+        lineWidth: 1,
+        globalAlpha: 1,
+        fillStyle: "#000" as unknown,
+        strokeStyle: "#000",
+        save() {},
+        restore() {},
+        beginPath() {},
+        closePath() {},
+        rect() {},
+        arc() {},
+        arcTo() {},
+        moveTo() {},
+        lineTo() {},
+        translate() {},
+        rotate() {},
+        setLineDash() {},
+        createLinearGradient(x0: number, y0: number, x1: number, y1: number) {
+            const gradient: FakeGradient = {
+                id: gradients.length,
+                axis: [x0, y0, x1, y1],
+                stops: [],
+                addColorStop(offset: number, color: string) {
+                    gradient.stops.push([offset, color]);
+                },
+            } as unknown as FakeGradient;
+            gradients.push(gradient);
+            return gradient;
+        },
+        fill() {
+            fills.push(ctx.fillStyle as FakeGradient | string);
+        },
+        stroke() {},
+    };
+    return { ctx: ctx as unknown as CanvasRenderingContext2D, gradients, fills };
+}
+
+const topToBottom = {
+    type: "linear" as const,
+    from: { x: 0, y: 0 },
+    to: { x: 0, y: 1 },
+    stops: [
+        { offset: 0, color: "#f00" },
+        { offset: 1, color: "#00f" },
+    ],
+};
+
+// Gradient fill contract shared by all renderers; the webgl, skia and server
+// suites assert the same geometry through their own recorders.
+describe("CanvasDraw gradient fills", () => {
+    it("runs a box-unit axis across the item's drawn box", () => {
+        const { draw, render } = setup(); // scale 10, camera at (0,0)
+        const { ctx, gradients, fills } = makeGradientRecordingCtx();
+
+        // size 2 at (2,2) -> screen box (15,15,20,20)
+        draw.drawRect([{ x: 2, y: 2, size: 2, style: { fillStyle: topToBottom } }], 1);
+        render(ctx);
+
+        expect(gradients).toHaveLength(1);
+        expect(gradients[0].axis).toEqual([15, 15, 15, 35]);
+        expect(gradients[0].stops).toEqual([
+            [0, "#f00"],
+            [1, "#00f"],
+        ]);
+        expect(fills[0]).toBe(gradients[0]);
+    });
+
+    it("gives each item its own axis, so one spec fits every size", () => {
+        const { draw, render } = setup();
+        const { ctx, gradients } = makeGradientRecordingCtx();
+
+        draw.drawRect(
+            [
+                { x: 2, y: 2, size: 2, style: { fillStyle: topToBottom } },
+                { x: 6, y: 2, size: 1, style: { fillStyle: topToBottom } },
+            ],
+            1,
+        );
+        render(ctx);
+
+        expect(gradients.map((g) => g.axis)).toEqual([
+            [15, 15, 15, 35],
+            [60, 20, 60, 30],
+        ]);
+    });
+
+    it("projects world units through the camera and reuses one gradient", () => {
+        const { draw, render } = setup();
+        const { ctx, gradients, fills } = makeGradientRecordingCtx();
+
+        const world = { ...topToBottom, units: "world" as const, from: { x: 0, y: 0 }, to: { x: 0, y: 4 } };
+        draw.drawRect(
+            [
+                { x: 2, y: 2, size: 1, style: { fillStyle: world } },
+                { x: 4, y: 2, size: 1, style: { fillStyle: world } },
+            ],
+            1,
+        );
+        render(ctx);
+
+        // A world axis does not depend on the item, so the per-frame memo
+        // collapses the batch onto one gradient object
+        expect(gradients).toHaveLength(1);
+        expect(gradients[0].axis).toEqual([5, 5, 5, 45]);
+        expect(fills[0]).toBe(fills[1]);
+    });
+
+    it("normalizes stops before handing them over", () => {
+        const { draw, render } = setup();
+        const { ctx, gradients } = makeGradientRecordingCtx();
+
+        draw.drawRect(
+            [
+                {
+                    x: 2,
+                    y: 2,
+                    style: {
+                        fillStyle: {
+                            ...topToBottom,
+                            stops: [
+                                { offset: 2, color: "late" },
+                                { offset: -1, color: "early" },
+                            ],
+                        },
+                    },
+                },
+            ],
+            1,
+        );
+        render(ctx);
+
+        // addColorStop throws on an out-of-range offset, so clamping is not optional
+        expect(gradients[0].stops).toEqual([
+            [0, "early"],
+            [1, "late"],
+        ]);
+    });
+
+    it("rotates a box-unit axis with its shape", () => {
+        const { draw, render } = setup();
+        const { ctx, gradients } = makeGradientRecordingCtx();
+
+        // Under the rotated transform the box is centered on the origin, so
+        // the axis is local: a 20px box spans -10..10 on both axes, and the
+        // gradient runs down its left edge (x is inert for a vertical ramp)
+        draw.drawRect([{ x: 2, y: 2, size: 2, rotate: 90, style: { fillStyle: topToBottom } }], 1);
+        render(ctx);
+
+        expect(gradients[0].axis).toEqual([-10, -10, -10, 10]);
+    });
+
+    it("spans a path's bounding box", () => {
+        const { draw, render } = setup();
+        const { ctx, gradients } = makeGradientRecordingCtx();
+
+        draw.drawPath(
+            [
+                {
+                    points: [
+                        { x: 1, y: 1 },
+                        { x: 3, y: 1 },
+                        { x: 3, y: 2 },
+                    ],
+                    closed: true,
+                    style: { fillStyle: topToBottom },
+                },
+            ],
+            1,
+        );
+        render(ctx);
+
+        // bounds (1,1)-(3,2) -> screen (15,15)-(35,25)
+        expect(gradients[0].axis).toEqual([15, 15, 15, 25]);
+    });
+
+    it("leaves a plain color string untouched", () => {
+        const { draw, render } = setup();
+        const { ctx, gradients, fills } = makeGradientRecordingCtx();
+
+        draw.drawRect([{ x: 2, y: 2, style: { fillStyle: "#0f0" } }], 1);
+        render(ctx);
+
+        expect(gradients).toHaveLength(0);
+        expect(fills).toEqual(["#0f0"]);
+    });
+});

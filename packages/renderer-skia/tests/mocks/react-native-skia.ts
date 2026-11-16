@@ -1,0 +1,231 @@
+/**
+ * Minimal runtime mock of `@shopify/react-native-skia` for node tests.
+ * Wired in via `resolve.alias` in vitest.config.mts — the real module
+ * requires native bindings that don't exist in a node environment.
+ */
+
+export const PaintStyle = { Fill: 0, Stroke: 1 };
+
+export interface MockPaint {
+    style: number;
+    color: unknown;
+    strokeWidth: number;
+    alphaf: number;
+    pathEffect: unknown;
+    shader: unknown;
+    setAntiAlias(v: boolean): void;
+    setStyle(v: number): void;
+    setColor(c: unknown): void;
+    setStrokeWidth(w: number): void;
+    setAlphaf(a: number): void;
+    setPathEffect(e: unknown): void;
+    setShader(s: unknown): void;
+}
+
+const makePaint = (): MockPaint => {
+    const paint: MockPaint = {
+        style: 0,
+        color: undefined,
+        strokeWidth: 1,
+        alphaf: 1,
+        pathEffect: null,
+        shader: null,
+        setAntiAlias() {},
+        setStyle(v: number) {
+            paint.style = v;
+        },
+        setColor(c: unknown) {
+            paint.color = c;
+        },
+        setStrokeWidth(w: number) {
+            paint.strokeWidth = w;
+        },
+        setAlphaf(a: number) {
+            paint.alphaf = a;
+        },
+        setPathEffect(e: unknown) {
+            paint.pathEffect = e;
+        },
+        setShader(shader: unknown) {
+            paint.shader = shader;
+        },
+    };
+    return paint;
+};
+
+/** Every gradient handed to Skia.Shader.MakeLinearGradient. */
+export const gradientCalls: Array<{
+    start: { x: number; y: number };
+    end: { x: number; y: number };
+    colors: unknown[];
+    pos: number[] | null;
+}> = [];
+
+/** Every string passed to Skia.Color, for asserting parse/cache behavior. */
+export const colorParseCalls: string[] = [];
+
+export interface MockOp {
+    op: string;
+    [key: string]: unknown;
+}
+
+export interface MockPicture {
+    __picture: true;
+    bounds: unknown;
+    ops: MockOp[];
+}
+
+/**
+ * Op-recording canvas used by the PictureRecorder mock (and reusable from
+ * tests as a frame canvas). Paint state is captured at call time, mirroring
+ * Skia's snapshot-on-record semantics.
+ */
+export function makeRecordingCanvas() {
+    const ops: MockOp[] = [];
+    const canvas = {
+        save: () => ops.length,
+        restoreToCount() {},
+        rotate(deg: number, px: number, py: number) {
+            ops.push({ op: "rotate", deg, px, py });
+        },
+        translate(x: number, y: number) {
+            ops.push({ op: "translate", x, y });
+        },
+        scale(sx: number, sy: number) {
+            ops.push({ op: "scale", sx, sy });
+        },
+        drawRect(rect: unknown, paint: MockPaint) {
+            ops.push({
+                op: "rect",
+                rect,
+                style: paint.style,
+                color: paint.color,
+                strokeWidth: paint.strokeWidth,
+                pathEffect: paint.pathEffect,
+                shader: paint.shader,
+            });
+        },
+        drawRRect(rrect: unknown, paint: MockPaint) {
+            ops.push({ op: "rrect", rrect, style: paint.style, color: paint.color, pathEffect: paint.pathEffect });
+        },
+        drawCircle(cx: number, cy: number, r: number, paint: MockPaint) {
+            ops.push({
+                op: "circle",
+                cx,
+                cy,
+                r,
+                style: paint.style,
+                strokeWidth: paint.strokeWidth,
+                pathEffect: paint.pathEffect,
+                shader: paint.shader,
+            });
+        },
+        drawLine(x1: number, y1: number, x2: number, y2: number, paint: MockPaint) {
+            ops.push({
+                op: "line",
+                x1,
+                y1,
+                x2,
+                y2,
+                strokeWidth: paint.strokeWidth,
+                color: paint.color,
+                pathEffect: paint.pathEffect,
+            });
+        },
+        drawText(text: string, x: number, y: number, paint: MockPaint, font: { size: number }) {
+            ops.push({ op: "text", text, x, y, fontSize: font.size, color: paint.color });
+        },
+        drawPath(_path: unknown, paint: MockPaint) {
+            ops.push({ op: "path", style: paint.style, strokeWidth: paint.strokeWidth });
+        },
+        drawImageRect(img: unknown, src: unknown, dest: unknown, paint: MockPaint) {
+            ops.push({ op: "image", img, src, dest, alpha: paint.alphaf });
+        },
+        drawPicture(picture: MockPicture) {
+            ops.push({ op: "picture", picture });
+        },
+    };
+    return { canvas, ops };
+}
+
+export const TileMode = { Clamp: 0, Repeat: 1, Mirror: 2, Decal: 3 };
+
+/** Every picture recorder created, for asserting when a scene is (re-)recorded. */
+export const pictureRecorders: unknown[] = [];
+
+export const Skia = {
+    Paint: makePaint,
+    Shader: {
+        MakeLinearGradient: (
+            start: { x: number; y: number },
+            end: { x: number; y: number },
+            colors: unknown[],
+            pos: number[] | null,
+        ) => {
+            gradientCalls.push({ start, end, colors, pos });
+            return { __gradient: gradientCalls.length - 1 };
+        },
+    },
+    Color: (value: string) => {
+        colorParseCalls.push(value);
+        return { parsed: value };
+    },
+    PathEffect: {
+        MakeDash: (intervals: number[], phase: number) => ({ __dash: intervals, phase }),
+    },
+    XYWHRect: (x: number, y: number, width: number, height: number) => ({ x, y, width, height }),
+    RRectXY: (rect: unknown, rx: number, ry: number) => ({ rect, rx, ry }),
+    Path: {
+        Make: () => {
+            const segments: Array<[string, number, number]> = [];
+            return {
+                segments,
+                moveTo(x: number, y: number) {
+                    segments.push(["M", x, y]);
+                },
+                lineTo(x: number, y: number) {
+                    segments.push(["L", x, y]);
+                },
+            };
+        },
+    },
+    PictureRecorder: () => {
+        let recording: { canvas: unknown; ops: MockOp[] } | null = null;
+        let bounds: unknown;
+        const recorder = {
+            beginRecording(cullRect?: unknown) {
+                recording = makeRecordingCanvas();
+                bounds = cullRect;
+                return recording.canvas;
+            },
+            finishRecordingAsPicture(): MockPicture {
+                return { __picture: true, bounds, ops: recording?.ops ?? [] };
+            },
+        };
+        pictureRecorders.push(recorder);
+        return recorder;
+    },
+};
+
+export interface MockFont {
+    size: number;
+    setSize(s: number): void;
+    measureText(text: string): { x: number; y: number; width: number; height: number };
+    getMetrics(): { ascent: number; descent: number };
+}
+
+/** Every style passed to matchFont, for asserting font cache behavior. */
+export const matchFontCalls: Array<{ fontFamily: string; fontSize: number; fontWeight?: string }> = [];
+
+export const matchFont = (style: { fontFamily: string; fontSize: number; fontWeight?: string }): MockFont => {
+    matchFontCalls.push(style);
+    const font: MockFont = {
+        size: style.fontSize,
+        setSize(s: number) {
+            font.size = s;
+        },
+        measureText: (text: string) => ({ x: 0, y: 0, width: text.length * 6, height: 10 }),
+        getMetrics: () => ({ ascent: -8, descent: 2 }),
+    };
+    return font;
+};

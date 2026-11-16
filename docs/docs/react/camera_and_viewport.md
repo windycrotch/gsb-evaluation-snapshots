@@ -1,0 +1,427 @@
+---
+sidebar_position: 4
+---
+
+# Camera & Viewport
+
+The engine uses a virtual camera system to navigate the infinite grid. Control the camera through the engine handle.
+
+## Camera Concepts
+
+-   **Center-Based**: The camera is defined by the world coordinate at the exact center of the viewport.
+-   **Infinite Grid**: You can pan infinitely in any direction.
+-   **Zoom**: Controls how many pixels a single grid unit occupies (`scale`).
+
+## Initial Position
+
+Set the initial camera position with the `center` prop:
+
+```tsx
+<CanvasTileEngine
+    engine={engine}
+    renderer={new RendererCanvas()}
+    config={config}
+    center={{ x: 10, y: 10 }} // Start centered at (10, 10)
+>
+    {/* children */}
+</CanvasTileEngine>
+```
+
+## Programmatic Control
+
+Access camera methods through the engine handle when `engine.isReady` is `true`.
+
+### Interrupting an Animation
+
+`setCenter` and `goCenter` replace the active move while a concurrent zoom continues. `setScale`, `zoomIn`, `zoomOut`, and `goScale` replace the active zoom while a concurrent move continues. `fitBounds` replaces both. These rules also apply to instant commands and reduced motion, including when a setter keeps the current value unchanged. Interrupted `goCenter` and `goScale` runs do not call their `onComplete` callback. A command issued from `onCoordsChange` or `onZoom` also interrupts the old animation safely.
+
+The same rules apply to the React Native engine handle. See [the JavaScript camera guide](../js/camera_and_viewport.md#interrupting-an-animation) for details.
+
+### Moving the Camera
+
+#### `goCenter(x, y, duration?)`
+
+Smoothly animates the camera to a new position.
+
+```tsx
+function MapWithNavigation() {
+    const engine = useCanvasTileEngine();
+
+    const goToBase = () => {
+        if (engine.isReady) {
+            engine.goCenter(0, 0, 1000); // Pan to origin over 1 second
+        }
+    };
+
+    const goToMarker = () => {
+        if (engine.isReady) {
+            engine.goCenter(50, 50, 500); // Pan to (50, 50) over 500ms
+        }
+    };
+
+    return (
+        <div>
+            <button onClick={goToBase}>Go to Base</button>
+            <button onClick={goToMarker}>Go to Marker</button>
+
+            <CanvasTileEngine engine={engine} renderer={new RendererCanvas()} config={config}>
+                {/* children */}
+            </CanvasTileEngine>
+        </div>
+    );
+}
+```
+
+#### `setCenter(center)`
+
+Instantly jumps to a position without animation.
+
+```tsx
+const jumpToPosition = (x: number, y: number) => {
+    if (engine.isReady) {
+        engine.setCenter({ x, y });
+    }
+};
+```
+
+#### `getCenter()`
+
+Returns the current center coordinates of the view.
+
+```tsx
+const logPosition = () => {
+    if (engine.isReady) {
+        const center = engine.getCenter();
+        console.log("Current position:", center); // { x: 5.5, y: 10.2 }
+    }
+};
+```
+
+:::note Renamed APIs
+:::
+
+#### `getVisibleBounds()`
+
+Returns the world coordinate bounds of the visible viewport. Useful for knowing which cells are on screen.
+
+```tsx
+const placeRandomMine = () => {
+    if (engine.isReady) {
+        const bounds = engine.getVisibleBounds();
+        // { minX: 0, maxX: 10, minY: 0, maxY: 10 }
+
+        const x = bounds.minX + Math.floor(Math.random() * (bounds.maxX - bounds.minX));
+        const y = bounds.minY + Math.floor(Math.random() * (bounds.maxY - bounds.minY));
+
+        console.log("Random position:", x, y);
+    }
+};
+```
+
+| Property | Description                      |
+| :------- | :------------------------------- |
+| `minX`   | Left edge of viewport (floored)  |
+| `maxX`   | Right edge of viewport (ceiled)  |
+| `minY`   | Top edge of viewport (floored)   |
+| `maxY`   | Bottom edge of viewport (ceiled) |
+
+### Tracking Camera Position
+
+Use `onCoordsChange` to track camera movement:
+
+```tsx
+function MapWithCoordinateDisplay() {
+    const engine = useCanvasTileEngine();
+    const [center, setCenter] = useState({ x: 0, y: 0 });
+
+    return (
+        <div>
+            <div>
+                Position: ({center.x.toFixed(1)}, {center.y.toFixed(1)})
+            </div>
+
+            <CanvasTileEngine engine={engine} renderer={new RendererCanvas()} config={config} onCoordsChange={setCenter}>
+                {/* children */}
+            </CanvasTileEngine>
+        </div>
+    );
+}
+```
+
+## Zooming
+
+Configure zoom limits in the config:
+
+```tsx
+const config = {
+    scale: 50, // Initial zoom (pixels per grid unit)
+    minScale: 10, // Minimum zoom out
+    maxScale: 200, // Maximum zoom in
+    eventHandlers: {
+        zoom: true, // Enable mouse wheel zoom
+    },
+};
+```
+
+### `zoomIn(factor?)`
+
+Zooms in by a given factor (default: 1.5), centered on the viewport.
+
+```tsx
+const handleZoomIn = () => {
+    engine.zoomIn(); // Zoom in by 1.5x
+    engine.zoomIn(2); // Zoom in by 2x
+};
+```
+
+### `zoomOut(factor?)`
+
+Zooms out by a given factor (default: 1.5), centered on the viewport.
+
+```tsx
+const handleZoomOut = () => {
+    engine.zoomOut(); // Zoom out by 1.5x
+    engine.zoomOut(2); // Zoom out by 2x
+};
+```
+
+### `getScale()`
+
+Returns the current zoom scale.
+
+```tsx
+const logScale = () => {
+    const scale = engine.getScale();
+    console.log("Current scale:", scale); // 50
+};
+```
+
+### `setScale(scale)`
+
+Sets the zoom level directly. The value is clamped to `minScale` and `maxScale` bounds, and the change is anchored at the viewport center (matching `goScale`/`zoomIn`/`zoomOut`).
+
+| Parameter | Type     | Description                                    |
+| :-------- | :------- | :--------------------------------------------- |
+| `scale`   | `number` | The desired zoom level (pixels per grid unit). |
+
+```tsx
+const setZoom = (scale: number) => {
+    if (engine.isReady) {
+        engine.setScale(scale);
+    }
+};
+```
+
+### `goScale(scale, duration?, onComplete?)`
+
+Smoothly animates the zoom level to a target value, like `goCenter` does for position. The zoom is anchored at the viewport center (matching `zoomIn`/`zoomOut`), and the target is clamped to `minScale` and `maxScale` bounds.
+
+| Parameter    | Type       | Default      | Description                                    |
+| :----------- | :--------- | :----------- | :--------------------------------------------- |
+| `scale`      | `number`   | **Required** | The desired zoom level (pixels per grid unit). |
+| `duration`   | `number`   | `500`        | Animation duration in ms. `0` = instant.       |
+| `onComplete` | `function` | -            | Called when the animation finishes.            |
+
+```tsx
+const zoomToDetail = () => {
+    // Smoothly zoom to 100 pixels per grid unit over 1 second
+    engine.goScale(100, 1000);
+
+    // Combine with goCenter for a fly-to effect
+    engine.goCenter(15, 20, 1000);
+};
+```
+
+### `setScaleLimits(minScale, maxScale)`
+
+Updates the `minScale` and `maxScale` limits at runtime. All zooming (gestures, `setScale`, `goScale`, `zoomIn`, `zoomOut`) clamps to the new range, and the current scale is clamped into it immediately (firing `onZoom` if it changes).
+
+| Parameter  | Type     | Description                                 |
+| :--------- | :------- | :------------------------------------------ |
+| `minScale` | `number` | New minimum zoom level. Must be positive.   |
+| `maxScale` | `number` | New maximum zoom level. Must be >= minScale. |
+
+```tsx
+const allowDeepZoom = () => {
+    // Allow zooming between 10 and 200 pixels per grid unit
+    engine.setScaleLimits(10, 200);
+};
+```
+
+### `fitBounds(bounds, options?)`
+
+Fits a world-space rectangle into the viewport: centers the view on the rectangle and picks the largest scale that keeps the whole (padded) area visible, clamped to the scale limits. Animated by default. Not related to `setBounds`, which restricts camera movement.
+
+| Parameter | Type | Description |
+| :-------- | :--- | :---------- |
+| `bounds` | `{ minX, maxX, minY, maxY }` | Rectangle to fit. Every edge must be finite. |
+| `options.padding` | `number` | Extra world-unit margin on every side; scales with the content. Default `0`. |
+| `options.paddingPx` | `number` | Screen-pixel margin kept free on every side, independent of the content's world size. Wins over `padding`. |
+| `options.durationMs` | `number` | Animation duration in ms. Default `500`; `0` = instant. |
+| `options.onComplete` | `function` | Called when the fit completes. |
+
+`padding` keeps the margin proportional to the content; `paddingPx` keeps it a fixed number of screen pixels regardless of how large the fitted area is — the right choice for fit-to-selection UI (same world/px pair as `hitTest`'s `padding`/`paddingPx`).
+
+Returns `{ scale, fitted }` — the scale the fit targets after clamping, and whether the whole rectangle actually ends up visible. `fitted` is `false` only when `minScale` floors the fit, so the view shows less than you asked for; clamping at `maxScale` still shows all of it. Before mount the handle has no engine to fit, so it returns `undefined`.
+
+`bounds` is an area, not a range of cell indices. Cell `k` spans `[k-0.5, k+0.5]`, so a board of cells `0..31` covers `-0.5..31.5` and centers on `15.5`. Passing `0..32` fits the same 32-unit width but centers the view on `16`, half a cell off.
+
+```tsx
+const showWholeBoard = () => {
+    // Cells 0..31 cover -0.5..31.5
+    engine.fitBounds({ minX: -0.5, maxX: 31.5, minY: -0.5, maxY: 31.5 }, { padding: 1 });
+};
+
+const zoomToSelection = (selection: { minX: number; maxX: number; minY: number; maxY: number }) => {
+    engine.fitBounds(selection, { paddingPx: 24, durationMs: 300 });
+};
+```
+
+### `setAccessibility(patch)` / `onAccessibilityChange(listener)`
+
+Update the accessible name, description, role or tab-stop behavior at runtime. Merged, not replaced. `onAccessibilityChange` subscribes to those updates and returns an unsubscribe function; the DOM renderers and the React Native binding already listen internally, so you rarely need it.
+
+```tsx
+engine.setAccessibility({ label: `Floor ${floor} seating chart` });
+```
+
+
+### `setReducedMotion(value)` / `getReducedMotion()`
+
+Replace the reduced-motion preference, and read the value in effect.
+
+| Parameter | Type | Description |
+| :-------- | :--- | :---------- |
+| `value` | `boolean \| "auto"` | `"auto"` (default) follows the platform; `true`/`false` are explicit choices the platform cannot override. |
+
+```tsx
+const engine = useCanvasTileEngine();
+
+// Respect the OS setting — already the default, shown for clarity
+engine.setReducedMotion("auto");
+
+const instant = engine.getReducedMotion();
+```
+
+When in effect, `goCenter`, `goScale`, `fitBounds` and `resize` land instantly, overriding any `durationMs` you pass. `SpriteAnimator` and your own drawing are out of scope.
+
+The platform signal is wired for you: `prefers-reduced-motion` on the web, `AccessibilityInfo` on React Native. `getReducedMotion()` returns `false` before mount, where there is no engine and no signal yet, so it is only meaningful once `engine.isReady`.
+
+
+### Example: Zoom Controls
+
+```tsx
+function MapWithZoomControls() {
+    const engine = useCanvasTileEngine();
+
+    return (
+        <div>
+            <div>
+                <button onClick={() => engine.zoomIn()}>+</button>
+                <button onClick={() => engine.zoomOut()}>-</button>
+            </div>
+
+            <CanvasTileEngine engine={engine} renderer={new RendererCanvas()} config={config}>
+                {/* children */}
+            </CanvasTileEngine>
+        </div>
+    );
+}
+```
+
+## Viewport & Resizing
+
+### Auto-Resizing
+
+Enable automatic resize handling:
+
+```tsx
+const config = {
+    // ...
+    eventHandlers: {
+        resize: true,
+    },
+};
+```
+
+### Manual Resizing
+
+#### `resize(width, height, duration?)`
+
+Manually trigger a resize with optional animation:
+
+```tsx
+const changeResolution = (width: number, height: number) => {
+    if (engine.isReady) {
+        engine.resize(width, height, 500); // Animate over 500ms
+    }
+};
+```
+
+#### `getSize()`
+
+Get the current canvas dimensions:
+
+```tsx
+const logSize = () => {
+    if (engine.isReady) {
+        const size = engine.getSize();
+        console.log("Canvas size:", size); // { width: 1920, height: 1080 }
+    }
+};
+```
+
+### Handling Resize Events
+
+```tsx
+<CanvasTileEngine
+    engine={engine}
+    renderer={new RendererCanvas()}
+    config={config}
+    onResize={() => {
+        const size = engine.getSize();
+        console.log("Resized to:", size);
+    }}
+>
+    {/* children */}
+</CanvasTileEngine>
+```
+
+## Camera Bounds
+
+Restrict camera movement to a specific area:
+
+### In Configuration
+
+```tsx
+const config = {
+    // ...
+    bounds: {
+        minX: -100,
+        maxX: 100,
+        minY: -100,
+        maxY: 100,
+    },
+};
+```
+
+### Dynamically with `setBounds`
+
+```tsx
+const restrictToArea = () => {
+    if (engine.isReady) {
+        engine.setBounds({ minX: 0, maxX: 500, minY: 0, maxY: 500 });
+    }
+};
+
+const removeBounds = () => {
+    if (engine.isReady) {
+        engine.setBounds({
+            minX: -Infinity,
+            maxX: Infinity,
+            minY: -Infinity,
+            maxY: Infinity,
+        });
+    }
+};
+```

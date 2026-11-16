@@ -1,0 +1,61 @@
+version: 2
+updates:
+    # GitHub Actions
+    - package-ecosystem: "github-actions"
+      directory: "/"
+      schedule:
+          interval: "monthly"
+      commit-message:
+          prefix: "chore(deps)"
+      groups:
+          actions-minor-patch:
+              patterns:
+                  - "*"
+              update-types:
+                  - "minor"
+                  - "patch"
+
+    # Root package.json
+    - package-ecosystem: "npm"
+      directory: "/"
+      schedule:
+          interval: "monthly"
+      commit-message:
+          prefix: "chore(deps)"
+      groups:
+          minor-patch:
+              patterns:
+                  - "*"
+              update-types:
+                  - "minor"
+                  - "patch"
+
+    # Core package
+    - package-ecosystem: "npm"
+      directory: "/packages/core"
+      schedule:
+          interval: "monthly"
+      commit-message:
+          prefix: "chore(core)"
+      groups:
+          minor-patch:
+              patterns:
+                  - "*"
+              update-types:
+                  - "minor"
+                  - "patch"
+
+    # Docs
+    - package-ecosystem: "npm"
+      directory: "/docs"
+      schedule:
+          interval: "monthly"
+      commit-message:
+          prefix: "chore(docs)"
+      groups:
+          minor-patch:
+              patterns:
+                  - "*"
+              update-types:
+                  - "minor"
+                  - "patch"

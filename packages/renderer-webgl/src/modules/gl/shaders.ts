@@ -1,0 +1,269 @@
+/**
+ * GLSL shader sources for the WebGL renderer.
+ *
+ * All vertex shaders work in CSS-pixel space: positions are supplied in logical
+ * pixels (top-left origin, y-down) and projected to clip space using a
+ * `u_resolution` uniform. Device pixel ratio is handled by `gl.viewport`, so the
+ * shaders themselves never need to know about it.
+ * @internal
+ */
+
+// ─── Shape program (anti-aliased rounded boxes / circles) ───
+
+/**
+ * Gradient fills ride along every colored program as two extra per-vertex
+ * floats plus one shared ramp texture.
+ *
+ * `a_gradT` is the gradient parameter at that vertex, computed on the CPU.
+ * That is exact rather than approximate: the parameter is an affine function
+ * of position, so interpolating it across the triangles reproduces it exactly,
+ * however many color stops the ramp has and whatever angle the axis runs at.
+ * The fragment shader then samples the ramp, so the stop count never touches
+ * the vertex count.
+ *
+ * `a_gradRow` selects the ramp row, or is negative for a solid fill — which is
+ * every vertex of every shape that never asked for a gradient.
+ */
+export const SHAPE_VERTEX_SHADER = `
+attribute vec2 a_position;
+attribute vec2 a_local;
+attribute vec2 a_halfSize;
+attribute vec4 a_radius;
+attribute vec4 a_color;
+attribute float a_gradT;
+attribute float a_gradRow;
+
+uniform vec2 u_resolution;
+
+varying vec2 v_local;
+varying vec2 v_halfSize;
+varying vec4 v_radius;
+varying vec4 v_color;
+varying float v_gradT;
+varying float v_gradRow;
+
+void main() {
+    vec2 clip = (a_position / u_resolution) * 2.0 - 1.0;
+    gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0);
+    v_local = a_local;
+    v_halfSize = a_halfSize;
+    v_radius = a_radius;
+    v_color = a_color;
+    v_gradT = a_gradT;
+    v_gradRow = a_gradRow;
+}
+`;
+
+/**
+ * Signed-distance rounded box with per-corner radii. With derivatives available
+ * we anti-alias the edge across one pixel; this single shape covers sharp rects,
+ * rounded rects and circles (circle = box where radius == halfSize).
+ *
+ * Radius packing (local space is y-down): x = bottom-right, y = top-right,
+ * z = bottom-left, w = top-left.
+ */
+const ROUND_BOX_DISTANCE = `
+float cornerDistance(vec2 fromCorner, float radius, float dist) {
+    if (fromCorner.x < radius && fromCorner.y < radius) {
+        return max(dist, length(fromCorner - vec2(radius)) - radius);
+    }
+    return dist;
+}
+
+float sdRoundBox(vec2 p, vec2 b, vec4 r) {
+    vec2 q = abs(p) - b;
+    float dist = min(max(q.x, q.y), 0.0) + length(max(q, 0.0));
+    // Test each corner's actual arc region. A valid asymmetric radius can
+    // cross either center axis, so choosing by quadrant would clip the arc.
+    dist = cornerDistance(b - p, r.x, dist);
+    dist = cornerDistance(vec2(b.x - p.x, b.y + p.y), r.y, dist);
+    dist = cornerDistance(vec2(b.x + p.x, b.y - p.y), r.z, dist);
+    return cornerDistance(b + p, r.w, dist);
+}
+`;
+
+const SHAPE_FRAGMENT_BODY = `
+precision mediump float;
+
+varying vec2 v_local;
+varying vec2 v_halfSize;
+varying vec4 v_radius;
+varying vec4 v_color;
+varying float v_gradT;
+varying float v_gradRow;
+
+uniform sampler2D u_ramp;
+uniform float u_rampRows;
+
+${ROUND_BOX_DISTANCE}
+
+void main() {
+    float dist = sdRoundBox(v_local, v_halfSize, v_radius);
+    float alpha = EDGE_ALPHA;
+    if (alpha <= 0.0) discard;
+    vec4 base = v_color;
+    if (v_gradRow >= 0.0) {
+        base = texture2D(u_ramp, vec2(clamp(v_gradT, 0.0, 1.0), (v_gradRow + 0.5) / u_rampRows));
+    }
+    gl_FragColor = vec4(base.rgb, base.a * alpha);
+}
+`;
+
+const SHAPE_FRAGMENT_AA_BODY = SHAPE_FRAGMENT_BODY.replace(
+    "EDGE_ALPHA",
+    "1.0 - smoothstep(-fwidth(dist), fwidth(dist), dist)",
+);
+
+/**
+ * Fragment shader variant that anti-aliases using screen-space derivatives, for
+ * WebGL1 contexts. Some drivers reject the `GL_OES_standard_derivatives`
+ * extension directive outright on WebGL2 (it's meant to be superseded there, not
+ * polyfilled onto GLSL ES 1.00), so this path is WebGL1-only; WebGL2 uses the
+ * dedicated `#version 300 es` variant below instead.
+ */
+export function shapeFragmentShaderAA(): string {
+    return "#extension GL_OES_standard_derivatives : enable\n" + SHAPE_FRAGMENT_AA_BODY;
+}
+
+/** Fallback fragment shader (hard edge) when derivatives are unsupported. */
+export const SHAPE_FRAGMENT_SHADER_HARD = SHAPE_FRAGMENT_BODY.replace("EDGE_ALPHA", "dist < 0.0 ? 1.0 : 0.0");
+
+/**
+ * GLSL ES 3.00 vertex shader for the shape program, used only on WebGL2
+ * contexts paired with {@link SHAPE_FRAGMENT_SHADER_AA_300}. `dFdx`/`dFdy`/
+ * `fwidth` are core in GLSL ES 3.00, so this avoids the extension mechanism
+ * entirely instead of depending on driver support for a WebGL1-era extension.
+ * `#version 300 es` must be the very first line of the source.
+ */
+export const SHAPE_VERTEX_SHADER_300 = `#version 300 es
+in vec2 a_position;
+in vec2 a_local;
+in vec2 a_halfSize;
+in vec4 a_radius;
+in vec4 a_color;
+in float a_gradT;
+in float a_gradRow;
+
+uniform vec2 u_resolution;
+
+out vec2 v_local;
+out vec2 v_halfSize;
+out vec4 v_radius;
+out vec4 v_color;
+out float v_gradT;
+out float v_gradRow;
+
+void main() {
+    vec2 clip = (a_position / u_resolution) * 2.0 - 1.0;
+    gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0);
+    v_local = a_local;
+    v_halfSize = a_halfSize;
+    v_radius = a_radius;
+    v_color = a_color;
+    v_gradT = a_gradT;
+    v_gradRow = a_gradRow;
+}
+`;
+
+/** GLSL ES 3.00 counterpart of {@link SHAPE_FRAGMENT_AA_BODY}; see {@link SHAPE_VERTEX_SHADER_300}. */
+export const SHAPE_FRAGMENT_SHADER_AA_300 = `#version 300 es
+precision mediump float;
+
+in vec2 v_local;
+in vec2 v_halfSize;
+in vec4 v_radius;
+in vec4 v_color;
+in float v_gradT;
+in float v_gradRow;
+
+uniform sampler2D u_ramp;
+uniform float u_rampRows;
+
+out vec4 outColor;
+
+${ROUND_BOX_DISTANCE}
+
+void main() {
+    float dist = sdRoundBox(v_local, v_halfSize, v_radius);
+    float alpha = 1.0 - smoothstep(-fwidth(dist), fwidth(dist), dist);
+    if (alpha <= 0.0) discard;
+    vec4 base = v_color;
+    if (v_gradRow >= 0.0) {
+        base = texture(u_ramp, vec2(clamp(v_gradT, 0.0, 1.0), (v_gradRow + 0.5) / u_rampRows));
+    }
+    outColor = vec4(base.rgb, base.a * alpha);
+}
+`;
+
+// ─── Line program (solid colored thick lines) ───
+
+export const LINE_VERTEX_SHADER = `
+attribute vec2 a_position;
+attribute vec4 a_color;
+attribute float a_gradT;
+attribute float a_gradRow;
+
+uniform vec2 u_resolution;
+
+varying vec4 v_color;
+varying float v_gradT;
+varying float v_gradRow;
+
+void main() {
+    vec2 clip = (a_position / u_resolution) * 2.0 - 1.0;
+    gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0);
+    v_color = a_color;
+    v_gradT = a_gradT;
+    v_gradRow = a_gradRow;
+}
+`;
+
+/**
+ * Strokes are always solid, but path fills are covered by a quad drawn through
+ * this same program, so it carries the ramp too.
+ */
+export const LINE_FRAGMENT_SHADER = `
+precision mediump float;
+varying vec4 v_color;
+varying float v_gradT;
+varying float v_gradRow;
+
+uniform sampler2D u_ramp;
+uniform float u_rampRows;
+
+void main() {
+    if (v_gradRow >= 0.0) {
+        gl_FragColor = texture2D(u_ramp, vec2(clamp(v_gradT, 0.0, 1.0), (v_gradRow + 0.5) / u_rampRows));
+    } else {
+        gl_FragColor = v_color;
+    }
+}
+`;
+
+// ─── Texture program (images) ───
+
+export const TEXTURE_VERTEX_SHADER = `
+attribute vec2 a_position;
+attribute vec2 a_texcoord;
+
+uniform vec2 u_resolution;
+
+varying vec2 v_texcoord;
+
+void main() {
+    vec2 clip = (a_position / u_resolution) * 2.0 - 1.0;
+    gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0);
+    v_texcoord = a_texcoord;
+}
+`;
+
+export const TEXTURE_FRAGMENT_SHADER = `
+precision mediump float;
+uniform sampler2D u_texture;
+uniform float u_alpha;
+varying vec2 v_texcoord;
+void main() {
+    vec4 color = texture2D(u_texture, v_texcoord);
+    gl_FragColor = vec4(color.rgb, color.a * u_alpha);
+}
+`;

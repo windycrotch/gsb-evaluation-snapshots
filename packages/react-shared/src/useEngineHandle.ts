@@ -1,0 +1,642 @@
+import { useRef, useState } from "react";
+import { normalizeConfig } from "@canvas-tile-engine/core";
+import type {
+    DrawOptions,
+    DrawItems,
+    CanvasTileEngine as CanvasTileEngineCore,
+    CanvasTileEngineConfig,
+    Coords,
+    Bounds,
+    EventHandlers,
+    AccessibilityConfig,
+    FitBoundsOptions,
+    FitBoundsResult,
+    DrawHandle,
+    HitResult,
+    HitTestOptions,
+    HitTestRectOptions,
+    ImageItem,
+    Text,
+    Circle,
+    Line,
+    Rect,
+    LineStyle,
+    DrawTransform,
+    PathItem,
+    RectDrawOptions,
+    CircleDrawOptions,
+    TextDrawOptions,
+    LineDrawOptions,
+    PathDrawOptions,
+    ImageDrawOptions,
+    StaticDrawOptions,
+    ReducedMotionSetting,
+} from "@canvas-tile-engine/core";
+
+/** Dummy handle returned when engine is not ready */
+const DUMMY_DRAW_HANDLE: DrawHandle = { layer: -1, id: Symbol("dummy") };
+
+/**
+ * Warn (dev only) and return the dummy handle when a draw method is called
+ * before the engine mounts. Without the warning these calls are silent
+ * no-ops, which makes remount/ordering bugs invisible.
+ */
+function droppedDraw(method: string): DrawHandle {
+    if (typeof process !== "undefined" && process.env.NODE_ENV !== "production") {
+        console.warn(
+            `Canvas Tile Engine: ${method}() was called before the engine mounted, so the call was dropped. ` +
+                `Make imperative draw calls from an effect that returns early while engine.instance is null ` +
+                `and lists engine.instance in its deps, so it re-runs when the engine remounts. ` +
+                `That effect can run twice as the engine attaches: pass an id (same id replaces) ` +
+                `or remove the returned handle in the effect's cleanup.`,
+        );
+    }
+    return DUMMY_DRAW_HANDLE;
+}
+
+const isDev = () => typeof process !== "undefined" && process.env.NODE_ENV !== "production";
+
+/**
+ * Dev only: the live id-less registrations made through a handle, per engine,
+ * by what was drawn (the items, or a grid's arguments) and layer. The same key
+ * registered twice on one layer without an id, and without removing the first,
+ * is almost always an imperative effect that ran twice (it can as the engine
+ * attaches), so everything paints and hit-tests twice. Reported once per engine.
+ */
+type UnnamedDraws = {
+    byKey: Map<unknown, Map<number, symbol>>;
+    byHandle: Map<symbol, [unknown, number]>;
+    warned: boolean;
+};
+const unnamedDraws = new WeakMap<object, UnnamedDraws>();
+
+/** Forward a draw to the engine (or drop it before mount), tracking id-less registrations in dev. */
+function trackDraw<E extends object>(
+    engine: E | null,
+    method: string,
+    key: unknown,
+    options: { id?: string } | undefined,
+    draw: (engine: E) => DrawHandle,
+): DrawHandle {
+    if (!engine) {
+        return droppedDraw(method);
+    }
+    const handle = draw(engine);
+    if (options?.id !== undefined || !isDev()) {
+        return handle;
+    }
+    let draws = unnamedDraws.get(engine);
+    if (!draws) {
+        draws = { byKey: new Map(), byHandle: new Map(), warned: false };
+        unnamedDraws.set(engine, draws);
+    }
+    const layers = draws.byKey.get(key) ?? new Map<number, symbol>();
+    draws.byKey.set(key, layers);
+    if (layers.has(handle.layer) && !draws.warned) {
+        draws.warned = true;
+        console.warn(
+            `Canvas Tile Engine: ${method}() registered the same content on layer ${handle.layer} twice without an id, ` +
+                `so it now paints and hit-tests twice. An imperative effect can run twice as the engine attaches: ` +
+                `pass an id (same id replaces) or remove the returned handle in the effect's cleanup.`,
+        );
+    }
+    layers.set(handle.layer, handle.id);
+    draws.byHandle.set(handle.id, [key, handle.layer]);
+    return handle;
+}
+
+/** Forget tracked registrations removed through the handle: one handle, one layer, or all. */
+function untrackDraws(engine: object | null, which: { handle: DrawHandle } | { layer: number } | "all"): void {
+    const draws = engine && unnamedDraws.get(engine);
+    if (!draws) {
+        return;
+    }
+    for (const [id, [key, layer]] of draws.byHandle) {
+        const matches = which === "all" || ("handle" in which ? which.handle.id === id : which.layer === layer);
+        if (matches) {
+            draws.byHandle.delete(id);
+            const layers = draws.byKey.get(key);
+            if (layers?.get(layer) === id) {
+                layers.delete(layer);
+            }
+        }
+    }
+}
+
+/**
+ * Config snapshot `getConfig` returns while the engine is not ready.
+ *
+ * Built with the engine's own normalization so the two can never disagree:
+ * every field is exactly what `Config` resolves for the same input, instead of
+ * a hand-maintained copy that drifted (it claimed drag and pointer zoom were
+ * on by default, and the debug event logs off). The placeholder input is
+ * `scale: 1` at a zero size — the same size the pre-mount `getSize()` reports —
+ * so the scale-derived fields, `minScale` and `maxScale`, describe that
+ * placeholder and not the `config` the component has yet to mount with. Read
+ * those after `isReady` if they matter.
+ *
+ * Deeply frozen, like the snapshots `Config.get()` hands out: this object is
+ * shared by every pre-mount call, so a consumer mutating it would corrupt all
+ * the later ones.
+ */
+const DEFAULT_CONFIG = normalizeConfig({ scale: 1, size: { width: 0, height: 0 } });
+
+/**
+ * Platform-agnostic engine handle shared by the `useCanvasTileEngine` hooks.
+ * Generic over the mount (`TMount`), image (`TImage`), and custom draw
+ * context (`TCtx`) types; the platform packages pin these to their concrete
+ * types (`HTMLDivElement`/`HTMLImageElement`/`unknown` on the web,
+ * `SkiaMount`/`SkImage`/`SkCanvas` on React Native).
+ *
+ * All methods return default/dummy values when the engine is not ready,
+ * allowing safe usage without null checks.
+ */
+export interface EngineHandleBase<TMount, TImage, TCtx> {
+    /** @internal - Used by CanvasTileEngine component */
+    _setInstance: (engine: CanvasTileEngineCore<TMount, TImage> | null) => void;
+
+    /** Whether the engine is ready (mounted and initialized) */
+    readonly isReady: boolean;
+
+    /** The underlying engine instance (null until component mounts) */
+    readonly instance: CanvasTileEngineCore<TMount, TImage> | null;
+
+    /** Render a frame */
+    render(): void;
+
+    /** Request a frame, coalescing repeated requests before the next frame. No-op before mount. */
+    requestRender(): void;
+
+    /** Get the current view center in world coordinates */
+    getCenter(): Coords;
+
+    /** Get visible world coordinate bounds of the viewport */
+    getVisibleBounds(): {
+        minX: number;
+        maxX: number;
+        minY: number;
+        maxY: number;
+    };
+
+    /** Move the view center instantly */
+    setCenter(center: Coords): void;
+
+    /** Animate the view center to target coordinates */
+    goCenter(x: number, y: number, durationMs?: number, onComplete?: () => void): void;
+
+    /** Get current canvas size */
+    getSize(): { width: number; height: number };
+
+    /** Get current canvas scale */
+    getScale(): number;
+
+    /** Set the canvas scale directly, clamped to min/max bounds. */
+    setScale(newScale: number): void;
+
+    /** Animate the canvas scale to a target value, clamped to min/max bounds */
+    goScale(targetScale: number, durationMs?: number, onComplete?: () => void): void;
+
+    /** Zoom in by a factor (default: 1.5) */
+    zoomIn(factor?: number): void;
+
+    /** Zoom out by a factor (default: 1.5) */
+    zoomOut(factor?: number): void;
+
+    /** Update the min/max scale limits at runtime, clamping the current scale into the new range */
+    setScaleLimits(minScale: number, maxScale: number): void;
+
+    /**
+     * Update accessibility preferences at runtime: `label`, `description`,
+     * `role`, `focusable`, `reducedMotion`. Merged, not replaced, and the DOM
+     * renderers re-apply their attributes in response.
+     */
+    setAccessibility(patch: Partial<AccessibilityConfig>): void;
+
+    /**
+     * Replace the reduced-motion preference. `"auto"` (the default) follows
+     * the platform: `prefers-reduced-motion` on the web, `AccessibilityInfo`
+     * on React Native. When in effect, every engine-driven camera animation
+     * lands instantly — including one given an explicit `durationMs`.
+     */
+    setReducedMotion(value: ReducedMotionSetting): void;
+
+    /**
+     * Whether reduced motion is currently in effect, preference resolved
+     * against the platform signal. `false` before mount, where there is no
+     * engine and no signal yet.
+     */
+    getReducedMotion(): boolean;
+
+    /**
+     * Get the current normalized config snapshot (deeply frozen, never
+     * `undefined`). Before mount this is the engine's defaults for an
+     * *unconfigured* engine, resolved by the engine's own normalization, so
+     * nothing here contradicts a default-constructed engine — but the handle
+     * cannot see the `config` prop, so every field that prop sets still
+     * changes when the engine attaches: `scale` (and the `minScale`/`maxScale`
+     * derived from it), `size`, `eventHandlers`, `backgroundColor`,
+     * `coordinates`, `bounds`, `debug`. Gate on `isReady` for those.
+     */
+    getConfig(): Required<CanvasTileEngineConfig>;
+
+    /** Set map boundaries */
+    setBounds(bounds: { minX: number; maxX: number; minY: number; maxY: number }): void;
+
+    /**
+     * Fit a world rectangle into the viewport (centers and rescales, clamped
+     * to scale limits). Returns what the fit did — `fitted: false` means
+     * `minScale` floored it, so the whole rectangle is not visible — or
+     * `undefined` before mount, when there is no engine to fit.
+     */
+    fitBounds(
+        bounds: { minX: number; maxX: number; minY: number; maxY: number },
+        options?: FitBoundsOptions,
+    ): FitBoundsResult | undefined;
+
+    /** Dynamically update event handlers at runtime */
+    setEventHandlers(handlers: Partial<EventHandlers>): void;
+
+    /** Register a custom draw function; `transform.worldToScreen(x, y)` maps world coordinates to canvas pixels */
+    addDrawFunction(
+        fn: (ctx: TCtx, coords: Coords, config: Required<CanvasTileEngineConfig>, transform: DrawTransform) => void,
+        layer?: number,
+        options?: DrawOptions,
+    ): DrawHandle;
+
+    /** Draw rectangles */
+    drawRect<TData = unknown>(
+        items: DrawItems<Rect<TData>>,
+        layer?: number,
+        options?: RectDrawOptions<TData>,
+    ): DrawHandle;
+
+    /** Draw static rectangles (cached) */
+    drawStaticRect(items: Rect[], cacheKey: string, layer?: number, options?: StaticDrawOptions): DrawHandle;
+
+    /** Draw circles */
+    drawCircle<TData = unknown>(
+        items: DrawItems<Circle<TData>>,
+        layer?: number,
+        options?: CircleDrawOptions<TData>,
+    ): DrawHandle;
+
+    /** Draw static circles (cached) */
+    drawStaticCircle(items: Circle[], cacheKey: string, layer?: number, options?: StaticDrawOptions): DrawHandle;
+
+    /** Draw lines */
+    drawLine<TData = unknown>(
+        items: DrawItems<Line<TData>>,
+        style?: LineStyle,
+        layer?: number,
+        options?: LineDrawOptions<TData>,
+    ): DrawHandle;
+
+    /** Draw text */
+    drawText<TData = unknown>(
+        items: DrawItems<Text<TData>>,
+        layer?: number,
+        options?: TextDrawOptions<TData>,
+    ): DrawHandle;
+
+    /** Draw free-form paths: open/closed polylines, filled shapes, per-item styling */
+    drawPath<TData = unknown>(
+        items: DrawItems<PathItem<TData>>,
+        layer?: number,
+        options?: PathDrawOptions<TData>,
+    ): DrawHandle;
+
+    /** Draw images */
+    drawImage<TData = unknown>(
+        items: DrawItems<ImageItem<TImage, TData>>,
+        layer?: number,
+        options?: ImageDrawOptions<TImage, TData>,
+    ): DrawHandle;
+
+    /** Draw static images (cached) */
+    drawStaticImage(
+        items: ImageItem<TImage>[],
+        cacheKey: string,
+        layer?: number,
+        options?: StaticDrawOptions,
+    ): DrawHandle;
+
+    /** Draw grid lines */
+    drawGridLines(
+        cellSize: number,
+        lineWidth?: number,
+        strokeStyle?: string,
+        layer?: number,
+        options?: DrawOptions,
+    ): DrawHandle;
+
+    /** Clear a specific layer */
+    clearLayer(layer: number): void;
+
+    /** Clear all layers */
+    clearAll(): void;
+
+    /** Clear static cache */
+    clearStaticCache(cacheKey?: string): void;
+
+    /** Remove a previously registered draw callback */
+    removeDrawHandle(handle: DrawHandle): void;
+
+    /**
+     * All rect/circle/image/path/line items under a world point, highest visual
+     * priority first. Pass `coords.raw` from event callbacks. Empty before
+     * mount.
+     */
+    hitTest<TData = unknown>(point: Coords, opts?: HitTestOptions): HitResult<TImage, TData>[];
+
+    /** The topmost item under a world point, or undefined. */
+    hitTestFirst<TData = unknown>(point: Coords, opts?: HitTestOptions): HitResult<TImage, TData> | undefined;
+
+    /**
+     * All items whose geometry intersects (default) or lies fully inside a
+     * world rectangle — marquee/box selection. Corners may be in any order;
+     * build them from event `coords.raw` values. Empty before mount.
+     */
+    hitTestRect<TData = unknown>(rect: Bounds, opts?: HitTestRectOptions): HitResult<TImage, TData>[];
+
+    /** Image loader instance (undefined until engine mounts) */
+    readonly images: CanvasTileEngineCore<TMount, TImage>["images"] | undefined;
+
+    /**
+     * Load an image using the engine's image loader.
+     * Returns a rejected promise if engine is not ready.
+     * @param src - Image URL to load
+     * @param retry - Number of retries on failure (default: 1)
+     */
+    loadImage(src: string, retry?: number): Promise<TImage>;
+}
+
+/**
+ * Shared implementation behind the platform `useCanvasTileEngine` hooks.
+ *
+ * Owns the parts that must stay in lockstep across platforms: the stable
+ * handle identity, ready-state tracking, safe no-op forwarding before mount,
+ * and the remount-counter re-render fix.
+ *
+ * @param buildExtras - Optional platform extension point, invoked once while
+ * the handle is being built. The returned members are merged onto the handle
+ * (e.g. the web package adds `_containerRef` and `resize`). It receives the
+ * live instance ref so extras can forward to the engine.
+ */
+export function useEngineHandle<TMount, TImage, TCtx, TExtras extends object = Record<string, never>>(
+    buildExtras?: (instanceRef: { readonly current: CanvasTileEngineCore<TMount, TImage> | null }) => TExtras,
+): EngineHandleBase<TMount, TImage, TCtx> & TExtras {
+    const instanceRef = useRef<CanvasTileEngineCore<TMount, TImage> | null>(null);
+    // State is only used to trigger re-renders; actual values are read from refs.
+    // This must be a counter, not a boolean: during a key remount _setInstance
+    // runs twice (null, then the new engine) inside one flush, and a boolean
+    // would collapse back to its previous value — React then discards the
+    // re-render as a no-op WITHOUT running consumer effects, even ones whose
+    // deps (engine.instance) changed. A distinct value per call guarantees the
+    // post-remount render commits and those effects re-fire.
+    const [, bumpInstanceVersion] = useState(0);
+    // Keep isReady in a ref so the handle getter can read it without recreating handle
+    const isReadyRef = useRef(false);
+
+    // The handle must keep a single identity for the component's entire
+    // lifetime, so it lives in a ref (isReady is read through isReadyRef so it
+    // never needs to change). useMemo is not enough: React treats it as a
+    // discardable cache — Fast Refresh recreates it, which remounts the engine
+    // and races the children's draw effects against the new instance.
+    const handleRef = useRef<(EngineHandleBase<TMount, TImage, TCtx> & TExtras) | null>(null);
+    if (handleRef.current === null) {
+        const base: EngineHandleBase<TMount, TImage, TCtx> = {
+            _setInstance: (engine: CanvasTileEngineCore<TMount, TImage> | null) => {
+                instanceRef.current = engine;
+                isReadyRef.current = engine !== null;
+                bumpInstanceVersion((v) => v + 1);
+            },
+
+            get isReady() {
+                return isReadyRef.current;
+            },
+
+            get instance() {
+                return instanceRef.current;
+            },
+
+            get images() {
+                return instanceRef.current?.images;
+            },
+
+            render() {
+                instanceRef.current?.render();
+            },
+
+            requestRender() {
+                instanceRef.current?.requestRender();
+            },
+
+            getCenter() {
+                return instanceRef.current?.getCenter() ?? { x: 0, y: 0 };
+            },
+
+            getVisibleBounds() {
+                return (
+                    instanceRef.current?.getVisibleBounds() ?? {
+                        minX: 0,
+                        maxX: 0,
+                        minY: 0,
+                        maxY: 0,
+                    }
+                );
+            },
+
+            setCenter(center: Coords) {
+                instanceRef.current?.setCenter(center);
+            },
+
+            goCenter(x: number, y: number, durationMs?: number, onComplete?: () => void) {
+                instanceRef.current?.goCenter(x, y, durationMs, onComplete);
+            },
+
+            getSize() {
+                return instanceRef.current?.getSize() ?? { width: 0, height: 0 };
+            },
+
+            getScale() {
+                return instanceRef.current?.getScale() ?? 1;
+            },
+
+            setScale(newScale: number) {
+                instanceRef.current?.setScale(newScale);
+            },
+
+            goScale(targetScale: number, durationMs?: number, onComplete?: () => void) {
+                instanceRef.current?.goScale(targetScale, durationMs, onComplete);
+            },
+
+            zoomIn(factor?: number) {
+                instanceRef.current?.zoomIn(factor);
+            },
+
+            zoomOut(factor?: number) {
+                instanceRef.current?.zoomOut(factor);
+            },
+
+            setScaleLimits(minScale: number, maxScale: number) {
+                instanceRef.current?.setScaleLimits(minScale, maxScale);
+            },
+
+            setAccessibility(patch) {
+                instanceRef.current?.setAccessibility(patch);
+            },
+
+            setReducedMotion(value: ReducedMotionSetting) {
+                instanceRef.current?.setReducedMotion(value);
+            },
+
+            getReducedMotion() {
+                return instanceRef.current?.getReducedMotion() ?? false;
+            },
+
+            getConfig() {
+                return instanceRef.current?.getConfig() ?? DEFAULT_CONFIG;
+            },
+
+            setBounds(bounds) {
+                instanceRef.current?.setBounds(bounds);
+            },
+
+            fitBounds(bounds, options) {
+                return instanceRef.current?.fitBounds(bounds, options);
+            },
+
+            setEventHandlers(handlers) {
+                instanceRef.current?.setEventHandlers(handlers);
+            },
+
+            addDrawFunction(fn, layer, options) {
+                // The core API is renderer-agnostic (`ctx: unknown`); each
+                // platform handle narrows the context type (TCtx), so widen it
+                // back here to keep the cast out of user code.
+                return (
+                    instanceRef.current?.addDrawFunction(
+                        fn as (
+                            ctx: unknown,
+                            coords: Coords,
+                            config: Required<CanvasTileEngineConfig>,
+                            transform: DrawTransform,
+                        ) => void,
+                        layer,
+                        options,
+                    ) ?? droppedDraw("addDrawFunction")
+                );
+            },
+
+            drawRect(items, layer, options) {
+                return trackDraw(instanceRef.current, "drawRect", items, options, (e) =>
+                    e.drawRect(items, layer, options),
+                );
+            },
+
+            drawStaticRect(items, cacheKey, layer, options) {
+                return (
+                    instanceRef.current?.drawStaticRect(items, cacheKey, layer, options) ??
+                    droppedDraw("drawStaticRect")
+                );
+            },
+
+            drawCircle(items, layer, options) {
+                return trackDraw(instanceRef.current, "drawCircle", items, options, (e) =>
+                    e.drawCircle(items, layer, options),
+                );
+            },
+
+            drawStaticCircle(items, cacheKey, layer, options) {
+                return (
+                    instanceRef.current?.drawStaticCircle(items, cacheKey, layer, options) ??
+                    droppedDraw("drawStaticCircle")
+                );
+            },
+
+            drawLine(items, style, layer, options) {
+                return trackDraw(instanceRef.current, "drawLine", items, options, (e) =>
+                    e.drawLine(items, style, layer, options),
+                );
+            },
+
+            drawText(items, layer, options) {
+                return trackDraw(instanceRef.current, "drawText", items, options, (e) =>
+                    e.drawText(items, layer, options),
+                );
+            },
+
+            drawPath(items, layer, options) {
+                return trackDraw(instanceRef.current, "drawPath", items, options, (e) =>
+                    e.drawPath(items, layer, options),
+                );
+            },
+
+            drawImage(items, layer, options) {
+                return trackDraw(instanceRef.current, "drawImage", items, options, (e) =>
+                    e.drawImage(items, layer, options),
+                );
+            },
+
+            drawStaticImage(items, cacheKey, layer, options) {
+                return (
+                    instanceRef.current?.drawStaticImage(items, cacheKey, layer, options) ??
+                    droppedDraw("drawStaticImage")
+                );
+            },
+
+            drawGridLines(cellSize, lineWidth, strokeStyle, layer, options) {
+                return trackDraw(
+                    instanceRef.current,
+                    "drawGridLines",
+                    `grid:${cellSize}|${lineWidth}|${strokeStyle}`,
+                    options,
+                    (e) => e.drawGridLines(cellSize, lineWidth, strokeStyle, layer, options),
+                );
+            },
+
+            clearLayer(layer) {
+                untrackDraws(instanceRef.current, { layer });
+                instanceRef.current?.clearLayer(layer);
+            },
+
+            clearAll() {
+                untrackDraws(instanceRef.current, "all");
+                instanceRef.current?.clearAll();
+            },
+
+            clearStaticCache(cacheKey) {
+                instanceRef.current?.clearStaticCache(cacheKey);
+            },
+
+            removeDrawHandle(handle) {
+                untrackDraws(instanceRef.current, { handle });
+                instanceRef.current?.removeDrawHandle(handle);
+            },
+
+            hitTest<TData>(point: Coords, opts?: HitTestOptions) {
+                return instanceRef.current?.hitTest<TData>(point, opts) ?? [];
+            },
+
+            hitTestFirst<TData>(point: Coords, opts?: HitTestOptions) {
+                return instanceRef.current?.hitTestFirst<TData>(point, opts);
+            },
+
+            hitTestRect<TData>(rect: Bounds, opts?: HitTestRectOptions) {
+                return instanceRef.current?.hitTestRect<TData>(rect, opts) ?? [];
+            },
+
+            loadImage(src: string, retry?: number) {
+                if (!instanceRef.current) {
+                    return Promise.reject(new Error("Engine not ready. Wait for isReady before loading images."));
+                }
+                return instanceRef.current.images.load(src, retry);
+            },
+        };
+        handleRef.current = buildExtras
+            ? Object.assign(base, buildExtras(instanceRef))
+            : (base as EngineHandleBase<TMount, TImage, TCtx> & TExtras);
+    }
+
+    return handleRef.current;
+}

@@ -1,0 +1,1205 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { CanvasTileEngine } from "../../src/CanvasTileEngine";
+import { fitScale } from "../../src/utils/fitScale";
+import type { CanvasTileEngineConfig, Coords, IRenderer, PathItem } from "../../src/types";
+
+type Mount = Record<string, never>;
+
+function createMockRenderer(): IRenderer<Mount> {
+    return {
+        init: vi.fn(),
+        setupEvents: vi.fn(),
+        render: vi.fn(),
+        resize: vi.fn(),
+        resizeWithAnimation: vi.fn(),
+        destroy: vi.fn(),
+        getDrawAPI: vi.fn(),
+        getImageLoader: vi.fn(),
+    } as unknown as IRenderer<Mount>;
+}
+
+const baseConfig: CanvasTileEngineConfig = {
+    scale: 1,
+    minScale: 0.5,
+    maxScale: 2,
+    size: { width: 800, height: 600 },
+};
+
+function createEngine(config: CanvasTileEngineConfig = baseConfig) {
+    return new CanvasTileEngine<Mount>({}, config, createMockRenderer());
+}
+
+describe("CanvasTileEngine", () => {
+    let engine: CanvasTileEngine<Mount>;
+    let onZoom: ReturnType<typeof vi.fn<(scale: number) => void>>;
+    let onCoordsChange: ReturnType<typeof vi.fn<(coords: Coords) => void>>;
+
+    beforeEach(() => {
+        engine = createEngine();
+        onZoom = vi.fn<(scale: number) => void>();
+        onCoordsChange = vi.fn<(coords: Coords) => void>();
+        engine.onZoom = onZoom;
+        engine.onCoordsChange = onCoordsChange;
+    });
+
+    describe("binding event-handler subscriptions", () => {
+        it("notifies subscribers synchronously with the updated normalized config", () => {
+            const listener = vi.fn((handlers) => {
+                expect(handlers).toBe(engine.getConfig().eventHandlers);
+                expect(Object.isFrozen(handlers)).toBe(true);
+            });
+            engine._subscribeEventHandlers(listener);
+
+            engine.setEventHandlers({ drag: true, zoom: true });
+            expect(listener).toHaveBeenCalledExactlyOnceWith(engine.getConfig().eventHandlers);
+            expect(listener.mock.calls[0][0]).toMatchObject({ drag: true, zoom: "pointer" });
+
+            engine.setEventHandlers({ drag: false });
+            expect(listener).toHaveBeenCalledTimes(2);
+            expect(listener.mock.calls[1][0]).toMatchObject({ drag: false, zoom: "pointer" });
+        });
+
+        it("unsubscribes independently and clears remaining listeners on destroy", () => {
+            const first = vi.fn();
+            const second = vi.fn();
+            const unsubscribe = engine._subscribeEventHandlers(first);
+            engine._subscribeEventHandlers(second);
+
+            unsubscribe();
+            unsubscribe();
+            engine.setEventHandlers({ click: true });
+            expect(first).not.toHaveBeenCalled();
+            expect(second).toHaveBeenCalledTimes(1);
+
+            engine.destroy();
+            engine.setEventHandlers({ click: false });
+            expect(second).toHaveBeenCalledTimes(1);
+        });
+    });
+
+    describe("programmatic zoom fires onZoom", () => {
+        it("fires onZoom when setScale changes the scale", () => {
+            engine.setScale(1.5);
+            expect(onZoom).toHaveBeenCalledWith(1.5);
+        });
+
+        it("does not fire onZoom when setScale leaves the scale unchanged", () => {
+            engine.setScale(1);
+            expect(onZoom).not.toHaveBeenCalled();
+        });
+
+        it("fires onZoom on zoomIn with the clamped scale", () => {
+            engine.zoomIn(10); // clamped to maxScale 2
+            expect(onZoom).toHaveBeenCalledWith(2);
+        });
+
+        it("does not fire onZoom when zoomIn is already clamped at maxScale", () => {
+            engine.setScale(2);
+            onZoom.mockClear();
+            engine.zoomIn();
+            expect(onZoom).not.toHaveBeenCalled();
+        });
+
+        it("fires onZoom on zoomOut", () => {
+            engine.zoomOut(2); // 1 / 2 = 0.5
+            expect(onZoom).toHaveBeenCalledWith(0.5);
+        });
+    });
+
+    describe("setScale anchoring", () => {
+        it("keeps the viewport center fixed, matching goScale", () => {
+            engine.setCenter({ x: 12, y: 34 });
+            engine.setScale(2);
+            const after = engine.getCenter();
+            expect(after.x).toBeCloseTo(12);
+            expect(after.y).toBeCloseTo(34);
+        });
+
+        it("produces the same view as goScale with zero duration", () => {
+            engine.setCenter({ x: 5, y: 7 });
+            engine.setScale(1.5);
+            const viaSet = { center: engine.getCenter(), scale: engine.getScale() };
+
+            const other = createEngine();
+            other.setCenter({ x: 5, y: 7 });
+            other.goScale(1.5, 0);
+
+            expect(other.getScale()).toBe(viaSet.scale);
+            expect(other.getCenter().x).toBeCloseTo(viaSet.center.x);
+            expect(other.getCenter().y).toBeCloseTo(viaSet.center.y);
+        });
+    });
+
+    // Node has no requestAnimationFrame, so goScale completes instantly here;
+    // frame-by-frame interpolation is covered by the AnimationController tests.
+    describe("goScale", () => {
+        it("reaches the target scale and fires onZoom", () => {
+            engine.goScale(1.5, 0);
+            expect(engine.getScale()).toBe(1.5);
+            expect(onZoom).toHaveBeenCalledWith(1.5);
+        });
+
+        it("clamps the target to maxScale", () => {
+            engine.goScale(10, 0);
+            expect(engine.getScale()).toBe(2);
+        });
+
+        it("does not fire onZoom when already at the target scale", () => {
+            engine.goScale(1, 0);
+            expect(onZoom).not.toHaveBeenCalled();
+        });
+
+        it("keeps the viewport center fixed while zooming", () => {
+            const before = engine.getCenter();
+            engine.goScale(2, 0);
+            const after = engine.getCenter();
+            expect(after.x).toBeCloseTo(before.x);
+            expect(after.y).toBeCloseTo(before.y);
+        });
+
+        it("calls onComplete when the animation finishes", () => {
+            const onComplete = vi.fn();
+            engine.goScale(1.5, 0, onComplete);
+            expect(onComplete).toHaveBeenCalled();
+        });
+
+        it("rejects invalid scale values", () => {
+            expect(() => engine.goScale(-1)).toThrow();
+            expect(() => engine.goScale(NaN)).toThrow();
+        });
+    });
+
+    describe("setScaleLimits", () => {
+        it("updates the limits used by zoom clamping", () => {
+            engine.setScaleLimits(0.5, 4);
+            engine.setScale(3);
+            expect(engine.getScale()).toBe(3);
+        });
+
+        it("reflects the new limits in getConfig", () => {
+            engine.setScaleLimits(0.25, 8);
+            const config = engine.getConfig();
+            expect(config.minScale).toBe(0.25);
+            expect(config.maxScale).toBe(8);
+        });
+
+        it("clamps the current scale into the new range and fires onZoom", () => {
+            engine.setScaleLimits(1.5, 4);
+            expect(engine.getScale()).toBe(1.5);
+            expect(onZoom).toHaveBeenCalledWith(1.5);
+        });
+
+        it("does not fire onZoom when the current scale stays in range", () => {
+            engine.setScaleLimits(0.25, 8);
+            expect(onZoom).not.toHaveBeenCalled();
+        });
+
+        it("rejects invalid limits without touching the camera", () => {
+            expect(() => engine.setScaleLimits(4, 2)).toThrow();
+            expect(() => engine.setScaleLimits(0, 2)).toThrow();
+            expect(() => engine.setScaleLimits(NaN, 2)).toThrow();
+            engine.setScale(10); // still clamped by the original maxScale 2
+            expect(engine.getScale()).toBe(2);
+        });
+    });
+
+    describe("center API (getCenter / setCenter / goCenter)", () => {
+        it("setCenter moves the view center instantly and fires onCoordsChange", () => {
+            engine.setCenter({ x: 25, y: 40 });
+            expect(engine.getCenter()).toEqual({ x: 25, y: 40 });
+            expect(onCoordsChange).toHaveBeenCalledWith({ x: 25, y: 40 });
+        });
+
+        // Node has no requestAnimationFrame, so goCenter completes instantly.
+        it("goCenter animates to the target center", () => {
+            const onComplete = vi.fn();
+            engine.goCenter(10, 20, 0, onComplete);
+            expect(engine.getCenter()).toEqual({ x: 10, y: 20 });
+            expect(onComplete).toHaveBeenCalled();
+        });
+
+        it("setCenter and goCenter reject non-finite coordinates", () => {
+            expect(() => engine.setCenter({ x: NaN, y: 0 })).toThrow();
+            expect(() => engine.goCenter(0, Infinity)).toThrow();
+        });
+    });
+
+    describe("fitBounds", () => {
+        // Wide limits so the fit math is observable without clamping.
+        const wideLimits: CanvasTileEngineConfig = { ...baseConfig, minScale: 0.01, maxScale: 1000 };
+
+        it("centers on the bounds and picks the scale that fits the tighter axis", () => {
+            const e = createEngine(wideLimits);
+            e.fitBounds({ minX: 0, maxX: 100, minY: 0, maxY: 50 }, { durationMs: 0 });
+            // min(800 / 100, 600 / 50) = 8
+            expect(e.getScale()).toBe(8);
+            expect(e.getCenter().x).toBeCloseTo(50);
+            expect(e.getCenter().y).toBeCloseTo(25);
+        });
+
+        it("applies padding on every side", () => {
+            const e = createEngine(wideLimits);
+            e.fitBounds({ minX: 0, maxX: 100, minY: 0, maxY: 50 }, { padding: 10, durationMs: 0 });
+            // min(800 / 120, 600 / 70)
+            expect(e.getScale()).toBeCloseTo(800 / 120);
+        });
+
+        it("paddingPx shrinks the viewport instead of growing the bounds", () => {
+            const e = createEngine(wideLimits);
+            e.fitBounds({ minX: 0, maxX: 100, minY: 0, maxY: 50 }, { paddingPx: 40, durationMs: 0 });
+            // min((800 - 80) / 100, (600 - 80) / 50) = 7.2
+            expect(e.getScale()).toBeCloseTo(7.2);
+        });
+
+        it("paddingPx keeps the same pixel margin regardless of content size", () => {
+            const e = createEngine(wideLimits);
+            e.fitBounds({ minX: 0, maxX: 100, minY: 0, maxY: 50 }, { paddingPx: 40, durationMs: 0 });
+            const small = e.getScale();
+            // 10x larger content, same paddingPx: margin stays 40px, so the
+            // scale is exactly 10x smaller (world padding would need a manual
+            // 10x to achieve this).
+            e.fitBounds({ minX: 0, maxX: 1000, minY: 0, maxY: 500 }, { paddingPx: 40, durationMs: 0 });
+            expect(e.getScale()).toBeCloseTo(small / 10);
+        });
+
+        it("paddingPx wins over world padding", () => {
+            const e = createEngine(wideLimits);
+            e.fitBounds({ minX: 0, maxX: 100, minY: 0, maxY: 50 }, { padding: 10, paddingPx: 40, durationMs: 0 });
+            expect(e.getScale()).toBeCloseTo(7.2); // not 800 / 120
+        });
+
+        it("clamps a paddingPx that would consume the viewport", () => {
+            const e = createEngine(wideLimits);
+            // 2 * 500 exceeds both viewport axes; the fit area floors at 1px
+            // per axis and the result rides the scale limits instead of
+            // going negative or non-finite.
+            e.fitBounds({ minX: 0, maxX: 100, minY: 0, maxY: 50 }, { paddingPx: 500, durationMs: 0 });
+            expect(e.getScale()).toBe(0.01); // wideLimits minScale
+        });
+
+        it("lands exactly on the scale fitScale() derives (shared math, no drift)", () => {
+            const e = createEngine(wideLimits);
+            const bounds = { minX: 0, maxX: 100, minY: 0, maxY: 50 };
+            const size = { width: 800, height: 600 };
+
+            e.fitBounds(bounds, { paddingPx: 24, durationMs: 0 });
+            expect(e.getScale()).toBe(fitScale(bounds, size, { paddingPx: 24 }));
+
+            e.fitBounds(bounds, { padding: 3, durationMs: 0 });
+            expect(e.getScale()).toBe(fitScale(bounds, size, { padding: 3 }));
+        });
+
+        it("clamps the scale to the limits", () => {
+            engine.fitBounds({ minX: 0, maxX: 1, minY: 0, maxY: 1 }, { durationMs: 0 });
+            expect(engine.getScale()).toBe(2); // maxScale
+            engine.fitBounds({ minX: -10000, maxX: 10000, minY: -10000, maxY: 10000 }, { durationMs: 0 });
+            expect(engine.getScale()).toBe(0.5); // minScale
+        });
+
+        it("respects limits updated via setScaleLimits", () => {
+            engine.setScaleLimits(0.5, 4);
+            engine.fitBounds({ minX: 0, maxX: 1, minY: 0, maxY: 1 }, { durationMs: 0 });
+            expect(engine.getScale()).toBe(4);
+        });
+
+        it("fires onZoom and onCoordsChange", () => {
+            engine.fitBounds({ minX: 0, maxX: 100, minY: 0, maxY: 50 }, { durationMs: 0 });
+            expect(onZoom).toHaveBeenCalledWith(2); // clamped to maxScale
+            expect(onCoordsChange).toHaveBeenCalled();
+        });
+
+        // Node has no requestAnimationFrame, so the animated path (default
+        // 500ms) completes instantly here.
+        it("animated fit reaches the target and calls onComplete", () => {
+            const onComplete = vi.fn();
+            const e = createEngine(wideLimits);
+            e.fitBounds({ minX: 0, maxX: 100, minY: 0, maxY: 50 }, { onComplete });
+            expect(e.getScale()).toBe(8);
+            expect(e.getCenter().x).toBeCloseTo(50);
+            expect(e.getCenter().y).toBeCloseTo(25);
+            expect(onComplete).toHaveBeenCalled();
+        });
+
+        it("reports the applied scale and that the area fits", () => {
+            const e = createEngine(wideLimits);
+            const result = e.fitBounds({ minX: 0, maxX: 100, minY: 0, maxY: 50 }, { durationMs: 0 });
+            expect(result).toEqual({ scale: 8, fitted: true });
+        });
+
+        it("reports fitted: false when minScale keeps the area from fitting", () => {
+            // 20000 world units wide at minScale 0.5 needs 10000px of viewport.
+            const result = engine.fitBounds(
+                { minX: -10000, maxX: 10000, minY: -10000, maxY: 10000 },
+                { durationMs: 0 },
+            );
+            expect(result).toEqual({ scale: 0.5, fitted: false });
+            expect(engine.getScale()).toBe(0.5);
+        });
+
+        it("stays fitted when maxScale caps the zoom — the area is still fully visible", () => {
+            const result = engine.fitBounds({ minX: 0, maxX: 1, minY: 0, maxY: 1 }, { durationMs: 0 });
+            expect(result).toEqual({ scale: 2, fitted: true });
+        });
+
+        it("reports the same result on the animated path", () => {
+            const e = createEngine(wideLimits);
+            expect(e.fitBounds({ minX: 0, maxX: 100, minY: 0, maxY: 50 })).toEqual({ scale: 8, fitted: true });
+        });
+
+        it("an instant fit cancels an in-flight animation instead of losing to it", () => {
+            // Node has no rAF, so the animated path would otherwise complete
+            // synchronously and the race could not happen at all. Drive the
+            // frame queue by hand instead.
+            const frames = new Map<number, FrameRequestCallback>();
+            let nextFrameId = 1;
+            vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
+                const id = nextFrameId++;
+                frames.set(id, cb);
+                return id;
+            });
+            vi.stubGlobal("cancelAnimationFrame", (id: number) => frames.delete(id));
+
+            try {
+                const e = createEngine(wideLimits);
+                e.fitBounds({ minX: 0, maxX: 100, minY: 0, maxY: 50 }, { durationMs: 500 });
+                expect(frames.size).toBeGreaterThan(0); // the animation really is in flight
+
+                e.fitBounds({ minX: 200, maxX: 300, minY: 400, maxY: 450 }, { durationMs: 0 });
+                const scale = e.getScale();
+                const center = e.getCenter();
+
+                // Drain everything the cancelled animation had queued.
+                for (const [id, frame] of [...frames]) {
+                    frames.delete(id);
+                    frame(performance.now() + 16);
+                }
+
+                expect(e.getScale()).toBe(scale);
+                expect(e.getCenter().x).toBeCloseTo(center.x);
+                expect(e.getCenter().y).toBeCloseTo(center.y);
+            } finally {
+                vi.unstubAllGlobals();
+            }
+        });
+
+        it("rejects invalid bounds and padding", () => {
+            expect(() => engine.fitBounds({ minX: 10, maxX: 0, minY: 0, maxY: 10 })).toThrow();
+            expect(() => engine.fitBounds({ minX: 0, maxX: 0, minY: 0, maxY: 10 })).toThrow();
+            expect(() => engine.fitBounds({ minX: 0, maxX: Infinity, minY: 0, maxY: 10 })).toThrow();
+            expect(() => engine.fitBounds({ minX: 0, maxX: 10, minY: 0, maxY: NaN })).toThrow();
+            expect(() => engine.fitBounds({ minX: 0, maxX: 10, minY: 0, maxY: 10 }, { padding: -1 })).toThrow();
+            expect(() => engine.fitBounds({ minX: 0, maxX: 10, minY: 0, maxY: 10 }, { paddingPx: -1 })).toThrow();
+            expect(() => engine.fitBounds({ minX: 0, maxX: 10, minY: 0, maxY: 10 }, { paddingPx: NaN })).toThrow();
+        });
+    });
+
+    describe("setBounds", () => {
+        it("fires onCoordsChange since bounds can clamp the camera", () => {
+            // Engine starts centered at (0, 0); these bounds force a clamp.
+            engine.setBounds({ minX: 1000, maxX: 3000, minY: 1000, maxY: 3000 });
+            expect(onCoordsChange).toHaveBeenCalled();
+            const coords = onCoordsChange.mock.calls[0][0];
+            expect(coords.x).toBeGreaterThan(500);
+            expect(coords.y).toBeGreaterThan(500);
+        });
+    });
+
+    describe("programmatic resize fires onResize once", () => {
+        // Every renderer's resizeWithAnimation completion invokes its own
+        // onResize (the engine setter mirrors the user callback into the
+        // renderer) and then the engine-supplied onComplete. The engine must
+        // not invoke the callback again from onComplete.
+        function createEngineWithResizingRenderer() {
+            const renderer = createMockRenderer();
+            (renderer.resizeWithAnimation as ReturnType<typeof vi.fn>).mockImplementation(
+                (_w: number, _h: number, _d: number, onComplete?: () => void) => {
+                    renderer.onResize?.();
+                    onComplete?.();
+                },
+            );
+            return new CanvasTileEngine<Mount>({}, baseConfig, renderer);
+        }
+
+        it("invokes the user onResize callback exactly once", () => {
+            const e = createEngineWithResizingRenderer();
+            const onResize = vi.fn();
+            e.onResize = onResize;
+
+            e.resize(400, 300, 0);
+            expect(onResize).toHaveBeenCalledTimes(1);
+        });
+
+        it("invokes onResize before the caller's onComplete", () => {
+            const e = createEngineWithResizingRenderer();
+            const order: string[] = [];
+            e.onResize = () => order.push("onResize");
+
+            e.resize(400, 300, 0, () => order.push("onComplete"));
+            expect(order).toEqual(["onResize", "onComplete"]);
+        });
+    });
+
+    describe("gridAligned initial center snapping", () => {
+        // Integers are cell centers (cell k spans [k-0.5, k+0.5]), so an even
+        // tile count needs a half-integer center and an odd tile count needs
+        // an integer center for pixel-perfect alignment.
+        function centerFor(config: CanvasTileEngineConfig, center: Coords): Coords {
+            const e = new CanvasTileEngine<Mount>({}, config, createMockRenderer(), center);
+            return e.getCenter();
+        }
+
+        const even = { scale: 15, size: { width: 300, height: 300 }, gridAligned: true }; // 20x20 tiles
+        const odd = { scale: 20, size: { width: 380, height: 380 }, gridAligned: true }; // 19x19 tiles
+
+        it("snaps an integer center down to the board center for even tile counts", () => {
+            // A 0-based 20-cell board's true center is 9.5; a center computed
+            // as N/2 = 10 must land there, not drift to 10.5.
+            expect(centerFor(even, { x: 10, y: 10 })).toEqual({ x: 9.5, y: 9.5 });
+        });
+
+        it("keeps an already-aligned half-integer center for even tile counts", () => {
+            expect(centerFor(even, { x: 9.5, y: 9.5 })).toEqual({ x: 9.5, y: 9.5 });
+        });
+
+        it("snaps to the nearest half-integer for even tile counts", () => {
+            expect(centerFor(even, { x: 9.2, y: 9.8 })).toEqual({ x: 9.5, y: 9.5 });
+            expect(centerFor(even, { x: 10.4, y: 10.6 })).toEqual({ x: 10.5, y: 10.5 });
+        });
+
+        it("snaps to the nearest integer for odd tile counts", () => {
+            expect(centerFor(odd, { x: 9.4, y: 9.6 })).toEqual({ x: 9, y: 10 });
+        });
+
+        it("keeps an already-aligned integer center for odd tile counts", () => {
+            expect(centerFor(odd, { x: 9, y: 9 })).toEqual({ x: 9, y: 9 });
+        });
+
+        it("does not snap when the tile count is not an integer", () => {
+            const fractional = { scale: 7, size: { width: 300, height: 300 }, gridAligned: true };
+            expect(centerFor(fractional, { x: 10.3, y: 10.3 })).toEqual({ x: 10.3, y: 10.3 });
+        });
+
+        it("does not snap when gridAligned is false", () => {
+            const off = { ...even, gridAligned: false };
+            expect(centerFor(off, { x: 10.3, y: 10.3 })).toEqual({ x: 10.3, y: 10.3 });
+        });
+
+        it("centers a gridToSize board exactly when its center is used", () => {
+            // The fixed-board pattern: gridToSize + center => cells 0..N-1
+            // exactly fill the viewport, i.e. visible world is [-0.5, N-0.5].
+            const e = new CanvasTileEngine<Mount>({}, even, createMockRenderer(), { x: 9.5, y: 9.5 });
+            expect(e.getVisibleBounds()).toEqual({ minX: -1, maxX: 20, minY: -1, maxY: 20 });
+            expect(e.getCenter()).toEqual({ x: 9.5, y: 9.5 });
+        });
+    });
+
+    describe("hit testing through the engine draw API", () => {
+        function createEngineWithDrawAPI() {
+            let seq = 0;
+            const drawAPI = {
+                drawRect: (_items: unknown, layer: number = 1) => ({ id: Symbol(`rect-${seq++}`), layer }),
+                drawCircle: (_items: unknown, layer: number = 1) => ({ id: Symbol(`circle-${seq++}`), layer }),
+                drawImage: (_items: unknown, layer: number = 1) => ({ id: Symbol(`image-${seq++}`), layer }),
+                drawStaticRect: (_items: unknown, _key: string, layer: number = 1) => ({
+                    id: Symbol(`static-${seq++}`),
+                    layer,
+                }),
+                removeDrawHandle: vi.fn(),
+                clearLayer: vi.fn(),
+                clearAll: vi.fn(),
+                clearStaticCache: vi.fn(),
+            };
+            const renderer = createMockRenderer();
+            (renderer.getDrawAPI as ReturnType<typeof vi.fn>).mockReturnValue(drawAPI);
+            return new CanvasTileEngine<Mount>({}, baseConfig, renderer);
+        }
+
+        // Event payloads report coords.raw in corner space: the cell of item k
+        // spans [k, k+1] there (which is why snapped floors it). The engine
+        // converts to item space internally, so these tests query in raw space -
+        // the same values an onClick/onHover callback would receive.
+        it("registers drawn items and finds them via hitTestFirst with raw coords", () => {
+            const e = createEngineWithDrawAPI();
+            e.drawRect({ x: 2, y: 2, size: 1 }, 1);
+
+            // Raw center of cell (2,2) is (2.5, 2.5)
+            const hit = e.hitTestFirst({ x: 2.5, y: 2.5 });
+            expect(hit).toBeDefined();
+            expect(hit!.kind).toBe("rect");
+            expect(hit!.layer).toBe(1);
+        });
+
+        it("applies the raw-to-item half-cell offset at the API boundary", () => {
+            const e = createEngineWithDrawAPI();
+            e.drawRect({ x: 2, y: 2, size: 1 }, 1);
+
+            // In raw space the item's cell spans [2, 3] on each axis
+            expect(e.hitTestFirst({ x: 2.05, y: 2.05 })).toBeDefined();
+            expect(e.hitTestFirst({ x: 2.95, y: 2.95 })).toBeDefined();
+            // (1.95, 1.95) belongs to cell (1,1) - a hit here would mean the
+            // offset was not applied
+            expect(e.hitTestFirst({ x: 1.95, y: 1.95 })).toBeUndefined();
+        });
+
+        it("stops reporting items after removeDrawHandle and clearLayer", () => {
+            const e = createEngineWithDrawAPI();
+            const h = e.drawCircle({ x: 0, y: 0, size: 1 }, 2);
+            e.drawRect({ x: 0, y: 0, size: 1 }, 3);
+
+            expect(e.hitTest({ x: 0.5, y: 0.5 })).toHaveLength(2);
+
+            e.removeDrawHandle(h);
+            expect(e.hitTest({ x: 0.5, y: 0.5 })).toHaveLength(1);
+
+            e.clearLayer(3);
+            expect(e.hitTest({ x: 0.5, y: 0.5 })).toHaveLength(0);
+        });
+
+        it("includes static draw variants and clears everything on clearAll", () => {
+            const e = createEngineWithDrawAPI();
+            e.drawStaticRect([{ x: 1, y: 1, size: 1 }], "terrain", 0);
+
+            expect(e.hitTestFirst({ x: 1.5, y: 1.5 })).toBeDefined();
+
+            e.clearAll();
+            expect(e.hitTestFirst({ x: 1.5, y: 1.5 })).toBeUndefined();
+        });
+
+        it("expands hit geometry with world-unit padding", () => {
+            const e = createEngineWithDrawAPI();
+            // Station-dot scenario: small marker, generous touch target
+            e.drawCircle({ x: 0, y: 0, size: 0.95 }, 1);
+
+            // Raw (1.5, 0.5) is 1.0 world units from the dot center; radius is 0.475
+            expect(e.hitTestFirst({ x: 1.5, y: 0.5 })).toBeUndefined();
+            expect(e.hitTestFirst({ x: 1.5, y: 0.5 }, { padding: 0.625 })).toBeDefined();
+        });
+
+        it("converts paddingPx with the current scale", () => {
+            const e = createEngineWithDrawAPI();
+            e.drawCircle({ x: 0, y: 0, size: 0.5 }, 1); // radius 0.25
+
+            // Raw (1.2, 0.5) is 0.7 world units from the center -> needs 0.45+
+            expect(e.hitTestFirst({ x: 1.2, y: 0.5 }, { paddingPx: 0.8 })).toBeDefined(); // scale 1 -> 0.8 world
+
+            e.setScale(2);
+            expect(e.hitTestFirst({ x: 1.2, y: 0.5 }, { paddingPx: 0.8 })).toBeUndefined(); // scale 2 -> 0.4 world
+        });
+
+        it("adds padding and paddingPx together", () => {
+            const e = createEngineWithDrawAPI();
+            e.drawCircle({ x: 0, y: 0, size: 0.5 }, 1); // radius 0.25
+            e.setScale(2);
+
+            // 0.3 world + 0.4px / scale 2 = 0.5 -> effective radius 0.75 covers 0.7
+            expect(e.hitTestFirst({ x: 1.2, y: 0.5 }, { padding: 0.3, paddingPx: 0.4 })).toBeDefined();
+            expect(e.hitTestFirst({ x: 1.2, y: 0.5 }, { padding: 0.3 })).toBeUndefined();
+        });
+
+        it("hitTest: false keeps a registration out of every hit query", () => {
+            const e = createEngineWithDrawAPI();
+            // Decorative floor under an interactive unit at the same cell
+            e.drawRect({ x: 2, y: 2, size: 1 }, 0, { hitTest: false });
+            e.drawCircle({ x: 2, y: 2, size: 1 }, 2);
+
+            const hits = e.hitTest({ x: 2.5, y: 2.5 });
+            expect(hits).toHaveLength(1);
+            expect(hits[0].kind).toBe("circle");
+
+            // Marquee over the cell sees the unit, not the floor
+            const marquee = e.hitTestRect({ minX: 1.8, maxX: 3.2, minY: 1.8, maxY: 3.2 });
+            expect(marquee).toHaveLength(1);
+            expect(marquee[0].kind).toBe("circle");
+        });
+
+        it("static draws accept hitTest: false too", () => {
+            const e = createEngineWithDrawAPI();
+            e.drawStaticRect([{ x: 1, y: 1, size: 1 }], "terrain", 0, { hitTest: false });
+            expect(e.hitTestFirst({ x: 1.5, y: 1.5 })).toBeUndefined();
+        });
+
+        it("id-replace toggles hit participation in both directions", () => {
+            const e = createEngineWithDrawAPI();
+            e.drawRect({ x: 2, y: 2, size: 1 }, 1, { id: "floor" });
+            expect(e.hitTestFirst({ x: 2.5, y: 2.5 })).toBeDefined();
+
+            // Same id, now opted out: the stale hit entry must not survive
+            e.drawRect({ x: 2, y: 2, size: 1 }, 1, { id: "floor", hitTest: false });
+            expect(e.hitTestFirst({ x: 2.5, y: 2.5 })).toBeUndefined();
+
+            // And opting back in re-registers
+            e.drawRect({ x: 2, y: 2, size: 1 }, 1, { id: "floor" });
+            expect(e.hitTestFirst({ x: 2.5, y: 2.5 })).toBeDefined();
+        });
+    });
+
+    describe("id-based draw registration replace", () => {
+        function createEngineWithDrawAPI() {
+            let seq = 0;
+            const drawAPI = {
+                addDrawFunction: (_fn: unknown, layer: number = 1) => ({ id: Symbol(`fn-${seq++}`), layer }),
+                drawRect: (_items: unknown, layer: number = 1) => ({ id: Symbol(`rect-${seq++}`), layer }),
+                drawCircle: (_items: unknown, layer: number = 1) => ({ id: Symbol(`circle-${seq++}`), layer }),
+                drawPath: (_items: unknown, layer: number = 1) => ({ id: Symbol(`path-${seq++}`), layer }),
+                drawStaticRect: (_items: unknown, _key: string, layer: number = 1) => ({
+                    id: Symbol(`static-${seq++}`),
+                    layer,
+                }),
+                drawGridLines: (_cellSize: number, _style: unknown, layer: number = 0) => ({
+                    id: Symbol(`grid-${seq++}`),
+                    layer,
+                }),
+                removeDrawHandle: vi.fn(),
+                clearLayer: vi.fn(),
+                clearAll: vi.fn(),
+                clearStaticCache: vi.fn(),
+            };
+            const renderer = createMockRenderer();
+            (renderer.getDrawAPI as ReturnType<typeof vi.fn>).mockReturnValue(drawAPI);
+            return { e: new CanvasTileEngine<Mount>({}, baseConfig, renderer), drawAPI };
+        }
+
+        it("replaces the previous registration when the same id is reused", () => {
+            const { e, drawAPI } = createEngineWithDrawAPI();
+            const first = e.drawRect({ x: 2, y: 2, size: 1 }, 1, { id: "seats" });
+            e.drawRect({ x: 5, y: 5, size: 1 }, 1, { id: "seats" });
+
+            expect(drawAPI.removeDrawHandle).toHaveBeenCalledTimes(1);
+            expect(drawAPI.removeDrawHandle).toHaveBeenCalledWith(first);
+            expect(e.hitTestFirst({ x: 2.5, y: 2.5 })).toBeUndefined();
+            expect(e.hitTestFirst({ x: 5.5, y: 5.5 })).toBeDefined();
+        });
+
+        it("refreshes a mutated command path re-registered with the same id and scale", () => {
+            const { e, drawAPI } = createEngineWithDrawAPI();
+            const item: PathItem = {
+                commands: [
+                    { type: "moveTo", x: 0, y: 0 },
+                    { type: "lineTo", x: 4, y: 0 },
+                    { type: "lineTo", x: 4, y: 4 },
+                    { type: "lineTo", x: 0, y: 4 },
+                    { type: "closePath" },
+                ],
+                style: { fillStyle: "red" },
+            };
+            const first = e.drawPath(item, 1, { id: "zone" });
+            // Engine hit queries take raw coordinates, offset by half a cell.
+            expect(e.hitTestFirst({ x: 2.5, y: 2.5 })?.item).toBe(item);
+
+            item.commands = item.commands!.map((command) =>
+                command.type === "moveTo" || command.type === "lineTo" ? { ...command, x: command.x + 20 } : command,
+            );
+            const second = e.drawPath(item, 1, { id: "zone" });
+
+            expect(e.getScale()).toBe(baseConfig.scale);
+            expect(drawAPI.removeDrawHandle).toHaveBeenCalledWith(first);
+            expect(e.hitTest({ x: 2.5, y: 2.5 })).toHaveLength(0);
+            const hits = e.hitTest({ x: 22.5, y: 2.5 });
+            expect(hits).toHaveLength(1);
+            expect(hits[0]).toMatchObject({ item, handle: second });
+            expect(e.hitTestRect({ minX: 0, minY: 0, maxX: 5, maxY: 5 })).toHaveLength(0);
+            expect(e.hitTestRect({ minX: 20, minY: 0, maxX: 25, maxY: 5 })).toHaveLength(1);
+        });
+
+        it("accumulates as before when no id is given", () => {
+            const { e, drawAPI } = createEngineWithDrawAPI();
+            e.drawRect({ x: 2, y: 2, size: 1 }, 1);
+            e.drawRect({ x: 2, y: 2, size: 1 }, 1);
+
+            expect(drawAPI.removeDrawHandle).not.toHaveBeenCalled();
+            expect(e.hitTest({ x: 2.5, y: 2.5 })).toHaveLength(2);
+        });
+
+        it("shares one id namespace across draw kinds and layers", () => {
+            const { e, drawAPI } = createEngineWithDrawAPI();
+            const rect = e.drawRect({ x: 2, y: 2, size: 1 }, 1, { id: "marker" });
+            e.drawCircle({ x: 7, y: 7, size: 1 }, 4, { id: "marker" });
+
+            expect(drawAPI.removeDrawHandle).toHaveBeenCalledWith(rect);
+            expect(e.hitTestFirst({ x: 2.5, y: 2.5 })).toBeUndefined();
+            const hit = e.hitTestFirst({ x: 7.5, y: 7.5 });
+            expect(hit!.kind).toBe("circle");
+            expect(hit!.layer).toBe(4);
+        });
+
+        it("frees the id when its handle is removed manually", () => {
+            const { e, drawAPI } = createEngineWithDrawAPI();
+            const h = e.drawRect({ x: 2, y: 2, size: 1 }, 1, { id: "seats" });
+            e.removeDrawHandle(h);
+            drawAPI.removeDrawHandle.mockClear();
+
+            e.drawRect({ x: 5, y: 5, size: 1 }, 1, { id: "seats" });
+            // A fresh registration: nothing stale left to replace
+            expect(drawAPI.removeDrawHandle).not.toHaveBeenCalled();
+            expect(e.hitTestFirst({ x: 5.5, y: 5.5 })).toBeDefined();
+        });
+
+        it("frees ids on clearLayer, leaving other layers tracked", () => {
+            const { e, drawAPI } = createEngineWithDrawAPI();
+            e.drawRect({ x: 2, y: 2, size: 1 }, 1, { id: "a" });
+            const kept = e.drawRect({ x: 3, y: 3, size: 1 }, 2, { id: "b" });
+            e.clearLayer(1);
+
+            e.drawRect({ x: 5, y: 5, size: 1 }, 1, { id: "a" });
+            expect(drawAPI.removeDrawHandle).not.toHaveBeenCalled();
+
+            e.drawRect({ x: 6, y: 6, size: 1 }, 2, { id: "b" });
+            expect(drawAPI.removeDrawHandle).toHaveBeenCalledWith(kept);
+        });
+
+        it("replaces static draws on the same cacheKey and invalidates the cache", () => {
+            const { e, drawAPI } = createEngineWithDrawAPI();
+            const first = e.drawStaticRect([{ x: 1, y: 1, size: 1 }], "terrain", 0);
+            e.drawStaticRect([{ x: 4, y: 4, size: 1 }], "terrain", 0);
+
+            expect(drawAPI.removeDrawHandle).toHaveBeenCalledWith(first);
+            expect(drawAPI.clearStaticCache).toHaveBeenCalledWith("terrain");
+            expect(e.hitTestFirst({ x: 1.5, y: 1.5 })).toBeUndefined();
+            expect(e.hitTestFirst({ x: 4.5, y: 4.5 })).toBeDefined();
+        });
+
+        it("drops the static cache when the registration is removed by handle", () => {
+            const { e, drawAPI } = createEngineWithDrawAPI();
+            const h = e.drawStaticRect([{ x: 1, y: 1, size: 1 }], "terrain", 0);
+            e.removeDrawHandle(h);
+            expect(drawAPI.clearStaticCache).toHaveBeenCalledWith("terrain");
+        });
+
+        it("drops static caches on clearLayer for registrations on that layer", () => {
+            const { e, drawAPI } = createEngineWithDrawAPI();
+            e.drawStaticRect([{ x: 1, y: 1, size: 1 }], "terrain", 0);
+            e.drawStaticRect([{ x: 2, y: 2, size: 1 }], "props", 3);
+            e.clearLayer(0);
+
+            expect(drawAPI.clearStaticCache).toHaveBeenCalledWith("terrain");
+            expect(drawAPI.clearStaticCache).not.toHaveBeenCalledWith("props");
+        });
+
+        it("clears all static caches and the id registry on clearAll", () => {
+            const { e, drawAPI } = createEngineWithDrawAPI();
+            e.drawStaticRect([{ x: 1, y: 1, size: 1 }], "terrain", 0);
+            e.drawRect({ x: 2, y: 2, size: 1 }, 1, { id: "seats" });
+            e.clearAll();
+
+            expect(drawAPI.clearStaticCache).toHaveBeenCalledWith();
+            drawAPI.removeDrawHandle.mockClear();
+            e.drawRect({ x: 5, y: 5, size: 1 }, 1, { id: "seats" });
+            expect(drawAPI.removeDrawHandle).not.toHaveBeenCalled();
+        });
+
+        it("tracks ids for grid lines and custom draw functions", () => {
+            const { e, drawAPI } = createEngineWithDrawAPI();
+            const grid = e.drawGridLines(5, 1, "black", 0, { id: "grid" });
+            e.drawGridLines(10, 1, "black", 0, { id: "grid" });
+            expect(drawAPI.removeDrawHandle).toHaveBeenCalledWith(grid);
+
+            const fn = e.addDrawFunction(() => {}, 1, { id: "hud" });
+            e.addDrawFunction(() => {}, 1, { id: "hud" });
+            expect(drawAPI.removeDrawHandle).toHaveBeenCalledWith(fn);
+        });
+
+        it.each([-1, -0.25, 0, -0, NaN, Infinity, -Infinity, "1", null, undefined])(
+            "rejects invalid grid cellSize %s before replacing an existing registration",
+            (cellSize) => {
+                const { e, drawAPI } = createEngineWithDrawAPI();
+                const grid = e.drawGridLines(1, 1, "black", 0, { id: "grid" });
+                const register = vi.spyOn(drawAPI, "drawGridLines");
+
+                expect(() => e.drawGridLines(cellSize as number, 1, "black", 0, { id: "grid" })).toThrow(
+                    new RangeError("[CanvasTileEngine] cellSize must be a positive finite number"),
+                );
+                expect(register).not.toHaveBeenCalled();
+                expect(drawAPI.removeDrawHandle).not.toHaveBeenCalled();
+
+                // A rejected replacement leaves both the old handle and its id intact.
+                e.drawGridLines(0.5, 1, "black", 0, { id: "grid" });
+                expect(drawAPI.removeDrawHandle).toHaveBeenCalledExactlyOnceWith(grid);
+                expect(register).toHaveBeenCalledExactlyOnceWith(0.5, { lineWidth: 1, strokeStyle: "black" }, 0, {
+                    clip: undefined,
+                });
+            },
+        );
+    });
+
+    describe("styleOf paint-time decoration", () => {
+        function createEngineWithDrawAPI() {
+            let seq = 0;
+            const drawAPI = {
+                drawRect: vi.fn((_items: unknown, layer: number = 1, _options?: unknown) => ({
+                    id: Symbol(`rect-${seq++}`),
+                    layer,
+                })),
+                drawCircle: vi.fn((_items: unknown, layer: number = 1, _options?: unknown) => ({
+                    id: Symbol(`circle-${seq++}`),
+                    layer,
+                })),
+                drawText: vi.fn((_items: unknown, layer: number = 2, _options?: unknown) => ({
+                    id: Symbol(`text-${seq++}`),
+                    layer,
+                })),
+                drawLine: vi.fn((_items: unknown, _style: unknown, layer: number = 1, _options?: unknown) => ({
+                    id: Symbol(`line-${seq++}`),
+                    layer,
+                })),
+                drawPath: vi.fn((_items: unknown, layer: number = 1, _options?: unknown) => ({
+                    id: Symbol(`path-${seq++}`),
+                    layer,
+                })),
+                removeDrawHandle: vi.fn(),
+                clearLayer: vi.fn(),
+                clearAll: vi.fn(),
+                clearStaticCache: vi.fn(),
+            };
+            const renderer = createMockRenderer();
+            (renderer.getDrawAPI as ReturnType<typeof vi.fn>).mockReturnValue(drawAPI);
+            return { e: new CanvasTileEngine<Mount>({}, baseConfig, renderer), drawAPI };
+        }
+
+        it("threads styleOf through to the renderer draw API on every draw kind", () => {
+            const { e, drawAPI } = createEngineWithDrawAPI();
+            const shape = () => ({ fillStyle: "#f00" });
+            const text = () => ({ fillStyle: "#f00" });
+            const line = () => ({ strokeStyle: "#f00" });
+            const path = () => ({ fillStyle: "#f00" });
+
+            e.drawRect({ x: 1, y: 1, size: 1 }, 1, { styleOf: shape });
+            expect(drawAPI.drawRect.mock.calls[0][2]).toEqual({ styleOf: shape });
+
+            e.drawCircle({ x: 1, y: 1, size: 1 }, 1, { styleOf: shape });
+            expect(drawAPI.drawCircle.mock.calls[0][2]).toEqual({ styleOf: shape });
+
+            e.drawText({ x: 1, y: 1, text: "a" }, 2, { styleOf: text });
+            expect(drawAPI.drawText.mock.calls[0][2]).toEqual({ styleOf: text });
+
+            e.drawLine({ from: { x: 0, y: 0 }, to: { x: 1, y: 1 } }, undefined, 1, { styleOf: line });
+            expect(drawAPI.drawLine.mock.calls[0][3]).toEqual({ styleOf: line });
+
+            e.drawPath(
+                {
+                    points: [
+                        { x: 0, y: 0 },
+                        { x: 1, y: 1 },
+                    ],
+                },
+                1,
+                { styleOf: path },
+            );
+            expect(drawAPI.drawPath.mock.calls[0][2]).toEqual({ styleOf: path });
+        });
+
+        it("registers hit-test geometry regardless of styleOf", () => {
+            const { e } = createEngineWithDrawAPI();
+            e.drawRect({ x: 2, y: 2, size: 1 }, 1, { styleOf: () => ({ fillStyle: "#f00" }) });
+            expect(e.hitTestFirst({ x: 2.5, y: 2.5 })).toBeDefined();
+        });
+
+        it("composes with id-based replace", () => {
+            const { e, drawAPI } = createEngineWithDrawAPI();
+            const first = e.drawRect({ x: 2, y: 2, size: 1 }, 1, { id: "tiles", styleOf: () => undefined });
+            e.drawRect({ x: 5, y: 5, size: 1 }, 1, { id: "tiles" });
+
+            expect(drawAPI.removeDrawHandle).toHaveBeenCalledTimes(1);
+            expect(drawAPI.removeDrawHandle).toHaveBeenCalledWith(first);
+        });
+    });
+
+    describe("visibleOf / interactiveOf per-item callbacks", () => {
+        function createEngineWithDrawAPI() {
+            let seq = 0;
+            const drawAPI = {
+                drawRect: vi.fn((_items: unknown, layer: number = 1, _options?: unknown) => ({
+                    id: Symbol(`rect-${seq++}`),
+                    layer,
+                })),
+                drawCircle: vi.fn((_items: unknown, layer: number = 1, _options?: unknown) => ({
+                    id: Symbol(`circle-${seq++}`),
+                    layer,
+                })),
+                drawText: vi.fn((_items: unknown, layer: number = 2, _options?: unknown) => ({
+                    id: Symbol(`text-${seq++}`),
+                    layer,
+                })),
+                drawLine: vi.fn((_items: unknown, _style: unknown, layer: number = 1, _options?: unknown) => ({
+                    id: Symbol(`line-${seq++}`),
+                    layer,
+                })),
+                drawPath: vi.fn((_items: unknown, layer: number = 1, _options?: unknown) => ({
+                    id: Symbol(`path-${seq++}`),
+                    layer,
+                })),
+                drawImage: vi.fn((_items: unknown, layer: number = 1, _options?: unknown) => ({
+                    id: Symbol(`image-${seq++}`),
+                    layer,
+                })),
+                removeDrawHandle: vi.fn(),
+                clearLayer: vi.fn(),
+                clearAll: vi.fn(),
+                clearStaticCache: vi.fn(),
+            };
+            const renderer = createMockRenderer();
+            (renderer.getDrawAPI as ReturnType<typeof vi.fn>).mockReturnValue(drawAPI);
+            return { e: new CanvasTileEngine<Mount>({}, baseConfig, renderer), drawAPI };
+        }
+
+        const testImg = { width: 10, height: 10 } as unknown as HTMLImageElement;
+
+        it("threads visibleOf through to the renderer draw API on every draw kind", () => {
+            const { e, drawAPI } = createEngineWithDrawAPI();
+            const visible = () => true;
+
+            e.drawRect({ x: 1, y: 1, size: 1 }, 1, { visibleOf: visible });
+            expect(drawAPI.drawRect.mock.calls[0][2]).toEqual({ visibleOf: visible });
+
+            e.drawCircle({ x: 1, y: 1, size: 1 }, 1, { visibleOf: visible });
+            expect(drawAPI.drawCircle.mock.calls[0][2]).toEqual({ visibleOf: visible });
+
+            e.drawText({ x: 1, y: 1, text: "a" }, 2, { visibleOf: visible });
+            expect(drawAPI.drawText.mock.calls[0][2]).toEqual({ visibleOf: visible });
+
+            e.drawLine({ from: { x: 0, y: 0 }, to: { x: 1, y: 1 } }, undefined, 1, { visibleOf: visible });
+            expect(drawAPI.drawLine.mock.calls[0][3]).toEqual({ visibleOf: visible });
+
+            e.drawPath(
+                {
+                    points: [
+                        { x: 0, y: 0 },
+                        { x: 1, y: 1 },
+                    ],
+                },
+                1,
+                { visibleOf: visible },
+            );
+            expect(drawAPI.drawPath.mock.calls[0][2]).toEqual({ visibleOf: visible });
+
+            e.drawImage({ x: 1, y: 1, size: 1, img: testImg }, 1, { visibleOf: visible });
+            expect(drawAPI.drawImage.mock.calls[0][2]).toEqual({ visibleOf: visible });
+        });
+
+        it("threads clip through to the renderer draw API on every dynamic draw kind", () => {
+            const { e, drawAPI } = createEngineWithDrawAPI();
+            const clip = { minX: 0, maxX: 4, minY: 0, maxY: 2 };
+
+            e.drawRect({ x: 1, y: 1, size: 1 }, 1, { clip });
+            e.drawCircle({ x: 1, y: 1, size: 1 }, 1, { clip });
+            e.drawText({ x: 1, y: 1, text: "a" }, 2, { clip });
+            e.drawLine({ from: { x: 0, y: 0 }, to: { x: 1, y: 1 } }, undefined, 1, { clip });
+            e.drawPath(
+                {
+                    points: [
+                        { x: 0, y: 0 },
+                        { x: 1, y: 1 },
+                    ],
+                },
+                1,
+                { clip },
+            );
+            e.drawImage({ x: 1, y: 1, size: 1, img: testImg }, 1, { clip });
+
+            expect(drawAPI.drawRect.mock.calls[0][2]).toMatchObject({ clip });
+            expect(drawAPI.drawCircle.mock.calls[0][2]).toMatchObject({ clip });
+            expect(drawAPI.drawText.mock.calls[0][2]).toMatchObject({ clip });
+            expect(drawAPI.drawLine.mock.calls[0][3]).toMatchObject({ clip });
+            expect(drawAPI.drawPath.mock.calls[0][2]).toMatchObject({ clip });
+            expect(drawAPI.drawImage.mock.calls[0][2]).toMatchObject({ clip });
+        });
+
+        it("visibleOf reads live state: hiding an item drops it from hit queries without re-registering", () => {
+            const { e } = createEngineWithDrawAPI();
+            const hidden = new Set<string>();
+            e.drawRect(
+                [
+                    { x: 2, y: 2, size: 1, data: "a" },
+                    { x: 5, y: 5, size: 1, data: "b" },
+                ],
+                1,
+                { visibleOf: (item) => !hidden.has(item.data!) },
+            );
+
+            expect(e.hitTestFirst({ x: 2.5, y: 2.5 })).toBeDefined();
+
+            hidden.add("a");
+            expect(e.hitTestFirst({ x: 2.5, y: 2.5 })).toBeUndefined();
+            expect(e.hitTestFirst({ x: 5.5, y: 5.5 })).toBeDefined();
+        });
+
+        it("interactiveOf false keeps an item painted but lets queries fall through to items below", () => {
+            const { e } = createEngineWithDrawAPI();
+            e.drawRect({ x: 2, y: 2, size: 1 }, 1);
+            e.drawRect({ x: 2, y: 2, size: 1 }, 2, { interactiveOf: () => false });
+
+            const hits = e.hitTest({ x: 2.5, y: 2.5 });
+            expect(hits).toHaveLength(1);
+            expect(hits[0].layer).toBe(1);
+        });
+
+        it("an item hidden by visibleOf never hits, even when interactiveOf returns true", () => {
+            const { e } = createEngineWithDrawAPI();
+            e.drawRect({ x: 2, y: 2, size: 1 }, 1, { visibleOf: () => false, interactiveOf: () => true });
+            expect(e.hitTestFirst({ x: 2.5, y: 2.5 })).toBeUndefined();
+        });
+
+        it("hitTestRect respects both callbacks", () => {
+            const { e } = createEngineWithDrawAPI();
+            e.drawRect(
+                [
+                    { x: 2, y: 2, size: 1, data: "deco" },
+                    { x: 5, y: 5, size: 1, data: "unit" },
+                ],
+                1,
+                { interactiveOf: (item) => item.data !== "deco" },
+            );
+            e.drawCircle({ x: 7, y: 7, size: 1 }, 1, { visibleOf: () => false });
+
+            const marquee = e.hitTestRect({ minX: 0, maxX: 10, minY: 0, maxY: 10 });
+            expect(marquee).toHaveLength(1);
+            expect(marquee[0].item.data).toBe("unit");
+        });
+
+        it("applies to image kind too", () => {
+            const { e } = createEngineWithDrawAPI();
+            const hidden = new Set<string>();
+            e.drawImage(
+                [
+                    { x: 2, y: 2, size: 1, img: testImg, data: "a" },
+                    { x: 5, y: 5, size: 1, img: testImg, data: "b" },
+                ],
+                1,
+                { visibleOf: (item) => !hidden.has(item.data!), interactiveOf: (item) => item.data !== "b" },
+            );
+
+            expect(e.hitTestFirst({ x: 2.5, y: 2.5 })).toBeDefined();
+            hidden.add("a");
+            expect(e.hitTestFirst({ x: 2.5, y: 2.5 })).toBeUndefined();
+            // "b" stays visible but interactiveOf keeps it out of queries.
+            expect(e.hitTestFirst({ x: 5.5, y: 5.5 })).toBeUndefined();
+        });
+
+        it("applies to line and path kinds too", () => {
+            const { e } = createEngineWithDrawAPI();
+            e.drawLine({ from: { x: 0, y: 2 }, to: { x: 4, y: 2 } }, undefined, 1, { visibleOf: () => false });
+            expect(e.hitTestFirst({ x: 2.5, y: 2.5 })).toBeUndefined();
+
+            e.drawPath(
+                {
+                    points: [
+                        { x: 5, y: 5 },
+                        { x: 8, y: 5 },
+                        { x: 8, y: 8 },
+                    ],
+                    closed: true,
+                    style: { fillStyle: "#000" },
+                },
+                1,
+                { interactiveOf: () => false },
+            );
+            expect(e.hitTestFirst({ x: 7.5, y: 6 })).toBeUndefined();
+        });
+    });
+
+    describe("reduced motion", () => {
+        const reduced: CanvasTileEngineConfig = {
+            ...baseConfig,
+            minScale: 0.01,
+            maxScale: 1000,
+            accessibility: { reducedMotion: true },
+        };
+
+        // The anti-drift guarantee: fitBounds picks its branch from the same
+        // number the animation controller receives, so a reduced animated fit
+        // and an explicit instant fit cannot end up anywhere different.
+        it("makes an animated fitBounds identical to an instant one", () => {
+            const bounds = { minX: 0, maxX: 100, minY: 0, maxY: 50 };
+
+            const animated = createEngine(reduced);
+            const animatedResult = animated.fitBounds(bounds);
+
+            const instant = createEngine({ ...reduced, accessibility: { reducedMotion: false } });
+            const instantResult = instant.fitBounds(bounds, { durationMs: 0 });
+
+            expect(animatedResult).toEqual(instantResult);
+            expect(animated.getScale()).toBe(instant.getScale());
+            expect(animated.getCenter().x).toBeCloseTo(instant.getCenter().x);
+            expect(animated.getCenter().y).toBeCloseTo(instant.getCenter().y);
+        });
+
+        it("fires onComplete synchronously for an animated fitBounds", () => {
+            const e = createEngine(reduced);
+            const onComplete = vi.fn();
+
+            e.fitBounds({ minX: 0, maxX: 100, minY: 0, maxY: 50 }, { onComplete });
+
+            expect(onComplete).toHaveBeenCalledTimes(1);
+        });
+
+        it("collapses goCenter and goScale to instant", () => {
+            const e = createEngine(reduced);
+            const onZoom = vi.fn<(scale: number) => void>();
+            e.onZoom = onZoom;
+
+            e.goCenter(40, 25, 500);
+            expect(e.getCenter()).toEqual({ x: 40, y: 25 });
+
+            e.goScale(4, 500);
+            expect(e.getScale()).toBe(4);
+            expect(onZoom).toHaveBeenCalledTimes(1);
+            expect(onZoom).toHaveBeenCalledWith(4);
+        });
+
+        it("overrides an explicitly passed durationMs", () => {
+            const e = createEngine(reduced);
+
+            e.goCenter(10, 20, 5000);
+
+            expect(e.getCenter()).toEqual({ x: 10, y: 20 });
+        });
+
+        it("honors a runtime setReducedMotion", () => {
+            const e = createEngine({ ...baseConfig, minScale: 0.01, maxScale: 1000 });
+            expect(e.getReducedMotion()).toBe(false);
+
+            e.setReducedMotion(true);
+
+            expect(e.getReducedMotion()).toBe(true);
+            expect(e.getConfig().accessibility.reducedMotion).toBe(true);
+        });
+
+        it('resolves "auto" from the pushed platform signal', () => {
+            const e = createEngine();
+            expect(e.getReducedMotion()).toBe(false);
+
+            e._setPlatformReducedMotion(true);
+
+            expect(e.getReducedMotion()).toBe(true);
+            // The snapshot keeps reporting the preference, not the resolution.
+            expect(e.getConfig().accessibility.reducedMotion).toBe("auto");
+        });
+
+        // Reduction happens once, inside the renderer's own AnimationController.
+        // Forwarding a shortened duration here would double-apply it on the web
+        // and skip it entirely on a renderer that does its own thing.
+        it("forwards resize durations to the renderer unchanged", () => {
+            const renderer = createMockRenderer();
+            const e = new CanvasTileEngine<Mount>({}, reduced, renderer);
+
+            e.resize(1000, 800, 500);
+
+            expect(renderer.resizeWithAnimation).toHaveBeenCalledWith(1000, 800, 500, undefined);
+        });
+
+        // The regression guard for pull-based detection: on React Native
+        // `window` exists but `matchMedia` does not, so any core-side probe
+        // would throw here.
+        it("never probes the platform itself", () => {
+            vi.stubGlobal("window", {});
+            try {
+                const e = createEngine({ ...baseConfig, minScale: 0.01, maxScale: 1000 });
+                expect(() => e.setReducedMotion("auto")).not.toThrow();
+                expect(() => e.goCenter(5, 5, 500)).not.toThrow();
+                expect(() => e.fitBounds({ minX: 0, maxX: 10, minY: 0, maxY: 10 })).not.toThrow();
+                expect(e.getReducedMotion()).toBe(false);
+            } finally {
+                vi.unstubAllGlobals();
+            }
+        });
+    });
+});

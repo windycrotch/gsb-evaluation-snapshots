@@ -1,0 +1,23 @@
+{
+    "name": "renderer-server-game-map",
+    "private": true,
+    "version": "0.0.0",
+    "type": "module",
+    "scripts": {
+        "start": "tsx src/main.ts",
+        "render": "tsx src/main.ts",
+        "typecheck": "tsc --noEmit",
+        "format": "oxfmt",
+        "format:check": "oxfmt --check"
+    },
+    "dependencies": {
+        "@canvas-tile-engine/core": "workspace:*",
+        "@canvas-tile-engine/renderer-server": "workspace:*",
+        "@faker-js/faker": "^10.6.0"
+    },
+    "devDependencies": {
+        "@types/node": "^25.3.3",
+        "tsx": "^4.23.15",
+        "typescript": "~5.9.3"
+    }
+}

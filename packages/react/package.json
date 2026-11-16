@@ -1,0 +1,68 @@
+{
+    "name": "@canvas-tile-engine/react",
+    "version": "0.9.0",
+    "description": "React bindings for Canvas Tile Engine - build interactive 2D grid-based maps with declarative components",
+    "author": "Enes Yüksel",
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/enesyukselx/canvas-tile-engine.git",
+        "directory": "packages/react"
+    },
+    "homepage": "https://canvastileengine.dev",
+    "bugs": {
+        "url": "https://github.com/enesyukselx/canvas-tile-engine/issues"
+    },
+    "keywords": [
+        "canvas",
+        "tile",
+        "engine",
+        "react",
+        "2d",
+        "map",
+        "game",
+        "grid",
+        "visualization",
+        "component"
+    ],
+    "sideEffects": false,
+    "main": "dist/index.cjs",
+    "module": "dist/index.mjs",
+    "types": "dist/index.d.ts",
+    "exports": {
+        ".": {
+            "types": "./dist/index.d.ts",
+            "import": "./dist/index.mjs",
+            "require": "./dist/index.cjs"
+        }
+    },
+    "files": [
+        "dist"
+    ],
+    "scripts": {
+        "build": "tsup",
+        "dev": "tsup --watch",
+        "typecheck": "tsc --noEmit",
+        "lint": "oxlint",
+        "test": "vitest run",
+        "test:watch": "vitest",
+        "test:coverage": "vitest run --coverage",
+        "format": "oxfmt",
+        "format:check": "oxfmt --check"
+    },
+    "peerDependencies": {
+        "@canvas-tile-engine/core": ">=0.12.0",
+        "react": ">=18.0.0",
+        "react-dom": ">=18.0.0"
+    },
+    "devDependencies": {
+        "@canvas-tile-engine/core": "workspace:^",
+        "@canvas-tile-engine/react-shared": "workspace:^",
+        "@testing-library/react": "^16.3.3",
+        "@types/react": "^18.3.0",
+        "@types/react-dom": "^18.3.0",
+        "jsdom": "^26.1.0",
+        "react": "^18.3.1",
+        "react-dom": "^18.3.1"
+    }
+}

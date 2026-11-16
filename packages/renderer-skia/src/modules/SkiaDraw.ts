@@ -1,0 +1,1153 @@
+import {
+    CanvasTileEngineConfig,
+    Circle,
+    CoordinateTransformer,
+    Coords,
+    DEFAULT_VALUES,
+    DrawHandle,
+    ICamera,
+    ImageItem,
+    Line,
+    PathItem,
+    Rect,
+    Text,
+    resolveLineWidthPx,
+    resolveSizePx,
+    resolveBoxPx,
+    isGradient,
+    normalizeStops,
+    gradientAxisPx,
+    resolveLineDashPx,
+    overlayLineStyle,
+    resolveRadiusPx,
+    resolveCornerRadiusPx,
+    resolveOrigin,
+    computeOriginOffset,
+    traceRoundedPath,
+    traceCommands,
+    pathItemBounds,
+    type CommandTraceTarget,
+    DrawTransform,
+} from "@canvas-tile-engine/core";
+import type {
+    ItemCollectionChange,
+    FontWeight,
+    Paint,
+    PaintBox,
+    RendererClipOptions,
+    AnchoredItem,
+    Bounds,
+    LineStyle,
+    LineDecorationStyle,
+    PathDecorationStyle,
+    RendererDrawOptions,
+    RendererImageDrawOptions,
+    ShapeDecorationStyle,
+    TextDecorationStyle,
+} from "@canvas-tile-engine/core";
+import {
+    FillType,
+    matchFont,
+    PaintStyle,
+    Skia,
+    TileMode,
+    type InputRRect,
+    type SkCanvas,
+    type SkColor,
+    type SkFont,
+    type SkImage,
+    type SkPaint,
+    type SkPath,
+    type SkPicture,
+    type SkRect,
+} from "@shopify/react-native-skia";
+import {
+    PaintedCuller,
+    boxPaintBounds,
+    boxPixelPadding,
+    getViewportBounds,
+    gridLineStep,
+    intersectsBounds,
+    linePaintBounds,
+    pathPaintBounds,
+    textPaintBounds,
+    staticCacheBounds,
+    staticRectPaintBounds,
+    staticCirclePaintBounds,
+    staticImagePaintBounds,
+} from "@canvas-tile-engine/renderer-shared/geometry";
+
+/** matchFont's weight argument; its input type is not exported by the package. */
+type SkiaFontWeight = NonNullable<NonNullable<Parameters<typeof matchFont>[0]>["fontWeight"]>;
+import { type DrawCallback, DrawChanges, Layer } from "@canvas-tile-engine/renderer-shared/scene";
+import { LruCache } from "@canvas-tile-engine/renderer-shared/cache";
+import type { SkiaDrawContext } from "../types";
+import { DEFAULT_SANS_SERIF } from "../utils/fonts";
+
+const TEXT_BOUNDS_CACHE_LIMIT = 2048;
+
+interface TextLayout {
+    bounds: Bounds;
+    offset: Coords;
+}
+
+/**
+ * Upper bound on the parsed-color cache.
+ *
+ * The cache is consulted once per visible item per frame, so the working set is
+ * whatever survives culling — not the whole item list. The bound has to clear
+ * that, because a bounded LRU whose working set overflows it does not degrade,
+ * it falls off a cliff: every lookup asks for the entry the previous frame
+ * evicted and the hit rate goes to zero. 8192 covers a dense viewport where
+ * `styleOf` gives every cell its own stable color, at roughly 180 bytes an
+ * entry (the key string, the `SkColor` float array, the map slot) — about 1.5MB
+ * held, which is cheap next to the pictures a frame already records.
+ *
+ * It is deliberately twice `renderer-webgl`'s bound. Every miss here crosses
+ * into native `Skia.Color`, and unlike WebGL there is no inline parser to fall
+ * back on, so headroom is worth more memory here than there. Size the two
+ * independently rather than reunifying them.
+ * @internal
+ */
+export const COLOR_CACHE_LIMIT = 8192;
+
+/**
+ * Skia implementation of the engine draw API.
+ *
+ * Mirrors the Canvas2D `CanvasDraw` (culling, spatial indexing, origin handling,
+ * rotation), drawing each primitive directly onto the `SkCanvas` that is being
+ * recorded into the current frame's picture. Colors are parsed by Skia itself,
+ * so no DOM color parser is needed.
+ * @internal
+ */
+export class SkiaDraw {
+    private drawChanges = new DrawChanges();
+
+    /** Transform helpers handed to custom draw callbacks. */
+    private drawTransform: DrawTransform = {
+        worldToScreen: (x, y) => this.transformer.worldToScreen(x, y),
+        screenToWorld: (x, y) => this.transformer.screenToWorld(x, y),
+    };
+    // Reusable paints, mutated per draw call (draws are immediate within a frame).
+    private fillPaint: SkPaint;
+    private strokePaint: SkPaint;
+    private imagePaint: SkPaint;
+    private fontCache = new Map<string, SkFont>();
+    private textLayoutCache = new LruCache<string, TextLayout>(TEXT_BOUNDS_CACHE_LIMIT);
+    private colorCache = new LruCache<string, SkColor>(COLOR_CACHE_LIMIT);
+    // Pre-recorded pictures for the drawStatic* variants, keyed by cacheKey.
+    private staticPictureCache = new Map<string, { picture: SkPicture; recordScale: number }>();
+
+    constructor(
+        private layers: Layer<SkiaDrawContext>,
+        private transformer: CoordinateTransformer,
+        private camera: ICamera,
+    ) {
+        this.fillPaint = Skia.Paint();
+        this.fillPaint.setAntiAlias(true);
+        this.fillPaint.setStyle(PaintStyle.Fill);
+
+        this.strokePaint = Skia.Paint();
+        this.strokePaint.setAntiAlias(true);
+        this.strokePaint.setStyle(PaintStyle.Stroke);
+
+        this.imagePaint = Skia.Paint();
+        this.imagePaint.setAntiAlias(true);
+    }
+
+    /**
+     * Register a layer callback, forwarding the registration's clip. Every
+     * draw method funnels through here so a new draw kind cannot forget it.
+     */
+    private register(
+        layer: number,
+        options: RendererClipOptions | undefined,
+        fn: DrawCallback<SkiaDrawContext>,
+    ): DrawHandle {
+        return this.layers.add(layer, fn, options?.clip);
+    }
+
+    /** Update the caches belonging to an existing collection registration. */
+    applyDrawChanges(handle: DrawHandle, changes: readonly ItemCollectionChange<unknown>[]): void {
+        this.drawChanges.apply(handle, changes);
+    }
+
+    addDrawFunction(
+        fn: (
+            canvas: SkCanvas,
+            coords: Coords,
+            config: Required<CanvasTileEngineConfig>,
+            transform: DrawTransform,
+        ) => void,
+        layer: number = 1,
+        options?: RendererClipOptions,
+    ): DrawHandle {
+        return this.register(layer, options, ({ ctx: canvas, config, topLeft }) => {
+            fn(canvas, topLeft, config, this.drawTransform);
+        });
+    }
+
+    drawRect(
+        items: Array<Rect> | Rect,
+        layer: number = 1,
+        options?: RendererDrawOptions<Rect, ShapeDecorationStyle>,
+    ): DrawHandle {
+        const list = Array.isArray(items) ? items : [items];
+        const styleOf = options?.styleOf;
+        const visibleOf = options?.visibleOf;
+
+        const culler = new PaintedCuller(
+            list,
+            (item, scale) => boxPaintBounds(item, scale, item.style),
+            !!styleOf,
+            (item) => boxPixelPadding(item, item.style),
+        );
+
+        const handle = this.register(layer, options, ({ ctx: canvas, config, topLeft }) => {
+            const bounds = getViewportBounds(topLeft, config);
+            const visibleItems = culler.query(bounds, this.camera.scale);
+
+            for (const item of visibleItems) {
+                if (visibleOf?.(item) === false) {
+                    continue;
+                }
+                const deco = styleOf?.(item);
+                const style = deco ? { ...item.style, ...deco } : item.style;
+                if (!intersectsBounds(bounds, boxPaintBounds(item, this.camera.scale, style))) {
+                    continue;
+                }
+
+                const pos = this.transformer.worldToScreen(item.x, item.y);
+                this.paintRect(canvas, item, pos, this.camera.scale, true, deco);
+            }
+        });
+        this.drawChanges.add(handle, culler.applyChanges.bind(culler));
+        return handle;
+    }
+
+    /** Paint a single rect at a resolved position; `cellSize` is the pixel
+     * size of one world cell. `useSizePx` is false on the static picture path,
+     * which replays at a recorded scale where a screen size cannot hold.
+     * `deco` is dynamic-path only — the static path records without
+     * decorations. */
+    private paintRect(
+        canvas: SkCanvas,
+        item: Rect,
+        pos: Coords,
+        cellSize: number,
+        useSizePx: boolean,
+        deco?: ShapeDecorationStyle,
+    ) {
+        const size = item.size ?? 1;
+        const origin = resolveOrigin(item.origin);
+        const style = deco ? { ...item.style, ...deco } : item.style;
+        const box = useSizePx
+            ? resolveBoxPx(item, cellSize)
+            : { width: (item.width ?? size) * cellSize, height: (item.height ?? size) * cellSize };
+        const pxW = box.width;
+        const pxH = box.height;
+        const { x: drawX, y: drawY } = computeOriginOffset(pos, pxW, pxH, origin, cellSize);
+        const cx = drawX + pxW / 2;
+        const cy = drawY + pxH / 2;
+        const rotation = item.rotate ?? 0;
+        const radius = this.resolveRadius(resolveRadiusPx(item.radius, cellSize));
+
+        const count = rotation !== 0 ? this.withRotation(canvas, rotation, cx, cy) : -1;
+
+        const rect = Skia.XYWHRect(drawX, drawY, pxW, pxH);
+        const rounded = this.hasRadius(radius);
+        if (style?.fillStyle) {
+            const resetFill = this.applyFill(style.fillStyle, { x: drawX, y: drawY, width: pxW, height: pxH });
+            if (rounded) {
+                canvas.drawRRect(this.makeRRect(rect, radius), this.fillPaint);
+            } else {
+                canvas.drawRect(rect, this.fillPaint);
+            }
+            resetFill();
+        }
+        if (style?.strokeStyle) {
+            this.strokePaint.setColor(this.color(style.strokeStyle));
+            this.strokePaint.setStrokeWidth(resolveLineWidthPx(style, cellSize));
+            const dash = resolveLineDashPx(style, cellSize);
+            if (dash) {
+                this.strokePaint.setPathEffect(Skia.PathEffect.MakeDash(dash, 0));
+            }
+            if (rounded) {
+                canvas.drawRRect(this.makeRRect(rect, radius), this.strokePaint);
+            } else {
+                canvas.drawRect(rect, this.strokePaint);
+            }
+            if (dash) {
+                this.strokePaint.setPathEffect(null);
+            }
+        }
+
+        if (count !== -1) {
+            canvas.restoreToCount(count);
+        }
+    }
+
+    drawCircle(
+        items: Array<Circle> | Circle,
+        layer: number = 1,
+        options?: RendererDrawOptions<Circle, ShapeDecorationStyle>,
+    ): DrawHandle {
+        const list = Array.isArray(items) ? items : [items];
+        const styleOf = options?.styleOf;
+        const visibleOf = options?.visibleOf;
+
+        const culler = new PaintedCuller(
+            list,
+            (item, scale) => boxPaintBounds(item, scale, item.style, false),
+            !!styleOf,
+            (item) => boxPixelPadding(item, item.style),
+        );
+
+        const handle = this.register(layer, options, ({ ctx: canvas, config, topLeft }) => {
+            const bounds = getViewportBounds(topLeft, config);
+            const visibleItems = culler.query(bounds, this.camera.scale);
+
+            for (const item of visibleItems) {
+                if (visibleOf?.(item) === false) {
+                    continue;
+                }
+                const deco = styleOf?.(item);
+                const style = deco ? { ...item.style, ...deco } : item.style;
+                if (!intersectsBounds(bounds, boxPaintBounds(item, this.camera.scale, style, false))) {
+                    continue;
+                }
+
+                const pos = this.transformer.worldToScreen(item.x, item.y);
+                this.paintCircle(canvas, item, pos, this.camera.scale, true, deco);
+            }
+        });
+        this.drawChanges.add(handle, culler.applyChanges.bind(culler));
+        return handle;
+    }
+
+    /** Paint a single circle at a resolved position; `cellSize` is the pixel
+     * size of one world cell. `useSizePx` is false on the static picture
+     * path, which records at a fixed scale where pixel sizing cannot hold.
+     * `deco` is dynamic-path only — static pictures record undecorated. */
+    private paintCircle(
+        canvas: SkCanvas,
+        item: Circle,
+        pos: Coords,
+        cellSize: number,
+        useSizePx: boolean,
+        deco?: ShapeDecorationStyle,
+    ) {
+        const origin = resolveOrigin(item.origin);
+        const style = deco ? { ...item.style, ...deco } : item.style;
+        const pxSize = useSizePx ? resolveSizePx(item, cellSize) : (item.size ?? 1) * cellSize;
+        const radius = pxSize / 2;
+        const { x: drawX, y: drawY } = computeOriginOffset(pos, pxSize, pxSize, origin, cellSize);
+        const cx = drawX + radius;
+        const cy = drawY + radius;
+
+        if (style?.fillStyle) {
+            const resetFill = this.applyFill(style.fillStyle, {
+                x: cx - radius,
+                y: cy - radius,
+                width: radius * 2,
+                height: radius * 2,
+            });
+            canvas.drawCircle(cx, cy, radius, this.fillPaint);
+            resetFill();
+        }
+        if (style?.strokeStyle) {
+            this.strokePaint.setColor(this.color(style.strokeStyle));
+            this.strokePaint.setStrokeWidth(resolveLineWidthPx(style, cellSize));
+            const dash = resolveLineDashPx(style, cellSize);
+            if (dash) {
+                this.strokePaint.setPathEffect(Skia.PathEffect.MakeDash(dash, 0));
+            }
+            canvas.drawCircle(cx, cy, radius, this.strokePaint);
+            if (dash) {
+                this.strokePaint.setPathEffect(null);
+            }
+        }
+    }
+
+    drawLine(
+        items: Array<Line> | Line,
+        style?: LineStyle,
+        layer: number = 1,
+        options?: RendererDrawOptions<Line, LineDecorationStyle>,
+    ): DrawHandle {
+        const list = Array.isArray(items) ? items : [items];
+        const styleOf = options?.styleOf;
+        const visibleOf = options?.visibleOf;
+
+        return this.register(layer, options, ({ ctx: canvas, config, topLeft }) => {
+            const bounds = getViewportBounds(topLeft, config);
+            const baseColor = this.color(style?.strokeStyle ?? "#000000");
+            const baseWidth = resolveLineWidthPx(style, this.camera.scale);
+            this.strokePaint.setColor(baseColor);
+            this.strokePaint.setStrokeWidth(baseWidth);
+            const dash = resolveLineDashPx(style, this.camera.scale);
+            const baseDash = dash ? Skia.PathEffect.MakeDash(dash, 0) : null;
+            if (baseDash) {
+                this.strokePaint.setPathEffect(baseDash);
+            }
+
+            for (const item of list) {
+                if (visibleOf?.(item) === false) {
+                    continue;
+                }
+                if (!intersectsBounds(bounds, linePaintBounds(item, this.camera.scale, style))) {
+                    continue;
+                }
+
+                const a = this.transformer.worldToScreen(item.from.x, item.from.y);
+                const b = this.transformer.worldToScreen(item.to.x, item.to.y);
+
+                const deco = styleOf?.(item);
+                if (deco || item.style) {
+                    // Item with its own style (or a decoration): repaint with
+                    // the merged style, then restore the shared paint for the
+                    // rest of the batch. Width resolves from the
+                    // registration-time layers only (call style + item.style)
+                    // — the same layers hit testing reads — so a smuggled
+                    // decoration width cannot desync paint from hit.
+                    const registration = overlayLineStyle(style, item.style);
+                    const merged = overlayLineStyle(registration, deco);
+                    this.strokePaint.setColor(this.color(merged.strokeStyle ?? "#000000"));
+                    this.strokePaint.setStrokeWidth(resolveLineWidthPx(registration, this.camera.scale));
+                    const mergedDash = resolveLineDashPx(merged, this.camera.scale);
+                    this.strokePaint.setPathEffect(mergedDash ? Skia.PathEffect.MakeDash(mergedDash, 0) : null);
+                    canvas.drawLine(a.x, a.y, b.x, b.y, this.strokePaint);
+                    this.strokePaint.setColor(baseColor);
+                    this.strokePaint.setStrokeWidth(baseWidth);
+                    this.strokePaint.setPathEffect(baseDash);
+                    continue;
+                }
+
+                canvas.drawLine(a.x, a.y, b.x, b.y, this.strokePaint);
+            }
+            if (baseDash) {
+                this.strokePaint.setPathEffect(null);
+            }
+        });
+    }
+
+    drawText(
+        items: Array<Text> | Text,
+        layer: number = 2,
+        options?: RendererDrawOptions<Text, TextDecorationStyle>,
+    ): DrawHandle {
+        const list = Array.isArray(items) ? items : [items];
+        const styleOf = options?.styleOf;
+        const visibleOf = options?.visibleOf;
+
+        const culler = new PaintedCuller(
+            list,
+            (item, scale) => {
+                const pxSize = item.fontPx ?? (item.size ?? 1) * scale;
+                const font = this.getFont(item.style?.fontFamily ?? DEFAULT_SANS_SERIF, pxSize, item.style?.fontWeight);
+                return textPaintBounds(item, scale, this.layoutText(item, item.style, pxSize, font).bounds);
+            },
+            !!styleOf,
+        );
+
+        const handle = this.register(layer, options, ({ ctx: canvas, config, topLeft }) => {
+            const bounds = getViewportBounds(topLeft, config);
+            const visibleItems = culler.query(bounds, this.camera.scale);
+
+            for (const item of visibleItems) {
+                if (visibleOf?.(item) === false) {
+                    continue;
+                }
+                const size = item.size ?? 1;
+                const deco = styleOf?.(item);
+                const style = deco ? { ...item.style, ...deco } : item.style;
+
+                // Font sizing matches the Canvas2D renderer: fontPx wins, else size * scale.
+                const pxSize = item.fontPx ?? size * this.camera.scale;
+                const font = this.getFont(style?.fontFamily ?? DEFAULT_SANS_SERIF, pxSize, style?.fontWeight);
+                const layout = this.layoutText(item, style, pxSize, font);
+                if (!intersectsBounds(bounds, textPaintBounds(item, this.camera.scale, layout.bounds))) {
+                    continue;
+                }
+                this.fillPaint.setColor(this.color(style?.fillStyle ?? "#000000"));
+
+                const pos = this.transformer.worldToScreen(item.x, item.y);
+                const x = pos.x + layout.offset.x;
+                const y = pos.y + layout.offset.y;
+
+                const rotation = item.rotate ?? 0;
+                const count = rotation !== 0 ? this.withRotation(canvas, rotation, pos.x, pos.y) : -1;
+                canvas.drawText(item.text, x, y, this.fillPaint, font);
+                if (count !== -1) {
+                    canvas.restoreToCount(count);
+                }
+            }
+        });
+        this.drawChanges.add(handle, (changes: readonly ItemCollectionChange<Text>[]) => culler?.applyChanges(changes));
+        return handle;
+    }
+
+    /**
+     * Adapts an SkPath to the Canvas2D-shaped sink `traceRoundedPath`
+     * expects, so corner-arc geometry is byte-identical across renderers.
+     */
+    private pathSink(path: SkPath): CommandTraceTarget {
+        return {
+            moveTo: (x, y) => void path.moveTo(x, y),
+            lineTo: (x, y) => void path.lineTo(x, y),
+            arc: (x, y, radius, startAngle, endAngle, counterclockwise) => {
+                // Canvas2D arc semantics -> Skia oval sweep: positive sweep
+                // is clockwise (increasing angle) in both, y-down.
+                let sweep = endAngle - startAngle;
+                if (!counterclockwise && sweep < 0) {
+                    sweep += Math.PI * 2;
+                }
+                if (counterclockwise && sweep > 0) {
+                    sweep -= Math.PI * 2;
+                }
+                const deg = 180 / Math.PI;
+                const oval = Skia.XYWHRect(x - radius, y - radius, radius * 2, radius * 2);
+                const sweepDeg = sweep * deg;
+                // Skia reduces sweeps modulo 360, so a Canvas2D full circle
+                // (sweep exactly 360) would collapse to nothing - split it.
+                if (Math.abs(sweepDeg) >= 360) {
+                    const half = sweepDeg / 2;
+                    path.arcToOval(oval, startAngle * deg, half, false);
+                    path.arcToOval(oval, startAngle * deg + half, half, false);
+                } else {
+                    path.arcToOval(oval, startAngle * deg, sweepDeg, false);
+                }
+            },
+            quadraticCurveTo: (cpx, cpy, x, y) => void path.quadTo(cpx, cpy, x, y),
+            bezierCurveTo: (cp1x, cp1y, cp2x, cp2y, x, y) => void path.cubicTo(cp1x, cp1y, cp2x, cp2y, x, y),
+            closePath: () => void path.close(),
+        };
+    }
+
+    drawPath(
+        items: PathItem[],
+        layer: number = 1,
+        options?: RendererDrawOptions<PathItem, PathDecorationStyle>,
+    ): DrawHandle {
+        const styleOf = options?.styleOf;
+        const visibleOf = options?.visibleOf;
+        // Identity-keyed bounds survive insertion/removal; immutable collection
+        // updates invalidate only the replaced item.
+        const itemBounds = new WeakMap(items.map((item) => [item, pathItemBounds(item)] as const));
+
+        const handle = this.register(layer, options, ({ ctx: canvas, config, topLeft }) => {
+            const viewport = getViewportBounds(topLeft, config);
+            for (let n = 0; n < items.length; n++) {
+                const item = items[n];
+                if (!itemBounds.has(item)) {
+                    itemBounds.set(item, pathItemBounds(item));
+                }
+                const bounds = itemBounds.get(item);
+                if (!bounds || visibleOf?.(item) === false) {
+                    continue;
+                }
+
+                if (!intersectsBounds(viewport, pathPaintBounds(bounds, item.style, this.camera.scale))) {
+                    continue;
+                }
+
+                const deco = styleOf?.(item);
+                const style = deco ? { ...item.style, ...deco } : item.style;
+                const filled = style?.fillStyle !== undefined;
+
+                const path = Skia.Path.Make();
+                if (item.commands !== undefined) {
+                    // Free-form commands replay natively (curves stay
+                    // curves); world→screen and degrees→radians convert in
+                    // core so all renderers trace identical geometry.
+                    traceCommands(
+                        this.pathSink(path),
+                        item.commands,
+                        (x, y) => this.transformer.worldToScreen(x, y),
+                        this.camera.scale,
+                    );
+                } else {
+                    const pts = item.points!.map((p) => this.transformer.worldToScreen(p.x, p.y));
+                    // Corner radius from item.style: registration-time
+                    // only (see the stroke-width note below).
+                    traceRoundedPath(
+                        this.pathSink(path),
+                        pts,
+                        item.closed === true,
+                        resolveCornerRadiusPx(item.style, this.camera.scale),
+                    );
+                }
+
+                if (filled) {
+                    path.setFillType(item.fillRule === "evenodd" ? FillType.EvenOdd : FillType.Winding);
+                    // A path's box is its bounding box on screen, matching the
+                    // Canvas2D and WebGL paths.
+                    const topLeftPx = this.transformer.worldToScreen(bounds.minX, bounds.minY);
+                    const bottomRightPx = this.transformer.worldToScreen(bounds.maxX, bounds.maxY);
+                    const resetFill = this.applyFill(style!.fillStyle!, {
+                        x: topLeftPx.x,
+                        y: topLeftPx.y,
+                        width: bottomRightPx.x - topLeftPx.x,
+                        height: bottomRightPx.y - topLeftPx.y,
+                    });
+                    canvas.drawPath(path, this.fillPaint);
+                    resetFill();
+                }
+                // A fill-only item draws no outline; everything else strokes
+                // (defaulting to a hairline, matching the legacy behavior).
+                if (style?.strokeStyle !== undefined || !filled) {
+                    this.strokePaint.setColor(this.color(style?.strokeStyle ?? "#000000"));
+                    // Width from item.style, not the decorated merge:
+                    // hit testing reads the registration-time style, and
+                    // the decoration types' width exclusion is type-level
+                    // only — a smuggled width must not desync paint & hit.
+                    this.strokePaint.setStrokeWidth(resolveLineWidthPx(item.style, this.camera.scale));
+                    const dash = resolveLineDashPx(style, this.camera.scale);
+                    if (dash) {
+                        this.strokePaint.setPathEffect(Skia.PathEffect.MakeDash(dash, 0));
+                    }
+                    canvas.drawPath(path, this.strokePaint);
+                    if (dash) {
+                        this.strokePaint.setPathEffect(null);
+                    }
+                }
+            }
+        });
+        this.drawChanges.add(handle, (changes: readonly ItemCollectionChange<PathItem>[]) => {
+            for (const change of changes) {
+                itemBounds.delete(change.item);
+                if (change.type === "update") {
+                    itemBounds.delete(change.previous);
+                }
+            }
+        });
+        return handle;
+    }
+
+    drawImage(
+        items: Array<ImageItem<SkImage>> | ImageItem<SkImage>,
+        layer: number = 1,
+        options?: RendererImageDrawOptions<SkImage>,
+    ): DrawHandle {
+        const list = Array.isArray(items) ? items : [items];
+        const visibleOf = options?.visibleOf;
+
+        const culler = new PaintedCuller(
+            list,
+            (item, scale) => boxPaintBounds(item, scale),
+            false,
+            (item) => boxPixelPadding(item),
+        );
+
+        const handle = this.register(layer, options, ({ ctx: canvas, config, topLeft }) => {
+            const bounds = getViewportBounds(topLeft, config);
+            const visibleItems = culler.query(bounds, this.camera.scale);
+
+            for (const item of visibleItems) {
+                if (visibleOf?.(item) === false) {
+                    continue;
+                }
+                if (!intersectsBounds(bounds, boxPaintBounds(item, this.camera.scale))) {
+                    continue;
+                }
+
+                const pos = this.transformer.worldToScreen(item.x, item.y);
+                this.paintImage(canvas, item, pos, this.camera.scale, true);
+            }
+        });
+        this.drawChanges.add(handle, culler.applyChanges.bind(culler));
+        return handle;
+    }
+
+    /** Paint a single image at a resolved position; `cellSize` is the pixel
+     * size of one world cell. `useSizePx` is false on the static picture
+     * path, which records at a fixed scale where pixel sizing cannot hold. */
+    private paintImage(canvas: SkCanvas, item: ImageItem<SkImage>, pos: Coords, cellSize: number, useSizePx: boolean) {
+        const origin = resolveOrigin(item.origin);
+
+        const img = item.img;
+        const imgW = img.width();
+        const imgH = img.height();
+        if (!imgW || !imgH) {
+            return;
+        }
+
+        const pxSize = useSizePx ? resolveSizePx(item, cellSize) : (item.size ?? 1) * cellSize;
+
+        // Spritesheet source rect; defaults to the whole image
+        const srcX = item.sprite?.x ?? 0;
+        const srcY = item.sprite?.y ?? 0;
+        const srcW = item.sprite?.w ?? imgW;
+        const srcH = item.sprite?.h ?? imgH;
+
+        // preserve aspect (of the sprite frame when one is set)
+        const aspect = srcW / srcH;
+        let drawW = pxSize;
+        let drawH = pxSize;
+        if (aspect > 1) {
+            drawH = pxSize / aspect;
+        } else {
+            drawW = pxSize * aspect;
+        }
+
+        const { x: baseX, y: baseY } = computeOriginOffset(pos, pxSize, pxSize, origin, cellSize);
+        const offsetX = baseX + (pxSize - drawW) / 2;
+        const offsetY = baseY + (pxSize - drawH) / 2;
+        const rotation = item.rotate ?? 0;
+
+        const cx = offsetX + drawW / 2;
+        const cy = offsetY + drawH / 2;
+        const flipX = item.flipX === true;
+        const flipY = item.flipY === true;
+        const count = rotation !== 0 ? this.withRotation(canvas, rotation, cx, cy) : -1;
+        // Mirror around the draw box center (image first, rotation second —
+        // the flip is the innermost transform, matching the 2D renderers).
+        // Flip is scale-independent, so static pictures honor it too.
+        const flipCount = flipX || flipY ? canvas.save() : -1;
+        if (flipX || flipY) {
+            canvas.translate(cx, cy);
+            canvas.scale(flipX ? -1 : 1, flipY ? -1 : 1);
+            canvas.translate(-cx, -cy);
+        }
+
+        const src = Skia.XYWHRect(srcX, srcY, srcW, srcH);
+        const dest = Skia.XYWHRect(offsetX, offsetY, drawW, drawH);
+        // Skia snapshots paint state at draw time, so mutating the shared paint
+        // per item is safe (same pattern as fill/stroke paints).
+        const opacity = item.opacity ?? 1;
+        if (opacity !== 1) {
+            this.imagePaint.setAlphaf(opacity);
+        }
+        canvas.drawImageRect(img, src, dest, this.imagePaint);
+        if (opacity !== 1) {
+            this.imagePaint.setAlphaf(1);
+        }
+
+        if (flipCount !== -1) {
+            canvas.restoreToCount(flipCount);
+        }
+        if (count !== -1) {
+            canvas.restoreToCount(count);
+        }
+    }
+
+    drawGridLines(
+        cellSize: number,
+        style: { strokeStyle: string; lineWidth: number },
+        layer: number = 0,
+        options?: RendererClipOptions,
+    ): DrawHandle {
+        if (!Number.isFinite(cellSize) || cellSize <= 0) {
+            throw new RangeError("[CanvasTileEngine] cellSize must be a positive finite number");
+        }
+        return this.register(layer, options, ({ ctx: canvas, config, topLeft }) => {
+            const viewW = config.size.width / config.scale;
+            const viewH = config.size.height / config.scale;
+
+            // Zoomed far out, keep only every 2nd/4th/... line so the number of
+            // drawLine calls (each a JSI hop) stays bounded by the viewport size.
+            const step = gridLineStep(cellSize, config.scale);
+
+            const startX = Math.floor(topLeft.x / step) * step - DEFAULT_VALUES.CELL_CENTER_OFFSET;
+            const endX = Math.ceil((topLeft.x + viewW) / step) * step - DEFAULT_VALUES.CELL_CENTER_OFFSET;
+            const startY = Math.floor(topLeft.y / step) * step - DEFAULT_VALUES.CELL_CENTER_OFFSET;
+            const endY = Math.ceil((topLeft.y + viewH) / step) * step - DEFAULT_VALUES.CELL_CENTER_OFFSET;
+
+            this.strokePaint.setColor(this.color(style.strokeStyle));
+            this.strokePaint.setStrokeWidth(style.lineWidth);
+
+            for (let x = startX; x <= endX; x += step) {
+                const p1 = this.transformer.worldToScreen(x, startY);
+                const p2 = this.transformer.worldToScreen(x, endY);
+                canvas.drawLine(p1.x, p1.y, p2.x, p2.y, this.strokePaint);
+            }
+
+            for (let y = startY; y <= endY; y += step) {
+                const p1 = this.transformer.worldToScreen(startX, y);
+                const p2 = this.transformer.worldToScreen(endX, y);
+                canvas.drawLine(p1.x, p1.y, p2.x, p2.y, this.strokePaint);
+            }
+        });
+    }
+
+    // ─── Static variants ───
+    //
+    // Unlike the dynamic draw* methods, which re-issue one Skia call per visible
+    // item on every frame (each a JSI hop on React Native), the static variants
+    // record the full item set once into an SkPicture and replay it per frame
+    // with a single drawPicture under the camera transform. Replay cost is a
+    // handful of calls regardless of item count — this is the Skia equivalent
+    // of the Canvas2D renderer's offscreen cache. The picture is recorded at
+    // the camera scale active at record time and replayed under the camera
+    // transform, so world-unit style values (lineWidth, radius) scale with
+    // zoom exactly as intended. Pixel-denominated opt-ins (lineWidthPx,
+    // lineDashPx) are baked in at the record scale and scale along on replay
+    // — use the dynamic draw methods when a zoom-independent px value must
+    // hold.
+
+    drawStaticRect(items: Array<Rect>, cacheKey: string, layer: number = 1, options?: RendererClipOptions): DrawHandle {
+        return this.addStaticPictureLayer(
+            cacheKey,
+            items,
+            layer,
+            staticRectPaintBounds,
+            (canvas, item, pos, cellSize) => this.paintRect(canvas, item, pos, cellSize, false),
+            options,
+        );
+    }
+
+    drawStaticCircle(
+        items: Array<Circle>,
+        cacheKey: string,
+        layer: number = 1,
+        options?: RendererClipOptions,
+    ): DrawHandle {
+        return this.addStaticPictureLayer(
+            cacheKey,
+            items,
+            layer,
+            staticCirclePaintBounds,
+            (canvas, item, pos, cellSize) => this.paintCircle(canvas, item, pos, cellSize, false),
+            options,
+        );
+    }
+
+    drawStaticImage(
+        items: Array<ImageItem<SkImage>>,
+        cacheKey: string,
+        layer: number = 1,
+        options?: RendererClipOptions,
+    ): DrawHandle {
+        return this.addStaticPictureLayer(
+            cacheKey,
+            items,
+            layer,
+            (item) => staticImagePaintBounds(item, item.img.width(), item.img.height()),
+            (canvas, item, pos, cellSize) => this.paintImage(canvas, item, pos, cellSize, false),
+            options,
+        );
+    }
+
+    clearStaticCache(cacheKey?: string) {
+        // Only drop the references: a still-registered layer callback may keep
+        // replaying its picture, so native memory is reclaimed by the GC
+        // finalizer rather than an explicit dispose here.
+        if (cacheKey === undefined) {
+            this.staticPictureCache.clear();
+        } else {
+            this.staticPictureCache.delete(cacheKey);
+        }
+    }
+
+    /**
+     * Record `items` into a new picture for a `drawStatic*` registration,
+     * store it under `cacheKey` (replacing any earlier entry), and register a
+     * layer callback that replays it.
+     *
+     * Contract: every call records afresh, at the camera scale active at
+     * registration. The layer captures the picture and replays it every frame
+     * under the camera transform; nothing re-records it later. To show new
+     * items or styles, register again (through the engine, reusing the
+     * `cacheKey` replaces the old registration). `clearStaticCache` only drops
+     * the stored reference.
+     */
+    private addStaticPictureLayer<T extends AnchoredItem>(
+        cacheKey: string,
+        items: T[],
+        layer: number,
+        boundsOf: (item: T, scale: number) => Bounds | null,
+        paintItem: (canvas: SkCanvas, item: T, pos: Coords, cellSize: number) => void,
+        options?: RendererClipOptions,
+    ): DrawHandle {
+        if (items.length === 0) {
+            return this.register(layer, options, () => {});
+        }
+
+        const entry = this.recordStaticPicture(items, boundsOf, paintItem);
+        this.staticPictureCache.set(cacheKey, entry);
+        const { picture, recordScale } = entry;
+
+        return this.register(layer, options, ({ ctx: canvas, topLeft }) => {
+            // worldToScreen(w) = (w + CELL_CENTER_OFFSET - topLeft) * scale, and
+            // the picture was recorded with a camera at (0, 0, recordScale), so
+            // the recorded coordinates only miss the -topLeft term and the
+            // scale ratio.
+            const scale = this.camera.scale;
+            const count = canvas.save();
+            canvas.translate(-topLeft.x * scale, -topLeft.y * scale);
+            canvas.scale(scale / recordScale, scale / recordScale);
+            canvas.drawPicture(picture);
+            canvas.restoreToCount(count);
+        });
+    }
+
+    /** Record `items` into a picture using a camera fixed at (0, 0) and the current scale. */
+    private recordStaticPicture<T extends AnchoredItem>(
+        items: T[],
+        boundsOf: (item: T, scale: number) => Bounds | null,
+        paintItem: (canvas: SkCanvas, item: T, pos: Coords, cellSize: number) => void,
+    ): { picture: SkPicture; recordScale: number } {
+        const recordScale = this.camera.scale;
+
+        // Same painted bounds as Canvas2D, already in corner-space with the
+        // cell-center offset, origins, rotation, and recorded strokes included.
+        // Empty registrations return before reaching this method.
+        const { minX, minY, maxX, maxY } = staticCacheBounds(items, recordScale, boundsOf) ?? {
+            minX: 0,
+            minY: 0,
+            maxX: 0,
+            maxY: 0,
+        };
+
+        const recorder = Skia.PictureRecorder();
+        const canvas = recorder.beginRecording(
+            Skia.XYWHRect(
+                minX * recordScale,
+                minY * recordScale,
+                (maxX - minX) * recordScale,
+                (maxY - minY) * recordScale,
+            ),
+        );
+
+        for (const item of items) {
+            const pos = {
+                x: (item.x + DEFAULT_VALUES.CELL_CENTER_OFFSET) * recordScale,
+                y: (item.y + DEFAULT_VALUES.CELL_CENTER_OFFSET) * recordScale,
+            };
+            paintItem(canvas, item, pos, recordScale);
+        }
+
+        return { picture: recorder.finishRecordingAsPicture(), recordScale };
+    }
+
+    // ─── Layer management ───
+
+    removeDrawHandle(handle: DrawHandle) {
+        this.drawChanges.remove(handle);
+        this.layers.remove(handle);
+    }
+
+    clearLayer(layer: number) {
+        this.drawChanges.clear(layer);
+        this.layers.clear(layer);
+    }
+
+    clearAll() {
+        this.drawChanges.clear();
+        this.layers.clear();
+    }
+
+    destroy() {
+        this.drawChanges.clear();
+        this.layers.clear();
+        this.fontCache.clear();
+        this.textLayoutCache.clear();
+        this.colorCache.clear();
+        this.staticPictureCache.clear();
+    }
+
+    // ─── Helpers ───
+
+    /**
+     * Parse a CSS color string once and reuse the result — `Skia.Color` is a
+     * native parse per call, which adds up over thousands of items per frame.
+     *
+     * The cache is bounded: a `styleOf` that computes a color string per frame
+     * would otherwise add a permanent entry for every value it ever produced.
+     */
+    /**
+     * Point `fillPaint` at a {@link Paint} and hand back a reset function.
+     *
+     * The paint is shared across every item of a frame, so a gradient shader
+     * has to be cleared again afterwards — a leaked shader would tint every
+     * later solid fill. `box` is the item's drawn box in canvas pixels;
+     * `toScreen` is only consulted for world units.
+     */
+    private applyFill(
+        paint: Paint,
+        box: PaintBox,
+        toScreen: (x: number, y: number) => Coords = (x, y) => this.transformer.worldToScreen(x, y),
+    ): () => void {
+        if (!isGradient(paint)) {
+            this.fillPaint.setColor(this.color(paint));
+            return () => {};
+        }
+
+        const axis = gradientAxisPx(paint, box, toScreen);
+        const stops = normalizeStops(paint.stops);
+        this.fillPaint.setShader(
+            Skia.Shader.MakeLinearGradient(
+                { x: axis.x0, y: axis.y0 },
+                { x: axis.x1, y: axis.y1 },
+                stops.map((stop) => this.color(stop.color)),
+                stops.map((stop) => stop.offset),
+                TileMode.Clamp,
+            ),
+        );
+        return () => this.fillPaint.setShader(null);
+    }
+
+    private color(value: string): SkColor {
+        let parsed = this.colorCache.get(value);
+        if (!parsed) {
+            parsed = Skia.Color(value);
+            this.colorCache.set(value, parsed);
+        }
+        return parsed;
+    }
+
+    /**
+     * Resolves `Rect.radius` into either a single uniform radius or a
+     * per-corner `[topLeft, topRight, bottomRight, bottomLeft]` tuple,
+     * matching the Canvas2D backend's `ctx.roundRect` corner semantics:
+     * shorter arrays expand CSS-style ([all], [tl+br, tr+bl], [tl, tr+bl, br]).
+     * Overflow handling is left to Skia's RRect, which scales radii down
+     * proportionally to fit the rect just like `roundRect` does.
+     */
+    private resolveRadius(radius: number | number[] | undefined): number | [number, number, number, number] {
+        if (radius === undefined) {
+            return 0;
+        }
+        if (!Array.isArray(radius)) {
+            return Math.max(0, radius);
+        }
+
+        const r = radius.map((v) => Math.max(0, v ?? 0));
+        switch (r.length) {
+            case 0:
+                return 0;
+            case 1:
+                return r[0];
+            case 2:
+                return [r[0], r[1], r[0], r[1]];
+            case 3:
+                return [r[0], r[1], r[2], r[1]];
+            default:
+                return [r[0], r[1], r[2], r[3]];
+        }
+    }
+
+    private hasRadius(radius: number | [number, number, number, number]): boolean {
+        return Array.isArray(radius) ? radius.some((r) => r > 0) : radius > 0;
+    }
+
+    /** Builds an `InputRRect` from a resolved radius, using a non-uniform RRect for per-corner values. */
+    private makeRRect(rect: SkRect, radius: number | [number, number, number, number]): InputRRect {
+        if (!Array.isArray(radius)) {
+            return Skia.RRectXY(rect, radius, radius);
+        }
+
+        const [topLeft, topRight, bottomRight, bottomLeft] = radius;
+        return {
+            rect,
+            topLeft: { x: topLeft, y: topLeft },
+            topRight: { x: topRight, y: topRight },
+            bottomRight: { x: bottomRight, y: bottomRight },
+            bottomLeft: { x: bottomLeft, y: bottomLeft },
+        };
+    }
+
+    /** Save the canvas and rotate (degrees) about a pivot. Returns the save count. */
+    private withRotation(canvas: SkCanvas, degrees: number, px: number, py: number): number {
+        const count = canvas.save();
+        canvas.rotate(degrees, px, py);
+        return count;
+    }
+
+    /**
+     * One cached font per family; the size is set per call so text scales
+     * continuously with zoom (fonts are snapshotted into the recorded picture
+     * at draw time, so mutating the shared instance between draws is safe).
+     */
+    private getFont(family: string, size: number, weight?: FontWeight): SkFont {
+        // Weight is part of the key: a typeface is matched once and reused at
+        // every size (setSize below), so a family-only key would hand back the
+        // regular face for a bold request.
+        const key = weight === undefined ? family : `${family}|${weight}`;
+        let font = this.fontCache.get(key);
+        if (!font) {
+            font = matchFont({
+                fontFamily: family,
+                fontSize: size,
+                // matchFont takes the CSS keywords and the numeric weights as
+                // strings; core's numeric literals map straight across.
+                ...(weight === undefined ? {} : { fontWeight: String(weight) as SkiaFontWeight }),
+            });
+            this.fontCache.set(key, font);
+        }
+        font.setSize(size);
+        return font;
+    }
+
+    /** Cache native ink measurements together with the exact paint origin. */
+    private layoutText(item: Text, style: Text["style"], pxSize: number, font: SkFont): TextLayout {
+        const key = JSON.stringify([
+            style?.fontFamily ?? DEFAULT_SANS_SERIF,
+            style?.fontWeight,
+            pxSize,
+            item.text,
+            style?.textAlign ?? "center",
+            style?.textBaseline ?? "middle",
+        ]);
+        const cached = this.textLayoutCache.get(key);
+        if (cached) {
+            return cached;
+        }
+        const ink = font.measureText(item.text);
+        const offset = this.alignText({ x: 0, y: 0 }, font, ink.width, style?.textAlign, style?.textBaseline);
+        const bounds = {
+            minX: offset.x + ink.x - 1,
+            minY: offset.y + ink.y - 1,
+            maxX: offset.x + ink.x + ink.width + 1,
+            maxY: offset.y + ink.y + ink.height + 1,
+        };
+        const layout = { bounds, offset };
+        this.textLayoutCache.set(key, layout);
+        return layout;
+    }
+
+    /**
+     * Map Canvas2D-style text alignment/baseline onto Skia's baseline-left
+     * `drawText` origin by offsetting the draw position.
+     */
+    private alignText(
+        pos: Coords,
+        font: SkFont,
+        width: number,
+        textAlign: string | undefined,
+        textBaseline: string | undefined,
+    ): Coords {
+        let x = pos.x;
+        let y = pos.y;
+
+        switch (textAlign ?? "center") {
+            case "center":
+                x -= width / 2;
+                break;
+            case "right":
+            case "end":
+                x -= width;
+                break;
+            // "left" / "start" -> no offset
+        }
+
+        const metrics = font.getMetrics();
+        // metrics.ascent is negative (above baseline), descent positive (below).
+        switch (textBaseline ?? "middle") {
+            case "middle":
+                y -= (metrics.ascent + metrics.descent) / 2;
+                break;
+            case "top":
+            case "hanging":
+                y -= metrics.ascent;
+                break;
+            case "bottom":
+            case "ideographic":
+                y -= metrics.descent;
+                break;
+            // "alphabetic" -> baseline, no offset
+        }
+
+        return { x, y };
+    }
+}
