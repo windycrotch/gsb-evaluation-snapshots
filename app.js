@@ -14,11 +14,24 @@ let deletedPlacement = null;
 let inventoryUndoTimer, placementUndoTimer;
 let packingController = null;
 let bestAutoResult = null;
+let solutionAlternatives = []; // 当前输入下已接受的方案列表（含最佳方案），输入变更即清空
 let solutionAttempt = 0;
 let packingSeed = 20260617;
 
 const MAX_INVENTORY_QTY = 1000;
 const MAX_ITEM_NAME_LENGTH = 80;
+
+// 引擎层结构化失败原因到用户可读提示的翻译表
+const EXPLORE_FAILURE_MESSAGES = {
+    [Packer.EXPLORE_FAILURE.NO_FIT_ITEMS]: '当前清单没有能放入容器的货物，无法更换方案',
+    [Packer.EXPLORE_FAILURE.NO_DISTINCT_LAYOUT]: '搜索预算内未找到与当前不同的有效布局，现有方案已保留',
+    [Packer.EXPLORE_FAILURE.TIME_BUDGET_EXCEEDED]: '搜索时间已用完，暂未找到其他有效布局，现有方案已保留',
+    [Packer.EXPLORE_FAILURE.INVALID_INPUT]: '装箱输入无效，请检查容器与清单后重试'
+};
+function exploreFailureMessage(reason) {
+    return EXPLORE_FAILURE_MESSAGES[reason] || '未找到不同的有效方案，现有方案已保留';
+}
+
 function setWorkspaceStatus(message) {
     document.getElementById('workspace-status').textContent = message;
 }
@@ -34,11 +47,13 @@ function invalidateAutoLayout() {
     autoUnpackedItems = [];
     animationStep = 0;
     bestAutoResult = null;
+    solutionAlternatives = []; // 容器或清单已变更，旧方案列表全部作废，避免展示过期数据
     solutionAttempt = 0;
     packingSeed = 20260617;
     document.getElementById('alternative-pack-btn').disabled = true;
     document.getElementById('restore-best-btn').hidden = true;
     document.getElementById('packing-comparison').textContent = '配置已更新，请重新计算';
+    renderSolutionList();
     document.getElementById('anim-section').style.display = 'none';
     if (activeMode === 'auto') clearRenderedBoxes();
     setWorkspaceStatus('配置已更新，请重新计算');
@@ -678,6 +693,98 @@ async function performParallelPacking(items, binW, binH, binL, options, signal) 
     return best;
 }
 
+// 换方案专用：按固定顺序依次尝试容器姿态，底层为单线程确定性种子搜索。
+// 不使用多线程竞速，相同种子与输入得到相同结果；失败时返回结构化原因而非布局。
+async function exploreAlternativePacking(items, binW, binH, binL, options, signal) {
+    const configs = [
+        { perm: [0, 1, 2], bin: [binW, binH, binL] },
+        { perm: [1, 0, 2], bin: [binH, binW, binL] },
+        { perm: [0, 2, 1], bin: [binW, binL, binH] }
+    ];
+    const excluded = new Set(options.excludeSignatures || []);
+    let best = null;
+    const reasons = [];
+    const seenBins = new Set();
+    for (let index = 0; index < configs.length; index++) {
+        const config = configs[index];
+        if (seenBins.has(config.bin.join('|'))) continue;
+        seenBins.add(config.bin.join('|'));
+        // 仅当前姿态（世界坐标即本地坐标）把排除签名下推到引擎；其余姿态在主线程映射后再过滤
+        const localOptions = index === 0
+            ? { ...options, excludeSignatures: [...excluded], excludeSignature: undefined }
+            : { ...options, excludeSignatures: [], excludeSignature: undefined };
+        const reply = await PackingJobs.exploreAlternative(items, config.bin, localOptions, {
+            signal,
+            onProgress(value, label) {
+                const progress = document.getElementById('loading-progress');
+                progress.style.transform = 'scaleX(' + ((index + value / 100) / configs.length) + ')';
+                progress.parentElement.setAttribute('aria-valuenow', String(Math.round((index + value / 100) / configs.length * 100)));
+                document.getElementById('loading-description').textContent = label + '，姿态 ' + (index + 1) + ' / ' + configs.length;
+            }
+        });
+        if (signal.aborted) throw new DOMException('计算已取消', 'AbortError');
+        if (!reply.success) { reasons.push(reply.reason); continue; }
+
+        // 把姿态本地坐标映射回世界坐标并重新校验，防止坐标置换引入非法布局
+        const packed = reply.items.map(item => {
+            const pos = [], size = [];
+            [item.x, item.y, item.z].forEach((v, i) => pos[config.perm[i]] = v);
+            [item.rw, item.rh, item.rd].forEach((v, i) => size[config.perm[i]] = v);
+            const mapped = new Item(item.id, item.name, item.w, item.h, item.d, item.color, item.weight);
+            mapped.x = pos[0]; mapped.y = pos[1]; mapped.z = pos[2];
+            const rotation = Packer.getUniqueOrientations(mapped).find(r =>
+                Math.abs(r.rw - size[0]) < 0.001 && Math.abs(r.rh - size[1]) < 0.001 && Math.abs(r.rd - size[2]) < 0.001);
+            mapped.setRotation(rotation.rotationType);
+            return mapped;
+        });
+        if (!Packer.validatePackingResult(packed, binW, binH, binL, options.checkStability, options.supportRatio).valid) continue;
+        const signature = Packer.layoutSignature(packed);
+        if (excluded.has(signature)) continue;
+        if (!best || Packer.comparePackings(packed, best.items) > 0) {
+            best = { items: packed, unpacked: reply.unpacked, seed: reply.seed, signature };
+        }
+        if (packed.length === items.length) break;
+    }
+    if (best) return { success: true, ...best };
+    // 所有姿态都失败：优先暴露时间预算原因，其次报告没有不同布局
+    const reason = reasons.includes(Packer.EXPLORE_FAILURE.TIME_BUDGET_EXCEEDED)
+        ? Packer.EXPLORE_FAILURE.TIME_BUDGET_EXCEEDED
+        : reasons.includes(Packer.EXPLORE_FAILURE.NO_FIT_ITEMS)
+            ? Packer.EXPLORE_FAILURE.NO_FIT_ITEMS
+            : Packer.EXPLORE_FAILURE.NO_DISTINCT_LAYOUT;
+    return { success: false, reason };
+}
+
+// 渲染当前输入下已接受的方案列表；输入变更后列表随状态一起清空
+function renderSolutionList(activeSignature = null) {
+    const list = document.getElementById('solution-list');
+    if (!list) return;
+    list.innerHTML = '';
+    if (solutionAlternatives.length <= 1) { list.hidden = true; return; }
+    list.hidden = false;
+    const bestSignature = bestAutoResult ? Packer.layoutSignature(bestAutoResult.items) : null;
+    solutionAlternatives.forEach((solution, index) => {
+        const signature = solution.signature || Packer.layoutSignature(solution.items);
+        const metrics = Packer.packingMetrics(solution.items);
+        const row = document.createElement('button');
+        row.type = 'button';
+        row.className = 'solution-list-item' + (signature === activeSignature ? ' active' : '');
+        row.setAttribute('aria-pressed', String(signature === activeSignature));
+        const isBest = signature === bestSignature;
+        row.innerHTML =
+            '<span class="solution-name">方案 ' + (index + 1) + (isBest ? '（最佳）' : '') + '</span>' +
+            '<span class="solution-metrics">' + metrics.count + ' 件 · ' +
+            (metrics.volume / 1000).toFixed(1) + ' L · 堆高 ' + metrics.height.toFixed(1) + ' cm</span>' +
+            '<span class="solution-seed">种子 ' + solution.seed + '</span>';
+        row.addEventListener('click', () => {
+            if (packingController) return;
+            displayAutoResult(solution);
+            setWorkspaceStatus('已切换到方案 ' + (index + 1));
+        });
+        list.appendChild(row);
+    });
+}
+
 function displayAutoResult(result) {
     stopAnimation();
     autoPackedItems = result.items;
@@ -692,13 +799,15 @@ function displayAutoResult(result) {
     updateStats();
     showStep(animationStep);
     const metrics = Packer.packingMetrics(autoPackedItems);
+    const currentSignature = Packer.layoutSignature(autoPackedItems);
     const best = Packer.packingMetrics(bestAutoResult.items);
-    const isBest = Packer.layoutSignature(autoPackedItems) === Packer.layoutSignature(bestAutoResult.items);
+    const isBest = currentSignature === Packer.layoutSignature(bestAutoResult.items);
     document.getElementById('restore-best-btn').hidden = isBest;
     document.getElementById('packing-comparison').textContent =
         '方案 ' + result.attempt + '，种子 ' + result.seed + '。已装 ' + metrics.count +
         ' 件，体积 ' + (metrics.volume / 1000).toFixed(1) + ' L，堆高 ' + metrics.height.toFixed(1) +
         ' cm。最佳：' + best.count + ' 件 / ' + (best.volume / 1000).toFixed(1) + ' L / ' + best.height.toFixed(1) + ' cm。';
+    renderSolutionList(currentSignature);
 }
 document.getElementById('run-pack-btn').addEventListener('click', () => calculatePacking());
 document.getElementById('alternative-pack-btn').addEventListener('click', () => calculatePacking(true));
@@ -766,20 +875,34 @@ async function calculatePacking(explore = false) {
     // Fast searches should finish without flashing a full-screen scrim.
     const loadingTimer = setTimeout(() => openOverlay('loading-modal'), 300);
     try {
-        const result = await performParallelPacking(itemsToPack, binW, binH, binL, {
-            checkStability, supportRatio: 0.5, biggerFirst, seed: packingSeed, explore,
-            excludeSignature: explore ? previousSignature : undefined
-        }, controller.signal);
+        const commonOptions = {
+            checkStability, supportRatio: 0.5, biggerFirst, seed: packingSeed
+        };
+        const result = explore
+            ? await exploreAlternativePacking(itemsToPack, binW, binH, binL,
+                { ...commonOptions, explore: true, excludeSignatures: [previousSignature].filter(Boolean) },
+                controller.signal)
+            : await performParallelPacking(itemsToPack, binW, binH, binL, commonOptions, controller.signal);
         if (controller.signal.aborted) return;
         closeOverlay('loading-modal');
-        if (result.noAlternative) {
+
+        // 换方案失败：保留当前布局与方案列表，只展示可读原因，绝不替换为更差或重复的摆法
+        if (explore && !result.success) {
+            setWorkspaceStatus(exploreFailureMessage(result.reason));
+            return;
+        }
+        if (!explore && result.noAlternative) {
             setWorkspaceStatus('本次搜索未找到不同的有效方案，现有布局已保留');
             return;
         }
         result.attempt = solutionAttempt;
-        result.seed = packingSeed;
+        result.seed = result.seed ?? packingSeed;
+        result.signature = result.signature ?? Packer.layoutSignature(result.items);
         const improved = bestAutoResult && Packer.comparePackings(result.items, bestAutoResult.items) > 0;
         if (!bestAutoResult || improved) bestAutoResult = result;
+        if (!solutionAlternatives.some(solution => solution.signature === result.signature)) {
+            solutionAlternatives.push(result);
+        }
         displayAutoResult(result);
         const elapsed = ((performance.now() - started) / 1000).toFixed(2);
         setWorkspaceStatus((improved ? '找到更优方案' : explore ? '已生成不同方案' : '装箱完成') +

@@ -15,9 +15,11 @@ const PackingJobs = {
                     try {
                         const items = data.items.map(it => new Item(it.id, it.name, it.w, it.h, it.d, it.color, it.weight));
                         const p = new Packer(...data.bin);
-                        const result = data.layer
-                            ? p.tryLayerBacktrackingPackWithPartitions(items, data.options.checkStability, data.options.supportRatio, data.start, data.end, data.options)
-                            : p.runGreedyPackTrials(items, data.options, data.start, data.end - data.start);
+                        const result = data.explore
+                            ? p.exploreAlternative(items, data.options)
+                            : data.layer
+                                ? p.tryLayerBacktrackingPackWithPartitions(items, data.options.checkStability, data.options.supportRatio, data.start, data.end, data.options)
+                                : p.runGreedyPackTrials(items, data.options, data.start, data.end - data.start);
                         self.postMessage({result});
                     } catch (error) { self.postMessage({error: error.message}); }
                 };`;
@@ -148,6 +150,97 @@ const PackingJobs = {
             onProgress(100, '基础布局校验完成');
             return finishResult(best, { degraded: true });
         } finally { stoppers.forEach(stop => stop()); }
+    },
+    // 可指定种子的确定性换方案调用：单线程编排，消除线程竞速导致的跨机器不一致。
+    // 返回 { success, reason, seed, items, unpacked, ... }；失败时不返回任何布局。
+    async exploreAlternative(items, bin, options = {}, { signal, onProgress = () => {} } = {}) {
+        const abortError = () => new DOMException('计算已取消', 'AbortError');
+        const checkAbort = () => { if (signal?.aborted) throw abortError(); };
+        checkAbort();
+        Packer.assertItems(items);
+        new Packer(...bin);
+        const originals = items;
+        const ids = new Map(originals.map(item => [item.id, item]));
+        const normalized = { checkStability: true, supportRatio: 0.5, biggerFirst: true, seed: 20260617, timeBudgetMs: 8000, ...options };
+        const finishFailure = (reason, extra = {}) => ({ success: false, reason, items: [], unpacked: [], ...extra });
+
+        // 超尺寸物品无法参与任何布局，直接归入未装，不启动无意义搜索
+        const fitting = items.filter(item => Packer.getUniqueOrientations(item).some(r =>
+            r.rw <= bin[0] + EPS_OVERLAP && r.rh <= bin[1] + EPS_OVERLAP && r.rd <= bin[2] + EPS_OVERLAP));
+        if (!fitting.length) return finishFailure(Packer.EXPLORE_FAILURE.NO_FIT_ITEMS);
+
+        // 主线程复核后台载荷：物品不丢失、不重复、几何合法、支撑达标、签名确实不同
+        const accept = reply => {
+            if (!reply || typeof reply !== 'object') throw new TypeError('Invalid worker result');
+            if (!reply.success) return reply;
+            if (!Array.isArray(reply.items) || !Array.isArray(reply.unpacked)) throw new TypeError('Invalid worker result');
+            const seen = new Set();
+            const packed = reply.items.map(raw => {
+                const original = ids.get(raw?.id);
+                if (!original || seen.has(raw.id) || !Number.isInteger(raw.rotationType) || raw.rotationType < 0 || raw.rotationType > 5) {
+                    throw new RangeError('Invalid worker item');
+                }
+                seen.add(raw.id);
+                const item = new Item(original.id, original.name, original.w, original.h, original.d, original.color, original.weight);
+                item.setRotation(raw.rotationType);
+                if ([item.rw - raw.rw, item.rh - raw.rh, item.rd - raw.rd].some(v => !Number.isFinite(v) || Math.abs(v) > EPS_OVERLAP)) {
+                    throw new RangeError('Invalid worker dimensions');
+                }
+                item.x = raw.x; item.y = raw.y; item.z = raw.z;
+                return item;
+            });
+            if (!Packer.validatePackingResult(packed, ...bin, normalized.checkStability, normalized.supportRatio).valid) {
+                throw new RangeError('后台返回了无效布局');
+            }
+            const excluded = new Set();
+            if (Array.isArray(normalized.excludeSignatures)) normalized.excludeSignatures.forEach(sig => excluded.add(sig));
+            if (typeof normalized.excludeSignature === 'string') excluded.add(normalized.excludeSignature);
+            if (excluded.has(Packer.layoutSignature(packed))) throw new RangeError('后台返回了被排除的布局');
+            const packedIds = new Set(packed.map(item => item.id));
+            const unpacked = originals.filter(item => !packedIds.has(item.id));
+            if (packedIds.size + unpacked.length !== originals.length) throw new RangeError('后台结果物品账目不一致');
+            return { ...reply, items: packed, unpacked };
+        };
+
+        const runOnMainThread = () => new Packer(...bin).exploreAlternative(fitting, normalized);
+
+        if (typeof Worker !== 'undefined') {
+            onProgress(20, '正在搜索其他装箱方式');
+            const reply = await new Promise((resolve, reject) => {
+                let worker, timer, done = false;
+                const finish = (error, result) => {
+                    if (done) return;
+                    done = true;
+                    clearTimeout(timer);
+                    signal?.removeEventListener('abort', abort);
+                    worker?.terminate();
+                    error ? reject(error) : resolve(result);
+                };
+                const abort = () => finish(abortError());
+                checkAbort();
+                worker = this.createWorker();
+                signal?.addEventListener('abort', abort, { once: true });
+                timer = setTimeout(() => finish(new Error('后台计算超时，请减少数量后重试')), 15000);
+                worker.onerror = () => finish(new Error('后台计算失败，请重试'));
+                worker.onmessageerror = () => finish(new Error('后台计算结果无法读取'));
+                worker.onmessage = ({ data: message }) => {
+                    if (!message || typeof message !== 'object') return finish(new Error('Invalid worker response'));
+                    finish(message.error ? new Error(message.error) : null, message.result);
+                };
+                worker.postMessage({ explore: true, items: fitting, bin, options: normalized });
+            });
+            checkAbort();
+            onProgress(80, '正在校验候选布局');
+            const accepted = accept(reply);
+            onProgress(100, '布局校验完成');
+            return accepted; // 含成功布局或结构化失败原因（无不同方案 / 预算耗尽）
+        }
+        // 无 Worker 环境：主线程确定性回退，合约不变
+        onProgress(40, '后台线程不可用，正在运行基础策略');
+        const accepted = accept(runOnMainThread());
+        checkAbort();
+        onProgress(100, '基础布局校验完成');
+        return accepted;
     },
     dispose() {
         if (this.blobURL) URL.revokeObjectURL(this.blobURL);

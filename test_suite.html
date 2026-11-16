@@ -99,7 +99,7 @@
         }
 
         function runTests() {
-            document.getElementById('total-count').innerText = "13";
+            document.getElementById('total-count').innerText = "14";
 
             // ==========================================
             // TEST CASE 1: 49-item set with stability check
@@ -519,6 +519,51 @@
                     `Height difference: ${Math.abs(10.024 - 10.026)}\nMatches: ${matches.length}`);
             } catch (err) {
                 addResult('支撑索引相邻容差桶回归测试', false, err.stack);
+            }
+
+            // ==========================================
+            // TEST CASE 14: Seeded exploreAlternative contract
+            // ==========================================
+            try {
+                const exploreBin = [8, 8, 8];
+                const exploreItems = () => Array.from({ length: 6 }, (_, i) => new Item('e' + i, "Cube", 2, 2, 2));
+                const packerA = new Packer(...exploreBin);
+                const first = packerA.exploreAlternative(exploreItems(), { seed: 41, maxTrials: 24, excludeSignatures: [] });
+                const packerB = new Packer(...exploreBin);
+                const second = packerB.exploreAlternative(exploreItems(), { seed: 41, maxTrials: 24, excludeSignatures: [] });
+
+                const deterministic = first.success && second.success &&
+                    Packer.layoutSignature(first.items) === Packer.layoutSignature(second.items);
+                const valid = first.success &&
+                    Packer.validatePackingResult(first.items, ...exploreBin, true, 0.5).valid;
+                const accounting = first.success &&
+                    first.items.length + first.unpacked.length === 6 &&
+                    new Set([...first.items, ...first.unpacked].map(i => i.id)).size === 6;
+
+                // 排除首个签名后，结果要么失败要么给出不同布局，绝不返回相同摆法
+                const excluded = packerA.exploreAlternative(exploreItems(), {
+                    seed: 41, maxTrials: 24, excludeSignatures: [first.signature]
+                });
+                const exclusionHonored = excluded.success === false || excluded.signature !== first.signature;
+
+                // 唯一恰好占满容器的布局必须诚实报告失败原因
+                const unique = new Packer(4, 4, 4).exploreAlternative(
+                    [new Item('only', 'One', 4, 4, 4)],
+                    { seed: 7, maxTrials: 12, excludeSignatures: [Packer.layoutSignature(
+                        new Packer(4, 4, 4).exploreAlternative(
+                            [new Item('only', 'One', 4, 4, 4)], { seed: 7, maxTrials: 12, excludeSignatures: [] }
+                        ).items)] }
+                );
+                const honestFailure = unique.success === false &&
+                    unique.reason === Packer.EXPLORE_FAILURE.NO_DISTINCT_LAYOUT;
+
+                const success = deterministic && valid && accounting && exclusionHonored && honestFailure;
+                const details = `Deterministic across same seed: ${deterministic}\nValidation (incl. support): ${valid}\n` +
+                    `Cargo accounting (no loss/duplicate): ${accounting}\nExcluded signature honored: ${exclusionHonored}\n` +
+                    `Unique layout reports ${unique.reason}: ${honestFailure}`;
+                addResult("可指定种子的换方案探索合约测试", success, details);
+            } catch (err) {
+                addResult("可指定种子的换方案探索合约测试", false, err.stack);
             }
 
             document.getElementById('status').innerText = "DONE";

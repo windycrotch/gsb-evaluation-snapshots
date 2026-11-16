@@ -277,8 +277,8 @@ async function main() {
         await suite.goto(pathToFileURL(path.resolve(__dirname, '../test_suite.html')).href, { waitUntil: 'load', timeout: 60000 });
         await suite.waitForFunction(() => document.getElementById('status').textContent === 'DONE', { timeout: 60000 });
         assert.equal(await suite.$eval('#failed-count', el => el.textContent), '0');
-        assert.equal(await suite.$eval('#passed-count', el => el.textContent), '13');
-        console.log('PASS all 13 existing browser algorithm tests');
+        assert.equal(await suite.$eval('#passed-count', el => el.textContent), '14');
+        console.log('PASS all 14 existing browser algorithm tests');
         await suite.close();
     } finally { await browser.close(); }
 }

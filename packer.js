@@ -426,6 +426,118 @@ class Packer {
         return Math.abs(right.height - left.height) > EPS_OVERLAP ? right.height - left.height : 0;
     }
 
+    // 换方案探索的结构化失败原因（机器可读，页面层负责翻译为用户提示）
+    static EXPLORE_FAILURE = Object.freeze({
+        NO_FIT_ITEMS: 'NO_FIT_ITEMS',                 // 没有任何物品能放入容器
+        NO_DISTINCT_LAYOUT: 'NO_DISTINCT_LAYOUT',     // 搜索预算内只找到被排除的/重复的布局
+        TIME_BUDGET_EXCEEDED: 'TIME_BUDGET_EXCEEDED', // 时间预算耗尽，未取得候选
+        INVALID_INPUT: 'INVALID_INPUT'                // 输入不合法
+    });
+
+    // 一次可指定种子的确定性探索调用：返回与排除签名不同的合法布局，或结构化失败标记。
+    // 合约：
+    //   1. 每个候选都通过 validatePackingResult（含支撑检查）；
+    //   2. 候选签名不得出现在 excludeSignatures 中；
+    //   3. 已装 + 未装恰好覆盖全部输入物品，不丢失、不重复；
+    //   4. 相同种子、相同输入、相同试验数得到逐坐标一致的结果（不使用线程竞速）。
+    exploreAlternative(itemsToPack, options = {}) {
+        try {
+            Packer.assertItems(itemsToPack);
+        } catch (error) {
+            return { success: false, reason: Packer.EXPLORE_FAILURE.INVALID_INPUT, detail: error.message, items: [], unpacked: [] };
+        }
+        const checkStability = options.checkStability !== false;
+        const supportRatio = options.supportRatio !== undefined ? options.supportRatio : DEFAULT_SUPPORT_RATIO;
+        const seed = Number.isFinite(options.seed) ? (options.seed >>> 0) : 20260617;
+        const maxTrials = Number.isInteger(options.maxTrials) && options.maxTrials > 0
+            ? Math.min(options.maxTrials, 1000) : 48;
+        const timeBudgetMs = Number.isFinite(options.timeBudgetMs) ? options.timeBudgetMs : Infinity;
+        const deadline = timeBudgetMs === Infinity ? Infinity : performance.now() + timeBudgetMs;
+        // 同时接受新接口（数组）与旧接口（单个签名字符串）
+        const excluded = new Set();
+        if (Array.isArray(options.excludeSignatures)) options.excludeSignatures.forEach(sig => excluded.add(sig));
+        if (typeof options.excludeSignature === 'string') excluded.add(options.excludeSignature);
+
+        if (!itemsToPack.length) {
+            return { success: false, reason: Packer.EXPLORE_FAILURE.NO_FIT_ITEMS, items: [], unpacked: [] };
+        }
+
+        const inputIds = new Set(itemsToPack.map(item => item.id));
+        let best = null;
+        let trialsRun = 0;
+        let budgetHit = false;
+
+        for (let trial = 0; trial < maxTrials; trial++) {
+            if (performance.now() > deadline) { budgetHit = true; break; }
+            trialsRun = trial + 1;
+            const result = this.runGreedyPackTrials(itemsToPack, {
+                checkStability,
+                supportRatio,
+                biggerFirst: options.biggerFirst !== false,
+                seed,
+                explore: true,
+                weights: options.weights,
+                maxSpaces: options.maxSpaces,
+                maxCandidatePositions: options.maxCandidatePositions,
+                // 单次调用只跑一个确定性试验，由本方法统一编排，时间预算在试验之间检查
+                timeBudgetMs: Infinity
+            }, trial, 1);
+
+            const candidate = result.items;
+            if (!candidate.length) continue; // 空布局不是有效方案
+
+            // 合约 1：完整合法性校验（边界、碰撞、重复 id、支撑）
+            const validation = Packer.validatePackingResult(candidate, this.binW, this.binH, this.binD, checkStability, supportRatio);
+            if (!validation.valid) continue;
+
+            // 合约 2：布局签名必须与所有排除签名不同
+            const signature = Packer.layoutSignature(candidate);
+            if (excluded.has(signature)) continue;
+
+            // 合约 3：已装与未装恰好覆盖全部输入，不丢失、不重复
+            const candidateIds = new Set(candidate.map(item => item.id));
+            const unpackedIds = new Set(result.unpacked.map(item => item.id));
+            let accountingOk = candidateIds.size === candidate.length && unpackedIds.size === result.unpacked.length;
+            if (accountingOk) {
+                for (const id of inputIds) {
+                    const inPacked = candidateIds.has(id);
+                    const inUnpacked = unpackedIds.has(id);
+                    if (inPacked === inUnpacked) { accountingOk = false; break; }
+                }
+                if (candidateIds.size + unpackedIds.size !== inputIds.size) accountingOk = false;
+            }
+            if (!accountingOk) continue;
+
+            // 同质量时保留先找到的候选（试验顺序由种子决定，保证确定性）
+            if (!best || Packer.comparePackings(candidate, best.items) > 0) {
+                best = { items: candidate, unpacked: result.unpacked, signature, trial };
+            }
+            if (candidate.length === itemsToPack.length) break;
+        }
+
+        if (!best) {
+            return {
+                success: false,
+                reason: budgetHit ? Packer.EXPLORE_FAILURE.TIME_BUDGET_EXCEEDED : Packer.EXPLORE_FAILURE.NO_DISTINCT_LAYOUT,
+                trialsRun,
+                items: [],
+                unpacked: []
+            };
+        }
+
+        return {
+            success: true,
+            reason: null,
+            seed,
+            trialsRun,
+            budgetExhausted: budgetHit,
+            signature: best.signature,
+            metrics: Packer.packingMetrics(best.items),
+            items: best.items,
+            unpacked: best.unpacked
+        };
+    }
+
     static assertItems(items) {
         if (!Array.isArray(items) || items.length > 1000) throw new RangeError('Expected an array of at most 1000 items');
         const ids = new Set();
