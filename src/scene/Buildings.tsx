@@ -1,12 +1,17 @@
-import { useEffect, useLayoutEffect, useMemo, useRef } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, type RefObject } from "react";
 import * as THREE from "three";
 import { useFrame, type ThreeEvent } from "@react-three/fiber";
 import type { CityBuilding, CityLayout } from "../lib/types";
+import type { TapGesture } from "../../shared/gestures";
 
 // ─── Instanced tower renderer ──────────────────────────────────
 // One draw call for the whole city. A raw shader draws the pixel window grid
 // procedurally (every tower shares the same floor height), so there is no
 // texture atlas: columns, floors and lit windows are per-instance attributes.
+//
+// Picking does not live here. Selection is handled by the PickingBridge in
+// CityScene, which raycasts this exact mesh at pointer release; this component
+// only owns hover feedback and exposes its InstancedMesh ref.
 
 const vertexShader = /* glsl */ `
   attribute vec3 aTint;
@@ -106,14 +111,14 @@ const FLOOR_HEIGHT = 3.2;
 interface BuildingsProps {
   layout: CityLayout;
   onHover: (b: CityBuilding | null) => void;
-  onSelect: (b: CityBuilding) => void;
   fog: { color: string; near: number; far: number };
+  /** the mesh the PickingBridge raycasts; owned by CityScene */
+  meshRef: RefObject<THREE.InstancedMesh | null>;
+  /** press/drag tracker, used to freeze hover while a gesture is in flight */
+  gestureRef: RefObject<TapGesture | null>;
 }
 
-export default function Buildings({ layout, onHover, onSelect, fog }: BuildingsProps) {
-  const meshRef = useRef<THREE.InstancedMesh>(null);
-  // where the press started, so a drag across the skyline never counts as a tap
-  const press = useRef<{ x: number; y: number; id: number } | null>(null);
+export default function Buildings({ layout, onHover, fog, meshRef, gestureRef }: BuildingsProps) {
   const count = layout.buildings.length;
 
   const geometry = useMemo(() => {
@@ -162,7 +167,9 @@ export default function Buildings({ layout, onHover, onSelect, fog }: BuildingsP
     [fog.color, fog.near, fog.far],
   );
 
-  // one matrix per tower: footprint, height, position
+  // one matrix per tower: footprint, height, position. The instance matrices
+  // are the source of truth for picking as well, so the bounding sphere that
+  // guards the raycast must be rebuilt from them every time they change.
   useLayoutEffect(() => {
     const mesh = meshRef.current;
     if (!mesh) return;
@@ -178,19 +185,23 @@ export default function Buildings({ layout, onHover, onSelect, fog }: BuildingsP
     });
     mesh.instanceMatrix.needsUpdate = true;
     mesh.computeBoundingSphere();
-  }, [layout, geometry, material]);
+  }, [layout, geometry, material, meshRef]);
 
   useFrame((state) => {
     material.uniforms.uTime.value = state.clock.elapsedTime;
   });
 
   const handleMove = (e: ThreeEvent<PointerEvent>) => {
-    e.stopPropagation();
+    // While a press is in flight the camera is panning/orbiting. Updating the
+    // hover target against a moving scene just makes the highlight jump and
+    // the hand cursor flicker; hover resumes on the first move after release.
+    if (gestureRef.current?.isDown) return;
     if (e.instanceId === undefined) return;
     onHover(layout.buildings[e.instanceId] ?? null);
   };
 
   const handleOver = () => {
+    if (gestureRef.current?.isDown) return;
     document.body.style.cursor = "pointer";
   };
 
@@ -199,32 +210,12 @@ export default function Buildings({ layout, onHover, onSelect, fog }: BuildingsP
     onHover(null);
   };
 
-  useEffect(() => () => {
-    document.body.style.cursor = "";
-  }, []);
-
-  const handleDown = (e: ThreeEvent<PointerEvent>) => {
-    // only the tower under the cursor owns this press
-    e.stopPropagation();
-    press.current = {
-      x: e.nativeEvent.clientX,
-      y: e.nativeEvent.clientY,
-      id: e.instanceId === undefined ? -1 : e.instanceId,
-    };
-  };
-
-  const handleClick = (e: ThreeEvent<MouseEvent>) => {
-    e.stopPropagation();
-    const p = press.current;
-    press.current = null;
-    if (!p || p.id < 0) return;
-    // a tap, not the tail of an orbit drag
-    const moved = Math.hypot(e.nativeEvent.clientX - p.x, e.nativeEvent.clientY - p.y);
-    if (moved > 8) return;
-    if (e.instanceId !== p.id) return;
-    const b = layout.buildings[p.id];
-    if (b) onSelect(b);
-  };
+  useEffect(
+    () => () => {
+      document.body.style.cursor = "";
+    },
+    [],
+  );
 
   return (
     <instancedMesh
@@ -234,8 +225,6 @@ export default function Buildings({ layout, onHover, onSelect, fog }: BuildingsP
       onPointerMove={handleMove}
       onPointerOver={handleOver}
       onPointerOut={handleOut}
-      onPointerDown={handleDown}
-      onClick={handleClick}
     />
   );
 }

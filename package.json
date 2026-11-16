@@ -10,6 +10,8 @@
     "build": "vite build",
     "build:ci": "node scripts/build-blogs.mjs && vite build",
     "preview": "vite preview --port 3210",
+    "test": "node --test \"shared/*.test.mjs\"",
+    "typecheck": "tsc --noEmit",
     "deploy": "npm run build:ci && npx wrangler pages deploy dist --project-name blog-city --branch main",
     "sync": "node scripts/sync-health.mjs && node scripts/build-blogs.mjs"
   },

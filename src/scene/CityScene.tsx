@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, type RefObject } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { OrbitControls } from "@react-three/drei";
 import * as THREE from "three";
@@ -9,6 +9,8 @@ import { Roundabout, Traffic } from "./Downtown";
 import { Ground, Moon, PALETTE, Sky } from "./Backdrop";
 import type { CityBuilding, CityLayout } from "../lib/types";
 import { useReducedMotion } from "../lib/usePresence";
+import { TapGesture } from "../../shared/gestures";
+import { pickInstance } from "../../shared/picking";
 
 export interface FocusTarget {
   x: number;
@@ -295,6 +297,91 @@ function HoverMarker({ building }: { building: CityBuilding | null }) {
   );
 }
 
+// Drawing clipping planes. The pick ray is clipped to the same range, so a
+// tower can never be clickable while it is clipped off screen (or vice versa),
+// however far the wheel pushes the camera in or out.
+const CAMERA_NEAR = 2;
+const CAMERA_FAR = 12000;
+
+interface PickingBridgeProps {
+  layout: CityLayout;
+  meshRef: RefObject<THREE.InstancedMesh | null>;
+  gestureRef: RefObject<TapGesture | null>;
+  onSelect: (b: CityBuilding | null) => void;
+}
+
+// Owns the whole tap/pan/orbit decision on the canvas DOM element, where the
+// raw press and release coordinates are trustworthy even at low frame rate.
+//
+// On a genuine tap the ray is cast once, at release, against the camera of the
+// current frame — so a scene that panned while frames were dropping still
+// picks the tower under the release cursor. A drag ends the gesture with no
+// selection at all (no deselect, no accidental pick), and a tap on empty sky
+// deselects and hands the orbit centre back to the middle of town.
+function PickingBridge({ layout, meshRef, gestureRef, onSelect }: PickingBridgeProps) {
+  const { camera, gl } = useThree();
+
+  useEffect(() => {
+    const el = gl.domElement;
+    const gesture = gestureRef.current;
+    if (!gesture) return;
+
+    const onDown = (e: PointerEvent) => {
+      gesture.begin(e, e.pointerId);
+    };
+    const onMove = (e: PointerEvent) => {
+      gesture.move(e);
+    };
+    // the deciding event lives on the canvas: a release inside it may select
+    const onUp = (e: PointerEvent) => {
+      // stop the window safety-net from settling the same release twice
+      e.stopPropagation();
+      const release = gesture.end(e, e.pointerId);
+      // a press that turned into a pan/orbit drag, or a non-primary button:
+      // leave the current selection exactly where it is
+      if (!release) return;
+      const mesh = meshRef.current;
+      if (!mesh || !(camera instanceof THREE.PerspectiveCamera)) return;
+      const hit = pickInstance(mesh, camera, release, el);
+      if (hit) {
+        const building = layout.buildings[hit.instanceId];
+        if (building) onSelect(building);
+      } else {
+        // tapped empty sky: close the card and recentre the orbit pivot
+        onSelect(null);
+      }
+    };
+    // a release that lands outside the canvas (a fast fling) never reaches the
+    // element listener; settle the gesture on the window so it can't stick.
+    // Such a release always travelled, so end() returns null and selects nothing.
+    const onWindowUp = (e: PointerEvent) => {
+      if (gesture.isDown) gesture.end(e, e.pointerId);
+    };
+    const onCancel = () => gesture.cancel();
+    const onBlur = () => gesture.cancel();
+    const onContext = (e: Event) => e.preventDefault();
+
+    el.addEventListener("pointerdown", onDown);
+    el.addEventListener("pointermove", onMove);
+    el.addEventListener("pointerup", onUp);
+    window.addEventListener("pointerup", onWindowUp);
+    el.addEventListener("pointercancel", onCancel);
+    window.addEventListener("blur", onBlur);
+    el.addEventListener("contextmenu", onContext);
+    return () => {
+      el.removeEventListener("pointerdown", onDown);
+      el.removeEventListener("pointermove", onMove);
+      el.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointerup", onWindowUp);
+      el.removeEventListener("pointercancel", onCancel);
+      window.removeEventListener("blur", onBlur);
+      el.removeEventListener("contextmenu", onContext);
+    };
+  }, [gl, camera, layout, meshRef, gestureRef, onSelect]);
+
+  return null;
+}
+
 interface CitySceneProps {
   layout: CityLayout;
   selected: CityBuilding | null;
@@ -344,25 +431,22 @@ export default function CityScene({
     () => ({ color: PALETTE.fog, near: home.reach * 1.35, far: home.reach * 2.9 }),
     [home],
   );
-  // a press that turned into an orbit drag must not count as "clicked the sky"
-  const missPress = useRef<{ x: number; y: number } | null>(null);
+  // the towers' InstancedMesh (for release-time raycasts) and the shared
+  // tap/drag state machine (also read by Buildings to freeze hover mid-drag)
+  const meshRef = useRef<THREE.InstancedMesh | null>(null);
+  const gestureRef = useRef<TapGesture | null>(null);
+  if (gestureRef.current === null) gestureRef.current = new TapGesture();
 
   return (
     <Canvas
       dpr={[1, 1.8]}
-      camera={{ position: [home.pos.x, home.pos.y, home.pos.z], fov: 42, near: 2, far: 12000 }}
+      camera={{ position: [home.pos.x, home.pos.y, home.pos.z], fov: 42, near: CAMERA_NEAR, far: CAMERA_FAR }}
+      // keep R3F's own raycaster on the same clipping range as the camera, so
+      // hover and the release-time pick agree about what is in front of us
+      raycaster={{ near: CAMERA_NEAR, far: CAMERA_FAR }}
       gl={{ antialias: true, powerPreference: "high-performance" }}
       onCreated={({ gl }) => {
         gl.setClearColor(PALETTE.skyBottom);
-      }}
-      onPointerDown={(e) => {
-        missPress.current = { x: e.clientX, y: e.clientY };
-      }}
-      onPointerMissed={(e) => {
-        const p = missPress.current;
-        missPress.current = null;
-        if (p && Math.hypot(e.clientX - p.x, e.clientY - p.y) > 8) return;
-        onSelect(null);
       }}
     >
       <fog attach="fog" args={[fog.color, fog.near, fog.far]} />
@@ -376,7 +460,8 @@ export default function CityScene({
       <Roundabout layout={layout} />
       <Traffic layout={layout} />
       <Trees layout={layout} />
-      <Buildings layout={layout} onHover={onHover} onSelect={onSelect} fog={fog} />
+      <Buildings layout={layout} onHover={onHover} fog={fog} meshRef={meshRef} gestureRef={gestureRef} />
+      <PickingBridge layout={layout} meshRef={meshRef} gestureRef={gestureRef} onSelect={onSelect} />
       <SelectionMarker building={selected} />
       <HoverMarker building={hovered} />
       <Rig focus={focus} homeToken={homeToken} home={home} />
