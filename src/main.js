@@ -4,7 +4,8 @@ import {
   G, loadSettings, saveSettings, newRun, updateTimers, clearTimers, on, emit, clamp, lerp, damp,
   easeInOutCubic, easeOutCubic, rand, after, mulberry32,
 } from './core.js';
-import { initInput, updateInput, endInputFrame, Input } from './input.js';
+import { initInput, updateInput, endInputFrame, inputDebug, Input } from './input.js';
+import { runInputTests } from './inputtest.js';
 import { initRenderer, createSky, createLights, makeTextures, renderFrame, updatePost, updateLights, POST, applyQuality, ATMO, GFX } from './gfx.js';
 import { initWorld, useStageWorld, updateWorld, updateTerrain, resetTerrain, setWorldAtmosphere, railFrame, railToWorld, terrainHeight, worldToRail, pathX, paletteAt, __worldDebug } from './world.js';
 import { initFX, beginFXFrame, updateFX, clearFX, bigFlash, addShake, FX, explode } from './fx.js';
@@ -24,7 +25,7 @@ import {
 import {
   initHUD, showScreen, hideScreens, hudVisible, updateHUD, radio, clearRadio, tip, clearTip, banner, hideBanner, warning, bossBar,
   setBossHP, popText, MENU_CB, titlePressed, titleReset, updateMenus, menuBack, refreshTitle, showTitleMenu, setLoading, showResults,
-  updateResults, skipResults, resetHUDCache, setGameOverText, clearMarkers,
+  updateResults, skipResults, resetHUDCache, setGameOverText, clearMarkers, menuDebug,
 } from './hud.js';
 import { AudioSys } from './audio.js';
 
@@ -104,6 +105,20 @@ async function boot() {
     __step: (n = 1, dt = 1 / 60) => { for (let i = 0; i < n; i++) frame(dt); return { state: G.state, d: Math.round(G.rail.d), hits: G.run.hits, shield: G.run.shield }; },
     enemies, WSTATE, ebullets, explode,
     __key: (code, down) => window.dispatchEvent(new KeyboardEvent(down ? 'keydown' : 'keyup', { code })),
+    // Input-layer introspection and the pause/focus regression suite (see src/inputtest.js).
+    __inputState: () => inputDebug(),
+    __menuState: () => menuDebug(),
+    __inputTest: () => runInputTests({
+      step: (n, dt) => { for (let i = 0; i < n; i++) frame(dt ?? 1 / 60); },
+      setup: () => devTestSetup(0),
+      focusLost: () => onFocusLost(true),
+      ship: () => ({ u: ship.u, v: ship.v, x: ship.pos.x, y: ship.pos.y, z: ship.pos.z }),
+      shots: () => G.run.shots,
+      state: () => ({ state: G.state, paused: G.paused, pauseCount, resumeCount }),
+      input: inputDebug,
+      menu: menuDebug,
+      Input,
+    }),
     // Regression helpers: a seeded Math.random makes a __bot run repeatable, __snap/__fp summarise game state and the world.
     __seed: (s) => { const r0 = mulberry32(s); window.__rc = 0; Math.random = () => { window.__rc++; return r0(); }; },
     __snap: () => {
@@ -175,8 +190,29 @@ if (__DEV__) {
   if (q.has('manual')) window.__manual = true;
   if (q.has('seed')) { const r0 = mulberry32(+q.get('seed') || 1); window.__rc = 0; Math.random = () => { window.__rc++; return r0(); }; }
 }
-window.addEventListener('blur', () => { if (G.state === 'play' && !S.intro && !manual()) pause(); });
-document.addEventListener('visibilitychange', () => { if (document.hidden && G.state === 'play' && !S.intro && !manual()) pause(); });
+window.addEventListener('blur', () => onFocusLost());
+document.addEventListener('visibilitychange', () => { if (document.hidden) onFocusLost(); });
+
+// A focus loss is a hard input boundary: every source is reset (see input.js) and, in normal play,
+// the mission pauses. `force` lets the dev input test exercise the same path from a __step run,
+// where the automatic pause is suppressed.
+function onFocusLost(force) {
+  if (G.state !== 'play' || S.intro) return;
+  resetCharge();                      // a charge built before the break must not fire on return
+  if (force || !manual()) pause();
+}
+
+// Deterministic fresh-play setup for the dev input regression suite: a clean run at the start of
+// the first mission with no stale input state and the pause counters zeroed.
+function devTestSetup(d = 0) {
+  hideScreens(); closeScreens();
+  setupStage(d, false);
+  G.run.shots = 0; G.run.shotsHit = 0; G.run.hits = 0;
+  pauseCount = resumeCount = 0;
+  Input.reset();
+  for (let i = 0; i < 8; i++) frame(1 / 60);   // let cooldowns/fades settle without input
+  G.run.shots = 0;
+}
 
 // Unlock audio on any genuine user gesture. (Test runs stay silent: sound effects are throttled in real time.)
 for (const ev of ['keydown', 'pointerdown', 'touchstart', 'mousedown']) window.addEventListener(ev, () => { if (!manual()) AudioSys.init(); }, { passive: true });
@@ -480,10 +516,20 @@ function respawn(fromMenu) {
   fadeTo(1, fromMenu ? 0.35 : 0.6, () => setupStage(d, false));
 }
 
+// Pause/resume bookkeeping (also used by the dev input test to prove one press cannot both
+// pause and resume inside a single frame).
+let pauseCount = 0, resumeCount = 0;
+
 function pause() {
   if (G.state !== 'play' && G.state !== 'dead') return;
   if (G.paused) return;
   G.paused = true;
+  pauseCount++;
+  // Entering pause is a hard input boundary: drop whatever was held (keyboard, mouse, pad, touch)
+  // along with pending double taps, and abandon any charge built up before the break so the
+  // release after resuming cannot fire a charged shot.
+  Input.reset();
+  resetCharge();
   showScreen('pause');
   AudioSys.sfx('pause');
   AudioSys.setPaused(true);
@@ -491,9 +537,13 @@ function pause() {
 function resume() {
   if (!G.paused) return;
   G.paused = false;
+  resumeCount++;
   hideScreens();
   AudioSys.setPaused(false);
-  Input.clearAll();
+  // Also clear on the way out so the key/button that resumed us cannot leak into the first
+  // gameplay frame (no stray shot, bomb or roll), and no stale double tap survives the pause.
+  Input.reset();
+  resetCharge();
 }
 
 function gameOver() {
@@ -795,13 +845,14 @@ function attract(rdt) {
 
 function updatePlay(dt, rdt) {
   const run = G.run;
-  // pause toggle
-  if (Input.pressed('pause')) {
-    if (G.paused) { if (!menuBack()) resume(); }
-    else pause();
-  } else if (G.paused) {
-    if (Input.pressed('back') && !Input.pressed('pause')) { if (!menuBack()) resume(); }
+  // Pause toggle. Escape is both "pause" and "back", so decide once per frame: while paused the
+  // pause key (or back, outside a sub-menu) resumes, and a single frame can never both pause and
+  // resume. Input.reset() in pause()/resume() makes the key that changed state need a fresh press.
+  if (G.paused) {
+    if (Input.pressed('pause') || Input.pressed('back')) { if (!menuBack()) resume(); }
     else updateMenus();
+  } else if (Input.pressed('pause')) {
+    pause();
   }
   if (G.paused) { renderPausedHUD(rdt); return; }
 

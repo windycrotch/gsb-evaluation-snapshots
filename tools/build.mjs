@@ -2,6 +2,9 @@
 //   node tools/build.mjs          → minified build
 //   node tools/build.mjs --dev    → unminified build with inline sourcemap (for debugging)
 //   node tools/build.mjs --watch  → dev build, rebuilds on change
+//   node tools/build.mjs --dev --out <file>
+//                                 → write just the full HTML to <file> (used by tools/input-check.mjs
+//                                   so a test run does not overwrite the shipped index.html)
 //
 // Outputs
 //   index.html               full HTML document (open directly in a browser, works offline)
@@ -14,6 +17,9 @@ import { fileURLToPath } from 'node:url';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const watch = process.argv.includes('--watch');
 const dev = watch || process.argv.includes('--dev');
+const outArg = process.argv.indexOf('--out');
+const OUT_ONLY = outArg > 0 ? path.resolve(process.argv[outArg + 1] || '') : null;
+if (outArg > 0 && !process.argv[outArg + 1]) { console.error('--out needs a file path'); process.exit(1); }
 
 const TEMPLATE = path.join(root, 'src', 'template.html');
 const OUT_FULL = path.join(root, 'index.html');
@@ -29,11 +35,17 @@ function writeHtml(js) {
     '<!doctype html>\n<html lang="ja">\n<head>\n<meta charset="utf-8">\n' +
     '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">\n' +
     head.trim() + '\n</head>\n<body>\n' + bodyWithScript.trim() + '\n</body>\n</html>\n';
+  const kb = (Buffer.byteLength(full) / 1024).toFixed(0);
+  if (OUT_ONLY) {
+    fs.mkdirSync(path.dirname(OUT_ONLY), { recursive: true });
+    fs.writeFileSync(OUT_ONLY, full);
+    console.log(`[build] ${new Date().toLocaleTimeString()}  ${path.relative(root, OUT_ONLY)} ${kb} KB (dev)`);
+    return;
+  }
   const fragment = head.trim() + '\n' + bodyWithScript.trim() + '\n';
   fs.mkdirSync(path.dirname(OUT_FRAGMENT), { recursive: true });
   fs.writeFileSync(OUT_FULL, full);
   fs.writeFileSync(OUT_FRAGMENT, fragment);
-  const kb = (Buffer.byteLength(full) / 1024).toFixed(0);
   console.log(`[build] ${new Date().toLocaleTimeString()}  index.html ${kb} KB${dev ? ' (dev)' : ''}`);
 }
 

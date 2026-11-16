@@ -13,7 +13,8 @@
   "type": "module",
   "scripts": {
     "build": "node tools/build.mjs",
-    "dev": "node tools/build.mjs --watch"
+    "dev": "node tools/build.mjs --watch",
+    "check:input": "node tools/input-check.mjs"
   },
   "devDependencies": {
     "esbuild": "^0.25.10",

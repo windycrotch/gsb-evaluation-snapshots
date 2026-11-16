@@ -226,6 +226,12 @@ export function titlePressed() {
 export function titleReset() { EL.press.hidden = false; EL.mainmenu.hidden = true; EL.storymenu.hidden = true; activeMenu = null; }
 export function updateMenus() { if (activeMenu) activeMenu.update(); }
 export function menuActive() { return !!activeMenu; }
+// Dev-build introspection: which menu is focused and on which item (used by __inputTest).
+export function menuDebug() {
+  if (!activeMenu) return null;
+  const vis = activeMenu.visibleItems();
+  return { i: activeMenu.i, act: vis[activeMenu.i]?.dataset.act ?? null, count: vis.length };
+}
 
 // ============================================================ Touch controls
 function initTouch() {
@@ -235,6 +241,7 @@ function initTouch() {
   let sid = null, ox = 0, oy = 0;
   EL.tstick.addEventListener('pointerdown', (e) => {
     sid = e.pointerId; ox = e.clientX; oy = e.clientY;
+    Input.setTouchStick(0, 0);   // a fresh gesture re-arms the stick after a pause/blur reset
     EL.tknob.style.display = 'block'; EL.tknob.style.left = ox + 'px'; EL.tknob.style.top = (oy - EL.tstick.getBoundingClientRect().top) + 'px';
     EL.tstick.setPointerCapture(sid); AudioSys.init();
   });
@@ -254,6 +261,15 @@ function initTouch() {
     const up = () => { b.classList.remove('pressed'); Input.touchButton(code, false); };
     b.addEventListener('pointerup', up); b.addEventListener('pointercancel', up);
   }
+  // On blur/pause the input layer drops touch state; mirror that on screen so no button looks
+  // held and the stick re-centres. A finger still down must lift (or start a new gesture) before
+  // it can steer/fire again, so the reset itself must not clear the stick's stale flag.
+  Input.onReset(() => {
+    sid = null;
+    EL.tknob.style.display = 'none';
+    EL.tknob.firstElementChild.style.transform = '';
+    for (const b of EL.touch.querySelectorAll('.t-btn')) b.classList.remove('pressed');
+  });
   EL.tpause.addEventListener('click', () => { MENU_CB.pause?.(); });
 }
 
