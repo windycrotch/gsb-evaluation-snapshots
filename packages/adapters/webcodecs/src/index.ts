@@ -1,0 +1,1 @@
+export { WebCodecsVideoDecoderPort } from './WebCodecsVideoDecoderPort';

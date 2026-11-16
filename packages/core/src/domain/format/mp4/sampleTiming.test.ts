@@ -1,0 +1,207 @@
+import { describe, expect, it } from 'vitest';
+
+import { boxesIn } from './movieBoxes';
+import { sampleTimingOf } from './sampleTiming';
+import { trackBoxesOf, type TrackBoxes } from './trackHeaders';
+import { encodeBox, encodeFullBox } from '../../../testing/encodeBox';
+import {
+  buildMp4File,
+  type FixtureEdit,
+  type FixtureTrack,
+} from '../../../testing/mp4/buildMp4File';
+import { videoSampleEntry } from '../../../testing/mp4/sampleEntries';
+import { captureError } from '../../../../test/support/errors';
+
+const TIMESCALE = 10_240;
+const DELTA = 1024;
+const MOVIE_TIMESCALE = 1000;
+
+function track(overrides: Partial<FixtureTrack> = {}): FixtureTrack {
+  return {
+    trackId: 1,
+    handler: 'vide',
+    sampleEntry: videoSampleEntry({
+      type: 'avc1',
+      width: 64,
+      height: 64,
+      configuration: encodeBox('avcC', new Uint8Array(5)),
+    }),
+    timescale: TIMESCALE,
+    samples: Array.from({ length: 6 }, () => ({
+      bytes: new Uint8Array(3),
+      duration: DELTA,
+      isSync: true,
+    })),
+    ...overrides,
+  };
+}
+
+function withOffsets(offsets: readonly number[], version: 'version-0' | 'version-1'): FixtureTrack {
+  const plain = track();
+  return track({
+    compositionOffsets: version,
+    samples: plain.samples.map((sample, index) => ({
+      ...sample,
+      compositionOffset: offsets[index] ?? 0,
+    })),
+  });
+}
+
+function trackBoxesFor(fixture: FixtureTrack, headerVersion: 0 | 1 = 0): TrackBoxes {
+  const file = buildMp4File([fixture], { movieTimescale: MOVIE_TIMESCALE, headerVersion });
+  const [movie] = boxesIn(file.bytes.subarray(file.movieBox.offset, file.movieBox.end));
+  const trak = boxesIn(movie?.body ?? new Uint8Array()).find((box) => box.type === 'trak');
+  if (!trak) throw new Error('no track');
+  return trackBoxesOf(trak);
+}
+
+function timingOf(
+  fixture: FixtureTrack,
+  headerVersion: 0 | 1 = 0,
+): ReturnType<typeof sampleTimingOf> {
+  return sampleTimingOf(trackBoxesFor(fixture, headerVersion), {
+    media: TIMESCALE,
+    movie: MOVIE_TIMESCALE,
+    sampleCount: fixture.samples.length,
+  });
+}
+
+/**
+ * The fixture's boxes with `table` in its sample table, in place of one of its type.
+ */
+function withTable(fixture: FixtureTrack, table: Uint8Array): TrackBoxes {
+  const boxes = trackBoxesFor(fixture);
+  const [replacement] = boxesIn(table);
+  if (!replacement) throw new Error('no table');
+  const others = boxes.sampleTable.filter((box) => box.type !== replacement.type);
+  return { ...boxes, sampleTable: [...others, replacement] };
+}
+
+/**
+ * A table box of one run: `count` samples of `value`.
+ */
+function oneRun(type: 'stts' | 'ctts', count: number, value: number): Uint8Array {
+  const payload = new Uint8Array(12);
+  const view = new DataView(payload.buffer);
+  view.setUint32(0, 1);
+  view.setUint32(4, count);
+  view.setUint32(8, value);
+  return encodeFullBox(type, { version: 0 }, payload);
+}
+
+const MOST_A_COUNT_SAYS = 0xff_ff_ff_ff;
+
+function withEdits(edits: readonly FixtureEdit[]): ReturnType<typeof sampleTimingOf> {
+  return timingOf(track({ edits }));
+}
+
+describe('sampleTimingOf', () => {
+  it('shows each sample when it decodes, for its decode duration, when nothing shifts it', () => {
+    const timing = timingOf(track());
+    expect([...timing.timestamps]).toEqual(
+      [0, 1, 2, 3, 4, 5].map((index) => (index * DELTA) / TIMESCALE),
+    );
+    expect([...timing.durations]).toEqual(Array.from({ length: 6 }, () => DELTA / TIMESCALE));
+    expect(timing.end).toBe((6 * DELTA) / TIMESCALE);
+  });
+
+  it('shows each sample its composition offset after it decodes, as the cameras write HEVC', () => {
+    const timing = timingOf(withOffsets([DELTA, DELTA, DELTA, DELTA, DELTA, DELTA], 'version-0'));
+    expect(timing.timestamps[0]).toBe(DELTA / TIMESCALE);
+    expect(timing.durations[0]).toBe(DELTA / TIMESCALE);
+    expect(timing.end).toBe((7 * DELTA) / TIMESCALE);
+  });
+
+  it('lasts each reordered frame until the next one shows, the last one shown for its own decode duration', () => {
+    const timing = timingOf(
+      withOffsets([DELTA, -DELTA / 2, DELTA, -DELTA / 2, DELTA, -DELTA / 2], 'version-1'),
+    );
+    const shown = [1, 0.5, 3, 2.5, 5, 4.5].map((ticks) => (ticks * DELTA) / TIMESCALE);
+    expect([...timing.timestamps]).toEqual(shown);
+    const gaps = [1.5, 0.5, 1.5, 0.5, 1, 0.5].map((ticks) => (ticks * DELTA) / TIMESCALE);
+    expect([...timing.durations]).toEqual(gaps);
+    expect(timing.end).toBe((6 * DELTA) / TIMESCALE);
+  });
+
+  it('starts the media later by an empty edit, converted to the track timescale and rounded', () => {
+    const timing = withEdits([
+      { segmentDuration: 333, mediaTime: -1 },
+      { segmentDuration: 600, mediaTime: 0 },
+    ]);
+    const emptyTicks = Math.round((333 / MOVIE_TIMESCALE) * TIMESCALE);
+    expect(timing.timestamps[0]).toBe(emptyTicks / TIMESCALE);
+    expect(timing.timestamps[1]).toBe((emptyTicks + DELTA) / TIMESCALE);
+  });
+
+  it('shows the media from the edit media time on, in ticks divided once', () => {
+    const timing = withEdits([{ segmentDuration: 400, mediaTime: 2 * DELTA }]);
+    expect(timing.timestamps[0]).toBe((-2 * DELTA) / TIMESCALE);
+    expect(timing.timestamps[3]).toBe(DELTA / TIMESCALE);
+  });
+
+  it('reads an edit list of version 1, with 64-bit times', () => {
+    const timing = timingOf(
+      track({
+        edits: [
+          { segmentDuration: 333, mediaTime: -1 },
+          { segmentDuration: 600, mediaTime: DELTA },
+        ],
+      }),
+      1,
+    );
+    const emptyTicks = Math.round((333 / MOVIE_TIMESCALE) * TIMESCALE);
+    expect(timing.timestamps[1]).toBe(emptyTicks / TIMESCALE);
+  });
+
+  it('follows only the first edit that shows media, as mediabunny does', () => {
+    const timing = withEdits([
+      { segmentDuration: 300, mediaTime: DELTA },
+      { segmentDuration: 300, mediaTime: 4 * DELTA },
+    ]);
+    expect(timing.timestamps[1]).toBe(0);
+  });
+
+  it('reads an edit list without an empty edit whatever the movie timescale', () => {
+    const boxes = trackBoxesFor(track({ edits: [{ segmentDuration: 300, mediaTime: DELTA }] }));
+    const timing = sampleTimingOf(boxes, { media: TIMESCALE, movie: 0, sampleCount: 6 });
+    expect(timing.timestamps[1]).toBe(0);
+  });
+
+  it('refuses an empty edit in a movie timescale of zero, which would make every time not a number', () => {
+    const edits = [
+      { segmentDuration: 300, mediaTime: -1 },
+      { segmentDuration: 300, mediaTime: 0 },
+    ];
+    const boxes = trackBoxesFor(track({ edits }));
+    const timescales = { media: TIMESCALE, movie: 0, sampleCount: 6 };
+    expect(captureError(() => sampleTimingOf(boxes, timescales))).toMatchObject({
+      code: 'unsupported-container',
+      message: expect.stringContaining('movie timescale of 0') as string,
+    });
+  });
+
+  it('refuses a time-to-sample table that counts other samples than the sizes do', () => {
+    const timescales = { media: TIMESCALE, movie: MOVIE_TIMESCALE, sampleCount: 7 };
+    expect(captureError(() => sampleTimingOf(trackBoxesFor(track()), timescales))).toMatchObject({
+      code: 'unsupported-container',
+      message: expect.stringContaining('times 6 samples of a track that has 7') as string,
+    });
+  });
+
+  it('refuses a run counting more samples than the track has before allocating them', () => {
+    const boxes = withTable(track(), oneRun('stts', MOST_A_COUNT_SAYS, DELTA));
+    const timescales = { media: TIMESCALE, movie: MOVIE_TIMESCALE, sampleCount: 6 };
+    expect(captureError(() => sampleTimingOf(boxes, timescales))).toMatchObject({
+      code: 'unsupported-container',
+      message: expect.stringContaining(`times ${MOST_A_COUNT_SAYS} samples`) as string,
+    });
+  });
+
+  it('reads composition offsets for the samples of the track alone, however far a run reaches', () => {
+    const boxes = withTable(track(), oneRun('ctts', MOST_A_COUNT_SAYS, DELTA));
+    const timescales = { media: TIMESCALE, movie: MOVIE_TIMESCALE, sampleCount: 6 };
+    const timing = sampleTimingOf(boxes, timescales);
+    expect(timing.timestamps).toHaveLength(6);
+    expect(timing.timestamps[0]).toBe(DELTA / TIMESCALE);
+  });
+});

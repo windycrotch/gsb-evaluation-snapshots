@@ -1,0 +1,168 @@
+:host {
+  --gyro-view-accent: #fff;
+  --gyro-view-controls-background: rgb(0 0 0 / 60%);
+  --gyro-view-menu-background: rgb(24 24 23 / 92%);
+  --gyro-view-text: #fff;
+  --gyro-view-font: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --gyro-view-radius: 8px;
+
+  display: block;
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  background: #000;
+  color: var(--gyro-view-text);
+  font-family: var(--gyro-view-font);
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+:host([hidden]) {
+  display: none;
+}
+
+:host(:focus-visible) {
+  outline: 2px solid var(--gyro-view-accent);
+  outline-offset: 2px;
+}
+
+/*
+ * Pinned over the page where the Fullscreen API is refused (iPhone Safari). Like the browser's
+ * own fullscreen rules it overrides the size, margins and place the page gave the element, and
+ * the insets size it to the visible viewport, where 100vh would reach under Safari's toolbars.
+ * It keeps no corners or border of the page's, which would show the page behind it, and zero
+ * border and padding override a popover's defaults, which the pinned element is (ADR 0041). A
+ * page's styles for every popover would outrank the host's overflow, colours and font, so the
+ * fill holds them too. The z-index matters only where the browser has no popovers.
+ */
+:host([data-fill]) {
+  position: fixed !important;
+  inset: 0 !important;
+  box-sizing: border-box !important;
+  width: auto !important;
+  height: auto !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  max-width: none !important;
+  max-height: none !important;
+  margin: 0 !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  padding: 0 !important;
+  transform: none !important;
+  translate: none !important;
+  rotate: none !important;
+  scale: none !important;
+  aspect-ratio: auto !important;
+  overflow: hidden !important;
+  background: #000 !important;
+  color: var(--gyro-view-text) !important;
+  font-family: var(--gyro-view-font) !important;
+  z-index: 2147483000 !important;
+}
+
+:host(:fullscreen) {
+  width: 100%;
+  height: 100%;
+  aspect-ratio: auto;
+}
+
+/* The size container the controls fit themselves to: the player's size, not the page's. Its
+   size never depends on its content, which size containment requires. */
+.stage {
+  position: absolute;
+  inset: 0;
+  container-type: size;
+}
+
+canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+}
+
+/* A canvas keeps the last picture drawn on it: until the recording loading now draws one, the
+   previous recording's would show under the spinner or the error. Transparent rather than
+   hidden, so a tap on it still starts a recording that is ready but has drawn nothing yet. */
+:host(:not([data-has-frame])) canvas {
+  opacity: 0;
+}
+
+.poster {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  pointer-events: none;
+}
+
+:host([data-has-frame]) .poster,
+:host(:not([poster])) .poster {
+  display: none;
+}
+
+.overlay {
+  position: absolute;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 1rem;
+  text-align: center;
+  background: rgb(0 0 0 / 45%);
+}
+
+:host([data-status='loading']) .overlay.loading,
+:host([data-status='buffering']) .overlay.loading,
+:host([data-status='seeking']) .overlay.loading,
+:host([data-status='error']) .overlay.error {
+  display: flex;
+}
+
+/* A wait while playing or seeking shows over the picture once it lasts: the short ones of a
+   seek or a loop would only flash. */
+:host([data-status='buffering']) .overlay.loading,
+:host([data-status='seeking']) .overlay.loading {
+  background: transparent;
+  pointer-events: none;
+  visibility: hidden;
+  animation: gyro-view-shown-once-lasting 0s linear 0.3s forwards;
+}
+
+@keyframes gyro-view-shown-once-lasting {
+  to {
+    visibility: visible;
+  }
+}
+
+.spinner {
+  width: 2.5rem;
+  height: 2.5rem;
+  border: 3px solid rgb(255 255 255 / 25%);
+  border-top-color: var(--gyro-view-accent);
+  border-radius: 50%;
+  animation: gyro-view-spin 0.9s linear infinite;
+}
+
+@keyframes gyro-view-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* A viewer who asked for less motion still sees that it loads, three times slower. */
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation-duration: 2.7s;
+  }
+}
+
+.error-code {
+  font-size: 0.8rem;
+  opacity: 0.7;
+}

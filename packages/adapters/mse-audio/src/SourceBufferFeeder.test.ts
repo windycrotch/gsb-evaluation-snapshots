@@ -1,0 +1,398 @@
+import { Deferred, seconds, type AudioSegmentSource } from '@gyroview/core';
+import { describe, expect, it, onTestFinished } from 'vitest';
+
+import {
+  attachMediaSource,
+  isMediaSourceTypeSupported,
+  mediaSourceConstructor,
+  type AttachedMediaSource,
+} from './mediaSourceSupport';
+import { SourceBufferFeeder } from './SourceBufferFeeder';
+import { openFixtureAudio } from './test/fixtureAudio';
+
+const AAC_IN_MP4 = 'audio/mp4; codecs="mp4a.40.2"';
+
+/**
+ * Polls until the condition holds, for at most `withinMs`.
+ */
+async function waitUntil(isSatisfied: () => boolean, withinMs = 2000): Promise<void> {
+  const deadline = performance.now() + withinMs;
+  while (!isSatisfied() && performance.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
+/**
+ * A source with nothing to append; the first test disposes its feeder before any run starts.
+ */
+const UNREAD_SOURCE: AudioSegmentSource = {
+  mimeType: AAC_IN_MP4,
+  duration: seconds(3),
+  async *segmentsFrom(): AsyncGenerator<Uint8Array<ArrayBuffer>> {
+    // Nothing to append.
+  },
+};
+
+/**
+ * Segments that never come, as from a stalled network: a run over them waits until stopped.
+ */
+async function* neverEnding(): AsyncGenerator<Uint8Array<ArrayBuffer>> {
+  await new Promise<never>(() => {
+    // never settled on purpose
+  });
+}
+
+async function openMediaSource(element: HTMLMediaElement): Promise<AttachedMediaSource> {
+  const mediaSourceClass = mediaSourceConstructor();
+  if (!mediaSourceClass) throw new Error('this browser has no media source');
+  return attachMediaSource(element, mediaSourceClass);
+}
+
+/**
+ * The fixture's first segments: its initialisation and about a second of audio.
+ */
+const FIRST_SECOND = 2;
+/**
+ * A time inside that first second.
+ */
+const SEEK_WITHIN = 0.5;
+/**
+ * How far before the end of what a stopped run appended the next run restarts from, and past it
+ * playback must then get: across the seam between the two runs' audio.
+ */
+const ACROSS_THE_SEAM = 0.3;
+/**
+ * Headless WebKit under load is slow to start playing.
+ */
+const PLAYBACK_WITHIN_MS = 10_000;
+/**
+ * A time past the first second, which a run stalled after it has not appended.
+ */
+const SEEK_BEYOND_THE_FIRST = 2;
+
+/**
+ * A playhead inside the first two seconds, which the evictions below take away.
+ */
+const EVICTED_PLAYHEAD = 1;
+const EVICTED_UP_TO = 2;
+
+type Segments = AsyncIterable<Uint8Array<ArrayBuffer>>;
+
+/**
+ * Takes buffered audio away, as a managed media source may at any time.
+ */
+async function evict(sourceBuffer: SourceBuffer, start: number, end: number): Promise<void> {
+  const done = new Promise((resolve) => {
+    sourceBuffer.addEventListener('updateend', resolve, { once: true });
+  });
+  sourceBuffer.remove(start, end);
+  await done;
+}
+
+function isBufferedAt(element: HTMLMediaElement, time: number): boolean {
+  const { buffered } = element;
+  for (let index = 0; index < buffered.length; index += 1) {
+    if (buffered.start(index) <= time && time < buffered.end(index)) return true;
+  }
+  return false;
+}
+
+/**
+ * The next append throws `error`, as a full source buffer does; the ones after go through.
+ */
+function refuseOnce(sourceBuffer: SourceBuffer, error: Error): void {
+  const append = sourceBuffer.appendBuffer.bind(sourceBuffer);
+  let hasRefused = false;
+  sourceBuffer.appendBuffer = (data): void => {
+    if (hasRefused) {
+      append(data);
+      return;
+    }
+    hasRefused = true;
+    throw error;
+  };
+}
+
+function everySegment(segments: Segments): Segments {
+  return segments;
+}
+
+/**
+ * The first `count` segments, then none ever again: a run that waits as on a stalled network.
+ * `stalled` resolves once the run asks for the next segment, its last one appended.
+ */
+function stallingAfter(count: number, stalled: Deferred<void>): (segments: Segments) => Segments {
+  return async function* (segments) {
+    let yielded = 0;
+    for await (const segment of segments) {
+      if (yielded === count) break;
+      yield segment;
+      yielded += 1;
+    }
+    stalled.resolve();
+    await new Promise<never>(() => {
+      // never settled on purpose
+    });
+  };
+}
+
+interface FixtureFeeder {
+  readonly feeder: SourceBufferFeeder;
+  readonly element: HTMLAudioElement;
+  readonly mediaSource: MediaSource;
+  readonly sourceBuffer: SourceBuffer;
+  /**
+   * The time each run asked the source for segments from.
+   */
+  readonly asked: number[];
+  readonly close: () => void;
+}
+
+/**
+ * A feeder of the fixture's audio into a real media source, the first run's segments passed
+ * through `firstRun`.
+ */
+async function fixtureFeeder(firstRun: (segments: Segments) => Segments): Promise<FixtureFeeder> {
+  const fixture = await openFixtureAudio();
+  const element = document.createElement('audio');
+  document.body.append(element);
+  const attached = await openMediaSource(element);
+  const { mediaSource } = attached;
+  const sourceBuffer = mediaSource.addSourceBuffer(fixture.source.mimeType);
+  mediaSource.duration = fixture.source.duration;
+  const asked: number[] = [];
+  const feeder = new SourceBufferFeeder({
+    element,
+    mediaSource,
+    sourceBuffer,
+    source: {
+      mimeType: fixture.source.mimeType,
+      duration: fixture.source.duration,
+      segmentsFrom: (time): Segments => {
+        asked.push(time);
+        const segments = fixture.source.segmentsFrom(time);
+        return asked.length === 1 ? firstRun(segments) : segments;
+      },
+    },
+  });
+  const close = (): void => {
+    feeder.dispose();
+    attached.detach();
+    element.remove();
+    fixture.dispose();
+  };
+  return { feeder, element, mediaSource, sourceBuffer, asked, close };
+}
+
+describe.skipIf(!isMediaSourceTypeSupported(AAC_IN_MP4))('SourceBufferFeeder', () => {
+  it('disposes while old audio is being evicted, which a source buffer cannot abort', async () => {
+    const element = document.createElement('audio');
+    document.body.append(element);
+    const attached = await openMediaSource(element);
+    const { mediaSource } = attached;
+    const sourceBuffer = mediaSource.addSourceBuffer(AAC_IN_MP4);
+    mediaSource.duration = UNREAD_SOURCE.duration;
+    const feeder = new SourceBufferFeeder({
+      element,
+      mediaSource,
+      sourceBuffer,
+      source: UNREAD_SOURCE,
+    });
+    sourceBuffer.remove(0, 1);
+    expect(sourceBuffer.updating).toBe(true);
+    expect(() => {
+      feeder.dispose();
+    }).not.toThrow();
+    attached.detach();
+    element.remove();
+  });
+
+  it('feeds a second before the time it restarts from, and from the start before that', async () => {
+    const element = document.createElement('audio');
+    document.body.append(element);
+    const attached = await openMediaSource(element);
+    const { mediaSource } = attached;
+    const sourceBuffer = mediaSource.addSourceBuffer(AAC_IN_MP4);
+    const asked: number[] = [];
+    const feeder = new SourceBufferFeeder({
+      element,
+      mediaSource,
+      sourceBuffer,
+      source: {
+        ...UNREAD_SOURCE,
+        segmentsFrom: (time): AsyncIterable<Uint8Array<ArrayBuffer>> => {
+          asked.push(time);
+          return neverEnding();
+        },
+      },
+    });
+    feeder.restartFrom(seconds(2.5));
+    await waitUntil(() => asked.length === 1);
+    feeder.restartFrom(seconds(0.5));
+    await waitUntil(() => asked.length === 2);
+    expect(asked).toEqual([1.5, 0]);
+    feeder.dispose();
+    attached.detach();
+    element.remove();
+  });
+
+  it('appends only what is missing after a seek within the audio already buffered', async () => {
+    const stalled = new Deferred<void>();
+    const { feeder, element, asked, close } = await fixtureFeeder(
+      stallingAfter(FIRST_SECOND, stalled),
+    );
+    feeder.restartFrom(seconds(0));
+    await stalled.promise;
+    const stalledAt = element.buffered.end(0);
+    expect(stalledAt).toBeGreaterThan(SEEK_WITHIN);
+    feeder.restartFrom(seconds(SEEK_WITHIN));
+    await waitUntil(() => asked.length === 2);
+    expect(asked[1]).toBe(stalledAt);
+    close();
+  });
+
+  // A seek restarts the feeder, stopping its run between any two of its segments: playing from
+  // the last run's audio into the next run's must still decode, which only playing shows, and so
+  // must a second initialisation segment before any audio. The element plays from the start
+  // rather than seeking to the seam, since Playwright's Linux WebKit (GStreamer) now and then
+  // never finishes a seek within buffered audio, and retrying did not help: in a run where one
+  // seek was lost, the next often were too.
+  const restarts = [
+    {
+      appended: 1,
+      name: 'plays after a restart stopped a run after its initialisation segment alone',
+    },
+    ...[2, 3].map((appended) => ({
+      appended,
+      name: `plays from one run's audio into the next after a restart stopped a run after ${appended} of its segments`,
+    })),
+  ];
+  for (const { appended, name } of restarts) {
+    it(name, async () => {
+      const stalled = new Deferred<void>();
+      const { feeder, element, asked, close } = await fixtureFeeder(
+        stallingAfter(appended, stalled),
+      );
+      onTestFinished(close);
+      feeder.restartFrom(seconds(0));
+      await stalled.promise;
+      const seam = element.buffered.length > 0 ? element.buffered.end(0) : 0;
+      feeder.restartFrom(seconds(Math.max(0, seam - ACROSS_THE_SEAM)));
+      element.muted = true;
+      await element.play();
+      await waitUntil(
+        () => element.error !== null || element.currentTime > seam + ACROSS_THE_SEAM,
+        PLAYBACK_WITHIN_MS,
+      );
+      expect(asked).toEqual([0, seam]);
+      expect(element.error).toBeNull();
+      expect(feeder.failure).toBeUndefined();
+      expect(element.currentTime).toBeGreaterThan(seam + ACROSS_THE_SEAM);
+    });
+  }
+
+  it("leaves a failed element's own error to say why, appending nothing more", async () => {
+    const stalled = new Deferred<void>();
+    const { feeder, element, mediaSource, close } = await fixtureFeeder(
+      stallingAfter(FIRST_SECOND, stalled),
+    );
+    feeder.restartFrom(seconds(0));
+    await stalled.promise;
+    // How a segment the parser cannot read fails the element, in every engine alike: the append
+    // error algorithm ends the stream with a decode error.
+    mediaSource.endOfStream('decode');
+    await waitUntil(() => element.error !== null);
+    expect(element.error?.code).toBe(MediaError.MEDIA_ERR_DECODE);
+    feeder.restartFrom(seconds(SEEK_BEYOND_THE_FIRST));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(element.error).not.toBeNull();
+    expect(feeder.failure).toBeUndefined();
+    close();
+  });
+
+  it('feeds the playhead again when the audio there was evicted after the stream ended', async () => {
+    const { feeder, element, mediaSource, sourceBuffer, asked, close } =
+      await fixtureFeeder(everySegment);
+    feeder.restartFrom(seconds(0));
+    await waitUntil(() => mediaSource.readyState === 'ended');
+    expect(mediaSource.readyState).toBe('ended');
+    element.currentTime = EVICTED_PLAYHEAD;
+    await evict(sourceBuffer, 0, EVICTED_UP_TO);
+    element.dispatchEvent(new Event('waiting'));
+    await waitUntil(() => isBufferedAt(element, EVICTED_PLAYHEAD));
+    expect(asked).toEqual([0, 0]);
+    expect(isBufferedAt(element, EVICTED_PLAYHEAD)).toBe(true);
+    expect(feeder.failure).toBeUndefined();
+    close();
+  });
+
+  it('asks for the playhead once only, however often the element waits there', async () => {
+    const { feeder, element, mediaSource, sourceBuffer, asked, close } = await fixtureFeeder(
+      (segments) => segments,
+    );
+    feeder.restartFrom(seconds(0));
+    await waitUntil(() => mediaSource.readyState === 'ended');
+    expect(mediaSource.readyState).toBe('ended');
+    element.currentTime = EVICTED_PLAYHEAD;
+    await evict(sourceBuffer, 0, EVICTED_UP_TO);
+    element.dispatchEvent(new Event('waiting'));
+    // The eviction reopened the stream; the run that feeds the playhead again ends it again, and
+    // until then it appends, while a source buffer refuses a removal.
+    await waitUntil(() => asked.length === 2 && mediaSource.readyState === 'ended');
+    expect(asked).toHaveLength(2);
+    expect(mediaSource.readyState).toBe('ended');
+    await evict(sourceBuffer, 0, EVICTED_UP_TO);
+    element.dispatchEvent(new Event('waiting'));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(asked).toHaveLength(2);
+    close();
+  });
+
+  it('leaves alone a playhead waiting at the end of what is buffered, the run appending there', async () => {
+    const stalled = new Deferred<void>();
+    const { feeder, element, asked, close } = await fixtureFeeder(
+      stallingAfter(FIRST_SECOND, stalled),
+    );
+    feeder.restartFrom(seconds(0));
+    await stalled.promise;
+    element.currentTime = element.buffered.end(0);
+    element.dispatchEvent(new Event('waiting'));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(asked).toEqual([0]);
+    close();
+  });
+
+  it('makes room and appends again when the source buffer is full', async () => {
+    const { feeder, mediaSource, sourceBuffer, close } = await fixtureFeeder(everySegment);
+    refuseOnce(sourceBuffer, new DOMException('the buffer is full', 'QuotaExceededError'));
+    feeder.restartFrom(seconds(0));
+    await waitUntil(() => mediaSource.readyState === 'ended');
+    expect(mediaSource.readyState).toBe('ended');
+    expect(feeder.failure).toBeUndefined();
+    close();
+  });
+
+  it('fails when the source buffer stays full after making room', async () => {
+    const { feeder, sourceBuffer, close } = await fixtureFeeder(everySegment);
+    sourceBuffer.appendBuffer = (): void => {
+      throw new DOMException('the buffer is full', 'QuotaExceededError');
+    };
+    feeder.restartFrom(seconds(0));
+    await waitUntil(() => feeder.failure !== undefined);
+    expect(feeder.failure).toMatchObject({ code: 'decode' });
+    close();
+  });
+
+  it('starts no run after a seek within audio buffered to the end of the ended stream', async () => {
+    const { feeder, element, mediaSource, asked, close } = await fixtureFeeder(everySegment);
+    feeder.restartFrom(seconds(0));
+    await waitUntil(() => mediaSource.readyState === 'ended');
+    feeder.restartFrom(seconds(1));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(asked).toHaveLength(1);
+    expect(mediaSource.readyState).toBe('ended');
+    expect(element.error).toBeNull();
+    expect(feeder.failure).toBeUndefined();
+    close();
+  });
+});

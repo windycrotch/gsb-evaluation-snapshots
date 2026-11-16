@@ -1,0 +1,59 @@
+import { readRecording } from '../../src/application/recording/readRecording';
+import type { Recording } from '../../src/application/recording/Recording';
+import { InfoRecordFormat, RecordType } from '../../src/domain/format/constants';
+import { InMemoryRandomAccessSource } from '../../src/testing/InMemoryRandomAccessSource';
+import {
+  TrailerFixtureBuilder,
+  type FixtureRecordSpec,
+} from '../../src/testing/TrailerFixtureBuilder';
+import { loadFixture } from './fixtures';
+import { minimalMp4Prefix } from './mp4Prefix';
+
+export interface OfficeRecordingParts {
+  /**
+   * An info record in place of the office one.
+   */
+  readonly info?: Uint8Array;
+  /**
+   * A gyro record in place of the office one.
+   */
+  readonly gyro?: Uint8Array;
+  readonly hasGyro?: boolean;
+  readonly hasExposure?: boolean;
+  /**
+   * A trim record, as the Insta360 app adds to a clip it trims.
+   */
+  readonly trim?: Uint8Array;
+}
+
+/**
+ * A recording built from the office X5 fixture slices: its info record, the first 2000 gyro
+ * samples and the first 16 exposure entries, behind a minimal MP4.
+ */
+export function officeRecording(parts: OfficeRecordingParts = {}): Promise<Recording> {
+  const file = officeRecords(parts).buildContiguous();
+  return readRecording(new InMemoryRandomAccessSource(file.bytes));
+}
+
+/**
+ * The trailer records of {@link officeRecording}, for a test that lays the file out itself.
+ */
+export function officeRecords(parts: OfficeRecordingParts = {}): TrailerFixtureBuilder {
+  const builder = new TrailerFixtureBuilder().withPrefix(minimalMp4Prefix()).addRecord({
+    id: RecordType.Info,
+    format: InfoRecordFormat.Protobuf,
+    payload: parts.info ?? loadFixture('x5/office/record-01-info.bin'),
+  });
+  for (const record of optionalRecords(parts)) builder.addRecord(record);
+  return builder;
+}
+
+function optionalRecords(parts: OfficeRecordingParts): FixtureRecordSpec[] {
+  const gyro = parts.gyro ?? loadFixture('x5/office/record-03-gyro-first2000.bin');
+  const exposure = loadFixture('x5/office/record-04-exposure-first16.bin');
+  return [
+    ...((parts.hasGyro ?? true) ? [{ id: RecordType.Gyro, payload: gyro }] : []),
+    ...((parts.hasExposure ?? true) ? [{ id: RecordType.Exposure, payload: exposure }] : []),
+    ...(parts.trim ? [{ id: RecordType.Trim, payload: parts.trim }] : []),
+  ];
+}

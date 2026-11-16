@@ -1,0 +1,41 @@
+# ADR 0004: Select format variants from the file, not from the camera model
+
+Status: accepted (2026-09-18); amended (2026-09-27): without `is_raw_gyro`, the gyro sample
+layout is told from the median stamp step each candidate decodes over the first 32 samples, not
+from the payload size
+
+## Context
+
+Only two X5 recordings are available locally, yet the player must accept X3, X4 and X5 files.
+The trailer, calibration, gyro and layout all have documented variants across firmware
+generations that do not align cleanly with model names.
+
+## Decision
+
+Every variant is selected from evidence inside the file: trailer wrapper from the box scan;
+record access from the id of the header before the footer; calibration version from the token
+count and version word; gyro sample layout from `is_raw_gyro` or the payload size; frame timing
+source from `pts_type` and record presence; lens layout from protobuf field 79, track count and
+aspect ratio. The model string may seed a default (IMU axis orientation) that data then verifies.
+Variants without a real sample are covered by synthetic fixtures and marked "verify on real file".
+
+## Consequences
+
+More parsing code paths and fixtures up front; no silent breakage when an unseen camera writes
+a known variant. A camera writing an unknown variant fails with a typed error naming it.
+
+## Colour (2026-09-30)
+
+How a lens is brought to the display follows the colour its track's bitstream declares (the VUI
+or a `colr` box, `TrackColour`), not the camera model and not the info record's capture mode
+("Dolby_Vision" on the X6), ADR 0033.
+
+## Lens order of a split pair (2026-10-05)
+
+Which file of a split-file pair holds lens 0 was read from the names alone (`_00_` before
+`_10_`), and unnamed or renamed files kept the order they were given in: a pair served from
+opaque URLs `_10_` first was stitched with each lens in the other's place, without a warning. The
+data tells: an older camera writes the trailer to its back lens's file alone, and the player
+already reads the recording from whichever file has it. So where exactly one file of the pair
+ends with a trailer, that file is lens 0; the names decide only where the trailer does not, and
+the layout's evidence says when the trailer overrode a name.
