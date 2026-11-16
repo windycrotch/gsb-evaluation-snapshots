@@ -1,0 +1,479 @@
+# ruff: noqa: S101
+"""Contract and differential tests for public single-volume ``warp_affine3d``."""
+
+from __future__ import annotations
+
+import cv2
+import numpy as np
+import pytest
+import torch
+
+import albucore.affine3d as affine3d
+from albucore import warp_affine, warp_affine3d
+from albucore.affine3d import _affine_grid, _inverse_matrix, _normalize_matrix
+from albucore.sampling3d import _sample3d_torch_cpu
+
+
+def _volume(dtype: type[np.uint8 | np.float32], channels: int = 5) -> np.ndarray:
+    """Build a non-cubic ``DHWC`` volume with values that expose spatial-axis swaps."""
+    shape = (3, 4, 5, channels)
+    if dtype is np.uint8:
+        return np.arange(np.prod(shape), dtype=np.uint8).reshape(shape)
+    return np.arange(np.prod(shape), dtype=np.float32).reshape(shape) / np.float32(10.0)
+
+
+def _translation(x: float = 0.0, y: float = 0.0, z: float = 0.0) -> np.ndarray:
+    """Build one forward ``(x, y, z)`` translation matrix."""
+    return np.array(
+        (
+            (1.0, 0.0, 0.0, x),
+            (0.0, 1.0, 0.0, y),
+            (0.0, 0.0, 1.0, z),
+        ),
+        dtype=np.float32,
+    )
+
+
+@pytest.mark.parametrize(
+    "volume",
+    [
+        np.zeros((3, 4, 1), dtype=np.uint8),
+        torch.zeros((1, 3, 4), dtype=torch.uint8),
+    ],
+    ids=("numpy_rank_3", "torch_rank_3"),
+)
+def _numpy_trilinear_constant_reference(
+    volume: np.ndarray,
+    matrix: np.ndarray,
+    size: tuple[int, int, int],
+    fill: np.ndarray,
+) -> np.ndarray:
+    """Independently sample one small DHWC volume with inverse affine trilinear interpolation."""
+    homogeneous = np.eye(4, dtype=np.float64)
+    homogeneous[:3] = matrix
+    inverse = np.linalg.inv(homogeneous)
+    result = np.empty((*size, volume.shape[-1]), dtype=np.float32)
+    depth, height, width = volume.shape[:3]
+
+    for output_z in range(size[0]):
+        for output_y in range(size[1]):
+            for output_x in range(size[2]):
+                source_x, source_y, source_z, _ = inverse @ (output_x, output_y, output_z, 1.0)
+                source = (source_z, source_y, source_x)
+                lower = tuple(int(np.floor(coordinate)) for coordinate in source)
+                weights = tuple(coordinate - axis_lower for coordinate, axis_lower in zip(source, lower, strict=True))
+                value = np.zeros(volume.shape[-1], dtype=np.float32)
+                for depth_offset in (0, 1):
+                    for height_offset in (0, 1):
+                        for width_offset in (0, 1):
+                            offsets = depth_offset, height_offset, width_offset
+                            weight = np.float32(1.0)
+                            for axis, offset in enumerate(offsets):
+                                weight *= weights[axis] if offset else 1.0 - weights[axis]
+                            indices = tuple(lower[axis] + offset for axis, offset in enumerate(offsets))
+                            if all(
+                                0 <= index_ < axis_size
+                                for index_, axis_size in zip(indices, (depth, height, width), strict=True)
+                            ):
+                                value += weight * volume[indices]
+                            else:
+                                value += weight * fill
+                result[output_z, output_y, output_x] = value
+    return result
+
+
+@pytest.mark.parametrize("dtype", [np.uint8, np.float32], ids=["uint8", "float32"])
+@pytest.mark.parametrize("channels", [1, 3, 5, 9], ids=["c1", "c3", "c5", "c9"])
+def test_warp_affine3d_identity_preserves_public_container_dtype_and_aliasing(
+    dtype: type[np.uint8 | np.float32],
+    channels: int,
+) -> None:
+    volume = _volume(dtype, channels)
+    tensor = torch.from_numpy(volume).permute(3, 0, 1, 2)
+    matrix = np.eye(4, dtype=np.float32)
+
+    assert warp_affine3d(volume, matrix, volume.shape[:3]) is volume
+    assert warp_affine3d(tensor, matrix, (tensor.shape[1], tensor.shape[2], tensor.shape[3])) is tensor
+
+
+@pytest.mark.parametrize("dtype", [np.uint8, np.float32], ids=["uint8", "float32"])
+def test_warp_affine3d_forward_x_translation_uses_constant_per_channel_fill(
+    dtype: type[np.uint8 | np.float32],
+) -> None:
+    """A forward positive x translation pulls source x-1 and fills the first output column."""
+    volume = _volume(dtype, channels=5)
+    fill = np.array((11.0, 23.0, 37.0, 41.0, 53.0), dtype=np.float32)
+
+    result = warp_affine3d(
+        volume,
+        _translation(x=1.0),
+        volume.shape[:3],
+        interpolation=cv2.INTER_NEAREST,
+        border_value=fill,
+    )
+    expected = np.empty_like(volume)
+    expected[:, :, 0, :] = fill.astype(dtype)
+    expected[:, :, 1:, :] = volume[:, :, :-1, :]
+
+    if dtype is np.uint8:
+        np.testing.assert_array_equal(result, expected)
+    else:
+        np.testing.assert_allclose(result, expected, rtol=2e-5, atol=2e-5)
+
+
+def test_warp_affine3d_replicate_border_uses_the_nearest_edge_voxel() -> None:
+    """Replicate padding does not consume constant fill and keeps the source edge at x=0."""
+    volume = _volume(np.uint8, channels=3)
+
+    result = warp_affine3d(
+        volume,
+        _translation(x=1.0),
+        volume.shape[:3],
+        interpolation=cv2.INTER_NEAREST,
+        border_mode=cv2.BORDER_REPLICATE,
+        border_value=(255.0, 254.0, 253.0),
+    )
+    expected = np.empty_like(volume)
+    expected[:, :, 0, :] = volume[:, :, 0, :]
+    expected[:, :, 1:, :] = volume[:, :, :-1, :]
+
+    np.testing.assert_array_equal(result, expected)
+
+
+@pytest.mark.parametrize("axis", [0, 1, 2], ids=["depth", "height", "width"])
+def test_warp_affine3d_nearest_reflection_matches_numpy_flip(axis: int) -> None:
+    volume = _volume(np.uint8, channels=5)
+    matrix = np.eye(4, dtype=np.float32)
+    coordinate_axis = 2 - axis
+    matrix[coordinate_axis, coordinate_axis] = -1.0
+    matrix[coordinate_axis, 3] = volume.shape[axis] - 1
+
+    result = warp_affine3d(volume, matrix, volume.shape[:3], interpolation=cv2.INTER_NEAREST)
+
+    np.testing.assert_array_equal(result, np.flip(volume, axis=axis))
+
+
+@pytest.mark.parametrize(
+    ("matrix", "size", "axes"),
+    [
+        (
+            np.array(((0.0, 1.0, 0.0, 0.0), (-1.0, 0.0, 0.0, 4.0), (0.0, 0.0, 1.0, 0.0)), dtype=np.float32),
+            (3, 5, 4),
+            (1, 2),
+        ),
+        (
+            np.array(((1.0, 0.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0), (0.0, -1.0, 0.0, 3.0)), dtype=np.float32),
+            (4, 3, 5),
+            (0, 1),
+        ),
+        (
+            np.array(((0.0, 0.0, 1.0, 0.0), (0.0, 1.0, 0.0, 0.0), (-1.0, 0.0, 0.0, 4.0)), dtype=np.float32),
+            (5, 4, 3),
+            (0, 2),
+        ),
+    ],
+    ids=["height_width", "depth_height", "depth_width"],
+)
+def test_warp_affine3d_nearest_90_degree_rotations_match_numpy_rot90(
+    matrix: np.ndarray,
+    size: tuple[int, int, int],
+    axes: tuple[int, int],
+) -> None:
+    volume = _volume(np.uint8, channels=5)
+
+    result = warp_affine3d(volume, matrix, size, interpolation=cv2.INTER_NEAREST)
+
+    np.testing.assert_array_equal(result, np.rot90(volume, axes=axes))
+
+
+def test_warp_affine3d_in_plane_d1_rotation_matches_2d_warp_affine() -> None:
+    volume = _volume(np.uint8, channels=3)[:1]
+    matrix_3d = np.array(((0.0, 1.0, 0.0, 0.0), (-1.0, 0.0, 0.0, 4.0), (0.0, 0.0, 1.0, 0.0)), dtype=np.float32)
+    matrix_2d = matrix_3d[:2, (0, 1, 3)]
+
+    result_3d = warp_affine3d(volume, matrix_3d, (1, 5, 4), interpolation=cv2.INTER_NEAREST)
+    result_2d = warp_affine(volume[0], matrix_2d, (4, 5), flags=cv2.INTER_NEAREST)
+
+    np.testing.assert_array_equal(result_3d[0], result_2d)
+
+
+@pytest.mark.parametrize("dtype", [np.uint8, np.float32], ids=["uint8", "float32"])
+@pytest.mark.parametrize("interpolation", [cv2.INTER_NEAREST, cv2.INTER_LINEAR], ids=["nearest", "linear"])
+def test_warp_affine3d_numpy_and_torch_paths_match_after_layout_conversion(
+    dtype: type[np.uint8 | np.float32],
+    interpolation: int,
+) -> None:
+    volume = _volume(dtype, channels=5)
+    tensor = torch.from_numpy(volume).permute(3, 0, 1, 2)
+    matrix = np.array(
+        (
+            (0.9, 0.1, 0.0, 0.4),
+            (0.0, 1.1, 0.1, -0.3),
+            (0.05, 0.0, 1.0, 0.2),
+        ),
+        dtype=np.float32,
+    )
+    size = (2, 5, 4)
+
+    numpy_result = warp_affine3d(volume, matrix, size, interpolation=interpolation, border_value=17.0)
+    tensor_result = warp_affine3d(tensor, matrix, size, interpolation=interpolation, border_value=17.0)
+
+    assert numpy_result.shape == (*size, volume.shape[-1])
+    assert tensor_result.shape == (volume.shape[-1], *size)
+    np.testing.assert_array_equal(numpy_result, tensor_result.permute(1, 2, 3, 0).numpy())
+
+
+def test_warp_affine3d_linear_matches_an_independent_numpy_trilinear_reference() -> None:
+    volume = _volume(np.float32, channels=3)
+    matrix = np.array(
+        (
+            (0.9, 0.1, 0.0, 0.4),
+            (0.0, 1.1, 0.1, -0.3),
+            (0.05, 0.0, 1.0, 0.2),
+        ),
+        dtype=np.float32,
+    )
+    size = (2, 5, 4)
+    fill = np.array((1.5, -2.0, 7.0), dtype=np.float32)
+
+    result = warp_affine3d(volume, matrix, size, interpolation=cv2.INTER_LINEAR, border_value=fill)
+    expected = _numpy_trilinear_constant_reference(volume, matrix, size, fill)
+
+    np.testing.assert_allclose(result, expected, rtol=3e-5, atol=3e-5)
+
+
+@pytest.mark.parametrize("dtype", [np.uint8, np.float32], ids=["uint8", "float32"])
+def test_warp_affine3d_linear_constant_fill_has_the_expected_half_voxel_blend(
+    dtype: type[np.uint8 | np.float32],
+) -> None:
+    """Shifted-input fill correction blends a half-voxel boundary without an extra coverage kernel."""
+    volume = np.ones((1, 1, 4, 1), dtype=dtype)
+
+    result = warp_affine3d(
+        volume,
+        _translation(x=0.5),
+        volume.shape[:3],
+        interpolation=cv2.INTER_LINEAR,
+        border_value=3.0,
+    )
+
+    expected = np.array((2.0, 1.0, 1.0, 1.0), dtype=dtype).reshape(1, 1, 4, 1)
+    np.testing.assert_array_equal(result, expected)
+
+
+def test_warp_affine3d_nearest_half_voxel_ties_to_even() -> None:
+    """Nearest sampling follows the documented CPU Torch tie rule at interior half-voxels."""
+    volume = np.arange(4, dtype=np.uint8).reshape(1, 1, 4, 1)
+
+    result = warp_affine3d(
+        volume,
+        _translation(x=0.5),
+        volume.shape[:3],
+        interpolation=cv2.INTER_NEAREST,
+        border_value=99.0,
+    )
+
+    np.testing.assert_array_equal(result.reshape(-1), np.array((0, 0, 2, 2), dtype=np.uint8))
+
+
+def test_warp_affine3d_accepts_positive_and_negative_stride_numpy_views() -> None:
+    """Positive-stride inputs use zero-copy storage and negative strides receive one explicit repair copy."""
+    volume = _volume(np.float32, channels=5)
+    positive_stride = volume[:, ::2, :, :]
+    negative_stride = volume[:, :, ::-1, :]
+
+    positive_result = warp_affine3d(positive_stride, _translation(), (2, 3, 4))
+    negative_result = warp_affine3d(negative_stride, _translation(), (2, 3, 4))
+
+    assert positive_result.shape == negative_result.shape == (2, 3, 4, 5)
+    assert positive_result.dtype == negative_result.dtype == np.float32
+
+
+def test_warp_affine3d_accepts_read_only_numpy_storage_with_a_repair_copy() -> None:
+    """A read-only NumPy input is copied once before Torch receives mutable shared storage."""
+    volume = _volume(np.float32, channels=3)
+    volume.setflags(write=False)
+
+    result = warp_affine3d(volume, _translation(x=0.25), (2, 5, 4))
+
+    assert result.shape == (2, 5, 4, 3)
+    assert result.dtype == np.float32
+
+
+def test_warp_affine3d_accepts_noncontiguous_torch_cdhw() -> None:
+    volume = torch.from_numpy(_volume(np.float32, channels=5)).permute(3, 0, 1, 2)[:, :, :, ::2]
+
+    result = warp_affine3d(volume, _translation(), (2, 3, 4))
+
+    assert result.shape == (5, 2, 3, 4)
+    assert result.dtype == torch.float32
+
+
+def test_warp_affine3d_output_can_feed_a_trainable_torch_module() -> None:
+    volume = torch.from_numpy(_volume(np.float32, channels=1)).permute(3, 0, 1, 2)
+    layer = torch.nn.Conv3d(1, 1, kernel_size=1)
+
+    result = warp_affine3d(volume, _translation(x=0.25), (2, 3, 4))
+    loss = layer(result.unsqueeze(0)).sum()
+    loss.backward()
+
+    assert layer.weight.grad is not None
+
+
+def test_warp_affine3d_3x4_and_homogeneous_4x4_matrices_are_equivalent() -> None:
+    volume = _volume(np.float32, channels=3)
+    matrix_3x4 = _translation(x=0.75, y=-0.25, z=0.5)
+    matrix_4x4 = np.eye(4, dtype=np.float32)
+    matrix_4x4[:3] = matrix_3x4
+
+    result_3x4 = warp_affine3d(volume, matrix_3x4, (2, 5, 4), border_value=2.0)
+    result_4x4 = warp_affine3d(volume, matrix_4x4, (2, 5, 4), border_value=2.0)
+
+    np.testing.assert_array_equal(result_3x4, result_4x4)
+
+
+def test_warp_affine3d_does_not_mutate_a_real_warp_input() -> None:
+    """Affine sampling is allocating because output voxels read source values in arbitrary order."""
+    volume = _volume(np.float32, channels=3)
+    original = volume.copy()
+
+    result = warp_affine3d(volume, _translation(x=0.25), (2, 5, 4), border_value=7.0)
+
+    np.testing.assert_array_equal(volume, original)
+    assert not np.shares_memory(result, volume)
+
+
+@pytest.mark.parametrize("axis", [0, 1], ids=["x", "y"])
+@pytest.mark.parametrize(
+    ("shape", "labels"),
+    [
+        ((1, 9, 4), 2),
+        ((5, 9, 13), 3),
+        ((30, 9, 5), 3),
+        ((1, 128, 160), 2),
+        ((2, 64, 80), 2),
+        ((96, 1, 129), 3),
+        ((96, 129, 1), 3),
+        ((2, 32, 127), 3),
+        ((2, 32, 128), 3),
+        ((2, 32, 129), 3),
+    ],
+)
+@pytest.mark.parametrize("shift", [0.5, 1.5, -0.5, -1.5])
+@pytest.mark.parametrize("dtype", [np.uint8, np.float16, np.float32])
+def test_warp_affine3d_xy_nearest_preserves_native_half_voxel_ties(
+    axis: int,
+    shape: tuple[int, int, int],
+    shift: float,
+    dtype: type,
+    labels: int,
+) -> None:
+    volume = (np.arange(np.prod(shape)).reshape(*shape, 1) % labels).astype(dtype)
+    matrix = np.eye(4, dtype=np.float64)
+    matrix[axis, 3] = shift
+    tensor = torch.from_numpy(volume).permute(3, 0, 1, 2)
+    grid = _affine_grid(_inverse_matrix(_normalize_matrix(matrix)), volume.shape[:3], 1, volume.shape[:3])
+    expected = (
+        _sample3d_torch_cpu(
+            tensor,
+            grid,
+            cv2.INTER_NEAREST,
+            cv2.BORDER_CONSTANT,
+            np.array([99], dtype=np.float32),
+        )
+        .permute(1, 2, 3, 0)
+        .numpy()
+    )
+
+    result = warp_affine3d(volume, matrix, volume.shape[:3], interpolation=cv2.INTER_NEAREST, border_value=99)
+
+    np.testing.assert_array_equal(result, expected)
+
+
+def test_warp_affine3d_nearest_extreme_depth_preserves_native_z_rounding() -> None:
+    depth = 2**23 + 1
+    volume = (np.arange(depth, dtype=np.uint32) % 251).astype(np.uint8).reshape(depth, 1, 1, 1)
+    matrix = _translation(x=0.125)
+    tensor = torch.from_numpy(volume).permute(3, 0, 1, 2)
+    grid = _affine_grid(_inverse_matrix(_normalize_matrix(matrix)), volume.shape[:3], 1, volume.shape[:3])
+    expected = (
+        _sample3d_torch_cpu(
+            tensor,
+            grid,
+            cv2.INTER_NEAREST,
+            cv2.BORDER_CONSTANT,
+            np.zeros(1, dtype=np.float32),
+        )
+        .permute(1, 2, 3, 0)
+        .numpy()
+    )
+    del grid
+
+    result = warp_affine3d(volume, matrix, volume.shape[:3], cv2.INTER_NEAREST)
+
+    np.testing.assert_array_equal(result, expected)
+
+
+@pytest.mark.parametrize("entry", [(0, 2), (1, 2), (2, 0), (2, 1), (2, 2), (2, 3)])
+@pytest.mark.parametrize("interpolation", [cv2.INTER_NEAREST, cv2.INTER_LINEAR])
+def test_warp_affine3d_near_xy_matrix_keeps_true_3d_sampling(
+    entry: tuple[int, int],
+    interpolation: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    volume = np.tile(_volume(np.float32, channels=3), (16, 16, 16, 1))
+    matrix = np.eye(4, dtype=np.float64)
+    matrix[0, 3] = 0.25
+    matrix[entry] += 1e-12
+
+    def unexpected_xy(*args: object) -> torch.Tensor:
+        raise AssertionError("A real Z change must retain 3D sampling")
+
+    monkeypatch.setattr(affine3d, "_warp_affine_xy_torch_cpu_batch", unexpected_xy)
+    result = warp_affine3d(volume, matrix, volume.shape[:3], interpolation)
+    grid = _affine_grid(_inverse_matrix(matrix), volume.shape[:3], 3, volume.shape[:3])
+    expected = (
+        _sample3d_torch_cpu(
+            torch.from_numpy(volume).permute(3, 0, 1, 2),
+            grid,
+            interpolation,
+            cv2.BORDER_CONSTANT,
+            np.zeros(3, dtype=np.float32),
+        )
+        .permute(1, 2, 3, 0)
+        .numpy()
+    )
+
+    np.testing.assert_array_equal(result, expected)
+    assert not np.shares_memory(result, volume)
+
+
+@pytest.mark.parametrize("depth", [8, 32])
+def test_warp_affine3d_xy_nearest_changed_depth_keeps_true_3d_sampling(
+    depth: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    volume = (np.arange(16 * 64 * 80, dtype=np.uint32) % 251).astype(np.uint8).reshape(16, 64, 80, 1)
+    matrix = _translation(x=0.5)
+    size = (depth, 64, 80)
+
+    def unexpected_xy(*args: object) -> torch.Tensor:
+        raise AssertionError("A depth change must retain 3D sampling")
+
+    monkeypatch.setattr(affine3d, "_warp_affine_xy_torch_cpu_batch", unexpected_xy)
+    grid = _affine_grid(_inverse_matrix(_normalize_matrix(matrix)), volume.shape[:3], 1, size)
+    expected = (
+        _sample3d_torch_cpu(
+            torch.from_numpy(volume).permute(3, 0, 1, 2),
+            grid,
+            cv2.INTER_NEAREST,
+            cv2.BORDER_CONSTANT,
+            np.zeros(1, dtype=np.float32),
+        )
+        .permute(1, 2, 3, 0)
+        .numpy()
+    )
+
+    result = warp_affine3d(volume, matrix, size, cv2.INTER_NEAREST)
+
+    np.testing.assert_array_equal(result, expected)

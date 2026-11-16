@@ -1,0 +1,1355 @@
+"""Tests for geometric module: warp_affine, warp_perspective, copy_make_border, remap."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from itertools import product
+
+import pytest
+import cv2
+import numpy as np
+
+from albucore.geometric import (
+    warp_affine,
+    warp_perspective,
+    copy_make_border,
+    remap,
+    resize,
+)
+from albucore.utils import get_opencv_max_channels
+
+DTYPES = [np.uint8, np.float32]
+
+
+@pytest.fixture
+def rng():
+    return np.random.default_rng(42)
+
+
+def make_image(h: int, w: int, channels: int, dtype: type, rng: np.random.Generator) -> np.ndarray:
+    if dtype == np.uint8:
+        img = rng.integers(0, 256, (h, w, channels), dtype=np.uint8)
+    else:
+        img = rng.random((h, w, channels), dtype=np.float32)
+    return np.ascontiguousarray(img)
+
+
+@pytest.mark.parametrize(
+    "channels",
+    [
+        get_opencv_max_channels(),
+        get_opencv_max_channels() + 1,
+        get_opencv_max_channels() + 64,
+    ],
+    ids=["at_limit", "above_limit", "well_above_limit"],
+)
+@pytest.mark.parametrize("dtype", [np.uint8, np.float32], ids=["uint8", "float32"])
+@pytest.mark.parametrize("operation", ["remap", "warp_affine", "warp_perspective"])
+def test_geometric_identity_at_opencv_channel_boundary(channels: int, dtype: type, operation: str) -> None:
+    height, width = 8, 8
+    channel_values = np.arange(channels, dtype=np.int64).astype(dtype)
+    img = np.broadcast_to(channel_values, (height, width, channels)).copy()
+    map_x, map_y = np.meshgrid(
+        np.arange(width, dtype=np.float32),
+        np.arange(height, dtype=np.float32),
+    )
+    affine = np.array([[1, 0, 0], [0, 1, 0]], dtype=np.float32)
+    perspective = np.eye(3, dtype=np.float32)
+
+    if operation == "remap":
+        result = remap(img, map_x, map_y, interpolation=cv2.INTER_NEAREST)
+    elif operation == "warp_affine":
+        result = warp_affine(img, affine, (width, height), flags=cv2.INTER_NEAREST)
+    else:
+        result = warp_perspective(img, perspective, (width, height), flags=cv2.INTER_NEAREST)
+
+    assert result.shape == img.shape
+    assert result.dtype == img.dtype
+    np.testing.assert_array_equal(result, img)
+
+
+@pytest.mark.parametrize("channels", [1, 3, 4, 8], ids=[f"c{c}" for c in [1, 3, 4, 8]])
+def test_warp_affine_shape(channels: int, rng: np.random.Generator) -> None:
+    img = make_image(16, 16, channels, np.uint8, rng)
+    M = np.float32([[1, 0, 2], [0, 1, 2]])
+    dsize = (16, 16)
+    result = warp_affine(img, M, dsize, border_value=0)
+    assert result.shape == (16, 16, channels)
+
+
+@pytest.mark.parametrize("channels", [1, 3, 4], ids=["1ch", "3ch", "4ch"])
+def test_warp_affine_equiv_cv2(channels: int, rng: np.random.Generator) -> None:
+    img = make_image(16, 16, channels, np.uint8, rng)
+    M = np.float32([[1, 0, 2], [0, 1, 2]])
+    dsize = (16, 16)
+    expected = cv2.warpAffine(img, M, dsize, flags=cv2.INTER_LINEAR, borderValue=0)
+    if channels == 1 and expected.ndim == 2:
+        expected = np.expand_dims(expected, -1)
+    result = warp_affine(img, M, dsize, flags=cv2.INTER_LINEAR, border_value=0)
+    np.testing.assert_array_equal(result, expected)
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [cv2.INTER_NEAREST, cv2.INTER_LINEAR, cv2.INTER_AREA],
+    ids=["NEAREST", "LINEAR", "AREA"],
+)
+def test_warp_affine_interpolations(flags: int, rng: np.random.Generator) -> None:
+    img = make_image(16, 16, 8, np.uint8, rng)
+    M = np.float32([[1, 0, 0], [0, 1, 0]])
+    result = warp_affine(img, M, (16, 16), flags=flags, border_value=0)
+    assert result.shape == (16, 16, 8)
+
+
+@pytest.mark.parametrize("border_value", [0, 128, (0, 0, 0, 0)], ids=["scalar0", "scalar128", "tuple4"])
+def test_warp_affine_border_values(border_value: int | tuple, rng: np.random.Generator) -> None:
+    img = make_image(16, 16, 8, np.uint8, rng)
+    M = np.float32([[1, 0, 2], [0, 1, 2]])
+    result = warp_affine(img, M, (16, 16), border_value=border_value)
+    assert result.shape == (16, 16, 8)
+
+
+def test_warp_affine_per_channel_border_value(rng: np.random.Generator) -> None:
+    img = make_image(16, 16, 8, np.uint8, rng)
+    M = np.float32([[1, 0, 2], [0, 1, 2]])
+    border_value = tuple(range(8))
+    result = warp_affine(img, M, (16, 16), border_value=border_value)
+    assert result.shape == (16, 16, 8)
+
+
+def test_warp_affine_accepts_3x3_matrix(rng: np.random.Generator) -> None:
+    img = make_image(16, 16, 3, np.uint8, rng)
+    M_2x3 = np.float32([[1, 0, 2], [0, 1, 2]])
+    M_3x3 = np.eye(3, dtype=np.float32)
+    M_3x3[:2, :] = M_2x3
+    result_2x3 = warp_affine(img, M_2x3, (16, 16), border_value=0)
+    result_3x3 = warp_affine(img, M_3x3, (16, 16), border_value=0)
+    np.testing.assert_array_equal(result_2x3, result_3x3)
+
+
+@pytest.mark.parametrize("dtype", [np.uint8, np.float32], ids=["uint8", "float32"])
+def test_warp_affine_3x3_matrix_dtype(dtype: type, rng: np.random.Generator) -> None:
+    img = make_image(16, 16, 3, dtype, rng)
+    M_3x3 = np.eye(3, dtype=np.float32)
+    M_3x3[:2, :] = [[1, 0, 2], [0, 1, 2]]
+    result = warp_affine(img, M_3x3, (16, 16), border_value=0)
+    assert result.shape == (16, 16, 3)
+    assert result.dtype == dtype
+
+
+def test_warp_affine_3x3_matrix_chunked_path(rng: np.random.Generator) -> None:
+    img = make_image(16, 16, 8, np.uint8, rng)
+    M_3x3 = np.eye(3, dtype=np.float32)
+    M_3x3[:2, :] = [[1, 0, 2], [0, 1, 2]]
+    result = warp_affine(img, M_3x3, (16, 16), border_value=0)
+    assert result.shape == (16, 16, 8)
+
+
+def test_warp_affine_3x3_matrix_rotation(rng: np.random.Generator) -> None:
+    img = make_image(16, 16, 3, np.uint8, rng)
+    angle = np.pi / 4
+    c, s = np.cos(angle), np.sin(angle)
+    M_2x3 = np.float32([[c, -s, 8], [s, c, 8]])
+    M_3x3 = np.eye(3, dtype=np.float32)
+    M_3x3[:2, :] = M_2x3
+    result_2x3 = warp_affine(img, M_2x3, (16, 16), border_value=0)
+    result_3x3 = warp_affine(img, M_3x3, (16, 16), border_value=0)
+    np.testing.assert_array_equal(result_2x3, result_3x3)
+
+
+_WARP_AFFINE_IMAGE_SHAPES = [(100, 100, 1), (100, 100, 2), (100, 100, 3), (100, 100, 7)]
+_WARP_AFFINE_TRANSFORM_PARAMS = [
+    (0, (0, 0), 1, (0, 0), (100, 100)),  # No change
+    (45, (0, 0), 1, (0, 0), (100, 100)),  # Rotation
+    (0, (10, 10), 1, (0, 0), (100, 100)),  # Translation
+    (0, (0, 0), 2, (0, 0), (200, 200)),  # Scaling
+    (0, (0, 0), 1, (20, 0), (100, 100)),  # Shear in x only
+    (0, (0, 0), 1, (0, 20), (100, 100)),  # Shear in y only
+    (0, (0, 0), 1, (20, 20), (100, 100)),  # Shear in both x and y
+]
+
+
+@pytest.mark.parametrize(
+    "params,image_shape",
+    list(product(_WARP_AFFINE_TRANSFORM_PARAMS, _WARP_AFFINE_IMAGE_SHAPES)),
+)
+def test_warp_affine_transforms(params: tuple, image_shape: tuple[int, ...]) -> None:
+    angle, translation, scale, shear, output_shape = params
+    image = np.ones(image_shape, dtype=np.uint8) * 255
+
+    translate: Mapping[str, float] = {"x": translation[0], "y": translation[1]}
+    shear_dict: Mapping[str, float] = {"x": shear[0], "y": shear[1]}
+    scale_dict: Mapping[str, float] = {"x": scale, "y": scale}
+    shift = _center(image_shape)
+
+    affine_matrix = _create_affine_matrix(
+        translate=translate,
+        shear=shear_dict,
+        scale=scale_dict,
+        rotate=angle,
+        shift=shift,
+    )
+
+    height_out, width_out = output_shape
+    warped = warp_affine(
+        image,
+        affine_matrix,
+        dsize=(width_out, height_out),
+        flags=cv2.INTER_LINEAR,
+        border_value=0,
+        border_mode=cv2.BORDER_CONSTANT,
+    )
+
+    assert warped.shape[:2] == output_shape
+
+
+@pytest.mark.parametrize("image_shape", _WARP_AFFINE_IMAGE_SHAPES)
+@pytest.mark.parametrize(
+    "translation,padding_value",
+    [
+        ((10, 0), 0),
+        ((-10, 0), 0),
+        ((0, 10), 0),
+        ((0, -10), 0),
+    ],
+)
+def test_warp_affine_edge_padding(
+    image_shape: tuple[int, ...],
+    translation: tuple[int, int],
+    padding_value: int,
+) -> None:
+    image = np.ones(image_shape, dtype=np.uint8) * 255
+
+    translate: Mapping[str, float] = {"x": translation[0], "y": translation[1]}
+    shear_dict: Mapping[str, float] = {"x": 0, "y": 0}
+    scale_dict: Mapping[str, float] = {"x": 1, "y": 1}
+    shift = _center(image_shape)
+
+    affine_matrix = _create_affine_matrix(
+        translate=translate,
+        shear=shear_dict,
+        scale=scale_dict,
+        rotate=0,
+        shift=shift,
+    )
+
+    height, width = image_shape[:2]
+    warped = warp_affine(
+        image,
+        affine_matrix,
+        dsize=(width, height),
+        flags=cv2.INTER_LINEAR,
+        border_value=padding_value,
+        border_mode=cv2.BORDER_CONSTANT,
+    )
+
+    if translation[0] > 0:
+        np.testing.assert_array_equal(warped[:, : translation[0]], padding_value)
+    elif translation[0] < 0:
+        np.testing.assert_array_equal(warped[:, translation[0] :], padding_value)
+    if translation[1] > 0:
+        np.testing.assert_array_equal(warped[: translation[1], :], padding_value)
+    elif translation[1] < 0:
+        np.testing.assert_array_equal(warped[translation[1] :, :], padding_value)
+
+    if translation[0] > 0:
+        np.testing.assert_array_equal(warped[:, translation[0] :], 255)
+    elif translation[0] < 0:
+        np.testing.assert_array_equal(warped[:, : translation[0]], 255)
+    if translation[1] > 0:
+        np.testing.assert_array_equal(warped[translation[1] :, :], 255)
+    elif translation[1] < 0:
+        np.testing.assert_array_equal(warped[: translation[1], :], 255)
+
+
+# Mirrors albumentations center() and create_affine_transformation_matrix().
+def _center(image_shape: tuple[int, ...]) -> tuple[float, float]:
+    height, width = image_shape[:2]
+    return width / 2 - 0.5, height / 2 - 0.5
+
+
+def _create_affine_matrix(
+    translate: Mapping[str, float],
+    shear: Mapping[str, float],
+    scale: Mapping[str, float],
+    rotate: float,
+    shift: tuple[float, float],
+) -> np.ndarray:
+    rotate_rad = np.deg2rad(rotate % 360)
+    shear_x_rad = np.deg2rad(shear["x"])
+    shear_y_rad = np.deg2rad(shear["y"])
+
+    m_shift_topleft = np.array([[1, 0, -shift[0]], [0, 1, -shift[1]], [0, 0, 1]], dtype=np.float32)
+    m_scale = np.array([[scale["x"], 0, 0], [0, scale["y"], 0], [0, 0, 1]], dtype=np.float32)
+    m_rotate = np.array(
+        [
+            [np.cos(rotate_rad), np.sin(rotate_rad), 0],
+            [-np.sin(rotate_rad), np.cos(rotate_rad), 0],
+            [0, 0, 1],
+        ],
+        dtype=np.float32,
+    )
+    m_shear = np.array(
+        [[1, np.tan(shear_x_rad), 0], [np.tan(shear_y_rad), 1, 0], [0, 0, 1]],
+        dtype=np.float32,
+    )
+    m_translate = np.array(
+        [[1, 0, translate["x"]], [0, 1, translate["y"]], [0, 0, 1]],
+        dtype=np.float32,
+    )
+    m_shift_center = np.array([[1, 0, shift[0]], [0, 1, shift[1]], [0, 0, 1]], dtype=np.float32)
+
+    m = m_shift_center @ m_translate @ m_shear @ m_rotate @ m_scale @ m_shift_topleft
+    m[2] = [0, 0, 1]
+    return m
+
+
+def _ensure_hwc(img: np.ndarray) -> np.ndarray:
+    if img.ndim == 2:
+        return np.expand_dims(img, -1)
+    return img
+
+
+@pytest.mark.parametrize("image_shape", [(100, 100, 3)])  # 1ch has lower IoU after round-trip
+@pytest.mark.parametrize("angle", [45, 90, 180])
+@pytest.mark.parametrize("shape", ["circle", "rectangle"])
+@pytest.mark.parametrize("scale", [1, 0.8, 1.2])
+def test_warp_affine_inverse_angle_scale(
+    image_shape: tuple[int, ...],
+    angle: int,
+    shape: str,
+    scale: float,
+) -> None:
+    image = np.zeros(image_shape, dtype=np.uint8)
+    if shape == "rectangle":
+        cv2.rectangle(image, (25, 25), (75, 75), 255, -1)
+    else:
+        cv2.circle(image, (50, 50), 25, 255, -1)
+
+    center_pt = _center(image_shape)
+    forward_matrix = _create_affine_matrix(
+        translate={"x": 0, "y": 0},
+        shear={"x": 0, "y": 0},
+        scale={"x": scale, "y": scale},
+        rotate=angle,
+        shift=center_pt,
+    )
+    inverse_matrix = _create_affine_matrix(
+        translate={"x": 0, "y": 0},
+        shear={"x": 0, "y": 0},
+        scale={"x": 1 / scale, "y": 1 / scale},
+        rotate=-angle,
+        shift=center_pt,
+    )
+
+    height, width = image_shape[:2]
+    img_hwc = _ensure_hwc(image)
+    warped = warp_affine(
+        img_hwc,
+        forward_matrix,
+        flags=cv2.INTER_NEAREST,
+        border_value=0,
+        dsize=(width, height),
+        border_mode=cv2.BORDER_CONSTANT,
+    )
+    restored = warp_affine(
+        warped,
+        inverse_matrix,
+        flags=cv2.INTER_NEAREST,
+        border_value=0,
+        dsize=(width, height),
+        border_mode=cv2.BORDER_CONSTANT,
+    )
+
+    intersection = np.logical_and(image > 0, restored.squeeze() > 0)
+    union = np.logical_or(image > 0, restored.squeeze() > 0)
+    iou = np.sum(intersection) / np.sum(union)
+    assert iou > 0.97, f"IoU {iou} too low"
+
+
+@pytest.mark.parametrize(
+    "img,expected",
+    [
+        (
+            np.array([[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15, 16]], dtype=np.uint8),
+            np.array([[4, 8, 12, 16], [3, 7, 11, 15], [2, 6, 10, 14], [1, 5, 9, 13]], dtype=np.uint8),
+        ),
+        (
+            np.array(
+                [
+                    [0.01, 0.02, 0.03, 0.04],
+                    [0.05, 0.06, 0.07, 0.08],
+                    [0.09, 0.10, 0.11, 0.12],
+                    [0.13, 0.14, 0.15, 0.16],
+                ],
+                dtype=np.float32,
+            ),
+            np.array(
+                [
+                    [0.04, 0.08, 0.12, 0.16],
+                    [0.03, 0.07, 0.11, 0.15],
+                    [0.02, 0.06, 0.10, 0.14],
+                    [0.01, 0.05, 0.09, 0.13],
+                ],
+                dtype=np.float32,
+            ),
+        ),
+    ],
+)
+def test_warp_affine_rotate_90(img: np.ndarray, expected: np.ndarray) -> None:
+    angle = 90
+    center_pt = _center(img.shape[:2])
+    transform = _create_affine_matrix(
+        translate={"x": 0, "y": 0},
+        shear={"x": 0, "y": 0},
+        scale={"x": 1, "y": 1},
+        rotate=angle,
+        shift=center_pt,
+    )
+    height, width = img.shape[:2]
+    img_hwc = _ensure_hwc(img)
+    result = warp_affine(
+        img_hwc,
+        transform,
+        flags=cv2.INTER_LINEAR,
+        border_value=0,
+        dsize=(width, height),
+        border_mode=cv2.BORDER_CONSTANT,
+    )
+    out = result.squeeze() if result.shape[-1] == 1 else result
+    np.testing.assert_array_almost_equal(out, expected, decimal=5)
+
+
+@pytest.mark.parametrize(
+    "img,expected,translate",
+    [
+        (
+            np.array([[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15, 16]], dtype=np.uint8),
+            np.array([[0, 0, 1, 2], [0, 0, 5, 6], [0, 0, 9, 10], [0, 0, 13, 14]], dtype=np.uint8),
+            (0, 2),
+        ),
+        (
+            np.array(
+                [
+                    [0.01, 0.02, 0.03, 0.04],
+                    [0.05, 0.06, 0.07, 0.08],
+                    [0.09, 0.10, 0.11, 0.12],
+                    [0.13, 0.14, 0.15, 0.16],
+                ],
+                dtype=np.float32,
+            ),
+            np.array(
+                [
+                    [0.00, 0.00, 0.01, 0.02],
+                    [0.00, 0.00, 0.05, 0.06],
+                    [0.00, 0.00, 0.09, 0.10],
+                    [0.00, 0.00, 0.13, 0.14],
+                ],
+                dtype=np.float32,
+            ),
+            (0, 2),
+        ),
+        (
+            np.array([[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15, 16]], dtype=np.uint8),
+            np.array([[0, 0, 0, 0], [0, 0, 0, 0], [1, 2, 3, 4], [5, 6, 7, 8]], dtype=np.uint8),
+            (2, 0),
+        ),
+        (
+            np.array(
+                [
+                    [0.01, 0.02, 0.03, 0.04],
+                    [0.05, 0.06, 0.07, 0.08],
+                    [0.09, 0.10, 0.11, 0.12],
+                    [0.13, 0.14, 0.15, 0.16],
+                ],
+                dtype=np.float32,
+            ),
+            np.array(
+                [
+                    [0.00, 0.00, 0.00, 0.00],
+                    [0.00, 0.00, 0.00, 0.00],
+                    [0.01, 0.02, 0.03, 0.04],
+                    [0.05, 0.06, 0.07, 0.08],
+                ],
+                dtype=np.float32,
+            ),
+            (2, 0),
+        ),
+    ],
+)
+def test_warp_affine_translate(img: np.ndarray, expected: np.ndarray, translate: tuple[int, int]) -> None:
+    transform = _create_affine_matrix(
+        translate={"x": translate[1], "y": translate[0]},
+        shear={"x": 0, "y": 0},
+        scale={"x": 1, "y": 1},
+        rotate=0,
+        shift=(0, 0),
+    )
+    height, width = img.shape[:2]
+    img_hwc = _ensure_hwc(img)
+    result = warp_affine(
+        img_hwc,
+        transform,
+        flags=cv2.INTER_LINEAR,
+        border_value=0,
+        dsize=(width, height),
+        border_mode=cv2.BORDER_CONSTANT,
+    )
+    out = result.squeeze() if result.shape[-1] == 1 else result
+    np.testing.assert_array_almost_equal(out, expected, decimal=5)
+
+
+@pytest.mark.parametrize("image_shape", [(100, 100, 1), (100, 100, 3)])
+@pytest.mark.parametrize("shape", ["circle", "rectangle"])
+@pytest.mark.parametrize("shear", [0, 20, -20])
+def test_warp_affine_inverse_shear(
+    image_shape: tuple[int, ...],
+    shear: int,
+    shape: str,
+) -> None:
+    image = np.zeros(image_shape, dtype=np.uint8)
+    if shape == "rectangle":
+        cv2.rectangle(image, (25, 25), (75, 75), 255, -1)
+    else:
+        cv2.circle(image, (50, 50), 25, 255, -1)
+
+    center_pt = _center(image_shape[:2])
+    forward_matrix = _create_affine_matrix(
+        translate={"x": 0, "y": 0},
+        shear={"x": shear, "y": 0},
+        scale={"x": 1, "y": 1},
+        rotate=0,
+        shift=center_pt,
+    )
+    inverse_matrix = _create_affine_matrix(
+        translate={"x": 0, "y": 0},
+        shear={"x": -shear, "y": 0},
+        scale={"x": 1, "y": 1},
+        rotate=0,
+        shift=center_pt,
+    )
+
+    height, width = image_shape[:2]
+    warped = warp_affine(
+        image,
+        forward_matrix,
+        flags=cv2.INTER_NEAREST,
+        border_value=0,
+        dsize=(width, height),
+        border_mode=cv2.BORDER_CONSTANT,
+    )
+    restored = warp_affine(
+        warped,
+        inverse_matrix,
+        flags=cv2.INTER_NEAREST,
+        border_value=0,
+        dsize=(width, height),
+        border_mode=cv2.BORDER_CONSTANT,
+    )
+    np.testing.assert_allclose(image, restored, atol=1)
+    if shear != 0:
+        assert not np.array_equal(image, warped)
+
+
+@pytest.mark.parametrize("image_shape", [(100, 100, 1), (100, 100, 3)])
+@pytest.mark.parametrize("shape", ["circle", "rectangle"])
+@pytest.mark.parametrize("translate", [(0, 0), (10, -10), (-10, 10)])
+def test_warp_affine_inverse_translate(
+    image_shape: tuple[int, ...],
+    translate: tuple[int, int],
+    shape: str,
+) -> None:
+    image = np.zeros(image_shape, dtype=np.uint8)
+    if shape == "rectangle":
+        cv2.rectangle(image, (25, 25), (75, 75), 255, -1)
+    else:
+        cv2.circle(image, (50, 50), 25, 255, -1)
+
+    center_pt = _center(image_shape[:2])
+    forward_matrix = _create_affine_matrix(
+        translate={"x": translate[0], "y": translate[1]},
+        shear={"x": 0, "y": 0},
+        scale={"x": 1, "y": 1},
+        rotate=0,
+        shift=center_pt,
+    )
+    inverse_matrix = _create_affine_matrix(
+        translate={"x": -translate[0], "y": -translate[1]},
+        shear={"x": 0, "y": 0},
+        scale={"x": 1, "y": 1},
+        rotate=0,
+        shift=center_pt,
+    )
+
+    height, width = image_shape[:2]
+    warped = warp_affine(
+        image,
+        forward_matrix,
+        flags=cv2.INTER_NEAREST,
+        border_value=0,
+        dsize=(width, height),
+        border_mode=cv2.BORDER_CONSTANT,
+    )
+    restored = warp_affine(
+        warped,
+        inverse_matrix,
+        flags=cv2.INTER_NEAREST,
+        border_value=0,
+        dsize=(width, height),
+        border_mode=cv2.BORDER_CONSTANT,
+    )
+    np.testing.assert_allclose(image, restored, atol=1)
+    if translate != (0, 0):
+        assert not np.array_equal(image, warped)
+
+
+@pytest.mark.parametrize("channels", [1, 3, 8], ids=["1ch", "3ch", "8ch"])
+def test_warp_perspective_shape(channels: int, rng: np.random.Generator) -> None:
+    img = make_image(16, 16, channels, np.uint8, rng)
+    M = np.eye(3, dtype=np.float32)
+    M[0, 2] = 1
+    M[1, 2] = 1
+    dsize = (16, 16)
+    result = warp_perspective(img, M, dsize, border_value=0)
+    assert result.shape == (16, 16, channels)
+
+
+@pytest.mark.parametrize("channels", [1, 3, 4], ids=["1ch", "3ch", "4ch"])
+def test_warp_perspective_equiv_cv2(channels: int, rng: np.random.Generator) -> None:
+    img = make_image(16, 16, channels, np.uint8, rng)
+    M = np.eye(3, dtype=np.float32)
+    M[0, 2] = 1
+    M[1, 2] = 1
+    dsize = (16, 16)
+    expected = cv2.warpPerspective(img, M, dsize, borderValue=0)
+    if channels == 1 and expected.ndim == 2:
+        expected = np.expand_dims(expected, -1)
+    result = warp_perspective(img, M, dsize, border_value=0)
+    np.testing.assert_array_equal(result, expected)
+
+
+@pytest.mark.parametrize("channels", [1, 3, 9])
+@pytest.mark.parametrize("projective", [False, True], ids=["half-ties", "projective"])
+def test_float16_nearest_warp_perspective_uses_integer_pixel_copy(
+    channels: int,
+    projective: bool,
+    rng: np.random.Generator,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    height, width = 32, 48
+    dsize = (41, 29)
+    image = rng.uniform(-4, 4, (height, width, channels)).astype(np.float16)
+    patterns = np.array([0x0001, 0x8001, 0x8000, 0x7C00, 0xFC00, 0x7E55, 0xFE55], dtype=np.uint16)
+    image.view(np.uint16).reshape(-1)[: patterns.size] = patterns
+    if projective:
+        matrix = np.array([[0.97, 0.02, 1.25], [-0.03, 0.93, -1.75], [1e-4, -2e-4, 1.0]], dtype=np.float32)
+    else:
+        matrix = np.array([[1.0, 0.0, 0.5], [0.0, 1.0, -0.5], [0.0, 0.0, 1.0]], dtype=np.float32)
+    with np.errstate(over="ignore", invalid="ignore"):
+        expected = warp_perspective(
+            image.astype(np.float32),
+            matrix,
+            dsize,
+            flags=cv2.INTER_NEAREST,
+        ).astype(np.float16)
+
+    warp_cv = cv2.warpPerspective
+    input_dtypes: list[np.dtype] = []
+
+    def record_warp(src: np.ndarray, *args: object, **kwargs: object) -> np.ndarray:
+        input_dtypes.append(src.dtype)
+        return warp_cv(src, *args, **kwargs)
+
+    monkeypatch.setattr(cv2, "warpPerspective", record_warp)
+    result = warp_perspective(image, matrix, dsize, flags=cv2.INTER_NEAREST)
+
+    expected_src_dtype = np.uint8 if channels == 9 else np.uint16
+    assert input_dtypes == [np.dtype(expected_src_dtype)]
+    assert result.shape == (dsize[1], dsize[0], channels)
+    assert result.dtype == np.float16
+    finite = np.isfinite(expected)
+    np.testing.assert_array_equal(result.view(np.uint16)[finite], expected.view(np.uint16)[finite])
+    np.testing.assert_array_equal(np.isnan(result), np.isnan(expected))
+    np.testing.assert_array_equal(np.isposinf(result), np.isposinf(expected))
+    np.testing.assert_array_equal(np.isneginf(result), np.isneginf(expected))
+
+
+def test_float16_nearest_warp_perspective_nonzero_border_uses_float32_path(
+    rng: np.random.Generator,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image = rng.uniform(-2, 2, (32, 48, 3)).astype(np.float16)
+    matrix = np.array([[1.0, 0.0, 1.5], [0.0, 1.0, -2.25], [0.0, 0.0, 1.0]], dtype=np.float32)
+    dsize = (48, 32)
+    expected = warp_perspective(
+        image.astype(np.float32),
+        matrix,
+        dsize,
+        flags=cv2.INTER_NEAREST,
+        border_value=0.25,
+    ).astype(np.float16)
+
+    warp_cv = cv2.warpPerspective
+    input_dtypes: list[np.dtype] = []
+
+    def record_warp(src: np.ndarray, *args: object, **kwargs: object) -> np.ndarray:
+        input_dtypes.append(src.dtype)
+        return warp_cv(src, *args, **kwargs)
+
+    monkeypatch.setattr(cv2, "warpPerspective", record_warp)
+    result = warp_perspective(image, matrix, dsize, flags=cv2.INTER_NEAREST, border_value=0.25)
+
+    assert input_dtypes == [np.dtype(np.float32)]
+    np.testing.assert_array_equal(result.view(np.uint16), expected.view(np.uint16))
+
+
+def test_float16_nearest_warp_perspective_noncontiguous_image_uses_float32_path(
+    rng: np.random.Generator,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = rng.uniform(-2, 2, (32, 96, 3)).astype(np.float16)
+    image = source[:, ::2]
+    matrix = np.array([[0.97, 0.0, 0.25], [0.0, 0.93, -0.5], [0.0, 0.0, 1.0]], dtype=np.float32)
+    dsize = (48, 32)
+    expected = warp_perspective(image.astype(np.float32), matrix, dsize, flags=cv2.INTER_NEAREST).astype(np.float16)
+
+    warp_cv = cv2.warpPerspective
+    input_dtypes: list[np.dtype] = []
+
+    def record_warp(src: np.ndarray, *args: object, **kwargs: object) -> np.ndarray:
+        input_dtypes.append(src.dtype)
+        return warp_cv(src, *args, **kwargs)
+
+    monkeypatch.setattr(cv2, "warpPerspective", record_warp)
+    result = warp_perspective(image, matrix, dsize, flags=cv2.INTER_NEAREST)
+
+    assert input_dtypes == [np.dtype(np.float32)]
+    np.testing.assert_array_equal(result.view(np.uint16), expected.view(np.uint16))
+
+
+def test_float16_nearest_warp_perspective_float64_matrix_uses_float32_path(
+    rng: np.random.Generator,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image = rng.uniform(-2, 2, (32, 48, 3)).astype(np.float16)
+    matrix = np.array([[0.97, 0.02, 1.25], [-0.03, 0.93, -1.75], [1e-4, -2e-4, 1.0]], dtype=np.float64)
+    dsize = (48, 32)
+    expected = warp_perspective(image.astype(np.float32), matrix, dsize, flags=cv2.INTER_NEAREST).astype(np.float16)
+
+    warp_cv = cv2.warpPerspective
+    input_dtypes: list[np.dtype] = []
+
+    def record_warp(src: np.ndarray, *args: object, **kwargs: object) -> np.ndarray:
+        input_dtypes.append(src.dtype)
+        return warp_cv(src, *args, **kwargs)
+
+    monkeypatch.setattr(cv2, "warpPerspective", record_warp)
+    result = warp_perspective(image, matrix, dsize, flags=cv2.INTER_NEAREST)
+
+    assert input_dtypes == [np.dtype(np.float32)]
+    np.testing.assert_array_equal(result.view(np.uint16), expected.view(np.uint16))
+
+
+def test_warp_perspective_per_channel_border_value(rng: np.random.Generator) -> None:
+    img = make_image(16, 16, 8, np.uint8, rng)
+    M = np.eye(3, dtype=np.float32)
+    border_value = (0,) * 8
+    result = warp_perspective(img, M, (16, 16), border_value=border_value)
+    assert result.shape == (16, 16, 8)
+
+
+@pytest.mark.parametrize("channels", [1, 3, 4, 8], ids=[f"c{c}" for c in [1, 3, 4, 8]])
+def test_copy_make_border_shape(channels: int, rng: np.random.Generator) -> None:
+    img = make_image(16, 16, channels, np.uint8, rng)
+    result = copy_make_border(img, 2, 2, 2, 2, value=0)
+    assert result.shape == (20, 20, channels)
+
+
+@pytest.mark.parametrize("channels", [1, 3, 4], ids=["1ch", "3ch", "4ch"])
+def test_copy_make_border_equiv_cv2(channels: int, rng: np.random.Generator) -> None:
+    img = make_image(16, 16, channels, np.uint8, rng)
+    expected = cv2.copyMakeBorder(img, 2, 2, 2, 2, cv2.BORDER_CONSTANT, value=0)
+    if channels == 1 and expected.ndim == 2:
+        expected = np.expand_dims(expected, -1)
+    result = copy_make_border(img, 2, 2, 2, 2, value=0)
+    np.testing.assert_array_equal(result, expected)
+
+
+@pytest.mark.parametrize("value", [0, 128, (0, 0, 0, 0)], ids=["scalar0", "scalar128", "tuple4"])
+def test_copy_make_border_values(value: int | tuple, rng: np.random.Generator) -> None:
+    img = make_image(16, 16, 8, np.uint8, rng)
+    result = copy_make_border(img, 2, 2, 2, 2, value=value)
+    assert result.shape == (20, 20, 8)
+
+
+def test_copy_make_border_per_channel_value(rng: np.random.Generator) -> None:
+    img = make_image(16, 16, 8, np.uint8, rng)
+    value = tuple(range(8))
+    result = copy_make_border(img, 2, 2, 2, 2, value=value)
+    assert result.shape == (20, 20, 8)
+
+
+@pytest.mark.parametrize("channels", [1, 3, 4, 8], ids=[f"c{c}" for c in [1, 3, 4, 8]])
+def test_remap_shape(channels: int, rng: np.random.Generator) -> None:
+    h, w = 16, 16
+    img = make_image(h, w, channels, np.uint8, rng)
+    map_x = np.tile(np.arange(w, dtype=np.float32), (h, 1))
+    map_y = np.tile(np.arange(h, dtype=np.float32).reshape(-1, 1), (1, w))
+    result = remap(img, map_x, map_y)
+    assert result.shape == img.shape
+
+
+@pytest.mark.parametrize("channels", [1, 3, 4], ids=["1ch", "3ch", "4ch"])
+def test_remap_equiv_cv2(channels: int, rng: np.random.Generator) -> None:
+    h, w = 16, 16
+    img = make_image(h, w, channels, np.uint8, rng)
+    map_x = np.tile(np.arange(w, dtype=np.float32), (h, 1))
+    map_y = np.tile(np.arange(h, dtype=np.float32).reshape(-1, 1), (1, w))
+    expected = cv2.remap(img, map_x, map_y, cv2.INTER_LINEAR)
+    if channels == 1 and expected.ndim == 2:
+        expected = np.expand_dims(expected, -1)
+    result = remap(img, map_x, map_y)
+    np.testing.assert_array_equal(result, expected)
+
+
+def test_remap_identity_map(rng: np.random.Generator) -> None:
+    h, w = 16, 16
+    img = make_image(h, w, 3, np.uint8, rng)
+    map_x = np.tile(np.arange(w, dtype=np.float32), (h, 1))
+    map_y = np.tile(np.arange(h, dtype=np.float32).reshape(-1, 1), (1, w))
+    result = remap(img, map_x, map_y)
+    np.testing.assert_array_equal(result, img)
+
+
+@pytest.mark.parametrize("channels", [1, 3, 9])
+def test_float16_nearest_remap_uses_integer_pixel_copy(
+    channels: int,
+    rng: np.random.Generator,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    height, width = 32, 48
+    output_height, output_width = 29, 37
+    image = rng.uniform(-4, 4, (height, width, channels)).astype(np.float16)
+    patterns = np.array([0x0001, 0x8001, 0x8000, 0x7C00, 0xFC00, 0x7E55, 0xFE55], dtype=np.uint16)
+    image.view(np.uint16).reshape(-1)[: patterns.size] = patterns
+    yy, xx = np.indices((output_height, output_width), dtype=np.float32)
+    map_x = np.ascontiguousarray(xx * np.float32(0.97) + np.float32(1.25))
+    map_y = np.ascontiguousarray(yy * np.float32(0.93) + np.float32(1.75))
+    map_x[0, 0], map_y[0, 0] = 0.0, 0.0
+    map_x[0, 1], map_y[0, 1] = 0.5, 0.0
+    map_x[-1, -1], map_y[-1, -1] = -0.5, -0.5
+    with np.errstate(over="ignore", invalid="ignore"):
+        expected = remap(image.astype(np.float32), map_x, map_y, interpolation=cv2.INTER_NEAREST).astype(np.float16)
+
+    remap_cv = cv2.remap
+    input_metadata: list[tuple[np.dtype, np.dtype, bool]] = []
+
+    def record_remap(
+        src: np.ndarray,
+        map1: np.ndarray,
+        map2: np.ndarray | None,
+        *args: object,
+        **kwargs: object,
+    ) -> np.ndarray:
+        input_metadata.append((src.dtype, map1.dtype, map2 is None))
+        return remap_cv(src, map1, map2, *args, **kwargs)
+
+    monkeypatch.setattr(cv2, "remap", record_remap)
+    result = remap(image, map_x, map_y, interpolation=cv2.INTER_NEAREST)
+
+    expected_src_dtype = np.uint8 if channels == 9 else np.uint16
+    assert input_metadata == [(np.dtype(expected_src_dtype), np.dtype(np.int16), True)]
+    assert result.shape == (output_height, output_width, channels)
+    assert result.dtype == np.float16
+    finite = np.isfinite(expected)
+    np.testing.assert_array_equal(result.view(np.uint16)[finite], expected.view(np.uint16)[finite])
+    np.testing.assert_array_equal(np.isnan(result), np.isnan(expected))
+    np.testing.assert_array_equal(np.isposinf(result), np.isposinf(expected))
+    np.testing.assert_array_equal(np.isneginf(result), np.isneginf(expected))
+
+
+def test_float16_nearest_remap_nonzero_border_uses_float32_path(
+    rng: np.random.Generator,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image = rng.uniform(-2, 2, (32, 48, 3)).astype(np.float16)
+    yy, xx = np.indices((32, 48), dtype=np.float32)
+    map_x = xx + np.float32(1.5)
+    map_y = yy - np.float32(2.25)
+    expected = remap(image.astype(np.float32), map_x, map_y, cv2.INTER_NEAREST, border_value=0.25).astype(np.float16)
+
+    remap_cv = cv2.remap
+    input_dtypes: list[np.dtype] = []
+
+    def record_remap(src: np.ndarray, *args: object, **kwargs: object) -> np.ndarray:
+        input_dtypes.append(src.dtype)
+        return remap_cv(src, *args, **kwargs)
+
+    monkeypatch.setattr(cv2, "remap", record_remap)
+    result = remap(image, map_x, map_y, cv2.INTER_NEAREST, border_value=0.25)
+
+    assert input_dtypes == [np.dtype(np.float32)]
+    np.testing.assert_array_equal(result.view(np.uint16), expected.view(np.uint16))
+
+
+def test_float16_nearest_remap_noncontiguous_image_uses_float32_path(
+    rng: np.random.Generator,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = rng.uniform(-2, 2, (32, 96, 3)).astype(np.float16)
+    image = source[:, ::2]
+    yy, xx = np.indices(image.shape[:2], dtype=np.float32)
+    map_x = xx + np.float32(0.25)
+    map_y = yy - np.float32(0.25)
+    expected = remap(image.astype(np.float32), map_x, map_y, cv2.INTER_NEAREST).astype(np.float16)
+
+    remap_cv = cv2.remap
+    input_dtypes: list[np.dtype] = []
+
+    def record_remap(src: np.ndarray, *args: object, **kwargs: object) -> np.ndarray:
+        input_dtypes.append(src.dtype)
+        return remap_cv(src, *args, **kwargs)
+
+    monkeypatch.setattr(cv2, "remap", record_remap)
+    result = remap(image, map_x, map_y, cv2.INTER_NEAREST)
+
+    assert input_dtypes == [np.dtype(np.float32)]
+    np.testing.assert_array_equal(result.view(np.uint16), expected.view(np.uint16))
+
+
+# Interpolations supported by cv2.remap (INTER_LINEAR_EXACT is not)
+REMAP_INTERPOLATIONS = [
+    cv2.INTER_NEAREST,
+    cv2.INTER_LINEAR,
+    cv2.INTER_CUBIC,
+    cv2.INTER_AREA,
+    cv2.INTER_LANCZOS4,
+]
+REMAP_BORDER_MODES = [
+    cv2.BORDER_CONSTANT,
+    cv2.BORDER_REPLICATE,
+    cv2.BORDER_REFLECT,
+    cv2.BORDER_REFLECT_101,
+    cv2.BORDER_WRAP,
+]
+
+
+@pytest.mark.parametrize("channels", [6, 8, 16, 32], ids=[f"c{c}" for c in [6, 8, 16, 32]])
+@pytest.mark.parametrize("interpolation", REMAP_INTERPOLATIONS, ids=["nearest", "linear", "cubic", "area", "lanczos4"])
+@pytest.mark.parametrize("border_mode", REMAP_BORDER_MODES, ids=["constant", "replicate", "reflect", "reflect101", "wrap"])
+@pytest.mark.parametrize("dtype", [np.uint8, np.float32], ids=["uint8", "float32"])
+def test_remap_many_channels_all_modes(
+    channels: int,
+    interpolation: int,
+    border_mode: int,
+    dtype: type,
+    rng: np.random.Generator,
+) -> None:
+    h, w = 32, 32
+    img = make_image(h, w, channels, dtype, rng)
+    map_x = np.tile(np.arange(w, dtype=np.float32), (h, 1))
+    map_y = np.tile(np.arange(h, dtype=np.float32).reshape(-1, 1), (1, w))
+
+    result = remap(img, map_x, map_y, interpolation=interpolation, border_mode=border_mode)
+
+    assert result.shape == img.shape
+    assert result.dtype == img.dtype
+
+    if interpolation in (cv2.INTER_NEAREST, cv2.INTER_LINEAR, cv2.INTER_AREA):
+        expected = cv2.remap(img, map_x, map_y, interpolation, borderMode=border_mode)
+        np.testing.assert_array_equal(result, expected)
+
+
+@pytest.mark.parametrize("border_value", [0, 128, (0, 0, 0), (128,) * 4], ids=["0", "128", "tuple3", "tuple4"])
+def test_remap_border_value_const(border_value: int | tuple, rng: np.random.Generator) -> None:
+    h, w = 32, 32
+    img = make_image(h, w, 8, np.uint8, rng)
+    map_x = np.tile(np.arange(w, dtype=np.float32), (h, 1))
+    map_y = np.tile(np.arange(h, dtype=np.float32).reshape(-1, 1), (1, w))
+
+    result = remap(
+        img, map_x, map_y, border_mode=cv2.BORDER_CONSTANT, border_value=border_value
+    )
+    assert result.shape == img.shape
+
+    expected = cv2.remap(
+        img, map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=border_value
+    )
+    np.testing.assert_array_equal(result, expected)
+
+
+def test_remap_border_value_per_channel(rng: np.random.Generator) -> None:
+    h, w = 32, 32
+    img = make_image(h, w, 8, np.uint8, rng)
+    map_x = np.tile(np.arange(w, dtype=np.float32), (h, 1))
+    map_y = np.tile(np.arange(h, dtype=np.float32).reshape(-1, 1), (1, w))
+    border_value = (1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0)
+
+    result = remap(
+        img, map_x, map_y, border_mode=cv2.BORDER_CONSTANT, border_value=border_value
+    )
+    assert result.shape == img.shape
+
+    ref_chunks = []
+    for i in range(8):
+        ch = img[:, :, i : i + 1]
+        bv = (border_value[i],) * 4
+        out = cv2.remap(ch, map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=bv)
+        ref_chunks.append(np.expand_dims(out, -1) if out.ndim == 2 else out)
+    expected = np.concatenate(ref_chunks, axis=-1)
+    np.testing.assert_array_equal(result, expected)
+
+
+def test_warp_affine_dsize_change(rng: np.random.Generator) -> None:
+    img = make_image(32, 32, 3, np.uint8, rng)
+    M = np.float32([[0.5, 0, 0], [0, 0.5, 0]])
+    result = warp_affine(img, M, (16, 16), border_value=0)
+    assert result.shape == (16, 16, 3)
+
+
+@pytest.mark.parametrize("dtype", DTYPES, ids=["uint8", "float32"])
+def test_copy_make_border_dtypes(dtype: type, rng: np.random.Generator) -> None:
+    img = make_image(16, 16, 3, dtype, rng)
+    result = copy_make_border(img, 2, 2, 2, 2, value=0)
+    assert result.dtype == img.dtype
+
+
+@pytest.mark.parametrize("channels", [1, 3, 4, 5, 8, 16], ids=[f"c{c}" for c in [1, 3, 4, 5, 8, 16]])
+def test_resize_shape(channels: int, rng: np.random.Generator) -> None:
+    img = make_image(16, 16, channels, np.uint8, rng)
+    dsize = (32, 24)
+    result = resize(img, dsize)
+    assert result.shape == (24, 32, channels)
+
+
+@pytest.mark.parametrize("channels", [1, 3, 4], ids=["1ch", "3ch", "4ch"])
+def test_resize_equiv_cv2(channels: int, rng: np.random.Generator) -> None:
+    img = make_image(16, 16, channels, np.uint8, rng)
+    dsize = (32, 24)
+    expected = cv2.resize(img, dsize, interpolation=cv2.INTER_LINEAR)
+    if channels == 1 and expected.ndim == 2:
+        expected = np.expand_dims(expected, -1)
+    result = resize(img, dsize, interpolation=cv2.INTER_LINEAR)
+    np.testing.assert_array_equal(result, expected)
+
+
+ALL_INTERPOLATIONS = [
+    cv2.INTER_NEAREST,
+    cv2.INTER_LINEAR,
+    cv2.INTER_CUBIC,
+    cv2.INTER_AREA,
+    cv2.INTER_LANCZOS4,
+]
+INTERP_IDS = ["nearest", "linear", "cubic", "area", "lanczos4"]
+
+
+@pytest.mark.parametrize("channels", [5, 8, 16], ids=["5ch", "8ch", "16ch"])
+@pytest.mark.parametrize("interpolation", ALL_INTERPOLATIONS, ids=INTERP_IDS)
+@pytest.mark.parametrize("dtype", [np.uint8, np.float32], ids=["uint8", "float32"])
+def test_resize_many_channels_interpolations(
+    channels: int,
+    interpolation: int,
+    dtype: type,
+    rng: np.random.Generator,
+) -> None:
+    # Downscale so INTER_AREA takes its area-averaging path, where cv2 asserts cn <= 4.
+    img = make_image(100, 100, channels, dtype, rng)
+    dsize = (37, 37)
+
+    result = resize(img, dsize, interpolation=interpolation)
+
+    assert result.shape == (37, 37, channels)
+    assert result.dtype == dtype
+
+    if interpolation == cv2.INTER_AREA:
+        for start in range(0, channels, 4):
+            chunk = img[:, :, start : start + 4]
+            expected_chunk = cv2.resize(chunk, dsize, interpolation=cv2.INTER_AREA)
+            if expected_chunk.ndim == 2:
+                expected_chunk = expected_chunk[:, :, np.newaxis]
+            np.testing.assert_array_equal(result[:, :, start : start + 4], expected_chunk)
+    else:
+        expected = cv2.resize(img, dsize, interpolation=interpolation)
+        np.testing.assert_array_equal(result, expected)
+
+
+@pytest.mark.parametrize("channels", [5, 8, 16], ids=["5ch", "8ch", "16ch"])
+def test_resize_inter_area_upscale_many_channels(channels: int, rng: np.random.Generator) -> None:
+    img = make_image(37, 37, channels, np.uint8, rng)
+    dsize = (100, 100)
+    result = resize(img, dsize, interpolation=cv2.INTER_AREA)
+    expected = cv2.resize(img, dsize, interpolation=cv2.INTER_AREA)
+    assert result.shape == (100, 100, channels)
+    np.testing.assert_array_equal(result, expected)
+
+
+def test_resize_with_fx_fy(rng: np.random.Generator) -> None:
+    img = make_image(16, 16, 6, np.uint8, rng)
+    result = resize(img, (0, 0), fx=1.5, fy=1.5, interpolation=cv2.INTER_LINEAR)
+    assert result.shape == (24, 24, 6)
+
+
+@pytest.mark.parametrize("dtype", [np.uint8, np.float32], ids=["uint8", "float32"])
+def test_resize_dtypes(dtype: type, rng: np.random.Generator) -> None:
+    img = make_image(16, 16, 6, dtype, rng)
+    dsize = (32, 32)
+    result = resize(img, dsize)
+    assert result.dtype == img.dtype
+
+
+@pytest.mark.parametrize("channels", [1, 3, 9])
+def test_float16_nearest_resize_uses_uint16_pixel_copy(
+    channels: int,
+    rng: np.random.Generator,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image = rng.uniform(-4, 4, size=(64, 80, channels)).astype(np.float16)
+    patterns = np.array([0x0001, 0x8001, 0x7C00, 0xFC00, 0x7E55, 0xFE55, 0x0000, 0x8000], dtype=np.uint16)
+    image.view(np.uint16).reshape(-1)[: patterns.size] = patterns
+    dsize = (31, 47)
+    resize_cv = cv2.resize
+    with np.errstate(over="ignore", invalid="ignore"):
+        expected = resize_cv(image.astype(np.float32), dsize, interpolation=cv2.INTER_NEAREST).astype(np.float16)
+    if channels == 1 and expected.ndim == 2:
+        expected = expected[..., np.newaxis]
+
+    input_dtypes: list[np.dtype] = []
+
+    def record_resize(src: np.ndarray, *args: object, **kwargs: object) -> np.ndarray:
+        input_dtypes.append(src.dtype)
+        return resize_cv(src, *args, **kwargs)
+
+    monkeypatch.setattr(cv2, "resize", record_resize)
+    result = resize(image, dsize, interpolation=cv2.INTER_NEAREST)
+
+    assert input_dtypes == [np.dtype(np.uint16)]
+    assert result.shape == expected.shape
+    assert result.dtype == np.float16
+    finite = np.isfinite(expected)
+    np.testing.assert_array_equal(result.view(np.uint16)[finite], expected.view(np.uint16)[finite])
+    np.testing.assert_array_equal(np.isnan(result), np.isnan(expected))
+    np.testing.assert_array_equal(np.isposinf(result), np.isposinf(expected))
+    np.testing.assert_array_equal(np.isneginf(result), np.isneginf(expected))
+
+
+def test_float16_nearest_half_size_single_channel_uses_exact_strided_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image = np.arange(64 * 80, dtype=np.uint16).reshape(64, 80, 1).view(np.float16)
+    image.view(np.uint16)[::2, ::2, 0][0, :4] = np.array([0x0001, 0x8001, 0x7C00, 0xFE55], dtype=np.uint16)
+    dsize = (40, 32)
+    with np.errstate(over="ignore", invalid="ignore"):
+        expected = cv2.resize(image.astype(np.float32), dsize, interpolation=cv2.INTER_NEAREST).astype(np.float16)
+    if expected.ndim == 2:
+        expected = expected[..., np.newaxis]
+
+    def reject_opencv_resize(*args: object, **kwargs: object) -> None:
+        raise AssertionError("The exact half-size single-channel path should not call OpenCV.")
+
+    monkeypatch.setattr(cv2, "resize", reject_opencv_resize)
+    result = resize(image, dsize, interpolation=cv2.INTER_NEAREST)
+
+    assert result.shape == expected.shape
+    assert result.dtype == np.float16
+    assert result.flags.c_contiguous
+    assert not np.shares_memory(result, image)
+    finite = np.isfinite(expected)
+    np.testing.assert_array_equal(result.view(np.uint16)[finite], expected.view(np.uint16)[finite])
+    np.testing.assert_array_equal(np.isnan(result), np.isnan(expected))
+    np.testing.assert_array_equal(np.isposinf(result), np.isposinf(expected))
+    np.testing.assert_array_equal(np.isneginf(result), np.isneginf(expected))
+
+    tiny_image = np.array([[[1.0], [2.0]], [[3.0], [4.0]]], dtype=np.float16)
+    tiny_result = resize(tiny_image, (1, 1), interpolation=cv2.INTER_NEAREST)
+    assert not np.shares_memory(tiny_result, tiny_image)
+    assert tiny_result[0, 0, 0] == tiny_image[0, 0, 0]
+
+
+@pytest.mark.parametrize("strided_axis", [0, 1])
+def test_float16_nearest_resize_noncontiguous_routes_preserve_samples(
+    strided_axis: int,
+    rng: np.random.Generator,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base = rng.uniform(-4, 4, size=(64, 80, 3)).astype(np.float16)
+    image = base[::2] if strided_axis == 0 else base[:, ::2, :]
+    dsize = (image.shape[1] // 2, image.shape[0] // 2)
+    resize_cv = cv2.resize
+    with np.errstate(over="ignore", invalid="ignore"):
+        expected = resize_cv(image.astype(np.float32), dsize, interpolation=cv2.INTER_NEAREST).astype(np.float16)
+
+    input_arrays: list[np.ndarray] = []
+
+    def record_resize(src: np.ndarray, *args: object, **kwargs: object) -> np.ndarray:
+        input_arrays.append(src)
+        return resize_cv(src, *args, **kwargs)
+
+    if strided_axis == 0:
+        monkeypatch.setattr(cv2, "resize", record_resize)
+        result = resize(image, dsize, interpolation=cv2.INTER_NEAREST)
+        assert len(input_arrays) == 1
+        assert input_arrays[0].dtype == np.uint16
+        assert not input_arrays[0].flags.c_contiguous
+    else:
+        def reject_opencv_resize(*args: object, **kwargs: object) -> None:
+            raise AssertionError("Exact half-size downscaling should copy the sampled pixels directly.")
+
+        monkeypatch.setattr(cv2, "resize", reject_opencv_resize)
+        result = resize(image, dsize, interpolation=cv2.INTER_NEAREST)
+        assert result.flags.c_contiguous
+        assert not np.shares_memory(result, image)
+
+    assert result.dtype == np.float16
+    np.testing.assert_array_equal(result.view(np.uint16), expected.view(np.uint16))
+
+
+def test_float16_nearest_resize_preserves_every_binary16_finite_value() -> None:
+    image = np.arange(65_536, dtype=np.uint16).reshape(256, 256, 1).view(np.float16)
+    dsize = (173, 119)
+    with np.errstate(over="ignore", invalid="ignore"):
+        expected = cv2.resize(image.astype(np.float32), dsize, interpolation=cv2.INTER_NEAREST).astype(np.float16)
+    if expected.ndim == 2:
+        expected = expected[..., np.newaxis]
+
+    result = resize(image, dsize, interpolation=cv2.INTER_NEAREST)
+
+    finite = np.isfinite(expected)
+    np.testing.assert_array_equal(result.view(np.uint16)[finite], expected.view(np.uint16)[finite])
+    np.testing.assert_array_equal(np.isnan(result), np.isnan(expected))
+    np.testing.assert_array_equal(np.isposinf(result), np.isposinf(expected))
+    np.testing.assert_array_equal(np.isneginf(result), np.isneginf(expected))
+
+
+@pytest.mark.parametrize("channels", [1, 3, 9])
+def test_float16_nearest_warp_affine_uses_uint16_pixel_copy(
+    channels: int,
+    rng: np.random.Generator,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image = rng.uniform(-2, 2, size=(64, 80, channels)).astype(np.float16)
+    patterns = np.array([0x0001, 0x8001, 0x7C00, 0xFC00, 0x7E55, 0xFE55], dtype=np.uint16)
+    image.view(np.uint16).reshape(-1)[: patterns.size] = patterns
+    matrix = np.array([[0.95, 0.0, 1.25], [0.0, 1.05, -2.25]], dtype=np.float32)
+    dsize = (80, 64)
+    with np.errstate(over="ignore", invalid="ignore"):
+        expected = warp_affine(image.astype(np.float32), matrix, dsize, flags=cv2.INTER_NEAREST).astype(np.float16)
+
+    warp_cv = cv2.warpAffine
+    input_dtypes: list[np.dtype] = []
+
+    def record_warp(src: np.ndarray, *args: object, **kwargs: object) -> np.ndarray:
+        input_dtypes.append(src.dtype)
+        return warp_cv(src, *args, **kwargs)
+
+    monkeypatch.setattr(cv2, "warpAffine", record_warp)
+    result = warp_affine(image, matrix, dsize, flags=cv2.INTER_NEAREST)
+
+    expected_backend_dtype = np.uint8 if channels == 9 else np.uint16
+    assert input_dtypes == [np.dtype(expected_backend_dtype)]
+    assert result.shape == image.shape
+    assert result.dtype == np.float16
+    finite = np.isfinite(expected)
+    np.testing.assert_array_equal(result.view(np.uint16)[finite], expected.view(np.uint16)[finite])
+    np.testing.assert_array_equal(np.isnan(result), np.isnan(expected))
+    np.testing.assert_array_equal(np.isposinf(result), np.isposinf(expected))
+    np.testing.assert_array_equal(np.isneginf(result), np.isneginf(expected))
+
+
+def test_float16_nearest_warp_affine_nonzero_border_uses_float32_path(
+    rng: np.random.Generator,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image = rng.uniform(-2, 2, size=(64, 80, 3)).astype(np.float16)
+    matrix = np.array([[1.0, 0.0, 3.5], [0.0, 1.0, -2.25]], dtype=np.float32)
+    dsize = (80, 64)
+    border_value = 0.25
+    with np.errstate(over="ignore", invalid="ignore"):
+        expected = warp_affine(
+            image.astype(np.float32),
+            matrix,
+            dsize,
+            flags=cv2.INTER_NEAREST,
+            border_value=border_value,
+        ).astype(np.float16)
+
+    warp_cv = cv2.warpAffine
+    input_dtypes: list[np.dtype] = []
+
+    def record_warp(src: np.ndarray, *args: object, **kwargs: object) -> np.ndarray:
+        input_dtypes.append(src.dtype)
+        return warp_cv(src, *args, **kwargs)
+
+    monkeypatch.setattr(cv2, "warpAffine", record_warp)
+    result = warp_affine(image, matrix, dsize, flags=cv2.INTER_NEAREST, border_value=border_value)
+
+    assert input_dtypes == [np.dtype(np.float32)]
+    np.testing.assert_array_equal(result.view(np.uint16), expected.view(np.uint16))
+
+
+def test_float16_nearest_warp_affine_noncontiguous_input_uses_float32_path(
+    rng: np.random.Generator,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = rng.uniform(-2, 2, size=(64, 80, 3)).astype(np.float16)
+    image = source[:, ::2, :]
+    matrix = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float32)
+    dsize = (40, 64)
+    expected = warp_affine(image.astype(np.float32), matrix, dsize, flags=cv2.INTER_NEAREST).astype(np.float16)
+    warp_cv = cv2.warpAffine
+    input_dtypes: list[np.dtype] = []
+
+    def record_warp(src: np.ndarray, *args: object, **kwargs: object) -> np.ndarray:
+        input_dtypes.append(src.dtype)
+        return warp_cv(src, *args, **kwargs)
+
+    monkeypatch.setattr(cv2, "warpAffine", record_warp)
+    result = warp_affine(image, matrix, dsize, flags=cv2.INTER_NEAREST)
+
+    assert input_dtypes == [np.dtype(np.float32)]
+    np.testing.assert_array_equal(result.view(np.uint16), expected.view(np.uint16))
+
+
+@pytest.mark.parametrize(
+    "operation,backend,expected_shape",
+    [
+        ("resize", "resize", (11, 17, 1)),
+        ("warp_affine", "warpAffine", (11, 17, 1)),
+        ("warp_perspective", "warpPerspective", (11, 17, 1)),
+        ("copy_make_border", "copyMakeBorder", (12, 20, 1)),
+        ("remap", "remap", (6, 8, 1)),
+    ],
+)
+def test_geometric_single_channel_passes_explicit_destination(
+    operation: str,
+    backend: str,
+    expected_shape: tuple[int, int, int],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image = np.ones((9, 13, 1), dtype=np.float32)
+    matrix = np.array([[1, 0, 0], [0, 1, 0]], dtype=np.float32)
+    perspective_matrix = np.eye(3, dtype=np.float32)
+    map_x, map_y = np.meshgrid(np.arange(8, dtype=np.float32), np.arange(6, dtype=np.float32))
+    original_backend = getattr(cv2, backend)
+    destinations: list[np.ndarray] = []
+
+    def run_backend(*args: object, **kwargs: object) -> np.ndarray:
+        destination = kwargs.get("dst")
+        assert isinstance(destination, np.ndarray)
+        assert destination.shape == expected_shape
+        destinations.append(destination)
+        return original_backend(*args, **kwargs)
+
+    monkeypatch.setattr(cv2, backend, run_backend)
+    if operation == "resize":
+        result = resize(image, (17, 11))
+    elif operation == "warp_affine":
+        result = warp_affine(image, matrix, (17, 11))
+    elif operation == "warp_perspective":
+        result = warp_perspective(image, perspective_matrix, (17, 11))
+    elif operation == "copy_make_border":
+        result = copy_make_border(image, 1, 2, 3, 4)
+    else:
+        result = remap(image, map_x, map_y)
+
+    assert result.shape == expected_shape
+    assert destinations == [result]

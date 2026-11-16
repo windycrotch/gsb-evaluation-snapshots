@@ -1,0 +1,1046 @@
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import urllib.error
+from pathlib import Path
+from types import SimpleNamespace
+
+import numpy as np
+import pytest
+
+from benchmarks.shape_grids import parse_dhwc_shape
+from tests.router_contracts import ROUTER_CONTRACTS
+from tools import (
+    check_benchmark_regressions,
+    check_router_contracts,
+    ci_matrix,
+    generate_release_summary,
+    resolve_previous_pypi_release,
+    summarize_benchmarks,
+    validate_release_candidate,
+    verify_golden_vectors,
+    verify_publish_artifacts,
+)
+from tools.golden_vectors import array_metadata
+
+
+@pytest.mark.parametrize("value", ["1,5,7,3", " 1, 5, 7, 3 ", "+1,5,7,3"])
+def test_benchmark_shape_parser_preserves_explicit_dhwc_axes(value: str) -> None:
+    assert parse_dhwc_shape(value) == (1, 5, 7, 3)
+
+
+@pytest.mark.parametrize("value", ["", "1,5,7", "1,5,7,3,9", "0,5,7,3", "1,-5,7,3", "1,5.5,7,3", "a,5,7,3"])
+def test_benchmark_shape_parser_rejects_malformed_or_nonpositive_sizes(value: str) -> None:
+    with pytest.raises(argparse.ArgumentTypeError, match="four comma-separated positive integers"):
+        parse_dhwc_shape(value)
+
+
+def _router_json(ms: float) -> dict[str, object]:
+    return {
+        "meta": {
+            "albucore_version": "test",
+            "distribution_version": "test",
+            "python": "3.12",
+            "platform": "test",
+            "quick": True,
+            "with_geometric": False,
+        },
+        "rows": [
+            {
+                "op": "normalize",
+                "layout": "HWC",
+                "shape": [128, 160, 3],
+                "dtype": "float32",
+                "ms_median": ms,
+                "status": "ok",
+                "detail": "",
+                "ms_mean": ms,
+                "ms_std": 0.0,
+                "ms_mad": 0.0,
+                "timing_n": 3,
+            },
+        ],
+    }
+
+
+def test_router_contract_check_passes() -> None:
+    assert check_router_contracts.main() == 0
+
+
+def test_router_contract_check_requires_clip_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    contracts = dict(check_router_contracts.ROUTER_CONTRACTS)
+    del contracts["clip"]
+    monkeypatch.setattr(check_router_contracts, "ROUTER_CONTRACTS", contracts)
+    errors: list[str] = []
+
+    check_router_contracts._check_exports(errors)
+
+    assert errors == ["Missing router contracts: `clip`"]
+
+
+@pytest.mark.parametrize(
+    "change, expected",
+    [
+        ("remove", "Router contracts for non-exported names: `add`"),
+        ("add", "Missing router contracts: `unclassified_operation`"),
+    ],
+)
+def test_router_contract_check_detects_package_export_drift(tmp_path, monkeypatch, change, expected) -> None:
+    exports = check_router_contracts._read_all(check_router_contracts.PUBLIC_API_PATH)
+    if change == "remove":
+        exports.remove("add")
+    else:
+        exports.add("unclassified_operation")
+    package = tmp_path / "__init__.py"
+    package.write_text(f"__all__ = {sorted(exports)!r}\n")
+    monkeypatch.setattr(check_router_contracts, "PUBLIC_API_PATH", package)
+    errors = []
+
+    check_router_contracts._check_exports(errors)
+
+    assert errors == [expected]
+
+
+def test_router_contract_check_rejects_duplicate_exports(tmp_path) -> None:
+    package = tmp_path / "__init__.py"
+    package.write_text("__all__ = ['add', 'add']\n")
+
+    with pytest.raises(RuntimeError, match="Duplicate names in export list"):
+        check_router_contracts._read_all(package)
+
+
+def test_ci_matrix_check_passes() -> None:
+    assert ci_matrix.check() == []
+
+
+def test_ci_matrix_requires_torch_to_be_an_optional_dependency(monkeypatch) -> None:
+    pyproject_text = ci_matrix.PYPROJECT.read_text().replace('torch = ["torch>=2.14.1"]\n', "")
+    original_read_text = Path.read_text
+
+    def read_text(path: Path, *args: object, **kwargs: object) -> str:
+        if path == ci_matrix.PYPROJECT:
+            return pyproject_text
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+
+    errors = ci_matrix.check()
+
+    assert "pyproject.toml must define project.optional-dependencies.torch" in errors
+
+
+def test_ci_matrix_rejects_torch_as_a_base_dependency(monkeypatch) -> None:
+    pyproject_text = ci_matrix.PYPROJECT.read_text().replace(
+        "\ndependencies = [\n",
+        '\ndependencies = [\n  "torch>=2.14.1",\n',
+        1,
+    )
+    original_read_text = Path.read_text
+
+    def read_text(path: Path, *args: object, **kwargs: object) -> str:
+        if path == ci_matrix.PYPROJECT:
+            return pyproject_text
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+
+    errors = ci_matrix.check()
+
+    assert "project.dependencies must not require torch; use the torch extra" in errors
+
+
+def test_ci_matrix_requires_the_pytorch_cpu_index(monkeypatch) -> None:
+    pyproject_text = ci_matrix.PYPROJECT.read_text().replace(
+        'torch = { index = "pytorch-cpu" }',
+        'torch = { index = "pypi" }',
+    )
+    original_read_text = Path.read_text
+
+    def read_text(path: Path, *args: object, **kwargs: object) -> str:
+        if path == ci_matrix.PYPROJECT:
+            return pyproject_text
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+
+    errors = ci_matrix.check()
+
+    assert "pyproject.toml must pin torch to the pytorch-cpu index" in errors
+
+
+def test_ci_matrix_requires_shared_cpu_environment_for_base_benchmark(monkeypatch) -> None:
+    benchmark_text = ci_matrix.BENCHMARK_PR_WORKFLOW.read_text().replace(
+        'PYTHONPATH="$PWD" uv run --project "$GITHUB_WORKSPACE" python benchmarks/benchmark_router_synthetic.py',
+        "uv run python benchmarks/benchmark_router_synthetic.py",
+    )
+    original_read_text = Path.read_text
+
+    def read_text(path: Path, *args: object, **kwargs: object) -> str:
+        if path == ci_matrix.BENCHMARK_PR_WORKFLOW:
+            return benchmark_text
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+
+    errors = ci_matrix.check()
+
+    assert "PR benchmark workflow must run the base source tree in the PR CPU environment" in errors
+
+
+def test_ci_matrix_requires_torch_in_security_exports(monkeypatch) -> None:
+    security_text = ci_matrix.SECURITY_WORKFLOW.read_text().replace(" --extra torch", "", 1)
+    original_read_text = Path.read_text
+
+    def read_text(path: Path, *args: object, **kwargs: object) -> str:
+        if path == ci_matrix.SECURITY_WORKFLOW:
+            return security_text
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+
+    errors = ci_matrix.check()
+
+    assert ".github/workflows/security.yml must include the torch extra in every uv export" in errors
+
+
+@pytest.mark.parametrize(
+    "workflow",
+    (ci_matrix.RELEASE_CANDIDATE_WORKFLOW, ci_matrix.PUBLISH_WORKFLOW),
+)
+@pytest.mark.parametrize(
+    ("old", "new"),
+    (
+        ("--no-dev --no-emit-project", "--no-emit-project"),
+        ("--format requirements-txt", "--extra torch --format requirements-txt"),
+        ("--format requirements-txt", "--group dev --format requirements-txt"),
+    ),
+)
+def test_ci_matrix_requires_base_runtime_for_release_sbom(monkeypatch, workflow: Path, old: str, new: str) -> None:
+    workflow_text = workflow.read_text()
+    modified_text = workflow_text.replace(old, new, 1)
+    assert modified_text != workflow_text
+    original_read_text = Path.read_text
+
+    def read_text(path: Path, *args: object, **kwargs: object) -> str:
+        if path == workflow:
+            return modified_text
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+
+    errors = ci_matrix.check()
+
+    expected_error = (
+        f"{workflow.relative_to(ci_matrix.REPO_ROOT)} must export exactly the locked base runtime for the release SBOM"
+    )
+    assert expected_error in errors
+
+
+def test_ci_matrix_requires_pytorch_cpu_index_for_dependency_audits(monkeypatch) -> None:
+    security_text = ci_matrix.SECURITY_WORKFLOW.read_text().replace(
+        " --extra-index-url https://download.pytorch.org/whl/cpu",
+        "",
+        1,
+    )
+    original_read_text = Path.read_text
+
+    def read_text(path: Path, *args: object, **kwargs: object) -> str:
+        if path == ci_matrix.SECURITY_WORKFLOW:
+            return security_text
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+
+    errors = ci_matrix.check()
+
+    assert ".github/workflows/security.yml must pass the PyTorch CPU index to every pip-audit command" in errors
+
+
+def test_ci_matrix_requires_shared_cpu_torch_action_per_job(monkeypatch) -> None:
+    ci_text = ci_matrix.CI_WORKFLOW.read_text().replace(ci_matrix.CI_FOUNDATION_TORCH_ACTION, "", 1)
+    original_read_text = Path.read_text
+
+    def read_text(path: Path, *args: object, **kwargs: object) -> str:
+        if path == ci_matrix.CI_WORKFLOW:
+            return ci_text
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+
+    errors = ci_matrix.check()
+
+    assert "CI test job must install Torch through the shared CPU-only action" in errors
+
+
+def test_ci_matrix_missing_workflow_error_is_not_duplicated(monkeypatch) -> None:
+    missing_workflow = ci_matrix.REPO_ROOT / ".github" / "workflows" / "__missing__.yml"
+
+    monkeypatch.setattr(ci_matrix, "RELEASE_CANDIDATE_WORKFLOW", missing_workflow)
+
+    errors = ci_matrix.check()
+
+    assert errors.count(f"Required workflow {missing_workflow.relative_to(ci_matrix.REPO_ROOT)} is missing") == 1
+
+
+def test_ci_matrix_requires_version_only_test_gating(monkeypatch) -> None:
+    ci_text = (
+        ci_matrix.CI_WORKFLOW.read_text()
+        .replace("python tools/classify_ci_changes.py", "")
+        .replace("if: needs.change_scope.outputs.run_tests == 'true'", "")
+    )
+    original_read_text = Path.read_text
+
+    def read_text(path: Path, *args: object, **kwargs: object) -> str:
+        if path == ci_matrix.CI_WORKFLOW:
+            return ci_text
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+
+    errors = ci_matrix.check()
+
+    assert "CI workflow is missing version-only change classifier" in errors
+    assert "CI workflow does not gate all three test jobs on change scope" in errors
+
+
+def test_ci_matrix_requires_docs_contract_check_routing(monkeypatch) -> None:
+    ci_text = ci_matrix.CI_WORKFLOW.read_text().replace(
+        "if: steps.classify.outputs.run_docs_contract_checks == 'true'", ""
+    )
+    original_read_text = Path.read_text
+
+    def read_text(path: Path, *args: object, **kwargs: object) -> str:
+        if path == ci_matrix.CI_WORKFLOW:
+            return ci_text
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+
+    errors = ci_matrix.check()
+
+    assert "CI workflow does not verify contract documentation changes" in errors
+
+
+def test_ci_matrix_requires_docs_only_routing(monkeypatch) -> None:
+    security_text = ci_matrix.SECURITY_WORKFLOW.read_text().replace(
+        """    paths-ignore:
+      - AGENTS.md
+      - CONTRIBUTING.md
+      - MAINTAINERS.md
+      - README.md
+      - SECURITY.md
+      - docs/**
+""",
+        "",
+    )
+    original_read_text = Path.read_text
+
+    def read_text(path: Path, *args: object, **kwargs: object) -> str:
+        if path == ci_matrix.SECURITY_WORKFLOW:
+            return security_text
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+
+    errors = ci_matrix.check()
+
+    assert ".github/workflows/security.yml must ignore documentation-only pull requests" in errors
+
+
+def test_ci_matrix_requires_docs_only_legal_routing(monkeypatch) -> None:
+    legal_text = ci_matrix.LEGAL_INTEGRITY_WORKFLOW.read_text().replace(
+        "steps.classify.outputs.run_package_metadata_checks == 'true'",
+        "",
+    )
+    original_read_text = Path.read_text
+
+    def read_text(path: Path, *args: object, **kwargs: object) -> str:
+        if path == ci_matrix.LEGAL_INTEGRITY_WORKFLOW:
+            return legal_text
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+
+    errors = ci_matrix.check()
+
+    assert ".github/workflows/legal-integrity.yml is missing README metadata routing" in errors
+
+
+def test_ci_matrix_requires_legal_python_before_classification(monkeypatch) -> None:
+    workflow_text = ci_matrix.LEGAL_INTEGRITY_WORKFLOW.read_text()
+    install_start = workflow_text.index("      - name: Install uv and Python")
+    classify_start = workflow_text.index("      - name: Classify change scope")
+    verifier_start = workflow_text.index("      - name: Verify source-tree legal integrity")
+    legal_text = (
+        workflow_text[:install_start]
+        + workflow_text[classify_start:verifier_start]
+        + workflow_text[install_start:classify_start]
+        + workflow_text[verifier_start:]
+    )
+    original_read_text = Path.read_text
+
+    def read_text(path: Path, *args: object, **kwargs: object) -> str:
+        if path == ci_matrix.LEGAL_INTEGRITY_WORKFLOW:
+            return legal_text
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+
+    errors = ci_matrix.check()
+
+    assert "Legal integrity workflow must install Python before classifying changes" in errors
+
+
+def test_ci_matrix_requires_docs_only_codeql_routing(monkeypatch) -> None:
+    codeql_text = ci_matrix.CODEQL_WORKFLOW.read_text().replace("      - README.md\n", "")
+    original_read_text = Path.read_text
+
+    def read_text(path: Path, *args: object, **kwargs: object) -> str:
+        if path == ci_matrix.CODEQL_WORKFLOW:
+            return codeql_text
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+
+    errors = ci_matrix.check()
+
+    assert ".github/workflows/codeql.yml must ignore documentation-only pull requests" in errors
+
+
+def test_ci_matrix_requires_codeql_transition_gate(monkeypatch) -> None:
+    codeql_text = ci_matrix.CODEQL_WORKFLOW.read_text().replace("    if: vars.CODEQL_ADVANCED_SETUP == 'true'\n", "")
+    original_read_text = Path.read_text
+
+    def read_text(path: Path, *args: object, **kwargs: object) -> str:
+        if path == ci_matrix.CODEQL_WORKFLOW:
+            return codeql_text
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+
+    errors = ci_matrix.check()
+
+    assert ".github/workflows/codeql.yml is missing advanced setup transition gate" in errors
+
+
+def test_ci_matrix_requires_macos_arm64_warning_regressions(monkeypatch) -> None:
+    ci_text = (
+        ci_matrix.CI_WORKFLOW.read_text()
+        .replace("runs-on: macos-latest", "")
+        .replace("pytest tests/test_matmul.py", "")
+        .replace("-W error", "")
+        .replace('"numpy==2.2.6"', "")
+        .replace("-r requirements-dev.txt", "")
+    )
+    original_read_text = Path.read_text
+
+    def read_text(path: Path, *args: object, **kwargs: object) -> str:
+        if path == ci_matrix.CI_WORKFLOW:
+            return ci_text
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+
+    errors = ci_matrix.check()
+
+    assert "CI workflow is missing the macOS arm64 runner" in errors
+    assert "CI workflow is missing warnings-as-errors matmul tests on macOS" in errors
+    assert "CI workflow does not pin the affected NumPy version for the macOS regression tests" in errors
+    assert "CI workflow does not install test dependencies for the macOS regression tests" in errors
+
+
+def test_ci_matrix_accepts_equivalent_macos_dependency_formatting(monkeypatch) -> None:
+    ci_text = (
+        ci_matrix.CI_WORKFLOW.read_text()
+        .replace("runs-on: macos-latest", "runs-on: 'macos-latest'")
+        .replace(
+            'run: uv pip install -e ".[headless,torch]" "numpy==2.2.6" -r requirements-dev.txt',
+            "run: uv pip install -e '.[headless,torch]' 'numpy==2.2.6' --requirement=requirements-dev.txt",
+        )
+    )
+    original_read_text = Path.read_text
+
+    def read_text(path: Path, *args: object, **kwargs: object) -> str:
+        if path == ci_matrix.CI_WORKFLOW:
+            return ci_text
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+
+    assert ci_matrix.check() == []
+
+
+def test_ci_matrix_requires_dev_dependencies_in_macos_job(monkeypatch) -> None:
+    ci_text = ci_matrix.CI_WORKFLOW.read_text().replace(
+        'run: uv pip install -e ".[headless,torch]" "numpy==2.2.6" -r requirements-dev.txt',
+        'run: uv pip install -e ".[headless,torch]" "numpy==2.2.6"',
+    )
+    original_read_text = Path.read_text
+
+    def read_text(path: Path, *args: object, **kwargs: object) -> str:
+        if path == ci_matrix.CI_WORKFLOW:
+            return ci_text
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+
+    errors = ci_matrix.check()
+
+    assert "CI workflow does not install test dependencies for the macOS regression tests" in errors
+
+
+def test_ci_matrix_requires_legal_artifact_verifier_commands(monkeypatch) -> None:
+    release_candidate_text = ci_matrix.RELEASE_CANDIDATE_WORKFLOW.read_text().replace(
+        ci_matrix.LEGAL_ARTIFACT_VERIFY_COMMAND,
+        "",
+    )
+    publish_text = ci_matrix.PUBLISH_WORKFLOW.read_text().replace(ci_matrix.LEGAL_ARTIFACT_VERIFY_COMMAND, "")
+    original_read_text = Path.read_text
+
+    def read_text(path: Path, *args: object, **kwargs: object) -> str:
+        if path == ci_matrix.RELEASE_CANDIDATE_WORKFLOW:
+            return release_candidate_text
+        if path == ci_matrix.PUBLISH_WORKFLOW:
+            return publish_text
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+
+    errors = ci_matrix.check()
+
+    assert ".github/workflows/release-candidate.yml is missing legal artifact verifier" in errors
+    assert ".github/workflows/publish.yml is missing legal artifact verifier" in errors
+
+
+def test_ci_matrix_requires_legal_artifact_verifier_in_both_publish_paths(monkeypatch) -> None:
+    publish_text = ci_matrix.PUBLISH_WORKFLOW.read_text().replace(ci_matrix.LEGAL_ARTIFACT_VERIFY_COMMAND, "", 1)
+    original_read_text = Path.read_text
+
+    def read_text(path: Path, *args: object, **kwargs: object) -> str:
+        if path == ci_matrix.PUBLISH_WORKFLOW:
+            return publish_text
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+
+    errors = ci_matrix.check()
+
+    assert ".github/workflows/publish.yml must run the legal artifact verifier in both publish paths" in errors
+
+
+def test_ci_matrix_requires_shared_antigravity_workflow(monkeypatch) -> None:
+    workflow_text = ci_matrix.ANTIGRAVITY_WORKFLOW.read_text().replace(
+        ci_matrix.CI_FOUNDATION_ANTIGRAVITY_WORKFLOW,
+        "",
+    )
+    original_read_text = Path.read_text
+
+    def read_text(path: Path, *args: object, **kwargs: object) -> str:
+        if path == ci_matrix.ANTIGRAVITY_WORKFLOW:
+            return workflow_text
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+
+    errors = ci_matrix.check()
+
+    assert ".github/workflows/antigravity-pr-checks.yml is missing shared trusted review workflow" in errors
+
+
+def test_ci_matrix_rejects_a_caller_supplied_release_candidate_ref(monkeypatch) -> None:
+    workflow_text = ci_matrix.RELEASE_CANDIDATE_WORKFLOW.read_text().replace(
+        "ref: main",
+        "ref: ${{ inputs.commit_sha }}",
+    )
+    original_read_text = Path.read_text
+
+    def read_text(path: Path, *args: object, **kwargs: object) -> str:
+        if path == ci_matrix.RELEASE_CANDIDATE_WORKFLOW:
+            return workflow_text
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+
+    errors = ci_matrix.check()
+
+    assert ".github/workflows/release-candidate.yml must not contain caller-supplied candidate ref" in errors
+
+
+def test_benchmark_regression_check_blocks_release(tmp_path, monkeypatch) -> None:
+    baseline = tmp_path / "baseline.json"
+    current = tmp_path / "current.json"
+    baseline.write_text(json.dumps(_router_json(1.0)))
+    current.write_text(json.dumps(_router_json(1.2)))
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "check_benchmark_regressions.py",
+            "--baseline",
+            str(baseline),
+            "--current",
+            str(current),
+            "--mode",
+            "release",
+        ],
+    )
+
+    assert check_benchmark_regressions.main() == 1
+
+
+def test_benchmark_regression_check_prints_summary_and_writes_report(tmp_path, monkeypatch, capsys) -> None:
+    baseline = tmp_path / "baseline.json"
+    current = tmp_path / "current.json"
+    report = tmp_path / "report.md"
+    baseline.write_text(json.dumps(_router_json(1.0)))
+    current.write_text(json.dumps(_router_json(1.2)))
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "check_benchmark_regressions.py",
+            "--baseline",
+            str(baseline),
+            "--current",
+            str(current),
+            "--mode",
+            "release",
+            "--output-md",
+            str(report),
+        ],
+    )
+
+    assert check_benchmark_regressions.main() == 1
+    assert "Benchmark Regression Check" in report.read_text()
+    captured = capsys.readouterr()
+    assert "Benchmark regression summary" in captured.out
+    assert "normalize HWC 128x160x3 float32" in captured.out
+
+
+def test_benchmark_regression_check_accepts_explicit_release_regression(tmp_path, monkeypatch) -> None:
+    baseline = tmp_path / "baseline.json"
+    current = tmp_path / "current.json"
+    accepted = tmp_path / "accepted.json"
+    report = tmp_path / "report.md"
+    baseline.write_text(json.dumps(_router_json(1.0)))
+    current.write_text(json.dumps(_router_json(1.2)))
+    accepted.write_text(
+        json.dumps(
+            {
+                "regressions": [
+                    {
+                        "op": "normalize",
+                        "layout": "HWC",
+                        "shape": [128, 160, 3],
+                        "dtype": "float32",
+                        "reason": "intentional | correctness fix",
+                        "approved_by": "maintainer | release owner",
+                    },
+                ],
+            },
+        ),
+    )
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "check_benchmark_regressions.py",
+            "--baseline",
+            str(baseline),
+            "--current",
+            str(current),
+            "--mode",
+            "release",
+            "--accepted-regressions",
+            str(accepted),
+            "--output-md",
+            str(report),
+        ],
+    )
+
+    assert check_benchmark_regressions.main() == 0
+    report_text = report.read_text()
+    assert "`accepted`" in report_text
+    assert r"`intentional \| correctness fix`" in report_text
+    assert r"`maintainer \| release owner`" in report_text
+
+
+def test_benchmark_regression_check_rejects_undocumented_accepted_regression(tmp_path, monkeypatch) -> None:
+    baseline = tmp_path / "baseline.json"
+    current = tmp_path / "current.json"
+    accepted = tmp_path / "accepted.json"
+    baseline.write_text(json.dumps(_router_json(1.0)))
+    current.write_text(json.dumps(_router_json(1.2)))
+    accepted.write_text(
+        json.dumps(
+            {
+                "regressions": [
+                    {
+                        "op": "normalize",
+                        "layout": "HWC",
+                        "shape": [128, 160, 3],
+                        "dtype": "float32",
+                    },
+                ],
+            },
+        ),
+    )
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "check_benchmark_regressions.py",
+            "--baseline",
+            str(baseline),
+            "--current",
+            str(current),
+            "--mode",
+            "release",
+            "--accepted-regressions",
+            str(accepted),
+        ],
+    )
+
+    with pytest.raises(TypeError, match="reason"):
+        check_benchmark_regressions.main()
+
+
+def test_benchmark_regression_check_rejects_duplicate_accepted_regression_key(tmp_path, monkeypatch) -> None:
+    baseline = tmp_path / "baseline.json"
+    current = tmp_path / "current.json"
+    accepted = tmp_path / "accepted.json"
+    baseline.write_text(json.dumps(_router_json(1.0)))
+    current.write_text(json.dumps(_router_json(1.2)))
+    accepted.write_text(
+        json.dumps(
+            {
+                "regressions": [
+                    {
+                        "op": "normalize",
+                        "layout": "HWC",
+                        "shape": [128, 160, 3],
+                        "dtype": "float32",
+                        "reason": "first approval",
+                        "approved_by": "maintainer-a",
+                    },
+                    {
+                        "op": "normalize",
+                        "layout": "HWC",
+                        "shape": [128, 160, 3],
+                        "dtype": "float32",
+                        "reason": "second approval",
+                        "approved_by": "maintainer-b",
+                    },
+                ],
+            },
+        ),
+    )
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "check_benchmark_regressions.py",
+            "--baseline",
+            str(baseline),
+            "--current",
+            str(current),
+            "--mode",
+            "release",
+            "--accepted-regressions",
+            str(accepted),
+        ],
+    )
+
+    with pytest.raises(ValueError, match="duplicate accepted regression keys"):
+        check_benchmark_regressions.main()
+
+
+def test_benchmark_blocking_ops_come_from_router_contracts() -> None:
+    expected = {
+        benchmark_name
+        for contract in ROUTER_CONTRACTS.values()
+        if contract.release_blocking_performance
+        for benchmark_name in contract.benchmark_names
+    }
+
+    assert check_benchmark_regressions.RELEASE_BLOCKING_OPS == expected
+
+
+def test_release_candidate_ci_run_validator_requires_success() -> None:
+    runs = [
+        {
+            "status": "completed",
+            "conclusion": "failure",
+            "url": "https://example.invalid/failure",
+        },
+        {
+            "status": "completed",
+            "conclusion": "success",
+            "url": "https://example.invalid/success",
+        },
+    ]
+
+    assert validate_release_candidate.validate_ci_runs(runs) == "https://example.invalid/success"
+
+    with pytest.raises(ValueError, match="No successful CI workflow run"):
+        validate_release_candidate.validate_ci_runs(runs[:1])
+
+
+def test_publish_artifact_verifier_checks_provenance_files_and_checksums(tmp_path) -> None:
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    version = "0.2.2"
+    commit_sha = "abc123"
+    candidate_run = dist / "candidate-run.json"
+    candidate_run.write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "conclusion": "success",
+                "workflowName": "Release Candidate",
+                "headSha": commit_sha,
+            },
+        ),
+    )
+    (dist / "release-candidate-metadata.json").write_text(
+        json.dumps(
+            {
+                "version": version,
+                "commit_sha": commit_sha,
+            },
+        ),
+    )
+    files = [
+        dist / f"albucore-{version}.tar.gz",
+        dist / f"albucore-{version}-py3-none-any.whl",
+        dist / "release-candidate-metadata.json",
+    ]
+    for path in files:
+        if not path.exists():
+            path.write_text(path.name)
+    (dist / "SHA256SUMS.txt").write_text(
+        "".join(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  ./{path.name}\n" for path in files),
+    )
+
+    verify_publish_artifacts.verify_prepublish_artifacts(dist, candidate_run, version, commit_sha)
+    verify_publish_artifacts.verify_direct_release_artifacts(dist, version, commit_sha)
+
+    pypi_dist = tmp_path / "pypi-dist"
+    verify_publish_artifacts.copy_distribution_files(dist, pypi_dist, version)
+    assert sorted(path.name for path in pypi_dist.iterdir()) == [
+        f"albucore-{version}-py3-none-any.whl",
+        f"albucore-{version}.tar.gz",
+    ]
+
+    (dist / f"albucore-{version}.tar.gz").write_text("changed")
+    with pytest.raises(ValueError, match="Checksum mismatch"):
+        verify_publish_artifacts.verify_checksums(dist)
+
+
+def test_publish_artifact_verifier_rejects_candidate_run_mismatches() -> None:
+    valid = {
+        "status": "completed",
+        "conclusion": "success",
+        "workflowName": "Release Candidate",
+        "headSha": "abc123",
+    }
+
+    with pytest.raises(ValueError, match="did not succeed"):
+        verify_publish_artifacts.verify_candidate_run({**valid, "conclusion": "failure"}, "abc123")
+    with pytest.raises(ValueError, match="expected 'Release Candidate'"):
+        verify_publish_artifacts.verify_candidate_run({**valid, "workflowName": "Other"}, "abc123")
+    with pytest.raises(ValueError, match="does not match abc123"):
+        verify_publish_artifacts.verify_candidate_run({**valid, "headSha": "deadbeef"}, "abc123")
+
+
+def test_publish_artifact_verifier_rejects_release_metadata_mismatches() -> None:
+    metadata = {"version": "0.2.2", "commit_sha": "abc123"}
+
+    with pytest.raises(ValueError, match="version"):
+        verify_publish_artifacts.verify_release_metadata({**metadata, "version": "0.2.3"}, "0.2.2", "abc123")
+    with pytest.raises(ValueError, match="SHA"):
+        verify_publish_artifacts.verify_release_metadata({**metadata, "commit_sha": "deadbeef"}, "0.2.2", "abc123")
+
+
+def test_publish_artifact_verifier_rejects_missing_and_malformed_checksums(tmp_path) -> None:
+    dist = tmp_path / "dist"
+    dist.mkdir()
+
+    with pytest.raises(FileNotFoundError, match="SHA256SUMS"):
+        verify_publish_artifacts.verify_checksums(dist)
+
+    checksums = dist / "SHA256SUMS.txt"
+    checksums.write_text("0" * 64 + "missing-separator")
+    with pytest.raises(ValueError, match="Malformed checksum line"):
+        verify_publish_artifacts.verify_checksums(dist)
+
+    checksums.write_text("0" * 10 + "  ./artifact.whl\n")
+    with pytest.raises(ValueError, match="Malformed sha256 digest"):
+        verify_publish_artifacts.verify_checksums(dist)
+
+
+class _FakeResponse:
+    def __init__(self, payload: dict[str, object] | None = None, status: int = 200) -> None:
+        self.payload = payload or {}
+        self.status = status
+
+    def __enter__(self) -> "_FakeResponse":
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return json.dumps(self.payload).encode()
+
+
+def test_publish_artifact_verifier_rejects_existing_pypi_version() -> None:
+    def existing_version(url: str, *, timeout: float) -> _FakeResponse:
+        return _FakeResponse(status=200)
+
+    with pytest.raises(ValueError, match="already has"):
+        verify_publish_artifacts.verify_pypi_absent("albucore", "0.2.2", urlopen=existing_version)
+
+
+def test_publish_artifact_verifier_accepts_missing_pypi_version() -> None:
+    def missing_version(url: str, *, timeout: float) -> _FakeResponse:
+        raise urllib.error.HTTPError(url, 404, "missing", hdrs=None, fp=None)
+
+    verify_publish_artifacts.verify_pypi_absent("albucore", "0.2.2", urlopen=missing_version)
+
+
+def test_publish_artifact_verifier_waits_for_pypi_files() -> None:
+    def published_version(url: str, *, timeout: float) -> _FakeResponse:
+        return _FakeResponse(payload={"urls": [{"filename": "albucore-0.2.2.tar.gz"}]})
+
+    file_count = verify_publish_artifacts.verify_pypi_publication(
+        "albucore",
+        "0.2.2",
+        verify_publish_artifacts.PyPIWaitConfig(
+            attempts=1,
+            sleep_seconds=0.0,
+            urlopen=published_version,
+        ),
+    )
+
+    assert file_count == 1
+
+
+def test_publish_artifact_verifier_requires_pypi_urls_list() -> None:
+    with pytest.raises(TypeError, match="urls"):
+        verify_publish_artifacts.pypi_file_count({"urls": {"filename": "albucore-0.2.2.tar.gz"}})
+
+
+def test_publish_artifact_verifier_rejects_pypi_publication_without_files() -> None:
+    def empty_version(url: str, *, timeout: float) -> _FakeResponse:
+        return _FakeResponse(payload={"urls": []})
+
+    with pytest.raises(ValueError, match="metadata but no files"):
+        verify_publish_artifacts.verify_pypi_publication(
+            "albucore",
+            "0.2.2",
+            verify_publish_artifacts.PyPIWaitConfig(
+                attempts=1,
+                sleep_seconds=0.0,
+                urlopen=empty_version,
+            ),
+        )
+
+
+def test_benchmark_summary_reads_router_json(tmp_path, monkeypatch, capsys) -> None:
+    path = tmp_path / "current.json"
+    path.write_text(json.dumps(_router_json(1.0)))
+
+    monkeypatch.setattr("sys.argv", ["summarize_benchmarks.py", str(path)])
+
+    assert summarize_benchmarks.main() == 0
+    captured = capsys.readouterr()
+    assert "Benchmark Summary" in captured.out
+    assert "`normalize`" in captured.out
+
+
+def test_release_summary_omits_release_benchmark_artifacts(tmp_path) -> None:
+    dist = tmp_path / "dist"
+    dist.mkdir()
+
+    summary = generate_release_summary.generate_summary("0.2.2", dist)
+
+    assert "Router benchmark" not in summary
+    assert "memory-smoke" not in summary
+
+
+def test_previous_pypi_release_skips_unpublished_release() -> None:
+    releases = {
+        "0.1.5": [{"filename": "albucore-0.1.5.tar.gz", "yanked": False}],
+        "0.1.6": [{"filename": "albucore-0.1.6.tar.gz", "yanked": False}],
+        "0.2.0": [],
+        "0.2.1": [{"filename": "albucore-0.2.1.tar.gz", "yanked": False}],
+    }
+
+    previous = resolve_previous_pypi_release.previous_published_version("0.2.1", releases)
+
+    assert previous == "0.1.6"
+
+
+def test_previous_pypi_release_cli_writes_github_env(tmp_path, monkeypatch, capsys) -> None:
+    env_path = tmp_path / "github-env"
+    releases = {
+        "0.1.6": [{"filename": "albucore-0.1.6.tar.gz", "yanked": False}],
+        "0.2.0": [],
+    }
+
+    monkeypatch.setattr(resolve_previous_pypi_release, "fetch_pypi_releases", lambda project: releases)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "resolve_previous_pypi_release.py",
+            "--current-version",
+            "0.2.1",
+            "--github-env",
+            str(env_path),
+        ],
+    )
+
+    assert resolve_previous_pypi_release.main() == 0
+    assert env_path.read_text() == "PREVIOUS_RELEASE_VERSION=0.1.6\n"
+    assert "PREVIOUS_RELEASE_VERSION=0.1.6" in capsys.readouterr().out
+
+
+def test_pypi_release_payload_must_be_json_object() -> None:
+    with pytest.raises(TypeError, match="not a JSON object"):
+        resolve_previous_pypi_release.pypi_releases_from_payload("albucore", [])
+
+
+def test_golden_vector_verify_checks_computed_dtype(tmp_path, monkeypatch) -> None:
+    expected = np.array([1.0, 2.0], dtype=np.float32)
+    manifest_path = tmp_path / "manifest.json"
+    outputs_path = tmp_path / "outputs.npz"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "cases": [
+                    {
+                        "name": "dtype_case",
+                        "outputs": {"result": array_metadata(expected)},
+                    },
+                ],
+            },
+        ),
+    )
+    np.savez(outputs_path, dtype_case__result=expected)
+    case = SimpleNamespace(
+        name="dtype_case",
+        compute=lambda: {"result": expected.astype(np.float64)},
+        rtol=0.0,
+        atol=0.0,
+    )
+
+    monkeypatch.setattr(verify_golden_vectors, "MANIFEST_PATH", manifest_path)
+    monkeypatch.setattr(verify_golden_vectors, "OUTPUTS_PATH", outputs_path)
+    monkeypatch.setattr(verify_golden_vectors, "GOLDEN_CASES", (case,))
+
+    errors = verify_golden_vectors.verify()
+
+    assert any("dtype_case.result.computed: metadata dtype mismatch" in error for error in errors)

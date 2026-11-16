@@ -1,0 +1,233 @@
+# Albucore public API classification
+
+`from albucore import *` exposes only **routers** and shared helpers listed in [`albucore/__init__.py`](../albucore/__init__.py) `__all__`.
+
+## Precondition boundary
+
+Public routers are low-level kernels and receive prevalidated inputs. Upstream callers own container,
+rank/layout, dtype, device, contiguity, autograd, and operation-control validation. Albucore does not
+repeat those checks on the hot path; NumPy/Torch dispatch selects the implementation, and backend code
+may still normalize values or allocate the buffers required by its kernel.
+
+## Containers, layouts, and dtypes
+
+NumPy uses channel-last layouts: HWC/NHWC for images and DHWC/NDHWC for volumes. Eager CPU Torch uses channel-first
+layouts: CHW/NCHW for images and CDHW/NCDHW for volumes. Common Tensor operations with channel-dependent controls
+take keyword-only `layout=`; do not infer layout from rank. Spatial APIs define their layout by operation.
+
+Image inputs support `uint8`, `float16`, and `float32`; float64 is not a supported image input. Most arithmetic and
+geometric operations preserve the input dtype. `normalize` and `normalize_per_image` return float16 for
+float16 input and float32 for uint8/float32 input; `exp`, `log`, and `sqrt` return float32 for uint8 input. Statistics
+use wide accumulators and may return float64. `apply_uint8_lut` remains uint8-only. A backend may compute
+in float32 and restore float16 when needed; include those conversions in the full-path benchmark.
+`convert_dtype` returns the explicitly requested dtype.
+
+## Explicit output buffers
+
+`clip(image)` saturates to the input dtype range without writing to it. `clip(image, out=destination)` uses the
+destination dtype and returns that exact object; `out=image` requests mutation. Pass `dtype` explicitly when choosing
+a conversion independently of optional output storage. An explicit dtype must match the supplied destination.
+Clipping does not scale intensities: a uint8 destination clips to [0,255] and truncates fractions; floating destinations
+clip to [0,1]. The caller validates output metadata and overlap. Dtype changes may require working storage.
+
+`exp`, `log`, and `sqrt` use the same explicit-output contract. Their output dtype is float16 for float16 input
+and float32 for uint8/float32 input. Writable views may be supplied as output; AX owns protective copies required
+when that storage must remain unchanged. No dtype-specific ownership heuristic silently refuses an explicit output.
+
+`normalize(image, mean, denominator, out=destination)` uses fixed caller statistics. Its destination is float16
+for float16 input and float32 for uint8/float32 input. Floating output may alias the complete input; uint8 input
+requires a separate float32 result. Tensor calls require layout. Without `out`, input is unchanged and the existing
+approximate identity policy may return it directly. Output strides do not change the selected arithmetic kernel;
+an unsupported destination uses a temporary followed by a copy. Adaptive `normalize_per_image` has separate statistics
+and clipping policies.
+
+`normalize_per_image(image, mode, out=destination)` estimates its statistics from the input. Its result dtype and
+output alias rules match fixed `normalize`. Statistics are computed before writing an alias. Mean/std modes add
+`1e-4` to the standard deviation and clip to [-20,20]. Min/max policy is:
+
+| Mode | Epsilon added to the range |
+| --- | --- |
+| `min_max` | None |
+| `min_max_per_channel`, uint8 | `1e-4`, including C=1 |
+| `min_max_per_channel`, floating C=1 | None |
+| `min_max_per_channel`, floating C>1 | `1e-4` |
+
+NumPy global modes reduce the whole array; channel modes reduce every axis except the last. Tensor NCHW/NCDHW
+normalize each batch item independently; CHW/CDHW span one image or volume. Tensor layout is required. Empty input
+returns an empty result without estimating statistics. Strided outputs can require a temporary.
+
+`add` and `multiply` preserve the input dtype and accept keyword-only `out` with that dtype and container.
+The destination has the image shape and layout. Exact image or full-field operand aliases are supported;
+other overlaps, including a broadcast control sharing output storage, are outside the caller-validated contract.
+Without `out`, neither input is written. Tensor calls require an explicit `layout=`.
+
+`multiply_add` also uses keyword-only, dtype/container-matching `out` and requires a Tensor layout.
+Uint8 controls are scalars or channel vectors; floating inputs also accept broadcastable fields.
+Exact image and full-field control aliases are supported, including an output that is also the bias field.
+The two-step half routes retain product rounding before addition; selected NumKong scalar routes retain fused rounding.
+Supplying output may still require an intermediate to preserve that numerical policy and read-before-write order.
+
+`equalize_uint8(img, *, mode="cv", mask=None)` equalizes each channel of an HWC uint8 image using OpenCV or
+Pillow histogram mapping. An optional uint8 mask selects histogram samples while the mapping applies to every pixel.
+An HW mask or HWC mask with one channel is shared across channels. An HWC mask with matching channel count selects
+each histogram independently. The result uses independent writable storage.
+
+`apply_uint8_lut` maps uint8 images through a shared `(256,)` or per-channel `(256, 1, C)` table.
+Without `out`, it returns independent writable storage and leaves the input unchanged.
+It accepts writable strided `out` buffers and `out=image`, returning that exact object. Other overlapping
+views and overlap with the table are unsupported. Shared tables use StringZilla byte translation. Distinct tables
+can use OpenCV directly on packed HWC crops with padded rows. Shared Tensor tables do not require layout; per-channel
+Tensor calls declare `layout=`. Strided paths may use a temporary. Values match integer table lookup exactly.
+
+## Static return types
+
+Overloads preserve the relationship between input and output container and dtype. Dtype-preserving NumPy calls retain
+that array type; Tensor calls return Tensor. Normalization and conversion follow their explicit output-dtype contracts.
+The implementation may still accept a union of inputs without exposing that entire union as every caller's result.
+
+Concrete NumPy dtypes use `NDArray[np.uint8]`, `NDArray[np.float16]`, and `NDArray[np.float32]` directly.
+These annotations constrain dtype, not rank; the same types describe images, videos and volumes.
+Shape and layout follow the operation's documented contract. Shared unions and TypeVars express supported
+input sets and input/output relationships rather than abbreviating a single dtype.
+
+The checked generic `np.dtype[T]` path in `clip` and `convert_dtype` uses `T` bounded by
+`np.uint8 | np.float16 | np.float32` and retains `NDArray[T]` without a destination. A dynamically selected
+`SupportedDType` returns the union of the three concrete array types. Inferred `clip` output follows the supplied
+buffer; an explicit target dtype must match that buffer. Generic overloads must not hide a conflicting destination.
+
+`ImageInputT` describes a helper that preserves both container and image dtype. Its bound includes the three supported
+NumPy image dtypes and Tensor; Tensor dtype and CPU placement remain runtime preconditions. Operations that change
+dtype or accept different operand types by container use their concrete overloads.
+
+## Routers (package `__all__`)
+
+User-facing entry points with benchmark-driven backends inside:
+
+`add` and `multiply` accept scalar, channel-vector, and full-field operands. A valid channel vector retains its
+dtype and vector semantics for C=1. It is not silently converted to a Python scalar. Full-size floating Tensor
+operands use the native CPU operation when that preserves the declared result dtype.
+
+- **Arithmetic / weighted:** `add`, `add_weighted`, `multiply`, `multiply_add`, `power`, `normalize`, `normalize_per_image`
+  `power` accepts keyword-only `out` and returns it by identity. Without `out`, input storage is unchanged.
+  Writable strided outputs and exact input aliasing are supported; other overlaps are outside the contract.
+  Uint8 accepts scalar/channel exponents and saturates/truncates a float32 table. Floating inputs also accept
+  broadcastable exponent fields. Tensor calls require an explicit layout. Scalar half powers compute in float32
+  and round once; half channel/field routes match the wide result within one half ULP.
+- **Elementwise math:** `exp`, `log`, `sqrt` (float16/float32 inputs, uint8 with float32 output, NumPy-compatible special values, exact shape preservation, explicit writable `out` buffers)
+- **Histogram:** `equalize_uint8` (from `albucore.histogram`)
+- **Uint8 LUT (`albucore.lut`):** `apply_uint8_lut` (shared or per-channel tables, with explicit `out`)
+- **Conversion (`albucore.convert`):** `convert_dtype(img, dtype, *, max_value=None, out=None)`; see the conversion contract below.
+- **Geometry / misc:** `hflip`, `vflip`, `median_blur`, `matmul`, `pairwise_distances_squared`
+- **Stats:** `mean`, `std`, `mean_std`, `reduce_sum` (from `albucore.stats`)
+- **Geometric:** `copy_make_border`, `flip_volume`, `gaussian_blur3d`, `remap`, `resize`, `resize3d`, `rot90_volume`, `separable_filter3d`, `transpose_volume`, `warp_affine`, `warp_affine3d`, `warp_perspective`.
+  NumPy image layouts are HWC/NHWC and volume layouts are DHWC/NDHWC; CPU Tensor image layouts are CHW/NCHW and volume layouts are CDHW/NCDHW.
+  Only `warp_affine3d` and `remap3d` accept volume batches, applying one shared matrix or grid to each item. Other 3D routers accept one volume per call.
+- **3D dense resampling:** `remap3d` applies a caller-provided float32 `(D_out, H_out, W_out, 3)` normalized `align_corners=False` pull grid in `(x, y, z)` order to one NumPy `DHWC`/`NDHWC` array or CPU Torch `CDHW`/`NCDHW` tensor. For rank 5 the same grid is applied to every volume. The grid can be NumPy or Torch, its spatial shape defines the output, and coordinates outside `[-1, 1]` use constant or replicate borders. The router preserves the input container, dtype, channel count, and public layout. `remap3d` does not scan the dense grid for identity or convert a voxel-coordinate map.
+- `warp_affine3d` and `remap3d` retain their `DHWC`/`CDHW` single-volume calls and also accept NumPy `NDHWC` and CPU Torch `NCDHW` batches. Other 3D routers continue to accept one volume per call.
+- **3D constant padding:** `pad3d` takes NumPy DHWC or CPU Torch CDHW and spatial padding `(front, back, top, bottom, left, right)`. It supports uint8/float16/float32 volumes and int16 masks, preserves dtype and channel count, and follows NumPy fill semantics.
+- **Utils:** see `utils.__all__` in [`albucore/utils.py`](../albucore/utils.py)
+- **Types / constants:** `ImageInput`, `ImageInputT`, `SupportedDType`, `TensorLayout`, `NormalizationType`, `ValueType`, and shared routing constants.
+- **Metadata:** `__version__`, `__author__`, `__maintainer__`
+
+`add_weighted(img1, weight1, img2, weight2, *, out=...)` preserves the matching input dtype and container.
+The second image has the same shape, dtype and container as the first. Tensor calls require a layout. Without
+`out`, both inputs remain unchanged; a writable output is returned by identity and may alias either complete input.
+Strided outputs may require a temporary. The existing NumKong/OpenCV region keeps its rounding and non-finite
+policy; zero weights do not add a new identity shortcut. Caller prevalidation owns metadata and overlap checks.
+
+## NumPy image kernels
+
+`box_blur`, `convolve`, `erode`, `dilate`, `linear_transformation_rgb` and `unsharp_mask` live in
+`albucore.filtering` and are exported from the package root. They preserve the input NumPy dtype and shape,
+return independent writable storage, and never write input data. Supported image dtypes are uint8, float16 and
+float32; float16 computes in float32 and restores half storage. Spatial filters accept HWC with an explicit singleton channel for grayscale.
+RGB transforms accept HWC/NHWC with one shared matrix. AX validates ranks and kernel controls before dispatch.
+
+`convolve` accepts a shared `(K, K)` kernel or `(C, K, K)` kernels and clips floating output to [0,1]. RGB transforms
+also clip floating output to [0,1]. Unsharp masking clips floating sharpened candidates before threshold selection;
+its threshold uses byte units, divided by 255 for floating images. Box blur and morphology do not add clipping.
+
+Shared-kernel convolution uses a separate destination for contiguous uint8/float32 input; per-channel and
+packed working-buffer paths retain their measured implementation. Unsharp masking reuses its blur buffer for
+residuals and its sharpened buffer for the result. Threshold inversion preserves source pixels on NaN residuals.
+Performance validation for these operations uses Core public calls only; raw measurements live outside Git.
+
+## Image dtype conversion
+
+`convert_dtype(img, dtype, *, max_value=None, out=None)` accepts NumPy arrays and eager CPU Tensors.
+The destination dtype is explicit and supports all nine pairs among uint8, float16, and float32.
+`max_value` defaults to 255 and affects only conversions between uint8 and floating types:
+
+| Conversion | Values |
+| --- | --- |
+| uint8 → float16/float32 | Divide by `max_value`, returning the requested floating dtype |
+| float16/float32 → uint8 | Multiply by `max_value`, round ties to even, saturate to [0, 255], map NaN to zero |
+| float16 ↔ float32 | Cast without intensity scaling or clipping |
+| Same dtype | Preserve values and ignore `max_value` |
+
+Float images conventionally represent intensities in [0, 1]. The conversion does not estimate the image's
+min/max or rescale floating values that are outside that range. For example:
+
+```python
+import numpy as np
+
+from albucore import convert_dtype
+
+half = convert_dtype(image_uint8, np.float16)
+wide = convert_dtype(half, np.float32)
+restored = convert_dtype(wide, np.uint8)
+convert_dtype(image_uint8, np.float32, max_value=128, out=float32_buffer)
+```
+
+Without `out`, input storage is unchanged and same-dtype calls return the input object. A supplied output
+must match the target dtype, input shape, container, and layout; it is returned by identity. Writable strided
+destinations and exact same-dtype input aliases are supported. Other overlaps are outside the caller-validated
+contract. Pointwise Tensor conversion preserves the declared layout without a `layout` argument.
+
+NumPy uint8 normalization uses a 256-entry LUT in the target floating dtype, avoiding a full float32 intermediate
+for float16 output. On Linux x86-64, Tensor uint8-to-float16 conversion normalizes in a float32 workspace before
+casting or writing the half destination. Other Tensor uint8 conversions divide in the result dtype; a strided
+half destination uses a contiguous half workspace before copying the result.
+
+NumPy half-to-uint8 quantization computes in float32. Contiguous half Tensors may quantize in half for exactly
+representable scales, within one uint8 unit of the wide result; other Tensor quantization uses float32.
+
+Large contiguous NumPy FP16↔FP32 casts use NumKong in the measured AVX-512 region when NumPy's
+floating-error policy is preserved. Large contiguous macOS ARM Tensor casts use NumPy storage conversion and
+zero-copy Tensor wrapping. These routes also preserve the explicit-output contract.
+
+## NumPy and CPU Tensor bridge
+
+`albucore.tensor_bridge.numpy_to_tensor_layout(array, layout, *, contiguous=False)` converts a channel-last NumPy array
+to a CPU Tensor in CHW, NCHW, CDHW, or NCDHW order. The caller supplies the matching rank and an explicit channel axis.
+`numpy_to_tensor_storage(array, *, contiguous=False)` keeps the existing axis order. Both preserve the dtype, use native
+byte order, and wrap compatible writable storage directly. The default permits strided Tensor views and copies in
+memory order when a view is incompatible. A round trip from a Tensor through a compatible NumPy view keeps the
+original PyTorch storage, including for empty views. PyTorch can then detect overlap as it does for native views.
+Dtype reinterpretations, unaligned byte offsets, and views that extend beyond the original Tensor storage require
+a copy. Pass `contiguous=True` to require dense storage.
+
+`tensor_to_numpy_channel_last` exposes a validated CPU Tensor as a channel-last NumPy view.
+`tensor_to_numpy_storage` keeps its current axes.
+
+For measured interleaved layouts, the dense converter writes into the final channel planes. Routing depends on the
+platform, dtype, and strides. Spatial transposes, quarter-turns, and other general strides use the NumPy copy.
+See the [paired bridge benchmark](../benchmarks/benchmark_tensor_bridge.py).
+
+## Backend-specific imports (submodule-only)
+
+Public calls use `from albucore import <operation>`. Package `__all__` is explicit; the implementation is imported
+directly from its owning module. Backend functions are implementation details for internal tests and benchmarks:
+
+- Backend-specific: `*_numpy`, `*_opencv`, `*_lut`, `*_cv2`, `hflip_numpy`, `vflip_numpy`
+- Weighted sums and private blend kernels live in [`albucore.weighted`](../albucore/weighted.py). Scalar NumKong scale and arithmetic kernels live in
+  [`albucore.arithmetic`](../albucore/arithmetic.py); conversion kernels in
+  [`albucore.convert`](../albucore/convert.py); fixed-statistics and per-image normalization in
+  [`albucore.normalize`](../albucore/normalize.py); elementwise kernels in
+  [`albucore.elementwise`](../albucore/elementwise.py); flips in
+  [`albucore.ops_misc`](../albucore/ops_misc.py).
+- Arithmetic LUT construction, operand preparation, and NumPy/OpenCV kernels are private implementation details.
+
+## Internal
+
+Names prefixed with `_` or used only inside albucore (not stable API).

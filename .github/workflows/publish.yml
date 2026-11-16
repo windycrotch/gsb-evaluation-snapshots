@@ -1,0 +1,320 @@
+name: Publish
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to publish
+        required: true
+      commit_sha:
+        description: Exact release candidate commit SHA
+        required: true
+      candidate_run_id:
+        description: Successful Release Candidate workflow run id
+        required: true
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  publish:
+    name: Publish validated artifacts
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment: pypi
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: write
+      id-token: write
+
+    steps:
+      - name: Checkout release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.commit_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download release candidate artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-candidate-artifacts
+          path: dist
+          run-id: ${{ inputs.candidate_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Verify distribution license and CLA integrity
+        run: python tools/verify_legal_integrity.py --artifacts dist/*.whl dist/*.tar.gz
+
+      - name: Verify release candidate provenance and artifacts
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+          REQUESTED_COMMIT_SHA: ${{ inputs.commit_sha }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          gh run view "${CANDIDATE_RUN_ID}" \
+            --json conclusion,headSha,status,workflowName,url \
+            > dist/candidate-run.json
+          python tools/verify_publish_artifacts.py prepublish \
+            --dist-dir dist \
+            --candidate-run-json dist/candidate-run.json \
+            --version "${REQUESTED_VERSION}" \
+            --commit-sha "${REQUESTED_COMMIT_SHA}"
+
+      - name: Prepare PyPI upload directory
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          python tools/verify_publish_artifacts.py prepare-pypi-dist \
+            --dist-dir dist \
+            --output-dir pypi-dist \
+            --version "${REQUESTED_VERSION}"
+
+      - name: Publish distributions to PyPI
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # release/v1
+        with:
+          packages-dir: pypi-dist
+          attestations: true
+
+      - name: Verify PyPI publication
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          python tools/verify_publish_artifacts.py publication \
+            --version "${REQUESTED_VERSION}"
+
+      - name: Create or update GitHub Release
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # zizmor: ignore[superfluous-actions] supports create-or-update release semantics; v3.0.4
+        with:
+          tag_name: ${{ inputs.version }}
+          target_commitish: ${{ inputs.commit_sha }}
+          body_path: dist/albucore-${{ inputs.version }}-release-summary.md
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
+            dist/*-sbom.cdx.json
+            dist/SHA256SUMS.txt
+            dist/runtime-requirements.txt
+            dist/release-candidate-metadata.json
+            dist/albucore-*-release-summary.md
+          fail_on_unmatched_files: true
+
+  publish-from-release:
+    name: Publish from GitHub Release
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    environment: pypi
+    timeout-minutes: 60
+    permissions:
+      actions: read
+      contents: write
+      id-token: write
+
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install uv
+        uses: albumentations-team/ci-foundation/actions/setup-python-uv@93efc801c2f22e08e40000dec2541fd1cafa5f59
+        with:
+          python-version: "3.11"
+          uv-version: "0.12.0"
+          cache-dependency-glob: uv.lock
+          cache-suffix: albucore-release-publish
+          cache-enabled: "false"
+
+      - name: Resolve release metadata from published release
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          RELEASE_VERSION="${RELEASE_TAG#v}"
+          RELEASE_COMMIT_SHA="$(git rev-parse HEAD)"
+          python tools/validate_release_candidate.py metadata \
+            --version "${RELEASE_VERSION}" \
+            --commit-sha "${RELEASE_COMMIT_SHA}" \
+            --github-env "${GITHUB_ENV}" \
+            --fetch-origin-main \
+            --require-origin-main
+
+      - name: Verify CI workflow succeeded for release commit
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          gh run list \
+            --workflow CI \
+            --commit "${CANDIDATE_COMMIT_SHA}" \
+            --json conclusion,status,databaseId,url \
+            --limit 20 \
+            > /tmp/albucore-ci-runs.json
+          python tools/validate_release_candidate.py ci-runs \
+            --runs-json /tmp/albucore-ci-runs.json
+
+      - name: Verify license and CLA provenance
+        run: python tools/verify_legal_integrity.py
+
+      - name: Build distributions
+        run: uv build
+
+      - name: Verify distribution license and CLA integrity
+        run: python tools/verify_legal_integrity.py --artifacts dist/*.whl dist/*.tar.gz
+
+      - name: Install release validation dependencies
+        run: uv sync --frozen --extra headless --extra torch --group dev
+
+      - name: Verify CPU-only Torch
+        uses: albumentations-team/ci-foundation/actions/torch-cpu@93efc801c2f22e08e40000dec2541fd1cafa5f59
+        with:
+          mode: verify
+
+      - name: Check public router contracts
+        run: uv run python tools/check_router_contracts.py
+
+      - name: Check CI matrix policy
+        run: uv run python tools/ci_matrix.py check
+
+      - name: Verify golden vectors
+        run: uv run python tools/verify_golden_vectors.py
+
+      - name: Run release property tests
+        run: uv run pytest tests/property --hypothesis-profile=release
+
+      - name: Check distribution metadata
+        run: uv tool run --from twine twine check dist/*
+
+      - name: Create wheel smoke environment
+        id: wheel_smoke
+        run: |
+          VENV_DIR="${RUNNER_TEMP}/albucore-release-venv"
+          python -m venv "$VENV_DIR"
+          echo "python=${VENV_DIR}/bin/python" >> "${GITHUB_OUTPUT}"
+
+      - name: Install CPU-only Torch for wheel smoke test
+        uses: albumentations-team/ci-foundation/actions/torch-cpu@93efc801c2f22e08e40000dec2541fd1cafa5f59
+        with:
+          mode: install
+          python: ${{ steps.wheel_smoke.outputs.python }}
+          requirement: "torch>=2.14.1"
+
+      - name: Smoke test built wheel
+        env:
+          WHEEL_SMOKE_PYTHON: ${{ steps.wheel_smoke.outputs.python }}
+        run: |
+          "$WHEEL_SMOKE_PYTHON" -m pip install --upgrade pip
+          if [ -n "${HEADLESS_RUNTIME_DEPENDENCIES:-}" ]; then
+            printf '%s\n' "${HEADLESS_RUNTIME_DEPENDENCIES}" > "${RUNNER_TEMP}/headless-runtime-requirements.txt"
+            "$WHEEL_SMOKE_PYTHON" -m pip install -r "${RUNNER_TEMP}/headless-runtime-requirements.txt"
+          fi
+          "$WHEEL_SMOKE_PYTHON" -m pip install dist/*.whl
+          cd /tmp
+          "$WHEEL_SMOKE_PYTHON" -c 'import albucore, numpy as np; img = np.zeros((64, 64, 3), dtype=np.uint8); print("albucore smoke test passed, version:", albucore.__version__)'
+
+      - name: Verify uv.lock is up-to-date
+        run: uv lock --check
+
+      - name: Export locked runtime dependencies
+        run: uv export --frozen --no-dev --no-emit-project --format requirements-txt --output-file dist/runtime-requirements.txt
+
+      - name: Generate CycloneDX SBOM
+        run: |
+          uv tool run --from cyclonedx-bom cyclonedx-py requirements dist/runtime-requirements.txt \
+            --output-format JSON \
+            --output-file "dist/${SBOM_FILENAME}"
+
+      - name: Collect installed dependency license evidence
+        run: >-
+          uv tool run --from cyclonedx-bom cyclonedx-py environment .venv/bin/python
+          --pyproject pyproject.toml
+          --mc-type library
+          --output-reproducible
+          --output-file "${RUNNER_TEMP}/dependency-licenses.cdx.json"
+
+      - name: Add reviewed licenses to CycloneDX SBOM
+        run: >-
+          uv run --no-sync python tools/verify_dependency_licenses.py
+          --requirements dist/runtime-requirements.txt
+          --license-sbom "${RUNNER_TEMP}/dependency-licenses.cdx.json"
+          --sbom "dist/${SBOM_FILENAME}"
+          --write-sbom
+
+      - name: Generate release metadata
+        run: |
+          python tools/validate_release_candidate.py candidate-metadata \
+            --dist-dir dist \
+            --version "${PACKAGE_VERSION}" \
+            --commit-sha "${CANDIDATE_COMMIT_SHA}"
+
+      - name: Generate checksums
+        run: |
+          (
+            cd dist
+            files=(
+              ./*.whl
+              ./*.tar.gz
+              ./*-sbom.cdx.json
+              ./runtime-requirements.txt
+              ./release-candidate-metadata.json
+            )
+            sha256sum "${files[@]}" > SHA256SUMS.txt
+          )
+
+      - name: Generate release summary
+        run: |
+          uv run python tools/generate_release_summary.py \
+            --version "${PACKAGE_VERSION}" \
+            --dist-dir dist \
+            --output-md "dist/albucore-${PACKAGE_VERSION}-release-summary.md"
+          (
+            cd dist
+            sha256sum ./albucore-*-release-summary.md >> SHA256SUMS.txt
+          )
+
+      - name: Verify release artifacts before PyPI
+        run: |
+          python tools/verify_publish_artifacts.py direct-release \
+            --dist-dir dist \
+            --version "${PACKAGE_VERSION}" \
+            --commit-sha "${CANDIDATE_COMMIT_SHA}"
+
+      - name: Prepare PyPI upload directory
+        run: |
+          python tools/verify_publish_artifacts.py prepare-pypi-dist \
+            --dist-dir dist \
+            --output-dir pypi-dist \
+            --version "${PACKAGE_VERSION}"
+
+      - name: Publish distributions to PyPI
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # release/v1
+        with:
+          packages-dir: pypi-dist
+          attestations: true
+
+      - name: Verify PyPI publication
+        run: |
+          python tools/verify_publish_artifacts.py publication \
+            --version "${PACKAGE_VERSION}"
+
+      - name: Attach artifacts to GitHub Release
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # zizmor: ignore[superfluous-actions] supports release-asset attachment semantics; v3.0.4
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
+            dist/*-sbom.cdx.json
+            dist/SHA256SUMS.txt
+            dist/runtime-requirements.txt
+            dist/release-candidate-metadata.json
+            dist/albucore-*-release-summary.md
+          fail_on_unmatched_files: true

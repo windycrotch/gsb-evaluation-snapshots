@@ -1,0 +1,81 @@
+#!/usr/bin/env python3
+"""Grayscale / small-C sanity: where **LUT vs OpenCV** and **NumPy vs cv2.multiply** win.
+
+- **uint8 ``multiply``**: production uses **LUT**; OpenCV (float multiply + clip) is correct but slower here.
+- **float32 → uint8 scaling**: compares NumPy ``rint(img * max_value)`` with ``cv2.multiply``.
+  Production ``convert_dtype`` uses its measured NumKong/Torch routes. OpenCV scalar multiplication on
+  **(H, W, 1)** arrays needs special handling; this benchmark also checks the squeezed 2D candidate.
+
+Run from repo root::
+
+    uv run python benchmarks/benchmark_grayscale_paths.py
+"""
+
+from __future__ import annotations
+
+import argparse
+
+import cv2
+import numpy as np
+from shape_grids import GRAYSCALE_MULTIPLY_SHAPES, LARGE_SQUARE_HW
+from timing import bench_wall_ms
+
+from albucore.arithmetic import _apply_lut, _multiply_uint8_opencv
+from albucore.utils import clip, get_max_value
+
+
+def main() -> None:
+    p = argparse.ArgumentParser()
+    p.add_argument("--repeats", type=int, default=25)
+    p.add_argument("--warmup", type=int, default=8)
+    p.add_argument("--seed", type=int, default=0)
+    args = p.parse_args()
+
+    rng = np.random.default_rng(args.seed)
+    mv = float(get_max_value(np.uint8))
+
+    print("## 1) uint8 per-channel multiply: LUT vs OpenCV with saturation\n")
+    print("| shape | LUT ms | OpenCV ms | faster |")
+    print("|-------|-------:|-----------:|--------|")
+    for (h, w), c in GRAYSCALE_MULTIPLY_SHAPES:
+        img = rng.integers(1, 256, (h, w, c), dtype=np.uint8)
+        vec = rng.random(c, dtype=np.float32) * 0.5 + 0.5
+
+        def run_lut() -> None:
+            _apply_lut(np.ascontiguousarray(img.copy()), vec, 'multiply')
+
+        def run_cv() -> None:
+            _multiply_uint8_opencv(np.ascontiguousarray(img.copy()), vec)
+
+        t_l = bench_wall_ms(run_lut, repeats=args.repeats, warmup=args.warmup).median
+        t_c = bench_wall_ms(run_cv, repeats=args.repeats, warmup=args.warmup).median
+        faster = "LUT" if t_l <= t_c else "OpenCV"
+        print(f"| ({h},{w},{c}) | {t_l:.4f} | {t_c:.4f} | {faster} |")
+
+    print("\n## 2) float32 → uint8: NumPy vs `cv2.multiply` (grayscale)\n")
+    print("| shape | NumPy `rint(img*255)` ms | cv2 on squeezed (H,W) ms | faster | max |f-np| on product |")
+    print("|-------|-------------------------:|-------------------------:|--------|--------------:|")
+    for h, w in LARGE_SQUARE_HW:
+        img = np.ascontiguousarray(rng.random((h, w, 1), dtype=np.float32))
+        g = np.squeeze(img, axis=-1)
+
+        def run_np() -> None:
+            clip(np.rint(img * mv), np.uint8)
+
+        def run_cv2() -> None:
+            clip(np.rint(cv2.multiply(g, mv)), np.uint8)
+
+        t_n = bench_wall_ms(run_np, repeats=args.repeats, warmup=args.warmup).median
+        t_v = bench_wall_ms(run_cv2, repeats=args.repeats, warmup=args.warmup).median
+        faster = "NumPy" if t_n <= t_v else "cv2"
+        bad = np.max(np.abs(img * mv - cv2.multiply(img, mv)))
+        print(f"| ({h},{w},1) | {t_n:.4f} | {t_v:.4f} | {faster} | {bad:.2e} |")
+
+    print(
+        "\n**Note:** `cv2.multiply(img_3d, 255)` on (H,W,1) float **differs** from `img * 255` (see max |f-np| column); "
+        "do not use raw 3D cv2 multiply for float→uint8 scaling on grayscale.",
+    )
+
+
+if __name__ == "__main__":
+    main()

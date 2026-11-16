@@ -1,0 +1,131 @@
+name: PR Benchmarks
+
+on:
+  pull_request:
+    paths:
+      - "albucore/**"
+      - "benchmarks/**"
+      - "tests/router_contracts.py"
+      - "tests/verification_constants.py"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/benchmark-pr.yml"
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  router-benchmark:
+    name: PR router benchmark
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout PR
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install uv and Python
+        uses: albumentations-team/ci-foundation/actions/setup-python-uv@93efc801c2f22e08e40000dec2541fd1cafa5f59
+        with:
+          python-version: "3.12"
+          uv-version: "0.12.0"
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+          cache-suffix: albucore-pr-benchmark-torch-cpu
+
+      - name: Install PR tree
+        run: uv sync --frozen --extra headless --extra torch --group dev
+
+      - name: Verify CPU-only Torch
+        uses: albumentations-team/ci-foundation/actions/torch-cpu@93efc801c2f22e08e40000dec2541fd1cafa5f59
+        with:
+          mode: verify
+
+      - name: Run PR quick router benchmark
+        run: |
+          mkdir -p benchmarks/results
+          uv run python benchmarks/benchmark_router_synthetic.py \
+            --quick \
+            --with-geometric \
+            --repeats 7 \
+            --warmup 2 \
+            --benchmark-label "pr-${GITHUB_SHA}" \
+            --output-json benchmarks/results/router-pr.json
+
+      - name: Checkout base tree
+        run: |
+          git fetch origin "${GITHUB_BASE_REF}:refs/remotes/origin/${GITHUB_BASE_REF}" --depth=1
+          git worktree add ../albucore-base "origin/${GITHUB_BASE_REF}"
+
+      - name: Run CPU Tensor bridge benchmark
+        run: |
+          if git diff --quiet "origin/${GITHUB_BASE_REF}...HEAD" -- \
+            albucore/tensor_bridge.py benchmarks/benchmark_tensor_bridge.py; then
+            exit 0
+          fi
+          PYTHONPATH="$PWD" uv run --no-project --python 3.11 \
+            --index "https://download.pytorch.org/whl/cpu" \
+            --with "torch>=2.14.1" --with "numpy>=1.24.4" --with "numkong>=7.8.7" \
+            --with "stringzilla>=5.3.2" --with "opencv-python-headless>=5.0.0.93" \
+            python benchmarks/benchmark_tensor_bridge.py --quick \
+            --baseline-bridge ../albucore-base/albucore/tensor_bridge.py \
+            --metadata-json benchmarks/results/tensor-bridge-metadata.json > benchmarks/results/tensor-bridge.csv
+
+      - name: Run base quick router benchmark
+        working-directory: ../albucore-base
+        run: |
+          PYTHONPATH="$PWD" uv run --project "$GITHUB_WORKSPACE" python benchmarks/benchmark_router_synthetic.py \
+            --quick \
+            --with-geometric \
+            --repeats 7 \
+            --warmup 2 \
+            --benchmark-label "base-${GITHUB_BASE_REF}" \
+            --output-json "${GITHUB_WORKSPACE}/benchmarks/results/router-base.json"
+
+      - name: Check PR benchmark regressions
+        run: |
+          uv run python tools/check_benchmark_regressions.py \
+            --baseline benchmarks/results/router-base.json \
+            --current benchmarks/results/router-pr.json \
+            --mode advisory \
+            --output-md benchmarks/results/REPORT_router_pr_regressions.md
+
+      - name: Summarize PR router benchmark
+        run: |
+          uv run python tools/summarize_benchmarks.py \
+            benchmarks/results/router-pr.json \
+            --output-md benchmarks/results/REPORT_router_pr_summary.md
+
+      - name: Write benchmark step summary
+        if: always()
+        run: |
+          {
+            echo "## PR Benchmark Summary"
+            echo
+            if [ -f benchmarks/results/REPORT_router_pr_regressions.md ]; then
+              cat benchmarks/results/REPORT_router_pr_regressions.md
+            else
+              echo "Regression report was not generated."
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload benchmark artifacts
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pr-router-benchmark-results
+          path: |
+            benchmarks/results/router-pr.json
+            benchmarks/results/router-base.json
+            benchmarks/results/tensor-bridge.csv
+            benchmarks/results/tensor-bridge-metadata.json
+            benchmarks/results/REPORT_router_pr_regressions.md
+            benchmarks/results/REPORT_router_pr_summary.md
+          if-no-files-found: warn

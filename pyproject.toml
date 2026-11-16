@@ -1,0 +1,196 @@
+[build-system]
+build-backend = "hatchling.build"
+
+requires = [ "hatchling" ]
+
+[project]
+name = "albucore"
+version = "0.3.10"
+
+description = "High-performance image processing functions for deep learning and computer vision."
+readme = "README.md"
+keywords = [ "deep learning", "image processing" ]
+license = "MIT"
+license-files = ["LICENSE"]
+maintainers = [ { name = "Vladimir Iglovikov" } ]
+
+authors = [ { name = "Vladimir Iglovikov" } ]
+requires-python = ">=3.11"
+
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: Scientific/Engineering :: Image Processing",
+  "Topic :: Software Development :: Libraries",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+  "Typing :: Typed",
+]
+
+dependencies = [
+  "numpy>=1.24.4",
+  "numkong>=7.8.7",
+  "stringzilla>=5.3.2",
+]
+
+[project.optional-dependencies]
+contrib = ["opencv-contrib-python>=5.0.0.93"]
+contrib-headless = ["opencv-contrib-python-headless>=5.0.0.93"]
+gui = ["opencv-python>=5.0.0.93"]
+headless = ["opencv-python-headless>=5.0.0.93"]
+torch = ["torch>=2.14.1"]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["albucore"]
+include = ["albucore/py.typed"]
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+  "CLA.md",
+  "legal/**",
+  "_internal/**",
+  "private/**",
+  "data/private/**",
+  "**/*signature*",
+  "**/*signer*",
+  "**/*acceptance*record*/**",
+  "**/*entity*acceptance*/**",
+  "**/*cla*assistant*/**",
+  "dist/**",
+  "**/*.whl",
+  "**/*.tar.gz",
+  "tests/**",
+  "benchmarks/**",
+  "benchmark/**",
+  "conda.recipe/**",
+]
+
+[tool.ruff]
+target-version = "py311"
+
+line-length = 120
+indent-width = 4
+
+exclude = [
+  ".bzr",
+  ".direnv",
+  ".eggs",
+  ".git",
+  ".git-rewrite",
+  ".hg",
+  ".ipynb_checkpoints",
+  ".mypy_cache",
+  ".nox",
+  ".pants.d",
+  ".pyenv",
+  ".pytest_cache",
+  ".pytype",
+  ".ruff_cache",
+  ".svn",
+  ".tox",
+  ".venv",
+  ".vscode",
+  "__pypackages__",
+  "_build",
+  "benchmark",
+  "buck-out",
+  "build",
+  "dist",
+  "node_modules",
+  "setup.py",
+  "site",
+  "site-packages",
+  "tests",
+  "benchmarks",
+  "venv",
+]
+
+format.indent-style = "space"
+format.quote-style = "double"
+format.line-ending = "auto"
+format.skip-magic-trailing-comma = false
+lint.select = [ "ALL" ]
+lint.ignore = [
+  "ANN401",
+  "ARG001",
+  # The project does not require boilerplate copyright headers in source files.
+  "CPY001",
+  "D100",
+  "D103",
+  "D104",
+  "EM101",
+  "EM102",
+  "F403",
+  "FBT001",
+  "FBT002",
+  "FBT003",
+  "PLR2004",
+  "TRY003",
+]
+
+lint.explicit-preview-rules = true
+lint.fixable = [ "ALL" ]
+lint.unfixable = [  ]
+# Allow unused variables when underscore-prefixed.
+lint.dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+lint.pydocstyle.convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+# These modules expose drop-in OpenCV-compatible signatures and internal helpers
+# that mirror those signatures. Keep the argument-count exceptions scoped to
+# those implementation modules rather than disabling the rules globally.
+# The policy hook follows these exact path-scoped exceptions; update this table
+# if either module moves so Ruff and the policy hook stay aligned.
+"albucore/affine3d.py" = [ "PLR0913", "PLR0917" ]
+"albucore/geometric.py" = [ "PLR0911", "PLR0913", "PLR0917" ]
+# Statistics retain explicit NumPy reduction options and add keyword-only Tensor layout.
+"albucore/stats.py" = [ "PLR0913" ]
+# Weighted sums keep four operands plus explicit output and Tensor layout.
+"albucore/weighted.py" = [ "PLR0913" ]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+follow_imports = "silent"
+warn_redundant_casts = true
+warn_unused_ignores = true
+disallow_any_generics = false
+check_untyped_defs = true
+no_implicit_reexport = true
+disable_error_code = ["type-arg"]
+
+disallow_untyped_defs = true
+
+warn_return_any = true
+strict_equality = true
+warn_unreachable = true
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+]
+
+[dependency-groups]
+dev = [
+    "hypothesis>=6.165.5",
+    "packaging>=25.0",
+    "pytest>=9.1.1",
+    "pytest-randomly>=4.1.0",
+]

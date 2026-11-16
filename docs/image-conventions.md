@@ -1,0 +1,109 @@
+# Image Shape Conventions
+
+## Overview
+
+Albucore expects images to follow specific shape conventions where **the channel dimension is always present**, even for grayscale images.
+
+## Validation boundary
+
+Albucore is the low-level execution layer. AlbumentationsX and other callers validate the container, rank, layout,
+explicit channel dimension, dtype, device, contiguity, autograd state, and operation control data before entering an
+Albucore router. Routers therefore assume their documented preconditions and do not repeat metadata validation on
+the hot path. The `np.ndarray`/`torch.Tensor` dispatch that selects a backend is implementation routing, not a second
+validation pass.
+
+## Shape Formats
+
+NumPy image inputs use channel-last layouts. CPU Torch inputs use channel-first layouts declared by the operation or
+by the keyword-only `layout=` argument; never infer `NCHW` versus `CDHW` from rank or axis sizes.
+
+### Single Images and Volumes
+
+- **RGB/Multi-channel image**: `(H, W, C)` - Height, Width, Channels
+- **Grayscale image**: `(H, W, 1)` - Height, Width, 1 channel
+- **Volume**: `(D, H, W, C)` - Depth, Height, Width, Channels
+- **Grayscale volume**: `(D, H, W, 1)` - Depth, Height, Width, 1 channel
+
+### Batches
+
+- **Batch of images**: `(N, H, W, C)` - Number of images, Height, Width, Channels
+- **Batch of grayscale images**: `(N, H, W, 1)`
+- **Batch of volumes**: `(N, D, H, W, C)` for NumPy or `(N, C, D, H, W)` for Torch
+
+For 2D Torch images and batches, use `CHW` and `NCHW`. For volumes, use `CDHW`; only `warp_affine3d` and `remap3d`
+also accept `NCDHW` batches.
+
+Only `warp_affine3d` and `remap3d` accept both volume ranks today. Each applies one shared matrix or pull grid to every
+item. Other 3D routers continue to accept one volume per call. The batch axis `N` is separate from volume depth `D`.
+
+## Accessing Dimensions
+
+For a NumPy image array, rely on:
+
+```python
+num_channels = image.shape[-1]
+width = image.shape[-2]
+height = image.shape[-3]
+```
+
+For a Tensor, read the channel axis from its declared layout (`CHW`/`CDHW`: axis 0; `NCHW`/`NCDHW`: axis 1).
+
+## Supported image dtypes
+
+Image routers accept `uint8`, `float16`, and `float32`. They do not accept `float64` image inputs. Statistics may
+return `float64` or wide integer outputs, and `apply_uint8_lut` remains `uint8`-only.
+
+## Important Notes
+
+### Correct
+
+```python
+import numpy as np
+
+# Grayscale image with explicit channel dimension
+gray_image = np.random.randint(0, 256, (100, 100, 1), dtype=np.uint8)
+
+# RGB image
+rgb_image = np.random.randint(0, 256, (100, 100, 3), dtype=np.uint8)
+
+# Multi-channel image (e.g., multispectral)
+multi_channel = np.random.randint(0, 256, (100, 100, 10), dtype=np.uint8)
+```
+
+### Incorrect
+
+```python
+# DO NOT use 2D shape for grayscale images
+gray_image = np.random.randint(0, 256, (100, 100), dtype=np.uint8)  # Missing channel dimension!
+
+# DO NOT use 3D shape for grayscale volumes
+gray_volume = np.random.randint(0, 256, (20, 100, 100), dtype=np.uint8)  # Missing channel dimension!
+```
+
+## Examples
+
+```python
+import numpy as np
+import albucore
+
+# Single grayscale image
+gray = np.random.randint(0, 256, (256, 256, 1), dtype=np.uint8)
+result = albucore.multiply(gray, 1.5)
+
+# Single RGB image
+rgb = np.random.randint(0, 256, (256, 256, 3), dtype=np.uint8)
+result = albucore.multiply(rgb, 1.5)
+
+# Batch of 10 RGB images
+batch = np.random.randint(0, 256, (10, 256, 256, 3), dtype=np.uint8)
+result = albucore.multiply(batch, 1.5)
+
+# 3D volume with 20 slices (grayscale)
+volume = np.random.randint(0, 256, (20, 256, 256, 1), dtype=np.uint8)
+result = albucore.multiply(volume, 1.5)
+
+# Batch of four volumes; warp_affine3d applies one matrix to each
+volume_batch = np.random.randint(0, 256, (4, 20, 256, 256, 1), dtype=np.uint8)
+matrix = np.eye(4, dtype=np.float32)
+warped_batch = albucore.warp_affine3d(volume_batch, matrix, (20, 256, 256))
+```
