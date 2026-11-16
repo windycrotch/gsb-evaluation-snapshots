@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <title>Keyframe3D Demos</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <script src="../js/three.js"></script>
+    <script src="https://minkcv.github.io/keyframe3d/js/BufferGeometryUtils.js"></script>
+    <script src="https://minkcv.github.io/keyframe3d/player.js"></script>
+    <style>
+        html, body {
+            margin: 0px;
+            width: 100%;
+            height: 100%;
+            background-color: #2c2c2c;
+        }
+        h1, .links {
+            font-family: Arial, Helvetica, sans-serif;
+            text-align: center;
+            color: #ffffff;
+        }
+        .player {
+            width: 100%;
+            height: 400px;
+            position: relative;
+        }
+        .controls {
+            margin: auto;
+            width: 200px;
+        }
+        a {
+            font-family: Arial, Helvetica, sans-serif;
+            color: #ffffff;
+        }
+        a:visited {
+            color: #cccccc;
+        }
+    </style>
+</head>
+<body>
+    <h1>Keyframe3D Demos</h1>
+    <div class='links'>
+        <a href='https://github.com/minkcv/keyframe3d/' target='_blank'>go to github repo</a><br>
+        <a href='https://minkcv.github.io/keyframe3d/' target='_blank'>open editor</a></br>
+        <a href='https://minkcv.github.io/keyframe3d/demos/ipadpro.html'>iPad Pro</a>
+    </div>
+    <div class='player' id='player1'>
+    </div>
+    <div class='player' id='player2'>
+    </div>
+    <div class='controls'>
+        <button onclick='playPlayer("player2")'>Play</button>
+        <button onclick='pausePlayer("player2")'>Pause</button>
+    </div>
+    <div class='player' id='player3'>
+    </div>
+    <div class='controls'>
+        <button onclick='playPlayer("player3")'>Play</button>
+        <button onclick='pausePlayer("player3")'>Pause</button>
+    </div>
+    <div class='player' id='player4'>
+    </div>
+    <div class='controls'>
+        <button onclick='playPlayer("player4")'>Play</button>
+        <button onclick='pausePlayer("player4")'>Pause</button>
+    </div>
+    <div class='player' id='player5'>
+    </div>
+    <div class='controls'>
+        <button onclick='playPlayer("player5")'>Play</button>
+        <button onclick='pausePlayer("player5")'>Pause</button>
+    </div>
+    <div class='player' id='player6'>
+    </div>
+    <div class='controls'>
+        <button onclick='playPlayer("player6")'>Play</button>
+        <button onclick='pausePlayer("player6")'>Pause</button>
+    </div>
+    <div class='player' id='player7'>
+    </div>
+    <div class='controls'>
+        <button onclick='playPlayer("player7")'>Play</button>
+        <button onclick='pausePlayer("player7")'>Pause</button>
+    </div>
+    <div class='player' id='player8'>
+    </div>
+    <div class='controls'>
+        <button onclick='playPlayer("player8")'>Play</button>
+        <button onclick='pausePlayer("player8")'>Pause</button>
+        <button onclick='document.getElementById("player8").requestFullscreen()'>Fullscreen</button>
+    </div>
+    <div class='player' id='player9'>
+    </div>
+    <div class='controls'>
+        <button onclick='playPlayer("player9")'>Play</button>
+        <button onclick='pausePlayer("player9")'>Pause</button>
+    </div>
+    <div class='player' id='player10'>
+    </div>
+    <div class='controls'>
+        <button onclick='playPlayer("player10")'>Play</button>
+        <button onclick='pausePlayer("player10")'>Pause</button>
+    </div>
+    <div class='player' id='player11'></div>
+    <div class='controls'>
+        <button onclick='playPlayer("player11")'>Play</button>
+        <button onclick='pausePlayer("player11")'>Pause</button>
+    </div>
+    
+    <script type='text/javascript'>
+        // for testing locally
+        // python2: python -m SimpleHTTPServer 8000
+        // python3: python -m http.server
+        
+        var pc1 = createContext('player1');
+        loadProjectPlayer('https://minkcv.github.io/keyframe3d/demos/logo.json', pc1);
+
+        var pc2 = createContext('player2');
+        loadProjectPlayer('https://minkcv.github.io/keyframe3d/demos/lightcycles.json', pc2);
+
+        var pc3 = createContext('player3');
+        loadProjectPlayer('https://minkcv.github.io/keyframe3d/demos/bee.json', pc3);
+
+        var pc4 = createContext('player4');
+        loadProjectPlayer('https://minkcv.github.io/keyframe3d/demos/stresstest.json', pc4);
+        
+        var pc5 = createContext('player5');
+        loadProjectPlayer('https://minkcv.github.io/keyframe3d/demos/logo2.json', pc5);
+
+        var pc6 = createContext('player6');
+        loadProjectPlayer('https://minkcv.github.io/keyframe3d/demos/eye.json', pc6);
+
+        var pc7 = createContext('player7');
+        loadProjectPlayer('https://minkcv.github.io/keyframe3d/demos/tunnel.json', pc7);
+
+        var pc8 = createContext('player8');
+        loadProjectPlayer('https://minkcv.github.io/keyframe3d/demos/floppydisk.json', pc8);
+        pc8.renderer.domElement.onclick = function(){togglePlayPausePlayer("player8")};
+
+        var pc9 = createContext('player9');
+        loadProjectPlayer('https://minkcv.github.io/keyframe3d/demos/vacuum.json', pc9);
+
+        var pc10 = createContext('player10');
+        loadProjectPlayer('https://minkcv.github.io/keyframe3d/demos/lines.json', pc10);
+
+        var pc11 = createContext('player11');
+        loadProjectPlayer('https://minkcv.github.io/keyframe3d/demos/earth.json', pc11);
+    </script>
+</body>
+</html>

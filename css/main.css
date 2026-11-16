@@ -1,0 +1,273 @@
+@font-face {
+    font-family: droid_sans_mono_regular;
+    src: url('DroidSansMono.ttf');
+}
+* {
+    box-sizing: content-box;
+}
+hr {
+    margin-top: 5px;
+    margin-bottom: 5px;
+    border-color: #cccccc;
+}
+.model-select, .shape-select {
+    width: 100%;
+    height: 220px;
+}
+option:checked, option:active {
+    background: linear-gradient(#b049b9, #b049b9) !important;
+    color: #cccccc !important;
+}
+.viewport {
+    width: 100%;
+    height: 100%;
+    border: 1px solid;
+}
+.view-angle-controls {
+    position: absolute;
+    margin: 5px;
+}
+.view-angle-controls > button {
+    color: #EFEFEF;
+    background-color: #212529;
+    width: 40px;
+}
+
+.view-position-controls {
+    position: absolute;
+    bottom: 0px;
+    margin: 5px;
+}
+.view-camera {
+    position: absolute;
+    right: 0px;
+    margin: 5px;
+}
+.custom-file-label {
+    box-sizing: border-box;
+}
+.custom-file-input, .custom-file, .custom-file-label {
+    height: calc(2rem + 2px) !important;
+}
+.custom-file-label::after {
+    height: 2rem !important;
+}
+.custom-file {
+    margin-top: 2px !important;
+    margin-bottom: 2px !important;
+}
+.input-group {
+    margin: 2px !important;
+}
+select, select:focus {
+    color: #cccccc;
+    background-color: #2c2c2c;
+    outline-color: #2c2c2c;
+    border-color: #2c2c2c;
+    margin-bottom: 5px;
+}
+#scene-tree {
+    border: 1px solid #cccccc;
+    height: 93%;
+    overflow: auto;
+}
+button {
+    margin: 2px;
+}
+.settings, .models, .file-menu, .tree-view, .tree-controls, .controls, .shapes {
+    margin: 5px;
+}
+:not(.custom-file) > label {
+    font-family: droid_sans_mono_regular;
+    color: #cccccc;
+}
+#welcome > label {
+    font-family: Arial, Helvetica, sans-serif;
+}
+#welcome > input {
+    width: 20px;
+}
+#properties > div {
+    margin: 5px;
+}
+.settings > input, .controls > input {
+    float: right;
+}
+input[type=checkbox] {
+    margin: 4px;
+}
+input {
+    font-family: droid_sans_mono_regular;
+}
+#current-camera {
+    font-family: droid_sans_mono_regular;
+    font-size: 11pt;
+}
+pre, .controls > div, .controls > div > span {
+    font-size: 12pt;
+    color: #cccccc;
+}
+#keyframe-info {
+    overflow: auto;
+    height: 93%;
+}
+#keyframe-info > div {
+    margin-left: 20px;
+}
+#keyframe-info > pre {
+    margin: 2px;
+    color: #cccccc;
+    font-family: droid_sans_mono_regular;
+}
+.node-info {
+    /* I tried so many other styles */
+    margin-top: -8px;
+    margin-bottom: -4px;
+}
+.node-info-enabled, .node-info-disabled {
+    margin: 0px 1px 0px 1px;
+    padding: 0px 2px 0px 2px;
+    font-size: 10pt;
+}
+.node-info-enabled {
+    color: #cccccc;
+    background-color: #b049b9;
+}
+.node-info-disabled {
+    color: #cccccc;
+    background-color: #444444;
+}
+h1, h2, h3 {
+    font-family: Arial, Helvetica, sans-serif;
+    font-weight: bold;
+    color: #cccccc;
+    margin: 1px;
+}
+p {
+    font-family: Arial, Helvetica, sans-serif;
+    color: #cccccc;
+    margin: 1px;
+}
+h2 {
+    margin-top: 5px;
+    margin-left: 5px;
+}
+h1 {
+    font-size: 30pt;
+    margin-bottom: 10px;
+}
+input {
+    color: #cccccc;
+    background-color: #2c2c2c;
+    width: 120px;
+    border-style: solid;
+    border-width: 1px;
+}
+button {
+    color: #212529;
+    background-color: #EFEFEF;
+    -webkit-appearance: none;
+}
+button > label {
+    padding: 0px !important;
+    margin: -4px 0px -1px 0px !important;
+    border: 0px !important;
+}
+::-moz-selection {
+    color: #cccccc;
+    background: transparent;
+    background-color: transparent;
+}
+::selection {
+    color: #cccccc;
+    background: transparent;
+    background-color: transparent;
+}
+input::selection {
+    color: #2c2c2c;
+    background-color: #cccccc;
+}
+input:focus, .btn:focus, .btn:active {
+    outline-color: #b049b9;
+    box-shadow: none;
+}
+#welcome {
+    margin: 15px;
+}
+.jqtree-toggler-left:hover {
+    color: #cccccc !important;
+}
+.log {
+    overflow: auto;
+    height: 100%;
+    width: 100%;
+    padding-bottom: 20px;
+}
+.log > pre {
+    margin: 0px;
+    overflow: hidden;
+}
+.log > .error {
+    color: #cc0000;
+}
+.log > .warning {
+    color: #cccc00;
+}
+#timeline {
+    height: 95%;
+    margin-left: 5px;
+    margin-right: 5px;
+}
+#timeline > * {
+    font-family: droid_sans_mono_regular;
+    font-size: 9pt;
+}
+.timeline-keyframe {
+    border-color: #b049b9
+}
+.vis-item.timeline-item {
+    background: #cccccc;
+}
+.vis-time-axis .vis-grid.vis-minor {
+    border-color: #555555 !important;
+}
+.vis-text, .vis-label {
+    color: #cccccc !important;
+}
+.vis-custom-time {
+    background-color: #b049b9;
+}
+.vis-selected {
+    background: #ffffff !important;
+    border-color: #ffffff !important;
+}
+a:not([href]):not([tabindex]) {
+    color: #cccccc; /* undo bootstrap stuff to fix tree controls */
+}
+/* Style the buttons that are used to open and close the accordion panel */
+.accordion {
+    -webkit-appearance: none;
+    background-color: #444444 !important;
+    color: #cccccc !important;
+    cursor: pointer;
+    padding: 5px;
+    margin: 0px;
+    width: 95%;
+    text-align: left;
+    border: none;
+    outline: none;
+    transition: 0.4s;
+}
+
+/* Add a background color to the button if it is clicked on (add the .active class with JS), and when you move the mouse over it (hover) */
+.active, .accordion:hover {
+    background-color: #555;
+}
+
+/* Style the accordion panel. Note: hidden by default */
+.panel {
+    padding: 0 18px;
+    background-color: #2c2c2c;
+    display: none;
+    overflow: hidden;
+}
