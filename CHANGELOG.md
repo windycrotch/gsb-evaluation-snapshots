@@ -149,6 +149,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `limitations`、`unknowns`、`coverage` 均为附加字段，旧客户端可忽略。
   错误结果不带 `meta`（只有 `kind` / `recovery` / `retryable`）。
   `inspect_evidence` / `list_evidence` 属于导航工具，不写证据库（避免自我引用）。
+- **VulnScanner 注入点来源显式化 + 重定向逐跳校验 + 结果可追溯**：
+  `scan_url` 的 `params` 键仍决定注入参数名，非空字符串值作为该参数的
+  原始值参与拼装（注入值为「原始值 + payload」）；新增独立入口
+  `param_names`（列表）只测指定参数名，与 `params` 取并集、互不覆盖；两者
+  都为空时仍退回默认 `q`。新增 `scan()` 返回 `VulnScanResult`（findings +
+  `VulnScanSummary`），汇总逐参数记录 `source` / `original_value` /
+  `payloads_tested` / `findings` / `blocked` / `redirect_capped` / `failed` /
+  `skipped_reason`；`scan_url` 保持返回 list，并在 `last_summary` 暴露同一
+  汇总。`VulnFinding` 新增可选 `param_source` / `original_value` /
+  `redirects`，`to_dict` 只在字段非空时追加，旧调用方看到的字典不变。
+- **VulnScanner 重定向逐跳 SSRF 复查**：`_get` 不再固定停在首个 3xx
+  （3xx 响应体通常为空，规则匹配必然落空），改为按 `_MAX_REDIRECTS`（5 跳，
+  与 `HeaderChecker` 同思路）逐跳跟随，每跳目标 host 都走
+  `host_is_unsafe(resolve=True)`；命中内网 / 环回 / 链路本地（含云元数据）
+  即停止跟随，该次探测标记为「被拦截」且不产生 finding——内网响应内容
+  不会进入证据。构造器新增 `allow_private_hosts` 开关，语义与
+  `HeaderChecker` 一致。跳数超限的探测同样不产出 finding，计入
+  `redirect_capped_count`。`PentestReport` 增加 `vuln_scan` 汇总与
+  `vuln_blocked_count` / `vuln_redirect_capped_count` / `vuln_failed_count` /
+  `vuln_skipped_params` 摘要字段，MCP `pentest_recon` 传递 `allow_private`。
 
 ### Fixed
 

@@ -1386,6 +1386,7 @@ def _patch_pentest_modules(
 ) -> None:
     """patch pentest 子模块，返回 mock 结果。headers 需为真实 dataclass 实例。"""
     from web_crawler.pentest import HeaderCheckResult
+    from web_crawler.pentest.vuln_scanner import VulnScanResult, VulnScanSummary
 
     fake_port_scanner = MagicMock()
     fake_port_scanner.scan.return_value = port_scan or []
@@ -1399,6 +1400,10 @@ def _patch_pentest_modules(
     fake_vuln.__enter__ = MagicMock(return_value=fake_vuln)
     fake_vuln.__exit__ = MagicMock(return_value=False)
     fake_vuln.scan_url.return_value = vulns or []
+    fake_vuln.scan.return_value = VulnScanResult(
+        findings=vulns or [],
+        summary=VulnScanSummary(url="http://x"),
+    )
     fake_header = MagicMock()
     fake_header.__enter__ = MagicMock(return_value=fake_header)
     fake_header.__exit__ = MagicMock(return_value=False)
@@ -1409,7 +1414,10 @@ def _patch_pentest_modules(
     monkeypatch.setattr("web_crawler.pentest.PortScanner", fake_port_scanner)
     monkeypatch.setattr("web_crawler.pentest.DirBruter", lambda: fake_dir_bruter)
     monkeypatch.setattr("web_crawler.pentest.SubdomainEnumerator", lambda: fake_subdomain)
-    monkeypatch.setattr("web_crawler.pentest.VulnScanner", lambda: fake_vuln)
+    monkeypatch.setattr(
+        "web_crawler.pentest.VulnScanner",
+        lambda **_kwargs: fake_vuln,  # allow_private_hosts 等关键字参数被 mock 忽略
+    )
     monkeypatch.setattr(
         "web_crawler.pentest.HeaderChecker",
         lambda **_kwargs: fake_header,  # allow_private_hosts 等关键字参数被 mock 忽略
