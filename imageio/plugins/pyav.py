@@ -176,9 +176,10 @@ examples to better understand how to use them.
 """
 
 import gc
+from collections import deque
 from fractions import Fraction
 from math import ceil
-from typing import Any, Dict, Generator, List, Optional, Tuple, Union
+from typing import Any, Deque, Dict, Generator, List, Optional, Tuple, Union
 
 import av
 import av.filter
@@ -293,6 +294,89 @@ def _get_frame_type(picture_type: int) -> str:
     return picture_types[picture_type]
 
 
+class _VideoFilter:
+    """Buffer the frames that pass through an ``av.filter.Graph``.
+
+    FFmpeg filters may lag, i.e., pushing a frame into the graph can yield zero,
+    one, or several frames, and some frames only become available after the
+    graph has been flushed. This wrapper keeps every frame the graph has
+    produced so far so that they can be handed out one at a time without
+    dropping (or duplicating) any of them.
+
+    """
+
+    def __init__(self, graph: "av.filter.Graph") -> None:
+        self._graph = graph
+        self._queue: Deque[av.VideoFrame] = deque()
+        self._eof = False
+        self._flushed = False
+
+    @property
+    def eof(self) -> bool:
+        """Whether the filter has signaled that it won't produce more frames."""
+
+        return self._eof
+
+    def __len__(self) -> int:
+        return len(self._queue)
+
+    def push(self, frame: av.VideoFrame) -> None:
+        """Send a frame into the filter and buffer everything it emits."""
+
+        if self._eof:
+            # the filter has already terminated, it won't accept more frames
+            return
+
+        self._graph.push(frame)
+        self._drain()
+
+    def flush(self) -> None:
+        """Signal EOF to the filter and buffer the frames it still holds."""
+
+        if self._flushed or self._eof:
+            return
+
+        self._flushed = True
+        try:
+            # send EOF in av>=9.0
+            self._graph.push(None)
+        except ValueError:  # pragma: no cover
+            # handle av<9.0, which doesn't accept None
+            pass
+        except av.error.EOFError:  # pragma: no cover
+            # the filter ended while it was being flushed
+            pass
+
+        self._drain()
+
+    def pop(self) -> Optional[av.VideoFrame]:
+        """Return the oldest buffered frame or ``None`` if there is none."""
+
+        if self._queue:
+            return self._queue.popleft()
+        return None
+
+    def pop_all(self) -> List[av.VideoFrame]:
+        """Return all currently buffered frames (oldest first) and empty the queue."""
+
+        frames = list(self._queue)
+        self._queue.clear()
+        return frames
+
+    def _drain(self) -> None:
+        """Move all frames the filter is currently willing to emit into the queue."""
+
+        while True:
+            try:
+                self._queue.append(self._graph.pull())
+            except av.error.BlockingIOError:
+                # filter has lag and needs more frames
+                return
+            except av.error.EOFError:
+                self._eof = True
+                return
+
+
 class PyAVPlugin(PluginV3):
     """Support for pyAV as backend.
 
@@ -329,9 +413,14 @@ class PyAVPlugin(PluginV3):
         self._container = None
         self._video_stream = None
         self._video_filter = None
+        # the arguments of the active filter, used to rebuild it (read) or to
+        # build it lazily from the first frame (write)
+        self._filter_args = None
 
         if request.mode.io_mode == IOMode.read:
             self._next_idx = 0
+            self._decoder_done = False
+            self._filter_out_idx = 0
             try:
                 if request._uri_type == 5:  # 5 is the value of URI_HTTP
                     # pyav should read from HTTP by itself. This enables reading
@@ -351,6 +440,7 @@ class PyAVPlugin(PluginV3):
                 raise InitializationError(msg) from None
         else:
             self.frames_written = 0
+            self._last_encoded_time = None
             file_handle = self.request.get_file()
             filename = getattr(file_handle, "name", None)
             extension = self.request.extension or self.request.format_hint
@@ -451,8 +541,18 @@ class PyAVPlugin(PluginV3):
         bidirectionaly predicted pictures. I lack test videos to write unit
         tests for this case.
 
-        Reading from an index other than ``...``, i.e. reading a single frame,
-        currently doesn't support filters that introduce delays.
+        When a filter is given, ``index`` refers to the filtered video, i.e.,
+        the ``index``-th frame that the filter emits. Filters that introduce a
+        delay (e.g. ``tpad`` or ``framestep``) are supported: frames that the
+        filter has already produced but not yet returned are kept and are
+        returned by subsequent reads instead of being dropped.
+
+        Because a filter with delay has to see the beginning of the video before
+        it can emit the first frame, reading with a filter decodes the video
+        from the start instead of seeking. Reading a single frame from deep
+        inside a long video is therefore slower when a filter is used. Passing
+        the same filter to consecutive reads reuses its state, so accessing the
+        frames in order only decodes each frame once.
 
         """
 
@@ -465,6 +565,9 @@ class PyAVPlugin(PluginV3):
             )
 
             self._container.seek(0)
+            self._decoder = self._container.decode(video=0)
+            self._next_idx = 0
+            self._decoder_done = False
             if not uses_filter and props.shape[0] != 0:
                 frames = np.empty(props.shape, dtype=props.dtype)
                 for idx, frame in enumerate(
@@ -517,14 +620,22 @@ class PyAVPlugin(PluginV3):
             variable_fps = bool(self._container.format.flags & 0x400)
             constant_framerate = not variable_fps
 
+        if filter_sequence is not None or filter_graph is not None:
+            # `index` refers to the filtered video, i.e., the index-th frame the
+            # filter emits. A filter with lag may need to see the beginning of
+            # the video before it emits anything, so decoding is driven by the
+            # filter instead of by `_seek`.
+            return self._unpack_frame(
+                self._read_filtered_frame(index, filter_sequence, filter_graph),
+                format=format,
+            )
+
+        self.set_video_filter(filter_sequence, filter_graph)
+
         # note: cheap for contiguous incremental reads
         self._seek(index, constant_framerate=constant_framerate)
         desired_frame = next(self._decoder)
         self._next_idx += 1
-
-        self.set_video_filter(filter_sequence, filter_graph)
-        if self._video_filter is not None:
-            desired_frame = self._video_filter.send(desired_frame)
 
         return self._unpack_frame(desired_frame, format=format)
 
@@ -581,25 +692,37 @@ class PyAVPlugin(PluginV3):
         self._video_stream.thread_type = thread_type or "SLICE"
         self._video_stream.codec_context.thread_count = thread_count
 
+        # iter always starts a new pass over the video, so a filter left over
+        # from a previous pass must not be reused with its stale buffer
+        self._video_filter = None
+        self._filter_out_idx = 0
         self.set_video_filter(filter_sequence, filter_graph)
+
+        if self._video_filter is None:
+            for frame in self._decoder:
+                self._next_idx += 1
+                yield self._unpack_frame(frame, format=format)
+            return
 
         for frame in self._decoder:
             self._next_idx += 1
+            self._video_filter.push(frame)
 
-            if self._video_filter is not None:
-                try:
-                    frame = self._video_filter.send(frame)
-                except StopIteration:
-                    break
+            for filtered_frame in self._video_filter.pop_all():
+                self._filter_out_idx += 1
+                yield self._unpack_frame(filtered_frame, format=format)
 
-            if frame is None:
-                continue
+            if self._video_filter.eof:
+                # the filter terminated, e.g., a `trim` or `select` filter
+                # decided that the video is over for it.
+                return
 
-            yield self._unpack_frame(frame, format=format)
-
-        if self._video_filter is not None:
-            for frame in self._video_filter:
-                yield self._unpack_frame(frame, format=format)
+        # the video is exhausted; flush the filter so that the frames it still
+        # holds are returned instead of being dropped
+        self._video_filter.flush()
+        for filtered_frame in self._video_filter.pop_all():
+            self._filter_out_idx += 1
+            yield self._unpack_frame(filtered_frame, format=format)
 
     def write(
         self,
@@ -978,24 +1101,78 @@ class PyAVPlugin(PluginV3):
             plane_array[...] = frame
 
         stream = self._video_stream
-        if stream.codec_context.time_base:
-            av_frame.time_base = stream.codec_context.time_base
+        # `frame.pts` is a frame counter, so its unit is 1/fps. The codec's time
+        # base is only available once it is opened; fall back to the stream's so
+        # that the filter graph keeps the timestamps in the right unit.
+        frame_time_base = stream.codec_context.time_base or stream.time_base
+        if frame_time_base:
+            av_frame.time_base = frame_time_base
         av_frame.pts = self.frames_written
         self.frames_written += 1
 
-        if self._video_filter is not None:
-            av_frame = self._video_filter.send(av_frame)
-            if av_frame is None:
-                return
+        if self._filter_args is not None:
+            if self._video_filter is None:
+                # the filter is built from the first frame so that its input
+                # matches the frame's size and format
+                self._video_filter = _VideoFilter(
+                    self._build_graph(*self._filter_args, frame=av_frame)
+                )
+            self._video_filter.push(av_frame)
+            for filtered_frame in self._video_filter.pop_all():
+                self._encode_frame(filtered_frame)
+            return
 
+        self._encode_frame(av_frame)
+
+    def _encode_frame(self, frame: av.VideoFrame) -> None:
+        """Send a frame to the encoder and mux the resulting packets.
+
+        Filters with delay emit frames with missing, negative, or duplicated
+        timestamps (``tpad``, e.g., emits the padded frames with a timestamp of
+        ``None``). Encoders and muxers reject such frames, so a frame whose
+        timestamp is not strictly increasing relative to the previously encoded
+        frame gets a fresh one, derived from the stream's time base. Valid
+        timestamps are left untouched, which preserves the timing change
+        introduced by filters such as ``framestep``.
+
+        """
+
+        stream = self._video_stream
         if not stream.codec_context.is_open:
             # the size comes from the frame that reaches the encoder, a filter
             # may have rescaled it. the first encode opens the codec, and after
             # that av refuses to change the size
-            stream.width = av_frame.width
-            stream.height = av_frame.height
+            stream.width = frame.width
+            stream.height = frame.height
 
-        for packet in stream.encode(av_frame):
+        if frame.pts is not None and frame.pts >= 0 and frame.time_base:
+            frame_time = float(frame.pts * frame.time_base)
+        else:
+            frame_time = None
+
+        if frame_time is None or (
+            self._last_encoded_time is not None
+            and frame_time <= self._last_encoded_time
+        ):
+            # re-stamp in the encoder's time base. `stream.time_base` changes
+            # once the codec is opened, so it is only a fallback.
+            time_base = stream.codec_context.time_base
+            if not time_base:
+                time_base = frame.time_base
+            if not time_base:
+                time_base = stream.time_base
+            if self._last_encoded_time is None:
+                frame_time = 0.0
+            else:
+                frame_time = self._last_encoded_time + 1.0 / float(
+                    stream.average_rate or 1
+                )
+            frame.time_base = time_base
+            frame.pts = int(round(frame_time / float(time_base)))
+
+        self._last_encoded_time = frame_time
+
+        for packet in stream.encode(frame):
             self._container.mux(packet)
 
     def set_video_filter(
@@ -1025,14 +1202,51 @@ class PyAVPlugin(PluginV3):
 
         Notes
         -----
-        Changing a filter graph with lag during reading or writing will
-        currently cause frames in the filter queue to be lost.
+        Calling this function repeatedly with the same ``filter_sequence`` and
+        ``filter_graph`` reuses the existing filter, so frames that it has
+        buffered are not lost. Passing different filters replaces the old one,
+        and the frames it still holds back are dropped.
 
         """
 
         if filter_sequence is None and filter_graph is None:
             self._video_filter = None
+            self._filter_args = None
+            self._filter_out_idx = 0
             return
+
+        if self._video_filter is not None and self._filter_args == (
+            filter_sequence,
+            filter_graph,
+        ):
+            # the same filter is already active; keep its buffered frames
+            return
+
+        self._filter_args = (filter_sequence, filter_graph)
+
+        if self.request.mode.io_mode == IOMode.write:
+            # the frame's size is only known once the first frame arrives, so
+            # the graph is built lazily in `write_frame`
+            self._video_filter = None
+            return
+
+        self._video_filter = _VideoFilter(
+            self._build_graph(filter_sequence, filter_graph)
+        )
+
+    def _build_graph(
+        self,
+        filter_sequence: List[Tuple[str, Union[str, dict]]] = None,
+        filter_graph: Tuple[dict, List] = None,
+        frame: av.VideoFrame = None,
+    ) -> "av.filter.Graph":
+        """Create and configure the filter graph.
+
+        If ``frame`` is given, the graph's input is set up to accept frames
+        like the given one. Otherwise the video stream is used as a template,
+        which is what reading requires.
+
+        """
 
         if filter_sequence is None:
             filter_sequence = list()
@@ -1046,7 +1260,15 @@ class PyAVPlugin(PluginV3):
 
         graph = av.filter.Graph()
 
-        previous_node = graph.add_buffer(template=self._video_stream)
+        if frame is None:
+            previous_node = graph.add_buffer(template=self._video_stream)
+        else:
+            previous_node = graph.add_buffer(
+                width=frame.width,
+                height=frame.height,
+                format=frame.format.name,
+                time_base=frame.time_base,
+            )
         for filter_name, argument in filter_sequence:
             if isinstance(argument, str):
                 current_node = graph.add(filter_name, argument)
@@ -1069,41 +1291,7 @@ class PyAVPlugin(PluginV3):
 
         graph.configure()
 
-        def video_filter():
-            # this starts a co-routine
-            # send frames using graph.send()
-            frame = yield None
-
-            # send and receive frames in "parallel"
-            while frame is not None:
-                graph.push(frame)
-                try:
-                    frame = yield graph.pull()
-                except av.error.BlockingIOError:
-                    # filter has lag and needs more frames
-                    frame = yield None
-                except av.error.EOFError:
-                    break
-
-            try:
-                # send EOF in av>=9.0
-                graph.push(None)
-            except ValueError:  # pragma: no cover
-                # handle av<9.0
-                pass
-
-            # all frames have been sent, empty the filter
-            while True:
-                try:
-                    yield graph.pull()
-                except av.error.EOFError:
-                    break  # EOF
-                except av.error.BlockingIOError:  # pragma: no cover
-                    # handle av<9.0
-                    break
-
-        self._video_filter = video_filter()
-        self._video_filter.send(None)
+        return graph
 
     @property
     def container_metadata(self):
@@ -1248,16 +1436,90 @@ class PyAVPlugin(PluginV3):
         stream = self._video_stream
 
         if self._video_filter is not None:
-            # flush encoder
-            for av_frame in self._video_filter:
-                if not stream.codec_context.is_open:
-                    stream.width = av_frame.width
-                    stream.height = av_frame.height
-                for packet in stream.encode(av_frame):
-                    self._container.mux(packet)
+            # flush the filter so that all frames it still holds are encoded
+            # before the encoder itself is flushed
+            self._video_filter.flush()
+            for av_frame in self._video_filter.pop_all():
+                self._encode_frame(av_frame)
             self._video_filter = None
+        self._filter_args = None
 
         # flush stream
         for packet in stream.encode():
             self._container.mux(packet)
         self._video_stream = None
+
+    def _rewind(self) -> None:
+        """Restart decoding from the first frame of the video."""
+
+        self._container.seek(0)
+        self._decoder = self._container.decode(video=0)
+        self._next_idx = 0
+        self._decoder_done = False
+
+    def _read_filtered_frame(
+        self,
+        index: int,
+        filter_sequence: List[Tuple[str, Union[str, dict]]] = None,
+        filter_graph: Tuple[dict, List] = None,
+    ) -> av.VideoFrame:
+        """Return the ``index``-th frame emitted by the given filter.
+
+        Frames that the filter has already produced but not yet returned are
+        buffered, so consecutive calls return the frames in the order the filter
+        emits them without duplicates or gaps. A filter that introduces a delay
+        is flushed once the video is exhausted so that the frames it holds back
+        are returned too.
+
+        ``index`` refers to the filtered video, i.e., the index-th frame the
+        filter emits. Reading the same index again returns the same frame.
+
+        """
+
+        filter_args = (filter_sequence, filter_graph)
+        if self._video_filter is None or self._filter_args != filter_args:
+            # a new filter has to see the video from the beginning, otherwise
+            # its delay would be primed with the middle of the file
+            self._rewind()
+            self._filter_out_idx = 0
+            self.set_video_filter(filter_sequence, filter_graph)
+        elif index < self._filter_out_idx:
+            # a filter with lag can't be rewound, so we have to start over
+            self._rewind()
+            self._filter_out_idx = 0
+            self._video_filter = None
+            self.set_video_filter(*filter_args)
+
+        # replay frames the filter has already produced
+        while self._filter_out_idx < index and len(self._video_filter) > 0:
+            self._video_filter.pop()
+            self._filter_out_idx += 1
+
+        # drive the filter until it emits the requested frame
+        while True:
+            if len(self._video_filter) > 0:
+                frame = self._video_filter.pop()
+                self._filter_out_idx += 1
+                if self._filter_out_idx - 1 == index:
+                    return frame
+                continue
+
+            if self._video_filter.eof:
+                raise StopIteration
+
+            if self._decoder_done:
+                # the video is exhausted; flush the frames the filter still
+                # holds back and hand them out one at a time
+                self._video_filter.flush()
+                if len(self._video_filter) == 0:
+                    raise StopIteration
+                continue
+
+            try:
+                decoded = next(self._decoder)
+            except StopIteration:
+                self._decoder_done = True
+                continue
+
+            self._next_idx += 1
+            self._video_filter.push(decoded)

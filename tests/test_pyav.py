@@ -638,3 +638,265 @@ def test_lagging_video_stream(test_images):
     if not output.poll(timeout=5):
         proc.kill()
         raise TimeoutError("Test Subprocess failed to respond in time.")
+
+
+def _write_test_video(path: Path, n_frames: int = 12, size: int = 32, fps: int = 10):
+    """Write a small, locally generated, gradient video and return its frames."""
+
+    frames = np.zeros((n_frames, size, size, 3), dtype=np.uint8)
+    for idx in range(n_frames):
+        frames[idx, ...] = idx * (255 // max(n_frames, 1))
+
+    iio.imwrite(
+        path,
+        frames,
+        plugin="pyav",
+        codec="mpeg4",
+        fps=fps,
+        out_pixel_format="yuv420p",
+    )
+
+    # re-read to get the decoded frames; encoding is lossy, so comparing
+    # against the re-read frames keeps the tests independent of the codec
+    return iio.imread(path, plugin="pyav")
+
+
+def test_delayed_filter_single_frame_read(tmp_path):
+    # `tpad` prepends frames, so the filter holds frames back and emits several
+    # frames for the very first input frame
+    in_path = tmp_path / "in.mp4"
+    expected = _write_test_video(in_path)
+
+    filter_sequence = [("tpad", "start=3")]
+
+    with iio.imopen(in_path, "r", plugin="pyav") as file:
+        # one frame at a time; this is the path that used to drop frames
+        actual = [
+            file.read(index=idx, filter_sequence=filter_sequence)
+            for idx in range(expected.shape[0] + 3)
+        ]
+
+    # the padded frames are blank, the rest must match the source video
+    assert np.allclose(actual[:3], 0)
+    assert np.allclose(actual[3:], expected)
+
+    # comparing against a bulk read makes sure that no frame was skipped or
+    # duplicated along the way
+    bulk = iio.imread(in_path, plugin="pyav", filter_sequence=filter_sequence)
+    assert np.allclose(actual, bulk)
+
+
+def test_delayed_filter_single_frame_read_no_skip_or_duplicate(tmp_path):
+    # `framestep` drops frames; the filter still emits them one at a time and
+    # the remaining frames must not be lost when reading them individually
+    in_path = tmp_path / "in.mp4"
+    expected = _write_test_video(in_path)
+
+    filter_sequence = [("framestep", "2")]
+
+    bulk = iio.imread(in_path, plugin="pyav", filter_sequence=filter_sequence)
+
+    with iio.imopen(in_path, "r", plugin="pyav") as file:
+        actual = [
+            file.read(index=idx, filter_sequence=filter_sequence)
+            for idx in range(bulk.shape[0])
+        ]
+
+    assert np.allclose(actual, bulk)
+    assert np.allclose(bulk, expected[::2][: bulk.shape[0]])
+
+    # reading past the end of the filtered video raises
+    with iio.imopen(in_path, "r", plugin="pyav") as file:
+        with pytest.raises(StopIteration):
+            file.read(index=bulk.shape[0], filter_sequence=filter_sequence)
+
+
+def test_delayed_filter_single_frame_read_random_access(tmp_path):
+    # a delayed filter can't be rewound, so a backwards jump has to restart it
+    in_path = tmp_path / "in.mp4"
+    _write_test_video(in_path)
+
+    filter_sequence = [("tpad", "start=2")]
+    bulk = iio.imread(in_path, plugin="pyav", filter_sequence=filter_sequence)
+
+    with iio.imopen(in_path, "r", plugin="pyav") as file:
+        assert np.allclose(file.read(index=5, filter_sequence=filter_sequence), bulk[5])
+        assert np.allclose(file.read(index=1, filter_sequence=filter_sequence), bulk[1])
+        assert np.allclose(file.read(index=1, filter_sequence=filter_sequence), bulk[1])
+        assert np.allclose(file.read(index=0, filter_sequence=filter_sequence), bulk[0])
+
+
+def test_delayed_filter_bulk_read(tmp_path):
+    in_path = tmp_path / "in.mp4"
+    expected = _write_test_video(in_path)
+
+    # a filter that pads the start adds frames
+    padded = iio.imread(
+        in_path,
+        plugin="pyav",
+        filter_sequence=[("tpad", "start=3")],
+    )
+    assert padded.shape[0] == expected.shape[0] + 3
+    assert np.allclose(padded[:3], 0)
+    assert np.allclose(padded[3:], expected)
+
+    # a filter that drops frames removes them
+    stepped = iio.imread(
+        in_path,
+        plugin="pyav",
+        filter_sequence=[("framestep", "2")],
+    )
+    assert stepped.shape[0] == int(np.ceil(expected.shape[0] / 2))
+    assert np.allclose(stepped, expected[::2])
+
+    # a filter that buffers the whole video only emits on EOF
+    reversed_frames = iio.imread(
+        in_path,
+        plugin="pyav",
+        filter_sequence=[("reverse", "")],
+    )
+    assert reversed_frames.shape[0] == expected.shape[0]
+    assert np.allclose(reversed_frames, expected[::-1])
+
+
+def test_delayed_filter_bulk_read_flushed_after_eof(tmp_path):
+    # `tpad stop=3` appends frames, which the filter can only emit once it has
+    # been flushed at the end of the video
+    in_path = tmp_path / "in.mp4"
+    expected = _write_test_video(in_path)
+
+    padded = iio.imread(
+        in_path,
+        plugin="pyav",
+        filter_sequence=[("tpad", "stop=3")],
+    )
+    assert padded.shape[0] == expected.shape[0] + 3
+    assert np.allclose(padded[: expected.shape[0]], expected)
+
+
+def test_delayed_filter_iter_flushes(tmp_path):
+    in_path = tmp_path / "in.mp4"
+    expected = _write_test_video(in_path)
+
+    # iter and imiter must yield the buffered frames too
+    iterated = np.stack(
+        list(
+            iio.imiter(
+                in_path,
+                plugin="pyav",
+                filter_sequence=[("tpad", "start=3")],
+            )
+        )
+    )
+    bulk = iio.imread(in_path, plugin="pyav", filter_sequence=[("tpad", "start=3")])
+
+    assert iterated.shape == bulk.shape
+    assert np.allclose(iterated, bulk)
+    assert iterated.shape[0] == expected.shape[0] + 3
+
+
+def test_delayed_filter_write_flushes(tmp_path):
+    in_path = tmp_path / "in.mp4"
+    frames = _write_test_video(in_path)
+
+    # `tpad` prepends frames; they must be flushed into the container on close
+    out_path = tmp_path / "padded.mp4"
+    iio.imwrite(
+        out_path,
+        frames,
+        plugin="pyav",
+        codec="mpeg4",
+        fps=10,
+        filter_sequence=[("tpad", "start=3")],
+    )
+
+    actual = iio.imread(out_path, plugin="pyav")
+    assert actual.shape == (frames.shape[0] + 3,) + frames.shape[1:]
+    assert actual.shape[0] == frames.shape[0] + 3
+
+
+def test_delayed_filter_write_flushes_tail(tmp_path):
+    in_path = tmp_path / "in.mp4"
+    frames = _write_test_video(in_path)
+
+    # `tpad stop=3` appends frames that only become available at flush time
+    out_path = tmp_path / "padded_tail.mp4"
+    iio.imwrite(
+        out_path,
+        frames,
+        plugin="pyav",
+        codec="mpeg4",
+        fps=10,
+        filter_sequence=[("tpad", "stop=3")],
+    )
+
+    actual = iio.imread(out_path, plugin="pyav")
+    assert actual.shape[0] == frames.shape[0] + 3
+
+
+def test_delayed_filter_write_drops_frames(tmp_path):
+    in_path = tmp_path / "in.mp4"
+    frames = _write_test_video(in_path)
+
+    # `framestep` drops frames; the container must contain the remaining ones
+    out_path = tmp_path / "stepped.mp4"
+    iio.imwrite(
+        out_path,
+        frames,
+        plugin="pyav",
+        codec="mpeg4",
+        fps=10,
+        filter_sequence=[("framestep", "2")],
+    )
+
+    actual = iio.imread(out_path, plugin="pyav")
+    assert actual.shape[0] == int(np.ceil(frames.shape[0] / 2))
+
+
+def test_delayed_filter_write_bytes(tmp_path):
+    in_path = tmp_path / "in.mp4"
+    frames = _write_test_video(in_path)
+
+    # writing to `<bytes>` flushes immediately; the returned bytes must contain
+    # the padded frames as well
+    encoded = iio.imwrite(
+        "<bytes>",
+        frames,
+        extension=".mp4",
+        plugin="pyav",
+        codec="mpeg4",
+        fps=10,
+        filter_sequence=[("tpad", "start=3")],
+    )
+
+    assert isinstance(encoded, bytes)
+    actual = iio.imread(encoded, plugin="pyav", extension=".mp4")
+    assert actual.shape[0] == frames.shape[0] + 3
+
+
+def test_delayed_filter_write_close_flushes(tmp_path):
+    # the same as above, but using the procedural API and an explicit close
+    in_path = tmp_path / "in.mp4"
+    frames = _write_test_video(in_path)
+
+    out_path = tmp_path / "procedural.mp4"
+    with iio.imopen(out_path, "w", plugin="pyav", extension=".mp4") as file:
+        file.init_video_stream("mpeg4", fps=10)
+        file.set_video_filter(filter_sequence=[("tpad", "start=2")])
+        for frame in frames:
+            file.write_frame(frame)
+
+    actual = iio.imread(out_path, plugin="pyav")
+    assert actual.shape[0] == frames.shape[0] + 2
+
+
+def test_no_filter_read_unchanged(tmp_path):
+    # the fix must not alter the no-filter code path
+    in_path = tmp_path / "in.mp4"
+    expected = _write_test_video(in_path)
+
+    assert np.allclose(iio.imread(in_path, plugin="pyav"), expected)
+
+    with iio.imopen(in_path, "r", plugin="pyav") as file:
+        for idx in range(expected.shape[0]):
+            assert np.allclose(file.read(index=idx), expected[idx])
