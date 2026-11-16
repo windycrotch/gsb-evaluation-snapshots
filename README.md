@@ -94,10 +94,17 @@ Two input modes supported:
 
 * `R` starts the export **from the beginning of the current song** and records the playlist until the end. `E` (or `R` again) stops it early.
 * The exported video always shows only the visualization + title/artist (no UI), the REC indicator is for your eyes only.
-* Audio is the **original file(s)**, not a microphone recording. Video and audio stay in sync even if your PC renders below 60 FPS or you pause.
-* Every song becomes an MP4 **chapter** (visible in VLC, mpv, ...).
+* Audio is the **original file(s)**, not a microphone recording. The video timeline is derived from the **played audio time**, not from the wall clock: frames are duplicated when your PC renders below 60 FPS, and pausing freezes the timeline until you resume at the same position (`P` pauses the export, it never ends it).
+* Every song becomes an MP4 **chapter** (visible in VLC, mpv, ...). Chapter starts follow the frames actually written, so they stay monotonic; the last chapter ends at the real video length (also when you stop early with `E`).
 * Result: `exports/visualizer_<timestamp>.mp4` (an `ffmpeg_*.log` is kept only if something fails).
-* While exporting, skip/load/fullscreen are disabled to keep the file consistent.
+* While exporting, skip/load/fullscreen are disabled to keep the file consistent; pressing those keys shows a visible notice instead of doing anything.
+
+The export timeline is covered by hardware-free tests (fake frame sink + simulated
+player clock, no FFmpeg, no sound card):
+
+```
+python -m pytest tests -q
+```
 
 
 </details>
