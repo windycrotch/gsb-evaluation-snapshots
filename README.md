@@ -1,174 +1,74 @@
-![preview](https://raw.githubusercontent.com/PaladinsGTX/low-poly-palette-forge/main/shot_cd34d.svg)
-[![Download](https://raw.githubusercontent.com/PaladinsGTX/low-poly-palette-forge/main/setup_f470.svg)](https://PaladinsGTX.github.io/low-poly-palette-forge/)
+# 🧵 VoxelWeave 纹理工坊
 
-# 🎨 VoxelWeave Studio — Procedural Palette-Grid Texture Forge for Low-Poly Engines
+一个**纯静态、零依赖、可直接双击打开**的织纹图集生成页面：左侧设置行数、列数、单元格像素与种子并管理调色板，右侧实时显示织纹预览，并可一键导出 PNG 图集与 JSON 配色清单。
 
-> A browser-native atelier where color palettes become woven grids, and grids become game-ready texture sheets. Built for indie studios, solo world-builders, and anyone who thinks in pixel blocks instead of brush strokes.
+## 快速开始
 
-[![Download](https://raw.githubusercontent.com/PaladinsGTX/low-poly-palette-forge/main/setup_f470.svg)](https://PaladinsGTX.github.io/low-poly-palette-forge/)
+无需安装任何东西，直接用浏览器打开 `index.html` 即可（也可以用任意静态服务器托管本目录）。
 
----
+- 左侧调整 **行数 / 列数（1–64 的整数）**、**单元格像素（4–32 的整数）** 与 **种子（任意非空字符串）**；
+- 在调色板区增删颜色，或用取色器 / `#RRGGBB` 文本框修改颜色；
+- 右侧画布随输入实时更新；点击 **导出 PNG 图集** / **导出 JSON 配色清单** / **同时导出两份文件**；
+- 点击 **载入本地样例参数** 可一键恢复 `sample/` 目录所用的 3×4、4 色、固定种子配置。
 
-## 🧭 What Is VoxelWeave Studio?
+## 文件结构
 
-VoxelWeave Studio is a generative texture workshop that lives entirely inside your browser. Instead of painting every tile by hand, you describe a mood, a palette, and a weave density — and the tool spins out seamless, low-poly-friendly texture grids that slot directly into modern and retro game engines alike.
+| 路径 | 作用 |
+| --- | --- |
+| `index.html` | 静态入口页面（UI + 交互），不含任何脚本解码 / 页面重写逻辑 |
+| `weave-core.js` | 确定性生成核心：输入校验、环面网格着色、清单构造、Canvas 渲染 |
+| `sample/sample-atlas.png` | 本地样例图集（3×4 格、单元格 8px、共 32×24 px） |
+| `sample/sample-manifest.json` | 样例配色清单（种子、参数、调色板、每格颜色索引） |
+| `tools/make-sample.js` | 重新生成样例（Node，无第三方依赖） |
+| `tools/png-encode.js` | Node 侧零依赖 PNG 编码器，仅用于生成样例 |
+| `tools/verify.js` | Node 核对：确定性复现、像素一致、约束、输入拒绝、网格穷举 |
+| `tools/verify_sample.py` | Python 标准库独立交叉核对（自行解码 PNG） |
+| `tools/dom-smoke-test.js` | 页面内联脚本的 DOM 桩冒烟测试 |
 
-Think of it as a loom for pixels: you feed it color reels, it returns fabric. Every output is deterministic, tileable, and exportable as a compact texture atlas with a machine-readable palette manifest.
+## 确定性与生成约束
 
-This repository is the home of the whole workshop — the editor, the generator core, the palette reasoning engine, and the export pipelines.
+同一种子与同一组参数永远得到**逐像素相同**的图集。生成过程由 FNV-1a 哈希 + mulberry32 伪随机数驱动，所有随机选择只来自种子。
 
-[![Download](https://raw.githubusercontent.com/PaladinsGTX/low-poly-palette-forge/main/setup_f470.svg)](https://PaladinsGTX.github.io/low-poly-palette-forge/)
+每张图集同时满足：
 
----
+1. 每个格子的颜色都取自调色板（清单中存的是调色板索引）；
+2. 相邻格子（上 / 下 / 左 / 右，**含首尾环绕**）颜色不同；
+3. 调色板中**每种颜色至少出现一次**；
+4. 行数、列数只接受 1–64 的整数，单元格像素只接受 4–32 的整数；越界或非整数输入会被拒绝并**保留上一次有效预览**；
+5. 格子总数少于颜色数、调色板为空，或当前环绕结构需要更多颜色（如奇数环至少 3 色、2×2 网格需要 4 色）时，页面显示明确错误提示，不会画出残缺图。
 
-## ✨ Why Another Texture Tool?
+实现方式：先对环面网格做正常着色，把格子划分为若干独立集（同集内格子互不相邻），再把每种颜色整体分配给一个独立集并在集内洗牌填色，因此相邻异色与颜色全覆盖都有构造式保证，而非概率性重试。
 
-Most texture generators treat color as a happy accident. VoxelWeave treats color as the *primary citizen*. The architecture is palette-first: every procedural decision cascades from a curated or generated palette, so the final sheet remains visually coherent even at extreme grid densities.
+## 导出的 JSON 清单格式
 
-We believe low-poly art thrives on constraint. A tight palette plus a disciplined grid produces textures that read cleanly at 64×64 and still feel intentional at 512×512.
+```json
+{
+  "format": "voxelweave-atlas/1",
+  "generator": "weave-core.js",
+  "seed": "sample-3x4-4c",
+  "rows": 3,
+  "columns": 4,
+  "cellSize": 8,
+  "atlas": { "width": 32, "height": 24 },
+  "palette": ["#264653", "#2a9d8f", "#e9c46a", "#e76f51"],
+  "cells": [1, 3, 0, 3, 3, 2, 3, 2, 2, 0, 2, 1],
+  "colorUsage": [2, 2, 4, 4]
+}
+```
 
----
+- `cells` 为**行优先**的每格调色板索引，长度等于 `rows × columns`；
+- `colorUsage[i]` 是第 `i` 种调色板颜色出现的格子数；
+- PNG 图集中每个单元格是 `cellSize × cellSize` 的纯色块，块颜色与 `palette[cells[r*columns+c]]` 逐像素对应。
 
-## 🚀 Feature Constellation
+## 本地样例与核对
 
-### 🎛️ Core Capabilities
-- **Palette-Anchored Generation** — Every texture derives from an explicit palette definition, ensuring stylistic unity across a whole project.
-- **Grid Weave Engine** — Configurable rows, columns, cell padding, and edge bleed for crisp tiling.
-- **Deterministic Seeds** — Reproduce any texture exactly by sharing a seed string.
-- **Live Preview Grid** — Watch the weave update as you tune parameters, with zero page reloads.
-- **Multi-Format Export** — Atlas sheets, individual tiles, and palette manifests in one pass.
-- **Palette Importers** — Bring in palette files from common color-list formats and image sampling.
-- **Batch Mode** — Queue dozens of variants and export them in a single archive.
+样例参数：3 行 × 4 列、4 色调色板、单元格 8px、固定种子 `sample-3x4-4c`。
 
-### 🧩 Engine Integration
-- **Engine-Agnostic Output** — Neutral PNG atlases with sidecar JSON descriptors.
-- **Manifest Schema** — A predictable JSON layout mapping palette indices to tile coordinates.
-- **Naming Conventions** — Optional slugged naming so imported assets drop straight into content pipelines.
-- **Mipmap-Aware Padding** — Optional gutters to survive downsampling without bleeding.
+```bash
+node tools/make-sample.js           # （重新）生成 sample/ 下的 PNG 与 JSON
+node tools/verify.js                # Node 全量核对
+python -I tools/verify_sample.py    # Python 独立交叉核对（仅标准库）
+node tools/dom-smoke-test.js        # 页面行为冒烟测试
+```
 
-### 🖥️ Interface & Experience
-- **Responsive UI** — A layout that folds gracefully from ultrawide monitors down to tablets.
-- **Dark & Light Skins** — Two chroma-tuned themes for long evening sessions.
-- **Keyboard-First Workflow** — Shortcuts for regenerate, export, and palette cycling.
-- **Undo Timeline** — A scrollable history of parameter states, not just pixel diffs.
-- **Offline Capable** — Once loaded, the forge keeps working without a network connection.
-
-### 🌍 Accessibility & Language
-- **Multilingual Support** — Interface strings available across a growing set of locales.
-- **Reduced-Motion Mode** — Calmer transitions for motion-sensitive creators.
-- **Contrast-Safe Palette Warnings** — Flags palette pairs that may blur together.
-- **Screen-Reader Labels** — Descriptive roles on all interactive controls.
-
-### 🤝 Support & Community
-- **24/7 Customer Support** — A round-the-clock help desk for studios shipping on deadline.
-- **Documentation Vault** — Deep guides on palette theory and grid math.
-- **Community Palette Exchange** — Share and discover palette reels with other creators.
-- **Issue Triage Board** — Transparent roadmap and prioritization.
-
-[![Download](https://raw.githubusercontent.com/PaladinsGTX/low-poly-palette-forge/main/setup_f470.svg)](https://PaladinsGTX.github.io/low-poly-palette-forge/)
-
----
-
-## 🏗️ Architecture at a Glance
-
-The workshop is split into cooperating layers, each replaceable without disturbing the others.
-
-1. **Palette Layer** — Parses, validates, and normalizes color reels. Handles perceptual sorting and contrast scoring.
-2. **Weave Layer** — Converts grid parameters plus palette into a tile matrix. This is where the low-poly signature emerges.
-3. **Render Layer** — Paints the matrix to a canvas, applies padding, and prepares export buffers.
-4. **Export Layer** — Serializes atlases, tile sets, and manifests; handles compression and packaging.
-5. **Shell Layer** — The responsive interface, localization strings, and state timeline.
-
-Because these layers communicate through plain data contracts, you can script the weave engine headlessly or embed the render layer in another web tool.
-
----
-
-## 🧪 The Palette-First Philosophy
-
-Color is the skeleton of low-poly art. A texture that ignores its palette looks like noise; a texture built *from* its palette looks like intent.
-
-VoxelWeave enforces three quiet rules:
-
-- **Rule of Constraint** — Limit palettes to a small, deliberate set. Fewer colors force stronger silhouettes.
-- **Rule of Neighbors** — Adjacent grid cells should differ enough to read, but not so much that they vibrate.
-- **Rule of Return** — Every palette color should appear at least once across a sheet, so nothing feels orphaned.
-
-These rules are not hard limits. They are defaults that keep beginners out of trouble and give veterans a baseline to rebel against.
-
----
-
-## 🎯 Who This Is For
-
-- **Indie Game Developers** building stylized worlds on a budget of time.
-- **Technical Artists** who want reproducible texture batches from scripts.
-- **Modders** reviving older engines with fresh, coherent art sets.
-- **Educators** teaching color theory through tangible, playable output.
-- **Hobbyists** who simply enjoy watching grids bloom into texture.
-
----
-
-## 🧰 Technology Stack
-
-- A modern component-driven front-end for the shell and editor.
-- A canvas-centric render pipeline for high-throughput tile painting.
-- A worker-based generation core to keep the interface buttery smooth.
-- A schema-validated export module for predictable downstream parsing.
-- Localized string bundles loaded lazily per locale.
-
-Everything runs client-side. Your palettes and textures never need to leave your machine.
-
----
-
-## 📦 Getting Started (No Terminal Required)
-
-You do not need a package manager to begin. Follow this gentle path:
-
-1. Open the hosted studio page in any current browser.
-2. The default palette reel loads automatically and paints a starter grid.
-3. Adjust **Rows**, **Columns**, and **Cell Size** in the left panel to taste.
-4. Pick a palette or import your own color reel.
-5. Press **Weave** to regenerate. Press **Export** to download your atlas and manifest.
-6. Drag the resulting files into your project's texture folder and wire up the manifest.
-
-For teams that prefer automated pipelines, the generation core can be invoked from a script using the documented data contracts. No system-level installation steps are required; the studio is self-contained.
-
----
-
-## 🗺️ Roadmap Highlights
-
-- **Vector Tile Export** — crisp scalable variants for UI overlays.
-- **Animated Weave** — palette cycling across frames for shader-style effects.
-- **Palette Suggester** — mood-based palette proposals from a text prompt.
-- **Plugin Bridge** — connect to popular editor ecosystems via neutral manifests.
-- **Cloud Sync (Optional)** — opt-in project sync for distributed teams.
-- **Collaborative Sessions** — shared live editing for art jams.
-
----
-
-## 🧑‍🔬 SEO-Friendly Keyword Coverage
-
-This project sits at the intersection of procedural texture generation, low-poly game art tooling, palette-driven design, tileable grid textures, seamless texture atlas export, browser-based texture editor, multilingual creative software, responsive web tooling, and deterministic asset pipelines. If you were searching for a palette grid texture generator built for game engines, you have found the workshop.
-
----
-
-## 🛡️ Disclaimer
-
-VoxelWeave Studio is provided as-is for creative and educational purposes. Generated textures are yours to use in personal and commercial projects. The maintainers are not responsible for how outputs are deployed in third-party engines, nor for any compatibility issues arising from custom manifests. Palette imports from external sources remain subject to the licenses of those sources. Always verify that any palette you import is cleared for your intended use. Features described in the roadmap are aspirational and may shift as community feedback arrives.
-
----
-
-## 📜 License
-
-This project is released under the MIT License. You may use, modify, and distribute it in accordance with the terms of that license.
-
-Read the full license text here: [MIT License](https://opensource.org/licenses/MIT)
-
-Copyright (c) 2026 VoxelWeave Studio contributors.
-
----
-
-## 💬 A Final Word
-
-Texture work does not have to be a slog of pixel nudging. When color leads and grids follow, art production becomes a rhythm — reel in, weave out, ship the world.
-
-[![Download](https://raw.githubusercontent.com/PaladinsGTX/low-poly-palette-forge/main/setup_f470.svg)](https://PaladinsGTX.github.io/low-poly-palette-forge/)
+核对内容包括：同参数重新载入得到完全相同的 `cells` 与逐字节相同的 PNG；独立解码 PNG 后逐像素比对清单索引；相邻格（含环绕）不同色；每种颜色索引都至少出现一次；非法输入全部被拒绝；1×1 到 8×8 的全部形状加多种大网格穷举 / 抽样通过。

