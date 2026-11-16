@@ -61,6 +61,7 @@ export class SimplePlayer extends HTMLElement {
   #optimisticPlaybackState: PlaybackState = null;
   #videoLoadAttempt = 0;
   #videoRetryTimer = 0;
+  #sourceGeneration = 0;
   #controlsHideTimer = 0;
   #loadingStateTimer = 0;
   #initialProgressSettleTimer = 0;
@@ -314,6 +315,10 @@ export class SimplePlayer extends HTMLElement {
     }
 
     this.#syncAutoplayState();
+    // src can change while the element is disconnected, when attribute
+    // callbacks are intentionally inert. Reconcile here so a reconnect never
+    // resumes the previous source.
+    if (this.#videoSourceLoaded && this.#video.dataset.src !== this.src) this.#resetSource();
     this.#setupLazyLoading();
     this.#syncOptionalControls();
     this.#syncTimeVisibility();
@@ -1141,11 +1146,15 @@ export class SimplePlayer extends HTMLElement {
     this.#initialProgressSettleTimer = window.setTimeout(this.#finishInitialProgressSettle, this.#initialProgressSettleDelay);
   }
 
-  async #hydrateVideoSource() {
+  async #hydrateVideoSource(sourceOverride?: string) {
     if (this.#videoSourceLoaded) return;
 
-    const source = this.#video.dataset.src || this.src;
+    const source = sourceOverride ?? this.#video.dataset.src ?? this.src;
     if (!source) return;
+
+    // Retries pass their original source explicitly; if the src attribute moved
+    // on while the retry was queued, this hydration must not touch the video.
+    if (sourceOverride !== undefined && !this.#isCurrentSource(source)) return;
 
     this.#clearVideoRetryTimer();
     this.#clearFirstFrameFallbackTimer();
@@ -1165,6 +1174,10 @@ export class SimplePlayer extends HTMLElement {
     if (this.#video.autoplay && this.#video.muted) {
       await this.#video.play().catch(() => undefined);
     }
+  }
+
+  #isCurrentSource(source: string) {
+    return (this.#video.dataset.src || this.src) === source;
   }
 
   #isLoopBoundaryBlip() {
@@ -1273,10 +1286,21 @@ export class SimplePlayer extends HTMLElement {
   }
 
   #retryVideoLoad() {
-    if (this.#videoLoadAttempt >= this.#maxVideoLoadAttempts || this.#videoRetryTimer) return;
+    if (this.#videoRetryTimer) return;
+    if (this.#videoLoadAttempt >= this.#maxVideoLoadAttempts) return;
+
+    const source = this.#video.dataset.src || this.src;
+    if (!source) return;
+
+    const generation = this.#sourceGeneration;
 
     this.#videoRetryTimer = window.setTimeout(() => {
       this.#videoRetryTimer = 0;
+      // A src change (or disconnect) invalidates this retry. Bail out instead of
+      // letting a stale failure replace the source the user just selected.
+      if (generation !== this.#sourceGeneration) return;
+      if ((this.#video.dataset.src || this.src) !== source) return;
+
       this.#clearFirstFrameFallbackTimer();
       this.#videoSourceLoaded = false;
       this.#hasDecodedFirstFrame = false;
@@ -1292,7 +1316,7 @@ export class SimplePlayer extends HTMLElement {
 
       this.#video.removeAttribute('src');
       this.#video.load();
-      void this.#hydrateVideoSource();
+      void this.#hydrateVideoSource(source);
     }, this.#videoRetryDelay);
   }
 
@@ -1413,6 +1437,11 @@ export class SimplePlayer extends HTMLElement {
   }
 
   #holdPausedVisualProgress() {
+    if (!this.#videoSourceLoaded || this.#video.error) {
+      this.#pausedVisualProgressTime = null;
+      return;
+    }
+
     if (!Number.isFinite(this.#video.duration) || this.#video.duration <= 0) {
       this.#pausedVisualProgressTime = null;
       return;
@@ -1425,6 +1454,12 @@ export class SimplePlayer extends HTMLElement {
   }
 
   #freezeRenderedProgressForPause() {
+    if (!this.#videoSourceLoaded || this.#video.error) {
+      this.#clearPausedVisualProgress();
+      this.#updateProgress(0);
+      return;
+    }
+
     if (!Number.isFinite(this.#video.duration) || this.#video.duration <= 0) {
       this.#pauseFrozenProgressPercent = null;
       this.#holdPausedVisualProgress();
@@ -1450,6 +1485,7 @@ export class SimplePlayer extends HTMLElement {
   }
 
   #getVisualProgressTime() {
+    if (!this.#videoSourceLoaded || this.#video.error) return 0;
     if (!Number.isFinite(this.#video.duration) || this.#video.duration <= 0) return this.#video.currentTime || 0;
     if (this.#isScrubPreviewLocked()) return this.#scrubTargetTime;
     if (this.#pausedVisualProgressTime !== null) return this.#pausedVisualProgressTime;
@@ -1564,6 +1600,19 @@ export class SimplePlayer extends HTMLElement {
   }
 
   #updateProgress(time = this.#getVisualProgressTime()) {
+    // A failed source (or one that has not been hydrated yet) must not keep
+    // reporting its previous duration/progress to assistive tech.
+    if (!this.#videoSourceLoaded || this.#video.error) {
+      this.#lastRenderedProgressTime = 0;
+      this.#setProgressVisual(0);
+      this.#progressTrack.setAttribute('aria-valuemin', '0');
+      this.#progressTrack.setAttribute('aria-valuemax', '0');
+      this.#progressTrack.setAttribute('aria-valuenow', '0');
+      this.#progressTrack.setAttribute('aria-valuetext', 'Loading video');
+      this.#syncPinnedTimeText(0);
+      return;
+    }
+
     const hasDuration = Number.isFinite(this.#video.duration) && this.#video.duration > 0;
     if (hasDuration && this.#pauseFrozenProgressPercent !== null) {
       const frozenTime = this.#pauseFrozenProgressPercent * this.#video.duration;
@@ -2830,7 +2879,13 @@ export class SimplePlayer extends HTMLElement {
   };
 
   #handleVideoError = () => {
+    // A late error from a previous source can arrive after the element has
+    // already been reset for a new one; ignore it rather than resetting the
+    // new source's first-frame state.
+    if (!this.#video.error) return;
+
     this.#optimisticPlaybackState = null;
+    this.#clearPausedVisualProgress();
     this.#hasDecodedFirstFrame = false;
     this.#hasPresentedFirstFrame = false;
     this.#firstFrameRequestPending = false;
@@ -2858,12 +2913,28 @@ export class SimplePlayer extends HTMLElement {
     );
   }
 
+  #cancelActiveScrubForSourceReset() {
+    this.#clearScrubLongPressTimer();
+    this.#releaseScrubPointer(this.#activeScrubPointerId);
+    this.#activeScrubPointerId = null;
+    this.#isTrackingScrub = false;
+    this.#isScrubbing = false;
+    this.#scrubWasPlaying = false;
+    this.#isProgressHoverPreviewing = false;
+    this.#player.classList.remove('is-scrubbing', 'is-progress-hovering');
+    this.#clearControlsCollision();
+  }
+
   #resetSource() {
     if (!this.#video) return;
+    this.#sourceGeneration += 1;
     this.#observer?.disconnect();
     this.#observer = null;
     this.#clearVideoRetryTimer();
+    this.#clearLoadingStateTimer();
     this.#clearInitialProgressSettleTimer();
+    this.#clearFirstFrameFallbackTimer();
+    this.#cancelActiveScrubForSourceReset();
     this.#videoSourceLoaded = false;
     this.#videoLoadAttempt = 0;
     this.#hasDecodedFirstFrame = false;
@@ -2872,16 +2943,29 @@ export class SimplePlayer extends HTMLElement {
     this.#firstFramePresentationPending = false;
     this.#firstFrameRequestToken += 1;
     this.#hasInitialProgressSettled = false;
+    this.#initialProgressEstimateUnlockAt = 0;
     this.#lastRenderedProgressTime = 0;
+    this.#visualProgressTime = 0;
+    this.#visualProgressUpdatedAt = performance.now();
     this.#clearPausedVisualProgress();
+    this.#isCommittedScrubPending = false;
+    this.#committedScrubWasPlaying = false;
+    this.#optimisticPlaybackState = null;
+    this.#isPlaybackBuffering = true;
     this.#hasAudioTrack = false;
     this.#hasCheckedAudioTrack = false;
     this.#syncOptionalControls();
     this.#clearVolumeInteractionState();
-    this.#isCommittedScrubPending = false;
-    this.#committedScrubWasPlaying = false;
-    this.#optimisticPlaybackState = null;
-    this.#player.classList.remove('has-loaded-once', 'has-visible-frame', 'is-progress-settling');
+    this.#player.classList.remove(
+      'has-loaded-once',
+      'has-visible-frame',
+      'is-progress-settling',
+      'is-progress-hovering',
+    );
+    this.#player.style.setProperty('--sp-hover-fill-inset', '100%');
+    this.#hasScrubReturnMarker = false;
+    this.#player.classList.remove('has-return-marker');
+    this.#player.style.setProperty('--sp-return-marker-left', '0px');
     this.#video.dataset.src = this.src;
     this.#video.pause();
     this.#video.removeAttribute('src');
@@ -2889,8 +2973,9 @@ export class SimplePlayer extends HTMLElement {
     this.#syncAutoplayState();
     this.#video.load();
     this.#setProgressVisual(0);
+    this.#updateProgress(0);
     this.#syncAudioControlState();
-    this.#syncVideoLoading();
+    this.#setVideoLoading(true, true);
     this.#syncVideoState();
   }
 }
