@@ -1,0 +1,54 @@
+{
+ "stream": {
+  "residentMB": 139.43,
+  "fullMB": 405,
+  "hierarchyMB": 6.61,
+  "levels": [
+   1,
+   0,
+   2,
+   3,
+   5,
+   3
+  ],
+  "rootLevels": [
+   10,
+   10,
+   11,
+   11,
+   10,
+   11
+  ],
+  "requests": 168
+ },
+ "mode": "clod",
+ "count": 96,
+ "errorPx": 2,
+ "budget": 0,
+ "frames": 300,
+ "tris": {
+  "min": 618482,
+  "median": 1200156,
+  "p95": 2276279,
+  "max": 2460671
+ },
+ "effPx": {
+  "min": 2,
+  "median": 2,
+  "p95": 2,
+  "max": 2
+ },
+ "selectMs": {
+  "min": 0.3,
+  "median": 0.9,
+  "p95": 1.8,
+  "max": 14.4
+ },
+ "frameMs": {
+  "min": 2.1,
+  "median": 7,
+  "p95": 21.3,
+  "max": 1036.6
+ },
+ "maxTriJumpPerFrame": 219073
+}

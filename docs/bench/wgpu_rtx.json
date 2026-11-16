@@ -1,0 +1,140 @@
+{
+ "name": "wgpu_rtx",
+ "gpu": "WebGPU: nvidia blackwell  ",
+ "res": "1920x1080",
+ "count": 96,
+ "rows": [
+  {
+   "dist": 8,
+   "errorPx": 2,
+   "budget": 0,
+   "tris": 2031026,
+   "ranges": 17000,
+   "selectMs": 0.7,
+   "cpuRenderMs": 0.7,
+   "frameMs": 7.5,
+   "p90": 10
+  },
+  {
+   "dist": 50,
+   "errorPx": 2,
+   "budget": 0,
+   "tris": 2050347,
+   "ranges": 17143,
+   "selectMs": 0.7,
+   "cpuRenderMs": 0.6,
+   "frameMs": 6.6,
+   "p90": 9
+  },
+  {
+   "dist": 300,
+   "errorPx": 2,
+   "budget": 0,
+   "tris": 252576,
+   "ranges": 2064,
+   "selectMs": 0.1,
+   "cpuRenderMs": 0.3,
+   "frameMs": 4.4,
+   "p90": 6.6
+  },
+  {
+   "dist": 8,
+   "errorPx": 4,
+   "budget": 0,
+   "tris": 1329528,
+   "ranges": 11118,
+   "selectMs": 0.5,
+   "cpuRenderMs": 0.6,
+   "frameMs": 6,
+   "p90": 9.1
+  },
+  {
+   "dist": 50,
+   "errorPx": 4,
+   "budget": 0,
+   "tris": 1070825,
+   "ranges": 9006,
+   "selectMs": 0.3,
+   "cpuRenderMs": 0.4,
+   "frameMs": 5.4,
+   "p90": 7.1
+  },
+  {
+   "dist": 300,
+   "errorPx": 4,
+   "budget": 0,
+   "tris": 15790,
+   "ranges": 137,
+   "selectMs": 0.3,
+   "cpuRenderMs": 0.3,
+   "frameMs": 4.6,
+   "p90": 7
+  },
+  {
+   "dist": 8,
+   "errorPx": 0.5,
+   "budget": 300000,
+   "tris": 300647,
+   "ranges": 2502,
+   "selectMs": 0.5,
+   "cpuRenderMs": 0.3,
+   "frameMs": 4.5,
+   "p90": 6.9
+  },
+  {
+   "dist": 50,
+   "errorPx": 0.5,
+   "budget": 300000,
+   "tris": 300233,
+   "ranges": 2465,
+   "selectMs": 0.2,
+   "cpuRenderMs": 0.3,
+   "frameMs": 4.6,
+   "p90": 6.9
+  },
+  {
+   "dist": 300,
+   "errorPx": 0.5,
+   "budget": 300000,
+   "tris": 300178,
+   "ranges": 2464,
+   "selectMs": 0.2,
+   "cpuRenderMs": 0.2,
+   "frameMs": 4.1,
+   "p90": 5
+  },
+  {
+   "dist": 8,
+   "errorPx": 0.5,
+   "budget": 1000000,
+   "tris": 1000061,
+   "ranges": 8373,
+   "selectMs": 0.8,
+   "cpuRenderMs": 0.3,
+   "frameMs": 5.5,
+   "p90": 7.5
+  },
+  {
+   "dist": 50,
+   "errorPx": 0.5,
+   "budget": 1000000,
+   "tris": 1000601,
+   "ranges": 8410,
+   "selectMs": 0.7,
+   "cpuRenderMs": 0.3,
+   "frameMs": 5.5,
+   "p90": 7.5
+  },
+  {
+   "dist": 300,
+   "errorPx": 0.5,
+   "budget": 1000000,
+   "tris": 1000604,
+   "ranges": 8421,
+   "selectMs": 1.2,
+   "cpuRenderMs": 0.3,
+   "frameMs": 5.5,
+   "p90": 7.1
+  }
+ ]
+}
