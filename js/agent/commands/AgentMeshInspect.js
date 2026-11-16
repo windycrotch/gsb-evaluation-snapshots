@@ -3,7 +3,7 @@ import { resolveTargets } from '../AgentUtils.js';
 import { AXES_NOTE, positionToThree, positionFromThree } from '../AgentAxes.js';
 
 const NAME = 'mesh.inspect';
-const INCLUDE = ['summary', 'islands', 'selection', 'vertices', 'edges', 'faces'];
+const INCLUDE = ['summary', 'islands', 'selection', 'vertices', 'edges', 'faces', 'repair'];
 const DEFAULT_LIMIT = 500;
 const MAX_LIMIT = 5000;
 const MAX_ISLANDS = 50;
@@ -407,11 +407,25 @@ export const meshInspectSpec = {
         for (const face of meshData.faces.values()) {
           if (!scope.faceInScope(face)) continue;
           const { normal, center } = faceNormalAndCenter(meshData, face);
-          items.push([face.id, [...face.vertexIds], fmt.vec(frame.dir(normal)), fmt.vec(frame.point(center))]);
+          // Tuple: [id, vertexIds, normal, center, isRepairFace] — the 5th entry is 1 for
+          // faces created by the manifold-repair fallback, 0 otherwise.
+          items.push([face.id, [...face.vertexIds], fmt.vec(frame.dir(normal)), fmt.vec(frame.point(center)), face.isRepairFace ? 1 : 0]);
         }
         items.sort((a, b) => a[0] - b[0]);
         result.faces = page(items, offset, limit);
       }
+    }
+
+    if (want.has('repair')) {
+      const repairFaceIds = [];
+      for (const face of meshData.faces.values()) {
+        if (face.isRepairFace) repairFaceIds.push(face.id);
+      }
+      repairFaceIds.sort((a, b) => a - b);
+      result.repair = {
+        repairFaceIds,
+        lastReport: object.userData?.lastRepairReport ?? meshData.repairReport ?? null,
+      };
     }
 
     return result;

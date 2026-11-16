@@ -3,6 +3,7 @@ import { MODES } from '../core/ModeManager.js';
 import { sceneOutlineSpec } from './commands/AgentSceneOutline.js';
 import { viewportCaptureSpec } from './commands/AgentViewportCapture.js';
 import { meshInspectSpec } from './commands/AgentMeshInspect.js';
+import { meshRepairReportSpec } from './commands/AgentMeshRepairReport.js';
 import { undoSpec } from './commands/AgentUndo.js';
 import { redoSpec } from './commands/AgentRedo.js';
 import { objectPickSpec } from './commands/AgentObjectPick.js';
@@ -62,6 +63,7 @@ export function registerAgentCommands(registry) {
   registry.define('scene.outline', sceneOutlineSpec);
   registry.define('viewport.capture', viewportCaptureSpec);
   registry.define('mesh.inspect', meshInspectSpec);
+  registry.define('mesh.repairReport', meshRepairReportSpec);
   registry.define('editor.undo', undoSpec);
   registry.define('editor.redo', redoSpec);
 

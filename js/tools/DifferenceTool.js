@@ -158,6 +158,7 @@ export class DifferenceTool {
       }
     } catch (err) {
       console.error('DifferenceTool failed:', err);
+      alert(`Difference failed: ${err?.message ?? err}`);
     } finally {
       this.endSession();
     }

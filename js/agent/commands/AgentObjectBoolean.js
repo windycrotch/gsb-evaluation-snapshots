@@ -111,15 +111,24 @@ function defineBooleanSpec({ command, summary, operandDescription, emptyMessage,
       const operandStats = meshStats(secondary);
 
       const beforeMeshData = structuredClone(primary.userData.meshData);
-      let resultMeshData;
+      let computed;
       try {
-        resultMeshData = await compute(primary, secondary);
+        computed = await compute(primary, secondary);
       } catch (error) {
+        // ManifoldRepairError means the repair fallback ran but still could not produce a
+        // valid manifold. Report the concrete reasons + repair report; never return empty.
+        const repairNote = error?.report
+          ? ` Repair was attempted (${error.report.weldedVerts} welded, ${error.report.removedFaces} ` +
+            `removed, ${error.report.filledHoles} filled, ${error.report.skippedHoles} skipped) but the mesh ` +
+            `is still invalid: ${(error.reasons ?? []).join('; ') || 'unknown reason'}.`
+          : '';
         throw new Error(
-          `${command}: the boolean failed (${error?.message ?? error}). Both meshes must be closed, ` +
-          'watertight solids without self-intersections. Nothing was changed.'
+          `${command}: the boolean failed (${error?.message ?? error}).${repairNote} ` +
+            'Both meshes must be closed, watertight solids without self-intersections. Nothing was changed.'
         );
       }
+      const resultMeshData = computed.resultMeshData;
+      const repairs = computed.repairs ?? [];
 
       scene.updateMatrixWorld(true);
       if (
@@ -135,7 +144,7 @@ function defineBooleanSpec({ command, summary, operandDescription, emptyMessage,
 
       const removed = [secondary, ...descendantsOf(secondary)].map(summarize);
 
-      editor.execute(createCommand(editor, primary, secondary, beforeMeshData, resultMeshData));
+      editor.execute(createCommand(editor, primary, secondary, beforeMeshData, resultMeshData, repairs));
 
       scene.updateMatrixWorld(true);
       editor.signals.objectChanged.dispatch();
@@ -148,6 +157,12 @@ function defineBooleanSpec({ command, summary, operandDescription, emptyMessage,
         },
         operand: { ...summarize(secondary), stats: operandStats },
         removedUuids: removed.map((entry) => entry.uuid),
+        // Observable repair fallback: one entry per auto-repaired operand, with the full
+        // report (counts, warnings, repair-added face ids). Empty when no repair was needed.
+        repairs: repairs.map((r) => ({
+          objectUuid: r.objectUuid,
+          report: r.report,
+        })),
       };
     },
   };

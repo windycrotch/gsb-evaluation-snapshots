@@ -160,6 +160,7 @@ export class IntersectTool {
       }
     } catch (err) {
       console.error('IntersectTool failed:', err);
+      alert(`Intersection failed: ${err?.message ?? err}`);
     } finally {
       this.endSession();
     }

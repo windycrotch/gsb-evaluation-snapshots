@@ -1,14 +1,31 @@
 import * as THREE from 'three';
-import { MeshData } from '../core/MeshData.js';
+import { MeshData, Face } from '../core/MeshData.js';
 
+export const DEFAULT_REPAIR_OPTIONS = {
+  weldEpsilon: 1e-6,
+  fixWinding: true,
+  fillHoles: true,
+  maxHoleFillEdges: 128,
+};
+
+/**
+ * Repair a (possibly non-manifold) MeshData so the Manifold WASM library can ingest it.
+ *
+ * Pipeline (order is part of the contract):
+ *   1. weld coincident vertices within `weldEpsilon`
+ *   2. remove degenerate faces (repeated verts / <3 verts) and duplicate faces
+ *   3. resolve non-manifold edges (edge shared by 3+ faces)
+ *   4. resolve non-manifold vertices (disjoint face fans are split into new vertices)
+ *   5. unify face winding
+ *   6. fill boundary loops; loops with more than maxHoleFillEdges edges are skipped + warned
+ *
+ * The returned MeshData preserves every original face id and gives brand-new repair faces
+ * non-colliding ids (maxOriginalId + 1, ...) flagged with `isRepairFace = true`.
+ *
+ * The returned report is also stored on `result.repairReport`.
+ */
 export function repairMeshData(meshData, options = {}) {
-  const opts = {
-    weldEpsilon: 1e-6,
-    fixWinding: true,
-    fillHoles: true,
-    maxHoleFillEdges: 128,
-    ...options,
-  };
+  const opts = { ...DEFAULT_REPAIR_OPTIONS, ...options };
 
   const report = {
     weldedVerts: 0,
@@ -18,6 +35,9 @@ export function repairMeshData(meshData, options = {}) {
     filledHoles: 0,
     skippedHoles: 0,
     warnings: [],
+    // Checkability: which faces are brand new vs. survivors of the input mesh.
+    repairFaceIds: [],
+    originalFaceIds: [],
   };
 
   let verts = [];
@@ -32,69 +52,221 @@ export function repairMeshData(meshData, options = {}) {
     faces.push({ id: faceId, vids: face.vertexIds.map(id => vidToIdx.get(id)) });
   }
 
-  // Weld
+  // 1. Weld
   const remap = weldVertices(verts, opts.weldEpsilon);
   for (let i = 0; i < remap.length; i++) if (remap[i] !== i) report.weldedVerts++;
   faces = faces.map(f => ({ id: f.id, vids: f.vids.map(i => remap[i]) }));
 
-  // Degenerate / duplicate faces
+  // 2. Degenerate / duplicate faces
   const beforeDedup = faces.length;
   faces = removeDegenerateFaces(faces);
   faces = removeDuplicateFaces(faces);
   report.removedFaces += beforeDedup - faces.length;
 
-  // Non-manifold edges
+  // 3. Non-manifold edges
   const beforeNME = faces.length;
   faces = resolveNonManifoldEdges(faces, report);
   report.removedFaces += beforeNME - faces.length;
 
-  // Non-manifold vertices
+  // 4. Non-manifold vertices
   ({ verts, faces } = resolveNonManifoldVertices(verts, faces, report));
 
-  // Winding
+  // 5. Winding
   if (opts.fixWinding) faces = fixWindingConsistency(verts, faces, report);
 
-  // Hole fill
+  // 6. Hole fill
   if (opts.fillHoles) faces = fillHoles(verts, faces, opts.maxHoleFillEdges, report);
 
-  // Compact & rebuild MeshData
+  if (faces.length === 0) {
+    report.warnings.push('Repair produced no faces; the mesh is empty.');
+  }
+
+  // Compact unused vertices while preserving the per-face id/repair flag.
   const usedSet = new Set(faces.flatMap(f => f.vids));
   const compact = new Map();
   const finalVerts = [];
-  for (const idx of usedSet) { compact.set(idx, finalVerts.length); finalVerts.push(verts[idx]); }
-  faces = faces.map(f => ({ id: f.id, vids: f.vids.map(i => compact.get(i)) }));
+  for (const idx of usedSet) {
+    compact.set(idx, finalVerts.length);
+    finalVerts.push(verts[idx]);
+  }
+  faces = faces.map(f => ({
+    id: f.id,
+    isRepairFace: !!f.isRepairFace,
+    vids: f.vids.map(i => compact.get(i)),
+  }));
 
-  const result = new MeshData();
-  const vertObjs = finalVerts.map(v => 
-    result.addVertex(new THREE.Vector3(v.x, v.y, v.z))
-  );
-  for (const f of faces) result.addFace(f.vids.map(i => vertObjs[i]));
-
-  // Determine safe IDs for brand new "repair" faces to avoid collisions
+  // Rebuild a MeshData with explicit face ids: original faces keep their ids, repair
+  // faces get fresh ids above every original id so they can never collide.
   let maxOriginalId = -1;
   for (const f of faces) {
-    if (f.id !== -1 && f.id > maxOriginalId) maxOriginalId = f.id;
+    if (!f.isRepairFace && f.id !== -1 && f.id > maxOriginalId) maxOriginalId = f.id;
   }
-
   let nextRepairId = maxOriginalId + 1;
 
+  const result = new MeshData();
+  const vertObjs = finalVerts.map(v =>
+    result.addVertex(new THREE.Vector3(v.x, v.y, v.z))
+  );
+
   for (const f of faces) {
-    const newFace = result.addFace(f.vids.map(i => vertObjs[i]));
-    
-    result.faces.delete(newFace.id);
-    
-    if (f.id !== -1 && f.id !== undefined) {
-      newFace.id = f.id;
+    const faceId = f.isRepairFace ? nextRepairId++ : f.id;
+    buildFaceWithId(result, faceId, f.vids.map(i => vertObjs[i]));
+    if (f.isRepairFace) {
+      result.faces.get(faceId).isRepairFace = true;
+      report.repairFaceIds.push(faceId);
     } else {
-      newFace.id = nextRepairId++;
-      newFace.isRepairFace = true;
+      report.originalFaceIds.push(faceId);
     }
-    
-    result.faces.set(newFace.id, newFace);
   }
 
+  result.syncIdCounters();
   result.repairReport = report;
   return result;
+}
+
+// Mirror of MeshData.addFace bookkeeping, but with an explicit id instead of nextFaceId++.
+function buildFaceWithId(meshData, faceId, vertices) {
+  const vIds = vertices.map(v => v.id);
+  const face = new Face(faceId, vIds);
+
+  meshData.faces.set(faceId, face);
+  meshData.faceKeyMap.set(meshData._getFaceKey(vIds), face);
+
+  const len = vIds.length;
+  for (let i = 0; i < len; i++) {
+    const v1 = vertices[i];
+    const v2 = vertices[(i + 1) % len];
+    const edge = meshData.addEdge(v1, v2);
+    face.edgeIds.add(edge.id);
+    edge.faceIds.add(faceId);
+  }
+  for (const v of vertices) v.faceIds.add(faceId);
+  return face;
+}
+
+/**
+ * WASM-free topological manifold check. Used to report repair failures honestly when
+ * the WASM module is unavailable, and as a fast precondition. It verifies the properties
+ * a 2-manifold triangle/polygon soup must satisfy:
+ *   - at least one face and every face has >=3 unique vertices
+ *   - every edge is used by exactly 2 faces
+ *   - every vertex's incident faces form a single connected fan (one link component)
+ * Self-intersection is NOT detectable here; WASM remains the final authority.
+ *
+ * Returns { valid: true } or { valid: false, reasons: string[] }.
+ */
+export function validateManifoldTopology(meshData) {
+  const reasons = [];
+
+  if (!meshData || meshData.faces.size === 0) {
+    return { valid: false, reasons: ['mesh has no faces'] };
+  }
+
+  for (const face of meshData.faces.values()) {
+    const ids = face.vertexIds;
+    if (ids.length < 3 || new Set(ids).size !== ids.length) {
+      reasons.push(`face ${face.id} is degenerate`);
+    }
+  }
+
+  const edgeFaces = new Map();
+  for (const face of meshData.faces.values()) {
+    const ids = face.vertexIds;
+    for (let i = 0; i < ids.length; i++) {
+      const a = ids[i];
+      const b = ids[(i + 1) % ids.length];
+      const key = a < b ? `${a},${b}` : `${b},${a}`;
+      if (!edgeFaces.has(key)) edgeFaces.set(key, []);
+      edgeFaces.get(key).push(face.id);
+    }
+  }
+
+  let boundary = 0;
+  for (const [key, faceIds] of edgeFaces) {
+    if (faceIds.length === 1) boundary++;
+    else if (faceIds.length > 2) reasons.push(`edge (${key}) is shared by ${faceIds.length} faces`);
+  }
+  if (boundary > 0) reasons.push(`mesh is open: ${boundary} boundary edge(s)`);
+
+  // Non-manifold vertex: the faces incident to one vertex split into several fans that still
+  // share that vertex but share no edge through it (a "pinch"). Separate closed components
+  // that were already split into distinct vertices are valid and are not flagged.
+  const vertFaces = new Map();
+  for (const face of meshData.faces.values()) {
+    for (const vi of face.vertexIds) {
+      if (!vertFaces.has(vi)) vertFaces.set(vi, []);
+      vertFaces.get(vi).push(face);
+    }
+  }
+  for (const [vi, fan] of vertFaces) {
+    if (fan.length < 2) continue;
+    if (countVertexFanComponents(vi, fan) > 1) {
+      reasons.push(`vertex ${vi} is a non-manifold pinch (disjoint face fans share the vertex)`);
+    }
+  }
+
+  return { valid: reasons.length === 0, reasons };
+}
+
+// Connected components of the faces incident to `vi`, where two faces are linked when they
+// share another vertex (i.e. an edge through vi). Self-contained so it works with real face ids.
+function countVertexFanComponents(vi, fanFaces) {
+  const neighborsOf = (face) => {
+    const around = new Set();
+    for (let i = 0; i < face.vertexIds.length; i++) {
+      if (face.vertexIds[i] !== vi) continue;
+      const n = face.vertexIds.length;
+      around.add(face.vertexIds[(i - 1 + n) % n]);
+      around.add(face.vertexIds[(i + 1) % n]);
+    }
+    return around;
+  };
+
+  const adj = new Map(fanFaces.map((f) => [f.id, []]));
+  for (let i = 0; i < fanFaces.length; i++) {
+    const aroundI = neighborsOf(fanFaces[i]);
+    for (let j = i + 1; j < fanFaces.length; j++) {
+      const aroundJ = neighborsOf(fanFaces[j]);
+      const linked = [...aroundJ].some((v) => aroundI.has(v));
+      if (linked) {
+        adj.get(fanFaces[i].id).push(fanFaces[j].id);
+        adj.get(fanFaces[j].id).push(fanFaces[i].id);
+      }
+    }
+  }
+
+  const visited = new Set();
+  let components = 0;
+  for (const face of fanFaces) {
+    if (visited.has(face.id)) continue;
+    components++;
+    const q = [face.id];
+    visited.add(face.id);
+    while (q.length) {
+      const cur = q.shift();
+      for (const nb of adj.get(cur)) {
+        if (!visited.has(nb)) {
+          visited.add(nb);
+          q.push(nb);
+        }
+      }
+    }
+  }
+  return components;
+}
+
+/** Human-readable one-line summary for UI / agent surfacing. */
+export function formatRepairReport(report) {
+  if (!report) return '';
+  const parts = [
+    `welded ${report.weldedVerts} vertex${report.weldedVerts === 1 ? '' : 's'}`,
+    `removed ${report.removedFaces} face${report.removedFaces === 1 ? '' : 's'}`,
+    `split ${report.splitVerts} vertex${report.splitVerts === 1 ? '' : 's'}`,
+    `flipped ${report.flippedFaces} face${report.flippedFaces === 1 ? '' : 's'}`,
+    `filled ${report.filledHoles} hole${report.filledHoles === 1 ? '' : 's'}`,
+    `skipped ${report.skippedHoles} hole${report.skippedHoles === 1 ? '' : 's'}`,
+  ];
+  return parts.join(', ');
 }
 
 function weldVertices(verts, epsilon) {
@@ -211,8 +383,8 @@ function resolveNonManifoldVertices(verts, faces, report) {
     }
 
   const newVerts = [...verts];
-  
-  const newFaces = faces.map(f => ({ id: f.id, vids: [...f.vids] }));
+
+  const newFaces = faces.map(f => ({ id: f.id, isRepairFace: !!f.isRepairFace, vids: [...f.vids] }));
 
   for (const [vi, fis] of vertFaces) {
     if (fis.length < 2) continue;
@@ -328,7 +500,7 @@ function fixWindingConsistency(verts, faces, report) {
       const toFace = new THREE.Vector3(
         fc.x - meshCentroid.x,
         fc.y - meshCentroid.y,
-        fc.z - meshCentroid.z,
+        fc.z - meshCentroid.z
       );
       score += (toFlip.has(fi) ? -1 : 1) * n.dot(toFace);
     }
@@ -342,41 +514,48 @@ function fixWindingConsistency(verts, faces, report) {
 
   report.flippedFaces = toFlip.size;
   return faces.map((f, i) =>
-    toFlip.has(i) ? { id: f.id, vids: [...f.vids].reverse() } : f
+    toFlip.has(i)
+      ? { id: f.id, isRepairFace: !!f.isRepairFace, vids: [...f.vids].reverse() }
+      : f
   );
 }
 
 function fillHoles(verts, faces, maxEdges, report) {
-  const edgeCount = new Map();
-  const edgeDirMap = new Map();
-
+  // Collect directed boundary half-edges. A manifold edge shared by two opposite-wound
+  // faces appears once in each direction; a boundary edge appears in one direction only.
+  const directed = new Map(); // "a,b" -> count
   for (let fi = 0; fi < faces.length; fi++) {
     const vids = faces[fi].vids, n = vids.length;
     for (let i = 0; i < n; i++) {
-      const a = vids[i], b = vids[(i+1) % n];
-      const key = a < b ? `${a},${b}` : `${b},${a}`;
-      edgeCount.set(key, (edgeCount.get(key) ?? 0) + 1);
-      edgeDirMap.set(key, { a, b });
+      const a = vids[i], b = vids[(i + 1) % n];
+      const key = `${a},${b}`;
+      directed.set(key, (directed.get(key) ?? 0) + 1);
     }
   }
 
-  const bAdj = new Map();
-  for (const [key, count] of edgeCount) {
-    if (count !== 1) continue;
-    const { a, b } = edgeDirMap.get(key);
-    bAdj.set(b, a);
+  // Boundary half-edge: its directed occurrence has no opposite counterpart.
+  const next = new Map();
+  for (const [key, count] of directed) {
+    const [a, b] = key.split(',').map(Number);
+    const opposite = directed.get(`${b},${a}`) ?? 0;
+    if (count > opposite) {
+      // Boundary edge oriented a -> b in the surviving face's winding.
+      next.set(a, b);
+    }
   }
 
+  // Walk boundary loops. The loop collected follows the face winding (outward normal);
+  // the cap must use the reversed order to wind oppositely.
   const holes = [];
   const visited = new Set();
-  for (const start of bAdj.keys()) {
+  for (const start of next.keys()) {
     if (visited.has(start)) continue;
     const loop = [];
     let cur = start;
-    while (!visited.has(cur) && bAdj.has(cur)) {
+    while (!visited.has(cur) && next.has(cur)) {
       visited.add(cur);
       loop.push(cur);
-      cur = bAdj.get(cur);
+      cur = next.get(cur);
     }
     if (cur === start && loop.length >= 3) holes.push(loop);
   }
@@ -385,11 +564,15 @@ function fillHoles(verts, faces, maxEdges, report) {
   for (const loop of holes) {
     if (loop.length > maxEdges) {
       report.skippedHoles++;
-      report.warnings.push(`Skipped hole with ${loop.length} boundary edges (limit: ${maxEdges})`);
+      report.warnings.push(
+        `Skipped hole with ${loop.length} boundary edges (limit: ${maxEdges})`
+      );
       continue;
     }
-    const tris = earClip(verts, loop);
-    for (const tri of tris) extra.push({ id: -1, vids: tri });
+    // Reverse so the cap normal points opposite the surrounding faces.
+    const cap = [...loop].reverse();
+    const tris = earClip(verts, cap);
+    for (const tri of tris) extra.push({ id: -1, isRepairFace: true, vids: tri });
     report.filledHoles++;
   }
 

@@ -160,6 +160,7 @@ export class UnionTool {
       }
     } catch (err) {
       console.error('UnionTool failed:', err);
+      alert(`Union failed: ${err?.message ?? err}`);
     } finally {
       this.endSession();
     }

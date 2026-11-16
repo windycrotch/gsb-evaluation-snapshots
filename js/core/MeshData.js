@@ -23,8 +23,12 @@ class Face {
     this.id = id;
     this.vertexIds = vertexIds;
     this.edgeIds = new Set();
+    // True for faces created by the manifold-repair fallback (hole fills).
+    this.isRepairFace = false;
   }
 }
+
+export { Vertex, Edge, Face };
 
 export class MeshData {
   constructor() {
@@ -269,12 +273,14 @@ export class MeshData {
       id: face.id,
       vertexIds: [...face.vertexIds],
       edgeIds: Array.from(face.edgeIds),
+      isRepairFace: !!face.isRepairFace,
     };
   }
 
   static rehydrateFace(data) {
     const face = new Face(data.id, [...data.vertexIds]);
     face.edgeIds = new Set(data.edgeIds);
+    face.isRepairFace = !!data.isRepairFace;
     return face;
   }
 

@@ -39,6 +39,7 @@ import { SubdivideSelectionCommand } from './SubdivideSelectionCommand.js';
 import { UnionCommand } from './UnionCommand.js';
 import { DifferenceCommand } from './DifferenceCommand.js';
 import { IntersectCommand } from './IntersectCommand.js';
+import { RepairMeshCommand } from './RepairMeshCommand.js';
 import { SetMaterialCommand } from './SetMaterialCommand.js';
 import { SetUserDataValueCommand } from './SetUserDataValueCommand.js';
 import { SetVisibilityCommand } from './SetVisibilityCommand.js';
@@ -97,6 +98,7 @@ export const commands = new Map([
   [UnionCommand.type, UnionCommand],
   [DifferenceCommand.type, DifferenceCommand],
   [IntersectCommand.type, IntersectCommand],
+  [RepairMeshCommand.type, RepairMeshCommand],
   [SetMaterialCommand.type, SetMaterialCommand],
   [SetUserDataValueCommand.type, SetUserDataValueCommand],
   [SetVisibilityCommand.type, SetVisibilityCommand],

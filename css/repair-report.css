@@ -1,0 +1,114 @@
+.repair-report-toast {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 2000;
+  width: 340px;
+  max-width: calc(100vw - 32px);
+  font-family: sans-serif;
+  font-size: 13px;
+  color: #f0f0f0;
+  background: rgba(32, 34, 38, 0.96);
+  border: 1px solid rgba(230, 167, 64, 0.85);
+  border-radius: 6px;
+  padding: 10px 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  display: none;
+  flex-direction: column;
+  gap: 8px;
+  pointer-events: auto;
+}
+
+.repair-report-toast.active {
+  display: flex;
+}
+
+.repair-report-toast__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.repair-report-toast__title {
+  flex: 1;
+  font-weight: 700;
+  color: #ffc36b;
+}
+
+.repair-report-toast__toggle,
+.repair-report-toast__close {
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  background: rgba(255, 255, 255, 0.08);
+  color: #f0f0f0;
+  border-radius: 3px;
+  padding: 2px 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.repair-report-toast__close {
+  padding: 2px 7px;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.repair-report-toast__summary {
+  color: #d8d8d8;
+  line-height: 1.45;
+}
+
+.repair-report-toast__details {
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+  padding-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.repair-report-grid {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 2px 12px;
+}
+
+.repair-report-row {
+  display: contents;
+}
+
+.repair-report-row span {
+  color: #bdbdbd;
+}
+
+.repair-report-row b {
+  text-align: right;
+  color: #ffffff;
+}
+
+.repair-report-label {
+  color: #9fc7e8;
+  margin-bottom: 3px;
+  font-weight: 600;
+}
+
+.repair-report-ids {
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  word-break: break-all;
+  color: #ffd9a0;
+}
+
+.repair-report-warnings {
+  margin: 0;
+  padding-left: 18px;
+  color: #ffb86b;
+}
+
+.repair-report-warnings li {
+  margin-bottom: 2px;
+}
+
+.repair-report-note {
+  color: #9a9a9a;
+}

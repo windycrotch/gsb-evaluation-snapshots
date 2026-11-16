@@ -3,6 +3,7 @@ import { RemoveObjectCommand } from '../commands/RemoveObjectCommand.js';
 import { DifferenceCommand } from '../commands/DifferenceCommand.js';
 import { SequentialMultiCommand } from '../commands/SequentialMultiCommand.js';
 import { SetSelectionCommand } from '../commands/SetSelectionCommand.js';
+import { collectRepairDescriptors, appendBooleanCommands } from './BooleanRepairSupport.js';
 
 export class DifferenceOps {
   constructor(editor) {
@@ -12,7 +13,7 @@ export class DifferenceOps {
   /**
    * Subtract `secondary` from `primary`, replace primary's mesh with the result and remove
    * `secondary`, as one undoable step. Returns true on success, false if the inputs are invalid.
-   * Throws if the boolean fails.
+   * Throws if the boolean fails (including failed repair).
    */
   async difference(primary, secondary) {
     const computed = await this.compute(primary, secondary);
@@ -28,15 +29,15 @@ export class DifferenceOps {
 
     // Clone before any await so the undo state is the mesh as it was when the user confirmed
     const beforeMeshData = structuredClone(primary.userData.meshData);
-    const resultMeshData = await DifferenceOps.computeDifference(primary, secondary);
+    const { resultMeshData, repairs } = await DifferenceOps.computeDifference(primary, secondary);
 
-    return { beforeMeshData, resultMeshData };
+    return { beforeMeshData, resultMeshData, repairs };
   }
 
   // Step 2 (sync): apply a computed result as one undoable step.
-  commit(primary, secondary, { beforeMeshData, resultMeshData }) {
+  commit(primary, secondary, { beforeMeshData, resultMeshData, repairs = [] }) {
     this.editor.execute(
-      DifferenceOps.createCommand(this.editor, primary, secondary, beforeMeshData, resultMeshData)
+      DifferenceOps.createCommand(this.editor, primary, secondary, beforeMeshData, resultMeshData, repairs)
     );
   }
 
@@ -48,38 +49,54 @@ export class DifferenceOps {
       && primary !== secondary;
   }
 
-  // Returns the MeshData for primary − secondary, keeping face ids traceable to both inputs.
+  // Returns the MeshData for primary − secondary, keeping face ids traceable to both inputs,
+  // plus a `repairs` list for any operand that had to be auto-repaired.
   static async computeDifference(primary, secondary) {
     const meshData = primary.userData.meshData;
     const idOffsetB = meshData.nextFaceId + meshData.vertices.size;
 
     await getManifoldWasm();
 
-    const [
-      { manifold: manifoldA, faceIdMap: faceIdMapA },
-      { manifold: manifoldB, faceIdMap: faceIdMapB },
-    ] = await Promise.all([
+    const [a, b] = await Promise.all([
       toManifold(primary, 0),
       toManifold(secondary, idOffsetB),
     ]);
 
     let result = null;
     try {
-      result = manifoldA.subtract(manifoldB);
-      return fromManifoldResult(result.getMesh(), faceIdMapA, faceIdMapB, primary);
+      result = a.manifold.subtract(b.manifold);
+      return {
+        resultMeshData: fromManifoldResult(result.getMesh(), a.faceIdMap, b.faceIdMap, primary),
+        repairs: collectRepairDescriptors([
+          { object: primary, entry: a },
+          { object: secondary, entry: b },
+        ]),
+      };
     } finally {
       // Manifold objects live in WASM memory and aren't garbage collected.
       result?.delete?.();
+      a.manifold.delete?.();
+      b.manifold.delete?.();
     }
   }
 
-  static createCommand(editor, primary, secondary, beforeMeshData, resultMeshData) {
+  static createCommand(editor, primary, secondary, beforeMeshData, resultMeshData, repairs = []) {
     const prevSelection = [...editor.selection.selectedObjects];
 
     const multi = new SequentialMultiCommand(editor, 'Difference Objects');
     multi.add(() => new SetSelectionCommand(editor, [primary], prevSelection));
-    multi.add(() => new DifferenceCommand(editor, primary, beforeMeshData, resultMeshData));
-    multi.add(() => new RemoveObjectCommand(editor, secondary));
+
+    appendBooleanCommands({
+      multi,
+      editor,
+      primary,
+      booleanCommandCtor: DifferenceCommand,
+      resultMeshData,
+      beforeMeshData,
+      repairs,
+      secondary,
+      removeObjectCommandCtor: RemoveObjectCommand,
+    });
     return multi;
   }
 }

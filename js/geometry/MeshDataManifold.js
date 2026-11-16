@@ -1,7 +1,7 @@
 import ManifoldModule from 'manifold-3d';
 import * as THREE from 'three';
 import { MeshData } from '../core/MeshData.js';
-import { repairMeshData } from './ManifoldRepair.js';
+import { repairMeshData, validateManifoldTopology, formatRepairReport } from './ManifoldRepair.js';
 
 let _wasm = null;
 
@@ -13,38 +13,105 @@ export async function getManifoldWasm() {
   return _wasm;
 }
 
+/** Thrown when the repair fallback still cannot produce a valid manifold. Never silent. */
+export class ManifoldRepairError extends Error {
+  constructor(message, { report, reasons, objectName } = {}) {
+    super(message);
+    this.name = 'ManifoldRepairError';
+    this.report = report ?? null;
+    this.reasons = reasons ?? [];
+    this.objectName = objectName ?? null;
+  }
+}
+
+/**
+ * Build a WASM Manifold for `object`, running the repair pipeline once if the raw mesh
+ * is rejected. Returns:
+ *   {
+ *     manifold, faceIdMap,
+ *     repaired: boolean,            // true if the repair fallback was used
+ *     repairedMeshData: MeshData|null,
+ *     report: repairReport|null     // counts + warnings + repairFaceIds
+ *   }
+ *
+ * If repair still cannot yield a valid manifold, throws ManifoldRepairError with the
+ * report and concrete reasons — it never resolves to an empty mesh.
+ */
 export async function toManifold(object, idOffset = 0) {
   const wasm = await getManifoldWasm();
   const originalData = object.userData.meshData;
+  const objectName = object.name || object.uuid;
+
+  // First attempt on the raw mesh. The WASM constructor either throws (NotManifold) or
+  // returns a manifold with a non-NoError status — both count as a rejected input.
+  let first = null;
+  try {
+    first = createManifoldFromMeshData(wasm, originalData, object.matrixWorld, idOffset);
+    if (first.manifold.status() === 'NoError') {
+      return {
+        manifold: first.manifold,
+        faceIdMap: first.faceIdMap,
+        repaired: false,
+        repairedMeshData: null,
+        report: null,
+      };
+    }
+    first.manifold.delete?.();
+  } catch (err) {
+    // Constructor threw (e.g. ManifoldError: Not manifold) — fall through to repair.
+    first?.manifold?.delete?.();
+  }
+
+  // Boolean library rejected the raw mesh — run the observable repair fallback.
+  const repairedData = repairMeshData(originalData);
+  const report = repairedData.repairReport;
+
+  // WASM-free guard: if topology is provably invalid (open, pinch, empty, ...), fail honestly
+  // instead of feeding a bad mesh to the library and risking a silent empty manifold.
+  const topology = validateManifoldTopology(repairedData);
+  if (!topology.valid) {
+    throw new ManifoldRepairError(
+      `Mesh "${objectName}" could not be repaired into a valid manifold. ` +
+        `${formatRepairReport(report)}. Remaining problems: ${topology.reasons.join('; ')}.`,
+      { report, reasons: topology.reasons, objectName }
+    );
+  }
 
   let manifold;
   let faceIdMap;
-
   try {
-    const result = createManifoldFromMeshData(wasm, originalData, object.matrixWorld, idOffset);
-    manifold = result.manifold;
-    faceIdMap = result.faceIdMap;
-
-    if (manifold.status() !== 'NoError') {
-      throw new Error("Manifold status is not NoError");
-    }
-
-  } catch (err) {
-    const repairedData = repairMeshData(originalData);
     const result = createManifoldFromMeshData(wasm, repairedData, object.matrixWorld, idOffset);
-    
     manifold = result.manifold;
     faceIdMap = result.faceIdMap;
+  } catch (err) {
+    const reasons = [`manifold-3d rejected the repaired mesh: ${err?.message ?? err}`];
+    throw new ManifoldRepairError(
+      `Mesh "${objectName}" still failed manifold construction after repair. ` +
+        `${formatRepairReport(report)}. Remaining problems: ${reasons.join('; ')}.`,
+      { report, reasons, objectName }
+    );
+  }
 
-    // Update the map to flag repaired faces
-    for (const [faceId, face] of repairedData.faces) {
-      if (!originalData.faces.has(faceId)) {
-        faceIdMap.set(faceId + idOffset, 'repair');
-      }
+  if (manifold.status() !== 'NoError') {
+    const badStatus = manifold.status();
+    manifold.delete?.();
+    const reasons = [`manifold-3d reported status ${badStatus} after repair (e.g. self-intersection)`];
+    throw new ManifoldRepairError(
+      `Mesh "${objectName}" still failed manifold construction after repair. ` +
+        `${formatRepairReport(report)}. Remaining problems: ${reasons.join('; ')}.`,
+      { report, reasons, objectName }
+    );
+  }
+
+  // Flag every face that did not exist on the original mesh so downstream code
+  // (fromManifoldResult, UI, agent) can identify repair-added geometry.
+  for (const [faceId, face] of repairedData.faces) {
+    if (face.isRepairFace || !originalData.faces.has(faceId)) {
+      faceIdMap.set(faceId + idOffset, 'repair');
     }
   }
 
-  return { manifold, faceIdMap };
+  return { manifold, faceIdMap, repaired: true, repairedMeshData: repairedData, report };
 }
 
 function createManifoldFromMeshData(wasm, meshData, matrixWorld, idOffset) {
