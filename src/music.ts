@@ -6,8 +6,14 @@ export const MUSIC_BPM = 132;
 
 const BEAT = 60 / MUSIC_BPM;
 const STEP = BEAT / 4;
+// Layer changes and transport restarts are quantized to a quarter-note beat:
+// four sixteenth steps. A pending mode only takes effect on this boundary.
+const STEPS_PER_BEAT = 4;
 const LOOKAHEAD = 0.12;
 const CLOCK_MS = 32;
+// When the scheduling clock trails the audio clock by more than this, the
+// transport restarts at the next beat instead of catching up the backlog.
+const STALL_DRIFT = 0.035;
 const FLOOR = 0.0001;
 const clamp = (value: number, fallback = 0): number => Math.min(1, Math.max(0, Number.isFinite(value) ? value : fallback));
 const silentMode = (mode: MusicMode): boolean => mode === 'paused' || mode === 'hidden';
@@ -180,7 +186,7 @@ export class RallyMusic {
     if (this.disposed || !this.enabled || silentMode(this.mode) || this.context.state !== 'running' || this.timer !== null) return;
     const now = this.now();
     // Resume at the next beat, never replay notes accumulated while asleep.
-    this.transportStep = Math.ceil(this.transportStep / 4) * 4;
+    this.transportStep = Math.ceil(this.transportStep / STEPS_PER_BEAT) * STEPS_PER_BEAT;
     this.nextTime = now + 0.065;
     this.effectiveMode = this.mode;
     this.pendingMode = null;
@@ -218,7 +224,7 @@ export class RallyMusic {
     }
     const now = this.now();
     // Background throttling or a stalled tab must not produce a catch-up burst.
-    if (this.nextTime < now - 0.035) {
+    if (this.nextTime < now - STALL_DRIFT) {
       this.stopTransport();
       this.startTransport();
       return;
@@ -227,7 +233,7 @@ export class RallyMusic {
     while (this.nextTime < now + LOOKAHEAD && safety++ < 8) {
       const step = this.transportStep % STEPS_PER_BAR;
       const bar = Math.floor(this.transportStep / STEPS_PER_BAR) % SCORE_BARS;
-      if (this.pendingMode && step % 4 === 0) {
+      if (this.pendingMode && step % STEPS_PER_BEAT === 0) {
         this.effectiveMode = this.pendingMode;
         this.pendingMode = null;
         this.applyLayers(this.nextTime);
