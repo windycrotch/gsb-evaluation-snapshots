@@ -128,21 +128,21 @@ export function placeAt(
   out[5] = m[1] * lx + m[3] * ly + m[5];
 }
 
-/**
- * Copy `i`'s quad matrix (the same algebra as `draw.sprite`) and colour, for backends without a GPU path.
- * Returns the colour; writes the matrix into `out`.
- */
-export function copyAt(c: CopySpec, i: number, out: Matrix, f: Frame): number {
-  const e = c.each;
-  const k = e.scale === undefined ? 1 : valueAt(c, e.scale, i);
-  const r = c.rotation + (e.rotation === undefined ? 0 : valueAt(c, e.rotation, i));
-  const p = i * c.stride + c.offset;
-  placeAt(c.m, f.w, f.h, c.positions[p] as number, c.positions[p + 1] as number, c.originX, c.originY, c.scaleX * k, c.scaleY * k, r, out);
-  if (c.snap && !r) {
-    out[4] = Math.round(out[4]);
-    out[5] = Math.round(out[5]);
-  }
-  const color = e.color;
+/** Copy `i`'s own scale: the shared scale times its `each.scale` entry, when it has one. */
+export function copyScale(c: CopySpec, i: number): number {
+  const scale = c.each.scale;
+  return scale === undefined ? 1 : valueAt(c, scale, i);
+}
+
+/** Copy `i`'s own rotation: the shared rotation plus its `each.rotation` entry, when it has one. */
+export function copyRotation(c: CopySpec, i: number): number {
+  const rot = c.each.rotation;
+  return c.rotation + (rot === undefined ? 0 : valueAt(c, rot, i));
+}
+
+/** Copy `i`'s colour: the shared tint times its `each.color` entry, when it has one. */
+export function copyColor(c: CopySpec, i: number): number {
+  const color = c.each.color;
   const each =
     color === undefined
       ? 0xffffffff
@@ -150,6 +150,22 @@ export function copyAt(c: CopySpec, i: number, out: Matrix, f: Frame): number {
         ? ((c.bits as Uint32Array)[i * c.stride + color] as number)
         : (color[i] as number);
   return each === 0xffffffff ? c.color : multiply(c.color, each);
+}
+
+/**
+ * Copy `i`'s quad matrix (the same algebra as `draw.sprite`) and colour, for backends without a GPU path.
+ * Returns the colour; writes the matrix into `out`.
+ */
+export function copyAt(c: CopySpec, i: number, out: Matrix, f: Frame): number {
+  const r = copyRotation(c, i);
+  const p = i * c.stride + c.offset;
+  const k = copyScale(c, i);
+  placeAt(c.m, f.w, f.h, c.positions[p] as number, c.positions[p + 1] as number, c.originX, c.originY, c.scaleX * k, c.scaleY * k, r, out);
+  if (c.snap && !r) {
+    out[4] = Math.round(out[4]);
+    out[5] = Math.round(out[5]);
+  }
+  return copyColor(c, i);
 }
 
 /** Channel-wise product of two 0xRRGGBBAA colours. */

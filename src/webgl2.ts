@@ -1,5 +1,5 @@
 import type { Backend, BlendMode, ClipRect, Matrix, RawContext, TextureSource } from "./backend.js";
-import { type CopySpec, copyAt, frameAt, placeAt } from "./copies.js";
+import { type CopySpec, copyAt, copyColor, copyRotation, copyScale, frameAt, placeAt } from "./copies.js";
 import type { Frame, SpriteDrawOptions } from "./draw.js";
 import type { Layer } from "./layer.js";
 import type { Shader } from "./shader.js";
@@ -960,8 +960,85 @@ export class WebGL2Backend implements Backend {
     }
     const src = c.frame.image;
     if (src === this.target) throw new Error("spryte: can't draw a render target into itself");
+    // Nothing queued to keep order with: the tight per-copy pipeline uploads interleaved records as is.
+    if (this.count === 0 && !(this.shapes && this.shapes.count > 0)) {
+      this.copiesEach(c);
+      return;
+    }
+    this.copiesMerged(c);
+  }
+
+  /**
+   * Per-copy sprites joining the batch already queued, so they keep their place among rects, sprites and shapes.
+   * Copies under the open sprite batch's transform are written as instances (`write`); copies under another
+   * transform, or joining pending shapes, go as quads into the same batch. `unitFor` splits the batch only when
+   * the frame's texture can't get a unit, and the batch it opens keeps this call's transform and the active
+   * shader, so the split is invisible in the output.
+   */
+  private copiesMerged(c: CopySpec): void {
+    const shapes = this.shapes;
+    const bm = this.bm;
+    const fits =
+      !this.sprites ||
+      (c.m[0] === bm[0] &&
+        c.m[1] === bm[1] &&
+        c.m[2] === bm[2] &&
+        c.m[3] === bm[3] &&
+        c.m[4] === bm[4] &&
+        c.m[5] === bm[5]);
+    // A different transform than the batch's, or pending shapes without a custom shader: quads keep order and
+    // change nothing about the batch. Frames share one image here (`mixed` is false), already checked above.
+    if (!fits || (shapes && shapes.count > 0 && !this.shader)) {
+      const q = this.fallback;
+      for (let i = 0; i < c.count; i++) {
+        const f = frameAt(c, i);
+        const color = copyAt(c, i, q, f);
+        this.quad(q, f.image, f.x, f.y, f.w, f.h, color, c.flash, c.smooth);
+      }
+      return;
+    }
+    // Under a custom shader shapes don't take sprites: draw them first, keeping order.
+    if (shapes && shapes.count > 0) this.flushShapes();
+    const smooth = c.smooth;
+    for (let i = 0; i < c.count; i++) {
+      const f = c.frames ? frameAt(c, i) : c.frame;
+      const t = f.image === this.lastSrc && this.last ? this.last : this.texture(f.image);
+      const sameAsLast = t === this.last;
+      this.lastSrc = f.image;
+      this.last = t;
+      if (this.count === this.capacity) this.flush();
+      // Splits only when all 8 units are taken and no unit holds this texture; the new batch then reopens on
+      // this call's transform below.
+      const unit = this.unitFor(t, smooth, sameAsLast, f.image);
+      if (!this.sprites) {
+        for (let k = 0; k < 6; k++) bm[k] = c.m[k] as number;
+        this.sprites = true;
+      }
+      const p = i * c.stride + c.offset;
+      const k = copyScale(c, i);
+      this.write(
+        unit,
+        c.m,
+        f,
+        c.positions[p] as number,
+        c.positions[p + 1] as number,
+        c.originX,
+        c.originY,
+        c.scaleX * k,
+        c.scaleY * k,
+        copyRotation(c, i),
+        copyColor(c, i),
+        c.flash,
+        smooth,
+      );
+    }
+  }
+
+  /** Per-copy sprites as one instanced draw: the batch was empty, so nothing waits behind them. */
+  private copiesEach(c: CopySpec): void {
     this.flush();
     const gl = this.gl;
+    const src = c.frame.image;
     const tex = src === this.lastSrc && this.last ? this.last : this.texture(src);
     this.lastSrc = src;
     this.last = tex;

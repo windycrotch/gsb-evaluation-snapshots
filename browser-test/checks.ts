@@ -248,6 +248,89 @@ for (const backend of ["webgl2", "2d"] as const) {
     }
 }
 
+// Per-copy sprites joining a batch already holding rects and ordinary sprites must match the same drawing done
+// sprite by sprite, in place: this is the merge path, not the empty-batch per-copy pipeline.
+{
+  const n = 20;
+  const scale = Float32Array.from({ length: n }, (_, i) => 0.5 + (i % 4) * 0.5);
+  const rotation = Float32Array.from({ length: n }, (_, i) => (i % 5) * 0.29);
+  const color = Uint32Array.from({ length: n }, (_, i) => [0xffffffff, 0xff8080ff, 0x80ff80c0][i % 3] as number);
+  const hex = (c: number) => `#${c.toString(16).padStart(8, "0")}`;
+  // Rotated copies take cos/sin in the shader, so allow the same edge tolerance as the empty-batch check.
+  const ROTATED_EDGE = 8;
+  for (const backend of ["webgl2", "2d"] as const) {
+    const loop = await render((draw) => {
+      draw.rect(2, 1, 40, 20, "#446");
+      for (let i = 0; i < n; i++)
+        draw.sprite(img, pos[i * 2] as number, pos[i * 2 + 1] as number, {
+          scaleX: scale[i] as number,
+          scaleY: scale[i] as number,
+          rotation: rotation[i] as number,
+          tint: hex(color[i] as number),
+        });
+      draw.rect(60, 40, 20, 10, "#e23");
+    }, backend);
+    // The same order, with the copies merged: a rect, the per-copy run, then the closing rect.
+    const bulk = await render((draw) => {
+      draw.rect(2, 1, 40, 20, "#446");
+      draw.sprites(img, pos, n, {}, { scale, rotation, color });
+      draw.rect(60, 40, 20, 10, "#e23");
+    }, backend);
+    const differing = diff(loop, bulk);
+    let drawn = 0;
+    for (let i = 0; i < loop.length; i += 4) if (loop[i] !== 0x10 || loop[i + 1] !== 0x20) drawn++;
+    const tolerance = backend === "webgl2" ? ROTATED_EDGE : 0;
+    results.push({
+      name: `sprites(each) merged among quads == sprite() loop (${backend}, ${differing} px differ, tolerance ${tolerance})`,
+      differing: differing <= tolerance ? 0 : differing,
+      nonBackground: drawn,
+    });
+  }
+}
+
+// Eight distinct images fill all eight units; a ninth forces a split. The split batch must still draw the copies
+// in place, so the scene matches the same drawing done sprite by sprite.
+{
+  const images = Array.from({ length: 10 }, (_, i) => {
+    const c = document.createElement("canvas");
+    c.width = 8;
+    c.height = 6;
+    const g = c.getContext("2d") as CanvasRenderingContext2D;
+    g.fillStyle = ["#cffb2d", "#ff8080", "#8080ff", "#40ffa0", "#ffd36b", "#c0f", "#0cc", "#f60", "#8f8", "#f0f"][i] as string;
+    g.fillRect(0, 0, 8, 6);
+    return c;
+  });
+  const where = (i: number, count: number) => [(i * 17.3) % (W - 16) + 4, (i * 11.7) % (H - 16) + 4] as const;
+  const backend = "webgl2" as const;
+  const loop = await render((draw) => {
+    // Nine sprites from nine distinct images take nine units, so the batch splits before the tenth.
+    for (let i = 0; i < 10; i++) {
+      const [x, y] = where(i, 10);
+      draw.sprite(images[i] as HTMLCanvasElement, x, y);
+    }
+    const pos2 = Float32Array.from(where(10, 1));
+    for (let i = 0; i < 5; i++) draw.sprite(images[9] as HTMLCanvasElement, (pos2[0] as number) + i * 9, pos2[1] as number);
+    draw.rect(2, 2, 20, 10, "#fff");
+  }, backend);
+  const bulk = await render((draw) => {
+    for (let i = 0; i < 10; i++) {
+      const [x, y] = where(i, 10);
+      draw.sprite(images[i] as HTMLCanvasElement, x, y);
+    }
+    // Five copies of the last image: it has no free unit in the batch holding the other nine.
+    draw.sprites(images[9] as HTMLCanvasElement, Float32Array.from([where(10, 1)[0], where(10, 1)[1], where(10, 1)[0] + 9, where(10, 1)[1], where(10, 1)[0] + 18, where(10, 1)[1], where(10, 1)[0] + 27, where(10, 1)[1], where(10, 1)[0] + 36, where(10, 1)[1]]), 5);
+    draw.rect(2, 2, 20, 10, "#fff");
+  }, backend);
+  const differing = diff(loop, bulk);
+  let drawn = 0;
+  for (let i = 0; i < loop.length; i += 4) if (loop[i] !== 0x10 || loop[i + 1] !== 0x20) drawn++;
+  results.push({
+    name: `sprites() splits at 9 textures and keeps its place (webgl2, ${differing} px differ)`,
+    differing,
+    nonBackground: drawn,
+  });
+}
+
 // Interleaved records (each.stride): must match the same values passed as separate arrays, on both backends.
 {
   const n = 20;
@@ -322,6 +405,28 @@ for (const backend of ["webgl2", "2d"] as const) {
     draw.withShader(s, () => draw.sprites(img, pos, n));
   });
   record("withShader + sprites() == withShader + sprite() loop (webgl2)", plainLoop, plainBulk);
+  // Same again with a rect queued first, so the copies take the merge path under the shader rather than the
+  // empty-batch per-copy program.
+  const mergedLoop = await render((draw) => {
+    const s = draw.createShader(swap);
+    draw.withShader(s, () => {
+      draw.rect(4, 2, 30, 18, "#446");
+      for (let i = 0; i < n; i++)
+        draw.sprite(img, pos[i * 2] as number, pos[i * 2 + 1] as number, {
+          scaleX: scale[i] as number,
+          scaleY: scale[i] as number,
+          tint: hex(color[i] as number),
+        });
+    });
+  });
+  const mergedBulk = await render((draw) => {
+    const s = draw.createShader(swap);
+    draw.withShader(s, () => {
+      draw.rect(4, 2, 30, 18, "#446");
+      draw.sprites(img, pos, n, {}, { scale, color });
+    });
+  });
+  record("withShader + sprites(each) merged after a quad == shader + sprite() loop (webgl2)", mergedLoop, mergedBulk);
 }
 
 // Custom shaders.

@@ -29,7 +29,8 @@ function fakeGL() {
     getProgramParameter: () => true,
     checkFramebufferStatus: () => "FRAMEBUFFER_COMPLETE",
     getParameter: (p: unknown) => (p === "MAX_TEXTURE_SIZE" ? 16384 : undefined),
-    getUniformLocation: () => ({}),
+    // The name rides on the location, so tests can tell uniforms apart and check the batch's transform.
+    getUniformLocation: (_p: unknown, name: string) => ({ name }),
     shaderSource: (_s: unknown, src: string) => shaderSources.push(src),
   };
   const gl = new Proxy(target, {
@@ -386,6 +387,175 @@ describe("WebGL2Backend", () => {
       draw.sprite(image(), 10.4, 10.6, { rotation: 1, scaleX: 2, origin: [0, 1] });
       draw.end();
       expect(sprite(calls).map((v) => Math.round(v * 1000) / 1000)).toEqual([10.4, 10.6, 1, 2, 1, 0, 1, 0, 0, 0, 16, 16, 16]);
+    });
+  });
+
+  describe("per-copy sprites with each", () => {
+    /** Instance `i` of the last batch uploaded (`write`'s layout: 14 floats per instance). */
+    const inst = (calls: { name: string; args: unknown[] }[], i: number) => {
+      const f = calls.findLast((c) => c.name === "bufferSubData")?.args[2] as Float32Array;
+      return Array.from(f.subarray(i * 14, i * 14 + 13));
+    };
+    const flags = (calls: { name: string; args: unknown[] }[], count: number) =>
+      Array.from({ length: count }, (_, i) => inst(calls, i)[12]);
+
+    it("join pending shapes as quads, keeping shape-copy-shape order in one draw", () => {
+      const { gl, calls, count } = fakeGL();
+      const draw = new Draw(new WebGL2Backend(gl), false);
+      const img = image();
+      draw.begin("#000", 100, 50, 1);
+      roundRect(draw, 2, 2, 20, 20, 4, "#e23");
+      draw.sprites(img, new Float32Array([10, 10]), 1, {}, { rotation: Float32Array.of(0.5) });
+      ring(draw, 20, 20, 8, 2, "#ffd36b");
+      draw.end();
+      // Both shapes and the copies share the shape batch: one indexed draw, no instanced draw.
+      expect(count("drawElements")).toBe(1);
+      expect(count("drawArraysInstanced")).toBe(0);
+      expect(draw.drawCalls).toBe(1);
+      // The copy's four vertices (textured, at its centre) sit between the two shapes' vertices.
+      const verts = calls.findLast((c) => c.name === "bufferData")?.args[1] as Float32Array;
+      expect(Array.from(verts).length).toBeGreaterThan(4 * 6);
+    });
+
+    it("join the batch in place between rects and ordinary sprites, as one draw", () => {
+      const { gl, calls, count } = fakeGL();
+      const draw = new Draw(new WebGL2Backend(gl), false);
+      const a = image();
+      const b = image();
+      const rot = Float32Array.of(0.5, 0.5);
+      draw.begin("#000", 100, 50, 1);
+      draw.rect(0, 0, 4, 4, "#fff"); // unit 0: the white texture
+      draw.sprite(a, 10, 10); // unit 1, as a sprite instance
+      draw.sprites(b, new Float32Array([10, 11, 20, 21]), 2, {}, { rotation: rot }); // unit 2, per copy
+      draw.rect(0, 20, 4, 4, "#fff");
+      draw.sprite(a, 30, 10);
+      draw.sprites(b, new Float32Array([40, 11, 50, 21]), 2, {}, { rotation: rot });
+      draw.end();
+      // Everything stayed in one batch: the copies did not cut the draw order.
+      expect(count("drawArraysInstanced")).toBe(1);
+      expect(draw.drawCalls).toBe(1);
+      // Unit 0 quad, unit 1 sprite, copies on unit 2 (rotated, so not snapped), then the same again.
+      expect(flags(calls, 8)).toEqual([0, 1 + 16 + 32, 2 + 16, 2 + 16, 0, 1 + 16 + 32, 2 + 16, 2 + 16]);
+      // Each copy sits where its position says, at the batch's transform.
+      expect(inst(calls, 2).slice(0, 3)).toEqual([10, 11, 0.5]);
+      expect(inst(calls, 3).slice(0, 3)).toEqual([20, 21, 0.5]);
+      expect(inst(calls, 6).slice(0, 3)).toEqual([40, 11, 0.5]);
+      expect(inst(calls, 7).slice(0, 3)).toEqual([50, 21, 0.5]);
+      expect(draw.drawCalls).toBe(count("drawArraysInstanced") + count("drawElements"));
+    });
+
+    it("split only when the texture cannot get a unit, keeping the transform and shader", () => {
+      const { gl, calls } = fakeGL();
+      const draw = new Draw(new WebGL2Backend(gl), false);
+      const shader = new Shader("vec4 effect(vec4 color, vec2 uv) { return source(uv) * color; }");
+      draw.begin("#000", 100, 50, 1);
+      draw.translate(5, 3);
+      draw.withShader(shader, () => {
+        // Eight distinct images take all eight units.
+        for (let i = 0; i < 8; i++) draw.sprite(image(), i, 0);
+        draw.sprites(image(), new Float32Array([10, 10]), 1, {}, { rotation: Float32Array.of(0.5) });
+      });
+      draw.end();
+      const draws = calls.filter((c) => c.name === "drawArraysInstanced");
+      expect(draws.map((c) => c.args[3])).toEqual([8, 1]);
+      expect(draw.drawCalls).toBe(2);
+      // The new batch reopens on the same transform: translation and linear part are uploaded again for it.
+      const second = calls.map((c, i) => (c.name === "drawArraysInstanced" ? i : -1)).filter((i) => i >= 0)[1] as number;
+      const before = calls.slice(0, second);
+      const lin = before.filter((c) => c.name === "uniform4f" && (c.args[0] as { name?: string }).name === "u_linear").at(-1);
+      const mt = before.filter((c) => c.name === "uniform2f" && (c.args[0] as { name?: string }).name === "u_mt").at(-1);
+      expect(lin?.args.slice(1)).toEqual([1, 0, 0, 1]);
+      expect(mt?.args.slice(1)).toEqual([5, 3]);
+      // And the same program draws both: nothing switched to the separate per-copy pipeline.
+      const first = calls.findIndex((c) => c.name === "drawArraysInstanced");
+      expect(calls.slice(first + 1, second).some((c) => c.name === "useProgram")).toBe(false);
+    });
+
+    it("keep each.frame's frame per copy when they join the batch", () => {
+      const { gl, calls, count } = fakeGL();
+      const draw = new Draw(new WebGL2Backend(gl), false);
+      const img = image(64, 16);
+      const frames = [
+        { image: img, x: 0, y: 0, w: 16, h: 16 },
+        { image: img, x: 16, y: 0, w: 16, h: 16 },
+      ];
+      draw.begin("#000", 100, 50, 1);
+      draw.rect(0, 0, 4, 4, "#fff"); // something queued, so the copies must merge
+      draw.sprites(frames, new Float32Array([10, 10, 40, 10]), 2, {}, { frame: Uint8Array.of(0, 1) });
+      draw.end();
+      expect(count("drawArraysInstanced")).toBe(1);
+      // Instance 1 is frame 0 at the atlas origin; instance 2 is frame 1, one frame across.
+      expect(inst(calls, 1).slice(8, 12)).toEqual([0, 0, 16, 16]);
+      expect(inst(calls, 2).slice(8, 12)).toEqual([16, 0, 16, 16]);
+    });
+
+    it("split at 9 distinct textures, counting the split batch, without a custom shader", () => {
+      const { gl, calls, count } = fakeGL();
+      const draw = new Draw(new WebGL2Backend(gl), false);
+      draw.begin("#000", 100, 50, 1);
+      for (let i = 0; i < 8; i++) draw.rect(0, i, 4, 4, "#fff"); // the white texture, one unit
+      for (let i = 0; i < 7; i++) draw.sprite(image(), i, 0); // seven more units: 8 in all
+      const ninth = image();
+      draw.sprites(ninth, new Float32Array([30, 20]), 1, {}, { rotation: Float32Array.of(0.5) });
+      draw.rect(0, 0, 1, 1, "#fff");
+      draw.end();
+      const draws = calls.filter((c) => c.name === "drawArraysInstanced");
+      expect(draws.map((c) => c.args[3])).toEqual([15, 2]);
+      expect(draw.drawCalls).toBe(count("drawArraysInstanced") + count("drawElements"));
+      // The copy was written into the second batch, at its position.
+      expect(inst(calls, 0).slice(0, 3)).toEqual([30, 20, 0.5]);
+    });
+
+    it("keep their place under a transform that changes per call, sent as finished quads", () => {
+      const { gl, calls, count } = fakeGL();
+      const draw = new Draw(new WebGL2Backend(gl), false);
+      const img = image();
+      draw.begin("#000", 100, 50, 1);
+      draw.sprite(img, 10, 10);
+      draw.push();
+      draw.translate(20, 0);
+      draw.sprites(img, new Float32Array([10, 10]), 1, {}, { rotation: Float32Array.of(0.5) });
+      draw.pop();
+      draw.sprite(img, 30, 10);
+      draw.end();
+      expect(count("drawArraysInstanced")).toBe(1);
+      // The copies under the moved transform are quads (no sprite flag), with the translation baked in:
+      // the quad layout puts the matrix's e (x) at index 2.
+      expect(inst(calls, 1)[12]).toBeLessThan(16);
+      expect(inst(calls, 1)[2]).toBeCloseTo(26.81474, 3);
+      expect(inst(calls, 2)[12]).toBeGreaterThanOrEqual(16);
+    });
+
+    it("use the compact per-copy pipeline when nothing is queued, uploading records as is", () => {
+      const { gl, calls, count } = fakeGL();
+      const draw = new Draw(new WebGL2Backend(gl), false);
+      const data = new Float32Array([1, 2, 2, 3, 4, 2]); // x, y, scale per copy
+      draw.begin("#000", 100, 50, 1);
+      draw.sprites(image(), data, 2, {}, { stride: 3, scale: 2 });
+      expect(draw.drawCalls).toBe(1);
+      draw.end();
+      expect(count("drawArraysInstanced")).toBe(1);
+      // The interleaved record went to the GPU untouched.
+      expect(calls.some((c) => c.name === "bufferData" && c.args[1] === data)).toBe(true);
+      expect(draw.drawCalls).toBe(count("drawArraysInstanced") + count("drawElements"));
+    });
+
+    it("still refuse to draw a render target into itself, queued or not", () => {
+      const { gl } = fakeGL();
+      const draw = new Draw(new WebGL2Backend(gl), false);
+      draw.begin("#000", 100, 50, 1);
+      const t = draw.createTarget(10, 10);
+      const each = { rotation: Float32Array.of(0.5) };
+      // Empty batch: the compact per-copy path.
+      expect(() => draw.into(t, () => draw.sprites(t, [0, 0], 1, {}, each))).toThrow(/into itself/);
+      // Non-empty batch: the merge path checks before writing anything.
+      expect(() =>
+        draw.into(t, () => {
+          draw.rect(0, 0, 4, 4, "#fff");
+          draw.sprites(t, [0, 0], 1, {}, each);
+        }),
+      ).toThrow(/into itself/);
+      draw.end();
     });
   });
 
