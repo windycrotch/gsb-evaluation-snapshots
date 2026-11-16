@@ -1,7 +1,10 @@
 """
 Resincroniza la fuente de descarga de una consola contra un item nuevo de
-archive.org (cuando el item viejo murio). Genera Data/<label>_source_override.json
-y Data/<label>_missing_sources.txt.
+archive.org (cuando el item viejo murio). Genera Data/<label>_source_override.json,
+Data/<label>_missing_sources.txt y Data/<label>_failed_candidates.txt (candidatos
+que no se pudieron descargar/descomprimir, con motivo). El progreso se cachea
+por archivo en Data/.<label>_hash_cache.json, asi que se puede cortar y
+retomar: lo ya hasheado se saltea y lo fallido se reintenta.
 
 Uso:
     python scripts/sync_source.py --console SNES --item retroachievementscompatibleromsSNES
