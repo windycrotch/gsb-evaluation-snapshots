@@ -1,0 +1,38 @@
+{
+  "type": "module",
+  "version": "0.2.0-beta.2",
+  "private": true,
+  "packageManager": "pnpm@11.18.0",
+  "scripts": {
+    "build": "pnpm -rF \"./packages/*\" build",
+    "build:vanilla": "pnpm -F @moeru/three-mmd-example-vanilla build",
+    "bump": "bumpp",
+    "dev": "pnpm -F @moeru/three-mmd-playground dev",
+    "dev:vanilla": "pnpm -F @moeru/three-mmd-example-vanilla dev",
+    "lint": "eslint --flag unstable_native_nodejs_ts_config --cache .",
+    "preview": "pnpm -F @moeru/three-mmd-playground preview",
+    "preview:vanilla": "pnpm -F @moeru/three-mmd-example-vanilla preview",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@antfu/eslint-config": "catalog:",
+    "@eslint-react/eslint-plugin": "catalog:",
+    "@generouted/react-router": "catalog:r3f",
+    "@moeru/eslint-config": "catalog:",
+    "@moeru/tsconfig": "catalog:",
+    "@playwright/cli": "catalog:",
+    "@types/node": "catalog:",
+    "@vitejs/plugin-react": "catalog:",
+    "bumpp": "catalog:",
+    "eslint": "catalog:",
+    "eslint-plugin-react-hooks": "catalog:",
+    "eslint-plugin-react-refresh": "catalog:",
+    "pkgroll": "catalog:",
+    "playwright": "catalog:",
+    "react-router": "catalog:r3f",
+    "tsdown": "catalog:",
+    "typescript": "catalog:",
+    "vite": "catalog:",
+    "vitest": "catalog:"
+  }
+}
