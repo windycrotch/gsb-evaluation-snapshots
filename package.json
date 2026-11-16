@@ -43,6 +43,7 @@
   "scripts": {
     "build": "rimraf dist && rollup -c",
     "dev": "rollup -w -c rollup.config.dev.js",
+    "test": "node --import ./test/register-hooks.mjs ./test/background-image.test.mjs",
     "prepare": "npm run build"
   },
   "dependencies": {

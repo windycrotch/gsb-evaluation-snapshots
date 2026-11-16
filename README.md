@@ -60,7 +60,8 @@ new ThreeRenderObjects(<domElement>, { configOptions })
 | <b>skyRadius</b>([<i>number</i>]) | Radius of the sphere that bounds the scene, in GL units. | 50000 |
 | <b>backgroundColor</b>([<i>str</i>]) | Getter/setter for the canvas background color. | `#000011` |
 | <b>backgroundImageUrl</b>([<i>url</i>]) | Getter/setter for the URL of the image to be used as scene background. If no image is provided, the background color is shown instead. | `null` |
-| <b>onBackgroundImageLoaded</b>([<i>fn</i>]) | Callback function triggered when the background image has finished loading asynchronously and is rendered on the scene. ||
+| <b>backgroundImageStatus</b>([<i>str</i>]) | Getter/setter for the observable loading status of the background image, one of `idle`, `loading`, `loaded` or `error`. It is `idle` by default and whenever no URL is set; it becomes `loading` while a URL is being fetched, `loaded` once the texture has been applied to the background sky sphere, and `error` if the image fails to load (in which case the sky sphere stays hidden and, when `waitForLoadComplete` is enabled, the first render is no longer blocked). Setting a new URL supersedes any in-flight request, so late responses from previous URLs are ignored and never affect this status. | `idle` |
+| <b>onBackgroundImageLoaded</b>([<i>fn</i>]) | Callback function triggered when the background image has finished loading asynchronously and is rendered on the scene. Only triggered on successful loads, and only for the most recently set URL. ||
 | <b>showNavInfo</b>([<i>boolean</i>]) | Getter/setter for whether to show the navigation controls footer info. | `true` |
 
 ### Render control

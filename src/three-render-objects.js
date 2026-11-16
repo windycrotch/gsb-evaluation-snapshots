@@ -72,7 +72,68 @@ export default Kapsule({
     height: { default: window.innerHeight, onChange(height, state, prevHeight) { isNaN(height) && (state.height = prevHeight) } },
     viewOffset: { default: [0, 0] },
     backgroundColor: { default: '#000011' },
-    backgroundImageUrl: {},
+    backgroundImageUrl: {
+      onChange(url, state) {
+        // resetProps runs before init, when the skysphere doesn't exist yet
+        if (!state.initialised) return;
+
+        // Each url change gets a new sequence id. Responses from older requests are stale and ignored.
+        const loadSeq = ++state.backgroundImageLoadSeq;
+
+        if (!url) {
+          state.backgroundImageStatus = 'idle';
+          state.skysphere.visible = false;
+          state.skysphere.material && (state.skysphere.material.map = null);
+
+          !state.loadComplete && finishLoad();
+          return;
+        }
+
+        state.backgroundImageStatus = 'loading';
+
+        new three.TextureLoader().load(url,
+          texture => { // success
+            if (loadSeq !== state.backgroundImageLoadSeq) return; // stale response, a newer url was set meanwhile
+
+            texture.colorSpace = three.SRGBColorSpace;
+            state.skysphere.material = new three.MeshBasicMaterial({ map: texture, side: three.BackSide });
+            state.skysphere.visible = true;
+            state.backgroundImageStatus = 'loaded';
+
+            // triggered when background image finishes loading (asynchronously to allow 1 frame to load texture)
+            state.onBackgroundImageLoaded && setTimeout(state.onBackgroundImageLoaded);
+
+            !state.loadComplete && finishLoad();
+          },
+          undefined,
+          () => { // error
+            if (loadSeq !== state.backgroundImageLoadSeq) return; // stale response, a newer url was set meanwhile
+
+            // Keep the skysphere hidden and make sure no failed texture is referenced
+            state.skysphere.visible = false;
+            state.skysphere.material && (state.skysphere.material.map = null);
+            state.backgroundImageStatus = 'error';
+
+            // Don't block the first render on a failed background load
+            !state.loadComplete && finishLoad();
+          }
+        );
+
+        function finishLoad() {
+          state.loadComplete = state.scene.visible = true;
+        }
+      }
+    },
+    backgroundImageStatus: {
+      default: 'idle',
+      triggerUpdate: false,
+      // Only the four documented statuses are allowed; reject external invalid values
+      onChange(status, state, prevStatus) {
+        if (!['idle', 'loading', 'loaded', 'error'].includes(status)) {
+          state.backgroundImageStatus = prevStatus;
+        }
+      }
+    },
     onBackgroundImageLoaded: {},
     showNavInfo: { default: true },
     skyRadius: { default: 50000 },
@@ -340,7 +401,8 @@ export default Kapsule({
     camera: new three.PerspectiveCamera(),
     timer: new three.Timer(),
     tweenGroup: new TweenGroup(),
-    lastRaycasterCheck: 0
+    lastRaycasterCheck: 0,
+    backgroundImageLoadSeq: 0 // identifies the most recent background image request, to ignore stale responses
   }),
 
   init(domNode, state, {
@@ -535,26 +597,6 @@ export default Kapsule({
       state.renderer.setClearColor(new three.Color(opacify(1, state.backgroundColor)), alpha);
     }
 
-    if (changedProps.hasOwnProperty('backgroundImageUrl')) {
-      if (!state.backgroundImageUrl) {
-        state.skysphere.visible = false;
-        state.skysphere.material.map = null;
-
-        !state.loadComplete && finishLoad();
-      } else {
-        new three.TextureLoader().load(state.backgroundImageUrl, texture => {
-          texture.colorSpace = three.SRGBColorSpace;
-          state.skysphere.material = new three.MeshBasicMaterial({ map: texture, side: three.BackSide });
-          state.skysphere.visible = true;
-
-          // triggered when background image finishes loading (asynchronously to allow 1 frame to load texture)
-          state.onBackgroundImageLoaded && setTimeout(state.onBackgroundImageLoaded);
-
-          !state.loadComplete && finishLoad();
-        });
-      }
-    }
-
     changedProps.hasOwnProperty('showNavInfo') && (state.navInfo.style.display = state.showNavInfo ? null : 'none');
 
     if (changedProps.hasOwnProperty('lights')) {
@@ -565,12 +607,6 @@ export default Kapsule({
     if (changedProps.hasOwnProperty('objects')) {
       (changedProps.objects || []).forEach(obj => state.scene.remove(obj)); // Clear the place
       state.objects.forEach(obj => state.scene.add(obj)); // Add to scene
-    }
-
-    //
-
-    function finishLoad() {
-      state.loadComplete = state.scene.visible = true;
     }
   }
 });

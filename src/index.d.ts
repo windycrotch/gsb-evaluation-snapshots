@@ -22,6 +22,8 @@ type CameraCoords = Coords & { lookAt: Coords };
 
 type Obj3DCompFn = (a: Object3D, b: Object3D) => number;
 
+export type BackgroundImageStatus = 'idle' | 'loading' | 'loaded' | 'error';
+
 export declare class ThreeRenderObjectsGeneric<ChainableInstance> {
   constructor(element: HTMLElement, configOptions?: ConfigOptions);
 
@@ -47,6 +49,8 @@ export declare class ThreeRenderObjectsGeneric<ChainableInstance> {
   backgroundColor(color: string): ChainableInstance;
   backgroundImageUrl(): string | null;
   backgroundImageUrl(url: string | null): ChainableInstance;
+  backgroundImageStatus(): BackgroundImageStatus;
+  backgroundImageStatus(status: BackgroundImageStatus): ChainableInstance;
   onBackgroundImageLoaded(callback: () => void): ChainableInstance;
   showNavInfo(): boolean;
   showNavInfo(enabled: boolean): ChainableInstance;
