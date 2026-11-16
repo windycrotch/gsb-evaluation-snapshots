@@ -1,0 +1,36 @@
+{
+  "name": "lookacrawler",
+  "version": "1.1.2",
+  "description": "Token-optimized local MCP server for web crawling and LLM content extraction",
+  "main": "index.ts",
+  "bin": {
+    "lookacrawler": "./cli.ts"
+  },
+  "type": "module",
+  "scripts": {
+    "start": "bun run index.ts",
+    "dev": "bun --watch run index.ts",
+    "cli": "bun run cli.ts",
+    "serve": "bun run index.ts --transport sse",
+    "build": "bun build index.ts --target bun --external playwright --external playwright-core --outdir ./dist",
+    "build:maps": "cd google-maps-scraper && go build -o maps-leads .",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@mozilla/readability": "^0.6.0",
+    "jsdom": "^30.0.1",
+    "libphonenumber-js": "^1.13.15",
+    "playwright": "^1.62.1",
+    "turndown": "^7.2.4",
+    "turndown-plugin-gfm": "^1.0.2",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.14",
+    "@types/jsdom": "^28.0.3",
+    "@types/node": "^26.1.2",
+    "@types/turndown": "^5.0.6",
+    "typescript": "^5.7.3"
+  }
+}
