@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { DEFAULT_MIDI_QUEUE_TIMING } from '../../../src/config/defaults'
 import { MidiPortQueue } from '../../../src/audio/midi/port-queue'
 import { intent, QueueFake, TEST_QUEUE_TIMING } from './queue-fake'
+import { PortFake } from './port-fake'
 
 const harnesses: QueueFake[] = []
 function setup(supportsClear = true) {
@@ -482,5 +483,183 @@ describe('owned MIDI port queue', () => {
     expect(DEFAULT_MIDI_QUEUE_TIMING.horizonMs).toBeGreaterThanOrEqual(
       DEFAULT_MIDI_QUEUE_TIMING.pumpIntervalMs + DEFAULT_MIDI_QUEUE_TIMING.cancelGuardMs
     )
+  })
+
+  it('moves release obligations to a replacement port and never replays old attacks', () => {
+    const fake = setup()
+    fake.queue.enqueue(intent('held', { onTimeMs: 1000, offTimeMs: 3000 }))
+    fake.queue.pump()
+    expect(fake.delivered.map((event) => event.bytes)).toEqual([[0x90, 60, 100]])
+    fake.port.state = 'disconnected'
+    fake.queue.disconnect()
+    const replacement = new PortFake('output-b')
+    replacement.connection = 'open'
+    const sent: Array<{ bytes: number[]; timeMs: number }> = []
+    replacement.send.mockImplementation((bytes, timeMs) => sent.push({ bytes: [...bytes], timeMs }))
+    const next = fake.queue.recoverTo(replacement)
+    expect(next).not.toBe(fake.queue)
+    // The reconnected handle only receives the owed Off, never the old On.
+    expect(sent).toEqual([{ bytes: [0x80, 60, 0], timeMs: 1000 }])
+    expect(fake.port.send).toHaveBeenCalledTimes(1)
+    expect(fake.queue.getSnapshot().releaseObligations).toEqual([])
+    next.enqueue(intent('fresh', { portId: 'output-b', onTimeMs: 1010, offTimeMs: 1020 }))
+    fake.nowMs = 1010
+    next.pump()
+    expect(sent.slice(1)).toEqual([
+      { bytes: [0x90, 60, 100], timeMs: 1010 },
+      { bytes: [0x80, 60, 0], timeMs: 1020 }
+    ])
+    next.dispose()
+  })
+
+  it.each([true, false])('closes obligations on reconnect without replaying attacks (clear: %s)', (supportsClear) => {
+    const fake = setup(supportsClear)
+    fake.queue.enqueue(intent('held', { onTimeMs: 1000, offTimeMs: 3000 }))
+    fake.advance(1000)
+    expect(fake.delivered.map((event) => event.bytes)).toEqual([[0x90, 60, 100]])
+    fake.port.state = 'disconnected'
+    fake.queue.disconnect()
+    expect(fake.queue.getSnapshot().failed).toBe(true)
+    expect(fake.delivered).toHaveLength(1)
+    fake.port.state = 'connected'
+    fake.queue.recover()
+    expect(fake.delivered.map((event) => event.bytes)).toEqual([
+      [0x90, 60, 100],
+      [0x80, 60, 0]
+    ])
+    expect(fake.delivered.filter((event) => (event.bytes[0]! & 0xf0) === 0x90)).toHaveLength(1)
+    fake.advance(1010)
+    expect(fake.queue.getSnapshot().releaseObligations).toEqual([])
+  })
+
+  it('reuses a channel for another track once a recovered release obligation is fulfilled', () => {
+    const fake = setup()
+    fake.queue.enqueue(intent('held', { onTimeMs: 1000, offTimeMs: 3000 }))
+    fake.queue.pump()
+    fake.port.state = 'disconnected'
+    fake.queue.disconnect()
+    fake.port.state = 'connected'
+    fake.queue.recover()
+    expect(fake.delivered.map((event) => event.bytes)).toEqual([
+      [0x90, 60, 100],
+      [0x80, 60, 0]
+    ])
+    expect(() =>
+      fake.queue.enqueue(
+        intent('chord', {
+          track: 'chord',
+          source: { kind: 'chord', chordId: 'C', midi: 64 },
+          midi: 64,
+          onTimeMs: 1010,
+          offTimeMs: 1020
+        })
+      )
+    ).not.toThrow()
+    fake.advance(1010)
+    expect(fake.delivered.at(-1)?.bytes).toEqual([0x90, 64, 100])
+  })
+
+  it('drops queued notes on a clock epoch jump without catching up, then schedules fresh notes', () => {
+    const fake = setup()
+    fake.queue.enqueue(intent('held', { onTimeMs: 1000, offTimeMs: 3000 }))
+    fake.queue.enqueue(intent('future', { midi: 64, onTimeMs: 2000, offTimeMs: 3000 }))
+    fake.queue.pump()
+    ++fake.epoch
+    fake.nowMs = 5000
+    fake.queue.pump()
+    // The possible attack is closed; the never-submitted future note is dropped silently.
+    expect(fake.delivered.map((event) => [event.bytes, event.timeMs])).toEqual([
+      [[0x90, 60, 100], 1000],
+      [[0x80, 60, 0], 5000]
+    ])
+    expect(fake.queue.getSnapshot().notes).toEqual([])
+    fake.queue.enqueue(intent('fresh', { onTimeMs: 5100, offTimeMs: 5200 }))
+    fake.advance(5100)
+    fake.advance(5200)
+    expect(fake.delivered.map((event) => [event.bytes, event.timeMs])).toEqual([
+      [[0x90, 60, 100], 1000],
+      [[0x80, 60, 0], 5000],
+      [[0x90, 60, 100], 5100],
+      [[0x80, 60, 0], 5200]
+    ])
+  })
+
+  it('sends the panic controllers only once across repeated panic calls', () => {
+    const fake = setup()
+    fake.queue.enqueue(intent('active', { onTimeMs: 1000, offTimeMs: 3000 }))
+    fake.queue.pump()
+    fake.queue.panic()
+    fake.queue.panic()
+    fake.queue.panic()
+    expect(fake.delivered.map((event) => event.bytes)).toEqual([
+      [0x90, 60, 100],
+      [0x80, 60, 0],
+      [0xb0, 64, 0],
+      [0xb0, 123, 0],
+      [0xb0, 120, 0]
+    ])
+  })
+
+  it('panics again for new activity after the panic guard window', () => {
+    const fake = setup()
+    fake.queue.enqueue(intent('active', { onTimeMs: 1000, offTimeMs: 3000 }))
+    fake.queue.pump()
+    fake.queue.panic()
+    fake.advance(1010)
+    fake.queue.enqueue(intent('next', { onTimeMs: 1020, offTimeMs: 2000 }))
+    fake.advance(1020)
+    fake.queue.panic()
+    expect(fake.delivered.map((event) => event.bytes)).toEqual([
+      [0x90, 60, 100],
+      [0x80, 60, 0],
+      [0xb0, 64, 0],
+      [0xb0, 123, 0],
+      [0xb0, 120, 0],
+      [0x90, 60, 100],
+      [0x80, 60, 0],
+      [0xb0, 64, 0],
+      [0xb0, 123, 0],
+      [0xb0, 120, 0]
+    ])
+  })
+
+  it('canceling a local same-pitch successor leaves the active predecessor gate untouched', () => {
+    const fake = setup()
+    fake.queue.enqueue(intent('old', { onTimeMs: 1000, offTimeMs: 3000 }))
+    fake.queue.pump()
+    fake.queue.enqueue(intent('new', { onTimeMs: 2000, offTimeMs: 2500 }))
+    fake.queue.cancel({ source: { kind: 'melody', noteId: 'new' } })
+    fake.advance(1990)
+    fake.advance(2010)
+    fake.advance(2020)
+    expect(fake.delivered.map((event) => [event.bytes, event.timeMs])).toEqual([
+      [[0x90, 60, 100], 1000],
+      [[0x80, 60, 0], 2000]
+    ])
+    expect(fake.queue.getSnapshot().notes).toEqual([])
+  })
+
+  it('canceling one source never closes an active same-pitch note of another source', () => {
+    const fake = setup()
+    fake.queue.enqueue(intent('melody', { onTimeMs: 1000, offTimeMs: 3000 }))
+    fake.queue.enqueue(
+      intent('chord', {
+        track: 'chord',
+        channel: 2,
+        source: { kind: 'chord', chordId: 'C', midi: 60 },
+        onTimeMs: 1000,
+        offTimeMs: 4000
+      })
+    )
+    fake.queue.pump()
+    fake.queue.cancel({ source: { kind: 'melody', noteId: 'melody' } })
+    expect(fake.delivered.map((event) => event.bytes)).toEqual([
+      [0x90, 60, 100],
+      [0x91, 60, 100],
+      [0x80, 60, 0]
+    ])
+    fake.advance(3980)
+    fake.advance(4010)
+    expect(fake.delivered.at(-1)?.bytes).toEqual([0x81, 60, 0])
   })
 })

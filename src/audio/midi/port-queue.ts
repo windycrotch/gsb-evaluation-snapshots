@@ -111,12 +111,12 @@ export class MidiPortQueue {
     }
     if (note.portId !== this.port.id || this.notes.has(note.eventId))
       throw new Error('Invalid port or duplicate MIDI event identity.')
-    if (
-      [...this.notes.values()].some((entry) => entry.note.channel === note.channel && entry.note.track !== note.track)
-    ) {
+    // Release-only obligations are already closed and must not block or reshape new notes.
+    const live = [...this.notes.values()].filter((entry) => !entry.releaseOnly)
+    if (live.some((entry) => entry.note.channel === note.channel && entry.note.track !== note.track)) {
       throw new Error('MIDI tracks must use different port/channel pairs.')
     }
-    const existing = [...this.notes.values()].map((entry) => entry.note)
+    const existing = live.map((entry) => entry.note)
     const replacement = retriggerMidiNotes(existing, note)
     const ids = new Set(replacement.map((entry) => entry.eventId))
     const removed = new Set(existing.filter((entry) => !ids.has(entry.eventId)).map((entry) => entry.eventId))
@@ -326,6 +326,8 @@ export class MidiPortQueue {
     if (this.disposed || this.port.state !== 'connected' || this.port.connection !== 'open') return
     this.failed = false
     this.cancel({})
+    // Prune fulfilled release obligations instead of leaving the wakeup stopped.
+    this.arm()
   }
 
   releaseScope(scope: MidiNoteScope): void {
@@ -409,31 +411,42 @@ export class MidiPortQueue {
       this.failed = true
     }
     const now = this.environment.readClock().nowMs
+    // A panic submitted inside the race guard still covers every used channel; never repeat it.
+    const panickedRecently = this.submitted.some(
+      (event) => event.kind === 'panic' && event.timeMs >= now - this.timing.cancelGuardMs
+    )
     const releases: OwnedMidiNote[] = []
-    for (const { note, onSubmitted } of this.notes.values()) {
-      if (onSubmitted) {
-        try {
-          this.release(note, now)
-          // A failed clear can leave a future attack in the driver; follow it with an explicit Off.
-          if (!cleared && note.onTimeMs > now) this.release(note, note.onTimeMs)
-          releases.push({
-            note: { ...note, offTimeMs: now },
-            onSubmitted: true,
-            offSubmitted: true,
-            offSubmittedTimeMs: now,
-            releaseOnly: true
-          })
-        } catch {
-          /* Best-effort cleanup continues on other notes. */
-        }
+    for (const entry of this.notes.values()) {
+      const { note, onSubmitted, offSubmitted } = entry
+      if (!onSubmitted) continue
+      if (offSubmitted) {
+        // Already closed by an earlier cleanup; keep the obligation for the ledger only.
+        releases.push(entry)
+        continue
+      }
+      try {
+        this.release(note, now)
+        // A failed clear can leave a future attack in the driver; follow it with an explicit Off.
+        if (!cleared && note.onTimeMs > now) this.release(note, note.onTimeMs)
+        releases.push({
+          note: { ...note, offTimeMs: now },
+          onSubmitted: true,
+          offSubmitted: true,
+          offSubmittedTimeMs: now,
+          releaseOnly: true
+        })
+      } catch {
+        /* Best-effort cleanup continues on other notes. */
       }
     }
-    for (const [channel, note] of this.usedChannels) {
-      for (const controller of [64, 123, 120]) {
-        try {
-          this.send({ note, kind: 'off', timeMs: now }, now, [0xb0 | (channel - 1), controller, 0], 'panic')
-        } catch {
-          /* Disconnected ports cannot acknowledge cleanup. */
+    if (!panickedRecently) {
+      for (const [channel, note] of this.usedChannels) {
+        for (const controller of [64, 123, 120]) {
+          try {
+            this.send({ note, kind: 'off', timeMs: now }, now, [0xb0 | (channel - 1), controller, 0], 'panic')
+          } catch {
+            /* Disconnected ports cannot acknowledge cleanup. */
+          }
         }
       }
     }
