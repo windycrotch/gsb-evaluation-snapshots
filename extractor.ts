@@ -41,6 +41,12 @@ export interface FastExtractOptions {
   cookies?: Record<string, string>;
   proxy?: string;
   maxRetries?: number;
+  /**
+   * When false, anti-bot blocks are rethrown instead of escalating to the
+   * deep/stealth browser path. Used by callers that run their own retry
+   * policy and need the raw error. Defaults to true.
+   */
+  escalate?: boolean;
   linkFormat?: LinkFormat;
   imageMode?: ImageMode;
 }
@@ -530,7 +536,7 @@ async function extractFastOnce(options: FastExtractOptions): Promise<string> {
     // to pass — without this, the default `fast` path silently returns 0 bytes.
     const message = error instanceof Error ? error.message : String(error);
     const antiBot = /Anti-Bot protection/i.test(message) || /cloudflare/i.test(message) || /just a moment/i.test(message);
-    if (antiBot) {
+    if (antiBot && options.escalate !== false) {
       recordMetric("escalations");
       console.error(`[lookacrawler] fast blocked by anti-bot (${message.slice(0, 90)}); escalating to deep/stealth...`);
       return extractDeep({

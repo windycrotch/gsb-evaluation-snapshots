@@ -40,6 +40,18 @@ export interface CrawlWebsiteOptions {
   cookies?: Record<string, string>;
   proxy?: string;
   timeoutMs?: number;
+  /**
+   * Total wall-clock budget for the whole crawl, measured from function
+   * entry. Once exhausted no new pages are dispatched; in-flight requests
+   * may finish but queued URLs are dropped.
+   */
+  maxDurationMs?: number;
+  /**
+   * Maximum retries per page for recoverable failures (timeouts, HTTP
+   * 429/5xx, network errors). Non-recoverable failures (403, anti-bot /
+   * CAPTCHA challenges, invalid URLs) are never retried. Defaults to 0.
+   */
+  maxRetries?: number;
 }
 
 export interface CrawledPage {
@@ -48,6 +60,8 @@ export interface CrawledPage {
   markdown: string;
   charCount: number;
   estimatedTokens: number;
+  /** How many fetch attempts this page consumed (1 for an immediate success). */
+  attempts: number;
   error?: string;
 }
 
@@ -55,6 +69,10 @@ export interface CrawlWebsiteResult {
   startUrl: string;
   totalPagesCrawled: number;
   totalEstimatedTokens: number;
+  /** True when the crawl ended early because maxDurationMs ran out. */
+  stoppedByBudget: boolean;
+  /** Queued URLs never processed because of the time budget or maxPages. */
+  skippedCount: number;
   pages: CrawledPage[];
 }
 
@@ -239,9 +257,35 @@ export function extractHrefsFromMarkdown(markdown: string): string[] {
 }
 
 /**
+ * Decide whether a page-fetch failure is worth retrying.
+ *
+ * Recoverable: timeouts, HTTP 429 / 5xx (including the "Anti-Bot protection
+ * triggered: HTTP Status 503" wrapper fetchHtml puts around them), and
+ * network-level failures (socket resets, DNS, connection refused).
+ * Everything else — 403, CAPTCHA/challenge pages, SSRF blocks, invalid
+ * URLs, oversize responses — is final.
+ */
+export function isRecoverableCrawlError(message: string): boolean {
+  if (/timed out/i.test(message)) return true;
+  if (/HTTP (?:Status )?429/.test(message)) return true;
+  if (/HTTP (?:Status )?5\d{2}/.test(message)) return true;
+  if (/HTTP (?:Status )?\d{3}/.test(message)) return false;
+  if (/Anti-Bot|not allowed|invalid|credentials|exceeds maximum size/i.test(message)) return false;
+  return true;
+}
+
+const RETRY_INITIAL_BACKOFF_MS = 200;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
  * Perform autonomous, recursive website crawling with depth boundaries, regex route filtering, and token accounting.
  */
 export async function crawlWebsite(options: CrawlWebsiteOptions): Promise<CrawlWebsiteResult> {
+  // The total-duration budget is measured from function entry.
+  const crawlStartMs = Date.now();
   const startUrl = options.startUrl || options.url;
   if (!startUrl) {
     throw new Error("Missing startUrl for crawler");
@@ -259,10 +303,19 @@ export async function crawlWebsite(options: CrawlWebsiteOptions): Promise<CrawlW
     cookies,
     proxy,
     timeoutMs = 15000,
+    maxDurationMs,
+    maxRetries = 0,
   } = options;
 
   await validateTargetUrl(startUrl);
   const targetHost = new URL(startUrl).hostname;
+
+  // Total crawl budget, measured from function entry so URL validation and
+  // filter setup are included.
+  const deadline =
+    typeof maxDurationMs === "number" && Number.isFinite(maxDurationMs)
+      ? crawlStartMs + Math.max(0, maxDurationMs)
+      : Number.POSITIVE_INFINITY;
 
   const isUrlAllowed = makeUrlFilter(targetHost, includePatterns, excludePatterns);
 
@@ -270,88 +323,117 @@ export async function crawlWebsite(options: CrawlWebsiteOptions): Promise<CrawlW
   const visited = new Set<string>([startUrl]);
   const pages: CrawledPage[] = [];
 
+  // When the caller asks for crawl-level retries, the extractor's own
+  // retry/escalation policy is switched off so every attempt (and its
+  // backoff) is accounted for here against the total-duration budget.
+  // With the default maxRetries: 0 the extractor behaves exactly as before.
+  const extractorRetryOverrides =
+    maxRetries > 0 ? { maxRetries: 0, escalate: false } : {};
+
   const crawlPage = async ({ url: currentUrl, depth }: { url: string; depth: number }): Promise<void> => {
-    try {
-      let markdown: string;
-      if (mode === "deep") {
-        markdown = await extractDeep({
-          url: currentUrl,
-          timeoutMs,
-          headers,
-          cookies,
-          proxy,
-          linkFormat,
-          imageMode,
-        });
-      } else {
-        markdown = await extractFast({
-          url: currentUrl,
-          timeoutMs,
-          headers,
-          cookies,
-          proxy,
-          linkFormat,
-          imageMode,
-        });
-      }
-
-      const charCount = markdown.length;
-      const estimatedTokens = Math.ceil(charCount / 4);
-
-      pages.push({
-        url: currentUrl,
-        depth,
-        markdown,
-        charCount,
-        estimatedTokens,
-      });
-
-      // If depth allows, discover outgoing links from this page
-      if (depth < maxDepth && pages.length + queue.length < maxPages * 2) {
-        try {
-          // Reuse the markdown we already have instead of re-fetching the
-          // page. A second fetchHtml doubles the traffic and, in `deep`
-          // mode, returns raw SPA markup with an empty <div id="root">, so
-          // link discovery silently found nothing and the crawl stopped.
-          // The rendered markdown carries every href the browser saw.
-          let hrefs = extractHrefsFromMarkdown(markdown);
-          if (hrefs.length === 0 && linkFormat === "strip") {
-            // `strip` removes URLs by design; the page may still be worth
-            // one extra fetch if it has no other way to expose its links.
-            const html = await fetchHtml(currentUrl, { timeoutMs: 5000, headers, cookies, proxy });
-            const dom = new JSDOM(html, { url: currentUrl });
-            hrefs = Array.from(dom.window.document.querySelectorAll("a[href]"))
-              .map((a) => a.getAttribute("href") || "");
-          }
-
-          for (const href of hrefs) {
-            if (!href) continue;
-            try {
-              const resolved = new URL(href, currentUrl);
-              resolved.hash = "";
-              const normalizedUrl = resolved.toString();
-
-              if (!visited.has(normalizedUrl) && isUrlAllowed(normalizedUrl)) {
-                visited.add(normalizedUrl);
-                queue.push({ url: normalizedUrl, depth: depth + 1 });
-              }
-            } catch {
-              /* skip */
-            }
-          }
-        } catch {
-          /* link discovery error ignored */
+    let attempts = 0;
+    let backoffMs = RETRY_INITIAL_BACKOFF_MS;
+    // Retried attempts re-run the same extract call, so validateTargetUrl
+    // and the URL filters apply to every attempt exactly as before.
+    while (true) {
+      attempts++;
+      try {
+        let markdown: string;
+        if (mode === "deep") {
+          markdown = await extractDeep({
+            url: currentUrl,
+            timeoutMs,
+            headers,
+            cookies,
+            proxy,
+            linkFormat,
+            imageMode,
+            ...extractorRetryOverrides,
+          });
+        } else {
+          markdown = await extractFast({
+            url: currentUrl,
+            timeoutMs,
+            headers,
+            cookies,
+            proxy,
+            linkFormat,
+            imageMode,
+            ...extractorRetryOverrides,
+          });
         }
+
+        const charCount = markdown.length;
+        const estimatedTokens = Math.ceil(charCount / 4);
+
+        pages.push({
+          url: currentUrl,
+          depth,
+          markdown,
+          charCount,
+          estimatedTokens,
+          attempts,
+        });
+
+        // If depth allows, discover outgoing links from this page
+        if (depth < maxDepth && pages.length + queue.length < maxPages * 2) {
+          try {
+            // Reuse the markdown we already have instead of re-fetching the
+            // page. A second fetchHtml doubles the traffic and, in `deep`
+            // mode, returns raw SPA markup with an empty <div id="root">, so
+            // link discovery silently found nothing and the crawl stopped.
+            // The rendered markdown carries every href the browser saw.
+            let hrefs = extractHrefsFromMarkdown(markdown);
+            if (hrefs.length === 0 && linkFormat === "strip") {
+              // `strip` removes URLs by design; the page may still be worth
+              // one extra fetch if it has no other way to expose its links.
+              const html = await fetchHtml(currentUrl, { timeoutMs: 5000, headers, cookies, proxy });
+              const dom = new JSDOM(html, { url: currentUrl });
+              hrefs = Array.from(dom.window.document.querySelectorAll("a[href]"))
+                .map((a) => a.getAttribute("href") || "");
+            }
+
+            for (const href of hrefs) {
+              if (!href) continue;
+              try {
+                const resolved = new URL(href, currentUrl);
+                resolved.hash = "";
+                const normalizedUrl = resolved.toString();
+
+                if (!visited.has(normalizedUrl) && isUrlAllowed(normalizedUrl)) {
+                  visited.add(normalizedUrl);
+                  queue.push({ url: normalizedUrl, depth: depth + 1 });
+                }
+              } catch {
+                /* skip */
+              }
+            }
+          } catch {
+            /* link discovery error ignored */
+          }
+        }
+        return;
+      } catch (err: any) {
+        const message = err?.message || String(err);
+        const remainingMs = deadline - Date.now();
+        if (attempts <= maxRetries && isRecoverableCrawlError(message) && remainingMs > 0) {
+          // Increasing backoff between retries; the wait consumes the same
+          // total-duration budget, so it is capped at what remains.
+          await sleep(Math.min(backoffMs, remainingMs));
+          backoffMs *= 2;
+          continue;
+        }
+        pages.push({
+          url: currentUrl,
+          depth,
+          markdown: "",
+          charCount: 0,
+          estimatedTokens: 0,
+          attempts,
+          error: message,
+        });
+        return;
       }
-    } catch (err: any) {
-      pages.push({
-        url: currentUrl,
-        depth,
-        markdown: "",
-        charCount: 0,
-        estimatedTokens: 0,
-        error: err.message || String(err),
-      });
     }
   };
 
@@ -359,8 +441,17 @@ export async function crawlWebsite(options: CrawlWebsiteOptions): Promise<CrawlW
   // waves (`Promise.all` per batch) left every slot idle until the slowest page
   // of the batch returned.
   let inFlight = 0;
+  let stoppedByBudget = false;
+  let skippedCount = 0;
   await new Promise<void>((resolve) => {
     const pump = () => {
+      if (Date.now() >= deadline && (queue.length > 0 || inFlight > 0)) {
+        // Budget exhausted: stop dispatching new pages. In-flight requests
+        // are left to finish; everything still queued is dropped.
+        stoppedByBudget = true;
+        skippedCount += queue.length;
+        queue.length = 0;
+      }
       while (inFlight < concurrency && queue.length > 0 && pages.length + inFlight < maxPages) {
         const item = queue.shift()!;
         inFlight++;
@@ -369,7 +460,13 @@ export async function crawlWebsite(options: CrawlWebsiteOptions): Promise<CrawlW
           pump();
         });
       }
-      if (inFlight === 0) resolve();
+      if (inFlight === 0) {
+        // URLs left behind because maxPages (not the time budget) stopped
+        // dispatching also count as skipped.
+        skippedCount += queue.length;
+        queue.length = 0;
+        resolve();
+      }
     };
     pump();
   });
@@ -380,6 +477,8 @@ export async function crawlWebsite(options: CrawlWebsiteOptions): Promise<CrawlW
     startUrl,
     totalPagesCrawled: pages.length,
     totalEstimatedTokens,
+    stoppedByBudget,
+    skippedCount,
     pages,
   };
 }

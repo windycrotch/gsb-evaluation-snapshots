@@ -7,6 +7,8 @@ describe("Autonomous Web Crawler & Mapper (crawler.ts)", () => {
   const requestLog: Array<{ path: string; start: number; end?: number }> = [];
   let inFlight = 0;
   let maxInFlight = 0;
+  let flakyHits = 0;
+  let forbiddenHits = 0;
 
   beforeAll(() => {
     process.env.LOOKACRAWLER_ALLOW_LOCAL = "true";
@@ -14,6 +16,38 @@ describe("Autonomous Web Crawler & Mapper (crawler.ts)", () => {
       port: 0,
       async fetch(req) {
         const url = new URL(req.url);
+
+        if (url.pathname === "/flaky") {
+          flakyHits++;
+          if (flakyHits === 1) {
+            return new Response("Service Unavailable", { status: 503 });
+          }
+          return new Response(
+            `<!DOCTYPE html><html><body><h1>Flaky Page Recovered</h1><p>Recovered after a retry.</p></body></html>`,
+            { headers: { "Content-Type": "text/html" } }
+          );
+        }
+
+        if (url.pathname === "/forbidden") {
+          forbiddenHits++;
+          return new Response("Forbidden", { status: 403 });
+        }
+
+        if (url.pathname === "/budget/hub") {
+          const links = ["p1", "p2", "p3", "p4", "p5"].map((p) => `<a href="/budget/${p}">${p}</a>`).join("");
+          return new Response(
+            `<!DOCTYPE html><html><body><h1>Budget Hub</h1>${links}</body></html>`,
+            { headers: { "Content-Type": "text/html" } }
+          );
+        }
+
+        if (url.pathname.startsWith("/budget/p")) {
+          await Bun.sleep(500);
+          return new Response(
+            `<!DOCTYPE html><html><body><h1>${url.pathname}</h1><p>Slow budget page.</p></body></html>`,
+            { headers: { "Content-Type": "text/html" } }
+          );
+        }
 
         if (url.pathname.startsWith("/pool/")) {
           const entry: { path: string; start: number; end?: number } = { path: url.pathname, start: performance.now() };
@@ -258,6 +292,82 @@ describe("Autonomous Web Crawler & Mapper (crawler.ts)", () => {
       expect(result.pages.length).toBe(1);
       const markdown = result.pages[0].markdown;
       expect(markdown).toContain("[1]:");
+    });
+
+    test("should retry a recoverable 503 and record attempts on success", async () => {
+      const before = flakyHits;
+      const result = await crawlWebsite({
+        startUrl: `${serverUrl}/flaky`,
+        maxDepth: 0,
+        maxPages: 1,
+        mode: "fast",
+        maxRetries: 3,
+      });
+
+      expect(result.stoppedByBudget).toBe(false);
+      expect(result.pages.length).toBe(1);
+      const page = result.pages[0];
+      expect(page.error).toBeUndefined();
+      expect(page.attempts).toBe(2);
+      expect(page.markdown).toContain("Flaky Page Recovered");
+      expect(flakyHits - before).toBe(2);
+    });
+
+    test("should not retry a non-recoverable 403", async () => {
+      const before = forbiddenHits;
+      const result = await crawlWebsite({
+        startUrl: `${serverUrl}/forbidden`,
+        maxDepth: 0,
+        maxPages: 1,
+        mode: "fast",
+        maxRetries: 3,
+      });
+
+      expect(result.pages.length).toBe(1);
+      const page = result.pages[0];
+      expect(page.attempts).toBe(1);
+      expect(page.error).toBeDefined();
+      expect(page.error).toContain("403");
+      expect(forbiddenHits - before).toBe(1);
+    });
+
+    test("should stop dispatching pages once maxDurationMs is exhausted", async () => {
+      const maxDurationMs = 300;
+      const startedAt = Date.now();
+      const result = await crawlWebsite({
+        startUrl: `${serverUrl}/budget/hub`,
+        maxDepth: 1,
+        maxPages: 10,
+        concurrency: 2,
+        mode: "fast",
+        maxDurationMs,
+      });
+      const elapsed = Date.now() - startedAt;
+
+      expect(result.stoppedByBudget).toBe(true);
+      expect(result.skippedCount).toBeGreaterThan(0);
+      // In-flight pages may finish, but nothing queued after the budget ran
+      // out is allowed into the results.
+      const crawled = result.pages.map((p) => p.url);
+      expect(crawled).toContain(`${serverUrl}/budget/hub`);
+      expect(crawled).not.toContain(`${serverUrl}/budget/p3`);
+      expect(crawled).not.toContain(`${serverUrl}/budget/p4`);
+      expect(crawled).not.toContain(`${serverUrl}/budget/p5`);
+      // Total time stays within the budget plus the in-flight slow pages.
+      expect(elapsed).toBeLessThan(maxDurationMs + 2000);
+    });
+
+    test("should report attempts: 1 and no budget stop with default options", async () => {
+      const result = await crawlWebsite({
+        startUrl: `${serverUrl}/page2`,
+        maxDepth: 0,
+        maxPages: 1,
+        mode: "fast",
+      });
+
+      expect(result.stoppedByBudget).toBe(false);
+      expect(result.pages.length).toBe(1);
+      expect(result.pages[0].attempts).toBe(1);
     });
   });
 });
