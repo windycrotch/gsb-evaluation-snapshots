@@ -1,0 +1,110 @@
+# 更新记录
+
+## 0.7.8 (2026-11-14)
+
+- 适配 DSH 0.2.2-rc.3：最低 Harness 版本声明提升至 0.2.2-rc.3，运行时代码未变。
+- Support DSH 0.2.2-rc.3: raise the minimum Harness declaration to 0.2.2-rc.3; runtime code is unchanged.
+
+## 0.7.7 (2026-11-08)
+
+- 将最低 DSH 版本对齐到已验收的 0.2.1-rc.2，修复插件市场在该版本安装前直接拒绝的问题；保留宿主权限、进程执行及用户选择更新的机制，不要求版本豁免（#7）。
+- Support verified DSH 0.2.1-rc.2 installations without an allow-version exemption; retain native permissions, subprocess execution and optional updates.
+
+## 0.7.6 (2026-11-04)
+
+- 同步共享界面：嵌入设置时继承宿主底色，输入框跟随主题，空状态保持可读宽度；新版 DSH 可显示插件设置图标。
+- Align embedded surfaces, themed inputs, readable empty states and optional native settings icons.
+- 分镜参数对齐官方 SDK 支持的 schema 子集，范围仍由执行层严格校验。
+- Align storyboard schemas with the native SDK subset while keeping runtime bounds.
+
+
+## 0.7.5 (2026-10-30)
+
+- `ffmpeg_health` 现在输出实际探测的可执行文件路径，失败时附 1-3 步修复指引（安装 FFmpeg / 加入 PATH / 配置 ffmpegPath 或 DSH_FFMPEG_PATH / 重启 DSH）并在结构化结果里给出 `hint`；工具结果文本同步显示。
+- 可执行文件缺失（ENOENT）时，各工具直接给出可行动的修复文案并点名 `ffmpeg_health`，其他错误（如 EACCES）保持原样不被改写；取消语义不变。
+- 使用说明新增「故障排查」表：ENOENT、退出码失败、超时、4MB 输出截断、覆盖拒绝、源文件保护与总览图时间含义。
+- Health now prints the probed executable paths, adds numbered next steps and a structured hint on failure; missing binaries produce actionable tool errors that point at ffmpeg_health while other errors stay untouched; new troubleshooting docs.
+
+## 0.7.4 (2026-10-30)
+
+- 重整中英文首页：用途、三步流程图、安装入口与操作示例；详细配置与边界集中到完整说明。
+- 保留下载统计、独立更新选择、问题反馈和贡献入口；原封面与运行功能保留。
+- Refresh bilingual landing pages, workflow artwork, quick starts and reference navigation.
+
+
+## 0.7.3 (2026-10-30)
+
+- 原生插件列表与详情新增专门生成的鲸鱼娘图标：大头像、独立功能符号、透明留白，适合 30 / 36 px 显示；原封面保留。
+- Add purpose-made whale-girl artwork with a distinct function emblem, transparent padding and small-size readability; preserve the original cover.
+
+
+[返回简介](README.md) · [使用说明](docs/USAGE.md) · [验证记录](docs/VALIDATION.md)
+
+[历史英文记录](docs/CHANGELOG.en.md)
+
+## 0.7.2 (2026-10-29)
+
+- 补齐中英文使用流程：准备、入口、具体操作与结果核对；新增累计 npm 下载徽章并保留月统计。
+- Add practical getting-started workflows and lifetime npm download badges alongside monthly counts.
+
+## 0.7.1 (2026-10-29)
+
+- 修复极短、分数帧率视频的采样时间取整越过最后一帧：向下取微秒精度，源文件保持不变。
+- Avoid rounding past the final frame when sampling short fractional-frame-rate clips.
+
+## 0.7.0 (2026-10-29)
+
+- 新增 ffmpeg_storyboard：均匀采样并拼成单张 PNG 总览图，附每格采样目标时间；可指定片段范围，保留原视频与已有成品。失败或取消会清理临时采样，不发布半成品。
+- Add ffmpeg_storyboard for bounded, uniform video contact sheets with per-cell target times and optional time ranges. Preserve source files and existing output; clean scratch and publish only a completed PNG.
+
+## 0.6.4 (2026-10-29)
+
+- 同步仓库与 npm 的简明介绍、中英文 README 和反馈入口；本次为文档与包元数据更新。
+- Sync npm descriptions and both README guides with the repository, including issue and pull-request links.
+
+## 0.6.3 (2026-10-27)
+
+- 修复分批更新时的新旧更新控件混用：保留原页面、草稿与安装保护，空闲后接管旧控制器，兼容旧入口。
+
+## 0.6.2 (2026-10-27)
+
+- 更新控件移至原有工作台或原生插件详情页底部；更新记录与选项原地展开，移除独立更新菜单与页面。
+- 保留原页面操作与草稿，自动安装默认关闭；安装前确认，遇到未保存修改或运行任务时暂停。
+
+## 0.6.1 (2026-10-27)
+
+- Keep this component's own update entry visible when installed transitively through Suite. Confirm whole-Suite update scope before opening its controls.
+- Keep automatic installation off by default and preserve independent installation behavior.
+
+## 0.6.0 (2026-10-26)
+
+- Add this plugin’s own update controls and independent preferences. Automatic installation stays off until explicitly enabled.
+- Confirm manual installs, preserve local sources and disabled state, pause for tasks or unsaved changes, and use native DSH recovery without forced restarts.
+- Require the public DSH 0.2.1-rc.3 update APIs; Suite components remain managed through Suite.
+
+## 0.5.1（2026-10-26）
+
+- 抽帧默认使用每次独立的 run 目录；显式帧序列检查实际文件冲突。输出保护覆盖所有拼接输入、字幕源、符号链接及硬链接别名。
+- Windows 回归 114 项通过、1 项跳过；宿主与未验收范围见[本次记录](docs/validation-0.5.1.md)。
+
+## 0.5.0 (2026-10-15)
+
+- 修复 GIF 的起点和时长选项作用到错误输入，调色板以单帧写入；非零起点也能按指定区间导出。
+- 重编码拼接先统一画布、帧率、像素比例与时间戳，可指定目标宽高和帧率，等比补边。
+- 混合有声/无声素材时只为无声片段补静音，保留其余片段的声音；全无声素材保持无音轨。
+
+## 0.4.5 (2026-10-05)
+
+- 输入、输出、字幕与抽帧路径按当前 DSH 会话工作区解析，避免宿主启动目录造成找错文件；非法时间参数立即报错。
+
+## 0.4.4 (2026-09-28)
+
+- 更新官方 Harness 0.2.0-rc.1 的兼容声明和共同加载验证；运行时代码未变。验证范围见[验证记录](docs/VALIDATION.md)。
+
+## 0.4.3 (2026-09-19)
+
+- 修复抽帧数到旧帧/清单截断、取消被当成功、取消文案丢原因、`+2dB` 被拒；音轨提取非 AAC 自动转 AAC、concat 混合音轨可用、ffprobe 截断明确报错。测试 102 项。
+
+## 更早的改动
+
+完整历史可查阅 [GitHub 提交记录](https://github.com/STARDUSTLC666/dsh-ffmpeg/commits/master)。
