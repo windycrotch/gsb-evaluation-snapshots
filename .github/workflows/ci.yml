@@ -32,6 +32,9 @@ jobs:
 
       # `test:unit` rather than `test`: the build above already produced the dist/ and
       # public/ artifacts the tests import, so skip rebuilding
+      - name: Build Test Bundle
+        run: npm run test:build
+
       - name: Run Tests
         run: npm run test:unit
 

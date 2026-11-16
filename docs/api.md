@@ -143,6 +143,8 @@ An animated splat sequence (a `.gsaf` content url) is the timeline instead: `has
 
 `animationTime`, `animationDuration`, `hasAnimation` and `hasSequence` are read-only observations. Seeking wraps repeat tracks and clamps once and ping-pong tracks to their duration. It preserves pause state; pause first to stop at the requested time. Hosts can pause from `animationTime:changed` to respond to a playback threshold, at the viewer's update cadence.
 
+For an animated splat sequence the seek wraps its time modulo the duration (a negative time lands back in `[0, duration)`) and moves the playhead before the frame is decoded in the worker. A failed decode is terminal: the sequence keeps its last frame on screen, `animationTime` stops advancing and every later `seek()` rejects with that original error without starting another decode, so a host can treat a rejected seek as "playback can no longer continue". Destroying the viewer never leaves a seek pending — any still waiting resolves rather than hangs. On WebGL, or with a single-frame file, there is no timeline and `seek()` settles immediately without touching the decoder worker. Seeking while paused still decodes and shows the requested frame; it just does not advance the clock.
+
 Dragging the built-in timeline pauses playback. Releasing or cancelling the drag does not restore an earlier pause flag, so it cannot undo a host command issued during scrubbing. Use Play to resume. The standalone `window.scrubTo` hook retains its pause-and-wait-for-frame behavior; `seek()` itself is synchronous.
 
 ### Controlling the camera

@@ -48,8 +48,9 @@ const readBytes = async (response: Response, progressCallback: (progress: number
  * {@link paused} stops its clock, {@link seek} moves it and {@link time} is where it is. Each
  * update decodes the frame due at that time, in a worker, so a slow decode skips frames rather
  * than slowing playback; the decoder continues forward from the frame it holds and replays from
- * the last keyframe to go back. Destroying {@link entity} stops it and releases the worker and
- * the container.
+ * the last keyframe to go back. A failed decode flips {@link failed} on, freezes the playhead and
+ * rejects every seek with the original error. Destroying {@link entity} stops it, releases the
+ * worker and the container, and resolves every seek still waiting rather than leaving it pending.
  */
 class GsafPlayer {
     /** The gsplat entity, showing the frame at {@link time}. */
@@ -111,7 +112,9 @@ class GsafPlayer {
         this.animated = animated;
 
         const onUpdate = (dt: number) => {
-            if (!this.paused) this._time = (this._time + dt) % this.duration;
+            // a failed sequence stays on its last frame: the clock no longer advances, so
+            // {@link time} reports where playback stopped
+            if (!this.paused && !this.failure) this._time = (this._time + dt) % this.duration;
             this.pump();
         };
         if (animated) app.on('update', onUpdate);
@@ -119,6 +122,7 @@ class GsafPlayer {
         entity.once('destroy', () => {
             this.destroyed = true;
             app.off('update', onUpdate);
+            // nothing can decode or upload anymore, so waits settle as resolved rather than hang
             this.settle();
         });
     }
@@ -129,13 +133,31 @@ class GsafPlayer {
     }
 
     /**
-     * Moves the playhead, wrapping it into the sequence.
+     * Whether a decode has failed. Once true it never clears: the player keeps its last frame on
+     * screen, {@link time} stops advancing and every {@link seek} rejects with the original error.
+     */
+    get failed() {
+        return this.failure !== null;
+    }
+
+    /**
+     * Moves the playhead, wrapping it into the sequence, and waits for the frame it names.
+     *
+     * The time wraps modulo {@link duration}, so a negative time lands back in
+     * `[0, duration)`. The returned promise resolves once that frame has been decoded in the
+     * worker and uploaded to the container (and a work buffer update requested); a repeat seek to
+     * the frame already on screen resolves at once. Seeking while {@link paused} still decodes and
+     * shows the frame, it just does not move the clock. A seek after a failed decode rejects with
+     * the original error and starts no decode; a seek after the entity is destroyed resolves at
+     * once, as do any seeks still pending when destruction happens. On a non-{@link animated}
+     * player (one frame, or WebGL) it resolves at once without touching the worker.
      *
      * @param time - The time in seconds.
      * @returns Resolves once the frame at that time is on screen, or the player is destroyed;
      * rejects once a decode has failed.
      */
     seek(time: number) {
+        if (this.destroyed) return Promise.resolve();
         if (this.failure) return Promise.reject(this.failure);
         if (!this.animated) return Promise.resolve();
         // a time already in range is kept exactly, so it lands on the frame it names
