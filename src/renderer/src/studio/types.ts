@@ -173,7 +173,7 @@ export interface StudioEngineApi {
   // Chops
   setChopBuffer(buffer: AudioBuffer | null): void
   setChopSettings(settings: ChopSettings): void
-  /** Start/end of a pad in source seconds, or null when no buffer is loaded. */
+  /** Start/end of a pad in source seconds, or null when no buffer is loaded or the pad falls outside it. */
   chopRegion(pad: number): { start: number; end: number } | null
   triggerChop(pad: number, velocity?: number, when?: number): void
   stopChops(): void

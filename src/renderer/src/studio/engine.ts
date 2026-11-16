@@ -1,3 +1,4 @@
+import { ChopPlayer } from './chop'
 import {
   DRUM_VOICES,
   STEPS_PER_BAR,
@@ -43,13 +44,6 @@ interface SynthVoice {
   oscillators: OscillatorNode[]
   nodes: AudioNode[]
   pitches: PitchParam[]
-}
-
-interface ActiveChop {
-  source: AudioBufferSourceNode
-  gain: GainNode
-  nodes: AudioNode[]
-  stopped: boolean
 }
 
 interface ActiveOpenHat {
@@ -185,9 +179,7 @@ export class StudioEngine implements StudioEngineApi {
   private sequencerMonoEnd = 0
   private liveNoteStack: Array<{ midi: number; velocity: number }> = []
 
-  private chopBuffer: AudioBuffer | null = null
-  private chopSettings: ChopSettings = { ...DEFAULT_CHOPS }
-  private readonly activeChops = new Set<ActiveChop>()
+  private readonly chopper = new ChopPlayer(DEFAULT_CHOPS)
   private openHat: ActiveOpenHat | null = null
   private active808: ActiveOpenHat | null = null
 
@@ -227,6 +219,7 @@ export class StudioEngine implements StudioEngineApi {
       return { dry, reverb, delay }
     }
     this.tracks = { drums: makeTrack(), chops: makeTrack(), synth: makeTrack() }
+    this.chopper.connect(ctx, this.tracks.chops.dry, this.tracks.chops.reverb)
 
     this.reverbInput = ctx.createGain()
     const convolver = ctx.createConvolver()
@@ -890,79 +883,26 @@ export class StudioEngine implements StudioEngineApi {
   }
 
   setChopBuffer(buffer: AudioBuffer | null): void {
-    if (this.chopBuffer !== buffer) this.stopChops()
-    this.chopBuffer = buffer
+    // Swapping samples stops whatever is still sounding from the old one first.
+    this.chopper.setBuffer(buffer)
   }
 
   setChopSettings(settings: ChopSettings): void {
-    this.chopSettings = { ...settings }
+    this.chopper.setSettings(settings)
   }
 
   chopRegion(pad: number): { start: number; end: number } | null {
-    const buffer = this.chopBuffer
-    if (!buffer) return null
-    const beatLength = 60 / Math.max(1, this.chopSettings.bpm)
-    const index = Math.max(0, Math.floor(pad))
-    const rawStart = this.chopSettings.offset +
-      (this.chopSettings.startBeat + index * this.chopSettings.sliceBeats) * beatLength
-    const rawEnd = rawStart + this.chopSettings.sliceBeats * beatLength
-    const start = clamp(rawStart, 0, buffer.duration)
-    const end = clamp(rawEnd, 0, buffer.duration)
-    return rawStart >= buffer.duration || end <= start ? null : { start, end }
+    return this.chopper.region(pad)
   }
 
   triggerChop(pad: number, velocity = 1, when?: number): void {
-    if (!this.ctx || !this.tracks || !this.chopBuffer) return
-    const region = this.chopRegion(pad)
-    if (!region) return
-    const ctx = this.ctx
-    const time = Math.max(when ?? ctx.currentTime, ctx.currentTime)
-    if (this.chopSettings.choke) this.chokeChops(time, 0.005)
-    const source = ctx.createBufferSource()
-    source.buffer = this.chopBuffer
-    const tempoRate = this.chopSettings.fitToTempo ? this.bpm / Math.max(1, this.chopSettings.bpm) : 1
-    const playbackRate = Math.max(0.01, tempoRate * 2 ** (this.chopSettings.pitch / 12))
-    source.playbackRate.value = playbackRate
-    const gain = ctx.createGain()
-    const send = ctx.createGain()
-    send.gain.value = clamp(this.chopSettings.reverb, 0, 1)
-    source.connect(gain)
-    gain.connect(this.tracks.chops.dry)
-    gain.connect(send).connect(this.tracks.chops.reverb)
-    const realDuration = (region.end - region.start) / playbackRate
-    const fade = Math.min(Math.max(0.001, this.chopSettings.fade), realDuration / 2)
-    const level = Math.max(EPSILON, clamp(velocity, 0, 1))
-    gain.gain.setValueAtTime(EPSILON, time)
-    gain.gain.exponentialRampToValueAtTime(level, time + fade)
-    gain.gain.setValueAtTime(level, Math.max(time + fade, time + realDuration - fade))
-    gain.gain.exponentialRampToValueAtTime(EPSILON, time + realDuration)
-    const active: ActiveChop = { source, gain, nodes: [source, gain, send], stopped: false }
-    this.activeChops.add(active)
-    source.onended = () => {
-      this.activeChops.delete(active)
-      for (const node of active.nodes) node.disconnect()
-    }
-    source.start(time, region.start, region.end - region.start)
-    source.stop(time + realDuration + 0.01)
+    if (!this.ctx || !this.tracks) return
+    // A pad with no valid region is silent: it neither plays nor chokes.
+    this.chopper.trigger(pad, velocity, when, this.bpm)
   }
 
   stopChops(): void {
-    if (!this.ctx) return
-    this.chokeChops(this.ctx.currentTime, 0.02)
-  }
-
-  private chokeChops(when: number, fade: number): void {
-    for (const chop of this.activeChops) {
-      if (chop.stopped) continue
-      chop.stopped = true
-      holdAt(chop.gain.gain, when)
-      chop.gain.gain.exponentialRampToValueAtTime(EPSILON, when + fade)
-      try {
-        chop.source.stop(when + fade + 0.005)
-      } catch {
-        // Already ended.
-      }
-    }
+    this.chopper.stop()
   }
 
   setTrack(track: StudioTrackId, state: MixerTrack): void {

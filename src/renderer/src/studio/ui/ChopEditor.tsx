@@ -12,6 +12,7 @@ import {
   updateChop
 } from '../actions'
 import { useStudio } from '../store'
+import { computeChopRegion } from '../chop'
 import { CHOP_PADS, type ChopSettings, type ChopSource } from '../types'
 import { Param, Seg, fmt } from './Param'
 import { usePadFlash } from './usePadFlash'
@@ -30,10 +31,15 @@ const SLICE_LABELS: Record<string, string> = { '0.5': '⅛', '1': '1 BEAT', '2':
 
 const PAD_COLORS = ['#7c5cff', '#39c5ff', '#2ee66b', '#ffd23c', '#ff7a39', '#ff4d6d', '#c084fc', '#22d3ee']
 
-function padRegion(c: ChopSettings, pad: number): { start: number; end: number } {
-  const beat = 60 / c.bpm
-  const start = c.offset + (c.startBeat + pad * c.sliceBeats) * beat
-  return { start, end: start + c.sliceBeats * beat }
+/** Region shown for a pad — the same computation the engine plays. */
+function padRegion(c: ChopSettings, pad: number, duration: number | undefined): { start: number; end: number } | null {
+  if (duration === undefined) {
+    // No sample loaded yet: show the nominal grid so the layout stays stable.
+    const beat = 60 / c.bpm
+    const start = c.offset + (c.startBeat + pad * c.sliceBeats) * beat
+    return { start, end: start + c.sliceBeats * beat }
+  }
+  return computeChopRegion(duration, c, pad)
 }
 
 export function ChopEditor() {
@@ -162,8 +168,8 @@ export function ChopEditor() {
 
       <div className="pad-grid cols-8">
         {Array.from({ length: CHOP_PADS }, (_, pad) => {
-          const r = padRegion(chop, pad)
-          const valid = hasSample && (!chopData.buffer || r.start < chopData.buffer.duration)
+          const r = padRegion(chop, pad, chopData.buffer?.duration)
+          const valid = hasSample && (!chopData.buffer || r !== null)
           return (
             <button
               key={pad}
@@ -172,7 +178,12 @@ export function ChopEditor() {
               className="pad-big chop-pad"
               style={{ ['--pad-color' as string]: PAD_COLORS[pad % PAD_COLORS.length] }}
               onPointerDown={(e) => hitChop(pad, e.shiftKey ? 0.55 : 1)}
-              {...tip(`Chop ${pad + 1}`, `Plays ${formatTime(r.start)}–${formatTime(r.end)} of the sample. Key: ${PAD_KEY_LABELS[pad]} (Shift = soft).`)}
+              {...tip(
+                `Chop ${pad + 1}`,
+                r
+                  ? `Plays ${formatTime(r.start)}–${formatTime(r.end)} of the sample. Key: ${PAD_KEY_LABELS[pad]} (Shift = soft).`
+                  : `Outside the sample — this pad is silent. Key: ${PAD_KEY_LABELS[pad]}.`
+              )}
             >
               <span className="pad-key">{PAD_KEY_LABELS[pad]}</span>
               {pad + 1}
@@ -277,8 +288,13 @@ function ChopWaveform({ chop, title }: { chop: ChopSettings; title: string }) {
       }
       const dur = buffer.duration
       const beat = 60 / c.bpm
-      const first = padRegion(c, 0).start
-      const last = padRegion(c, CHOP_PADS - 1).end
+      // The pad window as laid out on the grid; clipped to the sample for drawing.
+      const nominalFirst = padRegion(c, 0, undefined)!.start
+      const nominalLast = padRegion(c, CHOP_PADS - 1, undefined)!.end
+      const first = Math.max(0, Math.min(nominalFirst, dur))
+      const last = Math.min(dur, Math.max(nominalLast, first))
+      // Keep the window non-degenerate when the pad window is pushed past the end.
+      const span = Math.max(1e-4, last - first)
 
       // --- Overview ---
       const oh = OVERVIEW_H
@@ -298,7 +314,6 @@ function ChopWaveform({ chop, title }: { chop: ChopSettings; title: string }) {
       // --- Detail ---
       const top = oh + 6
       const dh = h - top
-      const span = last - first
       const key = `${w}|${first.toFixed(4)}|${span.toFixed(4)}|${buffer.length}`
       if (!detailCache.current || detailCache.current.key !== key) {
         const data = new Float32Array(w * 2)
@@ -324,13 +339,16 @@ function ChopWaveform({ chop, title }: { chop: ChopSettings; title: string }) {
       const data = detailCache.current.data
       const mid = top + dh / 2
       for (let pad = 0; pad < CHOP_PADS; pad++) {
-        const r = padRegion(c, pad)
-        const x1 = ((r.start - first) / span) * w
-        const x2 = ((r.end - first) / span) * w
+        const r = padRegion(c, pad, dur)
+        // Out-of-range pads still get a (dark) lane so the grid reads consistently.
+        const laneStart = r ? r.start : padRegion(c, pad, undefined)!.start
+        const laneEnd = r ? r.end : padRegion(c, pad, undefined)!.end
+        const x1 = ((laneStart - first) / span) * w
+        const x2 = ((laneEnd - first) / span) * w
         ctx.fillStyle = pad % 2 === 0 ? 'rgba(255,255,255,0.035)' : 'rgba(255,255,255,0.0)'
         ctx.fillRect(x1, top, x2 - x1, dh)
         const color = PAD_COLORS[pad % PAD_COLORS.length]
-        ctx.fillStyle = r.start >= dur ? '#2a2f3a' : color
+        ctx.fillStyle = r ? color : '#2a2f3a'
         for (let x = Math.max(0, Math.floor(x1)); x < Math.min(w, Math.ceil(x2)); x++) {
           const mn = data[x * 2]
           const mx = data[x * 2 + 1]
@@ -353,9 +371,9 @@ function ChopWaveform({ chop, title }: { chop: ChopSettings; title: string }) {
       }
       // Moving playhead for the chop that's sounding
       if (chopFlash.pad >= 0) {
-        const r = padRegion(c, chopFlash.pad)
-        const t = r.start + ((performance.now() - chopFlash.at) / 1000) * chopFlash.rate
-        if (t < r.end) {
+        const r = padRegion(c, chopFlash.pad, dur)
+        const t = r ? r.start + ((performance.now() - chopFlash.at) / 1000) * chopFlash.rate : Infinity
+        if (r && t < r.end) {
           ctx.fillStyle = '#ffffff'
           ctx.fillRect(((t - first) / span) * w, top, 2, dh)
           const ox = (t / dur) * w

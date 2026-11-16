@@ -68,6 +68,16 @@ npm run dev     # development (hot reload)
 npm start       # build + run the production bundle
 ```
 
+## Tests
+
+```bash
+npm test        # Chopper slice/rate/fade tests — synthetic buffers, no audio files needed
+```
+
+The suite (`tests/`, Node's built-in test runner) builds short silent buffers in
+memory and drives the engine through a small fake Web Audio graph, so it runs
+offline and without an audio device. `npm run typecheck:test` typechecks it.
+
 ## How to DJ with it
 
 1. **Add tracks** (button or drag-and-drop). BPM and beat phase are detected automatically. Make **crates** with **+ NEW CRATE** and drag tracks onto them to organize your library.

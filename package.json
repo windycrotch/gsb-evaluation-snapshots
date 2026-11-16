@@ -16,7 +16,9 @@
     "start": "npm run build && electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "icon": "electron scripts/make-icon.cjs",
-    "dist": "npm run build && electron-builder --mac"
+    "dist": "npm run build && electron-builder --mac",
+    "test": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --import ./tests/register-loader.mjs --test \"tests/**/*.test.mts\"",
+    "typecheck:test": "tsc --noEmit -p tsconfig.test.json"
   },
   "build": {
     "appId": "com.alexanderliteplo.stemdeck",

@@ -5,6 +5,7 @@
 import { engine } from '../audio/engine'
 import { computePeaks, type WaveformPeaks } from '../audio/analysis'
 import { showToast, useStore } from '../state/store'
+import { chopPlaybackRate } from './chop'
 import { studio } from './engine'
 import { DRUM_KITS, SYNTH_PRESETS, cloneKit, clonePatch, emptyPattern } from './presets'
 import { useStudio, type AppView } from './store'
@@ -377,7 +378,7 @@ export function hitChop(pad: number, velocity = 1): void {
   const { chop, bpm } = get()
   chopFlash.pad = pad
   chopFlash.at = performance.now()
-  chopFlash.rate = (chop.fitToTempo ? bpm / chop.bpm : 1) * Math.pow(2, chop.pitch / 12)
+  chopFlash.rate = chopPlaybackRate(bpm, chop)
   padFlash.set(`chop:${pad}`, performance.now())
   const step = recordStep()
   if (step !== null) setChopStep(pad, step, velocity)
