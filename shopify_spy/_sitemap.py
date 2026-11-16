@@ -7,6 +7,7 @@ host.
 
 from __future__ import annotations
 
+import dataclasses
 import io
 import logging
 import zlib
@@ -65,13 +66,32 @@ def parse(body: bytes) -> tuple[str | None, list[str]]:
     return root_type or None, locs
 
 
+@dataclasses.dataclass(frozen=True)
+class WalkReport:
+    """What one sitemap traversal did, readable once the walk has ended.
+
+    ``read`` is every sitemap URL fetched and parsed, in the order read.
+    ``off_host`` is each child sitemap refused for pointing outside the
+    top-level hosts. ``abandoned`` is each sitemap given up on because the
+    request failed, the response wasn't OK, or the body didn't parse. Both
+    hold each address once, however often an index repeats it. ``pages`` is
+    the number of page URLs the walk yielded.
+    """
+
+    read: tuple[str, ...]
+    off_host: tuple[str, ...]
+    abandoned: tuple[str, ...]
+    pages: int
+
+
 class SitemapWalk:
     """Async-iterable page URLs from a sitemap, following indexes on the same host.
 
     The store's hosts are the sitemap URL's host plus wherever it redirected to.
     ``root_ok`` becomes True once the top-level sitemap has been read.
     ``follow(child_url)`` decides which child sitemaps of an index are read.
-    ``kind`` is the request kind for every sitemap fetched.
+    ``kind`` is the request kind for every sitemap fetched. After the iteration
+    has run to completion, ``report`` summarizes the traversal.
     """
 
     def __init__(
@@ -88,9 +108,39 @@ class SitemapWalk:
         self.root_ok = False
         self.hosts = {hostname(sitemap_url)}
         self._visited: set[str] = set()
+        self._read: list[str] = []
+        self._off_host: list[str] = []
+        self._off_host_seen: set[str] = set()
+        self._abandoned: list[str] = []
+        self._abandoned_seen: set[str] = set()
+        self._pages = 0
+        self._finished = False
+
+    @property
+    def report(self) -> WalkReport:
+        """The traversal summary; only meaningful once the walk has ended."""
+        if not self._finished:
+            raise RuntimeError("SitemapWalk has not finished; report is readable afterwards")
+        return WalkReport(
+            read=tuple(self._read),
+            off_host=tuple(self._off_host),
+            abandoned=tuple(self._abandoned),
+            pages=self._pages,
+        )
 
     def __aiter__(self) -> AsyncIterator[str]:
-        return self._walk(self.sitemap_url, 0)
+        return self._iterate()
+
+    async def _iterate(self) -> AsyncIterator[str]:
+        async for page in self._walk(self.sitemap_url, 0):
+            self._pages += 1
+            yield page
+        self._finished = True
+
+    def _abandon(self, url: str) -> None:
+        if url not in self._abandoned_seen:
+            self._abandoned_seen.add(url)
+            self._abandoned.append(url)
 
     async def _walk(self, url: str, depth: int) -> AsyncIterator[str]:
         if url in self._visited or depth > MAX_DEPTH:
@@ -100,17 +150,26 @@ class SitemapWalk:
             response = await self.session.get(url, kind=self.kind)
         except RequestFailed as exc:
             logger.info("Sitemap request failed: %s", exc)
+            self._abandon(url)
             return
         if response is None or not response.ok:
+            self._abandon(url)
             return
         root, locs = parse(response.body)
         if depth == 0:
             self.hosts.add(hostname(response.url))
             self.root_ok = root is not None
+        if root is None:
+            self._abandon(url)
+            return
+        self._read.append(url)
         if root == "sitemapindex":
             for loc in locs:
                 if hostname(loc) not in self.hosts:
                     logger.info("Skipping off-host child sitemap %s", loc)
+                    if loc not in self._off_host_seen:
+                        self._off_host_seen.add(loc)
+                        self._off_host.append(loc)
                 elif self.follow(loc):
                     async for page in self._walk(loc, depth + 1):
                         yield page
@@ -125,5 +184,7 @@ def iter_locs(
     follow: Callable[[str], bool] | None = None,
     kind: RequestKind = STORE,
 ) -> SitemapWalk:
-    """Walk a sitemap: ``async for loc in iter_locs(session, url)``."""
+    """Walk a sitemap: ``async for loc in iter_locs(session, url)``.
+
+    The returned walk's ``report`` summarizes the traversal once it ends."""
     return SitemapWalk(session, sitemap_url, follow, kind)

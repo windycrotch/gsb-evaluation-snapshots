@@ -191,3 +191,139 @@ async def test_iter_locs_non_2xx_yields_nothing(status):
 async def test_iter_locs_request_failure_yields_nothing():
     session, _ = make_session({"https://a.test/sitemap.xml": FetchTimeout("slow")})
     assert await collect(session, "https://a.test/sitemap.xml") == []
+
+
+# --- walk report ----------------------------------------------------------------------
+
+
+async def walk_and_collect(session, url) -> tuple[sitemap.SitemapWalk, list[str]]:
+    walk = iter_locs(session, url)
+    async with asyncio.timeout(2):
+        locs = [loc async for loc in walk]
+    return walk, locs
+
+
+async def test_report_simple_urlset_counts_pages():
+    session, _ = make_session(
+        {"https://a.test/sitemap.xml": (200, urlset("https://a.test/p/1", "https://a.test/p/2"))}
+    )
+    walk, locs = await walk_and_collect(session, "https://a.test/sitemap.xml")
+    assert locs == ["https://a.test/p/1", "https://a.test/p/2"]
+    assert walk.report.read == ("https://a.test/sitemap.xml",)
+    assert walk.report.off_host == ()
+    assert walk.report.abandoned == ()
+    assert walk.report.pages == 2
+
+
+async def test_report_not_readable_before_walk_ends():
+    session, _ = make_session({"https://a.test/sitemap.xml": (200, urlset("https://a.test/p/1"))})
+    walk = iter_locs(session, "https://a.test/sitemap.xml")
+    with pytest.raises(RuntimeError):
+        walk.report
+    async with asyncio.timeout(2):
+        async for _ in walk:
+            break  # abandoning the walk early is not "ended" either
+    with pytest.raises(RuntimeError):
+        walk.report
+
+
+async def test_report_normal_index():
+    session, _ = make_session(
+        {
+            "https://a.test/sitemap.xml": (
+                200,
+                index("https://a.test/s1.xml", "https://a.test/s2.xml"),
+            ),
+            "https://a.test/s1.xml": (200, urlset("https://a.test/p/1")),
+            "https://a.test/s2.xml": (200, urlset("https://a.test/p/2", "https://a.test/p/3")),
+        }
+    )
+    walk, locs = await walk_and_collect(session, "https://a.test/sitemap.xml")
+    assert locs == ["https://a.test/p/1", "https://a.test/p/2", "https://a.test/p/3"]
+    assert walk.report.read == (
+        "https://a.test/sitemap.xml",
+        "https://a.test/s1.xml",
+        "https://a.test/s2.xml",
+    )
+    assert walk.report.off_host == ()
+    assert walk.report.abandoned == ()
+    assert walk.report.pages == 3
+
+
+async def test_report_off_host_child_listed_once():
+    session, fetcher = make_session(
+        {
+            "https://a.test/sitemap.xml": (
+                200,
+                index(
+                    "https://evil.test/s.xml",
+                    "https://a.test/s1.xml",
+                    "https://evil.test/s.xml",  # repeated: still reported once
+                ),
+            ),
+            "https://a.test/s1.xml": (200, urlset("https://a.test/p/1")),
+            "https://evil.test/s.xml": (200, urlset("https://evil.test/p/x")),
+        }
+    )
+    walk, locs = await walk_and_collect(session, "https://a.test/sitemap.xml")
+    assert locs == ["https://a.test/p/1"]
+    assert fetcher.count("https://evil.test/s.xml") == 0
+    assert walk.report.off_host == ("https://evil.test/s.xml",)
+    assert walk.report.abandoned == ()
+    assert walk.report.pages == 1
+
+
+async def test_report_broken_children_abandoned():
+    session, _ = make_session(
+        {
+            "https://a.test/sitemap.xml": (
+                200,
+                index(
+                    "https://a.test/gone.xml",  # request fails: 404
+                    "https://a.test/slow.xml",  # request fails: timeout
+                    "https://a.test/corrupt.xml",  # parses to nothing
+                    "https://a.test/ok.xml",
+                ),
+            ),
+            "https://a.test/gone.xml": (404, "not found"),
+            "https://a.test/slow.xml": FetchTimeout("slow"),
+            "https://a.test/corrupt.xml": (200, b"\x1f\x8b" + b"not really gzip"),
+            "https://a.test/ok.xml": (200, urlset("https://a.test/p/1")),
+        }
+    )
+    walk, locs = await walk_and_collect(session, "https://a.test/sitemap.xml")
+    assert locs == ["https://a.test/p/1"]
+    assert walk.report.read == ("https://a.test/sitemap.xml", "https://a.test/ok.xml")
+    assert walk.report.abandoned == (
+        "https://a.test/gone.xml",
+        "https://a.test/slow.xml",
+        "https://a.test/corrupt.xml",
+    )
+    assert walk.report.pages == 1
+
+
+async def test_report_duplicate_child_counted_once():
+    session, fetcher = make_session(
+        {
+            "https://a.test/sitemap.xml": (
+                200,
+                index("https://a.test/s1.xml", "https://a.test/s1.xml"),
+            ),
+            "https://a.test/s1.xml": (200, urlset("https://a.test/p/1")),
+        }
+    )
+    walk, locs = await walk_and_collect(session, "https://a.test/sitemap.xml")
+    assert locs == ["https://a.test/p/1"]
+    assert fetcher.count("https://a.test/s1.xml") == 1
+    assert walk.report.read == ("https://a.test/sitemap.xml", "https://a.test/s1.xml")
+    assert walk.report.pages == 1
+
+
+async def test_report_unreadable_root_abandoned_and_root_not_ok():
+    session, _ = make_session({"https://a.test/sitemap.xml": (500, "boom")})
+    walk, locs = await walk_and_collect(session, "https://a.test/sitemap.xml")
+    assert locs == []
+    assert walk.root_ok is False
+    assert walk.report.read == ()
+    assert walk.report.abandoned == ("https://a.test/sitemap.xml",)
+    assert walk.report.pages == 0
