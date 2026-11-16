@@ -7,9 +7,7 @@ import express from 'express';
 import type { NextFunction, Request, Response } from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
-import https from 'node:https';
 import { fileURLToPath } from 'node:url';
-import type { IncomingMessage } from 'node:http';
 import type {
   ApiError,
   BitrateResponse,
@@ -50,6 +48,7 @@ import {
   sendWaveFeedback,
   validateToken,
 } from './yandex';
+import { proxyStream, serveBufferWithRange } from './stream';
 
 const app = express();
 app.disable('x-powered-by');
@@ -366,119 +365,6 @@ function respondError(res: Response, err: unknown, context: string): void {
   const message = `${context}: ${errorMessage(err)}`;
   console.error(`[error] ${message}`);
   res.status(status).json({ error: message } satisfies ApiError);
-}
-
-type ParsedRange = { start: number; end: number } | 'unsatisfiable' | null;
-
-/** Parses a single-range `bytes=` header. null → serve the whole resource. */
-function parseRange(header: string, size: number): ParsedRange {
-  const m = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
-  if (!m) return null; // malformed or multi-range: ignore per RFC 9110
-  const startStr = m[1] as string;
-  const endStr = m[2] as string;
-  if (!startStr && !endStr) return null;
-  if (!startStr) {
-    // Suffix range: last N bytes.
-    const suffix = Number(endStr);
-    if (suffix === 0) return 'unsatisfiable';
-    return { start: Math.max(0, size - suffix), end: size - 1 };
-  }
-  const start = Number(startStr);
-  if (start >= size) return 'unsatisfiable';
-  const end = endStr ? Math.min(Number(endStr), size - 1) : size - 1;
-  if (end < start) return 'unsatisfiable';
-  return { start, end };
-}
-
-function serveBufferWithRange(req: Request, res: Response, buf: Buffer, contentType: string): void {
-  res.setHeader('Accept-Ranges', 'bytes');
-  const rangeHeader = req.headers.range;
-  if (typeof rangeHeader === 'string') {
-    const range = parseRange(rangeHeader, buf.length);
-    if (range === 'unsatisfiable') {
-      res.setHeader('Content-Range', `bytes */${buf.length}`);
-      res.status(416).json({ error: 'Requested range not satisfiable' } satisfies ApiError);
-      return;
-    }
-    if (range) {
-      res.status(206);
-      res.setHeader('Content-Type', contentType);
-      res.setHeader('Content-Range', `bytes ${range.start}-${range.end}/${buf.length}`);
-      res.setHeader('Content-Length', String(range.end - range.start + 1));
-      res.end(buf.subarray(range.start, range.end + 1));
-      return;
-    }
-  }
-  res.setHeader('Content-Type', contentType);
-  res.setHeader('Content-Length', String(buf.length));
-  res.end(buf);
-}
-
-/**
- * Streams the signed upstream URL to the client, relaying status/headers and
- * forwarding Range. Uses node:https (not fetch/undici, which Yandex's edge
- * fingerprint-blocks) and follows a couple of redirects.
- */
-function proxyStream(req: Request, res: Response, url: string, redirectsLeft = 3): Promise<void> {
-  const headers: Record<string, string> = { 'User-Agent': 'Yandex-Music-API' };
-  if (typeof req.headers.range === 'string') headers['Range'] = req.headers.range;
-  return new Promise<void>((resolve, reject) => {
-    let settled = false;
-    const finish = (err?: unknown): void => {
-      if (settled) return;
-      settled = true;
-      if (err) reject(err instanceof Error ? err : new Error(String(err)));
-      else resolve();
-    };
-    const upstream = https.get(url, { headers }, (u: IncomingMessage) => {
-      // Connected: cancel the connect timeout so the stream may idle while the
-      // browser buffers ahead and pauses reading (backpressure) — a long idle is
-      // normal for audio playback and must NOT kill the upstream.
-      upstream.setTimeout(0);
-      const status = u.statusCode ?? 502;
-      // Follow redirects (some audio hosts 302 to a CDN edge).
-      if (status >= 300 && status < 400 && u.headers.location && redirectsLeft > 0) {
-        u.resume();
-        settled = true;
-        proxyStream(req, res, new URL(u.headers.location, url).toString(), redirectsLeft - 1).then(
-          resolve,
-          reject,
-        );
-        return;
-      }
-      if (status !== 200 && status !== 206 && status !== 416) {
-        u.resume();
-        finish(new UpstreamError(502, `Audio host responded ${status}`));
-        return;
-      }
-      res.status(status);
-      for (const name of ['content-type', 'content-length', 'content-range'] as const) {
-        const value = u.headers[name];
-        if (value) res.setHeader(name, value);
-      }
-      if (!u.headers['content-type']) res.setHeader('Content-Type', 'audio/mpeg');
-      res.setHeader('Accept-Ranges', u.headers['accept-ranges'] ?? 'bytes');
-      if (status === 416) {
-        u.resume();
-        res.end();
-        finish();
-        return;
-      }
-      // Client went away (seek, next track, tab close): drop the upstream. This
-      // is a normal end, not an error.
-      res.on('close', () => {
-        u.destroy();
-        finish();
-      });
-      u.on('error', () => finish());
-      u.on('end', () => finish());
-      u.pipe(res);
-    });
-    upstream.on('error', (err) =>
-      finish(new UpstreamError(502, `Could not reach audio host: ${errorMessage(err)}`)),
-    );
-    upstream.setTimeout(15_000, () => upstream.destroy(new Error('audio host connect timed out')));
-  });
 }
 
 // ---------------------------------------------------------------------------

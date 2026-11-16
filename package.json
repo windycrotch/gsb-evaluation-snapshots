@@ -17,6 +17,7 @@
     "build:all": "npm run build -w client && npm run build:server",
     "build:binary": "node scripts/build-binary.mjs",
     "image:build": "bash scripts/build-image.sh",
+    "test": "npm run test -w server",
     "start": "npm run build -w client && cross-env NODE_ENV=production npm run start -w server",
     "set-token": "node scripts/set-token.mjs",
     "typecheck": "npm run typecheck -w server && npm run typecheck -w client"
