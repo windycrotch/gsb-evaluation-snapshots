@@ -5,6 +5,7 @@ import React from 'react';
 import styled from 'styled-components';
 
 import Icon from '../utils/Icon'
+import { getSoundError, subscribeSoundErrors } from '../player/sounds'
 
 import {filter} from 'lodash';
 
@@ -12,6 +13,20 @@ export default class Sound extends React.Component {
 
   constructor(props){
     super(props)
+    this.state = {
+      error: getSoundError(props.sound._id)
+    }
+  }
+
+  componentDidMount () {
+    // keep the error marker in sync with the player evaluation results
+    this.unsubscribeSoundErrors = subscribeSoundErrors(() => {
+      this.setState({ error: getSoundError(this.props.sound._id) })
+    })
+  }
+
+  componentWillUnmount () {
+    this.unsubscribeSoundErrors && this.unsubscribeSoundErrors()
   }
 
   removeThatSound = () => Meteor.call('sounds.remove', this.props.sound._id);
@@ -44,9 +59,16 @@ export default class Sound extends React.Component {
       ])
     }
 
+    let error = this.state.error
+
 		return (
-      <OneSound onClick={this.selectThatSound}>
-        <Name selected={this.props.sound.selected}> {this.props.sound.name} </Name>
+      <OneSound onClick={this.selectThatSound} error={!!error}>
+        <Name selected={this.props.sound.selected} error={!!error}> {this.props.sound.name} </Name>
+        {error &&
+          <ErrorMark title={error.message}>
+            <Icon name="exclamation-triangle"/>
+          </ErrorMark>
+        }
         <Buttons>
           <button onClick={this.cloneThatSound}>
             <Icon name="clone"/>
@@ -61,13 +83,19 @@ export default class Sound extends React.Component {
 const OneSound = styled.li`
   position: relative;
   min-height: 25px;
+  border-left: ${props => props.error ? '3px solid red' : 'none'};
 `;
 
 const Name = styled.p`
 display: inline-block;
 height: 0px;
 margin: 0px;
-color: ${props => props.selected && 'blue'};
+color: ${props => props.error ? 'red' : (props.selected ? 'blue' : 'inherit')};
+`;
+
+const ErrorMark = styled.span`
+  color: red;
+  margin-left: 5px;
 `;
 
 const Buttons = styled.p`

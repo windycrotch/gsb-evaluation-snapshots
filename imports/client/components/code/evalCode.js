@@ -1,29 +1,59 @@
-import { each, filter } from 'lodash'
 import { prepareCode } from './prepareCode'
 
-import Tone from 'tone';
-import teoria from 'teoria'
+// The two kinds of failure a sound code evaluation can produce:
+//  - syntax:    the code cannot be parsed / executed
+//  - structure: the code runs but its result does not follow the convention
+//               (result must be an object with c and e, and o.vars entries must be arrays)
+export const ERROR_TYPES = {
+  SYNTAX: 'syntax',
+  STRUCTURE: 'structure'
+}
 
-export let evalCode = (code) => {
+const syntaxError = (message) => ({ status: 'err', errorType: ERROR_TYPES.SYNTAX, body: `EDITOR SYNTAX ERROR => ${message}` })
+const structureError = (message) => ({ status: 'err', errorType: ERROR_TYPES.STRUCTURE, body: `EDITOR RESULT ERROR => ${message}` })
 
-  code = prepareCode(code)
-
-  try {
-    let result =  eval(`(function self(){${code}}())`);
-    let error = `EDITOR RESULT ERROR => the code should contain one c(code) var`
-
-    if(!result || typeof result !== 'object') return {status: 'err', body: error}
-    if(!result.c) return {status: 'err', body: error}
-    if(!result.e) return {status: 'err', body: error}
-    if(result.o && result.o.vars) {
-      let error = {status: 'err', body: 'EDITOR RESULT ERROR => each result.o.vars structure should be [NAMEVAR, VAR, MINVAL, MAXVAL]'}
-      if (filter(result.o.vars, v => v instanceof Array).length !== result.o.vars.length) return error
-    }
-
-    return {status: 'ok', body: result}
-
-  } catch (e) {
-    let error = `EDITOR SYNTAX ERROR => ${e.message}`
-    return {status: 'err', body: error}
+// The evaluated code may reference Tone, teoria, each and filter as free variables.
+// Resolve them from the injected scope first, then from the browser globals,
+// so this module stays usable without importing Tone.js (e.g. in offline tests).
+const resolveScope = (scope) => {
+  const g = typeof window !== 'undefined' ? window : (typeof globalThis !== 'undefined' ? globalThis : {})
+  return {
+    Tone: scope.Tone || g.Tone,
+    teoria: scope.teoria || g.teoria,
+    each: scope.each || (g._ && g._.each),
+    filter: scope.filter || (g._ && g._.filter)
   }
+}
+
+export let evalCode = (code, scope = {}) => {
+
+  let prepared
+  try {
+    prepared = prepareCode(code)
+  } catch (e) {
+    return syntaxError(e.message)
+  }
+  if (typeof prepared !== 'string') return syntaxError('the code could not be parsed')
+
+  // these consts are intentionally "unused": the evaluated code closes over them
+  const { Tone, teoria, each, filter } = resolveScope(scope)
+
+  let result
+  try {
+    result = eval(`(function self(){${prepared}}())`);
+  } catch (e) {
+    return syntaxError(e.message)
+  }
+
+  if (!result || typeof result !== 'object') return structureError('the code should return an object containing one c(code) var')
+  if (!result.c) return structureError('the code should contain one c(code) var')
+  if (!result.e) return structureError('the code should contain one e(elements) var')
+  if (result.o && result.o.vars) {
+    let vars = result.o.vars
+    if (!Array.isArray(vars) || vars.some(v => !Array.isArray(v))) {
+      return structureError('each result.o.vars structure should be [NAMEVAR, VAR, MINVAL, MAXVAL]')
+    }
+  }
+
+  return { status: 'ok', body: result }
 }

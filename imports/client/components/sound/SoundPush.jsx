@@ -5,6 +5,7 @@ import React from 'react';
 import styled from 'styled-components';
 
 import Icon from '../utils/Icon'
+import { getSoundError, subscribeSoundErrors } from '../player/sounds'
 
 import {filter} from 'lodash';
 import * as css from '/imports/client/components/css/styles.js'
@@ -13,6 +14,20 @@ export default class SoundPush extends React.Component {
 
   constructor(props){
     super(props)
+    this.state = {
+      error: getSoundError(props.sound._id)
+    }
+  }
+
+  componentDidMount () {
+    // keep the error marker in sync with the player evaluation results
+    this.unsubscribeSoundErrors = subscribeSoundErrors(() => {
+      this.setState({ error: getSoundError(this.props.sound._id) })
+    })
+  }
+
+  componentWillUnmount () {
+    this.unsubscribeSoundErrors && this.unsubscribeSoundErrors()
   }
 
   selectThatSound = () => Meteor.call('sounds.select', this.props.sound._id);
@@ -36,7 +51,7 @@ export default class SoundPush extends React.Component {
     }
 
 		return (
-      <OneSound muted={!this.props.sound.muted} onClick={this.toggleAndSelectThatSound}>
+      <OneSound muted={!this.props.sound.muted} error={!!this.state.error} title={this.state.error ? this.state.error.message : ''} onClick={this.toggleAndSelectThatSound}>
         <Name selected={this.props.sound.selected}> {this.props.sound.name} </Name>
         <Buttons>
           {buttons}
@@ -53,7 +68,7 @@ const OneSound = styled.li`
   flex-shrink: 0;
   margin: 10px;
   padding: 10px;
-  border: 2px black solid;
+  border: 2px ${props => props.error ? 'red' : 'black'} solid;
   min-height: 25px;
   list-style: none;
   font-size: 10px;

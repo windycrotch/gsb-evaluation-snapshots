@@ -2,7 +2,8 @@
   "name": "simple-todos",
   "private": true,
   "scripts": {
-    "start": "meteor run"
+    "start": "meteor run",
+    "test": "node --import ./tests/register-shims.mjs --test \"tests/*.test.mjs\""
   },
   "dependencies": {
     "babel-runtime": "^6.20.0",

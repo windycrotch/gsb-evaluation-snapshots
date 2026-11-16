@@ -9,7 +9,7 @@ import _ from 'lodash'
 
 import styled from 'styled-components';
 
-import { updateSound, removeSound } from './sounds';
+import { updateSound, removeSound, getSoundErrors } from './sounds';
 import { soundsWatcher } from './soundsWatcher';
 import { observeTones } from './tones';
 
@@ -18,7 +18,7 @@ export default class Player extends React.Component {
   constructor(props){
     super(props)
     this.state = {
-      codeErrors: false
+      codeErrors: {}
     }
   }
 
@@ -30,11 +30,14 @@ export default class Player extends React.Component {
     Tone.Transport.loopEnd = '2m'
     Tone.Transport.loop = true
     window.Tone = Tone
+    window.teoria = teoria
 
     Tone.context.latencyHint = "interactive"
 
     observeTones()
   }
+
+  refreshCodeErrors = () => this.setState({ codeErrors: getSoundErrors() })
 
   // initializeSounds
   componentWillReceiveProps(nextProps) {
@@ -45,13 +48,15 @@ export default class Player extends React.Component {
       array2: this.props.sounds,
       added: s => {
         updateSound(s)
+        this.refreshCodeErrors()
       },
       updated: (s, p) => {
-        let result = updateSound(s)
-        result.status === 'err' ? this.setState({codeErrors: result.body}) : this.setState({codeErrors: false})
+        updateSound(s)
+        this.refreshCodeErrors()
       },
       deleted: s => {
         removeSound(s)
+        this.refreshCodeErrors()
       },
       nothing: (s, p) => console.log('nothing', p)
     })
@@ -62,11 +67,19 @@ export default class Player extends React.Component {
   }
 
 	render() {
-    let errors = this.state.codeErrors ? this.state.codeErrors : 'no synthax error'
+    let errors = this.state.codeErrors || {}
+    let errorIds = Object.keys(errors)
 
 		return (
       <div>
-        <Result error={this.state.codeErrors}> {errors} </Result>
+        {errorIds.length === 0
+          ? <Result error={false}>no synthax error</Result>
+          : errorIds.map(id =>
+              <Result key={id} error={true}>
+                {`${errors[id].name || id} => ${errors[id].message}`}
+              </Result>
+            )
+        }
       </div>
 
     )
