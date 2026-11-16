@@ -41,6 +41,38 @@ describe('searchFilms', () => {
     }
   });
 
+  it('keeps results in descending score and catalogue order on ties', () => {
+    // "animated" tags ten films equally: every score is identical, so the order
+    // must be the catalogue order rather than an arbitrary sort.
+    const q = 'animated';
+    const results = searchFilms(q);
+    const expected = FILMS.filter(f => f.tags.includes('animated'));
+    assert.deepEqual(
+      results.map(f => f.id),
+      expected.map(f => f.id),
+      'ties must keep catalogue order',
+    );
+    const scores = results.map(f => scoreFilm(f, q).total);
+    assert.ok(
+      scores.every(s => s === scores[0]),
+      'the tie is real, not a coincidence',
+    );
+    // A mixed query still comes out with non-increasing scores.
+    const mixed = searchFilms('dragon robot').map(f => scoreFilm(f, 'dragon robot').total);
+    assert.ok(
+      mixed.every((s, i) => i === 0 || mixed[i - 1]! >= s),
+      'scores must descend',
+    );
+  });
+
+  it('still returns the shared-word film in search, even when the name means another title', () => {
+    // resolveFilm must refuse these, but the caller falls back to a search page,
+    // and searchFilms owes it the film that shares a word.
+    assert.deepEqual(ids('man of steel'), ['tears-of-steel']);
+    assert.deepEqual(ids('steel'), ['tears-of-steel']);
+    assert.deepEqual(ids('big fish'), ['big-buck-bunny']);
+  });
+
   it('matches a title phrase only from a word start', () => {
     assert.equal(ids('big buck')[0], 'big-buck-bunny');
     for (const q of ['ring', 'ant', 'rat', 'ear', 'tel']) {
@@ -136,5 +168,30 @@ describe('resolveFilm', () => {
 
   it('misses on a tie rather than pick by catalogue order', () => {
     assert.equal(resolveFilm('animated'), undefined); // nearly every film carries the tag
+  });
+
+  it('misses the exact shared-word names named in the brief', () => {
+    for (const q of ['blade runner', 'man of steel']) {
+      assert.equal(resolveFilm(q), undefined, `"${q}" must not resolve`);
+    }
+  });
+
+  it('never resolves on a logline-only hit, even when every word matches', () => {
+    // "caffeine" appears only in Coffee Run's logline: search finds the film, but
+    // a logline hit is not strong enough to resolve a name.
+    assert.deepEqual(ids('caffeine'), ['coffee-run']);
+    assert.equal(resolveFilm('caffeine'), undefined);
+  });
+
+  it('only resolves when every meaningful word lands on the same film', () => {
+    // "sintel with subtitles": "sintel" is a title hit, "subtitles" confirms nothing.
+    assert.equal(resolveFilm('sintel with subtitles'), undefined);
+    // Whereas dropping the unconfirmable word resolves.
+    assert.equal(resolveFilm('sintel')?.id, 'sintel');
+  });
+
+  it('resolves an exact id but leaves an unknown id to the query fallback', () => {
+    assert.equal(resolveFilm('tears-of-steel')?.id, 'tears-of-steel');
+    assert.equal(resolveFilm('not-a-real-id'), undefined);
   });
 });

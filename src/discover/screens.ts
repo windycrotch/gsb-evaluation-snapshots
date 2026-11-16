@@ -36,16 +36,16 @@ const INVISIBLE = /[\u{FE00}-\u{FE0F}\u{E0100}-\u{E01EF}\u{115F}\u{1160}\u{3164}
 
 /**
  * A query as it may be repeated back to the user and the model: one line,
- * no control or invisible characters, no double quotes, bounded. Tool inputs
- * are free text from a model that may itself be steered by content it read,
- * so nothing is echoed verbatim. Double quotes become single quotes, so a
- * query cannot close the quotes it is shown in and pass for server text.
+ * no control or invisible characters, no quotes, bounded. Tool inputs are free
+ * text from a model that may itself be steered by content it read, so nothing
+ * is echoed verbatim. Double and curly quotes become single quotes, so a query
+ * cannot close the quotes it is shown in and pass for server text.
  */
 export function echo(text: string): string {
   const clean = text
     .replace(/[\p{Cc}\p{Cf}]+/gu, ' ')
     .replace(INVISIBLE, ' ')
-    .replace(/["“”„«»]/g, "'")
+    .replace(/["“”„«»‘’‹›]/g, "'")
     .replace(/\s+/g, ' ')
     .trim();
   return clean.length > MAX_ECHO ? `${clean.slice(0, MAX_ECHO - 1)}…` : clean;
