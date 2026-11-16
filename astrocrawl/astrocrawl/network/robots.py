@@ -4,6 +4,8 @@ import asyncio
 import base64
 import re
 import time
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from urllib.parse import unquote, urlparse
 
@@ -17,6 +19,27 @@ from astrocrawl.network._fetch import aiohttp_retry_fetch
 from astrocrawl.utils.url import strip_www
 
 _logger = LogfmtLogger("astrocrawl.robots")
+
+
+@dataclass(frozen=True)
+class RobotsFetchSummary:
+    """某 origin 最近一次真实 robots.txt 抓取的只读快照。
+
+    与缓存中的 AsyncRobotsParser 来自同一次抓取（同一锁区间写入）：
+    - fetch_status: ok / http_<状态码> / fetch_failed（沿用 get_fetch_status 风格）
+    - allow_all:    该次抓取结果是否允许全部路径（决定 is_allowed 放行）
+    - fallback:     是否因非 200 或网络失败而回退为全部允许
+    - elapsed_ms:   本次抓取耗时（毫秒，含解析）
+    - fetched_at:   本次抓取发起时刻（UTC，带时区）
+    """
+
+    origin: str
+    fetch_status: str
+    allow_all: bool
+    fallback: bool
+    elapsed_ms: float
+    fetched_at: datetime
+
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -215,6 +238,7 @@ class RobotsCache:
         self.domain_rate_limiter = domain_rate_limiter
         self.respect_crawl_delay = respect_crawl_delay
         self._fetch_status: dict[str, str] = {}
+        self._fetch_summary: dict[str, RobotsFetchSummary] = {}
         self._status_lock = asyncio.Lock()
         self._proxy_session = proxy_session
         self._path_switch = path_switch
@@ -274,6 +298,8 @@ class RobotsCache:
     async def _fetch_robots(self, origin: str) -> AsyncRobotsParser:
         async with self._fetch_semaphore:
             robots_url = f"{origin}/robots.txt"
+            fetched_at = datetime.now(UTC)
+            started = time.perf_counter()
             result = await aiohttp_retry_fetch(
                 url=robots_url,
                 http_session=self._session,
@@ -286,25 +312,45 @@ class RobotsCache:
                 max_bytes=ROBOTS_MAX_SIZE,
             )
             parser = AsyncRobotsParser(self._ua)
+            fallback = False
             if result.content is not None:
                 parser.parse(result.content.decode("utf-8", errors="replace"))
                 parser.fetch_status = "ok"
             elif result.http_status > 0:
                 parser.allow_all = True
                 parser.fetch_status = f"http_{result.http_status}"
+                fallback = True
             else:
                 parser.allow_all = True
                 parser.fetch_status = "fetch_failed"
-                self._log.debug(ErrorEvent.ROBOTS_FETCH_FAILED, origin=origin, fallback="allow_all")
+                fallback = True
+            elapsed_ms = round((time.perf_counter() - started) * 1000.0, 3)
+            summary = RobotsFetchSummary(
+                origin=origin,
+                fetch_status=parser.fetch_status,
+                allow_all=parser.allow_all,
+                fallback=fallback,
+                elapsed_ms=elapsed_ms,
+                fetched_at=fetched_at,
+            )
         async with self._lock:
             expire = time.monotonic() + self._ttl
             self._cache[origin] = (parser, expire)
+            self._fetch_summary[origin] = summary
             if len(self._cache) > self._max_size:
                 oldest_origin = min(self._cache.keys(), key=lambda k: self._cache[k][1])
                 del self._cache[oldest_origin]
             self._tasks.pop(origin, None)
         async with self._status_lock:
             self._fetch_status[origin] = parser.fetch_status
+        # 每次真实抓取恰好一条日志；缓存命中不经过此处，不会重复记录。
+        self._log.info(
+            ErrorEvent.ROBOTS_FETCH,
+            origin=origin,
+            fetch_status=parser.fetch_status,
+            fallback=fallback,
+            elapsed_ms=elapsed_ms,
+        )
         if self.respect_crawl_delay and self.domain_rate_limiter and parser.crawl_delay is not None:
             domain = strip_www(urlparse(origin).netloc)
             await self.domain_rate_limiter.set_crawl_delay(domain, parser.crawl_delay)
@@ -321,3 +367,13 @@ class RobotsCache:
         """返回该源站 robots.txt 的获取状态。"""
         async with self._status_lock:
             return self._fetch_status.get(origin, "not_checked")
+
+    async def get_fetch_summary(self, origin: str) -> RobotsFetchSummary | None:
+        """返回该源站最近一次真实 robots.txt 抓取的只读摘要。
+
+        从未抓取过（含仅命中缓存前身不存在的情况）返回 None。
+        摘要与缓存中保存的解析结果在同一次抓取、同一锁区间内写入，
+        因此 status/allow_all 与 is_allowed 的放行依据一致。
+        """
+        async with self._lock:
+            return self._fetch_summary.get(origin)

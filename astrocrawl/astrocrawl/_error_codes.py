@@ -203,6 +203,7 @@ class ErrorEvent(Enum):
     VALIDATION_PARSE_ERROR = "validation_parse_error"
 
     # ── Network: robots / sitemap / throttle ──
+    ROBOTS_FETCH = "robots_fetch"
     ROBOTS_FETCH_FAILED = "robots_fetch_failed"
     ROBOTS_TXT_OVERSIZE = "robots_txt_oversize"
     SITEMAP_START = "sitemap_start"

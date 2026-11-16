@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+import logging
 
 import aiohttp
 import pytest
@@ -425,6 +426,276 @@ class TestRobotsCacheFetch:
         result = await cache._fetch_robots("https://x.com")
         assert result.allow_all
         assert result.fetch_status == "http_403"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# RobotsCache — 抓取摘要 + logfmt 抓取日志
+# ═══════════════════════════════════════════════════════════════════════
+
+_ORIGIN = "https://example.com"
+
+
+def _patch_fetch(monkeypatch, result_factory):
+    """用可控的抓取结果替换 aiohttp_retry_fetch，并记录调用次数。"""
+    from unittest.mock import AsyncMock
+
+    fetch_mock = AsyncMock(side_effect=result_factory)
+    monkeypatch.setattr("astrocrawl.network.robots.aiohttp_retry_fetch", fetch_mock)
+    return fetch_mock
+
+
+def _fetch_log_records(caplog) -> list[logging.LogRecord]:
+    """仅取出 robots_fetch 事件对应的记录（排除其它事件噪音）。"""
+    return [r for r in caplog.records if getattr(r, "_logfmt_event", None) == "robots_fetch"]
+
+
+class TestRobotsFetchSummary:
+    """get_fetch_summary — 最近一次真实抓取的结构化摘要。"""
+
+    @pytest.mark.asyncio
+    async def test_never_fetched_returns_none(self):
+        from unittest.mock import MagicMock
+
+        cache = RobotsCache("Bot", MagicMock())
+        assert await cache.get_fetch_summary(_ORIGIN) is None
+
+    @pytest.mark.asyncio
+    async def test_success_summary_matches_parser(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        from astrocrawl.network._fetch import AiohttpFetchResult
+
+        _patch_fetch(
+            monkeypatch,
+            lambda **_kw: AiohttpFetchResult(content=b"User-agent: Bot\nDisallow: /private", http_status=200),
+        )
+        cache = RobotsCache("Bot", MagicMock())
+        await cache._fetch_robots(_ORIGIN)
+
+        summary = await cache.get_fetch_summary(_ORIGIN)
+        assert summary is not None
+        assert summary.origin == _ORIGIN
+        assert summary.fetch_status == "ok"
+        assert summary.allow_all is False
+        assert summary.fallback is False
+        assert summary.elapsed_ms >= 0.0
+        assert summary.fetched_at.tzinfo is not None
+        # 与缓存中解析结果来自同一次抓取
+        cached_parser, _expire = cache._cache[_ORIGIN]
+        assert cached_parser.fetch_status == summary.fetch_status
+        assert cached_parser.allow_all == summary.allow_all
+        # get_fetch_status 行为不变
+        assert await cache.get_fetch_status(_ORIGIN) == "ok"
+
+    @pytest.mark.asyncio
+    async def test_http_404_summary_is_fallback_allow_all(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        from astrocrawl.network._fetch import AiohttpFetchResult
+
+        _patch_fetch(monkeypatch, lambda **_kw: AiohttpFetchResult(http_status=404))
+        cache = RobotsCache("Bot", MagicMock())
+        assert await cache.is_allowed("https://example.com/anything") is True
+
+        summary = await cache.get_fetch_summary(_ORIGIN)
+        assert summary is not None
+        assert summary.fetch_status == "http_404"
+        assert summary.allow_all is True
+        assert summary.fallback is True
+        assert await cache.get_fetch_status(_ORIGIN) == "http_404"
+
+    @pytest.mark.asyncio
+    async def test_network_failure_summary_is_fallback_allow_all(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        from astrocrawl.network._fetch import AiohttpFetchResult
+
+        _patch_fetch(monkeypatch, lambda **_kw: AiohttpFetchResult())
+        cache = RobotsCache("Bot", MagicMock())
+        assert await cache.is_allowed("https://example.com/anything") is True
+
+        summary = await cache.get_fetch_summary(_ORIGIN)
+        assert summary is not None
+        assert summary.fetch_status == "fetch_failed"
+        assert summary.allow_all is True
+        assert summary.fallback is True
+        assert await cache.get_fetch_status(_ORIGIN) == "fetch_failed"
+
+
+class TestRobotsFetchLogging:
+    """每次真实抓取一条 logfmt 日志；缓存命中不写。"""
+
+    @pytest.mark.asyncio
+    async def test_fetch_writes_single_logfmt_record(self, monkeypatch, caplog):
+        from unittest.mock import MagicMock
+
+        from astrocrawl.network._fetch import AiohttpFetchResult
+
+        caplog.set_level(logging.INFO, logger="astrocrawl.robots")
+        _patch_fetch(
+            monkeypatch,
+            lambda **_kw: AiohttpFetchResult(content=b"User-agent: Bot\nDisallow: /private", http_status=200),
+        )
+        cache = RobotsCache("Bot", MagicMock())
+        await cache._fetch_robots(_ORIGIN)
+
+        records = _fetch_log_records(caplog)
+        assert len(records) == 1
+        fields = records[0]._logfmt_fields
+        assert fields["origin"] == _ORIGIN
+        assert fields["fetch_status"] == "ok"
+        assert fields["fallback"] is False
+        assert isinstance(fields["elapsed_ms"], float)
+        assert fields["elapsed_ms"] >= 0.0
+        # logfmt 渲染可被解析：event=robots_fetch 开头
+        assert records[0].getMessage().startswith("event=robots_fetch ")
+
+    @pytest.mark.asyncio
+    async def test_http_404_log_marks_fallback(self, monkeypatch, caplog):
+        from unittest.mock import MagicMock
+
+        from astrocrawl.network._fetch import AiohttpFetchResult
+
+        caplog.set_level(logging.INFO, logger="astrocrawl.robots")
+        _patch_fetch(monkeypatch, lambda **_kw: AiohttpFetchResult(http_status=404))
+        cache = RobotsCache("Bot", MagicMock())
+        await cache._fetch_robots(_ORIGIN)
+
+        records = _fetch_log_records(caplog)
+        assert len(records) == 1
+        fields = records[0]._logfmt_fields
+        assert fields["fetch_status"] == "http_404"
+        assert fields["fallback"] is True
+        assert "elapsed_ms" in fields
+
+    @pytest.mark.asyncio
+    async def test_network_failure_log_marks_fallback(self, monkeypatch, caplog):
+        from unittest.mock import MagicMock
+
+        from astrocrawl.network._fetch import AiohttpFetchResult
+
+        caplog.set_level(logging.INFO, logger="astrocrawl.robots")
+        _patch_fetch(monkeypatch, lambda **_kw: AiohttpFetchResult())
+        cache = RobotsCache("Bot", MagicMock())
+        await cache._fetch_robots(_ORIGIN)
+
+        records = _fetch_log_records(caplog)
+        assert len(records) == 1
+        fields = records[0]._logfmt_fields
+        assert fields["fetch_status"] == "fetch_failed"
+        assert fields["fallback"] is True
+
+    @pytest.mark.asyncio
+    async def test_cache_hit_does_not_log_again(self, monkeypatch, caplog):
+        from unittest.mock import MagicMock
+
+        from astrocrawl.network._fetch import AiohttpFetchResult
+
+        caplog.set_level(logging.INFO, logger="astrocrawl.robots")
+        fetch_mock = _patch_fetch(
+            monkeypatch,
+            lambda **_kw: AiohttpFetchResult(content=b"User-agent: Bot\nDisallow: /private", http_status=200),
+        )
+        cache = RobotsCache("Bot", MagicMock())
+
+        await cache.is_allowed("https://example.com/a")
+        await cache.is_allowed("https://example.com/b")
+        await cache.get_sitemaps(_ORIGIN)
+
+        assert fetch_mock.await_count == 1
+        assert len(_fetch_log_records(caplog)) == 1
+
+    @pytest.mark.asyncio
+    async def test_expired_cache_refetch_logs_again_and_overwrites_summary(self, monkeypatch, caplog):
+        import time
+        from unittest.mock import MagicMock
+
+        from astrocrawl.network._fetch import AiohttpFetchResult
+
+        caplog.set_level(logging.INFO, logger="astrocrawl.robots")
+        responses = [
+            AiohttpFetchResult(content=b"User-agent: Bot\nDisallow: /private", http_status=200),
+            AiohttpFetchResult(http_status=403),
+        ]
+        fetch_mock = _patch_fetch(monkeypatch, lambda **_kw: responses.pop(0))
+        cache = RobotsCache("Bot", MagicMock())
+
+        await cache._get_or_fetch_robots(_ORIGIN)
+        first = await cache.get_fetch_summary(_ORIGIN)
+        assert first is not None
+        assert first.fetch_status == "ok"
+
+        # 令缓存立即过期（模拟 TTL 到期），旧状态被重抓结果覆盖
+        cache._cache[_ORIGIN] = (cache._cache[_ORIGIN][0], time.monotonic() - 1)
+        parser = await cache._get_or_fetch_robots(_ORIGIN)
+        second = await cache.get_fetch_summary(_ORIGIN)
+
+        assert fetch_mock.await_count == 2
+        assert parser.allow_all is True
+        assert second is not None
+        assert second.fetch_status == "http_403"
+        assert second.fallback is True
+        assert second.fetched_at >= first.fetched_at
+        assert cache._cache[_ORIGIN][0] is not None
+        assert await cache.get_fetch_status(_ORIGIN) == "http_403"
+        # 两次真实抓取 → 两条日志，顺序对应
+        records = _fetch_log_records(caplog)
+        assert [r._logfmt_fields["fetch_status"] for r in records] == ["ok", "http_403"]
+
+    @pytest.mark.asyncio
+    async def test_concurrent_requests_fetch_once(self, monkeypatch, caplog):
+        import asyncio
+        from unittest.mock import MagicMock
+
+        from astrocrawl.network._fetch import AiohttpFetchResult
+
+        caplog.set_level(logging.INFO, logger="astrocrawl.robots")
+
+        async def _slow_fetch(**_kw):
+            await asyncio.sleep(0.02)
+            return AiohttpFetchResult(content=b"User-agent: Bot\nDisallow: /private", http_status=200)
+
+        fetch_mock = _patch_fetch(monkeypatch, _slow_fetch)
+        cache = RobotsCache("Bot", MagicMock())
+
+        urls = [f"https://example.com/private/page{i}" for i in range(10)]
+        results = await asyncio.gather(*(cache.is_allowed(u) for u in urls))
+
+        assert results == [False] * 10
+        assert fetch_mock.await_count == 1
+        assert len(_fetch_log_records(caplog)) == 1
+        summary = await cache.get_fetch_summary(_ORIGIN)
+        assert summary is not None
+        assert summary.fetch_status == "ok"
+        cached_parser, _expire = cache._cache[_ORIGIN]
+        assert cached_parser.fetch_status == summary.fetch_status
+        assert cached_parser.allow_all == summary.allow_all
+
+    @pytest.mark.asyncio
+    async def test_concurrent_after_expiry_fetch_once(self, monkeypatch):
+        import asyncio
+        import time
+        from unittest.mock import MagicMock
+
+        from astrocrawl.network._fetch import AiohttpFetchResult
+
+        async def _slow_fetch(**_kw):
+            await asyncio.sleep(0.02)
+            return AiohttpFetchResult(http_status=404)
+
+        fetch_mock = _patch_fetch(monkeypatch, _slow_fetch)
+        cache = RobotsCache("Bot", MagicMock())
+        old_parser = AsyncRobotsParser("Bot")
+        cache._cache[_ORIGIN] = (old_parser, time.monotonic() - 1)
+
+        results = await asyncio.gather(*(cache.is_allowed(f"https://example.com/p{i}") for i in range(8)))
+
+        assert results == [True] * 8
+        assert fetch_mock.await_count == 1
+        summary = await cache.get_fetch_summary(_ORIGIN)
+        assert summary is not None
+        assert summary.fetch_status == "http_404"
+        assert summary.fallback is True
 
 
 class TestRobotsBuildHeaders:
