@@ -5,6 +5,8 @@
    Swaps are quantized to the next bar. On desktops, a slower high-quality render of each tonal
    layer follows in the background and is swapped in on a later bar (see upgrade). */
 
+import { LIMITER_DEFAULTS, parseLimiterParams } from './limiter-config.js';
+
 export const BEATS = 128; // one transport cycle: the 32-bar loop the bar clock counts
 export const NOTE = { C: 0, 'C#': 1, Db: 1, D: 2, 'D#': 3, Eb: 3, E: 4, F: 5, 'F#': 6, Gb: 6, G: 7, 'G#': 8, Ab: 8, A: 9, 'A#': 10, Bb: 10, B: 11 };
 export const NOTE_NAMES = ['C', 'C#', 'D', 'Eb', 'E', 'F', 'F#', 'G', 'Ab', 'A', 'Bb', 'B'];
@@ -137,18 +139,33 @@ export async function loadManifest(url) {
 // at the source (see stemTrim), so it only has to catch the peaks where three stems add up,
 // and never goes over its -1 dBTP ceiling. `drive` sets how far typical mixes reach into it,
 // chosen so a three-layer mix plays about as loud as it did through the old compressors.
-const LIMIT = { lookahead: 0.005, release: 0.12, ceiling: -1, drive: -2.5 };
+//
+// ceiling/lookahead/release are user-configurable; parseLimiterParams is the one place they are
+// normalized, and buildLimiter is the one place the limiter is built, so the live graph and the
+// WAV export (both call buildLimiter) always run the same parameters through the same worklet.
+const DRIVE_DB = -2.5;
+let limiterSettings = { ...LIMITER_DEFAULTS }; // seconds / dBTP, as passed in; parsed per context
+export function configureLimiter(params = {}) {
+  // Keep only what parseLimiter understands; it fills every gap with the default.
+  limiterSettings = {
+    ceiling: params.ceiling,
+    lookahead: params.lookahead,
+    release: params.release,
+  };
+}
+export function getLimiterParams() { return { ...limiterSettings }; }
 const limiterModule = new URL('./limiter-worklet.js', import.meta.url);
 const loadLimiter = (c) => (c.audioWorklet && window.AudioWorkletNode
   ? c.audioWorklet.addModule(limiterModule) : Promise.reject(new Error('AudioWorklet is not supported')));
 function buildLimiter(c) {
-  const lookahead = Math.round(LIMIT.lookahead * c.sampleRate);
+  // The single parse point shared by real-time playback and exportLoopWav's offline render.
+  const { ceiling, lookahead, release } = parseLimiterParams(limiterSettings, c.sampleRate);
   const input = c.createGain();
-  input.gain.value = Math.pow(10, LIMIT.drive / 20);
+  input.gain.value = Math.pow(10, DRIVE_DB / 20);
   const output = new AudioWorkletNode(c, 'true-peak-limiter', {
     numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2],
     channelCount: 2, channelCountMode: 'explicit', channelInterpretation: 'speakers',
-    processorOptions: { lookahead, release: LIMIT.release, ceiling: LIMIT.ceiling },
+    processorOptions: { lookahead, release, ceiling },
   });
   input.connect(output);
   return { input, output, latency: lookahead }; // its delay is exactly the lookahead

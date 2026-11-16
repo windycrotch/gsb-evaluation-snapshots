@@ -1,10 +1,16 @@
 /* Lookahead true-peak limiter (AudioWorklet), the last stage of the mix and the export.
    Peaks are sensed on 4x-oversampled audio, so the peaks between samples that a DAC or a lossy
    encoder will produce count too. The gain each peak needs is held for the lookahead window,
-   released over ~120 ms, and smoothed by a moving average one window long, so it is already
-   down when the delayed peak arrives: the output never goes over the ceiling, and quiet
-   passages pass untouched instead of being squeezed all the time like a compressor does.
-   Stereo-linked, so the image doesn't shift. Latency is exactly `lookahead` samples. */
+   released over the configured release time, and smoothed by a moving average one window long, so
+   it is already down when the delayed peak arrives: the output never goes over the ceiling, and
+   quiet passages pass untouched instead of being squeezed all the time like a compressor does.
+   Stereo-linked, so the image doesn't shift. Latency is exactly `lookahead` samples.
+
+   processorOptions (parsed once on the main thread in js/limiter-config.js, shared by the live
+   graph and the WAV export; re-validated here as audio-thread defence in depth):
+     lookahead — whole samples; rounded and clamped to at least HALF + 1 (7)
+     ceiling   — dBTP; the limiter aims 0.05 dB under it (see the constructor)
+     release   — seconds; must be positive and finite, else the 120 ms default is used */
 
 const PHASES = 4, HALF = 6; // 4x interpolation, 12 taps per phase (the interpolator delays HALF samples)
 
@@ -42,14 +48,25 @@ const BOUND = Math.max(...TAPS.map((t) => t.reduce((a, v) => a + Math.abs(v), 0)
 class TruePeakLimiter extends AudioWorkletProcessor {
   constructor({ processorOptions: o = {} } = {}) {
     super();
-    this.latency = Math.max(HALF + 1, Math.round(o.lookahead ?? 0.005 * sampleRate));
+    // The main thread already parsed these (js/limiter-config.js, the one parse point shared by the
+    // live graph and the export); validate again here so a hand-built node with bad processorOptions
+    // can't make the audio thread compute NaN gains or allocate a too-short delay line.
+    // Lookahead arrives in whole samples: round once more and clamp to HALF + 1, the smallest window
+    // the interpolator's tap span fits in. The clamp still has to produce normal audio.
+    const asked = Math.round(Number.isFinite(o.lookahead) ? o.lookahead : 0.005 * sampleRate);
+    this.latency = Math.max(HALF + 1, asked);
     this.win = this.latency - HALF + 1; // hold and smoothing window, in samples
     // Aimed 0.05 dB under the ceiling: the short interpolator reads a peak up to ~0.03 dB lower
     // than a full-length true-peak meter does (measured).
-    this.ceiling = Math.pow(10, ((o.ceiling ?? -1) - 0.05) / 20);
+    const ceilingDb = Number.isFinite(o.ceiling) ? o.ceiling : -1;
+    this.ceiling = Math.pow(10, (ceilingDb - 0.05) / 20);
     this.quiet = this.ceiling / BOUND;
     this.loud = 0; // how many more windows hold a sample over `quiet`
-    this.decay = Math.exp(-1 / ((o.release ?? 0.12) * sampleRate));
+    // release must be a positive finite number of seconds; 0, negatives and NaN take the 120 ms
+    // default, so the decay coefficient stays a healthy number in (0, 1). A NaN here would poison
+    // the gain for the rest of the render and could leave the mix silent.
+    const release = Number.isFinite(o.release) && o.release > 0 ? o.release : 0.12;
+    this.decay = Math.exp(-1 / (release * sampleRate));
     this.hist = [new Float64Array(4 * HALF), new Float64Array(4 * HALF)]; // last 2*HALF inputs, stored twice
     this.hpos = 0;
     this.qPrev = 0;
