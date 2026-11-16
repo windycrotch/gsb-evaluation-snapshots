@@ -299,8 +299,8 @@ function setupChapterLabelDisplay(player: Player, chaptersTrack: TextTrack): voi
   spacer.appendChild(controlBarChapterHolder);
 
   const cueChangeHandler = () => {
-    // Safari needs Array.from() for activeCues
-    const activeCues = Array.from(chaptersTrack.activeCues);
+    // Safari needs Array.from() for activeCues; activeCues is null when no cues are active
+    const activeCues = Array.from(chaptersTrack.activeCues || []);
     if (activeCues.length > 0) {
       const cue = activeCues[0] as VTTCue;
       controlBarChapterHolder.innerText = cue.text || '';

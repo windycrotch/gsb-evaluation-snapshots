@@ -1,14 +1,19 @@
 import videojs from 'video.js';
 import type Player from 'video.js/dist/types/player';
 import { CleanupRegistry } from '../../utils';
+import {
+  clampTooltipLeftPct,
+  findChapterAtTime,
+  getChapterForHover,
+  isValidDuration,
+} from './chapterUtils';
+import type { ChapterMarker } from './chapterUtils';
+
+// Re-export so existing imports from './chapterMarkerProgressBar' keep working.
+export type { ChapterMarker } from './chapterUtils';
+export { parseChaptersFromVTT } from './chapterUtils';
 
 const Component = videojs.getComponent('Component');
-
-export interface ChapterMarker {
-  startTime: number;
-  endTime: number;
-  label: string;
-}
 
 interface ChapterMarkersProgressBarControlOptions {
   chapters: ChapterMarker[];
@@ -30,12 +35,30 @@ class ChapterMarkersProgressBarControl extends Component {
     this.chapters = options.chapters || [];
 
     player.ready(() => {
+      if ((this as any).isDisposed && (this as any).isDisposed()) return;
       this.addMarkers(this.chapters, player);
       this.attachHoverHandlers(player);
-      // After addMarkers: it "clears previous markers" by calling this.dispose(),
-      // which would also undo this hookup.
       this.addChapterToSeekBarValueText_(player);
     });
+  }
+
+  /**
+   * Removes the boundary markers and the tooltip container from the DOM.
+   * Does NOT touch event listeners or the component itself — use dispose()
+   * for full teardown.
+   */
+  private clearMarkers_() {
+    this.chapterBoundaries.forEach((boundary) => {
+      if (boundary && boundary.parentNode) {
+        boundary.remove();
+      }
+    });
+    this.chapterBoundaries = [];
+
+    if (this.chapterTooltipContainer) {
+      this.chapterTooltipContainer.remove();
+      this.chapterTooltipContainer = null;
+    }
   }
 
   /**
@@ -43,13 +66,13 @@ class ChapterMarkersProgressBarControl extends Component {
    */
   addMarkers(chapters: ChapterMarker[], player: Player) {
     const duration = player.duration();
-    if (!duration || duration <= 0) return;
+    if (!isValidDuration(duration)) return;
 
     const playheadWell = player.el().querySelector('.vjs-progress-holder');
     if (!playheadWell) return;
-    
-    // Clear any previous markers
-    this.dispose(); 
+
+    // Clear any previous markers (DOM only — listeners stay attached)
+    this.clearMarkers_();
 
     // Create a single container for the chapter tooltip
     this.chapterTooltipContainer = document.createElement('div');
@@ -60,7 +83,7 @@ class ChapterMarkersProgressBarControl extends Component {
       if (chapter.startTime < 0 || chapter.endTime > duration || chapter.endTime <= chapter.startTime) {
         return;
       }
-      
+
       const leftPct = (chapter.startTime / duration) * 100;
 
       // Only add boundary markers
@@ -86,69 +109,69 @@ class ChapterMarkersProgressBarControl extends Component {
         };
       };
     };
-    const progressControl = playerWithControlBar.controlBar.progressControl;
-    
+    const progressControl = playerWithControlBar.controlBar && playerWithControlBar.controlBar.progressControl;
+    if (!progressControl) return;
+
+    const hideTooltip = () => {
+      if (this.chapterTooltipContainer) {
+        this.chapterTooltipContainer.style.display = 'none';
+        // Clear the text so no stale chapter name lingers in the DOM
+        this.chapterTooltipContainer.innerText = '';
+      }
+    };
+
     const mousemoveHandler = (e: MouseEvent) => {
       if (!this.chapterTooltipContainer) return;
 
-      const playerEl = player.el();
-      const playerRect = playerEl.getBoundingClientRect();
-      const playerWidth = (playerEl as HTMLElement).offsetWidth;
-
+      const duration = player.duration();
       const barRect = progressControl.el().getBoundingClientRect();
-      const progressHolder = progressControl.el().querySelector('.vjs-progress-holder') as HTMLElement;
 
-      if (!progressHolder) return;
+      if (!isValidDuration(duration) || barRect.width <= 0) {
+        hideTooltip();
+        return;
+      }
+
+      const progressHolder = progressControl.el().querySelector('.vjs-progress-holder') as HTMLElement | null;
+      if (!progressHolder) {
+        hideTooltip();
+        return;
+      }
 
       const pct = Math.max(0, Math.min(1, (e.clientX - barRect.left) / barRect.width));
-      const time = pct * player.duration();
 
-      // Find the chapter for the current hover time
-      const chapter = this.chapters.find(c => time >= c.startTime && time < c.endTime);
+      // Only show the tooltip when the hovered time is inside a valid chapter
+      const chapter = getChapterForHover(this.chapters, duration, pct);
 
-      if (chapter) {
-        // Update tooltip text first
-        this.chapterTooltipContainer.innerText = chapter.label;
-        this.chapterTooltipContainer.style.display = 'block';
-
-        // Measure tooltip width (now that it's visible with text)
-        const tooltipWidth = this.chapterTooltipContainer.offsetWidth;
-        const tooltipHalfWidth = tooltipWidth / 2;
-
-        // Calculate position in player coordinates
-        const progressBarLeftOffset = barRect.left - playerRect.left;
-        const hoverPositionInPlayer = progressBarLeftOffset + (pct * barRect.width);
-
-        // Clamp position
-        let clampedLeft = hoverPositionInPlayer;
-        if (clampedLeft < tooltipHalfWidth) {
-          clampedLeft = tooltipHalfWidth;
-        } else if (clampedLeft > playerWidth - tooltipHalfWidth) {
-          clampedLeft = playerWidth - tooltipHalfWidth;
-        }
-
-        // Convert to progress-holder relative position
-        const progressHolderRect = progressHolder.getBoundingClientRect();
-        const leftRelativeToHolder = clampedLeft - (progressHolderRect.left - playerRect.left);
-        const leftPct = (leftRelativeToHolder / progressHolderRect.width) * 100;
-
-        // Set position
-        this.chapterTooltipContainer.style.left = `${leftPct}%`;
-      } else {
-        // Hide if not over a chapter
-        this.chapterTooltipContainer.style.display = 'none';
+      if (!chapter) {
+        hideTooltip();
+        return;
       }
-    };
 
-    const mouseleaveHandler = () => {
-      // Hide the tooltip when leaving the progress bar
-      if (this.chapterTooltipContainer) {
-        this.chapterTooltipContainer.style.display = 'none';
-      }
+      const playerEl = player.el() as HTMLElement;
+      const playerRect = playerEl.getBoundingClientRect();
+      const progressHolderRect = progressHolder.getBoundingClientRect();
+
+      // Update tooltip text first
+      this.chapterTooltipContainer.innerText = chapter.label;
+      this.chapterTooltipContainer.style.display = 'block';
+
+      // Clamp using the tooltip's actual rendered width so it never
+      // overflows the player's left/right edges
+      const leftPct = clampTooltipLeftPct({
+        pct,
+        barWidth: barRect.width,
+        barLeftInPlayer: barRect.left - playerRect.left,
+        playerWidth: playerEl.offsetWidth,
+        holderLeftInPlayer: progressHolderRect.left - playerRect.left,
+        holderWidth: progressHolderRect.width,
+        tooltipWidth: this.chapterTooltipContainer.offsetWidth,
+      });
+
+      this.chapterTooltipContainer.style.left = `${leftPct}%`;
     };
 
     this.cleanup_.registerVideoJsListener(progressControl, 'mousemove', mousemoveHandler);
-    this.cleanup_.registerVideoJsListener(progressControl, 'mouseleave', mouseleaveHandler);
+    this.cleanup_.registerVideoJsListener(progressControl, 'mouseleave', hideTooltip);
   }
 
   /**
@@ -166,7 +189,7 @@ class ChapterMarkersProgressBarControl extends Component {
       const current = seekBarEl.getAttribute('aria-valuetext') || '';
       const base = suffix && current.endsWith(suffix) ? current.slice(0, -suffix.length) : current;
       const time = player.currentTime() ?? 0;
-      const chapter = this.chapters.find(c => time >= c.startTime && time < c.endTime);
+      const chapter = findChapterAtTime(this.chapters, time);
       suffix = chapter ? `, ${player.localize('Chapter: {1}', [chapter.label])}` : '';
       const next = base + suffix;
       if (next !== current) seekBarEl.setAttribute('aria-valuetext', next);
@@ -183,21 +206,10 @@ class ChapterMarkersProgressBarControl extends Component {
   }
 
   /**
-   * On dispose, remove all created elements.
+   * On dispose, remove all created elements and listeners.
    */
   dispose() {
-    this.chapterBoundaries.forEach((boundary) => {
-      if (boundary && boundary.parentNode) {
-        boundary.remove();
-      }
-    });
-    this.chapterBoundaries = [];
-
-    if (this.chapterTooltipContainer && this.chapterTooltipContainer.parentNode) {
-      this.chapterTooltipContainer.remove();
-      this.chapterTooltipContainer = null;
-    }
-    
+    this.clearMarkers_();
     this.cleanup_.dispose();
     super.dispose();
   }
@@ -206,64 +218,3 @@ class ChapterMarkersProgressBarControl extends Component {
 videojs.registerComponent('ChapterMarkersProgressBarControl', ChapterMarkersProgressBarControl);
 
 export default ChapterMarkersProgressBarControl;
-
-/**
- * Parses a WebVTT string into an array of chapter marker objects.
- *
- * @param vttData - Raw VTT file string content
- * @returns An array of { time, label } objects
- */
-
-/**
- * Parses a WebVTT string into an array of chapter objects,
- * each of which contains startTime, endTime, and label.
- */
-export function parseChaptersFromVTT(vttData: string): ChapterMarker[] {
-  const chapters: ChapterMarker[] = []
-
-  // 1) Normalize newlines and split into cue blocks
-  const rawBlocks = vttData.replace(/\r\n|\r|\n/g, '\n').split(/\n{2,}/)
-
-  for (const block of rawBlocks) {
-    const lines = block.trim().split('\n')
-    // A valid cue block has a line containing "-->"
-    const timeLine = lines.find((l) => /-->/.test(l))
-    if (!timeLine) continue
-
-    // 2) Extract start and end timestamps (like "00:00:05.000 --> 00:00:12.000")
-    const [startRaw, endRaw] = timeLine.split('-->').map((s) => s.trim())
-    const startTime = timestampToSeconds(startRaw)
-    const endTime = timestampToSeconds(endRaw)
-
-    // 3) The next line(s) after the timeLine are the chapter label
-    //    (If you had multiple lines of text, you could join them.)
-    const labelLine = lines[1] || ''
-    const label = labelLine.trim()
-
-    // Only add if label is non-empty and times are valid
-    if (
-      label &&
-      !isNaN(startTime) &&
-      !isNaN(endTime) &&
-      endTime > startTime
-    ) {
-      chapters.push({ startTime, endTime, label })
-    }
-  }
-
-  return chapters
-}
-  
-/** Convert "HH:MM:SS.mmm" → seconds */
-function timestampToSeconds(timestamp: string): number {
-  // e.g. "00:00:05.000"
-  const [hh, mm, ssMs] = timestamp.split(':')
-  if (!hh || !mm || !ssMs) return NaN
-
-  const [ss, ms] = ssMs.split('.')
-  const hours = parseInt(hh, 10)
-  const minutes = parseInt(mm, 10)
-  const seconds = parseInt(ss, 10)
-  const millis = parseInt(ms || '0', 10)
-  return hours * 3600 + minutes * 60 + seconds + millis / 1000
-}
