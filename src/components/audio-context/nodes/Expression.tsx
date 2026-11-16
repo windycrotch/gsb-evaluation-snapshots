@@ -1,5 +1,5 @@
-import { MAX_LENGTH, PROCESSOR_INPUTS, STOP_MESSAGE, compile, processorSource } from "$library/expression";
-import { ReadonlySignal, Signal, computed, effect, signal, useSignalEffect } from "@preact/signals-react";
+import { ExpressionRuntime, PROCESSOR_INPUTS, STOP_MESSAGE, processorSource } from "$library/expression";
+import { ReadonlySignal, computed, effect, signal, useSignalEffect } from "@preact/signals-react";
 import { group, icon } from "../_groups";
 import { prop, reactive } from "@vicimpa/decorators";
 
@@ -23,14 +23,17 @@ const processor = () => defineRuntimeWorklet('expression', name => processorSour
 
 type TExpressionFieldProps = {
   text: ReadonlySignal<string>;
-  draft: Signal<string | null>;
   invalid: ReadonlySignal<true | undefined>;
+  onBegin: (value: string) => void;
+  onDraft: (value: string) => void;
   onCommit: (value: string) => void;
+  onCancel: () => void;
 };
 
 // Поле формулы: Enter или потеря фокуса — применить, Shift+Enter — перенос строки, Esc — отменить
-const ExpressionField = ({ text, draft, invalid, onCommit }: TExpressionFieldProps) => {
+const ExpressionField = ({ text, invalid, onBegin, onDraft, onCommit, onCancel }: TExpressionFieldProps) => {
   const ref = useRef<HTMLTextAreaElement>(null);
+  const cancelled = useRef(false);
 
   useSignalEffect(() => {
     const value = text.value;
@@ -45,16 +48,20 @@ const ExpressionField = ({ text, draft, invalid, onCommit }: TExpressionFieldPro
       className={s.expression}
       data-invalid={invalid}
       defaultValue={text.peek()}
-      maxLength={MAX_LENGTH}
       rows={2}
       spellCheck={false}
       placeholder="sin(TAU * a * t) * b"
-      onFocus={e => draft.value = e.currentTarget.value}
-      onInput={e => draft.value = e.currentTarget.value}
+      onFocus={e => {
+        cancelled.current = false;
+        onBegin(e.currentTarget.value);
+      }}
+      onInput={e => onDraft(e.currentTarget.value)}
       onKeyDown={e => {
         e.stopPropagation();
 
         if (e.key === 'Escape') {
+          // Возврат к сохранённой формуле: на blur уже ничего не применяем
+          cancelled.current = true;
           e.currentTarget.value = text.peek();
           e.currentTarget.blur();
         }
@@ -65,8 +72,13 @@ const ExpressionField = ({ text, draft, invalid, onCommit }: TExpressionFieldPro
         }
       }}
       onBlur={e => {
+        if (cancelled.current) {
+          cancelled.current = false;
+          onCancel();
+          return;
+        }
+
         onCommit(e.currentTarget.value);
-        draft.value = null;
       }} />
   );
 };
@@ -86,22 +98,36 @@ export default class extends BaseNode {
 
   @prop @store expression = 'sin(TAU * a * t) * b';
 
+  // Зеркало состояния рантайма для реактивности: черновик и счётчик изменений
+  _draft = signal<string | null>(null);
+  _revision = signal(0);
+
+  // Ошибка загрузки самого процессора; формулы и ядра ведёт рантайм
+  _fatal = signal('');
+
+  // Рантайм создаётся лениво: в конструкторе реактивные поля ещё не готовы
+  #runtime: ExpressionRuntime | null = null;
+
+  get _runtime() {
+    if (!this.#runtime) {
+      const source = typeof this.expression === 'string' ? this.expression : '';
+      this.#runtime = new ExpressionRuntime(source, {
+        onLoadError: () => this._revision.value++,
+      });
+    }
+
+    return this.#runtime;
+  }
+
   // Проект может прийти по ссылке с чем угодно в этом поле
   _text = computed(() => typeof this.expression === 'string' ? this.expression : '');
-  _draft = signal<string | null>(null);
-  _loadError = signal('');
-
-  _compiled = computed(() => compile(this.expression));
 
   // Пока поле редактируется — ошибка черновика, иначе — сохранённой формулы или загрузки
   _error = computed(() => {
-    const draft = this._draft.value;
-    const result = draft !== null ? compile(draft) : this._compiled.value;
+    this._draft.value;
+    this._revision.value;
 
-    if (!result.ok)
-      return `${result.error}`;
-
-    return draft !== null ? '' : this._loadError.value;
+    return this._runtime.error || this._fatal.value;
   });
 
   _invalid = computed(() => !!this._error.value || undefined);
@@ -110,17 +136,29 @@ export default class extends BaseNode {
     this._error.value && <div className={s.expressionError}>{this._error.value}</div>
   ));
 
-  // Ядро, которое должно играть; уходит в процессор, как только тот загрузится
-  #kernel: string | null = null;
-  #node: AudioWorkletNode | null = null;
-  #sent = 0;
+  #setDraft(value: string | null) {
+    // Сначала состояние рантайма, потом сигнал: computed не должен увидеть прошлый черновик
+    if (value === null)
+      this._runtime.cancelDraft();
+    else
+      this._runtime.setDraft(value);
 
-  #send() {
-    if (!this.#node || this.#kernel === null)
-      return;
-
-    this.#node.port.postMessage({ kernel: this.#kernel, id: ++this.#sent });
+    this._draft.value = value;
   }
+
+  // Применение черновика: ошибка не меняет играющее ядро, удачная формула — меняет
+  #commit(value: string) {
+    this._runtime.setDraft(value);
+    this._runtime.commitDraft();
+    this._draft.value = null;
+    this._revision.value++;
+
+    // Сохранённая формула живёт в проекте; если текст изменился — обновляем поле
+    if (this.expression !== this._runtime.source)
+      this.expression = this._runtime.source;
+  }
+
+  #stopNode: (() => void) | null = null;
 
   async #start(version: number) {
     try {
@@ -140,33 +178,23 @@ export default class extends BaseNode {
         pipe(node, this.#out),
       );
 
-      node.port.onmessage = ({ data }) => {
-        // Ответ на устаревшее ядро не интересен
-        if (data?.id !== this.#sent)
-          return;
-
-        if (!data.ok) console.error(data.error);
-        this._loadError.value = data.ok ? '' : 'Failed to load the compiled expression';
-      };
-
-      this.#node = node;
       this.#stopNode = () => {
         node.port.onmessage = null;
         unwire();
         node.port.postMessage(STOP_MESSAGE);
       };
 
-      this.#send();
+      // Порт процессора — транспорт рантайма: ответы на устаревшие ядра он отбросит сам
+      node.port.onmessage = ({ data }) => this._runtime.receive(data);
+      this._runtime.attach(message => node.port.postMessage(message));
     } catch (error) {
       if (version !== this.#version)
         return;
 
       console.error(error);
-      this._loadError.value = 'Failed to load the expression processor';
+      this._fatal.value = 'Failed to load the expression processor';
     }
   }
-
-  #stopNode: (() => void) | null = null;
 
   _connect = () => {
     const version = ++this.#version;
@@ -174,20 +202,21 @@ export default class extends BaseNode {
 
     return dispose(
       effect(() => {
-        const result = this._compiled.value;
+        // Внешняя смена формулы (проект, отмена) тоже доходит до процессора
+        const text = this._text.value;
 
-        // С ошибкой разбора продолжает играть последняя рабочая формула
-        if (!result.ok)
+        if (text === this._runtime.source)
           return;
 
-        this.#kernel = result.kernel;
-        this.#send();
+        this._runtime.setSource(text);
+        this._revision.value++;
       }),
       () => {
         this.#version++;
+        this._fatal.value = '';
+        this._runtime.detach();
         this.#stopNode?.();
         this.#stopNode = null;
-        this.#node = null;
       },
     );
   };
@@ -204,9 +233,11 @@ export default class extends BaseNode {
 
       <ExpressionField
         text={this._text}
-        draft={this._draft}
         invalid={this._invalid}
-        onCommit={value => this.expression = value} />
+        onBegin={value => this.#setDraft(value)}
+        onDraft={value => this.#setDraft(value)}
+        onCommit={value => this.#commit(value)}
+        onCancel={() => this.#setDraft(null)} />
 
       {this._errorView}
     </>

@@ -22,6 +22,7 @@ registerProcessor(${JSON.stringify(name)}, class extends AudioWorkletProcessor {
 
   running = true;
   kernel = null;
+  kernelId = 0;
   y1 = 0;
 
   constructor(options) {
@@ -35,6 +36,13 @@ registerProcessor(${JSON.stringify(name)}, class extends AudioWorkletProcessor {
       }
 
       if (data && typeof data.kernel === 'string') {
+        // Позднее сообщение не должно затереть ядро, собранное после него
+        if (typeof data.id === 'number') {
+          if (data.id <= this.kernelId)
+            return;
+          this.kernelId = data.id;
+        }
+
         try {
           this.kernel = new Function('return ' + data.kernel)();
           this.port.postMessage({ ok: true, id: data.id });

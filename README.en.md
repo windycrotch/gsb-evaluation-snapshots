@@ -105,6 +105,8 @@ The formula is evaluated every sample. Projects carry the formula as text. Openi
 - **Operators:** `+ - * / % **`; comparisons (they give 0 or 1); `&& || !`; `?:`.
 - **Functions:** `sin cos tan asin acos atan atan2 sinh cosh tanh exp log log2 log10 pow sqrt abs sign floor ceil round trunc min max clamp mix fract mod noise`.
 
+The formula field checks the draft as you type and shows the error with its position, but only applies the text on <kbd>Enter</kbd> or blur; <kbd>Esc</kbd> restores the saved formula. A bad formula never stops the sound: the node keeps playing the last good one, and stays silent if there has never been one. Changing the formula does not recreate the processor — it just receives a new kernel, and `y1` carries over.
+
 ### Media, Sampler, Recorder
 
 - **Sampler:**
