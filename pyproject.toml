@@ -1,0 +1,97 @@
+[project]
+name = "qmm"
+version = "0.19.0"
+description = "Quadratic Majorize-Minimize Python toolbox"
+authors = [
+    { name = "François Orieux", email = "francois.orieux@universite-paris-saclay.fr" },
+    { name = "Ralph Abirizk", email = "ralph.abirizk@universite-paris-saclay.fr" },
+]
+maintainers = [
+    { name = "François Orieux", email = "francois.orieux@universite-paris-saclay.fr" },
+]
+readme = "README.md"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
+requires-python = ">=3.9"
+keywords = ["optimization", "MM", "surrogate", "criterion", "objective", "learning"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Typing :: Typed",
+]
+dependencies = ["numpy>=1.19,<3.0"]
+
+[project.urls]
+Homepage = "https://qmm.readthedocs.io/en/stable/"
+Documentation = "https://qmm.readthedocs.io/en/stable/"
+Repository = "https://github.com/forieux/qmm/"
+"Bug Tracker" = "https://github.com/forieux/qmm/issues"
+"Author webpage" = "https://pro.orieux.fr/"
+
+[dependency-groups]
+test = ["pytest>=7"]
+lint = ["ruff", "pylint", "mypy"]
+docs = [
+    "sphinx>=8,<10; python_version >= '3.11'",
+    "sphinx-autodoc-typehints>=2; python_version >= '3.11'",
+    "sphinx-rtd-theme>=3; python_version >= '3.11'",
+]
+demo = ["matplotlib", "scipy>=1.11", "pooch", "udft"]
+dev = [
+    { include-group = "test" },
+    { include-group = "lint" },
+    { include-group = "docs" },
+    { include-group = "demo" },
+    "ipython",
+    "twine",
+]
+
+[build-system]
+requires = ["poetry-core>=2.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.pylint.main]
+load-plugins = "pylint.extensions.docparams"
+
+[tool.pylint.messages_control]
+max-parents = 10
+# abstract-method: Loss.gr_sup and gy_sup are optional and raise NotImplementedError.
+# too-many-positional-arguments: the solvers public API, already seen by max-args.
+disable = [
+  "line-too-long",
+  "abstract-method",
+  "too-many-positional-arguments", ]
+
+[tool.pylint.design]
+max-args = 7
+max-attributes = 8
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+filterwarnings = ["error::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "I", "NPY", "RUF013"]
+# E501: left to the formatter. E731: `precond = lambda x: x` is clear enough.
+ignore = ["E501", "E731"]
+
+[tool.ruff.lint.per-file-ignores]
+"qmm/__init__.py" = ["F403"]

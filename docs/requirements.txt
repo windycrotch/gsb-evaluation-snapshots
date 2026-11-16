@@ -1,0 +1,7 @@
+# This file is required since we use ReadTheDocs services.
+# If it is not used, feel free to delete it.
+
+numpy
+sphinx>=8,<10
+sphinx-autodoc-typehints>=2
+sphinx-rtd-theme>=3
