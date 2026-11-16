@@ -57,12 +57,18 @@ An item key identifies an object inside the collection. `DrawOptions.id` identif
 | `insert(item)` | Appends an item. Duplicate keys throw before insertion. |
 | `update(key, patchOrUpdater)` | Replaces the item with a shallow copy, preserving its key and position; returns the replacement. Missing keys and key changes throw. |
 | `remove(key)` | Removes and compacts the array; returns `false` if the key is absent. |
+| `replaceAll(items)` | Validates every new key (string/number, unique) before changing anything; then clears the collection and rebuilds it in the supplied order. The `items` array identity is unchanged and subscribers receive one batch containing all removals and insertions. |
 | `batch(callback)` | Groups synchronous mutations, including nested batches. Returns the callback result. |
 | `subscribe(listener)` | Receives a read-only array of insert/update/remove deltas after changes; returns an unsubscribe function. It does not emit an initial snapshot. |
+| `changesSince(sequence)` | Returns `{ changes, sequence }`: the applied changes after `sequence`, in occurrence order, and the latest sequence. Sequence 0 means the beginning. Invalid cursors (negative, fractional, `NaN`) throw a `TypeError` without changing the collection. |
 
 Update patches are shallow. Replace nested values such as `style`, `data`, path `commands`, or `points` immutably. Do not mutate objects returned by `get()` or `items`, and do not push into the exposed array. To change a key, remove the old item and insert a new one; the new item is appended.
 
 `batch` groups synchronous work; it is not an async transaction and provides no rollback. If its callback throws, successful changes are still delivered before the error propagates. Subscriber errors do not prevent other subscribers from receiving the changes; the first error is rethrown after notification delivery. Reentrant mutations queue their notifications until the current listeners finish. Collection state changes immediately; all engine registrations are synchronized when the outermost mutation finishes. A subscriber added during a batch receives only changes made after it subscribed.
+
+`replaceAll` is atomic in its validation only: if any supplied key is invalid or repeated, it throws before touching the collection, so the items, the change log, and subscribers stay exactly as they were. Once validation passes, every removal and insertion is applied and delivered. It replaces the whole content even when some keys already exist; that is how it differs from `batch`-ed inserts. Its removals are recorded from the tail inward and its insertions in the supplied order.
+
+Every applied change gets the next sequence number (starting at 1) and is retained in a change log. `changesSince(0)` replays the whole log; pass a previous result's `sequence` to read only what came after it. Returned change records and their array are frozen, so callers cannot mutate the collection through them. A cursor beyond the log returns no changes and the current sequence, so the result is always safe to use as the next cursor. The log is recorded when a change is applied, before delivery, so it stays consistent with collection state even when listeners throw. It is never truncated; a long-lived collection with heavy mutation keeps growing it, so use it as a replay/interop hook rather than an unbounded audit history for very large editors.
 
 ## Hit Testing and Paint Order
 

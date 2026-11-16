@@ -18,6 +18,17 @@ export type ItemCollectionChange<T> =
       }
     | { readonly type: "remove"; readonly key: ItemKey; readonly item: T; readonly index: number };
 
+/**
+ * A delivered slice of a collection's change log. `changes` holds only entries
+ * after the requested sequence, in occurrence order. `sequence` is the latest
+ * delivered sequence, so it can be fed back into `changesSince` as the next
+ * cursor without replaying or skipping anything.
+ */
+export interface ItemCollectionChanges<T> {
+    readonly changes: readonly ItemCollectionChange<T>[];
+    readonly sequence: number;
+}
+
 // A shared symbol also recognizes collections across copies of the core package.
 // Arbitrary arrays and iterables never opt into the live-source protocol.
 const ITEM_COLLECTION_BRAND: unique symbol = Symbol.for("@canvas-tile-engine/core/ItemCollection");
@@ -34,6 +45,12 @@ export interface ReadonlyItemCollection<out T> {
     get(key: ItemKey): T | undefined;
     keyAt(index: number): ItemKey | undefined;
     subscribe(listener: (changes: readonly ItemCollectionChange<T>[]) => void): () => void;
+    /**
+     * Optional change-log reader. `ItemCollection` always implements it; a
+     * source that keeps no history may omit it, so consumers should feature
+     * check before replaying.
+     */
+    changesSince?(sequence: number): ItemCollectionChanges<T>;
 }
 
 /** A single draw item, an ordinary array, or an explicitly live collection. */
@@ -77,6 +94,10 @@ interface CollectionNotification<T> {
  * Reentrant mutations queue their notifications until the current listeners
  * finish. All listeners run even if one throws; the first error is rethrown
  * after delivery. Successfully applied changes are never rolled back.
+ *
+ * Every applied change also receives the next sequence number and is retained
+ * in a change log, so a host can replay a notification batch from a cursor with
+ * `changesSince`. The log is append-only for the lifetime of the collection.
  */
 export class ItemCollection<T extends object> implements ReadonlyItemCollection<T> {
     readonly [ITEM_COLLECTION_BRAND] = true;
@@ -87,6 +108,7 @@ export class ItemCollection<T extends object> implements ReadonlyItemCollection<
     private readonly subscribers = new Set<CollectionSubscriber<T>>();
     private pendingChanges: ItemCollectionChange<T>[] = [];
     private readonly notifications: CollectionNotification<T>[] = [];
+    private readonly changeLog: ItemCollectionChange<T>[] = [];
     private batchDepth = 0;
     private notifying = false;
     private lastChangeSequence = 0;
@@ -178,6 +200,52 @@ export class ItemCollection<T extends object> implements ReadonlyItemCollection<
     }
 
     /**
+     * Replace every item in one update. All new keys are validated before
+     * anything changes: an invalid key throws a TypeError and a repeated key
+     * throws the same duplicate-key error as `insert`, leaving the collection,
+     * its log, and its subscribers untouched.
+     *
+     * On success the backing array keeps its identity. Existing items are
+     * recorded as removals from the end, then the new items are appended in
+     * the supplied order, and subscribers receive one batch containing all of
+     * those changes. The change log records the same entries in sequence.
+     * Nested inside `batch`, everything merges into that batch's notification.
+     */
+    replaceAll(items: readonly T[]): void {
+        const next: Array<{ key: ItemKey; item: T }> = [];
+        const nextKeys = new Set<ItemKey>();
+        for (const item of items) {
+            const key = this.readKey(item);
+            if (nextKeys.has(key)) {
+                throw new Error(`ItemCollection: duplicate key ${String(key)}`);
+            }
+            nextKeys.add(key);
+            next.push({ key, item });
+        }
+        this.batchDepth++;
+        try {
+            for (let index = this.values.length - 1; index >= 0; index--) {
+                const key = this.keys[index];
+                const item = this.values[index];
+                this.entries.delete(key);
+                this.values.pop();
+                this.keys.pop();
+                this.record({ type: "remove", key, item, index });
+            }
+            for (const { key, item } of next) {
+                const index = this.values.length;
+                this.entries.set(key, { item, index });
+                this.values.push(item);
+                this.keys.push(key);
+                this.record({ type: "insert", key, item, index });
+            }
+        } finally {
+            this.batchDepth--;
+            this.flush();
+        }
+    }
+
+    /**
      * Group synchronous mutations into one notification. Nested batches merge.
      * This is not a transaction: if the callback throws, successful changes
      * still notify subscribers before its error is rethrown.
@@ -217,6 +285,30 @@ export class ItemCollection<T extends object> implements ReadonlyItemCollection<
         };
     }
 
+    /**
+     * Read the change log after the given sequence. Sequence 0 means "before
+     * the first change"; each applied change occupies the next sequence, so
+     * changes are numbered 1..N and `sequence` in the result is N.
+     *
+     * The returned records are the same frozen entries that were delivered to
+     * subscribers, in occurrence order, and the array is frozen as well.
+     * Mutating the result never changes the collection or its log. A cursor
+     * newer than the log returns no changes and the current sequence, so the
+     * result's `sequence` is always safe to use as the next cursor.
+     *
+     * A negative, fractional, NaN, or non-numeric sequence throws a TypeError
+     * before reading anything.
+     */
+    changesSince(sequence: number): ItemCollectionChanges<T> {
+        if (typeof sequence !== "number" || !Number.isInteger(sequence) || sequence < 0) {
+            throw new TypeError("ItemCollection: sequence must be a non-negative integer");
+        }
+        return Object.freeze({
+            changes: Object.freeze(this.changeLog.slice(sequence)),
+            sequence: this.lastChangeSequence,
+        });
+    }
+
     private readKey(item: T): ItemKey {
         const key = this.keyOf(item);
         if (typeof key !== "string" && typeof key !== "number") {
@@ -227,7 +319,12 @@ export class ItemCollection<T extends object> implements ReadonlyItemCollection<
 
     private record(change: ItemCollectionChange<T>): void {
         this.lastChangeSequence++;
-        this.pendingChanges.push(Object.freeze(change));
+        const frozen = Object.freeze(change);
+        // Applied changes are logged immediately, before delivery, so a host
+        // replaying from a cursor sees exactly the changes that took effect,
+        // including ones whose listeners throw and replaceAll entries.
+        this.changeLog.push(frozen);
+        this.pendingChanges.push(frozen);
         this.flush();
     }
 

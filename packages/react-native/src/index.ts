@@ -92,6 +92,7 @@ export type {
     ItemKey,
     ItemCollectionOptions,
     ItemCollectionChange,
+    ItemCollectionChanges,
     ReadonlyItemCollection,
     DrawItems,
 } from "@canvas-tile-engine/core";

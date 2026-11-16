@@ -52,10 +52,20 @@ canvas UI still needs its own state/subscription.
   It is not an async transaction. Successful changes still notify if the
   callback throws; no rollback. Subscribers receive immutable delta
   envelopes, but item values themselves must still be treated as read-only.
+- `replaceAll(items)` validates every new key first; an invalid or repeated
+  key throws before anything changes. On success it clears and rebuilds the
+  collection in the supplied order, keeps the `items` array identity, and
+  delivers one batch with all removals and insertions.
 - `subscribe(listener)` does not emit an initial snapshot and returns
   unsubscribe. It receives ordered `ItemCollectionChange<T>[]` deltas:
   insert/remove carry `key`, `item`, `index`; update also has `previous`.
   A subscriber added during a batch receives only subsequent changes.
+- `changesSince(sequence)` returns `{ changes, sequence }`: applied changes
+  after `sequence` in occurrence order plus the latest sequence. Sequence 0
+  is the start; each applied change takes the next number. Results are
+  frozen; a negative/fractional/`NaN` cursor throws `TypeError`. The log is
+  written when a change applies, so it matches state even if a listener
+  throws. Use the returned `sequence` as the next cursor.
 - Subscriber errors do not skip remaining subscribers; the first error is
   rethrown after delivery. Reentrant mutation notifications drain in FIFO
   order. Query current engine geometry after the outer mutation returns;

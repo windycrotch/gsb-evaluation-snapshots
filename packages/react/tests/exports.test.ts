@@ -25,6 +25,9 @@ describe("core type re-exports", () => {
         expectTypeOf<Binding.ItemCollectionChange<Core.Rect<Data>>>().toEqualTypeOf<
             Core.ItemCollectionChange<Core.Rect<Data>>
         >();
+        expectTypeOf<Binding.ItemCollectionChanges<Core.Rect<Data>>>().toEqualTypeOf<
+            Core.ItemCollectionChanges<Core.Rect<Data>>
+        >();
         expectTypeOf<Binding.ReadonlyItemCollection<Core.Rect<Data>>>().toEqualTypeOf<
             Core.ReadonlyItemCollection<Core.Rect<Data>>
         >();

@@ -42,6 +42,7 @@ export {
     isItemCollection,
     type ItemCollectionOptions,
     type ItemCollectionChange,
+    type ItemCollectionChanges,
     type ReadonlyItemCollection,
     type ItemKey,
     type DrawItems,

@@ -358,4 +358,33 @@ describe("ItemCollection engine integration", () => {
         expect(engine.hitTest(at(0)).map((hit) => hit.key)).toEqual(["a"]);
         expect(engine.hitTest(at(10)).map((hit) => hit.key)).toEqual(["b"]);
     });
+
+    it("applies replaceAll to registrations, hits, and the dense view in one notification", () => {
+        frames();
+        const { engine, applyDrawChanges, registered } = createEngine();
+        const source = seats(3);
+        engine.drawRect(source);
+        expect(engine.hitTest(at(10)).map((hit) => hit.key)).toEqual(["1"]);
+        const view = registered[0].items;
+
+        source.replaceAll([
+            { id: "3", x: 30, y: 0 },
+            { id: "0", x: 0, y: 0 },
+        ]);
+
+        expect(applyDrawChanges).toHaveBeenCalledTimes(1);
+        expect(registered[0].items).toBe(view);
+        expect(view).toEqual(source.items);
+        expect(source.items.map((item) => item.id)).toEqual(["3", "0"]);
+        expect(engine.hitTest(at(10))).toEqual([]);
+        expect(engine.hitTest(at(30)).map((hit) => [hit.key, hit.index])).toEqual([["3", 0]]);
+        expect(engine.hitTest(at(0)).map((hit) => [hit.key, hit.index])).toEqual([["0", 1]]);
+        expect(source.changesSince(0).changes.map(({ type, key }) => [type, key])).toEqual([
+            ["remove", "2"],
+            ["remove", "1"],
+            ["remove", "0"],
+            ["insert", "3"],
+            ["insert", "0"],
+        ]);
+    });
 });

@@ -182,7 +182,7 @@ type ItemKey = string | number;
 type DrawItems<T> = T | T[] | ReadonlyItemCollection<T>;
 ```
 
-`ItemCollection<T extends object>` implements the read-only collection source consumed by dynamic draws. `ItemCollectionOptions<T>` supplies `keyOf`. `ItemCollectionChange<T>` is an insert/update/remove discriminated union; every change includes `key`, `item`, and `index`, and updates also include `previous`. `isItemCollection(value)` recognizes the explicit source protocol. The class, guard, and types are exported by core, React, and React Native. See [Live Item Collections](../js/item_collections.md) for mutation and subscription semantics.
+`ItemCollection<T extends object>` implements the read-only collection source consumed by dynamic draws. `ItemCollectionOptions<T>` supplies `keyOf`. `ItemCollectionChange<T>` is an insert/update/remove discriminated union; every change includes `key`, `item`, and `index`, and updates also include `previous`. `ItemCollectionChanges<T>` is the `{ changes, sequence }` result of `changesSince(sequence)`, which replays applied changes from a cursor. `isItemCollection(value)` recognizes the explicit source protocol. The class, guard, and types are exported by core, React, and React Native. See [Live Item Collections](../js/item_collections.md) for mutation and subscription semantics.
 
 Collection hit results add `key?: ItemKey`; `index` remains the item's current array position. Ordinary single-item and array hits have no `key` field.
 

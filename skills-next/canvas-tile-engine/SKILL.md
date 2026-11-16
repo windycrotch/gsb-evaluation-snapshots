@@ -60,8 +60,10 @@ scenes (one layering caveat in [performance](references/performance.md)).
    (draw + hit-test entries). Without an id, every call adds another copy.
    Static draws use their `cacheKey` as the id.
    For frequent per-item geometry edits, use a stable `ItemCollection`
-   (core >= 0.12): `insert` / `update` / `remove` / `batch` maintain caches
-   and hit testing, then automatically request a frame. Read
+   (core >= 0.12): `insert` / `update` / `remove` / `batch` / `replaceAll`
+   maintain caches and hit testing, then automatically request a frame.
+   `changesSince(sequence)` replays applied changes from a cursor when a
+   host must forward or mirror them. Read
    [live collections](references/item-collections.md) before implementing them.
 4. **Decoration is not geometry.** Selection, hover, highlight and filters go
    through `styleOf` / `visibleOf` / `interactiveOf` in the draw options:
@@ -241,7 +243,7 @@ const png = await renderToBuffer({
 | :-- | :-- |
 | [core-api.md](references/core-api.md) | Coordinate spaces, construction, full config reference, every engine method, image loading, utilities, exported types. |
 | [drawing.md](references/drawing.md) | Retained draw model, ids, `styleOf`/`visibleOf`/`interactiveOf`, every primitive, origin, gradients, clipping, static caches, custom drawing, screen-fixed overlays. |
-| [item-collections.md](references/item-collections.md) | `ItemCollection` keyed insert/update/remove/batch, subscriptions, hit keys, React usage, lifecycle and limits (core >= 0.12). |
+| [item-collections.md](references/item-collections.md) | `ItemCollection` keyed insert/update/remove/replaceAll/batch, subscriptions, change-log replay, hit keys, React usage, lifecycle and limits (core >= 0.12). |
 | [events.md](references/events.md) | Flags, callback payloads, keyboard control, runtime mode switching, interaction patterns. |
 | [react.md](references/react.md) | `useCanvasTileEngine` handle, the compound components and their props, lifecycle rules, types, pitfalls. |
 | [react-native.md](references/react-native.md) | RN component, sizing boards to the screen, touch behavior, Skia types and custom drawing, platform differences. |
