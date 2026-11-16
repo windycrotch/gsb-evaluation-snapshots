@@ -1,8 +1,13 @@
 import { AudioWorkletEventMessage } from "@/workers/types";
 
 const handleNodeMessage =
-  (nodeRef: AudioWorkletNode, config: unknown) => (e: MessageEvent) => {
-    const event = e.data as AudioWorkletEventMessage<number>;
+  (
+    nodeRef: AudioWorkletNode,
+    config: unknown,
+    onParamChange?: (event: AudioWorkletEventMessage<unknown>) => void
+  ) =>
+  (e: MessageEvent) => {
+    const event = e.data as AudioWorkletEventMessage<unknown>;
     // WASM was loaded - so lets initialize our Rust-based module
     if (event.type === "wasm-loaded") {
       console.log("wasm loaded");
@@ -14,6 +19,14 @@ const handleNodeMessage =
         type: "init-module",
         data: config,
       });
+      return;
+    }
+
+    // Forward parameter confirmations (e.g. "set-bits-confirmed") so the
+    // page can display the parameter values actually in effect. These
+    // messages are informational only and never change audio processing.
+    if (typeof event.type === "string" && event.type.endsWith("-confirmed")) {
+      onParamChange?.(event);
     }
   };
 
@@ -22,7 +35,8 @@ export const createWorkletNode = async (
   wasmPath: string,
   worklet: string,
   workletName: string,
-  config?: unknown
+  config?: unknown,
+  onParamChange?: (event: AudioWorkletEventMessage<unknown>) => void
 ) => {
   // Fetch the WASM module
   const response = await fetch(wasmPath);
@@ -46,7 +60,11 @@ export const createWorkletNode = async (
     nodeRef.port.postMessage({ type: "init-wasm", data: wasmData });
 
     // Get messages from the worklet/processor
-    nodeRef.port.onmessage = handleNodeMessage(nodeRef, config);
+    nodeRef.port.onmessage = handleNodeMessage(
+      nodeRef,
+      config,
+      onParamChange
+    );
 
     console.log("created worklet node", nodeRef);
 

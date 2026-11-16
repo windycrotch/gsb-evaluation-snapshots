@@ -1,8 +1,13 @@
 import BitcrusherWorklet from "@/workers/bitcrusher.ts?worker&url";
 import "clawdio-bitcrusher/clawdio_bitcrusher_bg.wasm?no-inline";
 import BitcrusherWasmPath from "clawdio-bitcrusher/clawdio_bitcrusher_bg.wasm?url&no-inline";
+import type { AudioWorkletEventMessage } from "@/workers/types";
 import { CustomAudioWorkletNode } from "./types";
 import { assertNode, createWorkletNode } from "./utils";
+
+export type BitcrusherParamConfirmedEvent =
+  | AudioWorkletEventMessage<{ bits: number }>
+  | AudioWorkletEventMessage<{ normfreq: number }>;
 
 export type BitcrusherNode = CustomAudioWorkletNode & {
   setBits: (newBits: number) => void;
@@ -11,13 +16,19 @@ export type BitcrusherNode = CustomAudioWorkletNode & {
 
 /**
  * Creates a Bitcrusher audio worklet node and initializes it's WASM module.
- * Returns the AudioWorkletNode and helpful setter functions for parameters
+ * Returns the AudioWorkletNode and helpful setter functions for parameters.
+ *
+ * `onParamChange` (optional) receives confirmation messages posted by the
+ * worklet after a parameter update has taken effect in the underlying WASM
+ * module, e.g. `{ type: "set-bits-confirmed", data: { bits: 8 } }`. It is
+ * purely informational and never affects the audio output.
  * @returns BitcrusherNode
  */
 const createBitcrusherNode = async (
   audioCtx: AudioContext,
   bits = 4,
-  normfreq = 0.1
+  normfreq = 0.1,
+  onParamChange?: (event: BitcrusherParamConfirmedEvent) => void
 ) => {
   let nodeRef: AudioWorkletNode | null = null;
 
@@ -41,7 +52,10 @@ const createBitcrusherNode = async (
     {
       bits,
       normfreq,
-    }
+    },
+    onParamChange as
+      | ((event: AudioWorkletEventMessage<unknown>) => void)
+      | undefined
   );
 
   assertNode(nodeRef, "Bitcrusher");

@@ -33,6 +33,18 @@ impl MoogModule {
         }
     }
 
+    /// Updates the cutoff frequency and resonance used by subsequent
+    /// `process` calls in a single step.
+    ///
+    /// Only `cutoff` and `resonance` are changed: the four pole outputs
+    /// (`out1`..`out4`) and input histories (`in1`..`in4`) are preserved, so
+    /// parameter changes take effect immediately without resetting the
+    /// filter's internal state.
+    pub fn set_params(&mut self, cutoff: f32, resonance: f32) {
+        self.cutoff = cutoff;
+        self.resonance = resonance;
+    }
+
     pub fn process(&mut self, samples: &js_sys::Float32Array) -> js_sys::Float32Array {
         let samples_vec: Vec<f32> = samples.to_vec();
         let output = self.process_vec(samples_vec);

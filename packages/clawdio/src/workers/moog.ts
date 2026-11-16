@@ -2,6 +2,7 @@ import init, { MoogModule } from "clawdio-moog";
 import type {
   AudioWorkletEventMessage,
   AudioWorkletInitWasmEvent,
+  AudioWorkletParamConfirmedEvent,
 } from "./types";
 import { initWasm } from "./utils";
 
@@ -20,6 +21,15 @@ export interface MoogEventSetResonance
   type: "set-resonance";
   data: number;
 }
+
+export type MoogCutoffConfirmed = AudioWorkletParamConfirmedEvent<{
+  cutoff: number;
+  resonance: number;
+}>;
+export type MoogResonanceConfirmed = AudioWorkletParamConfirmedEvent<{
+  cutoff: number;
+  resonance: number;
+}>;
 
 export type MoogOptions = {
   cutoff: number;
@@ -49,16 +59,50 @@ class MoogWorklet extends AudioWorkletProcessor {
 
     if (event.type === "init-module") {
       const { cutoff = 0.065, resonance = 3.5 } = event.data;
+      // Keep the local fields in sync with the constructed module so later
+      // set_params calls and confirmation messages report the real values.
+      this.cutoff = cutoff;
+      this.resonance = resonance;
       this.worklet = MoogModule.new(cutoff, resonance);
     }
 
     // Setters for internal properties (since we can't mutate this directly)
     if (event.type === "set-cutoff") {
       this.cutoff = event.data;
-      // @TODO: Update the underylinng module
+
+      // Until the WASM module is initialized there is nothing to update.
+      // Safely ignore the message instead of throwing.
+      if (this.worklet == null) return;
+
+      // Push both parameters into the Rust module together. The module keeps
+      // its four pole outputs and input histories, so the filter state is
+      // not reset and the next processed block uses the new cutoff.
+      this.worklet.set_params(this.cutoff, this.resonance);
+
+      // Confirm the effective values back to the main thread. This is purely
+      // informational and does not alter the audio processing result.
+      const confirmed: MoogCutoffConfirmed = {
+        type: "set-cutoff-confirmed",
+        data: { cutoff: this.cutoff, resonance: this.resonance },
+      };
+      this.port.postMessage(confirmed);
     }
     if (event.type === "set-resonance") {
       this.resonance = event.data;
+
+      // Until the WASM module is initialized there is nothing to update.
+      // Safely ignore the message instead of throwing.
+      if (this.worklet == null) return;
+
+      // Push both parameters into the Rust module together without resetting
+      // the filter's internal state; the next block uses the new resonance.
+      this.worklet.set_params(this.cutoff, this.resonance);
+
+      const confirmed: MoogResonanceConfirmed = {
+        type: "set-resonance-confirmed",
+        data: { cutoff: this.cutoff, resonance: this.resonance },
+      };
+      this.port.postMessage(confirmed);
     }
   };
 

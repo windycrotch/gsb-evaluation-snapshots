@@ -15,6 +15,15 @@ impl BitcrusherModule {
         BitcrusherModule { bits, phaser: 0.0, last: 0.0 }
     }
 
+    /// Updates the quantization bit depth used by subsequent `process` calls.
+    ///
+    /// Only the `bits` parameter is changed: the running phaser position and
+    /// the last held sample are preserved, so the update can be applied at any
+    /// point in the stream without resetting the effect's internal state.
+    pub fn set_bits(&mut self, bits: usize) {
+        self.bits = bits;
+    }
+
     pub fn process(&mut self, samples: &js_sys::Float32Array, normfreq: f32) -> js_sys::Float32Array {
 
         // console::log_1(&"Processing in Rust".into());
