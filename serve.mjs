@@ -1,0 +1,50 @@
+// Zero-dependency static server for working on the app: it serves this folder the way the hosted
+// site is laid out (index.html, js/, stems.json and the stems-ogg/ and stems-flac/ copies made by
+// `npm run stems`), to this computer only (127.0.0.1). It is not a way to publish the site: that
+// is `npm run deploy` (Cloudflare). No stems here? `npm run dev:live` streams them from the live site.
+// Usage:  npm run dev [-- <port>]      (or: node serve.mjs [port])
+import { createServer } from 'node:http';
+import { createReadStream, statSync, existsSync } from 'node:fs';
+import { join, normalize, extname, dirname, resolve, relative, isAbsolute } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)));
+const PORT = Number(process.argv[2] || process.env.PORT || 8137);
+const TYPES = {
+  '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8', '.svg': 'image/svg+xml',
+  '.ogg': 'audio/ogg', '.flac': 'audio/flac', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp',
+  '.ico': 'image/x-icon', '.md': 'text/plain; charset=utf-8', '.webmanifest': 'application/manifest+json',
+};
+
+// Answer only names for this computer, so a web page can't reach the server by pointing its own
+// domain at 127.0.0.1 (DNS rebinding).
+const OWN_HOST = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i;
+
+createServer((req, res) => {
+  if (!OWN_HOST.test(req.headers.host || '')) { res.writeHead(403); return res.end(); }
+  let path;
+  try { path = decodeURIComponent(new URL(req.url, 'http://x').pathname); } catch { res.writeHead(400); return res.end(); }
+  if (path.endsWith('/')) path += 'index.html';
+  const file = normalize(join(ROOT, path));
+  const rel = relative(ROOT, file);
+  // No dot files or folders, also not by their Windows aliases: 8.3 short names (GIT~1 is .git),
+  // alternate data streams (':') and names Windows trims (a trailing '.' or space).
+  if (rel.startsWith('..') || isAbsolute(rel) || rel.split(/[\\/]/).some((s) => /^\.|[~:]|[. ]$/.test(s))) { res.writeHead(403); return res.end(); }
+  let st;
+  try { st = statSync(file); } catch { res.writeHead(404); return res.end('not found'); }
+  if (st.isDirectory()) { res.writeHead(302, { Location: path + '/' }); return res.end(); }
+  // As _headers has it on the hosted site: a stem's name changes with its key or BPM, so stems
+  // are cached for good, and everything else is asked for again on each load.
+  const audio = /\.(ogg|flac)$/i.test(file);
+  res.writeHead(200, {
+    'Content-Type': TYPES[extname(file).toLowerCase()] || 'application/octet-stream',
+    'Content-Length': st.size,
+    'Cache-Control': audio ? 'public, max-age=31536000, immutable' : 'no-cache',
+    'X-Content-Type-Options': 'nosniff',
+  });
+  createReadStream(file).pipe(res);
+}).listen(PORT, '127.0.0.1', () => {
+  console.log(`Dream Chamber Remixed → http://localhost:${PORT}/`);
+  if (!existsSync(join(ROOT, 'stems-ogg'))) console.log('No stems-ogg/ here, so nothing will play: build the stems (npm run stems) or stream them from the live site (npm run dev:live).');
+});
