@@ -254,6 +254,7 @@ shipped code, not a re-implementation.
 npm run typecheck      # tsc --noEmit, strict
 npm run verify         # circuit geometry
 npm run verify:race    # headless full-race simulation
+npm run verify:catchup # catch-up multiplier scenarios, headless
 npm run verify:pages   # boots the build from a GitHub Pages style subpath
 npm run verify:mobile  # emulated phone: multi-touch, menus, touch targets
 npm run playtest       # real browser, real Chrome (after npm run build)
@@ -274,6 +275,16 @@ power-up field, and asserts that a full three-lap race is completable: every
 car takes the flag, nobody goes off, lap times are plausible and consistent,
 the field finishes together, the ramp is actually jumped, attract mode is
 stable, and restarting reproduces the grid.
+
+### `npm run verify:catchup` — catch-up multiplier scenarios
+
+Drives the real `RaceDirector` and physics with the player and one rival held
+at exact arc positions, and asserts the per-car catch-up multiplier itself:
+direction and magnitude at 350/700/1000 m gaps (full effect at 700 m, at most
+16% easing and 5% pushing, always inside [0.8, 1.06]), shortest wrapped
+distance across the start/finish line, a frozen multiplier while paused that
+resumes smoothly, multipliers back at 1 on restart, and no rewritten targets
+for cars that have already finished.
 
 ### `npm run verify:pages` — deployment check
 

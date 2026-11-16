@@ -36,7 +36,7 @@ const MAX_SUBSTEPS = 6;
  * making everyone slower, rivals close and open the gap by a few percent based
  * on where they are relative to the player.
  *
- * Deliberately asymmetric. Easing (10%) is stronger than pushing (3%), which
+ * Deliberately asymmetric. Easing (16%) is stronger than pushing (5%), which
  * means a struggling player is helped more than a dominant one is punished,
  * and a car ahead of you can still win the race.
  */
