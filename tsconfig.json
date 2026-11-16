@@ -1,0 +1,30 @@
+{
+  "compilerOptions": {
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "module": "es2020",
+    "target": "es2018",
+    "resolveJsonModule": true,
+    "allowJs": true,
+    "moduleResolution": "node",
+    "outDir": "build",
+    "lib": ["esnext", "dom"],
+    "sourceMap": true,
+    "rootDir": "src",
+    "forceConsistentCasingInFileNames": true,
+    "strictFunctionTypes": true,
+    "strict": true,
+    "allowSyntheticDefaultImports": true,
+    "esModuleInterop": true,
+    "suppressImplicitAnyIndexErrors": false,
+    "noUnusedLocals": true,
+    "typeRoots": ["./node_modules/@types", "./index.d.ts"],
+    "baseUrl": ".",
+    "paths": {
+      "*": ["./node_modules/@types/*", "*"]
+    },
+    "declaration": true
+  },
+  "include": ["./index.d.ts", "src/**/*"],
+  "exclude": ["node_modules", "build"]
+}
