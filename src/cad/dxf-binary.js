@@ -5,7 +5,25 @@
 const SENTINEL = [...new TextEncoder().encode('AutoCAD Binary DXF'), 13, 10, 26, 0];
 // Quebra de linha dentro de um valor desalinharia os pares do texto gerado.
 const LINE_BREAKS = /[\r\n]+/g;
-const CODE_PAGE_LABELS = { 932: 'shift_jis', 950: 'big5' };
+// Rótulos ANSI_* do $DWGCODEPAGE traduzidos para codificações que o TextDecoder entende.
+// Só vale antes do AC1021: a partir do AutoCAD 2007 o DXF é sempre UTF-8.
+const CODE_PAGE_LABELS = {
+    874: 'windows-874',
+    932: 'shift_jis',
+    936: 'gbk',
+    949: 'windows-949',
+    950: 'big5',
+    1250: 'windows-1250',
+    1251: 'windows-1251',
+    1252: 'windows-1252',
+    1253: 'windows-1253',
+    1254: 'windows-1254',
+    1255: 'windows-1255',
+    1256: 'windows-1256',
+    1257: 'windows-1257',
+    1258: 'windows-1258',
+};
+const FALLBACK_ENCODING = 'windows-1252';
 
 function valueType(code) {
     if (code >= 0 && code <= 9) return 'string';
@@ -48,13 +66,19 @@ export function isBinaryDxf(bytes) {
     return true;
 }
 
+// Nome de código de página desconhecido (ou sem suporte no ambiente) nunca derruba a leitura:
+// volta para o padrão windows-1252, que sempre decodifica sem erro.
 function decoderForCodePage(name) {
-    const page = Number(/^ANSI_(\d+)$/i.exec(name)?.[1]);
-    try {
-        return new TextDecoder(CODE_PAGE_LABELS[page] ?? `windows-${page}`);
-    } catch {
-        return new TextDecoder('windows-1252');
+    const match = /^ANSI_(\d+)$/i.exec(String(name).trim());
+    const label = match ? CODE_PAGE_LABELS[Number(match[1])] : undefined;
+    if (label) {
+        try {
+            return new TextDecoder(label);
+        } catch {
+            // Alguns ambientes do navegador omitem codificações menos usadas.
+        }
     }
+    return new TextDecoder(FALLBACK_ENCODING);
 }
 
 export function binaryDxfToText(bytes) {
@@ -65,7 +89,11 @@ export function binaryDxfToText(bytes) {
     // O primeiro par é sempre 0/SECTION: nos dois bytes do código, o segundo também é zero.
     const wideCodes = bytes[offset + 1] === 0;
     // Nomes das variáveis do cabeçalho são ASCII; a codificação real vem de $ACADVER e $DWGCODEPAGE.
-    let decoder = new TextDecoder('windows-1252');
+    // Regra de precedência, independente da ordem em que as variáveis aparecem:
+    //   1. $ACADVER >= AC1021 fixa UTF-8 e nada volta a trocar de decodificador;
+    //   2. antes disso, $DWGCODEPAGE escolhe a codificação da página (nome inválido vira windows-1252);
+    //   3. sem nenhum dos dois, fica o windows-1252 inicial.
+    let decoder = new TextDecoder(FALLBACK_ENCODING);
     let unicode = false;
     let headerVariable = null;
 
@@ -120,11 +148,17 @@ export function binaryDxfToText(bytes) {
         if (code === 0 && value === 'EOF') break;
         if (code === 0) headerVariable = null;
         else if (code === 9) headerVariable = value;
-        else if (headerVariable === '$ACADVER' && code === 1 && value >= 'AC1021') {
+        else if (headerVariable === '$ACADVER' && code === 1) {
             // A partir do AutoCAD 2007 os textos do DXF são sempre UTF-8, seja qual for $DWGCODEPAGE.
-            decoder = new TextDecoder('utf-8');
-            unicode = true;
+            // A decisão é irreversível: um $DWGCODEPAGE que venha depois não pode voltar para
+            // codificação de byte único (o sinalizador "unicode" trava o decodificador).
+            if (!unicode && value.trim().toUpperCase() >= 'AC1021') {
+                decoder = new TextDecoder('utf-8');
+                unicode = true;
+            }
         } else if (headerVariable === '$DWGCODEPAGE' && code === 3 && !unicode) {
+            // Pode chegar antes do $ACADVER: fica valendo até que uma versão >= AC1021 o substitua.
+            // Página não reconhecida cai no windows-1252 dentro de decoderForCodePage, sem lançar erro.
             decoder = decoderForCodePage(value);
         }
     }

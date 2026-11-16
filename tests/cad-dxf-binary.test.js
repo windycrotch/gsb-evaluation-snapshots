@@ -8,6 +8,43 @@ const SENTINEL = 'AutoCAD Binary DXF\r\n\x1a\0';
 const latin1 = (text) => Uint8Array.from(text, (c) => c.charCodeAt(0));
 const utf8 = (text) => new TextEncoder().encode(text);
 
+// TextDecoder legado existe, mas não há TextEncoder correspondente: monta o mapa
+// reverso byte -> caractere varrendo a própria tabela da codificação.
+function legacyEncoder(label) {
+    const reverse = new Map();
+    const decoder = new TextDecoder(label);
+    for (let byte = 0x80; byte <= 0xff; byte += 1) {
+        const char = decoder.decode(Uint8Array.of(byte));
+        if (char && char.codePointAt(0) > 0x7f && char !== '�') reverse.set(char, [byte]);
+    }
+    for (let high = 0x81; high <= 0xfe; high += 1) {
+        for (let low = 0x40; low <= 0xfe; low += 1) {
+            if (low === 0x7f) continue;
+            const char = decoder.decode(Uint8Array.of(high, low));
+            if (char && char.codePointAt(0) > 0x7f && char !== '�' && !reverse.has(char)) {
+                reverse.set(char, [high, low]);
+            }
+        }
+    }
+    return (text) => {
+        const bytes = [];
+        for (const char of text) {
+            const code = char.codePointAt(0);
+            if (code < 0x80) bytes.push(code);
+            else {
+                const mapped = reverse.get(char);
+                assert.ok(mapped, `caractere ${char} inexistente em ${label}`);
+                bytes.push(...mapped);
+            }
+        }
+        return Uint8Array.from(bytes);
+    };
+}
+const shiftJis = legacyEncoder('shift_jis');
+const big5 = legacyEncoder('big5');
+const gbk = legacyEncoder('gbk');
+const cp1252 = legacyEncoder('windows-1252');
+
 function typedValue(code, value) {
     const number = (size, write) => {
         const view = new DataView(new ArrayBuffer(size));
@@ -125,4 +162,115 @@ test('readDxfFile aceita os dois formatos a partir do File', async () => {
     assert.equal(await readDxfFile(new File([ascii], 'a.dxf')), ascii);
     const text = await readDxfFile(new File([encode(pairsOf(ascii))], 'b.dxf'));
     assert.equal(parseDxf(text).entities.length, 5);
+});
+
+// Monta um DXF binário mínimo com HEADER (versão e/ou código de página, em qualquer ordem)
+// e um único TEXT cujo valor é o texto não ASCII a preservar na tradução.
+function headerDxf({ version = null, codePage = null, order = ['version', 'codePage'], text, encodeText = utf8 }) {
+    const header = [];
+    const pushVersion = () => version != null && header.push([9, '$ACADVER'], [1, version]);
+    const pushCodePage = () => codePage != null && header.push([9, '$DWGCODEPAGE'], [3, codePage]);
+    for (const key of order) (key === 'version' ? pushVersion : pushCodePage)();
+    return encode([
+        [0, 'SECTION'], [2, 'HEADER'], ...header, [0, 'ENDSEC'],
+        [0, 'SECTION'], [2, 'ENTITIES'], [0, 'TEXT'], [1, text], [0, 'ENDSEC'], [0, 'EOF'],
+    ], { encodeText });
+}
+
+function valueOfGroup(textOutput, groupCode) {
+    const pairs = pairsOf(textOutput);
+    // O valor do $ACADVER também usa o grupo 1; o texto da entidade TEXT é o último par do grupo.
+    return pairs.findLast(([code]) => code === groupCode)?.[1];
+}
+
+const JP = '日本語テスト';
+const ZH_TW = '繁體中文測試';
+const ZH_CN = '简体中文测试';
+const PT = 'Peça de medição ×4 — açúcar 90°';
+
+test('UTF-8 (AC1032) vence mesmo com $DWGCODEPAGE ANSI_932 depois do $ACADVER', () => {
+    const text = binaryDxfToText(headerDxf({ version: 'AC1032', codePage: 'ANSI_932', order: ['version', 'codePage'], text: JP }));
+    assert.equal(valueOfGroup(text, 1), JP);
+});
+
+test('$DWGCODEPAGE antes do $ACADVER: o UTF-8 que chega depois substitui o shift_jis', () => {
+    const text = binaryDxfToText(headerDxf({ version: 'AC1032', codePage: 'ANSI_932', order: ['codePage', 'version'], text: JP }));
+    assert.equal(valueOfGroup(text, 1), JP);
+});
+
+test('apenas $DWGCODEPAGE: textos em shift_jis e big5 são traduzidos corretamente', () => {
+    const japanese = binaryDxfToText(headerDxf({ codePage: 'ANSI_932', order: ['codePage'], text: JP, encodeText: shiftJis }));
+    assert.equal(valueOfGroup(japanese, 1), JP);
+    const traditional = binaryDxfToText(headerDxf({ codePage: 'ANSI_950', order: ['codePage'], text: ZH_TW, encodeText: big5 }));
+    assert.equal(valueOfGroup(traditional, 1), ZH_TW);
+});
+
+test('apenas $ACADVER >= AC1021: textos UTF-8 são traduzidos sem $DWGCODEPAGE', () => {
+    const text = binaryDxfToText(headerDxf({ version: 'AC1021', order: ['version'], text: ZH_CN }));
+    assert.equal(valueOfGroup(text, 1), ZH_CN);
+});
+
+test('versão antiga com código de página: ANSI_936 (gbk) e ANSI_1252 governam os textos', () => {
+    const simplified = binaryDxfToText(headerDxf({
+        version: 'AC1018', codePage: 'ANSI_936', order: ['version', 'codePage'], text: ZH_CN, encodeText: gbk,
+    }));
+    assert.equal(valueOfGroup(simplified, 1), ZH_CN);
+    const portuguese = binaryDxfToText(headerDxf({
+        version: 'AC1015', codePage: 'ANSI_1252', order: ['codePage', 'version'], text: PT, encodeText: cp1252,
+    }));
+    assert.equal(valueOfGroup(portuguese, 1), PT);
+});
+
+test('combinação contraditória: versão antiga + página asiática não vira UTF-8, e a página vence', () => {
+    const text = binaryDxfToText(headerDxf({
+        version: 'AC1014', codePage: 'ANSI_932', order: ['version', 'codePage'], text: JP, encodeText: shiftJis,
+    }));
+    assert.equal(valueOfGroup(text, 1), JP);
+});
+
+test('código de página desconhecido ou mal formado cai em windows-1252 sem lançar erro', () => {
+    const unknown = binaryDxfToText(headerDxf({
+        version: 'AC1018', codePage: 'ANSI_9999', order: ['codePage', 'version'], text: PT, encodeText: cp1252,
+    }));
+    assert.equal(valueOfGroup(unknown, 1), PT);
+    const garbage = binaryDxfToText(headerDxf({
+        codePage: 'LATIN-1 (não padrão)', order: ['codePage'], text: PT, encodeText: cp1252,
+    }));
+    assert.equal(valueOfGroup(garbage, 1), PT);
+    // Já em UTF-8, o $DWGCODEPAGE desconhecido que vem depois também não troca o decodificador.
+    const unicode = binaryDxfToText(headerDxf({
+        version: 'AC1032', codePage: 'ANSI_9999', order: ['version', 'codePage'], text: JP,
+    }));
+    assert.equal(valueOfGroup(unicode, 1), JP);
+});
+
+test('quebra de linha em texto não ASCII também vira espaço e mantém os pares alinhados', () => {
+    const text = binaryDxfToText(headerDxf({ version: 'AC1032', order: ['version'], text: `linha 1\n${JP}\r\nfim` }));
+    assert.ok(text.includes(`\n1\nlinha 1 ${JP} fim\n`));
+    assert.equal(pairsOf(text).find(([code, value]) => code === 1 && value.includes('linha 1'))[1], `linha 1 ${JP} fim`);
+});
+
+test('erros de arquivo truncado e grupo desconhecido trazem o byte exato da falha', () => {
+    const truncated = headerDxf({ version: 'AC1032', order: ['version'], text: JP });
+    assert.throws(
+        () => binaryDxfToText(truncated.subarray(0, truncated.length - 4)),
+        (error) => {
+            assert.match(error.message, /DXF binário truncado no byte \d+\./);
+            const offset = Number(/byte (\d+)/.exec(error.message)[1]);
+            assert.ok(offset >= SENTINEL.length && offset < truncated.length);
+            return true;
+        },
+    );
+    const badGroup = encode([[0, 'SECTION'], [2, 'HEADER'], [9, '$ACADVER'], [1, 'AC1032'], [0, 'ENDSEC'], [2000, 'x'], [0, 'EOF']]);
+    assert.throws(
+        () => binaryDxfToText(badGroup),
+        (error) => {
+            assert.match(error.message, /Código de grupo 2000 desconhecido no byte \d+ do DXF binário\./);
+            // O par 2000/"x" é seguido pelo par 0/EOF: 2 bytes do código + 2 do valor ("x\0")
+            // e mais 2 do código + 4 do valor ("EOF\0") depois do início do código 2000.
+            const expectedOffset = badGroup.length - (4 + 6);
+            assert.ok(error.message.includes(`byte ${expectedOffset}`));
+            return true;
+        },
+    );
 });
