@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### `remap3d` batch contract
+
+Rank-5 `remap3d` calls now sample each batch item independently with one shared grid, so a batch result equals
+stacking per-volume calls for both NumPy `NDHWC` and CPU Torch `NCDHW` inputs. Output spatial size comes from the
+grid's first three axes, and container, dtype, layout, and channel count are preserved. Empty batches return a new
+correctly shaped array or tensor instead of raising. `border_value` accepts a scalar or exactly one value per
+channel, and NumPy and Torch grids produce identical results, including read-only and negative-stride grid views.
+Input volumes and grids are never modified in place. Grids that are not rank 4 with a trailing axis of 3, or that
+are not float32, now raise `ValueError` before any sampling work, including for empty batches.
+
 ## 0.3.4 — 2026-11-04
 
 This release reduces temporary memory in float16-to-float32 conversion and speeds up raw uint8-to-float32

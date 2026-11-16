@@ -21,12 +21,18 @@ def _normalize_border_value(
     border_value: float | tuple[float, ...] | np.ndarray | None,
     channels: int,
 ) -> np.ndarray:
-    """Convert prevalidated constant-border values to contiguous float32 channel data."""
+    """Convert scalar or per-channel constant-border values to contiguous float32 channel data."""
     if border_value is None:
         return np.zeros(channels, dtype=np.float32)
     values = np.asarray(border_value, dtype=np.float32)
     if values.ndim == 0:
-        values = np.full(channels, values.item(), dtype=np.float32)
+        return np.full(channels, values.item(), dtype=np.float32)
+    if values.ndim != 1:
+        msg = f"border_value must be a scalar or a 1-D per-channel sequence, got shape {values.shape}."
+        raise ValueError(msg)
+    if values.shape[0] != channels:
+        msg = f"border_value must hold one value per channel ({channels}), got {values.shape[0]}."
+        raise ValueError(msg)
     return np.ascontiguousarray(values, dtype=np.float32)
 
 

@@ -319,3 +319,52 @@ def test_remap3d_uint8_restores_after_one_float32_sampling_pass() -> None:
     result = remap3d(volume, grid, interpolation=cv2.INTER_LINEAR)
 
     np.testing.assert_array_equal(result, np.array([[[[128]]]], dtype=np.uint8))
+
+
+@pytest.mark.parametrize("container", ["numpy", "tensor"])
+@pytest.mark.parametrize(
+    "invalid_grid",
+    [
+        np.zeros((2, 3), dtype=np.float32),
+        np.zeros((2, 3, 3), dtype=np.float32),
+        np.zeros((1, 2, 3, 4, 3), dtype=np.float32),
+        np.zeros((2, 3, 4, 2), dtype=np.float32),
+        np.zeros((2, 3, 4, 3), dtype=np.float64),
+        np.zeros((2, 3, 4, 3), dtype=np.float16),
+    ],
+    ids=("rank2", "rank3", "rank5", "last_axis_2", "float64", "float16"),
+)
+def test_remap3d_single_volume_rejects_invalid_grid_shape_or_dtype(
+    container: str,
+    invalid_grid: np.ndarray,
+) -> None:
+    """Single-volume calls enforce the same grid rank and float32 contract as batches."""
+    volume = _volume(np.float32, channels=3)
+    if container == "tensor":
+        volume = torch.from_numpy(volume).permute(3, 0, 1, 2)
+        grids: tuple[np.ndarray | torch.Tensor, ...] = (invalid_grid, torch.from_numpy(invalid_grid.copy()))
+    else:
+        grids = (invalid_grid,)
+
+    for grid in grids:
+        with pytest.raises(ValueError, match="sampling_grid"):
+            remap3d(volume, grid)
+
+
+def test_remap3d_accepts_read_only_and_negative_stride_numpy_grids_without_mutation() -> None:
+    """A read-only or reversed float32 grid yields the same result as its contiguous copy."""
+    volume = _volume(np.float32, channels=3)
+    backing = _identity_grid(volume.shape[:3])
+    backing[:, :, :, 0] += np.float32(0.2)
+    read_only = backing.copy()
+    read_only.setflags(write=False)
+    negative = backing[:, ::-1]
+    negative_copy = negative.copy()
+
+    read_only_result = remap3d(volume, read_only)
+    negative_result = remap3d(volume, negative)
+
+    np.testing.assert_array_equal(read_only, backing)
+    np.testing.assert_array_equal(negative, negative_copy)
+    np.testing.assert_array_equal(read_only_result, remap3d(volume, backing))
+    np.testing.assert_array_equal(negative_result, remap3d(volume, negative_copy))
