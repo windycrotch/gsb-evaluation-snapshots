@@ -130,7 +130,7 @@ export class MMDAnimationManager {
         return this
 
       mixer.stopAllAction()
-      object.updateAnimation()
+      object.resetAnimationControl()
       mixer.uncacheRoot(object.mesh)
       this.models.delete(object)
       return this
@@ -205,9 +205,11 @@ export class MMDAnimationManager {
       }
     }
 
-    const audioEnd = this.audioDuration == null
-      ? Number.POSITIVE_INFINITY
-      : this.audioDelay + this.audioDuration
+    const audioEnd = this.audioDuration != null
+      && Number.isFinite(this.audioDuration)
+      && this.audioDuration > 0
+      ? this.audioDelay + this.audioDuration
+      : Number.POSITIVE_INFINITY
 
     if (!this.audioStarted && this.audioElapsed >= this.audioDelay && this.audioElapsed <= audioEnd) {
       this.audioStarted = true

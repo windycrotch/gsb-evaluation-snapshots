@@ -296,6 +296,75 @@ describe('mmd property animation', () => {
     expect(mmd.ikSolver.isEnabled(0)).toBe(true)
   })
 
+  it('restores the pre-animation IK value on removal even when it was disabled', () => {
+    const mmd = createIkMmd()
+    mmd.ikSolver.setEnabled(0, false)
+
+    const clip = new AnimationClip('property', 1, [])
+    clip.userData = {
+      propertyTrack: {
+        frameNumbers: [0],
+        ikBoneNames: ['ik'],
+        ikStates: [[true]],
+      },
+    }
+    const manager = new MMDAnimationManager()
+    manager.add(mmd, { animation: clip })
+
+    manager.update(0, { grant: false, physics: false })
+    expect(mmd.ikSolver.isEnabled(0)).toBe(true)
+
+    manager.remove(mmd)
+
+    expect(mmd.ikSolver.isEnabled(0)).toBe(false)
+  })
+
+  it('drops the animation IK record on removal so it cannot affect later state', () => {
+    const mmd = createIkMmd()
+    const clip = new AnimationClip('property', 1, [])
+    clip.userData = {
+      propertyTrack: {
+        frameNumbers: [0],
+        ikBoneNames: ['ik'],
+        ikStates: [[false]],
+      },
+    }
+    const manager = new MMDAnimationManager()
+    manager.add(mmd, { animation: clip })
+
+    manager.update(0, { grant: false, physics: false })
+    expect(mmd.ikSolver.isEnabled(0)).toBe(false)
+
+    manager.remove(mmd)
+    expect(mmd.ikSolver.isEnabled(0)).toBe(true)
+
+    // A later animation must capture the restored value, not a stale record.
+    mmd.ikSolver.setEnabled(0, false)
+    mmd.updateWithMixer(0, new AnimationMixer(mmd.mesh), { grant: false, physics: false })
+    expect(mmd.ikSolver.isEnabled(0)).toBe(false)
+  })
+
+  it('does not disturb other registered MMDs when a duplicate add is rejected', () => {
+    const mmd = createIkMmd()
+    const clip = new AnimationClip('property', 1, [])
+    clip.userData = {
+      propertyTrack: {
+        frameNumbers: [0],
+        ikBoneNames: ['ik'],
+        ikStates: [[false]],
+      },
+    }
+    const manager = new MMDAnimationManager()
+    manager.add(mmd, { animation: clip })
+    manager.update(0.5, { grant: false, physics: false })
+
+    expect(() => manager.add(mmd)).toThrow('MMDAnimationManager: MMD has already been added.')
+    expect(mmd.ikSolver.isEnabled(0)).toBe(false)
+
+    manager.update(0.5, { grant: false, physics: false })
+    expect(mmd.ikSolver.isEnabled(0)).toBe(false)
+  })
+
   it('does not apply an IK property state before its first key', () => {
     const mmd = createIkMmd()
     const clip = new AnimationClip('property', 1, [])

@@ -265,6 +265,138 @@ describe('mMDAnimationManager', () => {
     expect(play).toHaveBeenCalledTimes(2)
   })
 
+  it('stops audio at every loop end and replays it at the delay time of the next loop', () => {
+    let playing = false
+    const play = vi.fn(() => {
+      playing = true
+    })
+    const stop = vi.fn(() => {
+      playing = false
+    })
+    const audio = {
+      buffer: { duration: 1.5 },
+      get isPlaying() {
+        return playing
+      },
+      play,
+      stop,
+      type: 'Audio',
+    } as unknown as import('three').Audio
+    const manager = new MMDAnimationManager({ duration: 2 })
+
+    manager.add(audio, { delayTime: 0.5 })
+
+    for (let round = 1; round <= 3; round++) {
+      manager.update(0.25)
+      expect(play).toHaveBeenCalledTimes(round - 1)
+
+      manager.update(0.25)
+      expect(play).toHaveBeenCalledTimes(round)
+      expect(playing).toBe(true)
+
+      manager.update(1.5)
+      expect(stop).toHaveBeenCalledTimes(round)
+      expect(playing).toBe(false)
+    }
+  })
+
+  it.each([
+    ['a zero-length buffer', { duration: 0 }],
+    ['a non-finite buffer duration', { duration: Number.NaN }],
+    ['no buffer', undefined],
+  ])('starts audio without a usable buffer duration (%s)', (_, buffer) => {
+    for (const managerOptions of [{}, { duration: 2 }]) {
+      let playing = false
+      const play = vi.fn(() => {
+        playing = true
+      })
+      const stop = vi.fn(() => {
+        playing = false
+      })
+      const audio = {
+        buffer,
+        get isPlaying() {
+          return playing
+        },
+        play,
+        stop,
+        type: 'Audio',
+      } as unknown as import('three').Audio
+      const manager = new MMDAnimationManager(managerOptions)
+      const delayTime = managerOptions.duration == null ? 1 : 0.5
+
+      manager.add(audio, { delayTime })
+      // Overshoot the delay: an unusable buffer duration must not gate playback.
+      manager.update(delayTime + 0.25)
+      expect(play).toHaveBeenCalledOnce()
+      expect(playing).toBe(true)
+
+      if (managerOptions.duration == null)
+        continue
+
+      // The next loop stops it at the loop end and plays it again after the delay.
+      manager.update(managerOptions.duration)
+      expect(stop).toHaveBeenCalledOnce()
+      expect(play).toHaveBeenCalledTimes(2)
+    }
+  })
+
+  it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY])(
+    'rejects an invalid manager duration (%s)',
+    (duration) => {
+      expect(() => new MMDAnimationManager({ duration })).toThrow(RangeError)
+    },
+  )
+
+  it('rejects a duplicate MMD without changing its registration or animation', () => {
+    const mmd = createMmd('duplicate')
+    const other = createMmd('other')
+    const animation = createClip('duplicate animation')
+    const physicsUpdate = vi.fn()
+    mmd.setPhysics(() => ({
+      createHelper: <T>() => undefined as T,
+      update: physicsUpdate,
+    }))
+    const manager = new MMDAnimationManager()
+
+    manager.add(mmd, { animation })
+    manager.add(other, { animation: createClip('other animation') })
+    manager.update(0.5)
+    expect(mmd.mesh.position.x).toBeCloseTo(0.5)
+    expect(other.mesh.position.x).toBeCloseTo(0.5)
+    expect(physicsUpdate).toHaveBeenCalledOnce()
+
+    expect(() => manager.add(mmd, { animation: createClip('second animation') }))
+      .toThrow('MMDAnimationManager: MMD has already been added.')
+
+    // Rejection happens before any mutation of the existing registration.
+    expect(mmd.mesh.position.x).toBeCloseTo(0.5)
+    expect(other.mesh.position.x).toBeCloseTo(0.5)
+    expect(physicsUpdate).toHaveBeenCalledOnce()
+
+    // A normal update still advances each registered model exactly once.
+    manager.update(0.25)
+    expect(mmd.mesh.position.x).toBeCloseTo(0.75)
+    expect(other.mesh.position.x).toBeCloseTo(0.75)
+    expect(physicsUpdate).toHaveBeenCalledTimes(2)
+    expect(physicsUpdate).toHaveBeenLastCalledWith(0.25)
+  })
+
+  it('ignores removal of an unregistered MMD and keeps registered models running', () => {
+    const registered = createMmd('registered')
+    const unregistered = createMmd('unregistered')
+    const manager = new MMDAnimationManager()
+
+    manager.add(registered, { animation: createClip('registered animation') })
+
+    expect(() => manager.remove(unregistered)).not.toThrow()
+    expect(manager.remove(unregistered)).toBe(manager)
+
+    manager.update(0.25)
+    expect(registered.mesh.position.x).toBeCloseTo(0.25)
+    expect(unregistered.mesh.position.x).toBe(0)
+  })
+
   it('does not start audio in the trailing silence of a global loop', () => {
     let playing = false
     const play = vi.fn(() => {

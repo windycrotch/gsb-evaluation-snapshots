@@ -166,9 +166,23 @@ export class MMD {
   }
 
   public dispose() {
+    this.resetAnimationControl()
     this.physics?.dispose?.()
     this.physics = undefined
     this.animationPose = undefined
+  }
+
+  /**
+   * Releases every IK switch an animation took over, restoring the value that
+   * was in effect before the animation gained control, and drops the records.
+   *
+   * Call this when an animation is removed; otherwise a later update may keep
+   * applying the previous animation's IK states.
+   */
+  public resetAnimationControl() {
+    this.currentAnimationIKStates.clear()
+    this.currentAnimationIKWeights.clear()
+    this.releaseAnimationControlledIKBones()
   }
 
   public setPhysics(createPhysics: PhysicsFactory) {
@@ -205,43 +219,46 @@ export class MMD {
   }
 
   public updateAnimation(mixer?: AnimationMixer) {
+    if (mixer == null) {
+      this.resetAnimationControl()
+      return
+    }
+
     this.currentAnimationIKStates.clear()
     this.currentAnimationIKWeights.clear()
 
-    if (mixer != null) {
-      const animationActions = getActiveActions(mixer)
+    const animationActions = getActiveActions(mixer)
 
-      for (const action of animationActions) {
-        const propertyTrack = (action.getClip().userData as MMDAnimationUserData).propertyTrack
-        if (propertyTrack == null)
+    for (const action of animationActions) {
+      const propertyTrack = (action.getClip().userData as MMDAnimationUserData).propertyTrack
+      if (propertyTrack == null)
+        continue
+
+      const weight = action.getEffectiveWeight()
+      if (weight <= 0 || propertyTrack.frameNumbers.length === 0)
+        continue
+
+      const frameIndex = getPropertyFrameIndex(propertyTrack, action.time)
+      if (frameIndex < 0)
+        continue
+
+      for (let i = 0; i < propertyTrack.ikBoneNames.length; i++) {
+        const ikBoneName = propertyTrack.ikBoneNames[i]
+        const boneIndex = this.ikBoneIndicesByName.get(ikBoneName)
+          ?? this.normalizedIkBoneIndicesByName.get(ikBoneName.normalize('NFKC'))
+        if (boneIndex === undefined)
           continue
 
-        const weight = action.getEffectiveWeight()
-        if (weight <= 0 || propertyTrack.frameNumbers.length === 0)
+        const enabled = propertyTrack.ikStates[i]?.[frameIndex]
+        if (enabled == null)
           continue
 
-        const frameIndex = getPropertyFrameIndex(propertyTrack, action.time)
-        if (frameIndex < 0)
+        const currentWeight = this.currentAnimationIKWeights.get(boneIndex)
+        if (currentWeight !== undefined && currentWeight >= weight)
           continue
 
-        for (let i = 0; i < propertyTrack.ikBoneNames.length; i++) {
-          const ikBoneName = propertyTrack.ikBoneNames[i]
-          const boneIndex = this.ikBoneIndicesByName.get(ikBoneName)
-            ?? this.normalizedIkBoneIndicesByName.get(ikBoneName.normalize('NFKC'))
-          if (boneIndex === undefined)
-            continue
-
-          const enabled = propertyTrack.ikStates[i]?.[frameIndex]
-          if (enabled == null)
-            continue
-
-          const currentWeight = this.currentAnimationIKWeights.get(boneIndex)
-          if (currentWeight !== undefined && currentWeight >= weight)
-            continue
-
-          this.currentAnimationIKWeights.set(boneIndex, weight)
-          this.currentAnimationIKStates.set(boneIndex, enabled)
-        }
+        this.currentAnimationIKWeights.set(boneIndex, weight)
+        this.currentAnimationIKStates.set(boneIndex, enabled)
       }
     }
 
@@ -252,14 +269,7 @@ export class MMD {
         this.ikSolver.setEnabled(boneIndex, enabled)
     }
 
-    for (const [boneIndex, enabled] of this.animationControlledIKBones) {
-      if (this.currentAnimationIKStates.has(boneIndex))
-        continue
-
-      if (this.ikSolver.isEnabled(boneIndex) !== enabled)
-        this.ikSolver.setEnabled(boneIndex, enabled)
-      this.animationControlledIKBones.delete(boneIndex)
-    }
+    this.releaseAnimationControlledIKBones()
   }
 
   public updateWithMixer(
@@ -288,6 +298,17 @@ export class MMD {
     const bones = this.mesh.skeleton.bones
     for (const limited of this.axisLimitedBones)
       limited.output.copy(bones[limited.index].quaternion)
+  }
+
+  private releaseAnimationControlledIKBones() {
+    for (const [boneIndex, enabled] of this.animationControlledIKBones) {
+      if (this.currentAnimationIKStates.has(boneIndex))
+        continue
+
+      if (this.ikSolver.isEnabled(boneIndex) !== enabled)
+        this.ikSolver.setEnabled(boneIndex, enabled)
+      this.animationControlledIKBones.delete(boneIndex)
+    }
   }
 
   /** Without a mixer in between, bones still hold last frame's output; put the animated input back. */
