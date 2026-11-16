@@ -1,0 +1,10 @@
+{
+  "name": "ytspoofingstream",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "description": "Offline tests for the YTSpoofingStream harvest session manager. No dependencies — uses the Node.js built-in test runner.",
+  "scripts": {
+    "test": "node --test \"test/**/*.test.js\" \"test/**/*.test.mjs\""
+  }
+}

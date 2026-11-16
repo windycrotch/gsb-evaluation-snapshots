@@ -843,7 +843,10 @@
         return { formats: [], streamingContext: null, cancelled: true, superseded: true };
       }
 
-      if (error === 'HARVEST_CANCELLED' || error === 'HARVEST_TIMEOUT') {
+      // Cancellation, timeout and rejected/illegal data are all transient:
+      // none of them proves the video lacks 774, so they never set the local
+      // confirmedNo774 marker and allow a later retry.
+      if (error === 'HARVEST_CANCELLED' || error === 'HARVEST_TIMEOUT' || error === 'HARVEST_INVALID_DATA') {
         if (pendingFetches.get(videoId) === fetchPromise) {
           pendingFetches.delete(videoId);
         }
