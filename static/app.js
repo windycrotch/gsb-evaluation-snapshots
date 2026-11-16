@@ -133,6 +133,23 @@ function nameColHtml(it) {
   return `<span class="nameline">${star}<span class="gname">${esc(it.name)}</span>${surge}</span>`;
 }
 
+const CCU_REASON_LABELS = {
+  network_error: "网络错误",
+  rate_limited: "接口限流",
+  invalid_response: "接口返回无效人数",
+  http_error: "HTTP 状态错误",
+  unknown_error: "未知错误",
+};
+
+function playersCellHtml(it) {
+  /* 采集失败与真实的 0 人在线必须可区分：失败给破折号加原因提示 */
+  if (it.players_status === "failed") {
+    const reason = CCU_REASON_LABELS[it.players_error] || CCU_REASON_LABELS.unknown_error;
+    return `<span class="pnum" data-label="在线" title="本轮人数采集失败（${reason}），并非 0 人在线">—</span>`;
+  }
+  return `<span class="pnum" data-label="在线">${fmt(it.players)}</span>`;
+}
+
 function rowHtml(it, stats) {
   if (!stats) {
     // 价格类榜单：# | 封面 | 游戏 | 价格
@@ -153,7 +170,7 @@ function rowHtml(it, stats) {
       ${nameColHtml(it)}
       ${genres ? `<span class="genre-line">${genres}</span>` : ""}
     </span>
-    <span class="pnum" data-label="在线">${fmt(it.players)}</span>
+    ${playersCellHtml(it)}
     <span class="peak-col peak-num">${fmt(it.peak)}</span>
     <span class="delta-col">${deltaHtml(it)}</span>
     <span class="spark-col">${sparkSvg(it.spark)}</span>

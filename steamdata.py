@@ -401,6 +401,74 @@ def fetch_ccu(appid: int) -> int:
     return count
 
 
+# ---------- 在线人数采集的结果状态 ----------
+#
+# 失败原因类别基于抓取路径上真实可观察到的异常，不一刀切归为"失败"：
+CCU_NETWORK = "network_error"      # 连接失败/超时等传输层异常（httpx.TransportError 等）
+CCU_RATE_LIMIT = "rate_limited"    # 429/403 限流（_get_backoff 退避重试后仍被拒）
+CCU_INVALID = "invalid_response"   # 接口返回无效人数或响应结构缺失
+CCU_HTTP = "http_error"            # 其余 HTTP 状态错误（5xx 等）
+CCU_UNKNOWN = "unknown_error"      # 未预期的异常类型
+
+CCU_REASON_LABELS = {
+    CCU_NETWORK: "网络错误",
+    CCU_RATE_LIMIT: "接口限流",
+    CCU_INVALID: "接口返回无效人数",
+    CCU_HTTP: "HTTP 状态错误",
+    CCU_UNKNOWN: "未知错误",
+}
+
+
+def classify_ccu_error(exc: Exception) -> str:
+    """把 fetch_ccu 抓取路径上可观察到的异常映射为失败原因类别。"""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return CCU_RATE_LIMIT if exc.response.status_code in (429, 403) else CCU_HTTP
+    if isinstance(exc, httpx.HTTPError):
+        return CCU_NETWORK
+    if isinstance(exc, (ValueError, KeyError, TypeError)):
+        # ValueError：fetch_ccu 主动拒绝的无效人数（含 JSON 解析失败）；
+        # KeyError/TypeError：响应结构缺字段或类型对不上
+        return CCU_INVALID
+    return CCU_UNKNOWN
+
+
+def fetch_ccu_status(appid: int) -> tuple[int | None, str | None]:
+    """单款在线人数采集：成功返回 (count, None)，失败返回 (None, 原因类别)。
+
+    人数 0 是合法结果（确实没人在线），与"没采到"严格区分，绝不用 0 冒充未知。
+    """
+    try:
+        count = fetch_ccu(appid)
+    except Exception as e:
+        log.debug("ccu %s failed: %s", appid, e)
+        return None, classify_ccu_error(e)
+    if type(count) is not int or count < 0:
+        # fetch_ccu 自己已校验；此处兜住被替换/改写的实现返回的非法值
+        return None, CCU_INVALID
+    return count, None
+
+
+def players_summary(items: list[dict]) -> dict:
+    """本轮人数采集汇总：候选数/成功数/失败数 + 按原因类别聚合的失败计数。
+
+    从逐条状态派生（磁盘快照里的旧条目没有状态字段时按人数是否为空推断），
+    保证任何响应路径（实时/内存缓存/磁盘回退）的汇总都与条目本身一致。
+    """
+    by_reason: dict[str, int] = {}
+    ok = 0
+    for it in items:
+        status = it.get("players_status")
+        if status is None:
+            status = "failed" if it.get("players") is None else "ok"
+        if status == "ok":
+            ok += 1
+        else:
+            reason = it.get("players_error") or CCU_UNKNOWN
+            by_reason[reason] = by_reason.get(reason, 0) + 1
+    return {"candidates": len(items), "ok": ok, "failed": len(items) - ok,
+            "failures_by_reason": by_reason}
+
+
 _detail_store: dict[int, tuple[float, dict | None]] = {}
 DETAIL_TTL = 1800  # 详情 30min 缓存：价格/类型变化慢，也避免反复触发限流
 
@@ -532,7 +600,7 @@ def build_most_played(top_n: int = 100) -> list[dict]:
             return None
 
     with ThreadPoolExecutor(max_workers=20) as ex:
-        players = list(ex.map(lambda r: safe(fetch_ccu, r["appid"]), ranks))
+        ccu_results = list(ex.map(lambda r: fetch_ccu_status(r["appid"]), ranks))
     with ThreadPoolExecutor(max_workers=15) as ex:
         # 详情信任磁盘预热（36h 内直接用，冷启动零 appdetails 请求），完全 miss 才抓
         details = list(
@@ -540,7 +608,7 @@ def build_most_played(top_n: int = 100) -> list[dict]:
         )
 
     items = []
-    for r, ccu, detail in zip(ranks, players, details):
+    for r, (ccu, ccu_err), detail in zip(ranks, ccu_results, details):
         appid = r["appid"]
         detail = detail or {}
         name = detail.get("name")
@@ -556,15 +624,21 @@ def build_most_played(top_n: int = 100) -> list[dict]:
                 "genres": detail.get("genres") or [],
                 "price": detail.get("price"),
                 "players": ccu,
+                "players_status": "failed" if ccu_err else "ok",
+                "players_error": ccu_err,
                 "peak": r.get("peak_in_game"),
                 "last_week_rank": last,
                 "delta": None,
                 "is_new": last == -1,
             }
         )
+    # 有效人数（含真实的 0）降序；失败条目人数保持 None 并排在有效人数之后
     items.sort(key=lambda it: it["players"] if it["players"] is not None else -1, reverse=True)
     if not any(it["players"] is not None for it in items):
         raise RuntimeError("未取得任何有效在线人数，保留上一份榜单")
+    summary = players_summary(items)
+    if summary["failed"]:
+        log.warning("在线人数采集部分失败：%s", summary)
     items = rank_most_played(items)
     HISTORY.sample(items)  # 24h 滚动采样：双端（FastAPI/Streamlit）共用同一份内存环
     for it in items:

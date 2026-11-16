@@ -238,6 +238,13 @@ async def refresh_most_played():
         log.exception("最热榜后台刷新失败")
 
 
+def most_played_response(entry: CacheEntry) -> dict:
+    """最热榜响应：附带本轮人数采集汇总（候选/成功/失败 + 失败原因分类计数）。"""
+    resp = board_response(entry, charts_cache.ttl)
+    resp["summary"] = steamdata.players_summary(resp["items"])
+    return resp
+
+
 @app.get("/api/most-played")
 async def api_most_played(force: bool = False):
     async with charts_cache.lock:
@@ -247,7 +254,7 @@ async def api_most_played(force: bool = False):
         if hit is not None:
             if time.monotonic() - hit.stored_at >= charts_cache.ttl and not building:
                 asyncio.create_task(refresh_most_played())
-            return board_response(hit, charts_cache.ttl)
+            return most_played_response(hit)
         cached, built_at = await asyncio.to_thread(steamdata.load_cached_most_played)
         if cached:
             async with charts_cache.lock:
@@ -257,9 +264,9 @@ async def api_most_played(force: bool = False):
                 )
             if not building:
                 asyncio.create_task(refresh_most_played())
-            return board_response(entry, charts_cache.ttl)
+            return most_played_response(entry)
     entry = await charts_cache.get_entry("most_played", to_thread(steamdata.build_most_played), force=force)
-    return board_response(entry, charts_cache.ttl)
+    return most_played_response(entry)
 
 
 @app.get("/api/briefing")

@@ -538,6 +538,15 @@ def delta_html(it):
     return '<span class="delta same">—</span>'
 
 
+def players_cell_html(it):
+    """在线人数列：采集失败与真实的 0 人在线必须可区分。"""
+    if it.get("players_status") == "failed":
+        reason = steamdata.CCU_REASON_LABELS.get(it.get("players_error"), "未知错误")
+        return (f'<span class="pnum" data-label="在线" '
+                f'title="本轮人数采集失败（{_esc(reason)}），并非 0 人在线">—</span>')
+    return f'<span class="pnum" data-label="在线">{_fmt(it.get("players"))}</span>'
+
+
 def row_html(it, stats):
     surge = (f'<span class="surge" title="最近30分钟均值对比此前2小时均值；采样缺口超过5分钟时不显示">+{it["surge"]}%</span>'
              if it.get("surge") else "")
@@ -556,7 +565,7 @@ def row_html(it, stats):
             f'<span class="rank">{it["rank"]}</span>'
             f'<span class="gc-cover" aria-hidden="true"><img src="{_esc(it["image"])}" alt="" loading="lazy" onerror="this.hidden=true"></span>'
             f'<span><div class="gname">{_esc(it["name"])}{surge}</div>{sub}</span>'
-            f'<span class="pnum" data-label="在线">{_fmt(it.get("players"))}</span>'
+            f'{players_cell_html(it)}'
             f'<span class="peak">{_fmt(it.get("peak"))}</span>'
             f'{delta_html(it)}</a>')
 
@@ -584,7 +593,8 @@ def rows_html(items, title, sub, stats=False, query="", empty_html=EMPTY_HTML):
     if stats:
         body += ('<details class="gc-method"><summary>数据口径与缺失说明</summary>'
                  '候选游戏来自 Steam 官方榜单，按已取得的实时在线人数排序。'
-                 '未知人数显示 — 并置后；周变化对比上周官方排名。'
+                 '人数采集失败的行显示 — 并置后（悬停可见失败原因），0 是真实在线人数；'
+                 '周变化对比上周官方排名。'
                  '官方峰值与当前在线的采集时点不同。异动比较最近30分钟与此前2小时的均值，'
                  '样本覆盖不足或存在超过5分钟的缺口时不显示。</details>')
     return (f'<div class="gc-panel"><div class="gc-section">{title}'
