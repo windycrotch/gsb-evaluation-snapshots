@@ -274,6 +274,11 @@ TARGET_CHANNEL
 </details>
 
 <details>
+<summary><strong>اگر وسط صفحه‌بندی یک کانال، واکشی یک صفحه شکست بخورد چه؟</strong></summary>
+<p>شکست <strong>صفحهٔ نخست</strong> به‌معنای کانال نامعتبر است (<code>ERR</code>)؛ اما شکست <strong>صفحه‌های بعدی</strong> یک «وقفهٔ قابل‌ادامه» است: فایل‌های صفحه‌های موفقی که تا آن لحظه خوانده شده‌اند طبق روال عادی فیلتر، یکتاسازی و ارسال می‌شوند، ولی چک‌پوینت (<code>data/last_message_id.json</code>) از نقطهٔ تضمین‌شدهٔ قبلی جلوتر نمی‌رود تا در اجرای بعدی کل بازهٔ خوانده‌نشده دوباره اسکن شود و هیچ پیامی برای همیشه از قلم نیفتد. وقوع این وضعیت در هر اجرا با فیلدهای <code>page_interrupted</code>، <code>interrupted_count</code> و <code>interrupted_channels</code> در <code>data/npvt_report.txt</code> قابل مشاهده است.</p>
+</details>
+
+<details>
 <summary><strong>آیا امکان تغییر فرکانس اجرا هست؟</strong></summary>
 <p>بله. مقدار <code>cron</code> در <code>.github/workflows/collector.yml</code> را ویرایش کنید؛ مقدار فعلی <code>'45 */3 * * *'</code> یعنی هر ۳ ساعت یک‌بار.</p>
 </details>

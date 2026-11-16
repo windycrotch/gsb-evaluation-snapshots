@@ -274,6 +274,11 @@ This repository is inspired by public Telegram scraping techniques used in the o
 </details>
 
 <details>
+<summary><strong>What happens if fetching a page fails midway through paging a channel?</strong></summary>
+<p>A failure on the <strong>first page</strong> means the channel is invalid (<code>ERR</code>). A failure on a <strong>later page</strong> is a <em>resumable interruption</em>: files already found on the successful pages still go through the normal filtering, dedup and sending flow, but the checkpoint (<code>data/last_message_id.json</code>) is not advanced past the previously guaranteed position, so the next run re-scans the whole uncovered range and no message is lost forever. Each run's report line in <code>data/npvt_report.txt</code> records this via the new <code>page_interrupted</code>, <code>interrupted_count</code> and <code>interrupted_channels</code> fields.</p>
+</details>
+
+<details>
 <summary><strong>Can I change how often it runs?</strong></summary>
 <p>Yes. Edit the <code>cron</code> value in <code>.github/workflows/collector.yml</code>; the current value, <code>'45 */3 * * *'</code>, means every 3 hours.</p>
 </details>

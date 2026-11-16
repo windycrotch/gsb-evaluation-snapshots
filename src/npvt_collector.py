@@ -270,9 +270,40 @@ def find_blocked_keyword(file_name: str) -> str | None:
 # ----------------------------------------------------------------------------
 # اسکن یک کانال (با صفحه‌بندی محدود برای رسیدن به چک‌پوینت قبلی)
 # ----------------------------------------------------------------------------
-def scan_channel(channel: str, last_id: int) -> tuple[list[NpvtFile], int, bool, list[tuple[str, str, str]]]:
+@dataclass
+class ScanResult:
     """
-    خروجی: (فایل‌های .npvt پیدا‌شده, جدیدترین message_id دیده‌شده, آیا کانال نامعتبر است, فایل‌های فیلترشده)
+    نتیجه‌ی اسکن یک کانال.
+
+    found/newest_id/invalid/filtered همان معنای قدیمی را دارند.
+    interrupted=True یعنی صفحه‌ای *بعد از صفحه‌ی نخست* با شکست واکشی روبه‌رو
+    شده و پیمایش ناقص مانده است (نه کانال نامعتبر). در این حالت
+    resume_after_id = قدیمی‌ترین message_id که در صفحه‌های *موفق* این دور
+    دیده شده است؛ یعنی همه‌ی پیام‌های جدیدتر از این شماره به‌طور پیوسته
+    پوشش داده شده‌اند و دور بعد باید از همین «مرز» ادامه دهد (چک‌پوینت نباید
+    از این مرز جلوتر برود، وگرنه پیام‌های صفحه‌ی شکست‌خورده برای همیشه از
+    دست می‌روند).
+    """
+
+    found: list[NpvtFile]
+    newest_id: int
+    invalid: bool
+    filtered: list[tuple[str, str, str]]
+    interrupted: bool = False
+    resume_after_id: int | None = None
+
+
+def scan_channel(channel: str, last_id: int) -> ScanResult:
+    """
+    خروجی: ScanResult (فایل‌های .npvt پیدا‌شده، جدیدترین message_id دیده‌شده،
+    وضعیت کانال نامعتبر، فایل‌های فیلترشده، و وضعیت «وقفه‌ی قابل‌ادامه»).
+
+    تفکیک دو حالت شکست:
+      - شکست صفحه‌ی نخست (HTML خالی یا نبودِ هیچ پیامی) → کانال نامعتبر (invalid)
+      - شکست صفحه‌های بعدی → وقفه‌ی قابل‌ادامه (interrupted)؛ فایل‌های صفحات
+        موفقِ قبلی همچنان نگه داشته می‌شوند و چک‌پوینت نباید جلوتر از
+        resume_after_id برود تا دور بعد بتواند شکاف را دوباره بخواند.
+
     فایل‌های فیلترشده: (نام فایل, کلیدواژه‌ی مسدودکننده, لینک) — اصلاً به لیست found اضافه نمی‌شوند.
     """
     found: list[NpvtFile] = []
@@ -281,13 +312,26 @@ def scan_channel(channel: str, last_id: int) -> tuple[list[NpvtFile], int, bool,
     before: int | None = None
     first_page = True
     invalid = False
+    interrupted = False
+    # قدیمی‌ترین message_id که در یک صفحه‌ی موفق دیده شده (مرز پوشش پیوسته).
+    oldest_covered: int | None = None
 
     for page in range(MAX_PAGES_PER_CHANNEL):
         url = f"https://t.me/s/{channel}" + (f"?before={before}" if before else "")
         html = fetch_url(url)
         if not html:
             if first_page:
+                # صفحه‌ی نخست خوانده نشد: کانال وجود ندارد/خصوصی/مسدود است.
                 invalid = True
+            else:
+                # صفحه‌ی بعدی شکست خورد: داده‌های همین دور سالم‌اند ولی پوشش
+                # پیوسته تا اینجا متوقف می‌شود؛ دور بعد باید از مرز قبلی ادامه دهد.
+                interrupted = True
+                logger.warning(
+                    "   ↳ ⚠️ واکشی صفحه‌ی %d برای کانال %s شکست خورد؛ پیمایش به‌صورت "
+                    "قابل‌ادامه متوقف شد (مرز ادامه: after_id=%s).",
+                    page + 1, channel, oldest_covered,
+                )
             break
 
         soup = BeautifulSoup(html, "lxml")
@@ -295,6 +339,8 @@ def scan_channel(channel: str, last_id: int) -> tuple[list[NpvtFile], int, bool,
         if not nodes:
             if first_page:
                 invalid = True
+            # صفحه‌ی بدون پیام در میانه‌ی پیمایش، پایان طبیعیِ تاریخچه‌ی کانال
+            # است (شکست واکشی محسوب نمی‌شود).
             break
 
         ids_on_page: list[int] = []
@@ -306,6 +352,8 @@ def scan_channel(channel: str, last_id: int) -> tuple[list[NpvtFile], int, bool,
             msg_id = int(m.group(1))
             ids_on_page.append(msg_id)
             newest_id = max(newest_id, msg_id)
+            if oldest_covered is None or msg_id < oldest_covered:
+                oldest_covered = msg_id
 
             if msg_id <= last_id:
                 continue
@@ -333,7 +381,43 @@ def scan_channel(channel: str, last_id: int) -> tuple[list[NpvtFile], int, bool,
         if page < MAX_PAGES_PER_CHANNEL - 1:
             time.sleep(SLEEP_BETWEEN_PAGES)
 
-    return found, newest_id, invalid, filtered
+    resume_after_id = oldest_covered if interrupted else None
+    return ScanResult(
+        found=found,
+        newest_id=newest_id,
+        invalid=invalid,
+        filtered=filtered,
+        interrupted=interrupted,
+        resume_after_id=resume_after_id,
+    )
+
+
+def decide_checkpoint(
+    last_id: int,
+    newest_id: int,
+    invalid: bool,
+    interrupted: bool,
+    resume_after_id: int | None,
+) -> int:
+    """
+    تصمیم نهایی درباره‌ی مقدار چک‌پوینت یک کانال برای ذخیره در last_message_id.json.
+
+    - کانال نامعتبر (شکست صفحه‌ی نخست): چک‌پوینت دست نمی‌خورد تا دور بعد
+      دوباره تلاش شود.
+    - وقفه‌ی قابل‌ادامه (شکست صفحه‌ی بعدی): چک‌پوینت روی همان مقدار قبلی
+      (last_id) می‌ماند. هر شماره‌ای بزرگ‌تر از last_id در محدوده‌ای قرار
+      دارد که ممکن است پیام‌های دیده‌نشده داشته باشد (شماره‌پیام‌های تلگرام
+      گاف هم می‌خورند و صفحه‌ی شکست‌خورده اصلاً خوانده نشده)، پس هیچ مقدار
+      بالاتری تضمین‌پذیر نیست. دور بعد با همان چک‌پوینت کل بازه‌ی شکاف را
+      دوباره می‌خواند و موارد تکراری با seen_files حذف می‌شوند.
+    - پیمایش کامل (یا رسیدن به چک‌پوینت قبلی): طبق رفتار قدیمی تا newest_id
+      جلو می‌رویم.
+    """
+    if invalid:
+        return last_id
+    if interrupted:
+        return last_id
+    return max(newest_id, last_id)
 
 
 # ----------------------------------------------------------------------------
@@ -453,30 +537,47 @@ def main() -> None:
     all_filtered: list[tuple[str, str, str]] = []
     channel_results: list[tuple[str, str]] = []
     invalid_channels: list[str] = []
+    interrupted_channels: list[str] = []
 
     for idx, ch in enumerate(channels, 1):
         logger.info("📡 [%d/%d] بررسی کانال: %s", idx, len(channels), ch)
         last_id = checkpoints.get(ch, 0)
-        found, newest_id, invalid, filtered = scan_channel(ch, last_id)
+        result = scan_channel(ch, last_id)
 
-        if invalid:
+        if result.invalid:
             logger.warning("   ↳ ⚠️ کانال نامعتبر یا غیرقابل‌دسترسی (وجود ندارد/خصوصی/مسدود).")
             invalid_channels.append(ch)
             channel_results.append((ch, "ERR"))
         else:
-            if found:
-                logger.info("   ↳ %d فایل .npvt جدید پیدا شد.", len(found))
+            if result.found:
+                logger.info("   ↳ %d فایل .npvt جدید پیدا شد.", len(result.found))
             else:
                 logger.info("   ↳ فایل .npvt جدیدی پیدا نشد.")
-            if filtered:
-                logger.info("   ↳ 🚫 %d فایل به‌خاطر کلیدواژه‌ی مسدود نادیده گرفته شد.", len(filtered))
-            channel_results.append((ch, str(len(found))))
+            if result.filtered:
+                logger.info("   ↳ 🚫 %d فایل به‌خاطر کلیدواژه‌ی مسدود نادیده گرفته شد.", len(result.filtered))
+            channel_results.append((ch, str(len(result.found))))
 
-        if newest_id:
-            checkpoints[ch] = max(newest_id, last_id)
+        decided_checkpoint = decide_checkpoint(
+            last_id, result.newest_id, result.invalid,
+            result.interrupted, result.resume_after_id,
+        )
 
-        all_new.extend(found)
-        all_filtered.extend(filtered)
+        if result.interrupted:
+            # فایل‌های صفحات موفق همین دور همچنان وارد جریان ارسال می‌شوند، اما
+            # چک‌پوینت از مرز پوشش تضمین‌شده جلوتر نمی‌رود تا دور بعد شکاف بازخوانی شود.
+            interrupted_channels.append(ch)
+            logger.warning(
+                "   ↳ ♻️ وقفه‌ی قابل‌ادامه در صفحه‌بندی؛ چک‌پوینت %s روی %s نگه داشته می‌شود "
+                "(مرز ادامه: after_id=%s؛ دور بعد از همین نقطه ادامه می‌یابد).",
+                ch, decided_checkpoint, result.resume_after_id,
+            )
+
+        # مثل رفتار قدیمی: چک‌پوینت صفر ذخیره نمی‌شود (نبودِ کلید هم معنای ۰ دارد).
+        if decided_checkpoint:
+            checkpoints[ch] = decided_checkpoint
+
+        all_new.extend(result.found)
+        all_filtered.extend(result.filtered)
         if idx < len(channels):
             time.sleep(SLEEP_BETWEEN_CHANNELS)
 
@@ -568,13 +669,20 @@ def main() -> None:
             f"duplicates={duplicate_in_batch} already_sent={already_sent} "
             f"batch={len(batch)} sent={sent} failed={failed} discarded={len(discarded)} "
             f"pending_retry={len(leftover)} filtered={len(all_filtered)} "
-            f"invalid_channels={len(invalid_channels)}\n"
+            f"invalid_channels={len(invalid_channels)} "
+            # فیلدهای جدید (هیچ‌کدام از فیلدهای قبلی حذف نشده‌اند):
+            # page_interrupted مشخص می‌کند این دور اصلاً وقفه‌ی صفحه‌بندی رخ داده یا نه،
+            # interrupted_channels فهرست کانال‌های متوقف‌شده را نشان می‌دهد.
+            f"page_interrupted={1 if interrupted_channels else 0} "
+            f"interrupted_count={len(interrupted_channels)} "
+            f"interrupted_channels={','.join(interrupted_channels) if interrupted_channels else '-'}\n"
         )
 
     logger.info(
         "✅ پایان اجرا. ارسال‌شده: %d | ناموفق (در صف ماند): %d | کنار گذاشته‌شده (سقف %d): %d | "
-        "فیلترشده: %d | کانال نامعتبر: %d",
-        sent, failed, MAX_FILES_PER_MESSAGE, len(discarded), len(all_filtered), len(invalid_channels),
+        "فیلترشده: %d | کانال نامعتبر: %d | وقفه‌ی صفحه‌بندی: %d",
+        sent, failed, MAX_FILES_PER_MESSAGE, len(discarded), len(all_filtered),
+        len(invalid_channels), len(interrupted_channels),
     )
 
 
