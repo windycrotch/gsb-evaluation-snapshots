@@ -8,6 +8,7 @@ import { themeOf, SIZES, FONT_SIZES, FONTS, GEO_IDS, COLOR_IDS, GRID_IDS, GRID_S
 import {
   localBounds, pageBounds, toLocal, drawShape, hitShape, marqueeHits,
   scaleShape, textLayout, noteLayout, NOTE_W, sampleLinePts, resetTextLayouts,
+  shapeIntersectsRect, shapeContainedInRect,
 } from './shapes.js'
 import { boundsUnion, boundsExpand, boundsContain, clamp, rotWith } from './geometry.js'
 
@@ -1598,13 +1599,22 @@ export class Editor {
   // ---- export --------------------------------------------------------------
   // Renders the drawing into a PNG at crisp resolution — with the paper
   // behind it, or on transparency. Everything by default; pass ids (a Set)
-  // to export just those shapes.
-  async exportImage({ background = true, scale = 2, margin = 48, ids = null } = {}) {
-    let b = null
+  // to export just those shapes. Pass region (a page-space rect) to export a
+  // viewfinder frame: the canvas covers exactly the region, shapes fully
+  // inside it draw as-is, shapes crossing its edge are clipped to the frame,
+  // and shapes fully outside are skipped — no out-of-frame fragments.
+  async exportImage({ background = true, scale = 2, margin = 48, ids = null, region = null } = {}) {
     const shapes = this.shapesSorted().filter((s) => !ids || ids.has(s.id))
-    for (const s of shapes) b = boundsUnion(b, pageBounds(s))
-    if (!b) return null
-    b = boundsExpand(b, margin)
+    let b
+    if (region) {
+      // the frame is exact — margin only pads content-derived bounds
+      b = { x: region.x, y: region.y, w: region.w, h: region.h }
+    } else {
+      b = null
+      for (const s of shapes) b = boundsUnion(b, pageBounds(s))
+      if (!b) return null
+      b = boundsExpand(b, margin)
+    }
     // stay under ~24MP however big the drawing is
     const cap = Math.sqrt(24e6 / (b.w * b.h))
     const k = Math.min(scale, cap)
@@ -1621,7 +1631,25 @@ export class Editor {
     ctx.setTransform(k, 0, 0, k, -b.x * k, -b.y * k)
     // make sure every image asset is decoded before the snap
     await this._decodeAssets(shapes)
-    for (const s of shapes) drawShape(ctx, s, { theme: this.theme, store: this.store, zoom: k })
+    for (const s of shapes) {
+      if (region) {
+        // three states against the frame: outside → skip; crossing → draw
+        // clipped to the frame (the clip sits in page space, outside the
+        // shape's own rotate/opacity, so no out-of-frame pixel can leak);
+        // fully inside → draw as-is
+        if (!shapeIntersectsRect(s, b)) continue
+        if (!shapeContainedInRect(s, b)) {
+          ctx.save()
+          ctx.beginPath()
+          ctx.rect(b.x, b.y, b.w, b.h)
+          ctx.clip()
+          drawShape(ctx, s, { theme: this.theme, store: this.store, zoom: k })
+          ctx.restore()
+          continue
+        }
+      }
+      drawShape(ctx, s, { theme: this.theme, store: this.store, zoom: k })
+    }
     return new Promise((resolve) => canvas.toBlob((blob) => resolve(blob), 'image/png'))
   }
   async _decodeAssets(shapes) {

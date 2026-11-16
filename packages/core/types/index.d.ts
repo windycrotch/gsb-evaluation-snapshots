@@ -149,6 +149,10 @@ export function drawShape(
 ): void
 /** Point hit-test in page space. */
 export function hitShape(shape: ShapeRecord, px: number, py: number, tol: number, store: Store): boolean
+/** Does any part of the shape reach into the page-space rect? (Same graze test as marquee selection.) */
+export function shapeIntersectsRect(shape: ShapeRecord, rect: Bounds): boolean
+/** Is the shape entirely inside the page-space rect? */
+export function shapeContainedInRect(shape: ShapeRecord, rect: Bounds): boolean
 
 /** The ink's stroke options (perfect-freehand's). */
 export interface StrokeOptions {
@@ -310,8 +314,8 @@ export class Editor {
   importImageBlobs(blobs: Blob[] | File[], at?: { x: number; y: number }): Promise<void>
   pickImage(): void
 
-  /** Render the drawing to a PNG blob (null when the board is empty). */
-  exportImage(opts?: { background?: boolean; scale?: number; margin?: number; ids?: Set<string> | null }): Promise<Blob | null>
+  /** Render the drawing to a PNG blob (null when the board is empty). Pass `region` to export an exact page-space viewfinder frame: shapes fully inside draw as-is, edge-crossers are clipped to the frame, outsiders are skipped. */
+  exportImage(opts?: { background?: boolean; scale?: number; margin?: number; ids?: Set<string> | null; region?: Bounds | null }): Promise<Blob | null>
 
   // rendering
   requestRender(): void

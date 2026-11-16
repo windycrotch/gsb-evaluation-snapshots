@@ -362,7 +362,7 @@ export function buildUI(editor, { hidden = false, onSave, themeToggle = true, gr
     const hasSel = editor.selection.size > 0
     item('download', 'Export as PNG', null, () => saveImage(true, null))
     item('transparent', 'Export — transparent', null, () => saveImage(false, null))
-    if (hasSel) item('image', 'Export selection', null, () => saveImage(true, new Set(editor.selection)))
+    if (hasSel) item('image', 'Export selection', null, () => saveImage(true, null, editor.selectionBounds()))
     item('copy', hasSel ? 'Copy selection as image' : 'Copy as image', null, async () => {
       const blob = await editor.exportImage({ background: true, ids: hasSel ? new Set(editor.selection) : null })
       if (blob) await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })])
@@ -440,8 +440,8 @@ export function buildUI(editor, { hidden = false, onSave, themeToggle = true, gr
       })
     }
   }
-  async function saveImage(background, ids) {
-    const blob = await editor.exportImage({ background, ids })
+  async function saveImage(background, ids, region = null) {
+    const blob = await editor.exportImage({ background, ids, region })
     if (!blob) return
     if (onSave) return onSave(blob, background)
     const a = document.createElement('a')

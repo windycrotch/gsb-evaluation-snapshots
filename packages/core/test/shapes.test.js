@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect } from 'vitest'
-import { localBounds, pageBounds, hitShape, marqueeHits, scaleShape, textLayout, geoOutline, resetTextLayouts } from '../src/shapes.js'
+import { localBounds, pageBounds, hitShape, marqueeHits, scaleShape, textLayout, geoOutline, resetTextLayouts, shapeIntersectsRect, shapeContainedInRect } from '../src/shapes.js'
 import { Store } from '../src/store.js'
 
 const geo = (over = {}, props = {}) => ({
@@ -90,6 +90,77 @@ describe('marquee', () => {
     expect(marqueeHits(line, { x: 60, y: 5, w: 30, h: 20 })).toBe(false)
     // rect the diagonal passes through (interior, not just corners)
     expect(marqueeHits(line, { x: 40, y: 30, w: 20, h: 20 })).toBe(true)
+  })
+})
+
+describe('export framing predicates', () => {
+  // geo(): rectangle at (10,10), 100×50
+  it('classifies fully inside, fully outside and partially intersecting rects', () => {
+    const s = geo()
+    // fully inside
+    expect(shapeIntersectsRect(s, { x: 0, y: 0, w: 200, h: 200 })).toBe(true)
+    expect(shapeContainedInRect(s, { x: 0, y: 0, w: 200, h: 200 })).toBe(true)
+    // fully outside
+    expect(shapeIntersectsRect(s, { x: 300, y: 300, w: 50, h: 50 })).toBe(false)
+    expect(shapeContainedInRect(s, { x: 300, y: 300, w: 50, h: 50 })).toBe(false)
+    // partial: overlaps the bottom-right corner
+    expect(shapeIntersectsRect(s, { x: 100, y: 50, w: 50, h: 50 })).toBe(true)
+    expect(shapeContainedInRect(s, { x: 100, y: 50, w: 50, h: 50 })).toBe(false)
+  })
+
+  it('a rect touching the page-bounds edge counts as intersecting, not contained', () => {
+    const s = geo()
+    // page bounds are exactly 10..110 × 10..60
+    expect(shapeContainedInRect(s, { x: 10, y: 10, w: 100, h: 50 })).toBe(true)
+    expect(shapeContainedInRect(s, { x: 11, y: 10, w: 100, h: 50 })).toBe(false)
+  })
+
+  it('honors rotation: the rotated footprint, not the original box, is judged', () => {
+    // thin rect rotated 90° about its center (60,15): footprint 55..65 × -35..65
+    const s = geo({ rot: Math.PI / 2 }, { w: 100, h: 10, fill: 'solid' })
+    expect(pageBounds(s).x).toBeCloseTo(55)
+    expect(pageBounds(s).y).toBeCloseTo(-35)
+    // the unrotated box no longer contains it
+    expect(shapeContainedInRect(s, { x: 10, y: 10, w: 100, h: 10 })).toBe(false)
+    // a rect around the true rotated footprint does
+    expect(shapeContainedInRect(s, { x: 50, y: -40, w: 20, h: 120 })).toBe(true)
+    // a rect overlapping the unrotated box but missing the rotated body misses
+    expect(shapeIntersectsRect(s, { x: 10, y: 12, w: 40, h: 6 })).toBe(false)
+    // ...and one crossing the rotated body hits
+    expect(shapeIntersectsRect(s, { x: 50, y: 40, w: 20, h: 10 })).toBe(true)
+  })
+
+  it('follows the bend of an arrow, not just its endpoints', () => {
+    const arrow = { id: 'a', typeName: 'shape', type: 'arrow', x: 0, y: 0, rot: 0, z: 1, props: { dx: 100, dy: 0, bend: 40, size: 'm', color: 'black', dash: 'solid' } }
+    const straight = { ...arrow, props: { ...arrow.props, bend: 0 } }
+    // the curve sags to y≈40 under the straight line: a rect there only
+    // touches the bent arrow
+    const under = { x: 40, y: 20, w: 20, h: 20 }
+    expect(shapeIntersectsRect(arrow, under)).toBe(true)
+    expect(shapeIntersectsRect(straight, under)).toBe(false)
+    // containment accounts for the bend padding in pageBounds
+    expect(shapeContainedInRect(arrow, { x: -50, y: -50, w: 200, h: 100 })).toBe(true)
+    expect(shapeContainedInRect(arrow, { x: 0, y: -5, w: 100, h: 10 })).toBe(false)
+    expect(shapeContainedInRect(straight, { x: 0, y: -5, w: 100, h: 10 })).toBe(true)
+  })
+
+  it('tests freehand strokes against their point set', () => {
+    const d = { id: 'd', typeName: 'shape', type: 'draw', x: 0, y: 0, rot: 0, z: 1, props: { pts: [0, 0, 0.5, 100, 0, 0.5], size: 'm', color: 'black', done: true } }
+    // a rect the stroke passes through
+    expect(shapeIntersectsRect(d, { x: 40, y: -3, w: 20, h: 6 })).toBe(true)
+    // a rect below the stroke's reach misses
+    expect(shapeIntersectsRect(d, { x: 40, y: 20, w: 20, h: 20 })).toBe(false)
+    expect(shapeContainedInRect(d, { x: -20, y: -20, w: 140, h: 40 })).toBe(true)
+    expect(shapeContainedInRect(d, { x: 0, y: 0, w: 100, h: 4 })).toBe(false)
+  })
+
+  it('keeps the filled/unfilled difference: interior misses a hollow body', () => {
+    // diamond at (10,10), 100×50 — its bounds corners are outside the body
+    const hollow = geo({}, { geo: 'diamond' })
+    const filled = geo({}, { geo: 'diamond', fill: 'solid' })
+    const corner = { x: 10, y: 10, w: 8, h: 8 } // inside the bounds, outside the diamond
+    expect(shapeIntersectsRect(hollow, corner)).toBe(false)
+    expect(shapeIntersectsRect(filled, corner)).toBe(true)
   })
 })
 

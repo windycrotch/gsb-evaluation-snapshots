@@ -597,6 +597,26 @@ export function marqueeHits(shape, rect) {
   return false
 }
 
+// ---- export framing ----------------------------------------------------------
+
+// Rect predicates for the export viewfinder, both in PAGE space. The
+// intersect test IS the marquee graze test, so export agrees with selection:
+// solid bodies (text/note/image, filled geos) answer on their rotation-aware
+// page bounds, while strokes answer on their true geometry — the raw point
+// set for freehand, bend-sampled points for arrows/lines, the outline
+// polygon for unfilled geos.
+export function shapeIntersectsRect(shape, rect) {
+  return marqueeHits(shape, rect)
+}
+
+// Fully inside? pageBounds is the tightest axis-aligned box around the
+// (possibly rotated) shape, so box-in-rect is exactly shape-in-rect.
+export function shapeContainedInRect(shape, rect) {
+  const b = pageBounds(shape)
+  return b.x >= rect.x && b.y >= rect.y &&
+    b.x + b.w <= rect.x + rect.w && b.y + b.h <= rect.y + rect.h
+}
+
 // ---- transforms ------------------------------------------------------------
 
 // scale a shape's local geometry about the LOCAL origin; caller repositions

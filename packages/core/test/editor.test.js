@@ -549,6 +549,17 @@ describe('export', () => {
     expect(blob).toBeInstanceOf(Blob)
     expect(blob.type).toBe('image/png')
   })
+
+  it('region export frames exactly the given rect, even with nothing inside', async () => {
+    editor.setTool('geo')
+    drag(editor, [[10, 10], [80, 80]])
+    // a region away from all content still exports (paper only)
+    const empty = await editor.exportImage({ background: true, region: { x: 500, y: 500, w: 100, h: 100 } })
+    expect(empty).toBeInstanceOf(Blob)
+    // a region over the shape exports too (inside/crossing shapes drawn)
+    const framed = await editor.exportImage({ background: true, region: { x: 0, y: 0, w: 200, h: 200 } })
+    expect(framed).toBeInstanceOf(Blob)
+  })
 })
 
 describe('events & lifecycle', () => {
