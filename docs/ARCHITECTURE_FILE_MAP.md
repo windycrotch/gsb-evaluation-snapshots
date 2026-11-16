@@ -178,7 +178,7 @@ stageflow/
 │   │   ├── CameraTelemetryCapsule.tsx  # Dual-camera telemetry pill with [OBS|CAM] switch & 1-click YAML copy
 │   │   ├── CameraTelemetryHoverCard.tsx # Precision degrees, meters, focus & aperture hover inspection card
 │   │   ├── telemetryYamlFormatter.ts   # Pure generator for scoped `camera:` and `observer_camera:` snippets
-│   │   ├── DirectorialTransportBar.tsx # Shot-marker scrubber, shot chips, speed (0.25x-2x) & POV toggle
+│   │   ├── DirectorialTransportBar.tsx # Shot-marker scrubber, shot chips, speed (HTML5 0.1x-4x, YT/procedural 0.25x-2x) & POV toggle
 │   │   ├── YamlInspectorDrawer.tsx  # Slide-out live YAML editor with read-only protection & fork-on-edit
 │   │   ├── ToastContainer.tsx       # Floating animated toast notification banners
 │   │   ├── LabelDisplayModeToggle.tsx # Floating 3-mode 3D diorama label toggle (All / Cam / Off)

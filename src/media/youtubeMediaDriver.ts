@@ -97,6 +97,8 @@ export class YouTubeMediaDriver implements MediaClockDriver {
   private anchorPerfTimeMs = 0;
   private pendingSeekTarget: number | null = null;
   private pendingSeekTimestampMs = 0;
+  // True while a paused scrub must keep its anchor even after the 600ms guard fires.
+  private pausedSeekLatch = false;
 
   constructor(
     containerElement: HTMLElement,
@@ -109,7 +111,7 @@ export class YouTubeMediaDriver implements MediaClockDriver {
     this.anchorPerfTimeMs = performance.now();
 
     ensureYouTubeIframeApi().then(() => {
-      if (this.destroyed) return;
+      if (this.destroyed || typeof window === 'undefined') return;
       const win = window as YTWindow;
       if (!win.YT || !win.YT.Player) return;
 
@@ -153,6 +155,7 @@ export class YouTubeMediaDriver implements MediaClockDriver {
                 now - this.pendingSeekTimestampMs > 600;
               if (isSeekSettled) {
                 this.pendingSeekTarget = null;
+                this.pausedSeekLatch = false;
                 this.lastPolledYtTime = rawT;
                 this.anchorVideoTimeSec = rawT;
                 this.anchorPerfTimeMs = now;
@@ -171,6 +174,7 @@ export class YouTubeMediaDriver implements MediaClockDriver {
                 now - this.pendingSeekTimestampMs > 600;
               if (isSeekSettled) {
                 this.pendingSeekTarget = null;
+                this.pausedSeekLatch = false;
                 this.lastPolledYtTime = rawT;
                 this.anchorVideoTimeSec = rawT;
                 this.anchorPerfTimeMs = now;
@@ -182,6 +186,7 @@ export class YouTubeMediaDriver implements MediaClockDriver {
             } else if (state === 0) {
               this.playing = false;
               this.pendingSeekTarget = null;
+              this.pausedSeekLatch = false;
               this.anchorVideoTimeSec = this.getDuration();
               this.callbacks.onPlayStateChange?.(false);
               this.callbacks.onEnded?.();
@@ -209,7 +214,7 @@ export class YouTubeMediaDriver implements MediaClockDriver {
   }
 
   public getCurrentTime(): number {
-    if (!this.ready || !this.player) {
+    if (this.destroyed || !this.ready || !this.player) {
       return this.anchorVideoTimeSec;
     }
 
@@ -224,12 +229,29 @@ export class YouTubeMediaDriver implements MediaClockDriver {
         Math.abs(rawYtTime - this.pendingSeekTarget) < 1.5;
       const isTimedOut = now - this.pendingSeekTimestampMs > 600;
 
-      if (isClose || isTimedOut) {
+      if (isClose) {
         this.pendingSeekTarget = null;
+        this.pausedSeekLatch = false;
         if (typeof rawYtTime === 'number' && Number.isFinite(rawYtTime)) {
           this.lastPolledYtTime = rawYtTime;
           this.anchorVideoTimeSec = rawYtTime;
           this.anchorPerfTimeMs = now;
+        }
+      } else if (isTimedOut) {
+        // Safety guard fired: release the latch, but while paused keep holding
+        // the requested anchor instead of rubberbanding to a stale polled time.
+        this.pendingSeekTarget = null;
+        if (this.playing) {
+          this.pausedSeekLatch = false;
+          if (typeof rawYtTime === 'number' && Number.isFinite(rawYtTime)) {
+            this.lastPolledYtTime = rawYtTime;
+            this.anchorVideoTimeSec = rawYtTime;
+            this.anchorPerfTimeMs = now;
+          }
+        } else {
+          this.pausedSeekLatch = true;
+          this.anchorPerfTimeMs = now;
+          return this.anchorVideoTimeSec;
         }
       } else {
         if (!this.playing) {
@@ -244,7 +266,10 @@ export class YouTubeMediaDriver implements MediaClockDriver {
       }
     }
 
+    // While a paused scrub latch is active the anchor is authoritative: do not
+    // overwrite it with a lagging IFrame poll (also covers post-timeout reads).
     if (
+      !this.pausedSeekLatch &&
       typeof rawYtTime === 'number' &&
       Number.isFinite(rawYtTime) &&
       Math.abs(rawYtTime - this.lastPolledYtTime) > 0.001
@@ -267,7 +292,7 @@ export class YouTubeMediaDriver implements MediaClockDriver {
   }
 
   public getDuration(): number {
-    if (this.ready && this.player) {
+    if (!this.destroyed && this.ready && this.player) {
       const d = this.player.getDuration();
       if (typeof d === 'number' && Number.isFinite(d) && d > 0) {
         return d;
@@ -285,41 +310,49 @@ export class YouTubeMediaDriver implements MediaClockDriver {
   }
 
   public isMuted(): boolean {
-    if (this.ready && this.player) {
+    if (!this.destroyed && this.ready && this.player) {
       return this.player.isMuted();
     }
     return this.muted;
   }
 
   public async play(): Promise<void> {
+    if (this.destroyed) return;
     if (this.ready && this.player) {
+      this.pausedSeekLatch = false;
       this.anchorPerfTimeMs = performance.now();
       this.player.playVideo();
     }
   }
 
   public pause(): void {
+    if (this.destroyed) return;
     if (this.ready && this.player) {
       this.anchorVideoTimeSec = this.getCurrentTime();
       this.playing = false;
+      this.pausedSeekLatch = false;
       this.player.pauseVideo();
       this.callbacks.onPlayStateChange?.(false);
     }
   }
 
   public seek(timeSec: number): void {
+    if (this.destroyed) return;
     const clamped = Math.max(0, Math.min(this.getDuration(), timeSec));
     this.anchorVideoTimeSec = clamped;
     this.lastPolledYtTime = clamped;
     this.anchorPerfTimeMs = performance.now();
     this.pendingSeekTarget = clamped;
     this.pendingSeekTimestampMs = performance.now();
+    // While paused, the requested anchor must survive the 600ms safety guard.
+    this.pausedSeekLatch = !this.playing;
     if (this.ready && this.player) {
       this.player.seekTo(clamped, true);
     }
   }
 
   public setPlaybackRate(rate: number): void {
+    if (this.destroyed) return;
     const safeRate = Math.max(0.25, Math.min(2.0, rate));
     this.anchorVideoTimeSec = this.getCurrentTime();
     this.anchorPerfTimeMs = performance.now();
@@ -331,6 +364,7 @@ export class YouTubeMediaDriver implements MediaClockDriver {
   }
 
   public setMuted(muted: boolean): void {
+    if (this.destroyed) return;
     this.muted = muted;
     if (this.ready && this.player) {
       if (muted) {
@@ -342,9 +376,14 @@ export class YouTubeMediaDriver implements MediaClockDriver {
   }
 
   public destroy(): void {
+    if (this.destroyed) return;
+    // Freeze the last displayed time so reads after a source switch never touch
+    // the torn-down IFrame player.
+    this.anchorVideoTimeSec = this.getCurrentTime();
     this.destroyed = true;
     this.playing = false;
     this.pendingSeekTarget = null;
+    this.pausedSeekLatch = false;
     if (this.player) {
       try {
         this.player.destroy();

@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+#### Media Clock Edge-Case Hardening & Destroy Quarantine (`src/media/`, `tests/unit/mediaDrivers.test.ts`)
+
+- **Scrub Target Clamping Across All Drivers (`html5MediaDriver.ts`, `youtubeMediaDriver.ts`, `proceduralMediaDriver.ts`)**:
+  - `seek(timeSec)` now clamps the requested target to `[0, duration]` on every driver before dispatching it (HTML5 `video.currentTime`, IFrame `player.seekTo`, procedural anchor), so out-of-range drag targets can never escape the timeline.
+- **Paused Scrub Pinning (No Extrapolation)**:
+  - `Html5MediaDriver` caches the last displayed time (`lastCurrentTimeSec`) and returns the optimistic seek target on repeated 60fps reads while paused, regardless of decoder lag.
+  - `YouTubeMediaDriver` retains the requested anchor when the 600ms in-flight seek safety guard fires while **paused**, instead of rubberbanding to a stale polled IFrame timestamp; the previous re-anchor behavior is preserved while playing.
+  - `ProceduralMediaDriver` returns the anchor verbatim while paused so wall-clock advancement never drifts the playhead.
+- **Playback-Rate Re-Anchor & Per-Source Clamping**:
+  - `setPlaybackRate(rate)` re-anchors at the currently displayed time before applying the new rate on all three drivers (re-syncing in-flight optimistic seeks on HTML5) to eliminate instantaneous playhead jumps.
+  - HTML5 rate is clamped to the native `0.1x`–`4.0x` band; YouTube and Procedural rates are clamped to `0.25x`–`2.0x`.
+- **Procedural Duration-Shrink Clamp (`proceduralMediaDriver.ts`)**:
+  - `setDuration()` enforces the 0.5s minimum and clamps the playhead anchor (resetting the perf anchor) to the new end whenever the current position exceeds the shortened duration, whether paused or playing.
+- **Destroy Quarantine / Source-Switch Safety**:
+  - All three drivers gained idempotent `destroy()` contracts that freeze the final displayed time and flip a `destroyed` flag. Post-destroy `getCurrentTime()` reads return the frozen snapshot without touching the detached `<video>` or torn-down IFrame player; transport commands (`play`/`pause`/`seek`/`setPlaybackRate`/`setMuted`) and procedural `setDuration()` become no-ops, and late native events no longer reach callbacks.
+  - `YouTubeMediaDriver`'s IFrame API loader and mount callback are now guarded with `typeof window === 'undefined'`, removing unhandled rejections in non-DOM (Node) environments.
+- **Unit Test Coverage (`tests/unit/mediaDrivers.test.ts`)**:
+  - Added 16 deterministic tests (4 → 20 in the file; suite total 265 → 281) using fake video elements, fake IFrame player objects, and a controllable `performance.now()` fake clock — covering seek clamping, paused no-extrapolation reads (including latch release when the IFrame catches up to the 1.5s proximity window), rate re-anchoring/clamping, procedural duration shortening (including the 0.5s floor), and source-switch teardown proving retired drivers are never read or commanded again. No real network or decoder dependencies.
+- **Specification & Doc Sync (`docs/MEDIA_CLOCK_AND_SYNC_SPECIFICATIONS.md`, `docs/ARCHITECTURE_FILE_MAP.md`, `README.md`, `AGENTS.md`)**:
+  - Documented the scrub clamping, paused pinning, per-source rate bands, duration-shrink clamp, destroy quarantine, and paused-start source-switch lifecycle; updated speed-pill annotations and Vitest test counts (281).
+
 ## [1.1.2] - 2026-11-15
 
 ### Changed

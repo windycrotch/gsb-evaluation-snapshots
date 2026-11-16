@@ -41,22 +41,36 @@ export interface MediaClockDriver {
 - Binds directly to the mounted `<video>` element in [`UniversalVideoViewport.tsx`](../src/ui/UniversalVideoViewport.tsx).
 - Reads `video.currentTime` synchronously at 60fps and forwards native `play`, `pause`, `loadedmetadata`, `ratechange`, and `ended` events.
 - **Optimistic In-Flight Seek Latch**: During asynchronous keyframe demuxing (`video.seeking === true`), `getCurrentTime()` holds `pendingSeekSec` rather than reporting stale or un-seeked video timestamps until the native `seeked` event fires (or a 500ms safety timeout elapses).
+- **Scrub Clamping & Paused Pinning**: `seek(timeSec)` clamps the target to $[0, \text{duration}]$ before touching the element, and the most recently displayed time is cached (`lastCurrentTimeSec`). Repeated 60fps reads while paused always return the seek target — the clock never extrapolates forward.
+- **Rate Re-Anchor & Clamp**: `setPlaybackRate(rate)` first re-anchors at the currently displayed time (re-syncing any in-flight optimistic seek so the playhead cannot jump), then clamps to the HTML5-native **$0.1\text{x}$–$4.0\text{x}$** band before assigning `video.playbackRate`.
+- **Destroy Quarantine**: `destroy()` snapshots the final displayed time, removes every native listener, pauses the element, and flips a `destroyed` flag. Post-destroy reads return the frozen snapshot without touching the detached `<video>`, and all transport commands (`play`/`pause`/`seek`/`setPlaybackRate`/`setMuted`) become no-ops so a source switch can never drive the retired driver.
 
 ### 2.2 `YouTubeMediaDriver` & 60fps Drift-Corrected Extrapolation (`youtubeMediaDriver.ts`)
-- Dynamically loads `https://www.youtube.com/iframe_api` via a singleton promise and mounts an chromeless player (`controls: 0`, `disablekb: 1`, `modestbranding: 1`, `rel: 0`, `playsinline: 1`).
+- Dynamically loads `https://www.youtube.com/iframe_api` via a singleton promise and mounts an chromeless player (`controls: 0`, `disablekb: 1`, `modestbranding: 1`, `rel: 0`, `playsinline: 1`). The loader and its `.then()` mount callback are guarded with `typeof window === 'undefined'` so non-DOM environments (e.g. Node unit tests) never produce unhandled rejections.
 - **Solving IFrame `postMessage` Polling Latency**:
   - Because YouTube's `player.getCurrentTime()` updates over an asynchronous `postMessage` bridge at ~10–15Hz, reading it raw at 60fps would cause visible camera stepping.
   - `YouTubeMediaDriver` solves this via **high-resolution clock extrapolation**:
     1. Whenever `player.getCurrentTime()` reports a new timestamp (`Math.abs(rawYtTime - lastPolledYtTime) > 0.001`), it re-anchors `anchorVideoTimeSec = rawYtTime` and `anchorPerfTimeMs = performance.now()`.
     2. On intermediate 60fps animation frames while playing, `getCurrentTime()` returns:
        $$t_{\text{extrapolated}} = \text{anchorVideoTimeSec} + \frac{\text{performance.now()} - \text{anchorPerfTimeMs}}{1000} \times \text{playbackRate}$$
-    3. When `seek(targetSec)` is invoked (e.g. scrubbing while paused or frame-stepping), `anchorVideoTimeSec` updates **synchronously on the same call stack** before `player.seekTo(targetSec, true)` is dispatched, giving the 3D diorama **0ms scrub latency**.
+    3. When `seek(targetSec)` is invoked (e.g. scrubbing while paused or frame-stepping), `anchorVideoTimeSec` updates **synchronously on the same call stack** before `player.seekTo(targetSec, true)` is dispatched, giving the 3D diorama **0ms scrub latency**. The target is clamped to $[0, \text{duration}]$.
 - **In-Flight Seek Protection (Anti-Reversion Guard)**:
   - While YouTube processes `seekTo(targetSec)` asynchronously, incoming `player.getCurrentTime()` queries reporting stale pre-seek timestamps are filtered out until YouTube's clock catches up to within $1.5\text{s}$ of the target (or a 600ms safety timeout guard fires). This prevents the scrubber and 3D diorama from rubberbanding back to the pre-seek time.
+  - When the 600ms guard fires while **paused**, the latch is released but the requested anchor is retained instead of adopting the stale polled timestamp, guaranteeing paused scrub reads stay pinned to the target with zero extrapolation. While playing, the guard re-anchors to the latest polled time as before.
+- **Rate Re-Anchor & Clamp**: `setPlaybackRate(rate)` snapshots `getCurrentTime()` into the anchor before applying the new rate, then clamps to the IFrame-supported **$0.25\text{x}$–$2.0\text{x}$** band and calls `player.setPlaybackRate()`, eliminating instantaneous playhead jumps on speed changes.
+- **Destroy Quarantine**: `destroy()` freezes the final displayed anchor, nulls the player after invoking its `destroy()`, and flips `destroyed`. Subsequent `getCurrentTime()` calls return the frozen anchor without polling the torn-down IFrame, and transport commands are no-ops.
 
 ### 2.3 `ProceduralMediaDriver` (`proceduralMediaDriver.ts`)
 - Pure `performance.now()` virtual clock used by `procedural://` blueprint scenes.
 - Paired with a 60fps true 3D Stage Cam Viewport (`StageCamMonitorCanvas.tsx` / `StageCamViewRig.tsx`) in [`UniversalVideoViewport.tsx`](../src/ui/UniversalVideoViewport.tsx) that renders the shared 3D diorama scene directly through the Stage Camera's lens with a rule-of-thirds safe-action reticle and live optical lens telemetry strip.
+- **Scrub Clamping & Paused Pinning**: `seek(timeSec)` clamps to $[0, \text{durationSec}]$; while paused `getCurrentTime()` returns the anchor verbatim, so repeated reads never drift regardless of wall-clock advancement.
+- **Rate Re-Anchor & Clamp**: `setPlaybackRate(rate)` unconditionally re-anchors `anchorTimeSec` to the currently displayed time and resets `anchorPerfMs` before applying the rate clamped to **$0.25\text{x}$–$2.0\text{x}$**, preventing jumps when switching speed while paused or playing.
+- **Duration-Shrink Clamp**: `setDuration(newDurationSec)` enforces the $0.5\text{s}$ minimum; if the current playhead exceeds the new duration, the anchor is clamped to the new end (and the perf anchor reset), whether the clock is paused or playing.
+- **Destroy Quarantine**: `destroy()` freezes the anchor at the displayed time and flips `destroyed`; post-destroy reads return the frozen value and all transport commands plus `setDuration()` become no-ops.
+
+### 2.4 Source Switch Lifecycle (`useMediaClock.ts`)
+- When the classified `sourceInfo` changes, the driver-instantiation effect tears down the previous driver via its `destroy()` quarantine contract before constructing the replacement, and nulls `driverRef` when it still points at the retired instance. The old driver is therefore never read or commanded after a switch.
+- Every freshly constructed driver begins life **paused at $t=0$** (HTML5/YouTube mount with autoplay disabled; the procedural clock starts with `playing = false`), and `setIsPlaying(false)` is dispatched synchronously on each switch.
 
 ---
 
@@ -111,4 +125,4 @@ Transport playback, frame-stepping, and diorama display modes are managed via [`
 | **Toggle Optical DoF Blur** | `[ Blur ]` Button | `B` | Toggles real-time thin-lens depth of field bokeh blur in Stage Cam POV / Monitor (`useStudioDisplaySettings`). |
 | **Loop Active Shot** | `[ 🔁 ]` Button | — | Dynamically bounds and loops playback within whichever shot is currently active (`activeShot.startSec` to `activeShot.endSec`), updating smoothly when jumping across shots without trapping manual seeks (`useStageFrameLoop`). |
 | **Mute / Unmute Audio** | `[ 🔊 ]` Button | — | Toggles audio mute across HTML5 and YouTube drivers (`useMediaClock`). |
-| **Playback Speed** | — *(Driver API)* | — | Adjusts `playbackRate` (`0.25x`–`2x`) across HTML5, YouTube, and Procedural drivers (`useMediaClock`). |
+| **Playback Speed** | — *(Driver API)* | — | Adjusts `playbackRate` with display-time re-anchoring and no playhead jump; clamped to `0.1x`–`4x` on HTML5 and `0.25x`–`2x` on YouTube and Procedural drivers (`useMediaClock`). |
