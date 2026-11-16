@@ -107,7 +107,7 @@ renderer.setAnimationLoop(() => {
 
 `errorPx` is the allowed geometric error in pixels. `budget` is a triangle count for the whole selector; when it is above zero the selector refines worst-first until the budget is spent, and `errorPx` becomes the floor below which it stops refining. Something like `{ errorPx: 0.5, budget: 300000 }` gives a fixed cost per frame.
 
-The data folder can be served by anything. Streaming additionally needs a host that honours HTTP Range requests.
+The data folder can be served by anything. Streaming prefers a host that honours HTTP Range requests: the loader asks for byte ranges and expects `206 Partial Content`. If the host ignores `Range` and answers `200` with the whole file, streaming silently falls back to one full download of `<name>.bin` — the asset is then complete (`loadedLevel` is `0`) and nothing more is requested. See `fallbackFull` below.
 
 ## Demo
 
@@ -143,7 +143,7 @@ Controls: drag to look, WASD and Q/E to fly, shift to go faster. The panel switc
 Fetches `<base>/<name>.json` and `<base>/<name>.bin` whole. The asset holds `meta` (the JSON), `geometry` (a `BufferGeometry` with every level in it; do not draw it directly), `sphere` (bounding sphere in model space) and the hierarchy arrays.
 
 **`loadClodStream(base, name, { rootBytes = 96 * 1024, delayMs = 0 })`** → `Promise<asset>`
-Loads the hierarchy and the coarsest levels that fit in `rootBytes`, and fetches finer levels later with Range requests. Use with `updateStreaming`. Useful fields: `loadedLevel` (0 means everything is loaded), `residentBytes`, `fullBytes`. Streaming assets cannot be used with `DiscreteLodSet`.
+Loads the hierarchy and the coarsest levels that fit in `rootBytes`, and fetches finer levels later with Range requests. Use with `updateStreaming`. Useful fields: `loadedLevel` (0 means everything is loaded), `residentBytes`, `fullBytes`, `requests` (HTTP requests issued so far) and `fallbackFull`. When the server ignores `Range` and answers `200`, the loader fetches the whole `.bin` once, slices the sections out of it and marks the asset complete: `fallbackFull` becomes `true`, `loadedLevel` is `0`, `residentBytes === fullBytes`, and `updateStreaming` never requests more for it. If that full download fails too, the load rejects with an error naming the URL and HTTP status. Streaming assets cannot be used with `DiscreteLodSet`.
 
 **`updateStreaming(assets)`** → `Promise[]`
 Call once per frame after `select()`. Starts a fetch for each streaming asset whose last selection wanted finer levels than it has.

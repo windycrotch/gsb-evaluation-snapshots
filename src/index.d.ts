@@ -34,6 +34,10 @@ export interface ClodAsset {
   fullBytes: number;
   /** Streaming assets only. */
   stream?: true;
+  /** Streaming assets only: the server ignored HTTP Range, so the whole .bin was fetched in one GET. */
+  fallbackFull?: boolean;
+  /** Streaming assets only: number of HTTP requests issued so far (Range or full download). */
+  requests?: number;
   loadTo?(level: number): Promise<void>;
   loading?: Promise<void> | null;
   [key: string]: unknown;

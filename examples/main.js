@@ -58,7 +58,10 @@ window.addEventListener('resize', resize); resize();
 const assets = [];
 for (const name of ASSETS) {
   msg(`loading ${name}…`);
-  const a = STREAM ? await loadClodStream(DATA, name, { delayMs: NET_DELAY }) : await loadClod(DATA, name);
+  let a;
+  try {
+    a = STREAM ? await loadClodStream(DATA, name, { delayMs: NET_DELAY }) : await loadClod(DATA, name);
+  } catch (e) { msg(`failed to load ${name}: ${e.message || e}`); throw e; }
   const std = loadClodMaterial(DATA, a); // MeshStandardMaterial with the textures the preprocessor copied out of the GLB
   const mk = () => q.get('mat') === 'basic' ? new THREE.MeshBasicMaterial({ color: 0x999999 }) : q.get('mat') === 'lambert' ? new THREE.MeshLambertMaterial({ map: std.map }) : std.clone();
   a.matClod = patchDebug(mk()); a.matPlain = mk();
@@ -174,7 +177,8 @@ function select() {
 let streamPending = [];
 function pumpStreaming() {
   if (!STREAM) return;
-  streamPending.push(...updateStreaming(assets));
+  // a failed request must stay visible, not turn into a blank scene with a stale status line
+  streamPending.push(...updateStreaming(assets).map((p) => p.catch((e) => msg(`streaming failed: ${e.message || e}`))));
 }
 const residentMB = () => assets.reduce((x, a) => x + a.residentBytes, 0) / 1048576, fullMB = () => assets.reduce((x, a) => x + a.fullBytes, 0) / 1048576;
 // ---- occlusion (?occ=1): render into a target with a depth texture, reduce depth to a 64x36
@@ -239,7 +243,10 @@ function loop(now) {
     `frame (rAF)   ${ema.toFixed(1)} ms\n` +
     `${renderer.domElement.width}x${renderer.domElement.height}  multi_draw ${hasMultiDraw ? 'yes' : 'NO'}` +
     (OCC ? `\noccluded props ${sel.occluded || 0}  (depth ${hzbAge} frames old)` : '') +
-    (STREAM ? `\nresident      ${residentMB().toFixed(1)} of ${fullMB().toFixed(0)} MB\nlevels loaded ${assets.map((a) => a.loadedLevel).join(' ')}` : '');
+    (STREAM ? `\nresident      ${residentMB().toFixed(1)} of ${fullMB().toFixed(0)} MB\n` +
+      (assets.every((a) => a.fallbackFull) ? '已整包加载 (server ignored Range)'
+        : `levels loaded ${assets.map((a) => a.fallbackFull ? '整包' : a.loadedLevel).join(' ')}`) +
+      `\nrequests      ${assets.reduce((x, a) => x + a.requests, 0)}` : '');
 }
 msg(gpuName);
 requestAnimationFrame(loop);
@@ -372,7 +379,7 @@ window.demo.trace = async ({ frames = 300, mode = 'clod', count = 96, errorPx = 
   // what cluster-granular streaming would have had to load: every cluster drawn at least once in the flight
   let usedTris = 0; for (const a of assets) if (a._used) { for (let c = 0; c < a.meta.clusters; c++) if (a._used[c]) usedTris += a.clusterU[c * 4 + 1] / 3; a._used = null; }
   const usedMB = +(usedTris * 25 / 1048576).toFixed(1); // 12 B indices + about 13 B of vertex data per triangle in this format
-  const stream = STREAM ? { residentMB: +residentMB().toFixed(2), fullMB: +fullMB().toFixed(1), hierarchyMB: +(assets.reduce((x, a) => x + a.hierarchyBytes, 0) / 1048576).toFixed(2), levels: assets.map((a) => a.loadedLevel), rootLevels: assets.map((a) => a.rootLevel), requests: assets.reduce((x, a) => x + a.requests, 0) } : null;
+  const stream = STREAM ? { residentMB: +residentMB().toFixed(2), fullMB: +fullMB().toFixed(1), hierarchyMB: +(assets.reduce((x, a) => x + a.hierarchyBytes, 0) / 1048576).toFixed(2), levels: assets.map((a) => a.loadedLevel), rootLevels: assets.map((a) => a.rootLevel), fallbackFull: assets.map((a) => !!a.fallbackFull), requests: assets.reduce((x, a) => x + a.requests, 0) } : null;
   return { usedTris, usedMB, stream, mode, count, errorPx, budget, frames, tris: st(tris), effPx: st(eff.map((e) => Math.min(e, 1e6))), selectMs: st(selMs), frameMs: st(ms), maxTriJumpPerFrame: maxJump };
 };
 

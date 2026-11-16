@@ -60,9 +60,15 @@ function finishHierarchy(a) {
   a.loadedLevel = 0; a.wantLevel = 255; a.residentBytes = 0; a.fullBytes = 0; a.batches = [];
 }
 
+// Raised internally when the server answers a Range request with the whole file (200): streaming is
+// impossible, so the loader switches to one plain GET and keeps everything resident.
+const RANGE_UNSUPPORTED = Symbol('RANGE_UNSUPPORTED');
+
 // Streaming loader. The hierarchy (errors, spheres, group membership) is always resident; geometry is
 // fetched as a growing prefix of the file with HTTP Range requests: "everything down to level L".
 // This is level granularity per asset, far coarser than Nanite's 128 KB pages of cluster groups.
+// If the server ignores Range and answers 200, the whole .bin is fetched once instead and the asset is
+// marked fully resident (`fallbackFull: true`), so updateStreaming never asks for more.
 // options: { rootBytes = 96 KB: geometry loaded up front, delayMs = 0: artificial latency per request, for testing }
 export async function loadClodStream(base, name, options = {}) {
   const { rootBytes = 96 * 1024, delayMs = 0 } = typeof options === 'number' ? { rootBytes: options } : options;
@@ -70,46 +76,131 @@ export async function loadClodStream(base, name, options = {}) {
   const meta = await (await get(base + '/' + name + '.json')).json();
   const url = base + '/' + name + '.bin';
   const T = { Float32Array, Int8Array, Uint32Array, Int32Array };
-  const range = async (k, from, to) => { // elements [from, to) of section k
-    const s = meta.sections[k], C = T[s.type], b = C.BYTES_PER_ELEMENT;
-    if (delayMs) await new Promise((res) => setTimeout(res, delayMs));
-    const r = await get(url, { headers: { Range: 'bytes=' + (s.offset + from * b) + '-' + (s.offset + to * b - 1) } });
-    if (r.status !== 206) throw new Error(url + ': the server ignored the HTTP Range request, which streaming needs');
-    return new C(await r.arrayBuffer());
-  };
-  const a = { meta, name, stream: true };
-  let hBytes = 0;
-  for (const k of ['clusterF', 'clusterU', 'groupF', 'memberOff', 'memberIds']) { const s = meta.sections[k]; a[k] = await range(k, 0, s.bytes / T[s.type].BYTES_PER_ELEMENT); hBytes += s.bytes; }
-  finishHierarchy(a);
-  a.hierarchyBytes = hBytes;
+  const a = { meta, name, stream: true, fallbackFull: false, requests: 0 };
   const LR = meta.levelRanges; // coarsest first
-  a.fullBytes = LR[LR.length - 1].bytes;
-  const c = new THREE.Vector3().fromArray(meta.bbMin).add(new THREE.Vector3().fromArray(meta.bbMax)).multiplyScalar(0.5);
-  a.sphere = new THREE.Sphere(c, new THREE.Vector3().fromArray(meta.bbMax).sub(new THREE.Vector3().fromArray(meta.bbMin)).length() * 0.5);
-  a.pos = new Float32Array(0); a.nrm = new Int8Array(0); a.uv = new Float32Array(0); a.idx = new Uint32Array(0);
-  let vEnd = 0, iEnd = 0;
+  const HK = ['clusterF', 'clusterU', 'groupF', 'memberOff', 'memberIds'];
+  const section = (buf, k) => { const s = meta.sections[k], C = T[s.type]; return new C(buf, s.offset, s.bytes / C.BYTES_PER_ELEMENT); };
+  // A 206 is required for the byte range to be meaningful. Some servers answer 200 instead (or a 206
+  // whose Content-Range does not start where we asked); either way the body is not the slice we need.
+  const isPartial = (r, first) => {
+    if (r.status !== 206) return false;
+    const cr = r.headers && typeof r.headers.get === 'function' ? r.headers.get('content-range') : null;
+    if (cr != null) { const m = /^bytes\s+(\d+)/i.exec(String(cr).trim()); if (m && +m[1] !== first) return false; }
+    return true;
+  };
+  // `requests` counts the HTTP requests issued for this asset (Range or plain GET), for the demo HUD.
+  // `pooled` holds the body of a 200 answer to a Range request, so the whole-file fallback does not have
+  // to download it a second time; `wholeFile` is the plain GET shared by every caller that needs it.
+  let pooled = null, wholeFile = null;
+  const range = async (k, from, to, signal) => { // elements [from, to) of section k
+    const s = meta.sections[k], C = T[s.type], b = C.BYTES_PER_ELEMENT;
+    if (a.fallbackFull) throw RANGE_UNSUPPORTED; // already fetched whole: do not hit the network again
+    if (delayMs) await new Promise((res) => setTimeout(res, delayMs));
+    const first = s.offset + from * b;
+    const r = await get(url, { headers: { Range: 'bytes=' + first + '-' + (s.offset + to * b - 1) }, signal });
+    a.requests++;
+    if (!isPartial(r, first)) {
+      // The server ignored Range, so the body is the whole file: keep it for the fallback instead of
+      // fetching it again. Start the read without awaiting so the caller can throw immediately.
+      if (r.status === 200 && !pooled) { const p = r.arrayBuffer(); p.catch(() => {}); pooled = { promise: p }; }
+      else if (r.body && typeof r.body.cancel === 'function') { try { r.body.cancel(); } catch {} }
+      throw RANGE_UNSUPPORTED;
+    }
+    const buf = await r.arrayBuffer();
+    const want = (to - from) * b;
+    // a 206 that carries more or less than the requested bytes is not usable as this slice
+    if (buf.byteLength !== want) { throw RANGE_UNSUPPORTED; }
+    return new C(buf);
+  };
+  const plainGet = async () => {
+    if (delayMs) await new Promise((res) => setTimeout(res, delayMs));
+    const r = await get(url); // a failure here throws "<url>: HTTP <status>"; never leave an empty scene
+    a.requests++;
+    return r.arrayBuffer();
+  };
+  const fetchWhole = async () => {
+    if (pooled) {
+      const p = pooled; pooled = null;
+      try { return await p.promise; } catch { /* a sibling abort may have cancelled that body; fetch afresh */ }
+    }
+    if (wholeFile) { try { return await wholeFile; } catch { wholeFile = null; } } // retry a failed download next time
+    return (wholeFile = plainGet());
+  };
+  let vEnd = 0, iEnd = 0, derived = false;
   const grow = (old, add) => { const n = new old.constructor(old.length + add.length); n.set(old); n.set(add, old.length); return n; };
-  a.loading = null; a.requests = 0;
+  const installGeometry = () => {
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(a.pos, 3));
+    geo.setAttribute('normal', new THREE.BufferAttribute(a.nrm, 4, true));
+    geo.setAttribute('uv', new THREE.BufferAttribute(a.uv, 2));
+    geo.setIndex(new THREE.BufferAttribute(a.idx, 1));
+    geo.boundingSphere = a.sphere;
+    const old = a.geometry; a.geometry = geo;
+    for (const b of a.batches) b.geometry = geo;
+    if (old) old.dispose();
+  };
+  // hierarchy-derived data and the bounding sphere; runs exactly once, before any ClodBatch exists
+  const derive = () => {
+    if (derived) return;
+    derived = true;
+    finishHierarchy(a);
+    a.hierarchyBytes = HK.reduce((n, k) => n + meta.sections[k].bytes, 0);
+    a.fullBytes = LR[LR.length - 1].bytes;
+    const c = new THREE.Vector3().fromArray(meta.bbMin).add(new THREE.Vector3().fromArray(meta.bbMax)).multiplyScalar(0.5);
+    a.sphere = new THREE.Sphere(c, new THREE.Vector3().fromArray(meta.bbMax).sub(new THREE.Vector3().fromArray(meta.bbMin)).length() * 0.5);
+    a.pos = new Float32Array(0); a.nrm = new Int8Array(0); a.uv = new Float32Array(0); a.idx = new Uint32Array(0);
+    a.loading = null;
+  };
+  // Fallback path: fetch the whole file once, slice every section out of it and mark the asset fully
+  // resident (loadedLevel 0, residentBytes == fullBytes), so updateStreaming never asks for more.
+  const loadWhole = async () => {
+    let buf;
+    try { buf = await fetchWhole(); } catch (e) { a.loading = null; throw e; } // a retry stays possible: no flag set
+    let need = 0; for (const s of Object.values(meta.sections)) need = Math.max(need, s.offset + s.bytes);
+    if (buf.byteLength < need) { a.loading = null; throw new Error(`${url}: full download was ${buf.byteLength} bytes, need ${need}`); }
+    for (const k of Object.keys(meta.sections)) a[k] = section(buf, k);
+    derive(); // no-op when the hierarchy had already streamed in
+    a.pos = a.positions; a.nrm = a.normals; a.uv = a.uvs; a.idx = a.indices;
+    vEnd = a.positions.length / 3; iEnd = a.indices.length;
+    installGeometry();
+    a.fallbackFull = true; a.loadedLevel = 0; a.residentBytes = a.fullBytes; a.loading = null;
+  };
+
+  let hierarchyStreamed = true;
+  try {
+    for (const k of HK) { const s = meta.sections[k]; a[k] = await range(k, 0, s.bytes / T[s.type].BYTES_PER_ELEMENT); }
+  } catch (e) {
+    if (e !== RANGE_UNSUPPORTED) throw e;
+    hierarchyStreamed = false;
+  }
+  if (!hierarchyStreamed) {
+    await loadWhole(); // installs hierarchy + geometry from the single full response
+    a.rootLevel = 0; a.loadTo = () => Promise.resolve(); // nothing left to fetch
+    return a;
+  }
+  derive();
   // fetch geometry down to `level` and swap in a bigger geometry
   a.loadTo = (level) => {
+    if (a.fallbackFull) return Promise.resolve();
     if (a.loading) return a.loading;
     const r = LR.find((l) => l.level === level) || LR[LR.length - 1];
     if (r.vertexEnd <= vEnd && r.indexEnd <= iEnd) { a.loadedLevel = Math.min(a.loadedLevel, r.level); return Promise.resolve(); }
     a.loading = (async () => {
-      const [p, n, u, i] = await Promise.all([range('positions', vEnd * 3, r.vertexEnd * 3), range('normals', vEnd * 4, r.vertexEnd * 4), range('uvs', vEnd * 2, r.vertexEnd * 2), range('indices', iEnd, r.indexEnd)]);
-      a.requests += 4;
-      a.pos = grow(a.pos, p); a.nrm = grow(a.nrm, n); a.uv = grow(a.uv, u); a.idx = grow(a.idx, i);
-      vEnd = r.vertexEnd; iEnd = r.indexEnd;
-      const geo = new THREE.BufferGeometry();
-      geo.setAttribute('position', new THREE.BufferAttribute(a.pos, 3));
-      geo.setAttribute('normal', new THREE.BufferAttribute(a.nrm, 4, true));
-      geo.setAttribute('uv', new THREE.BufferAttribute(a.uv, 2));
-      geo.setIndex(new THREE.BufferAttribute(a.idx, 1));
-      geo.boundingSphere = a.sphere;
-      const old = a.geometry; a.geometry = geo;
-      for (const b of a.batches) b.geometry = geo;
-      if (old) old.dispose();
-      a.loadedLevel = r.level; a.residentBytes = r.bytes; a.loading = null;
+      // four ranges in parallel; if one comes back 200, abort its siblings instead of downloading the file four times
+      const ac = new AbortController();
+      try {
+        const [p, n, u, i] = await Promise.all([
+          range('positions', vEnd * 3, r.vertexEnd * 3, ac.signal), range('normals', vEnd * 4, r.vertexEnd * 4, ac.signal),
+          range('uvs', vEnd * 2, r.vertexEnd * 2, ac.signal), range('indices', iEnd, r.indexEnd, ac.signal)]);
+        a.pos = grow(a.pos, p); a.nrm = grow(a.nrm, n); a.uv = grow(a.uv, u); a.idx = grow(a.idx, i);
+        vEnd = r.vertexEnd; iEnd = r.indexEnd;
+        installGeometry();
+        a.loadedLevel = r.level; a.residentBytes = r.bytes; a.loading = null;
+      } catch (e) {
+        if (e !== RANGE_UNSUPPORTED) { a.loading = null; throw e; }
+        ac.abort();
+        await loadWhole(); // the server stopped honouring Range mid-flight: keep everything instead
+      }
     })();
     return a.loading;
   };
