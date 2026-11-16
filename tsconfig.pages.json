@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.app.json",
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.pages.tsbuildinfo",
+    "paths": {
+      "@astralarium/pixi-three": ["./src/index.ts"],
+      "#components/*": ["./examples/components/*"],
+      "#lib/*": ["./examples/components/lib/*"]
+    }
+  },
+  "include": ["examples"]
+}

@@ -1,0 +1,172 @@
+import { useApplication } from "@pixi/react";
+import {
+  type ConstructorRepresentation,
+  createRoot,
+  events,
+  extend,
+  type ReconcilerRoot,
+  type RootState,
+  type ThreeToJSXElements,
+  unmountComponentAtNode,
+} from "@react-three/fiber";
+import { ContextBridge, type ContextBridgeValue } from "fiber-tunnel";
+import { FiberProvider } from "its-fine";
+import { type WebGPURenderer as PixiWebGPURenderer } from "pixi.js";
+import {
+  type PropsWithChildren,
+  type ReactNode,
+  type RefObject,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
+import { type WebGPURendererParameters } from "three/src/renderers/webgpu/WebGPURenderer.js";
+import * as THREE from "three/webgpu";
+import { WebGPURenderer } from "three/webgpu";
+
+extend(THREE as unknown as ConstructorRepresentation);
+
+declare module "@react-three/fiber" {
+  // eslint-disable-next-line @typescript-eslint/no-empty-object-type
+  interface ThreeElements extends ThreeToJSXElements<typeof THREE> {}
+}
+
+/**
+ * @category component
+ * @expand
+ */
+export interface ThreeRootBaseProps {
+  /** Optional HTML element to use as {@link https://r3f.docs.pmnd.rs/api/events | event source} */
+  eventSource?: RefObject<HTMLElement | null>;
+  /**
+   * {@link https://threejs.org/docs/#api/en/renderers/webgpu/WebGPURenderer | WebGPURenderer} parameters
+   */
+  threeRendererParameters?: Partial<WebGPURendererParameters>;
+  /**
+   * Callback after the {@link https://r3f.docs.pmnd.rs/api/canvas | canvas} has rendered (but not yet committed)
+   */
+  onCreated?: (state: RootState) => void;
+  /**
+   * {@link https://r3f.docs.pmnd.rs/api/events | React Three Fiber} handler for pointer clicks that have missed any target
+   */
+  onPointerMissed?: (event: MouseEvent) => void;
+}
+
+/** @internal */
+export interface ThreeRootProps extends ThreeRootBaseProps, PropsWithChildren {
+  /** Pixi-side providers for the r3f root, from `FiberAnchor` */
+  bridge: ContextBridgeValue;
+}
+
+/** @internal */
+export function ThreeRoot({
+  bridge,
+  children,
+  eventSource,
+  threeRendererParameters,
+  onCreated,
+  onPointerMissed,
+}: ThreeRootProps) {
+  const pixi = useApplication();
+  const threeRootRef = useRef<ReconcilerRoot<HTMLCanvasElement>>(null);
+  const [cleanupFn, setCleanupFn] = useState<(() => void) | null>(null);
+
+  // Latest bridged tree; read by the async init below
+  const rootElementRef = useRef<ReactNode>(null);
+  useEffect(() => {
+    rootElementRef.current = (
+      <ContextBridge bridge={bridge}>
+        <FiberProvider>{children}</FiberProvider>
+      </ContextBridge>
+    );
+    threeRootRef.current?.render(rootElementRef.current);
+  }, [bridge, children]);
+
+  useEffect(() => {
+    if (!pixi.isInitialised) {
+      return;
+    }
+
+    async function initThree() {
+      const canvas = pixi.app.canvas;
+
+      const pixiRenderer = pixi.app.renderer as PixiWebGPURenderer;
+
+      const renderer = new WebGPURenderer({
+        canvas: canvas,
+        device: pixiRenderer.device.gpu.device,
+        ...threeRendererParameters,
+      });
+
+      renderer.setClearColor(0, 0);
+
+      await renderer.init();
+
+      pixi.app.renderer.resetState();
+
+      const threeRoot = createRoot(canvas);
+
+      threeRootRef.current = threeRoot;
+
+      const threeState: RootState = await new Promise((resolve) => {
+        void threeRoot.configure({
+          frameloop: "never",
+          renderer,
+          onCreated: (state) => {
+            resolve(state);
+            onCreated?.(state);
+          },
+          onPointerMissed,
+          events,
+          size: {
+            width: 1,
+            height: 1,
+            top: 0,
+            left: 0,
+          },
+        });
+        threeRoot.render(rootElementRef.current);
+      });
+      if (eventSource?.current) {
+        threeState.events.connect?.(eventSource.current);
+      }
+
+      function render() {
+        threeState.advance(pixi.app.ticker.lastTime);
+      }
+
+      const { prerender } = pixi.app.renderer.runners;
+
+      const runner = { prerender: render };
+
+      prerender.add(runner);
+
+      setCleanupFn(() => () => {
+        unmountComponentAtNode(canvas);
+        try {
+          prerender.remove(runner);
+        } catch {
+          /* ... */
+        }
+      });
+    }
+
+    void initThree();
+  }, [
+    eventSource,
+    threeRendererParameters,
+    onCreated,
+    onPointerMissed,
+    pixi,
+    pixi.isInitialised,
+  ]);
+
+  useEffect(() => {
+    if (!cleanupFn) {
+      return;
+    }
+    return cleanupFn;
+  }, [cleanupFn]);
+
+  return null;
+}
