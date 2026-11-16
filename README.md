@@ -63,8 +63,11 @@ dabs ─── about 2.5 million instanced cards, each one mark of the brush she
   the light to warm yellow, the weave of the canvas, and a little varnish. It also smooths and then firms the
   edges of the strokes. The picture is drawn at the screen's own pixels, and with fewer when frames are slow.
 - **Far away, fewer and larger dabs.** Each dab has a fixed rank. With distance only the low ranks stay and
-  grow to cover their neighbours, so strokes never swap. Small strokes use a plain variant of the
-  brush: one clean shape in one colour.
+  grow to cover their neighbours, so strokes never swap. The kept rank share is linked to the drawing
+  resolution: when slow frames shrink the picture, fewer ranks stay and the surviving cards grow more, with a
+  hysteresis dwell so the strokes do not flicker while the resolution wobbles. At full resolution the fine
+  dabs beside the near paths are all kept, and no rank leaves until a grown neighbour already covers it.
+  Small strokes use a plain variant of the brush: one clean shape in one colour.
 
 - **Creatures are painted the same way.** Each part of a body is painted once and moves as a whole, so the
   strokes stay on the creature as it walks. It is lit from straight above, which stays right as it turns.

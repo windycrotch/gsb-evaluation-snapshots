@@ -4,9 +4,10 @@ import * as THREE from 'three'
 import { buildAudio } from './audio.ts'
 import type { SoundName } from './audio.ts'
 import type { MobEvent } from './mobs.ts'
-import { bakeShade, gustAt, shared } from './paint.ts'
+import { bakeShade, clamp, gustAt, shared } from './paint.ts'
 import { buildMobs } from './mobs.ts'
 import { buildViewModel } from './viewmodel.ts'
+import { RankBudget } from './rankBudget.ts'
 import { BACKDROP, buildWorld, groundHeight, pushOut } from './world.ts'
 
 const REFERENCE_SHORT_SIDE = 270
@@ -227,6 +228,8 @@ const player = {
 
 // the share of the screen's pixels that are drawn: falls when frames are slow, see keepPace
 let sharpness = 1
+// the share of dab ranks kept, linked to sharpness with dwell-time hysteresis, see rankBudget.ts
+const rankBudget = new RankBudget()
 
 function resize() {
   const short = Math.min(innerWidth, innerHeight)
@@ -247,6 +250,7 @@ function resize() {
 }
 addEventListener('resize', () => {
   sharpness = 1
+  rankBudget.reset()
   resize()
 })
 resize()
@@ -445,6 +449,7 @@ function step(dt: number) {
 
 function render(time: number) {
   shared.uTime.value = time
+  shared.uRankBudget.value = rankBudget.value
   const lift = Math.abs(Math.cos(player.bob)) * 0.06 * player.stride
   // struck down, the eye sinks to the ground and tips over
   const fallen = player.down < 0 ? 0 : THREE.MathUtils.smoothstep(player.down, 0, 0.7)
@@ -473,6 +478,8 @@ const handsUpdate = (dt: number, time: number) =>
   hands.update({ dt, time, bob: player.bob, stride: player.stride, turn: turnSpeed, rise: player.grounded ? 0 : player.vy, health: player.health })
 
 function advance(dt: number, time: number) {
+  // The stroke ranks follow the settled drawing resolution, with a dwell so threshold wobble cannot flicker.
+  rankBudget.update(sharpness, dt)
   step(dt)
   audio.update({ x: player.x, z: player.z, yaw: player.yaw, gust: gustAt({ x: player.x, z: player.z, time }) })
   const { damage, events } = mobs.update({ dt, time, prey: prey() })
@@ -501,8 +508,24 @@ const debug = {
   hands,
   audio,
   finish: finish.material.uniforms,
+  // the stroke-rank budget linked to the drawing resolution (see rankBudget.ts)
+  ranks: rankBudget,
   manual: false,
   time: 3,
+  /** the share of screen pixels drawn, 1 at full resolution; the rank budget follows it with hysteresis */
+  get sharpness() {
+    return sharpness
+  },
+  /**
+   * Force the drawing resolution for testing, 1 = full screen pixels, down to about 0.2. Recomputes the
+   * picture size at once, like keepPace would a step at a time. Call without an argument to hand control
+   * back to the frame pacer.
+   */
+  setSharpness(value?: number) {
+    sharpness = value === undefined ? 1 : clamp(value, 0.2, 1)
+    resize()
+    return { sharpness, rankBudget: rankBudget.value, rankLevel: rankBudget.currentLevel }
+  },
   /** place the player, draw one frame, return it as a PNG data URL */
   snap(pose: Partial<typeof player> = {}) {
     Object.assign(player, pose)

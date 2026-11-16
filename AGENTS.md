@@ -57,7 +57,9 @@ The painter follows https://patch.gg/blendi/oil-paint (source: `~/Documents/GitH
   weave of the canvas, a rolloff of the brightest paint, and varnish. The palette is saturated on purpose and
   the grade holds it together. The hands are drawn after it, unfinished.
 - **The picture is drawn at the screen's own pixels** (up to 2400 on the short side): stretched, far things turn
-  soft. `keepPace` gives up pixels a step at a time when most frames are slow. Stroke sizes do not depend on it.
+  soft. `keepPace` gives up pixels a step at a time when most frames are slow. The stroke ranks follow that
+  resolution through `uRankBudget` (see `rankBudget.ts`): fewer pixels keep fewer ranks and grow the surviving
+  cards, with dwell-time hysteresis so a threshold wobble cannot flicker strokes in and out.
 - **Dabs** are instanced cards that show one mark of the brush sheet. `face` dabs turn to the eye and run along
   `dir` on the canvas. `lie` dabs lie on a surface and are stood up when seen edge on. Edges are cut with
   alpha to coverage, so the render target needs its samples. A mark's edge is one pixel wide on screen
@@ -86,10 +88,15 @@ The painter follows https://patch.gg/blendi/oil-paint (source: `~/Documents/GitH
 - **Dabs are kept in a few meshes by how they behave** (`KINDS` in `world.ts`): least and largest size on
   screen in reference pixels (270 on the short side), sway, broken colour, shade and mist.
 - **Far dabs:** each dab has a fixed rank. Past the distance where it would be smaller than its least size, only
-  the low ranks stay and grow. The vertex shader uses true distance, so turning the head changes nothing.
-  A stroke that is small on screen is plain (`uFine`): less broken colour, no streak or thickness, and the plain
-  mark of the brush sheet (its alpha channel: the same touch as one clean shape, no bristle gaps or dry end).
-  Detail inside a stroke a few pixels wide is noise, and far things then read as a mix of colours.
+  the low ranks stay and grow. The vertex shader uses true distance, so turning the head changes nothing. The
+  kept share is `uRankBudget`: a dab stays while `rank * cover < uRankBudget` and its least screen size grows by
+  `1 / uRankBudget`, so at full resolution (`uRankBudget = 1`) the fine dabs beside the near paths are all kept,
+  and lowering the drawing resolution thins ranks without opening a hole (a rank leaves only once a grown
+  neighbour covers it). `RankBudget` in `rankBudget.ts` derives the budget from `sharpness` in quantised levels
+  with a dwell (`RANK_HOLD_SECONDS`); it is one scalar per frame with no camera in it, preserving fixed-rank
+  semantics. A stroke that is small on screen is plain (`uFine`): less broken colour, no streak or thickness,
+  and the plain mark of the brush sheet (its alpha channel: the same touch as one clean shape, no bristle gaps
+  or dry end). Detail inside a stroke a few pixels wide is noise, and far things then read as a mix of colours.
 - **How fine a thing is painted** depends on how near the player can come (`reachOf` in `world.ts`).
 - **Under meshes** take the light from face normals. Custom geometry must be wound outward.
 - **Colours** never go through `THREE.Color`. `hex()` keeps raw sRGB and the renderer converts nothing.
@@ -144,3 +151,31 @@ game.manual = true; game.stick.y = -1; game.tick(1 / 24) // step frame by frame 
 ```
 
 Compare `snap` output with frames of the reference video side by side. Keep the palette measured, not guessed.
+
+## accepting the resolution-linked stroke ranks
+
+The logic has unit tests (`node --test scripts/rank-budget.test.ts`, also `npm test`): level mapping, the
+dwell hysteresis, fixed-rank semantics, monotone nesting of the visible sets and the no-hole coverage
+invariant. The visual acceptance runs in the browser against the debug hook:
+
+```js
+// 1. stand on the near path and save the full-resolution frame (fine strokes beside the path)
+game.snap({ x: 0, z: 10, yaw: 0, pitch: -0.1 })
+game.ranks.value        // 1 at full resolution; every near dab is kept
+
+// 2. force the drawing resolution down, as slow frames would a step at a time
+game.setSharpness(0.6)  // picture re-renders smaller; the rank level only changes after the 0.5 s dwell
+game.ranks.currentLevel // rises as the low resolution holds; game.ranks.value is the kept rank share
+//    the picture stays continuous: surviving cards grow by 1 / value, no blank patches, no swapped strokes
+
+// 3. recover the resolution: after the dwell the fine strokes beside the path are back
+game.setSharpness(1)
+game.ranks.value        // returns to 1
+
+// 4. flicker check: rapid changes on a threshold must never move the active level
+for (let i = 0; i < 60; i++) game.setSharpness(i % 2 ? 1 : 0.78)
+game.ranks.currentLevel // stays put; no strokes appear or disappear per frame
+```
+
+In normal play `keepPace` changes `sharpness` itself every `PACE_FRAMES`; `game.setSharpness` only forces it
+for the test. The same checks can be driven frame by frame with `game.manual = true` and `game.tick(dt)`.

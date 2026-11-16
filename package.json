@@ -6,6 +6,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "typecheck": "tsc",
+    "test": "node --test scripts/rank-budget.test.ts",
     "deploy": "pnpm build && wrangler deploy --env preview",
     "deploy:prod": "pnpm build && wrangler deploy"
   },

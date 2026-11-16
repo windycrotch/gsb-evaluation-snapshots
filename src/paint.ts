@@ -154,6 +154,9 @@ export const shared = {
   uPixel: { value: 0.001 },
   // screen pixels in one pixel of the reference frame: dab sizes on screen are given in reference pixels
   uRef: { value: 4 },
+  // share of the fixed dab ranks kept this frame, 1 at full drawing resolution, less when pixels are given
+  // up to keep the pace. One scalar for the whole frame, set from RankBudget in main.ts.
+  uRankBudget: { value: 1 },
   // how strongly the light rakes across the thick paint
   uImpasto: { value: 1 },
   // the way the wind blows over the ground (x, z): from the left of the first view, and a little toward it
@@ -288,6 +291,7 @@ attribute vec4 aNormal; // the surface it is on, or nothing. w: 1 for a lying da
 attribute vec4 aColor;  // a: which marks of the brush sheet, and whether it is pinned by its foot
 uniform float uPixel;
 uniform float uRef;
+uniform float uRankBudget;
 uniform float uTime;
 uniform float uSway;
 uniform float uGust;
@@ -351,9 +355,16 @@ void main() {
   float px = length(vc.xyz) * uPixel * uRef;
   // Far away a dab would be smaller than the least size. Then only a share of the dabs stays, by rank,
   // and each one grows to stand for its neighbours. Rank is fixed, so strokes never swap.
-  vec2 size = max(aData.xy, uMin * px);
+  // uRankBudget ties that share to the drawing resolution: the fewer pixels drawn, the fewer ranks stay and
+  // the larger the least size grows (the 1 / uRankBudget factor). A rank only drops out once this dab's card
+  // has grown past rank * cover >= 1, when the lower-rank neighbours that stay at this cover already stand
+  // for it, so neighbouring levels never leave a hole; at the least size itself cover is 1 / uRankBudget >= 1.
+  // The budget is one frame-wide scalar with no camera in it, so each dab keeps the same show/hide answer in
+  // every frame of a budget level: fixed-rank semantics.
+  float leastScale = 1.0 / max(uRankBudget, 1e-3);
+  vec2 size = max(aData.xy, uMin * px * leastScale);
   float cover = size.x * size.y / (aData.x * aData.y);
-  float alive = 1.0 - smoothstep(0.8, 1.2, aData.z * cover) * smoothstep(1.0, 1.3, cover);
+  float alive = 1.0 - smoothstep(0.8, 1.2, aData.z * cover * uRankBudget) * smoothstep(1.0, 1.3, cover);
   if (alive <= 0.0) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
   if (uMax.x > 0.0) size = min(size, uMax * px);
   vec2 half_ = size * 0.5 * alive;
@@ -377,7 +388,7 @@ void main() {
     vec2 sb = b.xy + vc.xy * b.z / depth;
     float la = length(sa), lb = length(sb);
     float thin = abs(sa.x * sb.y - sa.y * sb.x) / max(max(la, lb), 1e-6);
-    float need = uMin.x * 0.5 * px * alive;
+    float need = uMin.x * 0.5 * px * leastScale * alive;
     if (thin < need) {
       if (la > lb) {
         vec2 perp = vec2(-sa.y, sa.x) / max(la, 1e-6);
