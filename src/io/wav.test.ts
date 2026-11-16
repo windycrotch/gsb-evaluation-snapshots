@@ -1,4 +1,5 @@
 import { AudioBuffer } from '../core/buffer.js';
+import { MAX_SAMPLES_PER_BUFFER } from '../core/sample-rate.js';
 import { it, expect } from 'vitest';
 import * as wav from './wav.js';
 import { writeFourCC } from './bytes.js';
@@ -98,4 +99,104 @@ it('validates fact counts without requiring them in legacy floating files', () =
   new DataView(bytes.buffer).setUint32(46, 99, true);
   expect(() => wav.parseWav(bytes)).toThrow('fact');
   expect(wav.parseWav(fixture(32, 1, 4, true)).frames).toBe(4);
+});
+
+// Structural stand-in for candidate buffers that AudioBuffer itself rejects
+// (33 channels, oversized sample budgets). The check must still classify them.
+function candidate(
+  sampleRate: number,
+  numChannels: number,
+  numSamples: number,
+  channels: ArrayLike<number>[] = [],
+): wav.WavEncodeSource {
+  const empty = new Float32Array(0);
+  return {
+    sampleRate,
+    numChannels,
+    numSamples,
+    getChannel: (channel) => channels[channel] ?? empty,
+  };
+}
+
+it('checkWavEncodable accepts legal stereo and every encoding round-trips it', () => {
+  const audio = new AudioBuffer(48000, 2, 4, [
+    new Float32Array([-0.5, 0, 0.25, 0.75]),
+    new Float32Array([0.5, -0.25, 0, -1]),
+  ]);
+  const result = wav.checkWavEncodable(audio);
+  expect(result).toEqual({
+    ok: true,
+    sampleRate: 48000,
+    channels: 2,
+    numSamples: 4,
+    totalSamples: 8,
+  });
+  const lossless: readonly wav.WavEncoding[] = ['pcm24', 'pcm32', 'float32', 'float64'];
+  const quantized: readonly wav.WavEncoding[] = ['pcm8', 'pcm16'];
+  for (const encoding of [...lossless, ...quantized]) {
+    const restored = wav.decodeWav(wav.encodeWav(audio, encoding));
+    expect(restored.sampleRate).toBe(48000);
+    expect(restored.numChannels).toBe(2);
+    expect(restored.numSamples).toBe(4);
+    for (let channel = 0; channel < 2; channel++) {
+      const expected = Array.from(audio.getChannel(channel));
+      const actual = Array.from(restored.getChannel(channel));
+      if (lossless.includes(encoding)) expect(actual).toEqual(expected);
+      else
+        actual.forEach((value, index) =>
+          expect(Math.abs(value - expected[index]!)).toBeLessThanOrEqual(
+            encoding === 'pcm8' ? 1 / 128 : 1 / 32768,
+          ),
+        );
+    }
+  }
+});
+
+it('checkWavEncodable flags illegal sample rates before any other problem', () => {
+  for (const sampleRate of [44100.5, 0, 192001, Number.NaN, Number.POSITIVE_INFINITY]) {
+    const result = wav.checkWavEncodable(candidate(sampleRate, 1, 4, [new Float32Array(4)]));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe('invalid-sample-rate');
+      expect(result.message).toMatch(/sampleRate/);
+    }
+  }
+});
+
+it('checkWavEncodable flags channel counts above 32', () => {
+  const result = wav.checkWavEncodable(candidate(48000, 33, 1));
+  expect(result.ok).toBe(false);
+  if (!result.ok) {
+    expect(result.reason).toBe('too-many-channels');
+    expect(result.channels).toBe(33);
+    expect(result.message).toMatch(/channel/);
+  }
+});
+
+it('checkWavEncodable flags aggregate sample counts over the memory limit', () => {
+  const numSamples = MAX_SAMPLES_PER_BUFFER + 1;
+  const result = wav.checkWavEncodable(candidate(48000, 1, numSamples));
+  expect(result.ok).toBe(false);
+  if (!result.ok) {
+    expect(result.reason).toBe('sample-count-exceeded');
+    expect(result.totalSamples).toBe(MAX_SAMPLES_PER_BUFFER + 1);
+    expect(result.message).toMatch(/memory limit/);
+  }
+});
+
+it('checkWavEncodable locates non-finite samples and encodeWav throws before writing', () => {
+  for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+    const audio = new AudioBuffer(48000, 1, 4);
+    const samples = audio.getChannel(0);
+    samples[1] = bad;
+    const result = wav.checkWavEncodable(audio);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe('non-finite-sample');
+      expect(result.nonFiniteSample).toEqual({ channel: 0, index: 1, value: bad });
+      expect(result.message).toMatch(/not finite/);
+    }
+    for (const encoding of ['pcm16', 'float32', 'float64'] as const)
+      expect(() => wav.encodeWav(audio, encoding)).toThrow(RangeError);
+  }
 });

@@ -1,5 +1,5 @@
 import { serializeAnalysis, analysisToCsv } from '../io/analysis-export.js';
-import { encodeWav } from '../io/wav.js';
+import { encodeWav, checkWavEncodable } from '../io/wav.js';
 import { loadAudioFile } from './file-loader.js';
 import { analyzeAudio, type AudioAnalysis } from '../analysis.js';
 import type { AudioBuffer } from '../core/buffer.js';
@@ -359,9 +359,14 @@ element('export-csv').addEventListener('click', () =>
     'sonascope-features.csv',
   ),
 );
-element('export-wav').addEventListener('click', () =>
-  download(new Blob([encodeWav(audio)], { type: 'audio/wav' }), 'sonascope-audio.wav'),
-);
+element('export-wav').addEventListener('click', () => {
+  const check = checkWavEncodable(audio);
+  if (!check.ok) {
+    status(`WAV export blocked: ${check.message}`, true);
+    return;
+  }
+  download(new Blob([encodeWav(audio)], { type: 'audio/wav' }), 'sonascope-audio.wav');
+});
 element('export-png').addEventListener('click', () =>
   spectrogram.toBlob((blob) => {
     if (blob) download(blob, 'sonascope-spectrogram.png');

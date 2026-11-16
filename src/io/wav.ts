@@ -1,10 +1,59 @@
 import { AudioBuffer } from '../core/buffer.js';
-import { assertSampleRate, MAX_SAMPLES_PER_BUFFER } from '../core/sample-rate.js';
+import { assertSampleRate, MAX_SAMPLE_RATE, MAX_SAMPLES_PER_BUFFER } from '../core/sample-rate.js';
 import { asDataView, writeFourCC, type ByteSource } from './bytes.js';
 import { scanRiff } from './riff.js';
 import * as pcm from './pcm.js';
 
 export type WavEncoding = 'pcm8' | 'pcm16' | 'pcm24' | 'pcm32' | 'float32' | 'float64';
+
+export const MAX_WAV_CHANNELS = 32;
+
+/**
+ * Structural shape required from an audio source before WAV bytes are
+ * produced. AudioBuffer satisfies it; passing a plain object lets callers
+ * validate a candidate buffer that could not itself be constructed.
+ */
+export interface WavEncodeSource {
+  readonly sampleRate: number;
+  readonly numChannels: number;
+  readonly numSamples: number;
+  getChannel(channel: number): ArrayLike<number>;
+}
+
+/** Machine-readable reasons returned by {@link checkWavEncodable}. */
+export type WavEncodeIssue =
+  | 'invalid-sample-rate'
+  | 'too-many-channels'
+  | 'sample-count-exceeded'
+  | 'non-finite-sample';
+
+/** Location of the first sample that is NaN or Infinity. */
+export interface WavNonFiniteSample {
+  channel: number;
+  index: number;
+  value: number;
+}
+
+/** Structured pre-flight result suitable for surfacing in a UI. */
+export type WavEncodeCheck =
+  | {
+      ok: true;
+      sampleRate: number;
+      channels: number;
+      numSamples: number;
+      totalSamples: number;
+    }
+  | {
+      ok: false;
+      reason: WavEncodeIssue;
+      message: string;
+      sampleRate: number;
+      channels: number;
+      numSamples: number;
+      totalSamples: number;
+      nonFiniteSample?: WavNonFiniteSample;
+    };
+
 export interface WavInfo {
   sampleRate: number;
   channels: number;
@@ -49,7 +98,8 @@ export function parseWav(input: ByteSource): WavInfo {
     tag = view.getUint16(offset + 24, true);
   }
   assertSampleRate(sampleRate);
-  if (channels < 1 || channels > 32) throw new RangeError('WAVE channel count must be in [1,32]');
+  if (channels < 1 || channels > MAX_WAV_CHANNELS)
+    throw new RangeError(`WAVE channel count must be in [1, ${MAX_WAV_CHANNELS}]`);
   if (tag !== 1 && tag !== 3) throw new RangeError('Unsupported WAVE encoding');
   if (!(tag === 1 ? [8, 16, 24, 32] : [32, 64]).includes(bitsPerSample))
     throw new RangeError('Unsupported WAVE bit depth');
@@ -101,14 +151,84 @@ export function decodeWav(input: ByteSource): AudioBuffer {
   return output;
 }
 
+/**
+ * Validates an audio source for WAV encoding without allocating a buffer or
+ * writing any bytes. Every constraint is checked once and the outcome is a
+ * plain structured object so the workbench can explain why an export is
+ * blocked. On failure the reason is one of invalid-sample-rate,
+ * too-many-channels, sample-count-exceeded or non-finite-sample; on success
+ * the result reports the dimensions the encoder would use.
+ */
+export function checkWavEncodable(audio: WavEncodeSource): WavEncodeCheck {
+  const { sampleRate, numChannels, numSamples } = audio;
+  const totalSamples = numSamples * numChannels;
+  const fail = (reason: WavEncodeIssue, message: string, extra?: WavNonFiniteSample) => ({
+    ok: false as const,
+    reason,
+    message,
+    sampleRate,
+    channels: numChannels,
+    numSamples,
+    totalSamples,
+    ...(extra ? { nonFiniteSample: extra } : {}),
+  });
+  if (
+    typeof sampleRate !== 'number' ||
+    !Number.isInteger(sampleRate) ||
+    sampleRate < 1 ||
+    sampleRate > MAX_SAMPLE_RATE
+  ) {
+    return fail(
+      'invalid-sample-rate',
+      `WAVE sampleRate must be an integer in [1, ${MAX_SAMPLE_RATE}], got ${sampleRate}`,
+    );
+  }
+  if (numChannels > MAX_WAV_CHANNELS) {
+    return fail(
+      'too-many-channels',
+      `WAVE supports at most ${MAX_WAV_CHANNELS} channels, got ${numChannels}`,
+    );
+  }
+  if (
+    typeof numSamples !== 'number' ||
+    !Number.isInteger(numSamples) ||
+    numSamples < 0 ||
+    totalSamples > MAX_SAMPLES_PER_BUFFER
+  ) {
+    return fail(
+      'sample-count-exceeded',
+      `WAVE total sample count ${totalSamples} exceeds the memory limit ${MAX_SAMPLES_PER_BUFFER}.`,
+    );
+  }
+  for (let channel = 0; channel < numChannels; channel++) {
+    const samples = audio.getChannel(channel);
+    for (let index = 0; index < samples.length; index++) {
+      const value = samples[index]!;
+      if (typeof value !== 'number' || !Number.isFinite(value)) {
+        return fail(
+          'non-finite-sample',
+          `WAVE sample at channel ${channel} index ${index} is not finite: ${value}`,
+          { channel, index, value: typeof value === 'number' ? value : Number.NaN },
+        );
+      }
+    }
+  }
+  return {
+    ok: true,
+    sampleRate,
+    channels: numChannels,
+    numSamples,
+    totalSamples,
+  };
+}
+
 export function encodeWav(audio: AudioBuffer, encoding: WavEncoding = 'pcm16'): Uint8Array {
   const encodings = ['pcm8', 'pcm16', 'pcm24', 'pcm32', 'float32', 'float64'];
   if (!encodings.includes(encoding)) throw new RangeError('Unsupported WAVE encoding');
-  assertSampleRate(audio.sampleRate);
-  if (!Number.isInteger(audio.sampleRate))
-    throw new RangeError('WAVE sampleRate must be an integer');
-  if (audio.numChannels > 32 || audio.numSamples * audio.numChannels > MAX_SAMPLES_PER_BUFFER)
-    throw new RangeError('Audio exceeds WAVE memory or channel limits');
+  // Run every precondition before any allocation: a rejected source must never
+  // leave a half-written buffer behind, especially for NaN/Infinity samples.
+  const check = checkWavEncodable(audio);
+  if (!check.ok) throw new RangeError(check.message);
   const floating = encoding.startsWith('float');
   const bits = Number(encoding.replace(/[^0-9]/g, ''));
   const align = (audio.numChannels * bits) / 8;
