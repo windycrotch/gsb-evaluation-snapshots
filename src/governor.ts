@@ -15,7 +15,8 @@
 //
 // Hence the rules:
 //   - only frames drawn at the current size count, and the first few at each
-//     new size are dropped
+//     new size are dropped; a pause (the canvas offscreen) starts the
+//     measurement over too, through reset()
 //   - down is immediate, sized from the measurement (a frame over budget is a
 //     dropped frame now)
 //   - up is a probe: one step at a time when there is headroom, after a wait.
@@ -77,6 +78,16 @@ export class ResolutionGovernor {
     this.max = Math.min(1, Math.max(STEP, o.max ?? 1));
     this.min = Math.min(this.max, Math.max(STEP, o.min ?? 0.5));
     this.scale = this.max;
+  }
+
+  /**
+   * Forget the frames measured so far and warm up again, as at a new size:
+   * what is drawn next is not comparable to what was measured last — the
+   * canvas was paused offscreen, and the GPU has had other work in between.
+   */
+  reset(): void {
+    this.samples = [];
+    this.skip = WARMUP;
   }
 
   /**

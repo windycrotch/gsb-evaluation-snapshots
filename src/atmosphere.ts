@@ -170,7 +170,9 @@ export interface AtmosphereOptions extends Conditions {
    *
    * Under budget nothing changes at all. Needs `EXT_disjoint_timer_query`
    * (Chrome and Edge on the desktop); elsewhere the resolution simply holds.
-   * {@link Atmosphere.resolution} reads the current factor.
+   * Frames skipped while the canvas is offscreen (see `pauseOffscreen`) are
+   * never measured, and coming back starts the measurement over, as a resize
+   * does. {@link Atmosphere.resolution} reads the current factor.
    */
   adaptiveResolution?: boolean | { budget?: number; min?: number };
 }
@@ -299,6 +301,13 @@ export class Atmosphere {
         const inView = entries[entries.length - 1].isIntersecting;
         const back = inView && !this.inView;
         this.inView = inView;
+        if (back && this.governor) {
+          // the pause parts the frames behind it from the frames ahead: start
+          // the adaptive resolution's measurement over, as at a new size, and
+          // drop the timings still trailing the frames from before it
+          this.renderer.takeGpuTimes();
+          this.governor.reset();
+        }
         // not left to the next tick, up to a frame interval off: what it left
         // with is a moment long gone, and a new size has cleared the canvas of it
         if (back && this.raf) this.draw(performance.now());

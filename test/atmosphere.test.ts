@@ -21,7 +21,7 @@ const { made, FakeRenderer, atStart } = vi.hoisted(() => {
     // what isSettled answers: flipped by the tests as variants start and land
     linked = atStart.linked;
     isSettled = vi.fn(() => this.available && this.linked);
-    takeGpuTimes = () => [];
+    takeGpuTimes = vi.fn((): { ms: number; pixels: number }[] => []);
     readonly canvas: HTMLCanvasElement;
     readonly opts: { onReady?: (available: boolean) => void; onLinked?: () => void };
     constructor(canvas: HTMLCanvasElement, opts: FakeRenderer['opts']) {
@@ -241,6 +241,65 @@ describe('out of view', () => {
     expect(watching).toBe(true);
     sky.dispose();
     expect(watching).toBe(false);
+  });
+
+  describe('with the adaptive resolution on', () => {
+    // a frame far over the budget (12.5 ms at 60 fps), at the full 640×360
+    const slow = { ms: 50, pixels: 640 * 360 };
+    const frames = (n: number, from: number) => { for (let t = 0; t < n; t++) tick(from + t * 100); };
+
+    it('measures nothing and changes nothing while away, and warms up again on the way back', () => {
+      const { sky, renderer } = mount({ fps: 60, adaptiveResolution: true }, inDocument());
+      renderer.takeGpuTimes.mockReturnValue([slow]);
+      // 8 frames in view: 3 warm-up, 5 counted — one short of the 6 a decision needs
+      frames(8, 100);
+      expect(sky.resolution).toBe(1);
+      const measured = renderer.takeGpuTimes.mock.calls.length;
+      view(false);
+      frames(12, 1000);
+      // the skipped frames are not measured, and cannot move the scale
+      expect(renderer.takeGpuTimes.mock.calls.length).toBe(measured);
+      expect(sky.resolution).toBe(1);
+      // back: the samples from before the pause are discarded, so the catch-up
+      // draw and the next frames are warm-up again, not the last straws
+      view(true);
+      frames(6, 3000);
+      expect(sky.resolution).toBe(1);
+      // and once it has seen enough of the frames after the pause, it decides
+      frames(3, 4000);
+      expect(sky.resolution).toBeLessThan(1);
+    });
+
+    it('adjusts as usual with pauseOffscreen: false, watching nothing', () => {
+      const { sky, renderer } = mount({ fps: 60, adaptiveResolution: true, pauseOffscreen: false }, inDocument());
+      expect(watching).toBe(false);
+      renderer.takeGpuTimes.mockReturnValue([slow]);
+      frames(10, 100);
+      expect(sky.resolution).toBeLessThan(1);
+    });
+
+    it('adjusts as usual on a canvas outside the document, which is never offscreen', () => {
+      const { sky, renderer } = mount({ fps: 60, adaptiveResolution: true });
+      view(false);   // a detached canvas never intersects anything
+      renderer.takeGpuTimes.mockReturnValue([slow]);
+      frames(10, 100);
+      expect(renderer.render).toHaveBeenCalled();
+      expect(sky.resolution).toBeLessThan(1);
+    });
+
+    it('does not draw or measure on the way back once stopped', () => {
+      const { sky, renderer } = mount({ fps: 60, adaptiveResolution: true }, inDocument());
+      renderer.takeGpuTimes.mockReturnValue([slow]);
+      frames(1, 100);
+      sky.stop();
+      const drawn = renderer.render.mock.calls.length;
+      const measured = renderer.takeGpuTimes.mock.calls.length;
+      view(false);
+      view(true);
+      expect(renderer.render.mock.calls.length).toBe(drawn);
+      expect(renderer.takeGpuTimes.mock.calls.length).toBe(measured + 1);   // the drain, not a frame
+      expect(sky.resolution).toBe(1);
+    });
   });
 });
 

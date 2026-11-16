@@ -92,4 +92,16 @@ describe('ResolutionGovernor', () => {
     // full-size frames still in flight after the drop must not push it down again
     expect(g.update(frames(12, 18, 1), FULL, 100)).toBe(s);
   });
+
+  it('starts its measurement over on reset(), as at a new size', () => {
+    const g = new ResolutionGovernor({ budget: 12.5 });
+    // 8 frames in: 3 warm-up dropped, 5 counted — one short of a decision
+    g.update(frames(8, 18, 1), FULL, 0);
+    g.reset();
+    // the frames that would have tipped it are warm-up again
+    expect(g.update(frames(3, 18, 1), FULL, 100)).toBe(1);
+    expect(g.update(frames(5, 18, 1), FULL, 200)).toBe(1);
+    // and with enough of them it decides as it would have from scratch
+    expect(g.update(frames(1, 18, 1), FULL, 300)).toBeLessThan(1);
+  });
 });
