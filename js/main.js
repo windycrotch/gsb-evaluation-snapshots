@@ -13,6 +13,7 @@ import {
     renderEffectFrames
 } from './AbilityEffect.js?v=13';
 import { LOOP_MOTIFS, LOOP_MOTIF_GROUPS } from './engine/LoopArt.js?v=3';
+import { validateLoopFrames } from './engine/LoopFrames.js';
 
 const GIF_WORKER_URL = new URL('./gif.worker.js', import.meta.url).href;
 const GIF_TRANSPARENT_COLOR = 0x010203;
@@ -323,6 +324,33 @@ const endExport = () => {
     exportButtons.forEach((button) => { button.disabled = false; });
 };
 
+// The guard renders its own detached canvases from the same loop pipeline, so
+// the live preview and the frames already generated for a previous export stay
+// untouched. Only an approved batch continues to the download path.
+const runExportGuard = async () => {
+    const settings = currentExportOptions();
+    setNotice('Checking frame safety before export…');
+    let report;
+    try {
+        report = await validateLoopFrames(
+            baseRecipe,
+            settings.size,
+            settings.size,
+            settings.frameCount,
+            baseRecipe.seed
+        );
+    } catch (error) {
+        console.error(error);
+        setNotice('Export safety check could not run.', 'danger');
+        return false;
+    }
+    if (!report.passed) {
+        setNotice(`Export blocked: ${report.failures.join(' · ')}`, 'danger');
+        return false;
+    }
+    return true;
+};
+
 const updateRecipeReadout = () => {
     recipeFamily.textContent = EFFECT_FAMILIES[baseRecipe.family]?.shortLabel ?? prettyLabel(baseRecipe.family);
     recipeElement.textContent = ELEMENTS[baseRecipe.element]?.label ?? prettyLabel(baseRecipe.element);
@@ -479,6 +507,7 @@ const releaseAfterDownload = (url) => {
 const exportAtlas = async () => {
     if (!beginExport()) return;
     try {
+        if (!await runExportGuard()) return;
         const { frames, size } = await captureFrames();
         const atlas = createAtlas(frames, size);
         const blob = await canvasToBlob(atlas);
@@ -511,6 +540,7 @@ const exportFramesZip = async () => {
     }
     if (!beginExport()) return;
     try {
+        if (!await runExportGuard()) return;
         const { frames } = await captureFrames();
         const zip = new JSZip();
         const blobs = await Promise.all(frames.map((frame) => canvasToBlob(frame)));
@@ -537,6 +567,11 @@ const exportGif = async () => {
         return;
     }
     if (!beginExport()) return;
+
+    if (!await runExportGuard()) {
+        endExport();
+        return;
+    }
 
     let gif;
     let watchdog;

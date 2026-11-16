@@ -215,6 +215,8 @@ Because these tests use Canvas APIs, they run in a browser rather than a Node.js
 
 Open `tests/loop-art-harness.html` for dedicated seam checks across all 50 motifs and three seeds each. It checks exact periodicity, the visible transition from the last exported frame to the first, non-empty frames, transparent frame edges, distinct rendered frames, and export dimensions. `tests/motif-gallery.html` shows all 50 motifs together for visual review.
 
+`tests/export-guard-harness.html` exercises the reusable export pre-flight guard (`validateLoopFrames` in `js/engine/LoopFrames.js`) with fixed seeds across three paths: a normal inset render that passes, a 16 px canvas with an oversized core that paints on the boundary and must be rejected, and an interior-only last-frame tamper that breaks the end-to-start seam without touching any edge. It also confirms that non-finite dimensions and frame counts fall back to defaults instead of throwing, that out-of-range values clamp to 16–512 px and 1–120 frames, and that identical seeds produce byte-identical frames. Every export button runs this guard before downloading, so a failed check is reported in the notice area and no file is written; the guard renders its own detached canvases and never changes the live preview.
+
 ## Deploying to GitHub Pages
 
 The repository is already structured as a static site:

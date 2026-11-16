@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Export guard verification</title>
+    <style>
+        body { font-family: system-ui, sans-serif; margin: 24px; }
+        body[data-status="passed"] { background: #e9f9ec; }
+        body[data-status="failed"] { background: #fdecec; }
+        pre { background: #10141c; color: #e6edf3; padding: 16px; border-radius: 8px;
+              overflow: auto; font-size: 12px; line-height: 1.45; }
+    </style>
+</head>
+<body data-status="running">
+    <h1>Export pre-flight guard</h1>
+    <p>Fixed-seed coverage of the three guard paths: normal pass, boundary
+        overflow, and a broken end-to-start seam. All canvases render through the
+        same <code>drawLoopPhase</code> pipeline used by the real exporter.</p>
+    <pre id="result">Running export guard verification…</pre>
+    <script type="module">
+        import { presets } from '../js/presets.js';
+        import {
+            validateLoopFrames,
+            renderLoopFrameData,
+            evaluateLoopFrameData
+        } from '../js/engine/LoopFrames.js';
+
+        const output = document.querySelector('#result');
+        const failures = [];
+        const cases = [];
+
+        // Case 1 — normal pass: an inset preset on a 160 px canvas with a
+        // fixed seed must satisfy every guard condition.
+        const passing = await validateLoopFrames(presets.fireball, 160, 160, 24, 734211);
+        cases.push({
+            case: 'normal-pass',
+            expectedPass: true,
+            actualPass: passing.passed,
+            failures: passing.failures,
+            frameCount: passing.frameCount,
+            width: passing.width,
+            height: passing.height,
+            seed: passing.seed,
+            boundaryPixelTotal: passing.boundaryPixelTotal,
+            phaseOneDifference: passing.phaseOneDifference,
+            meanDifference: passing.meanDifference,
+            wrapDifference: passing.wrapDifference,
+            wrapRatio: passing.wrapRatio,
+            minOpaquePixels: Math.min(...passing.frameStats.map((frame) => frame.opaquePixels)),
+            frameStats: passing.frameStats
+        });
+        if (!passing.passed) failures.push('normal-pass: expected the inset preset to pass the guard');
+        if (passing.boundaryPixelTotal !== 0) failures.push('normal-pass: boundary pixels were counted');
+        if (passing.phaseOneDifference !== 0) failures.push('normal-pass: phase 0 and phase 1 frames differ');
+
+        // Case 2 — boundary overflow: a 16 px canvas with an oversized orb
+        // core necessarily paints onto the four outermost pixel rows/columns.
+        const boundaryConfig = {
+            ...presets.frostNova,
+            shape: { type: 'point', radius: 4, width: 8, height: 8 },
+            visuals: { ...presets.frostNova.visuals, coreStyle: 'orb', startSize: 22 }
+        };
+        const boundary = await validateLoopFrames(boundaryConfig, 16, 16, 8, 424242);
+        cases.push({
+            case: 'boundary-overflow',
+            expectedPass: false,
+            actualPass: boundary.passed,
+            failures: boundary.failures,
+            boundaryPixelTotal: boundary.boundaryPixelTotal,
+            perFrameBoundaryPixels: boundary.frameStats.map((frame) => frame.boundaryPixels),
+            frameStats: boundary.frameStats
+        });
+        if (boundary.passed) failures.push('boundary-overflow: guard accepted frames that touch the edge');
+        if (boundary.boundaryPixelTotal === 0) failures.push('boundary-overflow: no boundary pixels were detected');
+
+        // Case 3 — broken seam: a clean render is tampered only in the last
+        // frame's interior. No edge pixel is added, phase 1 still matches
+        // frame 0, but the last-to-first jump must exceed the 1.6x limit.
+        const seamData = await renderLoopFrameData({
+            config: presets.fireball,
+            width: 160,
+            height: 160,
+            frameCount: 24,
+            seed: 734211
+        });
+        const lastFrame = seamData.frames.at(-1);
+        const lastContext = lastFrame.getContext('2d');
+        lastContext.fillStyle = '#ff2d2d';
+        lastContext.fillRect(48, 48, 32, 32);
+        const seamMetrics = evaluateLoopFrameData(seamData);
+        const seamBoundaryTotal = seamMetrics.frameStats.reduce(
+            (sum, frame) => sum + frame.boundaryPixels, 0
+        );
+        const seamReport = {
+            case: 'seam-break',
+            expectedPass: false,
+            wrapJumpDetected: seamMetrics.wrapDifference > seamMetrics.meanDifference * 1.6,
+            boundaryPixelTotal: seamBoundaryTotal,
+            phaseOneDifference: seamMetrics.phaseOneDifference,
+            meanDifference: Number(seamMetrics.meanDifference.toFixed(4)),
+            wrapDifference: Number(seamMetrics.wrapDifference.toFixed(4)),
+            wrapRatio: Number(seamMetrics.wrapRatio.toFixed(4)),
+            differences: seamMetrics.differences.map((value) => Number(value.toFixed(4))),
+            frameStats: seamMetrics.frameStats
+        };
+        cases.push(seamReport);
+        if (!seamReport.wrapJumpDetected) failures.push('seam-break: wrap jump stayed within the 1.6x limit');
+        if (seamBoundaryTotal !== 0) failures.push('seam-break: tamper introduced boundary pixels');
+        if (seamReport.phaseOneDifference !== 0) failures.push('seam-break: phase-1 comparison changed unexpectedly');
+
+        // Input hygiene: non-finite values fall back to defaults, out-of-range
+        // values clamp, and nothing may throw.
+        let fallback;
+        let fallbackThrew = false;
+        try {
+            fallback = await validateLoopFrames(
+                presets.fireball, 'huge', NaN, Infinity, 'not-a-number'
+            );
+        } catch (error) {
+            fallbackThrew = true;
+            fallback = { error: error.message };
+        }
+        const fallbackExpected = { width: 160, height: 160, frameCount: 32, seed: null };
+        const fallbackActual = {
+            width: fallback.width,
+            height: fallback.height,
+            frameCount: fallback.frameCount,
+            seed: fallback.seed
+        };
+        cases.push({
+            case: 'invalid-input-fallback',
+            expected: fallbackExpected,
+            actual: fallbackActual,
+            threw: fallbackThrew
+        });
+        if (fallbackThrew) failures.push('invalid-input-fallback: guard threw on non-finite input');
+        if (JSON.stringify(fallbackActual) !== JSON.stringify(fallbackExpected)) {
+            failures.push('invalid-input-fallback: defaults were not applied');
+        }
+
+        const clamped = await validateLoopFrames(presets.fireball, 8, 9999, 240, 734211);
+        const clampExpected = { width: 16, height: 512, frameCount: 120, seed: 734211 };
+        const clampActual = {
+            width: clamped.width,
+            height: clamped.height,
+            frameCount: clamped.frameCount,
+            seed: clamped.seed
+        };
+        cases.push({
+            case: 'out-of-range-clamp',
+            expected: clampExpected,
+            actual: clampActual
+        });
+        if (JSON.stringify(clampActual) !== JSON.stringify(clampExpected)) {
+            failures.push('out-of-range-clamp: values were not bounded to 16-512 / 1-120');
+        }
+
+        // Determinism: the same seed must produce byte-identical frame buffers.
+        const runA = await renderLoopFrameData({
+            config: presets.fireball, width: 96, height: 96, frameCount: 10, seed: 99
+        });
+        const runB = await renderLoopFrameData({
+            config: presets.fireball, width: 96, height: 96, frameCount: 10, seed: 99
+        });
+        let identical = true;
+        for (let index = 0; index < runA.frames.length; index += 1) {
+            const left = runA.frames[index].getContext('2d').getImageData(0, 0, 96, 96).data;
+            const right = runB.frames[index].getContext('2d').getImageData(0, 0, 96, 96).data;
+            if (left.some((value, pixel) => value !== right[pixel])) identical = false;
+        }
+        cases.push({ case: 'seeded-determinism', identical });
+        if (!identical) failures.push('seeded-determinism: same seed rendered different frames');
+
+        const result = { passed: failures.length === 0, failures, cases };
+        document.body.dataset.status = result.passed ? 'passed' : 'failed';
+        output.textContent = JSON.stringify(result, null, 2);
+    </script>
+</body>
+</html>

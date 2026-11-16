@@ -142,10 +142,17 @@ const getLoopParticleCount = (config, duration) => {
     );
 };
 
-export const createLoopModel = (sourceConfig, bounds) => {
+export const createLoopModel = (sourceConfig, bounds, seedOverride) => {
     const config = mergeEmitterConfig(sourceConfig);
     const duration = Math.max(0.1, config.visuals.life);
-    const seed = hashString(JSON.stringify({ config, bounds }));
+    // Export guards can pin a seed independently of the hashed config/bounds
+    // pair so the same seed always drives the same frame sequence. An invalid
+    // override falls back to the deterministic configuration hash.
+    const override = Number(seedOverride);
+    const hasValidOverride = seedOverride !== undefined
+        && seedOverride !== null
+        && Number.isFinite(override);
+    const seed = hasValidOverride ? (Math.trunc(override) >>> 0) : hashString(JSON.stringify({ config, bounds }));
     const emitterRandom = createSeededRandom(seed);
     const templateEmitter = new Emitter(config, bounds, { random: emitterRandom });
     const particleCount = getLoopParticleCount(config, duration);
@@ -240,4 +247,205 @@ export const renderSeamlessLoopFrames = async ({ config, width, height, frameCou
     }
 
     return { frames, model };
+};
+
+// --- Export pre-flight guard -------------------------------------------------
+// The guard renders its own detached canvases through the same drawLoopPhase
+// pipeline used by renderSeamlessLoopFrames, so preview and export pixels stay
+// identical for a given configuration and seed. It never touches the live
+// preview canvas or any frame sequence the caller already generated.
+
+const DEFAULT_GUARD_WIDTH = 160;
+const DEFAULT_GUARD_HEIGHT = 160;
+const DEFAULT_GUARD_FRAMES = 32;
+const WRAP_JUMP_LIMIT = 1.6;
+
+const normalizeSeedOverride = (value) => {
+    if (value === undefined || value === null) return undefined;
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return undefined;
+    const truncated = Math.trunc(numeric) >>> 0;
+    return truncated === 0 ? 1 : truncated;
+};
+
+const framePixels = (canvas) => canvas.getContext('2d')
+    .getImageData(0, 0, canvas.width, canvas.height).data;
+
+// Mean per-channel absolute difference, matching the convention used by the
+// loop verification harnesses; identical buffers compare as exactly zero.
+const measureDifference = (left, right) => {
+    let total = 0;
+    for (let index = 0; index < left.length; index += 1) {
+        total += Math.abs(left[index] - right[index]);
+    }
+    return total / left.length;
+};
+
+const countOpaquePixels = (pixels, width, height) => {
+    let count = 0;
+    for (let index = 3; index < pixels.length; index += 4) {
+        if (pixels[index] > 0) count += 1;
+    }
+    return count;
+};
+
+// Only the four outermost rows/columns count as the boundary: any occupied
+// pixel there would be sliced or clipped when the atlas enters an engine.
+const countBoundaryPixels = (pixels, width, height) => {
+    let count = 0;
+    for (let x = 0; x < width; x += 1) {
+        if (pixels[(0 * width + x) * 4 + 3] > 0) count += 1;
+        if (pixels[((height - 1) * width + x) * 4 + 3] > 0) count += 1;
+    }
+    for (let y = 1; y < height - 1; y += 1) {
+        if (pixels[(y * width) * 4 + 3] > 0) count += 1;
+        if (pixels[(y * width + width - 1) * 4 + 3] > 0) count += 1;
+    }
+    return count;
+};
+
+/**
+ * Renders the full loop sequence plus a phase-1 reference through the shared
+ * drawLoopPhase pipeline on detached canvases. Dimensions and frame count are
+ * bounded with fallback defaults (16-512 px, 1-120 frames) instead of throwing.
+ */
+export const renderLoopFrameData = async ({
+    config,
+    width,
+    height,
+    frameCount,
+    seed
+} = {}) => {
+    const bounds = {
+        width: Math.trunc(bounded(width, DEFAULT_GUARD_WIDTH, 16, 512)),
+        height: Math.trunc(bounded(height, DEFAULT_GUARD_HEIGHT, 16, 512))
+    };
+    const totalFrames = Math.trunc(bounded(frameCount, DEFAULT_GUARD_FRAMES, 1, 120));
+    const seedOverride = normalizeSeedOverride(seed);
+    const model = createLoopModel(config, bounds, seedOverride);
+    const frames = [];
+
+    for (let index = 0; index < totalFrames; index += 1) {
+        const canvas = document.createElement('canvas');
+        canvas.width = bounds.width;
+        canvas.height = bounds.height;
+        const context = canvas.getContext('2d');
+        drawLoopPhase(context, model, index / totalFrames);
+        frames.push(canvas);
+        if (index % 4 === 3) await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+
+    // A fresh model with the same inputs must render an identical phase-1 frame;
+    // comparing it against frame zero proves the cycle closes exactly.
+    const phaseOneCanvas = document.createElement('canvas');
+    phaseOneCanvas.width = bounds.width;
+    phaseOneCanvas.height = bounds.height;
+    drawLoopPhase(phaseOneCanvas.getContext('2d'), model, 1);
+
+    return {
+        bounds,
+        frameCount: totalFrames,
+        seed: seedOverride ?? null,
+        frames,
+        phaseOneCanvas
+    };
+};
+
+/**
+ * Measures per-frame occupancy, boundary occupancy, adjacent-frame differences
+ * (including the last-frame-to-first wrap) and the phase-0 vs phase-1 seam.
+ */
+export const evaluateLoopFrameData = ({ frames, phaseOneCanvas, bounds, frameCount }) => {
+    const { width, height } = bounds;
+    const totalFrames = Math.trunc(frameCount);
+    const pixels = frames.map((canvas) => framePixels(canvas));
+    const phaseOnePixels = framePixels(phaseOneCanvas);
+
+    const frameStats = pixels.map((data, index) => ({
+        index,
+        opaquePixels: countOpaquePixels(data, width, height),
+        boundaryPixels: countBoundaryPixels(data, width, height)
+    }));
+
+    const differences = pixels.map((data, index) =>
+        measureDifference(data, pixels[(index + 1) % totalFrames]));
+    const phaseOneDifference = measureDifference(pixels[0], phaseOnePixels);
+    const wrapDifference = differences[totalFrames - 1];
+    const meanDifference = differences.reduce((sum, value) => sum + value, 0) / totalFrames;
+    const wrapRatio = meanDifference === 0 ? 0 : wrapDifference / meanDifference;
+
+    return {
+        width,
+        height,
+        frameCount: totalFrames,
+        frameStats,
+        differences,
+        meanDifference,
+        wrapDifference,
+        wrapRatio,
+        phaseOneDifference
+    };
+};
+
+/**
+ * Pre-flight self check run before any download. Returns per-frame statistics
+ * and an overall verdict with human-readable failure reasons; it never throws
+ * on bad input and never mutates the caller's preview or generated frames.
+ */
+export const validateLoopFrames = async (config, width, height, frameCount, seed) => {
+    const data = await renderLoopFrameData({
+        config,
+        width,
+        height,
+        frameCount,
+        seed
+    });
+    const metrics = evaluateLoopFrameData(data);
+    const failures = [];
+
+    const emptyFrames = metrics.frameStats
+        .filter((frame) => frame.opaquePixels === 0)
+        .map((frame) => frame.index);
+    if (emptyFrames.length > 0) {
+        failures.push(`Frames with no visible pixels: ${emptyFrames.join(', ')}`);
+    }
+
+    const boundaryTotal = metrics.frameStats.reduce(
+        (sum, frame) => sum + frame.boundaryPixels,
+        0
+    );
+    if (boundaryTotal !== 0) {
+        const offending = metrics.frameStats
+            .filter((frame) => frame.boundaryPixels > 0)
+            .map((frame) => `#${frame.index} (${frame.boundaryPixels})`);
+        failures.push(`Visible pixels touch the canvas edge on ${offending.join(', ')}`);
+    }
+
+    if (metrics.phaseOneDifference !== 0) {
+        failures.push('First frame and phase-1 render differ, so the loop does not close exactly');
+    }
+
+    if (metrics.wrapDifference > metrics.meanDifference * WRAP_JUMP_LIMIT) {
+        failures.push(
+            `Last-to-first jump is ${metrics.wrapRatio.toFixed(2)}x the average frame change (limit ${WRAP_JUMP_LIMIT}x)`
+        );
+    }
+
+    const round = (value) => Number(value.toFixed(4));
+
+    return {
+        passed: failures.length === 0,
+        failures,
+        width: metrics.width,
+        height: metrics.height,
+        frameCount: metrics.frameCount,
+        seed: data.seed,
+        boundaryPixelTotal: boundaryTotal,
+        meanDifference: round(metrics.meanDifference),
+        wrapDifference: round(metrics.wrapDifference),
+        wrapRatio: round(metrics.wrapRatio),
+        phaseOneDifference: round(metrics.phaseOneDifference),
+        differences: metrics.differences.map(round),
+        frameStats: metrics.frameStats
+    };
 };
