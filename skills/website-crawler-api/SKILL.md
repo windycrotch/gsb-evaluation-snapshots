@@ -201,6 +201,40 @@ batch = requests.post(f"{BASE}/api/v1/extract/batch", headers=HEADERS,
 print(batch["data"]["id"], batch["data"]["urls_count"], batch["data"]["invalid_urls"])
 ```
 
+### Resumable crawl: keep every page, re-fetch only the failures
+
+A crawl that meets a bad page, a timeout, robots.txt or an empty balance still keeps the pages it already fetched. Finalize every crawl so the work survives an early stop, and resume with a batch of just the missing URLs instead of restarting the whole crawl. A ready-to-run, standard-library-only implementation is at [`examples/resumable_crawl.py`](/examples/resumable_crawl.py) (tests: `tests/test_resumable_crawl.py`).
+
+Flow, in order:
+
+1. Start with `POST /api/v1/extract/crawl` carrying an `Idempotency-Key`; keep the `202` job id.
+2. Poll `GET /api/v1/extract/crawl/{id}?include_content=false` until `status` is `completed`, `failed` or `cancelled`. Do not restart a job that is still running.
+3. Once it ends, page the full results with `status=succeeded`, then `status=failed`, then `status=skipped`, following each response's `next_cursor`. Each status has its own cursor chain, so fetch the three lists separately.
+4. Finalize on disk, then resume from the failure list with `POST /api/v1/extract/batch`.
+
+On-disk rules:
+
+- **One file per succeeded page.** Derive the filename from the URL (host + path plus a short hash of the full URL), so it is unique and stable: the same URL always maps to the same file across crawl and every resume round, and one URL is never stored twice. Write `content` exactly as returned - markdown is not rewritten, reformatted or truncated. A `page-index.json` maps each URL to its file.
+- **One `failures.json` for everything not captured.** Every item carries `url`, `category` (exactly `failed` or `skipped`), `status_code` (null on skipped items, which may have none) and `error` for failed or `skip_reason` (for example `robots`) for skipped. Keep the categories separate: both cost 0 credits, but a failed page is a fetch error worth retrying and a skipped page was excluded by a rule.
+- **Empty content is a failure.** A result whose `status` is `succeeded` but whose `content` is missing or blank goes into `failures.json` with an explanatory `error`; never write an empty file and count it as a captured page.
+- **Record `stopped_reason`.** When the job ended early (`insufficient_credits`, `max_pages`, `time_limit`, `storage_limit`, `cancelled`), store the reason in `failures.json` with a note that pages still queued or not yet discovered were never fetched and are not itemized. Fix the cause (top up credits, raise `max_pages`, ...) before the next round.
+
+Resume rules:
+
+- Submit only the URLs in `failures.json` to `POST /api/v1/extract/batch` - never start a second crawl for them. Filter by `category` when needed (for example retry only `failed` and leave robots-skipped URLs alone).
+- Merge the `202`'s `invalid_urls` into the next failure list (as `failed`, with the API's error); those URLs never ran and were not billed. If every URL is invalid the answer is `400`, no job is created, and the existing list must be kept intact.
+- Every crawl and batch POST sends an `Idempotency-Key`, generated deterministically from the request when one is not supplied, so a retried request returns the original job instead of doubling it.
+- Apply the batch results to the same directory: recovered URLs leave the failure list and land in their own page file; still-failed and still-skipped URLs stay in their categories. Results expire three days after a job finishes, so finalize promptly.
+
+```bash
+# Start the crawl and finalize whatever it gets, even after an early stop
+python examples/resumable_crawl.py crawl --url https://hono.dev/docs \
+    --max-pages 50 --include-paths /docs --out ./hono-docs
+
+# Later: batch only the URLs that failed or were skipped
+python examples/resumable_crawl.py resume --failures ./hono-docs/failures.json
+```
+
 ### Webhooks
 
 Set `webhook_url` and the `202` returns `webhook_secret` (`whsec_...`) once. When the job completes, fails or is cancelled, Scavio POSTs `{ "event": "completed" | "failed" | "cancelled", "job": { ...the status summary... }, "sent_at": "..." }` with headers `Scavio-Signature`, `Scavio-Event` and `Scavio-Job-Id`. Results are not in the body - read them from `job.status_url`. A delivery without a 2xx within 10 seconds is retried 30 seconds and 5 minutes later. Verify every delivery over the raw body:

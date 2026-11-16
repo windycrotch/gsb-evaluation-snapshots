@@ -219,7 +219,7 @@ Get the key at [scavio.dev](https://scavio.dev). The free tier is 50 credits on 
 | --- | --- |
 | `url-to-markdown-api` | Any URL to clean Markdown, plain text, or raw HTML for prompts and RAG |
 | `website-screenshot-api` | Full-page PNG of any public URL as an inline base64 image |
-| `website-crawler-api` | Crawl a whole site to Markdown, map every URL from its sitemap, and batch extract up to 1,000 URLs as one job |
+| `website-crawler-api` | Crawl a whole site to Markdown, map every URL from its sitemap, and batch extract up to 1,000 URLs as one job; resumable finalization keeps every fetched page on disk and re-fetches only the failure list (`examples/resumable_crawl.py`) |
 
 ### Umbrella
 
