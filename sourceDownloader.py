@@ -9,6 +9,7 @@ Respects server trust boundaries.
 """
 
 import os
+import re
 import sys
 import argparse
 import hashlib
@@ -25,6 +26,27 @@ from bs4 import BeautifulSoup, FeatureNotFound
 USER_AGENT = "Mozilla/5.0 (Educational Website Crawler)"
 TIMEOUT = 10
 visited_lock = threading.Lock()
+visited = set()
+processed = set()
+
+
+def claim_url(url: str) -> bool:
+    """Atomically check whether `url` was already seen and register it if not.
+
+    Returns True exactly once per URL per run — the caller that gets True
+    owns the URL and is responsible for enqueueing/processing it.
+    """
+    with visited_lock:
+        if url in visited:
+            return False
+        visited.add(url)
+        return True
+
+
+def mark_processed(url: str) -> None:
+    """Record that `url` was actually processed (fetched and handled)."""
+    with visited_lock:
+        processed.add(url)
 
 
 # -----------------------------
@@ -249,12 +271,12 @@ def rewrite_links(
 
 def crawl_page(args):
     url, depth, base_url, project_dir, min_depth, max_depth, no_download = args
-    
-    with visited_lock:
-        if url in visited or depth > max_depth:
-            return []
-        visited.add(url)
-    
+
+    # The URL was already atomically claimed via claim_url() before being
+    # enqueued, so it is guaranteed to be processed exactly once per run.
+    if depth > max_depth:
+        return []
+
     try:
         response = safe_request(url)
         content_type = response.headers.get("Content-Type", "")
@@ -268,6 +290,7 @@ def crawl_page(args):
             os.makedirs(os.path.dirname(local_path), exist_ok=True)
             with open(local_path, "wb") as f:
                 f.write(response.read())
+            mark_processed(url)
             print(f"[✓] Saved asset: {url}")
             return []
 
@@ -301,8 +324,10 @@ def crawl_page(args):
                 with open(page_path, "w", encoding="utf-8", errors="ignore") as f:
                     f.write(str(soup))
 
+            mark_processed(url)
             print(f"[✓] Analyzed (depth {depth}): {url}")
         else:
+            mark_processed(url)
             print(f"[•] Crawled only (depth {depth}): {url}")
 
         return new_links
@@ -313,14 +338,26 @@ def crawl_page(args):
 
 
 def crawl_website(base_url: str, min_depth: int, max_depth: int, export_urls: bool = False, no_download: bool = False, threads: int = 1):
-    global visited
+    global visited, processed
     visited = set()
-    
+    processed = set()
+
     parsed = urlparse(base_url)
-    project_dir = parsed.netloc.replace(".", "_")
+    # Sanitize every character that is invalid in directory names (e.g. the
+    # ":" in "host:port") so local sites can be crawled on any platform.
+    project_dir = re.sub(r"[^A-Za-z0-9_-]", "_", parsed.netloc)
     os.makedirs(project_dir, exist_ok=True)
 
-    queue = deque([(base_url, 0)])
+    queue = deque()
+    if claim_url(base_url):
+        queue.append((base_url, 0))
+
+    def enqueue_new_links(results):
+        # Links returned by workers must pass the same atomic dedup check
+        # before being queued, so no URL is ever submitted twice.
+        for link, d in results:
+            if d <= max_depth and claim_url(link):
+                queue.append((link, d))
 
     while queue:
         batch = []
@@ -335,22 +372,21 @@ def crawl_website(base_url: str, min_depth: int, max_depth: int, export_urls: bo
             with ThreadPoolExecutor(max_workers=len(batch)) as executor:
                 futures = [executor.submit(crawl_page, (url, depth, base_url, project_dir, min_depth, max_depth, no_download)) for url, depth in batch]
                 for future in as_completed(futures):
-                    for link, depth in future.result():
-                        if link not in visited and depth <= max_depth:
-                            queue.append((link, depth))
+                    enqueue_new_links(future.result())
         else:
             for url, depth in batch:
                 results = crawl_page((url, depth, base_url, project_dir, min_depth, max_depth, no_download))
-                for link, d in results:
-                    if link not in visited and d <= max_depth:
-                        queue.append((link, d))
+                enqueue_new_links(results)
 
     if export_urls:
+        # Written only after every crawl task has finished; contains the
+        # deduplicated, sorted set of URLs actually processed this run.
+        exported = sorted(processed)
         urls_file = os.path.join(project_dir, "urls.txt")
         with open(urls_file, "w", encoding="utf-8") as f:
-            for url in sorted(visited):
+            for url in exported:
                 f.write(url + "\n")
-        print(f"[✓] Exported {len(visited)} URLs to {urls_file}")
+        print(f"[✓] Exported {len(exported)} URLs to {urls_file}")
 
 
 # -----------------------------
@@ -392,6 +428,14 @@ def main():
     )
 
     args = parser.parse_args()
+
+    # Avoid crashing on consoles whose encoding (e.g. GBK) cannot render
+    # the status symbols; fall back to replacement characters instead.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, OSError):
+            pass
 
     if not args.url.startswith(("http://", "https://")):
         print("[!] Invalid URL format.")
