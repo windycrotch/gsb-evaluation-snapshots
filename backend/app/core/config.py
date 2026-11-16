@@ -1,0 +1,76 @@
+"""
+AAA Engine Core Configuration
+Centralized configuration management with environment variable support.
+"""
+
+try:
+    from pydantic_settings import BaseSettings
+except ImportError:
+    from pydantic import BaseModel as BaseSettings
+
+from functools import lru_cache
+
+
+class Settings(BaseSettings):
+    """Application settings loaded from environment variables."""
+
+    # Application
+    APP_NAME: str = "AAA Engine"
+    APP_VERSION: str = "1.0.0"
+    DEBUG: bool = False
+
+    # Database
+    DATABASE_URL: str = "sqlite:///./aaa_engine.db"
+
+    # Security - No fallback defaults for secrets in production
+    L3_HMAC_SECRET: str | None = None
+
+    # Model Configuration
+    WHISPER_MODEL: str = "small"  # "small" for better accuracy (was "base")
+
+    # Thresholds (configurable via environment)
+    L2_SPOOF_THRESHOLD: float = 0.7  # Raised to reduce false positives (was 0.5)
+    L1_SIMILARITY_THRESHOLD: float = 0.35  # Lowered to reduce false rejections (was 0.5)
+    ASR_PHRASE_THRESHOLD: float = 0.6
+
+    # Challenge Configuration
+    CHALLENGE_TTL_SECONDS: int = 90
+
+    # Rate Limiting (increased for development/testing)
+    RATE_LIMIT_CHALLENGES: str = "60/minute"
+    RATE_LIMIT_VERIFY: str = "30/minute"
+    RATE_LIMIT_ENROLL: str = "30/minute"
+
+    # CORS - explicit origins only, no wildcards allowed
+    # In production, set this to the actual frontend URLs
+    CORS_ORIGINS: str = "http://localhost:5173,http://localhost:3000,https://aaa-frontend.onrender.com"
+
+    class Config:
+        env_file = ".env"
+        case_sensitive = True
+        extra = "ignore"  # Allow unknown env vars to pass through
+
+
+@lru_cache
+def get_settings() -> Settings:
+    """Get cached settings instance."""
+    return Settings()
+
+
+def validate_production_config() -> list[str]:
+    """
+    Validate configuration for production use.
+    Returns list of validation errors.
+    """
+    settings = get_settings()
+    errors = []
+
+    # Critical: HMAC secret must be set in production
+    if not settings.DEBUG and not settings.L3_HMAC_SECRET:
+        errors.append("L3_HMAC_SECRET must be set in production")
+
+    # Warn if using SQLite in production
+    if not settings.DEBUG and settings.DATABASE_URL.startswith("sqlite"):
+        errors.append("SQLite should not be used in production")
+
+    return errors
