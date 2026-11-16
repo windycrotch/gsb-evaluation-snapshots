@@ -25,6 +25,19 @@
  * over hundreds of metres, so surf heard from a road forty metres up is dull
  * as well as quiet, and opening the low-pass as the road drops toward the
  * water is most of what sells the descent.
+ *
+ * Two things are deliberately unlike the rest of the mix. The side the water
+ * is on is only as trustworthy as the bearing it arrived with, so the caller
+ * supplies a sideConfidence alongside oceanSide: when the road is mid-hairpin
+ * and the projected bearing is noise, the surf is pulled toward the centre of
+ * the image rather than committed to whichever side the lagging scalar was
+ * passing through. It re-expands when the bearing settles again. And a jump
+ * is a change of medium for the ear, not just for the tyres: the surf and the
+ * sea air step back while the car is off the ground — audibly, but nowhere
+ * near silence — and gulls stop entirely, because a gull call from a car that
+ * is not in contact with the world is the thing that makes a jump sound
+ * canned. Both are smoothed here, with the same setTargetAtTime discipline as
+ * every other parameter.
  */
 import { clamp, lerp, approach, smoothstep } from '../core/util.js';
 import { rng, rand } from '../core/rng.js';
@@ -212,11 +225,24 @@ export class Ambience {
     this.swell = 0;
     this.near = 0;
     this.side = 0;
+    /* How much the side estimate is trusted, and how far into a jump the car
+       is. Both are smoothed here rather than read straight off the state
+       struct: a bearing that is ambiguous for a single frame must not snap the
+       image, and `airborne` can chatter when the car skims a crest. */
+    this.conf = 1;
+    this.air = 0;
+    this.gullGate = 1;
+    /* Last known shore geometry, for callers that hand this class a partial
+       state struct rather than going through Audio's own latch. A missing
+       field must never turn into NaN — a NaN AudioParam is silence at best
+       and a throw at worst. */
+    this.shore = { distance: 70, drop: 40, side: 0 };
   }
 
   /**
    * @param {number} dt
-   * @param {object} s  shoreDistance / shoreDrop / oceanSide / speed / openness
+   * @param {object} s  shoreDistance / shoreDrop / oceanSide / sideConfidence /
+   *                    speed / openness / airborne
    * @param {number} t  when, on the engine's clock
    */
   update(dt, s, t) {
@@ -226,9 +252,21 @@ export class Ambience {
     /* Distance to the water as the sound travels: along the ground and down
        the cliff. The drop counts for less than the horizontal run because the
        road is looking straight at the water rather than past it — the cliff
-       does not shadow what is directly below. */
-    const flat = Math.max(0, s.shoreDistance);
-    const drop = Math.max(0, s.shoreDrop);
+       does not shadow what is directly below.
+     *
+     * Latched. Audio.update() latches the three shore fields before they get
+     * here, but this class is also driven directly by the offline harness and
+     * has to survive a partial struct on its own: an absent field means "no
+     * news", not "zero", and only a finite value is accepted so a NaN out of a
+     * track query in the middle of a tunnel bounces off instead of poisoning
+     * every filter downstream. */
+    const sh = this.shore;
+    if (Number.isFinite(s.shoreDistance)) sh.distance = Math.max(0, s.shoreDistance);
+    if (Number.isFinite(s.shoreDrop)) sh.drop = Math.max(0, s.shoreDrop);
+    if (Number.isFinite(s.oceanSide)) sh.side = clamp(s.oceanSide, -1, 1);
+
+    const flat = sh.distance;
+    const drop = sh.drop;
     const dist = Math.hypot(flat, drop * 0.62);
 
     /* Inverse-square would fade the surf to nothing within a hundred metres
@@ -252,6 +290,19 @@ export class Ambience {
     const fast = smoothstep(18, 62, s.speed);
     const duck = lerp(1, 0.45, fast);
 
+    /* Off the ground, the world gets quieter for the ear as well as for the
+       tyres — but not silent, and not the same hard gate the tyres get.
+       Airborne, there is nothing between the car and the coast, so the surf is
+       arguably closer; what actually changes is that the whole bed is no
+       longer masked by road noise, and a surf layer held at full level through
+       a jump reads as a backing track that forgot the car left the ground.
+       The dip is deliberately shallow — about 3.5 dB, measured on the layer
+       and unchanged by the master chain — arrives quickly, and comes back over
+       the best part of a second so the landing does not slam the ocean back
+       in. Gulls are the exception and get a real gate: see below. */
+    this.air = approach(this.air, s.airborne ? 1 : 0, s.airborne ? 6.5 : 2.4, dt);
+    const airDuck = lerp(1, 0.66, this.air);
+
     /* Air absorption. Forty metres up and a hundred out, surf is a rumble;
        from the roadside at ten metres it hisses. */
     this.boom.tune(1, 150 + n * 110, t, 0.5);
@@ -262,11 +313,11 @@ export class Ambience {
 
     const swell = 1 + this.swell * 0.14;
     set(this.surf.gain, 1, 0.1);
-    set(this.boom.lvl.gain, 0.0001 + 0.34 * Math.pow(n, 0.75) * swell * duck);
-    set(this.wash.lvl.gain, 0.0001 + 0.26 * n * swell * duck);
+    set(this.boom.lvl.gain, 0.0001 + 0.34 * Math.pow(n, 0.75) * swell * duck * airDuck);
+    set(this.wash.lvl.gain, 0.0001 + 0.26 * n * swell * duck * airDuck);
     /* Foam is the first thing distance takes away, so it is squared: audible
        from the roadside, gone from the top of the cliff. */
-    set(this.foam.lvl.gain, 0.0001 + 0.17 * n * n * swell * duck);
+    set(this.foam.lvl.gain, 0.0001 + 0.17 * n * n * swell * duck * airDuck);
 
     /* Which side the water is on, and how wide each band is allowed to be.
      *
@@ -274,11 +325,32 @@ export class Ambience {
      * band is placed hardest and the boom stays near the middle. The two
      * sources inside each band are not placed at the same point — they
      * straddle the nominal direction — which is what keeps the water a body of
-     * sound off to one side rather than a hard-panned loop. */
-    this.side = approach(this.side, clamp(s.oceanSide || 0, -1, 1), 2.2, dt);
+     * sound off to one side rather than a hard-panned loop.
+     *
+     * The bearing is only trusted as far as the caller says it should be.
+     * `oceanSide` is a scalar that follows the car's heading, and on a
+     * switchback it is briefly pointing at the wrong side while the projection
+     * catches up — the pan sweeping through the whole stereo field and out the
+     * other side, which is the one artefact that makes a wide surf bed read as
+     * a pan effect rather than as a place. So the bearing is scaled by a
+     * smoothed confidence: at 1 the bands sit fully to the side, at 0 they
+     * collapse to the centre with their width intact (the two halves of each
+     * pair stay apart from each other, which is what keeps the correlation
+     * low), and in between they open and close continuously. Losing
+     * confidence is faster than regaining it, because the reason to collapse
+     * is a wrong image now and the reason to re-expand is a right one that
+     * should not flicker.
+     */
+    const confIn = clamp(Number.isFinite(s.sideConfidence) ? s.sideConfidence : 1, 0, 1);
+    this.conf = approach(this.conf, confIn, confIn < this.conf ? 8 : 1.8, dt);
+    this.side = approach(this.side, sh.side, 2.2, dt);
+    /* Unknown side is not "left" — it is the centre. `oceanSide: 0` therefore
+       feeds the same collapse as a low confidence, which is what makes the
+       hairpin case continuous instead of a hard cut to one channel. */
+    const side = this.side * this.conf;
     const place = (b, centre, spread) => {
-      set(b.pans[0].pan, clamp(this.side * centre - spread, -1, 1), 0.4);
-      set(b.pans[1].pan, clamp(this.side * centre + spread, -1, 1), 0.4);
+      set(b.pans[0].pan, clamp(side * centre - spread, -1, 1), 0.4);
+      set(b.pans[1].pan, clamp(side * centre + spread, -1, 1), 0.4);
     };
     place(this.boom, 0.18, 0.52);
     place(this.wash, 0.50, 0.46);
@@ -287,24 +359,38 @@ export class Ambience {
     /* Sea air. Onshore, so it is stronger when the ocean is close and when
        the road is exposed; the low-pass opens a little with the car's own
        speed because the relative airflow does rise, but the level does not —
-       that is surface.js's job and doubling it up is how you get mud. */
+       that is surface.js's job and doubling it up is how you get mud. It
+       shares the airborne dip with the surf, because a jump changes what the
+       ear is in, not just where the water is. */
     const exposure = lerp(0.55, 1, clamp(s.openness ?? lerp(0.4, 1, n), 0, 1));
-    const air = 0.052 * exposure * lerp(1, 0.5, fast);
+    const air = 0.052 * exposure * lerp(1, 0.5, fast) * airDuck;
     set(this.seaWind.gain, 0.0001 + air);
-    for (const side of [this.airL, this.airR]) {
-      set(side.lo.frequency, 900 + s.speed * 9, 0.4);
-      set(side.hi.frequency, 200 + n * 60, 0.4);
+    for (const vent of [this.airL, this.airR]) {
+      set(vent.lo.frequency, 900 + s.speed * 9, 0.4);
+      set(vent.hi.frequency, 200 + n * 60, 0.4);
     }
 
     /* Gulls. Gated on being near the water, on not going fast enough to drown
        them, and on the clock — and the interval is redrawn every time, so the
-       calls never fall into a rhythm. */
+       calls never fall into a rhythm.
+     *
+     * Airborne is a hard gate rather than a closed door: refusing to schedule
+     * a call is not enough, because a call placed a moment before take-off
+     * would still be ringing a second into the jump. The gull bus itself is
+     * pulled to zero while the car is off the ground, fast enough that the
+     * silence arrives with the wheels leaving and slowly enough not to click,
+     * and it comes back on the same ramp the surf does. This is the one layer
+     * that is *completely* silent in the air, and it is the right one: a call
+     * implies a bird near the car, and the car is not where it was. */
+    this.gullGate = approach(this.gullGate, s.airborne ? 0 : 1,
+      s.airborne ? 40 : 4, dt);
+    set(this.gull.gain, 0.9 * this.gullGate, 0.02);
     this.gullTimer -= dt;
     const canCall = n > 0.22 && s.speed < 46 && !s.airborne;
     if (this.gullTimer <= 0) {
       this.gullTimer = r.f(GULL_MIN, GULL_MAX) * lerp(1.8, 1.0, n);
       if (canCall) {
-        this.cry(t, clamp(this.side * r.f(0.2, 0.9) + r.f(-0.25, 0.25), -1, 1),
+        this.cry(t, clamp(side * r.f(0.2, 0.9) + r.f(-0.25, 0.25), -1, 1),
           0.16 * n * (1 - smoothstep(20, 46, s.speed)));
       }
     }

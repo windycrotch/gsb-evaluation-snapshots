@@ -29,6 +29,11 @@
  *   shoreDrop      metres the road sits above the water.
  *   oceanSide      -1 water to the left, +1 to the right, 0 unknown. Car
  *                  relative, so it flips when the road doubles back.
+ *   sideConfidence 0..1, how much the oceanSide bearing is to be trusted —
+ *                  omit or pass 1 when it is a real measurement, less when the
+ *                  road is mid-hairpin and the projection is unreliable. The
+ *                  surf collapses toward the centre of the image as this
+ *                  falls and re-expands when it recovers.
  *   openness       0..1, exposed headland to sheltered cutting. Optional even
  *                  among the optional ones — it is derived from the shore
  *                  distance if absent.
@@ -82,12 +87,13 @@ export class Audio {
     this._ownsContext = false;
     this._airborne = false;
     this._duck = 0;
+    this._duckHit = null;
     this._speed = 0;
     /* Defaults chosen so the game sounds like a coast road before anything is
        wired: a road forty metres above the water with the sea somewhere off to
        the left is the setting, and a state struct that omits the new fields
        should get the setting rather than get silence. */
-    this._shore = { distance: 70, drop: 40, side: -1 };
+    this._shore = { distance: 70, drop: 40, side: -1, conf: 1 };
   }
 
   /** Create and resume the context, building the graph on first call. Safe to
@@ -342,15 +348,57 @@ export class Audio {
     this.impacts.onFire = (t, s) => {
       const depth = 1 - 0.5 * s;
       const g = this.duck.gain;
-      /* cancelAndHoldAtTime, where it exists, is the only way to interrupt a
-         running ramp without the parameter jumping back to whatever value was
-         last set — which, with hits landing on top of each other, is an
-         audible click on the second one. */
-      if (g.cancelAndHoldAtTime) g.cancelAndHoldAtTime(t);
-      else { g.cancelScheduledValues(t); g.setValueAtTime(g.value, t); }
+      const tau = lerp(0.06, 0.16, s);
+      /* Start the dip from the value the duck actually has at this instant,
+         computed rather than read.
+       *
+       * The obvious implementation — cancelAndHoldAtTime(t) and then ramp to
+       * the new depth — has a hole in it that only opens on the very first hit
+       * of a run. On a parameter with no scheduled events, cancelAndHoldAtTime
+       * leaves nothing behind to anchor the following ramp, and
+       * linearRampToValueAtTime then interpolates from the last event *before*
+       * the ramp — of which there is none, so the ramp starts at time zero.
+       * The whole mix quietly fades to the dip depth over the entire run up to
+       * the first collision and only comes back afterwards: a 6 dB loss of
+       * level, arriving so gradually that it reads as the master having been
+       * set wrong rather than as a bug. Measured in isolation it was
+       * unmistakable — 0.5 DC on the bus read 0.29 by the time the hit
+       * landed — and it was invisible to every existing test because they all
+       * measure windows long after the first impact has already passed.
+       *
+       * Reading `.value` does not fix it either: outside a rendering pass it
+       * returns the intrinsic value, not the automated one, so on the second
+       * overlapping hit it would snap the gain back to 1 and click. The
+       * automation is entirely ours, so its value at any instant is known
+       * exactly: on the ramp for the first 12 ms, then an exponential return
+       * to unity. `_duckValue` is that model, and using it means the scheduled
+       * shape is right whether the parameter has history or not. */
+      const from = this._duckValue(t);
+      g.cancelScheduledValues(t);
+      g.setValueAtTime(from, t);
       g.linearRampToValueAtTime(depth, t + 0.012);
-      g.setTargetAtTime(1, t + 0.05, lerp(0.06, 0.16, s));
+      g.setTargetAtTime(1, t + 0.05, tau);
+      this._duckHit = { t, from, depth, tau };
     };
+  }
+
+  /**
+   * The sidechain gain at time `t`, from the automation this class scheduled.
+   *
+   * Exactly equivalent to reading the AudioParam, without depending on which
+   * value a getter returns between rendering passes.
+   */
+  _duckValue(t) {
+    const h = this._duckHit;
+    if (!h) return 1;
+    if (t <= h.t) return h.from;
+    const rampEnd = h.t + 0.012;
+    if (t <= rampEnd) return lerp(h.from, h.depth, (t - h.t) / 0.012);
+    /* The hold between ramp and setTarget: the target fires at t + 0.05, so
+       the gain sits at `depth` until then. */
+    const targetAt = h.t + 0.05;
+    if (t <= targetAt) return h.depth;
+    return 1 + (h.depth - 1) * Math.exp(-(t - targetAt) / h.tau);
   }
 
   /** Suspend. Cheap to reverse — start() picks the same graph back up. */
@@ -419,6 +467,11 @@ export class Audio {
     if (state.shoreDistance != null) sh.distance = Math.max(0, state.shoreDistance);
     if (state.shoreDrop != null) sh.drop = Math.max(0, state.shoreDrop);
     if (state.oceanSide != null) sh.side = clamp(state.oceanSide, -1, 1);
+    /* Confidence in that bearing. Latched like the rest, but its default is
+       "trust it", not "back to the setup": a caller that never learned the
+       field should get the old fully-placed surf rather than a permanently
+       centred one. */
+    if (state.sideConfidence != null) sh.conf = clamp(state.sideConfidence, 0, 1);
 
     this.ambience.update(step, {
       speed,
@@ -426,6 +479,7 @@ export class Audio {
       shoreDistance: sh.distance,
       shoreDrop: sh.drop,
       oceanSide: sh.side,
+      sideConfidence: sh.conf,
       openness: state.openness,
     }, t);
 

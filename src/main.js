@@ -2049,12 +2049,26 @@ class Game {
     const f = this.track.frameAt(p.s);
     const right = f.flatRight ?? f.right;
     const side = c.seaSideAt(p.s);
+    /* How much to believe that projection.
+     *
+     * The side is read off `right · car.right`, and the dot product is only a
+     * bearing while the car is roughly pointing along the road. Through a
+     * hairpin, sideways with the handbrake on, or after a spin the car's right
+     * vector swings away from the track's and the same dot product sweeps
+     * through zero — which is not "the sea is now dead ahead", it is "the
+     * question does not currently have a side". Squaring the magnitude makes
+     * the ambiguity fall away quadratically rather than linearly, so ordinary
+     * cornering keeps full confidence and only genuine sideways states lose
+     * it; the floor of 0.15 keeps a slow drifting car from being treated as
+     * perfectly blind. */
+    const align = Math.abs(right.dot(p.right));
     return {
       shoreDistance: shore,
       // Pythagoras on the two distances the world exposes; there is no
       // separate sea-level query and this avoids adding one.
       shoreDrop: Math.sqrt(Math.max(0, water * water - shore * shore)),
       oceanSide: clamp(right.dot(p.right) * side, -1, 1),
+      sideConfidence: clamp(Math.max(0.15, align * align), 0, 1),
     };
   }
 
