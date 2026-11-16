@@ -1,25 +1,25 @@
 import { useContext, memo } from "react";
-import { Context } from "../Provider";
-import { soundFiles } from "../constants/config";
+import AppContext from "../context";
 import Track from "./Track";
 
 const TrackList = ({ currentStepID }) => {
   const {
     sequence: { trackList, noteCount },
-  } = useContext(Context);
+  } = useContext(AppContext);
+
   const content = trackList.map((track, trackID) => {
-    const { title, onNotes, soundFile } = track;
-    const soundFilePath = soundFiles[soundFile];
+    const { title, onNotes } = track;
 
     return (
       <Track
-        key={title}
-        trackID={+trackID}
+        // Include the track index in the key so a sequence switch remounts
+        // each track and its UI state is rebuilt from the new pattern.
+        key={`${title}-${trackID}`}
+        trackID={trackID}
         currentStepID={currentStepID}
         title={title}
         noteCount={noteCount}
         onNotes={onNotes}
-        soundFilePath={soundFilePath}
       />
     );
   });

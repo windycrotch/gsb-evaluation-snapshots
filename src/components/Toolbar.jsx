@@ -1,33 +1,20 @@
-import { useContext, memo } from "react";
+import { memo, useContext } from "react";
 import { sequenceList } from "../constants/config";
-import { Context } from "../Provider";
+import AppContext from "../context";
 import "./Toolbar.css";
 
-const ToolBar = ({
-  setStartTime,
-  setPastLapse,
-  setBPM,
-  isSequencePlaying,
-  startTime,
-  BPM,
-}) => {
-  const {
-    sequence: { id: selectedSequenceID },
-    selectSequence,
-  } = useContext(Context);
+const ToolBar = () => {
+  const { sequence, selectSequence, bpm, setBPM, frame, play, pause, stop } =
+    useContext(AppContext);
+  const selectedSequenceID = sequence.id;
+  const isSequencePlaying = frame ? frame.isPlaying : false;
 
   function togglePlayback() {
     if (isSequencePlaying) {
-      setPastLapse((l) => l + performance.now() - startTime);
-      setStartTime(null);
+      pause();
     } else {
-      setStartTime(performance.now());
+      play();
     }
-  }
-
-  function stopPlayback() {
-    setPastLapse(0);
-    setStartTime(null);
   }
 
   function updateBPM(e) {
@@ -37,8 +24,9 @@ const ToolBar = ({
   return (
     <nav className="toolbar">
       <button
+        type="button"
         className="form_element button_stop"
-        onClick={stopPlayback}
+        onClick={stop}
         aria-label="Stop"
       >
         <svg width="14" height="14" viewBox="0 0 14 14">
@@ -52,6 +40,7 @@ const ToolBar = ({
         </svg>
       </button>
       <button
+        type="button"
         className="form_element button_play_pause"
         onClick={togglePlayback}
         aria-label="Play / Pause"
@@ -79,7 +68,7 @@ const ToolBar = ({
         className="form_element input_bpm"
         id="bpm"
         type="text"
-        value={BPM}
+        value={bpm}
         onChange={updateBPM}
       />
       <label className="label_bpm" htmlFor="bpm">

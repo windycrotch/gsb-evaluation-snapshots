@@ -1,26 +1,38 @@
 import { useRef, useLayoutEffect, memo } from "react";
 import "./PlayHead.css";
 
+/**
+ * Playhead position is driven by the transport snapshot:
+ *   (currentStepID + progressInStep) / totalSteps
+ * It stays frozen on the current step while paused and returns to the start
+ * when stopped (currentStepID === null).
+ */
 const PlayHead = ({
   notesAreaWidthInPixels,
-  timePerSequence,
-  totalLapsedTime,
+  currentStepID,
+  progressInStep,
+  totalSteps,
 }) => {
-  const PlayHead = useRef(null);
+  const playHeadRef = useRef(null);
 
   useLayoutEffect(() => {
-    let progress = Math.min(
-      (totalLapsedTime % timePerSequence) / timePerSequence,
-      1
-    );
+    const step = currentStepID === null ? 0 : currentStepID;
+    const fraction =
+      currentStepID === null ? 0 : (step + progressInStep) / totalSteps;
+    const progress = Math.min(fraction, 1);
 
-    PlayHead.current.style.transform =
+    playHeadRef.current.style.transform =
       "translate3d(" +
       (progress * notesAreaWidthInPixels).toFixed(2) +
       "px, 0, 0px)";
-  }, [notesAreaWidthInPixels, timePerSequence, totalLapsedTime]);
+  }, [
+    notesAreaWidthInPixels,
+    currentStepID,
+    progressInStep,
+    totalSteps,
+  ]);
 
-  return <div className="play_head" ref={PlayHead}></div>;
+  return <div className="play_head" ref={playHeadRef}></div>;
 };
 
 export default memo(PlayHead);
