@@ -29,6 +29,7 @@ describe( "Tempo update action", () => {
     });
 
     afterEach(() => {
+        vi.clearAllMocks();
         vi.restoreAllMocks();
     });
 

@@ -46,6 +46,7 @@ describe( "Vuex song module", () => {
     };
 
     afterEach(() => {
+        vi.clearAllMocks();
         vi.restoreAllMocks();
     });
 

@@ -10,6 +10,7 @@ type RecordCallback = ( recordedAudio: Blob ) => void;
 export default class OutputRecorder
 {
     private recording: boolean;
+    private exporting: boolean;
     private type: string;
     private callback: RecordCallback;
     private node: ScriptProcessorNode;
@@ -21,6 +22,7 @@ export default class OutputRecorder
         const context: BaseAudioContext = source.context;
 
         this.recording = false;
+        this.exporting = false;
         this.type      = type;
         this.callback  = callback;
 
@@ -29,6 +31,7 @@ export default class OutputRecorder
 
         this.worker = new RecorderWorker();
         this.worker.onmessage = ( e: MessageEvent ): void => {
+            this.exporting = false;
             this.callback?.( e.data );
         };
 
@@ -43,12 +46,15 @@ export default class OutputRecorder
             if ( !this.recording ) {
                 return;
             }
+            // record all channels provided by the input (e.g. 1 for mono, 2 for stereo)
+            const { inputBuffer } = e;
+            const buffer: Float32Array[] = [];
+            for ( let channel = 0; channel < inputBuffer.numberOfChannels; ++channel ) {
+                buffer.push( inputBuffer.getChannelData( channel ));
+            }
             this.worker.postMessage({
                 command: "record",
-                buffer: [
-                    e.inputBuffer.getChannelData( 0 ),
-                    e.inputBuffer.getChannelData( 1 )
-                ]
+                buffer
             });
         };
         source.connect( this.node );
@@ -64,12 +70,18 @@ export default class OutputRecorder
     }
 
     dispose(): void {
-        this.worker.postMessage({ command: "clear" });
-        this.worker.terminate();
+        this.worker?.postMessage({ command: "clear" });
+        this.worker?.terminate();
         this.worker = null;
     }
 
     export( type?: string ): void {
+        if ( this.exporting || !this.worker ) {
+            // an export is already pending (or the recorder has been disposed),
+            // ignore to prevent generating duplicate files for a single recording
+            return;
+        }
+        this.exporting = true;
         this.worker.postMessage({
             command: "exportWAV",
             type: type || this.type

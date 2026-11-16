@@ -19,6 +19,7 @@ vi.mock( "@/model/factories/sample-factory", () => ({
 
 describe( "Vuex sample module", () => {
     afterEach(() => {
+        vi.clearAllMocks();
         vi.restoreAllMocks();
     });
 

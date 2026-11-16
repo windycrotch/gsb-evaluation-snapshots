@@ -30,6 +30,7 @@ describe( "Transpose action", () => {
     });
 
     afterEach(() => {
+        vi.clearAllMocks();
         vi.restoreAllMocks();
     });
 

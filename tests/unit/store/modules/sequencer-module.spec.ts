@@ -63,6 +63,7 @@ describe( "Vuex sequencer module", () => {
 
     afterEach(() => {
         vi.useRealTimers();
+        vi.clearAllMocks();
         vi.restoreAllMocks();
     });
 
