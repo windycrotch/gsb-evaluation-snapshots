@@ -1,0 +1,38 @@
+# Root pyproject — tool config only. The repo is a monorepo of individually-
+# installable packages (libs/core, libs/connectors/*, libs/meta, cli); each
+# carries its own pyproject.toml with its own [project] metadata. The
+# umbrella ``genblaze`` package ships from libs/meta — NOT from here.
+#
+# A stub [project] block used to live here (name="genblaze" version="0.1.0",
+# empty deps), which caused ``pip install -e .`` from the repo root to
+# shadow the real umbrella with an extras-less 0.1.0 stub. See CHANGELOG
+# for the release that removed it. Use ``make install-dev`` for editable
+# monorepo dev installs.
+#
+# [build-system] is retained so PEP 517 frontends (pip, build, etc.) that
+# inspect this file find a declared backend. Without a [project] block
+# hatchling errors out cleanly on any build attempt — the desired outcome.
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["libs/core/tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 99
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "S"]
+ignore = [
+    "S101",  # assert is fine in tests
+    "S603",  # subprocess without shell=True is fine
+    "S607",  # partial path to executable is fine
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101", "S106"]
+"libs/core/tests/**/*.py" = ["S101", "S106"]
+"libs/connectors/**/tests/**/*.py" = ["S101", "S106"]

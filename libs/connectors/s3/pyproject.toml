@@ -1,0 +1,74 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "genblaze-s3"
+version = "0.3.7"
+description = "S3-compatible storage backend for genblaze (B2, R2, MinIO, AWS)"
+authors = [{name = "Jeronimo De Leon", email = "jdeleon@backblaze.com"}]
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Typing :: Typed",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia",
+    "Topic :: Software Development :: Libraries",
+]
+keywords = ["genblaze", "ai", "media", "manifest", "provenance", "c2pa-ready", "genai", "pipeline", "s3", "backblaze", "b2", "storage", "object-storage"]
+
+dependencies = [
+    "genblaze-core>=0.3.4,<0.4",
+    # <2: bounded-major convention (#61) — caps below the next major so a
+    # future boto3 release can't silently break this connector at resolve
+    # time.
+    "boto3>=1.28,<2",
+    # backend.py imports botocore.exceptions directly (unguarded, module load).
+    # boto3 always ships it, but declaring the direct import is honest and lets
+    # deptry verify it. Floor tracks boto3>=1.28's botocore baseline; safe
+    # because pip propagates boto3's exact botocore pin (a `--no-deps` install
+    # could still skew it, but that bypasses all our gates anyway). <2 caps
+    # below the next major, same as boto3 above (#61).
+    "botocore>=1.31,<2",
+]
+
+[project.urls]
+Homepage = "https://github.com/backblaze-labs/genblaze"
+Documentation = "https://github.com/backblaze-labs/genblaze"
+Repository = "https://github.com/backblaze-labs/genblaze"
+Issues = "https://github.com/backblaze-labs/genblaze/issues"
+
+[project.optional-dependencies]
+async = [
+    # Phase 3 of the storage-backend hardening tranche — native async via
+    # aiobotocore-backed aioboto3. Keep the upper bound conservative so
+    # an aioboto3 major bump doesn't silently land breaking changes for
+    # users with floating extras pins.
+    "aioboto3>=12,<16",
+    # async_backend.py imports aiobotocore.config.AioConfig directly. aioboto3
+    # always pulls it, but the direct import is declared so deptry can verify
+    # it; aioboto3 pins the exact aiobotocore (==2.7.0 at our 12.0 floor), so no
+    # resolver conflict — the floor just matches that true minimum. <3 caps
+    # below the next major (#61); aioboto3 above already pins the exact
+    # aiobotocore it needs, so this cap is a backstop, not the binding
+    # constraint.
+    "aiobotocore>=2.7,<4",
+]
+dev = [
+    "pytest>=7.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["genblaze_s3"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.deptry]
+# Treat the `dev` extra as dev-only tooling so deptry doesn't flag pytest as
+# an unused declared dep (DEP002).
+optional_dependencies_dev_groups = ["dev"]

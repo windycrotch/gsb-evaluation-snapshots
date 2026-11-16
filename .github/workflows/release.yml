@@ -1,0 +1,558 @@
+name: Release
+
+# Two entry points:
+#   1. release: published   — production. Tag must match the latest CHANGELOG.md
+#                             wave header (e.g. tag "v0.3.0" iff the most recent
+#                             `## [X.Y.Z]` heading is `## [0.3.0]`). Per-package
+#                             pyproject versions are NOT tag-validated; they
+#                             version independently. See RELEASING.md.
+#   2. workflow_dispatch    — manual. Defaults to dry_run=true → TestPyPI + npm --dry-run.
+#                             Use this to exercise the full pipeline (build, smoke, gates,
+#                             OIDC, sigstore attestations) without touching prod registries.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Route publishes to TestPyPI + npm --dry-run instead of real registries"
+        type: boolean
+        required: true
+        default: true
+      ref:
+        description: "Git ref to release from (default: current branch). Only honored on workflow_dispatch."
+        type: string
+        required: false
+        default: ""
+
+# A half-shipped release is worse than a delayed one. Serialize concurrent
+# releases on the same tag, but don't cancel an in-flight publish — a job
+# interrupted between two `pypi-publish` calls would leave PyPI partially
+# updated and the umbrella unable to resolve its connector pins.
+concurrency:
+  group: release-${{ github.event.release.tag_name || github.run_id }}
+  cancel-in-progress: false
+
+# Default permissions are least-privilege (read-only). Jobs that actually
+# need to mint an OIDC token for Trusted Publishing override this with a
+# per-job `permissions:` block. Pre-publish gates and install-verify
+# never need write permissions of any kind.
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.13"
+  NODE_VERSION: "20"
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────
+  # Pre-publish gates. All four must pass before any package is built:
+  # validate-version, changelog-gate, release-smoke, pin-parity.
+  # ─────────────────────────────────────────────────────────────────────
+
+  validate-version:
+    # Single source of truth for "what wave are we releasing" + "is this
+    # a dry run". Emitted as outputs so every downstream job reads the same
+    # values without re-parsing files or re-evaluating dispatch inputs.
+    #
+    # Versioning model: each package's pyproject.toml carries its own
+    # version, and they do NOT move in lockstep. The GitHub Release tag
+    # follows the most recent CHANGELOG.md version header — that's the
+    # only source that always exists and always reflects the maintainer's
+    # intent for "what to call this wave". Per-package versions are
+    # whatever their own pyproject says; the workflow publishes those
+    # as-is.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      wave_version: ${{ steps.read.outputs.wave }}
+      umbrella_version: ${{ steps.read.outputs.umbrella }}
+      core_version: ${{ steps.read.outputs.core }}
+      spec_version: ${{ steps.read.outputs.spec }}
+      dry_run: ${{ steps.read.outputs.dry_run }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+      - id: read
+        name: Read CHANGELOG + pyproject versions and validate release tag
+        # SECURITY: all GitHub-controlled values (event name, release tag,
+        # dispatch inputs) are passed via `env:` rather than templated
+        # directly into the shell script. This prevents script injection
+        # from a maliciously-named tag like  v1.0.0"; rm -rf /  on a
+        # release-create event.
+        # See https://securitylab.github.com/research/github-actions-untrusted-input/
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+
+          # `wave` = the latest non-Unreleased version header in CHANGELOG.md.
+          # `## [0.3.0] - 2026-05-11` → wave="0.3.0". This is the canonical
+          # release name for the wave.
+          wave=$(grep -m1 -E '^## \[[0-9]' CHANGELOG.md | sed -E 's/^## \[([^]]+)\].*/\1/')
+          if [ -z "$wave" ]; then
+            echo "::error file=CHANGELOG.md::Could not find a versioned heading in CHANGELOG.md"
+            exit 1
+          fi
+
+          # Per-package versions for downstream visibility (logs, install-verify).
+          umbrella=$(awk -F'"' '/^version *= */ {print $2; exit}' libs/meta/pyproject.toml)
+          core=$(awk -F'"' '/^version *= */ {print $2; exit}' libs/core/pyproject.toml)
+          spec=$(python -c "import json; print(json.load(open('libs/spec/package.json'))['version'])")
+
+          echo "wave=$wave" >> "$GITHUB_OUTPUT"
+          echo "umbrella=$umbrella" >> "$GITHUB_OUTPUT"
+          echo "core=$core" >> "$GITHUB_OUTPUT"
+          echo "spec=$spec" >> "$GITHUB_OUTPUT"
+
+          # Normalize the dry_run flag. On `release` trigger there's no input,
+          # so we hard-code false. On workflow_dispatch we honor the user's
+          # toggle (defaults to true — see inputs.dry_run.default above).
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            dry_run="$INPUT_DRY_RUN"
+          else
+            dry_run="false"
+          fi
+          echo "dry_run=$dry_run" >> "$GITHUB_OUTPUT"
+
+          # On `release` trigger, enforce tag matches the CHANGELOG wave name.
+          # This catches "tagged v0.3.0 but forgot to cut the CHANGELOG" and
+          # vice-versa. Per-package pyproject versions are NOT validated
+          # against the tag — they version independently by design.
+          if [ "$EVENT_NAME" = "release" ]; then
+            expected="v$wave"
+            if [ "$RELEASE_TAG" != "$expected" ]; then
+              echo "::error file=CHANGELOG.md::Release tag '$RELEASE_TAG' does not match latest CHANGELOG.md wave '$wave' (expected '$expected'). Either re-tag, or cut a new CHANGELOG section before tagging."
+              exit 1
+            fi
+          fi
+
+          echo "Release plan: wave=$wave (umbrella=$umbrella, core=$core, spec=$spec), dry_run=$dry_run"
+
+  changelog-gate:
+    # CHANGELOG hygiene: block release if [Unreleased] still contains entries.
+    # Cheap insurance against publishing with an uncut changelog — caught a
+    # near-miss during the 0.2.x cycle when a connector PR landed inside
+    # the same merge window as a release-prep PR.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+      - name: Ensure CHANGELOG [Unreleased] is empty
+        run: |
+          # Extract lines BETWEEN `## [Unreleased]` (exclusive) and the next
+          # `## [...]` versioned heading (exclusive). A range-style
+          # `awk '/A/,/B/'` would collapse to a single line because
+          # `[Unreleased]` matches both start and end patterns — use a flag.
+          unreleased_body=$(awk '
+              /^## \[Unreleased\]$/ { flag=1; next }
+              /^## \[/ && flag       { flag=0; exit }
+              flag                   { print }
+          ' CHANGELOG.md)
+          # A real entry is `- ` (bullet) or `### ` (subsection heading).
+          # Blank lines and prose are tolerated in a clean [Unreleased] block.
+          if echo "$unreleased_body" | grep -qE "^- |^### "; then
+            echo "::error file=CHANGELOG.md::CHANGELOG.md [Unreleased] block has entries — must be cut to a versioned heading before release"
+            echo "Offending content:"
+            echo "$unreleased_body"
+            exit 1
+          fi
+          echo "CHANGELOG.md [Unreleased] block is empty — ok"
+
+  release-smoke:
+    # Build every wheel, install local genblaze wheels while keeping PyPI
+    # enabled for transitive deps, and import every connector. Catches
+    # incompatible pyproject pins BEFORE PyPI sees them — editable installs
+    # in ci.yml don't exercise version constraints. See tools/release_smoke.sh.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [validate-version]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: pip install build twine
+      - name: Run release smoke test (build + install + import all)
+        run: make release-smoke
+
+  pin-parity:
+    # For every package, compare its source [project.dependencies] to the
+    # wheel already published on PyPI at the same version. A mismatch is
+    # fatal: ``skip-existing`` on the publish jobs would silently no-op
+    # the divergent wheel, leaving the stale (broken) wheel resolvable
+    # forever. This trap has shipped twice (genblaze-s3 in 0.3.0,
+    # genblaze-langsmith + genblaze-cli in 0.3.2) before this gate
+    # existed. ``make pre-release`` runs the same check locally — this
+    # is the defense-in-depth layer for maintainers who skipped it.
+    # See tools/check_pin_parity.py.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [validate-version]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: pip install packaging
+      - name: Check source pins match published wheel pins
+        run: python tools/check_pin_parity.py
+
+  # ─────────────────────────────────────────────────────────────────────
+  # PyPI publishes. Dependency order is significant: core ships first
+  # because every other package depends on it; the umbrella ships last
+  # because pip needs the connectors it pins to already be on PyPI.
+  # ─────────────────────────────────────────────────────────────────────
+
+  publish-core:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [validate-version, changelog-gate, release-smoke, pin-parity]
+    # Dry-run dispatches use the `testpypi` environment so we can configure
+    # a SEPARATE Trusted Publisher on test.pypi.org without leaking that
+    # OIDC trust into production. Real publishes use `pypi`.
+    environment: ${{ needs.validate-version.outputs.dry_run == 'true' && 'testpypi' || 'pypi' }}
+    permissions:
+      contents: read
+      id-token: write   # Trusted Publishing to PyPI + sigstore attestations.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: pip install build twine
+      - name: Build genblaze-core
+        run: cd libs/core && python -m build
+      - name: Validate wheel metadata
+        run: twine check libs/core/dist/*
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        with:
+          packages-dir: libs/core/dist/
+          repository-url: ${{ needs.validate-version.outputs.dry_run == 'true' && 'https://test.pypi.org/legacy/' || 'https://upload.pypi.org/legacy/' }}
+          attestations: true   # PEP 740 sigstore attestations — provenance into PyPI's integrity registry.
+          skip-existing: true  # Idempotent: re-running a partially-failed release is safe. PyPI duplicates are treated as success.
+
+  publish-cli:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [publish-core, validate-version]
+    environment: ${{ needs.validate-version.outputs.dry_run == 'true' && 'testpypi' || 'pypi' }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: pip install build twine
+      - name: Build genblaze-cli
+        run: cd cli && python -m build
+      - name: Validate wheel metadata
+        run: twine check cli/dist/*
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        with:
+          packages-dir: cli/dist/
+          repository-url: ${{ needs.validate-version.outputs.dry_run == 'true' && 'https://test.pypi.org/legacy/' || 'https://upload.pypi.org/legacy/' }}
+          attestations: true
+          skip-existing: true
+
+  publish-connectors:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [publish-core, validate-version]
+    environment: ${{ needs.validate-version.outputs.dry_run == 'true' && 'testpypi' || 'pypi' }}
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      # One connector failing must NOT cancel the others. A failure here
+      # typically means a transient PyPI issue or a per-package config bug;
+      # cancelling siblings leaves us with a partial release that's worse
+      # to recover from than letting them all attempt and re-running the
+      # failed cell after the fact.
+      fail-fast: false
+      matrix:
+        connector:
+          - replicate
+          - s3
+          - openai
+          - google
+          - runway
+          - luma
+          - decart
+          - elevenlabs
+          - stability-audio
+          - lmnt
+          - hume
+          - gmicloud
+          - langsmith
+          - nvidia
+          - assemblyai
+          - atlascloud
+          - fal
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: pip install build twine
+      - name: Build connector
+        run: cd libs/connectors/${{ matrix.connector }} && python -m build
+      - name: Validate wheel metadata
+        run: twine check libs/connectors/${{ matrix.connector }}/dist/*
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        with:
+          packages-dir: libs/connectors/${{ matrix.connector }}/dist/
+          repository-url: ${{ needs.validate-version.outputs.dry_run == 'true' && 'https://test.pypi.org/legacy/' || 'https://upload.pypi.org/legacy/' }}
+          attestations: true
+          skip-existing: true
+
+  publish-meta:
+    # The `genblaze` umbrella MUST publish after every connector: its
+    # [project.optional-dependencies] block references connector packages
+    # by version constraint, and pip resolution requires those targets
+    # to exist on PyPI when the umbrella's own wheel is being installed.
+    # Publishing meta before connectors would leave `pip install "genblaze[all]"`
+    # in a broken intermediate state until connectors land.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [publish-connectors, validate-version]
+    environment: ${{ needs.validate-version.outputs.dry_run == 'true' && 'testpypi' || 'pypi' }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: pip install build twine
+      - name: Build genblaze (umbrella)
+        run: cd libs/meta && python -m build
+      - name: Validate wheel metadata
+        run: twine check libs/meta/dist/*
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        with:
+          packages-dir: libs/meta/dist/
+          repository-url: ${{ needs.validate-version.outputs.dry_run == 'true' && 'https://test.pypi.org/legacy/' || 'https://upload.pypi.org/legacy/' }}
+          attestations: true
+          skip-existing: true
+
+  # ─────────────────────────────────────────────────────────────────────
+  # npm publish (TypeScript types). Runs in parallel with the PyPI graph
+  # because @genblaze/spec has no dependency on any Python package.
+  #
+  # Split in two (see #270): build-npm-types does the npm install +
+  # code-generation in a low-privilege job (no id-token), and publish-npm
+  # — which holds `id-token: write` for npm provenance — only downloads the
+  # already-verified artifact and calls `npm publish`. No npm install or
+  # execution of third-party code happens in the privileged job, so a
+  # compromised transitive dependency of the type generator can never reach
+  # the OIDC token or NPM_TOKEN.
+  # ─────────────────────────────────────────────────────────────────────
+
+  build-npm-types:
+    # Low-privilege build: regenerate libs/spec/ts/genblaze.d.ts from the
+    # JSON Schemas and fail if it doesn't match what's committed (someone
+    # changed a schema without re-running `make ts-types`). This job never
+    # touches npm publish credentials — default permissions are read-only.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [validate-version]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # zizmor: ignore[cache-poisoning] (this job's output artifact feeds the id-token publish job — no cache: input, nothing to poison); v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Regenerate TS types from JSON Schemas
+        # Defensive — CI already runs ts-types-check on every push, but a
+        # release shouldn't trust that the committed types are still
+        # current. Regenerate, then refuse to publish if the working tree
+        # is dirty. generate-types.sh installs the pinned toolchain via
+        # `npm ci --ignore-scripts` from the committed lockfile — no
+        # unpinned `npx`, no lifecycle scripts.
+        run: make ts-types
+      - name: Verify generated types match committed
+        run: |
+          if ! git diff --exit-code libs/spec/ts/; then
+            echo "::error::libs/spec/ts/ is stale. Run 'make ts-types' locally and commit before tagging a release."
+            exit 1
+          fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: genblaze-spec-types
+          path: libs/spec/ts/genblaze.d.ts
+          retention-days: 1
+
+  publish-npm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [build-npm-types, validate-version, changelog-gate, pin-parity]
+    environment: ${{ needs.validate-version.outputs.dry_run == 'true' && 'npm-dryrun' || 'npm' }}
+    permissions:
+      contents: read
+      id-token: write   # npm provenance — signed attestation that this tarball was built from this commit by this workflow.
+    env:
+      # Belt-and-suspenders (see #270): this job never installs a dependency
+      # tree, but `npm publish` itself can run package lifecycle hooks
+      # (prepublishOnly/prepack/prepare/postpublish) if @genblaze/spec's
+      # package.json ever defines one. Job-wide so no future step in this
+      # privileged job can accidentally skip it.
+      NPM_CONFIG_IGNORE_SCRIPTS: "true"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # zizmor: ignore[cache-poisoning] (publish job sets no cache: input, nothing to poison); v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: "https://registry.npmjs.org"
+      - name: Download verified TS types
+        # No npm install and no code generation happens in this job — the
+        # types were already regenerated and drift-checked by
+        # build-npm-types, which holds no publish credentials.
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: genblaze-spec-types
+          path: libs/spec/ts/
+      - name: Check if @genblaze/spec version is already published
+        # Idempotent guard: npm publish hard-fails on duplicate versions
+        # (no skip-existing equivalent). Pre-check via `npm view` so a
+        # re-run after a partial release fall-through doesn't fail this
+        # job. The wave often advances WITHOUT a spec bump (only ~half
+        # the waves change the schema), so this is the common path.
+        id: npm_check
+        working-directory: libs/spec
+        run: |
+          local_version=$(node -p "require('./package.json').version")
+          remote_version=$(npm view @genblaze/spec version 2>/dev/null || echo "")
+          echo "local=$local_version remote=$remote_version"
+          if [ "$local_version" = "$remote_version" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::@genblaze/spec@$local_version is already on npm — skipping publish (idempotent)"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Publish to npm
+        if: steps.npm_check.outputs.skip != 'true'
+        working-directory: libs/spec
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          DRY_RUN: ${{ needs.validate-version.outputs.dry_run }}
+        run: |
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "Dry run: validating publish without uploading"
+            npm publish --access public --dry-run --provenance
+          else
+            npm publish --access public --provenance
+          fi
+
+  # ─────────────────────────────────────────────────────────────────────
+  # Post-publish: install from the public registry and import each
+  # package to confirm the publish actually worked end-to-end. Skipped
+  # on dry-runs because TestPyPI metadata indexing lags real PyPI by
+  # enough that this would flake.
+  # ─────────────────────────────────────────────────────────────────────
+
+  install-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [publish-meta, publish-npm, validate-version]
+    if: needs.validate-version.outputs.dry_run != 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Wait for PyPI to index the umbrella
+        # PyPI's CDN can take ~30-60s to surface a fresh release. Poll with
+        # a bounded retry so an indexing lag doesn't fail the whole run.
+        # Indexing is checked against the umbrella's own version because
+        # that's what `pip install genblaze` resolves to — the wave name
+        # (which the tag follows) doesn't appear in the package metadata.
+        env:
+          UMBRELLA_VERSION: ${{ needs.validate-version.outputs.umbrella_version }}
+        run: |
+          version="$UMBRELLA_VERSION"
+          for i in $(seq 1 12); do
+            if pip index versions genblaze 2>/dev/null | grep -q "$version"; then
+              echo "genblaze==$version is visible on PyPI"
+              exit 0
+            fi
+            echo "[$i/12] genblaze==$version not yet on PyPI, sleeping 10s…"
+            sleep 10
+          done
+          echo "::error::genblaze==$version did not appear on PyPI within 2 minutes"
+          exit 1
+      - name: Fresh install and import smoke
+        # Resolves ``genblaze[all]`` (every connector), not bare ``genblaze``
+        # (only umbrella defaults: core + s3). The [all] form exercises
+        # every connector's pin against public PyPI — the same install
+        # graph real users see, and the gate that would have caught the
+        # 0.3.0 s3 drift and the 0.3.2 langsmith/cli drift before they
+        # shipped. ``make post-release`` from a maintainer's laptop runs
+        # the same check.
+        env:
+          UMBRELLA_VERSION: ${{ needs.validate-version.outputs.umbrella_version }}
+        run: |
+          version="$UMBRELLA_VERSION"
+          python -m venv /tmp/verify
+          /tmp/verify/bin/pip install --upgrade pip
+
+          # The umbrella pre-check above only confirms `genblaze` itself is
+          # indexed; `genblaze[all]` also resolves the ~14 connector packages
+          # that propagate across PyPI's CDN independently, so this exact
+          # install can still 404 on a connector's stale edge even when the
+          # umbrella wait passed (#189). Retry the install itself — it's the
+          # operation that actually fails, regardless of which package lags.
+          attempts=5
+          for i in $(seq 1 "$attempts"); do
+            if /tmp/verify/bin/pip install "genblaze[all]==$version"; then
+              break
+            fi
+            if [ "$i" -eq "$attempts" ]; then
+              echo "::error::pip install genblaze[all]==$version failed after $attempts attempts"
+              exit 1
+            fi
+            echo "[$i/$attempts] pip install genblaze[all]==$version failed, retrying in 30s…"
+            sleep 30
+          done
+
+          /tmp/verify/bin/python tools/release_import_smoke.py

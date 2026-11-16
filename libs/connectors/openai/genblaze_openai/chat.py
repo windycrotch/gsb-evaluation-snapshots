@@ -1,0 +1,252 @@
+"""Standalone OpenAI Chat Completions wrapper. Sits outside the Pipeline /
+Step machinery — see ``docs/features/llm-calls.md`` for rationale and usage.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from typing import Any
+
+from genblaze_core.exceptions import ProviderError
+from genblaze_core.models.chat import ChatMessage, ChatResponse, ToolCall, coerce_response_format
+from genblaze_core.models.enums import ProviderErrorCode
+from genblaze_core.providers.retry import (
+    RetryPolicy,
+    call_with_rate_limit_retry,
+    retry_after_from_response,
+)
+
+from genblaze_openai._errors import map_openai_error
+
+
+def _normalize_messages(
+    messages: list[ChatMessage] | list[dict] | None,
+    prompt: str | None,
+    system: str | None,
+) -> list[dict]:
+    """Build the OpenAI-shaped message list from any of the input forms."""
+    if messages is None and prompt is None:
+        raise ProviderError(
+            "chat() requires either `messages` or `prompt`",
+            error_code=ProviderErrorCode.INVALID_INPUT,
+        )
+
+    out: list[dict] = []
+    if system is not None:
+        out.append({"role": "system", "content": system})
+
+    if messages is not None:
+        for m in messages:
+            if isinstance(m, ChatMessage):
+                # str content stays as str on the wire (cheaper, avoids array-content
+                # quirks on system messages); list content gets dumped as a list of
+                # block dicts via pydantic — discriminator type tag is preserved.
+                if isinstance(m.content, str):
+                    wire_content: Any = m.content
+                else:
+                    wire_content = [b.model_dump(exclude_none=True) for b in m.content]
+                msg: dict[str, Any] = {"role": m.role, "content": wire_content}
+                if m.name is not None:
+                    msg["name"] = m.name
+                if m.tool_call_id is not None:
+                    msg["tool_call_id"] = m.tool_call_id
+                if m.tool_calls:
+                    msg["tool_calls"] = [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.name,
+                                # OpenAI requires a JSON-encoded string, not Python repr.
+                                "arguments": json.dumps(tc.arguments),
+                            },
+                        }
+                        for tc in m.tool_calls
+                    ]
+                out.append(msg)
+            else:
+                out.append(dict(m))
+    else:
+        out.append({"role": "user", "content": prompt})
+
+    return out
+
+
+def _parse_response(model: str, raw: Any) -> ChatResponse:
+    """Translate an OpenAI ChatCompletion object into a uniform ChatResponse."""
+    raw_dict = raw.model_dump() if hasattr(raw, "model_dump") else dict(raw)
+    choice = raw_dict.get("choices", [{}])[0]
+    message = choice.get("message", {}) or {}
+    usage = raw_dict.get("usage", {}) or {}
+
+    tokens_in = usage.get("prompt_tokens")
+    tokens_out = usage.get("completion_tokens")
+    cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
+
+    tool_calls: list[ToolCall] = []
+    for tc in message.get("tool_calls") or []:
+        fn = tc.get("function", {}) or {}
+        tool_calls.append(
+            ToolCall(
+                id=tc.get("id", ""),
+                name=fn.get("name", ""),
+                arguments=fn.get("arguments", {}),
+            )
+        )
+
+    return ChatResponse(
+        text=message.get("content") or "",
+        model=raw_dict.get("model", model),
+        finish_reason=choice.get("finish_reason"),
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
+        tokens_cached=cached,
+        tool_calls=tool_calls,
+        cost_usd=None,  # chat() reports no cost; compute from tokens_in/out with your own rates.
+        raw=raw_dict,
+    )
+
+
+def chat(
+    model: str,
+    messages: list[ChatMessage] | list[dict] | None = None,
+    *,
+    prompt: str | None = None,
+    system: str | None = None,
+    tools: list[dict] | None = None,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    response_format: dict | type | None = None,
+    api_key: str | None = None,
+    base_url: str | None = None,
+    timeout: float = 60.0,
+    client: Any = None,
+    retry_on_rate_limit: bool = False,
+    retry_policy: RetryPolicy | None = None,
+    **kwargs: Any,
+) -> ChatResponse:
+    """Call an OpenAI chat / completion model and return a uniform `ChatResponse`.
+
+    Args:
+        model: OpenAI model id (e.g. "gpt-4o", "gpt-4o-mini").
+        messages: Conversation turns. Mutually exclusive with `prompt`.
+        prompt: Single-turn shorthand — wrapped as a user message.
+        system: System instruction prepended when set.
+        tools: Tool/function definitions in OpenAI's native shape.
+        temperature, max_tokens: Standard sampling controls (passed through if set).
+        response_format: Structured-output spec. Accepts a Pydantic ``BaseModel``
+            subclass (auto-generates the JSON schema) or a pre-formed dict (e.g.
+            ``{"type": "json_object"}`` or ``{"type": "json_schema", ...}``).
+        api_key: API key override; otherwise OPENAI_API_KEY env var.
+        base_url: Override the OpenAI API base URL — use for Azure OpenAI or
+            OpenAI-compatible endpoints. Ignored when ``client`` is supplied.
+        timeout: HTTP timeout in seconds.
+        client: Pre-built `openai.OpenAI` instance — escape hatch for tests
+            and custom clients. When supplied, its lifecycle is the caller's
+            (we won't close it).
+        retry_on_rate_limit: When ``True``, waits and retries transient
+            failures — 429 and 5xx (``SERVER_ERROR``); ``TIMEOUT`` too when
+            an explicit ``retry_policy`` includes it — using the server's
+            ``Retry-After`` hint (falling back to exponential backoff)
+            instead of raising immediately. Name kept for compatibility.
+            Off by default. See ``docs/features/llm-calls.md``.
+        retry_policy: Optional ``RetryPolicy`` controlling attempt cap,
+            retryable codes, and backoff when ``retry_on_rate_limit=True``
+            (or passed on its own to opt in implicitly). Defaults to
+            ``RetryPolicy()`` (6 attempts).
+        **kwargs: Forwarded to `client.chat.completions.create`.
+
+    Raises:
+        ProviderError: With a classified `error_code` for any SDK exception.
+            Re-raised once retries (if enabled) are exhausted.
+
+    Performance note:
+        For high-throughput callers (many chat calls in a tight loop), pass a
+        reusable ``client=openai.OpenAI(...)`` to amortize HTTP connection setup.
+        Internally-created clients are closed after each call to avoid
+        resource leaks.
+    """
+    # retry_policy alone (without the bool flag) also opts in — see the
+    # retry_policy docstring above.
+    retry_managed = retry_on_rate_limit or retry_policy is not None
+
+    own_client = client is None
+    if own_client:
+        try:
+            import openai
+        except ImportError as exc:
+            raise ProviderError("openai package not installed. Run: pip install openai") from exc
+        ckwargs: dict[str, Any] = {"timeout": timeout}
+        if api_key:
+            ckwargs["api_key"] = api_key
+        if base_url:
+            ckwargs["base_url"] = base_url
+        if retry_managed:
+            # We already retry via call_with_rate_limit_retry below; disable
+            # the SDK's own internal retry (default 2) so RetryPolicy.max_attempts
+            # stays authoritative instead of being multiplied by a second,
+            # invisible retry layer underneath it.
+            ckwargs["max_retries"] = 0
+        client = openai.OpenAI(**ckwargs)
+
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": _normalize_messages(messages, prompt, system),
+    }
+    if tools is not None:
+        payload["tools"] = tools
+    if temperature is not None:
+        payload["temperature"] = temperature
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
+    if response_format is not None:
+        payload["response_format"] = coerce_response_format(response_format)
+    payload.update(kwargs)
+
+    def _invoke() -> Any:
+        try:
+            return client.chat.completions.create(**payload)
+        except ProviderError:
+            raise
+        except Exception as exc:
+            raise ProviderError(
+                f"OpenAI chat failed: {exc}",
+                error_code=map_openai_error(exc),
+                retry_after=retry_after_from_response(exc),
+            ) from exc
+
+    try:
+        # retry_policy= alone opts in implicitly, even without retry_on_rate_limit=True.
+        if retry_managed:
+            raw = call_with_rate_limit_retry(_invoke, policy=retry_policy)
+        else:
+            raw = _invoke()
+    finally:
+        if own_client:
+            # Best-effort close — matches the GMI chat pattern and prevents
+            # httpx transport leaks on high-throughput callers. Closed once
+            # here (not per attempt) so the client stays open across retries.
+            close_fn = getattr(client, "close", None)
+            if callable(close_fn):
+                close_fn()
+
+    return _parse_response(model, raw)
+
+
+async def achat(
+    model: str,
+    messages: list[ChatMessage] | list[dict] | None = None,
+    **kwargs: Any,
+) -> ChatResponse:
+    """Async wrapper around `chat()`. Runs the sync call in a worker thread.
+
+    Matches the in-tree `BaseProvider.ainvoke` pattern (uses `asyncio.to_thread`
+    rather than the SDK's native async client) for consistency. Switch to
+    `openai.AsyncOpenAI` here if true async I/O ever shows up in profiling.
+
+    Accepts the same `retry_on_rate_limit` / `retry_policy` kwargs as `chat()`.
+    Any backoff sleep happens inside the worker thread, so it never blocks the
+    event loop — no separate async retry path is needed.
+    """
+    return await asyncio.to_thread(chat, model, messages, **kwargs)

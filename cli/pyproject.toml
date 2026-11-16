@@ -1,0 +1,56 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "genblaze-cli"
+version = "0.3.7"
+description = "CLI for genblaze manifest operations"
+authors = [{name = "Jeronimo De Leon", email = "jdeleon@backblaze.com"}]
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia",
+    "Topic :: Software Development :: Libraries",
+]
+keywords = ["genblaze", "ai", "media", "manifest", "provenance", "c2pa-ready", "genai", "pipeline", "cli", "command-line"]
+
+dependencies = [
+    "genblaze-core>=0.3.9,<0.4",
+    # <9: bounded-major convention (#61) — caps below the next major so a
+    # future click release can't silently break the CLI at resolve time.
+    "click>=8.0,<9",
+]
+
+[project.urls]
+Homepage = "https://github.com/backblaze-labs/genblaze"
+Documentation = "https://github.com/backblaze-labs/genblaze#readme"
+Repository = "https://github.com/backblaze-labs/genblaze"
+Changelog = "https://github.com/backblaze-labs/genblaze/blob/main/CHANGELOG.md"
+Issues = "https://github.com/backblaze-labs/genblaze/issues"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pillow>=10.0",
+]
+
+[project.scripts]
+genblaze = "genblaze_cli.main:cli"
+
+[tool.hatch.build.targets.wheel]
+packages = ["genblaze_cli"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.deptry]
+# Treat the `dev` extra as dev-only tooling so deptry does not flag pytest
+# (and other test-only deps) as unused declared deps (DEP002).
+optional_dependencies_dev_groups = ["dev"]

@@ -1,0 +1,121 @@
+"""GMICloudImageProvider — image generation via the GMICloud request queue.
+
+Auth: Set GMI_API_KEY env var or pass api_key= to the constructor.
+
+Docs: https://docs.gmicloud.ai
+
+Models, pricing, and parameter handling are driven by the ``ModelRegistry``
+built in ``genblaze_gmicloud.models.image``.
+"""
+
+from __future__ import annotations
+
+import mimetypes
+from typing import Any
+from urllib.parse import urlparse
+
+from genblaze_core.exceptions import ProviderError
+from genblaze_core.models.asset import Asset
+from genblaze_core.models.enums import Modality, ProviderErrorCode
+from genblaze_core.models.step import Step
+from genblaze_core.providers.base import (
+    ProviderCapabilities,
+    validate_asset_url,
+)
+from genblaze_core.providers.model_registry import ModelRegistry
+from genblaze_core.runnable.config import RunnableConfig
+
+from ._base import GMICloudBase, extract_media_urls
+from ._errors import map_gmicloud_error
+from .models.image import build_image_registry
+
+
+class GMICloudImageProvider(GMICloudBase):
+    """Provider adapter for GMICloud image generation via the request queue.
+
+    Models: Seedream, Gemini Flash Image, FLUX-Kontext, Reve, Bria series,
+    and any new image model added to GMICloud's queue (unknown models pass through).
+
+    Args:
+        api_key: GMICloud API key. Falls back to GMI_API_KEY env var.
+        poll_interval: Seconds between request status polls (default 5).
+        http_timeout: HTTP request timeout in seconds (default 120).
+        base_url: Override the request-queue base URL. See ``GMICloudBase``.
+        http_client: Pre-built ``httpx.Client``. See ``GMICloudBase``.
+        models: Optional custom ``ModelRegistry``.
+    """
+
+    name = "gmicloud-image"
+
+    # seededit-3-0-i2i-250628 is a gated third-party model on GMICloud —
+    # the empty-payload probe returns LIVE (it exists in the catalog) but
+    # a real submit 404s "you do not have access" for accounts without
+    # extra entitlement. See ``GMICloudBase._entitlement_gated_slugs``
+    # and #193.
+    _entitlement_gated_slugs = frozenset({"seededit-3-0-i2i-250628"})
+
+    @classmethod
+    def create_registry(cls) -> ModelRegistry:
+        return build_image_registry()
+
+    def get_capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities(
+            supported_modalities=[Modality.IMAGE],
+            supported_inputs=["text", "image"],
+            accepts_chain_input=True,
+            models=self._models.known(),
+            output_formats=["image/png", "image/jpeg"],
+        )
+
+    def submit(self, step: Step, config: RunnableConfig | None = None) -> Any:
+        try:
+            payload = self.prepare_payload(step)
+            return self._submit_request(step.model, payload)
+        except ProviderError:
+            raise
+        except Exception as exc:
+            raise ProviderError(
+                f"GMICloud submit failed: {exc}",
+                error_code=map_gmicloud_error(exc),
+            ) from exc
+
+    def fetch_output(self, prediction_id: Any, step: Step) -> Step:
+        try:
+            detail = self._fetch_detail(prediction_id)
+            status = detail.get("status", "")
+            outcome = detail.get("outcome") or {}
+
+            step.provider_payload = {"gmicloud": {"request_id": prediction_id, "status": status}}
+
+            if status in ("failed", "cancelled"):
+                raise ProviderError(
+                    str(detail.get("error") or f"Image generation {status}"),
+                    error_code=ProviderErrorCode.UNKNOWN,
+                )
+
+            image_urls = extract_media_urls(outcome, image_fallback=True)
+            if not image_urls:
+                raise ProviderError("GMICloud request completed but no image URL found")
+
+            # Build the asset list atomically — either all URLs validate and
+            # land on the step, or none do. Prevents partial state on a late
+            # validation failure mid-batch.
+            new_assets: list[Asset] = []
+            for image_url in image_urls:
+                validate_asset_url(image_url)
+                path = urlparse(image_url).path
+                mime, _ = mimetypes.guess_type(path)
+                if mime is None or not mime.startswith("image/"):
+                    mime = "image/png"
+                new_assets.append(Asset(url=image_url, media_type=mime))
+            step.assets.extend(new_assets)
+
+            self._apply_registry_pricing(step)
+            return step
+        except ProviderError:
+            raise
+        except Exception as exc:
+            raise ProviderError(
+                f"GMICloud fetch_output failed: {exc}",
+                error_code=map_gmicloud_error(exc),
+            ) from exc

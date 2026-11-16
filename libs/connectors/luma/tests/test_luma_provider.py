@@ -1,0 +1,193 @@
+"""Tests for LumaProvider (mocked — no real API calls)."""
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+from urllib.parse import urlparse
+
+import pytest
+from genblaze_core.exceptions import ProviderError
+from genblaze_core.models.enums import StepStatus
+from genblaze_core.models.manifest import Manifest
+from genblaze_core.models.run import Run
+from genblaze_core.models.step import Step
+from genblaze_core.testing import ProviderComplianceTests
+
+
+@pytest.fixture
+def mock_luma():
+    """Patch lumaai with a mock client."""
+    mock_client = MagicMock()
+    mock_client.generations.create.return_value = SimpleNamespace(id="gen-abc")
+    mock_client.generations.get.return_value = SimpleNamespace(
+        id="gen-abc",
+        state="completed",
+        assets=SimpleNamespace(video="https://luma-output.com/video.mp4"),
+    )
+
+    with patch.dict("sys.modules", {"lumaai": MagicMock()}):
+        from genblaze_luma import LumaProvider
+
+        provider = LumaProvider(auth_token="test-key")
+        provider._client = mock_client
+        yield provider, mock_client
+
+
+def test_submit_returns_generation_id(mock_luma):
+    provider, client = mock_luma
+    step = Step(provider="luma", model="ray-2", prompt="a sunset over ocean")
+    gen_id = provider.submit(step)
+    assert gen_id == "gen-abc"
+    client.generations.create.assert_called_once()
+
+
+def test_poll_returns_true_on_completed(mock_luma):
+    provider, _ = mock_luma
+    assert provider.poll("gen-abc") is True
+
+
+def test_poll_returns_false_on_dreaming(mock_luma):
+    provider, client = mock_luma
+    client.generations.get.return_value = SimpleNamespace(id="gen-abc", state="dreaming")
+    assert provider.poll("gen-abc") is False
+
+
+def test_poll_progress_surfaces_preview_frame(mock_luma):
+    """poll_progress() exposes intermediate preview frame from cached generation."""
+    provider, client = mock_luma
+    client.generations.get.return_value = SimpleNamespace(
+        id="gen-abc",
+        state="dreaming",
+        assets=SimpleNamespace(preview="https://luma-preview.test/frame.jpg"),
+    )
+    assert provider.poll("gen-abc") is False
+    signals = provider.poll_progress("gen-abc")
+    assert signals is not None
+    assert signals["preview_url"] == "https://luma-preview.test/frame.jpg"
+    assert signals["message"] == "dreaming"
+
+
+def test_poll_progress_returns_none_when_no_preview(mock_luma):
+    """state alone is enough to return signals (message), even without preview."""
+    provider, client = mock_luma
+    client.generations.get.return_value = SimpleNamespace(
+        id="gen-abc", state="queued", assets=None
+    )
+    assert provider.poll("gen-abc") is False
+    signals = provider.poll_progress("gen-abc")
+    assert signals == {"message": "queued"}
+
+
+def test_fetch_output_attaches_asset(mock_luma):
+    provider, _ = mock_luma
+    step = Step(provider="luma", model="ray-2", prompt="a sunset")
+    result = provider.fetch_output("gen-abc", step)
+    assert len(result.assets) == 1
+    assert result.assets[0].media_type == "video/mp4"
+    _host = urlparse(result.assets[0].url).hostname or ""
+    assert _host == "luma-output.com" or _host.endswith(".luma-output.com")
+
+
+def test_fetch_output_failed_raises(mock_luma):
+    provider, client = mock_luma
+    client.generations.get.return_value = SimpleNamespace(
+        id="gen-abc", state="failed", failure_reason="Content policy violation"
+    )
+    step = Step(provider="luma", model="ray-2", prompt="bad")
+    with pytest.raises(ProviderError, match="Content policy violation"):
+        provider.fetch_output("gen-abc", step)
+
+
+def test_invoke_full_lifecycle(mock_luma):
+    provider, _ = mock_luma
+    step = Step(provider="luma", model="ray-2", prompt="a sunset")
+    result = provider.invoke(step)
+    assert result.status == StepStatus.SUCCEEDED
+    assert len(result.assets) == 1
+
+
+def test_url_only_output_manifest_does_not_verify_without_sink(mock_luma):
+    provider, _ = mock_luma
+    result = provider.invoke(Step(provider="luma", model="ray-2", prompt="a sunset"))
+
+    manifest = Manifest.from_run(Run(name="same", steps=[result]))
+
+    assert result.assets[0].sha256 is None
+    assert manifest.verify_hash()
+    assert manifest.output_asset_ids_missing_sha256() == [result.assets[0].asset_id]
+    assert not manifest.verify()
+
+
+def test_invalid_aspect_ratio_raises(mock_luma):
+    provider, _ = mock_luma
+    step = Step(
+        provider="luma",
+        model="ray-2",
+        prompt="test",
+        params={"aspect_ratio": "5:3"},
+    )
+    with pytest.raises(ProviderError, match="Invalid aspect_ratio"):
+        provider.submit(step)
+
+
+def test_cost_not_populated_until_formula_lands(mock_luma):
+    """Cost stays None for all models.
+
+    Luma bills by duration; the previous flat per-generation attribution
+    misreported costs and was removed. Re-enable once a duration-aware
+    formula is implemented.
+    """
+    provider, _ = mock_luma
+    for model in ("ray-2", "ray-flash-2", "unknown-model"):
+        step = Step(provider="luma", model=model, prompt="a sunset")
+        result = provider.fetch_output("gen-abc", step)
+        assert result.cost_usd is None, f"cost_usd must be None for {model}"
+
+
+def test_duration_param_forwarded(mock_luma):
+    """Standard 'duration' param is forwarded to Luma API."""
+    provider, client = mock_luma
+    step = Step(
+        provider="luma",
+        model="ray-2",
+        prompt="test",
+        params={"duration": "5s"},
+    )
+    provider.submit(step)
+    call_kwargs = client.generations.create.call_args[1]
+    assert call_kwargs["duration"] == "5s"
+
+
+# --- Compliance harness ---
+
+
+class TestLumaCompliance(ProviderComplianceTests):
+    """Verify LumaProvider satisfies the genblaze provider contract."""
+
+    # Luma bills by duration, not per generation. Flat-cost attribution was
+    # removed to avoid misreporting; re-enable when a (model, duration)
+    # formula lands.
+    expects_cost = False
+
+    @pytest.fixture(autouse=True)
+    def _patch_sdk(self):
+        with patch.dict("sys.modules", {"lumaai": MagicMock()}):
+            yield
+
+    def make_provider(self):
+        from genblaze_luma import LumaProvider
+
+        mock_client = MagicMock()
+        mock_client.generations.create.return_value = SimpleNamespace(id="gen-abc")
+        mock_client.generations.get.return_value = SimpleNamespace(
+            id="gen-abc",
+            state="completed",
+            assets=SimpleNamespace(video="https://luma-output.com/video.mp4"),
+        )
+        provider = LumaProvider(auth_token="test-key")
+        provider._client = mock_client
+        return provider
+
+    def make_step(self):
+        return Step(provider="luma", model="ray-2", prompt="test prompt")

@@ -1,0 +1,346 @@
+"""Standalone Google Gemini chat wrapper. Mirrors ``genblaze_openai.chat`` —
+same signature, same ``ChatResponse`` shape. Auth: ``GEMINI_API_KEY`` or
+``project=`` for Vertex AI.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import mimetypes
+import re
+from typing import Any
+
+from genblaze_core.exceptions import ProviderError
+from genblaze_core.models.chat import (
+    ChatMessage,
+    ChatResponse,
+    ImageURLContent,
+    ImageURLRef,
+    TextContent,
+    ToolCall,
+)
+from genblaze_core.models.enums import ProviderErrorCode
+from genblaze_core.providers.retry import (
+    RetryPolicy,
+    call_with_rate_limit_retry,
+    retry_after_from_response,
+)
+
+from genblaze_google._errors import map_google_error
+
+# Gemini uses "model" / "user" roles; "assistant" maps to "model".
+_ROLE_MAP = {"user": "user", "assistant": "model", "system": "user", "tool": "user"}
+
+
+def _normalize_to_gemini(
+    messages: list[ChatMessage] | list[dict] | None,
+    prompt: str | None,
+    system: str | None,
+) -> tuple[list[dict], str | None]:
+    """Translate canonical messages to Gemini's `contents` + extracted system instruction."""
+    if messages is None and prompt is None:
+        raise ProviderError(
+            "chat() requires either `messages` or `prompt`",
+            error_code=ProviderErrorCode.INVALID_INPUT,
+        )
+
+    system_instruction = system
+    contents: list[dict] = []
+
+    iter_msgs: list[Any] = list(messages) if messages is not None else []
+    if not iter_msgs and prompt is not None:
+        iter_msgs = [ChatMessage(role="user", content=prompt)]
+
+    for m in iter_msgs:
+        msg = m if isinstance(m, ChatMessage) else ChatMessage(**m)
+        # Gemini takes a separate system_instruction; pull the first system msg out.
+        # system_instruction is plain text only, so reject media blocks there too.
+        if msg.role == "system":
+            if system_instruction is None:
+                system_instruction = _gemini_text_only(msg.content)
+            continue
+        role = _ROLE_MAP.get(msg.role, "user")
+        contents.append({"role": role, "parts": _content_to_gemini_parts(msg.content)})
+
+    return contents, system_instruction
+
+
+def _content_to_gemini_parts(content: Any) -> list[dict]:
+    """Translate ChatMessage.content into Gemini `parts` (text + inline/file image data).
+
+    Mirrors the block-to-wire translation `genblaze_openai.chat._normalize_messages`
+    already does for the OpenAI-vision shape, so a `ChatMessage` built from the
+    canonical content blocks is portable across providers instead of being
+    pre-flight-rejected here (#194). Block types Gemini has no `parts` mapping
+    for (video, audio) still raise a precise `INVALID_INPUT` rather than
+    failing mid-request.
+    """
+    if isinstance(content, str):
+        return [{"text": content}]
+    parts: list[dict] = []
+    for block in content:
+        if isinstance(block, TextContent):
+            parts.append({"text": block.text})
+        elif isinstance(block, ImageURLContent):
+            parts.append(_image_ref_to_gemini_part(block.image_url))
+        else:
+            raise ProviderError(
+                f"Gemini does not accept {type(block).__name__}. Only TextContent and "
+                "ImageURLContent translate to Gemini `parts` today. Pass native Gemini "
+                "parts via raw dict messages, or wait for genblaze-google's typed "
+                "multimodal support (tracked in framework-dx-recommendations.md).",
+                error_code=ProviderErrorCode.INVALID_INPUT,
+            )
+    return parts
+
+
+def _image_ref_to_gemini_part(ref: ImageURLRef) -> dict:
+    """Translate an `ImageURLRef` to Gemini's `inline_data` or `file_data` part.
+
+    - `data:` URIs decode to `inline_data` — the base64 payload split from the
+      URI header, mime type read from the header (falling back to
+      `media_type` if the header omits one).
+    - Any other URL (e.g. a Gemini Files API URI) passes through as
+      `file_data`; mime type comes from `media_type` if set, else a
+      best-effort guess from the URL's extension. Gemini validates the URI
+      upstream — we don't preflight-reject unresolvable URLs here.
+    """
+    url = ref.url
+    if url.startswith("data:"):
+        header, _, payload = url.partition(",")
+        if not payload:
+            raise ProviderError(
+                f"Malformed data URI in image_url — missing comma-delimited payload: "
+                f"{url[:32]}...",
+                error_code=ProviderErrorCode.INVALID_INPUT,
+            )
+        meta = header[len("data:") :]
+        if "base64" not in meta.lower():
+            raise ProviderError(
+                "Gemini inline_data requires a base64-encoded data URI "
+                "(e.g. 'data:image/jpeg;base64,...'); got a non-base64 data URI.",
+                error_code=ProviderErrorCode.INVALID_INPUT,
+            )
+        header_mime = _valid_mime_type(meta.split(";")[0])
+        mime_type = header_mime or ref.media_type or "application/octet-stream"
+        return {"inline_data": {"mime_type": mime_type, "data": payload}}
+
+    mime_type = ref.media_type or mimetypes.guess_type(url)[0] or "application/octet-stream"
+    return {"file_data": {"mime_type": mime_type, "file_uri": url}}
+
+
+# RFC 2045 token chars, loosely: reject anything that isn't a plain "type/subtype"
+# so a malformed data-URI header (e.g. stray whitespace/control chars from a
+# hand-built URI) can't be forwarded verbatim into the request payload as mime_type.
+_MIME_TYPE_RE = re.compile(r"^[\w.+-]+/[\w.+-]+$")
+
+
+def _valid_mime_type(candidate: str) -> str | None:
+    """Return `candidate` if it looks like a `type/subtype` MIME string, else None."""
+    return candidate if _MIME_TYPE_RE.match(candidate) else None
+
+
+def _gemini_text_only(content: Any) -> str:
+    """Reduce ChatMessage.content to plain text; raise on non-text blocks.
+
+    Only used for `system` messages — Gemini's `system_instruction` is a
+    plain string field, unlike `contents[].parts` which accepts media.
+    """
+    if isinstance(content, str):
+        return content
+    text_parts: list[str] = []
+    for block in content:
+        if isinstance(block, TextContent):
+            text_parts.append(block.text)
+            continue
+        raise ProviderError(
+            f"Gemini's system_instruction does not accept {type(block).__name__} — "
+            "only TextContent blocks are supported for system messages.",
+            error_code=ProviderErrorCode.INVALID_INPUT,
+        )
+    return "".join(text_parts)
+
+
+def _parse_response(model: str, raw: Any) -> ChatResponse:
+    """Translate a Gemini GenerateContentResponse into a uniform ChatResponse."""
+    raw_dict = raw.model_dump() if hasattr(raw, "model_dump") else dict(raw)
+
+    text = ""
+    finish_reason: str | None = None
+    tool_calls: list[ToolCall] = []
+
+    candidates = raw_dict.get("candidates") or []
+    if candidates:
+        first = candidates[0] or {}
+        # Real SDK returns FinishReason enum; stringify so the str field validates.
+        fr = first.get("finish_reason")
+        finish_reason = str(fr).rsplit(".", 1)[-1] if fr is not None else None
+        for part in (first.get("content") or {}).get("parts") or []:
+            if "text" in part and part["text"]:
+                text += part["text"]
+            fn = part.get("function_call")
+            if fn:
+                tool_calls.append(
+                    ToolCall(
+                        id=fn.get("id", fn.get("name", "")),
+                        name=fn.get("name", ""),
+                        arguments=fn.get("args", {}) or {},
+                    )
+                )
+
+    usage = raw_dict.get("usage_metadata") or {}
+    tokens_in = usage.get("prompt_token_count")
+    tokens_out = usage.get("candidates_token_count")
+    cached = usage.get("cached_content_token_count")
+
+    return ChatResponse(
+        text=text,
+        model=raw_dict.get("model_version") or model,
+        finish_reason=finish_reason,
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
+        tokens_cached=cached,
+        tool_calls=tool_calls,
+        cost_usd=None,  # chat() reports no cost; compute from tokens_in/out with your own rates.
+        raw=raw_dict,
+    )
+
+
+def chat(
+    model: str,
+    messages: list[ChatMessage] | list[dict] | None = None,
+    *,
+    prompt: str | None = None,
+    system: str | None = None,
+    tools: list[dict] | None = None,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    api_key: str | None = None,
+    project: str | None = None,
+    location: str = "us-central1",
+    client: Any = None,
+    retry_on_rate_limit: bool = False,
+    retry_policy: RetryPolicy | None = None,
+    **kwargs: Any,
+) -> ChatResponse:
+    """Call a Google Gemini model and return a uniform `ChatResponse`.
+
+    Args:
+        model: Gemini model id (e.g. "gemini-2.5-flash", "gemini-2.5-pro").
+        messages: Conversation turns. Mutually exclusive with `prompt`.
+        prompt: Single-turn shorthand — wrapped as a user message.
+        system: System instruction (Gemini's `system_instruction`).
+        tools: Tool definitions in Gemini's native shape (function_declarations).
+        temperature, max_tokens: Sampling controls (mapped to `generation_config`).
+        api_key: Gemini API key override; otherwise GEMINI_API_KEY env var.
+        project: GCP project for Vertex AI auth (mutually exclusive with api_key).
+        location: GCP region for Vertex AI.
+        client: Pre-built `google.genai.Client` — escape hatch for tests.
+        retry_on_rate_limit: When ``True``, waits and retries transient
+            failures — 429 and 5xx (``SERVER_ERROR``); ``TIMEOUT`` too when
+            an explicit ``retry_policy`` includes it — using the server's
+            ``Retry-After`` hint (falling back to exponential backoff)
+            instead of raising immediately. Name kept for compatibility.
+            Off by default. See ``docs/features/llm-calls.md``.
+        retry_policy: Optional ``RetryPolicy`` controlling attempt cap,
+            retryable codes, and backoff when ``retry_on_rate_limit=True``
+            (or passed on its own to opt in implicitly). Defaults to
+            ``RetryPolicy()`` (6 attempts).
+        **kwargs: Extra keys merged into the `generation_config`.
+
+    Raises:
+        ProviderError: With a classified `error_code` for any SDK exception.
+            Re-raised once retries (if enabled) are exhausted.
+    """
+    # retry_policy alone (without the bool flag) also opts in — see the
+    # retry_policy docstring above.
+    retry_managed = retry_on_rate_limit or retry_policy is not None
+
+    own_client = client is None
+    if own_client:
+        try:
+            from google import genai
+        except ImportError as exc:
+            raise ProviderError(
+                "google-genai package not installed. Run: pip install google-genai"
+            ) from exc
+        ckwargs: dict[str, Any] = {}
+        if retry_managed:
+            # We already retry via call_with_rate_limit_retry below; pin the
+            # SDK's own retry to a single attempt (google-genai retries up to
+            # 5 times whenever HttpRetryOptions is configured) so
+            # RetryPolicy.max_attempts stays authoritative instead of being
+            # multiplied by a second, invisible retry layer underneath it.
+            # `genai.types` (not a fresh `from google.genai import types`) so
+            # this works off the already-imported `genai` module — matters for
+            # tests that stub `sys.modules["google"]` without a real
+            # `google.genai` submodule to resolve independently.
+            ckwargs["http_options"] = genai.types.HttpOptions(
+                retry_options=genai.types.HttpRetryOptions(attempts=1)
+            )
+        if project:
+            client = genai.Client(vertexai=True, project=project, location=location, **ckwargs)
+        else:
+            if api_key:
+                ckwargs["api_key"] = api_key
+            client = genai.Client(**ckwargs)
+
+    contents, system_instruction = _normalize_to_gemini(messages, prompt, system)
+
+    gen_config: dict[str, Any] = {}
+    if temperature is not None:
+        gen_config["temperature"] = temperature
+    if max_tokens is not None:
+        gen_config["max_output_tokens"] = max_tokens
+    if system_instruction is not None:
+        gen_config["system_instruction"] = system_instruction
+    if tools is not None:
+        gen_config["tools"] = tools
+    gen_config.update(kwargs)
+
+    call_kwargs: dict[str, Any] = {"model": model, "contents": contents}
+    if gen_config:
+        call_kwargs["config"] = gen_config
+
+    def _invoke() -> Any:
+        try:
+            return client.models.generate_content(**call_kwargs)
+        except ProviderError:
+            raise
+        except Exception as exc:
+            raise ProviderError(
+                f"Gemini chat failed: {exc}",
+                error_code=map_google_error(exc),
+                retry_after=retry_after_from_response(exc),
+            ) from exc
+
+    try:
+        # retry_policy= alone opts in implicitly, even without retry_on_rate_limit=True.
+        if retry_managed:
+            raw = call_with_rate_limit_retry(_invoke, policy=retry_policy)
+        else:
+            raw = _invoke()
+    finally:
+        if own_client:
+            # Best-effort close — not all google-genai versions expose close(),
+            # so probe via hasattr to stay compatible. Closed once here (not
+            # per attempt) so the client stays open across retries.
+            close_fn = getattr(client, "close", None)
+            if callable(close_fn):
+                close_fn()
+
+    return _parse_response(model, raw)
+
+
+async def achat(
+    model: str,
+    messages: list[ChatMessage] | list[dict] | None = None,
+    **kwargs: Any,
+) -> ChatResponse:
+    """Async wrapper around `chat()`. Runs in a worker thread (matches `BaseProvider.ainvoke`).
+
+    Accepts the same `retry_on_rate_limit` / `retry_policy` kwargs as `chat()`.
+    Any backoff sleep happens inside the worker thread, so it never blocks the
+    event loop — no separate async retry path is needed.
+    """
+    return await asyncio.to_thread(chat, model, messages, **kwargs)

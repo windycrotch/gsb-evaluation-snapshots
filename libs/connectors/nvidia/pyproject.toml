@@ -1,0 +1,63 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "genblaze-nvidia"
+version = "0.3.4"
+description = "NVIDIA NIM / build.nvidia.com media provider adapters for genblaze (video, image, audio, chat)"
+authors = [{name = "Jeronimo De Leon", email = "jdeleon@backblaze.com"}]
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Typing :: Typed",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia",
+    "Topic :: Software Development :: Libraries",
+]
+keywords = ["genblaze", "ai", "media", "manifest", "provenance", "c2pa-ready", "genai", "pipeline", "nvidia", "nim", "nemotron"]
+
+dependencies = [
+    "genblaze-core>=0.3.7,<0.4",
+    # <1: bounded-major convention (#61) — httpx is pre-1.0, so this caps at
+    # its next major.
+    "httpx>=0.24,<1",
+]
+
+[project.urls]
+Homepage = "https://github.com/backblaze-labs/genblaze"
+Documentation = "https://github.com/backblaze-labs/genblaze"
+Repository = "https://github.com/backblaze-labs/genblaze"
+Changelog = "https://github.com/backblaze-labs/genblaze/blob/main/CHANGELOG.md"
+Issues = "https://github.com/backblaze-labs/genblaze/issues"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+]
+chat = [
+    # <4: bounded-major convention (#61); matches the cap the openai
+    # connector (genblaze-openai) uses for the same package.
+    "openai>=1.0,<4",
+]
+
+[project.entry-points."genblaze.providers"]
+nvidia-video = "genblaze_nvidia:NvidiaVideoProvider"
+nvidia-image = "genblaze_nvidia:NvidiaImageProvider"
+nvidia-audio = "genblaze_nvidia:NvidiaAudioProvider"
+nvidia-chat = "genblaze_nvidia:NvidiaChatProvider"
+
+[tool.hatch.build.targets.wheel]
+packages = ["genblaze_nvidia"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.deptry]
+# Treat the `dev` extra as dev-only tooling so deptry does not flag pytest
+# (and other test-only deps) as unused declared deps (DEP002).
+optional_dependencies_dev_groups = ["dev"]

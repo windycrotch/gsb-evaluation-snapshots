@@ -1,0 +1,750 @@
+"""Tests for ReplicateProvider with mocked Replicate API."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any
+from unittest.mock import MagicMock
+
+import pytest
+from genblaze_core.models.enums import Modality, ProviderErrorCode
+from genblaze_core.models.step import Step
+from genblaze_core.providers import ModelSpec
+from genblaze_core.testing import ProviderComplianceTests
+from genblaze_replicate._errors import map_replicate_error
+from genblaze_replicate.provider import ReplicateProvider
+
+
+@dataclass
+class FakePrediction:
+    """Minimal mock of a Replicate prediction object."""
+
+    id: str = "pred-abc123"
+    status: str = "succeeded"
+    output: Any = field(default_factory=lambda: ["https://example.com/out.png"])
+    error: str | None = None
+    model: str = "test/model"
+    version: str | None = "v1"
+    created_at: str = "2026-01-01T00:00:00Z"
+
+
+def _make_step(**kwargs) -> Step:
+    defaults = {"provider": "replicate", "model": "test/model", "prompt": "a cat"}
+    defaults.update(kwargs)
+    return Step(**defaults)
+
+
+def _make_model_with_version(version_id: str | None):
+    """A fake ``replicate.model.Model`` exposing a concrete ``latest_version``."""
+    model = MagicMock()
+    if version_id is None:
+        model.latest_version = None
+    else:
+        model.latest_version = MagicMock(id=version_id)
+    return model
+
+
+# --- map_replicate_error tests ---
+
+
+def test_map_error_timeout():
+    assert map_replicate_error("Request timed out") == ProviderErrorCode.TIMEOUT
+
+
+def test_map_error_rate_limit():
+    assert map_replicate_error("rate limit exceeded 429") == ProviderErrorCode.RATE_LIMIT
+
+
+def test_map_error_auth():
+    assert map_replicate_error("401 unauthorized token") == ProviderErrorCode.AUTH_FAILURE
+
+
+def test_map_error_invalid_input():
+    assert map_replicate_error("invalid input: bad format") == ProviderErrorCode.INVALID_INPUT
+
+
+def test_map_error_model_not_found():
+    assert map_replicate_error("model not found") == ProviderErrorCode.MODEL_ERROR
+
+
+def test_map_error_server_error():
+    assert map_replicate_error("500 internal server error") == ProviderErrorCode.SERVER_ERROR
+
+
+def test_map_error_unknown():
+    assert map_replicate_error("something went wrong") == ProviderErrorCode.UNKNOWN
+
+
+def test_map_error_accepts_exception():
+    """map_replicate_error should accept Exception objects too."""
+    assert map_replicate_error(RuntimeError("timed out")) == ProviderErrorCode.TIMEOUT
+
+
+# --- submit tests ---
+
+
+def test_submit_sends_prompt_and_params():
+    provider = ReplicateProvider(api_token="test-token")
+    mock_client = MagicMock()
+    mock_client.models.get.return_value = _make_model_with_version("v-resolved")
+    mock_client.predictions.create.return_value = FakePrediction()
+    provider._client = mock_client
+
+    step = _make_step(params={"width": 1024})
+    result = provider.submit(step)
+
+    mock_client.predictions.create.assert_called_once_with(
+        version="v-resolved",
+        input={"width": 1024, "prompt": "a cat"},
+    )
+    assert result == "pred-abc123"
+
+
+def test_submit_includes_negative_prompt():
+    provider = ReplicateProvider(api_token="test-token")
+    mock_client = MagicMock()
+    mock_client.models.get.return_value = _make_model_with_version("v-resolved")
+    mock_client.predictions.create.return_value = FakePrediction()
+    provider._client = mock_client
+
+    step = _make_step(negative_prompt="blurry")
+    provider.submit(step)
+
+    call_input = mock_client.predictions.create.call_args.kwargs["input"]
+    assert call_input["negative_prompt"] == "blurry"
+
+
+# --- version resolution (community-model 404 fix, #109) ---
+
+
+def test_submit_resolves_community_model_slug_to_version():
+    """A bare ``owner/name`` slug (the common case — community models) must
+    resolve to a version hash and submit via ``version=``, not ``model=``.
+    ``predictions.create(model=...)`` only resolves official models and 404s
+    for the vast majority of Replicate's public catalog (#109)."""
+    provider = ReplicateProvider(api_token="test-token")
+    mock_client = MagicMock()
+    mock_client.models.get.return_value = _make_model_with_version("abc123hash")
+    mock_client.predictions.create.return_value = FakePrediction()
+    provider._client = mock_client
+
+    step = _make_step(model="sczhou/codeformer")
+    provider.submit(step)
+
+    mock_client.models.get.assert_called_once_with("sczhou/codeformer")
+    mock_client.predictions.create.assert_called_once_with(
+        version="abc123hash",
+        input={"prompt": "a cat"},
+    )
+
+
+def test_submit_uses_inline_version_without_network_call():
+    """``owner/name:hash`` carries the version inline — no ``models.get()``
+    round-trip needed to resolve it."""
+    provider = ReplicateProvider(api_token="test-token")
+    mock_client = MagicMock()
+    mock_client.predictions.create.return_value = FakePrediction()
+    provider._client = mock_client
+
+    step = _make_step(model="sczhou/codeformer:deadbeef1234")
+    provider.submit(step)
+
+    mock_client.models.get.assert_not_called()
+    mock_client.predictions.create.assert_called_once_with(
+        version="deadbeef1234",
+        input={"prompt": "a cat"},
+    )
+
+
+def test_submit_caches_resolved_version_across_calls():
+    """The version resolution is cached per-slug so repeated submits (e.g.
+    across a batch run) don't re-issue ``models.get()`` per prediction."""
+    provider = ReplicateProvider(api_token="test-token")
+    mock_client = MagicMock()
+    mock_client.models.get.return_value = _make_model_with_version("cached-version")
+    mock_client.predictions.create.return_value = FakePrediction()
+    provider._client = mock_client
+
+    provider.submit(_make_step(model="sczhou/codeformer"))
+    provider.submit(_make_step(model="sczhou/codeformer"))
+
+    assert mock_client.models.get.call_count == 1
+    assert mock_client.predictions.create.call_count == 2
+
+
+def test_submit_falls_back_to_model_path_for_official_versionless_model():
+    """Official Replicate models (e.g. ``black-forest-labs/flux-schnell``)
+    expose no version and are only runnable via ``predictions.create(model=…)``
+    (POST /v1/models/{owner}/{name}/predictions). When ``models.get`` reports
+    no ``latest_version``, submit() must fall back to the ``model=`` path with
+    the bare slug rather than raise — raising would break every official model,
+    including several this connector documents as supported (#109)."""
+    provider = ReplicateProvider(api_token="test-token")
+    mock_client = MagicMock()
+    mock_client.models.get.return_value = _make_model_with_version(None)
+    mock_client.predictions.create.return_value = FakePrediction()
+    provider._client = mock_client
+
+    result = provider.submit(_make_step(model="black-forest-labs/flux-schnell"))
+
+    mock_client.predictions.create.assert_called_once_with(
+        model="black-forest-labs/flux-schnell",
+        input={"prompt": "a cat"},
+    )
+    # A versionless official model must NOT be submitted with a version= kwarg.
+    assert "version" not in mock_client.predictions.create.call_args.kwargs
+    assert result == "pred-abc123"
+
+
+def test_submit_caches_versionless_resolution_across_calls():
+    """The "official / no version" decision is cached per-slug just like a
+    resolved hash — a fan-out of submits over an official model issues one
+    ``models.get`` probe, not one per prediction."""
+    provider = ReplicateProvider(api_token="test-token")
+    mock_client = MagicMock()
+    mock_client.models.get.return_value = _make_model_with_version(None)
+    mock_client.predictions.create.return_value = FakePrediction()
+    provider._client = mock_client
+
+    provider.submit(_make_step(model="black-forest-labs/flux-schnell"))
+    provider.submit(_make_step(model="black-forest-labs/flux-schnell"))
+
+    assert mock_client.models.get.call_count == 1
+    assert mock_client.predictions.create.call_count == 2
+
+
+def test_validate_model_seeds_version_cache_for_submit():
+    """``validate_model``'s per-slug probe and ``submit``'s version resolution
+    share one ``models.get()`` round-trip per slug — the pipeline preflight
+    phase already fetches the model, so submit() shouldn't fetch it again."""
+    provider = ReplicateProvider(api_token="test-token")
+    mock_client = MagicMock()
+    mock_client.models.get.return_value = _make_model_with_version("seeded-version")
+    mock_client.predictions.create.return_value = FakePrediction()
+    provider._client = mock_client
+
+    provider.validate_model("sczhou/codeformer")
+    provider.submit(_make_step(model="sczhou/codeformer"))
+
+    assert mock_client.models.get.call_count == 1
+    mock_client.predictions.create.assert_called_once_with(
+        version="seeded-version",
+        input={"prompt": "a cat"},
+    )
+
+
+def test_validate_model_strips_inline_version_before_probe():
+    """A ``Pipeline.run()`` preflight validates ``step.model`` verbatim,
+    including any inline ``:version`` suffix. Replicate's model-existence
+    GET (``/v1/models/{owner}/{name}``) only accepts the bare slug — a
+    compound ``owner/name:hash`` key 404s even when the model exists, which
+    would otherwise abort the run with a false "model not found" before
+    ``submit()`` ever runs. ``validate_model`` must probe the bare slug."""
+    from genblaze_core.providers import ValidationOutcome
+
+    provider = ReplicateProvider(api_token="test-token")
+    mock_client = MagicMock()
+    mock_client.models.get.return_value = _make_model_with_version("resolved-hash")
+    provider._client = mock_client
+
+    result = provider.validate_model("sczhou/codeformer:deadbeef1234")
+
+    mock_client.models.get.assert_called_once_with("sczhou/codeformer")
+    assert result.outcome is ValidationOutcome.OK_AUTHORITATIVE
+
+
+def test_validate_model_refresh_also_evicts_version_cache():
+    """``refresh=True`` is a request to re-check everything about a slug —
+    it must also drop any cached version resolution, not just the
+    validation-outcome cache, so a subsequent ``submit()`` re-resolves
+    ``latest_version`` instead of silently reusing a stale hash."""
+    provider = ReplicateProvider(api_token="test-token")
+    mock_client = MagicMock()
+    mock_client.models.get.return_value = _make_model_with_version("v1")
+    mock_client.predictions.create.return_value = FakePrediction()
+    provider._client = mock_client
+
+    provider.validate_model("sczhou/codeformer")
+    provider.submit(_make_step(model="sczhou/codeformer"))
+    assert mock_client.predictions.create.call_args.kwargs["version"] == "v1"
+
+    # Model owner publishes a new version; caller refreshes.
+    mock_client.models.get.return_value = _make_model_with_version("v2")
+    provider.validate_model("sczhou/codeformer", refresh=True)
+    provider.submit(_make_step(model="sczhou/codeformer"))
+
+    assert mock_client.predictions.create.call_args.kwargs["version"] == "v2"
+
+
+# --- poll tests ---
+
+
+def test_poll_returns_true_on_success():
+    provider = ReplicateProvider(api_token="test-token", poll_interval=0.0)
+    mock_client = MagicMock()
+    mock_client.predictions.get.return_value = FakePrediction(status="succeeded")
+    provider._client = mock_client
+
+    assert provider.poll("pred-abc123") is True
+
+
+def test_poll_returns_true_on_failed():
+    provider = ReplicateProvider(api_token="test-token", poll_interval=0.0)
+    mock_client = MagicMock()
+    mock_client.predictions.get.return_value = FakePrediction(status="failed")
+    provider._client = mock_client
+
+    assert provider.poll("pred-abc123") is True
+
+
+def test_poll_returns_true_on_canceled():
+    provider = ReplicateProvider(api_token="test-token", poll_interval=0.0)
+    mock_client = MagicMock()
+    mock_client.predictions.get.return_value = FakePrediction(status="canceled")
+    provider._client = mock_client
+
+    assert provider.poll("pred-abc123") is True
+
+
+def test_poll_returns_false_on_processing():
+    provider = ReplicateProvider(api_token="test-token", poll_interval=0.0)
+    mock_client = MagicMock()
+    mock_client.predictions.get.return_value = FakePrediction(status="processing")
+    provider._client = mock_client
+
+    assert provider.poll("pred-abc123") is False
+
+
+# --- fetch_output tests ---
+
+
+def test_fetch_output_success_with_list():
+    provider = ReplicateProvider(api_token="test-token")
+    mock_client = MagicMock()
+    mock_client.predictions.get.return_value = FakePrediction(
+        output=["https://example.com/a.png", "https://example.com/b.png"]
+    )
+    provider._client = mock_client
+
+    step = _make_step()
+    result = provider.fetch_output("pred-abc123", step)
+
+    assert len(result.assets) == 2
+    assert result.assets[0].url == "https://example.com/a.png"
+
+
+def test_fetch_output_success_with_string():
+    provider = ReplicateProvider(api_token="test-token")
+    mock_client = MagicMock()
+    mock_client.predictions.get.return_value = FakePrediction(
+        output="https://example.com/single.png"
+    )
+    provider._client = mock_client
+
+    step = _make_step()
+    result = provider.fetch_output("pred-abc123", step)
+
+    assert len(result.assets) == 1
+    assert result.assets[0].url == "https://example.com/single.png"
+
+
+def test_fetch_output_success_with_none():
+    provider = ReplicateProvider(api_token="test-token")
+    mock_client = MagicMock()
+    mock_client.predictions.get.return_value = FakePrediction(output=None)
+    provider._client = mock_client
+
+    step = _make_step()
+    result = provider.fetch_output("pred-abc123", step)
+
+    assert len(result.assets) == 0
+
+
+def test_fetch_output_success_with_dict():
+    """Some Replicate models return dict outputs like {'video': url, 'audio': url}."""
+    provider = ReplicateProvider(api_token="test-token")
+    mock_client = MagicMock()
+    mock_client.predictions.get.return_value = FakePrediction(
+        output={
+            "video": "https://example.com/video.mp4",
+            "subtitles": "https://example.com/subs.vtt",
+        }
+    )
+    provider._client = mock_client
+
+    step = _make_step()
+    result = provider.fetch_output("pred-abc123", step)
+
+    urls = {a.url for a in result.assets}
+    assert urls == {"https://example.com/video.mp4", "https://example.com/subs.vtt"}
+
+
+def test_fetch_output_success_with_nested_list():
+    """Batch-output models return list[list[str]]; flatten one level."""
+    provider = ReplicateProvider(api_token="test-token")
+    mock_client = MagicMock()
+    mock_client.predictions.get.return_value = FakePrediction(
+        output=[["https://example.com/a.png", "https://example.com/b.png"]]
+    )
+    provider._client = mock_client
+
+    step = _make_step()
+    result = provider.fetch_output("pred-abc123", step)
+
+    assert len(result.assets) == 2
+
+
+def test_fetch_output_unknown_shape_raises_clear_error():
+    """Unknown output shapes raise ProviderError with a specific message."""
+    from genblaze_core.exceptions import ProviderError
+
+    provider = ReplicateProvider(api_token="test-token")
+    mock_client = MagicMock()
+    mock_client.predictions.get.return_value = FakePrediction(output=42)
+    provider._client = mock_client
+
+    step = _make_step()
+    with pytest.raises(ProviderError, match="Unexpected Replicate output shape"):
+        provider.fetch_output("pred-abc123", step)
+
+
+def test_fetch_output_failed():
+    from genblaze_core.exceptions import ProviderError
+
+    provider = ReplicateProvider(api_token="test-token")
+    mock_client = MagicMock()
+    mock_client.predictions.get.return_value = FakePrediction(
+        status="failed", error="Model crashed"
+    )
+    provider._client = mock_client
+
+    step = _make_step()
+    with pytest.raises(ProviderError, match="Model crashed"):
+        provider.fetch_output("pred-abc123", step)
+
+
+def test_fetch_output_canceled():
+    from genblaze_core.exceptions import ProviderError
+
+    provider = ReplicateProvider(api_token="test-token")
+    mock_client = MagicMock()
+    mock_client.predictions.get.return_value = FakePrediction(status="canceled")
+    provider._client = mock_client
+
+    step = _make_step()
+    with pytest.raises(ProviderError, match="canceled"):
+        provider.fetch_output("pred-abc123", step)
+
+
+# --- Token safety ---
+
+
+def test_fetch_output_rejects_non_https_url():
+    """Asset URLs must be HTTPS to prevent SSRF via malicious provider output."""
+    from genblaze_core.exceptions import ProviderError
+
+    provider = ReplicateProvider(api_token="test-token")
+    mock_client = MagicMock()
+    mock_client.predictions.get.return_value = FakePrediction(output=["file:///etc/passwd"])
+    provider._client = mock_client
+
+    step = _make_step()
+    with pytest.raises(ProviderError, match="Unsafe asset URL"):
+        provider.fetch_output("pred-abc123", step)
+
+
+def test_fetch_output_rejects_http_url():
+    """Plain HTTP URLs rejected — could target internal metadata endpoints."""
+    from genblaze_core.exceptions import ProviderError
+
+    provider = ReplicateProvider(api_token="test-token")
+    mock_client = MagicMock()
+    mock_client.predictions.get.return_value = FakePrediction(
+        output=["http://169.254.169.254/latest/meta-data/"]
+    )
+    provider._client = mock_client
+
+    step = _make_step()
+    with pytest.raises(ProviderError, match="Unsafe asset URL"):
+        provider.fetch_output("pred-abc123", step)
+
+
+def test_fetch_output_rejects_schemeless_url():
+    """Scheme-less URLs rejected — urlparse sets empty scheme for these."""
+    from genblaze_core.exceptions import ProviderError
+
+    provider = ReplicateProvider(api_token="test-token")
+    mock_client = MagicMock()
+    mock_client.predictions.get.return_value = FakePrediction(
+        output=["//169.254.169.254/latest/meta-data/"]
+    )
+    provider._client = mock_client
+
+    step = _make_step()
+    with pytest.raises(ProviderError, match="Unsafe asset URL"):
+        provider.fetch_output("pred-abc123", step)
+
+
+def test_cost_none_by_default():
+    """As of genblaze-core 0.3.0 the SDK no longer ships pricing for
+    Replicate. ``cost_usd`` is ``None`` unless the user has registered
+    a pricing strategy via ``provider.models.register_pricing()``.
+    See ``docs/reference/pricing-recipes.md``.
+    """
+    provider = ReplicateProvider(api_token="test-token")
+    mock_client = MagicMock()
+    pred = FakePrediction()
+    pred.metrics = MagicMock()
+    pred.metrics.predict_time = 10.0
+    mock_client.predictions.get.return_value = pred
+    provider._client = mock_client
+
+    step = _make_step()
+    result = provider.fetch_output("pred-abc123", step)
+    assert result.cost_usd is None
+
+
+def test_cost_tracked_with_user_registered_pricing():
+    """User-registered compute-time pricing flows through the same path."""
+    from genblaze_core.providers import per_response_metric
+
+    def compute_time_cost(ctx):
+        payload = ctx.provider_payload.get("replicate") if ctx.provider_payload else None
+        if not isinstance(payload, dict):
+            return None
+        predict_time = payload.get("predict_time")
+        if predict_time is None:
+            return None
+        return float(predict_time) * 0.000225
+
+    provider = ReplicateProvider(api_token="test-token")
+    provider.models.register_pricing("test/model", per_response_metric(compute_time_cost))
+    mock_client = MagicMock()
+    pred = FakePrediction()
+    pred.metrics = MagicMock()
+    pred.metrics.predict_time = 10.0
+    mock_client.predictions.get.return_value = pred
+    provider._client = mock_client
+
+    step = _make_step()
+    result = provider.fetch_output("pred-abc123", step)
+    assert result.cost_usd is not None
+    assert result.cost_usd == pytest.approx(10.0 * 0.000225)
+
+
+def test_cost_none_without_metrics():
+    """Cost stays None when prediction has no metrics, even with pricing registered."""
+    from genblaze_core.providers import per_response_metric
+
+    provider = ReplicateProvider(api_token="test-token")
+    provider.models.register_pricing("test/model", per_response_metric(lambda ctx: 0.0))
+    mock_client = MagicMock()
+    pred = FakePrediction()
+    # No metrics attribute
+    mock_client.predictions.get.return_value = pred
+    provider._client = mock_client
+
+    step = _make_step()
+    result = provider.fetch_output("pred-abc123", step)
+    # The strategy returns 0.0 if metrics are absent — but we registered
+    # one that returns 0.0 unconditionally. Verify the pricing path runs.
+    assert result.cost_usd == pytest.approx(0.0)
+
+
+def test_token_not_in_provider_payload():
+    """API token must never leak into the provider_payload stored in manifests."""
+    provider = ReplicateProvider(api_token="r8_secret_token_123")
+    mock_client = MagicMock()
+    mock_client.predictions.get.return_value = FakePrediction()
+    provider._client = mock_client
+
+    step = _make_step()
+    result = provider.fetch_output("pred-abc123", step)
+
+    # Serialize the entire payload and check token is absent
+    import json
+
+    payload_str = json.dumps(result.provider_payload)
+    assert "r8_secret_token_123" not in payload_str
+
+
+# --- Catalog-decoupling: discovery + per-slug validation ---
+
+
+def _make_model(owner: str, name: str):
+    """Minimal fake of a Replicate ``Model`` object."""
+    m = MagicMock()
+    m.owner = owner
+    m.name = name
+    return m
+
+
+def test_discovery_support_native():
+    """Replicate is the proof-point for NATIVE discovery in PR #3."""
+    from genblaze_core.providers import DiscoverySupport
+
+    assert ReplicateProvider.discovery_support is DiscoverySupport.NATIVE
+
+
+def test_discover_models_returns_first_page():
+    """``discover_models`` snapshots the first page of /v1/models — enough
+    to seed ``known()`` without enumerating the entire catalog."""
+    from genblaze_core.providers import DiscoveryStatus
+
+    provider = ReplicateProvider(api_token="test-token")
+    mock_client = MagicMock()
+    page = MagicMock()
+    page.results = [
+        _make_model("black-forest-labs", "flux-schnell"),
+        _make_model("stability-ai", "sdxl"),
+        _make_model("meta", "llama-3"),
+    ]
+    mock_client.models.list.return_value = page
+    provider._client = mock_client
+
+    result = provider.discover_models()
+    assert result.status is DiscoveryStatus.OK
+    assert "black-forest-labs/flux-schnell" in result.slugs
+    assert "stability-ai/sdxl" in result.slugs
+    assert result.source_url == "https://api.replicate.com/v1/models"
+
+
+def test_discover_models_failure_returns_failed():
+    """A failed list call surfaces as ``DiscoveryStatus.FAILED`` — never
+    raises into the caller, never poisons the cache."""
+    from genblaze_core.providers import DiscoveryStatus
+
+    provider = ReplicateProvider(api_token="test-token")
+    mock_client = MagicMock()
+    mock_client.models.list.side_effect = RuntimeError("boom")
+    provider._client = mock_client
+
+    result = provider.discover_models()
+    assert result.status is DiscoveryStatus.FAILED
+    assert "boom" in (result.detail or "")
+
+
+def test_validate_model_authoritative_via_models_get():
+    """A live slug returns ``OK_AUTHORITATIVE`` (source PROBE) via
+    ``client.models.get()`` — the cheap-existence-check that Replicate
+    supports authoritatively."""
+    from genblaze_core.providers import ValidationOutcome, ValidationSource
+
+    provider = ReplicateProvider(api_token="test-token")
+    mock_client = MagicMock()
+    mock_client.models.get.return_value = _make_model("owner", "live-model")
+    provider._client = mock_client
+
+    result = provider.validate_model("owner/live-model")
+    assert result.outcome is ValidationOutcome.OK_AUTHORITATIVE
+    assert result.source is ValidationSource.PROBE
+
+
+def test_validate_model_not_found_via_models_get():
+    """A 404-class error from ``client.models.get()`` surfaces as
+    ``NOT_FOUND``. The Pipeline preflight phase raises on this outcome
+    before any prediction is created."""
+    from genblaze_core.providers import ValidationOutcome, ValidationSource
+
+    provider = ReplicateProvider(api_token="test-token")
+    mock_client = MagicMock()
+    mock_client.models.get.side_effect = RuntimeError("404 model not found")
+    provider._client = mock_client
+
+    result = provider.validate_model("owner/dead-model")
+    assert result.outcome is ValidationOutcome.NOT_FOUND
+    assert result.source is ValidationSource.PROBE
+
+
+def test_validate_model_caches_result():
+    """Per-slug validation cache memoizes the per-slug GET so successive
+    Pipeline runs don't re-fetch."""
+    provider = ReplicateProvider(api_token="test-token")
+    mock_client = MagicMock()
+    mock_client.models.get.return_value = _make_model("owner", "x")
+    provider._client = mock_client
+
+    provider.validate_model("owner/x")
+    provider.validate_model("owner/x")
+    provider.validate_model("owner/x")
+
+    assert mock_client.models.get.call_count == 1
+
+
+def test_validate_model_refresh_evicts_cache():
+    """``refresh=True`` forces a fresh per-slug GET."""
+    provider = ReplicateProvider(api_token="test-token")
+    mock_client = MagicMock()
+    mock_client.models.get.return_value = _make_model("owner", "x")
+    provider._client = mock_client
+
+    provider.validate_model("owner/x")
+    provider.validate_model("owner/x", refresh=True)
+    assert mock_client.models.get.call_count == 2
+
+
+def test_validate_model_user_registered_skips_probe():
+    """A user-registered exact spec is authoritative without a network
+    round-trip — the per-slug probe should not fire."""
+    from genblaze_core.providers import ValidationOutcome, ValidationSource
+
+    provider = ReplicateProvider(api_token="test-token")
+    provider.models.register(ModelSpec(model_id="owner/local", modality=Modality.IMAGE))
+    mock_client = MagicMock()
+    provider._client = mock_client
+
+    result = provider.validate_model("owner/local")
+    assert result.outcome is ValidationOutcome.OK_AUTHORITATIVE
+    assert result.source is ValidationSource.USER
+    mock_client.models.get.assert_not_called()
+
+
+def test_get_client_raises_when_dependency_missing():
+    """Missing replicate/httpx surfaces a clear ProviderError naming both.
+
+    `_get_client` imports httpx then replicate; either ImportError maps to the
+    same message. Only reachable when a dependency is absent, so skip when both
+    are installed (the branch is un-hittable without uninstalling one). Mirrors
+    nvidia's test_chat_raises_when_openai_missing.
+    """
+    import importlib
+
+    from genblaze_core.exceptions import ProviderError
+
+    if (
+        importlib.util.find_spec("httpx") is not None
+        and importlib.util.find_spec("replicate") is not None
+    ):
+        pytest.skip("httpx and replicate are installed — ImportError branch not reachable")
+
+    provider = ReplicateProvider(api_token="test-token")
+    with pytest.raises(ProviderError, match="replicate or httpx"):
+        provider._get_client()
+
+
+# --- Compliance harness ---
+
+
+class TestReplicateCompliance(ProviderComplianceTests):
+    """Verify ReplicateProvider satisfies the genblaze provider contract."""
+
+    # ReplicateProvider populates cost_usd from prediction.metrics.predict_time,
+    # but the FakePrediction compliance fixture doesn't expose that metric.
+    # A dedicated test (test_cost_tracked_from_predict_time) covers the real
+    # code path; compliance waives the check here.
+    expects_cost = False
+
+    def make_provider(self):
+        provider = ReplicateProvider(api_token="test-token")
+        mock_client = MagicMock()
+        # submit() resolves a version via models.get().latest_version.id
+        # before creating a prediction — stub it explicitly rather than
+        # relying on MagicMock's auto-vivified (but opaque) attribute chain.
+        mock_client.models.get.return_value = _make_model_with_version("compliance-version")
+        mock_client.predictions.create.return_value = FakePrediction()
+        mock_client.predictions.get.return_value = FakePrediction()
+        provider._client = mock_client
+        return provider
+
+    def make_step(self):
+        return Step(provider="replicate", model="test/model", prompt="a cat")

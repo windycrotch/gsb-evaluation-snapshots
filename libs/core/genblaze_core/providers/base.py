@@ -1,0 +1,2301 @@
+"""Base provider — abstract interface for media generation APIs."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import threading
+import time
+import warnings
+from abc import ABCMeta, abstractmethod
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from decimal import Decimal
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Literal
+from urllib.parse import urlparse
+from urllib.request import url2pathname
+
+from genblaze_core._utils import new_id, sanitize_error, utc_now
+from genblaze_core.exceptions import ProviderError
+from genblaze_core.models.asset import Asset
+from genblaze_core.models.enums import (
+    Modality,
+    ProviderErrorCode,
+    StepStatus,
+)
+from genblaze_core.models.step import UPSTREAM_ID_KEY, Step
+from genblaze_core.observability.span import StepSpan
+from genblaze_core.providers.discovery import DiscoveryResult
+from genblaze_core.providers.family import (
+    DiscoverySupport,
+    LiveProbeResult,
+)
+from genblaze_core.providers.model_registry import EMPTY_REGISTRY, ModelRegistry, compute_cost
+from genblaze_core.providers.pricing import PricingContext
+from genblaze_core.providers.probe import ProbeResult, ProbeStatus
+from genblaze_core.providers.progress import ProgressEvent
+from genblaze_core.providers.retry import PRE_RESPONSE_EXCEPTIONS, RetryPolicy
+from genblaze_core.providers.spec import ModelSpec
+from genblaze_core.providers.validation import (
+    ValidationOutcome,
+    ValidationResult,
+    ValidationSource,
+)
+from genblaze_core.runnable.base import Runnable
+from genblaze_core.runnable.config import RunnableConfig
+
+if TYPE_CHECKING:
+    from genblaze_core.models.voice import Voice
+
+logger = logging.getLogger("genblaze.provider")
+
+# Env-var escape hatch for offline tests / fixtures that mock submit() without
+# also mocking the preflight endpoint.
+_SKIP_PREFLIGHT_ENV = "GENBLAZE_SKIP_PREFLIGHT"
+
+# Default poll interval and timeout for the submit→poll→fetch lifecycle
+DEFAULT_POLL_INTERVAL = 1.0  # seconds
+DEFAULT_TIMEOUT = 600.0  # 10 minutes
+
+# Heartbeat thresholds — once the adaptive poll interval grows past
+# _HEARTBEAT_THRESHOLD_SEC, split the sleep into _HEARTBEAT_CHUNK_SEC chunks
+# and fire a heartbeat-flavored progress event between chunks so SSE
+# proxies, load balancers, and impatient users see the connection is alive.
+_HEARTBEAT_THRESHOLD_SEC = 15.0
+_HEARTBEAT_CHUNK_SEC = 10.0
+
+# Max consecutive transient poll() errors tolerated inside a single invoke().
+# Guards against misclassification in connectors that wrap httpx/boto exceptions
+# opaquely — a single 503 mid-poll shouldn't fail a 10-minute video generation.
+# Overridable per-provider via subclass attribute if needed.
+_DEFAULT_POLL_TRANSIENT_RETRIES = 5
+
+
+@dataclass
+class ProviderCapabilities:
+    """Declares what a provider supports for upfront validation and discovery.
+
+    All fields are optional — omitting a field means "unspecified" (no restriction).
+    """
+
+    supported_modalities: list[Modality] | None = field(default=None)
+    supported_inputs: list[str] | None = field(default=None)  # e.g. ["text", "image", "video"]
+    # True if provider reads step.inputs (whether seeded directly via
+    # external_inputs=, resolved via input_from=, or chained from a prior step).
+    # Name retained for back-compat; flag covers all three input mechanisms.
+    accepts_chain_input: bool = field(default=False)
+    max_duration: float | None = field(default=None)  # seconds
+    resolutions: list[str] | None = field(default=None)  # e.g. ["720p", "1080p", "4k"]
+    output_formats: list[str] | None = field(default=None)  # e.g. ["video/mp4", "audio/mpeg"]
+    models: list[str] | None = field(default=None)  # known model IDs
+
+
+@dataclass
+class SubmitResult:
+    """Result from provider submit(), with optional timing hints for adaptive polling.
+
+    Providers can return this instead of a raw prediction ID to give the
+    polling loop an estimated completion time, reducing unnecessary API calls.
+    """
+
+    prediction_id: Any
+    estimated_seconds: float | None = field(default=None)
+
+
+@dataclass
+class _StepRetryState:
+    """Per-invocation authority for post-submit step retries."""
+
+    prediction_id: Any | None = None
+    resume_failures: int = 0
+
+    def clear(self) -> None:
+        self.prediction_id = None
+        self.resume_failures = 0
+
+    def record_submit(self, prediction_id: Any) -> None:
+        if prediction_id is not None:
+            self.prediction_id = prediction_id
+            self.resume_failures = 0
+
+    def record_resume_failure(self) -> None:
+        self.resume_failures += 1
+
+
+def _adaptive_poll_interval(elapsed: float, base: float, max_interval: float = 30.0) -> float:
+    """Compute poll interval that backs off as elapsed time increases.
+
+    Starts at base, doubles every 30s of elapsed time, capped at max_interval.
+    """
+    doublings = int(elapsed / 30)
+    return min(base * (2**doublings), max_interval)
+
+
+def classify_api_error(exc: Exception | str) -> ProviderErrorCode:
+    """Map an exception to a normalized ProviderErrorCode.
+
+    Shared default error classifier for provider adapters. Connectors with
+    provider-specific error types (gRPC codes, HTTP status ints, SDK exceptions)
+    should keep their own mapper; connectors that only do string matching can
+    delegate here.
+    """
+    msg = str(exc).lower()
+    if "timeout" in msg or "timed out" in msg:
+        return ProviderErrorCode.TIMEOUT
+    if "rate limit" in msg or "rate_limit" in msg or "429" in msg:
+        return ProviderErrorCode.RATE_LIMIT
+    # Content policy / safety refusal — deterministic, never retryable.
+    # Check before auth/invalid because a refusal often reads as 400 and
+    # carries "policy" / "safety" in the message.
+    policy_terms = (
+        "content_policy",
+        "content policy",
+        "safety_filter",
+        "safety filter",
+        "content filter",
+        "policy violation",
+        "blocked by safety",
+        "responsibleai",
+    )
+    if any(t in msg for t in policy_terms):
+        return ProviderErrorCode.CONTENT_POLICY
+    auth_terms = ("auth", "unauthorized", "forbidden", "401", "403", "api_key")
+    if any(t in msg for t in auth_terms):
+        return ProviderErrorCode.AUTH_FAILURE
+    if "invalid" in msg or "validation" in msg or "400" in msg:
+        return ProviderErrorCode.INVALID_INPUT
+    # Check server errors before model errors — "model" appears in many server messages
+    if "server" in msg or "500" in msg or "502" in msg or "503" in msg:
+        return ProviderErrorCode.SERVER_ERROR
+    if "model" in msg and ("not found" in msg or "not available" in msg):
+        return ProviderErrorCode.MODEL_ERROR
+    return ProviderErrorCode.UNKNOWN
+
+
+# Allowed URL schemes for asset URLs — shared across all providers
+_ALLOWED_SCHEMES = {"https"}
+
+
+def validate_asset_url(url: str) -> None:
+    """Reject non-HTTPS or malformed URLs to prevent SSRF.
+
+    All providers should call this when attaching asset URLs from API responses.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in _ALLOWED_SCHEMES or not parsed.netloc:
+        raise ProviderError(f"Unsafe asset URL '{url}' — only absolute HTTPS URLs allowed")
+
+
+# Schemes allowed for chain inputs (file:// from local providers, https:// from cloud)
+_CHAIN_INPUT_SCHEMES = frozenset({"https", "file"})
+
+# Paths that resolve under any of these prefixes are rejected unconditionally.
+# Best-effort defense in depth — pipelines accepting user-controlled URLs
+# should additionally pass ``file_root_allowlist`` for strict containment.
+# Includes Linux + macOS canonical aliases and common container secrets paths.
+_FORBIDDEN_FILE_PATH_PREFIXES = (
+    "/proc/",
+    "/dev/",
+    "/sys/",
+    "/etc/",
+    "/private/etc/",  # macOS canonical alias for /etc
+    "/private/var/run/",  # macOS secrets path
+    "/run/secrets/",  # Linux container secrets (Docker / Kubernetes)
+    "/var/run/secrets/",  # alt Linux secrets path
+)
+
+
+def validate_chain_input_url(
+    url: str,
+    *,
+    file_root_allowlist: tuple[Path, ...] = (),
+) -> None:
+    """Validate a URL from ``step.inputs`` before forwarding to a provider.
+
+    Allows ``https://`` (cloud-hosted assets) and ``file://`` (local
+    chain outputs from SyncProviders), with the constraints below.
+    Rejects ``http://`` and every other scheme.
+
+    ``file://`` validation is layered:
+
+    * **RFC 8089 netloc**: empty or ``localhost``; anything else is
+      treated as a remote-host reference and rejected.
+    * **Percent-decoding before traversal check**: ``urlparse`` leaves
+      ``%2F`` encoded, so a substring scan for ``..`` would miss
+      ``..%2Fetc%2Fpasswd``. ``unquote()`` is applied before
+      canonicalization.
+    * **Canonicalization via ``Path.resolve(strict=False)``**: collapses
+      ``..`` segments, follows symlinks, and resolves platform aliases
+      like ``/private/etc`` → ``/etc`` on macOS.
+    * **Denylist on the canonical path**: rejects ``/proc``, ``/dev``,
+      ``/sys``, ``/etc``, ``/private/etc``, ``/private/var/run``,
+      ``/run/secrets``, ``/var/run/secrets``. Best-effort and
+      non-exhaustive — Windows paths and platform-specific secrets
+      mounts are not covered. Production deployments accepting
+      user-controlled URLs **must** pass ``file_root_allowlist``.
+    * **Strict containment (opt-in)** via ``file_root_allowlist``: every
+      accepted path must resolve under one of the listed roots.
+      Symlinks resolve through; outside-root symlinks fail the check.
+
+    **Known limitations of default mode** (no allowlist):
+
+    * Multi-pass percent-encoding (``..%252F...``) is NOT collapsed by
+      single-pass ``unquote``. The literal ``%2F`` survives to the
+      resolved path; downstream consumers that decode again before
+      opening the file are responsible for their own validation.
+      Allowlist mode neutralizes this case.
+    * Platform-specific sensitive paths beyond the denylist (e.g.
+      ``C:\\Windows\\System32`` on Windows) — use the allowlist.
+
+    Args:
+        url: The URL to validate.
+        file_root_allowlist: Optional tuple of root directories. If
+            provided, ``file://`` URLs must resolve under one of these
+            roots after canonicalization. Recommended for any pipeline
+            that accepts user-supplied chain-input URLs.
+
+    Raises:
+        ProviderError(INVALID_INPUT) on any rejection.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in _CHAIN_INPUT_SCHEMES:
+        raise ProviderError(
+            f"Unsafe chain input URL '{url}' — only HTTPS and file:// URLs allowed",
+            error_code=ProviderErrorCode.INVALID_INPUT,
+        )
+    if parsed.scheme == "https":
+        if not parsed.netloc:
+            raise ProviderError(
+                f"Malformed HTTPS URL '{url}' — missing host",
+                error_code=ProviderErrorCode.INVALID_INPUT,
+            )
+        return
+
+    # --- file:// path ---
+    # RFC 8089: empty or 'localhost' netloc; anything else is suspicious
+    # (file://remote-host/etc/passwd is always wrong).
+    if parsed.netloc and parsed.netloc != "localhost":
+        raise ProviderError(
+            f"file:// URL must have empty or 'localhost' netloc; got {parsed.netloc!r}",
+            error_code=ProviderErrorCode.INVALID_INPUT,
+        )
+
+    # Decode percent-encoded sequences BEFORE canonicalization so that
+    # ``file:///valid/path/..%2Fetc%2Fpasswd`` collapses correctly.
+    # url2pathname handles Windows drive letters (/C:/... → C:\...) and
+    # also does percent-decoding (no-op on Unix beyond the unquote call).
+    decoded_path = url2pathname(parsed.path)
+
+    if not Path(decoded_path).is_absolute():
+        raise ProviderError(
+            f"file:// URL requires an absolute path; got {decoded_path!r}",
+            error_code=ProviderErrorCode.INVALID_INPUT,
+        )
+
+    # Canonicalize through Path.resolve() to collapse '..', symlinks,
+    # and platform aliases (/private/etc → /etc on macOS) in one pass.
+    # strict=False so a path that doesn't yet exist (e.g. an output
+    # location validated before write) still validates.
+    canonical_str = str(Path(decoded_path).resolve(strict=False))
+
+    if any(canonical_str.startswith(p.rstrip("/")) for p in _FORBIDDEN_FILE_PATH_PREFIXES):
+        raise ProviderError(
+            f"file:// path resolves to a sensitive system location: {canonical_str}",
+            error_code=ProviderErrorCode.INVALID_INPUT,
+        )
+
+    if file_root_allowlist:
+        canonical = Path(canonical_str)
+        if not any(canonical.is_relative_to(root.resolve()) for root in file_root_allowlist):
+            raise ProviderError(
+                f"file:// path not under any allowlisted root: {canonical_str}",
+                error_code=ProviderErrorCode.INVALID_INPUT,
+            )
+
+
+#: Private identity sentinel — see ``_ProviderInitGuardMeta``. Deliberately not
+#: a plain ``bool``: a bool default (e.g. ``_base_init_done = True``) is a
+#: one-line accidental or naive bypass for a subclass/dataclass field of the
+#: same name. Checking identity against this module-private object doesn't
+#: make bypass impossible (a subclass could still import and assign this
+#: exact object), but it rules out the accidental collision and raises the
+#: bar to a deliberate act.
+_BASE_INIT_TOKEN = object()
+
+
+class _ProviderInitGuardMeta(ABCMeta):
+    """Fails construction loudly when a subclass never ran ``BaseProvider.__init__``.
+
+    ``@dataclass`` on a provider subclass replaces the inherited ``__init__``
+    with a generated one, so ``BaseProvider.__init__`` silently never runs and
+    the instance is missing attributes (``_poll_cache``, ``_retry_policy_override``,
+    etc.). That surfaces later as a confusing ``AttributeError`` deep inside
+    ``invoke()``, naming a private attribute the caller never wrote.
+
+    This can't be caught in ``__init_subclass__``: that hook runs while the
+    ``class`` statement's body is being built, but ``@dataclass`` is a
+    decorator applied to the class object *afterward* — so at
+    ``__init_subclass__`` time the class isn't a dataclass yet and has no
+    generated ``__init__``. Construction is the earliest point at which both
+    signals (``__dataclass_fields__`` on the class itself, and whether
+    ``BaseProvider.__init__`` actually ran) are reliably observable.
+    """
+
+    def __call__(cls, *args: Any, **kwargs: Any) -> Any:
+        obj = super().__call__(*args, **kwargs)
+        if getattr(obj, "_base_init_token", None) is not _BASE_INIT_TOKEN:
+            # ``__dataclass_fields__ in cls.__dict__`` (not ``is_dataclass(cls)``,
+            # which is also true when only an inherited *base* is the
+            # dataclass) — so the message names the class actually decorated,
+            # not an unrelated mixin ancestor.
+            if "__dataclass_fields__" in cls.__dict__:
+                raise TypeError(
+                    f"{cls.__name__} is decorated with @dataclass, which replaces "
+                    "BaseProvider.__init__ with a generated one — so BaseProvider "
+                    "never initializes its poll cache, retry policy, or preflight "
+                    "state. Providers cannot be dataclasses. Write a plain "
+                    "__init__ that calls super().__init__() instead."
+                )
+            # Deliberately does not name a specific __init__ as "the" culprit:
+            # cls.__init__ might already call super().__init__() correctly and
+            # still hit this — e.g. a base class further up the MRO is itself
+            # a @dataclass whose generated __init__ doesn't forward the call
+            # any further, so "add super().__init__() to {cls.__name__}"
+            # would be wrong advice in that case. Point at the whole chain.
+            raise TypeError(
+                f"BaseProvider.__init__ never ran for this {cls.__name__} "
+                "instance, so its poll cache, retry policy, and preflight "
+                "state were never initialized. Check every __init__ in "
+                f"{cls.__name__}'s class hierarchy — including any inherited "
+                "from a base class — and make sure each one calls "
+                "super().__init__(). A base class decorated with @dataclass "
+                "is a common cause: its generated __init__ does not forward "
+                "to BaseProvider.__init__ on its own."
+            )
+        return obj
+
+
+class BaseProvider(Runnable[Step, Step], metaclass=_ProviderInitGuardMeta):
+    """Abstract base for all provider adapters.
+
+    Providers implement the 3-method lifecycle:
+    1. submit — send the generation request
+    2. poll — check for completion
+    3. fetch_output — retrieve results and attach assets
+
+    Subclasses may override ``create_registry()`` to declare per-model specs
+    (pricing, parameter aliases, input routing, validation). The registry is
+    consulted in two places:
+
+    - ``prepare_payload(step)`` — run the full parameter pipeline (aliases →
+      transformer → chain inputs → coercers → defaults → schemas → required →
+      constraints → allowlist) before submit.
+    - After ``fetch_output()`` — if a spec defines ``pricing`` and
+      ``step.cost_usd`` is not already set, compute it automatically.
+
+    Users customize the registry via the ``models=`` init kwarg or by mutating
+    the class-level default returned from ``models_default()``.
+    """
+
+    name: str = "base"
+
+    #: Sentinel read by ``_ProviderInitGuardMeta.__call__``. Class-level default
+    #: so a subclass whose ``__init__`` never ran ``super().__init__()`` reads
+    #: ``None`` here instead of raising ``AttributeError``. Set to the private
+    #: ``_BASE_INIT_TOKEN`` object as the last statement of
+    #: ``BaseProvider.__init__`` — last, so a constructor that raises partway
+    #: through still leaves this ``None``.
+    _base_init_token: object | None = None
+
+    #: Per-provider declaration of upstream catalog API support. Drives
+    #: ``validate_model()`` outcome semantics and the ``tools/probe_models.py``
+    #: probe scope. Subclasses **must** override unless they accept the
+    #: ``NONE`` default (no catalog API). The conformance test enforces
+    #: presence on every entry-point provider. See
+    #: :class:`~genblaze_core.providers.family.DiscoverySupport`.
+    discovery_support: DiscoverySupport = DiscoverySupport.NONE
+
+    #: TTL (seconds) for cached family-probe results. The probe call is
+    #: cheap network-wise but for queue-style providers (GMI, Runway,
+    #: Luma) it creates an audit-log entry on the user's account per
+    #: invocation — cache aggressively. Subclasses may override the
+    #: class attribute, or operators may set it per-instance via
+    #: ``provider.PROBE_CACHE_TTL_SECONDS = N`` before the first probe.
+    PROBE_CACHE_TTL_SECONDS: float = 3600.0
+
+    #: Maximum probe-cache size before oldest-first eviction kicks in.
+    #: Bounded so long-running daemons that see many distinct slugs
+    #: don't grow the cache unbounded. 256 fits any realistic
+    #: per-provider catalog with margin (largest connector today is
+    #: GMICloud with ~30 slugs). Eviction is FIFO via dict insertion
+    #: order, not LRU — adequate given the TTL provides freshness.
+    PROBE_CACHE_MAX_ENTRIES: int = 256
+
+    poll_interval: float = DEFAULT_POLL_INTERVAL
+    # Max transient failures tolerated per phase (submit/poll/fetch) before escalating.
+    # Counter is phase-local — a successful poll does not refund submit's budget.
+    # Set to 0 to disable intra-phase retries. Backwards-compat knob: when a caller
+    # doesn't pass ``retry_policy=``, ``_default_retry_policy()`` reads this attribute
+    # and folds it into the policy's ``max_attempts`` (= ``poll_transient_retries + 1``).
+    poll_transient_retries: int = _DEFAULT_POLL_TRANSIENT_RETRIES
+
+    # Per-provider opt-in for idempotency-key header injection on submit retries.
+    # When set, ``_inject_idempotency_header()`` adds the header with a value
+    # derived from ``self._retry_policy.make_idempotency_key(step)``. The same
+    # value is reused across retries of one step — that's what makes the
+    # upstream able to dedupe. Leave as ``None`` for providers whose API
+    # doesn't document idempotency-key support.
+    IDEMPOTENCY_HEADER_NAME: str | None = None
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        # Ensure each subclass has its own cache slot — avoids inheriting a
+        # sibling class's registry.
+        super().__init_subclass__(**kwargs)
+        cls._models_cache = None  # type: ignore[attr-defined]
+
+    @classmethod
+    def create_registry(cls) -> ModelRegistry:
+        """Return the package-default ModelRegistry for this provider.
+
+        Override in subclasses to declare specs. Default is the empty,
+        permissive registry — matches historical "pass everything, no pricing"
+        behavior.
+        """
+        return EMPTY_REGISTRY
+
+    @classmethod
+    def models_default(cls) -> ModelRegistry:
+        """Class-level registry, built lazily once per subclass."""
+        # Check __dict__ so we don't read a parent class's cache
+        if cls.__dict__.get("_models_cache") is None:
+            cls._models_cache = cls.create_registry()  # type: ignore[attr-defined]
+        return cls._models_cache  # type: ignore[attr-defined,return-value]
+
+    def __init__(
+        self,
+        *,
+        models: ModelRegistry | None = None,
+        retry_policy: RetryPolicy | None = None,
+        probe_cache_ttl: float | None = None,
+        probe_cache_max_entries: int | None = None,
+    ) -> None:
+        """
+        Args:
+            models: Per-instance ``ModelRegistry`` override. ``None`` uses
+                the class-level default from ``models_default()``.
+            retry_policy: Per-instance retry policy. ``None`` builds a
+                policy from ``self.poll_transient_retries``.
+            probe_cache_ttl: Per-instance TTL (seconds) for the
+                family-probe result cache. ``None`` uses the class-level
+                ``PROBE_CACHE_TTL_SECONDS`` (3600). Set higher in
+                production for stable upstreams; lower in staging where
+                slug churn is faster. Configurable per-instance to avoid
+                process-global class-attribute mutation.
+            probe_cache_max_entries: Per-instance cap on probe-cache
+                size before FIFO eviction kicks in. ``None`` uses the
+                class-level ``PROBE_CACHE_MAX_ENTRIES`` (256). Raise for
+                providers with very large catalogs.
+        """
+        # Poll result cache — avoids redundant API calls between poll() and fetch_output().
+        # ``_poll_cache_lock`` guards both dicts together: ``_get_cached_poll_result``
+        # does a read-then-pop pair that is not atomic without it. Multiple concurrent
+        # ``ainvoke()`` calls (which dispatch via ``asyncio.to_thread``) race on the same
+        # provider instance otherwise, and one caller can read ``None`` while another
+        # is still in the middle of pop'ing. ``threading.Lock`` (not RLock) is correct
+        # here — none of these methods re-enter each other; ``Lock`` is faster.
+        self._poll_cache: dict[str, Any] = {}
+        self._poll_cache_times: dict[str, float] = {}
+        self._poll_cache_max_age: float = 3600.0  # 1 hour TTL
+        self._poll_cache_lock: threading.Lock = threading.Lock()
+        # Use ``is not None`` rather than truthiness — ``ModelRegistry.__len__``
+        # makes an empty registry falsy, so ``models or default`` would silently
+        # discard explicit empty overrides (Replicate / LMNT have empty defaults).
+        self._models: ModelRegistry = models if models is not None else type(self).models_default()
+        # Caller-passed override; if ``None``, the ``retry_policy`` property
+        # builds a fresh policy on each access from ``self.poll_transient_retries``
+        # so legacy mutations (``provider.poll_transient_retries = 2``) keep
+        # working. Stored as override-only so an explicit ``RetryPolicy`` is
+        # authoritative — instance-level ``poll_transient_retries`` mutations
+        # are ignored once a policy has been passed in.
+        self._retry_policy_override: RetryPolicy | None = retry_policy
+        # One-shot preflight gate — credentials checked before the first submit
+        # of this instance, then skipped for the lifetime of the object.
+        # The locks are lazy: ``threading.Lock`` is cheap to construct here, but
+        # ``asyncio.Lock`` requires a running loop, so it's deferred to first
+        # async use via ``_get_async_preflight_lock``.
+        self._preflight_done: bool = False
+        self._preflight_sync_lock: threading.Lock = threading.Lock()
+        self._preflight_async_lock: asyncio.Lock | None = None
+        # Family-probe result cache — keyed by slug; value is
+        # ``(fetched_monotonic, LiveProbeResult)``. Keeps Pipeline
+        # preflight from firing the audit-log-creating empty-payload
+        # probe on every step.
+        #
+        # Concurrency: ``RLock``-guarded for state mutation;
+        # ``threading.Event``-based single-flight prevents the cold-burst
+        # case where N concurrent ``validate_model`` callers for the
+        # same slug all miss the cache and all fire the probe. With
+        # single-flight, exactly one probe fires; the others wait on the
+        # Event and read the result the winner produced.
+        #
+        # Memory bound: ``_PROBE_CACHE_MAX_ENTRIES`` caps the dict size.
+        # When exceeded, the cache evicts the oldest entries (insertion
+        # order via ``dict``'s ordered-since-3.7 contract). 256 entries
+        # is comfortably above any realistic per-provider catalog while
+        # keeping memory bounded for daemons that see many distinct slugs.
+        #
+        # ``refresh=True`` on ``validate_model()`` evicts the entry.
+        # Default TTL of 1 hour matches the discovery cache and the
+        # operator's mental model of "model existence is stable for ~hours".
+        self._probe_cache: dict[str, tuple[float, LiveProbeResult]] = {}
+        self._probe_cache_lock: threading.RLock = threading.RLock()
+        # Per-instance config: fall back to class-level constants when
+        # the kwarg is None so subclasses can still tune via class-attr
+        # override.
+        self._probe_cache_ttl: float = (
+            probe_cache_ttl if probe_cache_ttl is not None else type(self).PROBE_CACHE_TTL_SECONDS
+        )
+        self._probe_cache_max_entries: int = (
+            probe_cache_max_entries
+            if probe_cache_max_entries is not None
+            else type(self).PROBE_CACHE_MAX_ENTRIES
+        )
+        # In-flight probe events keyed by slug; entry exists while a
+        # probe is mid-flight, gets removed once the result is cached.
+        self._probe_inflight: dict[str, threading.Event] = {}
+        # Last statement: marks this instance as fully initialized for
+        # ``_ProviderInitGuardMeta``. Keep this at the end of ``__init__``.
+        self._base_init_token = _BASE_INIT_TOKEN
+
+    @property
+    def retry_policy(self) -> RetryPolicy:
+        """The active retry policy for this provider instance.
+
+        Resolution order:
+
+        1. The ``retry_policy=`` argument passed to ``__init__`` if any —
+           authoritative; ``poll_transient_retries`` mutations are ignored.
+        2. Otherwise, a fresh ``RetryPolicy`` built from
+           ``self.poll_transient_retries`` (read at access time, so
+           ``provider.poll_transient_retries = 2`` after construction works).
+
+        Built lazily on access rather than cached at ``__init__`` so the legacy
+        path remains responsive to mutations. The dataclass is frozen + slotted,
+        so per-access construction is cheap.
+        """
+        if self._retry_policy_override is not None:
+            return self._retry_policy_override
+        return RetryPolicy(max_attempts=self.poll_transient_retries + 1)
+
+    def _inject_idempotency_header(
+        self,
+        headers: dict[str, str] | None,
+        step: Step,
+    ) -> dict[str, str]:
+        """Add the idempotency-key header to ``headers`` iff the provider opted in.
+
+        No-op when ``IDEMPOTENCY_HEADER_NAME`` is unset or the policy returns
+        ``None``. Returns a new dict so callers can safely pass the result to
+        SDKs that retain header references. Always returns a dict (never
+        modifies the input in place) to keep the call site total.
+        """
+        out: dict[str, str] = dict(headers) if headers else {}
+        header_name = type(self).IDEMPOTENCY_HEADER_NAME
+        if header_name is None:
+            return out
+        key = self.retry_policy.make_idempotency_key(step)
+        if key is None:
+            return out
+        out[header_name] = key
+        return out
+
+    def _cache_poll_result(self, prediction_id: Any, result: Any) -> None:
+        """Cache a poll result for reuse in fetch_output().
+
+        Thread-safe: concurrent calls (e.g. multiple ``ainvoke`` running
+        on the same provider via ``asyncio.to_thread``) acquire
+        ``_poll_cache_lock`` before mutating either dict.
+        """
+        key = str(prediction_id)
+        with self._poll_cache_lock:
+            self._poll_cache[key] = result
+            self._poll_cache_times[key] = time.monotonic()
+
+    def _get_cached_poll_result(self, prediction_id: Any) -> Any | None:
+        """Return cached poll result if available. Consumes the entry.
+
+        Read-then-pop is performed under ``_poll_cache_lock`` so two
+        concurrent callers can't both observe the entry and race to
+        ``pop`` it (one would silently get ``None`` while the other got
+        the result, with no way to tell which won). With the lock,
+        exactly one caller wins.
+        """
+        key = str(prediction_id)
+        with self._poll_cache_lock:
+            result = self._poll_cache.pop(key, None)
+            self._poll_cache_times.pop(key, None)
+        return result
+
+    def _cleanup_poll_cache(self) -> None:
+        """Remove poll cache entries older than TTL to prevent memory leaks.
+
+        All read + delete operations happen inside ``_poll_cache_lock``
+        so a concurrent ``_cache_poll_result`` write can't change the
+        dict mid-scan ("dictionary changed size during iteration").
+        """
+        now = time.monotonic()
+        max_age = self._poll_cache_max_age
+        with self._poll_cache_lock:
+            stale = [k for k, t in self._poll_cache_times.items() if now - t > max_age]
+            for k in stale:
+                self._poll_cache.pop(k, None)
+                self._poll_cache_times.pop(k, None)
+
+    @property
+    def models(self) -> ModelRegistry:
+        """The per-instance ``ModelRegistry`` (class default unless overridden)."""
+        return self._models
+
+    # --- discovery / catalog hooks -----------------------------------------
+
+    def list_models(self) -> list[ModelSpec]:
+        """Return every registered ``ModelSpec`` for this provider instance.
+
+        Convenience over ``provider.models.items()`` for app-side discovery
+        (model pickers, cost dashboards, capability matrices). Sorted by
+        ``model_id`` for deterministic output.
+        """
+        return [spec for _, spec in self._models.items()]
+
+    def list_voices(
+        self,
+        *,
+        model: str | None = None,
+        language: str | None = None,
+    ) -> list[Voice]:
+        """Return available voices for TTS / music models. Default empty.
+
+        Audio connectors override this to return either a curated catalog
+        (GMI, OpenAI TTS, NVIDIA Riva) or a live-API fetch with caching
+        (ElevenLabs, LMNT). Non-audio connectors leave the default in place.
+
+        Filters are advisory — implementations should return only voices that
+        match both ``model`` (when supplied) and ``language`` (BCP 47 prefix
+        match, e.g. ``"en"`` matches ``"en-US"``).
+        """
+        return []
+
+    # --- pre-flight + probe contracts --------------------------------------
+
+    def preflight_auth(self, *, timeout: float = 5.0) -> None:
+        """Cheap credential check called once per instance before the first submit.
+
+        Default is a no-op so connectors that haven't opted in keep working.
+        Override with a fast (sub-second) call against a known-cheap endpoint
+        to surface bad credentials immediately rather than after a long-running
+        ``submit()`` blocks for the full HTTP timeout.
+
+        Implementations should raise ``ProviderError`` (preferably with
+        ``error_code=AUTH_FAILURE``) on credential rejection, and let
+        transient/network errors surface naturally — the calling site treats
+        any exception as a hard preflight failure.
+
+        Disabled when ``GENBLAZE_SKIP_PREFLIGHT`` is set (offline test escape).
+        """
+        return None
+
+    # --- catalog discovery & validation ------------------------------------
+    #
+    # Two surfaces collaborate to answer "is this slug usable?":
+    #
+    # * ``discover_models()`` snapshots upstream's catalog (when one exists)
+    #   and caches the result single-flight, RLock-guarded, with a 1-hour
+    #   default TTL. Connectors with ``DiscoverySupport.NATIVE`` override.
+    # * ``validate_model()`` returns a graded ``ValidationResult`` —
+    #   authoritative, provisional, unknown, or not-found — and is the
+    #   single entrypoint for the question. ``Pipeline.run()`` calls it
+    #   during preflight; users call it directly for explicit checks.
+    #
+    # See ``docs/exec-plans/active/model-registry-decoupling.md``.
+
+    def discover_models(
+        self,
+        *,
+        max_age_seconds: float | None = ...,  # type: ignore[assignment]
+    ) -> DiscoveryResult:
+        """Snapshot upstream's model catalog (when one exists).
+
+        Default returns ``DiscoveryResult.unsupported()`` — connectors with
+        a real catalog endpoint (``GET /v1/models``, vendor SDK list, etc.)
+        override and back the call with a ``_DiscoveryCache``.
+
+        Args:
+            max_age_seconds: Maximum age (seconds) of an acceptable cached
+                snapshot. ``None`` accepts any age (one-fetch-per-process).
+                Override per-call; default uses the cache's TTL.
+        """
+        return DiscoveryResult.unsupported(
+            detail=f"{type(self).__name__} declares DiscoverySupport.{self.discovery_support}"
+        )
+
+    def validate_model(
+        self,
+        model_id: str,
+        *,
+        refresh: bool = False,
+    ) -> ValidationResult:
+        """Return the graded answer to "is this slug usable?".
+
+        Outcomes (see ``ValidationOutcome``):
+
+        * ``OK_AUTHORITATIVE`` — user-registered, NATIVE-discovery-confirmed,
+          or a probe (family-level, or the registry's ``fallback_probe`` when
+          no family matched) returned LIVE.
+        * ``OK_PROVISIONAL`` — family-matched but liveness unverifiable.
+          Pipeline preflight emits a WARN and proceeds.
+        * ``UNKNOWN_PERMISSIVE`` — no family match, no ``fallback_probe``
+          configured (or the probe returned UNKNOWN); permissive fallback
+          applies.
+        * ``NOT_FOUND`` — discovery says absent, or a probe (family-level or
+          fallback) returned DEAD. Pipeline preflight raises before any wire
+          calls.
+
+        A positive outcome (``OK_AUTHORITATIVE`` / ``OK_PROVISIONAL``) means
+        the slug is known to exist — it does **not** mean this account is
+        entitled to call it. A probe can only observe what the upstream API
+        reveals before an entitlement check runs (see connectors' own
+        gating overrides, e.g. GMICloud's ``_entitlement_gated_slugs``).
+
+        For ``DiscoverySupport.NATIVE`` providers, this method may issue
+        a single discovery fetch (subject to TTL and single-flight). For
+        ``PARTIAL`` / ``NONE``, it may invoke a family-level ``probe()``
+        when present, or the registry's ``fallback_probe`` when no family
+        matched and one is configured. ``refresh=True`` forces a fresh
+        discovery snapshot or re-probe.
+        """
+        # First pass: non-network — return immediately if we already know.
+        result = self._models.validate(model_id, discovery_support=self.discovery_support)
+        if (
+            result.outcome is ValidationOutcome.OK_AUTHORITATIVE
+            or result.outcome is ValidationOutcome.NOT_FOUND
+        ) and not refresh:
+            return result
+
+        # NATIVE: refresh discovery cache and re-validate. The single-flight
+        # cache deduplicates concurrent callers, so this is safe to call
+        # eagerly from preflight.
+        if self.discovery_support is DiscoverySupport.NATIVE:
+            if refresh:
+                # Force-evict so the cache reissues a fetch. ``invalidate``
+                # is a no-op for connectors without a cache backing.
+                cache = self._models._discovery_cache
+                if cache is not None:
+                    cache.invalidate()
+            discovery_failed = False
+            try:
+                self.discover_models()
+            except Exception as exc:
+                logger.warning("discover_models raised during validate_model: %s", exc)
+                discovery_failed = True
+            result = self._models.validate(model_id, discovery_support=self.discovery_support)
+            # When the in-band fetch failed, the validation answer was
+            # computed against whatever was in the cache (potentially
+            # stale, possibly empty). Annotate ``detail`` so operators
+            # correlating logs during an upstream incident know the
+            # signal quality is degraded — without this hint, an
+            # ``OK_AUTHORITATIVE`` from ``DISCOVERY`` looks identical to
+            # one from a fresh fetch.
+            if discovery_failed:
+                from dataclasses import replace
+
+                result = replace(
+                    result,
+                    detail=("discovery fetch failed; result is from stale or empty cache"),
+                )
+            return result
+
+        # PARTIAL / NONE: if a family probe is configured, consult it.
+        # Goes through _cached_probe so repeated validate_model() calls
+        # for the same slug (e.g., Pipeline preflight + retries + manual
+        # checks) hit the upstream at most once per TTL window.
+        #
+        # The pre-probe ``result.detail`` may carry "known_unstable" when
+        # the slug is in the family's unstable_examples or registry-level
+        # unstable_slugs. We preserve that detail on the probe-LIVE path
+        # (the slug was flagged unstable for a reason — ops may want the
+        # hint even when it's currently live) but drop it on the
+        # probe-DEAD path (NOT_FOUND speaks for itself).
+        unstable_detail = (
+            result.detail if result.outcome is ValidationOutcome.OK_PROVISIONAL else None
+        )
+        match = self._models.match_family(model_id)
+        if match is not None and match.family.probe is not None:
+            probe_result = self._cached_probe(match.family.probe, model_id, refresh=refresh)
+            if probe_result is LiveProbeResult.LIVE:
+                return ValidationResult.ok_authoritative(
+                    ValidationSource.PROBE,
+                    family_name=match.family.name,
+                    detail=unstable_detail,
+                )
+            if probe_result is LiveProbeResult.DEAD:
+                return ValidationResult.not_found(
+                    ValidationSource.PROBE,
+                    family_name=match.family.name,
+                    detail="upstream probe returned DEAD",
+                )
+            # UNKNOWN: fall through to provisional answer below.
+
+        # No family matched at all (the permissive-fallback case). Connectors
+        # without a full catalog can still opt in to a liveness check here —
+        # ``fallback_probe`` is the liveness counterpart to the registry's
+        # ``fallback`` param-shape spec. Without this, every slug the
+        # fallback covers (a provider's mainline models, as well as
+        # fabricated ones) grades identically as UNKNOWN_PERMISSIVE, with no
+        # way to tell "this account can call this" from "this string looks
+        # plausible" (#248).
+        elif match is None and self._models._fallback_probe is not None:
+            # ``resolve_canonical`` is cheap and non-network (no fetch, no
+            # wire call) — it only ever differs from ``model_id`` here when
+            # ``get()`` resolved through the user-spec or alias layer to
+            # something other than the permissive fallback (family
+            # resolution was already ruled out above by ``match is None``).
+            # That means ``model_id`` is a (possibly deprecated) alias for a
+            # genuine USER-registered spec that ``ModelRegistry.validate()``
+            # missed — it only checks ``_user`` by exact key, not through
+            # ``_alias_index``. Treat it exactly as validating the canonical
+            # slug directly would: USER is documented as "strongest signal
+            # regardless of provider class" and must never be handed to a
+            # probe under the alias's literal (and often non-wire) string
+            # (#248 review).
+            canonical = self._models.resolve_canonical(model_id)
+            if canonical != model_id:
+                return ValidationResult.ok_authoritative(ValidationSource.USER)
+            # Gating on UNKNOWN_PERMISSIVE (not just ``match is None``) is
+            # the second half of that same protection: it excludes a plain
+            # USER exact-match slug under ``refresh=True`` — such a result
+            # is already OK_AUTHORITATIVE/USER, never UNKNOWN_PERMISSIVE, so
+            # this branch leaves it untouched and ``return result`` below
+            # preserves it instead of letting the probe overrule it.
+            if result.outcome is ValidationOutcome.UNKNOWN_PERMISSIVE:
+                # The pre-probe ``result.detail`` may carry "known_unstable"
+                # for a registry-level unstable slug that matched no family
+                # (the orphan case). Preserve it on the LIVE path for the
+                # same reason as the family-probe branch above; NOT_FOUND
+                # speaks for itself on DEAD.
+                fallback_unstable_detail = result.detail
+                probe_result = self._cached_probe(
+                    self._models._fallback_probe, model_id, refresh=refresh
+                )
+                if probe_result is LiveProbeResult.LIVE:
+                    return ValidationResult.ok_authoritative(
+                        ValidationSource.PROBE,
+                        detail=(
+                            fallback_unstable_detail
+                            or "fallback probe: slug matched no family pattern"
+                        ),
+                    )
+                if probe_result is LiveProbeResult.DEAD:
+                    return ValidationResult.not_found(
+                        ValidationSource.PROBE,
+                        detail="upstream fallback probe returned DEAD",
+                    )
+                # UNKNOWN: fall through to permissive answer below.
+
+        return result
+
+    # Bound on how long a thread will wait for an in-flight probe before
+    # giving up and falling through to UNKNOWN. Higher than the typical
+    # probe round-trip (sub-second for catalog-style endpoints, seconds
+    # for queue-style); lower than the pipeline preflight step budget so
+    # a hung probe doesn't deadlock preflight indefinitely.
+    _PROBE_INFLIGHT_WAIT_SECONDS: float = 30.0
+
+    def _cached_probe(
+        self,
+        probe: Any,
+        model_id: str,
+        *,
+        refresh: bool,
+    ) -> LiveProbeResult:
+        """Cache + single-flight wrapper around ``_invoke_family_probe``.
+
+        Returns a previously-cached ``LiveProbeResult`` when fresh; otherwise
+        elects the calling thread as the in-flight probe issuer and runs
+        the probe outside the lock. Concurrent callers for the same slug
+        block on a ``threading.Event`` and read the result the winner
+        produced — exactly one probe fires across N concurrent callers
+        on the cold path. ``refresh=True`` forces a fresh fetch.
+
+        Concurrency model:
+
+        * ``_probe_cache_lock`` (RLock) guards all state — both the cache
+          dict and the in-flight registry.
+        * Single-flight uses ``threading.Event``: the elected fetcher
+          stores an Event under the slug while running the probe; other
+          threads encountering the same slug wait on it.
+        * The cache is bounded at ``PROBE_CACHE_MAX_ENTRIES`` via FIFO
+          eviction (oldest first, exploiting Python 3.7+ dict insertion
+          order). Evictions only happen on write — reads are O(1).
+
+        Exceptions in the probe surface as ``LiveProbeResult.UNKNOWN``
+        and are NOT cached — a transient error shouldn't poison the cache
+        for the TTL window. ``UNKNOWN`` results from a successful probe
+        also aren't cached for the same reason (a model whose probe is
+        inconclusive deserves re-checking next call).
+        """
+        # Phase 1: cache lookup or single-flight election (under lock).
+        is_fetcher: bool
+        wait_event: threading.Event | None = None
+        with self._probe_cache_lock:
+            if not refresh:
+                cached = self._probe_cache.get(model_id)
+                if cached is not None:
+                    fetched_at, cached_result = cached
+                    if (time.monotonic() - fetched_at) <= self._probe_cache_ttl:
+                        return cached_result
+                    # Expired — evict; we'll repopulate after the probe.
+                    del self._probe_cache[model_id]
+            else:
+                self._probe_cache.pop(model_id, None)
+
+            # Single-flight election. If another thread is already
+            # probing this slug, wait on its event.
+            in_flight = self._probe_inflight.get(model_id)
+            if in_flight is not None:
+                is_fetcher = False
+                wait_event = in_flight
+            else:
+                is_fetcher = True
+                self._probe_inflight[model_id] = threading.Event()
+
+        # Phase 2 (waiter): block on the in-flight event, then read cache.
+        if not is_fetcher:
+            if wait_event is not None:
+                wait_event.wait(timeout=self._PROBE_INFLIGHT_WAIT_SECONDS)
+            with self._probe_cache_lock:
+                cached = self._probe_cache.get(model_id)
+                if cached is not None:
+                    return cached[1]
+            # Either the fetcher timed out, errored without caching
+            # (UNKNOWN), or the entry expired between wait and read.
+            # Fall through to UNKNOWN rather than re-firing the probe —
+            # callers can retry with refresh=True if they need certainty.
+            return LiveProbeResult.UNKNOWN
+
+        # Phase 3 (elected fetcher): run the probe outside the lock,
+        # then update cache + signal waiters in a guaranteed-cleanup
+        # finally block.
+        #
+        # The cleanup MUST run even on ``BaseException`` (KeyboardInterrupt,
+        # SystemExit, custom BaseException subclasses raised by tests).
+        # Without ``finally`` here, ``_probe_inflight[model_id]`` would
+        # leak permanently — every subsequent caller for that slug
+        # becomes a waiter on a dead Event and blocks for the full
+        # ``_PROBE_INFLIGHT_WAIT_SECONDS`` before falling through.
+        #
+        # Probe duration is bounded by the connector's own transport
+        # timeout (``httpx.Client(timeout=...)`` for HTTP probes,
+        # equivalent for SDK-based probes). The framework deliberately
+        # does NOT wrap the probe in a separate ``concurrent.futures``
+        # timeout — see the ``FamilyProbe`` contract docstring in
+        # ``family.py`` for why.
+        result: LiveProbeResult = LiveProbeResult.UNKNOWN
+        try:
+            result = self._invoke_family_probe(probe, model_id)
+        except Exception as exc:
+            logger.warning(
+                "family.probe raised for %s: %s — returning UNKNOWN",
+                model_id,
+                exc,
+            )
+            result = LiveProbeResult.UNKNOWN
+        finally:
+            with self._probe_cache_lock:
+                event = self._probe_inflight.pop(model_id, None)
+                # Only cache definitive answers — UNKNOWN may be transient.
+                if result is not LiveProbeResult.UNKNOWN:
+                    self._probe_cache[model_id] = (time.monotonic(), result)
+                    self._evict_probe_cache_if_oversized()
+                if event is not None:
+                    event.set()
+
+        return result
+
+    def _evict_probe_cache_if_oversized(self) -> None:
+        """FIFO eviction when ``_probe_cache`` exceeds the size cap.
+
+        Caller must hold ``_probe_cache_lock``. Drops the oldest 25% of
+        entries in one pass to amortize eviction cost — checking on
+        every write would amplify lock-hold time on the hot path.
+        """
+        if len(self._probe_cache) <= self._probe_cache_max_entries:
+            return
+        # Drop oldest 25% (relies on dict insertion-order being
+        # FIFO-coherent in Python 3.7+).
+        evict_count = max(1, len(self._probe_cache) // 4)
+        for slug in list(self._probe_cache.keys())[:evict_count]:
+            del self._probe_cache[slug]
+
+    def _invoke_family_probe(self, probe: Any, model_id: str) -> LiveProbeResult:
+        """Hook for connectors to invoke a ``FamilyProbe`` with their http client.
+
+        Default raises ``NotImplementedError`` — connectors that ship a
+        family probe must override this to wire in their ``httpx.Client``,
+        auth, and timeout. Keeping the wiring connector-side keeps
+        ``BaseProvider`` free of httpx-specific detail.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} ships a FamilyProbe but does not "
+            f"override _invoke_family_probe(). Override to wire in your "
+            f"http client and auth."
+        )
+
+    def probe_model(self, model_id: str) -> ProbeResult:
+        """**Deprecated.** Use ``validate_model(model_id, refresh=True)``.
+
+        Adapter that delegates to ``validate_model`` and coerces the result
+        to a legacy ``ProbeResult`` so existing ``tools/probe_models.py``
+        consumers don't break in-flight. Slated for removal in
+        ``genblaze-core 0.4.0``.
+
+        Outcome mapping:
+
+        ============================  ====================
+        ``ValidationOutcome``         ``ProbeStatus``
+        ============================  ====================
+        ``OK_AUTHORITATIVE``          ``OK``
+        ``OK_PROVISIONAL``            ``UNKNOWN`` (provisional ≠ confirmed)
+        ``UNKNOWN_PERMISSIVE``        ``UNKNOWN``
+        ``NOT_FOUND``                 ``NOT_FOUND``
+        ============================  ====================
+
+        ``DiscoverySupport.NONE`` providers without a configured probe
+        return ``SKIPPED`` to preserve the historical default.
+        """
+        warnings.warn(
+            "BaseProvider.probe_model() is deprecated since genblaze-core 0.3.0; "
+            "use validate_model() instead. Will be removed in genblaze-core 0.4.0.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        # Preserve the historical SKIPPED-by-default behavior for providers
+        # that haven't opted into the new validation contract.
+        if (
+            self.discovery_support is DiscoverySupport.NONE
+            and self._models.match_family(model_id) is None
+            and model_id not in self._models
+        ):
+            return ProbeResult.skipped()
+
+        result = self.validate_model(model_id, refresh=True)
+        return _coerce_validation_to_probe(result)
+
+    # --- pricing estimation ------------------------------------------------
+
+    def estimate_cost(
+        self,
+        model: str,
+        params: Mapping[str, Any] | None = None,
+        *,
+        n: int = 1,
+    ) -> Decimal | None:
+        """Compute upfront USD cost for ``n`` outputs without running the model.
+
+        Returns ``None`` when:
+        - the model is unknown or has no registered ``pricing`` strategy, or
+        - the strategy depends on response-only data (e.g. per-byte costs that
+          require an actual asset), in which case the caller falls back to
+          "varies."
+
+        Synthesizes a minimal ``Step`` + ``n`` placeholder ``Asset`` instances
+        so existing per-unit / per-second / param-based pricing strategies work
+        unchanged. Asset ``duration`` is populated from ``params["duration"]``
+        when present, so per-second video pricing estimates correctly.
+        """
+        spec = self._models.get(model)
+        if spec is None or spec.pricing is None:
+            return None
+        params = dict(params or {})
+        fake_step = Step(
+            provider=self.name,
+            model=model,
+            params=params,
+            prompt=str(params.get("prompt") or ""),
+        )
+        duration = params.get("duration")
+        try:
+            duration_f = float(duration) if duration is not None else None
+        except (TypeError, ValueError):
+            duration_f = None
+        fake_assets = tuple(
+            Asset(
+                asset_id=new_id(),
+                url=f"about:blank#{i}",
+                media_type="application/octet-stream",
+                duration=duration_f,
+            )
+            for i in range(n)
+        )
+        cost = spec.pricing(PricingContext(step=fake_step, assets=fake_assets))
+        if cost is None:
+            return None
+        return Decimal(str(cost))
+
+    # --- capability declaration --------------------------------------------
+
+    def get_capabilities(self) -> ProviderCapabilities | None:
+        """Return provider capabilities for discovery and validation.
+
+        Override in subclasses to declare supported modalities, inputs,
+        resolutions, etc. Returns None by default (unspecified).
+        """
+        return None
+
+    def normalize_params(
+        self, params: dict[str, Any], modality: Modality | None = None
+    ) -> dict[str, Any]:
+        """Normalize standard parameter names to provider-specific ones.
+
+        Override in subclasses to map standard params (duration, resolution,
+        aspect_ratio) to provider-native names. Default returns params unchanged.
+        Native params always take precedence over standard ones.
+
+        Runs *before* the ``ModelSpec``-driven pipeline in ``prepare_payload``.
+        """
+        return params
+
+    def prepare_payload(
+        self,
+        step: Step,
+        *,
+        base_params: dict[str, Any] | None = None,
+        validate_inputs: bool = True,
+    ) -> dict[str, Any]:
+        """Run the registered ``ModelSpec`` pipeline for ``step.model``.
+
+        Returns the dict to forward to the provider SDK. SSRF-validates every
+        ``step.inputs`` URL before the spec's ``input_mapping`` reads them,
+        unless ``validate_inputs=False`` (connectors that do their own
+        validation can opt out).
+        """
+        if validate_inputs:
+            for asset in step.inputs:
+                validate_chain_input_url(asset.url)
+        if base_params is None:
+            base_params = {}
+            if step.prompt is not None:
+                base_params["prompt"] = step.prompt
+            if step.negative_prompt is not None:
+                base_params["negative_prompt"] = step.negative_prompt
+            if step.seed is not None:
+                base_params["seed"] = step.seed
+            base_params.update(step.params)
+        base_params = self.normalize_params(base_params, step.modality)
+        return self._models.prepare_payload(step, base_params=base_params)
+
+    def _apply_registry_pricing(self, step: Step) -> None:
+        """If spec pricing is defined and cost not already set, compute and attach."""
+        if step.cost_usd is not None:
+            return
+        cost = compute_cost(self._models, step)
+        if cost is not None:
+            step.cost_usd = cost
+
+    def _fire_progress(
+        self,
+        step: Step,
+        config: RunnableConfig | None,
+        status: str,
+        start_time: float,
+        progress_pct: float | None = None,
+        message: str | None = None,
+        preview_url: str | None = None,
+        is_heartbeat: bool = False,
+    ) -> None:
+        """Fire on_progress callback if one is configured."""
+        callback = (config or {}).get("on_progress")
+        if callback is not None:
+            callback(
+                ProgressEvent(
+                    step_id=step.step_id,
+                    provider=self.name,
+                    model=step.model,
+                    status=status,
+                    progress_pct=progress_pct,
+                    elapsed_sec=time.monotonic() - start_time,
+                    message=message,
+                    preview_url=preview_url,
+                    # Surface the upstream prediction id once submit() has set
+                    # it on the step. Pre-submit ticks ("submitted" status
+                    # fired before submit returns) carry None — that's
+                    # accurate, the id doesn't exist yet.
+                    request_id=step.metadata.get(UPSTREAM_ID_KEY),
+                    is_heartbeat=is_heartbeat,
+                )
+            )
+
+    def _fire_poll_progress(
+        self,
+        prediction_id: Any,
+        step: Step,
+        config: RunnableConfig | None,
+        start_time: float,
+    ) -> None:
+        """Fire a ``processing`` progress tick, optionally enriched by ``poll_progress``.
+
+        Connectors that override ``poll_progress`` return preview_url /
+        progress_pct / message; the base default returns None and we fire
+        a plain processing tick.
+        """
+        signals = self.poll_progress(prediction_id) or {}
+        preview_url = signals.get("preview_url")
+        if preview_url is not None:
+            # Defensive validation — connectors should also call
+            # ``validate_asset_url`` themselves, but we re-check here so
+            # bypass via subclass mistakes can't ship an unsafe URL.
+            try:
+                validate_asset_url(preview_url)
+            except ProviderError:
+                logger.debug("poll_progress preview_url failed SSRF check; dropping")
+                preview_url = None
+        self._fire_progress(
+            step,
+            config,
+            "processing",
+            start_time,
+            progress_pct=signals.get("progress_pct"),
+            message=signals.get("message"),
+            preview_url=preview_url,
+        )
+
+    def _sleep_with_heartbeats(
+        self,
+        interval: float,
+        step: Step,
+        config: RunnableConfig | None,
+        start_time: float,
+    ) -> None:
+        """Sleep ``interval`` seconds, emitting heartbeat ticks for long waits.
+
+        Short waits sleep without overhead; once the interval crosses
+        ``_HEARTBEAT_THRESHOLD_SEC``, the sleep is broken into
+        ``_HEARTBEAT_CHUNK_SEC`` chunks with a ``is_heartbeat=True`` progress
+        event between chunks. Keeps SSE connections alive without flooding
+        observability when the interval is short.
+        """
+        if interval < _HEARTBEAT_THRESHOLD_SEC:
+            time.sleep(interval)
+            return
+        remaining = interval
+        while remaining > 0:
+            chunk = min(_HEARTBEAT_CHUNK_SEC, remaining)
+            time.sleep(chunk)
+            remaining -= chunk
+            if remaining > 0:
+                self._fire_progress(step, config, "processing", start_time, is_heartbeat=True)
+
+    async def _asleep_with_heartbeats(
+        self,
+        interval: float,
+        step: Step,
+        config: RunnableConfig | None,
+        start_time: float,
+    ) -> None:
+        """Async twin of ``_sleep_with_heartbeats``."""
+        if interval < _HEARTBEAT_THRESHOLD_SEC:
+            await asyncio.sleep(interval)
+            return
+        remaining = interval
+        while remaining > 0:
+            chunk = min(_HEARTBEAT_CHUNK_SEC, remaining)
+            await asyncio.sleep(chunk)
+            remaining -= chunk
+            if remaining > 0:
+                self._fire_progress(step, config, "processing", start_time, is_heartbeat=True)
+
+    @abstractmethod
+    def submit(self, step: Step, config: RunnableConfig | None = None) -> Any:
+        """Submit the generation request. Returns a provider-specific prediction ID."""
+        ...
+
+    @abstractmethod
+    def poll(self, prediction_id: Any, config: RunnableConfig | None = None) -> bool:
+        """Poll for completion. Returns True when done."""
+        ...
+
+    def poll_progress(self, prediction_id: Any) -> dict[str, Any] | None:
+        """Return mid-poll signals to merge into the next ``step.progress`` event.
+
+        Default ``None`` — no extra signals. Connectors with rich poll
+        responses (Runway preview frames, Luma intermediate stills,
+        Replicate streamed logs) override to return any of:
+
+        - ``preview_url`` (str): ephemeral preview (validated via
+          ``validate_asset_url`` before forwarding).
+        - ``progress_pct`` (float, 0.0–1.0): upstream-reported progress.
+        - ``message`` (str): human-readable status.
+
+        The base poll loop calls this between poll iterations and merges
+        the returned dict into the generic "processing" progress event.
+        Use the cached poll result via ``self._get_cached_poll_result`` /
+        ``self._cache_poll_result`` to avoid an extra API call.
+        """
+        return None
+
+    @abstractmethod
+    def fetch_output(self, prediction_id: Any, step: Step) -> Step:
+        """Fetch results and attach assets to the step. Returns updated step."""
+        ...
+
+    @staticmethod
+    def _classify_poll_exc(exc: Exception) -> ProviderErrorCode:
+        """Pick the best error code for an exception raised by poll().
+
+        Prefers an explicit ProviderError.error_code over string-matching so
+        connectors that already categorize their SDK exceptions keep the
+        classification they set.
+        """
+        if isinstance(exc, ProviderError) and exc.error_code is not None:
+            return exc.error_code
+        return classify_api_error(exc)
+
+    def _is_retryable(
+        self,
+        exc: Exception,
+        retry_on: tuple[type[BaseException], ...] | None,
+        attempt: int,
+    ) -> bool:
+        """Retry rule for one phase.
+
+        Two distinct rules, picked by whether ``retry_on`` is supplied:
+
+        - **Submit phase** (``retry_on`` set, typically ``PRE_RESPONSE_EXCEPTIONS``):
+          membership in ``retry_on`` is itself the declaration that the
+          exception type is safe to retry — pre-response network failures
+          can't have triggered a side effect, regardless of how the message
+          string would classify. We honor only the policy's ``max_attempts``
+          gate, not its ``retryable_codes`` set, because pre-response error
+          strings often classify to ``UNKNOWN``.
+        - **Poll / fetch phase** (``retry_on`` is ``None``): delegate fully to
+          ``self.retry_policy.should_retry`` (code membership + budget gate).
+        """
+        policy = self.retry_policy
+        if retry_on is not None:
+            if not isinstance(exc, retry_on):
+                return False
+            return attempt < policy.max_attempts
+        code = self._classify_poll_exc(exc)
+        return policy.should_retry(code, attempt)
+
+    def _retry_delay(self, exc: Exception, attempt: int) -> float:
+        """Delay before the next attempt — server hint wins over computed backoff."""
+        retry_after = (
+            exc.retry_after
+            if isinstance(exc, ProviderError) and exc.retry_after is not None
+            else None
+        )
+        return self.retry_policy.compute_delay(attempt, retry_after=retry_after)
+
+    def _emit_retry(
+        self,
+        step: Step,
+        config: RunnableConfig | None,
+        phase: Literal["submit", "poll", "fetch"],
+        exc: Exception,
+        attempt: int,
+        delay: float,
+    ) -> None:
+        """Log + fire ``on_retry`` so pipeline streams can surface the retry."""
+        code = self._classify_poll_exc(exc)
+        max_attempts = self.retry_policy.max_attempts
+        logger.warning(
+            "%s %s retry %d/%d in %.1fs (code=%s)",
+            self.name,
+            phase,
+            attempt,
+            max_attempts,
+            delay,
+            code,
+        )
+        callback = (config or {}).get("on_retry")
+        if callback is None:
+            return
+        # Local import to avoid a circular reference at module import time.
+        from genblaze_core.observability.events import StepRetriedEvent
+
+        callback(
+            StepRetriedEvent(
+                run_id=(config or {}).get("run_id"),
+                step_id=step.step_id,
+                provider=self.name,
+                model=step.model,
+                phase=phase,
+                attempt=attempt,
+                max_attempts=max_attempts,
+                delay_sec=delay,
+                error_code=str(code) if code else None,
+                error=sanitize_error(str(exc)),
+            )
+        )
+
+    def _retry_phase(
+        self,
+        fn: Any,
+        *,
+        phase: Literal["submit", "poll", "fetch"],
+        step: Step,
+        config: RunnableConfig | None,
+        start_time: float,
+        timeout: float,
+        retry_on: tuple[type[BaseException], ...] | None = None,
+    ) -> Any:
+        """Run ``fn()`` with retries; unified across submit / poll / fetch.
+
+        ``retry_on=PRE_RESPONSE_EXCEPTIONS`` narrows submit retries to network
+        errors that cannot have triggered a side effect. Everywhere else the
+        retryable set is driven by the normalized error code.
+
+        Both the budget gate (``max_attempts``) and the code-eligibility check
+        live in ``self._retry_policy``; ``_is_retryable`` composes them with
+        the optional exception-class narrowing.
+        """
+        attempt = 1
+        while True:
+            try:
+                return fn()
+            except Exception as exc:
+                if not self._is_retryable(exc, retry_on, attempt):
+                    if isinstance(exc, ProviderError):
+                        exc.attempts = attempt
+                    raise
+                delay = self._retry_delay(exc, attempt)
+                elapsed = time.monotonic() - start_time
+                if elapsed + delay >= timeout:
+                    if isinstance(exc, ProviderError):
+                        exc.attempts = attempt
+                    raise
+                self._emit_retry(step, config, phase, exc, attempt, delay)
+                time.sleep(delay)
+                attempt += 1
+
+    async def _aretry_phase(
+        self,
+        fn: Any,
+        *,
+        phase: Literal["submit", "poll", "fetch"],
+        step: Step,
+        config: RunnableConfig | None,
+        start_time: float,
+        timeout: float,
+        retry_on: tuple[type[BaseException], ...] | None = None,
+    ) -> Any:
+        """Async twin of ``_retry_phase`` — ``fn`` is an awaitable factory."""
+        attempt = 1
+        while True:
+            try:
+                return await fn()
+            except Exception as exc:
+                if not self._is_retryable(exc, retry_on, attempt):
+                    if isinstance(exc, ProviderError):
+                        exc.attempts = attempt
+                    raise
+                delay = self._retry_delay(exc, attempt)
+                elapsed = time.monotonic() - start_time
+                if elapsed + delay >= timeout:
+                    if isinstance(exc, ProviderError):
+                        exc.attempts = attempt
+                    raise
+                self._emit_retry(step, config, phase, exc, attempt, delay)
+                await asyncio.sleep(delay)
+                attempt += 1
+
+    def _run_preflight_once(self) -> None:
+        """Run ``preflight_auth`` once per instance, honoring the env-var skip.
+
+        Idempotent and thread-safe: concurrent submit() calls (e.g. from
+        ``ThreadPoolExecutor`` batches) will only invoke ``preflight_auth``
+        once. The flag is set even when the check raises, so a permanent
+        auth failure doesn't get retried on every submit (the calling site
+        already surfaced the error).
+        """
+        if self._preflight_done or os.environ.get(_SKIP_PREFLIGHT_ENV):
+            return
+        # Double-checked locking — cheap fast-path read, lock only when needed.
+        with self._preflight_sync_lock:
+            if self._preflight_done:
+                return
+            try:
+                self.preflight_auth()
+            finally:
+                self._preflight_done = True
+
+    def _get_async_preflight_lock(self) -> asyncio.Lock:
+        """Lazily create the asyncio lock on the running loop's first call."""
+        if self._preflight_async_lock is None:
+            self._preflight_async_lock = asyncio.Lock()
+        return self._preflight_async_lock
+
+    async def _arun_preflight_once(self) -> None:
+        """Async twin of ``_run_preflight_once`` — protects concurrent coroutines.
+
+        Without this, two coroutines that pass the unlocked ``_preflight_done``
+        check on the same loop both dispatch ``asyncio.to_thread`` and run
+        ``preflight_auth`` in parallel.
+        """
+        if self._preflight_done or os.environ.get(_SKIP_PREFLIGHT_ENV):
+            return
+        async with self._get_async_preflight_lock():
+            if self._preflight_done:
+                return
+            await asyncio.to_thread(self._run_preflight_once)
+
+    def _checkpoint_submit(
+        self,
+        step: Step,
+        config: RunnableConfig | None,
+        prediction_id: Any,
+    ) -> None:
+        """Fire the submit checkpoint callback before polling an upstream job."""
+        on_submit = (config or {}).get("on_submit")
+        if on_submit is not None:
+            on_submit(step.step_id, prediction_id)
+
+    def _require_prediction_id(self, prediction_id: Any) -> Any:
+        """Reject submit results that cannot identify an upstream job."""
+        if prediction_id is None:
+            raise ProviderError(
+                "submit() returned no upstream prediction id",
+                error_code=ProviderErrorCode.INVALID_INPUT,
+            )
+        if isinstance(prediction_id, str) and prediction_id == "":
+            raise ProviderError(
+                "submit() returned an empty upstream prediction id",
+                error_code=ProviderErrorCode.INVALID_INPUT,
+            )
+        if isinstance(prediction_id, (bytes, bytearray)) and len(prediction_id) == 0:
+            raise ProviderError(
+                "submit() returned an empty upstream prediction id",
+                error_code=ProviderErrorCode.INVALID_INPUT,
+            )
+        return prediction_id
+
+    def _poll_fetch_once(
+        self,
+        prediction_id: Any,
+        step: Step,
+        config: RunnableConfig | None,
+        timeout: float,
+        start_time: float,
+        *,
+        timeout_label: str = "Poll",
+    ) -> Step:
+        """Run the shared sync poll-until-done loop and fetch the result."""
+        while True:
+            done = self._retry_phase(
+                lambda: self.poll(prediction_id, config),
+                phase="poll",
+                step=step,
+                config=config,
+                start_time=start_time,
+                timeout=timeout,
+            )
+            if done:
+                break
+            elapsed = time.monotonic() - start_time
+            if elapsed >= timeout:
+                raise ProviderError(
+                    f"{timeout_label} timeout after {elapsed:.1f}s (limit: {timeout}s)"
+                )
+            self._fire_poll_progress(prediction_id, step, config, start_time)
+            interval = _adaptive_poll_interval(elapsed, self.poll_interval)
+            self._sleep_with_heartbeats(interval, step, config, start_time)
+
+        step = self._retry_phase(
+            lambda: self.fetch_output(prediction_id, step),
+            phase="fetch",
+            step=step,
+            config=config,
+            start_time=start_time,
+            timeout=timeout,
+        )
+        self._apply_registry_pricing(step)
+        return step
+
+    async def _apoll_fetch_once(
+        self,
+        prediction_id: Any,
+        step: Step,
+        config: RunnableConfig | None,
+        timeout: float,
+        start_time: float,
+        *,
+        timeout_label: str = "Poll",
+    ) -> Step:
+        """Run the shared async poll-until-done loop and fetch the result."""
+        while True:
+            done = await self._aretry_phase(
+                lambda: asyncio.to_thread(self.poll, prediction_id, config),
+                phase="poll",
+                step=step,
+                config=config,
+                start_time=start_time,
+                timeout=timeout,
+            )
+            if done:
+                break
+            elapsed = time.monotonic() - start_time
+            if elapsed >= timeout:
+                raise ProviderError(
+                    f"{timeout_label} timeout after {elapsed:.1f}s (limit: {timeout}s)"
+                )
+            self._fire_poll_progress(prediction_id, step, config, start_time)
+            interval = _adaptive_poll_interval(elapsed, self.poll_interval)
+            await self._asleep_with_heartbeats(interval, step, config, start_time)
+
+        step = await self._aretry_phase(
+            lambda: asyncio.to_thread(self.fetch_output, prediction_id, step),
+            phase="fetch",
+            step=step,
+            config=config,
+            start_time=start_time,
+            timeout=timeout,
+        )
+        self._apply_registry_pricing(step)
+        return step
+
+    def _attempt_once(
+        self,
+        step: Step,
+        config: RunnableConfig | None,
+        timeout: float,
+        start_time: float,
+        retry_state: _StepRetryState | None = None,
+    ) -> Step:
+        """Execute a single submit→poll→fetch attempt with adaptive polling."""
+        self._cleanup_poll_cache()
+        self._run_preflight_once()
+        step.metadata.pop(UPSTREAM_ID_KEY, None)
+        if retry_state is not None:
+            retry_state.clear()
+        step.started_at = utc_now()
+        step.status = StepStatus.SUBMITTED
+        self._fire_progress(step, config, "submitted", start_time)
+
+        logger.debug("Submitting to %s: model=%s", self.name, step.model)
+        raw = self._retry_phase(
+            lambda: self.submit(step, config),
+            phase="submit",
+            step=step,
+            config=config,
+            start_time=start_time,
+            timeout=timeout,
+            retry_on=PRE_RESPONSE_EXCEPTIONS,
+        )
+
+        # Support SubmitResult for timing hints (backward compatible with plain IDs)
+        if isinstance(raw, SubmitResult):
+            prediction_id = raw.prediction_id
+            estimated_seconds = raw.estimated_seconds
+        else:
+            prediction_id = raw
+            estimated_seconds = None
+
+        prediction_id = self._require_prediction_id(prediction_id)
+
+        # Stash on the step so subsequent progress events (and the wire-side
+        # request_id field) can surface the upstream id. Stored under
+        # metadata to keep it out of the canonical manifest hash payload.
+        step.metadata[UPSTREAM_ID_KEY] = str(prediction_id)
+        if retry_state is not None:
+            retry_state.record_submit(prediction_id)
+
+        self._checkpoint_submit(step, config, prediction_id)
+
+        step.status = StepStatus.PROCESSING
+
+        # If provider gave a time estimate, delay first poll to reduce API calls
+        if estimated_seconds is not None and estimated_seconds > 0:
+            initial_delay = min(
+                estimated_seconds * 0.8,
+                timeout - (time.monotonic() - start_time),
+            )
+            if initial_delay > 0:
+                time.sleep(initial_delay)
+
+        step = self._poll_fetch_once(prediction_id, step, config, timeout, start_time)
+        # Only mark succeeded if fetch_output didn't signal failure
+        if step.status != StepStatus.FAILED:
+            step.status = StepStatus.SUCCEEDED
+            step.completed_at = utc_now()
+        self._fire_progress(step, config, "succeeded", start_time)
+        logger.debug("Step succeeded: %d assets", len(step.assets))
+        return step
+
+    def _finalize_resume_step(
+        self,
+        step: Step,
+        config: RunnableConfig | None,
+        start_time: float,
+    ) -> Step:
+        """Set final status and fire progress after fetch_output in resume paths."""
+        if step.status != StepStatus.FAILED:
+            step.status = StepStatus.SUCCEEDED
+            step.completed_at = utc_now()
+            self._fire_progress(step, config, "succeeded", start_time)
+        else:
+            self._fire_progress(step, config, "failed", start_time)
+        return step
+
+    def _handle_resume_error(
+        self,
+        step: Step,
+        exc: Exception,
+        config: RunnableConfig | None,
+        start_time: float,
+    ) -> Step:
+        """Classify and record an error during resume — shared by sync/async paths."""
+        error_code = (
+            exc.error_code
+            if isinstance(exc, ProviderError) and exc.error_code is not None
+            else classify_api_error(exc)
+        )
+        step.status = StepStatus.FAILED
+        step.error = sanitize_error(str(exc))
+        step.error_code = error_code
+        step.completed_at = utc_now()
+        self._fire_progress(step, config, "failed", start_time)
+        logger.warning("Resume failed: %s (code=%s)", step.error, step.error_code)
+        return step
+
+    def _record_step_retry_route(
+        self,
+        span: StepSpan,
+        *,
+        attempt: int,
+        max_retries: int,
+        resumed: bool,
+    ) -> None:
+        """Record whether a step-level retry resumed or re-submitted."""
+        route = "resume" if resumed else "submit"
+        span.set_attribute("genblaze.step_retry.route", route)
+        span.set_attribute("genblaze.step_retry.resumed", resumed)
+        logger.info(
+            "Step retry %d/%d for %s step_id=%s run_id=%s route=%s",
+            attempt,
+            max_retries,
+            span.name,
+            span.step_id,
+            span.run_id,
+            route,
+        )
+
+    def _record_resume_budget_exhausted(
+        self,
+        span: StepSpan,
+        retry_state: _StepRetryState,
+    ) -> None:
+        """Record that retry budget ended while bound to an existing prediction."""
+        if retry_state.resume_failures == 0:
+            return
+        span.set_attribute("genblaze.step_retry.resume_exhausted", True)
+        span.set_attribute("genblaze.step_retry.resume_failures", retry_state.resume_failures)
+        logger.warning(
+            "Resume retry budget exhausted for %s step_id=%s run_id=%s "
+            "resume_failures=%d no_resubmit=true",
+            span.name,
+            span.step_id,
+            span.run_id,
+            retry_state.resume_failures,
+        )
+
+    def _resume_once(
+        self,
+        prediction_id: Any,
+        step: Step,
+        config: RunnableConfig | None,
+        timeout: float,
+        start_time: float,
+        *,
+        progress_status: str = "resumed",
+    ) -> Step:
+        """Resume polling an in-flight job, raising errors to the caller."""
+        step.metadata[UPSTREAM_ID_KEY] = str(prediction_id)
+        step.status = StepStatus.PROCESSING
+        if step.started_at is None:
+            step.started_at = utc_now()
+        self._fire_progress(step, config, progress_status, start_time)
+
+        step = self._poll_fetch_once(
+            prediction_id,
+            step,
+            config,
+            timeout,
+            start_time,
+            timeout_label="Resume poll",
+        )
+        return self._finalize_resume_step(step, config, start_time)
+
+    def resume(
+        self,
+        prediction_id: Any,
+        step: Step,
+        config: RunnableConfig | None = None,
+    ) -> Step:
+        """Resume polling an in-flight job, skipping submit().
+
+        Use this to recover from a worker restart during a long-running
+        generation. Default implementation polls until done, then fetches output.
+        Errors are classified and recorded on the step (matching invoke() behavior).
+        """
+        step = step.model_copy()
+        timeout = (config or {}).get("timeout", DEFAULT_TIMEOUT)
+        start_time = time.monotonic()
+
+        try:
+            return self._resume_once(prediction_id, step, config, timeout, start_time)
+        except Exception as exc:
+            return self._handle_resume_error(step, exc, config, start_time)
+
+    async def _aresume_once(
+        self,
+        prediction_id: Any,
+        step: Step,
+        config: RunnableConfig | None,
+        timeout: float,
+        start_time: float,
+        *,
+        progress_status: str = "resumed",
+    ) -> Step:
+        """Async resume path that raises errors to the caller."""
+        step.metadata[UPSTREAM_ID_KEY] = str(prediction_id)
+        step.status = StepStatus.PROCESSING
+        if step.started_at is None:
+            step.started_at = utc_now()
+        self._fire_progress(step, config, progress_status, start_time)
+
+        step = await self._apoll_fetch_once(
+            prediction_id,
+            step,
+            config,
+            timeout,
+            start_time,
+            timeout_label="Resume poll",
+        )
+        return self._finalize_resume_step(step, config, start_time)
+
+    async def aresume(
+        self,
+        prediction_id: Any,
+        step: Step,
+        config: RunnableConfig | None = None,
+    ) -> Step:
+        """Async version of resume() — polls without blocking the event loop.
+
+        Errors are classified and recorded on the step (matching ainvoke() behavior).
+        """
+        step = step.model_copy()
+        timeout = (config or {}).get("timeout", DEFAULT_TIMEOUT)
+        start_time = time.monotonic()
+
+        try:
+            return await self._aresume_once(prediction_id, step, config, timeout, start_time)
+        except Exception as exc:
+            return self._handle_resume_error(step, exc, config, start_time)
+
+    def invoke(self, step: Step, config: RunnableConfig | None = None) -> Step:
+        """Execute the full submit→poll→fetch lifecycle with optional retry."""
+        step = step.model_copy()
+        timeout = (config or {}).get("timeout", DEFAULT_TIMEOUT)
+        max_retries = (config or {}).get("max_retries", 0)
+        start_time = time.monotonic()
+
+        span = StepSpan(
+            name=f"{self.name}/{step.model}",
+            run_id=(config or {}).get("run_id"),
+            step_id=step.step_id,
+        )
+        retry_state = _StepRetryState()
+
+        with span:
+            # Keep the retry route decision aligned with ainvoke(); only the
+            # fresh-attempt and resume helpers differ by await plumbing.
+            for attempt in range(max_retries + 1):
+                try:
+                    resume_prediction_id = retry_state.prediction_id if attempt > 0 else None
+                    if attempt > 0:
+                        # Reset step state for retry
+                        step.status = StepStatus.PENDING
+                        step.error = None
+                        step.error_code = None
+                        step.assets = []
+                        self._record_step_retry_route(
+                            span,
+                            attempt=attempt,
+                            max_retries=max_retries,
+                            resumed=resume_prediction_id is not None,
+                        )
+
+                    if resume_prediction_id is not None:
+                        self._checkpoint_submit(step, config, resume_prediction_id)
+                        step = self._resume_once(
+                            resume_prediction_id,
+                            step,
+                            config,
+                            timeout,
+                            start_time,
+                            progress_status="retry_resumed",
+                        )
+                    else:
+                        step = self._attempt_once(step, config, timeout, start_time, retry_state)
+                    span.retries = step.retries
+                    # Copy cost from span to step if provider set it
+                    if span.cost is not None:
+                        step.cost_usd = span.cost
+                    return step
+
+                except Exception as exc:
+                    error_code = (
+                        exc.error_code
+                        if isinstance(exc, ProviderError) and exc.error_code is not None
+                        else classify_api_error(exc)
+                    )
+                    if resume_prediction_id is not None:
+                        retry_state.record_resume_failure()
+
+                    # Step-level retry: budget from config.max_retries (caller-driven),
+                    # retryable codes from the unified RetryPolicy so users tune one knob.
+                    # Resolving retry_policy touches instance state set up by
+                    # BaseProvider.__init__. Only re-raise the *original* exc when
+                    # that state is genuinely missing (an improperly-constructed
+                    # provider that bypassed the metaclass guard, e.g. via
+                    # object.__new__) — not for every AttributeError, which would
+                    # also swallow a genuine bug in a *correctly* constructed
+                    # provider's own retry_policy override (pre-existing behavior
+                    # for that case: propagate raw, same as before this guard).
+                    try:
+                        retryable = error_code in self.retry_policy.retryable_codes
+                    except AttributeError:
+                        if getattr(self, "_base_init_token", None) is not _BASE_INIT_TOKEN:
+                            raise exc from None
+                        raise
+                    if not retryable or attempt >= max_retries:
+                        step.status = StepStatus.FAILED
+                        step.error = sanitize_error(str(exc))
+                        step.error_code = error_code
+                        step.completed_at = utc_now()
+                        self._fire_progress(step, config, "failed", start_time)
+                        logger.warning("Step failed: %s (code=%s)", step.error, step.error_code)
+                        self._record_resume_budget_exhausted(span, retry_state)
+                        span.retries = step.retries
+                        return step
+
+                    step.retries += 1
+                    retry_after = (
+                        exc.retry_after
+                        if isinstance(exc, ProviderError) and exc.retry_after is not None
+                        else None
+                    )
+                    backoff = self.retry_policy.compute_delay(attempt + 1, retry_after=retry_after)
+                    logger.info(
+                        "Retry %d/%d for %s step_id=%s run_id=%s after %s (backoff=%.1fs)",
+                        attempt + 1,
+                        max_retries,
+                        span.name,
+                        span.step_id,
+                        span.run_id,
+                        error_code,
+                        backoff,
+                    )
+
+                    # Check global timeout before sleeping
+                    elapsed = time.monotonic() - start_time
+                    if elapsed + backoff >= timeout:
+                        step.status = StepStatus.FAILED
+                        step.error = sanitize_error(str(exc))
+                        step.error_code = error_code
+                        step.completed_at = utc_now()
+                        self._fire_progress(step, config, "failed", start_time)
+                        logger.warning("Retry aborted: global timeout would be exceeded")
+                        self._record_resume_budget_exhausted(span, retry_state)
+                        span.retries = step.retries
+                        return step
+
+                    time.sleep(backoff)
+
+        # Should not reach here, but safety fallback
+        return step  # pragma: no cover
+
+    async def _attempt_once_async(
+        self,
+        step: Step,
+        config: RunnableConfig | None,
+        timeout: float,
+        start_time: float,
+        retry_state: _StepRetryState | None = None,
+    ) -> Step:
+        """Execute a single submit→poll→fetch attempt without blocking the event loop."""
+        self._cleanup_poll_cache()
+        if not self._preflight_done and not os.environ.get(_SKIP_PREFLIGHT_ENV):
+            if type(self).preflight_auth is BaseProvider.preflight_auth:
+                # Default no-op — set the flag inline; no need to spawn a thread
+                # (and avoid the context switch that would reorder concurrent
+                # steps in tests using cooperative ``asyncio.gather`` ordering).
+                self._preflight_done = True
+            else:
+                # Custom preflight does I/O; the locked async runner ensures
+                # concurrent coroutines on the same loop only invoke it once.
+                await self._arun_preflight_once()
+        step.metadata.pop(UPSTREAM_ID_KEY, None)
+        if retry_state is not None:
+            retry_state.clear()
+        step.started_at = utc_now()
+        step.status = StepStatus.SUBMITTED
+        self._fire_progress(step, config, "submitted", start_time)
+
+        logger.debug("Submitting to %s: model=%s", self.name, step.model)
+        raw = await self._aretry_phase(
+            lambda: asyncio.to_thread(self.submit, step, config),
+            phase="submit",
+            step=step,
+            config=config,
+            start_time=start_time,
+            timeout=timeout,
+            retry_on=PRE_RESPONSE_EXCEPTIONS,
+        )
+
+        # Support SubmitResult for timing hints (backward compatible with plain IDs)
+        if isinstance(raw, SubmitResult):
+            prediction_id = raw.prediction_id
+            estimated_seconds = raw.estimated_seconds
+        else:
+            prediction_id = raw
+            estimated_seconds = None
+
+        prediction_id = self._require_prediction_id(prediction_id)
+
+        # Stash on the step so subsequent progress events (and the wire-side
+        # request_id field) can surface the upstream id. Stored under
+        # metadata to keep it out of the canonical manifest hash payload.
+        step.metadata[UPSTREAM_ID_KEY] = str(prediction_id)
+        if retry_state is not None:
+            retry_state.record_submit(prediction_id)
+
+        self._checkpoint_submit(step, config, prediction_id)
+
+        step.status = StepStatus.PROCESSING
+
+        # If provider gave a time estimate, delay first poll to reduce API calls
+        if estimated_seconds is not None and estimated_seconds > 0:
+            initial_delay = min(
+                estimated_seconds * 0.8,
+                timeout - (time.monotonic() - start_time),
+            )
+            if initial_delay > 0:
+                await asyncio.sleep(initial_delay)
+
+        step = await self._apoll_fetch_once(prediction_id, step, config, timeout, start_time)
+        if step.status != StepStatus.FAILED:
+            step.status = StepStatus.SUCCEEDED
+            step.completed_at = utc_now()
+        self._fire_progress(step, config, "succeeded", start_time)
+        logger.debug("Step succeeded: %d assets", len(step.assets))
+        return step
+
+    async def ainvoke(self, step: Step, config: RunnableConfig | None = None) -> Step:
+        """Async submit→poll→fetch lifecycle — uses asyncio.sleep instead of blocking."""
+        step = step.model_copy()
+        timeout = (config or {}).get("timeout", DEFAULT_TIMEOUT)
+        max_retries = (config or {}).get("max_retries", 0)
+        start_time = time.monotonic()
+
+        span = StepSpan(
+            name=f"{self.name}/{step.model}",
+            run_id=(config or {}).get("run_id"),
+            step_id=step.step_id,
+        )
+        retry_state = _StepRetryState()
+
+        with span:
+            # Keep the retry route decision aligned with invoke(); only the
+            # fresh-attempt and resume helpers differ by await plumbing.
+            for attempt in range(max_retries + 1):
+                try:
+                    resume_prediction_id = retry_state.prediction_id if attempt > 0 else None
+                    if attempt > 0:
+                        step.status = StepStatus.PENDING
+                        step.error = None
+                        step.error_code = None
+                        step.assets = []
+                        self._record_step_retry_route(
+                            span,
+                            attempt=attempt,
+                            max_retries=max_retries,
+                            resumed=resume_prediction_id is not None,
+                        )
+
+                    if resume_prediction_id is not None:
+                        self._checkpoint_submit(step, config, resume_prediction_id)
+                        step = await self._aresume_once(
+                            resume_prediction_id,
+                            step,
+                            config,
+                            timeout,
+                            start_time,
+                            progress_status="retry_resumed",
+                        )
+                    else:
+                        step = await self._attempt_once_async(
+                            step, config, timeout, start_time, retry_state
+                        )
+                    span.retries = step.retries
+                    if span.cost is not None:
+                        step.cost_usd = span.cost
+                    return step
+
+                except Exception as exc:
+                    error_code = (
+                        exc.error_code
+                        if isinstance(exc, ProviderError) and exc.error_code is not None
+                        else classify_api_error(exc)
+                    )
+                    if resume_prediction_id is not None:
+                        retry_state.record_resume_failure()
+
+                    # See the matching comment in invoke() — only re-raise the
+                    # original exc if the instance genuinely bypassed the
+                    # metaclass guard; otherwise let a real provider bug in
+                    # retry_policy propagate as-is.
+                    try:
+                        retryable = error_code in self.retry_policy.retryable_codes
+                    except AttributeError:
+                        if getattr(self, "_base_init_token", None) is not _BASE_INIT_TOKEN:
+                            raise exc from None
+                        raise
+                    if not retryable or attempt >= max_retries:
+                        step.status = StepStatus.FAILED
+                        step.error = sanitize_error(str(exc))
+                        step.error_code = error_code
+                        step.completed_at = utc_now()
+                        self._fire_progress(step, config, "failed", start_time)
+                        logger.warning("Step failed: %s (code=%s)", step.error, step.error_code)
+                        self._record_resume_budget_exhausted(span, retry_state)
+                        span.retries = step.retries
+                        return step
+
+                    step.retries += 1
+                    retry_after = (
+                        exc.retry_after
+                        if isinstance(exc, ProviderError) and exc.retry_after is not None
+                        else None
+                    )
+                    backoff = self.retry_policy.compute_delay(attempt + 1, retry_after=retry_after)
+                    logger.info(
+                        "Retry %d/%d for %s step_id=%s run_id=%s after %s (backoff=%.1fs)",
+                        attempt + 1,
+                        max_retries,
+                        span.name,
+                        span.step_id,
+                        span.run_id,
+                        error_code,
+                        backoff,
+                    )
+
+                    elapsed = time.monotonic() - start_time
+                    if elapsed + backoff >= timeout:
+                        step.status = StepStatus.FAILED
+                        step.error = sanitize_error(str(exc))
+                        step.error_code = error_code
+                        step.completed_at = utc_now()
+                        self._fire_progress(step, config, "failed", start_time)
+                        logger.warning("Retry aborted: global timeout would be exceeded")
+                        self._record_resume_budget_exhausted(span, retry_state)
+                        span.retries = step.retries
+                        return step
+
+                    await asyncio.sleep(backoff)
+
+        return step  # pragma: no cover
+
+
+class SyncProvider(BaseProvider):
+    """Base for providers with synchronous APIs (OpenAI, Stability, ElevenLabs).
+
+    Subclasses implement a single ``generate()`` method instead of the
+    three-method submit/poll/fetch_output lifecycle. The base class wraps
+    ``generate()`` into the lifecycle automatically.
+
+    Thread-safe: results are keyed by step_id, so concurrent invocations
+    don't interfere with each other.
+
+    Example::
+
+        class OpenAIProvider(SyncProvider):
+            name = "openai"
+
+            def generate(self, step, config=None):
+                resp = openai.images.generate(prompt=step.prompt, **step.params)
+                for url in resp.data:
+                    validate_asset_url(url.url)
+                    step.assets.append(Asset(url=url.url, media_type="image/png"))
+                return step
+    """
+
+    def __init__(
+        self,
+        *,
+        models: ModelRegistry | None = None,
+        retry_policy: RetryPolicy | None = None,
+        probe_cache_ttl: float | None = None,
+        probe_cache_max_entries: int | None = None,
+    ) -> None:
+        super().__init__(
+            models=models,
+            retry_policy=retry_policy,
+            probe_cache_ttl=probe_cache_ttl,
+            probe_cache_max_entries=probe_cache_max_entries,
+        )
+        # Results keyed by step_id — avoids monkey-patching Pydantic models
+        self._sync_results: dict[str, Step] = {}
+
+    @abstractmethod
+    def generate(self, step: Step, config: RunnableConfig | None = None) -> Step:
+        """Execute generation synchronously and return step with populated assets."""
+        ...
+
+    def submit(self, step: Step, config: RunnableConfig | None = None) -> Any:
+        """Calls generate() and stashes the result for fetch_output."""
+        # Clear any stale result from a prior failed attempt (retry safety)
+        self._sync_results.pop(step.step_id, None)
+        result = self.generate(step, config)
+        self._sync_results[step.step_id] = result
+        return "sync"
+
+    def poll(self, prediction_id: Any, config: RunnableConfig | None = None) -> bool:
+        return True
+
+    def fetch_output(self, prediction_id: Any, step: Step) -> Step:
+        return self._sync_results.pop(step.step_id, step)
+
+
+# --- ValidationResult → ProbeResult coercion --------------------------------
+#
+# Bridge between the new validation surface and the legacy probe surface so
+# external probe-CI consumers don't break in 0.3.0. The mapping is deliberately
+# lossy on the OK_PROVISIONAL → UNKNOWN edge — provisional is a weaker claim
+# than ProbeStatus.OK, so coercing it down to UNKNOWN is the honest move.
+
+_VALIDATION_TO_PROBE: Mapping[ValidationOutcome, ProbeStatus] = {
+    ValidationOutcome.OK_AUTHORITATIVE: ProbeStatus.OK,
+    ValidationOutcome.OK_PROVISIONAL: ProbeStatus.UNKNOWN,
+    ValidationOutcome.UNKNOWN_PERMISSIVE: ProbeStatus.UNKNOWN,
+    ValidationOutcome.NOT_FOUND: ProbeStatus.NOT_FOUND,
+}
+
+
+def _coerce_validation_to_probe(result: ValidationResult) -> ProbeResult:
+    """Map a ``ValidationResult`` to a legacy ``ProbeResult`` for the
+    deprecated ``probe_model()`` adapter."""
+    status = _VALIDATION_TO_PROBE.get(result.outcome, ProbeStatus.UNKNOWN)
+    return ProbeResult(status=status, detail=result.detail)

@@ -1,0 +1,228 @@
+"""Tests for StabilityAudioProvider (mocked — no real API calls)."""
+
+from __future__ import annotations
+
+import tempfile
+from unittest.mock import MagicMock, patch
+
+import pytest
+from genblaze_core.exceptions import ProviderError
+from genblaze_core.models.enums import StepStatus
+from genblaze_core.models.step import Step
+from genblaze_core.testing import ProviderComplianceTests
+
+
+@pytest.fixture
+def mock_stability(tmp_path):
+    """Patch httpx with a mock client."""
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.content = b"fake-audio-bytes"
+
+    mock_http = MagicMock()
+    mock_http.post.return_value = mock_response
+
+    with patch.dict("sys.modules", {"httpx": MagicMock()}):
+        from genblaze_stability_audio import StabilityAudioProvider
+
+        provider = StabilityAudioProvider(api_key="test-key", output_dir=str(tmp_path))
+        provider._http_client = mock_http
+        yield provider, mock_http
+
+
+def test_generate_returns_audio_asset(mock_stability):
+    provider, _ = mock_stability
+    step = Step(
+        provider="stability-audio",
+        model="stable-audio-2.5",
+        prompt="Upbeat electronic music with synths",
+    )
+    result = provider.generate(step)
+    assert len(result.assets) == 1
+    assert result.assets[0].media_type == "audio/mpeg"
+    assert result.assets[0].url.startswith("file://")
+
+
+def test_invoke_full_lifecycle(mock_stability):
+    provider, _ = mock_stability
+    step = Step(
+        provider="stability-audio",
+        model="stable-audio-2.5",
+        prompt="Ambient soundscape",
+    )
+    result = provider.invoke(step)
+    assert result.status == StepStatus.SUCCEEDED
+    assert len(result.assets) == 1
+
+
+def test_duration_param_passed(mock_stability):
+    provider, http_client = mock_stability
+    step = Step(
+        provider="stability-audio",
+        model="stable-audio-2.5",
+        prompt="test",
+        params={"duration": "30"},
+    )
+    provider.generate(step)
+    call_kwargs = http_client.post.call_args
+    assert "30" in str(call_kwargs)
+
+
+def test_invalid_duration_raises(mock_stability):
+    provider, _ = mock_stability
+    step = Step(
+        provider="stability-audio",
+        model="stable-audio-2.5",
+        prompt="test",
+        params={"duration": "200"},
+    )
+    with pytest.raises(ProviderError, match="Invalid duration"):
+        provider.generate(step)
+
+
+def test_api_error_raises(mock_stability):
+    provider, http_client = mock_stability
+    error_resp = MagicMock()
+    error_resp.status_code = 401
+    error_resp.text = "Unauthorized"
+    http_client.post.return_value = error_resp
+    step = Step(
+        provider="stability-audio",
+        model="stable-audio-2.5",
+        prompt="test",
+    )
+    with pytest.raises(ProviderError, match="Stability Audio API error 401"):
+        provider.generate(step)
+
+
+def test_cost_none_by_default(mock_stability):
+    """As of genblaze-core 0.3.0 the SDK no longer ships pricing for
+    Stability Audio. cost_usd is None unless the user has registered
+    pricing via ``provider.models.register_pricing()``. See
+    ``docs/reference/pricing-recipes.md`` for the canonical recipe.
+    """
+    provider, _ = mock_stability
+    step = Step(
+        provider="stability-audio",
+        model="stable-audio-2.5",
+        prompt="Upbeat music",
+        params={"duration": "30"},
+    )
+    result = provider.generate(step)
+    assert result.cost_usd is None
+
+
+def test_cost_tracked_with_user_registered_per_second(mock_stability):
+    """User-registered per-second strategy with the duration-fallback shape.
+
+    Documents the canonical Stability Audio recipe: prefer the
+    probed asset duration, fall back to ``step.params['duration']``.
+    """
+    from genblaze_core.providers import PricingContext, PricingStrategy
+
+    def per_second_with_param_fallback(rate: float) -> PricingStrategy:
+        def _strategy(ctx: PricingContext) -> float | None:
+            dur = ctx.output_duration_s
+            if dur is None:
+                raw = ctx.step.params.get("duration")
+                try:
+                    dur = float(raw) if raw is not None else None
+                except (TypeError, ValueError):
+                    dur = None
+            if dur is None:
+                return None
+            return dur * rate
+
+        return _strategy
+
+    provider, _ = mock_stability
+    # Fork before mutating to avoid polluting the class-level
+    # models_default() cache (would affect sibling tests).
+    provider._models = provider.models.fork()
+    provider.models.register_pricing("stable-audio-2.5", per_second_with_param_fallback(0.01))
+
+    step = Step(
+        provider="stability-audio",
+        model="stable-audio-2.5",
+        prompt="Upbeat music",
+        params={"duration": "30"},
+    )
+    result = provider.generate(step)
+    assert result.cost_usd == pytest.approx(30.0 * 0.01)
+
+
+def test_audio_type_metadata(mock_stability):
+    """Stability Audio assets are tagged as music."""
+    provider, _ = mock_stability
+    step = Step(
+        provider="stability-audio",
+        model="stable-audio-2.5",
+        prompt="Upbeat electronic",
+    )
+    result = provider.generate(step)
+    assert result.assets[0].metadata["audio_type"] == "music"
+
+
+def test_asset_duration_set(mock_stability):
+    """Asset duration is set from params."""
+    provider, _ = mock_stability
+    step = Step(
+        provider="stability-audio",
+        model="stable-audio-2.5",
+        prompt="test",
+        params={"duration": "30"},
+    )
+    result = provider.generate(step)
+    assert result.assets[0].duration == 30.0
+
+
+def test_rate_limit_error_code(mock_stability):
+    provider, http_client = mock_stability
+    error_resp = MagicMock()
+    error_resp.status_code = 429
+    error_resp.text = "Rate limited"
+    http_client.post.return_value = error_resp
+    step = Step(
+        provider="stability-audio",
+        model="stable-audio-2.5",
+        prompt="test",
+    )
+    with pytest.raises(ProviderError) as exc_info:
+        provider.generate(step)
+    assert exc_info.value.error_code.value == "rate_limit"
+
+
+# --- Compliance harness ---
+
+
+class TestStabilityAudioCompliance(ProviderComplianceTests):
+    """Verify StabilityAudioProvider satisfies the genblaze provider contract."""
+
+    # StabilityAudioProvider populates cost_usd from asset.duration, but the
+    # compliance fixture's fake audio blob doesn't carry a duration through
+    # the mutagen probe path. Dedicated cost tests cover the real code path.
+    expects_cost = False
+
+    @pytest.fixture(autouse=True)
+    def _patch_sdk(self):
+        with patch.dict("sys.modules", {"httpx": MagicMock()}):
+            yield
+
+    def make_provider(self):
+        from genblaze_stability_audio import StabilityAudioProvider
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.content = b"fake-audio-bytes"
+        mock_http = MagicMock()
+        mock_http.post.return_value = mock_response
+        provider = StabilityAudioProvider(api_key="test-key", output_dir=tempfile.mkdtemp())
+        provider._http_client = mock_http
+        return provider
+
+    def make_step(self):
+        return Step(
+            provider="stability-audio",
+            model="stable-audio-2.5",
+            prompt="test prompt",
+        )

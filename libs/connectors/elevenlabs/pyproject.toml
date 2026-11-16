@@ -1,0 +1,53 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "genblaze-elevenlabs"
+version = "0.3.3"
+description = "ElevenLabs TTS and sound effects provider adapter for genblaze"
+authors = [{name = "Jeronimo De Leon", email = "jdeleon@backblaze.com"}]
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Typing :: Typed",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia",
+    "Topic :: Software Development :: Libraries",
+]
+keywords = ["genblaze", "ai", "media", "manifest", "provenance", "c2pa-ready", "genai", "pipeline", "elevenlabs", "tts", "audio"]
+
+dependencies = [
+    "genblaze-core>=0.3.7,<0.4",
+    "elevenlabs>=2.0,<3",
+]
+
+[project.urls]
+Homepage = "https://github.com/backblaze-labs/genblaze"
+Documentation = "https://github.com/backblaze-labs/genblaze"
+Repository = "https://github.com/backblaze-labs/genblaze"
+Issues = "https://github.com/backblaze-labs/genblaze/issues"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+]
+
+[project.entry-points."genblaze.providers"]
+elevenlabs-tts = "genblaze_elevenlabs:ElevenLabsTTSProvider"
+elevenlabs-sfx = "genblaze_elevenlabs:ElevenLabsSFXProvider"
+
+[tool.hatch.build.targets.wheel]
+packages = ["genblaze_elevenlabs"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.deptry]
+# Treat the `dev` extra as dev-only tooling so deptry does not flag pytest
+# (and other test-only deps) as unused declared deps (DEP002).
+optional_dependencies_dev_groups = ["dev"]

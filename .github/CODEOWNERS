@@ -1,0 +1,15 @@
+# Default owner for everything
+# TODO: add @backblaze-labs/genblaze-maintainers as co-owner once the team is created
+* @jeronimodeleon
+
+# Core SDK
+libs/core/ @jeronimodeleon
+
+# CLI
+cli/ @jeronimodeleon
+
+# Connectors
+libs/connectors/ @jeronimodeleon
+
+# CI / repo config
+.github/ @jeronimodeleon

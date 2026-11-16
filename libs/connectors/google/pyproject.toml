@@ -1,0 +1,62 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "genblaze-google"
+version = "0.3.5"
+description = "Google provider adapters for genblaze (Veo video, Imagen + Gemini image)"
+authors = [{name = "Jeronimo De Leon", email = "jdeleon@backblaze.com"}]
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Typing :: Typed",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia",
+    "Topic :: Software Development :: Libraries",
+]
+keywords = ["genblaze", "ai", "media", "manifest", "provenance", "c2pa-ready", "genai", "pipeline", "google", "veo", "imagen", "gemini"]
+
+dependencies = [
+    # >=0.3.8: this connector imports call_with_rate_limit_retry, added to
+    # genblaze-core in 0.3.8 -- a >=0.3.7 floor would let pip resolve this
+    # package against the still-published 0.3.7 core and fail with
+    # ImportError at `import genblaze_google`. >=0.3.9: chat(retry_on_rate_limit=True)
+    # retries 5xx only with 0.3.9's call_with_rate_limit_retry (#264).
+    "genblaze-core>=0.3.9,<0.4",
+    # <2: bounded-major convention (#61) — caps below the next major so a
+    # future google-genai release can't silently break this connector at
+    # resolve time.
+    "google-genai>=1.0,<3",
+]
+
+[project.urls]
+Homepage = "https://github.com/backblaze-labs/genblaze"
+Documentation = "https://github.com/backblaze-labs/genblaze"
+Repository = "https://github.com/backblaze-labs/genblaze"
+Issues = "https://github.com/backblaze-labs/genblaze/issues"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+]
+
+[project.entry-points."genblaze.providers"]
+google-veo = "genblaze_google:VeoProvider"
+google-imagen = "genblaze_google:ImagenProvider"
+google-gemini-image = "genblaze_google:GeminiImageProvider"
+
+[tool.hatch.build.targets.wheel]
+packages = ["genblaze_google"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.deptry]
+# Treat the `dev` extra as dev-only tooling so deptry does not flag pytest
+# (and other test-only deps) as unused declared deps (DEP002).
+optional_dependencies_dev_groups = ["dev"]

@@ -1,0 +1,988 @@
+"""Tests for DalleProvider (mocked — no real API calls)."""
+
+from __future__ import annotations
+
+import base64
+import socket
+import tempfile
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
+import pytest
+from genblaze_core.exceptions import ProviderError
+from genblaze_core.models.enums import StepStatus
+from genblaze_core.models.manifest import Manifest
+from genblaze_core.models.policy import EmbedPolicy
+from genblaze_core.models.run import Run
+from genblaze_core.models.step import Step
+from genblaze_core.testing import ProviderComplianceTests
+
+_FAKE_PNG = b"\x89PNG\r\n\x1a\nfake-image-bytes"
+_CONN_PATCH = "genblaze_openai.dalle.open_pinned_https_connection"
+
+
+def _fake_pinned_conn(*_args, **_kwargs):
+    """Minimal http.client-like connection that yields _FAKE_PNG once."""
+    conn = MagicMock()
+    resp = MagicMock()
+    resp.status = 200
+    resp.read.side_effect = [_FAKE_PNG, b""]
+    conn.getresponse.return_value = resp
+    return conn
+
+
+@pytest.fixture
+def mock_dalle():
+    """Patch openai with a mock client and stub the SSRF-pinned downloader.
+
+    dall-e-2/3 return signed CDN URLs; the provider now fetches the bytes into a
+    local hashed asset, so the pinned HTTPS connection is faked here.
+    """
+    mock_client = MagicMock()
+    mock_client.images.generate.return_value = SimpleNamespace(
+        data=[SimpleNamespace(url="https://oaidalleapiprodscus.blob.core.windows.net/img.png")]
+    )
+
+    with patch.dict("sys.modules", {"openai": MagicMock()}):
+        from genblaze_openai.dalle import DalleProvider
+
+        with patch(_CONN_PATCH, side_effect=_fake_pinned_conn):
+            provider = DalleProvider(api_key="test-key")
+            provider._client = mock_client
+            yield provider, mock_client
+
+
+def test_generate_returns_image_asset(mock_dalle):
+    provider, _ = mock_dalle
+    step = Step(provider="openai-dalle", model="dall-e-3", prompt="a cat in space")
+    result = provider.generate(step)
+    assert len(result.assets) == 1
+    assert result.assets[0].media_type == "image/png"
+    # URL responses are materialized to a local hashed file:// asset.
+    assert result.assets[0].url.startswith("file://")
+    assert result.assets[0].sha256 is not None
+    assert result.assets[0].size_bytes == len(_FAKE_PNG)
+
+
+def test_url_response_materialized_locally_without_credentials(mock_dalle):
+    provider, client = mock_dalle
+    sas_url = (
+        "https://oaidalleapiprodscus.blob.core.windows.net/private/img.png"
+        "?st=2026-06-20T00%3A00%3A00Z&se=2026-06-20T01%3A00%3A00Z"
+        "&sp=r&sv=2024-11-04&sig=secret&tenant_resource=keep"
+    )
+    client.images.generate.return_value = SimpleNamespace(data=[SimpleNamespace(url=sas_url)])
+
+    with patch(_CONN_PATCH, side_effect=_fake_pinned_conn) as conn:
+        result = provider.generate(Step(provider="openai-dalle", model="dall-e-3", prompt="cat"))
+
+    # The signed URL is used to FETCH the bytes (credentials preserved for the
+    # download)...
+    assert conn.call_args.args[0] == sas_url
+    # ...but never persisted: the asset is a local hashed file with no SAS
+    # material, and the embedded manifest is credential-free.
+    asset = result.assets[0]
+    assert asset.url.startswith("file://")
+    assert asset.sha256 is not None
+    for cred in ("sig=", "se=", "st=", "sp=", "sv=", "secret"):
+        assert cred not in asset.url
+    manifest = Manifest.from_run(Run(name="sas", steps=[result]))
+    embedded = manifest.to_embed_json(EmbedPolicy(embed_mode="full"))
+    for cred in ("sig=", "se=", "secret"):
+        assert cred not in embedded
+
+
+def test_invoke_full_lifecycle(mock_dalle):
+    provider, _ = mock_dalle
+    step = Step(provider="openai-dalle", model="dall-e-3", prompt="a cat")
+    result = provider.invoke(step)
+    assert result.status == StepStatus.SUCCEEDED
+    assert len(result.assets) == 1
+
+
+def test_url_output_materialized_verifies_without_sink(mock_dalle):
+    provider, _ = mock_dalle
+    result = provider.invoke(Step(provider="openai-dalle", model="dall-e-3", prompt="a cat"))
+
+    manifest = Manifest.from_run(Run(name="same", steps=[result]))
+
+    # URL responses are downloaded and hashed at the source, so the manifest
+    # verifies without a storage sink.
+    assert result.assets[0].sha256 is not None
+    assert manifest.verify_hash()
+    assert manifest.output_asset_ids_missing_sha256() == []
+    assert manifest.verify()
+
+
+def test_multiple_images(mock_dalle):
+    provider, client = mock_dalle
+    client.images.generate.return_value = SimpleNamespace(
+        data=[
+            SimpleNamespace(url="https://example.com/img1.png"),
+            SimpleNamespace(url="https://example.com/img2.png"),
+        ]
+    )
+    step = Step(provider="openai-dalle", model="dall-e-3", prompt="cats", params={"n": 2})
+    result = provider.generate(step)
+    assert len(result.assets) == 2
+
+
+def test_params_passed_to_api(mock_dalle):
+    provider, client = mock_dalle
+    step = Step(
+        provider="openai-dalle",
+        model="dall-e-3",
+        prompt="test",
+        params={"size": "1792x1024", "quality": "hd", "style": "vivid"},
+    )
+    provider.generate(step)
+    call_kwargs = client.images.generate.call_args[1]
+    assert call_kwargs["size"] == "1792x1024"
+    assert call_kwargs["quality"] == "hd"
+    assert call_kwargs["style"] == "vivid"
+
+
+def test_api_error_raises_provider_error(mock_dalle):
+    provider, client = mock_dalle
+    client.images.generate.side_effect = RuntimeError("429 rate limit exceeded")
+    step = Step(provider="openai-dalle", model="dall-e-3", prompt="test")
+    with pytest.raises(ProviderError, match="OpenAI image generation failed"):
+        provider.generate(step)
+
+
+# --- Cost tracking ---
+
+
+def test_cost_none_by_default(mock_dalle):
+    """As of genblaze-core 0.3.0 the SDK ships zero hardcoded prices for
+    OpenAI image models. Users register pricing via
+    ``provider.models.register_pricing()``; see
+    ``docs/reference/pricing-recipes.md`` for the canonical recipe."""
+    provider, _ = mock_dalle
+    step = Step(
+        provider="openai-dalle",
+        model="dall-e-3",
+        prompt="test",
+        params={"quality": "standard", "size": "1024x1024"},
+    )
+    result = provider.generate(step)
+    assert result.cost_usd is None
+
+
+def test_cost_tracked_with_user_registered_tiered_pricing(mock_dalle):
+    """User-registered ``tiered`` pricing keyed on (quality, size)
+    flows through compute_cost — the canonical OpenAI image recipe."""
+    from genblaze_core.providers import tiered
+
+    provider, _ = mock_dalle
+    rates = {
+        ("standard", "1024x1024"): 0.040,
+        ("standard", "1024x1792"): 0.080,
+        ("standard", "1792x1024"): 0.080,
+        ("hd", "1024x1024"): 0.080,
+        ("hd", "1024x1792"): 0.120,
+        ("hd", "1792x1024"): 0.120,
+    }
+
+    def key(ctx):
+        params = ctx.step.params
+        return (params.get("quality", "standard"), params.get("size", "1024x1024"))
+
+    provider._models = provider.models.fork()
+    provider.models.register_pricing("dall-e-3", tiered(rates, key=key))
+
+    for params, expected in (
+        ({"quality": "standard", "size": "1024x1024"}, 0.040),
+        ({"quality": "hd", "size": "1792x1024"}, 0.120),
+    ):
+        step = Step(provider="openai-dalle", model="dall-e-3", prompt="test", params=params)
+        result = provider.generate(step)
+        assert result.cost_usd == pytest.approx(expected), params
+
+
+def test_cost_none_unknown_model(mock_dalle):
+    """Cost stays None for unknown model."""
+    provider, _ = mock_dalle
+    step = Step(provider="openai-dalle", model="unknown-model", prompt="test")
+    result = provider.generate(step)
+    assert result.cost_usd is None
+
+
+# --- Param validation ---
+
+
+def test_invalid_size_raises(mock_dalle):
+    """Invalid size for DALL-E 3 is rejected before API call."""
+    provider, _ = mock_dalle
+    step = Step(
+        provider="openai-dalle",
+        model="dall-e-3",
+        prompt="test",
+        params={"size": "500x500"},
+    )
+    with pytest.raises(ProviderError, match="Invalid size"):
+        provider.generate(step)
+
+
+def test_invalid_quality_raises(mock_dalle):
+    """Invalid quality value is rejected before API call."""
+    provider, _ = mock_dalle
+    step = Step(
+        provider="openai-dalle",
+        model="dall-e-3",
+        prompt="test",
+        params={"quality": "ultra"},
+    )
+    with pytest.raises(ProviderError, match="Invalid quality"):
+        provider.generate(step)
+
+
+# --- Capabilities ---
+
+
+def test_capabilities_declared(mock_dalle):
+    """DALL-E provider declares IMAGE modality and model list."""
+    provider, _ = mock_dalle
+    from genblaze_core.models.enums import Modality
+
+    caps = provider.get_capabilities()
+    assert caps is not None
+    assert caps.supported_modalities == [Modality.IMAGE]
+    assert "gpt-image-1" in caps.models
+    assert "dall-e-3" in caps.models
+
+
+# --- gpt-image-1 b64 path ---
+
+
+def test_gpt_image_1_saves_b64_locally(tmp_path):
+    """gpt-image-1 returns base64 data that gets saved as a local file."""
+    b64_data = base64.b64encode(b"fake-png-data").decode()
+    mock_client = MagicMock()
+    mock_client.images.generate.return_value = SimpleNamespace(
+        data=[SimpleNamespace(b64_json=b64_data, url=None)]
+    )
+
+    with patch.dict("sys.modules", {"openai": MagicMock()}):
+        from genblaze_openai.dalle import DalleProvider
+
+        provider = DalleProvider(api_key="test-key", output_dir=str(tmp_path))
+        provider._client = mock_client
+
+    step = Step(provider="openai-dalle", model="gpt-image-1", prompt="a cat")
+    result = provider.generate(step)
+    assert len(result.assets) == 1
+    assert result.assets[0].url.startswith("file://")
+    assert result.assets[0].media_type == "image/png"
+
+
+# --- New model registry: gpt-image-2 / 1.5 / 1-mini ---
+
+
+@pytest.fixture
+def mock_b64_dalle(tmp_path):
+    """DalleProvider with a b64-returning mock client and temp output_dir."""
+    b64 = base64.b64encode(b"fake-image-bytes").decode()
+    mock_client = MagicMock()
+    mock_client.images.generate.return_value = SimpleNamespace(
+        data=[SimpleNamespace(b64_json=b64, url=None)]
+    )
+    mock_client.images.edit.return_value = SimpleNamespace(
+        data=[SimpleNamespace(b64_json=b64, url=None)]
+    )
+    with patch.dict("sys.modules", {"openai": MagicMock()}):
+        from genblaze_openai.dalle import DalleProvider
+
+        provider = DalleProvider(api_key="test-key", output_dir=str(tmp_path))
+        provider._client = mock_client
+        yield provider, mock_client, tmp_path
+
+
+def test_capabilities_lists_all_models(mock_dalle):
+    provider, _ = mock_dalle
+    caps = provider.get_capabilities()
+    for m in (
+        "gpt-image-2",
+        "gpt-image-1.5",
+        "gpt-image-1",
+        "gpt-image-1-mini",
+        "dall-e-3",
+        "dall-e-2",
+    ):
+        assert m in caps.models
+    assert caps.accepts_chain_input is True
+    assert "image" in (caps.supported_inputs or [])
+
+
+def test_capabilities_output_formats_include_webp(mock_dalle):
+    provider, _ = mock_dalle
+    caps = provider.get_capabilities()
+    assert set(caps.output_formats or []) >= {"image/png", "image/jpeg", "image/webp"}
+
+
+# --- gpt-image-2 free-form size constraints ---
+
+
+@pytest.mark.parametrize(
+    "size",
+    ["1024x1024", "1536x1024", "1024x1536", "2048x2048", "2048x1152", "auto"],
+)
+def test_gpt_image_2_valid_sizes_accepted(mock_b64_dalle, size):
+    provider, _, _ = mock_b64_dalle
+    step = Step(provider="openai-dalle", model="gpt-image-2", prompt="x", params={"size": size})
+    result = provider.generate(step)
+    assert result.assets  # no validation error
+
+
+@pytest.mark.parametrize(
+    ("size", "reason"),
+    [
+        ("3840x2160", "max edge"),  # max edge must be < 3840
+        ("1025x1024", "multiples of 16"),  # not multiple of 16
+        ("3456x1024", "aspect ratio"),  # 3.375:1 — over 3:1
+        ("512x512", "total pixels"),  # 262,144 pixels — under 655,360
+        ("notasize", "WIDTHxHEIGHT"),  # malformed
+    ],
+)
+def test_gpt_image_2_invalid_sizes_rejected(mock_b64_dalle, size, reason):
+    provider, _, _ = mock_b64_dalle
+    step = Step(provider="openai-dalle", model="gpt-image-2", prompt="x", params={"size": size})
+    with pytest.raises(ProviderError, match=reason):
+        provider.generate(step)
+
+
+# --- input_fidelity soft-warn ---
+
+
+def test_input_fidelity_soft_warns_on_unsupported_model(mock_b64_dalle, caplog):
+    provider, _, _ = mock_b64_dalle
+    step = Step(
+        provider="openai-dalle",
+        model="gpt-image-1-mini",
+        prompt="x",
+        params={"input_fidelity": "high"},
+    )
+    with caplog.at_level("WARNING", logger="genblaze.openai.dalle"):
+        provider.generate(step)
+    assert any("input_fidelity" in r.message for r in caplog.records)
+
+
+def test_input_fidelity_no_warn_on_supported_model(mock_b64_dalle, caplog):
+    provider, _, _ = mock_b64_dalle
+    step = Step(
+        provider="openai-dalle",
+        model="gpt-image-1.5",
+        prompt="x",
+        params={"input_fidelity": "high"},
+    )
+    with caplog.at_level("WARNING", logger="genblaze.openai.dalle"):
+        provider.generate(step)
+    assert not any("input_fidelity" in r.message for r in caplog.records)
+
+
+# --- output_format → suffix + media_type ---
+
+
+def test_output_format_webp_sets_media_type_and_suffix(mock_b64_dalle):
+    provider, _, tmp_path = mock_b64_dalle
+    step = Step(
+        provider="openai-dalle",
+        model="gpt-image-1",
+        prompt="x",
+        params={"output_format": "webp"},
+    )
+    result = provider.generate(step)
+    assert result.assets[0].media_type == "image/webp"
+    assert result.assets[0].url.endswith(".webp")
+
+
+def test_output_format_jpeg_sets_jpg_suffix(mock_b64_dalle):
+    provider, _, _ = mock_b64_dalle
+    step = Step(
+        provider="openai-dalle",
+        model="gpt-image-1",
+        prompt="x",
+        params={"output_format": "jpeg"},
+    )
+    result = provider.generate(step)
+    assert result.assets[0].media_type == "image/jpeg"
+    assert result.assets[0].url.endswith(".jpg")
+
+
+def test_persist_image_bytes_uses_local_file_url_helper(mock_b64_dalle):
+    """Regression guard for #252: output asset URLs must be built via the
+    shared ``local_file_url`` (``Path.as_uri()``) helper, not a hand-rolled
+    ``f"file://{quote(...)}"`` — the latter mis-parses on Windows because the
+    drive letter's colon lands in the URL's netloc instead of the path. This
+    pins the *call site*, not just the helper (already covered in
+    libs/core/tests/unit/test_utils.py), so a future revert to inline string
+    building is caught here too."""
+    provider, _, _ = mock_b64_dalle
+    with patch(
+        "genblaze_openai.dalle.local_file_url", return_value="file:///sentinel.png"
+    ) as mock_helper:
+        step = Step(provider="openai-dalle", model="gpt-image-1", prompt="x")
+        result = provider.generate(step)
+    mock_helper.assert_called_once()
+    assert result.assets[0].url == "file:///sentinel.png"
+
+
+def test_output_compression_out_of_range_rejected(mock_b64_dalle):
+    provider, _, _ = mock_b64_dalle
+    step = Step(
+        provider="openai-dalle",
+        model="gpt-image-1",
+        prompt="x",
+        params={"output_format": "jpeg", "output_compression": 150},
+    )
+    with pytest.raises(ProviderError, match="output_compression"):
+        provider.generate(step)
+
+
+# --- Edit endpoint routing ---
+
+
+def test_edit_route_used_when_inputs_present(mock_b64_dalle, tmp_path):
+    """step.inputs presence triggers client.images.edit, not generate."""
+    provider, client, out_dir = mock_b64_dalle
+    input_file = out_dir / "input.png"
+    input_file.write_bytes(b"fake-input-png")
+
+    from genblaze_core.models.asset import Asset as _Asset
+
+    step = Step(
+        provider="openai-dalle",
+        model="gpt-image-2",
+        prompt="make it blue",
+        inputs=[_Asset(url=f"file://{input_file}", media_type="image/png")],
+    )
+    result = provider.generate(step)
+    assert client.images.edit.called
+    assert not client.images.generate.called
+    assert len(result.assets) == 1
+
+
+def test_edit_route_forwards_multiple_inputs(mock_b64_dalle, tmp_path):
+    provider, client, out_dir = mock_b64_dalle
+    f1 = out_dir / "a.png"
+    f1.write_bytes(b"a")
+    f2 = out_dir / "b.png"
+    f2.write_bytes(b"b")
+    from genblaze_core.models.asset import Asset as _Asset
+
+    step = Step(
+        provider="openai-dalle",
+        model="gpt-image-2",
+        prompt="composite",
+        inputs=[
+            _Asset(url=f"file://{f1}", media_type="image/png"),
+            _Asset(url=f"file://{f2}", media_type="image/png"),
+        ],
+    )
+    provider.generate(step)
+    kwargs = client.images.edit.call_args.kwargs
+    assert isinstance(kwargs["image"], list)
+    assert len(kwargs["image"]) == 2
+
+
+def test_edit_with_dalle3_no_client_gate(mock_dalle, tmp_path):
+    """dall-e-3 + inputs: no client-side rejection; server is the authority."""
+    provider, client = mock_dalle
+    # Put an input on a dall-e-3 step; we only assert the client call was made.
+    out_dir = Path(tempfile.mkdtemp())
+    f = out_dir / "x.png"
+    f.write_bytes(b"p")
+    provider._output_dir = out_dir
+    from genblaze_core.models.asset import Asset as _Asset
+
+    step = Step(
+        provider="openai-dalle",
+        model="dall-e-3",
+        prompt="x",
+        inputs=[_Asset(url=f"file://{f}", media_type="image/png")],
+    )
+    provider.generate(step)
+    assert client.images.edit.called
+
+
+def test_edit_mask_param_opens_file(mock_b64_dalle, tmp_path):
+    provider, client, out_dir = mock_b64_dalle
+    img = out_dir / "i.png"
+    img.write_bytes(b"img")
+    msk = out_dir / "m.png"
+    msk.write_bytes(b"msk")
+    from genblaze_core.models.asset import Asset as _Asset
+
+    step = Step(
+        provider="openai-dalle",
+        model="gpt-image-2",
+        prompt="x",
+        inputs=[_Asset(url=f"file://{img}", media_type="image/png")],
+        params={"mask": f"file://{msk}"},
+    )
+    provider.generate(step)
+    kwargs = client.images.edit.call_args.kwargs
+    assert "mask" in kwargs
+    assert kwargs["mask"] is not None  # file handle was passed
+
+
+def test_edit_file_url_outside_allowed_roots_rejected(mock_b64_dalle):
+    """A file:// chain input pointing at a sensitive system path must
+    be rejected. Two reject paths can fire here:
+    - ``validate_chain_input_url`` (called early on every chain input)
+      catches denylist hits like ``/etc/`` with "sensitive system
+      location" in the message.
+    - ``_resolve_local_file`` (DALL-E's own allowlist check) catches
+      paths outside the temp+output_dir roots with "outside allowed
+      directories".
+
+    Either path is correct; pin the test to "rejected" rather than a
+    specific message so the order of checks can change without
+    breaking the regression intent.
+    """
+    provider, _, _ = mock_b64_dalle
+    from genblaze_core.models.asset import Asset as _Asset
+
+    step = Step(
+        provider="openai-dalle",
+        model="gpt-image-2",
+        prompt="x",
+        inputs=[_Asset(url="file:///etc/passwd", media_type="image/png")],
+    )
+    # match= keeps the test honest: an unrelated ProviderError (missing
+    # API key, model lookup failure) won't pass this regression pin.
+    with pytest.raises(ProviderError, match=r"sensitive system|outside allowed"):
+        provider.generate(step)
+
+
+def test_edit_windows_drive_letter_file_url(mock_b64_dalle, tmp_path, monkeypatch):
+    """Regression for #132: url2pathname() strips the leading slash before a
+    Windows drive letter in _resolve_local_file. Simulates Windows url2pathname
+    behavior so the allowlist check receives the correct absolute path."""
+    provider, client, _ = mock_b64_dalle
+    from genblaze_core.models.asset import Asset as _Asset
+
+    # Create a real image file in tmp_path so resolved.is_file() passes
+    img = tmp_path / "input.png"
+    img.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+    real_path = str(img.resolve())
+
+    # Simulate what Windows url2pathname does for file:///C:/tmp/input.png
+    monkeypatch.setattr(
+        "genblaze_openai.dalle.url2pathname",
+        lambda _: real_path,
+    )
+
+    step = Step(
+        provider="openai-dalle",
+        model="gpt-image-2",
+        prompt="edit this",
+        inputs=[_Asset(url="file:///C:/tmp/input.png", media_type="image/png")],
+    )
+    # The provider resolves the file, calls images.edit; no ProviderError
+    provider.generate(step)
+    assert client.images.edit.called
+
+
+# --- Unknown model passthrough ---
+
+
+def test_unknown_model_passes_through(mock_b64_dalle):
+    """Unknown / alias models route without validation; cost stays None."""
+    provider, client, _ = mock_b64_dalle
+    step = Step(
+        provider="openai-dalle",
+        model="chatgpt-image-latest",
+        prompt="x",
+        params={"size": "4096x4096"},  # would fail gpt-image-2 validator
+    )
+    result = provider.generate(step)
+    assert client.images.generate.called
+    assert result.cost_usd is None
+
+
+# --- New-model pricing ---
+
+
+@pytest.mark.parametrize(
+    ("model", "quality", "size", "expected"),
+    [
+        ("gpt-image-1.5", "low", "1024x1024", 0.009),
+        ("gpt-image-1.5", "medium", "1536x1024", 0.050),
+        ("gpt-image-1.5", "high", "1024x1536", 0.200),
+        ("gpt-image-1-mini", "low", "1024x1024", 0.005),
+        ("gpt-image-1-mini", "high", "1536x1024", 0.052),
+    ],
+)
+def test_user_registered_pricing_for_gpt_image_variants(
+    mock_b64_dalle, model, quality, size, expected
+):
+    """User-registered ``tiered`` pricing keyed on ``(quality, size)``
+    flows through compute_cost for any gpt-image variant. Demonstrates
+    the canonical recipe for the GPT-image lineup."""
+    from genblaze_core.providers import tiered
+
+    rates_per_model: dict = {
+        "gpt-image-1.5": {
+            ("low", "1024x1024"): 0.009,
+            ("medium", "1536x1024"): 0.050,
+            ("high", "1024x1536"): 0.200,
+        },
+        "gpt-image-1-mini": {
+            ("low", "1024x1024"): 0.005,
+            ("high", "1536x1024"): 0.052,
+        },
+    }
+
+    def make_key():
+        def _key(ctx):
+            params = ctx.step.params
+            return (params.get("quality"), params.get("size"))
+
+        return _key
+
+    provider, _, _ = mock_b64_dalle
+    provider._models = provider.models.fork()
+    provider.models.register_pricing(model, tiered(rates_per_model[model], key=make_key()))
+
+    step = Step(
+        provider="openai-dalle",
+        model=model,
+        prompt="x",
+        params={"quality": quality, "size": size},
+    )
+    result = provider.generate(step)
+    assert result.cost_usd == pytest.approx(expected)
+
+
+def test_gpt_image_2_pricing_none_by_default(mock_b64_dalle):
+    """gpt-image-2 has no published rates and the SDK ships none.
+    cost_usd stays None unless the user registers pricing."""
+    provider, _, _ = mock_b64_dalle
+    step = Step(
+        provider="openai-dalle",
+        model="gpt-image-2",
+        prompt="x",
+        params={"quality": "high", "size": "1024x1024"},
+    )
+    result = provider.generate(step)
+    assert result.cost_usd is None
+
+
+# --- gpt-image usage payload (#240) ---
+
+
+def test_usage_recorded_from_sdk_object(mock_b64_dalle):
+    """gpt-image-* responses carry a pydantic Usage model exposing
+    model_dump(). Regression test for #240 — usage must survive into
+    provider_payload instead of being silently dropped."""
+    provider, client, _ = mock_b64_dalle
+    b64 = base64.b64encode(b"fake-image-bytes").decode()
+    usage = MagicMock()
+    usage.model_dump.return_value = {
+        "input_tokens": 12,
+        "output_tokens": 34,
+        "total_tokens": 46,
+        "input_tokens_details": {"image_tokens": 0, "text_tokens": 12},
+    }
+    client.images.generate.return_value = SimpleNamespace(
+        data=[SimpleNamespace(b64_json=b64, url=None)], usage=usage
+    )
+    step = Step(provider="openai-dalle", model="gpt-image-1", prompt="x")
+    result = provider.generate(step)
+    assert result.provider_payload["usage"] == {
+        "input_tokens": 12,
+        "output_tokens": 34,
+        "total_tokens": 46,
+        "input_tokens_details": {"image_tokens": 0, "text_tokens": 12},
+    }
+    usage.model_dump.assert_called_once_with(mode="json")
+
+
+def test_usage_recorded_from_dict_shaped_response(mock_b64_dalle):
+    """Usage may already be a plain dict (e.g. a replayed fixture)."""
+    provider, client, _ = mock_b64_dalle
+    b64 = base64.b64encode(b"fake-image-bytes").decode()
+    client.images.generate.return_value = SimpleNamespace(
+        data=[SimpleNamespace(b64_json=b64, url=None)],
+        usage={"input_tokens": 5, "output_tokens": 10, "total_tokens": 15},
+    )
+    step = Step(provider="openai-dalle", model="gpt-image-1", prompt="x")
+    result = provider.generate(step)
+    assert result.provider_payload["usage"] == {
+        "input_tokens": 5,
+        "output_tokens": 10,
+        "total_tokens": 15,
+    }
+
+
+def test_usage_recorded_from_namespace_object(mock_b64_dalle):
+    """A bare attribute object without model_dump (e.g. a lightweight test
+    double) still normalizes into a plain dict."""
+    provider, client, _ = mock_b64_dalle
+    b64 = base64.b64encode(b"fake-image-bytes").decode()
+    client.images.generate.return_value = SimpleNamespace(
+        data=[SimpleNamespace(b64_json=b64, url=None)],
+        usage=SimpleNamespace(input_tokens=12, output_tokens=34, total_tokens=46),
+    )
+    step = Step(provider="openai-dalle", model="gpt-image-2", prompt="x")
+    result = provider.generate(step)
+    assert result.provider_payload["usage"] == {
+        "input_tokens": 12,
+        "output_tokens": 34,
+        "total_tokens": 46,
+    }
+
+
+def test_usage_absent_for_dalle3(mock_dalle):
+    """dall-e-2/3 responses have no usage block — provider_payload stays
+    free of a "usage" key rather than storing None or an empty dict."""
+    provider, _ = mock_dalle
+    step = Step(provider="openai-dalle", model="dall-e-3", prompt="a cat")
+    result = provider.generate(step)
+    assert "usage" not in result.provider_payload
+
+
+def test_usage_recorded_on_edit_route(mock_b64_dalle):
+    """Usage extraction applies to /images/edits too, not just /generations."""
+    provider, client, out_dir = mock_b64_dalle
+    input_file = out_dir / "input.png"
+    input_file.write_bytes(b"fake-input-png")
+    b64 = base64.b64encode(b"fake-image-bytes").decode()
+    client.images.edit.return_value = SimpleNamespace(
+        data=[SimpleNamespace(b64_json=b64, url=None)],
+        usage=SimpleNamespace(input_tokens=1, output_tokens=2, total_tokens=3),
+    )
+    from genblaze_core.models.asset import Asset as _Asset
+
+    step = Step(
+        provider="openai-dalle",
+        model="gpt-image-2",
+        prompt="make it blue",
+        inputs=[_Asset(url=f"file://{input_file}", media_type="image/png")],
+    )
+    result = provider.generate(step)
+    assert result.provider_payload["usage"] == {
+        "input_tokens": 1,
+        "output_tokens": 2,
+        "total_tokens": 3,
+    }
+
+
+def test_jsonable_usage_recurses_into_lists():
+    """A list-valued usage field (not currently emitted by OpenAI, but not
+    ruled out for a future field) is recursed into rather than passed
+    through as opaque, non-JSON-guaranteed objects."""
+    from genblaze_openai.dalle import _jsonable_usage
+
+    usage = {"breakdown": [SimpleNamespace(kind="text", tokens=3)]}
+    assert _jsonable_usage(usage) == {"breakdown": [{"kind": "text", "tokens": 3}]}
+
+
+def test_jsonable_usage_depth_guard_stops_pathological_recursion():
+    """A malformed/adversarial deeply-nested usage value can't provoke a
+    stack overflow — normalization gives up past _MAX_USAGE_DEPTH and falls
+    back to repr() rather than raising, since usage capture must never fail
+    the image generation it's attached to."""
+    from genblaze_openai.dalle import _MAX_USAGE_DEPTH, _jsonable_usage
+
+    # Build a chain nested well past the depth cap.
+    node: dict = {}
+    innermost = node
+    for _ in range(_MAX_USAGE_DEPTH + 5):
+        innermost["next"] = {}
+        innermost = innermost["next"]
+    innermost["leaf"] = "value"
+
+    result = _jsonable_usage(node)  # must not raise RecursionError
+    # Beyond the cap, normalization stops and falls back to a plain repr.
+    assert isinstance(result, dict)
+
+
+# --- _download_https_to_temp SSRF tests ---
+
+
+# Patch target: dalle imports open_pinned_https_connection directly.
+_DALLE_CONN_PATCH = "genblaze_openai.dalle.open_pinned_https_connection"
+_PRIVATE_DNS = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.1", 443))]
+
+
+def _make_dalle_conn(status: int = 200, body: bytes = b"px") -> MagicMock:
+    resp = MagicMock()
+    resp.status = status
+    # Simulate reading body then EOF
+    resp.read.side_effect = [body, b""]
+    conn = MagicMock()
+    conn.getresponse.return_value = resp
+    return conn
+
+
+class TestDownloadHttpsToTemp:
+    """SSRF / DNS-pinning coverage for _download_https_to_temp."""
+
+    def test_private_ip_rejected(self):
+        """A URL whose hostname resolves to a private IP must raise ProviderError."""
+        with patch(
+            "genblaze_core._utils.socket.getaddrinfo",
+            return_value=_PRIVATE_DNS,
+        ):
+            from genblaze_openai.dalle import _download_https_to_temp
+
+            with pytest.raises(ProviderError, match="Private/loopback"):
+                _download_https_to_temp("https://internal.example.com/img.png", timeout=5.0)
+
+    def test_dns_rebinding_connect_target_is_pinned_ip(self):
+        """open_pinned_https_connection must be called — the conn target is
+        the pinned public IP returned by resolve_ssrf, not a re-resolution."""
+        conn = _make_dalle_conn(status=200, body=b"imagedata")
+
+        with patch(_DALLE_CONN_PATCH, return_value=conn) as mock_open:
+            from genblaze_openai.dalle import _download_https_to_temp
+
+            result = _download_https_to_temp("https://oai.example.com/img.png", timeout=5.0)
+
+        # open_pinned_https_connection was called (SSRF guard ran)
+        mock_open.assert_called_once()
+        call_kw = mock_open.call_args
+        assert call_kw.args[0] == "https://oai.example.com/img.png"
+        # connection was closed after download
+        conn.close.assert_called()
+        # temp file was written and returned
+        assert result.exists()
+        result.unlink(missing_ok=True)
+
+    def test_3xx_raises_provider_error_not_followed(self):
+        """A 3xx response must raise ProviderError — not silently followed."""
+        conn = _make_dalle_conn(status=302, body=b"")
+        conn.getresponse.return_value.read.return_value = b""
+
+        with patch(_DALLE_CONN_PATCH, return_value=conn):
+            from genblaze_openai.dalle import _download_https_to_temp
+
+            with pytest.raises(ProviderError, match="HTTP 302"):
+                _download_https_to_temp("https://oai.example.com/img.png", timeout=5.0)
+
+        # conn.close() still called even on 3xx
+        conn.close.assert_called()
+
+    def test_connection_closed_on_error(self):
+        """If conn.request() raises, the connection is still closed (no FD leak)."""
+        conn = MagicMock()
+        conn.request.side_effect = OSError("network down")
+
+        with patch(_DALLE_CONN_PATCH, return_value=conn):
+            from genblaze_openai.dalle import _download_https_to_temp
+
+            with pytest.raises(OSError):
+                _download_https_to_temp("https://oai.example.com/img.png", timeout=5.0)
+
+        conn.close.assert_called()
+
+    def test_default_suffix_is_a_recognized_image_extension(self):
+        """Regression for #253: the old hardcoded '.img' suffix made the OpenAI
+        client infer Content-Type: application/octet-stream on upload, which
+        /v1/images/edits rejects. The default must be an extension OpenAI's
+        multipart Content-Type sniffing recognizes."""
+        conn = _make_dalle_conn(status=200, body=b"imagedata")
+        with patch(_DALLE_CONN_PATCH, return_value=conn):
+            from genblaze_openai.dalle import _download_https_to_temp
+
+            result = _download_https_to_temp("https://oai.example.com/img.png", timeout=5.0)
+        try:
+            assert result.suffix != ".img"
+            assert result.suffix == ".png"
+        finally:
+            result.unlink(missing_ok=True)
+
+    @pytest.mark.parametrize("suffix", [".png", ".jpg", ".webp"])
+    def test_explicit_suffix_is_honored(self, suffix):
+        """Callers that know the declared media type can request the matching
+        suffix so the temp filename's extension truthfully reflects the bytes."""
+        conn = _make_dalle_conn(status=200, body=b"imagedata")
+        with patch(_DALLE_CONN_PATCH, return_value=conn):
+            from genblaze_openai.dalle import _download_https_to_temp
+
+            result = _download_https_to_temp(
+                "https://oai.example.com/img", timeout=5.0, suffix=suffix
+            )
+        try:
+            assert result.suffix == suffix
+        finally:
+            result.unlink(missing_ok=True)
+
+
+# --- media_type -> temp-file suffix mapping (#253) ---
+
+
+@pytest.mark.parametrize(
+    ("media_type", "expected_suffix"),
+    [
+        ("image/png", ".png"),
+        ("image/jpeg", ".jpg"),
+        ("image/webp", ".webp"),
+        ("image/PNG", ".png"),  # case-insensitive
+        ("image/gif", ".png"),  # unrecognized -> safe fallback
+        (None, ".png"),  # absent -> safe fallback
+        ("", ".png"),
+    ],
+)
+def test_suffix_for_media_type(media_type, expected_suffix):
+    from genblaze_openai.dalle import _suffix_for_media_type
+
+    assert _suffix_for_media_type(media_type) == expected_suffix
+
+
+def test_edit_https_input_downloaded_with_media_type_suffix(mock_b64_dalle):
+    """End-to-end regression for #253: an https:// edit input's declared
+    Asset.media_type must drive the downloaded temp file's suffix, so the
+    OpenAI client's multipart upload infers a real Content-Type instead of
+    application/octet-stream."""
+    provider, client, _ = mock_b64_dalle
+    from genblaze_core.models.asset import Asset as _Asset
+
+    conn = _make_dalle_conn(status=200, body=b"remote-jpeg-bytes")
+    step = Step(
+        provider="openai-dalle",
+        model="gpt-image-2",
+        prompt="edit remote source",
+        inputs=[_Asset(url="https://cdn.example.com/product.jpg", media_type="image/jpeg")],
+    )
+    with patch(_DALLE_CONN_PATCH, return_value=conn):
+        provider.generate(step)
+
+    kwargs = client.images.edit.call_args.kwargs
+    uploaded = kwargs["image"]
+    assert uploaded.name.endswith(".jpg")
+
+
+# --- Compliance harness ---
+
+
+class TestDalleCompliance(ProviderComplianceTests):
+    """Verify DalleProvider satisfies the genblaze provider contract."""
+
+    # SDK no longer ships pricing as of genblaze-core 0.3.0.
+    expects_cost = False
+
+    @pytest.fixture(autouse=True)
+    def _patch_sdk(self):
+        with (
+            patch.dict("sys.modules", {"openai": MagicMock()}),
+            patch(_CONN_PATCH, side_effect=_fake_pinned_conn),
+        ):
+            yield
+
+    def make_provider(self):
+        from genblaze_openai.dalle import DalleProvider
+
+        mock_client = MagicMock()
+        mock_client.images.generate.return_value = SimpleNamespace(
+            data=[SimpleNamespace(url="https://example.com/img.png")]
+        )
+        provider = DalleProvider(api_key="test-key")
+        provider._client = mock_client
+        return provider
+
+    def make_step(self):
+        return Step(provider="openai-dalle", model="dall-e-3", prompt="test prompt")

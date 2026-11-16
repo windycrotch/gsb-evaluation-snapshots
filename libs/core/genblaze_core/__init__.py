@@ -1,0 +1,189 @@
+"""genblaze-core — orchestration framework for media generation."""
+
+import logging
+
+from genblaze_core._version import __version__
+
+# Library convention: attach a no-op handler to the root of our logger
+# namespace so records don't fall through to logging.lastResort, which
+# writes WARNING+ to stderr for any application that hasn't configured
+# logging itself. Applications opt in via their own handlers (#46).
+#
+# Named "genblaze" (not "genblaze_core") because that is the namespace
+# every module in this package and its connectors logs under. Attached
+# here — not in the "genblaze" umbrella package at libs/meta — because
+# that umbrella is not always installed (pip install genblaze-core alone
+# is a supported path); attaching in genblaze_core covers both cases,
+# since the umbrella re-exports from genblaze_core and would otherwise
+# leave core-only installs unprotected.
+logging.getLogger("genblaze").addHandler(logging.NullHandler())
+
+_LAZY_IMPORTS: dict[str, tuple[str, str]] = {
+    # pipeline (primary entry point)
+    "Pipeline": ("genblaze_core.pipeline.pipeline", "Pipeline"),
+    "PipelineResult": ("genblaze_core.pipeline.result", "PipelineResult"),
+    "StepCompleteEvent": ("genblaze_core.pipeline.result", "StepCompleteEvent"),
+    # runnable configuration
+    "RunnableConfig": ("genblaze_core.runnable.config", "RunnableConfig"),
+    # pipeline cache
+    "StepCache": ("genblaze_core.pipeline.cache", "StepCache"),
+    # pipeline templates
+    "PipelineTemplate": ("genblaze_core.pipeline.template", "PipelineTemplate"),
+    "StepTemplate": ("genblaze_core.pipeline.template", "StepTemplate"),
+    # moderation
+    "ModerationHook": ("genblaze_core.pipeline.moderation", "ModerationHook"),
+    "ModerationResult": ("genblaze_core.pipeline.moderation", "ModerationResult"),
+    # builders
+    "RunBuilder": ("genblaze_core.builders.run_builder", "RunBuilder"),
+    "StepBuilder": ("genblaze_core.builders.step_builder", "StepBuilder"),
+    # providers
+    "BaseProvider": ("genblaze_core.providers.base", "BaseProvider"),
+    "ProviderCapabilities": ("genblaze_core.providers.base", "ProviderCapabilities"),
+    "SubmitResult": ("genblaze_core.providers.base", "SubmitResult"),
+    "SyncProvider": ("genblaze_core.providers.base", "SyncProvider"),
+    "ModelRegistry": ("genblaze_core.providers.model_registry", "ModelRegistry"),
+    "ModelSpec": ("genblaze_core.providers.spec", "ModelSpec"),
+    "ParamSurface": ("genblaze_core.providers.params", "ParamSurface"),
+    "ProbeResult": ("genblaze_core.providers.probe", "ProbeResult"),
+    "ProbeStatus": ("genblaze_core.providers.probe", "ProbeStatus"),
+    "validate_asset_url": ("genblaze_core.providers.base", "validate_asset_url"),
+    "validate_chain_input_url": ("genblaze_core.providers.base", "validate_chain_input_url"),
+    "FFmpegCompositor": ("genblaze_core.providers.compositor", "FFmpegCompositor"),
+    "FFmpegTransform": ("genblaze_core.providers.transform", "FFmpegTransform"),
+    "ProgressEvent": ("genblaze_core.providers.progress", "ProgressEvent"),
+    "Spinner": ("genblaze_core.progress_display", "Spinner"),
+    # observability
+    "StreamEvent": ("genblaze_core.observability.events", "StreamEvent"),
+    "Tracer": ("genblaze_core.observability.tracer", "Tracer"),
+    "NoOpTracer": ("genblaze_core.observability.tracer", "NoOpTracer"),
+    "LoggingTracer": ("genblaze_core.observability.tracer", "LoggingTracer"),
+    "OTelTracer": ("genblaze_core.observability.tracer", "OTelTracer"),
+    "CompositeTracer": ("genblaze_core.observability.tracer", "CompositeTracer"),
+    "StructuredLogger": ("genblaze_core.observability.logger", "StructuredLogger"),
+    # agents
+    "AgentLoop": ("genblaze_core.agents.loop", "AgentLoop"),
+    "AgentContext": ("genblaze_core.agents.loop", "AgentContext"),
+    "AgentIteration": ("genblaze_core.agents.loop", "AgentIteration"),
+    "AgentResult": ("genblaze_core.agents.loop", "AgentResult"),
+    "Evaluator": ("genblaze_core.agents.evaluator", "Evaluator"),
+    "EvaluationResult": ("genblaze_core.agents.evaluator", "EvaluationResult"),
+    "CallableEvaluator": ("genblaze_core.agents.evaluator", "CallableEvaluator"),
+    "ThresholdEvaluator": ("genblaze_core.agents.evaluator", "ThresholdEvaluator"),
+    # models
+    "Manifest": ("genblaze_core.models.manifest", "Manifest"),
+    "ManifestVerification": ("genblaze_core.models.manifest", "ManifestVerification"),
+    "parse_manifest": ("genblaze_core.models.manifest", "parse_manifest"),
+    "Run": ("genblaze_core.models.run", "Run"),
+    "Step": ("genblaze_core.models.step", "Step"),
+    "StepAttempt": ("genblaze_core.models.step", "StepAttempt"),
+    "Asset": ("genblaze_core.models.asset", "Asset"),
+    "AudioMetadata": ("genblaze_core.models.asset", "AudioMetadata"),
+    "Track": ("genblaze_core.models.asset", "Track"),
+    "VideoMetadata": ("genblaze_core.models.asset", "VideoMetadata"),
+    "Voice": ("genblaze_core.models.voice", "Voice"),
+    "WordTiming": ("genblaze_core.models.asset", "WordTiming"),
+    "ChatMessage": ("genblaze_core.models.chat", "ChatMessage"),
+    "ChatResponse": ("genblaze_core.models.chat", "ChatResponse"),
+    "ToolCall": ("genblaze_core.models.chat", "ToolCall"),
+    "TextContent": ("genblaze_core.models.chat", "TextContent"),
+    "ImageURLContent": ("genblaze_core.models.chat", "ImageURLContent"),
+    "ImageURLRef": ("genblaze_core.models.chat", "ImageURLRef"),
+    "VideoURLContent": ("genblaze_core.models.chat", "VideoURLContent"),
+    "VideoURLRef": ("genblaze_core.models.chat", "VideoURLRef"),
+    "AudioURLContent": ("genblaze_core.models.chat", "AudioURLContent"),
+    "AudioURLRef": ("genblaze_core.models.chat", "AudioURLRef"),
+    # enums
+    "Modality": ("genblaze_core.models.enums", "Modality"),
+    "StepType": ("genblaze_core.models.enums", "StepType"),
+    "RunStatus": ("genblaze_core.models.enums", "RunStatus"),
+    "StepStatus": ("genblaze_core.models.enums", "StepStatus"),
+    "PromptVisibility": ("genblaze_core.models.enums", "PromptVisibility"),
+    "ProviderErrorCode": ("genblaze_core.models.enums", "ProviderErrorCode"),
+    "EmbedPolicy": ("genblaze_core.models.policy", "EmbedPolicy"),
+    "PromptTemplate": ("genblaze_core.models.prompt_template", "PromptTemplate"),
+    # provider discovery
+    "discover_providers": ("genblaze_core.providers.registry", "discover_providers"),
+    # sinks
+    "BaseSink": ("genblaze_core.sinks.base", "BaseSink"),
+    "ParquetSink": ("genblaze_core.sinks.parquet", "ParquetSink"),
+    # storage
+    "StorageBackend": ("genblaze_core.storage.base", "StorageBackend"),
+    "ObjectStorageSink": ("genblaze_core.storage.sink", "ObjectStorageSink"),
+    "AssetTransfer": ("genblaze_core.storage.transfer", "AssetTransfer"),
+    "KeyStrategy": ("genblaze_core.storage.base", "KeyStrategy"),
+    "ObjectLockConfig": ("genblaze_core.storage.base", "ObjectLockConfig"),
+    "StorageConfig": ("genblaze_core.storage.config", "StorageConfig"),
+    "StorageErrorCode": ("genblaze_core.storage.errors", "StorageErrorCode"),
+    "RETRYABLE_STORAGE_CODES": ("genblaze_core.storage.errors", "RETRYABLE_STORAGE_CODES"),
+    "classify_botocore_error": ("genblaze_core.storage.errors", "classify_botocore_error"),
+    "KeyBuilder": ("genblaze_core.storage.key_builder", "KeyBuilder"),
+    "URLPolicy": ("genblaze_core.storage.url_policy", "URLPolicy"),
+    "URLPolicyError": ("genblaze_core.storage.url_policy", "URLPolicyError"),
+    "ObjectMetadata": ("genblaze_core.storage.types", "ObjectMetadata"),
+    "FileEntry": ("genblaze_core.storage.types", "FileEntry"),
+    "ListPage": ("genblaze_core.storage.types", "ListPage"),
+    "DeleteError": ("genblaze_core.storage.types", "DeleteError"),
+    "DeleteResult": ("genblaze_core.storage.types", "DeleteResult"),
+    "TransferProgress": ("genblaze_core.storage.types", "TransferProgress"),
+    # testing — mocks are pytest-free (genblaze_core.mocks);
+    # ProviderComplianceTests requires pytest (genblaze_core.testing).
+    "MockProvider": ("genblaze_core.mocks", "MockProvider"),
+    "MockVideoProvider": ("genblaze_core.mocks", "MockVideoProvider"),
+    "MockAudioProvider": ("genblaze_core.mocks", "MockAudioProvider"),
+    "ProviderComplianceTests": ("genblaze_core.testing", "ProviderComplianceTests"),
+    # exceptions
+    "GenblazeError": ("genblaze_core.exceptions", "GenblazeError"),
+    "BatchPipelineError": ("genblaze_core.exceptions", "BatchPipelineError"),
+    "PipelineError": ("genblaze_core.exceptions", "PipelineError"),
+    "PipelineTimeoutError": ("genblaze_core.exceptions", "PipelineTimeoutError"),
+    "EmbeddingError": ("genblaze_core.exceptions", "EmbeddingError"),
+    "StorageError": ("genblaze_core.exceptions", "StorageError"),
+    "ProviderError": ("genblaze_core.exceptions", "ProviderError"),
+    "ManifestError": ("genblaze_core.exceptions", "ManifestError"),
+    "UnverifiedAssetError": ("genblaze_core.exceptions", "UnverifiedAssetError"),
+    "SinkError": ("genblaze_core.exceptions", "SinkError"),
+    "WebhookError": ("genblaze_core.exceptions", "WebhookError"),
+    "SigningError": ("genblaze_core.exceptions", "SigningError"),
+    # webhooks
+    "WebhookNotifier": ("genblaze_core.webhooks.notifier", "WebhookNotifier"),
+    "WebhookConfig": ("genblaze_core.webhooks.notifier", "WebhookConfig"),
+    "WebhookEvent": ("genblaze_core.webhooks.notifier", "WebhookEvent"),
+    "WebhookSink": ("genblaze_core.webhooks.sink", "WebhookSink"),
+    # signing (Mode 2 — optional extra)
+    "Ed25519Signer": ("genblaze_core.signing.ed25519", "Ed25519Signer"),
+    "ManifestSigner": ("genblaze_core.signing.base", "ManifestSigner"),
+    "SignatureBundle": ("genblaze_core.signing.base", "SignatureBundle"),
+    "verify_signature_bundle": ("genblaze_core.signing.ed25519", "verify_signature_bundle"),
+}
+
+__all__ = [*_LAZY_IMPORTS.keys(), "__version__"]
+
+
+def __dir__() -> list[str]:
+    return sorted(set(__all__) | set(globals().keys()))
+
+
+def __getattr__(name: str):
+    if name in _LAZY_IMPORTS:
+        module_path, attr = _LAZY_IMPORTS[name]
+        import importlib
+
+        from genblaze_core._optional import OptionalDependencyError
+
+        try:
+            mod = importlib.import_module(module_path)
+        except OptionalDependencyError as exc:
+            # Issue #165: OptionalDependencyError is an ImportError, not an
+            # AttributeError, so hasattr()/getattr(obj, name, default) and
+            # introspection tooling (which only swallow AttributeError) would
+            # otherwise crash instead of treating the symbol as absent. Since
+            # this exact except clause *is* the __getattr__ path a consumer
+            # also hits on real usage (e.g. genblaze_core.ParquetSink(...)),
+            # re-raise as AttributeError with the original install-hint
+            # message preserved (chained via `from` so the typed error is
+            # still reachable through __cause__).
+            raise AttributeError(str(exc)) from exc
+        val = getattr(mod, attr)
+        globals()[name] = val
+        return val
+    raise AttributeError(f"module 'genblaze_core' has no attribute {name!r}")

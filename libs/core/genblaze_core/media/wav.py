@@ -1,0 +1,189 @@
+"""WAV media handler — embed/extract manifests via LIST/INFO chunks."""
+
+from __future__ import annotations
+
+import json
+import os
+import struct
+from pathlib import Path
+
+from genblaze_core._utils import MAX_MANIFEST_BYTES
+from genblaze_core.exceptions import EmbeddingError
+from genblaze_core.media.base import (
+    BaseMediaHandler,
+    MediaCapability,
+    atomic_write,
+    read_media_bytes,
+)
+from genblaze_core.models.manifest import Manifest, parse_manifest
+
+# Custom INFO tag for genblaze manifest
+INFO_TAG = b"IMFL"  # "Info GenBLaze" (tag kept for backward compat)
+
+
+class WavHandler(BaseMediaHandler):
+    """Embed and extract manifests in WAV LIST/INFO chunks."""
+
+    def embed(
+        self,
+        source: str | os.PathLike[str],
+        manifest: Manifest,
+        output: str | os.PathLike[str] | None = None,
+    ) -> Path:
+        try:
+            # Coerce both source= and output= — either being a bare str
+            # would leak into the -> Path contract below (#225).
+            source = Path(source)
+            output = Path(output) if output else source
+            manifest_bytes = manifest.to_canonical_json().encode("utf-8")
+            data = read_media_bytes(source)
+
+            _reject_unsupported_wav_variants(data, source)
+            if data[:4] != b"RIFF" or data[8:12] != b"WAVE":
+                raise EmbeddingError(f"Not a valid WAV file: {source}")
+
+            # Build INFO chunk: tag + null-terminated string (padded to even length)
+            payload = manifest_bytes + b"\x00"
+            if len(payload) % 2 != 0:
+                payload += b"\x00"
+            info_entry = INFO_TAG + struct.pack("<I", len(manifest_bytes) + 1) + payload
+
+            # Build LIST/INFO chunk
+            list_chunk = b"LIST" + struct.pack("<I", len(info_entry) + 4) + b"INFO" + info_entry
+
+            cleaned = _remove_list_info(data)
+            riff_data = cleaned[8:]
+            new_data = (
+                b"RIFF"
+                + struct.pack("<I", len(riff_data) + len(list_chunk))
+                + riff_data
+                + list_chunk
+            )
+
+            with atomic_write(output) as tmp:
+                tmp.write_bytes(new_data)
+            return output
+        except EmbeddingError:
+            raise
+        except Exception as exc:
+            raise EmbeddingError(f"Failed to embed manifest in WAV: {exc}") from exc
+
+    def extract(self, source: str | os.PathLike[str]) -> Manifest:
+        try:
+            source = Path(source)
+            data = read_media_bytes(source)
+            _reject_unsupported_wav_variants(data, source)
+            if data[:4] != b"RIFF" or data[8:12] != b"WAVE":
+                raise EmbeddingError(f"Not a valid WAV file: {source}")
+
+            manifest_json = _find_info_tag(data, INFO_TAG)
+            if manifest_json is None:
+                raise EmbeddingError(f"No genblaze manifest found in {source}")
+            return parse_manifest(json.loads(manifest_json))
+        except EmbeddingError:
+            raise
+        except Exception as exc:
+            raise EmbeddingError(f"Failed to extract manifest from WAV: {exc}") from exc
+
+    @staticmethod
+    def capabilities() -> list[str]:
+        return ["audio/wav"]
+
+    @staticmethod
+    def media_capabilities() -> list[MediaCapability]:
+        return [
+            MediaCapability(
+                mime_type="audio/wav",
+                max_payload_bytes=None,
+                metadata_location="LIST/INFO chunk",
+                strip_risk="low",
+            )
+        ]
+
+
+def _reject_unsupported_wav_variants(data: bytes, source: Path) -> None:
+    """Reject WAV variants that look RIFF-shaped but parse with different rules.
+
+    RF64/BW64 use 64-bit sizes for >4 GB audio; RIFX is big-endian RIFF. Both
+    pass the simple ``data[8:12] == b"WAVE"`` check below and would silently
+    misparse little-endian chunk sizes, producing a corrupt output file.
+    """
+    marker = data[:4] if len(data) >= 4 else b""
+    if marker in (b"RF64", b"BW64"):
+        raise EmbeddingError(
+            f"RF64/BW64 (>4 GB) WAV files are not supported: {source}. Use sidecar fallback."
+        )
+    if marker == b"RIFX":
+        raise EmbeddingError(
+            f"Big-endian RIFX WAV files are not supported: {source}. Use sidecar fallback."
+        )
+
+
+def _find_info_tag(data: bytes, tag: bytes) -> str | None:
+    """Search WAV chunks for a LIST/INFO block containing the given tag."""
+    pos = 12  # Skip RIFF header
+    while pos < len(data) - 8:
+        chunk_id = data[pos : pos + 4]
+        chunk_size = struct.unpack("<I", data[pos + 4 : pos + 8])[0]
+        if pos + 8 + chunk_size > len(data):
+            break  # Truncated/corrupt chunk
+        chunk_data = data[pos + 8 : pos + 8 + chunk_size]
+
+        if chunk_id == b"LIST" and chunk_data[:4] == b"INFO":
+            info_pos = 4
+            while info_pos < len(chunk_data) - 8:
+                sub_id = chunk_data[info_pos : info_pos + 4]
+                sub_size = struct.unpack("<I", chunk_data[info_pos + 4 : info_pos + 8])[0]
+                if info_pos + 8 + sub_size > len(chunk_data):
+                    break  # Truncated sub-chunk
+                if sub_id == tag:
+                    # Cap BEFORE slicing — don't pay the bytes-allocation
+                    # cost for a sub-chunk we're about to reject. Slice
+                    # only inside the matching branch so non-matching
+                    # sub-chunks don't allocate either.
+                    if sub_size > MAX_MANIFEST_BYTES:
+                        raise EmbeddingError(
+                            f"Embedded manifest exceeds size limit: "
+                            f"{sub_size} > {MAX_MANIFEST_BYTES} bytes"
+                        )
+                    sub_data = chunk_data[info_pos + 8 : info_pos + 8 + sub_size]
+                    return sub_data.rstrip(b"\x00").decode("utf-8")
+                # Advance (sub-chunks are word-aligned)
+                info_pos += 8 + sub_size
+                if info_pos % 2 != 0:
+                    info_pos += 1
+
+        # Advance to next chunk (word-aligned)
+        pos += 8 + chunk_size
+        if pos % 2 != 0:
+            pos += 1
+    return None
+
+
+def _remove_list_info(data: bytes) -> bytes:
+    """Remove all LIST/INFO chunks from WAV data."""
+    result = data[:12]  # RIFF header + WAVE
+    pos = 12
+    while pos < len(data) - 8:
+        chunk_id = data[pos : pos + 4]
+        chunk_size = struct.unpack("<I", data[pos + 4 : pos + 8])[0]
+        total = 8 + chunk_size
+        if total % 2 != 0:
+            total += 1
+
+        # Guard against malformed chunk sizes exceeding remaining data
+        if pos + total > len(data):
+            result += data[pos:]
+            break
+
+        # Skip LIST/INFO chunks
+        if chunk_id == b"LIST" and pos + 12 <= len(data) and data[pos + 8 : pos + 12] == b"INFO":
+            pos += total
+            continue
+
+        result += data[pos : pos + total]
+        pos += total
+
+    # Update RIFF size
+    result = result[:4] + struct.pack("<I", len(result) - 8) + result[8:]
+    return result

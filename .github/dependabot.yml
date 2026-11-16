@@ -1,0 +1,40 @@
+version: 2
+updates:
+  # Keep GitHub Actions up to date
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # Keep Python dependencies up to date across every installable package.
+  # The `directories` glob auto-covers new connectors scaffolded under
+  # libs/connectors/*, so coverage never drifts as the monorepo grows. The
+  # root pyproject is tool-config only (no [project] dependencies) and is
+  # intentionally excluded; libs/spec has no Python deps.
+  - package-ecosystem: "pip"
+    directories:
+      - "/libs/core"
+      - "/libs/meta"
+      - "/libs/connectors/*"
+      - "/cli"
+    schedule:
+      interval: "weekly"
+    groups:
+      python-deps:
+        patterns: ["*"]
+    ignore:
+      # Internal genblaze-* packages are version-coordinated by the release
+      # wave (see RELEASING.md), not Dependabot — keeps it from opening PRs
+      # that fight the umbrella version flow.
+      - dependency-name: "genblaze-*"
+      # Bounded-major policy (#61): every runtime dep is capped one major past
+      # what the connector is verified against, so adopting a new major is a
+      # deliberate, manually-verified step — never an automated cap-raise
+      # (see #192, closed for exactly this reason). Dependabot still proposes
+      # minor/patch bumps within the verified major; major bumps are opened by
+      # a human once the connector is tested against the new major.
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]

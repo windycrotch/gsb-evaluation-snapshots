@@ -1,0 +1,399 @@
+"""Tests for FFmpegTransform provider."""
+
+from __future__ import annotations
+
+import re
+import subprocess
+from unittest.mock import MagicMock, patch
+
+import pytest
+from genblaze_core._utils import compute_sha256
+from genblaze_core.exceptions import ProviderError
+from genblaze_core.models.asset import Asset, AudioMetadata, VideoMetadata
+from genblaze_core.models.enums import Modality, ProviderErrorCode, StepStatus, StepType
+from genblaze_core.models.step import Step
+from genblaze_core.providers.transform import FFmpegTransform, _escape_drawtext
+
+_UTILS = "genblaze_core.providers._ffmpeg_utils"
+
+
+def _make_video_asset() -> Asset:
+    asset = Asset(url="file:///tmp/input.mp4", media_type="video/mp4")
+    asset.video = VideoMetadata(codec="h264", frame_rate=30.0, has_audio=True)
+    asset.width = 1920
+    asset.height = 1080
+    asset.duration = 15.0
+    return asset
+
+
+def _make_audio_asset() -> Asset:
+    asset = Asset(url="file:///tmp/input.mp3", media_type="audio/mpeg")
+    asset.audio = AudioMetadata(codec="mp3", channels=2, sample_rate=44100)
+    asset.duration = 60.0
+    return asset
+
+
+def _make_step(operation: str, input_asset: Asset | None = None, **params) -> Step:
+    inputs = [input_asset] if input_asset else []
+    return Step(
+        provider="ffmpeg-transform",
+        model="transform",
+        prompt=None,
+        modality=Modality.VIDEO,
+        inputs=inputs,
+        params={"operation": operation, **params},
+    )
+
+
+# --- Operation tests ---
+
+
+@patch(f"{_UTILS}.shutil.which", return_value="/usr/bin/ffmpeg")
+@patch(f"{_UTILS}.subprocess.run")
+def test_resize_builds_correct_filter(mock_run, mock_which):
+    mock_run.return_value = MagicMock(returncode=0, stderr=b"")
+    transform = FFmpegTransform()
+    step = _make_step("resize", _make_video_asset(), width=1280, height=720)
+
+    with patch("pathlib.Path.stat") as mock_stat:
+        mock_stat.return_value = MagicMock(st_size=1_000_000)
+        result = transform.generate(step)
+
+    cmd = mock_run.call_args[0][0]
+    assert "-vf" in cmd
+    vf_idx = cmd.index("-vf")
+    assert cmd[vf_idx + 1] == "scale=1280:720"
+    assert result.assets[0].width == 1280
+    assert result.assets[0].height == 720
+    assert result.step_type == StepType.TRANSCODE
+
+
+@patch(f"{_UTILS}.shutil.which", return_value="/usr/bin/ffmpeg")
+@patch(f"{_UTILS}.subprocess.run")
+def test_crop_builds_correct_filter(mock_run, mock_which):
+    mock_run.return_value = MagicMock(returncode=0, stderr=b"")
+    transform = FFmpegTransform()
+    step = _make_step("crop", _make_video_asset(), width=640, height=480, x=100, y=50)
+
+    with patch("pathlib.Path.stat") as mock_stat:
+        mock_stat.return_value = MagicMock(st_size=500_000)
+        result = transform.generate(step)
+
+    cmd = mock_run.call_args[0][0]
+    vf_idx = cmd.index("-vf")
+    assert cmd[vf_idx + 1] == "crop=640:480:100:50"
+    assert result.assets[0].width == 640
+    assert result.assets[0].height == 480
+    assert result.step_type == StepType.EDIT
+
+
+@patch(f"{_UTILS}.shutil.which", return_value="/usr/bin/ffmpeg")
+@patch(f"{_UTILS}.subprocess.run")
+def test_overlay_text_builds_drawtext(mock_run, mock_which):
+    mock_run.return_value = MagicMock(returncode=0, stderr=b"")
+    transform = FFmpegTransform()
+    step = _make_step(
+        "overlay_text",
+        _make_video_asset(),
+        text="Hello World",
+        fontsize=32,
+        x=50,
+        y=50,
+        fontcolor="yellow",
+    )
+
+    with patch("pathlib.Path.stat") as mock_stat:
+        mock_stat.return_value = MagicMock(st_size=1_000_000)
+        result = transform.generate(step)
+
+    cmd = mock_run.call_args[0][0]
+    vf_idx = cmd.index("-vf")
+    drawtext_arg = cmd[vf_idx + 1]
+    assert "drawtext=" in drawtext_arg
+    assert "Hello World" in drawtext_arg
+    assert "fontsize=32" in drawtext_arg
+    assert "fontcolor=yellow" in drawtext_arg
+    # Dimensions unchanged
+    assert result.assets[0].width == 1920
+    assert result.assets[0].height == 1080
+    assert result.step_type == StepType.EDIT
+
+
+@patch(f"{_UTILS}.shutil.which", return_value="/usr/bin/ffmpeg")
+@patch(f"{_UTILS}.subprocess.run")
+def test_audio_normalize_applies_loudnorm(mock_run, mock_which):
+    mock_run.return_value = MagicMock(returncode=0, stderr=b"")
+    transform = FFmpegTransform()
+    step = _make_step("audio_normalize", _make_audio_asset())
+    step.modality = Modality.AUDIO
+
+    with patch("pathlib.Path.stat") as mock_stat:
+        mock_stat.return_value = MagicMock(st_size=500_000)
+        result = transform.generate(step)
+
+    cmd = mock_run.call_args[0][0]
+    assert "-af" in cmd
+    af_idx = cmd.index("-af")
+    assert cmd[af_idx + 1] == "loudnorm"
+    assert result.step_type == StepType.TRANSCODE
+    assert result.assets[0].audio is not None
+    assert result.assets[0].audio.codec == "mp3"
+
+
+@patch(f"{_UTILS}.shutil.which", return_value="/usr/bin/ffmpeg")
+@patch(f"{_UTILS}.subprocess.run")
+def test_convert_format_changes_extension(mock_run, mock_which):
+    mock_run.return_value = MagicMock(returncode=0, stderr=b"")
+    transform = FFmpegTransform()
+    step = _make_step("convert_format", _make_video_asset(), format="webm")
+
+    with patch("pathlib.Path.stat") as mock_stat:
+        mock_stat.return_value = MagicMock(st_size=800_000)
+        result = transform.generate(step)
+
+    cmd = mock_run.call_args[0][0]
+    assert cmd[-1].endswith(".webm")
+    assert result.assets[0].media_type == "video/webm"
+    assert result.step_type == StepType.TRANSCODE
+
+
+@patch(f"{_UTILS}.shutil.which", return_value="/usr/bin/ffmpeg")
+@patch(f"{_UTILS}.subprocess.run")
+def test_transform_populates_output_sha256(mock_run, mock_which, tmp_path):
+    mock_run.return_value = MagicMock(returncode=0, stderr=b"")
+    out_path = tmp_path / "out.mp4"
+    payload = b"transformed bytes"
+    out_path.write_bytes(payload)
+    transform = FFmpegTransform(output_dir=tmp_path)
+    step = _make_step("resize", _make_video_asset(), width=1280, height=720)
+
+    with patch("genblaze_core.providers.transform.get_output_path", return_value=out_path):
+        result = transform.generate(step)
+
+    assert result.assets[0].sha256 == compute_sha256(payload)
+    assert result.assets[0].size_bytes == len(payload)
+
+
+@patch(f"{_UTILS}.shutil.which", return_value="/usr/bin/ffmpeg")
+@patch(f"{_UTILS}.subprocess.run")
+def test_transform_raises_when_output_integrity_read_fails(mock_run, mock_which, tmp_path):
+    mock_run.return_value = MagicMock(returncode=0, stderr=b"")
+    missing_out = tmp_path / "missing.mp4"
+    transform = FFmpegTransform(output_dir=tmp_path)
+    step = _make_step("resize", _make_video_asset(), width=1280, height=720)
+
+    with (
+        patch("genblaze_core.providers.transform.get_output_path", return_value=missing_out),
+        pytest.raises(ProviderError, match="Failed to hash ffmpeg output") as exc_info,
+    ):
+        transform.generate(step)
+
+    assert exc_info.value.error_code == ProviderErrorCode.UNKNOWN
+
+
+# --- Error cases ---
+
+
+def test_missing_operation_raises():
+    transform = FFmpegTransform()
+    step = Step(
+        provider="ffmpeg-transform",
+        model="t",
+        modality=Modality.VIDEO,
+        inputs=[_make_video_asset()],
+        params={},
+    )
+    with patch(f"{_UTILS}.shutil.which", return_value="/usr/bin/ffmpeg"):
+        with pytest.raises(ProviderError, match="requires 'operation' param"):
+            transform.generate(step)
+
+
+def test_unknown_operation_raises():
+    transform = FFmpegTransform()
+    step = _make_step("blur", _make_video_asset())
+    with patch(f"{_UTILS}.shutil.which", return_value="/usr/bin/ffmpeg"):
+        with pytest.raises(ProviderError, match="Unknown operation 'blur'"):
+            transform.generate(step)
+
+
+def test_no_input_asset_raises():
+    transform = FFmpegTransform()
+    step = Step(
+        provider="ffmpeg-transform",
+        model="t",
+        modality=Modality.VIDEO,
+        inputs=[],
+        params={"operation": "resize", "width": 640, "height": 480},
+    )
+    with patch(f"{_UTILS}.shutil.which", return_value="/usr/bin/ffmpeg"):
+        with pytest.raises(ProviderError, match="requires at least one input"):
+            transform.generate(step)
+
+
+def test_ffmpeg_not_found_raises():
+    transform = FFmpegTransform()
+    step = _make_step("resize", _make_video_asset(), width=640, height=480)
+    with patch(f"{_UTILS}.shutil.which", return_value=None):
+        with pytest.raises(ProviderError, match="ffmpeg not found"):
+            transform.generate(step)
+
+
+@patch(f"{_UTILS}.shutil.which", return_value="/usr/bin/ffmpeg")
+@patch(f"{_UTILS}.subprocess.run")
+def test_ffmpeg_timeout_raises(mock_run, mock_which):
+    mock_run.side_effect = subprocess.TimeoutExpired(cmd="ffmpeg", timeout=120)
+    transform = FFmpegTransform()
+    step = _make_step("resize", _make_video_asset(), width=640, height=480)
+    with pytest.raises(ProviderError, match="ffmpeg timed out"):
+        transform.generate(step)
+
+
+def test_resize_missing_dimensions_raises():
+    transform = FFmpegTransform()
+    step = _make_step("resize", _make_video_asset())  # no width/height
+    with patch(f"{_UTILS}.shutil.which", return_value="/usr/bin/ffmpeg"):
+        with pytest.raises(ProviderError, match="resize requires"):
+            transform.generate(step)
+
+
+def test_convert_format_unsupported_raises():
+    transform = FFmpegTransform()
+    step = _make_step("convert_format", _make_video_asset(), format="exe")
+    with patch(f"{_UTILS}.shutil.which", return_value="/usr/bin/ffmpeg"):
+        with pytest.raises(ProviderError, match="Unsupported format 'exe'"):
+            transform.generate(step)
+
+
+def test_overlay_text_missing_text_raises():
+    transform = FFmpegTransform()
+    step = _make_step("overlay_text", _make_video_asset())  # no text param
+    with patch(f"{_UTILS}.shutil.which", return_value="/usr/bin/ffmpeg"):
+        with pytest.raises(ProviderError, match="requires 'text' param"):
+            transform.generate(step)
+
+
+# --- Drawtext escaping ---
+
+
+def test_escape_drawtext_colons():
+    assert _escape_drawtext("time: 12:30") == "time\\: 12\\:30"
+
+
+def test_escape_drawtext_quotes():
+    # ffmpeg's single-quoted values have no backslash-escape mechanism of
+    # their own — the only correct way to embed a literal quote is to close
+    # the quote, add a backslash-escaped quote outside it, then reopen a new
+    # quote. Verified against real ffmpeg (7.0.1): `\'` alone (the previous
+    # behavior) ends the quoted string early instead of escaping it.
+    assert _escape_drawtext("it's") == "it'\\''s"
+
+
+def test_escape_drawtext_quote_then_semicolon_cannot_break_out_of_filtergraph():
+    """Regression for #17 (filtergraph-injection variant found in review):
+    a naive `\\'` quote escape ends the quoted string early, so a `;`
+    immediately after an embedded quote becomes filtergraph-syntax-
+    significant — ffmpeg then parses the remainder as a new filter chain
+    (e.g. splicing in an attacker-named `scale` filter). Confirmed
+    reproducible against real ffmpeg 7.0.1 with the old escaping
+    (`Error applying option 'fontsize' to filter 'scale'`). The corrected
+    quote escaping keeps the whole payload inside one quoted string."""
+    escaped = _escape_drawtext("x';scale=")
+    assert escaped == "x'\\'';scale="
+    # No bare, unescaped quote is ever followed by unquoted content that a
+    # filtergraph parser could reinterpret — every quote is part of the
+    # close-escape-reopen sequence.
+    assert "\\';" not in escaped
+
+
+def test_escape_drawtext_percent_expansion():
+    """Regression for #17: unescaped '%' triggers ffmpeg's text-expansion
+    parser (enabled by default). '%%' is ffmpeg's own literal-percent escape."""
+    assert _escape_drawtext("100% done") == "100%% done"
+
+
+def test_escape_drawtext_percent_brace_sequence_rendered_literally():
+    """A crafted '%{...}' text-expansion sequence must not survive as an
+    active expansion once escaped. ffmpeg's expansion parser only triggers on
+    a single unescaped '%' directly followed by '{'; doubling to '%%' makes
+    ffmpeg consume the pair as one literal '%', leaving '{' as ordinary text
+    that starts no expansion — i.e. the whole sequence renders literally."""
+    escaped = _escape_drawtext("value=%{expr:1+1}")
+    assert escaped == "value=%%{expr\\:1+1}"
+    # Not a bare, unescaped '%' immediately before '{' (that shape is what
+    # triggers expansion) — every '%' here is part of a doubled '%%' pair.
+    assert re.search(r"(?<!%)%(?!%)\{", escaped) is None
+
+
+def test_escape_drawtext_backslash_n_literal():
+    """A caller-supplied literal two-char '\\n' (backslash + 'n', not an
+    actual newline byte) must render as literal text, not be interpreted by
+    ffmpeg's escape parser as a control sequence. Doubling the backslash
+    first means ffmpeg sees an escaped backslash followed by a bare 'n'."""
+    assert _escape_drawtext("line1\\nline2") == "line1\\\\nline2"
+
+
+@patch(f"{_UTILS}.shutil.which", return_value="/usr/bin/ffmpeg")
+@patch(f"{_UTILS}.subprocess.run")
+def test_overlay_text_escapes_percent_expansion(mock_run, mock_which):
+    """End-to-end: a '%{...}' expansion sequence in the text param must not
+    survive unescaped into the constructed -vf filter argument."""
+    mock_run.return_value = MagicMock(returncode=0, stderr=b"")
+    transform = FFmpegTransform()
+    step = _make_step("overlay_text", _make_video_asset(), text="score: %{eif:1+1:d}")
+
+    with patch("pathlib.Path.stat") as mock_stat:
+        mock_stat.return_value = MagicMock(st_size=1_000_000)
+        transform.generate(step)
+
+    cmd = mock_run.call_args[0][0]
+    drawtext_arg = cmd[cmd.index("-vf") + 1]
+    assert "%%{" in drawtext_arg
+    assert re.search(r"(?<!%)%(?!%)\{", drawtext_arg) is None
+
+
+# --- Capabilities and integration ---
+
+
+def test_get_capabilities():
+    transform = FFmpegTransform()
+    caps = transform.get_capabilities()
+    assert Modality.VIDEO in caps.supported_modalities
+    assert Modality.AUDIO in caps.supported_modalities
+    assert caps.accepts_chain_input is True
+
+
+@patch(f"{_UTILS}.shutil.which", return_value="/usr/bin/ffmpeg")
+@patch(f"{_UTILS}.subprocess.run")
+@patch(
+    "genblaze_core._utils.socket.getaddrinfo",
+    return_value=[(2, 1, 6, "", ("93.184.216.34", 0))],
+)
+def test_transform_in_pipeline_chain(mock_dns, mock_run, mock_which):
+    """Transform works as a chained step after generation."""
+    from genblaze_core.pipeline.pipeline import Pipeline
+    from genblaze_core.testing import MockVideoProvider
+
+    mock_run.return_value = MagicMock(returncode=0, stderr=b"")
+    video_prov = MockVideoProvider()
+    transform = FFmpegTransform()
+
+    with patch("pathlib.Path.stat") as mock_stat:
+        mock_stat.return_value = MagicMock(st_size=500_000)
+        result = (
+            Pipeline("chain-test", chain=True)
+            .step(video_prov, model="vid", prompt="sunset", modality=Modality.VIDEO)
+            .step(
+                transform,
+                model="transform",
+                modality=Modality.VIDEO,
+                step_type=StepType.TRANSCODE,
+                operation="resize",
+                width=640,
+                height=480,
+            )
+            .run()
+        )
+
+    assert result.run.steps[0].status == StepStatus.SUCCEEDED
+    assert result.run.steps[1].status == StepStatus.SUCCEEDED
+    assert result.run.steps[1].assets[0].width == 640

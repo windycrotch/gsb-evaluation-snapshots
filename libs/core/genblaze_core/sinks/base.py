@@ -1,0 +1,165 @@
+"""Base sink ABC."""
+
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from collections.abc import Sequence
+
+from genblaze_core.models.asset import Asset
+from genblaze_core.models.manifest import Manifest
+from genblaze_core.models.run import Run
+from genblaze_core.models.step import Step
+
+
+class BaseSink(ABC):
+    """Abstract base for event/manifest sinks."""
+
+    # Lifecycle ownership: when True (default), ``Pipeline.run()``/``arun()``
+    # close this sink in their ``finally`` block — appropriate for sinks whose
+    # resources are run-scoped (e.g. ObjectStorageSink's eager-upload pool and
+    # connection pool). Set False for sinks whose lifecycle is process-scoped
+    # and self-managed (e.g. WebhookSink: a fire-and-forget daemon worker that
+    # flushes via atexit); the pipeline must not close — and block joining — those.
+    _close_with_run: bool = True
+
+    @abstractmethod
+    def write_run(self, run: Run, manifest: Manifest) -> None:
+        """Persist a completed run and its manifest."""
+        ...
+
+    def on_step_complete(  # noqa: B027 — intentionally empty default; sinks opt in.
+        self,
+        step: Step,
+        *,
+        run_id: str,
+        tenant_id: str | None,
+        date_str: str,
+    ) -> None:
+        """Pipeline hook — called after each step finishes execution.
+
+        Default is a no-op. Sinks that support eager asset transfer
+        (overlapping upload with subsequent step generation) override
+        this to submit transfers to a background pool. The pipeline
+        calls ``write_run`` at the end regardless; eager sinks simply
+        have less work to do in that final call.
+
+        Called for every completed step, including failed ones — sinks
+        decide what (if anything) to do based on ``step.status``.
+        """
+
+    # ------------------------------------------------------------------
+    # Standalone asset writes (Plan 4 Phase 1).
+    #
+    # ``put_asset`` is for non-generative workflows (DAM, archival,
+    # podcast hosting, UGC ingest) that have an :class:`Asset` to
+    # persist *without* a surrounding ``Run`` / ``Pipeline`` wrapper.
+    # Default impls raise ``NotImplementedError`` so non-storage-backed
+    # sinks (e.g. :class:`ParquetSink`) keep working without changes.
+    # ------------------------------------------------------------------
+
+    def put_asset(
+        self,
+        asset: Asset,
+        *,
+        manifest_uri: str | None = None,
+        tenant_id: str | None = None,
+    ) -> Asset:
+        """Write a single asset's bytes to the sink and return it updated.
+
+        The asset is **mutated in place**: ``url`` is rewritten to the
+        durable URL on the sink's backend, and ``sha256`` / ``size_bytes``
+        / ``media_type`` are populated when missing. The same object is
+        returned for fluent-style use.
+
+        ``manifest_uri`` is an optional pointer to a manifest that
+        references this asset. When supplied with ``tenant_id``, the sink
+        may write a tenant-scoped reverse-lookup index entry so
+        :meth:`read_manifest_for_asset` can find the manifest later.
+
+        Args:
+            asset: An :class:`Asset` whose ``url`` points to the
+                source bytes. Supports ``file://`` (allowlisted dirs
+                only) and ``https://`` (SSRF-protected). The URL is
+                **rewritten** to the sink backend's durable URL after
+                upload.
+            manifest_uri: Optional manifest pointer to record for
+                reverse lookup.
+            tenant_id: Required by storage sinks when ``manifest_uri`` is
+                supplied, so reverse lookups stay scoped to the caller's
+                authorization context.
+
+        Returns:
+            The same ``asset`` instance, mutated.
+
+        Raises:
+            NotImplementedError: by default. Storage-backed sinks
+                override.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not implement put_asset()")
+
+    def put_assets(
+        self,
+        assets: Sequence[Asset],
+        *,
+        manifest_uri: str | None = None,
+        tenant_id: str | None = None,
+    ) -> list[Asset]:
+        """Bulk variant of :meth:`put_asset`.
+
+        Storage-backed sinks parallelize the per-asset writes via an
+        internal thread pool; the order of returned assets matches
+        the input order regardless of completion order.
+
+        Default impl raises :class:`NotImplementedError`.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not implement put_assets()")
+
+    def read_manifest_for_asset(
+        self,
+        asset_id: str,
+        *,
+        tenant_id: str,
+        verify: bool = True,
+        allow_unverified_assets: bool = False,
+    ) -> Manifest | None:
+        """Reverse-lookup: given an ``asset_id``, return the manifest
+        that references it within ``tenant_id`` (if known to the sink).
+
+        Returns ``None`` when no index entry exists for ``asset_id``.
+        Storage-backed sinks maintain the index by sidecar files
+        written during :meth:`put_asset` calls that supplied both
+        ``manifest_uri=`` and ``tenant_id=``. Manifests for assets put
+        without ``manifest_uri=`` are not discoverable via this method.
+
+        Default impl raises :class:`NotImplementedError`.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement read_manifest_for_asset()"
+        )
+
+    @abstractmethod
+    def close(self) -> None:
+        """Release any held resources.
+
+        Must be idempotent. ``__exit__`` may call it after an explicit
+        ``with sink:`` block, and — for sinks with ``_close_with_run = True``
+        (the default) — ``Pipeline.run()``/``arun()`` also call it in their
+        ``finally`` block. Such a sink is spent once passed to ``run()`` —
+        construct a fresh one per run rather than reusing it. Sinks that set
+        ``_close_with_run = False`` are never closed by the pipeline and remain
+        reusable across runs.
+        """
+        ...
+
+    # Context-manager support — convenience for callers that own the sink
+    # lifecycle explicitly (e.g. standalone scripts, tests). For sinks the
+    # pipeline closes (``_close_with_run = True``), the with-pattern is optional
+    # but recommended when constructing the sink outside a run(); wrapping such
+    # a sink in `with sink:` AND passing it to run() calls close() twice — safe
+    # because close() is contractually idempotent (see above).
+
+    def __enter__(self) -> BaseSink:
+        return self
+
+    def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
+        self.close()
