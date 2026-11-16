@@ -214,7 +214,7 @@
   // cannot: it throws the pixels away and repaints that spot from the stroke
   // list at the loupe's own scale.
   var LP = 0, limg, lpx, Bz, Cz;
-  var lp = { cx: 300, cy: 240, zi: 6, key: '', keyT: 0, job: null, sharp: false, cap: '' };
+  var lp = { cx: 300, cy: 240, zi: 6, key: '', job: null, sharp: false, used: 0, cap: '' };
   var mouse = { on: false, wx: 0, wy: 0 };
   function loupeBilinear(cx, cy, half) {
     var step = 2 * half / LP, x0w = cx - half, y0w = cy - half, k = 0;
@@ -263,8 +263,8 @@
   }
   var capEl = $('loupeCap');
   function loupeFrame(dt, still, now) {
-    if (compactNow) return;                    // the loupe is not on screen
-    var inspect = mouse.on, zoom = inspect ? lp.zi : 4, used = 0;
+    if (compactNow) { lp.job = null; return; }   // the loupe is not on screen: no repaint work either
+    var inspect = mouse.on, zoom = inspect ? lp.zi : 4;
     if (inspect) { lp.cx = mouse.wx; lp.cy = mouse.wy; }
     else {
       var gx = pos >= N ? 268 : bv.wx, gy = pos >= N ? 238 : bv.wy, e = 1 - Math.exp(-dt * (pos >= N ? 2.5 : 7));
@@ -277,11 +277,16 @@
       loupeBilinear(lp.cx, lp.cy, half);
       cap = inspect ? zs + ' · live pixels — pause to repaint this spot from the strokes' : zs + ' · following the brush';
     } else {
+      // The panel is still, so this spot is repainted from the stroke list at
+      // the loupe's own scale. Any change of centre, zoom, stroke position or
+      // canvas scale kills the old repaint and starts a fresh one at once —
+      // no settling delay, and the enlarged pixels are never passed off as
+      // the result: until the repaint finishes the caption says so.
       var key = Math.round(lp.cx * 8) + ',' + Math.round(lp.cy * 8) + ',' + zoom.toFixed(2) + ',' + pos.toFixed(3) + ',' + S.toFixed(3) + ',' + LP;
-      if (key !== lp.key) { lp.key = key; lp.keyT = now; lp.job = null; lp.sharp = false; loupeBilinear(lp.cx, lp.cy, half); }
-      else if (!lp.sharp) {
-        if (!lp.job && (SYNC || now - lp.keyT > 90)) jobStart(lp.cx, lp.cy, half);
-        if (lp.job) { used = lp.job.used; if (jobStep(SYNC ? 1e9 : 9)) { lp.sharp = true; lp.used = lp.job.used; lp.job = null; } }
+      if (key !== lp.key) { lp.key = key; lp.job = null; lp.sharp = false; }
+      if (!lp.sharp) {
+        if (!lp.job) jobStart(lp.cx, lp.cy, half);
+        if (jobStep(SYNC ? 1e9 : 9)) { lp.sharp = true; lp.used = lp.job.used; lp.job = null; }
       }
       cap = lp.sharp ? zs + ' · repainted from ' + fmt(lp.used) + ' strokes, not enlarged pixels' : zs + ' · repainting from the strokes…';
     }
