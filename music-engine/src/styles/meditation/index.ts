@@ -44,7 +44,7 @@ class MeditationStyle implements StyleInstance {
 
   constructor(seed: string | number, parameters: Record<string, ParamValue>) {
     this.p = { ...parameters };
-    this.master = new SeededRandom(`${seed}::meditation`);
+    this.master = SeededRandom.forStyle(seed, 'meditation');
     this.breath = new BreathEngine(this.master.fork('breath'), this.num('breathRate', 0.4));
     this.drones = new DroneGenerator(this.master);
     this.bells = new BellGenerator(this.master);

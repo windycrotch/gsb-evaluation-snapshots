@@ -607,7 +607,11 @@ export class MusicEngine {
     this.params.init(plugin.id, plugin.parameters);
     const params = this.params.getAll(plugin.id);
     // Seed isolation per style + version (PRD §13/§60): adding a new style
-    // plugin can never perturb another style's random streams.
+    // plugin can never perturb another style's random streams. The style must
+    // treat this string as its only seed input and root its streams via
+    // SeededRandom.forStyle(seedStr, plugin.id), then fork() per musical
+    // purpose — hand-written `::styleName` suffixes and Math.random() are
+    // forbidden inside style code (see SeededRandom.ts).
     const seedStr = `${this.seed}|${plugin.id}|v${plugin.version}`;
     this.styleRandom = new SeededRandom(seedStr);
     try {

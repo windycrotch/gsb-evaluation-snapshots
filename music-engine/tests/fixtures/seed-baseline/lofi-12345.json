@@ -1,0 +1,4122 @@
+[
+ {
+  "id": "lofi:0",
+  "type": "chord",
+  "startTime": 0.002852837671568512,
+  "duration": 1.4615384615384615,
+  "instrument": "electric-piano",
+  "pitch": 48,
+  "notes": [
+   60,
+   62,
+   63,
+   67,
+   70
+  ],
+  "velocity": 0.5120098408763605,
+  "pan": -0.045027117080346936,
+  "parameters": {
+   "roll": 0.02372820740751922
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "harmony",
+   "section": "Intro"
+  }
+ },
+ {
+  "id": "lofi:1",
+  "type": "chord",
+  "startTime": 1.5397912067617074,
+  "duration": 1.4615384615384615,
+  "instrument": "electric-piano",
+  "pitch": 48,
+  "notes": [
+   60,
+   62,
+   63,
+   67,
+   70
+  ],
+  "velocity": 0.488305660836755,
+  "pan": -0.0693124138346232,
+  "parameters": {
+   "roll": 0.02372820740751922
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "harmony",
+   "section": "Intro"
+  }
+ },
+ {
+  "id": "lofi:2",
+  "type": "bass",
+  "startTime": -0.007003788625296064,
+  "duration": 2.689230769230769,
+  "instrument": "bass",
+  "pitch": 36,
+  "velocity": 0.5568733772920507,
+  "pan": 0.006560125509580745,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "bass",
+   "section": "Intro"
+  }
+ },
+ {
+  "id": "lofi:3",
+  "type": "chord",
+  "startTime": 3.07873105227113,
+  "duration": 2.557692307692308,
+  "instrument": "electric-piano",
+  "pitch": 53,
+  "notes": [
+   60,
+   63,
+   65,
+   69
+  ],
+  "velocity": 0.5196477684961995,
+  "pan": -0.04780036584778238,
+  "parameters": {
+   "roll": 0.025234209906309844
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "harmony",
+   "section": "Intro"
+  }
+ },
+ {
+  "id": "lofi:4",
+  "type": "bass",
+  "startTime": 3.075610873244596,
+  "duration": 2.689230769230769,
+  "instrument": "bass",
+  "pitch": 41,
+  "velocity": 0.5761632203960572,
+  "pan": -0.0026934209585530175,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "bass",
+   "section": "Intro"
+  }
+ },
+ {
+  "id": "lofi:5",
+  "type": "chord",
+  "startTime": 6.1566248779379915,
+  "duration": 1.4615384615384615,
+  "instrument": "electric-piano",
+  "pitch": 58,
+  "notes": [
+   58,
+   62,
+   65,
+   69
+  ],
+  "velocity": 0.4976167882134562,
+  "pan": -0.06966862610523943,
+  "parameters": {
+   "roll": 0.01263598600588739
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "harmony",
+   "section": "Intro"
+  }
+ },
+ {
+  "id": "lofi:6",
+  "type": "chord",
+  "startTime": 7.696416769383877,
+  "duration": 1.4615384615384615,
+  "instrument": "electric-piano",
+  "pitch": 58,
+  "notes": [
+   58,
+   62,
+   65,
+   69
+  ],
+  "velocity": 0.5174090756502667,
+  "pan": -0.0195420061874567,
+  "parameters": {
+   "roll": 0.01263598600588739
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "harmony",
+   "section": "Intro"
+  }
+ },
+ {
+  "id": "lofi:7",
+  "type": "bass",
+  "startTime": 6.1502862423561035,
+  "duration": 2.689230769230769,
+  "instrument": "bass",
+  "pitch": 34,
+  "velocity": 0.5672009116617265,
+  "pan": 0.012883233587634772,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "bass",
+   "section": "Intro"
+  }
+ },
+ {
+  "id": "lofi:8",
+  "type": "chord",
+  "startTime": 9.233215583421243,
+  "duration": 1.4615384615384615,
+  "instrument": "electric-piano",
+  "pitch": 55,
+  "notes": [
+   58,
+   62,
+   65,
+   67
+  ],
+  "velocity": 0.5053090680015468,
+  "pan": -0.07644496821512889,
+  "parameters": {
+   "roll": 0.014488052415661513
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "harmony",
+   "section": "Intro"
+  }
+ },
+ {
+  "id": "lofi:9",
+  "type": "chord",
+  "startTime": 10.772594219851694,
+  "duration": 1.4615384615384615,
+  "instrument": "electric-piano",
+  "pitch": 55,
+  "notes": [
+   58,
+   62,
+   65,
+   67
+  ],
+  "velocity": 0.5111198299457163,
+  "pan": -0.02473966249972141,
+  "parameters": {
+   "roll": 0.014488052415661513
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "harmony",
+   "section": "Intro"
+  }
+ },
+ {
+  "id": "lofi:10",
+  "type": "bass",
+  "startTime": 9.233068343295736,
+  "duration": 2.689230769230769,
+  "instrument": "bass",
+  "pitch": 43,
+  "velocity": 0.5507461769374061,
+  "pan": 0.00959977656803591,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "bass",
+   "section": "Intro"
+  }
+ },
+ {
+  "id": "lofi:11",
+  "type": "note",
+  "startTime": 9.228648191465828,
+  "duration": 0.3461538461538462,
+  "instrument": "electric-piano",
+  "pitch": 77,
+  "velocity": 0.5000941466628707,
+  "pan": 0.05830385884354579,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "melody",
+   "section": "Intro"
+  }
+ },
+ {
+  "id": "lofi:12",
+  "type": "note",
+  "startTime": 9.999794221168377,
+  "duration": 0.3461538461538462,
+  "instrument": "electric-piano",
+  "pitch": 77,
+  "velocity": 0.5249829866169701,
+  "pan": 0.05190182623372765,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "melody",
+   "section": "Intro"
+  }
+ },
+ {
+  "id": "lofi:13",
+  "type": "note",
+  "startTime": 10.450074923185605,
+  "duration": 0.3461538461538462,
+  "instrument": "electric-piano",
+  "pitch": 75,
+  "velocity": 0.40229220637291024,
+  "pan": 0.014274325679898815,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "melody",
+   "section": "Intro"
+  }
+ },
+ {
+  "id": "lofi:14",
+  "type": "chord",
+  "startTime": 12.3058100673957,
+  "duration": 1.4615384615384615,
+  "instrument": "electric-piano",
+  "pitch": 48,
+  "notes": [
+   60,
+   62,
+   63,
+   70
+  ],
+  "velocity": 0.514944596144259,
+  "pan": -0.07208098824491657,
+  "parameters": {
+   "roll": 0.015308465233072638
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "harmony",
+   "section": "Intro"
+  }
+ },
+ {
+  "id": "lofi:15",
+  "type": "chord",
+  "startTime": 13.847454279811554,
+  "duration": 1.4615384615384615,
+  "instrument": "electric-piano",
+  "pitch": 48,
+  "notes": [
+   60,
+   62,
+   63,
+   70
+  ],
+  "velocity": 0.502575634292015,
+  "pan": -0.043655269354961446,
+  "parameters": {
+   "roll": 0.015308465233072638
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "harmony",
+   "section": "Intro"
+  }
+ },
+ {
+  "id": "lofi:16",
+  "type": "bass",
+  "startTime": 12.30654892655765,
+  "duration": 2.689230769230769,
+  "instrument": "bass",
+  "pitch": 36,
+  "velocity": 0.5567324636614274,
+  "pan": -0.007243707805767851,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "bass",
+   "section": "Intro"
+  }
+ },
+ {
+  "id": "lofi:17",
+  "type": "chord",
+  "startTime": 15.38918751924819,
+  "duration": 2.607843137254902,
+  "instrument": "electric-piano",
+  "pitch": 53,
+  "notes": [
+   60,
+   63,
+   65,
+   69
+  ],
+  "velocity": 0.5076949898560389,
+  "pan": -0.022744545417216884,
+  "parameters": {
+   "roll": 0.01914011069294065
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "harmony",
+   "section": "Intro"
+  }
+ },
+ {
+  "id": "lofi:18",
+  "type": "bass",
+  "startTime": 15.38332190132727,
+  "duration": 2.7419607843137253,
+  "instrument": "bass",
+  "pitch": 41,
+  "velocity": 0.5781294306024722,
+  "pan": 0.004325486575693012,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "bass",
+   "section": "Intro"
+  }
+ },
+ {
+  "id": "lofi:19",
+  "type": "chord",
+  "startTime": 18.524876411530794,
+  "duration": 0.7307692307692307,
+  "instrument": "electric-piano",
+  "pitch": 53,
+  "notes": [
+   60,
+   63,
+   65,
+   69
+  ],
+  "velocity": 0.5415062604459224,
+  "pan": -0.0396383116048717,
+  "parameters": {
+   "roll": 0.022214370707049964
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "harmony",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:20",
+  "type": "chord",
+  "startTime": 19.74187466557619,
+  "duration": 0.36538461538461536,
+  "instrument": "electric-piano",
+  "pitch": 53,
+  "notes": [
+   60,
+   63,
+   65,
+   69
+  ],
+  "velocity": 0.5220125934673436,
+  "pan": -0.00354305474437748,
+  "parameters": {
+   "roll": 0.022214370707049964
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "harmony",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:21",
+  "type": "chord",
+  "startTime": 20.064145444951457,
+  "duration": 1.4615384615384615,
+  "instrument": "electric-piano",
+  "pitch": 53,
+  "notes": [
+   60,
+   63,
+   65,
+   69
+  ],
+  "velocity": 0.5433046049137147,
+  "pan": -0.03247816938421569,
+  "parameters": {
+   "roll": 0.022214370707049964
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "harmony",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:22",
+  "type": "bass",
+  "startTime": 18.516979828517687,
+  "duration": 1.3446153846153845,
+  "instrument": "bass",
+  "pitch": 41,
+  "velocity": 0.5898154007568738,
+  "pan": -0.004608599369164126,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "bass",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:23",
+  "type": "bass",
+  "startTime": 20.062154671858657,
+  "duration": 1.3446153846153845,
+  "instrument": "bass",
+  "pitch": 48,
+  "velocity": 0.6232127912963733,
+  "pan": 0.01197265330947498,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "bass",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:24",
+  "type": "drum",
+  "startTime": 18.53118780962191,
+  "duration": 0.3,
+  "instrument": "kick",
+  "velocity": 0.8484643760878975,
+  "pan": 0.008187381398158182,
+  "parameters": {
+   "duck": 0.35
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:25",
+  "type": "drum",
+  "startTime": 18.516588762497783,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.4864333236615812,
+  "pan": 0.13491498328286955,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:26",
+  "type": "drum",
+  "startTime": 18.968811315016147,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.336096977443594,
+  "pan": 0.1204005823300096,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:27",
+  "type": "drum",
+  "startTime": 19.28717870809723,
+  "duration": 0.16,
+  "instrument": "snare",
+  "velocity": 0.8058453126164352,
+  "pan": -0.07397102628579023,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:28",
+  "type": "drum",
+  "startTime": 19.286183277845712,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.479421495439577,
+  "pan": 0.13160756939570709,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:29",
+  "type": "drum",
+  "startTime": 19.732607448056026,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.33267486208739977,
+  "pan": 0.11705227943107818,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:30",
+  "type": "drum",
+  "startTime": 20.061862086853207,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.4768231375281275,
+  "pan": 0.08162996102342152,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:31",
+  "type": "drum",
+  "startTime": 20.51057020187844,
+  "duration": 0.3,
+  "instrument": "kick",
+  "velocity": 0.8925259775888277,
+  "pan": -0.004773260424291768,
+  "parameters": {
+   "duck": 0.35
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:32",
+  "type": "drum",
+  "startTime": 20.503733035979852,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.33035612836023126,
+  "pan": 0.148330530982151,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:33",
+  "type": "drum",
+  "startTime": 20.829094500133206,
+  "duration": 0.16,
+  "instrument": "snare",
+  "velocity": 0.8040528411460921,
+  "pan": -0.1168501859882475,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:34",
+  "type": "drum",
+  "startTime": 20.825912183983025,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.4963828945867202,
+  "pan": 0.08824370927427079,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:35",
+  "type": "drum",
+  "startTime": 21.282757683066432,
+  "duration": 0.25,
+  "instrument": "kick",
+  "velocity": 0.5902196607760077,
+  "pan": 0.02057265178882097,
+  "parameters": {
+   "duck": 0.35
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:36",
+  "type": "chord",
+  "startTime": 21.59959543463795,
+  "duration": 1.0961538461538463,
+  "instrument": "electric-piano",
+  "pitch": 58,
+  "notes": [
+   58,
+   62,
+   65,
+   69
+  ],
+  "velocity": 0.5195936677595728,
+  "pan": -0.019970924943582307,
+  "parameters": {
+   "roll": 0.00978516303189099
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "harmony",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:37",
+  "type": "chord",
+  "startTime": 23.13610677550411,
+  "duration": 1.4615384615384615,
+  "instrument": "electric-piano",
+  "pitch": 58,
+  "notes": [
+   58,
+   62,
+   65,
+   69
+  ],
+  "velocity": 0.5382353292071795,
+  "pan": -0.031359118790866294,
+  "parameters": {
+   "roll": 0.00978516303189099
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "harmony",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:38",
+  "type": "bass",
+  "startTime": 21.595957167117906,
+  "duration": 1.3446153846153845,
+  "instrument": "bass",
+  "pitch": 34,
+  "velocity": 0.6050393129661323,
+  "pan": -0.000230459030275405,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "bass",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:39",
+  "type": "bass",
+  "startTime": 23.133546579985047,
+  "duration": 1.3446153846153845,
+  "instrument": "bass",
+  "pitch": 41,
+  "velocity": 0.5956887928794818,
+  "pan": 0.016041272889225678,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "bass",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:40",
+  "type": "drum",
+  "startTime": 21.60729758769473,
+  "duration": 0.3,
+  "instrument": "kick",
+  "velocity": 0.8900017769081707,
+  "pan": 0.02324814070568142,
+  "parameters": {
+   "duck": 0.35
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:41",
+  "type": "drum",
+  "startTime": 21.596813549536392,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.47177563944810763,
+  "pan": 0.10932866767402478,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:42",
+  "type": "drum",
+  "startTime": 22.03864078317762,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.3319099627083149,
+  "pan": 0.14119777905744688,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:43",
+  "type": "drum",
+  "startTime": 22.365193275281303,
+  "duration": 0.16,
+  "instrument": "snare",
+  "velocity": 0.8027953968144983,
+  "pan": -0.0697156958439727,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:44",
+  "type": "drum",
+  "startTime": 22.36780350477761,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.4762583794672504,
+  "pan": 0.10105495812234623,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:45",
+  "type": "drum",
+  "startTime": 22.808976256300845,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.33314876213292577,
+  "pan": 0.13023140405535547,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:46",
+  "type": "drum",
+  "startTime": 23.58491759993125,
+  "duration": 0.3,
+  "instrument": "kick",
+  "velocity": 0.9105223493613582,
+  "pan": -0.04016706939094701,
+  "parameters": {
+   "duck": 0.35
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:47",
+  "type": "drum",
+  "startTime": 23.58043621872334,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.3391264934400319,
+  "pan": 0.13971483873139384,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:48",
+  "type": "drum",
+  "startTime": 23.907611750766012,
+  "duration": 0.16,
+  "instrument": "snare",
+  "velocity": 0.789225136214238,
+  "pan": -0.10297078716558442,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:49",
+  "type": "drum",
+  "startTime": 23.900741268686925,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.47671660962706625,
+  "pan": 0.12208205508496969,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:50",
+  "type": "note",
+  "startTime": 21.601636249220423,
+  "duration": 1.0384615384615385,
+  "instrument": "electric-piano",
+  "pitch": 73,
+  "velocity": 0.5095500925015458,
+  "pan": 0.05133739936424148,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "melody",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:51",
+  "type": "note",
+  "startTime": 23.136606392862767,
+  "duration": 0.3461538461538462,
+  "instrument": "electric-piano",
+  "pitch": 65,
+  "velocity": 0.5099628378629942,
+  "pan": 0.04009395106356593,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "melody",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:52",
+  "type": "note",
+  "startTime": 23.58711366432164,
+  "duration": 0.3461538461538462,
+  "instrument": "electric-piano",
+  "pitch": 64,
+  "velocity": 0.40056488942774027,
+  "pan": 0.04240206702133975,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "melody",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:53",
+  "type": "chord",
+  "startTime": 24.674724677782553,
+  "duration": 0.7307692307692307,
+  "instrument": "electric-piano",
+  "pitch": 55,
+  "notes": [
+   58,
+   62,
+   65,
+   67
+  ],
+  "velocity": 0.5392482835833493,
+  "pan": -0.08417410191087876,
+  "parameters": {
+   "roll": 0.019461776811629534
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "harmony",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:54",
+  "type": "chord",
+  "startTime": 25.892729483674113,
+  "duration": 0.36538461538461536,
+  "instrument": "electric-piano",
+  "pitch": 55,
+  "notes": [
+   58,
+   62,
+   65,
+   67
+  ],
+  "velocity": 0.5327646602287206,
+  "pan": -0.02830081082488571,
+  "parameters": {
+   "roll": 0.019461776811629534
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "harmony",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:55",
+  "type": "chord",
+  "startTime": 26.21444992463705,
+  "duration": 1.4615384615384615,
+  "instrument": "electric-piano",
+  "pitch": 55,
+  "notes": [
+   58,
+   62,
+   65,
+   67
+  ],
+  "velocity": 0.5530936680898941,
+  "pan": -0.04488412245102726,
+  "parameters": {
+   "roll": 0.019461776811629534
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "harmony",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:56",
+  "type": "bass",
+  "startTime": 24.673812525513604,
+  "duration": 1.3446153846153845,
+  "instrument": "bass",
+  "pitch": 43,
+  "velocity": 0.6038356948418447,
+  "pan": -0.015735257547194206,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "bass",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:57",
+  "type": "bass",
+  "startTime": 26.209192127754882,
+  "duration": 1.3446153846153845,
+  "instrument": "bass",
+  "pitch": 50,
+  "velocity": 0.6134863219377853,
+  "pan": -0.0010663364490395833,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "bass",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:58",
+  "type": "drum",
+  "startTime": 24.68043225262839,
+  "duration": 0.3,
+  "instrument": "kick",
+  "velocity": 0.9286805260500441,
+  "pan": -0.008316863478319938,
+  "parameters": {
+   "duck": 0.35
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:59",
+  "type": "drum",
+  "startTime": 24.671154051502864,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.48873940845155095,
+  "pan": 0.09941428111936296,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:60",
+  "type": "drum",
+  "startTime": 25.443540031494987,
+  "duration": 0.16,
+  "instrument": "snare",
+  "velocity": 0.796302709789558,
+  "pan": -0.08107706137643242,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:61",
+  "type": "drum",
+  "startTime": 25.895819159906996,
+  "duration": 0.25,
+  "instrument": "kick",
+  "velocity": 0.5815215334760763,
+  "pan": 0.025928731216006848,
+  "parameters": {
+   "duck": 0.35
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:62",
+  "type": "drum",
+  "startTime": 25.890087421047323,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.33303705779929454,
+  "pan": 0.11246408235144287,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:63",
+  "type": "drum",
+  "startTime": 26.046685187240694,
+  "duration": 0.08,
+  "instrument": "snare",
+  "velocity": 0.29197241676256847,
+  "pan": -0.08807952789491859,
+  "parameters": {
+   "ghost": true
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:64",
+  "type": "drum",
+  "startTime": 26.215959134131545,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.49414498627105263,
+  "pan": 0.12353291353689531,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:65",
+  "type": "drum",
+  "startTime": 26.66220122317767,
+  "duration": 0.3,
+  "instrument": "kick",
+  "velocity": 0.9058107091888782,
+  "pan": 0.033587020416163044,
+  "parameters": {
+   "duck": 0.35
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:66",
+  "type": "drum",
+  "startTime": 26.657181117782912,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.323642752443775,
+  "pan": 0.15850036923648936,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:67",
+  "type": "drum",
+  "startTime": 26.982650294522667,
+  "duration": 0.16,
+  "instrument": "snare",
+  "velocity": 0.8088198852823808,
+  "pan": -0.07410469674331817,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:68",
+  "type": "drum",
+  "startTime": 26.97989754466483,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.4968395226247849,
+  "pan": 0.12247737496310195,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:69",
+  "type": "note",
+  "startTime": 24.676638865288595,
+  "duration": 1.0384615384615385,
+  "instrument": "electric-piano",
+  "pitch": 65,
+  "velocity": 0.5146484589848115,
+  "pan": 0.041339656316088436,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "melody",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:70",
+  "type": "note",
+  "startTime": 26.216563517575754,
+  "duration": 0.3461538461538462,
+  "instrument": "electric-piano",
+  "pitch": 70,
+  "velocity": 0.5128625993240374,
+  "pan": 0.02240478896092412,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "melody",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:71",
+  "type": "note",
+  "startTime": 26.665579214591887,
+  "duration": 0.3461538461538462,
+  "instrument": "electric-piano",
+  "pitch": 70,
+  "velocity": 0.40416925709314316,
+  "pan": 0.04648722456068163,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "melody",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:72",
+  "type": "chord",
+  "startTime": 27.75178994307997,
+  "duration": 1.4615384615384615,
+  "instrument": "electric-piano",
+  "pitch": 48,
+  "notes": [
+   60,
+   62,
+   63,
+   70
+  ],
+  "velocity": 0.53034865927891,
+  "pan": -0.06895622717603998,
+  "parameters": {
+   "roll": 0.017381735282950103
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "harmony",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:73",
+  "type": "chord",
+  "startTime": 29.73842381514996,
+  "duration": 1.0961538461538463,
+  "instrument": "electric-piano",
+  "pitch": 48,
+  "notes": [
+   60,
+   62,
+   63,
+   70
+  ],
+  "velocity": 0.530118265418607,
+  "pan": -0.06763297153557757,
+  "parameters": {
+   "roll": 0.017381735282950103
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "harmony",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:74",
+  "type": "bass",
+  "startTime": 27.751540579201762,
+  "duration": 1.3446153846153845,
+  "instrument": "bass",
+  "pitch": 36,
+  "velocity": 0.6032467884213195,
+  "pan": 0.00022262185739229092,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "bass",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:75",
+  "type": "bass",
+  "startTime": 29.292492273565284,
+  "duration": 1.3446153846153845,
+  "instrument": "bass",
+  "pitch": 43,
+  "velocity": 0.6027339138305515,
+  "pan": 0.012690441408091373,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "bass",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:76",
+  "type": "drum",
+  "startTime": 27.75451585053245,
+  "duration": 0.3,
+  "instrument": "kick",
+  "velocity": 0.9176781971853513,
+  "pan": 0.01611237642527047,
+  "parameters": {
+   "duck": 0.35
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:77",
+  "type": "drum",
+  "startTime": 27.744660037755132,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.4940900327205285,
+  "pan": 0.1369447267570897,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:78",
+  "type": "drum",
+  "startTime": 28.197424942818007,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.32230737786795594,
+  "pan": 0.12289181683915547,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:79",
+  "type": "drum",
+  "startTime": 28.52090532617459,
+  "duration": 0.16,
+  "instrument": "snare",
+  "velocity": 0.7941825677173348,
+  "pan": -0.08847734642529892,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:80",
+  "type": "drum",
+  "startTime": 28.522604040712853,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.4784905870351375,
+  "pan": 0.14079539484327755,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:81",
+  "type": "drum",
+  "startTime": 28.97538843836493,
+  "duration": 0.25,
+  "instrument": "kick",
+  "velocity": 0.5815856615013608,
+  "pan": 0.010826394464449504,
+  "parameters": {
+   "duck": 0.35
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:82",
+  "type": "drum",
+  "startTime": 28.970067577041334,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.33851026814392093,
+  "pan": 0.10703887672855494,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:83",
+  "type": "drum",
+  "startTime": 29.28625314048551,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.47422621722301905,
+  "pan": 0.14497211024892595,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:84",
+  "type": "drum",
+  "startTime": 29.74168866825396,
+  "duration": 0.3,
+  "instrument": "kick",
+  "velocity": 0.8708698144790725,
+  "pan": 0.0027676237323790123,
+  "parameters": {
+   "duck": 0.35
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:85",
+  "type": "drum",
+  "startTime": 29.733280168774165,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.3361862740565993,
+  "pan": 0.12180997347059945,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:86",
+  "type": "drum",
+  "startTime": 30.063466629631744,
+  "duration": 0.16,
+  "instrument": "snare",
+  "velocity": 0.8079333770402649,
+  "pan": -0.09535170320766762,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:87",
+  "type": "drum",
+  "startTime": 30.05394475504372,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.48936961816526636,
+  "pan": 0.12133312243840286,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:88",
+  "type": "drum",
+  "startTime": 30.514071868431124,
+  "duration": 0.25,
+  "instrument": "kick",
+  "velocity": 0.575783224220792,
+  "pan": 0.007438014213560751,
+  "parameters": {
+   "duck": 0.35
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:89",
+  "type": "note",
+  "startTime": 27.754856422895877,
+  "duration": 1.0384615384615385,
+  "instrument": "electric-piano",
+  "pitch": 75,
+  "velocity": 0.5159286467043661,
+  "pan": 0.04316849461074253,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "melody",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:90",
+  "type": "note",
+  "startTime": 29.29803013360324,
+  "duration": 0.3461538461538462,
+  "instrument": "electric-piano",
+  "pitch": 67,
+  "velocity": 0.5143084242098183,
+  "pan": 0.054556951654651194,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "melody",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:91",
+  "type": "note",
+  "startTime": 29.73761385424811,
+  "duration": 0.3461538461538462,
+  "instrument": "electric-piano",
+  "pitch": 64,
+  "velocity": 0.40704635562770247,
+  "pan": 0.0414627161655738,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "melody",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:92",
+  "type": "chord",
+  "startTime": 30.834036517059452,
+  "duration": 2.1923076923076925,
+  "instrument": "electric-piano",
+  "pitch": 53,
+  "notes": [
+   60,
+   63,
+   65,
+   69
+  ],
+  "velocity": 0.5380796342156042,
+  "pan": -0.06320763570806157,
+  "parameters": {
+   "roll": 0.02586945933941752
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "harmony",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:93",
+  "type": "chord",
+  "startTime": 33.58631160401837,
+  "duration": 0.36538461538461536,
+  "instrument": "electric-piano",
+  "pitch": 53,
+  "notes": [
+   60,
+   63,
+   65,
+   69
+  ],
+  "velocity": 0.5344685747086759,
+  "pan": -0.03638314317993339,
+  "parameters": {
+   "roll": 0.02586945933941752
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "harmony",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:94",
+  "type": "bass",
+  "startTime": 30.827888227455126,
+  "duration": 1.3446153846153845,
+  "instrument": "bass",
+  "pitch": 41,
+  "velocity": 0.5829185213410474,
+  "pan": 0.0002605729093896446,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "bass",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:95",
+  "type": "bass",
+  "startTime": 32.367312005391334,
+  "duration": 1.3446153846153845,
+  "instrument": "bass",
+  "pitch": 48,
+  "velocity": 0.6091778676751091,
+  "pan": -0.005459024172005504,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "bass",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:96",
+  "type": "drum",
+  "startTime": 30.832198281311793,
+  "duration": 0.3,
+  "instrument": "kick",
+  "velocity": 0.8905175034668423,
+  "pan": -0.002457341050197049,
+  "parameters": {
+   "duck": 0.35
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:97",
+  "type": "drum",
+  "startTime": 30.824474236724352,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.4824791535729744,
+  "pan": 0.13898718994171314,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:98",
+  "type": "drum",
+  "startTime": 31.27086073264212,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.337987146107506,
+  "pan": 0.12590146906122812,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:99",
+  "type": "drum",
+  "startTime": 31.594217459678955,
+  "duration": 0.16,
+  "instrument": "snare",
+  "velocity": 0.8154486265596829,
+  "pan": -0.05561332897155605,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:100",
+  "type": "drum",
+  "startTime": 31.594737037123377,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.4999858944066763,
+  "pan": 0.10378254495101327,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:101",
+  "type": "drum",
+  "startTime": 32.046846830389626,
+  "duration": 0.25,
+  "instrument": "kick",
+  "velocity": 0.5869819420206496,
+  "pan": -0.011661114222284708,
+  "parameters": {
+   "duck": 0.35
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:102",
+  "type": "drum",
+  "startTime": 32.36684942307191,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.48896387164275495,
+  "pan": 0.11737733986513278,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:103",
+  "type": "drum",
+  "startTime": 32.82038442540279,
+  "duration": 0.3,
+  "instrument": "kick",
+  "velocity": 0.877317329007558,
+  "pan": -0.03936309893276497,
+  "parameters": {
+   "duck": 0.35
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:104",
+  "type": "drum",
+  "startTime": 32.81183301833488,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.337430550065069,
+  "pan": 0.08804009731309065,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:105",
+  "type": "drum",
+  "startTime": 33.13580857625344,
+  "duration": 0.16,
+  "instrument": "snare",
+  "velocity": 0.7866268007653858,
+  "pan": -0.09890500472765293,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:106",
+  "type": "drum",
+  "startTime": 33.136412729110184,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.4862164565378311,
+  "pan": 0.11337206136176164,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:107",
+  "type": "drum",
+  "startTime": 33.579123804086564,
+  "duration": 0.3,
+  "instrument": "hat",
+  "velocity": 0.4053944748349832,
+  "pan": 0.11347867482963821,
+  "parameters": {
+   "open": true
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:108",
+  "type": "chord",
+  "startTime": 33.904049164408256,
+  "duration": 2.1923076923076925,
+  "instrument": "electric-piano",
+  "pitch": 58,
+  "notes": [
+   58,
+   62,
+   65,
+   69
+  ],
+  "velocity": 0.5389705517444513,
+  "pan": -0.030513714657286153,
+  "parameters": {
+   "roll": 0.012255869346670806
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "harmony",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:109",
+  "type": "chord",
+  "startTime": 36.65445636401779,
+  "duration": 0.36538461538461536,
+  "instrument": "electric-piano",
+  "pitch": 58,
+  "notes": [
+   58,
+   62,
+   65,
+   69
+  ],
+  "velocity": 0.5596043985363037,
+  "pan": -0.09,
+  "parameters": {
+   "roll": 0.012255869346670806
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "harmony",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:110",
+  "type": "bass",
+  "startTime": 33.90494751375171,
+  "duration": 1.3446153846153845,
+  "instrument": "bass",
+  "pitch": 34,
+  "velocity": 0.5998146333935701,
+  "pan": -0.013401436814859348,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "bass",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:111",
+  "type": "drum",
+  "startTime": 33.91068616753417,
+  "duration": 0.3,
+  "instrument": "kick",
+  "velocity": 0.8814205680232982,
+  "pan": -0.009295066570920864,
+  "parameters": {
+   "duck": 0.35
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:112",
+  "type": "drum",
+  "startTime": 33.90479609133131,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.4857206539779606,
+  "pan": 0.11832901629054995,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:113",
+  "type": "drum",
+  "startTime": 34.34781837010883,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.329475850486578,
+  "pan": 0.12765476974785742,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:114",
+  "type": "drum",
+  "startTime": 34.67414958154292,
+  "duration": 0.16,
+  "instrument": "snare",
+  "velocity": 0.7945226491960976,
+  "pan": -0.0785965578952214,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:115",
+  "type": "drum",
+  "startTime": 34.67285265568965,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.4951362975262053,
+  "pan": 0.12895405280292843,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:116",
+  "type": "drum",
+  "startTime": 35.12102849277383,
+  "duration": 0.25,
+  "instrument": "kick",
+  "velocity": 0.5926039094563622,
+  "pan": 0.003622912852894318,
+  "parameters": {
+   "duck": 0.35
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:117",
+  "type": "drum",
+  "startTime": 35.11659249548832,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.33593188803132734,
+  "pan": 0.09169197648145375,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:118",
+  "type": "drum",
+  "startTime": 35.4428317121294,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.5047828175030713,
+  "pan": 0.08666806993452575,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:119",
+  "type": "drum",
+  "startTime": 35.89648539478443,
+  "duration": 0.3,
+  "instrument": "kick",
+  "velocity": 0.9310145824473762,
+  "pan": -0.016763362507715686,
+  "parameters": {
+   "duck": 0.35
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:120",
+  "type": "drum",
+  "startTime": 35.88953921353506,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.33278883275522897,
+  "pan": 0.11274684953044396,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:121",
+  "type": "drum",
+  "startTime": 36.20843752172836,
+  "duration": 0.16,
+  "instrument": "snare",
+  "velocity": 0.7906217191952367,
+  "pan": -0.07848618365607404,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:122",
+  "type": "drum",
+  "startTime": 36.659040965219816,
+  "duration": 0.25,
+  "instrument": "kick",
+  "velocity": 0.5914815715915823,
+  "pan": -0.03932716703106842,
+  "parameters": {
+   "duck": 0.35
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:123",
+  "type": "drum",
+  "startTime": 36.65442425011532,
+  "duration": 0.3,
+  "instrument": "hat",
+  "velocity": 0.4099977270655408,
+  "pan": 0.06999999999999999,
+  "parameters": {
+   "open": true
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:124",
+  "type": "note",
+  "startTime": 33.90452666815334,
+  "duration": 0.6923076923076924,
+  "instrument": "electric-piano",
+  "pitch": 65,
+  "velocity": 0.517555376966672,
+  "pan": 0.057001183800896096,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "melody",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:125",
+  "type": "note",
+  "startTime": 35.12613689338012,
+  "duration": 0.3461538461538462,
+  "instrument": "electric-piano",
+  "pitch": 67,
+  "velocity": 0.40154875088059205,
+  "pan": 0.029959085011477458,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "melody",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:126",
+  "type": "note",
+  "startTime": 35.444421916199,
+  "duration": 0.6923076923076924,
+  "instrument": "electric-piano",
+  "pitch": 65,
+  "velocity": 0.524543888915022,
+  "pan": 0.08710113036809697,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "melody",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:127",
+  "type": "chord",
+  "startTime": 36.98599646926286,
+  "duration": 1.0961538461538463,
+  "instrument": "electric-piano",
+  "pitch": 50,
+  "notes": [
+   60,
+   62,
+   65,
+   69
+  ],
+  "velocity": 0.553877050402222,
+  "pan": -0.016140965134395262,
+  "parameters": {
+   "roll": 0.025547479160130025
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "harmony",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:128",
+  "type": "chord",
+  "startTime": 38.51987512000609,
+  "duration": 1.4615384615384615,
+  "instrument": "electric-piano",
+  "pitch": 50,
+  "notes": [
+   60,
+   62,
+   65,
+   69
+  ],
+  "velocity": 0.5527423264104335,
+  "pan": -0.030454400255639506,
+  "parameters": {
+   "roll": 0.025547479160130025
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "harmony",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:129",
+  "type": "bass",
+  "startTime": 36.97653249175071,
+  "duration": 1.3446153846153845,
+  "instrument": "bass",
+  "pitch": 38,
+  "velocity": 0.5921823763993342,
+  "pan": -0.021308034214260946,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "bass",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:130",
+  "type": "drum",
+  "startTime": 36.9863869904522,
+  "duration": 0.3,
+  "instrument": "kick",
+  "velocity": 0.943284601820234,
+  "pan": 0.005960994213890611,
+  "parameters": {
+   "duck": 0.35
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:131",
+  "type": "drum",
+  "startTime": 36.979385426768495,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.4895687890472976,
+  "pan": 0.12976655362814987,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:132",
+  "type": "drum",
+  "startTime": 37.4235906149612,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.3354893801386852,
+  "pan": 0.1176313339779167,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:133",
+  "type": "drum",
+  "startTime": 37.75294069876299,
+  "duration": 0.16,
+  "instrument": "snare",
+  "velocity": 0.8202763882385085,
+  "pan": -0.0974207378818917,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:134",
+  "type": "drum",
+  "startTime": 38.19635164075084,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.33543452474570107,
+  "pan": 0.11851470626282108,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:135",
+  "type": "drum",
+  "startTime": 38.51610316720341,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.4854120891867058,
+  "pan": 0.1312560205563256,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:136",
+  "type": "drum",
+  "startTime": 38.97708583661708,
+  "duration": 0.3,
+  "instrument": "kick",
+  "velocity": 0.8852673091442401,
+  "pan": 0.00015855034241859492,
+  "parameters": {
+   "duck": 0.35
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:137",
+  "type": "drum",
+  "startTime": 38.964201355629,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.3301827241894752,
+  "pan": 0.12319228462521059,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:138",
+  "type": "drum",
+  "startTime": 39.29201029833644,
+  "duration": 0.16,
+  "instrument": "snare",
+  "velocity": 0.7953585888137742,
+  "pan": -0.06365441539281913,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:139",
+  "type": "drum",
+  "startTime": 39.28828389406929,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.49091041329999,
+  "pan": 0.10564497752226008,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:140",
+  "type": "drum",
+  "startTime": 39.73493876133032,
+  "duration": 0.3,
+  "instrument": "hat",
+  "velocity": 0.41293607575572905,
+  "pan": 0.12985229718979382,
+  "parameters": {
+   "open": true
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:141",
+  "type": "note",
+  "startTime": 36.98419356379012,
+  "duration": 0.6923076923076924,
+  "instrument": "electric-piano",
+  "pitch": 72,
+  "velocity": 0.5242665831309848,
+  "pan": 0.02265609676388626,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "melody",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:142",
+  "type": "note",
+  "startTime": 38.526155583953326,
+  "duration": 0.6923076923076924,
+  "instrument": "electric-piano",
+  "pitch": 65,
+  "velocity": 0.5090452321979662,
+  "pan": 0.044522313693867735,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "melody",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:143",
+  "type": "chord",
+  "startTime": 40.06516735375185,
+  "duration": 1.4901960784313724,
+  "instrument": "electric-piano",
+  "pitch": 55,
+  "notes": [
+   62,
+   65,
+   71
+  ],
+  "velocity": 0.5443089245694616,
+  "pan": -0.007986212522742085,
+  "parameters": {
+   "roll": 0.011350027347914874
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "harmony",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:144",
+  "type": "chord",
+  "startTime": 42.08724338133988,
+  "duration": 1.1176470588235294,
+  "instrument": "electric-piano",
+  "pitch": 55,
+  "notes": [
+   62,
+   65,
+   71
+  ],
+  "velocity": 0.5447750512409083,
+  "pan": -0.03705258538480281,
+  "parameters": {
+   "roll": 0.011350027347914874
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "harmony",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:145",
+  "type": "bass",
+  "startTime": 40.05351937696713,
+  "duration": 1.3709803921568626,
+  "instrument": "bass",
+  "pitch": 43,
+  "velocity": 0.612238117917887,
+  "pan": 0.002186971633862488,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "bass",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:146",
+  "type": "bass",
+  "startTime": 41.621254881264846,
+  "duration": 1.3709803921568626,
+  "instrument": "bass",
+  "pitch": 50,
+  "velocity": 0.589680644769191,
+  "pan": -0.005087074478468946,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "bass",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:147",
+  "type": "drum",
+  "startTime": 40.06692470090847,
+  "duration": 0.3,
+  "instrument": "kick",
+  "velocity": 0.878791992624556,
+  "pan": 0.0287731254975542,
+  "parameters": {
+   "duck": 0.35
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:148",
+  "type": "drum",
+  "startTime": 40.05517597470861,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.4914657004259524,
+  "pan": 0.12181064756474674,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:149",
+  "type": "drum",
+  "startTime": 40.510800149600676,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.34810429046909197,
+  "pan": 0.10570053043741445,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:150",
+  "type": "drum",
+  "startTime": 40.84698407395801,
+  "duration": 0.16,
+  "instrument": "snare",
+  "velocity": 0.8137528080428781,
+  "pan": -0.09770259575391545,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:151",
+  "type": "drum",
+  "startTime": 40.84112327682804,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.4979908007590981,
+  "pan": 0.12323975849928329,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:152",
+  "type": "drum",
+  "startTime": 41.30526884149101,
+  "duration": 0.25,
+  "instrument": "kick",
+  "velocity": 0.5914136383567562,
+  "pan": -0.0037600314124219747,
+  "parameters": {
+   "duck": 0.35
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:153",
+  "type": "drum",
+  "startTime": 41.29595490879704,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.3275091532871898,
+  "pan": 0.11918806908469066,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:154",
+  "type": "drum",
+  "startTime": 41.627833254255115,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.4771297881645252,
+  "pan": 0.09183925822612402,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:155",
+  "type": "drum",
+  "startTime": 42.08949888779557,
+  "duration": 0.3,
+  "instrument": "kick",
+  "velocity": 0.9002464018647246,
+  "pan": -0.01229668789108396,
+  "parameters": {
+   "duck": 0.35
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:156",
+  "type": "drum",
+  "startTime": 42.08362415436166,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.3358930010084454,
+  "pan": 0.14632991014574742,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:157",
+  "type": "drum",
+  "startTime": 42.414871521907465,
+  "duration": 0.16,
+  "instrument": "snare",
+  "velocity": 0.7948411580017747,
+  "pan": -0.10598296367028744,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:158",
+  "type": "drum",
+  "startTime": 42.41271402741288,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.49224764519937786,
+  "pan": 0.09107967174244726,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:159",
+  "type": "drum",
+  "startTime": 42.8650407398739,
+  "duration": 0.3,
+  "instrument": "hat",
+  "velocity": 0.4068494477048117,
+  "pan": 0.10554898639507136,
+  "parameters": {
+   "open": true
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A"
+  }
+ },
+ {
+  "id": "lofi:160",
+  "type": "chord",
+  "startTime": 43.19292272526573,
+  "duration": 0.7307692307692307,
+  "instrument": "electric-piano",
+  "pitch": 51,
+  "notes": [
+   61,
+   63,
+   70
+  ],
+  "velocity": 0.5468712203710306,
+  "pan": -0.048527416021021536,
+  "parameters": {
+   "roll": 0.021164240554906427
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "harmony",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:161",
+  "type": "chord",
+  "startTime": 44.411236887476925,
+  "duration": 0.36538461538461536,
+  "instrument": "electric-piano",
+  "pitch": 51,
+  "notes": [
+   61,
+   63,
+   70
+  ],
+  "velocity": 0.5512184363353354,
+  "pan": -0.09,
+  "parameters": {
+   "roll": 0.021164240554906427
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "harmony",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:162",
+  "type": "chord",
+  "startTime": 44.73848240801126,
+  "duration": 1.4615384615384615,
+  "instrument": "electric-piano",
+  "pitch": 51,
+  "notes": [
+   61,
+   63,
+   70
+  ],
+  "velocity": 0.5729614915999502,
+  "pan": -0.08919221913943924,
+  "parameters": {
+   "roll": 0.021164240554906427
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "harmony",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:163",
+  "type": "bass",
+  "startTime": 43.19422845725198,
+  "duration": 1.3446153846153845,
+  "instrument": "bass",
+  "pitch": 39,
+  "velocity": 0.6121412021241222,
+  "pan": 0.00839740407712424,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "bass",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:164",
+  "type": "bass",
+  "startTime": 44.737394585594856,
+  "duration": 1.3446153846153845,
+  "instrument": "bass",
+  "pitch": 46,
+  "velocity": 0.5900483410629916,
+  "pan": 0.007375556090484905,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "bass",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:165",
+  "type": "drum",
+  "startTime": 43.20283340478815,
+  "duration": 0.3,
+  "instrument": "kick",
+  "velocity": 0.9066776088064668,
+  "pan": 0.028165132726163403,
+  "parameters": {
+   "duck": 0.35
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:166",
+  "type": "drum",
+  "startTime": 43.647610888334654,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.3394176770538052,
+  "pan": 0.1141203364077536,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:167",
+  "type": "drum",
+  "startTime": 43.97026368349841,
+  "duration": 0.16,
+  "instrument": "snare",
+  "velocity": 0.8068517602567193,
+  "pan": -0.09320686179146623,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:168",
+  "type": "drum",
+  "startTime": 43.9630255859172,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.505654455141741,
+  "pan": 0.12117784291462137,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:169",
+  "type": "drum",
+  "startTime": 44.411544003740154,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.3366773625842673,
+  "pan": 0.16099662646459825,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:170",
+  "type": "drum",
+  "startTime": 45.18380847286631,
+  "duration": 0.3,
+  "instrument": "kick",
+  "velocity": 0.9066669680292779,
+  "pan": 0.011245208080127638,
+  "parameters": {
+   "duck": 0.35
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:171",
+  "type": "drum",
+  "startTime": 45.179306216710465,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.33370328423136913,
+  "pan": 0.12067223316800166,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:172",
+  "type": "drum",
+  "startTime": 45.503849956752255,
+  "duration": 0.16,
+  "instrument": "snare",
+  "velocity": 0.79522234753237,
+  "pan": -0.057718755039850106,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:173",
+  "type": "drum",
+  "startTime": 45.50388658623301,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.498938630632901,
+  "pan": 0.10548599097682562,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:174",
+  "type": "drum",
+  "startTime": 45.95122740223825,
+  "duration": 0.3,
+  "instrument": "hat",
+  "velocity": 0.41333417949674395,
+  "pan": 0.13031481111990262,
+  "parameters": {
+   "open": true
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:175",
+  "type": "chord",
+  "startTime": 46.28294410412803,
+  "duration": 2.1923076923076925,
+  "instrument": "electric-piano",
+  "pitch": 58,
+  "notes": [
+   62,
+   65,
+   68
+  ],
+  "velocity": 0.557613867246612,
+  "pan": -0.030093549584189895,
+  "parameters": {
+   "roll": 0.027916610401123764
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "harmony",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:176",
+  "type": "chord",
+  "startTime": 49.03236171583957,
+  "duration": 0.36538461538461536,
+  "instrument": "electric-piano",
+  "pitch": 58,
+  "notes": [
+   62,
+   65,
+   68
+  ],
+  "velocity": 0.5683362353033159,
+  "pan": -0.07926386240635926,
+  "parameters": {
+   "roll": 0.027916610401123764
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "harmony",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:177",
+  "type": "bass",
+  "startTime": 46.268838224593715,
+  "duration": 1.3446153846153845,
+  "instrument": "bass",
+  "pitch": 34,
+  "velocity": 0.6011704641656624,
+  "pan": -0.008552831575428889,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "bass",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:178",
+  "type": "drum",
+  "startTime": 46.277053562793625,
+  "duration": 0.3,
+  "instrument": "kick",
+  "velocity": 0.9378811036006474,
+  "pan": 0.0015624950085787255,
+  "parameters": {
+   "duck": 0.35
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:179",
+  "type": "drum",
+  "startTime": 46.271585025245066,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.5047111207097513,
+  "pan": 0.14188633739726178,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:180",
+  "type": "drum",
+  "startTime": 46.719049835414864,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.3400419273348279,
+  "pan": 0.11974542159194611,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:181",
+  "type": "drum",
+  "startTime": 47.04054270235571,
+  "duration": 0.16,
+  "instrument": "snare",
+  "velocity": 0.8281023274586207,
+  "pan": -0.07490970476135335,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:182",
+  "type": "drum",
+  "startTime": 47.48425919755242,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.33036079038337496,
+  "pan": 0.11266733187316823,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:183",
+  "type": "drum",
+  "startTime": 47.80964948201395,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.5085919607058642,
+  "pan": 0.1339804229848422,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:184",
+  "type": "drum",
+  "startTime": 48.2646594431396,
+  "duration": 0.3,
+  "instrument": "kick",
+  "velocity": 0.9004352788263092,
+  "pan": -0.003821528793794746,
+  "parameters": {
+   "duck": 0.35
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:185",
+  "type": "drum",
+  "startTime": 48.25077706103969,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.3293283962030998,
+  "pan": 0.11951470561769444,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:186",
+  "type": "drum",
+  "startTime": 48.582383894946474,
+  "duration": 0.16,
+  "instrument": "snare",
+  "velocity": 0.8069170720112089,
+  "pan": -0.11592714117924754,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:187",
+  "type": "drum",
+  "startTime": 48.57830299803819,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.515742003497294,
+  "pan": 0.1484961106720922,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:188",
+  "type": "drum",
+  "startTime": 49.02741327092758,
+  "duration": 0.3,
+  "instrument": "hat",
+  "velocity": 0.4030792605265435,
+  "pan": 0.13128949196262546,
+  "parameters": {
+   "open": true
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:189",
+  "type": "chord",
+  "startTime": 49.34867144389798,
+  "duration": 0.7307692307692307,
+  "instrument": "electric-piano",
+  "pitch": 48,
+  "notes": [
+   60,
+   62,
+   63,
+   70
+  ],
+  "velocity": 0.5450736792809191,
+  "pan": -0.03329875440877875,
+  "parameters": {
+   "roll": 0.015362665398977697
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "harmony",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:190",
+  "type": "chord",
+  "startTime": 50.56587953840435,
+  "duration": 0.36538461538461536,
+  "instrument": "electric-piano",
+  "pitch": 48,
+  "notes": [
+   60,
+   62,
+   63,
+   70
+  ],
+  "velocity": 0.5554794006309913,
+  "pan": -0.05057557253801652,
+  "parameters": {
+   "roll": 0.015362665398977697
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "harmony",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:191",
+  "type": "chord",
+  "startTime": 50.88974854241111,
+  "duration": 1.4615384615384615,
+  "instrument": "electric-piano",
+  "pitch": 48,
+  "notes": [
+   60,
+   62,
+   63,
+   70
+  ],
+  "velocity": 0.5644188551504764,
+  "pan": -0.06852903236352317,
+  "parameters": {
+   "roll": 0.015362665398977697
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "harmony",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:192",
+  "type": "bass",
+  "startTime": 49.34558706397754,
+  "duration": 1.3446153846153845,
+  "instrument": "bass",
+  "pitch": 36,
+  "velocity": 0.6117279659827137,
+  "pan": -0.0052264353436567304,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "bass",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:193",
+  "type": "drum",
+  "startTime": 49.356294140504424,
+  "duration": 0.3,
+  "instrument": "kick",
+  "velocity": 0.9012408254188852,
+  "pan": 0.01175655935093437,
+  "parameters": {
+   "duck": 0.35
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:194",
+  "type": "drum",
+  "startTime": 49.34863769867688,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.4974944987016833,
+  "pan": 0.11284096480121225,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:195",
+  "type": "drum",
+  "startTime": 49.794437332859495,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.3378631917884619,
+  "pan": 0.13415634219658445,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:196",
+  "type": "drum",
+  "startTime": 50.120684424670316,
+  "duration": 0.16,
+  "instrument": "snare",
+  "velocity": 0.8162522336637993,
+  "pan": -0.09002225591670607,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:197",
+  "type": "drum",
+  "startTime": 50.11365152251798,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.5054933627429493,
+  "pan": 0.12237296804424544,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:198",
+  "type": "drum",
+  "startTime": 50.56386842625673,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.34112959137793203,
+  "pan": 0.10822738490580051,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:199",
+  "type": "drum",
+  "startTime": 51.345942506336705,
+  "duration": 0.3,
+  "instrument": "kick",
+  "velocity": 0.8989697944729398,
+  "pan": 0.028876563678189113,
+  "parameters": {
+   "duck": 0.35
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:200",
+  "type": "drum",
+  "startTime": 51.664798819153695,
+  "duration": 0.16,
+  "instrument": "snare",
+  "velocity": 0.7844210354672435,
+  "pan": -0.09320907454533531,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:201",
+  "type": "drum",
+  "startTime": 52.10781111162016,
+  "duration": 0.25,
+  "instrument": "kick",
+  "velocity": 0.5983299958830511,
+  "pan": 0.002814733688370782,
+  "parameters": {
+   "duck": 0.35
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:202",
+  "type": "drum",
+  "startTime": 52.26457716443889,
+  "duration": 0.08,
+  "instrument": "snare",
+  "velocity": 0.28952049209753933,
+  "pan": -0.07092878623381915,
+  "parameters": {
+   "ghost": true
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:203",
+  "type": "note",
+  "startTime": 49.80317440770323,
+  "duration": 0.5192307692307693,
+  "instrument": "electric-piano",
+  "pitch": 64,
+  "velocity": 0.4162131850477667,
+  "pan": 0.01103092290380267,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "melody",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:204",
+  "type": "chord",
+  "startTime": 52.42802638929157,
+  "duration": 2.1923076923076925,
+  "instrument": "electric-piano",
+  "pitch": 56,
+  "notes": [
+   63,
+   68,
+   70
+  ],
+  "velocity": 0.5502346244982171,
+  "pan": 0.005448790721969063,
+  "parameters": {
+   "roll": 0.012719298300333321
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "harmony",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:205",
+  "type": "chord",
+  "startTime": 55.18138599334266,
+  "duration": 0.36538461538461536,
+  "instrument": "electric-piano",
+  "pitch": 56,
+  "notes": [
+   63,
+   68,
+   70
+  ],
+  "velocity": 0.5550135520931913,
+  "pan": -0.01167487155827478,
+  "parameters": {
+   "roll": 0.012719298300333321
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "harmony",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:206",
+  "type": "bass",
+  "startTime": 52.42907837900387,
+  "duration": 1.3446153846153845,
+  "instrument": "bass",
+  "pitch": 44,
+  "velocity": 0.5944533519409753,
+  "pan": -0.007919043443201587,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "bass",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:207",
+  "type": "bass",
+  "startTime": 53.96749107251447,
+  "duration": 1.3446153846153845,
+  "instrument": "bass",
+  "pitch": 51,
+  "velocity": 0.5787699464621681,
+  "pan": 0.00045236120948955675,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "bass",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:208",
+  "type": "drum",
+  "startTime": 52.44035595776774,
+  "duration": 0.3,
+  "instrument": "kick",
+  "velocity": 0.924122280279389,
+  "pan": 0.0014418424603747258,
+  "parameters": {
+   "duck": 0.35
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:209",
+  "type": "drum",
+  "startTime": 52.42752853972863,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.49740828890924854,
+  "pan": 0.1412558249979097,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:210",
+  "type": "drum",
+  "startTime": 52.86762441164131,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.3381479657736489,
+  "pan": 0.15660919601506434,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:211",
+  "type": "drum",
+  "startTime": 53.20086966366497,
+  "duration": 0.16,
+  "instrument": "snare",
+  "velocity": 0.8044315525549586,
+  "pan": -0.060241006323876994,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:212",
+  "type": "drum",
+  "startTime": 53.96701294390856,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.5021201725038879,
+  "pan": 0.1361062719759643,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:213",
+  "type": "drum",
+  "startTime": 54.4167827305334,
+  "duration": 0.3,
+  "instrument": "kick",
+  "velocity": 0.8771923578847631,
+  "pan": -0.01925697735164189,
+  "parameters": {
+   "duck": 0.35
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:214",
+  "type": "drum",
+  "startTime": 54.40674343406679,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.33359636661322534,
+  "pan": 0.1087113569394436,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:215",
+  "type": "drum",
+  "startTime": 54.73285474051167,
+  "duration": 0.16,
+  "instrument": "snare",
+  "velocity": 0.8080096549600182,
+  "pan": -0.0982282813971959,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:216",
+  "type": "drum",
+  "startTime": 54.73064987616683,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.49841246397846034,
+  "pan": 0.13028341724785086,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:217",
+  "type": "note",
+  "startTime": 53.64927535593353,
+  "duration": 0.3461538461538462,
+  "instrument": "electric-piano",
+  "pitch": 65,
+  "velocity": 0.42402643982572,
+  "pan": 0.05780358817318805,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "melody",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:218",
+  "type": "chord",
+  "startTime": 55.505451789933815,
+  "duration": 1.0961538461538463,
+  "instrument": "electric-piano",
+  "pitch": 51,
+  "notes": [
+   61,
+   63,
+   66,
+   70
+  ],
+  "velocity": 0.544674102754856,
+  "pan": -0.06618769834769106,
+  "parameters": {
+   "roll": 0.027230755078606308
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "harmony",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:219",
+  "type": "chord",
+  "startTime": 57.046819494614596,
+  "duration": 1.4615384615384615,
+  "instrument": "electric-piano",
+  "pitch": 51,
+  "notes": [
+   61,
+   63,
+   66,
+   70
+  ],
+  "velocity": 0.5635806687304071,
+  "pan": -0.035159065104169586,
+  "parameters": {
+   "roll": 0.027230755078606308
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "harmony",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:220",
+  "type": "bass",
+  "startTime": 55.50581799359285,
+  "duration": 1.3446153846153845,
+  "instrument": "bass",
+  "pitch": 39,
+  "velocity": 0.613553428819358,
+  "pan": 0.004238483146669585,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "bass",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:221",
+  "type": "drum",
+  "startTime": 55.508137780574614,
+  "duration": 0.3,
+  "instrument": "kick",
+  "velocity": 0.9253745332018602,
+  "pan": 0.0009571913321677666,
+  "parameters": {
+   "duck": 0.35
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:222",
+  "type": "drum",
+  "startTime": 55.49949177572219,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.4778373233787303,
+  "pan": 0.15797894605753307,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:223",
+  "type": "drum",
+  "startTime": 55.94388269222628,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.32764916713981734,
+  "pan": 0.11907659410754297,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:224",
+  "type": "drum",
+  "startTime": 56.27473520368215,
+  "duration": 0.16,
+  "instrument": "snare",
+  "velocity": 0.7980013461837964,
+  "pan": -0.07085374504293632,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:225",
+  "type": "drum",
+  "startTime": 56.27353375420932,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.5009153600832735,
+  "pan": 0.1290164909198112,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:226",
+  "type": "drum",
+  "startTime": 56.71472045423104,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.33165798325413676,
+  "pan": 0.11792535808675397,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:227",
+  "type": "drum",
+  "startTime": 56.882739192086866,
+  "duration": 0.08,
+  "instrument": "snare",
+  "velocity": 0.2944452611469376,
+  "pan": -0.09827580826497587,
+  "parameters": {
+   "ghost": true
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:228",
+  "type": "drum",
+  "startTime": 57.03743697617069,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.49963172917558746,
+  "pan": 0.11206526214165312,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:229",
+  "type": "drum",
+  "startTime": 57.494580975036094,
+  "duration": 0.3,
+  "instrument": "kick",
+  "velocity": 0.9109989486085313,
+  "pan": -0.01758157692286197,
+  "parameters": {
+   "duck": 0.35
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:230",
+  "type": "drum",
+  "startTime": 57.48764412978737,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.33758293686570096,
+  "pan": 0.09355122923847926,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:231",
+  "type": "drum",
+  "startTime": 57.81407579449164,
+  "duration": 0.16,
+  "instrument": "snare",
+  "velocity": 0.8111957095379413,
+  "pan": -0.06260001630036653,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:232",
+  "type": "drum",
+  "startTime": 57.810113346634395,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.5009715431831983,
+  "pan": 0.10498054397908439,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:233",
+  "type": "drum",
+  "startTime": 58.255494230355644,
+  "duration": 0.3,
+  "instrument": "hat",
+  "velocity": 0.431629642470575,
+  "pan": 0.14976371918478437,
+  "parameters": {
+   "open": true
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:234",
+  "type": "note",
+  "startTime": 55.95306889461268,
+  "duration": 0.5192307692307693,
+  "instrument": "electric-piano",
+  "pitch": 64,
+  "velocity": 0.4139734313209041,
+  "pan": 0.02350057477282294,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "melody",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:235",
+  "type": "chord",
+  "startTime": 58.58498413649443,
+  "duration": 1.4615384615384615,
+  "instrument": "electric-piano",
+  "pitch": 58,
+  "notes": [
+   62,
+   65,
+   68,
+   70
+  ],
+  "velocity": 0.5471141311152039,
+  "pan": -0.026658686386405256,
+  "parameters": {
+   "roll": 0.025904043872840704
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "harmony",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:236",
+  "type": "chord",
+  "startTime": 60.568376267034864,
+  "duration": 1.0961538461538463,
+  "instrument": "electric-piano",
+  "pitch": 58,
+  "notes": [
+   62,
+   65,
+   68,
+   70
+  ],
+  "velocity": 0.5533158111830025,
+  "pan": -0.04945602136407228,
+  "parameters": {
+   "roll": 0.025904043872840704
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "harmony",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:237",
+  "type": "bass",
+  "startTime": 58.58333335243987,
+  "duration": 1.3446153846153845,
+  "instrument": "bass",
+  "pitch": 34,
+  "velocity": 0.609162976705254,
+  "pan": -0.003231318232145124,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "bass",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:238",
+  "type": "drum",
+  "startTime": 58.58765327150169,
+  "duration": 0.3,
+  "instrument": "kick",
+  "velocity": 0.9037897865020608,
+  "pan": 0.015942444506980808,
+  "parameters": {
+   "duck": 0.35
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:239",
+  "type": "drum",
+  "startTime": 58.58137935917299,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.4982245103956074,
+  "pan": 0.136898588676022,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:240",
+  "type": "drum",
+  "startTime": 59.02263667312991,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.3453759787525362,
+  "pan": 0.1172997709674836,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:241",
+  "type": "drum",
+  "startTime": 59.35387523741277,
+  "duration": 0.16,
+  "instrument": "snare",
+  "velocity": 0.8002812386353878,
+  "pan": -0.05925690898383325,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:242",
+  "type": "drum",
+  "startTime": 59.35035725060383,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.49467234051344355,
+  "pan": 0.10162436541590424,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:243",
+  "type": "drum",
+  "startTime": 59.795376398286976,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.333435331589556,
+  "pan": 0.1152327514084476,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:244",
+  "type": "drum",
+  "startTime": 60.12114398591681,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.4854840662561415,
+  "pan": 0.10878298741018237,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:245",
+  "type": "drum",
+  "startTime": 60.56998235431803,
+  "duration": 0.3,
+  "instrument": "kick",
+  "velocity": 0.9145954807061017,
+  "pan": 0.0012221716773423341,
+  "parameters": {
+   "duck": 0.35
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:246",
+  "type": "drum",
+  "startTime": 60.56647216153361,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.33975656615575767,
+  "pan": 0.10490027890384188,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:247",
+  "type": "drum",
+  "startTime": 60.888444986758465,
+  "duration": 0.16,
+  "instrument": "snare",
+  "velocity": 0.8032636957945526,
+  "pan": -0.09876172916426061,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:248",
+  "type": "drum",
+  "startTime": 60.88865536291918,
+  "duration": 0.06,
+  "instrument": "hat",
+  "velocity": 0.5000706022418906,
+  "pan": 0.14155326105688262,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:249",
+  "type": "drum",
+  "startTime": 61.334786821787596,
+  "duration": 0.3,
+  "instrument": "hat",
+  "velocity": 0.41805663352613986,
+  "pan": 0.12024425596500467,
+  "parameters": {
+   "open": true
+  },
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "drums",
+   "section": "A'"
+  }
+ },
+ {
+  "id": "lofi:250",
+  "type": "note",
+  "startTime": 59.80085903020667,
+  "duration": 0.3461538461538462,
+  "instrument": "electric-piano",
+  "pitch": 67,
+  "velocity": 0.4323495701279957,
+  "pan": 0.008141760296254255,
+  "metadata": {
+   "sourcePlugin": "lofi",
+   "role": "melody",
+   "section": "A'"
+  }
+ }
+]

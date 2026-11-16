@@ -21,7 +21,7 @@ class PulseStyle implements StyleInstance {
   private bpm: number;
 
   constructor(seed: string | number, parameters: Record<string, ParamValue>) {
-    this.rng = new SeededRandom(`${seed}::pulse`);
+    this.rng = SeededRandom.forStyle(seed, 'pulse');
     this.bpm = Number(parameters.bpm ?? 100) || 100;
   }
 

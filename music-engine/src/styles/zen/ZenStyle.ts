@@ -14,6 +14,13 @@ import { BellGenerator } from './BellGenerator';
 import { HarmonicGenerator } from './HarmonicGenerator';
 import { TextureGenerator } from './TextureGenerator';
 
+/**
+ * Single source of truth for this style's id, re-exported by the plugin
+ * descriptor in index.ts so the root fork tag always matches the id the
+ * engine embedded into the seed string.
+ */
+export const ZEN_STYLE_ID = 'zen';
+
 export interface HarmonicField {
   root: number;
   /** Semitone offsets: root, fifth, octave, sus color, optional 9th. */
@@ -29,8 +36,13 @@ interface FieldSpan {
 /**
  * Free-time Zen generator (PRD §23–32): no BPM, long drones, sparse bells,
  * first-class silence, breath modulation and slow harmonic fields.
- * Four independent lanes advance their own cursors, so output is independent
- * of generation-window chunking (determinism).
+ *
+ * Seed convention: the only root is `SeededRandom.forStyle(seed, ZEN_STYLE_ID)`,
+ * built from the engine-provided seed string with no hand-written `::zen`
+ * suffix in this file. Each lane then forks an independent stream — `breath`,
+ * `field`, `arc`, `drone`, `bells`, `harmonics`, `texture` — and advances its
+ * own cursor, so output is independent of generation-window chunking
+ * (determinism) and no lane's call order can perturb another.
  */
 export class ZenStyle implements StyleInstance {
   private p: Record<string, ParamValue>;
@@ -52,7 +64,9 @@ export class ZenStyle implements StyleInstance {
 
   constructor(seed: string | number, parameters: Record<string, ParamValue>) {
     this.p = { ...parameters };
-    this.master = new SeededRandom(`${seed}::zen`);
+    // Root stream: the engine seed already encodes `${seed}|zen|v…`; the
+    // style only names itself through the canonical forStyle() entry point.
+    this.master = SeededRandom.forStyle(seed, ZEN_STYLE_ID);
     this.breath = new BreathEngine(this.master.fork('breath'), this.num('breath', 0.5));
     this.drones = new DroneGenerator(this.master);
     this.bells = new BellGenerator(this.master);

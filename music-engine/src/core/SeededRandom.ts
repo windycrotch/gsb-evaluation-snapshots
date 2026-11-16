@@ -4,6 +4,16 @@
  * Determinism contract: same seed → same sequence, on every browser.
  * `fork(tag)` derives an independent stream so that one generator's random
  * call order can never influence another (PRD §13 Plugin Seed Isolation).
+ *
+ * Style-side seed convention (the only sanctioned derivation path):
+ *   1. The engine hands each style a fully-qualified seed string
+ *      `${userSeed}|${styleId}|v${version}` via `StyleConfig.seed`.
+ *   2. A style builds its root RNG with `SeededRandom.forStyle(seed, styleId)`
+ *      — never by hand-concatenating `::${styleName}` itself.
+ *   3. Every musical purpose (arrangement / harmony / drums / melody /
+ *      humanize / arc / bar:N …) gets its own stream via `fork(tag)`.
+ *   4. `Math.random()` is forbidden inside style code; all randomness must be
+ *      traceable to these forked streams.
  */
 
 function xmur3(str: string): () => number {
@@ -40,9 +50,33 @@ function sfc32(a: number, b: number, c: number, d: number): () => number {
 export class SeededRandom {
   private nextFn: () => number;
 
-  constructor(public readonly seed: string | number) {
+  /**
+   * Fork chain that produced this stream, e.g. `['lofi', 'bar:3']` for a
+   * per-bar RNG. The root RNG created directly with `new SeededRandom(seed)`
+   * has an empty path; `forStyle` roots every style stream at its style id.
+   * Introspection only — it never affects the generated sequence.
+   */
+  readonly tagPath: readonly string[];
+
+  constructor(public readonly seed: string | number, tagPath: readonly string[] = []) {
     const h = xmur3(String(seed));
     this.nextFn = sfc32(h(), h(), h(), h());
+    this.tagPath = [...tagPath];
+  }
+
+  /**
+   * The single sanctioned root for a style's random streams. `engineSeed` is
+   * the exact string the engine passed in `StyleConfig.seed`
+   * (`${userSeed}|${styleId}|v${version}`); `styleId` is the plugin id and
+   * becomes the first tag of every stream the style subsequently forks.
+   *
+   * Equivalent to the historical `new SeededRandom(`${engineSeed}::${styleId}`)`
+   * construction, so refactored styles reproduce their published output
+   * field-for-field — but the `::` concatenation now lives in exactly one
+   * place instead of being re-implemented by every style.
+   */
+  static forStyle(engineSeed: string | number, styleId: string): SeededRandom {
+    return new SeededRandom(`${String(engineSeed)}::${styleId}`, [styleId]);
   }
 
   /** Float in [0, 1). */
@@ -93,6 +127,6 @@ export class SeededRandom {
 
   /** Independent stream derived from this seed + tag (never call-order dependent). */
   fork(tag: string): SeededRandom {
-    return new SeededRandom(`${String(this.seed)}::${tag}`);
+    return new SeededRandom(`${String(this.seed)}::${tag}`, [...this.tagPath, tag]);
   }
 }

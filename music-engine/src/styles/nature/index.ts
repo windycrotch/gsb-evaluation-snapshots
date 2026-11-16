@@ -41,7 +41,7 @@ class NatureStyle implements StyleInstance {
 
   constructor(seed: string | number, parameters: Record<string, ParamValue>) {
     this.p = { ...parameters };
-    this.master = new SeededRandom(`${seed}::nature`);
+    this.master = SeededRandom.forStyle(seed, 'nature');
     this.root = 36 + this.master.fork('root').int(0, 6);
     this.windRng = this.master.fork('wind');
     this.waterRng = this.master.fork('water');

@@ -51,7 +51,7 @@ class ChiptuneStyle implements StyleInstance {
 
   constructor(seed: string | number, parameters: Record<string, ParamValue>) {
     this.p = { ...parameters };
-    this.master = new SeededRandom(`${seed}::chiptune`);
+    this.master = SeededRandom.forStyle(seed, 'chiptune');
     this.beatModel = new BeatTimeModel(() => this.num('bpm', 140));
     this.arc = new MacroArc(
       parsePurpose(this.p.sessionPurpose),

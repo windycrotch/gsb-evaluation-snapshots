@@ -36,6 +36,13 @@ interface ActiveSection {
 }
 
 /**
+ * Single source of truth for this style's id. The plugin descriptor in
+ * index.ts re-exports it so the root fork tag can never drift from the id
+ * the engine embedded into the seed string.
+ */
+export const LOFI_STYLE_ID = 'lofi';
+
+/**
  * Directional micro-timing (v1.1 §76.1): constant per-instrument biases in
  * milliseconds. Zero-mean jitter sounds sloppy; biased offsets feel like a
  * pocket — kick laid back, hats pushing, bass slightly ahead of the kick.
@@ -51,8 +58,14 @@ const POCKET_BIAS: Record<string, number> = {
 
 /**
  * Beat-based lofi/chillhop generator (PRD §14–22).
- * All randomness flows through forks of the style seed; generation is driven
- * by a bar cursor, so event output is independent of window chunking.
+ *
+ * Seed convention: the only root is `SeededRandom.forStyle(seed, LOFI_STYLE_ID)`,
+ * built from the engine-provided seed string with no hand-written `::lofi`
+ * suffix in this file. Every purpose then forks an independent stream:
+ * arrangement → cycle:N, per-section harmony/kit, `bar:N` (which in turn feeds
+ * harmony rhythm, bass, drums and melody), `humanize`, `arc`. Generation is
+ * driven by a bar cursor over these call-order-independent streams, so the
+ * event output is identical for any generation-window chunking.
  */
 export class LofiStyle implements StyleInstance {
   private p: Record<string, ParamValue>;
@@ -83,7 +96,9 @@ export class LofiStyle implements StyleInstance {
 
   constructor(seed: string | number, parameters: Record<string, ParamValue>) {
     this.p = { ...parameters };
-    this.master = new SeededRandom(`${seed}::lofi`);
+    // Root stream: the engine seed already encodes `${seed}|lofi|v…`; the
+    // style only names itself through the canonical forStyle() entry point.
+    this.master = SeededRandom.forStyle(seed, LOFI_STYLE_ID);
     this.arrangement = new Arrangement(this.master.fork('arrangement'));
     this.humRng = this.master.fork('humanize');
     this.currentBpm = this.num('bpm', 78);

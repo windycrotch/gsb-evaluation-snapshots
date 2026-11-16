@@ -59,22 +59,30 @@ dist/assets/index-<hash>.css       样式（≈13 KB / gzip ≈3.6 KB）
 ## 新增一个音乐风格（不改 Core）
 
 1. 新建 `src/styles/<id>/index.ts`，实现 `StylePlugin`（metadata + parameters + presets + create）
-2. 生成器只产出 `MusicalEvent`；随机数一律用 `context.random`（种子派生，按小节 fork）
+2. 生成器只产出 `MusicalEvent`；随机数只允许走种子派生链：
+   - 引擎经 `StyleConfig.seed` 传入完整种子串 `${userSeed}|<id>|v<version>`，
+     风格根 RNG 只能用 `SeededRandom.forStyle(seed, <id>)` 建立，
+     **禁止**再手工拼 `::风格名` 这类后缀，**禁止** `Math.random()`
+   - 各用途（编曲 / 和声 / 鼓组 / 旋律 / 人性化 / 弧线 / `bar:N` …）
+     一律 `root.fork(tag)` 分出互不干扰的随机流，并以小节/泳道游标驱动生成，
+     保证 `[0,30]+[30,60]` 与一次 `[0,60]` 的输出逐字段一致
 3. 复用已有乐器与效果器（`context.instruments` / `context.fx`）
 4. 在 `src/main.ts` 里 `engine.registerStyle(myPlugin)` 注册一行
-5. 参照 `tests/styles/NewStyles.test.ts` 补测试（确定性 / 分块不变 / 结构特征）
+5. 参照 `tests/styles/NewStyles.test.ts` 补测试（确定性 / 分块不变 / 结构特征），
+   种子派生约定见 `tests/core/StyleSeeding.test.ts`
 
 现成范例：`src/styles/dream/`（free 型）或 `src/styles/jazzhop/`（beat 型）。
 详细规范见 `docs/musicprd.md`。
 
 ## 测试覆盖
 
-175 个单元测试（12 个文件）：
+197 个单元测试（13 个文件）：
 
 | 文件 | 覆盖 |
 |---|---|
 | `tests/styles/NewStyles.test.ts` | 各风格的确定性、分块一致性与结构特征 |
 | `tests/lofi/` `tests/zen/` | 两个样板风格的深度用例 |
+| `tests/core/StyleSeeding.test.ts` | 风格侧种子派生约定：改造前黄金快照逐字段复现、窗口切分不变、同/异 seed、禁止手工后缀与 `Math.random()`、fork 标签链 |
 | `tests/core/Engine.test.ts` | 引擎生命周期、风格切换、种子复现 |
 | `tests/core/Scheduler.test.ts` | 调度时序与前瞻 |
 | `tests/core/SeededRandom.test.ts` | 种子派生与 fork 隔离 |

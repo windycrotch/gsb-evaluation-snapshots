@@ -32,7 +32,7 @@ class DreamStyle implements StyleInstance {
 
   constructor(seed: string | number, parameters: Record<string, ParamValue>) {
     this.p = { ...parameters };
-    this.master = new SeededRandom(`${seed}::dream`);
+    this.master = SeededRandom.forStyle(seed, 'dream');
     this.pads = new DroneGenerator(this.master);
     this.plucks = new HarmonicGenerator(this.master);
     this.bellRng = this.master.fork('bells');

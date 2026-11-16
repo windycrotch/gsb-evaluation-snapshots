@@ -62,7 +62,7 @@ class SynthwaveStyle implements StyleInstance {
 
   constructor(seed: string | number, parameters: Record<string, ParamValue>) {
     this.p = { ...parameters };
-    this.master = new SeededRandom(`${seed}::synthwave`);
+    this.master = SeededRandom.forStyle(seed, 'synthwave');
     this.humRng = this.master.fork('humanize');
     this.beatModel = new BeatTimeModel(() => this.num('bpm', 100));
     this.arc = new MacroArc(

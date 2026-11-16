@@ -35,7 +35,7 @@ class SleepStyle implements StyleInstance {
 
   constructor(seed: string | number, parameters: Record<string, ParamValue>) {
     this.p = { ...parameters };
-    this.master = new SeededRandom(`${seed}::sleep`);
+    this.master = SeededRandom.forStyle(seed, 'sleep');
     this.drones = new DroneGenerator(this.master);
     const rootRng = this.master.fork('root');
     this.root = 31 + rootRng.int(0, 5); // G1–C2 region

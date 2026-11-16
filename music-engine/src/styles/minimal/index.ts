@@ -45,7 +45,7 @@ class MinimalStyle implements StyleInstance {
 
   constructor(seed: string | number, parameters: Record<string, ParamValue>) {
     this.p = { ...parameters };
-    this.master = new SeededRandom(`${seed}::minimal`);
+    this.master = SeededRandom.forStyle(seed, 'minimal');
     this.beatModel = new BeatTimeModel(() => this.num('bpm', 118));
     const rng = this.master.fork('contour');
     this.contour = CONTOURS[rng.int(0, CONTOURS.length - 1)];

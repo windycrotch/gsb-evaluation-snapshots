@@ -38,7 +38,7 @@ class CinematicStyle implements StyleInstance {
 
   constructor(seed: string | number, parameters: Record<string, ParamValue>) {
     this.p = { ...parameters };
-    this.master = new SeededRandom(`${seed}::cinematic`);
+    this.master = SeededRandom.forStyle(seed, 'cinematic');
     this.root = 33 + this.master.fork('root').int(0, 5);
     this.pedalRng = this.master.fork('pedal');
     this.voiceRng = this.master.fork('voices');

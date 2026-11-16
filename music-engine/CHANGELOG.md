@@ -1,5 +1,19 @@
 # 变更记录
 
+## Unreleased · 风格侧种子派生约定统一（音乐输出零变化）
+
+- **唯一根 RNG 入口 `SeededRandom.forStyle(seed, styleId)`**：17 个风格原先各自手工拼接
+  `new SeededRandom(`${seed}::风格名`)` 的写法全部移除，`::` 拼接收敛到 `SeededRandom` 一处；
+  风格只从引擎传入的 `${userSeed}|<id>|v<version>` 种子串出发，再用 `fork(tag)`
+  按编曲 / 和声 / 鼓组 / 旋律 / 人性化 / 弧线 / `bar:N` 等用途分互不干扰的随机流。
+  风格代码内禁止手工后缀与 `Math.random()`，由 `tests/core/StyleSeeding.test.ts` 静态扫描兜底。
+- **可核对的派生链**：`SeededRandom` 新增只读 `tagPath`（如 `['lofi', 'bar:3']`），
+  仅用于追踪与测试，不参与随机序列；`forStyle` 的输出序列与旧手工构造逐位一致。
+- **已发布音乐逐字段保持不变**：Lofi / Zen 改造前的事件快照存入
+  `tests/fixtures/seed-baseline/`（由 `scripts/capture-seed-baseline.ts` 生成），
+  测试对快照做严格深度相等断言；另覆盖 `[0,30]+[30,60]` 对 `[0,60]` 的窗口切分不变性、
+  同 seed 复现、异 seed 差异，以及 MockAudioContext 下的整引擎生命周期复现。
+
 ## v1.1.1（2026-10-03）· 页脚整理：访问统计独立成行 + 仓库链接
 
 - **访问统计移到单独一行**：页脚第一行只放播放控件（音量 / 状态 / 风格·时长），第二行居中显示

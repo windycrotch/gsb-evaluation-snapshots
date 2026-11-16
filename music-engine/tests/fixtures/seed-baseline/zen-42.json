@@ -1,0 +1,814 @@
+[
+ {
+  "id": "zen:drone:0",
+  "type": "drone",
+  "startTime": 0,
+  "duration": 47.09561992222909,
+  "instrument": "drone",
+  "pitch": 43,
+  "velocity": 0.4208329330837041,
+  "pan": 0.01244477805448696,
+  "parameters": {
+   "warmth": 0.6,
+   "movement": 0.2867023783794936,
+   "cutoff": 782.7774613022258
+  },
+  "metadata": {
+   "sourcePlugin": "zen",
+   "role": "drone"
+  }
+ },
+ {
+  "id": "zen:drone:1",
+  "type": "drone",
+  "startTime": 39.58337839129847,
+  "duration": 43.89498877334874,
+  "instrument": "drone",
+  "pitch": 43,
+  "velocity": 0.4632539146871005,
+  "pan": -0.046601524692960083,
+  "parameters": {
+   "warmth": 0.6,
+   "movement": 0.31425900093675596,
+   "cutoff": 837.1502620368573
+  },
+  "metadata": {
+   "sourcePlugin": "zen",
+   "role": "drone"
+  }
+ },
+ {
+  "id": "zen:drone:2",
+  "type": "drone",
+  "startTime": 75.19653960262426,
+  "duration": 57.58560926652048,
+  "instrument": "drone",
+  "pitch": 43,
+  "velocity": 0.47307621645471565,
+  "pan": 0.09869120857911184,
+  "parameters": {
+   "warmth": 0.6,
+   "movement": 0.31206673504169413,
+   "cutoff": 842.6003519203624
+  },
+  "metadata": {
+   "sourcePlugin": "zen",
+   "role": "drone"
+  }
+ },
+ {
+  "id": "zen:drone:3",
+  "type": "drone",
+  "startTime": 125.8226788278157,
+  "duration": 44.477820716518906,
+  "instrument": "drone",
+  "pitch": 43,
+  "velocity": 0.4070629022960667,
+  "pan": 0.042521936586126685,
+  "parameters": {
+   "warmth": 0.6,
+   "movement": 0.23834588696096476,
+   "cutoff": 732.6570960269318
+  },
+  "metadata": {
+   "sourcePlugin": "zen",
+   "role": "drone"
+  }
+ },
+ {
+  "id": "zen:drone:4",
+  "type": "drone",
+  "startTime": 161.63682105610613,
+  "duration": 43.60856302873231,
+  "instrument": "drone",
+  "pitch": 44,
+  "velocity": 0.38959974791333596,
+  "pan": -0.1217948051635176,
+  "parameters": {
+   "warmth": 0.6,
+   "movement": 0.22475734606177264,
+   "cutoff": 708.4039397229981
+  },
+  "metadata": {
+   "sourcePlugin": "zen",
+   "role": "drone"
+  }
+ },
+ {
+  "id": "zen:drone:5",
+  "type": "drone",
+  "startTime": 197.55577675167936,
+  "duration": 62.36870941653847,
+  "instrument": "drone",
+  "pitch": 44,
+  "velocity": 0.4112884503977625,
+  "pan": 0.05442254402441904,
+  "parameters": {
+   "warmth": 0.6,
+   "movement": 0.258185912532586,
+   "cutoff": 752.0847788288892
+  },
+  "metadata": {
+   "sourcePlugin": "zen",
+   "role": "drone"
+  }
+ },
+ {
+  "id": "zen:bell:0",
+  "type": "bell",
+  "startTime": 32.41635829939651,
+  "duration": 12.8,
+  "instrument": "bell",
+  "pitch": 67,
+  "velocity": 0.4630230593881649,
+  "pan": -0.09127777320332825,
+  "parameters": {
+   "attack": 0.13199999999999998,
+   "detune": 4,
+   "exciteBus": "drone",
+   "excite": 0.355
+  },
+  "metadata": {
+   "sourcePlugin": "zen",
+   "role": "bell",
+   "section": ""
+  }
+ },
+ {
+  "id": "zen:sil:1",
+  "type": "silence",
+  "startTime": 32.41635829939651,
+  "duration": 16.061914549629044,
+  "metadata": {
+   "sourcePlugin": "zen",
+   "role": "silence"
+  }
+ },
+ {
+  "id": "zen:bell:2",
+  "type": "bell",
+  "startTime": 48.47827284902555,
+  "duration": 17.28,
+  "instrument": "bowl",
+  "pitch": 62,
+  "velocity": 0.4008449812836978,
+  "pan": 0.05612235847860575,
+  "parameters": {
+   "attack": 0.13199999999999998,
+   "detune": 4,
+   "exciteBus": "drone",
+   "excite": 0.355
+  },
+  "metadata": {
+   "sourcePlugin": "zen",
+   "role": "bowl",
+   "section": ""
+  }
+ },
+ {
+  "id": "zen:sil:3",
+  "type": "silence",
+  "startTime": 48.47827284902555,
+  "duration": 24.28422168213324,
+  "metadata": {
+   "sourcePlugin": "zen",
+   "role": "silence"
+  }
+ },
+ {
+  "id": "zen:bell:4",
+  "type": "bell",
+  "startTime": 72.7624945311588,
+  "duration": 12.8,
+  "instrument": "bell",
+  "pitch": 72,
+  "velocity": 0.4726823259406907,
+  "pan": 0.0019554804544895887,
+  "parameters": {
+   "attack": 0.13199999999999998,
+   "detune": 4,
+   "exciteBus": "drone",
+   "excite": 0.355
+  },
+  "metadata": {
+   "sourcePlugin": "zen",
+   "role": "bell",
+   "section": ""
+  }
+ },
+ {
+  "id": "zen:sil:5",
+  "type": "silence",
+  "startTime": 72.7624945311588,
+  "duration": 22.4434546198465,
+  "metadata": {
+   "sourcePlugin": "zen",
+   "role": "silence"
+  }
+ },
+ {
+  "id": "zen:bell:6",
+  "type": "bell",
+  "startTime": 95.20594915100529,
+  "duration": 17.28,
+  "instrument": "bowl",
+  "pitch": 55,
+  "velocity": 0.4256488223777265,
+  "pan": 0.2606571301305666,
+  "parameters": {
+   "attack": 0.13199999999999998,
+   "detune": 4,
+   "exciteBus": "drone",
+   "excite": 0.355
+  },
+  "metadata": {
+   "sourcePlugin": "zen",
+   "role": "bowl",
+   "section": ""
+  }
+ },
+ {
+  "id": "zen:sil:7",
+  "type": "silence",
+  "startTime": 95.20594915100529,
+  "duration": 17.663632818425047,
+  "metadata": {
+   "sourcePlugin": "zen",
+   "role": "silence"
+  }
+ },
+ {
+  "id": "zen:bell:8",
+  "type": "bell",
+  "startTime": 112.86958196943033,
+  "duration": 17.28,
+  "instrument": "bowl",
+  "pitch": 55,
+  "velocity": 0.4642819258126031,
+  "pan": 0.18597517616581172,
+  "parameters": {
+   "attack": 0.13199999999999998,
+   "detune": 4,
+   "exciteBus": "drone",
+   "excite": 0.355
+  },
+  "metadata": {
+   "sourcePlugin": "zen",
+   "role": "bowl",
+   "section": ""
+  }
+ },
+ {
+  "id": "zen:sil:9",
+  "type": "silence",
+  "startTime": 112.86958196943033,
+  "duration": 21.941664487816066,
+  "metadata": {
+   "sourcePlugin": "zen",
+   "role": "silence"
+  }
+ },
+ {
+  "id": "zen:bell:10",
+  "type": "bell",
+  "startTime": 134.8112464572464,
+  "duration": 12.8,
+  "instrument": "bell",
+  "pitch": 73,
+  "velocity": 0.4567662800680738,
+  "pan": -0.02921336064580828,
+  "parameters": {
+   "attack": 0.13199999999999998,
+   "detune": 4,
+   "exciteBus": "drone",
+   "excite": 0.355
+  },
+  "metadata": {
+   "sourcePlugin": "zen",
+   "role": "bell",
+   "section": ""
+  }
+ },
+ {
+  "id": "zen:sil:11",
+  "type": "silence",
+  "startTime": 134.8112464572464,
+  "duration": 22.47513333996456,
+  "metadata": {
+   "sourcePlugin": "zen",
+   "role": "silence"
+  }
+ },
+ {
+  "id": "zen:bell:12",
+  "type": "bell",
+  "startTime": 157.28637979721097,
+  "duration": 17.28,
+  "instrument": "bowl",
+  "pitch": 56,
+  "velocity": 0.43933404308081575,
+  "pan": -0.19245733548421412,
+  "parameters": {
+   "attack": 0.13199999999999998,
+   "detune": 4,
+   "exciteBus": "drone",
+   "excite": 0.355
+  },
+  "metadata": {
+   "sourcePlugin": "zen",
+   "role": "bowl",
+   "section": ""
+  }
+ },
+ {
+  "id": "zen:sil:13",
+  "type": "silence",
+  "startTime": 157.28637979721097,
+  "duration": 17.14926656353898,
+  "metadata": {
+   "sourcePlugin": "zen",
+   "role": "silence"
+  }
+ },
+ {
+  "id": "zen:bell:14",
+  "type": "bell",
+  "startTime": 174.43564636074996,
+  "duration": 17.28,
+  "instrument": "bowl",
+  "pitch": 56,
+  "velocity": 0.40773582989359297,
+  "pan": -0.1328433321462944,
+  "parameters": {
+   "attack": 0.13199999999999998,
+   "detune": 4,
+   "exciteBus": "drone",
+   "excite": 0.355
+  },
+  "metadata": {
+   "sourcePlugin": "zen",
+   "role": "bowl",
+   "section": ""
+  }
+ },
+ {
+  "id": "zen:sil:15",
+  "type": "silence",
+  "startTime": 174.43564636074996,
+  "duration": 20.713955120615818,
+  "metadata": {
+   "sourcePlugin": "zen",
+   "role": "silence"
+  }
+ },
+ {
+  "id": "zen:bell:16",
+  "type": "bell",
+  "startTime": 195.14960148136578,
+  "duration": 17.28,
+  "instrument": "bowl",
+  "pitch": 61,
+  "velocity": 0.4268484860601999,
+  "pan": 0.14818863780703395,
+  "parameters": {
+   "attack": 0.13199999999999998,
+   "detune": 4,
+   "exciteBus": "drone",
+   "excite": 0.355
+  },
+  "metadata": {
+   "sourcePlugin": "zen",
+   "role": "bowl",
+   "section": ""
+  }
+ },
+ {
+  "id": "zen:sil:17",
+  "type": "silence",
+  "startTime": 195.14960148136578,
+  "duration": 15.319370945177031,
+  "metadata": {
+   "sourcePlugin": "zen",
+   "role": "silence"
+  }
+ },
+ {
+  "id": "zen:bell:18",
+  "type": "bell",
+  "startTime": 219.3689724265424,
+  "duration": 17.28,
+  "instrument": "bowl",
+  "pitch": 56,
+  "velocity": 0.44845727004030567,
+  "pan": -0.07019146850798279,
+  "parameters": {
+   "attack": 0.13199999999999998,
+   "detune": 4,
+   "exciteBus": "drone",
+   "excite": 0.355
+  },
+  "metadata": {
+   "sourcePlugin": "zen",
+   "role": "bowl",
+   "section": ""
+  }
+ },
+ {
+  "id": "zen:sil:19",
+  "type": "silence",
+  "startTime": 219.3689724265424,
+  "duration": 9.828044645527786,
+  "metadata": {
+   "sourcePlugin": "zen",
+   "role": "silence"
+  }
+ },
+ {
+  "id": "zen:bell:20",
+  "type": "bell",
+  "startTime": 229.1970170720702,
+  "duration": 12.8,
+  "instrument": "bell",
+  "pitch": 80,
+  "velocity": 0.4277408993754073,
+  "pan": 0.0987445088243112,
+  "parameters": {
+   "attack": 0.13199999999999998,
+   "detune": 4,
+   "exciteBus": "drone",
+   "excite": 0.355
+  },
+  "metadata": {
+   "sourcePlugin": "zen",
+   "role": "bell",
+   "section": ""
+  }
+ },
+ {
+  "id": "zen:sil:21",
+  "type": "silence",
+  "startTime": 229.1970170720702,
+  "duration": 24.41474249163664,
+  "metadata": {
+   "sourcePlugin": "zen",
+   "role": "silence"
+  }
+ },
+ {
+  "id": "zen:harm:0",
+  "type": "harmonic",
+  "startTime": 8,
+  "duration": 4.544135255040601,
+  "instrument": "pluck",
+  "pitch": 79,
+  "velocity": 0.2534121986108671,
+  "pan": -0.15589087770786136,
+  "parameters": {
+   "bright": 0.53
+  },
+  "metadata": {
+   "sourcePlugin": "zen",
+   "role": "harmonic"
+  }
+ },
+ {
+  "id": "zen:harm:1",
+  "type": "harmonic",
+  "startTime": 8.826198473200202,
+  "duration": 4.936027852119878,
+  "instrument": "pluck",
+  "pitch": 74,
+  "velocity": 0.2534121986108671,
+  "pan": -0.04440083389636129,
+  "parameters": {
+   "bright": 0.53
+  },
+  "metadata": {
+   "sourcePlugin": "zen",
+   "role": "harmonic"
+  }
+ },
+ {
+  "id": "zen:harm:2",
+  "type": "harmonic",
+  "startTime": 9.96011790074408,
+  "duration": 3.33413673134055,
+  "instrument": "pluck",
+  "pitch": 81,
+  "velocity": 0.2534121986108671,
+  "pan": -0.1680592558113858,
+  "parameters": {
+   "bright": 0.53
+  },
+  "metadata": {
+   "sourcePlugin": "zen",
+   "role": "harmonic"
+  }
+ },
+ {
+  "id": "zen:harm:3",
+  "type": "harmonic",
+  "startTime": 11.284674465097487,
+  "duration": 5.3393845919054,
+  "instrument": "pluck",
+  "pitch": 72,
+  "velocity": 0.2534121986108671,
+  "pan": 0.20183613302651793,
+  "parameters": {
+   "bright": 0.53
+  },
+  "metadata": {
+   "sourcePlugin": "zen",
+   "role": "harmonic"
+  }
+ },
+ {
+  "id": "zen:harm:4",
+  "type": "harmonic",
+  "startTime": 64.06917436264106,
+  "duration": 3.483302663313225,
+  "instrument": "pluck",
+  "pitch": 74,
+  "velocity": 0.2552760668801274,
+  "pan": 0.18816065904684365,
+  "parameters": {
+   "bright": 0.53
+  },
+  "metadata": {
+   "sourcePlugin": "zen",
+   "role": "harmonic"
+  }
+ },
+ {
+  "id": "zen:harm:5",
+  "type": "harmonic",
+  "startTime": 64.89656566029066,
+  "duration": 6.828061944805086,
+  "instrument": "pluck",
+  "pitch": 72,
+  "velocity": 0.2552760668801274,
+  "pan": -0.159697444178164,
+  "parameters": {
+   "bright": 0.53
+  },
+  "metadata": {
+   "sourcePlugin": "zen",
+   "role": "harmonic"
+  }
+ },
+ {
+  "id": "zen:harm:6",
+  "type": "harmonic",
+  "startTime": 65.92054116373532,
+  "duration": 6.977390716201626,
+  "instrument": "pluck",
+  "pitch": 67,
+  "velocity": 0.2552760668801274,
+  "pan": 0.02618561126291752,
+  "parameters": {
+   "bright": 0.53
+  },
+  "metadata": {
+   "sourcePlugin": "zen",
+   "role": "harmonic"
+  }
+ },
+ {
+  "id": "zen:harm:7",
+  "type": "harmonic",
+  "startTime": 112.8358782190003,
+  "duration": 5.486447348259389,
+  "instrument": "pluck",
+  "pitch": 67,
+  "velocity": 0.2720859934658656,
+  "pan": 0.17554514738731086,
+  "parameters": {
+   "bright": 0.53
+  },
+  "metadata": {
+   "sourcePlugin": "zen",
+   "role": "harmonic"
+  }
+ },
+ {
+  "id": "zen:harm:8",
+  "type": "harmonic",
+  "startTime": 113.33989329227364,
+  "duration": 5.695535526960157,
+  "instrument": "pluck",
+  "pitch": 81,
+  "velocity": 0.2720859934658656,
+  "pan": 0.1103979405015707,
+  "parameters": {
+   "bright": 0.53
+  },
+  "metadata": {
+   "sourcePlugin": "zen",
+   "role": "harmonic"
+  }
+ },
+ {
+  "id": "zen:harm:9",
+  "type": "harmonic",
+  "startTime": 141.0125567519141,
+  "duration": 3.3944977906066924,
+  "instrument": "pluck",
+  "pitch": 82,
+  "velocity": 0.2974843639314918,
+  "pan": -0.12226533505599946,
+  "parameters": {
+   "bright": 0.53
+  },
+  "metadata": {
+   "sourcePlugin": "zen",
+   "role": "harmonic"
+  }
+ },
+ {
+  "id": "zen:harm:10",
+  "type": "harmonic",
+  "startTime": 141.87949316436774,
+  "duration": 4.975926648941822,
+  "instrument": "pluck",
+  "pitch": 68,
+  "velocity": 0.2974843639314918,
+  "pan": -0.2276743883267045,
+  "parameters": {
+   "bright": 0.53
+  },
+  "metadata": {
+   "sourcePlugin": "zen",
+   "role": "harmonic"
+  }
+ },
+ {
+  "id": "zen:harm:11",
+  "type": "harmonic",
+  "startTime": 190.63679408599043,
+  "duration": 5.103666009847075,
+  "instrument": "pluck",
+  "pitch": 68,
+  "velocity": 0.26358295333491694,
+  "pan": -0.23547868966124952,
+  "parameters": {
+   "bright": 0.53
+  },
+  "metadata": {
+   "sourcePlugin": "zen",
+   "role": "harmonic"
+  }
+ },
+ {
+  "id": "zen:harm:12",
+  "type": "harmonic",
+  "startTime": 191.2715342115646,
+  "duration": 5.085645648301579,
+  "instrument": "pluck",
+  "pitch": 82,
+  "velocity": 0.26358295333491694,
+  "pan": -0.22108212939929217,
+  "parameters": {
+   "bright": 0.53
+  },
+  "metadata": {
+   "sourcePlugin": "zen",
+   "role": "harmonic"
+  }
+ },
+ {
+  "id": "zen:harm:13",
+  "type": "harmonic",
+  "startTime": 191.82442941293473,
+  "duration": 5.015454514068551,
+  "instrument": "pluck",
+  "pitch": 80,
+  "velocity": 0.26358295333491694,
+  "pan": -0.04668113065417856,
+  "parameters": {
+   "bright": 0.53
+  },
+  "metadata": {
+   "sourcePlugin": "zen",
+   "role": "harmonic"
+  }
+ },
+ {
+  "id": "zen:harm:14",
+  "type": "harmonic",
+  "startTime": 216.15004495133766,
+  "duration": 4.7877888538641855,
+  "instrument": "pluck",
+  "pitch": 80,
+  "velocity": 0.29798914611017674,
+  "pan": 0.04092330194544047,
+  "parameters": {
+   "bright": 0.53
+  },
+  "metadata": {
+   "sourcePlugin": "zen",
+   "role": "harmonic"
+  }
+ },
+ {
+  "id": "zen:harm:15",
+  "type": "harmonic",
+  "startTime": 217.2438966560469,
+  "duration": 4.57053866807837,
+  "instrument": "pluck",
+  "pitch": 80,
+  "velocity": 0.29798914611017674,
+  "pan": 0.1868827275466174,
+  "parameters": {
+   "bright": 0.53
+  },
+  "metadata": {
+   "sourcePlugin": "zen",
+   "role": "harmonic"
+  }
+ },
+ {
+  "id": "zen:tex:0",
+  "type": "texture",
+  "startTime": 0,
+  "duration": 70.38296972103417,
+  "instrument": "noise-texture",
+  "velocity": 0.268,
+  "pan": 0.02173231672495604,
+  "parameters": {
+   "texture": "air",
+   "movement": 0.4
+  },
+  "metadata": {
+   "sourcePlugin": "zen",
+   "role": "texture"
+  }
+ },
+ {
+  "id": "zen:tex:1",
+  "type": "water",
+  "startTime": 52.78722729077563,
+  "duration": 76.14547995552421,
+  "instrument": "noise-texture",
+  "velocity": 0.268,
+  "pan": -0.19159737899899484,
+  "parameters": {
+   "texture": "water",
+   "movement": 0.4
+  },
+  "metadata": {
+   "sourcePlugin": "zen",
+   "role": "texture"
+  }
+ },
+ {
+  "id": "zen:tex:2",
+  "type": "water",
+  "startTime": 109.89633725741879,
+  "duration": 90.96178893931211,
+  "instrument": "noise-texture",
+  "velocity": 0.268,
+  "pan": -0.10421899473294616,
+  "parameters": {
+   "texture": "water",
+   "movement": 0.4
+  },
+  "metadata": {
+   "sourcePlugin": "zen",
+   "role": "texture"
+  }
+ },
+ {
+  "id": "zen:tex:3",
+  "type": "texture",
+  "startTime": 178.11767896190287,
+  "duration": 63.0545920142904,
+  "instrument": "noise-texture",
+  "velocity": 0.268,
+  "pan": -0.17291139801964164,
+  "parameters": {
+   "texture": "air",
+   "movement": 0.4
+  },
+  "metadata": {
+   "sourcePlugin": "zen",
+   "role": "texture"
+  }
+ },
+ {
+  "id": "zen:tex:4",
+  "type": "texture",
+  "startTime": 225.40862297262066,
+  "duration": 59.12260619010777,
+  "instrument": "noise-texture",
+  "velocity": 0.268,
+  "pan": -0.09598964871838689,
+  "parameters": {
+   "texture": "room",
+   "movement": 0.4
+  },
+  "metadata": {
+   "sourcePlugin": "zen",
+   "role": "texture"
+  }
+ }
+]

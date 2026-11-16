@@ -62,7 +62,7 @@ class DeepHouseStyle implements StyleInstance {
 
   constructor(seed: string | number, parameters: Record<string, ParamValue>) {
     this.p = { ...parameters };
-    this.master = new SeededRandom(`${seed}::deephouse`);
+    this.master = SeededRandom.forStyle(seed, 'deephouse');
     this.humRng = this.master.fork('humanize');
     this.beatModel = new BeatTimeModel(() => this.num('bpm', 121));
     this.arc = new MacroArc(

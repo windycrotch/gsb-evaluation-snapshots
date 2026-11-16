@@ -529,6 +529,12 @@ rng.fork("drums")
 
 这样增加一个随机算法不会导致整个音乐结果不可预测地变化。
 
+实现约定（当前代码）：引擎把 `${userSeed}|<styleId>|v<version>` 作为唯一种子串
+交给风格；风格根 RNG 统一由 `SeededRandom.forStyle(seed, styleId)` 建立，
+之后只能 `fork(tag)` 分用途派生，禁止在风格内手工拼接 `::风格名` 后缀，
+也禁止直接使用 `Math.random()`。Lofi / Zen 改造前后的逐字段一致性由
+`tests/core/StyleSeeding.test.ts` 中的改造前黄金快照锁定。
+
 ---
 
 # 14. Lofi Plugin

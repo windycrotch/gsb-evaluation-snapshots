@@ -20,8 +20,15 @@ Beat-based lofi / chillhop / jazzhop generator.
 
 Same seed + parameters + plugin version → identical event sequence,
 independently of how the timeline is chunked into generation windows.
-RNG streams are forked per generator (`arrangement`, `bar:N`, `humanize`...),
-so tweaks never reshuffle unrelated parts.
+
+The style's only seed input is the engine-provided string
+`${userSeed}|lofi|v${version}`. It builds its root RNG once with
+`SeededRandom.forStyle(seed, LOFI_STYLE_ID)` and never hand-concatenates a
+`::lofi` suffix itself. Every purpose then gets an independent stream via
+`fork(tag)` — `arrangement` (which forks `cycle:N`), `section:N`,
+`bar:N` (harmony rhythm / bass / drums / melody), `humanize`, `arc` — so
+call-order changes and window chunking can never reshuffle unrelated parts.
+`Math.random()` is forbidden inside the style.
 
 ## Example
 

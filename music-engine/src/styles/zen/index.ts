@@ -1,10 +1,10 @@
 import type { StylePlugin } from '../../core/types';
-import { ZenStyle } from './ZenStyle';
+import { ZenStyle, ZEN_STYLE_ID } from './ZenStyle';
 import { zenParameters } from './parameters';
 import { zenPresets } from './presets';
 
 export const zenPlugin: StylePlugin = {
-  id: 'zen',
+  id: ZEN_STYLE_ID,
   name: 'Zen',
   version: '1.0.0',
   description: '禅意声音景观：长音 Drone、颂钵钟铃、大量留白与缓慢呼吸的空间感。',

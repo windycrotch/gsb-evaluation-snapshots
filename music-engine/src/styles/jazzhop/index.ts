@@ -45,7 +45,7 @@ class JazzhopStyle implements StyleInstance {
 
   constructor(seed: string | number, parameters: Record<string, ParamValue>) {
     this.p = { ...parameters };
-    this.master = new SeededRandom(`${seed}::jazzhop`);
+    this.master = SeededRandom.forStyle(seed, 'jazzhop');
     this.humRng = this.master.fork('humanize');
     this.beatModel = new BeatTimeModel(() => this.num('bpm', 88));
     this.arc = new MacroArc(

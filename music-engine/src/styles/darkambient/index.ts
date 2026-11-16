@@ -34,7 +34,7 @@ class DarkAmbientStyle implements StyleInstance {
 
   constructor(seed: string | number, parameters: Record<string, ParamValue>) {
     this.p = { ...parameters };
-    this.master = new SeededRandom(`${seed}::darkambient`);
+    this.master = SeededRandom.forStyle(seed, 'darkambient');
     this.root = 26 + this.master.fork('root').int(0, 6); // D0–A0 region
     this.droneRng = this.master.fork('drone');
     this.hitRng = this.master.fork('hits');

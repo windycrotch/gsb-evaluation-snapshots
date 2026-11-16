@@ -27,6 +27,13 @@ Free-time ambient / meditation soundscape generator — deliberately **not**
 Same seed + parameters + plugin version → identical event sequence,
 independently of window chunking (lane cursors advance strictly by time).
 
+The style's only seed input is the engine-provided string
+`${userSeed}|zen|v${version}`. It builds its root RNG once with
+`SeededRandom.forStyle(seed, ZEN_STYLE_ID)` and never hand-concatenates a
+`::zen` suffix itself. Each lane forks an independent stream — `breath`,
+`field`, `arc`, `drone`, `bells`, `harmonics`, `texture` — so no lane's call
+order can perturb another. `Math.random()` is forbidden inside the style.
+
 ## Example
 
 ```ts

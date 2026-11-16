@@ -64,7 +64,7 @@ class NeoClassicalStyle implements StyleInstance {
 
   constructor(seed: string | number, parameters: Record<string, ParamValue>) {
     this.p = { ...parameters };
-    this.master = new SeededRandom(`${seed}::neoclassical`);
+    this.master = SeededRandom.forStyle(seed, 'neoclassical');
     this.humRng = this.master.fork('humanize');
     this.beatModel = new BeatTimeModel(() => this.num('bpm', 64));
     this.arc = new MacroArc(

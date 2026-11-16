@@ -41,7 +41,7 @@ class JapaneseStyle implements StyleInstance {
 
   constructor(seed: string | number, parameters: Record<string, ParamValue>) {
     this.p = { ...parameters };
-    this.master = new SeededRandom(`${seed}::japanese`);
+    this.master = SeededRandom.forStyle(seed, 'japanese');
     this.root = 38 + this.master.fork('root').int(0, 5);
     this.kotoRng = this.master.fork('koto');
     this.bellRng = this.master.fork('bells');

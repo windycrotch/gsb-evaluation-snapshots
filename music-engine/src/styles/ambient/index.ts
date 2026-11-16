@@ -33,7 +33,7 @@ class AmbientStyle implements StyleInstance {
 
   constructor(seed: string | number, parameters: Record<string, ParamValue>) {
     this.p = { ...parameters };
-    this.master = new SeededRandom(`${seed}::ambient`);
+    this.master = SeededRandom.forStyle(seed, 'ambient');
     this.plucks = new HarmonicGenerator(this.master);
     this.textures = new TextureGenerator(this.master);
     this.cloudRng = this.master.fork('clouds');
