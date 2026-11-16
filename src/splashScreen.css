@@ -37,7 +37,7 @@
 			content: "v ";
 		}
 	}
-	button {
+	#splashScreen-start {
 		margin-top: 48px;
 		padding: 10px 16px;
 		font: 16px var( --gsui-font-monospace );
@@ -48,6 +48,67 @@
 		&::before { content: "downloading..." }
 		[ data-loaded ] &::before { content: "[ click to start ]" }
 		[ data-starting ] &::before { content: "starting..." }
+	}
+	#splashScreen-steps {
+		display: none;
+		margin: 0;
+		padding: 0;
+		list-style: none;
+		font: 14px var( --gsui-font-monospace );
+
+		[ data-starting ] & {
+			display: flex;
+			flex-direction: column;
+			gap: 4px;
+		}
+		li {
+			opacity: .35;
+
+			&::before { content: "· "; }
+			&[ data-state="running" ] { opacity: 1; }
+			&[ data-state="running" ]::before { content: "» "; }
+			&[ data-state="done" ] { opacity: .75; }
+			&[ data-state="done" ]::before { content: "✓ "; color: #7d7; }
+			&[ data-state="error" ] { opacity: 1; color: #f77; }
+			&[ data-state="error" ]::before { content: "✗ "; }
+		}
+	}
+	#splashScreen-status {
+		font: 13px var( --gsui-font-monospace );
+		opacity: .7;
+
+		&:empty {
+			display: none;
+		}
+	}
+	#splashScreen-error {
+		display: none;
+		align-items: center;
+		flex-direction: column;
+		gap: 8px;
+
+		[ data-error ] & {
+			display: flex;
+		}
+	}
+	#splashScreen-errorMsg {
+		font: 14px var( --gsui-font-monospace );
+		color: #f77;
+	}
+	#splashScreen-retry {
+		padding: 8px 14px;
+		font: 14px var( --gsui-font-monospace );
+	}
+	#splashScreen-swWarning {
+		display: none;
+		max-width: 480px;
+		font: 12px var( --gsui-font-monospace );
+		color: #fc6;
+		text-align: center;
+
+		[ data-sw-warning ] & {
+			display: block;
+		}
 	}
 	[ data-alert ] {
 		display: none;
