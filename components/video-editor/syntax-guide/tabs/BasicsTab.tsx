@@ -1,0 +1,380 @@
+"use client";
+
+import { CodeExample, Section, DirectiveDoc } from "../components";
+
+export function BasicsTab() {
+  return (
+    <>
+      {/* Overview */}
+      <Section title="Overview">
+        <div className="bg-blue-50 dark:bg-blue-950/20 border border-blue-200 dark:border-blue-900 rounded-lg p-3 space-y-2">
+          <p className="text-xs text-gray-700 dark:text-neutral-300 leading-relaxed">
+            Create video scenes using markdown-like syntax. Each scene starts
+            with{" "}
+            <code className="text-pink-600 dark:text-pink-400 font-mono bg-pink-100 dark:bg-pink-950/30 px-1 py-0.5 rounded">
+              !scene
+            </code>{" "}
+            (or{" "}
+            <code className="text-pink-600 dark:text-pink-400 font-mono bg-pink-100 dark:bg-pink-950/30 px-1 py-0.5 rounded">
+              !slide
+            </code>
+            ,{" "}
+            <code className="text-pink-600 dark:text-pink-400 font-mono bg-pink-100 dark:bg-pink-950/30 px-1 py-0.5 rounded">
+              !frame
+            </code>
+            ) and can contain text, code, terminal, charts, and more.
+          </p>
+          <p className="text-xs text-gray-600 dark:text-neutral-400 leading-relaxed">
+            <strong className="text-gray-900 dark:text-white">Tip:</strong>{" "}
+            Alternative keywords are available to avoid conflicts with other
+            markdown parsers. Use{" "}
+            <code className="text-cyan-600 dark:text-cyan-400 font-mono bg-cyan-100 dark:bg-cyan-950/30 px-1 py-0.5 rounded">
+              !slide
+            </code>{" "}
+            instead of{" "}
+            <code className="text-cyan-600 dark:text-cyan-400 font-mono bg-cyan-100 dark:bg-cyan-950/30 px-1 py-0.5 rounded">
+              !scene
+            </code>
+            ,{" "}
+            <code className="text-cyan-600 dark:text-cyan-400 font-mono bg-cyan-100 dark:bg-cyan-950/30 px-1 py-0.5 rounded">
+              !heading
+            </code>{" "}
+            instead of{" "}
+            <code className="text-cyan-600 dark:text-cyan-400 font-mono bg-cyan-100 dark:bg-cyan-950/30 px-1 py-0.5 rounded">
+              !text
+            </code>
+            , etc.
+          </p>
+        </div>
+      </Section>
+
+      {/* Basic Scene */}
+      <Section title="Scene Structure">
+        <CodeExample
+          title="scene-structure.md"
+          code={`!scene
+!text
+Your content here
+animation: fadeIn
+size: lg
+
+!duration 3s
+!background #3b82f6
+!transition fade
+
+---`}
+        />
+      </Section>
+
+      {/* Scene Directives */}
+      <Section title="Core Directives">
+        <div className="space-y-3">
+          <DirectiveDoc
+            directive="!scene"
+            description="Starts a new scene block"
+            options={["!scene", "!slide", "!frame", "!section", "!page"]}
+          />
+          <DirectiveDoc
+            directive="!duration Xs"
+            description="Scene duration in seconds"
+            options={["!duration", "!time", "!length"]}
+          />
+          <DirectiveDoc
+            directive="!background"
+            description="Background color or gradient"
+            options={[
+              "!background",
+              "!bg",
+              "!color",
+              "#3b82f6",
+              "linear-gradient(...)",
+            ]}
+          />
+          <DirectiveDoc
+            directive="!transition"
+            description="Transition effect"
+            options={[
+              "!transition",
+              "!trans",
+              "!effect",
+              "fade",
+              "slide",
+              "wipe",
+              "zoom",
+              "magic",
+              "none",
+            ]}
+          />
+          <DirectiveDoc
+            directive="!chapter"
+            description='Chapter marker: !chapter "Introduction"'
+          />
+        </div>
+      </Section>
+
+      {/* Text Scenes */}
+      <Section title="Text Scenes">
+        <CodeExample
+          title="text-scene.md"
+          code={`!scene
+!text
+Hello World!
+animation: bounceIn
+size: 2xl
+color: #ffffff
+fontFamily: serif
+
+!duration 3s
+!background #8b5cf6`}
+        />
+        <CodeExample
+          title="multi-line-text.md"
+          code={`!scene
+!text
+Multi-Line Text
+Now you can create
+multiple lines in one slide
+animation: slideUp
+size: lg
+fontFamily: sans
+
+!duration 4s
+!background #3b82f6`}
+        />
+        <div className="space-y-2 mt-3">
+          <DirectiveDoc
+            directive="!text"
+            description="Text content directive"
+            options={[
+              "!text",
+              "!heading",
+              "!title",
+              "!h1",
+              "!h2",
+              "!paragraph",
+              "!p",
+            ]}
+          />
+          <DirectiveDoc
+            directive="animation:"
+            description="Text animation"
+            options={[
+              "fadeIn",
+              "slideUp",
+              "slideDown",
+              "bounceIn",
+              "typewriter",
+            ]}
+          />
+          <DirectiveDoc
+            directive="size:"
+            description="Text size"
+            options={["sm", "md", "lg", "xl", "2xl"]}
+          />
+          <DirectiveDoc
+            directive="color:"
+            description="Text color (hex)"
+            options={["#ffffff", "#000000", "#3b82f6"]}
+          />
+          <DirectiveDoc
+            directive="fontFamily:"
+            description="Text font family"
+            options={["serif", "sans", "mono", "display"]}
+          />
+        </div>
+        <p className="text-xs text-muted-foreground mt-2">
+          <strong>Multi-line support:</strong> Use line breaks in your text to
+          create multiple lines. Each line will be rendered on a separate line
+          in the slide.
+        </p>
+      </Section>
+
+      {/* Code Scenes */}
+      <Section title="Code Scenes">
+        <CodeExample
+          title="code-scene.md"
+          code={`!scene
+!code
+highlight: 2-4
+typing: true
+speed: 40
+fontSize: md
+fontFamily: jetbrains
+\`\`\`typescript
+const msg = "Hello"
+console.log(msg)
+\`\`\`
+
+!duration 5s
+!background #1e1e2e`}
+        />
+        <CodeExample
+          title="code-customization.md"
+          code={`!scene
+!code
+fontSize: lg
+fontFamily: fira
+height: 400
+width: 600
+typing: true
+\`\`\`javascript
+function createVideo(markdown) {
+  return renderToMP4(markdown);
+}
+\`\`\`
+
+!duration 4s
+!background #1e1e2e`}
+        />
+        <div className="space-y-2 mt-3">
+          <DirectiveDoc
+            directive="!code"
+            description="Code block directive"
+            options={["!code", "!snippet", "!block", "!codeblock", "!syntax"]}
+          />
+          <DirectiveDoc
+            directive="highlight:"
+            description="Lines to highlight"
+            options={["2", "1-3", "1,3,5"]}
+          />
+          <DirectiveDoc
+            directive="typing: true"
+            description="Enable typing animation"
+          />
+          <DirectiveDoc
+            directive="speed: 40"
+            description="Typing speed (chars/sec)"
+          />
+          <DirectiveDoc
+            directive="fontSize:"
+            description="Code font size"
+            options={["xs", "sm", "md", "lg"]}
+          />
+          <DirectiveDoc
+            directive="fontFamily:"
+            description="Code font family"
+            options={[
+              "mono",
+              "jetbrains",
+              "fira",
+              "source",
+              "inconsolata",
+              "courier",
+            ]}
+          />
+          <DirectiveDoc
+            directive="height:"
+            description="Code block height in pixels"
+            options={["300", "400", "500"]}
+          />
+          <DirectiveDoc
+            directive="width:"
+            description="Code block width in pixels"
+            options={["500", "600", "800"]}
+          />
+        </div>
+      </Section>
+
+      {/* In-Scene Timelines */}
+      <Section title="In-Scene Timelines">
+        <CodeExample
+          title="timeline-elements.md"
+          code={`!scene
+!text "First line" at:0s duration:1.5s
+!text "Second line" at:1.2s duration:2s
+!emoji 🎯 at:2.5s duration:1s
+
+!duration 4s
+!background #3b82f6`}
+        />
+        <div className="space-y-2 mt-3">
+          <DirectiveDoc
+            directive="at:"
+            description="Element start time in seconds"
+            options={["0s", "1.5s", "2.2s"]}
+          />
+          <DirectiveDoc
+            directive="duration:"
+            description="Element duration in seconds"
+            options={["1s", "1.5s", "2s"]}
+          />
+        </div>
+        <p className="text-xs text-muted-foreground mt-2">
+          <strong>Timeline Control:</strong> Use{" "}
+          <code className="text-cyan-600 dark:text-cyan-400 font-mono bg-cyan-100 dark:bg-cyan-950/30 px-1 py-0.5 rounded">
+            at:
+          </code>{" "}
+          and{" "}
+          <code className="text-cyan-600 dark:text-cyan-400 font-mono bg-cyan-100 dark:bg-cyan-950/30 px-1 py-0.5 rounded">
+            duration:
+          </code>{" "}
+          to precisely control when elements appear and disappear within a
+          scene.
+        </p>
+      </Section>
+
+      {/* Staggered Animations */}
+      <Section title="Staggered Animations">
+        <CodeExample
+          title="stagger-animation.md"
+          code={`!scene
+!text
+Line 1
+Line 2
+Line 3
+animation: slideUp
+stagger: 0.3s
+
+!duration 3s
+!background #8b5cf6`}
+        />
+        <div className="space-y-2 mt-3">
+          <DirectiveDoc
+            directive="stagger:"
+            description="Delay between animated lines"
+            options={["0.2s", "0.3s", "0.5s"]}
+          />
+        </div>
+        <p className="text-xs text-muted-foreground mt-2">
+          <strong>Sequential Animation:</strong> Each line animates with a
+          delay, creating a cascading effect. Perfect for lists and multi-line
+          text.
+        </p>
+      </Section>
+
+      {/* Image Scenes */}
+      <Section title="Image Scenes">
+        <CodeExample
+          title="image-scene.md"
+          code={`!scene
+!image src:https://example.com/photo.jpg fit:cover
+
+!duration 4s
+!background #1e1e2e`}
+        />
+        <div className="space-y-2 mt-3">
+          <DirectiveDoc
+            directive="!image"
+            description="Image scene directive"
+            options={["!image", "!img", "!photo", "!picture"]}
+          />
+          <DirectiveDoc directive="src:" description="Image URL (required)" />
+          <DirectiveDoc
+            directive="fit:"
+            description="Image fit mode"
+            options={["cover", "contain", "fill"]}
+          />
+          <DirectiveDoc
+            directive="position:"
+            description="Image position"
+            options={["center", "top", "bottom", "left", "right"]}
+          />
+          <DirectiveDoc
+            directive='alt:"text"'
+            description="Alt text for accessibility"
+          />
+        </div>
+      </Section>
+    </>
+  );
+}

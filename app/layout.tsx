@@ -1,0 +1,133 @@
+import type React from "react";
+import type { Metadata, Viewport } from "next";
+import { Inter, Geist_Mono, Playfair_Display } from "next/font/google";
+import "./globals.css";
+import { ThemeProvider } from "@components/theme-provider";
+
+const inter = Inter({ subsets: ["latin"], variable: "--font-inter" });
+const geistMono = Geist_Mono({
+  subsets: ["latin"],
+  variable: "--font-geist-mono",
+});
+const playfair = Playfair_Display({
+  subsets: ["latin"],
+  variable: "--font-playfair",
+});
+
+const siteUrl =
+  process.env.NEXT_PUBLIC_SITE_URL || "https://markdownvideo.avikmukherjee.com";
+const siteName = "Markdown Video";
+const title = "Markdown Video - Create Stunning Videos with Markdown";
+const description =
+  "Transform simple markdown syntax into stunning animated videos. Perfect for tutorials, demos, and presentations. No timeline, no keyframes - just write.";
+
+export const metadata: Metadata = {
+  metadataBase: new URL(siteUrl),
+  title: {
+    default: title,
+    template: `%s | ${siteName}`,
+  },
+  description,
+  applicationName: siteName,
+  keywords: [
+    "markdown",
+    "video",
+    "animation",
+    "tutorial",
+    "demo",
+    "presentation",
+    "code video",
+    "developer tools",
+    "video editor",
+    "markdown to video",
+    "animated code",
+    "terminal animation",
+  ],
+  authors: [{ name: siteName }],
+  creator: siteName,
+  publisher: siteName,
+  formatDetection: {
+    email: false,
+    address: false,
+    telephone: false,
+  },
+  openGraph: {
+    type: "website",
+    locale: "en_US",
+    url: siteUrl,
+    siteName,
+    title,
+    description,
+    images: [
+      {
+        url: "/og-image.png",
+        width: 1200,
+        height: 630,
+        alt: "Markdown Video - Create videos with Markdown syntax",
+        type: "image/png",
+      },
+    ],
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "Avik Mukherjee",
+    description:
+      "Avik Mukherjee is a developer who loves to code and build things.",
+    images: ["https://markdownvideo.avikmukherjee.com/og-image.png"],
+    creator: "@avikm744",
+    site: "@avikm744",
+    siteId: "@avikm744",
+  },
+  alternates: {
+    canonical: "https://markdownvideo.avikmukherjee.com",
+  },
+  robots: {
+    index: true,
+    follow: true,
+    googleBot: {
+      index: true,
+      follow: true,
+      "max-video-preview": -1,
+      "max-image-preview": "large",
+      "max-snippet": -1,
+    },
+  },
+  icons: {
+    icon: [
+      { url: "/favicon.ico", sizes: "any" },
+      { url: "/icon.png", type: "image/png" },
+    ],
+    shortcut: "/icon.png",
+    apple: "/icon.png",
+  },
+  manifest: "/site.webmanifest",
+  category: "technology",
+};
+
+export const viewport: Viewport = {
+  themeColor: [
+    { media: "(prefers-color-scheme: light)", color: "#ffffff" },
+    { media: "(prefers-color-scheme: dark)", color: "#0a0a0f" },
+  ],
+  width: "device-width",
+  initialScale: 1,
+  maximumScale: 5,
+};
+
+export default function RootLayout({
+  children,
+}: Readonly<{
+  children: React.ReactNode;
+}>) {
+  return (
+    <html lang="en" suppressHydrationWarning>
+      <body
+        className={`${inter.variable} ${geistMono.variable} ${playfair.variable} font-sans antialiased`}
+      >
+        <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
+          {children}
+        </ThemeProvider>
+      </body>
+    </html>
+  );
+}
