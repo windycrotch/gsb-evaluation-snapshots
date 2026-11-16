@@ -135,7 +135,18 @@ function setKeyframe() {
 }
 
 function shiftKeyframes() {
-    var shiftBy = parseInt($('#shift-by-time').val());
+    var shiftInput = $('#shift-by-time').val();
+    var shiftInputStr = (shiftInput === undefined || shiftInput === null) ? '' : String(shiftInput).trim();
+    if (!/^[+-]?\d+$/.test(shiftInputStr)) {
+        alert('Shift time must be a whole number. No keyframes were shifted.');
+        log('Shift keyframes cancelled: "' + shiftInputStr + '" is not a valid integer', 'warning');
+        return;
+    }
+    var shiftBy = parseInt(shiftInputStr, 10);
+    if (shiftBy == 0) {
+        log('Shift keyframes by 0: nothing to move');
+        return;
+    }
     var kfWhatNodes = $('#keyframe-what-nodes').val();
     var kfPosition = $('#kf-position').prop('checked');
     var kfRotation = $('#kf-rotation').prop('checked');
@@ -143,105 +154,165 @@ function shiftKeyframes() {
     var kfVisible = $('#kf-visible').prop('checked');
     var treeNode = $('#scene-tree').tree('getSelectedNode');
     var selectedNode = null;
-    var nodeNames = '"';
     if (treeNode != false)
         selectedNode = findNode(pcx, treeNode.id);
-    var newKeyframes = {};
-    for (var i = 0; i < pcx.keyframes.length; i++) {
-        var kf = pcx.keyframes[i];
-        var currentTime = kf.time;
-        var newTime = currentTime + shiftBy;
-        if (newTime < 0) {
-            log('The keyframe at time ' + currentTime + ' was moved to a negative time and was removed', 'warning');
-            pcx.keyframes.splice(i, 1);
-            i--;
-        }
-        if (newTime >= pcx.settings.length) {
-            log('The keyframe at time ' + currentTime + ' was moved to a time past the animation length', 'warning');
-        }
-        var newKF = {time: newTime, nodes: []};
-        if (kfWhatNodes == 'selected-node') {
-            var data = getKeyframeData(kf, selectedNode.id);
-            if (data == null)
-                return;
-            nodeNames += selectedNode.name + '" ';
-            var newData = {id: selectedNode.id};
-            if (kfPosition && data.pos)
-                newData.pos = JSON.parse(JSON.stringify(data.pos));
-            if (kfRotation && data.rot)
-                newData.rot = JSON.parse(JSON.stringify(data.rot));
-            if (kfScale && data.scale)
-                newData.scale = JSON.parse(JSON.stringify(data.scale));
-            if (kfVisible && data.vis)
-                newData.vis = JSON.parse(JSON.stringify(data.vis));
-            newKF.nodes.push(newData);
-        }
-        else {
-            if (kfWhatNodes == 'all-nodes')
-                selectedNode = findNode(pcx, 0);
-            traverseTree(pcx, function(node) {
-                var data = getKeyframeData(kf, node.id);
-                if (data == null)
-                    return;
-                nodeNames += node.name + '" ';
-                var newData = {id: node.id};
-                if (kfPosition && data.pos)
-                    newData.pos = JSON.parse(JSON.stringify(data.pos));
-                if (kfRotation && data.rot)
-                    newData.rot = JSON.parse(JSON.stringify(data.rot));
-                if (kfScale && data.scale)
-                    newData.scale = JSON.parse(JSON.stringify(data.scale));
-                if (kfVisible && data.vis)
-                    newData.vis = JSON.parse(JSON.stringify(data.vis));
-                newKF.nodes.push(newData);
-            }, selectedNode);
-        }
-        newKeyframes[currentTime.toString()] = newKF;
+    if (kfWhatNodes != 'all-nodes' && selectedNode == null) {
+        alert('Select a node to shift keyframes');
+        return;
+    }
+    var targetNodes = [];
+    if (kfWhatNodes == 'all-nodes') {
+        traverseTree(pcx, function(node) {
+            if (node.id != 0)
+                targetNodes.push(node);
+        });
+    }
+    else if (kfWhatNodes == 'selected-and-children') {
+        traverseTree(pcx, function(node) {
+            if (node.id != 0)
+                targetNodes.push(node);
+        }, selectedNode);
+    }
+    else if (selectedNode.id != 0) {
+        targetNodes.push(selectedNode);
+    }
+    if (targetNodes.length == 0) {
+        alert('Select a node to shift keyframes');
+        return;
+    }
+
+    var cloneValue = function(value) {
+        return JSON.parse(JSON.stringify(value));
     };
-    Object.keys(newKeyframes).forEach(function(key) {
-        var oldTime = parseInt(key);
-        var newKF = newKeyframes[key];
-        var oldKF = getKeyframe(pcx, oldTime);
-        newKF.nodes.forEach(function(node) {
-            var data = getKeyframeData(oldKF, node.id);
+    var nodeNames = [];
+    var moves = [];
+    pcx.keyframes.forEach(function(kf) {
+        if (!kf.nodes)
+            return;
+        var movedData = [];
+        targetNodes.forEach(function(node) {
+            var data = getKeyframeData(kf, node.id);
             if (data == null)
                 return;
-            if (kfPosition)
-                data.pos = undefined;
-            if (kfRotation)
-                data.rot = undefined;
-            if (kfScale)
-                data.scale = undefined;
-            if (kfVisible)
-                data.vis = undefined;
-        });
-    });
-    Object.keys(newKeyframes).forEach(function(key) {
-        var oldTime = parseInt(key);
-        var newKF = newKeyframes[key];
-        var existingKF = getKeyframe(pcx, newKF.time);
-        if (existingKF == null) {
-            existingKF = {time: newKF.time, nodes: []};
-            pcx.keyframes.push(existingKF);
-        }
-        newKF.nodes.forEach(function(node) {
-            var data = getKeyframeData(existingKF, node.id);
-            if (data == null) {
-                var data = {id: node.id};
-                existingKF.nodes.push(data);
+            var newData = {id: node.id};
+            var hasData = false;
+            if (kfPosition && data.pos !== undefined) {
+                newData.pos = cloneValue(data.pos);
+                hasData = true;
             }
-            if (kfPosition)
-                data.pos = node.pos;
-            if (kfRotation)
-                data.rot = node.rot;
-            if (kfScale)
-                data.scale = node.scale;
+            if (kfRotation && data.rot !== undefined) {
+                newData.rot = cloneValue(data.rot);
+                hasData = true;
+            }
+            if (kfScale && data.scale !== undefined) {
+                newData.scale = cloneValue(data.scale);
+                hasData = true;
+            }
+            if (kfVisible && data.vis !== undefined) {
+                newData.vis = data.vis;
+                hasData = true;
+            }
+            if (!hasData)
+                return;
+            if (nodeNames.indexOf(node.name) == -1)
+                nodeNames.push(node.name);
+            movedData.push({nodeId: node.id, source: data, data: newData});
+        });
+        if (movedData.length == 0)
+            return;
+        moves.push({
+            kf: kf,
+            oldTime: kf.time,
+            newTime: kf.time + shiftBy,
+            movedData: movedData
         });
     });
-    log('Shifted time for data for nodes ' + nodeNames);
-    cleanKeyframes(nodeNames);
+
+    if (moves.length == 0) {
+        log('No keyframe data for the selected nodes to shift', 'warning');
+        return;
+    }
+
+    // Out-of-range destinations: below 0 the data is dropped, past the length it is kept with a warning.
+    moves.forEach(function(move) {
+        move.removed = move.newTime < 0;
+        if (move.removed) {
+            log('The keyframe at time ' + move.oldTime + ' was moved to a negative time and was removed', 'warning');
+        }
+        else if (move.newTime >= pcx.settings.length) {
+            log('The keyframe at time ' + move.oldTime + ' was moved to a time past the animation length', 'warning');
+        }
+    });
+
+    // Snapshot then strip the moved data from its source keyframe so no keyframe is moved twice.
+    moves.forEach(function(move) {
+        move.movedData.forEach(function(entry) {
+            if (entry.data.pos !== undefined)
+                entry.source.pos = undefined;
+            if (entry.data.rot !== undefined)
+                entry.source.rot = undefined;
+            if (entry.data.scale !== undefined)
+                entry.source.scale = undefined;
+            if (entry.data.vis !== undefined)
+                entry.source.vis = undefined;
+        });
+    });
+
+    // Drop node entries emptied by the strip, then keyframes that have nothing left.
+    var affectedKeyframes = [];
+    moves.forEach(function(move) {
+        if (affectedKeyframes.indexOf(move.kf) == -1)
+            affectedKeyframes.push(move.kf);
+        for (var i = 0; i < move.kf.nodes.length; i++) {
+            var nodeData = move.kf.nodes[i];
+            if (nodeData.pos === undefined && nodeData.rot === undefined && nodeData.scale === undefined && nodeData.vis === undefined) {
+                move.kf.nodes.splice(i, 1);
+                i--;
+            }
+        }
+    });
+    affectedKeyframes.forEach(function(kf) {
+        if (kf.nodes.length == 0 && kf.cameraId === undefined) {
+            var index = pcx.keyframes.indexOf(kf);
+            if (index != -1)
+                pcx.keyframes.splice(index, 1);
+        }
+    });
+
+    // Move the snapshotted data to its new time, merging into any keyframe already there.
+    moves.forEach(function(move) {
+        if (move.removed)
+            return;
+        var destKF = getKeyframe(pcx, move.newTime);
+        if (destKF == null) {
+            destKF = {time: move.newTime, nodes: []};
+            pcx.keyframes.push(destKF);
+        }
+        move.movedData.forEach(function(entry) {
+            var destData = getKeyframeData(destKF, entry.nodeId);
+            if (destData == null) {
+                destData = {id: entry.nodeId};
+                destKF.nodes.push(destData);
+            }
+            if (entry.data.pos !== undefined)
+                destData.pos = entry.data.pos;
+            if (entry.data.rot !== undefined)
+                destData.rot = entry.data.rot;
+            if (entry.data.scale !== undefined)
+                destData.scale = entry.data.scale;
+            if (entry.data.vis !== undefined)
+                destData.vis = entry.data.vis;
+        });
+    });
+
+    var nodeNamesStr = '"';
+    nodeNames.forEach(function(name) {
+        nodeNamesStr += name + '" ';
+    });
+    log('Shifted time for data for nodes ' + nodeNamesStr);
     seekTime(pcx.time);
     updateTimeline();
+    viewportsNeedRender();
 }
 
 function getNodeData(node, kfPosition, kfRotation, kfScale, kfVisible) {
