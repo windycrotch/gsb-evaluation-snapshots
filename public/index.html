@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="theme-color" content="#efe9f1">
+<title>雨丝 Wet Denier Lab</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 2.5c3.6 4.9 6 8.3 6 11.5a6 6 0 0 1-12 0c0-3.2 2.4-6.6 6-11.5z' fill='%235d7bff'/%3E%3C/svg%3E">
+<meta name="description" content="点丝袜任意位置泼水：水花炸开，湿了的地方透出皮肤，水珠挂住、滑落、滴到地上。二次元 3D 丝袜泼水实验，制作 Newton Quan。">
+<meta name="author" content="Newton Quan">
+<meta property="og:type" content="website">
+<meta property="og:title" content="雨丝 Wet Denier Lab">
+<meta property="og:description" content="点丝袜任意位置泼水：水花炸开，湿了的地方透出皮肤，水珠挂住、滑落、滴到地上。二次元 3D 丝袜泼水实验，制作 Newton Quan。">
+<meta property="og:image" content="./assets/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="stylesheet" href="./vendor/zcool-xiaowei.css">
+<link rel="stylesheet" href="./src/site.css">
+</head>
+<body>
+<canvas id="view" aria-label="三维丝袜泼水"></canvas>
+<header class="brand">
+<div class="logo">雨丝</div>
+<div class="sub">WET&nbsp;DENIER&nbsp;LAB</div></header>
+<div class="corner">
+<button id="photoBtn" class="round" aria-label="拍照"><svg viewBox="0 0 24 24"><path d="M4.5 8.2h3l1.4-2.2h6.2l1.4 2.2h3a1 1 0 0 1 1 1v8.6a1 1 0 0 1-1 1h-15a1 1 0 0 1-1-1V9.2a1 1 0 0 1 1-1z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><circle cx="12" cy="13.2" r="3.3" fill="none" stroke="currentColor" stroke-width="1.7"/></svg></button>
+<button id="aboutBtn" class="round" aria-label="制作说明" aria-expanded="false" aria-controls="about"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.2" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M12 11v5.2" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/><circle cx="12" cy="7.9" r="1.15" fill="currentColor"/></svg></button>
+<button id="sound" class="round" aria-label="声音" aria-pressed="true"><svg viewBox="0 0 24 24"><path d="M4 9.5h3.2L12 5.5v13l-4.8-4H4z" fill="currentColor"/><path class="wave" d="M15.5 9a4.2 4.2 0 0 1 0 6M18 6.6a7.6 7.6 0 0 1 0 10.8" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path class="mute" d="M15.5 9.5l5 5m0-5l-5 5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg></button></div>
+<section id="about" class="about" role="dialog" aria-label="制作说明" aria-hidden="true">
+<button id="aboutClose" class="close" aria-label="关闭说明"><svg viewBox="0 0 24 24"><path d="M7 7l10 10M17 7L7 17" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
+<div class="about-head">
+<div class="about-logo">雨丝</div>
+<div class="about-name">Wet Denier Lab · 丝袜泼水实验</div>
+<div class="maker">制作 <strong>Newton Quan</strong></div></div>
+<p class="lead">点丝袜泼水，看水花炸开、湿处透出皮肤、水珠挂住滑落。底栏切换泼水和视角；「场景」里换地方，「衣橱」里换姿势、款式、材质和花纹，每种料子遇水的样子都不一样。</p>
+<dl class="facts">
+<dt>技术</dt>
+<dd>Three.js 实时渲染，丝袜、水、场景和声音都由程序实时生成，没有用一张图片</dd>
+<dt>素材</dt>
+<dd>腿型 MakeHuman（CC0）· 丝袜原型 punkduck（<a href="https://creativecommons.org/licenses/by/3.0/" target="_blank" rel="noopener">CC BY 3.0</a>，已改编）· Three.js（MIT）</dd></dl>
+<div class="about-foot">© 2026 Newton Quan</div></section>
+<div id="hint" class="hint">点丝袜任意位置泼水 · 按住拖动连续浇</div>
+<div id="loading" class="loading"><span></span>正在准备丝袜与水…</div>
+<div id="zoombar" class="zoombar">
+<button class="round" id="zoomIn" aria-label="放大">＋</button>
+<button class="round" id="zoomOut" aria-label="缩小">−</button>
+<button class="round small" id="viewReset" aria-label="复位">复位</button></div>
+<aside class="side">
+<section id="scenes" class="sheet scenes" aria-label="场景"></section>
+<section id="materials" class="sheet" aria-label="衣橱"></section></aside>
+<nav class="dock" aria-label="操作">
+<div class="modes" role="radiogroup" aria-label="触控方式"><span class="thumb" aria-hidden="true"></span>
+<button id="modeWater" class="mode" role="radio" aria-checked="true"><svg viewBox="0 0 24 24"><path d="M12 3.5c3 4.1 5 6.9 5 9.6a5 5 0 0 1-10 0c0-2.7 2-5.5 5-9.6z" fill="currentColor"/><path class="glint" d="M10 14.2a2.2 2.2 0 0 0 2 2" fill="none" stroke-width="1.4" stroke-linecap="round"/></svg><span>泼水</span></button>
+<button id="modeView" class="mode" role="radio" aria-checked="false"><svg viewBox="0 0 24 24"><path d="M12 4.5a7.5 7.5 0 1 1-7.1 5.1" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M3.6 5.6l1.4 4.3 4.2-1.6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="12" r="2.2" fill="currentColor"/></svg><span>视角</span></button></div><span class="sep" aria-hidden="true"></span>
+<button id="bucketBtn" class="tool accent" data-key="空格"><svg viewBox="0 0 24 24"><path d="M4 18.5c2.6 1.4 13.4 1.4 16 0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M7.6 16.2c-.9-2.4-.2-4.6 1.5-6M16.4 16.2c.9-2.4.2-4.6-1.5-6M12 15.6V11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="12" cy="7" r="1.7" fill="currentColor"/><circle cx="7" cy="7.6" r="1.15" fill="currentColor"/><circle cx="17" cy="7.6" r="1.15" fill="currentColor"/></svg><span>一捧水</span></button>
+<button id="rainBtn" class="tool" aria-pressed="false" data-key="R"><svg viewBox="0 0 24 24"><path d="M7 13.5h9.5a3.5 3.5 0 0 0 .3-7 5 5 0 0 0-9.6 1.3A2.9 2.9 0 0 0 7 13.5z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M8.5 16.5l-1 2.5M12.5 16.5l-1 2.5M16.5 16.5l-1 2.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg><span>细雨</span></button>
+<button id="slowBtn" class="tool" aria-pressed="false" data-key="S"><svg viewBox="0 0 24 24"><circle cx="12" cy="13" r="7.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M12 13V9M10 3.5h4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg><span>慢动作</span></button>
+<button id="dryBtn" class="tool" data-key="D"><svg viewBox="0 0 24 24"><path d="M5 17.5c3-1 5-3.5 6-7m2 9c2.5-1.5 4.5-4.5 5-8" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path d="M15.5 3.8l.8 1.9 1.9.8-1.9.8-.8 1.9-.8-1.9-1.9-.8 1.9-.8zM6.5 6l.5 1.1 1.1.5-1.1.5-.5 1.1-.5-1.1L4.9 7.6 6 7.1z" fill="currentColor"/></svg><span>擦干</span></button>
+<button id="sceneBtn" class="tool" aria-pressed="false" data-key="C"><svg viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="14" rx="2.6" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M4 16.2l4.6-4.7 3.6 3.4 2.6-2.4 5.2 4.4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" stroke-linecap="round"/><circle cx="15.6" cy="9.4" r="1.5" fill="currentColor"/></svg><span>场景</span></button>
+<button id="matBtn" class="tool" aria-pressed="false" data-key="W"><svg viewBox="0 0 24 24"><path d="M12 8.4V7.2a2.1 2.1 0 1 0-2.1-2.1" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path d="M12 8.4l8 6.2a1.4 1.4 0 0 1-.9 2.5H4.9a1.4 1.4 0 0 1-.9-2.5z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg><span>衣橱</span></button></nav>
+<div id="photo" class="photo" role="dialog" aria-label="照片" aria-hidden="true">
+<figure>
+<img id="photoImg" alt="雨丝截图">
+<figcaption id="photoTip">长按图片可以保存</figcaption></figure>
+<div class="photo-actions">
+<a id="photoSave" class="pill solid" download="yusi.jpg">保存图片</a>
+<button id="photoShare" class="pill">复制这一双的链接</button>
+<button id="photoClose" class="pill">关闭</button></div></div>
+
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>
