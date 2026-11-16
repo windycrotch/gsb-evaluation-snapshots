@@ -1,0 +1,886 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>TRAX Release Notes</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:ital,wght@0,400;0,700;1,400&family=Chakra+Petch:wght@500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* The wordmark's face: The Rave Is In Your Pants by NALGames, 2013,
+   freeware for non-commercial use. Cut down to the letters used. */
+@font-face {
+  font-family: "The Rave Is In Your Pants";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url(data:font/ttf;base64,AAEAAAANAIAAAwBQR1BPU9WK5I8AAAWEAAAAWkdTVUJsjHSFAAAF4AAAABpPUy8yQxNqggAAAVgAAABgY21hcACzAVoAAAHQAAAAVGdhc3D//wADAAAFfAAAAAhnbHlm40xIbQAAAjQAAAFmaGVhZByhT4QAAADcAAAANmhoZWEQLAiNAAABFAAAACRobXR4LOwAAgAAAbgAAAAYbG9jYQFlARAAAAIkAAAADm1heHAACQAYAAABOAAAACBuYW1lI5Y66wAAA5wAAAG+cG9zdP8qAJYAAAVcAAAAIAABAAAAAQAA4W8lcl8PPPUACwgAAAAAAM4XWBsAAAAA5tSs9gAAAAAImAV4AAAABgABAAAAAAAAAAEAAAa0/l4A3glgAAAAyAiYAAEAAAAAAAAAAAAAAAAAAAAGAAEAAAAGABgAAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwfjAZAABQAIBZoFMwAAARsFmgUzAAAD0QBmAhIAAAIABQAAAAAAAAAAAAABAAAAAAAAAAAAAAAASEwgIABAAC4AWAWa/mYAzQa0AaIAAAABAAAAAAQABZoAAAAgAAIJYAAAAfQAAAj8AAIINAAAB2wAAAj8AAAAAAACAAAAAwAAABQAAwABAAAAFAAEAEAAAAAMAAgAAgAEAC4AQQBSAFQAWP//AAAALgBBAFIAVABY////0//B/7H/sP+tAAEAAAAAAAAAAAAAAAAAAAAoADMAVgB/AJIAswAAAAEAAAAACJgFeAAVAAABASYVESERNDMyFwEBFjURIREUIyInBEz9CSn+1GQkQAOEAvcpASxkJEACWAHMEk78GAUUZCn90f40Ek4D6PrsZCkAAQAAAAABLADIAAMAADE1IRUBLMjIAAIAAgAACDQFeAAEAA8AAAEmBwEhASEnIQcjATYzMhcD3hM2/l8DtQKL/qyW+zKK8AOGRVggGwQMKk79qP5wyMgFFGQpAAABAAAAAAdsBXgAFwAAASMiFREhERAhITI1NCMhNSEgERAhIwEhAtPfyP7UAfQDhMjI+ogFeAH0/gzeAtL+TAJYyP5wAZABkMjIyP5w/nD9qAAAAQAAAAAGpAV4AAcAAAEhNSEVIREhArz9RAak/UT+1ASwyMj7UAABAAAAAAg0BXgACwAAAQEhAQEhAQEhAQEhA+39QP7hA1L8oAHGAoUCvQEs/KQDWf5BAiT93AKbAt392gIm/WP9JQAAAAAABwBaAAMAAQQJAAAAWgAAAAMAAQQJAAEAMgBaAAMAAQQJAAIADgCMAAMAAQQJAAMATACaAAMAAQQJAAQAMgBaAAMAAQQJAAUAVgDmAAMAAQQJAAYAKAE8AFQAeQBwAGUAZgBhAGMAZQAgAKkATgBBAEwARwBhAG0AZQBzAC4AIAAyADAAMQAzAC4AIABBAGwAbAAgAFIAaQBnAGgAdABzACAAUgBlAHMAZQByAHYAZQBkAFQAaABlACAAUgBhAHYAZQAgAEkAcwAgAEkAbgAgAFkAbwB1AHIAIABQAGEAbgB0AHMAUgBlAGcAdQBsAGEAcgBUAGgAZQAgAFIAYQB2AGUAIABJAHMAIABJAG4AIABZAG8AdQByACAAUABhAG4AdABzADoAVgBlAHIAcwBpAG8AbgAgADEALgAwADAAVgBlAHIAcwBpAG8AbgAgADEALgAwADAAIABKAHUAbAB5ACAAMgA2ACwAIAAyADAAMQAzACwAIABpAG4AaQB0AGkAYQBsACAAcgBlAGwAZQBhAHMAZQBUAGgAZQBSAGEAdgBlAEkAcwBJAG4AWQBvAHUAcgBQAGEAbgB0AHMAAAADAAAAAAAA/ycAlgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAf//AAIAAQAAAAoAHgAsAAFsYXRuAAgABAAAAAD//wABAAAAAWtlcm4ACAAAAAEAAAABAAQAAgAAAAEACAABAA4ABAAAAAIAFgAcAAEAAgACAAQAAQAE/VgAAQAC/UoAAAABAAAACgAWABgAAWxhdG4ACAAAAAAAAAAAAAA=) format("truetype");
+}
+
+:root {
+  --ground: #F3F5F7;
+  --surface: #FFFFFF;
+  --ink: #121A22;
+  --muted: #56636F;
+  --rule: #D8DEE4;
+  --accent: #8F6200;
+  --accent-fill: #FFD060;
+  --accent-soft: #FFF3D1;
+  --sky: #2A7196;
+  --screen: #101820;
+  --screen-ink: #E8EDF1;
+  --screen-dim: #909090;
+  --key: #FFFFFF;
+  --key-edge: #BFC7CF;
+  --tri: #23946F;
+  --cir: #D23E48;
+  --crs: #4B6FCB;
+  --sqr: #C0589A;
+  --display: "Chakra Petch", "Avenir Next Condensed", "Arial Narrow", sans-serif;
+  --body: "Atkinson Hyperlegible", "Segoe UI", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground: #101820;
+    --surface: #17212B;
+    --ink: #E6ECF1;
+    --muted: #97A5B2;
+    --rule: #2A3642;
+    --accent: #FFD060;
+    --accent-fill: #FFD060;
+    --accent-soft: #2B2616;
+    --sky: #70C0E0;
+    --screen: #0B1117;
+    --key: #202C38;
+    --key-edge: #3A4957;
+    --tri: #4CC79D;
+    --cir: #F0646D;
+    --crs: #7C9CF0;
+    --sqr: #E785C2;
+  }
+}
+:root[data-theme="dark"] {
+  --ground: #101820;
+  --surface: #17212B;
+  --ink: #E6ECF1;
+  --muted: #97A5B2;
+  --rule: #2A3642;
+  --accent: #FFD060;
+  --accent-fill: #FFD060;
+  --accent-soft: #2B2616;
+  --sky: #70C0E0;
+  --screen: #0B1117;
+  --key: #202C38;
+  --key-edge: #3A4957;
+  --tri: #4CC79D;
+  --cir: #F0646D;
+  --crs: #7C9CF0;
+  --sqr: #E785C2;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--ink);
+  font-family: var(--body);
+  font-size: 16.5px;
+  line-height: 1.6;
+  padding-inline: 20px;
+  padding-block: 0 64px;
+}
+a { color: var(--sky); text-underline-offset: 2px; }
+a:focus-visible, summary:focus-visible { outline: 2px solid var(--accent-fill); outline-offset: 2px; border-radius: 3px; }
+code, .file { font-family: var(--mono); font-size: 0.86em; background: var(--surface); border: 1px solid var(--rule); border-radius: 4px; padding: 0.05em 0.35em; white-space: nowrap; }
+
+.masthead {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding-block: 40px 28px;
+  border-bottom: 1px solid var(--rule);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  justify-content: space-between;
+  gap: 12px 32px;
+}
+.wordmark {
+  font-family: "The Rave Is In Your Pants", var(--display);
+  font-weight: 400;
+  font-size: clamp(3.4rem, 10vw, 6rem);
+  line-height: 0.92;
+  letter-spacing: 0.02em;
+  margin: 0;
+}
+.masthead p { margin: 8px 0 0; color: var(--muted); max-width: 46ch; }
+.edition {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  color: var(--muted);
+  text-align: right;
+  line-height: 1.5;
+}
+.edition strong { color: var(--ink); font-weight: 500; }
+
+.layout {
+  max-width: 1080px;
+  margin: 0 auto;
+  display: grid;
+  grid-template-columns: 210px minmax(0, 1fr);
+  gap: 48px;
+  padding-top: 32px;
+}
+nav.toc {
+  position: sticky;
+  top: calc(env(safe-area-inset-top, 0px) + 20px);
+  align-self: start;
+  font-size: 0.92rem;
+}
+.toc h2 {
+  font-family: var(--display);
+  font-size: 0.78rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 0 0 10px;
+}
+.toc ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.toc a { display: block; padding: 3px 0 3px 10px; border-left: 2px solid var(--rule); color: var(--ink); text-decoration: none; }
+.toc a:hover { border-left-color: var(--accent-fill); }
+
+main { min-width: 0; max-width: 72ch; }
+section { padding-block: 8px 28px; border-bottom: 1px solid var(--rule); margin-bottom: 28px; scroll-margin-top: 20px; }
+section:last-child { border-bottom: 0; }
+h2 {
+  font-family: var(--display);
+  font-weight: 600;
+  font-size: 1.75rem;
+  line-height: 1.15;
+  letter-spacing: 0.01em;
+  margin: 0 0 12px;
+  text-wrap: balance;
+}
+h3 {
+  font-family: var(--display);
+  font-weight: 600;
+  font-size: 1.12rem;
+  letter-spacing: 0.02em;
+  margin: 26px 0 8px;
+}
+p { margin: 0 0 12px; }
+ul { margin: 0 0 12px; padding-left: 1.2em; }
+li { margin-bottom: 4px; }
+.lede { font-size: 1.08rem; color: var(--ink); }
+
+/* The controls: key column, then what it does. */
+.controls { width: 100%; border-collapse: collapse; margin: 6px 0 16px; font-size: 0.97rem; }
+.controls th {
+  text-align: left;
+  font-family: var(--display);
+  font-size: 0.74rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 600;
+  padding: 0 0 6px;
+  border-bottom: 1px solid var(--rule);
+}
+.controls td { padding: 9px 0; border-bottom: 1px solid var(--rule); vertical-align: top; }
+.controls td:first-child { width: 11.5rem; padding-right: 14px; white-space: nowrap; }
+.controls tr:last-child td { border-bottom: 0; }
+.how { color: var(--muted); font-size: 0.86rem; display: block; margin-top: 3px; }
+
+.key {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  vertical-align: -0.42em;
+  min-width: 1.75em;
+  height: 1.75em;
+  padding: 0 0.4em;
+  border-radius: 999px;
+  background: var(--key);
+  border: 1px solid var(--key-edge);
+  box-shadow: 0 1px 0 var(--key-edge);
+  font-family: var(--display);
+  font-weight: 600;
+  font-size: 0.82em;
+  letter-spacing: 0.04em;
+  color: var(--ink);
+  line-height: 1;
+}
+.key svg { width: 1.05em; height: 1.05em; display: block; }
+.key.face { width: 1.75em; padding: 0; }
+.key.shoulder { border-radius: 0.55em 0.55em 0.3em 0.3em; min-width: 2.1em; }
+.key.pill { font-size: 0.66em; letter-spacing: 0.1em; height: 2.1em; padding: 0 0.8em; }
+.plus { color: var(--muted); margin: 0 0.2em; font-size: 0.85em; }
+.held { font-size: 0.78rem; color: var(--muted); margin-left: 6px; font-style: italic; }
+
+.note {
+  background: var(--accent-soft);
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin: 12px 0 16px;
+  font-size: 0.95rem;
+}
+.note strong { color: var(--ink); }
+
+/* The Player, sketched at the PSP's own 480 x 272. */
+.screen-wrap { margin: 16px 0 8px; overflow-x: auto; }
+.screen {
+  position: relative;
+  width: 100%;
+  max-width: 560px;
+  aspect-ratio: 480 / 272;
+  background: var(--screen);
+  border-radius: 10px;
+  border: 6px solid #05080B;
+  color: var(--screen-ink);
+  font-family: var(--body);
+  overflow: hidden;
+  container-type: inline-size;
+}
+.screen > div { position: absolute; }
+.s-album { top: 2.6%; left: 0; right: 0; text-align: center; font-size: 3cqw; color: var(--screen-dim); }
+.s-count { top: 2.6%; right: 2.5%; font-size: 2.8cqw; color: var(--screen-dim); font-family: var(--mono); }
+.s-batt { top: 3.6%; left: 2.1%; width: 4.2%; height: 3.3%; border: 1px solid var(--screen-dim); border-radius: 1px; }
+.s-batt::before { content: ""; position: absolute; inset: 18%; right: 35%; background: #C8C8C8; }
+.s-batt::after { content: ""; position: absolute; right: -14%; top: 30%; width: 10%; height: 40%; background: var(--screen-dim); }
+.s-cover {
+  left: 2.1%; top: 11%; width: 50%; bottom: 3.7%;
+  width: auto; aspect-ratio: 1;
+  border-radius: 2px;
+  background:
+    radial-gradient(circle at 38% 40%, #E7A6C9 0 16%, transparent 17%),
+    radial-gradient(circle at 60% 58%, #8EA6F2 0 20%, transparent 21%),
+    linear-gradient(135deg, #F6F1E7, #E9E3D6);
+}
+.s-title { left: 57%; right: 3%; top: 38%; font-size: 4.2cqw; font-weight: 700; line-height: 1.15; }
+.s-artist { left: 57%; right: 3%; top: 53%; font-size: 3.2cqw; color: #C8C8C8; }
+.s-bar { left: 57%; right: 3%; top: 81%; height: 2.4%; border-radius: 3px; background: #28303A; }
+.s-bar::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 38%; border-radius: 3px; background: #70C0E0; }
+.s-time { left: 57%; top: 86%; font-size: 2.8cqw; color: var(--screen-dim); font-family: var(--mono); }
+.s-mode { left: 76.5%; top: 86.6%; width: 2.8%; aspect-ratio: 1; border: 1.5px solid var(--screen-dim); border-radius: 50%; border-right-color: transparent; }
+.s-state { right: 3%; top: 86.4%; width: 0; height: 0; border-left: 1.6cqw solid #80FF80; border-top: 1cqw solid transparent; border-bottom: 1cqw solid transparent; }
+.legend { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 4px 20px; font-size: 0.9rem; color: var(--muted); margin: 10px 0 16px; padding: 0; list-style: none; }
+.legend b { color: var(--ink); font-weight: 700; }
+
+.modes { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; margin: 10px 0 16px; padding: 0; list-style: none; }
+.modes li { background: var(--surface); border: 1px solid var(--rule); border-radius: 8px; padding: 10px 12px; margin: 0; }
+.modes b { font-family: var(--display); font-weight: 600; letter-spacing: 0.02em; display: block; }
+.modes span { color: var(--muted); font-size: 0.9rem; }
+
+.tree-wrap { overflow-x: auto; margin: 8px 0 14px; }
+pre.tree {
+  font-family: var(--mono);
+  font-size: 0.84rem;
+  line-height: 1.55;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin: 0;
+  width: max-content;
+  min-width: 100%;
+}
+pre.tree .c { color: var(--muted); }
+
+dl.formats { display: grid; grid-template-columns: max-content 1fr; gap: 6px 18px; margin: 8px 0 14px; }
+dl.formats dt { font-family: var(--display); font-weight: 600; letter-spacing: 0.03em; }
+dl.formats dd { margin: 0; color: var(--ink); }
+
+@media (max-width: 820px) {
+  .layout { grid-template-columns: minmax(0, 1fr); gap: 20px; }
+  nav.toc { position: static; }
+  .toc ol { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+  .edition { text-align: left; }
+}
+@media (max-width: 520px) {
+  .controls td:first-child { width: auto; white-space: normal; }
+  .controls, .controls tbody, .controls tr, .controls td { display: block; }
+  .controls thead { display: none; }
+  .controls td { border-bottom: 0; padding: 0; }
+  .controls td:first-child { padding-top: 10px; }
+  .controls tr { border-bottom: 1px solid var(--rule); padding-bottom: 10px; }
+  dl.formats { grid-template-columns: 1fr; }
+  dl.formats dd { margin-bottom: 6px; }
+}
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+html { scroll-behavior: smooth; }
+
+.notes-lede { font-size: 1.08rem; color: var(--muted); max-width: 60ch; }
+main ul { padding-left: 1.15em; }
+main ul ul { margin-top: 4px; }
+main li { margin-bottom: 6px; }
+main li strong { color: var(--ink); }
+</style>
+</head>
+<body>
+
+<header class="masthead">
+  <div>
+    <h1 class="wordmark">TRAX</h1>
+    <p class="notes-lede">A music player for the PSP and the PS&nbsp;Vita. What it does, and the work behind it.</p>
+  </div>
+  <div class="edition">
+    <strong>1.0.0</strong><br>
+    Release notes<br>
+    For PSP-1000 and later,<br>
+    and for the PS&nbsp;Vita
+  </div>
+</header>
+
+<div class="layout">
+  <nav class="toc" aria-label="Contents">
+    <h2>Contents</h2>
+    <ol>
+      <li><a href="#new-in-1-0-0">New in 1.0.0</a></li>
+      <li><a href="#new-in-rc-1">New in RC 1</a></li>
+      <li><a href="#new-in-beta-11">New in beta 11</a></li>
+      <li><a href="#new-in-beta-10">New in beta 10</a></li>
+      <li><a href="#new-in-beta-9">New in beta 9</a></li>
+      <li><a href="#new-in-beta-8">New in beta 8</a></li>
+      <li><a href="#new-in-beta-7">New in beta 7</a></li>
+      <li><a href="#new-in-beta-6">New in beta 6</a></li>
+      <li><a href="#new-in-beta-5">New in beta 5</a></li>
+      <li><a href="#new-in-beta-4">New in beta 4</a></li>
+      <li><a href="#new-in-beta-3">New in beta 3</a></li>
+      <li><a href="#new-in-beta-2">New in beta 2</a></li>
+      <li><a href="#features">Features</a></li>
+      <li><a href="#engineering-improvements">Engineering improvements</a></li>
+      <li><a href="#known-limitations">Known limitations</a></li>
+    </ol>
+  </nav>
+
+  <main>
+  <p>A music player for the PSP, and now for the PS&nbsp;Vita as well.</p>
+<section id="new-in-1-0-0">
+  <h2>New in 1.0.0</h2>
+  <p>The list redrawn, and the constants behind it measured &mdash; a Vita that stops inheriting numbers that were never its own.</p>
+  <h3>New</h3>
+<ul>
+  <li><strong>The list redrawn.</strong> The selected row is filled rather than recoloured. Colour alone was carrying two meanings at once &mdash; what a row is, and which one is pointed at &mdash; and on a 272-pixel screen at arm&rsquo;s length the second has to win, so the pick takes the amber as ground, its text goes dark and everything else goes neutral. Alternating rows take a barely-there band so the eye can run along a long name without losing its line.</li>
+  <li><strong>A glyph says what each row is.</strong> A folder, a music note, and a page for the rows that neither open nor play &mdash; a booklet PDF, a sleeve scan, a <code>.url</code> &mdash; all of which had been drawing a music note, a glyph promising something that will not play. The folder&rsquo;s trailing slash goes with the colour, the glyph having said it already, which gives the name back the width. A row with a cover keeps its sleeve.</li>
+  <li><strong>Tracks say how long they play,</strong> in a second column. A cue sheet carries its times in its own text and always had them; everything else now comes from an idle pass measuring one visible track a frame &mdash; the pass the scan&rsquo;s own comment had been promising since it stopped opening the files it lists. A dozen-track album fills in in well under a second, where the first attempt took four.</li>
+  <li><strong>Folders say how many rows they open as.</strong> Not how many files they hold: a cue sheet collapses the audio it indexes and the cover beside it into one album row, so counting entries would have made a folder of a hundred discs read three hundred. The count settles it from the names alone, the way the scan&rsquo;s own first pass does, and a folder with no sheet in it &mdash; which is most of them, and all of a folder of folders &mdash; is answered there and never read twice.</li>
+  <li><strong>A control reference inside the app</strong>, as a fourth tab on the Settings page. Every control TRAX has, on one page &mdash; the list, the player, the gallery, the cassette, the equalizer, and HOME to quit &mdash; with each button drawn as its own shape rather than named in words. Thirty-six lines through a window of eleven: Up and Down scroll, and held, they repeat at the cadence the list and the equalizer already use. Where the second column starts is measured on the machine it is running on rather than set by eye, and the page is checked at compile time against the footer, as the settings rows already were.</li>
+</ul>
+  <h3>Changed</h3>
+<ul>
+  <li><strong>Constants that were one number for two machines are now two.</strong> <code>app.c</code> grew from a PSP app and had the Vita fitted afterwards. A sweep of every core file and all 47 platform files found the pattern confined entirely to it &mdash; <code>vgfx.h</code>, <code>cassette.h</code> and <code>playview.h</code> were written with two machines in mind and are clean. The PSP is unchanged in every case below; what ends is the Vita inheriting numbers that were never its own.
+  <ul>
+    <li><strong>Probe pacing.</strong> A PSP puts a probe at 46.0 ms a file, a Vita at 12.7. One number for both meant either a Vita waiting four seconds an album to fill in a column it reads in a fifth of a second, or a PSP holding the card 46% of the time &mdash; the two-readers problem the queue pass is written against. 20 frames apart on a PSP and 6 on a Vita come to the same 14% of the card.</li>
+    <li><strong>The launch hold.</strong> Press to first audio is 890&ndash;1023 ms on a PSP and 97&ndash;215 ms on a Vita, and both had been waiting 2000 ms before touching the card again. The Vita gets 500, which is the PSP&rsquo;s own ratio rather than a new number picked by eye.</li>
+    <li><strong>The scrollbar</strong> was three bare numbers &mdash; a 3 px bar, a 6 px gutter and a 12 px minimum thumb. Right on a PSP, a hairline on a Vita. The track line stays one pixel, because a rule is a rule at any size.</li>
+    <li><strong>The visualization menu and the music-folder picker</strong> were whole screens of PSP pixels with correctly sized type inside them.</li>
+  </ul></li>
+  <li><strong>A fourth sizing factor, <code>UI_ROWS()</code>.</strong> Neither <code>UI_SCALE</code> nor <code>UI_TEXT</code> was the ratio those panels wanted. The right one is the one the list had already picked by hand and never written down: <code>ROW_HEIGHT</code> goes 20 to 30, so a panel of text rows goes by halves. A macro over a whole dialog rather than a dozen paired constants, because every number in one of these panels moves together or the panel stops lining up.</li>
+  <li><strong>The music-folder picker hangs from the middle.</strong> A heading, a rule and <code>count</code> rows is a composition whose height depends on how many places the machine has, so where its top belongs is arithmetic and never was a number. It had been a PSP constant scaled, which on a Vita put the whole thing in the upper half with 180 px of nothing beneath it. The PSP moves about four pixels down, which is the one place this work does not leave it untouched.</li>
+  <li><strong>The app calls itself TRAX in its own About box.</strong> The one place the product was still TRAXPSP, and it was in the binary rather than on the website.</li>
+</ul>
+  <h3>Fixed</h3>
+<ul>
+  <li><strong>An <code>.m4a</code>&rsquo;s length took a whole decoder to read.</strong> Every one of them fell off the end of <code>sound_length_from_open()</code> and was measured by building a decoder instead &mdash; 32 ms a file on a Vita against an mp3&rsquo;s 14, and the only format doing it. <code>mvhd</code> holds the duration and the timescale it is counted in and is the first box inside <code>moov</code>, so the length now comes out of the first 4 KB of it and no more. Checked against <code>afinfo</code> on five of the files on the card, exact to the millisecond. A file keeping its <code>mvhd</code> further in, or giving no duration, answers 0 and gets the decoder exactly as before.</li>
+  <li><strong>The cover beside a <code>.cue</code> stopped showing.</strong> The sleeves were a pass of their own above the rows, which was right for as long as a row drew nothing but text; giving a row a background painted straight over them. The sleeve is drawn inside the row loop now, after the band. While it was invisible nobody could see that it sat at a hardcoded x of 22 &mdash; a PSP number &mdash; which on a Vita had been putting a folder&rsquo;s names in two different places depending on which covers had decoded.</li>
+  <li><strong>The scrollbar came out in pieces,</strong> one per unbanded row, for the same reason. The row fills stop two pixels short of it now.</li>
+  <li><strong>A row&rsquo;s time ran under the scrollbar on a Vita.</strong> The time and the width a name is allowed were both written <code>SCR_WIDTH - 10</code>: a right anchor with a PSP&rsquo;s margin on it, which cleared a 3 px bar in a 6 px gutter and stopped clearing anything the moment the bar was scaled. Re-running the sweep with its filter fixed found two more of the same shape &mdash; the header&rsquo;s item count, and the Vita&rsquo;s own one-line header, which had 8 px of left margin while the rows under it had 52.</li>
+  <li><strong>The Vita&rsquo;s visualization menu hid a row behind a scroll.</strong> <code>VIS_COUNT</code> is 13 and a Vita adds the equalizer, having no music-note button to open it with, so the menu is fourteen rows &mdash; and the change that made the panel read properly fitted only thirteen of them, on the one machine that never needed to scroll. Its row height is the list&rsquo;s own <code>ROW_HEIGHT</code> now, which is what fourteen rows and the panel&rsquo;s head and foot leave room for.</li>
+  <li><strong>Probe timings never reached the log.</strong> The counter batched at 32 files, which is eleven seconds of uninterrupted browsing, so the app closed long before a line was printed. The more useful half is that the expensive path &mdash; the fall-through that builds a decoder, and for a variable bitrate mp3 with no Xing frame walks the file to count its frames &mdash; was not inside the measured region at all, so the log reported the cheap answer and stayed silent about the dear one. Eight to a line now, which is one line an album, and the slow path says so per file with the name.</li>
+  <li><strong>Probing no longer drops frames while the list is moving.</strong> 14 ms does not fit in a 16.7 ms frame alongside everything else, so every probe costs a frame; at the new pacing that would have been ten a second, all of them while the rows are moving under the eye, which is the one moment a dropped frame shows. Probes wait 120 ms for the cursor and the scroll to stop first, so the cost moves out of the scroll and into the pause after it.</li>
+</ul>
+  <h3>Also</h3>
+<ul>
+  <li><strong>The manual&rsquo;s Settings and About section</strong> had six hundred pixels of nothing after each label, with the text that belonged there off the side of the page. One <code>dd</code> with no <code>dt</code> of its own landed in a two-column grid&rsquo;s label column and was measured as a label, taking that column to 2683 px and collapsing the other to 93.</li>
+  <li><strong>The documents that go on the site</strong> were brought up to date and republished. Both pages had been built once and never published again, so what was live was beta 1 of each &mdash; a manual that said &ldquo;A music player for the PSP&rdquo; with no mention of a Vita, against a home page saying the Vita build is native.</li>
+  <li><strong>The kernel helper compiled with a warning,</strong> and had been doing so for as long as it has existed. <code>NAME_MAX</code> is the toolchain&rsquo;s, out of a <code>limits.h</code> that arrives behind <code>pspkernel.h</code>, and the helper was redefining it. Only a cold build ever showed it, which is why the gate that refuses to release out of a build with anything to say had never caught it: a release built on top of an existing build tree recompiles nothing it already has.</li>
+</ul>
+</section>
+
+<section id="new-in-rc-1">
+  <h2>New in RC 1</h2>
+  <p>Five more visualizations, an equalizer with twice the bands, and a Vita that no longer draws PSP-sized type on a screen four times the size.</p>
+  <h3>New</h3>
+<ul>
+  <li><strong>Five visualizations, bringing it to thirteen.</strong>
+  <p><strong>LED bars</strong> is the segmented display off the front of a stereo &mdash; twenty bars, green through yellow to red, each with a cap that holds the highest it reached and sinks back slowly. The color comes from the segment&rsquo;s own height rather than the bar&rsquo;s, which is what makes it read as a scale the bars are measured against instead of bars that change color as they grow.</p>
+  <p><strong>Spectrum rays</strong> is a rainbow spectrum standing on a lit floor with a beam thrown off each peak. The floor&rsquo;s bounce is a soft smear of the color above it rather than the bars drawn again upside down &mdash; a mirrored copy costs what the bars cost and reads as a second row of them.</p>
+  <p><strong>Waveform</strong> is the whole audible range at once, 20 Hz at the left to 20 kHz at the right, drawn above and below a center line. The axis is frequency and it stands still: what moves is the height of the bars, so a shape stays where it is for as long as the sound making it does.</p>
+  <p><strong>Circular</strong> is the same scale stood on a ring and pointing outward &mdash; 50 Hz at the top and round counterclockwise to 16 kHz arriving back there, once around. Narrower than the flat one on purpose: on a ring every bar is equally in view, so the empty decade below 50 Hz reads as a bald patch rather than a quiet edge.</p>
+  <p><strong>Waterfall</strong> keeps the spectrum twenty times a second and draws the rows going away from you: about a second of music as a landscape, with a chorus arriving as a ridge running into the distance.</p></li>
+  <li><strong>The equalizer has ten bands instead of five.</strong> 31, 62, 125, 250 and 500 Hz, then 1, 2, 4, 8 and 16 kHz, each one octave wide and &plusmn;12 dB as before, and the panel is drawn as a graphic equalizer &mdash; a scale down the side, dashed lines across it, and the curve the bands add up to washed in behind them. Measured on the host, a band at +12 dB reads +12.00 dB at its own center, every one of the ten; all ten flat deviate by 0.000 dB.
+  <p>An <code>eq.cfg</code> written by an earlier version holds five numbers rather than ten and is ignored rather than half-read. The old centers were 60 Hz to 12 kHz, and the same figures against the new ones would not be the settings anybody chose, so the bands start flat once.</p></li>
+  <li><strong>The Vita&rsquo;s cassette is drawn for the Vita.</strong> A skin at a full 960&times;544, in place of the PSP&rsquo;s artwork shown at twice its size. Its reels, its hubs and its text are its own rather than a 480&times;272 picture stretched over a screen four times the area.</li>
+</ul>
+  <h3>Changed</h3>
+<ul>
+  <li><strong>The Vita&rsquo;s text and icons are sized for its own screen.</strong> They had been drawn at PSP sizes on a screen with four times the pixels, which left the Play view&rsquo;s type, its play and pause marks, the battery, the countdown and the action bar&rsquo;s labels all smaller than they should ever have been. The sizes now come from what the fonts actually measure on each machine rather than from a number written down once.</li>
+  <li><strong>The visualization list scrolls on a PSP.</strong> Thirteen of them and the equalizer want more panel than a PSP has screen. The rows are left the size they were and the list scrolls instead, with a mark to say there is more above or below; a Vita has room for every row and never scrolls.</li>
+  <li><strong>The toasts are legible.</strong> The strip naming the play mode was set a size below the bar directly beneath it, which is the wrong way round for something that is gone in two seconds and has to be read at a glance. Both it and the one-line note now match the action bar.</li>
+  <li><strong>Two messages say what they mean.</strong> &ldquo;grw0:/MUSIC is not there any more&rdquo; is now &ldquo;grw0:/MUSIC not found&rdquo;, and a server that has lost a track says &ldquo;Not found on the server.&rdquo;</li>
+  <li><strong>What Original format costs, measured on a PSP rather than guessed at.</strong> ALAC at 1139 kbps and WAV at 1411 play clean over 802.11b; 96 kHz FLAC at 3142 is the edge, breaking up 16 times in one run and 122 in the next; 192 kHz at 5026 breaks up every time. The surprise is that it also makes a track <em>start</em> four to six times sooner, because the server no longer has to transcode before it can send anything &mdash; so a library of CD-rate lossless is better off with it on. The manual says all of this now.</li>
+</ul>
+  <h3>Fixed</h3>
+<ul>
+  <li><strong>The caution about original-format playback vanished while it still applied.</strong> It is kept on screen for as long as it is true.</li>
+  <li><strong>The Vita&rsquo;s reels turned the wrong way.</strong> Clockwise, where a cassette winds the other way and where the PSP had it right all along. The two machines disagreed because the Vita&rsquo;s backend negated the angle a second time; nothing but the reels rotates, so there was nothing else to notice it by.</li>
+  <li><strong>Skipping through a cue album emptied the cover.</strong> It stayed empty until playback reached a different file. A cover was being filed under the track rather than the file it came from, and a cue album&rsquo;s tracks are slices of one file with one sleeve between them.</li>
+  <li><strong>A cue sheet written on a Japanese system could not be matched to its audio.</strong> The sheet names its file in Shift-JIS while the card&rsquo;s own names are UTF-8, so the two can never be equal and such an album lost every track title under global shuffle. The sheet is now matched to its audio by the two names the card gave, never by the one the sheet gave itself.</li>
+  <li><strong>A seek could be dropped.</strong> If a second seek arrived while one was still running, the first finished and cleared the request, taking the second with it. Reachable rather than reported, and more likely on an m4a, where a seek is real work.</li>
+</ul>
+</section>
+
+<section id="new-in-beta-11">
+  <h2>New in beta 11</h2>
+  <p>Two faults in the gallery, both of which had been there a while and neither of which was noticed until somebody played music and went looking at covers at the same time.</p>
+  <h3>Fixed</h3>
+<ul>
+  <li><strong>The gallery stopped loading covers altogether.</strong> There is one picture being decoded at a time, by design &mdash; asking for a second replaces the first rather than queueing behind it. What that design never said is what becomes of whoever was waiting on the first, and the answer was: it waits for ever.
+  <p>So playing a track, opening the gallery, and letting the track change was enough. The player asked for its own sleeve, the gallery&rsquo;s tile was quietly displaced, and the tile stayed marked as still coming &mdash; which the gallery reads as a reason not to ask for anything else. One collision and the wall stayed empty until it was closed. It now notices a request that has been pushed out and asks again; the player, which had the same fault in the other direction, no longer leaves the orb up for the rest of a track.</p></li>
+  <li><strong>A card that was not in the machine put its albums on the wall.</strong> The list correctly said there was nothing; the gallery showed twenty-two albums from the last time that card was seen, none of which could be opened. The same fault was fixed once for a card removed while TRAX was running &mdash; this was the other way in, the card already gone before TRAX started, which that guard could not see. The remembered albums are dropped as soon as the folder will not read, and the walk is left running so they come back by themselves if the card turns up a moment later.</li>
+</ul>
+  <h3>Also</h3>
+<ul>
+  <li>The log now names the folder on every gallery line, and says when a missing card&rsquo;s albums were dropped. Neither changes what TRAX does; both were added because a fault that cannot be told from correct behaviour in a log is a fault that gets diagnosed by guesswork.</li>
+</ul>
+</section>
+
+<section id="new-in-beta-10">
+  <h2>New in beta 10</h2>
+  <p>Your music no longer has to be on the card.</p>
+  <h3>New</h3>
+<ul>
+  <li><strong>Music from a server.</strong> Subsonic &mdash; Navidrome, Airsonic, Gonic and the rest &mdash; and Jellyfin, which speaks its own API rather than Subsonic&rsquo;s, whatever its plugin catalogue suggests. Set one up in <em>Settings &rsaquo; Servers</em>: a name, a kind, an address, a username and a password, typed with the machine&rsquo;s own keyboard. Then pick it in <em>Music folder</em>, where the memory cards already are &mdash; &ldquo;where is my music&rdquo; is one question, and a server is one of the answers rather than a separate mode to be in.
+  <p><em>Test this server</em> proves it is there and that the login works before anything depends on it.</p></li>
+  <li><strong>Original format,</strong> per server and off by default. Off, the server is asked for a 192 kbps MP3 of whatever the track is. On, the file arrives as it is.
+  <p>The difference is the point of the switch. A 96 kHz 24-bit FLAC is 3142 kbps &mdash; 384 KB a second, against 24 for the MP3 &mdash; and a 192 kHz one is 613 KB a second. A Vita carries all of it without a stumble, a 57-minute WAV starting in 125 ms. A PSP does not: the same two files broke up 29 and 377 times. So a PSP says so when the switch is turned on, and warns rather than refuses, because a CD-rate FLAC is a third of the size and may well be fine.</p>
+  <p>Everything but ATRAC plays from a server: MP3, FLAC, WAV, Opus and ALAC. What a stream holds is read off its first bytes rather than assumed from what was asked for.</p></li>
+  <li><strong>Failures that name what to change.</strong> &ldquo;No machine answers to that name. Check the address for a typo.&rdquo; &ldquo;Something is there, but it is not a Jellyfin server. If it sits under a path, such as <code>/jellyfin</code>, put that in the address too.&rdquo; A wrong clock is named only where it can actually be the cause &mdash; the certificate dates &mdash; because saying it after every failure teaches people to stop reading it.</li>
+  <li><strong>Tracks not in an album,</strong> for Jellyfin. It makes one album per folder, so anything loose in the music folder belongs to none and cannot be reached by opening albums. A row at the end of the album list leads to them, offered only when there are some. On the library this was built against that was nine tracks of twenty, across four formats, and it looked for all the world like those formats being unsupported.</li>
+</ul>
+  <h3>Fixed</h3>
+<ul>
+  <li><strong>A PSP would not reach a server named by its numbers.</strong> Its resolver answers &ldquo;no such host&rdquo; for a dotted quad, so a machine two metres away could not be found. A Vita&rsquo;s resolver copes, which is exactly the sort of difference that makes one machine work and the other not.</li>
+  <li><strong>Only the first request of each session worked on a PSP.</strong> <code>sceNetApctlConnect()</code> answers an error when the machine is already connected, so everything after the first fetch failed &mdash; and the first had already proved the network was fine. Lyrics never noticed: one fetch, now and then. A library asks on every listing, every album and every track.</li>
+  <li><strong>Turning the radio on no longer looks like a crash.</strong> It takes seconds on a PSP, and it used to happen inside the first fetch, before there was anything to draw with &mdash; so the screen went dark and the d-pad stopped answering. It says so now, and Circle gives up.</li>
+  <li><strong>Stepping through the music sources no longer connects to each one</strong> it pauses on.</li>
+  <li><strong>The memory card is no longer read while the music comes off a server.</strong> The gallery&rsquo;s walk carried on in the background, and the card watcher went on polling an empty slot &mdash; both of them asking for work nobody wanted, on the thread that draws and reads the buttons.</li>
+  <li><strong>A diagnostic was writing 154 lines to the card</strong> in a fifteen-second run &mdash; two for every directory entry whose name carries an unusual byte, each line its own open, append and close. It lit the card light and stalled the d-pad, and cost more than reading the directory it described: the same folder now reads in 106 ms where it took 179.</li>
+</ul>
+</section>
+
+<section id="new-in-beta-9">
+  <h2>New in beta 9</h2>
+  <p>One thing, on both machines: the player takes its colour from the record you are playing.</p>
+  <h3>New</h3>
+<ul>
+  <li><strong>A background drawn from the album&rsquo;s own cover.</strong> Up to six colours are taken from the sleeve as it loads, and the space around the artwork drifts between them &mdash; about eighteen seconds on each, and still while the music is. It is on to begin with, and <em>Dynamic background</em> in Settings turns it off.
+  <p>The colours are not the sleeve&rsquo;s own, and that is deliberate rather than a shortcut. The titles and times are printed over this, and a bright cover used as it is would leave them unreadable, so each colour keeps its hue and is brought down to a brightness the words can sit on. The background is tinted by the record; it is not a copy of it. A sleeve with nothing to take &mdash; one that is all black, or all grey &mdash; simply keeps the old flat colour, and how many colours come back depends on what is actually in the picture rather than always being six.</p></li>
+</ul>
+  <h3>Fixed</h3>
+<ul>
+  <li><strong>The progress bar no longer disappears against some covers.</strong> The bar&rsquo;s track was a fixed dark grey that happened to be almost exactly as bright as the new background, so on a coloured sleeve the two matched and only the dot was left. It is now drawn from whatever is behind it and stays clear of it, whichever colour the drift has reached.</li>
+  <li><strong>The Settings page fits again.</strong> Adding a row pushed its help text down through the footer. The rows sit a little closer now, and the page is measured when TRAX is built rather than when somebody notices.</li>
+</ul>
+</section>
+
+<section id="new-in-beta-8">
+  <h2>New in beta 8</h2>
+  <p>One album a reader could not play, and everything that turned out to be standing behind it. All of this is a PSP; a Vita was right all along and is left alone.</p>
+  <h3>Fixed</h3>
+<ul>
+  <li><strong>Filenames on a PSP were being read as the wrong alphabet.</strong> A PSP hands a filename back in Shift-JIS, and TRAX had been reading it as Windows-1252 &mdash; so an album ripped by iTunes, with a curly apostrophe in its name, drew as <code>Don?ft Look Back</code> rather than <code>Don&rsquo;t Look Back</code>. Three from one card:
+  <p><code>Boston - Don?ft Look Back</code>, <code>Yaz - Upstairs at Eric?fs</code>, <code>Star Wars - Main Title ?^ Rebel Blockade Runner</code>. Every one of them played perfectly; it was only ever what you were reading that was wrong, and a typographic apostrophe is in most filenames a ripper writes.</p>
+  <p>Decoded properly now, from a table generated out of cp932. Only on a PSP, and that restriction is the important part rather than caution: Windows-1252 high bytes followed by ASCII make perfectly valid Shift-JIS pairs, so trying it everywhere turned <code>Mot&ouml;rhead</code> into <code>Mothead</code> and <code>Bj&ouml;rk</code> into <code>Bjk</code> &mdash; names that were right before. It is not a guess about an encoding; it is a fact about one machine.</p></li>
+
+  <li><strong>An album whose name a PSP cannot say now opens anyway.</strong> A PSP converts a long filename to Shift-JIS and stops dead at the first character it has no version of. An album called <code>nano神社 (✪㉨✪) - c o o l e r c a t EP</code> arrived as ten bytes ending at the bracket, because a star is not in Shift-JIS &mdash; and ten bytes that are not a real name open nothing. Worse, cut that early the name has lost its <code>.mp3</code> too, so every track in the folder listed as a grey row nothing could select, all ten of them showing the same ten characters.
+  <p>TRAX reads the folder off the card itself now, finds the real name and the short 8.3 name beside it, and uses the short one to open and the real one to show. Characters the PSP has no letter for are left out of what is shown, so the name reads as far as it can rather than as a row of blanks.</p>
+  <p>This needs the helper and custom firmware. A signed build says the name cannot be read and suggests renaming the folder, which is the honest answer when there is nothing it can do.</p></li>
+
+  <li><strong>A folder that will not open says why.</strong> It used to answer &ldquo;cannot play that item&rdquo;, which is true and no use at all.</li>
+</ul>
+  <h3>Under the surface</h3>
+<ul>
+  <li>A Vita does none of the above and is not asked to. Its filenames come back whole and in UTF-8, so it says as much once per folder and skips the lot &mdash; where before this it was checking every name in every folder for a fault it cannot have.</li>
+</ul>
+</section>
+
+<section id="new-in-beta-7">
+  <h2>New in beta 7</h2>
+  <p>Both of these came from listeners rather than from a plan.</p>
+  <h3>Changed</h3>
+<ul>
+  <li><strong>A folder holds a thousand tracks, where it held a hundred and twenty-eight.</strong> One listener wrote that the only thing keeping TRAX from being the best FLAC player he had was what looked like a limit of 128 files to a folder. He was right, and it was worse than it looked: the list showed 256 entries and the queue took 128 of them without a word, so a folder of two hundred tracks played the first 128 and stopped.
+  <p>Raising it meant shrinking what a track costs first. A queue entry was 1524 bytes, of which 672 were the same two strings written out again for every track &mdash; one cover belongs to the whole album and one album name comes off the cue sheet, so both live on the queue now rather than on each track. 852 bytes apiece, and a thousand of them is 852 KB where the old hundred and twenty-eight took 190. Measured on a PSP: 818 KB more at launch, 6.4 percent of the heap, leaving 12.1 MB free against a peak use of 2.9.</p>
+  <p>The listing sort had to go with it. It was an insertion sort that copies a whole entry per shift, which is fine at 256 and sixteen times the work at 1024 &mdash; seconds of it for a folder arriving in anything like reverse order. It is a qsort now, checked against the old one over twenty thousand random listings of folders and files: the same order every time. And when a group will not fit, the log says so, once, when it starts.</p></li>
+
+  <li><strong>Lyrics wrap instead of being cut off.</strong> Another listener: "text wrapping didn't occur for lyrics display ... especially evident when using large text size". A line too wide was cut with an ellipsis and the rest thrown away, and at the large size, where a line holds perhaps five words, that was most of the song.
+  <p>The reason it had never wrapped was real: the scroll was counted in lines, every line assumed one row tall, so two rows of one line would have put everything below it out of step. The scroll counts rows now and the row a line starts on is looked up rather than assumed. Breaks are worked out once per song and kept &mdash; wrapping asks the font about a word at a time, which is real work on a PSP &mdash; and measured at the largest size a line is ever drawn at, so that a line does not rewrap and shove the song about at the moment it is sung.</p></li>
+</ul>
+  <h3>Fixed</h3>
+<ul>
+  <li><strong>The lyric view was written in one machine's pixels.</strong> Row spacing was 22 flat: about right for a PSP's font and too little for a Vita's, so rows there sat closer together than the letters are tall and ran into each other. It asks the font now. The line being sung sat 140 pixels down &mdash; just past the middle of a PSP, the top quarter of a Vita &mdash; so that is a share of the screen, and the bars top and bottom take the screen's scale like everything else.</li>
+
+  <li><strong>A line of lyrics was cut to 160 bytes as the file was read,</strong> before anything that draws it ever saw the rest. 160 bytes is 160 letters of English and about 53 of Japanese, where each takes three. It is 320 now, and the parser says in the log when it has to cut one &mdash; a line that arrives short looks exactly like a line the wrapping mishandled, and telling those apart should not need a screenshot.</li>
+
+  <li><strong>One song's line breaks were drawn over the next song's words.</strong> The player keeps one set of lyrics inside what it knows about the current track and reads each track's words into it, so the address never changes and only the contents do. The layout cache watched the address, so it worked once per run and every song after the first was laid out for the first one.</li>
+
+  <li><strong>The list's bar said Search beside a button that opens the gallery.</strong> It had been drawn for a search that does not exist yet, then wired to the gallery a release ago, and nobody moved the label.</li>
+</ul>
+</section>
+
+<section id="new-in-beta-6">
+  <h2>New in beta 6</h2>
+  <h3>Added</h3>
+<ul>
+  <li><strong>A gallery of covers.</strong> Triangle from the list opens every album on your card by its cover, as a wall two across or as a carousel with the album you are on largest and its neighbors overlapping behind it. Select swaps the two, Circle goes back to the list, and whichever you were last in is where TRAX opens next time.
+  <p>Cross opens an album as choosing it in the list would. Held, it starts the album from its first track and goes straight to the Player &mdash; which is the point of standing in front of a wall of covers, since the one you are looking at is usually the one you want. In a shuffle mode the shuffle picks where to begin: you chose an album, not a track in it.</p>
+  <p>An album with no cover file gets an orb drawn for the purpose, so the wall stays a wall rather than a row of gaps. On a Vita you can tap an album to highlight it and tap again to open it, and swipe to move.</p>
+  <p>The albums are indexed once and the index is kept on the card, because reading 43 folders takes 2.2 seconds on a PSP and a gallery that opens by default should not pay that every launch. With the index in hand a gallery launch went from 2313&nbsp;ms to 163.</p></li>
+
+  <li><strong>A card taken out of a Vita <em>may</em> be noticed.</strong> When it is, the list and the gallery empty and say which folder has gone, instead of offering albums that are not there and answering &ldquo;cannot play that item&rdquo; one row at a time; put the card back and everything returns with nothing pressed.
+  <p>It is only fair to say this is unfinished. A Vita goes on answering for a card that has left the slot: the folder still exists, it still lists what it used to hold, <code>sceAppMgrGetDevInfo</code> will not discuss the game card at all, and the firmware will even hand over a file&#x27;s contents after the card has gone. The one signal that ever changes is the listing eventually going empty, and it does not always change &mdash; one pull was noticed within two seconds and the next was not noticed at all. So TRAX looks, and when it sees it says so. Navigating anywhere finds out for certain, which is the part that has always worked.</p></li>
+</ul>
+  <h3>Changed</h3>
+<ul>
+  <li><strong>Covers appear before the rows they belong to.</strong> A folder of albums used to arrive and then fill in, one cover a frame. The covers for the rows about to be shown are now read before the list is drawn, straight from the cache on this thread rather than asked of the background worker and waited for &mdash; the waiting was a spin with no sleep in it, and what it waited for was a thread that deliberately stands down while music plays. It logged &ldquo;0 of 1 ready in 250&nbsp;ms&rdquo;; it now reads 1 of 1 in 35.</li>
+
+  <li><strong>A cover is cached at the size it is drawn.</strong> The cache held two sizes, the Player&#x27;s and a list row&#x27;s, and the gallery draws something between them &mdash; so every gallery cover was decoded from the original every single time, and the gallery behaved as though it had no cache at all. At the size it actually draws, a cover is a 64&nbsp;KB read and no arithmetic.</li>
+
+  <li><strong>Changing the music folder rereads it once, when you stop choosing.</strong> Three places rotate in a ring and the folder was read on each keypress, so reaching the third read the first two on the way past. It now waits until the choice stands still, and rebuilds the album index too &mdash; which it never did, so the gallery went on showing the albums of the card you had just swapped out.</li>
+
+  <li><strong>An empty gallery says which of the two things it is.</strong> &ldquo;No albums found&rdquo; appeared the instant a folder changed, because the count was nought for the second before the walk had been anywhere &mdash; telling somebody who had just chosen a card that it was empty before anything had looked at it. It now says &ldquo;Reading grw0:/MUSIC&rdquo; while the walk runs, and names the folder in either message.</li>
+</ul>
+  <h3>Fixed</h3>
+<ul>
+  <li><strong>A folder&#x27;s cover was decoded again on every play.</strong> The Player had two paths: a cue album&#x27;s art went through the cache, and a picture found in a folder did not, on the grounds that a plain folder was not ours to write in. The list and the gallery had been writing there all along, so the Player was the only caller keeping a rule nobody else kept &mdash; and paid for it by decoding the whole original every time a track started. On a Vita that was 3851&nbsp;ms for a 1900-pixel cover, with a copy at exactly the size wanted lying unread beside the file.</li>
+
+  <li><strong>Waking a PSP in the carousel left it taking no notice of anything.</strong> It had not stopped &mdash; it was drawing sixty frames a second throughout &mdash; but a suspend loses the pad&#x27;s analog sampling mode, and sampling in digital mode reports the stick as 0. Zero is not the centre: it reads as a direction held down, so the carousel pulled back every step taken in it. There is a power callback now to set the pad up again, a read that did not happen reports the stick centred rather than whatever was on the stack, and the flag the Home menu sets is <code>volatile</code>, which it should always have been.</li>
+
+  <li><strong>The left-hand cover flickered between the orb and the artwork.</strong> A tile was handed out without being told which album it now held, so the picture arrived in a tile nobody was looking for, the album asked again, and being busy meant the orb was drawn instead &mdash; orb, artwork, orb, for as long as you looked at it, leaking the decoded texture on every turn.</li>
+
+  <li><strong>Album labels were unreadable on a PSP.</strong> Four things were wrong and only the last of them was the one being seen: a missing <code>text_begin()</code>, a font size multiplied by the layout scale, names fitted at one size and drawn at another &mdash; and then blending, without which a PGF glyph&#x27;s soft edges land as opaque squares.</li>
+
+  <li><strong>A use-after-free in the browser&#x27;s name pool.</strong> Adding a name that already lived in the pool could read from freed memory when the pool grew, which is the kind of fault that shows up as something else entirely, somewhere else entirely.</li>
+
+  <li><strong>Text that is not UTF-8 is Windows-1252, not Latin-1.</strong> Smart quotes, dashes and ellipses in tags and cue sheets came out as stray boxes because the bytes 0x80&ndash;0x9F were being widened as though they were Latin-1 control codes.</li>
+
+  <li><strong>A cue album&#x27;s audio file was indexed twice by global shuffle</strong> &mdash; once as the sheet&#x27;s tracks and again as the file itself.</li>
+</ul>
+</section>
+
+<section id="new-in-beta-5">
+  <h2>New in beta 5</h2>
+  <h3>Added</h3>
+<ul>
+  <li><strong>Global shuffle.</strong> A sixth play mode that plays any track under your music folder rather than the folder you are looking at. It was asked for, and it turned out to be mostly a question of what <em>not</em> to do.
+  <p>Reading a full card takes seconds, so it asks before it starts, and then shows a bar with a Cancel while it reads. The bar counts the folders at the top level of your music folder &mdash; the only total that can be known without reading the card twice &mdash; so it moves unevenly if your folders are very different sizes. Cancelling keeps nothing: part of a card is not a shuffle of it.</p>
+  <p>The list it plays from is not a queue. Five thousand tracks as queue entries would be seven megabytes, which a PSP has not got; instead each folder&#x27;s path is stored once with a sixteen-byte locator per track, and no file is opened at all &mdash; a name is enough to know a track exists. On a real card that is 1536 tracks in 2.1 seconds and 70&nbsp;KB on a PSP, 1430 tracks in 1.5 seconds on a Vita. It is let go of the moment playback stops, and says in the log what it released.</p>
+  <p>An album with a cue sheet contributes its tracks, not the one long file they live in. It plays your card through once and stops, and it is the one mode TRAX deliberately does not remember between launches &mdash; so that a press of Cross out of habit never starts a read of your whole card.</p></li>
+</ul>
+  <h3>Changed</h3>
+<ul>
+  <li><strong>Starting the app is about a hundred times quicker.</strong> With a folder of 133 tracks remembered from last time, a PSP took sixteen seconds of black screen to draw its first frame and now takes 125&nbsp;ms; a Vita took six or seven seconds and now takes about a hundred.
+  <p>None of that work needed doing before anything was drawn. Resuming used to reopen the folder <em>and</em> build a queue from it <em>and</em> open the track &mdash; which is to say it entered a folder and pressed Cross for you, and pressing Cross is the expensive half. It reads a directory listing now and nothing else.</p></li>
+
+  <li><strong>Resume puts the cursor on your track instead of opening it.</strong> TRAX comes up in the folder you were playing from, with the track highlighted and its position remembered; press Cross and it carries on from where you were. It no longer opens the file, or starts paused, at launch. Move the cursor or leave the folder and the remembered position is forgotten, because a position means nothing anywhere but where it was taken.</li>
+
+  <li><strong>Starting a track went from two to four seconds to about half a second,</strong> measured from the button to the first audible sample. Four separate things were in the way, and only one of them was where it looked:
+  <p>Queueing a folder opened <em>every file in it</em> to decide whether its long name or its 8.3 name was the one that worked &mdash; 128 opens for one track. An mp3&#x27;s length could only be had by scanning the whole file, because the header reader knew FLAC and WAV and had no third case. The folder&#x27;s cover art was looked for by reading the whole directory again on every track. And everything that read the card did so <em>after</em> the decoder had started filling its buffers, where the same work costs about five times as much.</p>
+  <p>Now the one track that plays is resolved at the moment it plays, mp3 lengths come from a Xing, Info or VBRI frame count &mdash; or from the bitrate, but only after a dozen frame headers agree about it &mdash; the folder&#x27;s cover answer is kept, and every read a track needs happens in the silence before the stream opens. What is left is the decoder finding its first frame, which belongs to the files rather than to TRAX.</p></li>
+
+  <li><strong>Album art stays on screen instead of being fetched again for every track.</strong> An album where each track carries its own copy of the same sleeve used to throw the sleeve away and decode it afresh on every skip, the panel visibly losing its art and getting it back. TRAX recognised a cover by the file it came from, and a cover living inside a track&#x27;s tags has no file; it has an identity of its own now.</li>
+
+  <li><strong>Track lengths are measured while the music plays, not while you browse.</strong> Walking into a folder of 133 files used to spend about four seconds of card work measuring every track in it, which held the list at fifteen frames a second and made everything feel slow &mdash; including the button press that starts a track. Nothing in the list ever showed a length; they are for the cassette&#x27;s tape, and the tape fills them in over the first minute of listening instead.</li>
+
+  <li><strong>Neither machine suspends itself under a playing track any more.</strong> Nothing in TRAX had ever told either console that something was happening, so a long album could be cut off part way by the console&#x27;s own idle timer. Only the suspension timer is cancelled, and only while the music actually plays: TRAX turns the backlight off itself when the screen-off setting asks, and an album paused and put down is a fair reason for a handheld to sleep. It needs no privilege, so an unmodified PSP keeps playing too.</li>
+
+  <li><strong>Browsing no longer opens every file it lists.</strong> The list opened each file to decide whether its row should be greyed out, which is what made opening a folder cost more than reading the whole card does. A file that will not open now looks like any other until you choose it, and then says so.</li>
+</ul>
+  <h3>Fixed</h3>
+<ul>
+  <li><strong>Global shuffle could not play some files on a PSP.</strong> A name with a typographic apostrophe in it &mdash; <code>Eric&#x2019;s</code> rather than <code>Eric&#x27;s</code> &mdash; is sometimes a name a PSP will hand back and then refuse to open again. Every other part of TRAX had always tried the old 8.3 name as a second chance; the new index had not, so an album that played perfectly from the list would stop a global shuffle dead.</li>
+  <li><strong>The player said &ldquo;repeat&rdquo; while global shuffle was playing.</strong> The mode indicator under the progress bar ended its list of cases with a catch-all that drew the repeat symbol, so a mode added later inherited it. Every mode names itself now, and one with no symbol of its own draws nothing &mdash; a missing icon being a smaller lie than a wrong one.</li>
+  <li><strong>One unplayable file no longer stops the rest of the group.</strong> Playback steps over it and carries on, and gives up only if nothing in the folder will open.</li>
+</ul>
+</section>
+
+<section id="new-in-beta-4">
+  <h2>New in beta 4</h2>
+  <h3>Added</h3>
+<ul>
+  <li><strong>TRAX runs on a PS&nbsp;Vita.</strong> A native <code>.vpk</code>, not the PSP build under Adrenaline: it draws at 960&times;544, reads the Vita&#x27;s own storage, and is the same player throughout &mdash; the same browser, the same cassette, the same skins, the same settings.
+  <p>It came from one tree rather than a fork. The app moved into <code>src/core/</code>, which both machines compile, and each keeps only a shell of its own: a PSP&#x27;s <code>main.c</code> is now twenty-five lines. Where the two genuinely disagree there is a seam with a header explaining what the question is &mdash; how to open a folder, what a texture is, where the app may write &mdash; and each machine answers it its own way. The PSP&#x27;s build came out byte-identical across the split.</p>
+  <p><strong>Music can be in three places,</strong> and TRAX asks which the first time more than one of them has anything in it: <code>ux0:/music</code> on the console itself, <code>grw0:/MUSIC</code> on a card in the game card slot, or <code>uma0:/MUSIC</code>. Settings changes it afterwards.</p>
+  <p><strong>The touchscreen drags the progress bar.</strong> That is all it does for now &mdash; the list, the menus and everything else are buttons, exactly as on a PSP.</p>
+  <p><strong>Lyrics work over Wi-Fi,</strong> through mbedTLS. The Vita&#x27;s own TLS refused the handshake outright, so TRAX carries its own and opens the socket underneath it.</p></li>
+
+  <li><strong>ATRAC3plus plays on the Vita too,</strong> through <code>SceAudiocodec</code> &mdash; the firmware&#x27;s own codec module, which the public SDK loads but declares nothing of. Worth saying plainly: TRAX itself claimed for a while that this was impossible, and gave three good reasons in a comment. All three were true and none of them meant what they were taken to mean. What settled it was looking at what another Vita player actually calls, rather than reading the SDK&#x27;s headers again.</li>
+
+  <li><strong>Skins can be drawn for each machine.</strong> A <code>skin.json</code> names pixels, and a Vita&#x27;s are not a PSP&#x27;s, so the two now carry separate artwork and geometry. The hub is shared, being scaled to whatever hole it is drawn into. A Vita skin may be a full 960&times;544 and is kept at that size rather than squeezed down and stretched back.</li>
+</ul>
+  <h3>Fixed</h3>
+<ul>
+  <li><strong>A file whose name ran past 159 bytes could not be played.</strong> It appeared in the list, greyed out and impossible to select. This affected both machines and had been there from the start.
+  <p>It was reported as a problem with Japanese text, and it is not, quite: the limit counts bytes, and a Japanese character takes three of them, so a Japanese title reaches it at about fifty-three characters where an English one takes a hundred and fifty-nine. The name was cut as it came off the card, which took the <code>.mp3</code> off the end &mdash; so TRAX decided the file was not audio, and the shortened name would not have opened anything anyway.</p>
+  <p>Names are held whole now, in one block for the folder rather than in fixed-size fields. Fifty ordinary tracks use about two kilobytes for their names where thirty-two were reserved before, so this costs less memory than it replaced.</p></li>
+
+  <li><strong>mbedTLS was missing from the About page&#x27;s credits</strong> on both machines. It has been linked in for as long as lyrics have been fetched over TLS, and a list of what a program is built from is worse for quietly leaving one out than for being short. Each machine names its own now: vita2d, the VitaSDK and FreeType on one, intraFont and the PSPSDK on the other, and neither carries the other&#x27;s.</li>
+</ul>
+  <h3>Changed</h3>
+<ul>
+  <li><strong>Dragging the scrub no longer stacks up seeks.</strong> A new one used to go out every few frames whether or not the last had landed, which on a file the decoder has to search through meant each request threw away the one already running. It waits for the outstanding one now; letting go still sends wherever you left it.</li>
+  <li><strong>The About page lays itself out by measuring,</strong> rather than at heights written down for one screen and one font, and sizes itself to fit whatever it has to say. This rearranges the page on a PSP as well, where it should look much the same and is put together rather differently underneath.</li>
+</ul>
+</section>
+<section id="new-in-beta-3">
+  <h2>New in beta 3</h2>
+  <h3>Removed</h3>
+<ul>
+  <li><strong>Refresh (○) is gone from the list&#x27;s bar.</strong> It had been labelled there since the first build and never wired up, because the rescan it promised turned out to be answering a question the PSP does not ask. Circle still goes up a level, which is what a list does everywhere and needs no label.</li>
+</ul>
+  <h3>Added</h3>
+<ul>
+  <li><strong>ATRAC3 and ATRAC3plus</strong> in <code>.at3</code>, decoded on the Media Engine &mdash; the PSP&#x27;s own format, and the one everything SonicStage ever put on a memory stick is in. An <code>.at3</code> is a RIFF WAVE, so it arrives at the same branch a WAV does and the format tag decides; rather than match that tag against ATRAC3&#x27;s two spellings, one of which hides inside an extensible header&#x27;s GUID, TRAX offers anything it cannot make PCM of to the library and lets it answer. The library reads the file itself, so a track is fed from the card as it drains rather than held in memory.
+  <p>Tracks bought from Sony&#x27;s Connect store are OpenMG-protected. Those cannot be played, by this or anything else, and nothing in TRAX can change that.</p>
+  <p>Heard on a PSP-1000: three ATRAC3plus tracks open, stream and play, their lengths agreeing with what the files say to the millisecond, and a track change hands one decoder over to the next without either growing.</p></li>
+  <li><strong>Lyrics text size,</strong> in Settings: Default, Medium or Large. The line being sung sets the scale and the lines around it follow in proportion, spacing with them, so the block keeps its shape at any of them &mdash; larger just means fewer lines on a screen 272 pixels tall. Asked for, and worth having: nobody reads a PSP at arm&#x27;s length as easily as whoever picked the first size did.</li>
+</ul>
+</section>
+<section id="new-in-beta-2">
+  <h2>New in beta 2</h2>
+  <h3>Added</h3>
+<ul>
+  <li><strong>Opus</strong> in <code>.opus</code>, tags and cover art included &mdash; a fifth format.</li>
+  <li><strong>Lyrics,</strong> fetched by the PSP itself from lrclib.net over its own Wi-Fi. A visualization of their own: each line lights as it is sung, and Up and Down read back over what has been. They are kept in a <code>LYRICS</code> folder at the root of the card, with your music&#x27;s own folders mirrored inside it.</li>
+  <li><strong>VU meters:</strong> a pair of analog movements marked in VU and spaced by voltage as a real face is, with needles on a spring and a peak lamp.</li>
+  <li><strong>A build for a PSP that was never modified.</strong> Signed, so official firmware will run it, and shipped beside the usual one as <strong>TRAX OFW</strong>. What it gives up is under Known limitations.</li>
+  <li><strong>The headphone remote.</strong> Play, pause, forward and back from Sony&#x27;s Remote Commander &mdash; on either firmware, and with the screen off, which is where a remote earns its keep.</li>
+</ul>
+  <h3>Changed</h3>
+<ul>
+  <li><strong>Holding Select opens the list of visualizations</strong> whatever the firmware, and the equalizer is the last entry in it &mdash; so it can be reached where there is no ♪ button to read. A tap of Select now closes the equalizer; before, it did nothing there.</li>
+  <li><strong>What the buttons do follows whether <code>trax_kernel.prx</code> loaded,</strong> not which build it is. With the helper, beta 1 exactly: ♪ opens the equalizer. Without it, holding △ for two thirds of a second does.</li>
+  <li><strong>A release carries both builds,</strong> <code>TRAX</code> and <code>TRAX OFW</code> side by side, with the documents beside them rather than inside the app&#x27;s own folder.</li>
+  <li><strong>An <code>.lrc</code> is no longer listed</strong> in the browser, wherever it sits. There was never anything to be done with one there.</li>
+</ul>
+  <h3>Fixed</h3>
+<ul>
+  <li><strong>Opus crashed on the first track.</strong> The decoding thread&#x27;s stack was 16 KB, which suited every other format; Opus decodes through arrays on the stack and overran it. It is 64 KB now.</li>
+  <li><strong>Opus froze the interface for two or three seconds</strong> as a track began, measuring the file a second time to read its tags &mdash; which on a memory stick means seeking to the end and working back. The tags are read from the front of the file instead, which brought Opus cover art with it.</li>
+  <li><strong>Choosing the equalizer from the list of visualizations did nothing.</strong> The ✕ that chose it was seen again by the equalizer a moment later in the same frame, where ✕ means close, so it opened and shut before anything was drawn.</li>
+  <li><strong>Holding Select on firmware with no helper opened the equalizer directly,</strong> leaving the list of visualizations &mdash; and so the Lyrics view &mdash; unreachable.</li>
+  <li><strong>A popular song came back with &ldquo;no lyrics&rdquo; when lrclib had twenty versions of it.</strong> Every result in a search carries its words in full, so the reply ran past the half megabyte TRAX can hold, and what was left did not parse. A reply too big is now cut back to its last whole result rather than thrown away, and the log says that is what happened instead of blaming the server.</li>
+  <li><strong>A track credited to more than one act found nothing.</strong> lrclib files &ldquo;Dancing with Myself&rdquo; under &ldquo;Billy Idol&rdquo; where the tag says &ldquo;Billy Idol and Generation X&rdquo;, and asking for the longer name returns not one result. Failing everything else, TRAX now asks by title alone and sorts the artist out itself &mdash; one name containing the other, and the length within ten seconds, since the server is no longer the one making sure it is the right act.</li>
+</ul>
+</section>
+<section id="features">
+  <h2>Features</h2>
+  <h3>Formats</h3>
+<ul>
+  <li><strong>MP3.</strong></li>
+  <li><strong>Opus</strong> in <code>.opus</code>, tags and cover art included.</li>
+  <li><strong>FLAC</strong>, including 24-bit at 96 kHz and 192 kHz.</li>
+  <li><strong>WAV:</strong> 8, 16, 24 and 32-bit PCM, 32-bit float, A-law, µ-law, and multichannel (extensible) files.</li>
+  <li><strong>ALAC</strong> in <code>.m4a</code>, with Apple&#x27;s reference decoder.</li>
+  <li><strong>ATRAC3 / ATRAC3plus</strong> in <code>.at3</code>, decoded by the PSP&#x27;s Media Engine. Not OpenMG: a track bought from Sony&#x27;s Connect store will not play.</li>
+  <li><strong>AAC</strong> in <code>.m4a</code>, decoded by the PSP&#x27;s own Media Engine, so the main processor stays free.</li>
+  <li><strong>Cue sheets.</strong> A single-file album with a <code>.cue</code> appears as one album, split into its tracks.</li>
+  <li><strong>Seeking</strong> in every format.</li>
+  <li><strong>Scrubbing</strong> that speeds up the longer it&#x27;s held: normal speed, then 2× after 2 seconds and 3× after 5.</li>
+  </ul>
+  <h3>Browsing</h3>
+<ul>
+  <li><strong>Folders</strong> under <code>ms0:/PSP/MUSIC</code> or <code>ms0:/MUSIC</code>, whichever holds your music. At the first launch TRAX looks in both: it takes the one with something in it, and asks only when both are alike. Settings keeps the answer.</li>
+  <li><strong>Folders come first</strong>, then tracks, each sorted by name.</li>
+  <li><strong>Cue albums</strong> show as one entry, with their cover as a thumbnail, and open like a folder to their numbered tracks. Playing a track queues the whole album from there.</li>
+  <li><strong>Track lengths</strong>, measured in the background while you browse.</li>
+  <li><strong>One line per row.</strong> Long names are cut with &quot;…&quot; (keeping the file extension), and the selected row scrolls to show its full name.</li>
+  <li><strong>A scrollbar</strong> in long folders, and a bold folder path above the list.</li>
+  <li><strong>Accented, Japanese and Korean names.</strong> The Japanese and Korean fonts load only when a name needs them. A file whose long name the PSP can&#x27;t reopen is opened by its short (8.3) name instead.</li>
+  </ul>
+  <h3>Playing</h3>
+<ul>
+  <li><strong>Five play modes,</strong> chosen with the shoulder buttons in the list: Play once, Repeat, Repeat one, Shuffle, and Shuffle and repeat.</li>
+  <li><strong>In the shuffle modes,</strong> tapping ✕ starts on a random track, and holding it starts on the highlighted one.</li>
+  <li><strong>Queues keep their own mode,</strong> so changing the mode in the list doesn&#x27;t affect what&#x27;s already playing.</li>
+  <li><strong>A five-band equalizer</strong> (60 Hz to 12 kHz, ±12 dB) with five presets (Flat, Bass, Treble, Vocal, Loud), opened with the ♪ button. Your settings are saved.</li>
+  <li><strong>The headphone remote.</strong> Sony's Remote Commander pauses, resumes and skips, from anywhere in TRAX and with the screen off — its buttons do not wake it. It needs no custom firmware.</li>
+  <li><strong>An on-screen volume display</strong> when the volume keys are pressed. The PSP draws nothing over TRAX itself.</li>
+  </ul>
+  <h3>Player view</h3>
+<ul>
+  <li><strong>Cover art</strong> from JPEG and PNG, embedded in the file or found in the folder. It looks for <code>folder</code>, then <code>album</code>, then a picture named after the folder, then the first picture.</li>
+  <li><strong>Large covers</strong> of any size, including 16 MB, 2,800-pixel PNGs.</li>
+  <li><strong>While a slow cover decodes,</strong> a glowing white orb turns where it will appear, and the cover cross-fades in over it.</li>
+  <li><strong>A track with no cover</strong> gets the orb in pink, purple and blue light.</li>
+  <li><strong>A track information sidebar</strong> (△): format, codec, sample rate, bit depth and channels.</li>
+  <li><strong>An icon beside the time</strong> shows how the queue is playing.</li>
+  <li><strong>A battery level</strong> in the top left, filled to the charge: green while charging, red at 15% or below.</li>
+  </ul>
+  <h3>Visualizations</h3>
+  <p>Tap Select to swap between the Player and your chosen visualization. Hold Select to choose one.</p>
+<ul>
+  <li><strong>Tape deck:</strong> a cassette whose reels wind at physically correct speeds. It takes skins from <code>SKINS</code>, each a folder with a picture and an optional <code>skin.json</code> for label text and background colors.</li>
+  <li><strong>Orb:</strong> the network orb reacting to the music, each latitude swelling with its own frequency band.</li>
+  <li><strong>Level meter:</strong> stereo LED meters from −48 to 0 dB, with peak-hold markers.</li>
+  <li><strong>Smoke:</strong> twisting ribbons of light that drift sideways and gust now and then.</li>
+  <li><strong>Starfield:</strong> a calm flight through the stars.</li>
+  <li><strong>Sphere matrix:</strong> 16 columns of shaded spheres, each column a frequency band, lighting up and springing larger with the music.</li>
+  <li><strong>VU meters:</strong> a pair of analog movements, marked in VU and spaced by voltage as a real face is, with needles that take 300 ms to the mark and step a little past it.</li>
+  <li><strong>Lyrics:</strong> each line lighting as it is sung, with Up and Down to read back. Triangle fetches them from lrclib.net over Wi-Fi — an exact match first, then a search for the closest version somebody has timed. They are kept in a <code>LYRICS</code> folder at the root of the card, mirroring the music's own folders, so the words are not mixed in among the music and both builds share what either has fetched. An <code>.lrc</code> beside the track still works, and is no longer listed in the browser.</li>
+  <li><strong>The track title</strong> fades in over a visualization when it starts and on each track change.</li>
+  </ul>
+  <h3>Settings and About (Start)</h3>
+<ul>
+  <li><strong>Lyrics text size:</strong> Default, Medium or Large for the words in the Lyrics visualization.</li>
+  <li><strong>Sleep timer:</strong> 15 to 90 minutes, fading out over the last half minute, then pausing.</li>
+  <li><strong>Screen off while playing:</strong> after 30 seconds to 5 minutes without a press. Any button wakes the screen, and it also relights when the music stops. The screen is where most of the battery goes.</li>
+  <li><strong>Resume on launch:</strong> reopens the last track, paused where you left it.</li>
+  <li><strong>About:</strong> version, build date, battery, memory stick free space, helper module status, loaded fonts, and credits for the libraries TRAX uses.</li>
+  </ul>
+  <h3>Look and feel</h3>
+<ul>
+  <li><strong>Smooth 12-pixel icons</strong> for the PSP&#x27;s buttons and the play modes, anti-aliased rather than pixel-plotted.</li>
+  <li><strong>Text drawn at the fonts&#x27; native size,</strong> pixel for pixel like the PSP&#x27;s own menus.</li>
+  <li><strong>TRAX name and icon</strong> in the XMB.</li>
+  </ul>
+</section>
+<section id="engineering-improvements">
+  <h2>Engineering improvements</h2>
+  <h3>Memory</h3>
+<ul>
+  <li><strong>The main thread&#x27;s stack no longer overflows.</strong> The play queue (about 190 KB) and cue-sheet structures (about 32 KB) had been on its 256 KB stack. On a real PSP that ended in a black screen; the emulator never enforced it.</li>
+  <li><strong>Covers are scaled down as they decode,</strong> instead of being decoded full size first.</li>
+  <ul>
+    <li>A 1,500-pixel PNG used to need 8.6 MB and now needs only the thumbnail.</li>
+    <li>A 16.7 MB, 2,843-pixel cover now decodes in 1.8 MB, where it couldn&#x27;t be opened at all before.</li>
+    <li>Covers stream from the file rather than being loaded into memory first, so there&#x27;s no size limit.</li>
+    </ul>
+  <li><strong>Skipping stops a cover&#x27;s decode.</strong> A progressive JPEG holds up to 12 MB for the ten seconds it decodes. When you skip, that memory is released before the next file opens.</li>
+  <li><strong>The Japanese and Korean fonts load only when needed,</strong> leaving about 3 MB more free for most music libraries.</li>
+  <li><strong>ALAC buffers are sized correctly.</strong> One track asked for 2.3 MB instead of 30 KB, which failed once memory was fragmented.</li>
+  <li><strong>Skins are built before the old one is released,</strong> so a failed load no longer leaves nothing on screen.</li>
+  <li><strong>No leaks.</strong> Damaged covers had leaked everything decoded so far: 38 MB over 5,000 test images. A 5-hour-52-minute soak test (468 tracks, every visualization) ended with the heap exactly as it started, and heap use held at 3.6–4.1 MB throughout.</li>
+  <li><strong>Size fields from files are capped,</strong> so a damaged header can&#x27;t ask for an absurd buffer or wrap round to a tiny one on the PSP&#x27;s 32-bit system.</li>
+  </ul>
+  <h3>Crash and safety fixes</h3>
+  <p>Most of these were found by fuzzing: millions of deliberately damaged files run through the file readers on the Mac with AddressSanitizer and UndefinedBehaviorSanitizer.</p>
+<ul>
+  <li><strong>Mono AAC</strong> overran a buffer by 4 KB.</li>
+  <li><strong>Damaged MP4 box sizes near 4 GB</strong> slipped past the bounds checks, and the reader then read far past the end of the file&#x27;s index. The same pattern was fixed in the MP4 sample tables and in the ALAC configuration.</li>
+  <li><strong>Apple&#x27;s ALAC decoder</strong> trusted its input in six ways: sample counts, channel counts, and reads past the end of a packet. All six are fixed and marked in the source.</li>
+  <li><strong>An MP3 tag with an empty text field</strong> crashed the app.</li>
+  <li><strong>FLAC comment lengths</strong> could wrap round. <strong>Float WAVs containing NaN</strong> produced undefined samples.</li>
+  <li><strong>A 1 KB fake JPEG</strong> claiming 65,000 pixels a side asked for gigabytes of memory.</li>
+  <li><strong>Oversized PNG dimensions</strong> in covers, skins and icons could wrap round to a small allocation.</li>
+  <li><strong>Bad directory data from the memory stick</strong> caused an exception; it&#x27;s now checked before use.</li>
+  <li><strong>File paths</strong> are only used when they fit their buffers whole. The build now has no compiler warnings.</li>
+  </ul>
+  <h3>Bug fixes</h3>
+<ul>
+  <li><strong>Accented letters drew as the wrong character,</strong> for example &quot;Río&quot; came out with a capital I. The cause was a font caching option.</li>
+  <li><strong>Some files with non-ASCII names</strong> couldn&#x27;t be opened; they now open by their short name.</li>
+  <li><strong>The cassette flickered on real hardware.</strong> Four causes were fixed: a stale graphics texture cache, a frame being shown while still being drawn (fixed with triple buffering), sprites on fractional pixels, and textures too wide for the graphics chip&#x27;s cache.</li>
+  <li><strong>PNG covers didn&#x27;t work.</strong></li>
+  <li><strong>AAC was refused entirely,</strong> and once it played, its first second was garbled.</li>
+  <li><strong>ALAC tracks</strong> sometimes failed with &quot;Couldn&#x27;t play&quot; after several tracks.</li>
+  <li><strong>FLAC seeking</strong> failed through the new block reader.</li>
+  <li><strong>The equalizer</strong> closed the whole player instead of just itself, and didn&#x27;t save changes made with Up/Down.</li>
+  <li><strong>16-bit FLAC and WAV</strong> are now bit-exact. Every sample had been scaled down by a hair.</li>
+  <li><strong>Long names</strong> spilled into the row below, and list text was slightly blurred from being drawn at 0.9 size.</li>
+  <li><strong>A repeated track&#x27;s cover</strong> blinked on every loop.</li>
+  <li><strong>Opus crashed,</strong> then froze the interface for seconds at each track: a 16 KB decoder stack it decodes past, and a second pass over the file to read tags.</li>
+  <li><strong>The equalizer could not be chosen</strong> from the list of visualizations: the press that chose it was read again as the press that closes it.</li>
+  <li><strong>The top of the cover</strong> now and then showed half drawn for a frame. The display was picking up the next frame while it was still being drawn; buffers now change only at a vertical sync.</li>
+  </ul>
+  <h3>Speed</h3>
+<ul>
+  <li><strong>Opening an MP3</strong> no longer reads the whole file. Finding a tag at the very end was taking 2.3 seconds of the 2.55 seconds needed to open a 9 MB track.</li>
+  <li><strong>Streaming reads the card in 128 KB aligned blocks</strong> instead of 1 KB pieces.</li>
+  <ul>
+    <li>A 24-bit/192 kHz FLAC had been 630 card reads a second.</li>
+    <li>On one card, misaligned reads took 123 ms per block against 8 ms aligned.</li>
+    <li>Hi-res FLAC now plays cleanly even at a 222 MHz processor speed.</li>
+    </ul>
+  <li><strong>Covers decode on their own low-priority thread,</strong> and step aside whenever the audio buffer dips.</li>
+  <li><strong>A cover is read from the card in the gap between tracks,</strong> not during playback. That took underruns from 50 to 0.</li>
+  <li><strong>Cue album covers are cached</strong> after the first decode. The Technotronic cover took 15 seconds on every play before.</li>
+  <li><strong>Track lengths</strong> are read from the file handles the folder scan already opens.</li>
+  <li><strong>Drawing:</strong></li>
+  <ul>
+    <li>Circles use 4.1× fewer vertices.</li>
+    <li>The skin is drawn in strips that fit the graphics chip&#x27;s 8 KB texture cache.</li>
+    <li>Icons are rendered once at startup.</li>
+    <li>Each visualization element is one batched draw call.</li>
+    <li>Sines come from a lookup table.</li>
+    </ul>
+  <li><strong>AAC output</strong> is read through the cached view of memory; reading through the uncached one cost more than decoding.</li>
+  <li><strong>The music analysis</strong> runs only while a visualization is showing, below the decoder&#x27;s priority.</li>
+  </ul>
+  <h3>ATRAC</h3>
+<ul>
+  <li><strong>The second buffer.</strong> sceAtrac refuses every seek with <code>NEED_SECOND_BUFFER</code> until it has been handed a slice from near the end of the track, held apart from the streaming one so it can reach the end without the ring having got there. It says where and how much &mdash; 376 bytes for a 57-second track &mdash; and a track short enough not to need one says so instead. Playing worked without it; only scrubbing gave the game away.</li>
+  <li><strong>Nothing to discard at the start.</strong> AAC arrives with 2,112 samples of encoder run-up that have to be dropped. ATRAC has none: the first frame off the Media Engine is already music. The emulator suggested otherwise &mdash; it returns near-silence there &mdash; and following it would have taken 27 ms off the front of every track, quietly.</li>
+  <li><strong>The format tag is not worth matching.</strong> An <code>.at3</code> is a RIFF WAVE, so it lands where a WAV does, but ATRAC3plus hides behind an extensible header whose SubFormat GUID reads as tag <code>0xAABF</code> under the usual &ldquo;first two bytes&rdquo; rule, and declares 0 bits per sample. Anything <code>wav_parse</code> cannot make PCM of is offered to the library instead, which knows what it can decode.</li>
+</ul>
+  <h3>Networking</h3>
+  <p>Fetching the words for a track is the first thing TRAX does over the air, and none of it was a given on a 333 MHz machine.</p>
+<ul>
+  <li><strong>TLS 1.2 on the PSP itself.</strong> lrclib.net is HTTPS only. It offers ECDHE-ECDSA with ChaCha20-Poly1305, which is the one modern suite this processor is happy with: ChaCha is arithmetic it can do, and an ECDSA certificate is far cheaper to check than an RSA one. The trust roots are compiled in rather than taking whatever answers &mdash; a player that skipped that would take words, or anything else, from whoever else was on the Wi-Fi.</li>
+  <li><strong>Three megabytes are kept back from the heap,</strong> because the heap had been taking the whole partition and the system&#x27;s network modules then had nowhere to load: 220 KB free, and the module refused. The log&#x27;s opening line now says how much is outside the heap, so this cannot go quietly wrong again.</li>
+  <li><strong>The PSP&#x27;s clock is read directly.</strong> newlib&#x27;s <code>time()</code> never reaches the hardware clock &mdash; it answers as though it were 1970, so every valid certificate &ldquo;starts in the future&rdquo; and was refused, on a PSP whose own clock was right.</li>
+  <li><strong>Chunked replies are reassembled</strong> before anything tries to read them. Cloudflare sends this API&#x27;s answers as a series of lengths with data between them, and handing that to a JSON parser looked exactly like &ldquo;no lyrics for this track&rdquo;.</li>
+  <li><strong>A busy server is retried</strong> three times, two seconds apart, and named as such: lrclib answers 503 often enough to be worth telling apart from a fault.</li>
+  <li><strong>An album&#x27;s tracks each keep their own file.</strong> They share one audio file, so they had all written to one <code>.lrc</code>, each fetch overwriting the last, and the times then belonged to a different track.</li>
+</ul>
+  <h3>Testing and tools</h3>
+<ul>
+  <li><strong>A fuzzer</strong> for every file reader under AddressSanitizer and UndefinedBehaviorSanitizer (<code>tools/fuzz</code>), with leak checks.</li>
+  <li><strong>Decodes are bit-exact against ffmpeg,</strong> checked for FLAC, WAV and ALAC.</li>
+  <li><strong>A soak-test build (TRAX SOAK)</strong> that presses buttons by itself for hours and logs memory and thread stacks.</li>
+  <li><strong>A visualization preview renderer</strong> (<code>tools/vispreview</code>) that renders any visualization to video with a track&#x27;s sound.</li>
+  </ul>
+</section>
+<section id="known-limitations">
+  <h2>Known limitations</h2>
+<ul>
+  <li>Pulling the card a Vita&#x27;s music is on is only sometimes noticed while TRAX is sitting still; see the note above. Moving around the list or the gallery finds out reliably.</li>
+  <li><strong>Music stops while a PS&nbsp;Vita is in standby.</strong> Tapping the power button suspends TRAX along with the console; tapping again wakes it where it left off, in the same track at the same place. Playing on with the console asleep means handing the audio to the system&#x27;s own player, which would cost TRAX its decoders, its equalizer and the cassette&#x27;s place on the tape. Plugins exist that give any app background playback, installed into the console rather than into TRAX.</li>
+
+  <li><strong>Global shuffle&#x27;s progress bar moves unevenly</strong> when the folders at the top level of your music folder hold very different numbers of tracks. It counts folders because that is the only total available without reading the card twice, so ten big folders and eight small ones will crawl and then leap. It is honest about how much is left, not about how long it will take.</li>
+
+  <li><strong>An mp3 with no tag takes longer to start</strong> &mdash; about half a second rather than a third of one. Without an ID3 tag to say where the audio begins, the decoder has to hunt for the first frame, and some rips put several hundred bytes of nothing in front of it. Adding tags to such files fixes it, and so does nothing TRAX can do.</li>
+
+  <li><strong>A FLAC with a large padding block is slow to start,</strong> however small the music is. Some taggers leave megabytes of empty space in a file after editing it, and the decoder has to read through all of it to reach the audio. <code>metaflac --remove --block-type=PADDING --dont-use-padding</code> takes it out, and makes the files smaller into the bargain.</li>
+
+  <li><strong>Search (△)</strong> is labelled in the list&#x27;s bar but not implemented yet. On both machines.</li>
+  <li><strong>On a PS&nbsp;Vita,</strong> three things are worth knowing:
+    <ul>
+      <li><strong>Skins of your own</strong> go in <code>ux0:/data/trax/SKINS</code>, and a Vita&#x27;s may be a full 960&times;544.</li>
+      <li><strong><code>uma0:/MUSIC</code> has never been tested,</strong> for want of a card that mounts there. It costs nothing if you have none: a folder that is not there reads as empty and is never chosen on its own.</li>
+      <li><strong>The touchscreen only drags the progress bar.</strong> Scrolling the list by hand, tapping a row, and the rest of it are not done.</li>
+    </ul>
+  </li>
+  <li><strong>On a PSP that was never modified</strong> &mdash; the <strong>TRAX OFW</strong> build &mdash; four things are missing, and none of them can be worked around in software:
+    <ul>
+      <li><strong>No Wi-Fi,</strong> so no fetching lyrics. The PSP&#x27;s WPA2 support comes from ARK-4&#x27;s plugin; official firmware manages only WEP, WPA, or a router left in mixed WPA/WPA2 mode. Everything else about Lyrics works, including <code>.lrc</code> files you copy into <code>LYRICS</code> yourself.</li>
+      <li><strong>No screen off while playing,</strong> which is where most of the battery goes.</li>
+      <li><strong>No volume display.</strong></li>
+      <li><strong>No ♪ button.</strong> Volume, ♪, screen and hold can only be read in kernel mode, and signed homebrew is user mode only. Holding △ for two thirds of a second opens the equalizer instead.</li>
+    </ul>
+  </li>
+  <li><strong>With custom firmware,</strong> those three need <code>trax_kernel.prx</code> beside the EBOOT. Without it TRAX still runs, and behaves as it does on official firmware.</li>
+  <li><strong>Mono AAC</strong> has been fixed and fuzzed but not yet heard on a PSP.</li>
+  <li><strong>Plain ATRAC3 on the Vita</strong> is written and has not been heard: every sample to hand was ATRAC3plus, which has been. The two go through one code path.</li>
+  <li><strong>Plain ATRAC3</strong> has not been heard on a PSP either. Every sample to hand was ATRAC3plus, and the two go through one code path, but that is an argument rather than a test.</li>
+  <li><strong>Scrubbing an ATRAC track</strong> has been proven on the emulator and not yet on hardware. It is the part the second buffer exists for, so it is the part worth trying first.</li>
+  <li><strong>A large progressive JPEG cover</strong> is still the tightest moment for memory: about 2.3 MB free at its peak, with the Japanese font loaded.</li>
+  <li><strong>Sony&#x27;s fonts</strong> (<code>ltn8.pgf</code>, <code>jpn0.pgf</code>) must not be included in a distributed build. A PSP loads them from its own system storage.</li>
+  </ul>
+</section>
+  </main>
+</div>
+</body>
+</html>

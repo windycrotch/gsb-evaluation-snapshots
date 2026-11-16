@@ -1,0 +1,762 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>TRAX Manual</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:ital,wght@0,400;0,700;1,400&family=Chakra+Petch:wght@500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* The wordmark's face: The Rave Is In Your Pants by NALGames, 2013,
+   freeware for non-commercial use. Cut down to the letters used. */
+@font-face {
+  font-family: "The Rave Is In Your Pants";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url(data:font/ttf;base64,AAEAAAANAIAAAwBQR1BPU9WK5I8AAAWEAAAAWkdTVUJsjHSFAAAF4AAAABpPUy8yQxNqggAAAVgAAABgY21hcACzAVoAAAHQAAAAVGdhc3D//wADAAAFfAAAAAhnbHlm40xIbQAAAjQAAAFmaGVhZByhT4QAAADcAAAANmhoZWEQLAiNAAABFAAAACRobXR4LOwAAgAAAbgAAAAYbG9jYQFlARAAAAIkAAAADm1heHAACQAYAAABOAAAACBuYW1lI5Y66wAAA5wAAAG+cG9zdP8qAJYAAAVcAAAAIAABAAAAAQAA4W8lcl8PPPUACwgAAAAAAM4XWBsAAAAA5tSs9gAAAAAImAV4AAAABgABAAAAAAAAAAEAAAa0/l4A3glgAAAAyAiYAAEAAAAAAAAAAAAAAAAAAAAGAAEAAAAGABgAAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwfjAZAABQAIBZoFMwAAARsFmgUzAAAD0QBmAhIAAAIABQAAAAAAAAAAAAABAAAAAAAAAAAAAAAASEwgIABAAC4AWAWa/mYAzQa0AaIAAAABAAAAAAQABZoAAAAgAAIJYAAAAfQAAAj8AAIINAAAB2wAAAj8AAAAAAACAAAAAwAAABQAAwABAAAAFAAEAEAAAAAMAAgAAgAEAC4AQQBSAFQAWP//AAAALgBBAFIAVABY////0//B/7H/sP+tAAEAAAAAAAAAAAAAAAAAAAAoADMAVgB/AJIAswAAAAEAAAAACJgFeAAVAAABASYVESERNDMyFwEBFjURIREUIyInBEz9CSn+1GQkQAOEAvcpASxkJEACWAHMEk78GAUUZCn90f40Ek4D6PrsZCkAAQAAAAABLADIAAMAADE1IRUBLMjIAAIAAgAACDQFeAAEAA8AAAEmBwEhASEnIQcjATYzMhcD3hM2/l8DtQKL/qyW+zKK8AOGRVggGwQMKk79qP5wyMgFFGQpAAABAAAAAAdsBXgAFwAAASMiFREhERAhITI1NCMhNSEgERAhIwEhAtPfyP7UAfQDhMjI+ogFeAH0/gzeAtL+TAJYyP5wAZABkMjIyP5w/nD9qAAAAQAAAAAGpAV4AAcAAAEhNSEVIREhArz9RAak/UT+1ASwyMj7UAABAAAAAAg0BXgACwAAAQEhAQEhAQEhAQEhA+39QP7hA1L8oAHGAoUCvQEs/KQDWf5BAiT93AKbAt392gIm/WP9JQAAAAAABwBaAAMAAQQJAAAAWgAAAAMAAQQJAAEAMgBaAAMAAQQJAAIADgCMAAMAAQQJAAMATACaAAMAAQQJAAQAMgBaAAMAAQQJAAUAVgDmAAMAAQQJAAYAKAE8AFQAeQBwAGUAZgBhAGMAZQAgAKkATgBBAEwARwBhAG0AZQBzAC4AIAAyADAAMQAzAC4AIABBAGwAbAAgAFIAaQBnAGgAdABzACAAUgBlAHMAZQByAHYAZQBkAFQAaABlACAAUgBhAHYAZQAgAEkAcwAgAEkAbgAgAFkAbwB1AHIAIABQAGEAbgB0AHMAUgBlAGcAdQBsAGEAcgBUAGgAZQAgAFIAYQB2AGUAIABJAHMAIABJAG4AIABZAG8AdQByACAAUABhAG4AdABzADoAVgBlAHIAcwBpAG8AbgAgADEALgAwADAAVgBlAHIAcwBpAG8AbgAgADEALgAwADAAIABKAHUAbAB5ACAAMgA2ACwAIAAyADAAMQAzACwAIABpAG4AaQB0AGkAYQBsACAAcgBlAGwAZQBhAHMAZQBUAGgAZQBSAGEAdgBlAEkAcwBJAG4AWQBvAHUAcgBQAGEAbgB0AHMAAAADAAAAAAAA/ycAlgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAf//AAIAAQAAAAoAHgAsAAFsYXRuAAgABAAAAAD//wABAAAAAWtlcm4ACAAAAAEAAAABAAQAAgAAAAEACAABAA4ABAAAAAIAFgAcAAEAAgACAAQAAQAE/VgAAQAC/UoAAAABAAAACgAWABgAAWxhdG4ACAAAAAAAAAAAAAA=) format("truetype");
+}
+
+:root {
+  --ground: #F3F5F7;
+  --surface: #FFFFFF;
+  --ink: #121A22;
+  --muted: #56636F;
+  --rule: #D8DEE4;
+  --accent: #8F6200;
+  --accent-fill: #FFD060;
+  --accent-soft: #FFF3D1;
+  --sky: #2A7196;
+  --screen: #101820;
+  --screen-ink: #E8EDF1;
+  --screen-dim: #909090;
+  --key: #FFFFFF;
+  --key-edge: #BFC7CF;
+  --tri: #23946F;
+  --cir: #D23E48;
+  --crs: #4B6FCB;
+  --sqr: #C0589A;
+  --display: "Chakra Petch", "Avenir Next Condensed", "Arial Narrow", sans-serif;
+  --body: "Atkinson Hyperlegible", "Segoe UI", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground: #101820;
+    --surface: #17212B;
+    --ink: #E6ECF1;
+    --muted: #97A5B2;
+    --rule: #2A3642;
+    --accent: #FFD060;
+    --accent-fill: #FFD060;
+    --accent-soft: #2B2616;
+    --sky: #70C0E0;
+    --screen: #0B1117;
+    --key: #202C38;
+    --key-edge: #3A4957;
+    --tri: #4CC79D;
+    --cir: #F0646D;
+    --crs: #7C9CF0;
+    --sqr: #E785C2;
+  }
+}
+:root[data-theme="dark"] {
+  --ground: #101820;
+  --surface: #17212B;
+  --ink: #E6ECF1;
+  --muted: #97A5B2;
+  --rule: #2A3642;
+  --accent: #FFD060;
+  --accent-fill: #FFD060;
+  --accent-soft: #2B2616;
+  --sky: #70C0E0;
+  --screen: #0B1117;
+  --key: #202C38;
+  --key-edge: #3A4957;
+  --tri: #4CC79D;
+  --cir: #F0646D;
+  --crs: #7C9CF0;
+  --sqr: #E785C2;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--ink);
+  font-family: var(--body);
+  font-size: 16.5px;
+  line-height: 1.6;
+  padding-inline: 20px;
+  padding-block: 0 64px;
+}
+a { color: var(--sky); text-underline-offset: 2px; }
+a:focus-visible, summary:focus-visible { outline: 2px solid var(--accent-fill); outline-offset: 2px; border-radius: 3px; }
+code, .file { font-family: var(--mono); font-size: 0.86em; background: var(--surface); border: 1px solid var(--rule); border-radius: 4px; padding: 0.05em 0.35em; white-space: nowrap; }
+
+.masthead {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding-block: 40px 28px;
+  border-bottom: 1px solid var(--rule);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  justify-content: space-between;
+  gap: 12px 32px;
+}
+.wordmark {
+  font-family: "The Rave Is In Your Pants", var(--display);
+  font-weight: 400;
+  font-size: clamp(3.4rem, 10vw, 6rem);
+  line-height: 0.92;
+  letter-spacing: 0.02em;
+  margin: 0;
+}
+.masthead p { margin: 8px 0 0; color: var(--muted); max-width: 46ch; }
+.edition {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  color: var(--muted);
+  text-align: right;
+  line-height: 1.5;
+}
+.edition strong { color: var(--ink); font-weight: 500; }
+
+.layout {
+  max-width: 1080px;
+  margin: 0 auto;
+  display: grid;
+  grid-template-columns: 210px minmax(0, 1fr);
+  gap: 48px;
+  padding-top: 32px;
+}
+nav.toc {
+  position: sticky;
+  top: calc(env(safe-area-inset-top, 0px) + 20px);
+  align-self: start;
+  font-size: 0.92rem;
+}
+.toc h2 {
+  font-family: var(--display);
+  font-size: 0.78rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 0 0 10px;
+}
+.toc ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.toc a { display: block; padding: 3px 0 3px 10px; border-left: 2px solid var(--rule); color: var(--ink); text-decoration: none; }
+.toc a:hover { border-left-color: var(--accent-fill); }
+
+main { min-width: 0; max-width: 72ch; }
+section { padding-block: 8px 28px; border-bottom: 1px solid var(--rule); margin-bottom: 28px; scroll-margin-top: 20px; }
+section:last-child { border-bottom: 0; }
+h2 {
+  font-family: var(--display);
+  font-weight: 600;
+  font-size: 1.75rem;
+  line-height: 1.15;
+  letter-spacing: 0.01em;
+  margin: 0 0 12px;
+  text-wrap: balance;
+}
+h3 {
+  font-family: var(--display);
+  font-weight: 600;
+  font-size: 1.12rem;
+  letter-spacing: 0.02em;
+  margin: 26px 0 8px;
+}
+p { margin: 0 0 12px; }
+ul { margin: 0 0 12px; padding-left: 1.2em; }
+li { margin-bottom: 4px; }
+.lede { font-size: 1.08rem; color: var(--ink); }
+
+/* The controls: key column, then what it does. */
+.controls { width: 100%; border-collapse: collapse; margin: 6px 0 16px; font-size: 0.97rem; }
+.controls th {
+  text-align: left;
+  font-family: var(--display);
+  font-size: 0.74rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 600;
+  padding: 0 0 6px;
+  border-bottom: 1px solid var(--rule);
+}
+.controls td { padding: 9px 0; border-bottom: 1px solid var(--rule); vertical-align: top; }
+.controls td:first-child { width: 11.5rem; padding-right: 14px; white-space: nowrap; }
+.controls tr:last-child td { border-bottom: 0; }
+.how { color: var(--muted); font-size: 0.86rem; display: block; margin-top: 3px; }
+
+.key {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  vertical-align: -0.42em;
+  min-width: 1.75em;
+  height: 1.75em;
+  padding: 0 0.4em;
+  border-radius: 999px;
+  background: var(--key);
+  border: 1px solid var(--key-edge);
+  box-shadow: 0 1px 0 var(--key-edge);
+  font-family: var(--display);
+  font-weight: 600;
+  font-size: 0.82em;
+  letter-spacing: 0.04em;
+  color: var(--ink);
+  line-height: 1;
+}
+.key svg { width: 1.05em; height: 1.05em; display: block; }
+.key.face { width: 1.75em; padding: 0; }
+.key.shoulder { border-radius: 0.55em 0.55em 0.3em 0.3em; min-width: 2.1em; }
+.key.pill { font-size: 0.66em; letter-spacing: 0.1em; height: 2.1em; padding: 0 0.8em; }
+.plus { color: var(--muted); margin: 0 0.2em; font-size: 0.85em; }
+.held { font-size: 0.78rem; color: var(--muted); margin-left: 6px; font-style: italic; }
+
+.note {
+  background: var(--accent-soft);
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin: 12px 0 16px;
+  font-size: 0.95rem;
+}
+.note strong { color: var(--ink); }
+
+/* The Player, sketched at the PSP's own 480 x 272. */
+.screen-wrap { margin: 16px 0 8px; overflow-x: auto; }
+.screen {
+  position: relative;
+  width: 100%;
+  max-width: 560px;
+  aspect-ratio: 480 / 272;
+  background: var(--screen);
+  border-radius: 10px;
+  border: 6px solid #05080B;
+  color: var(--screen-ink);
+  font-family: var(--body);
+  overflow: hidden;
+  container-type: inline-size;
+}
+.screen > div { position: absolute; }
+.s-album { top: 2.6%; left: 0; right: 0; text-align: center; font-size: 3cqw; color: var(--screen-dim); }
+.s-count { top: 2.6%; right: 2.5%; font-size: 2.8cqw; color: var(--screen-dim); font-family: var(--mono); }
+.s-batt { top: 3.6%; left: 2.1%; width: 4.2%; height: 3.3%; border: 1px solid var(--screen-dim); border-radius: 1px; }
+.s-batt::before { content: ""; position: absolute; inset: 18%; right: 35%; background: #C8C8C8; }
+.s-batt::after { content: ""; position: absolute; right: -14%; top: 30%; width: 10%; height: 40%; background: var(--screen-dim); }
+.s-cover {
+  left: 2.1%; top: 11%; width: 50%; bottom: 3.7%;
+  width: auto; aspect-ratio: 1;
+  border-radius: 2px;
+  background:
+    radial-gradient(circle at 38% 40%, #E7A6C9 0 16%, transparent 17%),
+    radial-gradient(circle at 60% 58%, #8EA6F2 0 20%, transparent 21%),
+    linear-gradient(135deg, #F6F1E7, #E9E3D6);
+}
+.s-title { left: 57%; right: 3%; top: 38%; font-size: 4.2cqw; font-weight: 700; line-height: 1.15; }
+.s-artist { left: 57%; right: 3%; top: 53%; font-size: 3.2cqw; color: #C8C8C8; }
+.s-bar { left: 57%; right: 3%; top: 81%; height: 2.4%; border-radius: 3px; background: #28303A; }
+.s-bar::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 38%; border-radius: 3px; background: #70C0E0; }
+.s-time { left: 57%; top: 86%; font-size: 2.8cqw; color: var(--screen-dim); font-family: var(--mono); }
+.s-mode { left: 84%; top: 86.6%; width: 2.8%; aspect-ratio: 1; border: 1.5px solid var(--screen-dim); border-radius: 50%; border-right-color: transparent; }
+.s-state { right: 3%; top: 86.4%; width: 0; height: 0; border-left: 1.6cqw solid #80FF80; border-top: 1cqw solid transparent; border-bottom: 1cqw solid transparent; }
+.legend { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 4px 20px; font-size: 0.9rem; color: var(--muted); margin: 10px 0 16px; padding: 0; list-style: none; }
+.legend b { color: var(--ink); font-weight: 700; }
+
+.modes { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; margin: 10px 0 16px; padding: 0; list-style: none; }
+.modes li { background: var(--surface); border: 1px solid var(--rule); border-radius: 8px; padding: 10px 12px; margin: 0; }
+.modes b { font-family: var(--display); font-weight: 600; letter-spacing: 0.02em; display: block; }
+.modes span { color: var(--muted); font-size: 0.9rem; }
+
+.tree-wrap { overflow-x: auto; margin: 8px 0 14px; }
+pre.tree {
+  font-family: var(--mono);
+  font-size: 0.84rem;
+  line-height: 1.55;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin: 0;
+  width: max-content;
+  min-width: 100%;
+}
+pre.tree .c { color: var(--muted); }
+
+dl.formats { display: grid; grid-template-columns: max-content 1fr; gap: 6px 18px; margin: 8px 0 14px; }
+dl.formats dt { font-family: var(--display); font-weight: 600; letter-spacing: 0.03em; }
+dl.formats dd { margin: 0; color: var(--ink); }
+/* A note that belongs to the row above it, not beside it.
+ *
+ * The grid alternates children between the two columns, so a dd with no dt
+ * of its own lands in the max-content column and is sized as if it were a
+ * label: one paragraph took that column to 2683 px, collapsed the other to
+ * 93, and pushed every description off the side of the page in a column of
+ * single words. Spanning both columns keeps it out of that measurement and
+ * keeps the dt/dd pairs after it in the columns they belong to. */
+dl.formats dd.note { grid-column: 1 / -1; }
+
+/* Getting in touch, at the foot of the page. */
+.contact {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding-block: 28px 8px;
+  border-top: 1px solid var(--rule);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 28px;
+  font-size: 0.98rem;
+}
+.contact a { color: var(--ink); text-decoration: none; border-bottom: 1px solid var(--rule); }
+.contact a:hover { border-bottom-color: var(--accent-fill); }
+.handle { display: inline-flex; align-items: center; gap: 10px; color: var(--muted); }
+.handle .logos { display: inline-flex; align-items: center; gap: 10px; color: var(--ink); }
+.handle svg { width: 1em; height: 1em; display: block; }
+
+@media (max-width: 820px) {
+  .layout { grid-template-columns: minmax(0, 1fr); gap: 20px; }
+  nav.toc { position: static; }
+  .toc ol { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+  .edition { text-align: left; }
+}
+@media (max-width: 520px) {
+  .controls td:first-child { width: auto; white-space: normal; }
+  .controls, .controls tbody, .controls tr, .controls td { display: block; }
+  .controls thead { display: none; }
+  .controls td { border-bottom: 0; padding: 0; }
+  .controls td:first-child { padding-top: 10px; }
+  .controls tr { border-bottom: 1px solid var(--rule); padding-bottom: 10px; }
+  dl.formats { grid-template-columns: 1fr; }
+  dl.formats dd { margin-bottom: 6px; }
+}
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+html { scroll-behavior: smooth; }
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="g-tri" viewBox="0 0 20 20"><path d="M10 3.2 17 15.6H3z" fill="none" stroke="var(--tri)" stroke-width="2.1" stroke-linejoin="round"/></symbol>
+  <symbol id="g-cir" viewBox="0 0 20 20"><circle cx="10" cy="10" r="6.4" fill="none" stroke="var(--cir)" stroke-width="2.1"/></symbol>
+  <symbol id="g-crs" viewBox="0 0 20 20"><path d="M4.4 4.4 15.6 15.6M15.6 4.4 4.4 15.6" fill="none" stroke="var(--crs)" stroke-width="2.2" stroke-linecap="round"/></symbol>
+  <symbol id="g-sqr" viewBox="0 0 20 20"><rect x="4.2" y="4.2" width="11.6" height="11.6" rx="0.8" fill="none" stroke="var(--sqr)" stroke-width="2.1"/></symbol>
+  <symbol id="g-up" viewBox="0 0 20 20"><path d="M10 4.5 15.5 13h-11z" fill="currentColor"/></symbol>
+  <symbol id="g-down" viewBox="0 0 20 20"><path d="M10 15.5 4.5 7h11z" fill="currentColor"/></symbol>
+  <symbol id="g-left" viewBox="0 0 20 20"><path d="M4.5 10 13 4.5v11z" fill="currentColor"/></symbol>
+  <symbol id="g-right" viewBox="0 0 20 20"><path d="M15.5 10 7 4.5v11z" fill="currentColor"/></symbol>
+  <symbol id="g-note" viewBox="0 0 20 20"><path d="M8 14.5V4.2l7-1.7v10.3" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><ellipse cx="6" cy="14.6" rx="2.5" ry="1.9" fill="currentColor"/><ellipse cx="13" cy="12.9" rx="2.5" ry="1.9" fill="currentColor"/></symbol>
+</svg>
+
+<header class="masthead">
+  <div>
+    <h1 class="wordmark">TRAX</h1>
+    <p>A music player for the PSP and the PS Vita. This manual covers every screen and button.</p>
+  </div>
+  <div class="edition">
+    <strong>Version 1.0.0</strong><br>
+    For PSP-1000 and later<br>
+    Custom firmware recommended<br>
+    And for the PS Vita
+  </div>
+</header>
+
+<div class="layout">
+  <nav class="toc" aria-label="Contents">
+    <h2>Contents</h2>
+    <ol>
+      <li><a href="#setup">Setting up</a></li>
+      <li><a href="#vita">On a PS Vita</a></li>
+      <li><a href="#list">The list</a></li>
+      <li><a href="#gallery">The gallery</a></li>
+      <li><a href="#modes">Play modes</a></li>
+      <li><a href="#global">Global shuffle</a></li>
+      <li><a href="#standby">Standby</a></li>
+      <li><a href="#player">The Player</a></li>
+      <li><a href="#vis">Visualizations</a></li>
+      <li><a href="#eq">Equalizer</a></li>
+      <li><a href="#settings">Settings, About and Help</a></li>
+      <li><a href="#cue">Cue albums</a></li>
+      <li><a href="#art">Cover art</a></li>
+      <li><a href="#skins">Cassette skins</a></li>
+      <li><a href="#server">Music from a server</a></li>
+      <li><a href="#formats">Supported files</a></li>
+      <li><a href="#limits">In this release</a></li>
+    </ol>
+  </nav>
+
+  <main>
+    <section id="setup">
+      <h2>Setting up</h2>
+      <p class="lede">TRAX plays the music already on your card, in the folders you keep it in — on a PSP, either <code>PSP/MUSIC</code> or <code>MUSIC</code> at the root. This section is the PSP; <a href="#vita">On a PS Vita</a> covers the other machine.</p>
+
+      <h3>Install</h3>
+      <p>Copy the <code>TRAX</code> folder into <code>PSP/GAME</code> on the memory stick. TRAX then appears in the XMB under Game › Memory Stick.</p>
+      <div class="tree-wrap"><pre class="tree">PSP/
+  GAME/
+    TRAX/
+      EBOOT.PBP          <span class="c">the app</span>
+      trax_kernel.prx    <span class="c">the helper: volume display, ♪ button, screen off</span>
+      SKINS/             <span class="c">cassette skins</span>
+  MUSIC/                 <span class="c">your music, in any folders you like</span></pre></div>
+      <p>Music at the root of the card, in <code>MUSIC</code>, works just as well. That is the folder ARK-4 makes, and plenty of people use it.</p>
+      <h3>Which folder TRAX reads</h3>
+      <p>The first time it runs, TRAX looks in both. If only one has anything in it, that is the one it reads, without asking. If both have something, or neither does, it asks which to use and remembers the answer. Settings has a <strong>Music folder</strong> row to change it later.</p>
+
+      <h3>The helper module</h3>
+      <p>Some things only the PSP's system can see: the volume keys, the ♪ button, and turning the screen off. <code>trax_kernel.prx</code> lets TRAX use them. It needs custom firmware such as ARK-4, PRO or Adrenaline.</p>
+      <div class="note"><strong>Without the helper,</strong> TRAX still plays everything. You won't get the on-screen volume, the ♪ button or Screen off while playing. The equalizer is still there two ways: hold <span class="key face" aria-label="Triangle"><svg><use href="#g-tri"/></svg></span> for two thirds of a second, or hold <span class="key pill">SELECT</span> for the visualization list, where it is the last entry.</div>
+
+      <h3>On an unmodified PSP</h3>
+      <p>A signed build of TRAX runs on firmware that has never been modified. It plays every format, draws every visualization and reads lyrics from the card. What it cannot do is anything needing the kernel — the volume display, the ♪ button, Screen off, and mending a folder name the PSP cannot read — or, usually, join a Wi-Fi network, since the PSP's WPA2 support comes from custom firmware.</p>
+
+      <h3>Quitting</h3>
+      <p>Press <span class="key pill">HOME</span> as with any PSP app, or choose Quit on the Settings page.</p>
+    </section>
+
+    <section id="vita">
+      <h2>On a PS Vita</h2>
+      <p class="lede">TRAX has a native Vita build. It is the same player — the same list, cassette, equalizer and settings — drawn for the larger screen, and not the PSP version running under Adrenaline.</p>
+
+      <h3>Install</h3>
+      <p>Open <code>TRAX.vpk</code> with VitaShell and let it install. TRAX then appears on the home screen like any other application. Its own files live in <code>ux0:/data/trax</code>, which it makes itself: the settings, the log, lyrics it has fetched, and a <code>SKINS</code> folder for skins of your own.</p>
+
+      <h3>Where the music goes</h3>
+      <p>A Vita can have storage in three places at once, and TRAX reads any of them:</p>
+      <div class="tree-wrap"><pre class="tree">ux0:/music        <span class="c">the console's own storage</span>
+grw0:/MUSIC       <span class="c">a card in the game card slot — a microSD adapter</span>
+uma0:/MUSIC       <span class="c">the other card, where one is mounted</span></pre></div>
+      <p>The first time it runs, TRAX looks in all three. If only one has anything in it, that is the one it reads, without asking. If more than one does, it asks which — offering only the folders that actually have music in them — and remembers the answer. Settings has a <strong>Music folder</strong> row to change it later, and that one lists every place the machine has, empty ones included, so you can point at a card before you have put anything on it.</p>
+
+      <h3>The touchscreen</h3>
+      <p>The front panel drags the progress bar: touch the dot and slide it, and the time beside it follows your finger rather than the decoder, so it does not lurch along behind.</p>
+      <p>In <a href="#gallery">the gallery</a> it does more: tap an album to highlight it, tap it again to open it, and swipe to move — left and right along the carousel, up and down along the wall. Everything else — the list, the menus, the visualizations — is buttons, exactly as on a PSP.</p>
+
+      <h3>What differs from the PSP</h3>
+      <ul>
+        <li><strong>No helper module, and none needed.</strong> The volume keys and the screen are the Vita's own business, and this machine has no ♪ button.</li>
+        <li><strong>Lyrics work over Wi-Fi</strong> with nothing extra installed.</li>
+        <li><strong>Skins are drawn for this screen.</strong> A Vita skin is 960x544, and its <code>skin.json</code> names pixels on a screen that size. See <a href="#skins">Cassette skins</a>.</li>
+        <li><strong>ATRAC3plus plays here too,</strong> through the Vita's own codec module.</li>
+        <li><strong>A card taken out may be noticed.</strong> When it is, TRAX empties the list and the gallery and says which folder has gone, and putting the card back brings everything back with nothing pressed. It is unfinished, and the reason is a Vita rather than TRAX: the console keeps answering for a card that has left the slot — the folder still exists, still lists what it used to hold, and will even hand over a file's contents. The only signal that ever changes is the listing going empty, and it does not always change. Moving around the list or the gallery finds out for certain.</li>
+      </ul>
+    </section>
+
+    <section id="list">
+      <h2>The list</h2>
+      <p>TRAX opens on the list of your music folder. The header shows the folder you're in, in bold, and how many items it holds. Folders come first, then tracks, each sorted by name.</p>
+      <p>Every row is one line. A long name is cut short with "…", keeping the file extension. Highlight it and it scrolls to show the whole name. Files TRAX can't play are listed, dimmed, rather than hidden.</p>
+
+      <table class="controls">
+        <thead><tr><th scope="col">Press</th><th scope="col">To</th></tr></thead>
+        <tbody>
+          <tr><td><span class="key face"><svg><use href="#g-up"/></svg></span> <span class="key face"><svg><use href="#g-down"/></svg></span></td><td>Move the highlight. Hold to keep moving.<span class="how">The analog stick works too.</span></td></tr>
+          <tr><td><span class="key face" aria-label="Cross"><svg><use href="#g-crs"/></svg></span></td><td>Open a folder or cue album, or play the highlighted track.<span class="how">Playing a track queues the whole folder, so you can skip through it in the Player.</span></td></tr>
+          <tr><td><span class="key face" aria-label="Cross"><svg><use href="#g-crs"/></svg></span><span class="held">held</span></td><td>In the shuffle modes, start on the highlighted track. A tap lets the shuffle choose the first track.</td></tr>
+          <tr><td><span class="key face" aria-label="Circle"><svg><use href="#g-cir"/></svg></span></td><td>Go up one folder, or back out of a cue album.</td></tr>
+          <tr><td><span class="key shoulder">L</span> <span class="key shoulder">R</span></td><td>Choose how the next thing you start will play. See <a href="#modes">Play modes</a>.</td></tr>
+          <tr><td><span class="key face" aria-label="Square"><svg><use href="#g-sqr"/></svg></span></td><td>Return to the Player, when something is playing.</td></tr>
+          <tr><td><span class="key face" aria-label="Music note"><svg><use href="#g-note"/></svg></span></td><td>Go to what's playing, with the equalizer open.</td></tr>
+          <tr><td><span class="key face" aria-label="Triangle"><svg><use href="#g-tri"/></svg></span></td><td>Open the gallery &mdash; every album on the card, by its cover. See <a href="#gallery">The gallery</a>.</td></tr>
+          <tr><td><span class="key pill">START</span></td><td>Open Settings and About.</td></tr>
+        </tbody>
+      </table>
+      <p>The bar along the bottom shows the play modes, with the chosen one in white, and the name of what's playing on the right.</p>
+    </section>
+
+
+    <section id="gallery">
+      <h2>The gallery</h2>
+      <p><span class="key face" aria-label="Triangle"><svg><use href="#g-tri"/></svg></span> from the list opens the gallery: every album on your card, shown by its cover rather than by its name. There are two views of the same thing, and <span class="key pill">SELECT</span> swaps between them.</p>
+      <ul class="modes">
+        <li><b>The wall</b><span>Covers two across, scrolling down as far as your card goes.</span></li>
+        <li><b>The carousel</b><span>One long row, the album in the middle largest, its neighbors overlapping behind it.</span></li>
+      </ul>
+      <p>An album with no cover file gets the orb &mdash; TRAX&#x27;s own stand-in &mdash; so the wall stays a wall rather than a row of gaps.</p>
+
+      <table class="controls">
+        <thead><tr><th scope="col">Press</th><th scope="col">To</th></tr></thead>
+        <tbody>
+          <tr><td><span class="key face"><svg><use href="#g-up"/></svg></span> <span class="key face"><svg><use href="#g-down"/></svg></span> <span class="key face"><svg><use href="#g-left"/></svg></span> <span class="key face"><svg><use href="#g-right"/></svg></span></td><td>Move through the albums.<span class="how">The analog stick works too. On the wall, up and down move a row at a time; on the carousel, left and right walk it.</span></td></tr>
+          <tr><td><span class="key face" aria-label="Cross"><svg><use href="#g-crs"/></svg></span></td><td>Open the album, the same as choosing it in the list.</td></tr>
+          <tr><td><span class="key face" aria-label="Cross"><svg><use href="#g-crs"/></svg></span><span class="held">held</span></td><td>Start the album from its first track, without opening it first.<span class="how">If you are in a shuffle mode, the shuffle chooses where to begin &mdash; you picked an album, not a track in it.</span></td></tr>
+          <tr><td><span class="key pill">SELECT</span></td><td>Swap between the wall and the carousel.</td></tr>
+          <tr><td><span class="key face" aria-label="Circle"><svg><use href="#g-cir"/></svg></span></td><td>Back to the list.</td></tr>
+        </tbody>
+      </table>
+
+      <p>On a Vita you can also tap an album to highlight it and tap it again to open it, and swipe to move: left and right along the carousel, up and down along the wall.</p>
+
+      <p>Whichever view you were last in is where TRAX opens next time, the list included. If you live in the gallery, that means the album index has to be read before anything can be drawn, and a card of any size takes a moment &mdash; so a progress dialog says what it is doing, with <span class="key face" aria-label="Circle"><svg><use href="#g-cir"/></svg></span> to give up and use the list instead. After the first time the index is kept on the card and a launch is back to a fraction of a second.</p>
+
+      <p>Covers arrive as you go. They are cached beside your pictures at the size the gallery draws them, so the first pass over a card is the slow one and afterwards they appear as fast as you can scroll. While you are moving, TRAX draws only the covers it already has and leaves the rest until you stop &mdash; a large cover takes long enough to decode that fetching it mid-sweep would cost you the smoothness instead.</p>
+    </section>
+
+    <section id="modes">
+      <h2>Play modes</h2>
+      <p>Choose the mode in the list, with <span class="key shoulder">L</span> and <span class="key shoulder">R</span>, <em>before</em> you start something. That way a folder can be set to shuffle and then started. The mode's name shows for a moment when you change it.</p>
+      <ul class="modes">
+        <li><b>Play once</b><span>Plays from the chosen track to the end of the folder, then stops.</span></li>
+        <li><b>Repeat</b><span>Plays the folder over and over.</span></li>
+        <li><b>Repeat one</b><span>Plays the same track again each time it ends.</span></li>
+        <li><b>Shuffle</b><span>Plays every track once, in a random order.</span></li>
+        <li><b>Shuffle and repeat</b><span>Shuffles again each time round, and never starts a round with the track that just finished.</span></li>
+        <li><b>Global shuffle</b><span>Plays any track under your music folder, not just the ones in the folder you are looking at. See <a href="#global">Global shuffle</a>.</span></li>
+      </ul>
+      <p>Whatever is playing keeps the mode it was started with. Changing the mode in the list affects only what you start next. The Player shows the queue's mode as a small icon beside the time. Play once has no icon.</p>
+      <p>Shuffling changes the order tracks play in, not the list. The folder still reads in its own order.</p>
+
+      <h2 id="standby">Standby</h2>
+      <p>Tapping the power button puts the console into standby and TRAX with it. The music stops; tapping again wakes it and it carries on from where it was, in the same track at the same place.</p>
+      <p>TRAX cannot keep playing through standby, and this is worth being plain about rather than leaving you to wonder. An app playing with the console asleep has to hand its audio to the system&#x27;s own player, which would mean giving up TRAX&#x27;s decoders, its equalizer and the cassette&#x27;s sense of where it is on the tape. Plugins exist that enable background playback for any app, installed into the console rather than into TRAX; if that is what you want, that is where it lives.</p>
+      <p>What TRAX does do is keep the console awake while it plays, so it will not suspend itself out from under an album. With <b>Screen off while playing</b> on, that means a dark screen and forty minutes of music.</p>
+
+      <h2 id="global">Global shuffle</h2>
+      <p>Every other mode plays the folder you are in. Global shuffle plays your whole music folder: any track, in any folder, in a random order.</p>
+      <p>It has to read your music folder before it can do that &mdash; measured at about a second and a half for sixteen hundred tracks on a Vita, and two and a half on a PSP &mdash; so it asks first. Press <span class="key face" aria-label="Cross"><svg><use href="#g-crs"/></svg></span> on any track to start it, and TRAX will tell you what it is about to do:</p>
+      <blockquote>Using global shuffle requires reading your entire music folder which may take time.</blockquote>
+      <p><span class="key face" aria-label="Cross"><svg><use href="#g-crs"/></svg></span> goes ahead. <span class="key face" aria-label="Circle"><svg><use href="#g-cir"/></svg></span> closes the dialog and nothing happens.</p>
+      <p>While it reads, a bar counts the folders at the top level of your music folder and says how many tracks it has found. <span class="key face" aria-label="Circle"><svg><use href="#g-cir"/></svg></span> cancels, and cancelling keeps nothing &mdash; part of a card is not a shuffle of it.</p>
+      <p>Things worth knowing:</p>
+      <ul>
+        <li>Which track you press <span class="key face" aria-label="Cross"><svg><use href="#g-crs"/></svg></span> on makes no difference. The shuffle picks where to begin.</li>
+        <li>An album with a cue sheet contributes its tracks, not the one long file they live in.</li>
+        <li>It plays your card through once and stops. It does not go round again.</li>
+        <li>Stopping playback ends it, and the list of tracks it built is let go of there and then.</li>
+        <li>It is the one mode TRAX does not remember between launches. Every other mode is where you left it; this one is asked for each time, so that a press of <span class="key face" aria-label="Cross"><svg><use href="#g-crs"/></svg></span> out of habit never starts a read of your whole card.</li>
+        <li>Folders and albums still open normally while it is the chosen mode. Only pressing <span class="key face" aria-label="Cross"><svg><use href="#g-crs"/></svg></span> on a track starts it.</li>
+      </ul>
+      <p>The bar counts top-level folders because that is the only total TRAX can know without reading your card twice. If your folders are very different sizes, expect it to move unevenly.</p>
+    </section>
+
+    <section id="player">
+      <h2>The Player</h2>
+      <p>Starting a track opens the Player. It's built from the file's own tags:</p>
+      <div class="screen-wrap">
+        <div class="screen" role="img" aria-label="Sketch of the Player screen: the battery top left, the album name centered along the top, the track count top right, the cover on the left, the title and artist on the right, and the progress bar and time along the bottom right.">
+          <div class="s-batt"></div>
+          <div class="s-album">(the best of) New Order</div>
+          <div class="s-count">5/10</div>
+          <div class="s-cover"></div>
+          <div class="s-title">Touched by the Hand of God</div>
+          <div class="s-artist">New Order</div>
+          <div class="s-bar"></div>
+          <div class="s-time">3:31 / 10:00</div>
+          <div class="s-mode"></div>
+          <div class="s-state"></div>
+        </div>
+      </div>
+      <ul class="legend">
+        <li><b>Top left:</b> battery. Green while charging, red at 15% or less.</li>
+        <li><b>Top:</b> the album. The track's place in the queue is on the right.</li>
+        <li><b>Left:</b> the cover.</li>
+        <li><b>Right:</b> title and artist, then the progress bar, the time, the play-mode icon and whether it's playing or paused.</li>
+      </ul>
+
+      <table class="controls">
+        <thead><tr><th scope="col">Press</th><th scope="col">To</th></tr></thead>
+        <tbody>
+          <tr><td><span class="key face" aria-label="Cross"><svg><use href="#g-crs"/></svg></span></td><td>Pause or resume.</td></tr>
+          <tr><td><span class="key face"><svg><use href="#g-left"/></svg></span> <span class="key face"><svg><use href="#g-right"/></svg></span><span class="held">held</span></td><td>Scrub backward or forward. The longer you hold, the faster it goes: normal speed, then twice as fast after 2 seconds and three times after 5.<span class="how">The analog stick works too.</span></td></tr>
+          <tr><td><span class="key shoulder">L</span> <span class="key shoulder">R</span></td><td>Previous or next track in the queue.</td></tr>
+          <tr><td><span class="key face" aria-label="Triangle"><svg><use href="#g-tri"/></svg></span></td><td>Show or hide the track's details: format, codec, sample rate, bit depth and channels.</td></tr>
+          <tr><td><span class="key pill">SELECT</span></td><td>Swap between the Player and your chosen visualization.</td></tr>
+          <tr><td><span class="key pill">SELECT</span><span class="held">held</span></td><td>Choose a visualization.</td></tr>
+          <tr><td><span class="key face" aria-label="Music note"><svg><use href="#g-note"/></svg></span></td><td>Open or close the equalizer. Needs the helper module; without it, hold <span class="key face" aria-label="Triangle"><svg><use href="#g-tri"/></svg></span> instead.</td></tr>
+          <tr><td><span class="key face" aria-label="Triangle"><svg><use href="#g-tri"/></svg></span><span class="held">held</span></td><td>Open the equalizer, on a PSP whose helper module did not load &mdash; the ♪ button cannot be read there. Two thirds of a second; a tap still shows the track&#x27;s details.</td></tr>
+          <tr><td><span class="key face" aria-label="Circle"><svg><use href="#g-cir"/></svg></span></td><td>Back to the list. The music keeps playing.</td></tr>
+          <tr><td><span class="key face" aria-label="Square"><svg><use href="#g-sqr"/></svg></span></td><td>Stop, and go back to the list.</td></tr>
+        </tbody>
+      </table>
+
+      <h3>The headphone remote</h3>
+      <p>With Sony's Remote Commander plugged in, its centre button pauses and resumes, and Forward and Back move through the queue as the shoulder buttons do. Its volume keys are the PSP's own.</p>
+      <p>The remote works from anywhere in TRAX — the list, a visualization, the settings page — and, more usefully, <strong>with the screen off</strong>: its buttons don't wake the screen, so an album can play through without the screen ever coming on. It works on an unmodified PSP too, where it is the only way to skip a track without looking.</p>
+
+      <h3>Volume</h3>
+      <p>The PSP's own volume keys work as usual. With the helper loaded, TRAX shows the level on screen while you change it.</p>
+    </section>
+
+    <section id="vis">
+      <h2>Visualizations</h2>
+      <p>Tap <span class="key pill">SELECT</span> in the Player to swap to a visualization, and again to swap back. Hold <span class="key pill">SELECT</span> to choose which one: <span class="key face"><svg><use href="#g-up"/></svg></span> <span class="key face"><svg><use href="#g-down"/></svg></span> to pick, <span class="key face" aria-label="Cross"><svg><use href="#g-crs"/></svg></span> to choose it, <span class="key face" aria-label="Circle"><svg><use href="#g-cir"/></svg></span> to close the list. TRAX remembers your choice.</p>
+      <dl class="formats">
+        <dt>Tape deck</dt><dd>A cassette whose reels wind as the track plays. <span class="key face"><svg><use href="#g-up"/></svg></span> <span class="key face"><svg><use href="#g-down"/></svg></span> change the skin.</dd>
+        <dt>Orb</dt><dd>A glowing network orb, each band of it swelling with its own part of the music.</dd>
+        <dt>Level meter</dt><dd>Stereo LED meters from −48 to 0 dB, with peak markers.</dd>
+        <dt>Smoke</dt><dd>Ribbons of light drifting sideways, gusting now and then.</dd>
+        <dt>Starfield</dt><dd>A calm flight through the stars.</dd>
+        <dt>Sphere matrix</dt><dd>Sixteen columns of spheres, one per frequency band, lighting up with the music.</dd>
+        <dt>VU meters</dt><dd>A pair of analog movements, one per channel, with needles that swing as a real meter does and a peak lamp.</dd>
+        <dt>Lyrics</dt><dd>The words, in time with the music. See below.</dd>
+        <dt>LED bars</dt><dd>The segmented display off the front of a stereo: twenty bars, green through yellow to red, each with a cap that holds the highest it reached and sinks back slowly.</dd>
+        <dt>Spectrum rays</dt><dd>A rainbow spectrum standing on a lit floor, with a beam of light thrown off each peak.</dd>
+        <dt>Waveform</dt><dd>The whole audible range at once &mdash; 20 Hz at the left to 20 kHz at the right &mdash; drawn above and below a center line.</dd>
+        <dt>Circular</dt><dd>The same, stood on a ring and pointing outward: 50 Hz at the top and round counterclockwise to 16 kHz arriving back there, once. A narrower range than the flat one shows &mdash; on a ring every bar is equally in view, so the empty decade below 50 Hz would be a bald patch rather than a quiet edge.</dd>
+        <dt>Waterfall</dt><dd>The spectrum kept twenty times a second and drawn going away from you: about a second of music as a landscape, with a chorus arriving as a ridge.</dd>
+      </dl>
+      <p>The track's title fades in over a visualization when you arrive and at each new track. All the Player's other buttons still work.</p>
+      <p>The equalizer is the last entry in the same list, which is how to reach it on a PSP without the helper module.</p>
+
+      <h3>Lyrics</h3>
+      <p>The words live in a <code>LYRICS</code> folder at the root of the card, with your music's own folders mirrored inside it: a track at <code>PSP/MUSIC/The Cars/Greatest Hits/album.flac</code> keeps its words at <code>LYRICS/The Cars/Greatest Hits/album.lrc</code>. One folder, so the words are not mixed in among the music, and both builds of TRAX share whatever either has fetched. An <code>.lrc</code> sitting beside the track still works, and is no longer listed in the browser. A file with timings lights each line as it is sung; one without drifts through the track and says so. <span class="key face"><svg><use href="#g-up"/></svg></span> <span class="key face"><svg><use href="#g-down"/></svg></span> read back over what has been sung, and let go after five seconds. If the words are small for you, Settings has a <strong>Lyrics text size</strong> row: Default, Medium or Large. A line too long for the screen wraps onto as many rows as it needs, and stays in time with the song either way — so the large size costs you no words.</p>
+      <p><span class="key face" aria-label="Triangle"><svg><use href="#g-tri"/></svg></span> fetches the words from <a href="https://lrclib.net">lrclib.net</a> over Wi-Fi and saves them into that folder, creating it as it goes. TRAX asks for an exact match first and, failing that, searches by name and takes the version closest in length — preferring one somebody has timed. A track of a cue album keeps its own file, <code>album.03.lrc</code>, since the album's tracks share one audio file.</p>
+      <div class="note"><strong>Fetching needs a network the PSP can join,</strong> which in practice means custom firmware: WPA2 support comes from ARK-4's plugin, and unmodified firmware manages only WEP, WPA, or a router left in mixed WPA/WPA2 mode. Everything else about Lyrics works either way — including <code>.lrc</code> files you copy into <code>LYRICS</code> yourself — TRAX makes that folder the first time it runs, so it is there waiting.</div>
+    </section>
+
+    <section id="eq">
+      <h2>Equalizer</h2>
+      <p>Ten bands &mdash; 31 Hz, 62, 125, 250, 500 Hz, 1, 2, 4, 8 and 16 kHz &mdash; each ±12 dB. Open it with <span class="key face" aria-label="Music note"><svg><use href="#g-note"/></svg></span>, or by holding <span class="key pill">SELECT</span> if the helper isn't loaded. Changes are heard at once and saved.</p>
+      <table class="controls">
+        <thead><tr><th scope="col">Press</th><th scope="col">To</th></tr></thead>
+        <tbody>
+          <tr><td><span class="key face"><svg><use href="#g-left"/></svg></span> <span class="key face"><svg><use href="#g-right"/></svg></span></td><td>Pick a band.</td></tr>
+          <tr><td><span class="key face"><svg><use href="#g-up"/></svg></span> <span class="key face"><svg><use href="#g-down"/></svg></span></td><td>Raise or lower it. Hold to keep going.</td></tr>
+          <tr><td><span class="key face" aria-label="Triangle"><svg><use href="#g-tri"/></svg></span></td><td>Step through the presets: Flat, Bass, Treble, Vocal and Loud.</td></tr>
+          <tr><td><span class="key face" aria-label="Circle"><svg><use href="#g-cir"/></svg></span> or <span class="key face" aria-label="Cross"><svg><use href="#g-crs"/></svg></span></td><td>Close the equalizer.</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="settings">
+      <h2>Settings, About and Help</h2>
+      <p>Press <span class="key pill">START</span> anywhere to open this page. Press it again or <span class="key face" aria-label="Circle"><svg><use href="#g-cir"/></svg></span> to close it. <span class="key shoulder">L</span> and <span class="key shoulder">R</span> switch between the tabs.</p>
+      <h3>Settings</h3>
+      <p><span class="key face"><svg><use href="#g-up"/></svg></span> <span class="key face"><svg><use href="#g-down"/></svg></span> pick a setting. <span class="key face"><svg><use href="#g-left"/></svg></span> <span class="key face"><svg><use href="#g-right"/></svg></span> or <span class="key face" aria-label="Cross"><svg><use href="#g-crs"/></svg></span> change it.</p>
+      <dl class="formats">
+        <dt>Music folder</dt><dd><code>PSP/MUSIC</code> or <code>MUSIC</code> at the root of the card. Changing it reads the other folder straight away; anything playing carries on.</dd>
+        <dt>Lyrics text size</dt><dd>Default, Medium or Large: how big the words are drawn in the Lyrics visualization. Larger is easier to read from further away and fits fewer lines on the screen at once.</dd>
+        <dt>Dynamic background</dt><dd>On or Off. When on, TRAX takes up to six colours from the album's cover as it loads and drifts the space around the artwork between them, about eighteen seconds on each, holding still while the music is paused. The colours are dimmed rather than used as they are: a bright sleeve at full strength would leave the titles and times unreadable, so each one keeps its hue and is brought down to a brightness the words can sit on. A cover with nothing to take from it &mdash; one that is all black, or all grey &mdash; keeps the plain background instead, and a sleeve with two colours in it gives two rather than always six. The colours are taken when a cover loads, so turning this on shows itself on the next track rather than the one already playing.</dd>
+        <dt>Sleep timer</dt><dd>Off, 15, 30, 60 or 90 minutes. The music fades out over the last half minute, then pauses. It's for one evening, so it's always Off when TRAX starts.</dd>
+        <dt>Screen off while playing</dt><dd>Off, or after 30 seconds, 1, 2 or 5 minutes without a button press. The screen uses most of the battery. Any button wakes it without doing anything else, and it comes back on by itself when the music stops. Needs the helper.</dd>
+        <dd class="note"><strong>On a PS&nbsp;Vita</strong> this needs nothing extra, and TRAX now also keeps the machine from suspending itself while a track plays &mdash; so an album plays through with the screen dark rather than being cut off part way. Tapping the power button is different: that suspends TRAX, the music stops, and tapping again wakes it where it left off. See <a href="#standby">Standby</a>.</dd>
+        <dt>Resume on launch</dt><dd>When on, TRAX opens the folder you were last playing from and puts the cursor on that track, remembering how far into it you were. Press <span class="key face" aria-label="Cross"><svg><use href="#g-crs"/></svg></span> and it carries on from there. It does not start playing by itself, and it does not open the file until you ask &mdash; which is what makes starting the app quick. Move the cursor or leave the folder and the remembered position is forgotten.</dd>
+        <dt>Quit</dt><dd>Press <span class="key face" aria-label="Cross"><svg><use href="#g-crs"/></svg></span> to leave TRAX.</dd>
+      </dl>
+      <h3>About</h3>
+      <p>Shows the version and build date, the battery level, the free space on the memory stick, whether the helper is running, which fonts are loaded, and credits for the libraries TRAX uses.</p>
+      <h3>Help</h3>
+      <p>The last tab, and the same control reference as this manual&rsquo;s tables &mdash; on the machine, where you need it. Every control in the app on one page: the list, the player, the gallery, the cassette, the equalizer, and <span class="key pill">HOME</span> to quit. The buttons are drawn as their own shapes rather than named. <span class="key face"><svg><use href="#g-up"/></svg></span> <span class="key face"><svg><use href="#g-down"/></svg></span> scroll it, and holding one repeats.</p>
+    </section>
+
+    <section id="cue">
+      <h2>Cue albums</h2>
+      <p>Some albums are one long audio file with a <code>.cue</code> sheet beside it that marks where each track starts. TRAX shows that pair as a single album, named from the sheet and with its cover as a thumbnail. The audio file and the picture don't get rows of their own.</p>
+      <ul>
+        <li><span class="key face" aria-label="Cross"><svg><use href="#g-crs"/></svg></span> on the album opens it like a folder, listing its tracks by number. The header shows the album's name after the folder.</li>
+        <li><span class="key face" aria-label="Cross"><svg><use href="#g-crs"/></svg></span> on a track plays the album from that track. <span class="key shoulder">L</span> and <span class="key shoulder">R</span> in the Player move through the album.</li>
+        <li><span class="key face" aria-label="Circle"><svg><use href="#g-cir"/></svg></span> goes back to the folder, with the album highlighted.</li>
+      </ul>
+      <p>The time and progress bar show your place in the track, not in the whole file.</p>
+    </section>
+
+    <section id="art">
+      <h2>Cover art</h2>
+      <p>TRAX uses the picture embedded in the track, as JPEG or PNG. If there isn't one, it uses a picture from the track's folder, looking in this order:</p>
+      <ul>
+        <li>a picture named <code>folder</code>,</li>
+        <li>then one named <code>album</code>,</li>
+        <li>then one named after the folder itself,</li>
+        <li>and failing those, the first picture in the folder by name.</li>
+      </ul>
+      <p><code>.jpg</code>, <code>.jpeg</code> and <code>.png</code> all work, at any size. A large cover can take a few seconds to decode; a glowing white orb turns where it will appear, and the cover fades in over it. A track with no cover at all gets the orb in pink, purple and blue.</p>
+    </section>
+
+    <section id="skins">
+      <h2>Cassette skins</h2>
+      <p>The Tape deck's cassette is a picture from the <code>SKINS</code> folder &mdash; beside the app on a PSP, and in <code>ux0:/data/trax/SKINS</code> on a Vita. Add your own by giving each skin a folder:</p>
+      <div class="tree-wrap"><pre class="tree">SKINS/
+  hub.png                    <span class="c">the reel hub every skin uses</span>
+  Maxell XLII 90/
+    Maxell XLII 90.png       <span class="c">the picture: named after the folder, or skin.png</span>
+    skin.json                <span class="c">optional: where to print the title, and colors</span>
+    hub.png                  <span class="c">optional: this skin's own hub</span></pre></div>
+      <p>Where the picture is transparent, the turning reels and tape show through. A skin without <code>skin.json</code> shows no text. In the Tape deck, <span class="key face"><svg><use href="#g-up"/></svg></span> <span class="key face"><svg><use href="#g-down"/></svg></span> step through the skins, and TRAX remembers the one you pick.</p>
+      <div class="note"><strong>A skin is drawn for one screen.</strong> The positions in <code>skin.json</code> are pixels, so a PSP&#x27;s skin is 480x272 and a Vita&#x27;s is 960x544, and one file cannot serve both. The skins that ship are made for the machine they ship with; <code>SKINS.html</code> has the format.</div>
+    </section>
+
+    <section id="server">
+      <h2>Music from a server</h2>
+      <p class="lede">Your music does not have to be on the card. TRAX plays from a Subsonic server &mdash; Navidrome, Airsonic, Gonic &mdash; or from a Jellyfin, over your own Wi-Fi.</p>
+
+      <h3>Setting one up</h3>
+      <p>Open <strong>Settings &rsaquo; Servers</strong> and fill in a name, the kind, the address, a username and a password. The address is typed with the machine&#x27;s own keyboard: the PSP&#x27;s on-screen one, the Vita&#x27;s IME. <code>192.168.0.10:4533</code> is enough &mdash; without a scheme it is read as <code>http://</code>, which is the right guess for a machine on your own network. If the server sits under a path, such as <code>/music</code>, put that in too.</p>
+      <p><strong>Test this server</strong> asks it to prove it is there and that the username and password work. <strong>Use this library</strong> points TRAX at it.</p>
+      <p>A server is then offered in <strong>Music folder</strong> alongside the memory cards, because &ldquo;where is my music&rdquo; is one question and a server is one of the answers.</p>
+
+      <h3>Original format</h3>
+      <p>Off by default, and set per server. Off, the server is asked for a 192 kbps MP3 of whatever the track is &mdash; about 24 KB a second, which any of these machines carries comfortably. On, the file arrives as it is.</p>
+      <p>That is the whole of the choice. A 96 kHz 24-bit FLAC is 3142 kbps, or 384 KB a second; a 192 kHz one is 5026 kbps, or 613 KB. A Vita streams any of them without a stumble. A PSP&#x27;s Wi-Fi has a limit, and it was found by playing the lot:</p>
+      <dl class="formats">
+        <dt>ALAC, 1139 kbps</dt><dd>Plays clean, and starts in 129 ms.</dd>
+        <dt>WAV, 1411 kbps</dt><dd>Plays clean, and starts in 174 ms.</dd>
+        <dt>FLAC 96 kHz, 3142 kbps</dt><dd>Breaks up, and unpredictably &mdash; the same track twice gave 16 interruptions and then 122. This is the edge rather than the far side of it.</dd>
+        <dt>FLAC 192 kHz, 5026 kbps</dt><dd>Breaks up reliably, about 150 times.</dd>
+      </dl>
+      <p>So lossless at CD rates goes over a PSP&#x27;s Wi-Fi comfortably and hi-res does not. A PSP says so when the switch is turned on, and warns rather than refuses.</p>
+      <p><strong>It also starts tracks sooner</strong> &mdash; four to six times sooner, for anything the Wi-Fi can carry. With the switch off, the server has to convert the track before it can send any of it, and that costs most of a second before the first note. So if your music is CD-rate lossless, turning this on gives you the original file <em>and</em> a quicker start. It is off by default because the setting has to be safe for the library that cannot take it.</p>
+      <p>Seeking differs too. A track the server is transcoding cannot be moved through by bytes, so the dot follows your finger and the sound catches up when you let go. A track sent as it is behaves like any file.</p>
+
+      <h3>When it will not connect</h3>
+      <p>TRAX says what to change rather than what failed. If the clock is wrong &mdash; which it is on a handheld whose battery has run flat &mdash; every certificate looks expired, and TRAX names the clock only there, where it can actually be the cause.</p>
+      <p>The commonest mistake is the <strong>Kind</strong> row. A Subsonic server has no Jellyfin login and a Jellyfin speaks no Subsonic, and testing one as the other says so plainly.</p>
+
+      <h3>What a server does not do yet</h3>
+      <ul>
+        <li><a href="#gallery">The gallery</a> is the card&#x27;s: it is built by walking folders for sleeves, and a server has none. With one chosen, <span class="key face" aria-label="Triangle"><svg><use href="#g-tri"/></svg></span> says so rather than showing another library&#x27;s covers.</li>
+        <li><a href="#global">Global shuffle</a> and resume are the card&#x27;s too.</li>
+        <li>Jellyfin makes one album per folder, so anything loose in your music folder belongs to no album. Those appear under <strong>Tracks not in an album</strong> at the end of the album list. Navidrome groups by tags instead, so the same files show as proper albums there.</li>
+        <li>Passwords are kept as they were typed, in <code>servers.cfg</code> on the card. A memory card has nowhere to keep a secret, so use an account that can only play music.</li>
+      </ul>
+    </section>
+
+    <section id="formats">
+      <h2>Supported files</h2>
+      <dl class="formats">
+        <dt>MP3</dt><dd>All common bit rates.</dd>
+        <dt>Opus</dt><dd>In <code>.opus</code>. Decoded at 48 kHz, with its tags and cover art.</dd>
+        <dt>FLAC</dt><dd>Including 24-bit at 96 kHz and 192 kHz.</dd>
+        <dt>WAV</dt><dd>8, 16, 24 and 32-bit PCM, 32-bit float, A-law and µ-law, and multichannel.</dd>
+        <dt>AAC</dt><dd>In <code>.m4a</code>, decoded by the PSP's own Media Engine.</dd>
+        <dt>ALAC</dt><dd>Apple Lossless, in <code>.m4a</code>.</dd>
+        <dt>ATRAC</dt><dd>ATRAC3 and ATRAC3plus, in <code>.at3</code> &mdash; the PSP&#x27;s own format, decoded by its Media Engine, and on a Vita by that machine&#x27;s own codec module. Tracks bought from Sony&#x27;s old Connect store are OpenMG-protected and will not play, on this or anything else.</dd>
+        <dt>Cue sheets</dt><dd>A <code>.cue</code> beside a single-file album. See <a href="#cue">Cue albums</a>.</dd>
+      </dl>
+      <p>All but ATRAC play from a server as well. What a stream holds is read off its first bytes rather than assumed, so a file sent as it is plays as itself.</p>
+      <p>Names in accented Latin, Japanese and Korean display correctly. The fonts for Japanese and Korean load only when a name needs them.</p>
+    </section>
+
+    <section id="limits">
+      <h2>In this release</h2>
+      <ul>
+        <li>Search is not built. <span class="key face" aria-label="Triangle"><svg><use href="#g-tri"/></svg></span> was drawn on the bar for it and opens <a href="#gallery">the gallery</a> instead, which is what the bar now says. <span class="key face" aria-label="Circle"><svg><use href="#g-cir"/></svg></span> goes up a folder, and carries no label because a list does that everywhere.</li>
+        <li>The volume display, the ♪ button and Screen off need the helper and custom firmware. None of the three applies on a Vita: that machine handles its own volume and screen, and has no ♪ button.</li>
+        <li>A very large progressive JPEG cover can take around ten seconds to appear while hi-res music plays on a PSP. The orb shows in the meantime.</li>
+        <li>On a Vita the touchscreen works on the progress bar and in the gallery. The list is still scrolled with the buttons.</li>
+        <li>A PSP can only say a filename in Shift-JIS, and stops at the first character it has no version of — a star or a heart in an album's name, say. TRAX reads the folder off the card itself to find the real name, which needs the helper and custom firmware. Without it such a folder cannot be opened at all, and TRAX says so and suggests renaming it. Characters the PSP has no letter for are left out of what is shown, so a name reads as much as it can rather than as a row of blanks.</li>
+        <li>One folder shows and plays up to 1024 tracks, and a cue sheet up to the same. Past that the rest are left out, and the log says so when it happens. A line of lyrics holds 320 bytes — about 320 letters of English or 100 of Japanese — and wraps onto at most eight rows.</li>
+        <li><code>uma0:/MUSIC</code> is read but has never been tested, for want of a card that mounts there.</li>
+      </ul>
+    </section>
+  </main>
+</div>
+
+<footer class="contact">
+  <a href="mailto:traxpsp@gmail.com">traxpsp@gmail.com</a>
+  <span class="handle">
+    @traxpsp
+    <span class="logos">
+      <svg viewBox="0 0 24 24" role="img" aria-label="Twitter"><path fill="currentColor" d="M23 4.9c-.8.4-1.7.6-2.6.8 1-.6 1.7-1.5 2-2.6-.9.5-1.9.9-2.9 1.2a4.5 4.5 0 0 0-7.7 4.1A12.8 12.8 0 0 1 2.5 3.7a4.5 4.5 0 0 0 1.4 6 4.4 4.4 0 0 1-2-.6v.1c0 2.2 1.5 4 3.6 4.4-.7.2-1.4.2-2 .1a4.5 4.5 0 0 0 4.2 3.1A9 9 0 0 1 1 18.6a12.7 12.7 0 0 0 6.9 2c8.3 0 12.8-6.9 12.8-12.8v-.6c.9-.6 1.6-1.4 2.3-2.3z"/></svg>
+      <svg viewBox="0 0 24 24" role="img" aria-label="Bluesky"><path fill="currentColor" d="M12 10.9C10.9 8.7 8 4.8 5.3 3 2.7 1.4 1.7 1.7 1.1 2 .3 2.4 0 3.7 0 4.5v6.2c0 1.3 1 2.3 2.3 2.4h.6c1.7.3 3.3.7 4.8 2 .6.5 1.1 1.1 1.5 1.8-.9.6-2 .9-3.1.9-1.3 0-2.4.6-2.4 1.8s1.3 1.9 2.7 1.9c2.3 0 4.2-1.4 5.6-3.4 1.4 2 3.3 3.4 5.6 3.4 1.4 0 2.7-.7 2.7-1.9s-1.1-1.8-2.4-1.8c-1.1 0-2.2-.3-3.1-.9.4-.7.9-1.3 1.5-1.8 1.5-1.3 3.1-1.7 4.8-2h.6c1.3-.1 2.3-1.1 2.3-2.4V4.5c0-.8-.3-2.1-1.1-2.5-.6-.3-1.6-.6-4.2 1-2.7 1.8-5.6 5.7-6.7 7.9z"/></svg>
+      <svg viewBox="0 0 24 24" role="img" aria-label="Instagram"><rect x="3" y="3" width="18" height="18" rx="5" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="17.2" cy="6.8" r="1.3" fill="currentColor"/></svg>
+      <svg viewBox="0 0 24 24" role="img" aria-label="Reddit"><circle cx="12" cy="13.5" r="8" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="20.3" cy="10.3" r="2.2" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="3.7" cy="10.3" r="2.2" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 5.5 13.2 1.9l3.3.9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="17" cy="2.8" r="1.6" fill="currentColor"/><circle cx="9.3" cy="12.6" r="1.3" fill="currentColor"/><circle cx="14.7" cy="12.6" r="1.3" fill="currentColor"/><path d="M8.8 16.6c.9.8 2 1.2 3.2 1.2s2.3-.4 3.2-1.2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+    </span>
+  </span>
+</footer>
+
+</body>
+</html>
