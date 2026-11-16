@@ -39,6 +39,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `diff` was not `||x_{k+1} - x_k||²`.
 - Crash with `max_iter=0` or integer `x0`, and NaN when starting on the solution.
 - `calc_objv` was not restored on exception.
+- `mmmg`/`mmcg` now restore `calc_objv` on every objective even if one flag
+  setter raises during the restoration; the original exception still propagates
+  and a failed run never reports `success`.
 - `Loss.gr_coeffs` truncated integer inputs.
 - `Huber.gr_sup` did not match its documentation.
 - Read the Docs build.

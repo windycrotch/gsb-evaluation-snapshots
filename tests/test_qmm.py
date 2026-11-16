@@ -658,6 +658,143 @@ def test_calc_objv_is_restored_on_exception(solver, data):
     assert objv.calc_objv is False
 
 
+@pytest.mark.parametrize("solver", MM_SOLVERS, ids=name_of)
+def test_calc_objv_restored_after_normal_convergence(solver, scaled):
+    """The flags keep their pre-call values after a normal convergence."""
+    make, _ = scaled
+    objv_list = make()
+    objv_list[0].calc_objv = True
+    previous = [objv.calc_objv for objv in objv_list]
+
+    res = solver(objv_list, np.zeros(N), tol=1e-9, calc_objv=not previous[0])
+
+    assert res.success
+    assert res.status == 0
+    assert [objv.calc_objv for objv in objv_list] == previous
+
+
+@pytest.mark.parametrize("solver", MM_SOLVERS, ids=name_of)
+def test_calc_objv_restored_when_callback_raises(solver, scaled):
+    """An exception in the callback propagates and every flag is restored."""
+    make, _ = scaled
+    objv_list = make()
+    # Deliberately mixed pre-call values, including the value the solver sets.
+    objv_list[0].calc_objv = True
+    extra = make()[0]
+    extra.calc_objv = False
+    objv_list.append(extra)
+    previous = [objv.calc_objv for objv in objv_list]
+
+    calls = []
+
+    def callback(result):
+        calls.append(1)
+        if len(calls) == 2:
+            raise RuntimeError("callback failed")
+
+    with pytest.raises(RuntimeError, match="callback failed"):
+        solver(
+            objv_list,
+            np.zeros(N),
+            tol=0,
+            max_iter=20,
+            callback=callback,
+            calc_objv=True,
+        )
+
+    assert len(calls) == 2
+    assert [objv.calc_objv for objv in objv_list] == previous
+
+
+@pytest.mark.parametrize("solver", MM_SOLVERS, ids=name_of)
+def test_calc_objv_restored_when_value_computation_raises(solver, data):
+    """With `calc_objv=True`, a failure of the objective value propagates and
+    the flags are restored for every objective."""
+
+    class BrokenValue(qmm.Objective):
+        """The value path used when `calc_objv` is true fails."""
+
+        def gradient(self, point):
+            residual = self.operator(point) - self.data
+            if self.calc_objv:
+                raise RuntimeError("value computation failed")
+            return self.hyper * self._adj(self.loss.gradient(residual))
+
+    broken = BrokenValue(identity, identity, qmm.Square(), data=data)
+    broken.calc_objv = False
+    other = qmm.QuadObjective(identity, identity, data=data, hyper=2.0)
+    other.calc_objv = True
+    objv_list = [broken, other]
+    previous = [objv.calc_objv for objv in objv_list]
+
+    with pytest.raises(RuntimeError, match="value computation failed"):
+        solver(objv_list, np.zeros(N), tol=0, max_iter=5, calc_objv=True)
+
+    assert [objv.calc_objv for objv in objv_list] == previous
+
+
+@pytest.mark.parametrize("solver", MM_SOLVERS, ids=name_of)
+def test_calc_objv_restored_even_if_a_setter_fails(solver, data):
+    """Restoration runs for all objectives even if one setter raises."""
+
+    class FlakyObjective(qmm.QuadObjective):
+        """The flag setter raises when the original `True` value is restored."""
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._flag = True
+
+        @property
+        def calc_objv(self):
+            return self._flag
+
+        @calc_objv.setter
+        def calc_objv(self, value):
+            if value is True:
+                raise RuntimeError("setter failed during restore")
+            self._flag = value
+
+    flaky = FlakyObjective(identity, identity, data=data)
+    other = qmm.QuadObjective(identity, identity, data=data)
+    other.calc_objv = True
+
+    with pytest.raises(RuntimeError, match="setter failed during restore"):
+        solver([flaky, other], np.zeros(N), tol=1e-9, calc_objv=False)
+
+    # The remaining objective must not be left with the solver's value.
+    assert other.calc_objv is True
+
+
+@pytest.mark.parametrize("solver", MM_SOLVERS, ids=name_of)
+def test_exception_does_not_report_success(solver, scaled):
+    """A failed run must not be observable as a successful optimization."""
+    make, _ = scaled
+    objv_list = make()
+
+    seen = []
+
+    class FailingResult(Exception):
+        """Carries the in-progress result out of the callback."""
+
+        def __init__(self, result):
+            super().__init__("callback failed")
+            self.result = result
+
+    def callback(result):
+        seen.append(dict(result))
+        raise FailingResult(result)
+
+    with pytest.raises(FailingResult) as exc_info:
+        solver(objv_list, np.zeros(N), tol=0, max_iter=20, callback=callback)
+
+    # The exception carries the in-progress result, never a success claim.
+    result = exc_info.value.result
+    assert result.success is False
+    assert result.status == 99
+    assert result.message == "NA"
+    assert all(objv.calc_objv is False for objv in objv_list)
+
+
 # %% Lists of data
 
 

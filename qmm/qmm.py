@@ -711,15 +711,31 @@ def close_result(res: OptimizeResult) -> None:
 
 @contextmanager
 def set_calc_objv(objv_list: Sequence["BaseObjective"], calc_objv: bool):
-    """Set `calc_objv` of objectives and always restore it at the end."""
+    """Set `calc_objv` of objectives and always restore it at the end.
+
+    The previous value of every objective is saved before entering and restored
+    on exit, including when the body raises. Restoration is attempted for all
+    objectives even if one of them raises while its flag is being restored: the
+    original exception, if any, is propagated, not swallowed.
+    """
     previous_flag = [objv.calc_objv for objv in objv_list]
     for objv in objv_list:
         objv.calc_objv = calc_objv
     try:
         yield
     finally:
+        # Restore every objective, even if a previous setter raises. A failure
+        # during restoration must not leave the remaining objectives untouched
+        # and must not mask the exception that interrupted the optimization.
+        restore_error = None
         for objv, flag in zip(objv_list, previous_flag):
-            objv.calc_objv = flag
+            try:
+                objv.calc_objv = flag
+            except Exception as exc:  # pylint: disable=broad-except
+                if restore_error is None:
+                    restore_error = exc
+        if restore_error is not None:
+            raise restore_error
 
 
 def check_not_list(out: ArrOrSeq) -> array:
