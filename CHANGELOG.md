@@ -1,0 +1,86 @@
+# Changelog
+
+## [0.3.3](https://github.com/daidr/minecraft-skin-renderer/compare/minecraft-skin-renderer-v0.3.2...minecraft-skin-renderer-v0.3.3) (2026-11-05)
+
+
+### Bug Fixes
+
+* improve renderer resource lifecycle ([510dd58](https://github.com/daidr/minecraft-skin-renderer/commit/510dd585282fca88945b1094e2761565b530f99b))
+* run git-hooks in prepare instead of postinstall ([#12](https://github.com/daidr/minecraft-skin-renderer/issues/12)) ([240dfa8](https://github.com/daidr/minecraft-skin-renderer/commit/240dfa8624f7234546457af789701e6617b9ae0f)), closes [#11](https://github.com/daidr/minecraft-skin-renderer/issues/11)
+
+## [0.3.2](https://github.com/daidr/minecraft-skin-renderer/compare/minecraft-skin-renderer-v0.3.1...minecraft-skin-renderer-v0.3.2) (2026-03-28)
+
+
+### Features
+
+* add built-in Lambert lighting with ambient and directional light ([d5c6a73](https://github.com/daidr/minecraft-skin-renderer/commit/d5c6a73d442aaeb1dcdd1d5836651aaf8f0cff38))
+* **playground:** add lighting controls with enable toggle ([4509697](https://github.com/daidr/minecraft-skin-renderer/commit/450969771bce1f4c455c4b5232b2a7b4538fddd0))
+
+## [0.3.1](https://github.com/daidr/minecraft-skin-renderer/compare/minecraft-skin-renderer-v0.3.0...minecraft-skin-renderer-v0.3.1) (2026-03-04)
+
+
+### Features
+
+* add dynamic animation/camera controls and Vue3 v-model bindings ([d828859](https://github.com/daidr/minecraft-skin-renderer/commit/d828859d4e78b0884d6217b10577adfc30813287))
+* export BoneIndex, easing functions, and add isFinished to AnimationController ([a75629c](https://github.com/daidr/minecraft-skin-renderer/commit/a75629c5e9c7ecebc7a048f274db33c55b75ff26))
+
+
+### Bug Fixes
+
+* add types conditions to subpath exports and fix build config ([d0f4ad1](https://github.com/daidr/minecraft-skin-renderer/commit/d0f4ad1d4630fe4ba9fb80f2865370cd49872902))
+* **playground:** resolve multiple UI bugs and improve type safety ([5f0d09b](https://github.com/daidr/minecraft-skin-renderer/commit/5f0d09b52d10921792514b867ed0ef25b8a1ffc4))
+* resolve resource leaks and rendering issues across renderers ([40a1b65](https://github.com/daidr/minecraft-skin-renderer/commit/40a1b652250e0bd45e5a1ed75fb6e63b2e74e1ca))
+
+## [0.3.0](https://github.com/daidr/minecraft-skin-renderer/compare/minecraft-skin-renderer-v0.2.3...minecraft-skin-renderer-v0.3.0) (2026-02-28)
+
+
+### ⚠ BREAKING CHANGES
+
+* **canvas2d:** `renderSkinSide` has been removed. Use `renderSkinRightSide` (same behavior as the old `renderSkinSide`) or `renderSkinLeftSide` instead. The Vue 3 composable `useRenderSkinSide` is also replaced by `useRenderSkinRightSide` and `useRenderSkinLeftSide`.
+
+### Features
+
+* **canvas2d:** replace renderSkinSide with renderSkinRightSide and renderSkinLeftSide ([dda1664](https://github.com/daidr/minecraft-skin-renderer/commit/dda1664efe4f061b8a1d1d18b7e4c46af642aa7e))
+
+## [0.2.3](https://github.com/daidr/minecraft-skin-renderer/compare/minecraft-skin-renderer-v0.2.2...minecraft-skin-renderer-v0.2.3) (2026-02-27)
+
+
+### Bug Fixes
+
+* adjust camera and animation for better model ([8a77ad8](https://github.com/daidr/minecraft-skin-renderer/commit/8a77ad8718bc4a1e2bf8fe4af7bf7f65e0175095))
+
+## [0.2.2](https://github.com/daidr/minecraft-skin-renderer/compare/minecraft-skin-renderer-v0.2.1...minecraft-skin-renderer-v0.2.2) (2026-02-12)
+
+
+### Features
+
+* **playground-styles:** add checkerboard pattern to canvas background ([30abe78](https://github.com/daidr/minecraft-skin-renderer/commit/30abe78e8e9ed14754f9d231d1eba083d04b3352))
+* **vue3:** add explicit type definitions for components and composables ([b44acfc](https://github.com/daidr/minecraft-skin-renderer/commit/b44acfc9db0b098801459c95828164a00ee5d093))
+* **vue3:** add Vue 3 integration with components and composables ([#5](https://github.com/daidr/minecraft-skin-renderer/issues/5)) ([daafdce](https://github.com/daidr/minecraft-skin-renderer/commit/daafdce6be487d862e5b5d128b581c94b6e9797c))
+
+## [0.2.1](https://github.com/daidr/minecraft-skin-renderer/compare/minecraft-skin-renderer-v0.2.0...minecraft-skin-renderer-v0.2.1) (2026-02-09)
+
+
+### Features
+
+* **animation:** 支持骨骼位置偏移动画 ([11ae056](https://github.com/daidr/minecraft-skin-renderer/commit/11ae056a01a7b0e6e062a650b5ff008c003df659))
+* **panorama:** 添加全景背景插件支持 ([11fd2ef](https://github.com/daidr/minecraft-skin-renderer/commit/11fd2efd06df6c1d8cef8f5727bc3458fd0ff61e))
+* **playground:** 添加性能测试页面及构建配置 ([fb9f4b7](https://github.com/daidr/minecraft-skin-renderer/commit/fb9f4b7417c10bd9817ddb219f6996067ce38006))
+* **playground:** 添加设置持久化功能 ([4d583f7](https://github.com/daidr/minecraft-skin-renderer/commit/4d583f7525218b0bddab27641eea6c10b4cb2c89))
+* **renderer:** 添加 WebGPU 后端支持 ([a3c4cdd](https://github.com/daidr/minecraft-skin-renderer/commit/a3c4cdd50e18eec0f94814cf526cdb78c5b4ac78))
+* **viewer:** 添加皮肤部件可见性控制功能 ([fa9cd8a](https://github.com/daidr/minecraft-skin-renderer/commit/fa9cd8a9e4c650fdbb00a2dd9255205ed8335d9a))
+* 初始化 Minecraft 皮肤渲染器项目结构 ([a0c5575](https://github.com/daidr/minecraft-skin-renderer/commit/a0c55755b58da246adc31f7f296a77e5b92f7b28))
+* 引入可摇树优化的渲染器插件系统 ([7ed3bc7](https://github.com/daidr/minecraft-skin-renderer/commit/7ed3bc7e924aa9dfcd36cd4d7bcb384ce71f522f))
+* 添加披风与鞘翅支持 ([91bfbdc](https://github.com/daidr/minecraft-skin-renderer/commit/91bfbdcbc1968992beb7a30bd57c9cee2f8ce459))
+
+
+### Bug Fixes
+
+* **animation:** 调整动画参数以改进角色动作和翼部位置 ([c6e6138](https://github.com/daidr/minecraft-skin-renderer/commit/c6e6138fb809adb2faa35bbb0462b3cb8f75b38d))
+* **camera:** prevent page scroll on mobile touch interactions ([4a53d24](https://github.com/daidr/minecraft-skin-renderer/commit/4a53d24b4ae745ba2e90686be0472682f92fd357))
+* **geometry:** 修复翻转UV贴图的边缘渗色问题 ([75fb0f8](https://github.com/daidr/minecraft-skin-renderer/commit/75fb0f86687811dc028f33f8ed1fe3a9db37d62c))
+
+
+### Performance Improvements
+
+* 优化渲染性能和动画系统 ([4a6eda4](https://github.com/daidr/minecraft-skin-renderer/commit/4a6eda4277c981662322b61311f346fe908d8859))

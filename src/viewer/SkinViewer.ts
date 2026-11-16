@@ -1,0 +1,979 @@
+/**
+ * Main SkinViewer implementation
+ *
+ * This module provides the public API for the Minecraft skin viewer.
+ * It orchestrates the rendering subsystems while delegating specific concerns to:
+ * - ResourceManager: GPU resource lifecycle
+ * - BoneMatrixComputer: Skeleton matrix calculations
+ * - RenderState: Pre-allocated render objects
+ */
+
+import { createCamera, setCameraAspect } from "../core/camera/Camera";
+import type { Camera } from "../core/camera/Camera";
+import {
+  createOrbitControls,
+  getOrbitDistance,
+  getOrbitRotation,
+  resetOrbitControls,
+  setOrbitDistance,
+  setOrbitRotation,
+  updateOrbitControls,
+} from "../core/camera/OrbitControls";
+import type { OrbitControls } from "../core/camera/OrbitControls";
+import { BufferUsage, TextureFilter, isWebGPUSupported } from "../core/renderer/types";
+import type {
+  BackendType,
+  BindGroup,
+  IBuffer,
+  IPipeline,
+  IRenderer,
+  ITexture,
+} from "../core/renderer/types";
+import { getRendererPlugin, getRegisteredBackends } from "../core/renderer/registry";
+import { PART_NAMES, createDefaultVisibility } from "../model/types";
+import type {
+  BoxGeometry,
+  ModelVariant,
+  PlayerSkeleton,
+  PartName,
+  PartsVisibility,
+} from "../model/types";
+import { createPlayerSkeleton, resetSkeleton } from "../model/PlayerModel";
+import { loadSkinTexture, loadCapeTexture, createPlaceholderTexture } from "../texture";
+import type { TextureSource } from "../texture";
+import { createRenderLoop, startRenderLoop, stopRenderLoop } from "./RenderLoop";
+import type { RenderLoop } from "./RenderLoop";
+import type { AnimationConfig, AnimationController } from "../animation/types";
+import {
+  createAnimationController,
+  updateAnimationController,
+} from "../animation/AnimationController";
+import type { BackgroundRenderer } from "../core/plugins/types";
+import { getBackgroundPlugin } from "../core/plugins/registry";
+
+// Import refactored modules
+import {
+  createAllPartGeometries,
+  createAllPartBuffers,
+  disposeAllPartBuffers,
+  createCapeGeometry,
+  createElytraGeometry,
+  createPipelines,
+} from "./ResourceManager";
+import type { PartBuffers, PartGeometry } from "./ResourceManager";
+import { computeBoneMatrices, BONE_MATRICES_SIZE } from "./BoneMatrixComputer";
+import { createRenderBindGroups, updateRenderBindGroups } from "./RenderState";
+import type { RenderBindGroups } from "./RenderState";
+
+/** Panorama plugin not registered warning */
+const PANORAMA_WARN =
+  "PanoramaPlugin is not registered. Import and use() it to enable panorama backgrounds:\n" +
+  "  import { PanoramaPlugin } from 'minecraft-skin-renderer/panorama'\n" +
+  "  use(PanoramaPlugin)";
+
+function closeLoadedBitmap(source: TextureSource | undefined, bitmap: ImageBitmap): void {
+  if (source !== bitmap) {
+    bitmap.close();
+  }
+}
+
+/** Back equipment type (cape, elytra, or none) */
+export type BackEquipment = "cape" | "elytra" | "none";
+
+/** SkinViewer options */
+export interface SkinViewerOptions {
+  canvas: HTMLCanvasElement;
+  preferredBackend?: BackendType | "auto";
+  antialias?: boolean;
+  pixelRatio?: number;
+  /**
+   * Preserve the drawing buffer after presenting a frame.
+   * Leave disabled for better realtime rendering performance.
+   */
+  preserveDrawingBuffer?: boolean;
+  skin?: TextureSource;
+  /** Cape texture (64x32 format). Used for both cape and elytra if elytra texture is not provided. */
+  cape?: TextureSource;
+  /** Back equipment to display: 'cape', 'elytra', or 'none'. Default: 'none' unless cape is provided. */
+  backEquipment?: BackEquipment;
+  slim?: boolean;
+  /** Ambient light intensity (0.0~1.0). Default: 0.6 */
+  ambientLight?: number;
+  /** Direct light intensity (0.0~1.0). Default: 0.4 */
+  directLight?: number;
+  fov?: number;
+  zoom?: number;
+  enableRotate?: boolean;
+  enableZoom?: boolean;
+  autoRotate?: boolean;
+  autoRotateSpeed?: number;
+  /**
+   * Panorama background. Requires PanoramaPlugin to be registered.
+   * Provide a URL or TextureSource for an equirectangular panorama image.
+   */
+  panorama?: TextureSource;
+}
+
+/** SkinViewer interface */
+export interface SkinViewer {
+  setSkin(source: TextureSource | null): Promise<void>;
+  /**
+   * Set the cape texture (64x32 format).
+   * This texture is used for both cape and elytra display.
+   */
+  setCape(source: TextureSource | null): Promise<void>;
+  setSlim(slim: boolean): void;
+
+  /**
+   * Set which back equipment to display.
+   * @param equipment - 'cape' for cape, 'elytra' for elytra wings, 'none' to hide
+   */
+  setBackEquipment(equipment: BackEquipment): void;
+  /** Get the current back equipment setting */
+  readonly backEquipment: BackEquipment;
+
+  /**
+   * Get the current parts visibility settings
+   */
+  getPartsVisibility(): PartsVisibility;
+
+  /**
+   * Set visibility for all parts at once
+   */
+  setPartsVisibility(visibility: PartsVisibility): void;
+
+  /**
+   * Set visibility for a specific part
+   * @param part - The part name (head, body, leftArm, rightArm, leftLeg, rightLeg)
+   * @param layer - The layer to modify ('inner', 'outer', or 'both')
+   * @param visible - Whether the layer should be visible
+   */
+  setPartVisibility(part: PartName, layer: "inner" | "outer" | "both", visible: boolean): void;
+
+  /** Set ambient light intensity (0.0~1.0) */
+  setAmbientLight(intensity: number): void;
+  /** Get ambient light intensity */
+  getAmbientLight(): number;
+  /** Set direct light intensity (0.0~1.0) */
+  setDirectLight(intensity: number): void;
+  /** Get direct light intensity */
+  getDirectLight(): number;
+
+  playAnimation(name: string, config?: AnimationConfig): void;
+  pauseAnimation(): void;
+  resumeAnimation(): void;
+  stopAnimation(): void;
+  setAnimationSpeed(speed: number): void;
+  setAnimationAmplitude(amplitude: number): void;
+  readonly isPaused: boolean;
+
+  setRotation(theta: number, phi: number): void;
+  getRotation(): { theta: number; phi: number };
+  setZoom(zoom: number): void;
+  getZoom(): number;
+  setAutoRotate(enabled: boolean): void;
+  setAutoRotateSpeed(speed: number): void;
+  setEnableRotate(enabled: boolean): void;
+  setEnableZoom(enabled: boolean): void;
+  resetCamera(): void;
+
+  render(): void;
+  startRenderLoop(): void;
+  stopRenderLoop(): void;
+  resize(width: number, height: number): void;
+
+  screenshot(type?: "png" | "jpeg", quality?: number): string;
+
+  /**
+   * Set panorama background. Requires PanoramaPlugin to be registered.
+   * @param source - Panorama texture source, or null to clear
+   */
+  setPanorama(source: TextureSource | null): Promise<void>;
+
+  /** Callback fired when zoom changes via user interaction (wheel or pinch) */
+  onZoomChange: ((zoom: number) => void) | null;
+  /** Callback fired when rotation changes via user interaction (drag) or auto-rotate */
+  onRotationChange: ((theta: number, phi: number) => void) | null;
+
+  readonly isPlaying: boolean;
+  readonly currentAnimation: string | null;
+  readonly backend: BackendType;
+
+  dispose(): void;
+}
+
+/** Internal SkinViewer state */
+interface SkinViewerState {
+  renderer: IRenderer;
+  camera: Camera;
+  controls: OrbitControls;
+  renderLoop: RenderLoop;
+  animationController: AnimationController;
+
+  skeleton: PlayerSkeleton;
+  variant: ModelVariant;
+
+  // GPU resources - pipelines
+  skinPipeline: IPipeline;
+  overlayPipeline: IPipeline;
+  capePipeline: IPipeline;
+
+  // GPU resources - part buffers
+  partBuffers: Record<PartName, PartBuffers>;
+
+  // GPU resources - cape/elytra
+  capeVertexBuffer: IBuffer;
+  capeIndexBuffer: IBuffer;
+  capeGeometry: BoxGeometry;
+  elytraVertexBuffer: IBuffer;
+  elytraIndexBuffer: IBuffer;
+  elytraGeometry: BoxGeometry;
+
+  // Textures
+  skinTexture: ITexture | null;
+  capeTexture: ITexture | null;
+
+  // Geometry data
+  partGeometries: Record<PartName, PartGeometry>;
+
+  // Visibility and equipment
+  partsVisibility: PartsVisibility;
+  backEquipment: BackEquipment;
+
+  // Performance optimization: bone matrix cache
+  boneMatricesCache: Float32Array;
+  boneMatricesDirty: boolean;
+
+  // Performance optimization: pre-allocated render objects (from RenderState module)
+  renderBindGroups: RenderBindGroups;
+
+  // Lighting
+  ambientLight: number;
+  directLight: number;
+
+  // Background state
+  backgroundRenderer: BackgroundRenderer | null;
+
+  // Async resource versioning
+  skinRequestId: number;
+  capeRequestId: number;
+  panoramaRequestId: number;
+
+  // State flags
+  disposed: boolean;
+}
+
+/**
+ * Create a SkinViewer
+ */
+export async function createSkinViewer(options: SkinViewerOptions): Promise<SkinViewer> {
+  const canvas = options.canvas;
+  const width = canvas.clientWidth || canvas.width;
+  const height = canvas.clientHeight || canvas.height;
+  const variant: ModelVariant = options.slim ? "slim" : "classic";
+
+  // Determine and create renderer based on preferred backend
+  const preferredBackend = options.preferredBackend ?? "auto";
+  const registeredBackends = getRegisteredBackends();
+
+  if (registeredBackends.length === 0) {
+    throw new Error(
+      "No renderer registered. Please register a renderer using use():\n" +
+        "  import { use } from 'minecraft-skin-renderer'\n" +
+        "  import { WebGLRendererPlugin } from 'minecraft-skin-renderer/webgl'\n" +
+        "  use(WebGLRendererPlugin)",
+    );
+  }
+
+  // Determine which backend to use (prefer WebGPU if available)
+  const targetBackend: BackendType =
+    preferredBackend !== "auto"
+      ? preferredBackend
+      : getRendererPlugin("webgpu") && isWebGPUSupported()
+        ? "webgpu"
+        : getRendererPlugin("webgl")
+          ? "webgl"
+          : registeredBackends[0];
+
+  const plugin = getRendererPlugin(targetBackend);
+  if (!plugin) {
+    throw new Error(
+      `Renderer "${targetBackend}" is not registered. Available: [${registeredBackends.join(", ")}]\n` +
+        `Please register it using use():\n` +
+        `  import { ${targetBackend === "webgpu" ? "WebGPURendererPlugin" : "WebGLRendererPlugin"} } from 'minecraft-skin-renderer/${targetBackend}'\n` +
+        `  use(${targetBackend === "webgpu" ? "WebGPURendererPlugin" : "WebGLRendererPlugin"})`,
+    );
+  }
+
+  const rendererOptions = {
+    canvas,
+    antialias: options.antialias ?? true,
+    pixelRatio: options.pixelRatio,
+    preserveDrawingBuffer: options.preserveDrawingBuffer ?? false,
+  };
+
+  let renderer: IRenderer;
+  try {
+    renderer = await plugin.createRenderer(rendererOptions);
+  } catch (e) {
+    // Try fallback to other registered backend
+    const fb = registeredBackends.find((b) => b !== targetBackend);
+    const fbPlugin = fb && getRendererPlugin(fb);
+    if (!fbPlugin) throw e;
+    console.warn(`${targetBackend} initialization failed, falling back to ${fb}:`, e);
+    try {
+      renderer = await fbPlugin.createRenderer(rendererOptions);
+    } catch (fallbackError) {
+      throw new Error(
+        `All renderers failed to initialize.\n` +
+          `  ${targetBackend}: ${e instanceof Error ? e.message : (e as string)}\n` +
+          `  ${fb}: ${fallbackError instanceof Error ? fallbackError.message : (fallbackError as string)}`,
+      );
+    }
+  }
+
+  const initCleanup: (() => void)[] = [() => renderer.dispose()];
+  const rollbackInit = () => {
+    for (let i = initCleanup.length - 1; i >= 0; i--) {
+      try {
+        initCleanup[i]!();
+      } catch {
+        // Continue rolling back the rest of the resources.
+      }
+    }
+  };
+
+  try {
+    renderer.resize(width, height);
+
+    // Create camera
+    const aspect = width / height;
+    const camera = createCamera(aspect, {
+      fov: options.fov ?? 70,
+      position: [0, 16, 50],
+      target: [0, 16, 0],
+    });
+
+    // Create orbit controls
+    const controls = createOrbitControls(camera, canvas, {
+      enableRotate: options.enableRotate ?? true,
+      enableZoom: options.enableZoom ?? true,
+      autoRotate: options.autoRotate ?? false,
+      autoRotateSpeed: options.autoRotateSpeed ?? 30.0,
+      minDistance: 20,
+      maxDistance: 150,
+    });
+    initCleanup.push(() => controls.dispose());
+
+    if (options.zoom !== undefined) {
+      setOrbitDistance(controls, options.zoom);
+    }
+
+    // Create skeleton
+    const skeleton = createPlayerSkeleton(variant);
+
+    // Create geometry for all parts (using ResourceManager)
+    const partGeometries = createAllPartGeometries(variant);
+
+    // Create pipelines (using ResourceManager)
+    const { skinPipeline, overlayPipeline, capePipeline } = createPipelines(renderer);
+    initCleanup.push(() => skinPipeline.dispose());
+    initCleanup.push(() => overlayPipeline.dispose());
+    initCleanup.push(() => capePipeline.dispose());
+
+    // Create buffers for all parts
+    const partBuffers = createAllPartBuffers(renderer, partGeometries);
+    initCleanup.push(() => disposeAllPartBuffers(partBuffers));
+
+    // Create cape geometry and buffers
+    const capeGeometry = createCapeGeometry();
+    const capeVertexBuffer = renderer.createBuffer(BufferUsage.Vertex, capeGeometry.vertices);
+    const capeIndexBuffer = renderer.createBuffer(BufferUsage.Index, capeGeometry.indices);
+    initCleanup.push(() => capeVertexBuffer.dispose());
+    initCleanup.push(() => capeIndexBuffer.dispose());
+
+    // Create elytra geometry and buffers
+    const elytraGeometry = createElytraGeometry();
+    const elytraVertexBuffer = renderer.createBuffer(BufferUsage.Vertex, elytraGeometry.vertices);
+    const elytraIndexBuffer = renderer.createBuffer(BufferUsage.Index, elytraGeometry.indices);
+    initCleanup.push(() => elytraVertexBuffer.dispose());
+    initCleanup.push(() => elytraIndexBuffer.dispose());
+
+    // Load initial skin texture (fallback to placeholder)
+    let skinBitmap: ImageBitmap;
+    try {
+      skinBitmap = options.skin
+        ? await loadSkinTexture(options.skin)
+        : await createPlaceholderTexture();
+    } catch (error) {
+      console.warn("Failed to load skin texture, using placeholder:", error);
+      skinBitmap = await createPlaceholderTexture();
+    }
+    const texOpts = { magFilter: TextureFilter.Linear, minFilter: TextureFilter.Linear };
+    let skinTexture: ITexture | null;
+    try {
+      skinTexture = await renderer.createTexture(skinBitmap, texOpts);
+    } finally {
+      closeLoadedBitmap(options.skin, skinBitmap);
+    }
+    const initialSkinTexture = skinTexture;
+    initCleanup.push(() => initialSkinTexture.dispose());
+
+    // Create animation controller
+    const animationController = createAnimationController(skeleton);
+
+    // Load initial cape texture if provided
+    let capeTexture: ITexture | null = null;
+    if (options.cape) {
+      try {
+        const bitmap = await loadCapeTexture(options.cape);
+        try {
+          capeTexture = await renderer.createTexture(bitmap, texOpts);
+        } finally {
+          closeLoadedBitmap(options.cape, bitmap);
+        }
+        const initialCapeTexture = capeTexture;
+        initCleanup.push(() => initialCapeTexture.dispose());
+      } catch (error) {
+        console.warn("Failed to load cape texture:", error);
+      }
+    }
+
+    // Determine initial back equipment
+    let initialBackEquipment: BackEquipment = options.backEquipment ?? "none";
+    if (initialBackEquipment === "none" && capeTexture) {
+      initialBackEquipment = "cape"; // Default to cape if texture is provided but no explicit setting
+    }
+
+    // Pre-allocate render objects to avoid GC pressure (using RenderState module)
+    const renderBindGroups = createRenderBindGroups();
+
+    // Create state object
+    const state: SkinViewerState = {
+      renderer,
+      camera,
+      controls,
+      renderLoop: null as unknown as RenderLoop,
+      animationController,
+      skeleton,
+      variant,
+      skinPipeline,
+      overlayPipeline,
+      capePipeline,
+      partBuffers,
+      capeVertexBuffer,
+      capeIndexBuffer,
+      capeGeometry,
+      elytraVertexBuffer,
+      elytraIndexBuffer,
+      elytraGeometry,
+      skinTexture,
+      capeTexture,
+      partGeometries,
+      partsVisibility: createDefaultVisibility(),
+      backEquipment: initialBackEquipment,
+      boneMatricesCache: new Float32Array(BONE_MATRICES_SIZE),
+      boneMatricesDirty: true,
+      renderBindGroups,
+      ambientLight: options.ambientLight ?? 0.6,
+      directLight: options.directLight ?? 0.4,
+      backgroundRenderer: null,
+      skinRequestId: 0,
+      capeRequestId: 0,
+      panoramaRequestId: 0,
+      disposed: false,
+    };
+
+    // Render function
+    const doRender = () => {
+      if (state.disposed) return;
+
+      const {
+        renderer,
+        camera,
+        skinPipeline,
+        overlayPipeline,
+        capePipeline,
+        partBuffers,
+        capeVertexBuffer,
+        capeIndexBuffer,
+        elytraVertexBuffer,
+        elytraIndexBuffer,
+        skinTexture,
+        capeTexture,
+        partsVisibility,
+        backEquipment,
+      } = state;
+
+      renderer.beginFrame();
+      renderer.clear(0, 0, 0, 0);
+
+      // Render background first (if available)
+      if (state.backgroundRenderer) {
+        state.backgroundRenderer.render(camera);
+      }
+
+      if (skinTexture) {
+        // Compute bone matrices only if dirty
+        if (state.boneMatricesDirty) {
+          computeBoneMatrices(state.skeleton, state.boneMatricesCache);
+          state.boneMatricesDirty = false;
+        }
+
+        // Update pre-allocated bind groups (using RenderState module)
+        const { renderBindGroups } = state;
+        renderBindGroups.uniforms.u_ambientIntensity = state.ambientLight;
+        renderBindGroups.uniforms.u_diffuseIntensity = state.directLight;
+        updateRenderBindGroups(
+          renderBindGroups,
+          camera.viewMatrix,
+          camera.projectionMatrix,
+          state.boneMatricesCache,
+          skinTexture,
+          camera.position,
+          camera.target,
+          capeTexture,
+        );
+
+        // Helper to issue a draw call
+        const draw = (pl: IPipeline, vb: IBuffer, ib: IBuffer, ic: number, bg: BindGroup) => {
+          renderer.draw({
+            pipeline: pl,
+            vertexBuffers: [vb],
+            indexBuffer: ib,
+            indexCount: ic,
+            bindGroup: bg,
+          });
+        };
+
+        // Draw each part based on visibility settings
+        for (const partName of PART_NAMES) {
+          const visibility = partsVisibility[partName];
+          const buffers = partBuffers[partName];
+          if (visibility.inner) {
+            renderBindGroups.uniforms.u_alphaTest = 0.0; // Inner layer: force opaque
+            draw(
+              skinPipeline,
+              buffers.innerVertexBuffer,
+              buffers.innerIndexBuffer,
+              buffers.innerIndexCount,
+              renderBindGroups.skinBindGroup,
+            );
+          }
+          if (visibility.outer) {
+            renderBindGroups.uniforms.u_alphaTest = 0.01; // Outer layer: alpha test
+            draw(
+              overlayPipeline,
+              buffers.outerVertexBuffer,
+              buffers.outerIndexBuffer,
+              buffers.outerIndexCount,
+              renderBindGroups.skinBindGroup,
+            );
+          }
+        }
+
+        // Restore alpha test for cape/elytra rendering
+        renderBindGroups.uniforms.u_alphaTest = 0.01;
+
+        // Draw cape or elytra if texture is available and equipment is enabled
+        if (capeTexture && backEquipment !== "none") {
+          const isCape = backEquipment === "cape";
+          draw(
+            capePipeline,
+            isCape ? capeVertexBuffer : elytraVertexBuffer,
+            isCape ? capeIndexBuffer : elytraIndexBuffer,
+            (isCape ? state.capeGeometry : state.elytraGeometry).indexCount,
+            renderBindGroups.capeBindGroup,
+          );
+        }
+      }
+
+      renderer.endFrame();
+    };
+
+    // Update function
+    const doUpdate = (deltaTime: number) => {
+      if (state.disposed) return;
+
+      updateOrbitControls(state.controls, deltaTime);
+      updateAnimationController(state.animationController, deltaTime);
+
+      // Mark bone matrices as dirty if animation is playing
+      if (state.animationController.isPlaying) {
+        state.boneMatricesDirty = true;
+      }
+    };
+
+    // Create render loop
+    state.renderLoop = createRenderLoop(doUpdate, doRender);
+
+    // Create viewer interface
+    const viewer: SkinViewer = {
+      get backend() {
+        return state.renderer.backend;
+      },
+
+      get isPlaying() {
+        return state.animationController.isPlaying;
+      },
+
+      get currentAnimation() {
+        return state.animationController.currentAnimation;
+      },
+
+      get onZoomChange() {
+        return state.controls.onDistanceChange;
+      },
+      set onZoomChange(callback: ((zoom: number) => void) | null) {
+        state.controls.onDistanceChange = callback;
+      },
+
+      get onRotationChange() {
+        return state.controls.onRotationChange;
+      },
+      set onRotationChange(callback: ((theta: number, phi: number) => void) | null) {
+        state.controls.onRotationChange = callback;
+      },
+
+      async setSkin(source: TextureSource | null) {
+        if (state.disposed) return;
+
+        const requestId = ++state.skinRequestId;
+
+        if (!source) {
+          const oldTexture = state.skinTexture;
+          state.skinTexture = null;
+          oldTexture?.dispose();
+          return;
+        }
+
+        let tex: ITexture;
+        try {
+          const bitmap = await loadSkinTexture(source);
+          if (state.disposed || requestId !== state.skinRequestId) {
+            closeLoadedBitmap(source, bitmap);
+            return;
+          }
+          try {
+            tex = await state.renderer.createTexture(bitmap, texOpts);
+          } finally {
+            closeLoadedBitmap(source, bitmap);
+          }
+        } catch (error) {
+          if (!state.disposed && requestId === state.skinRequestId) {
+            throw error;
+          }
+          return;
+        }
+
+        if (state.disposed || requestId !== state.skinRequestId) {
+          tex.dispose();
+          return;
+        }
+
+        const oldTexture = state.skinTexture;
+        state.skinTexture = tex;
+        oldTexture?.dispose();
+      },
+
+      async setCape(source: TextureSource | null) {
+        if (state.disposed) return;
+
+        const requestId = ++state.capeRequestId;
+
+        if (!source) {
+          const oldTexture = state.capeTexture;
+          state.capeTexture = null;
+          // Hide back equipment if cape texture is removed
+          state.backEquipment = "none";
+          oldTexture?.dispose();
+          return;
+        }
+
+        let tex: ITexture;
+        try {
+          const bitmap = await loadCapeTexture(source);
+          if (state.disposed || requestId !== state.capeRequestId) {
+            closeLoadedBitmap(source, bitmap);
+            return;
+          }
+          try {
+            tex = await state.renderer.createTexture(bitmap, texOpts);
+          } finally {
+            closeLoadedBitmap(source, bitmap);
+          }
+        } catch (error) {
+          if (!state.disposed && requestId === state.capeRequestId) {
+            throw error;
+          }
+          return;
+        }
+
+        if (state.disposed || requestId !== state.capeRequestId) {
+          tex.dispose();
+          return;
+        }
+
+        const oldTexture = state.capeTexture;
+        state.capeTexture = tex;
+        oldTexture?.dispose();
+
+        // Auto-enable cape display if not already showing something
+        if (state.backEquipment === "none") {
+          state.backEquipment = "cape";
+        }
+      },
+
+      setBackEquipment(equipment: BackEquipment) {
+        state.backEquipment = equipment;
+      },
+
+      get backEquipment() {
+        return state.backEquipment;
+      },
+
+      getPartsVisibility(): PartsVisibility {
+        // Return a deep copy to prevent external mutation
+        const result = {} as PartsVisibility;
+        for (const part of PART_NAMES) {
+          result[part] = { ...state.partsVisibility[part] };
+        }
+        return result;
+      },
+
+      setPartsVisibility(visibility: PartsVisibility) {
+        for (const part of PART_NAMES) {
+          state.partsVisibility[part] = { ...visibility[part] };
+        }
+      },
+
+      setPartVisibility(part: PartName, layer: "inner" | "outer" | "both", visible: boolean) {
+        if (layer === "both") {
+          state.partsVisibility[part].inner = visible;
+          state.partsVisibility[part].outer = visible;
+        } else {
+          state.partsVisibility[part][layer] = visible;
+        }
+      },
+
+      setAmbientLight(intensity: number) {
+        state.ambientLight = Math.max(0, Math.min(1, intensity));
+      },
+
+      getAmbientLight() {
+        return state.ambientLight;
+      },
+
+      setDirectLight(intensity: number) {
+        state.directLight = Math.max(0, Math.min(1, intensity));
+      },
+
+      getDirectLight() {
+        return state.directLight;
+      },
+
+      setSlim(slim: boolean) {
+        if (state.disposed) return;
+
+        const newVariant = slim ? "slim" : "classic";
+        if (newVariant === state.variant) return;
+
+        // Remember current animation state
+        const currentAnimation = state.animationController.currentAnimation;
+        const wasPlaying = state.animationController.isPlaying;
+        const wasPaused = state.animationController.isPaused;
+
+        state.variant = newVariant;
+
+        // Recreate skeleton
+        state.skeleton = createPlayerSkeleton(newVariant);
+
+        // Recreate animation controller with new skeleton
+        state.animationController = createAnimationController(state.skeleton);
+
+        // Restore animation state
+        if (currentAnimation && wasPlaying) {
+          state.animationController.play(currentAnimation);
+          if (wasPaused) {
+            state.animationController.pause();
+          }
+        }
+
+        // Dispose old buffers
+        disposeAllPartBuffers(state.partBuffers);
+
+        // Recreate geometry and buffers
+        state.partGeometries = createAllPartGeometries(newVariant);
+        state.partBuffers = createAllPartBuffers(state.renderer, state.partGeometries);
+
+        // Mark bone matrices as dirty
+        state.boneMatricesDirty = true;
+      },
+
+      playAnimation(name: string, config?: AnimationConfig) {
+        state.animationController.play(name, config);
+      },
+
+      pauseAnimation() {
+        state.animationController.pause();
+      },
+
+      resumeAnimation() {
+        state.animationController.resume();
+      },
+
+      stopAnimation() {
+        state.animationController.stop();
+        resetSkeleton(state.skeleton);
+        state.boneMatricesDirty = true;
+      },
+
+      setAnimationSpeed(speed: number) {
+        state.animationController.setSpeed(speed);
+      },
+
+      setAnimationAmplitude(amplitude: number) {
+        state.animationController.setAmplitude(amplitude);
+      },
+
+      get isPaused() {
+        return state.animationController.isPaused;
+      },
+
+      setRotation(theta: number, phi: number) {
+        setOrbitRotation(state.controls, theta, phi);
+      },
+
+      getRotation() {
+        return getOrbitRotation(state.controls);
+      },
+
+      setZoom(zoom: number) {
+        setOrbitDistance(state.controls, zoom);
+      },
+
+      getZoom() {
+        return getOrbitDistance(state.controls);
+      },
+
+      setAutoRotate(enabled: boolean) {
+        state.controls.autoRotate = enabled;
+      },
+
+      setAutoRotateSpeed(speed: number) {
+        state.controls.autoRotateSpeed = speed;
+      },
+
+      setEnableRotate(enabled: boolean) {
+        state.controls.enableRotate = enabled;
+      },
+
+      setEnableZoom(enabled: boolean) {
+        state.controls.enableZoom = enabled;
+      },
+
+      resetCamera() {
+        resetOrbitControls(state.controls);
+      },
+
+      render: doRender,
+
+      startRenderLoop: () => startRenderLoop(state.renderLoop),
+
+      stopRenderLoop: () => stopRenderLoop(state.renderLoop),
+
+      resize(width: number, height: number) {
+        if (state.disposed) return;
+
+        state.renderer.resize(width, height);
+        setCameraAspect(state.camera, width / height);
+      },
+
+      screenshot(type = "png" as const, quality = 0.92) {
+        doRender();
+        return canvas.toDataURL(`image/${type}`, quality);
+      },
+
+      async setPanorama(source: TextureSource | null) {
+        if (state.disposed) return;
+
+        const requestId = ++state.panoramaRequestId;
+
+        if (source === null) {
+          const oldRenderer = state.backgroundRenderer;
+          state.backgroundRenderer = null;
+          oldRenderer?.dispose();
+          return;
+        }
+
+        // Get panorama plugin
+        const panoramaPlugin = getBackgroundPlugin("panorama");
+        if (!panoramaPlugin) {
+          console.warn(PANORAMA_WARN);
+          return;
+        }
+
+        // Load into a local renderer first so failed/stale requests keep the current background.
+        const nextRenderer = panoramaPlugin.createRenderer(state.renderer);
+        try {
+          await nextRenderer.setSource(source);
+        } catch (error) {
+          nextRenderer.dispose();
+          if (!state.disposed && requestId === state.panoramaRequestId) {
+            throw error;
+          }
+          return;
+        }
+
+        if (state.disposed || requestId !== state.panoramaRequestId) {
+          nextRenderer.dispose();
+          return;
+        }
+
+        const oldRenderer = state.backgroundRenderer;
+        state.backgroundRenderer = nextRenderer;
+        oldRenderer?.dispose();
+      },
+
+      dispose() {
+        if (state.disposed) return;
+        state.disposed = true;
+
+        stopRenderLoop(state.renderLoop);
+        state.controls.dispose();
+
+        // Dispose all part buffers
+        disposeAllPartBuffers(state.partBuffers);
+
+        // Dispose pipelines, buffers, textures, and background
+        for (const r of [
+          state.skinPipeline,
+          state.overlayPipeline,
+          state.capePipeline,
+          state.capeVertexBuffer,
+          state.capeIndexBuffer,
+          state.elytraVertexBuffer,
+          state.elytraIndexBuffer,
+          state.skinTexture,
+          state.capeTexture,
+          state.backgroundRenderer,
+        ])
+          r?.dispose();
+
+        state.renderer.dispose();
+      },
+    };
+
+    // Initialize panorama background asynchronously without blocking viewer creation.
+    if (options.panorama) {
+      viewer.setPanorama(options.panorama).catch((e) => {
+        console.warn("Failed to load panorama:", e);
+      });
+    }
+
+    return viewer;
+  } catch (error) {
+    rollbackInit();
+    throw error;
+  }
+}

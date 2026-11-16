@@ -1,0 +1,27 @@
+{
+  "$schema": "https://jsr.io/schema/config-file.v1.json",
+  "name": "@daidr/minecraft-skin-renderer",
+  "version": "0.3.3",
+  "license": "MIT",
+  "exports": {
+    ".": "./src/index.ts",
+    "./webgl": "./src/webgl.ts",
+    "./webgpu": "./src/webgpu.ts",
+    "./panorama": "./src/panorama.ts",
+    "./canvas2d": "./src/canvas2d.ts",
+    "./vue3": "./src/vue3.ts"
+  },
+  "publish": {
+    "include": [
+      "src/**/*.ts",
+      "README.md",
+      "LICENSE"
+    ],
+    "exclude": [
+      "src/**/*.test.ts",
+      "src/**/*.spec.ts",
+      "src/iife-core.ts",
+      "src/iife-vue3.ts"
+    ]
+  }
+}

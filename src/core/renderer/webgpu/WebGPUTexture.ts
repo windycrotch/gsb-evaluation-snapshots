@@ -1,0 +1,207 @@
+/**
+ * WebGPU Texture implementation
+ */
+
+import { TextureFilter, TextureWrap } from "../types";
+import type { ITexture, TextureOptions } from "../types";
+import { textureId } from "../utils";
+
+export class WebGPUTextureImpl implements ITexture {
+  readonly id: number;
+  readonly width: number;
+  readonly height: number;
+
+  private device: GPUDevice;
+  private texture: GPUTexture;
+  private textureView: GPUTextureView;
+  private sampler: GPUSampler;
+  private disposed = false;
+
+  /** Version counter for cancelling pending updates */
+  private updateVersion = 0;
+
+  /** Callback invoked on dispose to clean up external caches */
+  private onDisposeCallback: ((id: number) => void) | null = null;
+
+  private constructor(
+    device: GPUDevice,
+    texture: GPUTexture,
+    sampler: GPUSampler,
+    width: number,
+    height: number,
+  ) {
+    this.id = textureId();
+    this.device = device;
+    this.texture = texture;
+    this.textureView = texture.createView();
+    this.sampler = sampler;
+    this.width = width;
+    this.height = height;
+  }
+
+  /**
+   * Create a WebGPU texture from an image source
+   */
+  static async create(
+    device: GPUDevice,
+    source: TexImageSource,
+    options: TextureOptions = {},
+  ): Promise<WebGPUTextureImpl> {
+    // Get dimensions from source
+    let width: number;
+    let height: number;
+
+    if (source instanceof HTMLVideoElement) {
+      width = source.videoWidth;
+      height = source.videoHeight;
+    } else if (source instanceof VideoFrame) {
+      width = source.displayWidth;
+      height = source.displayHeight;
+    } else {
+      width = source.width;
+      height = source.height;
+    }
+
+    // Create texture
+    const texture = device.createTexture({
+      size: { width, height },
+      format: "rgba8unorm",
+      usage:
+        GPUTextureUsage.TEXTURE_BINDING |
+        GPUTextureUsage.COPY_DST |
+        GPUTextureUsage.RENDER_ATTACHMENT,
+    });
+
+    let bitmap: ImageBitmap | null = null;
+    let ownsBitmap = false;
+
+    try {
+      // Convert to ImageBitmap first if needed for copyExternalImageToTexture.
+      if (source instanceof ImageBitmap) {
+        bitmap = source;
+      } else {
+        bitmap = await createImageBitmap(source);
+        ownsBitmap = true;
+      }
+
+      // Note: WebGPU texture coordinates have (0,0) at top-left, same as image files,
+      // so we don't need to flip Y (unlike WebGL where (0,0) is at bottom-left)
+      device.queue.copyExternalImageToTexture({ source: bitmap }, { texture }, { width, height });
+    } catch (error) {
+      texture.destroy();
+      throw error;
+    } finally {
+      if (ownsBitmap) {
+        bitmap?.close();
+      }
+    }
+
+    // Create sampler
+    const sampler = device.createSampler({
+      minFilter: WebGPUTextureImpl.convertFilter(options.minFilter ?? TextureFilter.Nearest),
+      magFilter: WebGPUTextureImpl.convertFilter(options.magFilter ?? TextureFilter.Nearest),
+      addressModeU: WebGPUTextureImpl.convertWrap(options.wrapU ?? TextureWrap.ClampToEdge),
+      addressModeV: WebGPUTextureImpl.convertWrap(options.wrapV ?? TextureWrap.ClampToEdge),
+    });
+
+    return new WebGPUTextureImpl(device, texture, sampler, width, height);
+  }
+
+  /** Set a callback to be invoked when this texture is disposed */
+  setOnDispose(callback: (id: number) => void): void {
+    this.onDisposeCallback = callback;
+  }
+
+  /** Convert filter enum to GPU filter mode */
+  private static convertFilter(filter: TextureFilter): GPUFilterMode {
+    switch (filter) {
+      case TextureFilter.Linear:
+        return "linear";
+      default:
+        return "nearest";
+    }
+  }
+
+  /** Convert wrap enum to GPU address mode */
+  private static convertWrap(wrap: TextureWrap): GPUAddressMode {
+    switch (wrap) {
+      case TextureWrap.Repeat:
+        return "repeat";
+      case TextureWrap.MirrorRepeat:
+        return "mirror-repeat";
+      default:
+        return "clamp-to-edge";
+    }
+  }
+
+  /** Get the native WebGPU texture */
+  getNativeTexture(): GPUTexture {
+    return this.texture;
+  }
+
+  /** Get the texture view */
+  getTextureView(): GPUTextureView {
+    return this.textureView;
+  }
+
+  /** Get the sampler */
+  getSampler(): GPUSampler {
+    return this.sampler;
+  }
+
+  /** Update texture data */
+  update(source: TexImageSource): void {
+    if (this.disposed) return;
+
+    // Increment version to cancel any pending updates
+    this.updateVersion++;
+
+    // For WebGPU, we need to handle this asynchronously
+    // but the interface expects sync. We use version checking to handle race conditions
+    this.updateAsync(source, this.updateVersion).catch((error) => {
+      console.warn("WebGPU texture update failed:", error);
+    });
+  }
+
+  /**
+   * Async update implementation with version checking.
+   * If the version changes during the async operation, the update is cancelled.
+   */
+  private async updateAsync(source: TexImageSource, version: number): Promise<void> {
+    let bitmap: ImageBitmap | null = null;
+    let ownsBitmap = false;
+
+    try {
+      if (source instanceof ImageBitmap) {
+        bitmap = source;
+      } else {
+        bitmap = await createImageBitmap(source);
+        ownsBitmap = true;
+      }
+
+      // Check if this update has been superseded by a newer one
+      if (this.disposed || this.updateVersion !== version) {
+        return;
+      }
+
+      this.device.queue.copyExternalImageToTexture(
+        { source: bitmap },
+        { texture: this.texture },
+        { width: this.width, height: this.height },
+      );
+    } finally {
+      if (ownsBitmap) {
+        bitmap?.close();
+      }
+    }
+  }
+
+  /** Dispose the texture */
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.onDisposeCallback?.(this.id);
+    this.onDisposeCallback = null;
+    this.texture.destroy();
+  }
+}

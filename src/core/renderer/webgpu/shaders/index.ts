@@ -1,0 +1,4 @@
+export {
+  SKIN_SHADER_WGSL_RAW as SKIN_SHADER_WGSL,
+  SIMPLE_SHADER_WGSL_RAW as SIMPLE_SHADER_WGSL,
+} from "./raw.ts";
