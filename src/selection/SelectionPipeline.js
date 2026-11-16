@@ -56,7 +56,9 @@ export class SelectionPipeline {
       // the last render if new tiled data arrived over the network.
       const tileSizes = layer._tileSizes ?? [layer.instanceCount ?? layer.vertexCount ?? 0]
       if (tileSizes.every(n => n > 0) && !arraysEqual(selCol._tiles.map(t => t.n), tileSizes)) {
-        selCol._rebuild(tileSizes)
+        // Silent: the fresh result is published right after the readback, so
+        // subscribers see one change rather than a transient "cleared" state.
+        selCol._rebuild(tileSizes, { silent: true })
       }
 
       const props = plot._buildLayerProps(layer, layerIdx, {})

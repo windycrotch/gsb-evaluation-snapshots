@@ -4,12 +4,20 @@ API for reading selection results, cross-plot selection linking, and (when neede
 
 ---
 
-## `plot.selections[name]`
+## `plot.getSelection(name)`
 
-Returns a stable `Selection` instance for the given name. The same instance is returned across `plot.update()` calls, so subscriptions survive updates.
+Returns the stable `Selection` instance for a selection channel **declared by a layer's `selection` key**. This is the public read path; the same instance is returned on every call and across `plot.update()` calls, so subscriptions survive updates.
 
 ```js
-const sel = plot.selections['brush1']
+const sel = plot.getSelection('brush1')
+```
+
+- `name` must match the `selection` value of at least one layer in the current config. For a name no layer declares, `getSelection()` **throws** an error naming it — an unknown name never silently reads as an empty selection.
+- The returned object is identical to `plot.selections[name]`; `plot.selections` remains available and behaves the same, including throwing when reading `.arrays` of an undeclared name.
+
+```js
+// Throws: no layer declares 'typo'
+plot.getSelection('typo')
 ```
 
 `Selection` implements the [`ColumnData`](Data.md) interface, so it can be used directly as an attribute value in layer specs or computation inputs:
@@ -19,10 +27,25 @@ layers: [{
   points: {
     xData: 'input.x',
     yData: 'input.y',
-    vData: plot.selections['brush1'],  // drive color from selection state
+    vData: plot.getSelection('brush1'),  // drive color from selection state
   }
 }]
 ```
+
+---
+
+## Selection state semantics
+
+Every `Selection` reads from one of three states. `active` and `arrays` always agree:
+
+| State | `active` | `arrays` |
+|-------|----------|----------|
+| Never selected, a lasso that hit nothing, or after `clear()` | `false` | `null` |
+| A lasso (or applied cross-plot selection) hit ≥ 1 point | `true` | `Float32Array[]`, one per tile |
+
+There is no distinct "drawn but empty" state: a miss and a never-drawn selection are both `active === false, arrays === null`.
+
+When `active` is `true`, `arrays[t]` has exactly `tile[t]`'s point count, and `arrays[t][i] === 1` marks a selected point (all other entries are `0`). For single-tile layers `arrays` has length 1. This matches the tile/index pair returned by `plot.pick()`.
 
 ---
 
@@ -30,16 +53,14 @@ layers: [{
 
 ### `selection.active`
 
-`true` when a lasso has been drawn and at least one point is selected; `false` otherwise (including before any lasso has been drawn).
+`true` when a lasso has been drawn and at least one point is selected; `false` otherwise (including before any lasso has been drawn), and after `clear()`.
 
 ### `selection.arrays`
 
-A `Float32Array[]` with one array per data tile: each element is `1` if selected, `0` if not. Returns `null` when `selection.active` is `false`.
-
-For single-tile layers, `selection.arrays` has length 1. For tiled layers, `selection.arrays[t][i]` is `1` when local point `i` within tile `t` is selected. This matches the tile/index pair returned by `plot.pick()`.
+A `Float32Array[]` with one array per data tile: each element is `1` if selected, `0` if not. Returns `null` when `selection.active` is `false`. Reading `arrays` on a name no layer declares throws (see [`plot.getSelection`](#plotgetselectionname)).
 
 ```js
-plot.selections['brush1'].subscribe(sel => {
+plot.getSelection('brush1').subscribe(sel => {
   const arrays = sel.arrays   // Float32Array[] | null
   if (arrays) {
     arrays.forEach((tileArr, t) => {
@@ -60,26 +81,30 @@ Total number of data points tracked by this selection channel across all tiles, 
 
 ### `selection.clear()`
 
-Clears the selection and marks it inactive. Triggers a re-render and notifies subscribers.
+Clears the selection and marks it inactive. Takes effect immediately (`active` becomes `false`, `arrays` becomes `null` synchronously), triggers a re-render and notifies subscribers. When two plots share the same data object and selection name, clearing on one returns both to inactive.
 
 ```js
-plot.selections['brush1'].clear()
+plot.getSelection('brush1').clear()
 ```
 
 ### `selection.applyFrom(otherSelection)`
 
-Copies the selection state from another `Selection` object into this one. Triggers a re-render and notifies subscribers. Used by `linkSelections` internally; also useful for manual cross-plot or cross-component propagation.
+Copies the selection result from another `Selection` into this one. Triggers a re-render and notifies subscribers.
+
+- If the source is active, the target becomes active with the same per-point result. When the two plots' tile layouts (point counts) differ, the target **rebuilds its tiles at its own sizes** before writing, so it never keeps the source's tile structure or any stale data.
+- If the source is inactive (`arrays === null`), the target also returns to inactive.
+- Used by `linkSelections` internally; also useful for manual cross-plot or cross-component propagation.
 
 ```js
-plot2.selections['brush1'].applyFrom(plot1.selections['brush1'])
+plot2.getSelection('brush1').applyFrom(plot1.getSelection('brush1'))
 ```
 
 ### `selection.subscribe(callback)`
 
-Registers a callback fired whenever the selection changes (after any lasso on any linked plot). Returns `{ remove() }` to unregister.
+Registers a callback fired whenever the selection changes: after a lasso completes (hit or miss), after `clear()`, and after the selection is overwritten by an applied cross-plot result. Also fires on every plot sharing the same data object and selection name, since they share one selection channel. Returns `{ remove() }` to unregister.
 
 ```js
-const handle = plot.selections['brush1'].subscribe(sel => {
+const handle = plot.getSelection('brush1').subscribe(sel => {
   console.log('selection changed, active:', sel.active)
 })
 
@@ -164,7 +189,7 @@ Links two `Selection` objects bidirectionally. When a lasso fires on either plot
 ```js
 import { linkSelections } from 'gladly'
 
-const handle = linkSelections(plot1.selections['brush1'], plot2.selections['brush1'])
+const handle = linkSelections(plot1.getSelection('brush1'), plot2.getSelection('brush1'))
 
 // Later, tear down:
 handle.unlink()
@@ -186,7 +211,7 @@ const config2 = { layers: [{ points: { xData: 'input.x', yData: 'input.z', selec
 await plot1.update({ data: myData, config: config1 })
 await plot2.update({ data: myData, config: config2 })
 
-linkSelections(plot1.selections['brush1'], plot2.selections['brush1'])
+linkSelections(plot1.getSelection('brush1'), plot2.getSelection('brush1'))
 // Lasso on either plot propagates to the other via the link
 ```
 

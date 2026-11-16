@@ -123,7 +123,7 @@ npm start
 - Layer types include factory methods to create Layer instances
 - Plot auto-calculates domains from data, allows overrides via `axes` param
 - Axes use D3 scales with lazy initialization; accessed via `plot.axes[name]` (stable Proxy)
-- Selections are GPU 0/1 masks per data point; accessed via `plot.selections[name]` (stable Proxy, same pattern as axes); implement `ColumnData` so they can be used as layer attributes
+- Selections are GPU 0/1 masks per data point; read via `plot.getSelection(name)` (the public entry — throws for an undeclared name) or `plot.selections[name]` (stable Proxy, same pattern as axes); implement `ColumnData` so they can be used as layer attributes
 - Cross-plot selection sync requires `linkSelections(selA, selB)` or `PlotGroup` with `autoLink: true`
 - Rendering uses dual surfaces: WebGL canvas + SVG overlay
 - Unit validation prevents incompatible data on same axis

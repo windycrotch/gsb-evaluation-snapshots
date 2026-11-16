@@ -8,10 +8,10 @@ The GPU-driven lasso selection pipeline finds **all** data points inside the dra
 
 | Component | File | Purpose |
 |-----------|------|---------|
-| `SelectionColumn` | `src/selection/SelectionColumn.js` | Holds one float FBO per data tile; 4-packed per texel; `upload(flat)` splits a flat CPU buffer across tile textures; `_rebuild(tileSizes)` reallocates tiles when tile structure changes |
-| `SelectionRegistry` | `src/selection/SelectionRegistry.js` | `WeakMap<dataRef, Map<name, entry>>` — allocates and owns one `SelectionColumn` per (dataRef, name) pair (shared across all plots using the same data + name); sets `col._onWrite` to call `scheduleRender()` on every consumer plot; no copy-propagation logic |
-| `Selection` | `src/selection/Selection.js` | User-facing wrapper for one (dataRef, plot, name) triple; implements `ColumnData`; owns the per-tile CPU mirror (`_arrays: Float32Array[] | null`); fires subscribers on change |
-| `SelectionLink` | `src/selection/SelectionLink.js` | `linkSelections(selA, selB)` — wires two `Selection` objects bidirectionally via their `subscribe` APIs |
+| `SelectionColumn` | `src/selection/SelectionColumn.js` | Holds one float FBO per data tile; 4-packed per texel; owns the per-tile CPU mirror (`arrays: Float32Array[] | null`); `upload(arrays)` writes one fresh buffer per tile, sized to that tile; `_rebuild(tileSizes)` reallocates tiles when tile structure changes; `onStateChange(cb)` fans a write out to every `Selection` bound to the column |
+| `SelectionRegistry` | `src/selection/SelectionRegistry.js` | `WeakMap<dataRef, Map<name, Map<plot, entry>>>` — one `SelectionColumn` per (dataRef, name, plot), at that plot's layer tile layout; sets `col._onWrite` to call `scheduleRender()` on its plot |
+| `Selection` | `src/selection/Selection.js` | User-facing wrapper for one (dataRef, plot, name) triple; implements `ColumnData`; reads `active`/`arrays` from its column; throws for a name no layer declares; fires subscribers on change |
+| `SelectionLink` | `src/selection/SelectionLink.js` | `linkSelections(selA, selB)` — wires two `Selection` objects bidirectionally via their `subscribe` APIs, with a re-entrancy guard so an apply does not echo back |
 | `LassoMask` | `src/selection/LassoMask.js` | SVG polyline overlay drawn while the user drags; no role in the GPU pipeline |
 | `PositionCapture` | `src/selection/PositionCapture.js` | Pass 1 — runs the layer's vertex shader in capture mode, scatter-writing NDC positions into a float FBO |
 | `SelectionTestPass` | `src/selection/SelectionTestPass.js` | Pass 2 — instanced draw, one instance per primitive; reads positions from Pass 1 FBO, tests against lasso polygon, scatter-writes into one `SelectionColumn` tile |
@@ -74,7 +74,7 @@ The 4-per-texel packing matches all other data textures: data point `i` within a
 
 Tile count and sizes can change between renders (e.g. when new tiled data arrives over the network). The framework rebuilds selection tiles automatically in two places:
 
-1. **Every render frame** — after the tile loop computes `layer._tileSizes`, it checks whether `selCol._tiles` matches. If not, `selCol._rebuild(layer._tileSizes)` destroys the old FBOs and allocates new ones. `_rebuild` calls `selCol._onClear`, which `Selection` registers to null `_arrays` and notify subscribers.
+1. **Every render frame** — after the tile loop computes `layer._tileSizes`, it checks whether `selCol._tiles` matches. If not, `selCol._rebuild(layer._tileSizes)` destroys the old FBOs and allocates new ones, nulls the CPU mirror and notifies every bound `Selection` (a selection cannot survive its points changing shape).
 
 2. **Every lasso** — `SelectionPipeline.runLasso()` performs the same check before its GPU passes, in case tile count changed since the last render frame.
 
@@ -90,31 +90,26 @@ Each `SelectionColumn` tile stores 4 values per texel (RGBA), matching the packi
 
 After `SelectionPipeline.runLasso()` completes, `Plot.selectLasso()` calls `selection._readbackAndNotify()` on each affected `Selection` object:
 
-1. **GPU readback** — reads each tile's FBO into a `Float32Array` trimmed to `tile.n`, storing the result as `_arrays: Float32Array[]` (one per tile). If no points are selected, the column is cleared and `_arrays` is set to `null`.
-2. **`_onClear` registration** — `_readbackAndNotify` registers a callback on `selCol._onClear` so that any future tile rebuild (e.g. new data mid-session) automatically nulls `_arrays` and notifies subscribers.
-3. **`selCol._onWrite` fires** — because the `SelectionColumn` is shared (same (dataRef, name) pair → same column instance), writing it via `upload()` or `clear()` calls `selCol._onWrite()`, which `SelectionRegistry` has wired to call `scheduleRender()` on **every consumer plot**. This means all plots that reference this column re-render without explicit cross-plot wiring.
-4. **`selection._notify()`** — fires all registered subscribers with the `Selection` as argument.
-5. **Linked plot update** (if `linkSelections` was called) — the subscriber calls `otherSelection.applyFrom(selection)`, which syncs tile structure, uploads `_arrays` to per-tile GPU textures, schedules re-render, and notifies its own subscribers.
-6. **`otherSelection._notify()`** — fires the other selection's subscribers. A `_propagating` flag breaks cycles.
+1. **GPU readback** — reads each tile's FBO into a `Float32Array` trimmed to `tile.n`, one per tile.
+2. **Publish** — if any point is selected, `col.publish(arrays)` records the CPU mirror, marks the column active and notifies every bound `Selection`. If no point is selected, `col.clear({ notify: true })` zeroes the textures and publishes the inactive state (`active === false`, `arrays === null`). A miss is therefore indistinguishable from never having drawn.
+3. **`col._onWrite` fires** — `SelectionRegistry` wires it to `scheduleRender()` on the column's plot, so a write from any source (lasso, apply, link) re-renders.
+4. **`col.onStateChange` listeners fire** — every `Selection` bound to the column notifies its own subscribers with itself as argument. The same state reaches `getSelection(name)` and `selections[name]` readers without a readback.
+5. **Linked plot update** (if `linkSelections` was called) — the subscriber calls `otherSelection.applyFrom(selection)`, which rebuilds the target column at the target's own tile sizes, uploads the result, schedules a re-render and notifies its subscribers. A re-entrancy guard in `linkSelections` stops the apply from echoing back.
 
 ```
 selectLasso()
   └─ SelectionPipeline.runLasso()             [GPU: 2-pass per tile → per-tile SelectionColumn FBOs]
   └─ Selection._readbackAndNotify()
-       └─ per-tile GPU readback → _arrays: Float32Array[]
-       └─ col.activate() / col.clear()
-       │    └─ col._onWrite() → SelectionRegistry callback
-       │         └─ for each consumer plot: plot.scheduleRender()   ← all sharing plots re-render
-       └─ col._onClear = () => { _arrays=null; notify }
-       └─ _notify() → subscribers
-            └─ otherSelection.applyFrom(selection)   [if linkSelections used]
-                 └─ selCol._rebuild() if tile structure differs
-                 └─ col.upload(_arrays)        [GPU: per-tile Float32Array[] → per-tile subimages]
-                 │    └─ col._onWrite() → SelectionRegistry callback (scheduleRender on all)
-                 └─ _notify() → …
+       └─ per-tile GPU readback → arrays: Float32Array[]
+       └─ col.publish(arrays) / col.clear({ notify: true })
+            └─ col._onWrite() → SelectionRegistry callback → plot.scheduleRender()
+            └─ onStateChange listeners → each bound Selection._notify()
+                 └─ otherSelection.applyFrom(selection)   [if linkSelections used]
+                      └─ col._rebuild(own tileSizes) if layout differs  [silent]
+                      └─ col.upload(arrays)    [GPU: fresh per-tile buffers at target sizes]
 ```
 
-Cross-plot re-renders happen automatically via `selCol._onWrite` because the `SelectionColumn` instance is shared — all plots using the same (dataRef, name) pair reference the same column. Explicit copy-propagation of `_arrays` state is still established via `linkSelections(selA, selB)` or `PlotGroup._updateAutoLinks()` when `autoLink: true`, matching on **both the dataset object reference and the selection name**.
+Two plots using the same data object and selection name each own a separate `SelectionColumn`, so a plot is never forced into another plot's point count. They are kept in sync explicitly by `linkSelections(selA, selB)` / `Selection.applyFrom()` (or `PlotGroup._updateAutoLinks()` when `autoLink: true`, matching on **both the dataset object reference and the selection name**).
 
 ---
 

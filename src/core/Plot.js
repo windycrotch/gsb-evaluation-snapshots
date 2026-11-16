@@ -515,12 +515,10 @@ export class Plot extends GlBase {
     const epoch = ++this._initEpoch
     const { layers = [], colorbars = [], transforms = [], interactions = {} } = this.currentConfig
 
-    // Unregister selection columns from previous layer set
-    for (const layer of this.layers) {
-      if (layer.selectionName) {
-        globalSelectionRegistry.unregister(this._lastRawDataArg, layer.selectionName, this)
-      }
-    }
+    // Selection columns are left in the registry while the layer set rebuilds:
+    // _processLayers re-registers them, and retainOnly() then releases only the
+    // names the new config dropped. Tearing them down here would discard a
+    // selection on a resize or config refresh that keeps the channel.
 
     // Destroy GPU buffers owned by the previous layer set before rebuilding.
     for (const layer of this.layers) {
@@ -546,6 +544,15 @@ export class Plot extends GlBase {
     if (this._initEpoch !== epoch) return
     await this._processLayers(layers, this.currentData, epoch)
     if (this._initEpoch !== epoch) return
+
+    // Release columns for names the new config no longer declares, keeping those
+    // it does — a re-initialize (resize, config refresh) must not discard a
+    // selection the user already made on a channel that still exists.
+    if (this._lastRawDataArg != null) {
+      globalSelectionRegistry.retainOnly(
+        this._lastRawDataArg, this, new Set(this._declaredSelectionNames())
+      )
+    }
 
     // Read the axes from the live config, not the one this update started with: a linked
     // axis that zoomed meanwhile has written its new range there (setAxisDomain).
@@ -1135,6 +1142,11 @@ export class Plot extends GlBase {
     this._contextMenuListeners.clear()
     this._contextMenuOpenListeners.clear()
 
+    // Release this plot's selection columns — the plot is going away.
+    if (this._lastRawDataArg != null) {
+      globalSelectionRegistry.retainOnly(this._lastRawDataArg, this, new Set())
+    }
+
     this._renderCallbacks.clear()
     this._canvas.remove()
   }
@@ -1604,30 +1616,82 @@ export class Plot extends GlBase {
     }
   }
 
-  async selectLasso(vertices) {
-    if (!this.regl || !this.layers.length || !this._lastRawDataArg) return
+  // ─── Selection API ───────────────────────────────────────────────────────────
 
-    const selectionColumns = new Map()
-    for (let i = 0; i < this.layers.length; i++) {
-      const layer = this.layers[i]
-      if (layer.selectionName && layer.selectionColumn) {
-        selectionColumns.set(i, layer.selectionColumn)
+  // The selection names this plot's layer config declares, across every layer type.
+  _declaredSelectionNames() {
+    const names = new Set()
+    for (const layerSpec of this.currentConfig?.layers ?? []) {
+      for (const parameters of Object.values(layerSpec ?? {})) {
+        if (parameters && typeof parameters === 'object' && parameters.selection) {
+          names.add(parameters.selection)
+        }
       }
     }
-    if (selectionColumns.size === 0) return
+    return names
+  }
+
+  _declaresSelection(name) {
+    return this._declaredSelectionNames().has(name)
+  }
+
+  /**
+   * Returns the Selection object for a selection channel declared by a layer's
+   * `selection` key. The same stable instance is returned across update() calls,
+   * so subscriptions survive config changes.
+   *
+   * Throws for a name no layer declares, so a typo cannot be mistaken for an
+   * empty selection. For a declared name nothing has been selected yet, reading
+   * `active` yields false and `arrays` yields null.
+   *
+   * Usage: plot.getSelection('brush1')
+   */
+  getSelection(name) {
+    if (typeof name !== 'string' || name === '')
+      throw new Error(`[gladly] getSelection: expected a selection name, got ${String(name)}`)
+    if (!this._declaresSelection(name))
+      throw new Error(
+        `[gladly] getSelection: no layer declares a selection named '${name}' — ` +
+        `add selection: '${name}' to a layer spec`
+      )
+    return this._getSelection(name)
+  }
+
+  async selectLasso(vertices) {
+    if (!this.regl || !this.layers.length || !this._lastRawDataArg) return
 
     if (!this._selectionPipeline) {
       this._selectionPipeline = new SelectionPipeline(this.regl, this)
     }
 
-    await this._selectionPipeline.runLasso(vertices, selectionColumns)
+    // A resize (ResizeObserver) or any other update can land while the GPU passes
+    // are running and replace this.layers. Retry against the rebuilt layer set
+    // rather than publishing a result computed for layers that no longer render;
+    // the layers are rebuilt on the same data and config, so the retry is cheap
+    // and the outcome identical.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const epoch = this._initEpoch
 
-    const notified = new Set()
-    for (const layer of this.layers) {
-      if (layer.selectionName && layer.selectionColumn && !notified.has(layer.selectionName)) {
-        notified.add(layer.selectionName)
-        this._getSelection(layer.selectionName)._readbackAndNotify()
+      const selectionColumns = new Map()
+      for (let i = 0; i < this.layers.length; i++) {
+        const layer = this.layers[i]
+        if (layer.selectionName && layer.selectionColumn) {
+          selectionColumns.set(i, layer.selectionColumn)
+        }
       }
+      if (selectionColumns.size === 0) return
+
+      await this._selectionPipeline.runLasso(vertices, selectionColumns)
+      if (this._initEpoch !== epoch) continue   // layers rebuilt mid-flight; redo
+
+      const notified = new Set()
+      for (const layer of this.layers) {
+        if (layer.selectionName && layer.selectionColumn && !notified.has(layer.selectionName)) {
+          notified.add(layer.selectionName)
+          this._getSelection(layer.selectionName)._readbackAndNotify()
+        }
+      }
+      return
     }
   }
 }
