@@ -1,5 +1,5 @@
 (() => {
-  // ../node_modules/three/build/three.module.js
+  // node_modules/three/build/three.module.js
   var REVISION = "169";
   var CullFaceNone = 0;
   var CullFaceBack = 1;
@@ -21797,7 +21797,7 @@ void main() {
     }
   }
 
-  // ../node_modules/three/examples/jsm/shaders/CopyShader.js
+  // node_modules/three/examples/jsm/shaders/CopyShader.js
   var CopyShader = {
     name: "CopyShader",
     uniforms: {
@@ -21837,7 +21837,7 @@ void main() {
     )
   };
 
-  // ../node_modules/three/examples/jsm/postprocessing/Pass.js
+  // node_modules/three/examples/jsm/postprocessing/Pass.js
   var Pass = class {
     constructor() {
       this.isPass = true;
@@ -21881,7 +21881,7 @@ void main() {
     }
   };
 
-  // ../node_modules/three/examples/jsm/postprocessing/ShaderPass.js
+  // node_modules/three/examples/jsm/postprocessing/ShaderPass.js
   var ShaderPass = class extends Pass {
     constructor(shader, textureID) {
       super();
@@ -21921,7 +21921,7 @@ void main() {
     }
   };
 
-  // ../node_modules/three/examples/jsm/postprocessing/MaskPass.js
+  // node_modules/three/examples/jsm/postprocessing/MaskPass.js
   var MaskPass = class extends Pass {
     constructor(scene, camera) {
       super();
@@ -21978,7 +21978,7 @@ void main() {
     }
   };
 
-  // ../node_modules/three/examples/jsm/postprocessing/EffectComposer.js
+  // node_modules/three/examples/jsm/postprocessing/EffectComposer.js
   var EffectComposer = class {
     constructor(renderer, renderTarget) {
       this.renderer = renderer;
@@ -22100,7 +22100,7 @@ void main() {
     }
   };
 
-  // ../node_modules/three/examples/jsm/postprocessing/RenderPass.js
+  // node_modules/three/examples/jsm/postprocessing/RenderPass.js
   var RenderPass = class extends Pass {
     constructor(scene, camera, overrideMaterial = null, clearColor = null, clearAlpha = null) {
       super();
@@ -22151,7 +22151,7 @@ void main() {
     }
   };
 
-  // ../node_modules/three/examples/jsm/shaders/LuminosityHighPassShader.js
+  // node_modules/three/examples/jsm/shaders/LuminosityHighPassShader.js
   var LuminosityHighPassShader = {
     name: "LuminosityHighPassShader",
     shaderID: "luminosityHighPass",
@@ -22204,7 +22204,7 @@ void main() {
     )
   };
 
-  // ../node_modules/three/examples/jsm/postprocessing/UnrealBloomPass.js
+  // node_modules/three/examples/jsm/postprocessing/UnrealBloomPass.js
   var UnrealBloomPass = class _UnrealBloomPass extends Pass {
     constructor(resolution, strength, radius, threshold) {
       super();
@@ -22460,7 +22460,7 @@ void main() {
   UnrealBloomPass.BlurDirectionX = new Vector2(1, 0);
   UnrealBloomPass.BlurDirectionY = new Vector2(0, 1);
 
-  // ../node_modules/three/examples/jsm/shaders/OutputShader.js
+  // node_modules/three/examples/jsm/shaders/OutputShader.js
   var OutputShader = {
     name: "OutputShader",
     uniforms: {
@@ -22544,7 +22544,7 @@ void main() {
     )
   };
 
-  // ../node_modules/three/examples/jsm/postprocessing/OutputPass.js
+  // node_modules/three/examples/jsm/postprocessing/OutputPass.js
   var OutputPass = class extends Pass {
     constructor() {
       super();
@@ -24646,6 +24646,7 @@ void main() {
   var RACE_LEN = 2200;
   var AI_NAMES = ["\u9713\u8679", "\u8D64\u98CE", "\u591C\u822A"];
   var AI_COLORS = [7329535, 16756838, 12160255];
+  var ghostSeq = 0;
   function nameTag(text, color) {
     const c = document.createElement("canvas");
     c.width = 256;
@@ -24723,10 +24724,20 @@ void main() {
       const id = p.id || p.from;
       const o = this.opponents.find((x) => x.id === id);
       if (!o) return;
+      o.lastSeen = Date.now();
+      if (o.finished) return;
+      if (o.obsZ !== null) {
+        const dtObs = this.time - o.obsT;
+        if (dtObs > 0) {
+          const v = (p.z - o.obsZ) / dtObs;
+          if (Number.isFinite(v) && v >= 0 && v <= 40) o.obsSpeed = o.obsSpeed === null ? v : o.obsSpeed * 0.7 + v * 0.3;
+        }
+      }
+      o.obsZ = p.z;
+      o.obsT = this.time;
       o.netZ = p.z;
       o.netX = p.x === void 0 ? o.netX : p.x;
       o.netY = p.y === void 0 ? o.netY : p.y;
-      o.lastSeen = Date.now();
       o.slowT = p.slow || 0;
       o.lockT = p.lock || 0;
       if (o.z < p.z - 40) o.z = p.z - 40;
@@ -24736,13 +24747,18 @@ void main() {
       const o = this.opponents.find((x) => x.id === id);
       if (o) o.lastSeen = Date.now();
     }
-    // 断线 → 就地转 AI 托管，继续以当前速度跑完，别让比赛变成一个人的独角戏
+    // 断线 → 就地转 AI 托管，沿用掉线前一刻的推进节奏继续跑，
+    // 别让比赛变成一个人的独角戏，也不能把对手节奏重置成固定系数
     takeover(id) {
       const o = this.opponents.find((x) => x.id === id);
       if (!o) return null;
+      if (o.finished) return o;
+      if (o.obsSpeed !== null) {
+        const base = Math.min(34, 12 + o.z * 0.018);
+        o.pace = clamp2(o.obsSpeed / Math.max(1, base), 0.85, 1.15);
+      }
       o.ai = true;
       o.remote = false;
-      o.pace = Math.min(1.02, Math.max(0.9, (12 + o.z * 0.018) / Math.max(1, 12 + o.z * 0.018)));
       return o;
     }
     removeHuman(id) {
@@ -24752,14 +24768,18 @@ void main() {
       o.root.visible = false;
       this.opponents.splice(i, 1);
     }
-    // 技能命中：AI 直接生效；真人对手由上层通过 net 通知对方本地结算
+    // 技能命中：AI 直接生效；真人对手由上层通过 net 通知对方本地结算。
+    // 返回 true 表示技能生效；对手已完赛时返回 false，上层不得消耗技能槽
     applySkill(o, kind) {
-      if (!o) return;
+      if (!o) return false;
+      if (o.finished) return false;
       if (kind === "headwind") o.slowT = 4;
       else if (kind === "blackout") {
         o.slowT = 2;
         o.darkT = 5;
       } else if (kind === "lockjump") o.lockT = 4;
+      else return false;
+      return true;
     }
     _makeGhost(name, color) {
       const root = new Group();
@@ -24790,6 +24810,7 @@ void main() {
       root.add(tag);
       this._root.add(root);
       return {
+        uid: ++ghostSeq,
         ai: true,
         remote: false,
         id: null,
@@ -24809,6 +24830,11 @@ void main() {
         t: 0,
         finished: false,
         finishT: 0,
+        // 掉线托管前的节奏采样：对真人对手实测其推进速度（米/秒），
+        // 托管时换算成 pace，沿用掉线前一刻的节奏而不是重置成固定系数
+        obsZ: null,
+        obsT: 0,
+        obsSpeed: null,
         slowT: 0,
         lockT: 0,
         darkT: 0,
@@ -24825,13 +24851,13 @@ void main() {
       this.time += dt;
       for (const o of this.opponents) {
         o.t += dt;
-        if (o.slowT > 0) o.slowT -= dt;
-        if (o.lockT > 0) o.lockT -= dt;
-        if (o.darkT > 0) o.darkT -= dt;
         if (o.finished) {
           o.root.position.set(o.x, o.y, o.z);
           continue;
         }
+        if (o.slowT > 0) o.slowT -= dt;
+        if (o.lockT > 0) o.lockT -= dt;
+        if (o.darkT > 0) o.darkT -= dt;
         if (o.ai) {
           const base = Math.min(34, 12 + o.z * 0.018) * o.pace;
           let mul = 1;
@@ -24852,35 +24878,52 @@ void main() {
         if (o.body) o.body.material.emissiveIntensity = o.darkT > 0 ? 0.3 : o.slowT > 0 ? 0.55 : 0.9;
         o.root.position.set(o.x, o.y, o.z);
         if (o.z >= this.len) {
+          o.z = this.len;
           o.finished = true;
           o.finishT = this.time;
+          o.root.position.set(o.x, o.y, o.z);
         }
       }
       let ahead = 0;
-      for (const o of this.opponents) if (o.finished || o.z > playerZ) ahead++;
+      for (const o of this.opponents) {
+        if (o.finished) ahead++;
+        else if (playerZ < this.len && o.z > playerZ) ahead++;
+      }
       this.place = ahead + 1;
     }
-    // 名次表：按赛道进度降序，相差的米数直接给玩家看
+    // 名次表：完赛者按完赛时刻排前（gap 显示"完赛"），未完赛者按赛道进度降序，
+    // 相差的米数直接给玩家看
     rows(playerZ) {
+      const meDone = playerZ >= this.len;
       const list = [
-        { name: "\u4F60", z: playerZ, me: true, color: "#6fd6ff", done: false, id: null },
+        // 玩家完赛时没有单独的冲线时刻，名次应排在所有已记录完赛时刻的对手之后，
+        // 故用 Infinity 参与"先冲线者靠前"的排序（与 race.place 口径一致）
+        { uid: 0, name: "\u4F60", z: Math.min(playerZ, this.len), me: true, color: "#6fd6ff", done: meDone, id: null, finishT: meDone ? Infinity : -1 },
         ...this.opponents.map((o) => ({
+          uid: o.uid,
           name: o.name,
           id: o.id,
           z: Math.min(o.z, this.len),
           me: false,
           color: "#" + o.color.toString(16).padStart(6, "0"),
-          done: o.finished
+          done: o.finished,
+          finishT: o.finished ? o.finishT : Infinity
         }))
       ];
-      list.sort((a, b) => b.z - a.z);
+      list.sort((a, b) => {
+        if (a.done !== b.done) return a.done ? -1 : 1;
+        if (a.done) return a.finishT - b.finishT;
+        return b.z - a.z;
+      });
       return list.map((r, i) => ({
         place: i + 1,
+        uid: r.uid,
         name: r.name,
         id: r.id,
         me: r.me,
+        done: r.done,
         color: r.color,
-        gap: r.me ? "\u2014" : r.done ? "\u5B8C\u8D5B" : `${r.z > playerZ ? "+" : ""}${Math.round(r.z - playerZ)}m`
+        gap: r.done ? "\u5B8C\u8D5B" : r.me ? "\u2014" : `${r.z > playerZ ? "+" : ""}${Math.round(r.z - playerZ)}m`
       }));
     }
     setVisible(on) {
@@ -25618,10 +25661,18 @@ void main() {
       hud.toast("\u8981\u9009\u5BF9\u624B\u7684\u540D\u6B21", 1e3);
       return;
     }
-    const o = race.opponents.find((x) => x.id === row.id) || race.opponents.find((x) => x.name === row.name);
+    const o = race.opponents.find((x) => row.uid !== void 0 && x.uid === row.uid) || race.opponents.find((x) => x.id === row.id) || race.opponents.find((x) => x.name === row.name);
     if (!o) return;
     const s = SKILLS[atkSkill];
-    race.applySkill(o, atkSkill);
+    if (o.finished) {
+      hud.toast(`${o.name} \u5DF2\u5B8C\u8D5B \xB7 ${s.name}\u65E0\u6548`, 1600);
+      return;
+    }
+    const applied = race.applySkill(o, atkSkill);
+    if (!applied) {
+      hud.toast(`${o.name} \u5DF2\u5B8C\u8D5B \xB7 ${s.name}\u65E0\u6548`, 1600);
+      return;
+    }
     if (net && netRace && net.ready && o.remote) net.sendSkill(o.id, atkSkill);
     hud.toast(`${s.icon} ${s.name} \u2192 ${o.name}`, 1500);
     audio.ui();
@@ -26027,7 +26078,7 @@ void main() {
       race.update(running ? dt : 0, player.pos.z);
       if (netRace) {
         for (const o of race.opponents) {
-          if (o.remote && Date.now() - o.lastSeen > 5e3) {
+          if (o.remote && !o.finished && Date.now() - o.lastSeen > 5e3) {
             race.takeover(o.id);
             hud.toast(`${o.name} \u6389\u7EBF \xB7 AI \u63A5\u7BA1`, 2200);
           }

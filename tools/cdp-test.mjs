@@ -7,9 +7,9 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const SHOTS = path.join(ROOT, '.shots');
-const CHROME = 'C:/Program Files/Google/Chrome/Application/chrome.exe';
+const CHROME = process.env.SR_CHROME || 'C:/Program Files/Google/Chrome/Application/chrome.exe';
 const PORT = 9333;
-const PAGE = 'http://127.0.0.1:8123/?sim';
+const PAGE = `http://127.0.0.1:${process.env.SR_PORT || 8123}/?sim`;
 
 mkdirSync(SHOTS, { recursive: true });
 

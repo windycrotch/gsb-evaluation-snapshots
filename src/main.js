@@ -304,10 +304,23 @@ function castAttack(place) {
     hud.toast('要选对手的名次', 1000);
     return;
   }
-  const o = race.opponents.find((x) => x.id === row.id) || race.opponents.find((x) => x.name === row.name);
+  // 优先用稳定 uid 精确对应（本地 AI 的网络 id 为 null，不能靠 id 匹配）
+  const o =
+    race.opponents.find((x) => row.uid !== undefined && x.uid === row.uid) ||
+    race.opponents.find((x) => x.id === row.id) ||
+    race.opponents.find((x) => x.name === row.name);
   if (!o) return;
   const s = SKILLS[atkSkill];
-  race.applySkill(o, atkSkill);
+  // 已完赛的对手状态冻结：技能不生效、不联机转发、不消耗技能槽
+  if (o.finished) {
+    hud.toast(`${o.name} 已完赛 · ${s.name}无效`, 1600);
+    return;
+  }
+  const applied = race.applySkill(o, atkSkill);
+  if (!applied) {
+    hud.toast(`${o.name} 已完赛 · ${s.name}无效`, 1600);
+    return;
+  }
   if (net && netRace && net.ready && o.remote) net.sendSkill(o.id, atkSkill);
   hud.toast(`${s.icon} ${s.name} → ${o.name}`, 1500);
   audio.ui();
@@ -778,7 +791,7 @@ function animate() {
     // 应用层心跳超时 → 该对手掉线，就地交给 AI 托管（不打断比赛）
     if (netRace) {
       for (const o of race.opponents) {
-        if (o.remote && Date.now() - o.lastSeen > 5000) {
+        if (o.remote && !o.finished && Date.now() - o.lastSeen > 5000) {
           race.takeover(o.id);
           hud.toast(`${o.name} 掉线 · AI 接管`, 2200);
         }

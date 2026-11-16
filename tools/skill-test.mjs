@@ -5,9 +5,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const CHROME = 'C:/Program Files/Google/Chrome/Application/chrome.exe';
+const CHROME = process.env.SR_CHROME || 'C:/Program Files/Google/Chrome/Application/chrome.exe';
 const PORT = 9355;
-const PAGE = 'http://127.0.0.1:8123/?race';
+const PAGE = `http://127.0.0.1:${process.env.SR_PORT || 8123}/?race`;
 
 const chrome = spawn(
   CHROME,
