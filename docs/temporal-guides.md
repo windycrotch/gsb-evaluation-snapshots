@@ -106,8 +106,11 @@ upscaler.dispatchUpscale({ color: beautyColor, deltaTime }, camera); // + reacti
 ```
 
 - A split frame is in flight between the two calls (`upscaler.guidesPending`). Inside it,
-  `dispatch()` and a second `dispatchGuides()` throw; finish with `dispatchUpscale()`.
-  `dispatchUpscale()` without a preceding `dispatchGuides()` throws too.
+  the monolithic `dispatch()`/`encode()` and a second guides call
+  (`dispatchGuides()`/`encodeGuides()`) throw, naming the call that opened the frame and
+  pointing at `dispatchUpscale()`. `dispatchUpscale()`/`encodeUpscale()` without a
+  preceding guides call throws too. All of these reject at the call site, before any
+  command is encoded or submitted.
 - Frame-end bookkeeping (ping-pong flips, the history reset) happens once per frame: in
   `dispatch()`, in `dispatchUpscale()`, or, on the `guides` path, in `dispatchGuides()`.
 - `upscaler.gpuTimings` reports both submits together: the early stage's timings are held

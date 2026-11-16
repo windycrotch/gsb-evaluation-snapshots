@@ -46,8 +46,12 @@ core.encode(encoder, { color, depth, velocity, deltaTime }, { near, far, perspec
   fills `core.gpuTimings`. Without it the timer silently does nothing. Nothing else
   is feature-gated.
 - **Device loss.** After `device.lost` resolves, `isReady` turns false and
-  dispatches throw `UpscalerNotReadyError` (`reason: 'device-lost'`). Recreate
-  the core on the new device.
+  dispatches throw `UpscalerNotReadyError` (`reason: 'device-lost'`). `prepare()`
+  rejects with a `@pmndrs/upscaler:`-prefixed error instead of resolving, and a
+  pipeline compile still waiting on the GPU is settled (rejected) rather than
+  left pending — so awaiting preparation after a loss cannot hang. A split frame
+  left open by `dispatchGuides`/`encodeGuides` is cleared, so `guidesPending`
+  returns false. Recreate the core on the new device.
 
 ## Lifecycle
 

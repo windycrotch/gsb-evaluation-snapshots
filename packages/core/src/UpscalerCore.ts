@@ -187,6 +187,9 @@ export class UpscalerCore<THandle = GPUTexture> {
     private _initialized = false;
     private _generation = 0;
     private _deviceLost = false;
+    // Rejects when the device is lost. Raced against prepare() so a queued or
+    // already-satisfied preparation cannot resolve after loss and cannot hang.
+    private _loss: Promise<never> | null = null;
     private readonly _passes = new Map<string, ComputePass>();
     private readonly _requests = new Map<string, Promise<void>>();
     private readonly _failures = new Map<string, unknown>();
@@ -259,9 +262,10 @@ export class UpscalerCore<THandle = GPUTexture> {
     // dispatches) and after the frame-end index flips.
     private _latestDepthWrite = 0;
     private _latestHistoryWrite = 0;
-    // A split frame is in flight: dispatchGuides() ran, dispatchUpscale()
-    // hasn't. Guards against double-encoding the guides stage.
-    private _guidesPending = false;
+    // A split frame is in flight: which guides call opened it (null = none).
+    // dispatchUpscale()/encodeUpscale() clears it. Guards against a second
+    // guides encode and against mixing in the monolithic dispatch().
+    private _guidesOpenedBy: 'dispatchGuides' | 'encodeGuides' | null = null;
 
     constructor(options: UpscalerCoreOptions<THandle>);
     constructor(options: UpscalerCoreInternalOptions<THandle>) {
@@ -315,9 +319,15 @@ export class UpscalerCore<THandle = GPUTexture> {
      */
     prepare(): Promise<void> {
         this._ensureResources();
-        const preparation = this._deviceLost
-            ? Promise.reject(new Error("@pmndrs/upscaler: GPU device lost."))
-            : this._queuePreparation(true);
+        if (this._deviceLost) {
+            const lost = Promise.reject(new Error('@pmndrs/upscaler: GPU device lost.'));
+            void lost.catch(() => {});
+            return lost;
+        }
+        // Race the compilation against device loss: a lost device can leave
+        // `createComputePipelineAsync` unresolved forever, and a preparation
+        // that already resolved must not report success after the loss.
+        const preparation = Promise.race([this._queuePreparation(true), this._lossSignal()]);
         // Pass failures already report their cause. Ignored promises must not add
         // an unhandled rejection; returning the original still rejects for awaiters.
         void preparation.catch(() => {});
@@ -340,9 +350,19 @@ export class UpscalerCore<THandle = GPUTexture> {
         const device = this._device;
         this._deviceLost = false;
         const generation = this._generation;
-        void device.lost.then(() => {
-            if (generation === this._generation) this._deviceLost = true;
+        this._loss = new Promise<never>((_resolve, reject) => {
+            void device.lost.then(() => {
+                if (generation !== this._generation) return;
+                this._deviceLost = true;
+                // Nothing is in flight on a dead device: clear the split-frame
+                // marker so guidesPending does not report a frame that can
+                // never be finished.
+                this._guidesOpenedBy = null;
+                reject(new Error('@pmndrs/upscaler: GPU device lost.'));
+            });
         });
+        // An unobserved loss must not surface as an unhandled rejection.
+        void this._loss.catch(() => {});
         this._constants = new ConstantsBuffer(device);
         if (this._gpuTiming) this._timer = new GpuTimer(device);
         this._linearSampler = device.createSampler({
@@ -357,6 +377,11 @@ export class UpscalerCore<THandle = GPUTexture> {
         }
         this._jitter = new JitterSequence(this._ratio);
         this._initialized = true;
+    }
+
+    private _lossSignal(): Promise<never> {
+        if (this._deviceLost) return Promise.reject(new Error('@pmndrs/upscaler: GPU device lost.'));
+        return this._loss ?? new Promise<never>(() => {});
     }
 
     private _mandatoryPasses(): string[] {
@@ -611,7 +636,7 @@ export class UpscalerCore<THandle = GPUTexture> {
      * between finishing the split frame and the monolithic {@link dispatch}.
      */
     get guidesPending(): boolean {
-        return this._guidesPending;
+        return this._guidesOpenedBy !== null;
     }
 
     /**
@@ -706,16 +731,20 @@ export class UpscalerCore<THandle = GPUTexture> {
     }
 
     private _stageFrame(inputs: DispatchInputs, camera: FrameCamera): void {
+        // Checked before anything mutates: a split frame already owns this
+        // frame's bookkeeping, so the monolithic path cannot take it over.
+        if (this._guidesOpenedBy !== null) {
+            throw new Error(
+                '@pmndrs/upscaler: a split frame is in flight — ' +
+                    `${this._guidesOpenedBy}() already ran the guides stage this frame. ` +
+                    'Finish it with dispatchUpscale() (or encodeUpscale()) instead of ' +
+                    'dispatch()/encode(); a frame cannot be run both split and all-in-one.',
+            );
+        }
         this._startDispatch();
         if (this._path === 'guides') {
             throw new Error(
                 "@pmndrs/upscaler: the 'guides' path has no upscale — drive it with dispatchGuides().",
-            );
-        }
-        if (this._guidesPending) {
-            throw new Error(
-                '@pmndrs/upscaler: a split frame is in flight — finish it with dispatchUpscale() ' +
-                    'instead of dispatch().',
             );
         }
         if (!this._output || !this._outputGPU) {
@@ -778,7 +807,7 @@ export class UpscalerCore<THandle = GPUTexture> {
         this._device.queue.submit([encoder.finish()]);
         // On the temporal path dispatchUpscale's submit finishes this frame.
         this._timer?.readback(this._path === 'guides');
-        this._endGuides();
+        this._endGuides('dispatchGuides');
     }
 
     /**
@@ -792,10 +821,17 @@ export class UpscalerCore<THandle = GPUTexture> {
     encodeGuides(encoder: GPUCommandEncoder, inputs: GuideDispatchInputs, camera: FrameCamera): void {
         this._stageGuides(inputs, camera);
         this._encodeGuides(encoder, inputs);
-        this._endGuides();
+        this._endGuides('encodeGuides');
     }
 
     private _stageGuides(inputs: GuideDispatchInputs, camera: FrameCamera): void {
+        if (this._guidesOpenedBy !== null) {
+            throw new Error(
+                `@pmndrs/upscaler: ${this._guidesOpenedBy}() already ran the guides stage for this ` +
+                    "frame — this frame's guides are complete. Finish the frame with " +
+                    'dispatchUpscale() (or encodeUpscale()) instead of calling the guides stage again.',
+            );
+        }
         this._startDispatch();
         if (this._path !== 'temporal' && this._path !== 'guides') {
             throw new Error(
@@ -805,23 +841,18 @@ export class UpscalerCore<THandle = GPUTexture> {
         if (!this._dilatedMotion) {
             throw new Error('@pmndrs/upscaler: configure() must run before dispatchGuides().');
         }
-        if (this._guidesPending) {
-            throw new Error(
-                '@pmndrs/upscaler: dispatchGuides() already ran this frame — finish with dispatchUpscale().',
-            );
-        }
         this._writeConstants(inputs, camera);
         this._constants.upload();
     }
 
-    private _endGuides(): void {
+    private _endGuides(how: 'dispatchGuides' | 'encodeGuides'): void {
         if (this._path === 'guides') {
             // The frame ends here — there is no late stage.
             this._frameIndex++;
             this._pendingReset = false;
             this._depthIndex = 1 - this._depthIndex;
         } else {
-            this._guidesPending = true;
+            this._guidesOpenedBy = how;
         }
     }
 
@@ -860,15 +891,19 @@ export class UpscalerCore<THandle = GPUTexture> {
     }
 
     private _stageUpscale(inputs: DispatchInputs, camera: FrameCamera): void {
-        if (!this.isReady) throw new Error("@pmndrs/upscaler: await init() (or prepare()) before dispatchUpscale().");
+        if (!this.isReady) {
+            throw notReadyError(this, 'Upscaler', this._deviceLost ? 'device-lost' : 'preparing');
+        }
         if (this._path !== 'temporal') {
             throw new Error(
                 `@pmndrs/upscaler: dispatchUpscale() requires the temporal path (got '${this._path}').`,
             );
         }
-        if (!this._guidesPending) {
+        if (this._guidesOpenedBy === null) {
             throw new Error(
-                '@pmndrs/upscaler: call dispatchGuides() first (or use the all-in-one dispatch()).',
+                '@pmndrs/upscaler: the guides stage has not run for this frame — ' +
+                    'call dispatchGuides() (or encodeGuides()) before dispatchUpscale(), ' +
+                    'or use the all-in-one dispatch().',
             );
         }
         if (!this._output || !this._outputGPU) {
@@ -883,7 +918,7 @@ export class UpscalerCore<THandle = GPUTexture> {
     }
 
     private _endUpscale(): void {
-        this._guidesPending = false;
+        this._guidesOpenedBy = null;
         this._frameIndex++;
         this._pendingReset = false;
         this._historyIndex = 1 - this._historyIndex;
@@ -893,6 +928,8 @@ export class UpscalerCore<THandle = GPUTexture> {
     /** Releases every GPU resource the core allocated (never the device). */
     dispose(): void {
         this._generation++;
+        this._loss = null;
+        this._deviceLost = false;
         this._passes.clear();
         this._requests.clear();
         this._failures.clear();
@@ -1602,7 +1639,7 @@ export class UpscalerCore<THandle = GPUTexture> {
             history: null,
         };
         this._guides = null;
-        this._guidesPending = false;
+        this._guidesOpenedBy = null;
         this._history = null;
         this._locks = null;
         this._dilatedDepth = null;

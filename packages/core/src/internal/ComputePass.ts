@@ -26,6 +26,10 @@ interface DeviceCache {
     modules: Map<string, GPUShaderModule>;
     pipelines: Map<string, Promise<GPUComputePipeline>>;
     queue: Array<() => void>;
+    // Rejections of compiles still waiting on `createComputePipelineAsync`.
+    // Losing the device can leave those promises pending forever (the browser
+    // may never settle them), so the loss handler rejects them explicitly.
+    pending: Set<(error: Error) => void>;
     active: number;
     lost: boolean;
 }
@@ -33,10 +37,14 @@ interface DeviceCache {
 const caches = new WeakMap<GPUDevice, DeviceCache>();
 const COMPILE_CONCURRENCY = 4;
 
+function deviceLostError(): Error {
+    return new Error('@pmndrs/upscaler: GPU device lost.');
+}
+
 function deviceCache(device: GPUDevice): DeviceCache {
     let cache = caches.get(device);
     if (cache) return cache;
-    cache = { modules: new Map(), pipelines: new Map(), queue: [], active: 0, lost: false };
+    cache = { modules: new Map(), pipelines: new Map(), queue: [], pending: new Set(), active: 0, lost: false };
     caches.set(device, cache);
     const current = cache;
     void device.lost.then(() => {
@@ -45,13 +53,16 @@ function deviceCache(device: GPUDevice): DeviceCache {
         current.pipelines.clear();
         // Drain queued tasks so their promises reject rather than hang forever.
         for (const task of current.queue.splice(0)) task();
+        // In-flight compiles have no queue slot to drain — settle them here.
+        for (const reject of current.pending) reject(deviceLostError());
+        current.pending.clear();
     });
     return cache;
 }
 
 function compile(device: GPUDevice, label: string, code: string, options: ComputePassOptions): Promise<GPUComputePipeline> {
     const cache = deviceCache(device);
-    if (cache.lost) return Promise.reject(new Error('@pmndrs/upscaler: GPU device lost.'));
+    if (cache.lost) return Promise.reject(deviceLostError());
     const constants = Object.fromEntries(Object.entries(options.constants ?? {}).sort(([a], [b]) => a.localeCompare(b)));
     const key = JSON.stringify([code, 'main', 'auto', Object.entries(constants).map(
         ([name, value]) => [name, typeof value, Object.is(value, -0) ? '-0' : String(value)],
@@ -60,7 +71,11 @@ function compile(device: GPUDevice, label: string, code: string, options: Comput
     if (existing) return existing;
     const pipeline = new Promise<GPUComputePipeline>((resolve, reject) => {
         const start = (): void => {
-            if (cache.lost) { reject(new Error('@pmndrs/upscaler: GPU device lost.')); return; }
+            if (cache.lost) { reject(deviceLostError()); return; }
+            // Registered before the await: the device can be lost while
+            // `createComputePipelineAsync` is unresolved, and some
+            // implementations never settle that promise afterwards.
+            cache.pending.add(reject);
             cache.active++;
             void (async () => {
                 try {
@@ -73,10 +88,11 @@ function compile(device: GPUDevice, label: string, code: string, options: Comput
                         label: `upscale-${label}`, layout: 'auto',
                         compute: { module, entryPoint: 'main', constants },
                     });
-                    if (cache.lost) throw new Error('@pmndrs/upscaler: GPU device lost.');
+                    if (cache.lost) throw deviceLostError();
                     resolve(result);
                 } catch (error) { reject(error); }
                 finally {
+                    cache.pending.delete(reject);
                     cache.active--;
                     if (!cache.lost) cache.queue.shift()?.();
                 }

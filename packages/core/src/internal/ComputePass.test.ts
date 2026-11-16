@@ -112,4 +112,17 @@ describe('async compute pipeline cache', () => {
         expect((await results).every(result => result.status === 'rejected')).toBe(true);
         await expect(ComputePass.create(device, 'new', 'new')).rejects.toThrow('device lost');
     });
+
+    it('rejects an in-flight compile the device never settles', async () => {
+        const { device, lost } = mockDevice();
+        // These jobs are never resolved: a lost device can leave
+        // `createComputePipelineAsync` pending forever. The loss handler alone
+        // must settle the promise, or `prepare()` would hang.
+        const request = ComputePass.create(device, 'a', 'source');
+        const settled = vi.fn();
+        void request.then(settled, settled);
+        lost.resolve({} as GPUDeviceLostInfo);
+        await expect(request).rejects.toThrow('@pmndrs/upscaler: GPU device lost.');
+        expect(settled).toHaveBeenCalledTimes(1);
+    });
 });
