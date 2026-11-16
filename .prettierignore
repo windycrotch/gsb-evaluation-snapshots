@@ -1,0 +1,9 @@
+node_modules
+dist
+coverage
+demo/dist
+public/build
+*.lock
+package-lock.json
+
+web-dist

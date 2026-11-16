@@ -1,0 +1,12 @@
+node_modules/
+dist/
+coverage/
+.vitest-cache/
+.DS_Store
+*.log
+*.tsbuildinfo
+demo/dist/
+.tmp/
+.cache/
+
+web-dist/
