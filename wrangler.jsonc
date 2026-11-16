@@ -1,0 +1,16 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "castle-valley",
+  "compatibility_date": "2026-10-16",
+  // A static site: there is no Worker code, only the files vite builds.
+  "assets": { "directory": "./dist" },
+  "routes": [{ "pattern": "omw-game.kimaki.dev", "custom_domain": true }],
+  "env": {
+    "preview": {
+      "name": "castle-valley-preview",
+      // routes are inherited: without this the preview would take the production domain
+      "routes": [],
+      "workers_dev": true
+    }
+  }
+}

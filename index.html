@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+    <title>Castle Valley</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #000;
+        overflow: hidden;
+        overscroll-behavior: none;
+      }
+      canvas {
+        display: block;
+        width: 100vw;
+        height: 100dvh;
+        touch-action: none;
+        user-select: none;
+        -webkit-user-select: none;
+        cursor: crosshair;
+      }
+      #hint {
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: 5vh;
+        text-align: center;
+        font: 13px/1.4 ui-monospace, Menlo, monospace;
+        letter-spacing: 0.08em;
+        color: #e6d5a4;
+        text-shadow: 0 1px 0 #000;
+        pointer-events: none;
+        transition: opacity 1.2s;
+      }
+      #jump {
+        position: fixed;
+        right: 6vw;
+        bottom: 34vh;
+        width: 58px;
+        height: 58px;
+        border: 2px solid #e6d5a4;
+        border-radius: 50%;
+        background: rgba(20, 16, 40, 0.35);
+        font: 11px/1 ui-monospace, Menlo, monospace;
+        letter-spacing: 0.08em;
+        color: #e6d5a4;
+        opacity: 0.7;
+        touch-action: none;
+        user-select: none;
+        -webkit-user-select: none;
+      }
+      .touch,
+      .mouse,
+      #jump {
+        display: none;
+      }
+      @media (pointer: coarse) {
+        .touch {
+          display: inline;
+        }
+        #jump {
+          display: block;
+        }
+      }
+      @media (pointer: fine) {
+        .mouse {
+          display: inline;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="hint">
+      <span class="mouse">click to look &middot; WASD to walk &middot; shift to run &middot; space to jump &middot; click to swing &middot; M mutes</span>
+      <span class="touch">left thumb walks &middot; right thumb looks &middot; tap to swing</span>
+    </div>
+    <button id="jump" type="button">JUMP</button>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
