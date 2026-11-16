@@ -223,10 +223,20 @@ async function finishRecording(blob, name, ext) {
   recEl.classList.remove('on');
   document.body.classList.remove('recording');
   if (ext === 'mp4') {
-    try { blob = await toStandardMp4(blob); } catch (e) { console.warn('MP4 rewrite failed, saving as recorded', e); }
+    try {
+      const res = await toStandardMp4(blob);
+      blob = res.blob;
+      if (res.status === 'already-standard') console.info('Recording was already a standard MP4, no rewrite needed');
+      toast(`Clip saved as MP4${res.hasAudio === false ? ' (no audio track)' : ''}`);
+    } catch (e) {
+      // a fragmented recording we could not rewrite must not look like a success
+      console.error('MP4 rewrite failed:', e);
+      toast(`MP4 rewrite failed: ${e.message}. Saved the original fragmented file, it may not upload.`, 6000);
+    }
+  } else {
+    toast('Saved as WebM. X needs MP4, record in Chrome for MP4');
   }
   download(blob, name);
-  toast(ext === 'mp4' ? 'Clip saved as MP4' : 'Saved as WebM. X needs MP4, record in Chrome for MP4');
 }
 function startTimer() {
   const t0 = performance.now();
@@ -297,7 +307,7 @@ async function exportClip({ seconds, start, events, name, keep = false, setup })
     env.setHour(start.hour);
     env.setWeather(start.weather, true);
     env.cycle = !!start.cycle;
-    const blob = await renderClip({
+    const { blob, hasAudio } = await renderClip({
       canvas, seconds, fps: 60,
       // ~18 Mbps per 1080p worth of pixels, up to 50: X re-encodes everything, so start it from a near-clean file
       bitrate: Math.min(50e6, (18e6 * canvas.width * canvas.height) / (1920 * 1080)),
@@ -308,7 +318,7 @@ async function exportClip({ seconds, start, events, name, keep = false, setup })
       onProgress: (p) => { label.textContent = `rendering ${Math.round(p * 100)}%`; },
     });
     if (!keep) download(blob, `${name}.mp4`);
-    toast(`Clip ready: ${seconds.toFixed(1)}s, ${canvas.width}×${canvas.height} at 60 fps, MP4 for X`, 3500);
+    toast(`Clip ready: ${seconds.toFixed(1)}s, ${canvas.width}×${canvas.height} at 60 fps, MP4 for X${hasAudio ? '' : ' (no audio track)'}`, 3500);
     return blob;
   } catch (e) {
     console.error(e);

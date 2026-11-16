@@ -65,9 +65,13 @@ function trak({ id, handler, timescale, samples, sampleEntry, width = 0, height 
   return { box: box('trak', tkhd, box('mdia', mdhd, hdlr, box('minf', mh, dinf, box('stbl', ...parts)))), trackDur };
 }
 
-/** video: { width, height, timescale, samples: [{ data, dur, key, cto }], avcC }, audio: { timescale, samples: [{ data, dur }], asc, channels, sampleRate } */
+/** video: { width, height, timescale, samples: [{ data, dur, key, cto }], avcC }, audio: { timescale, samples: [{ data, dur }], asc, channels, sampleRate } | null.
+ *  Returns { blob, hasAudio }. With no usable audio (sound off, or AAC unsupported) the file is a
+ *  video-only MP4: no empty sound track is written into moov. */
 export function muxMp4(video, audio) {
   const movieTs = 1000;
+  if (!audio?.samples?.length) audio = null;
+  const hasAudio = !!audio;
   const avc1 = box('avc1', u8(0, 0, 0, 0, 0, 0), u16(1), u16(0), u16(0), u32(0), u32(0), u32(0), u16(video.width), u16(video.height),
     u32(0x480000), u32(0x480000), u32(0), u16(1), new Uint8Array(32), u16(0x18), u16(0xffff), box('avcC', video.avcC));
   let mp4a = null;
@@ -91,7 +95,8 @@ export function muxMp4(video, audio) {
   const mdatSize = 16 + vBytes + aBytes;
   const moov = build(ftyp.length + build(0).length + 16);
   const mdatHeader = cat(u32(1), enc.encode('mdat'), u64(mdatSize));
-  return new Blob([ftyp, moov, mdatHeader, ...video.samples.map((s) => s.data), ...(audio ? audio.samples.map((s) => s.data) : [])], { type: 'video/mp4' });
+  const blob = new Blob([ftyp, moov, mdatHeader, ...video.samples.map((s) => s.data), ...(audio ? audio.samples.map((s) => s.data) : [])], { type: 'video/mp4' });
+  return { blob, hasAudio };
 }
 
 // H.264 High profile at the lowest level that fits the frame size and rate: 4K at 60fps needs level 5.2,
@@ -120,10 +125,12 @@ channel.port1.onmessage = () => waiting.shift()?.();
 const yieldTask = () => new Promise((r) => { waiting.push(r); channel.port2.postMessage(0); });
 
 /**
- * Render `seconds` of the current scene to an MP4 Blob.
+ * Render `seconds` of the current scene to an MP4.
  * step(dt, t): advance the world one frame (env + scene update). render(): draw the frame to the canvas.
  * script: [{ at: seconds, run() }] events fired on time (scene buttons, time and weather changes).
  * audio: the Ambience (sound is rendered offline in sync), or null for a silent clip.
+ * Resolves to { blob, hasAudio }: hasAudio is false when the clip has no sound track (sound off, or
+ * this browser cannot encode AAC), in which case the file is a video-only MP4.
  */
 export async function renderClip({ canvas, step, render, audio = null, seconds = 15, fps = 60, bitrate = 18e6, script = [], onProgress }) {
   if (typeof VideoEncoder === 'undefined') throw new Error('This browser has no WebCodecs (use Chrome)');
@@ -191,6 +198,7 @@ export async function renderClip({ canvas, step, render, audio = null, seconds =
     onProgress?.(0.88);
     const buffer = await audio.endOffline();
     audioTrack = await encodeAac(buffer, seconds);
+    if (!audioTrack) console.warn('This browser cannot encode AAC, exporting the clip without sound');
   }
   onProgress?.(1);
   return muxMp4({ width, height, timescale, samples, avcC }, audioTrack);
@@ -247,9 +255,13 @@ async function encodeAac(buffer, seconds) {
   return { timescale: sampleRate, samples: chunks, asc, channels, sampleRate };
 }
 
-/** Write tracks whose sample entries are already encoded (raw stsd/tkhd/hdlr/vmhd|smhd/dinf boxes). */
+/** Write tracks whose sample entries are already encoded (raw stsd/tkhd/hdlr/vmhd|smhd/dinf boxes).
+ *  Tracks with no samples (e.g. a muted audio track) are dropped, never written as empty traks.
+ *  Returns { blob, hasAudio }. Throws when no track has any samples. */
 export function muxRaw(tracks) {
   const movieTs = 1000;
+  tracks = tracks.filter((t) => t.samples?.length);
+  if (!tracks.length) throw new Error('muxRaw: no track has any samples, nothing to write');
   const ftyp = box('ftyp', enc.encode('isom'), u32(512), enc.encode('isomiso2avc1mp41'));
   const sizes = tracks.map((t) => t.samples.reduce((a, s) => a + s.data.length, 0));
   const build = (mdatStart) => {
@@ -284,5 +296,6 @@ export function muxRaw(tracks) {
   };
   const total = sizes.reduce((a, b) => a + b, 0);
   const moov = build(ftyp.length + build(0).length + 16);
-  return new Blob([ftyp, moov, cat(u32(1), enc.encode('mdat'), u64(16 + total)), ...tracks.flatMap((t) => t.samples.map((s) => s.data))], { type: 'video/mp4' });
+  const blob = new Blob([ftyp, moov, cat(u32(1), enc.encode('mdat'), u64(16 + total)), ...tracks.flatMap((t) => t.samples.map((s) => s.data))], { type: 'video/mp4' });
+  return { blob, hasAudio: tracks.some((t) => t.handler === 'soun') };
 }

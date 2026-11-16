@@ -101,8 +101,13 @@ export function stamp() {
 // ---------------------------------------------------------------- fragmented MP4 -> standard MP4
 // Chrome's MediaRecorder writes fragmented MP4 with a zero duration in moov. Some uploaders and players
 // misread that. This rewrites it as a normal MP4 (index first, one mdat) without re-encoding.
+// toStandardMp4 returns { blob, status, hasAudio }: status is 'rewritten', or 'already-standard' when the
+// input has no fragments and is handed back untouched. A fragmented file that cannot be rewritten throws
+// with a clear reason — it must never come back looking like a successful rewrite.
 
-function readBoxes(dv, start, end) {
+const fail = (msg) => { throw new Error(`MP4 rewrite failed: ${msg}`); };
+
+function readBoxes(dv, start, end, where = 'top level') {
   const out = [];
   let i = start;
   while (i + 8 <= end) {
@@ -110,6 +115,7 @@ function readBoxes(dv, start, end) {
     const type = String.fromCharCode(dv.getUint8(i + 4), dv.getUint8(i + 5), dv.getUint8(i + 6), dv.getUint8(i + 7));
     let hdr = 8;
     if (size === 1) { size = Number(dv.getBigUint64(i + 8)); hdr = 16; } else if (size === 0) size = end - i;
+    if (size < hdr || i + size > end) fail(`corrupt '${type}' box at ${where} (bad size ${size})`);
     out.push({ type, start: i, body: i + hdr, end: i + size });
     i += size;
   }
@@ -117,41 +123,59 @@ function readBoxes(dv, start, end) {
 }
 const find = (dv, s, e, type) => readBoxes(dv, s, e).find((b) => b.type === type);
 
+// Best effort, only for reporting: does an already-standard file have a sound track?
+function hasSoundTrack(dv, moov) {
+  try {
+    for (const t of readBoxes(dv, moov.body, moov.end)) {
+      if (t.type !== 'trak') continue;
+      const mdia = find(dv, t.body, t.end, 'mdia');
+      const hdlr = mdia && find(dv, mdia.body, mdia.end, 'hdlr');
+      if (hdlr && String.fromCharCode(dv.getUint8(hdlr.body + 8), dv.getUint8(hdlr.body + 9), dv.getUint8(hdlr.body + 10), dv.getUint8(hdlr.body + 11)) === 'soun') return true;
+    }
+  } catch (e) { /* unusual layout: report no audio rather than fail a file we are not rewriting */ }
+  return false;
+}
+
 export async function toStandardMp4(blob) {
   const buf = new Uint8Array(await blob.arrayBuffer());
   const dv = new DataView(buf.buffer);
   const top = readBoxes(dv, 0, buf.length);
   const moov = top.find((b) => b.type === 'moov');
-  if (!moov || !top.some((b) => b.type === 'moof')) return blob; // already standard
+  if (!top.some((b) => b.type === 'moof')) return { blob, status: 'already-standard', hasAudio: moov ? hasSoundTrack(dv, moov) : null };
+  if (!moov) fail('the file is fragmented but has no moov box');
   const trex = {};
   const mvex = find(dv, moov.body, moov.end, 'mvex');
   if (mvex) for (const b of readBoxes(dv, mvex.body, mvex.end)) if (b.type === 'trex') trex[dv.getUint32(b.body + 4)] = { dur: dv.getUint32(b.body + 12), size: dv.getUint32(b.body + 16), flags: dv.getUint32(b.body + 20) };
   const tracks = new Map();
   for (const t of readBoxes(dv, moov.body, moov.end)) {
     if (t.type !== 'trak') continue;
-    const tkhd = find(dv, t.body, t.end, 'tkhd');
+    const need = (b, name) => b || fail(`a trak box is missing its ${name}`);
+    const tkhd = need(find(dv, t.body, t.end, 'tkhd'), 'tkhd');
     const v0 = dv.getUint8(tkhd.body) === 0;
     const id = dv.getUint32(tkhd.body + (v0 ? 12 : 20));
-    const mdia = find(dv, t.body, t.end, 'mdia');
-    const mdhd = find(dv, mdia.body, mdia.end, 'mdhd');
+    const mdia = need(find(dv, t.body, t.end, 'mdia'), 'mdia');
+    const mdhd = need(find(dv, mdia.body, mdia.end, 'mdhd'), 'mdhd');
     const timescale = dv.getUint32(mdhd.body + (dv.getUint8(mdhd.body) === 0 ? 12 : 20));
-    const hdlr = find(dv, mdia.body, mdia.end, 'hdlr');
-    const minf = find(dv, mdia.body, mdia.end, 'minf');
-    const stbl = find(dv, minf.body, minf.end, 'stbl');
-    const stsd = find(dv, stbl.body, stbl.end, 'stsd');
-    const mh = find(dv, minf.body, minf.end, 'vmhd') || find(dv, minf.body, minf.end, 'smhd');
-    const dinf = find(dv, minf.body, minf.end, 'dinf');
+    const hdlr = need(find(dv, mdia.body, mdia.end, 'hdlr'), 'hdlr');
+    const minf = need(find(dv, mdia.body, mdia.end, 'minf'), 'minf');
+    const stbl = need(find(dv, minf.body, minf.end, 'stbl'), 'stbl');
+    const stsd = need(find(dv, stbl.body, stbl.end, 'stsd'), 'stsd');
+    const mh = need(find(dv, minf.body, minf.end, 'vmhd') || find(dv, minf.body, minf.end, 'smhd'), 'vmhd/smhd');
+    const dinf = need(find(dv, minf.body, minf.end, 'dinf'), 'dinf');
     const slice = (b) => buf.slice(b.start, b.end);
     tracks.set(id, { id, timescale, handler: String.fromCharCode(...buf.slice(hdlr.body + 8, hdlr.body + 12)), tkhd: slice(tkhd), hdlr: slice(hdlr), stsd: slice(stsd), mh: slice(mh), dinf: slice(dinf), samples: [], start: null, d: trex[id] || { dur: 0, size: 0, flags: 0 } });
   }
+  if (!tracks.size) fail('the moov box has no tracks');
   for (const moof of top) {
     if (moof.type !== 'moof') continue;
     for (const traf of readBoxes(dv, moof.body, moof.end)) {
       if (traf.type !== 'traf') continue;
       const tfhd = find(dv, traf.body, traf.end, 'tfhd');
+      if (!tfhd) fail('a traf box has no tfhd (fragment header)');
       const flags = dv.getUint32(tfhd.body) & 0xffffff;
       let p = tfhd.body + 4;
       const t = tracks.get(dv.getUint32(p));
+      if (!t) fail(`a fragment references unknown track ${dv.getUint32(p)}`);
       p += 4;
       let base = moof.start, ddur = t.d.dur, dsize = t.d.size, dflags = t.d.flags;
       if (flags & 1) { base = Number(dv.getBigUint64(p)); p += 8; }
@@ -175,12 +199,15 @@ export async function toStandardMp4(blob) {
           if (rf & 0x400) { sf = dv.getUint32(q); q += 4; }
           if (rf & 0x800) { cto = version ? dv.getInt32(q) : dv.getUint32(q); q += 4; }
           if (k === 0 && first !== null) sf = first;
+          if (off < 0 || off + size > buf.length) fail('a sample runs past the end of the file (the fragment data is truncated)');
           t.samples.push({ data: buf.subarray(off, off + size), dur, key: !(sf & 0x10000), cto });
           off += size;
         }
       }
     }
   }
+  if (![...tracks.values()].some((t) => t.samples.length)) fail('no media samples found in any fragment');
   const { muxRaw } = await import('./exporter.js');
-  return muxRaw([...tracks.values()]);
+  const { blob: out, hasAudio } = muxRaw([...tracks.values()]);
+  return { blob: out, status: 'rewritten', hasAudio };
 }

@@ -88,6 +88,8 @@ All clips are standard MP4 files (H.264 + AAC, index first) and land in your Dow
 - **Social kit.** With the save endpoint running (`python3 tools/save-endpoint.py`), `await __pixel.kit()` in the browser console renders every scene's demo clip as 16:9 and 1:1 MP4 (3840×2160, 2160×2160) and a hero photo as 4:5 and 1:1 PNG (2160×2700, 2160×2160) into `exports/`. Square and portrait frames use pixel size 3 (6 in the 2× files) with the camera fitted to the diorama.
 - `tools/fmp4-to-mp4.py` rewrites a fragmented MP4 (from Chrome's MediaRecorder or a screen recorder) as a standard one without re-encoding.
 
+Live recordings come out of Chrome as fragmented MP4 and are rewritten to standard MP4 in the page before download. If that rewrite fails you get a clear error (toast and console) and the untouched original — never a silent half-converted file. Clips exported without sound (sound off, or a browser that cannot encode AAC) are written as video-only MP4s, with no empty audio track in the file.
+
 ## How it works
 
 1. The scene renders at low resolution (output size ÷ pixel size, e.g. 480×270) into an HDR colour buffer, view normals and depth.
@@ -159,6 +161,7 @@ Keep silhouettes bold, and keep text and real logos out of scenes.
 `await __pixel.sheet(name, [[hour, weather, seconds, fn?], ...])` renders a grid of states to `exports/<name>.png`, and
 `await __pixel.still(name, hour, weather)` saves one full frame. Both need the save endpoint: `python3 tools/save-endpoint.py` (port 5185).
 `__pixel.load(name)` switches scene, and `__pixel.def` is the current scene definition.
+`await (await import('./tests/mp4-tests.js')).runMp4Tests()` runs the MP4 pipeline tests: the fragmented-to-standard rewrite (success, already-standard, corrupt inputs) and video-only export from both MP4 writers.
 
 ### Performance
 Aim for under 16 ms a frame. Every mesh costs a draw call in up to three passes (shadow, reflection, main), so merge static
@@ -178,6 +181,7 @@ non-glowing details in the reflection and shadow passes, and `userData.noMirror`
 - `engine/palettes.js`: palette generation for the palette colour mode
 - `scenes/`: the scenes, their parts and the shared kits
 - `tools/`: the no-cache dev server, the save endpoint for review images, the MP4 rewriter
+- `tests/`: browser-console tests for the MP4 rewrite and writers
 - `exports/`: renders and review images (ignored by git)
 
 ## Credits
