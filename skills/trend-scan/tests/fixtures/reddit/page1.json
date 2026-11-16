@@ -1,0 +1,15 @@
+{
+  "status": "ok",
+  "coverage": {"complete": true, "warnings": []},
+  "posts": [
+    {
+      "url": "https://www.reddit.com/r/espresso/comments/abc/grinder_advice/",
+      "author": "groundcontrol",
+      "published_at": "2026-11-15T11:00:00Z",
+      "title": "What grinder do you recommend under $300 for home espresso?",
+      "upvotes": 240,
+      "comment_count": 97
+    }
+  ],
+  "creditsCharged": 1
+}

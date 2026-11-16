@@ -54,14 +54,55 @@ If the user asks for them, say so; do not replace them silently.
 4. Group recurring angles, formats, sounds or titles, and count the accounts that
    appear more than once.
 
+## Scripted pipeline
+
+The steps above are implemented as an executable, reproducible pipeline in this
+folder (Python standard library only). The script does not change the rules; it
+enforces them so coverage, skips and call counts cannot be forgotten.
+
+```bash
+python skills/trend-scan/scan.py \
+  --query "home espresso" \
+  --platforms tiktok,youtube,reddit,threads,instagram,x,bluesky \
+  --window-days 7 --max-pages 1
+```
+
+- `scan.py` parses inputs, `platforms.py` resolves each platform's keyword or
+  hashtag operation, `scan_engine.py` runs the loop and `report.py` renders the
+  Markdown report. `--list-platforms` prints the capability table.
+- Data access goes through one swappable interface, `SearchAdapter.fetch_page`.
+  Production uses `ScrapeAtlasCLIAdapter`, which calls the real `scrapeatlas`
+  CLI (authenticated per the `scrapeatlas-setup` skill; it never handles API
+  keys). Tests use a fake adapter under `tests/` backed by local fixture files.
+  The fake is never imported by production code, so fixture data cannot enter a
+  real scan.
+- No-tool platforms are explicit outcomes, not silent drops: Instagram, X and
+  Bluesky (and any unknown platform) are reported as `no_tool` with the reason.
+- Failure codes (`upstream_rate_limited`, `not_found`, ...) and `status:
+  partial` / `coverage.complete: false` keep any posts already returned, flag
+  the platform incomplete or failed, and stop further paging; the code appears
+  in the coverage declaration.
+- Pagination only echoes the cursor the previous page returned, under its
+  original field name (including `search_id` + `cursor` bundles). A missing or
+  null cursor stops the loop, and the per-platform `--max-pages` cap stops it
+  even when another cursor is available; the report names the page it stopped on
+  and why.
+- Tests: `python -I -m unittest discover -s skills/trend-scan/tests -v`. They
+  cover normal multi-platform scans, no-tool platforms, failures and partial
+  coverage, missing cursors and page-limit stops.
+
 ## Output
 
-- Per platform: result count in the page, date range, top 3 to 5 posts with URL,
-  author and metric values.
+- Per platform: result count in the page, the actual date range the page covers,
+  top 3 to 5 posts with URL, author and metric values (fewer than 3 is stated
+  honestly rather than padded).
 - Cross-platform themes, each with the posts that support it.
 - Accounts that appear most, with platform and handle.
-- A coverage line: calls made, status of each, pages covered, platforms skipped
-  for lack of a search tool and credits charged.
+- A final coverage declaration on its own line: total calls made, status of each
+  platform, pages covered per platform, platforms skipped for lack of a search
+  tool, every failure code, credits charged and the data source adapter.
+- A standing disclaimer that search results are a platform-ranked sample, not
+  total volume.
 
 Search results are a ranked sample chosen by each platform. Do not present result
 counts as total volume or as a measure of the trend's size.

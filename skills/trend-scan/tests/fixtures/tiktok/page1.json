@@ -1,0 +1,36 @@
+{
+  "status": "ok",
+  "coverage": {"complete": true, "warnings": []},
+  "posts": [
+    {
+      "url": "https://www.tiktok.com/@brewlab/video/111",
+      "author": "@brewlab",
+      "published_at": "2026-11-14T09:12:00Z",
+      "text": "Home espresso routine with the new #espresso setup",
+      "play_count": 120000,
+      "like_count": 8400,
+      "comment_count": 320,
+      "share_count": 210
+    },
+    {
+      "url": "https://www.tiktok.com/@baristajoe/video/222",
+      "author": "@baristajoe",
+      "published_at": "2026-11-13T18:40:00Z",
+      "text": "Three espresso mistakes beginners make every morning",
+      "play_count": 54000,
+      "like_count": 3100,
+      "comment_count": 145
+    },
+    {
+      "url": "https://www.tiktok.com/@brewlab/video/333",
+      "author": "@brewlab",
+      "published_at": "2026-11-12T07:05:00Z",
+      "text": "Dialing in a light roast on my #espresso machine",
+      "play_count": 21000,
+      "like_count": 1500,
+      "comment_count": 88
+    }
+  ],
+  "max_cursor": "tk-cursor-abc",
+  "creditsCharged": 1
+}
