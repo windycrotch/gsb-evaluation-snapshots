@@ -1,3 +1,9 @@
+import { MAX_STAINS } from './wetness.js';
+
+// The uniform array size and the shader loop bound must match the CPU-side
+// ring buffer exactly, so both derive from the same constant.
+const stainCount = MAX_STAINS;
+
 export const stageVertex = /* glsl */`
   varying vec2 screenUV;
   void main() {
@@ -182,7 +188,7 @@ export const fabricFragment = /* glsl */`
   uniform float skinOnly;
   uniform float reflection;
   uniform float time;
-  uniform vec4 stains[24];
+  uniform vec4 stains[${stainCount}];
   varying vec3 wetPoint;
   varying vec3 localPoint;
   varying vec3 facing;
@@ -240,7 +246,7 @@ export const fabricFragment = /* glsl */`
       else if (pattern == 4.) base = mix(base, vec3(.81,.80,.85)*shade,print*.76);
       else base *= 1. - .42 * print;
       float wetness = 0.;
-      for (int i = 0; i < 24; i++) {
+      for (int i = 0; i < ${stainCount}; i++) {
         vec4 mark = stains[i];
         if (mark.w <= 0.) continue;
         vec3 delta = wetPoint-mark.xyz;

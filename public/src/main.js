@@ -3,6 +3,7 @@ import { loadMesh } from './mesh.js';
 import { dropletFragment, dropletVertex, fabricFragment, fabricVertex, outlineFragment, outlineVertex, stageFragment, stageVertex } from './shaders.js';
 import { initUI } from './ui.js';
 import { applyPose } from './pose.js';
+import { addStain, clearStains, MAX_STAINS, restoreStains, wetnessSnapshot } from './wetness.js';
 
 const canvas = document.getElementById('view');
 const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
@@ -32,7 +33,7 @@ const cuffs = ['plain', 'lace', 'stripes', 'rib', 'bow'];
 const patterns = ['none', 'dots', 'argyle', 'net', 'hoops', 'pins', 'seam', 'hearts', 'stars', 'lace', 'fade', 'paws'];
 const defaultLeg = { length: 'thigh', cuff: 'lace', material: 'sheer', denier: 40, color: 'ink' };
 const restTarget = new THREE.Vector3(0, .43, .035);
-const maxStains = 24;
+const maxStains = MAX_STAINS;
 const poses = ['single', 'together', 'step', 'crossed', 'tiptoe', 'point', 'pigeon'];
 
 function createSound() {
@@ -283,6 +284,7 @@ function createEngine({ stocking }) {
   let sheetShift = 0;
   let lastTime = performance.now();
   let lastInput = lastTime;
+  let frozen = false;
 
   function setScene(sceneName, colorName) {
     environment = sceneName ?? environment;
@@ -400,13 +402,8 @@ function createEngine({ stocking }) {
     const local = mesh.worldToLocal(point.clone());
     const uniforms = mesh.material.uniforms;
     if (local.y >= uniforms.lengthLimit.value && uniforms.lengthLimit.value < .9) return;
-    const stains = uniforms.stains.value;
-    const close = stains.find(stain => stain.w > 0 && Math.hypot(stain.x - local.x, stain.y - local.y, stain.z - local.z) < .021);
-    if (close) close.w = Math.min(.089, Math.max(close.w, radius) * 1.13);
-    else {
-      stains[model.nextStain].set(local.x, local.y, local.z, radius);
-      model.nextStain = (model.nextStain + 1) % maxStains;
-    }
+    const result = addStain(uniforms.stains.value, model.nextStain, local, radius);
+    model.nextStain = result.cursor;
   }
 
   function rippleAt(position) {
@@ -485,10 +482,7 @@ function createEngine({ stocking }) {
     sound.play(1);
   }
 
-  function dry() {
-    for (const model of models) {
-      for (const mark of model.cloth.material.uniforms.stains.value) mark.w = 0;
-    }
+  function clearWater() {
     for (const { mesh } of droplets) world.remove(mesh);
     for (const { mesh } of ripples) {
       mesh.material.dispose();
@@ -496,6 +490,36 @@ function createEngine({ stocking }) {
     }
     droplets.length = 0;
     ripples.length = 0;
+  }
+
+  function dry() {
+    for (const model of models) {
+      clearStains(model.cloth.material.uniforms.stains.value);
+      model.nextStain = 0;
+      model.cloth.material.uniformsNeedUpdate = true;
+      model.reflection.material.uniformsNeedUpdate = true;
+    }
+    // A finger or mouse still held down would otherwise keep painting the old
+    // spot right after the towel passes.
+    for (const pointer of pointers.values()) pointer.wet = false;
+    clearWater();
+  }
+
+  // Marks live in the posed local space of each stocking, so a link can carry
+  // them verbatim as long as it also carries the pose.
+  function wetness() {
+    return models.map(model => wetnessSnapshot(
+      model.cloth.material.uniforms.stains.value, model.nextStain,
+    ));
+  }
+
+  function setWetness(legs) {
+    models.forEach((model, index) => {
+      const marks = model.cloth.material.uniforms.stains.value;
+      model.nextStain = restoreStains(marks, Array.isArray(legs) ? legs[index] : null);
+      model.cloth.material.uniformsNeedUpdate = true;
+      model.reflection.material.uniformsNeedUpdate = true;
+    });
   }
 
   function updateWater(delta) {
@@ -540,6 +564,11 @@ function createEngine({ stocking }) {
 
   function run(time) {
     requestAnimationFrame(run);
+    if (frozen) {
+      lastTime = time;
+      lastInput = time;
+      return;
+    }
     const dt = Math.max(0, Math.min(.05, (time - lastTime) * .001));
     lastTime = time;
     playClock += dt * (slow ? .20 : 1);
@@ -555,6 +584,23 @@ function createEngine({ stocking }) {
     }
     updateWater(dt * (slow ? .20 : 1));
     renderer.render(world, camera);
+  }
+
+  // The local acceptance script compares leg pixels across steps, so it needs
+  // frames that do not drift with camera easing, the idle auto-orbit or a
+  // droplet mid-flight. `freeze` holds the animation loop; `settle` renders one
+  // frame with every smoothed value snapped to its target.
+  function settle() {
+    lastInput = performance.now();
+    updateCamera(1e6);
+    renderer.render(world, camera);
+    renderer.getContext().finish();
+  }
+
+  function freeze(value) {
+    frozen = Boolean(value);
+    if (frozen) settle();
+    lastInput = performance.now();
   }
 
   function photo() {
@@ -675,8 +721,14 @@ function createEngine({ stocking }) {
   setScene('studio', 'lilac');
   setPose('step');
 
-  return {
+  const api = {
     setScene, setMaterial, setPose, zoom, orbit, resetCamera, bucket, dry, photo, thumbnail,
+    wetness, setWetness, freeze, clearWater, settle,
+    splashAt(x, y) {
+      const hit = pickLeg(x, y);
+      if (!hit) return -1;
+      return splash(x, y) ? hit.object.userData.leg : -1;
+    },
     setMode(value) { mode = value; lastInput = performance.now(); },
     setRain(value) { rain = value; },
     setSlow(value) { slow = value; },
@@ -690,6 +742,11 @@ function createEngine({ stocking }) {
     },
     setSound(value) { sound.setEnabled(value); },
   };
+  // The wetness accessors are harmless to expose, and the local acceptance
+  // script needs a deterministic way to read them; gate it behind a query flag
+  // so ordinary visits do not leak engine internals.
+  if (new URLSearchParams(location.search).has('selftest')) window.__yusi = api;
+  return api;
 }
 
 try {

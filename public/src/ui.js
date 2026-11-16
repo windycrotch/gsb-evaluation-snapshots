@@ -1,3 +1,5 @@
+import { decodeWetness, encodeWetness } from './wetness.js';
+
 const POSES = {
   single: '单腿', together: '并立', step: '一前一后', crossed: '交叉',
   tiptoe: '踮脚', point: '足尖点地', pigeon: '内八',
@@ -138,18 +140,21 @@ function decodeColor(value, options) {
   return Object.hasOwn(options, value) ? value : null;
 }
 
-function serializeLook(state) {
+export function serializeLook(state, wetness = []) {
   const legs = state.legs.map(leg => [
     leg.length, leg.cuff, Number(leg.garter), leg.material, leg.denier, leg.pattern,
     encodeColor(leg.color), leg.secret, encodeColor(leg.wetColor) || '-',
   ].join('.'));
-  return ['1', state.pose, state.scene, encodeColor(state.backdrop), ...legs].join('~');
+  // Wetness (x,y,z,radius per mark) rides along as two trailing fields so
+  // links made before wetness sharing existed still parse as dry looks.
+  const marks = [0, 1].map(index => encodeWetness(wetness[index]) || '-');
+  return ['1', state.pose, state.scene, encodeColor(state.backdrop), ...legs, ...marks].join('~');
 }
 
-function deserializeLook(hash) {
+export function deserializeLook(hash) {
   const serialized = new URLSearchParams(hash.slice(1)).get('look');
   if (!serialized) return null;
-  const [version, pose, scene, backdrop, left, right = left] = serialized.split('~');
+  const [version, pose, scene, backdrop, left, right = left, wetLeft, wetRight] = serialized.split('~');
   if (version !== '1') return null;
 
   const readLeg = value => {
@@ -168,11 +173,17 @@ function deserializeLook(hash) {
     };
   };
 
+  // A missing field means "no wetness"; a malformed one drops wetness for both
+  // legs rather than letting the page fail.
+  const decoded = [wetLeft, wetRight].map(value => decodeWetness(value));
+  const wetness = decoded.some(value => value === null) ? [[], []] : decoded.map(value => value ?? []);
+
   return {
     pose: Object.hasOwn(POSES, pose) ? pose : 'step',
     scene: Object.hasOwn(SCENES, scene) ? scene : 'studio',
     backdrop: decodeColor(backdrop, BACKDROPS) || 'lilac',
     legs: [readLeg(left), readLeg(right)],
+    wetness,
   };
 }
 
@@ -482,12 +493,13 @@ export function initUI(engine) {
       setPose(look.pose);
       setScene(look.scene, look.backdrop);
       applyMaterial(look.legs);
+      engine.setWetness?.(look.wetness);
     }
   }
 
   function linkForLook() {
     const url = new URL(location.href);
-    url.hash = 'look=' + serializeLook(state);
+    url.hash = 'look=' + serializeLook(state, engine.wetness?.() ?? []);
     return url.href;
   }
 
@@ -495,13 +507,13 @@ export function initUI(engine) {
     const url = linkForLook();
     try {
       await navigator.clipboard.writeText(url);
-      showHint('链接已复制 · 别人打开就是这一双、这个姿势和场景', 3400);
+      showHint('链接已复制 · 别人打开就是这一双、这个姿势和场景，湿痕也在', 3400);
     } catch {
       let copy = get('#copybox');
       if (!copy) {
         const dismiss = button('好', {class: 'pill'});
         copy = element('div', {id: 'copybox', class: 'copybox'}, [
-          element('span', {}, ['复制下面的链接，别人打开就是这一双、这个姿势和场景：']),
+          element('span', {}, ['复制下面的链接，别人打开就是这一双、这个姿势和场景，湿痕也在：']),
           element('input', {'aria-label': '复制链接', readonly: ''}),
           dismiss,
         ]);
@@ -675,4 +687,8 @@ export function initUI(engine) {
   syncScenes();
   applyLook();
   resize();
+  // Local acceptance tests read the same link the copy button produces.
+  if (new URLSearchParams(location.search).has('selftest')) {
+    window.__yusiUI = { link: linkForLook, applyLook };
+  }
 }
