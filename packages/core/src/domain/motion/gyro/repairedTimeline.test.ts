@@ -103,4 +103,55 @@ describe('repairedTimeline', () => {
       expect(times[index]).toBeGreaterThanOrEqual(times[index - 1] ?? 0);
     }
   });
+
+  it('puts back a stamp left at zero in the middle, which no clock handed out', () => {
+    const recorded = timeline();
+    recorded[50] = 0;
+    const { times, mended } = repairedTimeline(recorded);
+    expect(mended).toBe(1);
+    expect(times[50]).toBe(50_000);
+    expect(times[49]).toBe(49_000);
+    expect(times[51]).toBe(51_000);
+  });
+
+  it('puts back a stamp not a number rather than letting it stand', () => {
+    const recorded = timeline();
+    recorded[50] = NaN;
+    const { times, mended } = repairedTimeline(recorded);
+    expect(mended).toBe(1);
+    expect(times[50]).toBe(50_000);
+  });
+
+  it.each([0, 1, 2])('puts back a stray in a record of three, at position %i', (bad) => {
+    const captureBase = 921_000_000;
+    const recorded = Float64Array.from([0, 10_000, 20_000], (offset) => captureBase + offset);
+    recorded[bad] = captureBase + 1_000_030_000;
+    const { times, mended } = repairedTimeline(recorded);
+    expect(mended).toBe(1);
+    expect([...times]).toEqual([0, 10_000, 20_000].map((offset) => captureBase + offset));
+  });
+
+  it('keeps a real gap between two stretches of the same length, as a pause is', () => {
+    const captureBase = 921_000_000;
+    const paused = Float64Array.from(
+      { length: 16 },
+      (_unused, index) => captureBase + index * 1000 + (index >= 8 ? 2_000_000 : 0),
+    );
+    expect(repairedTimeline(paused)).toEqual({ times: paused, mended: 0 });
+  });
+
+  it('keeps a record of three whose stamps are all in step as they are', () => {
+    const recorded = Float64Array.from([10_000, 20_000, 30_000]);
+    expect(repairedTimeline(recorded)).toEqual({ times: recorded, mended: 0 });
+  });
+
+  it('puts back the first of two strays ahead of a shorter trusted stretch', () => {
+    const recorded = Float64Array.from(
+      { length: 40 },
+      (_unused, index) => index * 1000 + ([10, 25].includes(index) ? 5e6 : 0),
+    );
+    const { times, mended } = repairedTimeline(recorded);
+    expect(mended).toBe(2);
+    expect([times[10], times[25]]).toEqual([10_000, 25_000]);
+  });
 });

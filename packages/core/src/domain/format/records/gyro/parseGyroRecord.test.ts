@@ -230,6 +230,80 @@ describe('parseGyroRecord with the raw X5 layout', () => {
     expect([...track.captureTimes]).toEqual([10, 20, 30, 40, 50, 60, 70].map((ms) => ms * 1000));
   });
 
+  it('mends a stamp left at zero in the middle, which no clock handed out', () => {
+    const stamps = [10, 20, 30, 0, 50, 60, 70];
+    const payload = new Uint8Array(
+      stamps.flatMap((stamp) => [...encodeFloatSample(stamp, [0, 1, 0], [0, 0, 0])]),
+    );
+    const { track, mendedStamps, unwrittenSamples } = read(payload, {
+      isRawGyro: false,
+      ranges: undefined,
+    });
+    expect([mendedStamps, unwrittenSamples]).toEqual([1, 0]);
+    expect([...track.captureTimes]).toEqual([10, 20, 30, 40, 50, 60, 70].map((ms) => ms * 1000));
+  });
+
+  it.each([0, 1, 5, 6])(
+    'mends a stray first, last or among a short record (position %i)',
+    (bad) => {
+      const stamps = [10, 20, 30, 40, 50, 60, 70];
+      stamps[bad] = 1_000_030;
+      const payload = new Uint8Array(
+        stamps.flatMap((stamp) => [...encodeFloatSample(stamp, [0, 1, 0], [0, 0, 0])]),
+      );
+      const { track, mendedStamps } = read(payload, { isRawGyro: false, ranges: undefined });
+      expect(mendedStamps).toBe(1);
+      expect([...track.captureTimes]).toEqual([10, 20, 30, 40, 50, 60, 70].map((ms) => ms * 1000));
+    },
+  );
+
+  it('mends a stray in a record of three samples, where the other two are all it has', () => {
+    const stamps = [10, 1_000_030, 30];
+    const payload = new Uint8Array(
+      stamps.flatMap((stamp) => [...encodeFloatSample(stamp, [0, 1, 0], [0, 0, 0])]),
+    );
+    const { track, mendedStamps } = read(payload, { isRawGyro: false, ranges: undefined });
+    expect(mendedStamps).toBe(1);
+    expect([...track.captureTimes]).toEqual([10_000, 20_000, 30_000]);
+  });
+
+  it('keeps the kept samples aligned after a damaged one between them is dropped', () => {
+    const samples = [
+      encodeFloatSample(10, [0, 1, 0], [0, 0, 0]),
+      encodeFloatSample(20, [0, 2, 0], [0, 0.5, 0]),
+      encodeFloatSample(30, [0, NaN, 0], [0, 0, 0]),
+      encodeFloatSample(40, [0, 4, 0], [0, 2, 0]),
+      encodeFloatSample(50, [0, 5, 0], [0, 2.5, 0]),
+    ];
+    const { track, damagedSamples } = read(new Uint8Array(samples.flatMap((s) => [...s])), {
+      isRawGyro: false,
+      ranges: undefined,
+    });
+    expect(damagedSamples).toBe(1);
+    expect([...track.captureTimes]).toEqual([10_000, 20_000, 40_000, 50_000]);
+    // Each sample kept its own readings, not the dropped one's.
+    expect([0, 1, 2, 3].map((index) => track.sampleAt(index).acceleration[1])).toEqual([
+      1, 2, 4, 5,
+    ]);
+    expect([0, 1, 2, 3].map((index) => track.sampleAt(index).angularVelocity[1])).toEqual([
+      0, 0.5, 2, 2.5,
+    ]);
+  });
+
+  it('leaves out a slot of zero bytes among written ones as unwritten, not as a zero reading', () => {
+    const samples = [
+      encodeFloatSample(10, [0, 1, 0], [0, 0, 0]),
+      new Uint8Array(FLOAT_SAMPLE_SIZE),
+      encodeFloatSample(30, [0, 1, 0], [0, 0, 0]),
+    ];
+    const { track, damagedSamples, unwrittenSamples, mendedStamps } = read(
+      new Uint8Array(samples.flatMap((s) => [...s])),
+      { isRawGyro: false, ranges: undefined },
+    );
+    expect([damagedSamples, unwrittenSamples, mendedStamps]).toEqual([0, 1, 0]);
+    expect([...track.captureTimes]).toEqual([10_000, 30_000]);
+  });
+
   it('tolerates and reports a partial trailing sample, as ONE R recordings have', () => {
     const payload = new Uint8Array(RAW_SAMPLE_SIZE * 3 + 1);
     payload.set(encodeRawSample(1000), 0);
@@ -238,6 +312,52 @@ describe('parseGyroRecord with the raw X5 layout', () => {
     const parsed = read(payload, { isRawGyro: true, ranges: undefined });
     expect(parsed.track.length).toBe(3);
     expect(parsed.strayBytes).toBe(1);
+  });
+
+  it('counts the residue of every partial sample after the last whole one', () => {
+    const payload = new Uint8Array([
+      ...encodeFloatSample(1000, [0, 1, 0], [0, 0, 0]),
+      ...encodeFloatSample(1002, [0, 1, 0], [0, 0, 0]),
+      ...encodeFloatSample(1004, [0, 1, 0], [0, 0, 0]).subarray(0, FLOAT_SAMPLE_SIZE - 7),
+    ]);
+    const parsed = read(payload, { isRawGyro: false, ranges: undefined });
+    expect([parsed.track.length, parsed.strayBytes, parsed.damagedSamples]).toEqual([2, 49, 0]);
+  });
+
+  it('decodes an empty payload to an empty track with every count at zero', () => {
+    const parsed = read(new Uint8Array(), { isRawGyro: true, ranges: undefined });
+    expect(parsed.track.isEmpty).toBe(true);
+    expect(parsed).toMatchObject({
+      layout: 'raw',
+      strayBytes: 0,
+      damagedSamples: 0,
+      unwrittenSamples: 0,
+      mendedStamps: 0,
+    });
+  });
+
+  it('returns an empty track when every sample is unavailable, counting each kind', () => {
+    const unsafeStamp = encodeFloatSample(200, [0, 1, 0], [0, 0, 0]);
+    unsafeStamp[7] = 0xff;
+    const flipped = bitFlipped(
+      encodeFloatSample(300, [0, 1, 0], [0, 0.5, 0]),
+      ANGULAR_Y_HIGH_BYTE,
+      0x40,
+    );
+    const payload = new Uint8Array(
+      [
+        new Uint8Array(FLOAT_SAMPLE_SIZE),
+        unsafeStamp,
+        encodeFloatSample(200, [0, NaN, 0], [0, 0, 0]),
+        flipped,
+      ].flatMap((sample) => [...sample]),
+    );
+    const parsed = read(payload, { isRawGyro: false, ranges: undefined });
+    expect(parsed.track.isEmpty).toBe(true);
+    expect([parsed.unwrittenSamples, parsed.damagedSamples, parsed.mendedStamps]).toEqual([
+      1, 3, 0,
+    ]);
+    expect([parsed.strayBytes, parsed.layout]).toEqual([0, 'float']);
   });
 });
 

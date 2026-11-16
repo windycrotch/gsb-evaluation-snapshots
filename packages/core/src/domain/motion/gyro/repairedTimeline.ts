@@ -45,8 +45,9 @@ interface Line {
 /**
  * Recorded stamps made fit to integrate over and to search. Stretches of stamps in step are
  * trusted when they are long (and the longest always is); every stamp outside them is placed on
- * the line from its nearest trusted neighbour, keeping its own time when that is near. A real gap
- * lies between two trusted stretches and stays. No stamp is then let go back.
+ * the line from its nearest trusted neighbour, keeping its own time when that is near. A stamp
+ * that is no time at all (zero, or not a number) is always placed. A real gap lies between two
+ * trusted stretches and stays. No stamp is then let go back.
  */
 export function repairedTimeline(recorded: Float64Array): RepairedTimeline {
   const interval = typicalInterval(recorded);
@@ -61,6 +62,15 @@ export function repairedTimeline(recorded: Float64Array): RepairedTimeline {
   return { times, mended };
 }
 
+/**
+ * Whether a stamp can be a time the capture clock handed out: positive and finite. Zero is a
+ * slot the clock had not started for, or one the camera never wrote; either way it says nothing
+ * about where a sample belongs, and must not anchor a stretch or be kept as a near neighbour.
+ */
+function isTime(stamp: number | undefined): stamp is number {
+  return stamp !== undefined && Number.isFinite(stamp) && stamp > 0;
+}
+
 function toleranceOf(interval: number): number {
   return Math.max(STRAY_INTERVALS * interval, MIN_STRAY_TOLERANCE_US);
 }
@@ -73,26 +83,47 @@ function typicalInterval(times: Float64Array): number {
 }
 
 /**
- * The maximal runs of stamps each a step after the one before (not back, not far ahead).
+ * The maximal runs of stamps each a step after the one before (not back, not far ahead). A
+ * stamp that is no time ends the run before it and starts the run after: it cannot be believed
+ * as a place, nor lend its neighbours one.
  */
 function steadyStretches({ recorded, tolerance }: Line): Stretch[] {
   const stretches: Stretch[] = [];
   let start = 0;
   for (let index = 1; index <= recorded.length; index += 1) {
-    const step = (recorded[index] ?? -Infinity) - (recorded[index - 1] ?? 0);
-    if (step >= 0 && step <= tolerance) continue;
+    const before = recorded[index - 1];
+    const step = (recorded[index] ?? -Infinity) - (before ?? 0);
+    const isInStep = isTime(before) && isTime(recorded[index]) && step >= 0 && step <= tolerance;
+    if (isInStep) continue;
     stretches.push({ start, end: index });
     start = index;
   }
   return stretches;
 }
 
+/**
+ * The stretches long enough to be believed, and always the longest. Ties for the longest are
+ * believed together, as a real gap is: two long runs in step with a jump between them.
+ * The exception is a record with no run of two stamps at all, as one stray among three or four
+ * leaves it: nothing there can anchor the repair, so only the earliest stamp is believed and the
+ * rest are placed from it, rather than each singleton standing as its own stretch.
+ */
 function trustedStretches(stretches: readonly Stretch[]): Stretch[] {
   let longest = 0;
-  for (const stretch of stretches) longest = Math.max(longest, lengthOf(stretch));
-  return stretches.filter((stretch) => {
+  let earliestLongest = -1;
+  for (const [index, stretch] of stretches.entries()) {
     const length = lengthOf(stretch);
-    return length >= TRUSTED_STRETCH || length === longest;
+    if (length <= longest) continue;
+    longest = length;
+    earliestLongest = index;
+  }
+  const hasSteadyRun = longest > 1;
+  return stretches.filter((stretch, index) => {
+    const length = lengthOf(stretch);
+    return (
+      length >= TRUSTED_STRETCH ||
+      (length === longest && (hasSteadyRun || index === earliestLongest))
+    );
   });
 }
 
@@ -126,9 +157,11 @@ function placeAfter(times: Float64Array, untrusted: Stretch, line: Line): void {
 }
 
 /**
- * The stamp's own time when it is near where its neighbour puts it, that place otherwise.
+ * The stamp's own time when it is a time and lies near where its neighbour puts it, that place
+ * otherwise. A stamp that is no time at all (zero, a value not a number) never stands: where its
+ * bytes put it is not where its sample belongs.
  */
 function placed(index: number, expected: number, line: Line): number {
-  const recorded = line.recorded[index] ?? expected;
-  return Math.abs(recorded - expected) <= line.tolerance ? recorded : expected;
+  const recorded = line.recorded[index];
+  return isTime(recorded) && Math.abs(recorded - expected) <= line.tolerance ? recorded : expected;
 }

@@ -97,10 +97,11 @@ const UNWRITTEN = 'unwritten';
 
 /**
  * Decodes the gyro record payload into a {@link GyroTrack} with the given layout. Whole samples
- * only: a partial sample at the end is tolerated and reported, never rejected. So is a sample whose
- * bytes cannot be a reading (a stamp past the safe integers, a value no camera measures, a
- * component a flipped bit moved) and a slot left all zero: each sample carries its own time, so
- * the others still count.
+ * only: a partial sample at the end is tolerated and reported, never rejected. So is a sample
+ * whose bytes cannot be a reading (a stamp past the safe integers or not a number, a component
+ * past what a camera measures or not a number, one a flipped bit moved) and a slot left all
+ * zero: each sample carries its own time, so the others still count, and a sample left out
+ * takes its readings with it so the kept ones stay aligned.
  * Stamps that stray from their neighbours are mended (see {@link repairedTimeline}).
  */
 export function parseGyroRecord(payload: Uint8Array, layout: GyroSampleLayout): ParsedGyroRecord {
@@ -126,7 +127,9 @@ export function parseGyroRecord(payload: Uint8Array, layout: GyroSampleLayout): 
 }
 
 /**
- * The reading in one slot; undefined when its bytes cannot be one.
+ * The reading in one slot; `UNWRITTEN` for a slot the camera never wrote, undefined when its
+ * bytes cannot be one. A reading is no reading when a component is not a number, past what a
+ * camera measures, or when its stamp cannot sit on the capture clock.
  */
 function slotAt(
   reader: ByteReader,
@@ -143,6 +146,7 @@ function slotAt(
       angularVelocity: layout.angularVelocityAt(reader, offset),
     };
     const isReading =
+      isPlausibleStamp(captureTime) &&
       isWithin(sample.acceleration, MAX_PLAUSIBLE_ACCELERATION_G) &&
       isWithin(sample.angularVelocity, MAX_PLAUSIBLE_ANGULAR_VELOCITY_RAD_S);
     return isReading ? sample : undefined;
@@ -150,6 +154,16 @@ function slotAt(
     if (hasErrorCode(error, 'binary-unsafe-integer')) return undefined;
     throw error;
   }
+}
+
+/**
+ * A stamp whose bytes can still spell a time: a finite number within the safe integers. A stamp
+ * far from its neighbours is not damage — the timeline mends it from them ({@link
+ * repairedTimeline}) — but one past the safe integers is no time any clock hands out, and a
+ * float stamp a flipped exponent bit made infinite or not a number is no time either.
+ */
+function isPlausibleStamp(stamp: number): boolean {
+  return Number.isFinite(stamp) && Math.abs(stamp) <= Number.MAX_SAFE_INTEGER;
 }
 
 /**
@@ -177,6 +191,8 @@ function hasPlausibleTimestamps(payload: Uint8Array, layout: GyroSampleLayout): 
 
 /**
  * The stamps `layout` decodes from the leading samples; one that cannot be a stamp is skipped.
+ * So is a zero stamp: a slot the camera never wrote, or one read before its clock ran, says
+ * nothing about the rate, and an all-zero payload must not be taken for a record either.
  */
 function stampsOf(payload: Uint8Array, layout: GyroSampleLayout): Float64Array {
   const reader = new ByteReader(payload);
@@ -184,7 +200,7 @@ function stampsOf(payload: Uint8Array, layout: GyroSampleLayout): Float64Array {
   const stamps: number[] = [];
   for (let index = 0; index < count; index += 1) {
     const stamp = stampAt(reader, layout, index * layout.sampleSize);
-    if (stamp !== undefined) stamps.push(stamp);
+    if (stamp !== undefined && stamp > 0) stamps.push(stamp);
   }
   return Float64Array.from(stamps);
 }
