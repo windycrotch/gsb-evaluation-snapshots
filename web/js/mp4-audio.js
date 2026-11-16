@@ -172,18 +172,24 @@ function segmentPlan({ file, v, moov, trak, mdia, mdhd, mvhd, stbl, stsd,
   if (sample !== sizes.length) fail('MP4 音轨时间索引不完整');
   const movieScaleAt = mvhd.data + (v.getUint8(mvhd.data) === 1 ? 20 : 12);
   need(mvhd, movieScaleAt, 4); const movieScale = v.getUint32(movieScaleAt);
+  // Edit lengths and movie headers are stamped in movie ticks; a zero scale would
+  // silently turn every edit duration into Infinity and fall back to the full track.
+  if (!movieScale) fail('MP4 影片时间基无效');
   let trim = 0, lead = 0;
   const edts = boxes(v, trak.data, trak.end).find((b) => b.type === 'edts');
   if (edts) {
     const elst = child(v, edts, 'elst'); need(elst, elst.data, 8);
-    const version = v.getUint8(elst.data), entries = v.getUint32(elst.data + 4), width = version === 1 ? 20 : 12;
+    // Reject unknown versions even for an empty table: the entry width would be a guess.
+    const version = v.getUint8(elst.data);
+    if (version > 1) fail('暂不支持此音轨的复杂剪辑时间轴');
+    const entries = v.getUint32(elst.data + 4), width = version === 1 ? 20 : 12;
     need(elst, elst.data + 8, entries * width);
     let seenMedia = false;
     for (let i = 0; i < entries; i++) {
       const at = elst.data + 8 + i * width;
       const length = version === 1 ? Number(v.getBigUint64(at)) : v.getUint32(at);
       const time = version === 1 ? Number(v.getBigInt64(at + 8)) : v.getInt32(at + 4);
-      if (version > 1 || v.getUint32(at + width - 4) !== 65536 || seenMedia) fail('暂不支持此音轨的复杂剪辑时间轴');
+      if (v.getUint32(at + width - 4) !== 65536 || seenMedia) fail('暂不支持此音轨的复杂剪辑时间轴');
       if (time === -1) lead += length / movieScale;
       else { trim = time / timescale; duration = length / movieScale; seenMedia = true; }
     }
@@ -206,7 +212,7 @@ function segmentPlan({ file, v, moov, trak, mdia, mdhd, mvhd, stbl, stsd,
     async *segments() {
       // Bound decoded windows to ~12 s; overlap absorbs codec and resampling edges.
       let first = 0;
-      if (lead) yield { silence: lead, duration: lead };
+      if (lead) yield { silence: lead, time: 0, duration: lead };
       for (let time = 0; time < duration; time += 12) {
         signal?.throwIfAborted();
         const begin = trim + time, end = trim + Math.min(duration, time + 12);
