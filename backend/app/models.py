@@ -65,8 +65,8 @@ class JSONEncodedList(TypeDecorator):
 
     def load_dialect_impl(self, dialect):
         if dialect.name == "postgresql":
-            from sqlalchemy.dialects.postgresql import ARRAY
             from sqlalchemy import REAL
+            from sqlalchemy.dialects.postgresql import ARRAY
             return dialect.type_descriptor(ARRAY(REAL))
         else:
             return dialect.type_descriptor(Text())
@@ -128,6 +128,11 @@ class Challenge(Base):
     payload = Column(Text)  # Raw signed payload
     expires_at = Column(DateTime, index=True)  # Indexed for cleanup queries
     used = Column(Boolean, default=False, index=True)  # Indexed for filtering
+    # Lifecycle state machine column (see security/challenge_lifecycle.py).
+    # Nullable for backwards compatibility with rows created before migration 004;
+    # the effective state is derived from `used`/`expires_at` in that case.
+    state = Column(String(20), default="CREATED", index=True)
+    consumed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", back_populates="challenges")

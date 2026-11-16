@@ -3,6 +3,7 @@ Rate Limiting Tests for AAA Engine
 Tests HTTP 429 responses and rate limit behavior.
 """
 
+import pytest
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 from slowapi import Limiter
@@ -14,6 +15,21 @@ from app.core.ratelimit import (
     limiter,
     rate_limit_exceeded_handler,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_shared_limiter():
+    """Reset the shared limiter between tests.
+
+    slowapi keys limit buckets by the endpoint function's ``__name__``. The
+    endpoints defined in this module therefore use distinct names; the reset
+    additionally guards against state leaking between tests under random
+    ordering, which would otherwise make a later test see a 429 on its *first*
+    request.
+    """
+    limiter.reset()
+    yield
+    limiter.reset()
 
 
 class TestRateLimitHandler:
@@ -28,7 +44,7 @@ class TestRateLimitHandler:
 
         @app.get("/test")
         @limiter.limit("1/minute")
-        def test_endpoint(request: Request):
+        def endpoint_returns_429(request: Request):
             return {"status": "ok"}
 
         client = TestClient(app)
@@ -49,7 +65,7 @@ class TestRateLimitHandler:
 
         @app.get("/test-format")
         @limiter.limit("1/minute")
-        def test_endpoint(request: Request):
+        def endpoint_response_format(request: Request):
             return {"status": "ok"}
 
         client = TestClient(app)
@@ -76,7 +92,7 @@ class TestRateLimitHandler:
 
         @app.get("/test-header")
         @limiter.limit("1/minute")
-        def test_endpoint(request: Request):
+        def endpoint_retry_after(request: Request):
             return {"status": "ok"}
 
         client = TestClient(app)
@@ -142,7 +158,7 @@ class TestRateLimitBehavior:
         # Use a per-second limit for testing
         @app.get("/test-reset")
         @app.state.limiter.limit("2/second")
-        def test_endpoint(request: Request):
+        def endpoint_resets_after_window(request: Request):
             return {"status": "ok"}
 
         client = TestClient(app)
@@ -168,7 +184,7 @@ class TestRateLimitBehavior:
 
         @app.get("/test-ip")
         @test_limiter.limit("1/minute")
-        def test_endpoint(request: Request):
+        def endpoint_separate_ips(request: Request):
             return {"status": "ok"}
 
         client = TestClient(app)
@@ -197,7 +213,7 @@ class TestRateLimitErrorDetails:
 
         @app.get("/test-docs")
         @limiter.limit("1/minute")
-        def test_endpoint(request: Request):
+        def endpoint_docs_details(request: Request):
             return {"status": "ok"}
 
         client = TestClient(app)

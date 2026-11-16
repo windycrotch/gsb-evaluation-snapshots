@@ -10,10 +10,21 @@ import hmac
 import os
 import random
 import secrets
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+
+from .security.challenge_lifecycle import (
+    CHALLENGE_TTL_SECONDS,
+    ChallengeLifecycleCode,
+    ChallengeLifecycleError,
+    ChallengeState,
+    challenge_state,
+    epoch_seconds,
+    utcnow,
+)
 
 # Secret key for HMAC token signing (MUST be set via environment variable)
 _hmac_secret = os.environ.get("L3_HMAC_SECRET")
@@ -155,6 +166,49 @@ def _generate_dynamic_phrase() -> str:
 # =============================================================================
 
 
+@dataclass(frozen=True)
+class TokenConsumption:
+    """Outcome of a challenge-token consumption attempt.
+
+    ``code`` is always populated with a stable machine-readable identifier so
+    callers can distinguish replay (``TOKEN_ALREADY_USED``), expiry
+    (``TOKEN_EXPIRED``), cross-user misuse (``TOKEN_USER_MISMATCH``) and plain
+    invalid tokens (``TOKEN_NOT_FOUND``) instead of collapsing them into one
+    generic failure.
+    """
+
+    valid: bool
+    code: ChallengeLifecycleCode
+    challenge_id: str | None = None
+    user_id: str | None = None
+    phrase: str | None = None
+    expires_at: datetime | None = None
+
+
+#: Maps a lifecycle rejection code to the public policy reason code.
+_LIFECYCLE_PUBLIC_REASONS: dict[ChallengeLifecycleCode, str] = {
+    ChallengeLifecycleCode.TOKEN_ALREADY_USED: "REPLAY_DETECTED",
+    ChallengeLifecycleCode.TOKEN_EXPIRED: "CHALLENGE_EXPIRED",
+    ChallengeLifecycleCode.TOKEN_NOT_FOUND: "CHALLENGE_INVALID",
+    ChallengeLifecycleCode.MALFORMED_TOKEN_STRUCTURE: "CHALLENGE_INVALID",
+    ChallengeLifecycleCode.INVALID_TOKEN_EXPIRATION: "CHALLENGE_INVALID",
+    ChallengeLifecycleCode.INVALID_TOKEN_SIGNATURE: "CHALLENGE_INVALID",
+    ChallengeLifecycleCode.INVALID_CHALLENGE_STATE: "CHALLENGE_INVALID",
+    ChallengeLifecycleCode.INVALID_STATE_TRANSITION: "CHALLENGE_INVALID",
+    ChallengeLifecycleCode.CHALLENGE_TERMINATED: "CHALLENGE_INVALID",
+    ChallengeLifecycleCode.TOKEN_USER_MISMATCH: "CHALLENGE_INVALID",
+}
+
+
+def public_reason_for(code: ChallengeLifecycleCode | str) -> str:
+    """Translate a lifecycle rejection code into a stable public reason code."""
+    try:
+        code = ChallengeLifecycleCode(code)
+    except ValueError:
+        return "CHALLENGE_INVALID"
+    return _LIFECYCLE_PUBLIC_REASONS.get(code, "CHALLENGE_INVALID")
+
+
 def generate_challenge(user_id: str, db: Session | None = None) -> dict:
     """
     Generate a dynamic challenge phrase and single-use HMAC-SHA256 signed token with 90s TTL.
@@ -172,9 +226,12 @@ def generate_challenge(user_id: str, db: Session | None = None) -> dict:
     phrase = _generate_dynamic_phrase()
 
     # Expiration: strictly 90 seconds (per shared contract section 6 & layer3 spec)
-    now = datetime.utcnow()
-    expires_at = now + timedelta(seconds=90)
-    expires_timestamp = str(int(expires_at.timestamp()))
+    now = utcnow()
+    expires_at = now + timedelta(seconds=CHALLENGE_TTL_SECONDS)
+    # Use the true Unix epoch for the signed claim. ``datetime.timestamp()`` on a
+    # naive datetime interprets it in local time, which silently shifts the
+    # embedded expiry by the host's UTC offset (and breaks expiry checks).
+    expires_timestamp = str(epoch_seconds(expires_at))
 
     # Create raw payload and sign with HMAC-SHA256
     raw_nonce = secrets.token_hex(16)
@@ -201,6 +258,7 @@ def generate_challenge(user_id: str, db: Session | None = None) -> dict:
             payload=raw_payload,
             expires_at=expires_at,
             used=False,
+            state=ChallengeState.CREATED.value,
         )
         db.add(challenge)
         db.commit()
@@ -208,6 +266,242 @@ def generate_challenge(user_id: str, db: Session | None = None) -> dict:
         result["challenge_id"] = str(challenge.id)
 
     return result
+
+
+def _verify_signature(challenge, token: str) -> bool:
+    """Verify the HMAC signature of the *presented* token, in constant time.
+
+    The signed payload is reconstructed from the presented token's nonce/expiry
+    combined with the user_id and phrase stored in the database. This means a
+    forged or edited token can never be accepted by replaying a previously stored
+    signature: the signature must actually cover the presented nonce and expiry.
+    """
+    parts = token.split(".")
+    if len(parts) != 3:
+        return False
+    nonce, exp_str, signature = parts
+    payload = f"{challenge.user_id}:{exp_str}:{challenge.phrase}:{nonce}"
+    expected_sig = hmac.new(SECRET_KEY, payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(signature, expected_sig)
+
+
+def validate_challenge_token(
+    token: str,
+    db: Session,
+    expected_user_id: str | None = None,
+    now: datetime | None = None,
+) -> TokenConsumption:
+    """Read-only validation of a challenge token (no state mutation).
+
+    Returns a ``TokenConsumption`` whose ``code`` explains any rejection. This is
+    used as a cheap pre-flight before running model inference, so lifecycle
+    failures produce a stable, assertable reason instead of falling through to
+    the acoustic gates.
+    """
+    if not token or not db or not token.strip():
+        return TokenConsumption(valid=False, code=ChallengeLifecycleCode.TOKEN_NOT_FOUND)
+
+    from .models import Challenge
+
+    now = now or utcnow()
+    challenge = db.query(Challenge).filter(Challenge.token == token).first()
+    if challenge is None:
+        return TokenConsumption(valid=False, code=ChallengeLifecycleCode.TOKEN_NOT_FOUND)
+
+    result = TokenConsumption(
+        valid=False,
+        code=ChallengeLifecycleCode.INVALID_CHALLENGE_STATE,
+        challenge_id=str(challenge.id),
+        user_id=str(challenge.user_id),
+        phrase=challenge.phrase,
+        expires_at=challenge.expires_at,
+    )
+
+    try:
+        state = challenge_state(challenge, now=now)
+    except ChallengeLifecycleError as err:
+        return TokenConsumption(
+            valid=False,
+            code=ChallengeLifecycleCode(err.code),
+            challenge_id=result.challenge_id,
+            user_id=result.user_id,
+            phrase=result.phrase,
+            expires_at=result.expires_at,
+        )
+
+    # Terminal states first: a replayed token must report replay even if its TTL
+    # has also elapsed by the time of the second submission.
+    if state in (ChallengeState.CONSUMED, ChallengeState.COMPLETED):
+        code = ChallengeLifecycleCode.TOKEN_ALREADY_USED
+    elif state is ChallengeState.TERMINATED:
+        code = ChallengeLifecycleCode.CHALLENGE_TERMINATED
+    elif state is ChallengeState.EXPIRED:
+        code = ChallengeLifecycleCode.TOKEN_EXPIRED
+    elif expected_user_id is not None and str(expected_user_id) != str(challenge.user_id):
+        # Ownership binding: never let user B ride on user A's challenge.
+        code = ChallengeLifecycleCode.TOKEN_USER_MISMATCH
+    else:
+        # Structural + signature validation for pending tokens.
+        parts = token.split(".")
+        if len(parts) != 3:
+            code = ChallengeLifecycleCode.MALFORMED_TOKEN_STRUCTURE
+        else:
+            try:
+                token_exp = int(parts[1])
+            except ValueError:
+                code = ChallengeLifecycleCode.INVALID_TOKEN_EXPIRATION
+            else:
+                if epoch_seconds(now) > token_exp:
+                    # The signed claim itself has passed; treat exactly like DB expiry.
+                    code = ChallengeLifecycleCode.TOKEN_EXPIRED
+                elif not _verify_signature(challenge, token):
+                    code = ChallengeLifecycleCode.INVALID_TOKEN_SIGNATURE
+                else:
+                    return TokenConsumption(
+                        valid=True,
+                        code=ChallengeLifecycleCode.TOKEN_VALID,
+                        challenge_id=result.challenge_id,
+                        user_id=result.user_id,
+                        phrase=result.phrase,
+                        expires_at=result.expires_at,
+                    )
+
+    return TokenConsumption(
+        valid=False,
+        code=code,
+        challenge_id=result.challenge_id,
+        user_id=result.user_id,
+        phrase=result.phrase,
+        expires_at=result.expires_at,
+    )
+
+
+def consume_challenge_token(
+    token: str,
+    db: Session,
+    expected_user_id: str | None = None,
+    now: datetime | None = None,
+) -> TokenConsumption:
+    """Atomically validate *and* consume a challenge token exactly once.
+
+    Single-use is enforced by a conditional ``UPDATE`` (``used = false AND
+    expires_at > :now``), so two concurrent submissions can never both succeed.
+    When the update matches no row the current row is re-read to return a
+    precise, stable rejection code.
+
+    Args:
+        token: Challenge token presented by the caller.
+        db: SQLAlchemy session (required).
+        expected_user_id: User the verification request claims to authenticate.
+            When provided the token must have been issued to this exact user.
+        now: Injectable clock (testing only).
+    """
+    if not token or not db or not str(token).strip():
+        return TokenConsumption(valid=False, code=ChallengeLifecycleCode.TOKEN_NOT_FOUND)
+
+    from .models import Challenge
+
+    now = now or utcnow()
+    challenge = db.query(Challenge).filter(Challenge.token == token).first()
+    if challenge is None:
+        return TokenConsumption(valid=False, code=ChallengeLifecycleCode.TOKEN_NOT_FOUND)
+
+    precheck = validate_challenge_token(token, db, expected_user_id=expected_user_id, now=now)
+    if not precheck.valid:
+        return precheck
+
+    # Atomic consume. ``used`` is the canonical flag; ``state``/``consumed_at``
+    # are kept in sync. The ownership predicate is part of the UPDATE itself so
+    # that a concurrent request from another user cannot slip in between the
+    # pre-check and the write.
+    params = {"token": token, "now": now}
+    if expected_user_id is None:
+        full_statement = text("""
+            UPDATE challenges
+            SET used = true, state = 'CONSUMED', consumed_at = :now
+            WHERE token = :token
+              AND used = false
+              AND expires_at > :now
+        """)
+        legacy_statement = text("""
+            UPDATE challenges
+            SET used = true
+            WHERE token = :token
+              AND used = false
+              AND expires_at > :now
+        """)
+    else:
+        params["user_id"] = str(expected_user_id)
+        full_statement = text("""
+            UPDATE challenges
+            SET used = true, state = 'CONSUMED', consumed_at = :now
+            WHERE token = :token
+              AND used = false
+              AND expires_at > :now
+              AND user_id = :user_id
+        """)
+        legacy_statement = text("""
+            UPDATE challenges
+            SET used = true
+            WHERE token = :token
+              AND used = false
+              AND expires_at > :now
+              AND user_id = :user_id
+        """)
+
+    try:
+        result = db.execute(full_statement, params)
+    except Exception:
+        # Deployment without migration 004 (no state/consumed_at columns):
+        # fall back to the legacy `used`-only update rather than failing open.
+        db.rollback()
+        result = db.execute(legacy_statement, params)
+    db.commit()
+
+    if result.rowcount == 0:
+        # Lost the race, expired between pre-check and update, or wrong owner.
+        db.expire_all()
+        return _classify_consumption_failure(token, db, expected_user_id, now)
+
+    return TokenConsumption(
+        valid=True,
+        code=ChallengeLifecycleCode.TOKEN_CONSUMED,
+        challenge_id=str(challenge.id),
+        user_id=str(challenge.user_id),
+        phrase=challenge.phrase,
+        expires_at=challenge.expires_at,
+    )
+
+
+def _classify_consumption_failure(
+    token: str, db: Session, expected_user_id: str | None, now: datetime
+) -> TokenConsumption:
+    """Explain why the atomic consume matched no rows."""
+    from .models import Challenge
+
+    challenge = db.query(Challenge).filter(Challenge.token == token).first()
+    if challenge is None:
+        return TokenConsumption(valid=False, code=ChallengeLifecycleCode.TOKEN_NOT_FOUND)
+
+    challenge_data = {
+        "challenge_id": str(challenge.id),
+        "user_id": str(challenge.user_id),
+        "phrase": challenge.phrase,
+        "expires_at": challenge.expires_at,
+    }
+    if challenge.used or getattr(challenge, "state", None) in (
+        ChallengeState.CONSUMED.value,
+        ChallengeState.COMPLETED.value,
+    ):
+        code = ChallengeLifecycleCode.TOKEN_ALREADY_USED
+    elif expected_user_id is not None and str(expected_user_id) != str(challenge.user_id):
+        code = ChallengeLifecycleCode.TOKEN_USER_MISMATCH
+    elif challenge.expires_at is None or challenge.expires_at <= now:
+        code = ChallengeLifecycleCode.TOKEN_EXPIRED
+    else:
+        code = ChallengeLifecycleCode.INVALID_CHALLENGE_STATE
+
+    return TokenConsumption(valid=False, code=code, **challenge_data)
 
 
 def verify_token(token: str, db: Session = None) -> bool:
@@ -231,47 +525,12 @@ def verify_token(token: str, db: Session = None) -> bool:
         # Legacy behavior: no database, always return False
         return False
 
-    from .models import Challenge
-
-    now = datetime.utcnow()
-
-    # Atomic update: Mark as used only if not already used and not expired
-    # This prevents race conditions where two requests try to use the same token
-    # Use proper boolean syntax compatible with both SQLite and PostgreSQL
-    result = db.execute(
-        text("""
-            UPDATE challenges
-            SET used = true
-            WHERE token = :token
-              AND used = false
-              AND expires_at > :now
-        """),
-        {"token": token, "now": now},
-    )
-    db.commit()
-
-    # If no rows affected, token was invalid, already used, or expired
-    if result.rowcount == 0:
-        return False
-
-    # Verify HMAC signature
-    challenge = db.query(Challenge).filter(Challenge.token == token).first()
-    if challenge and challenge.payload:
-        expected_sig = hmac.new(
-            SECRET_KEY, challenge.payload.encode("utf-8"), hashlib.sha256
-        ).hexdigest()
-        if not hmac.compare_digest(challenge.signature or "", expected_sig):
-            # Signature mismatch - revert the used flag and return False
-            db.execute(
-                text("UPDATE challenges SET used = false WHERE token = :token"), {"token": token}
-            )
-            db.commit()
-            return False
-
-    return True
+    return consume_challenge_token(token, db).valid
 
 
-def validate_and_consume_token(token: str, db: Session) -> dict | None:
+def validate_and_consume_token(
+    token: str, db: Session, expected_user_id: str | None = None
+) -> dict | None:
     """
     Atomically validate and consume a challenge token.
 
@@ -281,59 +540,26 @@ def validate_and_consume_token(token: str, db: Session) -> dict | None:
     Args:
         token: Challenge token to verify
         db: SQLAlchemy session (required)
+        expected_user_id: Optional user the caller claims to authenticate; the
+            token must belong to this user (cross-user reuse is rejected).
 
     Returns:
         dict with challenge data if valid, None otherwise
     """
-    from .models import Challenge
-
     if not token or not db:
         return None
 
-    now = datetime.utcnow()
-
-    # Atomic update: Mark as used only if not already used and not expired
-    # Use proper boolean syntax for PostgreSQL compatibility
-    result = db.execute(
-        text("""
-            UPDATE challenges
-            SET used = true
-            WHERE token = :token
-              AND used = false
-              AND expires_at > :now
-        """),
-        {"token": token, "now": now},
-    )
-    db.commit()
-
-    # If no rows affected, token was invalid, already used, or expired
-    if result.rowcount == 0:
+    outcome = consume_challenge_token(token, db, expected_user_id=expected_user_id)
+    if not outcome.valid:
         return None
-
-    # Fetch the challenge data
-    challenge = db.query(Challenge).filter(Challenge.token == token).first()
-    if not challenge:
-        return None
-
-    # Verify HMAC signature
-    if challenge.payload:
-        expected_sig = hmac.new(
-            SECRET_KEY, challenge.payload.encode("utf-8"), hashlib.sha256
-        ).hexdigest()
-        if not hmac.compare_digest(challenge.signature or "", expected_sig):
-            # Signature mismatch - revert the used flag and return None
-            db.execute(
-                text("UPDATE challenges SET used = false WHERE token = :token"), {"token": token}
-            )
-            db.commit()
-            return None
 
     return {
-        "challenge_id": str(challenge.id),
-        "user_id": str(challenge.user_id),
-        "phrase": challenge.phrase,
-        "token": challenge.token,
-        "expires_at": challenge.expires_at,
+        "challenge_id": outcome.challenge_id,
+        "id": outcome.challenge_id,
+        "user_id": outcome.user_id,
+        "phrase": outcome.phrase,
+        "token": token,
+        "expires_at": outcome.expires_at,
     }
 
 
@@ -354,19 +580,19 @@ def get_token_user_id(token: str, db: Session = None) -> str | None:
 
 
 def get_token_phrase(token: str, db: Session = None) -> str | None:
-    """Get the challenge phrase associated with a token."""
-    if not token:
+    """Get the challenge phrase associated with a *usable* token.
+
+    Returns ``None`` when the token is unknown, expired, already consumed or
+    terminated. Callers use this both to decide which phrase to expect and as a
+    pre-flight check, so a replay must not be able to recover the phrase.
+    """
+    if not token or db is None:
         return None
 
-    if db is None:
+    outcome = validate_challenge_token(token, db)
+    if not outcome.valid:
         return None
-
-    from .models import Challenge
-
-    challenge = db.query(Challenge).filter(Challenge.token == token).first()
-    if challenge:
-        return challenge.phrase
-    return None
+    return outcome.phrase
 
 
 def cleanup_expired_tokens(db: Session) -> int:
@@ -381,7 +607,7 @@ def cleanup_expired_tokens(db: Session) -> int:
     Returns:
         Number of tokens deleted
     """
-    now = datetime.utcnow()
+    now = utcnow()
     result = db.execute(text("DELETE FROM challenges WHERE expires_at < :now"), {"now": now})
     db.commit()
     return result.rowcount

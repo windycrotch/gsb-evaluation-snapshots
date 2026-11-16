@@ -41,15 +41,16 @@ from ...db import get_db
 from ...layer1_speaker import verify_speaker
 from ...layer2_deepfake import detect_spoof
 from ...layer3_adaptive import (
-    get_token_phrase,
+    ChallengeLifecycleCode,
+    consume_challenge_token,
     update_voiceprint,
-    validate_and_consume_token,
+    validate_challenge_token,
 )
 from ...layer3_asr import verify_phrase
 from ...models import AuthLog, User, Voiceprint
 from ...schemas.common import Decision, RiskLevel
 from ...security.jwt_auth import oauth2_scheme
-from ...services.voiceprint_service import decrypt_embedding, encrypt_embedding
+from ...services.voiceprint_service import decrypt_embedding
 from .verification_requests import register_verification_request
 
 router = APIRouter(prefix="/verify", tags=["authentication"])
@@ -102,6 +103,12 @@ class VerificationResult(BaseModel):
     risk_level: RiskLevel = Field(RiskLevel.LOW, description="Risk assessment level")
     requires_fresh_challenge: bool = Field(False, description="True if STEP_UP requires new challenge")
     requires_human_review: bool = Field(False, description="True if REVIEW decision")
+    # Stable machine-readable lifecycle error identifier (None on APPROVE).
+    # Values are drawn from ChallengeLifecycleCode so callers can assert on
+    # e.g. TOKEN_ALREADY_USED / TOKEN_EXPIRED / TOKEN_USER_MISMATCH.
+    error_code: str | None = Field(
+        None, description="Stable error identifier when the challenge token is rejected"
+    )
     # Note: No raw scores exposed to prevent information leakage
 
 
@@ -195,13 +202,54 @@ async def verify_authentication(
             detail={"code": "AUDIO_TOO_SHORT", "message": "Audio file is too short"},
         )
 
-    # === CHALLENGE VALIDATION ===
-    expected_phrase = get_token_phrase(token, db)
-    if not expected_phrase:
+    # === CHALLENGE VALIDATION (pre-flight, before any model inference) ===
+    # The token is bound to the user who requested it and to a 90s TTL, and may
+    # only ever be consumed once. All three properties are checked here so a
+    # replay/expired/cross-user token produces a stable, assertable reason
+    # instead of being masked by (or short-circuiting) the acoustic gates.
+    challenge_check = validate_challenge_token(token, db, expected_user_id=user_id)
+    rejection_code = challenge_check.code
+    expected_phrase = challenge_check.phrase if challenge_check.valid else None
+
+    if not challenge_check.valid:
+        # Reject immediately: do not run inference on an unusable token.
         policy_input.challenge_valid = False
-        policy_input.challenge_expired = True
-    else:
-        policy_input.challenge_valid = True
+        if rejection_code is ChallengeLifecycleCode.TOKEN_EXPIRED:
+            policy_input.challenge_expired = True
+        elif rejection_code is ChallengeLifecycleCode.TOKEN_ALREADY_USED:
+            policy_input.challenge_consumed = True
+
+        policy_output = evaluate_policy(policy_input)
+        _log_attempt(
+            db,
+            user_id=user_id,
+            l2_label="not_run",
+            l2_confidence=0.0,
+            l1_score=0.0,
+            result=policy_output.decision.value,
+            layer_blocked=policy_output.gate_blocked,
+            challenge_id=challenge_check.challenge_id,
+        )
+        db.commit()
+        register_verification_request(
+            request_id=req_id,
+            decision=policy_output.decision,
+            reason_public=policy_output.reason_public,
+            risk_level=policy_output.risk_level,
+        )
+        return VerificationResult(
+            request_id=req_id,
+            decision=policy_output.decision,
+            session_id=session_id,
+            reason=policy_output.reason_internal or policy_output.reason_public,
+            reason_public=policy_output.reason_public,
+            risk_level=policy_output.risk_level,
+            requires_fresh_challenge=True,
+            requires_human_review=False,
+            error_code=rejection_code.value,
+        )
+
+    policy_input.challenge_valid = True
 
     # === PARALLEL EXECUTION: AD (Layer 2) || ASR (Layer 3A) ===
     # Run deepfake detection and ASR phrase verification concurrently
@@ -301,15 +349,25 @@ async def verify_authentication(
     logger.info(f"[{req_id}] Policy decision: {policy_output.decision} ({policy_output.reason_public})")
 
     # === TOKEN CONSUMPTION (only on APPROVE) ===
+    # Consumption is atomic and user-bound: even if two requests pass the
+    # pre-flight check concurrently, exactly one wins, and a token issued to a
+    # different user can never be consumed here.
     challenge_id = None
+    rejection_code: ChallengeLifecycleCode | None = None
     if policy_output.decision == Decision.APPROVE:
-        challenge_data = validate_and_consume_token(token, db)
-        if not challenge_data:
-            # Token was consumed between validation and now (race condition)
-            policy_input.challenge_consumed = True
+        consumption = consume_challenge_token(token, db, expected_user_id=user_id)
+        if not consumption.valid:
+            # Lost the race (replay) or the token expired mid-flight.
+            rejection_code = consumption.code
+            if rejection_code is ChallengeLifecycleCode.TOKEN_ALREADY_USED:
+                policy_input.challenge_consumed = True
+            elif rejection_code is ChallengeLifecycleCode.TOKEN_EXPIRED:
+                policy_input.challenge_expired = True
+            else:
+                policy_input.challenge_valid = False
             policy_output = evaluate_policy(policy_input)
         else:
-            challenge_id = challenge_data.get("id") if isinstance(challenge_data, dict) else None
+            challenge_id = consumption.challenge_id
 
             # Update voiceprint with EMA
             if new_embedding is not None:
@@ -356,6 +414,7 @@ async def verify_authentication(
         risk_level=policy_output.risk_level,
         requires_fresh_challenge=policy_output.requires_fresh_challenge,
         requires_human_review=policy_output.requires_human_review,
+        error_code=rejection_code.value if rejection_code is not None else None,
     )
 
 

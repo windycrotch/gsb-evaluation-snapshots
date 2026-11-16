@@ -11,6 +11,7 @@ Version-controlled database schema migrations for the AAA Engine.
 | 001 | Initial schema (users, voiceprints, challenges, auth_logs) | APPLIED | 2026-11-12 |
 | 002 | Add challenges security columns (signature, payload, created_at) | APPLIED | 2026-11-14 |
 | 003 | Add challenges table indexes (token, expires_at, used) | PENDING | 2026-11-15 |
+| 004 | Add challenges lifecycle columns (state, consumed_at) | PENDING | 2026-11-17 |
 
 ## Database Configuration
 

@@ -109,7 +109,9 @@ def evaluate_banking_decision(
     else:
         min_similarity = base_threshold  # Use config threshold for standard
 
-    if similarity_score >= min_similarity:
+    # Require a strict margin above the tier threshold: a score exactly at the
+    # boundary is marginal and must step up rather than auto-approve (fail closed).
+    if similarity_score > min_similarity:
         return Decision.APPROVE, False
     elif similarity_score >= (min_similarity - 0.10):
         # Marginal similarity requires step-up challenge

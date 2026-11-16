@@ -28,9 +28,16 @@ from .core.ratelimit import RateLimitExceeded, limiter, rate_limit_exceeded_hand
 from .db import Base, engine, get_db
 from .layer1_speaker import enroll_speaker, verify_speaker
 from .layer2_deepfake import detect_spoof
-from .layer3_adaptive import generate_challenge, get_token_phrase, update_voiceprint, verify_token
+from .layer3_adaptive import (
+    ChallengeLifecycleCode,
+    consume_challenge_token,
+    generate_challenge,
+    public_reason_for,
+    update_voiceprint,
+    validate_challenge_token,
+)
 from .layer3_asr import verify_phrase
-from .models import AuthLog, Challenge, User, Voiceprint
+from .models import AuthLog, User, Voiceprint
 from .schemas.common import Decision
 from .security.host_auth import BankingShieldPolicy, evaluate_banking_decision
 from .security.jwt_auth import configure_cors
@@ -137,6 +144,8 @@ class VerifyResponse(BaseModel):
     decision: Decision = Decision.DENY
     result: str = "REJECT"  # "ACCEPT" | "REJECT" for backward compatibility
     reason: str = ""
+    reason_public: str = ""
+    error_code: str | None = None
     request_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     verification_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     session_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -273,24 +282,38 @@ async def get_challenge(request: Request, user_id: str = Query(...), db: Session
     if not voiceprint:
         raise HTTPException(status_code=400, detail="User has no enrolled voiceprint")
 
-    # Generate challenge
-    challenge_data = generate_challenge(user_id)
+    # Generate challenge and persist it (including HMAC signature/payload so the
+    # token can later be verified, tracked and consumed exactly once).
+    challenge_data = generate_challenge(user_id, db=db)
 
-    # Store in DB
-    challenge = Challenge(
-        user_id=uuid.UUID(user_id),
+    return ChallengeResponse(
         phrase=challenge_data["phrase"],
         token=challenge_data["token"],
         expires_at=challenge_data["expires_at"],
     )
-    db.add(challenge)
-    db.commit()
-
-    return ChallengeResponse(**challenge_data)
 
 
 # NOTE: /v1/verification-requests/{request_id} is handled by api/v1/verification_requests.py router
 # The legacy endpoint was removed as it was dead code (incorrectly returned latest log ignoring request_id)
+
+
+_CHALLENGE_REJECTION_MESSAGES: dict[ChallengeLifecycleCode, str] = {
+    ChallengeLifecycleCode.TOKEN_ALREADY_USED: "Challenge token has already been used",
+    ChallengeLifecycleCode.TOKEN_EXPIRED: "Challenge token has expired",
+    ChallengeLifecycleCode.TOKEN_USER_MISMATCH: "Challenge token was issued to a different user",
+    ChallengeLifecycleCode.TOKEN_NOT_FOUND: "Challenge token not found",
+    ChallengeLifecycleCode.CHALLENGE_TERMINATED: "Challenge has been terminated",
+    ChallengeLifecycleCode.INVALID_TOKEN_SIGNATURE: "Challenge token signature is invalid",
+    ChallengeLifecycleCode.MALFORMED_TOKEN_STRUCTURE: "Challenge token is malformed",
+    ChallengeLifecycleCode.INVALID_TOKEN_EXPIRATION: "Challenge token expiration is invalid",
+    ChallengeLifecycleCode.INVALID_CHALLENGE_STATE: "Challenge is in an invalid state",
+    ChallengeLifecycleCode.INVALID_STATE_TRANSITION: "Illegal challenge state transition",
+}
+
+
+def _challenge_rejection_message(code: ChallengeLifecycleCode) -> str:
+    """Human-readable message for a challenge lifecycle rejection."""
+    return _CHALLENGE_REJECTION_MESSAGES.get(code, "Challenge token is invalid")
 
 
 @app.post("/auth/verify", response_model=VerifyResponse)
@@ -322,7 +345,41 @@ async def verify(
     # Read audio
     audio_bytes = await audio.read()
 
-    expected_phrase = get_token_phrase(token, db) or ""
+    # === CHALLENGE VALIDATION (pre-flight) ===
+    # Reject replayed / expired / cross-user tokens *before* spending compute on
+    # model inference, with a stable machine-readable reason. The token is bound
+    # to the user who requested it.
+    challenge_check = validate_challenge_token(token, db, expected_user_id=user_id)
+    if not challenge_check.valid:
+        db.add(
+            AuthLog(
+                user_id=uuid.UUID(user_id),
+                challenge_id=uuid.UUID(challenge_check.challenge_id)
+                if challenge_check.challenge_id
+                else None,
+                l2_label="not_run",
+                l2_confidence=0.0,
+                l1_score=0.0,
+                result="REJECT",
+                layer_blocked=3,
+            )
+        )
+        db.commit()
+        return VerifyResponse(
+            decision=Decision.DENY,
+            result="REJECT",
+            confidence=0.0,
+            layer_blocked=3,
+            session_id=session_id,
+            reason=_challenge_rejection_message(challenge_check.code),
+            reason_public=public_reason_for(challenge_check.code),
+            error_code=challenge_check.code.value,
+            l2_label="not_run",
+            l2_confidence=0.0,
+            l1_score=0.0,
+        )
+
+    expected_phrase = challenge_check.phrase or ""
     loop = asyncio.get_running_loop()
 
     # === GATES 1 & 2: Parallel execution of AD (Deepfake) and ASR (Phrase Match) ===
@@ -458,10 +515,14 @@ async def verify(
             asr_similarity=asr_similarity,
         )
 
-    # === GATE 4: Token Verification ===
-    if not verify_token(token, db):
+    # === GATE 4: Atomic, single-use, user-bound token consumption ===
+    consumption = consume_challenge_token(token, db, expected_user_id=user_id)
+    if not consumption.valid:
         log = AuthLog(
             user_id=uuid.UUID(user_id),
+            challenge_id=uuid.UUID(consumption.challenge_id)
+            if consumption.challenge_id
+            else None,
             l2_label=l2_label,
             l2_confidence=l2_confidence,
             l1_score=l1_score,
@@ -477,16 +538,15 @@ async def verify(
             confidence=0.0,
             layer_blocked=3,
             session_id=session_id,
-            reason="Invalid or expired token",
+            reason=_challenge_rejection_message(consumption.code),
+            reason_public=public_reason_for(consumption.code),
+            error_code=consumption.code.value,
             l2_label=l2_label,
             l2_confidence=l2_confidence,
             l1_score=l1_score,
         )
 
-    # Mark challenge as used in database
-    challenge = db.query(Challenge).filter(Challenge.token == token).first()
-    if challenge:
-        challenge.used = True
+    challenge_id = consumption.challenge_id
 
     # === GATE 5: Update voiceprint with EMA on APPROVE ===
     updated_embedding = update_voiceprint(voiceprint.embedding, new_embedding)
@@ -497,7 +557,7 @@ async def verify(
     # Log success
     log = AuthLog(
         user_id=uuid.UUID(user_id),
-        challenge_id=challenge.id if challenge else None,
+        challenge_id=uuid.UUID(challenge_id) if challenge_id else None,
         l2_label=l2_label,
         l2_confidence=l2_confidence,
         l1_score=l1_score,

@@ -11,7 +11,7 @@ The AAA-controlled capture component uses these grants to:
 import hashlib
 import hmac
 import secrets
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
@@ -20,6 +20,14 @@ from sqlalchemy.orm import Session
 from ...core.config import get_settings
 from ...db import get_db
 from ...models import Challenge, User
+from ...security.challenge_lifecycle import (
+    ChallengeLifecycleError,
+    ChallengeState,
+    InvalidStateTransitionError,
+    challenge_state,
+    transition_challenge,
+    utcnow,
+)
 from ...security.jwt_auth import oauth2_scheme
 
 router = APIRouter(prefix="/capture", tags=["capture"])
@@ -128,13 +136,30 @@ async def create_capture_grant(
             detail={"code": "CHALLENGE_NOT_FOUND", "message": "Challenge not found"},
         )
 
-    if challenge.used:
+    now = utcnow()
+
+    # Reject challenges that can no longer transition to AUTHORIZED. This is the
+    # state-machine guard: a consumed or expired challenge must never be
+    # re-activated into a "pending verification" state by minting a new grant.
+    try:
+        current_state = challenge_state(challenge, now=now)
+    except ChallengeLifecycleError as err:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": err.code, "message": "Challenge state is invalid"},
+        ) from err
+
+    if current_state in (ChallengeState.CONSUMED, ChallengeState.COMPLETED):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
             detail={"code": "CHALLENGE_CONSUMED", "message": "Challenge already used"},
         )
-
-    if challenge.expires_at < datetime.utcnow():
+    if current_state is ChallengeState.TERMINATED:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "CHALLENGE_TERMINATED", "message": "Challenge has been terminated"},
+        )
+    if current_state is ChallengeState.EXPIRED:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"code": "CHALLENGE_EXPIRED", "message": "Challenge has expired"},
@@ -146,9 +171,22 @@ async def create_capture_grant(
     signature = _generate_grant_signature(grant_id, effective_tenant, request.challenge_id)
 
     # Grant TTL matches remaining challenge time, max 90s
-    remaining_seconds = int((challenge.expires_at - datetime.utcnow()).total_seconds())
+    remaining_seconds = int((challenge.expires_at - now).total_seconds())
     ttl_seconds = min(remaining_seconds, 90)
-    expires_at = datetime.utcnow() + timedelta(seconds=ttl_seconds)
+    expires_at = now + timedelta(seconds=ttl_seconds)
+
+    # Advance the lifecycle state (CREATED -> AUTHORIZED). Re-issuing a grant for
+    # a challenge that is already AUTHORIZED is idempotent; any other illegal
+    # transition raises instead of silently rewriting the record.
+    if current_state is not ChallengeState.AUTHORIZED:
+        try:
+            transition_challenge(challenge, ChallengeState.AUTHORIZED, now=now)
+        except InvalidStateTransitionError as err:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"code": err.code, "message": err.message},
+            ) from err
+        db.commit()
 
     # Store grant
     _capture_grants[grant_id] = {
@@ -199,7 +237,7 @@ async def get_capture_status(
         return CaptureStatus(valid=False, error="INVALID_SIGNATURE")
 
     # Check expiry
-    if grant["expires_at"] < datetime.utcnow():
+    if grant["expires_at"] < utcnow():
         return CaptureStatus(valid=False, error="GRANT_EXPIRED")
 
     # Check if already consumed
@@ -207,7 +245,7 @@ async def get_capture_status(
         return CaptureStatus(valid=False, error="GRANT_CONSUMED")
 
     # Calculate remaining time
-    remaining = int((grant["expires_at"] - datetime.utcnow()).total_seconds())
+    remaining = int((grant["expires_at"] - utcnow()).total_seconds())
 
     return CaptureStatus(
         valid=True,
@@ -250,14 +288,14 @@ def get_grant_info(grant_id: str) -> dict | None:
         return None
     if grant["consumed"]:
         return None
-    if grant["expires_at"] < datetime.utcnow():
+    if grant["expires_at"] < utcnow():
         return None
     return grant
 
 
 def cleanup_expired_grants():
     """Remove expired grants (call periodically)."""
-    now = datetime.utcnow()
+    now = utcnow()
     expired = [gid for gid, g in _capture_grants.items() if g["expires_at"] < now]
     for gid in expired:
         del _capture_grants[gid]

@@ -70,3 +70,46 @@ def clear_settings_cache():
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# Challenge-token fixtures (shared by challenge lifecycle security tests)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def challenge_user(db_session):
+    """Create a user with an enrolled voiceprint."""
+    import uuid
+
+    from app.models import User, Voiceprint
+
+    user = User(
+        id=uuid.uuid4(),
+        name="Challenge Owner",
+        email=f"owner_{uuid.uuid4().hex[:8]}@example.com",
+    )
+    db_session.add(user)
+    db_session.commit()
+    db_session.add(Voiceprint(user_id=user.id, embedding=[0.1] * 192, sample_count=1))
+    db_session.commit()
+    return user
+
+
+@pytest.fixture
+def other_user(db_session):
+    """Create a second, unrelated enrolled user."""
+    import uuid
+
+    from app.models import User, Voiceprint
+
+    user = User(
+        id=uuid.uuid4(),
+        name="Other User",
+        email=f"other_{uuid.uuid4().hex[:8]}@example.com",
+    )
+    db_session.add(user)
+    db_session.commit()
+    db_session.add(Voiceprint(user_id=user.id, embedding=[0.2] * 192, sample_count=1))
+    db_session.commit()
+    return user
