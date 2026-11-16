@@ -1,0 +1,164 @@
+import { describe, it, expect } from 'vitest';
+import { LaborMarketMap } from './LaborMarketMap';
+import { POPULATION_PER_TILE_LEVEL } from './growthConstants';
+import { GameMap } from './Map';
+import { BuildingMap, type BuildingType } from './Building';
+import { StructureMap } from './StructureMap';
+import { TileType, createTile } from './Tile';
+import type { Frontage } from './buildingFootprint';
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function makeMap(
+  w: number,
+  h: number,
+  roads: Array<{ x: number; y: number }>,
+): GameMap {
+  const map = new GameMap(w, h);
+  for (const { x, y } of roads) {
+    map.setTile(x, y, createTile(x, y, TileType.ROAD));
+  }
+  return map;
+}
+
+function addBuilding(
+  bm: BuildingMap,
+  x: number,
+  y: number,
+  type: BuildingType,
+  frontage: Frontage,
+  opts: { level?: number; abandoned?: boolean } = {},
+) {
+  return bm.addBuilding({
+    type,
+    level: opts.level ?? 1,
+    density: 0,
+    age: 0,
+    abandoned: opts.abandoned ?? false,
+    frontage,
+    footprint: [{ x, y }],
+    anchor: { x, y },
+    structureRect: { x, y, w: 1, h: 1 },
+  });
+}
+
+const idxOf = (w: number, x: number, y: number) => y * w + x;
+
+/** A straight road row at `y` spanning `[x0, x1]` inclusive. */
+function roadRow(y: number, x0: number, x1: number): Array<{ x: number; y: number }> {
+  const cells: Array<{ x: number; y: number }> = [];
+  for (let x = x0; x <= x1; x++) cells.push({ x, y });
+  return cells;
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+describe('LaborMarketMap', () => {
+  describe('initial state', () => {
+    it('a fresh instance reports zero everywhere and no flows', () => {
+      const lm = new LaborMarketMap();
+      expect(lm.getEmployed()).toBe(0);
+      expect(lm.getUnemployed()).toBe(0);
+      expect(lm.getJobsCapacity()).toBe(0);
+      expect(lm.getJobsFilled()).toBe(0);
+      expect(lm.getReachableUnfilledJobs()).toBe(0);
+      expect(lm.getFlows()).toEqual([]);
+    });
+  });
+
+  describe('recompute — seeded R/C scenario', () => {
+    it('populates getters and matched flows from a single R→C pair', () => {
+      // Residential (1,0) frontage S → access (1,1). Commercial (5,0) frontage S
+      // → access (5,1). Road row y=1 connects them.
+      const w = 10;
+      const map = makeMap(w, 8, roadRow(1, 1, 5));
+      const sm = new StructureMap(w, 8);
+      const bm = new BuildingMap(w, 8);
+      addBuilding(bm, 1, 0, 'residential', 'S', { level: 1 });
+      addBuilding(bm, 5, 0, 'commercial', 'S', { level: 1 });
+
+      const lm = new LaborMarketMap();
+      lm.recompute(map, sm, bm);
+
+      expect(lm.getEmployed()).toBe(POPULATION_PER_TILE_LEVEL);
+      expect(lm.getUnemployed()).toBe(0);
+      expect(lm.getJobsCapacity()).toBe(POPULATION_PER_TILE_LEVEL);
+      expect(lm.getJobsFilled()).toBe(POPULATION_PER_TILE_LEVEL);
+      expect(lm.getReachableUnfilledJobs()).toBe(0);
+
+      const flows = lm.getFlows();
+      expect(flows).toHaveLength(1);
+      expect(flows[0]).toEqual({
+        originNode: idxOf(w, 1, 1),
+        destNode: idxOf(w, 5, 1),
+        count: POPULATION_PER_TILE_LEVEL,
+      });
+    });
+
+    it('counts leftover workers as unemployed when jobs are scarce', () => {
+      // Two level-1 residentials, one level-1 job node whose capacity is exactly one
+      // building's worth of workers → the first origin is matched, the second is not.
+      const w = 12;
+      const map = makeMap(w, 8, roadRow(1, 1, 7));
+      const sm = new StructureMap(w, 8);
+      const bm = new BuildingMap(w, 8);
+      addBuilding(bm, 1, 0, 'residential', 'S', { level: 1 });
+      addBuilding(bm, 3, 0, 'residential', 'S', { level: 1 });
+      addBuilding(bm, 7, 0, 'commercial', 'S', { level: 1 });
+
+      const lm = new LaborMarketMap();
+      lm.recompute(map, sm, bm);
+
+      expect(lm.getEmployed()).toBe(POPULATION_PER_TILE_LEVEL);
+      expect(lm.getUnemployed()).toBe(POPULATION_PER_TILE_LEVEL);
+      expect(lm.getJobsCapacity()).toBe(POPULATION_PER_TILE_LEVEL);
+      expect(lm.getJobsFilled()).toBe(POPULATION_PER_TILE_LEVEL);
+      expect(lm.getFlows()).toHaveLength(1);
+    });
+
+    it('reports the leftover slots for a connected 1R + level-2 C scenario', () => {
+      // One level of workers reaches a level-2 C, filling one level's worth of slots →
+      // the remaining level's worth stays reachable+unfilled.
+      const w = 10;
+      const map = makeMap(w, 8, roadRow(1, 1, 5));
+      const sm = new StructureMap(w, 8);
+      const bm = new BuildingMap(w, 8);
+      addBuilding(bm, 1, 0, 'residential', 'S', { level: 1 });
+      addBuilding(bm, 5, 0, 'commercial', 'S', { level: 2 });
+
+      const lm = new LaborMarketMap();
+      lm.recompute(map, sm, bm);
+
+      expect(lm.getEmployed()).toBe(POPULATION_PER_TILE_LEVEL);
+      expect(lm.getReachableUnfilledJobs()).toBe(2 * POPULATION_PER_TILE_LEVEL - POPULATION_PER_TILE_LEVEL);
+    });
+  });
+
+  describe('clear()', () => {
+    it('zeroes every getter and empties the flows after a populated recompute', () => {
+      const w = 10;
+      const map = makeMap(w, 8, roadRow(1, 1, 5));
+      const sm = new StructureMap(w, 8);
+      const bm = new BuildingMap(w, 8);
+      addBuilding(bm, 1, 0, 'residential', 'S', { level: 1 });
+      addBuilding(bm, 5, 0, 'commercial', 'S', { level: 1 });
+
+      const lm = new LaborMarketMap();
+      lm.recompute(map, sm, bm);
+      expect(lm.getEmployed()).toBe(POPULATION_PER_TILE_LEVEL);
+
+      lm.clear();
+
+      expect(lm.getEmployed()).toBe(0);
+      expect(lm.getUnemployed()).toBe(0);
+      expect(lm.getJobsCapacity()).toBe(0);
+      expect(lm.getJobsFilled()).toBe(0);
+      expect(lm.getReachableUnfilledJobs()).toBe(0);
+      expect(lm.getFlows()).toEqual([]);
+    });
+  });
+});
