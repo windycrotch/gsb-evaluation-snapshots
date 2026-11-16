@@ -1,0 +1,47 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "outDir": "./.dist/out-tsc/spec",
+    "tsBuildInfoFile": "./.dist/out-tsc/spec/tsconfig.spec.tsbuildinfo",
+    "noEmit": false,
+    "jsx": "react-jsx",
+    "types": [
+      "vitest/globals",
+      "vitest/importMeta",
+      "vite/client",
+      "node",
+      "vitest"
+    ]
+  },
+  "include": [
+    "src/**/*.test.ts",
+    "src/**/*.spec.ts",
+    "src/**/*.test.tsx",
+    "src/**/*.spec.tsx",
+    "src/**/*.test.js",
+    "src/**/*.spec.js",
+    "src/**/*.test.jsx",
+    "src/**/*.spec.jsx",
+    "src/**/*.d.ts"
+  ],
+  "references": [
+    {
+      "path": "./tsconfig.app.json"
+    },
+    {
+      "path": "../../packages/media-playback-controls/tsconfig.lib.json"
+    },
+    {
+      "path": "../../packages/media-player/tsconfig.lib.json"
+    },
+    {
+      "path": "../../packages/media-core/tsconfig.lib.json"
+    },
+    {
+      "path": "../../packages/media-parser-cdg/tsconfig.lib.json"
+    },
+    {
+      "path": "../../packages/media-loader/tsconfig.lib.json"
+    }
+  ]
+}
