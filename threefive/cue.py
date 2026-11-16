@@ -61,7 +61,10 @@ class Cue(SCTE35Base):
         self.info_section = SpliceInfoSection()
         self.bites = None
         if data:
-            self._bits_decode(data)
+            try:
+                self._bits_decode(data)
+            except ERR:
+                self.bites = None
         self.packet_data = packet_data
         self.decode()
 
@@ -116,7 +119,7 @@ class Cue(SCTE35Base):
         """
         _decode_crc decode the crc from bites
         """
-        if bites:
+        if bites and len(bites) >= FOUR:
             self.info_section.crc = hex(
                 int.from_bytes(bites[ZERO:FOUR], byteorder="big")
             )
@@ -125,19 +128,49 @@ class Cue(SCTE35Base):
 
     def decode(self):
         """
-        Cue.decode() parses for SCTE35 data
+        Cue.decode() parses for SCTE35 data.
 
         * decode doesn't need to be called directly
 
+        decode returns False when the data cannot be
+        parsed as a SCTE-35 cue (truncated data, a
+        table_id other than 0xfc, an unknown splice
+        command type, ...). On failure Cue.command
+        is None and the encoders (base64, bytes,
+        hex, int) all return False, so a bad input
+        never produces a seemingly valid encoding.
+        """
+        self.command = None
+        self.descriptors = []
+        try:
+            decoded = self._decode()
+        except ERR:
+            decoded = False
+        if not decoded:
+            # a failed or partial parse must not
+            # leave a seemingly valid command behind
+            self.command = None
+            self.descriptors = []
+        return decoded
+
+    def _decode(self):
+        """
+        _decode walks the SCTE-35 section,
+        splice command, descriptors and crc.
         """
         bites = self.bites
-        self.descriptors = []
-        while bites:
-            bites = self.decode_info_section(bites)
-            bites = self._decode_splice_command(bites)
-            bites = self._decode_descriptors(bites)
-            return self._decode_crc(bites)
-        return False
+        if not bites:
+            return False
+        bites = self.decode_info_section(bites)
+        if self.info_section.table_id != "0xfc":
+            return False
+        bites = self._decode_splice_command(bites)
+        if not bites:
+            return False
+        bites = self._decode_descriptors(bites)
+        if bites is False:
+            return False
+        return self._decode_crc(bites)
 
     def _descriptor_loop(self, loop_bites):
         """
@@ -211,8 +244,8 @@ class Cue(SCTE35Base):
 
     def _bits_int(self, data):
         pdata = pif(data)
-        if isinstance(pdata, int):
-            length = pdata.bit_length() >> THREE
+        if isinstance(pdata, int) and pdata >= ZERO:
+            length = (pdata.bit_length() + 7) >> THREE
             bites = int.to_bytes(pdata, length, byteorder="big")
             self.bites = bites
             return True
@@ -316,7 +349,9 @@ class Cue(SCTE35Base):
             >>> cue=Cue('0xfc301600000000000000fff00506feceda3b7700000d10b0ea')
             >>> cue.bytes()
         """
-        return self.bites
+        if self.command:
+            return self.bites
+        return False
 
     def hex(self):
         """
@@ -329,7 +364,10 @@ class Cue(SCTE35Base):
              >>> cue.hex()
             '0xfc301600000000000000fff00506feceda3b7700000d10b0ea'
         """
-        return hex(self.int())
+        as_int = self.int()
+        if as_int is False:
+            return False
+        return hex(as_int)
 
     def int(self):
         """
@@ -342,7 +380,8 @@ class Cue(SCTE35Base):
                     >>> cue.int()
                     1583008701074197245727019716796221243010008018887947691536618
         """
-        self.encode()
+        if not self.encode():
+            return False
         return int.from_bytes(self.bites, byteorder="big")
 
     def encode(self):
@@ -552,6 +591,8 @@ class Cue(SCTE35Base):
                         >>> cue = threefive.Cue(Base64)
                         >>> cue.xml()
         """
+        if not self.command:
+            return False
         self.encode()
         sis = self.info_section.xml(ns=ns)
         cmd = self.command.xml(ns=ns)
@@ -565,6 +606,8 @@ class Cue(SCTE35Base):
         xmlbin returns SCTE-35
         as xmlbin
         """
+        if not self.command:
+            return False
         xb = Node("Signal", attrs={"xmlns": "https://scte.org/schemas/35"}, ns=ns)
         xbb = Node("Binary", value=self.base64())
         xb.addchild(xbb)
