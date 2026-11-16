@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+    paths-ignore:
+      - "archive/**" # 每日快照提交不重跑测试
+      - "cache/**"
+  pull_request:
+
+# 默认最小权限；snapshot.yml 的推送 job 单独声明 contents: write
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install test dependencies
+        run: pip install pytest -r requirements.txt
+
+      - name: Unit tests
+        run: python -m pytest tests/ -q
+
+      - name: Frontend data freshness
+        run: node --test tests/test_frontend.cjs
