@@ -1,6 +1,6 @@
+import math
 import random
 import time
-import math
 
 
 def ease_in_out(t: float) -> float:

@@ -25,12 +25,13 @@ REQUIREMENTS:
 - Playwright installed
 """
 
-from anti_scraping_playwright import AntiBlockingScraper, ScraperConfig
-
-from anti_scraping_playwright.scraper import sync_playwright
 import json
-from datetime import datetime
+from datetime import datetime, timezone
+
 from playwright.sync_api import Page
+
+from anti_scraping_playwright import AntiBlockingScraper, ScraperConfig
+from anti_scraping_playwright.scraper import sync_playwright
 
 # ============================================================================
 # STEP 1: CONFIGURATION (⭐ YOUR TASK: Fill in the config)
@@ -106,12 +107,12 @@ def step2_scrape_front_page(page: Page, url: str, scraper: AntiBlockingScraper):
                 'rank': rank.strip().replace('.', ''),
                 'title': title.strip(),
                 'url': article_url,
-                'scraped_at': datetime.now().isoformat()
+                'scraped_at': datetime.now(tz=timezone.utc).isoformat()
             })
-            
+
             print(f"  ✓ {rank} {title[:50]}...")
-            
-        except Exception as e:
+
+        except Exception as e:  # noqa: BLE001 - skip an article that fails to parse
             print(f"  ✗ Error extracting article: {e}")
             continue
     
@@ -164,29 +165,29 @@ def step3_scrape_with_metadata(page: Page, url: str, scraper: AntiBlockingScrape
             points = "N/A"
             try:
                 points = metadata_row.locator('span.score').text_content()
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 - missing field keeps the default
                 pass
-            
+
             # TODO: Extract author
             author = "N/A"
             try:
                 author = metadata_row.locator('a.hnuser').text_content()
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 - missing field keeps the default
                 pass
-            
+
             # TODO: Extract time
             time_posted = "N/A"
             try:
                 time_posted = metadata_row.locator('span.age').get_attribute('title')
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 - missing field keeps the default
                 pass
-            
+
             # TODO: Extract comment count
             comments = "0"
             try:
                 comment_link = metadata_row.locator('a:has-text("comment")').first
                 comments = comment_link.text_content().split()[0]
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 - missing field keeps the default
                 pass
             
             results.append({
@@ -197,12 +198,12 @@ def step3_scrape_with_metadata(page: Page, url: str, scraper: AntiBlockingScrape
                 'author': author,
                 'time': time_posted,
                 'comments': comments,
-                'scraped_at': datetime.now().isoformat()
+                'scraped_at': datetime.now(tz=timezone.utc).isoformat()
             })
-            
+
             print(f"  ✓ {rank} {title[:40]}... | {points} | by {author}")
-            
-        except Exception as e:
+
+        except Exception as e:  # noqa: BLE001 - skip an article that fails to parse
             print(f"  ✗ Error: {e}")
             continue
     
@@ -278,7 +279,7 @@ def step4_scrape_multiple_pages(scraper: AntiBlockingScraper, num_pages: int = 3
                     # Update current URL
                     current_url = page.url
                     
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 - end-of-pagination failure stops the loop
                     print(f"  ⚠️ No more pages or error: {e}")
                     break
         
@@ -314,7 +315,6 @@ def step5_bonus_scrape_comments(scraper: AntiBlockingScraper, article_url: str):
     # TODO: Implement comment scraping
     # This is a challenge - try to figure it out!
     
-    pass
 
 
 # ============================================================================
@@ -452,7 +452,7 @@ def validate_exercise():
                         errors.append(f"Missing field: {field}")
                     else:
                         print(f"✓ Field '{field}' present")
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - validator reports every failure as an exercise error
         errors.append(f"Error validating advanced scraping: {e}")
     
     # Print results
@@ -513,7 +513,7 @@ Ready? Let's begin!
         
     except KeyboardInterrupt:
         print("\n\n⚠️  Exercise interrupted by user")
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - top-level guard renders the failure to the learner
         print(f"\n\n❌ Error running exercise: {e}")
         print("\nTIP: Make sure anti_block_scraper.py is in the same directory")
         import traceback

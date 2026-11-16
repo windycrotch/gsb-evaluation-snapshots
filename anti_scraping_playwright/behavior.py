@@ -1,19 +1,20 @@
 import random
 import time
-from typing import Tuple
+
 from playwright.sync_api import Page
+
 
 class HumanBehavior:
     
     def __init__(self, 
-                 typing_speed_range: Tuple[int, int] = (50, 150),
-                 action_delay_range: Tuple[float, float] = (0.5, 2.0),
-                 read_delay_range: Tuple[float, float] = (1.0, 3.0)):
+                 typing_speed_range: tuple[int, int] = (50, 150),
+                 action_delay_range: tuple[float, float] = (0.5, 2.0),
+                 read_delay_range: tuple[float, float] = (1.0, 3.0)):
         self.typing_speed_range = typing_speed_range
         self.action_delay_range = action_delay_range
         self.read_delay_range = read_delay_range
     
-    def random_delay(self, min_sec: float = None, max_sec: float = None):
+    def random_delay(self, min_sec: float | None = None, max_sec: float | None = None):
         min_s = min_sec if min_sec is not None else self.action_delay_range[0]
         max_s = max_sec if max_sec is not None else self.action_delay_range[1]
         delay = random.uniform(min_s, max_s)
@@ -185,7 +186,7 @@ def example_search():
         try:
             page.click("button:has-text('Accept')", timeout=2000)
             human.random_delay(0.5, 1.0)
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 - consent banner is optional
             pass
         
         human.reading_delay(50)

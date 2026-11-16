@@ -1,8 +1,9 @@
-import re
-from typing import List, Optional, Tuple
-from playwright.sync_api import Page, Locator, ElementHandle
-from dataclasses import dataclass
 import json
+import re
+from dataclasses import dataclass
+
+from playwright.sync_api import ElementHandle, Locator, Page
+
 
 @dataclass
 class HoneypotElement:
@@ -10,7 +11,7 @@ class HoneypotElement:
     element_type: str  # 'link', 'input', 'button', etc.
     reason: str  # Why it's considered a honeypot
     visibility_score: float  # 0 (invisible) to 1 (fully visible)
-    text: Optional[str] = None
+    text: str | None = None
 
 
 class HoneypotDetector:
@@ -42,9 +43,9 @@ class HoneypotDetector:
             r'crawler.*trap', r'spider.*trap'
         ]
         
-        self.detected_honeypots: List[HoneypotElement] = []
+        self.detected_honeypots: list[HoneypotElement] = []
     
-    def is_invisible_element(self, page: Page, element: ElementHandle) -> Tuple[bool, float]:
+    def is_invisible_element(self, page: Page, element: ElementHandle) -> tuple[bool, float]:
         """
         Check if element is invisible using multiple methods.
         
@@ -109,10 +110,12 @@ class HoneypotDetector:
                 visibility_score *= visibility_info['opacity'] * 10
                 reasons.append(f"opacity: {visibility_info['opacity']}")
             
-            if visibility_info['position'] in ['absolute', 'fixed']:
-                if visibility_info['left'] < -9000 or visibility_info['top'] < -9000:
-                    visibility_score = 0
-                    reasons.append("positioned off-screen")
+            if (
+                visibility_info['position'] in ['absolute', 'fixed']
+                and (visibility_info['left'] < -9000 or visibility_info['top'] < -9000)
+            ):
+                visibility_score = 0
+                reasons.append("positioned off-screen")
             
             if visibility_info['width'] < 1 or visibility_info['height'] < 1:
                 visibility_score = 0
@@ -133,12 +136,12 @@ class HoneypotDetector:
             is_invisible = visibility_score < 0.3
             
             return is_invisible, visibility_score
-            
-        except Exception:
+
+        except Exception:  # noqa: BLE001 - fall back to "visible" on any probe error
             # If we can't determine, assume visible to be safe
             return False, 1.0
     
-    def check_honeypot_patterns(self, element: ElementHandle) -> Tuple[bool, List[str]]:
+    def check_honeypot_patterns(self, element: ElementHandle) -> tuple[bool, list[str]]:
         """
         Check if element matches common honeypot patterns.
         
@@ -179,19 +182,21 @@ class HoneypotDetector:
             if attrs.get('tabIndex', 0) < 0:
                 reasons.append("negative tabIndex (not keyboard accessible)")
             
-            if attrs.get('tagName') == 'input':
-                name = attrs.get('name', '').lower()
-                if any(x in name for x in ['confirm', 'check', 'verify', 'url', 'website']):
-                    if attrs.get('type') in ['email', 'url', 'text']:
-                        reasons.append("suspicious confirmation field")
-            
+            name = attrs.get('name', '').lower()
+            if (
+                attrs.get('tagName') == 'input'
+                and any(x in name for x in ['confirm', 'check', 'verify', 'url', 'website'])
+                and attrs.get('type') in ['email', 'url', 'text']
+            ):
+                reasons.append("suspicious confirmation field")
+
             is_honeypot = len(reasons) > 0
             return is_honeypot, reasons
-            
-        except Exception:
+
+        except Exception:  # noqa: BLE001 - unreadable element is treated as safe
             return False, []
     
-    def detect_honeypot_links(self, page: Page) -> List[HoneypotElement]:
+    def detect_honeypot_links(self, page: Page) -> list[HoneypotElement]:
         honeypots = []
         
         try:
@@ -227,15 +232,15 @@ class HoneypotDetector:
                             text=text[:50]
                         ))
                 
-                except Exception:
+                except Exception:  # noqa: BLE001, S112 - skip elements that detach mid-scan
                     continue
-        
-        except Exception as e:
+
+        except Exception as e:  # noqa: BLE001 - detection must never break the scrape
             print(f"Error detecting honeypot links: {e}")
         
         return honeypots
     
-    def detect_honeypot_inputs(self, page: Page) -> List[HoneypotElement]:
+    def detect_honeypot_inputs(self, page: Page) -> list[HoneypotElement]:
         honeypots = []
         
         try:
@@ -265,15 +270,15 @@ class HoneypotDetector:
                             text=name
                         ))
                 
-                except Exception:
+                except Exception:  # noqa: BLE001, S112 - skip elements that detach mid-scan
                     continue
-        
-        except Exception as e:
+
+        except Exception as e:  # noqa: BLE001 - detection must never break the scrape
             print(f"Error detecting honeypot inputs: {e}")
         
         return honeypots
     
-    def detect_all_honeypots(self, page: Page) -> List[HoneypotElement]:
+    def detect_all_honeypots(self, page: Page) -> list[HoneypotElement]:
         self.detected_honeypots = []
         
         link_honeypots = self.detect_honeypot_links(page)
@@ -284,7 +289,7 @@ class HoneypotDetector:
         
         return self.detected_honeypots
     
-    def get_safe_clickable_elements(self, page: Page, selector: str = 'a') -> List[Locator]:
+    def get_safe_clickable_elements(self, page: Page, selector: str = 'a') -> list[Locator]:
         """
         Get only safe (non-honeypot) clickable elements.
         
@@ -329,7 +334,9 @@ class HoneypotDetector:
         try:
             element_handle = element.element_handle()
             
-            is_invisible, visibility_score = self.is_invisible_element(page, element_handle)
+            is_invisible, _visibility_score = self.is_invisible_element(
+                page, element_handle
+            )
             if is_invisible:
                 return False
             
@@ -347,8 +354,8 @@ class HoneypotDetector:
                     return False
             
             return True
-            
-        except Exception:
+
+        except Exception:  # noqa: BLE001 - uninspectable element defaults to unsafe-click
             return False
     
     def print_report(self):
@@ -556,8 +563,9 @@ def example_safe_form_filling():
 # Example 4: Real-world scraping with honeypot avoidance
 def example_real_world_scraping():
     """Example of scraping a real website while avoiding honeypots."""
-    from playwright.sync_api import sync_playwright
     import time
+
+    from playwright.sync_api import sync_playwright
     
     detector = HoneypotDetector()
     

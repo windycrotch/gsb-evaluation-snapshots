@@ -1,18 +1,19 @@
+import json
 import random
 import time
-import json
-from typing import List, Dict, Optional
-from playwright.sync_api import sync_playwright, Browser, BrowserContext
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
+
+from playwright.sync_api import Browser, BrowserContext, sync_playwright
+
 
 @dataclass
 class ProxyServer:
     server: str
-    username: Optional[str] = None
-    password: Optional[str] = None
+    username: str | None = None
+    password: str | None = None
     
-    def to_playwright_format(self) -> Dict:
+    def to_playwright_format(self) -> dict:
         proxy_dict = {"server": self.server}
         if self.username and self.password:
             proxy_dict["username"] = self.username
@@ -23,8 +24,8 @@ class ProxyServer:
 @dataclass
 class SessionConfig:
     proxy: ProxyServer
-    user_agent: Optional[str] = None
-    viewport: Dict = field(default_factory=lambda: {"width": 1920, "height": 1080})
+    user_agent: str | None = None
+    viewport: dict = field(default_factory=lambda: {"width": 1920, "height": 1080})
     locale: str = "en-US"
     timezone: str = "America/New_York"
     clear_cookies: bool = True
@@ -34,7 +35,9 @@ class SessionConfig:
 
 class CleanSessionManager:
     
-    def __init__(self, proxies: List[ProxyServer], user_agents: List[str] = None):
+    def __init__(
+        self, proxies: list[ProxyServer], user_agents: list[str] | None = None
+    ):
         """
         Initialize the clean session manager.
         
@@ -48,7 +51,7 @@ class CleanSessionManager:
         self.session_count = 0
         self.sessions_history = []
     
-    def _get_default_user_agents(self) -> List[str]:
+    def _get_default_user_agents(self) -> list[str]:
         return [
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -65,9 +68,9 @@ class CleanSessionManager:
     def get_random_proxy(self) -> ProxyServer:
         return random.choice(self.proxies)
     
-    def create_clean_session(self, browser: Browser, 
-                            proxy: ProxyServer = None,
-                            user_agent: str = None,
+    def create_clean_session(self, browser: Browser,
+                            proxy: ProxyServer | None = None,
+                            user_agent: str | None = None,
                             **context_options) -> BrowserContext:
         """
         Create a completely clean browser context with new proxy.
@@ -104,7 +107,7 @@ class CleanSessionManager:
             "session_id": self.session_count,
             "proxy": proxy.server,
             "user_agent": user_agent[:50] + "...",
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now(tz=timezone.utc).isoformat()
         })
         
         print(f"✓ Created clean session #{self.session_count} with proxy: {proxy.server}")
@@ -142,7 +145,7 @@ class CleanSessionManager:
                         }
                     }
                 """)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - storage clearing is best-effort
             print(f"Warning: Could not clear all storage: {e}")
     
     def rotate_session(self, browser: Browser, old_context: BrowserContext = None,
@@ -164,7 +167,7 @@ class CleanSessionManager:
         
         return self.create_clean_session(browser, **context_options)
     
-    def get_session_info(self, context: BrowserContext) -> Dict:
+    def get_session_info(self, context: BrowserContext) -> dict:
         cookies = context.cookies()
         
         return {

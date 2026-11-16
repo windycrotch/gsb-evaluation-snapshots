@@ -1,14 +1,15 @@
 import random
-from playwright.sync_api import sync_playwright, Browser, BrowserContext
-from typing import List, Optional
+
+from playwright.sync_api import Browser, BrowserContext, sync_playwright
+
 
 class UserAgentRotator:
     
-    def __init__(self, user_agents: Optional[List[str]] = None):
+    def __init__(self, user_agents: list[str] | None = None):
         self.user_agents = user_agents or self._get_default_user_agents()
         self.current_index = 0
     
-    def _get_default_user_agents(self) -> List[str]:
+    def _get_default_user_agents(self) -> list[str]:
         return [
             # Chrome on Windows
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",

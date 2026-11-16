@@ -4,18 +4,33 @@ Includes: User Agent Rotation, Human Behavior, Proxy Rotation, Cookie Cleaning,
 Honeypot Detection, Anti-Fingerprinting, Stealth Mode, Tor Support
 """
 
+import json
+import os
 import random
-import time
 import re
-from typing import List, Dict, Optional, Tuple, Callable
+import tempfile
+import time
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Any, Union
+
 try:
-    from playwright.sync_api import sync_playwright, Browser, BrowserContext, Page, Locator
+    from playwright.sync_api import (
+        Browser,
+        BrowserContext,
+        Locator,
+        Page,
+        sync_playwright,
+    )
 except ImportError:  # pragma: no cover - allows config/tests without playwright installed
     sync_playwright = None
     Browser = BrowserContext = Page = Locator = None
-from dataclasses import dataclass, field
 
 __version__ = "2.0.0"
+
+
+class ProgressFileError(Exception):
+    """Raised when a resume progress file cannot be parsed or has an invalid structure."""
 
 
 
@@ -26,10 +41,10 @@ __version__ = "2.0.0"
 @dataclass
 class ProxyServer:
     server: str
-    username: Optional[str] = None
-    password: Optional[str] = None
+    username: str | None = None
+    password: str | None = None
     
-    def to_playwright_format(self) -> Dict:
+    def to_playwright_format(self) -> dict:
         proxy_dict = {"server": self.server}
         if self.username and self.password:
             proxy_dict["username"] = self.username
@@ -40,19 +55,19 @@ class ProxyServer:
 @dataclass
 class ScraperConfig:
     # Proxy settings
-    proxies: List[ProxyServer] = field(default_factory=list)
+    proxies: list[ProxyServer] = field(default_factory=list)
     use_tor: bool = False
     tor_port: int = 9050
     tor_control_port: int = 9051
     
     # User agent rotation
-    user_agents: List[str] = field(default_factory=list)
+    user_agents: list[str] = field(default_factory=list)
     rotate_user_agent: bool = True
     
     # Human behavior
-    typing_speed_range: Tuple[int, int] = (50, 150)
-    action_delay_range: Tuple[float, float] = (0.5, 2.0)
-    reading_delay_range: Tuple[float, float] = (1.0, 3.0)
+    typing_speed_range: tuple[int, int] = (50, 150)
+    action_delay_range: tuple[float, float] = (0.5, 2.0)
+    reading_delay_range: tuple[float, float] = (1.0, 3.0)
     enable_human_behavior: bool = True
     
     # Session management
@@ -108,7 +123,7 @@ class HoneypotDetector:
         }
         self.detected_honeypots = []
     
-    def is_invisible_element(self, page: Page, element) -> Tuple[bool, float]:
+    def is_invisible_element(self, page: Page, element) -> tuple[bool, float]:
         try:
             visibility_info = page.evaluate("""
                 (element) => {
@@ -137,18 +152,20 @@ class HoneypotDetector:
                 visibility_score = 0
             if visibility_info['opacity'] < 0.1:
                 visibility_score *= visibility_info['opacity'] * 10
-            if visibility_info['position'] in ['absolute', 'fixed']:
-                if visibility_info['left'] < -9000 or visibility_info['top'] < -9000:
-                    visibility_score = 0
+            if (
+                visibility_info['position'] in ['absolute', 'fixed']
+                and (visibility_info['left'] < -9000 or visibility_info['top'] < -9000)
+            ):
+                visibility_score = 0
             if visibility_info['width'] < 1 or visibility_info['height'] < 1:
                 visibility_score = 0
             if visibility_info['ariaHidden'] == 'true':
                 visibility_score *= 0.5
             if visibility_info['hidden']:
                 visibility_score = 0
-            
+
             return visibility_score < 0.3, visibility_score
-        except Exception:
+        except Exception:  # noqa: BLE001 - probe failure means treat element as visible
             return False, 1.0
     
     def check_honeypot_patterns(self, element) -> bool:
@@ -168,7 +185,7 @@ class HoneypotDetector:
                     if re.search(pattern, str(attr_value), re.IGNORECASE):
                         return True
             return False
-        except Exception:
+        except Exception:  # noqa: BLE001 - attribute probe failure means no pattern match
             return False
     
     def is_safe_element(self, page: Page, element: Locator) -> bool:
@@ -179,7 +196,7 @@ class HoneypotDetector:
                 return False
             matches_pattern = self.check_honeypot_patterns(element_handle)
             return not matches_pattern
-        except Exception:
+        except Exception:  # noqa: BLE001 - uninspectable element is treated as unsafe
             return False
 
 
@@ -204,7 +221,7 @@ class AntiBlockingScraper:
         if self.config.use_tor:
             self._setup_tor_proxy()
     
-    def _get_default_user_agents(self) -> List[str]:
+    def _get_default_user_agents(self) -> list[str]:
         return [
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -218,7 +235,7 @@ class AntiBlockingScraper:
         self.config.proxies.insert(0, tor_proxy)
         print(f"✓ Tor proxy configured: socks5://127.0.0.1:{self.config.tor_port}")
     
-    def _get_next_proxy(self) -> Optional[ProxyServer]:
+    def _get_next_proxy(self) -> ProxyServer | None:
         if not self.config.proxies:
             return None
 
@@ -234,7 +251,7 @@ class AntiBlockingScraper:
         self.current_proxy_index = (self.current_proxy_index + 1) % len(pool)
         return proxy
 
-    def record_proxy_result(self, proxy: Optional[ProxyServer], success: bool):
+    def record_proxy_result(self, proxy: ProxyServer | None, success: bool):
         if not proxy or not self.config.enable_proxy_health:
             return
         score = self.proxy_health.get(proxy.server, 1.0)
@@ -247,7 +264,7 @@ class AntiBlockingScraper:
     def _get_random_user_agent(self) -> str:
         return random.choice(self.config.user_agents)
     
-    def _get_random_viewport(self) -> Dict:
+    def _get_random_viewport(self) -> dict:
         if not self.config.randomize_viewport:
             return {"width": 1920, "height": 1080}
         
@@ -391,7 +408,9 @@ class AntiBlockingScraper:
 
         return context
     
-    def random_delay(self, min_sec: float = None, max_sec: float = None):
+    def random_delay(
+        self, min_sec: float | None = None, max_sec: float | None = None
+    ):
         if not self.config.enable_human_behavior:
             return
 
@@ -485,7 +504,7 @@ class AntiBlockingScraper:
             print(f"⚠️  Skipped honeypot element: {selector}")
             return False
     
-    def get_safe_links(self, page: Page, selector: str = 'a') -> List[Locator]:
+    def get_safe_links(self, page: Page, selector: str = 'a') -> list[Locator]:
         all_links = page.locator(selector).all()
         
         if not self.config.detect_honeypots:
@@ -519,9 +538,9 @@ class AntiBlockingScraper:
             time.sleep(random.uniform(*self.config.reading_delay_range))
     
     def scrape_with_rotation(self, 
-                            urls: List[str], 
+                            urls: list[str], 
                             scrape_callback: Callable[[Page, str], any],
-                            **browser_options) -> List[any]:
+                            **browser_options) -> list[any]:
         """
         Scrape multiple URLs with automatic session rotation.
         
@@ -590,7 +609,7 @@ class AntiBlockingScraper:
                         self.recent_failures = 0
                         self.record_proxy_result(proxy_used, True)
 
-                    except Exception as e:
+                    except Exception as e:  # noqa: BLE001 - retries must absorb every page failure
                         print(f"✗ Attempt {attempt}/{self.config.max_retries} failed for {url}: {e}")
                         self.recent_failures += 1
                         self.record_proxy_result(proxy_used, False)
@@ -617,8 +636,149 @@ class AntiBlockingScraper:
             if context:
                 context.close()
             browser.close()
-        
+
         return results
+
+    def scrape_with_resume(
+        self,
+        urls: list[str],
+        progress_file: Union[str, "os.PathLike[str]"],
+        scrape_callback: Callable[[Page, str], Any],
+        **browser_options: Any,
+    ) -> dict[str, Any]:
+        """
+        Scrape a list of URLs with on-disk progress so an interrupted or failed
+        run can be resumed without re-scraping finished pages.
+
+        Each successfully scraped URL is appended to ``progress_file`` (a JSON
+        document with ``completed_urls`` and ``results`` keys) via an atomic
+        temp-file + replace write. Calling this method again with the same
+        progress file skips every URL already recorded there and only scrapes
+        the remainder; missing files start from empty progress.
+
+        Args:
+            urls: URLs to scrape. Duplicate entries are collapsed while
+                preserving first-seen order.
+            progress_file: JSON file used to persist completed pages.
+            scrape_callback: Function(page, url) that performs scraping. It must
+                return a JSON-serializable result.
+            **browser_options: Additional browser launch options, forwarded to
+                :meth:`scrape_with_rotation`.
+
+        Returns:
+            Summary dict with ``succeeded``, ``failed``, ``skipped`` counts and
+            ``failed_urls``. The ``failed_urls`` list can be passed straight
+            back as the ``urls`` argument of a later call to retry them.
+
+        Raises:
+            ProgressFileError: If the progress file exists but cannot be parsed
+                or does not match the expected structure.
+        """
+        # De-duplicate while preserving order so each URL maps to one result.
+        unique_urls = list(dict.fromkeys(urls))
+
+        state = _load_progress(progress_file)
+        completed = set(state["completed_urls"])
+
+        remaining = [url for url in unique_urls if url not in completed]
+        skipped = len(unique_urls) - len(remaining)
+
+        succeeded_now: list[str] = []
+
+        def persistent_callback(page: Page, current_url: str) -> Any:
+            result = scrape_callback(page, current_url)
+            # Persist before acknowledging success so a crash afterwards still
+            # leaves the page recorded as completed.
+            state["completed_urls"].append(current_url)
+            state["results"].append({"url": current_url, "result": result})
+            _atomic_write_progress(progress_file, state)
+            succeeded_now.append(current_url)
+            return result
+
+        failed_urls: list[str] = []
+        if remaining:
+            # Reuse the existing browser launch, session rotation, retry
+            # backoff, proxy-health and circuit-breaker machinery unchanged.
+            run_results = self.scrape_with_rotation(
+                remaining, persistent_callback, **browser_options
+            )
+            succeeded_set = set(succeeded_now)
+            failed_urls = [
+                url
+                for url, outcome in zip(remaining, run_results)
+                if url not in succeeded_set
+            ]
+
+        return {
+            "succeeded": len(succeeded_now),
+            "failed": len(failed_urls),
+            "skipped": skipped,
+            "failed_urls": failed_urls,
+        }
+
+
+def _load_progress(progress_file: Union[str, "os.PathLike[str]"]) -> dict[str, Any]:
+    """Load resume progress, starting from empty state when the file is absent."""
+    if not os.path.exists(progress_file):
+        return {"completed_urls": [], "results": []}
+
+    try:
+        with open(progress_file, encoding="utf-8") as handle:
+            state = json.load(handle)
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
+        raise ProgressFileError(
+            f"Progress file is not valid JSON and cannot be resumed: {progress_file}"
+        ) from exc
+
+    if not isinstance(state, dict):
+        raise ProgressFileError(
+            f"Progress file must contain a JSON object: {progress_file}"
+        )
+
+    completed_urls = state.get("completed_urls")
+    results = state.get("results")
+    if not isinstance(completed_urls, list) or not isinstance(results, list):
+        raise ProgressFileError(
+            "Progress file must contain 'completed_urls' and 'results' lists: "
+            f"{progress_file}"
+        )
+    if not all(isinstance(url, str) for url in completed_urls):
+        raise ProgressFileError(
+            f"All entries in 'completed_urls' must be strings: {progress_file}"
+        )
+    if not all(
+        isinstance(entry, dict) and isinstance(entry.get("url"), str)
+        for entry in results
+    ):
+        raise ProgressFileError(
+            "Every entry in 'results' must be an object with a string 'url': "
+            f"{progress_file}"
+        )
+    return state
+
+
+def _atomic_write_progress(
+    progress_file: Union[str, "os.PathLike[str]"], state: dict[str, Any]
+) -> None:
+    """Write progress to a temp file and atomically replace the target."""
+    directory = os.path.dirname(os.path.abspath(progress_file))
+    os.makedirs(directory, exist_ok=True)
+    tmp_handle, tmp_path = tempfile.mkstemp(
+        prefix=".progress-", suffix=".tmp", dir=directory
+    )
+    try:
+        with os.fdopen(tmp_handle, "w", encoding="utf-8") as handle:
+            json.dump(state, handle, indent=2, ensure_ascii=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, progress_file)
+    except BaseException:
+        # An interrupted write must leave the previous progress file intact.
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 

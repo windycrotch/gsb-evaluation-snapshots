@@ -1,4 +1,6 @@
 import random
+from typing import ClassVar
+
 from playwright.sync_api import sync_playwright
 
 
@@ -7,14 +9,17 @@ class StealthContext:
     Reusable Playwright stealth context
     """
 
-    USER_AGENTS = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36",
-
-        "Mozilla/5.0 (X11; Linux x86_64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/119.0.0.0 Safari/537.36",
+    USER_AGENTS: ClassVar[list[str]] = [
+        (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+        (
+            "Mozilla/5.0 (X11; Linux x86_64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/119.0.0.0 Safari/537.36"
+        ),
     ]
 
     def __init__(
