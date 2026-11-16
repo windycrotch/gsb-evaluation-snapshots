@@ -279,7 +279,10 @@ def test_upload_cover_from_an_unsafe_url_is_rejected(
     )
 
     assert response.status_code == 400
-    assert response.get_json()["error"] == "URL is not public"
+    body = response.get_json()
+    assert body["code"] == "invalid_url"
+    # The internal address never appears in the response text.
+    assert "127.0.0.1" not in body["error"]
 
 
 def test_preview_proxies_a_remote_picture(client, auth_headers, tags_module, monkeypatch):
@@ -451,7 +454,9 @@ def test_folder_cover_from_url_rejects_an_unsafe_url(
     )
 
     assert response.status_code == 400
-    assert response.get_json()["error"] == "URL is not public"
+    body = response.get_json()
+    assert body["code"] == "invalid_url"
+    assert "127.0.0.1" not in body["error"]
 
 
 def test_folder_cover_from_url_rejects_an_oversized_image(

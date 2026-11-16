@@ -9,7 +9,7 @@ import pytest
 import requests
 
 import metadata_writer
-from safe_fetch import ImageTooLargeError
+from safe_fetch import FAILURE_MESSAGES, FetchFailureReason, ImageTooLargeError
 
 
 def _relative(path, music_root):
@@ -431,22 +431,26 @@ def test_cover_upload_reports_a_write_failure(
     assert response.get_json()["error"] == "Failed to update cover art"
 
 
-@pytest.mark.parametrize(
-    "error,status,message",
-    [
-        (ImageTooLargeError("The image is too large."), 413, "The image is too large."),
-        (
-            requests.exceptions.Timeout("slow"),
-            504,
-            "The external service did not respond in time.",
-        ),
-        (
-            requests.exceptions.ConnectionError("down"),
-            502,
-            "The external service request failed.",
-        ),
-    ],
-)
+COVER_FAILURE_CASES = [
+    (
+        ImageTooLargeError("The image is too large."),
+        413,
+        "content_too_large",
+    ),
+    (requests.exceptions.Timeout("slow"), 504, "network_error"),
+    (requests.exceptions.ConnectionError("down"), 502, "network_error"),
+]
+
+
+def _assert_cover_failure(response, status, code):
+    """Coded failures keep the plain ``error`` text and add a stable code."""
+    body = response.get_json()
+    assert response.status_code == status
+    assert body["code"] == code
+    assert body["error"] == FAILURE_MESSAGES[FetchFailureReason(code)]
+
+
+@pytest.mark.parametrize("error,status,code", COVER_FAILURE_CASES)
 def test_cover_from_url_maps_fetch_failures(
     client,
     auth_headers,
@@ -456,7 +460,7 @@ def test_cover_from_url_maps_fetch_failures(
     monkeypatch,
     error,
     status,
-    message,
+    code,
 ):
     song = _make_audio(test_dir)
 
@@ -474,28 +478,12 @@ def test_cover_from_url_maps_fetch_failures(
         },
     )
 
-    assert response.status_code == status
-    assert response.get_json()["error"] == message
+    _assert_cover_failure(response, status, code)
 
 
-@pytest.mark.parametrize(
-    "error,status,message",
-    [
-        (ImageTooLargeError("The image is too large."), 413, "The image is too large."),
-        (
-            requests.exceptions.Timeout("slow"),
-            504,
-            "The external service did not respond in time.",
-        ),
-        (
-            requests.exceptions.ConnectionError("down"),
-            502,
-            "The external service request failed.",
-        ),
-    ],
-)
+@pytest.mark.parametrize("error,status,code", COVER_FAILURE_CASES)
 def test_cover_preview_maps_fetch_failures(
-    client, auth_headers, tags_module, monkeypatch, error, status, message
+    client, auth_headers, tags_module, monkeypatch, error, status, code
 ):
     def broken(*args, **kwargs):
         raise error
@@ -508,8 +496,7 @@ def test_cover_preview_maps_fetch_failures(
         query_string={"url": "https://example.com/cover.jpg"},
     )
 
-    assert response.status_code == status
-    assert response.get_json()["error"] == message
+    _assert_cover_failure(response, status, code)
 
 
 def test_delete_field_reports_a_write_failure(

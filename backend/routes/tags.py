@@ -15,7 +15,7 @@ from errors import (
     _server_error,
 )
 from formats import image_mime_for, is_supported_audio, mime_for
-from logger_config import log_info
+from logger_config import log_error, log_info
 from metadata_extractor import extract_metadata, read_only_metadata
 from metadata_writer import (
     delete_field_from_folder,
@@ -27,7 +27,12 @@ from metadata_writer import (
     update_folder_pictures_only_current,
 )
 from paths import safe_path
-from safe_fetch import ImageTooLargeError, UnsafeURLError, fetch_image
+from safe_fetch import (
+    ImageTooLargeError,
+    UnsafeURLError,
+    describe_fetch_failure,
+    fetch_image,
+)
 
 bp = Blueprint('tags', __name__)
 
@@ -35,6 +40,21 @@ bp = Blueprint('tags', __name__)
 def _path(value):
     """Resolve a user path against the library root."""
     return safe_path(value, MUSIC_ROOT)
+
+
+def _fetch_failure_response(exc):
+    """Turn a cover download failure into a coded, user-facing JSON error.
+
+    The full exception goes to the log; the client gets the stable reason code,
+    the Chinese explanation and the matching status. Neither field contains a
+    resolved address, so an internal IP cannot leak through this path.
+    """
+    failure = describe_fetch_failure(exc)
+    log_error(
+        f'{request.method} {request.path}: cover fetch failed '
+        f'({failure.code}): {exc.__class__.__name__}: {exc}'
+    )
+    return jsonify(failure.as_dict()), failure.status
 
 
 def _update_folder_field(recursive):
@@ -301,12 +321,10 @@ def update_file_picture_from_url_endpoint():
             })
         return jsonify({'error': 'Failed to update cover art'}), 500
             
-    except ImageTooLargeError as e:
-        return jsonify({'error': str(e)}), 413
-    except UnsafeURLError as e:
-        return jsonify({'error': str(e)}), 400
+    except (ImageTooLargeError, UnsafeURLError) as e:
+        return _fetch_failure_response(e)
     except requests.exceptions.RequestException as e:
-        return _server_error(e, 'Could not download the image from the provided URL.')
+        return _fetch_failure_response(e)
     except PermissionError as e:
         return _permission_error(e)
     except Exception as e:
@@ -355,12 +373,10 @@ def _update_folder_cover_from_url(recursive):
             )
         })
 
-    except ImageTooLargeError as e:
-        return jsonify({'error': str(e)}), 413
-    except UnsafeURLError as e:
-        return jsonify({'error': str(e)}), 400
+    except (ImageTooLargeError, UnsafeURLError) as e:
+        return _fetch_failure_response(e)
     except requests.exceptions.RequestException as e:
-        return _server_error(e, 'Could not download the image from the provided URL.')
+        return _fetch_failure_response(e)
     except PermissionError as e:
         return _permission_error(e)
     except Exception as e:
@@ -388,11 +404,11 @@ def preview_remote_picture():
             max_bytes=PREVIEW_MAX_BYTES,
         )
     except ImageTooLargeError as e:
-        return jsonify({'error': str(e)}), 413
+        return _fetch_failure_response(e)
     except UnsafeURLError as e:
-        return jsonify({'error': str(e)}), 400
+        return _fetch_failure_response(e)
     except requests.exceptions.RequestException as e:
-        return _server_error(e, 'Could not download the image from the provided URL.')
+        return _fetch_failure_response(e)
 
     response = Response(image_data, mimetype=mime_type)
     response.headers['Cache-Control'] = 'private, max-age=300'

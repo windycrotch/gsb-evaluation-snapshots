@@ -86,6 +86,12 @@ Cover images fetched from a user-supplied URL go through an SSRF guard
 - a size cap is enforced while streaming (10 MB) and requests use explicit
   timeouts.
 
+Failures are reported to the client as a stable reason code plus a generic
+explanation (`describe_fetch_failure()`): `invalid_url`, `too_many_redirects`,
+`content_too_large`, `not_an_image` or `network_error`. Neither the reason text
+nor the exception message echoes a resolved address, so a hostname that maps to
+an internal IP does not reveal that IP in the response.
+
 Browser cover previews are proxied through the same guard
 (`/api/metadata/picture/preview`). The CSP allows images only from the app
 itself, `data:` and `blob:`, so the browser does not contact addon- or

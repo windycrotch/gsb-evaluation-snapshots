@@ -297,3 +297,178 @@ def test_a_redirect_to_a_private_host_is_rejected(monkeypatch):
 
     assert len(calls) == 1
     assert redirect.closed is True
+
+
+# --- Failure reason codes -------------------------------------------------
+#
+# The route layer calls ``describe_fetch_failure`` to turn an exception into a
+# stable code plus a user-facing Chinese message, so these tests assert both
+# the code and that the response object is closed on every failure path.
+
+
+def _failure_for(monkeypatch, responses, url, **fetch_kwargs):
+    """Run a fetch that is expected to fail; return (exception, calls)."""
+    calls = _install_responses(monkeypatch, responses)
+    with pytest.raises(Exception) as info:
+        safe_fetch.fetch_image(url, "agent", **fetch_kwargs)
+    return info.value, calls
+
+
+def _assert_failure(error, reason):
+    failure = safe_fetch.describe_fetch_failure(error)
+    assert failure.code == reason.value
+    assert failure.message == safe_fetch.FAILURE_MESSAGES[reason]
+    assert failure.message  # never empty
+    # The JSON payload exposes the stable code and the user-facing message.
+    assert failure.as_dict() == {
+        "error": failure.message,
+        "code": reason.value,
+    }
+    return failure
+
+
+def test_reason_codes_are_stable_strings():
+    assert {reason.value for reason in safe_fetch.FetchFailureReason} == {
+        "invalid_url",
+        "too_many_redirects",
+        "content_too_large",
+        "not_an_image",
+        "network_error",
+    }
+
+
+def test_successful_download_needs_no_failure_description(monkeypatch):
+    response = FakeResponse(
+        headers={"Content-Type": "IMAGE/PNG; charset=binary"},
+        chunks=[b"png"],
+    )
+    _install_responses(monkeypatch, [response])
+
+    data, mime = safe_fetch.fetch_image("https://cdn.test/cover.png", "agent")
+
+    assert data == b"png"
+    assert mime == "image/png"
+    assert response.closed is True
+
+
+def test_redirect_to_a_private_host_maps_to_invalid_url(monkeypatch):
+    redirect = FakeResponse(
+        status_code=302, headers={"Location": "http://internal.test/secret"}
+    )
+    calls = _install_responses(monkeypatch, [redirect])
+    _resolve_to(
+        monkeypatch,
+        {"cdn.test": [PUBLIC_IP], "internal.test": [PRIVATE_IP]},
+    )
+
+    with pytest.raises(safe_fetch.UnsafeURLError) as info:
+        safe_fetch.fetch_image("https://cdn.test/start", "agent")
+
+    assert _assert_failure(info.value, safe_fetch.FetchFailureReason.INVALID_URL)
+    # The private hop is rejected before a second request is made.
+    assert len(calls) == 1
+    assert redirect.closed is True
+
+
+def test_redirect_limit_maps_to_too_many_redirects(monkeypatch):
+    first = FakeResponse(status_code=301, headers={"Location": "/two"})
+    second = FakeResponse(status_code=301, headers={"Location": "/three"})
+    error, calls = _failure_for(
+        monkeypatch, [first, second], "https://cdn.test/one", max_redirects=1
+    )
+
+    assert isinstance(error, safe_fetch.UnsafeURLError)
+    assert _assert_failure(
+        error, safe_fetch.FetchFailureReason.TOO_MANY_REDIRECTS
+    )
+    assert len(calls) == 2
+    assert first.closed is True
+    assert second.closed is True
+
+
+def test_declared_length_limit_maps_to_content_too_large(monkeypatch):
+    response = FakeResponse(
+        headers={"Content-Type": "image/jpeg", "Content-Length": "11"},
+    )
+    error, _ = _failure_for(
+        monkeypatch, [response], "https://cdn.test/cover.jpg", max_bytes=10
+    )
+
+    assert isinstance(error, safe_fetch.ImageTooLargeError)
+    assert _assert_failure(
+        error, safe_fetch.FetchFailureReason.CONTENT_TOO_LARGE
+    )
+    assert response.closed is True
+
+
+def test_streamed_length_limit_maps_to_content_too_large(monkeypatch):
+    response = FakeResponse(
+        headers={"Content-Type": "image/jpeg"},
+        chunks=[b"123456", b"78901"],
+    )
+    error, _ = _failure_for(
+        monkeypatch, [response], "https://cdn.test/cover.jpg", max_bytes=10
+    )
+
+    assert isinstance(error, safe_fetch.ImageTooLargeError)
+    assert _assert_failure(
+        error, safe_fetch.FetchFailureReason.CONTENT_TOO_LARGE
+    )
+    assert response.closed is True
+
+
+def test_non_image_content_type_maps_to_not_an_image(monkeypatch):
+    response = FakeResponse(headers={"Content-Type": "text/html; charset=utf-8"})
+    error, _ = _failure_for(monkeypatch, [response], "https://cdn.test/page")
+
+    assert isinstance(error, safe_fetch.UnsafeURLError)
+    assert _assert_failure(error, safe_fetch.FetchFailureReason.NOT_AN_IMAGE)
+    assert response.closed is True
+
+
+def test_resolution_failure_maps_to_invalid_url(monkeypatch):
+    _resolve_to(monkeypatch, {"missing.test": socket.gaierror("nope")})
+
+    with pytest.raises(safe_fetch.UnsafeURLError) as info:
+        safe_fetch.fetch_image("https://missing.test/cover.jpg", "agent")
+
+    assert _assert_failure(info.value, safe_fetch.FetchFailureReason.INVALID_URL)
+
+
+def test_http_error_and_timeout_map_to_network_error(monkeypatch):
+    not_found = FakeResponse(status_code=404)
+    _install_responses(monkeypatch, [not_found])
+    with pytest.raises(requests.HTTPError) as info:
+        safe_fetch.fetch_image("https://cdn.test/missing.jpg", "agent")
+    assert not_found.closed is True
+    assert _assert_failure(
+        info.value, safe_fetch.FetchFailureReason.NETWORK_ERROR
+    )
+
+    timeout = safe_fetch.describe_fetch_failure(
+        requests.exceptions.Timeout("slow")
+    )
+    assert timeout.code == safe_fetch.FetchFailureReason.NETWORK_ERROR.value
+    assert timeout.status == 504
+
+
+def test_failure_text_never_echoes_the_resolved_private_address(monkeypatch):
+    _resolve_to(monkeypatch, {"internal.test": [PRIVATE_IP]})
+
+    with pytest.raises(safe_fetch.UnsafeURLError) as info:
+        safe_fetch.fetch_image("https://internal.test/secret.jpg", "agent")
+
+    failure = safe_fetch.describe_fetch_failure(info.value)
+    assert PRIVATE_IP not in str(info.value)
+    assert PRIVATE_IP not in failure.message
+    assert PRIVATE_IP not in str(failure.as_dict())
+
+
+def test_unknown_exception_is_reported_as_network_error():
+    failure = safe_fetch.describe_fetch_failure(RuntimeError("boom"))
+
+    assert failure.code == safe_fetch.FetchFailureReason.NETWORK_ERROR.value
+    assert failure.message == safe_fetch.FAILURE_MESSAGES[
+        safe_fetch.FetchFailureReason.NETWORK_ERROR
+    ]
+    assert failure.status == 502
