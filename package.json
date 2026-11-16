@@ -7,6 +7,10 @@
   "copyright": "(c) 2026 Olivier Giulieri",
   "author": "Olivier Giulieri (https://evoluteur.github.io/)",
   "license": "MIT",
+  "scripts": {
+    "test": "node verify/verify.js",
+    "test:stress": "node verify/stress.js"
+  },
   "keywords": [
     "cymatics",
     "chladni",

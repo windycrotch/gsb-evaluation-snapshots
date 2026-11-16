@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Cymatics - local mode/sand consistency checks</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        margin: 24px;
+        background: #0b0b18;
+        color: #e8e8f0;
+      }
+      h1 { font-size: 20px; }
+      .row { display: flex; gap: 24px; flex-wrap: wrap; align-items: flex-start; }
+      canvas { border: 1px solid #ffffff26; background: #0b0b18; }
+      #log {
+        font-family: ui-monospace, monospace;
+        font-size: 12px;
+        white-space: pre-wrap;
+        background: #12121f;
+        border: 1px solid #ffffff1a;
+        border-radius: 8px;
+        padding: 12px;
+        max-height: 520px;
+        overflow: auto;
+        width: 560px;
+      }
+      .ok { color: #7ee787; }
+      .fail { color: #ff7b72; }
+      .info { color: #79c0ff; }
+      button {
+        background: #2a2a40;
+        color: #e8e8f0;
+        border: 1px solid #ffffff26;
+        border-radius: 6px;
+        padding: 8px 14px;
+        cursor: pointer;
+        margin-right: 8px;
+      }
+      button:hover { background: #353552; }
+      #summary { font-size: 15px; margin: 12px 0; font-weight: 600; }
+      .hint { color: #9a9ab0; font-size: 12px; max-width: 760px; }
+    </style>
+  </head>
+  <body>
+    <h1>Mode / sand consistency — local verification</h1>
+    <p class="hint">
+      Loads the production <code>js/cymatics.js</code> and <code>js/app.js</code>, injects a
+      seeded random generator (no audio, deterministic grains), drives the same entry paths as
+      the address bar and the arrow buttons, and asserts that after every switch every settled
+      grain lies within <code>0.0012</code> plate units of the current mode's nodal line, while
+      unsettled grains keep moving. The plate on the left is the real player canvas, so each
+      re-settle can be watched.
+    </p>
+    <button id="run">Run checks</button>
+    <span id="summary"></span>
+    <div class="row">
+      <canvas id="plate" width="420" height="420"></canvas>
+      <div id="log"></div>
+    </div>
+
+    <!-- hidden player controls: init()/refreshPanel() address these by id -->
+    <div hidden>
+      <select id="shape"></select>
+      <input id="size" />
+      <input id="mix" />
+      <input id="grains" />
+      <select id="render"></select>
+      <input id="freq" />
+      <button id="play"></button>
+      <span id="pname"></span>
+      <span id="tagline"></span>
+      <span id="blurb"></span>
+      <span id="freqVal"></span>
+      <span id="sizeVal"></span>
+      <span id="mixVal"></span>
+      <span id="grainsVal"></span>
+      <span id="modeName"></span>
+      <label id="mixRow" style="display: none"></label>
+    </div>
+
+    <!-- production scripts, untouched apart from the state/redraw changes -->
+    <script src="../js/cymatics.js"></script>
+    <script src="../js/app.js"></script>
+    <script src="browser.js"></script>
+  </body>
+</html>

@@ -21,6 +21,14 @@ let grains = [];
 let field = null; // offscreen canvas holding the standing wave
 let running = false;
 
+// Randomness seam: the page uses Math.random, but the local verification
+// harness injects a seeded generator so a run and its assertions are
+// reproducible without a browser.
+let rng = Math.random.bind(Math);
+const setRng = (fn) => {
+  rng = typeof fn === "function" ? fn : Math.random.bind(Math);
+};
+
 // --- the plate, sampled once per mode ----------------------------------
 
 // The sand asks the plate where its nodes are about 100,000 times a frame.
@@ -73,15 +81,15 @@ const inside = (x, y) =>
 const scatter = () => {
   grains = [];
   while (grains.length < state.grains) {
-    const x = Math.random();
-    const y = Math.random();
+    const x = rng();
+    const y = rng();
     // a fixed sub-grain offset, so a settled line keeps the width of sand
     if (inside(x, y))
       grains.push({
         x,
         y,
-        ox: (Math.random() - 0.5) * 0.006,
-        oy: (Math.random() - 0.5) * 0.006,
+        ox: (rng() - 0.5) * 0.006,
+        oy: (rng() - 0.5) * 0.006,
         settled: false,
       });
   }
@@ -142,8 +150,8 @@ const shake = () => {
       continue;
     }
     const drive = Math.min(distance / reach, 1);
-    const x = g.x - step * drive * gx + (Math.random() - 0.5) * jitter * drive * distance;
-    const y = g.y - step * drive * gy + (Math.random() - 0.5) * jitter * drive * distance;
+    const x = g.x - step * drive * gx + (rng() - 0.5) * jitter * drive * distance;
+    const y = g.y - step * drive * gy + (rng() - 0.5) * jitter * drive * distance;
     if (inside(x, y)) {
       moved = Math.max(moved, Math.abs(x - g.x) + Math.abs(y - g.y));
       g.x = x;
@@ -194,6 +202,10 @@ const buildField = () => {
     }
   }
   field.getContext("2d").putImageData(image, 0, 0);
+  // A rebuilt wave means new nodal lines, so any grain resting on the old
+  // ones must start searching again. settle() also calls unsettle() at the
+  // state-transition site; keeping it here guards every other caller (the
+  // superposition slider, for instance) against a stale settled flag.
   unsettle();
 };
 
@@ -410,18 +422,38 @@ const updateLink = () => {
 // Picking a frequency picks the mode that actually resonates there. Some
 // modes share a frequency (0,5 and 3,4 on the square), so a mode asked for
 // by name, as in a link, is taken as named rather than found by frequency.
+// A name that is absent from the spectrum (a stale or hand-typed link) can
+// never leave the previous figure on screen: it falls back to the mode
+// nearest the current frequency.
+const pickMode = (name) => {
+  const byName = name ? state.modes.find((m) => m.name === name) : null;
+  if (byName) return { mode: byName, matched: "name" };
+  return { mode: nearestMode(state.modes, state.frequency), matched: "frequency" };
+};
+
 const settle = (rebuildGrains, name) => {
   state.modes = spectrum(state.shape, state.size);
   fitRange();
-  state.mode =
-    (name && state.modes.find((m) => m.name === name)) ||
-    nearestMode(state.modes, state.frequency);
+  const picked = pickMode(name);
+  state.mode = picked.mode;
+  // A mode reached by name (a link, or the arrow buttons) carries its own
+  // frequency, so the readout follows the mode. On the frequency fallback the
+  // slider owns state.frequency and it must keep the value the user dragged to.
+  if (picked.matched === "name") state.frequency = state.mode.frequency;
   buildField();
+  // INVARIANT: whatever entry path was used (by-name hit, nearest-frequency
+  // fallback, or a name that does not exist), the figure shown and the nodes
+  // the sand settles on must be the current mode's. buildField() already
+  // unsettles every grain defensively; assert the reset here too, at the
+  // state-transition site, so the guarantee cannot silently depend on how the
+  // field happens to be built.
+  unsettle();
   if (rebuildGrains) scatter();
   refreshPanel();
   retune();
   draw();
   updateLink();
+  return { matched: picked.matched };
 };
 
 const onFrequency = (input) => {
@@ -460,10 +492,12 @@ const onRender = (select) => {
 };
 
 const onStep = (direction) => {
-  const i = state.modes.indexOf(state.mode);
+  const i = Math.max(0, state.modes.indexOf(state.mode));
   const next = state.modes[Math.min(Math.max(i + direction, 0), state.modes.length - 1)];
-  state.frequency = next.frequency;
-  settle(false, next.name); // by name: a twin mode at the same frequency is still a step
+  // By name: a twin mode at the same frequency is still a real step. settle()
+  // rebuilds the field and unsettles the sand, so the figure and the nodal
+  // lines the grains gather on change together.
+  settle(false, next.name);
 };
 
 const savePNG = () => {
@@ -490,9 +524,10 @@ const init = () => {
   const mix = params.has("mix") ? +params.get("mix") : NaN;
   if (mix >= -1 && mix <= 1) state.mix = mix;
   state.modes = spectrum(state.shape, state.size);
+  // The requested name is passed through verbatim. settle() resolves it: a
+  // name the spectrum does not contain falls back to the nearest-frequency
+  // mode instead of erroring or keeping a figure from a previous page state.
   const wanted = params.get("mode");
-  const picked = wanted && state.modes.find((m) => m.name === wanted);
-  state.frequency = picked ? picked.frequency : state.frequency;
 
   $("shape").value = state.shape;
   $("size").value = state.size * 100;
@@ -501,7 +536,7 @@ const init = () => {
   $("render").value = state.render;
 
   scatter();
-  settle(false, picked && picked.name);
+  settle(false, wanted);
   resize();
   window.addEventListener("resize", resize);
   start();
