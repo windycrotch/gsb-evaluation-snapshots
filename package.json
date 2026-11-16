@@ -1,0 +1,38 @@
+{
+  "name": "motlab",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Video as code: canvas scene pages rendered frame by frame in headless Chrome with WebCodecs, a project format with audio, a web viewer, and an agent skill that builds the scenes.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/staryone/motlab.git"
+  },
+  "homepage": "https://github.com/staryone/motlab#readme",
+  "bugs": {
+    "url": "https://github.com/staryone/motlab/issues"
+  },
+  "keywords": [
+    "video",
+    "motion-graphics",
+    "canvas",
+    "webcodecs",
+    "headless-chrome",
+    "agent-skills",
+    "claude-code"
+  ],
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "motlab": "bin/motlab.js"
+  },
+  "scripts": {
+    "test": "node --test",
+    "doctor": "node bin/motlab.js doctor"
+  },
+  "dependencies": {
+    "mediabunny": "1.65.2"
+  }
+}

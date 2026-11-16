@@ -1,0 +1,14 @@
+{
+  "fps": 30,
+  "scenes": [
+    "scenes/01-judul.html",
+    "scenes/02-grafik.html",
+    "scenes/03-selesai.html"
+  ],
+  "audio": [
+    { "file": "audio/musik.wav", "start": 0, "volume": 0.6 },
+    { "file": "audio/whoosh.wav", "start": 2.2, "volume": 0.8 },
+    { "file": "audio/whoosh.wav", "start": 5.7, "volume": 0.8 },
+    { "file": "audio/tik.wav", "start": 7.3, "volume": 0.9 }
+  ]
+}

@@ -1,0 +1,1264 @@
+<!doctype html>
+<html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{{name}} / {{version}} · motlab</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600&display=swap">
+<style>
+  /* Design notes are in DESIGN.md. Muted text and waveform colours were picked with the contrast checker against every background they sit on. */
+  :root { --line: #e6e6e4; --edge: #dcdcda; --canvas: #ececec; --text: #1f1f1e; --muted: #666561; --hover: #f4f4f3; --press: #e4e4e2; --sel: #ebebea; --blue: #2c6fe0; --blue-bg: #dfe9fb; --red: #b8322a; --red-bg: #fbe4e2;
+    --font: "Plus Jakarta Sans", ui-sans-serif, system-ui, "Segoe UI", sans-serif; --side: clamp(260px, 24.5vw, 468px);
+    --ease: cubic-bezier(.2, .8, .2, 1); --fast: .14s; --slide: .26s; }
+  * { box-sizing: border-box; margin: 0; }
+  [hidden]:not(.menu, .toast, #tip) { display: none !important; }
+  html, body { height: 100%; }
+  body { display: grid; grid-template: 44px minmax(0, 1fr) / var(--side) minmax(0, 1fr); transition: grid-template-columns var(--slide) var(--ease); font: 14px/1.4 var(--font); color: var(--text); background: #fff; -webkit-font-smoothing: antialiased; user-select: none; }
+  body.closed { grid-template-columns: 0 minmax(0, 1fr); }
+  body.still, body.still * { transition: none !important; }   /* no animation for the state the page opens in */
+  button { font: inherit; color: inherit; border: 0; background: none; cursor: pointer; }
+  button:disabled { cursor: not-allowed; opacity: .45; }
+  svg { display: block; flex: none; }
+  .muted { color: var(--muted); }
+  .num { font-variant-numeric: tabular-nums; }
+
+  /* one header across both panes, like the Claude app header: panel toggle, project / scene in the middle, Export */
+  header { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr minmax(0, auto) 1fr; align-items: center; gap: 12px; padding: 0 10px; border-bottom: .5px solid #ececeb; white-space: nowrap; }
+  .crumb { display: flex; align-items: center; gap: 4px; min-width: 0; font-size: 14px; }
+  .crumb h1 { font: inherit; min-width: 0; }
+  .crumb .wrap { min-width: 0; }
+  /* a crumb that opens a menu: the project, and later its version */
+  .pick { display: flex; align-items: center; gap: 2px; max-width: 100%; height: 28px; padding: 0 4px 0 8px; border-radius: 6px; color: var(--muted); }
+  .pick .nm { overflow: hidden; text-overflow: ellipsis; }
+  .pick:hover, .pick.open { background: var(--hover); color: var(--text); }
+  .crumb .sep { color: #c9c9c7; }
+  #crumb { overflow: hidden; text-overflow: ellipsis; }
+  .sep:has(+ #crumb:empty) { display: none; }
+  header .wrap { justify-self: end; }
+  .icon { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 6px; }
+  .btn { display: flex; align-items: center; gap: 6px; height: 30px; padding: 0 10px; border-radius: 8px; font-weight: 500; }
+  .icon:hover, .btn:hover, .btn.open, #panel[aria-expanded="true"] { background: var(--hover); }
+  .wrap { position: relative; }
+
+  /* left pane */
+  /* the panel keeps its width and the column around it slides, so the list does not reflow while it opens or closes */
+  aside { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; box-shadow: inset -1px 0 var(--line); background: #fff; transition: visibility 0s, opacity var(--slide) var(--ease); }
+  aside > * { width: var(--side); flex-shrink: 0; }
+  aside > nav { flex-shrink: 1; }
+  body.closed aside { visibility: hidden; opacity: 0; transition: visibility 0s var(--slide), opacity var(--slide) var(--ease); }
+  #lists { flex: 1; min-height: 0; overflow-y: auto; padding: 6px 10px 12px; }
+  h2 { font-size: 12px; font-weight: 500; color: var(--muted); padding: 14px 10px 6px; }
+  ol, ul { list-style: none; padding: 0; }
+  .row { display: flex; align-items: center; gap: 10px; width: 100%; padding: 6px 10px; border-radius: 8px; text-align: left; }
+  .row:hover { background: var(--hover); }
+  .row[aria-current] { background: var(--sel); }
+  .row[aria-current] .name { font-weight: 500; }
+  .row canvas, .row .ic { flex: none; height: 34px; border-radius: 5px; background: #f0f0ee; box-shadow: 0 0 0 1px rgba(0,0,0,.06); }
+  .row .ic { display: grid; place-items: center; width: 34px; color: var(--muted); }
+  .row .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row small { display: block; font-size: 12px; font-weight: 400; color: var(--muted); }
+  .row .d { font-size: 12px; color: var(--muted); }
+  .empty { padding: 6px 10px; font-size: 13px; color: var(--muted); }
+  #sel { padding: 12px 20px 14px; }
+  #sel b { display: block; font-weight: 500; }
+  #sel small { display: block; font-size: 12px; color: var(--muted); }
+
+  /* canvas pane */
+  main { grid-area: 2 / 2; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  aside { grid-area: 2 / 1; }
+  #canvas { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--canvas); overflow-y: auto; }
+  .pill { display: flex; align-items: center; gap: 2px; height: 36px; padding: 0 4px; background: #fff; border: 1px solid var(--edge); border-radius: 10px; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
+  .pill button { display: flex; align-items: center; gap: 4px; height: 28px; padding: 0 8px; border-radius: 6px; }
+  .pill button:hover { background: var(--hover); }
+  .pill .sq { width: 30px; padding: 0; justify-content: center; }
+  .pill .hot { background: var(--blue-bg); color: var(--blue); }
+  .pill .hot:hover { background: #d3e1fa; }
+  #pillFull { position: absolute; top: 12px; right: 12px; z-index: 2; }
+  #stage { flex: 1; min-height: 150px; display: grid; grid-template: minmax(0, 1fr) / minmax(0, 1fr); place-items: center; padding: 60px 24px 14px; font-size: 13px; color: var(--muted); }
+  #msg { max-width: 46ch; text-align: center; user-select: text; }
+  #stage { position: relative; }
+  #stage:fullscreen { padding: 0; background: #111; }
+  /* notes on the preview, after the Claude canvas selection box: a 1 px blue line and a light blue fill, square
+     corners, and the note's number in a small blue tag above the top left corner */
+  #marks { position: absolute; inset: 0; pointer-events: none; }
+  .mk { position: absolute; border: 1px solid var(--blue); background: rgba(44,111,224,.14); }
+  .mk.on { background: rgba(44,111,224,.22); }
+  .mk.point { border-radius: 50%; }
+  .mk.point::after { content: ""; position: absolute; inset: 0; margin: auto; width: 5px; height: 5px; border-radius: 50%; background: var(--blue); }
+  .mk i, .tag { min-width: 16px; height: 16px; padding: 0 5px; border-radius: 4px; background: var(--blue); color: #fff; font: 600 11px/16px var(--font); font-style: normal; text-align: center; font-variant-numeric: tabular-nums; }
+  .mk i { position: absolute; left: -1px; bottom: calc(100% + 2px); }
+  .mk.point i { left: calc(100% + 1px); bottom: calc(100% + 1px); }
+  /* the note being written: a card like the menus, under the box (above it when there is no room) */
+  .pop { position: fixed; z-index: 20; width: 288px; max-width: calc(100vw - 24px); padding: 8px; background: #fff; border: 1px solid var(--edge); border-radius: 12px; box-shadow: 0 8px 28px rgba(0,0,0,.12); color: var(--text); font-size: 13px; }
+  .pop .head { display: flex; align-items: center; gap: 8px; padding: 2px 2px 8px; font-size: 12px; color: var(--muted); }
+  #popText { display: block; width: 100%; min-height: 60px; max-height: 160px; padding: 8px 10px; border: 1px solid var(--edge); border-radius: 8px; font: inherit; font-size: 13px; line-height: 1.45; color: var(--text); background: #fff; resize: none; user-select: text; }
+  #popText::placeholder { color: var(--muted); }
+  #popText:focus-visible { outline: 2px solid var(--blue); outline-offset: -1px; }
+  .pop .foot2 { display: flex; justify-content: space-between; gap: 6px; margin-top: 8px; }
+  #popDel, #popOk { height: 30px; padding: 0 12px; border-radius: 8px; font-size: 13px; font-weight: 500; }
+  #popDel { color: var(--muted); }
+  #popDel:hover { background: var(--hover); color: var(--text); }
+  #popOk { background: var(--text); color: #fff; }
+  #popOk:active { background: #000; }
+  .row .ic.n { font-size: 13px; font-weight: 600; color: var(--text); }
+  .row .none { color: var(--muted); }
+  /* done notes: folded under "Selesai" (Done) at the end of the list, muted and struck through, and off the preview and the
+     timeline unless one is open */
+  #doneBtn { color: var(--muted); font-size: 13px; }
+  #doneBtn .ic { background: none; box-shadow: none; }
+  #doneBtn svg { transition: rotate var(--fast) var(--ease); }
+  #doneBtn[aria-expanded="true"] svg { rotate: 180deg; }
+  .row.done .ic.n, .row.done .name > span { color: var(--muted); }
+  .row.done .name > span { text-decoration: line-through; text-decoration-color: rgba(0,0,0,.3); }
+  #popState { display: flex; align-items: center; gap: 4px; margin-left: auto; }
+  #popState svg { width: 14px; height: 14px; }
+  .pop .foot2 span { flex: none; display: flex; gap: 6px; }
+  #popDone { display: flex; align-items: center; gap: 6px; height: 30px; padding: 0 10px; white-space: nowrap; border-radius: 8px; font-size: 13px; font-weight: 500; color: var(--text); }
+  #popDone:hover { background: var(--hover); }
+  #popDone svg { width: 14px; height: 14px; }
+  /* the + cursor is dark over light parts of the frame and light over dark parts (.on-dark, set from the frame's pixels),
+     with a faint halo in the other colour for edges between the two */
+  #view { cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24'%3E%3Cpath d='M12 3v18M3 12h18' stroke='%23fff' stroke-opacity='.4' stroke-width='3.5'/%3E%3Cpath d='M12 3v18M3 12h18' stroke='%231f1f1e' stroke-width='1.5'/%3E%3C/svg%3E") 12 12, crosshair; }
+  #view.on-dark { cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24'%3E%3Cpath d='M12 3v18M3 12h18' stroke='%23000' stroke-opacity='.4' stroke-width='3.5'/%3E%3Cpath d='M12 3v18M3 12h18' stroke='%23fff' stroke-width='1.5'/%3E%3C/svg%3E") 12 12, crosshair; }
+  #view { max-width: 100%; max-height: 100%; touch-action: none; background: #fff; border-radius: 3px; box-shadow: 0 0 0 1px rgba(0,0,0,.06), 0 2px 10px rgba(0,0,0,.06); }
+  #stage:fullscreen #view { border-radius: 0; box-shadow: none; }
+  #bar { flex: none; display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; padding: 0 12px; margin-bottom: 10px; }
+  #tools, #rangeBar { height: 40px; padding: 0 6px; border-radius: 12px; }
+  /* with a range: what it covers and what can be done with it, next to the play toolbar */
+  #rangeBar { gap: 4px; padding-left: 10px; font-size: 13px; }
+  #rangeBar .ri { color: var(--blue); }
+  #rangeText { display: flex; align-items: center; gap: 8px; padding: 0 6px 0 4px; white-space: nowrap; }
+  #rangeText .dv { width: 1px; height: 16px; background: var(--line); }
+  /* a range as "00:03.00 [arrow] 00:06.50"; screen readers hear "sampai" or "to" */
+  .rg { display: inline-flex; align-items: center; gap: 4px; height: 1lh; vertical-align: top; }   /* one line high, so the icon sits on the text's middle */
+  .rg svg { width: 12px; height: 12px; color: var(--muted); }
+  /* inside a line of small text the digits' middle sits 0.9 px above the line's middle (Plus Jakarta Sans 12 px, measured) */
+  small .rg svg, #popWhere .rg svg { translate: 0 -.075em; }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  /* phones: the toolbars keep to the essentials so they fit; the timeline fits the width there anyway */
+  @media (max-width: 479px) { #time .muted, #rangeText .muted, #rangeText .dv, #zin, #zout { display: none; } }
+  /* tooltips: a small dark label after a short hover, with the shortcut in a key cap; the timeline's lists its keys */
+  #tip { position: fixed; z-index: 40; max-width: 280px; padding: 6px 8px; border-radius: 8px; background: var(--text); color: #fff; font-size: 12px; line-height: 1.4; box-shadow: 0 4px 14px rgba(0,0,0,.18); pointer-events: none; transition: opacity var(--fast) var(--ease), translate var(--fast) var(--ease), display var(--fast) allow-discrete; }
+  #tip[hidden] { display: none; opacity: 0; }
+  @starting-style { #tip:not([hidden]) { opacity: 0; translate: 0 2px; } }
+  #tip .line { display: flex; align-items: center; gap: 8px; }
+  #tip kbd { display: inline-block; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 4px; background: rgba(255,255,255,.16); font: 500 11px/18px var(--font); text-align: center; }
+  #tip .keys { display: grid; grid-template-columns: auto 1fr; gap: 5px 12px; align-items: center; }
+  #tip .keys span:first-child, #tip .keys .k { white-space: nowrap; }
+  #tip .dim { color: rgba(255,255,255,.7); }
+  #time { padding: 0 10px 0 12px; font-size: 13px; }
+  #lane { max-height: 35vh; margin: 0 12px 12px; background: #fff; border: 1px solid var(--edge); border-radius: 12px; box-shadow: 0 1px 2px rgba(0,0,0,.04); overflow: auto; }
+  #laneIn { position: relative; }
+  #tl { position: sticky; left: 0; display: block; width: 100%; height: 144px; cursor: pointer; }
+  #tl:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; border-radius: 12px; }
+  .mark { position: absolute; top: 4px; bottom: 6px; left: 20px; width: 2px; margin-left: -1px; background: var(--text); pointer-events: none; }
+  .mark::before { content: ""; position: absolute; top: 0; left: -4px; width: 10px; height: 12px; border-radius: 3px 3px 5px 5px; background: inherit; }
+  #pick { background: var(--blue); width: 1px; margin-left: 0; }
+  #pick::before { display: none; }
+  .toast { position: absolute; top: 56px; left: 50%; transform: translate(-50%, 0); transition: opacity var(--fast) var(--ease), transform var(--fast) var(--ease), display var(--fast) allow-discrete; z-index: 5; max-width: calc(100% - 24px); padding: 8px 12px; border-radius: 8px; background: var(--text); color: #fff; font-size: 13px; }
+
+  /* menus */
+  .menu { position: absolute; top: calc(100% + 6px); z-index: 10; min-width: 220px; padding: 6px; background: #fff; border: 1px solid var(--edge); border-radius: 12px; box-shadow: 0 8px 28px rgba(0,0,0,.12); font-weight: 400; }
+  .menu { transform-origin: top right; transition: opacity var(--fast) var(--ease), transform var(--fast) var(--ease), display var(--fast) allow-discrete; }
+  .menu[hidden], .toast[hidden] { display: none; opacity: 0; }
+  .menu[hidden] { transform: translateY(-4px) scale(.98); }
+  .toast[hidden] { transform: translate(-50%, -4px); }
+  @starting-style { .menu:not([hidden]) { opacity: 0; transform: translateY(-4px) scale(.98); } .toast:not([hidden]) { opacity: 0; transform: translate(-50%, -4px); } }
+  .menu.r { right: 0; }
+  .menu.c { left: 50%; translate: -50% 0; transform-origin: top center; }
+  #projMenu { width: 300px; max-width: calc(100vw - 24px); }
+  #projList { max-height: min(60vh, 420px); overflow-y: auto; }
+  .menu a.opt { color: inherit; text-decoration: none; }
+  .menu .opt.two { flex-direction: column; align-items: flex-start; justify-content: center; gap: 1px; height: auto; min-height: 44px; padding: 6px 10px; }
+  .opt.two span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .menu .foot { padding: 8px 10px 4px; font-size: 12px; color: var(--muted); white-space: normal; }
+  .menu .foot:empty { display: none; }
+  .menu .div { height: 1px; margin: 6px 4px; background: var(--line); }
+  #verMenu { width: 260px; max-width: calc(100vw - 24px); }
+  #verList { max-height: min(50vh, 320px); overflow-y: auto; }
+  #verForm { display: flex; gap: 6px; padding: 4px; }
+  #verName { flex: 1; min-width: 0; height: 32px; padding: 0 10px; border: 1px solid var(--edge); border-radius: 8px; font: inherit; font-size: 13px; color: var(--text); background: #fff; user-select: text; }
+  #verName::placeholder { color: var(--muted); }
+  #verName:focus-visible { outline: 2px solid var(--blue); outline-offset: -1px; }
+  #verGo { height: 32px; padding: 0 12px; border-radius: 8px; font-size: 13px; font-weight: 500; background: var(--text); color: #fff; }
+  #verGo:active:not(:disabled) { background: #000; }
+  .menu h3 { font-size: 12px; font-weight: 500; color: var(--muted); padding: 6px 10px; }
+  #exportMenu { width: 232px; }
+  .menu .opt { display: flex; align-items: center; justify-content: space-between; width: 100%; height: 32px; padding: 0 10px; border-radius: 8px; font-size: 13px; text-align: left; }
+  .menu .opt:hover { background: var(--hover); }
+  .menu .opt.on { background: var(--sel); font-weight: 500; }
+  .opt .dim { font-size: 12px; font-weight: 400; color: var(--muted); }
+  .acts { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+  #go, #stop { height: 34px; border-radius: 8px; font-size: 13px; font-weight: 500; }
+  #go { display: flex; align-items: center; justify-content: center; gap: 8px; background: var(--text); color: #fff; }
+  #go .spin { border-color: rgba(255,255,255,.3); border-top-color: #fff; }   /* the button is faded like any disabled one while it loads */
+  #stop { background: var(--red-bg); color: var(--red); }   /* tinted like the blue pill button, not a solid fill */
+  #stop:hover:not(:disabled) { background: #f8d9d6; }
+  #xs { padding: 10px 10px 4px; font-size: 12px; color: var(--muted); user-select: text; }
+  #xs .line { display: flex; justify-content: space-between; gap: 8px; color: var(--text); }
+  #xs .sub { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #xs .wrap { white-space: normal; }
+  #xs a { color: var(--blue); text-decoration: none; font-weight: 500; }
+  #xs a:hover { text-decoration: underline; }
+  .spin { width: 14px; height: 14px; border: 1.5px solid var(--edge); border-top-color: var(--text); border-radius: 50%; animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #frames { position: fixed; left: -99999px; top: 0; visibility: hidden; }
+
+  /* pressed state, after hover so it wins */
+  .icon, .btn, .pick, .pill button, .row, .menu .opt, #go, #stop, #popDel, #popDone, #popOk { transition: background-color var(--fast) var(--ease), opacity var(--fast) var(--ease), transform var(--fast) var(--ease); }
+  .icon:active, .pill .sq:active { transform: scale(.94); }
+  .icon:active, .btn:active, .pick:active, #popDel:active, #popDone:active, .pill button:active, .row:active, .menu .opt:active { background: var(--press); }
+  .pill .hot:active { background: #c7d8f8; }
+  #go:active:not(:disabled) { background: #000; }
+  #stop:active:not(:disabled) { background: #f4cdc9; }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before { transition-duration: 0s !important; transition-delay: 0s !important; }
+    .spin { animation: none; border-color: var(--text); }
+  }
+  /* narrow windows: the panel floats over the canvas instead of squeezing it */
+  @media (max-width: 719px) {
+    body, body.closed { grid-template-columns: 0 minmax(0, 1fr); }
+    aside { position: fixed; top: 44px; left: 0; bottom: 0; z-index: 30; width: min(320px, 85vw); box-shadow: 0 8px 28px rgba(0,0,0,.16); transition: visibility 0s, transform var(--slide) var(--ease); }
+    aside > * { width: auto; }
+    body.closed aside { opacity: 1; transform: translateX(-100%); transition: visibility 0s var(--slide), transform var(--slide) var(--ease); }
+  }
+  @media (pointer: coarse) {
+    .icon, .btn, .pick, .pill button, .row, .menu .opt, #go, #stop, #verGo, #verName, #popDel, #popDone, #popOk { min-height: 44px; }
+    .icon, .pill .sq { min-width: 44px; }
+    .pill { height: auto; }
+  }
+</style></head>
+<body class="still">
+<header>
+  <div><button class="icon" id="panel" data-i="panel" data-label="hidePanel" aria-expanded="true"></button></div>
+  <div class="crumb">
+    <div class="wrap"><h1><button class="pick" id="proj" data-i="down" aria-expanded="false" aria-controls="projMenu" data-t="data-tip=switchProject"><span class="nm">{{name}}</span></button></h1>
+      <div class="menu c" id="projMenu" hidden><h3 data-t="projects"></h3><div id="projList"><p class="foot" data-t="loading"></p></div><p class="foot" id="projFoot"></p>
+        <div class="div"></div><button class="opt" id="lang"><span></span><span class="dim"></span></button></div></div>
+    <span class="sep" aria-hidden="true">/</span>
+    <div class="wrap"><button class="pick" id="ver" data-i="down" aria-expanded="false" aria-controls="verMenu" data-t="data-tip=switchVersion"><span class="nm">{{version}}</span></button>
+      <div class="menu c" id="verMenu" hidden>
+        <h3 data-t="versions"></h3><div id="verList"><p class="foot" data-t="loading"></p></div>
+        <div class="div"></div>
+        <button class="opt" id="verNew"><span data-t="newVersion"></span><span class="dim" aria-hidden="true">+</span></button>
+        <form id="verForm" hidden><input id="verName" autocomplete="off" spellcheck="false" maxlength="40" data-t="placeholder=versionHint aria-label=versionName"><button id="verGo" data-t="create"></button></form>
+        <p class="foot" id="verFoot"></p>
+      </div></div>
+    <span class="sep" aria-hidden="true">/</span><span id="crumb"></span>
+  </div>
+  <div class="wrap">
+      <button class="btn" id="export" data-i="export" aria-expanded="false" aria-controls="exportMenu"><span id="exportLabel">Export</span></button>
+      <div class="menu r" id="exportMenu" hidden>
+        <h3 data-t="resolution"></h3>
+        <div id="res" role="group" data-t="aria-label=resolution"></div>
+        <div class="acts"><button id="go">Export</button><button id="stop" data-t="cancel" hidden></button></div>
+        <div id="xs" role="status" hidden></div>
+      </div>
+  </div>
+</header>
+<aside>
+  <nav id="lists" data-t="aria-label=lists">
+    <h2 data-t="scenes"></h2><ol id="scenes"></ol>
+    <h2>Audio</h2><ul id="audio"></ul>
+    <h2><span data-t="notes"></span> <span id="noteCount" class="num"></span></h2><ol id="notes"></ol>
+  </nav>
+  <section id="sel" aria-live="polite" data-t="aria-label=selection"><b id="selText" class="muted" data-t="nothing"></b><small id="selSub" data-t="how"></small><small id="selRange" class="num" hidden></small><small data-t="saved"></small></section>
+</aside>
+<main>
+  <div id="canvas">
+    <div class="pill" id="pillFull"><button class="sq" id="full" data-i="full" data-label="full"></button></div>
+    <div class="toast" id="note" role="status" hidden></div>
+    <div id="stage"><span id="msg" data-t="loadingProject"></span><canvas id="view" hidden></canvas><div id="marks"></div>
+      <div class="pop" id="pop" role="dialog" aria-labelledby="popWhere" hidden>
+        <div class="head"><span class="tag" id="popN"></span><span id="popWhere" class="num"></span><span id="popState" hidden></span></div>
+        <textarea id="popText" rows="2" data-t="placeholder=noteHint aria-label=note"></textarea>
+        <div class="foot2"><button id="popDel" data-t="del"></button><span><button id="popDone"></button><button id="popOk" data-t="save"></button></span></div>
+      </div></div>
+    <div id="bar">
+    <div class="pill" id="tools">
+      <button class="sq" id="prev" data-i="prev" data-label="prevScene"></button>
+      <button class="sq" id="play" data-i="play" data-label="play" data-key="Space"></button>
+      <button class="sq" id="next" data-i="next" data-label="nextScene"></button>
+      <span id="time" class="num"><span id="now">00:00.00</span> <span class="muted">/ <span id="len">00:00.00</span></span></span>
+      <button class="sq" id="rangeBtn" data-i="range" data-label="markRange" data-key="R" aria-pressed="false"></button>
+      <button class="sq" id="zout" data-i="zout" data-label="zoomOut" data-key="−"></button>
+      <button class="sq" id="zin" data-i="zin" data-label="zoomIn" data-key="+"></button>
+      <button class="sq" id="laneBtn" data-i="lane" data-label="hideTimeline" aria-expanded="true" aria-controls="lane"></button>
+    </div>
+    <div class="pill" id="rangeBar" role="group" data-t="aria-label=range" hidden>
+      <span class="ri" data-i="range"></span><span id="rangeText" class="num"></span>
+      <button id="rangeNote" data-i="note" data-t="note"></button>
+      <button class="sq" id="rangeOff" data-i="x" data-label="removeRange" data-key="Esc"></button>
+    </div>
+    </div>
+    <div id="lane"><div id="laneIn">
+      <canvas id="tl" data-tip="#tlKeys" tabindex="0" role="slider" aria-label="Timeline" aria-valuemin="0" aria-valuenow="0"></canvas>
+      <div class="mark" id="pick" hidden></div><div class="mark" id="head"></div>
+    </div></div>
+  </div>
+</main>
+<div id="frames"></div>
+<div id="tip" aria-hidden="true" hidden></div>
+<template id="tlKeys"><div class="keys">
+  <span data-t="clickDrag"></span><span class="dim" data-t="moveTime"></span>
+  <span class="k"><kbd>←</kbd> <kbd>→</kbd></span><span class="dim" data-t="step"></span>
+  <span class="k"><kbd>Shift</kbd> + <span data-t="drag"></span></span><span class="dim" data-t="markRangeKey"></span>
+  <span class="k"><kbd>I</kbd> <kbd>O</kbd></span><span class="dim" data-t="rangeEnds"></span>
+  <span class="k"><kbd>X</kbd></span><span class="dim" data-t="sceneRange"></span>
+  <span class="k"><kbd>Ctrl</kbd> + scroll</span><span class="dim">zoom</span>
+</div></template>
+<script type="module">
+const $ = id => document.getElementById(id);
+// ---- UI text, in Indonesian and English. The language is the one picked in the project menu, else the browser's:
+// Indonesian when one of its languages is, English otherwise. Picking one reloads the page, so text is set once.
+const TEXT = {
+  hidePanel: ['Sembunyikan panel', 'Hide panel'],
+  showPanel: ['Tampilkan panel', 'Show panel'],
+  switchProject: ['Ganti project', 'Switch project'],
+  projects: ['Project', 'Projects'],
+  loading: ['Memuat…', 'Loading…'],
+  projectsHint: ['Project yang pernah dibuka akan muncul di sini.', 'Projects you have opened show up here.'],
+  projectsFailed: ['Daftar project tidak bisa dimuat.', 'The project list could not be loaded.'],
+  otherLang: ['English', 'Bahasa Indonesia'],
+  switchVersion: ['Ganti versi', 'Switch version'],
+  versions: ['Versi', 'Versions'],
+  main: ['Utama', 'Main'],
+  versionsFailed: ['Daftar versi tidak bisa dimuat.', 'The version list could not be loaded.'],
+  newVersion: ['Versi baru dari ini', 'New version from this one'],
+  versionName: ['Nama versi baru', 'New version name'],
+  versionHint: ['Nama, misal tiktok', 'Name, for example tiktok'],
+  create: ['Buat', 'Create'],
+  copyOf: [v => `Salinan dari ${v}. Minta agent mengubah isinya.`, v => `A copy of ${v}. Ask the agent to change it.`],
+  badName: ['Nama versi pakai huruf atau angka.', 'Use letters or numbers in the name.'],
+  nameTaken: ['Sudah ada versi dengan nama itu.', 'A version with that name already exists.'],
+  resolution: ['Resolusi', 'Resolution'],
+  cancel: ['Batalkan', 'Cancel'],
+  lists: ['Scene dan audio', 'Scenes and audio'],
+  scenes: ['Scene', 'Scenes'],
+  notes: ['Catatan', 'Notes'],
+  note: ['Catatan', 'Note'],
+  selection: ['Seleksi', 'Selection'],
+  nothing: ['Belum ada pilihan', 'Nothing selected'],
+  how: ['Klik scene, audio, atau timeline. Tarik kotak atau klik di preview untuk memberi catatan.', 'Click a scene, an audio file or the timeline. Drag a box or click on the preview to leave a note.'],
+  saved: ['Tersimpan di selection.json', 'Saved in selection.json'],
+  full: ['Layar penuh', 'Full screen'],
+  fullExit: ['Keluar dari layar penuh', 'Exit full screen'],
+  fullNone: ['Layar penuh tidak tersedia di browser ini', 'Full screen is not available in this browser'],
+  fullRefused: ['Layar penuh ditolak browser', 'The browser refused full screen'],
+  fullStuck: ['Layar penuh tidak terbuka. Coba di Chrome biasa.', 'Full screen did not open. Try it in regular Chrome.'],
+  loadingProject: ['Memuat project…', 'Loading project…'],
+  noteHint: ['Tulis masalahnya. Enter untuk simpan.', 'Say what is wrong. Enter to save.'],
+  del: ['Hapus', 'Delete'],
+  save: ['Simpan', 'Save'],
+  prevScene: ['Scene sebelumnya', 'Previous scene'],
+  nextScene: ['Scene berikutnya', 'Next scene'],
+  play: ['Putar', 'Play'],
+  pause: ['Jeda', 'Pause'],
+  space: ['Spasi', 'Space'],
+  markRange: ['Tandai rentang', 'Mark a range'],
+  zoomOut: ['Perkecil timeline', 'Zoom out the timeline'],
+  zoomIn: ['Perbesar timeline', 'Zoom in the timeline'],
+  hideTimeline: ['Sembunyikan timeline', 'Hide timeline'],
+  showTimeline: ['Tampilkan timeline', 'Show timeline'],
+  range: ['Rentang', 'Range'],
+  removeRange: ['Hapus rentang', 'Remove range'],
+  to: ['sampai', 'to'],
+  clickDrag: ['Klik atau tarik', 'Click or drag'],
+  moveTime: ['pindah waktu', 'move in time'],
+  step: ['1 frame, dengan Shift 1 detik', '1 frame, 1 second with Shift'],
+  drag: ['tarik', 'drag'],
+  markRangeKey: ['tandai rentang', 'mark a range'],
+  rangeEnds: ['awal dan akhir rentang', 'start and end of a range'],
+  sceneRange: ['rentang satu scene', 'one scene as a range'],
+  noScenes: ['Belum ada scene. Tambahkan ke "scenes" di project.json, lalu muat ulang.', 'No scenes yet. Add them to "scenes" in project.json, then reload.'],
+  noFile: [n => `Scene ${n} di project.json tidak punya "file".`, n => `Scene ${n} in project.json has no "file".`],
+  firstTransition: ['Scene 1 punya transisi, padahal tidak ada scene sebelumnya. Hapus "transition" dari scene 1.', 'Scene 1 has a transition, but there is no scene before it. Remove "transition" from scene 1.'],
+  badTransition: [(n, e) => `Transisi di scene ${n}: ${e}`, (n, e) => `Transition in scene ${n}: ${e}`],
+  noCanvas: [f => `${f} tidak ada atau tanpa <canvas id="c">. Periksa project.json, lalu muat ulang.`, f => `${f} is missing or has no <canvas id="c">. Check project.json, then reload.`],
+  loadingScene: [(i, n) => `Memuat scene ${i} dari ${n}…`, (i, n) => `Loading scene ${i} of ${n}…`],
+  tooShort: [(i, f, a, b) => `Scene ${i} (${f} frame) terlalu pendek untuk transisinya (${a} + ${b} frame). Perpendek "duration" transisinya, lalu muat ulang.`,
+    (i, f, a, b) => `Scene ${i} (${f} frames) is too short for its transitions (${a} + ${b} frames). Shorten the transition's "duration", then reload.`],
+  loadFailed: [e => `Gagal memuat project: ${e}. Periksa project.json, lalu muat ulang.`, e => `The project did not load: ${e}. Check project.json, then reload.`],
+  noScenesYet: ['Belum ada scene', 'No scenes yet'],
+  noAudio: ['Belum ada audio', 'No audio yet'],
+  starts: [s => `mulai ${s} s`, s => `starts at ${s} s`],
+  inScene: [(time, n) => `${time}, di scene ${n}`, (time, n) => `${time}, in scene ${n}`],
+  atSecond: [(s, time) => `Detik ${s}, video ${time}`, (s, time) => `At ${s} s, video ${time}`],
+  sceneSecond: [(n, s) => `Scene ${n}, detik ${s}`, (n, s) => `Scene ${n}, at ${s} s`],
+  done: ['Selesai', 'Done'],
+  reopen: ['Buka lagi', 'Reopen'],
+  markDone: ['Tandai selesai', 'Mark done'],
+  empty: ['Tanpa catatan', 'Empty note'],
+  noteLabel: [(n, done, text, where) => `Catatan ${n}${done ? ', selesai' : ''}: ${text || 'tanpa catatan'}, ${where}`, (n, done, text, where) => `Note ${n}${done ? ', done' : ''}: ${text || 'empty note'}, ${where}`],
+  noNotes: ['Belum ada catatan. Tarik kotak atau klik di preview.', 'No notes yet. Drag a box or click on the preview.'],
+  allDone: ['Semua catatan sudah selesai.', 'All notes are done.'],
+  rangeHow: ['Tarik di timeline dari awal sampai akhir. Esc untuk batal.', 'Drag on the timeline from start to end. Esc to cancel.'],
+  open: ['Buka', 'Open'],
+  cancelling: ['Membatalkan…', 'Cancelling…'],
+  exporting: [r => `Mengekspor ${r}`, r => `Exporting ${r}`],
+  preparing: ['Menyiapkan…', 'Preparing…'],
+  sceneOf: [(i, n) => `Scene ${i} dari ${n}`, (i, n) => `Scene ${i} of ${n}`],
+  cancelled: ['Export dibatalkan', 'Export cancelled'],
+  noResult: ['render berhenti tanpa hasil', 'the render stopped without a result'],
+  doneIn: [s => `Selesai, ${s} detik`, s => `Done in ${s} s`],
+  failed: ['Export gagal', 'Export failed'],
+  seeLog: [e => `${e}. Log ada di terminal.`, e => `${e}. The log is in the terminal.`],
+  busy: ['Export lain masih berjalan', 'Another export is still running'],
+};
+const LANG = (() => {
+  let pick; try { pick = localStorage.motlabLang; } catch {}
+  return pick === 'id' || pick === 'en' ? pick : navigator.languages.some(l => /^id(-|$)/i.test(l)) ? 'id' : 'en';
+})();
+const L = (key, ...a) => { const v = TEXT[key][LANG === 'id' ? 0 : 1]; return typeof v === 'function' ? v(...a) : v; };
+document.documentElement.lang = LANG;
+// data-t="key" is the element's text, data-t="attribute=key" an attribute; several are separated by spaces
+for (const el of [document, $('tlKeys').content].flatMap(root => [...root.querySelectorAll('[data-t]')]))
+  for (const part of el.dataset.t.split(' ')) { const [attr, key] = part.includes('=') ? part.split('=') : [null, part]; attr ? el.setAttribute(attr, L(key)) : el.textContent = L(key); }
+const VERSION = '{{project}}' === 'project.json' ? L('main') : '{{version}}';   // the server names project.json "Utama"
+$('ver').firstElementChild.textContent = VERSION; document.title = `${$('proj').textContent} / ${VERSION} · motlab`;
+$('lang').firstChild.textContent = L('otherLang'); $('lang').lastChild.textContent = LANG === 'id' ? 'EN' : 'ID'; $('lang').firstChild.lang = LANG === 'id' ? 'en' : 'id';
+$('lang').onclick = () => { try { localStorage.motlabLang = LANG === 'id' ? 'en' : 'id'; } catch {} location.reload(); };
+const PAD = 20, RULER = 44, MK_Y = 30, VH = 54, AH = 40, GAP = 8, AY = RULER + VH + GAP, PEAKS = 200;
+const BLUE = '#2c6fe0', MUTED = '#666561', WAVE = '#85847f';   // waveform is 3.3:1 on its clip, 3.9:1 in blue when selected
+const FONT = getComputedStyle(document.documentElement).getPropertyValue('--font').trim();   // the timeline canvas uses the page font too
+const laneHeight = n => AY + n * (AH + GAP) + 6;
+const svg = (d, fill) => `<svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="${fill ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">${d}</svg>`;
+const ICON = {
+  panel: svg('<rect x="2" y="3" width="12" height="10" rx="2"/><path d="M6.5 3v10"/>'),
+  export: svg('<path d="M8 2.5v7.5m0 0L5 7m3 3 3-3M3 11v1a1.5 1.5 0 0 0 1.5 1.5h7A1.5 1.5 0 0 0 13 12v-1"/>'),
+  full: svg('<path d="M9.5 2.5h4v4M6.5 13.5h-4v-4M13.5 2.5 9.5 6.5M2.5 13.5l4-4"/>'),
+  prev: svg('<path d="M4 3.5v9"/><path d="M12 4v8L6.5 8z" fill="currentColor"/>'),
+  next: svg('<path d="M12 3.5v9"/><path d="M4 4v8l5.5-4z" fill="currentColor"/>'),
+  play: svg('<path d="M5 3.5v9L12.5 8z"/>', true),
+  pause: svg('<path d="M5 3.5v9M11 3.5v9" stroke-width="2.5"/>'),
+  wave: svg('<path d="M3 6.5v3M5.5 4v8M8 5.5v5M10.5 3v10M13 6.5v3"/>'),
+  range: svg('<path d="M5 3H3v10h2M11 3h2v10h-2M6.5 8h3"/>'),
+  note: svg('<path d="M3 3.5h10v7H8.5L5.5 13v-2.5H3z"/>'),
+  x: svg('<path d="m4.5 4.5 7 7m0-7-7 7"/>'),
+  arrow: svg('<path d="M3.5 8h9M8.5 4l4 4-4 4"/>'),   // Lucide arrow-right (ISC), in the 16 px box
+  check: svg('<path d="M13 4.5 6.5 11 3 7.5"/>'),   // Lucide check (ISC), in the 16 px box
+  undo: svg('<path d="M3 3v4h4"/><path d="M3.5 7A5 5 0 1 1 5 11.5"/>'),   // Lucide rotate-ccw (ISC), in the 16 px box
+  zout: svg('<circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3 3M5 7h4"/>'),
+  zin: svg('<circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3 3M5 7h4M7 5v4"/>'),
+  lane: svg('<rect x="2" y="3" width="12" height="10" rx="2"/><path d="M2 9.5h12"/>'),
+  down: svg('<path d="m5 6.5 3 3 3-3"/>'),
+};
+const label = (b, text, key = b.dataset.key) => {   // the accessible name and the tooltip; `key` is shown in a key cap
+  b.setAttribute('aria-label', text); b.dataset.tip = text;
+  if (key) { b.dataset.key = key; b.setAttribute('aria-keyshortcuts', key === '−' ? '-' : key); }
+};
+document.querySelectorAll('[data-i]').forEach(e => e.insertAdjacentHTML(e.id === 'export' || e.id === 'rangeNote' ? 'afterbegin' : 'beforeend', ICON[e.dataset.i]));
+document.querySelectorAll('[data-label]').forEach(b => label(b, L(b.dataset.label)));
+// Tooltips: shown after 0.5 s of hover (at once while moving between controls, or on keyboard focus), above the control
+// or below it near the top of the window. The timeline's list of keys waits 1 s and goes away when the pointer moves on,
+// so it does not sit over the timeline while you work.
+{
+  const tip = $('tip'); let at = null, timer = 0, warm = 0, from = null;
+  const fill = el => {
+    const t = el.dataset.tip;
+    if (t.startsWith('#')) return tip.replaceChildren($(t.slice(1)).content.cloneNode(true));
+    tip.innerHTML = '<span class="line"><span></span></span>'; tip.firstChild.firstChild.textContent = t;
+    if (el.dataset.key) tip.firstChild.append(Object.assign(document.createElement('kbd'), { textContent: el.dataset.key === 'Space' ? L('space') : el.dataset.key }));
+  };
+  const place = (el, x) => {
+    const r = el.getBoundingClientRect(), w = tip.offsetWidth, h = tip.offsetHeight, M = 8;
+    const left = x ?? r.left + r.width / 2 - w / 2, top = r.top - h - 6 >= M ? r.top - h - 6 : r.bottom + 6;
+    tip.style.left = Math.min(innerWidth - w - M, Math.max(M, left)) + 'px'; tip.style.top = top + 'px';
+  };
+  const show = (el, x) => { at = el; fill(el); tip.hidden = false; place(el, x); };
+  const hide = () => { clearTimeout(timer); if (!tip.hidden) warm = performance.now(); tip.hidden = true; at = null; };
+  addEventListener('pointerover', e => {
+    const el = e.target.closest?.('[data-tip]');
+    if (el === at || e.pointerType === 'touch') return;
+    hide(); if (!el) return;
+    const big = el.dataset.tip.startsWith('#'), x = e.clientX;
+    from = { x: e.clientX, y: e.clientY };
+    timer = setTimeout(() => show(el, big ? x - 20 : undefined), big ? 1000 : performance.now() - warm < 400 ? 0 : 500);
+  });
+  addEventListener('pointermove', e => {   // the timeline's list: still pointer only
+    const el = e.target.closest?.('[data-tip^="#"]');
+    if (!el || e.buttons || !from || Math.hypot(e.clientX - from.x, e.clientY - from.y) < 6) return;
+    hide(); from = { x: e.clientX, y: e.clientY };
+    timer = setTimeout(() => show(el, from.x - 20), 1000);
+  });
+  addEventListener('pointerout', e => { const el = e.target.closest?.('[data-tip]'); if (el && !el.contains(e.relatedTarget)) hide(); });
+  for (const ev of ['pointerdown', 'wheel', 'keydown', 'scroll']) addEventListener(ev, hide, { capture: true, passive: true });
+  addEventListener('focusin', e => { const el = e.target.closest?.('[data-tip]'); if (el && e.target.matches(':focus-visible') && !el.dataset.tip.startsWith('#')) { hide(); show(el); } });
+  addEventListener('focusout', e => { if (at?.contains(e.target)) hide(); });
+}
+const fmt = t => `${String(Math.floor(t / 60)).padStart(2, '0')}:${(t % 60).toFixed(2).padStart(5, '0')}`;
+const name = f => f.split('/').pop().replace(/\.\w+$/, '');
+const hint = text => Object.assign(new Error(text), { hint: true });   // a message that already says what to do next
+let noteTimer;
+const note = text => { $('note').textContent = text; $('note').hidden = false; clearTimeout(noteTimer); noteTimer = setTimeout(() => $('note').hidden = true, 5000); };
+
+// ---- menus, the side panel and full screen work before the project has loaded
+const menus = [[$('export'), $('exportMenu')], [$('proj'), $('projMenu')], [$('ver'), $('verMenu')]];
+const setMenu = (btn, menu, open) => { menu.hidden = !open; btn.classList.toggle('open', open); btn.setAttribute('aria-expanded', open); if (open) btn.onopen?.(); };
+for (const [btn, menu] of menus) btn.onclick = () => setMenu(btn, menu, menu.hidden);
+// The project menu lists the motlab projects the server finds, read again each time it opens, so a new one shows up.
+$('proj').onopen = async () => {
+  try {
+    const { projects } = await (await fetch('/projects')).json();
+    $('projList').replaceChildren(...projects.map(p => {
+      const a = document.createElement('a'); a.className = 'opt two'; a.href = `/p/${p.slug}/`;
+      a.innerHTML = '<span class="nm"></span><span class="dim"></span>'; a.firstChild.textContent = p.name; a.lastChild.textContent = p.path;
+      if (p.slug === '{{slug}}') { a.classList.add('on'); a.setAttribute('aria-current', 'page'); }
+      return a;
+    }));
+    $('projFoot').textContent = L('projectsHint');
+  } catch { $('projList').innerHTML = `<p class="foot">${L('projectsFailed')}</p>`; }
+};
+// Versions are the project files in this folder (project.json, project-tiktok.json). A new one is a copy of the open
+// version, which the agent then changes; the page opens it right away.
+$('ver').onopen = async () => {
+  $('verForm').hidden = true; $('verNew').hidden = false; $('verFoot').textContent = '';
+  try {
+    const list = await (await fetch('versions')).json();
+    $('verList').replaceChildren(...list.map(v => {
+      const a = document.createElement('a'); a.className = 'opt'; a.href = '?v=' + encodeURIComponent(v.file);
+      a.innerHTML = '<span></span><span class="dim"></span>'; a.firstChild.textContent = v.file === 'project.json' ? L('main') : v.label; a.lastChild.textContent = v.file;
+      if (v.file === '{{project}}') { a.classList.add('on'); a.setAttribute('aria-current', 'page'); }
+      return a;
+    }));
+  } catch { $('verList').innerHTML = `<p class="foot">${L('versionsFailed')}</p>`; }
+};
+$('verNew').onclick = () => { $('verNew').hidden = true; $('verForm').hidden = false; $('verFoot').textContent = L('copyOf', VERSION); $('verName').focus(); };
+$('verForm').onsubmit = async e => {
+  e.preventDefault();
+  if (!/[a-z0-9]/i.test($('verName').value)) { $('verFoot').textContent = L('badName'); return $('verName').focus(); }   // the server keeps only a to z and 0 to 9
+  $('verGo').disabled = true;
+  try {
+    const r = await fetch('versions', { method: 'POST', body: JSON.stringify({ from: '{{project}}', name: $('verName').value }) });
+    if (!r.ok) throw new Error(r.status === 409 ? L('nameTaken') : await r.text());
+    location.search = '?v=' + encodeURIComponent((await r.json()).file);
+  } catch (err) { $('verFoot').textContent = err.message; $('verGo').disabled = false; $('verName').focus(); }
+};
+addEventListener('pointerdown', e => { for (const [btn, menu] of menus) if (!menu.parentElement.contains(e.target)) setMenu(btn, menu, false); });
+addEventListener('keydown', e => {
+  if (e.key === 'Escape') for (const [btn, menu] of menus) if (!menu.hidden) { setMenu(btn, menu, false); btn.focus(); e.preventDefault(); }
+});
+const setPanel = open => {
+  document.body.classList.toggle('closed', !open); $('panel').setAttribute('aria-expanded', open);
+  label($('panel'), L(open ? 'hidePanel' : 'showPanel'));
+};
+$('panel').onclick = () => setPanel(document.body.classList.contains('closed'));
+const narrow = matchMedia('(max-width: 719px)');   // a narrow window hides the panel, also when the window is made narrow later
+if (narrow.matches) setPanel(false);
+narrow.addEventListener('change', e => { if (e.matches) setPanel(false); });
+requestAnimationFrame(() => requestAnimationFrame(() => document.body.classList.remove('still')));   // animate from here on
+if (!document.fullscreenEnabled) { $('full').disabled = true; label($('full'), L('fullNone')); }
+$('full').onclick = () => {   // some embedded browsers neither open full screen nor reject, so a silent wait also gets a message
+  if (document.fullscreenElement) return document.exitFullscreen();
+  let settled = false;
+  $('stage').requestFullscreen().then(() => settled = true, e => { settled = true; note(L('fullRefused')); });
+  setTimeout(() => { if (!settled) note(L('fullStuck')); }, 1500);
+};
+document.onfullscreenchange = () => label($('full'), L(document.fullscreenElement ? 'fullExit' : 'full'));
+
+try {
+  const project = await (await fetch(encodeURIComponent('{{project}}'))).json(), fps = project.fps, files = project.audio || [];
+  if (!project.scenes?.length) throw hint(L('noScenes'));
+  $('tl').style.height = laneHeight(files.length) + 'px';   // hold the timeline's final height while the scenes load
+  try { if (localStorage.motlabTimeline === '0') $('lane').hidden = true; } catch {}   // hidden last time: stays hidden from the start
+
+  // Every scene is the real page in a hidden iframe, so the preview draws exactly what the render draws. Only a few
+  // pages stay loaded (the one on screen and its neighbours); the rest are unloaded, so a long project stays light.
+  const KEEP = 3, live = [];   // loaded scenes, least recently used first
+  let shown = null, rendering = [];
+  // A scene is a path, or { file, transition } where the transition turns the scene before into this one. Its length
+  // in frames (n) follows the renderer's rule in src/project.js.
+  const { createMixer, findTransition, transitionProgress } = await import('/__motlab/transitions.js');
+  const scenes = project.scenes.map((x, i) => {
+    const s = typeof x === 'string' ? { file: x } : { file: x.file, transition: x.transition };
+    if (!s.file) throw hint(L('noFile', i + 1));
+    if (s.transition) {
+      if (!i) throw hint(L('firstTransition'));
+      try { s.transition = { ease: 'inOutCubic', params: {}, ...s.transition, type: findTransition(s.transition.type).name, n: Math.max(1, Math.round((Number(s.transition.duration) || 0) * fps)) }; transitionProgress(0, 1, s.transition.ease); }
+      catch (e) { throw hint(L('badTransition', i + 1, e.message)); }
+    }
+    return s;
+  });
+  let mixer = null;
+  function unload(s) { s.frame.remove(); s.frame = s.win = s.canvas = s.warm = null; live.splice(live.indexOf(s), 1); }
+  function load(s) {
+    if (s.win) { live.push(...live.splice(live.indexOf(s), 1)); return s; }
+    return s.loading ??= (async () => {
+      const frame = document.createElement('iframe'); frame.src = `${s.file}?scale=1`; $('frames').append(frame);
+      await new Promise(r => frame.onload = r);
+      const win = frame.contentWindow, canvas = win.document.getElementById('c');
+      if (!canvas) { frame.remove(); throw hint(L('noCanvas', s.file)); }
+      await win.ready;
+      Object.assign(s, { frame, win, canvas }); live.push(s);
+      for (const old of live.filter(x => x !== s && x !== shown && !rendering.includes(x)).slice(0, Math.max(0, live.length - KEEP))) unload(old);
+      return s;
+    })().finally(() => s.loading = null);
+  }
+
+  // One pass through the scenes for their length and a few thumbnails (one per 2 s, at most 12).
+  const thumbAt = async (s, time) => { await s.win.renderAt(time); return createImageBitmap(s.canvas, { resizeHeight: VH * 2, resizeQuality: 'high' }); };
+  for (const [i, s] of scenes.entries()) {
+    $('msg').textContent = L('loadingScene', i + 1, scenes.length);
+    await load(s);
+    Object.assign(s, { dur: Math.round(s.win.TOTAL * fps) / fps, w: s.canvas.width, h: s.canvas.height, thumbs: [] });
+    const n = Math.min(12, Math.max(1, Math.round(s.dur / 2)));
+    for (let k = 0; k < n; k++) s.thumbs.push(await thumbAt(s, (k + 0.5) / n * s.dur));
+  }
+  // With a transition, a scene starts that many frames before the one before it ends: the two overlap.
+  let total = 0;
+  for (const [i, s] of scenes.entries()) {
+    const n = s.transition?.n || 0, out = scenes[i + 1]?.transition?.n || 0;   // the renderer's rule: a scene keeps at least one frame of its own
+    if (n + out >= Math.round(s.dur * fps)) throw hint(L('tooShort', i + 1, Math.round(s.dur * fps), n, out));
+    s.start = total - n / fps; total = s.start + s.dur;
+  }
+  const sceneAt = time => scenes.findLast(s => s.start <= time + 1e-9);
+  const pairAt = time => {   // inside a transition: the scene it comes from, and the frame of the transition
+    const s = sceneAt(time), n = s.transition?.n, k = frameIn(s, time);
+    return n && k < n ? { from: scenes[scenes.indexOf(s) - 1], k, n } : null;
+  };
+  const frameIn = (s, time) => Math.max(0, Math.min(Math.floor((time - s.start) * fps + 1e-6), Math.round(s.dur * fps) - 1));   // same frame grid as the render
+
+  const ac = new AudioContext();
+  const tracks = await Promise.all(files.map(async a => {
+    const buf = await ac.decodeAudioData(await (await fetch(a.file)).arrayBuffer()), data = buf.getChannelData(0);
+    const peaks = new Float32Array(Math.ceil(buf.duration * PEAKS));
+    for (let i = 0; i < data.length; i++) { const k = Math.floor(i / buf.sampleRate * PEAKS), v = Math.abs(data[i]); if (v > peaks[k]) peaks[k] = v; }
+    const from = a.from || 0, len = Math.max(0, Math.min(a.duration ?? Infinity, buf.duration - from));   // the part of the file that is used
+    return { file: a.file, start: a.start || 0, volume: a.volume ?? 1, from, len, buf, peaks };
+  }));
+
+  const view = $('view'), tl = $('tl'), lane = $('lane'), g = tl.getContext('2d'), clean = document.createElement('canvas');
+  view.width = clean.width = scenes[0].w; view.height = clean.height = scenes[0].h;
+  $('msg').hidden = true; view.hidden = false;
+  tl.setAttribute('aria-valuemax', total.toFixed(2));
+  let notes = [], others = [], active = null, opening = null, draft = null, hits = [];   // this version's notes, other versions', the open one, one to open, a box being drawn, tags on the timeline
+  const openNotes = () => notes.filter(m => !m.done || m === active);   // what the preview and the timeline show: done notes only while open
+  const images = new Map();   // note number -> PNG data URL, sent with the next save
+  let t = 0, sel = null, range = null, looping = false, playing = false, t0 = 0, ac0 = 0, sources = [], busy = false, pps = 1, zoom = 1, cur = null, luma = null;
+
+  // ---- side panel; every row is a button so Tab, Enter and Space reach it
+  $('len').textContent = fmt(total);
+  const item = (list, html, click) => {
+    const li = document.createElement('li'), b = document.createElement('button');
+    b.className = 'row'; b.innerHTML = html; b.onclick = click; li.append(b); $(list).append(li); return b;
+  };
+  const current = (el, on) => on ? el.setAttribute('aria-current', 'true') : el.removeAttribute('aria-current');
+  scenes.forEach((s, i) => {
+    s.li = item('scenes', `<canvas aria-hidden="true"></canvas><span class="name">${name(s.file)}<small>Scene ${i + 1}</small></span><span class="d num">${s.dur.toFixed(2)} s</span>`, () => seek(s.start));
+    const th = s.li.firstElementChild, b = s.thumbs[s.thumbs.length >> 1]; th.width = b.width; th.height = b.height; th.getContext('2d').drawImage(b, 0, 0);
+  });
+  tracks.forEach(a => a.li = item('audio', `<span class="ic">${ICON.wave}</span><span class="name">${name(a.file)}<small class="num">${L('starts', a.start.toFixed(2))}</small></span><span class="d num">vol ${a.volume}</span>`, () => seek(a.start, a)));
+  if (!tracks.length) $('audio').innerHTML = `<li class="empty">${L('noAudio')}</li>`;
+
+  // ---- timeline: ruler, one row of scenes, one row per audio file. Zoomed in, #laneIn gets the full width so the
+  // lane scrolls natively, and the canvas (sticky) draws only the part in view.
+  const fitPps = () => (lane.clientWidth - PAD * 2) / total, maxZoom = () => Math.max(1, 24 * fps / fitPps());   // up to 24 px per frame
+  function layout() {   // hidden, the timeline has no width, so it keeps its zoom and is laid out again when it is shown
+    if (lane.hidden) return;
+    zoom = Math.min(zoom, maxZoom()); pps = fitPps() * zoom;
+    $('laneIn').style.width = zoom > 1 ? total * pps + PAD * 2 + 'px' : '';
+    $('zout').disabled = zoom <= 1; $('zin').disabled = zoom >= maxZoom();
+  }
+  function setZoom(z, at = t, x = PAD + t * pps - lane.scrollLeft) {   // keeps time `at` under canvas x `x`
+    zoom = Math.max(1, z); layout(); lane.scrollLeft = PAD + at * pps - x; drawTimeline();
+  }
+  function drawTimeline() {
+    if (lane.hidden) return;
+    const w = lane.clientWidth, h = laneHeight(tracks.length), dpr = devicePixelRatio, sx = lane.scrollLeft;
+    tl.style.width = w + 'px'; tl.width = w * dpr; tl.height = h * dpr; tl.style.height = h + 'px'; g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const X = time => PAD + time * pps - sx, from = Math.max(0, (sx - PAD) / pps), to = (sx + w) / pps;   // visible seconds
+
+    g.font = `11px ${FONT}`; g.textBaseline = 'middle';
+    if (pps / fps >= 6) {   // close in, a small tick per frame
+      g.fillStyle = '#dcdcda';
+      for (let f = Math.floor(from * fps); f <= Math.min(to, total) * fps; f++) g.fillRect(X(f / fps), 21, 1, 4);
+    }
+    const step = [0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300].find(s => s * pps >= 70) || 600;
+    for (let k = Math.floor(from / step); k * step <= Math.min(to, total) + 1e-6; k++) {
+      const s = k * step, text = step < 1 ? fmt(s) : fmt(s).slice(0, 5);
+      g.fillStyle = '#dcdcda'; g.fillRect(X(s), 8, 1, 10);
+      g.fillStyle = MUTED; if (X(s) + 40 < w) g.fillText(text, X(s) + 6, 13);
+    }
+
+    for (const [i, s] of scenes.entries()) {
+      const x = X(s.start), cw = s.dur * pps - 2;
+      if (x > w || x + cw < 0) continue;
+      const tw = VH * s.w / s.h;   // thumbnails keep their shape; a tile shows the thumbnail nearest its middle
+      g.save(); g.beginPath(); g.roundRect(x, RULER, cw, VH, 8); g.clip();
+      for (let k = Math.max(0, Math.floor(-x / tw)); k * tw < cw && x + k * tw < w; k++) {
+        const at = (k + 0.5) * tw / pps, b = s.thumbs[Math.min(s.thumbs.length - 1, Math.floor(at / s.dur * s.thumbs.length))];
+        g.drawImage(b, x + k * tw, RULER, tw + 0.5, VH);
+      }
+      const ow = s.transition ? s.transition.n / fps * pps : 0;   // the overlap with the scene before, which holds the bowtie
+      const bx = Math.min(Math.max(x + ow, 0), x + cw - 24);   // the scene number stays in view while the scene is
+      g.fillStyle = 'rgba(0,0,0,.55)'; g.beginPath(); g.roundRect(bx + 6, RULER + 6, 18, 16, 5); g.fill();
+      g.fillStyle = '#fff'; g.textAlign = 'center'; g.fillText(i + 1, bx + 15, RULER + 14.5); g.textAlign = 'left';
+      g.restore();
+      g.lineWidth = 2; g.strokeStyle = sel && !sel.audio && sel.sceneIndex === i + 1 ? BLUE : 'rgba(0,0,0,.08)';
+      g.beginPath(); g.roundRect(x + 1, RULER + 1, cw - 2, VH - 2, 7); g.stroke();
+      if (s.transition) {   // where the scene before turns into this one: a bowtie on the overlap, as in video editors
+        const cx = x + ow / 2, cy = RULER + VH / 2, r = Math.max(5, Math.min(9, ow / 2));
+        g.fillStyle = 'rgba(255,255,255,.35)'; g.fillRect(x, RULER + 2, ow, VH - 4);
+        g.fillStyle = 'rgba(0,0,0,.6)'; g.beginPath(); g.roundRect(cx - r - 4, cy - 9, 2 * r + 8, 18, 5); g.fill();
+        g.fillStyle = '#fff'; g.beginPath(); g.moveTo(cx - r, cy - 5); g.lineTo(cx + r, cy + 5); g.lineTo(cx + r, cy - 5); g.lineTo(cx - r, cy + 5); g.closePath(); g.fill();
+      }
+    }
+
+    for (const [i, a] of tracks.entries()) {
+      const x = X(a.start), y = AY + i * (AH + GAP), cw = Math.max(4, Math.min(a.len, total - a.start) * pps), on = sel?.audio && tracks[sel.audio.index] === a;
+      if (x > w || x + cw < 0) continue;
+      g.fillStyle = on ? '#dfe9fb' : '#f1f1ef'; g.beginPath(); g.roundRect(x, y, cw, AH, 8); g.fill();
+      g.save(); g.clip(); g.fillStyle = on ? BLUE : WAVE;
+      for (let px = Math.max(0, Math.floor(-x)); px < cw && x + px < w; px++) {   // waveform at the volume it is mixed at
+        let v = 0; for (let k = Math.floor((a.from + px / pps) * PEAKS), e = Math.max(k + 1, Math.floor((a.from + (px + 1) / pps) * PEAKS)); k < e; k++) v = Math.max(v, a.peaks[k] || 0);
+        const bar = Math.max(1, Math.min(1, v * a.volume) * (AH - 8)); g.fillRect(x + px, y + (AH - bar) / 2, 1, bar);
+      }
+      g.restore();
+      if (on) { g.lineWidth = 2; g.strokeStyle = BLUE; g.beginPath(); g.roundRect(x + 1, y + 1, cw - 2, AH - 2, 7); g.stroke(); }
+      const label = name(a.file), lw = g.measureText(label).width, inside = cw > lw + 16, lx = Math.max(x, 0);
+      g.fillStyle = inside ? '#3d3d3a' : MUTED; g.fillText(label, inside ? Math.min(lx, x + cw - lw - 16) + 8 : x + cw + 8, inside ? y + 10 : y + AH / 2);
+    }
+    if (range) {   // a light blue band over every row, with a 1 px edge on each side and a bar in the ruler
+      const a = X(range.start), b = X(range.end);
+      g.fillStyle = 'rgba(44,111,224,.10)'; g.fillRect(a, 4, b - a, h - 10);
+      g.fillStyle = BLUE;
+      for (const x of [a, b]) {   // the edges can be dragged; each has a head at the top, like the playhead
+        g.fillRect(x - 0.5, 4, 1, h - 10);
+        g.beginPath(); g.roundRect(x - 4, 4, 8, 14, [3, 3, 4, 4]); g.fill();
+      }
+    }
+    // Notes in a row under the time labels: a numbered tag at their time, light blue, solid blue for the open one. A
+    // range note draws a line to the end of its range. All lines go first and every tag over them, with a 2 px white
+    // margin, so a line or a range edge never runs through a number.
+    g.font = `600 11px ${FONT}`; g.textAlign = 'center'; hits = [];
+    const vis = openNotes();
+    for (const m of vis) if (m.range) {
+      const a = X(m.range.start), b = X(m.range.end);
+      g.fillStyle = m === active ? BLUE : '#a9c3f1'; g.fillRect(a, MK_Y - 1, b - a, 2); g.fillRect(b - 1, MK_Y - 4, 2, 8);   // with a short end cap
+    }
+    for (const m of [...vis.filter(m => m !== active), ...vis.filter(m => m === active)]) {   // the open one on top
+      const a = X(m.range ? m.range.start : m.time), on = m === active, tw = Math.max(18, g.measureText(m.n).width + 10);
+      const x0 = m.range ? a : a - tw / 2;
+      if (x0 > w || x0 + tw < 0) continue;
+      const inBand = range && x0 + tw / 2 > X(range.start) && x0 + tw / 2 < X(range.end);   // the margin takes the colour under it
+      g.fillStyle = inBand ? '#eaf0fc' : '#fff'; g.beginPath(); g.roundRect(x0 - 2, MK_Y - 10, tw + 4, 20, 6); g.fill();
+      g.fillStyle = on ? BLUE : '#dfe9fb'; g.beginPath(); g.roundRect(x0, MK_Y - 8, tw, 16, 4); g.fill();
+      g.fillStyle = on ? '#fff' : BLUE; g.fillText(m.n, x0 + tw / 2, MK_Y + 0.5);
+      hits.push({ m, x0, x1: x0 + tw });
+    }
+    g.textAlign = 'left';
+    if (active?.range) place();
+    marks();
+  }
+  function marks() {   // the marks live in #laneIn, so they scroll with it
+    $('head').style.left = PAD + t * pps + 'px';
+    $('pick').hidden = !sel; if (sel) $('pick').style.left = PAD + sel.time * pps + 'px';
+    tl.setAttribute('aria-valuenow', t.toFixed(2)); tl.setAttribute('aria-valuetext', `${fmt(t)}, ${name(sceneAt(t).file)}`);
+  }
+  function reveal() {   // zoomed in, playing or stepping brings the playhead back into view, near the left edge
+    if (lane.hidden) return;
+    const x = PAD + t * pps - lane.scrollLeft;
+    if (x < PAD || x > lane.clientWidth - PAD) lane.scrollLeft = t * pps;
+  }
+  let drawQueued = false;
+  lane.onscroll = () => { if (!drawQueued) { drawQueued = true; requestAnimationFrame(() => { drawQueued = false; drawTimeline(); }); } };
+  lane.addEventListener('wheel', e => {   // Ctrl+scroll (and a trackpad pinch) zooms around the pointer
+    const r = tl.getBoundingClientRect(), x = e.clientX - r.left;
+    if (e.ctrlKey || e.metaKey) { e.preventDefault(); setZoom(zoom * Math.exp(-e.deltaY * 0.002), (x + lane.scrollLeft - PAD) / pps, x); }
+    else if (zoom > 1 && lane.scrollHeight <= lane.clientHeight && Math.abs(e.deltaY) > Math.abs(e.deltaX)) { e.preventDefault(); lane.scrollLeft += e.deltaY; }
+  }, { passive: false });
+  $('zin').onclick = () => setZoom(zoom * 2);
+  $('zout').onclick = () => setZoom(zoom / 2);
+  // The timeline can be hidden, so the preview gets the whole canvas (and more with the sidebar closed). The zoom
+  // buttons go with it, and the choice is remembered in this browser.
+  function setLane(open) {
+    lane.hidden = $('zin').hidden = $('zout').hidden = !open;
+    $('laneBtn').setAttribute('aria-expanded', open); label($('laneBtn'), L(open ? 'hideTimeline' : 'showTimeline'));
+    try { localStorage.motlabTimeline = open ? '1' : '0'; } catch {}
+    if (open) { layout(); drawTimeline(); reveal(); }
+  }
+  $('laneBtn').onclick = () => setLane(lane.hidden);
+
+  // ---- preview: the scene's canvas is copied to `clean` and the view. Notes with a box or point are thin outlines
+  // over the preview (#marks, after the selection box in the Claude canvas), so they stay sharp at any size. A note
+  // belongs to the frame it was drawn on and shows only there.
+  const PT = 16;   // point marker diameter in CSS px
+  const onFrame = m => !!cur && !!(m.box || m.point) && m.sceneIndex === scenes.indexOf(cur.s) + 1 && m.frame === cur.frame;
+  function paint() {
+    view.getContext('2d').drawImage(clean, 0, 0);
+    if (opening && onFrame(opening)) { const m = opening; opening = null; return openNote(m); }
+    if ((active?.box || active?.point) && !onFrame(active)) return closeNote();   // moved to another frame
+    const vis = openNotes().filter(onFrame); if (draft) vis.push(draft);
+    const vr = view.getBoundingClientRect(), sr = $('stage').getBoundingClientRect(), k = vr.width / view.width;
+    $('marks').replaceChildren(...vis.map(m => {
+      const d = document.createElement('div'), b = m.box || { x: m.point.x - PT / 2 / k, y: m.point.y - PT / 2 / k, w: PT / k, h: PT / k };
+      d.className = 'mk' + (m.point ? ' point' : '') + (m === active ? ' on' : '');
+      Object.assign(d.style, { left: vr.left - sr.left + b.x * k + 'px', top: vr.top - sr.top + b.y * k + 'px', width: b.w * k + 'px', height: b.h * k + 'px' });
+      if (m.n) d.append(Object.assign(document.createElement('i'), { textContent: m.n }));
+      return d;
+    }));
+    if (active?.box || active?.point) place();
+  }
+  function snapshot(m) {   // selection/<n>.png: the frame with this note's box or point and number, as on screen, scaled to the frame
+    const c = document.createElement('canvas'), v = c.getContext('2d'), k = view.width / view.getBoundingClientRect().width;
+    c.width = view.width; c.height = view.height; v.drawImage(clean, 0, 0);
+    v.fillStyle = 'rgba(44,111,224,.14)'; v.strokeStyle = BLUE; v.lineWidth = k;
+    let lx, ly;
+    if (m.box) { const { x, y, w, h } = m.box; v.fillRect(x, y, w, h); v.strokeRect(x + k / 2, y + k / 2, w - k, h - k); lx = x; ly = y - 2 * k; }
+    else {
+      const { x, y } = m.point;
+      v.beginPath(); v.arc(x, y, (PT / 2 - 0.5) * k, 0, Math.PI * 2); v.fill(); v.stroke();
+      v.fillStyle = BLUE; v.beginPath(); v.arc(x, y, 2.5 * k, 0, Math.PI * 2); v.fill();
+      lx = x + (PT / 2 + 1) * k; ly = y - (PT / 2 + 1) * k;
+    }
+    v.font = `600 ${11 * k}px ${FONT}`;
+    const tw = Math.max(16 * k, v.measureText(m.n).width + 10 * k), th = 16 * k, tx = Math.min(c.width - tw, Math.max(0, lx)), ty = Math.max(0, ly - th);
+    v.fillStyle = BLUE; v.beginPath(); v.roundRect(tx, ty, tw, th, 4 * k); v.fill();
+    v.fillStyle = '#fff'; v.textAlign = 'center'; v.textBaseline = 'middle'; v.fillText(m.n, tx + tw / 2, ty + th / 2 + 0.5 * k);
+    return c.toDataURL('image/png');
+  }
+  new ResizeObserver(paint).observe(view);
+  async function show() {
+    marks(); $('now').textContent = fmt(t);
+    const s = sceneAt(t);
+    if (s !== shown) { if (shown) shown.warm = null; shown = s; $('crumb').textContent = name(s.file); }   // played, it needs warming again
+    if (busy) return;
+    const at = t, frame = frameIn(s, at);
+    // The display refreshes at 60 to 240 Hz and the video has 24 or 30 frames a second, so most ticks land on the frame
+    // already shown. Drawing it again only took time from the next frame.
+    if (cur && cur.s === s && cur.frame === frame && s.win) return;
+    busy = true;
+    try {
+      const pair = pairAt(at);
+      rendering = pair ? [s, pair.from] : [s];
+      if (pair) await load(pair.from);
+      await load(s); await s.warm;
+      const next = scenes[scenes.indexOf(s) + 1];
+      // Load the next scene before playback reaches it, and draw its first frame, so its footage has already sought to
+      // the start and the cut does not stall (161 to 221 ms down to 10 to 17 ms on a scene with two clips, measured).
+      if (next) Promise.resolve(load(next)).then(n => { if (n !== shown && !n.warm) n.warm = n.win.renderAt(0).catch(() => {}); }).catch(() => {});
+      const c = clean.getContext('2d');
+      if (pair) {   // the frames of both scenes, mixed by the same code as the render (src/page/transitions.js)
+        const tr = s.transition, a = pair.from;
+        await a.win.renderAt(frameIn(a, at) / fps); await s.win.renderAt(frame / fps);
+        mixer ??= createMixer();
+        c.drawImage(mixer.draw(tr.type, a.canvas, s.canvas, transitionProgress(pair.k, pair.n, tr.ease), tr.params), 0, 0, clean.width, clean.height);
+      } else {
+        await s.win.renderAt(frame / fps);
+        c.drawImage(s.canvas, 0, 0, clean.width, clean.height);
+      }
+      cur = { s, frame }; luma = null; paint();
+    } finally { busy = false; rendering = []; }
+    if (at !== t) show();
+  }
+
+  // ---- playback: the audio clock drives the playhead; the button is blue only while it plays
+  const setPlay = on => { $('play').innerHTML = on ? ICON.pause : ICON.play; $('play').classList.toggle('hot', on); label($('play'), L(on ? 'pause' : 'play')); };
+  function play(jump = true) {   // with a range, Play starts at its start and goes round inside it
+    const inside = range && t >= range.start && t < range.end - 1e-6;
+    looping = !!range && (jump || inside);   // a click elsewhere while playing plays on from there
+    if (looping && !inside) t = range.start;
+    if (t >= total) t = 0;
+    ac.resume(); playing = true; t0 = t; ac0 = ac.currentTime; setPlay(true);
+    sources = tracks.filter(a => a.start + a.len > t).map(a => {
+      const src = ac.createBufferSource(), gain = ac.createGain();
+      src.buffer = a.buf; gain.gain.value = a.volume; src.connect(gain).connect(ac.destination);
+      const into = Math.max(0, t - a.start); src.start(ac0 + Math.max(0, a.start - t), a.from + into, a.len - into);
+      return src;
+    });
+    requestAnimationFrame(tick);
+  }
+  function pause() { playing = false; sources.forEach(s => s.stop()); sources = []; setPlay(false); }
+  function tick() {
+    if (!playing) return;
+    t = t0 + ac.currentTime - ac0;
+    if (looping && range && t >= range.end) { pause(); t = range.start; play(); return; }
+    if (t >= total) { t = total; pause(); }
+    reveal(); show(); requestAnimationFrame(tick);
+  }
+
+  // ---- selection: every click on a scene, an audio file or a point in time is written to selection.json, with the
+  // range and the notes.
+  function showSelection() {
+    scenes.forEach((s, i) => current(s.li, !!sel && !sel.audio && sel.sceneIndex === i + 1));
+    tracks.forEach((a, i) => current(a.li, sel?.audio?.index === i));
+    if (sel) {   // e.g. "Scene 2: 02-grafik" / "Detik 1.09, video 00:04.09"
+      $('selText').className = '';
+      $('selText').textContent = sel.audio ? `Audio: ${name(sel.audio.file)}` : `Scene ${sel.sceneIndex}: ${name(sel.scene)}`;
+      $('selSub').textContent = sel.audio
+        ? L('inScene', fmt(sel.time), sel.sceneIndex)
+        : L('atSecond', sel.sceneTime.toFixed(2), fmt(sel.time));
+    }
+    $('selRange').hidden = $('rangeBar').hidden = !range;   // e.g. "Rentang 00:03.00 sampai 00:05.00, 2.00 s"
+    if (range) {
+      const len = (range.end - range.start).toFixed(2);
+      $('selRange').innerHTML = `${L('range')} ${spanOf(range)} (${len} s)`;
+      $('rangeText').innerHTML = `${spanOf(range)}<span class="dv"></span><span class="muted">${len} s</span>`;
+    }
+    drawTimeline();
+  }
+  const spot = time => {   // where a time is: its scene, the frame the preview shows there, and the transition it is in
+    const s = sceneAt(time), pair = pairAt(time);
+    return { time: +time.toFixed(3), scene: s.file, sceneIndex: scenes.indexOf(s) + 1, sceneTime: +(time - s.start).toFixed(3), frame: frameIn(s, time),
+      transition: pair ? { type: s.transition.type, from: scenes.indexOf(pair.from) + 1, frame: pair.k, frames: pair.n } : null };
+  };
+  function select(time, audio) {   // a new time, scene or clip
+    sel = { ...spot(time), audio: audio ? { file: audio.file, start: audio.start, index: tracks.indexOf(audio) } : null };
+  }
+  const spanOf = r => `<span class="rg"><span>${fmt(r.start)}</span>${ICON.arrow}<span class="sr">${L('to')}</span><span>${fmt(r.end)}</span></span>`;
+  const rangeOut = r => r && { start: r.start, end: r.end, scenes: scenes.flatMap((s, i) => s.start < r.end - 1e-9 && s.start + s.dur > r.start + 1e-9 ? [i + 1] : []) };
+  // Written shortly after the last change, so scrubbing or typing does not write a file per pointer move or key. The
+  // server keeps the notes of the folder's other versions and writes the new note pictures.
+  // A note's done state is the file's unless it was changed here (`toggled`), because the agent marks notes done in
+  // selection.json while this page is open. The reply, and a read when the page gets focus back, bring those in.
+  // Another tab of the viewer can save notes of the same project too, so the page names the notes it deleted instead of
+  // leaving them out, and takes in the file's notes after every save and on focus (sync).
+  let saveTimer = 0;
+  const toggled = new Set(), deleted = new Set();   // done changed here (by number), and notes deleted here (by key)
+  const key = m => m.id || `#${m.n}`, uid = () => crypto.randomUUID?.() || Math.random().toString(36).slice(2) + Date.now().toString(36);
+  let known = new Set();   // keys of this version's notes in the file at the last sync
+  function save() {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(async () => {
+      const png = Object.fromEntries(images), sent = [...toggled], gone = [...deleted]; images.clear(); toggled.clear(); deleted.clear();
+      try {
+        const r = await fetch('selection', { method: 'POST', body: JSON.stringify({ ...sel, range: rangeOut(range), project: '{{project}}', marks: notes, toggled: sent, deleted: gone, images: png }) });
+        if (!r.ok) throw new Error(r.status);
+        const res = await r.json();
+        for (const [id, n] of res.renumbered) {   // another tab took this number first: the note moves to the next free one
+          const m = notes.find(x => x.id === id); if (!m) continue;
+          m.n = n; if (m.image) { m.image = `selection/${n}.png`; images.set(n, snapshot(m)); }
+          if (m === active) $('popN').textContent = n;
+          save();
+        }
+        sync(res.marks, res.others);
+      } catch { sent.forEach(n => toggled.add(n)); gone.forEach(k => deleted.add(k)); }
+    }, 150);
+  }
+  function sync(file, other) {   // this version's notes in the file, and the other versions'
+    const inFile = new Map(file.map(m => [key(m), m]));
+    let changed = false;
+    notes = notes.filter(m => {   // in the file at the last sync and gone now: deleted in another tab
+      const gone = known.has(key(m)) && !inFile.has(key(m));
+      if (gone) { changed = true; if (m === active) { active = null; pop.hidden = true; } }
+      return !gone;
+    });
+    for (const f of file) {
+      const m = notes.find(x => key(x) === key(f));
+      if (!m) { if (!deleted.has(key(f))) { const { project, ...n } = f; notes.push({ note: '', ...n }); changed = true; } continue; }   // made in another tab
+      if (!toggled.has(m.n) && !!m.done !== !!f.done) { changed = true; if (m.done) delete m.done; else m.done = true; }   // done marked by the agent
+    }
+    known = new Set(inFile.keys()); others = other;
+    if (!changed) return;
+    notes.sort((a, b) => a.n - b.n); paint(); listNotes(); drawTimeline(); if (active) doneUI(active);
+  }
+  const reread = () => document.visibilityState === 'visible' && fetch('selection.json', { cache: 'no-store' }).then(r => r.ok ? r.json() : null)
+    .then(s => s && sync((s.marks || []).filter(m => m.project === '{{project}}'), (s.marks || []).filter(m => m.project !== '{{project}}'))).catch(() => {});
+  addEventListener('focus', reread); document.addEventListener('visibilitychange', reread);
+
+  // ---- notes: a box or point drawn on the preview, or a range, with a line about what is wrong there. They stay in
+  // selection.json (`marks`) until they are deleted, numbered in the order they were made, across all versions.
+  const pop = $('pop'), popText = $('popText');
+  const where = m => m.range ? `${L('range')} ${fmt(m.range.start)} ${L('to')} ${fmt(m.range.end)}` : L('sceneSecond', m.sceneIndex, m.sceneTime.toFixed(2));   // read out
+  const whereHTML = m => m.range ? `${L('range')} ${spanOf(m.range)}` : where(m);   // shown
+  function place() {   // under the box or point, or above the range's tag on the timeline; kept inside the window
+    const el = $('marks').querySelector('.mk.on'), M = 12;
+    let r;
+    if (el) r = el.getBoundingClientRect();
+    else if (active?.range && !lane.hidden) {
+      const lr = tl.getBoundingClientRect(), x = lr.left + PAD + active.range.start * pps - lane.scrollLeft;
+      r = { left: x, top: lr.top + MK_Y - 8, bottom: lr.top + MK_Y + 8 };
+    } else { const sr = $('stage').getBoundingClientRect(); r = { left: sr.left + sr.width / 2 - 144, top: sr.bottom - 24, bottom: sr.bottom - 24 }; }
+    const w = pop.offsetWidth, h = pop.offsetHeight, below = r.bottom + 8, above = r.top - 8 - h;
+    pop.style.left = Math.min(innerWidth - w - M, Math.max(M, r.left)) + 'px';
+    // a range note sits above the timeline, so the range stays in view
+    pop.style.top = (el ? (below + h <= innerHeight - M ? below : Math.max(M, above)) : (above >= M ? above : below)) + 'px';
+  }
+  const grow = () => { popText.style.height = 'auto'; popText.style.height = Math.min(160, popText.scrollHeight + 2) + 'px'; };
+  function openNote(m) {
+    active = m; opening = null;
+    $('popN').textContent = m.n; $('popWhere').innerHTML = whereHTML(m); popText.value = m.note; doneUI(m);
+    pop.hidden = false; grow(); paint(); place(); listNotes(); drawTimeline();
+    popText.focus({ preventScroll: true });
+  }
+  function doneUI(m) {   // a done note says so in the card's head, and its button opens it again
+    $('popState').hidden = !m.done; $('popState').innerHTML = ICON.check + L('done');
+    $('popDone').innerHTML = m.done ? ICON.undo + L('reopen') : ICON.check + L('markDone');
+  }
+  function setDone(m, on) {   // done: the card closes and the note leaves the preview and the timeline; opened again, it stays open
+    if (on) m.done = true; else delete m.done;
+    toggled.add(m.n);
+    if (on) closeNote(); else { doneUI(m); paint(); listNotes(); drawTimeline(); save(); popText.focus({ preventScroll: true }); }
+  }
+  function closeNote() {
+    if (!active) return;
+    active = null; pop.hidden = true; paint(); listNotes(); drawTimeline(); save();
+  }
+  function deleteNote(m) {
+    notes = notes.filter(x => x !== m); images.delete(m.n); deleted.add(key(m));
+    if (m === active) { active = null; pop.hidden = true; }
+    paint(); listNotes(); drawTimeline(); save();
+  }
+  const nextN = () => Math.max(0, ...notes.map(m => m.n), ...others.map(m => m.n)) + 1;
+  function addNote(extra, time = t) {
+    const m = { id: uid(), n: nextN(), note: '', ...spot(time), box: null, point: null, range: null, image: null, ...extra };
+    if (m.box || m.point) { m.image = `selection/${m.n}.png`; images.set(m.n, snapshot(m)); }
+    notes.push(m); openNote(m); save();
+  }
+  function goTo(m) {   // to the note's frame (and its range), then open it once that frame is on screen
+    if (m.range) range = { start: m.range.start, end: m.range.end };
+    const here = onFrame(m) || (m.range && !(m.box || m.point));
+    seek(m.time);
+    if (here) openNote(m); else opening = m;
+  }
+  // The open notes, then the done ones folded under "Selesai N" (unfolded or not is remembered in this browser), so the
+  // list after a round of revisions holds what is left to do.
+  let doneOpen = false; try { doneOpen = localStorage.motlabDone === '1'; } catch {}
+  function listNotes() {
+    const open = notes.filter(m => !m.done), done = notes.filter(m => m.done);
+    $('noteCount').textContent = open.length || '';
+    const row = m => {
+      const li = document.createElement('li'), b = document.createElement('button');
+      b.className = 'row' + (m.done ? ' done' : ''); b.innerHTML = '<span class="ic n num" aria-hidden="true"></span><span class="name"><span></span><small class="num"></small></span>';
+      b.firstChild.textContent = m.n;
+      const text = b.querySelector('.name > span'); text.textContent = m.note.trim() || L('empty'); text.classList.toggle('none', !m.note.trim());
+      b.querySelector('small').innerHTML = whereHTML(m);
+      b.setAttribute('aria-label', L('noteLabel', m.n, m.done, m.note.trim(), where(m)));
+      b.onclick = () => goTo(m); current(b, m === active);
+      li.append(b); return li;
+    };
+    const items = open.map(row);
+    if (!notes.length) items.push(Object.assign(document.createElement('li'), { className: 'empty', textContent: L('noNotes') }));
+    else if (!open.length) items.push(Object.assign(document.createElement('li'), { className: 'empty', textContent: L('allDone') }));
+    if (done.length) {
+      const li = document.createElement('li'), b = document.createElement('button');
+      b.className = 'row'; b.id = 'doneBtn'; b.setAttribute('aria-expanded', doneOpen);
+      b.innerHTML = `<span class="ic" aria-hidden="true">${ICON.down}</span><span class="name">${L('done')} <span class="num"></span></span>`;
+      b.querySelector('.num').textContent = done.length;
+      b.onclick = () => { doneOpen = !doneOpen; try { localStorage.motlabDone = doneOpen ? '1' : '0'; } catch {} listNotes(); $('doneBtn').focus(); };
+      li.append(b); items.push(li);
+      if (doneOpen) items.push(...done.map(row));
+    }
+    $('notes').replaceChildren(...items);
+  }
+  popText.oninput = () => { active.note = popText.value; grow(); place(); listNotes(); save(); };
+  popText.onkeydown = e => {
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); closeNote(); }
+    if (e.key === 'Escape') { e.preventDefault(); closeNote(); }   // Escape in the note only closes it, the range stays
+  };
+  $('popOk').onclick = closeNote;
+  $('popDel').onclick = () => deleteNote(active);
+  $('popDone').onclick = () => setDone(active, !active.done);
+  $('rangeNote').onclick = () => { addNote({ range: rangeOut(range) }, range.start); showSelection(); };
+  $('rangeOff').onclick = () => unrange();
+  function seek(time, audio) {
+    t = Math.min(total, Math.max(0, time));
+    select(t, audio); save();
+    if (playing) { pause(); play(false); }
+    reveal(); showSelection(); show();
+  }
+
+  const scrub = e => {
+    const r = tl.getBoundingClientRect(), y = e.clientY - r.top;
+    seek((e.clientX - r.left + lane.scrollLeft - PAD) / pps, y >= AY ? tracks[Math.floor((y - AY) / (AH + GAP))] : null);
+  };
+  // A range: Shift+drag on the timeline, or I and O at the playhead. Its edges can be dragged, and Escape takes it off.
+  // Its ends sit on the frame grid.
+  const snap = time => Math.min(total, Math.max(0, Math.round(time * fps) / fps));
+  const timeAt = e => snap((e.clientX - tl.getBoundingClientRect().left + lane.scrollLeft - PAD) / pps);
+  const edgeAt = e => {
+    if (!range) return null;
+    const x = e.clientX - tl.getBoundingClientRect().left + lane.scrollLeft - PAD;
+    return Math.abs(x - range.start * pps) <= 5 ? 'start' : Math.abs(x - range.end * pps) <= 5 ? 'end' : null;
+  };
+  function setRange(a, b, done) {
+    range = { start: +Math.min(a, b).toFixed(3), end: +Math.max(a, b).toFixed(3) };
+    if (done) { if (range.end - range.start < 0.5 / fps) range = null; if (!sel) select(t, null); save(); showSelection(); } else drawTimeline();
+  }
+  let rangeDrag = null, rangeMode = false;
+  function setRangeMode(on) {
+    rangeMode = on; $('rangeBtn').classList.toggle('hot', on); $('rangeBtn').setAttribute('aria-pressed', on);
+    if (on && lane.hidden) setLane(true);
+    if (on) note(L('rangeHow')); else $('note').hidden = true;
+  }
+  $('rangeBtn').onclick = () => setRangeMode(!rangeMode);
+  const tagAt = e => {   // the note tag under the pointer, if any
+    const r = tl.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
+    return Math.abs(y - MK_Y) <= 9 ? hits.findLast(h => x >= h.x0 - 2 && x <= h.x1 + 2)?.m : null;
+  };
+  tl.onpointerdown = e => {
+    if (e.button !== 0) return;
+    const tag = tagAt(e);
+    if (tag) return goTo(tag);
+    const edge = edgeAt(e);
+    if (!e.shiftKey && !edge && !rangeMode) return scrub(e);
+    tl.setPointerCapture(e.pointerId);
+    rangeDrag = edge ? (edge === 'start' ? range.end : range.start) : timeAt(e);
+    setRange(rangeDrag, timeAt(e), false);
+  };
+  tl.onpointermove = e => {
+    if (rangeDrag !== null) return setRange(rangeDrag, timeAt(e), false);
+    if (!e.buttons) { tl.style.cursor = edgeAt(e) ? 'ew-resize' : tagAt(e) ? 'default' : rangeMode ? 'col-resize' : ''; return; }
+    scrub(e);
+  };
+  tl.onpointerup = tl.onpointercancel = () => { if (rangeDrag === null) return; rangeDrag = null; setRange(range.start, range.end, true); if (rangeMode) setRangeMode(false); };
+  addEventListener('keydown', e => {   // I and O mark the start and the end of the range at the playhead
+    if (e.ctrlKey || e.metaKey || e.altKey || e.target.closest?.('input, textarea')) return;
+    const k = e.key.toLowerCase(), at = snap(t);
+    if (k === 'r') setRangeMode(!rangeMode);   // R picks the range tool, as in Final Cut Pro
+    if (k === 'x') { const s = sceneAt(t); setRange(snap(s.start), snap(s.start + s.dur), true); }   // X: the scene under the playhead, as Mark Clip
+    if (k === 'i') setRange(at, range && range.end > at ? range.end : total, true);
+    else if (k === 'o') setRange(range && range.start < at ? range.start : 0, at, true);
+  });
+  tl.onkeydown = e => {   // arrows move one frame, Shift+arrows one second; the selected row stays selected; + and - zoom
+    if (e.key === '+' || e.key === '=') return setZoom(zoom * 2);
+    if (e.key === '-') return setZoom(zoom / 2);
+    if (e.key === '0') return setZoom(1);
+    const step = e.shiftKey ? 1 : 1 / fps, to = { ArrowLeft: t - step, ArrowRight: t + step, Home: 0, End: total }[e.key];
+    if (to === undefined) return;
+    e.preventDefault(); seek(to, sel?.audio ? tracks[sel.audio.index] : null);
+  };
+
+  let drag = null;
+  // The cursor follows the brightness of the frame under it: a 64-cell-wide copy of the frame is read once per frame,
+  // on the first pointer move after the frame changed, so playback costs nothing extra.
+  const LW = 64, LH = Math.max(1, Math.round(LW * view.height / view.width)), lumaCanvas = Object.assign(document.createElement('canvas'), { width: LW, height: LH });
+  const lumaCtx = lumaCanvas.getContext('2d', { willReadFrequently: true });
+  const tone = e => {
+    if (!luma) { lumaCtx.drawImage(clean, 0, 0, LW, LH); luma = lumaCtx.getImageData(0, 0, LW, LH).data; }
+    const r = view.getBoundingClientRect(), x = Math.min(LW - 1, Math.max(0, Math.floor((e.clientX - r.left) / r.width * LW))), y = Math.min(LH - 1, Math.max(0, Math.floor((e.clientY - r.top) / r.height * LH)));
+    const i = (y * LW + x) * 4;
+    const lin = c => (c /= 255) <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;   // relative luminance, as in WCAG contrast
+    // below 0.179 white has more contrast than the dark cursor, above it the dark one does
+    view.classList.toggle('on-dark', 0.2126 * lin(luma[i]) + 0.7152 * lin(luma[i + 1]) + 0.0722 * lin(luma[i + 2]) < 0.179);
+  };
+  view.addEventListener('pointerenter', tone); view.addEventListener('pointermove', tone);
+  const onView = e => {   // pointer position in the scene's own pixels (the page at ?scale=1)
+    const r = view.getBoundingClientRect();
+    return { x: Math.min(view.width, Math.max(0, (e.clientX - r.left) * view.width / r.width)), y: Math.min(view.height, Math.max(0, (e.clientY - r.top) * view.height / r.height)) };
+  };
+  const hit = p => {   // the note on this frame under the pointer, the last made first
+    const k = view.getBoundingClientRect().width / view.width;
+    return openNotes().filter(onFrame).findLast(m => m.box ? p.x >= m.box.x && p.x <= m.box.x + m.box.w && p.y >= m.box.y && p.y <= m.box.y + m.box.h
+      : Math.hypot(p.x - m.point.x, p.y - m.point.y) <= (PT / 2 + 2) / k);
+  };
+  // A drag on the preview draws a box and a click marks a point; either one is a new note, opened for typing. A click
+  // on a note opens it, and a click while a note is open only closes it.
+  view.onpointerdown = e => {
+    if (e.button !== 0 || !cur) return;
+    if (playing) pause();
+    view.setPointerCapture(e.pointerId);
+    drag = { a: onView(e), x: e.clientX, y: e.clientY, moved: false, open: !!active };
+  };
+  view.onpointermove = e => {
+    if (!drag || (!drag.moved && Math.hypot(e.clientX - drag.x, e.clientY - drag.y) < 4)) return;
+    if (!drag.moved) closeNote();
+    const a = drag.a, b = onView(e); drag.moved = true;
+    draft = { box: { x: Math.round(Math.min(a.x, b.x)), y: Math.round(Math.min(a.y, b.y)), w: Math.round(Math.abs(b.x - a.x)), h: Math.round(Math.abs(b.y - a.y)) } };
+    paint();
+  };
+  view.onpointerup = () => {
+    if (!drag) return;
+    const d = drag; drag = null;
+    if (d.moved) {
+      const { box } = draft; draft = null;
+      if (box.w < 2 || box.h < 2) return paint();
+      select(t, null); addNote({ box }); return showSelection();
+    }
+    const m = hit(d.a);
+    if (m) return m === active ? undefined : openNote(m);
+    if (d.open) return closeNote();
+    select(t, null); addNote({ point: { x: Math.round(d.a.x), y: Math.round(d.a.y) } }); showSelection();
+  };
+  view.onpointercancel = () => { drag = draft = null; paint(); };
+  // Escape (unless it just closed a menu) closes the open note, else leaves range marking, else takes the range off. A click on the empty grey
+  // space around the preview closes the note. Notes are only deleted with Hapus.
+  const unrange = () => { if (!range) return; range = null; save(); showSelection(); };
+  addEventListener('keydown', e => { if (e.key === 'Escape' && !e.defaultPrevented) active ? closeNote() : rangeMode ? setRangeMode(false) : unrange(); });
+  $('canvas').addEventListener('pointerdown', e => { if (e.button === 0 && (e.target === $('stage') || e.target === $('canvas'))) closeNote(); });
+
+  $('play').onclick = () => playing ? pause() : play();
+  $('prev').onclick = () => { const s = sceneAt(t), i = scenes.indexOf(s); seek(t - s.start > 0.5 || !i ? s.start : scenes[i - 1].start); };
+  $('next').onclick = () => { const n = scenes[scenes.indexOf(sceneAt(t)) + 1]; if (n) seek(n.start); };
+  addEventListener('keydown', e => {   // Space plays, except on a button or link, where Space presses that control
+    if (e.code !== 'Space' || e.target.closest?.('button, a, input, textarea, select')) return;
+    e.preventDefault(); $('play').click();
+  });
+
+  // ---- export: the server renders the project at the chosen size and streams its log back
+  const short = Math.min(view.width, view.height), RES = [[720, '720p'], [1080, '1080p'], [1440, '1440p'], [2160, '4K']];
+  let pick = 2160; try { pick = +localStorage.motlabRes || 2160; } catch {}
+  if (!RES.some(r => r[0] === pick)) pick = 2160;
+  for (const [p, text] of RES) {
+    const b = document.createElement('button'); b.className = 'opt';
+    b.innerHTML = `<span>${text}</span><span class="dim num">${Math.round(view.width * p / short)}×${Math.round(view.height * p / short)}</span>`;
+    b.onclick = () => choose(p);
+    $('res').append(b);
+  }
+  function choose(p) {   // the button names the size it will export, so the choice is visible without the menu
+    pick = p; try { localStorage.motlabRes = p; } catch {}
+    [...$('res').children].forEach((o, i) => { o.classList.toggle('on', RES[i][0] === p); o.setAttribute('aria-pressed', RES[i][0] === p); });
+    $('go').textContent = `Export ${RES.find(r => r[0] === p)[1]}`;
+  }
+  choose(pick);
+  const status = (main, sub, link) => {   // one line, an optional muted second line, an optional link at the end of the first
+    $('xs').hidden = false; $('xs').replaceChildren();
+    const line = document.createElement('span'); line.className = 'line'; line.append(main);
+    if (link) { const a = document.createElement('a'); a.href = encodeURI(link); a.target = '_blank'; a.textContent = L('open'); line.append(a); }
+    $('xs').append(line);
+    if (sub) { const s = document.createElement('span'); s.className = link ? 'sub' : 'sub wrap'; s.textContent = sub; s.dataset.tip = sub; $('xs').append(s); }
+  };
+  $('stop').onclick = () => {   // the running export's own response then ends with CANCELLED
+    $('stop').disabled = true; $('stop').textContent = L('cancelling'); status(L('cancelling'));
+    fetch('/export/cancel', { method: 'POST' }).catch(() => {});   // the server's route, not one under /p/<project>/: there is one export at a time
+  };
+  $('go').onclick = async () => {
+    const [p, text] = RES.find(r => r[0] === pick), icon = $('export').firstElementChild;
+    $('res').inert = true; $('go').disabled = true; $('go').setAttribute('aria-busy', 'true');
+    $('go').innerHTML = `<span class="spin" aria-hidden="true"></span><span>${L('exporting', text)}…</span>`;
+    $('stop').hidden = false; $('stop').disabled = false; $('stop').textContent = L('cancel');
+    $('exportLabel').textContent = L('exporting', text);
+    icon.outerHTML = '<span class="spin" aria-hidden="true"></span>'; status(L('preparing'));
+    try {
+      const res = await fetch('export', { method: 'POST', body: JSON.stringify({ project: '{{project}}', scale: p / short, tag: p + 'p' }) });
+      if (!res.ok) throw new Error(res.status === 409 ? L('busy') : await res.text());
+      const reader = res.body.pipeThrough(new TextDecoderStream()).getReader(); let log = '';
+      for (;;) {
+        const { done, value } = await reader.read(); if (done) break;
+        log += value;
+        const m = [...log.matchAll(/Scene (\d+)\/(\d+)/g)].at(-1);
+        if (m && !$('stop').disabled) status(L('sceneOf', m[1], m[2]));
+      }
+      const end = log.trim().split('\n').at(-1);
+      if (end === 'CANCELLED') status(L('cancelled'));
+      else {
+        if (!end.startsWith('DONE ')) throw new Error(end.replace(/^ERROR /, '') || L('noResult'));
+        const [, file, secs] = end.match(/^DONE (.+) (\d+)$/);
+        status(L('doneIn', secs), file, file);
+      }
+    } catch (e) { status(L('failed'), L('seeLog', e.message)); }
+    $('res').inert = false; $('stop').hidden = true;
+    $('go').disabled = false; $('go').removeAttribute('aria-busy'); choose(pick); $('exportLabel').textContent = 'Export';
+    $('export').firstElementChild.outerHTML = ICON.export;
+    setMenu($('export'), $('exportMenu'), true);
+  };
+
+  // ---- first paint: the last saved selection if there is one
+  sel = await fetch('selection.json').then(r => r.ok ? r.json() : null).catch(() => null);
+  const saved = Array.isArray(sel?.marks) ? sel.marks : [];   // notes of every version in this folder
+  others = saved.filter(m => m.project !== '{{project}}');
+  notes = saved.filter(m => m.project === '{{project}}').map(({ project, ...m }) => ({ note: '', ...m }));
+  known = new Set(notes.map(key));
+  if (sel) { delete sel.marks; delete sel.box; delete sel.point; }   // box and point are from before notes
+  if (sel?.project && sel.project !== '{{project}}') sel = null;   // the last click was in another project file of this folder
+  if (sel) t = Math.min(total, sel.time);
+  if (sel?.range && sel.range.end > sel.range.start && sel.range.start < total) range = { start: sel.range.start, end: Math.min(total, sel.range.end) };
+  await document.fonts.load(`11px ${FONT}`).catch(() => {});   // the canvas cannot redraw itself when the web font arrives
+  setLane(!lane.hidden); setPlay(false); listNotes(); showSelection(); show();
+  new ResizeObserver(() => { layout(); drawTimeline(); }).observe(lane);
+} catch (e) {
+  $('view').hidden = $('lane').hidden = $('bar').hidden = true; $('msg').hidden = false;
+  $('msg').textContent = e.hint ? e.message : L('loadFailed', e.message);
+  if (!$('scenes').children.length) $('scenes').innerHTML = `<li class="empty">${L('noScenesYet')}</li>`;
+  if (!e.hint) throw e;
+}
+</script>
+</body></html>

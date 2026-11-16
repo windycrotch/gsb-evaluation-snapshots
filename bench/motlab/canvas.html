@@ -1,0 +1,10 @@
+<!doctype html><html><head><meta charset="utf-8"></head><body style="margin:0"><canvas id="c"></canvas>
+<script src="../shared.js"></script>
+<script>
+const S = parseFloat(new URLSearchParams(location.search).get('scale') || '1');
+const cv = document.getElementById('c'); cv.width = BENCH.W * S; cv.height = BENCH.H * S;
+const ctx = cv.getContext('2d');
+window.TOTAL = BENCH.TOTAL;
+window.renderAt = t => { ctx.setTransform(S, 0, 0, S, 0, 0); BENCH.drawCanvas(ctx, t); };
+window.ready = document.fonts.ready.then(() => window.renderAt(0));
+</script></body></html>

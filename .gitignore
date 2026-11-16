@@ -1,0 +1,9 @@
+node_modules/
+out/
+*.part
+selection.json
+selection.png
+refs/
+__pycache__/
+selection/
+example_mesh/

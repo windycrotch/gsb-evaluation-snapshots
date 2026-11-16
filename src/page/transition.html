@@ -1,0 +1,41 @@
+<!doctype html><html><head><meta charset="utf-8"><title>motlab transition</title>
+<style>html,body{margin:0;background:#000} iframe{position:fixed;left:-99999px;top:0;border:0;visibility:hidden}</style></head>
+<body><canvas id="c"></canvas>
+<script type="module">
+// The frames where one scene turns into the next, rendered like any scene page (served at /__motlab/transition.html).
+// Both scene pages are loaded in iframes. Frame k shows frame (offset * fps + k) of `from` and frame k of `to`,
+// mixed by src/page/transitions.js, the same code the viewer uses.
+// Query: from, to (page paths from the served root), offset (seconds into `from`), frames, fps, type, ease, params (JSON), scale.
+import { createMixer, findTransition, transitionProgress } from '/__motlab/transitions.js';
+const q = new URLSearchParams(location.search), fps = +q.get('fps'), n = +q.get('frames'), offset = +q.get('offset');
+const type = q.get('type'), easing = q.get('ease') || 'inOutCubic', params = JSON.parse(q.get('params') || '{}'), scale = q.get('scale') || '1';
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+let A, B, mix;
+
+const open = path => new Promise((ok, fail) => {
+  const f = document.createElement('iframe'); f.src = `/${path}?scale=${scale}`;
+  f.onload = async () => {
+    try {
+      const w = f.contentWindow, c = w.document.getElementById('c');
+      if (!c || typeof w.renderAt !== 'function') throw new Error(`${path} does not keep the page contract`);
+      await w.ready; ok({ w, c });
+    } catch (e) { fail(e); }
+  };
+  f.onerror = () => fail(new Error(`${path} did not load`));
+  document.body.append(f);
+});
+
+window.TOTAL = n / fps;
+window.ready = (async () => {
+  findTransition(type); transitionProgress(0, n, easing);   // a wrong name fails here, before any frame
+  [A, B] = await Promise.all([open(q.get('from')), open(q.get('to'))]);
+  cv.width = A.c.width; cv.height = A.c.height; mix = createMixer();
+  return true;
+})();
+window.renderAt = async t => {
+  await window.ready;
+  const k = Math.min(n - 1, Math.max(0, Math.round(t * fps)));
+  await A.w.renderAt(offset + k / fps); await B.w.renderAt(k / fps);
+  ctx.drawImage(mix.draw(type, A.c, B.c, transitionProgress(k, n, easing), params), 0, 0, cv.width, cv.height);
+};
+</script></body></html>
