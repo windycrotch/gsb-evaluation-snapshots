@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0b84fe" />
+
+    <!-- Static meta tags in English: search engines and messenger link previews read them
+         (they don't run JS). For people, main.ts translates title/description to the browser language. -->
+    <title>please just text me — reply to voice messages with a typing video</title>
+    <meta
+      name="description"
+      content="Got another voice message? Reply just as inconveniently: type your answer and get a video of hands slowly typing it on a phone. Free, nothing to install."
+    />
+
+    <link rel="alternate" hreflang="x-default" href="https://pleasejusttext.me/" />
+    <link rel="alternate" hreflang="en" href="https://pleasejusttext.me/?lang=en" />
+    <link rel="alternate" hreflang="ru" href="https://pleasejusttext.me/?lang=ru" />
+    <link rel="alternate" hreflang="es" href="https://pleasejusttext.me/?lang=es" />
+    <link rel="alternate" hreflang="fr" href="https://pleasejusttext.me/?lang=fr" />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="please just text me" />
+    <meta property="og:url" content="https://pleasejusttext.me/" />
+    <meta property="og:title" content="Another voice message? Reply with a video of you typing." />
+    <meta
+      property="og:description"
+      content="Type your answer — get a video of hands slowly typing it on a phone. To read it, they’ll have to watch."
+    />
+    <meta property="og:image" content="https://pleasejusttext.me/og.jpg" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="Hands typing a reply on a phone next to a voice message" />
+    <meta name="twitter:card" content="summary_large_image" />
+
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "WebApplication",
+        "name": "please just text me",
+        "url": "https://pleasejusttext.me/",
+        "description": "Reply to voice messages with a video of hands typing your answer on a phone.",
+        "applicationCategory": "EntertainmentApplication",
+        "operatingSystem": "Any",
+        "inLanguage": ["en", "ru", "es", "fr"],
+        "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
+      }
+    </script>
+  </head>
+  <body>
+    <!-- Background: floating voice messages with absurd durations. Filled in by main.ts. -->
+    <div id="voice-rain" aria-hidden="true"></div>
+
+    <main id="app">
+      <nav class="topbar">
+        <span class="brand"><span class="typing-dots" aria-hidden="true"><i></i><i></i><i></i></span>please just text me</span>
+        <!-- Shows an icon + language code; a transparent native select on top opens the system picker on tap -->
+        <label class="lang-switch">
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8">
+            <circle cx="12" cy="12" r="9" />
+            <path d="M3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.6-3.8-9S9.5 5.6 12 3z" />
+          </svg>
+          <span id="lang-code" aria-hidden="true">EN</span>
+          <select id="lang" aria-label="Language">
+            <option value="en">English</option>
+            <option value="ru">Русский</option>
+            <option value="es">Español</option>
+            <option value="fr">Français</option>
+          </select>
+        </label>
+      </nav>
+
+      <!-- Instagram/TikTok/Facebook in-app browsers: “Send” often doesn't work there. Shown by main.ts. -->
+      <div id="inapp" class="inapp" role="note" hidden>
+        <p data-i18n="inappHint"></p>
+        <a id="open-chrome" class="inapp-btn" hidden data-i18n="openInChrome">Open in Chrome</a>
+      </div>
+
+      <header class="hero">
+        <h1 data-i18n="heroTitle">Another voice message?</h1>
+        <p class="lead">
+          <span data-i18n="heroLead">Reply just as inconveniently: a video of you typing the answer. Let them sit through it.</span>
+          <a href="#about" class="why" data-i18n="whyLink">Why?</a>
+        </p>
+      </header>
+
+      <section class="card">
+        <form id="form">
+          <label>
+            <span class="label-row"><span data-i18n="textLabel">Your reply</span><span id="counter"></span></span>
+            <textarea id="text" rows="4" required data-i18n-placeholder="textPlaceholder" placeholder="Type what you wanted to say…"></textarea>
+          </label>
+          <label>
+            <span data-i18n="modeLabel">Typing style</span>
+            <select id="mode">
+              <option value="normal" data-i18n="modeNormal">Normal</option>
+              <option value="grandpa" data-i18n="modeGrandpa">Grandpa, one finger</option>
+              <option value="typos" data-i18n="modeTypos">With typos</option>
+              <option value="manicure" data-i18n="modeManicure">With a manicure 💅</option>
+              <option value="breaks" data-i18n="modeBreaks">With coffee &amp; smoke breaks ☕</option>
+            </select>
+          </label>
+          <p id="limit-hint" class="hint" hidden></p>
+          <button id="render" type="submit" data-i18n="render">Make the video</button>
+        </form>
+      </section>
+
+      <section id="about" class="card about">
+        <h2 data-i18n="aboutTitle">Why this exists</h2>
+        <p data-i18n="about1">
+          Voice messages are convenient for the person recording them. Not for the one receiving them: you can’t skim them,
+          can’t read them in a meeting, on the subway without headphones or at 3 a.m. next to someone sleeping. So you listen
+          to two minutes of “so, um, listen…” to get one sentence.
+        </p>
+        <p data-i18n="about2">
+          People have wanted to answer in kind for a long time — some film themselves writing a reply with a pen on paper,
+          others typing it in Word. We made it one tap: write your reply and get a video of hands unhurriedly typing it on a
+          phone. To read it, they’ll have to watch. Exactly like you had to listen.
+        </p>
+        <p data-i18n="about3">It’s a joke, not a war. Send it, laugh together — and maybe the next message will arrive as text.</p>
+        <p class="note-soft" data-i18n="about5">
+          To be clear: voice messages are great when there’s no better way. If you’re driving, find typing or reading the
+          screen hard, or your hands are just busy — record away. The joke is about the habit of sending a two-minute voice
+          note where one line would do, and it’s meant for people who’ll laugh along with you.
+        </p>
+        <p class="privacy" data-i18n="about4">The video is made right on your phone. Your text is never uploaded or stored anywhere. We only count anonymous visits and button taps — no cookies.</p>
+      </section>
+
+      <footer>
+        <p data-i18n="footer">Made on your device · nothing is uploaded</p>
+        <!-- Keep on one line: the HTML minifier strips line breaks between tags together with the spaces -->
+        <p><span data-i18n="contactLead">Ideas or found a bug?</span> <a href="mailto:hello@pleasejusttext.me">hello@pleasejusttext.me</a> · <a href="https://github.com/lgordey/typing-reply" rel="noopener">GitHub</a></p>
+      </footer>
+    </main>
+
+    <!-- Result sheet: opens on “Make the video” — progress first, then the video and “Send”. -->
+    <dialog id="sheet" aria-labelledby="sheet-title">
+      <div class="sheet">
+        <div class="sheet-head">
+          <h2 id="sheet-title"></h2>
+          <button type="button" id="sheet-close" class="icon-btn" data-i18n-aria="close" aria-label="Close">
+            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+              <path d="M6 6l12 12M18 6L6 18" />
+            </svg>
+          </button>
+        </div>
+        <div class="sheet-media">
+          <video id="preview" playsinline muted loop autoplay></video>
+          <div id="sheet-progress" class="sheet-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100">
+            <span class="typing-dots big" aria-hidden="true"><i></i><i></i><i></i></span>
+            <span id="sheet-pct" class="pct">0%</span>
+            <span class="bar"><i id="sheet-bar"></i></span>
+          </div>
+        </div>
+        <p id="sheet-note" class="note"></p>
+        <button id="share" type="button" class="primary"></button>
+        <p id="share-hint" class="note"></p>
+        <button id="sheet-secondary" type="button" class="link-btn"></button>
+      </div>
+    </dialog>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

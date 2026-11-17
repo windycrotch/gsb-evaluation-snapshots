@@ -1,0 +1,32 @@
+{
+  "name": "typing-reply",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --host",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "dev:phone": "HTTPS=1 vite --host",
+    "frames": "tsx scripts/frames.ts",
+    "og": "tsx scripts/og.ts",
+    "stats": "tsx scripts/stats.ts"
+  },
+  "dependencies": {
+    "@fontsource/inter": "^5.3.0",
+    "mediabunny": "^1.66.0"
+  },
+  "devDependencies": {
+    "@napi-rs/canvas": "^1.1.0",
+    "@types/node": "^24.19.2",
+    "@vitejs/plugin-basic-ssl": "^2.3.0",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8",
+    "vitest": "^5.1.0",
+    "wrangler": "^4.156.0"
+  }
+}

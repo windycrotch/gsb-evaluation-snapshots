@@ -1,0 +1,55 @@
+# Manual production deploy to pleasejusttext.me.
+# GitHub → Actions → “Deploy production” → Run workflow → pick what to ship.
+# dev (typing-reply.*.workers.dev) deploys on every push to main via Cloudflare Workers Builds.
+name: Deploy production
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: What to deploy to pleasejusttext.me
+        type: choice
+        options:
+          - app
+          - placeholder
+        default: app
+
+concurrency:
+  group: production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Test & build app
+        if: inputs.target == 'app'
+        env:
+          # Cloudflare Web Analytics token: GitHub → Settings → Secrets and variables → Actions → Variables
+          VITE_CF_BEACON_TOKEN: ${{ vars.CF_BEACON_TOKEN }}
+        run: |
+          npm test
+          npm run build
+
+      - name: Use placeholder
+        if: inputs.target == 'placeholder'
+        run: |
+          rm -rf dist
+          mkdir dist
+          cp placeholder/* dist/
+
+      - name: Deploy
+        run: npx wrangler deploy --env production
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
