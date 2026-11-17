@@ -1,5 +1,10 @@
 # 更新记录
 
+## Unreleased
+
+- `ffmpeg_storyboard` 采样容错：单格在目标秒数取帧失败时，在该时间之前就近回退重试（步长为 1/4 采样间隔、最多 3 次，回退点始终不早于 start）；回退成功采用真实画面，仍失败则用同尺寸纯黑占位图补齐。返回 `frames` 每格新增布尔字段 `ok`（true=真实画面，false=黑场占位），`seconds` 保持请求的采样时间不变。仅当所有格都拿不到真实画面或探测不到视频时长才报错；重试与占位均在私有临时目录完成，总览图仍只写一次，尺寸、行列布局、参数校验与输出命名规则不变。
+- Fault-tolerant storyboard sampling: a failed cell retries at progressively earlier in-range times before falling back to an equal-size black placeholder; each frame now reports an `ok` boolean while `seconds` keeps the requested time. The run fails only when every cell fails or the duration cannot be probed; layout, validation, naming and the single-write publish are unchanged.
+
 ## 0.7.8 (2026-11-14)
 
 - 适配 DSH 0.2.2-rc.3：最低 Harness 版本声明提升至 0.2.2-rc.3，运行时代码未变。

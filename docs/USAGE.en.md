@@ -89,7 +89,7 @@ Run `ffmpeg_health` first: it probes ffmpeg and ffprobe separately, prints the e
 
 ```bash
 pnpm install
-pnpm test       # build + 123 tests
+pnpm test       # build + 128 tests
 ```
 
 ## License
@@ -98,4 +98,4 @@ MIT
 
 ## Video contact sheet
 
-Use `ffmpeg_storyboard({input:"movie.mp4",count:12,columns:4,width:320})` to create one PNG. Optional `start` and `end` accept seconds or HH:MM:SS.mmm. Count is 2–36, columns 1–6 and cell width 160–640. Cells use a 16:9 letterbox and preserve source aspect ratio. The tool result maps each cell to a requested seek time, not an exact decoded frame timecode. Uniform sampling does not detect scenes or guarantee coverage of short shots. Requires a seekable local video with a known duration. Sources and existing outputs are preserved by default; cancellation/failure cleans scratch and publishes no partial sheet.
+Use `ffmpeg_storyboard({input:"movie.mp4",count:12,columns:4,width:320})` to create one PNG. Optional `start` and `end` accept seconds or HH:MM:SS.mmm. Count is 2–36, columns 1–6 and cell width 160–640. Cells use a 16:9 letterbox and preserve source aspect ratio. The tool result maps each cell to a requested seek time, not an exact decoded frame timecode. Uniform sampling does not detect scenes or guarantee coverage of short shots. When a cell cannot be grabbed, sampling retries at progressively earlier times (never before `start`); a recovered cell uses the real frame, while a cell that still fails is filled with an equal-size pure-black placeholder. Each returned frame carries an `ok` boolean (`true` = real frame, `false` = black placeholder); the run only errors when every cell fails or the video duration cannot be probed, and `seconds` always stays the requested sample time. Retries and placeholders run in a private scratch directory and the sheet is written exactly once. Sources and existing outputs are preserved by default (a clashing name is auto-suffixed when overwrite is false); cancellation/failure cleans scratch and publishes no partial sheet.

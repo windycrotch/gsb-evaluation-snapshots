@@ -1,4 +1,4 @@
-import { constants, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { constants, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, renameSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, extname, join } from 'node:path'
 import { probeArgs } from './args.js'
@@ -20,11 +20,26 @@ function seconds(value: unknown, fallback: number, name: string): number {
   return parsed
 }
 
+/** 取帧失败后的就近回退次数（不含目标点的首次尝试）。 */
+const SAMPLE_FALLBACK_ATTEMPTS = 3
+/** 每次回退相对采样间隔（end-start)/count 后退的比例。 */
+const SAMPLE_FALLBACK_STEP_RATIO = 0.25
+
+/** 把时间钉在 FFmpeg 的微秒时钟上并向下取整，避免越过短视频最后一帧。 */
+function microFloor(value: number): number {
+  return Math.floor(value * 1e6) / 1e6
+}
+
+/** 输出文件存在且是非空普通文件才算拿到真实画面。 */
+function frameFileReady(path: string): boolean {
+  return existsSync(path) && lstatSync(path).isFile() && lstatSync(path).size > 0
+}
+
 /** A bounded contact sheet, assembled in private scratch before publishing its PNG. */
 export function createStoryboardTool(config: ResolvedFfmpegConfig, runner: ProcessRunner): FfmpegToolDefinition {
   return {
     name: 'ffmpeg_storyboard',
-    description: '把本地视频按时长均匀采样，拼成一张 PNG 总览图，返回每格序号和采样目标秒数，便于人工或视觉模型快速检查内容。默认 12 格、4 列；不代表自动镜头识别，也不保证覆盖所有短镜头。可设置 start/end 检查片段。保留源视频；默认给重名输出另取文件名。',
+    description: '把本地视频按时长均匀采样，拼成一张 PNG 总览图，返回每格序号、采样目标秒数与 ok（true=真实画面，false=取帧与回退均失败后的纯黑占位图），便于人工或视觉模型快速检查内容。默认 12 格、4 列；不代表自动镜头识别，也不保证覆盖所有短镜头。可设置 start/end 检查片段。单格取帧失败会向更早时间就近回退重试，仍失败则用黑场占位补齐，只有全部失败才报错。保留源视频；默认给重名输出另取文件名。',
     parameters: {
       type: 'object', additionalProperties: false, required: ['input'], properties: {
         input: { type: 'string', description: '本地视频路径，相对当前会话工作区。' },
@@ -37,10 +52,10 @@ export function createStoryboardTool(config: ResolvedFfmpegConfig, runner: Proce
       },
     },
     output: {
-      schema: { type: 'object', additionalProperties: true, required: ['output', 'count', 'frames'], properties: { output: { type: 'string' }, count: { type: 'integer' }, frames: { type: 'array', items: { type: 'object', additionalProperties: true } } } },
+      schema: { type: 'object', additionalProperties: true, required: ['output', 'count', 'frames'], properties: { output: { type: 'string' }, count: { type: 'integer' }, frames: { type: 'array', items: { type: 'object', additionalProperties: true, required: ['index', 'seconds', 'ok'], properties: { index: { type: 'integer' }, row: { type: 'integer' }, column: { type: 'integer' }, seconds: { type: 'number' }, ok: { type: 'boolean' } } } } } },
       render(_args, value) {
-        const result = value as { output: string; columns: number; rows: number; frames: Array<{ index: number; row: number; column: number; seconds: number }> }
-        return [{ type: 'text', text: ['视频总览图：' + result.output, result.columns + ' 列 × ' + result.rows + ' 行；从左到右、从上到下。下面是采样目标时间，非逐帧时间码：', ...result.frames.map(f => '#' + f.index + '（' + f.row + ' 行 ' + f.column + ' 列）：' + f.seconds + ' 秒')].join('\n') }]
+        const result = value as { output: string; columns: number; rows: number; frames: Array<{ index: number; row: number; column: number; seconds: number; ok: boolean }> }
+        return [{ type: 'text', text: ['视频总览图：' + result.output, result.columns + ' 列 × ' + result.rows + ' 行；从左到右、从上到下。下面是采样目标时间，非逐帧时间码（ok=false 为黑场占位格）：', ...result.frames.map(f => '#' + f.index + '（' + f.row + ' 行 ' + f.column + ' 列）：' + f.seconds + ' 秒' + (f.ok ? '' : '（占位）'))].join('\n') }]
       },
     },
     async execute(raw, execution) {
@@ -71,15 +86,55 @@ export function createStoryboardTool(config: ResolvedFfmpegConfig, runner: Proce
       if (start > lastFrame) throw new Error('所选范围太靠近结尾，无法取得视频帧；请提前 start。')
       // Round down to FFmpeg's microsecond clock. Millisecond rounding can seek
       // beyond the final frame of a short fractional-frame-rate video.
-      const frames = Array.from({ length: count }, (_, i) => ({ index: i + 1, row: Math.floor(i / columns) + 1, column: i % columns + 1, seconds: Math.floor(Math.min(lastFrame, start + (end - start) * i / count) * 1e6) / 1e6 }))
+      const frames = Array.from({ length: count }, (_, i) => ({ index: i + 1, row: Math.floor(i / columns) + 1, column: i % columns + 1, seconds: microFloor(Math.min(lastFrame, start + (end - start) * i / count)), ok: false }))
+      const fallbackStep = (end - start) / count * SAMPLE_FALLBACK_STEP_RATIO
       const scratch = mkdtempSync(join(tmpdir(), 'dsh-ffmpeg-storyboard-'))
       try {
+        const filter = 'scale=' + cellWidth + ':' + cellHeight + ':force_original_aspect_ratio=decrease,pad=' + cellWidth + ':' + cellHeight + ':(ow-iw)/2:(oh-ih)/2:color=black,setsar=1'
+        const sampleArgv = (at: number, image: string): string[] =>
+          [config.ffmpegPath, '-nostdin', '-v', 'error', '-n', '-ss', at.toFixed(6), '-i', input, '-map', '0:v:0', '-frames:v', '1', '-an', '-vf', filter, '-update', '1', image]
         for (const frame of frames) {
           const image = join(scratch, 'frame-' + String(frame.index).padStart(3, '0') + '.png')
-          const filter = 'scale=' + cellWidth + ':' + cellHeight + ':force_original_aspect_ratio=decrease,pad=' + cellWidth + ':' + cellHeight + ':(ow-iw)/2:(oh-ih)/2:color=black,setsar=1'
-          await invoke([config.ffmpegPath, '-nostdin', '-v', 'error', '-n', '-ss', frame.seconds.toFixed(6), '-i', input, '-map', '0:v:0', '-frames:v', '1', '-an', '-vf', filter, '-update', '1', image], '采样 #' + frame.index)
-          if (!existsSync(image) || !lstatSync(image).isFile() || lstatSync(image).size === 0) throw new Error('无法取得第 ' + frame.index + ' 格（' + frame.seconds + ' 秒）的画面，请缩短采样范围后重试。')
+          // 目标点优先；失败则只向更早的时间就近回退，每次都必须落在 [start, end) 且不早于 start。
+          const candidates: number[] = [frame.seconds]
+          for (let attempt = 1; attempt <= SAMPLE_FALLBACK_ATTEMPTS; attempt++) {
+            const at = microFloor(Math.max(start, frame.seconds - fallbackStep * attempt))
+            if (!candidates.includes(at)) candidates.push(at)
+          }
+          let captured = false
+          for (let attempt = 0; attempt < candidates.length; attempt++) {
+            const at = candidates[attempt]
+            const attemptImage = join(scratch, 'frame-' + String(frame.index).padStart(3, '0') + '-try-' + attempt + '.png')
+            try {
+              await invoke(sampleArgv(at, attemptImage), '采样 #' + frame.index + (attempt === 0 ? '' : '（回退 ' + attempt + '）'))
+            } catch (error) {
+              // 取消/超时属于任务级中断，不能被单格容错吞掉
+              signal?.throwIfAborted()
+              rmSync(attemptImage, { force: true })
+              continue
+            }
+            signal?.throwIfAborted()
+            if (!frameFileReady(attemptImage)) {
+              rmSync(attemptImage, { force: true })
+              continue
+            }
+            // 每个候选写独立临时文件，成功后才改名到拼格所需的规范文件名，绝不重写既有文件
+            renameSync(attemptImage, image)
+            captured = true
+            break
+          }
+          if (captured) {
+            frame.ok = true
+            continue
+          }
+          // 回退仍失败：用等尺寸纯黑占位图补齐该格，标记 ok=false；其余格照常采样。
+          const placeholder = join(scratch, 'frame-' + String(frame.index).padStart(3, '0') + '-black.png')
+          await invoke([config.ffmpegPath, '-nostdin', '-v', 'error', '-n', '-f', 'lavfi', '-i', 'color=c=black:s=' + cellWidth + 'x' + cellHeight, '-frames:v', '1', '-update', '1', placeholder], '生成第 ' + frame.index + ' 格黑场占位图')
+          if (!frameFileReady(placeholder)) throw new Error('第 ' + frame.index + ' 格的黑场占位图未生成，输出文件保留。')
+          renameSync(placeholder, image)
         }
+        // 所有格都拿不到真实画面时没有交付价值，直接报错并不发布总览图
+        if (!frames.some(frame => frame.ok)) throw new Error('所有采样点都无法取得真实画面，请缩短采样范围或先用 ffmpeg_probe 检查文件。')
         const assembled = join(scratch, 'storyboard.png')
         await invoke([config.ffmpegPath, '-nostdin', '-v', 'error', '-n', '-framerate', '1', '-start_number', '1', '-i', join(scratch, 'frame-%03d.png'), '-vf', 'tile=' + columns + 'x' + rows + ':nb_frames=' + count + ':padding=8:margin=8:color=black', '-frames:v', '1', '-update', '1', assembled], '拼接视频总览图')
         if (!existsSync(assembled) || !lstatSync(assembled).isFile() || lstatSync(assembled).size === 0) throw new Error('视频总览图未生成，输出文件保留。')
