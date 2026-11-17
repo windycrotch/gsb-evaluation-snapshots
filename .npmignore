@@ -1,0 +1,11 @@
+# Folders:
+test
+node_modules
+
+# Files:
+bun.lock
+.gitignore
+index.html
+favicon.svg
+vite.config.js
+*.code-workspace
