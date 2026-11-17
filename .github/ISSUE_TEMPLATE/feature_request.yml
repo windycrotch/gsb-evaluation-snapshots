@@ -1,0 +1,28 @@
+name: Feature request
+description: Suggest a focused improvement for Bytebound: Meadow Run.
+title: "feature: "
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Propose one clear player-facing improvement. Please do not include copyrighted third-party characters, levels, art, music, or other assets.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What player need does this address?
+      placeholder: Players need...
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      placeholder: Add...
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Describe any other approaches or workarounds you considered.

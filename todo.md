@@ -1,0 +1,39 @@
+# Mobile Playability Fixes
+
+- [x] Enforce landscape gameplay on supported mobile browsers and show a useful portrait handoff.
+- [x] Replace the crushed portrait layout with an intentional orientation gate and safe-area framing.
+- [x] Rebuild touch controls for thumb reach, pointer capture, and reliable release behavior.
+- [x] Fix the mobile start flow so the play button and first touch input reliably enter gameplay.
+- [x] Verify keyboard, touch, desktop, landscape-mobile, and portrait-mobile behavior.
+- [ ] Save a checkpoint with the completed mobile repair.
+- [x] Add an original looping retro background music track.
+- [x] Add original jump and item-collection sound effects.
+- [x] Wire audio cues to game start, jump, and shard collection without breaking mobile autoplay rules.
+- [x] Add accessible mute/volume controls and verify the audio-enhanced game.
+- [ ] Save a checkpoint with the audio layer.
+- [x] Audit and lower unreachable board gaps so every required route is jumpable.
+- [x] Add forgiving jump assistance for edge cases without removing challenge.
+- [x] Add haptic feedback for jump, shard collection, damage, checkpoint, and finish with graceful fallback.
+- [x] Replace the boxed mobile presentation with a full-viewport game surface and safe-area HUD.
+- [x] Verify desktop, landscape mobile, portrait handoff, touch input, and production build.
+- [ ] Save a checkpoint with the level, haptic, and full-viewport fixes.
+- [x] Add a mobile-friendly settings menu with clear open/close and focus behavior.
+- [x] Add saved left-handed control preference and swap the touch control clusters.
+- [x] Add saved audio and haptic preferences and apply them immediately to gameplay.
+- [x] Verify settings persistence across reloads and landscape mobile layout.
+- [ ] Save a checkpoint with the settings menu and preferences.
+- [x] Inspect the target GitHub repository history and current project branch.
+- [x] Commit the latest verified game project using the user’s GitHub identity.
+- [x] Push the project to vincenzo-afk/MARIO and verify the remote commit.
+- [x] Audit repository metadata, workflows, access, and the existing source tree.
+- [x] Replace the README with codebase-grounded Bytebound: Meadow Run documentation.
+- [x] Add appropriate contributor, issue, pull-request, security, and CI infrastructure.
+- [x] Apply a concise, evidence-based set of trending GitHub topics and repository description.
+- [x] Verify collaborator access and remove any non-user collaborator only if actually present.
+- [x] Validate, commit, and push the production-polished repository.
+- [x] Inspect direct collaborators, pending invitations, and repository permission assignments.
+- [x] Remove any verified agent-associated collaborator or pending invitation without changing owner access; none were present.
+- [x] Verify and report the final owner-only access state.
+- [x] Identify every manus-agent-attributed commit on main.
+- [x] Rewrite agent-attributed commit metadata to vincenzo-afk without changing project contents.
+- [x] Force-push rewritten main and verify the GitHub Contributors list no longer includes manus-agent.
