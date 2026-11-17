@@ -334,6 +334,11 @@ export function traceUvToThreeLocal(
     return results;
   }
 
+  const uvAttr = mesh.geometry.getAttribute("uv");
+  if (!uvAttr) {
+    return results;
+  }
+
   const bvh = getOrCreateUvBvh(mesh.geometry);
 
   _queryPoint.set(uv.x, uv.y, 0);
@@ -400,6 +405,10 @@ function traceTriangle(
   const posAttr = geometry.getAttribute("position");
   const normAttr = geometry.getAttribute("normal");
   const index = geometry.index;
+
+  if (!uvAttr || !posAttr) {
+    return null;
+  }
 
   const i0 = index ? index.getX(faceIndex * 3) : faceIndex * 3;
   const i1 = index ? index.getX(faceIndex * 3 + 1) : faceIndex * 3 + 1;

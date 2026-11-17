@@ -38,6 +38,7 @@ import {
   mapPixiToNdc as mapPixiToNdcUtil,
   mapThreeToNdc,
   mapUvToNdc,
+  projectRayToMeshPlaneIntersection,
   traceUvToThree,
   traceUvToThreeLocal,
 } from "./bijections";
@@ -54,6 +55,7 @@ import {
   ThreeSceneContext,
   useThreeSceneContext,
 } from "./three-scene-context";
+import { useLazyRef } from "./use-lazy-ref";
 import { useRenderSchedule } from "./use-render-schedule";
 
 /**
@@ -103,6 +105,11 @@ export interface ThreeRenderTextureProps {
   onPointerMissed?: (event: MouseEvent) => void;
   /** Children will be rendered into a portal */
   children: ReactNode;
+}
+
+/** Whether any r3f object holds capture of this pointer */
+function isPointerCaptured(state: RootState, pointerId: number) {
+  return (state.internal.pointerMap.get(pointerId)?.captured.size ?? 0) > 0;
 }
 
 /**
@@ -192,6 +199,9 @@ export function ThreeRenderTexture({
   const _ndc = new Vector2();
   const _uv = new Vector2();
   const [raycaster] = useState(() => new Raycaster());
+  // Last mesh hit per live or captured pointer;
+  // captured drags off that mesh extend its plane
+  const lastHitsRef = useLazyRef(() => new Map<number, Mesh>());
 
   function mapThreeToParentUv(vec3: Vector3, out?: Vector2) {
     // Project world vec3 through camera to NDC
@@ -351,14 +361,37 @@ export function ThreeRenderTexture({
     if (!computeParent(event, previous)) {
       return false;
     }
+
+    const pointerId = (event as PointerEvent).pointerId;
+    const isCaptured =
+      pointerId !== undefined && isPointerCaptured(state, pointerId);
+    const lastHits = lastHitsRef.current;
+    for (const id of lastHits.keys()) {
+      if (id !== pointerId && !isPointerCaptured(state, id)) {
+        lastHits.delete(id);
+      }
+    }
+
+    // Captured drags stay on the mesh where capture began
+    const capturedMesh = isCaptured ? lastHits.get(pointerId) : undefined;
     const [intersection] = previous.raycaster.intersectObjects(
-      getAttachedObjects(),
+      capturedMesh ? [capturedMesh] : getAttachedObjects(),
       false,
     );
-    if (!intersection) {
-      return false;
+
+    let uv = intersection?.uv;
+    if (intersection?.object instanceof Mesh && uv) {
+      lastHits.set(pointerId, intersection.object);
+    } else if (capturedMesh) {
+      // Ray slipped off every triangle: extend the start mesh's plane so
+      // the captured drag keeps receiving coordinates
+      const extendedIntersection = projectRayToMeshPlaneIntersection(
+        previous.raycaster.ray,
+        capturedMesh,
+      );
+      uv = extendedIntersection?.uv;
     }
-    const uv = intersection.uv;
+
     if (!uv) {
       return false;
     }
@@ -414,6 +447,8 @@ export function ThreeRenderTexture({
               <group onPointerOver={() => null} />
             </PortalContent>,
             scene,
+            // computeFn reads refs; r3f calls it on events only
+            // eslint-disable-next-line react-hooks/refs
             {
               events: {
                 compute: compute ?? computeFn,

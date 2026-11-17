@@ -18,6 +18,7 @@ import { Route as ExampleBijectionsRouteImport } from './routes/example/bijectio
 import { Route as ExampleContextBridgeRouteImport } from './routes/example/context-bridge'
 import { Route as ExampleDemandRenderingRouteImport } from './routes/example/demand-rendering'
 import { Route as ExampleEventCostRouteImport } from './routes/example/event-cost'
+import { Route as ExampleSharedRenderTextureRouteImport } from './routes/example/shared-render-texture'
 import { Route as ExampleSharedTextureRouteImport } from './routes/example/shared-texture'
 import { Route as ExampleThreePointerCaptureRouteImport } from './routes/example/three-pointer-capture'
 import { Route as ExampleThreeRenderTextureRouteImport } from './routes/example/three-render-texture'
@@ -69,6 +70,12 @@ const ExampleEventCostRoute = ExampleEventCostRouteImport.update({
   path: '/event-cost',
   getParentRoute: () => ExampleRoute,
 } as any)
+const ExampleSharedRenderTextureRoute =
+  ExampleSharedRenderTextureRouteImport.update({
+    id: '/shared-render-texture',
+    path: '/shared-render-texture',
+    getParentRoute: () => ExampleRoute,
+  } as any)
 const ExampleSharedTextureRoute = ExampleSharedTextureRouteImport.update({
   id: '/shared-texture',
   path: '/shared-texture',
@@ -106,6 +113,7 @@ export interface FileRoutesByFullPath {
   '/example/context-bridge': typeof ExampleContextBridgeRoute
   '/example/demand-rendering': typeof ExampleDemandRenderingRoute
   '/example/event-cost': typeof ExampleEventCostRoute
+  '/example/shared-render-texture': typeof ExampleSharedRenderTextureRoute
   '/example/shared-texture': typeof ExampleSharedTextureRoute
   '/example/three-pointer-capture': typeof ExampleThreePointerCaptureRoute
   '/example/three-render-texture': typeof ExampleThreeRenderTextureRoute
@@ -121,6 +129,7 @@ export interface FileRoutesByTo {
   '/example/context-bridge': typeof ExampleContextBridgeRoute
   '/example/demand-rendering': typeof ExampleDemandRenderingRoute
   '/example/event-cost': typeof ExampleEventCostRoute
+  '/example/shared-render-texture': typeof ExampleSharedRenderTextureRoute
   '/example/shared-texture': typeof ExampleSharedTextureRoute
   '/example/three-pointer-capture': typeof ExampleThreePointerCaptureRoute
   '/example/three-render-texture': typeof ExampleThreeRenderTextureRoute
@@ -138,6 +147,7 @@ export interface FileRoutesById {
   '/example/context-bridge': typeof ExampleContextBridgeRoute
   '/example/demand-rendering': typeof ExampleDemandRenderingRoute
   '/example/event-cost': typeof ExampleEventCostRoute
+  '/example/shared-render-texture': typeof ExampleSharedRenderTextureRoute
   '/example/shared-texture': typeof ExampleSharedTextureRoute
   '/example/three-pointer-capture': typeof ExampleThreePointerCaptureRoute
   '/example/three-render-texture': typeof ExampleThreeRenderTextureRoute
@@ -156,6 +166,7 @@ export interface FileRouteTypes {
     | '/example/context-bridge'
     | '/example/demand-rendering'
     | '/example/event-cost'
+    | '/example/shared-render-texture'
     | '/example/shared-texture'
     | '/example/three-pointer-capture'
     | '/example/three-render-texture'
@@ -171,6 +182,7 @@ export interface FileRouteTypes {
     | '/example/context-bridge'
     | '/example/demand-rendering'
     | '/example/event-cost'
+    | '/example/shared-render-texture'
     | '/example/shared-texture'
     | '/example/three-pointer-capture'
     | '/example/three-render-texture'
@@ -187,6 +199,7 @@ export interface FileRouteTypes {
     | '/example/context-bridge'
     | '/example/demand-rendering'
     | '/example/event-cost'
+    | '/example/shared-render-texture'
     | '/example/shared-texture'
     | '/example/three-pointer-capture'
     | '/example/three-render-texture'
@@ -266,6 +279,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ExampleEventCostRouteImport
       parentRoute: typeof ExampleRoute
     }
+    '/example/shared-render-texture': {
+      id: '/example/shared-render-texture'
+      path: '/shared-render-texture'
+      fullPath: '/example/shared-render-texture'
+      preLoaderRoute: typeof ExampleSharedRenderTextureRouteImport
+      parentRoute: typeof ExampleRoute
+    }
     '/example/shared-texture': {
       id: '/example/shared-texture'
       path: '/shared-texture'
@@ -310,6 +330,7 @@ interface ExampleRouteChildren {
   ExampleContextBridgeRoute: typeof ExampleContextBridgeRoute
   ExampleDemandRenderingRoute: typeof ExampleDemandRenderingRoute
   ExampleEventCostRoute: typeof ExampleEventCostRoute
+  ExampleSharedRenderTextureRoute: typeof ExampleSharedRenderTextureRoute
   ExampleSharedTextureRoute: typeof ExampleSharedTextureRoute
   ExampleThreePointerCaptureRoute: typeof ExampleThreePointerCaptureRoute
   ExampleThreeRenderTextureRoute: typeof ExampleThreeRenderTextureRoute
@@ -324,6 +345,7 @@ const ExampleRouteChildren: ExampleRouteChildren = {
   ExampleContextBridgeRoute: ExampleContextBridgeRoute,
   ExampleDemandRenderingRoute: ExampleDemandRenderingRoute,
   ExampleEventCostRoute: ExampleEventCostRoute,
+  ExampleSharedRenderTextureRoute: ExampleSharedRenderTextureRoute,
   ExampleSharedTextureRoute: ExampleSharedTextureRoute,
   ExampleThreePointerCaptureRoute: ExampleThreePointerCaptureRoute,
   ExampleThreeRenderTextureRoute: ExampleThreeRenderTextureRoute,
