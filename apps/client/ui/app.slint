@@ -1,0 +1,4025 @@
+import { CheckBox, ComboBox, LineEdit, ListView, Slider, ScrollView } from "std-widgets.slint";
+
+/// One rule of a smart playlist, as its editor shows it.
+export struct RuleRow {
+    /// Index into the editor's field list.
+    field: int,
+    /// The operators this field takes, as labels, and the chosen one.
+    ops: [string],
+    op: int,
+    value: string,
+    value2: string,
+    /// What to type: "seconds or m:ss", "days", "yes or no"…
+    hint: string,
+    needs-value: bool,
+    between: bool,
+}
+
+/// Something the playlist page's search can add: a track, album, artist or genre.
+export struct AddItem {
+    id: string,
+    title: string,
+    detail: string,
+}
+
+export struct ArtistItem {
+    id: string,
+    name: string,
+    subtitle: string,
+    image: image,
+}
+
+export struct AlbumItem {
+    id: string,
+    title: string,
+    subtitle: string,
+    cover: image,
+}
+
+/// One row of the Albums grid.
+export struct AlbumRow {
+    items: [AlbumItem],
+}
+
+export struct TrackItem {
+    number: string,
+    title: string,
+    artist: string,
+    duration: string,
+    playing: bool,
+    /// False for playlist entries whose file is currently missing.
+    available: bool,
+}
+
+export struct PlaylistItem {
+    id: string,
+    name: string,
+    subtitle: string,
+    smart: bool,
+}
+
+export struct PlaylistView {
+    id: string,
+    name: string,
+    meta: string,
+    cover: image,
+}
+
+export struct ArtistView {
+    id: string,
+    name: string,
+    stats: string,
+    genres: string,
+    meta: string,
+    biography: string,
+    image: image,
+}
+
+/// A row in a credits or band-member list. `heading` is set on the first row of each group.
+export struct CreditItem {
+    heading: string,
+    name: string,
+    detail: string,
+    artist-id: string,
+}
+
+export struct AlbumView {
+    id: string,
+    title: string,
+    artist: string,
+    meta: string,
+    genres: string,
+    cover: image,
+}
+
+export struct NowPlayingView {
+    active: bool,
+    track-id: string,
+    title: string,
+    artist: string,
+    album: string,
+    year: string,
+    format: string,
+    quality: string,
+    genres: string,
+    artist-id: string,
+    artist-meta: string,
+    biography: string,
+    /// Shown while credits / artist details are still being fetched.
+    loading-details: bool,
+    cover: image,
+    backdrop: image,
+    accent: color,
+}
+
+export struct LoginState {
+    /// The built-in admin still has its default password: hint at it on the sign-in form.
+    default-admin: bool,
+    /// Signed in with a default password: a new one must be chosen before anything else.
+    changing-password: bool,
+    /// The current password isn't known (e.g. the app restarted mid-change), so ask for it.
+    need-current: bool,
+    /// First run, admin password set: register the person who'll actually listen.
+    onboarding: bool,
+    busy: bool,
+    error: string,
+    /// A server with a certificate this computer doesn't trust: ask whether to (its SHA-256).
+    trust-fingerprint: string,
+    trust-server: string,
+    /// First start (or switching): a standalone player, or connected to a server?
+    choosing: bool,
+    /// This player has the library engine, so it can be used standalone.
+    local-available: bool,
+    /// Standalone's first start: choosing the folder the library starts with.
+    picking-folder: bool,
+    music-folder: string,
+    /// Switching away from a library in use: it can be gone back to (never at first start).
+    can-go-back: bool,
+}
+
+export enum Page { welcome, artist, album, search, playlist, queue, lyrics, history, albums, settings }
+export enum LyricsState { loading, none, instrumental, plain, synced }
+
+export enum RepeatMode { off, all, one }
+
+// Icon outlines from Lucide (https://lucide.dev, ISC licence), 24×24 viewbox.
+global Icons {
+    out property <string> shuffle: "M2 18h1.4c1.3 0 2.5-.6 3.3-1.7l6.1-8.6c.7-1.1 2-1.7 3.3-1.7H22 M18 2l4 4-4 4 M2 6h1.9c1.5 0 2.9.9 3.6 2.2 M22 18h-5.9c-1.3 0-2.6-.7-3.3-1.8l-.5-.8 M18 14l4 4-4 4";
+    out property <string> repeat: "M17 2l4 4-4 4 M3 11v-1a4 4 0 0 1 4-4h14 M7 22l-4-4 4-4 M21 13v1a4 4 0 0 1-4 4H3";
+    out property <string> repeat-one: "M17 2l4 4-4 4 M3 11v-1a4 4 0 0 1 4-4h14 M7 22l-4-4 4-4 M21 13v1a4 4 0 0 1-4 4H3 M11 10h1v4";
+    out property <string> queue: "M16 5H3 M16 12H3 M11 19H3 M21 16v6 M18 19h6";
+    // Lucide "disc-3".
+    out property <string> albums: "M2 12a10 10 0 1 0 20 0a10 10 0 1 0-20 0 M6 12c0-1.7.7-3.2 1.8-4.2 M10 12a2 2 0 1 0 4 0a2 2 0 1 0-4 0 M18 12c0 1.7-.7 3.2-1.8 4.2";
+    // Lucide "history".
+    out property <string> history: "M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8 M3 3v5h5 M12 7v5l4 2";
+    // Lucide "rotate-ccw".
+    out property <string> replay: "M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8 M3 3v5h5";
+    // Lucide "mic-vocal".
+    out property <string> lyrics: "M11 7.601l-5.994 8.19a1 1 0 0 0 .1 1.298l.817.818a1 1 0 0 0 1.314.087L15.09 12 M16.5 21.174C15.5 20.5 14.372 20 13 20c-2.058 0-3.928 2.356-6 2-2.072-.356-2.775-3.369-1.5-4.5 M11 7a5 5 0 1 0 10 0a5 5 0 1 0-10 0";
+    // Lucide "user".
+    out property <string> user: "M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2 M8 7a4 4 0 1 0 8 0a4 4 0 1 0-8 0";
+    out property <string> more: "M12 12h.01 M19 12h.01 M5 12h.01";
+    out property <string> settings: "M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z M9 12a3 3 0 1 0 6 0a3 3 0 1 0-6 0";
+    out property <string> switch-library: "M8 3L4 7l4 4 M4 7h16 M16 21l4-4-4-4 M20 17H4";
+    out property <string> sign-out: "M16 17l5-5-5-5 M21 12H9 M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4";
+    out property <string> plus: "M5 12h14 M12 5v14";
+    out property <string> window-close: "M18 6 6 18 M6 6l12 12";
+    out property <string> window-minimize: "M6 12h12";
+    out property <string> window-maximize: "M6 6h12v12H6z";
+    out property <string> window-restore: "M9 9h10v10H9z M6 15V6h9";
+    // Lucide "play", "pause", "skip-back", "skip-forward", drawn filled.
+    out property <string> play: "M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z";
+    out property <string> pause: "M14 4h4v16h-4z M6 4h4v16H6z";
+    out property <string> previous: "M17.971 4.285A2 2 0 0 1 21 6v12a2 2 0 0 1-3.029 1.715l-9.997-5.998a2 2 0 0 1-.003-3.432z M3 20V4";
+    out property <string> next: "M21 4v16 M6.029 4.285A2 2 0 0 0 3 6v12a2 2 0 0 0 3.029 1.715l9.997-5.998a2 2 0 0 0 .003-3.432z";
+    // Lucide "volume-2".
+    out property <string> volume: "M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z M16 9a5 5 0 0 1 0 6 M19.364 18.364a9 9 0 0 0 0-12.728";
+}
+
+export global Theme {
+    out property <color> bg: #0c0d10;
+    out property <color> surface: #15171c;
+    out property <color> surface-hi: #1e2128;
+    /// The user's accent (a fixed colour, or one taken from the playing album's cover).
+    in-out property <color> accent: #1ed760;
+    /// Panels let the window's album-colour gradient show through.
+    out property <color> panel: #15171c99;
+    out property <color> chrome: #0c0d10a6;
+    /// The three levels of text as designed, for the plain background.
+    out property <color> text-base: #f2f3f5;
+    out property <color> muted-base: #9097a3;
+    out property <color> faint-base: #5c6370;
+    /// The levels in use: the designed ones, lightened where the album-colour
+    /// gradient would make them hard to read (see appearance.rs).
+    in-out property <color> text: text-base;
+    in-out property <color> muted: muted-base;
+    in-out property <color> faint: faint-base;
+    /// The same for the Now Playing panel, over its artwork backdrop.
+    in-out property <color> art-text: text-base;
+    in-out property <color> art-muted: muted-base;
+    in-out property <color> art-faint: faint-base;
+    out property <length> radius: 10px;
+}
+
+component Cover inherits Rectangle {
+    in property <image> source;
+    in property <length> size: 160px;
+    width: size;
+    height: size;
+    border-radius: Theme.radius;
+    background: Theme.surface-hi;
+    clip: true;
+    Image {
+        width: parent.width;
+        height: parent.height;
+        source: root.source;
+        image-fit: cover;
+    }
+}
+
+/// A round button with a vector icon (not a font glyph: Windows draws ▶ ⏮ ⏭ as colour emoji).
+component IconButton inherits Rectangle {
+    in property <string> commands;
+    /// Solid shapes (the playback icons) rather than outlines.
+    in property <bool> filled;
+    in property <length> size: 36px;
+    in property <bool> primary;
+    callback clicked;
+    width: size;
+    height: size;
+    border-radius: size / 2;
+    background: primary ? (ta.has-hover ? #ffffff : #e8e9ec) : (ta.has-hover ? Theme.surface-hi : transparent);
+    animate background { duration: 120ms; }
+    Path {
+        width: size * 0.44;
+        height: size * 0.44;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        commands: root.commands;
+        fill: root.filled ? (primary ? Theme.bg : Theme.text) : transparent;
+        stroke: primary ? Theme.bg : Theme.text;
+        stroke-width: root.filled ? 1px : 2px;
+        stroke-line-cap: round;
+        stroke-line-join: round;
+    }
+    ta := TouchArea { clicked => { root.clicked(); } }
+}
+
+/// A small icon action in the sidebar's account row, named by a label shown above it on hover.
+component SidebarAction inherits Rectangle {
+    in property <string> commands;
+    in property <string> label;
+    in property <bool> active;
+    callback clicked;
+    width: 26px;
+    height: 26px;
+    border-radius: 13px;
+    background: ta.has-hover ? Theme.surface-hi : transparent;
+    animate background { duration: 120ms; }
+    Path {
+        x: 6px;
+        y: 6px;
+        width: 14px;
+        height: 14px;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        commands: root.commands;
+        fill: transparent;
+        stroke: root.active || ta.has-hover ? Theme.text : Theme.muted;
+        stroke-width: 2px;
+        stroke-line-cap: round;
+        stroke-line-join: round;
+    }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+    // Right-aligned with the icon, so the last one's label stays inside the sidebar.
+    if ta.has-hover: Rectangle {
+        x: parent.width - self.width;
+        y: -self.height - 6px;
+        width: tip.preferred-width + 16px;
+        height: 24px;
+        border-radius: 6px;
+        background: Theme.surface-hi;
+        tip := Text {
+            text: root.label;
+            color: Theme.text;
+            font-size: 11px;
+            font-weight: 600;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+}
+
+/// Toggle with a vector icon; an accent dot underneath marks it active.
+component ToggleIcon inherits Rectangle {
+    in property <string> commands;
+    in property <bool> active;
+    in property <color> accent: Theme.accent;
+    in property <string> tooltip;
+    callback clicked;
+    /// A right-click, for toggles with options.
+    callback context-menu;
+    /// A caption to the left of the icon, drawn outside it so the layout isn't disturbed;
+    /// shown only where `caption-width` leaves it room.
+    in property <string> caption;
+    in property <color> caption-color: Theme.muted;
+    in property <length> caption-width: 170px;
+    callback caption-clicked;
+    out property <bool> hovered: ta.has-hover;
+    width: 36px;
+    height: 36px;
+    border-radius: 18px;
+    background: ta.has-hover ? Theme.surface-hi : transparent;
+    animate background { duration: 120ms; }
+    Path {
+        x: 9px;
+        y: 8px;
+        width: 18px;
+        height: 18px;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        commands: root.commands;
+        fill: transparent;
+        stroke: root.active ? root.accent : (ta.has-hover ? Theme.text : Theme.muted);
+        stroke-width: 1.6px;
+    }
+    if root.active: Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: parent.height - 5px;
+        width: 4px;
+        height: 4px;
+        border-radius: 2px;
+        background: root.accent;
+    }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.down && e.button == PointerEventButton.right { root.context-menu(); }
+        }
+    }
+    if root.caption != "" && root.caption-width >= 48px: Text {
+        width: min(self.preferred-width, root.caption-width);
+        x: -self.width - 6px;
+        height: parent.height;
+        text: root.caption;
+        color: root.caption-color;
+        font-size: 11px;
+        font-weight: 600;
+        horizontal-alignment: right;
+        vertical-alignment: center;
+        overflow: elide;
+        TouchArea { mouse-cursor: pointer; clicked => { root.caption-clicked(); } }
+    }
+}
+
+component Chip inherits Rectangle {
+    in property <string> text;
+    in property <color> accent: Theme.muted;
+    height: 22px;
+    width: label.preferred-width + 16px;
+    border-radius: 11px;
+    border-width: 1px;
+    border-color: accent.with-alpha(0.5);
+    background: accent.with-alpha(0.12);
+    label := Text {
+        text: root.text;
+        color: Theme.text;
+        font-size: 11px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+component CreditList inherits VerticalLayout {
+    in property <[CreditItem]> items;
+    in property <color> accent: Theme.muted;
+    in property <color> text-color: Theme.text;
+    in property <color> muted-color: Theme.muted;
+    in property <color> faint-color: Theme.faint;
+    callback select-artist(string);
+    spacing: 2px;
+    for item in root.items: VerticalLayout {
+        padding-top: item.heading != "" ? 12px : 0px;
+        spacing: 4px;
+        if item.heading != "": Text {
+            text: item.heading;
+            color: root.faint-color;
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: 1.2px;
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            Text {
+                text: item.name;
+                color: item.artist-id != "" && ta.has-hover ? root.accent.brighter(0.4) : root.text-color;
+                font-size: 12px;
+                font-weight: 600;
+                min-width: 110px;
+                max-width: 150px;
+                overflow: elide;
+                ta := TouchArea {
+                    enabled: item.artist-id != "";
+                    mouse-cursor: item.artist-id != "" ? pointer : default;
+                    clicked => { root.select-artist(item.artist-id); }
+                }
+            }
+            Text {
+                horizontal-stretch: 1;
+                text: item.detail;
+                color: root.muted-color;
+                font-size: 12px;
+                wrap: word-wrap;
+            }
+        }
+    }
+}
+
+component MenuItem inherits Rectangle {
+    in property <string> text;
+    /// The option in effect, for menus that pick one.
+    in property <bool> checked;
+    callback clicked;
+    height: 30px;
+    border-radius: 4px;
+    background: ta.has-hover ? Theme.surface.brighter(0.6) : transparent;
+    Text {
+        x: 10px;
+        width: parent.width - 36px;
+        text: root.text;
+        color: root.checked ? Theme.accent : Theme.text;
+        font-size: 12px;
+        font-weight: root.checked ? 600 : 400;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    if root.checked: Text {
+        x: parent.width - 24px;
+        text: "✓";
+        color: Theme.accent;
+        font-size: 12px;
+        vertical-alignment: center;
+    }
+    ta := TouchArea { clicked => { root.clicked(); } }
+}
+
+/// What the shuffle button draws from, opened by right-clicking it.
+component ShuffleMenu inherits PopupWindow {
+    in property <string> scope;
+    callback pick(string);
+    width: 190px;
+    height: 6px + 24px + 5 * 31px + 6px;
+    Rectangle {
+        background: Theme.surface-hi;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: Theme.surface.brighter(0.8);
+        drop-shadow-blur: 18px;
+        drop-shadow-color: #000000b0;
+        VerticalLayout {
+            padding: 6px;
+            spacing: 1px;
+            Text {
+                height: 24px;
+                x: 10px;
+                text: "SHUFFLE FROM";
+                color: Theme.faint;
+                font-size: 10px;
+                font-weight: 700;
+                letter-spacing: 1.2px;
+                vertical-alignment: center;
+            }
+            for option in [
+                { key: "library", label: "Whole library" },
+                { key: "album", label: "This album" },
+                { key: "artist", label: "This artist" },
+                { key: "genre", label: "This genre" },
+                { key: "playlist", label: "This playlist" },
+            ]: MenuItem {
+                text: option.label;
+                checked: option.key == root.scope;
+                clicked => { root.pick(option.key); }
+            }
+        }
+    }
+}
+
+/// The sidebar's "+": an empty playlist, or a smart one from a template.
+component NewPlaylistMenu inherits PopupWindow {
+    callback pick(string);
+    width: 250px;
+    height: 6px + 31px + 9px + 24px + 5 * 31px + 6px;
+    Rectangle {
+        background: Theme.surface-hi;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: Theme.surface.brighter(0.8);
+        drop-shadow-blur: 18px;
+        drop-shadow-color: #000000b0;
+        VerticalLayout {
+            padding: 6px;
+            spacing: 1px;
+            MenuItem { text: "Empty playlist"; clicked => { root.pick("empty"); } }
+            Rectangle { height: 9px; Rectangle { height: 1px; background: Theme.surface.brighter(0.8); } }
+            Text {
+                height: 24px;
+                x: 10px;
+                text: "SMART, KEPT UP TO DATE";
+                color: Theme.faint;
+                font-size: 10px;
+                font-weight: 700;
+                letter-spacing: 1.2px;
+                vertical-alignment: center;
+            }
+            MenuItem { text: "Random tracks"; clicked => { root.pick("random"); } }
+            MenuItem { text: "From an artist"; clicked => { root.pick("artist"); } }
+            MenuItem { text: "From albums"; clicked => { root.pick("albums"); } }
+            MenuItem { text: "By genre"; clicked => { root.pick("genre"); } }
+            MenuItem { text: "Custom rules"; clicked => { root.pick("custom"); } }
+        }
+    }
+}
+
+/// Actions on a track (or a whole album): queue it, add it to a playlist, and,
+/// where the list allows, remove or move it.
+component ActionMenu inherits PopupWindow {
+    in property <[PlaylistItem]> playlists;
+    in property <bool> removable;
+    in property <bool> movable;
+    in property <string> remove-label: "Remove";
+    callback action(string, string);
+    width: 230px;
+    Rectangle {
+        background: Theme.surface-hi;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: Theme.surface.brighter(0.8);
+        drop-shadow-blur: 18px;
+        drop-shadow-color: #000000b0;
+        VerticalLayout {
+            padding: 6px;
+            spacing: 1px;
+            MenuItem { text: "Play next"; clicked => { root.action("next", ""); } }
+            MenuItem { text: "Add to queue"; clicked => { root.action("end", ""); } }
+            if root.movable: MenuItem { text: "Move up"; clicked => { root.action("up", ""); } }
+            if root.movable: MenuItem { text: "Move down"; clicked => { root.action("down", ""); } }
+            if root.removable: MenuItem { text: root.remove-label; clicked => { root.action("remove", ""); } }
+            Rectangle { height: 9px; Rectangle { height: 1px; background: Theme.surface.brighter(0.8); } }
+            Text {
+                text: "ADD TO PLAYLIST";
+                color: Theme.faint;
+                font-size: 10px;
+                font-weight: 700;
+                letter-spacing: 1px;
+                height: 22px;
+                vertical-alignment: center;
+            }
+            for p in root.playlists: MenuItem { text: p.name; clicked => { root.action("playlist", p.id); } }
+            MenuItem { text: "New playlist…"; clicked => { root.action("new-playlist", ""); } }
+        }
+    }
+}
+
+/// One track row; shared by album, search, playlist and queue lists.
+component TrackRow inherits Rectangle {
+    in property <TrackItem> track;
+    in property <[PlaylistItem]> playlists;
+    in property <bool> removable;
+    in property <bool> movable;
+    in property <string> remove-label: "Remove";
+    callback play();
+    callback action(string, string);
+    height: 44px;
+    border-radius: 6px;
+    background: ta.has-hover || more-ta.has-hover ? Theme.surface-hi : transparent;
+    ta := TouchArea { clicked => { if root.track.available { root.play(); } } }
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 6px;
+        spacing: 16px;
+        Text {
+            width: 28px;
+            text: track.playing ? "♪" : track.number;
+            color: track.playing ? Theme.accent : Theme.faint;
+            vertical-alignment: center;
+            horizontal-alignment: right;
+        }
+        VerticalLayout {
+            alignment: center;
+            Text {
+                text: track.title;
+                color: !track.available ? Theme.faint : track.playing ? Theme.accent : Theme.text;
+                font-size: 14px;
+                overflow: elide;
+            }
+            Text { text: track.available ? track.artist : track.artist + " · missing"; color: Theme.muted; font-size: 11px; overflow: elide; }
+        }
+        Text { text: track.duration; color: Theme.muted; font-size: 12px; vertical-alignment: center; horizontal-alignment: right; }
+        Rectangle {
+            width: 32px;
+            Path {
+                width: 18px;
+                height: 18px;
+                viewbox-width: 24;
+                viewbox-height: 24;
+                commands: Icons.more;
+                fill: transparent;
+                stroke: more-ta.has-hover ? Theme.text : (ta.has-hover ? Theme.muted : Theme.faint.with-alpha(0.5));
+                stroke-width: 2.5px;
+                stroke-line-cap: round;
+            }
+            more-ta := TouchArea { mouse-cursor: pointer; clicked => { menu.show(); } }
+        }
+    }
+    menu := ActionMenu {
+        x: root.width - self.width - 8px;
+        y: root.height - 4px;
+        playlists: root.playlists;
+        removable: root.removable;
+        movable: root.movable;
+        remove-label: root.remove-label;
+        action(kind, id) => { root.action(kind, id); }
+    }
+}
+
+/// A sidebar entry leading to a page (Albums, History).
+/// A scroll bar laid over a ScrollView or ListView whose own bar is off (the
+/// style's is barely visible): a thin line at rest, wider and in the accent
+/// colour under the pointer. Drag it, click the track to jump, or scroll on it.
+component AccentScrollBar inherits Rectangle {
+    in property <length> visible-height;
+    in property <length> content-height;
+    in-out property <length> content-y;
+    property <length> maximum: max(0px, root.content-height - root.visible-height);
+    property <bool> active: ta.has-hover || ta.pressed;
+    width: 14px;
+    visible: root.maximum > 0;
+    thumb := Rectangle {
+        width: root.active ? 6px : 3px;
+        x: parent.width - 4px - self.width;
+        height: max(24px, root.height * root.visible-height / max(1px, root.content-height));
+        y: (root.height - self.height) * (-root.content-y / max(1px, root.maximum));
+        border-radius: self.width / 2;
+        background: root.active ? Theme.accent : Theme.muted.with-alpha(0.45);
+        animate width, background { duration: 150ms; easing: ease-out; }
+    }
+    ta := TouchArea {
+        property <length> grab-offset;
+        property <length> grab-y;
+        function scroll-to(offset: length) {
+            root.content-y = -clamp(offset, 0px, root.maximum);
+        }
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+                // On the track: centre the thumb under the pointer, then drag from there.
+                if self.mouse-y < thumb.y || self.mouse-y > thumb.y + thumb.height {
+                    self.scroll-to((self.mouse-y - thumb.height / 2) * root.maximum / max(1px, root.height - thumb.height));
+                }
+                self.grab-offset = -root.content-y;
+                self.grab-y = self.mouse-y;
+            }
+        }
+        moved => {
+            if self.pressed {
+                self.scroll-to(self.grab-offset + (self.mouse-y - self.grab-y) * root.maximum / max(1px, root.height - thumb.height));
+            }
+        }
+        scroll-event(e) => {
+            self.scroll-to(-root.content-y - e.delta-y);
+            accept
+        }
+    }
+}
+
+component NavRow inherits Rectangle {
+    in property <string> icon;
+    in property <string> text;
+    in property <bool> active;
+    callback clicked();
+    height: 30px;
+    border-radius: 6px;
+    background: root.active ? Theme.surface-hi : (ta.has-hover ? Theme.surface-hi.with-alpha(0.5) : transparent);
+    HorizontalLayout {
+        padding-left: 8px;
+        spacing: 8px;
+        VerticalLayout {
+            alignment: center;
+            Path {
+                width: 16px;
+                height: 16px;
+                viewbox-width: 24;
+                viewbox-height: 24;
+                commands: root.icon;
+                fill: transparent;
+                stroke: Theme.muted;
+                stroke-width: 2px;
+            }
+        }
+        Text { text: root.text; color: Theme.text; font-size: 13px; vertical-alignment: center; }
+    }
+    ta := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+}
+
+component Sidebar inherits Rectangle {
+    in property <[ArtistItem]> artists;
+    in property <bool> history-open;
+    callback show-history();
+    in property <bool> albums-open;
+    callback show-albums();
+    in property <bool> settings-open;
+    callback show-settings();
+    in property <string> selected-id;
+    in property <string> status;
+    in property <[PlaylistItem]> playlists;
+    in property <string> selected-playlist-id;
+    callback select(string);
+    callback search-changed(string);
+    callback select-playlist(string);
+    /// "empty", or a smart playlist template: random, artist, albums, genre, custom.
+    callback new-playlist(string);
+    in property <string> account;
+    /// Standalone: "Sign out" becomes choosing how to use HyperPlayer again.
+    in property <bool> local;
+    callback sign-out();
+    /// Signed in to a server on a player with a library of its own: it can switch to it.
+    in property <bool> can-switch;
+    callback switch-library();
+    callback search-accepted(string);
+    public function focus-search() { search.focus(); }
+    /// Scrolls the artist list so row `index` is in view (centred if it was off-screen).
+    public function reveal-artist(index: int) {
+        let row = 52px;
+        let top = index * row;
+        if top < -artist-list.content-y || top + row > -artist-list.content-y + artist-list.visible-height {
+            artist-list.content-y = min(0px, max(artist-list.visible-height - artist-list.content-height, artist-list.visible-height / 2 - top - row / 2));
+        }
+    }
+    /// Empties the search box (and its results); returns whether there was anything to clear.
+    public function clear-search() -> bool {
+        if search.text == "" { return false; }
+        search.text = "";
+        root.search-changed("");
+        return true;
+    }
+    background: Theme.panel;
+    VerticalLayout {
+        VerticalLayout {
+            padding: 16px;
+            spacing: 12px;
+            Text {
+                text: "HyperPlayer";
+                color: Theme.text;
+                font-size: 20px;
+                font-weight: 800;
+                letter-spacing: -0.5px;
+            }
+            search := LineEdit {
+                placeholder-text: "Search artists, albums, tracks   ( / )";
+                edited(text) => { root.search-changed(text); }
+                accepted(text) => { root.search-accepted(text); }
+            }
+            NavRow {
+                icon: Icons.albums;
+                text: "Albums";
+                active: root.albums-open;
+                clicked => { root.show-albums(); }
+            }
+            NavRow {
+                icon: Icons.history;
+                text: "History";
+                active: root.history-open;
+                clicked => { root.show-history(); }
+            }
+            HorizontalLayout {
+                Text { text: "PLAYLISTS"; color: Theme.faint; font-size: 11px; font-weight: 700; letter-spacing: 1.2px; vertical-alignment: center; }
+                plus := Rectangle {
+                    width: 24px;
+                    height: 24px;
+                    border-radius: 12px;
+                    background: plus-ta.has-hover ? Theme.accent.brighter(0.15) : Theme.accent;
+                    drop-shadow-blur: plus-ta.has-hover ? 10px : 4px;
+                    drop-shadow-color: Theme.accent.with-alpha(0.5);
+                    animate background, drop-shadow-blur { duration: 120ms; }
+                    Path {
+                        x: 3px;
+                        y: 3px;
+                        width: 18px;
+                        height: 18px;
+                        viewbox-width: 24;
+                        viewbox-height: 24;
+                        commands: Icons.plus;
+                        fill: transparent;
+                        stroke: Theme.bg;
+                        stroke-width: 2.25px;
+                    }
+                    plus-ta := TouchArea { mouse-cursor: pointer; clicked => { new-menu.show(); } }
+                }
+                new-menu := NewPlaylistMenu {
+                    x: plus.x + plus.width - self.width;
+                    y: plus.y + plus.height + 6px;
+                    pick(kind) => { root.new-playlist(kind); }
+                }
+            }
+            VerticalLayout {
+                spacing: 2px;
+                for p in root.playlists: Rectangle {
+                    height: 30px;
+                    border-radius: 6px;
+                    background: p.id == root.selected-playlist-id ? Theme.surface-hi : (pl-ta.has-hover ? Theme.surface-hi.with-alpha(0.5) : transparent);
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        spacing: 6px;
+                        if p.smart: Text { text: "✦"; color: Theme.accent; font-size: 11px; vertical-alignment: center; }
+                        Text { text: p.name; color: Theme.text; font-size: 13px; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
+                        Text { text: p.subtitle; color: Theme.faint; font-size: 11px; vertical-alignment: center; }
+                    }
+                    pl-ta := TouchArea { clicked => { root.select-playlist(p.id); } }
+                }
+            }
+            Text { text: "ARTISTS"; color: Theme.faint; font-size: 11px; font-weight: 700; letter-spacing: 1.2px; }
+            Rectangle {
+                vertical-stretch: 1;
+                artist-list := ListView {
+                    vertical-scrollbar-policy: always-off;
+                    for artist in root.artists: Rectangle {
+                        height: 52px;
+                        border-radius: 8px;
+                        background: artist.id == root.selected-id ? Theme.surface-hi : (ta.has-hover ? Theme.surface-hi.with-alpha(0.5) : transparent);
+                        HorizontalLayout {
+                            padding: 6px;
+                            spacing: 10px;
+                            Rectangle {
+                                width: 40px;
+                                height: 40px;
+                                border-radius: 20px;
+                                clip: true;
+                                background: Theme.surface-hi;
+                                Image { width: 40px; height: 40px; source: artist.image; image-fit: cover; }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                Text { text: artist.name; color: Theme.text; font-size: 13px; font-weight: 600; overflow: elide; }
+                                Text { text: artist.subtitle; color: Theme.muted; font-size: 11px; overflow: elide; }
+                            }
+                        }
+                        ta := TouchArea { clicked => { root.select(artist.id); } }
+                    }
+                }
+                AccentScrollBar {
+                    x: parent.width - self.width;
+                    height: parent.height;
+                    visible-height: artist-list.visible-height;
+                    content-height: artist-list.content-height;
+                    content-y <=> artist-list.content-y;
+                }
+            }
+            if root.status != "": Text { text: root.status; color: Theme.faint; font-size: 11px; wrap: word-wrap; }
+        }
+        // The account, set apart from the scrolling lists like the transport bar.
+        Rectangle {
+            background: Theme.chrome;
+            Rectangle { y: 0; height: 1px; background: Theme.surface-hi; }
+            HorizontalLayout {
+                padding-left: 16px;
+                padding-right: 16px;
+                padding-top: 12px;
+                padding-bottom: 12px;
+                spacing: 8px;
+                VerticalLayout {
+                    alignment: center;
+                    Path {
+                        width: 14px;
+                        height: 14px;
+                        viewbox-width: 24;
+                        viewbox-height: 24;
+                        commands: Icons.user;
+                        fill: transparent;
+                        stroke: Theme.muted;
+                        stroke-width: 2px;
+                    }
+                }
+                Text { text: root.account; color: Theme.text; font-size: 12px; font-weight: 600; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
+                HorizontalLayout {
+                    spacing: 2px;
+                    SidebarAction {
+                        commands: Icons.settings;
+                        label: "Settings";
+                        active: root.settings-open;
+                        clicked => { root.show-settings(); }
+                    }
+                    // Standalone, there's no account to sign out of: "sign out" is switching library.
+                    if root.local || root.can-switch: SidebarAction {
+                        commands: Icons.switch-library;
+                        label: "Switch library";
+                        clicked => {
+                            if root.local {
+                                root.sign-out();
+                            } else {
+                                root.switch-library();
+                            }
+                        }
+                    }
+                    if !root.local: SidebarAction {
+                        commands: Icons.sign-out;
+                        label: "Sign out";
+                        clicked => { root.sign-out(); }
+                    }
+                }
+            }
+        }
+    }
+}
+
+component AlbumGrid inherits Rectangle {
+    in property <[AlbumItem]> albums;
+    in property <length> cell: 180px;
+    in property <color> text-color: Theme.text;
+    in property <color> muted-color: Theme.muted;
+    callback select(string);
+    property <int> columns: max(1, floor(self.width / (cell + 20px)));
+    min-height: ceil(albums.length / columns) * (cell + 64px);
+    for album[i] in albums: Rectangle {
+        x: mod(i, root.columns) * (root.cell + 20px);
+        y: floor(i / root.columns) * (root.cell + 64px);
+        width: root.cell;
+        height: root.cell + 54px;
+        VerticalLayout {
+            alignment: start;
+            spacing: 4px;
+            Cover {
+                source: album.cover;
+                size: root.cell;
+                drop-shadow-blur: ta.has-hover ? 24px : 12px;
+                drop-shadow-color: #00000080;
+                animate drop-shadow-blur { duration: 150ms; }
+            }
+            Text { text: album.title; color: root.text-color; font-size: 13px; font-weight: 600; overflow: elide; }
+            Text { text: album.subtitle; color: root.muted-color; font-size: 11px; overflow: elide; }
+        }
+        ta := TouchArea { clicked => { root.select(album.id); } }
+    }
+}
+
+component ArtistPage inherits Rectangle {
+    in property <ArtistView> artist;
+    in property <[AlbumItem]> albums;
+    in property <[CreditItem]> members;
+    callback select-album(string);
+    callback select-artist(string);
+    Rectangle {
+        artist-scroll := ScrollView {
+            vertical-scrollbar-policy: always-off;
+            VerticalLayout {
+                alignment: start;
+                padding: 28px;
+                spacing: 24px;
+                HorizontalLayout {
+                    spacing: 24px;
+                    alignment: start;
+                    Rectangle {
+                        width: 168px;
+                        height: 168px;
+                        border-radius: 84px;
+                        clip: true;
+                        background: Theme.surface-hi;
+                        Image { width: 168px; height: 168px; source: artist.image; image-fit: cover; }
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 6px;
+                        Text { text: "ARTIST"; color: Theme.muted; font-size: 11px; font-weight: 700; letter-spacing: 1.5px; }
+                        Text { text: artist.name; color: Theme.text; font-size: 44px; font-weight: 900; letter-spacing: -1px; }
+                        if artist.meta != "": Text { text: artist.meta; color: Theme.text; font-size: 13px; }
+                        Text { text: artist.stats; color: Theme.muted; font-size: 13px; }
+                        Text { text: artist.genres; color: Theme.faint; font-size: 12px; }
+                    }
+                }
+                if artist.biography != "": Text {
+                    text: artist.biography;
+                    color: Theme.muted;
+                    font-size: 13px;
+                    wrap: word-wrap;
+                    max-width: 760px;
+                }
+                if root.members.length > 0: VerticalLayout {
+                    max-width: 760px;
+                    Text { text: "Members"; color: Theme.text; font-size: 18px; font-weight: 700; }
+                    CreditList {
+                        items: root.members;
+                        select-artist(id) => { root.select-artist(id); }
+                    }
+                }
+                Text { text: "Discography"; color: Theme.text; font-size: 18px; font-weight: 700; }
+                AlbumGrid {
+                    albums: root.albums;
+                    select(id) => { root.select-album(id); }
+                }
+            }
+        }
+        AccentScrollBar {
+            x: parent.width - self.width;
+            height: parent.height;
+            visible-height: artist-scroll.visible-height;
+            content-height: artist-scroll.content-height;
+            content-y <=> artist-scroll.content-y;
+        }
+    }
+}
+
+component AlbumPage inherits Rectangle {
+    in property <AlbumView> album;
+    in property <[TrackItem]> tracks;
+    in property <[PlaylistItem]> playlists;
+    callback play(int);
+    callback back();
+    callback album-action(string, string);
+    callback track-action(int, string, string);
+    VerticalLayout {
+        padding: 28px;
+        spacing: 20px;
+        HorizontalLayout {
+            spacing: 24px;
+            alignment: start;
+            Cover {
+                source: album.cover;
+                size: 200px;
+                drop-shadow-blur: 30px;
+                drop-shadow-color: #000000a0;
+            }
+            VerticalLayout {
+                alignment: end;
+                spacing: 6px;
+                Text {
+                    text: "‹ Back to artist";
+                    color: back-ta.has-hover ? Theme.text : Theme.muted;
+                    font-size: 12px;
+                    back-ta := TouchArea { clicked => { root.back(); } }
+                }
+                Text { text: "ALBUM"; color: Theme.muted; font-size: 11px; font-weight: 700; letter-spacing: 1.5px; }
+                Text { text: album.title; color: Theme.text; font-size: 36px; font-weight: 900; letter-spacing: -0.8px; wrap: word-wrap; }
+                Text { text: album.artist; color: Theme.text; font-size: 15px; font-weight: 600; }
+                Text { text: album.meta; color: Theme.muted; font-size: 12px; }
+                Text { text: album.genres; color: Theme.faint; font-size: 12px; }
+                HorizontalLayout {
+                    alignment: start;
+                    padding-top: 8px;
+                    spacing: 12px;
+                    IconButton { commands: Icons.play; filled: true; primary: true; size: 48px; clicked => { root.play(0); } }
+                    IconButton { commands: Icons.more; size: 48px; clicked => { album-menu.show(); } }
+                }
+            }
+        }
+        Rectangle {
+            vertical-stretch: 1;
+            album-list := ListView {
+                vertical-scrollbar-policy: always-off;
+                for track[i] in root.tracks: TrackRow {
+                    track: track;
+                    playlists: root.playlists;
+                    play => { root.play(i); }
+                    action(kind, id) => { root.track-action(i, kind, id); }
+                }
+            }
+            AccentScrollBar {
+                x: parent.width - self.width;
+                height: parent.height;
+                visible-height: album-list.visible-height;
+                content-height: album-list.content-height;
+                content-y <=> album-list.content-y;
+            }
+        }
+    }
+    album-menu := ActionMenu {
+        x: 290px;
+        y: 250px;
+        playlists: root.playlists;
+        action(kind, id) => { root.album-action(kind, id); }
+    }
+}
+
+component AlbumsPage inherits Rectangle {
+    in property <string> summary;
+    in property <string> sort;
+    in property <[AlbumRow]> rows;
+    /// Bumped to scroll back to the top (after re-sorting).
+    in property <int> reset;
+    callback select(string);
+    callback sort-by(string);
+    callback columns-changed(int);
+    callback visible-rows(int, int);
+    property <length> cell: 168px;
+    property <length> gap: 20px;
+    property <length> row-height: root.cell + 70px;
+    property <int> columns: max(1, floor((list.visible-width - 8px + root.gap) / (root.cell + root.gap)));
+    function report() {
+        root.visible-rows(floor(-list.content-y / root.row-height), floor((-list.content-y + list.visible-height) / root.row-height));
+    }
+    init => {
+        root.columns-changed(root.columns);
+        root.report();
+    }
+    changed columns => {
+        root.columns-changed(root.columns);
+        root.report();
+    }
+    changed reset => { list.content-y = 0; }
+    VerticalLayout {
+        padding: 28px;
+        padding-bottom: 0;
+        spacing: 16px;
+        HorizontalLayout {
+            spacing: 12px;
+            VerticalLayout {
+                spacing: 4px;
+                Text { text: "Albums"; color: Theme.text; font-size: 28px; font-weight: 800; }
+                Text { text: root.summary; color: Theme.muted; font-size: 13px; }
+            }
+            Rectangle { horizontal-stretch: 1; }
+            for option in [{ key: "artist", label: "Artist" }, { key: "title", label: "Title" }, { key: "year", label: "Year" }, { key: "added", label: "Recently added" }]: VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    height: 28px;
+                    width: sort-label.preferred-width + 24px;
+                    border-radius: 14px;
+                    border-width: 1px;
+                    border-color: option.key == root.sort ? Theme.text : (sort-ta.has-hover ? Theme.muted : Theme.faint);
+                    background: option.key == root.sort ? Theme.surface-hi : transparent;
+                    sort-label := Text { text: option.label; color: option.key == root.sort ? Theme.text : Theme.muted; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
+                    sort-ta := TouchArea { mouse-cursor: pointer; clicked => { root.sort-by(option.key); } }
+                }
+            }
+        }
+        Rectangle {
+            vertical-stretch: 1;
+            list := ListView {
+                vertical-scrollbar-policy: always-off;
+                changed content-y => { root.report(); }
+                changed visible-height => { root.report(); }
+                for row in root.rows: HorizontalLayout {
+                    height: root.row-height;
+                    spacing: root.gap;
+                    alignment: start;
+                    for album in row.items: Rectangle {
+                        width: root.cell;
+                        VerticalLayout {
+                            alignment: start;
+                            spacing: 4px;
+                            Cover {
+                                source: album.cover;
+                                size: root.cell;
+                                drop-shadow-blur: ta.has-hover ? 24px : 12px;
+                                drop-shadow-color: #00000080;
+                                animate drop-shadow-blur { duration: 150ms; }
+                            }
+                            Text { text: album.title; color: Theme.text; font-size: 13px; font-weight: 600; overflow: elide; }
+                            Text { text: album.subtitle; color: Theme.muted; font-size: 11px; overflow: elide; }
+                        }
+                        ta := TouchArea { mouse-cursor: pointer; clicked => { root.select(album.id); } }
+                    }
+                }
+            }
+            AccentScrollBar {
+                x: parent.width - self.width;
+                height: parent.height;
+                visible-height: list.visible-height;
+                content-height: list.content-height;
+                content-y <=> list.content-y;
+            }
+        }
+    }
+}
+
+component HistoryPage inherits Rectangle {
+    in property <bool> loaded;
+    in property <string> summary;
+    in property <[ArtistItem]> artists;
+    in property <[TrackItem]> top;
+    in property <[TrackItem]> recent;
+    in property <[PlaylistItem]> playlists;
+    callback select-artist(string);
+    callback play(string, int);
+    callback track-action(string, int, string, string);
+    Rectangle {
+        history-scroll := ScrollView {
+            vertical-scrollbar-policy: always-off;
+            VerticalLayout {
+                alignment: start;
+                padding: 28px;
+                spacing: 18px;
+                VerticalLayout {
+                    spacing: 6px;
+                    Text { text: "History"; color: Theme.text; font-size: 28px; font-weight: 800; }
+                    if root.summary != "": Text { text: root.summary; color: Theme.muted; font-size: 13px; }
+                }
+                if root.loaded && root.recent.length == 0: Text {
+                    text: "Nothing yet. Tracks you listen to (half of them, or 4 minutes) show up here.";
+                    color: Theme.faint;
+                    font-size: 13px;
+                    wrap: word-wrap;
+                }
+                if root.artists.length > 0: Text { text: "Top artists · last 30 days"; color: Theme.text; font-size: 18px; font-weight: 700; }
+                if root.artists.length > 0: HorizontalLayout {
+                    alignment: start;
+                    spacing: 20px;
+                    for artist in root.artists: VerticalLayout {
+                        width: 110px;
+                        spacing: 4px;
+                        Rectangle {
+                            width: 110px;
+                            height: 110px;
+                            border-radius: 55px;
+                            clip: true;
+                            background: Theme.surface-hi;
+                            Image { width: 110px; height: 110px; source: artist.image; image-fit: cover; }
+                            TouchArea { mouse-cursor: pointer; clicked => { root.select-artist(artist.id); } }
+                        }
+                        Text { text: artist.name; color: Theme.text; font-size: 13px; font-weight: 600; horizontal-alignment: center; overflow: elide; }
+                        Text { text: artist.subtitle; color: Theme.muted; font-size: 11px; horizontal-alignment: center; }
+                    }
+                }
+                if root.top.length > 0: Text { text: "Most played · last 30 days"; color: Theme.text; font-size: 18px; font-weight: 700; }
+                for track[i] in root.top: TrackRow {
+                    track: track;
+                    playlists: root.playlists;
+                    play => { root.play("history-top", i); }
+                    action(kind, id) => { root.track-action("history-top", i, kind, id); }
+                }
+                if root.recent.length > 0: Text { text: "Recently played"; color: Theme.text; font-size: 18px; font-weight: 700; }
+                for track[i] in root.recent: TrackRow {
+                    track: track;
+                    playlists: root.playlists;
+                    play => { root.play("history-recent", i); }
+                    action(kind, id) => { root.track-action("history-recent", i, kind, id); }
+                }
+            }
+        }
+        AccentScrollBar {
+            x: parent.width - self.width;
+            height: parent.height;
+            visible-height: history-scroll.visible-height;
+            content-height: history-scroll.content-height;
+            content-y <=> history-scroll.content-y;
+        }
+    }
+}
+
+component SearchPage inherits Rectangle {
+    in property <string> query;
+    in property <[ArtistItem]> artists;
+    in property <[AlbumItem]> albums;
+    in property <[TrackItem]> tracks;
+    in property <[PlaylistItem]> playlists;
+    callback select-artist(string);
+    callback select-album(string);
+    callback play(int);
+    callback track-action(int, string, string);
+    Rectangle {
+        search-scroll := ScrollView {
+            vertical-scrollbar-policy: always-off;
+            VerticalLayout {
+                alignment: start;
+                padding: 28px;
+                spacing: 18px;
+                Text { text: "Results for “" + root.query + "”"; color: Theme.text; font-size: 24px; font-weight: 800; }
+                if artists.length + albums.length + tracks.length == 0: Text {
+                    text: "Nothing matches. Every word must appear in a title, artist or album name.";
+                    color: Theme.faint;
+                    font-size: 13px;
+                }
+                if artists.length > 0: Text { text: "Artists"; color: Theme.text; font-size: 18px; font-weight: 700; }
+                if artists.length > 0: HorizontalLayout {
+                    alignment: start;
+                    spacing: 20px;
+                    for artist in root.artists: VerticalLayout {
+                        width: 120px;
+                        spacing: 6px;
+                        Rectangle {
+                            width: 120px;
+                            height: 120px;
+                            border-radius: 60px;
+                            clip: true;
+                            background: Theme.surface-hi;
+                            Image { width: 120px; height: 120px; source: artist.image; image-fit: cover; }
+                            TouchArea { mouse-cursor: pointer; clicked => { root.select-artist(artist.id); } }
+                        }
+                        Text { text: artist.name; color: Theme.text; font-size: 13px; font-weight: 600; horizontal-alignment: center; overflow: elide; }
+                    }
+                }
+                if albums.length > 0: Text { text: "Albums"; color: Theme.text; font-size: 18px; font-weight: 700; }
+                if albums.length > 0: AlbumGrid {
+                    albums: root.albums;
+                    select(id) => { root.select-album(id); }
+                }
+                if tracks.length > 0: Text { text: "Tracks"; color: Theme.text; font-size: 18px; font-weight: 700; }
+                for track[i] in root.tracks: TrackRow {
+                    track: track;
+                    playlists: root.playlists;
+                    play => { root.play(i); }
+                    action(kind, id) => { root.track-action(i, kind, id); }
+                }
+            }
+        }
+        AccentScrollBar {
+            x: parent.width - self.width;
+            height: parent.height;
+            visible-height: search-scroll.visible-height;
+            content-height: search-scroll.content-height;
+            content-y <=> search-scroll.content-y;
+        }
+    }
+}
+
+component OutlineButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> danger;
+    callback clicked();
+    height: 30px;
+    width: ob-label.preferred-width + 24px;
+    border-radius: 15px;
+    border-width: 1px;
+    border-color: ob-ta.has-hover ? (root.danger ? #ff8a80 : Theme.text) : Theme.faint;
+    ob-label := Text {
+        text: root.text;
+        color: root.danger && ob-ta.has-hover ? #ff8a80 : Theme.muted;
+        font-size: 12px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    ob-ta := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+}
+
+component Segmented inherits HorizontalLayout {
+    in property <[{ key: string, label: string }]> options;
+    in property <string> selected;
+    callback pick(string);
+    spacing: 6px;
+    alignment: start;
+    for option in root.options: Rectangle {
+        height: 30px;
+        width: seg-label.preferred-width + 24px;
+        border-radius: 15px;
+        border-width: 1px;
+        border-color: option.key == root.selected ? Theme.text : (seg-ta.has-hover ? Theme.muted : Theme.faint);
+        background: option.key == root.selected ? Theme.surface-hi : transparent;
+        seg-label := Text {
+            text: option.label;
+            color: option.key == root.selected ? Theme.text : Theme.muted;
+            font-size: 12px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        seg-ta := TouchArea { mouse-cursor: pointer; clicked => { root.pick(option.key); } }
+    }
+}
+
+/// One kind of result in the playlist page's search, each with a button to add it.
+component AddSection inherits VerticalLayout {
+    in property <string> heading;
+    in property <string> kind;
+    in property <[AddItem]> items;
+    callback add(string, string, string);
+    spacing: 2px;
+    if root.items.length > 0: Text {
+        text: root.heading;
+        color: Theme.faint;
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 1.2px;
+    }
+    for item in root.items: Rectangle {
+        height: 40px;
+        border-radius: 6px;
+        background: row-ta.has-hover ? Theme.surface-hi.with-alpha(0.6) : transparent;
+        row-ta := TouchArea { }
+        HorizontalLayout {
+            padding-left: 8px;
+            padding-right: 8px;
+            spacing: 10px;
+            VerticalLayout {
+                alignment: center;
+                horizontal-stretch: 1;
+                Text { text: item.title; color: Theme.text; font-size: 13px; font-weight: 600; overflow: elide; }
+                if item.detail != "": Text { text: item.detail; color: Theme.muted; font-size: 11px; overflow: elide; }
+            }
+            VerticalLayout {
+                alignment: center;
+                OutlineButton { text: "+ Add"; clicked => { root.add(root.kind, item.id, item.title); } }
+            }
+        }
+    }
+}
+
+/// A smart playlist's rules: which tracks match, in what order, and how many.
+component SmartEditor inherits Rectangle {
+    in property <[RuleRow]> rules;
+    in property <bool> match-any;
+    in property <int> order;
+    in property <bool> descending;
+    in property <string> limit;
+    /// Edited since last applied.
+    in property <bool> dirty;
+    in property <string> message;
+    callback set-match(bool);
+    callback rule-field(int, int);
+    callback rule-op(int, int);
+    callback rule-value(int, string);
+    callback rule-value2(int, string);
+    callback remove-rule(int);
+    callback add-rule();
+    callback set-order(int);
+    callback set-descending(bool);
+    callback set-limit(string);
+    callback apply();
+    border-radius: 8px;
+    background: Theme.surface.with-alpha(0.7);
+    VerticalLayout {
+        padding: 12px;
+        spacing: 10px;
+        HorizontalLayout {
+            spacing: 10px;
+            alignment: start;
+            Text { text: "Tracks matching"; color: Theme.muted; font-size: 12px; vertical-alignment: center; }
+            Segmented {
+                selected: root.match-any ? "any" : "all";
+                options: [{ key: "all", label: "all rules" }, { key: "any", label: "any rule" }];
+                pick(key) => { root.set-match(key == "any"); }
+            }
+        }
+        for rule[i] in root.rules: HorizontalLayout {
+            spacing: 8px;
+            ComboBox {
+                width: 140px;
+                model: ["Title", "Artist", "Album", "Genre", "Format", "Year", "Duration", "Sample rate", "Plays", "Lossless", "Last played", "Added"];
+                current-index: rule.field;
+                selected => { root.rule-field(i, self.current-index); }
+            }
+            ComboBox {
+                width: 160px;
+                model: rule.ops;
+                current-index: rule.op;
+                selected => { root.rule-op(i, self.current-index); }
+            }
+            if rule.needs-value: LineEdit {
+                min-width: 60px;
+                text: rule.value;
+                placeholder-text: rule.hint;
+                edited(text) => { root.rule-value(i, text); }
+                accepted => { root.apply(); }
+            }
+            if rule.between: Text { text: "and"; color: Theme.muted; font-size: 12px; vertical-alignment: center; }
+            if rule.between: LineEdit {
+                min-width: 60px;
+                text: rule.value2;
+                placeholder-text: rule.hint;
+                edited(text) => { root.rule-value2(i, text); }
+                accepted => { root.apply(); }
+            }
+            if !rule.needs-value: Rectangle { horizontal-stretch: 1; }
+            IconButton { commands: Icons.window-close; size: 32px; clicked => { root.remove-rule(i); } }
+        }
+        if root.rules.length == 0: Text {
+            text: "No rules yet: any track in the library can be picked.";
+            color: Theme.faint;
+            font-size: 12px;
+        }
+        HorizontalLayout {
+            spacing: 10px;
+            OutlineButton { text: "+ Add rule"; clicked => { root.add-rule(); } }
+            Rectangle { horizontal-stretch: 1; }
+            Text { text: "Order"; color: Theme.muted; font-size: 12px; vertical-alignment: center; }
+            ComboBox {
+                width: 140px;
+                model: ["Random", "Title", "Artist", "Album", "Year", "Date added", "Plays", "Last played"];
+                current-index: root.order;
+                selected => { root.set-order(self.current-index); }
+            }
+            if root.order != 0: CheckBox {
+                text: "Descending";
+                checked: root.descending;
+                toggled => { root.set-descending(self.checked); }
+            }
+            Text { text: "up to"; color: Theme.muted; font-size: 12px; vertical-alignment: center; }
+            LineEdit {
+                width: 64px;
+                text: root.limit;
+                edited(text) => { root.set-limit(text); }
+                accepted => { root.apply(); }
+            }
+            Text { text: "tracks (max 500)"; color: Theme.muted; font-size: 12px; vertical-alignment: center; }
+        }
+        HorizontalLayout {
+            spacing: 12px;
+            alignment: start;
+            OutlineButton { text: root.dirty ? "Apply rules" : "Rules applied"; clicked => { root.apply(); } }
+            if root.message != "": Text {
+                text: root.message;
+                color: root.dirty ? Theme.accent : Theme.muted;
+                font-size: 12px;
+                vertical-alignment: center;
+                wrap: word-wrap;
+            }
+        }
+    }
+}
+
+component PlaylistPage inherits Rectangle {
+    in property <PlaylistView> playlist;
+    in property <[TrackItem]> tracks;
+    in property <[PlaylistItem]> playlists;
+    callback play(int);
+    callback shuffle-play();
+    callback rename(string);
+    callback delete();
+    callback track-action(int, string, string);
+    /// Searching the library to add to this playlist.
+    in-out property <string> add-query;
+    in property <bool> add-pending;
+    in property <[AddItem]> add-tracks;
+    in property <[AddItem]> add-albums;
+    in property <[AddItem]> add-artists;
+    in property <[AddItem]> add-genres;
+    /// What the last addition added.
+    in property <string> add-message;
+    callback add-search(string);
+    callback add(string, string, string);
+    /// A smart playlist: its rules instead of the search, and no editing by hand.
+    in property <bool> smart;
+    in property <[RuleRow]> rules;
+    in property <bool> match-any;
+    in property <int> order;
+    in property <bool> descending;
+    in property <string> limit;
+    in property <bool> rules-dirty;
+    in property <string> rules-message;
+    callback set-match(bool);
+    callback rule-field(int, int);
+    callback rule-op(int, int);
+    callback rule-value(int, string);
+    callback rule-value2(int, string);
+    callback remove-rule(int);
+    callback add-rule();
+    callback set-order(int);
+    callback set-descending(bool);
+    callback set-limit(string);
+    callback apply-rules();
+    callback save-copy();
+    property <bool> confirm-delete;
+    property <bool> nothing-found: root.add-tracks.length + root.add-albums.length + root.add-artists.length + root.add-genres.length == 0;
+    VerticalLayout {
+        padding: 28px;
+        spacing: 20px;
+        HorizontalLayout {
+            spacing: 24px;
+            alignment: start;
+            Cover {
+                source: playlist.cover;
+                size: 200px;
+                drop-shadow-blur: 30px;
+                drop-shadow-color: #000000a0;
+            }
+            VerticalLayout {
+                alignment: end;
+                spacing: 6px;
+                Text { text: root.smart ? "SMART PLAYLIST" : "PLAYLIST"; color: Theme.muted; font-size: 11px; font-weight: 700; letter-spacing: 1.5px; }
+                LineEdit {
+                    text: playlist.name;
+                    font-size: 24px;
+                    min-width: 360px;
+                    accepted(text) => { root.rename(text); }
+                    // Leaving the field keeps the new name too.
+                    changed has-focus => {
+                        if !self.has-focus { root.rename(self.text); }
+                    }
+                }
+                Text { text: playlist.meta + "  ·  click the name to rename the playlist"; color: Theme.muted; font-size: 12px; }
+                HorizontalLayout {
+                    alignment: start;
+                    padding-top: 8px;
+                    spacing: 12px;
+                    IconButton { commands: Icons.play; filled: true; primary: true; size: 48px; clicked => { root.play(0); } }
+                    VerticalLayout {
+                        alignment: center;
+                        ToggleIcon { commands: Icons.shuffle; clicked => { root.shuffle-play(); } }
+                    }
+                    // Freezes what matches now into an ordinary playlist, to edit by hand.
+                    if root.smart: VerticalLayout {
+                        alignment: center;
+                        OutlineButton { text: "Save as playlist"; clicked => { root.save-copy(); } }
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            width: delete-label.preferred-width + 24px;
+                            height: 32px;
+                            border-radius: 16px;
+                            border-width: 1px;
+                            border-color: root.confirm-delete ? #e5484d : (delete-ta.has-hover ? Theme.text : Theme.faint);
+                            delete-label := Text {
+                                text: root.confirm-delete ? "Click again to delete" : "Delete";
+                                color: root.confirm-delete ? #e5484d : Theme.muted;
+                                font-size: 12px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            delete-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    if root.confirm-delete { root.delete(); }
+                                    root.confirm-delete = !root.confirm-delete;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if root.smart: SmartEditor {
+            rules: root.rules;
+            match-any: root.match-any;
+            order: root.order;
+            descending: root.descending;
+            limit: root.limit;
+            dirty: root.rules-dirty;
+            message: root.rules-message;
+            set-match(any) => { root.set-match(any); }
+            rule-field(i, f) => { root.rule-field(i, f); }
+            rule-op(i, o) => { root.rule-op(i, o); }
+            rule-value(i, v) => { root.rule-value(i, v); }
+            rule-value2(i, v) => { root.rule-value2(i, v); }
+            remove-rule(i) => { root.remove-rule(i); }
+            add-rule => { root.add-rule(); }
+            set-order(o) => { root.set-order(o); }
+            set-descending(d) => { root.set-descending(d); }
+            set-limit(l) => { root.set-limit(l); }
+            apply => { root.apply-rules(); }
+        }
+        // While searching, the results and the playlist share the page about evenly.
+        if !root.smart: VerticalLayout {
+            spacing: 8px;
+            vertical-stretch: root.add-query != "" ? 1 : 0;
+            LineEdit {
+                placeholder-text: "Add to this playlist: search for tracks, albums, artists or genres";
+                text <=> root.add-query;
+                edited(text) => { root.add-search(text); }
+            }
+            if root.add-message != "": Text { text: root.add-message; color: Theme.accent; font-size: 12px; }
+            if root.add-query != "": Rectangle {
+                vertical-stretch: 1;
+                min-height: min(120px, add-results.preferred-height);
+                max-height: add-results.preferred-height;
+                border-radius: 8px;
+                background: Theme.surface.with-alpha(0.7);
+                add-scroll := ScrollView {
+                    vertical-scrollbar-policy: always-off;
+                    add-results := VerticalLayout {
+                        padding: 10px;
+                        spacing: 12px;
+                        AddSection { heading: "GENRES"; kind: "genre"; items: root.add-genres; add(k, id, t) => { root.add(k, id, t); } }
+                        AddSection { heading: "ARTISTS"; kind: "artist"; items: root.add-artists; add(k, id, t) => { root.add(k, id, t); } }
+                        AddSection { heading: "ALBUMS"; kind: "album"; items: root.add-albums; add(k, id, t) => { root.add(k, id, t); } }
+                        AddSection { heading: "TRACKS"; kind: "track"; items: root.add-tracks; add(k, id, t) => { root.add(k, id, t); } }
+                        if root.nothing-found: Text {
+                            text: root.add-pending ? "Searching…" : "Nothing found for “" + root.add-query + "”.";
+                            color: Theme.faint;
+                            font-size: 13px;
+                        }
+                    }
+                }
+                AccentScrollBar {
+                    x: parent.width - self.width;
+                    height: parent.height;
+                    visible-height: add-scroll.visible-height;
+                    content-height: add-scroll.content-height;
+                    content-y <=> add-scroll.content-y;
+                }
+            }
+        }
+        if tracks.length == 0 && root.smart: Text {
+            text: "No tracks match these rules.";
+            color: Theme.faint;
+            font-size: 13px;
+        }
+        if tracks.length == 0 && !root.smart && root.add-query == "": Text {
+            text: "Empty for now: search above to add tracks, albums, whole artists or genres. The ⋯ menu on any track or album adds it too.";
+            color: Theme.faint;
+            font-size: 13px;
+            wrap: word-wrap;
+        }
+        Rectangle {
+            vertical-stretch: 1;
+            playlist-list := ListView {
+                vertical-scrollbar-policy: always-off;
+                for track[i] in root.tracks: TrackRow {
+                    track: track;
+                    playlists: root.playlists;
+                    removable: !root.smart;
+                    movable: !root.smart;
+                    remove-label: "Remove from this playlist";
+                    play => { root.play(i); }
+                    action(kind, id) => { root.track-action(i, kind, id); }
+                }
+            }
+            AccentScrollBar {
+                x: parent.width - self.width;
+                height: parent.height;
+                visible-height: playlist-list.visible-height;
+                content-height: playlist-list.content-height;
+                content-y <=> playlist-list.content-y;
+            }
+        }
+    }
+}
+
+component QueuePage inherits Rectangle {
+    in property <string> origin;
+    in property <[TrackItem]> now;
+    in property <[TrackItem]> next;
+    in property <[PlaylistItem]> playlists;
+    callback jump(int);
+    callback clear();
+    callback track-action(int, string, string);
+    Rectangle {
+        queue-scroll := ScrollView {
+            vertical-scrollbar-policy: always-off;
+            VerticalLayout {
+                alignment: start;
+                padding: 28px;
+                spacing: 14px;
+                HorizontalLayout {
+                    Text { text: "Queue"; color: Theme.text; font-size: 28px; font-weight: 800; }
+                    VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            width: clear-label.preferred-width + 24px;
+                            height: 30px;
+                            border-radius: 15px;
+                            border-width: 1px;
+                            border-color: clear-ta.has-hover ? Theme.text : Theme.faint;
+                            clear-label := Text { text: "Clear"; color: Theme.muted; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
+                            clear-ta := TouchArea { mouse-cursor: pointer; clicked => { root.clear(); } }
+                        }
+                    }
+                }
+                if origin != "": Text { text: "Playing from " + root.origin; color: Theme.muted; font-size: 13px; }
+                if now.length == 0 && next.length == 0: Text {
+                    text: "Nothing queued. Use the ⋯ menu on any track or album to add music.";
+                    color: Theme.faint;
+                    font-size: 13px;
+                }
+                if now.length > 0: Text { text: "NOW PLAYING"; color: Theme.faint; font-size: 11px; font-weight: 700; letter-spacing: 1.2px; }
+                for track in root.now: TrackRow {
+                    track: track;
+                    playlists: root.playlists;
+                    action(kind, id) => { root.track-action(-1, kind, id); }
+                }
+                if next.length > 0: Text { text: "NEXT UP"; color: Theme.faint; font-size: 11px; font-weight: 700; letter-spacing: 1.2px; }
+                for track[i] in root.next: TrackRow {
+                    track: track;
+                    playlists: root.playlists;
+                    removable: true;
+                    remove-label: "Remove from queue";
+                    play => { root.jump(i); }
+                    action(kind, id) => { root.track-action(i, kind, id); }
+                }
+            }
+        }
+        AccentScrollBar {
+            x: parent.width - self.width;
+            height: parent.height;
+            visible-height: queue-scroll.visible-height;
+            content-height: queue-scroll.content-height;
+            content-y <=> queue-scroll.content-y;
+        }
+    }
+}
+
+component NowPlayingPanel inherits Rectangle {
+    in property <[float]> spectrum;
+    in property <bool> visualizer;
+    in property <NowPlayingView> np;
+    in property <[AlbumItem]> more-from;
+    in property <[CreditItem]> credits;
+    in property <[CreditItem]> members;
+    callback select-album(string);
+    callback select-artist(string);
+    background: Theme.panel;
+    clip: true;
+    // Blurred, darkened cover fills the panel; the accent colour tints it.
+    // appearance.rs mirrors these layers to keep the text above legible.
+    Image {
+        width: parent.width;
+        height: parent.height;
+        source: np.backdrop;
+        image-fit: cover;
+        opacity: 0.55;
+    }
+    Rectangle {
+        background: @linear-gradient(180deg, np.accent.with-alpha(0.25) 0%, Theme.surface.with-alpha(0.75) 45%, Theme.surface.with-alpha(0.6) 100%);
+    }
+    if !np.active: Text {
+        text: "Nothing playing";
+        color: Theme.art-faint;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    // Every line in here wraps or elides: one that can't would widen the whole
+    // column past the panel's edge.
+    if np.active: Rectangle {
+        np-scroll := ScrollView {
+            vertical-scrollbar-policy: always-off;
+            VerticalLayout {
+                alignment: start;
+                padding: 22px;
+                spacing: 14px;
+                Text { text: "NOW PLAYING"; color: Theme.art-muted; font-size: 11px; font-weight: 700; letter-spacing: 1.5px; }
+                Cover {
+                    source: np.cover;
+                    size: root.width - 44px;
+                    drop-shadow-blur: 40px;
+                    drop-shadow-color: np.accent.with-alpha(0.45);
+                }
+                if root.visualizer: Rectangle {
+                    height: 44px;
+                    property <length> step: self.width / max(1, root.spectrum.length);
+                    for level[i] in root.spectrum: Rectangle {
+                        x: i * parent.step + parent.step * 0.15;
+                        width: parent.step * 0.7;
+                        height: max(2px, level * parent.height);
+                        y: parent.height - self.height;
+                        border-radius: 2px;
+                        background: @linear-gradient(0deg, Theme.accent.with-alpha(0.55) 0%, Theme.accent 100%);
+                    }
+                }
+                VerticalLayout {
+                    spacing: 2px;
+                    Text { text: np.title; color: Theme.art-text; font-size: 22px; font-weight: 800; wrap: word-wrap; }
+                    Text { text: np.artist; color: Theme.art-text; font-size: 15px; font-weight: 600; wrap: word-wrap; }
+                    Text { text: np.album + (np.year == "" ? "" : "  ·  " + np.year); color: Theme.art-muted; font-size: 13px; wrap: word-wrap; }
+                }
+                HorizontalLayout {
+                    alignment: start;
+                    spacing: 6px;
+                    Chip { text: np.format; accent: np.accent; }
+                    if np.quality != "": Chip { text: np.quality; accent: np.accent; }
+                }
+                if np.genres != "": Text { text: np.genres; color: Theme.art-muted; font-size: 12px; wrap: word-wrap; }
+                Rectangle { height: 1px; background: Theme.surface-hi; }
+                Text { text: "Credits"; color: Theme.art-text; font-size: 15px; font-weight: 700; }
+                if credits.length == 0: Text {
+                    text: np.loading-details ? "Looking up musicians…" : "No credits found for this track.";
+                    color: Theme.art-faint;
+                    font-size: 12px;
+                }
+                CreditList {
+                    items: root.credits;
+                    accent: np.accent;
+                    text-color: Theme.art-text;
+                    muted-color: Theme.art-muted;
+                    faint-color: Theme.art-faint;
+                    select-artist(id) => { root.select-artist(id); }
+                }
+                Rectangle { height: 1px; background: Theme.surface-hi; }
+                VerticalLayout {
+                    spacing: 2px;
+                    Text {
+                        text: "About " + np.artist;
+                        color: about-ta.has-hover ? np.accent.brighter(0.4) : Theme.art-text;
+                        font-size: 15px;
+                        font-weight: 700;
+                        wrap: word-wrap;
+                        about-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.select-artist(np.artist-id); }
+                        }
+                    }
+                    if np.artist-meta != "": Text { text: np.artist-meta; color: Theme.art-muted; font-size: 12px; wrap: word-wrap; }
+                }
+                Text {
+                    text: np.biography != "" ? np.biography : np.loading-details ? "Fetching biography…" : "No biography available.";
+                    color: Theme.art-muted;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+                if members.length > 0: CreditList {
+                    items: root.members;
+                    accent: np.accent;
+                    text-color: Theme.art-text;
+                    muted-color: Theme.art-muted;
+                    faint-color: Theme.art-faint;
+                    select-artist(id) => { root.select-artist(id); }
+                }
+                if more-from.length > 0: Text { text: "More from " + np.artist; color: Theme.art-text; font-size: 15px; font-weight: 700; wrap: word-wrap; }
+                if more-from.length > 0: AlbumGrid {
+                    albums: root.more-from;
+                    cell: (root.width - 44px - 20px) / 2;
+                    text-color: Theme.art-text;
+                    muted-color: Theme.art-muted;
+                    select(id) => { root.select-album(id); }
+                }
+            }
+        }
+        AccentScrollBar {
+            x: parent.width - self.width;
+            height: parent.height;
+            visible-height: np-scroll.visible-height;
+            content-height: np-scroll.content-height;
+            content-y <=> np-scroll.content-y;
+        }
+    }
+}
+
+component LyricsPage inherits Rectangle {
+    in property <string> title;
+    in property <string> artist;
+    in property <LyricsState> state;
+    in property <[string]> lines;
+    /// The synced line being sung, or -1.
+    in property <int> current: -1;
+    in property <string> source;
+    callback seek-line(int);
+    property <length> row-height: 60px;
+    // Keep the sung line a third of the way down, like a teleprompter.
+    changed current => {
+        if root.current >= 0 {
+            list.content-y = min(0px, max(list.visible-height - list.content-height, list.visible-height / 3 - root.current * root.row-height));
+        }
+    }
+    VerticalLayout {
+        padding: 28px;
+        padding-bottom: 12px;
+        spacing: 6px;
+        Text { text: root.title == "" ? "Lyrics" : root.title; color: Theme.text; font-size: 28px; font-weight: 800; overflow: elide; }
+        Text { text: root.artist; color: Theme.muted; font-size: 14px; overflow: elide; }
+        if root.state != LyricsState.plain && root.state != LyricsState.synced: Text {
+            vertical-stretch: 1;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+            color: Theme.faint;
+            font-size: 18px;
+            text: root.state == LyricsState.loading ? "Looking for lyrics…"
+                : root.state == LyricsState.instrumental ? "Instrumental"
+                : root.title == "" ? "Nothing is playing" : "No lyrics found for this track";
+        }
+        Rectangle {
+            visible: root.state == LyricsState.plain || root.state == LyricsState.synced;
+            vertical-stretch: 1;
+            list := ListView {
+                vertical-scrollbar-policy: always-off;
+                for line[i] in root.lines: Rectangle {
+                    height: root.row-height;
+                    Text {
+                        width: parent.width;
+                        text: line;
+                        wrap: word-wrap;
+                        overflow: elide;
+                        vertical-alignment: center;
+                        font-size: 22px;
+                        font-weight: 700;
+                        color: root.state != LyricsState.synced || i == root.current ? Theme.text
+                            : line-ta.has-hover ? Theme.muted
+                            : i < root.current ? Theme.muted.with-alpha(0.7) : Theme.faint;
+                        animate color { duration: 200ms; }
+                    }
+                    line-ta := TouchArea {
+                        enabled: root.state == LyricsState.synced;
+                        mouse-cursor: self.enabled ? pointer : default;
+                        clicked => { root.seek-line(i); }
+                    }
+                }
+            }
+            AccentScrollBar {
+                x: parent.width - self.width;
+                height: parent.height;
+                visible-height: list.visible-height;
+                content-height: list.content-height;
+                content-y <=> list.content-y;
+            }
+        }
+        if root.source != "": Text { text: root.source; color: Theme.faint; font-size: 11px; }
+    }
+}
+
+/// Where to trim a track, at a time picked on its waveform (right-click).
+component TrimMenu inherits PopupWindow {
+    /// The time picked, in seconds, and as shown.
+    in property <float> at;
+    in property <string> at-text;
+    in property <bool> trimmed;
+    callback pick(string, float);
+    width: 230px;
+    height: 6px + 24px + (root.trimmed ? 3 : 2) * 31px + 6px;
+    Rectangle {
+        background: Theme.surface-hi;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: Theme.surface.brighter(0.8);
+        drop-shadow-blur: 18px;
+        drop-shadow-color: #000000b0;
+        VerticalLayout {
+            padding: 6px;
+            spacing: 1px;
+            Text {
+                height: 24px;
+                x: 10px;
+                text: "TRIM, FOR EVERYONE · " + root.at-text;
+                color: Theme.faint;
+                font-size: 10px;
+                font-weight: 700;
+                letter-spacing: 1.2px;
+                vertical-alignment: center;
+            }
+            MenuItem { text: "Start the track here"; clicked => { root.pick("start", root.at); } }
+            MenuItem { text: "End the track here"; clicked => { root.pick("end", root.at); } }
+            if root.trimmed: MenuItem { text: "Play the whole track"; clicked => { root.pick("clear", 0); } }
+        }
+    }
+}
+
+/// The seek bar drawn as the track's waveform: the played part in the accent colour.
+/// Click or drag anywhere to seek. Parts trimmed off are faded, and admins trim with a right-click.
+component WaveformBar inherits Rectangle {
+    in property <[float]> points;
+    in property <float> position;
+    in property <float> duration;
+    /// Where playback starts and ends, in seconds; negative for none.
+    in property <float> trim-start: -1;
+    in property <float> trim-end: -1;
+    in property <bool> can-trim;
+    callback seek(float);
+    callback trim(string, float);
+    height: 30px;
+    property <float> start-at: root.duration > 0 && root.trim-start > 0 ? root.trim-start / root.duration : 0;
+    property <float> end-at: root.duration > 0 && root.trim-end > 0 ? root.trim-end / root.duration : 1;
+    property <float> menu-at;
+    property <float> progress: root.duration > 0 ? root.position / root.duration : 0;
+    property <float> hover-at: clamp(ta.mouse-x / max(1px, root.width), 0, 1);
+    property <float> shown: ta.pressed ? root.hover-at : root.progress;
+    property <length> step: root.width / max(1, root.points.length);
+    for p[i] in root.points: Rectangle {
+        x: i * root.step;
+        width: max(1px, root.step * 0.62);
+        height: max(2px, p * root.height);
+        y: (root.height - self.height) / 2;
+        border-radius: 1px;
+        property <float> at: (i + 0.5) / root.points.length;
+        opacity: self.at < root.start-at || self.at > root.end-at ? 0.3 : 1;
+        background: self.at <= root.shown ? Theme.accent
+            : ta.has-hover && self.at <= root.hover-at ? Theme.muted
+            : Theme.faint.with-alpha(0.8);
+    }
+    // The trim points.
+    if root.start-at > 0: Rectangle {
+        x: root.start-at * root.width - 1px;
+        width: 2px;
+        background: Theme.text;
+    }
+    if root.end-at < 1: Rectangle {
+        x: root.end-at * root.width - 1px;
+        width: 2px;
+        background: Theme.text;
+    }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.up && e.button == PointerEventButton.left {
+                root.seek(root.hover-at * root.duration);
+            }
+            if e.kind == PointerEventKind.down && e.button == PointerEventButton.right && root.can-trim {
+                root.menu-at = root.hover-at * root.duration;
+                menu.show();
+            }
+        }
+    }
+    menu := TrimMenu {
+        x: clamp(ta.mouse-x - self.width / 2, 0, root.width - self.width);
+        y: -self.height - 8px;
+        at: root.menu-at;
+        at-text: floor(root.menu-at / 60) + ":" + (mod(floor(root.menu-at), 60) < 10 ? "0" : "") + mod(floor(root.menu-at), 60);
+        trimmed: root.trim-start >= 0 || root.trim-end >= 0;
+        pick(kind, at) => { root.trim(kind, at); }
+    }
+}
+
+/// Offers to trim the silence found in the track playing.
+component TrimOffer inherits Rectangle {
+    in property <string> text;
+    callback answer(string);
+    width: 360px;
+    height: layout.preferred-height;
+    background: Theme.surface-hi;
+    border-radius: 10px;
+    border-width: 1px;
+    border-color: Theme.surface.brighter(0.8);
+    drop-shadow-blur: 18px;
+    drop-shadow-color: #000000b0;
+    // Clicks stay on the card.
+    TouchArea { }
+    layout := VerticalLayout {
+        padding: 14px;
+        spacing: 10px;
+        Text { text: "Skip the silence?"; color: Theme.text; font-size: 13px; font-weight: 600; }
+        Text { text: root.text; color: Theme.muted; font-size: 12px; wrap: word-wrap; }
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: end;
+            OutlineButton { text: "Never for this track"; clicked => { root.answer("never"); } }
+            OutlineButton { text: "Not now"; clicked => { root.answer("later"); } }
+            OutlineButton { text: "Skip it"; clicked => { root.answer("accept"); } }
+        }
+    }
+}
+
+component TransportBar inherits Rectangle {
+    in property <[float]> waveform;
+    in property <bool> waveform-ready;
+    in property <float> trim-start: -1;
+    in property <float> trim-end: -1;
+    in property <bool> can-trim;
+    callback trim(string, float);
+    in property <NowPlayingView> np;
+    in property <bool> playing;
+    in property <float> position;
+    in property <float> duration;
+    in property <string> position-text;
+    in property <string> duration-text;
+    in-out property <float> volume;
+    in property <string> stream-info;
+    in property <string> quality-mode;
+    in property <string> replaygain-mode;
+    callback cycle-replaygain();
+    in property <bool> shuffle;
+    in property <RepeatMode> repeat;
+    // Same green as the playing-track marker, so "active" reads the same everywhere.
+    in property <color> accent: Theme.accent;
+    in property <bool> queue-open;
+    in property <bool> lyrics-open;
+    callback show-lyrics();
+    callback toggle();
+    callback toggle-shuffle();
+    /// What the shuffle button draws from: library, album, artist or genre.
+    in property <string> shuffle-scope;
+    /// While shuffling, what from ("Album: Kind of Blue").
+    in property <string> shuffle-label;
+    callback set-shuffle-scope(string);
+    callback cycle-repeat();
+    callback show-queue();
+    callback next();
+    callback prev();
+    callback seek(float);
+    callback volume-changed(float);
+    callback cycle-quality-mode();
+    changed position => {
+        if !seek-bar.dragging {
+            seek-bar.value = root.position;
+        }
+    }
+    height: 98px;
+    background: Theme.chrome;
+    Rectangle { y: 0; height: 1px; background: Theme.surface-hi; }
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        padding-top: 10px;
+        padding-bottom: 14px;
+        spacing: 16px;
+        HorizontalLayout {
+            width: 280px;
+            spacing: 12px;
+            alignment: start;
+            VerticalLayout {
+                alignment: center;
+                Cover { source: np.cover; size: 56px; border-radius: 6px; }
+            }
+            VerticalLayout {
+                alignment: center;
+                Text { text: np.title; color: Theme.text; font-size: 13px; font-weight: 600; overflow: elide; }
+                Text { text: np.artist; color: Theme.muted; font-size: 11px; overflow: elide; }
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            spacing: 4px;
+            HorizontalLayout {
+                alignment: center;
+                spacing: 12px;
+                shuffle-button := ToggleIcon {
+                    commands: Icons.shuffle;
+                    active: root.shuffle;
+                    accent: root.accent;
+                    clicked => { root.toggle-shuffle(); }
+                    context-menu => { shuffle-menu.show(); }
+                    // While shuffling, what from; otherwise, on hover, what it would draw from.
+                    caption: root.shuffle ? root.shuffle-label
+                        : !self.hovered ? ""
+                        : "Shuffle from: " + (root.shuffle-scope == "album" ? "This album"
+                            : root.shuffle-scope == "artist" ? "This artist"
+                            : root.shuffle-scope == "genre" ? "This genre"
+                            : root.shuffle-scope == "playlist" ? "This playlist" : "Whole library");
+                    caption-color: root.shuffle ? root.accent : Theme.muted;
+                    caption-width: self.x - 10px;
+                    caption-clicked => { shuffle-menu.show(); }
+                }
+                IconButton { commands: Icons.replay; clicked => { root.seek(0); } }
+                IconButton { commands: Icons.previous; filled: true; clicked => { root.prev(); } }
+                IconButton { commands: root.playing ? Icons.pause : Icons.play; filled: true; primary: true; size: 40px; clicked => { root.toggle(); } }
+                IconButton { commands: Icons.next; filled: true; clicked => { root.next(); } }
+                ToggleIcon {
+                    commands: root.repeat == RepeatMode.one ? Icons.repeat-one : Icons.repeat;
+                    active: root.repeat != RepeatMode.off;
+                    accent: root.accent;
+                    clicked => { root.cycle-repeat(); }
+                }
+                // Opens above the button: the bar is at the bottom of the window.
+                shuffle-menu := ShuffleMenu {
+                    x: shuffle-button.x + (shuffle-button.width - self.width) / 2;
+                    y: shuffle-button.y - self.height - 8px;
+                    scope: root.shuffle-scope;
+                    pick(scope) => { root.set-shuffle-scope(scope); }
+                }
+            }
+            HorizontalLayout {
+                spacing: 10px;
+                Text { text: root.position-text; color: Theme.muted; font-size: 11px; vertical-alignment: center; }
+                if root.waveform-ready: WaveformBar {
+                    points: root.waveform;
+                    position: root.position;
+                    duration: root.duration;
+                    trim-start: root.trim-start;
+                    trim-end: root.trim-end;
+                    can-trim: root.can-trim;
+                    seek(v) => { root.seek(v); }
+                    trim(kind, at) => { root.trim(kind, at); }
+                }
+                // The plain bar until the waveform has arrived (it's computed on first play).
+                seek-bar := Slider {
+                    visible: !root.waveform-ready;
+                    width: root.waveform-ready ? 0 : self.preferred-width;
+                    horizontal-stretch: root.waveform-ready ? 0 : 1;
+                    // Dragging assigns `value`, which would break a `value: root.position`
+                    // binding for good: the position is pushed in below instead.
+                    property <bool> dragging;
+                    minimum: 0;
+                    maximum: max(1, root.duration);
+                    changed(v) => { self.dragging = true; }
+                    released(v) => {
+                        self.dragging = false;
+                        root.seek(v);
+                    }
+                }
+                Text { text: root.duration-text; color: Theme.muted; font-size: 11px; vertical-alignment: center; }
+            }
+        }
+        VerticalLayout {
+            width: 320px;
+            alignment: center;
+            spacing: 4px;
+            HorizontalLayout {
+                spacing: 8px;
+                Path {
+                    width: 16px;
+                    height: 16px;
+                    viewbox-width: 24;
+                    viewbox-height: 24;
+                    commands: Icons.volume;
+                    fill: transparent;
+                    stroke: Theme.muted;
+                    stroke-width: 1.6px;
+                    stroke-line-cap: round;
+                    stroke-line-join: round;
+                }
+                Slider {
+                    minimum: 0;
+                    maximum: 1;
+                    value <=> root.volume;
+                    changed(v) => { root.volume-changed(v); }
+                }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: end;
+                ToggleIcon {
+                    commands: Icons.lyrics;
+                    active: root.lyrics-open;
+                    accent: root.accent;
+                    clicked => { root.show-lyrics(); }
+                }
+                ToggleIcon {
+                    commands: Icons.queue;
+                    active: root.queue-open;
+                    accent: root.accent;
+                    clicked => { root.show-queue(); }
+                }
+                Rectangle {
+                    width: rg-label.preferred-width + 14px;
+                    height: 20px;
+                    border-radius: 10px;
+                    border-width: 1px;
+                    border-color: rg-ta.has-hover ? Theme.accent : Theme.accent.with-alpha(0.55);
+                    background: Theme.accent.with-alpha(rg-ta.has-hover ? 0.28 : 0.16);
+                    rg-label := Text {
+                        text: root.replaygain-mode;
+                        color: Theme.accent.brighter(0.3);
+                        font-size: 10px;
+                        font-weight: 700;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    rg-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.cycle-replaygain(); }
+                    }
+                }
+                Rectangle {
+                    width: mode-label.preferred-width + 14px;
+                    height: 20px;
+                    border-radius: 10px;
+                    border-width: 1px;
+                    border-color: mode-ta.has-hover ? Theme.accent : Theme.accent.with-alpha(0.55);
+                    background: Theme.accent.with-alpha(mode-ta.has-hover ? 0.28 : 0.16);
+                    mode-label := Text {
+                        text: root.quality-mode;
+                        color: Theme.accent.brighter(0.3);
+                        font-size: 10px;
+                        font-weight: 700;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    mode-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.cycle-quality-mode(); }
+                    }
+                }
+            }
+            // Its own line: quality, measured speed and ReplayGain don't fit beside the chips.
+            Text {
+                text: root.stream-info;
+                color: Theme.faint;
+                font-size: 11px;
+                horizontal-alignment: right;
+                overflow: elide;
+            }
+        }
+    }
+}
+
+component Field inherits VerticalLayout {
+    in property <string> label;
+    spacing: 4px;
+    Text { text: root.label; color: Theme.faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+    @children
+}
+
+component PrimaryButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> busy;
+    callback clicked;
+    height: 40px;
+    border-radius: 20px;
+    background: root.busy ? Theme.surface-hi : (ta.has-hover ? #ffffff : #e8e9ec);
+    Text {
+        text: root.busy ? "Please wait…" : root.text;
+        color: root.busy ? Theme.muted : Theme.bg;
+        font-size: 14px;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    ta := TouchArea {
+        enabled: !root.busy;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+component LoginScreen inherits Rectangle {
+    in property <LoginState> state;
+    in-out property <string> server;
+    in-out property <string> username;
+    in-out property <string> password;
+    in-out property <string> new-password;
+    in-out property <string> confirm-password;
+    in-out property <string> full-name;
+    callback submit();
+    callback check-server();
+    callback change-password();
+    callback onboard();
+    callback skip-onboarding();
+    callback trust();
+    callback cancel-trust();
+    callback use-local();
+    callback use-server();
+    callback browse-music-folder();
+    callback use-music-folder();
+    callback back-to-choice();
+    callback back-to-library();
+    background: Theme.bg;
+    // Swallow clicks so nothing behind the screen reacts.
+    TouchArea { }
+    // Centred card, sized by its contents (fields come and go with the step and errors).
+    VerticalLayout {
+        alignment: center;
+        HorizontalLayout {
+            alignment: center;
+            Rectangle {
+                width: 400px;
+                border-radius: 14px;
+                background: Theme.surface;
+                drop-shadow-blur: 40px;
+                drop-shadow-color: #00000090;
+                // A layout (unlike the Rectangle itself) sizes to whichever step is shown.
+                VerticalLayout {
+                    if root.state.trust-fingerprint != "": VerticalLayout {
+                        padding: 32px;
+                        spacing: 14px;
+                        Text { text: "Trust this server?"; color: Theme.text; font-size: 22px; font-weight: 800; }
+                        Text {
+                            text: root.state.trust-server + " uses its own (self-signed) certificate, which this computer can't check by itself. Trust it only if this fingerprint matches the one the server shows in its log or the installer printed.";
+                            color: Theme.muted;
+                            font-size: 13px;
+                            wrap: word-wrap;
+                        }
+                        Field {
+                            label: "SHA-256 FINGERPRINT";
+                            Text {
+                                text: root.state.trust-fingerprint;
+                                color: Theme.text;
+                                font-family: "monospace";
+                                font-size: 12px;
+                                wrap: char-wrap;
+                            }
+                        }
+                        PrimaryButton { text: "Trust this server"; clicked => { root.trust(); } }
+                        Text {
+                            text: "Cancel";
+                            color: cancel-ta.has-hover ? Theme.text : Theme.faint;
+                            font-size: 12px;
+                            horizontal-alignment: center;
+                            cancel-ta := TouchArea { mouse-cursor: pointer; clicked => { root.cancel-trust(); } }
+                        }
+                    }
+                    if root.state.trust-fingerprint == "" && root.state.choosing && !root.state.picking-folder: VerticalLayout {
+                        padding: 32px;
+                        spacing: 14px;
+                        Text { text: "HyperPlayer"; color: Theme.text; font-size: 26px; font-weight: 800; letter-spacing: -0.5px; }
+                        Text {
+                            text: "How do you want to use HyperPlayer?";
+                            color: Theme.muted;
+                            font-size: 13px;
+                            wrap: word-wrap;
+                        }
+                        if root.state.local-available: PrimaryButton {
+                            text: "Standalone player";
+                            busy: root.state.busy;
+                            clicked => { root.use-local(); }
+                        }
+                        if root.state.local-available: Text {
+                            color: Theme.muted;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                            text: "HyperPlayer keeps its own library of your music folders, on this computer's disks or on a network drive. Nothing else to install.";
+                        }
+                        OutlineButton {
+                            text: "Connect to a HyperPlayer server";
+                            clicked => { root.use-server(); }
+                        }
+                        Text { text: "A server, at home or elsewhere, keeps the library, queue and playlists for all your devices."; color: Theme.muted; font-size: 12px; wrap: word-wrap; }
+                        if root.state.error != "": Text { text: root.state.error; color: #e5484d; font-size: 12px; wrap: word-wrap; }
+                        if root.state.can-go-back: HorizontalLayout {
+                            alignment: start;
+                            OutlineButton {
+                                text: "Back to my library";
+                                clicked => { root.back-to-library(); }
+                            }
+                        }
+                    }
+                    if root.state.trust-fingerprint == "" && root.state.choosing && root.state.picking-folder: VerticalLayout {
+                        padding: 32px;
+                        spacing: 14px;
+                        Text { text: "Your music folder"; color: Theme.text; font-size: 22px; font-weight: 800; }
+                        Text {
+                            text: "HyperPlayer builds its library from the music in this folder and its subfolders, and notices music added later. A folder on a network drive works too.";
+                            color: Theme.muted;
+                            font-size: 13px;
+                            wrap: word-wrap;
+                        }
+                        Field {
+                            label: "MUSIC FOLDER";
+                            Text {
+                                text: root.state.music-folder != "" ? root.state.music-folder : "No folder chosen yet";
+                                color: root.state.music-folder != "" ? Theme.text : Theme.faint;
+                                font-size: 13px;
+                                wrap: char-wrap;
+                            }
+                        }
+                        if root.state.music-folder != "": PrimaryButton {
+                            text: "Use this folder";
+                            busy: root.state.busy;
+                            clicked => { root.use-music-folder(); }
+                        }
+                        OutlineButton {
+                            text: root.state.music-folder != "" ? "Choose another folder…" : "Choose a folder…";
+                            clicked => { root.browse-music-folder(); }
+                        }
+                        Text { text: "More folders can be added later, in Settings."; color: Theme.muted; font-size: 12px; wrap: word-wrap; }
+                        if root.state.error != "": Text { text: root.state.error; color: #e5484d; font-size: 12px; wrap: word-wrap; }
+                        if !root.state.busy: Text {
+                            text: "Back";
+                            color: back-ta.has-hover ? Theme.text : Theme.faint;
+                            font-size: 12px;
+                            horizontal-alignment: center;
+                            back-ta := TouchArea { mouse-cursor: pointer; clicked => { root.back-to-choice(); } }
+                        }
+                    }
+                    if root.state.trust-fingerprint == "" && !root.state.choosing && !root.state.changing-password && !root.state.onboarding: VerticalLayout {
+                        padding: 32px;
+                        spacing: 14px;
+                        Text { text: "HyperPlayer"; color: Theme.text; font-size: 26px; font-weight: 800; letter-spacing: -0.5px; }
+                        Text {
+                            text: root.state.default-admin
+                                ? "First time on this server? Sign in as admin with the password “hyperplayer”, then choose your own."
+                                : "Sign in to your server.";
+                            color: Theme.muted;
+                            font-size: 13px;
+                            wrap: word-wrap;
+                        }
+                        Field {
+                            label: "SERVER";
+                            LineEdit {
+                                text <=> root.server;
+                                placeholder-text: "https://music.home:4533";
+                                accepted => { root.check-server(); }
+                            }
+                        }
+                        Field {
+                            label: "USERNAME";
+                            LineEdit { text <=> root.username; placeholder-text: "Username"; }
+                        }
+                        Field {
+                            label: "PASSWORD";
+                            LineEdit {
+                                text <=> root.password;
+                                input-type: InputType.password;
+                                placeholder-text: "Password";
+                                accepted => { root.submit(); }
+                            }
+                        }
+                        if root.state.error != "": Text { text: root.state.error; color: #e5484d; font-size: 12px; wrap: word-wrap; }
+                        PrimaryButton { text: "Sign in"; busy: root.state.busy; clicked => { root.submit(); } }
+                        if root.state.local-available: Text {
+                            text: "Use HyperPlayer as a standalone player instead";
+                            color: local-ta.has-hover ? Theme.text : Theme.faint;
+                            font-size: 12px;
+                            horizontal-alignment: center;
+                            local-ta := TouchArea { mouse-cursor: pointer; clicked => { root.use-local(); } }
+                        }
+                    }
+                    if root.state.trust-fingerprint == "" && root.state.changing-password: VerticalLayout {
+                        padding: 32px;
+                        spacing: 14px;
+                        Text { text: "Choose your password"; color: Theme.text; font-size: 22px; font-weight: 800; }
+                        Text {
+                            text: "You signed in with the default password. Pick your own to continue; the default stops working once you do.";
+                            color: Theme.muted;
+                            font-size: 13px;
+                            wrap: word-wrap;
+                        }
+                        if root.state.need-current: Field {
+                            label: "CURRENT PASSWORD";
+                            LineEdit { text <=> root.password; input-type: InputType.password; }
+                        }
+                        Field {
+                            label: "NEW PASSWORD (AT LEAST 8 CHARACTERS)";
+                            LineEdit { text <=> root.new-password; input-type: InputType.password; }
+                        }
+                        Field {
+                            label: "REPEAT IT";
+                            LineEdit {
+                                text <=> root.confirm-password;
+                                input-type: InputType.password;
+                                accepted => { root.change-password(); }
+                            }
+                        }
+                        if root.state.error != "": Text { text: root.state.error; color: #e5484d; font-size: 12px; wrap: word-wrap; }
+                        PrimaryButton { text: "Save and continue"; busy: root.state.busy; clicked => { root.change-password(); } }
+                    }
+                    if root.state.trust-fingerprint == "" && root.state.onboarding: VerticalLayout {
+                        padding: 32px;
+                        spacing: 14px;
+                        Text { text: "Who's listening?"; color: Theme.text; font-size: 22px; font-weight: 800; }
+                        Text {
+                            text: "Create your own account for everyday listening, with your playlists and preferences. The admin account stays for managing the server.";
+                            color: Theme.muted;
+                            font-size: 13px;
+                            wrap: word-wrap;
+                        }
+                        Field {
+                            label: "FULL NAME (OPTIONAL)";
+                            LineEdit { text <=> root.full-name; placeholder-text: "Your name"; }
+                        }
+                        Field {
+                            label: "USERNAME";
+                            LineEdit { text <=> root.username; placeholder-text: "Username"; }
+                        }
+                        Field {
+                            label: "PASSWORD (AT LEAST 8 CHARACTERS)";
+                            LineEdit { text <=> root.new-password; input-type: InputType.password; }
+                        }
+                        Field {
+                            label: "REPEAT IT";
+                            LineEdit {
+                                text <=> root.confirm-password;
+                                input-type: InputType.password;
+                                accepted => { root.onboard(); }
+                            }
+                        }
+                        if root.state.error != "": Text { text: root.state.error; color: #e5484d; font-size: 12px; wrap: word-wrap; }
+                        PrimaryButton { text: "Create my account"; busy: root.state.busy; clicked => { root.onboard(); } }
+                        Text {
+                            text: "Skip: keep using the admin account";
+                            color: skip-ta.has-hover ? Theme.text : Theme.faint;
+                            font-size: 12px;
+                            horizontal-alignment: center;
+                            skip-ta := TouchArea { mouse-cursor: pointer; clicked => { root.skip-onboarding(); } }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+component ShortcutHelp inherits Rectangle {
+    callback close();
+    background: #000000a0;
+    TouchArea { clicked => { root.close(); } }
+    Rectangle {
+        width: 420px;
+        height: rows.preferred-height + 48px;
+        border-radius: 12px;
+        background: Theme.surface-hi;
+        drop-shadow-blur: 30px;
+        drop-shadow-color: #000000c0;
+        rows := VerticalLayout {
+            x: 24px;
+            y: 24px;
+            width: parent.width - 48px;
+            spacing: 8px;
+            Text { text: "Keyboard shortcuts"; color: Theme.text; font-size: 18px; font-weight: 800; }
+            for row in [
+                { key: "Space", what: "Play / pause" },
+                { key: "← / →", what: "Seek back / forward 10 s" },
+                { key: "Ctrl+← / Ctrl+→", what: "Previous / next track" },
+                { key: "Home", what: "Replay the track from the start" },
+                { key: "↑ / ↓", what: "Volume up / down" },
+                { key: "M", what: "Mute" },
+                { key: "S / R", what: "Shuffle / repeat" },
+                { key: "Q", what: "Queue" },
+                { key: "L", what: "Lyrics" },
+                { key: "H", what: "History" },
+                { key: "A", what: "Albums" },
+                { key: ",", what: "Settings" },
+                { key: "/  or  Ctrl+F", what: "Search" },
+                { key: "Esc", what: "Leave search / close" },
+                { key: "?", what: "This help" },
+            ]: HorizontalLayout {
+                Text { width: 150px; text: row.key; color: Theme.text; font-size: 13px; font-weight: 700; }
+                Text { text: row.what; color: Theme.muted; font-size: 13px; }
+            }
+        }
+    }
+}
+
+export struct DeviceItem {
+    id: string,
+    name: string,
+    detail: string,
+    current: bool,
+}
+
+export struct UserItem {
+    id: string,
+    username: string,
+    detail: string,
+    admin: bool,
+    me: bool,
+}
+
+export struct FolderItem {
+    path: string,
+    detail: string,
+    available: bool,
+}
+
+/// A server whose music is part of the standalone library.
+export struct SourceItem {
+    id: string,
+    title: string,
+    detail: string,
+    failing: bool,
+}
+
+/// State and actions of the Settings page, driven from Rust (`ui.global::<SettingsState>()`).
+export global SettingsState {
+    in-out property <string> tab: "playback";
+    /// This player's version and the server's.
+    in property <string> versions;
+    in property <bool> is-admin;
+    /// The music on this computer: no password, devices or users; the folders are this computer's.
+    in property <bool> local;
+    /// Signed in to a server, on a player with a library of its own to switch to.
+    in property <bool> can-switch;
+    callback switch-library();
+
+    // Appearance.
+    in property <string> accent;
+    in property <bool> cover-background;
+    in property <bool> visualizer;
+    callback set-accent(string);
+    callback set-cover-background(bool);
+    callback set-visualizer(bool);
+    in property <bool> system-title-bar;
+    /// Off where the desktop's title bar is the only one (macOS).
+    in property <bool> title-bar-choice: true;
+    callback set-system-title-bar(bool);
+
+    // Playback (the user's preferences).
+    in property <string> quality;
+    in property <string> replaygain;
+    in property <float> preamp;
+    callback set-quality(string);
+    callback set-replaygain(string);
+    callback preamp-changed(float);
+    callback preamp-released(float);
+    /// Seconds of overlap between tracks (0: off), and where it applies.
+    in property <int> crossfade;
+    in property <bool> crossfade-on-skip;
+    in property <bool> crossfade-albums;
+    callback crossfade-changed(int);
+    callback crossfade-released(int);
+    callback set-crossfade-on-skip(bool);
+    callback set-crossfade-albums(bool);
+
+    // Account.
+    in-out property <string> full-name;
+    in property <string> name-message;
+    callback save-name();
+    in-out property <string> pw-current;
+    in-out property <string> pw-new;
+    in-out property <string> pw-confirm;
+    in property <string> pw-message;
+    in property <bool> pw-error;
+    callback change-password();
+    in property <[DeviceItem]> devices;
+    callback revoke-device(string);
+
+    // Scrobbling.
+    in property <bool> lb-connected;
+    in property <string> lb-username;
+    in property <string> lb-status;
+    in property <bool> lb-failing;
+    in property <bool> lb-busy;
+    in property <string> lb-error;
+    in-out property <string> lb-token;
+    callback lb-connect(string);
+    callback lb-disconnect();
+    in property <bool> fm-available;
+    in property <bool> fm-connected;
+    in property <string> fm-username;
+    in property <string> fm-status;
+    in property <bool> fm-failing;
+    in property <bool> fm-busy;
+    // Waiting for the user to allow HyperPlayer on last.fm (at `fm-url`).
+    in property <bool> fm-waiting;
+    in property <string> fm-url;
+    in property <string> fm-error;
+    callback fm-connect();
+    callback fm-open(string);
+    callback fm-cancel();
+    callback fm-disconnect();
+
+    // Admin: library.
+    in property <string> library-summary;
+    in property <[FolderItem]> folders;
+    in property <bool> scanning;
+    /// The running scan's share done, 0..1; negative while it's still finding the files.
+    in property <float> scan-progress;
+    in property <string> scan-detail;
+    callback rescan();
+    callback cancel-scan();
+    /// A path on the server to add to the library.
+    in-out property <string> new-folder;
+    /// An example path as the server writes them (Windows or not).
+    in property <string> folder-example: "/mnt/music";
+    callback add-folder();
+    /// Local library: choose a folder with the system's dialog.
+    callback browse-folder();
+    callback remove-folder(string);
+    in property <string> folders-message;
+    in property <bool> folders-error;
+
+    // Local library: servers whose music is part of it.
+    in property <[SourceItem]> sources;
+    in-out property <string> source-url;
+    in-out property <string> source-username;
+    in-out property <string> source-password;
+    in property <bool> source-busy;
+    /// The server's self-signed certificate, waiting for the user to trust it.
+    in property <string> source-fingerprint;
+    in property <string> sources-message;
+    in property <bool> sources-error;
+    callback add-source();
+    callback trust-source();
+    callback cancel-trust-source();
+    callback remove-source(string);
+    callback import-source-playlists(string);
+
+    // Admin: users.
+    in property <[UserItem]> users;
+    in property <string> users-message;
+    in property <bool> users-error;
+    callback set-admin(string, bool);
+    callback reset-password(string, string);
+    callback delete-user(string);
+    in-out property <string> new-username;
+    in-out property <string> new-full-name;
+    in-out property <string> new-password;
+    in-out property <bool> new-admin;
+    callback create-user();
+}
+
+component Card inherits Rectangle {
+    in property <string> title;
+    background: Theme.surface;
+    border-radius: Theme.radius;
+    max-width: 720px;
+    VerticalLayout {
+        padding: 18px;
+        spacing: 12px;
+        if root.title != "": Text { text: root.title; color: Theme.text; font-size: 15px; font-weight: 700; }
+        @children
+    }
+}
+
+component Note inherits Text {
+    color: Theme.muted;
+    font-size: 12px;
+    wrap: word-wrap;
+}
+
+component SettingsPage inherits Rectangle {
+    // Per-row admin actions waiting for input or confirmation.
+    property <string> removing-folder;
+    property <string> removing-source;
+    property <string> resetting;
+    property <string> reset-password;
+    property <string> deleting;
+    Rectangle {
+        settings-scroll := ScrollView {
+            vertical-scrollbar-policy: always-off;
+            VerticalLayout {
+                alignment: start;
+                padding: 28px;
+                spacing: 18px;
+                HorizontalLayout {
+                    spacing: 14px;
+                    Text { text: "Settings"; color: Theme.text; font-size: 28px; font-weight: 800; }
+                    Text { text: SettingsState.versions; color: Theme.faint; font-size: 12px; vertical-alignment: center; }
+                }
+                Segmented {
+                    selected: SettingsState.tab;
+                    // Listeners see the library's state too, read-only, as "Library".
+                    options: [{ key: "playback", label: "Playback" }, { key: "appearance", label: "Appearance" }, { key: "account", label: "Account" }, { key: "scrobbling", label: "Scrobbling" }, { key: "server", label: SettingsState.is-admin && !SettingsState.local ? "Server" : "Library" }];
+                    pick(key) => { SettingsState.tab = key; }
+                }
+
+                // ------------------------------------------------------------ playback
+                if SettingsState.tab == "playback": Card {
+                    title: "Streaming quality";
+                    Note { text: "Auto picks the best quality your connection sustains and adapts as it changes. Original always streams the file as it is; Data saver uses about 128 kbit/s."; }
+                    Segmented {
+                        selected: SettingsState.quality;
+                        options: [{ key: "auto", label: "Auto" }, { key: "original", label: "Original" }, { key: "data-saver", label: "Data saver" }];
+                        pick(key) => { SettingsState.set-quality(key); }
+                    }
+                }
+                if SettingsState.tab == "playback": Card {
+                    title: "Volume levelling (ReplayGain)";
+                    Note { text: "Evens out loudness between tracks using their ReplayGain tags. Auto keeps an album's own dynamics while it plays in order, and levels track by track otherwise."; }
+                    Segmented {
+                        selected: SettingsState.replaygain;
+                        options: [{ key: "auto", label: "Auto" }, { key: "track", label: "Track" }, { key: "album", label: "Album" }, { key: "off", label: "Off" }];
+                        pick(key) => { SettingsState.set-replaygain(key); }
+                    }
+                    HorizontalLayout {
+                        spacing: 12px;
+                        Text { text: "Pre-amp"; color: Theme.muted; font-size: 12px; vertical-alignment: center; }
+                        Slider {
+                            minimum: -15;
+                            maximum: 15;
+                            step: 0.5;
+                            value: SettingsState.preamp;
+                            changed(v) => { SettingsState.preamp-changed(round(v * 2) / 2); }
+                            released(v) => { SettingsState.preamp-released(round(v * 2) / 2); }
+                        }
+                        Text {
+                            width: 60px;
+                            text: (SettingsState.preamp > 0 ? "+" : "") + SettingsState.preamp + " dB";
+                            color: Theme.text;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            horizontal-alignment: right;
+                        }
+                    }
+                    Note { text: "Added to every ReplayGain adjustment; boosts are still limited so peaks never clip."; }
+                }
+                if SettingsState.tab == "playback": Card {
+                    title: "Crossfade";
+                    Note { text: "Fades each track into the next instead of playing them back to back. Tracks at different sample rates still change without a fade, so each plays at its own rate."; }
+                    HorizontalLayout {
+                        spacing: 12px;
+                        Text { text: "Length"; color: Theme.muted; font-size: 12px; vertical-alignment: center; }
+                        Slider {
+                            minimum: 0;
+                            maximum: 12;
+                            step: 1;
+                            value: SettingsState.crossfade;
+                            changed(v) => { SettingsState.crossfade-changed(round(v)); }
+                            released(v) => { SettingsState.crossfade-released(round(v)); }
+                        }
+                        Text {
+                            width: 60px;
+                            text: SettingsState.crossfade == 0 ? "Off" : SettingsState.crossfade + " s";
+                            color: Theme.text;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            horizontal-alignment: right;
+                        }
+                    }
+                    CheckBox {
+                        text: "Also when skipping to another track";
+                        enabled: SettingsState.crossfade > 0;
+                        checked: SettingsState.crossfade-on-skip;
+                        toggled => { SettingsState.set-crossfade-on-skip(self.checked); }
+                    }
+                    CheckBox {
+                        text: "Also between tracks of an album playing in order (gapless otherwise, as live albums need)";
+                        enabled: SettingsState.crossfade > 0;
+                        checked: SettingsState.crossfade-albums;
+                        toggled => { SettingsState.set-crossfade-albums(self.checked); }
+                    }
+                }
+
+                // ---------------------------------------------------------- appearance
+                if SettingsState.tab == "appearance": Card {
+                    title: "Accent colour";
+                    Note { text: "Used for highlights, active controls and the waveform. “From the album” follows the cover of what's playing."; }
+                    HorizontalLayout {
+                        spacing: 10px;
+                        alignment: start;
+                        for swatch in [
+                            { key: "cover", colour: #00000000 },
+                            { key: "#1ed760", colour: #1ed760 },
+                            { key: "#2dd4bf", colour: #2dd4bf },
+                            { key: "#5b8cff", colour: #5b8cff },
+                            { key: "#a77bff", colour: #a77bff },
+                            { key: "#ff5fa2", colour: #ff5fa2 },
+                            { key: "#ff5c5c", colour: #ff5c5c },
+                            { key: "#ff9f43", colour: #ff9f43 },
+                            { key: "#f5c542", colour: #f5c542 },
+                        ]: Rectangle {
+                            width: 34px;
+                            height: 34px;
+                            border-radius: 17px;
+                            border-width: SettingsState.accent == swatch.key ? 3px : 0px;
+                            border-color: Theme.text;
+                            // "From the album": the current accent, ringed to tell it apart.
+                            background: swatch.key == "cover" ? @linear-gradient(135deg, #ff5fa2 0%, #f5c542 50%, #2dd4bf 100%) : swatch.colour;
+                            drop-shadow-blur: swatch-ta.has-hover ? 10px : 0px;
+                            drop-shadow-color: (swatch.key == "cover" ? Theme.accent : swatch.colour).with-alpha(0.6);
+                            swatch-ta := TouchArea { mouse-cursor: pointer; clicked => { SettingsState.set-accent(swatch.key); } }
+                        }
+                    }
+                    Note { text: SettingsState.accent == "cover" ? "From the album" : "Fixed colour " + SettingsState.accent; color: Theme.text; }
+                }
+                if SettingsState.tab == "appearance": Card {
+                    title: "Window";
+                    CheckBox {
+                        text: "Tint the window with the colours of the album playing";
+                        checked: SettingsState.cover-background;
+                        toggled => { SettingsState.set-cover-background(self.checked); }
+                    }
+                    CheckBox {
+                        text: "Show the live spectrum under the cover";
+                        checked: SettingsState.visualizer;
+                        toggled => { SettingsState.set-visualizer(self.checked); }
+                    }
+                    if SettingsState.title-bar-choice: CheckBox {
+                        text: "Use the desktop's title bar instead of HyperPlayer's (from the next start; this computer only)";
+                        checked: SettingsState.system-title-bar;
+                        toggled => { SettingsState.set-system-title-bar(self.checked); }
+                    }
+                }
+
+                // ------------------------------------------------------------- account
+                if SettingsState.tab == "account": Card {
+                    title: "Profile";
+                    Field {
+                        label: "FULL NAME";
+                        LineEdit { text <=> SettingsState.full-name; placeholder-text: "Optional"; accepted => { SettingsState.save-name(); } }
+                    }
+                    HorizontalLayout {
+                        spacing: 12px;
+                        alignment: start;
+                        OutlineButton { text: "Save"; clicked => { SettingsState.save-name(); } }
+                        if SettingsState.name-message != "": Note { text: SettingsState.name-message; vertical-alignment: center; }
+                    }
+                }
+                if SettingsState.tab == "account" && !SettingsState.local: Card {
+                    title: "Password";
+                    Field {
+                        label: "CURRENT PASSWORD";
+                        LineEdit { text <=> SettingsState.pw-current; input-type: InputType.password; }
+                    }
+                    Field {
+                        label: "NEW PASSWORD";
+                        LineEdit { text <=> SettingsState.pw-new; input-type: InputType.password; placeholder-text: "At least 8 characters"; }
+                    }
+                    Field {
+                        label: "REPEAT THE NEW PASSWORD";
+                        LineEdit { text <=> SettingsState.pw-confirm; input-type: InputType.password; accepted => { SettingsState.change-password(); } }
+                    }
+                    HorizontalLayout {
+                        spacing: 12px;
+                        alignment: start;
+                        OutlineButton { text: "Change password"; clicked => { SettingsState.change-password(); } }
+                        if SettingsState.pw-message != "": Note {
+                            text: SettingsState.pw-message;
+                            color: SettingsState.pw-error ? #ff8a80 : Theme.muted;
+                            vertical-alignment: center;
+                        }
+                    }
+                    Note { text: "Changing it signs out your other devices."; }
+                }
+                if SettingsState.tab == "account" && !SettingsState.local: Card {
+                    title: "Signed-in devices";
+                    for device in SettingsState.devices: HorizontalLayout {
+                        spacing: 12px;
+                        VerticalLayout {
+                            alignment: center;
+                            horizontal-stretch: 1;
+                            Text { text: device.name + (device.current ? "  (this device)" : ""); color: Theme.text; font-size: 13px; overflow: elide; }
+                            Note { text: device.detail; }
+                        }
+                        if !device.current: VerticalLayout {
+                            alignment: center;
+                            OutlineButton { text: "Sign out"; clicked => { SettingsState.revoke-device(device.id); } }
+                        }
+                    }
+                }
+
+                // ---------------------------------------------------------- scrobbling
+                if SettingsState.tab == "scrobbling": Card {
+                    HorizontalLayout {
+                        spacing: 10px;
+                        Text { text: "ListenBrainz"; color: Theme.text; font-size: 15px; font-weight: 700; vertical-alignment: center; }
+                        if SettingsState.lb-connected: VerticalLayout {
+                            alignment: center;
+                            Chip { text: "Connected as " + SettingsState.lb-username; accent: Theme.accent; }
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                    }
+                    Text {
+                        text: "Sends what you listen to to your ListenBrainz profile, for a public listening history, statistics and recommendations. Listens are sent from the moment you connect; earlier history stays here.";
+                        color: Theme.muted;
+                        font-size: 13px;
+                        wrap: word-wrap;
+                    }
+                    if SettingsState.lb-connected: Note {
+                        text: SettingsState.lb-status;
+                        color: SettingsState.lb-failing ? #ff8a80 : Theme.muted;
+                    }
+                    // Shown to connect, and to replace a token ListenBrainz no longer accepts.
+                    if !SettingsState.lb-connected || SettingsState.lb-failing: Field {
+                        label: "USER TOKEN";
+                        LineEdit {
+                            text <=> SettingsState.lb-token;
+                            input-type: InputType.password;
+                            placeholder-text: "Copy it from listenbrainz.org/settings";
+                            accepted(t) => { SettingsState.lb-connect(t); }
+                        }
+                    }
+                    if SettingsState.lb-error != "": Note { text: SettingsState.lb-error; color: #ff8a80; }
+                    HorizontalLayout {
+                        alignment: start;
+                        spacing: 12px;
+                        if !SettingsState.lb-connected || SettingsState.lb-failing: PrimaryButton {
+                            width: 160px;
+                            text: SettingsState.lb-connected ? "Reconnect" : "Connect";
+                            busy: SettingsState.lb-busy;
+                            clicked => { SettingsState.lb-connect(SettingsState.lb-token); }
+                        }
+                        if SettingsState.lb-connected: VerticalLayout {
+                            alignment: center;
+                            OutlineButton { text: "Disconnect"; clicked => { SettingsState.lb-disconnect(); } }
+                        }
+                    }
+                }
+                if SettingsState.tab == "scrobbling": Card {
+                    HorizontalLayout {
+                        spacing: 10px;
+                        Text { text: "Last.fm"; color: Theme.text; font-size: 15px; font-weight: 700; vertical-alignment: center; }
+                        if SettingsState.fm-connected: VerticalLayout {
+                            alignment: center;
+                            Chip { text: "Connected as " + SettingsState.fm-username; accent: Theme.accent; }
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                    }
+                    Text {
+                        text: "Scrobbles what you listen to to your Last.fm profile. Connecting opens Last.fm in your browser, where you allow HyperPlayer; your password stays with Last.fm.";
+                        color: Theme.muted;
+                        font-size: 13px;
+                        wrap: word-wrap;
+                    }
+                    if !SettingsState.fm-available: Note {
+                        text: "This server isn't set up for Last.fm yet: its admin needs a Last.fm API account (last.fm/api/account/create) and to start the server with HP_LASTFM_API_KEY and HP_LASTFM_SECRET.";
+                    }
+                    if SettingsState.fm-connected: Note {
+                        text: SettingsState.fm-status;
+                        color: SettingsState.fm-failing ? #ff8a80 : Theme.muted;
+                    }
+                    if SettingsState.fm-waiting: Note {
+                        text: "Allow HyperPlayer on the Last.fm page that opened in your browser; this page updates by itself once you have.";
+                    }
+                    if SettingsState.fm-error != "": Note { text: SettingsState.fm-error; color: #ff8a80; }
+                    if SettingsState.fm-available: HorizontalLayout {
+                        alignment: start;
+                        spacing: 12px;
+                        // Shown to connect, and to reconnect when Last.fm no longer accepts the session.
+                        if !SettingsState.fm-waiting && (!SettingsState.fm-connected || SettingsState.fm-failing): PrimaryButton {
+                            width: 160px;
+                            text: SettingsState.fm-connected ? "Reconnect" : "Connect";
+                            busy: SettingsState.fm-busy;
+                            clicked => { SettingsState.fm-connect(); }
+                        }
+                        if SettingsState.fm-waiting: VerticalLayout {
+                            alignment: center;
+                            OutlineButton { text: "Open Last.fm again"; clicked => { SettingsState.fm-open(SettingsState.fm-url); } }
+                        }
+                        if SettingsState.fm-waiting: VerticalLayout {
+                            alignment: center;
+                            OutlineButton { text: "Cancel"; clicked => { SettingsState.fm-cancel(); } }
+                        }
+                        if SettingsState.fm-connected && !SettingsState.fm-waiting: VerticalLayout {
+                            alignment: center;
+                            OutlineButton { text: "Disconnect"; clicked => { SettingsState.fm-disconnect(); } }
+                        }
+                    }
+                }
+
+                // --------------------------------------------------------------- admin
+                if SettingsState.tab == "server": Card {
+                    title: "Library";
+                    // The figures are the card's point: larger than the notes around them.
+                    Text { text: SettingsState.library-summary; color: Theme.text; font-size: 14px; wrap: word-wrap; }
+                    // Folders are the server's paths: the server only lists them for admins.
+                    for folder in SettingsState.folders: HorizontalLayout {
+                        spacing: 10px;
+                        Text { text: folder.path; color: Theme.text; font-size: 13px; overflow: elide; horizontal-stretch: 1; vertical-alignment: center; }
+                        Text { text: folder.detail; color: folder.available ? Theme.muted : #ff8a80; font-size: 12px; vertical-alignment: center; }
+                        // The library keeps at least one folder.
+                        if SettingsState.folders.length > 1: OutlineButton {
+                            danger: true;
+                            text: root.removing-folder == folder.path ? "Confirm remove" : "Remove";
+                            clicked => {
+                                if root.removing-folder == folder.path {
+                                    root.removing-folder = "";
+                                    SettingsState.remove-folder(folder.path);
+                                } else {
+                                    root.removing-folder = folder.path;
+                                }
+                            }
+                        }
+                    }
+                    if root.removing-folder != "": Note {
+                        text: "Removing a folder takes its tracks out of the library. Playlists keep them, and find them again if the folder comes back.";
+                        color: #ff8a80;
+                    }
+                    if SettingsState.is-admin && SettingsState.local: HorizontalLayout {
+                        spacing: 8px;
+                        alignment: start;
+                        OutlineButton { text: "Add a folder…"; clicked => { SettingsState.browse-folder(); } }
+                    }
+                    if SettingsState.is-admin && !SettingsState.local: HorizontalLayout {
+                        spacing: 8px;
+                        LineEdit {
+                            text <=> SettingsState.new-folder;
+                            placeholder-text: "Another folder, as a path on the server (e.g. " + SettingsState.folder-example + ")";
+                            accepted => { SettingsState.add-folder(); }
+                        }
+                        OutlineButton { text: "Add folder"; clicked => { SettingsState.add-folder(); } }
+                    }
+                    if SettingsState.folders-message != "": Note {
+                        text: SettingsState.folders-message;
+                        color: SettingsState.folders-error ? #ff8a80 : Theme.muted;
+                    }
+                    if SettingsState.scanning: VerticalLayout {
+                        spacing: 6px;
+                        Rectangle {
+                            height: 6px;
+                            border-radius: 3px;
+                            background: Theme.surface-hi;
+                            clip: true;
+                            if SettingsState.scan-progress >= 0: Rectangle {
+                                x: 0;
+                                width: parent.width * min(1, SettingsState.scan-progress);
+                                border-radius: 3px;
+                                background: Theme.accent;
+                                animate width { duration: 400ms; easing: ease-out; }
+                            }
+                            // No total yet: a segment sweeps across instead.
+                            if SettingsState.scan-progress < 0: Rectangle {
+                                width: parent.width / 4;
+                                x: -self.width + mod(animation-tick() / 1ms, 1600) / 1600 * (parent.width + self.width);
+                                border-radius: 3px;
+                                background: Theme.accent;
+                            }
+                        }
+                        Text { text: SettingsState.scan-detail; color: Theme.muted; font-size: 12px; }
+                    }
+                    if SettingsState.is-admin: HorizontalLayout {
+                        alignment: start;
+                        OutlineButton {
+                            danger: SettingsState.scanning;
+                            text: SettingsState.scanning ? "Stop scan" : "Rescan now";
+                            clicked => {
+                                if SettingsState.scanning {
+                                    SettingsState.cancel-scan();
+                                } else {
+                                    SettingsState.rescan();
+                                }
+                            }
+                        }
+                    }
+                    Note {
+                        text: SettingsState.local
+                            ? "HyperPlayer notices new music in these folders while it's open, and rescans every few minutes. Folders on a network drive work too, as long as this computer can open them."
+                            : SettingsState.is-admin
+                            ? "The server also rescans every few minutes and watches folders where the filesystem allows. Folders set here replace HP_LIBRARY's, until HP_LIBRARY itself is changed (e.g. by the installer). In Docker, only folders mounted into the container can be found."
+                            : SettingsState.scanning ? "The server is scanning the library now." : "The server rescans the library every few minutes, so new music shows up on its own.";
+                    }
+                    if !SettingsState.local && SettingsState.can-switch: Note {
+                        text: "To combine this server's music with folders on this computer, or with other servers, use HyperPlayer as a standalone player and add this server in Settings → Library → Servers.";
+                    }
+                    if !SettingsState.local && SettingsState.can-switch: HorizontalLayout {
+                        alignment: start;
+                        OutlineButton { text: "Switch library…"; clicked => { SettingsState.switch-library(); } }
+                    }
+                }
+                if SettingsState.tab == "server" && SettingsState.local: Card {
+                    title: "Servers";
+                    Note {
+                        text: "Music on a HyperPlayer server can join this library: its artists and albums merge with yours, and it plays from the server whenever this computer can reach it. Your playlists on the server are copied here when you add it, and Copy playlists brings those copies up to date (replacing changes made to them here). The queue, playlists and listening history stay on this computer.";
+                    }
+                    for source in SettingsState.sources: HorizontalLayout {
+                        spacing: 10px;
+                        VerticalLayout {
+                            alignment: center;
+                            horizontal-stretch: 1;
+                            Text { text: source.title; color: Theme.text; font-size: 13px; font-weight: 600; overflow: elide; }
+                            Note { text: source.detail; color: source.failing ? #ff8a80 : Theme.muted; }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            OutlineButton {
+                                text: "Copy playlists";
+                                clicked => { SettingsState.import-source-playlists(source.id); }
+                            }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            OutlineButton {
+                                danger: true;
+                                text: root.removing-source == source.id ? "Confirm remove" : "Remove";
+                                clicked => {
+                                    if root.removing-source == source.id {
+                                        root.removing-source = "";
+                                        SettingsState.remove-source(source.id);
+                                    } else {
+                                        root.removing-source = source.id;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if root.removing-source != "": Note {
+                        text: "Removing a server takes its music out of this library. Playlists keep its tracks, and find them again if the server is added back.";
+                        color: #ff8a80;
+                    }
+                    if SettingsState.source-fingerprint == "": VerticalLayout {
+                        spacing: 12px;
+                        Field {
+                            label: "SERVER ADDRESS";
+                            LineEdit { text <=> SettingsState.source-url; placeholder-text: "e.g. music.example.com or 192.168.1.20:4533"; }
+                        }
+                        HorizontalLayout {
+                            spacing: 12px;
+                            Field {
+                                label: "USERNAME";
+                                LineEdit { text <=> SettingsState.source-username; }
+                            }
+                            Field {
+                                label: "PASSWORD";
+                                LineEdit {
+                                    text <=> SettingsState.source-password;
+                                    input-type: InputType.password;
+                                    accepted => { SettingsState.add-source(); }
+                                }
+                            }
+                        }
+                        HorizontalLayout {
+                            alignment: start;
+                            PrimaryButton {
+                                width: 160px;
+                                text: "Add server";
+                                busy: SettingsState.source-busy;
+                                clicked => { SettingsState.add-source(); }
+                            }
+                        }
+                    }
+                    if SettingsState.source-fingerprint != "": VerticalLayout {
+                        spacing: 10px;
+                        Text {
+                            text: "Trust this server's certificate?";
+                            color: Theme.text;
+                            font-size: 14px;
+                            font-weight: 700;
+                        }
+                        Note {
+                            text: "The server uses a certificate of its own rather than one from a known authority, as home servers usually do. Its fingerprint should match the one in the server's log:";
+                        }
+                        Text { text: SettingsState.source-fingerprint; color: Theme.text; font-size: 12px; wrap: char-wrap; font-family: "monospace"; }
+                        HorizontalLayout {
+                            alignment: start;
+                            spacing: 12px;
+                            PrimaryButton {
+                                width: 160px;
+                                text: "Trust and add";
+                                busy: SettingsState.source-busy;
+                                clicked => { SettingsState.trust-source(); }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                OutlineButton { text: "Cancel"; clicked => { SettingsState.cancel-trust-source(); } }
+                            }
+                        }
+                    }
+                    if SettingsState.sources-message != "": Note {
+                        text: SettingsState.sources-message;
+                        color: SettingsState.sources-error ? #ff8a80 : Theme.muted;
+                    }
+                }
+                if SettingsState.tab == "server" && SettingsState.is-admin && !SettingsState.local: Card {
+                    title: "Users";
+                    for user in SettingsState.users: VerticalLayout {
+                        spacing: 8px;
+                        HorizontalLayout {
+                            spacing: 8px;
+                            VerticalLayout {
+                                alignment: center;
+                                horizontal-stretch: 1;
+                                Text { text: user.username + (user.me ? "  (you)" : ""); color: Theme.text; font-size: 13px; font-weight: 600; overflow: elide; }
+                                Note { text: user.detail; }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                OutlineButton {
+                                    text: user.admin ? "Remove admin" : "Make admin";
+                                    clicked => { SettingsState.set-admin(user.id, !user.admin); }
+                                }
+                            }
+                            if !user.me: VerticalLayout {
+                                alignment: center;
+                                OutlineButton {
+                                    text: "Reset password";
+                                    clicked => {
+                                        root.resetting = root.resetting == user.id ? "" : user.id;
+                                        root.reset-password = "";
+                                    }
+                                }
+                            }
+                            if !user.me: VerticalLayout {
+                                alignment: center;
+                                OutlineButton {
+                                    danger: true;
+                                    text: root.deleting == user.id ? "Confirm delete" : "Delete";
+                                    clicked => {
+                                        if root.deleting == user.id {
+                                            root.deleting = "";
+                                            SettingsState.delete-user(user.id);
+                                        } else {
+                                            root.deleting = user.id;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if root.resetting == user.id: HorizontalLayout {
+                            spacing: 8px;
+                            LineEdit {
+                                text <=> root.reset-password;
+                                input-type: InputType.password;
+                                placeholder-text: "Temporary password (at least 8 characters)";
+                            }
+                            OutlineButton {
+                                text: "Set";
+                                clicked => {
+                                    SettingsState.reset-password(user.id, root.reset-password);
+                                    root.resetting = "";
+                                }
+                            }
+                        }
+                    }
+                    if SettingsState.users-message != "": Note {
+                        text: SettingsState.users-message;
+                        color: SettingsState.users-error ? #ff8a80 : Theme.muted;
+                    }
+                }
+                if SettingsState.tab == "server" && SettingsState.is-admin && !SettingsState.local: Card {
+                    title: "Add a user";
+                    HorizontalLayout {
+                        spacing: 12px;
+                        Field {
+                            label: "USERNAME";
+                            LineEdit { text <=> SettingsState.new-username; }
+                        }
+                        Field {
+                            label: "FULL NAME";
+                            LineEdit { text <=> SettingsState.new-full-name; placeholder-text: "Optional"; }
+                        }
+                    }
+                    Field {
+                        label: "PASSWORD";
+                        LineEdit { text <=> SettingsState.new-password; input-type: InputType.password; placeholder-text: "At least 8 characters"; }
+                    }
+                    CheckBox { text: "Admin (can manage the server and its users)"; checked <=> SettingsState.new-admin; }
+                    HorizontalLayout {
+                        alignment: start;
+                        OutlineButton { text: "Add user"; clicked => { SettingsState.create-user(); } }
+                    }
+                }
+            }
+        }
+        AccentScrollBar {
+            x: parent.width - self.width;
+            height: parent.height;
+            visible-height: settings-scroll.visible-height;
+            content-height: settings-scroll.content-height;
+            content-y <=> settings-scroll.content-y;
+        }
+    }
+}
+
+component WindowButton inherits Rectangle {
+    in property <string> kind;
+    in property <bool> maximized;
+    callback clicked();
+    width: 24px;
+    height: 24px;
+    border-radius: 12px;
+    background: wb-ta.has-hover ? (root.kind == "close" ? #e5484d : Theme.surface-hi.brighter(0.4)) : Theme.surface-hi;
+    animate background { duration: 100ms; }
+    Path {
+        x: 4px;
+        y: 4px;
+        width: 16px;
+        height: 16px;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        commands: root.kind == "close" ? Icons.window-close
+            : root.kind == "minimize" ? Icons.window-minimize
+            : root.maximized ? Icons.window-restore : Icons.window-maximize;
+        fill: transparent;
+        stroke: wb-ta.has-hover && root.kind == "close" ? #ffffff : Theme.text;
+        stroke-width: 1.6px;
+    }
+    wb-ta := TouchArea { clicked => { root.clicked(); } }
+}
+
+/// Drawn by us instead of the desktop: drag to move, double-click to maximise.
+component TitleBar inherits Rectangle {
+    in property <string> title;
+    in property <bool> maximized;
+    in property <[string]> left;
+    in property <[string]> right;
+    callback drag();
+    callback button(string);
+    height: 36px;
+    background: Theme.chrome;
+    property <bool> dragging;
+    bar-ta := TouchArea {
+        // Moving starts once the pointer actually moves, so a double-click still registers.
+        moved => {
+            if self.pressed && !root.dragging
+                && (abs(self.mouse-x - self.pressed-x) > 4px || abs(self.mouse-y - self.pressed-y) > 4px) {
+                root.dragging = true;
+                root.drag();
+            }
+        }
+        changed pressed => { if !self.pressed { root.dragging = false; } }
+        double-clicked => { root.button("maximize"); }
+    }
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 8px;
+        for b in root.left: VerticalLayout {
+            alignment: center;
+            WindowButton { kind: b; maximized: root.maximized; clicked => { root.button(b); } }
+        }
+        Text {
+            horizontal-stretch: 1;
+            text: root.title;
+            color: Theme.muted;
+            font-size: 12px;
+            font-weight: 600;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        for b in root.right: VerticalLayout {
+            alignment: center;
+            WindowButton { kind: b; maximized: root.maximized; clicked => { root.button(b); } }
+        }
+    }
+}
+
+export component AppWindow inherits Window {
+    icon: @image-url("../icons/hyperplayer-256.png");
+    title: np.active ? np.title + " — " + np.artist : "HyperPlayer";
+    preferred-width: 1400px;
+    preferred-height: 880px;
+    min-width: 960px;
+    min-height: 600px;
+    default-font-family: "Inter";
+    in property <bool> custom-title-bar: true;
+    in property <[float]> waveform;
+    in property <bool> waveform-ready;
+    /// The playing track's trimmed start and end, in seconds; negative for none.
+    in property <float> trim-start: -1;
+    in property <float> trim-end: -1;
+    /// Admins may trim tracks (for everyone).
+    in property <bool> can-trim;
+    callback trim(string, float);
+    /// An offer to trim the silence found in the playing track; empty when there's none.
+    in property <string> trim-offer;
+    callback trim-offer-answer(string);
+    in property <[float]> spectrum;
+    in property <bool> visualizer;
+    no-frame: root.custom-title-bar;
+    // Without the desktop's frame, Slint resizes the window from its edges itself.
+    resize-border-width: root.custom-title-bar && !root.window-maximized ? 5px : 0px;
+    in property <[string]> title-buttons-left;
+    in property <[string]> title-buttons-right;
+    in-out property <bool> window-maximized;
+    callback window-drag();
+    callback window-button(string);
+    /// The album-colour gradient behind everything (plain when off or nothing plays).
+    in property <color> tint-a: Theme.bg;
+    in property <color> tint-b: Theme.bg;
+    in property <color> tint-c: Theme.bg;
+    // Cross-fades to a new album's colours.
+    property <color> shown-a: root.tint-a;
+    property <color> shown-b: root.tint-b;
+    property <color> shown-c: root.tint-c;
+    animate shown-a, shown-b, shown-c { duration: 900ms; easing: ease-in-out; }
+    property <bool> rounded: root.custom-title-bar && !root.window-maximized;
+    background: transparent;
+
+    in property <[ArtistItem]> artists;
+    in property <string> selected-artist-id;
+    in property <string> status;
+    in property <Page> page: Page.welcome;
+    in property <ArtistView> artist;
+    in property <[AlbumItem]> artist-albums;
+    in property <AlbumView> album;
+    in property <[TrackItem]> album-tracks;
+    in property <string> search-query;
+    in property <[ArtistItem]> search-artists;
+    in property <[AlbumItem]> search-albums;
+    in property <[TrackItem]> search-tracks;
+    in property <[PlaylistItem]> playlists;
+    /// The playlists tracks can be added to by hand (not the smart ones), for the ⋯ menus.
+    in property <[PlaylistItem]> editable-playlists;
+    in property <string> selected-playlist-id;
+    in property <PlaylistView> playlist;
+    in property <[TrackItem]> playlist-tracks;
+    in-out property <string> playlist-add-query;
+    in property <bool> playlist-add-pending;
+    in property <[AddItem]> playlist-add-tracks;
+    in property <[AddItem]> playlist-add-albums;
+    in property <[AddItem]> playlist-add-artists;
+    in property <[AddItem]> playlist-add-genres;
+    in property <string> playlist-add-message;
+    callback playlist-add-search(string);
+    callback playlist-add(string, string, string);
+    in property <bool> smart-playlist;
+    in property <[RuleRow]> smart-rules;
+    in property <bool> smart-match-any;
+    in property <int> smart-order;
+    in property <bool> smart-descending;
+    in property <string> smart-limit;
+    in property <bool> smart-dirty;
+    in property <string> smart-message;
+    callback smart-set-match(bool);
+    callback smart-rule-field(int, int);
+    callback smart-rule-op(int, int);
+    callback smart-rule-value(int, string);
+    callback smart-rule-value2(int, string);
+    callback smart-remove-rule(int);
+    callback smart-add-rule();
+    callback smart-set-order(int);
+    callback smart-set-descending(bool);
+    callback smart-set-limit(string);
+    callback smart-apply();
+    callback smart-save-copy();
+    in property <string> queue-origin;
+    in property <[TrackItem]> queue-now;
+    in property <[TrackItem]> queue-next;
+    in property <NowPlayingView> np;
+    in property <[AlbumItem]> more-from;
+    in property <[CreditItem]> credits;
+    in property <[CreditItem]> np-members;
+    in property <[CreditItem]> artist-members;
+    in property <bool> playing;
+    in property <float> position;
+    in property <float> duration;
+    in property <string> position-text: "0:00";
+    in property <string> duration-text: "0:00";
+    in-out property <float> volume: 0.8;
+    in property <string> stream-info;
+    in property <string> quality-mode: "AUTO";
+    in property <string> replaygain-mode: "RG AUTO";
+    callback cycle-replaygain();
+    in property <bool> shuffle;
+    in property <RepeatMode> repeat;
+
+    callback select-artist(string);
+    callback select-album(string);
+    callback play-track(int);
+    callback play-search-track(int);
+    callback show-history();
+    callback show-albums();
+    callback show-settings();
+    callback albums-sort-by(string);
+    callback albums-columns(int);
+    callback albums-visible(int, int);
+    in property <string> albums-summary;
+    in property <string> albums-sort: "artist";
+    in property <[AlbumRow]> albums-rows;
+    property <int> albums-reset;
+    public function albums-scroll-to-top() { root.albums-reset += 1; }
+    callback play-history-track(string, int);
+    in property <bool> history-loaded;
+    in property <string> history-summary;
+    in property <[ArtistItem]> history-artists;
+    in property <[TrackItem]> history-top;
+    in property <[TrackItem]> history-recent;
+    callback search-changed(string);
+    callback search-accepted(string);
+    public function reveal-artist(index: int) { sidebar.reveal-artist(index); }
+    callback select-playlist(string);
+    /// "empty", or a smart playlist template: random, artist, albums, genre, custom.
+    callback new-playlist(string);
+    callback play-playlist(int);
+    callback shuffle-playlist();
+    callback rename-playlist(string);
+    callback delete-playlist();
+    callback album-action(string, string);
+    /// (list, index, action, playlist id); list is "album", "search", "playlist" or "queue".
+    callback track-action(string, int, string, string);
+    callback show-queue();
+    callback show-lyrics();
+    callback seek-lyric-line(int);
+    in property <LyricsState> lyrics-state: LyricsState.none;
+    in property <[string]> lyrics-lines;
+    in property <int> lyrics-current: -1;
+    in property <string> lyrics-source;
+    callback jump-in-queue(int);
+    callback clear-queue();
+    /// Keyboard actions handled in Rust: "seek-back", "seek-forward", "toggle-mute".
+    callback shortcut(string);
+    in property <bool> signed-in;
+    in property <LoginState> login;
+    in-out property <string> login-server;
+    in-out property <string> login-username;
+    in-out property <string> login-password;
+    in-out property <string> login-new-password;
+    in-out property <string> login-confirm-password;
+    in-out property <string> login-full-name;
+    in property <string> account;
+    callback login-submit();
+    callback login-check-server();
+    callback login-change-password();
+    callback login-onboard();
+    callback login-skip-onboarding();
+    callback login-trust();
+    callback login-cancel-trust();
+    callback login-use-local();
+    callback login-browse-music-folder();
+    callback login-use-music-folder();
+    callback login-back-to-choice();
+    callback login-back-to-library();
+    callback login-use-server();
+    callback sign-out();
+    /// Playing the music on this computer (the player's own library engine), not a server's.
+    in property <bool> local-library;
+    in property <bool> can-switch-library;
+    callback switch-library();
+    property <bool> show-help;
+    init => { keys.focus(); }
+    callback back-to-artist();
+    callback toggle();
+    callback next();
+    callback prev();
+    callback seek(float);
+    callback volume-changed(float);
+    callback cycle-quality-mode();
+    callback toggle-shuffle();
+    in property <string> shuffle-scope: "library";
+    in property <string> shuffle-label;
+    callback set-shuffle-scope(string);
+    callback cycle-repeat();
+
+    // With our own title bar (and not maximized) the window is drawn inside a frame with
+    // rounded corners; the window itself stays transparent around them.
+    frame := Rectangle {
+        border-radius: root.rounded ? 10px : 0px;
+        clip: true;
+        background: @linear-gradient(150deg, root.shown-a 0%, root.shown-b 55%, root.shown-c 100%);
+
+        keys := FocusScope {
+        key-pressed(event) => {
+            if event.text == Key.Escape {
+                if root.show-help { root.show-help = false; }
+                else if sidebar.clear-search() { }
+                else if root.page == Page.queue { root.show-queue(); }
+                else if root.page == Page.lyrics { root.show-lyrics(); }
+                else if root.page == Page.history { root.show-history(); }
+                else if root.page == Page.albums { root.show-albums(); }
+                else if root.page == Page.settings { root.show-settings(); }
+                keys.focus();
+                return accept;
+            }
+            // Everything else is ignored while modifier combos other than Ctrl are held.
+            if event.modifiers.alt || event.modifiers.meta { return reject; }
+            if event.modifiers.control {
+                if event.text == Key.LeftArrow { root.prev(); return accept; }
+                if event.text == Key.RightArrow { root.next(); return accept; }
+                if event.text == "f" { sidebar.focus-search(); return accept; }
+                return reject;
+            }
+            if event.text == " " { root.toggle(); return accept; }
+            if event.text == Key.LeftArrow { root.shortcut("seek-back"); return accept; }
+            if event.text == Key.RightArrow { root.shortcut("seek-forward"); return accept; }
+            if event.text == Key.Home { root.seek(0); return accept; }
+            if event.text == Key.UpArrow {
+                root.volume = min(1.0, root.volume + 0.05);
+                root.volume-changed(root.volume);
+                return accept;
+            }
+            if event.text == Key.DownArrow {
+                root.volume = max(0.0, root.volume - 0.05);
+                root.volume-changed(root.volume);
+                return accept;
+            }
+            if event.text == "m" || event.text == "M" { root.shortcut("toggle-mute"); return accept; }
+            if event.text == "s" || event.text == "S" { root.toggle-shuffle(); return accept; }
+            if event.text == "r" || event.text == "R" { root.cycle-repeat(); return accept; }
+            if event.text == "q" || event.text == "Q" { root.show-queue(); return accept; }
+            if event.text == "l" || event.text == "L" { root.show-lyrics(); return accept; }
+            if event.text == "h" || event.text == "H" { root.show-history(); return accept; }
+            if event.text == "a" || event.text == "A" { root.show-albums(); return accept; }
+            if event.text == "," { root.show-settings(); return accept; }
+            if event.text == "/" { sidebar.focus-search(); return accept; }
+            if event.text == "?" { root.show-help = !root.show-help; return accept; }
+            return reject;
+        }
+        VerticalLayout {
+            if root.custom-title-bar: TitleBar {
+                title: root.title;
+                maximized: root.window-maximized;
+                left: root.title-buttons-left;
+                right: root.title-buttons-right;
+                drag => { root.window-drag(); }
+                button(b) => { root.window-button(b); }
+            }
+            HorizontalLayout {
+                sidebar := Sidebar {
+                    width: 260px;
+                    artists: root.artists;
+                    selected-id: root.selected-artist-id;
+                    status: root.status;
+                    select(id) => { root.select-artist(id); }
+                    search-changed(text) => { root.search-changed(text); }
+                    search-accepted(text) => { root.search-accepted(text); }
+                    playlists: root.playlists;
+                    selected-playlist-id: root.page == Page.playlist ? root.selected-playlist-id : "";
+                    select-playlist(id) => { root.select-playlist(id); }
+                    new-playlist(kind) => { root.new-playlist(kind); }
+                    account: root.account;
+                    local: root.local-library;
+                    sign-out => { root.sign-out(); }
+                    can-switch: root.can-switch-library;
+                    switch-library => { root.switch-library(); }
+                    history-open: root.page == Page.history;
+                    show-history => { root.show-history(); }
+                    albums-open: root.page == Page.albums;
+                    show-albums => { root.show-albums(); }
+                    settings-open: root.page == Page.settings;
+                    show-settings => { root.show-settings(); }
+                }
+                Rectangle {
+                    horizontal-stretch: 1;
+                    if root.page == Page.welcome: Text {
+                        text: "Pick an artist to start listening";
+                        color: Theme.faint;
+                        font-size: 16px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    if root.page == Page.artist: ArtistPage {
+                        artist: root.artist;
+                        albums: root.artist-albums;
+                        members: root.artist-members;
+                        select-album(id) => { root.select-album(id); }
+                        select-artist(id) => { root.select-artist(id); }
+                    }
+                    if root.page == Page.search: SearchPage {
+                        query: root.search-query;
+                        artists: root.search-artists;
+                        albums: root.search-albums;
+                        tracks: root.search-tracks;
+                        playlists: root.editable-playlists;
+                        select-artist(id) => { root.select-artist(id); }
+                        select-album(id) => { root.select-album(id); }
+                        play(i) => { root.play-search-track(i); }
+                        track-action(i, kind, id) => { root.track-action("search", i, kind, id); }
+                    }
+                    if root.page == Page.playlist: PlaylistPage {
+                        playlist: root.playlist;
+                        tracks: root.playlist-tracks;
+                        playlists: root.editable-playlists;
+                        play(i) => { root.play-playlist(i); }
+                        shuffle-play => { root.shuffle-playlist(); }
+                        rename(name) => { root.rename-playlist(name); }
+                        delete => { root.delete-playlist(); }
+                        track-action(i, kind, id) => { root.track-action("playlist", i, kind, id); }
+                        add-query <=> root.playlist-add-query;
+                        add-pending: root.playlist-add-pending;
+                        add-tracks: root.playlist-add-tracks;
+                        add-albums: root.playlist-add-albums;
+                        add-artists: root.playlist-add-artists;
+                        add-genres: root.playlist-add-genres;
+                        add-message: root.playlist-add-message;
+                        add-search(text) => { root.playlist-add-search(text); }
+                        add(kind, id, title) => { root.playlist-add(kind, id, title); }
+                        smart: root.smart-playlist;
+                        rules: root.smart-rules;
+                        match-any: root.smart-match-any;
+                        order: root.smart-order;
+                        descending: root.smart-descending;
+                        limit: root.smart-limit;
+                        rules-dirty: root.smart-dirty;
+                        rules-message: root.smart-message;
+                        set-match(any) => { root.smart-set-match(any); }
+                        rule-field(i, f) => { root.smart-rule-field(i, f); }
+                        rule-op(i, o) => { root.smart-rule-op(i, o); }
+                        rule-value(i, v) => { root.smart-rule-value(i, v); }
+                        rule-value2(i, v) => { root.smart-rule-value2(i, v); }
+                        remove-rule(i) => { root.smart-remove-rule(i); }
+                        add-rule => { root.smart-add-rule(); }
+                        set-order(o) => { root.smart-set-order(o); }
+                        set-descending(d) => { root.smart-set-descending(d); }
+                        set-limit(l) => { root.smart-set-limit(l); }
+                        apply-rules => { root.smart-apply(); }
+                        save-copy => { root.smart-save-copy(); }
+                    }
+                    if root.page == Page.settings: SettingsPage { }
+                    if root.page == Page.albums: AlbumsPage {
+                        summary: root.albums-summary;
+                        sort: root.albums-sort;
+                        rows: root.albums-rows;
+                        reset: root.albums-reset;
+                        select(id) => { root.select-album(id); }
+                        sort-by(key) => { root.albums-sort-by(key); }
+                        columns-changed(n) => { root.albums-columns(n); }
+                        visible-rows(first, last) => { root.albums-visible(first, last); }
+                    }
+                    if root.page == Page.history: HistoryPage {
+                        loaded: root.history-loaded;
+                        summary: root.history-summary;
+                        artists: root.history-artists;
+                        top: root.history-top;
+                        recent: root.history-recent;
+                        playlists: root.editable-playlists;
+                        select-artist(id) => { root.select-artist(id); }
+                        play(list, i) => { root.play-history-track(list, i); }
+                        track-action(list, i, kind, id) => { root.track-action(list, i, kind, id); }
+                    }
+                    if root.page == Page.lyrics: LyricsPage {
+                        title: root.np.active ? root.np.title : "";
+                        artist: root.np.active ? root.np.artist : "";
+                        state: root.lyrics-state;
+                        lines: root.lyrics-lines;
+                        current: root.lyrics-current;
+                        source: root.lyrics-source;
+                        seek-line(i) => { root.seek-lyric-line(i); }
+                    }
+                    if root.page == Page.queue: QueuePage {
+                        origin: root.queue-origin;
+                        now: root.queue-now;
+                        next: root.queue-next;
+                        playlists: root.editable-playlists;
+                        jump(i) => { root.jump-in-queue(i); }
+                        clear => { root.clear-queue(); }
+                        track-action(i, kind, id) => { root.track-action("queue", i, kind, id); }
+                    }
+                    if root.page == Page.album: AlbumPage {
+                        album: root.album;
+                        tracks: root.album-tracks;
+                        playlists: root.editable-playlists;
+                        play(i) => { root.play-track(i); }
+                        back => { root.back-to-artist(); }
+                        album-action(kind, id) => { root.album-action(kind, id); }
+                        track-action(i, kind, id) => { root.track-action("album", i, kind, id); }
+                    }
+                }
+                NowPlayingPanel {
+                    width: 360px;
+                    np: root.np;
+                    spectrum: root.spectrum;
+                    visualizer: root.visualizer;
+                    more-from: root.more-from;
+                    credits: root.credits;
+                    members: root.np-members;
+                    select-album(id) => { root.select-album(id); }
+                    select-artist(id) => { root.select-artist(id); }
+                }
+            }
+            TransportBar {
+                np: root.np;
+                waveform: root.waveform;
+                waveform-ready: root.waveform-ready;
+                trim-start: root.trim-start;
+                trim-end: root.trim-end;
+                can-trim: root.can-trim;
+                trim(kind, at) => { root.trim(kind, at); }
+                playing: root.playing;
+                position: root.position;
+                duration: root.duration;
+                position-text: root.position-text;
+                duration-text: root.duration-text;
+                volume <=> root.volume;
+                toggle => { root.toggle(); }
+                next => { root.next(); }
+                prev => { root.prev(); }
+                seek(v) => { root.seek(v); }
+                volume-changed(v) => { root.volume-changed(v); }
+                stream-info: root.stream-info;
+                quality-mode: root.quality-mode;
+                cycle-quality-mode => { root.cycle-quality-mode(); }
+                replaygain-mode: root.replaygain-mode;
+                cycle-replaygain => { root.cycle-replaygain(); }
+                shuffle: root.shuffle;
+                repeat: root.repeat;
+                toggle-shuffle => { root.toggle-shuffle(); }
+                shuffle-scope: root.shuffle-scope;
+                shuffle-label: root.shuffle-label;
+                set-shuffle-scope(scope) => { root.set-shuffle-scope(scope); }
+                cycle-repeat => { root.cycle-repeat(); }
+                queue-open: root.page == Page.queue;
+                show-queue => { root.show-queue(); }
+                lyrics-open: root.page == Page.lyrics;
+                show-lyrics => { root.show-lyrics(); }
+            }
+        }
+        }
+        if root.trim-offer != "": TrimOffer {
+            x: root.width - self.width - 16px;
+            y: root.height - 98px - self.height - 12px;
+            text: root.trim-offer;
+            answer(a) => { root.trim-offer-answer(a); }
+        }
+        if root.show-help: ShortcutHelp {
+            close => { root.show-help = false; keys.focus(); }
+        }
+        if !root.signed-in: LoginScreen {
+            state: root.login;
+            server <=> root.login-server;
+            username <=> root.login-username;
+            password <=> root.login-password;
+            new-password <=> root.login-new-password;
+            confirm-password <=> root.login-confirm-password;
+            submit => { root.login-submit(); }
+            check-server => { root.login-check-server(); }
+            change-password => { root.login-change-password(); }
+            full-name <=> root.login-full-name;
+            onboard => { root.login-onboard(); }
+            skip-onboarding => { root.login-skip-onboarding(); }
+            trust => { root.login-trust(); }
+            cancel-trust => { root.login-cancel-trust(); }
+            use-local => { root.login-use-local(); }
+            browse-music-folder => { root.login-browse-music-folder(); }
+            use-music-folder => { root.login-use-music-folder(); }
+            back-to-choice => { root.login-back-to-choice(); }
+            back-to-library => { root.login-back-to-library(); }
+            use-server => { root.login-use-server(); }
+        }
+    }
+}

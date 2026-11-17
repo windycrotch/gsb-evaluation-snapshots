@@ -1,0 +1,197 @@
+import { z } from "zod";
+import { Id, named } from "./models.ts";
+
+/*
+ * Accounts and devices. Each signed-in client is a device holding an opaque
+ * bearer token; the server stores only a hash of it. Tokens travel in the
+ * `Authorization: Bearer` header (native clients) or an HttpOnly cookie (browsers).
+ */
+
+const Timestamp = z.iso.datetime();
+
+export const Username = z
+  .string()
+  .trim()
+  .min(2)
+  .max(64)
+  .regex(/^[\p{L}\p{N}._-]+$/u, "letters, digits, dots, dashes and underscores only");
+
+/** Long passphrases welcome; the floor keeps out trivially guessable ones. */
+export const Password = z.string().min(8).max(1024);
+
+/** Client-chosen id, so a device keeps its queue across logins. */
+export const DeviceId = z.string().regex(/^[A-Za-z0-9_-]{8,64}$/);
+
+export const User = named(
+  "User",
+  z.object({
+    id: Id,
+    username: z.string(),
+    fullName: z.string().nullable(),
+    admin: z.boolean(),
+    /**
+     * Still using a default password: until it is changed, the session may only
+     * read `/api/me`, change the password, or sign out.
+     */
+    mustChangePassword: z.boolean(),
+    createdAt: Timestamp,
+  }),
+);
+
+export const Device = named(
+  "Device",
+  z.object({
+    id: DeviceId,
+    name: z.string(),
+    createdAt: Timestamp,
+    lastSeenAt: Timestamp,
+    /** The device making this request. */
+    current: z.boolean(),
+  }),
+);
+
+export const DeviceList = named("DeviceList", z.array(Device));
+export const UserList = named("UserList", z.array(User));
+
+export const AuthStatus = named(
+  "AuthStatus",
+  z.object({
+    /** The built-in `admin` account still has its default password: clients can pre-fill the first sign-in. */
+    defaultAdmin: z.boolean(),
+    serverVersion: z.string(),
+  }),
+);
+
+const DeviceInfo = {
+  deviceName: z.string().trim().min(1).max(100),
+  /** Reuse an existing device id (keeps its queue); a new one is generated when omitted. */
+  deviceId: DeviceId.optional(),
+  /** Also set an HttpOnly session cookie (browsers). */
+  cookie: z.boolean().default(false),
+};
+
+export const Login = named(
+  "Login",
+  z.object({
+    username: z.string().min(1).max(64),
+    password: z.string().min(1).max(1024),
+    ...DeviceInfo,
+  }),
+);
+
+export const Session = named(
+  "Session",
+  z.object({
+    /** Bearer token for this device. Shown once; the server keeps only a hash. */
+    token: z.string(),
+    user: User,
+    device: Device,
+  }),
+);
+
+export const Me = named("Me", z.object({ user: User, device: Device }));
+
+export const ChangePassword = named(
+  "ChangePassword",
+  z.object({
+    currentPassword: z.string().min(1).max(1024),
+    newPassword: Password,
+  }),
+);
+
+const FullName = z.string().trim().max(200);
+
+export const CreateUser = named(
+  "CreateUser",
+  z.object({
+    username: Username,
+    password: Password,
+    fullName: FullName.optional(),
+    admin: z.boolean().default(false),
+  }),
+);
+
+export const UpdateMe = named("UpdateMe", z.object({ fullName: FullName.nullable().optional() }));
+
+export const UpdateUser = named(
+  "UpdateUser",
+  z.object({
+    fullName: FullName.nullable().optional(),
+    admin: z.boolean().optional(),
+    /** A temporary password: the user is signed out everywhere and must choose a new one at sign-in. */
+    password: Password.optional(),
+  }),
+);
+
+export const Onboard = named(
+  "Onboard",
+  z.object({
+    fullName: FullName.optional(),
+    username: Username,
+    password: Password,
+  }),
+  "First-run registration of the everyday user, made from the admin's session.",
+);
+
+const Accent = z.string().regex(/^(cover|#[0-9a-f]{6})$/);
+
+export const ShuffleScope = named(
+  "ShuffleScope",
+  z.enum(["library", "album", "artist", "genre", "playlist"]),
+  "Where shuffle picks tracks from: everything, the playing track's album, artist or genre, or the playlist playing.",
+);
+
+export const Preferences = named(
+  "Preferences",
+  z.object({
+    /** Streaming quality mode; see the client's adaptive streaming. */
+    quality: z.enum(["auto", "original", "data-saver"]).default("auto"),
+    /**
+     * Loudness normalisation: `auto` uses album gain while an album plays in order and
+     * track gain otherwise (shuffle, playlists, mixed queues).
+     */
+    replayGain: z.enum(["auto", "track", "album", "off"]).default("auto"),
+    /** Extra gain in dB applied on top of ReplayGain (still limited by the peak). */
+    replayGainPreamp: z.number().min(-15).max(15).default(0),
+    /** Accent colour: `cover` follows the playing album's artwork, otherwise a `#rrggbb` colour. */
+    accent: Accent.default("cover"),
+    /** Tint the window with a gradient of the playing album's colours. */
+    coverBackground: z.boolean().default(true),
+    /** Show the live spectrum in the now-playing panel. */
+    visualizer: z.boolean().default(true),
+    /** What the shuffle button draws from (the library when the track gives none to go by: no genre, not from a playlist). */
+    shuffleScope: ShuffleScope.default("library"),
+    /** Seconds the end of a track overlaps the start of the next; 0 plays them back to back. */
+    crossfade: z.int().min(0).max(12).default(0),
+    /** Also crossfade when skipping to another track, not only when one ends. */
+    crossfadeOnSkip: z.boolean().default(false),
+    /** Also crossfade between tracks of an album playing in order (gapless otherwise). */
+    crossfadeAlbums: z.boolean().default(false),
+  }),
+  "Per-user settings that follow the account to every device.",
+);
+
+export const UpdatePreferences = named(
+  "UpdatePreferences",
+  z.object({
+    quality: z.enum(["auto", "original", "data-saver"]).optional(),
+    replayGain: z.enum(["auto", "track", "album", "off"]).optional(),
+    replayGainPreamp: z.number().min(-15).max(15).optional(),
+    accent: Accent.optional(),
+    coverBackground: z.boolean().optional(),
+    visualizer: z.boolean().optional(),
+    shuffleScope: ShuffleScope.optional(),
+    crossfade: z.int().min(0).max(12).optional(),
+    crossfadeOnSkip: z.boolean().optional(),
+    crossfadeAlbums: z.boolean().optional(),
+  }),
+);
+
+export type User = z.infer<typeof User>;
+export type Device = z.infer<typeof Device>;
+export type Session = z.infer<typeof Session>;
+export type AuthStatus = z.infer<typeof AuthStatus>;
+export type Preferences = z.infer<typeof Preferences>;
+export type ShuffleScope = z.infer<typeof ShuffleScope>;
+export type UpdateMe = z.infer<typeof UpdateMe>;
+export type UpdateUser = z.infer<typeof UpdateUser>;

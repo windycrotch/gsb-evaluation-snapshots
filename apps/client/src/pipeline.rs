@@ -1,0 +1,784 @@
+//! Decodes on its own thread into a lock-free ring buffer that the audio callback drains.
+//!
+//! rodio pulls samples from the real-time audio callback; decoding a network
+//! stream there would block the callback whenever the network is slow. Here
+//! the callback only pops from a single-producer/single-consumer ring (no
+//! locks, no waiting), playing silence and counting an underrun when it's empty.
+
+use std::{
+    sync::{
+        Arc, Condvar, Mutex, MutexGuard,
+        atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
+    },
+    thread,
+    time::Duration,
+};
+
+use rodio::{ChannelCount, Sample, SampleRate, Source, source::SeekError};
+use rtrb::{Consumer, Producer, RingBuffer};
+
+/// Decoded audio kept ahead of playback.
+const BUFFER: Duration = Duration::from_secs(2);
+/// How long the decode thread sleeps when the ring is full.
+const FULL_BACKOFF: Duration = Duration::from_millis(10);
+
+/// Requests from the control handle to the decode thread (never touched by the audio thread).
+#[derive(Default)]
+struct Control {
+    seek_to: Option<Duration>,
+    seek_result: Option<bool>,
+    stopped: bool,
+}
+
+struct Shared {
+    control: Mutex<Control>,
+    cond: Condvar,
+    channels: ChannelCount,
+    sample_rate: SampleRate,
+    /// Frames actually played (excludes underrun silence); the source of truth for position.
+    frames_played: AtomicU64,
+    underrun_frames: AtomicU64,
+    /// The decoder has produced its last sample.
+    decoded_all: AtomicBool,
+    /// The audio side has played the last sample.
+    ended: AtomicBool,
+    /// After a seek, the decode thread parks a fresh ring here for the audio side to adopt.
+    replacement: Mutex<Option<Consumer<Sample>>>,
+    replace: AtomicBool,
+    /// Linear gain (ReplayGain), as f32 bits so the audio callback reads it without locking.
+    gain: AtomicU32,
+    /// Frames the audio side should drop before playing on (see `PipelineHandle::skip`).
+    skip_frames: AtomicU64,
+    /// The last `TAP` frames played, mixed to mono, for the visualizer: written by the
+    /// audio side without locking, read whenever (a torn read only costs a glitchy frame).
+    tap: Box<[AtomicU32]>,
+    tap_pos: AtomicUsize,
+    tap_on: AtomicBool,
+    /// Where playback stops (a trimmed end), in frames from the pipeline's start; `NONE` for the end.
+    end_frame: AtomicU64,
+    /// Where the audio ends, as far as known: the track's duration until the decoder
+    /// reaches the end, then exactly. Fades and the next track's start go by it.
+    expected_end: AtomicU64,
+    /// Frames over which the end fades out, and the start fades in (0: none).
+    fade_out: AtomicU64,
+    fade_in: AtomicU64,
+    /// The first sample has played.
+    started: AtomicBool,
+}
+
+/// No frame: no trimmed end, or an end not known yet.
+const NONE: u64 = u64::MAX;
+
+/// Frames kept for the visualizer (a power of two, at least `spectrum::WINDOW`).
+const TAP: usize = 4096;
+
+impl Shared {
+    fn control(&self) -> MutexGuard<'_, Control> {
+        self.control.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn capacity(&self) -> usize {
+        (self.sample_rate.get() as f64 * BUFFER.as_secs_f64()) as usize
+            * self.channels.get() as usize
+    }
+
+    fn frames_to_duration(&self, frames: u64) -> Duration {
+        Duration::from_secs_f64(frames as f64 / self.sample_rate.get() as f64)
+    }
+
+    fn duration_to_frames(&self, d: Duration) -> u64 {
+        (d.as_secs_f64() * self.sample_rate.get() as f64) as u64
+    }
+
+    /// The frame the audio is expected to end at (the trimmed end, if sooner).
+    fn end(&self) -> u64 {
+        self.end_frame
+            .load(Ordering::Relaxed)
+            .min(self.expected_end.load(Ordering::Relaxed))
+    }
+
+    /// Frames left to play, if the end is known.
+    fn remaining(&self) -> Option<u64> {
+        let end = self.end();
+        (end != NONE).then(|| end.saturating_sub(self.frames_played.load(Ordering::Relaxed)))
+    }
+}
+
+/// Equal-power fade: the level at `t` (0..=1) of the way in, so a crossfade keeps the loudness.
+fn fade_curve(t: f32) -> f32 {
+    (t.clamp(0.0, 1.0) * std::f32::consts::FRAC_PI_2).sin()
+}
+
+/// Control and statistics side of a pipeline.
+#[derive(Clone)]
+pub struct PipelineHandle(Arc<Shared>);
+
+impl PipelineHandle {
+    /// Position in the stream, counting only audio that was really played.
+    pub fn position(&self) -> Duration {
+        self.0
+            .frames_to_duration(self.0.frames_played.load(Ordering::Relaxed))
+    }
+
+    /// Silence played because decoding fell behind, since the last call.
+    pub fn take_underrun(&self) -> Duration {
+        self.0
+            .frames_to_duration(self.0.underrun_frames.swap(0, Ordering::Relaxed))
+    }
+
+    /// Everything has been decoded and played.
+    pub fn finished(&self) -> bool {
+        self.0.ended.load(Ordering::Relaxed)
+    }
+
+    /// Seeks the decoder; blocks until done (or `timeout`). Returns false if unsupported.
+    pub fn seek(&self, to: Duration, timeout: Duration) -> bool {
+        let mut c = self.0.control();
+        c.seek_to = Some(to);
+        c.seek_result = None;
+        self.0.cond.notify_all();
+        let (mut c, _) = self
+            .0
+            .cond
+            .wait_timeout_while(c, timeout, |c| c.seek_result.is_none())
+            .unwrap_or_else(|e| e.into_inner());
+        c.seek_result.take().unwrap_or(false)
+    }
+
+    /// Linear gain applied to every sample from now on (takes effect immediately,
+    /// not after the buffered audio).
+    pub fn set_gain(&self, linear: f32) {
+        self.0.gain.store(linear.to_bits(), Ordering::Relaxed);
+    }
+
+    /// Drops the next `by` of audio without playing it (counted as played). Used to
+    /// pick up exactly where a stream being replaced got to while this one opened.
+    pub fn skip(&self, by: Duration) {
+        let frames = (by.as_secs_f64() * self.0.sample_rate.get() as f64) as u64;
+        self.0.skip_frames.store(frames, Ordering::Relaxed);
+    }
+
+    /// Starts or stops recording played audio for `latest_played`.
+    pub fn set_tap(&self, on: bool) {
+        self.0.tap_on.store(on, Ordering::Relaxed);
+    }
+
+    /// Fills `out` with the most recently played frames (mono), oldest first.
+    pub fn latest_played(&self, out: &mut [f32]) {
+        let end = self.0.tap_pos.load(Ordering::Acquire);
+        let n = out.len().min(TAP);
+        for (i, slot) in out.iter_mut().take(n).enumerate() {
+            let at = (end + TAP - n + i) % TAP;
+            *slot = f32::from_bits(self.0.tap[at].load(Ordering::Relaxed));
+        }
+    }
+
+    pub fn sample_rate(&self) -> u32 {
+        self.0.sample_rate.get()
+    }
+
+    pub fn stop(&self) {
+        self.0.control().stopped = true;
+        self.0.cond.notify_all();
+    }
+
+    /// Stops playback at `at` (from the pipeline's start) rather than the audio's end.
+    pub fn set_end(&self, at: Option<Duration>) {
+        let frames = at.map_or(NONE, |d| self.0.duration_to_frames(d));
+        self.0.end_frame.store(frames, Ordering::Relaxed);
+    }
+
+    /// Where the audio should end (the track's length), until the decoder knows exactly.
+    pub fn set_expected_end(&self, at: Duration) {
+        let frames = self.0.duration_to_frames(at);
+        // Never over the exact end, once the decoder has found it.
+        if !self.0.decoded_all.load(Ordering::Relaxed) {
+            self.0.expected_end.store(frames, Ordering::Relaxed);
+        }
+    }
+
+    /// Fades the start in over `over`.
+    pub fn set_fade_in(&self, over: Duration) {
+        let frames = self.0.duration_to_frames(over);
+        self.0.fade_in.store(frames, Ordering::Relaxed);
+    }
+
+    /// Fades out over the last `over` before the end.
+    pub fn set_fade_out(&self, over: Duration) {
+        let frames = self.0.duration_to_frames(over);
+        self.0.fade_out.store(frames, Ordering::Relaxed);
+    }
+
+    /// Fades out from where it is now, over `over`, then ends (a crossfade on a skip).
+    pub fn fade_out_now(&self, over: Duration) {
+        let frames = self.0.duration_to_frames(over);
+        let now = self.0.frames_played.load(Ordering::Relaxed);
+        self.0.fade_out.store(frames, Ordering::Relaxed);
+        self.0.end_frame.store(now + frames, Ordering::Relaxed);
+    }
+
+    /// Something has played (a queued track that started, or is crossfading in).
+    pub fn started(&self) -> bool {
+        self.0.started.load(Ordering::Relaxed)
+    }
+}
+
+/// The rodio-facing end. Never blocks.
+pub struct BufferedSource {
+    shared: Arc<Shared>,
+    ring: Consumer<Sample>,
+    /// Sample index within the current frame, to count frames.
+    channel: u16,
+    started: bool,
+    /// Plays silence (not counted as played or underrun) until this pipeline has this
+    /// many frames left (0: until it has ended).
+    after: Option<(Arc<Shared>, u64)>,
+    /// Frames played since the start, for the fade-in.
+    since_start: u64,
+    /// The current frame's samples so far, summed for the visualizer tap.
+    frame_sum: f32,
+}
+
+/// Starts decoding `source` on a background thread.
+pub fn spawn<S>(source: S) -> (BufferedSource, PipelineHandle)
+where
+    S: Source + Send + 'static,
+{
+    let shared = Arc::new(Shared {
+        control: Mutex::new(Control::default()),
+        cond: Condvar::new(),
+        channels: source.channels(),
+        sample_rate: source.sample_rate(),
+        frames_played: AtomicU64::new(0),
+        underrun_frames: AtomicU64::new(0),
+        decoded_all: AtomicBool::new(false),
+        ended: AtomicBool::new(false),
+        replacement: Mutex::new(None),
+        replace: AtomicBool::new(false),
+        gain: AtomicU32::new(1.0f32.to_bits()),
+        skip_frames: AtomicU64::new(0),
+        tap: (0..TAP).map(|_| AtomicU32::new(0)).collect(),
+        tap_pos: AtomicUsize::new(0),
+        tap_on: AtomicBool::new(false),
+        end_frame: AtomicU64::new(NONE),
+        expected_end: AtomicU64::new(NONE),
+        fade_out: AtomicU64::new(0),
+        fade_in: AtomicU64::new(0),
+        started: AtomicBool::new(false),
+    });
+    let (producer, consumer) = RingBuffer::new(shared.capacity());
+    let worker = shared.clone();
+    thread::Builder::new()
+        .name("decode".into())
+        .spawn(move || decode(&worker, source, producer))
+        .expect("spawning decode thread");
+    let source = BufferedSource {
+        shared: shared.clone(),
+        ring: consumer,
+        channel: 0,
+        started: false,
+        after: None,
+        since_start: 0,
+        frame_sum: 0.0,
+    };
+    (source, PipelineHandle(shared))
+}
+
+fn decode<S: Source>(shared: &Shared, mut source: S, mut ring: Producer<Sample>) {
+    let mut pending: Option<Sample> = None;
+    let channels = u64::from(shared.channels.get());
+    // Samples decoded, from the pipeline's start (or the frame last sought to).
+    let mut decoded = 0u64;
+    loop {
+        {
+            let c = shared.control();
+            if c.stopped || ring.is_abandoned() {
+                return;
+            }
+            if let Some(to) = c.seek_to {
+                drop(c);
+                let ok = source.try_seek(to).is_ok();
+                if ok {
+                    // Hand the audio side a fresh ring so nothing decoded before the seek is played.
+                    let (producer, consumer) = RingBuffer::new(shared.capacity());
+                    ring = producer;
+                    pending = None;
+                    *shared.replacement.lock().unwrap_or_else(|e| e.into_inner()) = Some(consumer);
+                    shared.replace.store(true, Ordering::Release);
+                    shared.decoded_all.store(false, Ordering::Relaxed);
+                    shared.ended.store(false, Ordering::Relaxed);
+                    let frames = shared.duration_to_frames(to);
+                    shared.frames_played.store(frames, Ordering::Relaxed);
+                    decoded = frames * channels;
+                }
+                let mut c = shared.control();
+                c.seek_to = None;
+                c.seek_result = Some(ok);
+                shared.cond.notify_all();
+                continue;
+            }
+            if shared.decoded_all.load(Ordering::Relaxed) {
+                // Idle until a seek or stop arrives.
+                drop(shared.cond.wait_timeout(c, Duration::from_millis(100)));
+                continue;
+            }
+        }
+
+        // Fill the ring; decoding may block on the network, which is fine on this thread.
+        for _ in 0..4096 {
+            let Some(sample) = pending.take().or_else(|| source.next()) else {
+                // Now the end is known exactly.
+                shared
+                    .expected_end
+                    .store(decoded / channels, Ordering::Relaxed);
+                shared.decoded_all.store(true, Ordering::Relaxed);
+                break;
+            };
+            if ring.push(sample).is_err() {
+                pending = Some(sample);
+                thread::sleep(FULL_BACKOFF);
+                break;
+            }
+            decoded += 1;
+        }
+    }
+}
+
+impl Iterator for BufferedSource {
+    type Item = Sample;
+
+    fn next(&mut self) -> Option<Sample> {
+        if let Some((previous, overlap)) = &self.after {
+            let due = previous.ended.load(Ordering::Acquire)
+                || (*overlap > 0 && previous.remaining().is_some_and(|left| left < *overlap));
+            if !due {
+                return Some(0.0);
+            }
+            self.after = None;
+        }
+        if self.shared.replace.load(Ordering::Acquire)
+            && let Ok(mut slot) = self.shared.replacement.try_lock()
+            && let Some(ring) = slot.take()
+        {
+            self.ring = ring;
+            self.channel = 0;
+            self.shared.replace.store(false, Ordering::Release);
+        }
+        let skipping = self.skip();
+        let played = self.shared.frames_played.load(Ordering::Relaxed);
+        // The trimmed end (or the end of a fade-out on a skip), at a frame boundary.
+        if self.channel == 0 && played >= self.shared.end_frame.load(Ordering::Relaxed) {
+            self.shared.ended.store(true, Ordering::Release);
+            return None;
+        }
+        let popped = self.ring.pop().ok();
+        if popped.is_none()
+            && self.shared.decoded_all.load(Ordering::Relaxed)
+            && self.ring.is_empty()
+        {
+            self.shared.ended.store(true, Ordering::Release);
+            return None;
+        }
+        let last_in_frame = self.channel + 1 == self.shared.channels.get();
+        self.channel = if last_in_frame { 0 } else { self.channel + 1 };
+        match popped {
+            Some(sample) => {
+                if !self.started {
+                    self.started = true;
+                    self.shared.started.store(true, Ordering::Relaxed);
+                }
+                let sample = sample * self.level(played);
+                if self.shared.tap_on.load(Ordering::Relaxed) {
+                    self.frame_sum += sample;
+                }
+                if last_in_frame {
+                    self.since_start += 1;
+                    self.shared.frames_played.fetch_add(1, Ordering::Relaxed);
+                    if self.shared.tap_on.load(Ordering::Relaxed) {
+                        let mono = self.frame_sum / self.shared.channels.get() as f32;
+                        let at = self.shared.tap_pos.load(Ordering::Relaxed);
+                        self.shared.tap[at % TAP].store(mono.to_bits(), Ordering::Relaxed);
+                        self.shared.tap_pos.store((at + 1) % TAP, Ordering::Release);
+                    }
+                    self.frame_sum = 0.0;
+                }
+                Some(sample)
+            }
+            None => {
+                // Silence before the first sample is the initial fill, not an underrun.
+                if last_in_frame && self.started && !skipping {
+                    self.shared.underrun_frames.fetch_add(1, Ordering::Relaxed);
+                }
+                Some(0.0)
+            }
+        }
+    }
+}
+
+impl BufferedSource {
+    /// Holds this source back until `previous` has played its last sample, so the two
+    /// play back to back (gapless) even though they're separate sources in the mixer.
+    ///
+    /// With an `overlap`, it starts that long before `previous` ends instead, for a
+    /// crossfade (both must have the same sample rate).
+    pub fn play_after(&mut self, previous: &PipelineHandle, overlap: Duration) {
+        let frames = previous.0.duration_to_frames(overlap);
+        self.after = Some((previous.0.clone(), frames));
+    }
+
+    /// The gain for a sample of frame `played`: ReplayGain, and any fade in or out.
+    fn level(&self, played: u64) -> f32 {
+        let mut level = f32::from_bits(self.shared.gain.load(Ordering::Relaxed));
+        let fade_in = self.shared.fade_in.load(Ordering::Relaxed);
+        if fade_in > 0 && self.since_start < fade_in {
+            level *= fade_curve(self.since_start as f32 / fade_in as f32);
+        }
+        let fade_out = self.shared.fade_out.load(Ordering::Relaxed);
+        if fade_out > 0 {
+            let end = self.shared.end();
+            if end != NONE {
+                let left = end.saturating_sub(played);
+                if left < fade_out {
+                    level *= fade_curve(left as f32 / fade_out as f32);
+                }
+            }
+        }
+        level
+    }
+
+    /// Discards whole frames of a pending skip that are already decoded; returns
+    /// whether some of the skip is still outstanding.
+    fn skip(&mut self) -> bool {
+        let pending = self.shared.skip_frames.load(Ordering::Relaxed);
+        // Only at a frame boundary, so channels stay aligned.
+        if pending == 0 || self.channel != 0 {
+            return pending > 0;
+        }
+        let channels = self.shared.channels.get() as usize;
+        let frames = pending.min((self.ring.slots() / channels) as u64);
+        if frames > 0
+            && let Ok(chunk) = self.ring.read_chunk(frames as usize * channels)
+        {
+            chunk.commit_all();
+            self.shared
+                .frames_played
+                .fetch_add(frames, Ordering::Relaxed);
+            self.shared.skip_frames.fetch_sub(frames, Ordering::Relaxed);
+        }
+        pending > frames
+    }
+}
+
+impl Source for BufferedSource {
+    fn current_span_len(&self) -> Option<usize> {
+        None
+    }
+
+    fn channels(&self) -> ChannelCount {
+        self.shared.channels
+    }
+
+    fn sample_rate(&self) -> SampleRate {
+        self.shared.sample_rate
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        None
+    }
+
+    fn try_seek(&mut self, _: Duration) -> Result<(), SeekError> {
+        // Seeks go through `PipelineHandle::seek` so they never run on the audio thread.
+        Err(SeekError::NotSupported {
+            underlying_source: "BufferedSource",
+        })
+    }
+}
+
+impl Drop for BufferedSource {
+    fn drop(&mut self) {
+        self.shared.control().stopped = true;
+        self.shared.cond.notify_all();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    const SECOND: Duration = Duration::from_secs(1);
+
+    fn tone(seconds: f32) -> impl Source + Send {
+        rodio::source::SineWave::new(440.0).take_duration(Duration::from_secs_f32(seconds))
+    }
+
+    /// Lets the decode thread fill the ring before draining, like the prebuffer does.
+    fn settle() {
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    #[test]
+    fn plays_everything_then_ends() {
+        let (src, handle) = spawn(tone(0.5));
+        settle();
+        let played = src.count();
+        assert!(played < 44_100 * 10, "source never ended");
+        assert!(handle.finished());
+        assert!(
+            (handle.position().as_secs_f32() - 0.5).abs() < 0.01,
+            "{:?}",
+            handle.position()
+        );
+    }
+
+    /// Mono source whose samples are their own index, so tests can tell where audio came from.
+    struct Ramp {
+        pos: u32,
+        len: u32,
+    }
+
+    const RAMP_RATE: u32 = 8_000;
+
+    impl Iterator for Ramp {
+        type Item = Sample;
+        fn next(&mut self) -> Option<Sample> {
+            (self.pos < self.len).then(|| {
+                self.pos += 1;
+                (self.pos - 1) as Sample
+            })
+        }
+    }
+
+    impl Source for Ramp {
+        fn current_span_len(&self) -> Option<usize> {
+            None
+        }
+        fn channels(&self) -> ChannelCount {
+            ChannelCount::new(1).unwrap()
+        }
+        fn sample_rate(&self) -> SampleRate {
+            SampleRate::new(RAMP_RATE).unwrap()
+        }
+        fn total_duration(&self) -> Option<Duration> {
+            None
+        }
+        fn try_seek(&mut self, pos: Duration) -> Result<(), SeekError> {
+            self.pos = (pos.as_secs_f64() * RAMP_RATE as f64) as u32;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn seeking_moves_the_position_and_discards_old_audio() {
+        let (mut src, handle) = spawn(Ramp {
+            pos: 0,
+            len: RAMP_RATE * 5,
+        });
+        settle();
+        src.by_ref().take(1000).for_each(drop);
+        assert!(handle.seek(Duration::from_secs(3), SECOND));
+        assert_eq!(handle.position().as_secs(), 3);
+        settle();
+        // The very next sample comes from the seek target, not from the old buffer.
+        assert_eq!(src.next(), Some((3 * RAMP_RATE) as Sample));
+        assert_eq!(src.count() as u32, 2 * RAMP_RATE - 1);
+    }
+
+    #[test]
+    fn skipping_drops_audio_but_counts_it_as_played() {
+        let (mut src, handle) = spawn(Ramp {
+            pos: 0,
+            len: RAMP_RATE * 5,
+        });
+        settle();
+        handle.skip(Duration::from_millis(500));
+        assert_eq!(src.next(), Some((RAMP_RATE / 2) as Sample));
+        assert_eq!(
+            handle.position(),
+            Duration::from_millis(500) + Duration::from_micros(125)
+        );
+        assert_eq!(handle.take_underrun(), Duration::ZERO);
+    }
+
+    #[test]
+    fn a_source_played_after_another_starts_on_the_sample_it_ends() {
+        let (mut first, first_handle) = spawn(Ramp { pos: 0, len: 3 });
+        let (mut second, second_handle) = spawn(Ramp { pos: 100, len: 103 });
+        second.play_after(&first_handle, Duration::ZERO);
+        settle();
+        // Pulled together, like the mixer does: the second stays silent until the first ends.
+        let mut out = Vec::new();
+        for _ in 0..6 {
+            out.push((first.next(), second.next()));
+        }
+        assert_eq!(
+            out,
+            [
+                (Some(0.0), Some(0.0)),
+                (Some(1.0), Some(0.0)),
+                (Some(2.0), Some(0.0)),
+                (None, Some(100.0)),
+                (None, Some(101.0)),
+                (None, Some(102.0)),
+            ]
+        );
+        assert_eq!(second_handle.take_underrun(), Duration::ZERO);
+        assert_eq!(second_handle.position(), Duration::from_secs(3) / RAMP_RATE);
+    }
+
+    #[test]
+    fn a_trimmed_end_stops_playback_there() {
+        let (src, handle) = spawn(Ramp {
+            pos: 0,
+            len: RAMP_RATE * 2,
+        });
+        handle.set_end(Some(Duration::from_millis(500)));
+        settle();
+        let samples: Vec<Sample> = src.collect();
+        assert_eq!(samples.len() as u32, RAMP_RATE / 2);
+        assert_eq!(samples.last(), Some(&((RAMP_RATE / 2 - 1) as Sample)));
+        assert!(handle.finished());
+    }
+
+    #[test]
+    fn a_crossfade_overlaps_the_end_with_the_next_start() {
+        let (mut first, first_handle) = spawn(Ramp {
+            pos: 1,
+            len: 1 + RAMP_RATE * 2,
+        });
+        let (mut second, second_handle) = spawn(Ramp {
+            pos: 1,
+            len: 1 + RAMP_RATE * 2,
+        });
+        first_handle.set_expected_end(Duration::from_secs(2));
+        first_handle.set_fade_out(SECOND);
+        second.play_after(&first_handle, SECOND);
+        second_handle.set_fade_in(SECOND);
+        settle();
+        // The first second: only the first source, at full level.
+        for i in 0..RAMP_RATE {
+            assert_eq!(first.next(), Some((i + 1) as Sample));
+            assert_eq!(second.next(), Some(0.0));
+        }
+        assert!(!second_handle.started());
+        // The second second: both, one fading out as the other fades in.
+        let (mut out, mut inn) = (Vec::new(), Vec::new());
+        for _ in 0..RAMP_RATE {
+            out.push(first.next().unwrap());
+            inn.push(second.next().unwrap());
+        }
+        assert!(second_handle.started());
+        assert_eq!(inn[0], 0.0); // silent at the very start of the fade in
+        let level = |v: &[Sample], i: usize, sample: u32| v[i] / sample as Sample;
+        // Halfway: both at the equal-power level, sin(45°).
+        let half = (RAMP_RATE / 2) as usize;
+        let mid = std::f32::consts::FRAC_1_SQRT_2;
+        assert!((level(&out, half, RAMP_RATE + RAMP_RATE / 2 + 1) - mid).abs() < 0.01);
+        assert!((level(&inn, half, RAMP_RATE / 2 + 1) - mid).abs() < 0.01);
+        // The first has ended; the second plays on at full level.
+        assert_eq!(first.next(), None);
+        assert_eq!(second.next(), Some((RAMP_RATE + 1) as Sample));
+    }
+
+    #[test]
+    fn fading_out_now_ends_after_the_fade() {
+        let (mut src, handle) = spawn(Ramp {
+            pos: 1,
+            len: 1 + RAMP_RATE * 5,
+        });
+        settle();
+        src.by_ref().take(100).for_each(drop);
+        handle.fade_out_now(Duration::from_millis(100));
+        let rest: Vec<Sample> = src.collect();
+        assert_eq!(rest.len() as u32, RAMP_RATE / 10);
+        assert!(rest[0] > 100.0 * 0.99 && rest[rest.len() - 1] < 200.0 * 0.02);
+    }
+
+    #[test]
+    fn the_tap_holds_the_latest_played_frames() {
+        let (mut src, handle) = spawn(Ramp {
+            pos: 0,
+            len: RAMP_RATE,
+        });
+        settle();
+        handle.set_tap(true);
+        src.by_ref().take(5000).for_each(drop);
+        let mut out = [0.0; 4];
+        handle.latest_played(&mut out);
+        assert_eq!(out, [4996.0, 4997.0, 4998.0, 4999.0]);
+    }
+
+    #[test]
+    fn gain_scales_samples_immediately() {
+        let (mut src, handle) = spawn(Ramp {
+            pos: 0,
+            len: RAMP_RATE,
+        });
+        settle();
+        assert_eq!(src.next(), Some(0.0));
+        assert_eq!(src.next(), Some(1.0));
+        handle.set_gain(0.5);
+        assert_eq!(src.next(), Some(1.0)); // sample 2 × 0.5
+        assert_eq!(src.next(), Some(1.5)); // sample 3 × 0.5
+    }
+
+    #[test]
+    fn a_steady_supply_has_no_underruns() {
+        let (src, handle) = spawn(tone(0.5));
+        settle();
+        src.for_each(drop);
+        assert_eq!(handle.take_underrun(), Duration::ZERO);
+    }
+
+    /// A source that stalls partway through, like a network stream running dry.
+    struct Stalling<S> {
+        inner: S,
+        stall_at: usize,
+        emitted: usize,
+    }
+
+    impl<S: Source> Iterator for Stalling<S> {
+        type Item = Sample;
+        fn next(&mut self) -> Option<Sample> {
+            if self.emitted == self.stall_at {
+                thread::sleep(Duration::from_millis(300));
+            }
+            self.emitted += 1;
+            self.inner.next()
+        }
+    }
+
+    impl<S: Source> Source for Stalling<S> {
+        fn current_span_len(&self) -> Option<usize> {
+            None
+        }
+        fn channels(&self) -> ChannelCount {
+            self.inner.channels()
+        }
+        fn sample_rate(&self) -> SampleRate {
+            self.inner.sample_rate()
+        }
+        fn total_duration(&self) -> Option<Duration> {
+            None
+        }
+    }
+
+    #[test]
+    fn a_stalled_decoder_is_reported_as_underrun() {
+        let (mut src, handle) = spawn(Stalling {
+            inner: tone(1.0),
+            stall_at: 4410,
+            emitted: 0,
+        });
+        settle();
+        // Drain faster than real time so the stall shows up as silence.
+        let started = Instant::now();
+        while src.next().is_some() && started.elapsed() < Duration::from_secs(3) {}
+        assert!(handle.take_underrun() > Duration::ZERO);
+        let pos = handle.position().as_secs_f32();
+        assert!(
+            (pos - 1.0).abs() < 0.01,
+            "silence must not advance the position: {pos}"
+        );
+    }
+}

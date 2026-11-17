@@ -1,0 +1,451 @@
+//! Turning API data into Slint models, plus the background image pipeline.
+
+use std::{
+    collections::{HashMap, VecDeque},
+    rc::Rc,
+    sync::mpsc,
+    thread,
+};
+
+use hyperplayer::{
+    api::{Api, types},
+    palette::{self, Rgb},
+};
+use image::imageops::FilterType;
+use slint::{Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
+
+use super::{APP, AlbumItem, App, AppWindow, ArtistItem, CreditItem, TrackItem};
+
+/// Applies a decoded image to the UI; runs on the UI thread.
+pub type ApplyImage = Box<dyn FnOnce(&AppWindow, Image) + Send>;
+
+pub struct ImageJob {
+    /// The client to fetch with, so a sign-in change applies to queued jobs too.
+    api: Api,
+    artwork_id: String,
+    size: u32,
+    blur: bool,
+    apply: ApplyImage,
+    /// Checked just before fetching: false skips a job that is no longer needed
+    /// (e.g. a cover scrolled out of view while queued).
+    wanted: Option<Box<dyn Fn() -> bool + Send>>,
+}
+
+/// Decoded images kept for reuse. Big enough for a few screens of covers; the
+/// least recently used go first beyond it.
+const CACHE_BYTES: usize = 160 << 20;
+
+type CacheKey = (String, u32, bool);
+
+/// Pixel buffers by artwork, size and blur, evicting the least recently used past `capacity` bytes.
+struct ImageCache {
+    entries: HashMap<CacheKey, SharedPixelBuffer<Rgba8Pixel>>,
+    /// Least recently used first.
+    order: VecDeque<CacheKey>,
+    bytes: usize,
+    capacity: usize,
+}
+
+impl ImageCache {
+    fn new(capacity: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+            bytes: 0,
+            capacity,
+        }
+    }
+
+    fn get(&mut self, key: &CacheKey) -> Option<SharedPixelBuffer<Rgba8Pixel>> {
+        let hit = self.entries.get(key)?.clone();
+        if let Some(i) = self.order.iter().position(|k| k == key) {
+            let k = self.order.remove(i).expect("position is in range");
+            self.order.push_back(k);
+        }
+        Some(hit)
+    }
+
+    fn insert(&mut self, key: CacheKey, buffer: SharedPixelBuffer<Rgba8Pixel>) {
+        self.bytes += buffer.as_bytes().len();
+        self.order.push_back(key.clone());
+        if let Some(old) = self.entries.insert(key, buffer) {
+            self.bytes -= old.as_bytes().len();
+        }
+        while self.bytes > self.capacity
+            && let Some(k) = self.order.pop_front()
+        {
+            if let Some(b) = self.entries.remove(&k) {
+                self.bytes -= b.as_bytes().len();
+            }
+        }
+    }
+}
+
+/// Single image worker: fetches, decodes, resizes and caches pixel buffers.
+pub fn spawn_image_worker() -> mpsc::Sender<ImageJob> {
+    let (tx, rx) = mpsc::channel::<ImageJob>();
+    thread::spawn(move || {
+        let mut cache = ImageCache::new(CACHE_BYTES);
+        for job in rx {
+            let key = (job.artwork_id.clone(), job.size, job.blur);
+            let buffer = match cache.get(&key) {
+                Some(b) => b,
+                None if job.wanted.as_ref().is_some_and(|w| !w()) => continue,
+                None => match decode(&job.api, &job) {
+                    Ok(b) => {
+                        cache.insert(key, b.clone());
+                        b
+                    }
+                    Err(err) => {
+                        eprintln!("artwork {}: {err:#}", job.artwork_id);
+                        continue;
+                    }
+                },
+            };
+            let apply = job.apply;
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = APP.with(|a| a.borrow().as_ref().and_then(|app| app.ui.upgrade()))
+                {
+                    apply(&ui, Image::from_rgba8(buffer));
+                }
+            });
+        }
+    });
+    tx
+}
+
+fn decode(api: &Api, job: &ImageJob) -> anyhow::Result<SharedPixelBuffer<Rgba8Pixel>> {
+    // Backdrops only need a tiny source: blurred and upscaled by the renderer they look smooth.
+    let fetch_size = if job.blur { 64 } else { job.size };
+    let bytes = api.artwork(&job.artwork_id, fetch_size)?;
+    let mut img = image::load_from_memory(&bytes)?;
+    if job.blur {
+        img = img.resize(48, 48, FilterType::Triangle).blur(5.0);
+    }
+    let mut rgba = img.to_rgba8();
+    if job.blur {
+        // A backdrop sits behind text: never lighter than white text allows.
+        palette::dim(&mut rgba, palette::TEXT_CONTRAST);
+    }
+    Ok(SharedPixelBuffer::clone_from_slice(
+        rgba.as_raw(),
+        rgba.width(),
+        rgba.height(),
+    ))
+}
+
+pub fn load_image(
+    app: &App,
+    artwork: Option<&types::Artwork>,
+    size: u32,
+    blur: bool,
+    apply: ApplyImage,
+) {
+    load_image_if(app, artwork, size, blur, apply, None);
+}
+
+/// Like `load_image`, skipped if `wanted` says no by the time the worker gets to it.
+pub fn load_image_if(
+    app: &App,
+    artwork: Option<&types::Artwork>,
+    size: u32,
+    blur: bool,
+    apply: ApplyImage,
+    wanted: Option<Box<dyn Fn() -> bool + Send>>,
+) {
+    if let Some(art) = artwork {
+        let _ = app.images.send(ImageJob {
+            api: app.api.clone(),
+            artwork_id: (*art.id).clone(),
+            size,
+            blur,
+            apply,
+            wanted,
+        });
+    }
+}
+
+// ---------------------------------------------------------------- formatting
+
+pub fn fmt_duration(ms: i64) -> String {
+    let s = ms.max(0) / 1000;
+    if s >= 3600 {
+        format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
+    } else {
+        format!("{}:{:02}", s / 60, s % 60)
+    }
+}
+
+pub fn plural(n: i64, word: &str) -> String {
+    format!("{n} {word}{}", if n == 1 { "" } else { "s" })
+}
+
+/// Theme.surface, the panel colour album colours are shown on.
+const SURFACE: Rgb = Rgb(
+    0x15 as f32 / 255.0,
+    0x17 as f32 / 255.0,
+    0x1c as f32 / 255.0,
+);
+
+/// The album's own colour, lightened as needed to show (as text, on hover) on
+/// the panel.
+pub fn accent(art: Option<&types::Artwork>) -> slint::Color {
+    let c = art
+        .and_then(|a| a.dominant_color.as_ref())
+        .and_then(|c| Rgb::from_hex(&format!("#{}", c.trim_start_matches('#'))))
+        .unwrap_or(Rgb(0x5b as f32 / 255.0, 0x6c as f32 / 255.0, 1.0));
+    let (r, g, b) = palette::legible(c, SURFACE, palette::MUTED_CONTRAST).to_u8();
+    slint::Color::from_rgb_u8(r, g, b)
+}
+
+pub fn quality(f: &types::AudioFormat) -> String {
+    let rate = f
+        .sample_rate
+        .map(|r| format!("{:.1} kHz", r.get() as f64 / 1000.0).replace(".0 ", " "));
+    if f.lossless {
+        match (f.bit_depth, rate) {
+            (Some(d), Some(r)) => format!("{d}-bit · {r}"),
+            (None, Some(r)) => r,
+            _ => String::new(),
+        }
+    } else {
+        f.bitrate
+            .map(|b| format!("{} kbps", b.get() / 1000))
+            .unwrap_or_default()
+    }
+}
+
+pub fn album_item(a: &types::AlbumSummary, subtitle: String) -> AlbumItem {
+    AlbumItem {
+        id: (*a.id).clone().into(),
+        title: a.title.clone().into(),
+        subtitle: subtitle.into(),
+        cover: Image::default(),
+    }
+}
+
+/// One line describing the artist: "jazz trumpeter, bandleader · Alton, United States · 1926–1991".
+pub fn artist_meta(a: &types::Artist) -> String {
+    let kind = a.kind.map(|k| {
+        let k = k.to_string();
+        let mut c = k.chars();
+        c.next()
+            .map(|f| f.to_uppercase().chain(c).collect::<String>())
+            .unwrap_or_default()
+    });
+    [
+        a.disambiguation.clone().or(kind),
+        a.area.clone(),
+        a.active_years.clone(),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|s| !s.is_empty())
+    .collect::<Vec<_>>()
+    .join(" · ")
+}
+
+pub fn credit_heading(c: types::CreditCategory) -> &'static str {
+    use types::CreditCategory::*;
+    match c {
+        Performance => "MUSICIANS",
+        Composition => "WRITTEN BY",
+        Production => "PRODUCTION",
+        Engineering => "ENGINEERING",
+        Other => "OTHER",
+    }
+}
+
+/// Credits grouped under a heading per category (the server already sorts by category).
+pub fn credit_model(credits: &[types::Credit]) -> ModelRc<CreditItem> {
+    let mut last = None;
+    let rows: Vec<CreditItem> = credits
+        .iter()
+        .map(|c| {
+            let heading = if last != Some(c.category) {
+                credit_heading(c.category)
+            } else {
+                ""
+            };
+            last = Some(c.category);
+            let mut detail = c.roles.join(", ");
+            if c.scope == types::CreditScope::Album {
+                detail.push_str(" · album");
+            }
+            CreditItem {
+                heading: heading.into(),
+                name: c.name.clone().into(),
+                detail: detail.into(),
+                artist_id: c
+                    .artist_id
+                    .as_ref()
+                    .map(|i| i.to_string())
+                    .unwrap_or_default()
+                    .into(),
+            }
+        })
+        .collect();
+    Rc::new(VecModel::from(rows)).into()
+}
+
+pub fn member_model(members: &[types::BandMember], heading: &str) -> ModelRc<CreditItem> {
+    let rows: Vec<CreditItem> = members
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let detail = [Some(m.roles.join(", ")), m.years.clone()]
+                .into_iter()
+                .flatten()
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join(" · ");
+            CreditItem {
+                heading: if i == 0 { heading.into() } else { "".into() },
+                name: m.name.clone().into(),
+                detail: detail.into(),
+                artist_id: m
+                    .artist_id
+                    .as_ref()
+                    .map(|i| i.to_string())
+                    .unwrap_or_default()
+                    .into(),
+            }
+        })
+        .collect();
+    Rc::new(VecModel::from(rows)).into()
+}
+
+/// Fills a model of album cards and queues their covers.
+pub fn album_model(
+    app: &App,
+    albums: &[types::AlbumSummary],
+    subtitle: impl Fn(&types::AlbumSummary) -> String,
+    pick: fn(&AppWindow) -> ModelRc<AlbumItem>,
+) -> ModelRc<AlbumItem> {
+    let model = Rc::new(VecModel::from(
+        albums
+            .iter()
+            .map(|a| album_item(a, subtitle(a)))
+            .collect::<Vec<_>>(),
+    ));
+    for (i, a) in albums.iter().enumerate() {
+        let id: SharedString = (*a.id).clone().into();
+        load_image(
+            app,
+            a.cover.as_ref(),
+            360,
+            false,
+            Box::new(move |ui, img| {
+                let model = pick(ui);
+                if let Some(mut row) = model.row_data(i).filter(|r| r.id == id) {
+                    row.cover = img;
+                    model.set_row_data(i, row);
+                }
+            }),
+        );
+    }
+    model.into()
+}
+
+/// Fills a model of artist rows and queues their images.
+pub fn artist_model(
+    app: &App,
+    artists: &[types::ArtistSummary],
+    pick: fn(&AppWindow) -> ModelRc<ArtistItem>,
+) -> ModelRc<ArtistItem> {
+    let items: Vec<ArtistItem> = artists
+        .iter()
+        .map(|a| ArtistItem {
+            id: (*a.id).clone().into(),
+            name: a.name.clone().into(),
+            subtitle: format!(
+                "{} · {}",
+                plural(a.album_count, "album"),
+                plural(a.track_count, "track")
+            )
+            .into(),
+            image: Image::default(),
+        })
+        .collect();
+    for (i, a) in artists.iter().enumerate() {
+        let id: SharedString = (*a.id).clone().into();
+        load_image(
+            app,
+            a.image.as_ref(),
+            96,
+            false,
+            Box::new(move |ui, img| {
+                let model = pick(ui);
+                if let Some(mut row) = model.row_data(i).filter(|r| r.id == id) {
+                    row.image = img;
+                    model.set_row_data(i, row);
+                }
+            }),
+        );
+    }
+    Rc::new(VecModel::from(items)).into()
+}
+
+/// Track rows for search results: the subtitle names artist and album, since results mix albums.
+pub fn search_track_model(tracks: &[types::Track], playing: Option<&str>) -> ModelRc<TrackItem> {
+    Rc::new(VecModel::from(
+        tracks
+            .iter()
+            .enumerate()
+            .map(|(i, t)| TrackItem {
+                number: (i + 1).to_string().into(),
+                title: t.title.clone().into(),
+                artist: format!("{} · {}", t.artist_name, t.album_title).into(),
+                duration: fmt_duration(t.duration_ms).into(),
+                playing: playing == Some(t.id.as_str()),
+                available: true,
+            })
+            .collect::<Vec<_>>(),
+    ))
+    .into()
+}
+
+pub fn track_model(tracks: &[types::Track], playing: Option<&str>) -> ModelRc<TrackItem> {
+    Rc::new(VecModel::from(
+        tracks
+            .iter()
+            .enumerate()
+            .map(|(i, t)| TrackItem {
+                number: t
+                    .track_number
+                    .map(|n| n.get() as usize)
+                    .unwrap_or(i + 1)
+                    .to_string()
+                    .into(),
+                title: t.title.clone().into(),
+                artist: t.artist_name.clone().into(),
+                duration: fmt_duration(t.duration_ms).into(),
+                playing: playing == Some(t.id.as_str()),
+                available: true,
+            })
+            .collect::<Vec<_>>(),
+    ))
+    .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn buffer() -> SharedPixelBuffer<Rgba8Pixel> {
+        SharedPixelBuffer::new(10, 10) // 400 bytes
+    }
+
+    #[test]
+    fn image_cache_evicts_the_least_recently_used() {
+        let key = |id: &str| (id.to_string(), 360, false);
+        let mut cache = ImageCache::new(1000); // room for two
+        cache.insert(key("a"), buffer());
+        cache.insert(key("b"), buffer());
+        assert!(cache.get(&key("a")).is_some()); // a is now the most recent
+        cache.insert(key("c"), buffer());
+        assert!(cache.get(&key("b")).is_none());
+        assert!(cache.get(&key("a")).is_some() && cache.get(&key("c")).is_some());
+        assert_eq!(cache.bytes, 800);
+    }
+}
