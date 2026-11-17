@@ -1,0 +1,36 @@
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 10001;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: var(--bg-overlay);
+  pointer-events: auto;
+}
+
+.dialog {
+  width: min(520px, 100%);
+  max-height: calc(100vh - 40px);
+  overflow: auto;
+  padding: 24px;
+  box-sizing: border-box;
+  color: var(--text-primary);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-medium);
+  border-radius: 8px;
+  box-shadow: 0 18px 48px var(--shadow-strong);
+  scrollbar-color: var(--border-strong) var(--bg-surface);
+  scrollbar-width: thin;
+}
+
+@media (max-width: 420px) {
+  .backdrop {
+    padding: 16px;
+  }
+
+  .dialog {
+    padding: 20px;
+    max-height: calc(100vh - 32px);
+  }
+}
