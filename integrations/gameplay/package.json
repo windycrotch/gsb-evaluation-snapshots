@@ -1,0 +1,41 @@
+{
+  "name": "@xip/gameplay",
+  "version": "0.0.1",
+  "description": "High-level gameplay hooks for Xip (internal)",
+  "main": "./dist/index.mjs",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsup"
+  },
+  "files": [
+    "dist"
+  ],
+  "dependencies": {
+    "@xip/context": "workspace:*",
+    "@xip/core": "workspace:*",
+    "@xip/input": "workspace:*",
+    "@xip/physics": "workspace:*",
+    "@xip/renderer": "workspace:*"
+  },
+  "peerDependencies": {
+    "react": "^18.0.0 || ^19.0.0"
+  },
+  "devDependencies": {
+    "tsup": "^8.0.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/1homsi/xip"
+  },
+  "private": true,
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.mts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs",
+      "default": "./dist/index.mjs"
+    }
+  }
+}

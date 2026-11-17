@@ -1,0 +1,36 @@
+{
+  "name": "@xip/input",
+  "version": "0.0.1",
+  "description": "Keyboard and mouse input manager for Xip",
+  "main": "./dist/index.mjs",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsup"
+  },
+  "files": [
+    "dist"
+  ],
+  "dependencies": {
+    "@xip/core": "workspace:*"
+  },
+  "keywords": [
+    "game-engine",
+    "input",
+    "xip"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/1homsi/xip"
+  },
+  "private": true,
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.mts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs",
+      "default": "./dist/index.mjs"
+    }
+  }
+}

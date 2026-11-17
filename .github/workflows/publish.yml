@@ -1,0 +1,59 @@
+name: Publish to npm
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: latest
+
+      - uses: actions/setup-node@v6
+        with:
+          # Node 24 ships npm >=11.5.1, required for OIDC trusted publishing
+          # auth (npm 10 signs provenance but cannot authenticate the PUT,
+          # which surfaces as a misleading E404).
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Packed package smoke test
+        run: node scripts/publish-packages.mjs smoke
+
+      - name: Prepare package manifests
+        run: |
+          VERSION="${{ github.event.release.tag_name }}"
+          VERSION="${VERSION#v}"
+          VERSION="$VERSION" node scripts/publish-packages.mjs prepare
+          # Commit the stamped manifests so the working tree is clean —
+          # newer npm enforces tree cleanliness on publish and the old
+          # --no-git-checks escape hatch was removed from the CLI.
+          git config user.email "actions@github.com"
+          git config user.name "GitHub Actions"
+          git add -A
+          git commit -qm "Stamp package manifests for ${GITHUB_REF_NAME}"
+
+      - name: Publish packages
+        run: |
+          while IFS= read -r package_dir; do
+            echo "Publishing ${package_dir}"
+            (cd "${package_dir}" && npx --yes npm@latest publish --provenance --access public)
+          done < <(node scripts/publish-packages.mjs list-paths)
