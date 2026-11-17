@@ -1,0 +1,122 @@
+@tailwind base;
+  @tailwind components;
+  @tailwind utilities;
+
+  @layer base {
+    :root {
+      --background: 0 0% 100%;
+      --foreground: 222.2 84% 4.9%;
+
+      --card: 0 0% 100%;
+      --card-foreground: 222.2 84% 4.9%;
+
+      --popover: 0 0% 100%;
+      --popover-foreground: 222.2 84% 4.9%;
+
+      --primary: 222.2 47.4% 11.2%;
+      --primary-foreground: 210 40% 98%;
+
+      --secondary: 210 40% 96.1%;
+      --secondary-foreground: 222.2 47.4% 11.2%;
+
+      --muted: 210 40% 96.1%;
+      --muted-foreground: 215.4 16.3% 46.9%;
+
+      --accent: 210 40% 96.1%;
+      --accent-foreground: 222.2 47.4% 11.2%;
+
+      --destructive: 0 84.2% 60.2%;
+      --destructive-foreground: 210 40% 98%;
+
+      --border: 214.3 31.8% 91.4%;
+      --input: 214.3 31.8% 91.4%;
+      --ring: 222.2 84% 4.9%;
+
+      --radius: 0.5rem;
+
+      --spider-green: 142 71% 55%;
+      --spider-green-dark: 142 71% 45%;
+      --spider-green-muted: 142 40% 25%;
+    }
+
+    .dark {
+      --background: 222 47% 6%;
+      --foreground: 210 40% 98%;
+
+      --card: 223 47% 7%;
+      --card-foreground: 210 40% 98%;
+
+      --popover: 223 47% 7%;
+      --popover-foreground: 210 40% 98%;
+
+      --primary: 142 71% 55%;
+      --primary-foreground: 222 47% 6%;
+
+      --secondary: 220 30% 12%;
+      --secondary-foreground: 210 40% 98%;
+
+      --muted: 220 25% 14%;
+      --muted-foreground: 215 20% 55%;
+
+      --accent: 220 25% 14%;
+      --accent-foreground: 210 40% 98%;
+
+      --destructive: 0 62.8% 30.6%;
+      --destructive-foreground: 210 40% 98%;
+
+      --border: 220 20% 16%;
+      --input: 220 20% 16%;
+      --ring: 142 71% 55%;
+
+      --spider-green: 142 71% 55%;
+      --spider-green-dark: 142 71% 45%;
+      --spider-green-muted: 142 40% 25%;
+    }
+  }
+
+  @layer base {
+    html {
+      font-size: 16px;
+    }
+    * {
+      @apply border-border;
+    }
+    body {
+      @apply bg-background text-foreground;
+    }
+
+    /* Custom scrollbar */
+    ::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+    ::-webkit-scrollbar-track {
+      background: hsl(var(--background));
+    }
+    ::-webkit-scrollbar-thumb {
+      background: hsl(var(--muted));
+      border-radius: 4px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: hsl(var(--muted-foreground) / 0.5);
+    }
+  }
+
+  @layer utilities {
+    .status-bar {
+      @apply flex items-center gap-3 px-3 py-1 text-xs border-t bg-secondary/50;
+    }
+  }
+
+  @keyframes spider-pulse {
+    0%, 100% { opacity: 0.3; transform: scale(1); }
+    50% { opacity: 0.15; transform: scale(1.05); }
+  }
+
+  .animate-spider-pulse {
+    animation: spider-pulse 3s ease-in-out infinite;
+  }
+
+  .monaco-editor, .monaco-editor-background, .monaco-editor .margin {
+    background: transparent !important
+   }
