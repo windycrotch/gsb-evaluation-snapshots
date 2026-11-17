@@ -42,6 +42,39 @@ describe("shared framing jobs",()=>{
     expect((await req(input)).body.id).toBe(good.body.id);
     expect(startVideoAnalysis).toHaveBeenCalledTimes(1);
   });
+  it("starts each window of a long clip exactly once under concurrent and duplicate requests",async()=>{
+    // The dialog splits a 12-minute clip into three <=5-minute windows and
+    // fires them together; a second click while they are in flight must not
+    // start any of them again.
+    const windows=[{start:0,end:240},{start:240,end:480},{start:480,end:720}];
+    const first=await Promise.all(windows.map(w=>req({asset_id:"a",...w})));
+    expect(startVideoAnalysis).toHaveBeenCalledTimes(3);
+    expect(new Set(first.map(r=>r.body.id)).size).toBe(3);
+    const duplicate=await Promise.all(windows.map(w=>req({asset_id:"a",...w})));
+    expect(startVideoAnalysis).toHaveBeenCalledTimes(3);
+    expect(duplicate.map(r=>r.body.id).sort()).toEqual(first.map(r=>r.body.id).sort());
+    // A window already done is served from its cache, still with no new job.
+    const [w]=windows;
+    vi.mocked(getVideoAnalysis).mockResolvedValueOnce({job_id:first[0].body.job_id,status:"done",result:{shots:[]}});
+    const done=await read(first[0].body.id);
+    expect(done.status).toBe("done");
+    const cached=await req({asset_id:"a",...w});
+    expect(cached.body.id).toBe(first[0].body.id);
+    expect(cached.body.status).toBe("done");
+    expect(startVideoAnalysis).toHaveBeenCalledTimes(3);
+  });
+  it("reuses a done analysis covering the requested interval without resubmitting",async()=>{
+    const wide={asset_id:"a",start:100,end:400};
+    const {body}=await req(wide);
+    expect(startVideoAnalysis).toHaveBeenCalledTimes(1);
+    vi.mocked(getVideoAnalysis).mockResolvedValueOnce({job_id:body.job_id,status:"done",result:{shots:[]}});
+    expect((await read(body.id)).status).toBe("done");
+    // A narrower request wholly inside the cached stretch: same row, no start.
+    const inside=await req({asset_id:"a",start:120,end:300});
+    expect(inside.body.id).toBe(body.id);
+    expect(inside.body.status).toBe("done");
+    expect(startVideoAnalysis).toHaveBeenCalledTimes(1);
+  });
   it("does not restart a failure when another first request arrives late",async()=>{
     const state=await vi.mocked(mediaState).getMockImplementation()!({token:"test"},"a");
     let release!:()=>void;
@@ -66,6 +99,25 @@ describe("shared framing jobs",()=>{
     expect((await req(input)).body.status).toBe("failed");
     expect((await req(input)).body.status).toBe("failed");expect(startVideoAnalysis).toHaveBeenCalledTimes(1);
     expect((await req({...input,retry:true})).body.status).toBe("running");expect(startVideoAnalysis).toHaveBeenCalledTimes(2);
+  });
+  it("retries one failed window without re-analysing the window that already finished",async()=>{
+    const a={asset_id:"a",start:0,end:240}, b={asset_id:"a",start:240,end:480};
+    const winA=await req(a), winB=await req(b);
+    expect(startVideoAnalysis).toHaveBeenCalledTimes(2);
+    // Window A finishes; window B's submission fails.
+    vi.mocked(getVideoAnalysis).mockResolvedValueOnce({job_id:winA.body.job_id,status:"done",result:{shots:[]}});
+    expect((await read(winA.body.id)).status).toBe("done");
+    db.prepare("UPDATE video_reframes SET status='failed',error='Video analysis failed' WHERE id=?").run(winB.body.id);
+    // Plain re-requests restart neither window...
+    expect((await req(b)).body.status).toBe("failed");
+    expect((await req(a)).body.status).toBe("done");
+    expect(startVideoAnalysis).toHaveBeenCalledTimes(2);
+    // ...and the explicit retry touches only B. A's cached row and id survive.
+    const retried=await req({...b,retry:true});
+    expect(retried.body.id).toBe(winB.body.id);
+    expect(retried.body.status).toBe("running");
+    expect(startVideoAnalysis).toHaveBeenCalledTimes(3);
+    expect((await req(a)).body.id).toBe(winA.body.id);
   });
   it("marks an interrupted submission failed and never silently retries it",async()=>{
     const {body}=await req(input);db.prepare("UPDATE video_reframes SET status='starting',job_id=NULL,updated_at=0 WHERE id=?").run(body.id);

@@ -280,6 +280,35 @@ describe("Framing this cut", () => {
     const long: Edl = { ...empty(), main: { elements: [{ id: "a", type: "video", src: "asset:long" }] } };
     expect(frameTargets([{ project: "draft", name: "x", edl: long }], new Map([["asset:long", 5 * 3600]]))).toHaveProperty("error");
   });
+
+  it("joins a long clip's analysed windows into one continuous 9:16 timeline", async () => {
+    // A 12-minute clip is read in three windows. applyFraming joins their shots
+    // so the framed pieces cover the whole clip once, with both boundary shots kept.
+    const wide: Edl = { ...empty(), main: { elements: [{ id: "a", type: "video", src: "asset:talk", trimStart: 0, duration: 720 }] } };
+    const targets = frameTargets([{ project: "draft", name: "long cut", edl: wide }], seconds);
+    if ("error" in targets) throw new Error(targets.error);
+    const windows = targets[0].parts;
+    expect(windows.length).toBe(3);
+    for (const p of windows) {
+      p.status = "done";
+      p.shots = [speaker(p.from, (p.from + p.to) / 2), speaker((p.from + p.to) / 2, p.to)];
+    }
+    const { applyFraming } = await import("../src/server/clips");
+    const result = applyFraming(targets[0]);
+    if ("error" in result) throw new Error(result.error);
+    const { formatView } = await import("../src/shared/formats");
+    const tall = formatView(result.edl, "9:16");
+    const pieces = tall.main.elements as Array<{ trimStart?: number; duration: number }>;
+    expect(pieces.length).toBe(6); // two shots per window, three windows
+    expect(Math.round(pieces.reduce((n, e) => n + e.duration, 0) * 1000) / 1000).toBeCloseTo(720, 3);
+    // Neighbouring pieces meet exactly: no hole and no overlap.
+    let cursor = 0;
+    for (const e of pieces) {
+      expect(e.trimStart ?? 0).toBeCloseTo(cursor, 3);
+      cursor = (e.trimStart ?? 0) + e.duration;
+    }
+    expect(cursor).toBeCloseTo(720, 3);
+  });
 });
 
 describe("Clips in the conversation", () => {

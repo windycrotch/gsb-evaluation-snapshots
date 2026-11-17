@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { Sparkles, Loader2 } from "lucide-react";
 import { api, frameUrl, type Asset, type Edl } from "./edit";
 import { Dialog, btnPrimary, btnSecondary } from "./ui";
-import { analysisWindows, framedPieces, focusCrop, type Shot, type Layout } from "../shared/reframe";
+import { analysisWindows, framedPieces, focusCrop, mergeWindowShots, refreshParts,
+  BUSY_STATUSES, type AnalysisPart, type Shot, type Layout } from "../shared/reframe";
 import { placeClip, sideBySide, type Crop, type Shape } from "../shared/crop";
 import { sameShape } from "../shared/format";
 import { addFormat, findFormat, formatView, liftView } from "../shared/formats";
@@ -20,8 +21,8 @@ function target(edl: Edl): { doc: Edl; id: string | null } | null {
 
 type Result = {id?:string;status:string;shots?:Shot[];error?:string;shape?:Shape};
 /** One stretch of the clip, analysed on its own (analysisWindows). */
-type Part = {from:number;to:number;id?:string;status:string;error?:string;shots?:Shot[]};
-const BUSY=["starting","running","preparing"];
+type Part = AnalysisPart;
+const BUSY=BUSY_STATUSES as readonly string[];
 const whole:Crop={x:0,y:0,width:1,height:1};
 const time=(t:number)=>`${Math.floor(t/60)}:${(t%60).toFixed(1).padStart(4,"0")}`;
 export function ReframeDialog({edl:doc,assets,selected,onApply,onClose}:{edl:Edl;assets:Asset[];selected:number;onApply:(next:Edl,shown:string|null)=>void;onClose:()=>void}) {
@@ -46,41 +47,48 @@ export function ReframeDialog({edl:doc,assets,selected,onApply,onClose}:{edl:Edl
     setShots(clip?.type === "video" ? [{from:start,to:start+duration,layout:clip.split?"split":clip.crop?"speaker":"whole",review:false,reason:"Current framing",subjects:[],top:clip.split?.top ?? clip.crop ?? whole,bottom:clip.split?.bottom ?? whole}] : []);
     return ()=>{++generation.current;};
   },[index]);
-  const settle=(i:number,r:Result)=>{
-    if(r.shape)setShape(r.shape);
-    setParts(ps=>ps.map((p,k)=>k===i?{...p,id:r.id ?? p.id,status:r.status,error:r.error ?? undefined,shots:r.shots ?? p.shots}:p));
-  };
-  const fail=(i:number,message:string)=>setParts(ps=>ps.map((p,k)=>k===i?{...p,status:"error",error:message}:p));
   const ask=(p:Part,retry:boolean)=>api.send<Result>("POST","/api/reframe",{asset_id:asset?.id,start:p.from,end:p.to,retry});
-  const analyze=async()=>{
-    const seq=++generation.current;
-    await Promise.all(parts.map(async(p,i)=>{
-      if(p.status==="done"||BUSY.includes(p.status))return;
-      // Checking on an analysis that could not be read starts nothing new.
-      if(p.status==="error"&&p.id){setParts(ps=>ps.map((q,k)=>k===i?{...q,status:"running",error:undefined}:q));return;}
-      setParts(ps=>ps.map((q,k)=>k===i?{...q,status:"starting",error:undefined}:q));
-      try{const r=await ask(p,p.status==="failed");if(seq===generation.current)settle(i,r);}
-      catch(e){if(seq===generation.current)fail(i,(e as Error).message);}
-    }));
+  // One round over the windows: done and in-flight parts are skipped, so a
+  // retry only re-submits the failed window and every completed window is
+  // reused as-is, never analysed again.
+  const runParts=async(retry:boolean)=>{
+    const seq=generation.current;
+    const next=await refreshParts(parts,retry,{
+      post:(p,r)=>ask(p,r),
+      get:id=>api.get<Result>(`/api/reframe/${id}`),
+      fail:(_p,message)=>message,
+    });
+    if(seq!==generation.current)return; // the user switched clip while the requests were in flight
+    for(const r of next as Result[]){if(r.shape){setShape(r.shape);break;}}
+    setParts(next as Part[]);
     setPoll(v=>v+1);
   };
+  const analyze=()=>void runParts(failed.length>0);
+  // Poll only the windows still in flight. GET checks start nothing, and a
+  // window whose POST never came back (status "starting", no id yet) is asked
+  // again without retry: the server reuses the row it already holds.
   useEffect(()=>{
     if(!busy)return;
     const seq=generation.current;
-    const timer=setTimeout(async()=>{
-      await Promise.all(parts.map(async(p,i)=>{
-        if(!BUSY.includes(p.status)||p.status==="starting"&&!p.id)return;
-        try{const r=p.id ? await api.get<Result>(`/api/reframe/${p.id}`) : await ask(p,false);if(seq===generation.current)settle(i,r);}
-        catch(e){if(seq===generation.current)fail(i,(e as Error).message);}
-      }));
+    const timer=setTimeout(()=>{void (async()=>{
+      const next=await refreshParts(parts,false,{
+        post:(p)=>ask(p,false),
+        get:id=>api.get<Result>(`/api/reframe/${id}`),
+        fail:(_p,message)=>message,
+      },true);
+      if(seq!==generation.current)return;
+      for(const r of next as Result[]){if(r.shape){setShape(r.shape);break;}}
+      setParts(next as Part[]);
       setPoll(v=>v+1);
-    },4000);
+    })();},4000);
     return()=>clearTimeout(timer);
   },[busy,poll]);
-  // Every part read: its shots, in order, become the clip's.
+  // Every part read: join the windows' shots in source time into one sequence
+  // that covers the whole clip once — touching boundary shots are both kept,
+  // stray clocks dropped, and any hole filled with a whole shot.
   useEffect(()=>{
     if(!parts.length||parts.some(p=>p.status!=="done"))return;
-    setShots(parts.flatMap(p=>p.shots ?? []).filter(s=>s.to>start && s.from<start+duration).sort((a,b)=>a.from-b.from));
+    setShots(mergeWindowShots(parts,start,start+duration));
     setActive(0);setFrame(start);
   },[parts]);
   const shot=shots[active];

@@ -97,3 +97,135 @@ export function analysisWindows(start: number, end: number, max = 299.5): { from
   const at = (i: number) => (i === n ? end : Math.round((start + ((end - start) * i) / n) * 1000) / 1000);
   return Array.from({ length: n }, (_, i) => ({ from: at(i), to: at(i + 1) }));
 }
+
+/** Statuses that mean an analysis is still in flight, so the part must not be re-submitted. */
+export const BUSY_STATUSES = ["starting", "running", "preparing"] as const;
+
+/** One stretch of a clip, analysed on its own (analysisWindows), wherever that analysis runs. */
+export type AnalysisPart = { from: number; to: number; id?: string; status: string; error?: string; shots?: Shot[] };
+
+/** A framing answer as POST /api/reframe and GET /api/reframe/:id report it. */
+export type FramingResult = { id?: string; status: string; shots?: Shot[] | null; error?: string | null };
+
+const partFallback = (from: number, to: number, reason: string): Shot => ({
+  from, to, layout: "whole", reason, review: true, subjects: [],
+});
+/** Same clock slack normalizeShots allows: a shot touching the window edge counts as inside. */
+const EDGE = 0.1;
+/** Too short to keep as its own shot once rounded onto the window edges. */
+const MIN_SHOT = 0.1;
+
+/**
+ * Join the shot lists of consecutive analysis windows into one sequence that
+ * covers the whole clip exactly once: no holes and no overlapping time.
+ *
+ * Each window's shots were normalised inside its own [from,to] by the server,
+ * so the boundary shots of two touching windows meet at the same instant and
+ * both are kept — they are distinct shots that only share a boundary. A shot
+ * the model returned outside every window is dropped (normalizeShots' rule),
+ * and anything a window leaves uncovered is filled with a reviewable whole
+ * shot, the same fallback normalizeShots uses.
+ */
+export function mergeWindowShots(
+  windows: { from: number; to: number; shots?: Shot[] }[],
+  start: number,
+  end: number,
+): Shot[] {
+  if (!(end > start)) return [];
+  const ordered = [...windows].filter(w => w.to > w.from).sort((a, b) => a.from - b.from);
+  const out: Shot[] = [];
+  let at = start;
+  const fillTo = (t: number) => {
+    if (t - at > EDGE) out.push(partFallback(at, t, "No reliable framing for this section."));
+    at = t;
+  };
+  for (const w of ordered) {
+    if (w.to <= at - EDGE) continue; // an out-of-order/duplicate window, fully consumed
+    if (w.from > at + EDGE) fillTo(Math.min(w.from, end)); // a window missing from the answer: keep the picture whole
+    if (at >= end) break;
+    for (const raw of w.shots ?? []) {
+      // normalizeShots' rule: a clock outside the window (past the edge slack)
+      // is dropped, not pulled back in. The gap it leaves is filled whole below.
+      if (raw.from < w.from - EDGE || raw.to > w.to + EDGE || raw.to <= raw.from) continue;
+      // Inside the window: clamp onto what is still uncovered and the clip's end.
+      // The same edge slack applies here, so a shot a few ms past the boundary
+      // keeps its clock instead of being snapped and duplicated by the neighbour.
+      const lo = Math.max(at, raw.from), hi = Math.min(end, raw.to);
+      if (hi - lo < MIN_SHOT) continue;
+      fillTo(lo);
+      out.push({ ...raw, from: at, to: hi });
+      at = hi;
+    }
+    if (at < w.to - EDGE) fillTo(Math.min(w.to, end)); // the window answered but left a gap inside itself
+  }
+  fillTo(end);
+  return out.length ? out : [partFallback(start, end, "Framing needs manual review.")];
+}
+
+/** What one refresh of the analysis parts should do with a single part. */
+export type PartRequest =
+  | { action: "skip" }
+  | { action: "post"; retry: boolean }
+  | { action: "get"; id: string };
+
+/**
+ * Decide, without looking at other parts, how one window's analysis is driven
+ * this round. A finished part is never submitted again, and a failure is only
+ * restarted when `retry` is asked for explicitly: reusing a completed window
+ * and retrying a failed one therefore never touch each other. A poll round
+ * checks the in-flight rows (GET starts no analysis); an analyze round leaves
+ * them for the poll already running.
+ */
+export function partRequest(part: AnalysisPart, retry: boolean, poll = false): PartRequest {
+  if (part.status === "done") return { action: "skip" };
+  if (BUSY_STATUSES.includes(part.status as (typeof BUSY_STATUSES)[number])) {
+    if (!poll || !part.id) return { action: "skip" };
+    return { action: "get", id: part.id };
+  }
+  // The server said the analysis itself failed: only an explicit retry starts
+  // a new one, and it goes through POST so the server can replace the row.
+  if (part.status === "failed") return retry ? { action: "post", retry: true } : { action: "skip" };
+  // A request that never answered (client-side error). Re-check the row we
+  // already hold before ever starting another analysis; with no row there is
+  // nothing to read, so the first round posts (and a later round retries).
+  if (part.status === "error") {
+    if (part.id) return { action: "get", id: part.id };
+    return retry ? { action: "post", retry: true } : { action: "post", retry: false };
+  }
+  if (part.id) return { action: "get", id: part.id };
+  return { action: "post", retry: false };
+}
+
+/**
+ * Drive every window's analysis one round. Parts that are done or (outside a
+ * poll) in flight are returned untouched and never asked for again; only the
+ * parts this round actually targets issue a request, so a failed window
+ * retries on its own and the completed windows keep their shots.
+ */
+export async function refreshParts(
+  parts: AnalysisPart[],
+  retry: boolean,
+  call: {
+    post: (part: AnalysisPart, retry: boolean) => Promise<FramingResult>;
+    get: (id: string) => Promise<FramingResult>;
+    fail: (part: AnalysisPart, message: string) => string;
+  },
+  poll = false,
+): Promise<AnalysisPart[]> {
+  return Promise.all(parts.map(async part => {
+    const req = partRequest(part, retry, poll);
+    if (req.action === "skip") return part;
+    try {
+      const r = req.action === "get" ? await call.get(req.id) : await call.post(part, req.retry);
+      return {
+        ...part,
+        id: r.id ?? part.id,
+        status: r.status,
+        error: r.error ?? undefined,
+        shots: r.shots ?? part.shots,
+      };
+    } catch (e) {
+      return { ...part, status: "error", error: call.fail(part, (e as Error).message) };
+    }
+  }));
+}

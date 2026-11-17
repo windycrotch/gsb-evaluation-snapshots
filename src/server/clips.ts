@@ -15,7 +15,7 @@
 
 import type { Cue } from "../shared/transcript";
 import type { Edl } from "./edl";
-import { analysisWindows, framedPieces, sourceTime, type Shot } from "../shared/reframe";
+import { analysisWindows, framedPieces, mergeWindowShots, sourceTime, type Shot } from "../shared/reframe";
 import { DEFAULT_CAPTION_STYLE } from "../shared/captions";
 import { sameShape } from "../shared/format";
 import { addFormat, findFormat, formatView, liftView } from "../shared/formats";
@@ -357,7 +357,18 @@ export function applyFraming(target: FrameTarget): { edl: Edl; unsure: number } 
       elements.push(el);
       continue;
     }
-    const shots = parts.flatMap((p) => p.shots ?? []).filter((s) => s.to > start && s.from < end).sort((a, b) => a.from - b.from);
+    // One clip can read several stretches; join each contiguous run on its own
+    // so windows meeting at an edge keep both boundary shots and no time is
+    // doubled or left uncovered.
+    const runs: typeof parts[] = [];
+    for (const p of parts.sort((a, b) => a.from - b.from)) {
+      const run = runs.at(-1);
+      if (run && Math.abs(run.at(-1)!.to - p.from) <= 0.1) run.push(p);
+      else runs.push([p]);
+    }
+    const shots = runs.flatMap((run) =>
+      mergeWindowShots(run, Math.max(start, run[0].from), Math.min(end, run.at(-1)!.to)),
+    );
     unsure += shots.filter((s) => s.review && s.layout === "whole").length;
     elements.push(...framedPieces(el, el.duration, view.output.fps, shots, () => crypto.randomUUID()));
   }
