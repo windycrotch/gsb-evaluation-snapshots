@@ -1,0 +1,19 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+node_modules/
+separated/
+*.log
+
+# Audio files (don't ship media in the repo)
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.aac
+*.ogg
+
+# Local analysis cache / scratch
+.cache/
+*.tmp

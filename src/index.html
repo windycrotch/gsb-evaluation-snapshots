@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="it">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Par8DJ AI</title>
+    <link rel="stylesheet" href="./styles.css?v=20260604-4" />
+  </head>
+  <body>
+    <main class="app">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">🔥 il DJ che non chiede mai pause sigaretta</p>
+          <h1>Par8DJ AI</h1>
+          <p class="subtitle">
+            Tu metti i brani, ci pensa lui: mixa a tempo, in tonalità e senza far scappare la pista. 🎧🕺
+          </p>
+        </div>
+        <div class="import-card">
+          <label class="file-button">
+            Importa brani
+            <input id="fileInput" type="file" accept="audio/*" multiple />
+          </label>
+          <p>MP3, WAV, M4A e formati supportati dal browser.</p>
+        </div>
+      </header>
+
+      <section class="transport">
+        <div class="now">
+          <span class="label">In onda</span>
+          <strong id="nowTitle">Nessun brano</strong>
+          <span id="nowMeta">Carica una playlist per iniziare.</span>
+        </div>
+        <div class="controls">
+          <button id="startBtn">Start</button>
+          <button id="stopBtn" class="secondary">Stop</button>
+          <button id="skipBtn" class="secondary">Skip mix</button>
+        </div>
+        <div class="settings">
+          <label>
+            Crossfade
+            <input id="crossfadeInput" type="number" min="4" max="96" value="24" />
+            <span>s</span>
+          </label>
+          <label>
+            <input id="crossfadeAutoInput" type="checkbox" checked />
+            auto
+          </label>
+          <label>
+            curva
+            <select id="crossfadeCurveInput">
+              <option value="power" selected>Power</option>
+              <option value="smooth">Smooth</option>
+              <option value="cut">Cut</option>
+            </select>
+          </label>
+          <label>
+            <input id="smartModeInput" type="checkbox" checked />
+            scelta smart
+          </label>
+          <label>
+            <input id="radioEditInput" type="checkbox" checked />
+            radio edit
+          </label>
+          <label>
+            <input id="beatmatchInput" type="checkbox" checked />
+            beatmatch
+          </label>
+          <label class="range">
+            tolleranza
+            <input id="tempoTolInput" type="range" min="0.02" max="0.12" step="0.01" value="0.06" />
+            <span id="tempoTolVal">±6%</span>
+          </label>
+          <label>
+            <input id="bassSwapInput" type="checkbox" checked />
+            bass swap
+          </label>
+          <label>
+            <input id="levelerInput" type="checkbox" checked />
+            livella volume
+          </label>
+          <label>
+            <input id="energyArcInput" type="checkbox" checked />
+            arco energia
+          </label>
+          <label class="range">
+            picco
+            <input id="arcPeakInput" type="range" min="0.3" max="0.85" step="0.05" value="0.65" />
+            <span id="arcPeakVal">65%</span>
+          </label>
+          <label class="range">
+            peso energia
+            <input id="arcWeightInput" type="range" min="0" max="1" step="0.1" value="0.5" />
+            <span id="arcWeightVal">50%</span>
+          </label>
+        </div>
+      </section>
+
+      <section class="decks-transport">
+        <div class="deck-strip">
+          <div class="deck-strip-head">
+            <span class="deck-tag">Deck A · in onda</span>
+            <span class="deck-track" id="trackA">—</span>
+          </div>
+          <div class="platter-wrap">
+            <button class="platter" id="platterA" type="button" aria-label="Hold Deck A">
+              <span class="platter-disc">
+                <span class="platter-ring"></span>
+                <span class="platter-label">A</span>
+                <span class="platter-strobe"></span>
+              </span>
+            </button>
+            <div class="platter-hint">Hold + trascina = scratch/jog</div>
+          </div>
+          <div class="scrubber">
+            <span class="time" id="timeCurrentA">0:00</span>
+            <div class="seek" id="seekBarA">
+              <canvas class="waveform" id="waveformA" aria-hidden="true"></canvas>
+              <span class="grid" id="seekGridA"></span>
+              <i id="seekFillA"></i>
+              <u class="mark mark-in" id="markInA" data-cue="in" title="Cue in (trascina)"></u>
+              <u class="mark mark-out" id="markOutA" data-cue="out" title="Cue out (trascina)"></u>
+              <u class="mark mark-mix" id="markMixA" data-cue="mix" title="Punto di mix (trascina)"></u>
+              <b id="seekHandleA"></b>
+            </div>
+            <span class="time" id="timeTotalA">0:00</span>
+          </div>
+        </div>
+
+        <div class="deck-strip">
+          <div class="deck-strip-head">
+            <span class="deck-tag accent">Deck B · in arrivo</span>
+            <span class="deck-track" id="trackB">—</span>
+          </div>
+          <div class="platter-wrap">
+            <button class="platter" id="platterB" type="button" aria-label="Hold Deck B">
+              <span class="platter-disc">
+                <span class="platter-ring"></span>
+                <span class="platter-label">B</span>
+                <span class="platter-strobe"></span>
+              </span>
+            </button>
+            <div class="platter-hint">Hold + trascina = scratch/jog</div>
+          </div>
+          <div class="scrubber">
+            <span class="time" id="timeCurrentB">0:00</span>
+            <div class="seek" id="seekBarB">
+              <canvas class="waveform" id="waveformB" aria-hidden="true"></canvas>
+              <span class="grid" id="seekGridB"></span>
+              <i id="seekFillB"></i>
+              <u class="mark mark-in" id="markInB" data-cue="in" title="Punto di ingresso automatico — trascina per regolarlo, doppio clic per tornare automatico"></u>
+              <u class="mark mark-out" id="markOutB" data-cue="out" title="Cue out (trascina)"></u>
+              <u class="mark mark-mix" id="markMixB" data-cue="mix" title="Punto di mix (trascina)"></u>
+              <b id="seekHandleB"></b>
+            </div>
+            <span class="time" id="timeTotalB">0:00</span>
+          </div>
+        </div>
+      </section>
+
+      <div class="waveform-legend" aria-label="Legenda waveform">
+        <span><i class="section-intro"></i>Intro</span>
+        <span><i class="section-build"></i>Build</span>
+        <span><i class="section-drop"></i>Drop</span>
+        <span><i class="section-break"></i>Break</span>
+        <span><i class="section-body"></i>Body</span>
+        <span><i class="section-outro"></i>Outro</span>
+      </div>
+
+      <section class="panel mix-debug-panel" id="mixDebugPanel" hidden>
+        <div class="panel-head">
+          <h2>Decisione mix (debug)</h2>
+        </div>
+        <div id="mixDebug" class="mix-debug"></div>
+      </section>
+
+      <section class="meters">
+        <div class="deck">
+          <div class="deck-head">
+            <span class="deck-name">Deck A</span>
+            <span class="deck-db" id="deckADb">-∞ dB</span>
+          </div>
+          <div class="meter"><i id="deckAMeter"></i><b id="deckAPeak"></b></div>
+        </div>
+        <div class="deck">
+          <div class="deck-head">
+            <span class="deck-name">Deck B</span>
+            <span class="deck-db" id="deckBDb">-∞ dB</span>
+          </div>
+          <div class="meter"><i id="deckBMeter"></i><b id="deckBPeak"></b></div>
+        </div>
+      </section>
+
+      <section class="grid">
+        <article class="panel">
+          <div class="panel-head">
+            <h2>Libreria</h2>
+            <button id="addAllBtn" class="ghost">Aggiungi tutti</button>
+          </div>
+          <div id="libraryList" class="track-list empty">
+            <p>Nessun brano importato.</p>
+          </div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head">
+            <h2>Playlist live</h2>
+            <div class="panel-actions">
+              <button id="autoOrderBtn" class="ghost">Ordina set</button>
+              <button id="clearQueueBtn" class="ghost danger">Svuota</button>
+            </div>
+          </div>
+          <div id="queueList" class="track-list empty">
+            <p>Playlist vuota.</p>
+          </div>
+        </article>
+      </section>
+
+      <section class="panel midi-panel">
+        <div class="panel-head">
+          <h2>MIDI</h2>
+          <span id="midiStatus" class="midi-status">Non attivo</span>
+        </div>
+        <div id="midiMap" class="midi-map"></div>
+      </section>
+
+      <section class="panel log-panel">
+        <div class="panel-head">
+          <h2>Eventi</h2>
+          <button id="clearLogBtn" class="ghost">Pulisci</button>
+        </div>
+        <pre id="log"></pre>
+      </section>
+    </main>
+
+    <script type="module" src="./main.js?v=20260606-1"></script>
+  </body>
+</html>
