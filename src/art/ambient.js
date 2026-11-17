@@ -21,14 +21,7 @@
   }
   const rand = (a, b) => a + Math.random() * (b - a);
 
-  // ---- day / night ----
-  G.timeOfDay = function () {
-    const opt = G.state && G.state.options; if (opt && opt.dayNight === false) return { night: 0, dusk: 0 };
-    let h = G.forceHour !== undefined ? G.forceHour : (() => { const d = new Date(); return d.getHours() + d.getMinutes() / 60; })();
-    const night = h >= 20 || h < 5 ? 1 : h >= 18 ? (h - 18) / 2 : h < 7 ? 1 - (h - 5) / 2 : 0;
-    const dusk = h >= 16.5 && h < 20 ? Math.sin(Math.min(1, (h - 16.5) / 3) * Math.PI) : h >= 5 && h < 7.5 ? Math.sin(((h - 5) / 2.5) * Math.PI) * 0.7 : 0;
-    return { night: Math.max(0, Math.min(1, night)), dusk };
-  };
+  // ---- day / night: G.timeOfDay (the night/dusk phase) lives in src/core/daynight.js ----
   function dayNight(s, ow, cx, cy) {
     if (!ow.map.outdoor && ow.map.tsFile !== 'forest') return;
     const td = G.timeOfDay(); if (td.night <= 0.01 && td.dusk <= 0.01) return;

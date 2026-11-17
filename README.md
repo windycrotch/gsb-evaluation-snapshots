@@ -191,6 +191,7 @@ drivers are built on top of it:
 | `node tools/pvpfuzz.js` | Two copies of the game fight random link battles through their picks alone; every turn must match in both. |
 | `node -r ./tools/pathaudit.js tools/stepfuzz.js` | Fires every step/enter script on every walkable cell under random story states; flags anyone walking through a wall. |
 | `node tools/warpcheck.js` | Walks the warp graph and checks every exit leads back where it came from. |
+| `node tools/daynighttest.js` | Day/night clock: the readable/settable time of day, steady advance over frames indoors and out, and the per-frame cap after a long stall. |
 | `node tools/rendermap.js <Map> out.png` | Renders a whole map. `monsheet.js`, `vfxsheet.js` and `charsheet.js` do the same for Pokémon, move animations and characters. |
 
 ### Hosting

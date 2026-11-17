@@ -39,9 +39,13 @@
     }
   }
 
-  function step() {
+  // `dt` is the real time this frame represents, in ms. The day/night clock advances by it (capped
+  // inside daynight.js), so a stalled frame or a tab coming back from the background can never skip
+  // hours of sky in one step.
+  function step(dt) {
     frame++;
     G.frame = frame;
+    if (G.dayNight) G.dayNight.tick(dt);
     G.input.update();
     if (G.preStep) G.preStep();
     // tasks first (scripts), then the top scene receives input; a modal scene on top pauses the scripts
@@ -95,9 +99,13 @@
     let last = performance.now(), acc = 0;
     const STEP = 1000 / 60;
     function loop(now) {
-      acc += Math.min(100, now - last); last = now;
+      // A tab restored from the background, or a frame after a long stall, earns a single step of
+      // time, never the whole gap: rAF does not fire while hidden, so `raw` can be minutes.
+      const raw = now - last; last = now;
+      const credit = G.dayNight ? G.dayNight.credit(raw) : Math.min(raw, 100);
+      acc += Math.min(credit, 100);
       let n = 0;
-      while (acc >= STEP && n < 4) { step(); acc -= STEP; n++; }
+      while (acc >= STEP && n < 4) { step(STEP); acc -= STEP; n++; }
       if (n) { draw(surf); view.set(surf.data); ctx.putImageData(img, 0, 0); }
       requestAnimationFrame(loop);
     }

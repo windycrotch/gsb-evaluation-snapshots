@@ -32,8 +32,8 @@
     }
     if (G.titleScreen && !m && !window.HEADLESS) { (G.playIntro || G.titleScreen)(); return; }
     G.startGame(st);
-    // dev helpers: ?battle=SPECIES&lv=N starts a wild battle with a sample party; ?hour=H forces time of day
-    if (param('hour')) G.forceHour = +param('hour');
+    // dev helpers: ?battle=SPECIES&lv=N starts a wild battle with a sample party; ?hour=H sets the time of day
+    if (param('hour')) G.setTimeOfDay(+param('hour') / 24);
     if (param('battle')) {
       G.state.party.push(new G.Mon(param('mon') || 'CHARMANDER', +(param('plv') || 12)));
       G.bag.add('POKE_BALL', 5);
