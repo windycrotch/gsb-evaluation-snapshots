@@ -1,0 +1,7 @@
+node_modules
+
+dist
+yarn-error.log
+
+# Ignore macOS Desktop services files.
+.DS_Store
