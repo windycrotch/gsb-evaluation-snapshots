@@ -41,6 +41,7 @@ export function walkMove(ctx: MovementContext, dt: number): void {
       const scale = cap / speed;
       ctx.velocity.x *= scale;
       ctx.velocity.z *= scale;
+      ctx.cappedBy = 'ground';
     }
   }
 

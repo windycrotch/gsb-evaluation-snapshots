@@ -20,9 +20,10 @@ import type { LadderVolume, TraceResult } from '../physics/Collision/Collision.t
 import type { World } from '../physics/World/World.js';
 import type { Settings } from '../settings/Settings.js';
 
-import { type InputState, type MovementContext } from './MovementContext.js';
+import { type InputState, type MovementContext, type SpeedBreakdown, type SpeedCapLayer } from './MovementContext.js';
 import { DUCK_MAXS, DUCK_MINS, STAND_MAXS, STAND_MINS, updateDuck } from './Duck/Duck.js';
 import { DUCK_SPEED_IDEAL, EYE_DUCK, EYE_STAND } from './Duck/Duck.config.js';
+import { currentMaxSpeed } from './CurrentMaxSpeed/CurrentMaxSpeed.js';
 import { checkLadder, ladderMove } from './Ladder/Ladder.js';
 import { checkJump } from './Jump/Jump.js';
 import { checkVelocity } from './CheckVelocity/CheckVelocity.js';
@@ -73,6 +74,23 @@ export class PlayerController implements MovementContext {
   surfing = false;
   /** True from the moment surfing starts until the next real ground landing. */
   surfedSinceGrounded = false;
+  /** Which speed layer clamped this tick's velocity; see speedBreakdown(). */
+  cappedBy: SpeedCapLayer = 'none';
+
+  // True while the perf air-speed ceiling is actually in effect this tick:
+  // perf.enabled, airborne, not surfing, and no surf contact so far in this
+  // flight. Read through the airSpeedCapActive getter below.
+  private airSpeedCap = false;
+
+  /**
+   * Whether this tick's airborne speed ceiling (`settings.perf.maxAirSpeed`)
+   * is in effect. True only while airborne and not surfing (and not on a
+   * ladder) with `settings.perf.enabled` — and false for the remainder of a
+   * flight once any surf face has been touched, until the next real takeoff.
+   */
+  get airSpeedCapActive(): boolean {
+    return this.airSpeedCap;
+  }
 
   // Interpolation snapshots (position + eye height per tick).
   prevPos: Vec3;
@@ -172,6 +190,23 @@ export class PlayerController implements MovementContext {
 
   get horizontalSpeed(): number {
     return length2D(this.velocity);
+  }
+
+  /**
+   * What limited the player's speed this tick, for HUDs and diagnostics.
+   * `horizontal` is `horizontalSpeed`, `maxGround` is the ground ceiling for
+   * the current posture (`currentMaxSpeed`, i.e. run/walk/crouch cropped by
+   * the duck amount and stamina), and `cappedBy` says which layer actually
+   * scaled the velocity down this tick: 'ground' (noPrestrafe's ground clamp
+   * in WalkMove), 'air' (perf's maxAirSpeed ceiling in AirMove), or 'none'.
+   * A tick can only be clamped by one layer; the flag resets every tick.
+   */
+  speedBreakdown(): SpeedBreakdown {
+    return {
+      horizontal: this.horizontalSpeed,
+      maxGround: currentMaxSpeed(this),
+      cappedBy: this.cappedBy,
+    };
   }
 
   // -- Input ----------------------------------------------------------------
@@ -274,6 +309,8 @@ export class PlayerController implements MovementContext {
     this.groundTicksSinceLanding = 0;
     this.hasJumpedBefore = false;
     this.surfedSinceGrounded = false;
+    this.cappedBy = 'none';
+    this.airSpeedCap = false;
     set(this.landingVelocity, 0, 0, 0);
     this.lastHopQuality = null;
   }
@@ -283,6 +320,9 @@ export class PlayerController implements MovementContext {
   tick(dt: number): void {
     copy(this.prevPos, this.currPos);
     this.prevEye = this.currEye;
+    // Per-tick diagnostics: recomputed from scratch below.
+    this.cappedBy = 'none';
+    this.airSpeedCap = false;
 
     // Space stays pressed for as long as it's physically held; a queued
     // wheel notch is consumed for exactly this one tick and then gone,
@@ -331,7 +371,7 @@ export class PlayerController implements MovementContext {
           walkMove(this, dt);
           this.groundTicksSinceLanding++;
         } else {
-          airMove(this, dt);
+          this.airSpeedCap = airMove(this, dt);
         }
         categorizePosition(this);
         checkVelocity(this.velocity);

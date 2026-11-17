@@ -31,6 +31,19 @@ export interface InputState {
   reset: boolean;
 }
 
+/** Which speed layer clamped the velocity this tick: the ground cap, the air ceiling, or neither. */
+export type SpeedCapLayer = 'none' | 'ground' | 'air';
+
+/** Result of PlayerController.speedBreakdown(). */
+export interface SpeedBreakdown {
+  /** Current horizontal speed — same value as PlayerController.horizontalSpeed. */
+  horizontal: number;
+  /** Ground speed cap for the current posture/stance — same value as currentMaxSpeed(). */
+  maxGround: number;
+  /** Layer that actually clamped the velocity this tick. */
+  cappedBy: SpeedCapLayer;
+}
+
 export interface MovementContext {
   readonly world: World;
   readonly settings: Settings;
@@ -63,6 +76,12 @@ export interface MovementContext {
   surfing: boolean;
   /** True from the moment surfing starts until the next real ground landing. */
   surfedSinceGrounded: boolean;
+  /**
+   * Which speed layer clamped this tick's velocity. Reset to 'none' at the
+   * start of every tick; set by WalkMove (ground cap) and AirMove (air
+   * ceiling) when they actually scale the velocity down.
+   */
+  cappedBy: SpeedCapLayer;
 
   /** Position snapshot from the start of this tick, for blocked-move detection. */
   prevPos: Vec3;

@@ -88,6 +88,8 @@ world.ladders.push({
 | `surfing` | True on steep-but-surfable slopes |
 | `onLadder` | Current `LadderVolume` or `null` |
 | `horizontalSpeed` | `length2D(velocity)` — the HUD number |
+| `airSpeedCapActive` | True on ticks where the perf air-speed ceiling (`perf.maxAirSpeed`) is actually in effect: airborne, not surfing, `perf.enabled` — and false for the rest of a flight after touching a surf face |
+| `speedBreakdown()` | `{ horizontal, maxGround, cappedBy }` — current horizontal speed, the ground ceiling for the current stance (`currentMaxSpeed`), and which layer clamped this tick: `'none'`, `'ground'`, or `'air'` |
 | `eyeHeight` | Eye height for the current duck amount (eased like CS's `SetDuckedEyeOffset`) |
 | `stamina` | Fatigue pool in CS units, 0–`settings.stamina.max` (only when `settings.stamina.enabled`) |
 | `lastHopQuality` | `'perfect'` / `'normal'` / `null` (only when `settings.perf.enabled`) |
@@ -144,8 +146,8 @@ Everything is exported from `@unsurf/cs-movement`.
 
 - `PlayerController` — the main class. Constructor: `(world, settings, spawn, opts?)`
 - `PlayerOptions` — `{ log?: (msg: string) => void }`
-- Methods: `tick(dt)`, `respawn()`, `bindInput(el)`, `tickHistoryText()`
-- Properties: `origin`, `velocity`, `yaw`, `pitch`, `onGround`, `ducked`, `surfing`, `onLadder`, `input`, `stamina`, `lastHopQuality`, `horizontalSpeed`, `eyeHeight`, `mins`, `maxs`, `prevPos`/`currPos`, `prevEye`/`currEye`, `landingVelocity`, `landPunch`
+- Properties: `origin`, `velocity`, `yaw`, `pitch`, `onGround`, `ducked`, `surfing`, `onLadder`, `input`, `stamina`, `lastHopQuality`, `horizontalSpeed`, `airSpeedCapActive`, `eyeHeight`, `mins`, `maxs`, `prevPos`/`currPos`, `prevEye`/`currEye`, `landingVelocity`, `landPunch`
+- Methods: `tick(dt)`, `respawn()`, `bindInput(el)`, `tickHistoryText()`, `speedBreakdown()`
 
 ### World & Collision
 

@@ -17,7 +17,12 @@ import { computeWish } from '../WishDir/WishDir.js';
 // speed you build that way can't be CASHED IN on the ground — see
 // WalkMove.ts. perf.enabled DOES touch this function (see below) — real
 // bhop-assist chasemod servers cap air speed itself, not just the takeoff.
-export function airMove(ctx: MovementContext, dt: number): void {
+//
+// Returns whether the perf air-speed ceiling was in effect for this tick
+// (surfaced as PlayerController.airSpeedCapActive). True whenever perf is
+// enabled and the flight hasn't touched a surf face since the last takeoff —
+// even on ticks where the velocity was already under the ceiling.
+export function airMove(ctx: MovementContext, dt: number): boolean {
   const wishspeed = computeWish(ctx);
   airAccelerate(
     ctx.velocity,
@@ -46,13 +51,16 @@ export function airMove(ctx: MovementContext, dt: number): void {
   // otherwise air-strafe gain between hops pushes the observed peak well
   // past the intended ceiling. Surfing (and anything carried from it) is
   // exempt — it's a different physics path and is supposed to exceed this.
-  if (ctx.settings.perf.enabled && !ctx.surfing && !ctx.surfedSinceGrounded) {
+  const capActive = ctx.settings.perf.enabled && !ctx.surfing && !ctx.surfedSinceGrounded;
+  if (capActive) {
     const speed = length2D(ctx.velocity);
     const capped = applyAirSpeedCeiling(speed, ctx.settings.perf.maxAirSpeed, AIR_SPEED_CEILING_SOFTNESS);
     if (capped < speed) {
       const scale = capped / speed;
       ctx.velocity.x *= scale;
       ctx.velocity.z *= scale;
+      ctx.cappedBy = 'air';
     }
   }
+  return capActive;
 }

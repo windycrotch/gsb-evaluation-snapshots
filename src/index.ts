@@ -38,3 +38,4 @@ export * from './player/TryPlayerMove/TryPlayerMove.config.js';
 export * from './player/CategorizePosition/CategorizePosition.config.js';
 export * from './player/MouseInput/MouseInput.config.js';
 export * from './player/PlayerController.js';
+export type { InputState, MovementContext, SpeedBreakdown, SpeedCapLayer } from './player/MovementContext.js';
