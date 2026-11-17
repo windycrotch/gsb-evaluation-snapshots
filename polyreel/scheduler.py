@@ -105,7 +105,10 @@ def plan(playing: list[Item], queued: list[Item], width: float, height: float,
             quick = solve(_items(current), width, height, min_area, prev, effort=0, crop=crop)
             if quick.valid:
                 final = quick
-        result.layout = final
+        if final.valid:
+            result.layout = final
+        # Neither search met the size limit: leave the empty layout in place
+        # rather than apply one that breaks it (the wall stays as it was).
     return result
 
 
