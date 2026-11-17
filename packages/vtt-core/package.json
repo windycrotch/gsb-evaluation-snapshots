@@ -1,0 +1,30 @@
+{
+  "name": "@react-av/vtt-core",
+  "version": "0.0.8",
+  "private": false,
+  "description": "W3C specification compliant WebVTT implementation.",
+  "main": "dist/cjs/index.js",
+  "module": "dist/esm/index.js",
+  "files": [
+    "dist/cjs",
+    "dist/esm",
+    "src"
+  ],
+  "scripts": {
+    "build:cjs": "tsc --outDir dist/cjs --module commonjs",
+    "build:esm": "tsc --outDir dist/esm --module esnext",
+    "build": "pnpm build:cjs && pnpm build:esm",
+    "dev": "tsc --watch"
+  },
+  "keywords": [],
+  "author": "Daniel Wykerd <daniel@wykerd.dev>",
+  "license": "MIT",
+  "repository": {
+    "directory": "packages/vtt-core",
+    "type": "git",
+    "url": "https://github.com/Wykerd/react-av.git"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2"
+  }
+}
