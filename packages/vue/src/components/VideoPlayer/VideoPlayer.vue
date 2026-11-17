@@ -1,20 +1,20 @@
 <script setup lang="ts">
+import type { Chapter, ThumbnailState, Track, VideoSource } from '@vue-player/core'
+import { isPiPSupported, loadThumbnailVtt } from '@vue-player/core'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import type { Chapter, ThumbnailCue, Track, VideoSource } from '@vue-player/core'
-import { isPiPSupported, parseThumbnailVtt } from '@vue-player/core'
 import { usePlayer } from '../../composables/usePlayer'
-import IcoPlay from '../icons/IcoPlay.vue'
-import IcoPause from '../icons/IcoPause.vue'
-import VpPlayButton from '../controls/VpPlayButton.vue'
-import VpTimeline from '../controls/VpTimeline.vue'
-import VpTimeDisplay from '../controls/VpTimeDisplay.vue'
-import VpVolumeControl from '../controls/VpVolumeControl.vue'
-import VpSubtitlesButton from '../controls/VpSubtitlesButton.vue'
-import VpPiPButton from '../controls/VpPiPButton.vue'
 import VpFullscreenButton from '../controls/VpFullscreenButton.vue'
+import VpPiPButton from '../controls/VpPiPButton.vue'
+import VpPlayButton from '../controls/VpPlayButton.vue'
 import VpSettingsButton from '../controls/VpSettingsButton.vue'
-import VpLoadingOverlay from '../overlays/VpLoadingOverlay.vue'
+import VpSubtitlesButton from '../controls/VpSubtitlesButton.vue'
+import VpTimeDisplay from '../controls/VpTimeDisplay.vue'
+import VpTimeline from '../controls/VpTimeline.vue'
+import VpVolumeControl from '../controls/VpVolumeControl.vue'
+import IcoPause from '../icons/IcoPause.vue'
+import IcoPlay from '../icons/IcoPlay.vue'
 import VpErrorOverlay from '../overlays/VpErrorOverlay.vue'
+import VpLoadingOverlay from '../overlays/VpLoadingOverlay.vue'
 
 interface Props {
   src?: string
@@ -157,12 +157,25 @@ watch(
 )
 
 // ─── Thumbnails ───
-const thumbnailCues = ref<ThumbnailCue[]>([])
+// Status-aware state: the timeline needs to distinguish "nothing configured"
+// from "the VTT request failed" so it can show a failure hint rather than a
+// blank preview.
+const thumbnailState = ref<ThumbnailState>({ status: 'none', cues: [] })
+let thumbnailRequestId = 0
 
 watch(
   () => props.thumbnails,
   async (url) => {
-    thumbnailCues.value = url ? await parseThumbnailVtt(url) : []
+    const requestId = ++thumbnailRequestId
+    if (!url) {
+      thumbnailState.value = { status: 'none', cues: [] }
+      return
+    }
+    thumbnailState.value = { status: 'loading', cues: [] }
+    const result = await loadThumbnailVtt(url)
+    // A newer URL may have been requested while this one was in flight.
+    if (requestId !== thumbnailRequestId) return
+    thumbnailState.value = result
   },
   { immediate: true },
 )
@@ -350,7 +363,7 @@ function onTouchStart(e: TouchEvent) {
         :duration="state.duration"
         :buffered="state.buffered"
         :chapters="chapters"
-        :thumbnail-cues="thumbnailCues.length ? thumbnailCues : undefined"
+        :thumbnail-state="thumbnailState"
         @seek="controls.seek"
         @seekstart="onSeekStart"
         @seekend="onSeekEnd"

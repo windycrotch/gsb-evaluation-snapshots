@@ -335,6 +335,9 @@
   overflow: hidden;
   flex-shrink: 0;
   background: var(--vp-timeline-bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .vp-thumbnail-img {
@@ -347,6 +350,64 @@
 
 .vp-thumbnail-sprite {
   background-repeat: no-repeat;
+}
+
+/* Shimmer shown while the sprite/image request is in flight */
+.vp-thumbnail-loading {
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(
+    100deg,
+    rgba(255, 255, 255, 0.04) 30%,
+    rgba(255, 255, 255, 0.12) 50%,
+    rgba(255, 255, 255, 0.04) 70%
+  );
+  background-size: 200% 100%;
+  animation: vp-thumbnail-shimmer 1.2s linear infinite;
+}
+
+@keyframes vp-thumbnail-shimmer {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: -100% 0;
+  }
+}
+
+/* Explicit failure state: the VTT parsed but a sprite/image request was
+   blocked (e.g. CORS) or is unreachable. VTT-level failures hide the preview
+   entirely instead of using this style. */
+.vp-thumbnail-preview--error {
+  background: rgba(255, 107, 107, 0.08);
+  border: 1px solid rgba(255, 107, 107, 0.35);
+}
+
+.vp-thumbnail-failure {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  height: 100%;
+  padding: 8px;
+  text-align: center;
+}
+
+.vp-thumbnail-failure-icon {
+  width: 20px;
+  height: 20px;
+  color: #ff8585;
+  flex-shrink: 0;
+}
+
+.vp-thumbnail-failure-text {
+  font-size: 11px;
+  line-height: 1.35;
+  font-weight: 500;
+  color: #ff9b9b;
+  white-space: normal;
 }
 
 /* ─── Volume ─── */

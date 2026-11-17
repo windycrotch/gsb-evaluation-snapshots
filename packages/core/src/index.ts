@@ -1,30 +1,37 @@
+export { createDashAdapter } from './adapters/dash'
+
+export { createHlsAdapter } from './adapters/hls'
+export { createNativeAdapter } from './adapters/native'
+
+export type { NativeAdapter } from './adapters/native'
 export type {
-  PlayerState,
+  Chapter,
   PlayerError,
   PlayerOptions,
-  VideoSource,
+  PlayerState,
   Quality,
-  Track,
-  Chapter,
   ThumbnailCue,
+  ThumbnailState,
+  ThumbnailStatus,
+  Track,
+  VideoSource,
 } from './types'
 
-export { detectSourceType } from './utils/source'
-export type { SourceType } from './utils/source'
-
-export { formatTime, parseTimecode } from './utils/time'
-export { parseThumbnailVtt, parseVttText } from './utils/parseThumbnailVtt'
-
 export {
-  isFullscreenSupported,
-  isPiPSupported,
   enterFullscreen,
   exitFullscreen,
   getFullscreenElement,
+  isFullscreenSupported,
+  isPiPSupported,
 } from './utils/fullscreen'
 
-export { createNativeAdapter } from './adapters/native'
-export type { NativeAdapter } from './adapters/native'
+export {
+  findThumbnailCue,
+  loadThumbnailVtt,
+  parseThumbnailVtt,
+  parseVttText,
+} from './utils/parseThumbnailVtt'
+export { detectSourceType } from './utils/source'
 
-export { createHlsAdapter } from './adapters/hls'
-export { createDashAdapter } from './adapters/dash'
+export type { SourceType } from './utils/source'
+export { formatTime, parseTimecode } from './utils/time'

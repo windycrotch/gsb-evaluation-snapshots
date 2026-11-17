@@ -1,4 +1,4 @@
-export type { PlayerState, PlayerError, PlayerOptions } from './player'
-export type { VideoSource, Quality, Track } from './source'
 export type { Chapter } from './chapter'
-export type { ThumbnailCue } from './thumbnail'
+export type { PlayerError, PlayerOptions, PlayerState } from './player'
+export type { Quality, Track, VideoSource } from './source'
+export type { ThumbnailCue, ThumbnailState, ThumbnailStatus } from './thumbnail'

@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { ref } from 'vue'
 import { VideoPlayer } from '@vue-player/vue'
+import { ref } from 'vue'
 
 const testTracks = [
   {
@@ -42,6 +42,50 @@ const testChapters = [
 ]
 
 const active = ref(sources[0])
+
+// Thumbnail configuration options for manual verification.
+// The HLS stream is ~635s long; the sample VTTs only cover the first
+// 100 seconds on purpose, so hovering past the last cue exercises the
+// "nearest valid frame" / hidden-preview boundary paths.
+const thumbnailOptions = [
+  {
+    label: '关闭缩略图',
+    url: '',
+    hint: '无预览框，时间与章节提示照常显示',
+  },
+  {
+    label: '远程单图（原有入口）',
+    url: '/thumbnails.vtt',
+    hint: '逐 cue 远程图片，跨源图片加载失败时显示「缩略图不可用」',
+  },
+  {
+    label: '本地雪碧图 · 合法/非法混合',
+    url: '/thumbnails-mixed.vtt',
+    hint: '合法坐标裁切对应分块；非法/缺失坐标退化为整图；缺失图片显示失败提示',
+  },
+  {
+    label: 'VTT 地址不可达',
+    url: 'https://thumbnails.invalid/thumbnails.vtt',
+    hint: '域名保留不可解析（或跨域被拦截）：fetch 失败，预览区隐藏，进度条与章节提示照常工作',
+  },
+  {
+    label: 'VTT 内容为空',
+    url: '/thumbnails-empty.vtt',
+    hint: '返回空内容：预览区隐藏，播放与拖动不受影响',
+  },
+  {
+    label: '全部片段非法',
+    url: '/thumbnails-invalid.vtt',
+    hint: '无任何可用 cue：预览区隐藏',
+  },
+  {
+    label: '区间从 20s 开始（前段空白）',
+    url: '/thumbnails-shifted.vtt',
+    hint: '0–20s 落在首个片段之前：隐藏预览；进入区间后正常显示',
+  },
+]
+
+const activeThumbnail = ref(thumbnailOptions[2])
 </script>
 
 <template>
@@ -63,11 +107,43 @@ const active = ref(sources[0])
             :src="active.src"
             :chapters="testChapters"
             :tracks="testTracks"
-            :thumbnails="active.src === sources[0].src ? '/thumbnails.vtt' : undefined"
+            :thumbnails="activeThumbnail.url || undefined"
             :keyboard="true"
             @error="console.error('player error', $event)"
           />
         </div>
+
+        <section class="card verify-card">
+          <h3 class="card-title">手动验收要点</h3>
+          <ul class="verify-list">
+            <li>
+              <strong>混合样例</strong>
+              ：在进度条 0–30s 悬停，预览依次为雪碧图分块 1/2/3；30–60s 三段非法坐标均显示
+              <strong>整张雪碧图</strong>
+              而非错位裁切。
+            </li>
+            <li>
+              60–70s 的图片不存在，预览区显示
+              <strong>失败提示</strong>
+              ，播放与拖动不中断。
+            </li>
+            <li>
+              恰好悬停在 10s / 20s 等片段
+              <strong>结束时刻</strong>
+              时，命中下一个片段。
+            </li>
+            <li>
+              100s 之后（视频约 635s）无缩略图区间，预览回退到
+              <strong>最近有效片段</strong>
+              （分块 8），不出现越界空白。
+            </li>
+            <li>
+              切换到 VTT 不可达 / 空内容 / 全非法后，
+              <strong>预览区隐藏</strong>
+              ，时间与章节提示、拖动照常工作。
+            </li>
+          </ul>
+        </section>
       </div>
 
       <aside class="sidebar">
@@ -84,6 +160,22 @@ const active = ref(sources[0])
               {{ s.label }}
             </button>
           </div>
+        </section>
+
+        <section class="card">
+          <h3 class="card-title">Thumbnails</h3>
+          <div class="source-list">
+            <button
+              v-for="opt in thumbnailOptions"
+              :key="opt.url || 'none'"
+              class="source-btn"
+              :class="{ active: activeThumbnail.label === opt.label }"
+              @click="activeThumbnail = opt"
+            >
+              {{ opt.label }}
+            </button>
+          </div>
+          <p class="card-hint">{{ activeThumbnail.hint }}</p>
         </section>
 
         <section class="card">
@@ -294,6 +386,26 @@ body {
   border-color: rgba(61, 214, 140, 0.4);
   background: rgba(61, 214, 140, 0.08);
   color: var(--pg-accent);
+}
+
+/* ─── Verification checklist ─── */
+.verify-card {
+  gap: 10px;
+}
+
+.verify-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-left: 18px;
+  color: var(--pg-text-2);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.verify-list strong {
+  color: var(--pg-text-1);
+  font-weight: 600;
 }
 
 /* ─── Code block ─── */

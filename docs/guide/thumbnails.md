@@ -94,15 +94,32 @@ WEBVTT
 frame_000.jpg#xywh=0,0,160,90
 ```
 
+## Failure Handling and Boundaries
+
+The preview degrades predictably when assets or data are imperfect:
+
+- **Cross-origin / unreachable image** — if the VTT parses but a sprite or image request is blocked (for example by CORS), the preview shows an explicit failure hint with an alert icon instead of a blank box. Playback, seeking and the time/chapter tooltip are unaffected.
+- **Missing or invalid `xywh` fragment** — non-numeric, negative or zero-sized coordinates never produce a mis-cropped frame. The cue falls back to displaying the whole image.
+- **Unreachable, empty or fully invalid VTT** — when the WebVTT file cannot be fetched, returns an empty body, or contains no usable cue, the preview area is hidden entirely. The timeline, seek behaviour and chapter hints keep working.
+- **Half-open time intervals** — a hover position landing exactly on a cue's end time matches the *next* cue (`[start, end)` semantics).
+- **Out-of-range positions** — positions before the first cue hide the preview; positions past the last cue (including videos whose duration exceeds the thumbnail span) show the nearest valid frame rather than an out-of-range cue.
+
 ## ThumbnailCue Type
 
-If you need to parse the VTT manually or generate cues programmatically, use the `parseThumbnailVtt` utility from `@vue-player/core`:
+If you need to parse the VTT manually or generate cues programmatically, use the thumbnail utilities from `@vue-player/core`. `loadThumbnailVtt` also reports the load status, so you can distinguish "not configured" from "failed to load":
 
 ```ts
-import { parseThumbnailVtt } from '@vue-player/core'
+import { findThumbnailCue, loadThumbnailVtt } from '@vue-player/core'
 
-const cues = await parseThumbnailVtt('https://example.com/thumbnails.vtt')
+const { status, cues } = await loadThumbnailVtt('https://example.com/thumbnails.vtt')
+// status: 'none' | 'loading' | 'ready' | 'error'
+
+if (status === 'ready') {
+  const cue = findThumbnailCue(cues, 12.5) // boundary-safe cue lookup
+}
 ```
+
+The legacy `parseThumbnailVtt(url)` helper is retained; it resolves directly to the cue array (empty on any failure).
 
 Each returned cue has the following shape:
 
