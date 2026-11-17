@@ -1,0 +1,48 @@
+# Rampart — GitLab CI template.
+#
+# `test` runs the suite + the reliability benchmark (hard gate) on every push.
+# `rampart-scan` is a manual, copy-ready job that runs an authorized assessment of YOUR target
+# and publishes the SARIF + report bundle as artifacts. Only scan assets you are authorized to test.
+
+stages:
+  - test
+  - scan
+
+rampart-tests:
+  stage: test
+  image: python:3.12-slim
+  script:
+    - python -m pip install --require-hashes -r requirements/ci.txt   # hash-pinned test tooling
+    - python -m pip install --no-deps --no-build-isolation -e .
+    - python -m pytest -q
+    - python benchmarks/run_benchmark.py   # exits non-zero on any false positive/negative
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+
+# --- Copy into your own project to scan an authorized target (set $RAMPART_TARGET) ---
+rampart-scan:
+  stage: scan
+  image: python:3.12-slim
+  rules:
+    - when: manual
+      allow_failure: true
+  variables:
+    RAMPART_TARGET: "https://staging.example.internal"   # override in CI/CD variables
+    RAMPART_VERSION: "1.2.0"
+  script:
+    # Install a pinned release wheel (python:*-slim images have no git). Bump the version to upgrade.
+    - pip install "https://github.com/NitinReddy-A/Rampart/releases/download/v${RAMPART_VERSION}/rampart_appsec-${RAMPART_VERSION}-py3-none-any.whl"
+    - >
+      python -m rampart test
+      --scope-file rampart.scope.yaml
+      --target "$RAMPART_TARGET"
+      --crawl
+      --report sarif,md,json
+      --work-dir .rampart
+      --ci --fail-on high
+  artifacts:
+    when: always
+    paths:
+      - .rampart/reports/
+    expire_in: 30 days

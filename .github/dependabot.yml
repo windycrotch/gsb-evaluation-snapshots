@@ -1,0 +1,26 @@
+version: 2
+updates:
+  # Keep the actions used by CI, release, and the composite action up to date.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # Only dev/build/CI tooling lives here; Rampart's core has no runtime dependencies. The
+  # hash-locked files (requirements-dev.txt, requirements/*.txt) are uv-compiled from their
+  # requirements/*.in sources, and Dependabot re-locks them with their hashes.
+  - package-ecosystem: pip
+    directories: ["/", "/requirements"]
+    schedule:
+      interval: weekly
+    groups:
+      python:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly

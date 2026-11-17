@@ -1,0 +1,429 @@
+"""Supervisor — the phase state machine (blueprint sections 9, 10).
+
+Deterministic control flow with mandatory order and gates: recon -> map -> hypothesize ->
+test -> validate. The supervisor is the only component that decides "what to test next",
+always subject to the policy engine. It keeps a PTT-like plan (the hypothesis list with
+status) as auditable working memory rather than a free-text scratchpad.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+from ..agents import run_planner
+from ..orchestration import (
+    EscalationBudget,
+    Task,
+    TaskGraph,
+    escalation_identity,
+    follow_ups,
+    run_graph,
+)
+from ..runner import ProbeRunner
+from ..scanners import misconfig_checks, security_headers_check, sensitive_files_check
+from ..schemas.finding import State
+from ..util import endpoint_key, gen_id, now_iso
+from .test_worker import BolaIdorWorker
+from .web_worker import WEB_CLASSES, WebWorker
+
+
+@dataclass
+class ScanResult:
+    findings: list = field(default_factory=list)
+    hypotheses: list = field(default_factory=list)
+    phase_log: list = field(default_factory=list)
+    endpoints_tested: int = 0
+    tested_endpoints: set = field(default_factory=set, repr=False)
+    classes_tested: list = field(default_factory=list)
+    scanner_runs: list = field(default_factory=list)
+    plan: dict = field(default_factory=dict)
+    correlation: object = None
+    exploit_proofs: list = field(default_factory=list)
+    # False when the run could not actually assess the target (unreachable, or every request
+    # blocked by policy) — a "0 findings" result must never be mistaken for a clean bill of health.
+    complete: bool = True
+    incomplete_reason: str = ""
+
+    def mark_incomplete(self, reason: str) -> None:
+        if self.complete:
+            self.complete = False
+            self.incomplete_reason = reason
+
+
+class Supervisor:
+    # Classes that send writes/active probes — only tested when --active is set.
+    ACTIVE_CLASSES = {"MASS_ASSIGNMENT", "GRAPHQL", "XXE"}
+
+    def __init__(
+        self,
+        pipeline,
+        evidence_store,
+        session_manager,
+        validator,
+        intel,
+        appmodel,
+        host,
+        port,
+        scheme,
+        target_url,
+        application,
+        scanners=None,
+        active=False,
+        max_workers=None,
+        escalate=False,
+        escalation_caps=None,
+    ):
+        self.pipeline = pipeline
+        self.evidence = evidence_store
+        self.sessions = session_manager
+        self.validator = validator
+        self.intel = intel
+        self.appmodel = appmodel
+        self.host = host
+        self.port = port
+        self.scheme = scheme
+        self.target_url = target_url
+        self.application = application
+        self.scanners = scanners or []
+        self.active = active
+        # Thread-pool cap for the parallel hypothesis fan-out. The per-host rate limit and
+        # total-request budget remain the real throttle on traffic; this only bounds threads.
+        # Default: the scope's max_concurrent_workers (fallback 4) so a sequential-equivalent
+        # run stays polite, while an operator can dial it up for the "hundreds of agents" case.
+        if max_workers is None:
+            limits = getattr(getattr(pipeline, "scope", None), "limits", None)
+            max_workers = getattr(limits, "max_concurrent_workers", 4) or 4
+        self.max_workers = max(1, int(max_workers))
+        # Finding-driven escalation: a validated finding deterministically spawns bounded,
+        # deduped, oracle-proven follow-up tests. Off by default; every cap is enforced in
+        # EscalationBudget so this can be dialed up without any risk of runaway fan-out.
+        caps = escalation_caps or {}
+        self.escalation = EscalationBudget(
+            enabled=bool(escalate),
+            max_depth=caps.get("max_depth", 2),
+            max_total=caps.get("max_total", 24),
+            max_per_finding=caps.get("max_per_finding", 6),
+        )
+
+    def _log(self, result, phase, msg):
+        result.phase_log.append({"ts": now_iso(), "phase": phase, "msg": msg})
+
+    def _runner(self, phase, role="test-worker", profile="supervisor"):
+        return ProbeRunner(
+            self.pipeline,
+            self.evidence,
+            self.pipeline.engagement_id,
+            self.host,
+            self.port,
+            self.scheme,
+            actor_role=role,
+            actor_profile=profile,
+            phase=phase,
+        )
+
+    def _worker_for(self, vuln_class):
+        if vuln_class in WEB_CLASSES:
+            return WebWorker(
+                self._runner("test", profile=vuln_class),
+                application=self.application,
+                environment="authorized",
+            )
+        if vuln_class == "IDOR/BOLA":
+            return BolaIdorWorker(
+                self._runner("test", profile="bola-idor"),
+                application=self.application,
+                environment="authorized",
+            )
+        return None
+
+    def run(self) -> ScanResult:
+        result = ScanResult()
+
+        # Phase: recon / liveness (Tier 0)
+        recon = self._runner("recon")
+        live = recon.get(
+            "/", session=None, payload_class="benign-read", rationale="liveness probe", summary="liveness"
+        )
+        if live.executed:
+            self._log(result, "recon", f"liveness GET / -> {live.status}")
+        else:
+            why = live.blocked_reason or "blocked"
+            self._log(result, "recon", f"liveness GET / -> not executed ({why})")
+            if why.startswith("executor error"):
+                # The target did not answer at all: every further probe would fail the same way,
+                # so stop here and report the run as incomplete instead of "0 findings".
+                result.mark_incomplete(f"target unreachable: {why[len('executor error: ') :] or why}")
+                self._log(result, "recon", "target unreachable — DAST aborted (scan incomplete)")
+                return result
+
+        # Phase: map (already built) — record surface
+        ownable = self.appmodel.ownable_endpoints()
+        self._log(
+            result,
+            "map",
+            f"{len(self.appmodel.endpoints)} endpoints, {len(ownable)} ownable, "
+            f"{len(self.appmodel.principals)} seeded principals",
+        )
+
+        # Phase: built-in safe checks (security misconfiguration — observation IS the oracle)
+        misc_runner = self._runner("test", profile="misconfig")
+        misc_findings = security_headers_check(misc_runner, "/", self.target_url, self.application)
+        misc_findings += misconfig_checks(
+            misc_runner, self.appmodel, self.target_url, self.application, self.sessions
+        )
+        misc_findings += sensitive_files_check(misc_runner, self.target_url, self.application)
+        result.findings.extend(misc_findings)
+        self._log(
+            result, "test", f"built-in misconfiguration checks produced {len(misc_findings)} finding(s)"
+        )
+
+        # Phase: hypotheses — access-control (LLM/deterministic) + input-fuzzing (deterministic enum)
+        appmodel_d = self.appmodel.to_dict()
+        hyps = list(self.intel.propose_hypotheses(appmodel_d) or [])
+        hyps += list(self.intel.propose_web_hypotheses(appmodel_d) or [])
+        # Provider output is untrusted: keep only well-formed hypotheses with a string class.
+        hyps = [h for h in hyps if isinstance(h, dict) and isinstance(h.get("vuln_class"), str)]
+        if not self.active:
+            hyps = [h for h in hyps if h.get("vuln_class") not in self.ACTIVE_CLASSES]
+        for h in hyps:
+            h.setdefault("id", gen_id("hyp"))
+            h["status"] = "planned"
+        result.hypotheses = hyps
+        classes = sorted({h["vuln_class"] for h in hyps})
+        result.classes_tested = classes
+        self._log(
+            result,
+            "hypothesize",
+            f"{len(hyps)} hypothesis(es) across {len(classes)} class(es) [{', '.join(classes)}] "
+            f"via {self.intel.name}",
+        )
+
+        # Phase: plan — the planner agent prioritises classes (reasoning backend; deterministic fallback)
+        plan = run_planner(self.intel, appmodel_d, result.scanner_runs, classes)
+        if not isinstance(plan, dict):
+            plan = {"order": classes, "notes": "", "steps": []}
+        plan["order"] = [c for c in (plan.get("order") or classes) if isinstance(c, str)] or classes
+        result.plan = plan
+        order = {c: i for i, c in enumerate(plan.get("order", classes))}
+        hyps.sort(key=lambda h: order.get(h["vuln_class"], 99))
+        self._log(result, "plan", f"planner order: {', '.join(plan.get('order', classes))}")
+
+        # Phase: test + validate — fan every hypothesis out across the graph orchestrator so
+        # independent hypotheses are tested and validated in PARALLEL (each on its own worker +
+        # independent oracle). Results are reassembled in planned order, so a parallel run yields
+        # byte-identical findings to a sequential one; concurrency changes only wall-clock.
+        #
+        # Then escalate LEVEL BY LEVEL: each validated finding deterministically proposes bounded
+        # follow-up hypotheses (admitted through EscalationBudget), which run as the next level —
+        # still gated, still oracle-proven, still deterministic (admission order is sorted by
+        # investigation identity, so it never depends on which worker finished first).
+        self.escalation.seed(hyps)
+        for h in hyps:
+            h["_depth"] = 0
+        frontier = hyps
+        depth = 0
+        peak = 0
+        total_dur = 0.0
+        level_sizes: list[int] = []
+        while frontier:
+            level_sizes.append(len(frontier))
+            validated, lvl_peak, lvl_dur = self._run_level(result, frontier, depth)
+            peak = max(peak, lvl_peak)
+            total_dur = round(total_dur + lvl_dur, 3)
+            next_frontier: list = []
+            if self.escalation.enabled and depth < self.escalation.max_depth:
+                for hyp, finding in sorted(validated, key=lambda vf: escalation_identity(vf[0])):
+                    admitted = self.escalation.admit_batch(follow_ups(finding, hyp, self.appmodel), depth)
+                    for a in admitted:
+                        a.setdefault("id", gen_id("hyp"))
+                        a["status"] = "planned"
+                    next_frontier.extend(admitted)
+            if next_frontier:
+                result.hypotheses.extend(next_frontier)
+                origins = sorted({a.get("_origin", "escalation") for a in next_frontier})
+                self._log(
+                    result,
+                    "escalate",
+                    f"depth {depth + 1}: {len(next_frontier)} finding-driven follow-up(s) "
+                    f"admitted [{', '.join(origins)}]",
+                )
+            frontier = next_frontier
+            depth += 1
+
+        result.plan["parallel"] = {
+            "max_workers": self.max_workers,
+            "peak_concurrency": peak,
+            "duration_s": total_dur,
+            "levels": level_sizes,
+        }
+        if self.escalation.enabled:
+            result.plan["escalation"] = self.escalation.summary()
+            s = self.escalation.summary()
+            dropped = sum(s["dropped"].values())
+            self._log(
+                result,
+                "escalate",
+                f"escalation: {s['admitted']} follow-up(s) admitted, {dropped} dropped by caps "
+                f"(depth≤{s['max_depth']}, total≤{s['max_total']}, per-finding≤{s['max_per_finding']})",
+            )
+
+        # Phase: external OSS scanner adapters (graceful — skipped if the tool is not installed)
+        self.run_adapters(result)
+
+        return result
+
+    def _run_level(self, result, hyps, depth):
+        """Run one level of hypotheses in parallel and fold each task's record into ``result``.
+
+        Returns ``(validated, peak_concurrency, duration_s)`` where ``validated`` is the list of
+        ``(hypothesis, finding)`` pairs an independent oracle confirmed at this level — the seeds
+        for the next escalation level.
+        """
+        graph = TaskGraph()
+        for h in hyps:
+            h["_task_id"] = graph.add(
+                Task(
+                    name=f"hyp:{h['vuln_class']}:{h['id']}",
+                    kind="hypothesis",
+                    run=(lambda ctx, hh=h: self._investigate(hh)),
+                )
+            )
+        gres = run_graph(graph, max_workers=self.max_workers)
+        if depth == 0:
+            self._log(
+                result,
+                "test",
+                f"fanned {len(hyps)} hypothesis(es) across the orchestrator "
+                f"(max_workers={self.max_workers}, peak={gres.max_concurrency})",
+            )
+        else:
+            self._log(
+                result,
+                "escalate",
+                f"ran {len(hyps)} escalated hypothesis(es) at depth {depth} (peak={gres.max_concurrency})",
+            )
+
+        validated: list = []
+        for h in hyps:
+            # count distinct endpoints, not hypotheses: several classes hit the same endpoint
+            result.tested_endpoints.add(endpoint_key(h))
+            result.endpoints_tested = len(result.tested_endpoints)
+            task = graph.tasks.get(h.pop("_task_id", ""))
+            if task is None or task.status == "error":
+                h["status"] = "error"
+                err = task.error if task else "task missing"
+                self._log(result, "test", f"[{h['id']}] worker error -> skipped ({err})")
+                continue
+            rec = task.value or {}
+            for phase, msg in rec.get("logs", []):
+                self._log(result, phase, msg)
+            h["status"] = rec.get("status", "error")
+            finding = rec.get("finding")
+            if finding is not None:
+                result.findings.append(finding)
+            if rec.get("status") == "validated" and finding is not None:
+                validated.append((h, finding))
+        return validated, gres.max_concurrency, gres.duration_s
+
+    def run_adapters(self, result, allow_target_network: bool = True) -> None:
+        """Run the configured external OSS adapters and fold their findings into ``result``.
+
+        Called by :meth:`run` (DAST on) and directly by the engagement when DAST is off, so
+        white-box adapters (semgrep, bandit, gitleaks, trivy, ...) still run in sast/sca/iac
+        modes. With ``allow_target_network=False`` adapters that send traffic to the target
+        (nuclei, nmap, testssl) are skipped. Each run records whether it used the network."""
+        for adapter in self.scanners:
+            run_info = {
+                "scanner": adapter.name,
+                "available": False,
+                "findings": 0,
+                "note": "",
+                "uses_network": False,
+            }
+            try:
+                if not adapter.is_available():
+                    run_info["note"] = adapter.install_hint
+                    self._log(
+                        result, "scan", f"{adapter.name}: not installed — skipped ({adapter.install_hint})"
+                    )
+                elif getattr(adapter, "network", False) and not allow_target_network:
+                    run_info["available"] = True
+                    run_info["note"] = "skipped: sends traffic to the target and DAST is off"
+                    self._log(result, "scan", f"{adapter.name}: skipped (target-network tool; DAST is off)")
+                else:
+                    run_info["available"] = True
+                    skip = adapter.skip_reason() if hasattr(adapter, "skip_reason") else ""
+                    if skip:
+                        run_info["note"] = f"skipped: {skip}"
+                        self._log(result, "scan", f"{adapter.name}: skipped ({skip})")
+                    else:
+                        run_info["uses_network"] = bool(
+                            adapter.uses_network() if hasattr(adapter, "uses_network") else adapter.network
+                        )
+                        sfindings = adapter.run(self.appmodel, self.target_url, self.application)
+                        for f in sfindings:
+                            f.engagement_id = self.pipeline.engagement_id
+                        result.findings.extend(sfindings)
+                        run_info["findings"] = len(sfindings)
+                        self._log(result, "scan", f"{adapter.name}: {len(sfindings)} finding(s) ingested")
+            except Exception as exc:  # noqa: BLE001 - a flaky external tool must never break the run
+                run_info["note"] = f"error: {exc}"
+                self._log(result, "scan", f"{adapter.name}: error ({exc}) — skipped")
+            result.scanner_runs.append(run_info)
+
+    def _investigate(self, h) -> dict:
+        """Test + independently validate ONE hypothesis. Runs on a worker thread.
+
+        Returns a self-contained record ``{status, finding, logs}``; it never mutates the shared
+        ScanResult. All side effects (requests, evidence, audit) flow through the thread-safe
+        policy pipeline / audit log / evidence store, so N of these run concurrently and safely.
+        """
+        rec = {"status": "error", "finding": None, "logs": []}
+        worker = self._worker_for(h["vuln_class"])
+        if worker is None:
+            rec["status"] = "no-worker"
+            rec["logs"].append(("test", f"[{h['id']}] no worker for class {h['vuln_class']} -> skipped"))
+            return rec
+        finding = worker.investigate(h, self.target_url)
+        if finding is None:
+            rec["status"] = "blocked"
+            rec["logs"].append(("test", f"[{h['id']}] blocked by policy"))
+            return rec
+        if finding.state != State.EVIDENCE_FOUND:
+            rec["status"] = "no-signal"
+            finding.state = State.DROPPED
+            finding.status = "dropped"
+            rec["finding"] = finding
+            rec["logs"].append(("test", f"[{h['id']}] no initial signal -> dropped"))
+            return rec
+
+        # GATE: independent validation (separate component, clean state)
+        validated = self.validator.validate(finding, h)
+        rec["status"] = "validated" if validated else "dropped-by-validator"
+        h["finding_id"] = finding.id
+        if validated and finding.vuln_class == "IDOR/BOLA":
+            self._draft_narrative(finding, h)
+        rec["finding"] = finding
+        rec["logs"].append(
+            (
+                "validate",
+                f"[{h['id']}:{h['vuln_class']}] {'CONFIRMED' if validated else 'dropped'} "
+                f"({finding.verification.reproductions} reproductions)",
+            )
+        )
+        return rec
+
+    def _draft_narrative(self, finding, hyp):
+        """Reporter role: draft prose from VALIDATED evidence only (never invents evidence)."""
+        narr = self.intel.draft_finding_narrative(
+            {
+                "endpoint_method": hyp["endpoint_method"],
+                "endpoint_path": hyp["endpoint_path"],
+                "object_type": hyp["object_type"],
+            }
+        )
+        finding.description = narr.get("description", finding.description)
+        finding.impact = narr.get("impact", finding.impact)
+        finding.root_cause = narr.get("root_cause", finding.root_cause)
+        finding.remediation.summary = narr.get("remediation_summary", finding.remediation.summary)
+        finding.remediation.guidance = narr.get("remediation_guidance", finding.remediation.guidance)

@@ -1,0 +1,125 @@
+# ---------------------------------------------------------------------------
+# Rampart AppSec scan.
+#
+# On this repo it runs as a SELF-CONTAINED DEMO: it spins up the bundled,
+# intentionally-vulnerable demo target (examples/demo_target), scans it against
+# the demo's own committed rampart.scope.yaml authorization contract, and publishes the
+# full report bundle (SARIF + HTML + Markdown + JSON) as a downloadable workflow
+# artifact. Everything stays on loopback — there is no route to any real asset —
+# so it is safe to run on every push.
+#
+# Why an artifact and not the Security tab? Only because the demo target is
+# deliberately vulnerable: its findings would be standing noise in THIS repo's
+# Security tab. Rampart's SARIF itself is code-scanning ready — a runtime finding
+# is anchored to a relative virtual path (`127.0.0.1%3A8080/api/users`, shown as
+# 127.0.0.1:8080/api/users) with the exact URL as a logical location, and a
+# finding mapped to source (e.g. via `--repo`) to the repo file and line. In your
+# own repo, upload it with github/codeql-action/upload-sarif — see the commented
+# step at the end.
+#
+# TO USE THIS IN YOUR OWN REPOSITORY, copy this file and:
+#   1. Commit a real rampart.scope.yaml authorization contract (see rampart.scope.example.yaml
+#      at the repo root). It names an accountable owner, the in-scope host(s),
+#      an expiry, and seeded test accounts. Without a valid, unexpired, in-scope
+#      contract Rampart refuses to run (fail-closed) — the authorization gate.
+#   2. Point --target at a reachable, authorized target (an ephemeral staging
+#      deploy, or a service you spin up earlier in the job) instead of the demo.
+#   3. Add `--ci --fail-on high` to the scan so a validated high-severity
+#      finding fails the build (left OFF here because the demo target is
+#      deliberately vulnerable and would always trip the gate).
+#
+# Only test assets you own or are explicitly authorized to test.
+# ---------------------------------------------------------------------------
+name: Rampart AppSec Scan
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Authorized target base URL to scan"
+        required: true
+        default: "http://127.0.0.1:8080"
+
+permissions:
+  contents: read
+
+jobs:
+  rampart:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Install Rampart
+        # In your own repo, use the composite action (uses: NitinReddy-A/Rampart@v1)
+        # or install a pinned release instead of the local checkout.
+        run: |
+          python -m pip install --require-hashes -r requirements/build.txt
+          python -m pip install --no-deps --no-build-isolation -e .
+
+      - name: Start bundled demo target
+        # Isolated, offline, loopback-only — the target we own and test against.
+        run: |
+          python examples/demo_target/vulnerable_app.py --port 8080 &
+          for i in $(seq 1 20); do
+            if curl -sf -o /dev/null http://127.0.0.1:8080/; then
+              echo "demo target is up"; exit 0
+            fi
+            sleep 0.5
+          done
+          echo "demo target did not come up" >&2; exit 1
+
+      - name: Run Rampart assessment
+        # Scans the bundled demo target against its committed scope contract and
+        # writes SARIF for code scanning. No --ci gate here: the demo is
+        # intentionally vulnerable, so findings are expected and informational.
+        # In your own repo, add `--ci --fail-on high` to gate the build.
+        # The target goes through env (not ${{ }} inside the script) so it can't inject shell.
+        env:
+          TARGET: ${{ github.event.inputs.target || 'http://127.0.0.1:8080' }}
+        run: |
+          python -m rampart test \
+            --scope-file examples/demo_target/rampart.scope.yaml \
+            --target "$TARGET" \
+            --secrets examples/demo_target/secrets.json \
+            --openapi examples/demo_target/openapi.json \
+            --report sarif,html,md,json \
+            --fail-on high
+        # The reports land under <work-dir>/reports/ (default work-dir: .rampart).
+
+      - name: Publish report bundle
+        # Upload even if the scan step failed, so the reports are still available.
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rampart-report
+          path: .rampart/reports/
+          if-no-files-found: error
+
+      # In your own repo, upload the SARIF to the Security tab as well. This needs
+      # `permissions: security-events: write` on the job.
+      #
+      # - name: Upload SARIF to code scanning
+      #   if: always()
+      #   uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+      #   with:
+      #     sarif_file: .rampart/reports/report.sarif
+      #     category: rampart
+      #
+      # To post findings as a sticky PR comment, run this on `pull_request` events and
+      # grant `permissions: pull-requests: write` on the job (needs `--report ...,json`):
+      #
+      # - name: Comment on PR
+      #   if: always() && github.event_name == 'pull_request'
+      #   env:
+      #     GITHUB_TOKEN: ${{ github.token }}
+      #   run: python -m rampart pr-comment --fail-on high

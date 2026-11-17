@@ -1,0 +1,147 @@
+{
+  "openapi": "3.0.0",
+  "info": { "title": "demo-shop-api", "version": "1.0.0" },
+  "servers": [{ "url": "http://127.0.0.1:8080" }],
+  "paths": {
+    "/api/login": {
+      "post": {
+        "summary": "Authenticate and receive a bearer token",
+        "security": []
+      }
+    },
+    "/api/orders/{id}": {
+      "get": {
+        "summary": "Fetch an order by id",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }
+        ],
+        "security": [{ "bearerAuth": [] }]
+      }
+    },
+    "/api/search": {
+      "get": {
+        "summary": "Search (renders an HTML results page)",
+        "parameters": [
+          { "name": "q", "in": "query", "required": false, "schema": { "type": "string" } }
+        ],
+        "security": []
+      }
+    },
+    "/api/products": {
+      "get": {
+        "summary": "Look up a product by id",
+        "parameters": [
+          { "name": "id", "in": "query", "required": false, "schema": { "type": "string" } }
+        ],
+        "security": []
+      }
+    },
+    "/api/go": {
+      "get": {
+        "summary": "Redirect helper",
+        "parameters": [
+          { "name": "next", "in": "query", "required": false, "schema": { "type": "string" } }
+        ],
+        "security": []
+      }
+    },
+    "/api/fetch": {
+      "get": {
+        "summary": "Fetch a URL server-side",
+        "parameters": [
+          { "name": "url", "in": "query", "required": false, "schema": { "type": "string" } }
+        ],
+        "security": []
+      }
+    },
+    "/api/ping": {
+      "get": {
+        "summary": "Ping a host",
+        "parameters": [
+          { "name": "host", "in": "query", "required": false, "schema": { "type": "string" } }
+        ],
+        "security": []
+      }
+    },
+    "/api/file": {
+      "get": {
+        "summary": "Read a file by name",
+        "parameters": [
+          { "name": "name", "in": "query", "required": false, "schema": { "type": "string" } }
+        ],
+        "security": []
+      }
+    },
+    "/api/reports/orders": {
+      "get": { "summary": "Privileged: all customer orders", "security": [{ "bearerAuth": [] }] }
+    },
+    "/api/profile": {
+      "get": { "summary": "Current user profile", "security": [{ "bearerAuth": [] }] }
+    },
+    "/api/greet": {
+      "get": {
+        "summary": "Greeting (rendered via a template)",
+        "parameters": [
+          { "name": "name", "in": "query", "required": false, "schema": { "type": "string" } }
+        ],
+        "security": []
+      }
+    },
+    "/api/me": {
+      "get": { "summary": "Who am I (JWT-authenticated)", "security": [{ "bearerAuth": [] }] }
+    },
+    "/api/v2/me": {
+      "get": { "summary": "Who am I (HS256 JWT-authenticated)", "security": [{ "bearerAuth": [] }] }
+    },
+    "/api/checkout": {
+      "get": {
+        "summary": "Price quote for an item and quantity",
+        "parameters": [
+          { "name": "item", "in": "query", "schema": { "type": "string" } },
+          { "name": "qty", "in": "query", "schema": { "type": "integer" } }
+        ],
+        "security": []
+      }
+    },
+    "/api/webhook": {
+      "get": {
+        "summary": "Register a webhook URL (fetched server-side)",
+        "parameters": [
+          { "name": "url", "in": "query", "schema": { "type": "string" } }
+        ],
+        "security": []
+      }
+    },
+    "/dom": {
+      "get": {
+        "summary": "Client-rendered page (DOM sink)",
+        "parameters": [
+          { "name": "x", "in": "query", "schema": { "type": "string" } }
+        ],
+        "security": []
+      }
+    },
+    "/api/reset": {
+      "get": {
+        "summary": "Request a password-reset link",
+        "parameters": [
+          { "name": "email", "in": "query", "schema": { "type": "string" } }
+        ],
+        "security": []
+      }
+    },
+    "/api/account": {
+      "post": { "summary": "Update account profile", "security": [] }
+    },
+    "/graphql": {
+      "post": { "summary": "GraphQL endpoint", "security": [] }
+    },
+    "/api/import": {
+      "post": { "summary": "Import an XML document", "security": [] }
+    },
+    "/api/comments": {
+      "get": { "summary": "View comments", "security": [] },
+      "post": { "summary": "Post a comment", "security": [] }
+    }
+  }
+}

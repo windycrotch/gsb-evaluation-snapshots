@@ -1,0 +1,273 @@
+# Release pipeline — runs when a version tag (vX.Y.Z) is pushed.
+#
+#   git tag -a v1.2.0 -m "Rampart v1.2.0" && git push origin v1.2.0
+#
+# It ships every way of consuming Rampart from the one tag, and makes each one verifiable:
+#   * Python SDK + CLI   wheel + sdist on the GitHub Release, with SHA256SUMS, an SPDX SBOM,
+#                        and Sigstore-signed build-provenance + SBOM attestations
+#                        (`gh attestation verify <file> --repo <owner>/<repo>`). Published to
+#                        PyPI once trusted publishing is configured (see the `pypi` job).
+#   * Docker image       ghcr.io/<owner>/rampart:<version>, :<major>.<minor>, :latest
+#                        (linux/amd64 + linux/arm64), with signed provenance and an SBOM.
+#   * GitHub Action      the floating major tag (v1) is moved to this release, so
+#                        `uses: <owner>/rampart@v1` always gets the latest stable 1.x.
+#
+# Pre-release tags (v1.2.0-rc1, v1.2.0rc1, …) publish as GitHub pre-releases and never move
+# `v1` or the Docker `latest` tag. The tag must match rampart/version.py, and the release
+# notes come from that version's section in CHANGELOG.md. The repo has immutable releases
+# enabled, so a published release's assets and tag can never be changed afterwards.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build & verify distributions
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Check the tag matches rampart/version.py
+        id: version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(python -c 'import rampart.version as v; print(v.__version__)')"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::Tag v$tag does not match rampart/version.py ($pkg)"; exit 1
+          fi
+          if [[ "$pkg" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then pre=false; else pre=true; fi
+          echo "version=$pkg" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$pre" >> "$GITHUB_OUTPUT"
+
+      - name: Build wheel and sdist
+        # Hash-pinned tooling; --no-isolation so the pinned setuptools is the backend that builds
+        # the release (an isolated build would fetch an unpinned one).
+        run: |
+          python -m pip install --require-hashes -r requirements/release.txt
+          python -m build --no-isolation
+          twine check --strict dist/*
+
+      - name: Smoke-test the wheel in a clean environment
+        run: |
+          python -m venv /tmp/smoke
+          /tmp/smoke/bin/pip install dist/*.whl
+          cd /tmp
+          /tmp/smoke/bin/rampart --version
+          /tmp/smoke/bin/python -c "from rampart import Rampart, ScanResult; print('SDK import ok')"
+          /tmp/smoke/bin/rampart init --scope-file "$GITHUB_WORKSPACE/examples/demo_target/rampart.scope.yaml"
+
+      - name: Generate SBOM (SPDX)
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          path: dist/
+          format: spdx-json
+          output-file: sbom.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Collect release files
+        run: mv sbom.spdx.json "dist/rampart_appsec-${{ steps.version.outputs.version }}.spdx.json"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  github-release:
+    name: GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write        # create the release, move the v<major> tag
+      id-token: write        # sign attestations (Sigstore, keyless)
+      attestations: write
+    steps:
+      # Credentials are kept here on purpose: this job pushes the floating major tag.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist/
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/*.whl
+            dist/*.tar.gz
+
+      - name: Attest SBOM
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-path: |
+            dist/*.whl
+            dist/*.tar.gz
+          sbom-path: dist/rampart_appsec-${{ needs.build.outputs.version }}.spdx.json
+
+      - name: Checksums
+        run: cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
+
+      - name: Release notes from CHANGELOG.md
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          # Take everything under "## [VERSION]" up to the next "## [" heading.
+          awk -v v="$VERSION" '
+            index($0, "## [" v "]") == 1 { on = 1; next }
+            on && /^## \[/ { exit }
+            on { print }
+          ' CHANGELOG.md > notes.md
+          [ -s notes.md ] || echo "See [CHANGELOG.md](CHANGELOG.md)." > notes.md
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
+          whl="rampart_appsec-${VERSION}-py3-none-any.whl"
+          cat >> notes.md <<EOF
+
+          ## Install
+
+          | | |
+          | --- | --- |
+          | **pipx** | \`pipx install ${base}/${whl}\` |
+          | **pip** (CLI + Python SDK) | \`pip install ${base}/${whl}\` |
+          | **Docker** | \`docker run --rm ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/rampart:${VERSION} --help\` |
+          | **GitHub Action** | \`uses: ${GITHUB_REPOSITORY}@${GITHUB_REF_NAME}\` |
+          | **Claude Code (MCP)** | \`claude mcp add rampart -- rampart mcp\` |
+
+          ## Verify this release
+
+          Every artifact is built by this repository's release workflow and signed with
+          [Sigstore](https://www.sigstore.dev/) build-provenance attestations; nothing is built
+          on a maintainer's machine.
+
+          \`\`\`bash
+          gh release download ${GITHUB_REF_NAME} --repo ${GITHUB_REPOSITORY}
+          sha256sum -c SHA256SUMS
+          gh attestation verify ${whl} --repo ${GITHUB_REPOSITORY}
+          gh attestation verify oci://ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/rampart:${VERSION} --repo ${GITHUB_REPOSITORY}
+          \`\`\`
+
+          The SPDX SBOM (\`rampart_appsec-${VERSION}.spdx.json\`) lists every file and dependency.
+          EOF
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ needs.build.outputs.prerelease }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists (releases are immutable); not modifying it."
+            exit 0
+          fi
+          flags=()
+          [ "$PRERELEASE" = "true" ] && flags+=(--prerelease)
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "Rampart $GITHUB_REF_NAME" \
+            --notes-file notes.md \
+            --verify-tag "${flags[@]}"
+
+      - name: Move the floating major tag for the GitHub Action
+        if: needs.build.outputs.prerelease == 'false'
+        run: |
+          major="${GITHUB_REF_NAME%%.*}"
+          git tag -f "$major" "$GITHUB_SHA"
+          git push -f origin "refs/tags/$major"
+
+  docker:
+    name: Docker image (GHCR)
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/rampart
+          flavor: latest=false
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ needs.build.outputs.prerelease == 'false' }}
+          labels: |
+            org.opencontainers.image.title=Rampart
+            org.opencontainers.image.description=Self-hosted, evidence-first AppSec agent for web apps, APIs, and LLM endpoints.
+            org.opencontainers.image.licenses=Apache-2.0
+
+      - id: push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          sbom: true
+          provenance: mode=max
+          cache-from: type=gha
+          cache-to: type=gha,mode=max,ignore-error=true   # a cache-write race must never fail the build
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/${{ github.repository_owner }}/rampart
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+  pypi:
+    # Off until PyPI trusted publishing is set up, so a release never fails on it. To enable:
+    #   1. On pypi.org, add a "pending publisher" for project `rampart-appsec`:
+    #      owner = this repo's owner, repo = this repo, workflow = release.yml, environment = pypi
+    #   2. In this repo: Settings -> Environments -> New environment "pypi"
+    #   3. Settings -> Variables -> Actions -> add PYPI_PUBLISH = true
+    name: Publish to PyPI
+    needs: build
+    if: vars.PYPI_PUBLISH == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/rampart-appsec
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist/
+      - name: Keep only the Python distributions
+        run: rm -f dist/*.spdx.json
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
