@@ -21,10 +21,12 @@ export default class RConstantSource extends RScheduledSource {
 
   instantiateNode() {
     if (!this.node || this.playbackScheduled === false) {
+      const oldNode = this.node;
       this.node = this.context.audio.createConstantSource();
       this.node.addEventListener('ended', this.onEnded);
 
       this.context.nodes.set(this.props.identifier, this.node);
+      this.disposeNode(oldNode);
     }
 
     this.updateParams = this.updateParams.bind(this);

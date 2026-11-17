@@ -11,8 +11,10 @@ export default class RMediaElementSource extends RAudioNode {
   }
 
   createNode() {
+    const oldNode = this.node;
     this.node = this.context.audio.createMediaElementSource(this.props.element);
     this.context.nodes.set(this.props.identifier, this.node);
+    this.disposeNode(oldNode);
   }
 
   componentWillMount() {

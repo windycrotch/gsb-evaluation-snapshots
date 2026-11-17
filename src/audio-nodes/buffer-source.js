@@ -35,6 +35,7 @@ export default class RBufferSource extends RScheduledSource {
     super.onEnded(e);
     this.instantiateNode();
     this.connectToAllDestinations(this.props.destination, this.node);
+    this.syncGraph();
     if (this.props.onEnded) this.props.onEnded(e);
   }
 

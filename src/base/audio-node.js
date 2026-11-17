@@ -1,6 +1,26 @@
 import React from 'react';
 import RComponent from './component.js';
 
+import {
+  trackConnection,
+  getConnections,
+  getIncomingConnections,
+  removeConnection,
+  clearConnections
+} from './connection-registry.js';
+
+const sameArguments = (a, b) => {
+  return a.length === b.length && a.every((value, index) => value === b[index]);
+};
+
+// Warnings are only useful for the interesting failures; an
+// InvalidAccessError just means the connection was already gone (e.g. a
+// scheduled source removes its connections when it stops playing).
+const warn = error => {
+  if (error && error.name === 'InvalidAccessError') return;
+  console.warn(error); // eslint-disable-line no-console
+};
+
 /**
  * Any RComponent that corresponds to an AudioNode is a RAudioNode
  *
@@ -13,8 +33,19 @@ export default class RAudioNode extends RComponent {
     this.node = null;
     // dictionary of AudioNode parameters (either AudioParams or object properties)
     this.params = {};
+    // AudioNodes which are currently connected into this node (from the `parent` prop)
+    this.connectedParents = [];
     this.connectToAllDestinations = this.connectToAllDestinations.bind(this);
+    this.syncConnections = this.syncConnections.bind(this);
     this.setParam = this.setParam.bind(this);
+  }
+
+  componentWillMount() {
+    super.componentWillMount();
+    // make the node available to the graph as early as possible
+    if (this.context.nodes && typeof this.context.nodes.registerNode === 'function') {
+      this.context.nodes.registerNode(this);
+    }
   }
 
   // recursively builds up a list of nodes pointed to by IDs or lists of IDs
@@ -23,7 +54,12 @@ export default class RAudioNode extends RComponent {
       if (Array.isArray(element)) {
         this.flattenPointers(element, flattened);
       } else if (typeof element === 'symbol') {
-        flattened.push(this.context.nodes.get(element));
+        const pointer = this.context.nodes.get(element);
+
+        // a pointer can lead to a list of other pointers (e.g. the inputs of an RSplit)
+        if (Array.isArray(pointer)) this.flattenPointers(pointer, flattened);
+        // keep the slot (as undefined) so that the destination indices stay stable
+        else flattened.push(pointer);
       } else {
         flattened.push(element);
       }
@@ -49,37 +85,231 @@ export default class RAudioNode extends RComponent {
   }
 
   /**
+   * Works out the arguments of a single connection from this node to `destination`.
+   * The `owner` is the AudioNode which the connection belongs to – it's the
+   * destination itself, unless we're connecting to one of its AudioParams.
+   */
+  resolveConnection(destination, destinationIndex) {
+    if (!destination) return null;
+
+    const toParam = this.props.connectToParam;
+    const args = this.getConnectionArguments(
+      destination,
+      destinationIndex,
+      toParam,
+      this.props.connectFromChannel,
+      this.props.connectToChannel);
+
+    const target = args[0];
+
+    if (!target) return null;
+
+    return {
+      target,
+      owner: toParam ? destination : target,
+      args
+    };
+  }
+
+  /**
+   * Resolves the connections which this node should currently have from its
+   * `destination` prop (and the `disconnected` flag). Unresolvable pointers are
+   * skipped, so a node never connects to something that isn't mounted.
+   *
+   * @return     {Array|null}  the connections, or `null` if the destinations could not be resolved
+   */
+  resolveDestinations(destinationFunction) {
+    if (!destinationFunction || this.props.disconnected) return [];
+
+    let destinations;
+
+    try {
+      destinations = destinationFunction();
+    } catch (e) {
+      // the getter can only fail if the graph is momentarily inconsistent;
+      // leave the node's connections alone rather than tearing them down
+      return null;
+    }
+
+    if (!(destinations instanceof Array)) destinations = [ destinations ];
+
+    const connections = [];
+
+    this.flattenPointers(destinations).forEach((destination, destinationIndex) => {
+      const connection = this.resolveConnection(destination, destinationIndex);
+
+      if (!connection) return;
+
+      // connecting the exact same target with the same channel assignment
+      // twice would only duplicate the signal (e.g. in an RCycle), so the
+      // duplicate is dropped – different channel assignments are kept
+      const duplicate = connections.some(existing =>
+        existing.target === connection.target &&
+        sameArguments(existing.args, connection.args));
+
+      if (!duplicate) connections.push(connection);
+    });
+
+    return connections;
+  }
+
+  /**
+   * Resolves the AudioNodes which are declared to feed into this node,
+   * as reported by the `parent` prop.
+   */
+  resolveParents() {
+    const getParent = this.props.parent;
+
+    if (typeof getParent !== 'function') return [];
+
+    let parents;
+
+    try {
+      parents = getParent();
+    } catch (e) {
+      return [];
+    }
+
+    if (!parents) return [];
+    if (!(parents instanceof Array)) parents = [ parents ];
+
+    return this.flattenPointers(parents)
+      .filter(parent => parent && parent !== this.node);
+  }
+
+  /**
+   * Removes the connections which an old parent used to make into this node
+   * when the node's parent changes, leaving the parent's other connections
+   * (e.g. to this node's siblings) untouched.
+   */
+  syncParents() {
+    const parents = this.resolveParents();
+
+    this.connectedParents
+      .filter(parent => !parents.includes(parent))
+      .forEach(parent => {
+        getConnections(parent)
+          .filter(connection => connection.owner === this.node || connection.target === this.node)
+          .forEach(connection => {
+            try {
+              parent.disconnect(connection.target);
+            } catch (e) {
+              warn(e);
+            }
+
+            removeConnection(parent, connection.target);
+          });
+      });
+
+    this.connectedParents = parents;
+  }
+
+  /**
+   * Brings this node's connections in line with its current props.
+   *
+   * Stale connections are disconnected first (by target, so that any other
+   * connections the node has are left alone) and the missing ones are made
+   * afterwards. Calling this repeatedly with the same graph is a no-op.
+   *
+   * @param      {Function}  destinationFunction  The destinations getter, defaults to the `destination` prop
+   * @param      {AudioNode}  webAudioNode  The AudioNode to synchronise, defaults to this component's node
+   */
+  syncConnections(destinationFunction = this.props.destination, webAudioNode = this.node) {
+    const node = webAudioNode;
+
+    if (!node) return;
+
+    const desired = this.resolveDestinations(destinationFunction);
+
+    // the destinations can't be resolved right now – don't touch the graph
+    if (!desired) return;
+
+    // 1. disconnect whatever is no longer wanted.
+    // `AudioNode.disconnect(target)` drops every connection to that target, so
+    // a target is only disconnected once, even if it had several entries
+    // (e.g. with different channel assignments).
+    const staleTargets = [];
+
+    getConnections(node).forEach(connection => {
+      const stillWanted = desired.some(candidate =>
+        candidate.target === connection.target &&
+        sameArguments(candidate.args, connection.args));
+
+      if (!stillWanted && !staleTargets.includes(connection.target)) {
+        staleTargets.push(connection.target);
+      }
+    });
+
+    staleTargets.forEach(target => {
+      try {
+        node.disconnect(target);
+      } catch (e) {
+        warn(e);
+      }
+
+      removeConnection(node, target);
+    });
+
+    // 2. connect whatever is missing
+    desired.forEach(connection => {
+      const alreadyConnected = getConnections(node).some(existing =>
+        existing.target === connection.target &&
+        sameArguments(existing.args, connection.args));
+
+      if (alreadyConnected) return;
+
+      try {
+        node.connect(...connection.args);
+      } catch (e) {
+        warn(e);
+        return;
+      }
+
+      trackConnection(node, connection.target, connection.owner, connection.args);
+    });
+
+    if (node === this.node) this.syncParents();
+  }
+
+  /**
+   * Forgets the connections of an AudioNode which is being replaced by a new
+   * one (e.g. when a source re-creates its node after a prop change), so that
+   * the old edges can't accumulate or point at a dead node.
+   *
+   * @param      {AudioNode}  oldNode  The AudioNode which is being replaced
+   */
+  disposeNode(oldNode) {
+    if (!oldNode) return;
+
+    getIncomingConnections(oldNode).forEach(({ source, target }) => {
+      try {
+        source.disconnect(target);
+      } catch (e) {
+        warn(e);
+      }
+
+      removeConnection(source, target);
+    });
+
+    clearConnections(oldNode);
+
+    try {
+      oldNode.disconnect();
+    } catch (e) {
+      warn(e);
+    }
+  }
+
+  /**
    * Connects the given AudioNode to this RAudioNode's destinations.
-   * Abstracts away this operation as it's used in multiple lifecycle stages.
+   * Kept for the components which re-create their AudioNode (e.g. scheduled
+   * sources); it simply reconciles the connections.
    *
    * @param      {function} destinationFunction The function that will return the destinations
    * @param      {AudioNode}  webAudioNode  The web audio node
    */
   connectToAllDestinations(destinationFunction, webAudioNode) {
-    webAudioNode.disconnect();
-
-    if (destinationFunction && !this.props.disconnected) {
-      let destinations = destinationFunction();
-
-      if (!(destinations instanceof Array)) destinations = [ destinations ];
-
-      this.flattenPointers(destinations).forEach((destination, di) => {
-        if (destination) {
-          const connectArgs = this.getConnectionArguments(
-            destination,
-            di,
-            this.props.connectToParam,
-            this.props.connectFromChannel,
-            this.props.connectToChannel);
-
-          webAudioNode.connect(...connectArgs);
-        }
-      });
-    }
-  }
-
-  componentWillMount() {
-    super.componentWillMount();
+    this.syncConnections(destinationFunction, webAudioNode || this.node);
   }
 
   componentWillReceiveProps(nextProps) {
@@ -94,17 +324,49 @@ export default class RAudioNode extends RComponent {
     }
   }
 
-  // we use DidUpdate to connect to new destinations,
-  // because WillUpdate might get called before the new destinations are ready
-  componentDidUpdate(prevProps, prevState) {
-    if (prevProps.destination !== this.props.destination) {
-      this.connectToAllDestinations(this.props.destination, this.node);
+  /**
+   * Removes all connections into and out of the node when it unmounts.
+   *
+   * The outgoing connections all belong to this node, so they can be dropped
+   * with a single `disconnect()`. The incoming ones have to be removed one
+   * target at a time, so that the parents' connections to any siblings are
+   * left intact.
+   */
+  componentWillUnmount() {
+    const node = this.node;
+
+    if (node) {
+      // detach from the nodes which point at this one
+      getIncomingConnections(node).forEach(({ source, target }) => {
+        try {
+          source.disconnect(target);
+        } catch (e) {
+          warn(e);
+        }
+
+        removeConnection(source, target);
+      });
+
+      // and drop this node's own outgoing connections
+      clearConnections(node);
+
+      try {
+        node.disconnect();
+      } catch (e) {
+        warn(e);
+      }
     }
+
+    this.connectedParents = [];
+    this.node = null;
+
+    // removes the registry entry and unregisters the component
+    super.componentWillUnmount();
   }
 
-  componentWillUnmount() {
-    this.node.disconnect();
-    this.context.nodes.delete(this.props.identifier);
+  componentDidMount() {
+    super.componentDidMount();
+    this.syncConnections();
   }
 
   resolveTransitionProps(props, propName) {
@@ -159,10 +421,6 @@ export default class RAudioNode extends RComponent {
     } else {
       param.setValueAtTime(value, transitionTime || this.context.audio.currentTime);
     }
-  }
-
-  componentDidMount() {
-    this.connectToAllDestinations(this.props.destination, this.node);
   }
 
   render() {

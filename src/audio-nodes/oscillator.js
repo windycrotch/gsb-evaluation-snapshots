@@ -24,6 +24,7 @@ export default class ROscillator extends RScheduledSource {
 
   instantiateNode() {
     if (!this.node || this.playbackScheduled === false) {
+      const oldNode = this.node;
       this.node = this.context.audio.createOscillator();
       this.node.addEventListener('ended', this.onEnded);
 
@@ -32,6 +33,9 @@ export default class ROscillator extends RScheduledSource {
       }
 
       this.context.nodes.set(this.props.identifier, this.node);
+      // the Web Audio implementation removes a stopped node from the graph,
+      // but we still need to forget about its connections
+      this.disposeNode(oldNode);
     }
 
     this.updateParams = this.updateParams.bind(this);

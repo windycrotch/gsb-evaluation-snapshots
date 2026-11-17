@@ -21,6 +21,8 @@ export default class RScheduledSource extends RAudioNode {
     // Web Audio will remove the node from the graph after stopping, so reinstantiate it
     this.instantiateNode();
     this.connectToAllDestinations(this.props.destination, this.node);
+    // the replacement AudioNode needs to be picked up by its parents as well
+    this.syncGraph();
   }
 
   schedule() {

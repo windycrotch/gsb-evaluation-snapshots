@@ -1,6 +1,7 @@
 import React from 'react';
 import PropTypes from 'prop-types';
 import RComponent from './component.js';
+import NodeRegistry from './node-registry.js';
 
 window.AudioContext = window.AudioContext || window.webkitAudioContext || null;
 if (!window.AudioContext) {
@@ -19,7 +20,7 @@ export default class RAudioContext extends React.Component {
     super(props);
     // repository of all nodes in the graph
     // keyed by Symbols
-    this.nodes = new Map();
+    this.nodes = new NodeRegistry();
 
     this._context = new AudioContext(props.options);
 
