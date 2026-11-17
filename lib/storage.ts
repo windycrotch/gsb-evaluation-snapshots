@@ -1,9 +1,15 @@
 const DB_NAME = "spider-archiver";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const PAGES_STORE = "pages";
-const MAX_STORAGE_BYTES = 50 * 1024 * 1024; // 50MB
+const DEFAULT_MAX_STORAGE_BYTES = 50 * 1024 * 1024; // 50MB
+
+// Mutable so tests (and future settings UI) can lower the cap.
+export const storageConfig = {
+  maxBytes: DEFAULT_MAX_STORAGE_BYTES,
+};
 
 export interface StoredPage {
+  batchId: string;
   url: string;
   content: string;
   error?: string;
@@ -13,6 +19,13 @@ export interface StoredPage {
   contentSize: number;
 }
 
+export interface BatchInfo {
+  id: string;
+  createdAt: number;
+  pageCount: number;
+  totalSize: number;
+}
+
 export interface DomainInfo {
   domain: string;
   pageCount: number;
@@ -20,16 +33,53 @@ export interface DomainInfo {
   lastCrawled: number;
 }
 
+function createPagesStore(db: IDBDatabase): IDBObjectStore {
+  const store = db.createObjectStore(PAGES_STORE, {
+    keyPath: ["batchId", "url"],
+  });
+  store.createIndex("batchId", "batchId", { unique: false });
+  store.createIndex("domain", "domain", { unique: false });
+  store.createIndex("timestamp", "timestamp", { unique: false });
+  return store;
+}
+
 function openDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
 
-    request.onupgradeneeded = () => {
+    request.onupgradeneeded = (event) => {
       const db = request.result;
-      if (!db.objectStoreNames.contains(PAGES_STORE)) {
-        const store = db.createObjectStore(PAGES_STORE, { keyPath: "url" });
-        store.createIndex("domain", "domain", { unique: false });
-        store.createIndex("timestamp", "timestamp", { unique: false });
+      const tx = request.transaction;
+      const oldVersion = event.oldVersion;
+
+      if (oldVersion < 2 && db.objectStoreNames.contains(PAGES_STORE)) {
+        // Migrate v1 (keyed by URL only) into a single "legacy" batch so
+        // previously archived pages survive the schema change.
+        const oldStore = tx!.objectStore(PAGES_STORE);
+        const getAllReq = oldStore.getAll();
+        getAllReq.onsuccess = () => {
+          const legacyPages = getAllReq.result as any[];
+          db.deleteObjectStore(PAGES_STORE);
+          const store = createPagesStore(db);
+          const now = Date.now();
+          const batchId = `legacy-${now.toString(36)}`;
+          for (const page of legacyPages) {
+            if (!page?.url) continue;
+            store.put({
+              batchId,
+              url: page.url,
+              content: page.content || "",
+              error: page.error,
+              status: page.status,
+              domain: page.domain || getDomain(page.url),
+              timestamp: page.timestamp || now,
+              contentSize:
+                page.contentSize ?? new Blob([page.content || ""]).size,
+            });
+          }
+        };
+      } else if (!db.objectStoreNames.contains(PAGES_STORE)) {
+        createPagesStore(db);
       }
     };
 
@@ -46,33 +96,159 @@ function getDomain(url: string): string {
   }
 }
 
+function generateBatchId(): string {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/**
+ * Within one batch a URL may only appear once; when a crawl reports the same
+ * URL multiple times, the last result wins.
+ */
+export function dedupePagesByUrl<
+  T extends { url?: string; content?: string; error?: string; status?: number }
+>(pages: T[]): T[] {
+  const byUrl = new Map<string, T>();
+  for (const page of pages) {
+    if (!page?.url) continue;
+    byUrl.set(page.url, page);
+  }
+  return Array.from(byUrl.values());
+}
+
 export async function savePages(
   pages: { url: string; content?: string; error?: string; status?: number }[]
-): Promise<void> {
-  if (!pages?.length) return;
+): Promise<string> {
+  if (!pages?.length) return "";
 
-  await evictIfNeeded(pages);
+  const deduped = dedupePagesByUrl(pages);
+  const batchId = generateBatchId();
+  const now = Date.now();
+
+  const records: StoredPage[] = deduped.map((page) => {
+    const content = page.content || "";
+    return {
+      batchId,
+      url: page.url,
+      content,
+      error: page.error,
+      status: page.status,
+      domain: getDomain(page.url),
+      timestamp: now,
+      contentSize: new Blob([content]).size,
+    };
+  });
+
+  const batchSize = records.reduce((sum, r) => sum + r.contentSize, 0);
+
+  // A batch that cannot fit even into an empty archive is rejected outright,
+  // before anything is evicted, so existing batches are never lost for nothing.
+  if (batchSize > storageConfig.maxBytes) {
+    throw new Error(
+      `This crawl batch is ${formatBytes(batchSize)}, which exceeds the ` +
+        `${formatBytes(storageConfig.maxBytes)} archive limit on its own. ` +
+        `Nothing was saved and all existing batches were left untouched. ` +
+        `Try crawling fewer pages.`
+    );
+  }
+
+  await evictBatchesIfNeeded(batchSize);
 
   const db = await openDB();
-  const now = Date.now();
 
   return new Promise((resolve, reject) => {
     const tx = db.transaction(PAGES_STORE, "readwrite");
     const store = tx.objectStore(PAGES_STORE);
 
-    for (const page of pages) {
-      if (!page?.url) continue;
-      const content = page.content || "";
-      store.put({
-        url: page.url,
-        content,
-        error: page.error,
-        status: page.status,
-        domain: getDomain(page.url),
-        timestamp: now,
-        contentSize: new Blob([content]).size,
-      } satisfies StoredPage);
+    for (const record of records) {
+      store.put(record);
     }
+
+    tx.oncomplete = () => {
+      db.close();
+      resolve(batchId);
+    };
+    tx.onerror = () => {
+      db.close();
+      reject(tx.error);
+    };
+  });
+}
+
+export async function getBatches(): Promise<BatchInfo[]> {
+  const db = await openDB();
+
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(PAGES_STORE, "readonly");
+    const request = tx.objectStore(PAGES_STORE).getAll();
+
+    request.onsuccess = () => {
+      db.close();
+      const pages = request.result as StoredPage[];
+      const batchMap = new Map<string, BatchInfo>();
+
+      for (const page of pages) {
+        const info = batchMap.get(page.batchId) || {
+          id: page.batchId,
+          createdAt: page.timestamp,
+          pageCount: 0,
+          totalSize: 0,
+        };
+        info.pageCount++;
+        info.totalSize += page.contentSize;
+        info.createdAt = Math.min(info.createdAt, page.timestamp);
+        batchMap.set(page.batchId, info);
+      }
+
+      resolve(
+        Array.from(batchMap.values()).sort(
+          (a, b) => b.createdAt - a.createdAt
+        )
+      );
+    };
+    request.onerror = () => {
+      db.close();
+      reject(request.error);
+    };
+  });
+}
+
+export async function getPagesByBatch(
+  batchId: string
+): Promise<StoredPage[]> {
+  const db = await openDB();
+
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(PAGES_STORE, "readonly");
+    const index = tx.objectStore(PAGES_STORE).index("batchId");
+    const request = index.getAll(batchId);
+
+    request.onsuccess = () => {
+      db.close();
+      resolve(request.result);
+    };
+    request.onerror = () => {
+      db.close();
+      reject(request.error);
+    };
+  });
+}
+
+export async function deleteBatch(batchId: string): Promise<void> {
+  const db = await openDB();
+
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(PAGES_STORE, "readwrite");
+    const store = tx.objectStore(PAGES_STORE);
+    const index = store.index("batchId");
+    const request = index.openCursor(batchId);
+
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (cursor) {
+        cursor.delete();
+        cursor.continue();
+      }
+    };
 
     tx.oncomplete = () => {
       db.close();
@@ -165,34 +341,6 @@ export async function getSavedDomains(): Promise<DomainInfo[]> {
   });
 }
 
-export async function clearDomain(domain: string): Promise<void> {
-  const db = await openDB();
-
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(PAGES_STORE, "readwrite");
-    const store = tx.objectStore(PAGES_STORE);
-    const index = store.index("domain");
-    const request = index.openCursor(domain);
-
-    request.onsuccess = () => {
-      const cursor = request.result;
-      if (cursor) {
-        cursor.delete();
-        cursor.continue();
-      }
-    };
-
-    tx.oncomplete = () => {
-      db.close();
-      resolve();
-    };
-    tx.onerror = () => {
-      db.close();
-      reject(tx.error);
-    };
-  });
-}
-
 export async function clearAll(): Promise<void> {
   const db = await openDB();
 
@@ -210,47 +358,27 @@ export async function clearAll(): Promise<void> {
   });
 }
 
-async function evictIfNeeded(
-  newPages: { content?: string }[]
-): Promise<void> {
-  const domains = await getSavedDomains();
-  const currentSize = domains.reduce((sum, d) => sum + d.totalSize, 0);
-  const newSize = newPages.reduce(
-    (sum, p) => sum + new Blob([p.content || ""]).size,
-    0
-  );
+/**
+ * Evicts whole batches, oldest first, until the incoming batch fits within
+ * the storage cap. Callers must guarantee the incoming batch alone does not
+ * exceed the cap (savePages rejects that case before calling this).
+ */
+async function evictBatchesIfNeeded(incomingSize: number): Promise<void> {
+  const batches = await getBatches();
+  const currentSize = batches.reduce((sum, b) => sum + b.totalSize, 0);
+  const limit = storageConfig.maxBytes;
 
-  if (currentSize + newSize <= MAX_STORAGE_BYTES) return;
+  if (currentSize + incomingSize <= limit) return;
 
-  const db = await openDB();
+  const needed = currentSize + incomingSize - limit;
+  const oldestFirst = [...batches].sort((a, b) => a.createdAt - b.createdAt);
 
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(PAGES_STORE, "readwrite");
-    const store = tx.objectStore(PAGES_STORE);
-    const index = store.index("timestamp");
-    const request = index.openCursor();
-
-    let freed = 0;
-    const needed = currentSize + newSize - MAX_STORAGE_BYTES;
-
-    request.onsuccess = () => {
-      const cursor = request.result;
-      if (cursor && freed < needed) {
-        freed += (cursor.value as StoredPage).contentSize;
-        cursor.delete();
-        cursor.continue();
-      }
-    };
-
-    tx.oncomplete = () => {
-      db.close();
-      resolve();
-    };
-    tx.onerror = () => {
-      db.close();
-      reject(tx.error);
-    };
-  });
+  let freed = 0;
+  for (const batch of oldestFirst) {
+    if (freed >= needed) break;
+    await deleteBatch(batch.id);
+    freed += batch.totalSize;
+  }
 }
 
 export function formatBytes(bytes: number): string {

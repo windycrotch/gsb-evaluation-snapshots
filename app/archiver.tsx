@@ -1,11 +1,27 @@
 "use client";
 
-import { useState, useMemo, lazy, Suspense } from "react";
+import { useState, useMemo, useEffect, useCallback, lazy, Suspense } from "react";
 import SearchBar from "./searchbar";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/components/ui/use-toast";
 import { Toaster } from "@/components/ui/toaster";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  BatchInfo,
+  StoredPage,
+  deleteBatch,
+  formatBytes,
+  getBatches,
+  getPagesByBatch,
+  timeAgo,
+} from "@/lib/storage";
 
 const MonacoEditor = lazy(() =>
   import("@monaco-editor/react").then((m) => ({ default: m.default }))
@@ -34,11 +50,78 @@ function downloadBlob(content: string, filename: string, mime: string) {
 
 export default function Archiver() {
   const [data, setData] = useState<any[] | null>(null);
+  const [batches, setBatches] = useState<BatchInfo[]>([]);
+  const [selectedBatchId, setSelectedBatchId] = useState<string | null>(null);
+  const [batchPages, setBatchPages] = useState<StoredPage[]>([]);
   const [selectedIdx, setSelectedIdx] = useState(0);
   const [copied, setCopied] = useState(false);
   const { toast } = useToast();
 
-  const pages = (data || []).filter((p: any) => p?.url);
+  const refreshBatches = useCallback(async (selectId?: string | null) => {
+    try {
+      const list = await getBatches();
+      setBatches(list);
+      const next =
+        selectId !== undefined
+          ? selectId
+          : list.find((b) => b.id === selectedBatchId)?.id ?? list[0]?.id ?? null;
+      setSelectedBatchId(next);
+      return next;
+    } catch (e) {
+      console.error(e);
+      return null;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedBatchId]);
+
+  // Load archived batches on mount so past crawls are browsable.
+  useEffect(() => {
+    refreshBatches(undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Load the pages of the selected batch.
+  useEffect(() => {
+    if (!selectedBatchId) {
+      setBatchPages([]);
+      return;
+    }
+    getPagesByBatch(selectedBatchId)
+      .then((pages) => {
+        setBatchPages(pages);
+        setSelectedIdx(0);
+      })
+      .catch(console.error);
+  }, [selectedBatchId]);
+
+  // A new crawl streams pages in: switch back to the live view.
+  const handleStreamData = useCallback((d: any) => {
+    setSelectedBatchId(null);
+    setData(d);
+  }, []);
+
+  // Crawl finished and was persisted as a new batch: show that batch.
+  const handleSaveComplete = useCallback(
+    (batchId: string) => {
+      refreshBatches(batchId);
+    },
+    [refreshBatches]
+  );
+
+  const handleDeleteBatch = async () => {
+    if (!selectedBatchId) return;
+    try {
+      await deleteBatch(selectedBatchId);
+      toast({ title: "Batch deleted" });
+      await refreshBatches(undefined);
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const pages = selectedBatchId
+    ? batchPages
+    : (data || []).filter((p: any) => p?.url);
   const current = pages[selectedIdx];
 
   const content = current?.content || "";
@@ -61,6 +144,8 @@ export default function Archiver() {
     downloadBlob(content, `${slug}.html`, "text/html");
   };
 
+  // Exports only the pages of the currently selected batch (or the live
+  // crawl results while no batch is selected).
   const exportAll = () => {
     const ts = new Date().toISOString().slice(0, 10);
     const combined = pages
@@ -69,16 +154,66 @@ export default function Archiver() {
     downloadBlob(combined, `archive-${ts}.html`, "text/html");
   };
 
+  const selectedBatch = batches.find((b) => b.id === selectedBatchId);
+
   return (
     <div className="flex flex-col flex-1 min-h-0">
-      <SearchBar setDataValues={setData} />
+      <SearchBar
+        setDataValues={handleStreamData}
+        onSaveComplete={handleSaveComplete}
+      />
       {pages.length > 0 && current ? (
         <div className="flex flex-1 overflow-hidden">
           {/* Page List Sidebar */}
           <div className="w-64 border-r flex flex-col shrink-0">
+            {batches.length > 0 && (
+              <div className="px-3 py-2 bg-muted/50 border-b space-y-1.5">
+                <div className="flex items-center gap-1.5">
+                  <Select
+                    value={selectedBatchId ?? undefined}
+                    onValueChange={(v: string) => setSelectedBatchId(v)}
+                  >
+                    <SelectTrigger className="h-7 text-[11px] flex-1">
+                      <SelectValue placeholder="Live crawl results" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {batches.map((b) => (
+                        <SelectItem
+                          key={b.id}
+                          value={b.id}
+                          className="text-[11px]"
+                        >
+                          {new Date(b.createdAt).toLocaleString()} ·{" "}
+                          {b.pageCount} page{b.pageCount !== 1 ? "s" : ""}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  {selectedBatchId && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-7 px-2 text-[10px] text-destructive"
+                      onClick={handleDeleteBatch}
+                    >
+                      Delete
+                    </Button>
+                  )}
+                </div>
+                {selectedBatch && (
+                  <p className="text-[10px] text-muted-foreground">
+                    Crawled {timeAgo(selectedBatch.createdAt)} ·{" "}
+                    {selectedBatch.pageCount} page
+                    {selectedBatch.pageCount !== 1 ? "s" : ""} ·{" "}
+                    {formatBytes(selectedBatch.totalSize)}
+                  </p>
+                )}
+              </div>
+            )}
             <div className="px-3 py-2 bg-muted/50 border-b text-xs font-medium text-muted-foreground flex items-center justify-between">
               <span>
-                {pages.length} page{pages.length !== 1 ? "s" : ""} crawled
+                {pages.length} page{pages.length !== 1 ? "s" : ""}{" "}
+                {selectedBatchId ? "in batch" : "crawled"}
               </span>
               <Button
                 size="sm"

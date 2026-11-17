@@ -71,7 +71,7 @@ const SearchBar = ({
   onSaveComplete,
 }: {
   setDataValues: Dispatch<any>;
-  onSaveComplete?: () => void;
+  onSaveComplete?: (batchId: string) => void;
 }) => {
   const [url, setURl] = useState<string>("");
   const [dataLoading, setDataLoading] = useState<boolean>(false);
@@ -223,11 +223,21 @@ const SearchBar = ({
           })} for ${pages} page${pages === 1 ? "" : "s"}.`,
         });
 
-        // Persist crawled pages to IndexedDB
+        // Persist crawled pages to IndexedDB as a new batch
         if (crawledPagesRef.current.length) {
           savePages(crawledPagesRef.current)
-            .then(() => onSaveComplete?.())
-            .catch(console.error);
+            .then((batchId) => onSaveComplete?.(batchId))
+            .catch((e) => {
+              console.error(e);
+              toast({
+                variant: "destructive",
+                title: "Archive not saved",
+                description:
+                  e instanceof Error
+                    ? e.message
+                    : "Failed to save the crawl results to the local archive.",
+              });
+            });
         }
       }
       crawledPagesRef.current = [];
