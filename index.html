@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Merge Conflict — Clawd vs Codex</title>
+    <meta name="description" content="Two coding mascots. One arena. Play as Clawd or Codex in a cinematic 3D browser fighter with combos, parries, and beam clashes." />
+    <meta name="theme-color" content="#05070c" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Merge Conflict — Clawd vs Codex" />
+    <meta property="og:description" content="Two coding mascots. One arena. Pick a side and fight." />
+    <meta property="og:url" content="https://merge-conflict-delta.vercel.app/" />
+    <meta property="og:image" content="https://merge-conflict-delta.vercel.app/preview.jpg" />
+    <meta property="og:image:alt" content="Clawd and Codex facing off in the Merge Conflict arena" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="canonical" href="https://merge-conflict-delta.vercel.app/" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <style>
+      html, body { margin: 0; height: 100%; background: #05070c; overflow: hidden; }
+      #stage { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+      #ui { position: fixed; inset: 0; pointer-events: none; }
+    </style>
+  </head>
+  <body>
+    <noscript><p style="color: #f4f2ee; padding: 2rem; font-family: system-ui">Enable JavaScript to play Merge Conflict. Use a desktop browser with a keyboard or gamepad.</p></noscript>
+    <canvas id="stage"></canvas>
+    <div id="ui"></div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

@@ -1,0 +1,19 @@
+.film-title {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  opacity: 0;
+  pointer-events: none;
+}
+.film-title span {
+  display: block;
+  font-family: 'Archivo Variable', system-ui, sans-serif;
+  font-size: 4.1vw;
+  font-weight: 840;
+  font-stretch: 125%;
+  line-height: 1;
+  text-transform: uppercase;
+  color: #f4f2ee;
+  white-space: nowrap;
+}
