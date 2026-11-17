@@ -1,0 +1,27 @@
+{{- /* programs/list.html - Programs listing page */ -}}
+{{ define "main" }}
+  {{ partial "hero.html" (dict
+    "title" (i18n "programs_list_title")
+    "description" (i18n "programs_list_desc")
+  ) }}
+
+  {{- $programs := where (where .Site.Pages "Section" "programs") "Kind" "page" }}
+  {{- $episodes := where (where .Site.Pages "Section" "episodes") "Kind" "page" }}
+  <div class="program-grid">
+    {{- range $programs }}
+    {{- $progName := .Title }}
+    {{- $count := len (where $episodes "Params.program" $progName) }}
+    {{- partial "program-card.html" (dict
+      "icon"        .Params.icon
+      "url"         .RelPermalink
+      "title"       .Title
+      "description" .Params.description
+      "episodes"    $count
+    ) }}
+    {{- end }}
+  </div>
+  <div class="nav-buttons" style="margin-top:2rem">
+    <a href="{{ .Site.Home.RelPermalink }}" class="nav-button">{{ i18n "programs_list_cta_home" }}</a>
+    <a href="{{ relref . "schedule.md" }}" class="nav-button nav-button-primary">{{ i18n "programs_list_cta_schedule" }}</a>
+  </div>
+{{ end }}

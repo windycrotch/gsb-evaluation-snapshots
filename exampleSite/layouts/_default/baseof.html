@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="{{ .Site.Language.Lang }}" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ block "title" . }}{{ .Site.Title }}{{ end }}</title>
+  <meta name="description" content="{{ site.Params.description }}">
+  {{- /* Content Security Policy */ -}}
+  {{- $raw := printf "%d%s" now.Unix .Site.Title | sha256 -}}
+  {{- $cspNonce := substr $raw 0 20 -}}
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'nonce-{{ $cspNonce }}'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; media-src 'self' https:; connect-src 'self' https:; frame-ancestors 'none';">
+  {{- if .IsTranslated }}
+    {{- range .Translations }}
+    <link rel="alternate" hreflang="{{ .Language.Lang }}" href="{{ .Permalink }}">
+    {{- end }}
+  {{- end -}}
+  {{- if hugo.IsMultilingual }}
+    <link rel="alternate" hreflang="x-default" href="{{ .Site.BaseURL }}">
+  {{- end -}}
+  {{ with .OutputFormats.Get "rss" -}}
+    {{ printf `<link rel=%q type=%q href=%q title=%q>` .Rel .MediaType.Type .Permalink $.Site.Title | safeHTML }}
+  {{ end -}}
+  <link rel="icon" type="image/svg+xml" href="{{ "favicon.svg" | relURL }}">
+  <link rel="icon" type="image/x-icon" href="{{ "favicon.ico" | relURL }}">
+  <link rel="apple-touch-icon" href="{{ "apple-touch-icon.png" | relURL }}">
+  <link rel="manifest" href="{{ "site.webmanifest" | relURL }}">
+  {{ $turbolinks := resources.Get "js/vendor/turbolinks.js" | fingerprint }}
+  <script src="{{ $turbolinks.RelPermalink }}" integrity="{{ $turbolinks.Data.Integrity }}"></script>
+  {{- $codeCopy := resources.Get "js/code-copy.js" | fingerprint -}}
+  {{- if $codeCopy }}
+  <script src="{{ $codeCopy.RelPermalink }}" integrity="{{ $codeCopy.Data.Integrity }}" defer></script>
+  {{- end }}
+  {{- $syntaxCSS := resources.Get "css/syntax.css" -}}
+  {{- if $syntaxCSS }}
+  <link rel="stylesheet" href="{{ $syntaxCSS.RelPermalink }}">
+  {{- end }}
+  {{- /* Always load podcast-player CSS so the persistent footer has theme support on every page */ -}}
+  {{- $playerCSS := resources.Get "css/podcast-player.css" -}}
+  {{- if $playerCSS }}
+  <link rel="stylesheet" href="{{ $playerCSS.RelPermalink }}">
+  {{- end }}
+  {{- /* Utility shortcodes CSS (admonition, button, figure, video, tabs, gallery, carousel) */ -}}
+  {{- $utilCSS := resources.Get "css/shortcodes.css" -}}
+  {{- if $utilCSS }}
+  <link rel="stylesheet" href="{{ $utilCSS.RelPermalink }}">
+  {{- end }}
+  {{- $baseCSS := resources.Get "css/base.css" | minify | fingerprint }}
+  <link rel="stylesheet" href="{{ $baseCSS.RelPermalink }}" integrity="{{ $baseCSS.Data.Integrity }}">
+  <link rel="canonical" href="{{ .Permalink }}">
+  <style>
+    /* ── Theme variables ── */
+    :root,[data-theme="light"]{--bg:#fafafa;--surface:#ffffff;--text:#1a1a2e;--text-muted:#6b7280;--accent:#4f46e5;--accent-hover:#4338ca;--border:#e5e7eb;--radius:8px;--max-w:960px}
+    [data-theme="dark"]{--bg:#0f0f1a;--surface:#1a1a2e;--text:#e4e4ed;--text-muted:#9ca3af;--accent:#818cf8;--accent-hover:#6366f1;--border:#2d2d44}
+  </style>
+</head>
+<body>
+  <header>
+    <div class="container">
+      <a href="{{ .Site.Home.RelPermalink }}" class="site-title">
+        <svg viewBox="0 0 24 24" width="20" height="20"><circle cx="12" cy="12" r="11" fill="currentColor"/><circle cx="12" cy="12" r="7" fill="#fff"/><path d="M6.5 18a6 6 0 0 0 11 0" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M4.5 16a9 9 0 0 0 15 0" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/><path d="M3 14.5a11 11 0 0 0 18 0" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/><polygon points="9.5,7.5 16.5,12 9.5,16.5" fill="currentColor"/></svg>
+        {{ i18n "site_title" }}
+      </a>
+      <nav>
+        {{- $docsSection := .Site.GetPage "/docs" }}
+        {{- $docsPages := $docsSection.Pages }}
+        {{- range .Site.Menus.main }}
+        {{- $isDocs := or (eq .Name "Docs") (eq .URL "/docs/") (eq .URL "/wavecast/docs/") }}
+        {{- if $isDocs }}
+        <div class="nav-dropdown">
+          <button class="nav-dropdown-toggle" aria-expanded="false" aria-haspopup="true">{{ .Name }} <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button>
+          <div class="nav-dropdown-menu">
+            <a href="{{ .URL }}">{{ i18n "docs_index" | default "Documentation Index" }}</a>
+            {{- range $docsPages.Reverse }}
+            <a href="{{ .RelPermalink }}">{{ .Title }}</a>
+            {{- end }}
+          </div>
+        </div>
+        {{- else }}
+        <a href="{{ .URL }}" class="nav-link">{{ .Name }}</a>
+        {{- end }}
+        {{- end }}
+      </nav>
+      <a href="https://github.com/adurrr/wavecast" target="_blank" rel="noopener" class="github-link" aria-label="View on GitHub">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg>
+      </a>
+      {{- partial "language-switcher.html" . -}}
+      {{- partial "theme-toggle.html" . -}}
+    </div>
+  </header>
+
+  <main>
+    <div class="container">
+      {{ block "main" . }}{{ end }}
+    </div>
+  </main>
+
+  <footer>
+    <div class="container">
+      <div class="footer-nav">
+        {{- range .Site.Menus.main }}
+        <a href="{{ .URL }}">{{ .Name }}</a>
+        {{- end }}
+        <a href="{{ "index.xml" | relURL }}"><svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" style="vertical-align:middle;margin-right:3px"><path d="M6.18 15.64a2.18 2.18 0 0 1 2.18 2.18C8.36 19 7.38 20 6.18 20C5 20 4 19 4 17.82a2.18 2.18 0 0 1 2.18-2.18M4 4.44A15.56 15.56 0 0 1 19.56 20h-2.83A12.73 12.73 0 0 0 4 7.27V4.44m0 5.66a9.9 9.9 0 0 1 9.9 9.9h-2.83A7.07 7.07 0 0 0 4 12.93V10.1Z"/></svg>{{ i18n "footer_rss" }}</a>
+        <a href="https://github.com/adurrr/wavecast" target="_blank" rel="noopener">{{ i18n "footer_github" }}</a>
+      </div>
+      <p>{{ i18n "footer_text" | safeHTML }}</p>
+    </div>
+  </footer>
+
+  <podcast-footer id="podcast-footer" size="medium" data-turbolinks-permanent data-turbo-permanent hx-preserve></podcast-footer>
+
+  <script nonce="{{ $cspNonce }}">
+    (function() {
+      'use strict';
+      var STORAGE_KEY = 'podcast-demo-theme';
+
+      function getPreferred() { try { return localStorage.getItem(STORAGE_KEY) || 'light'; } catch(e) { return 'light'; } }
+      function apply(theme) {
+        document.documentElement.setAttribute('data-theme', theme);
+        try { localStorage.setItem(STORAGE_KEY, theme); } catch(e) {}
+        var btn = document.getElementById('theme-toggle');
+        if (btn) btn.innerHTML = theme === 'dark'
+          ? '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin-right:4px"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>Light'
+          : '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin-right:4px"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>Dark';
+      }
+      function toggle() {
+        apply(document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark');
+      }
+      function bindToggle() {
+        var btn = document.getElementById('theme-toggle');
+        if (btn) {
+          btn.removeEventListener('click', toggle);
+          btn.addEventListener('click', toggle);
+        }
+      }
+
+      apply(getPreferred());
+      bindToggle();
+      document.addEventListener('turbolinks:load', function() {
+        apply(getPreferred());
+        bindToggle();
+      });
+
+      /* ── Dropdown aria-expanded toggling ── */
+      document.querySelectorAll('.nav-dropdown-toggle, .lang-trigger').forEach(function(btn) {
+        var menu = btn.nextElementSibling;
+        btn.addEventListener('click', function(e) {
+          e.preventDefault();
+          var expanded = btn.getAttribute('aria-expanded') === 'true';
+          btn.setAttribute('aria-expanded', !expanded);
+        });
+        btn.addEventListener('keydown', function(e) {
+          if (e.key === 'Escape' && btn.getAttribute('aria-expanded') === 'true') {
+            btn.setAttribute('aria-expanded', 'false');
+            btn.focus();
+          }
+        });
+        if (menu) {
+          menu.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') {
+              btn.setAttribute('aria-expanded', 'false');
+              btn.focus();
+            }
+          });
+        }
+      });
+
+      /* Close dropdowns on outside click */
+      document.addEventListener('click', function(e) {
+        if (!e.target.closest('.nav-dropdown') && !e.target.closest('.lang-dropdown')) {
+          document.querySelectorAll('.nav-dropdown-toggle, .lang-trigger').forEach(function(btn) {
+            btn.setAttribute('aria-expanded', 'false');
+          });
+        }
+      });
+    })();
+  </script>
+  {{- /* i18n — inject translatable strings for JS components */}}
+  {{- $i18nKeys := slice
+    "player_play" "player_pause"
+    "player_rewind_title" "player_rewind_label"
+    "player_forward_title" "player_forward_label"
+    "player_mute_title" "player_mute_label"
+    "player_volume" "player_speed" "player_speed_label"
+    "player_seek" "player_cover_alt" "player_cover_of"
+    "player_episode" "player_close" "player_region"
+    "player_error" "player_no_source" "player_unknown_episode"
+    "player_source_link"
+    "code_copy_title" "code_copy_label" "code_copied" "code_copied_label"
+  -}}
+  <script nonce="{{ $cspNonce }}">
+  window.wavecast = window.wavecast || {};
+  window.wavecast.i18n = {
+    {{- range $i18nKeys }}
+    {{ . | jsonify | safeJS }}: {{ i18n . | jsonify | safeJS }},
+    {{- end }}
+  };
+  </script>
+  {{- /* Browser language auto-detection — redirect to preferred language on first visit */}}
+  {{- if hugo.IsMultilingual }}
+  <script nonce="{{ $cspNonce }}">
+  (function() {
+    var KEY = 'lang-pref';
+    try {
+      if (localStorage.getItem(KEY)) return;
+      localStorage.setItem(KEY, '1');
+    } catch(e) { return; }
+
+    var current = '{{ .Site.Language.Lang }}';
+    var browser = (navigator.language || navigator.userLanguage || '').split('-')[0];
+    if (!browser || browser === current) return;
+
+    {{- range .Site.Languages }}
+      {{- if ne .Lang $.Site.Language.Lang }}
+    if (browser === '{{ .Lang }}') {
+      window.location.href = '{{ $.Site.BaseURL }}{{ .Lang }}/';
+    }
+      {{- end }}
+    {{- end }}
+  })();
+  </script>
+  {{- end }}
+</body>
+</html>

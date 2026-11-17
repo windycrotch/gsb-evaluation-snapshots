@@ -1,0 +1,2444 @@
+/**
+ * <podcast-player> — Custom Web Component for podcast/radio audio playback.
+ *
+ * Attributes (all reflect observed props):
+ *   src        — Audio source URL (required at runtime)
+ *   title      — Episode title
+ *   poster     — Cover image URL
+ *   type       — MIME type of audio
+ *   chapters   — Comma-separated "HH:MM:SS-Label" pairs
+ *   persistent — Boolean attribute; hints the page framework to keep this
+ *                element alive across navigations
+ *   autoplay   — Boolean attribute
+ *
+ * Slots:
+ *   description — Rendered Markdown description from the shortcode
+ *
+ * Events emitted (bubbles):
+ *   player-state  — { paused, src, currentTime, duration }
+ *   podcast-play  — { src, title, url }  (compat with radio-t style controllers)
+ *
+ * @element podcast-player
+ */
+
+/* ------------------------------------------------------------------ */
+/*  Source Adapters (inlined to avoid ES module import issues          */
+/*  when Hugo serves the file via resources.Get without js.Build)      */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Detect the source type from a URL string.
+ * @param {string} url
+ * @returns {"local"|"azuracast"|"ivoox"}
+ */
+export function detectSourceType(url) {
+  if (!url) return "local";
+  if (/^(https?:)?\/\/[^\/]*ivoox\.com/i.test(url)) return "ivoox";
+  if (/azuracast\./i.test(url) || /\.stream\./i.test(url)) return "azuracast";
+  return "local";
+}
+
+/**
+ * Create the appropriate SourceAdapter for a <podcast-player> element.
+ * @param {HTMLElement} element
+ * @returns {SourceAdapter}
+ */
+export function createSourceAdapter(element) {
+  const type = element.getAttribute("data-source") || detectSourceType(
+    element.getAttribute("src") || "",
+  );
+  switch (type) {
+    case "azuracast": return new AzuracastAdapter(element);
+    case "ivoox":     return new IvooxAdapter(element);
+    default:          return new LocalAdapter(element);
+  }
+}
+
+export class LocalAdapter {
+  constructor(element) { this.element = element; }
+  async resolve() {
+    const src = this.element.getAttribute("src");
+    if (!src) throw new Error("LocalAdapter: missing src attribute");
+    return src;
+  }
+  async enrich() { return null; }
+}
+
+export class AzuracastAdapter {
+  constructor(element) { this.element = element; }
+  async resolve() {
+    const src = this.element.getAttribute("src");
+    if (src) return src;
+    const apiUrl = this.element.getAttribute("azuracast-api-url");
+    if (!apiUrl) throw new Error("AzuracastAdapter: missing azuracast-api-url attribute");
+    // Validate scheme before fetching to prevent client-side SSRF
+    const parsed = new URL(apiUrl);
+    if (parsed.protocol !== "https:") throw new Error("AzuracastAdapter: azuracast-api-url must use HTTPS");
+    const resp = await fetch(apiUrl);
+    if (!resp.ok) throw new Error(`AzuracastAdapter: API error ${resp.status}`);
+    const data = await resp.json();
+    const listenUrl = data?.station?.listen_url;
+    if (!listenUrl) throw new Error("AzuracastAdapter: no listen_url in API response");
+    this._cachedData = data;
+    return listenUrl;
+  }
+  async enrich() {
+    if (!this._cachedData) return null;
+    const np = this._cachedData.now_playing;
+    if (!np?.song) return null;
+    const meta = {};
+    if (np.song.title) meta.title = np.song.title;
+    if (np.song.artist) meta.artist = np.song.artist;
+    return Object.keys(meta).length > 0 ? meta : null;
+  }
+}
+
+export class IvooxAdapter {
+  constructor(element) { this.element = element; }
+  async resolve() {
+    const src = this.element.getAttribute("src");
+    if (!/ivoox\.com/i.test(src)) return src;
+    // Validate scheme and domain to prevent client-side SSRF
+    try {
+      const parsed = new URL(src);
+      if (parsed.protocol !== "https:" || !parsed.hostname.endsWith("ivoox.com")) {
+        console.warn("IvooxAdapter: refusing to fetch non-ivoox.com or non-HTTPS URL", src);
+        return src;
+      }
+    } catch { return src; }
+    try {
+      const resp = await fetch(src);
+      if (!resp.ok) return src;
+      const html = await resp.text();
+      const doc = new DOMParser().parseFromString(html, "text/html");
+      const ogAudio = doc.querySelector('meta[property="og:audio"]');
+      if (ogAudio?.content) return ogAudio.content;
+      const dataUrl = doc.querySelector("[data-audio-url]");
+      if (dataUrl?.getAttribute("data-audio-url")) return dataUrl.getAttribute("data-audio-url");
+      const audioSrc = doc.querySelector("audio source");
+      if (audioSrc?.src) return audioSrc.src;
+    } catch { /* fall through */ }
+    return src;
+  }
+  async enrich() { return null; }
+}
+
+/* ---- Open-source SVG icons (Feather/Lucide, MIT licensed) ---- */
+
+/**
+ * Compare two URLs by pathname + search, ignoring protocol/domain differences.
+ * Falls back to suffix matching for non-URL strings.
+ * @param {string} a
+ * @param {string} b
+ * @returns {boolean}
+ */
+function urlsMatch(a, b) {
+  try {
+    const uA = new URL(a, document.baseURI);
+    const uB = new URL(b, document.baseURI);
+    if (uA.pathname === uB.pathname && uA.search === uB.search) return true;
+    // Also match if paths differ only by trailing slash
+    return uA.pathname.replace(/\/$/, "") === uB.pathname.replace(/\/$/, "")
+      && uA.search === uB.search;
+  } catch { return a.endsWith(b) || b.endsWith(a); }
+}
+const ICON_SKIP_BACK =
+  '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>';
+const ICON_SKIP_FWD =
+  '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>';
+const ICON_VOL_FULL =
+  '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" fill="currentColor" stroke="none"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>';
+const ICON_VOL_LOW =
+  '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" fill="currentColor" stroke="none"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>';
+const ICON_VOL_MUTED =
+  '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" fill="currentColor" stroke="none"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>';
+
+class PodcastPlayer extends HTMLElement {
+  /** Attributes the component should react to. */
+  static get observedAttributes() {
+    return ["src", "title", "poster", "chapters", "type", "autoplay",
+      "data-preload", "persistent", "data-source", "url"];
+  }
+
+  /** Prefix for sessionStorage state key (instance ID appended). */
+  static get PERSISTENCE_KEY() { return "podcastPlayerState"; }
+
+  /** Minimum interval (ms) between throttled sessionStorage writes. */
+  static get SAVE_INTERVAL_MS() { return 30000; }
+
+  /** Staleness threshold (seconds) — discard saved position older than this. */
+  static get STATE_TTL_SECONDS() { return 3600; }
+
+  /* ------------------------------------------------------------------ */
+  /*  i18n — default English strings, overridable via window.wavecast   */
+  /* ------------------------------------------------------------------ */
+
+  static get DEFAULT_I18N() {
+    return {
+      player_region: "Podcast Player",
+      player_cover_alt: "Cover",
+      player_cover_of: "Cover: {title}",
+      player_rewind_title: "Rewind 15s",
+      player_rewind_label: "Rewind 15 seconds",
+      player_play: "Play",
+      player_pause: "Pause",
+      player_forward_title: "Forward 15s",
+      player_forward_label: "Forward 15 seconds",
+      player_seek: "Seek position",
+      player_mute_title: "Mute",
+      player_mute_label: "Toggle mute",
+      player_volume: "Volume",
+      player_speed: "Playback speed",
+      player_speed_label: "Playback speed {rate}×",
+      player_episode: "Podcast",
+      player_error: "Playback error",
+      player_no_source: "No audio source available",
+    };
+  }
+
+  constructor() {
+    super();
+    /** @type {ShadowRoot} */
+    this._shadow = this.attachShadow({ mode: "open" });
+    /** @type {HTMLAudioElement} */
+    this._audio = new Audio();
+    this._audio.preload = "metadata";
+
+    // Internal state
+    /** @type {Array<{time: number, label: string}>} */
+    this._chapters = [];
+    /** @type {number} */
+    this._currentChapterIndex = -1;
+    /** @type {string|null} detected navigation adapter */
+    this._persistenceAdapter = null;
+    /** @type {boolean} idempotency guard for _persistenceSetup */
+    this._persistenceActive = false;
+    /** @type {object|null} deferred restore state, applied on loadedmetadata */
+    this._pendingRestoreState = null;
+    /** @type {boolean} guard to suppress sync echo during cross-player state events */
+    this._suppressSync = false;
+
+    // Bind handlers so we can add/remove them
+    this._onTimeUpdate = this._onTimeUpdate.bind(this);
+    this._onLoadedMetadata = this._onLoadedMetadata.bind(this);
+    this._onPlay = this._onPlay.bind(this);
+    this._onPause = this._onPause.bind(this);
+    this._onEnded = this._onEnded.bind(this);
+    this._onError = this._onError.bind(this);
+    this._onKeyDown = this._onKeyDown.bind(this);
+    this._onExternalPause = this._onExternalPause.bind(this);
+    this._onExternalPlay = this._onExternalPlay.bind(this);
+    this._onExternalSeek = this._onExternalSeek.bind(this);
+    this._onPodcastClose = this._onPodcastClose.bind(this);
+    this._onBeforeUnload = this._onBeforeUnload.bind(this);
+    this._onStateChange = this._onStateChange.bind(this);
+
+    // i18n — merge window.wavecast.i18n over English defaults
+    const extI18n = (window.wavecast && window.wavecast.i18n) || {};
+    this._i = Object.assign({}, PodcastPlayer.DEFAULT_I18N, extI18n);
+
+    // Tiny helper: replace {key} placeholders in translated strings
+    this._t = (key, vars) => {
+      let s = this._i[key] || key;
+      if (vars) {
+        Object.keys(vars).forEach(k => {
+          s = s.replace("{" + k + "}", vars[k]);
+        });
+      }
+      return s;
+    };
+  }
+
+  /* ------------------------------------------------------------------ */
+  /*  Lifecycle                                                          */
+  /* ------------------------------------------------------------------ */
+
+  connectedCallback() {
+    this._render();
+    this._bindAudioEvents();
+    this._bindUIEvents();
+    document.addEventListener("keydown", this._onKeyDown);
+    document.addEventListener("podcast-pause", this._onExternalPause);
+    document.addEventListener("podcast-play", this._onExternalPlay);
+    document.addEventListener("podcast-seek", this._onExternalSeek);
+    document.addEventListener("podcast-close", this._onPodcastClose);
+    document.addEventListener("podcast-state-change", this._onStateChange);
+    this._applyAttributes();
+
+    // Phase 4: persistence — only when the persistent attribute is present
+    if (this.hasAttribute("persistent")) {
+      this._persistenceSetup();
+    }
+
+    // Phase 5: Apply restored position if the player was reconnected
+    // (e.g. Turbolinks). The persistence layer saved the position but
+    // marked paused=true (set in disconnectedCallback), so this only
+    // restores time/progress without autoplaying — the user sees "play" icon and
+    // can click to resume from where they left off. If metadata is already
+    // loaded (audio element survived reconnection), apply eagerly.
+    if (this._pendingRestoreState && this._audio.readyState >= HTMLMediaElement.HAVE_METADATA) {
+      this._applyRestoredPosition(this._pendingRestoreState);
+    }
+  }
+
+  disconnectedCallback() {
+    // Save state before we lose the audio context
+    if (this._persistenceActive) {
+      this._savePlaybackState();
+      // Override to paused=true — prevents autoplay on reconnect. When the user
+      // navigates away while playing, they may start listening to something else
+      // on the next page. Autoplaying on return would steal the audio from
+      // whatever is currently playing in the footer.
+      try {
+        const key = this._persistenceKey();
+        const raw = sessionStorage.getItem(key);
+        if (raw) {
+          const state = JSON.parse(raw);
+          state.paused = true;
+          sessionStorage.setItem(key, JSON.stringify(state));
+        }
+      } catch (_) {}
+    }
+    // Unbind audio events FIRST so our pause doesn't trigger _onPause
+    // (which would dispatch podcast-pause to the footer, incorrectly stopping it).
+    this._unbindAudioEvents();
+    // Stop playback: when Turbolinks replaces <body>, non-permanent inline players
+    // are removed from DOM but their internal <audio> keeps playing in memory.
+    // pause() stops the audio without clearing the src — preserving it for
+    // Turbolinks permanent elements that get detached/reattached.
+    if (!this._audio.paused) {
+      this._audio.pause();
+    }
+    this._teardownPersistence();
+    document.removeEventListener("keydown", this._onKeyDown);
+    document.removeEventListener("podcast-pause", this._onExternalPause);
+    document.removeEventListener("podcast-play", this._onExternalPlay);
+    document.removeEventListener("podcast-seek", this._onExternalSeek);
+    document.removeEventListener("podcast-close", this._onPodcastClose);
+    document.removeEventListener("podcast-state-change", this._onStateChange);
+  }
+
+  attributeChangedCallback(name, oldVal, newVal) {
+    if (oldVal === newVal) return;
+    switch (name) {
+      case "src":
+        this._applySrc(newVal);
+        break;
+      case "title":
+        this._updateTitle(newVal);
+        break;
+      case "poster":
+        this._updatePoster(newVal);
+        break;
+      case "chapters":
+        this._parseChapters(newVal);
+        break;
+      case "type":
+        // stored for internal use when setting source
+        break;
+      case "autoplay":
+        this._audio.autoplay = newVal !== null;
+        break;
+      case "data-preload":
+        this._audio.preload = newVal || "metadata";
+        break;
+      case "persistent":
+        if (newVal !== null && this.isConnected) {
+          this._persistenceSetup();
+        } else if (newVal === null) {
+          this._teardownPersistence();
+        }
+        break;
+      case "data-source":
+        if (this.isConnected) {
+          const src = this.getAttribute("src");
+          if (src) this._applySrc(src);
+        }
+        break;
+    }
+  }
+
+  /* ------------------------------------------------------------------ */
+  /*  Shadow DOM template                                                */
+  /* ------------------------------------------------------------------ */
+
+  _render() {
+    this._shadow.innerHTML = `
+      <style>
+        :host {
+          display: block;
+          font-family: system-ui, -apple-system, sans-serif;
+          --pp-primary: var(--podcast-player-primary, #6366f1);
+          --pp-bg: var(--podcast-player-bg, #1e1e2e);
+          --pp-surface: var(--podcast-player-surface, #2a2a3e);
+          --pp-text: var(--podcast-player-text, #e0e0e0);
+          --pp-text-muted: var(--podcast-player-text-muted, #888);
+          --pp-radius: var(--podcast-player-radius, 12px);
+          --pp-accent: var(--podcast-player-accent, #a78bfa);
+          --pp-progress-height: var(--podcast-player-progress-height, 5px);
+          --pp-thumb-size: var(--podcast-player-thumb-size, 14px);
+          --pp-focus-ring: var(--podcast-player-focus-ring, 0 0 0 3px rgba(99,102,241,.45));
+          --pp-border: var(--podcast-player-border, rgba(255,255,255,.06));
+          background: var(--pp-bg);
+          color: var(--pp-text);
+          border-radius: var(--pp-radius);
+          padding: 16px;
+          box-shadow: 0 4px 24px rgba(0,0,0,.25);
+          transition: background .2s;
+        }
+        .player        { display: flex; flex-direction: column; gap: 12px; }
+        .title-row     { min-width: 0; }
+        .title         { font-weight: 600; font-size: 1rem; margin: 0 0 4px;
+                         white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        ::slotted([slot="description"]) { font-size: .85rem; color: var(--pp-text-muted);
+                                          margin: 0; line-height: 1.4;
+                                          display: -webkit-box;
+                                          -webkit-line-clamp: 2;
+                                          -webkit-box-orient: vertical;
+                                          overflow: hidden; }
+        .media-row     { display: grid; grid-template-columns: auto 1fr;
+                         grid-template-areas:
+                           "poster buttons"
+                           "poster controls"
+                           "poster extras";
+                         gap: 12px 14px; align-items: start; }
+        .poster-wrap   { display: contents; }
+        .poster        { grid-area: poster; width: clamp(64px, 10vw, 110px); aspect-ratio: 1;
+                         border-radius: 8px; object-fit: cover; background: var(--pp-surface); }
+        .play-overlay  { grid-area: buttons; display: flex; align-items: center; gap: 8px; }
+        .body-area     { display: contents; }
+        .controls-row  { grid-area: controls; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+        .extras-row    { grid-area: extras; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+        .btn           { background: var(--pp-surface); border: none; color: var(--pp-text);
+                         width: 36px; height: 36px; border-radius: 50%;
+                         cursor: pointer; display: inline-flex; align-items: center;
+                         justify-content: center; font-size: 1.1rem;
+                         transition: background .15s, transform .1s, box-shadow .15s; }
+        .btn:hover     { background: var(--pp-primary); color: #fff; }
+        .btn:active    { transform: scale(.92); }
+        .btn-play      { width: 44px; height: 44px; font-size: 1.3rem;
+                         background: var(--pp-primary); color: #fff; }
+        .btn-play:hover { background: var(--pp-accent); }
+        .progress-wrap { flex: 1; min-width: 100px; position: relative; }
+        input[type="range"] { -webkit-appearance: none; appearance: none;
+                               width: 100%; height: var(--pp-progress-height); border-radius: 3px;
+                               background: linear-gradient(to right, var(--pp-primary) var(--progress, 0%), var(--pp-surface) var(--progress, 0%));
+                               outline: none;
+                               cursor: pointer; margin: 0; }
+        input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none;
+          width: var(--pp-thumb-size); height: var(--pp-thumb-size); border-radius: 50%;
+          background: var(--pp-primary); border: 2px solid var(--pp-bg);
+          cursor: pointer; transition: transform .15s ease; }
+        input[type="range"]::-webkit-slider-thumb:hover { transform: scale(1.25); }
+        input[type="range"]::-moz-range-thumb { width: var(--pp-thumb-size); height: var(--pp-thumb-size);
+          border-radius: 50%; background: var(--pp-primary); border: 2px solid var(--pp-bg);
+          cursor: pointer; transition: transform .15s ease; }
+        input[type="range"]::-moz-range-thumb:hover { transform: scale(1.25); }
+        .time          { font-size: .8rem; font-variant-numeric: tabular-nums;
+                         color: var(--pp-text-muted); white-space: nowrap; }
+        .vol-wrap      { display: flex; align-items: center; gap: 4px; width: 90px; }
+        .vol-wrap .btn { width: 28px; height: 28px; border-radius: 50%; font-size: .85rem; }
+        .rate-btn      { font-size: .75rem; font-weight: 600; width: auto;
+                         height: 28px; border-radius: 14px; padding: 0 10px; }
+        .chapters      { overflow-x: auto; }
+        .chapter-chip  { display: inline-block; font-size: .75rem; padding: 2px 8px; border-radius: 10px; margin-right: 4px;
+                         background: var(--pp-surface); color: var(--pp-text-muted);
+                         cursor: pointer; border: none; transition: background .15s; }
+        .chapter-chip:hover { background: var(--pp-primary); color: #fff; }
+        .chapter-chip.active { background: var(--pp-primary); color: #fff; }
+        .error-msg     { color: #f87171; font-size: .8rem; padding: 4px 0; }
+        .error-msg:not([hidden]) { animation: error-in .25s ease; }
+        @keyframes error-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+        .btn:focus-visible, .chapter-chip:focus-visible, input[type="range"]:focus-visible { outline: none; box-shadow: var(--pp-focus-ring); }
+        [hidden]       { display: none !important; }
+
+        @media (max-width: 640px) {
+          .player        { flex-direction: column; gap: 14px; }
+          .title         { white-space: normal; overflow: visible; text-overflow: clip; }
+          .media-row     { display: flex; flex-direction: column; gap: 12px; }
+          .poster-wrap   { display: block; position: relative; width: 100%; }
+          .poster        { width: 100%; aspect-ratio: 16/9; grid-area: auto; display: block; }
+          .play-overlay  { grid-area: auto; position: absolute; top: 50%; left: 50%;
+                           transform: translate(-50%, -50%); z-index: 2;
+                           background: rgba(0,0,0,0.6); border-radius: 999px;
+                           padding: 8px 16px; gap: 12px; }
+          .play-overlay .btn { background: transparent; color: #fff; width: 40px; height: 40px; }
+          .play-overlay .btn:hover { background: rgba(255,255,255,0.15); color: #fff; }
+          .play-overlay .btn-play { width: 46px; height: 46px; }
+          .body-area     { flex-direction: column; gap: 12px; }
+          .controls-row  { grid-area: auto; width: 100%;
+                            display: grid; grid-template-columns: 1fr auto auto auto;
+                            align-items: center; gap: 4px; }
+          .controls-row .progress-wrap { min-width: 30px; overflow: hidden; }
+          .controls-row .time { font-size: .7rem; white-space: nowrap; }
+          .controls-row .time-duration { padding-right: 8px; }
+          .extras-row    { grid-area: auto; }
+          .chapters      { margin-top: 0; width: 100%; }
+        }
+      </style>
+      <div class="player" part="player" role="region" aria-label="${this._t("player_region")}">
+        <div class="title-row" part="header">
+          <p class="title" part="title"></p>
+          <slot name="description"></slot>
+        </div>
+        <div class="media-row" part="media-row">
+          <div class="poster-wrap" part="poster-wrap">
+            <img class="poster" part="poster" src="" alt="${this._t("player_cover_alt")}" hidden>
+            <div class="play-overlay" part="play-overlay">
+              <button class="btn btn-skip-back" part="skip-back-btn"
+                      title="${this._t("player_rewind_title")}" aria-label="${this._t("player_rewind_label")}">${ICON_SKIP_BACK}</button>
+              <button class="btn btn-play" part="play-btn"
+                      title="${this._t("player_play")}" aria-label="${this._t("player_play")}" aria-pressed="false"><svg viewBox="0 0 512 512" width="24" height="24"><path fill="currentColor" d="M176 96l256 160-256 160V96z"/></svg></button>
+              <button class="btn btn-skip-fwd" part="skip-fwd-btn"
+                      title="${this._t("player_forward_title")}" aria-label="${this._t("player_forward_label")}">${ICON_SKIP_FWD}</button>
+            </div>
+          </div>
+          <div class="body-area" part="body">
+            <div class="controls-row" part="controls">
+              <div class="progress-wrap" part="progress-wrap">
+                <input type="range" class="progress" part="progress"
+                       min="0" max="100" value="0"
+                       aria-label="${this._t("player_seek")}" aria-valuetext="0:00 of 0:00">
+              </div>
+              <span class="time time-current" part="time-current">--:--</span>
+              <span class="time time-sep" part="time-sep">/</span>
+              <span class="time time-duration" part="time-duration">--:--</span>
+            </div>
+            <div class="extras-row" part="extras">
+              <div class="vol-wrap" part="vol-wrap">
+                <button class="btn btn-mute" part="mute-btn"
+                        title="${this._t("player_mute_title")}" aria-label="${this._t("player_mute_label")}" aria-pressed="false">${ICON_VOL_FULL}</button>
+                <input type="range" class="volume" part="volume"
+                       min="0" max="1" step="0.05" value="1"
+                       aria-label="${this._t("player_volume")}">
+              </div>
+              <button class="btn rate-btn" part="rate-btn"
+                      title="${this._t("player_speed")}" aria-label="${this._t("player_speed")}">1×</button>
+            </div>
+          </div>
+        </div>
+        <div class="chapters" part="chapters" hidden></div>
+        <div class="error-msg" part="error" role="alert" hidden></div>
+      </div>
+    `;
+
+    // Cache DOM refs
+    this._els = {
+      poster:       this._shadow.querySelector(".poster"),
+      title:        this._shadow.querySelector(".title"),
+      playBtn:      this._shadow.querySelector(".btn-play"),
+      skipBack:     this._shadow.querySelector(".btn-skip-back"),
+      skipFwd:      this._shadow.querySelector(".btn-skip-fwd"),
+      progress:     this._shadow.querySelector(".progress"),
+      timeCurrent:  this._shadow.querySelector(".time-current"),
+      timeDuration: this._shadow.querySelector(".time-duration"),
+      volume:       this._shadow.querySelector(".volume"),
+      muteBtn:      this._shadow.querySelector(".btn-mute"),
+      rateBtn:      this._shadow.querySelector(".rate-btn"),
+      chapters:     this._shadow.querySelector(".chapters"),
+      error:        this._shadow.querySelector(".error-msg"),
+    };
+  }
+
+  /* ------------------------------------------------------------------ */
+  /*  Audio event binding                                                */
+  /* ------------------------------------------------------------------ */
+
+  _bindAudioEvents() {
+    this._audio.addEventListener("timeupdate", this._onTimeUpdate);
+    this._audio.addEventListener("loadedmetadata", this._onLoadedMetadata);
+    this._audio.addEventListener("play", this._onPlay);
+    this._audio.addEventListener("pause", this._onPause);
+    this._audio.addEventListener("ended", this._onEnded);
+    this._audio.addEventListener("error", this._onError);
+  }
+
+  _unbindAudioEvents() {
+    this._audio.removeEventListener("timeupdate", this._onTimeUpdate);
+    this._audio.removeEventListener("loadedmetadata", this._onLoadedMetadata);
+    this._audio.removeEventListener("play", this._onPlay);
+    this._audio.removeEventListener("pause", this._onPause);
+    this._audio.removeEventListener("ended", this._onEnded);
+    this._audio.removeEventListener("error", this._onError);
+  }
+
+  /* ------------------------------------------------------------------ */
+  /*  UI event binding                                                   */
+  /* ------------------------------------------------------------------ */
+
+  _bindUIEvents() {
+    this._els.playBtn.addEventListener("click", () => this._togglePlay());
+    this._els.skipBack.addEventListener("click", () => this._skip(-15));
+    this._els.skipFwd.addEventListener("click", () => this._skip(15));
+    this._els.progress.addEventListener("input", () => this._seek());
+    this._els.volume.addEventListener("input", () => this._setVolume());
+    this._els.muteBtn.addEventListener("click", () => this._toggleMute());
+    this._els.rateBtn.addEventListener("click", () => this._cycleRate());
+    // Chapter clicks — delegated
+    this._els.chapters.addEventListener("click", (e) => {
+      const chip = e.target.closest(".chapter-chip");
+      if (chip) {
+        const idx = parseInt(chip.dataset.index, 10);
+        this._seekToChapter(idx);
+      }
+    });
+  }
+
+  /* ------------------------------------------------------------------ */
+  /*  Attribute handling                                                 */
+  /* ------------------------------------------------------------------ */
+
+  _applyAttributes() {
+    const src = this.getAttribute("src");
+    if (src) this._applySrc(src);
+
+    const title = this.getAttribute("title");
+    if (title) this._updateTitle(title);
+
+    const poster = this.getAttribute("poster");
+    if (poster) this._updatePoster(poster);
+
+    const chapters = this.getAttribute("chapters");
+    if (chapters) this._parseChapters(chapters);
+
+    const preload = this.getAttribute("data-preload") || "metadata";
+    this._audio.preload = preload;
+    this._audio.autoplay = this.hasAttribute("autoplay");
+  }
+
+  _applySrc(src) {
+    if (!src) return;
+
+    const dataSource = this.getAttribute("data-source");
+    const sourceType = dataSource || detectSourceType(src);
+
+    if (sourceType !== "local") {
+      this._resolveAdapterSource();
+      return;
+    }
+
+    this._setAudioSrc(src);
+  }
+
+  /** Directly assign a URL to the internal <audio> element. */
+  _setAudioSrc(src, { updateAttribute = true } = {}) {
+    const wasPlaying = !this._audio.paused;
+    this._audio.src = src;
+    this._audio.load();
+    if (wasPlaying) {
+      this._audio.play()?.catch(() => {});
+    }
+    if (updateAttribute && this.getAttribute("src") !== src) {
+      this.setAttribute("src", src);
+    }
+  }
+
+  /** Create the appropriate source adapter and resolve the real audio URL. */
+  async _resolveAdapterSource() {
+    const adapter = createSourceAdapter(this);
+    try {
+      const resolved = await adapter.resolve();
+      this._setAudioSrc(resolved, { updateAttribute: false });
+      await adapter.enrich();
+    } catch (err) {
+      this._showError(err.message);
+    }
+  }
+
+  _showError(msg) {
+    this._els.error.textContent = msg;
+    this._els.error.hidden = false;
+  }
+
+  _updateTitle(val) {
+    this._els.title.textContent = val || "";
+  }
+
+  _updatePoster(val) {
+    if (val) {
+      this._els.poster.src = val;
+      this._els.poster.hidden = false;
+      const title = this.getAttribute("title") || "";
+      this._els.poster.alt = title ? this._t("player_cover_of", {title}) : this._t("player_cover_alt");
+    } else {
+      this._els.poster.src = "";
+      this._els.poster.hidden = true;
+    }
+  }
+
+  _parseChapters(val) {
+    this._chapters = [];
+    this._els.chapters.innerHTML = "";
+    if (!val) {
+      this._els.chapters.hidden = true;
+      return;
+    }
+    const parts = val.split(",");
+    for (const p of parts) {
+      const m = p.match(/^(\d{2}):(\d{2}):(\d{2})-(.+)/);
+      if (!m) continue;
+      const seconds = parseInt(m[1], 10) * 3600
+                    + parseInt(m[2], 10) * 60
+                    + parseInt(m[3], 10);
+      this._chapters.push({ time: seconds, label: m[4].trim() });
+    }
+    if (this._chapters.length === 0) {
+      this._els.chapters.hidden = true;
+      return;
+    }
+    this._els.chapters.hidden = false;
+    this._chapters.forEach((ch, i) => {
+      const chip = document.createElement("button");
+      chip.className = "chapter-chip";
+      chip.dataset.index = i;
+      chip.textContent = ch.label;
+      chip.title = this._fmtTime(ch.time);
+      chip.setAttribute("aria-label", `Seek to chapter: ${ch.label}`);
+      this._els.chapters.appendChild(chip);
+    });
+  }
+
+  /* ------------------------------------------------------------------ */
+  /*  Playback controls                                                  */
+  /* ------------------------------------------------------------------ */
+
+  /** Toggle play/pause. */
+  _togglePlay() {
+    if (this._audio.paused) {
+      this._audio.play()?.catch(() => {});
+    } else {
+      this._audio.pause();
+    }
+  }
+
+  /** Skip relative seconds (negative = backward). */
+  _skip(sec) {
+    this._audio.currentTime = Math.max(0, Math.min(
+      this._audio.currentTime + sec,
+      this._audio.duration || 0,
+    ));
+    // Notify footer and other inline players of position change
+    this.dispatchEvent(new CustomEvent("podcast-seek", {
+      bubbles: true,
+      composed: true,
+      detail: {
+        currentTime: this._audio.currentTime,
+        src: this._audio.src || this.getAttribute("src") || "",
+      },
+    }));
+  }
+
+  /** Seek to the position set on the progress slider. */
+  _seek() {
+    if (!this._audio.duration) return;
+    const pct = parseFloat(this._els.progress.value) / 100;
+    this._audio.currentTime = pct * this._audio.duration;
+    // Notify footer and other inline players playing the same source
+    this.dispatchEvent(new CustomEvent("podcast-seek", {
+      bubbles: true,
+      composed: true,
+      detail: {
+        currentTime: this._audio.currentTime,
+        src: this._audio.src || this.getAttribute("src") || "",
+      },
+    }));
+  }
+
+  /** Seek to a chapter by index. */
+  _seekToChapter(index) {
+    const ch = this._chapters[index];
+    if (!ch) return;
+    this._audio.currentTime = ch.time;
+    // Update active chip
+    this._els.chapters.querySelectorAll(".chapter-chip").forEach((chip, i) => {
+      chip.classList.toggle("active", i === index);
+    });
+    this._currentChapterIndex = index;
+    // Notify footer and other inline players of position change
+    this.dispatchEvent(new CustomEvent("podcast-seek", {
+      bubbles: true,
+      composed: true,
+      detail: {
+        currentTime: ch.time,
+        src: this._audio.src || this.getAttribute("src") || "",
+      },
+    }));
+    // Auto-play if paused
+    if (this._audio.paused) {
+      this._audio.play()?.catch(() => {});
+    }
+  }
+
+  /* ------------------------------------------------------------------ */
+  /*  Volume                                                             */
+  /* ------------------------------------------------------------------ */
+
+  _setVolume() {
+    const v = parseFloat(this._els.volume.value);
+    // When a podcast-footer is producing audible output, keep the inline
+    // <audio> silenced (volume=0) to avoid double audio.  Only the footer's
+    // <audio> should produce sound.
+    const hasFooter = document.querySelector("podcast-footer[active]");
+    if (!hasFooter) {
+      this._audio.volume = v;
+      this._audio.muted = false;
+    }
+    this._updateMuteIcon(v);
+    // Dispatch the user-chosen values regardless of footer presence
+    this._dispatchStateChange({ volume: v, muted: false });
+  }
+
+  _toggleMute() {
+    const hasFooter = document.querySelector("podcast-footer[active]");
+    const wasMuted = this._els.muteBtn.getAttribute("aria-pressed") === "true";
+    const newMuted = !wasMuted;
+    if (!hasFooter) {
+      this._audio.muted = newMuted;
+    }
+    const currentVol = parseFloat(this._els.volume.value);
+    this._updateMuteIcon(newMuted ? 0 : currentVol);
+    this._els.muteBtn.setAttribute("aria-pressed", String(newMuted));
+    this._dispatchStateChange({ muted: newMuted, volume: newMuted ? 0 : currentVol });
+  }
+
+  _updateMuteIcon(vol) {
+    if (this._audio.muted || vol === 0) {
+      this._els.muteBtn.innerHTML = ICON_VOL_MUTED;
+      this._els.volume.value = 0;
+    } else if (vol < 0.5) {
+      this._els.muteBtn.innerHTML = ICON_VOL_LOW;
+    } else {
+      this._els.muteBtn.innerHTML = ICON_VOL_FULL;
+    }
+  }
+
+  /* ------------------------------------------------------------------ */
+  /*  Playback rate                                                      */
+  /* ------------------------------------------------------------------ */
+
+  _cycleRate() {
+    const rates = [0.5, 0.75, 1, 1.25, 1.5, 2];
+    const current = parseFloat(this._els.rateBtn.textContent) || 1;
+    const idx = rates.indexOf(current);
+    const next = rates[(idx + 1) % rates.length];
+    const hasFooter = document.querySelector("podcast-footer[active]");
+    if (!hasFooter) {
+      this._audio.playbackRate = next;
+    }
+    this._els.rateBtn.textContent = next + "\u00d7";
+    this._els.rateBtn.setAttribute("aria-label", this._t("player_speed_label", {rate: next+"\u00d7"}));
+    this._dispatchStateChange({ playbackRate: next });
+  }
+
+  /* ------------------------------------------------------------------ */
+  /*  Audio event handlers                                               */
+  /* ------------------------------------------------------------------ */
+
+  _onTimeUpdate() {
+    if (!this._audio.duration) return;
+    const pct = (this._audio.currentTime / this._audio.duration) * 100;
+    this._els.progress.value = pct;
+    this._els.progress.style.setProperty("--progress", pct + "%");
+    this._els.timeCurrent.textContent = this._fmtTime(this._audio.currentTime);
+    this._els.progress.setAttribute("aria-valuetext",
+      `${this._fmtTime(this._audio.currentTime)} of ${this._fmtTime(this._audio.duration)}`);
+
+    // Highlight active chapter
+    this._updateActiveChapter();
+
+    // Persistence: save state periodically (throttled to ~every 30 s)
+    // so the restored position is reasonably fresh on full page reload.
+    if (this.hasAttribute("persistent")) {
+      this._savePlaybackStateThrottled();
+    }
+  }
+
+  /** Throttled wrapper around _savePlaybackState — respects SAVE_INTERVAL_MS. */
+  _savePlaybackStateThrottled() {
+    const now = Date.now();
+    if (this._lastSaveTs && (now - this._lastSaveTs) < PodcastPlayer.SAVE_INTERVAL_MS) return;
+    this._lastSaveTs = now;
+    this._savePlaybackState();
+  }
+
+  _onLoadedMetadata() {
+    this._els.timeDuration.textContent = this._fmtTime(this._audio.duration);
+    this._els.progress.max = "100";
+    this._els.error.hidden = true;
+
+    // Apply deferred position restore (saved in _restorePlaybackState)
+    if (this._pendingRestoreState) {
+      this._applyRestoredPosition(this._pendingRestoreState);
+    }
+
+    // Update Media Session metadata
+    if ("mediaSession" in navigator) {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: this.getAttribute("title") || this._t("player_episode"),
+        artist: "",
+        album: "",
+        artwork: this.getAttribute("poster")
+          ? [{ src: this.getAttribute("poster"), sizes: "512x512", type: "image/jpeg" }]
+          : [],
+      });
+    }
+  }
+
+  _onPlay() {
+    this._els.playBtn.innerHTML = '<svg viewBox="0 0 512 512" width="24" height="24"><path fill="currentColor" d="M144 96h96v320h-96zM272 96h96v320h-96z"/></svg>';
+    this._els.playBtn.setAttribute("aria-label", this._t("player_pause"));
+    this._els.playBtn.setAttribute("aria-pressed", "true");
+    this._els.playBtn.title = this._t("player_pause");
+    this._dispatchState();
+    this._updateMediaSessionPlayback();
+
+    // Persistence: save play state immediately
+    if (this.hasAttribute("persistent")) {
+      this._lastSaveTs = Date.now();
+      this._savePlaybackState();
+    }
+
+    // Notify a global footer (podcast-footer) that playback started
+    this.dispatchEvent(new CustomEvent("podcast-play", {
+      bubbles: true,
+      composed: true,
+      detail: {
+        src: this._audio.src || this.getAttribute("src") || "",
+        title: this.getAttribute("title") || "",
+        poster: this.getAttribute("poster") || "",
+        url: this._resolveUrl(),
+        currentTime: this._audio.currentTime,
+      },
+    }));
+
+    // Mute the inline's own audio when a <podcast-footer> is present to prevent
+    // double audio — the footer's <audio> will produce the actual sound while
+    // this element's <audio> keeps playing for progress/chapter tracking.
+    // When no footer exists (standalone usage), restore volume to full so the
+    // inline produces audible output (handles the edge case where persistence
+    // restored volume=0 from a prior muted state).
+    const hasFooter = document.querySelector("podcast-footer");
+    if (hasFooter) {
+      this._audio.volume = 0;
+    } else if (this._audio.volume === 0) {
+      this._audio.volume = 1;
+    }
+  }
+
+  _onPause() {
+    this._els.playBtn.innerHTML = '<svg viewBox="0 0 512 512" width="24" height="24"><path fill="currentColor" d="M176 96l256 160-256 160V96z"/></svg>';
+    this._els.playBtn.setAttribute("aria-label", this._t("player_play"));
+    this._els.playBtn.setAttribute("aria-pressed", "false");
+    this._els.playBtn.title = this._t("player_play");
+    this._dispatchState();
+    this._updateMediaSessionPlayback();
+
+    // Restore volume so standalone playback (no footer) works at normal level
+    this._audio.volume = 1;
+
+    // Persistence: save pause state immediately
+    if (this.hasAttribute("persistent")) {
+      this._lastSaveTs = Date.now();
+      this._savePlaybackState();
+    }
+
+    // Notify footer (and other listeners) that playback paused
+    this.dispatchEvent(new CustomEvent("podcast-pause", {
+      bubbles: true,
+      composed: true,
+      detail: {
+        src: this._audio.src || this.getAttribute("src") || "",
+        title: this.getAttribute("title") || "",
+        poster: this.getAttribute("poster") || "",
+        currentTime: this._audio.currentTime,
+      },
+    }));
+  }
+
+  _onEnded() {
+    this._onPause();
+    this._audio.currentTime = 0;
+    this._els.progress.value = 0;
+  }
+
+  _onError() {
+    const err = this._audio.error;
+    let msg = this._t("player_error");
+    if (err && err.message) msg += ": " + err.message;
+    else if (this._audio.networkState === this._audio.NETWORK_NO_SOURCE) {
+      msg = this._t("player_no_source");
+    }
+    this._els.error.textContent = msg;
+    this._els.error.hidden = false;
+    this._dispatchState();
+  }
+
+  /* ------------------------------------------------------------------ */
+  /*  Keyboard shortcuts                                                 */
+  /* ------------------------------------------------------------------ */
+
+  _onKeyDown(e) {
+    // Only respond when this player is the relevant audio context
+    // (space should not interfere with other page elements)
+    if (e.target.closest("input, textarea, [contenteditable]")) return;
+
+    switch (e.code) {
+      case "Space":
+        e.preventDefault();
+        this._togglePlay();
+        break;
+      case "ArrowLeft":
+        e.preventDefault();
+        this._skip(-15);
+        break;
+      case "ArrowRight":
+        e.preventDefault();
+        this._skip(15);
+        break;
+      case "ArrowUp":
+        e.preventDefault();
+        {
+          const hasFooter = document.querySelector("podcast-footer[active]");
+          const base = hasFooter ? parseFloat(this._els.volume.value) : this._audio.volume;
+          const newVol = Math.min(1, base + 0.1);
+          if (!hasFooter) this._audio.volume = newVol;
+          this._els.volume.value = String(newVol);
+          this._updateMuteIcon(newVol);
+          this._dispatchStateChange({ volume: newVol, muted: false });
+        }
+        break;
+      case "ArrowDown":
+        e.preventDefault();
+        {
+          const hasFooter = document.querySelector("podcast-footer[active]");
+          const base = hasFooter ? parseFloat(this._els.volume.value) : this._audio.volume;
+          const newVol = Math.max(0, base - 0.1);
+          if (!hasFooter) this._audio.volume = newVol;
+          this._els.volume.value = String(newVol);
+          this._updateMuteIcon(newVol);
+          this._dispatchStateChange({ volume: newVol, muted: false });
+        }
+        break;
+      case "KeyM":
+        e.preventDefault();
+        this._toggleMute();
+        // _toggleMute already dispatches state change
+        break;
+    }
+  }
+
+  /* ------------------------------------------------------------------ */
+  /*  External event handlers (sync with podcast-footer)                  */
+  /* ------------------------------------------------------------------ */
+
+  /** Respond to a pause event from the footer or another inline player. */
+  _onExternalPause(e) {
+    const src = e.detail && e.detail.src;
+    const mySrc = this._audio.src || this.getAttribute("src") || "";
+    // Only react if the event matches our source (or if unknown — backward compat)
+    if (src && src !== mySrc && !urlsMatch(src, mySrc) && !urlsMatch(mySrc, src)) return;
+
+    if (this._audio.src && !this._audio.paused) {
+      this._audio.pause();
+      // _onPause will update our UI
+    } else {
+      // Ensure button shows play icon
+      this._els.playBtn.innerHTML = '<svg viewBox="0 0 512 512" width="24" height="24"><path fill="currentColor" d="M176 96l256 160-256 160V96z"/></svg>';
+      this._els.playBtn.setAttribute("aria-label", this._t("player_play"));
+      this._els.playBtn.setAttribute("aria-pressed", "false");
+      this._els.playBtn.title = this._t("player_play");
+    }
+  }
+
+  /** Respond to close event from the footer — force-stop playback. */
+  _onPodcastClose(e) {
+    if (this._audio.src && !this._audio.paused) {
+      this._audio.pause();
+    }
+    // Always show play icon on close
+    this._els.playBtn.innerHTML = '<svg viewBox="0 0 512 512" width="24" height="24"><path fill="currentColor" d="M176 96l256 160-256 160V96z"/></svg>';
+    this._els.playBtn.setAttribute("aria-label", this._t("player_play"));
+    this._els.playBtn.setAttribute("aria-pressed", "false");
+    this._els.playBtn.title = this._t("player_play");
+  }
+
+  /** Respond to a play event from the footer or another inline player.
+   *  Same source → sync button. Different source → stop our playback
+   *  (only one audio plays at a time). */
+  _onExternalPlay(e) {
+    const detail = e.detail || {};
+    const src = detail.src || "";
+    const mySrc = this._audio.src || this.getAttribute("src") || "";
+    if (!mySrc || !src) return;
+
+    if (mySrc === src || urlsMatch(src, mySrc) || urlsMatch(mySrc, src)) {
+      // Same source: someone else started our track — sync button to show pause
+      this._els.playBtn.innerHTML = '<svg viewBox="0 0 512 512" width="24" height="24"><path fill="currentColor" d="M144 96h96v320h-96zM272 96h96v320h-96z"/></svg>';
+      this._els.playBtn.setAttribute("aria-label", this._t("player_pause"));
+      this._els.playBtn.setAttribute("aria-pressed", "true");
+      this._els.playBtn.title = this._t("player_pause");
+    } else if (!this._audio.paused) {
+      // Different source: stop our playback (only one song at a time)
+      this._audio.pause();
+      // _onPause will update our button + dispatch podcast-pause
+    }
+  }
+
+  /** Respond to a seek event from the footer or another inline player. */
+  _onExternalSeek(e) {
+    const { currentTime: time, src } = (e.detail || {});
+    if (time == null || !isFinite(time)) return;
+    // Only seek if the event's source matches ours — prevents a paused
+    // player's progress bar interaction from affecting the active player.
+    const mySrc = this._audio.src || this.getAttribute("src") || "";
+    if (src && mySrc && src !== mySrc && !urlsMatch(src, mySrc) && !urlsMatch(mySrc, src)) return;
+    if (!this._audio.duration) return;
+    // Silently seek without dispatching our own seek event
+    this._audio.currentTime = Math.min(time, this._audio.duration);
+  }
+
+  /* ================================================================== */
+  /*  Phase 4 — Persistence Layer                                        */
+  /* ================================================================== */
+  //
+  // Two-tier strategy:
+  //   1. DOM persistence via framework-specific markers
+  //      (Turbolinks data-turbolinks-permanent, Turbo data-turbo-permanent,
+  //       htmx hx-preserve + stable ID)
+  //   2. State persistence via sessionStorage as a vanilla safety net
+  //      (saves on beforeunload, restores on next connectedCallback)
+
+  /** Per-instance sessionStorage key derived from src or id. */
+  _persistenceKey() {
+    const tag = this.getAttribute("src") || this.id || "player";
+    return PodcastPlayer.PERSISTENCE_KEY + ":" + tag;
+  }
+
+  /**
+   * Enable persistence for this player instance.
+   * Called from connectedCallback when persistent attribute is present.
+   */
+  _persistenceSetup() {
+    // Idempotency guard — avoid double-setup from attributeChangedCallback
+    if (this._persistenceActive) return;
+    this._persistenceActive = true;
+
+    // 1. Generate a stable ID if none exists (required by htmx hx-preserve).
+    //    If another player on the page already has the same derived ID, append
+    //    a counter to avoid collisions.
+    if (!this.id) {
+      const base = "pp-" + (this.getAttribute("src") || "player")
+          .replace(/[^a-zA-Z0-9_-]/g, "")
+          .slice(0, 32) || "pp-player";
+      this.id = base;
+      // Resolve collisions: if we're in the DOM and another element already
+      // owns this ID, append a counter until we find a free one.
+      if (this.isConnected) {
+        let counter = 2;
+        while (this.ownerDocument.getElementById(this.id) !== null &&
+               this.ownerDocument.getElementById(this.id) !== this) {
+          this.id = base + "-" + counter++;
+        }
+      }
+    }
+
+    // 2. Sprinkle framework-specific DOM markers so the element survives
+    //    partial page swaps (these are no-ops if the library isn't loaded).
+    this.setAttribute("data-turbolinks-permanent", "");
+    this.setAttribute("data-turbo-permanent", "");
+    this.setAttribute("hx-preserve", "true");
+
+    // 3. Detect which navigation library is available (for logging / debugging)
+    if (window.Turbolinks) {
+      this._persistenceAdapter = "turbolinks";
+    } else if (window.Turbo) {
+      this._persistenceAdapter = "turbo";
+    } else if (window.htmx) {
+      this._persistenceAdapter = "htmx";
+    } else {
+      this._persistenceAdapter = "vanilla";
+    }
+
+    // 6. One-time diagnostic — log which persistence mode is active
+    if (!window.__wavecastAdapterLogged) {
+      window.__wavecastAdapterLogged = true;
+      const modes = { turbolinks: "Turbolinks", turbo: "Turbo", htmx: "htmx", vanilla: "vanilla (footer will be destroyed on navigation; load htmx/Turbo/Turbolinks)" };
+      console.info(`[podcast-player] persistence adapter: ${modes[this._persistenceAdapter] || this._persistenceAdapter}`);
+    }
+
+    // 4. Vanilla safety net — save state before the page unloads
+    window.addEventListener("beforeunload", this._onBeforeUnload);
+
+    // 5. Attempt to restore any previously saved playback state
+    this._restorePlaybackState();
+  }
+
+  /** Tear down persistence listeners. Called from disconnectedCallback. */
+  _teardownPersistence() {
+    this._persistenceActive = false;
+    this._pendingRestoreState = null;
+    window.removeEventListener("beforeunload", this._onBeforeUnload);
+  }
+
+  /**
+   * beforeunload handler — persists the full player state to sessionStorage
+   * so it can be restored on the next page view.
+   */
+  _onBeforeUnload() {
+    this._savePlaybackState();
+  }
+
+  /**
+   * Serialize the player's current state into sessionStorage.
+   * Called automatically on beforeunload; also called periodically from
+   * play/pause/timeupdate so the saved position is always current.
+   */
+  _savePlaybackState() {
+    try {
+      const state = {
+        src:          this._audio.src || this.getAttribute("src") || "",
+        currentTime:  this._audio.currentTime,
+        paused:       this._audio.paused,
+        volume:       this._audio.volume,
+        muted:        this._audio.muted,
+        playbackRate: this._audio.playbackRate,
+        timestamp:    Date.now(),
+        title:        this.getAttribute("title") || "",
+        poster:       this.getAttribute("poster") || "",
+      };
+      sessionStorage.setItem(this._persistenceKey(), JSON.stringify(state));
+    } catch (_) {
+      // sessionStorage may be unavailable (private browsing, quota, etc.)
+    }
+  }
+
+  /**
+   * Restore a previously saved playback state from sessionStorage.
+   *
+   * Rules:
+   *   • Only restores if the saved `src` matches the current element's `src`
+   *     (prevents restoring a different episode's position).
+   *   • Restores volume, mute, playback rate unconditionally.
+   *   • Only restores position if the save is less than 1 hour old
+   *     (stale positions are discarded).
+   *   • Clears the saved state after restoring (one-shot).
+   */
+  /** Compare two URLs by their absolute form. */
+  _urlsMatch(a, b) {
+    try {
+      return new URL(a, document.baseURI).href === new URL(b, document.baseURI).href;
+    } catch {
+      return a === b;
+    }
+  }
+
+  _restorePlaybackState() {
+    try {
+      const raw = sessionStorage.getItem(this._persistenceKey());
+      if (!raw) return;
+      const state = JSON.parse(raw);
+      sessionStorage.removeItem(this._persistenceKey());
+
+      // Restore audio properties eagerly (safe regardless of src or metadata)
+      if (state.volume != null)        this._audio.volume = state.volume;
+      if (state.muted != null)         this._audio.muted = state.muted;
+      if (state.playbackRate != null)  this._audio.playbackRate = state.playbackRate;
+
+      // Update UI immediately for volume/rate
+      this._els.volume.value = this._audio.muted ? 0 : this._audio.volume;
+      this._updateMuteIcon(this._audio.muted ? 0 : this._audio.volume);
+      this._els.rateBtn.textContent = this._audio.playbackRate + "\u00d7";
+
+      // Verify src matches (exact URL comparison) — if different, skip position
+      const currentSrc = this.getAttribute("src");
+      if (currentSrc && state.src && !this._urlsMatch(state.src, currentSrc)) {
+        return;
+      }
+      // Validate restored src scheme to prevent sessionStorage manipulation
+      try {
+        const u = new URL(state.src, document.baseURI);
+        if (u.protocol !== "http:" && u.protocol !== "https:") return;
+      } catch (_) { return; }
+
+      // Defer position + autoplay to loadedmetadata (where duration is known)
+      this._pendingRestoreState = state;
+    } catch (_) {
+      // Ignore parse / storage errors
+    }
+  }
+
+  /**
+   * Apply deferred position restore once metadata is loaded.
+   * Called from _onLoadedMetadata when _pendingRestoreState is set.
+   */
+  _applyRestoredPosition(state) {
+    this._pendingRestoreState = null;
+
+    // Restore display attributes if the element doesn't already have them
+    if (!this.getAttribute("title") && state.title) {
+      this._updateTitle(state.title);
+      this.setAttribute("title", state.title);
+    }
+    if (!this.getAttribute("poster") && state.poster) {
+      this._updatePoster(state.poster);
+      this.setAttribute("poster", state.poster);
+    }
+
+    // Position restore with staleness guard
+    const elapsed = (state.timestamp != null)
+      ? (Date.now() - state.timestamp) / 1000
+      : Infinity;
+
+    if (elapsed < PodcastPlayer.STATE_TTL_SECONDS
+        && state.currentTime != null
+        && state.currentTime > 0) {
+      // Only estimate forward if the audio was actively playing
+      let targetTime = state.currentTime;
+      if (!state.paused) {
+        targetTime = Math.min(
+          state.currentTime + elapsed,
+          this._audio.duration || Infinity,
+        );
+      }
+      if (targetTime < (this._audio.duration || Infinity)) {
+        this._audio.currentTime = targetTime;
+      }
+      // else: episode likely ended — don't restore position
+    }
+
+    // Resume playback if it was active (browser may block — update UI on catch)
+    if (!state.paused) {
+      this._audio.play()?.catch(() => {
+        this._onPause();
+      });
+    }
+  }
+
+  /* ------------------------------------------------------------------ */
+  /*  Helpers                                                            */
+  /* ------------------------------------------------------------------ */
+
+  /** Format seconds to HH:MM:SS or MM:SS. */
+  _fmtTime(t) {
+    if (!t || !isFinite(t)) return "--:--";
+    const h = Math.floor(t / 3600);
+    const m = Math.floor((t % 3600) / 60);
+    const s = Math.floor(t % 60);
+    const pad = (n) => String(n).padStart(2, "0");
+    if (h > 0) return `${h}:${pad(m)}:${pad(s)}`;
+    return `${m}:${pad(s)}`;
+  }
+
+  /**
+   * Resolve the URL to use for the footer's source link.
+   * Priority: explicit `url` attribute (or "none" sentinel) > auto-derive from src.
+   * Auto-derivation strips the filename from the audio src.
+   * Returns:
+   *   - "none" when the user explicitly opted out
+   *   - an absolute http(s) URL string when a usable link can be determined
+   *   - "" when no usable URL can be determined (caller should hide the link)
+   */
+  _resolveUrl() {
+    const explicit = (this.getAttribute("url") || "").trim();
+    if (explicit.toLowerCase() === "none") return "none";
+    if (explicit) {
+      // Resolve relative URLs against the document base.
+      try {
+        return new URL(explicit, document.baseURI).href;
+      } catch (_) {
+        return "";
+      }
+    }
+    // Auto-derive from audio src.
+    const src = this._audio.src || this.getAttribute("src") || "";
+    if (!src) return "";
+    try {
+      const u = new URL(src, document.baseURI);
+      if (u.protocol !== "http:" && u.protocol !== "https:") return "";
+      // Strip filename, keep path up to last "/"
+      const lastSlash = u.href.lastIndexOf("/");
+      return lastSlash >= 0 ? u.href.substring(0, lastSlash + 1) : u.href;
+    } catch (_) {
+      return "";
+    }
+  }
+
+  /** Highlight the currently playing chapter. */
+  _updateActiveChapter() {
+    const t = this._audio.currentTime;
+    let activeIdx = -1;
+    for (let i = this._chapters.length - 1; i >= 0; i--) {
+      if (t >= this._chapters[i].time) { activeIdx = i; break; }
+    }
+    if (activeIdx !== this._currentChapterIndex) {
+      this._currentChapterIndex = activeIdx;
+      this._els.chapters.querySelectorAll(".chapter-chip").forEach((chip, i) => {
+        chip.classList.toggle("active", i === activeIdx);
+      });
+    }
+  }
+
+  /** Dispatch a player-state custom event. */
+  _dispatchState() {
+    this.dispatchEvent(new CustomEvent("player-state", {
+      bubbles: true,
+      detail: {
+        paused: this._audio.paused,
+        src: this._audio.src,
+        currentTime: this._audio.currentTime,
+        duration: this._audio.duration,
+      },
+    }));
+  }
+
+  /**
+   * Dispatch a podcast-state-change event so the footer (and other inline
+   * players) can sync mute, volume, and playback rate in real time.
+   *
+   * When a &lt;podcast-footer&gt; is active, the inline &lt;audio&gt; is
+   * silenced (volume=0) so the footer can produce audible output without
+   * double audio.  In that scenario we read volume / mute / rate from the
+   * inline UI elements rather than from `this._audio`, because the UI
+   * reflects the user's intent whereas the silenced audio does not.
+   *
+   * Callers can pass overrides to pin specific values regardless of the
+   * footer-active heuristic.
+   *
+   * @param {{ volume?: number, muted?: boolean, playbackRate?: number }} [overrides]
+   */
+  _dispatchStateChange(overrides = {}) {
+    if (this._suppressSync) return;
+    const footerActive = document.querySelector("podcast-footer[active]");
+    this.dispatchEvent(new CustomEvent("podcast-state-change", {
+      bubbles: true,
+      composed: true,
+      detail: {
+        src:          this._audio.src || this.getAttribute("src") || "",
+        volume:       "volume" in overrides ? overrides.volume
+                      : footerActive ? parseFloat(this._els.volume.value)
+                      : this._audio.volume,
+        muted:        "muted" in overrides ? overrides.muted
+                      : footerActive ? (this._els.muteBtn.getAttribute("aria-pressed") === "true")
+                      : this._audio.muted,
+        playbackRate: "playbackRate" in overrides ? overrides.playbackRate
+                      : footerActive ? (parseFloat(this._els.rateBtn.textContent) || 1)
+                      : this._audio.playbackRate,
+        currentTime:  this._audio.currentTime,
+      },
+    }));
+  }
+
+  /**
+   * Respond to podcast-state-change from the footer (or another inline player).
+   * Updates our UI sliders/buttons without changing our own <audio> — the footer
+   * is the source of truth for audible output.
+   */
+  _onStateChange(e) {
+    if (this._suppressSync) return;
+    const d = e.detail || {};
+    // Only react if src matches
+    const mySrc = this._audio.src || this.getAttribute("src") || "";
+    if (d.src && mySrc && d.src !== mySrc && !urlsMatch(d.src, mySrc) && !urlsMatch(mySrc, d.src)) return;
+
+    // Guard against echo — suppress our own dispatch while updating UI
+    this._suppressSync = true;
+    try {
+      if (d.volume != null && !this._audio.muted) {
+        this._els.volume.value = d.volume;
+      }
+      if (d.muted != null) {
+        this._updateMuteIcon(d.muted ? 0 : (d.volume != null ? d.volume : this._audio.volume));
+        this._els.volume.value = d.muted ? 0 : (this._els.volume.value);
+        this._els.muteBtn.setAttribute("aria-pressed", d.muted ? "true" : "false");
+      }
+      if (d.playbackRate != null) {
+        this._els.rateBtn.textContent = d.playbackRate + "\u00d7";
+      }
+    } finally {
+      this._suppressSync = false;
+    }
+  }
+
+  /** Update Media Session action handlers. */
+  _updateMediaSessionPlayback() {
+    if (!("mediaSession" in navigator)) return;
+    navigator.mediaSession.playbackState = this._audio.paused ? "paused" : "playing";
+    navigator.mediaSession.setActionHandler("play", () => this._audio.play());
+    navigator.mediaSession.setActionHandler("pause", () => this._audio.pause());
+    navigator.mediaSession.setActionHandler("seekbackward", () => this._skip(-15));
+    navigator.mediaSession.setActionHandler("seekforward", () => this._skip(15));
+  }
+}
+
+/* ================================================================== */
+/*  <podcast-footer> — Fixed-bottom mini-player bar                   */
+/*  Appears when any <podcast-player> dispatches a podcast-play event. */
+/*  Persists across page navigations via sessionStorage + a fixed key. */
+/* ================================================================== */
+
+class PodcastFooter extends HTMLElement {
+  static PERSISTENCE_KEY = "podcastPlayerState:footer";
+  static STATE_TTL_SECONDS = 3600; // 1 hour
+
+  /* ------------------------------------------------------------------ */
+  /*  i18n — default English strings, overridable via window.wavecast   */
+  /* ------------------------------------------------------------------ */
+
+  static get DEFAULT_I18N() {
+    return {
+      player_region: "Podcast Player",
+      player_cover_alt: "Cover",
+      player_cover_of: "Cover: {title}",
+      player_rewind_title: "Rewind 15s",
+      player_rewind_label: "Rewind 15 seconds",
+      player_play: "Play",
+      player_pause: "Pause",
+      player_forward_title: "Forward 15s",
+      player_forward_label: "Forward 15 seconds",
+      player_seek: "Seek position",
+      player_mute_title: "Mute",
+      player_mute_label: "Toggle mute",
+      player_volume: "Volume",
+      player_speed: "Playback speed",
+      player_speed_label: "Playback speed {rate}×",
+      player_episode: "Podcast",
+      player_error: "Playback error",
+      player_no_source: "No audio source available",
+      player_close: "Close player",
+      player_unknown_episode: "Unknown Episode",
+      player_source_link: "View episode",
+    };
+  }
+
+  constructor() {
+    super();
+    this._shadow = this.attachShadow({ mode: "open" });
+    this._audio = new Audio();
+    this._audio.preload = "metadata";
+    /** @type {boolean} guard to suppress sync echo during cross-player state events */
+    this._suppressSync = false;
+
+    // Bound handlers
+    this._onPlay = this._onPlay.bind(this);
+    this._onPause = this._onPause.bind(this);
+    this._onTimeUpdate = this._onTimeUpdate.bind(this);
+    this._onLoadedMetadata = this._onLoadedMetadata.bind(this);
+    this._onBeforeUnload = this._onBeforeUnload.bind(this);
+    this._onPodcastPlay = this._onPodcastPlay.bind(this);
+    this._onExternalPause = this._onExternalPause.bind(this);
+    this._onExternalSeek = this._onExternalSeek.bind(this);
+    this._onStateChange = this._onStateChange.bind(this);
+
+    // i18n — merge window.wavecast.i18n over English defaults
+    const extI18n = (window.wavecast && window.wavecast.i18n) || {};
+    this._i = Object.assign({}, PodcastFooter.DEFAULT_I18N, extI18n);
+
+    // Tiny helper: replace {key} placeholders in translated strings
+    this._t = (key, vars) => {
+      let s = this._i[key] || key;
+      if (vars) {
+        Object.keys(vars).forEach(k => {
+          s = s.replace("{" + k + "}", vars[k]);
+        });
+      }
+      return s;
+    };
+  }
+
+  connectedCallback() {
+    this._render();
+    this._bindAudioEvents();
+    this._bindUIEvents();
+
+    // Listen for events from inline players
+    document.addEventListener("podcast-play", this._onPodcastPlay);
+    document.addEventListener("podcast-pause", this._onExternalPause);
+    document.addEventListener("podcast-seek", this._onExternalSeek);
+    document.addEventListener("podcast-state-change", this._onStateChange);
+
+    // Persist on page unload
+    window.addEventListener("beforeunload", this._onBeforeUnload);
+
+    // Try to restore any previously saved playback state
+    this._restorePlaybackState();
+
+    // Sync UI with current audio state (audio may have survived reconnection)
+    this._syncUI();
+    this._setupTitleMarquee();
+  }
+
+  /** Sync all UI elements with the current audio state. */
+  _syncUI() {
+    if (this._audio.paused) {
+      this._els.playBtn.innerHTML = `<svg viewBox="0 0 512 512" width="22" height="22"><path fill="currentColor" d="M256 8C119 8 8 119 8 256s111 248 248 248 248-111 248-248S393 8 256 8zm115.7 272l-176 101c-15.8 8.8-35.7-2.5-35.7-21V152c0-18.4 19.8-29.8 35.7-21l176 107c16.4 9.2 16.4 32.9 0 42z"/></svg>`;
+      this._els.playBtn.setAttribute("aria-label", this._t("player_play"));
+      this._els.playBtn.title = this._t("player_play");
+    } else {
+      this._els.playBtn.innerHTML = `<svg viewBox="0 0 512 512" width="22" height="22"><path fill="currentColor" d="M256 8C119 8 8 119 8 256s111 248 248 248 248-111 248-248S393 8 256 8zm-16 328c0 8.8-7.2 16-16 16h-48c-8.8 0-16-7.2-16-16V176c0-8.8 7.2-16 16-16h48c8.8 0 16 7.2 16 16v160zm112 0c0 8.8-7.2 16-16 16h-48c-8.8 0-16-7.2-16-16V176c0-8.8 7.2-16 16-16h48c8.8 0 16 7.2 16 16v160z"/></svg>`;
+      this._els.playBtn.setAttribute("aria-label", this._t("player_pause"));
+      this._els.playBtn.title = this._t("player_pause");
+    }
+    this._setMuteIcon();
+    this._els.volume.value = this._audio.muted ? 0 : this._audio.volume;
+    this._els.rateBtn.textContent = this._audio.playbackRate + "×";
+    this._onTimeUpdate(); // sync progress/time display
+  }
+
+  /**
+   * Measure the footer title for overflow and toggle the marquee animation.
+   * Called from connectedCallback (initial mount) and after every title change.
+   * Uses ResizeObserver to re-measure on container resize / font load.
+   * No-op if either element is missing.
+   */
+  _setupTitleMarquee() {
+    const wrap  = this._els.title;     // .title  — clipped container
+    const inner = this._els.titleText; // .title-text — scrollable span
+    if (!wrap || !inner) return;
+
+    const measure = () => {
+      // Threshold of 8px filters out sub-pixel rounding noise; below that the
+      // animation would be imperceptible but still cost compositor work.
+      const overflow = inner.scrollWidth - wrap.clientWidth;
+      if (overflow > 8) {
+        wrap.style.setProperty("--marquee-distance", overflow + "px");
+        const duration = Math.min(20, Math.max(6, overflow / 40));
+        wrap.style.setProperty("--marquee-duration", duration + "s");
+        wrap.setAttribute("data-overflow", "");
+      } else {
+        wrap.removeAttribute("data-overflow");
+        wrap.style.removeProperty("--marquee-distance");
+        wrap.style.removeProperty("--marquee-duration");
+      }
+    };
+
+    // rAF: clientWidth/scrollWidth aren't reliable until after first paint of the new text.
+    requestAnimationFrame(measure);
+
+    if (!this._titleResizeObserver && typeof ResizeObserver !== "undefined") {
+      this._titleResizeObserver = new ResizeObserver(() => requestAnimationFrame(measure));
+      this._titleResizeObserver.observe(wrap);
+    }
+  }
+
+  /**
+   * Apply a URL to the footer's source link element, or hide it.
+   *   url === "none"          → hide the link entirely
+   *   url is empty/invalid    → hide the link (and clear href)
+   *   url is a valid http(s) URL → set the href, make the link visible
+   * The element is a real `<a>`, not a `<div>`, so the href is set directly.
+   * Sanitization: only http(s) protocols are accepted. Anything else
+   * (javascript:, data:, ftp:, malformed) results in the link being hidden.
+   * The most recently accepted URL is cached on `this._currentSourceUrl`
+   * so persistence (save/restore) round-trips the same value the user sees.
+   *
+   * Note: the link is only revealed if it already has text content. This
+   * prevents a top-level `<podcast-footer url="...">` attribute from
+   * flashing an empty link before any inline player has dispatched a
+   * podcast-play event.
+   */
+  _setSourceLink(url) {
+    const link = this._els.source;
+    if (!link) return;
+
+    if (typeof url === "string" && url.toLowerCase() === "none") {
+      link.hidden = true;
+      link.removeAttribute("href");
+      this._currentSourceUrl = "";
+      return;
+    }
+    if (!url) {
+      link.hidden = true;
+      link.removeAttribute("href");
+      this._currentSourceUrl = "";
+      return;
+    }
+    try {
+      const u = new URL(url, document.baseURI);
+      if (u.protocol !== "http:" && u.protocol !== "https:") {
+        link.hidden = true;
+        link.removeAttribute("href");
+        this._currentSourceUrl = "";
+        return;
+      }
+      link.href = u.href;
+      this._currentSourceUrl = u.href;
+      // Only reveal if the link has visible text (set by a podcast-play
+      // event). The footer renders no source label before a track starts.
+      if (link.textContent && link.textContent.trim()) {
+        link.hidden = false;
+        link.setAttribute("aria-label", this._t("player_source_link"));
+      }
+    } catch (_) {
+      link.hidden = true;
+      link.removeAttribute("href");
+      this._currentSourceUrl = "";
+    }
+  }
+
+  /** Set the mute button icon based on current muted/volume state. */
+  _setMuteIcon() {
+    if (this._audio.muted || this._audio.volume === 0) {
+      this._els.muteBtn.innerHTML = `<svg viewBox="0 0 576 512" width="18" height="18"><path fill="currentColor" d="M215 71l-89 89H24a24 24 0 0 0-24 24v144a24 24 0 0 0 24 24h102.06L215 441c15 15 41 4.47 41-17V88c0-21.47-26-32-41-17z"/></svg>`;
+    } else if (this._audio.volume < 0.5) {
+      this._els.muteBtn.innerHTML = `<svg viewBox="0 0 576 512" width="18" height="18"><path fill="currentColor" d="M215.03 71.05L126.06 160H24c-13.26 0-24 10.74-24 24v144c0 13.25 10.74 24 24 24h102.06l88.97 88.95c15.03 15.03 40.97 4.47 40.97-16.97V88.02c0-21.46-25.96-31.98-40.97-16.97zm233.32-51.08c-11.17-7.33-26.18-4.24-33.51 6.95-7.34 11.17-4.22 26.18 6.95 33.51 66.27 43.49 105.82 116.6 105.82 195.58 0 78.98-39.55 152.09-105.82 195.58-11.17 7.32-14.29 22.34-6.95 33.5 7.04 10.71 21.93 14.56 33.51 6.95C528.27 439.58 576 351.33 576 256S528.27 72.43 448.35 19.97zM480 256c0-63.53-32.06-121.94-85.77-156.24-11.19-7.14-26.03-3.82-33.12 7.46s-3.78 26.21 7.41 33.36C408.27 165.97 432 209.11 432 256s-23.73 90.03-63.48 115.42c-11.19 7.14-14.5 22.07-7.41 33.36 6.51 10.36 21.12 15.14 33.12 7.46C447.94 377.94 480 319.54 480 256z"/></svg>`;
+    } else {
+      this._els.muteBtn.innerHTML = `<svg viewBox="0 0 576 512" width="18" height="18"><path fill="currentColor" d="M215.03 71.05L126.06 160H24c-13.26 0-24 10.74-24 24v144c0 13.25 10.74 24 24 24h102.06l88.97 88.95c15.03 15.03 40.97 4.47 40.97-16.97V88.02c0-21.46-25.96-31.98-40.97-16.97zm233.32-51.08c-11.17-7.33-26.18-4.24-33.51 6.95-7.34 11.17-4.22 26.18 6.95 33.51 66.27 43.49 105.82 116.6 105.82 195.58 0 78.98-39.55 152.09-105.82 195.58-11.17 7.32-14.29 22.34-6.95 33.5 7.04 10.71 21.93 14.56 33.51 6.95C528.27 439.58 576 351.33 576 256S528.27 72.43 448.35 19.97zM480 256c0-63.53-32.06-121.94-85.77-156.24-11.19-7.14-26.03-3.82-33.12 7.46s-3.78 26.21 7.41 33.36C408.27 165.97 432 209.11 432 256s-23.73 90.03-63.48 115.42c-11.19 7.14-14.5 22.07-7.41 33.36 6.51 10.36 21.12 15.14 33.12 7.46C447.94 377.94 480 319.54 480 256z"/></svg>`;
+    }
+  }
+
+  disconnectedCallback() {
+    this._savePlaybackState();
+    // Don't pause or clear audio — the footer is designed to persist
+    // across Turbolinks navigation (data-turbolinks-permanent).
+    // Clearing the src here would break the persistence test: the
+    // disconnectedCallback fires during relocation, and after reconnection
+    // the audio would have no src, so loadedmetadata never fires and
+    // the deferred autoplay in _applyRestoredPosition is never called.
+    document.removeEventListener("podcast-play", this._onPodcastPlay);
+    document.removeEventListener("podcast-pause", this._onExternalPause);
+    document.removeEventListener("podcast-seek", this._onExternalSeek);
+    document.removeEventListener("podcast-state-change", this._onStateChange);
+    window.removeEventListener("beforeunload", this._onBeforeUnload);
+    this._unbindAudioEvents();
+    this._unbindUIEvents();
+    this._titleResizeObserver?.disconnect();
+    this._titleResizeObserver = null;
+  }
+
+  /** Attributes the component should react to. The `url` attribute lets a
+   *  page override whatever the inline player sent (e.g. wrap the footer's
+   *  source label in a clickable link to a specific episode page). The
+   *  override applies whether the attribute is present at parse time or
+   *  changed at runtime via JavaScript. */
+  static get observedAttributes() {
+    return ["url", "size"];
+  }
+
+  attributeChangedCallback(name, oldValue, newValue) {
+    if (oldValue === newValue) return;
+    if (name === "url") {
+      // Cache the override so a later podcast-play event can prefer it
+      // over the inline player's URL. If the footer is already showing
+      // a source, apply immediately too.
+      this._topLevelUrlOverride = (newValue != null) ? newValue : null;
+      if (this._els && this._els.source) {
+        const link = this._els.source;
+        if (link.textContent && link.textContent.trim()) {
+          this._setSourceLink(newValue || "");
+        }
+      }
+    } else if (name === "size") {
+      // No imperative work needed; the visual change is driven entirely by
+      // the :host([size="..."]) CSS selectors in the shadow style block.
+      // Unknown values are ignored by CSS, falling back to the default.
+    }
+  }
+
+  /* ---- Shadow DOM template ---- */
+
+  _render() {
+    this._shadow.innerHTML = `
+      <style>
+        :host { display: none; }
+        :host([active]) { display: block; }
+        /* Size variants — :host([size="..."]) declares the footprint variables.
+           The base rules below consume these via var() with the original
+           hardcoded value as the fallback, so omitting the attribute (default)
+           produces exactly today's layout. */
+        :host([size="medium"]) {
+          --podcast-footer-cover-size: 48px;
+          --podcast-footer-info-max-width: 240px;
+          --podcast-footer-btn-size: 36px;
+          --podcast-footer-btn-play-size: 44px;
+          --podcast-footer-skip-btn-size: 32px;
+          --podcast-footer-progress-min: 120px;
+          --podcast-footer-vol-width: 90px;
+          --podcast-footer-padding: 8px 16px;
+          --podcast-footer-min-height: 60px;
+          --podcast-footer-gap: 10px;
+          --podcast-footer-title-font: .95rem;
+          --podcast-footer-source-font: .8rem;
+          --podcast-footer-time-font: .85rem;
+        }
+        :host([size="large"]) {
+          --podcast-footer-cover-size: 64px;
+          --podcast-footer-info-max-width: 400px;
+          --podcast-footer-btn-size: 44px;
+          --podcast-footer-btn-play-size: 56px;
+          --podcast-footer-skip-btn-size: 36px;
+          --podcast-footer-progress-min: 180px;
+          --podcast-footer-vol-width: 110px;
+          --podcast-footer-padding: 12px 24px;
+          --podcast-footer-min-height: 72px;
+          --podcast-footer-gap: 12px;
+          --podcast-footer-title-font: 1.1rem;
+          --podcast-footer-source-font: .9rem;
+          --podcast-footer-time-font: 1rem;
+        }
+        .footer {
+          position: fixed; bottom: 0; left: 0; right: 0; z-index: 1000;
+          background: var(--podcast-player-bg, #1e1e2e);
+          border-top: 1px solid var(--podcast-player-border, rgba(255,255,255,.06));
+          padding: var(--podcast-footer-padding, 6px 12px);
+          display: flex; align-items: center; gap: var(--podcast-footer-gap, 8px);
+          font-family: system-ui, -apple-system, sans-serif;
+          font-size: .85rem;
+          color: var(--podcast-player-text, #e0e0e0);
+          box-shadow: 0 -2px 12px rgba(0,0,0,.3);
+          min-height: var(--podcast-footer-min-height, 52px);
+          box-sizing: border-box;
+          justify-content: center;
+        }
+        .cover {
+          width: var(--podcast-footer-cover-size, 36px);
+          height: var(--podcast-footer-cover-size, 36px);
+          border-radius: 4px;
+          object-fit: cover; flex-shrink: 0; background: var(--podcast-player-surface, #2a2a3e);
+        }
+        .cover[hidden] { display: none; }
+        .info {
+          flex: 0 0 auto; max-width: var(--podcast-footer-info-max-width, 140px); min-width: 0;
+          display: flex; flex-direction: column; gap: 2px;
+        }
+        .title {
+          font-weight: 600; font-size: var(--podcast-footer-title-font, .85rem);
+          overflow: hidden;
+        }
+        .title-text {
+          display: inline-block;
+          white-space: nowrap;
+          padding-right: 1.5em;
+        }
+        .title[data-overflow] .title-text {
+          animation: marquee var(--marquee-duration, 10s) linear infinite alternate;
+          will-change: transform;
+        }
+        .title:hover .title-text {
+          animation-play-state: paused;
+        }
+        @keyframes marquee {
+          0%, 12%  { transform: translateX(0); }
+          88%, 100% { transform: translateX(calc(-1 * var(--marquee-distance, 0px))); }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .title[data-overflow] .title-text {
+            animation: none;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 100%;
+          }
+        }
+        .source { font-size: var(--podcast-footer-source-font, .7rem); color: var(--podcast-player-text-muted, #888);
+                   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+                   text-decoration: none; cursor: pointer; }
+        .source:hover { color: var(--podcast-player-text, #e0e0e0);
+                        text-decoration: underline; }
+        .source:focus-visible { outline: 2px solid var(--podcast-player-accent, #7c3aed);
+                                outline-offset: 2px; }
+        .source[hidden] { display: none; }
+        .controls { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
+        .btn {
+          background: transparent; border: none; color: var(--podcast-player-text, #e0e0e0);
+          width: var(--podcast-footer-btn-size, 32px); height: var(--podcast-footer-btn-size, 32px); border-radius: 50%;
+          cursor: pointer; display: inline-flex; align-items: center;
+          justify-content: center;
+          transition: background .15s;
+        }
+        .btn:hover { background: var(--podcast-player-surface, #2a2a3e); }
+        .btn-play { width: var(--podcast-footer-btn-play-size, 36px); height: var(--podcast-footer-btn-play-size, 36px);
+                     background: var(--podcast-player-primary, #6366f1); color: #fff; }
+        .btn-play:hover { background: var(--podcast-player-accent, #a78bfa); }
+        .btn-skip-back,
+        .btn-skip-fwd { width: var(--podcast-footer-skip-btn-size, 28px); height: var(--podcast-footer-skip-btn-size, 28px); }
+        .btn-skip-back svg,
+        .btn-skip-fwd svg { display: block; }
+        .progress-wrap { flex: 1; min-width: var(--podcast-footer-progress-min, 80px); max-width: 400px; }
+        input[type="range"] {
+          -webkit-appearance: none; appearance: none;
+          width: 100%; height: 4px; border-radius: 2px;
+          background: linear-gradient(to right, var(--podcast-player-primary, #6366f1) var(--progress, 0%), var(--podcast-player-surface, #2a2a3e) var(--progress, 0%));
+          outline: none; cursor: pointer; margin: 0;
+        }
+        input[type="range"]::-webkit-slider-thumb {
+          -webkit-appearance: none;
+          width: 12px; height: 12px; border-radius: 50%;
+          background: var(--podcast-player-primary, #6366f1);
+          border: 2px solid var(--podcast-player-bg, #1e1e2e);
+          cursor: pointer;
+        }
+        input[type="range"]::-moz-range-thumb {
+          width: 12px; height: 12px; border-radius: 50%;
+          background: var(--podcast-player-primary, #6366f1);
+          border: 2px solid var(--podcast-player-bg, #1e1e2e);
+          cursor: pointer;
+        }
+        .time { font-size: var(--podcast-footer-time-font, .75rem); color: var(--podcast-player-text-muted, #888);
+                font-variant-numeric: tabular-nums; white-space: nowrap; flex-shrink: 0; }
+        .time-sep { color: var(--podcast-player-text-muted, #888); font-size: .75rem;
+                    flex-shrink: 0; }
+        .vol-wrap { display: flex; align-items: center; gap: 2px; width: var(--podcast-footer-vol-width, 70px); flex-shrink: 0; }
+        .vol-wrap[hidden] { display: none; }
+        .mute-btn { width: 28px; height: 28px; border-radius: 50%; }
+        .mute-btn svg { display: block; }
+        .rate-btn {
+          font-size: .7rem; font-weight: 600; width: auto; height: 24px;
+          border-radius: 12px; padding: 0 6px; background: transparent; border: none;
+          color: var(--podcast-player-text, #e0e0e0); cursor: pointer;
+          display: inline-flex; align-items: center; justify-content: center;
+          transition: background .15s; flex-shrink: 0;
+        }
+        .rate-btn:hover { background: var(--podcast-player-surface, #2a2a3e); }
+        .close {
+          background: transparent; border: none; color: var(--podcast-player-text-muted, #888);
+          cursor: pointer; padding: 4px; border-radius: 4px;
+          transition: background .15s, color .15s; display: inline-flex; align-items: center;
+          justify-content: center; flex-shrink: 0;
+        }
+        .close:hover { background: var(--podcast-player-surface, #2a2a3e); color: var(--podcast-player-text, #e0e0e0); }
+        .close svg { display: block; }
+
+        @media (max-width: 768px) {
+          /* All size variants collapse to a compact layout on narrow viewports. */
+          :host([size="medium"]),
+          :host([size="large"]) {
+            --podcast-footer-cover-size: 28px;
+            --podcast-footer-info-max-width: 100px;
+            --podcast-footer-btn-size: 32px;
+            --podcast-footer-btn-play-size: 36px;
+            --podcast-footer-skip-btn-size: 28px;
+            --podcast-footer-progress-min: 60px;
+            --podcast-footer-vol-width: 50px;
+            --podcast-footer-padding: 4px 8px;
+            --podcast-footer-min-height: 48px;
+            --podcast-footer-gap: 6px;
+            --podcast-footer-title-font: .8rem;
+            --podcast-footer-source-font: .7rem;
+            --podcast-footer-time-font: .7rem;
+          }
+          .footer { gap: 6px; padding: 4px 8px; font-size: .8rem; min-height: 48px; }
+          .cover { width: 28px; height: 28px; }
+          .info { max-width: 100px; }
+          .progress-wrap { min-width: 60px; }
+          .vol-wrap { width: 50px; }
+          .time { font-size: .7rem; }
+        }
+        @media (max-width: 480px) {
+          .info { display: none; }
+          .vol-wrap { display: none; }
+          .time-sep { display: none; }
+          .time + .time { margin-left: 4px; }
+          .progress-wrap { min-width: 40px; }
+          .time { font-size: .65rem; }
+        }
+      </style>
+      <div class="footer" part="footer">
+        <img class="cover" part="cover" src="" alt="" hidden>
+        <div class="info">
+          <div class="title" part="title"><span class="title-text"></span></div>
+          <a class="source" part="source" hidden></a>
+        </div>
+        <div class="controls">
+          <button class="btn btn-skip-back" part="skip-back-btn"
+                  title="${this._t("player_rewind_title")}" aria-label="${this._t("player_rewind_label")}">
+            <svg viewBox="0 0 20 20" width="16" height="16"><path fill="currentColor" d="M9 20C13.95 20 18 16 18 11.1111C18 6.22222 13.95 2.22222 9 2.22222V0L3.375 3.33333L9 6.66667V4.44444C12.7125 4.44444 15.75 7.44444 15.75 11.1111C15.75 14.7778 12.7125 17.7778 9 17.7778C5.2875 17.7778 2.25 14.7778 2.25 11.1111H0C0 16 4.05 20 9 20ZM5.89659 7.77778H7.20825V14.3545H5.87143V9.47977H5.81166C5.67326 9.69814 5.21088 9.96789 4.5 9.96789V8.8632C5.32726 8.8632 5.88086 8.17919 5.89659 7.77778ZM13.5 12.1612C13.5031 13.4907 12.528 14.4444 11.0937 14.4444C9.76002 14.4444 8.78807 13.632 8.76291 12.4952H10.084C10.1155 13.0058 10.5527 13.3526 11.0937 13.3526C11.7322 13.3526 12.1883 12.8805 12.1883 12.1965C12.1883 11.5061 11.7228 11.0276 11.0748 11.0244C10.6942 11.0244 10.3105 11.1946 10.1123 11.4676L8.90131 11.246L9.20642 7.77778H13.1446V8.91458H10.3294L10.1626 10.562H10.2004C10.4269 10.2376 10.9144 9.99679 11.4806 9.99679C12.6413 9.99679 13.5031 10.9024 13.5 12.1612Z"/></svg>
+          </button>
+          <button class="btn btn-play" part="play-btn"
+                  title="${this._t("player_play")}" aria-label="${this._t("player_play")}" aria-pressed="false">
+            <svg viewBox="0 0 512 512" width="22" height="22"><path fill="currentColor" d="M256 8C119 8 8 119 8 256s111 248 248 248 248-111 248-248S393 8 256 8zm115.7 272l-176 101c-15.8 8.8-35.7-2.5-35.7-21V152c0-18.4 19.8-29.8 35.7-21l176 107c16.4 9.2 16.4 32.9 0 42z"/></svg>
+          </button>
+          <button class="btn btn-skip-fwd" part="skip-fwd-btn"
+                  title="${this._t("player_forward_title")}" aria-label="${this._t("player_forward_label")}">
+            <svg viewBox="0 0 20 20" width="16" height="16"><path fill="currentColor" d="M9 20C4.05 20 0 16 0 11.1111C0 6.22222 4.05 2.22222 9 2.22222V0L14.625 3.33333L9 6.66667V4.44444C5.2875 4.44444 2.25 7.44444 2.25 11.1111C2.25 14.7778 5.2875 17.7778 9 17.7778C12.7125 17.7778 15.75 14.7778 15.75 11.1111H18C18 16 13.95 20 9 20ZM5.89659 7.77778H7.20825V14.3545H5.87143V9.47977H5.81166C5.67326 9.69814 5.21088 9.96789 4.5 9.96789V8.8632C5.32726 8.8632 5.88086 8.17919 5.89659 7.77778ZM13.5 12.1612C13.5031 13.4907 12.528 14.4444 11.0937 14.4444C9.76002 14.4444 8.78807 13.632 8.76291 12.4952H10.084C10.1155 13.0058 10.5527 13.3526 11.0937 13.3526C11.7322 13.3526 12.1883 12.8805 12.1883 12.1965C12.1883 11.5061 11.7228 11.0276 11.0748 11.0244C10.6942 11.0244 10.3105 11.1946 10.1123 11.4676L8.90131 11.246L9.20642 7.77778H13.1446V8.91458H10.3294L10.1626 10.562H10.2004C10.4269 10.2376 10.9144 9.99679 11.4806 9.99679C12.6413 9.99679 13.5031 10.9024 13.5 12.1612Z"/></svg>
+          </button>
+        </div>
+        <div class="progress-wrap">
+          <input type="range" class="progress" part="progress" min="0" max="100" value="0"
+                 aria-label="${this._t("player_seek")}" aria-valuetext="0:00 of 0:00">
+        </div>
+        <span class="time" part="time-current">--:--</span>
+        <span class="time-sep" part="time-sep">/</span>
+        <span class="time" part="time-duration">--:--</span>
+        <div class="vol-wrap" part="vol-wrap">
+          <button class="btn mute-btn" part="mute-btn" title="${this._t("player_mute_title")}" aria-label="${this._t("player_mute_label")}">
+            <svg viewBox="0 0 576 512" width="18" height="18"><path fill="currentColor" d="M215.03 71.05L126.06 160H24c-13.26 0-24 10.74-24 24v144c0 13.25 10.74 24 24 24h102.06l88.97 88.95c15.03 15.03 40.97 4.47 40.97-16.97V88.02c0-21.46-25.96-31.98-40.97-16.97zm233.32-51.08c-11.17-7.33-26.18-4.24-33.51 6.95-7.34 11.17-4.22 26.18 6.95 33.51 66.27 43.49 105.82 116.6 105.82 195.58 0 78.98-39.55 152.09-105.82 195.58-11.17 7.32-14.29 22.34-6.95 33.5 7.04 10.71 21.93 14.56 33.51 6.95C528.27 439.58 576 351.33 576 256S528.27 72.43 448.35 19.97zM480 256c0-63.53-32.06-121.94-85.77-156.24-11.19-7.14-26.03-3.82-33.12 7.46s-3.78 26.21 7.41 33.36C408.27 165.97 432 209.11 432 256s-23.73 90.03-63.48 115.42c-11.19 7.14-14.5 22.07-7.41 33.36 6.51 10.36 21.12 15.14 33.12 7.46C447.94 377.94 480 319.54 480 256z"/></svg>
+          </button>
+          <input type="range" class="volume" part="volume" min="0" max="1" step="0.05" value="1"
+                 aria-label="${this._t("player_volume")}">
+        </div>
+        <button class="rate-btn" part="rate-btn"
+                title="${this._t("player_speed")}" aria-label="${this._t("player_speed")}">1×</button>
+        <button class="close" part="close-btn" title="${this._t("player_close")}" aria-label="${this._t("player_close")}">
+          <svg viewBox="0 0 12 12" width="14" height="14"><path stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M3 9l6-6m0 6L3 3"/></svg>
+        </button>
+      </div>
+    `;
+
+    // Cache DOM refs
+    this._els = {
+      footer:     this._shadow.querySelector(".footer"),
+      cover:      this._shadow.querySelector(".cover"),
+      title:      this._shadow.querySelector(".title"),
+      titleText:  this._shadow.querySelector(".title-text"),
+      source:     this._shadow.querySelector(".source"),
+      playBtn:    this._shadow.querySelector(".btn-play"),
+      skipBack:   this._shadow.querySelector(".btn-skip-back"),
+      skipFwd:    this._shadow.querySelector(".btn-skip-fwd"),
+      progress:   this._shadow.querySelector(".progress"),
+      timeCur:    this._shadow.querySelector('[part="time-current"]'),
+      timeDur:    this._shadow.querySelector('[part="time-duration"]'),
+      volume:     this._shadow.querySelector(".volume"),
+      muteBtn:    this._shadow.querySelector(".mute-btn"),
+      rateBtn:    this._shadow.querySelector(".rate-btn"),
+      closeBtn:   this._shadow.querySelector(".close"),
+    };
+  }
+
+  /* ---- Audio events ---- */
+
+  _bindAudioEvents() {
+    this._audio.addEventListener("play", this._onPlay);
+    this._audio.addEventListener("pause", this._onPause);
+    this._audio.addEventListener("timeupdate", this._onTimeUpdate);
+    this._audio.addEventListener("loadedmetadata", this._onLoadedMetadata);
+  }
+
+  _unbindAudioEvents() {
+    this._audio.removeEventListener("play", this._onPlay);
+    this._audio.removeEventListener("pause", this._onPause);
+    this._audio.removeEventListener("timeupdate", this._onTimeUpdate);
+    this._audio.removeEventListener("loadedmetadata", this._onLoadedMetadata);
+  }
+
+  /* ---- UI events ---- */
+
+  _bindUIEvents() {
+    this._els.playBtn.addEventListener("click", () => this._togglePlay());
+    this._els.skipBack.addEventListener("click", () => this._skip(-15));
+    this._els.skipFwd.addEventListener("click", () => this._skip(15));
+    this._els.progress.addEventListener("input", () => this._seeking());
+    this._els.progress.addEventListener("change", () => this._seek());
+    this._els.volume.addEventListener("input", () => this._setVolume());
+    this._els.muteBtn.addEventListener("click", () => this._toggleMute());
+    this._els.rateBtn.addEventListener("click", () => this._cycleRate());
+    this._els.closeBtn.addEventListener("click", () => this._close());
+  }
+
+  _unbindUIEvents() {
+    // Remove listeners by replacing elements (simplest in Shadow DOM)
+  }
+
+  /* ---- Event handlers ---- */
+
+  /** React to play events from inline <podcast-player> elements. */
+  _onPodcastPlay(e) {
+    const { src, title, poster, currentTime } = e.detail;
+    if (!src) return;
+
+    // If same source is already loaded, just ensure we're shown
+    if (this._audio.src && this._audio.src === src) {
+      if (this._audio.paused) this._audio.play()?.catch(() => {});
+      this.setAttribute("active", "");
+      return;
+    }
+
+    // New source — load and play
+    this._els.titleText.textContent = title || this._t("player_unknown_episode");
+    this._els.source.textContent = src.replace(/^https?:\/\//, "").split("/")[0] || src;
+    // Top-level <podcast-footer url="..."> always overrides what the inline
+    // player sent via the event detail.
+    const eventUrl = (e.detail && e.detail.url) || "";
+    const finalUrl = (this._topLevelUrlOverride != null)
+      ? this._topLevelUrlOverride
+      : eventUrl;
+    this._setSourceLink(finalUrl);
+
+    if (poster) {
+      this._els.cover.src = poster;
+      this._els.cover.removeAttribute("hidden");
+    } else {
+      this._els.cover.setAttribute("hidden", "");
+    }
+
+    this._audio.src = src;
+    if (currentTime > 0) this._audio.currentTime = currentTime;
+    this._audio.play()?.catch(() => {});
+
+    // Force-apply the volume from the footer slider
+    this._audio.volume = parseFloat(this._els.volume.value);
+
+    this.setAttribute("active", "");
+    this._setupTitleMarquee();
+  }
+
+  /** React to pause events from inline <podcast-player> elements.
+   *  Only acts if the event's source matches what the footer is currently playing. */
+  _onExternalPause(e) {
+    const src = e.detail && e.detail.src;
+    const mySrc = this._audio.src || "";
+    // Ignore pauses from a different source (avoids incorrectly stopping when
+    // one player replaces another)
+    if (src && mySrc && src !== mySrc && !urlsMatch(src, mySrc) && !urlsMatch(mySrc, src)) return;
+
+    if (this._audio.src && !this._audio.paused) {
+      this._audio.pause();
+      // _onPause handler will update UI and dispatch its own event
+    }
+  }
+
+  _togglePlay() {
+    if (this._audio.paused) {
+      this._audio.play()?.catch(() => {});
+    } else {
+      this._audio.pause();
+    }
+  }
+
+  _seeking() {
+    // Update time display while scrubbing
+    if (!this._audio.duration) return;
+    const pct = parseFloat(this._els.progress.value) / 100;
+    this._els.timeCur.textContent = this._fmtTime(pct * this._audio.duration);
+  }
+
+  _seek() {
+    if (!this._audio.duration) return;
+    const pct = parseFloat(this._els.progress.value) / 100;
+    this._audio.currentTime = pct * this._audio.duration;
+    // Notify inline players playing the same source
+    this.dispatchEvent(new CustomEvent("podcast-seek", {
+      bubbles: true,
+      composed: true,
+      detail: {
+        currentTime: this._audio.currentTime,
+        src: this._audio.src || "",
+      },
+    }));
+  }
+
+  /** Respond to seek events from inline players — keep footer in sync. */
+  _onExternalSeek(e) {
+    const { currentTime: time, src } = (e.detail || {});
+    if (time == null || !isFinite(time)) return;
+    // Only seek if the source matches what the footer is playing
+    const mySrc = this._audio.src || "";
+    if (src && mySrc && src !== mySrc && !urlsMatch(src, mySrc) && !urlsMatch(mySrc, src)) return;
+    if (!this._audio.duration) return;
+    this._audio.currentTime = Math.min(time, this._audio.duration);
+  }
+
+  _skip(sec) {
+    if (!this._audio.src) return;
+    this._audio.currentTime = Math.max(0, Math.min(
+      (this._audio.currentTime || 0) + sec,
+      this._audio.duration || Infinity,
+    ));
+    this.dispatchEvent(new CustomEvent("podcast-seek", {
+      bubbles: true,
+      composed: true,
+      detail: {
+        currentTime: this._audio.currentTime,
+        src: this._audio.src || "",
+      },
+    }));
+  }
+
+  _cycleRate() {
+    const rates = [0.5, 0.75, 1, 1.25, 1.5, 2];
+    const cur = this._audio.playbackRate;
+    const idx = rates.indexOf(cur);
+    this._audio.playbackRate = rates[(idx + 1) % rates.length];
+    this._els.rateBtn.textContent = this._audio.playbackRate + "\u00d7";
+    this._dispatchStateChange();
+  }
+
+  _setVolume() {
+    const v = parseFloat(this._els.volume.value);
+    this._audio.volume = v;
+    this._audio.muted = false;
+    this._setMuteIcon();
+    this._dispatchStateChange();
+  }
+
+  _toggleMute() {
+    this._audio.muted = !this._audio.muted;
+    this._els.volume.value = this._audio.muted ? 0 : this._audio.volume;
+    this._setMuteIcon();
+    this._dispatchStateChange();
+  }
+
+  /** Hide the footer and stop playback. */
+  _close() {
+    this._audio.pause();
+    // Notify inline players to stop — dispatches BEFORE src is cleared
+    this.dispatchEvent(new CustomEvent("podcast-close", {
+      bubbles: true,
+      composed: true,
+      detail: { src: this._audio.src || "" },
+    }));
+    this._audio.removeAttribute("src");
+    this._audio.load();
+    this.removeAttribute("active");
+    this._savePlaybackState();
+  }
+
+  /**
+   * Dispatch podcast-state-change so inline players stay in sync when the user
+   * adjusts mute, volume, or playback rate from the footer.
+   */
+  _dispatchStateChange() {
+    if (this._suppressSync) return;
+    this.dispatchEvent(new CustomEvent("podcast-state-change", {
+      bubbles: true,
+      composed: true,
+      detail: {
+        src:          this._audio.src || "",
+        volume:       this._audio.volume,
+        muted:        this._audio.muted,
+        playbackRate: this._audio.playbackRate,
+        currentTime:  this._audio.currentTime,
+      },
+    }));
+  }
+
+  /**
+   * Respond to podcast-state-change from an inline player.  Applies the
+   * incoming mute / volume / playback rate to the footer's <audio> (which is
+   * the actual audible output).
+   */
+  _onStateChange(e) {
+    if (this._suppressSync) return;
+    const d = e.detail || {};
+    // Only react if src matches
+    const mySrc = this._audio.src || "";
+    if (d.src && mySrc && d.src !== mySrc && !urlsMatch(d.src, mySrc) && !urlsMatch(mySrc, d.src)) return;
+
+    this._suppressSync = true;
+    try {
+      if (d.volume != null) {
+        this._audio.volume = d.volume;
+        this._els.volume.value = d.volume;
+      }
+      if (d.muted != null) {
+        this._audio.muted = d.muted;
+        this._els.volume.value = d.muted ? 0 : parseFloat(this._els.volume.value);
+      }
+      if (d.volume != null || d.muted != null) {
+        this._setMuteIcon();
+      }
+      if (d.playbackRate != null) {
+        this._audio.playbackRate = d.playbackRate;
+        this._els.rateBtn.textContent = d.playbackRate + "\u00d7";
+      }
+    } finally {
+      this._suppressSync = false;
+    }
+  }
+
+  _onPlay() {
+    this._els.playBtn.innerHTML = `<svg viewBox="0 0 512 512" width="22" height="22"><path fill="currentColor" d="M256 8C119 8 8 119 8 256s111 248 248 248 248-111 248-248S393 8 256 8zm-16 328c0 8.8-7.2 16-16 16h-48c-8.8 0-16-7.2-16-16V176c0-8.8 7.2-16 16-16h48c8.8 0 16 7.2 16 16v160zm112 0c0 8.8-7.2 16-16 16h-48c-8.8 0-16-7.2-16-16V176c0-8.8 7.2-16 16-16h48c8.8 0 16 7.2 16 16v160z"/></svg>`;
+    this._els.playBtn.setAttribute("aria-label", this._t("player_pause"));
+    this._els.playBtn.title = this._t("player_pause");
+
+    // Notify inline players to sync their UI
+    this.dispatchEvent(new CustomEvent("podcast-play", {
+      bubbles: true,
+      composed: true,
+      detail: {
+        src: this._audio.src || "",
+        title: this._els.title.textContent,
+        poster: this._els.cover.getAttribute("src") || "",
+        currentTime: this._audio.currentTime,
+      },
+    }));
+  }
+
+  _onPause() {
+    this._els.playBtn.innerHTML = `<svg viewBox="0 0 512 512" width="22" height="22"><path fill="currentColor" d="M256 8C119 8 8 119 8 256s111 248 248 248 248-111 248-248S393 8 256 8zm115.7 272l-176 101c-15.8 8.8-35.7-2.5-35.7-21V152c0-18.4 19.8-29.8 35.7-21l176 107c16.4 9.2 16.4 32.9 0 42z"/></svg>`;
+    this._els.playBtn.setAttribute("aria-label", this._t("player_play"));
+    this._els.playBtn.title = this._t("player_play");
+
+    // Notify inline players to sync their UI
+    this.dispatchEvent(new CustomEvent("podcast-pause", {
+      bubbles: true,
+      composed: true,
+      detail: {
+        src: this._audio.src || "",
+        title: this._els.title.textContent,
+        poster: this._els.cover.getAttribute("src") || "",
+        currentTime: this._audio.currentTime,
+      },
+    }));
+  }
+
+  _onTimeUpdate() {
+    if (!this._audio.duration) return;
+    const pct = this._audio.currentTime / this._audio.duration;
+    this._els.progress.value = Math.round(pct * 100);
+    this._els.progress.style.setProperty("--progress", (pct * 100) + "%");
+    this._els.timeCur.textContent = this._fmtTime(this._audio.currentTime);
+    this._els.timeDur.textContent = this._audio.duration ? this._fmtTime(this._audio.duration) : "--:--";
+    this._els.progress.setAttribute("aria-valuetext",
+      this._els.timeCur.textContent + " of " + this._els.timeDur.textContent);
+  }
+
+  _onLoadedMetadata() {
+    this._els.timeDur.textContent = this._fmtTime(this._audio.duration);
+    this._applyRestoredPosition();
+  }
+
+  /* ---- Persistence ---- */
+
+  _onBeforeUnload() {
+    this._savePlaybackState();
+  }
+
+  _savePlaybackState() {
+    if (!this._audio.src) return; // nothing playing
+    try {
+      const state = {
+        src:          this._audio.src,
+        currentTime:  this._audio.currentTime,
+        paused:       this._audio.paused,
+        volume:       this._audio.volume,
+        muted:        this._audio.muted,
+        playbackRate: this._audio.playbackRate,
+        timestamp:    Date.now(),
+        title:        this._els.title.textContent,
+        poster:       this._els.cover.getAttribute("src") || "",
+        url:          this._currentSourceUrl || "",
+      };
+      sessionStorage.setItem(PodcastFooter.PERSISTENCE_KEY, JSON.stringify(state));
+    } catch (_) {}
+  }
+
+  _restorePlaybackState() {
+    try {
+      const raw = sessionStorage.getItem(PodcastFooter.PERSISTENCE_KEY);
+      if (!raw) return;
+      const state = JSON.parse(raw);
+      sessionStorage.removeItem(PodcastFooter.PERSISTENCE_KEY);
+
+      if (!state.src) return;
+
+      // Validate restored src scheme to prevent sessionStorage manipulation
+      try {
+        const u = new URL(state.src, document.baseURI);
+        if (u.protocol !== "http:" && u.protocol !== "https:") {
+          console.warn("PodcastFooter: ignoring restored src with unsafe scheme", u.protocol);
+          return;
+        }
+      } catch (_) { return; }
+
+      // Restore volume/mute/rate immediately
+      if (state.volume != null)        this._audio.volume = state.volume;
+      if (state.muted != null)         this._audio.muted = state.muted;
+      if (state.playbackRate != null)  this._audio.playbackRate = state.playbackRate;
+
+      this._els.volume.value = this._audio.muted ? 0 : this._audio.volume;
+      this._setMuteIcon();
+      this._els.rateBtn.textContent = (state.playbackRate || 1) + "×";
+      this._els.titleText.textContent = state.title || this._t("player_unknown_episode");
+      this._els.source.textContent = state.src.replace(/^https?:\/\//, "").split("/")[0] || state.src;
+      // Top-level <podcast-footer url="..."> override (set in HTML or at
+      // runtime) takes precedence over the URL persisted from a prior
+      // session.
+      const restoreUrl = (this._topLevelUrlOverride != null)
+        ? this._topLevelUrlOverride
+        : (state.url || "");
+      this._setSourceLink(restoreUrl);
+
+      if (state.poster) {
+        this._els.cover.src = state.poster;
+        this._els.cover.removeAttribute("hidden");
+      }
+
+      // If audio already has the same source loaded, it survived reconnection
+      // (e.g. Turbolinks permanent element). Don't re-set src — that would
+      // reset currentTime and trigger a fresh load. Just restore position.
+      if (this._audio.src && this._audio.src === state.src) {
+        this._applyPositionAndResume(state);
+      } else {
+        // Cold load: set src and defer position restore to loadedmetadata
+        this._pendingRestoreState = state;
+        this._audio.src = state.src;
+      }
+
+      // Show the footer
+      this.setAttribute("active", "");
+      this._setupTitleMarquee();
+    } catch (_) {}
+  }
+
+  /** Apply saved position and resume playback if it was active.
+   *
+   *  During Turbolinks navigation, the `<audio>` element survives (the footer
+   *  is `data-turbolinks-permanent`) and keeps playing.  The saved `currentTime`
+   *  is already close to real-time because the unbounded audio advanced during
+   *  navigation.  Unconditionally seeking would cause an audible interruption
+   *  (browser seeks the audio buffer), so we skip the seek when the correction
+   *  is trivial (< 500 ms).  Similarly, we only call `play()` if the audio is
+   *  actually paused — calling it on an already-playing element can glitch. */
+  _applyPositionAndResume(state) {
+    if (!state) return;
+    const elapsed = (state.timestamp != null)
+      ? (Date.now() - state.timestamp) / 1000
+      : Infinity;
+
+    if (elapsed < PodcastFooter.STATE_TTL_SECONDS
+        && state.currentTime != null
+        && state.currentTime > 0
+        && state.currentTime < (this._audio.duration || Infinity)) {
+      let targetTime = state.currentTime;
+      if (!state.paused) {
+        targetTime = Math.min(
+          state.currentTime + elapsed,
+          this._audio.duration || Infinity,
+        );
+      }
+      // Only seek if the position differs meaningfully — the audio may have
+      // played through navigation uninterrupted, so currentTime is already
+      // accurate.  An unnecessary seek causes an audible gap (issue #8).
+      if (Math.abs(targetTime - this._audio.currentTime) > 0.5) {
+        this._audio.currentTime = targetTime;
+      }
+    }
+
+    // Don't call play() if already playing — the audio likely survived
+    // reconnection and is still active.  Calling play() on an already-playing
+    // element can cause an audible interruption (issue #8).
+    if (!state.paused && this._audio.paused) {
+      this._audio.play()?.catch(() => {});
+    }
+  }
+
+  _applyRestoredPosition() {
+    const state = this._pendingRestoreState;
+    if (!state) return;
+    this._pendingRestoreState = null;
+    this._applyPositionAndResume(state);
+  }
+
+  /* ---- Helpers ---- */
+
+  _fmtTime(t) {
+    if (!t || !isFinite(t)) return "--:--";
+    const h = Math.floor(t / 3600);
+    const m = Math.floor((t % 3600) / 60);
+    const s = Math.floor(t % 60);
+    const pad = (n) => String(n).padStart(2, "0");
+    if (h > 0) return h + ":" + pad(m) + ":" + pad(s);
+    return m + ":" + pad(s);
+  }
+}
+
+// -----------------------------------------------------------------------
+// Registration
+// -----------------------------------------------------------------------
+if (!customElements.get("podcast-player")) {
+  customElements.define("podcast-player", PodcastPlayer);
+}
+if (!customElements.get("podcast-footer")) {
+  customElements.define("podcast-footer", PodcastFooter);
+}
+
+export default PodcastPlayer;

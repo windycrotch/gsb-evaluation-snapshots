@@ -1,0 +1,22 @@
+{{- /* hero.html - renders a hero section with optional tagline, description, and buttons */ -}}
+<section class="hero">
+  <h1>{{ .title }}</h1>
+  {{- with .tagline }}
+  <p class="tagline">{{ . }}</p>
+  {{- end }}
+  {{- with .description }}
+  <p>{{ . }}</p>
+  {{- end }}
+  {{- with .buttons }}
+  <div class="nav-buttons">
+    {{- range . }}
+    {{- /* Validate URL scheme — reject dangerous protocols */ -}}
+    {{- if and .url (not (or (hasPrefix .url "http://") (hasPrefix .url "https://") (hasPrefix .url "/") (hasPrefix .url "#") (hasPrefix .url "."))) -}}
+      {{- errorf "hero button: URL must be HTTP(S), relative, fragment, or dot-relative path, got %q" .url -}}
+    {{- end -}}
+    {{- /* WARNING: .text is rendered as safeHTML to allow SVG icons. Only use trusted SVG markup from theme authors. */ -}}
+    <a href="{{ .url }}" class="nav-button {{ .class }}">{{ .text | safeHTML }}</a>
+    {{- end }}
+  </div>
+  {{- end }}
+</section>

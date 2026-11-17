@@ -1,0 +1,132 @@
+{{- /*
+  podcast-player — Hugo shortcode for a persistent podcast/radio audio player.
+
+  Usage:
+    {{< podcast-player
+      src="https://example.com/audio.mp3"
+      title="Episode 42"
+      poster="https://example.com/cover.jpg"
+      description="Optional description with **Markdown**."
+      chapters="00:00:00-Intro,00:05:30-News"
+      url="https://example.com/episode-42"
+      persistent="true"
+    >}}
+
+  Named parameters + site config defaults.
+    Per-shortcode params take precedence over site config
+    ([params.podcastPlayer] in hugo.toml), which in turn
+    take precedence over the built-in defaults.
+
+    src         (required) Audio URL or local file path.
+    title       (optional) Episode title — rendered as attribute.
+    poster      (optional) Cover image URL.
+    description (optional) Markdown description (rendered as <span slot="description">).
+    type        (optional) MIME type.  Auto-detected for local resources.
+                           Default "audio/mpeg".
+    source      (optional) Source adapter hint: "local", "azuracast", "ivoox".
+                           Default "local".
+    persistent  (optional) Disable navigation persistence with "false".
+                           Default "true".
+    preload     (optional) <audio> preload hint.  Default "metadata".
+    chapters    (optional) Comma-separated "timestamp-label" pairs, e.g.
+                           "00:00:00-Intro,00:05:30-News".
+    url         (optional) Link target for the footer source label. A URL
+                           (http/https or site-relative) makes the label
+                           clickable. The literal string "none" hides the
+                           link. Omit to auto-derive from the audio src.
+    autoplay    (optional) Auto-play on load.  Default "false".
+    rate        (optional) Show playback rate control.  Default "true".
+*/ -}}
+
+{{- /* ---- 1. Validate required params ---- */ -}}
+{{- $src := .Get "src" -}}
+{{- if not $src -}}
+  {{- errorf "podcast-player: required 'src' parameter is missing. See %s" .Position -}}
+{{- end -}}
+{{- /* Validate audio URL scheme */ -}}
+{{- if $src }}
+  {{- $scheme := urls.Parse $src }}
+  {{- if and $scheme.Scheme (not (or (eq $scheme.Scheme "http") (eq $scheme.Scheme "https"))) }}
+    {{- errorf "podcast-player: audio src must use http or https scheme, got %q" $scheme.Scheme }}
+  {{- end }}
+{{- end -}}
+
+{{- /* ---- 2. Site config defaults ---- */ -}}
+{{- $siteCfg := site.Params.podcastPlayer | default dict -}}
+
+{{- /* ---- 3. Named params: explicit > site config > hardcoded default ---- */ -}}
+{{- $title       := .Get "title"       | default "" -}}
+{{- $poster      := .Get "poster"      | default "" -}}
+{{- $description := .Get "description" | default "" -}}
+{{- $type        := .Get "type"        | default ($siteCfg.type        | default "audio/mpeg") -}}
+{{- $source      := .Get "source"      | default ($siteCfg.source      | default "local") -}}
+{{- $preload     := .Get "preload"     | default ($siteCfg.preload     | default "metadata") -}}
+{{- $chapters    := .Get "chapters"    | default "" -}}
+{{- $url         := .Get "url"         | default "" -}}
+{{- /* Validate url scheme: allow http(s), relative, fragment, dot-relative, or the literal "none" */ -}}
+{{- if and $url (ne $url "none") (not (or (hasPrefix $url "http://") (hasPrefix $url "https://") (hasPrefix $url "/") (hasPrefix $url "#") (hasPrefix $url "."))) -}}
+  {{- errorf "podcast-player: url must be HTTP(S), relative, fragment, dot-relative, or 'none', got %q" $url -}}
+{{- end -}}
+{{- $autoplay    := .Get "autoplay"    | default ($siteCfg.autoplay    | default "false") -}}
+{{- $showRate    := .Get "rate"        | default ($siteCfg.rate        | default "true") -}}
+
+{{- /* persistent is special: Boolean in site config, string in shortcode param */ -}}
+{{- $persistentDefault := "true" -}}
+{{- if isset $siteCfg "persistent" -}}
+  {{- $persistentDefault = cond $siteCfg.persistent "true" "false" -}}
+{{- end -}}
+{{- $persistent := ne (.Get "persistent" | default $persistentDefault) "false" -}}
+
+{{- /* ---- 4. Resolve local vs remote source ---- */ -}}
+{{- $audioURL  := $src -}}
+{{- $audioType := $type -}}
+
+{{- /* Try page-scoped resource first, then global */ -}}
+{{- $localAudio := .Page.Resources.GetMatch $src -}}
+{{- if not $localAudio -}}
+  {{- $localAudio = resources.GetMatch $src -}}
+{{- end -}}
+
+{{- if $localAudio -}}
+  {{- $audioURL  = $localAudio.RelPermalink -}}
+  {{- $audioType = $localAudio.MediaType.Type -}}
+{{- end -}}
+
+{{- /* ---- 5. Assets — loaded exactly once per page ---- */ -}}
+{{- if not (.Page.Store.Get "podcastPlayerAssetsLoaded") -}}
+  {{- .Page.Store.Set "podcastPlayerAssetsLoaded" true -}}
+
+  {{- /* JS — link directly if asset exists, else inline fallback */ -}}
+  {{- $js := resources.Get "js/podcast-player.js" | fingerprint -}}
+  {{- if $js -}}
+    <script src="{{ $js.RelPermalink }}" integrity="{{ $js.Data.Integrity }}" type="module" defer></script>
+  {{- else -}}
+    <script type="module">
+      console.warn("podcast-player: JS asset not found — check your Hugo module setup.");
+    </script>
+  {{- end -}}
+
+  {{- /* CSS — link directly if asset exists */ -}}
+  {{- $css := resources.Get "css/podcast-player.css" | fingerprint -}}
+  {{- if $css -}}
+    <link rel="stylesheet" href="{{ $css.RelPermalink }}" integrity="{{ $css.Data.Integrity }}">
+  {{- end -}}
+{{- end -}}
+
+{{- /* ---- 6. Render the custom element ---- */ -}}
+<podcast-player
+  src="{{ $audioURL }}"
+  title="{{ $title }}"
+  {{- with $poster }} poster="{{ . }}"{{ end }}
+  {{- with $chapters }} chapters="{{ . }}"{{ end }}
+  {{- with $url }} url="{{ . }}"{{ end }}
+  type="{{ $audioType }}"
+  data-source="{{ $source }}"
+  data-preload="{{ $preload }}"
+  {{- if $persistent }} persistent{{ end }}
+  {{- if eq $autoplay "true" }} autoplay{{ end }}
+  {{- if eq $showRate "true" }} data-rate-control{{ end }}>
+  {{- if $description -}}
+    <span slot="description">{{ $description | .Page.RenderString }}</span>
+  {{- end -}}
+</podcast-player>

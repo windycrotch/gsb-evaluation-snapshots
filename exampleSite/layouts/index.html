@@ -1,0 +1,132 @@
+{{- /* index.html - Home page template */ -}}
+{{ define "main" }}
+  {{- /* Load podcast-player assets manually since the home page uses no shortcode */ -}}
+  {{- if not (.Page.Store.Get "podcastPlayerAssetsLoaded") -}}
+    {{- .Page.Store.Set "podcastPlayerAssetsLoaded" true }}
+    {{- $js := resources.Get "js/podcast-player.js" | fingerprint -}}
+    {{- if $js }}
+    <script src="{{ $js.RelPermalink }}" integrity="{{ $js.Data.Integrity }}" type="module" defer></script>
+    {{- end }}
+    {{- $css := resources.Get "css/podcast-player.css" | fingerprint -}}
+    {{- if $css }}
+    <link rel="stylesheet" href="{{ $css.RelPermalink }}" integrity="{{ $css.Data.Integrity }}">
+    {{- end }}
+  {{- end }}
+
+  {{- /* Hero section */ -}}
+  {{ partial "hero.html" (dict
+    "title"       .Params.title
+    "tagline"     .Params.tagline
+    "description" .Params.description
+    "buttons"     .Params.buttons
+  ) }}
+
+  {{- /* Featured episode player */ -}}
+  {{- $featuredPath := .Params.featured_episode | default "" }}
+  {{- $featured := "" }}
+  {{- if $featuredPath }}
+    {{- $featured = .Site.GetPage $featuredPath }}
+  {{- end }}
+  {{- with $featured }}
+  {{- with .Params.podcast }}
+  <podcast-player
+    src="{{ .src }}"
+    title="{{ $featured.Title }}{{ with $featured.Params.program }} - {{ . }}{{ end }}"
+    {{- with .poster }} poster="{{ . }}"{{ end }}
+    {{- with .chapters }} chapters="{{ . }}"{{ end }}
+    persistent type="audio/mpeg"
+    data-source="local"
+    data-preload="metadata"
+    data-rate-control></podcast-player>
+  {{- end }}
+  {{- end }}
+
+  {{- /* Info card */ -}}
+  <div class="info-card">
+    <p>{{ i18n "home_info_card" (dict "url" (relLangURL "/docs/")) | safeHTML }}</p>
+  </div>
+
+  {{- /* Our Programs - program grid */ -}}
+  <section class="demo-section">
+    <h2>{{ i18n "home_section_programs" }}</h2>
+    <p class="desc">{{ i18n "home_section_programs_desc" }}</p>
+    {{- $programs := where (where .Site.Pages "Section" "programs") "Kind" "page" }}
+    {{- $episodes := where (where .Site.Pages "Section" "episodes") "Kind" "page" }}
+    <div class="program-grid">
+      {{- range $programs }}
+      {{- $count := len (where $episodes "Params.program" .Title) }}
+      {{ partial "program-card.html" (dict
+        "icon"        .Params.icon
+        "url"         .RelPermalink
+        "title"       .Title
+        "description" .Params.description
+        "episodes"    $count
+      ) }}
+      {{- end }}
+    </div>
+  </section>
+
+  {{- /* Latest Episodes */ -}}
+  <section class="demo-section">
+    <h2>{{ i18n "home_section_episodes" }}</h2>
+    <p class="desc">{{ i18n "home_section_episodes_desc" }}</p>
+    {{- $latest := first 4 (sort $episodes "Date" "desc") }}
+    <div class="program-grid">
+      {{- range $latest }}
+      <a href="{{ .RelPermalink }}" class="program-card episode-card">
+        <span class="badge episode-card-badge">{{ .Params.program }}</span>
+        <h3>{{ .Title }}</h3>
+        <p class="episode-card-meta">{{ .Params.episode }} &middot; {{ .Params.duration }}</p>
+        {{- with .Params.tags }}
+        <div class="episode-card-tags">
+          {{- range first 3 . }}
+          <span class="badge episode-card-tag">{{ . }}</span>
+          {{- end }}
+        </div>
+        {{- end }}
+      </a>
+      {{- end }}
+    </div>
+  </section>
+
+  {{- /* About Wavecast */ -}}
+  <section class="demo-section">
+    <h2>{{ i18n "home_section_about" }}</h2>
+    <p class="desc">{{ i18n "home_section_about_desc" }}</p>
+    <div class="program-grid">
+      <div class="program-card" style="cursor:default">
+        <div class="program-card-icon">
+          <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        </div>
+        <h3>{{ i18n "home_feature_persistent_title" }}</h3>
+        <p>{{ i18n "home_feature_persistent_desc" }}</p>
+      </div>
+      <div class="program-card" style="cursor:default">
+        <div class="program-card-icon">
+          <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><polyline points="17 11 19 13 23 9"/></svg>
+        </div>
+        <h3>{{ i18n "home_feature_sync_title" }}</h3>
+        <p>{{ i18n "home_feature_sync_desc" }}</p>
+      </div>
+      <div class="program-card" style="cursor:default">
+        <div class="program-card-icon">
+          <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 22 8.5 22 15.5 12 22 2 15.5 2 8.5 12 2"/><line x1="12" y1="22" x2="12" y2="15.5"/></svg>
+        </div>
+        <h3>{{ i18n "home_feature_theme_title" }}</h3>
+        <p>{{ i18n "home_feature_theme_desc" }}</p>
+      </div>
+      <div class="program-card" style="cursor:default">
+        <div class="program-card-icon">
+          <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+        </div>
+        <h3>{{ i18n "home_feature_podcasts_title" }}</h3>
+        <p>{{ i18n "home_feature_podcasts_desc" }}</p>
+      </div>
+    </div>
+    <div class="nav-buttons" style="margin-top:1rem">
+      <a href="{{ relref . "about.md" }}" class="nav-button nav-button-primary">{{ i18n "home_cta_learn" }}</a>
+      <a href="{{ relref . "docs/_index.md" }}" class="nav-button">{{ i18n "home_cta_docs" }}</a>
+      <a href="https://github.com/adurrr/wavecast" target="_blank" rel="noopener" class="nav-button">{{ i18n "home_cta_github" }}</a>
+    </div>
+  </section>
+{{ end }}
