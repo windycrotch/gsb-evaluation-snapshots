@@ -1,0 +1,16 @@
+/* HeroUI v3 styles (includes Tailwind CSS v4 and the `dark:` variant) */
+@import '@heroui/styles';
+
+/* Brand accent: the purple Boardy used with NextUI's "secondary" color */
+:root,
+.dark,
+[data-theme='dark'] {
+  --accent: #9353d3;
+  --accent-foreground: #ffffff;
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+}
