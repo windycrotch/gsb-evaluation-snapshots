@@ -26,6 +26,9 @@ class EmbedResult:
     manifest_uri: str | None
     method: str  # "inline", "sidecar", "pointer", "none"
     embed_error: str | None = None  # set when inline embed failed and we fell back to sidecar
+    # MIME type actually used for handler dispatch. None in "none"/"pointer"
+    # modes, where no format handler is consulted.
+    resolved_mime: str | None = None
 
 
 def _get_handler_for_mime(mime_type: str):
@@ -33,6 +36,29 @@ def _get_handler_for_mime(mime_type: str):
     from genblaze_core.media import get_handler
 
     return get_handler(mime_type)
+
+
+def _resolve_mime(source: Path, mime_type: str | None) -> str:
+    """Resolve the MIME type used for handler dispatch.
+
+    Priority: an explicit ``mime_type`` from the caller wins — unless the
+    file's magic bytes identify a *different* known type, in which case the
+    content sniff takes precedence (a mislabeled file must not be fed to the
+    wrong handler). When no explicit type is given, defer to
+    :func:`guess_mime` (magic bytes → extension → application/octet-stream).
+    """
+    if mime_type is None:
+        return guess_mime(source)
+    sniffed = sniff_mime(source)
+    if sniffed is not None and sniffed != mime_type:
+        logger.info(
+            "Explicit mime_type=%s overridden by magic-byte sniff (%s) for %s",
+            mime_type,
+            sniffed,
+            source,
+        )
+        return sniffed
+    return mime_type
 
 
 class SmartEmbedder:
@@ -58,7 +84,9 @@ class SmartEmbedder:
             manifest: Manifest to embed.
             output: Optional output path.
             policy: Optional embed policy for redaction.
-            mime_type: MIME type override. Guessed from extension if not provided.
+            mime_type: MIME type override. Authoritative unless the file's
+                magic bytes identify a different known type (content sniff
+                wins on conflict). Guessed from content/extension if omitted.
         """
         # Coerce up front — every EmbedResult.path branch below defaults to
         # `output or source`, and EmbedResult.path is typed Path. Without
@@ -67,6 +95,7 @@ class SmartEmbedder:
         source = Path(source)
         output = Path(output) if output else None
         if policy is not None and policy.embed_mode == "none":
+            # None mode: write nothing, validate nothing (no hash check).
             return EmbedResult(
                 path=output or source,
                 sidecar_path=None,
@@ -90,11 +119,13 @@ class SmartEmbedder:
         # redaction would desynchronize hash and payload. We invoke it for
         # the validation side effect and pass the original manifest through
         # to avoid a wasteful serialize → parse → revalidate round-trip in
-        # the embed hot path.
+        # the embed hot path. This runs BEFORE any file is created or
+        # modified, so a hash/payload-inconsistent policy can never leave a
+        # half-written target behind.
         if policy is not None:
             manifest.to_embed_json(policy)
 
-        mime = mime_type or guess_mime(source)
+        mime = _resolve_mime(source, mime_type)
 
         # Try format-specific handler, fall back to sidecar on any error.
         # Failure reason is preserved in EmbedResult.embed_error so callers
@@ -109,6 +140,7 @@ class SmartEmbedder:
                     sidecar_path=None,
                     manifest_uri=None,
                     method="inline",
+                    resolved_mime=mime,
                 )
         except Exception as exc:
             inline_error = f"{type(exc).__name__}: {exc}"
@@ -128,6 +160,7 @@ class SmartEmbedder:
             manifest_uri=None,
             method="sidecar",
             embed_error=inline_error,
+            resolved_mime=mime,
         )
 
 

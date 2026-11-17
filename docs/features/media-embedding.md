@@ -35,10 +35,21 @@ Embed provenance manifests directly into media files (PNG, JPEG, WebP, MP4, MP3,
 ## Outputs
 - Modified media file with embedded manifest (inline) or `.json` sidecar
 - `EmbedResult` with `method` ("inline", "sidecar", "pointer", or "none"), `path`, `sidecar_path`
+- `EmbedResult.resolved_mime` records the MIME type actually used for handler
+  dispatch (`None` in none/pointer modes, where no format handler runs)
 - In sidecar/pointer modes, `path` always points at an existing media file: if
   `output=` names a location distinct from the source, the source bytes are
   copied there (same atomic-write contract as the inline handlers) before the
   sidecar is written alongside it (#238)
+
+## MIME dispatch priority
+- Explicit `mime_type=` wins — unless the file's magic bytes identify a
+  *different* known type, in which case the content sniff takes precedence
+- Without an explicit type: magic bytes → extension → `application/octet-stream`
+- `embed_mode='none'` writes nothing and skips hash/policy validation entirely;
+  `embed_mode='pointer'` writes only the pointer JSON sidecar
+- In full/sidecar modes, a policy that would desynchronize hash and payload
+  raises `ManifestError` before any file is created or modified
 
 ## Flow
 - `SmartEmbedder` checks MIME type → selects handler via `get_handler()`
