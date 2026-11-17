@@ -1,0 +1,80 @@
+"""
+Snake game
+----------
+
+Simple snake game based on bitmap rendering. Work in progress.
+"""
+
+from collections import deque
+
+import numpy as np
+
+from rendercanvas.auto import RenderCanvas, loop
+
+
+canvas = RenderCanvas(
+    title="Snake on $backend",
+    present_method=None,
+    size=(640, 480),
+    update_mode="continuous",
+)
+
+context = canvas.get_bitmap_context()
+
+world = np.zeros((60, 80), np.uint8)
+pos = [100, 100]
+direction = [1, 0]
+q = deque()
+
+
+@canvas.add_event_handler("resize")
+def on_resize(event):
+    # Match the size of the canvas, with an 8-fold reduction to get massive pixels.
+    # Incidentally, this results in precise physical pixels for the terminal backend :)
+    global world
+    w, h = int(event["width"]) // 8, int(event["height"]) // 8
+    world = np.zeros((h, w), np.uint8)
+
+
+@canvas.add_event_handler("key_down")
+def on_key(event):
+    key = event["key"]
+    if key == "ArrowLeft":
+        direction[0] = -1
+        direction[1] = 0
+    elif key == "ArrowRight":
+        direction[0] = 1
+        direction[1] = 0
+    elif key == "ArrowUp":
+        direction[0] = 0
+        direction[1] = -1
+    elif key == "ArrowDown":
+        direction[0] = 0
+        direction[1] = 1
+
+
+@canvas.request_draw
+def animate():
+    pos[0] += direction[0]
+    pos[1] += direction[1]
+
+    if pos[0] < 0:
+        pos[0] = world.shape[1] - 1
+    elif pos[0] >= world.shape[1]:
+        pos[0] = 0
+    if pos[1] < 0:
+        pos[1] = world.shape[0] - 1
+    elif pos[1] >= world.shape[0]:
+        pos[1] = 0
+
+    q.append(tuple(pos))
+    world[pos[1], pos[0]] = 255
+
+    while len(q) > 20:
+        old_pos = q.popleft()
+        world[old_pos[1], old_pos[0]] = 0
+
+    context.set_bitmap(world)
+
+
+loop.run()
