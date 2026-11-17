@@ -124,9 +124,11 @@
 
     // the frame the screen shows: when the game copies its back buffer to the screen, the frame last
     // published is what is there (header slot 15: that buffer + 1), and the page takes its background from it
+    // (holdPreview after every present: the track menu's overview window defended against the original's
+    // own picture of it, which its later batches and stale buffers keep putting back — see below)
     for (const name of ['sprite_blit_to_video', 'sprite_copy_2_to_1', 'sprite_copy_2_to_1_2', 'sprite_copy_2_to_1_clear']) {
       const f = P[name];
-      if (f) P[name] = function (r, m, PP, e) { ogRestore(); const ret = f(r, m, PP, e); Atomics.store(I, 15, Atomics.load(I, 0) + 1); return ret; };
+      if (f) P[name] = function (r, m, PP, e) { ogRestore(); const ret = f(r, m, PP, e); holdPreview(); Atomics.store(I, 15, Atomics.load(I, 0) + 1); return ret; };
     }
 
     // row address of the sprite1 drawing target (the back buffer)
@@ -302,8 +304,29 @@
       toBackground(s16(pc.rw(D, rect)), s16(pc.rw(D, rect + 2)), s16(pc.rw(D, rect + 4)), s16(pc.rw(D, rect + 6)));
     };
 
+    // The overview's hold on the screen. The original draws its own picture of the preview area in
+    // batches (a tile at a time), and while its menu is up that picture keeps coming back: the menu's
+    // window is blitted to the screen again on every hover, and its second buffer and the pointer's
+    // backing store still hold the picture from before the window was made see-through. So after every
+    // present, any pixel in the preview rectangle that shows the original's picture (kept aside at
+    // bg + 192000) is made see-through again: the published overview is neither chopped up nor flashed
+    // back. Anything else there (a dialog over it, the next menu's screen) is left alone, so this is
+    // inert away from the menu; the hold also ends when the tracks menu returns (below).
+    let pvRect = null;
+    function holdPreview() {
+      if (!pvRect) return;
+      const [L, R, T, Bt] = pvRect;
+      for (let y = Math.max(0, T); y < Math.min(200, Bt); y++)
+        for (let x = Math.max(0, L); x < Math.min(320, R); x++) {
+          const i = y * 320 + x, v = pc.mem[0xA0000 + i];
+          if (v !== KEY && v === B[192000 + i]) { pc.mem[0xA0000 + i] = KEY; B[128000 + i] = 1; }
+        }
+    }
+
     // The track menu's overview. Modern view: instead of the original's picture, the whole track in 3D (the
-    // page orbits it): the world is written, the window made see-through and a "preview" frame published.
+    // page orbits it): the world is written, the window made see-through and a "preview" frame published —
+    // the frame that stays published until the menu closes or another preview is asked for, its window
+    // held (above) from the moment it is made, the handshake below included.
     // The menu frees the track's shapes and the horizon right after, so the page is given a moment
     // (W[2] request, W[3] acknowledged) to build its meshes from them first. Otherwise: the original's
     // picture, drawn in several batches, left to the original renderer (and kept for OG mode, below).
@@ -324,11 +347,15 @@
       toBackground(L, R, T, Bt);
       I[16 + buf * BUF + 14] = 1;   // a preview frame
       publish();
+      pvRect = [L, R, T, Bt];   // the window held from now on, confirmed or not (holdPreview)
       const req = W[2] + 1; Atomics.store(W, 2, req);
       // (up to 3 s: a big track takes the page a while on a slow phone, and its shapes freed while it still read them were
       // drawn as giant slabs and spikes, kept in its cache for the tracks after; the page answers as soon as it is done)
       for (let t = 0; t < 60 && Atomics.load(W, 3) !== req; t++) Atomics.wait(W, 3, Atomics.load(W, 3), 50);
     };
+    // the tracks menu left (to race, or back to the main menu): the overview's hold on the screen ends
+    // with it; the next time the menu is shown its preview request publishes and holds again
+    { const rtm = P.run_tracks_menu; if (rtm) P.run_tracks_menu = function (r, m, PP, e) { try { return rtm(r, m, PP, e); } finally { pvRect = null; } }; }
 
     // a crash's explosion: in the modern view the page draws its own (hires-view.js, explosions); the
     // original's 2D animation is left out (its caller pops the arguments)
