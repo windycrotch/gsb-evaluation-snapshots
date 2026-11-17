@@ -1390,9 +1390,11 @@ export class Context {
         const start = Math.floor(ints[i]);
         const end = Math.floor(ints[i + 1]);
         for (let ii = start; ii <= end; ii++) {
-          const rgb = and(this.calculateRGBA(ii, j), 0xffffff00);
-          const alpha = and(this.calculateRGBA(ii, j), 0xff);
-          let col = this.calculateRGBA(ii, j);
+          // one color lookup per pixel; for a gradient this calls colorAt and
+          // fillPixelWithColor composites it with globalAlpha
+          const col = this.calculateRGBA(ii, j);
+          const rgb = and(col, 0xffffff00);
+          const alpha = and(col, 0xff);
           if (ii === start) {
             //first
             const int = or(rgb, (1 - fstartf) * alpha);

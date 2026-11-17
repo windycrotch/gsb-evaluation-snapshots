@@ -7,24 +7,42 @@ export class CanvasGradient {
   constructor() {
     this.stops = [];
   }
-  addColorStop(t: number, colorstring: number) {
+  addColorStop(t: number, colorstring: string | number) {
     if (arguments.length < 2) throw new TypeError("addColorStop requires an offset and color");
     const color = colorStringToUint32("" + colorstring);
     this.stops.push({ t: t, color: color });
   }
+
+  /**
+   * Returns the interpolated color (as a big-endian RGBA uint32) for the
+   * given gradient position. Stops may have been added in any order; they are
+   * sorted by offset here. Positions outside the stop range use the nearest
+   * endpoint color, and alpha is interpolated linearly just like RGB.
+   */
   protected _lerpStops(t: number) {
-    if (t < 0) t += 1.0;
-    if (t > 1) t -= 1.0;
-    // find the stops that T is inbetween
-    let start = this.stops
-      .slice()
-      .reverse()
-      .find((stop) => stop.t <= t);
-    let end = this.stops.find((stop) => stop.t > t);
-    if (!end) end = this.stops.at(-1);
+    // render stops in ascending offset order, regardless of insertion order
+    const stops = this.stops.slice().sort((a, b) => a.t - b.t);
+
+    // a single stop colors the whole area
+    if (stops.length === 1) return stops[0].color;
+
+    // positions outside the stop range use the nearest endpoint color
+    if (t <= stops[0].t) return stops[0].color;
+    if (t >= stops[stops.length - 1].t) return stops[stops.length - 1].color;
+
+    // find the pair of stops that t lies between
+    let start = stops[0];
+    let end = stops[stops.length - 1];
+    for (let i = 0; i < stops.length - 1; i++) {
+      if (stops[i].t <= t && t <= stops[i + 1].t) {
+        start = stops[i];
+        end = stops[i + 1];
+        break;
+      }
+    }
 
     // calculate relative T between those stops
-    let rt = remap(t, start.t, end.t, 0, 1);
+    const rt = start.t === end.t ? 0 : remap(t, start.t, end.t, 0, 1);
 
     // convert colors to components, 0->1
     const intToRGBA = (int: number) => {
@@ -33,19 +51,15 @@ export class CanvasGradient {
     const rgba_start = intToRGBA(start.color);
     const rgba_end = intToRGBA(end.color);
 
-    //lerp the final color
+    // lerp every component, including alpha
     const final_color = rgba_start.map((c, i) => lerp(c, rgba_end[i], rt));
 
-    // console.log(`t = ${t.toFixed(3)} tt = ${rt.toFixed(3)} color ${rgba_start}, ${rgba_end} -> ${final_color.map(v => v.toFixed(2))}`)
-
-    // convert back to bytes, force alpha to 100%
+    // convert back to bytes, preserving the interpolated alpha
     const RGBAToInt = (rgba: number[]) => {
       const fc = rgba.map((c) => c * 255);
-      return fromBytesBigEndian(fc[0], fc[1], fc[2], 0xff);
+      return fromBytesBigEndian(fc[0], fc[1], fc[2], fc[3]);
     };
     return RGBAToInt(final_color);
-    // const fc = final_color.map(c => c*255)
-    // return fromBytesBigEndian(fc[0],fc[1],fc[2],0xff)
   }
 }
 
@@ -113,8 +127,11 @@ export class ConicalGradient extends CanvasGradient {
   }
   colorAt(x: number, y: number) {
     const pt = this.start.subtract(new Point(x, y));
+    // angle measured clockwise from the gradient's start angle. atan2 ==
+    // this.angle corresponds to offset t = 0; a full turn maps to t = 1.
     let ang = Math.atan2(pt.y, pt.x) - this.angle;
-    const t = remap(ang, -Math.PI, Math.PI, 0, 1);
+    ang = ((ang % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+    const t = ang / (2 * Math.PI);
     return this._lerpStops(t);
   }
 }
