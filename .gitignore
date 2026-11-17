@@ -1,0 +1,18 @@
+node_modules/
+lib/
+coverage/
+.DS_Store
+packages/*/README.md
+apps/*/dist/
+apps/*/.expo/
+apps/*/.expo-shared/
+
+# Yarn 4 (Berry) — keep releases/plugins/patches, ignore cache & state
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions
+.pnp.*
+.claude/worktrees/

@@ -1,0 +1,22 @@
+{
+  "name": "webgltexture-loader-dom-video",
+  "version": "2.1.2",
+  "description": "HTMLVideoElement loader for webgltexture-loader",
+  "license": "MIT",
+  "author": "Gaëtan Renaudeau <renaudeau.gaetan@gmail.com>",
+  "repository": "https://github.com/gre/webgltexture-loader",
+  "files": [
+    "src",
+    "lib"
+  ],
+  "main": "lib/VideoTextureLoader.js",
+  "types": "lib/VideoTextureLoader.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "prepack": "tsc"
+  },
+  "dependencies": {
+    "webgltexture-loader": "^2.1.2"
+  }
+}

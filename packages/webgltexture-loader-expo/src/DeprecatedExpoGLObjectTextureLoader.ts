@@ -1,0 +1,81 @@
+import { NativeModulesProxy } from "expo-modules-core";
+import { globalRegistry, WebGLTextureLoaderAsyncHashCache } from "webgltexture-loader";
+
+const neverEnding: Promise<never> = new Promise(() => {});
+
+const available = !!NativeModulesProxy.ExponentGLObjectManager?.createObjectAsync;
+
+let warned = false;
+
+export default class ExpoGLObjectTextureLoader extends WebGLTextureLoaderAsyncHashCache<
+  Record<string, unknown>
+> {
+  static priority = -200;
+
+  objIds: WeakMap<WebGLTexture, number> = new WeakMap();
+
+  override canLoad(input: unknown): boolean {
+    if (!available && !warned) {
+      warned = true;
+      // This is a legacy fallback loader. It only activates on Expo
+      // SDKs that still expose `ExponentGLObjectManager.createObjectAsync`;
+      // modern SDKs (51+) have removed it. Demote to debug so it doesn't
+      // misleadingly imply the user is on the wrong Expo version.
+      console.debug(
+        "webgltexture-loader-expo: ExponentGLObjectManager.createObjectAsync " +
+          "is not available on this Expo SDK; the deprecated GLObject loader " +
+          "will not be used. This is expected on Expo SDK 51+.",
+      );
+    }
+    return available && typeof input === "object" && input !== null;
+  }
+
+  override disposeTexture(texture: WebGLTexture): void {
+    const exglObjId = this.objIds.get(texture);
+    if (exglObjId !== undefined) {
+      NativeModulesProxy.ExponentGLObjectManager?.destroyObjectAsync?.(exglObjId);
+    }
+    this.objIds.delete(texture);
+  }
+
+  override inputHash(config: Record<string, unknown>) {
+    return JSON.stringify(config);
+  }
+
+  override loadNoCache(config: Record<string, unknown>) {
+    const { gl } = this;
+    const { __exglCtxId: exglCtxId } = gl as unknown as { __exglCtxId: number };
+    const createObjectAsync = NativeModulesProxy.ExponentGLObjectManager?.createObjectAsync;
+    if (!createObjectAsync) {
+      return {
+        promise: Promise.reject(
+          new Error("ExponentGLObjectManager.createObjectAsync not available"),
+        ),
+        dispose: () => {},
+      };
+    }
+    let disposed = false;
+    const dispose = () => {
+      disposed = true;
+    };
+    const promise = createObjectAsync({
+      exglCtxId,
+      texture: config,
+    }).then(({ exglObjId }) => {
+      if (disposed) return neverEnding;
+      // Expo polyfills a constructible WebGLTexture(exglObjId) on the global.
+      // Standard browsers expose WebGLTexture as an opaque, non-constructible
+      // interface; this code only runs under Expo.
+      const texture = new (
+        globalThis as unknown as {
+          WebGLTexture: new (id: number) => WebGLTexture;
+        }
+      ).WebGLTexture(exglObjId);
+      this.objIds.set(texture, exglObjId);
+      return { texture, width: 0, height: 0 };
+    });
+    return { promise, dispose };
+  }
+}
+
+globalRegistry.add(ExpoGLObjectTextureLoader);

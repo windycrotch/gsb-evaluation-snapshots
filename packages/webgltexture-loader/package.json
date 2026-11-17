@@ -1,0 +1,25 @@
+{
+  "name": "webgltexture-loader",
+  "version": "2.1.2",
+  "description": "load & cache various kind of WebGLTexture with an extensible and loosely coupled system",
+  "keywords": [
+    "gl",
+    "loader",
+    "webgl",
+    "webgltexture"
+  ],
+  "license": "MIT",
+  "author": "Gaëtan Renaudeau <renaudeau.gaetan@gmail.com>",
+  "repository": "https://github.com/gre/webgltexture-loader",
+  "files": [
+    "src",
+    "lib"
+  ],
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "prepack": "tsc"
+  }
+}

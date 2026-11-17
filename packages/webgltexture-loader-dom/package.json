@@ -1,0 +1,24 @@
+{
+  "name": "webgltexture-loader-dom",
+  "version": "2.1.2",
+  "description": "collection of webgltexture-loader in DOM implementation context",
+  "license": "MIT",
+  "author": "Gaëtan Renaudeau <renaudeau.gaetan@gmail.com>",
+  "repository": "https://github.com/gre/webgltexture-loader",
+  "files": [
+    "src",
+    "lib"
+  ],
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "prepack": "tsc"
+  },
+  "dependencies": {
+    "webgltexture-loader-dom-canvas": "^2.1.2",
+    "webgltexture-loader-dom-image-url": "^2.1.2",
+    "webgltexture-loader-dom-video": "^2.1.2"
+  }
+}
