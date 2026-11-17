@@ -1,0 +1,67 @@
+{
+  "name": "vitest-screenshot",
+  "version": "2.0.1",
+  "description": "toMatchScreenshot() for Vitest: image-snapshot a WebGL/WebGPU canvas, Image or ImageData against a committed png/jpg/gif/webp baseline",
+  "keywords": [
+    "canvas",
+    "headless",
+    "image-snapshot",
+    "matcher",
+    "pixelmatch",
+    "screenshot",
+    "snapshot",
+    "testing",
+    "toMatchScreenshot",
+    "visual-regression",
+    "visual-testing",
+    "vitest",
+    "vitest-matcher",
+    "webgl",
+    "webgpu"
+  ],
+  "homepage": "https://github.com/bhouston/vitest-gpu#readme",
+  "bugs": {
+    "url": "https://github.com/bhouston/vitest-gpu/issues"
+  },
+  "license": "MIT",
+  "author": "Ben Houston <ben@ben3d.ca> (https://ben3d.ca)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bhouston/vitest-gpu.git",
+    "directory": "packages/vitest-screenshot"
+  },
+  "files": [
+    "dist/**/*.js",
+    "dist/**/*.js.map",
+    "dist/**/*.d.ts",
+    "dist/**/*.d.ts.map",
+    "src/**/*.ts",
+    "!src/**/*.test.ts"
+  ],
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "tsc": "tsc --noEmit && tsc -p tsconfig.type-tests.json"
+  },
+  "dependencies": {
+    "pixelmatch": "^7.2.0",
+    "sharp": "^0.35.5"
+  },
+  "peerDependencies": {
+    "vitest": ">=4 <6"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

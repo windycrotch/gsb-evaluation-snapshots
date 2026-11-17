@@ -1,0 +1,62 @@
+{
+  "name": "vitest-gpu",
+  "private": true,
+  "description": "Vitest environments for headless WebGL and WebGPU in Node, plus a screenshot matcher",
+  "license": "MIT",
+  "author": "Ben Houston <ben@ben3d.ca> (https://ben3d.ca)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bhouston/vitest-gpu.git"
+  },
+  "type": "module",
+  "scripts": {
+    "prepare": "husky",
+    "build": "pnpm -r --filter \"./packages/*\" --filter \"!@vitest-gpu/docs\" build",
+    "tsc": "pnpm -r tsc",
+    "docs:build": "pnpm --filter @vitest-gpu/docs build",
+    "docs:dev": "pnpm --filter @vitest-gpu/docs dev",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "test:types": "tsc -p packages/vitest-environment-webgpu-node/tsconfig.type-test.json && tsc -p packages/vitest-environment-webgl-node/tsconfig.type-test-node.json && tsc -p packages/vitest-environment-webgl-node/tsconfig.type-test-dom.json",
+    "test:watch": "vitest",
+    "format": "oxfmt .",
+    "lint": "oxlint --type-aware --type-check .",
+    "lint:fix": "oxlint --type-aware --type-check --fix .",
+    "package:maps": "pnpm build && node scripts/check-package-maps.mjs",
+    "release": "semantic-release",
+    "package:check": "pnpm package:maps && pnpm -r --filter \"./packages/*\" --filter \"!@vitest-gpu/docs\" exec npm pack --dry-run --ignore-scripts",
+    "test:workflow": "node --test scripts/workflow.test.mjs"
+  },
+  "devDependencies": {
+    "@anolilab/semantic-release-pnpm": "^8.1.36",
+    "@commitlint/cli": "^21.2.4",
+    "@commitlint/config-conventional": "^21.2.4",
+    "@semantic-release/commit-analyzer": "^13.0.1",
+    "@semantic-release/github": "^12.0.10",
+    "@semantic-release/release-notes-generator": "^14.1.1",
+    "@types/node": "^22.20.5",
+    "@visulima/yaml": "1.0.0",
+    "@vitest/coverage-v8": "^5.0.5",
+    "conventional-changelog-conventionalcommits": "^9.3.1",
+    "husky": "^9.1.7",
+    "lint-staged": "^17.6.0",
+    "oxfmt": "^0.75.0",
+    "oxlint": "^1.90.0",
+    "oxlint-tsgolint": "^7.0.2005",
+    "semantic-release": "^25.0.9",
+    "typescript": "7.1.0-beta",
+    "vite": "^8.3.5",
+    "vitest": "^5.0.5"
+  },
+  "lint-staged": {
+    "*.{js,jsx,ts,tsx,mjs,cjs}": [
+      "oxfmt --no-error-on-unmatched-pattern",
+      "oxlint --fix --no-error-on-unmatched-pattern"
+    ],
+    "*.{json,jsonc,md,mdx,css,html,yml,yaml}": "oxfmt --no-error-on-unmatched-pattern"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@12.16.1"
+}

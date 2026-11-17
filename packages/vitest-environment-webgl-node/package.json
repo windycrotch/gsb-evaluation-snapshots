@@ -1,0 +1,72 @@
+{
+  "name": "vitest-environment-webgl-node",
+  "version": "2.0.1",
+  "description": "Vitest environment for real headless WebGL 1/2 tests in Node (ANGLE via @onirenaud/node-webgl): no browser, Playwright or canvas mocks",
+  "keywords": [
+    "babylonjs",
+    "canvas",
+    "ci",
+    "gpu",
+    "gpu-testing",
+    "headless",
+    "headless-gl",
+    "node",
+    "pixijs",
+    "regl",
+    "testing",
+    "three.js",
+    "vitest",
+    "vitest-environment",
+    "webgl",
+    "webgl-testing",
+    "webgl2"
+  ],
+  "homepage": "https://github.com/bhouston/vitest-gpu#readme",
+  "bugs": {
+    "url": "https://github.com/bhouston/vitest-gpu/issues"
+  },
+  "license": "MIT",
+  "author": "Ben Houston <ben@ben3d.ca> (https://ben3d.ca)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bhouston/vitest-gpu.git",
+    "directory": "packages/vitest-environment-webgl-node"
+  },
+  "files": [
+    "globals.d.ts",
+    "dist/**/*.js",
+    "dist/**/*.js.map",
+    "dist/**/*.d.ts",
+    "dist/**/*.d.ts.map",
+    "src/**/*.ts",
+    "!src/**/*.test.ts"
+  ],
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./globals": {
+      "types": "./globals.d.ts"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "tsc": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@onirenaud/node-webgl": "^0.2.0"
+  },
+  "peerDependencies": {
+    "vitest": ">=4 <6"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

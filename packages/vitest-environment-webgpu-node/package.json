@@ -1,0 +1,74 @@
+{
+  "name": "vitest-environment-webgpu-node",
+  "version": "2.0.1",
+  "description": "Vitest environment for real headless WebGPU tests in Node (Dawn via the webgpu package): no browser, Playwright or mocks",
+  "keywords": [
+    "ci",
+    "compute-shader",
+    "dawn",
+    "gpu",
+    "gpu-testing",
+    "headless",
+    "node",
+    "testing",
+    "three.js",
+    "vitest",
+    "vitest-environment",
+    "webgpu",
+    "webgpu-testing",
+    "wgsl"
+  ],
+  "homepage": "https://github.com/bhouston/vitest-gpu#readme",
+  "bugs": {
+    "url": "https://github.com/bhouston/vitest-gpu/issues"
+  },
+  "license": "MIT",
+  "author": "Ben Houston <ben@ben3d.ca> (https://ben3d.ca)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bhouston/vitest-gpu.git",
+    "directory": "packages/vitest-environment-webgpu-node"
+  },
+  "files": [
+    "dist/**/*.js",
+    "dist/**/*.js.map",
+    "dist/**/*.d.ts",
+    "dist/**/*.d.ts.map",
+    "src/**/*.ts",
+    "!src/**/*.test.ts"
+  ],
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "tsc": "tsc --noEmit"
+  },
+  "dependencies": {
+    "webgpu": "^0.6.2"
+  },
+  "devDependencies": {
+    "typescript": "7.1.0-beta"
+  },
+  "peerDependencies": {
+    "typescript": ">=6",
+    "vitest": ">=4 <6"
+  },
+  "peerDependenciesMeta": {
+    "typescript": {
+      "optional": true
+    }
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
