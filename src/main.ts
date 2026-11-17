@@ -274,7 +274,36 @@ class HolographicTicketApp {
     })
   }
 
+  /**
+   * Ticket-switch rule: true when the current pass carries any physical tear
+   * progress — at least one severed perforation fiber, or a fully detached stub.
+   */
+  private hasTearProgress(): boolean {
+    return this.verlet.isFullyDetached || this.verlet.getIntactSeamCount() < NUM_COLS
+  }
+
+  /**
+   * Fully resets the physical pass to a fresh untorn ticket (25/25 fibers
+   * restored, stub back in place, admission state back to pending) and
+   * synchronously reconciles every tear-state UI element — fiber strip, tear
+   * percentage readout, status badge and primary CTA label — within the same
+   * call, so nothing waits for the next frame or the next drag.
+   * Observation modes (180° flip, X-Ray overlay) are intentionally preserved.
+   */
+  private resetPassAndSyncUI(): void {
+    this.verlet.resetPass(true)
+    this.syncPerforationUI()
+  }
+
   public selectTier(tierId: TierEditionId): void {
+    // Ticket-switch rule: if the current pass has any tear progress (partial
+    // tear or fully detached stub), issue a fresh untorn pass first so the new
+    // edition never inherits stale physical tear state. With zero torn fibers,
+    // only the texture & checkout info update — bend and flip are preserved.
+    if (this.hasTearProgress()) {
+      this.resetPassAndSyncUI()
+    }
+
     this.currentTier = TIER_SPECS[tierId]
     this.passUniforms.uFoilMode.value = this.currentTier.foilMode
 
@@ -299,6 +328,13 @@ class HolographicTicketApp {
   }
 
   public selectSeat(seat: SeatOption): void {
+    // Ticket-switch rule (same as selectTier): any tear progress on the current
+    // pass triggers a full reset to a fresh untorn pass before the new seat is
+    // applied; an untouched pass keeps its current bend and flip.
+    if (this.hasTearProgress()) {
+      this.resetPassAndSyncUI()
+    }
+
     this.currentSeat = seat
     document.querySelectorAll<HTMLButtonElement>('.seat-pill').forEach((btn) => {
       btn.classList.toggle('is-selected', btn.dataset.seat === seat.id)
@@ -348,9 +384,12 @@ class HolographicTicketApp {
   }
 
   public issueFreshPass(): void {
-    this.verlet.resetPass(true)
+    // Reset path (R key / reset button / verified-pass CTA): works identically
+    // whether the pass is partially torn or fully detached — restores 25/25
+    // fibers, 0% torn, "AWAITING TEAR VALIDATION" and "Tear Perforated Stub",
+    // all synced before this call returns.
+    this.resetPassAndSyncUI()
     this.sound.playCardFlexWhoosh(0.8)
-    this.syncPerforationUI()
   }
 
   private bindStageInteractions(): void {
