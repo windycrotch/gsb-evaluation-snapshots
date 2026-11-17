@@ -255,7 +255,8 @@ class Renderer3D {
     }
 
     /**
-     * Set tool visibility and color states
+     * Set tool visibility and color states. The toolpath buffers are rebuilt before the
+     * next frame is drawn if these changed (syncToolpathBuffers), so they apply at once.
      */
     setToolStates(toolStates) {
         this.toolStates = toolStates;
@@ -275,7 +276,6 @@ class Renderer3D {
     setLayerFilter(min, max) {
         this.layerFilter.min = min;
         this.layerFilter.max = max;
-        this.updateBuffers();
     }
 
     /**
@@ -382,6 +382,31 @@ class Renderer3D {
         upload(this.buffers.rapidColor, rapid.color);
         upload(this.buffers.cutPosition, cut.position);
         upload(this.buffers.cutColor, cut.color);
+        this.bufferKey = this.toolpathKey();
+    }
+
+    /**
+     * Everything the toolpath buffers are built from, as a string: the moves, the theme,
+     * the layer filter, rapid visibility and color, and each tool's visibility and color.
+     * Any change here means the buffers no longer match what should be drawn.
+     */
+    toolpathKey() {
+        let key = this.layerFilter.min + '|' + this.layerFilter.max + '|' + this.rapidMovesVisible + '|' +
+            this.rapidMoveColor + '|' + document.documentElement.getAttribute('data-theme');
+        for (const [toolNum, state] of this.toolStates) key += '|' + toolNum + ':' + (state.visible ? 1 : 0) + state.color;
+        return key;
+    }
+
+    /**
+     * Rebuild the toolpath buffers when a display setting they were built from has
+     * changed since (a layer slider drag, a tool's checkbox or colour, rapids on or off,
+     * a theme switch). Called before each draw, so a change shows on the next frame
+     * without reloading the file; with nothing changed it costs one string compare.
+     */
+    syncToolpathBuffers() {
+        if (this.segments.length === 0) return;
+        if (this.bufferKey === this.toolpathKey()) return;
+        this.updateBuffers();
     }
 
     /**
@@ -389,6 +414,9 @@ class Renderer3D {
      * the tool is. Uses the line program, already in use with its MVP set.
      */
     drawToolpaths() {
+        // A setting changed since the buffers were built: rebuild them now, so this frame
+        // already draws by the new layer range, tool and rapid settings
+        this.syncToolpathBuffers();
         const gl = this.gl;
         const L = this.locations;
         const n = this.segments.length;
@@ -465,6 +493,12 @@ class Renderer3D {
             gl.clearColor(0.98, 0.98, 0.98, 1.0);
         }
         
+        // A display setting changed since the buffers were built: rebuild them now, before
+        // the vertex count below decides whether anything is drawn (with every layer
+        // filtered out it is 0, and widening the range must bring the moves straight back;
+        // with the paths off entirely, drawToolpaths isn't reached to do it)
+        this.syncToolpathBuffers();
+
         gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
         if (!this.vertexCount || this.vertexCount === 0) {
