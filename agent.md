@@ -23,9 +23,11 @@ design into a template you can drive without touching canvas JSON:
   `name`, `type` (`text` or `image`), the current `value`, and the pages the
   field appears on.
 - `POST /api/designs/{id}/fill` — `{"values": {"headline": "..."}}`. Returns the
-  filled pages plus `filled` and `unmatched`; the stored design is unchanged.
+  filled pages plus `filled` and `unmatched`, `replacements` (how many objects
+  each name actually changed) and `skipped_pages` (pages whose canvas could not
+  be parsed and came back untouched); the stored design is unchanged.
   Add `"save": true` to write the result as a new design you can then open and
-  export.
+  export — it has the same pages and stats as the unsaved response.
 
 Prefer these over editing `canvas_json` by hand. Text fields take a string,
 image fields take a URL, and one name may cover several objects or pages.

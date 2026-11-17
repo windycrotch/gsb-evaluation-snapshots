@@ -270,6 +270,10 @@ const FillResponseSchema = z.object({
   pages: z.array(FilledPageSchema),
   filled: z.array(z.string()),
   unmatched: z.array(z.string()),
+  // Per filled name: how many objects were actually rewritten, across pages.
+  replacements: z.record(z.number()),
+  // Pages whose canvas_json could not be parsed; returned untouched in `pages`.
+  skipped_pages: z.array(z.string()),
 });
 
 const fillDesign = createRoute({
@@ -311,7 +315,7 @@ app.openapi(fillDesign, async (c) => {
   // Numbers are the common case for stat cards, so accept them and stringify
   // rather than making every caller do it.
   const strings = Object.fromEntries(Object.entries(values).map(([k, v]) => [k, String(v)]));
-  const { pages: filledPages, filled, unmatched } = fillPages(pages, strings);
+  const { pages: filledPages, filled, unmatched, replacements, skipped_pages } = fillPages(pages, strings);
 
   const body = filledPages.map((p) => ({
     id: p.id,
@@ -320,7 +324,7 @@ app.openapi(fillDesign, async (c) => {
     canvas_json: p.canvas_json,
   }));
 
-  if (!save) return c.json({ design, pages: body, filled, unmatched }, 200);
+  if (!save) return c.json({ design, pages: body, filled, unmatched, replacements, skipped_pages }, 200);
 
   // Ids are generated here rather than by the column default so the new rows
   // can be linked without a racy "most recently created" lookup.
@@ -341,7 +345,23 @@ app.openapi(fillDesign, async (c) => {
   for (const p of createdPages) {
     await run(
       "INSERT INTO pages (id, design_id, title, canvas_json, sort_order) VALUES (?, ?, ?, ?, ?)",
+      // A skipped page arrives here unchanged, so its original blob is stored.
       [p.id, newDesignId, p.title, p.canvas_json, p.sort_order]
+    );
+  }
+
+  // The saved design must hold exactly the pages the fill reported — skipped
+  // pages included, none dropped. If that ever diverges, undo the partial save
+  // rather than hand back a design that quietly disagrees with `pages`.
+  const saved = await get<{ c: number }>(
+    "SELECT COUNT(*) as c FROM pages WHERE design_id = ?",
+    [newDesignId]
+  );
+  if ((saved?.c ?? 0) !== filledPages.length) {
+    await run("DELETE FROM pages WHERE design_id = ?", [newDesignId]);
+    await run("DELETE FROM designs WHERE id = ?", [newDesignId]);
+    throw new Error(
+      `Saved ${saved?.c ?? 0} pages but the fill produced ${filledPages.length}; rolled back ${newDesignId}`
     );
   }
 
@@ -357,6 +377,8 @@ app.openapi(fillDesign, async (c) => {
       })),
       filled,
       unmatched,
+      replacements,
+      skipped_pages,
     },
     200
   );

@@ -198,9 +198,20 @@ curl -X POST localhost:8787/api/designs/$ID/fill \
 ```
 
 The response carries the filled pages plus `filled` and `unmatched`, so a name
-that matches nothing is reported rather than failing the request. The stored
-design is left alone — add `"save": true` (and optionally `"name"`) to persist
-the result as a new design instead.
+that matches nothing is reported rather than failing the request. Two more
+fields make the result checkable:
+
+- `replacements` maps each filled name to the number of objects actually
+  rewritten. A name reused on several objects or pages counts every hit, so
+  `{"logo": 5}` means five objects changed, not five pages.
+- `skipped_pages` lists the ids of pages whose `canvas_json` could not be
+  parsed. Those pages are returned byte-for-byte as they came in; they are the
+  reason a name can look filled but appear on fewer pages than expected.
+
+Both appear on the plain and the `save: true` response alike. The stored design
+is left alone — add `"save": true` (and optionally `"name"`) to persist the
+result as a new design instead; the new design has exactly the pages listed in
+`pages`, skipped ones included.
 
 ### How far this scales today
 

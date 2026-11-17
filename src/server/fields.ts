@@ -33,6 +33,19 @@ export interface FillResult<P extends PageJSON> {
   filled: string[];
   /** Supplied names that matched nothing — a typo, not an error. */
   unmatched: string[];
+  /**
+   * How many objects were actually rewritten for each filled name, summed
+   * across every parseable page. Reusing a name on several objects or pages
+   * counts each hit, so this total can be checked against the returned
+   * canvases. Names with zero replacements do not appear here.
+   */
+  replacements: Record<string, number>;
+  /**
+   * Ids of pages whose `canvas_json` could not be parsed. Those pages are
+   * returned exactly as received and contribute nothing to `filled` or
+   * `replacements`.
+   */
+  skipped_pages: string[];
 }
 
 /** Fabric serializes text as one of three type names depending on the class. */
@@ -122,10 +135,17 @@ export function collectFields(pages: PageJSON[]): Field[] {
  */
 export function fillPages<P extends PageJSON>(pages: P[], values: Record<string, string>): FillResult<P> {
   const filled = new Set<string>();
+  const replacements = new Map<string, number>();
+  const skippedPages: string[] = [];
 
   const out = pages.map((page) => {
     const canvas = parseCanvas(page.canvas_json);
-    if (!canvas) return page;
+    if (!canvas) {
+      // Leave the page byte-for-byte as it came in — a corrupt blob is not
+      // something to re-serialise or throw on, only to report.
+      skippedPages.push(page.id);
+      return page;
+    }
 
     let touched = false;
     eachObject(canvas, (obj) => {
@@ -135,10 +155,13 @@ export function fillPages<P extends PageJSON>(pages: P[], values: Record<string,
       const type = fieldTypeOf(obj);
       if (!type) return;
 
+      // An empty string is a legitimate value (it clears the slot), so the
+      // write and the count happen regardless of truthiness.
       if (type === "text") obj.text = values[name];
       else obj.src = values[name];
 
       filled.add(name);
+      replacements.set(name, (replacements.get(name) ?? 0) + 1);
       touched = true;
     });
 
@@ -149,5 +172,7 @@ export function fillPages<P extends PageJSON>(pages: P[], values: Record<string,
     pages: out,
     filled: [...filled],
     unmatched: Object.keys(values).filter((name) => !filled.has(name)),
+    replacements: Object.fromEntries(replacements),
+    skipped_pages: skippedPages,
   };
 }
