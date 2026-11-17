@@ -1,0 +1,61 @@
+name: Test and publish
+
+on:
+    push:
+        branches: [main]
+    pull_request:
+
+concurrency:
+    group: ${{ github.event_name == 'push' && 'npm-publish-main' || format('package-tests-pr-{0}-{1}', github.event.pull_request.number, github.sha) }}
+    queue: max
+
+permissions:
+    contents: read
+
+jobs:
+    test:
+        name: Package tests
+        runs-on: ubuntu-24.04
+        steps:
+            - uses: actions/checkout@v6
+            - uses: actions/setup-node@v6
+              with:
+                  node-version: '26.13.0'
+                  cache: 'npm'
+            - run: npm ci
+            - name: Get Playwright version
+              id: playwright-version
+              run: echo "version=$(node -p "require('playwright/package.json').version")" >> "$GITHUB_OUTPUT"
+            - uses: actions/cache@v4
+              with:
+                  path: ~/.cache/ms-playwright
+                  key: ${{ runner.os }}-${{ runner.arch }}-playwright-${{ steps.playwright-version.outputs.version }}-chromium
+            - run: npx playwright install --with-deps chromium
+            - run: npm run test:types
+            - run: npm run test:attest
+            - run: npm run bench:types
+            - run: npm run test:unit
+            - run: npm run test:browser
+
+    release:
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        needs: test
+        runs-on: ubuntu-24.04
+        permissions:
+            contents: write
+            id-token: write
+        steps:
+            - uses: actions/checkout@v6
+              with:
+                  fetch-depth: 0
+            - uses: actions/setup-node@v6
+              with:
+                  node-version: '26.13.0'
+                  package-manager-cache: false
+            - run: npm ci
+            - run: npm run build
+            - run: git merge-base --is-ancestor v0.0.8 HEAD
+            - run: npx semantic-release
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  NPM_CONFIG_PROVENANCE: 'true'

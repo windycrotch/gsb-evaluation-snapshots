@@ -1,0 +1,16 @@
+# Node modules
+**/node_modules
+
+# Dist build
+/dist
+
+# Miscellaneous
+.DS_Store
+.env
+
+# Documentation build
+/docs/dist
+/docs/.astro
+
+# Attest cache
+.attest
