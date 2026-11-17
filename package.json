@@ -51,6 +51,8 @@
     "build:js": "node esbuild.mjs",
     "build:js:min": "node esbuild.mjs -m",
     "build:types": "tsc --declaration --emitDeclarationOnly && mv build/index.d.ts build/three-good-godrays.d.ts",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
+    "test": "node test/run-tests.mjs",
     "prepublishOnly": "run-s clean build:types build:js:min copy-files",
     "prettier": "prettier --write \"src/**/*.{ts,js,tsx}\" && prettier --write \"demo/**/*.{ts,js,tsx}\""
   },

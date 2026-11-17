@@ -3,3 +3,5 @@ build
 public
 !public/.gitkeep
 yarn-error.log
+test/.test-build
+.tmp-probe
