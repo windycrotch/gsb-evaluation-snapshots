@@ -9,6 +9,14 @@ export type ResolvedAudioEngineMode = 'native' | 'worklet';
 /** Audio abstraction consumed by CdgPlayer. */
 export interface CdgAudioEngine {
   readonly mode: ResolvedAudioEngineMode;
+  /**
+   * Values the engine currently holds. Optional so custom engine
+   * implementations can omit them; the player falls back to its own state
+   * snapshot when a getter is unavailable.
+   */
+  readonly volume?: number;
+  readonly playbackRate?: number;
+  readonly pitchSemitones?: number;
   play(): Promise<void>;
   pause(): void;
   stop(): void;
@@ -49,6 +57,9 @@ class NativeAudioEngine implements CdgAudioEngine {
 
   private readonly media: HTMLMediaElement;
   private readonly logger: ReturnType<typeof createScopedLogger>;
+  private currentVolume: number;
+  private currentPlaybackRate: number;
+  private currentPitchSemitones = 0;
 
   constructor({
     media,
@@ -59,6 +70,20 @@ class NativeAudioEngine implements CdgAudioEngine {
   }) {
     this.media = media;
     this.logger = createScopedLogger({ scope: 'audio-engine', debug });
+    this.currentVolume = media.volume;
+    this.currentPlaybackRate = media.playbackRate;
+  }
+
+  get volume(): number {
+    return this.currentVolume;
+  }
+
+  get playbackRate(): number {
+    return this.currentPlaybackRate;
+  }
+
+  get pitchSemitones(): number {
+    return this.currentPitchSemitones;
   }
 
   async play(): Promise<void> {
@@ -87,10 +112,12 @@ class NativeAudioEngine implements CdgAudioEngine {
   }
 
   setVolume({ value }: { value: number }): void {
+    this.currentVolume = value;
     this.media.volume = value;
   }
 
   setTempo({ value }: { value: number }): void {
+    this.currentPlaybackRate = value;
     this.media.playbackRate = value;
   }
 
@@ -99,8 +126,9 @@ class NativeAudioEngine implements CdgAudioEngine {
   }
 
   setPitchSemitones({ value }: { value: number }): void {
-    void value;
-    // Native element playback cannot key shift independently.
+    // Native element playback cannot key shift independently, but the value is
+    // still recorded so state remains consistent across media switches.
+    this.currentPitchSemitones = value;
   }
 
   dispose(): void {
@@ -121,6 +149,9 @@ class WorkletAudioEngine implements CdgAudioEngine {
   private gainNode: GainNode | null = null;
   private workletNode: SoundTouchNodeLike | null = null;
   private initPromise: Promise<void> | null = null;
+  private currentVolume: number;
+  private currentPlaybackRate: number;
+  private currentPitchSemitones = 0;
 
   constructor({
     media,
@@ -132,6 +163,20 @@ class WorkletAudioEngine implements CdgAudioEngine {
     this.media = media;
     this.logger = createScopedLogger({ scope: 'audio-engine', debug });
     this.fallback = new NativeAudioEngine({ media, debug });
+    this.currentVolume = media.volume;
+    this.currentPlaybackRate = media.playbackRate;
+  }
+
+  get volume(): number {
+    return this.currentVolume;
+  }
+
+  get playbackRate(): number {
+    return this.currentPlaybackRate;
+  }
+
+  get pitchSemitones(): number {
+    return this.currentPitchSemitones;
   }
 
   async play(): Promise<void> {
@@ -169,6 +214,7 @@ class WorkletAudioEngine implements CdgAudioEngine {
   }
 
   setVolume({ value }: { value: number }): void {
+    this.currentVolume = value;
     this.media.volume = value;
     if (this.gainNode) {
       this.gainNode.gain.value = value;
@@ -176,6 +222,7 @@ class WorkletAudioEngine implements CdgAudioEngine {
   }
 
   setTempo({ value }: { value: number }): void {
+    this.currentPlaybackRate = value;
     this.media.playbackRate = value;
 
     if (this.workletNode) {
@@ -191,6 +238,7 @@ class WorkletAudioEngine implements CdgAudioEngine {
   }
 
   setPitchSemitones({ value }: { value: number }): void {
+    this.currentPitchSemitones = value;
     if (this.workletNode) {
       this.workletNode.pitchSemitones.setValueAtTime(
         value,
@@ -272,7 +320,7 @@ class WorkletAudioEngine implements CdgAudioEngine {
 
       const sourceNode = context.createMediaElementSource(this.media);
       const gainNode = context.createGain();
-      gainNode.gain.value = this.media.volume;
+      gainNode.gain.value = this.currentVolume;
       const workletNode = new SoundTouchNode({ context });
 
       sourceNode.connect(workletNode);
@@ -296,11 +344,14 @@ class WorkletAudioEngine implements CdgAudioEngine {
       }
 
       workletNode.playbackRate.setValueAtTime(
-        this.media.playbackRate,
+        this.currentPlaybackRate,
         context.currentTime,
       );
       workletNode.pitch.setValueAtTime(1, context.currentTime);
-      workletNode.pitchSemitones.setValueAtTime(0, context.currentTime);
+      workletNode.pitchSemitones.setValueAtTime(
+        this.currentPitchSemitones,
+        context.currentTime,
+      );
 
       this.context = context;
       this.sourceNode = sourceNode;
@@ -312,8 +363,8 @@ class WorkletAudioEngine implements CdgAudioEngine {
         message: 'worklet:initialize-graph:fallback-native',
         errorValue: err,
       });
-      this.fallback.setVolume({ value: this.media.volume });
-      this.fallback.setPlaybackRate({ value: this.media.playbackRate });
+      this.fallback.setVolume({ value: this.currentVolume });
+      this.fallback.setPlaybackRate({ value: this.currentPlaybackRate });
       void context.close();
     }
   }

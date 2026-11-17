@@ -83,6 +83,11 @@ export interface PlayerStateChangeDetail {
   next: PlayerState;
 }
 
+type MediaSettings = Pick<
+  PlayerState,
+  'volume' | 'playbackRate' | 'pitchSemitones'
+>;
+
 type CdgCorePlayerAsyncLoad = CDGPlayer & {
   loadAsync?: (args: { data: Uint8Array }) => Promise<CDGPlayer>;
 };
@@ -166,6 +171,9 @@ export class CdgPlayer extends EventTarget {
       debug,
     });
     this.audioEnginesByMedia.set(this.activeMedia, this.audioEngine);
+    // Seed the snapshot from the initial engine (a caller may have pre-set
+    // volume/rate on the media element) so state and engine never start apart.
+    this.state = { ...this.state, ...this.readActiveEngineSettings() };
 
     this.cdgPlayer = new CDGPlayer({
       afterRender: (renderContext: CdgRenderContext) => {
@@ -185,9 +193,13 @@ export class CdgPlayer extends EventTarget {
 
   /**
    * Returns immutable player state snapshot.
+   *
+   * Audio settings are read back from the engine bound to the currently active
+   * media element so the visible state can never diverge from what is actually
+   * driving playback after a media switch.
    */
   getState(): Readonly<PlayerState> {
-    return this.state;
+    return { ...this.state, ...this.readActiveEngineSettings() };
   }
 
   /**
@@ -382,7 +394,7 @@ export class CdgPlayer extends EventTarget {
       max: MAX_VOLUME,
     });
     this.audioEngine.setVolume({ value: nextVolume });
-    this.applyState({ volume: nextVolume });
+    this.applyEngineSettingsState();
   }
 
   /**
@@ -402,7 +414,7 @@ export class CdgPlayer extends EventTarget {
       max: MAX_TEMPO,
     });
     this.audioEngine.setTempo({ value: nextTempo });
-    this.applyState({ playbackRate: nextTempo });
+    this.applyEngineSettingsState();
   }
 
   /**
@@ -417,7 +429,7 @@ export class CdgPlayer extends EventTarget {
       }),
     );
     this.audioEngine.setPitchSemitones({ value: nextPitchSemitones });
-    this.applyState({ pitchSemitones: nextPitchSemitones });
+    this.applyEngineSettingsState();
   }
 
   /**
@@ -498,6 +510,10 @@ export class CdgPlayer extends EventTarget {
         message: 'bindMediaListeners',
         media: this.activeMedia,
       });
+
+      // Apply the player's settings to the newly selected engine right away so
+      // even a failed attach cannot leave the active engine out of sync.
+      this.syncActiveEngineSettings();
     }
 
     this.activeMediaKind = resolvedMediaKind;
@@ -568,6 +584,12 @@ export class CdgPlayer extends EventTarget {
       this.audio.removeAttribute('src');
       this.audio.load();
     }
+
+    // Loading/replacing a source can reset element-level playback properties
+    // (notably `playbackRate`). Re-apply the player's settings to whichever
+    // engine now drives the active media so audio output never lags behind the
+    // visible state after a switch.
+    this.syncActiveEngineSettings();
 
     this.logger.debug({
       message: 'attach:media-bound',
@@ -701,6 +723,49 @@ export class CdgPlayer extends EventTarget {
       listeners: ['timeupdate', 'play', 'pause', 'ended'],
       media,
     });
+  }
+
+  /**
+   * Reads the settings currently held by the engine bound to the active media.
+   * Engines that do not expose getters fall back to the last applied snapshot.
+   */
+  private readActiveEngineSettings(): MediaSettings {
+    const engine = this.audioEngine;
+    return {
+      volume: engine.volume ?? this.state.volume,
+      playbackRate: engine.playbackRate ?? this.state.playbackRate,
+      pitchSemitones: engine.pitchSemitones ?? this.state.pitchSemitones,
+    };
+  }
+
+  /**
+   * Mirrors the engine-bound settings into the player state snapshot, skipping
+   * the update when nothing changed to avoid redundant `statechange` events.
+   */
+  private applyEngineSettingsState(): void {
+    const settings = this.readActiveEngineSettings();
+    if (
+      settings.volume === this.state.volume &&
+      settings.playbackRate === this.state.playbackRate &&
+      settings.pitchSemitones === this.state.pitchSemitones
+    ) {
+      return;
+    }
+
+    this.applyState(settings);
+  }
+
+  /**
+   * Pushes the player's current settings to the engine of the active media.
+   * Called after a media switch or source reload so the audible output always
+   * matches the values the UI reports.
+   */
+  private syncActiveEngineSettings(): void {
+    const { volume, playbackRate, pitchSemitones } = this.state;
+    this.audioEngine.setVolume({ value: volume });
+    this.audioEngine.setTempo({ value: playbackRate });
+    this.audioEngine.setPitchSemitones({ value: pitchSemitones });
+    this.applyEngineSettingsState();
   }
 
   private shouldUseWorkerLoader(): boolean {
