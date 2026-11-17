@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Audio Analyzer — LUFS, BPM, Key, Spectrum</title>
+    <meta name="description" content="Free browser-based audio analyzer. Measure LUFS, True Peak, BPM, musical key, stereo width and frequency spectrum — runs 100% locally, no uploads needed.">
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="css/analyzer.css">
+</head>
+<body>
+    <section class="az-hero">
+        <div class="az-hero-bg"></div>
+        <div class="az-hero-content">
+            <h1>Audio <span class="gradient-blue">Analyzer</span></h1>
+            <p>LUFS, True Peak, BPM, Key, Stereo Width, Frequency Spectrum — runs 100% locally in your browser.</p>
+        </div>
+    </section>
+
+    <div class="az-container">
+        <!-- Drop Zone -->
+        <div id="azDropZone" class="az-dropzone">
+            <div class="az-dz-icon">&#9835;</div>
+            <h2>Drop an audio file to analyze</h2>
+            <p>MP3, WAV, FLAC, AAC, OGG supported</p>
+            <input type="file" id="azFileInput" accept="audio/*">
+        </div>
+
+        <!-- Results (hidden) -->
+        <div id="azResults" class="az-hidden">
+            <div class="az-file-bar" id="azFileBar">
+                <span class="az-fname" id="azFileName">—</span>
+                <span id="azDuration">—</span>
+                <span id="azSampleRate">—</span>
+                <span id="azChannels">—</span>
+                <button class="az-new-btn" id="azNewBtn">New File</button>
+            </div>
+
+            <div class="az-waveform-wrap">
+                <canvas id="azWaveform" class="az-waveform"></canvas>
+                <div class="az-transport">
+                    <button class="az-play-btn" id="azPlayBtn">Play</button>
+                    <span class="az-time"><span id="azCurTime">0:00</span> / <span id="azTotalTime">0:00</span></span>
+                </div>
+            </div>
+
+            <div class="az-metrics">
+                <div class="az-metric">
+                    <div class="az-metric-label">LUFS-I</div>
+                    <div class="az-metric-value" id="vLufs">—</div>
+                    <div class="az-metric-sub" id="sLufs">Integrated Loudness</div>
+                    <div class="az-metric-bar"><div class="az-metric-fill" id="fLufs"></div></div>
+                </div>
+                <div class="az-metric">
+                    <div class="az-metric-label">TRUE PEAK</div>
+                    <div class="az-metric-value" id="vTp">—</div>
+                    <div class="az-metric-sub" id="sTp">dBTP</div>
+                    <div class="az-metric-bar"><div class="az-metric-fill" id="fTp"></div></div>
+                </div>
+                <div class="az-metric">
+                    <div class="az-metric-label">TEMPO</div>
+                    <div class="az-metric-value" id="vBpm">...</div>
+                    <div class="az-metric-sub" id="sBpm">BPM</div>
+                </div>
+                <div class="az-metric">
+                    <div class="az-metric-label">KEY</div>
+                    <div class="az-metric-value" id="vKey">...</div>
+                    <div class="az-metric-sub" id="sKey">—</div>
+                </div>
+                <div class="az-metric">
+                    <div class="az-metric-label">STEREO WIDTH</div>
+                    <div class="az-metric-value" id="vWidth">—</div>
+                    <div class="az-metric-sub" id="sWidth">M/S Ratio</div>
+                    <div class="az-metric-bar"><div class="az-metric-fill" id="fWidth"></div></div>
+                </div>
+            </div>
+
+            <div class="az-secondary">
+                <div class="az-smeta"><span class="az-smeta-label">Short-term Max</span><span class="az-smeta-value" id="vStLufs">—</span></div>
+                <div class="az-smeta"><span class="az-smeta-label">Loudness Range</span><span class="az-smeta-value" id="vLra">—</span></div>
+                <div class="az-smeta"><span class="az-smeta-label">RMS Level</span><span class="az-smeta-value" id="vRms">—</span></div>
+                <div class="az-smeta"><span class="az-smeta-label">Crest Factor</span><span class="az-smeta-value" id="vCrest">—</span></div>
+                <div class="az-smeta"><span class="az-smeta-label">Phase Correlation</span><span class="az-smeta-value" id="vPhase">—</span></div>
+                <div class="az-smeta"><span class="az-smeta-label">Peak dBFS</span><span class="az-smeta-value" id="vPeak">—</span></div>
+            </div>
+
+            <div class="az-viz-grid">
+                <div class="az-viz-panel">
+                    <div class="az-viz-title">Frequency Spectrum</div>
+                    <canvas id="azSpectrum" class="az-spectrum"></canvas>
+                </div>
+                <div class="az-viz-panel">
+                    <div class="az-viz-title">Stereo Field</div>
+                    <canvas id="azGonio" class="az-goniometer"></canvas>
+                </div>
+            </div>
+
+            <div class="az-streaming" id="azStreaming">
+                <div class="az-viz-title">Streaming Platform Targets</div>
+                <div id="azStreamTable"></div>
+            </div>
+        </div>
+
+        <div class="az-privacy">100% local processing — your audio never leaves your device</div>
+
+        <div class="az-footer">
+            Built by <a href="https://tonalux.org">Tonalux</a> ·
+            <a href="https://github.com/Exenye/tonalux-analyzer">GitHub</a>
+        </div>
+    </div>
+
+    <!-- Loading Overlay -->
+    <div id="azLoading" class="az-loading az-hidden">
+        <div class="az-spinner"></div>
+        <p>Analyzing audio...</p>
+        <div class="az-progress-msg" id="azProgressMsg"></div>
+    </div>
+
+    <script src="js/analyzer.js"></script>
+</body>
+</html>
