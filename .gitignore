@@ -1,0 +1,41 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Production
+dist/
+build/
+
+# Testing
+coverage/
+
+# Misc
+.DS_Store
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Launch tracking (personal progress)
+LAUNCH_CHECKLIST.md
+
+# Test apps
+test-apps/
+
+# Generated js-synthesizer assets (copied from node_modules via postinstall)
+packages/demo/public/js-synthesizer/
