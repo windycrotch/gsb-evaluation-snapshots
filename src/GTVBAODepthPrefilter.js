@@ -46,6 +46,14 @@ export const sceneDepthToLinearDepth = ( depth, cameraNear, cameraFar, isOrthogr
 // apart. Integer arithmetic makes every consumer agree exactly.
 export const depthTexelOfAoTexel = ( aoTexel, depthResolution, aoResolution ) =>
 	vec2( ivec2( aoTexel ).mul( 2 ).add( 1 ).mul( ivec2( depthResolution ) ).div( ivec2( aoResolution ).mul( 2 ) ) );
+// Plain-number twin of depthTexelOfAoTexel(), carrying the identical integer
+// formula so non-shader code (tests, and any CPU-side consumer) derives the
+// very same scene-depth texel the prefilter and AO shaders use. Kept separate
+// from the TSL builder because it must run without a WebGPU node context.
+export const depthTexelOfAoTexelJS = ( aoTexelX, aoTexelY, depthWidth, depthHeight, aoWidth, aoHeight ) => [
+	Math.floor( ( ( 2 * aoTexelX + 1 ) * depthWidth ) / ( 2 * aoWidth ) ),
+	Math.floor( ( ( 2 * aoTexelY + 1 ) * depthHeight ) / ( 2 * aoHeight ) )
+];
 // Depth-aware downsample after XeGTAO: samples nearer than the farthest sample
 // of a 2x2 block by more than the depth range fade out, so a block straddling a
 // depth discontinuity keeps the far surface instead of averaging into a point
@@ -139,8 +147,27 @@ class GTVBAODepthPrefilter {
 		this._logarithmicDepthBuffer = value;
 		this._disposeKernels();
 	}
+	// Re-target the depth conversion at a different camera. A perspective/
+	// orthographic switch changes the linear-depth formula baked into the
+	// kernels/fragment materials, so those must be rebuilt; the near/far
+	// references follow the new camera automatically once their object moves.
+	// setSize() afterwards rebuilds the MIP chain at the new AO resolution and
+	// points every texture node at the freshly allocated resources.
+	setCamera( cameraNear, cameraFar, isOrthographicCamera ) {
+		this._cameraNear = cameraNear;
+		this._cameraFar = cameraFar;
+		if ( this._isOrthographicCamera === isOrthographicCamera ) return;
+		this._isOrthographicCamera = isOrthographicCamera;
+		this._logarithmicDepthBuffer = false;
+		this._disposeKernels();
+	}
 	setSize( width, height, depthWidth, depthHeight ) {
-		if ( this._width === width && this._height === height && this._depthWidth === depthWidth && this._depthHeight === depthHeight ) return;
+		if (
+			this._width === width &&
+			this._height === height &&
+			this._depthWidth === depthWidth &&
+			this._depthHeight === depthHeight
+		) return;
 		this._width = width;
 		this._height = height;
 		this._depthWidth = depthWidth;
@@ -157,8 +184,23 @@ class GTVBAODepthPrefilter {
 		this._disposeTextures();
 		this._allocateTextures();
 	}
+	// Mark the chain stale without changing its dimensions: the next setSize()
+	// with the same size reallocates and recomputes every level. Used when the
+	// camera projection changes at a fixed drawing-buffer size, where the level
+	// dimensions stay the same but the encoded depth the chain holds changes.
+	invalidate() {
+		this._width = 0;
+		this._height = 0;
+		this._depthWidth = 0;
+		this._depthHeight = 0;
+	}
 	release() {
-		if ( this._textures.length === 0 ) return;
+		if ( this._textures.length === 0 ) {
+			// Keep the dimension cache cleared: a later invalidate() must force a
+			// rebuild even when release() ran while nothing was allocated.
+			this._width = this._height = this._depthWidth = this._depthHeight = 0;
+			return;
+		}
 		this._disposeTextures();
 		this._sizes = [];
 		this._dispatchSizes = [];

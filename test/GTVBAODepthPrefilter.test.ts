@@ -7,7 +7,11 @@ import GTVBAONode from "../src/GTVBAONode.js";
 
 type MipTexture = { image: { width: number; height: number }; addEventListener(type: "dispose", listener: () => void): void };
 type MipNode = { value: MipTexture };
-type Prefilter = { compute(renderer: { compute(kernels: ComputeNode[]): void }): void };
+type Prefilter = {
+  setSize(width: number, height: number, depthWidth: number, depthHeight: number): void;
+  invalidate(): void;
+  compute(renderer: { compute(kernels: ComputeNode[]): void }): void;
+};
 
 function createNode() {
   return new GTVBAONode(uniform(1) as never, null, new PerspectiveCamera());
@@ -94,6 +98,65 @@ test("GTVBAONode runs both depth prefilter kernels in one compute call with disp
   prefilter.compute(renderer as never);
   assert.equal(calls.length, 2);
   assert.deepEqual(calls[1].dispatchSizes, [[65535, 3, 1], [32833, 1, 1]]);
+
+  node.dispose();
+});
+
+test("prefilter invalidate() rebuilds the chain at the same dimensions with new textures", () => {
+  const node = createNode();
+  const prefilter = (node as unknown as {
+    _depthPrefilter: Prefilter & { invalidate(): void };
+  })._depthPrefilter;
+  // At the default scale 1, node.setSize(64, 32) sizes the chain (64, 32, 64, 32).
+  node.setSize(64, 32);
+  const first = mipNodes(node).map(({ value }) => value);
+  assert.deepEqual(mipSizes(node), [[64, 32], [32, 16], [16, 8], [8, 4], [4, 2]]);
+
+  // Without invalidation, an identical setSize keeps the same allocation.
+  prefilter.setSize(64, 32, 64, 32);
+  assert.deepEqual(mipNodes(node).map(({ value }) => value), first);
+
+  // After invalidation, the same dimensions reallocate and repoint every node.
+  prefilter.invalidate();
+  prefilter.setSize(64, 32, 64, 32);
+  const rebuilt = mipNodes(node).map(({ value }) => value);
+  assert.equal(rebuilt.length, first.length);
+  assert.deepEqual(mipSizes(node), [[64, 32], [32, 16], [16, 8], [8, 4], [4, 2]]);
+  for (const oldTexture of first) {
+    assert.equal(rebuilt.includes(oldTexture), false, "invalidate kept an old texture");
+  }
+
+  node.dispose();
+});
+
+test("prefilter setCamera flips the orthographic flag and disposes the depth kernels", () => {
+  const node = createNode();
+  const prefilter = (node as unknown as {
+    _depthPrefilter: Prefilter & {
+      _isOrthographicCamera: boolean;
+      _kernels: ComputeNode[] | null;
+      setCamera(near: unknown, far: unknown, isOrthographic: boolean): void;
+    };
+  })._depthPrefilter;
+  const renderer = {
+    compute(kernels: ComputeNode[]) {
+      for (const kernel of kernels) kernel.addEventListener("dispose", () => {});
+    },
+  };
+  node.setSize(64, 32);
+  prefilter.compute(renderer as never);
+  assert.equal(prefilter._kernels !== null, true);
+  assert.equal(prefilter._isOrthographicCamera, false);
+
+  prefilter.setCamera(node as never, node as never, true);
+  assert.equal(prefilter._isOrthographicCamera, true);
+  assert.equal(prefilter._kernels, null, "orthographic switch disposes the perspective kernels");
+
+  // Same projection type only rebinds near/far and leaves the (rebuilt) kernels alone.
+  prefilter.compute(renderer as never);
+  const kernels = prefilter._kernels;
+  prefilter.setCamera(node as never, node as never, true);
+  assert.equal(prefilter._kernels, kernels);
 
   node.dispose();
 });

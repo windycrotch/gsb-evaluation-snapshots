@@ -143,12 +143,23 @@ test("GTVBAONode only upsamples by depth at reduced resolution with depth MIPs",
   const node = createTestGtvbaoNode();
 
   assert.equal(node.useDepthAwareUpsample, true);
+  // Full resolution with MIPs on: nothing to upsample, so the gate is false.
+  assert.equal(node.resolutionScale, 1);
+  assert.equal(node.useDepthMips.value, true);
   assert.equal(node.isDepthAwareUpsampleActive(), false);
   node.resolutionScale = 0.5;
+  assert.equal(node.isDepthAwareUpsampleActive(), true);
+  // Quarter resolution with MIPs on stays active.
+  node.resolutionScale = 0.25;
   assert.equal(node.isDepthAwareUpsampleActive(), true);
   node.useDepthMips.value = false;
   assert.equal(node.isDepthAwareUpsampleActive(), false);
   node.useDepthMips.value = true;
+  assert.equal(node.isDepthAwareUpsampleActive(), true);
+  // Back to full resolution disables it even with MIPs and the option on.
+  node.resolutionScale = 1;
+  assert.equal(node.isDepthAwareUpsampleActive(), false);
+  node.resolutionScale = 0.5;
   node.useDepthAwareUpsample = false;
   assert.equal(node.isDepthAwareUpsampleActive(), false);
 

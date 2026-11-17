@@ -83,6 +83,7 @@ export default class GTVBAONode extends Node<"vec4"> {
   ): Node<"float">;
   isDepthAwareUpsampleActive(): boolean;
   setSize(width: number, height: number): void;
+  setCamera(camera: PerspectiveCamera | OrthographicCamera): void;
   dispose(): void;
 }
 

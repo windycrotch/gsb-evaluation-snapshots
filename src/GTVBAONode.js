@@ -203,19 +203,63 @@ class GTVBAONode extends GTVBAONodeBase {
 	isDepthAwareUpsampleActive() {
 		return this.useDepthAwareUpsample && this.useDepthMips.value && this.resolutionScale < 1;
 	}
+	// Switch the node to a different camera (including between perspective and
+	// orthographic). Rebinds the projection/near/far nodes, rebuilds the depth
+	// conversion kernels and the AO material when the projection type changes,
+	// then reallocates and recomputes the depth MIP chain for the new state.
+	// Same-camera projection updates (zoom/aspect) need no call: setSize()
+	// detects the changed projection matrix every frame.
+	setCamera( camera ) {
+		if ( camera === this._camera ) return;
+		const wasOrthographic = this._isOrthographicCamera;
+		this._camera = camera;
+		this._isOrthographicCamera = camera.isOrthographicCamera === true;
+		this._cameraProjectionMatrixInverse.value = camera.projectionMatrixInverse;
+		this._cameraNear.object = camera;
+		this._cameraNear.reference = camera;
+		this._cameraFar.object = camera;
+		this._cameraFar.reference = camera;
+		this._depthPrefilter.setCamera( this._cameraNear, this._cameraFar, this._isOrthographicCamera );
+		if ( this._isOrthographicCamera !== wasOrthographic ) {
+			// The projection type is a shader build-time input for every variant.
+			this._logarithmicDepthBuffer = false;
+			for ( const material of this._materials.values() ) material.dispose();
+			this._materials.clear();
+			this._materialInputs = null;
+			this.needsUpdate = true;
+			if ( this._fragmentContext !== null ) this._refreshMaterialFragmentNode();
+			else this._material.needsUpdate = true;
+		}
+		// Force the depth chain to be rebuilt for the new camera even when the
+		// drawing buffer and AO dimensions are unchanged.
+		this._lastSize.aoWidth = 0;
+		this._lastSize.aoHeight = 0;
+		this._lastSize.projectionScale = null;
+		this._depthPrefilter.invalidate();
+	}
 	setSize( width, height ) {
 		const renderTarget = this._getActiveRenderTarget();
 		const targetIsDebug = renderTarget === this._debugRenderTarget;
 		const aoWidth = Math.max( 1, Math.round( width * this.resolutionScale ) );
 		const aoHeight = Math.max( 1, Math.round( height * this.resolutionScale ) );
-		if ( this.useDepthMips.value ) this._depthPrefilter.setSize( aoWidth, aoHeight, width, height );
-		else this._depthPrefilter.release();
 		const projectionScale = this._camera.projectionMatrix.elements[ 5 ];
 		const last = this._lastSize;
+		const dimensionsChanged = last.aoWidth !== aoWidth || last.aoHeight !== aoHeight;
+		const projectionChanged = last.projectionScale !== projectionScale;
+		// The depth chain depends on the AO/depth dimensions and on the camera
+		// projection. A projection change at unchanged size (zoom, aspect, or a
+		// perspective/orthographic switch) must still rebuild it: invalidate the
+		// prefilter's cached dimensions so it reallocates every level and points
+		// the texture nodes at the new resources instead of sampling stale ones.
+		if ( this.useDepthMips.value ) {
+			if ( projectionChanged && ! dimensionsChanged ) this._depthPrefilter.invalidate();
+			this._depthPrefilter.setSize( aoWidth, aoHeight, width, height );
+		} else {
+			this._depthPrefilter.release();
+		}
 		if (
-			last.aoWidth === aoWidth &&
-			last.aoHeight === aoHeight &&
-			last.projectionScale === projectionScale &&
+			! dimensionsChanged &&
+			! projectionChanged &&
 			last.targetIsDebug === targetIsDebug
 		) return;
 		last.aoWidth = aoWidth;
