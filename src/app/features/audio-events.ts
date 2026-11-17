@@ -1,0 +1,108 @@
+import { checkAndShowDonationToast } from "@/app/features/donation-toast";
+import type { CleanupCallback } from "@/app/features/types";
+import { syncProgressToStore } from "@/app/features/ui";
+import { getBcPlayerInstance, getMusicPlayerInstance } from "@/app/stores/adapters";
+import { getAppCoreInstance } from "@/app/stores/AppCoreImpl";
+import { getBrowserInstance } from "@/app/stores/BrowserImpl";
+import { getGuiInstance } from "@/app/stores/GuiImpl";
+import { LOOP_MODE, PLUME_CONSTANTS } from "@/domain/plume";
+import { coreActions } from "@/domain/ports/app-core";
+import { guiActions } from "@/domain/ports/plume-ui";
+import { getString } from "@/shared/i18n";
+import { CPL, logger } from "@/shared/logger";
+
+export interface AudioEventCallbacks {
+  updateTrackDisplay: () => void;
+  updateTrackForwardBtnState: () => void;
+}
+
+export const setupAudioEventListeners = (callbacks: AudioEventCallbacks): CleanupCallback => {
+  const musicPlayer = getMusicPlayerInstance();
+  const appCore = getAppCoreInstance();
+  const plumeUi = getGuiInstance();
+  const plume = plumeUi.getState();
+  const { updateTrackDisplay, updateTrackForwardBtnState } = callbacks;
+
+  const handleTimeUpdate = () => {
+    syncProgressToStore();
+  };
+
+  const handleLoadedMetadata = () => {
+    syncProgressToStore();
+    updateTrackDisplay();
+    updateTrackForwardBtnState();
+  };
+
+  const handleDurationChange = () => {
+    syncProgressToStore();
+  };
+
+  const handleLoadStart = () => {
+    updateTrackDisplay();
+    updateTrackForwardBtnState();
+  };
+
+  const handleVolumeChange = () => {
+    if (!plume.volumeSlider) return;
+
+    const currentVolume = musicPlayer.getVolume();
+    plume.volumeSlider.value = `${Math.round(currentVolume * PLUME_CONSTANTS.VOLUME_SLIDER_GRANULARITY)}`;
+    plumeUi.dispatch(guiActions.setVolumeSlider(plume.volumeSlider));
+
+    const currentIsMuted = appCore.getState().isMuted;
+    const newIsMuted = currentVolume === 0;
+    if (currentIsMuted !== newIsMuted) {
+      appCore.dispatch(coreActions.setIsMuted(newIsMuted));
+    }
+    appCore.dispatch(coreActions.setVolume(currentVolume));
+  };
+
+  const handlePlayPause = () => {
+    const isPlaying = !musicPlayer.isPaused();
+    // Guard against circular dispatch: when a subscription calls play()/pause(), the resulting event arrives with a state already reflected in the store.
+    if (isPlaying === appCore.getState().isPlaying) return;
+    appCore.dispatch(coreActions.setIsPlaying(isPlaying));
+  };
+
+  const handleEnded = () => {
+    const browserCache = getBrowserInstance().getState().cache;
+    void checkAndShowDonationToast(browserCache).catch((error: unknown) => {
+      logger(
+        CPL.ERROR,
+        `Failed to check and show donation toast: ${error instanceof Error ? error.message : String(error)}`
+      );
+    });
+
+    const pageType = appCore.getState().pageType;
+    const loopMode = appCore.getState().loopMode;
+    if (pageType === "album" && loopMode !== LOOP_MODE.COLLECTION) return;
+
+    const bcPlayer = getBcPlayerInstance();
+    if (!bcPlayer.isPlaying()) {
+      bcPlayer.getNextTrackButton()?.click();
+      bcPlayer.getPreviousTrackButton()?.click();
+    }
+  };
+
+  musicPlayer.on("timeupdate", handleTimeUpdate);
+  musicPlayer.on("loadedmetadata", handleLoadedMetadata);
+  musicPlayer.on("durationchange", handleDurationChange);
+  musicPlayer.on("loadstart", handleLoadStart);
+  musicPlayer.on("volumechange", handleVolumeChange);
+  musicPlayer.on("play", handlePlayPause);
+  musicPlayer.on("pause", handlePlayPause);
+  musicPlayer.on("ended", handleEnded);
+
+  logger(CPL.INFO, getString("INFO__AUDIO_EVENT_LISTENERS__SET_UP"));
+
+  return () => {
+    musicPlayer.off("timeupdate", handleTimeUpdate);
+    musicPlayer.off("loadedmetadata", handleLoadedMetadata);
+    musicPlayer.off("durationchange", handleDurationChange);
+    musicPlayer.off("loadstart", handleLoadStart);
+    musicPlayer.off("volumechange", handleVolumeChange);
+    musicPlayer.off("play", handlePlayPause);
+    musicPlayer.off("pause", handlePlayPause);
+    musicPlayer.off("ended", handleEnded);
+  };
+};

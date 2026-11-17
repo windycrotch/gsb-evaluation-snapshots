@@ -1,0 +1,32 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESnext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "removeComments": false,
+    "noImplicitAny": true,
+    "noImplicitReturns": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noPropertyAccessFromIndexSignature": true,
+    "allowUnreachableCode": false,
+    "allowUnusedLabels": false,
+    "resolveJsonModule": true,
+    "paths": {
+      "@/*": ["./src/*"],
+      "@lang/*": ["./_locales/*"]
+    }
+  },
+  "include": ["src/**/*", "tests/**/*"],
+  "exclude": ["node_modules", "dist", "build"]
+}

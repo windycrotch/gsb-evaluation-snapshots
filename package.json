@@ -1,0 +1,86 @@
+{
+  "author": "Quentin DI MEO",
+  "name": "plume",
+  "license": "MIT",
+  "version": "1.13.0",
+  "description": "Bandcamp extension: volume slider, hotkeys, loop modes, fullscreen mode, playback speed, waveform progress bar & beat visualizer.",
+  "scripts": {
+    "build": "node scripts/build.js --dev",
+    "build:watch": "node scripts/build.js --dev --watch",
+    "build:prod": "node scripts/build.js",
+    "build:test": "node scripts/build.js --test",
+    "clean": "rimraf dist build *.zip",
+    "sync-version": "node scripts/sync-version.js",
+    "package": "tsc --noEmit && pnpm build:prod && node scripts/package-deployer.js",
+    "deploy": "pnpm clean && pnpm sync-version && pnpm package",
+    "lint": "pnpm prettier && pnpm eslint",
+    "eslint": "eslint src/**/*.ts",
+    "eslint:fix": "eslint src/**/*.ts --fix",
+    "prettier": "prettier --check 'src/**/*.{ts,js,json,css,html}' 'tests/**/*.ts'",
+    "prettier:fix": "prettier --write 'src/**/*.{ts,js,json,css,html}' 'tests/**/*.ts'",
+    "format": "pnpm prettier:fix && pnpm eslint:fix",
+    "prepare": "tsc --noEmit && husky",
+    "ship": "pnpm run deploy && node scripts/zip-sources.js",
+    "test": "vitest run",
+    "test:a11y": "pnpm test tests/a11y/",
+    "test:cov": "pnpm test --coverage --coverage.skipFull",
+    "test:report": "pnpm test:cov --reporter=verbose"
+  },
+  "keywords": [
+    "bandcamp",
+    "browser-extension",
+    "chrome-extension",
+    "firefox-addon",
+    "typescript",
+    "audio-player",
+    "volume-control",
+    "music-player",
+    "bandcamp-enhancer",
+    "seek-bar",
+    "fullscreen",
+    "web-extension",
+    "manifest-v3"
+  ],
+  "dependencies": {
+    "web-audio-beat-detector": "^8.2.36"
+  },
+  "devDependencies": {
+    "@eslint/eslintrc": "^3.3.1",
+    "@eslint/js": "^9.33.0",
+    "@tailwindcss/postcss": "^4.2.2",
+    "@types/chrome": "^0.1.4",
+    "@types/firefox-webext-browser": "^120.0.4",
+    "@types/node": "^24.3.0",
+    "@typescript-eslint/eslint-plugin": "^8.40.0",
+    "@typescript-eslint/parser": "^8.40.0",
+    "@vitest/coverage-v8": "^4.1.2",
+    "autoprefixer": "^10.4.27",
+    "axe-core": "^4.11.2",
+    "esbuild": "^0.27.3",
+    "eslint": "^9.33.0",
+    "globals": "^16.3.0",
+    "happy-dom": "^20.8.9",
+    "husky": "^9.1.7",
+    "jsdom": "^29.0.1",
+    "lint-staged": "^16.2.7",
+    "postcss": "^8.5.9",
+    "prettier": "^3.6.2",
+    "rimraf": "^6.0.1",
+    "sass": "^1.99.0",
+    "tailwindcss": "^4.2.2",
+    "typescript": "^5.9.2",
+    "vitest": "^4.1.2"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "pnpm": ">=10.0.0"
+  },
+  "lint-staged": {
+    "src/**/*.{ts,js,json,css,html}": [
+      "prettier --write"
+    ],
+    "tests/**/*.ts": [
+      "prettier --write"
+    ]
+  }
+}

@@ -1,0 +1,273 @@
+import { toggleFullscreenMode } from "@/app/features/fullscreen";
+import { findOriginalPlayerContainer, hideOriginalPlayerElements } from "@/app/features/original-player";
+import { getInfoSectionWithRuntime } from "@/app/features/runtime";
+import { getTrackQuantifiers } from "@/app/features/track-quantifiers";
+import { getAppropriateAccentColor, getCurrentTrackTitle } from "@/app/features/track-title";
+import { CleanupCallback } from "@/app/features/types";
+import {
+  createBpmDisplaySection,
+  createFullscreenButtonSection,
+  createPlaybackControlPanel,
+  createProgressBar,
+  createTracklistToggle,
+  createVolumeControlSection,
+} from "@/app/features/ui";
+import { createToast } from "@/app/features/ui/toast";
+import { getBcPlayerInstance } from "@/app/stores/adapters";
+import { getAppCoreInstance } from "@/app/stores/AppCoreImpl";
+import { getGuiInstance } from "@/app/stores/GuiImpl";
+import { APP_VERSION, PLUME_LINKTREE_URL } from "@/domain/meta";
+import { coreActions, IAppCore } from "@/domain/ports/app-core";
+import { guiActions, IGui } from "@/domain/ports/plume-ui";
+import { BC_ELEM_SELECTORS, BC_NAME_SECTION_DEFAULT_WIDTH } from "@/infra/elements/bandcamp";
+import { PLUME_CSS_CLASSES, PLUME_ELEM_SELECTORS } from "@/infra/elements/plume";
+import { getActiveLocale, getString } from "@/shared/i18n";
+import { CPL, logger } from "@/shared/logger";
+import { applyTitleLang } from "@/shared/script-lang";
+import { createSafeSvgElement } from "@/shared/svg";
+import { PLUME_SVG } from "@/svg/icons";
+
+interface PlumeView {
+  plumeContainer: HTMLDivElement;
+  headerContainer: HTMLDivElement;
+  headerLogo: HTMLAnchorElement;
+
+  // Derived values computed during construction, forwarded to hydration
+  initialTrackTitle: string;
+  initialTrackNumberText: string;
+
+  tracklistCleanup: CleanupCallback;
+}
+
+const preloadFullscreenCoverArt = (): void => {
+  const bcPlayer = getBcPlayerInstance();
+  const artworkUrl = bcPlayer.getArtworkUrl();
+  if (!artworkUrl) return;
+
+  new Image().src = artworkUrl; // Preload the cover art to ensure it's cached and can be displayed immediately when entering fullscreen mode.
+};
+
+const notifyUnplayableTracks = () => {
+  const bcPlayer = getBcPlayerInstance();
+  const playabilityMap = bcPlayer.getTrackPlayabilityMap();
+  const titles = bcPlayer.getTrackRowTitles();
+  const unplayableTracks: { nb: number; title: string }[] = [];
+
+  playabilityMap.forEach((isPlayable, idx) => {
+    if (isPlayable) return;
+    const title = titles[idx] ?? `#${idx + 1}`;
+    unplayableTracks.push({ nb: idx + 1, title });
+  });
+
+  if (unplayableTracks.length === 0) return;
+  if (unplayableTracks.length === 1) {
+    const { nb, title } = unplayableTracks[0];
+    createToast({
+      label: getString("META__TOAST__UNPLAYABLE_TRACK"),
+      title: getString("LABEL__TOAST__UNPLAYABLE_TRACK__TITLE", [String(nb)]),
+      description: getString("LABEL__TOAST__UNPLAYABLE_TRACK__DESCRIPTION", [title]),
+      borderType: "warning",
+    });
+  } else {
+    const titlesList = unplayableTracks.map((track) => track.nb).join(", ");
+    createToast({
+      label: getString("META__TOAST__UNPLAYABLE_TRACKS"),
+      title: getString("LABEL__TOAST__UNPLAYABLE_TRACKS__TITLE", [String(unplayableTracks.length)]),
+      description: getString("LABEL__TOAST__UNPLAYABLE_TRACKS__DESCRIPTION", [titlesList]),
+      borderType: "warning",
+    });
+  }
+};
+
+const addRuntime = () => {
+  const bcPlayer = getBcPlayerInstance();
+  const trackView = bcPlayer.getTrackView();
+  if (!trackView) return;
+
+  trackView.insertBefore(getInfoSectionWithRuntime(), trackView.firstChild);
+};
+
+const buildPlumeView = async (isCollectionPage: boolean): Promise<PlumeView> => {
+  const appCore = getAppCoreInstance();
+  const flags = appCore.getState().featureFlags;
+
+  const plumeContainer = document.createElement("div");
+  plumeContainer.id = PLUME_ELEM_SELECTORS.plumeContainer.split("#")[1];
+  plumeContainer.lang = getActiveLocale();
+  plumeContainer.role = "region";
+  plumeContainer.ariaLabel = getString("ARIA__APP_NAME");
+
+  const headerContainer = document.createElement("div");
+  headerContainer.id = PLUME_ELEM_SELECTORS.headerContainer.split("#")[1];
+
+  const headerLogo = document.createElement("a");
+  headerLogo.id = PLUME_ELEM_SELECTORS.headerLogo.split("#")[1];
+  const logoSvg = createSafeSvgElement(PLUME_SVG.logo);
+  if (logoSvg) headerLogo.appendChild(logoSvg);
+  const versionTag = document.createElement("p");
+  versionTag.id = `${headerLogo.id}__version`;
+  versionTag.textContent = APP_VERSION;
+  headerLogo.appendChild(versionTag);
+  headerLogo.href = PLUME_LINKTREE_URL;
+  headerLogo.target = "_blank";
+  headerLogo.rel = "noopener noreferrer";
+  headerLogo.ariaLabel = getString("ARIA__APP_NAME");
+  headerLogo.title = getString("ARIA__LOGO_LINK");
+  headerContainer.appendChild(headerLogo);
+
+  const bcPlayer = getBcPlayerInstance();
+  const initialTrackTitle = getCurrentTrackTitle(isCollectionPage);
+  const initialTq = getTrackQuantifiers(initialTrackTitle, bcPlayer);
+  const currentTitleSection = document.createElement("div");
+  currentTitleSection.id = PLUME_ELEM_SELECTORS.headerCurrent.split("#")[1];
+  currentTitleSection.role = "group";
+  currentTitleSection.tabIndex = 0;
+  currentTitleSection.ariaLabel = isCollectionPage
+    ? getString("ARIA__TRACK_CURRENT", [String(initialTq.current), String(initialTq.total), initialTrackTitle])
+    : getString("ARIA__TRACK", [initialTrackTitle]);
+  applyTitleLang(currentTitleSection, initialTrackTitle);
+  const currentTitlePretext = document.createElement("span");
+  currentTitlePretext.id = PLUME_ELEM_SELECTORS.headerTitlePretext.split("#")[1];
+  const initialTrackNumberText = isCollectionPage
+    ? getString("LABEL__TRACK_CURRENT", [`${initialTq.current}/${initialTq.total}`])
+    : getString("LABEL__TRACK");
+  currentTitlePretext.textContent = initialTrackNumberText;
+  currentTitlePretext.style.color = getAppropriateAccentColor();
+  currentTitlePretext.ariaHidden = "true"; // hide from screen readers to avoid redundancy
+  currentTitleSection.appendChild(currentTitlePretext);
+  const titleRow = document.createElement("div");
+  titleRow.className = "plume-header-title-row";
+
+  if (isCollectionPage) {
+    const trackLink = document.createElement("a");
+    trackLink.id = PLUME_ELEM_SELECTORS.headerTrackLink.split("#")[1];
+    trackLink.classList.toggle(PLUME_CSS_CLASSES.featureHidden, !flags.goToTrack);
+
+    if (trackLink) {
+      const trackUrl = bcPlayer.getCurrentTrackUrl();
+
+      if (trackUrl) {
+        trackLink.href = trackUrl;
+        trackLink.ariaDisabled = "false";
+        trackLink.style.pointerEvents = "";
+        trackLink.tabIndex = 0;
+      } else {
+        trackLink.removeAttribute("href");
+        trackLink.ariaDisabled = "true";
+        trackLink.style.pointerEvents = "none";
+        trackLink.tabIndex = -1;
+      }
+    } else {
+      logger(CPL.WARN, getString("WARN__TRACK_LINK__NOT_FOUND"));
+    }
+    trackLink.target = "_self";
+    trackLink.ariaLabel = getString("ARIA__TRACK_LINK");
+    trackLink.title = getString("ARIA__TRACK_LINK");
+    trackLink.style.color = getAppropriateAccentColor();
+    const linkSvg = createSafeSvgElement(PLUME_SVG.externalLink);
+    if (linkSvg) trackLink.appendChild(linkSvg);
+    titleRow.appendChild(trackLink);
+  }
+
+  const currentTitleText = document.createElement("span");
+  currentTitleText.id = PLUME_ELEM_SELECTORS.headerTitle.split("#")[1];
+  currentTitleText.textContent = initialTrackTitle;
+  currentTitleText.title = initialTrackTitle; // see full title on hover in case title is truncated
+  currentTitleText.ariaHidden = "true"; // hide from screen readers to avoid redundancy
+  titleRow.appendChild(currentTitleText);
+
+  let tracklistCleanup: CleanupCallback = () => {}; // not optional because of return type
+  let pendingDropdown: HTMLDivElement | undefined;
+  if (isCollectionPage) {
+    const { toggleBtn, dropdownEl, cleanup } = createTracklistToggle();
+    toggleBtn.classList.toggle(PLUME_CSS_CLASSES.featureHidden, !flags.tracklist);
+    dropdownEl.classList.toggle(PLUME_CSS_CLASSES.featureHidden, !flags.tracklist);
+    titleRow.appendChild(toggleBtn);
+    pendingDropdown = dropdownEl;
+    tracklistCleanup = cleanup;
+  }
+  currentTitleSection.appendChild(titleRow);
+
+  headerContainer.appendChild(currentTitleSection);
+
+  plumeContainer.appendChild(headerContainer);
+  if (pendingDropdown) plumeContainer.appendChild(pendingDropdown);
+
+  const playbackManager = document.createElement("div");
+  playbackManager.id = PLUME_ELEM_SELECTORS.playbackManager.split("#")[1];
+
+  const progressContainer = createProgressBar();
+  playbackManager.appendChild(progressContainer);
+  const playbackControls = createPlaybackControlPanel();
+  if (playbackControls) playbackManager.appendChild(playbackControls);
+  plumeContainer.appendChild(playbackManager);
+
+  const volumeContainer = await createVolumeControlSection();
+  if (volumeContainer) plumeContainer.appendChild(volumeContainer);
+
+  const bpmSection = createBpmDisplaySection(isCollectionPage);
+  bpmSection.classList.toggle(PLUME_CSS_CLASSES.featureHidden, !flags.bpmDetect);
+  plumeContainer.appendChild(bpmSection);
+
+  const fullscreenBtnSection = createFullscreenButtonSection(toggleFullscreenMode);
+  fullscreenBtnSection.classList.toggle(PLUME_CSS_CLASSES.featureHidden, !flags.fullscreen);
+  plumeContainer.appendChild(fullscreenBtnSection);
+
+  return { plumeContainer, headerContainer, headerLogo, initialTrackTitle, initialTrackNumberText, tracklistCleanup };
+};
+
+const hydratePlumeView = (view: PlumeView, appCore: IAppCore, plumeUi: IGui): void => {
+  appCore.dispatch(coreActions.setTrackTitle(view.initialTrackTitle));
+  appCore.dispatch(coreActions.setTrackNumber(view.initialTrackNumberText));
+
+  plumeUi.dispatch(guiActions.setTitleDisplay(view.headerContainer));
+  plumeUi.dispatch(guiActions.setPlumeContainer(view.plumeContainer));
+  plumeUi.dispatch(guiActions.setHeaderLogo(view.headerLogo));
+};
+
+// Appends the Plume root element to the Bandcamp player container.
+const mountPlumeView = (view: PlumeView, container: Element): void => {
+  container.appendChild(view.plumeContainer);
+};
+
+export const injectEnhancements = async (): Promise<{ ok: boolean; tracklistCleanup: CleanupCallback }> => {
+  const appCore = getAppCoreInstance();
+  const plumeUi = getGuiInstance();
+  const bcPlayerContainer = findOriginalPlayerContainer();
+  if (!bcPlayerContainer) {
+    logger(CPL.ERROR, getString("ERROR__UNABLE_TO_FIND_CONTAINER"));
+    return { ok: false, tracklistCleanup: () => {} };
+  }
+
+  const { featureFlags, pageType } = appCore.getState();
+  const isCollectionPage = pageType === "album";
+
+  hideOriginalPlayerElements();
+
+  // Reorder middleColumn before mounting Plume so keyboard tab order reaches Plume first.
+  const trackView = bcPlayerContainer.closest(BC_ELEM_SELECTORS.trackView);
+  const middleCol = trackView?.querySelector<HTMLElement>(`:scope > ${BC_ELEM_SELECTORS.middleColumn}`);
+  if (middleCol) trackView!.appendChild(middleCol);
+
+  const view = await buildPlumeView(isCollectionPage);
+  hydratePlumeView(view, appCore, plumeUi);
+  mountPlumeView(view, bcPlayerContainer);
+
+  logger(CPL.LOG, getString("LOG__MOUNT__COMPLETE"));
+
+  if (isCollectionPage) {
+    addRuntime();
+    const runtimeSpan = document.querySelector<HTMLElement>(PLUME_ELEM_SELECTORS.runtimeSpan);
+    if (runtimeSpan) runtimeSpan.classList.toggle(PLUME_CSS_CLASSES.featureHidden, !featureFlags.runtime);
+    notifyUnplayableTracks();
+  }
+
+  if (featureFlags.fullscreen) preloadFullscreenCoverArt();
+
+  // Compensate the visual shift only when the name-section overflows past the leftColumn
+  if (middleCol) {
+    const nameSection = trackView?.querySelector<HTMLElement>(BC_ELEM_SELECTORS.infoSection);
+    if (nameSection && nameSection.offsetWidth <= BC_NAME_SECTION_DEFAULT_WIDTH) middleCol.style.marginTop = "-3rem";
+  }
+  return { ok: true, tracklistCleanup: view.tracklistCleanup };
+};

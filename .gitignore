@@ -1,0 +1,14 @@
+# Ignore node modules and build artifacts
+node_modules/
+dist/
+build/
+*.zip
+coverage/
+
+# To prevent committing sensitive files
+.env*
+
+# Ignore IDEs
+.vscode/
+.idea/
+.claude/

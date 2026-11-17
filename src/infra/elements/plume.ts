@@ -1,0 +1,72 @@
+// CSS selectors for Plume's own injected DOM elements.
+export enum PLUME_ELEM_SELECTORS {
+  bcElements = "div#plume-hidden-original",
+  plumeContainer = "div#plume-root",
+
+  runtimeSpan = "span#plume-runtime-span",
+  headerContainer = "div#plume-header-container",
+  headerLogo = "a#plume-header-logo",
+  headerLogoVersion = "p#plume-header-logo__version",
+  headerCurrent = "div#plume-header-current",
+  headerTitlePretext = "span#plume-header-title-pretext",
+  headerTitle = "span#plume-header-title",
+  headerTrackLink = "a#plume-header-track-link",
+  tracklistToggleBtn = "button#plume-tracklist-toggle-btn",
+  tracklistDropdown = "div#plume-tracklist-dropdown",
+  tracklistItem = "div.plume-tracklist-item",
+
+  playbackManager = "div#plume-playback-manager",
+  playbackControls = "div#plume-playback-controls",
+  progressContainer = "div#plume-progress-container",
+  progressSlider = "input#plume-progress-slider",
+  waveformCanvas = "canvas#plume-waveform-canvas",
+  timeDisplay = "div#plume-time-display",
+  elapsedDisplay = "span#plume-elapsed-display",
+  durationDisplay = "button#plume-duration-display",
+
+  speedWrapper = "div#plume-speed-wrapper",
+  speedBtn = "button#plume-speed-btn",
+  speedBtnText = "span#plume-speed-btn__text",
+  speedPopover = "div.plume-speed-popover",
+  speedLabel = "span.plume-speed-label",
+  speedCustomInput = "input.plume-speed-custom-input",
+  speedSlider = "input.plume-speed-slider",
+  trackBwdBtn = "button#plume-track-bwd-btn",
+  timeBwdBtn = "button#plume-time-bwd-btn",
+  playPauseBtn = "button#plume-play-pause-btn",
+  timeFwdBtn = "button#plume-time-fwd-btn",
+  trackFwdBtn = "button#plume-track-fwd-btn",
+  loopBtn = "button#plume-loop-btn",
+
+  volumeContainer = "div#plume-volume-container",
+  muteBtn = "button#plume-mute-btn",
+  volumeSlider = "input#plume-volume-slider",
+  volumeValue = "div#plume-volume-value",
+
+  bpmContainer = "div#plume-bpm-container",
+  bpmValue = "span#plume-bpm-value",
+  bpmLabel = "span#plume-bpm-label",
+  bpmDetectAllBtn = "button#plume-bpm-detect-all-btn",
+  bpmBadge = "span.plume-bpm-badge",
+
+  fullscreenBtn = "button#plume-fullscreen-btn",
+  fullscreenBtnLabel = "span#plume-fullscreen-btn-label",
+  fullscreenBtnContainer = "div#plume-fullscreen-btn-container",
+  fullscreenOverlay = "div#plume-fullscreen-overlay",
+  fullscreenBackground = "div#plume-fullscreen-background",
+  fullscreenVisualizerCanvas = "canvas#plume-fullscreen-visualizer-canvas",
+  fullscreenContent = "div#plume-fullscreen-content",
+  fullscreenExitBtn = "button#plume-fullscreen-exit-btn",
+  fullscreenPresentationContainer = "div#plume-fullscreen-presentation",
+  fullscreenCoverArt = "img#plume-fullscreen-cover-art",
+  fullscreenTitlingContainer = "div.plume-fullscreen-titling",
+  fullscreenTitlingRelease = "h2#plume-fullscreen-titling__release",
+  fullscreenTitlingArtist = "h3#plume-fullscreen-titling__artist",
+  fullscreenClone = "div#plume-fullscreen-clone",
+}
+
+// CSS class names applied programmatically to Plume's injected elements.
+export enum PLUME_CSS_CLASSES {
+  featureHidden = "plume-feature-hidden",
+  waveformLoading = "plume-waveform-loading",
+}
