@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>DSP Playground - Modulation Chain Tests</title>
+    <link rel="stylesheet" href="../css/styles.css">
+    <style>
+        #test-results {
+            position: fixed;
+            top: 10px;
+            left: 10px;
+            z-index: 1000;
+            background: rgba(20, 20, 20, 0.95);
+            color: #ddd;
+            font: 13px/1.5 monospace;
+            padding: 12px 16px;
+            border-radius: 6px;
+            max-width: 720px;
+            white-space: pre-wrap;
+        }
+
+        #test-results .pass { color: #4dff88; }
+        #test-results .fail { color: #ff4d4d; }
+        #test-results .summary { margin-top: 8px; font-weight: bold; }
+    </style>
+</head>
+
+<body>
+    <pre id="test-results">Running modulation chain tests…</pre>
+
+    <!-- DOM scaffolding required by App -->
+    <div id="toolbar" style="display:none">
+        <select id="preset-select"></select>
+        <button id="btn-toggle-delay-units">Delay Units: ms</button>
+    </div>
+    <input type="file" id="json-input" accept=".json" style="display:none">
+    <input type="file" id="audio-input" accept="audio/*" style="display:none">
+    <div id="canvas-container">
+        <canvas id="nodeCanvas"></canvas>
+    </div>
+
+    <script type="module">
+        import { App } from '../js/app.js';
+        import {
+            createMockAudioContext,
+            installMockAudio,
+            runModulationTests
+        } from './modulation-tests.js';
+
+        const out = document.getElementById('test-results');
+        const app = new App();
+        window.app = app;
+
+        // Deterministic audio context: no user gesture or sound output needed.
+        installMockAudio(app, createMockAudioContext());
+
+        const results = await runModulationTests(app);
+        const failed = results.filter(r => !r.pass);
+
+        out.innerHTML = '';
+        for (const r of results) {
+            const line = document.createElement('div');
+            line.className = r.pass ? 'pass' : 'fail';
+            line.textContent = `${r.pass ? 'PASS' : 'FAIL'}: ${r.name}` + (r.error ? `\n    ${r.error}` : '');
+            out.appendChild(line);
+        }
+        const summary = document.createElement('div');
+        summary.className = 'summary ' + (failed.length ? 'fail' : 'pass');
+        summary.textContent = failed.length
+            ? `${failed.length} of ${results.length} tests FAILED`
+            : `All ${results.length} tests passed`;
+        out.appendChild(summary);
+
+        window.modulationTestResults = results;
+        console.log('Modulation test results:', results);
+    </script>
+</body>
+
+</html>

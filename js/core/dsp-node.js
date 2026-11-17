@@ -152,13 +152,18 @@ export class DSPNode {
 
     restoreExtraData(data) {
         if (!data || !this.params) return;
+        const validStrategies = ['multiply', 'add', 'override'];
         const strategies = Array.isArray(data.paramStrategies)
             ? data.paramStrategies
             : (data.paramStrategies ? [data.paramStrategies] : []);
         strategies.forEach(entry => {
             const { index, strategy } = entry || {};
             if (typeof index === 'number' && this.params[index]) {
-                this.params[index].modulationStrategy = strategy || 'multiply';
+                // Ignore unrecognised strategies so a corrupt patch can't
+                // desync the computed value from the displayed mode.
+                this.params[index].modulationStrategy = validStrategies.includes(strategy)
+                    ? strategy
+                    : 'multiply';
             }
         });
     }

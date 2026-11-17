@@ -552,8 +552,8 @@ export class App {
         }
     }
 
-    saveGraph() {
-        const data = {
+    buildGraphData() {
+        return {
             nodes: this.nodes.map(n => n.getSnapshot()),
             connections: this.connections.map(c => ({
                 fromNodeId: c.fromNode.id,
@@ -565,6 +565,10 @@ export class App {
                 mode: c.mode
             }))
         };
+    }
+
+    saveGraph() {
+        const data = this.buildGraphData();
         const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
@@ -684,6 +688,10 @@ export class App {
         console.log(`Deleted node ID: ${node.id}`);
     }
 
+    normalizeParamMode(mode) {
+        return (mode === 'multiply' || mode === 'add' || mode === 'override') ? mode : null;
+    }
+
     connect(fromNode, fromPort, toNode, toPort, targetKind = 'audio', modeOverride) {
         if (targetKind === 'param') {
             const paramInput = toNode.paramInputs && toNode.paramInputs[toPort];
@@ -691,8 +699,10 @@ export class App {
             const modList = toNode.paramModulators[paramInput.paramIndex] || (toNode.paramModulators[paramInput.paramIndex] = []);
             if (modList.some(entry => entry.node === fromNode)) return;
             const param = toNode.params && toNode.params[paramInput.paramIndex];
-            const defaultMode = modeOverride
-                || (param && (param.modulationStrategy || param.defaultModulationStrategy))
+            // Connection mode (e.g. restored from a patch) wins over the
+            // param's own modulation strategy; invalid modes are discarded.
+            const defaultMode = this.normalizeParamMode(modeOverride)
+                || (param && (this.normalizeParamMode(param.modulationStrategy) || this.normalizeParamMode(param.defaultModulationStrategy)))
                 || 'multiply';
             modList.push({ node: fromNode, mode: defaultMode });
             if (typeof fromNode.addSubscriber === 'function') {
@@ -879,14 +889,20 @@ export class App {
     cycleParamConnectionMode(connection) {
         if (!connection || connection.kind !== 'param') return;
         const sequence = ['multiply', 'add', 'override'];
-        const current = connection.mode || 'multiply';
+        const current = this.normalizeParamMode(connection.mode) || 'multiply';
         const nextMode = sequence[(sequence.indexOf(current) + 1) % sequence.length];
         connection.mode = nextMode;
         const paramIndex = connection.paramIndex;
         const modList = connection.toNode.paramModulators && connection.toNode.paramModulators[paramIndex];
         if (modList) {
             const entry = modList.find(item => item.node === connection.fromNode);
-            if (entry) entry.mode = nextMode;
+            if (entry) {
+                entry.mode = nextMode;
+            } else {
+                // Keep the computation list in sync with the connection so the
+                // cable colour, slider value and audio value can't diverge.
+                modList.push({ node: connection.fromNode, mode: nextMode });
+            }
         }
         connection.toNode.updateParam(paramIndex);
     }

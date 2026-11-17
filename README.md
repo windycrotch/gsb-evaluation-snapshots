@@ -59,8 +59,22 @@ dsp-playground/
 │   ├── nodes/             # Individual node implementations
 │   ├── utils/             # Audio utilities
 │   └── worklets/          # AudioWorklet processors
+├── tests/
+│   ├── modulation-tests.html    # Browser test page for the modulation chain
+│   ├── modulation-tests.js      # Shared test suite (browser + Node)
+│   └── run-modulation-tests.mjs # Headless Node runner
 └── presets/               # Example configurations
 ```
+
+## Tests
+
+The modulation chain (connection modes, per-param strategies, save/load round
+trip) is covered by a self-contained suite:
+
+- **Browser**: serve the repo and open `tests/modulation-tests.html` — results
+  render on the page and in the console (`window.modulationTestResults`).
+- **Headless**: `node tests/run-modulation-tests.mjs` runs the same suite
+  against a mock AudioContext.
 
 ## Technology
 
