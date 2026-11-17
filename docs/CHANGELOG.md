@@ -1,0 +1,52 @@
+# [4.0.0](https://github.com/cycjimmy/h5-video-player/compare/v3.0.2...v4.0.0) (2026-11-13)
+
+
+* build!: migrate from rollup to vite 8, ship ESM only, and add stylelint ([596086c](https://github.com/cycjimmy/h5-video-player/commit/596086c16069708a98652cde09258629d18af83f))
+
+
+### BREAKING CHANGES
+
+* the package no longer ships a CommonJS build and requires an
+ESM-aware runtime or bundler. The build toolchain moved from rollup to vite and
+the browser baseline is now browserslist `defaults`, so IE and Android 4.4 are
+no longer supported.
+
+## [3.0.2](https://github.com/cycjimmy/h5-video-player/compare/v3.0.1...v3.0.2) (2024-07-17)
+
+
+### Bug Fixes
+
+* fix eslint version ([0a46942](https://github.com/cycjimmy/h5-video-player/commit/0a46942fa7b5572bdb1eac8d442dc30b7acef08b))
+* upgrade rollup to v4 ([e319dff](https://github.com/cycjimmy/h5-video-player/commit/e319dff7469765f6a05de046ece62a45cd3125b4))
+
+## [3.0.1](https://github.com/cycjimmy/h5-video-player/compare/v3.0.0...v3.0.1) (2022-06-21)
+
+
+### Bug Fixes
+
+* remove @rollup/plugin-commonjs and fix jest ([aaa9414](https://github.com/cycjimmy/h5-video-player/commit/aaa9414e20712d34c8b1379eb670ae4a0c707109))
+
+# [3.0.0](https://github.com/cycjimmy/h5-video-player/compare/v2.1.0...v3.0.0) (2022-03-26)
+
+
+### Bug Fixes
+
+* fix sass-lib path ([0016cd4](https://github.com/cycjimmy/h5-video-player/commit/0016cd477bdb19fd987d211a3e2c6e1634e2bfc1))
+* some chore ([b1cc2af](https://github.com/cycjimmy/h5-video-player/commit/b1cc2af4c7bc778bca486b13beb33cae30205ef2))
+
+
+### Features
+
+* change to module mode ([2a8d48f](https://github.com/cycjimmy/h5-video-player/commit/2a8d48fe53518ce4037b334e2286e3d6921a933d))
+
+
+### BREAKING CHANGES
+
+* change to module mode
+
+# [2.1.0](https://github.com/cycjimmy/h5-video-player/compare/v2.0.0...v2.1.0) (2019-10-24)
+
+
+### Features
+
+* **release:** start to use semantic release ([7cd9dcf](https://github.com/cycjimmy/h5-video-player/commit/7cd9dcfbb49cac925ead83a651aeb55c0812e076))
