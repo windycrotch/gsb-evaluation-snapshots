@@ -1,0 +1,98 @@
+# Runtime and lifecycle
+
+The host page owns the Canvas. `Application.mount('#app').run(window)` creates an `AppHost` that owns the runtime, event routing, overlay services, and the root render tree.
+
+```text
+HTMLCanvasElement
+  → Application
+  → AppHost
+  → RenderWindow
+  → RenderPage
+  → layouts and widgets
+```
+
+Keep one active `AppHost` per Canvas. Save the value returned by `run()` and call `dispose()` when the page unmounts, a route replaces the Canvas, or hot reload recreates the app. Dispose the old host before mounting another one on the same Canvas.
+
+A `RenderObject` receives constraints during layout, paints with the current theme, participates in hit testing when visible, and releases owned resources on disposal. Use `markNeedsLayout()` for changes that affect size or placement, and `markNeedsPaint()` for visual-only changes. See [layouts](layouts.md) for the parent-child constraint model.
+
+For ordinary page changes, replace or update the page inside the running window; the host does not need to be recreated. The [component showcase](../examples/basic-app/src/main.ts) shows a minimal startup and disposal pattern.
+
+## Shared animation time
+
+Each `RuntimeHost` owns an `AnimationClock`. Frame requests are coalesced, pending state changes are committed, and active animations are sampled before layout and paint using the same frame timestamp. Moving progress indicators, loading buttons, and loading overlays calculate position from elapsed time rather than timer callback counts.
+
+`RenderObject` extensions can use the protected `registerAnimation(tick)` method. Attachment owns the subscription; detachment and disposal cancel it. Hidden controls, inactive tabs and content outside the host or supported scroll clips pause their decorative animation time. Visible adorners are not clipped by their parent's content viewport. The document visibility lifecycle pauses and resumes the host clock.
+
+`PopupContext.animationClock` exposes the same clock to popup extensions. Cancel subscriptions when a popup closes. Direct clock subscriptions return an idempotent unsubscribe callback. `subscriberCount` includes paused subscriptions; `hasActiveAnimations` indicates whether another animation frame is needed.
+
+```ts
+import { AnimationClock } from 'directsurface'
+
+const clock = new AnimationClock(() => { /* request a frame from your host */ })
+const stop = clock.subscribe(elapsedMs => { /* update a visual value */ })
+clock.tick(0)
+clock.tick(1000 / 120)
+stop()
+clock.dispose()
+```
+
+The standalone clock does not create browser frame callbacks itself. `RuntimeHost.renderFrame(timestamp)` advances the clock; omitting the timestamp paints current state only. Decorative animation time excludes hidden time and must not be used as a business deadline clock. Failed callbacks or activity predicates are removed and surfaced while other subscriptions can continue.
+
+## Dynamic focus and scroll visibility
+
+A registered control revealed inside a popup can request focus immediately. The focus manager checks active popup ancestry and adds the control to that scope synchronously; hidden, removed, or unregistered controls cannot use this path to acquire focus. Modal boundaries remain in effect.
+
+Focusing a control asks ancestor scroll containers to reveal it. Wheel scrolling remains independent of focus. Carets and other independently replayed transient drawing inherit ancestor content clips, retaining the container's adorner exception, so offscreen editors do not draw over nearby controls.
+
+## Focus visibility
+
+Actual focus and its navigation outline are separate. Pointer presses hide navigation focus rings without clearing focus or selection. Keyboard navigation reveals them again, including when focus remains on the same control. Pointer movement and scrolling do not hide a keyboard focus ring.
+
+`FocusManager` records input before pointer routing and popup interception. Tab, arrows, Home/End, PageUp/PageDown, Enter, Space and Escape select keyboard visibility. Modifier-only keys, ordinary Ctrl/Meta/Alt shortcuts and input composition do not change the policy; navigation combinations such as Ctrl+Tab still count as keyboard navigation.
+
+Programmatic focus and popup focus restoration inherit the latest input modality; the initial default is keyboard visibility. Text fields and editors retain their editing border, caret and selection after pointer focus. Selected items and active editing cells keep their own state indicators.
+
+`FocusManager.instance.inputModality` returns `keyboard` or `pointer`. `FocusManager.keyboardFocusVisible` is a read-only drawing policy and does not instantiate a manager. Custom navigation outlines should follow that policy while preserving actual focus. Built-in focusable controls also expose `isFocusVisible`. Standard pointer dispatch already calls `notifyPointerInput()`; custom adapters can call it before dispatching pointer-down events. Keyboard events continue through `handleKeyDownEvent()`.
+
+
+## Invalidation during painting
+
+A paint pass consumes the requests that were present when it began. Calling `markNeedsPaint()` or `markNeedsTransientPaint()` from a paint callback preserves the new request for the next frame, including when it targets the same node and rectangle. Popup-owned render trees follow the same rule. Normal invalidations are still coalesced into a single pending frame; once the requested work finishes, the runtime returns to idle.
+
+Layer painters can also invalidate their own layer or a layer already painted earlier in the pass. `RuntimeHost` schedules the remaining dirty work after the pass, instead of clearing it at frame completion. Direct `PipelineOwner` flushes retain newly queued damage; popup transient replay uses a participant snapshot so newly added nodes wait until the next pass and detached nodes are skipped.
+
+If a runtime or popup painter throws, the error propagates and pending damage is retained for recovery. The failure itself does not start an automatic retry loop: after resolving the cause, request another paint to resume. A failed queued transient flush restores its consumed damage without restoring detached participants. Disposing a node or unregistering a layer removes its pending work.
+
+Prefer updating state before painting. If a custom painter intentionally requests another frame, give that update a stopping condition; requesting paint on every paint callback creates continuous rendering.
+
+
+## Partial repainting
+
+LayerManager unions the damage reported by every participating painter. Painters without a `shouldPaint` predicate provide persistent content whenever that layer needs repainting; a predicate returning `false` still excludes its painter. An explicit damage rectangle remains partial unless another requested painter reports a larger region.
+
+Clearing, repaint clipping and screen composition use the same viewport-clamped physical-pixel extent, including at fractional DPR. Each painter runs inside its own `save()` / `restore()` scope, with restoration in `finally`, so changes to transforms or clips do not leak into the next painter or a recovery pass. Empty offscreen damage is consumed without drawing. Painters must balance any additional save/restore scopes they create themselves.
+
+Runtime and popup transient painting replays retained visible participants when a region is damaged. This restores unchanged content that overlaps the cleared region; partial layer clips prevent opacity from accumulating outside it. Nodes under hidden ancestors are skipped. Requests raised during replay still remain queued for the next frame.
+
+RenderBox includes a margin for standard strokes and antialiasing in `paintBounds`, without enlarging layout or hit-test size. Custom effects extending farther must report their complete painted extent; moving content must invalidate both its old and new extents. After a painter throws, consumed damage and new damage remain available for the next explicit invalidation, while the Canvas state is restored. This does not change DrawList's primitive coordinate-snapping rules.
+
+
+## Browser service lifecycle
+
+The browser input controller uses a session port with explicit session identity and revisions. Ended or stale sessions do not overwrite a newer session. The browser adapter preserves the original keyboard and clipboard events, including `DataTransfer`, cancellation and propagation; TextBox readonly behavior and editable defaults stay unchanged. This service abstraction does not add a desktop-native runtime to the browser package.
+
+`ClipboardController` accepts an optional object with `readText()` and `writeText(text)` methods, while its default behavior continues to use the browser clipboard. `dispose()` prevents further reads/writes and ignores pending results that complete afterward. Dispose controllers owned by your application when their scope ends; do not dispose the framework's shared singleton as a per-control cleanup action.
+
+The visible performance panel repaints the union of its previous and current bounds when updated, moved, minimized or hidden. Hidden idle panels produce no further panel damage. This optimization preserves the same display and interaction behavior.
+
+## 输入会话与窗口边界
+
+`InputComposer` 的 `onSessionEnd` 在会话失去所有权后通知调用方；`ownsSession(token)` 可检查令牌是否仍有效。原生输入消费者可使用 `onBeforeInput`、`onNativeInput` 和 `onNativeCompositionEnd`；原生回调与对应的简化回调不会重复触发。`isolateNativeEvents` 会在释放时更换原生输入载体，隔离排队中的旧事件。只读输入仍在聚焦之前设置只读状态。
+
+按内容高度布局的窗口在居中之前完成测量；宿主缩小时会修正越出可见范围的模态窗口位置。事件监听的传播边界和清理规则见 [Event routing](event-routing.md)。
+
+## Browser file service
+
+Import `applicationFiles` and the `ApplicationFilePort`, `SaveFileOptions`, and `SaveFileResult` types from `directsurface`. `applicationFiles()` returns the shared browser service for `pickFiles`, `readDataUrl`, and `saveBytes`.
+
+`saveBytes(bytes, { name, type, signal })` starts a browser download and returns `status: 'download-started'`; this is not confirmation that an operating-system save completed. An already-aborted signal rejects before creating a download. `readDataUrl(file)` reads the supplied File bytes as a data URI.
