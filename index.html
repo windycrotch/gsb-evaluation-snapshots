@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>1013D | 1:1 Scale 3D Visualization & AR Viewer</title>
+    <meta name="application-name" content="1013D" />
+    <meta name="apple-mobile-web-app-title" content="1013D" />
+
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="author" content="Dexter Chock" />
+    <meta name="robots" content="index, follow" />
+    
+    <meta name="yandex-verification" content="56e17f27a2d40416" />
+
+    <link rel="me" href="https://www.instagram.com/dexterchock" />
+    <link rel="canonical" href="https://1013d.pages.dev/" />
+
+    <meta name="description" content="1:1 scale 3D model viewer for STL, OBJ, and 3MF files. Calibrate your screen to exact physical dimensions or visualize prints in AR instantly." />
+    
+    <meta name="keywords" content="1:1 scale algorithm, webgl physical scale, precise stl viewer, ppi calculation matrix, iso 7810 calibration, dexter chock, 3d print validation, AR 3d viewer, view stl in ar, augmented reality 3d printing, ios ar quick look, android scene viewer" />
+    
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://1013d.pages.dev/" />
+    <meta property="og:site_name" content="1013D" />
+    <meta property="og:title" content="1013D - Precision 1:1 Scale & AR Engine" />
+    <meta property="og:description" content="Stop guessing scale. Verify your 3D prints at 1:1 physical size on screen, or place them in your room with AR." />
+    <meta property="og:image" content="https://1013d.pages.dev/og-image.jpg?v=8" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:url" content="https://1013d.pages.dev/" />
+    <meta name="twitter:title" content="1013D - Precision 1:1 Scale & AR Engine" />
+    <meta name="twitter:description" content="Stop guessing scale. Verify your 3D prints at 1:1 physical size on screen, or place them in your room with AR." />
+    <meta name="twitter:image" content="https://1013d.pages.dev/og-image.jpg?v=8" />
+
+    <link rel="icon" type="image/png" href="/favicon-96x96.png" sizes="96x96" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="shortcut icon" href="/favicon.ico" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="ard" href="/.well-known/ard.json" type="application/json" />
+    
+    <meta name="theme-color" content="#050505" />
+
+    <link rel="stylesheet" href="/input.css" />
+
+    <style>
+      html, body {
+        background-color: #050505;
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        width: 100%;
+      }
+    </style>
+
+    <!-- Combined Structured Data -->
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@graph": [
+        {
+          "@type": "Person",
+          "@id": "https://1013d.pages.dev/#author",
+          "name": "Dexter Chock",
+          "url": "https://www.instagram.com/dexterchock"
+        },
+        {
+          "@type": "WebSite",
+          "@id": "https://1013d.pages.dev/#website",
+          "name": "1013D",
+          "url": "https://1013d.pages.dev/",
+          "publisher": {
+            "@id": "https://1013d.pages.dev/#author"
+          }
+        },
+        {
+          "@type": "SoftwareApplication",
+          "@id": "https://1013d.pages.dev/#software",
+          "name": "1013D",
+          "url": "https://1013d.pages.dev/",
+          "image": "https://1013d.pages.dev/og-image.jpg?v=8",
+          "screenshot": "https://1013d.pages.dev/og-image.jpg?v=8",
+          "applicationCategory": "EngineeringApplication",
+          "operatingSystem": "All, Web Browser",
+          "softwareRequirements": "WebGL 2.0",
+          "featureList": "1:1 Physical Scale, Augmented Reality (AR) Preview, STL/OBJ/3MF Support",
+          "offers": {
+            "@type": "Offer",
+            "price": "0",
+            "priceCurrency": "USD"
+          },
+          "author": {
+            "@id": "https://1013d.pages.dev/#author"
+          }
+        }
+      ]
+    }
+    </script>
+    
+  </head>
+  <body>
+    <div id="root">
+        <h1 style="
+            display: flex; 
+            justify-content: center; 
+            align-items: center; 
+            height: 100vh; 
+            color: #ffffff; 
+            font-family: sans-serif; 
+            font-weight: bold; 
+            font-size: 2rem;
+            margin: 0;
+        ">
+            1013D
+        </h1>
+    </div>
+    
+    <noscript>
+      <div style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 10000; background-color: #050505; color: #ffffff; display: flex; align-items: center; justify-content: center; text-align: center; padding: 2rem;">
+        <div>
+          <h1 style="font-size: 1.5rem; margin-bottom: 1rem;">JavaScript Required</h1>
+          <p>The 1013D interactive viewer requires JavaScript to render WebGL content.</p>
+        </div>
+      </div>
+    </noscript>
+
+    <script type="module" src="/index.tsx"></script>
+
+    <script defer src='https://static.cloudflareinsights.com/beacon.min.js' data-cf-beacon='{"token": "5b09c717ec08483d9ed9a6cf43e2a1a6"}'></script>
+  </body>
+</html>
