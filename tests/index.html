@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>TIDELINE — fight lifecycle tests</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 16px 20px;
+      background: #0d1117;
+      color: #d6e2ee;
+      font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    h1 { font-size: 16px; font-weight: 600; margin: 0 0 12px; }
+    #log { white-space: pre-wrap; }
+    .ok { color: #62d98b; }
+    .fail { color: #ff7b88; font-weight: 700; }
+    #summary { margin-top: 14px; padding: 10px 12px; border-radius: 8px; font-weight: 700; }
+    #summary.pass { background: #14361f; color: #8df0b0; }
+    #summary.failbox { background: #3d1620; color: #ff9aa6; }
+  </style>
+  <!-- Map the game's bare "three" import to the LOCAL stub: this page works
+       fully offline (serve the repo and open /tests/index.html). -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "./three-stub/three.js"
+    }
+  }
+  </script>
+</head>
+<body>
+  <h1>TIDELINE — reel-fight lifecycle tests (offline, stubbed THREE)</h1>
+  <div id="log"></div>
+  <div id="summary"></div>
+
+  <script type="module">
+    const logEl = document.getElementById("log");
+    const summaryEl = document.getElementById("summary");
+
+    // Mirror the harness console output into the page.
+    const origLog = console.log.bind(console);
+    console.log = (...args) => {
+      origLog(...args);
+      const line = args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" ");
+      const span = document.createElement("div");
+      if (line.includes("FAIL")) span.className = "fail";
+      else if (line.trimStart().startsWith("ok")) span.className = "ok";
+      span.textContent = line;
+      logEl.appendChild(span);
+    };
+
+    const { runSuites } = await import("./harness.js");
+    const { default: reelFightSuite } = await import("./reelFight.test.js");
+
+    const passed = await runSuites([reelFightSuite]);
+    summaryEl.className = passed ? "pass" : "failbox";
+    summaryEl.textContent = passed
+      ? "ALL TESTS PASSED"
+      : "SOME TESTS FAILED — see the log above (and the browser console)";
+    window.__TESTS_PASSED__ = passed;
+  </script>
+</body>
+</html>

@@ -106,7 +106,12 @@ function travelTo(locId, silent = false) {
   S.world.current = loc.id;
   bite.cancel();
   bobber.hide();
-  if (fight.active) fight.end();
+  // A fight belongs to the water it was hooked on: leaving must tear it down
+  // silently (no snap/escape event, no HUD updates from the old fight) and
+  // clear any held-input marker so a stale click cannot leak into the new spot.
+  fight.abort();
+  inputHeld = false;
+  spaceHeld = false;
   env.load(loc);
   casting.attachTo(env.playerSpot);
   rig.setAnchor(env.playerSpot);
@@ -132,11 +137,16 @@ function setPaused(on) {
   if (on && !isGameplayPhase(machine.current)) return;
   paused = on;
   if (on) {
-    fight.setReeling(false);
+    // Freeze the fight (timer/tension/progress/surge/jump & landing anim) and
+    // drop every held-input marker so nothing keeps "reeling" behind the menu.
+    fight.freeze();
     inputHeld = false;
+    spaceHeld = false;
     screens.showPause();
     saveGame();
   } else {
+    // State is exactly where it froze; the fight continues from there.
+    fight.unfreeze();
     screens.hideAll();
   }
 }
@@ -149,7 +159,11 @@ machine.register(Phase.MENU, {
   enter() {
     bite.cancel();
     bobber.hide();
-    if (fight.active) fight.end();
+    // Quitting to menu aborts any fight without a snap/escape outcome and
+    // removes the fish model + held input so nothing survives into the menu.
+    fight.abort();
+    inputHeld = false;
+    spaceHeld = false;
     casting.setBend(0);
     casting.setLineTension(0);
     hud.hide();
@@ -207,6 +221,10 @@ machine.register(Phase.REELING, {
     audio.play("hook");
   },
   exit() {
+    // Guarantee the fight can never be left half-alive by a phase change.
+    // abort() is silent and idempotent: normal snap/escape/landed outcomes
+    // already tore the fight down, so this emits no duplicate events.
+    fight.abort();
     rig.setFocus(null);
     casting.setBend(0);
     casting.setLineTension(0);

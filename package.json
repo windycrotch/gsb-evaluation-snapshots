@@ -1,0 +1,11 @@
+{
+  "name": "tideline",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "TIDELINE — 3D fishing simulator (no build step; tests run on Node + a local THREE stub).",
+  "scripts": {
+    "test": "node --import ./tests/three-stub/register.mjs tests/run-node.mjs",
+    "serve": "python3 -m http.server 8642"
+  }
+}

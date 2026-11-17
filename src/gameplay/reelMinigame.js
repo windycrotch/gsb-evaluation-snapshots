@@ -1,6 +1,18 @@
 // The reel-in fight: tension vs catch-progress with telegraphed surges, fish
 // fatigue, gear modifiers, a wandering fight point on the water, leaping fish
 // during surges, and the final landing arc into the boat/dock.
+//
+// Lifecycle contract:
+//  - freeze()/unfreeze(): while frozen, update() is a no-op, so the fight
+//    timer, tension, progress, surge cycle and jump/landing animations all
+//    stop dead and resume exactly where they left off. Reeling input raised
+//    during a freeze is ignored.
+//  - finish*() handles in-fight outcomes (snap / escape / landed). It fires
+//    its outcome event at most once, then tears the fight down.
+//  - abort() tears a fight down WITHOUT any outcome event (location switch,
+//    quit to menu, forced cleanup). It is idempotent and safe to call on an
+//    idle or frozen fight, and guarantees no further fight:* events can be
+//    emitted afterwards. end() is the silent-cleanup alias used by old code.
 
 import * as THREE from "three";
 import { CONFIG } from "../data/config.js";
@@ -17,10 +29,14 @@ export class ReelFight {
     this.effects = effects;
     this.audio = audio;
     this.active = false;
+    this.frozen = false;
     this.phase = "idle"; // idle | fight | landing
     this.fishPoint = new THREE.Vector3();
     this.playerSpot = new THREE.Vector3();
     this.fishMesh = null;
+    this.fish = null;
+    this.jump = null;
+    this.landing = null;
   }
 
   /**
@@ -30,10 +46,14 @@ export class ReelFight {
    * @param {object} stats { reelSpeed, lineStrength, control }
    */
   start(fish, startPos, playerSpot, stats) {
+    // Never start on top of a half-torn-down fight: clear it silently first.
+    this.teardown();
+
     this.fish = fish;
     this.stats = stats;
     this.playerSpot.copy(playerSpot);
     this.active = true;
+    this.frozen = false;
     this.phase = "fight";
     this.t = 0;
     this.reeling = false;
@@ -61,22 +81,72 @@ export class ReelFight {
     this.landing = null;
   }
 
+  /** Pause every time-driven part of the fight and drop any held input. */
+  freeze() {
+    if (!this.active) return;
+    this.frozen = true;
+    this.reeling = false;
+  }
+
+  /** Resume a frozen fight; its state is untouched so it continues in place. */
+  unfreeze() {
+    if (!this.active) return;
+    this.frozen = false;
+  }
+
   setReeling(on) {
+    // Input while paused (or after the fight is over) must never move state.
+    if (!this.active || this.frozen) return;
     if (this.phase === "fight") this.reeling = on;
   }
 
+  /**
+   * External teardown for leaving a fight without an outcome: switching
+   * fishing spots, returning to the main menu, or any forced cleanup.
+   * Removes the fish model and clears surge/jump/landing/input state. Never
+   * emits fight:snap / fight:escape / fight:landed and is safe to repeat.
+   */
+  abort() {
+    this.teardown();
+  }
+
+  /** Backwards-compatible silent cleanup alias (same semantics as abort). */
   end() {
+    this.teardown();
+  }
+
+  teardown() {
     this.active = false;
+    this.frozen = false;
     this.phase = "idle";
     this.reeling = false;
     if (this.fishMesh) {
       this.scene.remove(this.fishMesh);
       this.fishMesh = null;
     }
+    this.jump = null;
+    this.landing = null;
+    this.surgeState = "calm";
+    this.surgeTimer = 0;
+    this.surgeT = 0;
+    this.splashTimer = 0;
+    this.fish = null;
+  }
+
+  /**
+   * Resolve an in-fight outcome. Guarded so a snap/escape/landed event can
+   * only ever fire once: the first call tears the fight down, and any later
+   * update() returns at the frozen/inactive guard before reaching here.
+   */
+  finishOutcome(event, payload) {
+    if (!this.active) return;
+    const fish = this.fish;
+    this.teardown();
+    events.emit(event, { fish, ...payload });
   }
 
   get tired() {
-    return this.t > this.fish.fight.stamina;
+    return this.fish !== null && this.t > this.fish.fight.stamina;
   }
 
   // ---------- surge cycle ----------
@@ -139,7 +209,9 @@ export class ReelFight {
   // ---------- main update ----------
 
   update(dt) {
-    if (!this.active) return;
+    // A torn-down or paused fight does nothing at all — no timers, no
+    // tension/progress drift, no surge or jump animation, no HUD events.
+    if (!this.active || this.frozen) return;
 
     if (this.phase === "landing") {
       this.updateLanding(dt);
@@ -170,21 +242,15 @@ export class ReelFight {
 
     // fail states checked on raw values before clamping for display
     if (this.tension >= 100) {
-      const fish = this.fish;
-      this.end();
-      events.emit("fight:snap", { fish });
+      this.finishOutcome("fight:snap", {});
       return;
     }
     if (this.progress <= 0 && this.t > R.escapeGraceTime) {
-      const fish = this.fish;
-      this.end();
-      events.emit("fight:escape", { fish, reason: "It slipped the hook and swam off..." });
+      this.finishOutcome("fight:escape", { reason: "It slipped the hook and swam off..." });
       return;
     }
     if (this.t > R.maxFightTime) {
-      const fish = this.fish;
-      this.end();
-      events.emit("fight:escape", { fish, reason: "It outlasted you and shook free..." });
+      this.finishOutcome("fight:escape", { reason: "It outlasted you and shook free..." });
       return;
     }
 
@@ -251,9 +317,7 @@ export class ReelFight {
     this.fishMesh.rotation.y += dt * 4;
     this.fishMesh.rotation.z = lerp(0.8, -0.4, k);
     if (k >= 1) {
-      const fish = this.fish;
-      this.end();
-      events.emit("fight:landed", { fish });
+      this.finishOutcome("fight:landed", {});
     }
   }
 }

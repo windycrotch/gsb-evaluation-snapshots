@@ -25,6 +25,28 @@ npx http-server -p 8642
 Then open `http://localhost:8642` in a modern browser (Chrome, Edge, Firefox,
 Safari 16.4+). The only network request is the Three.js CDN fetch on first load.
 
+## Tests
+
+The reel-fight lifecycle (pause freeze, scene-switch teardown, single-fire
+snap/escape/landed events, HUD isolation) is covered by tests that need **no
+GPU, browser or network** — a tiny local THREE stub (`tests/three-stub/`)
+stands in for the renderer, and the game's real `ReelFight` code runs against
+fake scene/effects/audio objects.
+
+```bash
+# Node (any recent Node with ESM loader hooks; tested on Node 24)
+npm test
+
+# Browser: serve the repo and open the test page (works fully offline —
+# the page's import map points "three" at the local stub, not the CDN)
+python3 -m http.server 8642
+# then open http://localhost:8642/tests/
+```
+
+The browser page prints each assertion and a final pass/fail banner; the Node
+run exits non-zero on any failure.
+
+
 ## How to play
 
 | Action | Input |
