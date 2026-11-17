@@ -1,0 +1,37 @@
+import { availableParallelism } from "node:os";
+import { basename, join } from "node:path";
+
+import { gitCheckout, platform, requireFile, run, stageFile } from "./lib.mjs";
+
+export default async function build({ target, workDir, outputDir, component }) {
+    const source = join(workDir, "src");
+    gitCheckout({
+        url: component.source.url,
+        commit: component.source.commit,
+        destination: source,
+    });
+    // The Makefile's first target only removes FFVship; the library target is `build`.
+    // Bound `make -j`; a bare flag is unlimited and can trip the macOS process limit.
+    const jobs = Math.max(1, Math.min(8, availableParallelism()));
+    const makeArgs = ["-j", String(jobs), "BACKEND=Vulkan"];
+    if (platform(target) === "win32") {
+        // The Makefile defaults RMCMD to cmd's `del`, which make cannot invoke from
+        // the MSYS shell it uses here.
+        makeArgs.push("CXX=g++", "RMCMD=rm -f");
+    }
+    makeArgs.push("build");
+    run("make", makeArgs, { cwd: source });
+    const name = basename(component.artifacts[target].install);
+    // Vship's Makefile uses its Unix branch on macOS too and therefore names the shared
+    // object `libvship.so`; stage it under the dylib name the toolchain manifest expects.
+    const sourceName = platform(target) === "darwin" ? "libvship.so" : name;
+    const binary = requireFile(
+        source,
+        (path) => {
+            const filename = basename(path);
+            return filename === sourceName || filename === sourceName.replace(/^lib/u, "");
+        },
+        name,
+    );
+    stageFile(binary, outputDir, `lib/${name}`);
+}

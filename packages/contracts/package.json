@@ -1,0 +1,17 @@
+{
+    "name": "@av1ation/contracts",
+    "private": true,
+    "type": "module",
+    "exports": {
+        ".": "./src/index.ts",
+        "./boundaries": "./src/boundaries.ts",
+        "./versions": "./src/versions.ts"
+    },
+    "dependencies": {
+        "zod": "^4.6.7"
+    },
+    "scripts": {
+        "generate": "node scripts/generate.mjs",
+        "check": "node scripts/generate.mjs --check"
+    }
+}

@@ -1,0 +1,426 @@
+name: CI
+
+on:
+    push:
+        branches: [main]
+    pull_request:
+
+permissions:
+    contents: read
+
+concurrency:
+    group: ci-${{ github.ref }}
+    cancel-in-progress: true
+
+# Path filtering lives on the jobs, never on the pull_request trigger: a workflow-level
+# filter skips the gate jobs too, leaving branch protection waiting on checks that will
+# never report. Branch protection should require the three "... gate" jobs below.
+jobs:
+    changes:
+        name: Changed paths
+        runs-on: ubuntu-latest
+        timeout-minutes: 5
+        outputs:
+            web: ${{ steps.filter.outputs.web }}
+            rust: ${{ steps.filter.outputs.rust }}
+            e2e: ${{ steps.filter.outputs.e2e }}
+            docs: ${{ steps.filter.outputs.docs }}
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+            - name: Decide which check families are needed
+              id: filter
+              shell: bash
+              env:
+                  EVENT_NAME: ${{ github.event_name }}
+                  BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+                  HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+              run: |
+                  set -euo pipefail
+                  web=true
+                  rust=true
+                  e2e=true
+                  docs=false
+                  if [ "$EVENT_NAME" = "pull_request" ]; then
+                    if merge_base=$(git merge-base "$BASE_SHA" "$HEAD_SHA" 2>/dev/null) &&
+                       changed=$(git diff --name-only "$merge_base" "$HEAD_SHA") &&
+                       [ -n "$changed" ]; then
+                      web=false
+                      rust=false
+                      e2e=false
+                      while IFS= read -r path; do
+                        case "$path" in
+                          docs/*|*.md|*.mdx) docs=true ;;
+                          rust/*|Cargo.toml|Cargo.lock|rust-toolchain*|.cargo/*|packaging/*|release/*)
+                            rust=true
+                            e2e=true
+                            ;;
+                          schema/*|scripts/*)
+                            web=true
+                            rust=true
+                            e2e=true
+                            ;;
+                          packages/*|package.json|package-lock.json|.nvmrc|.prettier*|eslint.config.*|tsconfig*|vite.config.*|playwright.config.*)
+                            web=true
+                            e2e=true
+                            ;;
+                          apps/website/*) web=true ;;
+                          apps/*)
+                            web=true
+                            e2e=true
+                            ;;
+                          *)
+                            web=true
+                            rust=true
+                            e2e=true
+                            ;;
+                        esac
+                        # The generated clients, route paths, and contract types live in
+                        # these Rust sources; a change there must run their drift checks.
+                        case "$path" in
+                          rust/crates/contracts/*|rust/crates/service/src/api/*|rust/crates/service/src/bin/*|rust/crates/service/build.rs)
+                            web=true
+                            ;;
+                        esac
+                      done <<< "$changed"
+                      if [ "$web" = false ] && [ "$rust" = false ] && [ "$docs" = false ]; then
+                        # An unrecognised non-doc path must not slip through both filters.
+                        web=true
+                        rust=true
+                        e2e=true
+                      fi
+                    else
+                      echo "::warning::Could not determine the changed paths; running the full check set."
+                      docs=true
+                    fi
+                  else
+                    docs=true
+                  fi
+                  echo "web=$web" >> "$GITHUB_OUTPUT"
+                  echo "rust=$rust" >> "$GITHUB_OUTPUT"
+                  echo "e2e=$e2e" >> "$GITHUB_OUTPUT"
+                  echo "docs=$docs" >> "$GITHUB_OUTPUT"
+            - uses: actions/setup-node@v4
+              if: steps.filter.outputs.docs == 'true' && steps.filter.outputs.web == 'false'
+              with:
+                  node-version-file: .nvmrc
+                  cache: npm
+            - name: Check documentation
+              if: steps.filter.outputs.docs == 'true' && steps.filter.outputs.web == 'false'
+              run: |
+                  npm ci
+                  npm run check:docs
+
+    web:
+        name: Web checks
+        runs-on: ubuntu-latest
+        timeout-minutes: 20
+        needs: changes
+        if: needs.changes.outputs.web == 'true'
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+            - uses: actions/setup-node@v4
+              with:
+                  node-version-file: .nvmrc
+                  cache: npm
+            - run: npm ci
+            - name: Audit JavaScript dependencies
+              run: npm audit --audit-level=high
+            - name: Validate website release metadata and download URLs
+              run: npm run check:website-release -- --urls
+            - name: Run web static profile
+              run: npm run check:web
+            - name: Run web verification profile
+              run: npm run verify:web
+            - run: npm run coverage:check:changed -- --frontend
+              env:
+                  BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+            # The website's publishable build requires generated screenshot captures, which
+            # are not committed. Compile its gallery variant instead; the screenshot workflow
+            # and release build verify the captured site.
+            - run: npm run build:ci
+            - name: Check initial JavaScript bundle size
+              run: npm run check:bundle-size
+            - uses: actions/upload-artifact@v4
+              if: always()
+              with:
+                  name: coverage
+                  path: dist/coverage/web/
+                  if-no-files-found: warn
+
+    rust:
+        name: Rust tests and coverage
+        runs-on: windows-latest
+        timeout-minutes: 30
+        needs: changes
+        if: needs.changes.outputs.rust == 'true'
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+            - uses: actions/setup-node@v4
+              with:
+                  node-version-file: .nvmrc
+                  cache: npm
+            - uses: dtolnay/rust-toolchain@stable
+              with:
+                  toolchain: "1.97"
+                  components: rustfmt, clippy
+            - uses: Swatinem/rust-cache@v2
+              with:
+                  workspaces: rust -> ../dist/cargo
+            - uses: taiki-e/install-action@v2
+              with:
+                  tool: cargo-llvm-cov,cargo-audit
+            - run: rustup component add llvm-tools-preview
+            # Coverage instruments and relinks test binaries. Keep MSVC ahead of Git's
+            # link.exe; an ambient PATH can otherwise fail with 0xc0000142.
+            - uses: ilammy/msvc-dev-cmd@v1
+              with:
+                  arch: x64
+            - name: Assert Visual Studio linker
+              shell: pwsh
+              run: |
+                  $link = (Get-Command link.exe -CommandType Application -ErrorAction Stop |
+                    Select-Object -First 1).Source
+                  $visualStudioRoots = @(
+                    $env:VCToolsInstallDir,
+                    $env:VCINSTALLDIR,
+                    $env:VSINSTALLDIR
+                  ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+                  $underVisualStudio = $link -match '\\Microsoft Visual Studio\\'
+                  if (-not $underVisualStudio) {
+                    $underVisualStudio = $visualStudioRoots | Where-Object {
+                      $link.StartsWith($_, [System.StringComparison]::OrdinalIgnoreCase)
+                    }
+                  }
+                  if (-not $underVisualStudio) {
+                    throw "link.exe does not resolve under Visual Studio: $link"
+                  }
+                  Write-Host "link.exe resolves under Visual Studio: $link"
+            - run: npm ci
+            # The Tauri build script requires its resource directory to exist even when
+            # tests do not bundle a frontend; the compile-only job creates the same empty
+            # directory.
+            - name: Prepare compile-only resource directory
+              shell: bash
+              run: mkdir -p dist/apps/desktop
+            - name: Install FFMS2 development files
+              uses: ./.github/actions/install-ffms2
+            - name: Audit Rust dependencies
+              run: cargo audit --file rust/Cargo.lock
+            - name: Run Rust verification profile
+              run: npm run verify:rust
+            - run: npm run coverage:check:changed -- --rust
+              env:
+                  BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+            - uses: actions/upload-artifact@v4
+              if: always()
+              with:
+                  name: rust-coverage
+                  path: dist/coverage/rust/
+                  if-no-files-found: warn
+
+    rust-static:
+        name: Rust static checks
+        runs-on: windows-latest
+        timeout-minutes: 30
+        needs: changes
+        if: needs.changes.outputs.rust == 'true'
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+            - uses: actions/setup-node@v4
+              with:
+                  node-version-file: .nvmrc
+                  cache: npm
+            - uses: dtolnay/rust-toolchain@stable
+              with:
+                  toolchain: "1.97"
+                  components: rustfmt, clippy
+            - uses: Swatinem/rust-cache@v2
+              with:
+                  workspaces: rust -> ../dist/cargo
+            - uses: ilammy/msvc-dev-cmd@v1
+              with:
+                  arch: x64
+            - name: Assert Visual Studio linker
+              shell: pwsh
+              run: |
+                  $link = (Get-Command link.exe -CommandType Application -ErrorAction Stop |
+                    Select-Object -First 1).Source
+                  $visualStudioRoots = @(
+                    $env:VCToolsInstallDir,
+                    $env:VCINSTALLDIR,
+                    $env:VSINSTALLDIR
+                  ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+                  $underVisualStudio = $link -match '\\Microsoft Visual Studio\\'
+                  if (-not $underVisualStudio) {
+                    $underVisualStudio = $visualStudioRoots | Where-Object {
+                      $link.StartsWith($_, [System.StringComparison]::OrdinalIgnoreCase)
+                    }
+                  }
+                  if (-not $underVisualStudio) {
+                    throw "link.exe does not resolve under Visual Studio: $link"
+                  }
+                  Write-Host "link.exe resolves under Visual Studio: $link"
+            - run: npm ci
+            - name: Prepare compile-only resource directory
+              shell: bash
+              run: mkdir -p dist/apps/desktop
+            - name: Install FFMS2 development files
+              uses: ./.github/actions/install-ffms2
+            - name: Run Rust static profile
+              run: npm run check:rust
+
+    e2e:
+        name: Browser E2E
+        runs-on: windows-latest
+        timeout-minutes: 30
+        needs: changes
+        if: needs.changes.outputs.e2e == 'true'
+        env:
+            CI: "true"
+        steps:
+            - uses: actions/checkout@v4
+            - uses: actions/setup-node@v4
+              with:
+                  node-version-file: .nvmrc
+                  cache: npm
+            - uses: dtolnay/rust-toolchain@stable
+              with:
+                  toolchain: "1.97"
+            - uses: Swatinem/rust-cache@v2
+              with:
+                  workspaces: rust -> ../dist/cargo
+            - run: npm ci
+            - name: Install FFMS2 development files
+              uses: ./.github/actions/install-ffms2
+            - run: npx playwright install chromium
+            - name: Run browser E2E profile
+              run: npm run test:e2e
+            - uses: actions/upload-artifact@v4
+              if: always()
+              with:
+                  name: playwright
+                  path: |
+                      dist/playwright-report/
+                      dist/test-results/
+                  if-no-files-found: warn
+
+    # Compile-only, push-only: the release build proves the Tauri shell still links without
+    # adding its thirty-minute worst case to every pull request.
+    build-tauri:
+        name: Tauri compile
+        runs-on: windows-latest
+        timeout-minutes: 30
+        needs: changes
+        if: github.event_name == 'push' && needs.changes.outputs.e2e == 'true'
+        steps:
+            - uses: actions/checkout@v4
+            - uses: actions/setup-node@v4
+              with:
+                  node-version-file: .nvmrc
+                  cache: npm
+            - uses: dtolnay/rust-toolchain@stable
+              with:
+                  toolchain: "1.97"
+            - uses: Swatinem/rust-cache@v2
+              with:
+                  workspaces: rust -> ../dist/cargo
+            - run: npm ci
+            - name: Prepare compile-only resource directory
+              shell: bash
+              run: mkdir -p dist/tools
+            - name: Install FFMS2 development files
+              uses: ./.github/actions/install-ffms2
+            - name: Stage the FFMS2 runtime for the compile-only resource map
+              shell: bash
+              run: |
+                  mkdir -p dist/tools/lib
+                  cp "$FFMS_LIB_DIR/ffms2.dll" dist/tools/lib/ffms2.dll
+            - name: Compile Tauri shell
+              run: npm run tauri -- build --no-bundle
+
+    web-gate:
+        name: Web checks gate
+        needs: [changes, web]
+        if: always()
+        runs-on: ubuntu-latest
+        timeout-minutes: 5
+        steps:
+            - name: Require Web checks
+              env:
+                  CHANGES_RESULT: ${{ needs.changes.result }}
+                  JOB_RESULT: ${{ needs.web.result }}
+                  WEB_RUN: ${{ needs.changes.outputs.web }}
+              run: |
+                  if [ "$CHANGES_RESULT" != "success" ]; then
+                    echo "Change detection did not succeed ($CHANGES_RESULT)." >&2
+                    exit 1
+                  fi
+                  if [ "$JOB_RESULT" = "success" ]; then
+                    echo "Web checks passed."
+                  elif [ "$JOB_RESULT" = "skipped" ] && [ "$WEB_RUN" = "false" ]; then
+                    echo "Web checks skipped because no web path changed."
+                  else
+                    echo "Web checks did not pass ($JOB_RESULT)." >&2
+                    exit 1
+                  fi
+
+    rust-gate:
+        name: Rust checks gate
+        needs: [changes, rust, rust-static]
+        if: always()
+        runs-on: ubuntu-latest
+        timeout-minutes: 5
+        steps:
+            - name: Require Rust checks
+              env:
+                  CHANGES_RESULT: ${{ needs.changes.result }}
+                  JOB_RESULT: ${{ needs.rust.result }}
+                  STATIC_RESULT: ${{ needs.rust-static.result }}
+                  RUST_RUN: ${{ needs.changes.outputs.rust }}
+              run: |
+                  if [ "$CHANGES_RESULT" != "success" ]; then
+                    echo "Change detection did not succeed ($CHANGES_RESULT)." >&2
+                    exit 1
+                  fi
+                  if [ "$JOB_RESULT" = "success" ] && [ "$STATIC_RESULT" = "success" ]; then
+                    echo "Rust checks passed."
+                  elif [ "$JOB_RESULT" = "skipped" ] && [ "$STATIC_RESULT" = "skipped" ] && [ "$RUST_RUN" = "false" ]; then
+                    echo "Rust checks skipped because no Rust path changed."
+                  else
+                    echo "Rust checks did not pass (tests: $JOB_RESULT, static: $STATIC_RESULT)." >&2
+                    exit 1
+                  fi
+
+    e2e-gate:
+        name: Browser E2E gate
+        needs: [changes, e2e]
+        if: always()
+        runs-on: ubuntu-latest
+        timeout-minutes: 5
+        steps:
+            - name: Require Browser E2E
+              env:
+                  CHANGES_RESULT: ${{ needs.changes.result }}
+                  JOB_RESULT: ${{ needs.e2e.result }}
+                  E2E_RUN: ${{ needs.changes.outputs.e2e }}
+              run: |
+                  if [ "$CHANGES_RESULT" != "success" ]; then
+                    echo "Change detection did not succeed ($CHANGES_RESULT)." >&2
+                    exit 1
+                  fi
+                  if [ "$JOB_RESULT" = "success" ]; then
+                    echo "Browser E2E passed."
+                  elif [ "$JOB_RESULT" = "skipped" ] && [ "$E2E_RUN" = "false" ]; then
+                    echo "Browser E2E skipped because no app, package, or Rust path changed."
+                  else
+                    echo "Browser E2E did not pass ($JOB_RESULT)." >&2
+                    exit 1
+                  fi

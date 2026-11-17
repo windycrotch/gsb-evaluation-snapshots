@@ -1,0 +1,183 @@
+# Commands
+
+Run every command from the repository root as `npm run <script>`. The four primary commands
+are below; the sections after them list every script in `package.json` by purpose.
+
+## Primary commands
+
+| Command | Purpose |
+| --- | --- |
+| `npm run check` | Fast local gate: all static checks plus the plain web and Rust test suites. No coverage. |
+| `npm run verify` | Full local gate: static checks once, then the web and Rust coverage gates in parallel. |
+| `npm run test:e2e` | Build the headless service and desktop SPA, then run the Playwright browser journeys. |
+| `npm run test:real-encode` | Run the environment-gated real-encode suite with the real toolchain; fails on a skipped test or an empty run. |
+
+The shared static profiles are `check:web`, `check:rust`, and `check:evidence`; `check:web`
+runs the evidence profile. The matching test profiles are `verify:web` and `verify:rust`.
+`check:static` composes the static profiles, and `verify` composes `check:static` with the
+test profiles.
+
+## Full script reference
+
+### Development
+
+| Command | Purpose |
+| --- | --- |
+| `npm run dev` | Run the Tauri app in development with the `dist/dev-tools` provider cache. |
+| `npm run dev:desktop` | Run only the desktop Vite host. |
+| `npm run dev:tools` | Copy or link a release `tools/` tree into `dist/dev-tools`. |
+| `npm run dev:web` | Run the LAN web Vite host. |
+| `npm run dev:website` | Run the website demo Vite host. |
+| `npm run dev:headless` | Start the headless service and the desktop Vite host on port 1420 for browser review. |
+| `npm run tauri` | Run the Tauri CLI through the repository wrapper. |
+
+### Tests and coverage
+
+| Command | Purpose |
+| --- | --- |
+| `npm run test` | Run the plain web suite, then the plain Rust suite. |
+| `npm run test:web` | Run Vitest once, isolated per test file. |
+| `npm run test:web:coverage` | Run Vitest with v8 coverage and write the JSON report under `dist/coverage/web/`. |
+| `npm run test:inventory` | Regenerate `docs/test-inventory.md` from test and coverage reports. |
+| `npm run check:test-inventory` | Validate inventory counts, the documentation baseline, and coverage evidence. |
+| `npm run mutation:pilot` | Run the mutation-testing pilot. |
+| `npm run coverage:check` | Evaluate the coverage policy from the available reports. |
+| `npm run coverage:check:web` | Evaluate the frontend coverage policy and print the module report. |
+| `npm run coverage:check:rust` | Evaluate the engine/service coverage policy and print the module report. |
+| `npm run coverage:check:changed` | Check changed-line coverage against `BASE_SHA`. |
+| `npm run coverage:report` | Write the weekly coverage trend report. |
+| `npm run test:rust` | Run the full Rust workspace suite with `--locked`. |
+| `npm run test:real-encode` | Run the environment-gated real-encode suite and reject skipped tests or an empty run. |
+| `npm run audit:dependencies` | Run the npm and Cargo audits, write `dist/audits/`, and render the weekly report and issue body; findings are advisory. |
+| `npm run check:disk-space` | Fail when free space is below the configured floor. |
+| `npm run test:rust:coverage` | Run `llvm-cov` for the engine and service and write the Rust lcov report. |
+| `npm run test:e2e:build` | Build or reuse the cached headless service and desktop SPA. |
+| `npm run test:e2e:run` | Run Playwright against the built SPA and the real headless service. |
+| `npm run test:e2e` | Run `test:e2e:build`, then `test:e2e:run`. |
+
+### Build, release, and maintenance
+
+| Command | Purpose |
+| --- | --- |
+| `npm run build` | Build every workspace host bundle; the website requires the generated screenshot captures. |
+| `npm run build:ci` | Build every host for CI and clean checkouts; the website uses the gallery variant, which does not require generated captures. |
+| `npm run build:desktop` | Build the desktop host bundle. |
+| `npm run build:service` | Build the debug headless service used for review and E2E. |
+| `npm run build:web` | Build the LAN web host bundle. |
+| `npm run build:website` | Build the website host bundle; requires the generated docs and mobile-tour captures. |
+| `npm run build:website:gallery` | Build the website gallery variant for the screenshot pipeline. |
+| `npm run build:demo-tour` | Regenerate the six mobile tour captures from `dist/screenshots`. |
+| `npm run check:bundle-size` | Fail when a built host's initial JavaScript exceeds 250 KB gzip; reads the existing `dist/apps` output. |
+| `npm run build:system` | Build a desktop release using system providers only. |
+| `npm run release:build -- --tag <tag>` | Build both desktop release variants and aggregate checksums; the tag is required and selects the weekly/RC/stable shape, and a detached checkout also needs `--branch <name>`. |
+| `npm run release:manifest -- --tag <tag>` | Regenerate release notes and the manifest from existing artifacts; the tag is required, and a detached checkout also needs `--branch <name>`. Add `--code-signed`, `--notarized`, or `--updater` only when true. |
+| `npm run release:preflight -- --tag <tag>` | Fail-closed release readiness checks against a candidate artifact directory; writes `dist/release/preflight.json`. Does not tag or publish. |
+| `npm run release:readiness -- --tag <tag>` | Check the reviewed manual readiness record for the tag's channel; every applicable gate needs evidence and a verification date. |
+| `npm run release:weekly-tag -- --date <YYYYMMDD>` | Decide whether the tested HEAD should receive a weekly tag; skips documentation-only changes and existing dates. Does not create a tag; the weekly workflow checks readiness separately. |
+| `npm run release:website` | Project the checked-in published release manifest into the website's generated release metadata. |
+| `npm run check:website-release -- --urls` | Fail when the generated metadata is stale or a linked download is missing or has a different size on GitHub. |
+| `npm run toolchain:lock` | Hash the three built target trees into `packaging/toolchain.lock.json`; refuses a partial or missing target. |
+| `npm run toolchain:check` | Validate the reviewed manifest and recipe paths without requiring a lock. |
+| `npm run toolchain:plan` | Print the component/target build matrix with its cache keys. |
+| `npm run toolchain:build -- --target <triple>` | Build one target component by component, reusing each component cache when its recipe, builder and target are unchanged. |
+| `npm run toolchain:stage -- --target <triple>` | Assemble a target tree from existing component caches. |
+| `npm run toolchain:verify` | Fail closed unless the manifest and complete three-target lock are present and internally consistent. |
+| `npm run clean:outputs` | Remove transient generated output. |
+| `npm run clean:target` | Clean the Cargo target tree. |
+| `npm run stage:tools` | Stage the release toolchain tree, including the full provider set on every target. |
+
+### Formatting, linting, and static checks
+
+| Command | Purpose |
+| --- | --- |
+| `npm run typecheck` | Typecheck the workspace projects, including the E2E and screenshot harnesses. |
+| `npm run format` | Format web and Rust sources. |
+| `npm run format:web` | Write Prettier formatting for the repository. |
+| `npm run format:check` | Check web and Rust formatting. |
+| `npm run format:check:web` | Check Prettier formatting for the repository. |
+| `npm run format:rust` | Apply `rustfmt`. |
+| `npm run format:check:rust` | Check `rustfmt`. |
+| `npm run lint` | Run ESLint and Clippy. |
+| `npm run lint:js` | Run ESLint. |
+| `npm run lint:rust` | Run Clippy for all targets with warnings denied. |
+| `npm run check` | Run all static checks, then the plain web and Rust test suites. |
+| `npm run check:static` | Run the `check:web` and `check:rust` profiles. |
+| `npm run check:feature-boundaries` | Enforce UI, API, and contract dependency boundaries. |
+| `npm run check:service-modules` | Enforce service module ownership. |
+| `npm run check:api-json` | Reject raw `Json<T>` types at the API boundary. |
+| `npm run check:error-evidence` | Validate the error-evidence registry. |
+| `npm run check:evidence` | Run the error-evidence and route-test-matrix checks. |
+| `npm run check:web` | Run the shared web static profile. |
+| `npm run check:rust` | Run the shared Rust static profile, including toolchain manifest and recipe validation. |
+| `npm run evidence:generate` | Regenerate the error-evidence registry. |
+| `npm run check:docs` | Validate documentation links, anchors, and Contents maps. |
+| `npm run check:route-matrix` | Validate the generated route-test matrix. |
+| `npm run routes:matrix` | Regenerate the route-test matrix from the route manifest and tests. |
+| `npm run verify:web` | Run web coverage, the frontend policy, inventory generation, and the inventory check. |
+| `npm run verify:rust` | Run the full Rust suite, Rust coverage, and the Rust coverage policy. |
+| `npm run verify` | Run all static checks once, then `verify:web` and `verify:rust` in parallel. |
+| `npm run contracts` | Emit JSON Schema and regenerate the TypeScript and Zod contracts. |
+| `npm run contracts:emit` | Emit JSON Schema only. |
+| `npm run contracts:generate` | Regenerate TypeScript and Zod from the schema. |
+| `npm run contracts:check` | Fail on contract drift. |
+| `npm run routes` | Emit the route manifest and regenerate route paths and docs. |
+| `npm run routes:emit` | Emit the route manifest only. |
+| `npm run routes:generate` | Regenerate route paths and docs. |
+| `npm run routes:check` | Fail on route manifest or generated-output drift. |
+| `npm run doctor` | Check local prerequisites; add `-- --profile web`, `e2e`, or `real-encode` for one command's needs. |
+| `npm run version:sync` | Propagate the package version to generated inputs. |
+| `npm run version:check` | Fail on version drift. |
+
+### Utilities
+
+| Command | Purpose |
+| --- | --- |
+| `npm run screenshots` | Generate the deterministic both-theme screenshot gallery. |
+| `npm run screenshots:features` | Generate the screenshot set selected by a feature group or screen id. |
+| `npm run check:gallery` | Validate the generated screenshot gallery. |
+| `npm run bench:playback` | Run the playback benchmark. |
+| `npm run bench:thumbnails` | Run the thumbnail benchmark. |
+
+## Notes
+
+`package.json` remains the authoritative script list; update this page when a script is
+added, renamed, or removed. `npm run doctor` is the setup check, not a gate: the base run
+reports optional providers, while the `web`, `e2e`, and `real-encode` profiles turn the
+requirements for those commands into failures.
+
+`npm run test:e2e` needs Chromium installed once with `npx playwright install chromium`.
+`npm run test:real-encode` needs the full real-encode toolchain described in
+[CONTRIBUTING.md](../CONTRIBUTING.md#checks-and-tests) and
+[testing.md](testing.md#weekly-environment-gated-real-encode-gate).
+
+## CI and local verification
+
+Pull-request CI runs the same named profiles as local verification:
+
+| Environment | Profiles |
+| --- | --- |
+| Local `npm run verify` | `check:static`, then `verify:web` and `verify:rust` in parallel |
+| CI web job | `check:web`, then `verify:web`, then `build:ci` |
+| CI Rust job | `check:rust`, then `verify:rust` |
+| CI browser job | `test:e2e` |
+| Release-security workflow | `cargo-deny check licenses bans sources` and `gitleaks dir` with the reviewed policies |
+| Weekly real-encode job | `test:real-encode` |
+
+`check:static` is `check:web` followed by `check:rust`. `check:web` includes
+`check:evidence`, so `check:error-evidence` and `check:route-matrix` run locally and in CI.
+
+Intentional differences:
+
+- CI splits the static profiles across a Linux web job and a Windows Rust job; local
+  `verify` runs both on the host machine.
+- CI runs `coverage:check:changed` with the base commit and `npm run build:ci`; local
+  `verify` does neither. Changed-line coverage needs the pull-request diff.
+- Local `verify` does not run E2E or the real-encode suite; CI runs those as separate jobs
+  with the same `test:e2e` and `test:real-encode` profile names.
+- The weekly coverage-trend job measures coverage reports without running the full verify
+  gates. Screenshot and gallery checks remain advisory and are not part of either gate.
+- Release security is a release-time gate, not a pull-request gate. The reusable
+  `release-security.yml` installs the pinned cargo-deny and gitleaks binaries, verifies their
+  SHA-256 checksums, runs `cargo-deny` against `deny.toml`, and scans the tree with
+  `.gitleaks.toml`. The tag-driven release workflow calls it with the tag ref and blocks
+  publication on its result; it can also be dispatched manually.
