@@ -38,6 +38,75 @@ it('owns GLB geometry and textures while asynchronous encoding is in progress', 
   await pending
 })
 
+it('returns a non-empty GLB blob of the gltf-binary type when a model exists', async () => {
+  writer.parse.mockResolvedValue(new ArrayBuffer(8))
+  const studio = Object.assign(Object.create(GlassStudio.prototype), {
+    mesh: new THREE.Mesh(new THREE.BoxGeometry(10, 10, 10)),
+    target: { ...DEFAULT_GLASS_PARAMS, finish: 'metal' },
+    snapParams() {},
+  }) as GlassStudio
+  const blob = await studio.exportGLB()
+  expect(blob).toBeInstanceOf(Blob)
+  expect(blob.type).toBe('model/gltf-binary')
+  expect(blob.size).toBeGreaterThan(0)
+})
+
+it('returns a non-empty STL blob of the stl type at true millimetre size', async () => {
+  const mesh = new THREE.Mesh(new THREE.BoxGeometry(10, 20, 30))
+  // The pop animation's scale must not leak into the file.
+  mesh.scale.setScalar(0.5)
+  const studio = Object.assign(Object.create(GlassStudio.prototype), {
+    mesh,
+    target: { ...DEFAULT_GLASS_PARAMS },
+    snapParams() {},
+  }) as GlassStudio
+  const blob = studio.exportSTL()
+  expect(blob).toBeInstanceOf(Blob)
+  expect(blob.type).toBe('model/stl')
+  expect(blob.size).toBeGreaterThan(0)
+  // Binary STL: 80-byte header, uint32 triangle count, then 50 bytes per triangle.
+  const view = new DataView(await blob.arrayBuffer())
+  const triangles = view.getUint32(80, true)
+  expect(triangles).toBeGreaterThan(0)
+  let max = 0
+  for (let i = 0; i < triangles; i++)
+    for (let f = 0; f < 12; f++) // skip the normal; read the 3 vertices' coordinates
+      if (f >= 3) max = Math.max(max, Math.abs(view.getFloat32(84 + i * 50 + f * 4, true)))
+  // The box is 30 mm deep; a pop-scaled export would read 15 here instead.
+  expect(max).toBe(15)
+})
+
+it('throws a recognisable error from every export when there is no model', async () => {
+  const studio = Object.assign(Object.create(GlassStudio.prototype), {
+    mesh: null,
+    target: { ...DEFAULT_GLASS_PARAMS },
+    snapParams() {},
+  }) as GlassStudio
+  await expect(studio.exportGLB()).rejects.toThrow('Nothing to export')
+  expect(() => studio.exportSTL()).toThrow('Nothing to export')
+  await expect(studio.screenshot()).rejects.toThrow('Nothing to export')
+})
+
+it('restores viewport, pixel ratio and interaction state after a screenshot', async () => {
+  let ratio = 1
+  let resizes = 0
+  const focus = { shift: 40, scale: 0.7 }
+  const studio = Object.assign(Object.create(GlassStudio.prototype), {
+    renderer: { getPixelRatio: () => ratio, setPixelRatio: (v: number) => { ratio = v } },
+    canvas: { toBlob: (callback: BlobCallback) => callback(new Blob(['png'])) },
+    focus, interacting: true, target: { ...DEFAULT_GLASS_PARAMS },
+    mesh: new THREE.Mesh(new THREE.BoxGeometry()),
+    snapParams() {}, resize() { resizes++ }, renderPasses() {},
+  }) as GlassStudio
+  const blob = await studio.screenshot()
+  expect(blob.size).toBeGreaterThan(0)
+  expect(ratio).toBe(1)
+  expect((studio as unknown as { focus: unknown }).focus).toEqual(focus)
+  expect((studio as unknown as { interacting: boolean }).interacting).toBe(true)
+  // One resize for the high-resolution frame, one to restore the live viewport.
+  expect(resizes).toBe(2)
+})
+
 it('restores capture settings before waiting for PNG encoding', async () => {
   let ratio = 1
   let encode!: BlobCallback
