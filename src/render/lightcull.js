@@ -134,7 +134,36 @@ const ALL_RUNGS = [12, 16, 20, 24, 28, 34];
 // Set `lightBudget` (e.g. 20) to trade the dimmest lights of a heavy fight for frame rate.
 // `stats.droppedInFrustum` counts exactly what it costs, and F3 shows it live, so the trade
 // is never silent. null = no cap = lossless.
+//
+// The invariant that makes the cap meaningful: NO rung in the active ladder may exceed the
+// budget, so `shown` (which is always a rung) can never exceed it either. When the budget
+// falls below the smallest ladder entry the ladder becomes a single rung at the budget
+// rather than an empty set — an empty ladder would leave `rungFor()` returning `undefined`
+// and every light's visibility comparison against NaN.
 let RUNGS = ALL_RUNGS.slice();
+let budgetCap = null;
+
+/** `null` means no cap. Anything non-finite or <= 0 is treated as no cap, matching the
+ *  config's documented "null = lossless" default. */
+function normalizeBudget(cap) {
+  return (typeof cap === 'number' && Number.isFinite(cap) && cap > 0) ? cap : null;
+}
+
+/**
+ * The ladder in force for a given budget.
+ *
+ * With a cap, every rung ABOVE it is removed — those shader variants are never compiled
+ * and never reached. When the cap is below the smallest ladder rung there is no rung <=
+ * cap, so the ladder would be empty; in that case keep exactly ONE rung, clamped to the
+ * budget. A one-light budget therefore renders one light rather than silently reverting
+ * to the 12-light rung (which would ignore the user's cap entirely).
+ */
+function buildRungs(cap) {
+  if (cap == null) return ALL_RUNGS.slice();
+  const kept = ALL_RUNGS.filter((r) => r <= cap);
+  if (kept.length) return kept;
+  return [Math.max(1, Math.floor(cap))];
+}
 
 // NO hysteresis. An earlier version held the rung high after a spike (DOWN required
 // demand to fit a lower rung for N consecutive frames) on the assumption that rung
@@ -171,7 +200,7 @@ let dirty = true;       // rescan the scene graph for lights
 let lastRung = -1;
 
 const stats = {
-  live: 0, inFrustum: 0, shown: 0, rung: 0,
+  live: 0, inFrustum: 0, shown: 0, rung: 0, budget: null,
   culled: 0, padded: 0, droppedInFrustum: 0, rungChanges: 0, offRung: 0,
 };
 
@@ -214,7 +243,15 @@ function cull() {
     // material at that count. Measured over 227 combat frames: 4 rendered at 25, 24 and
     // 32 lights instead of the chosen rung, and those frames cost up to 433 ms.
     // The cull owns the total, so it owns parked slots too.
-    if (l.intensity <= 1e-3) { _parked.push(l); continue; }
+    //
+    // A shadow caster is checked FIRST, because `castShadow` is what guarantees it stays
+    // visible. A spent slot that happens to own the pooled shadow flag (props keeps one
+    // slot castShadow forever) is NOT an active shadow caster — forcing it visible would
+    // re-render six empty cube-map faces every frame for no light at all. Only an
+    // emitting shadow caster is protected; a spent one parks like any other slot.
+    const emitting = l.intensity > 1e-3;
+    const shadow = !!l.castShadow && emitting;
+    if (!emitting && !shadow) { _parked.push(l); continue; }
     live++;
     const d = l.distance;
     // A shadow-casting light is NEVER culled, in or out of frustum. `numPointShadows`
@@ -223,7 +260,8 @@ function cull() {
     // costs one light (0.55-1.6 ms) and halves the variant space. There is exactly one
     // shadow-casting PointLight in the scene (props.js `shadowLights: 1`), so this is a
     // one-light guarantee, not a licence for many.
-    if (l.castShadow || !(d > 0)) {     // shadow caster, or infinite reach
+    l.__lcShadow = shadow;
+    if (shadow || !(d > 0)) {     // shadow caster, or infinite reach
       l.__lcScore = Infinity;
       _in.push(l);
       continue;
@@ -249,14 +287,28 @@ function cull() {
   // Shadow-casting lights must keep a stable slot: dropping one changes the
   // shadow-map count, which is a separate term in the program cache key and
   // would recompile even at a fixed light count.
-  _in.sort((a, b) => (b.castShadow ? 1 : 0) - (a.castShadow ? 1 : 0) || b.__lcScore - a.__lcScore);
-  _out.sort((a, b) => b.__lcScore - a.__lcScore);
+  // NaN-safe comparison: several lights legitimately score +Infinity (shadows and
+  // infinite-reach lights), and `Infinity - Infinity` is NaN, which a sort comparator
+  // must not return.
+  _in.sort((a, b) => {
+    const sa = a.__lcShadow ? 1 : 0, sb = b.__lcShadow ? 1 : 0;
+    if (sa !== sb) return sb - sa;
+    return a.__lcScore > b.__lcScore ? -1 : a.__lcScore < b.__lcScore ? 1 : 0;
+  });
+  _out.sort((a, b) => a.__lcScore > b.__lcScore ? -1 : a.__lcScore < b.__lcScore ? 1 : 0);
 
+  // Shadows are shown unconditionally (they cost a light each); the remaining budget is
+  // spent on the highest-irradiance in-frustum lights, everything past it is dropped and
+  // counted. `shown` can exceed `rung` only if there are MORE protected shadow casters
+  // than the top rung — impossible with the scene's single caster, but caught by the
+  // offRung assertion below rather than silently breaking the count invariant.
   let shown = 0, dropped = 0;
   for (let i = 0; i < _in.length; i++) {
-    const on = shown < rung;
-    _in[i].visible = on;
-    if (on) shown++; else dropped++;
+    const l = _in[i];
+    const on = l.__lcShadow || shown < rung;
+    l.visible = on;
+    if (on) shown++;
+    else dropped++;
   }
   // Pad with zero-contribution lights so the count lands EXACTLY on the rung: first
   // out-of-frustum lights, then parked slots. Every remaining light is forced hidden.
@@ -268,6 +320,12 @@ function cull() {
     _out[i].visible = on;
     if (on) { shown++; padded++; }
   }
+  // Pad with non-shadow spent slots first. A spent slot may still own the pooled shadow
+  // FLAG (props assigns `castShadow` to its first slot permanently). Showing one to reach a
+  // rung would render six empty cube-map faces and flip the shadow-count term of the
+  // program key for a light that emits nothing, so they are used only if the rung cannot be
+  // reached any other way — correctness of the count beats the wasted passes.
+  _parked.sort((a, b) => (a.castShadow ? 1 : 0) - (b.castShadow ? 1 : 0));
   for (let i = 0; i < _parked.length; i++) {
     const on = shown < rung;
     _parked[i].visible = on;
@@ -278,6 +336,7 @@ function cull() {
   stats.inFrustum = _in.length;            // of those, able to affect a visible pixel
   stats.shown = shown;                     // MUST equal rung, every frame
   stats.rung = rung;
+  stats.budget = budgetCap;                // null = uncapped; F3 shows the cap in force
   stats.culled = _out.length + _parked.length - padded;   // hidden as zero-contribution
   stats.padded = padded;                   // shown only to hold the count on a rung
   stats.droppedInFrustum = dropped;        // >0 means real light was lost — never silent
@@ -311,14 +370,18 @@ function prewarm() {
   // In-play growth is therefore accepted as a bounded, first-fight-only cost: fight 1
   // compiled 91 programs, fight 2 compiled 5. It is a warm-up, not a leak.
 
-  // Order: live lights first, then parked slots, so a rung of N is reached the same way
-  // the cull reaches it.
-  const pool = _lights.slice().sort((a, b) => (b.intensity > 1e-3 ? 1 : 0) - (a.intensity > 1e-3 ? 1 : 0));
+  // Order: emitting shadow caster first, then other emitting lights, then spent slots —
+  // the same order in which the cull reaches a rung. The shadow caster must be in the
+  // first N for EVERY rung: `numPointShadows` is a term in the program cache key and the
+  // cull never hides it, so a rung prewarmed with it hidden would compile a variant the
+  // game never renders and leave the real shadowed variant cold.
+  const rank = (l) => (l.intensity > 1e-3 ? 2 : 0) + (l.castShadow ? 1 : 0);
+  const pool = _lights.slice().sort((a, b) => rank(b) - rank(a));
   const t0 = performance.now();
   for (const rung of RUNGS) {
     for (let i = 0; i < pool.length; i++) pool[i].visible = i < rung;
     renderer.compile(scene, camera);
-    // Render through the COMPOSER, not `renderer.render(scene, camera)`.
+    // Render through the COMPOSER, never `renderer.render(scene, camera)` directly.
     //
     // `outputColorSpace` is part of Three.js's program cache key, and it differs by render
     // TARGET: the canvas is sRGB while the composer's intermediate targets are
@@ -327,9 +390,16 @@ function prewarm() {
     // on first sight in play. Measured by diffing cache keys field-by-field after a
     // fight: 12 fresh keys differed ONLY at field 2, `srgb` vs `srgb-linear`.
     //
-    // Going through the composer also warms the post chain's own passes.
-    if (World.pipeline && World.pipeline.render) World.pipeline.render(1 / 60);
-    else renderer.render(scene, camera);
+    // Going through the composer also warms the post chain's own passes. If the composer
+    // is not up yet the prewarm must WAIT rather than fall back to the canvas: warming the
+    // wrong colour space is worse than not warming at all, because it spends the boot cost
+    // and still leaves the real program cold. main.js calls prewarm() after boot(), which
+    // registers and initialises the pipeline, so this path is the guard rather than the norm.
+    if (!World.pipeline || typeof World.pipeline.render !== 'function') {
+      for (let i = 0; i < _lights.length; i++) _lights[i].visible = was[i];
+      return { ms: 0, rungs: RUNGS.slice(), programs: renderer.info.programs.length, skipped: 'no-composer' };
+    }
+    World.pipeline.render(1 / 60);
   }
   for (let i = 0; i < _lights.length; i++) _lights[i].visible = was[i];
   const ms = performance.now() - t0;
@@ -340,7 +410,14 @@ const api = {
   get stats() { return { ...stats }; },
   get rungs() { return RUNGS.slice(); },
   get enabled() { return enabled; },
-  /** Toggle for same-tree A/B. Off restores every live light to visible. */
+  /**
+   * Toggle for same-tree A/B.
+   *
+   * Off restores every ACTIVE light to visible (parked pool slots stay hidden: they emit
+   * nothing, so showing them would only add shader variants). It also resets `lastRung` so
+   * re-enabling re-selects a rung from live demand instead of inheriting the rung that was
+   * current when it was switched off.
+   */
   setEnabled(on) {
     enabled = !!on;
     if (!enabled) {
@@ -352,6 +429,22 @@ const api = {
   },
   /** Call when a system creates or destroys lights. */
   invalidate() { dirty = true; },
+  /**
+   * Change the light budget at runtime. `null`/0/non-finite = uncapped.
+   *
+   * Rebuilding the ladder is the only thing a cap changes, and prewarming is per-rung, so
+   * a NEW cap invalidates the prewarm for any rung it adds. Callers flipping the cap in
+   * play must re-run `prewarm()` (or accept one cold frame per newly added rung) — F3 and
+   * the acceptance harness both do. `lastRung` is reset so the next frame selects against
+   * the new ladder instead of diffing against a rung that may no longer exist.
+   */
+  setBudget(cap) {
+    budgetCap = normalizeBudget(cap);
+    RUNGS = buildRungs(budgetCap);
+    lastRung = -1;
+    stats.budget = budgetCap;
+    return budgetCap;
+  },
   prewarm,
 };
 
@@ -363,13 +456,9 @@ export default {
     enabled = CFG.graphics.lightCull !== false;
     // Apply the optional budget cap. Rungs above it are removed entirely, so they are
     // never prewarmed and never reached — the shader variant count falls with the cap.
-    const cap = CFG.graphics.lightBudget;
-    if (Number.isFinite(cap) && cap > 0) {
-      RUNGS = ALL_RUNGS.filter((r) => r <= cap);
-      if (!RUNGS.length) RUNGS = [ALL_RUNGS[0]];   // never leave the ladder empty
-    } else {
-      RUNGS = ALL_RUNGS.slice();
-    }
+    budgetCap = normalizeBudget(CFG.graphics.lightBudget);
+    RUNGS = buildRungs(budgetCap);
+    stats.budget = budgetCap;
     dirty = true;
     World.lightCull = api;
   },

@@ -145,6 +145,15 @@ genuinely in frustum. Every one contributes, so the default keeps them all. If y
 headroom, set `graphics.lightBudget` in `src/core/config.js` (try `20`): +78% in that frame, at a
 measured 8.1 dimmest lights dropped per frame.
 
+A budget also shortens the ladder, so only the rungs it can reach are prewarmed: `20` leaves
+`12/16/20` and `shown` can never exceed 20. A budget below the smallest rung keeps one rung at the
+budget (`1` really means one light), and a shadow caster always keeps its slot no matter how low
+the budget goes — `droppedInFrustum` counts only the non-shadow lights squeezed out. It can be
+changed at runtime with `World.lightCull.setBudget(n)` followed by `prewarm()`; F3 shows the live
+ladder and the cap in force. `tests/lightcull.test.mjs` (`npm test`) covers the normal, boundary
+and negative paths, and `tools/lightbudget-check.mjs` drives the real game in a browser to confirm
+the same numbers on-frame.
+
 **These numbers are a floor, not a forecast.** They come from a headless software rasteriser
 (SwiftShader) with no GPU, and the per-light cost is **100% fragment work** — 0.585 ms/light at
 full resolution, 0.087 at quarter resolution, fixed CPU component ~0. That is precisely the work

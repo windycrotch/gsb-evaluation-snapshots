@@ -110,6 +110,12 @@ export const CFG = {
     // Set a number (20 is a good first try) to cap it. Above the cap the LOWEST-irradiance
     // in-frustum lights are dropped — dimmest first, so a bright nearby flash always
     // survives — and F3 reports `lights dropped` live so the trade is never silent.
+    //
+    // Rungs above the cap are removed from the ladder entirely (budget 20 -> 12/16/20), so
+    // `shown` can never exceed the cap. A budget below the smallest rung (12) keeps exactly
+    // one rung at the budget instead of an empty ladder, so 1 means one light, not "ignore
+    // the cap". Shadow-casting lights are exempt from the drop: they always keep a slot and
+    // `droppedInFrustum` counts only non-shadow lights pushed out by the budget.
     lightBudget: null,
   },
   world: {

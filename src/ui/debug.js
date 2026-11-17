@@ -67,7 +67,11 @@ export class DebugOverlay {
 
     const lc = World.lightCull && World.lightCull.stats;
     if (lc) {
-      set('lights', `${lc.shown}/${lc.inFrustum} @${lc.rung}`);
+      // `cap N` appears only when graphics.lightBudget is set; without it the ladder is the
+      // full lossless one. `rungs` is read live so a runtime setBudget() is visible at once.
+      const ladder = World.lightCull.rungs;
+      const cap = lc.budget != null ? ` · cap ${lc.budget}` : '';
+      set('lights', `${lc.shown}/${lc.inFrustum} @${lc.rung}${cap} [${ladder.join('/')}]`);
       // Accumulates, so any drop that ever happened stays visible rather than flickering
       // past between two 5 Hz samples.
       set('drop', lc.droppedInFrustum > 0 ? `${lc.droppedInFrustum} THIS FRAME` : '0');
