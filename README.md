@@ -22,6 +22,18 @@ then open <http://localhost:8765>.
 > Opening `index.html` directly (as a `file://` page) will not work: three.js ships as ES modules,
 > which browsers block on `file://`. The local server fixes that, and it also writes your `save.txt`.
 
+**Tests** (Python standard library only; they run the real server on an ephemeral port and
+redirect `save.txt` into a temp folder, so your own save is never touched):
+
+```bash
+python -m unittest test_server      # or: python test_server.py
+```
+
+They cover normal writes, concurrent writes (the file must end up as one complete request,
+never interleaved), invalid UTF-8 / non-JSON / non-object bodies (400), oversized or missing
+`Content-Length` (413, body never read), missing `X-Skybreak` header (403), other POST paths
+(404), and simulated disk failures (500, previous `save.txt` intact).
+
 **First time?** The game starts with a short **flight training**: each step waits until you have actually done it
 (climb, turn, shoot a target, fire a missile, grab a power-up). `Esc` skips it; the hangar's **Training** button replays it.
 
@@ -299,6 +311,7 @@ don't skew the numbers. Handy for comparing builds, or for sending feedback.
 index.html        page shell, HUD, hangar UI
 start.command     macOS launcher
 server.py         local server: serves the game, writes save.txt
+test_server.py    stdlib-only tests for server.py's save endpoint
 js/main.js        game loop, hangar ⇄ flight
 js/hangar.js      the hangar (view + input only)
 js/parts.js       part catalog, stats derived from the build
