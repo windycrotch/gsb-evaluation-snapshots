@@ -15,6 +15,7 @@ A project is a folder with scene pages, audio files and a `project.json`:
 
 - Scenes play in list order, and each lasts as long as its page's `TOTAL`, rounded to the frame grid.
 - A scene can be an object with a `transition` from the scene before it (see [Transitions](#transitions)). A plain path is a hard cut.
+- A scene can also declare its own length in seconds as `"duration"`: `{ "file": "scenes/02.html", "duration": 2.5 }`. It is optional and must agree with the page's `TOTAL`; the render stops if they differ. Declared, the whole [frame layout](#frame-layout) is known from `project.json` alone, so a project whose scenes are too short for their transitions fails before Chrome starts.
 - All scenes must have the same canvas size, and the render stops with an error that names the scene that differs. That size sets the orientation: landscape, portrait and square all work.
 - `start` is seconds from the start of the video, and `volume` is a multiplier (1 leaves it as is).
 - A mono file plays at the same level on both channels, in the viewer and in the render.
@@ -66,11 +67,41 @@ This renders every scene, joins them and adds the audio. The result is `example/
 
 How it works:
 
+- Before anything renders, the whole timeline is laid out (see [Frame layout](#frame-layout)).
 - Each scene is rendered to its own MP4, and ffmpeg joins them with `-c copy`.
 - The first scene picks the encoder, and every later scene is forced to the same encoder and codec, because a stream copy join is only safe when codec, encoder and resolution match.
 - Scenes are joined with hard cuts, unless a scene has a transition. A transition is rendered as a part of its own between the two scenes, and their own parts leave out those frames.
 - ffmpeg mixes the audio into one WAV first (`adelay`, `volume`, `amix`), and the final pass muxes it in as AAC.
 - Every scene starts its own Chrome (about one second) and runs one ffmpeg pass, so a project with many short scenes pays that per scene. Scenes are rendered one after another.
+
+## Frame layout
+
+`renderProject` works out the frames of the whole timeline before it starts Chrome, and writes them to `<output>.layout.json` beside the MP4 when the render finishes (`out/promo.mp4` gives `out/promo.layout.json`):
+
+```json
+{
+  "fps": 30,
+  "totalFrames": 117,
+  "scenes": [
+    { "file": "a.html", "start": 0, "end": 45, "frames": 45, "pageFrames": 60, "transitionIn": 0, "transitionOut": 15 },
+    { "file": "b.html", "start": 60, "end": 87, "frames": 27, "pageFrames": 45, "transitionIn": 15, "transitionOut": 3 },
+    { "file": "c.html", "start": 90, "end": 117, "frames": 27, "pageFrames": 30, "transitionIn": 3, "transitionOut": 0 }
+  ],
+  "transitions": [
+    { "type": "fade", "from": "a.html", "to": "b.html", "start": 45, "end": 60, "frames": 15, "duration": 0.5, "ease": "inOutCubic" },
+    { "type": "fade", "from": "b.html", "to": "c.html", "start": 87, "end": 90, "frames": 3, "duration": 0.1, "ease": "inOutCubic" }
+  ]
+}
+```
+
+Every range is `[start, end)`: the frames it covers are `start` to `end - 1`. The scenes and transitions are both in timeline order, and together they cover `0` to `totalFrames` with no gap and no overlap. A scene's `pageFrames` is what its page's `TOTAL` comes to (`round(TOTAL * fps)`); its `frames` is that minus the transitions it takes part in, which is what it shows on its own. A transition's frames are its `duration` on the frame grid (`max(1, round(duration * fps))`), and its `type` is the shader's name as `transitions.js` spells it.
+
+Two rules make the layout legal:
+
+- A transition lasts at least 1 frame, and its frame count is that rounded value, so it can be checked against the file.
+- A scene must keep at least 1 frame of its own: `pageFrames - transitionIn - transitionOut >= 1`. A shorter scene stops the render with an error that names the scene and both transition lengths. When every scene declares `duration`, or sets `window.TOTAL` to a literal number, this is caught before Chrome starts and leaves no `.part` and no layout file.
+
+The finished video must be the layout: its frame count has to equal `totalFrames` and its ranges must join end to end. The render checks the finished `.part` against the layout before it renames it, so a mismatch leaves neither an MP4 nor a layout behind.
 
 ## Transitions
 
@@ -81,9 +112,9 @@ How it works:
 ]
 ```
 
-The transition is set on the scene it leads into. For `duration` (rounded to whole frames, at least one), the two scenes overlap: the scene before keeps playing its last frames while the new one plays its first, and the two are mixed. Scene 2 therefore starts 0.5 s before scene 1 ends, and the video is 0.5 s shorter than the sum of the scenes. Audio `start` times are times in the finished video and do not move by themselves.
+The transition is set on the scene it leads into. For `duration` (rounded to whole frames, at least one), the two scenes overlap: the scene before keeps playing its last frames while the new one plays its first, and the two are mixed. Scene 2 therefore starts 0.5 s before scene 1 ends, and the video is 0.5 s shorter than the sum of the scenes. The exact frames are in the [frame layout](#frame-layout). Audio `start` times are times in the finished video and do not move by themselves.
 
-Frame `k` of an `n`-frame transition shows frame `TOTAL * fps - n + k` of the scene before and frame `k` of the new one, mixed at progress `ease((k + 0.5) / n)`, so neither end of the transition repeats a plain frame. A scene must be longer than its transitions together: a scene with one leading into it and one leading out needs more frames than the two have between them.
+Frame `k` of an `n`-frame transition shows frame `TOTAL * fps - n + k` of the scene before and frame `k` of the new one, mixed at progress `ease((k + 0.5) / n)`, so neither end of the transition repeats a plain frame. A scene must keep at least one frame of its own after its transitions take theirs: a scene with one leading into it and one leading out needs more frames than the two have between them, or the render stops with an error that names it (see [Frame layout](#frame-layout)).
 
 `type` is one of 11 shaders from [gl-transitions](https://github.com/gl-transitions/gl-transitions) 1.43.0, all MIT, copied into `src/page/transitions.js` with their authors: `fade`, `fadecolor`, `Directional`, `directionalwipe`, `directionalwarp`, `circleopen`, `CrossZoom`, `crosswarp`, `SimpleZoom`, `LinearBlur` and `cube`. `params` overrides their uniforms (for example `{ "direction": [1, 0] }`), and `ease` is a name from `motion.js`. An unknown type or ease stops the render and the viewer with the list of valid names.
 

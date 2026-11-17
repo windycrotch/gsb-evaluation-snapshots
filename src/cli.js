@@ -71,7 +71,7 @@ export async function main(argv) {
   if (mode === 'restart') { await restartViewer(); return 0; }
   if (mode === 'render') {
     if (!page) throw new Error('render needs a project folder or project file');
-    await renderProject({ dir: page, out, scale: num('scale', v.scale, { min: 0.01 }) });
+    await renderProject({ dir: page, out, scale: num('scale', v.scale, { min: 0.01 }), chrome: v.chrome });
     return 0;
   }
   if (!['stills', 'video', 'events'].includes(mode)) throw new Error(`unknown mode "${mode}" (render, start, edit, stop, restart, stills, video, events, doctor, update or uninstall)`);

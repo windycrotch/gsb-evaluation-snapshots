@@ -131,6 +131,13 @@ promo/
   scene before turns into it through a shader, and the two overlap for that long, so it starts that much earlier and
   the video is that much shorter. Use these for edits, explainers and talking heads; in an ad, a shape that carries
   across the cut (`craft.md`) is still better. The types and options are in `references/motion-and-libraries.md`.
+- A scene may also carry `"duration": 2.5` (seconds), its own length, next to its `"file"` (not inside its
+  `transition`). It is the same as its page's `TOTAL`. Set it on every scene that has a transition: the renderer then
+  knows the whole timeline before Chrome starts and reports a scene that is too short for its transitions straight
+  away. A declared `duration` that disagrees with the page's `TOTAL` stops the render.
+- `motlab render` writes `<output>.layout.json` beside the MP4: every scene's and transition's `[start, end)` frames
+  and the `totalFrames`. Read it when the user asks which frames a transition covers, or to check the video's length
+  frame by frame. A scene needs at least one frame of its own after its transitions take theirs.
 - `audio` is mixed by ffmpeg. `start` is seconds from the start of the whole video, `volume` a multiplier, `from` and
   `duration` pick a part of the file. A video file listed here contributes its sound.
 - `window.EVENTS` times are per scene. To place a sound on a beat, add the scene's start (the `TOTAL`s before it,

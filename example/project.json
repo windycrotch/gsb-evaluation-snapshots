@@ -1,9 +1,9 @@
 {
   "fps": 30,
   "scenes": [
-    "scenes/01-judul.html",
-    "scenes/02-grafik.html",
-    "scenes/03-selesai.html"
+    { "file": "scenes/01-judul.html", "duration": 3 },
+    { "file": "scenes/02-grafik.html", "duration": 3.5 },
+    { "file": "scenes/03-selesai.html", "duration": 2.5 }
   ],
   "audio": [
     { "file": "audio/musik.wav", "start": 0, "volume": 0.6 },

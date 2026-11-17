@@ -92,8 +92,103 @@ test('project: a transition overlaps two scenes and mixes them on the frame grid
   assert.ok(grey(30) > 248, `frame 30 is ${grey(30)}`);
 });
 
-test('project: scenes of different sizes stop the render, and a mono file plays at full level on both channels', async () => {
-  const proj = join(dir, 'proj2'), flat = (name, w, h) => writeFileSync(join(proj, name), `<!doctype html><canvas id="c" width="${w}" height="${h}"></canvas><script>
+test('project: three scenes with two transitions write a layout that matches the video frame for frame', async () => {
+  const proj = join(dir, 'proj-layout'), flat = (name, colour, total) => writeFileSync(join(proj, name), `<!doctype html><canvas id="c" width="320" height="180"></canvas><script>
+    const c = document.getElementById('c').getContext('2d'); window.TOTAL = ${total}; window.ready = Promise.resolve(true);
+    window.renderAt = () => { c.fillStyle = '${colour}'; c.fillRect(0, 0, 320, 180); };</script>`);
+  mkdirSync(proj);
+  // 2 s (60 frames), 1.5 s (45) and 1 s (30); the transitions round to 15 and 3 frames
+  flat('a.html', '#000', 2); flat('b.html', '#777', 1.5); flat('c.html', '#fff', 1);
+  writeFileSync(join(proj, 'project.json'), JSON.stringify({ fps: 30, scenes: ['a.html',
+    { file: 'b.html', transition: { type: 'fade', duration: 0.5, ease: 'linear' } },
+    { file: 'c.html', transition: { type: 'fade', duration: 0.1, ease: 'linear' } }] }));
+  const out = join(dir, 'layout.mp4');
+  await renderProject({ dir: proj, out, scale: 1, ...quiet });
+
+  const file = join(dir, 'layout.layout.json'), layout = JSON.parse(readFileSync(file, 'utf8'));
+  assert.equal(layout.fps, 30);
+  assert.equal(layout.totalFrames, 60 + 45 + 30 - 15 - 3);
+  assert.deepEqual(layout.scenes.map(s => [s.file, s.start, s.end]), [['a.html', 0, 45], ['b.html', 60, 87], ['c.html', 90, 117]]);
+  assert.deepEqual(layout.transitions.map(t => [t.type, t.from, t.to, t.start, t.end]), [['fade', 'a.html', 'b.html', 45, 60], ['fade', 'b.html', 'c.html', 87, 90]]);
+  // [start, end) ranges, contiguous in one order, with no gap and no overlap
+  const all = [...layout.scenes, ...layout.transitions].sort((a, b) => a.start - b.start);
+  let at = 0;
+  for (const r of all) { assert.equal(r.start, at); assert.ok(r.end > r.start); at = r.end; }
+  assert.equal(at, layout.totalFrames);
+  // the real file has exactly the layout's frames and length
+  const v = await probeVideo(out);
+  assert.equal(v.frames, layout.totalFrames);
+  assert.ok(Math.abs(v.duration - layout.totalFrames / 30) < 1e-3, `duration ${v.duration}`);
+  assert.ok(!existsSync(out + '.part'));
+  // the ranges describe what is on screen: the black scene, then a fade, then the grey one, then a fade, then white
+  const grey = f => meanRgb(out, '100:100:110:40', f)[0];
+  assert.ok(grey(44) < 8, `frame 44 is ${grey(44)}`);
+  assert.ok(Math.abs(grey(52) - 60) < 10, `frame 52 is ${grey(52)}`);   // middle of a 15-frame fade, black to #777
+  assert.ok(Math.abs(grey(70) - 119) < 8, `frame 70 is ${grey(70)}`);
+  assert.ok(grey(90) > 248, `frame 90 is ${grey(90)}`);      // scene c starts at 90, after the 3-frame fade
+  assert.ok(grey(116) > 248, `frame 116 is ${grey(116)}`);
+});
+
+test('project: declared durations lay the timeline out, and a page that disagrees stops the render', async () => {
+  const proj = join(dir, 'proj-declared'), flat = (name, colour, total) => writeFileSync(join(proj, name), `<!doctype html><canvas id="c" width="320" height="180"></canvas><script>
+    const c = document.getElementById('c').getContext('2d'); window.TOTAL = ${total}; window.ready = Promise.resolve(true);
+    window.renderAt = () => { c.fillStyle = '${colour}'; c.fillRect(0, 0, 320, 180); };</script>`);
+  mkdirSync(proj);
+  writeFileSync(join(proj, 'project.json'), JSON.stringify({ fps: 30, scenes: [{ file: 'a.html', duration: 1 },
+    { file: 'b.html', duration: 1, transition: { type: 'fade', duration: 0.5 } }] }));
+  // A page whose TOTAL is not what its scene declares is caught at its own render, and the layout's frames win.
+  flat('a.html', '#000', 99); flat('b.html', '#fff', 1);
+  await assert.rejects(renderProject({ dir: proj, out: join(dir, 'declared.mp4'), scale: 1, ...quiet }),
+    /a\.html has 2970 frames at 30 fps, but the project layout was made for 30/);
+  assert.ok(!existsSync(join(dir, 'declared.layout.json')));
+  assert.ok(!existsSync(join(dir, 'declared.mp4.part')));
+  assert.ok(!existsSync(join(dir, 'declared.mp4')));
+
+  flat('a.html', '#000', 1);   // the layout's frames now match the page
+  const out = join(dir, 'declared.mp4');
+  await renderProject({ dir: proj, out, scale: 1, ...quiet });
+  const layout = JSON.parse(readFileSync(join(dir, 'declared.layout.json'), 'utf8'));
+  assert.equal(layout.totalFrames, 45);   // 30 + 30 frames, 15 shared
+  assert.equal((await probeVideo(out)).frames, 45);
+});
+
+test('project: a scene left with no frames of its own fails before Chrome starts and leaves no file', async () => {
+  const proj = join(dir, 'proj-tooshort'), flat = (name, total) => writeFileSync(join(proj, name), `<!doctype html><canvas id="c" width="320" height="180"></canvas><script>
+    const c = document.getElementById('c').getContext('2d'); window.TOTAL = ${total}; window.ready = Promise.resolve(true);
+    window.renderAt = () => { c.fillStyle = '#000'; c.fillRect(0, 0, 320, 180); };</script>`);
+  mkdirSync(proj);
+  flat('a.html', 1); flat('b.html', 0.5); flat('c.html', 1);
+  // b.html is 15 frames and hands 15 to the transition into it and 15 to the one out of it: nothing is left.
+  // Every scene declares its duration, so the layout is known without a page and Chrome is never started.
+  writeFileSync(join(proj, 'project.json'), JSON.stringify({ fps: 30, scenes: [{ file: 'a.html', duration: 1 },
+    { file: 'b.html', duration: 0.5, transition: { type: 'fade', duration: 0.5 } },
+    { file: 'c.html', duration: 1, transition: { type: 'fade', duration: 0.5 } }] }));
+  const out = join(dir, 'out', 'tooshort.mp4');
+  const log = [];
+  await assert.rejects(renderProject({ dir: proj, out, scale: 1, log: line => log.push(line) }),
+    /scene 2 \(b\.html\) has 15 frames, but its transitions take 30 \(15 in, 15 out\), leaving -15/);
+  // nothing on disk: no MP4, no .part, no layout, and the output folder was not even made
+  assert.ok(!existsSync(out));
+  assert.ok(!existsSync(out + '.part'));
+  assert.ok(!existsSync(join(dir, 'out', 'tooshort.layout.json')));
+  assert.ok(!existsSync(join(dir, 'out')), 'the output folder should not be created by a failed layout');
+  // and it failed before any render log, so before Chrome
+  assert.ok(!log.some(line => /^Scene \d|^GPU:|^Encoder:/.test(line)), `render started before the layout check: ${log.join(' | ')}`);
+
+  // the same project with a scene long enough for its transitions renders and writes the layout beside the MP4
+  writeFileSync(join(proj, 'project.json'), JSON.stringify({ fps: 30, scenes: [{ file: 'a.html', duration: 1 },
+    { file: 'b.html', duration: 1.5, transition: { type: 'fade', duration: 0.5 } },
+    { file: 'c.html', duration: 1, transition: { type: 'fade', duration: 0.5 } }] }));
+  flat('b.html', 1.5);   // the page agrees with its declared duration
+  await renderProject({ dir: proj, out, scale: 1, ...quiet });
+  const layout = JSON.parse(readFileSync(join(dir, 'out', 'tooshort.layout.json'), 'utf8'));
+  assert.deepEqual(layout.scenes.map(s => [s.file, s.start, s.end]), [['a.html', 0, 15], ['b.html', 30, 45], ['c.html', 60, 75]]);
+  assert.deepEqual(layout.transitions.map(t => [t.start, t.end]), [[15, 30], [45, 60]]);
+  assert.equal(layout.totalFrames, 75);
+  assert.equal((await probeVideo(out)).frames, 75);
+});
+
+test('project: scenes of different sizes stop the render, and a mono file plays at full level on both channels', async () => {  const proj = join(dir, 'proj2'), flat = (name, w, h) => writeFileSync(join(proj, name), `<!doctype html><canvas id="c" width="${w}" height="${h}"></canvas><script>
     const c = document.getElementById('c').getContext('2d'); window.TOTAL = 1; window.ready = Promise.resolve(true);
     window.renderAt = () => { c.fillStyle = '#000'; c.fillRect(0, 0, ${w}, ${h}); };</script>`);
   mkdirSync(proj); flat('a.html', 320, 180); flat('b.html', 180, 320);

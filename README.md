@@ -109,14 +109,14 @@ This is one scene on one machine; macOS and Linux were not measured. The other s
 1. A project is a `project.json` that lists scene pages and audio files.
 2. A scene page is plain HTML with a `<canvas id="c">`, `window.renderAt(t)`, `window.TOTAL` and `window.ready`. Everything visible is a function of time, so the preview, the stills and the render draw the same frames.
 3. The viewer (`motlab start`, or `motlab edit` to open a project in it) shows the real pages in iframes with their audio through WebAudio, and saves your clicks and notes to `selection.json`.
-4. `motlab render` opens headless Chrome per scene and encodes the frames with `VideoEncoder` inside the page. ffmpeg only copies streams, joins the parts, sets the colour tags and adds the audio.
+4. `motlab render` lays out the whole timeline first (every scene's and transition's frames, written to `<output>.layout.json` beside the MP4), then opens headless Chrome per scene and encodes the frames with `VideoEncoder` inside the page. ffmpeg only copies streams, joins the parts, sets the colour tags and adds the audio.
 
 ```text
 project.json + scene pages (canvas, renderAt(t)) + audio files
   |
   +-- motlab edit    viewer: the real pages in iframes, WebAudio audio, selection.json
-  +-- motlab render  headless Chrome per scene -> VideoEncoder in the page -> MP4 parts
-                     -> ffmpeg -c copy: join, colour tags, audio -> out/<name>.mp4
+  +-- motlab render  frame layout -> headless Chrome per scene -> VideoEncoder in the page -> MP4 parts
+                     -> ffmpeg -c copy: join, colour tags, audio -> out/<name>.mp4 + <name>.layout.json
 ```
 
 Footage is decoded inside the page with Mediabunny, so a scene can cut and trim video files and draw over them. DOM-based engines take a screenshot of every frame and pipe the images to ffmpeg; encoding inside the page skips that, which is where the gap in [Speed](#speed) comes from. The encoder rules and the measured quirks are in [rendering](docs/rendering.md).

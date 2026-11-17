@@ -11,7 +11,7 @@ How `motlab render`, `motlab video` and Export turn scene pages into an MP4, how
 5. ffmpeg copies the stream (`-c copy`) into the final file. This pass writes BT.709 tags with the encoder's range into the bitstream, joins the parts from parallel mode, adds audio and moves `moov` to the front. It always runs, even after a successful Mediabunny mux, because the encoders tag colour inconsistently (see quirks).
 6. ffprobe counts the frames and duration of the final file. The render fails if they do not match.
 
-Temporary files go to the system temp folder and are removed afterwards. The output is written as `.part` and renamed at the end.
+Temporary files go to the system temp folder and are removed afterwards. The output is written as `.part` and renamed at the end. A project render also writes `<output>.layout.json` beside the MP4, the frame ranges of every scene and transition (see [Frame layout](projects.md#frame-layout)); it is written only after the MP4 is in place, and the finished `.part` is checked against it first.
 
 The code is plain JavaScript ESM with JSDoc and no TypeScript. Half of it runs inside Chrome and is served straight from disk, so TypeScript would mean two languages or a build step. CDP uses Node's built-in `WebSocket`.
 

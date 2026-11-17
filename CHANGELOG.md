@@ -2,6 +2,18 @@
 
 Changes are listed by release, newest first. The sections dated before 0.1.0 record what was built on the way to the first release.
 
+## Unreleased
+
+### Added
+
+- The frame layout of a project, worked out before anything renders: `renderProject` computes every scene's and every transition's frames on the timeline, and fails if a scene has no frame of its own after its transitions take theirs. It writes `<output>.layout.json` beside the MP4 (`out/promo.mp4` gives `out/promo.layout.json`) with `fps`, `totalFrames`, and the ordered `scenes` and `transitions`, each with a `[start, end)` range plus its file name or transition type. The finished video is checked against the layout: its frame count must equal `totalFrames`, the ranges join end to end with no gap or overlap, and the `.part` is compared before it is renamed, so a mismatch leaves neither an MP4 nor a layout. Measured on the example project at 1080p: 270 frames in the layout and in the file, and the render took the same 11 s as before.
+- A scene in `project.json` can declare its own length in seconds, `{ "file": "scenes/02.html", "duration": 2.5 }`, the same as its page's `TOTAL`. With it (or a `window.TOTAL = <number>` literal in the page) the whole layout is known from the files, so a scene that is too short for its transitions fails before Chrome starts and leaves no `.part` and no layout file. A declared `duration` that disagrees with the page's `TOTAL` stops the render and names the scene. `example/project.json` now declares its three durations, which also skips the layout's measurement pass. Tested on Windows: an example render with declared durations took 11.0 to 11.4 s against 11.0 to 11.2 s before, three scenes with two transitions gave 117 frames in the layout and in the video, and a 15-frame scene with 15 frames of transitions on either side failed before Chrome with no files left behind. Not measured: a project whose `TOTAL` is computed at run time and is too short, where the layout needs one Chrome that only reads `window.TOTAL` (it still fails before any frame is encoded, but not before Chrome starts).
+- `test/layout.test.js`: the layout arithmetic (contiguous ranges, transitions rounded to the frame grid and at least one frame, a scene that loses all its frames, declared durations, `window.TOTAL` read from a page) and `test/render.test.js` has three end-to-end cases: a three-scene project with two transitions whose layout and video agree frame for frame, declared durations whose page disagrees, and a too-short scene that fails before Chrome and leaves no file.
+
+### Changed
+
+- The viewer's timeline says why a scene is too short with the same frame count the layout uses, `round(TOTAL * fps)`, instead of one recomputed from the rounded seconds. The rule itself (a scene keeps its frames minus its transitions, and at least one) is unchanged and matches the renderer.
+
 ## 0.1.0 (2026-11-16)
 
 The first release.

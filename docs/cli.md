@@ -33,7 +33,7 @@ When the page throws while loading, the error names the file, line and column, f
 
 ## Options
 
-`render` takes only `--scale`; the rest are for `video` (and `--root`, `--chrome`, `--scale` and `--format` for `stills`, and `--root` and `--chrome` for `events`).
+`render` takes `--scale` and `--chrome`; the rest are for `video` (and `--root`, `--chrome`, `--scale` and `--format` for `stills`, and `--root` and `--chrome` for `events`).
 
 | Option | Meaning |
 |---|---|
@@ -75,3 +75,5 @@ And may have:
 - support for `?t=` (show one frame, for opening the page by hand) and `?scale=` (the resolution multiplier)
 
 The frame count is `round(TOTAL * fps)`, and frame `f` is drawn at `t = f / fps`. The page itself is never edited by the renderer: `src/page/runtime.js` is injected and drives it.
+
+In a project, set `window.TOTAL` to a literal number (`window.TOTAL = 8;`, or a constant it names, `const END = 8; window.TOTAL = END;`) when you want the [frame layout](projects.md#frame-layout) known from the files alone. A `TOTAL` computed at run time works too; the layout then reads it from the page with one Chrome that encodes nothing, so a scene too short for its transitions is still caught before the first frame.

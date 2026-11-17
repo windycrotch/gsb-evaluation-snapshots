@@ -34,22 +34,27 @@ async function openPage({ server, chromePath, url, scale, query }) {
   try {
     const page = await attachPage(chrome);
     await page.navigate(`${server.origin}/${url}?t=0&scale=${scale}${query ? '&' + query : ''}`);
-    // Wait for the contract. Give up 8 s after the document has finished loading (or 5 s after a script error).
-    const t0 = Date.now(); let loadedAt = 0;
-    for (;;) {
-      const state = await page.evaluate('typeof window.renderAt === "function" && typeof window.ready !== "undefined" ? "ok" : document.readyState').catch(() => 'loading');
-      if (state === 'ok') break;
-      const now = Date.now(), errs = page.errors.length ? ` Page errors: ${page.errors.slice(0, 3).join(' | ')}` : '';
-      if (state === 'complete' && !loadedAt) loadedAt = now;
-      if (now - t0 > 60000 || (loadedAt && now - loadedAt > 8000) || (errs && now - t0 > 5000)) throw new Error(`the page did not expose window.renderAt and window.ready.${errs}`);
-      await sleep(50);
-    }
-    // ready has no time limit (a heavy page can take long), but a page whose ready never resolves should not wait in silence
-    const waiting = setTimeout(() => console.warn(`Still waiting for window.ready after 30 s (${url}).${page.errors.length ? ` Page errors: ${page.errors.slice(0, 3).join(' | ')}` : ''}`), 30000);
-    try { await page.evaluate('Promise.resolve(window.ready).then(() => true)'); } finally { clearTimeout(waiting); }
+    await awaitContract(page, url);
     await page.evaluate(RUNTIME);
     return { ...page, chrome };
   } catch (e) { await chrome.close(); throw e; }
+}
+
+// Waits until the page exposes the contract (renderAt and ready) and its ready promise has resolved.
+async function awaitContract(page, url) {
+  // Give up 8 s after the document has finished loading (or 5 s after a script error).
+  const t0 = Date.now(); let loadedAt = 0;
+  for (;;) {
+    const state = await page.evaluate('typeof window.renderAt === "function" && typeof window.ready !== "undefined" ? "ok" : document.readyState').catch(() => 'loading');
+    if (state === 'ok') break;
+    const now = Date.now(), errs = page.errors.length ? ` Page errors: ${page.errors.slice(0, 3).join(' | ')}` : '';
+    if (state === 'complete' && !loadedAt) loadedAt = now;
+    if (now - t0 > 60000 || (loadedAt && now - loadedAt > 8000) || (errs && now - t0 > 5000)) throw new Error(`the page did not expose window.renderAt and window.ready.${errs}`);
+    await sleep(50);
+  }
+  // ready has no time limit (a heavy page can take long), but a page whose ready never resolves should not wait in silence
+  const waiting = setTimeout(() => console.warn(`Still waiting for window.ready after 30 s (${url}).${page.errors.length ? ` Page errors: ${page.errors.slice(0, 3).join(' | ')}` : ''}`), 30000);
+  try { await page.evaluate('Promise.resolve(window.ready).then(() => true)'); } finally { clearTimeout(waiting); }
 }
 
 async function openPages(count, args) {
@@ -81,6 +86,9 @@ export async function renderVideo(o) {
     if (width % 2 || height % 2) throw new Error(`canvas is ${width}x${height}; H.264 and HEVC need even dimensions`);
     // head and tail leave out frames at the start and the end, which a scene transition draws instead.
     const pageFrames = frameCount(info.total, fps), head = o.head || 0, tail = o.tail || 0, frames = pageFrames - head - tail;
+    // A project's layout is made before the render and passed in, so a page edited in between stops the render here.
+    if (o.expectFrames !== undefined && pageFrames !== o.expectFrames)
+      throw new Error(`${o.expectLabel || url} has ${pageFrames} frames at ${fps} fps, but the project layout was made for ${o.expectFrames}. Its TOTAL changed while the project rendered`);
     if (frames < 1) throw new Error(`the page has ${pageFrames} frames, too few for transitions of ${head} and ${tail} frames at its start and end`);
     const ranges = splitFrames(frames, workers).map(r => ({ start: r.start + head, end: r.end + head }));
     for (const extra of pages.splice(ranges.length)) await extra.chrome.close();
@@ -149,6 +157,26 @@ export async function renderVideo(o) {
     await server.close();
     rmSync(part, { force: true }); rmSync(tmp, { recursive: true, force: true });
   }
+}
+
+// Reads each scene page's TOTAL, without encoding anything: one Chrome for all of them. renderProject calls this for
+// the scenes that do not declare their own "duration", so the whole frame layout can be checked before any render
+// starts. `pages` are { file } with paths relative to `root`.
+export async function measureTotals({ root, pages, chrome }) {
+  const server = await startServer({ root }), urls = pages.map(p => locate({ page: join(resolve(root), p.file), root }).url);
+  let tab;
+  try {
+    if (!urls.length) return [];
+    tab = await openPage({ server, chromePath: findChrome(chrome), url: urls[0], scale: 1 });
+    const out = [];
+    for (const [i, page] of pages.entries()) {
+      if (i) { await tab.navigate(`${server.origin}/${urls[i]}?t=0&scale=1`); await awaitContract(tab, urls[i]); }
+      const total = await tab.evaluate('Number(window.TOTAL)');
+      if (!(total > 0)) throw new Error(`${page.file}: window.TOTAL must be a positive number of seconds (it is ${total})`);
+      out.push(total);
+    }
+    return out;
+  } finally { if (tab) await tab.chrome.close(); await server.close(); }
 }
 
 export async function renderStills(o) {

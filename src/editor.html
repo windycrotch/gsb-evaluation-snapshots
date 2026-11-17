@@ -602,11 +602,13 @@ try {
     const n = Math.min(12, Math.max(1, Math.round(s.dur / 2)));
     for (let k = 0; k < n; k++) s.thumbs.push(await thumbAt(s, (k + 0.5) / n * s.dur));
   }
-  // With a transition, a scene starts that many frames before the one before it ends: the two overlap.
+  // With a transition, a scene starts that many frames before the one before it ends: the two overlap. The rule is the
+  // renderer's (src/project.js projectLayout): a scene keeps its frames minus the transitions it takes part in, and it
+  // must keep at least one. A scene's own frames are round(TOTAL * fps), the same as the render.
   let total = 0;
   for (const [i, s] of scenes.entries()) {
-    const n = s.transition?.n || 0, out = scenes[i + 1]?.transition?.n || 0;   // the renderer's rule: a scene keeps at least one frame of its own
-    if (n + out >= Math.round(s.dur * fps)) throw hint(L('tooShort', i + 1, Math.round(s.dur * fps), n, out));
+    const frameTotal = Math.round(s.win.TOTAL * fps), n = s.transition?.n || 0, out = scenes[i + 1]?.transition?.n || 0;
+    if (frameTotal - n - out < 1) throw hint(L('tooShort', i + 1, frameTotal, n, out));
     s.start = total - n / fps; total = s.start + s.dur;
   }
   const sceneAt = time => scenes.findLast(s => s.start <= time + 1e-9);
