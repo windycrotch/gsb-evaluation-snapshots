@@ -1,0 +1,169 @@
+{
+    "ja": {
+        "commands": {
+            "OK": "OK",
+            "cancel": "キャンセル",
+            "reset": "リセット",
+            "play": "再生",
+            "pause": "一時停止"
+        },
+        "misc": {
+            "audiovideo": "オーディオ & ビデオ",
+            "audio": "オーディオ",
+            "auto": "自動",
+            "chapter": "チャプタ",
+            "isLive": "ライブ",
+            "error": "エラー",
+            "fullscreen": "全画面",
+            "language": "言語",
+            "languagesub": "言語と字幕",
+            "loop": "ループ",
+            "playbackrate": "再生速度",
+            "on": "オン",
+            "off": "オフ",
+            "quality": "品質",
+            "scrubber": "シークバー",
+            "settings": "設定",
+            "subtitles": "字幕",
+            "unavailable": "利用不可",
+            "unknownLang": "不明",
+            "time": "時間",
+            "video": "ビデオ",
+            "volume": "音量",
+            "volumeSlider": "音量調整",
+            "uiScale": "UI スケール"
+        },
+        "time": {
+            "hour": "時間",
+            "hour_plural": "時間",
+            "minute": "分",
+            "minute_plural": "分",
+            "second": "秒",
+            "second_plural": "秒"
+        },
+        "errors": {
+            "data": {
+                "header": "メディアデータエラー",
+                "unknown": "プレーヤーデータの処理中にエラーが発生しました",
+                "CONFIG_LOAD_ERROR": "設定ファイルを読み込めませんでした（メディアは再生できる可能性があります）。",
+                "DATA_ERR_MEDIA_DATA_DENIED": "メディアデータを読み込めませんでした。",
+                "DATA_ERR_MEDIA_NOT_FOUND": "メディアデータが見つかりません。",
+                "DATA_ERR_STREAM_NOT_FOUND": "メディアデータにストリームが指定されていません。",
+                "DATA_ERR_STREAM_NOT_PLAYABLE": "再生可能なストリームが見つかりません。形式がサポートされていない可能性があります。",
+                "DATA_ERR_INVALID_PLAYLIST_ITEM": "プレイリスト内の1つ以上の項目が読み込めず、スキップされました。",
+                "DATA_ERR_INVALID_INDEX": "無効なプレイリストインデックスです."
+            },
+            "media": {
+                "header": "メディアエラー",
+                "aborted": "再生が中止されました。",
+                "alternateStreamHint": "別の品質または言語設定を試してください。",
+                "decodingError": "選択したメディアファイルを再生できません。ファイルが破損している可能性があります。",
+                "fileWithError": "ファイル：",
+                "networkFailed": "ネットワークエラーのためファイルを再生できません。",
+                "notFound": "選択したメディアファイルが見つかりません。",
+                "unknown": "不明なエラーが発生しました",
+                "unsupported": "選択したメディアファイルはサポートされていません。",
+                "drmError": "このメディアのDRMに問題があります。",
+                "serverError": "サーバーに接続できません。",
+                "accessError": "メディアにアクセスできません。"
+            },
+            "library": {
+                "scriptLoaderErrorTitle": "読み込みエラー",
+                "scriptLoaderErrorMessage": "${libraryName} を読み込めませんでした。接続を確認して、もう一度お試しください。"
+            },
+            "consent": {
+                "header": "同意が必要です",
+                "denied": "同意が得られなかったため、${name} は読み込まれませんでした。"
+            },
+            "supportMessage": ""
+        },
+        "airplay": {
+            "airplay": "AirPlay",
+            "available": "AirPlayを使用",
+            "unavailable": "AirPlayは利用できません"
+        },
+        "audioControls": {
+            "freqBand": "周波数帯"
+        },
+        "chapter": {
+            "next": "次の章",
+            "prev": "前の章"
+        },
+        "chromecast": {
+            "chromecast": "Chromecast",
+            "available": "Chromecastを使用",
+            "unavailable": "Chromecastは利用できません",
+            "connected": "接続先 ",
+            "device": "リモートデバイス",
+            "choose": "デバイスを選択…",
+            "pause": "キャストを一時停止",
+            "play": "キャストを再開",
+            "cancel": "キャストを停止",
+            "isPaused": "キャストは一時停止中",
+            "isPlaying": "キャスト中",
+            "isBuffering": "バッファリング…",
+            "castError": "デバイスに接続できませんでした"
+        },
+        "consent": {
+            "heading": "同意が必要です",
+            "message": "この動画は ${name} によって提供されており、読み込む前に同意が必要です。",
+            "purposes": "${purposes} に使用されます。",
+            "purpose": {
+                "playback": "再生",
+                "cookies": "Cookie",
+                "advertising": "広告"
+            },
+            "listSep": "、",
+            "listAnd": "および",
+            "thirdCountry": "これには ${country} へのデータ転送が含まれる場合があります。",
+            "country": {
+                "US": "米国"
+            },
+            "privacy": "${name}のプライバシー",
+            "agree": "同意する",
+            "decline": "拒否",
+            "settings": "保存された同意",
+            "revoke": "すべて取り消す",
+            "revokeHint": "この同意は設定パネルでリセットできます。"
+        },
+        "file": {
+            "select": "ファイルを選択",
+            "drop": "ここにファイルをドロップ",
+            "unsupported": "サポートされていないファイル形式"
+        },
+        "pip": {
+            "title": "ピクチャインピクチャ",
+            "placeholder": "表示するビデオがありません",
+            "cancel": "PiPを閉じる",
+            "iFrameNotEnabled": "ピクチャ・イン・ピクチャはブラウザーによりブロックされています。",
+            "enableIframe": "ピクチャ・イン・ピクチャを開始するには、ブラウザーが動画への直接操作を必要とします。動画エリアを一度クリックしてから再度お試しください。"
+        },
+        "playlist": {
+            "playlist": "プレイリスト",
+            "open": "リストを開く",
+            "prev": "前のタイトル",
+            "next": "次のタイトル",
+            "loop": "リストをループ",
+            "shuffle": "シャッフル再生",
+            "continuous": "連続再生"
+        },
+        "subtitles": {
+            "fontSize": "フォントサイズ",
+            "fontSize_big": "大きいフォント",
+            "fontSize_medium": "中フォント",
+            "fontSize_small": "小フォント",
+            "header": "字幕"
+        },
+        "videoControls": {
+            "brightness": "明るさ",
+            "contrast": "コントラスト",
+            "saturate": "彩度",
+            "sharpen": "シャープ",
+            "hue": "色相"
+        },
+        "visualizerAmbient": {
+            "header": "バックライト",
+            "slider": "明るさを調整"
+        }
+    }
+}

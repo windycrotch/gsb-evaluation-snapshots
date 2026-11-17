@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="24px" height="24px" viewBox="0 0 24 24" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+    <title>player / forward</title>
+    <g id="player-/-forward" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd" stroke-linejoin="round">
+        <path d="M10.1645121,6.06924744 L20.6615955,11.6969322 C20.971625,11.8633691 20.971625,12.1364003 20.6615955,12.3028371 L10.1645121,17.9311453 C9.85448258,18.0969588 9.6,17.9529629 9.6,17.6101154 L9.6,15.23 L4.56451211,17.9311453 C4.25448258,18.0969588 4,17.9529629 4,17.6101154 L4,6.38965395 C4,6.04680651 4.25448258,5.90281059 4.56451211,6.06924744 L9.6,8.769 L9.6,6.38965395 C9.6,6.04680651 9.85448258,5.90281059 10.1645121,6.06924744 Z" id="Combined-Shape" stroke="#000000" stroke-width="1.5"></path>
+    </g>
+</svg>

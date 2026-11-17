@@ -1,0 +1,19 @@
+{
+    "title": "Vimeo Test Playlist",
+    "titleSecondary": "Various Vimeo Test Streams",
+
+    "media": [
+        {
+            "title": "Vimeo Winter 2025 Release: Enhanced collaboration, streamlined workflows",
+            "titleSecondary": "Integration Demo with Quality, Language & Subtitles Control",
+            "src":  "vimeo:1064773380",
+            "poster": "https://i.vimeocdn.com/video/1992153232-0a5bc6da79f4c4904f2e4e2de199694dc74b0f0bd179bfe929dd5e781892487c-d_1920x1080?region=us"
+        },
+        {
+            "title": "Multilingual Video Broadcasting Demo",
+            "titleSecondary": "With disabled quality control",
+            "src": "https://vimeo.com/1113961448",
+            "poster": "https://i.vimeocdn.com/video/2052586293-5900b6a494335f69e5bbab6f1e347920222ffdc7ed9b29b1f1eea2106fd08f16-d_1920x1080?region=us"
+        }
+    ]
+}

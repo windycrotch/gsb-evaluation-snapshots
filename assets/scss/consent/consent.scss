@@ -1,0 +1,70 @@
+@use '../lib/mixins' as *;
+@use '../core/mixins' as *;
+@use '../core/vars' as *;
+
+vision-player {
+
+    .vip-consent {
+        @include inset;
+
+        position: absolute;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        z-index: 50;
+        box-sizing: border-box;
+        padding: var(--spacing-block);
+        background: var(--vip-bg);
+        pointer-events: auto;
+
+        &:focus {
+            outline: none;
+        }
+    }
+
+    .vip-consent-panel {
+        width: 70%;
+        min-width: 16em;
+        max-width: 32em;
+        padding: var(--spacing-block);
+        border-radius: var(--border-radius);
+        background: var(--vip-ui-bg);
+
+        h2 {
+            text-align: center;
+        }
+
+        p {
+            @include font-small;
+
+            text-align: center;
+        }
+
+        > p + p {
+            margin-top: var(--spacing-block-small);
+        }
+
+        .vip-consent-hint {
+            font-size: var(--vip-font-size-small);
+        }
+    }
+
+    .vip-consent-privacy {
+        margin-top: var(--spacing-block-small);
+        font-size: var(--vip-font-size-small);
+        text-align: center;
+    }
+
+    .vip-consent-actions {
+        display: flex;
+        justify-content: center;
+        gap: var(--spacing-block-small);
+        margin-top: var(--spacing-block);
+        margin-bottom: var(--spacing-block);
+    }
+
+    .vip-consent-settings button {
+        flex-basis: 40%;
+        align-self: center;
+    }
+}

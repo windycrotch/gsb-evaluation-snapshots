@@ -1,0 +1,31 @@
+{
+    "title": "DASH Tests",
+    "titleSecondary": "Various DASH Test Streams",
+
+    "media": [
+        {
+            "title": "Big Buck Bunny",
+            "titleSecondary": "Bitrate Test",
+            "src":  "https://rdmedia.bbc.co.uk/bbb/2/client_manifest-common_init.mpd",
+            "poster": "https://visionplayer.io/media/posters/bucks-poster.jpg"
+        },
+        {
+            "title": "Cosmos Laundromat",
+            "titleSecondary": "Blender Foundation",
+            "src": "https://cdn.theoplayer.com/video/cosmos/cmaf.mpd",
+            "poster": "https://visionplayer.io/media/posters/gooseberry-poster.jpg"
+        },
+        {
+            "title": "Tears of Steel",
+            "titleSecondary": "Blender Foundation",
+            "src":  "https://www.bok.net/dash/tears_of_steel/cleartext/stream.mpd",
+            "poster": "https://visionplayer.io/media/posters/steel-poster.jpg"
+        },
+        {
+            "title": "BBC Test Stream Live",
+            "titleSecondary": "Live StreamWith Isd Subtitles",
+            "src": "https://vs-dash-ww-rd-live.akamaized.net/pl/testcard2020/avc-full-en.mpd",
+            "poster": "https://visionplayer.io/media/posters/bbc-poster.jpg"
+        }
+    ]
+}

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="24px" height="24px" viewBox="0 0 24 24" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+    <title>player / playlist-prev</title>
+    <g id="player-/-playlist-prev" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd" stroke-linejoin="round">
+        <path d="M7.59979412,5.08078868 L15.941,9.991 L15.9411765,6.66666667 C15.9411765,6.3 16.1983193,6 16.512605,6 L19.3697479,6 C19.6840336,6 19.9411765,6.3 19.9411765,6.66666667 L19.9411765,17.3333333 C19.9411765,17.7 19.6840336,18 19.3697479,18 L16.512605,18 C16.1983193,18 15.9411765,17.7 15.9411765,17.3333333 L15.941,14.008 L7.59979412,18.9196695 C7.27038774,19.1131186 7,18.9451233 7,18.5451347 L7,5.45459627 C7,5.0546076 7.27038774,4.88661236 7.59979412,5.08078868 Z" id="Combined-Shape-Copy" stroke="#000000" stroke-width="1.5" transform="translate(13.4706, 12) scale(-1, 1) translate(-13.4706, -12)"></path>
+    </g>
+</svg>
