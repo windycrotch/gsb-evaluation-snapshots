@@ -398,37 +398,41 @@ function detectKeyFallback(channels, fs) {
 self.onmessage = function(e) {
     var channels = e.data.channels;
     var fs = e.data.sampleRate;
+    // Every message echoes the request id so the main thread can tell which
+    // analysis run it belongs to and discard results from superseded files.
+    var requestId = e.data.requestId;
 
     try {
-        self.postMessage({ type: 'progress', msg: 'Computing loudness (EBU R128)...' });
+        self.postMessage({ type: 'progress', requestId: requestId, msg: 'Computing loudness (EBU R128)...' });
         var lufs = computeLUFS(channels, fs);
 
-        self.postMessage({ type: 'progress', msg: 'Measuring True Peak...' });
+        self.postMessage({ type: 'progress', requestId: requestId, msg: 'Measuring True Peak...' });
         var tp = computeTruePeak(channels);
 
-        self.postMessage({ type: 'progress', msg: 'Analyzing levels...' });
+        self.postMessage({ type: 'progress', requestId: requestId, msg: 'Analyzing levels...' });
         var levels = computeLevels(channels);
 
-        self.postMessage({ type: 'progress', msg: 'Analyzing stereo field...' });
+        self.postMessage({ type: 'progress', requestId: requestId, msg: 'Analyzing stereo field...' });
         var stereo = computeStereo(channels);
 
-        self.postMessage({ type: 'progress', msg: 'Computing frequency spectrum...' });
+        self.postMessage({ type: 'progress', requestId: requestId, msg: 'Computing frequency spectrum...' });
         var spectrum = computeSpectrum(channels, fs, 256);
 
-        self.postMessage({ type: 'progress', msg: 'Preparing waveform...' });
+        self.postMessage({ type: 'progress', requestId: requestId, msg: 'Preparing waveform...' });
         var waveform = computeWaveform(channels, 1200);
 
-        self.postMessage({ type: 'progress', msg: 'Computing stereo field data...' });
+        self.postMessage({ type: 'progress', requestId: requestId, msg: 'Computing stereo field data...' });
         var goniometer = computeGoniometer(channels, 8000);
 
-        self.postMessage({ type: 'progress', msg: 'Detecting BPM...' });
+        self.postMessage({ type: 'progress', requestId: requestId, msg: 'Detecting BPM...' });
         var bpm = detectBPMFallback(channels, fs);
 
-        self.postMessage({ type: 'progress', msg: 'Detecting key...' });
+        self.postMessage({ type: 'progress', requestId: requestId, msg: 'Detecting key...' });
         var key = detectKeyFallback(channels, fs);
 
         self.postMessage({
             type: 'result',
+            requestId: requestId,
             data: {
                 lufs: lufs.integrated, stLufs: lufs.stMax, momLufs: lufs.momentaryMax, lra: lufs.lra,
                 truePeak: tp, rms: levels.rms, peak: levels.peak, crest: levels.crest,
@@ -438,6 +442,6 @@ self.onmessage = function(e) {
             }
         });
     } catch (err) {
-        self.postMessage({ type: 'error', msg: err.message || String(err) });
+        self.postMessage({ type: 'error', requestId: requestId, msg: err.message || String(err) });
     }
 };

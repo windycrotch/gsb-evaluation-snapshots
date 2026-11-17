@@ -21,6 +21,10 @@ var rafId = null;
 var worker = null;
 var essentiaInstance = null;
 var essentiaLoaded = false;
+// Monotonically increasing id assigned to every processFile() run. Worker
+// messages carry this id back; anything that doesn't match the current id
+// belongs to a superseded file and is discarded.
+var currentRequestId = 0;
 
 /* ═══════════════════════════════════════════════════════════════════════════
    ESSENTIA.JS LOADING (async, non-blocking)
@@ -108,9 +112,13 @@ function initDropZone() {
 }
 
 function resetUI() {
+    currentRequestId++; // invalidate any in-flight analysis
     stopPlayback();
+    pauseOffset = 0;
+    if (worker) { worker.terminate(); worker = null; }
     document.getElementById('azDropZone').classList.remove('az-hidden');
     document.getElementById('azResults').classList.add('az-hidden');
+    document.getElementById('azCurTime').textContent = '0:00';
     audioBuffer = null;
     analysisData = null;
 }
@@ -124,20 +132,51 @@ async function processFile(file) {
         alert('File too large (' + sizeMB.toFixed(0) + ' MB). Maximum is 500 MB to avoid browser crashes.');
         return;
     }
+
+    // A new file supersedes everything before it: bump the request id so any
+    // late decode/worker/realtime callback from the previous file is ignored.
+    var requestId = ++currentRequestId;
+
+    // 1) Stop playback and reset the transport (position + button label)
+    stopPlayback();
+    pauseOffset = 0;
+    isPlaying = false;
+    document.getElementById('azPlayBtn').textContent = 'Play';
+    document.getElementById('azCurTime').textContent = '0:00';
+
+    // 2) Hide the previous file's results so its metrics can't linger
+    document.getElementById('azResults').classList.add('az-hidden');
+    document.getElementById('azDropZone').classList.remove('az-hidden');
+    analysisData = null;
+
+    // 3) The old worker belongs to a superseded request — retire it
+    if (worker) { worker.terminate(); worker = null; }
+
     if (sizeMB > 200) {
         showLoading('Loading large file (' + sizeMB.toFixed(0) + ' MB) — this may take a moment...');
     } else {
         showLoading('Decoding audio...');
     }
+
+    var decoded;
     try {
         var arrayBuf = await file.arrayBuffer();
         if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        audioBuffer = await audioCtx.decodeAudioData(arrayBuf);
+        decoded = await audioCtx.decodeAudioData(arrayBuf);
     } catch (e) {
+        if (requestId !== currentRequestId) return; // superseded while decoding
         hideLoading();
+        // Decode failed: keep the drop zone available for a retry and make
+        // sure no metrics from the previous file remain visible or active.
+        audioBuffer = null;
+        analysisData = null;
+        document.getElementById('azResults').classList.add('az-hidden');
+        document.getElementById('azDropZone').classList.remove('az-hidden');
         alert('Could not decode this file. Make sure it is a valid audio file.');
         return;
     }
+    if (requestId !== currentRequestId) return; // a newer file arrived during decode
+    audioBuffer = decoded;
 
     // Update file info
     document.getElementById('azFileName').textContent = file.name;
@@ -148,13 +187,13 @@ async function processFile(file) {
 
     // Run analysis
     showLoading('Analyzing...');
-    runAnalysis(audioBuffer);
+    runAnalysis(audioBuffer, requestId);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
    WORKER ANALYSIS
    ═══════════════════════════════════════════════════════════════════════════ */
-function runAnalysis(buffer) {
+function runAnalysis(buffer, requestId) {
     // Prepare channel data
     var channels = [];
     for (var c = 0; c < buffer.numberOfChannels; c++) {
@@ -162,21 +201,30 @@ function runAnalysis(buffer) {
     }
 
     // Create worker from separate file (requires HTTP server, not file://)
-    if (worker) worker.terminate();
+    if (worker) { worker.terminate(); worker = null; }
+    var w;
     try {
-        worker = new Worker('js/worker.js');
+        w = new Worker('js/worker.js');
     } catch (e) {
         hideLoading();
         alert('Web Workers require an HTTP server.\n\nRun: python3 -m http.server\nThen open: http://localhost:8000');
         return;
     }
+    worker = w;
 
-    worker.onmessage = function(e) {
-        if (e.data.type === 'progress') {
+    w.onmessage = function(e) {
+        var d = e.data;
+        // Ownership check: only the request that is still current may update
+        // analysisData, the progress text or the results area. Stale messages
+        // are dropped — and must NOT terminate the worker that is currently
+        // working on the new file.
+        if (d.requestId !== requestId || requestId !== currentRequestId) return;
+
+        if (d.type === 'progress') {
             var msg = document.getElementById('azProgressMsg');
-            if (msg) msg.textContent = e.data.msg;
-        } else if (e.data.type === 'result') {
-            analysisData = e.data.data;
+            if (msg) msg.textContent = d.msg;
+        } else if (d.type === 'result') {
+            analysisData = d.data;
 
             // Try essentia.js for better Key/BPM
             var essentiaResult = essentiaAnalyze(buffer);
@@ -202,28 +250,30 @@ function runAnalysis(buffer) {
             hideLoading();
             // Small delay to let layout settle before canvas rendering
             setTimeout(function() {
+                if (requestId !== currentRequestId) return; // superseded in the meantime
                 displayResults(analysisData, buffer);
             }, 50);
-            worker.terminate();
-            worker = null;
-        } else if (e.data.type === 'error') {
+            if (worker === w) worker = null;
+            w.terminate();
+        } else if (d.type === 'error') {
             hideLoading();
-            alert('Analysis error: ' + e.data.msg);
-            worker.terminate();
-            worker = null;
+            alert('Analysis error: ' + d.msg);
+            if (worker === w) worker = null;
+            w.terminate();
         }
     };
 
-    worker.onerror = function(e) {
+    w.onerror = function(e) {
+        if (requestId !== currentRequestId) return; // stale worker — ignore
         hideLoading();
         alert('Worker error: ' + (e.message || 'Unknown error'));
-        worker.terminate();
-        worker = null;
+        if (worker === w) worker = null;
+        w.terminate();
     };
 
-    // Transfer channel data to worker
+    // Transfer channel data to worker (tagged with the owning request id)
     var transferable = channels.map(function(ch) { return ch.buffer; });
-    worker.postMessage({ channels: channels, sampleRate: buffer.sampleRate }, transferable);
+    w.postMessage({ requestId: requestId, channels: channels, sampleRate: buffer.sampleRate }, transferable);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -648,7 +698,7 @@ function startPlayback() {
     document.getElementById('azPlayBtn').textContent = 'Pause';
 
     node.onended = function() {
-        if (sourceNode !== node) return;
+        if (sourceNode !== node) return; // stale source (file switched / stopped)
         isPlaying = false;
         pauseOffset = 0;
         sourceNode = null;
@@ -658,7 +708,7 @@ function startPlayback() {
         if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
     };
 
-    updatePlaybackUI();
+    updatePlaybackUI(node);
 }
 
 function stopPlayback() {
@@ -689,8 +739,12 @@ function seekTo(time) {
     if (wasPlaying) startPlayback();
 }
 
-function updatePlaybackUI() {
-    if (!isPlaying) return;
+function updatePlaybackUI(node) {
+    // Realtime drawing is only allowed for the source node that is currently
+    // bound to the current audioBuffer. If this callback belongs to an old
+    // source node (file switched or playback stopped), return without
+    // touching the UI at all.
+    if (!isPlaying || sourceNode !== node || !audioBuffer) return;
     var currentTime = pauseOffset + (audioCtx.currentTime - startTime);
     var pos = currentTime / audioBuffer.duration;
 
@@ -712,7 +766,7 @@ function updatePlaybackUI() {
         renderGoniometer(flat, true);
     }
 
-    // Real-time spectrum from AnalyserNode
+    // Real-time spectrum from AnalyserNode (only for the current analysisData)
     if (analyserNode && analysisData) {
         var freqData = new Float32Array(analyserNode.frequencyBinCount);
         analyserNode.getFloatFrequencyData(freqData);
@@ -732,7 +786,7 @@ function updatePlaybackUI() {
         renderSpectrum(analysisData.spectrum, Array.from(rtBands));
     }
 
-    rafId = requestAnimationFrame(updatePlaybackUI);
+    rafId = requestAnimationFrame(function() { updatePlaybackUI(node); });
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -757,6 +811,36 @@ function handleResize() {
         renderGoniometer(analysisData.goniometer);
     }
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   CONSOLE VERIFICATION HOOK
+   Exposed so the result-ownership behavior can be verified from the browser
+   console (see README.md → "Verifying result ownership"). Not used by the UI.
+   ═══════════════════════════════════════════════════════════════════════════ */
+window.azAnalyzer = {
+    // Programmatic equivalent of dropping a file (same code path)
+    loadFile: processFile,
+    // Snapshot of what the UI currently reflects
+    getState: function() {
+        return {
+            requestId: currentRequestId,
+            fileName: document.getElementById('azFileName').textContent,
+            duration: audioBuffer ? audioBuffer.duration : null,
+            sampleRate: audioBuffer ? audioBuffer.sampleRate : null,
+            isPlaying: isPlaying,
+            pauseOffset: pauseOffset,
+            playButton: document.getElementById('azPlayBtn').textContent,
+            resultsVisible: !document.getElementById('azResults').classList.contains('az-hidden'),
+            analysis: analysisData ? {
+                lufs: analysisData.lufs,
+                truePeak: analysisData.truePeak,
+                bpm: analysisData.bpm,
+                key: analysisData.key,
+                width: analysisData.width
+            } : null
+        };
+    }
+};
 
 /* ═══════════════════════════════════════════════════════════════════════════
    INIT
