@@ -1,0 +1,123 @@
+{
+  "name": "@flowscape-ui/canvas-react",
+  "version": "1.1.1",
+  "description": "High-performance Open Source React library for an interactive infinite canvas with nodes, pan/zoom, selection, history, and a plugin-friendly architecture.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "keywords": [
+    "react",
+    "react-component",
+    "typescript",
+    "canvas",
+    "infinite-canvas",
+    "pan-zoom",
+    "pinch-zoom",
+    "drag-and-drop",
+    "whiteboard",
+    "flowchart",
+    "diagram",
+    "node-editor"
+  ],
+  "engines": {
+    "node": ">=18",
+    "bun": ">=1.1.0"
+  },
+  "packageManager": "bun@1.1.9",
+  "peerDependencies": {
+    "react": "^18 || ^19",
+    "react-dom": "^18 || ^19"
+  },
+  "dependencies": {
+    "zustand": "^4.5.2"
+  },
+  "devDependencies": {
+    "@changesets/changelog-github": "^0.5.0",
+    "@changesets/cli": "^2.27.8",
+    "@playwright/test": "^1.55.0",
+    "@rollup/plugin-commonjs": "^28.0.9",
+    "@rollup/plugin-node-resolve": "^15.2.3",
+    "@rollup/plugin-replace": "^6.0.2",
+    "@rollup/plugin-typescript": "^12.3.0",
+    "@size-limit/file": "^11.1.5",
+    "@storybook/react": "^9.1.2",
+    "@storybook/react-vite": "^10.3.2",
+    "@types/node": "^24.3.0",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^19.1.7",
+    "@typescript-eslint/eslint-plugin": "^7.18.0",
+    "@typescript-eslint/parser": "^7.18.0",
+    "eslint": "^8.57.0",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-import": "^2.29.1",
+    "eslint-plugin-react": "^7.34.2",
+    "eslint-plugin-react-hooks": "^5.2.0",
+    "http-server": "^14.1.1",
+    "jsdom": "^26.1.0",
+    "jsdom-global": "^3.0.2",
+    "prettier": "^3.3.3",
+    "react": "^19.2.4",
+    "react-dom": "^18.2.0",
+    "rollup": "^4.21.0",
+    "rollup-plugin-dts": "^6.1.1",
+    "rollup-plugin-visualizer": "^6.0.3",
+    "size-limit": "^11.1.5",
+    "storybook": "^10.3.2",
+    "typescript": "5.9.2",
+    "vite": "^7.1.12",
+    "vitest": "^4.1.0"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "types": "tsc -p tsconfig.build.json --emitDeclarationOnly",
+    "build": "bun run types && rollup -c rollup.config.mjs",
+    "lint": "eslint . --ext .ts,.tsx",
+    "lint:fix": "eslint . --ext .ts,.tsx --fix",
+    "format": "prettier --check .",
+    "format:fix": "prettier --write .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "storybook": "storybook dev -p 6006",
+    "storybook:build": "storybook build",
+    "e2e": "playwright test",
+    "size": "size-limit",
+    "size:ci": "size-limit",
+    "analyze": "rollup -c rollup.config.mjs",
+    "changeset": "changeset",
+    "release": "changeset publish",
+    "prepack": "bun run build"
+  },
+  "size-limit": [
+    {
+      "path": "dist/index.js",
+      "limit": "25 kB"
+    }
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Flowscape-UI/canvas-react.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Flowscape-UI/canvas-react/issues"
+  },
+  "homepage": "https://github.com/Flowscape-UI/canvas-react#readme",
+  "author": "Flowscape-UI"
+}

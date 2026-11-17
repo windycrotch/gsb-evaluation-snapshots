@@ -1,0 +1,59 @@
+name: Storybook Pages
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: 'pages'
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.1.9
+
+      - name: Install deps
+        run: bun install --frozen-lockfile
+
+      - name: Build Storybook (or placeholder)
+        run: |
+          set -e
+          # Try to run the project's Storybook build.
+          # If Storybook isn't set up yet, create a placeholder site so Pages deploy succeeds.
+          if bun run storybook:build; then
+            echo "Storybook build step completed."
+          else
+            echo "No Storybook yet — generating placeholder site."
+          fi
+          mkdir -p storybook-static
+          if [ ! -f storybook-static/index.html ]; then
+            cp .github/pages/index.html storybook-static/index.html
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: storybook-static
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5
