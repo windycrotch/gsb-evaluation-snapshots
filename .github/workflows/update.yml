@@ -1,0 +1,161 @@
+name: Update rankings
+
+on:
+  schedule:
+    # 03:17 UTC = 11:17 Taiwan / 12:17 Japan, after DAM's 11:00 JST daily update.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - "scraper/**"
+      - "tests/**"
+      - "requirements-bpm.txt"
+      - ".github/workflows/update.yml"
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: update-rankings
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 165
+    steps:
+      # Start from the latest commit on the branch, not the one that queued this run:
+      # an earlier run may have pushed new data while this one was waiting.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-bpm.txt
+
+      - name: Run tests
+        run: python -m unittest discover -s tests -t .
+
+      - name: Fetch rankings
+        run: python -m scraper
+
+      # iTunes allows about 20 requests a minute, so new songs are looked up in batches.
+      # A failure here only means fewer tags today; the rankings still publish.
+      - name: Look up genres and listen links
+        continue-on-error: true
+        timeout-minutes: 30
+        run: python -m scraper.enrich --max 300 --budget 1500
+
+      # Spotify track ids for the listen button (client credentials). Without the two
+      # secrets, or while the app owner's Premium has lapsed, this only logs a warning.
+      # Kept small: Spotify answers bursts with a 24-hour Retry-After (see data/spotify-pause.json).
+      - name: Look up Spotify tracks
+        continue-on-error: true
+        timeout-minutes: 15
+        env:
+          SPOTIFY_CLIENT_ID: ${{ secrets.SPOTIFY_CLIENT_ID }}
+          SPOTIFY_CLIENT_SECRET: ${{ secrets.SPOTIFY_CLIENT_SECRET }}
+        run: python -m scraper.spotify --max 150 --budget 600
+
+      # Songwriters, producers, label, year and ISRC: Apple album data, Taiwan's National
+      # Central Library ISRC records and MusicBrainz (1 request a second). Cached for good.
+      - name: Look up publishing details
+        continue-on-error: true
+        timeout-minutes: 25
+        run: python -m scraper.credits --ncl-max 200 --mb-max 300 --budget 1200
+
+      # BPM and hashtags run ONNX models on iTunes previews (needs ffmpeg, numpy, onnxruntime).
+      - name: Install BPM tools
+        id: bpm-tools
+        continue-on-error: true
+        timeout-minutes: 10
+        run: |
+          command -v ffmpeg || { sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends ffmpeg; }
+          python -m pip install -q -r requirements-bpm.txt
+
+      - name: Cache Beat This! model
+        uses: actions/cache@v4
+        with:
+          path: .cache/beat-this
+          key: beat-this-e2c0d4376fac8141905a8312c1b327849751d59c
+
+      - name: Detect BPM
+        if: steps.bpm-tools.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 25
+        run: python -m scraper.bpm --max 300 --budget 1200
+
+      # Style, mood, instrument and vocal hashtags from Essentia's Discogs-EffNet models
+      # (essentia.upf.edu, pinned by SHA-256). About a second per song including the download.
+      - name: Cache Essentia models
+        uses: actions/cache@v4
+        with:
+          path: .cache/essentia
+          key: essentia-discogs-effnet-1-v1
+
+      - name: Detect hashtags
+        if: steps.bpm-tools.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 25
+        run: python -m scraper.tags --max 1500 --budget 1200
+
+      # Vocal range: UVR MDX-Net (Kim_Vocal_2) separates the vocals, GAME Small transcribes
+      # them into notes and scraper.singrange drops ghost notes. Both models come from pinned
+      # Hugging Face mirrors (aaatmy/*) checked by SHA-256. Tens of seconds per song, so a small batch.
+      - name: Cache vocal range models
+        uses: actions/cache@v4
+        with:
+          path: .cache/vocal
+          key: vocal-game-small-1.0.3-kim-vocal-2-v1
+
+      - name: Detect vocal range
+        if: steps.bpm-tools.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 30
+        run: python -m scraper.vocal --max 80 --budget 1500
+
+      - name: Commit data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add site/data data
+          if git diff --cached --quiet; then
+            echo "No data changes."
+            exit 0
+          fi
+          git commit -m "Update rankings $(TZ=Asia/Taipei date +%F)"
+          # This commit only touches generated data, so on a conflict keep this run's
+          # newer version (-X theirs is "the commit being replayed" during a rebase).
+          # GitHub occasionally answers a push with a 500; back off and retry before giving up.
+          for attempt in 1 2 3 4 5; do
+            if git pull --rebase -X theirs origin "${GITHUB_REF_NAME}" && git push origin "HEAD:${GITHUB_REF_NAME}"; then
+              exit 0
+            fi
+            git rebase --abort 2>/dev/null || true
+            echo "Push attempt ${attempt} failed; retrying in $((attempt * 20))s."
+            sleep $((attempt * 20))
+          done
+          exit 1
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: update
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
