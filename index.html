@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<meta name="theme-color" content="#04060d" />
+<title>星屑旅人 · Stardust Drifter</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='0.9em' font-size='90'>✨</text></svg>" />
+<link rel="stylesheet" href="./styles/main.css" />
+</head>
+<body>
+<div id="app">
+  <canvas id="scene"></canvas>
+  <div class="vignette"></div>
+  <div class="grain"></div>
+
+  <div id="hud" class="hud">
+    <div class="hud-top">
+      <div class="hud-left">
+        <div class="brand"><b>STARDUST</b><span>DRIFTER</span></div>
+        <div class="hearts-wrap">
+          <div class="tag">能量</div>
+          <div id="hearts" class="hearts"></div>
+        </div>
+      </div>
+
+      <div class="level-chip">
+        <div class="level-sub" id="levelSub">SECTOR 01 · TIDAL DRIFT</div>
+        <div class="level-name" id="levelName">潮汐之境</div>
+        <div class="shard-meter">
+          <div class="shard-bar"><i id="shardBar"></i></div>
+          <div class="shard-text"><b id="shardNow">0</b><span>/</span><em id="shardTotal">0</em><i>星屑</i></div>
+        </div>
+      </div>
+
+      <div class="hud-right">
+        <div class="timer" id="timer">00:00</div>
+        <button id="muteBtn" class="icon-btn" aria-label="声音开关">♪</button>
+      </div>
+    </div>
+
+    <div id="toast" class="toast"></div>
+    <div id="hint" class="hint"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> 移动 <span>·</span> <kbd>空格</kbd> 跳跃 / 二段跳 <span>·</span> <kbd>Shift</kbd> 冲刺</div>
+  </div>
+
+  <div id="touch" class="touch">
+    <div id="stick" class="stick"><i id="stickKnob"></i></div>
+    <div class="touch-btns">
+      <button id="dashBtn" class="round-btn dash">冲刺</button>
+      <button id="jumpBtn" class="round-btn jump">跳</button>
+    </div>
+  </div>
+
+  <!-- 标题 -->
+  <div id="title" class="screen title-screen">
+    <div class="title-inner">
+      <div class="kicker">A 3D GRAVITY ODYSSEY</div>
+      <h1>星屑旅人</h1>
+      <div class="latin">STARDUST&nbsp;DRIFTER</div>
+      <p class="desc">
+        在失重的微型星体之间穿行，收集散落的星屑。<br />
+        当最后一粒星屑归位，沉睡的星门会为你亮起。
+      </p>
+      <div class="title-actions">
+        <button id="startBtn" class="btn primary">开始旅程</button>
+        <span class="tip">建议使用耳机 · 支持键鼠与触屏</span>
+      </div>
+      <div class="keys">
+        <span><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> 移动</span>
+        <span><kbd>Space</kbd> 跳跃 / 二段跳</span>
+        <span><kbd>Shift</kbd> 冲刺</span>
+        <span><kbd>Esc</kbd> 暂停</span>
+      </div>
+    </div>
+    <div class="title-meta">
+      <span>5 SECTORS</span><i></i><span>50 SHARDS</span><i></i><span>ONE GATE</span>
+    </div>
+  </div>
+
+  <!-- 暂停 -->
+  <div id="pause" class="screen card-screen">
+    <div class="card">
+      <div class="card-kicker">PAUSED</div>
+      <h2>时间在此静止</h2>
+      <p class="card-desc">星域会等你，但暗影不会停太久。</p>
+      <div class="card-actions">
+        <button id="resumeBtn" class="btn primary">继续旅程</button>
+        <button id="restartBtn" class="btn ghost">重新开始</button>
+        <button id="homeBtn" class="btn ghost">返回标题</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 失败 -->
+  <div id="over" class="screen card-screen">
+    <div class="card danger">
+      <div class="card-kicker">ENERGY DEPLETED</div>
+      <h2>光芒熄灭了</h2>
+      <p class="card-desc">你的能量已耗尽。星屑仍散落在 <b id="overShards">0</b> 处等待拾起。</p>
+      <div class="card-actions">
+        <button id="retryBtn" class="btn primary">重试本星域</button>
+        <button id="homeBtn2" class="btn ghost">返回标题</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 通关 -->
+  <div id="win" class="screen card-screen">
+    <div class="card victory">
+      <div class="card-kicker">THE GATE IS OPEN</div>
+      <h2>你穿过了深瞳</h2>
+      <p class="card-desc">五座星域重新连成一条光路。旅人，你的名字会被星尘记住。</p>
+      <div class="stats">
+        <div class="stat"><span>总用时</span><b id="winTime">00:00</b></div>
+        <div class="stat"><span>星屑</span><b id="winShards">0</b></div>
+        <div class="stat"><span>星域</span><b>5 / 5</b></div>
+      </div>
+      <div class="card-actions">
+        <button id="againBtn" class="btn primary">再次启程</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="flash" class="flash"></div>
+  <div id="fade" class="fade"></div>
+</div>
+<script src="./assets/game.js"></script>
+</body>
+</html>

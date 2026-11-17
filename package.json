@@ -1,0 +1,14 @@
+{
+  "dependencies": {
+    "esbuild": "^0.28.2",
+    "three": "^0.169.0"
+  },
+  "name": "stardust-drifter",
+  "version": "1.0.0",
+  "description": "3D 球面重力冒险小游戏",
+  "private": true,
+  "scripts": {
+    "build": "esbuild src/main.js --bundle --format=iife --target=es2020 --outfile=assets/game.js",
+    "test": "node tools/cdp-test.mjs"
+  }
+}
