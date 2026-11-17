@@ -1,0 +1,60 @@
+﻿<!DOCTYPE html>
+
+<!--
+// Microtonal Fabric
+//
+// Copyright (c) Sergey A Kryukov, 2017-2021
+//
+// http://www.SAKryukov.org
+// http://www.codeproject.com/Members/SAKryukov
+// https://github.com/SAKryukov
+// https://github.com/SAKryukov/microtonal-fabric
+-->
+
+<html lang="en-us">
+<head>
+  <script src="../definition-set.js"></script>
+  <title>Authors: 29 EDO Microtonal Keyboard</title>
+  <style>
+    * { font-family: sans-serif; background-color: beige; }
+    body { padding-left: 2em; padding-right: 2em; }
+    p { margin: 0.4em; margin-left: 1em; }
+    h1, p:first-child, hr { margin-top: 2em; }
+    h1 { font-size: 128%; text-align: center; }
+    h2 { font-size: 105%; }
+  </style>
+</head>
+
+<body>
+
+  <h1>Microtonal Fabric, 29 EDO Microtonal Keyboard, v.&thinsp;<span></span></h1>
+  <h2>Authors:</h2>
+
+  <article>
+    <p>Idea, musical theory, conception, keyboard layouts:
+        <a href="http://www.musenc.ru/html/o/ogolevec.html">Алексей Степанович Оголевец</a>
+        (<a href="https://www.oxfordmusiconline.com/grovemusic/view/10.1093/gmo/9781561592630.001.0001/omo-9781561592630-e-0000020289">Aleksey S Ogolevets</a>),
+        <a href="https://ru.wikipedia.org/wiki/Брайнин,_Валерий_Борисович">Валерий Борисович Брайнин</a>
+        (<a href="https://en.wikipedia.org/wiki/Valeri_Brainin">Valeri B Brainin</a></a>)</p>
+    <p>Theory, technology, architecture, design, software, keyboard layout: <a href="http://www.SAKryukov.org">Сергей Александрович Крюков (Sergey A Kryukov)<a><p>
+    <br/>
+    <p>Source code: <a href="https://github.com/SAKryukov/microtonal-chromatic-lattice-keyboard">Git Hub</a><p>
+    <br/>
+    <p><a href="https://en.xen.wiki/w/Sergey_A_Kryukov#Microtonal_Fabric">Microtonal Fabric</a> on Xenharmonic Wiki</p>
+    <br/>
+    <p>Valeri B Brainin: <a href="http://brainin.org/Method/method_pro_de/publications_en1.html">Web site</a>
+    <hr/>
+    <p>Copyright &copy; Sergey A Kryukov, <span id="years"></span></p>
+    <p>Third party copyrights are property of their respective owners</p>  
+  </article>
+
+</body>
+
+  <script>
+    const version = document.querySelector("h1 span:last-child");
+    const years = document.querySelector("#years");
+    version.textContent = sharedDefinitionSet.version;
+    years.textContent = sharedDefinitionSet.years;
+  </script>
+
+</html>
