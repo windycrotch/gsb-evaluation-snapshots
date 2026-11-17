@@ -422,6 +422,14 @@ export function srtUrl(url: string, opts: { newValue?: boolean } = {}): void {
   if (/[\x00-\x1f\x7f]/.test(url)) {
     throw new Error('Control characters not allowed in SRT URL');
   }
+  // A raw '#' ends the address for GStreamer (everything after it is dropped).
+  // Name that specifically instead of letting the format regexes below reject
+  // it with a generic message, so the operator knows what to change. No stored
+  // document can hold a '#' (the regexes always rejected it), so this changes
+  // nothing for existing documents.
+  if (url.includes('#')) {
+    throw new Error("'#' ends the SRT address for GStreamer, which drops everything after it: write it as %23");
+  }
   if (isSrtRelayAddress(url)) {
     srtRelayUrl(url, opts);
     return;

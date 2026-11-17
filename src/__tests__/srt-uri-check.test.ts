@@ -96,6 +96,15 @@ describe('gstUnescape', () => {
 });
 
 describe('srtUrl: GStreamer rules only for a new value', () => {
+  it('names a raw # instead of hiding it behind the generic format error', () => {
+    const msg = /'#' ends the SRT address for GStreamer.*write it as %23/;
+    expect(() => srtUrl('srt://cdn.example.com:9000?streamid=#!::r=abc', { newValue: true })).toThrow(msg);
+    expect(() => srtUrl('srt+relay://auto?streamid=a#b', { newValue: true })).toThrow(msg);
+    // A stored address is held to the same message: none can contain '#' (the
+    // format regex always rejected it), so this changes nothing for old documents.
+    expect(() => srtUrl('srt://cdn.example.com:9000?streamid=#!::r=abc')).toThrow(msg);
+  });
+
   it('refuses a new address that GStreamer would read differently', () => {
     expect(() => srtUrl('srt://cdn.example.com:9000?Mode=Caller', { newValue: true })).toThrow(/use 'mode'/);
     expect(() => srtUrl('srt+relay://auto?PassPhrase=abcdefghij', { newValue: true })).toThrow(/use 'passphrase'/);
