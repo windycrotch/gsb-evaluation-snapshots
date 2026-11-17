@@ -51,6 +51,7 @@ import { loadSplat } from './loaders/SplatLoader';
 import { loadSpx } from './loaders/SpxLoader';
 import { loadSpz } from './loaders/SpzLoader';
 import { computeCompressionRatio, glbKhrGs2Splat, isInverted, isNeedReload } from '../utils/CommonUtils';
+import { detectGlbExtension } from '../utils/LocalFileUtils';
 import { SplatMeshOptions } from '../meshs/splatmesh/SplatMeshOptions';
 import { isMobile, MobileDownloadLimitSplatCount, PcDownloadLimitSplatCount } from '../utils/GlobalConstants';
 import { loadSog } from './loaders/SogLoader';
@@ -360,13 +361,11 @@ export function setupDataManager(events: Events) {
         if (opts.format === 'glb') {
             const fileBytes: Uint8Array = await loadFile(opts.url, events);
             fire(OnFetchStop, 100);
-            const ui32s = new Uint32Array(fileBytes.slice(0, 32).buffer);
-            const jsonLength4 = Math.floor((ui32s[3] + 3) / 4) * 4;
-            const sJson = new TextDecoder().decode(fileBytes.slice(20, 20 + jsonLength4));
+            // 统一走共享的 GLB 扩展识别（DataView 读取、兼容填充与 byteOffset）
+            const { kind: glbKind, json: oJson, jsonLength4 } = detectGlbExtension(fileBytes);
 
             // 扩展标准尚未发布，当前先初步对应
-            if (/KHR_gaussian_splatting_compression_spz_2/.test(sJson)) {
-                const oJson = JSON.parse(sJson);
+            if (glbKind === 'spz') {
                 const buffersOffset = 20 + jsonLength4 + 8;
                 const spzBytes = fileBytes
                     .subarray(buffersOffset, buffersOffset + oJson.buffers[0].byteLength)
@@ -375,7 +374,7 @@ export function setupDataManager(events: Events) {
                 opts.format = 'spz';
 
                 globalEv.on('Information-ver', () => `glb-spz`);
-            } else if (/KHR_gaussian_splatting/.test(sJson)) {
+            } else if (glbKind === 'gaussian') {
                 const splatBytes = glbKhrGs2Splat(fileBytes);
                 opts.url = URL.createObjectURL(new Blob([splatBytes as Uint8Array<ArrayBuffer>], { type: 'application/octet-stream' }));
                 opts.format = 'splat';

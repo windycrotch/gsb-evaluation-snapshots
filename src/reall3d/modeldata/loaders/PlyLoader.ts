@@ -235,13 +235,18 @@ export async function loadPly(model: SplatModel) {
     }
 
     function parseHeader(ui8s: Uint8Array): any {
-        let header = new TextDecoder().decode(ui8s.slice(0, 1024 * 2));
-        const header_end = 'end_header\n';
-        const header_end_index = header.indexOf(header_end);
+        const rawHeader = new TextDecoder().decode(ui8s.slice(0, 1024 * 2));
+        // 兼容 LF 与 CRLF 两种换行
+        const lfIndex = rawHeader.indexOf('end_header\n');
+        const crlfIndex = rawHeader.indexOf('end_header\r\n');
+        const header_end_index = lfIndex >= 0 ? lfIndex : crlfIndex;
         if (header_end_index < 0) {
             if (ui8s.byteLength > 1024 * 2) throw new Error('Unable to read .ply file header');
             return null;
         }
+
+        // 统一换行，兼容 CRLF 形式的 PLY 文件头
+        const header = rawHeader.substring(0, header_end_index).replace(/\r\n/g, '\n') + '\n';
 
         if (!header.startsWith('ply') || header.indexOf('format binary_little_endian 1.0') < 0) {
             throw new Error('Unknow .ply file header');
@@ -291,7 +296,9 @@ export async function loadPly(model: SplatModel) {
                 throw new Error(`Property not found: ${prop}`);
             }
         }
-        return { headerLength: header_end_index + header_end.length, offsets, rowLength: row_offset, vertexCount, shDegree };
+        // headerLength 基于原始字节：end_header 标记本身 10 字节 + 换行（LF 1 / CRLF 2）
+        const endMarkerLength = lfIndex >= 0 ? 'end_header\n'.length : 'end_header\r\n'.length;
+        return { headerLength: header_end_index + endMarkerLength, offsets, rowLength: row_offset, vertexCount, shDegree };
     }
 }
 

@@ -101,13 +101,23 @@ export function setupViewerUtils(events: Events) {
         fire(Information, { scene: `small (ply)` });
         const datas = await loadFile(url, events);
         if (datas) {
-            const url = URL.createObjectURL(new Blob([datas as Uint8Array<ArrayBuffer>], { type: 'application/octet-stream' }));
-            new PLYLoader().load(url, geometry => {
-                const material = new PointsMaterial({ size: 0.05, vertexColors: true });
-                const pointCloud = new Points(geometry, material);
-                fire(GetScene).add(pointCloud);
+            const blobUrl = URL.createObjectURL(new Blob([datas as Uint8Array<ArrayBuffer>], { type: 'application/octet-stream' }));
+            // 返回 Promise，使调用方可以在点云真正加入场景后再聚焦包围盒/重绘
+            await new Promise<void>(resolve => {
+                new PLYLoader().load(blobUrl, geometry => {
+                    geometry.computeBoundingBox(); // 预计算包围盒，供加载完成后的聚焦逻辑使用
+                    const material = new PointsMaterial({ size: 0.05, vertexColors: true });
+                    const pointCloud = new Points(geometry, material);
+                    fire(GetScene).add(pointCloud);
 
-                fire(ViewerNeedUpdate);
+                    fire(ViewerNeedUpdate); // 触发一次重绘
+                    URL.revokeObjectURL(blobUrl);
+                    resolve();
+                }, undefined, err => {
+                    console.error(err);
+                    URL.revokeObjectURL(blobUrl);
+                    resolve();
+                });
             });
         }
 

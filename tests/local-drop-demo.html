@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="zh-CN">
+    <head>
+        <meta charset="utf-8" />
+        <title>本地拖入链路验证 - Reall3dViewer</title>
+        <style>
+            body {
+                margin: 0;
+                font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif;
+                background: #111;
+                color: #eee;
+                display: flex;
+                height: 100vh;
+                overflow: hidden;
+            }
+            #panel {
+                width: 380px;
+                box-sizing: border-box;
+                padding: 12px;
+                overflow-y: auto;
+                background: #1b1b1b;
+                border-right: 1px solid #333;
+                flex-shrink: 0;
+            }
+            #stage {
+                flex: 1;
+                position: relative;
+                min-width: 0;
+            }
+            #gsviewer {
+                position: absolute;
+                inset: 0;
+            }
+            h3 {
+                margin: 12px 0 6px;
+                font-size: 14px;
+                color: #8ab4ff;
+            }
+            button {
+                display: block;
+                width: 100%;
+                margin: 4px 0;
+                padding: 8px;
+                background: #2b3a55;
+                color: #fff;
+                border: 1px solid #3d5278;
+                border-radius: 4px;
+                cursor: pointer;
+                text-align: left;
+            }
+            button:hover {
+                background: #36507a;
+            }
+            #log {
+                font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+                font-size: 12px;
+                line-height: 1.5;
+                white-space: pre-wrap;
+                word-break: break-all;
+            }
+            .ok {
+                color: #6ee787;
+            }
+            .bad {
+                color: #ff7b72;
+            }
+            .info {
+                color: #d2a8ff;
+            }
+            .hint {
+                color: #999;
+                font-size: 12px;
+                line-height: 1.5;
+            }
+            table {
+                width: 100%;
+                border-collapse: collapse;
+                font-size: 11px;
+            }
+            td,
+            th {
+                border: 1px solid #333;
+                padding: 3px 5px;
+                text-align: left;
+            }
+        </style>
+    </head>
+
+    <body>
+        <div id="panel">
+            <h3>本地拖入链路验证</h3>
+            <p class="hint">
+                左侧按钮直接调用 <code>viewer.handleDroppedFile(file)</code>（真实 drop 监听器内部调用的是同一方法），
+                把 tests/samples 下的样例文件送入拖入链路。渲染分支通过 testHooks 暴露的事件总线与
+                splatMesh.addModel 桩观察并记录。也可以把本地文件直接拖到右侧查看器做真实验证。
+            </p>
+
+            <h3>样例文件（tests/samples）</h3>
+            <button data-file="point-cloud.ply">① 点云 PLY → 期望 point-cloud 分支</button>
+            <button data-file="point-cloud-crlf.ply">② 点云 PLY（CRLF）→ 期望 point-cloud 分支</button>
+            <button data-file="gaussian.ply">③ 高斯 PLY → 期望 gaussian(splatMesh) 分支</button>
+            <button data-file="gaussian-upper.PLY">④ 大写后缀高斯 PLY → 期望 gaussian 分支</button>
+            <button data-file="khr-gs.glb">⑤ KHR_gaussian_splatting GLB → 期望 glb-gs → splatMesh</button>
+            <button data-file="khr-spz.glb">⑥ spz 压缩 GLB → 期望 glb-spz → splatMesh</button>
+            <button data-file="standard.glb">⑦ 普通 GLB → 期望 GLTFLoader 网格分支</button>
+            <button data-file="demo.scene.json">⑧ .scene.json → 期望 addScene 大场景流程</button>
+            <button data-file="unsupported.txt">⑨ 不支持扩展名（负向）→ 期望报错且场景不变</button>
+            <button id="run-all">▶ 一键顺序执行全部用例</button>
+
+            <h3>期望分支对照</h3>
+            <table>
+                <tr><th>文件</th><th>期望分支</th></tr>
+                <tr><td>point-cloud*.ply</td><td>OnLoadAndRenderPointCloudPly（three Points）</td></tr>
+                <tr><td>gaussian*.ply</td><td>splatMesh.addModel（高斯）</td></tr>
+                <tr><td>khr-gs.glb</td><td>glbKhrGs2Splat → splatMesh(.splat)</td></tr>
+                <tr><td>khr-spz.glb</td><td>抽出 spz → splatMesh(.spz)</td></tr>
+                <tr><td>standard.glb</td><td>GLTFLoader.load（网格）</td></tr>
+                <tr><td>demo.scene.json</td><td>addScene（大场景）</td></tr>
+                <tr><td>unsupported.txt</td><td>明确报错，不 reset、不加模型</td></tr>
+            </table>
+
+            <h3>执行日志</h3>
+            <div id="log"></div>
+        </div>
+
+        <div id="stage">
+            <div id="gsviewer"></div>
+            <div class="speed-container"><div class="speed-text hide"></div></div>
+        </div>
+
+        <script type="module">
+            import { Reall3dViewer } from '../src/reall3d/viewer/Reall3dViewer.ts';
+            import { OnLoadAndRenderPointCloudPly } from '../src/reall3d/events/EventConstants.ts';
+
+            const logEl = document.getElementById('log');
+            const log = (msg, cls = '') => {
+                const line = document.createElement('div');
+                if (cls) line.className = cls;
+                line.textContent = `${new Date().toLocaleTimeString()}  ${msg}`;
+                logEl.appendChild(line);
+                logEl.scrollTop = logEl.scrollHeight;
+            };
+
+            // 关闭内置 document drop 监听，统一通过 handleDroppedFile 编排（二者内部逻辑一致）
+            const viewer = new Reall3dViewer({ disableDropLocalFile: true, debugMode: false });
+            const { events, splatMesh } = viewer.testHooks;
+
+            /* ---------- 渲染分支观察 ---------- */
+            const calls = [];
+            const record = branch => {
+                calls.push(branch);
+                log(`分支调用：${branch}`, 'info');
+            };
+
+            // 入口：addModel / addScene
+            const origAddModel = viewer.addModel.bind(viewer);
+            viewer.addModel = async opts => {
+                const o = typeof opts === 'string' ? { url: opts } : opts;
+                record(`viewer.addModel(format=${o.format}, blob=${(o.url || '').startsWith('blob:')})`);
+                return origAddModel(opts);
+            };
+            const origAddScene = viewer.addScene.bind(viewer);
+            viewer.addScene = async (url, isSceneJson) => {
+                record(`viewer.addScene(isSceneJson=${!!isSceneJson}, blob=${(url || '').startsWith('blob:')})`);
+                return origAddScene(url, isSceneJson);
+            };
+
+            // 高斯分支：splatMesh.addModel（高斯 PLY、glb-gs、glb-spz 最终都到这里）
+            const origSplatAdd = splatMesh.addModel.bind(splatMesh);
+            splatMesh.addModel = (opts, meta) => {
+                record(`splatMesh.addModel(format=${opts.format})  ← 高斯渲染分支`);
+                return origSplatAdd(opts, meta);
+            };
+
+            // 点云分支：OnLoadAndRenderPointCloudPly 事件（点云 PLY、glb-webp-ply 走这里）
+            events.on(
+                OnLoadAndRenderPointCloudPly,
+                url => {
+                    record(`OnLoadAndRenderPointCloudPly(blob=${String(url).startsWith('blob:')})  ← 点云渲染分支`);
+                },
+                true,
+            );
+
+            /* ---------- 执行用例 ---------- */
+            async function fetchSample(name) {
+                const res = await fetch(`./samples/${name}`);
+                const blob = await res.blob();
+                return new File([blob], name, { type: blob.type });
+            }
+
+            const expectations = {
+                'point-cloud.ply': c => c.some(x => x.includes('OnLoadAndRenderPointCloudPly')) && !c.some(x => x.includes('splatMesh.addModel')),
+                'point-cloud-crlf.ply': c => c.some(x => x.includes('OnLoadAndRenderPointCloudPly')),
+                'gaussian.ply': c => c.some(x => x.includes('splatMesh.addModel(format=ply)')),
+                'gaussian-upper.PLY': c => c.some(x => x.includes('splatMesh.addModel(format=ply)')),
+                'khr-gs.glb': c => c.some(x => x.includes('splatMesh.addModel(format=splat)')),
+                'khr-spz.glb': c => c.some(x => x.includes('splatMesh.addModel(format=spz)')),
+                'standard.glb': c =>
+                    c.some(x => x.includes('viewer.addModel(format=glb)')) && !c.some(x => x.includes('splatMesh.addModel')),
+                'demo.scene.json': c => c.some(x => x.includes('viewer.addScene')),
+                'unsupported.txt': c => c.length === 0, // 不支持：不允许任何加载调用，且不 reset
+            };
+
+            async function runOne(name) {
+                log(`── 拖入 ${name} ──`);
+                calls.length = 0;
+                const file = await fetchSample(name);
+                await viewer.handleDroppedFile(file);
+                // 给异步加载/点云回调一点时间完成分支记录
+                await new Promise(r => setTimeout(r, 1200));
+                const branches = [...calls];
+                const ok = expectations[name](branches);
+                log(ok ? `✔ ${name} 符合预期` : `✘ ${name} 不符合预期，实际分支：${branches.join(' | ') || '无'}`, ok ? 'ok' : 'bad');
+                if (name === 'unsupported.txt') {
+                    const toast = document.querySelector('.speed-text');
+                    const shown = toast && !toast.classList.contains('hide') ? toast.innerText : '（未显示）';
+                    log(`页面错误提示：${shown}`, 'ok');
+                }
+                return ok;
+            }
+
+            document.querySelectorAll('button[data-file]').forEach(btn => {
+                btn.addEventListener('click', () => runOne(btn.dataset.file));
+            });
+            document.getElementById('run-all').addEventListener('click', async () => {
+                const names = Object.keys(expectations);
+                let pass = 0;
+                for (const name of names) {
+                    if (await runOne(name)) pass++;
+                    await new Promise(r => setTimeout(r, 300));
+                }
+                log(`==== 完成：${pass}/${names.length} 用例符合预期 ====`, pass === names.length ? 'ok' : 'bad');
+            });
+
+            log('验证页就绪：可点击按钮，也可直接把本地文件拖入页面。');
+        </script>
+    </body>
+</html>

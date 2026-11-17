@@ -2,7 +2,7 @@
 // Copyright (c) 2025 reall3d.com, MIT license
 // ==============================================
 import '../assets/style/style.less';
-import { Scene, AmbientLight, WebGLRenderer, Color, Matrix4, Camera, DirectionalLight, Mesh, MeshStandardMaterial } from 'three';
+import { Scene, AmbientLight, WebGLRenderer, Color, Matrix4, Camera, DirectionalLight, Mesh, MeshStandardMaterial, Vector3 } from 'three';
 import { DRACOLoader, GLTFLoader } from 'three/examples/jsm/Addons.js';
 import {
     GetCurrentDisplayShDegree,
@@ -83,6 +83,8 @@ import {
     OnLoadAndRenderPointCloudPly,
     SetViewerApi,
     GetOrignMetaString,
+    CameraSetLookAt,
+    GetAabbCenter,
 } from '../events/EventConstants';
 import { SplatMesh } from '../meshs/splatmesh/SplatMesh';
 import { ModelOptions } from '../modeldata/ModelOptions';
@@ -91,7 +93,8 @@ import { copyGsViewerOptions, genDefaultSceneMeta, initCamera, initGsViewerOptio
 import { Reall3dViewerOptions } from './Reall3dViewerOptions';
 import { SplatMeshOptions } from '../meshs/splatmesh/SplatMeshOptions';
 import { MarkData } from '../meshs/mark/data/MarkData';
-import { computeCompressionRatio, getUrl, glbKhrGs2Splat, isPointCloudPly, isString, parseRgbPly } from '../utils/CommonUtils';
+import { computeCompressionRatio, getUrl, glbKhrGs2Splat, isString, parseRgbPly } from '../utils/CommonUtils';
+import { detectGlbExtension, detectLocalFileKind, inferModelFormatFromUrl, isPointCloudPlyHeader, readPlyHeader, showLocalFileToast } from '../utils/LocalFileUtils';
 import { DecoderPath, isMobile, QualityLevels, SortTypes, ViewerVersion } from '../utils/GlobalConstants';
 import { MetaData } from '../modeldata/MetaData';
 import { globalEv } from '../events/GlobalEV';
@@ -111,6 +114,11 @@ export class Reall3dViewer {
     private metaMatrix: Matrix4;
 
     public needUpdate: boolean = true;
+
+    /** 仅供本地验证/测试使用：暴露内部事件总线与 SplatMesh，便于观察实际渲染分支 */
+    public get testHooks(): { events: Events; splatMesh: SplatMesh } {
+        return { events: this.events, splatMesh: this.splatMesh };
+    }
 
     constructor(opts: Reall3dViewerOptions = {}) {
         console.info('Reall3dViewer', ViewerVersion);
@@ -257,7 +265,12 @@ export class Reall3dViewer {
     }
 
     /**
-     * 允许拖拽本地文件进行渲染（支持模型文件、*.meta.json文件、*.scene.json文件）
+     * 允许拖拽本地文件进行渲染（支持模型文件、*.scene.json文件）
+     *
+     * 处理顺序：
+     * 1. 先按扩展名判断格式（大小写不敏感），不支持的类型直接报错返回，不改变当前场景；
+     * 2. .scene.json 走大场景 addScene 流程，其余模型文件走 addModel；
+     * 3. 模型加载完成后聚焦模型包围盒并触发一次重绘。
      */
     private enableDropLocalFile(): void {
         const that = this;
@@ -269,35 +282,35 @@ export class Reall3dViewer {
             e.preventDefault();
             e.stopPropagation();
             globalEv.fire(StopBgAudio);
-            let file = e.dataTransfer.files[0];
+            const file = e.dataTransfer.files[0];
             if (!file) return;
+            await that.handleDroppedFile(file);
+        });
+    }
 
-            let format: 'ply' | 'splat' | 'spx' | 'spz' | 'sog' | 'obj' | 'glb';
-            let isSceneJson = false;
-            if (file.name.endsWith('.spx')) {
-                format = 'spx';
-            } else if (file.name.endsWith('.splat')) {
-                format = 'splat';
-            } else if (file.name.endsWith('.ply')) {
-                format = 'ply';
-            } else if (file.name.endsWith('.spz')) {
-                format = 'spz';
-            } else if (file.name.endsWith('.sog') || file.name.endsWith('.zip')) {
-                format = 'sog';
-            } else if (file.name.endsWith('.obj')) {
-                format = 'obj';
-            } else if (file.name.endsWith('.scene.json')) {
-                isSceneJson = true;
-            } else if (file.name.endsWith('.glb')) {
-                format = 'glb';
-                globalEv.on('Information-ver', () => `glb`);
-            } else if (file.name.endsWith('.meta.json')) {
-                // 不得而知，待后续进一步检查
-            } else {
-                return console.error('unsupported format:', file.name);
-            }
+    /**
+     * 处理一个拖入的本地文件（同时供 document drop 监听器与本地验证页调用）。
+     *
+     * 处理顺序：
+     * 1. 先按扩展名判断格式（大小写不敏感），不支持的类型直接报错返回，不改变当前场景；
+     * 2. .scene.json 走大场景 addScene 流程，其余模型文件走 addModel；
+     * 3. 模型加载完成后聚焦模型包围盒并触发一次重绘。
+     */
+    public async handleDroppedFile(file: File): Promise<void> {
+        const that = this;
 
-            const url = URL.createObjectURL(file);
+        // 1) 先按扩展名判断格式
+        const kind = detectLocalFileKind(file.name);
+        if (kind.type === 'unsupported') {
+            // 明确报错且不改变当前场景（不执行 reset）
+            console.error(kind.error);
+            showLocalFileToast(kind.error);
+            return;
+        }
+
+        // 2) 生成 blob: 地址（addModel/addScene 内部不会再探测同名 .meta.json）
+        const url = URL.createObjectURL(file);
+        try {
             const opts: Reall3dViewerOptions = that.events.fire(GetOptions);
             opts.bigSceneMode = false;
             opts.debugMode = true;
@@ -311,14 +324,72 @@ export class Reall3dViewer {
             opts.shDegree = 3;
             opts.fov = 45;
             that.reset(opts);
-            if (isSceneJson) {
-                await that.addScene(url);
+
+            if (kind.type === 'scene') {
+                // .scene.json 走大场景流程，blob: 地址无后缀，需显式声明
+                await that.addScene(url, true);
             } else {
-                await that.addModel({ url, format });
-                that.events.fire(FocusAabbCenter);
+                await that.addModel({ url, format: kind.format });
+                // 3) 聚焦模型包围盒并触发一次重绘
+                that.focusLoadedModelAndRepaint();
             }
+        } catch (err) {
+            const msg = `Failed to load "${file.name}": ${err?.message || err}`;
+            console.error(msg, err);
+            showLocalFileToast(msg);
+        } finally {
             URL.revokeObjectURL(url);
-        });
+        }
+    }
+
+    /**
+     * 加载完成后聚焦模型包围盒并触发一次重绘。
+     * 同时兼容高斯 SplatMesh 与点云/网格等 three 对象（按包围盒中心聚焦）。
+     *
+     * 注意：高斯模型的包围盒要等首批数据下载解析后才可用，因此对 SplatMesh
+     * 做有限次轮询；点云/网格的包围盒在加载回调中已预先计算，可立即聚焦。
+     */
+    private focusLoadedModelAndRepaint(): void {
+        const that = this;
+        if (that.disposed) return;
+        const fire = (key: number, ...args: any): any => that.events.fire(key, ...args);
+
+        let attempts = 0;
+        const maxAttempts = 60; // 约 6 秒（100ms × 60）
+        const tryFocus = () => {
+            if (that.disposed) return;
+            const scene: Scene = fire(GetScene);
+            const center = new Vector3();
+            let found = false;
+
+            scene.traverse((obj: any) => {
+                if (found || !obj?.isObject3D) return;
+                if (obj instanceof SplatMesh) {
+                    const aabb: Vector3 = obj.fire(GetAabbCenter);
+                    // SplatModel 的 aabbCenter 在首批高斯数据解析后才赋值，未就绪时为 undefined
+                    if (aabb) {
+                        center.copy(aabb);
+                        found = true;
+                    }
+                } else if ((obj.isPoints || obj.isMesh) && (obj as Mesh).geometry?.boundingBox) {
+                    (obj as Mesh).geometry.boundingBox.getCenter(center);
+                    found = true;
+                }
+            });
+
+            if (found) {
+                fire(CameraSetLookAt, center); // 聚焦模型包围盒中心
+                fire(ViewerNeedUpdate); // 触发一次重绘
+            } else if (++attempts < maxAttempts) {
+                // 高斯数据尚未就绪，稍后重试
+                setTimeout(tryFocus, 100);
+            } else {
+                // 超时退回到 SplatMesh 包围盒中心事件
+                fire(FocusAabbCenter);
+                fire(ViewerNeedUpdate);
+            }
+        };
+        tryFocus();
     }
 
     /**
@@ -450,15 +521,16 @@ export class Reall3dViewer {
     /**
      * 添加大场景
      * @param sceneUrl 场景地址
+     * @param isSceneJson 是否按 .scene.json 解析；本地拖入生成的 blob: 地址没有后缀，必须显式传 true
      */
-    public async addScene(sceneUrl: string) {
+    public async addScene(sceneUrl: string, isSceneJson: boolean = false) {
         const that = this;
         if (that.disposed) return;
         const on = (key: number, fn?: Function, multiFn?: boolean): Function | Function[] => this.events.on(key, fn, multiFn);
         const fire = (key: number, ...args: any): any => that.events.fire(key, ...args);
 
         let meta: MetaData = {};
-        if (sceneUrl.endsWith('.scene.json')) {
+        if (isSceneJson || sceneUrl.endsWith('.scene.json')) {
             try {
                 const res = await fetch(sceneUrl, { mode: 'cors', credentials: 'omit', cache: 'reload' });
                 if (res.status === 200) {
@@ -584,21 +656,16 @@ export class Reall3dViewer {
         meta.url = meta.url || modelOpts.url;
         if (!modelOpts.format) {
             modelOpts.url = isMetaUrl ? meta.url : modelOpts.url;
-            const urlfile = modelOpts.url.split('?')[0];
-            if (urlfile.endsWith('.spx')) {
-                modelOpts.format = 'spx';
-            } else if (urlfile.endsWith('.splat')) {
-                modelOpts.format = 'splat';
-            } else if (urlfile.endsWith('.ply')) {
-                modelOpts.format = 'ply';
-            } else if (urlfile.endsWith('.spz')) {
-                modelOpts.format = 'spz';
-            } else if (urlfile.endsWith('.zip') || urlfile.endsWith('.sog') || urlfile.endsWith('/meta.json') || urlfile == 'meta.json') {
-                modelOpts.format = 'sog';
-            } else if (urlfile.endsWith('.obj')) {
-                modelOpts.format = 'obj';
-            } else if (urlfile.endsWith('.glb')) {
-                modelOpts.format = 'glb';
+            // 统一的扩展名推断（小写比较、忽略查询参数）；
+            // blob: 地址没有扩展名，正常情况下拖入链路已在生成 blob: 前确定 format，
+            // 走到这里仍无 format 时才报未知格式，避免对 blob: 地址误报
+            const inferFormat = inferModelFormatFromUrl(modelOpts.url);
+            if (inferFormat) {
+                modelOpts.format = inferFormat;
+            } else if (modelOpts.url.startsWith('blob:')) {
+                // blob: 地址没有扩展名可推断；调用方必须在创建 blob: 前显式传入 format
+                console.error('unknow format: blob: URL requires an explicit format, call addModel({ url, format }) instead');
+                return;
             } else {
                 console.error('unknow format!', modelOpts.url);
                 return;
@@ -633,13 +700,17 @@ export class Reall3dViewer {
         if (modelOpts.format === 'glb') {
             const fileBytes: Uint8Array = await loadFile(modelOpts.url, that.events);
             fire(OnFetchStop, 100);
-            const ui32s = new Uint32Array(fileBytes.slice(0, 32).buffer);
-            const jsonLength4 = Math.floor((ui32s[3] + 3) / 4) * 4;
-            const sJson = new TextDecoder().decode(fileBytes.slice(20, 20 + jsonLength4));
+            if (!fileBytes) {
+                console.error('glb file load failed:', modelOpts.url);
+                return;
+            }
+
+            // 读取 GLB JSON chunk 并识别高斯相关扩展
+            const { kind: glbKind, json: oJson, jsonLength4 } = detectGlbExtension(fileBytes);
 
             // 扩展标准尚未发布，当前先初步对应
-            if (/KHR_gaussian_splatting_compression_spz_2/.test(sJson)) {
-                const oJson = JSON.parse(sJson);
+            if (glbKind === 'spz') {
+                // KHR_gaussian_splatting_compression_spz_2：内嵌 spz 压缩数据
                 const buffersOffset = 20 + jsonLength4 + 8;
                 const spzBytes = fileBytes
                     .subarray(buffersOffset, buffersOffset + oJson.buffers[0].byteLength)
@@ -654,7 +725,8 @@ export class Reall3dViewer {
                 await fire(OnSetWaterMark, meta.watermark || meta.name);
                 URL.revokeObjectURL(modelOpts.url);
                 modelOpts.url = glburl;
-            } else if (/KHR_gaussian_splatting/.test(sJson)) {
+            } else if (glbKind === 'gaussian') {
+                // KHR_gaussian_splatting：标准高斯扩展，转换为 .splat 后走高斯渲染
                 const splatBytes = glbKhrGs2Splat(fileBytes);
                 const glburl = modelOpts.url;
                 modelOpts.url = URL.createObjectURL(new Blob([splatBytes as Uint8Array<ArrayBuffer>], { type: 'application/octet-stream' }));
@@ -670,8 +742,8 @@ export class Reall3dViewer {
                 await fire(OnSetWaterMark, meta.watermark || meta.name);
                 URL.revokeObjectURL(modelOpts.url);
                 modelOpts.url = glburl;
-            } else if (/com_github_gotoeasy_gsbox_webp_rgb_ply/.test(sJson)) {
-                const oJson = JSON.parse(sJson);
+            } else if (glbKind === 'gobox-webp-ply') {
+                // com_github_gotoeasy_gsbox_webp_rgb_ply：webp 压缩的 RGB 点云 PLY，走点云渲染
                 const buffersOffset = 20 + jsonLength4 + 8;
                 const dataBytes = fileBytes
                     .subarray(buffersOffset, buffersOffset + oJson.buffers[0].byteLength)
@@ -688,6 +760,7 @@ export class Reall3dViewer {
                 fire(Information, { renderSplatCount: count, visibleSplatCount: count, modelSplatCount: count, scene: 'small (glb-ply)' });
                 URL.revokeObjectURL(urlBlob);
             } else {
+                // 普通 GLB：走 three GLTFLoader 网格渲染
                 const urlBlob = URL.createObjectURL(new Blob([fileBytes as Uint8Array<ArrayBuffer>], { type: 'application/octet-stream' }));
                 await this.loadGlb(urlBlob, meta);
                 URL.revokeObjectURL(urlBlob);
@@ -696,20 +769,20 @@ export class Reall3dViewer {
             this.options({ autoRotate: false });
             await fire(OnLoadAndRenderObj, modelOpts.url);
         } else if (modelOpts.format === 'ply' && modelOpts.url.startsWith('blob:')) {
+            // 本地拖入的 PLY：先读文件头区分点云 PLY 与高斯 PLY
             const fileBytes: Uint8Array = await loadFile(modelOpts.url, that.events);
             fire(OnFetchStop, 100);
-
-            let header = new TextDecoder().decode(fileBytes.slice(0, 1024 * 2));
-            const header_end = 'end_header\n';
-            const header_end_index = header.indexOf(header_end);
-            if (header_end_index < 0) {
-                if (fileBytes.byteLength > 1024 * 2) throw new Error('Unable to read .ply file header');
+            if (!fileBytes) {
+                console.error('ply file load failed:', modelOpts.url);
                 return;
             }
-            header = header.substring(0, header_end_index);
-            if (isPointCloudPly(header)) {
+
+            const header = readPlyHeader(fileBytes);
+            if (isPointCloudPlyHeader(header)) {
+                // 点云 PLY：走点云渲染分支
                 await fire(OnLoadAndRenderPointCloudPly, modelOpts.url);
             } else {
+                // 高斯 PLY：走高斯渲染分支
                 this.splatMesh.addModel(modelOpts, meta);
                 await fire(OnSetWaterMark, meta.watermark || meta.name);
             }
@@ -722,7 +795,7 @@ export class Reall3dViewer {
         ((isMobile && meta.mobileEnableJoystick) || (!isMobile && meta.pcEnableJoystick)) && fire(ShowJoystick);
     }
 
-    private async loadGlb(urlBlob: string, meta: MetaData) {
+    private loadGlb(urlBlob: string, meta: MetaData): Promise<void> {
         const fire = (key: number, ...args: any): any => this.events.fire(key, ...args);
 
         const loader = new GLTFLoader();
@@ -730,26 +803,38 @@ export class Reall3dViewer {
         dracoLoader.setDecoderPath(DecoderPath);
         loader.setDRACOLoader(dracoLoader);
 
-        loader.load(
-            urlBlob,
-            gltf => {
-                const model = gltf.scene;
+        // 返回 Promise，使调用方可以在网格真正加入场景后再聚焦包围盒/重绘
+        return new Promise(resolve => {
+            loader.load(
+                urlBlob,
+                gltf => {
+                    const model = gltf.scene;
 
-                // 对 MeshStandardMaterial 的极端参数进行修复，改为非金属，保证漫反射
-                model.traverse(obj => {
-                    if (!(obj as Mesh).isMesh) return;
-                    const mat = (obj as Mesh).material;
-                    if (mat instanceof MeshStandardMaterial && mat.metalness >= 1 && mat.roughness >= 1) mat.metalness = 0;
-                });
+                    // 对 MeshStandardMaterial 的极端参数进行修复，改为非金属，保证漫反射
+                    model.traverse(obj => {
+                        if (!(obj as Mesh).isMesh) return;
+                        const mat = (obj as Mesh).material;
+                        if (mat instanceof MeshStandardMaterial && mat.metalness >= 1 && mat.roughness >= 1) mat.metalness = 0;
+                    });
 
-                (fire(GetScene) as Scene).add(model);
-                fire(LoadSmallSceneMetaData, meta);
-                fire(MarkUpdateVisible, true);
-                fire(ViewerNeedUpdate);
-            },
-            () => {},
-            err => console.error(err),
-        );
+                    // 预计算包围盒，供加载完成后的聚焦逻辑直接使用
+                    model.traverse(obj => {
+                        if ((obj as Mesh).isMesh) (obj as Mesh).geometry?.computeBoundingBox?.();
+                    });
+
+                    (fire(GetScene) as Scene).add(model);
+                    fire(LoadSmallSceneMetaData, meta);
+                    fire(MarkUpdateVisible, true);
+                    fire(ViewerNeedUpdate);
+                    resolve();
+                },
+                () => {},
+                err => {
+                    console.error(err);
+                    resolve();
+                },
+            );
+        });
     }
 
     // /**

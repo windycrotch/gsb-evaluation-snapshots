@@ -1,0 +1,7 @@
+{
+  "name": "drop-scene-demo",
+  "version": "1.0",
+  "url": "https://example.com/lod-meta.json",
+  "autoRotate": false,
+  "pointcloudMode": false
+}

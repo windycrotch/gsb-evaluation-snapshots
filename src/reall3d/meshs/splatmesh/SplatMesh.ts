@@ -52,6 +52,7 @@ import { SplatMeshOptions } from './SplatMeshOptions';
 import { ModelOptions } from '../../modeldata/ModelOptions';
 import { initSplatMeshOptions } from '../../utils/ViewerUtils';
 import { isInFrustum } from '../../utils/CommonUtils';
+import { inferModelFormatFromUrl } from '../../utils/LocalFileUtils';
 import { MetaData } from '../../modeldata/MetaData';
 import { BoundBox } from '../boundbox/BoundBox';
 import { QualityLevels, SortTypes } from '../../utils/GlobalConstants';
@@ -189,21 +190,12 @@ export class SplatMesh extends Mesh {
         if (that.disposed) return;
 
         if (!opts.format) {
-            if (opts.url.endsWith('.spx')) {
-                opts.format = 'spx';
-            } else if (opts.url.endsWith('.splat')) {
-                opts.format = 'splat';
-            } else if (opts.url.endsWith('.ply')) {
-                opts.format = 'ply';
-            } else if (opts.url.endsWith('.spz')) {
-                opts.format = 'spz';
-            } else if (opts.url.endsWith('.zip') || opts.url.endsWith('.sog') || opts.url.endsWith('/meta.json') || opts.url == 'meta.json') {
-                opts.format = 'sog';
-            } else if (opts.url.endsWith('.glb')) {
-                opts.format = 'glb';
-            } else if (opts.url.endsWith('.glb')) {
-                opts.format = 'glb';
-            } else if (opts.url.endsWith('.lod.json') || opts.url.endsWith('lod-meta.json')) {
+            // 统一的扩展名推断（小写比较、忽略查询参数）；blob: 地址无扩展名时不在此猜测
+            const inferFormat = inferModelFormatFromUrl(opts.url);
+            if (inferFormat && inferFormat !== 'obj') {
+                opts.format = inferFormat;
+            } else if (!opts.url.startsWith('blob:') && (opts.url.endsWith('.lod.json') || opts.url.endsWith('lod-meta.json'))) {
+                // LOD 元数据地址，格式保持空，由后续 LOD 流程处理
             } else {
                 console.error('unsupported format:', opts.url);
                 return;

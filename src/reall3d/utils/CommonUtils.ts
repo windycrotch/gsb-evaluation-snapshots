@@ -589,16 +589,20 @@ export function saveJsonAsFile(json: object | string, fileName: string = 'jsonfi
 
 // 当前扩充标准为候选阶段，无压缩，实际应用可能不合适，仅简单试验支持，忽略SH
 export function glbKhrGs2Splat(glbBytes: Uint8Array): Uint8Array {
-    const jsonLength = new Uint32Array(glbBytes.slice(0, 32).buffer)[3];
-    const oJson = JSON.parse(new TextDecoder().decode(glbBytes.slice(20, 20 + jsonLength)));
+    // 用 DataView 显式按字节偏移读取，兼容带 byteOffset 的 Uint8Array（如 Node Buffer 池）
+    const dv = new DataView(glbBytes.buffer, glbBytes.byteOffset, glbBytes.byteLength);
+    const jsonLength4 = dv.getUint32(12, true); // JSON chunk 长度（含 0x20 填充）
+    // trim 掉 GLB 的 0x20 填充后再解析，避免尾部空格导致 JSON.parse 报错
+    const oJson = JSON.parse(new TextDecoder().decode(glbBytes.subarray(20, 20 + jsonLength4)).trim());
     const positionIdx: number = oJson.meshes[0].primitives[0].attributes['POSITION'];
     const scaleIdx: number = oJson.meshes[0].primitives[0].attributes['KHR_gaussian_splatting:SCALE'];
     const sh0Idx: number = oJson.meshes[0].primitives[0].attributes['KHR_gaussian_splatting:SH_DEGREE_0_COEF_0'];
     const opacityIdx: number = oJson.meshes[0].primitives[0].attributes['KHR_gaussian_splatting:OPACITY'];
     const rotationIdx: number = oJson.meshes[0].primitives[0].attributes['KHR_gaussian_splatting:ROTATION'];
 
-    const f32sGlb = new Float32Array(glbBytes.buffer);
-    const byteLength1 = 20 + jsonLength + 8;
+    // 显式带上 byteOffset，兼容 Node Buffer 池等底层 ArrayBuffer 带偏移的情况
+    const f32sGlb = new Float32Array(glbBytes.buffer, glbBytes.byteOffset, glbBytes.byteLength / 4);
+    const byteLength1 = 20 + jsonLength4 + 8; // 12 字节文件头 + 8 字节 JSON chunk 头 + JSON chunk（含填充）
     const offsetPosition = (byteLength1 + oJson.bufferViews[positionIdx].byteOffset) / 4;
     const offsetScale = (byteLength1 + oJson.bufferViews[scaleIdx].byteOffset) / 4;
     const offsetRGB = (byteLength1 + oJson.bufferViews[sh0Idx].byteOffset) / 4;
@@ -729,11 +733,15 @@ export function allocTest(renderer: WebGLRenderer, width: number, height: number
 
 // 不含header_end
 export function isPointCloudPly(header: string) {
-    const oSet = new Set<string>(['x', 'y', 'z', 'red', 'green', 'blue']);
-    for (let prop of header.split('\n').filter(k => k.startsWith('property '))) {
-        oSet.delete(prop.split(' ')[2]);
+    // 统一换行，兼容 CRLF 文件头；属性名取每行最后一段，兼容 "property list ..." 写法
+    const propNames = new Set<string>();
+    for (const line of header.replace(/\r\n/g, '\n').split('\n')) {
+        if (!line.startsWith('property ')) continue;
+        const parts = line.split(' ');
+        propNames.add(parts[parts.length - 1]);
     }
-    return !oSet.size;
+    // 同时具备 red/green/blue 属性即视为点云 PLY（3DGS 高斯 PLY 用 f_dc_* 表达颜色）
+    return propNames.has('red') && propNames.has('green') && propNames.has('blue');
 }
 
 export interface RgbPly {

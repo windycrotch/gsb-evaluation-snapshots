@@ -5,6 +5,7 @@ import { Matrix4, Vector3 } from 'three';
 import { ModelOptions } from './ModelOptions';
 import { SplatTiles } from './SplatTiles';
 import { MetaData } from './MetaData';
+import { inferModelFormatFromUrl } from '../utils/LocalFileUtils';
 
 /**
  * SPX file header information
@@ -131,20 +132,10 @@ export class SplatModel {
         that.metaMatrix = meta.transform ? new Matrix4().fromArray(meta.transform) : null;
 
         if (!opts.format) {
-            if (opts.url?.endsWith('.spx')) {
-                that.opts.format = 'spx';
-            } else if (opts.url?.endsWith('.splat')) {
-                that.opts.format = 'splat';
-            } else if (opts.url?.endsWith('.ply')) {
-                that.opts.format = 'ply';
-            } else if (opts.url?.endsWith('.spz')) {
-                that.opts.format = 'spz';
-            } else if (opts.url?.endsWith('.zip') || opts.url?.endsWith('.sog') || opts.url?.endsWith('meta.json')) {
-                that.opts.format = 'sog';
-            } else if (opts.url?.endsWith('.glb')) {
-                that.opts.format = 'glb';
-            } else {
-                console.error('unknown format!');
+            // 统一的扩展名推断（小写比较、忽略查询参数）；blob: 地址无扩展名时不在此猜测
+            that.opts.format = inferModelFormatFromUrl(opts.url);
+            if (!that.opts.format && !opts.url?.startsWith('blob:')) {
+                console.error('unknown format!', opts.url);
             }
         }
         that.abortController = new AbortController(); // TODO
