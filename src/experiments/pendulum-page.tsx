@@ -35,7 +35,6 @@ export default function PendulumExperimentPage() {
   const [isPlaying, setIsPlaying] = useState(true);
   const [simulationSpeed, setSimulationSpeed] = useState(1);
   const [resetTrigger, setResetTrigger] = useState(0);
-  const [timeElapsed, setTimeElapsed] = useState(0);
 
   // Physics
   const [length, setLength] = useState(10);
@@ -55,7 +54,6 @@ export default function PendulumExperimentPage() {
     setResetTrigger((n) => n + 1);
     setIsPlaying(true);
     setSimulationSpeed(1);
-    setTimeElapsed(0);
   };
 
   // === PARAMETER CONTROLS ===
@@ -146,7 +144,7 @@ export default function PendulumExperimentPage() {
           kinetic={data.kineticEnergy}
           potential={data.potentialEnergy}
           total={data.totalEnergy}
-          maxEnergy={data.totalEnergy * 1.3 || 1}
+          maxEnergy={data.maxEnergy}
         />
       </div>
     </>
@@ -190,7 +188,7 @@ export default function PendulumExperimentPage() {
         onReset={handleReset}
         speed={simulationSpeed}
         onSpeedChange={setSimulationSpeed}
-        timeElapsed={timeElapsed}
+        timeElapsed={data?.elapsedTime ?? 0}
       />
 
       {/* Parameter Controls - Toggleable */}

@@ -1,9 +1,17 @@
 "use client";
 
-import { useRef, useMemo, useEffect, useCallback, useState } from "react";
+import { useRef, useMemo, useEffect, useState } from "react";
 import { useFrame } from "@react-three/fiber";
 import { Line, Html, Text } from "@react-three/drei";
 import * as THREE from "three";
+import {
+  correctedPeriod,
+  theoreticalFrequency,
+  pendulumKE,
+  pendulumPE,
+  rk4Step,
+  PeriodMeasurer,
+} from "./pendulum-physics";
 
 // ============================================
 // INTERFACES
@@ -33,6 +41,8 @@ export interface PendulumData {
   kineticEnergy: number;
   potentialEnergy: number;
   totalEnergy: number;
+  /** Reference energy (baseline at reset / parameter change) for bar scaling */
+  maxEnergy: number;
   angle: number;
   angleDeg: number;
   angularVelocity: number;
@@ -44,49 +54,6 @@ export interface PendulumData {
 }
 
 // ============================================
-// PHYSICS HELPERS
-// ============================================
-
-/** Large-angle period correction: T = T₀ × (1 + θ₀²/16 + 11θ₀⁴/3072) */
-function correctedPeriod(L: number, g: number, theta0: number): number {
-  const T0 = 2 * Math.PI * Math.sqrt(L / g);
-  const correction = 1 + (theta0 * theta0) / 16 + (11 * theta0 * theta0 * theta0 * theta0) / 3072;
-  return T0 * correction;
-}
-
-function pendulumPE(m: number, g: number, L: number, theta: number): number {
-  return m * g * L * (1 - Math.cos(theta));
-}
-
-function pendulumKE(m: number, L: number, omega: number): number {
-  return 0.5 * m * L * L * omega * omega;
-}
-
-// ============================================
-// RK4 INTEGRATOR
-// ============================================
-
-function rk4Step(
-  theta: number, omega: number,
-  g: number, L: number, b: number, dt: number
-): [number, number] {
-  const f = (th: number, om: number): [number, number] => {
-    const dTheta = om;
-    const dOmega = -(g / L) * Math.sin(th) - b * om;
-    return [dTheta, dOmega];
-  };
-
-  const [k1a, k1b] = f(theta, omega);
-  const [k2a, k2b] = f(theta + k1a * dt * 0.5, omega + k1b * dt * 0.5);
-  const [k3a, k3b] = f(theta + k2a * dt * 0.5, omega + k2b * dt * 0.5);
-  const [k4a, k4b] = f(theta + k3a * dt, omega + k3b * dt);
-
-  const newTheta = theta + (dt / 6) * (k1a + 2 * k2a + 2 * k3a + k4a);
-  const newOmega = omega + (dt / 6) * (k1b + 2 * k2b + 2 * k3b + k4b);
-  return [newTheta, newOmega];
-}
-
-// ============================================
 // 3D ENERGY BARS COMPONENT
 // ============================================
 
@@ -94,20 +61,22 @@ interface EnergyBars3DProps {
   kineticEnergy: number;
   potentialEnergy: number;
   totalEnergy: number;
+  /** Fixed reference energy so decay under damping stays visible */
+  maxEnergy: number;
   position?: [number, number, number];
 }
 
-function EnergyBars3D({ kineticEnergy, potentialEnergy, totalEnergy, position = [0, -5, 0] }: EnergyBars3DProps) {
-  const maxEnergy = Math.max(totalEnergy * 1.2, 0.1);
+function EnergyBars3D({ kineticEnergy, potentialEnergy, totalEnergy, maxEnergy, position = [0, -5, 0] }: EnergyBars3DProps) {
+  const scale = Math.max(maxEnergy, 0.1);
   const barWidth = 0.4;
   const barSpacing = 0.6;
   const maxHeight = 4;
   const baseY = position[1];
 
   // Calculate bar heights
-  const keHeight = (kineticEnergy / maxEnergy) * maxHeight;
-  const peHeight = (potentialEnergy / maxEnergy) * maxHeight;
-  const teHeight = (totalEnergy / maxEnergy) * maxHeight;
+  const keHeight = (kineticEnergy / scale) * maxHeight;
+  const peHeight = (potentialEnergy / scale) * maxHeight;
+  const teHeight = (totalEnergy / scale) * maxHeight;
 
   // Group position offset
   const groupX = position[0];
@@ -235,8 +204,8 @@ export function PendulumSceneComponent({
   simulationSpeed = 1,
   resetTrigger,
 }: PendulumSceneProps) {
-  // Local state for 3D energy bars (updated every 8 frames)
-  const [energyData, setEnergyData] = useState({ ke: 0, pe: 0, total: 0 });
+  // Local state for 3D energy bars (updated every few frames)
+  const [energyData, setEnergyData] = useState({ ke: 0, pe: 0, total: 0, max: 0.1 });
 
   // Refs
   const bobRef = useRef<THREE.Group>(null);
@@ -253,15 +222,20 @@ export function PendulumSceneComponent({
     theta: initialAngle,
     omega: 0,
     time: 0,
-    lastTheta: initialAngle,
     oscillations: 0,
-    lastCrossTime: 0,
-    measuredPeriod: 0,
   });
 
-  // Frame counter for throttling React state updates
+  // Same-direction zero-crossing period measurement
+  const measurerRef = useRef(new PeriodMeasurer());
+
+  // Energy baseline for bar scaling: fixed at reset / parameter change so
+  // that total-energy decay under damping stays visible.
+  const maxEnergyRef = useRef(
+    Math.max(mass * gravity * length * (1 - Math.cos(initialAngle)), 0.1)
+  );
+
+  // Frame counter for throttling React state to keep the UI responsive
   const frameCountRef = useRef(0);
-  const lastEnergyDataRef = useRef({ ke: 0, pe: 0, total: 0 });
 
   // Trail
   const MAX_TRAIL = 1500;
@@ -282,29 +256,48 @@ export function PendulumSceneComponent({
   // Bob radius scales with mass (visual hint)
   const bobRadius = 0.5 + mass * 0.08;
 
-  // Calculate initial total energy for energy bars max reference
-  const initialTotalEnergy = mass * gravity * length * (1 - Math.cos(initialAngle));
-
-  // Reset
+  // Reset: restore the initial pose, zero the clock, clear the trail and
+  // restart both the period measurement and the energy baseline.
   useEffect(() => {
     if (resetTrigger !== undefined && resetTrigger > 0) {
       stateRef.current = {
         theta: initialAngle,
         omega: 0,
         time: 0,
-        lastTheta: initialAngle,
         oscillations: 0,
-        lastCrossTime: 0,
-        measuredPeriod: 0,
       };
+      measurerRef.current.reset();
+      const e0 = Math.max(mass * gravity * length * (1 - Math.cos(initialAngle)), 0.1);
+      maxEnergyRef.current = e0;
       frameCountRef.current = 0;
       trailBuf.idx = 0;
       trailBuf.positions.fill(0);
       trailBuf.colors.fill(0);
       trailBuf.ages.fill(0);
-      setEnergyData({ ke: 0, pe: mass * gravity * length * (1 - Math.cos(initialAngle)), total: mass * gravity * length * (1 - Math.cos(initialAngle)) });
+      setEnergyData({ ke: 0, pe: e0, total: e0, max: e0 });
     }
-  }, [resetTrigger, initialAngle, mass, gravity, length, trailBuf]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resetTrigger, trailBuf]);
+
+  // Parameter change without reset: the pendulum keeps evolving from its
+  // current pose, but the measured period must be re-measured and the energy
+  // baseline re-anchored to the current total energy.
+  const prevParamsRef = useRef({ length, gravity, initialAngle });
+  useEffect(() => {
+    const prev = prevParamsRef.current;
+    if (
+      prev.length !== length ||
+      prev.gravity !== gravity ||
+      prev.initialAngle !== initialAngle
+    ) {
+      measurerRef.current.reset();
+      const s = stateRef.current;
+      const currentTotal =
+        pendulumKE(mass, length, s.omega) + pendulumPE(mass, gravity, length, s.theta);
+      maxEnergyRef.current = Math.max(currentTotal, 0.1);
+      prevParamsRef.current = { length, gravity, initialAngle };
+    }
+  }, [length, gravity, initialAngle, mass]);
 
   // Cleanup
   useEffect(() => {
@@ -318,25 +311,25 @@ export function PendulumSceneComponent({
     const s = stateRef.current;
     frameCountRef.current++;
 
+    // Integrate only while playing: when paused, nothing (pose, trail,
+    // vectors, energy, clock) evolves, and resuming continues from the
+    // exact paused state. simulationSpeed only scales how fast simulated
+    // time advances — s.time is always simulated elapsed time.
     if (isPlaying && dt > 0) {
       // Sub-step for stability at high speed
       const steps = Math.max(1, Math.ceil(dt / 0.004));
       const subDt = dt / steps;
       for (let i = 0; i < steps; i++) {
+        const prevTheta = s.theta;
+        const prevTime = s.time;
         const [newTheta, newOmega] = rk4Step(s.theta, s.omega, gravity, length, damping, subDt);
-        s.lastTheta = s.theta;
         s.theta = newTheta;
         s.omega = newOmega;
-      }
-      s.time += dt;
-
-      // Count oscillations (zero-crossing detection)
-      if (s.lastTheta < 0 && s.theta >= 0) {
-        s.oscillations++;
-        if (s.lastCrossTime > 0) {
-          s.measuredPeriod = s.time - s.lastCrossTime;
+        s.time += subDt;
+        // Count oscillations & measure period via same-direction zero crossings
+        if (measurerRef.current.record(prevTheta, s.theta, prevTime, s.time)) {
+          s.oscillations++;
         }
-        s.lastCrossTime = s.time;
       }
     }
 
@@ -468,27 +461,27 @@ export function PendulumSceneComponent({
       pos.needsUpdate = true;
     }
 
-    // Calculate energies
+    // Calculate energies (single source for both the data panel and the
+    // 3D energy bars)
     const ke = pendulumKE(mass, length, omega);
     const pe = pendulumPE(mass, gravity, length, theta);
     const total = ke + pe;
 
-    // Store latest energy data for 3D bars
-    lastEnergyDataRef.current = { ke, pe, total };
-
-    // Update React state every 8 frames (at 60fps = ~7.5 updates per second)
-    if (frameCountRef.current % 8 === 0) {
-      setEnergyData({ ke, pe, total });
+    // Update React state every 4 frames (at 60fps = ~15 updates per second)
+    if (frameCountRef.current % 4 === 0) {
+      const maxEnergy = maxEnergyRef.current;
+      setEnergyData({ ke, pe, total, max: maxEnergy });
 
       // Throttled data callback
       onDataChange?.({
         period: correctedPeriod(length, gravity, Math.abs(initialAngle)),
-        periodMeasured: s.measuredPeriod,
-        frequency: 1 / correctedPeriod(length, gravity, Math.abs(initialAngle)),
+        periodMeasured: measurerRef.current.measuredPeriod,
+        frequency: theoreticalFrequency(length, gravity, Math.abs(initialAngle)),
         angularFrequency: Math.sqrt(gravity / length),
         kineticEnergy: ke,
         potentialEnergy: pe,
         totalEnergy: total,
+        maxEnergy,
         angle: theta,
         angleDeg: (theta * 180) / Math.PI,
         angularVelocity: omega,
@@ -670,6 +663,7 @@ export function PendulumSceneComponent({
         kineticEnergy={energyData.ke}
         potentialEnergy={energyData.pe}
         totalEnergy={energyData.total}
+        maxEnergy={energyData.max}
         position={[length * 0.8, -length * 0.6, 0]}
       />
     </group>
