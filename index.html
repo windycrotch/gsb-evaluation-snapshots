@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+
+    <!-- Content-Security-Policy for the PACKAGED DESKTOP BUILD.
+         electron/main.ts delivers a CSP via webRequest.onHeadersReceived, but
+         that never applies under file://, which is how the packaged app loads
+         (main.ts uses loadFile). Proof by contradiction: if it did apply, its
+         `script-src 'self'` would evaluate 'self' against an opaque origin and
+         block file:///…/assets/index-*.js — every shipped build would be a black
+         screen, and they are not. So until today the desktop app ran with NO
+         policy at all, and an evaluated pattern could fetch() any host.
+
+         This policy is derived from the WEB one in netlify.toml, deliberately —
+         NOT from the string in main.ts, which is materially weaker (it allows
+         `ws:`/`wss:` to any host and `img-src https:`, i.e. exactly the
+         exfiltration the web build blocks, and omits form-action, object-src,
+         base-uri and frame-ancestors entirely).
+
+         Deltas from the web header, each intentional:
+         · `file:` added — required for the packaged renderer to load its own
+           assets. Harmless on web: the Netlify header also applies there and a
+           browser enforces the INTERSECTION of header and meta, so the web build
+           stays exactly as tight as netlify.toml.
+         · `ws://localhost:8080` added for the @strudel/osc bridge. It only takes
+           effect on desktop; on web the header intersection still refuses it,
+           which is correct — the OSC bridge is a local process.
+         · `freesound.org` REMOVED. It was allowlisted for code that does not
+           exist (0 references in src/), and a dead allowlist entry is a live
+           exfiltration destination — freesound.org accepts authenticated uploads.
+         · `form-action 'self'` added. It was absent everywhere, so an injected
+           form could POST the stored GitHub PAT to any host. CSP cannot stop
+           top-level navigation, but it can stop this.
+         · `frame-ancestors` left out. Browsers ignore it in a <meta> policy and
+           log a console error on every page load ("…is ignored when delivered via
+           a <meta> element"); it only works as a header. On the web the
+           netlify.toml header carries it, with X-Frame-Options DENY.
+
+         'unsafe-eval' is required and non-negotiable: evaluating user patterns
+         through Function() is the product. -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self' file:; script-src 'self' file: 'unsafe-eval' blob: data:; script-src-elem 'self' file: blob: data:; style-src 'self' file: 'unsafe-inline'; connect-src 'self' file: https://live-music-coder.pro https://api.github.com https://raw.githubusercontent.com https://*.githubusercontent.com ws://localhost:8080 ws://127.0.0.1:8080; img-src 'self' file: data: blob:; media-src 'self' file: https://live-music-coder.pro blob: data:; font-src 'self' file: data:; worker-src 'self' file: blob: data:; frame-src 'none'; object-src 'none'; base-uri 'self'; form-action 'self'"
+    />
+
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="apple-touch-icon" href="/icon-192.png" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+    <!-- Self-hosted IBM Plex (see src/styles/fonts.css for the rationale).
+         Only the two regular weights are preloaded — they cover first paint
+         for both the UI chrome and the code editor. The other five load
+         normally via @font-face; preloading every variant would compete
+         with the JS bundle for bandwidth on first visit. -->
+    <link rel="preload" href="/fonts/ibm-plex-sans-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="/fonts/ibm-plex-mono-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin />
+    <title>Live Music Coder — Write Code, Hear Music, Live</title>
+    <meta name="description" content="Browser-based live coding music IDE. Write code, hear music instantly. 4 audio engines, visual node graph, real-time visualizers, and instant code sharing. Free, no install." />
+    <!-- Canonical URL: scripts/prerender.mjs writes one into every prerendered route and
+         replaces the title, description, og:* and twitter:* tags below with the route's own.
+         The SPA shell (dist/spa.html, for deep links) gets it from usePageMeta at runtime. -->
+
+    <!-- Open Graph -->
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Live Music Coder — Write Code, Hear Music, Live" />
+    <meta property="og:description" content="A browser-based IDE where you write code and hear music in real time. 4 audio engines, visual node graph, real-time visualizers, and instant code sharing." />
+    <meta property="og:url" content="https://live-music-coder.pro" />
+    <meta property="og:site_name" content="Live Music Coder" />
+    <meta property="og:locale" content="en_US" />
+    <meta property="og:locale:alternate" content="de_DE" />
+    <meta property="og:locale:alternate" content="es_ES" />
+    <meta property="og:image" content="https://live-music-coder.pro/og-image.png" />
+
+    <!-- Twitter Card -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Live Music Coder — Write Code, Hear Music, Live" />
+    <meta name="twitter:description" content="Browser-based live coding music IDE. 4 engines, visual node graph, real-time visualizers, instant sharing." />
+    <meta name="twitter:image" content="https://live-music-coder.pro/og-image.png" />
+
+    <!-- Additional SEO -->
+    <meta name="author" content="Wender Media" />
+    <meta name="robots" content="index, follow" />
+    <meta name="theme-color" content="#0f0c0a" />
+
+    <!-- JSON-LD structured data: WebApplication -->
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "WebApplication",
+      "name": "Live Music Coder",
+      "description": "Browser-based live coding music IDE. Write code, hear music instantly. 4 audio engines, visual node graph, real-time visualizers, and instant code sharing.",
+      "url": "https://live-music-coder.pro",
+      "applicationCategory": "MultimediaApplication",
+      "operatingSystem": "Any",
+      "browserRequirements": "Requires a modern browser with Web Audio API support",
+      "offers": {
+        "@type": "Offer",
+        "price": "0",
+        "priceCurrency": "USD"
+      },
+      "author": {
+        "@type": "Organization",
+        "@id": "https://www.wendermedia.com/#organization",
+        "name": "Wender Media",
+        "legalName": "Wender Media - Arnold Wender",
+        "url": "https://www.wendermedia.com",
+        "founder": { "@id": "https://arnoldwender.com/#person" },
+        "sameAs": [
+          "https://www.youtube.com/@wendermedia",
+          "https://www.linkedin.com/company/wender-media",
+          "https://www.xing.com/pages/wendermedia",
+          "https://www.facebook.com/wendermedia",
+          "https://www.instagram.com/wendermedia/",
+          "https://github.com/arnoldwender",
+          "https://wendermedia.com",
+          "https://wendermedia.net",
+          "https://wendermedia.biz",
+          "https://wendermedia.info",
+          "https://wendermedia.org",
+          "https://wender.media"
+        ]
+      },
+      "inLanguage": ["en", "de", "es"],
+      "featureList": [
+        "4 audio engines (Strudel, Tone.js, Web Audio API, MIDI)",
+        "Visual signal-flow graph with bidirectional Tone.js and Web Audio code sync",
+        "Real-time waveform and spectrum visualizers",
+        "Instant code sharing via URL and GitHub Gist",
+        "Audio recording and export",
+        "No installation required"
+      ]
+    }
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

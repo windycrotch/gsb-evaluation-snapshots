@@ -1,0 +1,301 @@
+/* SPDX-License-Identifier: MIT
+   Copyright (c) 2026 Arnold Wender / Wender Media */
+
+/* ──────────────────────────────────────────────────────────
+   Global styles — Tailwind CSS v4 + design token imports
+   Art direction "SIGNAL ROOM" —
+   Dark-only: this is an instrument surface read in a dark room.
+   ────────────────────────────────────────────────────────── */
+@import "tailwindcss";
+@import './fonts.css';
+@import './tokens/index.css';
+
+/* --- Base element styles --- */
+html {
+  color-scheme: dark;
+}
+
+body {
+  font-family: var(--font-family-sans);
+  font-size: var(--font-size-base);
+  line-height: var(--line-height-base);
+  color: var(--color-text);
+  background: var(--color-bg);
+  margin: 0;
+  overflow: hidden;
+  height: 100vh;
+}
+
+#root {
+  height: 100%;
+}
+
+/* --- Electron on macOS: reserve 28px at the top of the viewport for
+       the custom title-bar drag strip (see src/lib/platform.ts and the
+       <TitleBar /> rendered from App.tsx). This prevents traffic lights
+       from covering page headers and provides a draggable region since
+       BrowserWindow uses titleBarStyle: 'hiddenInset'. Applied via a
+       class set on <html> from main.tsx so it never activates on web. */
+html.electron-mac body {
+  padding-top: 28px;
+  box-sizing: border-box;
+}
+
+/* --- Monospace elements — code editor and terminal --- */
+code,
+pre,
+.cm-editor {
+  font-family: var(--font-family-mono);
+}
+
+/* --- Scrollbar styling (webkit) --- */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--color-bg-alt);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-bg-hover);
+  border-radius: var(--radius-full);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-muted);
+}
+
+/* --- Strudel slider() widget inside CodeMirror --- */
+/* The @strudel/codemirror sliderPlugin renders <input type="range">
+   inline in the editor. These styles make it visible on dark backgrounds
+   and match the purple accent theme. */
+.cm-editor input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 64px;
+  height: 24px;
+  margin: 0 4px;
+  background: transparent;
+  cursor: pointer;
+  vertical-align: middle;
+}
+
+/* Track */
+.cm-editor input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  background: var(--color-bg-hover);
+  border-radius: var(--radius-full);
+  border: none;
+}
+
+.cm-editor input[type="range"]::-moz-range-track {
+  height: 4px;
+  background: var(--color-bg-hover);
+  border-radius: var(--radius-full);
+  border: none;
+}
+
+/* Thumb */
+.cm-editor input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  margin-top: -4px;
+  border-radius: var(--radius-full);
+  background: var(--color-primary);
+  border: 2px solid var(--color-bg);
+  box-shadow: 0 0 6px var(--color-primary-wash-strong);
+  transition: transform 100ms ease, box-shadow 100ms ease;
+}
+
+.cm-editor input[type="range"]::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: var(--radius-full);
+  background: var(--color-primary);
+  border: 2px solid var(--color-bg);
+  box-shadow: 0 0 6px var(--color-primary-wash-strong);
+}
+
+.cm-editor input[type="range"]:hover::-webkit-slider-thumb {
+  transform: scale(1.2);
+  box-shadow: var(--shadow-glow-signal);
+}
+
+.cm-editor input[type="range"]:active::-webkit-slider-thumb {
+  background: var(--color-primary-light);
+  box-shadow: 0 0 14px var(--color-primary-wash-strong);
+}
+
+/* Strudel inline block widgets (._pianoroll, ._scope, etc.) */
+.cm-editor .cm-widgetBuffer + .cm-line {
+  margin-top: 2px;
+}
+
+/* --- Sticky filter bar for listing pages (Examples, Samples, Sessions, Blog, Changelog) ---
+   Makes filters/search visible while scrolling through large collections. */
+.sticky-filters {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  background-color: var(--color-bg);
+  padding-bottom: var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+}
+
+/* Compact hero for listing pages — reduced vertical space */
+.listing-hero {
+  padding: var(--space-6) var(--space-6) var(--space-2);
+  text-align: center;
+}
+
+.listing-hero h1 {
+  font-size: var(--font-size-2xl);
+  font-weight: 700;
+  margin-bottom: var(--space-1);
+}
+
+.listing-hero p {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+  max-width: 500px;
+  margin: 0 auto;
+}
+
+/* ── Accessibility: prefers-reduced-motion global reset ──────
+   Disables ALL animations, transitions, and smooth scrolling
+   for users who request reduced motion. Applies before any
+   component-level animation so nothing slips through. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ── Focus-visible outlines on ALL interactive elements ──────
+   Global rule ensures keyboard focus is always visible with a
+   primary-colored ring. Overrides any inline outline:none. */
+:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+/* Remove the default focus outline — focus-visible handles it */
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* ── Button microinteraction states (global) ─────────────────
+   Applies hover, active, and disabled transitions to all
+   <button> elements. Uses compositor-only transform + filter. */
+button {
+  transition: transform var(--transition-fast),
+              filter var(--transition-fast),
+              opacity var(--transition-fast),
+              background-color var(--transition-fast),
+              border-color var(--transition-fast),
+              color var(--transition-fast);
+}
+
+button:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+
+button:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ── Input / select / textarea focus states ──────────────────
+   Consistent focus ring + border glow for all form controls. */
+input,
+select,
+textarea {
+  transition: border-color var(--transition-fast),
+              box-shadow var(--transition-fast);
+}
+
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  border-color: var(--color-primary);
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+/* ── Card hover lift ─────────────────────────────────────────
+   Generic card hover effect — apply .card-hover class to any
+   card element (blog posts, changelog, session cards, examples). */
+.card-hover {
+  transition: transform var(--transition-spring),
+              border-color var(--transition-fast),
+              box-shadow var(--transition-fast);
+}
+
+.card-hover:hover {
+  transform: var(--animation-card-lift);
+  box-shadow: var(--shadow-md);
+}
+
+/* ── Sticky filter bar transition ────────────────────────────
+   Smooth blur + shadow when the sticky bar is pinned. */
+.sticky-filters {
+  transition: box-shadow var(--transition-base),
+              backdrop-filter var(--transition-base);
+}
+
+/* ── Compose Mode pulse bar ──────────────────────────────────
+   Subtle pulse animation for the compose-mode indicator. */
+@keyframes compose-pulse {
+  0%, 100% { opacity: 0.6; }
+  50%      { opacity: 1; }
+}
+
+.compose-pulse {
+  animation: compose-pulse 2s ease-in-out infinite;
+}
+
+/* ── MIDI menu dropdown entrance ─────────────────────────────
+   Slide-down + fade for context menus and dropdowns. */
+@keyframes menu-enter {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.menu-enter {
+  animation: menu-enter var(--transition-fast) ease-out;
+}
+
+/* CodeMirror eval-flash highlight — uses success color at low opacity.
+   Class-based approach avoids hardcoding rgba() inline on the decoration. */
+.cm-eval-flash {
+  background-color: color-mix(in srgb, var(--color-success) 15%, transparent) !important;
+  transition: background-color var(--transition-slow);
+}
+
+/* --- Playing indicator animation for StrudelEditor --- */
+@keyframes playing-indicator {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}

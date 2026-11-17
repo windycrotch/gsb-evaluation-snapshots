@@ -1,0 +1,12 @@
+# Cache static assets aggressively (hashed filenames)
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable
+
+# HTML pages — always revalidate
+/*.html
+  Cache-Control: public, max-age=0, must-revalidate
+
+# Self-hosted fonts — immutable content at a stable path.
+# Filenames encode family+subset+weight+style, so a change is a new file.
+/fonts/*
+  Cache-Control: public, max-age=31536000, immutable

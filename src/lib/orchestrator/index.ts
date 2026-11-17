@@ -1,0 +1,145 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Arnold Wender / Wender Media
+/* ──────────────────────────────────────────────────────────
+   Orchestrator — central manager for engines, audio graph,
+   and playback state. Evaluates code from the editor and
+   routes it to the appropriate engine. Singleton pattern.
+   ────────────────────────────────────────────────────────── */
+
+import { AudioGraph } from './graph'
+import { createEngineAsync } from '../engines'
+import { resumeContext } from '../audio/context'
+import { useAppStore } from '../store'
+import type { EngineType, EngineAdapter } from '../../types/engine'
+import type { OrchestratorState } from './types'
+
+export type { OrchestratorState } from './types'
+
+/** Central orchestrator — manages engines, audio graph, and playback state.
+ * Evaluates code from the editor and routes it to the appropriate engine. */
+export class Orchestrator {
+  private engines: Map<EngineType, EngineAdapter> = new Map()
+  private initializedEngines: Set<EngineType> = new Set()
+  private graph: AudioGraph
+  private state: OrchestratorState = 'stopped'
+  private bpm = 120
+
+  constructor() {
+    this.graph = new AudioGraph()
+  }
+
+  /** Lazily initialize an engine (only when first needed) */
+  async getEngine(type: EngineType): Promise<EngineAdapter> {
+    /* Lazy-load engine module on first access — code-splits heavy deps */
+    if (!this.engines.has(type)) {
+      const engine = await createEngineAsync(type)
+      this.engines.set(type, engine)
+    }
+    const engine = this.engines.get(type)!
+
+    /* Initialize once on first access */
+    if (!this.initializedEngines.has(type)) {
+      await engine.init()
+      this.initializedEngines.add(type)
+    }
+    return engine
+  }
+
+  /** Evaluate code with the specified engine */
+  async evaluate(code: string, engineType: EngineType): Promise<void> {
+    if (useAppStore.getState().untrustedCodePending) {
+      throw new Error('Review and accept external code before evaluating')
+    }
+    const engine = await this.getEngine(engineType)
+    /* EngineAdapter does not mandate evaluate() — delegate only if present */
+    if ('evaluate' in engine && typeof (engine as Record<string, unknown>).evaluate === 'function') {
+      await (engine as unknown as { evaluate(c: string): Promise<void> }).evaluate(code)
+    }
+  }
+
+  /** Start playback — resumes AudioContext and starts all active engines */
+  async start(): Promise<void> {
+    if (useAppStore.getState().untrustedCodePending) return
+    await resumeContext()
+    for (const engine of this.engines.values()) {
+      /* Call without a block — interface now accepts optional EngineBlock */
+      engine.start()
+    }
+    this.state = 'playing'
+  }
+
+  /** Stop playback — stops all active engines */
+  stop(): void {
+    for (const engine of this.engines.values()) {
+      engine.stop()
+    }
+    this.state = 'stopped'
+  }
+
+  /** Set BPM across all engines that support it */
+  setBpm(bpm: number): void {
+    this.bpm = bpm
+    for (const [, engine] of this.engines) {
+      /* Forward to every engine that implements setBpm. This used to be gated on
+         type === 'tonejs', which meant the transport BPM control did nothing for
+         'strudel' — the DEFAULT engine (see DEFAULT_ENGINE in ../constants). */
+      if ('setBpm' in engine) {
+        (engine as unknown as { setBpm(b: number): void }).setBpm(bpm)
+      }
+    }
+  }
+
+  /** Current playback state */
+  getState(): OrchestratorState {
+    return this.state
+  }
+
+  /** The directed audio graph of blocks and connections */
+  getGraph(): AudioGraph {
+    return this.graph
+  }
+
+  /** Current BPM */
+  getBpm(): number {
+    return this.bpm
+  }
+
+  /** Get or create a per-block analyser node, delegating to the engine adapter.
+   * Returns null if the engine is not yet initialized or doesn't support it. */
+  getAnalyserForBlock(blockId: string, engineType: EngineType): AnalyserNode | null {
+    const engine = this.engines.get(engineType)
+    if (!engine || !this.initializedEngines.has(engineType)) return null
+
+    /* Delegate to the engine's per-block analyser cache — method is in the interface */
+    return engine.getAnalyserForBlock(blockId)
+  }
+
+  /** Dispose all engines and clean up */
+  dispose(): void {
+    this.stop()
+    for (const engine of this.engines.values()) {
+      engine.dispose()
+    }
+    this.engines.clear()
+    this.initializedEngines.clear()
+    this.graph.clear()
+  }
+}
+
+/* ── Singleton ─────────────────────────────────────────── */
+
+let orchestratorInstance: Orchestrator | null = null
+
+/** Get or create the singleton Orchestrator */
+export function getOrchestrator(): Orchestrator {
+  if (!orchestratorInstance) {
+    orchestratorInstance = new Orchestrator()
+  }
+  return orchestratorInstance
+}
+
+/** Dispose the singleton Orchestrator and release resources */
+export function disposeOrchestrator(): void {
+  orchestratorInstance?.dispose()
+  orchestratorInstance = null
+}

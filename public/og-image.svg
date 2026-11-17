@@ -1,0 +1,95 @@
+<!-- Live Music Coder — social preview source (1200x630).
+     Art direction "SIGNAL ROOM"
+     Renders public/og-image.png via scripts/render-icons.mjs.
+
+     Rebuilt 2026-08-16. The previous version carried the violet bolt, the
+     old engine hues (#3b82f6 / #22c55e / #f97316), the zinc greys and a
+     "by Wender Media" byline. All four are gone: the mark is the level
+     meter, the engine dots are the Okabe-Ito-derived accents, the greys
+     are the warm carbon ink ramp, and the byline was removed on request.
+
+     Composition after removing the byline: the type block and the engine
+     row were re-centred on the taller free area rather than left sitting
+     high with a hole beneath them, and the engine row now shows all four
+     engines (the copy says "4 audio engines"; the old row listed three).
+
+     Token names are written without their leading double hyphen because
+     XML forbids that sequence inside a comment.
+       #0f0c0a color-bg      #1b1815 color-bg-alt   #f5f3f1 color-text
+       #b7b4b1 color-text-secondary   #9e9a95 color-text-muted
+       #ffa54b color-primary/strudel  #ffc476 color-primary-ink
+       #84baff color-tonejs  #71edda color-webaudio  #d07ec9 color-midi -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <rect width="1200" height="630" fill="#0f0c0a"/>
+
+  <!-- Panel grid — engineering-drawing substrate, not decoration -->
+  <defs>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1b1815" stroke-width="0.5"/>
+    </pattern>
+  </defs>
+  <rect width="1200" height="630" fill="url(#grid)"/>
+
+  <!-- Signal bloom behind the mark -->
+  <ellipse cx="600" cy="238" rx="300" ry="170" fill="#ffa54b" opacity="0.06"/>
+  <ellipse cx="600" cy="238" rx="160" ry="95" fill="#ffa54b" opacity="0.08"/>
+
+  <!-- Decorative level-meter band. Amber dominates; the other engine hues
+       appear as occasional segments, the same restraint rule as the UI. -->
+  <g transform="translate(340, 150)" opacity="0.28">
+    <rect x="0"   y="50" width="12" height="40"  rx="3" fill="#ffa54b" opacity="0.4"/>
+    <rect x="20"  y="30" width="12" height="80"  rx="3" fill="#ffa54b" opacity="0.5"/>
+    <rect x="40"  y="15" width="12" height="110" rx="3" fill="#ffa54b" opacity="0.6"/>
+    <rect x="60"  y="25" width="12" height="90"  rx="3" fill="#84baff" opacity="0.5"/>
+    <rect x="80"  y="40" width="12" height="60"  rx="3" fill="#84baff" opacity="0.4"/>
+    <rect x="100" y="10" width="12" height="120" rx="3" fill="#ffa54b" opacity="0.7"/>
+    <rect x="120" y="35" width="12" height="70"  rx="3" fill="#71edda" opacity="0.5"/>
+    <rect x="140" y="20" width="12" height="100" rx="3" fill="#ffa54b" opacity="0.6"/>
+    <rect x="160" y="45" width="12" height="50"  rx="3" fill="#d07ec9" opacity="0.4"/>
+    <rect x="180" y="5"  width="12" height="130" rx="3" fill="#ffa54b" opacity="0.8"/>
+    <rect x="200" y="30" width="12" height="80"  rx="3" fill="#84baff" opacity="0.5"/>
+    <rect x="220" y="15" width="12" height="110" rx="3" fill="#ffa54b" opacity="0.6"/>
+    <rect x="240" y="40" width="12" height="60"  rx="3" fill="#71edda" opacity="0.4"/>
+    <rect x="260" y="25" width="12" height="90"  rx="3" fill="#ffa54b" opacity="0.5"/>
+    <rect x="280" y="50" width="12" height="40"  rx="3" fill="#84baff" opacity="0.4"/>
+    <rect x="300" y="20" width="12" height="100" rx="3" fill="#ffa54b" opacity="0.6"/>
+    <rect x="320" y="35" width="12" height="70"  rx="3" fill="#d07ec9" opacity="0.5"/>
+    <rect x="340" y="10" width="12" height="120" rx="3" fill="#ffa54b" opacity="0.7"/>
+    <rect x="360" y="30" width="12" height="80"  rx="3" fill="#71edda" opacity="0.5"/>
+    <rect x="380" y="45" width="12" height="50"  rx="3" fill="#ffa54b" opacity="0.4"/>
+    <rect x="400" y="15" width="12" height="110" rx="3" fill="#84baff" opacity="0.6"/>
+    <rect x="420" y="25" width="12" height="90"  rx="3" fill="#ffa54b" opacity="0.5"/>
+    <rect x="440" y="5"  width="12" height="130" rx="3" fill="#ffa54b" opacity="0.7"/>
+    <rect x="460" y="40" width="12" height="60"  rx="3" fill="#71edda" opacity="0.4"/>
+    <rect x="480" y="50" width="12" height="40"  rx="3" fill="#ffa54b" opacity="0.3"/>
+    <rect x="500" y="35" width="12" height="70"  rx="3" fill="#84baff" opacity="0.5"/>
+  </g>
+
+  <!-- The mark: same three-segment level meter as the favicon, scaled 2.4x -->
+  <g transform="translate(542, 190) scale(2.4)">
+    <rect width="48" height="48" rx="11" fill="#1b1815"/>
+    <rect x="7.25"  y="17" width="7.5" height="14" rx="2.4" fill="#ffa54b"/>
+    <rect x="20.25" y="9"  width="7.5" height="30" rx="2.4" fill="#ffc476"/>
+    <rect x="33.25" y="14" width="7.5" height="20" rx="2.4" fill="#ffa54b"/>
+  </g>
+
+  <text x="600" y="392" text-anchor="middle" font-family="'IBM Plex Sans', system-ui, sans-serif" font-size="54" font-weight="700" fill="#f5f3f1" letter-spacing="-0.01em">Live Music Coder</text>
+
+  <text x="600" y="438" text-anchor="middle" font-family="'IBM Plex Sans', system-ui, sans-serif" font-size="22" fill="#b7b4b1">Write Code, Hear Music, Live</text>
+
+  <!-- Engine row — panel legend voice: mono, uppercase, tracked out.
+       All four engines; each dot is that engine's identity accent. -->
+  <g transform="translate(361, 528)" font-family="'IBM Plex Mono', ui-monospace, monospace" font-size="15" letter-spacing="0.1em" fill="#9e9a95">
+    <rect x="0"   y="-5" width="10" height="10" rx="2" fill="#ffa54b"/>
+    <text x="20"  y="5">STRUDEL</text>
+    <rect x="126" y="-5" width="10" height="10" rx="2" fill="#84baff"/>
+    <text x="146" y="5">TONE.JS</text>
+    <rect x="252" y="-5" width="10" height="10" rx="2" fill="#71edda"/>
+    <text x="272" y="5">WEB AUDIO</text>
+    <rect x="416" y="-5" width="10" height="10" rx="2" fill="#d07ec9"/>
+    <text x="436" y="5">MIDI</text>
+  </g>
+
+  <!-- Signal rail along the bottom edge -->
+  <rect x="0" y="622" width="1200" height="8" fill="#ffa54b" opacity="0.55"/>
+</svg>

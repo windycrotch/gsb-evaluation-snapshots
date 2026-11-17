@@ -1,0 +1,7 @@
+/* SPDX-License-Identifier: MIT
+   Copyright (c) 2026 Arnold Wender / Wender Media */
+
+/* Design token barrel — import all token files */
+@import './colors.css';
+@import './typography.css';
+@import './spacing.css';
