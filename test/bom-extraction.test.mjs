@@ -539,6 +539,188 @@ test('JSON export redacts DataLink connection strings unless sensitive output is
   assert.equal(bom.tables[0].dataLink.connectionString, 'file:///Users/customer/private-parts.xlsx', 'serialization does not mutate the BOM');
 });
 
+test('block aggregation keys on attribute values, so distinct variants stay separate rows', () => {
+  const insert = (handle, partNo, layer) => ({
+    type: 'INSERT', kind: 'insert', handle, blockName: 'Valve', layer,
+    attribs: [{ type: 'ATTRIB', handle: `A-${handle}`, attributeTag: 'PN', text: partNo }]
+  });
+  const bom = extractCadBom(cadDocument({
+    entities: [insert('I1', 'V-1', 'Equipment'), insert('I2', 'V-2', 'Spare'), insert('I3', 'V-1', 'Equipment')]
+  }), { sources: ['block-attributes'], recursiveBlocks: false });
+  const table = tableBySource(bom, 'block-attributes');
+
+  assert.equal(table.rows.length, 2, 'same block name with different attribute values is not merged');
+  const v1 = table.rows.find((row) => row.cells.pn === 'V-1');
+  const v2 = table.rows.find((row) => row.cells.pn === 'V-2');
+  assert.equal(v1.quantity, 2);
+  assert.deepEqual(v1.sourceHandles, ['I1', 'I3']);
+  assert.equal(v2.quantity, 1);
+  assert.equal(v2.cells.layers, 'Spare');
+  assert.equal(bom.summary.blockItemCount, 2);
+  assert.equal(bom.summary.blockQuantity, 3);
+});
+
+test('MINSERT entities multiply quantity by row and column counts like INSERT', () => {
+  const bom = extractCadBom(cadDocument({
+    entities: [{ type: 'MINSERT', kind: 'insert', handle: 'M1', blockName: 'Grid', insertRowCount: 3, insertColumnCount: 4 }]
+  }), { sources: ['block-attributes'], recursiveBlocks: false });
+
+  assert.equal(tableBySource(bom, 'block-attributes').rows[0].quantity, 12);
+  assert.equal(bom.summary.blockQuantity, 12);
+});
+
+test('anonymous blocks are excluded by default and included on explicit opt-in', () => {
+  const document = cadDocument({
+    entities: [{ type: 'INSERT', kind: 'insert', handle: 'ANON', blockName: '*D9' }]
+  });
+  const options = { sources: ['block-attributes'], recursiveBlocks: false };
+
+  assert.equal(extractCadBom(document, options).tables.length, 0);
+  const included = extractCadBom(document, { ...options, includeAnonymousBlocks: true });
+  assert.equal(tableBySource(included, 'block-attributes').rows[0].cells.item, '*D9');
+});
+
+test('native table row and cell truncation leaves max-rows/max-cells warnings at the table and BOM root', () => {
+  const document = cadDocument({
+    entities: [{
+      type: 'ACAD_TABLE', kind: 'table', handle: 'T-ROWS',
+      table: {
+        rowCount: 6, columnCount: 2, headerSuppressed: false,
+        cells: [
+          { row: 0, column: 0, text: 'Part' }, { row: 0, column: 1, text: 'Qty' },
+          ...Array.from({ length: 5 }, (_, index) => [
+            { row: index + 1, column: 0, text: `P-${index}` },
+            { row: index + 1, column: 1, text: String(index + 1) }
+          ]).flat()
+        ]
+      }
+    }]
+  });
+
+  const rowLimited = extractCadBom(document, { sources: ['native-table'], maxRows: 3 });
+  const rowTable = tableBySource(rowLimited, 'native-table');
+  assert.equal(rowTable.rows.length, 3);
+  assert.deepEqual(rowTable.rows.map((row) => row.cells.part), ['P-0', 'P-1', 'P-2']);
+  assert.ok(rowTable.warnings.some((warning) => warning.code === 'max-rows'));
+  assert.ok(rowLimited.warnings.some((warning) => warning.code === 'max-rows' && warning.source === 'native-table'));
+
+  const cellLimited = extractCadBom(document, { sources: ['native-table'], maxCells: 4 });
+  const cellTable = tableBySource(cellLimited, 'native-table');
+  assert.ok(cellTable.warnings.some((warning) => warning.code === 'max-cells'));
+  assert.ok(cellLimited.warnings.some((warning) => warning.code === 'max-cells' && warning.source === 'native-table'));
+});
+
+test('a table referencing a missing DataLink returns cached cells and never touches the network', () => {
+  const document = cadDocument({
+    entities: [{
+      type: 'ACAD_TABLE', kind: 'table', handle: 'T-NOLINK',
+      table: {
+        rowCount: 2, columnCount: 2, headerSuppressed: false, dataLinkHandle: 'GHOST',
+        cells: [
+          { row: 0, column: 0, text: 'Part' }, { row: 0, column: 1, text: 'Qty' },
+          { row: 1, column: 0, text: 'P-1' }, { row: 1, column: 1, text: '2' }
+        ]
+      }
+    }]
+  });
+  const originalFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  globalThis.fetch = async () => {
+    fetchCalls += 1;
+    throw new Error('BOM extraction must not fetch external DataLinks');
+  };
+  try {
+    const bom = extractCadBom(document, { sources: ['native-table'] });
+    const table = tableBySource(bom, 'native-table');
+    assert.equal(fetchCalls, 0);
+    assert.deepEqual(table.rows.map((row) => row.cells), [{ part: 'P-1', qty: 2 }]);
+    assert.equal(table.dataLink, undefined);
+    assert.ok(table.warnings.some((warning) => warning.code === 'external-data-unavailable'));
+    assert.ok(bom.warnings.some((warning) => warning.code === 'external-data-unavailable'));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('CSV export neutralizes every formula-leading character (=, +, -, @) and leaves safe values untouched', () => {
+  const bom = extractCadBom(cadDocument({
+    dataTables: [{
+      handle: 'CSV', name: 'Formulas', rowCount: 1, columnCount: 6,
+      columns: [
+        { name: 'Eq', values: ['=1+1'] },
+        { name: 'Plus', values: ['+43'] },
+        { name: 'Minus', values: ['-7'] },
+        { name: 'At', values: ['@SUM(A1)'] },
+        { name: 'Spaced', values: ['  =cmd'] },
+        { name: 'Safe', values: ['P-100'] }
+      ]
+    }]
+  }), { sources: ['data-table'] });
+
+  assert.equal(
+    serializeCadBomCsv(bom),
+    '﻿Eq,Plus,Minus,At,Spaced,Safe\r\n\'=1+1,\'+43,\'-7,\'@SUM(A1),\'  =cmd,P-100'
+  );
+  assert.equal(
+    serializeCadBomCsv(bom, { includeUtf8Bom: false, escapeFormulas: false }),
+    'Eq,Plus,Minus,At,Spaced,Safe\r\n=1+1,+43,-7,@SUM(A1),  =cmd,P-100'
+  );
+});
+
+test('CSV export selects an explicit tableId and ignores unknown ones deterministically', () => {
+  const bom = extractCadBom(cadDocument({
+    dataTables: [{
+      handle: 'SMALL', name: 'Small', rowCount: 1, columnCount: 1,
+      columns: [{ name: 'Part', values: ['P-1'] }]
+    }, {
+      handle: 'LARGE', name: 'Large', rowCount: 2, columnCount: 1,
+      columns: [{ name: 'Part', values: ['P-2', 'P-3'] }]
+    }]
+  }), { sources: ['data-table'] });
+
+  assert.equal(serializeCadBomCsv(bom, { includeUtf8Bom: false }), 'Part\r\nP-2\r\nP-3', 'default picks the largest table');
+  const smallId = bom.tables.find((table) => table.name === 'Small').id;
+  assert.equal(serializeCadBomCsv(bom, { includeUtf8Bom: false, tableId: smallId }), 'Part\r\nP-1');
+  assert.equal(serializeCadBomCsv(bom, { includeUtf8Bom: false, tableId: 'does-not-exist' }), '');
+});
+
+test('repeated extraction of the same document is deterministic and side-effect free', () => {
+  const document = cadDocument({
+    blocks: {
+      Part: {
+        name: 'Part',
+        entities: [{ type: 'ATTDEF', handle: 'D1', attributeTag: 'MATERIAL', text: '316L' }]
+      }
+    },
+    entities: [{
+      type: 'INSERT', kind: 'insert', handle: 'I1', blockName: 'Part', layer: 'Equipment',
+      attribs: [{ type: 'ATTRIB', handle: 'A1', attributeTag: 'PN', text: 'P-1' }]
+    }, {
+      type: 'ACAD_TABLE', kind: 'table', handle: 'T1',
+      table: {
+        rowCount: 2, columnCount: 2, headerSuppressed: false,
+        cells: [
+          { row: 0, column: 0, text: 'Part' }, { row: 0, column: 1, text: 'Qty' },
+          { row: 1, column: 0, text: 'P-1' }, { row: 1, column: 1, text: '2' }
+        ]
+      }
+    }],
+    dataTables: [{
+      handle: 'DT1', name: 'Cached', rowCount: 1, columnCount: 1,
+      columns: [{ name: 'Part', values: ['P-1'] }]
+    }]
+  });
+  const options = { sources: ['block-attributes', 'native-table', 'data-table'] };
+  const before = JSON.stringify(document);
+
+  const first = extractCadBom(document, options);
+  const second = extractCadBom(document, options);
+
+  assert.deepEqual(second, first, 'extracting the same drawing twice yields identical tables and warnings');
+  assert.equal(JSON.stringify(document), before, 'extraction does not mutate the source document');
+  assert.doesNotThrow(() => structuredClone(first));
+});
+
 test('unsupported native formats return an empty, structured warning instead of guessing a BOM', () => {
   const bom = extractCadBom(cadDocument({ format: 'dwf', sourceName: 'drawing.dwf' }));
   assert.equal(bom.tables.length, 0);
