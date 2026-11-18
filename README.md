@@ -431,8 +431,9 @@ the bitrate or audio underruns. The mode chip in the player cycles Auto → Orig
   `/api/me`, change the password or sign out; everything else answers `password_change_required` until a new
   password is set, after which the default stops working. Playlists without an owner are adopted by the first admin.
 - **Devices:** signing in creates a device with a random 256-bit token (`Authorization: Bearer`). The server
-  stores only its SHA-256; passwords are Argon2id. Devices can be listed and revoked; changing the password signs
-  out all other devices. Failed sign-ins are rate-limited per IP and per username.
+  stores only its SHA-256; passwords are Argon2id. Devices can be listed and revoked one at a time, or all at
+  once with `POST /api/me/devices/revoke-all` (which signs this device out too and reports how many were signed
+  out); changing the password signs out all other devices. Failed sign-ins are rate-limited per IP and per username.
 - **Client:** the token is kept in the OS keyring (Secret Service on Linux), falling back to a `0600` file.
 - **Browsers (future web client):** sign-in can set an `HttpOnly; SameSite=Strict; Secure` cookie instead;
   cookie-authenticated writes must carry a same-origin `Origin` (CSRF protection). Cross-origin access is off

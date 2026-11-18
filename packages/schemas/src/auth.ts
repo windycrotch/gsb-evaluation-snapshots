@@ -51,6 +51,15 @@ export const Device = named(
 );
 
 export const DeviceList = named("DeviceList", z.array(Device));
+
+export const RevokedDevices = named(
+  "RevokedDevices",
+  z.object({
+    ok: z.literal(true),
+    /** How many device tokens stopped working, the calling device included. */
+    revoked: z.int().nonnegative(),
+  }),
+);
 export const UserList = named("UserList", z.array(User));
 
 export const AuthStatus = named(
@@ -189,6 +198,7 @@ export const UpdatePreferences = named(
 
 export type User = z.infer<typeof User>;
 export type Device = z.infer<typeof Device>;
+export type RevokedDevices = z.infer<typeof RevokedDevices>;
 export type Session = z.infer<typeof Session>;
 export type AuthStatus = z.infer<typeof AuthStatus>;
 export type Preferences = z.infer<typeof Preferences>;

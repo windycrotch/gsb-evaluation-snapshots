@@ -53,6 +53,7 @@ import {
   Me,
   Onboard,
   Preferences,
+  RevokedDevices,
   Session,
   UpdateMe,
   UpdatePreferences,
@@ -201,6 +202,14 @@ export const api = {
     params: DeviceParams,
     query: NoQuery,
     response: Ok,
+  }),
+  revokeAllDevices: json({
+    method: "POST",
+    path: "/api/me/devices/revoke-all",
+    summary: "Sign out every device of your account, this one included; returns how many were signed out",
+    params: NoParams,
+    query: NoQuery,
+    response: RevokedDevices,
   }),
   onboard: json({
     method: "POST",

@@ -179,10 +179,30 @@ export class Auth {
 
   /** Signs a device out. Its queue is kept, so signing back in with the same id resumes it. */
   revoke(auth: AuthContext, deviceId: string) {
-    const r = this.#db
-      .prepare("DELETE FROM devices WHERE id = ? AND user_id = ?")
-      .run(deviceId, auth.user.id);
-    if (!r.changes) throw notFound("Device");
+    if (!this.#revokeDevices(auth.user.id, { only: deviceId })) throw notFound("Device");
+  }
+
+  /**
+   * Signs every device of the account out, the calling one included. Returns how many
+   * were revoked. The caller's token stops working as soon as this returns.
+   */
+  revokeAll(auth: AuthContext): number {
+    return this.#revokeDevices(auth.user.id);
+  }
+
+  /**
+   * The one way device tokens stop working: their rows go. Deleting is a single
+   * statement, so a revoke that races another deletes the row once and reports it
+   * once; the loser sees no change (and `revoke` turns that into a 404).
+   */
+  #revokeDevices(userId: string, opts: { only?: string; except?: string } = {}): number {
+    const r =
+      opts.only !== undefined
+        ? this.#db.prepare("DELETE FROM devices WHERE id = ? AND user_id = ?").run(opts.only, userId)
+        : opts.except !== undefined
+          ? this.#db.prepare("DELETE FROM devices WHERE user_id = ? AND id <> ?").run(userId, opts.except)
+          : this.#db.prepare("DELETE FROM devices WHERE user_id = ?").run(userId);
+    return Number(r.changes);
   }
 
   async changePassword(auth: AuthContext, current: string, next: string) {
@@ -197,7 +217,7 @@ export class Auth {
       .prepare("UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?")
       .run(await hashPassword(next), auth.user.id);
     // Anyone who learned the old password may have signed in: keep only this device.
-    this.#db.prepare("DELETE FROM devices WHERE user_id = ? AND id <> ?").run(auth.user.id, auth.deviceId);
+    this.#revokeDevices(auth.user.id, { except: auth.deviceId });
   }
 
   users(): User[] {
@@ -265,7 +285,7 @@ export class Auth {
       if (hash) {
         // A temporary password: it only lets them choose their own, and every session using the old one ends.
         db.prepare("UPDATE users SET password_hash = ?, must_change_password = 1 WHERE id = ?").run(hash, id);
-        db.prepare("DELETE FROM devices WHERE user_id = ?").run(id);
+        this.#revokeDevices(id);
       }
       db.exec("COMMIT");
     } catch (err) {

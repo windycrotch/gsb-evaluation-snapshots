@@ -325,6 +325,43 @@
         }
       }
     },
+    "/api/me/devices/revoke-all": {
+      "post": {
+        "operationId": "revokeAllDevices",
+        "summary": "Sign out every device of your account, this one included; returns how many were signed out",
+        "parameters": [],
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sign out every device of your account, this one included; returns how many were signed out",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RevokedDevices"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/auth/onboard": {
       "post": {
         "operationId": "onboard",
@@ -4392,6 +4429,27 @@
         "items": {
           "$ref": "#/components/schemas/Device"
         }
+      },
+      "RevokedDevices": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "revoked": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "ok",
+          "revoked"
+        ],
+        "additionalProperties": false
       },
       "UserList": {
         "type": "array",

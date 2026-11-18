@@ -254,6 +254,12 @@ export async function buildApp(config: Config, opts: { logger?: boolean; fetch?:
   });
   route.json(api.listDevices, ({ auth: a }) => auth.devices(a));
   route.json(api.revokeDevice, ({ auth: a, params }) => (auth.revoke(a, params.id), ok));
+  route.json(api.revokeAllDevices, ({ auth: a, reply }) => {
+    const revoked = auth.revokeAll(a);
+    // A browser's cookie is dead with the device; clearing it saves a failed request.
+    reply.header("Set-Cookie", `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`);
+    return { ok: true as const, revoked };
+  });
   route.json(api.onboard, ({ auth: a, body }) => auth.onboard(a, body));
   route.json(api.getPreferences, ({ auth: a }) => auth.preferences(a.user.id));
   route.json(api.updatePreferences, ({ auth: a, body }) => auth.updatePreferences(a.user.id, body));

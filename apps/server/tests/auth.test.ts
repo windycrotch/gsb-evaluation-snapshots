@@ -160,6 +160,81 @@ test("changing the password signs out every other device", async () => {
   expect((await login("admin", "battery staple")).statusCode).toBe(200);
 });
 
+test("revoking every device signs them all out, the caller included", async () => {
+  const first = authed(ctx.app, await setupAdmin(ctx.app));
+  const secondSession = (await login("admin", "correct horse")).json() as { token: string };
+  const second = authed(ctx.app, secondSession.token);
+  expect((await first("/api/me")).statusCode).toBe(200);
+
+  const res = await second({ method: "POST", url: "/api/me/devices/revoke-all" });
+  expect(res.statusCode, res.body).toBe(200);
+  expect(res.json()).toEqual({ ok: true, revoked: 2 });
+
+  // Both old tokens are dead at once; signing in again works.
+  expect((await first("/api/me")).statusCode).toBe(401);
+  expect((await second("/api/me")).statusCode).toBe(401);
+  expect((await login("admin", "correct horse")).statusCode).toBe(200);
+});
+
+test("revoking every device on the only device succeeds and counts it", async () => {
+  const admin = authed(ctx.app, await setupAdmin(ctx.app));
+  await admin({
+    method: "POST",
+    url: "/api/users",
+    payload: { username: "guest", password: "guest password" },
+  });
+  const guest = authed(ctx.app, ((await login("guest", "guest password")).json() as { token: string }).token);
+
+  const res = await guest({ method: "POST", url: "/api/me/devices/revoke-all" });
+  expect(res.statusCode, res.body).toBe(200);
+  expect(res.json()).toEqual({ ok: true, revoked: 1 });
+  expect((await guest("/api/me")).statusCode).toBe(401);
+  // It only touched their own account.
+  expect((await admin("/api/me")).statusCode).toBe(200);
+});
+
+test("revoking someone else's device is a 404 and leaves every token working", async () => {
+  const admin = authed(ctx.app, await setupAdmin(ctx.app));
+  const adminDevice = ((await admin("/api/me")).json() as { device: { id: string } }).device;
+  await admin({
+    method: "POST",
+    url: "/api/users",
+    payload: { username: "guest", password: "guest password" },
+  });
+  const guest = authed(ctx.app, ((await login("guest", "guest password")).json() as { token: string }).token);
+
+  const res = await guest({ method: "DELETE", url: `/api/me/devices/${adminDevice.id}` });
+  expect(res.statusCode).toBe(404);
+  // Neither account lost a device.
+  expect((await guest("/api/me")).statusCode).toBe(200);
+  expect((await admin("/api/me")).statusCode).toBe(200);
+  expect((await admin("/api/me/devices")).json()).toHaveLength(1);
+
+  const unknown = await guest({ method: "DELETE", url: "/api/me/devices/dev-0000000000000000" });
+  expect(unknown.statusCode).toBe(404);
+  expect((await guest("/api/me")).statusCode).toBe(200);
+});
+
+test("two revocations of the same device: only one succeeds", async () => {
+  await setupAdmin(ctx.app);
+  const firstToken = ((await login("admin", "correct horse")).json() as { token: string }).token;
+  const secondToken = ((await login("admin", "correct horse")).json() as { token: string }).token;
+  const victim = (await login("admin", "correct horse", { deviceName: "victim" })).json() as {
+    token: string;
+    device: { id: string };
+  };
+
+  const [a, b] = await Promise.all([
+    authed(ctx.app, firstToken)({ method: "DELETE", url: `/api/me/devices/${victim.device.id}` }),
+    authed(ctx.app, secondToken)({ method: "DELETE", url: `/api/me/devices/${victim.device.id}` }),
+  ]);
+  expect([a.statusCode, b.statusCode].sort((x, y) => x - y)).toEqual([200, 404]);
+  expect((await authed(ctx.app, victim.token)("/api/me")).statusCode).toBe(401);
+  // The callers' own devices are untouched.
+  expect((await authed(ctx.app, firstToken)("/api/me")).statusCode).toBe(200);
+  expect((await authed(ctx.app, secondToken)("/api/me")).statusCode).toBe(200);
+});
+
 test("browser sessions: HttpOnly cookie, and cross-origin writes are refused", async () => {
   await setupAdmin(ctx.app);
   const res = await login("admin", "correct horse", { cookie: true });
