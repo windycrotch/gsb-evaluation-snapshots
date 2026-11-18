@@ -4,6 +4,7 @@ export * from './math/Bone';
 export * from './math/Distance';
 export * from './math/HeatDiffusion';
 export * from './math/WeightSolver';
+export * from './math/SkinWeights';
 export * from './core/Skinning';
 export * from './core/Rig';
 export * from './math/Bounds';

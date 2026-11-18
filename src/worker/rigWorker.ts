@@ -1,5 +1,6 @@
 import * as ort from 'onnxruntime-web';
 import { SkeletonRig, JointType, Joint } from '../types';
+import { calculateSkinWeights } from '../math/SkinWeights';
 
 let session: ort.InferenceSession | null = null;
 
@@ -110,8 +111,21 @@ function detectJointsProcedural(positions: Float32Array): SkeletonRig {
     if (z > maxZ) maxZ = z;
   }
 
+  // Empty mesh or non-finite input: fall back to a unit box centered on the
+  // origin so every joint position stays finite and the rig remains usable.
+  if (
+    vertexCount === 0 ||
+    ![minX, minY, minZ, maxX, maxY, maxZ].every(Number.isFinite)
+  ) {
+    minX = -0.5; maxX = 0.5;
+    minY = -0.5; maxY = 0.5;
+    minZ = -0.5; maxZ = 0.5;
+  }
+
   const cx = (minX + maxX) * 0.5;
   const cz = (minZ + maxZ) * 0.5;
+  // A fully collapsed (degenerate) mesh gives h === 0; keep a minimum span
+  // so stacked joints still get distinct, finite positions.
   const h = Math.max(maxY - minY, 1e-4);
 
   const keypointMap: Record<JointType, { x: number, y: number, z: number }> = {
@@ -167,96 +181,6 @@ async function detectJoints(positions: Float32Array): Promise<SkeletonRig> {
   }
 }
 
-function distToSegment(px: number, py: number, pz: number, ax: number, ay: number, az: number, bx: number, by: number, bz: number): number {
-  const abx = bx - ax;
-  const aby = by - ay;
-  const abz = bz - az;
-  const apx = px - ax;
-  const apy = py - ay;
-  const apz = pz - az;
-
-  const abLenSq = abx * abx + aby * aby + abz * abz;
-  if (abLenSq < 1e-8) {
-    return Math.sqrt(apx * apx + apy * apy + apz * apz);
-  }
-
-  const t = Math.max(0, Math.min(1, (apx * abx + apy * aby + apz * abz) / abLenSq));
-  const projX = ax + t * abx;
-  const projY = ay + t * aby;
-  const projZ = az + t * abz;
-
-  const dx = px - projX;
-  const dy = py - projY;
-  const dz = pz - projZ;
-  return Math.sqrt(dx * dx + dy * dy + dz * dz);
-}
-
-function calculateBoneWeights(
-  positions: Float32Array,
-  rig: SkeletonRig,
-  falloff: number,
-  skinIndices: Uint16Array,
-  skinWeights: Float32Array
-): void {
-  const vertexCount = positions.length / 3;
-  const boneTypes = Object.keys(rig.joints) as JointType[];
-  const bonePositions = boneTypes.map(type => rig.joints[type].position);
-
-  // Build bone segments from hierarchy
-  const segments: { boneIdx: number; ax: number; ay: number; az: number; bx: number; by: number; bz: number }[] = [];
-  for (let b = 0; b < boneTypes.length; b++) {
-    const parentType = boneTypes[b];
-    const parentPos = rig.joints[parentType].position;
-    const children = rig.hierarchy[parentType] || [];
-    
-    if (children.length > 0) {
-      for (const childType of children) {
-        const childPos = rig.joints[childType].position;
-        segments.push({
-          boneIdx: b,
-          ax: parentPos.x, ay: parentPos.y, az: parentPos.z,
-          bx: childPos.x, by: childPos.y, bz: childPos.z,
-        });
-      }
-    } else {
-      // Leaf joint: point capsule
-      segments.push({
-        boneIdx: b,
-        ax: parentPos.x, ay: parentPos.y, az: parentPos.z,
-        bx: parentPos.x, by: parentPos.y, bz: parentPos.z,
-      });
-    }
-  }
-
-  for (let i = 0; i < vertexCount; i++) {
-    const vx = positions[i * 3 + 0];
-    const vy = positions[i * 3 + 1];
-    const vz = positions[i * 3 + 2];
-    
-    const distances: { index: number, weight: number }[] = [];
-    
-    for (const seg of segments) {
-      const dist = distToSegment(vx, vy, vz, seg.ax, seg.ay, seg.az, seg.bx, seg.by, seg.bz);
-      const weight = 1.0 / Math.pow(dist + 0.001, falloff);
-      distances.push({ index: seg.boneIdx, weight });
-    }
-    
-    distances.sort((a, b) => b.weight - a.weight);
-    const top4 = distances.slice(0, 4);
-    const totalWeight = top4.reduce((sum, d) => sum + d.weight, 0);
-    
-    skinIndices[i * 4 + 0] = top4[0]?.index ?? 0;
-    skinIndices[i * 4 + 1] = top4[1]?.index ?? 0;
-    skinIndices[i * 4 + 2] = top4[2]?.index ?? 0;
-    skinIndices[i * 4 + 3] = top4[3]?.index ?? 0;
-    
-    skinWeights[i * 4 + 0] = (top4[0]?.weight ?? 0) / totalWeight;
-    skinWeights[i * 4 + 1] = (top4[1]?.weight ?? 0) / totalWeight;
-    skinWeights[i * 4 + 2] = (top4[2]?.weight ?? 0) / totalWeight;
-    skinWeights[i * 4 + 3] = (top4[3]?.weight ?? 0) / totalWeight;
-  }
-}
-
 self.onmessage = async (e: MessageEvent) => {
   const { type, payload, msgId } = e.data;
 
@@ -281,7 +205,7 @@ self.onmessage = async (e: MessageEvent) => {
       const skinWeights = new Float32Array(weightsBuffer);
 
       const rig = await detectJoints(positions);
-      calculateBoneWeights(positions, rig, falloff, skinIndices, skinWeights);
+      calculateSkinWeights(positions, rig, falloff, skinIndices, skinWeights);
 
       if (mode === 'TRANSFERABLE') {
         (self as any).postMessage({

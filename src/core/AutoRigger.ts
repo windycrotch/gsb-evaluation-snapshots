@@ -78,11 +78,20 @@ export class AutoRigger {
   async rig(mesh: THREE.Mesh): Promise<THREE.SkinnedMesh> {
     if (!this.isInitialized || !this.worker) throw new Error('[AutoRig] Engine not initialized.');
 
-    console.log('[AutoRig] Analyzing topology & detecting joints in Worker...');
-    
+    if (!mesh || !mesh.geometry) {
+      throw new Error('[AutoRig] Cannot rig: mesh.geometry is missing');
+    }
+
     const geometry = mesh.geometry;
-    const positions = geometry.attributes.position.array as Float32Array;
+    const positionAttr = geometry.getAttribute('position') as THREE.BufferAttribute | undefined;
+    if (!positionAttr || !(positionAttr.array instanceof Float32Array)) {
+      throw new Error('[AutoRig] Cannot rig: geometry has no Float32 "position" attribute');
+    }
+
+    const positions = positionAttr.array as Float32Array;
     const vertexCount = positions.length / 3;
+
+    console.log(`[AutoRig] Analyzing topology & detecting joints in Worker (${vertexCount} vertices)...`);
 
     const isSABSupported = typeof SharedArrayBuffer !== 'undefined' && 
       (typeof crossOriginIsolated !== 'undefined' ? crossOriginIsolated : false);
