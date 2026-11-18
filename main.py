@@ -19,7 +19,7 @@ class Pipeline(mp.Process):
 
         import osd
         from yolo26.det import YOLO26DetTRT
-        from cpp import Decoder, Encoder
+        from cpp import Decoder, Encoder, EndOfFileError, ReconnectExhaustedError
         from bytetrack.fast_byte_tracker import FastByteTracker
 
         model_det = YOLO26DetTRT(
@@ -79,74 +79,81 @@ class Pipeline(mp.Process):
         sum_encode = 0
         sum_event = 0
 
-        while 1:
-            t0 = time.time()
+        try:
+            while 1:
+                t0 = time.time()
 
-            # 读取下一帧解码结果；pts 为显示时间戳
-            try:
+                # 读取下一帧解码结果；pts 为显示时间戳
+                # 点播读完抛 EndOfFileError，流重连耗尽抛 ReconnectExhaustedError
                 frame, pts = decoder.next_frame()
-            except Exception as e:
-                # Decoder 内部重连已耗尽（流断）或点播文件读完，直接收尾
-                print(f"[Pipeline] {self.input_url} 读取结束: {e}")
-                break
 
-            frame_count += 1
+                frame_count += 1
 
-            t1 = time.time()
+                t1 = time.time()
 
-            # 推理检测框（返回 Nx6: x1,y1,x2,y2,score,cls）
-            det_results = model_det(frame)
+                # 推理检测框（返回 Nx6: x1,y1,x2,y2,score,cls）
+                det_results = model_det(frame)
 
-            t2 = time.time()
+                t2 = time.time()
 
-            det_results = det_results.cpu().numpy()  # (N, 6): x1,y1,x2,y2,score,cls
-            tracker_results = tracker.update(det_results)  # (M, 7): 末尾追加 track_id
+                det_results = det_results.cpu().numpy()  # (N, 6): x1,y1,x2,y2,score,cls
+                tracker_results = tracker.update(det_results)  # (M, 7): 末尾追加 track_id
 
-            t3 = time.time()
+                t3 = time.time()
 
-            annotated_frame = frame.cpu().numpy()
+                annotated_frame = frame.cpu().numpy()
 
-            for x1, y1, x2, y2, score, cls_id, track_id in tracker_results:
-                osd.draw_bbox(
-                    annotated_frame,
-                    (int(x1), int(y1)),
-                    (int(x2), int(y2)),
-                    color=(64, 64, 255),
-                    label=f"#{int(track_id)} {int(cls_id)}",
-                )
+                for x1, y1, x2, y2, score, cls_id, track_id in tracker_results:
+                    osd.draw_bbox(
+                        annotated_frame,
+                        (int(x1), int(y1)),
+                        (int(x2), int(y2)),
+                        color=(64, 64, 255),
+                        label=f"#{int(track_id)} {int(cls_id)}",
+                    )
 
-            annotated_frame = torch.from_numpy(annotated_frame)
-            encoder.encode(annotated_frame, pts)
+                annotated_frame = torch.from_numpy(annotated_frame)
+                encoder.encode(annotated_frame, pts)
 
-            t4 = time.time()
+                t4 = time.time()
 
-            # 业务逻辑
-            # Person(tracker_results)
-            # Vehicle(tracker_results)
+                # 业务逻辑
+                # Person(tracker_results)
+                # Vehicle(tracker_results)
 
-            t5 = time.time()
+                t5 = time.time()
 
-            sum_wait += t1 - t0
-            sum_det += t2 - t1
-            sum_track += t3 - t2
-            sum_encode += t4 - t3
-            sum_event += t5 - t4
+                sum_wait += t1 - t0
+                sum_det += t2 - t1
+                sum_track += t3 - t2
+                sum_encode += t4 - t3
+                sum_event += t5 - t4
 
-            if frame_count == 1000:
-                print(
-                    f"[{time.strftime('%m/%d/%Y-%H:%M:%S', time.localtime())}] {self.input_url}, "
-                    f"Det: {sum_det:.2f}ms, "
-                    f"Track: {sum_track:.2f}ms, "
-                    f"Encode: {sum_encode:.2f}ms, "
-                    f"Event: {sum_event:.2f}ms, "
-                    f"Wait: {sum_wait:.2f}ms "
-                )
-                frame_count = 0
-                sum_det = 0
-                sum_track = 0
-                sum_encode = 0
-                sum_event = 0
-                sum_wait = 0
+                if frame_count == 1000:
+                    print(
+                        f"[{time.strftime('%m/%d/%Y-%H:%M:%S', time.localtime())}] {self.input_url}, "
+                        f"Det: {sum_det:.2f}ms, "
+                        f"Track: {sum_track:.2f}ms, "
+                        f"Encode: {sum_encode:.2f}ms, "
+                        f"Event: {sum_event:.2f}ms, "
+                        f"Wait: {sum_wait:.2f}ms "
+                    )
+                    frame_count = 0
+                    sum_det = 0
+                    sum_track = 0
+                    sum_encode = 0
+                    sum_event = 0
+                    sum_wait = 0
+        except EndOfFileError as e:
+            # 点播文件正常读完
+            print(f"[Pipeline] {self.input_url} 读取结束: {e}")
+        except ReconnectExhaustedError as e:
+            # 流式源重连次数耗尽，信号丢失
+            print(f"[Pipeline] {self.input_url} 信号丢失: {e}")
+        except Exception:
+            # 未预期异常：收尾后重新抛出，不静默吞错
+            encoder.finish()
+            raise
 
         # 收尾：冲刷编码器缓冲并写入文件尾，否则输出文件不完整
         encoder.finish()

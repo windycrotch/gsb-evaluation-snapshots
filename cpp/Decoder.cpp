@@ -80,14 +80,18 @@ Decoder::Decoder(const std::string& filename,
       hwaccel(std::move(hwaccel_)) {
     try {
         init_ffmpeg(filename);
-    } catch (const std::exception& e) {
+    } catch (const SourceOpenError& e) {
         // 构造失败时对象析构函数不会执行，必须手动释放已分配的资源
         cleanup();
-        bool is_stream = filename.rfind("rtsp://", 0) == 0 || filename.rfind("rtp://", 0) == 0;
-        if (!is_stream) {
+        // 输入源打不开（流断线或文件不存在）：进入重连模式，由 next_frame() 按
+        // 重连策略重试，重连耗尽后抛出 ReconnectExhaustedError
+        std::cerr << "[Decoder] 初始化失败，进入重连模式: " << source_url << ", 原因: " << e.what() << std::endl;
+    } catch (const std::exception& e) {
+        cleanup();
+        if (!is_streaming_source) {
+            // 点播源的解码配置错误（如不支持的像素格式）重试无意义，直接抛出
             throw;
         }
-        is_streaming_source = true;
         std::cerr << "[Decoder] 初始化流失败，进入重连模式: " << source_url << ", 原因: " << e.what() << std::endl;
     }
 }
@@ -130,7 +134,7 @@ void Decoder::init_ffmpeg(const std::string& filename) {
         if (opts) {
             av_dict_free(&opts);
         }
-        throw std::runtime_error("[Decoder] 无法打开输入流: " + filename);
+        throw SourceOpenError("[Decoder] 无法打开输入流: " + filename);
     }
     if (opts) {
         av_dict_free(&opts);
@@ -254,7 +258,9 @@ void Decoder::cleanup() {
 }
 
 bool Decoder::try_reconnect() {
-    if (!enable_reconnect || !is_streaming_source) return false;
+    // 是否进入重连循环由调用点按场景决定（点播源 EOF 不调用本函数）；
+    // 这里只保留开关、次数上限与重连间隔逻辑，均不改动
+    if (!enable_reconnect) return false;
     while (max_reconnects == 0 || reconnect_attempts < max_reconnects) {
         reconnect_attempts += 1;
         // std::cerr << "[Decoder] 视频流断线中，正在重拉("
@@ -328,8 +334,10 @@ double Decoder::align_pts(double pts) {
 
 std::pair<torch::Tensor, double> Decoder::next_frame() {
     if (!codec_ctx || !format_ctx || !frame || !packet) {
+        // 构造时打开失败进入的重连模式：按重连策略重试，耗尽后抛出
         if (!try_reconnect()) {
-            throw std::runtime_error("[Decoder] 无信号，重连3次失败");
+            throw ReconnectExhaustedError("[Decoder] 无信号，重连" + std::to_string(reconnect_attempts) +
+                                          "次失败: " + source_url);
         }
     }
 
@@ -427,7 +435,12 @@ std::pair<torch::Tensor, double> Decoder::next_frame() {
     };
 
     if (finished) {
-        throw std::runtime_error("[Decoder] 视频流已结束或无可用信号");
+        // 已结束后再次调用：按源类型抛出对应类型
+        if (is_streaming_source) {
+            throw ReconnectExhaustedError("[Decoder] 无信号，重连" + std::to_string(reconnect_attempts) +
+                                          "次失败: " + source_url);
+        }
+        throw EndOfFileError("[Decoder] 读取结束(EOF): " + source_url);
     }
 
     while (true) {
@@ -462,7 +475,11 @@ std::pair<torch::Tensor, double> Decoder::next_frame() {
                         continue;
                     }
                     finished = true;
-                    return {torch::Tensor(), -1.0};
+                    if (is_streaming_source) {
+                        throw ReconnectExhaustedError("[Decoder] 无信号，重连" + std::to_string(reconnect_attempts) +
+                                                      "次失败: " + source_url);
+                    }
+                    throw std::runtime_error("[Decoder] 连续异常帧过多且无法恢复: " + source_url);
                 }
                 continue;
             } catch (...) {
@@ -476,7 +493,11 @@ std::pair<torch::Tensor, double> Decoder::next_frame() {
                         continue;
                     }
                     finished = true;
-                    return {torch::Tensor(), -1.0};
+                    if (is_streaming_source) {
+                        throw ReconnectExhaustedError("[Decoder] 无信号，重连" + std::to_string(reconnect_attempts) +
+                                                      "次失败: " + source_url);
+                    }
+                    throw std::runtime_error("[Decoder] 连续异常帧过多且无法恢复: " + source_url);
                 }
                 continue;
             }
@@ -484,41 +505,63 @@ std::pair<torch::Tensor, double> Decoder::next_frame() {
             av_frame_unref(frame);
             return {out, pts};
         } else if (ret == AVERROR_EOF) {
-            if (try_reconnect()) {
+            // 流式源：EOF 视为断线，尝试重连；点播源：EOF 是正常结束，不进入重连循环
+            if (is_streaming_source && try_reconnect()) {
                 continue;
             }
             finished = true;
-            throw std::runtime_error("[Decoder] 无信号，重连3次失败");
+            if (is_streaming_source) {
+                throw ReconnectExhaustedError("[Decoder] 无信号，重连" + std::to_string(reconnect_attempts) +
+                                              "次失败: " + source_url);
+            }
+            throw EndOfFileError("[Decoder] 读取结束(EOF): " + source_url);
         } else if (ret != AVERROR(EAGAIN)) {
             if (ret == AVERROR_INVALIDDATA) {
                 std::cerr << "[Decoder] 接收解码帧无效，已跳过当前帧: " << source_url << std::endl;
                 continue;
             }
             std::cerr << "[Decoder] 接收解码帧失败: " << source_url << ", 原因: " << ff_err(ret) << std::endl;
-            if (try_reconnect()) {
+            if (is_streaming_source && try_reconnect()) {
                 continue;
             }
             finished = true;
-            throw std::runtime_error("[Decoder] 无信号，重连3次失败");
+            if (is_streaming_source) {
+                throw ReconnectExhaustedError("[Decoder] 无信号，重连" + std::to_string(reconnect_attempts) +
+                                              "次失败: " + source_url);
+            }
+            throw std::runtime_error("[Decoder] 接收解码帧失败: " + source_url + ", 原因: " + ff_err(ret));
         }
 
         if (flushing) {
             finished = true;
-            throw std::runtime_error("[Decoder] 视频流已结束或无可用信号");
+            if (is_streaming_source) {
+                throw ReconnectExhaustedError("[Decoder] 无信号，重连" + std::to_string(reconnect_attempts) +
+                                              "次失败: " + source_url);
+            }
+            throw EndOfFileError("[Decoder] 读取结束(EOF): " + source_url);
         }
 
         ret = av_read_frame(format_ctx, packet);
         if (ret < 0) {
-            std::cerr << "[Decoder] 读取视频包失败: " << source_url << ", 原因: " << ff_err(ret) << std::endl;
-            if (try_reconnect()) {
-                continue;
+            if (ret != AVERROR_EOF) {
+                std::cerr << "[Decoder] 读取视频包失败: " << source_url << ", 原因: " << ff_err(ret) << std::endl;
             }
+            if (is_streaming_source) {
+                // 流式源：读包失败先尝试重连，耗尽后判定信号丢失
+                if (try_reconnect()) {
+                    continue;
+                }
+                finished = true;
+                throw ReconnectExhaustedError("[Decoder] 无信号，重连" + std::to_string(reconnect_attempts) +
+                                              "次失败: " + source_url);
+            }
+            // 点播源：EOF/读失败不进入重连循环，flush 排空解码器内剩余帧后正常结束
             flushing      = true;
             int flush_ret = avcodec_send_packet(codec_ctx, nullptr);
             if (flush_ret < 0) {
                 std::cerr << "[Decoder] 刷新解码器失败: " << source_url << ", 原因: " << ff_err(flush_ret) << std::endl;
                 finished = true;
-                throw std::runtime_error("[Decoder] 无信号，重连3次失败");
+                throw EndOfFileError("[Decoder] 读取结束(EOF): " + source_url);
             }
             continue;
         }
@@ -535,11 +578,15 @@ std::pair<torch::Tensor, double> Decoder::next_frame() {
                     continue;
                 }
                 std::cerr << "[Decoder] 发送视频包到解码器失败: " << source_url << ", 原因: " << ff_err(ret) << std::endl;
-                if (try_reconnect()) {
+                if (is_streaming_source && try_reconnect()) {
                     continue;
                 }
                 finished = true;
-                throw std::runtime_error("[Decoder] 无信号，重连3次失败");
+                if (is_streaming_source) {
+                    throw ReconnectExhaustedError("[Decoder] 无信号，重连" + std::to_string(reconnect_attempts) +
+                                                  "次失败: " + source_url);
+                }
+                throw std::runtime_error("[Decoder] 发送视频包到解码器失败: " + source_url + ", 原因: " + ff_err(ret));
             }
         } else {
             av_packet_unref(packet);

@@ -3,6 +3,7 @@
 #include <torch/extension.h>
 
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <utility>
 
@@ -17,6 +18,24 @@ extern "C" {
 }
 
 #include <npp.h>
+
+// 非流式点播源读到 EOF（重连不可用）时的正常结束信号，Python 侧可捕获
+class EndOfFileError : public std::runtime_error {
+public:
+    explicit EndOfFileError(const std::string& msg) : std::runtime_error(msg) {}
+};
+
+// 流式源重连次数耗尽，判定信号丢失，Python 侧可捕获
+class ReconnectExhaustedError : public std::runtime_error {
+public:
+    explicit ReconnectExhaustedError(const std::string& msg) : std::runtime_error(msg) {}
+};
+
+// 内部使用：输入源打开失败（可重试），用于区别于解码配置错误，不导出到 Python
+class SourceOpenError : public std::runtime_error {
+public:
+    explicit SourceOpenError(const std::string& msg) : std::runtime_error(msg) {}
+};
 
 class Decoder {
 public:

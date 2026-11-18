@@ -8,6 +8,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     // 若使用方没有先 import torch，返回 Tensor 时会因类型对象为空而段错误。
     py::module_::import("torch");
 
+    // 专用异常类型：均继承 Python RuntimeError，Python 侧可分别捕获
+    // EndOfFileError           —— 非流式点播源读到 EOF（重连不可用）的正常结束
+    // ReconnectExhaustedError  —— 流式源重连次数耗尽，信号丢失
+    py::register_exception<EndOfFileError>(m, "EndOfFileError", PyExc_RuntimeError);
+    py::register_exception<ReconnectExhaustedError>(m, "ReconnectExhaustedError", PyExc_RuntimeError);
+
     py::class_<Decoder>(m, "Decoder")
         .def(py::init([](const std::string& filename,
                          bool               enable_frame_skip,
