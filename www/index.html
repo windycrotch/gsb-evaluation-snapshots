@@ -119,6 +119,28 @@
             color: #BB464B;
             text-decoration: unset;
         }
+
+        .inkStatus {
+            display: inline-block;
+            margin-left: 12px;
+            padding: 4px 12px;
+            border: 1px solid #BB464B;
+            border-radius: 6px;
+            background-color: #2a2342;
+            font-size: 13px;
+            line-height: 1.4;
+            vertical-align: middle;
+            white-space: nowrap;
+        }
+
+        .inkStatus .statusItem {
+            margin: 0 8px;
+        }
+
+        .inkStatus .statusValue {
+            color: #FFD166;
+            font-weight: bold;
+        }
     </style>
 </head>
 
@@ -150,6 +172,11 @@
             <a href="#" id="black">Black</a> |
             <a href="#" id="white">White</a> |
             <a href="#" id="rainbow">Rainbow</a> |
+            <span class="inkStatus" id="inkStatus">
+                <span class="statusItem">已完成笔数: <span class="statusValue" id="completedCount">0</span></span>
+                <span class="statusItem">可撤销笔数: <span class="statusValue" id="undoCount">0</span></span>
+                <span class="statusItem">可重做笔数: <span class="statusValue" id="redoCount">0</span></span>
+            </span>
             <p>
                 Find the sources of the project <a href="https://github.com/sebavan/BabylonjsInkSample">Github</a>.
             </p>

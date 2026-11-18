@@ -34,6 +34,26 @@ const enum Brush {
 }
 
 /**
+ * Snapshot of the history of the ink canvas.
+ * It is exposed to the page so the status area can always display
+ * what is currently on the canvas, undoable and redoable.
+ */
+export interface InkCanvasHistoryState {
+    /**
+     * Number of completed paths currently displayed on the canvas
+     */
+    completedPathCount: number;
+    /**
+     * Number of paths that can be removed by an undo
+     */
+    undoableCount: number;
+    /**
+     * Number of paths that can be brought back by a redo
+     */
+    redoableCount: number;
+}
+
+/**
  * The canvas is responsible to create and orchestrate all the resources
  * the ink platform would need (scene, camera...)
  */
@@ -46,6 +66,7 @@ export class InkCanvas {
 
     private readonly _paths: PathMesh[];
     private readonly _redoPaths: PathMesh[];
+    private readonly _onHistoryChangedObservable: Observable<InkCanvasHistoryState>;
 
     private _currentPath: Nullable<PathMesh> = null;
     private _currentSize: number;
@@ -63,6 +84,7 @@ export class InkCanvas {
         this._particleTextureURL = particleTextureURL;
         this._paths = [];
         this._redoPaths = [];
+        this._onHistoryChangedObservable = new Observable<InkCanvasHistoryState>();
         this._currentPath = null;
         this._currentSize = 5;
         this._currentColor = Color3.White();
@@ -88,6 +110,30 @@ export class InkCanvas {
     }
 
     /**
+     * Gets the observable notified every time the ink history changes
+     * (path started, ended, undone, redone or cleared). The page status area
+     * listens to it to stay in sync with the actual canvas content.
+     */
+    public get onHistoryChangedObservable(): Observable<InkCanvasHistoryState> {
+        return this._onHistoryChangedObservable;
+    }
+
+    /**
+     * Gets a snapshot of the current ink history state.
+     * The stroke being drawn is already displayed on the canvas and is the
+     * one an undo would end and remove first, so it is counted as well: the
+     * status area then mirrors what the user actually sees.
+     */
+    public getState(): InkCanvasHistoryState {
+        const displayedCount = this._paths.length + (this._currentPath ? 1 : 0);
+        return {
+            completedPathCount: displayedCount,
+            undoableCount: displayedCount,
+            redoableCount: this._redoPaths.length,
+        };
+    }
+
+    /**
      * Starts creating a new path at the location of the pointer
      */
     public startPath(): void {
@@ -95,8 +141,9 @@ export class InkCanvas {
             return;
         }
 
-        // Cleanup the redo list
-        this._redoPaths.length = 0;
+        // Cleanup the redo list: a brand new stroke invalidates any previously
+        // undone path, so redo can not resurrect a stroke covered by this one.
+        this._disposePaths(this._redoPaths);
 
         // Create the new path mesh and assigns its material
         this._currentPath = this._createPath(this._scene.pointerX, this._scene.pointerY);
@@ -109,10 +156,9 @@ export class InkCanvas {
         this._currentPath.freezeWorldMatrix();
 
         // Starts the particles in rainbow mode
-        if (this._currentMode === Brush.rainbow) {
-            this._updateParticleSystem();
-            this._particleSystem.start();
-        }
+        this._syncParticleSystem();
+
+        this._notifyHistoryChanged();
     }
 
     /**
@@ -140,48 +186,66 @@ export class InkCanvas {
             return;
         }
 
-        // Adds the path to our undo list
-        this._paths.push(this._currentPath);
+        this._finalizeCurrentPath();
 
-        // Clear the current path
-        this._currentPath = null;
-
-        // Stops the particle system
-        this._particleSystem.stop();
+        this._notifyHistoryChanged();
     }
 
     /**
-     * Undo the latest created path
+     * Undo the latest created path.
+     * If a path is currently being drawn, it is ended first so no half drawn
+     * stroke can ever be left behind.
      */
     public undo(): void {
-        if (!this._currentPath && this._paths.length > 0) {
-            const path = this._paths.pop();
+        // Finish the in progress stroke before undoing anything
+        this._finalizeCurrentPath();
+
+        if (this._paths.length > 0) {
+            const path = this._paths.pop()!;
             this._redoPaths.push(path);
             this._scene.removeMesh(path);
         }
+
+        // No particle may survive an undo
+        this._syncParticleSystem();
+
+        this._notifyHistoryChanged();
     }
 
     /**
-     * Redo the latest undone path
+     * Redo the latest undone path.
+     * The restored path is added back to the scene and can be undone again.
      */
     public redo(): void {
-        if (!this._currentPath && this._redoPaths.length > 0) {
-            const path = this._redoPaths.pop();
-            this._paths.push(path);
-            this._scene.addMesh(path);
+        // Starting a new stroke clears the redo list, so redo is only
+        // meaningful when no stroke is currently in progress.
+        if (this._currentPath || this._redoPaths.length === 0) {
+            return;
         }
+
+        const path = this._redoPaths.pop()!;
+        this._paths.push(path);
+        this._scene.addMesh(path);
+
+        this._notifyHistoryChanged();
     }
 
     /**
-     * Clear all the created path
+     * Clear all the created paths, including the one currently being drawn.
+     * The redo stack is emptied as well, so undo and redo are no-ops afterwards.
      */
     public clear(): void {
-        if (!this._currentPath && this._paths.length > 0) {
-            let path: PathMesh;
-            while (path = this._paths.pop()) {
-                path.dispose();
-            }
-        }
+        // Finish the in progress stroke first, then remove everything
+        this._finalizeCurrentPath();
+
+        // Undone paths are not in the scene anymore but still hold resources
+        this._disposePaths(this._redoPaths);
+        this._disposePaths(this._paths);
+
+        // No particle may survive a clear
+        this._syncParticleSystem();
+
+        this._notifyHistoryChanged();
     }
 
     /**
@@ -205,6 +269,10 @@ export class InkCanvas {
      */
     public usePen(): void {
         this._currentMode = Brush.pen;
+
+        // Particles are exclusive to the rainbow brush: they must not keep
+        // emitting when the user switches back to a plain pen mid stroke.
+        this._syncParticleSystem();
     }
 
     /**
@@ -230,6 +298,60 @@ export class InkCanvas {
         return import(/* webpackChunkName: "debug" */ "./debug/appDebug").then((debugModule) => {
             debugModule.toggleDebugMode(this._scene);
         });
+    }
+
+    /**
+     * Commits the current path to the completed list and stops the particles.
+     * Used by endPath as well as by undo/clear which need to end the in
+     * progress stroke before acting on the history.
+     */
+    private _finalizeCurrentPath(): void {
+        const currentPath = this._currentPath;
+        if (!currentPath) {
+            return;
+        }
+
+        // Adds the path to our undo list
+        this._paths.push(currentPath);
+
+        // Clear the current path
+        this._currentPath = null;
+
+        // Stops the particle system as no stroke is in progress anymore
+        this._syncParticleSystem();
+    }
+
+    /**
+     * Disposes every path of the given list and empties it
+     */
+    private _disposePaths(paths: PathMesh[]): void {
+        while (paths.length > 0) {
+            const path = paths.pop()!;
+            path.material?.dispose();
+            path.dispose();
+        }
+    }
+
+    /**
+     * Starts or stops the particle system so it emits only while a rainbow
+     * stroke is actually being drawn. Every history operation goes through
+     * here to guarantee no leftover emission.
+     */
+    private _syncParticleSystem(): void {
+        if (this._currentPath && this._currentMode === Brush.rainbow) {
+            this._updateParticleSystem();
+            this._particleSystem.start();
+        }
+        else {
+            this._particleSystem.stop();
+        }
+    }
+
+    /**
+     * Notifies the page that the ink history changed
+     */
+    private _notifyHistoryChanged(): void {
+        this._onHistoryChangedObservable.notifyObservers(this.getState());
     }
 
     private _updateParticleSystem(): void {

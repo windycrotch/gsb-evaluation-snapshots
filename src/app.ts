@@ -16,6 +16,9 @@ const size15Btn = document.getElementById("size15") as HTMLElement;
 const blackBtn = document.getElementById("black") as HTMLElement;
 const whiteBtn = document.getElementById("white") as HTMLElement;
 const rainbowBtn = document.getElementById("rainbow") as HTMLElement;
+const completedCountSpan = document.getElementById("completedCount") as HTMLElement;
+const undoCountSpan = document.getElementById("undoCount") as HTMLElement;
+const redoCountSpan = document.getElementById("redoCount") as HTMLElement;
 
 /**
  * Can be set to enter in debug mode.
@@ -25,6 +28,20 @@ const debug = false;
 
 // Create our inking surface
 const inkCanvas = new InkCanvas(mainCanvas, "./assets/particle.png", debug);
+
+// Status area: keep the displayed counts in sync with the canvas history.
+// Initialized from the canvas state so the page always starts at 0/0/0.
+function updateStatus(): void {
+    const state = inkCanvas.getState();
+    completedCountSpan.innerText = String(state.completedPathCount);
+    undoCountSpan.innerText = String(state.undoableCount);
+    redoCountSpan.innerText = String(state.redoableCount);
+}
+
+updateStatus();
+inkCanvas.onHistoryChangedObservable.add(() => {
+    updateStatus();
+});
 
 // Timer Events
 setInterval(() => {
