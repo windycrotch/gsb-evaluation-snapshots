@@ -7,6 +7,8 @@ export const FIGHTER_R = 0.85; // body collision radius
 export const CHEST_Y = 1.05; // height of the hurt sphere centre
 export const HURT_R = 1.0;
 
+export const TICK = 1 / 60; // fixed simulation tick for lock-step / replay driving (World.advance)
+
 export const MAX_HP = 100;
 export const MAX_ENERGY = 100;
 export const MAX_STAMINA = 100;

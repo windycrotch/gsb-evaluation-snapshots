@@ -118,6 +118,7 @@ tools/
   render-video.mjs  frame-by-frame capture → MP4 (with the synthesized soundtrack)
   frame.mjs         grab single film-quality frames
   simtest.mjs       headless bot-vs-bot soak test / balance report
+  fixedstep.mjs     fixed-step determinism check: same frames + time, chunked three ways
   perf.mjs          real-time frame-rate probe
 ```
 
@@ -133,6 +134,10 @@ The simulation is already shaped for it:
 - For netcode, step the world at a fixed tick (1/60 s) instead of the display-rate sub-steps the
   single-player loop uses, interpolate fighter transforms for rendering, and either lock-step the
   inputs or add rollback by snapshotting `World` (it is a small tree of plain numbers and arrays).
+  `World.advance(frames, elapsed)` is that fixed-step entry point: it takes one input frame per
+  tick, runs whole 1/60 s ticks (`TICK` in `src/sim/constants.js`) and carries any sub-tick
+  remainder over, so the same frames + total time replay identically however the caller chunks
+  the time. `npm run fixedstep` (tools/fixedstep.mjs) verifies exactly that.
 - Slow motion is presentation-side time scaling today; in a networked match it needs to be driven
   from sim events so both peers agree on it.
 

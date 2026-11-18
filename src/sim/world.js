@@ -1,4 +1,4 @@
-import { ARENA_R, GRAVITY, FIGHTER_R, CHEST_Y, HURT_R, MAX_HP, MAX_ENERGY, MAX_STAMINA, BTN, ST } from './constants.js';
+import { ARENA_R, GRAVITY, FIGHTER_R, CHEST_Y, HURT_R, MAX_HP, MAX_ENERGY, MAX_STAMINA, BTN, ST, TICK } from './constants.js';
 import { MOVES, CHARS, ULT } from './moves.js';
 import { RNG, clamp, damp, turnToward } from '../core/math.js';
 
@@ -55,6 +55,9 @@ export class World {
     this.timeLeft = roundTime;
     this.active = false; // fighters can act
     this.nextId = 1;
+    this.acc = 0; // real time left over from advance(), carried into the next call
+    this.inbox = []; // queued input frames, one per fixed tick
+    this.heldFrame = null; // last frame applied, repeated when the inbox runs dry
   }
 
   emit(e) { this.events.push(e); }
@@ -196,6 +199,27 @@ export class World {
     this._stepBeams(dt, frozen);
     this._separate();
     for (const f of F) { f.pressed = 0; f.mashPress = 0; }
+  }
+
+  // Fixed-step entry point (netcode / replays): enqueue input frames — a single [p0, p1] frame or
+  // an array of them, one frame per tick — and advance by `elapsed` real seconds in whole 1/60 s
+  // ticks. A sub-tick remainder is carried into the next call, never dropped and never made up, so
+  // the same frames + same total elapsed give the identical result however the caller chunks the
+  // time. If the inbox runs dry the last frame is held. Returns the number of ticks run.
+  advance(frames, elapsed) {
+    const list = frames.length === 0 || Array.isArray(frames[0]) ? frames : [frames];
+    for (const f of list) this.inbox.push(f);
+    this.acc += elapsed;
+    let n = 0;
+    // the epsilon absorbs float summation error so chunk boundaries can never change the tick count
+    while (this.acc >= TICK - 1e-9) {
+      this.acc = Math.max(0, this.acc - TICK);
+      const frame = this.inbox.length ? this.inbox.shift() : this.heldFrame;
+      this.heldFrame = frame;
+      this.step(frame, TICK);
+      n++;
+    }
+    return n;
   }
 
   _stepFighter(f, o, dt) {
@@ -545,6 +569,7 @@ export class World {
       });
     }
     const melee = (p) => p.h.kind === 'light' || p.h.kind === 'heavy';
+    const done = new Set(); // entries already settled this frame — a hit never resolves twice
     if (pend.length === 2 && pend[0].f !== pend[1].f && melee(pend[0]) && melee(pend[1]) && pend[0].f.invuln <= 0 && pend[1].f.invuln <= 0 && pend[0].f.grounded && pend[1].f.grounded) {
       // simultaneous strikes cancel out in a clang
       const [a, b] = pend;
@@ -554,15 +579,16 @@ export class World {
         this._set(p.f, ST.STUN);
         p.f.stunDur = 0.3;
         p.f.energy = Math.min(MAX_ENERGY, p.f.energy + 4);
+        done.add(p);
       }
       this.hitstop = Math.max(this.hitstop, 0.1);
       this.emit({ type: 'clang', x: (a.f.x + b.f.x) / 2, y: 1.15, z: (a.f.z + b.f.z) / 2 });
-      return;
     }
     for (const p of pend) {
+      if (done.has(p)) continue;
       // near-simultaneous strikes also clang: if the target's own swing is about to land, neither wins
       const o = p.o;
-      if (melee(p) && o.state === ST.ATTACK && o.move && o.move.hits && !o.move.armor && !p.f.move.armor && o.grounded && p.f.grounded && o.invuln <= 0) {
+      if (melee(p) && o.state === ST.ATTACK && o.move && o.move.hits && !o.move.armor && !(p.f.move && p.f.move.armor) && o.grounded && p.f.grounded && o.invuln <= 0) {
         const h2 = o.move.hits[0];
         const facing = Math.sin(o.yaw) * p.fx + Math.cos(o.yaw) * p.fz < -0.4;
         if (facing && (h2.kind === 'light' || h2.kind === 'heavy') && !(o.hitMask & 1) && o.st >= h2.t0 - 0.04 && o.st <= h2.t1) {
@@ -576,7 +602,9 @@ export class World {
           }
           this.hitstop = Math.max(this.hitstop, 0.1);
           this.emit({ type: 'clang', x: (p.f.x + o.x) / 2, y: 1.15, z: (p.f.z + o.z) / 2 });
-          return;
+          // the clang negates both swings: every queued hit from either fighter is spent with it
+          for (const q of pend) if (q.f === p.f || q.f === o) done.add(q);
+          continue;
         }
       }
       p.f.hitMask |= 1 << p.i;
