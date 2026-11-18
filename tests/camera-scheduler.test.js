@@ -192,3 +192,193 @@ test('Long color decodes still enter protective cooldowns',()=>{
  assert.ok(first!==null&&second!==null,'IRIS must resume after the long decode');
  assert.ok(second-first>=35000,'Slow IRIS must not overload the phone');
 });
+
+test('ChromaQR and IRIS first attempts land near five and seven seconds',()=>{
+ const scheduler=createAutoScanScheduler(0);
+ const first={};
+ for(let now=0;now<=20000&&(first.chroma===undefined||first.iris===undefined);now+=100){
+  const kind=scheduler.next(now);
+  if(kind!=='standard'&&!(kind in first)){
+   first[kind]=now;
+   scheduler.report(kind,now+300,300);
+  }
+ }
+ assert.ok(first.chroma>=5000&&first.chroma<=5600,'ChromaQR first attempt around 5s, got '+first.chroma);
+ assert.ok(first.iris>=7000&&first.iris<=7600,'IRIS first attempt around 7s, got '+first.iris);
+});
+
+test('Earliest due specialized format wins when several are due',()=>{
+ const scheduler=createAutoScanScheduler(0);
+ const order=[];
+ let now=30000; // every format is past its first deadline by now
+ for(let round=0;round<4;round++){
+  for(let i=0;i<4;i++){assert.equal(scheduler.next(now),'standard');now+=100}
+  order.push(scheduler.next(now));now+=100;
+ }
+ assert.deepEqual(order,['dotcode','chroma','iris','pdf417'],
+  'Due formats must run in deadline order, not in a fixed or noisy order');
+});
+
+test('Every specialized scan is followed by at least four quick reads',()=>{
+ const scheduler=createAutoScanScheduler(0);
+ let now=50000; // dotcode, chroma, iris and pdf417 are all already due
+ for(let i=0;i<4;i++){assert.equal(scheduler.next(now),'standard');now+=100}
+ assert.equal(scheduler.next(now),'dotcode');now+=100;
+ // ChromaQR, IRIS and PDF417 remain due, but the quick-read counter restarted.
+ for(let i=0;i<4;i++){assert.equal(scheduler.next(now),'standard');now+=100}
+ assert.equal(scheduler.next(now),'chroma');
+});
+
+test('Cooldowns apply only past their decode-time thresholds',()=>{
+ const cases=[
+  ['chroma',1800,30000],
+  ['iris',1600,35000],
+  ['pdf417',1000,22000],
+  ['dotcode',1500,11000]
+ ];
+ for(const [kind,threshold,cooldown] of cases){
+  for(const [decodeMs,expectCooldown] of [[threshold,false],[threshold+1,true]]){
+   const scheduler=createAutoScanScheduler(0);
+   let now=0,firstFinish=null,second=null,guard=0;
+   while(second===null&&guard++<5000){
+    const k=scheduler.next(now);
+    if(k===kind){
+     if(firstFinish===null){
+      firstFinish=now+decodeMs;
+      scheduler.report(k,firstFinish,decodeMs);
+      now=firstFinish+120;
+     }else second=now;
+    }else{
+     if(k!=='standard')scheduler.report(k,now+400,400);
+     now+=k==='standard'?150:550;
+    }
+   }
+   assert.ok(second!==null,kind+' must run twice');
+   const gap=second-firstFinish;
+   if(expectCooldown)
+    assert.ok(gap>=cooldown,kind+' past '+threshold+'ms must cool down '+cooldown+'ms, got '+gap);
+   else
+    assert.ok(gap<cooldown,kind+' at exactly '+threshold+'ms must avoid the cooldown, got '+gap);
+  }
+ }
+});
+
+test('Skipped color passes reschedule within their short retry windows',()=>{
+ for(const [kind,window,normalInterval] of [['chroma',6500,15000],['iris',8500,18000]]){
+  const scheduler=createAutoScanScheduler(0);
+  let now=0,first=null,firstFinish=null,second=null,guard=0;
+  while(second===null&&guard++<2000){
+   const k=scheduler.next(now);
+   if(k===kind){
+    if(first===null){
+     first=now;firstFinish=now+50;
+     scheduler.report(k,firstFinish,50,true); // monochrome scene: skipped
+    }else second=now;
+   }else if(k!=='standard')scheduler.report(k,now+50,50);
+   now+=100;
+  }
+  assert.ok(first!==null&&second!==null,kind+' must be retried after a skip');
+  assert.ok(second>=firstFinish+window-1,
+   kind+' retry must not beat its rescheduled slot, got '+(second-firstFinish));
+  // The retry deadline is set within the window; execution can slip by one
+  // quick-read cycle when another due format resets the counter nearby.
+  assert.ok(second<=firstFinish+window+1000,
+   kind+' retry must land near the ~'+window+'ms slot, got '+(second-firstFinish));
+  assert.ok(second-first<normalInterval,
+   'Skipped '+kind+' must not wait the full '+normalInterval+'ms interval');
+ }
+});
+
+test('A skipped color pass never earns a cooldown, however slow the report',()=>{
+ const scheduler=createAutoScanScheduler(0);
+ let now=0,first=null,second=null,guard=0;
+ while(second===null&&guard++<5000){
+  const kind=scheduler.next(now);
+  if(kind==='chroma'){
+   if(first===null){
+    first=now;
+    // Skipped means the decoder never ran: a huge reported cost is irrelevant.
+    scheduler.report(kind,now+80,99999,true);
+    now+=200;
+   }else second=now;
+  }else{
+   if(kind!=='standard')scheduler.report(kind,now+300,300);
+   now+=kind==='standard'?150:450;
+  }
+ }
+ assert.ok(second!==null,'ChromaQR must be retried after a skip');
+ assert.ok(second-first<30000,'A skipped pass must not trigger the 30s slow-decode cooldown');
+});
+
+test('Repeated skips keep retrying without bunching up before the rescheduled slot',()=>{
+ const scheduler=createAutoScanScheduler(0);
+ const runs=[];
+ let now=0,guard=0;
+ while(runs.length<4&&guard++<1000){
+  const kind=scheduler.next(now);
+  if(kind==='chroma'){
+   runs.push(now);
+   scheduler.report(kind,now+50,50,true);
+  }else if(kind!=='standard')scheduler.report(kind,now+50,50);
+  now+=100;
+ }
+ assert.ok(runs.length>=4,'Skipped ChromaQR must keep being rescheduled');
+ for(let i=1;i<runs.length;i++){
+  const gap=runs[i]-runs[i-1];
+  assert.ok(gap>=6500,'Retry must not run earlier than its rescheduled deadline, gap '+gap);
+  assert.ok(gap<=7000,'Retry must stay close to the 6.5s window, gap '+gap);
+ }
+});
+
+test('Standard scans stay in the majority under skips and slow decodes',()=>{
+ const scheduler=createAutoScanScheduler(0);
+ const counts={standard:0,dotcode:0,pdf417:0,chroma:0,iris:0};
+ let now=0;
+ for(let i=0;i<400;i++){
+  const kind=scheduler.next(now);
+  counts[kind]++;
+  if(kind==='standard'){now+=260;scheduler.report(kind,now,120)}
+  else if(kind==='chroma'){const skip=i%2===0;now+=skip?60:2100;scheduler.report(kind,now,skip?60:2100,skip)}
+  else if(kind==='iris'){now+=900;scheduler.report(kind,now,900)}
+  else if(kind==='dotcode'){now+=1900;scheduler.report(kind,now,1900)} // slow DotCode
+  else{now+=700;scheduler.report(kind,now,700)}
+ }
+ const specialized=counts.dotcode+counts.pdf417+counts.chroma+counts.iris;
+ assert.ok(specialized>0,'specialized formats must run');
+ assert.ok(counts.standard>=4*specialized,
+  'every specialized pass requires four quick reads: '+JSON.stringify(counts));
+ for(const kind of ['dotcode','pdf417','chroma','iris'])
+  assert.ok(counts[kind]>=2,kind+' must keep being attempted');
+});
+
+test('Color pre-check handles empty, malformed and grayscale frames',()=>{
+ assert.equal(hasColorSignal(),false);
+ assert.equal(hasColorSignal(undefined),false);
+ assert.equal(hasColorSignal(null),false);
+ assert.equal(hasColorSignal({}),false);
+ assert.equal(hasColorSignal({data:[]}),false);
+ assert.equal(hasColorSignal({data:new Uint8ClampedArray(0)}),false);
+ assert.equal(hasColorSignal({data:new Uint8ClampedArray(6)}),false,'non RGBA-aligned length');
+ for(const gray of [0,80,160,255]){
+  const rgba=new Uint8ClampedArray(40*40*4);
+  for(let i=0;i<rgba.length;i+=4){rgba[i]=rgba[i+1]=rgba[i+2]=gray;rgba[i+3]=255}
+  assert.equal(hasColorSignal({data:rgba}),false,'gray level '+gray+' has no color signal');
+ }
+});
+
+test('Color pre-check keeps small colored codes and respects its thresholds',()=>{
+ // A handful of strongly saturated pixels inside a gray frame is enough.
+ const rgba=new Uint8ClampedArray(40*40*4);
+ for(let i=0;i<rgba.length;i+=4){rgba[i]=rgba[i+1]=rgba[i+2]=200;rgba[i+3]=255}
+ for(let p=0;p<8;p++){const i=p*4*50;rgba[i]=240;rgba[i+1]=30;rgba[i+2]=60}
+ assert.equal(hasColorSignal({data:rgba}),true,'a few saturated pixels must keep the pass');
+ const solid=(r,g,b,pixels)=>{
+  const frame=new Uint8ClampedArray(pixels*4);
+  for(let i=0;i<frame.length;i+=4){frame[i]=r;frame[i+1]=g;frame[i+2]=b;frame[i+3]=255}
+  return {data:frame};
+ };
+ // Boundary: brightness 85 and saturation span 40 both count as colored.
+ assert.equal(hasColorSignal(solid(85,45,45,64)),true,'boundary pixel counts as color');
+ assert.equal(hasColorSignal(solid(84,44,44,64)),false,'too dark to trust as color');
+ assert.equal(hasColorSignal(solid(200,162,162,64)),false,'too desaturated to trust as color');
+});

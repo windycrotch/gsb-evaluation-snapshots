@@ -13,6 +13,9 @@ export function autoQuickFormats(index){
 export function createAutoScanScheduler(startTime=0){
   let quickReads=0;
   let nextDot=startTime+4500,nextPdf=startTime+12000,nextChroma=startTime+5000,nextIris=startTime+7000;
+  // Deadline that triggered the in-flight color pass, so a skipped retry never
+  // moves earlier than the slot it replaces.
+  let dueChroma=nextChroma,dueIris=nextIris;
   return {
     next(now){
       // At least four regular barcode frames between every specialized pass.
@@ -25,8 +28,8 @@ export function createAutoScanScheduler(startTime=0){
         const kind=due[0][0];quickReads=0;
         if(kind==='dotcode')nextDot=now+7000;
         else if(kind==='pdf417')nextPdf=now+18000;
-        else if(kind==='chroma')nextChroma=now+15000;
-        else nextIris=now+18000;
+        else if(kind==='chroma'){dueChroma=due[0][1];nextChroma=now+15000}
+        else{dueIris=due[0][1];nextIris=now+18000}
         return kind;
       }
       quickReads++;
@@ -34,9 +37,11 @@ export function createAutoScanScheduler(startTime=0){
     },
     report(kind,finishedAt,decodeMs,skipped=false){
       // Recheck grayscale scenes cheaply without running a heavy color decoder.
+      // A skipped pass never decoded anything, so it earns no long cooldown;
+      // retry soon, but never earlier than the deadline this pass was due at.
       if(skipped){
-        if(kind==='chroma')nextChroma=Math.min(nextChroma,finishedAt+6500);
-        if(kind==='iris')nextIris=Math.min(nextIris,finishedAt+8500);
+        if(kind==='chroma')nextChroma=Math.min(nextChroma,Math.max(dueChroma,finishedAt+6500));
+        if(kind==='iris')nextIris=Math.min(nextIris,Math.max(dueIris,finishedAt+8500));
         return;
       }
       // Keep expensive color decoding rare on slow phones even with shorter normal intervals.
