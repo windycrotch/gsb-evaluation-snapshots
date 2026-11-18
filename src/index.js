@@ -97,6 +97,51 @@ export default class H5VideoPlayer {
       playButton: null,
     }
 
+    // lifecycle flags: make load()/close/destroy() predictable and idempotent
+    this._eventsBound = false
+    this._loaded = false
+    this._closed = false
+    this._destroyed = false
+    this._orientationBound = false
+
+    // Stable handler references so listeners can be removed again and are
+    // never bound twice on the same instance.
+    this._onMaskClick = () => {
+      if (this._isPlaying()) {
+        this.pause()
+      }
+      else {
+        this.play()
+      }
+    }
+    this._onPlayButtonClick = () => {
+      this.play()
+    }
+    this._onVideoClick = () => {
+      if (!this._isPlaying()) {
+        this.play()
+      }
+    }
+    this._onEnded = () => {
+      this._showPlayBtn()
+      if (this.options.autoClose) {
+        this._close()
+      }
+      this.hooks.stop()
+    }
+    this._onOrientationChange = () => {
+      window.removeEventListener(_orientationchangeEvt, this._onOrientationChange)
+
+      setTimeout(() => {
+        if (this._destroyed) {
+          this._orientationBound = false
+          return
+        }
+        this._changeWrapperStyle()
+        window.addEventListener(_orientationchangeEvt, this._onOrientationChange, false)
+      }, 400)
+    }
+
     this.initContainer()
     this.initWrapper()
 
@@ -153,6 +198,16 @@ export default class H5VideoPlayer {
   }
 
   load() {
+    if (this._destroyed) {
+      return this
+    }
+
+    // A repeated load() on a live instance must not stack listeners or
+    // re-fire hooks; only a closed/removed instance is re-mounted.
+    const alreadyLoaded = this._loaded
+      && !this._closed
+      && this.context.contains(this.els.container)
+
     if (!this.context.contains(this.els.container)) {
       this.init()
     }
@@ -162,55 +217,97 @@ export default class H5VideoPlayer {
 
     this.eventBind()
 
-    if (this.options.autoPlay) {
+    if (this.options.autoPlay && !alreadyLoaded) {
       this.play()
     }
+
+    this._loaded = true
+    this._closed = false
 
     return this
   }
 
   eventBind() {
-    if (this.options.control) {
-      this.els.mask.addEventListener('click', () => {
-        if (this._isPlaying()) {
-          this.pause()
-        }
-        else {
-          this.play()
-        }
-      })
+    if (this._destroyed || this._eventsBound) {
+      return
+    }
 
-      this.els.playButton.addEventListener('click', () => {
-        this.play()
-      })
+    if (this.options.control) {
+      this.els.mask.addEventListener('click', this._onMaskClick)
+      this.els.playButton.addEventListener('click', this._onPlayButtonClick)
     }
     else if (this.options.fixAndroidWechatContinue) {
-      this.els.video.addEventListener('click', () => {
-        if (!this._isPlaying()) {
-          this.play()
-        }
-      })
+      this.els.video.addEventListener('click', this._onVideoClick)
     }
 
-    this.els.video.addEventListener('ended', () => {
-      this._showPlayBtn()
-      if (this.options.autoClose) {
-        this._remove()
+    this.els.video.addEventListener('ended', this._onEnded)
+
+    this._eventsBound = true
+  }
+
+  eventUnbind() {
+    if (!this._eventsBound) {
+      return
+    }
+
+    if (this.options.control) {
+      this.els.mask.removeEventListener('click', this._onMaskClick)
+      if (this.els.playButton) {
+        this.els.playButton.removeEventListener('click', this._onPlayButtonClick)
       }
-      this.hooks.stop()
-    })
+    }
+    else if (this.options.fixAndroidWechatContinue) {
+      this.els.video.removeEventListener('click', this._onVideoClick)
+    }
+
+    this.els.video.removeEventListener('ended', this._onEnded)
+
+    this._eventsBound = false
   }
 
   play() {
+    if (this._destroyed) {
+      return
+    }
     this.els.video.play()
     this._hiddenPlayBtn()
     this.hooks.play()
   }
 
   pause() {
+    if (this._destroyed) {
+      return
+    }
     this.els.video.pause()
     this._showPlayBtn()
     this.hooks.pause()
+  }
+
+  /**
+   * Tear the instance down: remove the container and every listener.
+   * Idempotent — safe to call multiple times.
+   *
+   * @returns The player instance.
+   */
+  destroy() {
+    if (this._destroyed) {
+      return this
+    }
+    this._destroyed = true
+
+    this.eventUnbind()
+
+    if (this._orientationBound) {
+      window.removeEventListener(_orientationchangeEvt, this._onOrientationChange)
+      this._orientationBound = false
+    }
+
+    this._remove()
+
+    this._loaded = false
+    this._closed = true
+
+    return this
   }
 
   _showPlayBtn() {
@@ -230,67 +327,78 @@ export default class H5VideoPlayer {
   }
 
   _remove() {
-    this.context.removeChild(this.els.container)
+    if (this.els.container && this.els.container.parentNode) {
+      this.els.container.parentNode.removeChild(this.els.container)
+    }
+  }
+
+  /**
+   * Close a live instance: drop every listener and detach the container so a
+   * later load() starts from a clean, single-listener state.
+   */
+  _close() {
+    this.eventUnbind()
+    this._remove()
+    this._loaded = false
+    this._closed = true
+  }
+
+  _changeWrapperStyle() {
+    const containerRect = this.els.container.getBoundingClientRect()
+    const containerRectWidth = containerRect.width
+    const containerRectHeight = containerRect.height
+    if (_judgePhoneOrientation() === this.options.orientation) {
+      addStyles(this.els.wrapper, {
+        width: `${containerRectWidth}px`,
+        height: `${containerRectHeight}px`,
+        transform: '',
+      })
+    }
+    else {
+      // Adjust the video orientation
+      addStyles(this.els.wrapper, {
+        width: `${containerRectHeight}px`,
+        height: `${containerRectWidth}px`,
+        transform: 'rotate(-90deg)',
+      })
+    }
+
+    // set videoWrapperForConstraintRatio width&height
+    setTimeout(() => {
+      if (this._destroyed) {
+        return
+      }
+      const wrapperWidth = Number.parseInt(this.els.wrapper.style.width, 10)
+      const wrapperHeight = Number.parseInt(this.els.wrapper.style.height, 10)
+      const preComputedHeight = wrapperWidth / this.options.aspectRatio
+      if (preComputedHeight >= wrapperHeight) { // based on wrapperWidth
+        addStyles(this.els.videoWrapperForConstraintRatio, {
+          width: `${wrapperWidth}px`,
+          height: `${preComputedHeight}px`,
+        })
+      }
+      else { // based on wrapperHeight
+        addStyles(this.els.videoWrapperForConstraintRatio, {
+          width: `${wrapperHeight * this.options.aspectRatio}px`,
+          height: `${wrapperHeight}px`,
+        })
+      }
+    }, 0)
   }
 
   _assignWrapperStyle() {
-    const containerRect = () => this.els.container.getBoundingClientRect()
-
-    const _changeStyle = () => {
-      const containerRectWidth = containerRect().width
-      const containerRectHeight = containerRect().height
-      if (_judgePhoneOrientation() === this.options.orientation) {
-        addStyles(this.els.wrapper, {
-          width: `${containerRectWidth}px`,
-          height: `${containerRectHeight}px`,
-          transform: '',
-        })
-      }
-      else {
-        // Adjust the video orientation
-        addStyles(this.els.wrapper, {
-          width: `${containerRectHeight}px`,
-          height: `${containerRectWidth}px`,
-          transform: 'rotate(-90deg)',
-        })
-      }
-
-      // set videoWrapperForConstraintRatio width&height
-      setTimeout(() => {
-        const wrapperWidth = Number.parseInt(this.els.wrapper.style.width, 10)
-        const wrapperHeight = Number.parseInt(this.els.wrapper.style.height, 10)
-        const preComputedHeight = wrapperWidth / this.options.aspectRatio
-        if (preComputedHeight >= wrapperHeight) { // based on wrapperWidth
-          addStyles(this.els.videoWrapperForConstraintRatio, {
-            width: `${wrapperWidth}px`,
-            height: `${preComputedHeight}px`,
-          })
-        }
-        else { // based on wrapperHeight
-          addStyles(this.els.videoWrapperForConstraintRatio, {
-            width: `${wrapperHeight * this.options.aspectRatio}px`,
-            height: `${wrapperHeight}px`,
-          })
-        }
-      }, 0)
-    }
-
-    const _changeOrientation = () => {
-      window.removeEventListener(_orientationchangeEvt, _changeOrientation)
-
-      setTimeout(() => {
-        _changeStyle()
-        window.addEventListener(_orientationchangeEvt, _changeOrientation, false)
-      }, 400)
-    }
     if (this.options.disableRotation) {
-      _changeStyle()
-      window.addEventListener(_orientationchangeEvt, _changeOrientation, false)
+      this._changeWrapperStyle()
+      if (!this._orientationBound) {
+        window.addEventListener(_orientationchangeEvt, this._onOrientationChange, false)
+        this._orientationBound = true
+      }
     }
     else {
+      const containerRect = this.els.container.getBoundingClientRect()
       addStyles(this.els.wrapper, {
-        width: `${containerRect().width}px`,
-        height: `${containerRect().height}px`,
+        width: `${containerRect.width}px`,
+        height: `${containerRect.height}px`,
       })
     }
   }
