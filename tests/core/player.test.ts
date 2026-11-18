@@ -74,6 +74,97 @@ test("manual mode pauses at the loop start", () => {
   expect(p.position()).toBe(10);
 });
 
+test("manual and zero-delay loops never enter the waiting state", () => {
+  const zero = make();
+  zero.dispatch({ type: "toggle-play" });
+  advance(25);
+  expect(zero.getState().playState).toBe("playing");
+  expect(zero.getState().waitingUntil).toBeNull();
+  expect(zero.delayRemaining()).toBe(0);
+  const manual = make({ loopMode: { type: "manual" } });
+  manual.dispatch({ type: "toggle-play" });
+  advance(9);
+  expect(manual.getState().playState).toBe("paused");
+  expect(manual.getState().waitingUntil).toBeNull();
+  expect(manual.delayRemaining()).toBe(0);
+  expect(manual.position()).toBe(10);
+});
+
+test("changing speed during the delay keeps the original deadline", () => {
+  const p = make({ loopMode: { type: "automatic", delay: 2 } });
+  p.dispatch({ type: "toggle-play" });
+  advance(8.5);
+  expect(p.getState().playState).toBe("waiting");
+  expect(p.delayRemaining()).toBeCloseTo(1.5, 1);
+  p.setSpeed(0.5);
+  expect(p.getState().playState).toBe("waiting");
+  expect(p.delayRemaining()).toBeCloseTo(1.5, 1);
+  advance(1);
+  expect(p.getState().playState).toBe("waiting");
+  expect(p.delayRemaining()).toBeCloseTo(0.5, 1);
+  p.setSpeed(2);
+  expect(p.delayRemaining()).toBeCloseTo(0.5, 1);
+  advance(0.6);
+  expect(p.getState().playState).toBe("playing");
+  expect(p.position()).toBeCloseTo(10.2, 1);
+});
+
+test("moving during the delay ends the wait and follows the move rules", () => {
+  const p = make({ loopMode: { type: "automatic", delay: 2 } });
+  p.dispatch({ type: "toggle-play" });
+  advance(8.5);
+  expect(p.getState().playState).toBe("waiting");
+  p.dispatch({ type: "move", position: 14 });
+  expect(p.getState().playState).toBe("playing");
+  expect(p.position()).toBe(14);
+  expect(p.delayRemaining()).toBe(0);
+  advance(6.5);
+  expect(p.getState().playState).toBe("waiting");
+  p.dispatch({ type: "move", position: 45 });
+  expect(p.getState().playState).toBe("playing");
+  expect(p.position()).toBe(10);
+});
+
+test("a scrub during the delay is not cut short by the clock; the drop ends the wait", () => {
+  const p = make({ loopMode: { type: "automatic", delay: 2 } });
+  p.dispatch({ type: "toggle-play" });
+  advance(8.5);
+  expect(p.getState().playState).toBe("waiting");
+  p.startScrub(15);
+  advance(3);
+  expect(p.getState().playState).toBe("waiting");
+  expect(last().mode).toBe("scrubbing");
+  expect(p.position()).toBe(15);
+  p.scrubTo(16);
+  p.endScrub();
+  expect(p.getState().playState).toBe("playing");
+  expect(p.position()).toBeCloseTo(16, 1);
+});
+
+test("dropping a scrub outside the loop during the delay restarts at the loop start", () => {
+  const p = make({ loopMode: { type: "automatic", delay: 2 } });
+  p.dispatch({ type: "toggle-play" });
+  advance(8.5);
+  expect(p.getState().playState).toBe("waiting");
+  p.startScrub(45);
+  p.endScrub();
+  expect(p.getState().playState).toBe("playing");
+  expect(p.position()).toBe(10);
+});
+
+test("changing the loop during the delay ends the wait at the new loop start", () => {
+  const p = make({ loopMode: { type: "automatic", delay: 2 } });
+  p.dispatch({ type: "toggle-play" });
+  advance(8.5);
+  expect(p.getState().playState).toBe("waiting");
+  p.setLoop({ start: 30, end: 40 });
+  expect(p.getState().playState).toBe("playing");
+  expect(p.position()).toBe(30);
+  expect(p.delayRemaining()).toBe(0);
+  advance(1);
+  expect(p.position()).toBeCloseTo(31);
+});
+
 test("clicking outside the loop: playing goes to the loop start, paused stays", () => {
   const p = make();
   p.dispatch({ type: "move", position: 40 });

@@ -53,6 +53,7 @@ describe("move", () => {
   test("moving during the delay plays from the move or the loop start", () => {
     expect(run("waiting", { type: "move", position: 12 }, 20, auto2)).toEqual({ state: "playing", position: 12 });
     expect(run("waiting", { type: "move", position: 2 }, 20, auto2)).toEqual({ state: "playing", position: 10 });
+    expect(run("waiting", { type: "move", position: 20 }, 20, auto2)).toEqual({ state: "playing", position: 10 });
   });
 });
 

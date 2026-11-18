@@ -156,6 +156,7 @@ class TransportPlayer implements Player {
 
   private schedule() {
     clearTimeout(this.timer);
+    if (this.scrub !== null) return; // no transport events while scrubbing: the drop dispatches "move"
     const { mode, anchorPosition, anchorTime, rate, loop, loopWraps } = this.playback;
     const { playState, waitingUntil } = this.state;
     let due: number;
