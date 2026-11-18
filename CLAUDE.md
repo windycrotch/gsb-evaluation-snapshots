@@ -33,7 +33,7 @@ A `@react-three/fiber` canvas. The viewer is a big orchestrator that owns terrai
 4. **OSM overlays** ([services/osm.js](src/services/osm.js), [api/overpass.js](api/overpass.js)) — buildings, water (ways + multipolygon relations with stitched rings + holes), and roads come from Overpass. Each layer is lazy (fetched only when its toggle is on) and per-bbox memoized via a `useRef` cache. In dev it hits `overpass.private.coffee` directly; in prod it goes through `/api/overpass`, a Vercel edge function that tries five mirrors with timeouts and edge-caches the response. Override with `VITE_OVERPASS_URL`.
 5. **Surface analytics** ([terrainAnalysis.js](src/components/Viewer3D/terrainAnalysis.js), [surfaceTextures.js](src/components/Viewer3D/surfaceTextures.js), [hypsometric.js](src/components/Viewer3D/hypsometric.js)) — slope and aspect via Horn's 3×3, hillshade via the ESRI formula, hypsometric tint — all rendered to canvases swapped in as the terrain texture.
 6. **Vector overlays** — buildings extrude OSM footprints; water uses `THREE.Shape` with stitched holes and sits at the polygon's minimum sampled elevation; roads are projected polylines; contours use [marchingSquares.js](src/components/Viewer3D/marchingSquares.js) at user-selected spacing.
-7. **Tools** — flood "bathtub" inundation ([floodAnalysis.js](src/components/Viewer3D/floodAnalysis.js)) renders a horizontal plane and reports area; the elevation-profile tool turns two terrain clicks into a sampled cross-section ([profileSampling.js](src/components/Viewer3D/profileSampling.js)) rendered by [ProfilePanel](src/components/ProfilePanel/ProfilePanel.jsx) as inline SVG.
+7. **Tools** — flood "bathtub" inundation ([connectedFlood.js](src/components/Viewer3D/connectedFlood.js)) renders a horizontal plane and reports only water connected to the heightmap border (border-seeded 4-neighbour flood fill at or below the level; enclosed low ground is counted separately and subtitles are skipped under water); the elevation-profile tool turns two terrain clicks into a sampled cross-section ([profileSampling.js](src/components/Viewer3D/profileSampling.js)) rendered by [ProfilePanel](src/components/ProfilePanel/ProfilePanel.jsx) as inline SVG.
 
 ### Shared geo utilities ([src/utils/geo.js](src/utils/geo.js))
 
@@ -48,4 +48,4 @@ A `@react-three/fiber` canvas. The viewer is a big orchestrator that owns terrai
 
 ### Tested pieces
 
-Vitest covers the pure geometry/analysis modules: `marchingSquares`, `floodAnalysis`, `terrainAnalysis`, `profileSampling`. UI components and three.js scenes are not unit-tested — verify those by running `npm run dev`.
+Vitest covers the pure geometry/analysis modules: `marchingSquares`, `connectedFlood`, `floodAnalysis`, `buildContoursGeometry`, `terrainAnalysis`, `profileSampling`. UI components and three.js scenes are not unit-tested — verify those by running `npm run dev`.

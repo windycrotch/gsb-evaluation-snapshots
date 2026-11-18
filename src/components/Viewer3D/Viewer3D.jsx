@@ -43,7 +43,7 @@ import Roads from "./Roads";
 import Vegetation from "./Vegetation";
 import Contours from "./Contours";
 import FloodPlane from "./FloodPlane";
-import { floodStats } from "./floodAnalysis";
+import { computeConnectedFlood } from "./connectedFlood";
 import ProfileLine from "./ProfileLine";
 import ProfilePanel from "../ProfilePanel/ProfilePanel";
 import { sampleProfile } from "./profileSampling";
@@ -431,9 +431,15 @@ export default function Viewer3D({ bbox, onBack }) {
     setHypsoBandM(Math.max(1, Math.round(b)));
   }
 
+  // Only water connected to the heightmap border counts as inundation; low
+  // cells walled in by higher ground are reported as enclosed depressions.
   const flood = useMemo(() => {
     if (!showFlood || terrain.status !== "ready" || !pixelSizeM) return null;
-    return floodStats(terrain.heightmap, floodLevel, pixelSizeM * pixelSizeM);
+    return computeConnectedFlood(
+      terrain.heightmap,
+      floodLevel,
+      pixelSizeM * pixelSizeM,
+    );
   }, [showFlood, terrain, floodLevel, pixelSizeM]);
 
   // --- Overlay geometries ---
@@ -715,6 +721,7 @@ export default function Viewer3D({ bbox, onBack }) {
               color={contourColor}
               lineWidth={contourWidth}
               opacity={contourOpacity}
+              floodedCells={showFlood ? flood?.connected : null}
             />
           )}
           {showFlood && (
@@ -1297,7 +1304,7 @@ export default function Viewer3D({ bbox, onBack }) {
                         <div className={styles.stats}>
                           {(flood.floodedFraction * 100).toFixed(1)}
                           {t.inundatedSuffix}{" "}
-                          {(flood.floodedAreaM2 / 1_000_000).toFixed(2)} km²
+                          {(flood.connectedAreaM2 / 1_000_000).toFixed(2)} km²
                         </div>
                       )}
                     </>

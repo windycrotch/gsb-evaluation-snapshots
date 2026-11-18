@@ -1,6 +1,8 @@
 /**
- * Static "bathtub" flood inundation stats — every cell with elevation <= level
- * counts as flooded, regardless of hydraulic connectivity.
+ * Legacy "bathtub" flood stats — every cell with elevation <= level counts as
+ * flooded, regardless of hydraulic connectivity. The static flood panel now
+ * uses {@link computeConnectedFlood} from ./connectedFlood instead; this
+ * helper is kept for callers that explicitly want the naive count.
  *
  * @param {{elevations: Float32Array, width: number, height: number}} hm
  * @param {number} level         flood elevation in meters

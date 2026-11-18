@@ -10,11 +10,12 @@ export default function Contours({
   color = "#ffffff",
   lineWidth = 2,
   opacity = 0.9,
+  floodedCells = null,
 }) {
   const points = useMemo(() => {
     const levels = makeLevels(heightmap.minElevation, heightmap.maxElevation, spacing);
-    return buildContoursPoints(heightmap, bounds, scale, levels);
-  }, [heightmap, bounds, scale, spacing]);
+    return buildContoursPoints(heightmap, bounds, scale, levels, floodedCells);
+  }, [heightmap, bounds, scale, spacing, floodedCells]);
 
   if (points.length === 0) return null;
 
