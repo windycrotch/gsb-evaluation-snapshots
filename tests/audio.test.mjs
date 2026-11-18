@@ -23,6 +23,13 @@ import {
   strikeAmplitudes,
   strikeHeadroom,
 } from '../src/audio/synth.js';
+import {
+  BUS_THRESHOLD,
+  OfflineBus,
+  VOICE_GAIN,
+  busLimit,
+  peakOf,
+} from '../src/audio/bus.js';
 import { freqToNote, harmonicity, ratios } from '../src/audio/notes.js';
 import { decodeShape, encodeShape } from '../src/app/share.js';
 import { strokeToPolygon } from '../src/app/draw.js';
@@ -185,12 +192,12 @@ test('what you hear rolls off with frequency instead of being flat', () => {
   }
 });
 
-test('a physically scaled strike never reaches the soft limiter', () => {
-  // The old default of gain = 3.2 drove the summed modes to a pre-limiter peak of
-  // about 11, so two thirds of the first 300 ms came out of tanh hard clipped -
-  // audible distortion manufactured by the renderer. The pre-existing clipping
-  // test could not see it, because it only measured the limiter's own output,
-  // which is inside [-1, 1] by construction. This measures the input.
+test('a physically scaled strike stays under the bus compression threshold', () => {
+  // The old default of gain = 3.2 drove the summed modes to a peak of about 11,
+  // and the per-voice tanh then hard-distorted two thirds of every attack. The
+  // strikeHeadroom scaling exists to keep a single strike's raw sum well below
+  // the master-bus threshold instead. This measures the pre-bus signal directly,
+  // which is the level the bus actually receives (after VOICE_GAIN).
   const { mesh, modes, eigenvalues } = solveDrum(regularPolygon(256, 1), {
     modes: 14,
     targetNodes: 2200,
@@ -223,20 +230,21 @@ test('a physically scaled strike never reaches the soft limiter', () => {
     for (let k = 0; k < freqs.length; k++) {
       v += amps[k] * gain * Math.sin(2 * Math.PI * freqs[k] * t) * Math.exp(-t / taus[k]);
     }
-    peak = Math.max(peak, Math.abs(v));
+    peak = Math.max(peak, Math.abs(v * VOICE_GAIN));
   }
-  assert.ok(peak <= 0.9, `pre-limiter peak was ${peak}; tanh would be distorting`);
-  assert.ok(peak > 0.1, `pre-limiter peak was only ${peak}; the strike would be inaudible`);
+  assert.ok(peak <= BUS_THRESHOLD, `pre-bus peak was ${peak}; the bus would be compressing a lone strike`);
+  assert.ok(peak > 0.1, `pre-bus peak was only ${peak}; the strike would be inaudible`);
 });
 
-test('overlapping voices can exceed full scale even though a single strike never does', () => {
+test('overlapping voices exceed full scale before the bus, and the bus bounds them', () => {
   // main.js caps a fast series of taps at MAX_VOICES = 6, each independently
-  // scaled so its OWN peak sits near TARGET_PEAK = 0.72 and tanh-limited on its
-  // own. Nothing in that per-voice math looks at what else is ringing, so voices
-  // simply sum at the destination. This reproduces that summation directly - no
-  // AudioContext needed, since it is pure arithmetic - to pin the fact that
-  // motivates routing every voice through one shared limiter (`masterBus` in
-  // main.js) rather than trusting the per-voice tanh alone.
+  // scaled so its OWN peak sits near TARGET_PEAK = 0.72. Nothing in that
+  // per-voice math looks at what else is ringing, so voices sum at the bus
+  // input. renderStrike no longer limits on its own: the single tanh soft knee
+  // now lives on the master bus (audio/bus.js), applied once to the summed
+  // signal. This reproduces both sides of that chain directly - no AudioContext
+  // needed, it is pure arithmetic - pinning the fact that motivates the shared
+  // bus and checking the bus actually contains the pile-up.
   // Unit area, because main.js always normalises before solving. A radius-1 disk
   // has area pi, so now that the pitch follows the shape it would sound about a
   // fifth lower than anything the app can actually produce, and whether six taps
@@ -251,7 +259,6 @@ test('overlapping voices can exceed full scale even though a single strike never
   const taus = decayTimes(freqs, 1.7, 0.5, 130);
   const CONTACT_RATIO = 2.2;
   const TARGET_PEAK = 0.72;
-  const OUT_GAIN = 0.85; // main.js: out.gain.value
   const MAX_VOICES = 6;
   const SR = 48000;
 
@@ -266,23 +273,46 @@ test('overlapping voices can exceed full scale even though a single strike never
   );
   const voice = renderStrike({ freqs, amps, taus, sampleRate: SR, gain });
 
-  let singlePeak = 0;
-  for (const v of voice) singlePeak = Math.max(singlePeak, Math.abs(v * OUT_GAIN));
-  assert.ok(singlePeak < 0.95, `a single voice should sit well under full scale, got ${singlePeak}`);
+  // A single voice stays under the bus threshold even after the per-voice gain,
+  // so the bus must leave it bit-for-bit alone.
+  const single = new OfflineBus(SR).addVoice(voice).render();
+  assert.equal(single.engaged, false, 'a single strike must not trigger bus compression');
+  assert.ok(
+    single.inputPeak < BUS_THRESHOLD,
+    `single voice pre-bus peak was ${single.inputPeak}, threshold is ${BUS_THRESHOLD}`,
+  );
+  assert.ok(
+    single.outputPeak < 0.95,
+    `a single voice should sit well under full scale, got ${single.outputPeak}`,
+  );
 
-  // Six taps 30ms apart is a fast but ordinary tapping cadence, not an
-  // adversarial one.
+  // The raw, pre-bus sum of six taps 30 ms apart really does threaten to clip.
   const interval = Math.round(0.03 * SR);
   const sum = new Float64Array(voice.length + interval * (MAX_VOICES - 1));
   for (let v = 0; v < MAX_VOICES; v++) {
     const offset = v * interval;
-    for (let n = 0; n < voice.length; n++) sum[offset + n] += voice[n] * OUT_GAIN;
+    for (let n = 0; n < voice.length; n++) sum[offset + n] += voice[n] * VOICE_GAIN;
   }
-  let stackedPeak = 0;
-  for (const s of sum) stackedPeak = Math.max(stackedPeak, Math.abs(s));
+  const rawStackedPeak = peakOf(sum);
   assert.ok(
-    stackedPeak > 1,
-    `expected overlapping voices to exceed full scale without a shared limiter, got ${stackedPeak}`,
+    rawStackedPeak > 1,
+    `expected overlapping voices to exceed full scale before the bus, got ${rawStackedPeak}`,
+  );
+
+  // Through the real bus the same six voices engage compression and come back
+  // inside full scale - while remaining clearly louder than one voice.
+  const bus = new OfflineBus(SR);
+  for (let v = 0; v < MAX_VOICES; v++) bus.addVoice(voice, 0.03);
+  const stacked = bus.render();
+  assert.equal(stacked.engaged, true, 'six overlapping voices must start compression');
+  assert.ok(
+    stacked.inputPeak > BUS_THRESHOLD,
+    `pre-bus stacked peak ${stacked.inputPeak} should cross the threshold`,
+  );
+  assert.ok(stacked.outputPeak <= 1, `bus output must never exceed 1, got ${stacked.outputPeak}`);
+  assert.ok(
+    stacked.outputPeak >= 1.5 * single.outputPeak,
+    `stacked peak ${stacked.outputPeak} should be at least 1.5x the single ${single.outputPeak}`,
   );
 });
 
@@ -310,7 +340,7 @@ test('decay times fall with frequency', () => {
   }
 });
 
-test('a rendered strike is finite, audible, and never clips', () => {
+test('a rendered strike is finite, audible, and linear until the master bus', () => {
   const { mesh, modes, eigenvalues } = circle();
   const freqs = frequencies(eigenvalues, 130);
   const amps = strikeAmplitudes(mesh, modes, 0.1, 0.1, 0.09);
@@ -318,21 +348,50 @@ test('a rendered strike is finite, audible, and never clips', () => {
   const samples = renderStrike({ freqs, amps, taus, sampleRate: 24000 });
 
   assert.ok(samples.length > 1000);
-  let peak = 0;
-  for (const v of samples) {
-    assert.ok(Number.isFinite(v), 'sample was not finite');
-    peak = Math.max(peak, Math.abs(v));
+  // The renderer no longer limits: doubling the input amplitudes must double
+  // every rendered sample, because no tanh sits in the render path any more.
+  const doubled = renderStrike({
+    freqs,
+    amps: Float64Array.from(amps, (a) => 2 * a),
+    taus,
+    sampleRate: 24000,
+  });
+  let scaleError = 0;
+  for (let i = 0; i < samples.length; i++) {
+    assert.ok(Number.isFinite(samples[i]), 'sample was not finite');
+    scaleError = Math.max(scaleError, Math.abs(doubled[i] - 2 * samples[i]));
   }
+  assert.ok(scaleError < 1e-6, `render path is not linear, worst error ${scaleError}`);
+
+  let peak = 0;
+  for (const v of samples) peak = Math.max(peak, Math.abs(v));
   assert.ok(peak > 0.05, `expected an audible signal, peak was ${peak}`);
-  assert.ok(peak <= 1, `soft limiter should keep it inside range, got ${peak}`);
   assert.ok(Math.abs(samples[0]) < 1e-6, 'a struck membrane starts at rest, so no click');
+
+  // The bound now lives on the bus. A raw render with arbitrary caller gain can
+  // be hot on its own, so check it the way the app actually drives the bus:
+  // headroom-scaled to the 0.72 target, which is what every production voice is.
+  const w = nodeWeights(mesh);
+  const norms = modeNorms(mesh, modes, w);
+  const head = strikeHeadroom(mesh, modes, norms, freqs, w, 0.09, 2.2);
+  const scaled = renderStrike({
+    freqs,
+    amps,
+    taus,
+    sampleRate: 24000,
+    gain: 0.72 / head,
+  });
+  const out = new OfflineBus(24000).addVoice(scaled).render();
+  assert.equal(out.engaged, false, 'an ordinary production strike must not start compression');
+  assert.ok(out.outputPeak <= 1, `bus output must stay in range, got ${out.outputPeak}`);
 });
 
 test('the fast recurrence renders exactly what the direct formula would', () => {
   // renderStrike evaluates decaying sinusoids by rotating a unit vector instead
   // of calling Math.sin and Math.exp per sample, because the direct version was
   // slow enough to stall the animation. This pins the two together so the
-  // optimisation cannot quietly change the sound.
+  // optimisation cannot quietly change the sound. Limiting is not part of the
+  // renderer any more, so the expected signal is just the raw modal sum.
   const sampleRate = 16000;
   const gain = 3.2;
   const freqs = Float64Array.from([131.3, 209.7, 288.1, 460.5]);
@@ -352,7 +411,6 @@ test('the fast recurrence renders exactly what the direct formula would', () => 
       expected[n] += a * Math.sin(2 * Math.PI * freqs[k] * t) * Math.exp(-t / tau);
     }
   }
-  for (let n = 0; n < length; n++) expected[n] = Math.tanh(expected[n]);
   const fade = Math.min(length, Math.floor(0.012 * sampleRate));
   for (let i = 0; i < fade; i++) expected[length - fade + i] *= 1 - i / fade;
 

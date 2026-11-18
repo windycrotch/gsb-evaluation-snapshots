@@ -29,6 +29,13 @@ import {
   strikeHeadroom,
 } from '../audio/synth.js';
 import {
+  BUS_THRESHOLD,
+  MAX_VOICES,
+  VOICE_GAIN,
+  busCurve,
+  busInputScale,
+} from '../audio/bus.js';
+import {
   diskSpectrum,
   rectangleSpectrum,
   rightIsoscelesTriangleSpectrum,
@@ -39,7 +46,8 @@ const MODES = 16;
 // than the ear can hear, and it keeps the solve fast enough that drawing a shape
 // feels immediate.
 const TARGET_NODES = 2200;
-const MAX_VOICES = 6;
+// MAX_VOICES comes from audio/bus.js: the browser and the Node tests share one
+// voice cap, one gain and one limiting curve.
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
 const el = (id) => document.getElementById(id);
@@ -440,37 +448,53 @@ function recomputeFrequencies() {
 // ---------------------------------------------------------------------- audio
 
 let audioCtx = null;
-let masterBus = null;
+/** Input node of the shared master chain; every voice connects here. */
+let busInput = null;
 
 /**
- * One shared limiter that every voice routes through before the destination.
+ * Builds the one master chain every voice in the app travels through.
  *
- * `renderStrike`'s tanh is a safety net for a single voice, evaluated before
- * that voice is ever mixed with another. Overlapping strikes - a fast series of
- * taps, several drums ringing in the demo, or just two hits close together -
- * sum *after* that, straight at ctx.destination, which has no limiter of its
- * own: the browser just hard-clamps to [-1, 1]. Measured with real strike
- * cadences, six overlapping voices reach a destination peak of 1.0-1.7, so this
- * was actually clipping, and hard-clamping is worse than tanh's soft knee - it
- * is a flat ceiling rather than a curve, which is where the harshness came from.
+ * The chain computes the exact transfer function of `busLimit` in audio/bus.js,
+ * which is also what the Node tests run, so the mix is numerically checkable
+ * off-line rather than hidden inside a compressor whose curve only the browser
+ * knows:
  *
- * The threshold sits at -1 dB, just under full scale, so an ordinary single
- * strike (measured peak around -5 dBFS post-gain) never touches it and the
- * "quieter near the rim" information stays intact. It only engages when the
- * sum of voices actually threatens to clip.
+ *     voices -> busInput (sum) -> inputGain -> WaveShaper (busLimit)
+ *             -> outputGain -> destination
+ *
+ * A WaveShaper only addresses its [-1, 1] input domain, so inputGain scales the
+ * real-world mix down by busInputScale() and outputGain restores it. The curve
+ * table is generated from busLimit itself over a range that six voices cannot
+ * exceed; past that range it is already flat against its asymptote, so it can
+ * never overshoot full scale.
+ *
+ * busLimit is the identity up to BUS_THRESHOLD (0.95) and only bends above it.
+ * A single strike is scaled by strikeHeadroom/TARGET_PEAK to peak near 0.72 and
+ * then taken through the fixed VOICE_GAIN, so an ordinary strike never reaches
+ * the knee at all - and a rim strike, being quieter before the bus, stays
+ * quieter after it. The knee engages only when overlapping voices pile the mix
+ * past the threshold, where it soft-limits instead of letting the destination
+ * hard-clamp.
  */
+function buildMasterBus(ctx) {
+  const inputScale = busInputScale();
+  const inputGain = ctx.createGain();
+  inputGain.gain.value = inputScale;
+  const shaper = ctx.createWaveShaper();
+  shaper.curve = busCurve();
+  shaper.oversample = 'none';
+  const outputGain = ctx.createGain();
+  outputGain.gain.value = 1 / inputScale;
+  inputGain.connect(shaper).connect(outputGain).connect(ctx.destination);
+  return inputGain;
+}
+
 function ensureAudio() {
   if (!audioCtx) {
     const Ctor = window.AudioContext || window.webkitAudioContext;
     if (!Ctor) return null;
     audioCtx = new Ctor();
-    masterBus = audioCtx.createDynamicsCompressor();
-    masterBus.threshold.value = -1;
-    masterBus.knee.value = 0;
-    masterBus.ratio.value = 20;
-    masterBus.attack.value = 0.001;
-    masterBus.release.value = 0.1;
-    masterBus.connect(audioCtx.destination);
+    busInput = buildMasterBus(audioCtx);
   }
   if (audioCtx.state === 'suspended') audioCtx.resume();
   return audioCtx;
@@ -483,9 +507,14 @@ const brightness = () => Number(els.bright.value) / 100;
 // over. 2.2 corresponds to roughly 3.5 ms of contact against a 130 Hz
 // fundamental, which is a felt beater rather than a stick. See audibleAmps.
 const CONTACT_RATIO = 2.2;
-// Where the hardest strike on this drum should land. Well under 1 so the tanh in
-// renderStrike stays a safety net rather than a distortion stage.
+// Where the hardest strike on this drum should land. Well under BUS_THRESHOLD
+// (0.95) even after VOICE_GAIN, so a single strike passes the master bus
+// untouched and the soft knee is a mix-level safety stage, not distortion.
 const TARGET_PEAK = 0.72;
+// Fixed render gain for a single-mode preview (clicking a row of the mode
+// list). Kept as it was: a lone sinusoid at this level sits well under the bus
+// threshold after VOICE_GAIN, so previews are pure and never move the knee.
+const MODE_PREVIEW_GAIN = 0.45;
 
 /** One loudness scale per (drum, mallet), so relative strike loudness survives. */
 function headroom() {
@@ -576,9 +605,12 @@ function ring({ amps, taus, kind, x = 0, y = 0, gain = 1 }) {
   buffer.copyToChannel(samples, 0);
   const src = ctx.createBufferSource();
   src.buffer = buffer;
+  // One fixed per-voice gain, shared with the off-line OfflineBus, then straight
+  // into the master chain. renderStrike no longer limits, so voices sum linearly
+  // and the master bus's single soft knee is the only nonlinearity in the path.
   const out = ctx.createGain();
-  out.gain.value = 0.85;
-  src.connect(out).connect(masterBus);
+  out.gain.value = VOICE_GAIN;
+  src.connect(out).connect(busInput);
 
   // Overlapping strikes are natural - a real drum does not mute itself when you
   // hit it again - but the pile-up has to be bounded.
@@ -645,10 +677,10 @@ function playModeAlone(i) {
   if (!state.muted) ensureAudio();
   const amps = new Float64Array(freqs.length);
   amps[i] = 1;
-  // A lone sinusoid needs far less gain than a strike to reach the same level, and
-  // keeping it clear of the soft limiter leaves it a pure tone rather than a
-  // limiter-coloured one.
-  ring({ amps, taus: decayTimes(freqs, 1.7, brightness(), referenceHz()), kind: 'mode', gain: 0.45 });
+  // A lone sinusoid needs far less gain than a strike to reach a sensible level,
+  // and at 0.45 (then VOICE_GAIN) it stays far below the master bus threshold, so
+  // the preview reaches the ear as a pure tone the bus never colours.
+  ring({ amps, taus: decayTimes(freqs, 1.7, brightness(), referenceHz()), kind: 'mode', gain: MODE_PREVIEW_GAIN });
   setSelected(els.spectrum, i);
   showModeReadout(i, true);
 }

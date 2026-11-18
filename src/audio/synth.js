@@ -222,7 +222,9 @@ export function audibleAmps(amps, norms, freqs, contactRatio = 3, refHz = 0) {
  *
  * The renderer scales by this instead of per-strike normalising, so a strike near
  * the rim stays quieter than one in the middle - that difference is information
- * the physics is trying to convey - while nothing ever reaches the limiter.
+ * the physics is trying to convey - while the scaled voice lands well under the
+ * master-bus compression threshold (0.95, see audio/bus.js) and a single strike
+ * therefore passes the bus completely uncompressed.
  */
 export function strikeHeadroom(
   mesh,
@@ -302,11 +304,15 @@ export function decayTimes(freqs, baseSeconds = 1.7, brightness = 0.5, refHz = 0
  * moving, so each mode starts at zero displacement - hence sine rather than
  * cosine, and no click at onset.
  *
- * `gain` is the caller's job to set so the sum lands near full scale. The tanh
- * below is a safety net and nothing more: it used to be doing real work, because
- * a fixed gain of 3.2 drove sixteen modes to a pre-limiter peak of about 11, and
- * two thirds of the first 300 ms of every strike came out of the limiter hard
- * clipped. See `strikeHeadroom`.
+ * `gain` is the caller's job to set so the sum lands near full scale. This
+ * renderer deliberately applies NO limiting of its own: soft limiting lives in
+ * exactly one place now, the master bus (see audio/bus.js), where it acts on
+ * the *sum* of every ringing voice rather than squashing each voice before the
+ * mix. The per-voice tanh that used to sit here made a lone mode and a full
+ * strike impossible to level against each other, and it could not protect the
+ * destination anyway, because overlapping voices sum after it. The strike
+ * scaling from `strikeHeadroom` keeps a single voice well under the bus
+ * threshold, so the bus leaves an ordinary strike untouched.
  */
 export function renderStrike({
   freqs,
@@ -357,10 +363,10 @@ export function renderStrike({
     }
   }
 
-  // Soft limiter rather than peak normalisation: a strike near the rim really is
-  // quieter than one in the middle, and flattening that would throw away
-  // information the physics is trying to tell you.
-  for (let n = 0; n < length; n++) out[n] = Math.tanh(out[n]);
+  // No tanh here: the raw modal sum is returned as rendered and the master bus
+  // (audio/bus.js) applies the single, shared soft knee after voices are mixed.
+  // Keeping this linear is also what lets the rim stay genuinely quieter than
+  // the centre - nothing in the render path flattens that difference.
 
   // Short fade-out so truncation cannot click.
   const fade = Math.min(length, Math.floor(0.012 * sampleRate));

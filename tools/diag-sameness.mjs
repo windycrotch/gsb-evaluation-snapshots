@@ -20,6 +20,7 @@ import {
   decayTimes,
   renderStrike,
 } from '../src/audio/synth.js';
+import { OfflineBus } from '../src/audio/bus.js';
 
 // Production constants, copied from src/app/main.js.
 const CONTACT_RATIO = 2.2;
@@ -85,7 +86,7 @@ function balance(freqs, heard, taus) {
   return { share: e.map((v) => (tot > 0 ? v / tot : 0)), tot, centroid: tot > 0 ? num / tot : 0 };
 }
 
-/** Pre-limiter peak of the raw modal sum, to see whether tanh is doing real work. */
+/** Raw modal-sum peak before the master bus, to see how close a lone strike gets to the 0.95 knee. */
 function preLimiterPeak(freqs, heard, taus, gain) {
   // worst case: all modes momentarily in phase
   let s = 0;
@@ -111,11 +112,16 @@ function rms(buf, a, b) {
   return hi > lo ? Math.sqrt(acc / (hi - lo)) : 0;
 }
 
-/** Fraction of samples driven into the flat part of tanh. */
+/** Fraction of a bus-processed buffer riding above the 0.95 compression threshold. */
 function clippedFraction(buf) {
   let n = 0;
   for (let i = 0; i < buf.length; i++) if (Math.abs(buf[i]) > 0.95) n++;
   return n / buf.length;
+}
+
+/** Renders one voice and runs it through the same master bus as the browser. */
+function throughBus(voice) {
+  return new OfflineBus(SR).addVoice(voice).render().samples;
 }
 
 const ids = ['circle', 'square', 'rectangle', 'triangle', 'lshape', 'stadium', 'star', 'gww-a'];
@@ -123,13 +129,13 @@ const solved = new Map();
 for (const id of ids) solved.set(id, solve(id));
 
 console.log('=== 1. Modal balance per shape, hardest strike, production params ===\n');
-console.log('shape        f1     mode1%  mode1+2%  centroid  tau1    tau16   prelim.peak  clip%');
+console.log('shape        f1     mode1%  mode1+2%  centroid  tau1    tau16   raw.sum.peak  bus>0.95%');
 for (const id of ids) {
   const d = solved.get(id);
   const [px, py] = peakNode(d);
   const heard = heardAt(d, px, py);
   const b = balance(d.freqs, heard, d.taus);
-  const buf = render(d, heard);
+  const buf = throughBus(render(d, heard));
   console.log(
     `${id.padEnd(11)} ${d.freqs[0].toFixed(0).padStart(4)}Hz ` +
       `${(b.share[0] * 100).toFixed(1).padStart(6)} ` +
@@ -178,7 +184,7 @@ console.log('\n=== 3. Strike position, on the circle ===\n');
   for (const [label, px, py] of spots) {
     const heard = heardAt(d, px, py);
     const b = balance(d.freqs, heard, d.taus);
-    const buf = render(d, heard);
+    const buf = throughBus(render(d, heard));
     cents.push(b.centroid);
     console.log(
       `${label.padEnd(13)} ${(b.share[0] * 100).toFixed(1).padStart(6)} ` +
@@ -196,7 +202,7 @@ console.log('\n=== 4. What is left after the transient? (circle, off-centre) ===
 {
   const d = solved.get('circle');
   const heard = heardAt(d, 0.2, 0.2);
-  const buf = render(d, heard);
+  const buf = throughBus(render(d, heard));
   console.log('  window      rms      what dominates');
   for (const [a, b] of [
     [0, 0.05],
