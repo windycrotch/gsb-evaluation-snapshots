@@ -70,25 +70,52 @@ class PolicyPipeline:
             sessions.attach_pipeline(self)
 
     # ------------------------------------------------------------------ eval
+    @staticmethod
+    def _deny_reason(reason: str, stage: str, rule: str) -> str:
+        """Attach the machine-readable denial stage/rule to the human reason, so an audit
+        reader sees *which* rule rejected the request without parsing prose."""
+        detail = f" [deny_stage={stage}"
+        if rule:
+            detail += f"; rule={rule}"
+        return f"{reason.rstrip()}{detail}]"
+
     def _pre_checks(self, req: ToolCallRequest, checks: dict, rules: list):
         """Stages 0-2 shared by attack actions and setup (login) actions.
-        Returns (deny_reason or "", resolved_ip)."""
+        Returns (deny_reason or "", resolved_ip). A denial also records ``deny_stage``,
+        ``deny_rule`` — and for an exclusion the raw matched pattern in ``excluded_pattern`` —
+        in ``checks`` for audit."""
         a = req.action
         if self.scope.is_expired():
             checks["scope_expiry"] = "fail"
-            return f"scope contract expired or unparseable expiry ({self.scope.authorization.expires!r})", ""
+            checks["deny_stage"] = scope_validator.DENY_SCOPE_EXPIRED
+            checks["deny_rule"] = "scope.authorization.expires"
+            return (
+                self._deny_reason(
+                    f"scope contract expired or unparseable expiry ({self.scope.authorization.expires!r})",
+                    scope_validator.DENY_SCOPE_EXPIRED,
+                    "scope.authorization.expires",
+                ),
+                "",
+            )
         checks["scope_expiry"] = "pass"
 
         al = allowlist.check(self.scope, a, self.resolver)
         checks["allowlist"] = "pass" if al.ok else "fail"
         checks["resolved_ip"] = al.resolved_ip
         if not al.ok:
-            return al.reason, al.resolved_ip
+            stage = al.deny_stage or scope_validator.DENY_RESOLVED_IP_NOT_ALLOWED
+            checks["deny_stage"] = stage
+            checks["deny_rule"] = al.deny_rule
+            return self._deny_reason(al.reason, stage, al.deny_rule), al.resolved_ip
 
         sc = scope_validator.check(self.scope, a)
         checks["scope"] = "pass" if sc.ok else "fail"
         if not sc.ok:
-            return sc.reason, al.resolved_ip
+            checks["deny_stage"] = sc.deny_stage
+            checks["deny_rule"] = sc.deny_rule
+            if sc.excluded_pattern:
+                checks["excluded_pattern"] = sc.excluded_pattern
+            return self._deny_reason(sc.reason, sc.deny_stage, sc.deny_rule), al.resolved_ip
         if sc.matched_rule:
             rules.append(sc.matched_rule)
         return "", al.resolved_ip
@@ -111,6 +138,11 @@ class PolicyPipeline:
 
         er = engine.decide(rk.tier, self.scope.action_policy, req.phase)
         rules.extend(er.matched_rules)
+        reason = er.reason
+        if er.decision == Decision.DENY:
+            checks["deny_stage"] = scope_validator.DENY_POLICY_ENGINE
+            checks["deny_rule"] = er.matched_rules[-1] if er.matched_rules else "policy.default_deny"
+            reason = self._deny_reason(reason, scope_validator.DENY_POLICY_ENGINE, checks["deny_rule"])
         decision = PolicyDecision(
             request_id=req.request_id,
             decision=er.decision,
@@ -118,7 +150,7 @@ class PolicyPipeline:
             checks=checks,
             matched_rules=rules,
             policy_version=engine.POLICY_VERSION,
-            reason=er.reason,
+            reason=reason,
         )
         return decision, resolved_ip
 
@@ -143,6 +175,13 @@ class PolicyPipeline:
             decision.decision = Decision.DENY
             decision.reason = f"budget/circuit-breaker: {why}"
             decision.checks["rate_budget"] = "fail"
+            decision.checks["deny_stage"] = scope_validator.DENY_BUDGET
+            decision.checks["deny_rule"] = "limits.max_requests_per_host_per_min"
+            decision.reason = self._deny_reason(
+                decision.reason,
+                scope_validator.DENY_BUDGET,
+                "limits.max_requests_per_host_per_min",
+            )
         else:
             decision.checks["rate_budget"] = "pass"
             if "throttled" in why:
@@ -153,7 +192,18 @@ class PolicyPipeline:
         try:
             decision, resolved_ip = self.evaluate(req)
         except Exception as exc:  # noqa: BLE001 - fail closed on any unexpected error
-            decision = self._deny(req, {"error": "exception"}, [], f"pipeline error (fail-closed): {exc}")
+            decision = self._deny(
+                req,
+                {
+                    "error": "exception",
+                    "deny_stage": scope_validator.DENY_PIPELINE_ERROR,
+                    "deny_rule": "pipeline",
+                },
+                [],
+                self._deny_reason(
+                    f"pipeline error (fail-closed): {exc}", scope_validator.DENY_PIPELINE_ERROR, "pipeline"
+                ),
+            )
             resolved_ip = ""
 
         result = PipelineResult(decision=decision, resolved_ip=resolved_ip)
@@ -164,6 +214,13 @@ class PolicyPipeline:
             if self.approver is None:
                 decision.decision = Decision.DENY
                 decision.reason = "Tier 2 requires approval but no approver configured (fail-closed)"
+                decision.checks["deny_stage"] = scope_validator.DENY_APPROVAL_REQUIRED
+                decision.checks["deny_rule"] = "policy.tier2_requires_approval=true"
+                decision.reason = self._deny_reason(
+                    decision.reason,
+                    scope_validator.DENY_APPROVAL_REQUIRED,
+                    "policy.tier2_requires_approval=true",
+                )
                 approval_rec["status"] = "denied"
             else:
                 try:
@@ -181,11 +238,17 @@ class PolicyPipeline:
                     decision.decision = Decision.ALLOW
                 else:
                     decision.decision = Decision.DENY
-                    decision.reason = (
-                        f"Tier 2 approver error (fail-closed): {verdict['error']}"
-                        if verdict.get("error")
-                        else "Tier 2 approval denied by human"
-                    )
+                    if verdict.get("error"):
+                        stage = scope_validator.DENY_APPROVAL_ERROR
+                        rule = "approval.approver"
+                        decision.reason = f"Tier 2 approver error (fail-closed): {verdict['error']}"
+                    else:
+                        stage = scope_validator.DENY_APPROVAL_DENIED
+                        rule = "approval.human"
+                        decision.reason = "Tier 2 approval denied by human"
+                    decision.checks["deny_stage"] = stage
+                    decision.checks["deny_rule"] = rule
+                    decision.reason = self._deny_reason(decision.reason, stage, rule)
                     approval_rec["status"] = "denied"
 
         # Budget / rate limit (only if still allowed)
@@ -220,6 +283,9 @@ class PolicyPipeline:
             why, resolved_ip = self._pre_checks(req, checks, rules)
         except Exception as exc:  # noqa: BLE001
             why, resolved_ip = f"pipeline error (fail-closed): {exc}", ""
+            checks["deny_stage"] = scope_validator.DENY_PIPELINE_ERROR
+            checks["deny_rule"] = "pipeline"
+            why = self._deny_reason(why, scope_validator.DENY_PIPELINE_ERROR, "pipeline")
         if why:
             decision = self._deny(req, checks, rules, why)
         else:

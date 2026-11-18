@@ -13,6 +13,11 @@ from dataclasses import dataclass
 
 from ..schemas.scope import EngagementScope
 from ..schemas.toolcall import ToolAction
+from .scope_validator import (
+    DENY_HOST_NOT_IN_SCOPE,
+    DENY_PORT_NOT_ALLOWED,
+    DENY_RESOLVED_IP_NOT_ALLOWED,
+)
 
 
 @dataclass
@@ -20,6 +25,8 @@ class AllowlistResult:
     ok: bool
     resolved_ip: str = ""
     reason: str = ""
+    deny_stage: str = ""  # stable identifier, see scope_validator.DENY_*
+    deny_rule: str = ""
 
 
 def default_resolver(host: str) -> list[str]:
@@ -40,15 +47,28 @@ def check(scope: EngagementScope, action: ToolAction, resolver=default_resolver)
     host = action.target_host.lower()
     hs = scope.host_scope(host)
     if hs is None:
-        return AllowlistResult(False, reason=f"host {host!r} is not in scope (or is excluded)")
+        return AllowlistResult(
+            False,
+            reason=f"host {host!r} is not in scope (or is excluded)",
+            deny_stage=DENY_HOST_NOT_IN_SCOPE,
+            deny_rule="scope.in_scope",
+        )
     if action.port not in hs.ports:
         return AllowlistResult(
-            False, reason=f"port {action.port} not permitted for {host!r} (allowed: {hs.ports})"
+            False,
+            reason=f"port {action.port} not permitted for {host!r} (allowed: {hs.ports})",
+            deny_stage=DENY_PORT_NOT_ALLOWED,
+            deny_rule=f"scope.in_scope[{host}].ports",
         )
 
     ips = resolver(host)
     if not ips:
-        return AllowlistResult(False, reason=f"could not resolve {host!r} (fail-closed)")
+        return AllowlistResult(
+            False,
+            reason=f"could not resolve {host!r} (fail-closed)",
+            deny_stage=DENY_RESOLVED_IP_NOT_ALLOWED,
+            deny_rule="scope.resolved_ip_allowlist",
+        )
     # EVERY resolved IP must be allowlisted — a single rebind-to-internal answer denies.
     for ip in ips:
         if not scope.ip_allowed(ip):
@@ -57,5 +77,7 @@ def check(scope: EngagementScope, action: ToolAction, resolver=default_resolver)
                 resolved_ip=ip,
                 reason=f"resolved IP {ip} for {host!r} is not in resolved_ip_allowlist "
                 "(or is a hard-blocked range)",
+                deny_stage=DENY_RESOLVED_IP_NOT_ALLOWED,
+                deny_rule="scope.resolved_ip_allowlist",
             )
     return AllowlistResult(True, resolved_ip=ips[0], reason="host+port+resolved-IP in scope")

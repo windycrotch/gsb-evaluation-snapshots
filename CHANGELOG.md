@@ -7,6 +7,17 @@ All notable changes to Rampart are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Explainable scope-gate denials.** A rejected request now names the exact rule and stage
+  that refused it instead of a single "not in scope" sentence. `scope_validator.check()` returns
+  `deny_stage` (`host_not_in_scope`, `port_not_allowed`, `scheme_not_allowed`, `path_malformed`,
+  `path_excluded`, `method_not_allowed`, `host_header_not_allowed`, `path_not_included`),
+  `deny_rule`, and — for an exclusion — the raw `excluded_pattern` that matched (so a
+  percent-encoded or case-varied `/api/admin/**` bypass attempt reports the pattern it hit).
+  `ScopeResult.ok`/`reason`/`matched_rule` and the existing rejection ordering are unchanged.
+  The pipeline records `deny_stage` / `deny_rule` / `excluded_pattern` in
+  `PolicyDecision.checks` and appends them to `reason`, so the before-execution audit event
+  answers "which rule rejected this, and why" for every block — scope, allowlist, approval,
+  budget or engine alike.
 - **Finding-driven escalation (`--deep`).** A *confirmed* finding now deterministically spawns
   bounded, deduped, oracle-proven follow-up tests — the other injection classes on a parameter
   proven to be a live sink (the initial sweep only proposes SSRF/CMDI/traversal/redirect when the

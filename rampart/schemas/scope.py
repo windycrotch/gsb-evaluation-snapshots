@@ -606,6 +606,22 @@ class EngagementScope:
                 return hs
         return None
 
+    def _excluded_pattern(self, forms: list[str]) -> str | None:
+        for pat in self.paths_exclude:
+            if any(path_glob_match(pat, f, exclusion=True) for f in forms):
+                return pat
+        return None
+
+    def path_excluded_by(self, path: str) -> str | None:
+        """The first ``paths_exclude`` pattern matching ANY normalized/decoded spelling of
+        ``path`` (case-insensitive, trailing-slash-insensitive), or None. A malformed path
+        matches no pattern; :meth:`path_excluded` still counts it as excluded (fail-closed)."""
+        try:
+            forms = path_forms(path)
+        except PathError:
+            return None
+        return self._excluded_pattern(forms)
+
     def path_excluded(self, path: str) -> bool:
         """True if ANY normalized/decoded spelling of ``path`` matches an exclusion
         (case-insensitive, trailing-slash-insensitive). Malformed paths count as excluded."""
@@ -613,7 +629,7 @@ class EngagementScope:
             forms = path_forms(path)
         except PathError:
             return True
-        return any(path_glob_match(p, f, exclusion=True) for p in self.paths_exclude for f in forms)
+        return self._excluded_pattern(forms) is not None
 
     def path_included(self, hs: HostScope, path: str) -> str | None:
         """Return the matching include pattern if EVERY spelling of ``path`` is inside one of
