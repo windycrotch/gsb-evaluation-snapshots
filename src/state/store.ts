@@ -1038,11 +1038,16 @@ export const useCanvasStore = create<CanvasStore>()((set, get) => ({
       let snapDy = 0;
       let nextSnapLockX = s.snapLockX;
       let nextSnapLockY = s.snapLockY;
-      // Compute snapping only during an active drag batch (gesture), not for programmatic moves
+      // Compute snapping only during an active drag batch (gesture), not for programmatic moves.
+      // When snapping is disabled or the tolerance is 0, no correction/guide may be produced and
+      // any previously established lock must be dropped so it cannot resurrect later.
       if (s.alignSnapEnabled && s.historyBatch) {
         const zoom = s.camera.zoom || 1;
         const tolWorld = (s.alignSnapTolerancePx || 0) / zoom;
-        if (tolWorld > 0) {
+        if (tolWorld <= 0) {
+          nextSnapLockX = null;
+          nextSnapLockY = null;
+        } else {
           // Compute selection bounding box (selected ids only, not descendants)
           let selLeft = Infinity,
             selTop = Infinity,
@@ -1161,13 +1166,13 @@ export const useCanvasStore = create<CanvasStore>()((set, get) => ({
               ) {
                 nextSnapLockX = null;
               } else {
-                // Stay locked: snap exactly
+                // Stay locked: snap exactly to the locked coordinate
                 dxApplied = dx + corr.corr;
                 snapDx = corr.corr;
                 guidesEphemeral.push({
                   axis: 'x',
                   at: nextSnapLockX.at,
-                  kind: corr.kind,
+                  kind: nextSnapLockX.kind,
                   targetId: 'selection',
                 });
               }
@@ -1211,7 +1216,7 @@ export const useCanvasStore = create<CanvasStore>()((set, get) => ({
                 guidesEphemeral.push({
                   axis: 'y',
                   at: nextSnapLockY.at,
-                  kind: corr.kind,
+                  kind: nextSnapLockY.kind,
                   targetId: 'selection',
                 });
               }
