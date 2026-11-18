@@ -33,9 +33,12 @@
         // Lives in <head> and self-heals (re-injects on a tick) so it survives
         // any rebuild of <body>. Switches the server map for everyone via
         // `rcon changelevel`, calling the engine instance web/main.js exposes on
-        // window.__xash. Selection + switching state live on `window` so they
-        // survive a re-inject. Simple UX: instant search, current-map highlight,
-        // "switching…" feedback, Esc / backdrop / ✕ to close, touch-friendly.
+        // window.__xash. All switch state lives on `window` so it survives a
+        // re-inject. A map click is a checkable transaction, not a fire-and-forget:
+        //   idle → "switching" (UI locked, exactly ONE rcon command issued) →
+        //   success (server-ready signal seen → map highlighted, UI unlocks,
+        //   panel auto-closes) or failure/timeout (reason shown in-panel, no
+        //   highlight, panel stays open so the player can retry).
         (function () {
             // Must match rcon_password in cstrike/server.cfg. Public on a LAN by design.
             var RCON_PW = 'cs16lan';
@@ -47,6 +50,9 @@
                 'cs_estate', 'cs_backalley', 'cs_siege', 'cs_747', 'as_oilrig'
             ];
             var CUSTOM = ['cs_mansion']; // non-stock maps added via ./add-maps.sh
+            var READY_POLL_MS = 250;          // how often we check the server-ready signal
+            var DEFAULT_TIMEOUT_MS = 15000;   // give up waiting for the server after this
+            var DEFAULT_SUCCESS_CLOSE_MS = 3000; // auto-close the panel this long after a confirmed switch
 
             function css(el, s) { for (var k in s) el.style[k] = s[k]; }
             function tiles() { return document.querySelectorAll('#cs-mapgrid .cs-maptile'); }
@@ -82,25 +88,109 @@
                 var s = document.getElementById('cs-mapsearch'); if (s) s.disabled = on;
             }
 
-            function switchMap(name) {
-                if (window.__csSwitching) return; // guard against double-fire
-                window.__csSelectedMap = name;
+            // ---- status line ----
+            // Persisted on window so a rebuilt <body> keeps the last message.
+            // kind: 'info' (switching) | 'ok' (confirmed) | 'error' (failed/timed out)
+            function setStatus(text, kind) {
+                window.__csMapStatus = text ? { text: text, kind: kind || 'info' } : null;
+            }
+
+            // Re-apply ALL persisted state to the (possibly freshly rebuilt) DOM.
+            function syncUI() {
                 applyHighlight();
+                setSwitching(!!window.__csSwitching);
+                var st = document.getElementById('cs-mapstatus');
+                if (!st) return;
+                var s = window.__csMapStatus;
+                if (s && s.text) {
+                    st.textContent = s.text;
+                    st.style.color = s.kind === 'error' ? '#ff7b72' : (s.kind === 'ok' ? '#8fd98f' : '#f6b265');
+                    st.style.display = 'block';
+                } else {
+                    st.style.display = 'none';
+                }
+            }
+
+            function switchTimeoutMs() {
+                var v = Number(window.__csMapSwitchTimeoutMs); // test/ops override
+                return v > 0 ? v : DEFAULT_TIMEOUT_MS;
+            }
+            function successCloseMs() {
+                var v = Number(window.__csMapSuccessCloseMs);
+                return v > 0 ? v : DEFAULT_SUCCESS_CLOSE_MS;
+            }
+
+            // The "server is ready on the new map" signal. An external probe (or a
+            // test) can provide window.__csServerReady as a function or boolean;
+            // otherwise we treat a running engine as ready — a crashed/absent
+            // engine then never confirms and the switch times out loudly.
+            function serverReady() {
+                var sig = window.__csServerReady;
+                if (typeof sig === 'function') { try { return !!sig(); } catch (e) { return false; } }
+                if (sig !== undefined) return !!sig;
                 var x = window.__xash;
-                if (x && x.Cmd_ExecuteString) {
-                    x.Cmd_ExecuteString('rcon_password ' + RCON_PW);
-                    x.Cmd_ExecuteString('rcon changelevel ' + name);
+                return !!(x && x.running);
+            }
+
+            function clearWait() {
+                if (window.__csMapWaitPoll) { clearInterval(window.__csMapWaitPoll); window.__csMapWaitPoll = null; }
+                if (window.__csMapWaitTimeout) { clearTimeout(window.__csMapWaitTimeout); window.__csMapWaitTimeout = null; }
+            }
+
+            function endSwitch() {
+                clearWait();
+                window.__csSwitching = false;
+            }
+
+            // Confirmed: highlight the map (this is the ONLY place a map becomes
+            // "selected") and auto-close after a short, bounded confirmation.
+            function succeed(name) {
+                endSwitch();
+                window.__csSelectedMap = name;
+                setStatus('Switched to ' + name + ' — the server is loading the map.', 'ok');
+                syncUI();
+                var done = window.__csMapStatus;
+                setTimeout(function () {
+                    // Auto-close only if nothing newer (retry, error) replaced this status.
+                    if (window.__csMapStatus === done) { setStatus(null); syncUI(); closePicker(); }
+                }, successCloseMs());
+            }
+
+            // Failed/timed out: show the reason, unlock the UI, keep the panel
+            // open. __csSelectedMap is never the failed map (it is only set in
+            // succeed), so no stale highlight can remain.
+            function fail(reason) {
+                endSwitch();
+                setStatus(reason, 'error');
+                syncUI();
+            }
+
+            function switchMap(name) {
+                if (window.__csSwitching) return; // one switch at a time — never a 2nd rcon
+                var x = window.__xash;
+                if (!x || typeof x.Cmd_ExecuteString !== 'function') {
+                    // Engine missing or can't take commands: fail fast, send
+                    // nothing, mark nothing selected.
+                    setStatus('Cannot switch to ' + name + ': the game engine is not running or cannot accept commands.', 'error');
+                    syncUI();
+                    return;
                 }
                 window.__csSwitching = true;
-                setSwitching(true);
-                var status = document.getElementById('cs-mapstatus');
-                if (status) { status.textContent = 'Switching to ' + name + '…  (takes a few seconds)'; status.style.display = 'block'; }
-                setTimeout(function () {
-                    window.__csSwitching = false;
-                    setSwitching(false);
-                    var st = document.getElementById('cs-mapstatus'); if (st) st.style.display = 'none';
-                    closePicker();
-                }, 4000);
+                try {
+                    x.Cmd_ExecuteString('rcon_password ' + RCON_PW);
+                    x.Cmd_ExecuteString('rcon changelevel ' + name);
+                } catch (err) {
+                    fail('Could not send the map command to the engine: ' + ((err && err.message) || err));
+                    return;
+                }
+                setStatus('Switching to ' + name + '… waiting for the server.', 'info');
+                syncUI();
+                window.__csMapWaitPoll = setInterval(function () {
+                    if (serverReady()) succeed(name);
+                }, READY_POLL_MS);
+                window.__csMapWaitTimeout = setTimeout(function () {
+                    fail('Timed out waiting for the server to switch to ' + name + '. The map probably did not change — check the server and try again.');
+                }, switchTimeoutMs());
             }
 
             function filterMaps() {
@@ -125,6 +215,7 @@
                     if (s) { s.value = ''; filterMaps(); try { s.focus(); } catch (e) {} }
                 }, 0);
             }
+            window.__csMapOpen = openPicker;
 
             function build() {
                 if (!document.body || document.getElementById('cs-mapbtn')) return;
@@ -240,11 +331,12 @@
 
                 document.body.appendChild(btn);
                 document.body.appendChild(overlay);
-                applyHighlight();
+                syncUI(); // re-apply selection / switching / status after a rebuild
             }
 
             function tick() {
                 build(); // re-inject if the engine wiped <body>
+                syncUI(); // re-apply persisted state to freshly built nodes
                 var btn = document.getElementById('cs-mapbtn');
                 if (!btn) return;
                 var running = !!(window.__xash && window.__xash.running);
