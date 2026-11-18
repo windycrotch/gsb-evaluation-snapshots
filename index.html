@@ -455,24 +455,46 @@ function pressure(g, t) {   // 0..1: how badly nation g needs peace with nation 
 }
 function budget(g, t) { const p = pressure(g, t); return p < 0.12 ? 0 : p * (incomeOf(g) * 14 + Math.max(0, G.gold[g]) * 0.5); }
 function dealText(d) { const a = d.prov.map(i => `<b>${esc(P[i].name)}</b>`); if (d.gold > 0) a.push(`<b>${fmt(d.gold)} gold</b>`); return a.length ? a.join(', ') : 'nothing'; }
-function judgeDeal(d, ai, pl) {
+function judgeDeal(raw, ai, pl) {
   const w = G.wars.get(pk(ai, pl)); if (!w) return { ok: false, why: 'You are not at war.' };
   if (!G.tut && G.turn - w.s < 2) return { ok: false, why: 'The war has only just begun.' };
+  const d = normalizeDeal(raw);   // judge exactly what would change hands
   const v = dealValue(d), white = G.tut || aiAcceptsPeace(ai, pl);   // in the tutorial the beaten nation always agrees to white peace
   if (v <= 0) return white ? { ok: true, why: 'They are ready to end the war.' } : { ok: false, why: 'They want to keep fighting.' };
   if (d.giver === ai) { const B = budget(ai, pl); return v <= B ? { ok: true, why: 'They will pay this price.' } : { ok: false, why: B <= 0 ? 'They do not feel beaten and will give nothing.' : 'The price is too high for them.' }; }
   const B = budget(pl, ai); return white || v >= 0.5 * B ? { ok: true, why: 'They accept your offer.' } : { ok: false, why: 'They want more.' };
 }
 function cede(i, to) {
-  const from = G.owner[i]; if (from === to || G.cap[from] === i) return;
-  G.army[G.cap[from]] += G.army[i]; G.army[i] = 0;   // the garrison withdraws to the capital
+  const from = G.owner[i];
+  if (from < 0 || from === to) return;
+  if (G.cap[from] === i) return;                       // the capital can never be traded away
+  const cap = G.cap[from];
+  if (G.owner[cap] === from) G.army[cap] += G.army[i];   // the garrison withdraws to the giver's capital
+  G.army[i] = 0;
   capture(i, to);
 }
+// One canonical view of a deal, used both by the verdict and by the transfer, so what is
+// promised is exactly what changes hands: only provinces the giver still owns (its capital
+// excluded, no duplicates), and no more gold than the giver can actually pay.
+function normalizeDeal(d) {
+  const giver = d.giver, taker = d.taker;
+  const seen = new Set(), prov = [];
+  if (G.alive[giver] && giver !== taker) {
+    for (const i of d.prov) {
+      if (i == null || seen.has(i)) continue;
+      seen.add(i);
+      if (G.owner[i] === giver && G.cap[giver] !== i) prov.push(i);
+    }
+  }
+  const gold = G.alive[giver] ? Math.max(0, Math.min(Math.floor(d.gold) || 0, Math.floor(Math.max(0, G.gold[giver])))) : 0;
+  return { giver, taker, prov, gold };
+}
 function applyDeal(d) {
+  const n = normalizeDeal(d);
   const t = tally; tally = { won: 0, lost: 0 };
-  for (const i of d.prov) if (G.owner[i] === d.giver) cede(i, d.taker);
+  for (const i of n.prov) if (G.owner[i] === n.giver && G.cap[n.giver] !== i) cede(i, n.taker);
   tally = t;
-  const g = Math.max(0, Math.min(d.gold, Math.floor(G.gold[d.giver]))); G.gold[d.giver] -= g; G.gold[d.taker] += g;
+  G.gold[n.giver] -= n.gold; G.gold[n.taker] += n.gold;   // n.gold is already capped at the giver's treasury
   mapDirty = true;
 }
 function aiTerms(giver, taker, share) {   // what the giver can be made to hand over: border provinces first, then gold
