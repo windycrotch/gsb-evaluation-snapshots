@@ -33,6 +33,8 @@ O runtime separa captura, detecção, tracking, scoring e visualização. O mode
 
 O histórico em memória é limitado, os totais permanecem acumulados e a captura é sempre liberada ao encerrar. Vídeos locais respeitam o FPS do arquivo; falhas de câmera e saídas incompatíveis do modelo interrompem a execução com uma mensagem objetiva.
 
+Ao final da execução, o resultado traz o número de frames, o tempo decorrido, os quatro totais do dashboard e um relatório por item (status, score, vistas e instantes de entrada e saída), ordenado por identificador exibido. Se o vídeo terminar antes do previsto, os frames já processados são contabilizados normalmente; um vídeo sem nenhum frame continua sendo rejeitado.
+
 ## Indicadores
 
 Resultados de validação offline interna:

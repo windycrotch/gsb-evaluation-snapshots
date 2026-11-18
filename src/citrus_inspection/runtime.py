@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from time import perf_counter, sleep
 
@@ -23,13 +23,15 @@ class RunResult:
     elapsed_seconds: float
     stopped_by_user: bool
     summary: dict[str, int]
+    report: list[dict] = field(default_factory=list)
 
-    def as_dict(self) -> dict[str, int | float | bool]:
+    def as_dict(self) -> dict[str, int | float | bool | list[dict]]:
         return {
             "frames": self.frames,
             "elapsed_seconds": round(self.elapsed_seconds, 2),
             "stopped_by_user": self.stopped_by_user,
             **self.summary,
+            "report": self.report,
         }
 
 
@@ -55,7 +57,16 @@ def run_live(cfg: Config, scorer: Scorer, source: str) -> RunResult:
         cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
         window_open = True
         while True:
-            ok, bgr = capture.read()
+            try:
+                ok, bgr = capture.read()
+            except cv2.error as exc:
+                if not is_camera:
+                    break
+                failures += 1
+                if failures >= 3:
+                    raise RuntimeError("camera stopped returning frames") from exc
+                sleep(0.05)
+                continue
             if not ok:
                 if not is_camera:
                     break
@@ -91,7 +102,13 @@ def run_live(cfg: Config, scorer: Scorer, source: str) -> RunResult:
 
     if frames == 0:
         raise RuntimeError(f"video source returned no frames: {source}")
-    return RunResult(frames, perf_counter() - started, stopped_by_user, inspector.summary())
+    return RunResult(
+        frames=frames,
+        elapsed_seconds=perf_counter() - started,
+        stopped_by_user=stopped_by_user,
+        summary=inspector.summary(),
+        report=inspector.report(),
+    )
 
 
 def resolve_source(source: str) -> tuple[int | str, bool]:
