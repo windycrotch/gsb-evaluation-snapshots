@@ -6,3 +6,12 @@ declare module '*.glsl' {
   const source: string;
   export default source;
 }
+
+/** The hooks tests/cues.mjs drives the page's cue → pulse chain through. */
+interface Window {
+  __colorMusic: {
+    pulse: import('./core/pulse').Pulse;
+    handleCues: (cues: import('./app/audio').Cue[]) => void;
+    decay: (dt: number) => void;
+  };
+}

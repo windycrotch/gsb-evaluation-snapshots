@@ -9,11 +9,12 @@
  */
 import { barSeconds, STYLE_NAMES, STYLES, type Song, type Style, makeSong } from '../core/music';
 import { cssColor, paletteColor, type Palette } from '../core/palette';
+import { applyCues, chordHue, decayPulse, makePulse, type Pulse } from '../core/pulse';
 import { cleanSeed, newSeed } from '../core/rng';
 import { makeScene, PATTERNS, type Scene } from '../core/scene';
 import { type Pace, readSettings, type Settings } from '../core/settings';
 import { Engine, type Cue } from './audio';
-import { Renderer, type Pulse } from './renderer';
+import { Renderer } from './renderer';
 import { applyUpdate, canUpdate, checkForUpdate, justUpdated, startUpdates, type UpdateState } from './update';
 
 const STORAGE = 'color-music';
@@ -62,17 +63,7 @@ let engine: Engine | null = null;
 let section = 0;
 let energyTarget = song.sections[0]?.energy ?? 0.4;
 
-const pulse: Pulse = {
-  beatsPerSecond: song.bpm / 60,
-  beat: 0,
-  snare: 0,
-  note: 0,
-  flash: 0,
-  energy: 0.4,
-  level: 0,
-  chordHue: 0,
-  calm: settings.calm,
-};
+const pulse: Pulse = makePulse(song.bpm / 60, settings.calm);
 let chordHueTarget = 0;
 
 function setState(state: 'intro' | 'playing' | 'paused'): void {
@@ -149,35 +140,38 @@ function nextSong(at?: number, newSeedText?: string): void {
 
 // ---- Audio cues → pulses ----------------------------------------------------
 
-function handleCue(cue: Cue, late: boolean): void {
-  switch (cue.kind) {
-    case 'note':
-      if (late) return;
-      if (cue.voice === 'kick') pulse.beat = Math.max(pulse.beat, cue.velocity);
-      else if (cue.voice === 'snare' || cue.voice === 'clap') pulse.snare = Math.max(pulse.snare, cue.velocity);
-      else if (cue.voice === 'tom') pulse.beat = Math.max(pulse.beat, cue.velocity * 0.8);
-      else if (cue.voice === 'crash') pulse.flash = settings.calm ? 0 : 1;
-      else if (cue.voice === 'lead' || cue.voice === 'arp') pulse.note = Math.max(pulse.note, cue.velocity * (cue.voice === 'lead' ? 1 : 0.5));
-      // Without drums, the pad's chords carry the pulse.
-      else if (cue.voice === 'pad' && !song.sections[section]?.layers.includes('drums')) pulse.beat = Math.max(pulse.beat, cue.velocity * 0.35);
-      break;
-    case 'chord':
-      $('f-chord').textContent = cue.name;
-      // Around the circle of fifths: chords a fifth apart shift the colours a little, distant ones more.
-      chordHueTarget = (((cue.root * 7) % 12) / 12) * 0.35;
-      break;
-    case 'section': {
-      section = cue.section;
-      const part = song.sections[section];
-      energyTarget = part?.energy ?? 0.5;
-      if (settings.pace === 'section' || (settings.pace === 'song' && section === 0)) newScene(sceneSeconds());
-      break;
-    }
-    case 'bar': {
-      const part = song.sections[cue.section];
-      if (part) $('f-part').textContent = `${part.role[0]!.toUpperCase()}${part.role.slice(1)} · bar ${cue.bar + 1} of ${part.bars}`;
-      if (settings.pace === 'phrase' && cue.bar % 4 === 0) newScene(sceneSeconds());
-      break;
+/**
+ * Folds one frame's due cues into the pulse (core/pulse does the folding:
+ * oldest first, strongest hit of a kind wins) and shows what the batch
+ * announced — the chord, a new part of the song, the bar number. A note whose
+ * time is before `lateBefore` is over before it could show: skipped.
+ */
+function handleCues(cues: Cue[], lateBefore: number): void {
+  const events = applyCues(pulse, cues, {
+    calm: settings.calm,
+    // Without drums, the pad's chords carry the pulse.
+    padCarriesBeat: !song.sections[section]?.layers.includes('drums'),
+    late: (cue) => cue.time < lateBefore,
+  });
+  for (const event of events) {
+    switch (event.kind) {
+      case 'chord':
+        $('f-chord').textContent = event.name;
+        chordHueTarget = chordHue(event.root);
+        break;
+      case 'section': {
+        section = event.section;
+        const part = song.sections[section];
+        energyTarget = part?.energy ?? 0.5;
+        if (settings.pace === 'section' || (settings.pace === 'song' && section === 0)) newScene(sceneSeconds());
+        break;
+      }
+      case 'bar': {
+        const part = song.sections[event.section];
+        if (part) $('f-part').textContent = `${part.role[0]!.toUpperCase()}${part.role.slice(1)} · bar ${event.bar + 1} of ${part.bars}`;
+        if (settings.pace === 'phrase' && event.bar % 4 === 0) newScene(sceneSeconds());
+        break;
+      }
     }
   }
 }
@@ -188,23 +182,28 @@ let last = performance.now();
 function frame(now: number): void {
   const dt = Math.max(0, (now - last) / 1000);
   last = now;
-  if (engine) {
+  const state = document.body.dataset.state;
+  // Paused, the audio clock stands still: the cues wait unread, the pulses
+  // hold and the scene time does not move; Play picks up where it stopped.
+  const paused = state === 'paused';
+  if (engine && !paused) {
     engine.tick();
     const heard = engine.now();
-    for (const cue of engine.takeCues(heard)) handleCue(cue, cue.time < heard - 0.25);
+    handleCues(engine.takeCues(heard), heard - 0.25);
     pulse.level = engine.level();
   }
-  const playing = document.body.dataset.state === 'playing';
+  const playing = state === 'playing';
   pulse.beatsPerSecond = (song.bpm / 60) * (playing ? 1 : 0.3);
-  pulse.beat *= Math.exp(-dt * 7);
-  pulse.snare *= Math.exp(-dt * 9);
-  pulse.note *= Math.exp(-dt * 5);
-  pulse.flash *= Math.exp(-dt * 4);
-  pulse.energy += ((playing ? energyTarget : 0.3) - pulse.energy) * Math.min(1, dt * 0.6);
-  pulse.chordHue += (chordHueTarget - pulse.chordHue) * Math.min(1, dt * 1.5);
+  if (!paused) {
+    // Real elapsed seconds, never the renderer's clamped frame time: a long
+    // frame fades a flash by the long time it truly took.
+    decayPulse(pulse, dt);
+    pulse.energy += ((playing ? energyTarget : 0.3) - pulse.energy) * Math.min(1, dt * 0.6);
+    pulse.chordHue += (chordHueTarget - pulse.chordHue) * Math.min(1, dt * 1.5);
+  }
   pulse.calm = settings.calm;
   try {
-    renderer?.frame(dt, pulse);
+    renderer?.frame(paused ? 0 : dt, pulse);
   } catch (error) {
     console.error(error);
     renderer = null;
@@ -514,6 +513,12 @@ function bind(): void {
 }
 
 $('version').textContent = __APP_VERSION__;
+// tests/cues.mjs drives the cue → pulse chain by hand through these hooks.
+window.__colorMusic = {
+  pulse,
+  handleCues: (cues: Cue[]) => handleCues(cues, Number.NEGATIVE_INFINITY),
+  decay: (dt: number) => decayPulse(pulse, dt),
+};
 window.setInterval(() => {
   if (renderer) $('quality').textContent = `render ${Math.round(renderer.quality * 100)}%`;
 }, 1000);

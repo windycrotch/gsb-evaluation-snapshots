@@ -154,7 +154,10 @@ export class Engine {
         window.setTimeout(() => done.disconnect(), (t - this.ctx.currentTime + fade * 2 + 0.5) * 1000);
       }
     }
-    this.cues = this.cues.filter((cue) => cue.time < t);
+    // The old song's cues not yet read are void: the picture must not flash to
+    // a kick or chord of a song that is fading out. The new song's cues start
+    // at its own bar 0, written by the cursor reset below.
+    this.cues = [];
     this.song = song;
     this.channels = this.makeChannels(song);
     const delay = song.sound.fx.delaySteps * stepSeconds(song);

@@ -8,26 +8,13 @@
  * Each slot keeps its own clock, angle and palette phase, advanced in beats of
  * the music, so motion speeds up and slows down with the song.
  */
+import type { Pulse } from '../core/pulse';
 import type { Scene } from '../core/scene';
 import presentSource from './present.glsl';
 import sceneSource from './scene.glsl';
 import vertexSource from './quad.vert.glsl';
 
-export interface Pulse {
-  /** Beats per second of the music now. */
-  beatsPerSecond: number;
-  /** 0..1, decaying: the kick, the snare/clap, melody notes, a crash. */
-  beat: number;
-  snare: number;
-  note: number;
-  flash: number;
-  /** 0..1, smoothed: how busy the music is. */
-  energy: number;
-  level: number;
-  /** Palette offset from the chord now playing. */
-  chordHue: number;
-  calm: boolean;
-}
+export type { Pulse };
 
 interface Slot {
   scene: Scene;
@@ -182,6 +169,9 @@ export class Renderer {
   frame(dt: number, pulse: Pulse): void {
     if (this.lost || !this.a) return;
     const gl = this.gl;
+    // A long frame moves the scene clocks a little, not a lot. The pulses are
+    // not decayed here: the caller fades them by real elapsed time
+    // (core/pulse.decayPulse), so a clamped frame never stretches a flash.
     dt = Math.min(dt, 0.1);
     this.clock += dt;
     this.adapt(dt);
