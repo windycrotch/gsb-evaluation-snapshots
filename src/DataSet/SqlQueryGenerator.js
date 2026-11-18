@@ -79,14 +79,20 @@ class SqlQueryGenerator {
       return filterAxisItemsByNestingStage;
     }
 
-    // analyze the filter items and store them in a dict: 
+    // analyze the filter items and store them in a dict:
     // - filter items that require unnesting are stored by memberExpressionPath
+    // note that different filter items may share the same member expression path,
+    // so each entry has to hold a list rather than a single item.
     const topLevelFilterAxisItems = [];
     for (let i = 0; i < filterAxisItems.length; i++){
       const filterAxisItem = filterAxisItems[i];
       const memberExpressionPathString = SqlQueryGenerator.#getMemberExpressionPathStringForPathWithUnnestingOperation(filterAxisItem);
       if (memberExpressionPathString) {
-        filterAxisItemsByNestingStage[memberExpressionPathString] = filterAxisItem;
+        let nestingStageFilterAxisItems = filterAxisItemsByNestingStage[memberExpressionPathString];
+        if (nestingStageFilterAxisItems === undefined) {
+          filterAxisItemsByNestingStage[memberExpressionPathString] = nestingStageFilterAxisItems = [];
+        }
+        nestingStageFilterAxisItems.push(filterAxisItem);
       }
       else {
         topLevelFilterAxisItems.push(filterAxisItem);
@@ -144,51 +150,248 @@ class SqlQueryGenerator {
     return filterCondition;
   }
   
+  // test whether a filter item's member expression starts with the given
+  // column + path prefix. Compared token by token so that prefixes never
+  // accidentally match a longer, differently named column.
+  static #memberExpressionPathStartsWith(columnName, memberExpressionPath, prefixColumnName, prefixMemberExpressionPath){
+    if (columnName !== prefixColumnName) {
+      return false;
+    }
+    if (prefixMemberExpressionPath.length > memberExpressionPath.length) {
+      return false;
+    }
+    for (let i = 0; i < prefixMemberExpressionPath.length; i++) {
+      if (memberExpressionPath[i] !== prefixMemberExpressionPath[i]) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  // find the unnesting function (if any) that occurs immediately after the given prefix
+  static #getUnnestingFunctionNameAtPathPrefix(columnName, memberExpressionPath, prefixColumnName, prefixMemberExpressionPath){
+    if (!SqlQueryGenerator.#memberExpressionPathStartsWith(columnName, memberExpressionPath, prefixColumnName, prefixMemberExpressionPath)) {
+      return undefined;
+    }
+    const pathElement = memberExpressionPath[prefixMemberExpressionPath.length];
+    if (pathElement === undefined) {
+      return undefined;
+    }
+    const unnestingFunctions = SqlQueryGenerator.#getUnnestingFunctions();
+    return unnestingFunctions[pathElement] === undefined ? undefined : pathElement;
+  }
+
+  // Express a reference (column name + member expression path) in terms of the
+  // columns produced by an unnesting stage. When the reference points at an
+  // array element that this stage expands, the returned reference uses the
+  // unnested column name and keeps whatever path remains after that expansion.
+  // Returns undefined when the reference is not affected by this stage.
+  static #rewriteReferenceForUnnestingStage(
+    columnName,
+    memberExpressionPath,
+    stageColumnName,
+    stageMemberExpressionPath,
+    stageUnnestingFunctions
+  ){
+    memberExpressionPath = memberExpressionPath || [];
+    if (columnName !== stageColumnName) {
+      return undefined;
+    }
+    if (memberExpressionPath.length <= stageMemberExpressionPath.length) {
+      return undefined;
+    }
+    for (let i = 0; i < stageMemberExpressionPath.length; i++) {
+      if (memberExpressionPath[i] !== stageMemberExpressionPath[i]) {
+        return undefined;
+      }
+    }
+    const unnestingFunctionName = memberExpressionPath[stageMemberExpressionPath.length];
+    if (stageUnnestingFunctions[unnestingFunctionName] === undefined) {
+      return undefined;
+    }
+    const remainingMemberExpressionPath = memberExpressionPath.slice(stageMemberExpressionPath.length + 1);
+    return {
+      columnName: [stageColumnName].concat(stageMemberExpressionPath, [unnestingFunctionName]).join('.'),
+      memberExpressionPath: remainingMemberExpressionPath.length ? remainingMemberExpressionPath : undefined
+    };
+  }
+
+  // Rewrite the subject and partitionByItems of an axis aggregate so they
+  // reference the columns produced by the current unnesting stage. A window
+  // function cannot contain unnest(), so every array element the aggregate is
+  // computed over has to be referenced by its unnested column. Returns true
+  // when at least one reference was rewritten.
+  static #rewriteAxisAggregateForUnnestingStage(
+    item,
+    stageColumnName,
+    stageMemberExpressionPath,
+    stageUnnestingFunctions
+  ){
+    let rewritten = false;
+
+    const subjectRewrite = SqlQueryGenerator.#rewriteReferenceForUnnestingStage(
+      item.columnName,
+      item.memberExpressionPath,
+      stageColumnName,
+      stageMemberExpressionPath,
+      stageUnnestingFunctions
+    );
+    if (subjectRewrite) {
+      rewritten = true;
+      item.columnName = subjectRewrite.columnName;
+      if (subjectRewrite.memberExpressionPath) {
+        item.memberExpressionPath = subjectRewrite.memberExpressionPath;
+      }
+      else {
+        delete item.memberExpressionPath;
+      }
+      if (item.derivation && !item.memberExpressionPath) {
+        const derivationInfo = AttributeUi.getDerivationInfo(item.derivation);
+        if (derivationInfo && derivationInfo.unnestingFunction) {
+          delete item.derivation;
+        }
+      }
+    }
+
+    const partitionByItems = item.partitionByItems;
+    if (partitionByItems && partitionByItems.length) {
+      item.partitionByItems = partitionByItems.map(partitionByItem => {
+        const partitionRewrite = SqlQueryGenerator.#rewriteReferenceForUnnestingStage(
+          partitionByItem.columnName,
+          partitionByItem.memberExpressionPath,
+          stageColumnName,
+          stageMemberExpressionPath,
+          stageUnnestingFunctions
+        );
+        if (!partitionRewrite) {
+          return partitionByItem;
+        }
+        rewritten = true;
+        const newPartitionByItem = Object.assign({}, partitionByItem, {
+          columnName: partitionRewrite.columnName
+        });
+        if (partitionRewrite.memberExpressionPath) {
+          newPartitionByItem.memberExpressionPath = partitionRewrite.memberExpressionPath;
+        }
+        else {
+          delete newPartitionByItem.memberExpressionPath;
+          delete newPartitionByItem.derivation;
+        }
+        return newPartitionByItem;
+      });
+    }
+
+    return rewritten;
+  }
+
+  // Determine whether this stage has to expand an array that the given axis
+  // aggregate is based on - either as the subject of the aggregate or as one
+  // of its partition columns. If so, the aggregate cannot be evaluated here:
+  // a window function cannot contain unnest(), so it has to run after the
+  // expansion. Returns true when that is the case.
+  static #axisAggregateRequiresUnnestingAtStage(item, stageColumnName, stageMemberExpressionPath, stageUnnestingFunctions){
+    const matchesStage = (columnName, memberExpressionPath) => {
+      return SqlQueryGenerator.#rewriteReferenceForUnnestingStage(
+        columnName,
+        memberExpressionPath,
+        stageColumnName,
+        stageMemberExpressionPath,
+        stageUnnestingFunctions
+      ) !== undefined;
+    };
+
+    if (matchesStage(item.columnName, item.memberExpressionPath)) {
+      return true;
+    }
+    const partitionByItems = item.partitionByItems;
+    if (!partitionByItems || !partitionByItems.length) {
+      return false;
+    }
+    return partitionByItems.some(partitionByItem => {
+      return matchesStage(partitionByItem.columnName, partitionByItem.memberExpressionPath);
+    });
+  }
+
+  // Replace a deferred axis aggregate in the current stage's select list with
+  // plain projections of the columns it needs, so a later stage can compute the
+  // window function from the expanded values.
+  static #projectAxisAggregateBaseColumns(cte, item){
+    const existingColumnNames = new Set(
+      cte.items
+      .filter(stageItem => !stageItem.isUnnestingExpression)
+      .map(stageItem => stageItem.columnName)
+    );
+
+    const baseColumns = [];
+    const addBaseColumn = (columnName, columnType, memberExpressionPath) => {
+      if (!columnName || columnName === '*' || existingColumnNames.has(columnName)) {
+        return;
+      }
+      // a reference that still has a path will be produced by an unnesting
+      // operation, not by a plain projection
+      if (memberExpressionPath && memberExpressionPath.length) {
+        return;
+      }
+      baseColumns.push({
+        columnName: columnName,
+        columnType: columnType
+      });
+      existingColumnNames.add(columnName);
+    };
+
+    addBaseColumn(item.columnName, item.columnType, item.memberExpressionPath);
+    (item.partitionByItems || []).forEach(partitionByItem => {
+      addBaseColumn(partitionByItem.columnName, partitionByItem.columnType, partitionByItem.memberExpressionPath);
+    });
+    return baseColumns;
+  }
+
   static #transformFilterItems(
-    filterAxisItemsByNestingStage, 
-    unnestingItemMemberExpressionPathPrefixString, 
-    unnestingOperationItem, 
-    cte
+    filterAxisItemsByNestingStage,
+    unnestingOperationItem
   ){
     const unnestingFunctions = SqlQueryGenerator.#getUnnestingFunctions();
-    const unnestingFunctionNames = Object.keys(unnestingFunctions);
     const filters = [];
-    
+
+    const prefixColumnName = unnestingOperationItem.columnName;
+    const prefixMemberExpressionPath = unnestingOperationItem.memberExpressionPath;
+
     // check each filter path to see if it matches this unnesting stage
     const filterPaths = Object.keys(filterAxisItemsByNestingStage);
     for (let i = 0; i < filterPaths.length; i++){
       const filterPath = filterPaths[i];
-      //if (!filterPath.startsWith(unnestingItemMemberExpressionPathPrefixString)){
-        // filter path prefix does not match this path prefix, so leave it
-      //  continue;
-      //}
-      const originalFilterAxisItem = filterAxisItemsByNestingStage[filterPath];
-      const itemPrefix = SqlQueryGenerator.#getExpressionString(
-        originalFilterAxisItem.columnName,
-        originalFilterAxisItem.memberExpressionPath
-      );
-      if (!itemPrefix.startsWith(unnestingItemMemberExpressionPathPrefixString)){
+      const stageFilterAxisItems = filterAxisItemsByNestingStage[filterPath];
+      if (!stageFilterAxisItems) {
         continue;
       }
-      
-      // check if there is an unnesting function in the filter, immediately after the prefix
-      for (let j = 0; j < unnestingFunctionNames.length; j++){
-        const unnestingFunctionName = unnestingFunctionNames[j];
-        const unnestingExpression = unnestingItemMemberExpressionPathPrefixString + `['${unnestingFunctionName}']`;
-        if (!itemPrefix.startsWith(unnestingExpression)){
-          // filter path does not match this unnesting function, so try the next
+      const retainedFilterAxisItems = [];
+      for (let k = 0; k < stageFilterAxisItems.length; k++){
+        const originalFilterAxisItem = stageFilterAxisItems[k];
+        const originalMemberExpressionPath = originalFilterAxisItem.memberExpressionPath || [];
+
+        // find an unnesting function in the filter immediately after this stage's prefix
+        const unnestingFunctionName = SqlQueryGenerator.#getUnnestingFunctionNameAtPathPrefix(
+          originalFilterAxisItem.columnName,
+          originalMemberExpressionPath,
+          prefixColumnName,
+          prefixMemberExpressionPath
+        );
+
+        if (!unnestingFunctionName) {
+          // filter path does not match this unnesting stage - leave it for a later stage
+          retainedFilterAxisItems.push(originalFilterAxisItem);
           continue;
         }
-        
+
         // this filter path matches this unnesting stage, so register that in the unnesting operation
         if (unnestingOperationItem.unnestingFunctions[unnestingFunctionName] === undefined){
           unnestingOperationItem.unnestingFunctions[unnestingFunctionName] = 0;
         }
         unnestingOperationItem.unnestingFunctions[unnestingFunctionName] += 1;
-        
-        // since these filter items are part of this unnesting stage, 
+
+        // since these filter items are part of this unnesting stage,
         // we need replace them with new filter items that reference the column of the unnested item
-        const substituteMemberExpressionPath = originalFilterAxisItem.memberExpressionPath.slice(unnestingOperationItem.memberExpressionPath.length + 1);
+        const substituteMemberExpressionPath = originalMemberExpressionPath.slice(prefixMemberExpressionPath.length + 1);
         const columnExpression = [unnestingOperationItem.columnName].concat(unnestingOperationItem.memberExpressionPath);
         columnExpression.push(unnestingFunctionName);
 
@@ -203,13 +406,13 @@ class SqlQueryGenerator {
           substituteColumnType = getMemberExpressionType(originalFilterAxisItem.columnType, unnestingOperationItem.memberExpressionPath);
           substituteColumnType = getArrayElementType(substituteColumnType);
         }
-        
+
         const filterAxisItem = Object.assign({}, originalFilterAxisItem, {
           columnName: columnExpression.join('.'),
           columnType: substituteColumnType
         });
-        
-        
+
+
         if (substituteMemberExpressionPath.length){
           filterAxisItem.memberExpressionPath = substituteMemberExpressionPath;
         }
@@ -222,22 +425,108 @@ class SqlQueryGenerator {
             }
           }
         }
-        
+
         // now we have to check whether the remaining expressionpath of the filter item still contains unnesting expressions.
-        // if it does, then we have to replace the original item in filterAxisItemsByNestingStage with the substituted one
+        // if it does, then we have to register the substituted item under its new path so a later stage picks it up
         // if it does not, then we have to remove the path and the item from filterAxisItemsByNestingStage and add them to the cte
         const memberExpressionPathString = SqlQueryGenerator.#getMemberExpressionPathStringForPathWithUnnestingOperation(filterAxisItem);
         if (memberExpressionPathString) {
-          // replace the original filter axis item with the one that substitutes the path prefix with the column name of the corresponding unnesting operation
-          filterAxisItemsByNestingStage[filterPath] = filterAxisItem;
+          // register the substituted item under the new path (its column name changed)
+          if (memberExpressionPathString === filterPath) {
+            retainedFilterAxisItems.push(filterAxisItem);
+          }
+          else {
+            let nestedStageFilterAxisItems = filterAxisItemsByNestingStage[memberExpressionPathString];
+            if (nestedStageFilterAxisItems === undefined) {
+              filterAxisItemsByNestingStage[memberExpressionPathString] = nestedStageFilterAxisItems = [];
+            }
+            nestedStageFilterAxisItems.push(filterAxisItem);
+          }
         }
         else {
           // no more unnesting operations for this filter item past this stage, so we have to apply it here.
           filters.push(filterAxisItem);
         }
       }
+      if (retainedFilterAxisItems.length) {
+        filterAxisItemsByNestingStage[filterPath] = retainedFilterAxisItems;
+      }
+      else {
+        delete filterAxisItemsByNestingStage[filterPath];
+      }
     }
     return filters.length ? filters : undefined;
+  }
+
+  // When no axis item requires unnesting but a filter does, we still need an
+  // unnesting stage: the filter targets an array element and has to be evaluated
+  // against the unnested values rather than at the outermost level.
+  static #createFilterOnlyUnnestingStage(cte, filterAxisItemsByNestingStage){
+    const unnestingFunctions = SqlQueryGenerator.#getUnnestingFunctions();
+    const filterPaths = Object.keys(filterAxisItemsByNestingStage);
+
+    let match;
+    for (let i = 0; i < filterPaths.length; i++){
+      const filterPath = filterPaths[i];
+      const stageFilterAxisItems = filterAxisItemsByNestingStage[filterPath];
+      if (!stageFilterAxisItems) {
+        continue;
+      }
+      for (let k = 0; k < stageFilterAxisItems.length; k++){
+        const filterAxisItem = stageFilterAxisItems[k];
+        const memberExpressionPath = filterAxisItem.memberExpressionPath;
+        if (!memberExpressionPath || !memberExpressionPath.length) {
+          continue;
+        }
+        const index = memberExpressionPath.findIndex(element => unnestingFunctions[element] !== undefined);
+        if (index === -1) {
+          continue;
+        }
+        // prefer the shallowest unnesting operation so outer levels are expanded first
+        if (!match || index < match.index) {
+          match = { filterAxisItem, index, filterPath };
+        }
+      }
+    }
+    if (!match) {
+      return undefined;
+    }
+
+    const filterAxisItem = match.filterAxisItem;
+    const unnestingFunctionName = filterAxisItem.memberExpressionPath[match.index];
+    const unnestingFunction = unnestingFunctions[unnestingFunctionName];
+    const memberExpressionPathPrefix = filterAxisItem.memberExpressionPath.slice(0, match.index);
+
+    let elementType;
+    if (unnestingFunction.columnType) {
+      elementType = unnestingFunction.columnType;
+    }
+    else {
+      elementType = getArrayElementType(
+        getMemberExpressionType(filterAxisItem.columnType, memberExpressionPathPrefix)
+      );
+    }
+
+    const unnestingOperationItem = {
+      isUnnestingExpression: true,
+      columnName: filterAxisItem.columnName,
+      columnType: filterAxisItem.columnType,
+      elementType: elementType,
+      memberExpressionPath: memberExpressionPathPrefix,
+      unnestingFunctions: {}
+    };
+
+    const filters = SqlQueryGenerator.#transformFilterItems(
+      filterAxisItemsByNestingStage,
+      unnestingOperationItem
+    );
+
+    cte.items.push(unnestingOperationItem);
+
+    return {
+      unnestingOperationItem: unnestingOperationItem,
+      filters: filters
+    };
   }
   
   static #getUnnestingStages(datasource, queryAxisItems, filterAxisItemsByNestingStage){
@@ -282,8 +571,10 @@ class SqlQueryGenerator {
     // add new cte for each new level of unnesting operation
     
    let unnestingItem;
+   let filterOnlyStage;
    do {
       unnestingItem = undefined;
+      filterOnlyStage = undefined;
       cte = ctes[ctes.length - 1];
       // at the start of a new stage, initialize
       let unnestingDerivation = undefined;
@@ -362,12 +653,10 @@ class SqlQueryGenerator {
             
             // check if there are any filter items at this unnesting level.
             filters = SqlQueryGenerator.#transformFilterItems(
-              filterAxisItemsByNestingStage, 
-              unnestingItemMemberExpressionPathPrefixString, 
-              unnestingOperationItem, 
-              cte
+              filterAxisItemsByNestingStage,
+              unnestingOperationItem
             );
-            
+
             cte.items.push(unnestingOperationItem);
             break;
           }
@@ -426,8 +715,77 @@ class SqlQueryGenerator {
         newItems.push(newItem);
         
       } // end items loop
-      
-      if (unnestingItem) {
+
+      // Axis aggregates (window functions) evaluate their PARTITION BY at this
+      // stage. If a partition item points at the array we just unnested, the
+      // aggregate cannot be computed here: its window function would have to
+      // contain unnest(). In that case we project the columns it is based on
+      // in this stage and defer the aggregate to the next stage, where the
+      // unnested column is available.
+      if (unnestingOperationItem) {
+        const deferredAxisAggregates = [];
+        const stageItems = [];
+        for (let i = 0; i < cte.items.length; i++) {
+          const item = cte.items[i];
+          if (
+            QueryAxisItem.isAxisAggregate(item) &&
+            SqlQueryGenerator.#axisAggregateRequiresUnnestingAtStage(
+              item,
+              unnestingOperationItem.columnName,
+              unnestingOperationItem.memberExpressionPath,
+              unnestingOperationItem.unnestingFunctions
+            )
+          ) {
+            deferredAxisAggregates.push(item);
+            continue;
+          }
+          stageItems.push(item);
+        }
+        cte.items = stageItems;
+        deferredAxisAggregates.forEach(item => {
+          // make sure the columns feeding the aggregate survive this stage
+          SqlQueryGenerator.#projectAxisAggregateBaseColumns(cte, item).forEach(baseColumn => {
+            cte.items.push(baseColumn);
+          });
+          if (newItems.indexOf(item) === -1) {
+            newItems.push(item);
+          }
+        });
+      }
+
+      // Once the aggregate is deferred, rewrite its partition items so they
+      // reference the column produced by this stage rather than the array
+      // expression that was just expanded.
+      if (unnestingOperationItem) {
+        newItems = newItems.map(item => {
+          if (!QueryAxisItem.isAxisAggregate(item)) {
+            return item;
+          }
+          const newItem = Object.assign({}, item);
+          const rewritten = SqlQueryGenerator.#rewriteAxisAggregateForUnnestingStage(
+            newItem,
+            unnestingOperationItem.columnName,
+            unnestingOperationItem.memberExpressionPath,
+            unnestingOperationItem.unnestingFunctions
+          );
+          return rewritten ? newItem : item;
+        });
+      }
+
+      // If no axis item required unnesting at this stage, filters may still
+      // target an array element path. In that case we introduce a stage anyway
+      // so the filter can be pushed down to the level it belongs to.
+      if (!unnestingItem) {
+        filterOnlyStage = SqlQueryGenerator.#createFilterOnlyUnnestingStage(
+          cte,
+          filterAxisItemsByNestingStage
+        );
+        if (filterOnlyStage) {
+          filters = filterOnlyStage.filters;
+        }
+      }
+
+      if (unnestingItem || filterOnlyStage) {
         alias = 'cte' + (ctes.length + 1);
         ctes.push({
           items: newItems,
@@ -437,7 +795,7 @@ class SqlQueryGenerator {
         });
       }
       // if we didn't find a new unnesting stage, we are done.
-    } while(unnestingItem);
+    } while(unnestingItem || filterOnlyStage);
     return ctes;
   }
 
