@@ -9,7 +9,7 @@ const HUD = (() => {
   let crossKey = '', radarT = 0, game = null;
   const cache = {};
   const feed = [];
-  let buyOpen = false, buyCat = -1;
+  let buyOpen = false, buyCat = -1, buyStatus = '';
   let centerT = 0, hitT = 0;
 
   function setText(id, v) { if (cache[id] !== v) { cache[id] = v; E[id].textContent = v; } }
@@ -262,28 +262,46 @@ const HUD = (() => {
 
     // ---------------- 购买菜单 ----------------
     openBuy(g) {
-      buyOpen = true; buyCat = -1;
+      buyOpen = true; buyCat = -1; buyStatus = '';
       show('buymenu', true); show('vcursor', true);
       Input.cursorX = innerWidth / 2; Input.cursorY = innerHeight / 2;
       api.renderBuy(g);
     },
-    closeBuy() { buyOpen = false; show('buymenu', false); show('vcursor', false); },
+    closeBuy() { buyOpen = false; buyStatus = ''; show('buymenu', false); show('vcursor', false); },
+    // 购买被拒：在菜单顶部常驻显示原因（余额未变）；传空串则清除提示
+    buyBlocked(msg) { buyStatus = msg || ''; if (buyOpen && game) api.renderBuy(game); },
+    // 当前是否可购买 + 不可购买的原因（菜单状态行用）
+    buyAvailability(g) {
+      const md = g.mode, P = g.player;
+      const reason = md.buyBlockReason ? md.buyBlockReason(P) : ((md.canBuy && md.canBuy(P)) ? null : 'window');
+      return { can: reason == null, reason, text: reason ? (BUY_BLOCK_REASONS[reason] || '当前无法购买') : '' };
+    },
     renderBuy(g) {
       const P = g.player, md = g.mode;
+      const avail = api.buyAvailability(g);
+      const secs = md.buyTimeLeft ? md.buyTimeLeft() : null;
+      const secText = secs == null ? '' : Math.ceil(secs) + ' 秒';
+      const statusLine = avail.can
+        ? `<span class="ok">● 可以购买</span>${secText ? '　剩余可购买时间 <b>' + secText + '</b>（冻结期与开局购买窗口合并计算）' : ''}`
+        : `<span class="block">● 无法购买：${avail.text}</span>${secText ? '　剩余 <b>' + secText + '</b>' : ''}`;
       const cols = BUY_MENU.map((cat, ci) => {
         const items = cat.items.map((id, ii) => {
           const it = WEAPONS[id] || EQUIP[id];
           const st = g.buyState(P, id);
-          return `<div class="it ${st.ok ? '' : 'no'} ${st.own ? 'own' : ''} ${buyCat === ci ? 'hot' : ''}" data-buy="${id}"><div class="nm">${it.name}</div><div class="pr">${md.infiniteMoney ? '免费' : '$' + it.price}</div><div class="k">${ci + 1}-${ii + 1}</div></div>`;
+          const unavailable = st.own ? '已拥有' : !st.ok ? (P.money < st.price ? '余额不足' : '不可购买') : '';
+          return `<div class="it ${st.ok ? '' : 'no'} ${st.own ? 'own' : ''} ${buyCat === ci ? 'hot' : ''}" data-buy="${id}"><div class="nm">${it.name}</div><div class="pr">${md.infiniteMoney ? '免费' : '$' + it.price}${unavailable ? '<span class="flag">' + unavailable + '</span>' : ''}</div><div class="k">${ci + 1}-${ii + 1}</div></div>`;
         }).join('');
         return `<div class="col"><h4>${ci + 1}. ${cat.title}</h4>${items}</div>`;
       }).join('');
-      setHTML('buymenu', `<div class="bm"><div class="bmh"><div class="t">购买菜单</div><div class="m">${md.infiniteMoney ? '$ ∞' : '$' + P.money}</div></div><div class="cols">${cols}</div><div class="foot">鼠标点击购买，或按 数字键 选择分类+物品 · B / Esc 关闭 · ${md.buyTimeLeft ? '剩余购买时间 ' + Math.ceil(md.buyTimeLeft()) + ' 秒' : ''}</div></div>`);
+      setHTML('buymenu', `<div class="bm"><div class="bmh"><div class="t">购买菜单</div><div class="m">${md.infiniteMoney ? '$ ∞' : '$' + P.money}</div></div>` +
+        `<div class="bmstatus ${avail.can ? 'ok' : 'block'}">${statusLine}</div>` +
+        (buyStatus ? `<div class="bmblock">${buyStatus}</div>` : '') +
+        `<div class="cols">${cols}</div><div class="foot">鼠标点击购买，或按 数字键 选择分类+物品 · B / Esc 关闭 · 购买成功后余额与剩余秒数立即刷新</div></div>`);
     },
     updateBuy(g) {
       if (!buyOpen) return;
       E.vcursor.style.transform = `translate(${Input.cursorX}px, ${Input.cursorY}px)`;
-      if (!(g.mode.canBuy && g.mode.canBuy(g.player)) || !g.player.alive) { api.closeBuy(); return; }
+      // 菜单不再自动关闭：死亡 / 离开购买区 / 窗口过期都保留菜单并在状态行说明原因，由玩家按 B/Esc 关闭
       api.renderBuy(g);
     },
     buyClick(g) {

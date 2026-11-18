@@ -84,7 +84,10 @@ class NetHost {
         nx.e |= old.e; if (!nx.sr && old.sr) nx.sr = old.sr;
       }
       if (m.rtt != null) a.ping = m.rtt;
-    } else if (m.t === 'buy') g.buy(a, String(m.id), false);
+    } else if (m.t === 'buy') {
+      const res = g.buy(a, String(m.id), false);
+      if (res && res.ok === false && res.reason) this.conn.sendTo(pid, { t: 'bd', r: res.reason });
+    }
     else if (m.t === 'fall') g.applyDamage(a, null, clamp(Number(m.d) || 0, 0, 200), 'fall', null, null);
     else if (m.t === 'pi') this.conn.sendTo(pid, { t: 'po', c: m.c });
   }
@@ -219,6 +222,7 @@ class NetClient {
     else if (m.t === 'ctr') HUD.center(...m.a);
     else if (m.t === 's2') Sound.play(m.n, { vol: m.v });
     else if (m.t === 'ob') { if (this.g.player.alive) HUD.openBuy(this.g); }
+    else if (m.t === 'bd') HUD.buyBlocked(BUY_BLOCK_REASONS[m.r] || '当前无法购买（余额未变）');
     else if (m.t === 'po') this.rtt = Math.round(performance.now() - m.c);
   }
 
@@ -457,7 +461,15 @@ class ModeMirror {
   setup() {}
   tick() {}
   onKill() {}
-  canBuy(a) { return a === this.g.player && a.alive && this.cb; }
+  canBuy(a) { return this.buyBlockReason(a) == null; }
+  // 加入端只对“自己”做本地预判（死亡/窗口/购买区），最终以房主权威判定为准
+  buyBlockReason(a) {
+    if (a !== this.g.player) return null;
+    if (!a.alive) return 'death';
+    if (!this.cb) return 'window';
+    if (this.id === 'comp' && !this.g.map.inBuyZone(a.team, a.pos)) return 'zone';
+    return null;
+  }
   buyTimeLeft() { return this.bt; }
   timeLeft() { return this.tl; }
   syncBomb(b) {

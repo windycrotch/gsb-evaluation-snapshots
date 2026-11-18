@@ -115,6 +115,13 @@ button { font-family: var(--font); }
 #buymenu .bmh { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 12px; }
 #buymenu .bmh .t { font-size: 22px; font-weight: 700; letter-spacing: 3px; }
 #buymenu .bmh .m { font-size: 22px; color: #a5ff9a; font-weight: 700; }
+#buymenu .bmstatus { font-size: 14px; padding: 8px 12px; margin-bottom: 10px; border-radius: 4px; background: rgba(255,255,255,.05); border: 1px solid var(--line); letter-spacing: .5px; }
+#buymenu .bmstatus.ok { color: #9fffb0; border-color: rgba(111,217,111,.5); }
+#buymenu .bmstatus.block { color: #ffb0a6; border-color: rgba(211,47,47,.55); }
+#buymenu .bmstatus b { color: #fff; font-variant-numeric: tabular-nums; }
+#buymenu .bmblock { font-size: 14px; padding: 8px 12px; margin-bottom: 10px; border-radius: 4px; background: rgba(211,47,47,.16); border: 1px solid rgba(211,47,47,.6); color: #ffc9c2; }
+#buymenu .it .pr .flag { margin-left: 8px; font-size: 11px; color: var(--dim); border: 1px solid var(--line); border-radius: 3px; padding: 0 5px; }
+#buymenu .it.no .pr .flag { color: #ff8d80; border-color: rgba(211,47,47,.5); }
 #buymenu .cols { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }
 #buymenu .col h4 { margin: 0 0 8px; font-size: 13px; letter-spacing: 2px; color: var(--dim); font-weight: 400; }
 #buymenu .it { position: relative; padding: 9px 10px; margin-bottom: 6px; background: rgba(255,255,255,.05); border: 1px solid transparent; border-radius: 4px; }

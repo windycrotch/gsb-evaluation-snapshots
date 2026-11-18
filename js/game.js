@@ -421,7 +421,8 @@ class Game {
     this.scene.add(mdl.group);
     const eye = a.eyePos(new THREE.Vector3()), f = a.forward(new THREE.Vector3());
     const d = { inst, c4: !!isC4, mesh: mdl.group, pos: eye.clone().addScaledVector(f, 0.35).add(_g1.set(0, -0.35, 0)),
-      vel: f.multiplyScalar(a.alive ? 4.2 : 0.8).add(a.vel), ry: Math.random() * 6.28, spin: rand(4, 9), rest: false, t: 0, owner: a };
+      vel: f.multiplyScalar(a.alive ? 4.2 : 0.8).add(a.vel), ry: Math.random() * 6.28, spin: rand(4, 9), rest: false, t: 0, owner: a,
+      round: this.mode.round || 0 };
     if (this.world.pointSolid(d.pos.x, d.pos.y, d.pos.z)) d.pos.copy(a.pos).add(_g1.set(0, 0.5, 0));
     d.nid = this._dropSeq = (this._dropSeq || 0) + 1;
     this.drops.push(d);
@@ -459,6 +460,8 @@ class Game {
       if (!a.alive || a.mirror) continue;
       for (let i = this.drops.length - 1; i >= 0; i--) {
         const d = this.drops[i];
+        // 双保险：不属于当前回合的掉落（理论上已在回合切换时清空）一律不可拾取
+        if (d.round != null && d.round !== (this.mode.round || 0)) continue;
         if (d.owner === a && d.t < 2.5) continue;
         const dx = d.pos.x - a.pos.x, dz = d.pos.z - a.pos.z;
         if (dx * dx + dz * dz > 1.1 || Math.abs(d.pos.y - a.pos.y - 0.3) > 1.2) continue;
@@ -588,12 +591,28 @@ class Game {
     else if (id === 'defuser') { own = a.inv.defuser; if (own) ok = false; }
     return { ok, own, price };
   }
+  // 菜单/调用方共用的拒绝原因文案（core.js 里的 BUY_BLOCK_REASONS 是唯一文案源）
   buy(a, id, ui) {
     const md = this.mode;
-    if (!(md.canBuy && md.canBuy(a))) return false;
+    // 模式级拦截：死亡 / 不在购买区 / 购买窗口已过
+    const block = md.buyBlockReason ? md.buyBlockReason(a) : (md.canBuy && md.canBuy(a) ? null : 'window');
+    if (block) {
+      if (ui) { Sound.play('ui_deny'); HUD.buyBlocked(BUY_BLOCK_REASONS[block] || '当前无法购买'); }
+      return { ok: false, reason: block };
+    }
     const st = this.buyState(a, id);
-    if (!st.ok) { if (ui) Sound.play('ui_deny'); return false; }
-    if (this.client) { this.net.send({ t: 'buy', id }); if (ui) Sound.play('ui_buy', { vol: 0.6 }); return true; }
+    if (!st.ok) {
+      // 余额不变：这里直接返回，扣款逻辑在后面
+      if (ui) Sound.play('ui_deny');
+      if (ui) HUD.buyBlocked(st.own ? '已经拥有该装备，无需重复购买（余额未变）' : a.money < st.price ? '余额不足，购买被拒绝（余额未变）' : '当前状态无法购买该物品（余额未变）');
+      return { ok: false, reason: st.own ? 'own' : 'item' };
+    }
+    if (this.client) {
+      // 加入端本地预判，拦截明确不合法的请求（死亡/离区/窗口/已拥有/余额不足）；房主仍会再做权威判定
+      if (st.own) { if (ui) { Sound.play('ui_deny'); HUD.buyBlocked('已经拥有该装备，无需重复购买（余额未变）'); } return { ok: false, reason: 'own' }; }
+      if (!md.infiniteMoney && a.money < st.price) { if (ui) { Sound.play('ui_deny'); HUD.buyBlocked('余额不足，购买被拒绝（余额未变）'); } return { ok: false, reason: 'item' }; }
+      this.net.send({ t: 'buy', id }); if (ui) Sound.play('ui_buy', { vol: 0.6 }); return { ok: true };
+    }
     let price = st.price;
     if (id === 'helmet' && a.armor >= 100 && !a.helmet && !md.infiniteMoney) price = 350;
     if (!md.infiniteMoney) a.money -= price;
@@ -608,8 +627,9 @@ class Game {
     } else if (id === 'kevlar') a.armor = 100;
     else if (id === 'helmet') { a.armor = 100; a.helmet = true; }
     else if (id === 'defuser') a.inv.defuser = true;
-    if (ui) { Sound.play('ui_buy', { vol: 0.6 }); HUD.moneyFlash(); }
-    return true;
+    if (ui) { Sound.play('ui_buy', { vol: 0.6 }); HUD.moneyFlash(); HUD.buyBlocked(''); }
+    // 购买成功：余额已刷新，购买菜单下一帧 renderBuy 即读到新的 money 与剩余秒数
+    return { ok: true, price };
   }
   botBuy(a) {
     const m = () => a.money;
@@ -631,7 +651,7 @@ class Game {
     const P = this.player, c = P.cmd, I = Input, S = Settings.data;
     const ui = HUD.buyOpen;
     c.jumpPressed = false; c.duckPressed = false; c.attackPressed = false; c.attack2Pressed = false; c.usePressed = false; c.reload = false;
-    if (I.wasPressed('KeyB') && !this.over) { if (ui) HUD.closeBuy(); else if (this.mode.canBuy && this.mode.canBuy(P)) HUD.openBuy(this); }
+    if (I.wasPressed('KeyB') && !this.over) { if (ui) HUD.closeBuy(); else if (this.mode.canBuy) HUD.openBuy(this); }
     if (!P.alive) {
       if (I.mPressed[0] || I.wasPressed('Space')) this.nextSpectate(1);
       if (I.mPressed[2]) this.nextSpectate(-1);
@@ -744,9 +764,14 @@ class Game {
   idleCmd() { const c = this.player.cmd; Object.assign(c, newCmd(), { duck: this.crouchToggle && c.duck }); }
 
   // ---------------- 回合清场 / C4（房主与加入者共用） ----------------
+  // 清除所有遗留掉落（含 C4）：每个爆破回合开始时必须调用，保证掉落武器不跨回合被捡起
+  clearDrops() {
+    for (const d of this.drops) { this.scene.remove(d.mesh); this.emit({ t: 'undrop', n: d.nid }); }
+    this.drops.length = 0;
+  }
   clearRoundFx() {
     Effects.clearRound();
-    for (const d of this.drops) this.scene.remove(d.mesh); this.drops.length = 0;
+    this.clearDrops();
     for (const gr of this.grenades) this.scene.remove(gr.mesh); this.grenades.length = 0;
     for (const r of this.ragdolls) r.dispose(); this.ragdolls.length = 0;
     if (this.mode.clearBomb) this.mode.clearBomb(); else if (this.mode.clearMesh) this.mode.clearMesh();
@@ -956,6 +981,12 @@ class ModeTDM {
     if (a.isPlayer) { HUD.hideDeath(); g.flashAmt = 0; }
   }
   canBuy(a) { return a.alive && this.g.time - (a.spawnTime || 0) < 20; }
+  // 团队死斗规则保持原样：仅出生后 20 秒内、且活着时可免费换枪（无购买区限制）
+  buyBlockReason(a) {
+    if (!a.alive) return 'death';
+    if (this.g.time - (a.spawnTime || 0) >= 20) return 'tdm_window';
+    return null;
+  }
   buyTimeLeft() { return Math.max(0, 20 - (this.g.time - (this.g.player.spawnTime || 0))); }
   timeLeft() { return this.total - this.t; }
   tick(dt) {
@@ -1008,6 +1039,8 @@ class ModeRange {
     a.spawnAt(a.home, Math.PI); a.brain.task = { type: 'dummy', pos: a.home };
   }
   canBuy(a) { return a.alive; }
+  buyBlockReason(a) { return a.alive ? null : 'death'; }
+  buyTimeLeft() { return null; }
   timeLeft() { return null; }
   tick(dt) {
     const g = this.g;
@@ -1043,6 +1076,7 @@ class ModeComp {
     const g = this.g;
     this.round++;
     if (this.round === this.half + 1) this.halftime();
+    // 回合边界：先清掉上一回合遗留的全部掉落武器 / C4 / 手雷 / 尸体，掉落物绝不跨回合保留
     g.clearRoundFx();
     const pts = { CT: shuffle(g.map.spawns.CT.slice()), T: shuffle(g.map.spawns.T.slice()) };
     for (const a of g.actors) {
@@ -1103,7 +1137,19 @@ class ModeComp {
     });
   }
   snap(p, fallback) { const h = this.g.nav.heightAt(p.x, p.z); if (isNaN(h)) return fallback.clone(); return new THREE.Vector3(p.x, h, p.z); }
-  canBuy(a) { return a.alive && (this.phase === 'freeze' || (this.phase === 'live' && this.roundTime - this.t < this.buyWindow - this.freezeTime)) && this.g.map.inBuyZone(a.team, a.pos); }
+  // 冻结期与开局购买窗口合并计算：freezeTime(8s) 全程 + 开局后 (buyWindow-freezeTime)(10s)，共 buyWindow(18s)
+  buyWindowOpen() {
+    if (this.phase === 'freeze') return true;
+    if (this.phase !== 'live') return false;
+    return this.roundTime - this.t < this.buyWindow - this.freezeTime;
+  }
+  buyBlockReason(a) {
+    if (!a.alive) return 'death';
+    if (!this.buyWindowOpen()) return 'window';
+    if (!this.g.map.inBuyZone(a.team, a.pos)) return 'zone';
+    return null;
+  }
+  canBuy(a) { return this.buyBlockReason(a) == null; }
   buyTimeLeft() { return this.phase === 'freeze' ? this.t + (this.buyWindow - this.freezeTime) : Math.max(0, (this.buyWindow - this.freezeTime) - (this.roundTime - this.t)); }
   timeLeft() { if (this.phase === 'freeze') return this.t; if (this.bomb && this.bomb.planted && !this.bomb.defused && !this.bomb.exploded) return null; return this.phase === 'live' ? this.t : 0; }
   canPlant(a) { return this.phase === 'live' && this.bomb && !this.bomb.planted && a.team === 'T'; }
@@ -1249,20 +1295,44 @@ class ModeComp {
     this.phase = 'post'; this.t = 5.5;
     this.score[winner]++;
     const loser = winner === 'CT' ? 'T' : 'CT';
-    const bonus = reason === 'bomb' || reason === 'defuse' ? 3500 : 3250;
-    const lossPay = Math.min(3400, 1400 + 500 * this.lossStreak[loser]);
+    const winBonus = reason === 'bomb' || reason === 'defuse' ? 3500 : 3250;
+    const baseLossPay = Math.min(3400, 1400 + 500 * this.lossStreak[loser]);
+    const planted = !!(this.bomb && this.bomb.planted);
     this.lossStreak[winner] = Math.max(0, this.lossStreak[winner] - 1); this.lossStreak[loser] = Math.min(4, this.lossStreak[loser] + 1);
+    // 逐个结算：记录每个角色本回合实际拿到的经济补偿，供提示与计分板核对
+    this.lastResult = {
+      round: this.round, winner, loser, reason,
+      winBonus, baseLossPay, planted,
+      comps: [],            // { actor, team, gain, alive }
+      mvp: null, why: '',
+    };
     for (const a of g.actors) {
-      if (a.team === winner) a.money += bonus;
-      else a.money += (reason === 'time' && a.alive) ? 0 : lossPay + (a.team === 'T' && this.bomb && this.bomb.planted ? 800 : 0);
-      a.money = Math.min(16000, a.money);
+      let gain = 0;
+      if (a.team === winner) gain = winBonus;
+      else {
+        // 败方补偿：时间耗尽且存活 = 0；T 在安放炸弹后输掉可额外 +800
+        if (!(reason === 'time' && a.alive)) gain = baseLossPay + (a.team === 'T' && planted ? 800 : 0);
+      }
+      a.money = Math.min(16000, a.money + gain);
+      this.lastResult.comps.push({ actor: a, team: a.team, gain, alive: a.alive });
     }
+    // MVP：优先安放/拆弹等关键贡献者(mvpFlag)，否则取胜方本回合击杀最多者
     let mvp = null;
     for (const a of g.actors) if (a.team === winner && (a.mvpFlag || !mvp || a.roundKills > mvp.roundKills)) { if (!mvp || a.mvpFlag || a.roundKills > mvp.roundKills) mvp = a; }
-    if (mvp) mvp.mvp++;
+    if (mvp) { mvp.mvp++; this.lastResult.mvp = mvp; }
     for (const a of g.actors) a.mvpFlag = false;
-    const why = { elim: '全歼敌方', time: '时间耗尽', bomb: '目标已摧毁', defuse: '炸弹已拆除' }[reason];
-    g.center([winner === 'CT' ? '反恐精英获胜' : '恐怖分子获胜', winner === 'CT' ? 'win-ct' : 'win-t', 5, `${why}${mvp ? ' · 本局 MVP：' + mvp.name : ''}`]);
+    const why = ROUND_END_REASONS[reason] || reason;
+    this.lastResult.why = why;
+    // 每个玩家按自己阵营看到：胜方 + 获胜原因 + MVP；副行显示本方本回合实际到账
+    g.center((P) => {
+      const win = P.team === winner;
+      const mine = this.lastResult.comps.find((c) => c.actor === P);
+      const title = winner === 'CT' ? '反恐精英获胜' : '恐怖分子获胜';
+      const sub = win
+        ? `获胜原因：${why}　·　本回合 MVP：${mvp ? mvp.name : '—'}　·　本回合到账 +$${mine ? mine.gain : winBonus}`
+        : `获胜原因：${why}　·　本回合 MVP：${mvp ? mvp.name : '—'}　·　败方补偿 ${mine ? (mine.gain > 0 ? '+$' + mine.gain : '$0（时间耗尽且存活，无补偿）') : ''}`;
+      return [title, winner === 'CT' ? 'win-ct' : 'win-t', 5, sub];
+    });
     g.sound2d((a) => [winner === a.team ? 'round_win' : 'round_lose', 0.55]);
     g.noFire = false;
   }

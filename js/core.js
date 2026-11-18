@@ -59,6 +59,23 @@ const UP = new THREE.Vector3(0, 1, 0);
 function fmtTime(s) { s = Math.max(0, Math.ceil(s)); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); }
 function $(id) { return document.getElementById(id); }
 
+// 购买被模式规则拒绝时的统一原因（key → 给玩家看的中文说明）
+// death=已死亡 zone=不在购买区 window=购买窗口已过 tdm_window=死斗免费换枪时限已过
+const BUY_BLOCK_REASONS = {
+  death: '你已阵亡，本回合无法购买（余额未变）',
+  zone: '不在购买区内，无法购买（余额未变）',
+  window: '购买窗口已关闭（余额未变）',
+  tdm_window: '出生后的 20 秒免费换枪时间已过（余额未变）',
+};
+
+// 爆破回合获胜原因（key 与 ModeComp.endRound 入参一致）
+const ROUND_END_REASONS = {
+  elim: '全歼敌方',
+  time: '时间耗尽',
+  bomb: '炸弹爆炸',
+  defuse: '拆弹成功',
+};
+
 // ======================================================================
 //  设置（localStorage 仅作便利，失败不影响运行）
 // ======================================================================
