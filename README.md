@@ -1,0 +1,553 @@
+# @flyfish-dev/cad-viewer
+
+A professional, lightweight, extensible **frontend CAD viewer** for modern browsers.
+
+[![License: AGPL-3.0-only](https://img.shields.io/badge/license-AGPL--3.0--only-b31b1b.svg)](LICENSE)
+[![npm](https://img.shields.io/npm/v/@flyfish-dev/cad-viewer.svg)](https://www.npmjs.com/package/@flyfish-dev/cad-viewer)
+
+**Live demo:** [cad-viewer-iys.pages.dev](https://cad-viewer-iys.pages.dev)  
+**Source:** [github.com/flyfish-dev/cad-viewer](https://github.com/flyfish-dev/cad-viewer)
+
+The project provides a clean loader architecture for **DWG**, **DXF**, **DWF**, **DWFx** and **XPS**. DWG/DXF are normalized into a common `CadDocument` and rendered through retained WebGL with a lightweight Canvas overlay; DWF/DWFx/XPS are delegated to the native `dwf-viewer` renderer for WebGL-accelerated W2D and XPS/DWFx vectors, W3D/HSF eModel geometry, embedded XPS fonts and optional WASM fallback. Files are read locally in the browser; the viewer does not upload drawings to a backend.
+
+> DWG support uses `@mlightcad/libredwg-web` / LibreDWG WebAssembly in a worker. DXF support uses JavaScript parsing plus a built-in fallback parser. DWF, DWFx and XPS support is powered by `dwf-viewer` 0.6.x, including DWF 6+ ZIP containers, WHIP/W2D 2D sheets, W3D/HSF 3D eModel geometry, DWFx/OPC/XPS pages, adaptive CAD line weights and an optional raster WASM fallback.
+
+## What changed in 0.8.0
+
+- Added typed BOM extraction for block attributes, `MINSERT` quantities, native tables, DataTable, XDATA, XRECORD and high-confidence text grids.
+- Added `CadViewer.getBom()`, `extractCadBom()`, plus spreadsheet-safe CSV and JSON export helpers.
+- Added a compact BOM inspector to the demo while keeping extraction independent of the renderer and browser UI.
+- Hardened DWG/DXF metadata normalization, bounded hostile or malformed table data, and kept linked external DataLink files offline and untouched.
+- Updated LibreDWG WebAssembly to 0.7.9 and guarded a null complex-linetype STYLE reference that otherwise prevented valid drawings from loading.
+
+## What changed in 0.7.0
+
+- Corrected block-contained DWG geometry after PLAN/UCS transforms, including canonical insert/text rotations, closed-polyline fallback detection and authored constant/vertex widths.
+- Preserved TEXT width factors, alignment points, vertical/horizontal alignment and generation flags through worker normalization and INSERT expansion.
+- Added world-space wide-polyline rendering to Canvas2D and retained WebGL, while keeping dash phase and entity/INSERT linetype scales stable.
+- Added complete external SHX reference handling for complex DWG linetypes: referenced files are exposed through metadata, missing files use a safe marker fallback, and uploaded `File`/`ArrayBuffer` content is parsed, validated, cached and redrawn as real shape/text outlines without resetting the current view.
+- Added `onReferenceStateChange`, `addReferenceFile()`, `addReferenceBuffer()`, `getMissingReferences()` and related lifecycle APIs, plus a contextual SHX upload control in the demo.
+
+## What changed in 0.6.6
+
+- Added automatic initial fitting based on meaningful geometry inside a valid active DWG viewport, preventing remote coordinate clusters from shrinking the main drawing into a dot.
+- Added `fitMode: 'auto' | 'saved-view' | 'extents'` and `viewer.fit(mode)` for automatic content fitting, exact saved-view restoration or complete drawing extents.
+- Unified bounds and fitting behavior across the retained WebGL renderer and Canvas2D fallback.
+
+## What changed in 0.6.5
+
+- Preserved active DWG VPORT/header UCS saved views and applied safe planar scene transforms exactly once across geometry, text, inserts, bounds and interaction coordinates.
+- Added DWG LTYPE normalization and Canvas2D/WebGL rendering for dashed, dotted, BYLAYER and BYBLOCK linetypes, including continuous polyline phase and entity/global scale handling.
+- Preserved LibreDWG closed-polyline flags and added guarded fallbacks for tilted views, complex SHX linetype glyphs and pathological microscopic patterns.
+- Added public line-pattern helpers, `getSourceDocument()` and an eight-case DWG normalization regression suite.
+
+## What changed in 0.6.4
+
+- Added a stable package export for `@flyfish-dev/cad-viewer/wasm/dwg-worker.js`.
+- DWG worker loading now defaults to the page-relative runtime asset `wasm/dwg-worker.js`, making npm package assets and static demo deployments use the same worker file.
+- Dev, demo, Cloudflare Pages and npm library builds now build and copy the DWG worker asset explicitly before serving or packaging runtime files.
+
+## What changed in 0.6.3
+
+- Added `dxfEncoding` for overriding DXF text decoding when legacy files omit or misdeclare `$DWGCODEPAGE`.
+- DXF decoding now honors BOMs and `$DWGCODEPAGE` values such as `ANSI_936`, `CP936`, `GBK`, `BIG5`, `SHIFT_JIS` and Windows code pages before falling back.
+- DXF text entities now normalize common CAD escapes such as `\U+XXXX`, `%%c`, `%%d`, `%%p` and `\P`.
+
+## What changed in 0.6.2
+
+- Updated the native DWF path to `dwf-viewer` 0.6.4 for upstream DWF/DWFx bug fixes while keeping this package on its own SemVer line.
+- Verified the exposed `CadViewer` DWF/XPS options still match the current `dwf-viewer` API.
+
+## What changed in 0.6.1
+
+- Updated the native DWF path to `dwf-viewer` 0.6.1.
+- Adopted the current renderer behavior for WebGL-accelerated XPS/DWFx and W2D 2D vector rendering, W3D/HSF 3D rendering, embedded XPS font loading and optional WASM raster fallback.
+- Exposed DWF/XPS overview tuning through `dwfLineWeightMode`, `dwfMinStrokeCssPx`, `dwfMaxOverviewStrokeCssPx`, `dwfMinTextCssPx` and `dwfMinFilledAreaCssPx`.
+- Refreshed README, format notes, architecture notes and package metadata for the latest DWF support.
+
+## What changed in 0.6.0
+
+- Replaced the previous DWFx/XPS subset parser with the published `dwf-viewer` native renderer.
+- DWF/DWFx/XPS files now mount a dedicated native viewer path instead of being forced into the DWG/DXF `CadDocument` renderer.
+- Added support for DWF 6+ ZIP packages, WHIP/W2D 2D sheets, W3D/HSF 3D eModel pages, DWFx/OPC/XPS pages and dwf-viewer's WebGL/WASM render backends.
+- Added `CadNativeRenderableLoader`, allowing loaders to mount an optimized DOM/WebGL viewer when a format needs more than the normalized 2D scene model.
+- Added `dwfWasmUrl`, `dwfPreferWebgl`, `dwfPreferWasm`, `dwfMaxCanvasPixels`, `dwfMaxGpuCacheBytes` and related production options.
+- Runtime asset scripts now copy and validate both `libredwg-web.wasm` and `dwfv-render.wasm`.
+- Removed the old classic-DWF warning path and the `fflate` dependency from this package.
+- Updated package licensing to AGPL-3.0-only to match the integrated DWF renderer.
+
+## What changed in 0.5.3
+
+- Fixed DWG color fidelity for layer-indexed drawings. Indexed LibreDWG layers now resolve from ACI instead of the converter placeholder `0xffffff`, preventing monochrome-white output.
+- Preserved DWG true-color values even when the RGB integer is in the ACI range, such as `0x0000ff`.
+- Added BYBLOCK color inheritance for expanded INSERT/block entities.
+
+## What changed in 0.5.2
+
+- Fixed the noisy Vite build output where `@mlightcad/libredwg-web` printed a multi-megabyte `data:application/wasm;base64,...` warning.
+- DWG worker builds now use the lean LibreDWG ESM wrapper and load `/wasm/libredwg-web.js` + `/wasm/libredwg-web.wasm` at runtime, avoiding duplicated inline wasm assets.
+- `build:lib` now creates `dist/index.js` as a compatibility re-export for integrations that still request `/dist/index.js`.
+- Vite dev mode now serves a small `/dist/index.js` compatibility shim that forwards stale demo pages to `/demo/main.ts`.
+- `npm run preview` now builds the demo first, so clean checkouts do not fail because `dist-demo` is missing.
+
+## What changed in 0.5
+
+- The default rendering backend is now a **retained WebGL renderer**. CAD primitives are flattened once and uploaded to GPU buffers; pan/zoom updates only view uniforms.
+- Added spatial indexing and viewport culling. Line, triangle and point batches are bucketed across the drawing bounds, so zoomed-in views submit only visible batches.
+- Added large-drawing memory controls: coordinates are stored relative to the drawing center in `Float32Array`, colors are stored in `Uint8Array`, and temporary CPU arrays are released after upload.
+- Text and images render in a separate overlay with minimum screen-height and maximum visible-label limits.
+- `CadViewer` now supports `renderer: 'auto' | 'webgl' | 'canvas2d'`; `auto` prefers WebGL and falls back to Canvas2D.
+- Demo now reports renderer backend, visible primitives and estimated GPU memory.
+
+## What changed in 0.4
+
+- DWG parsing now runs in a **dedicated Web Worker by default**, so LibreDWG WASM initialization and binary decoding no longer block pan/zoom/UI interactions.
+- The worker keeps the LibreDWG WASM instance warm and reuses it across DWG loads.
+- Added cancellable loading through `AbortSignal`, worker timeout support, progress events, and explicit worker asset configuration.
+- Reduced DWG memory pressure by stripping raw parser objects from worker payloads unless `keepRaw: true` is explicitly enabled.
+- Demo now includes a loading overlay, progress bar, cancel action and loader mode indicator.
+- `viewer.destroy()` disposes canvas listeners and terminates owned DWG workers, which is safe for SPA route changes.
+- Library exports `supportsDwgWorker` and `DwgWorkerClient` for advanced integrations.
+
+## Features
+
+- **Pure frontend viewer component**: `new CadViewer({ container })` or `new CadViewer({ canvas })`.
+- **Loader registry**: DWG, DXF and DWF loaders are independent and replaceable; native-renderable loaders can mount their own optimized viewer.
+- **DWG preview**: browser-local parsing through LibreDWG WebAssembly, executed in a Web Worker by default.
+- **DWG view and linetype fidelity**: active planar saved views, block-contained text alignment and widths, closed/wide polylines, LTYPE tables, BYLAYER/BYBLOCK inheritance, dash/dot patterns and stable pattern scaling.
+- **External SHX references**: detects missing complex-linetype shape fonts, accepts local files or API-provided bytes, validates required glyphs and renders SHX shape/text geometry in Canvas2D and WebGL.
+- **BOM extraction**: reads block attributes, cached CAD tables, DataTable, XDATA, XRECORD and high-confidence text grids into one typed API with safe CSV/JSON export.
+- **DXF preview**: JavaScript parser path with fallback support for common ASCII DXF `ENTITIES`.
+- **DWF/DWFx/XPS preview**: powered by `dwf-viewer` for DWF ZIP packages, WebGL-accelerated W2D and XPS/DWFx 2D vectors, W3D/HSF eModel geometry, embedded XPS fonts, adaptive CAD line weights and raster fallback.
+- **CAD color handling**: ACI, BYLAYER, BYBLOCK inheritance, DWG layer colors, true color, fill color, opacity and adaptive contrast.
+- **High-performance WebGL viewport controls**: retained GPU buffers, spatial culling, zoom, pan, fit-to-view, cursor world coordinates and zoom percentage.
+- **Professional demo UI**: drag-and-drop, compact toolbar, status strip, parse/render timing, entity summary and warnings.
+- **Library + demo builds**: publishable npm package and Cloudflare Pages demo.
+
+## Install
+
+```bash
+npm install @flyfish-dev/cad-viewer
+```
+
+For local development from this repository:
+
+```bash
+npm install
+npm run dev
+```
+
+The DWG and DWF render paths need runtime assets in a public directory: `libredwg-web.js`, `libredwg-web.wasm`, `dwg-worker.js` and `dwfv-render.wasm`. This repository copies, builds and validates them for the demo:
+
+```bash
+npm run copy:wasm
+npm run build:worker
+npm run copy:worker
+npm run check:wasm
+```
+
+The demo resolves `wasmPath` to an absolute URL before sending it to the DWG worker and uses the same directory for `dwfv-render.wasm`. The default DWG worker URL is `wasm/dwg-worker.js`, resolved against the page URL. In your own app, prefer absolute paths or URLs, for example `/wasm`, `/wasm/dwg-worker.js` or `new URL('wasm/', document.baseURI).href`. Avoid passing a worker-relative path such as `./wasm` unless it is resolved on the UI thread first.
+
+When publishing the npm package, `build:lib` copies these files into `dist/wasm` and exposes them as package subpaths, including `./wasm/dwg-worker.js`. Applications still need to serve the runtime files from a public URL and pass that directory as `wasmPath`, or pass `dwfWasmUrl` / `workerUrl` explicitly.
+
+
+## Demo startup notes
+
+Use Vite for the source demo:
+
+```bash
+npm install
+npm run dev
+```
+
+For a production preview, use:
+
+```bash
+npm run preview
+```
+
+Do not serve the source directory with a plain static server and expect TypeScript entries to run. If a stale page requests `/dist/index.js`, run `npm run build:lib` to create the compatibility entry, or use the Vite dev server above.
+
+## Basic usage
+
+```ts
+import { CadViewer } from '@flyfish-dev/cad-viewer';
+import '@flyfish-dev/cad-viewer/style.css';
+
+const viewer = new CadViewer({
+  container: document.querySelector('#viewer')!,
+  renderer: 'auto',       // WebGL first, Canvas2D fallback
+  wasmPath: new URL('wasm/', document.baseURI).href,
+  dwfWasmUrl: new URL('wasm/dwfv-render.wasm', document.baseURI).href,
+  canvasOptions: {
+    background: '#05070d',
+    foreground: '#f8fafc',
+    fitMode: 'auto',
+    contrastMode: 'adaptive',
+    minColorContrast: 2.45
+  }
+});
+
+const input = document.querySelector<HTMLInputElement>('input[type=file]')!;
+input.addEventListener('change', async () => {
+  const file = input.files?.[0];
+  if (!file) return;
+  await viewer.loadFile(file);
+});
+```
+
+`fitMode: 'auto'` is the default. For DWG files with a valid active VPORT, it fits meaningful geometry inside the saved viewport, so remote survey coordinates or auxiliary geometry do not collapse the main sheet into a dot. Use `viewer.fit('saved-view')` to restore the exact saved viewport, or `viewer.fit('extents')` to include every coordinate cluster.
+
+
+## WebGL rendering and performance model
+
+The default `renderer: 'auto'` path attempts to create `CadWebGLRenderer` first. Instead of traversing every entity and rebuilding Canvas2D paths on every zoom, the renderer builds a retained scene once in `setDocument()`:
+
+```text
+CadDocument
+  ↓
+flatten blocks / curves / fills
+  ↓
+Float32Array positions + Uint8Array colors
+  ↓
+spatial GPU batches
+  ↓
+WebGL drawArrays with viewport culling
+```
+
+Tunable options:
+
+```ts
+new CadViewer({
+  container,
+  renderer: 'auto', // force 'webgl' or 'canvas2d' when needed
+  canvasOptions: {
+    enableSpatialIndex: true,
+    spatialIndexCellCount: 96,
+    maxVerticesPerBatch: 32768,
+    maxCurveSegments: 72,
+    textMinPixelHeight: 4,
+    maxVisibleTextLabels: 2400,
+    powerPreference: 'high-performance',
+    preserveDrawingBuffer: false
+  },
+  onRenderStats(stats) {
+    console.log(stats.backend, stats.visiblePrimitiveCount, stats.gpuMemoryBytes);
+  }
+});
+```
+
+For very large drawings, lower `maxCurveSegments`, increase `spatialIndexCellCount`, and cap `maxVisibleTextLabels`.
+
+## Worker-backed DWG parsing
+
+`DwgLoader` uses a module Web Worker by default in browsers. The default worker URL is `wasm/dwg-worker.js`, resolved relative to the page. The worker imports `@mlightcad/libredwg-web`, initializes LibreDWG WASM inside the worker thread, caches that WASM instance, decodes DWG bytes, normalizes the result into a structured-clone-safe `CadDocument`, and sends only the normalized scene back to the UI thread. Canvas rendering remains on the main thread.
+
+```ts
+const controller = new AbortController();
+
+const viewer = new CadViewer({
+  container,
+  wasmPath: new URL('wasm/', document.baseURI).href,
+  dwfWasmUrl: new URL('wasm/dwfv-render.wasm', document.baseURI).href,
+  useWorker: true,
+  workerTimeoutMs: 120_000,
+  onLoadProgress(progress) {
+    console.log(progress.phase, progress.message, progress.percent);
+  }
+});
+
+await viewer.preloadDwg(); // optional: warm the worker before the first file
+await viewer.loadFile(file, { signal: controller.signal });
+
+// cancel a large DWG load
+controller.abort();
+```
+
+Advanced deployments can override the worker URL or constructor when the bundler or CDN has a custom asset layout:
+
+```ts
+new CadViewer({
+  container,
+  wasmPath: new URL('wasm/', document.baseURI).href,
+  dwfWasmUrl: new URL('wasm/dwfv-render.wasm', document.baseURI).href,
+  workerUrl: new URL('/assets/dwg-worker.js', window.location.origin)
+});
+```
+
+The default package is worker-first. For non-browser runtimes, register a custom DWG loader instead of disabling workers.
+
+## Component API
+
+```ts
+const viewer = new CadViewer({
+  container,             // HTMLElement; creates a canvas inside
+  canvas,                // optional existing HTMLCanvasElement
+  renderer: 'auto',      // 'auto' | 'webgl' | 'canvas2d'
+  wasmPath: '/wasm',     // directory containing libredwg-web.js, libredwg-web.wasm and dwfv-render.wasm
+  dxfEncoding: 'gb18030', // optional override when legacy DXF codepage metadata is wrong
+  dwfWasmUrl: '/wasm/dwfv-render.wasm',
+  autoFit: true,
+  canvasOptions: {
+    background: '#05070d',
+    foreground: '#ffffff',
+    fitMode: 'auto',                 // 'auto' | 'saved-view' | 'extents'
+    contrastMode: 'adaptive',       // 'adaptive' | 'preserve'
+    minColorContrast: 2.45,
+    showPageBounds: true,
+    showUnsupportedMarkers: false,
+    trueColorByteOrder: 'rgb',
+    enableSpatialIndex: true,
+    spatialIndexCellCount: 96,
+    maxVerticesPerBatch: 32768,
+    maxCurveSegments: 72,
+    textMinPixelHeight: 4,
+    maxVisibleTextLabels: 2400
+  },
+  useWorker: true,                 // default for DWG
+  workerUrl: '/wasm/dwg-worker.js', // optional override; this is the default path
+  workerTimeoutMs: 0,              // 0 = disabled
+  dwfPreferWebgl: true,
+  dwfPreferWasm: true,
+  dwfMaxCanvasPixels: 16_777_216,
+  dwfLineWeightMode: 'adaptive',  // 'adaptive' | 'physical' | 'hairline'
+  dwfMinStrokeCssPx: 0.42,
+  dwfMinTextCssPx: 1.05,
+  onLoadProgress(progress) {},
+  onLoad(result) {},
+  onError(error) {},
+  onRenderStats(stats) {},
+  onViewChange(event) {},
+  onReferenceStateChange(state) {} // missing/loaded external SHX resources
+});
+
+await viewer.loadFile(file);
+await viewer.loadBuffer(arrayBuffer, 'drawing.dxf');
+await viewer.addReferenceFile(shxFile);
+await viewer.addReferenceBuffer(shxArrayBuffer, 'LSG.SHX');
+viewer.getMissingReferences();      // CadMissingReference[]
+viewer.getLoadedReferences();       // CadLoadedReference[]
+viewer.fit();                       // automatic meaningful-content fit
+viewer.fit('saved-view');          // exact active DWG viewport
+viewer.fit('extents');             // all geometry, including remote coordinate clusters
+viewer.zoomIn();
+viewer.zoomOut();
+await viewer.preloadDwg();       // optional DWG worker/WASM warmup
+viewer.setCanvasOptions({ background: '#f7f8fb', foreground: '#111827' });
+viewer.getDocument();            // transformed render-space CadDocument
+viewer.getSourceDocument();      // parser-owned WCS CadDocument
+viewer.getBom();                 // normalized CadBom from the source document
+viewer.clear();
+viewer.destroy();
+```
+
+### Current-view snapshots
+
+The 0.8.2 candidate adds `await viewer.captureCanvas()`. It redraws the active view before copying Canvas2D or WebGL vectors and text overlays, and supports native DWF/DWFx through its loader. The returned canvas can encode PNG or JPEG with `toBlob()`; no source entities, camera state or source colors are changed. This captures the current viewport/current native page, not every sheet or vector PDF output. Unloaded viewers and unsupported native loaders reject the request instead of returning an empty image.
+
+Native background contrast requires the `dwf-viewer` 0.6.7 candidate. `canvasOptions.contrastMode: 'adaptive'` improves low-contrast vector/text colors; use `'preserve'` for exact source colors. Release the DWF dependency first and verify the resolved version before publishing this package.
+
+### BOM and drawing properties
+
+`getBom()` derives independent tables from the parser-owned document. It covers `ATTDEF` defaults with `ATTRIB` overrides, recursive `INSERT`/`MINSERT` quantities, cached native table cells, DataTable, XDATA, XRECORD, and aligned text grids when their structure is high-confidence. XDATA and XRECORD are opt-in because real drawings often contain hundreds of unrelated application caches.
+
+```ts
+import { serializeCadBomCsv, serializeCadBomJson } from '@flyfish-dev/cad-viewer';
+
+await viewer.loadFile(dwgFile);
+const bom = viewer.getBom({ aggregateBlocks: true, textTables: 'auto' });
+if (bom) {
+  const csv = serializeCadBomCsv(bom, { tableId: bom.tables[0]?.id });
+  const json = serializeCadBomJson(bom); // DataLink connection strings are redacted by default
+}
+
+const applicationRecords = viewer.getBom({ sources: ['xdata', 'xrecord'] });
+```
+
+DataLink targets are never opened or fetched. The API only returns link metadata and cell values already cached in the drawing. JSON export omits `connectionString` by default; use `{ includeSensitiveData: true }` only for a trusted destination. If a modern CAD table has no cells exposed by the parser, the result contains a structured warning instead of invented values. Native DWF/DWFx/XPS rendering does not currently expose normalized BOM metadata.
+
+### External SHX references
+
+Complex DWG linetypes reference SHX shape/font files by name; their outlines are not embedded in the drawing. `CadViewer` keeps the drawing usable with a marker fallback and reports missing resources through both `onReferenceStateChange` and `document.metadata.missingReferences`.
+
+```ts
+const viewer = new CadViewer({
+  container,
+  onReferenceStateChange({ missing }) {
+    shxUploadButton.hidden = missing.length === 0;
+    shxUploadButton.textContent = missing.map(({ fileName }) => fileName).join(', ');
+  }
+});
+
+await viewer.loadFile(dwgFile);
+
+// User-selected local file.
+await viewer.addReferenceFile(shxFile);
+
+// Or bytes supplied by an application API. Keep the referenced file name.
+await viewer.addReferenceBuffer(shxBytes, 'LSG.SHX');
+```
+
+References can be supplied before or after the drawing. Parsed fonts remain cached across drawing loads until `removeReference()`, `clearReferences()` or `destroy()` is called. Replacing a reference validates the glyphs required by the active drawing; a same-named but incompatible file remains in the missing state. All parsing stays in the browser.
+
+## Loader architecture
+
+```text
+File / ArrayBuffer
+  ↓
+CadLoaderRegistry
+  ↓
+DwgLoader | DxfLoader | DwfLoader | custom loader
+  ↓
+DWG/DXF: CadDocument → CadWebGLRenderer | CadCanvasRenderer fallback
+DWF/DWFx/XPS: DwfLoader.mount() → dwf-viewer native WebGL vectors / 3D / WASM fallback
+```
+
+Each loader returns a normalized `CadDocument`:
+
+```ts
+interface CadDocument {
+  format: 'dwg' | 'dxf' | 'dwf' | 'dwfx' | 'xps' | 'unknown';
+  layers: Record<string, CadLayer>;
+  blocks: Record<string, CadBlock>;
+  entities: CadEntity[];
+  pages?: CadPage[];
+  warnings: string[];
+  raw?: unknown;
+}
+```
+
+Register a custom loader:
+
+```ts
+viewer.registerLoader({
+  id: 'my-cad-format',
+  label: 'My CAD Format',
+  formats: ['unknown'],
+  accepts(input) {
+    return input.fileName?.endsWith('.cad') ?? false;
+  },
+  async load(input) {
+    return {
+      document: {
+        format: 'unknown',
+        layers: {},
+        blocks: {},
+        entities: [],
+        metadata: {},
+        warnings: []
+      },
+      bytes: input.buffer instanceof Uint8Array ? input.buffer.byteLength : 0,
+      elapsedMs: 0,
+      format: 'unknown',
+      warnings: []
+    };
+  }
+});
+```
+
+## Format support
+
+| Format | Loader | Coverage |
+|---|---|---|
+| DWG | `DwgLoader` | Uses LibreDWG WebAssembly. Preserves active planar saved views, block-contained text transforms/alignment, closed and authored-width polylines, and LTYPE definitions. Canvas2D/WebGL render dash/dot patterns with BYLAYER/BYBLOCK inheritance. Referenced SHX fonts are reported as missing resources; supplied files render complex shape/text glyphs with authored scale, offset and rotation, while unavailable glyphs use a marker fallback. |
+| DXF | `DxfLoader` | Uses `dxf-parser` plus fallback parsing. Supports codepage-aware text decoding, CAD text escape normalization, core entities, blocks/inserts, colors/layers, polylines, hatch boundaries and splines as preview polylines. |
+| DWF | `DwfLoader` + `dwf-viewer` | DWF 6+ ZIP packages, WHIP/W2D 2D sheets, W3D/HSF 3D eModel pages, model tree metadata, WebGL rendering and optional WASM fallback. |
+| DWFx / XPS | `DwfLoader` + `dwf-viewer` | DWFx/OPC/XPS pages with WebGL-accelerated vector paths, embedded fonts, text, images, package resources and adaptive overview line weights through the native DWF renderer. |
+
+## Color handling
+
+The color resolver follows CAD semantics instead of treating all numbers as RGB:
+
+1. explicit CSS color or true color object,
+2. explicit DWG true-color integer, including low RGB values such as `0x0000ff`,
+3. entity ACI (`colorIndex`, `colorNumber`, `color` in `1..255`),
+4. BYBLOCK inheritance (`0`) when expanding INSERT/block geometry,
+5. BYLAYER lookup (`256` / unset),
+6. viewer foreground fallback.
+
+Layer colors prefer a valid ACI index when a converter also exposes a placeholder RGB value. ACI `7` is foreground-dependent: it renders light on dark canvas and dark on light canvas. With `contrastMode: 'adaptive'`, colors too close to the current canvas background are adjusted just enough to stay readable. Use `contrastMode: 'preserve'` when exact plotted colors are more important than screen readability.
+
+If a particular converter exposes true-color integers in BGR order:
+
+```ts
+new CadViewer({ canvasOptions: { trueColorByteOrder: 'bgr' } });
+```
+
+## Development
+
+Use Node.js 22.12 or newer (Node.js 24 is used for the candidate checks).
+The development toolchain uses Vite 7; the published library still targets ES2018.
+
+```bash
+npm install
+npm run dev          # run the demo
+npm run typecheck    # TypeScript validation
+npm test             # build the library and run DWG normalization regressions
+npm run build        # library + demo
+npm run preview      # preview built demo
+```
+
+## npm publishing
+
+1. Build and inspect the package:
+
+```bash
+npm run build:lib
+npm run pack:dry
+```
+
+2. Publish:
+
+```bash
+npm login
+npm publish --access public --auth-type=web
+```
+
+The package also exposes:
+
+```bash
+npm run release:npm
+```
+
+## Cloudflare Pages publishing
+
+Direct upload with Wrangler. The repository includes `public/_headers`, so Cloudflare Pages serves `.wasm` as `application/wasm` and caches it long-term:
+
+```bash
+npm install
+npm run build:demo
+npx wrangler pages deploy dist-demo --project-name cad-viewer
+```
+
+Or use the included script:
+
+```bash
+npm run deploy:pages
+```
+
+For GitHub Actions, configure repository secrets:
+
+```text
+CLOUDFLARE_API_TOKEN
+CLOUDFLARE_ACCOUNT_ID
+```
+
+The workflow is included at `.github/workflows/pages.yml`.
+
+## Repository layout
+
+```text
+src/
+  core/          shared format detection, colors, geometry, transforms, normalized types
+  loaders/       DwgLoader, DxfLoader, DwfLoader and CadLoaderRegistry
+  viewer/        CadViewer component and Canvas renderer
+demo/            professional Vite demo UI
+docs/            English and Chinese architecture / format notes
+scripts/         clean and runtime WASM copy/validation helpers
+public/wasm/     demo WASM asset output directory
+```
+
+## License
+
+AGPL-3.0-only. The default DWG loader integrates `@mlightcad/libredwg-web` / LibreDWG, SHX decoding uses the MIT-licensed `@mlightcad/shx-parser`, and the DWF renderer integrates `dwf-viewer`. Keep attribution and license notices when redistributing, modifying, embedding or using this package as part of another application. For closed-source commercial products, review all dependency licenses and replace loaders where your licensing model requires it.

@@ -1,0 +1,51 @@
+# Format support notes
+
+## DWG
+
+DWG is a proprietary binary CAD database. This project uses `@mlightcad/libredwg-web`, a browser WebAssembly wrapper around LibreDWG, as the default DWG loader.
+
+The loader is intentionally isolated behind `DwgLoader`, so it can be replaced with another parser or a licensed conversion backend.
+
+Rendering completeness depends on the normalized entities exposed by the parser. The renderer covers common 2D primitives and block insert expansion when block definitions are available. The DWG path preserves the active VPORT/header UCS saved view, block-contained text width/alignment/mirroring properties, constant and per-vertex polyline widths, LTYPE definitions, linetype scales and converter-specific closed-polyline flags. Safe planar saved views are applied once, with text and INSERT angles canonicalized after transformation; invalid or tilted views keep WCS coordinates. Canvas2D and WebGL render dashed/dotted patterns with BYLAYER/BYBLOCK inheritance and continuous phase across polyline edges.
+
+SHX shapes in complex linetypes do not embed their outlines in the DWG. Referenced external fonts are listed in `document.metadata.requiredShxFonts` and unresolved entries in `document.metadata.missingReferences`. Applications can supply a local `File` or API-provided `ArrayBuffer`/`Uint8Array` through `CadViewer.addReference*()`. Canvas2D and WebGL then render the decoded shape/text outlines with authored scale, local X/Y offset and relative/absolute rotation. Until a compatible file is available, the renderer preserves dash/gap lengths and phase and uses a marker fallback; exact symbol fidelity requires the original SHX.
+
+## DXF
+
+DXF is handled by `DxfLoader` with `dxf-parser` first and a built-in fallback parser for common DXF `ENTITIES`. A bounded metadata pass restores records that `dxf-parser` skips and associates handleless R12 `ATTRIB`/XDATA by section, block and entity order. Text decoding is codepage-aware: `DxfLoader` honors an explicit `dxfEncoding`, BOMs and `$DWGCODEPAGE` values before falling back to legacy candidates.
+
+Supported preview entities include:
+
+- LINE, CIRCLE, ARC.
+- LWPOLYLINE, POLYLINE, bulge arcs.
+- ELLIPSE, SPLINE preview.
+- TEXT, MTEXT, ATTRIB, including common CAD escapes such as `\U+XXXX`, `%%c`, `%%d`, `%%p` and `\P`.
+- INSERT block references.
+- SOLID, TRACE, 3DFACE.
+- HATCH boundary loop preview.
+
+## BOM and property data
+
+For normalized DWG/DXF source documents, `CadViewer.getBom()` can derive typed tables from:
+
+- block `ATTDEF` defaults and per-instance `ATTRIB` values, including recursive `INSERT` and `MINSERT` quantity;
+- native TABLE/ACAD_TABLE cells and DataTable values when the parser exposes data cached inside the drawing;
+- XDATA application groups and dictionary-resolved XRECORD values (both are opt-in because the containers are application-defined);
+- aligned TEXT/MTEXT grids, accepted automatically only when row and column structure is high-confidence.
+
+Each source remains a separate `CadBomTable`; unrelated schemas are not merged. Extraction has configurable entity, depth, row and cell limits. DataLink metadata may be returned with a cached table, but the loader never opens an external file or performs a network request. Some modern TABLECONTENT variants expose dimensions or a DataLink without cached cells; these produce `empty-native-table` or `external-data-unavailable` warnings.
+
+## DWF / DWFx / XPS
+
+DWF, DWFx and XPS are handled by `DwfLoader` through the published `dwf-viewer` package. The viewer path is native-rendered instead of being approximated by the DWG/DXF 2D scene renderer.
+
+Covered render paths include:
+
+- DWF 6+ ZIP container packages.
+- WHIP/W2D 2D sheets with WebGL rendering, adaptive CAD line weights and optional WASM raster fallback.
+- W3D/HSF 3D eModel shell geometry with model tree and material metadata.
+- DWFx / OPC / XPS `FixedPage` pages with WebGL-accelerated vector geometry, embedded XPS fonts where browser `FontFace` loading is available, text and image resources.
+
+`CadViewer` detects the native DWF loader and mounts it into a `nativeHost`; DWG/DXF continue to use the normalized `CadDocument` + retained WebGL renderer. Serve `dwg-worker.js`, `libredwg-web.js`, `libredwg-web.wasm` and `dwfv-render.wasm` under `/wasm`, or pass `workerUrl` / `dwfWasmUrl` explicitly. DWF/XPS overview rendering can be tuned with the `dwfLineWeightMode`, `dwfMinStrokeCssPx`, `dwfMaxOverviewStrokeCssPx`, `dwfMinTextCssPx` and `dwfMinFilledAreaCssPx` load options.
+
+The native DWF/DWFx/XPS path does not currently expose a normalized component/property model. `getBom()` therefore returns no DWF BOM tables and reports the unsupported-format boundary instead of inferring data from rendered labels.
