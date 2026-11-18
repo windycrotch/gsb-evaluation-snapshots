@@ -123,8 +123,10 @@ class BaseStreamingTask(BaseTask, ABC):
             #     state=status_name)
 
     def can_set_status(self, request_id) -> None or bool:
-        """to check current primary status of job is
-         in 'FAILED' and 'REVOKED'
+        """to check current primary status of job is not a final one
+
+        'FINISHED', 'FAILED' and 'REVOKED' are final: a late or repeated
+        task must not overwrite the outcome of a job that already ended.
         """
         if request_id is None:
             return None
@@ -132,6 +134,7 @@ class BaseStreamingTask(BaseTask, ABC):
             CacheKeysTemplates.PRIMARY_STATUS.format(
                 request_id=request_id), decode=False)
         return current_status not in [
+            self.primary_status.FINISHED,
             self.primary_status.FAILED,
             self.primary_status.REVOKED
         ]

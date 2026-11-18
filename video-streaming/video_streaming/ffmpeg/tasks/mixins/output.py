@@ -1,6 +1,7 @@
 import os
 from celery import states, Task
 from video_streaming.core.constants.cache_keys import CacheKeysTemplates
+from video_streaming.core.output_state import OutputLifecycleCoordinator
 from video_streaming.ffmpeg.tasks.base import BaseStreamingTask
 
 
@@ -22,6 +23,25 @@ class BaseOutputMixin(object):
         get_outputs_root_directory
 
     request: Task.request
+
+    def _output_lifecycle(self) -> OutputLifecycleCoordinator:
+        """Build the state aggregator bound to this task instance.
+
+        The coordinator is task-independent, so the same rules run offline in
+        tests with an in-memory cache stand-in.  A fresh coordinator is built
+        per call: Celery task instances are shared between requests, and the
+        "already removed" markers live in the cache so idempotency still
+        holds across workers and retries.
+        """
+        return OutputLifecycleCoordinator(
+            cache=self.cache,
+            delete_inputs=self.delete_inputs,
+            delete_outputs=self.delete_outputs,
+            remove_inputs=self.inputs_remover,
+            remove_outputs=self.outputs_remover,
+            save_primary_status=self.save_primary_status,
+            logger=self.logger,
+        )
 
     def save_failed(self, request_id, output_id):
         """
@@ -57,6 +77,9 @@ class BaseOutputMixin(object):
                         output_id
                     )
                 elif state == states.REVOKED:
+                    # Revoking one output only settles that output.  The job
+                    # becomes REVOKED only when every output is revoked,
+                    # which the aggregator decides from the output statuses.
                     self.save_output_status(
                         self.output_status.OUTPUT_REVOKED,
                         output_id,
@@ -68,160 +91,54 @@ class BaseOutputMixin(object):
             request_kwargs=request_kwargs)
 
     def save_output_status(self, status_name, output_id, request_id):
+        """Save the status of one output and aggregate the job state.
 
-        # check request_id, input_number and JOB_DETAILS has been set
+        Aggregation only acts on terminal output statuses:
 
-        if request_id is None:
-            # request_id has been not set
-            return
-
-        if output_id is None:
-            # input_number has been not set
-            return None
-
-        if not self.cache.get(CacheKeysTemplates.JOB_DETAILS.format(
-                request_id=request_id)):
-            # JOB_DETAILS has been not set
-            return None
-
-        # to prevent set output status after it was set to
-        # in 'OUTPUT_FAILED' and 'OUTPUT_REVOKED'
-        if self.can_set_output_status(output_id, request_id):
-
-            # add output status name as message to logger
-            log_message = f"output status: {status_name}"
-            if request_id:
-                log_message += f" ,request id: {request_id}"
-            if output_id:
-                log_message += f" ,output id: {output_id}"
-            self.logger.info(log_message)
-
-            self.cache.set(
-                CacheKeysTemplates.OUTPUT_STATUS.format(
-                    request_id=request_id,
-                    output_id=output_id),
-                status_name
-            )
-
-            if status_name == self.output_status.OUTPUT_REVOKED:
-                self.incr("REVOKED_OUTPUTS", request_id)
-                self.check_all_outputs_are_finished(request_id)
-            elif status_name == self.output_status.PROCESSING_FINISHED:
-                self.incr("PROCESSED_OUTPUTS", request_id)
-                self.check_to_delete_inputs(request_id)
-                self.check_all_outputs_are_finished(request_id)
-            elif status_name == self.output_status.UPLOADING_FINISHED:
-                self.incr("READY_OUTPUTS", request_id)
-                self.check_all_outputs_are_finished(request_id)
-            elif status_name == self.output_status.OUTPUT_FAILED:
-                self.incr("FAILED_OUTPUTS", request_id)
-                self.check_all_outputs_are_finished(request_id)
-
-            # check to delete unnecessary data
-            if status_name in [
-                    self.output_status.OUTPUT_REVOKED,
-                    self.output_status.PROCESSING_FINISHED,
-                    self.output_status.UPLOADING_FINISHED,
-                    self.output_status.OUTPUT_FAILED]:
-                self.cache.delete(
-                    CacheKeysTemplates.OUTPUT_PROGRESS.format(
-                        request_id=request_id,
-                        output_id=output_id
-                    ))
+        * the local inputs are removed once every output is terminal;
+        * the local outputs are removed and the job status is finalized
+          (FINISHED / FAILED / REVOKED) once every output is settled;
+        * a terminal job status is written once and never overwritten.
+        """
+        update = self._output_lifecycle().save_output_status(
+            status_name=status_name,
+            output_id=output_id,
+            request_id=request_id)
+        return update
 
     def can_set_output_status(self,
                               output_id,
                               request_id) -> None or bool:
-        """to check output current status of job is not in
-         'OUTPUT_FAILED', 'OUTPUT_REVOKED'
+        """to check output current status of job is not a terminal one
+
+        A settled status (uploaded, failed or revoked) is final and must not
+        be overwritten by a late or repeated status update.
         """
         if request_id is None:
             return None
         if output_id is None:
             return None
-
-        output_current_status = self.cache.get(
-            CacheKeysTemplates.OUTPUT_STATUS.format(
-                request_id=request_id,
-                output_id=output_id), decode=False)
-        return output_current_status not in [
-            self.output_status.OUTPUT_REVOKED,
-            self.output_status.OUTPUT_FAILED]
+        return self._output_lifecycle().can_set_output_status(
+            output_id, request_id)
 
     def check_to_delete_inputs(self, request_id):
-        if self.delete_inputs:
-            job_details: dict = self.cache.get(
-                CacheKeysTemplates.JOB_DETAILS.format(
-                    request_id=request_id))
-            if job_details:
-                total_outputs: int = job_details['total_outputs']
-                processed_outputs: int = self.cache.get(
-                    CacheKeysTemplates.PROCESSED_OUTPUTS.format(
-                        request_id=request_id)) or 0
-                revoked_outputs: int = self.cache.get(
-                    CacheKeysTemplates.REVOKED_OUTPUTS.format(
-                        request_id=request_id)) or 0
-                failed_outputs: int = self.cache.get(
-                    CacheKeysTemplates.FAILED_OUTPUTS.format(
-                        request_id=request_id)) or 0
+        """Delete the local inputs once every output reached a terminal state.
 
-                if total_outputs == (
-                        processed_outputs +
-                        revoked_outputs +
-                        failed_outputs):
-                    # delete all local inputs
-                    self.inputs_remover(request_id=request_id)
+        Terminal means processing finished, uploading finished, failed or
+        revoked.  A partially processed job keeps its inputs: another output
+        may still need them.
+        """
+        return self._output_lifecycle().check_to_delete_inputs(request_id)
 
     def check_all_outputs_are_finished(self, request_id):
+        """Finalize the job once all outputs are settled.
+
+        1. check all outputs are settled (uploaded, failed or revoked)
+        2. set primary status to 'FINISHED' or 'REVOKED' or 'FAILED'
+        3. remove local outputs files if delete_outputs flag is True
         """
-            1. check all outputs are finished
-            2. set primary status to 'FINISHED' or 'REVOKED' or 'FAILED'
-            3. remove local outputs files if delete_outputs flag is True
-        """
-
-        job_details: dict = self.cache.get(
-            CacheKeysTemplates.JOB_DETAILS.format(
-                request_id=request_id))
-        if job_details:
-            # calculate that all outputs are finished
-
-            total_outputs: int = job_details['total_outputs']
-            ready_outputs: int = self.cache.get(
-                CacheKeysTemplates.READY_OUTPUTS.format(
-                    request_id=request_id)) or 0
-            revoked_outputs: int = self.cache.get(
-                CacheKeysTemplates.REVOKED_OUTPUTS.format(
-                    request_id=request_id)) or 0
-            failed_outputs: int = self.cache.get(
-                CacheKeysTemplates.FAILED_OUTPUTS.format(
-                    request_id=request_id)) or 0
-
-            is_all_outputs_failed = total_outputs == failed_outputs
-            if is_all_outputs_failed:
-                self.save_primary_status(
-                    status_name=self.primary_status.FAILED,
-                    request_id=request_id
-                )
-
-            is_all_outputs_revoked = total_outputs == revoked_outputs
-            if is_all_outputs_revoked:
-                self.save_primary_status(
-                    self.primary_status.REVOKED,
-                    request_id
-                )
-
-            is_finished = total_outputs == (
-                        ready_outputs + revoked_outputs + failed_outputs)
-            if is_finished:
-                self.save_primary_status(
-                    self.primary_status.FINISHED,
-                    request_id
-                )
-
-            if self.delete_outputs:
-                if is_finished or is_all_outputs_failed or \
-                        is_all_outputs_revoked:
-                    self.outputs_remover(request_id=request_id)
+        return self._output_lifecycle().check_all_outputs_are_finished(
+            request_id)
 
     def is_output_forced_to_stop(
             self,
@@ -264,7 +181,7 @@ class BaseOutputMixin(object):
             return output_path, directory
 
         # when self.output_path is None, using self.s3_output_key
-        #  to set self.directory and self.output_path
+        #  to set self.directory and output_path
 
         # s3_output_key : "/foo/bar/example.mpd"
         output_filename = s3_output_key.rpartition('/')[-1]

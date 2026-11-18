@@ -66,6 +66,23 @@ class CacheKeysTemplates:
     # to save number of failed outputs
     FAILED_OUTPUTS = _PREFIX + "failed_outputs_{request_id}"
 
+    # integer
+    # to save number of outputs that have reached a terminal state
+    # (processing finished, uploading finished, failed or revoked).
+    # An output keeps this status while it moves on to uploading, so it is
+    # counted here and not derived from the current OUTPUT_STATUS value.
+    TERMINAL_OUTPUTS = _PREFIX + "terminal_outputs_{request_id}"
+
+    # string (json list)
+    # to save terminal outcomes that have already been counted for an
+    # output, so a retried or repeated status update is not counted twice
+    OUTPUT_COUNTED_OUTCOMES = _PREFIX + "o_counted_{request_id}_{output_id}"
+
+    # boolean
+    # to make the local cleanup idempotent across workers and retries
+    INPUTS_REMOVED = _PREFIX + "i_removed_{request_id}"
+    OUTPUTS_REMOVED = _PREFIX + "o_removed_{request_id}"
+
     # save status
 
     # string

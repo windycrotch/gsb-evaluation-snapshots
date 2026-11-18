@@ -210,3 +210,35 @@ GitHub repository administration also remains necessary: current inspection
 found no active ruleset and develop is unprotected. The connected GitHub
 integration does not expose write access to branch-protection or repository
 security settings.
+
+### Multi-output job aggregation (2026-11-18)
+
+A job derives several outputs from one input (HLS/DASH playlists, thumbnails,
+watermarked video), each run by its own processing/upload chain. The
+aggregation that turns per-output terminal states into job-level state now
+lives in `video_streaming/core/output_state.py` and is covered offline by
+`video-streaming/tests/test_output_state_aggregation.py` with an in-memory
+cache stand-in (no Redis, Celery, S3, FFmpeg or `.env` required).
+
+Corrected invariants:
+
+- An output is **terminal** when processing finished, uploading finished,
+  failed or revoked. The shared local inputs are deleted only when every
+  output is terminal. Previously the input count mixed processing-finished and
+  ready counters and could delete the input while a sibling was still
+  encoding.
+- An output is **settled** when uploading finished, failed or revoked. The job
+  becomes `FINISHED` only when every output is settled; `FAILED` when all are
+  failed, `REVOKED` when all are revoked. Previously a processed-but-not-yet
+  uploaded output was treated as finished, so a job could remain
+  `OUTPUTS_PROGRESSING` forever.
+- Terminal job statuses (`FINISHED`, `FAILED`, `REVOKED`) are final and are not
+  overwritten by late or retried task status updates.
+- Revoking a single output only marks and counts that output; the job becomes
+  `REVOKED` only if every output is revoked.
+- Terminal output statuses still delete that output's progress key, and the
+  per-output counters are incremented once per output so retries cannot end a
+  job early.
+
+These are unit-level guarantees for the aggregation rules; end-to-end
+gRPC → Celery → FFmpeg → S3 behavior and crash recovery remain unverified.
