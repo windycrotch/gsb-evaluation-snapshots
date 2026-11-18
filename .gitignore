@@ -1,0 +1,57 @@
+# Python virtualenv that happens to live in this folder - unrelated to this project
+.venv/
+__pycache__/
+*.pyc
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Secrets. Nothing here should ever hold a real token - api/visits.js reads its
+# Vercel API token from Environment Variables set in the Vercel dashboard, never
+# from a file in the repo - but ignored preemptively so a local .env dropped in
+# for testing (Vercel CLI's `vercel env pull` writes one) never gets committed.
+.env
+.env.*
+.vercel/
+
+# Browser smoke-test output
+.smoke/
+# The smoke test exercises the WAV export, which downloads into the repo root.
+*.wav
+# Commit message scratch file used when a message is too long for the shell.
+.commitmsg.tmp
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Scratch
+dist/
+coverage/
+tmp/
+*.local
+DESIGN.md
+PRODUCT.md
+.kiro/steering/10-codebase-map.md
+.kiro/steering/00-project.md
+.kiro/steering/20-memory.md
+# Installed agent skill packs. Vendored tooling for whoever is working on the repo,
+# not part of the build, and not this project's code to redistribute.
+.kiro/skills/
+.agents/skills/
+skills-lock.json
+poki-ready-copy/
+tools/poki-levels.mjs
+tools/poki-smoke.mjs
+tools/poki-survey.mjs
+tools/poki-sync.mjs
+.github/agents
+.github/hooks
+.github/skills
+.codex/
