@@ -259,6 +259,23 @@ class Controls {
     });
     this.rightContainer.appendChild(this.download);
 
+    // Picture in Picture
+    this.pictureInPicture = createElement('button', {
+      type: 'button',
+      class: 'fluid_button fluid_control_picture_in_picture fluid_button_picture_in_picture',
+      'aria-label': captions.pictureInPicture,
+      'aria-pressed': false,
+    });
+    this.pictureInPictureTooltip = createElement(
+      'div',
+      {
+        class: 'fluid_button_tooltip',
+      },
+      captions.pictureInPicture,
+    );
+    this.pictureInPicture.appendChild(this.pictureInPictureTooltip);
+    this.rightContainer.appendChild(this.pictureInPicture);
+
     // Theatre
     this.theatre = createElement('button', {
       type: 'button',

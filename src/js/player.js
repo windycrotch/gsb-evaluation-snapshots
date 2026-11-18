@@ -4,6 +4,7 @@ import Controls from './control-bar/controls';
 import Mobile from './mobile';
 import Download from './control-bar/download';
 import Fullscreen from './fullscreen';
+import PictureInPicture from './control-bar/picture-in-picture';
 import Theatre from './control-bar/theatre';
 import Preview from './control-bar/preview';
 import VolumeControl from './control-bar/volume';
@@ -306,6 +307,7 @@ class CVP {
     }
 
     this.download = new Download(this);
+    this.pictureInPicture = new PictureInPicture(this);
     this.fullscreen = new Fullscreen(this);
     this.theatre = new Theatre(this);
     this.HtmlOnPause = new HtmlOnPause(this);
@@ -404,6 +406,9 @@ class CVP {
     if (is.object(sources)) {
       sources = [sources];
     }
+
+    // Picture in picture cannot survive a source change
+    this.pictureInPicture?.exit();
 
     this.setSources(sources);
   };
@@ -913,6 +918,7 @@ class CVP {
       this.menu,
       this.subtitles,
       this.fps,
+      this.pictureInPicture,
       this.fullscreen,
       this.theatre,
       this.zoom,

@@ -110,12 +110,23 @@
   background-position: 0px 1px;
 }
 
+.fluid_button_picture_in_picture:before {
+  background: url('../static/picture-in-picture.svg') no-repeat;
+  background-position: 0px 1px;
+}
+
+.fluid_button_picture_in_picture_exit:before {
+  background: url('../static/picture-in-picture-exit.svg') no-repeat;
+  background-position: 0px 1px;
+}
+
 .fluid_button_volume,
 .fluid_button_mute {
   left: 10px;
 }
 
 .fluid_button_theatre,
-.fluid_button_download {
+.fluid_button_download,
+.fluid_button_picture_in_picture {
   display: none;
 }

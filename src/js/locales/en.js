@@ -10,6 +10,8 @@ const en = {
   subtitles: 'Subtitles',
   fullscreen: 'Fullscreen',
   exitFullscreen: 'Exit Fullscreen',
+  pictureInPicture: 'Picture in Picture',
+  exitPictureInPicture: 'Exit Picture in Picture',
   shortcuts: {
     title: 'Keyboard Shortcuts',
     close: 'Close keyboard shortcuts',

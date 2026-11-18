@@ -321,6 +321,9 @@ class Fullscreen {
       return;
     }
 
+    // Fullscreen and picture in picture are mutually exclusive
+    this.player.pictureInPicture?.exit();
+
     // iOS native fullscreen doesn't need the request step
     if (IS_IOS && this.player.config.layoutControls.fullscreen.iosNative) {
       if (typeof this.target.webkitEnterFullscreen === 'function') {
