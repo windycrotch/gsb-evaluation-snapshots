@@ -35,6 +35,21 @@ class UndoRedoService {
   private static redoStack: UndoRedoEvent[] = [];
 
   public static push(undoRedoEvent: UndoRedoEvent, index?: number) {
+    //property edits are self-contained UPDATE events with deep-copied from/to
+    //snapshots. They must not touch pushFlag (which only tracks the in-progress
+    //CREATE event while a shape is being drawn) and always discard the redo
+    //stack, including text/font edits whose shape is not a BaseModel instance.
+    if (undoRedoEvent.type === UndoRedoEventType.UPDATE) {
+      if (index !== undefined) {
+        this.undoStack.splice(index, 0, undoRedoEvent);
+      } else {
+        this.undoStack.push(undoRedoEvent);
+      }
+
+      this.redoStack = [];
+      return;
+    }
+
     if (index !== undefined) {
       this.undoStack.splice(index, 0, undoRedoEvent);
     } else {

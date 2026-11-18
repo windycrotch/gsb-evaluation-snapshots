@@ -289,8 +289,13 @@ export default function ShapeBasedCard({
   };
 
   const pushToUndoRedoService = useCallback((index: number, fromShape: Shape, toShape: Shape) => {
+    //property edits are recorded as UPDATE events: undo restores the pre-edit
+    //snapshot and redo restores the post-edit snapshot, while the shape keeps
+    //the same index in Store.allShapes. Every edit pushes its own event, so
+    //consecutive adjustments (e.g. dragging the stroke width slider repeatedly)
+    //are each individually undoable and never overwrite one another.
     UndoRedoService.push({
-      type: UndoRedoEventType.DELETE,
+      type: UndoRedoEventType.UPDATE,
       index,
       shape: {
         from: fromShape,
