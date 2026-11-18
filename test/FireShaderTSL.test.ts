@@ -1,8 +1,13 @@
 import { describe, it, expect } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { createFireUniforms, createFireFragmentNode } from '../src/tsl/FireShaderTSL'
 import { Color, Texture, Matrix4, Vector3, Vector4, LinearFilter, ClampToEdgeWrapping } from 'three'
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
+
+const tslShaderSource = readFileSync(join(process.cwd(), 'src/tsl/FireShaderTSL.ts'), 'utf8')
+const glslShaderSource = readFileSync(join(process.cwd(), 'src/FireShader.ts'), 'utf8')
 
 describe('FireShaderTSL', () => {
   describe('createFireUniforms', () => {
@@ -63,6 +68,37 @@ describe('FireShaderTSL', () => {
       const u = createFireUniforms({ fireTex: new Texture() })
       expect(() => createFireFragmentNode(u, 30, 5)).not.toThrow()
       expect(() => createFireFragmentNode(u, 10, 1)).not.toThrow()
+    })
+  })
+
+  describe('march step formula parity with the GLSL path', () => {
+    it('uses the same 0.0288 factor and bounding-box length as the GLSL shader', () => {
+      expect(tslShaderSource).toContain('0.0288')
+      expect(tslShaderSource).toMatch(/length\(u\.scale\)/)
+      // Degenerate-box guard mirroring the GLSL max(length(...), 0.0).
+      expect(tslShaderSource).toMatch(/max\(length\(u\.scale\)/)
+      expect(tslShaderSource).toMatch(/float\(0\.0288\)\.mul\(boxSize\)/)
+
+      // Both back-ends share the literal coefficient.
+      const glslFactor = glslShaderSource.match(/0\.0288/)
+      const tslFactor = tslShaderSource.match(/0\.0288/)
+      expect(glslFactor).not.toBeNull()
+      expect(tslFactor).not.toBeNull()
+      expect(tslFactor?.[0]).toBe(glslFactor?.[0])
+    })
+
+    it('drives animation from the instance time uniform, not the global TSL clock', () => {
+      // The global `time` node import must be gone...
+      expect(tslShaderSource).not.toMatch(/^\s*time,?\s*$/m)
+      // ...and the sampler must read the per-instance uniform instead.
+      expect(tslShaderSource).toContain('uniforms.seed.add(uniforms.time)')
+    })
+
+    it('keeps a writable time uniform that starts at zero', () => {
+      const u = createFireUniforms({ fireTex: new Texture() }) as any
+      expect(u.time.value).toBe(0)
+      u.time.value = 42
+      expect(u.time.value).toBe(42)
     })
   })
 })

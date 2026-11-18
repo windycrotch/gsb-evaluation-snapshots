@@ -118,13 +118,31 @@ describe('Fire class', () => {
     it('updates matrix uniforms', () => {
       const updateMatrixWorldSpy = vi.spyOn(fire, 'updateMatrixWorld')
       const matrixCopySpy = vi.spyOn(fire.material.uniforms.invModelMatrix.value, 'copy')
-      const scaleCopySpy = vi.spyOn(fire.material.uniforms.scale.value, 'copy')
 
       fire.update(1.0)
 
       expect(updateMatrixWorldSpy).toHaveBeenCalled()
       expect(matrixCopySpy).toHaveBeenCalledWith(fire.matrixWorld)
-      expect(scaleCopySpy).toHaveBeenCalledWith(fire.scale)
+    })
+
+    it('writes the world bounding-box extents (not the raw scale) into the scale uniform', () => {
+      fire.scale.set(2, 3, 2)
+      fire.update()
+
+      // Unit box (1,1,1) scaled by (2,3,2) -> world box extents (2,3,2)
+      expect(fire.material.uniforms.scale.value).toMatchObject({ x: 2, y: 3, z: 2 })
+    })
+
+    it('produces finite non-negative extents for zero and negative scale components', () => {
+      fire.scale.set(0, -2, -3)
+      fire.update()
+
+      const s = fire.material.uniforms.scale.value
+      expect([s.x, s.y, s.z].every((n) => Number.isFinite(n) && n >= 0)).toBe(true)
+      // Flipped axes mirror the mesh but still measure positive extents.
+      expect(s.x).toBeCloseTo(0)
+      expect(s.y).toBeCloseTo(2)
+      expect(s.z).toBeCloseTo(3)
     })
 
     it('works without time parameter', () => {
@@ -133,6 +151,39 @@ describe('Fire class', () => {
 
       expect(fire.time).toBe(2.0) // Should remain unchanged
       expect(fire.material.uniforms.time.value).toBe(2.0)
+    })
+
+    it('leaves time and the time uniform untouched when update() is called with no argument', () => {
+      fire.update(7.25)
+      fire.scale.set(2, 3, 2)
+      fire.update() // no argument: only matrix/box refresh
+
+      expect(fire.time).toBe(7.25)
+      expect(fire.material.uniforms.time.value).toBe(7.25)
+    })
+
+    it('never yields NaN or Infinity in the scale uniform under degenerate scales', () => {
+      const cases: Array<[number, number, number]> = [
+        [0, 0, 0],
+        [-1, -1, -1],
+        [0, -2, 0],
+        [2, 0, -3],
+      ]
+
+      for (const [x, y, z] of cases) {
+        fire.scale.set(x, y, z)
+        fire.update()
+        const s = fire.material.uniforms.scale.value
+        expect(Number.isNaN(s.x)).toBe(false)
+        expect(Number.isNaN(s.y)).toBe(false)
+        expect(Number.isNaN(s.z)).toBe(false)
+        expect(Number.isFinite(s.x)).toBe(true)
+        expect(Number.isFinite(s.y)).toBe(true)
+        expect(Number.isFinite(s.z)).toBe(true)
+        expect(s.x).toBeGreaterThanOrEqual(0)
+        expect(s.y).toBeGreaterThanOrEqual(0)
+        expect(s.z).toBeGreaterThanOrEqual(0)
+      }
     })
   })
 

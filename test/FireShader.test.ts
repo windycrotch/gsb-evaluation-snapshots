@@ -107,6 +107,18 @@ describe('FireShader', () => {
       // Should contain ray marching loop indicators
       expect(fs).toMatch(/for|while|step|march/i)
     })
+
+    it('derives the march step from the bounding-box scale with a degenerate guard', () => {
+      const fs = FireShader.fragmentShader
+
+      // Factor preserved so a unit cube keeps its historical look.
+      expect(fs).toContain('0.0288')
+      // Step is built from the box-size length...
+      expect(fs).toMatch(/length\(scale\.xyz\)/)
+      // ...clamped so a collapsed box can never produce NaN/Infinity.
+      expect(fs).toMatch(/max\(length\(scale\.xyz\),\s*0\.0\)/)
+      expect(fs).toMatch(/rayLen\s*=\s*0\.0288\s*\*\s*boxSize/)
+    })
   })
 
   describe('shader integration', () => {

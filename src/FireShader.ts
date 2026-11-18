@@ -14,7 +14,7 @@ export interface FireShaderUniforms {
   seed: { value: number }
   /** Inverse model matrix for ray marching */
   invModelMatrix: { value: Matrix4 }
-  /** Scale of the fire object */
+  /** World-space bounding-box extents (width, height, depth); always >= 0 */
   scale: { value: Vector3 }
   /** Noise scaling parameters [x, y, z, time] */
   noiseScale: { value: Vector4 }
@@ -55,6 +55,7 @@ export const FireShader = {
     time: { value: 0.0 },
     seed: { value: 0.0 },
     invModelMatrix: { value: new Matrix4() },
+    // World-space bounding-box extents (width, height, depth); always >= 0.
     scale: { value: new Vector3(1, 1, 1) },
     noiseScale: { value: new Vector4(1, 2, 1, 0.3) },
     magnitude: { value: 1.3 },
@@ -202,7 +203,13 @@ export const FireShader = {
     void main() {
       vec3 rayPos = vWorldPos;
       vec3 rayDir = normalize(rayPos - cameraPosition);
-      float rayLen = 0.0288 * length(scale.xyz);
+      // 'scale' holds the mesh's world-space bounding-box extents (always
+      // non-negative). Deriving the step from the box size instead of the raw
+      // scale vector keeps the march distance correct under non-uniform, zero
+      // or negative scales. The max guard guarantees a finite, non-NaN step
+      // even for a fully collapsed (zero-volume) box.
+      float boxSize = max(length(scale.xyz), 0.0);
+      float rayLen = 0.0288 * boxSize;
 
       vec4 col = vec4(0.0);
 

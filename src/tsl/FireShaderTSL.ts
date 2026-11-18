@@ -19,11 +19,11 @@ import {
   sqrt,
   dot,
   length,
+  max,
   cameraPosition,
   positionWorld,
   mx_noise_float,
   select,
-  time,
 } from 'three/tsl'
 import {
   Color,
@@ -67,6 +67,7 @@ export interface FireTSLUniforms {
   time: { value: number }
   seed: { value: number }
   invModelMatrix: { value: Matrix4 }
+  /** World-space bounding-box extents (width, height, depth); always >= 0 */
   scale: { value: Vector3 }
   noiseScale: { value: Vector4 }
   magnitude: { value: number }
@@ -98,6 +99,7 @@ export const createFireUniforms = (config: FireTSLConfig): FireTSLUniforms => {
     time: uniform(0),
     seed: uniform(Math.random() * 19.19),
     invModelMatrix: uniform(new Matrix4()),
+    // World-space bounding-box extents (width, height, depth); always >= 0.
     scale: uniform(new Vector3(1, 1, 1)),
     noiseScale: uniform(new Vector4(...(config.noiseScale ?? [1, 2, 1, 0.3]))),
     magnitude: uniform(config.magnitude ?? 1.3),
@@ -133,7 +135,8 @@ const localize = Fn(([worldPos, invMatrix]: [TSLNode, TSLNode]) => {
 /**
  * Creates fire sampler function with uniforms captured in closure
  * This is necessary because TSL Fn parameters must be TSL nodes, not plain objects
- * Uses TSL's built-in `time` node for automatic animation
+ * Uses the instance `time` uniform so animation follows `update(time)` / the
+ * `time` property, matching the GLSL path (rather than TSL's global clock node).
  *
  * @param octaves - Number of FBM turbulence octaves (baked into the node graph)
  */
@@ -144,7 +147,7 @@ const createSamplerFire = (uniforms: FireUniformNodes, octaves: number) => {
     const st = vec2(radius, p.y).toVar('st')
 
     const animP = vec3(p).toVar('animP')
-    const timeOffset = uniforms.seed.add(time).mul(scaleVec.w)
+    const timeOffset = uniforms.seed.add(uniforms.time).mul(scaleVec.w)
     animP.y.subAssign(timeOffset)
     animP.assign(animP.mul(vec3(scaleVec.x, scaleVec.y, scaleVec.z)))
 
@@ -183,7 +186,12 @@ export const createFireFragmentNode = (
   return Fn(() => {
     const rayPos = vec3(positionWorld).toVar('rayPos')
     const rayDir = normalize(rayPos.sub(cameraPosition)).toVar('rayDir')
-    const rayLen = float(0.0288).mul(length(u.scale))
+    // `u.scale` holds the mesh's world-space bounding-box extents (always
+    // non-negative). Mirror the GLSL path exactly: derive the march step from
+    // the box size with a max guard so a collapsed box can never produce
+    // NaN/Infinity.
+    const boxSize = max(length(u.scale), float(0.0))
+    const rayLen = float(0.0288).mul(boxSize)
 
     const col = vec4(0.0).toVar('col')
 

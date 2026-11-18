@@ -1,4 +1,5 @@
 import { Mesh, Color, type Material, type Matrix4, type Vector3 } from 'three'
+import { writeWorldBoundingBoxSize } from './fireStep'
 
 /**
  * The subset of fire uniforms shared by the GLSL and TSL implementations.
@@ -11,6 +12,7 @@ export interface FireUniformBag {
   time: { value: number }
   color: { value: Color }
   invModelMatrix: { value: Matrix4 }
+  /** World-space bounding-box extents `(width, height, depth)`, always >= 0. */
   scale: { value: Vector3 }
   magnitude: { value: number }
   lacunarity: { value: number }
@@ -39,6 +41,10 @@ export abstract class AbstractFire<TMat extends Material> extends Mesh {
    * Call this each frame. In React Three Fiber it runs automatically via
    * `useFrame`.
    *
+   * The time uniform is only touched when `time` is provided; calling
+   * `update()` with no argument simply refreshes the inverse model matrix and
+   * the world-space bounding-box size.
+   *
    * @param time - Current time in seconds (optional)
    */
   public update(time?: number): void {
@@ -49,7 +55,10 @@ export abstract class AbstractFire<TMat extends Material> extends Mesh {
     }
     this.updateMatrixWorld()
     uniforms.invModelMatrix.value.copy(this.matrixWorld).invert()
-    uniforms.scale.value.copy(this.scale)
+    // Derive the marching scale from the actual world bounding box instead of
+    // the raw `this.scale` vector, so non-uniform, zero and negative scales
+    // never distort the step length. Always writes finite, non-negative values.
+    writeWorldBoundingBoxSize(this, uniforms.scale.value)
   }
 
   /**

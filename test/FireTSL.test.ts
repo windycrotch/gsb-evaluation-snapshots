@@ -105,6 +105,57 @@ describe('FireTSL class', () => {
       expect(fire.time).toBe(2.0)
     })
 
+    it('leaves time and the time uniform untouched when update() is called with no argument', () => {
+      const fire = new FireTSL({ fireTex: texture })
+      fire.update(7.25)
+      fire.scale.set(2, 3, 2)
+      fire.update() // no argument: only matrix/box refresh
+
+      expect(fire.time).toBe(7.25)
+      expect(peek(fire).uniforms.time.value).toBe(7.25)
+    })
+
+    it('writes the world bounding-box extents (not the raw scale) into the scale uniform', () => {
+      const fire = new FireTSL({ fireTex: texture })
+      fire.scale.set(2, 3, 2)
+      fire.update()
+
+      expect(peek(fire).uniforms.scale.value).toMatchObject({ x: 2, y: 3, z: 2 })
+    })
+
+    it('produces finite non-negative extents for zero and negative scale components', () => {
+      const fire = new FireTSL({ fireTex: texture })
+      const cases: Array<[number, number, number]> = [
+        [0, 0, 0],
+        [-1, -1, -1],
+        [0, -2, 0],
+        [2, 0, -3],
+      ]
+
+      for (const [x, y, z] of cases) {
+        fire.scale.set(x, y, z)
+        fire.update()
+        const s = peek(fire).uniforms.scale.value
+        expect(Number.isNaN(s.x)).toBe(false)
+        expect(Number.isNaN(s.y)).toBe(false)
+        expect(Number.isNaN(s.z)).toBe(false)
+        expect(Number.isFinite(s.x)).toBe(true)
+        expect(Number.isFinite(s.y)).toBe(true)
+        expect(Number.isFinite(s.z)).toBe(true)
+        expect(s.x).toBeGreaterThanOrEqual(0)
+        expect(s.y).toBeGreaterThanOrEqual(0)
+        expect(s.z).toBeGreaterThanOrEqual(0)
+      }
+
+      // A fully flipped scale mirrors the mesh but keeps positive extents.
+      fire.scale.set(-2, -3, -4)
+      fire.update()
+      const flipped = peek(fire).uniforms.scale.value
+      expect(flipped.x).toBeCloseTo(2)
+      expect(flipped.y).toBeCloseTo(3)
+      expect(flipped.z).toBeCloseTo(4)
+    })
+
     it('writes the inverse world matrix into the uniform', () => {
       const fire = new FireTSL({ fireTex: texture })
       fire.position.set(5, 0, 0)
