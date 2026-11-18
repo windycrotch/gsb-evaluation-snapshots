@@ -1,0 +1,1358 @@
+from __future__ import annotations
+
+import logging
+import math
+from copy import copy
+import os
+import re
+import shlex
+from shutil import copyfile, copymode, rmtree
+from tempfile import mkdtemp, mkstemp
+from typing import TYPE_CHECKING, Iterable, Iterator, Literal, TypedDict, Union
+
+from mutagen.id3 import ID3, TXXX
+from mutagen.mp3 import MP3
+from mutagen.mp4 import MP4
+from mutagen.oggopus import OggOpus
+from mutagen.oggvorbis import OggVorbis
+
+from ._cmd_utils import (
+    DUR_REGEX,
+    PCM_INCOMPATIBLE_EXTS,
+    PCM_INCOMPATIBLE_FORMATS,
+    CommandRunner,
+    get_muxer_default_audio_encoder,
+)
+from ._errors import FFmpegNormalizeError
+from ._streams import (
+    AudioStream,
+    LoudnessStatisticsWithMetadata,
+    SubtitleStream,
+    SummaryRow,
+    VideoStream,
+    VerificationResult,
+)
+
+if TYPE_CHECKING:
+    from ffmpeg_normalize import FFmpegNormalize
+
+_logger = logging.getLogger(__name__)
+
+# Note: this does not contain MP3, see https://github.com/slhck/ffmpeg-normalize/issues/246
+# We may need to remove other formats as well, to be checked.
+AUDIO_ONLY_FORMATS = {"aac", "ast", "mka", "oga", "ogg", "opus", "wav"}
+ONE_STREAM = {"aac", "ast", "flac", "mp3", "wav"}
+
+
+def _to_ms(**kwargs: str) -> int:
+    hour = int(kwargs.get("hour", 0))
+    minute = int(kwargs.get("min", 0))
+    sec = int(kwargs.get("sec", 0))
+    ms = int(kwargs.get("ms", 0))
+
+    return (hour * 60 * 60 * 1000) + (minute * 60 * 1000) + (sec * 1000) + ms
+
+
+class StreamDict(TypedDict):
+    audio: dict[int, AudioStream]
+    video: dict[int, VideoStream]
+    subtitle: dict[int, SubtitleStream]
+
+
+class MediaFile:
+    """
+    Class that holds a file, its streams and adjustments
+    """
+
+    def __init__(
+        self, ffmpeg_normalize: FFmpegNormalize, input_file: str, output_file: str
+    ):
+        """
+        Initialize a media file for later normalization by parsing the streams.
+
+        Args:
+            ffmpeg_normalize (FFmpegNormalize): reference to overall settings
+            input_file (str): Path to input file
+            output_file (str): Path to output file
+        """
+        self.ffmpeg_normalize = ffmpeg_normalize
+        self.skip = False
+        # Per-file outcome, reported in the --print-stats output: "normalized"
+        # (default), "skipped" (already within threshold of target), or "error".
+        # "error" is set by FFmpegNormalize.run_normalization when processing
+        # fails; on failure, self.error holds the error message.
+        self.status: str = "normalized"
+        self.error: str | None = None
+        self.input_file = input_file
+        self.output_file = output_file
+        current_ext = os.path.splitext(output_file)[1][1:]
+        # we need to check if it's empty, e.g. /dev/null or NUL
+        if current_ext == "" or self.output_file == os.devnull:
+            _logger.debug(
+                f"Current extension is unset, or output file is a null device, using extension: {self.ffmpeg_normalize.extension}"
+            )
+            self.output_ext = self.ffmpeg_normalize.extension
+        else:
+            _logger.debug(
+                f"Current extension is set from output file, using extension: {current_ext}"
+            )
+            self.output_ext = current_ext
+        self.streams: StreamDict = {"audio": {}, "video": {}, "subtitle": {}}
+        self.temp_file: Union[str, None] = None
+        self.batch_reference: float | None = None
+        # Second-pass filter chain per normalized audio stream, keyed by stream
+        # id. Populated by _get_audio_filter_cmd() and reused by
+        # _get_encoder_settings() so the normalization filter is not built twice.
+        self._stream_filter_chains: dict[int, list[str]] = {}
+        # Input (access, modification) times captured before processing, used
+        # when the keep_mtime option is enabled.
+        self.input_timestamps: tuple[float, float] | None = None
+
+        self.parse_streams()
+
+    def _stream_ids(self) -> list[int]:
+        """
+        Get all stream IDs of this file.
+
+        Returns:
+            list: List of stream IDs
+        """
+        return (
+            list(self.streams["audio"].keys())
+            + list(self.streams["video"].keys())
+            + list(self.streams["subtitle"].keys())
+        )
+
+    def __repr__(self) -> str:
+        return os.path.basename(self.input_file)
+
+    def parse_streams(self) -> None:
+        """
+        Try to parse all input streams from file and set them in self.streams.
+
+        Raises:
+            FFmpegNormalizeError: If no audio streams are found
+        """
+        _logger.debug(f"Parsing streams of {self.input_file}")
+
+        cmd = [
+            self.ffmpeg_normalize.ffmpeg_exe,
+            "-i",
+            self.input_file,
+            "-c",
+            "copy",
+            "-t",
+            "0",
+            "-map",
+            "0",
+            "-f",
+            "null",
+            os.devnull,
+        ]
+
+        output = CommandRunner().run_command(cmd).get_output()
+
+        _logger.debug("Stream parsing command output:")
+        _logger.debug(output)
+
+        output_lines = [line.strip() for line in output.split("\n")]
+
+        # First pass: parse disposition flags for each stream
+        stream_dispositions: dict[int, bool] = {}
+
+        for line in output_lines:
+            if line.startswith("Stream"):
+                if stream_id_match := re.search(r"#0:([\d]+)", line):
+                    stream_id = int(stream_id_match.group(1))
+                    # Check if (default) appears on the Stream line
+                    is_default = "(default)" in line
+                    stream_dispositions[stream_id] = is_default
+
+        # Second pass: parse stream information
+        duration = None
+        for line in output_lines:
+            if "Duration" in line:
+                if duration_search := DUR_REGEX.search(line):
+                    duration = _to_ms(**duration_search.groupdict()) / 1000
+                    _logger.debug(f"Found duration: {duration} s")
+                else:
+                    _logger.warning("Could not extract duration from input file!")
+
+            if not line.startswith("Stream"):
+                continue
+
+            if stream_id_match := re.search(r"#0:([\d]+)", line):
+                stream_id = int(stream_id_match.group(1))
+                if stream_id in self._stream_ids():
+                    continue
+            else:
+                continue
+
+            is_default = stream_dispositions.get(stream_id, False)
+
+            if "Audio" in line:
+                _logger.debug(
+                    f"Found audio stream at index {stream_id} (default: {is_default})"
+                )
+                sample_rate_match = re.search(r"(\d+) Hz", line)
+                sample_rate = (
+                    int(sample_rate_match.group(1)) if sample_rate_match else None
+                )
+                bit_depth_match = re.search(r"([sfu])(\d+)(p|le|be)?", line)
+                bit_depth = int(bit_depth_match.group(2)) if bit_depth_match else None
+                is_float = bit_depth_match.group(1) == "f" if bit_depth_match else False
+                self.streams["audio"][stream_id] = AudioStream(
+                    self.ffmpeg_normalize,
+                    self,
+                    stream_id,
+                    sample_rate,
+                    bit_depth,
+                    duration,
+                    is_default,
+                    is_float,
+                )
+
+            elif "Video" in line:
+                _logger.debug(f"Found video stream at index {stream_id}")
+                self.streams["video"][stream_id] = VideoStream(
+                    self.ffmpeg_normalize,
+                    self,
+                    stream_id,
+                    attached_pic="(attached pic)" in line,
+                )
+
+            elif "Subtitle" in line:
+                _logger.debug(f"Found subtitle stream at index {stream_id}")
+                self.streams["subtitle"][stream_id] = SubtitleStream(
+                    self.ffmpeg_normalize, self, stream_id
+                )
+
+        if not self.streams["audio"]:
+            raise FFmpegNormalizeError(
+                f"Input file {self.input_file} does not contain any audio streams"
+            )
+
+        if (
+            self.output_ext.lower() in ONE_STREAM
+            and len(self.streams["audio"].values()) > 1
+        ):
+            _logger.warning(
+                "Output file only supports one stream. Keeping only first audio stream."
+            )
+            first_stream = list(self.streams["audio"].values())[0]
+            self.streams["audio"] = {first_stream.stream_id: first_stream}
+            self.streams["video"] = {}
+            self.streams["subtitle"] = {}
+
+    def _get_streams_to_normalize(self) -> list[AudioStream]:
+        """
+        Determine which audio streams to normalize based on configuration.
+
+        Returns:
+            list[AudioStream]: List of audio streams to normalize
+        """
+        all_audio_streams = list(self.streams["audio"].values())
+
+        if self.ffmpeg_normalize.audio_streams is not None:
+            # User specified specific stream indices
+            selected_streams = [
+                stream
+                for stream in all_audio_streams
+                if stream.stream_id in self.ffmpeg_normalize.audio_streams
+            ]
+            if not selected_streams:
+                _logger.warning(
+                    f"No audio streams found matching indices {self.ffmpeg_normalize.audio_streams}. "
+                    f"Available streams: {[s.stream_id for s in all_audio_streams]}"
+                )
+            else:
+                _logger.info(
+                    f"Normalizing selected audio streams: {[s.stream_id for s in selected_streams]}"
+                )
+            return selected_streams
+
+        elif self.ffmpeg_normalize.audio_default_only:
+            # Only normalize streams with default disposition
+            default_streams = [
+                stream for stream in all_audio_streams if stream.is_default
+            ]
+            if not default_streams:
+                _logger.warning(
+                    "No audio streams with 'default' disposition found. "
+                    f"Available streams: {[s.stream_id for s in all_audio_streams]}"
+                )
+            else:
+                _logger.info(
+                    f"Normalizing default audio streams: {[s.stream_id for s in default_streams]}"
+                )
+            return default_streams
+
+        else:
+            # Normalize all streams (default behavior)
+            return all_audio_streams
+
+    def run_normalization(self, batch_reference: float | None = None) -> None:
+        """
+        Run the normalization process for this file.
+
+        Args:
+            batch_reference (float | None, optional): Reference loudness for batch mode.
+                If provided, the first pass is skipped (assumed already done) and this
+                reference is used to calculate relative adjustments. Defaults to None.
+        """
+        _logger.debug(f"Running normalization for {self.input_file}")
+
+        # Store batch reference for use in second pass
+        self.batch_reference = batch_reference
+
+        # Capture the input file's timestamps before processing, since an
+        # in-place overwrite would otherwise lose the original modification time.
+        if self.ffmpeg_normalize.keep_mtime:
+            try:
+                stat = os.stat(self.input_file)
+                self.input_timestamps = (stat.st_atime, stat.st_mtime)
+            except OSError as e:
+                _logger.warning(
+                    f"Could not read timestamps from {self.input_file}: {e}"
+                )
+
+        # run the first pass to get loudness stats, unless in dynamic EBU mode or batch mode
+        # (in batch mode, first pass is already done in FFmpegNormalize.run_normalization)
+        if batch_reference is None:
+            if not (
+                self.ffmpeg_normalize.dynamic
+                and self.ffmpeg_normalize.normalization_type == "ebu"
+            ):
+                self._first_pass()
+            else:
+                _logger.debug(
+                    "Dynamic EBU mode: First pass will not run, as it is not needed."
+                )
+        else:
+            _logger.debug(
+                f"Batch mode: Skipping first pass (already completed), using batch reference = {batch_reference:.2f}"
+            )
+
+        # If the file is already within the configured threshold of the target
+        # level, skip normalization entirely and copy the input through to the
+        # output unchanged. This avoids needless re-encoding of files that are
+        # already at the target level.
+        if self._is_within_threshold():
+            self._handle_skip()
+            return
+
+        temp_dir = None
+
+        if self.ffmpeg_normalize.replaygain:
+            _logger.debug(
+                "ReplayGain mode: Second pass will run with temporary file to get stats."
+            )
+            temp_dir = mkdtemp()
+            self.temp_file = os.path.join(temp_dir, f"out.{self.output_ext}")
+            self.output_file = self.temp_file
+
+        # run the second pass as a whole.
+        with self.ffmpeg_normalize.progress_display.task("Second pass") as update:
+            for progress in self._second_pass():
+                update(progress)
+
+        # remove temp dir; this will remove the temp file as well if it has not been renamed (e.g. for replaygain)
+        if temp_dir and os.path.exists(temp_dir):
+            rmtree(temp_dir, ignore_errors=True)
+
+        # This will use stats from ebu_pass2 if available (from the main second pass),
+        # or fall back to ebu_pass1.
+        if self.ffmpeg_normalize.replaygain:
+            _logger.debug(
+                "ReplayGain tagging is enabled. Proceeding with tag calculation/application."
+            )
+            self._run_replaygain()
+        else:
+            # Strip any existing ReplayGain tags from the output file
+            # since they are no longer accurate after normalization
+            self._strip_replaygain_tags(self.output_file)
+            # Copy input timestamps last, after any tag modifications, so the
+            # output ends up with the original modification time.
+            if self.ffmpeg_normalize.keep_mtime and not self.ffmpeg_normalize.dry_run:
+                self._apply_input_timestamps()
+            _logger.info(f"Normalized file written to {self.output_file}")
+
+    def verify_output(self) -> None:
+        """Verify encoded audio, restoring requested timestamps after reading it."""
+        try:
+            self._verify_output()
+        finally:
+            if self.ffmpeg_normalize.keep_mtime:
+                self._apply_input_timestamps()
+
+    def _verify_output(self) -> None:
+        """Measure encoded audio without reapplying filters or input options.
+
+        Only normalized streams are checked. They precede passthrough and
+        original audio in encoded outputs; skipped files retain input indices.
+        Verification keeps the encoded file even if a check fails.
+        """
+        config = copy(self.ffmpeg_normalize)
+        config.pre_filter = config.post_filter = None
+        config.extra_input_options = None
+        config.audio_channels = None
+        measured_file = MediaFile(config, self.output_file, os.devnull)
+        selected = self._get_streams_to_normalize()
+        output_streams = list(measured_file.streams["audio"].values())
+        if self.status == "skipped":
+            output_streams = [
+                measured_file.streams["audio"][stream.stream_id] for stream in selected
+            ]
+        if not selected or len(output_streams) < len(selected):
+            raise FFmpegNormalizeError(
+                "Cannot verify output: selected audio streams are missing"
+            )
+
+        failures: list[str] = []
+        for source, measured in zip(selected, output_streams):
+            summary = source.get_summary()
+            expected = summary["output_level"]
+            if config.normalization_type == "ebu":
+                for _ in measured.parse_loudnorm_stats():
+                    pass
+                stats = measured.loudness_statistics["ebu_pass1"]
+                if stats is None:
+                    raise FFmpegNormalizeError(
+                        "Cannot verify output: loudness measurement is missing"
+                    )
+                level, peak = float(stats["input_i"]), float(stats["input_tp"])
+                if self.status != "skipped":
+                    expected = source.verification_target_level
+                    if expected is None:
+                        expected = summary["input_level"]
+                peak_limit = config.true_peak
+            else:
+                for _ in measured.parse_astats():
+                    pass
+                level = measured.loudness_statistics[
+                    "mean" if config.normalization_type == "rms" else "max"
+                ]
+                peak = measured.loudness_statistics["max"]
+                peak_limit = (
+                    config.target_level if config.normalization_type == "peak" else 0.0
+                )
+
+            if self.status == "skipped" and summary["output_peak"] is not None:
+                peak_limit = summary["output_peak"]
+
+            def finite(value: float | None) -> float | None:
+                return value if value is not None and math.isfinite(value) else None
+
+            level, peak, expected = finite(level), finite(peak), finite(expected)
+            errors: list[str] = []
+            if level is None or expected is None:
+                errors.append("output level or expected level is not finite")
+            elif abs(level - expected) > config.verify_loudness_tolerance:
+                errors.append(
+                    f"level {level:.2f} differs from expected {expected:.2f} "
+                    f"by more than {config.verify_loudness_tolerance:g} dB/LU"
+                )
+            if peak is None:
+                errors.append("output peak is not finite")
+            elif peak > peak_limit + config.verify_peak_tolerance:
+                errors.append(
+                    f"peak {peak:.2f} exceeds ceiling {peak_limit:.2f} "
+                    f"plus {config.verify_peak_tolerance:g} dB tolerance"
+                )
+            result: VerificationResult = {
+                "output_stream_id": measured.stream_id,
+                "output_level": level,
+                "output_peak": peak,
+                "expected_level": expected,
+                "peak_limit": peak_limit,
+                "loudness_tolerance": config.verify_loudness_tolerance,
+                "peak_tolerance": config.verify_peak_tolerance,
+                "passed": not errors,
+                "errors": errors,
+            }
+            source.verification = result
+            if errors:
+                failures.append(f"stream {source.stream_id}: " + "; ".join(errors))
+        if failures:
+            raise FFmpegNormalizeError(
+                "Encoded-output verification failed: " + "; ".join(failures)
+            )
+        _logger.info(f"Encoded-output verification passed for {self.output_file}")
+
+    def _is_within_threshold(self) -> bool:
+        """
+        Return whether every stream selected for normalization is already
+        within the configured threshold of the target level, meaning the file
+        can be copied through unchanged instead of being re-normalized.
+
+        The check compares the measured level against the absolute target level
+        (integrated loudness for EBU, peak/RMS level otherwise). It is disabled
+        when the threshold is zero or less, in batch mode (where files are
+        adjusted relative to a shared reference rather than an absolute target),
+        in ReplayGain mode (which only writes tags), when a pre/post filter or
+        channel downmix is requested (since these change the audio), and when
+        the output extension differs from the input (since the file is copied
+        verbatim, a container change would otherwise produce an invalid file).
+
+        Returns:
+            bool: True if the file should be skipped, False otherwise.
+        """
+        threshold = self.ffmpeg_normalize.threshold
+        if threshold <= 0:
+            return False
+
+        if self.ffmpeg_normalize.batch or self.ffmpeg_normalize.replaygain:
+            return False
+
+        if (
+            self.ffmpeg_normalize.pre_filter
+            or self.ffmpeg_normalize.post_filter
+            or self.ffmpeg_normalize.audio_channels
+        ):
+            return False
+
+        # A skipped file is copied verbatim, which only yields a valid file when
+        # the container stays the same. If the output extension differs, fall
+        # back to normal normalization so the requested format is produced.
+        input_ext = os.path.splitext(self.input_file)[1][1:].lower()
+        if input_ext != self.output_ext.lower():
+            return False
+
+        norm_type = self.ffmpeg_normalize.normalization_type
+        target = self.ffmpeg_normalize.target_level
+        streams = self._get_streams_to_normalize()
+        if not streams:
+            return False
+
+        for stream in streams:
+            measured: float | None
+            if norm_type == "ebu":
+                ebu_stats = stream.loudness_statistics["ebu_pass1"]
+                if ebu_stats is None:
+                    return False
+                measured = ebu_stats["input_i"]
+            elif norm_type == "peak":
+                measured = stream.loudness_statistics["max"]
+            else:  # rms
+                measured = stream.loudness_statistics["mean"]
+
+            if measured is None:
+                return False
+            if abs(target - float(measured)) > threshold:
+                return False
+
+        return True
+
+    def _handle_skip(self) -> None:
+        """
+        Mark this file as skipped (already at target) and copy the input
+        through to the output unchanged.
+
+        The input is copied verbatim (codec and other output options are not
+        applied to skipped files; use a threshold of 0 to always re-encode).
+        Stale ReplayGain tags are still stripped from the output, and the input
+        modification time is preserved if requested.
+        """
+        self.status = "skipped"
+        _logger.info(
+            f"{self.input_file}: already within {self.ffmpeg_normalize.threshold} "
+            f"of target level {self.ffmpeg_normalize.target_level}, "
+            "skipping normalization"
+        )
+
+        if self.ffmpeg_normalize.dry_run:
+            _logger.warning("Dry run used, not actually copying the file")
+            return
+
+        if self.output_file == os.devnull:
+            return
+
+        if os.path.realpath(self.input_file) != os.path.realpath(self.output_file):
+            try:
+                copyfile(self.input_file, self.output_file)
+            except OSError as e:
+                raise FFmpegNormalizeError(
+                    f"Could not copy {self.input_file} to {self.output_file}: {e}"
+                )
+        else:
+            _logger.debug(
+                "Output file is the same as the input file, leaving it unchanged"
+            )
+
+        # Remove any existing ReplayGain tags from the output, matching the
+        # behavior of a normal run.
+        self._strip_replaygain_tags(self.output_file)
+
+        if self.ffmpeg_normalize.keep_mtime:
+            self._apply_input_timestamps()
+
+        _logger.info(f"Skipped file copied to {self.output_file}")
+
+    def _apply_input_timestamps(self) -> None:
+        """
+        Copy the input file's access and modification times to the output file.
+
+        Used when the ``keep_mtime`` option is enabled. Only the access and
+        modification times are copied; a file's creation time (which some
+        operating systems such as Windows track separately) is not affected.
+        """
+        if self.input_timestamps is None:
+            return
+        atime, mtime = self.input_timestamps
+        try:
+            os.utime(self.output_file, (atime, mtime))
+            _logger.debug(
+                f"Copied input timestamps to {self.output_file} "
+                f"(atime={atime}, mtime={mtime})"
+            )
+        except OSError as e:
+            _logger.warning(f"Could not copy timestamps to {self.output_file}: {e}")
+
+    def _run_replaygain(self) -> None:
+        """
+        Run the replaygain process for this file.
+        """
+        _logger.debug(f"Running replaygain for {self.input_file}")
+
+        # get the audio streams
+        audio_streams = list(self.streams["audio"].values())
+
+        # Attempt to use EBU pass 2 statistics, which account for pre-filters.
+        # These are populated by the main second pass if it runs (not a dry run)
+        # and normalization_type is 'ebu'.
+        loudness_stats_source = "ebu_pass2"
+        loudnorm_stats = audio_streams[0].loudness_statistics.get("ebu_pass2")
+
+        if loudnorm_stats is None:
+            _logger.warning(
+                "ReplayGain: Second pass EBU statistics (ebu_pass2) not found. "
+                "Falling back to first pass EBU statistics (ebu_pass1). "
+                "This may not account for pre-filters if any are used."
+            )
+            loudness_stats_source = "ebu_pass1"
+            loudnorm_stats = audio_streams[0].loudness_statistics.get("ebu_pass1")
+
+        if loudnorm_stats is None:
+            _logger.error(
+                f"ReplayGain: No loudness statistics available from {loudness_stats_source} (and fallback) for stream 0. "
+                "Cannot calculate ReplayGain tags."
+            )
+            return
+
+        _logger.debug(
+            f"Using statistics from {loudness_stats_source} for ReplayGain calculation."
+        )
+
+        # apply the replaygain tag from the first audio stream (to all audio streams)
+        if len(audio_streams) > 1:
+            _logger.warning(
+                f"Your input file has {len(audio_streams)} audio streams. "
+                "Only the first audio stream's replaygain tag will be applied. "
+                "All audio streams will receive the same tag."
+            )
+
+        target_level = self.ffmpeg_normalize.target_level
+        # Use 'input_i' and 'input_tp' from the chosen stats.
+        # For ebu_pass2, these are measurements *after* pre-filter but *before* loudnorm adjustment.
+        input_i = loudnorm_stats.get("input_i")
+        input_tp = loudnorm_stats.get("input_tp")
+
+        if input_i is None or input_tp is None:
+            _logger.error(
+                f"ReplayGain: 'input_i' or 'input_tp' missing from {loudness_stats_source} statistics. "
+                "Cannot calculate ReplayGain tags."
+            )
+            return
+
+        track_gain = -(input_i - target_level)  # dB
+        track_peak = 10 ** (input_tp / 20)  # linear scale
+
+        _logger.debug(f"Calculated Track gain: {track_gain:.2f} dB")
+        _logger.debug(f"Calculated Track peak: {track_peak:.2f}")
+
+        if not self.ffmpeg_normalize.dry_run:  # This uses the overall dry_run state
+            self._write_replaygain_tags(track_gain, track_peak)
+        else:
+            _logger.warning(
+                "Overall dry_run is enabled, not actually writing ReplayGain tags to the file. "
+                "Tag calculation based on available stats was performed."
+            )
+
+    def _write_replaygain_tags(self, track_gain: float, track_peak: float) -> None:
+        """
+        Write the replaygain tags to the input file.
+
+        This is based on the code from bohning/usdb_syncer, licensed under the MIT license.
+        See: https://github.com/bohning/usdb_syncer/blob/2fa638c4f487dffe9f5364f91e156ba54cb20233/src/usdb_syncer/resource_dl.py
+        """
+        _logger.debug(f"Writing ReplayGain tags to {self.input_file}")
+
+        input_file_ext = os.path.splitext(self.input_file)[1]
+        if input_file_ext == ".mp3":
+            mp3 = MP3(self.input_file, ID3=ID3)
+            if not mp3.tags:
+                return
+            mp3.tags.add(
+                TXXX(desc="REPLAYGAIN_TRACK_GAIN", text=[f"{track_gain:.2f} dB"])
+            )
+            mp3.tags.add(TXXX(desc="REPLAYGAIN_TRACK_PEAK", text=[f"{track_peak:.6f}"]))
+            mp3.save()
+        elif input_file_ext in [".mp4", ".m4a", ".m4v", ".mov"]:
+            mp4 = MP4(self.input_file)
+            if not mp4.tags:
+                mp4.add_tags()
+            if not mp4.tags:
+                return
+            mp4.tags["----:com.apple.iTunes:REPLAYGAIN_TRACK_GAIN"] = [
+                f"{track_gain:.2f} dB".encode()
+            ]
+            mp4.tags["----:com.apple.iTunes:REPLAYGAIN_TRACK_PEAK"] = [
+                f"{track_peak:.6f}".encode()
+            ]
+            mp4.save()
+        elif input_file_ext == ".ogg":
+            ogg = OggVorbis(self.input_file)
+            ogg["REPLAYGAIN_TRACK_GAIN"] = [f"{track_gain:.2f} dB"]
+            ogg["REPLAYGAIN_TRACK_PEAK"] = [f"{track_peak:.6f}"]
+            ogg.save()
+        elif input_file_ext == ".opus":
+            opus = OggOpus(self.input_file)
+            # See https://datatracker.ietf.org/doc/html/rfc7845#section-5.2.1
+            opus["R128_TRACK_GAIN"] = [str(round(256 * track_gain))]
+            opus.save()
+        else:
+            _logger.error(
+                f"Unsupported input file extension: {input_file_ext} for writing replaygain tags. "
+                "Only .mp3, .mp4/.m4a, .ogg, .opus are supported. "
+                "If you think this should support more formats, please let me know at "
+                "https://github.com/slhck/ffmpeg-normalize/issues"
+            )
+            return
+
+        _logger.info(
+            f"Successfully wrote replaygain tags to input file {self.input_file}"
+        )
+
+    def _strip_replaygain_tags(self, output_file: str) -> None:
+        """
+        Strip ReplayGain tags from the output file after normalization.
+
+        This ensures that old ReplayGain tags from the input are removed,
+        since they are no longer accurate after normalization.
+
+        Args:
+            output_file (str): Path to the output file to strip tags from
+        """
+        _logger.debug(f"Stripping ReplayGain tags from {output_file}")
+
+        output_file_ext = os.path.splitext(output_file)[1]
+        if output_file_ext == ".mp3":
+            try:
+                mp3 = MP3(output_file, ID3=ID3)
+                if not mp3.tags:
+                    return
+                # Remove REPLAYGAIN_* tags
+                tags_to_remove = [
+                    key for key in mp3.tags if key.startswith("TXXX:REPLAYGAIN_")
+                ]
+                for tag in tags_to_remove:
+                    del mp3.tags[tag]
+                if tags_to_remove:
+                    mp3.save()
+                    _logger.debug(
+                        f"Stripped {len(tags_to_remove)} ReplayGain tag(s) from {output_file}"
+                    )
+            except Exception as e:
+                _logger.warning(
+                    f"Could not strip ReplayGain tags from {output_file}: {e}"
+                )
+        elif output_file_ext in [".mp4", ".m4a", ".m4v", ".mov"]:
+            try:
+                mp4 = MP4(output_file)
+                if not mp4.tags:
+                    return
+                # Remove REPLAYGAIN_* tags
+                tags_to_remove = [
+                    key
+                    for key in mp4.tags
+                    if "REPLAYGAIN_" in key.upper() or "REPLAYGAIN" in key.upper()
+                ]
+                for tag in tags_to_remove:
+                    del mp4.tags[tag]
+                if tags_to_remove:
+                    mp4.save()
+                    _logger.debug(
+                        f"Stripped {len(tags_to_remove)} ReplayGain tag(s) from {output_file}"
+                    )
+            except Exception as e:
+                _logger.warning(
+                    f"Could not strip ReplayGain tags from {output_file}: {e}"
+                )
+        elif output_file_ext == ".ogg":
+            try:
+                ogg = OggVorbis(output_file)
+                # Remove REPLAYGAIN_* tags (case-insensitive)
+                tags_to_remove = [
+                    key for key in ogg.keys() if key.upper().startswith("REPLAYGAIN_")
+                ]
+                for tag in tags_to_remove:
+                    del ogg[tag]
+                if tags_to_remove:
+                    ogg.save()
+                    _logger.debug(
+                        f"Stripped {len(tags_to_remove)} ReplayGain tag(s) from {output_file}"
+                    )
+            except Exception as e:
+                _logger.warning(
+                    f"Could not strip ReplayGain tags from {output_file}: {e}"
+                )
+        elif output_file_ext == ".opus":
+            try:
+                opus = OggOpus(output_file)
+                # Remove R128_* tags (Opus uses R128 instead of REPLAYGAIN, case-insensitive)
+                tags_to_remove = [
+                    key for key in opus.keys() if key.upper().startswith("R128_")
+                ]
+                for tag in tags_to_remove:
+                    del opus[tag]
+                if tags_to_remove:
+                    opus.save()
+                    _logger.debug(
+                        f"Stripped {len(tags_to_remove)} R128 tag(s) from {output_file}"
+                    )
+            except Exception as e:
+                _logger.warning(
+                    f"Could not strip ReplayGain tags from {output_file}: {e}"
+                )
+        else:
+            # For other formats, we don't need to strip tags
+            _logger.debug(
+                f"Skipping ReplayGain tag stripping for {output_file_ext} (not supported/needed)"
+            )
+
+    def _can_write_output_video(self) -> bool:
+        """
+        Determine whether the output file can contain video at all.
+
+        Returns:
+            bool: True if the output file can contain video, False otherwise
+        """
+        if self.output_ext.lower() in AUDIO_ONLY_FORMATS:
+            return False
+
+        # FLAC holds pictures (cover art), not video
+        if self.output_ext.lower() == "flac" and not all(
+            stream.attached_pic for stream in self.streams["video"].values()
+        ):
+            return False
+
+        return not self.ffmpeg_normalize.video_disable
+
+    def _first_pass(self) -> None:
+        """
+        Run the first pass of the normalization process.
+        """
+        _logger.debug(f"Parsing normalization info for {self.input_file}")
+
+        streams_to_normalize = self._get_streams_to_normalize()
+
+        for index, audio_stream in enumerate(streams_to_normalize):
+            if self.ffmpeg_normalize.normalization_type == "ebu":
+                fun = getattr(audio_stream, "parse_loudnorm_stats")
+            else:
+                fun = getattr(audio_stream, "parse_astats")
+
+            description = f"First pass, stream {index + 1}/{len(streams_to_normalize)}"
+            with self.ffmpeg_normalize.progress_display.task(description) as update:
+                for progress in fun():
+                    update(progress)
+
+    def _get_stream_filter_chain(self, audio_stream: AudioStream) -> list[str]:
+        """
+        Return the ordered list of ffmpeg audio filters applied to a single
+        stream in the second pass: the optional pre-filter, channel conversion,
+        the normalization filter itself (loudnorm for EBU, or the volume /
+        dynaudnorm filter for peak / RMS), and the optional post-filter.
+
+        Returns:
+            list[str]: the filters, in application order
+        """
+        skip_normalization = False
+        if self.ffmpeg_normalize.lower_only and not (
+            self.batch_reference is not None
+            and self.ffmpeg_normalize.normalization_type in ("peak", "rms")
+        ):
+            if self.ffmpeg_normalize.normalization_type == "ebu":
+                if (
+                    audio_stream.loudness_statistics["ebu_pass1"] is not None
+                    and audio_stream.loudness_statistics["ebu_pass1"]["input_i"]
+                    < self.ffmpeg_normalize.target_level
+                ):
+                    skip_normalization = True
+            elif self.ffmpeg_normalize.normalization_type == "peak":
+                if (
+                    audio_stream.loudness_statistics["max"] is not None
+                    and audio_stream.loudness_statistics["max"]
+                    < self.ffmpeg_normalize.target_level
+                ):
+                    skip_normalization = True
+            elif self.ffmpeg_normalize.normalization_type == "rms":
+                if (
+                    audio_stream.loudness_statistics["mean"] is not None
+                    and audio_stream.loudness_statistics["mean"]
+                    < self.ffmpeg_normalize.target_level
+                ):
+                    skip_normalization = True
+
+        if skip_normalization:
+            _logger.warning(
+                f"Stream {audio_stream.stream_id} had measured input loudness lower than target, skipping normalization."
+            )
+            normalization_filter = "acopy"
+            audio_stream.applied_gain = 0.0
+        else:
+            if self.ffmpeg_normalize.normalization_type == "ebu":
+                normalization_filter = audio_stream.get_second_pass_opts_ebu(
+                    batch_reference=self.batch_reference
+                )
+            else:
+                normalization_filter = audio_stream.get_second_pass_opts_peakrms(
+                    batch_reference=self.batch_reference
+                )
+
+        filter_chain = []
+
+        if self.ffmpeg_normalize.pre_filter:
+            filter_chain.append(self.ffmpeg_normalize.pre_filter)
+
+        # Apply channel conversion before normalization so that the
+        # normalization filter operates on the same channel layout that
+        # was measured in the first pass. See issue #316.
+        if self.ffmpeg_normalize.audio_channels:
+            filter_chain.append(
+                f"aformat=sample_fmts=fltp:channel_layouts={self.ffmpeg_normalize.audio_channels}c"
+            )
+
+        filter_chain.append(normalization_filter)
+
+        if self.ffmpeg_normalize.post_filter:
+            filter_chain.append(self.ffmpeg_normalize.post_filter)
+
+        return filter_chain
+
+    def _get_audio_filter_cmd(self) -> tuple[str, list[str]]:
+        """
+        Return the audio filter command and output labels needed.
+
+        Returns:
+            tuple[str, list[str]]: filter_complex command and the required output labels
+        """
+        filter_chains = []
+        output_labels = []
+
+        self._stream_filter_chains = {}
+
+        for audio_stream in self._get_streams_to_normalize():
+            filter_chain = self._get_stream_filter_chain(audio_stream)
+            self._stream_filter_chains[audio_stream.stream_id] = filter_chain
+
+            input_label = f"[0:{audio_stream.stream_id}]"
+            output_label = f"[norm{audio_stream.stream_id}]"
+            output_labels.append(output_label)
+
+            filter_chains.append(input_label + ",".join(filter_chain) + output_label)
+
+        filter_complex_cmd = ";".join(filter_chains)
+
+        return filter_complex_cmd, output_labels
+
+    def _get_encoder_settings(
+        self, audio_stream: AudioStream, audio_codec: str | None
+    ) -> str:
+        """
+        Return an ffmpeg-command-equivalent description of how a single audio
+        stream is encoded in the second pass: the codec, then the bitrate,
+        sample rate and channel count when set, followed by the effective
+        filter chain (which includes the loudnorm measured values) and finally
+        any ``--extra-output-options``.
+
+        Written as the ``ENCODER_SETTINGS`` stream tag when
+        ``write_encoder_settings`` is enabled. The filter chain comes from the
+        cache populated by :meth:`_get_audio_filter_cmd`, which must run first.
+        The loudnorm ``print_format`` option is dropped, as it only controls
+        first-pass diagnostics and not the normalization itself. Extra output
+        options are appended verbatim: they commonly carry encoder tuning
+        (``-q:a``, ``-compression_level``, ``-application`` ...), but are not
+        audio-scoped, so an unrelated option passed there will also appear here.
+        Extra *input* options are demuxer settings and are deliberately omitted.
+
+        Returns:
+            str: e.g. ``-c:a libopus -b:a 128000 -af loudnorm=i=-23.0:...``
+        """
+        codec = audio_codec if audio_codec else audio_stream.get_pcm_codec()
+        args = ["-c:a", codec]
+        if self.ffmpeg_normalize.audio_bitrate:
+            args += ["-b:a", str(self.ffmpeg_normalize.audio_bitrate)]
+        if self.ffmpeg_normalize.sample_rate:
+            args += ["-ar", str(self.ffmpeg_normalize.sample_rate)]
+        if self.ffmpeg_normalize.audio_channels:
+            args += ["-ac", str(self.ffmpeg_normalize.audio_channels)]
+        filter_chain = self._stream_filter_chains.get(audio_stream.stream_id, [])
+        if filter_chain:
+            af = re.sub(r":print_format=\w+", "", ",".join(filter_chain))
+            args += ["-af", af]
+        if self.ffmpeg_normalize.extra_output_options:
+            args += self.ffmpeg_normalize.extra_output_options
+        return shlex.join(args)
+
+    def _get_audio_codec(self) -> str | None:
+        """
+        Return the audio encoder to use for normalized streams, or None to use
+        the bit-depth-aware PCM default.
+
+        An explicit ``--audio-codec`` (``-c:a``) always takes precedence.
+        Otherwise, for a container that cannot store PCM (e.g. FLAC, MP3, Opus),
+        fall back to the codec ffmpeg itself would default to for that container,
+        so audio-only outputs work without requiring ``-c:a``. PCM-friendly
+        containers (e.g. WAV, Matroska) keep the lossless PCM default regardless
+        of their own muxer default.
+
+        Returns:
+            str | None: The encoder name, or None to use the PCM default.
+        """
+        if self.ffmpeg_normalize.audio_codec:
+            return self.ffmpeg_normalize.audio_codec
+
+        output_format = self.ffmpeg_normalize.output_format
+        if output_format in PCM_INCOMPATIBLE_FORMATS:
+            container = output_format
+        elif self.output_ext.lower() in PCM_INCOMPATIBLE_EXTS:
+            container = self.output_ext
+        else:
+            return None
+
+        encoder = get_muxer_default_audio_encoder(container)
+        if encoder is not None:
+            _logger.debug(
+                f"No audio codec set; using ffmpeg's default '{encoder}' for "
+                f"container '{container}'"
+            )
+        return encoder
+
+    def _second_pass(self) -> Iterator[float]:
+        """
+        Construct the second pass command and run it.
+
+        FIXME: make this method simpler
+        """
+        _logger.info(f"Running second pass for {self.input_file}")
+
+        # get the target output stream types depending on the options
+        output_stream_types: list[Literal["audio", "video", "subtitle"]] = ["audio"]
+        if self._can_write_output_video():
+            output_stream_types.append("video")
+        if not self.ffmpeg_normalize.subtitle_disable:
+            output_stream_types.append("subtitle")
+
+        # base command, here we will add all other options
+        cmd = [self.ffmpeg_normalize.ffmpeg_exe, "-hide_banner", "-y"]
+
+        # extra options (if any)
+        if self.ffmpeg_normalize.extra_input_options:
+            cmd.extend(self.ffmpeg_normalize.extra_input_options)
+
+        # get complex filter command
+        audio_filter_cmd, output_labels = self._get_audio_filter_cmd()
+
+        # add input file and basic filter
+        cmd.extend(["-i", self.input_file, "-filter_complex", audio_filter_cmd])
+
+        # map metadata, only if needed
+        if self.ffmpeg_normalize.metadata_disable:
+            cmd.extend(["-map_metadata", "-1"])
+        else:
+            # map global metadata
+            cmd.extend(["-map_metadata", "0"])
+            # map per-stream metadata (e.g. language tags)
+            for stream_type in output_stream_types:
+                stream_key = stream_type[0]
+                if stream_type not in self.streams:
+                    continue
+                for idx, _ in enumerate(self.streams[stream_type].items()):
+                    cmd.extend(
+                        [
+                            f"-map_metadata:s:{stream_key}:{idx}",
+                            f"0:s:{stream_key}:{idx}",
+                        ]
+                    )
+
+        # map chapters if needed
+        if self.ffmpeg_normalize.chapters_disable:
+            cmd.extend(["-map_chapters", "-1"])
+        else:
+            cmd.extend(["-map_chapters", "0"])
+
+        # collect all '-map' and codecs needed for output video based on input video
+        if self.streams["video"]:
+            if self._can_write_output_video():
+                for s in self.streams["video"].keys():
+                    cmd.extend(["-map", f"0:{s}"])
+                # set codec (copy by default)
+                cmd.extend(["-c:v", self.ffmpeg_normalize.video_codec])
+            else:
+                if not self.ffmpeg_normalize.video_disable:
+                    _logger.warning(
+                        f"The chosen output extension {self.output_ext} does not support video/cover art. It will be disabled."
+                    )
+
+        # Determine streams to normalize and passthrough
+        streams_to_normalize = self._get_streams_to_normalize()
+        all_audio_streams = list(self.streams["audio"].values())
+
+        # Determine which streams to passthrough
+        if self.ffmpeg_normalize.keep_other_audio and (
+            self.ffmpeg_normalize.audio_streams is not None
+            or self.ffmpeg_normalize.audio_default_only
+        ):
+            streams_to_passthrough = [
+                s for s in all_audio_streams if s not in streams_to_normalize
+            ]
+        else:
+            streams_to_passthrough = []
+
+        # ... and map the output of the normalization filters
+        for ol in output_labels:
+            cmd.extend(["-map", ol])
+
+        # ... and map passthrough audio streams (copy without normalization)
+        for stream in streams_to_passthrough:
+            cmd.extend(["-map", f"0:{stream.stream_id}"])
+
+        # Track output audio stream index for codec assignment
+        output_audio_idx = 0
+
+        # Resolve the audio codec once: an explicit --audio-codec wins, otherwise
+        # fall back to ffmpeg's own default codec for the output container (None
+        # means use the bit-depth-aware PCM default).
+        audio_codec = self._get_audio_codec()
+
+        # set audio codec for normalized streams
+        for audio_stream in streams_to_normalize:
+            codec = audio_codec if audio_codec else audio_stream.get_pcm_codec()
+            cmd.extend([f"-c:a:{output_audio_idx}", codec])
+            output_audio_idx += 1
+
+        # set audio codec for passthrough streams (always copy)
+        for _ in streams_to_passthrough:
+            cmd.extend([f"-c:a:{output_audio_idx}", "copy"])
+            output_audio_idx += 1
+
+        # other audio options (if any) - only apply to normalized streams
+        if self.ffmpeg_normalize.audio_bitrate:
+            if audio_codec == "libvorbis":
+                # libvorbis takes just a "-b" option, for some reason
+                # https://github.com/slhck/ffmpeg-normalize/issues/277
+                cmd.extend(["-b", str(self.ffmpeg_normalize.audio_bitrate)])
+            else:
+                # Only apply to normalized streams
+                for idx in range(len(streams_to_normalize)):
+                    cmd.extend(
+                        [f"-b:a:{idx}", str(self.ffmpeg_normalize.audio_bitrate)]
+                    )
+        if self.ffmpeg_normalize.sample_rate:
+            # Only apply to normalized streams
+            for idx in range(len(streams_to_normalize)):
+                cmd.extend([f"-ar:a:{idx}", str(self.ffmpeg_normalize.sample_rate)])
+        if self.ffmpeg_normalize.audio_channels:
+            # Only apply to normalized streams
+            for idx in range(len(streams_to_normalize)):
+                cmd.extend([f"-ac:a:{idx}", str(self.ffmpeg_normalize.audio_channels)])
+
+        # record how each normalized stream was encoded as an ENCODER_SETTINGS
+        # tag (a Matroska/WebM convention), so the output documents itself
+        if (
+            self.ffmpeg_normalize.write_encoder_settings
+            and not self.ffmpeg_normalize.metadata_disable
+        ):
+            for idx, audio_stream in enumerate(streams_to_normalize):
+                cmd.extend(
+                    [
+                        f"-metadata:s:a:{idx}",
+                        "ENCODER_SETTINGS="
+                        + self._get_encoder_settings(audio_stream, audio_codec),
+                    ]
+                )
+
+        # carry the input bit depth through to the output encoder, if requested
+        if self.ffmpeg_normalize.keep_bit_depth:
+            for idx, audio_stream in enumerate(streams_to_normalize):
+                sample_fmt = audio_stream.get_output_sample_fmt(audio_codec)
+                if sample_fmt is not None:
+                    cmd.extend([f"-sample_fmt:a:{idx}", sample_fmt])
+
+        # ... and subtitles
+        if not self.ffmpeg_normalize.subtitle_disable:
+            for s in self.streams["subtitle"].keys():
+                cmd.extend(["-map", f"0:{s}"])
+            # copy subtitles
+            cmd.extend(["-c:s", "copy"])
+
+        if self.ffmpeg_normalize.keep_original_audio:
+            # Map all original audio streams after normalized and passthrough streams
+            for index, _ in enumerate(self.streams["audio"].items()):
+                cmd.extend(["-map", f"0:a:{index}"])
+                cmd.extend([f"-c:a:{output_audio_idx}", "copy"])
+                output_audio_idx += 1
+
+        # extra options (if any)
+        if self.ffmpeg_normalize.extra_output_options:
+            cmd.extend(self.ffmpeg_normalize.extra_output_options)
+
+        # output format (if any)
+        if self.ffmpeg_normalize.output_format:
+            cmd.extend(["-f", self.ffmpeg_normalize.output_format])
+
+        # if dry run, only show sample command
+        if self.ffmpeg_normalize.dry_run:
+            cmd.append(self.output_file)
+            _logger.warning("Dry run used, not actually running second-pass command")
+            CommandRunner(dry=True).run_command(cmd)
+            yield 100
+            return
+
+        is_in_place_overwrite = os.path.realpath(self.input_file) == os.path.realpath(
+            self.output_file
+        )
+
+        temp_file: Union[str, None] = None
+        if is_in_place_overwrite:
+            # need to create a temporary file because we cannot override
+            # the same input file
+            output_dir = os.path.dirname(self.output_file) or "."
+            fd, temp_file = mkstemp(
+                suffix=f".{self.output_ext}",
+                prefix=f".{os.path.splitext(os.path.basename(self.output_file))[0]}.",
+                dir=output_dir,
+            )
+            os.close(fd)
+            # mkstemp creates the file with mode 0600; keep the input's mode
+            copymode(self.input_file, temp_file)
+            _logger.debug(
+                f"Output file is the same as the input file, "
+                f"encoding to temporary file {temp_file} first"
+            )
+            cmd.append(temp_file)
+        else:
+            cmd.append(self.output_file)
+
+        cmd_runner = CommandRunner()
+        try:
+            yield from cmd_runner.run_ffmpeg_command(cmd)
+        except Exception as e:
+            if temp_file and os.path.exists(temp_file):
+                os.remove(temp_file)
+            raise e
+        else:
+            # for in-place normalization, move the finished temp file over the input
+            if temp_file:
+                _logger.debug(
+                    f"Moving temporary file from {temp_file} to {self.output_file}"
+                )
+                os.replace(temp_file, self.output_file)
+
+        output = cmd_runner.get_output()
+        # in the second pass, we do not normalize stream-by-stream, so we set the stats based on the
+        # overall output (which includes multiple loudnorm stats)
+        if self.ffmpeg_normalize.normalization_type == "ebu":
+            ebu_pass_2_stats = list(
+                AudioStream.prune_and_parse_loudnorm_output(output).values()
+            )
+            # Only set second pass stats for streams that were actually normalized
+            streams_to_normalize = self._get_streams_to_normalize()
+            if len(ebu_pass_2_stats) == len(streams_to_normalize):
+                for idx, audio_stream in enumerate(streams_to_normalize):
+                    audio_stream.set_second_pass_stats(ebu_pass_2_stats[idx])
+            else:
+                _logger.debug(
+                    f"Expected {len(streams_to_normalize)} EBU pass 2 statistics but got {len(ebu_pass_2_stats)}. "
+                    "This can happen when normalization is skipped (e.g., with --lower-only)."
+                )
+
+        # warn if dynamic == False and any of the second pass stats contain "normalization_type" == "dynamic"
+        if self.ffmpeg_normalize.dynamic is False:
+            for audio_stream in self.streams["audio"].values():
+                pass2_stats = audio_stream.get_stats()["ebu_pass2"]
+                if pass2_stats is None:
+                    continue
+                if pass2_stats["normalization_type"] == "dynamic":
+                    pass1_stats = audio_stream.get_stats()["ebu_pass1"]
+
+                    reason = ""
+                    if pass1_stats is not None:
+                        target_level = audio_stream.verification_target_level
+                        if target_level is None:
+                            target_level = self.ffmpeg_normalize.target_level
+                        linear_gain = target_level - pass1_stats["input_i"]
+                        estimated_tp = pass1_stats["input_tp"] + linear_gain
+                        if estimated_tp > self.ffmpeg_normalize.true_peak:
+                            min_tp = estimated_tp
+                            max_target = (
+                                self.ffmpeg_normalize.true_peak
+                                - pass1_stats["input_tp"]
+                                + pass1_stats["input_i"]
+                            )
+                            reason = (
+                                f" Reason: the input true peak ({pass1_stats['input_tp']:.2f} dBTP) is too high — "
+                                f"after linear gain of {linear_gain:.2f} dB, "
+                                f"the estimated true peak would be {estimated_tp:.2f} dBTP, "
+                                f"exceeding the target of {self.ffmpeg_normalize.true_peak} dBTP. "
+                                f"To avoid this, raise --true-peak (-tp) to at least {min_tp:.1f}, "
+                                f"or lower the target level (-t) to at most {max_target:.1f}."
+                            )
+                        elif (
+                            pass1_stats["input_lra"]
+                            > self.ffmpeg_normalize.loudness_range_target
+                        ):
+                            reason = (
+                                f" Reason: the input loudness range ({pass1_stats['input_lra']:.2f} LU) "
+                                f"exceeds the target ({self.ffmpeg_normalize.loudness_range_target:.2f} LU). "
+                                "Consider raising the target loudness range or using "
+                                "--keep-loudness-range-target / --keep-lra-above-loudness-range-target."
+                            )
+                        elif pass1_stats["input_lra"] == 0:
+                            reason = (
+                                " Reason: the measured input loudness range is zero; "
+                                "the loudnorm filter requires a nonzero measured range for linear normalization."
+                            )
+
+                    _logger.warning(
+                        f"{self.input_file}: You specified linear normalization, but the loudnorm filter "
+                        f"reverted to dynamic normalization.{reason}"
+                    )
+
+        _logger.debug("Normalization finished")
+
+    def get_stats(self) -> Iterable[LoudnessStatisticsWithMetadata]:
+        return (
+            audio_stream.get_stats() for audio_stream in self.streams["audio"].values()
+        )
+
+    def get_summary(self) -> list[SummaryRow]:
+        """
+        Return the before/after summary for each analyzed audio stream.
+
+        Streams without any measurement (e.g. streams not selected for
+        normalization) are left out, unless the file failed to process.
+
+        Returns:
+            list[SummaryRow]: One summary entry per audio stream
+        """
+        rows = [
+            audio_stream.get_summary()
+            for audio_stream in self.streams["audio"].values()
+        ]
+        return [
+            row
+            for row in rows
+            if row["status"] == "error" or row["input_level"] is not None
+        ]

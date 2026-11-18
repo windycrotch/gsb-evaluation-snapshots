@@ -1,0 +1,59 @@
+site_name: ffmpeg-normalize
+site_url: https://slhck.info/ffmpeg-normalize/
+repo_url: https://github.com/slhck/ffmpeg-normalize
+theme:
+  name: material
+  features:
+    - navigation.instant
+    - navigation.sections
+    - navigation.footer
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  font:
+    text: Roboto
+    code: Roboto Mono
+  favicon: assets/images/favicon.png
+  icon:
+    logo: material/book-open-page-variant
+plugins:
+  - search
+nav:
+  - Home: index.md
+  - Getting Started:
+    - Requirements: getting-started/requirements.md
+    - Installation: getting-started/installation.md
+    - Docker Usage: getting-started/docker.md
+  - Usage:
+    - Basic Usage: usage/basic.md
+    - File Input/Output: usage/file-input-output.md
+    - Normalization Options: usage/normalization-options.md
+    - Album/Batch Normalization: usage/album-batch-normalization.md
+    - Audio Filters: usage/audio-filters.md
+    - Presets: usage/presets.md
+    - CLI Options Reference: usage/cli-options.md
+  - Advanced:
+    - API: advanced/api.md
+    - FAQ: advanced/faq.md
+  - About:
+    - Changelog: about/changelog.md
+    - Contributing: about/contributing.md
+    - License: about/license.md
+markdown_extensions:
+  - markdown.extensions.tables
+  - markdown.extensions.toc
+  - markdown.extensions.footnotes
+  - markdown.extensions.admonition
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - pymdownx.emoji

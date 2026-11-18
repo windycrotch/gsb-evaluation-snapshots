@@ -1,0 +1,456 @@
+# CLI Options Reference
+
+This is a complete list of all command-line options supported by `ffmpeg-normalize`.
+
+## File Input/Output
+
+### `input`
+
+Input media file(s)
+
+### `--input-list INPUT_LIST`
+
+Path to a text file containing a line-separated list of input files.
+
+Example: `ffmpeg-normalize --input-list input.txt`
+
+### `-o OUTPUT [OUTPUT ...], --output OUTPUT [OUTPUT ...]`
+
+Output file names.
+
+Will be applied per input file.
+
+If no output file name is specified for an input file, the output files
+will be written to the default output folder with the name `<input>.<ext>`, where `<ext>` is the output extension (see `-ext` option).
+
+Output paths must be distinct and cannot overwrite another input in the same run, even with `--force`. Normalizing a file in place is allowed. If inputs have the same basename, specify distinct output paths with `-o`.
+
+Example: `ffmpeg-normalize 1.wav 2.wav -o 1n.wav 2n.wav`
+
+### `-of OUTPUT_FOLDER, --output-folder OUTPUT_FOLDER`
+
+Output folder (default: `normalized`)
+
+This folder will be used for input files that have no explicit output name specified.
+
+### `--keep-mtime`
+
+Copy the input file's modification time to the output file.
+
+This is useful when you want to preserve the time a file was originally added to your collection (e.g. for sorting in a music library). Only the access and modification times are copied; a file's creation time (which some operating systems such as Windows track separately) is not affected.
+
+## General
+
+### `-f, --force`
+
+Force overwrite existing files
+
+### `-d, --debug`
+
+Print debugging output
+
+### `-v, --verbose`
+
+Print verbose output
+
+### `-q, --quiet`
+
+Only print errors
+
+### `-n, --dry-run`
+
+Do not run normalization, only print what would be done
+
+### `-pr`, `--progress`
+
+Show progress bars for files and streams.
+
+Enabled by default when stderr is an interactive terminal and `--quiet` is not set; disabled otherwise (e.g. in scripts or when output is redirected). Use this option to force progress output.
+
+### `--no-progress`
+
+Do not show progress bars, even in an interactive terminal
+
+### `--version`
+
+Print version and exit
+
+### `--preset PRESET`
+
+Load options from a preset file.
+
+Preset files are JSON files located in the presets directory. The directory location depends on your OS:
+
+- **Linux/macOS:** `~/.config/ffmpeg-normalize/presets/`
+- **Windows:** `%APPDATA%\ffmpeg-normalize\presets\`
+
+Use `--list-presets` to see available presets.
+
+CLI options specified on the command line take precedence over preset values.
+
+Example: `ffmpeg-normalize input.mp3 --preset podcast`
+
+### `--list-presets`
+
+List all available presets and exit.
+
+This displays both built-in presets and any custom presets installed in your config directory.
+
+## Normalization
+
+### `-nt {ebu,rms,peak}, --normalization-type {ebu,rms,peak}`
+
+Normalization type (default: `ebu`).
+
+EBU normalization performs two passes and normalizes according to EBU R128.
+
+RMS-based normalization brings the input file to the specified RMS level.
+
+Peak normalization brings the signal to the specified peak level.
+
+### `-t TARGET_LEVEL, --target-level TARGET_LEVEL`
+
+Normalization target level in dB/LUFS (default: -23).
+
+For EBU normalization, it corresponds to Integrated Loudness Target in LUFS. The range is -70.0 - -5.0.
+
+Otherwise, the range is -99 to 0.
+
+### `-p, --print-stats`
+
+Print loudness statistics for both passes formatted as JSON to stdout.
+
+Each entry also includes a `status` field with the per-file result: `normalized`, `skipped` (already within the `--threshold` of the target, see below), or `error`. When the status is `error`, an additional `error` field has the error message.
+
+### `--print-summary`
+
+Print a before/after summary table to stderr after processing.
+
+For each file and audio stream, the table lists the input level, the output level, the output peak, the applied gain, and the status (`normalized`, `skipped`, or `error`). The header line shows the normalization type and the target. Values that are not available are shown as `-`.
+
+The values depend on the normalization type:
+
+- EBU: integrated loudness in LUFS and true peak in dBTP. The input level comes from the first pass; the output level, output true peak and gain come from the second pass. In dynamic mode, there is no first pass, so the input level comes from the second pass, and the gain is the difference between the integrated output and input loudness.
+- RMS: RMS level and sample peak in dBFS. The output values are computed from the measured input and the applied gain.
+- Peak: peak level in dBFS. The output values are computed from the measured input and the applied gain.
+
+The table labels its output values as filter statistics (EBU) or calculated from applied gain (RMS/peak). These values do not include the effect of a `--post-filter` or the final encoder. Use `--verify` to report separate measurements of the encoded output. In a dry run, output values for EBU are not available, since the second pass does not run. Streams that are not selected for normalization (see `--audio-streams` and `--audio-default-only`) are not listed.
+
+The summary goes to stderr, so it can be combined with `--print-stats`, which writes JSON to stdout.
+
+Example:
+
+```bash
+ffmpeg-normalize *.m4a --print-summary
+```
+
+```
+Summary (EBU R128 normalization, target: -23.0 LUFS, true peak: -2.0 dBTP):
+
+File        Stream  Input (LUFS)  Output (LUFS)  True peak (dBTP)  Gain (dB)  Status
+----------  ------  ------------  -------------  ----------------  ---------  ----------
+loud.m4a         0         -14.1          -23.0             -16.7       -8.9  normalized
+quiet.m4a        0         -28.1          -23.0             -17.4       +5.2  normalized
+normal.m4a       0         -21.1          -23.0             -18.4       -1.9  normalized
+```
+
+### `--verify`
+
+Decode and measure the finished output file, then check each normalized audio stream against its effective output level and peak ceiling. This adds an analysis pass over the encoded audio. Passthrough streams and copies retained with `--keep-original-audio` are not checked.
+
+The checks use:
+
+- EBU: integrated loudness in LUFS and true peak in dBTP. The effective target includes batch adjustments and `--auto-lower-loudness-target`.
+- RMS: RMS level and sample peak in dBFS. The expected level includes the applied gain, including album headroom limits and `--lower-only`. The sample peak ceiling is 0 dBFS.
+- Peak: sample peak in dBFS. The expected level includes the applied gain; the ceiling is `--target-level`.
+- Files copied through by `--threshold`: their unchanged input level and peak serve as the reference.
+
+A level deviation beyond `--verify-loudness-tolerance` or a peak above its ceiling plus `--verify-peak-tolerance` marks the file as `error` and makes the CLI exit nonzero. Non-finite measurements, such as the loudness of digital silence, fail verification. The output file is kept for inspection.
+
+`--print-stats` includes a separate `verification` object for each checked stream, with the encoded `output_stream_id`, measured `output_level` and `output_peak`, `expected_level`, `peak_limit`, the tolerances, `passed`, and `errors`. `--print-summary` prints the measurements separately from the calculated or filter-derived values.
+
+Verification is skipped during `--dry-run`. It cannot be combined with `--replaygain` or an output directed to the null device.
+
+```bash
+ffmpeg-normalize input.mp3 -o output.m4a --verify --print-summary --print-stats
+```
+
+### `--verify-loudness-tolerance`
+
+Allowed absolute deviation from the effective output level in dB/LU. Default: `0.5`. Must be finite and between 0 and 99.
+
+### `--verify-peak-tolerance`
+
+Allowed overshoot above the peak ceiling in dB. Default: `0.1`. Must be finite and between 0 and 99.
+
+Lossy encoding and post-filters can change the final level or peak. Inspect failed measurements before increasing the tolerances.
+
+### `--replaygain`
+
+Write [ReplayGain](https://en.wikipedia.org/wiki/ReplayGain) tags to the original file without normalizing.
+
+This mode will overwrite the input file and ignore other options. It will strip all ReplayGain tags.
+
+Only works with EBU normalization, and only with .mp3, .mp4/.m4a, .ogg, .opus for now.
+
+### `--batch`
+
+Preserve relative loudness between files (album mode).
+
+When operating on a group of unrelated files, you usually want all of them at the same level. However, a group of music files all from the same album is generally meant to be listened to at the relative volumes they were recorded at. In batch mode, all the specified files are considered to be part of a single album and their relative volumes are preserved. RMS mode targets the average level, reducing the shared gain if needed to avoid sample clipping. Peak mode sets the loudest sample across the album to the target level. With `--lower-only`, the shared gain cannot be positive.
+
+Batch mode works with all normalization types (EBU, RMS, peak).
+
+Example: `ffmpeg-normalize album/*.flac --batch -nt rms -t -20`
+
+**Note:** For music albums, RMS or Peak normalization is recommended over EBU. See the [FAQ](../advanced/faq.md#how-do-i-normalize-an-album-while-preserving-relative-loudness-between-tracks) for details.
+
+### `--threshold THRESHOLD`
+
+Skip normalization when a file is already within this many dB/LU of the target level (default: 0, i.e. disabled).
+
+When set to a positive value, a file whose measured level is within the threshold of the target is considered already normalized and copied through unchanged instead of being re-encoded. Its status is reported as `skipped` in the `--print-stats` output.
+
+For EBU normalization, the measured integrated loudness is compared to the target level; for peak and RMS, the measured peak/RMS level is used. The true peak and loudness range are not considered for this decision.
+
+The default of 0 always normalizes. This option has no effect in batch or ReplayGain mode, or when a pre/post filter or channel downmix is used. Skipped files are only copied verbatim when the output keeps the input's extension; if the output format differs, the file is normalized normally so the requested format is produced.
+
+## EBU R128 Normalization
+
+### `-lrt LOUDNESS_RANGE_TARGET, --loudness-range-target LOUDNESS_RANGE_TARGET`
+
+EBU Loudness Range Target in LUFS (default: 7.0).
+
+Range is 1.0 - 50.0.
+
+### `--keep-loudness-range-target`
+
+Keep the input loudness range target to allow for linear normalization.
+
+### `--keep-lra-above-loudness-range-target`
+
+Keep input loudness range above loudness range target.
+
+Can be used as an alternative to `--keep-loudness-range-target` to allow for linear normalization.
+
+### `-tp TRUE_PEAK, --true-peak TRUE_PEAK`
+
+EBU Maximum True Peak in dBTP (default: -2.0).
+
+Range is -9.0 - +0.0.
+
+### `--offset OFFSET`
+
+EBU Offset Gain (default: 0.0).
+
+The gain is applied before the true-peak limiter in the first pass only. The offset for the second pass will be automatically determined based on the first pass statistics.
+
+Range is -99.0 - +99.0.
+
+### `--lower-only`
+
+Whether the audio should not increase in loudness.
+
+If the measured loudness from the first pass is lower than the target loudness then normalization will be skipped for the audio source.
+
+This option works with all normalization types:
+
+- For **EBU** normalization, this compares input integrated loudness to the target level.
+- For **peak** normalization, this compares the input peak level to the target level.
+- For **RMS** normalization, this compares the input RMS level to the target level.
+
+### `--auto-lower-loudness-target`
+
+Automatically lower the EBU Integrated Loudness Target to prevent falling back to dynamic mode.
+
+When the required gain to reach the target loudness would push the true peak above the specified limit, the `loudnorm` filter silently falls back to dynamic processing. This option prevents that by lowering the target loudness so that the gain stays within safe limits. Specifically, it ensures that the target is lower than `input_i - input_tp + true_peak` by a small margin (0.1 LUFS).
+
+This is commonly combined with `--keep-loudness-range-target` to maximize the chance of staying in linear mode. See [normalization options](../usage/normalization-options.md#recommended-settings-for-linear-normalization) for details.
+
+### `--dual-mono`
+
+Treat mono input files as "dual-mono".
+
+If a mono file is intended for playback on a stereo system, its EBU R128 measurement will be perceptually incorrect. If set, this option will compensate for this effect. Multi-channel input files are not affected by this option.
+
+### `--dynamic`
+
+Force dynamic normalization mode.
+
+Instead of applying linear EBU R128 normalization, choose a dynamic normalization. This uses a one-pass algorithm and skips the initial media scan.
+
+Dynamic mode will automatically change the sample rate to 192 kHz. Use `-ar`/`--sample-rate` to specify a different output sample rate.
+
+## Audio Encoding
+
+### `-c:a AUDIO_CODEC, --audio-codec AUDIO_CODEC`
+
+Audio codec to use for output files.
+
+See `ffmpeg -encoders` for a list.
+
+Will use PCM audio with input stream bit depth by default. For output containers that cannot store PCM (e.g. MP3, FLAC, Opus), the codec that ffmpeg uses by default for that container is chosen automatically, so you usually do not need to set this.
+
+### `-b:a AUDIO_BITRATE, --audio-bitrate AUDIO_BITRATE`
+
+Audio bitrate in bits/s, or with K suffix.
+
+If not specified, will use codec default.
+
+### `-ar SAMPLE_RATE, --sample-rate SAMPLE_RATE`
+
+Audio sample rate to use for output files in Hz.
+
+Will use input sample rate by default, except for EBU normalization, which will change the input sample rate to 192 kHz.
+
+### `-ac`, `--audio-channels`
+
+Set the number of audio channels. If not specified, the input channel layout will be used. This is equivalent to `-ac` in ffmpeg.
+
+### `-koa, --keep-original-audio`
+
+Copy original, non-normalized audio streams to output file
+
+### `--keep-bit-depth`, `--no-keep-bit-depth`
+
+Carry the detected input bit depth through to the output encoder. This is enabled by default.
+
+When you specify a non-PCM encoder (e.g. `-c:a flac`), ffmpeg would otherwise pick its own default sample format, which can promote 16-bit audio to 24-bit. With bit-depth preservation, the matching output sample format is set for you, so you no longer need to pass it via `-e`/`--extra-output-options` (e.g. `-e "-sample_fmt s16"`). Use `--no-keep-bit-depth` to let the encoder choose its own sample format instead.
+
+The chosen sample format is constrained to what the encoder actually supports. Note that ffmpeg has no 24-bit sample format, so 24-bit audio is carried in the 32-bit `s32` format (and the encoder stores it accordingly). Floating-point sources are left to the encoder, and for lossy encoders that only support floating-point formats (e.g. AAC) this has no effect.
+
+Example: `ffmpeg-normalize input.flac -nt peak -t 0 -c:a flac -o output.flac`
+
+## Audio Stream Selection
+
+### `-as AUDIO_STREAMS, --audio-streams AUDIO_STREAMS`
+
+Select specific audio streams to normalize by stream index (comma-separated).
+
+Example: `-as 1` normalizes only stream 1, `-as 1,2` normalizes streams 1 and 2.
+
+If not specified, all audio streams will be normalized (default behavior).
+
+### `--audio-default-only`
+
+Only normalize audio streams with the 'default' disposition flag.
+
+This is useful for files with multiple audio tracks where only the default track should be normalized (e.g., main audio track vs. commentary tracks).
+
+### `--keep-other-audio`
+
+Keep non-selected audio streams in the output file (copy without normalization).
+
+Must be combined with either `-as`/`--audio-streams` or `--audio-default-only`.
+
+Example: `ffmpeg-normalize input.mkv -as 1 --keep-other-audio` will normalize stream 1 and copy all other audio streams unchanged.
+
+**Note:** This option is mutually exclusive with `--keep-original-audio`. Use `--keep-original-audio` to keep all original streams alongside normalized ones, or `--keep-other-audio` to keep only non-selected streams as passthrough.
+
+### `-prf PRE_FILTER, --pre-filter PRE_FILTER`
+
+Add an audio filter chain before applying normalization.
+
+Multiple filters can be specified by comma-separating them.
+
+### `-pof POST_FILTER, --post-filter POST_FILTER`
+
+Add an audio filter chain after applying normalization.
+
+Multiple filters can be specified by comma-separating them.
+
+For EBU, the filter will be applied during the second pass.
+
+## Other Encoding Options
+
+### `-vn, --video-disable`
+
+Do not write video streams to output
+
+### `-c:v VIDEO_CODEC, --video-codec VIDEO_CODEC`
+
+Video codec to use for output files (default: 'copy').
+
+See `ffmpeg -encoders` for a list.
+
+Will attempt to copy video codec by default.
+
+### `-sn, --subtitle-disable`
+
+Do not write subtitle streams to output
+
+### `-mn, --metadata-disable`
+
+Do not write metadata to output
+
+### `-cn, --chapters-disable`
+
+Do not write chapters to output
+
+### `--write-encoder-settings`
+
+Write the effective encoder settings as an `ENCODER_SETTINGS` tag on each normalized audio stream.
+
+The tag holds an ffmpeg-command-equivalent string with the audio codec, the bitrate, sample rate and channel count (when set), the normalization filter including the measured loudnorm values, and any `-e`/`--extra-output-options` appended verbatim, for example:
+
+```
+-c:a libopus -b:a 128000 -af loudnorm=i=-23.0:lra=7.0:tp=-2.0:offset=-0.1:measured_i=-19.4:measured_lra=6.1:measured_tp=-3.2:measured_thresh=-29.6:linear=true
+```
+
+Extra output options are not audio-scoped, so an unrelated option passed there will also appear in the tag. Extra input options are demuxer settings and are not included.
+
+This is a Matroska/WebM tag convention; other containers may store it differently. It has no effect together with `--metadata-disable`.
+
+## Input/Output Format
+
+### `-ei EXTRA_INPUT_OPTIONS, --extra-input-options EXTRA_INPUT_OPTIONS`
+
+Extra input options list.
+
+A list of extra ffmpeg command line arguments valid for the input, applied before ffmpeg's `-i`.
+
+You can either use a JSON-formatted list (i.e., a list of comma-separated, quoted elements within square brackets), or a simple string of space-separated arguments.
+
+If JSON is used, you need to wrap the whole argument in quotes to prevent shell expansion and to preserve literal quotes inside the string. If a simple string is used, you need to specify the argument with `-e=`.
+
+Examples: `-ei '[ "-f", "mpegts", "-r", "24" ]'` or `-ei="-f mpegts -r 24"`
+
+### `-e EXTRA_OUTPUT_OPTIONS, --extra-output-options EXTRA_OUTPUT_OPTIONS`
+
+Extra output options list.
+
+A list of extra ffmpeg command line arguments valid for the output.
+
+You can either use a JSON-formatted list (i.e., a list of comma-separated, quoted elements within square brackets), or a simple string of space-separated arguments.
+
+If JSON is used, you need to wrap the whole argument in quotes to prevent shell expansion and to preserve literal quotes inside the string. If a simple string is used, you need to specify the argument with `-e=`.
+
+Examples: `-e '[ "-vbr", "3", "-preset:v", "ultrafast" ]'` or `-e="-vbr 3 -preset:v ultrafast"`
+
+### `-ofmt OUTPUT_FORMAT, --output-format OUTPUT_FORMAT`
+
+Media format to use for output file(s).
+
+See `ffmpeg -formats` for a list.
+
+If not specified, the format will be inferred by ffmpeg from the output file name. If the output file name is not explicitly specified, the extension will govern the format (see '--extension' option).
+
+### `-ext EXTENSION, --extension EXTENSION`
+
+Output file extension to use for output files that were not explicitly specified. (Default: `mkv`)
+
+## Environment Variables
+
+The program additionally respects environment variables:
+
+### `TMP` / `TEMP` / `TMPDIR`
+
+Sets the path to the temporary directory in which files are
+stored before being moved to the final output directory.
+Only valid for ReplayGain and when the input file == output file.
+Note: You need to use full paths.
+
+### `FFMPEG_PATH`
+
+Sets the full path to an `ffmpeg` executable other than
+the system default or you can provide a file name available on $PATH

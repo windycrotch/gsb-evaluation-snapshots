@@ -1,0 +1,538 @@
+## [1.45.2] - 2026-11-17
+
+### 🚀 Features
+
+- Include extra_output_options in ENCODER_SETTINGS tag (#322)
+
+### 🐛 Bug Fixes
+
+- *(ci)* Skip Claude review for fork PRs
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 1.45.2
+## [1.45.1] - 2026-11-17
+
+### 🐛 Bug Fixes
+
+- *(flac)* Keep cover art (#325)
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 1.45.1
+## [1.45.0] - 2026-11-16
+
+### 🚀 Features
+
+- *(cli)* Use rich for help, logs and progress
+- *(cli)* Show progress by default in terminals
+
+### 🐛 Bug Fixes
+
+- *(cli)* Show prefix and color for main errors
+- *(cli)* Show short ffmpeg errors only once
+
+### 📚 Documentation
+
+- *(api)* Regenerate API docs
+- [**breaking**] Note progress is now on by default in terminals
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 1.45.0
+## [1.44.1] - 2026-11-16
+
+### 🐛 Bug Fixes
+
+- *(io)* Keep the file mode when normalizing in place
+- *(ebu)* Reset offset for auto-lowered targets
+
+### 📚 Documentation
+
+- *(credits)* Add jayhemnani9910
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 1.44.1
+## [1.44.0] - 2026-11-09
+
+### 🚀 Features
+
+- *(verify)* Check encoded output levels
+
+### 🐛 Bug Fixes
+
+- *(cli)* Explain ffmpeg startup failures
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 1.44.0
+## [1.43.1] - 2026-11-09
+
+### 🐛 Bug Fixes
+
+- *(presets)* Respect explicit CLI defaults
+- *(io)* Reject colliding output paths
+- *(batch)* Cap album gain at peak headroom
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 1.43.1
+## [1.43.0] - 2026-10-14
+
+### 🚀 Features
+
+- *(cli)* Add --print-summary before/after table
+
+### ⚙️ Miscellaneous Tasks
+
+- Update pre-commit config
+- Bump version to 1.43.0
+## [1.42.1] - 2026-10-11
+
+### 🐛 Bug Fixes
+
+- *(deps)* Update dependencies with known vulnerabilities
+
+### 📚 Documentation
+
+- *(readme)* Add centered project icon
+- Use ty for type checking in contributing guide
+
+### ⚙️ Miscellaneous Tasks
+
+- Require Python 3.10 and support Python 3.15
+- Bump version to 1.42.1
+## [1.42.0] - 2026-09-02
+
+### 🚀 Features
+
+- Add --write-encoder-settings to tag streams with encoder settings
+
+### 🐛 Bug Fixes
+
+- *(ci)* Type binary subprocess output
+
+### 📚 Documentation
+
+- Add @ppetr as a contributor
+
+### ⚙️ Miscellaneous Tasks
+
+- Post code review findings as inline comments
+- Bump version to 1.42.0
+## [1.41.1] - 2026-07-10
+
+### 🐛 Bug Fixes
+
+- *(windows)* Hide ffmpeg console windows, fixes #319
+
+### 📚 Documentation
+
+- Fix
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 1.41.1
+## [1.41.0] - 2026-06-29
+
+### 🚀 Features
+
+- Implement automatic audio codec selection based on output container
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 1.41.0
+## [1.40.0] - 2026-06-27
+
+### 🚀 Features
+
+- Add --threshold to skip files already at target
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 1.40.0
+## [1.39.0] - 2026-06-27
+
+### 🚀 Features
+
+- Add --keep-mtime to preserve input mtime
+- Preserve input bit depth by default
+
+### 📚 Documentation
+
+- Document --keep-mtime and bit-depth preservation
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 1.39.0
+## [1.38.0] - 2026-06-20
+
+### 🚀 Features
+
+- Remove use of temporary files
+
+### 🐛 Bug Fixes
+
+- Do not create a temp file for the second pass except for replay gain
+
+### ⚙️ Miscellaneous Tasks
+
+- Prevent gh-pages race between docs deploy workflows
+- Update docs
+- Bump version to 1.38.0
+## [1.37.8] - 2026-05-21
+
+### 🐛 Bug Fixes
+
+- Fix issue #316, handle audio channels
+
+### ⚙️ Miscellaneous Tasks
+
+- Drop Python 3.9 support, bump pytest to >=9.0.3
+- Bump version to 1.37.8
+## [1.37.7] - 2026-05-12
+
+### ⚙️ Miscellaneous Tasks
+
+- Update ffmpeg
+- Bump version to 1.37.7
+## [1.37.6] - 2026-04-13
+
+### 🚀 Features
+
+- Improved warning messages for dynamic reversion, fixes #314
+
+### 🧪 Testing
+
+- Fix
+
+### ⚙️ Miscellaneous Tasks
+
+- Update ffmpeg
+- Bump version to 1.37.6
+## [1.37.5] - 2026-04-12
+
+### 🐛 Bug Fixes
+
+- Output logs with file names, fixes #313
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 1.37.5
+## [1.37.4] - 2026-03-30
+
+### 🐛 Bug Fixes
+
+- Add type assertions for mypy in ReplayGain tag tests
+
+### 📚 Documentation
+
+- Update file and batch handling under powershell/CMD
+- Update linear recommendations
+
+### ⚙️ Miscellaneous Tasks
+
+- Replace mypy with ty for type checking
+- *(build)* Relax uv_build upper bound to <1.0.0
+- Bump version to 1.37.4
+## [1.37.3] - 2026-02-08
+
+### 🐛 Bug Fixes
+
+- Restore uv/ffmpeg setup and allowed tools in CI workflows
+- Restore write permissions for Claude CI workflows
+- Strip ReplayGain tags after normalization, fixes #308
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 1.37.3
+## [1.37.2] - 2026-02-04
+
+### 🚀 Features
+
+- Better preset listing
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 1.37.2
+## [1.37.1] - 2026-02-04
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 1.37.1
+## [1.37.0] - 2026-02-03
+
+### 🐛 Bug Fixes
+
+- Update Claude workflows for fork PR permissions
+
+### 📚 Documentation
+
+- Update API examples
+
+### ⚙️ Miscellaneous Tasks
+
+- Update contriburors
+- Bump version to 1.37.0
+## [1.36.1] - 2026-01-07
+
+### 🚀 Features
+
+- Better file validation
+
+### 📚 Documentation
+
+- Typo
+- Move quickstart before what's new section
+
+### ⚙️ Miscellaneous Tasks
+
+- Update support to python 3.15
+- Test only Python 3.9 and 3.15
+- Add auto-deployment for docs
+- Fix dev docs
+- Bump version to 1.36.1
+
+### ◀️ Revert
+
+- Use Python 3.14 instead of 3.15
+## [1.36.0] - 2025-11-03
+
+### 🚀 Features
+
+- Add --preset option and update docs
+
+### 🐛 Bug Fixes
+
+- Correct markdown indentation for MkDocs Material
+- Warn instead of debug on invalid preset options
+
+### 📚 Documentation
+
+- Synchronize "What's New" section between README and docs
+- Update
+- Fix formatting
+- Update documentation for new features
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 1.36.0
+## [1.35.0] - 2025-10-30
+
+### 🚀 Features
+
+- Batch mode normalization
+
+### 🐛 Bug Fixes
+
+- Update completions
+
+### 📚 Documentation
+
+- Update readme and docs
+- How to generate completions
+- Fix completion links and update manual completions
+- Add link to GH repo
+
+### ⚙️ Miscellaneous Tasks
+
+- Add GitHub Actions workflow for automatic docs deployment
+- Update claude.md
+- Bump version to 1.35.0
+## [1.34.0] - 2025-10-21
+
+### 🚀 Features
+
+- Add selective audio stream normalization (#295)
+
+### 📚 Documentation
+
+- Fix Docker Hub badge link in README
+
+### ⚙️ Miscellaneous Tasks
+
+- Update ffmpeg version
+- Update claude.md
+- Bump version to 1.34.0
+## [1.33.4] - 2025-10-18
+
+### 🐛 Bug Fixes
+
+- Apply extra input options to first pass, fixes #294
+
+### 📚 Documentation
+
+- Update intro
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 1.33.4
+## [1.33.3] - 2025-10-17
+
+### ⚙️ Miscellaneous Tasks
+
+- Remove old gitchangelog templates
+- Add python 3.14 support, remove old license classifier
+- Bump version to 1.33.3
+## [1.33.2] - 2025-10-16
+
+### 🐛 Bug Fixes
+
+- Bug when first pass stats are skipped
+
+### 📚 Documentation
+
+- Document --lower-only option
+
+### ⚙️ Miscellaneous Tasks
+
+- Add commitizen for conventional commits
+- Bump version to 1.33.2
+## [1.33.0] - 2025-08-22
+
+### 📚 Documentation
+
+- Add @georgev93 as a contributor
+- Add @odie5533 as a contributor
+
+### ⚙️ Miscellaneous Tasks
+
+- Skip ci tests for commits that change only markdown files (#291)
+## [1.32.2] - 2025-05-08
+
+### 🐛 Bug Fixes
+
+- Make replaygain use second pass stats
+
+### 📚 Documentation
+
+- Reference changelog
+## [1.32.1] - 2025-05-08
+
+### 📚 Documentation
+
+- Docs
+## [1.32.0] - 2025-05-07
+
+### 🐛 Bug Fixes
+
+- Flake8 no longer used
+- Do not write replaygain tags if dry run is used
+
+### 📚 Documentation
+
+- Update ffmpeg guide
+- Convert options to headlines
+- Update contributing guide
+## [1.31.2] - 2025-03-19
+
+### 🐛 Bug Fixes
+
+- Special handling of /dev/null
+## [1.31.0] - 2024-12-15
+
+### 🚀 Features
+
+- Add completions
+
+### 📚 Documentation
+
+- Update docs to include lower-only
+- Update explainer
+## [1.30.0] - 2024-11-22
+
+### 📚 Documentation
+
+- Add @ahmetsait as a contributor
+
+### 💼 Other
+
+- `--print-stats` only outputs the last stream
+## [1.29.2] - 2024-11-18
+
+### 🐛 Bug Fixes
+
+- Show percentage with two decimal digits in progress
+
+### ⚙️ Miscellaneous Tasks
+
+- Add python 12
+## [1.29.1] - 2024-10-22
+
+### 🐛 Bug Fixes
+
+- Override argparse usage
+## [1.28.3] - 2024-08-16
+
+### 📚 Documentation
+
+- Add @kanjieater as a contributor
+## [1.27.4] - 2023-06-29
+
+### 🐛 Bug Fixes
+
+- Dockerfile used wrong path
+
+### 📚 Documentation
+
+- Add @sian1468 as a contributor
+- Add psavva as a contributor for code (#236)
+- Add HighMans as a contributor for code (#242)
+## [1.27.2] - 2023-05-05
+
+### 📚 Documentation
+
+- Add @07416 as a contributor
+## [1.27.1] - 2023-04-25
+
+### 📚 Documentation
+
+- Add @mjhalwa as a contributor
+## [1.27.0] - 2023-04-24
+
+### 🚀 Features
+
+- Add linear loudnorm option to set lra up to target, then keep input lra
+## [1.26.3] - 2023-02-08
+
+### 📚 Documentation
+
+- Add @g3n35i5 as a contributor
+## [1.26.2] - 2023-02-06
+
+### 🚜 Refactor
+
+- Improved logging behavior (#216)
+## [1.26.0] - 2022-12-14
+
+### 📚 Documentation
+
+- Add @benjaoming as a contributor
+- Add @Geekfish as a contributor
+- Add @thenewguy as a contributor
+- Add @aviolo as a contributor
+- Add @jetpks as a contributor
+- Add @kostalski as a contributor
+- Add @justinpearson as a contributor
+- Add @Nottt as a contributor
+- Add @Mathijsz as a contributor
+- Add @mpuels as a contributor
+- Add @mvbattista as a contributor
+- Add WyattBlue as a contributor for code (#198)
+## [1.22.0] - 2021-03-09
+
+### 💼 Other
+
+- New tests
+## [1.3.0] - 2018-04-15
+
+### 💼 Other
+
+- Progress bar
+## [1.0.0] - 2018-01-23
+
+### 💼 Other
+
+- V1.0 rewrite
+## [0.1.3] - 2015-12-15

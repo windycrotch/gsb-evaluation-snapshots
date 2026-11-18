@@ -1,0 +1,896 @@
+from __future__ import annotations
+
+import json
+import logging
+import math
+import os
+import sys
+from itertools import chain
+from typing import TYPE_CHECKING, Iterator, Literal
+
+from rich import box
+from rich.console import Group, RenderableType
+from rich.table import Table
+from rich.text import Text
+
+from ._cmd_utils import (
+    describe_error,
+    PCM_INCOMPATIBLE_EXTS,
+    PCM_INCOMPATIBLE_FORMATS,
+    ffmpeg_has_loudnorm,
+    get_ffmpeg_exe,
+    get_muxer_default_audio_encoder,
+    validate_input_file,
+)
+from ._console import ProgressDisplay, display_name, get_console
+from ._errors import FFmpegNormalizeError
+from ._media_file import MediaFile
+
+if TYPE_CHECKING:
+    from ._streams import LoudnessStatisticsWithMetadata, SummaryRow
+
+_logger = logging.getLogger(__name__)
+
+NORMALIZATION_TYPES = ("ebu", "rms", "peak")
+
+
+def check_range(number: object, min_r: float, max_r: float, name: str = "") -> float:
+    """
+    Checks if "number" is an int or float and is between min_r (inclusive)
+    and max_r (inclusive).
+
+    Args:
+        number (object): Number to check
+        min_r (float): Minimum range
+        max_r (float): Maximum range
+        name (str): Name of object being checked
+
+    Returns:
+        float: within given range
+
+    Raises:
+        FFmpegNormalizeError: If number is wrong type or not within range
+    """
+    if not isinstance(number, (float, int)):
+        raise FFmpegNormalizeError(f"{name} must be an int or float")
+    if number < min_r or number > max_r:
+        raise FFmpegNormalizeError(f"{name} must be within [{min_r},{max_r}]")
+    return number
+
+
+class FFmpegNormalize:
+    """
+    ffmpeg-normalize class.
+
+    Args:
+        normalization_type (str, optional): Normalization type. Defaults to "ebu".
+        target_level (float, optional): Target level. Defaults to -23.0.
+        print_stats (bool, optional): Print loudnorm stats. Defaults to False.
+        print_summary (bool, optional): Print a before/after summary table to stderr after processing. Defaults to False.
+        threshold (float, optional): When set to a positive value, skip normalization when the input is already within this many dB/LU of the target level, copying it through unchanged. Defaults to 0 (disabled, always normalize).
+        loudness_range_target (float, optional): Loudness range target. Defaults to 7.0.
+        keep_loudness_range_target (bool, optional): Keep loudness range target. Defaults to False.
+        keep_lra_above_loudness_range_target (bool, optional): Keep input loudness range above loudness range target. Defaults to False.
+        true_peak (float, optional): True peak. Defaults to -2.0.
+        offset (float, optional): Offset. Defaults to 0.0.
+        lower_only (bool, optional): Whether the audio should not increase in loudness. Defaults to False.
+        auto_lower_loudness_target (bool, optional): Automatically lower EBU Integrated Loudness Target.
+        dual_mono (bool, optional): Dual mono. Defaults to False.
+        dynamic (bool, optional): Use dynamic EBU R128 normalization. This is a one-pass algorithm and skips the initial media scan. Defaults to False.
+        audio_codec (str, optional): Audio codec. Defaults to "pcm_s16le".
+        audio_bitrate (float, optional): Audio bitrate. Defaults to None.
+        sample_rate (int, optional): Sample rate. Defaults to None.
+        audio_channels (int | None, optional): Audio channels. Defaults to None.
+        keep_original_audio (bool, optional): Keep original audio. Defaults to False.
+        pre_filter (str, optional): Pre filter. Defaults to None.
+        post_filter (str, optional): Post filter. Defaults to None.
+        video_codec (str, optional): Video codec. Defaults to "copy".
+        video_disable (bool, optional): Disable video. Defaults to False.
+        subtitle_disable (bool, optional): Disable subtitles. Defaults to False.
+        metadata_disable (bool, optional): Disable metadata. Defaults to False.
+        chapters_disable (bool, optional): Disable chapters. Defaults to False.
+        write_encoder_settings (bool, optional): Write the effective encoder settings (codec, bitrate, sample rate, channels, the normalization filter including the measured loudnorm values, and any extra_output_options) as an ENCODER_SETTINGS tag on each normalized audio stream. Defaults to False.
+        extra_input_options (list, optional): Extra input options. Defaults to None.
+        extra_output_options (list, optional): Extra output options. Defaults to None.
+        output_format (str, optional): Output format. Defaults to None.
+        extension (str, optional): Output file extension to use for output files that were not explicitly specified. Defaults to "mkv".
+        dry_run (bool, optional): Dry run. Defaults to False.
+        debug (bool, optional): Debug. Defaults to False.
+        progress (bool, optional): Progress. Defaults to False.
+        replaygain (bool, optional): Write ReplayGain tags without normalizing. Defaults to False.
+        batch (bool, optional): Preserve relative loudness between files (album mode). Defaults to False.
+        audio_streams (list[int] | None, optional): List of audio stream indices to normalize. Defaults to None (all streams).
+        audio_default_only (bool, optional): Only normalize audio streams with default disposition. Defaults to False.
+        keep_other_audio (bool, optional): Keep non-selected audio streams in output (copy without normalization). Defaults to False.
+        keep_mtime (bool, optional): Copy the input file's modification time to the output file. Defaults to False.
+        keep_bit_depth (bool, optional): Carry the detected input bit depth through to the output encoder. Defaults to True.
+        verify (bool, optional): Measure the encoded output and check its effective target and peak ceiling. Defaults to False. Not available with ReplayGain; skipped during dry runs.
+        verify_loudness_tolerance (float, optional): Allowed level deviation in dB/LU. Defaults to 0.5.
+        verify_peak_tolerance (float, optional): Allowed peak overshoot in dB. Defaults to 0.1.
+
+    Raises:
+        FFmpegNormalizeError: If the ffmpeg executable is not found or does not support the loudnorm filter.
+    """
+
+    # Default parameter values - single source of truth for all defaults
+    # Note: output_folder is a CLI-level option and not passed to FFmpegNormalize.__init__
+    DEFAULTS = {
+        "normalization_type": "ebu",
+        "target_level": -23.0,
+        "print_stats": False,
+        "print_summary": False,
+        "threshold": 0.0,
+        "loudness_range_target": 7.0,
+        "keep_loudness_range_target": False,
+        "keep_lra_above_loudness_range_target": False,
+        "true_peak": -2.0,
+        "offset": 0.0,
+        "lower_only": False,
+        "auto_lower_loudness_target": False,
+        "dual_mono": False,
+        "dynamic": False,
+        "audio_codec": "pcm_s16le",
+        "audio_bitrate": None,
+        "sample_rate": None,
+        "audio_channels": None,
+        "keep_original_audio": False,
+        "pre_filter": None,
+        "post_filter": None,
+        "video_codec": "copy",
+        "video_disable": False,
+        "subtitle_disable": False,
+        "metadata_disable": False,
+        "chapters_disable": False,
+        "write_encoder_settings": False,
+        "extra_input_options": None,
+        "extra_output_options": None,
+        "output_format": None,
+        "output_folder": "normalized",
+        "extension": "mkv",
+        "dry_run": False,
+        "debug": False,
+        "progress": False,
+        "replaygain": False,
+        "batch": False,
+        "audio_streams": None,
+        "audio_default_only": False,
+        "keep_other_audio": False,
+        "keep_mtime": False,
+        "keep_bit_depth": True,
+        "verify": False,
+        "verify_loudness_tolerance": 0.5,
+        "verify_peak_tolerance": 0.1,
+    }
+
+    def __init__(
+        self,
+        normalization_type: Literal["ebu", "rms", "peak"] = "ebu",
+        target_level: float = -23.0,
+        print_stats: bool = False,
+        print_summary: bool = False,
+        threshold: float = 0.0,
+        loudness_range_target: float = 7.0,
+        keep_loudness_range_target: bool = False,
+        keep_lra_above_loudness_range_target: bool = False,
+        true_peak: float = -2.0,
+        offset: float = 0.0,
+        lower_only: bool = False,
+        auto_lower_loudness_target: bool = False,
+        dual_mono: bool = False,
+        dynamic: bool = False,
+        audio_codec: str = "pcm_s16le",
+        audio_bitrate: float | None = None,
+        sample_rate: float | int | None = None,
+        audio_channels: int | None = None,
+        keep_original_audio: bool = False,
+        pre_filter: str | None = None,
+        post_filter: str | None = None,
+        video_codec: str = "copy",
+        video_disable: bool = False,
+        subtitle_disable: bool = False,
+        metadata_disable: bool = False,
+        chapters_disable: bool = False,
+        write_encoder_settings: bool = False,
+        extra_input_options: list[str] | None = None,
+        extra_output_options: list[str] | None = None,
+        output_format: str | None = None,
+        extension: str = "mkv",
+        dry_run: bool = False,
+        debug: bool = False,
+        progress: bool = False,
+        replaygain: bool = False,
+        batch: bool = False,
+        audio_streams: list[int] | None = None,
+        audio_default_only: bool = False,
+        keep_other_audio: bool = False,
+        keep_mtime: bool = False,
+        keep_bit_depth: bool = True,
+        verify: bool = False,
+        verify_loudness_tolerance: float = 0.5,
+        verify_peak_tolerance: float = 0.1,
+    ):
+        self.ffmpeg_exe = get_ffmpeg_exe()
+        self.has_loudnorm_capabilities = ffmpeg_has_loudnorm()
+
+        if normalization_type not in NORMALIZATION_TYPES:
+            raise FFmpegNormalizeError(
+                "Normalization type must be: 'ebu', 'rms', or 'peak'"
+            )
+        self.normalization_type = normalization_type
+
+        if not self.has_loudnorm_capabilities and self.normalization_type == "ebu":
+            raise FFmpegNormalizeError(
+                "Your ffmpeg does not support the 'loudnorm' EBU R128 filter. "
+                "Please install ffmpeg v4.2 or above, or choose another normalization type."
+            )
+
+        if self.normalization_type == "ebu":
+            self.target_level = check_range(target_level, -70, -5, name="target_level")
+        else:
+            self.target_level = check_range(target_level, -99, 0, name="target_level")
+
+        self.print_stats = print_stats
+        self.print_summary = print_summary
+
+        self.threshold = check_range(threshold, 0, 99, name="threshold")
+
+        self.loudness_range_target = check_range(
+            loudness_range_target, 1, 50, name="loudness_range_target"
+        )
+
+        self.keep_loudness_range_target = keep_loudness_range_target
+
+        if self.keep_loudness_range_target and loudness_range_target != 7.0:
+            _logger.warning(
+                "Setting --keep-loudness-range-target will override your set loudness range target value! "
+                "Remove --keep-loudness-range-target or remove the --lrt/--loudness-range-target option."
+            )
+
+        self.keep_lra_above_loudness_range_target = keep_lra_above_loudness_range_target
+
+        if (
+            self.keep_loudness_range_target
+            and self.keep_lra_above_loudness_range_target
+        ):
+            raise FFmpegNormalizeError(
+                "Options --keep-loudness-range-target and --keep-lra-above-loudness-range-target are mutually exclusive! "
+                "Please choose just one of the two options."
+            )
+
+        self.true_peak = check_range(true_peak, -9, 0, name="true_peak")
+        self.offset = check_range(offset, -99, 99, name="offset")
+        self.lower_only = lower_only
+        self.auto_lower_loudness_target = auto_lower_loudness_target
+
+        # Ensure library user is passing correct types
+        assert isinstance(dual_mono, bool), "dual_mono must be bool"
+        assert isinstance(dynamic, bool), "dynamic must be bool"
+
+        self.dual_mono = dual_mono
+        self.dynamic = dynamic
+        self.sample_rate = None if sample_rate is None else int(sample_rate)
+        self.audio_channels = None if audio_channels is None else int(audio_channels)
+
+        self.audio_codec = audio_codec
+        self.audio_bitrate = audio_bitrate
+        self.keep_original_audio = keep_original_audio
+        self.video_codec = video_codec
+        self.video_disable = video_disable
+        self.subtitle_disable = subtitle_disable
+        self.metadata_disable = metadata_disable
+        self.chapters_disable = chapters_disable
+        self.write_encoder_settings = write_encoder_settings
+
+        if self.write_encoder_settings and self.metadata_disable:
+            _logger.warning(
+                "write_encoder_settings has no effect together with metadata_disable; "
+                "no metadata will be written to the output."
+            )
+
+        self.extra_input_options = extra_input_options
+        self.extra_output_options = extra_output_options
+        self.pre_filter = pre_filter
+        self.post_filter = post_filter
+
+        self.output_format = output_format
+        self.extension = extension
+        self.dry_run = dry_run
+        self.debug = debug
+        self.progress = progress
+        self.progress_display = ProgressDisplay(enabled=False)
+        self.replaygain = replaygain
+        self.batch = batch
+
+        # Stream selection options
+        self.audio_streams = audio_streams
+        self.audio_default_only = audio_default_only
+        self.keep_other_audio = keep_other_audio
+
+        self.keep_mtime = keep_mtime
+        self.keep_bit_depth = keep_bit_depth
+        self.verify = verify
+        self.verify_loudness_tolerance = check_range(
+            verify_loudness_tolerance, 0, 99, name="verify_loudness_tolerance"
+        )
+        self.verify_peak_tolerance = check_range(
+            verify_peak_tolerance, 0, 99, name="verify_peak_tolerance"
+        )
+        if not all(
+            math.isfinite(value)
+            for value in (self.verify_loudness_tolerance, self.verify_peak_tolerance)
+        ):
+            raise FFmpegNormalizeError("Verification tolerances must be finite")
+        if verify and replaygain:
+            raise FFmpegNormalizeError("--verify cannot be combined with --replaygain")
+
+        if self.output_format in PCM_INCOMPATIBLE_FORMATS:
+            if self.audio_codec is not None and "pcm" in self.audio_codec:
+                raise FFmpegNormalizeError(
+                    f"Output format {self.output_format} does not support PCM audio. "
+                    "Please choose a suitable audio codec with the -c:a option."
+                )
+            if (
+                self.audio_codec is None
+                and get_muxer_default_audio_encoder(self.output_format) is None
+            ):
+                raise FFmpegNormalizeError(
+                    f"Output format {self.output_format} does not support PCM audio, "
+                    "and a default audio codec could not be determined. Please choose "
+                    "a suitable audio codec with the -c:a option."
+                )
+
+        # replaygain only works for EBU for now
+        if self.replaygain and self.normalization_type != "ebu":
+            raise FFmpegNormalizeError(
+                "ReplayGain only works for EBU normalization type for now."
+            )
+
+        # Validate stream selection options
+        if self.audio_streams is not None and self.audio_default_only:
+            raise FFmpegNormalizeError(
+                "Cannot use both audio_streams and audio_default_only together."
+            )
+
+        if self.keep_other_audio and self.keep_original_audio:
+            raise FFmpegNormalizeError(
+                "Cannot use both --keep-other-audio and --keep-original-audio together. "
+                "Use --keep-original-audio to keep all original streams alongside normalized ones, "
+                "or --keep-other-audio to keep only non-selected streams as passthrough."
+            )
+
+        self.stats: list[LoudnessStatisticsWithMetadata] = []
+        self.media_files: list[MediaFile] = []
+        self.file_count = 0
+
+    def add_media_file(self, input_file: str, output_file: str) -> None:
+        """
+        Add a media file to normalize
+
+        Args:
+            input_file (str): Path to input file
+            output_file (str): Path to output file
+        """
+        if not os.path.exists(input_file):
+            raise FFmpegNormalizeError(f"file {input_file} does not exist")
+
+        ext = os.path.splitext(output_file)[1][1:].lower()
+        if ext in PCM_INCOMPATIBLE_EXTS:
+            if self.audio_codec is not None and "pcm" in self.audio_codec:
+                raise FFmpegNormalizeError(
+                    f"Output extension {ext} does not support PCM audio. "
+                    "Please choose a suitable audio codec with the -c:a option."
+                )
+            if (
+                self.audio_codec is None
+                and get_muxer_default_audio_encoder(ext) is None
+            ):
+                raise FFmpegNormalizeError(
+                    f"Output extension {ext} does not support PCM audio, and a "
+                    "default audio codec could not be determined. Please choose a "
+                    "suitable audio codec with the -c:a option."
+                )
+
+        self.media_files.append(MediaFile(self, input_file, output_file))
+        self.file_count += 1
+
+    @staticmethod
+    def validate_input_files(input_files: list[str]) -> list[str]:
+        """
+        Validate all input files before processing.
+
+        This method checks that each input file exists, is readable, and contains
+        at least one audio stream. All files are validated upfront so that users
+        can fix all issues before rerunning the batch.
+
+        Args:
+            input_files: List of input file paths to validate
+
+        Returns:
+            list: List of error messages for invalid files. Empty if all files are valid.
+        """
+        errors = []
+        for input_file in input_files:
+            is_valid, error_msg = validate_input_file(input_file)
+            if not is_valid and error_msg:
+                errors.append(error_msg)
+        return errors
+
+    @staticmethod
+    def validate_output_files(input_files: list[str], output_files: list[str]) -> None:
+        """Reject duplicate destinations and outputs that overwrite another input.
+
+        Resolve symlinks and existing hard links, while allowing each file to be
+        normalized in place and multiple outputs to the null device.
+        """
+
+        def path_keys(path: str) -> list[str | tuple[int, int]]:
+            keys: list[str | tuple[int, int]] = [
+                os.path.normcase(os.path.realpath(path))
+            ]
+            if os.path.exists(path):
+                stat = os.stat(path)
+                keys.append((stat.st_dev, stat.st_ino))
+            return keys
+
+        input_owners: dict[str | tuple[int, int], set[int]] = {}
+        for index, path in enumerate(input_files):
+            for key in path_keys(path):
+                input_owners.setdefault(key, set()).add(index)
+
+        output_owners: dict[str | tuple[int, int], str] = {}
+        for index, path in enumerate(output_files):
+            if os.path.realpath(path) == os.path.realpath(os.devnull):
+                continue
+            for key in path_keys(path):
+                if key in output_owners:
+                    raise FFmpegNormalizeError(
+                        f"Output collision: '{path}' and '{output_owners[key]}' "
+                        "refer to the same destination. Specify distinct output paths."
+                    )
+                if input_owners.get(key, set()) - {index}:
+                    raise FFmpegNormalizeError(
+                        f"Output '{path}' would overwrite another input file. "
+                        "Specify a different output path."
+                    )
+                output_owners[key] = path
+
+    def _calculate_batch_reference(self) -> float | None:
+        """
+        Calculate a shared reference from the selected streams' measurements.
+
+        Peak mode uses the highest sample peak. RMS mode uses the average RMS,
+        with gain capped by the highest sample peak. EBU uses average LUFS.
+
+        Returns:
+            float | None: The batch reference loudness value, or None if no measurements found.
+
+        Note:
+            RMS and EBU averages weight each selected stream equally.
+        """
+        measurements: list[float] = []
+        peaks: list[float] = []
+
+        for media_file in self.media_files:
+            if media_file.status == "error":
+                continue
+            for stream in media_file._get_streams_to_normalize():
+                peak = stream.loudness_statistics.get("max")
+                if peak is not None and math.isfinite(peak):
+                    peaks.append(float(peak))
+                if self.normalization_type == "ebu":
+                    # Get EBU integrated loudness from first pass
+                    ebu_stats = stream.loudness_statistics.get("ebu_pass1")
+                    if ebu_stats and "input_i" in ebu_stats:
+                        measurements.append(float(ebu_stats["input_i"]))
+                elif self.normalization_type == "rms":
+                    # Get RMS mean value
+                    mean = stream.loudness_statistics.get("mean")
+                    if mean is not None:
+                        measurements.append(float(mean))
+                elif self.normalization_type == "peak":
+                    # Get peak max value
+                    max_val = stream.loudness_statistics.get("max")
+                    if max_val is not None:
+                        measurements.append(float(max_val))
+
+        measurements = [value for value in measurements if math.isfinite(value)]
+        if not measurements:
+            _logger.warning(
+                "No loudness measurements found for batch reference calculation. "
+                "Batch mode will not be applied."
+            )
+            return None
+
+        # Peak mode targets the loudest sample in the album. RMS mode targets
+        # the average level, but limits the shared gain to available headroom.
+        batch_reference = (
+            max(measurements)
+            if self.normalization_type == "peak"
+            else sum(measurements) / len(measurements)
+        )
+        if self.normalization_type == "rms" and peaks:
+            safe_reference = self.target_level + max(peaks)
+            if safe_reference > batch_reference:
+                _logger.warning(
+                    "Reducing album gain to avoid sample clipping; "
+                    "the requested RMS target will not be reached."
+                )
+                batch_reference = safe_reference
+        if self.lower_only and self.normalization_type in ("peak", "rms"):
+            batch_reference = max(batch_reference, self.target_level)
+        _logger.debug(f"Batch mode: Measurements for batch reference: {measurements}")
+        _logger.info(
+            f"Batch mode: Calculated reference loudness = {batch_reference:.2f} "
+            f"({self.normalization_type.upper()}, based on {len(measurements)} stream(s))"
+        )
+
+        return batch_reference
+
+    def _iter_media_files(self, description: str) -> Iterator[tuple[int, MediaFile]]:
+        """
+        Iterate over all media files while updating the overall progress bar.
+
+        Args:
+            description (str): Label of the overall progress bar
+
+        Yields:
+            tuple[int, MediaFile]: The index and the media file
+        """
+        display = self.progress_display
+        display.start_overall(description, self.file_count)
+        for index, media_file in enumerate(self.media_files):
+            display.set_current(display_name(media_file.input_file))
+            yield index, media_file
+            display.advance_overall()
+        display.set_current(None)
+
+    def run_normalization(self) -> None:
+        """
+        Run the normalization procedures.
+
+        In batch mode, all files are analyzed first (first pass), then a batch reference
+        loudness is calculated, and finally all files are normalized (second pass) with
+        adjustments relative to the batch reference to preserve relative loudness.
+
+        In non-batch mode, each file is processed completely (both passes) before
+        moving to the next file.
+        """
+        if (
+            self.verify
+            and not self.dry_run
+            and any(
+                os.path.realpath(file.output_file) == os.path.realpath(os.devnull)
+                for file in self.media_files
+            )
+        ):
+            raise FFmpegNormalizeError(
+                "--verify requires an output file, not the null device"
+            )
+        if not self.replaygain:
+            self.validate_output_files(
+                [media_file.input_file for media_file in self.media_files],
+                [media_file.output_file for media_file in self.media_files],
+            )
+        with ProgressDisplay(enabled=self.progress) as display:
+            self.progress_display = display
+            try:
+                self._process_media_files()
+            finally:
+                self.progress_display = ProgressDisplay(enabled=False)
+
+        if self.print_stats:
+            json.dump(
+                list(
+                    chain.from_iterable(
+                        media_file.get_stats() for media_file in self.media_files
+                    )
+                ),
+                sys.stdout,
+                indent=4,
+            )
+            print()
+
+        if self.print_summary:
+            console = get_console()
+            if console.is_terminal:
+                console.print(self.summary_renderable())
+            else:
+                print(self.format_summary(), file=sys.stderr)
+
+    def _process_media_files(self) -> None:
+        """Run both passes for all media files, in batch or per-file mode."""
+        if self.batch:
+            # Batch mode: analyze all files first, then normalize with relative adjustments
+            _logger.info(
+                f"Batch mode enabled: processing {self.file_count} file(s) while preserving relative loudness"
+            )
+
+            # Recommend RMS/Peak for album normalization instead of EBU
+            if self.normalization_type == "ebu":
+                _logger.warning(
+                    "Using EBU R128 normalization with --batch. For true album normalization where "
+                    "all tracks are shifted by the same amount, consider using --normalization-type rms "
+                    "or --normalization-type peak instead. EBU normalization applies different processing "
+                    "to each track based on its loudness characteristics, which may alter relative levels "
+                    "slightly due to psychoacoustic adjustments."
+                )
+
+            # Warn if using dynamic EBU mode with batch
+            if self.dynamic and self.normalization_type == "ebu":
+                _logger.warning(
+                    "ffmpeg uses dynamic EBU normalization. This may change relative "
+                    "loudness within a file. Use linear mode for true album normalization, or "
+                    "switch to --normalization-type peak or --normalization-type rms instead. "
+                    "To force linear mode, use --keep-lra-above-loudness-range-target or "
+                    "--keep-loudness-range-target."
+                )
+
+            # Phase 1: Run first pass on all files to collect measurements
+            _logger.info("Phase 1: Analyzing all files...")
+            for index, media_file in self._iter_media_files("Analysis"):
+                _logger.info(
+                    f"Analyzing file {media_file} ({index + 1} of {self.file_count})"
+                )
+
+                try:
+                    # Only run first pass if not in dynamic EBU mode
+                    if not (self.dynamic and self.normalization_type == "ebu"):
+                        media_file._first_pass()
+                    else:
+                        _logger.debug(
+                            "Dynamic EBU mode: First pass skipped for this file."
+                        )
+                except Exception as e:
+                    self._record_failure(media_file, e, "analyzing")
+                    continue
+
+            # Phase 2: Calculate batch reference loudness
+            batch_reference = self._calculate_batch_reference()
+
+            # Phase 3: Run second pass on all files with batch reference
+            _logger.info("Phase 2: Normalizing all files...")
+            for index, media_file in self._iter_media_files("Normalization"):
+                # Skip files that already failed during analysis
+                if media_file.status == "error":
+                    _logger.debug(f"Skipping {media_file} because its analysis failed")
+                    continue
+
+                _logger.info(
+                    f"Normalizing file {media_file} ({index + 1} of {self.file_count})"
+                )
+
+                try:
+                    media_file.run_normalization(batch_reference=batch_reference)
+                    if self.verify and not self.dry_run:
+                        media_file.verify_output()
+                except Exception as e:
+                    self._record_failure(media_file, e, "processing")
+                    continue
+        else:
+            # Non-batch mode: process each file completely before moving to the next
+            for index, media_file in self._iter_media_files("Files"):
+                _logger.info(
+                    f"Normalizing file {media_file} ({index + 1} of {self.file_count})"
+                )
+
+                try:
+                    media_file.run_normalization()
+                    if self.verify and not self.dry_run:
+                        media_file.verify_output()
+                except Exception as e:
+                    self._record_failure(media_file, e, "processing")
+                    continue
+
+    @staticmethod
+    def _record_failure(media_file: MediaFile, error: Exception, action: str) -> None:
+        """
+        Mark a media file as failed and log a short description of the error.
+
+        The full error (e.g. the complete ffmpeg output) is only logged in
+        debug mode.
+
+        Args:
+            media_file (MediaFile): The file that failed
+            error (Exception): The error
+            action (str): What was being done, e.g. "processing"
+        """
+        media_file.status = "error"
+        media_file.error = describe_error(error)
+        _logger.debug(f"Full error for {media_file.input_file}: {error}", exc_info=True)
+        _logger.error(f"Error {action} input file {media_file}: {media_file.error}")
+
+    def get_summary(self) -> list[SummaryRow]:
+        """
+        Return the before/after summary for all audio streams of all files.
+
+        Each entry contains the input level, output level, output peak and the
+        applied gain in dB. The level is the integrated loudness for EBU, the
+        RMS level for RMS, and the peak level for peak normalization. The
+        output peak is the true peak for EBU and the sample peak otherwise.
+        Values that are not available are None.
+
+        Returns:
+            list[SummaryRow]: One summary entry per audio stream
+        """
+        return list(
+            chain.from_iterable(
+                media_file.get_summary() for media_file in self.media_files
+            )
+        )
+
+    def _summary_parts(
+        self,
+    ) -> tuple[str, list[str], list[list[str]], list[tuple[str, bool]], list[str]]:
+        """
+        Collect the pieces of the before/after summary.
+
+        Returns:
+            tuple: The header, the column headings, the table rows, the
+                verification lines (text and whether the check passed), and
+                additional notes
+        """
+        if self.normalization_type == "ebu":
+            header = (
+                f"EBU R128 normalization, target: {self.target_level:.1f} LUFS, "
+                f"true peak: {self.true_peak:.1f} dBTP"
+            )
+            if self.dynamic:
+                header += ", dynamic mode"
+            columns = ["Input (LUFS)", "Output (LUFS)", "True peak (dBTP)", "Gain (dB)"]
+        elif self.normalization_type == "rms":
+            header = f"RMS normalization, target: {self.target_level:.1f} dBFS"
+            columns = [
+                "Input RMS (dBFS)",
+                "Output RMS (dBFS)",
+                "Peak (dBFS)",
+                "Gain (dB)",
+            ]
+        else:
+            header = f"Peak normalization, target: {self.target_level:.1f} dBFS"
+            columns = ["Input peak (dBFS)", "Output peak (dBFS)", "Gain (dB)"]
+
+        if self.batch:
+            header += ", batch mode (relative loudness preserved)"
+        if self.dry_run:
+            header += ", dry run"
+
+        def fmt(value: float | None, signed: bool = False) -> str:
+            if value is None:
+                return "-"
+            return f"{value:+.1f}" if signed else f"{value:.1f}"
+
+        rows = self.get_summary()
+        table: list[list[str]] = []
+        for row in rows:
+            values = [fmt(row["input_level"]), fmt(row["output_level"])]
+            if self.normalization_type != "peak":
+                values.append(fmt(row["output_peak"]))
+            values.append(fmt(row["gain"], signed=True))
+            table.append(
+                [row["input_file"], str(row["stream_id"]), *values, row["status"]]
+            )
+
+        verifications: list[tuple[str, bool]] = []
+        notes: list[str] = []
+        verified = [row for row in rows if "verification" in row]
+        if verified:
+            level_unit = "LUFS" if self.normalization_type == "ebu" else "dBFS"
+            peak_unit = "dBTP" if self.normalization_type == "ebu" else "dBFS"
+            for row in verified:
+                result = row["verification"]
+                outcome = "passed" if result["passed"] else "FAILED"
+                verifications.append(
+                    (
+                        f"{row['output_file']} stream {result['output_stream_id']}: "
+                        f"level {fmt(result['output_level'])} {level_unit}, "
+                        f"peak {fmt(result['output_peak'])} {peak_unit}, {outcome}",
+                        result["passed"],
+                    )
+                )
+        elif self.verify and self.dry_run:
+            notes.append("Encoded-output verification skipped: dry run.")
+
+        return (
+            header,
+            ["File", "Stream", *columns, "Status"],
+            table,
+            verifications,
+            notes,
+        )
+
+    _SUMMARY_FOOTNOTE = (
+        "Output values above: loudnorm filter statistics for EBU; "
+        "calculated from applied gain for RMS/peak; input levels for skipped files."
+    )
+
+    def format_summary(self) -> str:
+        """
+        Return the before/after summary as a human-readable table.
+
+        Returns:
+            str: The formatted table, including a header line with the target
+        """
+        header, headings, table, verifications, notes = self._summary_parts()
+        if not table:
+            return f"Summary ({header}): no files processed"
+
+        widths = [
+            max(len(headings[i]), *(len(line[i]) for line in table))
+            for i in range(len(headings))
+        ]
+
+        def fmt_line(cells: list[str]) -> str:
+            # Left-align the file name and status, right-align everything else
+            parts = [
+                cell.ljust(widths[i])
+                if i in (0, len(cells) - 1)
+                else cell.rjust(widths[i])
+                for i, cell in enumerate(cells)
+            ]
+            return "  ".join(parts).rstrip()
+
+        lines = [f"Summary ({header}):", "", fmt_line(headings)]
+        lines.append(fmt_line(["-" * w for w in widths]))
+        lines.extend(fmt_line(line) for line in table)
+        lines.append("\n" + self._SUMMARY_FOOTNOTE)
+        if verifications:
+            lines.append("\nEncoded-output verification (measured after encoding):")
+            lines.extend(text for text, _ in verifications)
+        for note in notes:
+            lines.append("\n" + note)
+        return "\n".join(lines)
+
+    def summary_renderable(self) -> RenderableType:
+        """
+        Return the before/after summary as a rich renderable for terminals.
+
+        Returns:
+            RenderableType: A table with the same content as `format_summary()`
+        """
+        header, headings, table, verifications, notes = self._summary_parts()
+        if not table:
+            return Text(f"Summary ({header}): no files processed")
+
+        status_styles = {"normalized": "status.ok", "skipped": "status.skipped"}
+        summary = Table(
+            title=f"Summary ({header})",
+            title_justify="left",
+            title_style="bold",
+            caption=self._SUMMARY_FOOTNOTE,
+            caption_justify="left",
+            caption_style="dim",
+            header_style="bold",
+            box=box.SIMPLE_HEAD,
+        )
+        last = len(headings) - 1
+        for i, heading in enumerate(headings):
+            summary.add_column(
+                heading,
+                justify="left" if i in (0, last) else "right",
+                overflow="fold",
+                no_wrap=i != 0,
+            )
+        for line in table:
+            status = line[-1]
+            summary.add_row(
+                *line[:-1],
+                Text(status, style=status_styles.get(status, "status.error")),
+            )
+
+        parts: list[RenderableType] = [summary]
+        if verifications:
+            parts.append(
+                Text(
+                    "Encoded-output verification (measured after encoding):",
+                    style="bold",
+                )
+            )
+            for text, passed in verifications:
+                parts.append(
+                    Text(
+                        f"  {'✔' if passed else '✘'} {text}",
+                        style="status.ok" if passed else "status.error",
+                    )
+                )
+        parts.extend(Text(note, style="dim") for note in notes)
+        return Group(*parts)

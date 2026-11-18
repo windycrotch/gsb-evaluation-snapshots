@@ -1,0 +1,248 @@
+"""Preset management for ffmpeg-normalize."""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import shutil
+from pathlib import Path
+from typing import Any
+
+_logger = logging.getLogger(__name__)
+
+
+def get_config_dir() -> Path:
+    """Get the platform-specific config directory for ffmpeg-normalize.
+
+    Returns:
+        Path: Configuration directory for presets
+
+    On Linux/macOS:
+        - XDG_CONFIG_HOME/ffmpeg-normalize (if XDG_CONFIG_HOME is set)
+        - ~/.config/ffmpeg-normalize (otherwise)
+
+    On Windows:
+        - %APPDATA%/ffmpeg-normalize
+    """
+    if os.name == "nt":  # Windows
+        appdata = os.getenv("APPDATA")
+        if appdata:
+            config_dir = Path(appdata) / "ffmpeg-normalize"
+        else:
+            config_dir = Path.home() / "AppData" / "Roaming" / "ffmpeg-normalize"
+    else:  # Linux/macOS
+        xdg_config = os.getenv("XDG_CONFIG_HOME")
+        if xdg_config:
+            config_dir = Path(xdg_config) / "ffmpeg-normalize"
+        else:
+            config_dir = Path.home() / ".config" / "ffmpeg-normalize"
+
+    return config_dir
+
+
+def get_presets_dir() -> Path:
+    """Get the presets directory.
+
+    Returns:
+        Path: Directory containing preset files
+    """
+    return get_config_dir() / "presets"
+
+
+def get_default_presets_dir() -> Path:
+    """Get the package default presets directory.
+
+    Returns:
+        Path: Directory containing default preset files bundled with the package
+    """
+    # Get the directory where this module is located
+    module_dir = Path(__file__).parent
+    return module_dir / "data" / "presets"
+
+
+class PresetManager:
+    """Manages loading and merging of presets with CLI arguments."""
+
+    def __init__(self) -> None:
+        """Initialize the preset manager."""
+        self.presets_dir = get_presets_dir()
+        self.default_presets_dir = get_default_presets_dir()
+
+    def get_available_presets(self) -> list[str]:
+        """Get list of available preset names.
+
+        Includes both user-installed presets and default presets from the package.
+        User presets take precedence if they have the same name.
+
+        Returns:
+            list[str]: List of available preset names (without .json extension)
+        """
+        presets = set()
+
+        # Get presets from user config directory
+        if self.presets_dir.exists():
+            for file in self.presets_dir.glob("*.json"):
+                presets.add(file.stem)
+
+        # Get default presets from package
+        if self.default_presets_dir.exists():
+            for file in self.default_presets_dir.glob("*.json"):
+                presets.add(file.stem)
+
+        return sorted(presets)
+
+    def get_presets_with_source(self) -> list[tuple[str, str]]:
+        """Get list of available presets with their source location.
+
+        Returns:
+            list[tuple[str, str]]: List of (preset_name, source) tuples where
+            source is either "user" or "builtin"
+        """
+        user_presets: set[str] = set()
+        builtin_presets: set[str] = set()
+
+        # Get presets from user config directory
+        if self.presets_dir.exists():
+            for file in self.presets_dir.glob("*.json"):
+                user_presets.add(file.stem)
+
+        # Get default presets from package
+        if self.default_presets_dir.exists():
+            for file in self.default_presets_dir.glob("*.json"):
+                builtin_presets.add(file.stem)
+
+        result = []
+        all_presets = sorted(user_presets | builtin_presets)
+        for preset in all_presets:
+            # User presets take precedence
+            if preset in user_presets:
+                result.append((preset, "user"))
+            else:
+                result.append((preset, "builtin"))
+
+        return result
+
+    def load_preset(self, preset_name: str) -> dict[str, Any]:
+        """Load a preset file by name.
+
+        Checks user config directory first, then falls back to package defaults.
+
+        Args:
+            preset_name: Name of the preset (without .json extension)
+
+        Returns:
+            dict[str, Any]: Preset configuration as a dictionary
+
+        Raises:
+            FileNotFoundError: If preset file doesn't exist
+            json.JSONDecodeError: If preset file is invalid JSON
+        """
+        # Try user config directory first
+        preset_path = self.presets_dir / f"{preset_name}.json"
+
+        # Fall back to package default presets
+        if not preset_path.exists():
+            preset_path = self.default_presets_dir / f"{preset_name}.json"
+
+        if not preset_path.exists():
+            raise FileNotFoundError(
+                f"Preset '{preset_name}' not found. "
+                f"Available presets: {', '.join(self.get_available_presets()) or 'none'}"
+            )
+
+        try:
+            with open(preset_path, "r") as f:
+                preset_data = json.load(f)
+        except json.JSONDecodeError as e:
+            raise json.JSONDecodeError(
+                f"Invalid JSON in preset '{preset_name}': {e.msg}",
+                e.doc,
+                e.pos,
+            )
+
+        if not isinstance(preset_data, dict):
+            raise ValueError(
+                f"Preset must be a JSON object, got {type(preset_data).__name__}"
+            )
+
+        return preset_data
+
+    def merge_preset_with_args(
+        self, preset_data: dict[str, Any], cli_args: Any, explicit_args: set[str]
+    ) -> None:
+        """Apply preset values only to options omitted from the command line.
+
+        Args:
+            preset_data: Preset configuration.
+            cli_args: Parsed arguments, including defaults; modified in place.
+            explicit_args: Argument destinations explicitly supplied by the user.
+        """
+        for key, value in preset_data.items():
+            attr_name = key.replace("-", "_")
+            if not hasattr(cli_args, attr_name):
+                _logger.warning(
+                    f"Preset option '{key}' is not a valid ffmpeg-normalize option. Skipping."
+                )
+                continue
+            if attr_name not in explicit_args:
+                setattr(cli_args, attr_name, value)
+                _logger.debug(f"Applied preset option '{key}' = {value}")
+
+    def validate_preset(self, preset_name: str) -> tuple[bool, str]:
+        """Validate that a preset file exists and is valid.
+
+        Args:
+            preset_name: Name of the preset to validate
+
+        Returns:
+            tuple[bool, str]: (is_valid, message)
+        """
+        try:
+            self.load_preset(preset_name)
+            return True, f"Preset '{preset_name}' is valid"
+        except FileNotFoundError as e:
+            return False, str(e)
+        except (json.JSONDecodeError, ValueError) as e:
+            return False, f"Error loading preset '{preset_name}': {e}"
+
+    def install_default_presets(self, force: bool = False) -> tuple[bool, str]:
+        """Install default presets to user config directory.
+
+        Args:
+            force: If True, overwrite existing presets
+
+        Returns:
+            tuple[bool, str]: (success, message)
+        """
+        try:
+            # Create presets directory if it doesn't exist
+            self.presets_dir.mkdir(parents=True, exist_ok=True)
+
+            if not self.default_presets_dir.exists():
+                return (
+                    False,
+                    f"Default presets directory not found at {self.default_presets_dir}",
+                )
+
+            # Copy all default presets
+            installed = []
+            skipped = []
+
+            for preset_file in self.default_presets_dir.glob("*.json"):
+                dest_file = self.presets_dir / preset_file.name
+
+                if dest_file.exists() and not force:
+                    skipped.append(preset_file.name)
+                else:
+                    shutil.copy2(preset_file, dest_file)
+                    installed.append(preset_file.name)
+
+            message = f"Installed {len(installed)} preset(s) to {self.presets_dir}"
+            if skipped:
+                message += f" ({len(skipped)} skipped, use --force to overwrite)"
+
+            return True, message
+
+        except Exception as e:
+            return False, f"Error installing default presets: {e}"

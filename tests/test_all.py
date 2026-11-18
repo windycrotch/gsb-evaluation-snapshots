@@ -1,0 +1,1694 @@
+import json
+import os
+import shlex
+import shutil
+import stat
+import subprocess
+import sys
+from typing import Any, Dict, List, Literal, Tuple, cast
+
+import pytest
+
+
+def _has_encoder(encoder_name: str) -> bool:
+    """Check if a given encoder is available in the local ffmpeg build."""
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-encoders"],
+            capture_output=True,
+            text=True,
+        )
+        return encoder_name in result.stdout
+    except FileNotFoundError:
+        return False
+
+
+def ffmpeg_normalize_call(args: List[str]) -> Tuple[str, str]:
+    cmd = [sys.executable, "-m", "ffmpeg_normalize"]
+    cmd.extend(args)
+
+    print(shlex.join(cmd))
+    try:
+        p = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True
+        )
+        stdout, stderr = p.communicate()
+        return stdout, stderr
+    except subprocess.CalledProcessError as e:
+        print(e.output)
+        raise e
+
+
+def _get_stats(
+    input_file: str, normalization_type: Literal["ebu", "rms", "peak"] = "ebu"
+) -> Dict:
+    """
+    Get the statistics from an existing output file without converting it.
+    """
+    stdout, _ = ffmpeg_normalize_call(
+        [input_file, "-f", "-n", "--print-stats", "-nt", normalization_type]
+    )
+    stats = cast(dict, json.loads(stdout))
+    # Drop the per-file outcome fields here; the loudness ground-truth tests
+    # only compare measured statistics. Status/skip behavior is tested
+    # separately.
+    for stream_stats in stats:
+        stream_stats.pop("status", None)
+        stream_stats.pop("error", None)
+    print(json.dumps(stats, indent=4))
+    return stats
+
+
+def _get_stream_info(input_file: str) -> List[Dict]:
+    cmd = [
+        "ffprobe",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        input_file,
+        "-of",
+        "json",
+        "-show_streams",
+    ]
+    return cast(
+        list,
+        json.loads(
+            subprocess.check_output(
+                cmd, stderr=subprocess.STDOUT, universal_newlines=True
+            )
+        )["streams"],
+    )
+
+
+def fuzzy_equal(d1: Any, d2: Any, precision: float = 0.1) -> bool:
+    """
+    Compare two objects recursively (just as standard '==' except floating point
+    values are compared within given precision.
+
+    Based on https://gist.github.com/durden/4236551, modified to handle lists
+    """
+
+    if len(d1) != len(d2):
+        print("Length of objects does not match {}, {}".format(d1, d2))
+        return False
+
+    if isinstance(d1, list):
+        ret = []
+        for v1, v2 in zip(d1, d2):
+            if isinstance(v1, dict):
+                ret.append(fuzzy_equal(v1, v2, precision))
+            else:
+                if not abs(v1 - v2) < precision:
+                    print("Values do not match: Got {}, expected {}".format(v1, v2))
+                    return False
+                else:
+                    ret.append(True)
+        return all(ret)
+    elif isinstance(d1, dict):
+        errors = []
+        for k, v in d1.items():
+            # Make sure all the keys are equal
+            if k not in d2:
+                print("Object does not contain: {}, {}".format(k, d2))
+                return False
+
+            # Fuzzy float comparison
+            if isinstance(v, float) and isinstance(d2[k], float):
+                if not abs(v - d2[k]) < precision:
+                    errors.append(
+                        "Values for {} do not match: Got {}, expected {}".format(
+                            k, v, d2[k]
+                        )
+                    )
+
+            # Recursive compare if there are nested dicts
+            elif isinstance(v, dict):
+                if not fuzzy_equal(v, d2[k], precision):
+                    return False
+
+            # Fall back to default
+            elif v != d2[k]:
+                errors.append(
+                    "Values for {} do not match: Got {}, expected {}".format(
+                        k, v, d2[k]
+                    )
+                )
+
+        if len(errors):
+            print("Errors:\n" + "\n".join(errors))
+            return False
+    else:
+        if not abs(d1 - d2) < precision:
+            print("Values do not match: Got {}, expected {}".format(d2, d2))
+            return False
+
+    return True
+
+
+class TestFFmpegNormalize:
+    @pytest.fixture(scope="function", autouse=True)
+    def cleanup(self):
+        os.makedirs("normalized", exist_ok=True)
+        yield
+        for file in [
+            "test.mkv",
+            "test.wav",
+            "test2.wav",
+            "test.mp3",
+            "test.aac",
+            "test.mp4",
+            "test1.mkv",
+            "test2.mkv",
+        ]:
+            if os.path.isfile("normalized/" + file):
+                os.remove("normalized/" + file)
+            if os.path.isdir("normalized"):
+                shutil.rmtree("normalized")
+
+    def test_input_list(self, tmp_path):
+        # Create a temporary input list file using pytest tmp_path
+        input_list_path = tmp_path / "input_list.txt"
+        input_list_path.write_text("tests/test.mp4\ntests/test.mp3\n")
+        # Run ffmpeg-normalize with --input-list
+        first_output = tmp_path / "video.mkv"
+        second_output = tmp_path / "audio.mkv"
+        ffmpeg_normalize_call(
+            [
+                "--input-list",
+                str(input_list_path),
+                "-o",
+                str(first_output),
+                str(second_output),
+            ]
+        )
+        # Check output files
+        assert first_output.is_file()
+        assert second_output.is_file()
+
+    def test_no_input_specified(self):
+        """Run the CLI with no arguments; should exit with error"""
+        _, stderr = ffmpeg_normalize_call([])
+        assert "No input files specified" in stderr
+
+    def test_empty_input_list_file(self, tmp_path):
+        # Create an empty input list file using pytest tmp_path
+        input_list_path = tmp_path / "empty_input_list.txt"
+        input_list_path.write_text("")
+        _, stderr = ffmpeg_normalize_call(["--input-list", str(input_list_path)])
+        # Should error because the list is empty
+        assert "No input files specified" in stderr
+
+    def test_output_filename_and_folder(self):
+        ffmpeg_normalize_call(["tests/test.mp4"])
+        assert os.path.isfile("normalized/test.mkv")
+
+    def test_default_warnings(self):
+        _, stderr = ffmpeg_normalize_call(
+            ["tests/test.mp4", "--dynamic", "-o", "normalized/test2.wav"]
+        )
+        assert "sample rate will automatically be set" in stderr
+
+    def test_multiple_outputs(self):
+        os.makedirs("normalized", exist_ok=True)
+        ffmpeg_normalize_call(
+            [
+                "tests/test.mp4",
+                "tests/test.mp4",
+                "-o",
+                "normalized/test1.mkv",
+                "normalized/test2.mkv",
+            ]
+        )
+        assert os.path.isfile("normalized/test1.mkv")
+        assert os.path.isfile("normalized/test2.mkv")
+
+    def test_overwrites(self):
+        ffmpeg_normalize_call(["tests/test.mp4", "-v"])
+        _, stderr = ffmpeg_normalize_call(["tests/test.mp4", "-v"])
+        assert "exists" in stderr
+
+    def test_in_place_overwrite(self, tmp_path):
+        # See issues #22 and #317.
+        test_file = tmp_path / "test.mp3"
+        shutil.copy("tests/test.mp3", test_file)
+        original_bytes = test_file.read_bytes()
+
+        ffmpeg_normalize_call(
+            [str(test_file), "-o", str(test_file), "-c:a", "libmp3lame", "-f"]
+        )
+
+        assert test_file.stat().st_size > 0
+        assert test_file.read_bytes() != original_bytes
+
+    def test_in_place_overwrite_keeps_file_mode(self, tmp_path):
+        test_file = tmp_path / "test.mp3"
+        shutil.copy("tests/test.mp3", test_file)
+        test_file.chmod(0o644)
+
+        ffmpeg_normalize_call(
+            [str(test_file), "-o", str(test_file), "-c:a", "libmp3lame", "-f"]
+        )
+
+        assert stat.S_IMODE(test_file.stat().st_mode) == 0o644
+
+    def test_flac_keeps_cover_art(self, tmp_path):
+        cover = tmp_path / "cover.png"
+        track = tmp_path / "track.flac"
+        subprocess.check_call(
+            [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=red:s=64x64",
+                "-frames:v",
+                "1",
+                str(cover),
+            ]
+        )
+        subprocess.check_call(
+            [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=d=3",
+                "-i",
+                str(cover),
+                "-map",
+                "0",
+                "-map",
+                "1",
+                "-c:a",
+                "flac",
+                "-c:v",
+                "copy",
+                "-disposition:v",
+                "attached_pic",
+                str(track),
+            ]
+        )
+        output = tmp_path / "out.flac"
+
+        ffmpeg_normalize_call([str(track), "-c:a", "flac", "-o", str(output)])
+
+        pictures = [
+            s
+            for s in _get_stream_info(str(output))
+            if s["codec_type"] == "video" and s["disposition"]["attached_pic"] == 1
+        ]
+        assert len(pictures) == 1
+
+    def test_dry(self):
+        ffmpeg_normalize_call(["tests/test.mp4", "-n"])
+        assert not os.path.isfile("normalized/test.mkv")
+
+    def test_only_supports_one_stream_output(self):
+        os.makedirs("normalized", exist_ok=True)
+        _, stderr = ffmpeg_normalize_call(
+            ["tests/test.mp4", "-o", "normalized/test.wav", "-v"]
+        )
+        assert "Output file only supports one stream" in stderr
+
+    def test_peak(self):
+        ffmpeg_normalize_call(["tests/test.mp4", "-nt", "peak", "-t", "0"])
+        assert os.path.isfile("normalized/test.mkv")
+        assert fuzzy_equal(
+            _get_stats("normalized/test.mkv", "peak"),
+            [
+                {
+                    "input_file": "normalized/test.mkv",
+                    "output_file": "normalized/test.mkv",
+                    "stream_id": 1,
+                    "ebu_pass1": None,
+                    "ebu_pass2": None,
+                    "mean": -14.8,
+                    "max": -0.0,
+                },
+                {
+                    "input_file": "normalized/test.mkv",
+                    "output_file": "normalized/test.mkv",
+                    "stream_id": 2,
+                    "ebu_pass1": None,
+                    "ebu_pass2": None,
+                    "mean": -19.3,
+                    "max": -0.0,
+                },
+            ],
+        )
+
+    def test_rms(self):
+        ffmpeg_normalize_call(["tests/test.mp4", "-nt", "rms", "-t", "-15"])
+        assert os.path.isfile("normalized/test.mkv")
+        assert fuzzy_equal(
+            _get_stats("normalized/test.mkv", "rms"),
+            [
+                {
+                    "input_file": "normalized/test.mkv",
+                    "output_file": "normalized/test.mkv",
+                    "stream_id": 1,
+                    "ebu_pass1": None,
+                    "ebu_pass2": None,
+                    "mean": -15.0,
+                    "max": -0.2,
+                },
+                {
+                    "input_file": "normalized/test.mkv",
+                    "output_file": "normalized/test.mkv",
+                    "stream_id": 2,
+                    "ebu_pass1": None,
+                    "ebu_pass2": None,
+                    "mean": -15.1,
+                    "max": 0.0,
+                },
+            ],
+        )
+
+    def test_ebu(self):
+        ffmpeg_normalize_call(["tests/test.mp4", "-nt", "ebu"])
+        assert os.path.isfile("normalized/test.mkv")
+        assert fuzzy_equal(
+            _get_stats("normalized/test.mkv", "ebu"),
+            [
+                {
+                    "input_file": "normalized/test.mkv",
+                    "output_file": "normalized/test.mkv",
+                    "stream_id": 1,
+                    "ebu_pass1": {
+                        "input_i": -23.00,
+                        "input_tp": -10.32,
+                        "input_lra": 2.40,
+                        "input_thresh": -33.06,
+                        "output_i": -22.03,
+                        "output_tp": -8.89,
+                        "output_lra": 2.30,
+                        "output_thresh": -32.12,
+                        "normalization_type": "dynamic",
+                        "target_offset": -0.97,
+                    },
+                    "ebu_pass2": None,
+                    "mean": None,
+                    "max": None,
+                },
+                {
+                    "input_file": "normalized/test.mkv",
+                    "output_file": "normalized/test.mkv",
+                    "stream_id": 2,
+                    "ebu_pass1": {
+                        "input_i": -22.98,
+                        "input_tp": -10.72,
+                        "input_lra": 2.10,
+                        "input_thresh": -33.03,
+                        "output_i": -22.16,
+                        "output_tp": -9.46,
+                        "output_lra": 2.10,
+                        "output_thresh": -32.25,
+                        "normalization_type": "dynamic",
+                        "target_offset": -0.84,
+                    },
+                    "ebu_pass2": None,
+                    "mean": None,
+                    "max": None,
+                },
+            ],
+        )
+
+    def test_threshold_skips_file_at_target(self, tmp_path):
+        """A file already within the threshold of the target is skipped and
+        copied through verbatim, reported as 'skipped' in the stats."""
+        # tests/test.m4a is at roughly -22.5 LUFS, within 0.5 of the -23 default
+        input_file = tmp_path / "in.m4a"
+        shutil.copy("tests/test.m4a", input_file)
+        output_file = tmp_path / "out.m4a"
+
+        stdout, _ = ffmpeg_normalize_call(
+            [
+                str(input_file),
+                "-o",
+                str(output_file),
+                "-c:a",
+                "aac",
+                "--threshold",
+                "0.5",
+                "--print-stats",
+            ]
+        )
+        assert output_file.exists()
+        # the skipped file is copied through unchanged
+        assert output_file.read_bytes() == input_file.read_bytes()
+
+        stats = json.loads(stdout)
+        assert len(stats) > 0
+        assert all(s["status"] == "skipped" for s in stats)
+
+    def test_threshold_disabled_by_default(self, tmp_path):
+        """By default (threshold 0), a file at the target is still normalized."""
+        input_file = tmp_path / "in.m4a"
+        shutil.copy("tests/test.m4a", input_file)
+        output_file = tmp_path / "out.m4a"
+
+        # no --threshold given, and an explicit 0 should behave the same way
+        for extra_args in ([], ["--threshold", "0"]):
+            stdout, _ = ffmpeg_normalize_call(
+                [
+                    str(input_file),
+                    "-o",
+                    str(output_file),
+                    "-c:a",
+                    "aac",
+                    "-f",
+                    "--print-stats",
+                    *extra_args,
+                ]
+            )
+            stats = json.loads(stdout)
+            assert len(stats) > 0
+            assert all(s["status"] == "normalized" for s in stats)
+
+    def test_status_normalized_when_not_at_target(self):
+        """A file far from the target is normalized and reported as such."""
+        # tests/test.mp4 is at roughly -40 LUFS, far from the -23 default
+        stdout, _ = ffmpeg_normalize_call(["tests/test.mp4", "-f", "--print-stats"])
+        stats = json.loads(stdout)
+        assert len(stats) > 0
+        assert all(s["status"] == "normalized" for s in stats)
+        # no error key for successfully processed files
+        assert all("error" not in s for s in stats)
+
+    def test_skip_exit_code_is_zero(self, tmp_path):
+        """Skipping a file (already at target) is not an error: exit code 0."""
+        input_file = tmp_path / "in.m4a"
+        shutil.copy("tests/test.m4a", input_file)
+        output_file = tmp_path / "out.m4a"
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "ffmpeg_normalize",
+                str(input_file),
+                "-o",
+                str(output_file),
+                "-c:a",
+                "aac",
+                "--threshold",
+                "0.5",
+            ],
+            capture_output=True,
+        )
+        assert result.returncode == 0
+
+    def test_error_status_and_nonzero_exit_code(self, tmp_path):
+        """A processing failure is reported per-file and yields a non-zero exit
+        code, while still printing stats with the error attribute."""
+        output_file = tmp_path / "out.mkv"
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "ffmpeg_normalize",
+                "tests/test.mp4",
+                "-o",
+                str(output_file),
+                "-c:a",
+                "definitelynotacodec",
+                "--print-stats",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode != 0
+        stats = json.loads(result.stdout)
+        assert any(s["status"] == "error" for s in stats)
+        assert any(s.get("error") for s in stats)
+
+    def test_acodec(self):
+        ffmpeg_normalize_call(["tests/test.mp4", "-c:a", "aac"])
+        assert os.path.isfile("normalized/test.mkv")
+        assert _get_stream_info("normalized/test.mkv")[1]["codec_name"] == "aac"
+
+    def test_abr(self):
+        os.makedirs("normalized", exist_ok=True)
+        ffmpeg_normalize_call(
+            [
+                "tests/test.mp4",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "320k",
+                "-o",
+                "normalized/test.aac",
+            ]
+        )
+        assert os.path.isfile("normalized/test.aac")
+        assert _get_stream_info("normalized/test.aac")[0]["codec_name"] == "aac"
+        assert (
+            abs(133000 - float(_get_stream_info("normalized/test.aac")[0]["bit_rate"]))
+            > 10000
+        )
+
+    def test_ar(self):
+        ffmpeg_normalize_call(["tests/test.mp4", "-ar", "48000"])
+        assert os.path.isfile("normalized/test.mkv")
+        assert _get_stream_info("normalized/test.mkv")[1]["sample_rate"] == "48000"
+
+    def test_vcodec(self):
+        ffmpeg_normalize_call(["tests/test.mp4", "-c:v", "libx265"])
+        assert os.path.isfile("normalized/test.mkv")
+        assert _get_stream_info("normalized/test.mkv")[0]["codec_name"] == "hevc"
+
+    def test_extra_input_options_json(self):
+        ffmpeg_normalize_call(
+            ["tests/test.mp4", "-c:a", "aac", "-ei", '[ "-f", "mp4" ]']
+        )
+        # FIXME: some better test that options are respected?
+        assert os.path.isfile("normalized/test.mkv")
+
+    def test_extra_output_options_json(self):
+        ffmpeg_normalize_call(
+            ["tests/test.mp4", "-c:a", "aac", "-e", '[ "-vbr", "3" ]']
+        )
+        # FIXME: some better test that options are respected?
+        assert os.path.isfile("normalized/test.mkv")
+
+    def test_ofmt_pcm_fail(self):
+        # Explicitly asking for PCM in a container that cannot hold it still fails.
+        _, stderr = ffmpeg_normalize_call(
+            [
+                "tests/test.mp4",
+                "-ofmt",
+                "mp3",
+                "-o",
+                "normalized/test.mp3",
+                "-c:a",
+                "pcm_s16le",
+                "-vn",
+                "-sn",
+            ]
+        )
+        assert "does not support" in stderr
+
+    def test_ofmt_mp3(self):
+        ffmpeg_normalize_call(
+            [
+                "tests/test.mp4",
+                "-ofmt",
+                "mp3",
+                "-o",
+                "normalized/test.mp3",
+                "-c:a",
+                "libmp3lame",
+                "-vn",
+                "-sn",
+            ]
+        )
+        assert os.path.isfile("normalized/test.mp3")
+
+    def test_ofmt_mp3_auto_codec(self):
+        # Without -c:a, the codec is taken from the output format.
+        ffmpeg_normalize_call(
+            [
+                "tests/test.mp4",
+                "-ofmt",
+                "mp3",
+                "-o",
+                "normalized/test.mp3",
+                "-vn",
+                "-sn",
+            ]
+        )
+        assert os.path.isfile("normalized/test.mp3")
+        assert _get_stream_info("normalized/test.mp3")[0]["codec_name"] == "mp3"
+
+    def test_ext_pcm_fail(self):
+        # Explicitly asking for PCM in a container that cannot hold it still fails.
+        _, stderr = ffmpeg_normalize_call(
+            ["tests/test.mp4", "-ext", "mp3", "-c:a", "pcm_s16le"]
+        )
+        assert "does not support" in stderr
+
+    def test_ext_mp3(self):
+        ffmpeg_normalize_call(["tests/test.mp4", "-ext", "mp3", "-c:a", "libmp3lame"])
+        assert os.path.isfile("normalized/test.mp3")
+
+    def test_ext_mp3_auto_codec(self):
+        # Without -c:a, the codec is taken from the output extension.
+        ffmpeg_normalize_call(["tests/test.mp4", "-ext", "mp3"])
+        assert os.path.isfile("normalized/test.mp3")
+        assert _get_stream_info("normalized/test.mp3")[0]["codec_name"] == "mp3"
+
+    def test_ext_flac_auto_codec(self):
+        ffmpeg_normalize_call(["tests/test.m4a", "-ext", "flac"])
+        assert os.path.isfile("normalized/test.flac")
+        assert _get_stream_info("normalized/test.flac")[0]["codec_name"] == "flac"
+
+    @pytest.mark.skipif(
+        not _has_encoder("libopus"), reason="libopus encoder not available"
+    )
+    def test_ext_opus_auto_codec(self):
+        ffmpeg_normalize_call(["tests/test.m4a", "-o", "normalized/test.opus"])
+        assert os.path.isfile("normalized/test.opus")
+        assert _get_stream_info("normalized/test.opus")[0]["codec_name"] == "opus"
+
+    def test_muxer_default_audio_encoder(self):
+        # The resolver mirrors ffmpeg's own default codec per container.
+        from ffmpeg_normalize._cmd_utils import get_muxer_default_audio_encoder
+
+        assert get_muxer_default_audio_encoder("flac") == "flac"
+        assert get_muxer_default_audio_encoder("mp4") == "aac"
+        # m4a's muxer is registered as "ipod", which must be resolved.
+        assert get_muxer_default_audio_encoder("m4a") == "aac"
+
+    def test_version(self):
+        stdout, _ = ffmpeg_normalize_call(["--version"])
+        assert "ffmpeg-normalize v" in stdout
+
+    def test_progress(self):
+        _, stderr = ffmpeg_normalize_call(["tests/test.mp4", "-pr"])
+        # Without a terminal, rich prints the final state of the overall bar
+        assert "Files" in stderr
+        assert "100%" in stderr
+        assert "1/1" in stderr
+        assert os.path.isfile("normalized/test.mkv")
+
+    def test_no_progress_when_not_a_terminal(self):
+        # Progress bars are only shown by default in interactive terminals
+        _, stderr = ffmpeg_normalize_call(["tests/test.mp4", "-f"])
+        assert "Files" not in stderr
+        _, stderr = ffmpeg_normalize_call(
+            ["tests/test.mp4", "-f", "-pr", "--no-progress"]
+        )
+        assert "Files" not in stderr
+
+    def test_duration(self):
+        _, stderr = ffmpeg_normalize_call(["tests/test.m4a", "--debug"])
+        assert "Found duration: " in stderr
+
+    def test_pre_filters(self):
+        ffmpeg_normalize_call(
+            [
+                "tests/test.m4a",
+                "-o",
+                "normalized/test2.wav",
+                "-prf",
+                "volume=0.5,volume=0.5",
+            ]
+        )
+        assert os.path.isfile("normalized/test2.wav")
+        assert fuzzy_equal(
+            _get_stats("normalized/test2.wav", "ebu"),
+            [
+                {
+                    "input_file": "normalized/test2.wav",
+                    "output_file": "normalized/test2.mkv",
+                    "stream_id": 0,
+                    "ebu_pass1": {
+                        "input_i": -23.03,
+                        "input_tp": -17.86,
+                        "input_lra": 0.4,
+                        "input_thresh": -35.86,
+                        "output_i": -19.91,
+                        "output_tp": -14.76,
+                        "output_lra": 0.0,
+                        "output_thresh": -32.59,
+                        "normalization_type": "dynamic",
+                        "target_offset": -3.09,
+                    },
+                    "ebu_pass2": None,
+                    "mean": None,
+                    "max": None,
+                }
+            ],
+        )
+
+    def test_post_filters(self):
+        ffmpeg_normalize_call(
+            [
+                "tests/test.m4a",
+                "-o",
+                "normalized/test2.wav",
+                "-pof",
+                "volume=0.5,volume=0.5",
+            ]
+        )
+        assert os.path.isfile("normalized/test2.wav")
+        assert fuzzy_equal(
+            _get_stats("normalized/test2.wav", "ebu"),
+            [
+                {
+                    "input_file": "normalized/test2.wav",
+                    "output_file": "normalized/test2.mkv",
+                    "stream_id": 0,
+                    "ebu_pass1": {
+                        "input_i": -35.05,
+                        "input_tp": -29.9,
+                        "input_lra": 0.4,
+                        "input_thresh": -47.87,
+                        "output_i": -19.9,
+                        "output_tp": -14.76,
+                        "output_lra": 0.0,
+                        "output_thresh": -32.58,
+                        "normalization_type": "dynamic",
+                        "target_offset": -3.1,
+                    },
+                    "ebu_pass2": None,
+                    "mean": None,
+                    "max": None,
+                }
+            ],
+        )
+
+    def test_quiet(self):
+        _, stderr = ffmpeg_normalize_call(
+            ["tests/test.mp4", "-ext", "wav", "-vn", "-f", "q"]
+        )
+        assert "only supports one stream" not in stderr
+
+    def test_audio_channels(self):
+        ffmpeg_normalize_call(
+            ["tests/test.mp4", "-ac", "1", "-o", "normalized/test.wav"]
+        )
+        assert os.path.isfile("normalized/test.wav")
+        stream_info = _get_stream_info("normalized/test.wav")[0]
+        assert stream_info["channels"] == 1
+
+        ffmpeg_normalize_call(
+            ["tests/test.mp4", "-ac", "2", "-o", "normalized/test2.wav"]
+        )
+        assert os.path.isfile("normalized/test2.wav")
+        stream_info = _get_stream_info("normalized/test2.wav")[0]
+        assert stream_info["channels"] == 2
+
+    def test_peak_with_downmix(self):
+        """
+        Regression test for https://github.com/slhck/ffmpeg-normalize/issues/316:
+        peak normalization combined with -ac downmix should result in the
+        target peak in the downmixed output.
+        """
+        target = -1.0
+        ffmpeg_normalize_call(
+            [
+                "tests/test.mp4",
+                "-nt",
+                "peak",
+                "-t",
+                str(target),
+                "-ac",
+                "2",
+                "-o",
+                "normalized/test.mkv",
+            ]
+        )
+        assert os.path.isfile("normalized/test.mkv")
+        stats = _get_stats("normalized/test.mkv", "peak")
+        # Both audio streams in the source should end up close to the target peak.
+        for stream_stats in stats:
+            assert stream_stats["max"] is not None
+            assert abs(stream_stats["max"] - target) < 0.1, (
+                f"Stream {stream_stats['stream_id']} peak {stream_stats['max']} "
+                f"is not close to target {target}"
+            )
+
+    def test_replaygain(self):
+        REPLAYGAIN_FILES = [
+            "tests/test.mp4",
+            "tests/test.mp3",
+            "tests/test.ogg",
+            "tests/test.opus",
+        ]
+        try:
+            for file in REPLAYGAIN_FILES:
+                original_mtime = os.path.getmtime(file)
+                ffmpeg_normalize_call([file, "--replaygain"])
+                assert os.path.isfile(file)
+                assert os.path.getmtime(file) > original_mtime
+        except AssertionError:
+            print(f"Failed to normalize {file}")
+            raise
+        finally:
+            # git checkout the files!
+            for file in REPLAYGAIN_FILES:
+                subprocess.run(["git", "checkout", file], check=False)
+
+    def test_audio_streams_single(self):
+        """Test normalizing only a single audio stream"""
+        ffmpeg_normalize_call(["tests/test.mp4", "-as", "1", "-nt", "ebu"])
+        assert os.path.isfile("normalized/test.mkv")
+        # Check that output has only 1 audio stream
+        streams = _get_stream_info("normalized/test.mkv")
+        audio_streams = [s for s in streams if s["codec_type"] == "audio"]
+        assert len(audio_streams) == 1
+        # Verify stats show only one stream was normalized
+        stats = _get_stats("normalized/test.mkv", "ebu")
+        assert len(stats) == 1
+        assert stats[0]["stream_id"] == 1
+
+    def test_audio_streams_multiple(self):
+        """Test normalizing multiple specific audio streams"""
+        ffmpeg_normalize_call(["tests/test.mp4", "-as", "1,2", "-nt", "ebu"])
+        assert os.path.isfile("normalized/test.mkv")
+        # Check that output has 2 audio streams
+        streams = _get_stream_info("normalized/test.mkv")
+        audio_streams = [s for s in streams if s["codec_type"] == "audio"]
+        assert len(audio_streams) == 2
+        # Verify stats show both streams were normalized
+        stats = _get_stats("normalized/test.mkv", "ebu")
+        assert len(stats) == 2
+
+    def test_audio_streams_with_keep_other(self):
+        """Test normalizing one stream while keeping others as passthrough"""
+        ffmpeg_normalize_call(
+            ["tests/test.mp4", "-as", "1", "--keep-other-audio", "-nt", "ebu"]
+        )
+        assert os.path.isfile("normalized/test.mkv")
+        # Check that output has 2 audio streams (1 normalized, 1 passthrough)
+        streams = _get_stream_info("normalized/test.mkv")
+        audio_streams = [s for s in streams if s["codec_type"] == "audio"]
+        assert len(audio_streams) == 2
+        # First audio stream should be normalized (PCM or similar)
+        assert "pcm" in audio_streams[0]["codec_name"]
+        # Second audio stream should be copied (ac3)
+        assert audio_streams[1]["codec_name"] == "ac3"
+
+    def test_audio_default_only(self):
+        """Test normalizing only default audio streams"""
+        # Note: test.mp4 has both audio streams marked as default
+        ffmpeg_normalize_call(["tests/test.mp4", "--audio-default-only", "-nt", "ebu"])
+        assert os.path.isfile("normalized/test.mkv")
+        # Since both streams are default, both should be normalized
+        streams = _get_stream_info("normalized/test.mkv")
+        audio_streams = [s for s in streams if s["codec_type"] == "audio"]
+        assert len(audio_streams) == 2
+        # Verify stats show both streams were normalized
+        stats = _get_stats("normalized/test.mkv", "ebu")
+        assert len(stats) == 2
+
+    def test_audio_streams_invalid_option_combination(self):
+        """Test that using both --audio-streams and --audio-default-only fails"""
+        _, stderr = ffmpeg_normalize_call(
+            ["tests/test.mp4", "-as", "1", "--audio-default-only"]
+        )
+        assert "Cannot use both" in stderr
+
+    def test_keep_mtime(self, tmp_path):
+        """The output file should inherit the input file's modification time."""
+        input_file = tmp_path / "test.wav"
+        output_file = tmp_path / "out.wav"
+        # Create a small wav source and give it a known, old modification time
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=1",
+                "-sample_fmt",
+                "s16",
+                str(input_file),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        old_mtime = 1577880000  # 2020-01-01 12:00:00 UTC
+        os.utime(input_file, (old_mtime, old_mtime))
+
+        ffmpeg_normalize_call(
+            [
+                str(input_file),
+                "-o",
+                str(output_file),
+                "-nt",
+                "peak",
+                "-t",
+                "0",
+                "-f",
+                "--keep-mtime",
+            ]
+        )
+        assert output_file.is_file()
+        assert abs(output_file.stat().st_mtime - old_mtime) < 1
+
+    def test_keep_mtime_not_set_by_default(self, tmp_path):
+        """Without --keep-mtime, the output file should have a fresh mtime."""
+        input_file = tmp_path / "test.wav"
+        output_file = tmp_path / "out.wav"
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=1",
+                "-sample_fmt",
+                "s16",
+                str(input_file),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        old_mtime = 1577880000  # 2020-01-01 12:00:00 UTC
+        os.utime(input_file, (old_mtime, old_mtime))
+
+        ffmpeg_normalize_call(
+            [str(input_file), "-o", str(output_file), "-nt", "peak", "-t", "0", "-f"]
+        )
+        assert output_file.is_file()
+        assert output_file.stat().st_mtime > old_mtime
+
+    @pytest.mark.skipif(not _has_encoder("flac"), reason="flac encoder not available")
+    def test_keep_bit_depth_flac(self, tmp_path):
+        """Bit depth is preserved by default; --no-keep-bit-depth opts out."""
+        input_file = tmp_path / "in.flac"
+        out_default = tmp_path / "out_default.flac"
+        out_no_keep = tmp_path / "out_no_keep.flac"
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=1",
+                "-sample_fmt",
+                "s16",
+                "-c:a",
+                "flac",
+                str(input_file),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        assert _get_stream_info(str(input_file))[0]["sample_fmt"] == "s16"
+
+        # By default, the 16-bit depth is preserved
+        ffmpeg_normalize_call(
+            [
+                str(input_file),
+                "-o",
+                str(out_default),
+                "-nt",
+                "peak",
+                "-t",
+                "0",
+                "-c:a",
+                "flac",
+                "-f",
+            ]
+        )
+        assert _get_stream_info(str(out_default))[0]["sample_fmt"] == "s16"
+
+        # With --no-keep-bit-depth, ffmpeg promotes the FLAC output to s32
+        ffmpeg_normalize_call(
+            [
+                str(input_file),
+                "-o",
+                str(out_no_keep),
+                "-nt",
+                "peak",
+                "-t",
+                "0",
+                "-c:a",
+                "flac",
+                "--no-keep-bit-depth",
+                "-f",
+            ]
+        )
+        assert _get_stream_info(str(out_no_keep))[0]["sample_fmt"] == "s32"
+
+    @pytest.mark.skipif(not _has_encoder("flac"), reason="flac encoder not available")
+    def test_keep_bit_depth_float_left_to_encoder(self, tmp_path):
+        """A floating-point source is left to the encoder, not forced to integer."""
+        input_file = tmp_path / "float.wav"
+        output_file = tmp_path / "out.flac"
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=1",
+                "-c:a",
+                "pcm_f32le",
+                str(input_file),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        assert _get_stream_info(str(input_file))[0]["sample_fmt"] == "flt"
+
+        # Default keep-bit-depth must not crash on a float source; the encoder
+        # picks the format (FLAC stores float input as s32).
+        ffmpeg_normalize_call(
+            [
+                str(input_file),
+                "-o",
+                str(output_file),
+                "-nt",
+                "peak",
+                "-t",
+                "0",
+                "-c:a",
+                "flac",
+                "-f",
+            ]
+        )
+        assert output_file.is_file()
+        assert _get_stream_info(str(output_file))[0]["sample_fmt"] == "s32"
+
+    def test_keep_other_and_keep_original_conflict(self):
+        """Test that using both --keep-other-audio and --keep-original-audio fails"""
+        _, stderr = ffmpeg_normalize_call(
+            [
+                "tests/test.mp4",
+                "-as",
+                "1",
+                "--keep-other-audio",
+                "--keep-original-audio",
+            ]
+        )
+        assert "Cannot use both" in stderr
+
+    def test_write_encoder_settings_ebu(self):
+        ffmpeg_normalize_call(
+            [
+                "tests/test.mp3",
+                "-o",
+                "normalized/test.mkv",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "128k",
+                "--write-encoder-settings",
+            ]
+        )
+        assert os.path.isfile("normalized/test.mkv")
+        tags = _get_stream_info("normalized/test.mkv")[0]["tags"]
+        settings = tags.get("ENCODER_SETTINGS") or tags.get("encoder_settings")
+        assert settings is not None
+        assert settings.startswith("-c:a aac -b:a 128k")
+        assert "-af loudnorm=" in settings
+        assert "measured_i=" in settings
+        # the diagnostic-only print_format option is stripped
+        assert "print_format" not in settings
+
+    def test_write_encoder_settings_peak(self):
+        ffmpeg_normalize_call(
+            [
+                "tests/test.mp3",
+                "-o",
+                "normalized/test.mkv",
+                "-nt",
+                "peak",
+                "-t",
+                "-5",
+                "--write-encoder-settings",
+            ]
+        )
+        assert os.path.isfile("normalized/test.mkv")
+        tags = _get_stream_info("normalized/test.mkv")[0]["tags"]
+        settings = tags.get("ENCODER_SETTINGS") or tags.get("encoder_settings")
+        assert settings is not None
+        assert settings.startswith("-c:a ")
+        assert "-af volume=" in settings
+
+    def test_write_encoder_settings_extra_output_options(self):
+        ffmpeg_normalize_call(
+            [
+                "tests/test.mp3",
+                "-o",
+                "normalized/test.mkv",
+                "-c:a",
+                "aac",
+                "-e",
+                '[ "-cutoff", "15000" ]',
+                "--write-encoder-settings",
+            ]
+        )
+        assert os.path.isfile("normalized/test.mkv")
+        tags = _get_stream_info("normalized/test.mkv")[0]["tags"]
+        settings = tags.get("ENCODER_SETTINGS") or tags.get("encoder_settings")
+        assert settings is not None
+        # extra output options are appended verbatim after the filter chain
+        assert settings.endswith("-cutoff 15000")
+
+    def test_write_encoder_settings_metadata_disable(self):
+        _, stderr = ffmpeg_normalize_call(
+            [
+                "tests/test.mp3",
+                "-o",
+                "normalized/test.mkv",
+                "-c:a",
+                "aac",
+                "--write-encoder-settings",
+                "-mn",
+            ]
+        )
+        assert os.path.isfile("normalized/test.mkv")
+        assert "no effect" in stderr
+        tags = _get_stream_info("normalized/test.mkv")[0].get("tags", {})
+        assert "ENCODER_SETTINGS" not in tags
+        assert "encoder_settings" not in tags
+
+
+def _summary_table(stderr: str) -> List[List[str]]:
+    """
+    Return the data rows of the --print-summary table as lists of cells.
+    """
+    lines = stderr.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith("Summary ("))
+    # Skip the title, empty line, headings and separator line, and stop at the
+    # first line that is not a table row (e.g. error messages)
+    rows = []
+    for line in lines[start + 4 :]:
+        if not line.startswith("tests/"):
+            break
+        rows.append(line.split())
+    return rows
+
+
+class TestPrintSummary:
+    """Tests for the --print-summary table and the summary API."""
+
+    def test_ebu_multiple_files(self, tmp_path):
+        stdout, stderr = ffmpeg_normalize_call(
+            [
+                "tests/test_loud.m4a",
+                "tests/test_quiet.m4a",
+                "-of",
+                str(tmp_path),
+                "--print-summary",
+                "--print-stats",
+            ]
+        )
+        assert (
+            "Summary (EBU R128 normalization, target: -23.0 LUFS, "
+            "true peak: -2.0 dBTP)" in stderr
+        )
+        assert "Input (LUFS)" in stderr
+        assert "True peak (dBTP)" in stderr
+
+        # JSON on stdout is not affected by the summary
+        stats = json.loads(stdout)
+        assert len(stats) == 2
+
+        rows = _summary_table(stderr)
+        assert [row[0] for row in rows] == [
+            "tests/test_loud.m4a",
+            "tests/test_quiet.m4a",
+        ]
+        for row, stream_stats in zip(rows, stats):
+            _, stream_id, input_i, output_i, output_tp, gain, status = row
+            assert int(stream_id) == stream_stats["stream_id"]
+            assert float(input_i) == pytest.approx(
+                stream_stats["ebu_pass1"]["input_i"], abs=0.05
+            )
+            assert float(output_i) == pytest.approx(
+                stream_stats["ebu_pass2"]["output_i"], abs=0.05
+            )
+            assert float(output_tp) == pytest.approx(
+                stream_stats["ebu_pass2"]["output_tp"], abs=0.05
+            )
+            assert float(gain) == pytest.approx(
+                stream_stats["ebu_pass2"]["output_i"]
+                - stream_stats["ebu_pass2"]["input_i"],
+                abs=0.05,
+            )
+            assert status == "normalized"
+
+    def test_summary_not_printed_by_default(self, tmp_path):
+        _, stderr = ffmpeg_normalize_call(["tests/test_loud.m4a", "-of", str(tmp_path)])
+        assert "Summary (" not in stderr
+
+    @pytest.mark.parametrize("normalization_type", ["rms", "peak"])
+    def test_peak_rms_reach_target(self, tmp_path, normalization_type):
+        _, stderr = ffmpeg_normalize_call(
+            [
+                "tests/test_loud.m4a",
+                "tests/test_quiet.m4a",
+                "-of",
+                str(tmp_path),
+                "-nt",
+                normalization_type,
+                "-t",
+                "-20",
+                "--print-summary",
+            ]
+        )
+        rows = _summary_table(stderr)
+        assert len(rows) == 2
+        for row in rows:
+            input_level, output_level = float(row[2]), float(row[3])
+            gain = float(row[-2])
+            assert output_level == pytest.approx(-20.0, abs=0.05)
+            assert input_level + gain == pytest.approx(output_level, abs=0.15)
+            assert row[-1] == "normalized"
+        if normalization_type == "peak":
+            # Peak normalization has no separate peak column
+            assert "Peak (dBFS)" not in stderr
+            assert all(len(row) == 6 for row in rows)
+        else:
+            assert "Peak (dBFS)" in stderr
+            assert all(len(row) == 7 for row in rows)
+
+    def test_batch_mode_uses_same_gain(self, tmp_path):
+        _, stderr = ffmpeg_normalize_call(
+            [
+                "tests/test_loud.m4a",
+                "tests/test_quiet.m4a",
+                "tests/test_normal.m4a",
+                "-of",
+                str(tmp_path),
+                "-nt",
+                "rms",
+                "--batch",
+                "--print-summary",
+            ]
+        )
+        assert "batch mode" in stderr
+        gains = {row[-2] for row in _summary_table(stderr)}
+        assert len(gains) == 1
+
+    def test_lower_only_shows_zero_gain(self, tmp_path):
+        _, stderr = ffmpeg_normalize_call(
+            [
+                "tests/test_quiet.m4a",
+                "-of",
+                str(tmp_path),
+                "-nt",
+                "peak",
+                "-t",
+                "0",
+                "--lower-only",
+                "--print-summary",
+            ]
+        )
+        (row,) = _summary_table(stderr)
+        assert row[2] == row[3]
+        assert row[-2] == "+0.0"
+
+    def test_dynamic_mode(self, tmp_path):
+        _, stderr = ffmpeg_normalize_call(
+            [
+                "tests/test_loud.m4a",
+                "-of",
+                str(tmp_path),
+                "--dynamic",
+                "--print-summary",
+            ]
+        )
+        assert "dynamic mode" in stderr
+        (row,) = _summary_table(stderr)
+        # Input level comes from the second pass, as there is no first pass
+        assert row[2] != "-"
+        assert float(row[3]) == pytest.approx(-23.0, abs=0.5)
+
+    def test_dry_run_shows_missing_output_values(self, tmp_path):
+        _, stderr = ffmpeg_normalize_call(
+            [
+                "tests/test_loud.m4a",
+                "-of",
+                str(tmp_path),
+                "-n",
+                "--print-summary",
+            ]
+        )
+        assert "dry run" in stderr
+        (row,) = _summary_table(stderr)
+        assert row[2] != "-"
+        assert row[3:6] == ["-", "-", "-"]
+
+    def test_skipped_file(self, tmp_path):
+        _, stderr = ffmpeg_normalize_call(
+            [
+                "tests/test.m4a",
+                "-o",
+                str(tmp_path / "out.m4a"),
+                "-c:a",
+                "aac",
+                "--threshold",
+                "0.5",
+                "--print-summary",
+            ]
+        )
+        rows = _summary_table(stderr)
+        assert len(rows) > 0
+        for row in rows:
+            assert row[2] == row[3]
+            assert row[-2] == "+0.0"
+            assert row[-1] == "skipped"
+
+    def test_error_file(self, tmp_path):
+        _, stderr = ffmpeg_normalize_call(
+            [
+                "tests/test_loud.m4a",
+                "-o",
+                str(tmp_path / "out.mkv"),
+                "-c:a",
+                "definitelynotacodec",
+                "--print-summary",
+            ]
+        )
+        (row,) = _summary_table(stderr)
+        assert row[2] != "-"
+        assert row[3:] == ["-", "-", "-", "error"]
+
+    def test_selected_streams_only(self, tmp_path):
+        _, stderr = ffmpeg_normalize_call(
+            [
+                "tests/test.mp4",
+                "-o",
+                str(tmp_path / "out.mkv"),
+                "--audio-streams",
+                "2",
+                "--print-summary",
+            ]
+        )
+        rows = _summary_table(stderr)
+        assert [row[1] for row in rows] == ["2"]
+
+    def test_api_get_summary(self, tmp_path):
+        from ffmpeg_normalize import FFmpegNormalize
+
+        normalizer = FFmpegNormalize(normalization_type="rms", target_level=-20)
+        normalizer.add_media_file("tests/test_quiet.m4a", str(tmp_path / "out.mkv"))
+        normalizer.run_normalization()
+
+        (row,) = normalizer.get_summary()
+        assert row["input_file"] == "tests/test_quiet.m4a"
+        assert row["status"] == "normalized"
+        assert row["input_level"] is not None
+        assert row["gain"] is not None
+        assert row["output_level"] == pytest.approx(-20.0, abs=0.01)
+        assert row["input_level"] + row["gain"] == pytest.approx(row["output_level"])
+        assert "RMS normalization, target: -20.0 dBFS" in normalizer.format_summary()
+
+
+class TestFileValidation:
+    """Tests for pre-batch file validation."""
+
+    def test_nonexistent_file(self):
+        """Test that validation fails for non-existent files."""
+        _, stderr = ffmpeg_normalize_call(["nonexistent_file.mp4"])
+        assert "Validation failed" in stderr
+        assert "does not exist" in stderr
+
+    def test_multiple_invalid_files(self):
+        """Test that validation reports all invalid files at once."""
+        _, stderr = ffmpeg_normalize_call(
+            ["nonexistent1.mp4", "nonexistent2.mp4", "nonexistent3.mp4"]
+        )
+        assert "Validation failed for 3 file(s)" in stderr
+        assert "nonexistent1.mp4" in stderr
+        assert "nonexistent2.mp4" in stderr
+        assert "nonexistent3.mp4" in stderr
+
+    def test_file_without_audio(self, tmp_path):
+        """Test that validation fails for files without audio streams."""
+        # Create a video-only file using ffmpeg
+        video_only = tmp_path / "video_only.mp4"
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=blue:s=320x240:d=1",
+            "-an",  # no audio
+            "-c:v",
+            "libx264",
+            str(video_only),
+        ]
+        subprocess.run(cmd, check=True, capture_output=True)
+
+        _, stderr = ffmpeg_normalize_call([str(video_only)])
+        assert "Validation failed" in stderr
+        assert "does not contain any audio streams" in stderr
+
+    def test_mixed_valid_invalid_files(self, tmp_path):
+        """Test that validation fails when mix of valid and invalid files."""
+        _, stderr = ffmpeg_normalize_call(
+            ["tests/test.mp4", "nonexistent.mp4", "tests/test.m4a"]
+        )
+        # Should report the invalid file but not the valid ones
+        assert "Validation failed for 1 file(s)" in stderr
+        assert "nonexistent.mp4" in stderr
+        # Valid files should not appear in error messages
+        assert "test.mp4" not in stderr or "does not exist" not in stderr
+
+    def test_valid_file_passes_validation(self):
+        """Test that valid files pass validation."""
+        # Should succeed (file exists and has audio)
+        ffmpeg_normalize_call(["tests/test.mp4", "-n"])  # dry run
+        # No assertion needed - if validation fails, the command will error
+
+    def test_replaygain_tags_stripped_after_normalization(self, tmp_path):
+        """Test that ReplayGain tags are stripped after normalization."""
+        import shutil
+
+        from mutagen.id3 import ID3, TXXX
+        from mutagen.mp3 import MP3
+
+        temp_input = tmp_path / "test_with_replaygain.mp3"
+        temp_output = tmp_path / "normalized_output.mp3"
+
+        try:
+            # Create a temporary copy of test.mp3 with ReplayGain tags
+            shutil.copy("tests/test.mp3", temp_input)
+
+            # Add ReplayGain tags to the input file
+            mp3 = MP3(str(temp_input), ID3=ID3)
+            if not mp3.tags:
+                mp3.add_tags()
+            assert mp3.tags is not None
+            mp3.tags.add(TXXX(desc="REPLAYGAIN_TRACK_GAIN", text=["-5.00 dB"]))
+            mp3.tags.add(TXXX(desc="REPLAYGAIN_TRACK_PEAK", text=["0.950000"]))
+            mp3.save()
+
+            # Verify tags were added
+            mp3_check = MP3(str(temp_input), ID3=ID3)
+            assert mp3_check.tags is not None
+            assert "TXXX:REPLAYGAIN_TRACK_GAIN" in mp3_check.tags
+            assert "TXXX:REPLAYGAIN_TRACK_PEAK" in mp3_check.tags
+
+            # Normalize the file
+            ffmpeg_normalize_call(
+                [str(temp_input), "-o", str(temp_output), "-c:a", "libmp3lame"]
+            )
+
+            # Check that output file exists
+            assert temp_output.exists()
+
+            # Check that ReplayGain tags were stripped from the output
+            mp3_output = MP3(str(temp_output), ID3=ID3)
+            if mp3_output.tags:
+                assert "TXXX:REPLAYGAIN_TRACK_GAIN" not in mp3_output.tags, (
+                    "REPLAYGAIN_TRACK_GAIN tag should be stripped"
+                )
+                assert "TXXX:REPLAYGAIN_TRACK_PEAK" not in mp3_output.tags, (
+                    "REPLAYGAIN_TRACK_PEAK tag should be stripped"
+                )
+        finally:
+            # Clean up temp files even if test fails
+            if temp_input.exists():
+                temp_input.unlink()
+            if temp_output.exists():
+                temp_output.unlink()
+
+    def test_replaygain_tags_stripped_m4a(self, tmp_path):
+        """Test that ReplayGain tags are stripped from M4A files after normalization."""
+        import shutil
+
+        from mutagen.mp4 import MP4
+
+        temp_input = tmp_path / "test_with_replaygain.m4a"
+        temp_output = tmp_path / "normalized_output.m4a"
+
+        try:
+            # Create a temporary copy of test.m4a with ReplayGain tags
+            shutil.copy("tests/test.m4a", temp_input)
+
+            # Add ReplayGain tags to the input file
+            mp4 = MP4(str(temp_input))
+            if not mp4.tags:
+                mp4.add_tags()
+            assert mp4.tags is not None
+            mp4.tags["----:com.apple.iTunes:REPLAYGAIN_TRACK_GAIN"] = [b"-5.00 dB"]
+            mp4.tags["----:com.apple.iTunes:REPLAYGAIN_TRACK_PEAK"] = [b"0.950000"]
+            mp4.save()
+
+            # Verify tags were added
+            mp4_check = MP4(str(temp_input))
+            assert mp4_check.tags is not None
+            assert "----:com.apple.iTunes:REPLAYGAIN_TRACK_GAIN" in mp4_check.tags
+            assert "----:com.apple.iTunes:REPLAYGAIN_TRACK_PEAK" in mp4_check.tags
+
+            # Normalize the file
+            ffmpeg_normalize_call(
+                [str(temp_input), "-o", str(temp_output), "-c:a", "aac"]
+            )
+
+            # Check that output file exists
+            assert temp_output.exists()
+
+            # Check that ReplayGain tags were stripped from the output
+            mp4_output = MP4(str(temp_output))
+            if mp4_output.tags:
+                assert (
+                    "----:com.apple.iTunes:REPLAYGAIN_TRACK_GAIN" not in mp4_output.tags
+                ), "REPLAYGAIN_TRACK_GAIN tag should be stripped"
+                assert (
+                    "----:com.apple.iTunes:REPLAYGAIN_TRACK_PEAK" not in mp4_output.tags
+                ), "REPLAYGAIN_TRACK_PEAK tag should be stripped"
+        finally:
+            # Clean up temp files even if test fails
+            if temp_input.exists():
+                temp_input.unlink()
+            if temp_output.exists():
+                temp_output.unlink()
+
+    def test_replaygain_tags_stripped_ogg(self, tmp_path):
+        """Test that ReplayGain tags are stripped from OGG files after normalization."""
+        import shutil
+
+        from mutagen.oggvorbis import OggVorbis
+
+        temp_input = tmp_path / "test_with_replaygain.ogg"
+        temp_output = tmp_path / "normalized_output.ogg"
+
+        encoder = "libvorbis" if _has_encoder("libvorbis") else "vorbis"
+        extra_args = (
+            [] if encoder == "libvorbis" else ["-e", "-strict experimental -ac 2"]
+        )
+
+        try:
+            # Create a temporary copy of test.ogg with ReplayGain tags
+            shutil.copy("tests/test.ogg", temp_input)
+
+            # Add ReplayGain tags to the input file
+            ogg = OggVorbis(str(temp_input))
+            ogg["REPLAYGAIN_TRACK_GAIN"] = ["-5.00 dB"]
+            ogg["REPLAYGAIN_TRACK_PEAK"] = ["0.950000"]
+            ogg.save()
+
+            # Verify tags were added
+            ogg_check = OggVorbis(str(temp_input))
+            assert "REPLAYGAIN_TRACK_GAIN" in ogg_check
+            assert "REPLAYGAIN_TRACK_PEAK" in ogg_check
+
+            # Normalize the file
+            ffmpeg_normalize_call(
+                [str(temp_input), "-o", str(temp_output), "-c:a", encoder] + extra_args
+            )
+
+            # Check that output file exists
+            assert temp_output.exists()
+
+            # Check that ReplayGain tags were stripped from the output
+            ogg_output = OggVorbis(str(temp_output))
+            # OGG stores tags in lowercase
+            assert "replaygain_track_gain" not in ogg_output, (
+                "replaygain_track_gain tag should be stripped"
+            )
+            assert "replaygain_track_peak" not in ogg_output, (
+                "replaygain_track_peak tag should be stripped"
+            )
+        finally:
+            # Clean up temp files even if test fails
+            if temp_input.exists():
+                temp_input.unlink()
+            if temp_output.exists():
+                temp_output.unlink()
+
+    def test_replaygain_tags_stripped_opus(self, tmp_path):
+        """Test that R128 tags are stripped from OPUS files after normalization."""
+        import shutil
+
+        from mutagen.oggopus import OggOpus
+
+        temp_input = tmp_path / "test_with_r128.opus"
+        temp_output = tmp_path / "normalized_output.opus"
+
+        try:
+            # Create a temporary copy of test.opus with R128 tags
+            shutil.copy("tests/test.opus", temp_input)
+
+            # Add R128 tags to the input file (Opus uses R128 instead of REPLAYGAIN)
+            opus = OggOpus(str(temp_input))
+            opus["R128_TRACK_GAIN"] = ["-1280"]  # -5.00 dB * 256
+            opus.save()
+
+            # Verify tags were added
+            opus_check = OggOpus(str(temp_input))
+            assert "R128_TRACK_GAIN" in opus_check
+
+            # Normalize the file
+            ffmpeg_normalize_call(
+                [str(temp_input), "-o", str(temp_output), "-c:a", "libopus"]
+            )
+
+            # Check that output file exists
+            assert temp_output.exists()
+
+            # Check that R128 tags were stripped from the output
+            opus_output = OggOpus(str(temp_output))
+            # OPUS stores tags in lowercase
+            assert "r128_track_gain" not in opus_output, (
+                "r128_track_gain tag should be stripped"
+            )
+        finally:
+            # Clean up temp files even if test fails
+            if temp_input.exists():
+                temp_input.unlink()
+            if temp_output.exists():
+                temp_output.unlink()
+
+
+def test_ffmpeg_env():
+    """Verify that ffmpeg_env context manager sets environment correctly."""
+    from ffmpeg_normalize._cmd_utils import CommandRunner, _get_ffmpeg_env, ffmpeg_env
+
+    original_env = _get_ffmpeg_env()
+    assert original_env is None
+
+    test_env = os.environ.copy()
+    test_env.update({"TEST_FFMPEG_ENV_VAR": "12345"})
+
+    with ffmpeg_env(test_env):
+        env_in_context = _get_ffmpeg_env()
+        assert env_in_context == test_env
+        # Check that commandrunner uses the env
+        cmd = CommandRunner().run_command(
+            [sys.executable, "-c", "import os; print(os.getenv('TEST_FFMPEG_ENV_VAR'))"]
+        )
+        assert cmd.get_output().strip() == "12345"
+
+    # After context, environment should be reset
+    env_after = _get_ffmpeg_env()
+    assert env_after is None
+
+
+def test_ffmpeg_popen_kwargs_hide_console_on_windows(monkeypatch):
+    """Verify that ffmpeg subprocesses do not open consoles on Windows."""
+    from ffmpeg_normalize import _cmd_utils
+
+    monkeypatch.setattr(_cmd_utils.sys, "platform", "win32")
+    monkeypatch.setattr(
+        _cmd_utils.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False
+    )
+
+    assert _cmd_utils._get_ffmpeg_popen_kwargs()["creationflags"] == 0x08000000
+
+
+def test_ffmpeg_popen_kwargs_are_empty_off_windows(monkeypatch):
+    """Verify that non-Windows subprocess options remain unchanged."""
+    from ffmpeg_normalize import _cmd_utils
+
+    monkeypatch.setattr(_cmd_utils.sys, "platform", "linux")
+
+    assert "creationflags" not in _cmd_utils._get_ffmpeg_popen_kwargs()

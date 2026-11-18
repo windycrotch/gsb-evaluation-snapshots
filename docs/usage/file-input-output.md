@@ -1,0 +1,106 @@
+# File Input/Output
+
+Here are some examples of how to specify input and output files when using `ffmpeg-normalize`.
+
+## Normalize multiple files
+
+Normalize two WAV files and write them to the specified output files with uncompressed PCM WAV as audio codec:
+
+```bash
+ffmpeg-normalize file1.wav file2.wav -o file1-normalized.wav file2-normalized.wav
+```
+
+!!! tip
+
+    If these are part of an album, you might want to use the [`--batch` option](normalization-options.md#albumbatch-normalization) to ensure consistent normalization across all files.
+
+## Where the output is written
+
+By default, `ffmpeg-normalize` writes the normalized file directly to its final destination, just like `ffmpeg` itself does. Versions prior to v1.38.0 used a temporary directory.
+
+Note: if the second pass is interrupted, the destination may be left with a partial or overwritten file.
+
+## Overwrite the input file
+
+You can (if you really need to!) also overwrite your input file. Warning, this will destroy data:
+
+```bash
+ffmpeg-normalize input.mp4 -o input.mp4 -f
+```
+
+In this case, `ffmpeg` cannot read from and write to the same file at once, so the file is first encoded to a temporary file next to the output and then moved over the original once the encode succeeds. The temporary file lives in the same directory as the output, so the move is a fast, atomic rename rather than a copy across filesystems.
+
+## Normalize videos, compress audio
+
+Normalize a number of videos in the current folder and write them to a folder called `normalized`, converting all audio streams to AAC with 192 kBit/s.
+
+```bash
+ffmpeg-normalize *.mkv -c:a aac -b:a 192k
+```
+
+## Use Windows for multiple files
+
+Windows does not expand wildcards like `*.mkv` automatically. There are several ways to handle multiple files:
+
+### PowerShell (recommended)
+
+Pass all matched files as arguments in a single command:
+
+```powershell
+ffmpeg-normalize (Get-ChildItem *.mkv).FullName -c:a aac -b:a 192k
+```
+
+This passes all files at once, so options like `--batch` work correctly.
+
+### Input list
+
+Create a text file listing your input files (one per line), then use `--input-list`:
+
+```bat
+dir /b *.mkv > filelist.txt
+ffmpeg-normalize --input-list filelist.txt -c:a aac -b:a 192k
+```
+
+This also passes all files in a single invocation, so `--batch` works correctly.
+
+### CMD loop
+
+```bat
+for %i in (*.mkv) do ffmpeg-normalize "%i" -c:a aac -b:a 192k
+```
+
+!!! warning
+
+    CMD loops run `ffmpeg-normalize` once per file. This means `--batch` mode will **not** work, because each invocation only sees a single file. Use one of the methods above if you need batch normalization.
+
+## How the output audio codec is chosen
+
+When you do not pass `-c:a`/`--audio-codec`, `ffmpeg-normalize` picks the audio codec for you, based on the output container:
+
+- For containers that can store uncompressed audio (such as WAV, MKV, or MOV), it uses **PCM** audio, matching the input bit depth. This is lossless, but produces large files.
+- For containers that cannot store PCM (MP3, MP4/M4A, FLAC, Ogg, Opus, WebM), it uses the **same default codec that ffmpeg itself would pick for that container**, so you do not have to specify one. For example:
+
+    - `.mp3` → MP3 (`libmp3lame`)
+    - `.m4a` / `.mp4` → AAC
+    - `.flac` → FLAC
+    - `.opus` → Opus (`libopus`)
+
+The exact codec is read from your ffmpeg build at runtime rather than hardcoded, so it always matches what plain ffmpeg would do. This means it can differ between builds: for example, on some builds `.ogg` defaults to FLAC rather than Vorbis. To see what your ffmpeg would choose for a given container, run e.g. `ffmpeg -h muxer=flac` and look at the "Default audio codec" line.
+
+You can always override this by setting `-c:a` explicitly, for example `-c:a libvorbis` to force an Ogg Vorbis file. Note that re-encoding to a lossy codec (MP3, AAC, Opus, …) introduces [generation loss](https://en.wikipedia.org/wiki/Generation_loss); to keep your audio lossless, use a PCM-capable container (WAV, MKV) or a lossless codec such as FLAC.
+
+## Create an MP3 file as output
+
+Normalize an MP3 file and write an MP3 file. The codec is chosen automatically (MP3 via `libmp3lame`), but you can specify the encoder and bitrate explicitly to control quality:
+
+```bash
+ffmpeg-normalize input.mp3 -c:a libmp3lame -b:a 320k -o output.mp3
+```
+
+## Change the output container from the default (MKV)
+
+Normalize many files, keeping PCM audio, but choosing a different container:
+
+```bash
+ffmpeg-normalize *.wav -c:a pcm_s16le -ext aif
+```
