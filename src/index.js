@@ -12,16 +12,23 @@ const THREE = (typeof window !== 'undefined') && window.THREE
 
 import { flatten as earcutFlatten } from 'earcut';
 
-import interpolateLine from './interpolateLine';
+import interpolateLine, { DEFAULT_RESOLUTION } from './interpolateLine.js';
 
 // support both modes for backwards threejs compatibility
 const setAttributeFn = new THREE.BufferGeometry().setAttribute ? 'setAttribute' : 'addAttribute';
 
 class GeoJsonGeometry extends THREE.BufferGeometry {
-  constructor(geoJson, radius = 1, resolution = 5) {
+  constructor(geoJson, radius = 1, resolution = DEFAULT_RESOLUTION) {
     super();
 
     this.type = 'GeoJsonGeometry';
+
+    // Normalize resolution here, so the interpolation logic only ever sees a
+    // finite positive number. 0, negatives and NaN would otherwise either loop
+    // forever or silently skip interpolation.
+    if (!(resolution > 0) || !Number.isFinite(resolution)) {
+      resolution = DEFAULT_RESOLUTION;
+    }
 
     this.parameters = {
       geoJson,
@@ -73,6 +80,10 @@ class GeoJsonGeometry extends THREE.BufferGeometry {
     }
 
     function genLineString(coords, r) {
+      if (!coords || !coords.length) {
+        return [{vertices: [], indices: []}];
+      }
+
       const coords3d = interpolateLine(coords, resolution)
         .map(([lng, lat, alt = 0]) => polar2Cartesian(lat, lng, r + alt));
 
@@ -100,35 +111,57 @@ class GeoJsonGeometry extends THREE.BufferGeometry {
     }
 
     function genPolygon(coords, r) {
-      const coords3d = coords
+      if (!coords || !coords.length) {
+        return [{vertices: [], indices: []}];
+      }
+
+      // Densify every ring (outer ring + holes) along the great circle.
+      const rings3d = coords
+        .filter(ring => ring && ring.length)
         .map(coordsSegment => interpolateLine(coordsSegment, resolution)
           .map(([lng, lat, alt = 0]) => polar2Cartesian(lat, lng, r + alt)));
 
-      // Each point generates 3 vertice items (x,y,z).
-      const {vertices, holes} = earcutFlatten(coords3d);
+      if (!rings3d.length) {
+        return [{vertices: [], indices: []}];
+      }
 
-      const firstHoleIdx = holes[0] || Infinity;
-      const outerVertices = vertices.slice(0, firstHoleIdx * 3);
-      const holeVertices = vertices.slice(firstHoleIdx * 3);
-
-      const holesIdx = new Set(holes);
+      // earcut's flatten concatenates the rings in order: outer ring first,
+      // then each hole. With 3D points every vertex occupies 3 array entries.
+      const {vertices, holes} = earcutFlatten(rings3d);
 
       const numPoints = Math.round(vertices.length / 3);
 
+      // Ring boundaries expressed as vertex indices: each entry is the index
+      // of the first vertex of the next ring. The outer ring spans
+      // [0, ringStarts[0]); hole k spans [ringStarts[k], ringStarts[k + 1]).
+      const ringStarts = [...holes, numPoints];
+      const firstHoleIdx = ringStarts[0]; // Infinity when there are no holes
+
       const outerIndices = [], holeIndices = [];
       for (let vIdx = 1; vIdx < numPoints; vIdx++) {
-        if (!holesIdx.has(vIdx)) {
-          if (vIdx < firstHoleIdx) {
-            outerIndices.push(vIdx - 1, vIdx)
-          } else {
-            holeIndices.push(vIdx - 1 - firstHoleIdx, vIdx - firstHoleIdx);
-          }
+        if (ringStarts.includes(vIdx)) {
+          // First vertex of a new ring: the edge from the previous vertex
+          // would connect two different rings, so skip it.
+          continue;
+        }
+
+        if (vIdx < firstHoleIdx) {
+          // Outer ring vertices keep their global index.
+          outerIndices.push(vIdx - 1, vIdx);
+        } else {
+          // Hole vertices are grouped separately and re-based to start at 0.
+          holeIndices.push(vIdx - 1 - firstHoleIdx, vIdx - firstHoleIdx);
         }
       }
+
+      const outerVertices = vertices.slice(0, firstHoleIdx * 3);
+      const holeVertices = vertices.slice(firstHoleIdx * 3);
 
       const groups = [{indices: outerIndices, vertices: outerVertices}];
 
       if (holes.length) {
+        // Re-based hole indices can only point into the hole vertex block, and
+        // run from 0 up to holeVertices' last vertex, so they never overflow.
         groups.push({indices: holeIndices, vertices: holeVertices});
       }
 
