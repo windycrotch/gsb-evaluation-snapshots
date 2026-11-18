@@ -9,6 +9,10 @@ const SKIN = 0.0003;
 // A resting capsule still touches a floor without penetrating it.
 const CONTACT_SLOP = 0.002;
 const FLOOR_INCLINATION = 0.7;
+// Static friction on standable ground while no input is held: tangential
+// speed below REST_SPEED snaps to zero, above it decays per contact substep.
+const REST_SPEED = 0.5;
+const REST_FRICTION = 0.5;
 
 export interface CourierMotion {
   direction: Vector3;
@@ -106,7 +110,8 @@ export class CollisionWorld {
           }
           this.correction.normalize();
           triangle.getNormal(this.faceNormal);
-          if (bottom && this.correction.dot(up) > 0 && this.faceNormal.dot(up) > FLOOR_INCLINATION) {
+          const standable = bottom && this.faceNormal.dot(up) > FLOOR_INCLINATION;
+          if (standable && this.correction.dot(up) > 0) {
             floor = this.faceNormal.clone();
           }
           // Preserve contact state independently of depenetration. Otherwise a
@@ -117,8 +122,19 @@ export class CollisionWorld {
           const inward = velocity.dot(this.correction);
           if (inward < 0) velocity.addScaledVector(this.correction, -inward);
           const depth = radius + SKIN - separation;
-          this.segment.start.addScaledVector(this.correction, depth);
-          this.segment.end.addScaledVector(this.correction, depth);
+          // A standable floor lifts the capsule straight out along local up.
+          // Pushing along the tilted contact normal instead converts radial
+          // penetration into tangential displacement, so every landing or
+          // settle on a gentle slope or step edge shoved the courier downhill.
+          const alignment = this.correction.dot(up);
+          if (standable && alignment > 0.35) {
+            const lift = depth / Math.max(alignment, 0.35);
+            this.segment.start.addScaledVector(up, lift);
+            this.segment.end.addScaledVector(up, lift);
+          } else {
+            this.segment.start.addScaledVector(this.correction, depth);
+            this.segment.end.addScaledVector(this.correction, depth);
+          }
           return false;
         },
       });
@@ -239,6 +255,18 @@ export class CourierPhysics {
       if (floor) {
         this.grounded = true;
         this.groundNormal.copy(floor);
+        if (amount === 0) {
+          // Static friction inside the standable cone: with no input held, a
+          // supported courier must come to a full stop instead of creeping
+          // downhill on the tangential speed a landing leaves behind.
+          const radialSpeed = this.velocity.dot(this.up);
+          const tangent = this.velocity.clone().addScaledVector(this.up, -radialSpeed);
+          const tangentSpeed = tangent.length();
+          if (tangentSpeed > 1e-9) {
+            const kept = tangentSpeed < REST_SPEED ? 0 : tangentSpeed * REST_FRICTION;
+            this.velocity.copy(tangent.multiplyScalar(kept / tangentSpeed)).addScaledVector(this.up, radialSpeed);
+          }
+        }
       }
     }
     this.up.copy(this.position).normalize();

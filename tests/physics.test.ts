@@ -90,6 +90,63 @@ test('face-normal slope classification permits moderate ramps and rejects steep 
   }
 });
 
+const IDLE_MOTION = { direction: new Vector3(), amount: 0, sprint: false, jump: false };
+
+test('resting on a moderate slope: no downhill shove on landing, no creep while idle', () => {
+  // Land on the middle of a standable ramp (surface at z=-4 is y=21.8), then stand still.
+  const physics = physicsFor([floor(), ramp(0.45)], new Vector3(0, 22.3, -4));
+  let landing: Vector3 | null = null;
+  for (let frame = 0; frame < 120 && !landing; frame++) {
+    physics.update(1 / 60, IDLE_MOTION);
+    if (physics.grounded) landing = physics.position.clone();
+  }
+  assert.ok(landing, 'never touched down on the ramp');
+  // Stand still for three more seconds; the landing must not shove the
+  // courier downhill and a resting courier must not creep at all.
+  for (let frame = 0; frame < 180; frame++) physics.update(1 / 60, IDLE_MOTION);
+  assert.equal(physics.grounded, true);
+  const up = landing.clone().normalize();
+  const shift = physics.position.clone().sub(landing);
+  shift.addScaledVector(up, -shift.dot(up));
+  assert.ok(shift.length() < 0.02, `resting courier drifted ${shift.length().toFixed(4)} horizontally`);
+  assert.ok(physics.position.z < -3.5, `slid down off the ramp: ${physics.position.z}`);
+  // Same for a rest at the edge of a step: no slow push away from the edge.
+  const step = physicsFor([floor(), box(8, 0.35, 8, 0, 20.045, -5)], new Vector3(0, 20.6, -0.95));
+  let stepLanding: Vector3 | null = null;
+  for (let frame = 0; frame < 120 && !stepLanding; frame++) {
+    step.update(1 / 60, IDLE_MOTION);
+    if (step.grounded) stepLanding = step.position.clone();
+  }
+  assert.ok(stepLanding, 'never touched down at the step edge');
+  for (let frame = 0; frame < 180; frame++) step.update(1 / 60, IDLE_MOTION);
+  const stepUp = stepLanding.clone().normalize();
+  const stepShift = step.position.clone().sub(stepLanding);
+  stepShift.addScaledVector(stepUp, -stepShift.dot(stepUp));
+  assert.ok(stepShift.length() < 0.01, `step edge pushed the courier ${stepShift.length().toFixed(4)}`);
+});
+
+test('walking uphill on a moderate slope still climbs and keeps floor contact', () => {
+  const physics = physicsFor([floor(), ramp(0.45)], new Vector3(0, 20.025, 0.7));
+  const result = simulate(physics, 3);
+  assert.ok(physics.position.z < -3, `walkable ramp blocked: ${physics.position.z}`);
+  assert.ok(physics.position.y > 21.4, `courier sank into the ramp: ${physics.position.y}`);
+  assert.equal(physics.grounded, true);
+  assert.ok(result.maxDepth < 0.003, `ramp penetration ${result.maxDepth}`);
+});
+
+test('steep ramps remain unclimbable and thin walls remain solid', () => {
+  const steep = physicsFor([floor(), ramp(1.6)], new Vector3(0, 20.025, 0.7));
+  const steepResult = simulate(steep, 3);
+  assert.ok(steep.position.z > -1.5, `steep ramp climbed: ${steep.position.z}`);
+  assert.ok(steepResult.maxDepth < 0.003, `steep ramp penetration ${steepResult.maxDepth}`);
+  const thinWall = box(8, 3, 0.04, 0, 21.5, -2);
+  const blocked = physicsFor([floor(), thinWall]);
+  const wallResult = simulate(blocked, 2, new Vector3(0, 0, -1), 60, false, true);
+  assert.ok(blocked.position.z > -1.75, `thin wall crossed: ${blocked.position.z}`);
+  assert.ok(blocked.position.y < 20.05, 'courier popped over the thin wall');
+  assert.ok(wallResult.maxDepth < 0.002, `capsule overlaps thin wall by ${wallResult.maxDepth}`);
+});
+
 test('both gravity hemispheres use the same complete wall and ceiling collision', () => {
   for (const angle of [0, Math.PI]) {
     const rotation = new Quaternion().setFromAxisAngle(new Vector3(1, 0, 0), angle);
