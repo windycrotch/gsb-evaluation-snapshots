@@ -77,7 +77,7 @@ export function derivative(data: Buf, params?: DerivativeParams): Buf
 export function integral(data: Buf, params?: IntegralParams): Buf
 
 export interface ResonatorParams { fc: number; bw?: number; fs?: number; [key: string]: unknown } // bw default 50
-/** Constant-peak-gain resonator (JOS two-zero form) — modal synthesis (bells, drums, formants). Peak gain is exactly 0dB at fc for any bw. Throws if params.fc is omitted. */
+/** Constant-peak-gain resonator (JOS two-zero form) — modal synthesis (bells, drums, formants). Peak gain is exactly 0dB at fc for any bw. fc is held to 0.49·fs; a negative, NaN or Infinity fc/bw (or a non-positive fs) throws, and a moved fc/bw glides over 20 ms. */
 export function resonator(data: Buf, params: ResonatorParams): Buf
 
 export interface SpectralTiltParams { slope?: number; fs?: number; [key: string]: unknown } // slope default 0 (dB/octave, positive = boost highs)

@@ -474,6 +474,8 @@ import { resonator } from '@audio/filter'
 resonator(buffer, { fc: 440, bw: 20, fs: 44100 })
 ```
 
+`fc` is held at 0.49 of `fs`; an `fc` or `bw` that is negative, NaN or Infinity (or an `fs` that is not positive) throws an `Error` naming the call — a section whose poles sit outside the unit circle would write NaN or a runaway into the output. A moved `fc`/`bw` glides over 20 ms from the value the last call ended on; the same params object keeps the section's state through the sweep, a new object starts from silence. Held, the `fc`/`bw`/`fs` output is the plain section, frame for frame.
+
 **Use when**: additive synthesis (bells, gongs), modal synthesis, formant bank building<br>
 **vs Peaking EQ**: resonator has fixed 0 dB peak; peaking EQ has variable gain — use resonator for synthesis, EQ for mixing
 

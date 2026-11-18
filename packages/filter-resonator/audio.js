@@ -1,26 +1,31 @@
 // atom manifest — two-pole resonator (ringing bandpass at fc with bandwidth bw) per @audio/compile CONTRACT.
-// Each channel's state (x1, x2, y1, y2) is a Float64Array made here and the section resonatorCoefs designs is written
-// into one more when fc or bw moves, so a block allocates nothing; params are live. fc is held to 0.49 of the rate, as
-// the ladders hold it: past Nyquist the resonance would sound at its alias. fc retunes the section: a host ramps it
-// (smoothing 0.02), the section designed again at each call's value.
-import { resonatorCoefs, resonatorBlock } from './resonator.js'
+// Each channel's state (x1, x2, y1, y2) and glide (resonatorGlide) are Float64Arrays made here, and the section is
+// designed into one more, so a block allocates nothing; params are live. fc is held to 0.49 of the rate, as the ladders
+// hold it: past Nyquist the resonance would sound at its alias. An fc or bw that is negative, NaN or Infinity throws
+// (checkResonator) rather than design a section whose poles lie outside the unit circle. A moved fc or bw glides over
+// 20 ms (resonatorRun), the same code the direct call runs, so a host's blocks and the kernel's direct calls are bit for
+// bit the same however a host cuts its calls; a value held is the plain section, as before.
+import { resonatorRun, resonatorGlide, resonatorCoefs, checkResonator } from './resonator.js'
 
 export const resonator = (ctx) => {
-	const fs = ctx.sampleRate, top = fs * 0.49, st = [], c = new Float64Array(4), last = Float64Array.of(NaN, NaN)   // the fc and bw c has
-	for (let ch = 0; ch < ctx.maxChannels; ch++) st.push(new Float64Array(4))
+	const fs = ctx.sampleRate, st = [], gl = [], set = new Float64Array(3)
+	set[2] = fs
+	for (let ch = 0; ch < ctx.maxChannels; ch++) { st.push(new Float64Array(4)); gl.push(resonatorGlide()) }
 	return (inputs, outputs, params) => {
-		const inp = inputs[0], out = outputs[0], fc = Math.min(params.fc[0], top), bw = params.bw[0]
-		if ((fc !== last[0]) | (bw !== last[1])) { resonatorCoefs(fc, bw, fs, c); last[0] = fc; last[1] = bw }
+		const inp = inputs[0], out = outputs[0]
+		let fc = params.fc[0], bw = params.bw[0]
+		checkResonator('resonator', fc, bw, fs)
+		set[0] = fc; set[1] = bw
 		for (let ch = 0; ch < inp.length; ch++) {
 			out[ch].set(inp[ch])
-			resonatorBlock(out[ch], st[ch], c)
+			resonatorRun(out[ch], st[ch], gl[ch], set)
 		}
 	}
 }
 resonator.channels = 'any'
 resonator.params = {
 	fc: { type: 'number', min: 20, max: 20000, default: 440, unit: 'Hz', curve: 'log', smoothing: 0.02 },
-	bw: { type: 'number', min: 1, max: 2000, default: 50, unit: 'Hz', curve: 'log' },
+	bw: { type: 'number', min: 1, max: 2000, default: 50, unit: 'Hz', curve: 'log', smoothing: 0.02 },
 }
 // The tail at the values in force: that of the section resonatorCoefs designs, fc held as process holds it
 resonator.tail = ({ sampleRate, params }) => {
