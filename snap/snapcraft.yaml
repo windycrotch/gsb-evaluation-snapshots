@@ -130,6 +130,7 @@ parts:
       cp -r \
         "$CRAFT_PART_SRC/index.js" \
         "$CRAFT_PART_SRC/preload.js" \
+        "$CRAFT_PART_SRC/window-mode.js" \
         "$CRAFT_PART_SRC/index.html" \
         "$CRAFT_PART_SRC/package.json" \
         "$CRAFT_PART_SRC/css" \

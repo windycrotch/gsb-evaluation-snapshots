@@ -79,7 +79,7 @@ jobs:
 
           APP_DIR="$PRIME/opt/crunchyroll/resources/app"
           mkdir -p "$APP_DIR"
-          cp -r index.js preload.js index.html package.json css js server "$APP_DIR/"
+          cp -r index.js preload.js window-mode.js index.html package.json css js server "$APP_DIR/"
 
           cp "squashfs-root/usr/share/icons/hicolor/256x256/apps/crunchyroll-linux.png" \
              "$PRIME/meta/gui/icon.png"

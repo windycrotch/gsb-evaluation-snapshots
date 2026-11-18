@@ -795,6 +795,28 @@ function setupFloatingToolbar() {
     window.electronUtilsRender.onWindowModeChanged(renderState);
   }
 
+  // Pull the authoritative snapshot once on startup instead of waiting for the
+  // next windowModeChanged event, so the toolbar highlights match a window that
+  // was already mini / pinned / fullscreen before this page (re)loaded.
+  function refreshWindowModeSnapshot() {
+    if (
+      !window.electronUtilsRender ||
+      typeof window.electronUtilsRender.getWindowModeSnapshot !== "function"
+    ) {
+      return;
+    }
+    Promise.resolve(window.electronUtilsRender.getWindowModeSnapshot())
+      .then(function (state) {
+        if (state && typeof state === "object") {
+          renderState(state);
+        }
+      })
+      .catch(function () {});
+  }
+
+  refreshWindowModeSnapshot();
+  window.refreshWindowModeSnapshot = refreshWindowModeSnapshot;
+
   function onUserMouseActivity(e) {
     var now = Date.now();
     if (e && e.type === "mousemove") {

@@ -3,6 +3,7 @@ const { app, BrowserWindow, ipcMain, screen, clipboard } = electron;
 const path = require("path");
 const fs = require("fs");
 const { fileURLToPath } = require("url");
+const windowMode = require("./window-mode");
 
 // Keep Chromium PulseAudio/PipeWire output in-process on Linux so idle sink suspend
 // or Bluetooth A2DP reconnects cannot leave an orphaned AudioService utility socket silent.
@@ -78,21 +79,20 @@ function updateZoom(win) {
   notifyMode(win);
 }
 
+// Single source of truth for the window mode. Both the `windowModeChanged`
+// broadcast and the `getWindowModeSnapshot` query are built from the same
+// helper, so the renderer always gets an authoritative answer for the current
+// state instead of waiting for the next event.
+function getWindowModeSnapshot(win) {
+  return windowMode.getWindowModeSnapshot(
+    { isMiniPlayer, isPinned, translucentFullscreenBypass },
+    win
+  );
+}
+
 function notifyMode(win) {
   if (!win || win.isDestroyed()) return;
-  const bounds = win.getContentBounds();
-  const scale =
-    bounds.width > 0 && bounds.height > 0
-      ? Math.max(0.15, Math.min(bounds.width / 1920, bounds.height / 1080))
-      : 1;
-  const isCompact = isMiniPlayer || bounds.width <= 720 || bounds.height <= 420;
-  win.webContents.send("windowModeChanged", {
-    isMiniPlayer,
-    isPinned,
-    isFullScreen: win.isFullScreen() || translucentFullscreenBypass,
-    isCompact,
-    scale,
-  });
+  win.webContents.send("windowModeChanged", getWindowModeSnapshot(win));
 }
 
 function getFullWorkAreaBounds(win) {
@@ -374,6 +374,10 @@ function toggleMiniPlayerMode(win) {
   } else {
     expandFromFloatingToFull(win, false);
   }
+  // Shrink/expand settle their bounds asynchronously and re-broadcast from
+  // updateZoom; send an immediate snapshot too so the renderer does not show a
+  // stale highlight for the duration of the transition.
+  notifyMode(win);
   const b = win.getContentBounds();
   return {
     isMiniPlayer,
@@ -474,6 +478,7 @@ function toggleFullScreenMode(win) {
     }, 60);
   }
   const b = win.getContentBounds();
+  notifyMode(win);
   return {
     isMiniPlayer,
     isPinned,
@@ -625,6 +630,11 @@ function createWindow() {
       );
       enforceMiniWindowDecoratedState(win, restoreBounds);
     }
+    updateZoom(win);
+  });
+
+  win.on("leave-full-screen", () => {
+    updateZoom(win);
   });
 
   win.on("resize", () => {
@@ -690,18 +700,22 @@ function createWindow() {
 
   // When switching to another app (Alt+Tab or clicking another window) while Pinned on Top:
   // Shrink to a floating window in 1 step and keep it in front.
+  // Only a pinned, non-mini window shrinks; an existing mini player just regains
+  // always-on-top, and unpinning permanently disables the blur shrink.
   win.on("blur", () => {
-    if (!isPinned || win.isDestroyed()) return;
-    if (isMiniPlayer) {
-      if (!win.isAlwaysOnTop()) {
-        applyAlwaysOnTop(win, true);
-      }
-      return;
-    }
-    if (Date.now() - lastShrinkTime < 250) return;
-
-    isMiniPlayer = true;
-    shrinkToFloatingWindow(win, 560, 315);
+    if (win.isDestroyed()) return;
+    windowMode.applyBlurPolicy({
+      mode: { isPinned, isMiniPlayer },
+      win,
+      now: Date.now(),
+      lastShrinkTime,
+      isAlwaysOnTop: () => win.isAlwaysOnTop(),
+      applyAlwaysOnTop: () => applyAlwaysOnTop(win, true),
+      shrink: () => {
+        isMiniPlayer = true;
+        shrinkToFloatingWindow(win, 560, 315);
+      },
+    });
   });
 
   // When focusing the Mini Player (e.g. clicking its titlebar to drag, grabbing its border to resize,
@@ -766,6 +780,23 @@ ipcMain.handle("toggleFullScreen", (event) => {
   const win = resolveSenderWindow(event);
   if (!win) return null;
   return toggleFullScreenMode(win);
+});
+
+// Authoritative snapshot query. Only the main window's own top-level renderer
+// may read it; popups, devtools, other webContents and sub-frames get null.
+function resolveSnapshotSender(event) {
+  const authorized = windowMode.isAuthorizedSnapshotSender({
+    sender: event && event.sender,
+    senderFrame: event && event.senderFrame,
+    mainWindow,
+  });
+  return authorized ? mainWindow : null;
+}
+
+ipcMain.handle("getWindowModeSnapshot", (event) => {
+  const win = resolveSnapshotSender(event);
+  if (!win) return null;
+  return getWindowModeSnapshot(win);
 });
 
 ipcMain.handle("setWindowOpacity", (event, rawValue) => {

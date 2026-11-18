@@ -6,6 +6,10 @@
   "main": "index.js",
   "author": "Pulkit Mundra <https://pulkit-mundra-portfolio.vercel.app>",
   "license": "ISC",
+  "scripts": {
+    "test": "node --test \"tests/*.test.js\"",
+    "simulate:window-mode": "node scripts/simulate-window-mode.js"
+  },
   "bugs": {
     "url": "https://github.com/pulkitmundra/crunchyroll-ubuntu-desktop/issues"
   }

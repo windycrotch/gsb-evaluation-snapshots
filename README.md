@@ -89,6 +89,25 @@ flowchart LR
 
 > **Interactive Player Simulator & Wayland Deep Dive:** Try the live Smart Auto-PiP (`F10`) & translucency simulator in the [**Case Study**](https://pulkit-mundra-portfolio.vercel.app/projects/crunchyroll-ubuntu-desktop) or read the engineering writeup: [**Bypassing GNOME Wayland's Fullscreen Black Curtain for a Translucent Linux Media Player ->**](https://pulkit-mundra-portfolio.vercel.app/engineering/wayland-fullscreen-black-curtain-translucent-linux-player)
 
+### Window Mode Snapshot (`window-mode.js`)
+
+The renderer no longer has to wait for the next `windowModeChanged` event to know what the window is doing. Both the broadcast and the new queryable IPC handler are built from the same `getWindowModeSnapshot()` helper, so they can never disagree:
+
+```js
+// renderer
+const { isMiniPlayer, isPinned, isFullScreen, isCompact, scale } =
+  await window.electronUtilsRender.getWindowModeSnapshot();
+```
+
+- `getWindowModeSnapshot` (preload -> `ipcMain.handle("getWindowModeSnapshot")`) returns `null` for any sender that is not the main window's own top-level frame, so popups, devtools and iframes cannot read it.
+- `app.js` calls it once on startup (`refreshWindowModeSnapshot()`), then keeps using `windowModeChanged` for live updates; mini / pin / fullscreen toggles, window resize and `enter-full-screen` / `leave-full-screen` all re-broadcast the snapshot.
+- Blur auto-shrink is restricted to a pinned, non-mini window and throttled to one shrink per 250 ms. Blur on an existing mini player only re-asserts always-on-top (no resize), and blur after unpinning never shrinks.
+
+```bash
+npm test                        # node:test suites (fake window + fake electron)
+npm run simulate:window-mode    # prints bounds + snapshot before/after per path
+```
+
 ---
 
 <a id="features"></a>
