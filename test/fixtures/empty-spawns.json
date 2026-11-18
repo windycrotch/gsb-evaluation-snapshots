@@ -1,0 +1,7 @@
+{
+  "playerScale": 0.8,
+  "shapes": [
+    { "t": "c", "x": 120, "y": 320, "r": 40, "k": "bouncy" }
+  ],
+  "spawns": []
+}

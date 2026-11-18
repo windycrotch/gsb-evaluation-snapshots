@@ -50,8 +50,16 @@ const Editor = {
     document.getElementById('btnImport').addEventListener('click', () => document.getElementById('importFile').click());
     document.getElementById('importFile').addEventListener('change', e => {
       if (e.target.files[0]) {
-        this.snapshot();
-        ArenaStore.import(e.target.files[0], () => { this.selected = null; this.syncUI(); });
+        // Snapshot only after a successful import; a rejected file leaves both
+        // the arena and the undo history untouched.
+        ArenaStore.import(e.target.files[0], repaired => {
+          this.snapshot();
+          this.selected = null;
+          this.syncUI();
+          if (repaired > 0) {
+            G.flashHint(repaired + ' invalid spawn point' + (repaired > 1 ? 's' : '') + ' reset to default');
+          }
+        });
       }
       e.target.value = '';
     });

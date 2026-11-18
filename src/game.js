@@ -100,7 +100,8 @@ const G = {
   },
 
   startMatch() {
-    if (!ArenaStore.current.shapes.length) {
+    if (!Array.isArray(ArenaStore.current.shapes) || !ArenaStore.current.shapes.length) {
+      // No geometry to fight on: stay in the editor, never enter countdown.
       this.setState('edit');
       this.flashHint('Draw at least one platform first — or hit Demo');
       return;
@@ -111,14 +112,25 @@ const G = {
     this.setState('play');
   },
 
+  // Always-valid spawn pair: each malformed/missing entry falls back to blank()'s
+  // default for that slot, so a round can never place a fighter at an illegal point.
+  currentSpawns() {
+    const stored = ArenaStore.current.spawns;
+    return ArenaStore.blank().spawns.map((fallback, i) =>
+      isValidSpawn(stored && stored[i]) ? [stored[i][0], stored[i][1]] : fallback);
+  },
+
   startRound() {
+    // Clean slate for the new round: no leftover shots, crates, or particles.
     Weapons.reset();
     this.particles.arr.length = 0;
     this.round.num++;
     this.round.phase = 'countdown';
     this.round.t = 1.1;
     this.round.banner = 'ROUND ' + this.round.num;
-    const sp = ArenaStore.current.spawns;
+    // Both fighters return to the current spawns, fully healed, unarmed.
+    // Player.reset() also zeroes velocity, ammo, cooldowns and facing state.
+    const sp = this.currentSpawns();
     this.players[0].reset(sp[0][0], sp[0][1]);
     this.players[1].reset(sp[1][0], sp[1][1]);
     Sound.round();
