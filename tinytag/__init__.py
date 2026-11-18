@@ -6,10 +6,11 @@
 __version__ = '2.3.2'
 
 from .tinytag import (
-    TinyTag, Image, Images, OtherFields, OtherImages,
+    TinyTag, TagReadResult, Image, Images, OtherFields, OtherImages,
     TinyTagException, ParseError, UnsupportedFormatError
 )
 __all__ = (
-    "TinyTag", "Image", "Images", "OtherFields", "OtherImages",
-    "TinyTagException", "ParseError", "UnsupportedFormatError"
+    "TinyTag", "TagReadResult", "Image", "Images", "OtherFields",
+    "OtherImages", "TinyTagException", "ParseError",
+    "UnsupportedFormatError"
 )

@@ -104,6 +104,31 @@ $ python3 -m tinytag /some/music.mp3
 Check `python3 -m tinytag --help` for all CLI options, for example other
 output formats.
 
+By default the command line tool stops at the first unreadable file and
+exits with status code `1`. With `--continue-on-error` (`-c`) every file is
+processed instead: failures are reported to `stderr` while successful files
+are still written to `stdout`, and the exit code remains `1` if any file
+failed. Combined with `--skip-unsupported` (`-s`), files with an unsupported
+extension are skipped silently and do not count as failures.
+
+### Reading Multiple Files
+
+When scanning a whole library, use `TinyTag.get_many()` to read several
+paths or open file objects in one call. Each input is parsed independently,
+so one corrupt file never interrupts the others. Every input produces one
+`TagReadResult`, in the same order:
+
+```python
+from tinytag import TinyTag
+
+for result in TinyTag.get_many(['/some/music.mp3', '/some/broken.ogg']):
+    if result.success:
+        print(result.tag.artist)
+    else:
+        # The original exception type and message are preserved.
+        print(f'{result.source}: {type(result.error).__name__}: {result.error}')
+```
+
 ### Supported Files
 
 To receive a tuple of file extensions tinytag supports, use the

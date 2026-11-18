@@ -28,24 +28,28 @@ def _usage() -> None:
     -s, --skip-unsupported
         Skip files that do not have a file extension supported by tinytag
 
+    -c, --continue-on-error
+        Do not stop at the first bad file: report every failure to stderr
+        and keep processing the remaining files
+
     -v, --version
         Display version
 
 ''')
 
 
-def _pop_param(name: str, _default: str | None) -> str | None:
-    if name in sys.argv:
-        idx = sys.argv.index(name)
-        sys.argv.pop(idx)
-        return sys.argv.pop(idx)
+def _pop_param(name: str, argv: list[str], _default: str | None) -> str | None:
+    if name in argv:
+        idx = argv.index(name)
+        argv.pop(idx)
+        return argv.pop(idx)
     return _default
 
 
-def _pop_switch(name: str) -> bool:
-    if name in sys.argv:
-        idx = sys.argv.index(name)
-        sys.argv.pop(idx)
+def _pop_switch(name: str, argv: list[str]) -> bool:
+    if name in argv:
+        idx = argv.index(name)
+        argv.pop(idx)
         return True
     return False
 
@@ -79,21 +83,32 @@ def _print_tag(tag: TinyTag, fmt: str, header_printed: bool = False) -> bool:
     return header_printed
 
 
-def _run() -> int:
+def _run(argv: list[str] | None = None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
+    argv = list(argv)
     header_printed = False
-    image_path = _pop_param('--save-image', None) or _pop_param('-i', None)
-    fmt = (_pop_param('--format', None) or _pop_param('-f', None)) or 'json'
-    skip_unsupported = _pop_switch('--skip-unsupported') or _pop_switch('-s')
-    filenames = sys.argv[1:]
-    display_help = not filenames or _pop_switch('--help') or _pop_switch('-h')
+    image_path = _pop_param('--save-image', argv, None) \
+        or _pop_param('-i', argv, None)
+    fmt = (_pop_param('--format', argv, None)
+           or _pop_param('-f', argv, None)) or 'json'
+    skip_unsupported = (_pop_switch('--skip-unsupported', argv)
+                        or _pop_switch('-s', argv))
+    continue_on_error = (_pop_switch('--continue-on-error', argv)
+                         or _pop_switch('-c', argv))
+    filenames = argv
+    display_help = not filenames or _pop_switch('--help', argv) \
+        or _pop_switch('-h', argv)
     if display_help:
         _usage()
         return 0
-    display_version = _pop_switch('--version') or _pop_switch('-v')
+    display_version = (_pop_switch('--version', argv)
+                       or _pop_switch('-v', argv))
     if display_version:
         print(__version__)
         return 0
 
+    error_count = 0
     for i, filename in enumerate(filenames):
         if (skip_unsupported
                 and not (TinyTag.is_supported(filename) and isfile(filename))):
@@ -113,8 +128,10 @@ def _run() -> int:
             header_printed = _print_tag(tag, fmt, header_printed)
         except (OSError, TinyTagException) as exc:
             sys.stderr.write(f'{filename}: {exc}\n')
-            return 1
-    return 0
+            if not continue_on_error:
+                return 1
+            error_count += 1
+    return 1 if error_count else 0
 
 
 if __name__ == '__main__':

@@ -40,7 +40,7 @@ TYPE_CHECKING = False
 
 # Lazy imports for type checking
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Iterable, Iterator
     from typing import Any, BinaryIO, Dict, List, Tuple, Union
 
     _StringListDict = Dict[str, List[str]]
@@ -52,6 +52,7 @@ if TYPE_CHECKING:
         ]
     ]
     _AtomTreeDict = Dict[bytes, Union['_AtomTreeDict', _AtomParser]]
+    _FileInput = Union[bytes, str, PathLike[Any], BinaryIO]
 else:
     _StringListDict = _ImageListDict = dict
 
@@ -69,6 +70,35 @@ class ParseError(TinyTagException):
 
 class UnsupportedFormatError(TinyTagException):
     """File format is not supported."""
+
+
+class TagReadResult:
+    """The outcome of reading a single file with
+    :meth:`TinyTag.get_many`.
+
+    Exactly one of :attr:`tag` and :attr:`error` is set: a successfully
+    parsed file carries a complete :class:`TinyTag` object, while a failed
+    read keeps the original exception instead of being swallowed.
+    """
+
+    def __init__(self,
+                 source: _FileInput,
+                 tag: TinyTag | None = None,
+                 error: Exception | None = None) -> None:
+        self.source: _FileInput = source
+        self.tag: TinyTag | None = tag
+        self.error: Exception | None = error
+
+    @property
+    def success(self) -> bool:
+        """Return whether the file was read without errors."""
+        return self.error is None
+
+    def __repr__(self) -> str:
+        if self.error is None:
+            return f'TagReadResult(source={self.source!r}, tag={self.tag!r})'
+        return (f'TagReadResult(source={self.source!r}, '
+                f'error={self.error!r})')
 
 
 class TinyTag:
@@ -173,6 +203,46 @@ class TinyTag:
         finally:
             if should_close_file:
                 file_obj.close()
+
+    @classmethod
+    def get_many(cls,
+                 inputs: Iterable[_FileInput],
+                 tags: bool = True,
+                 duration: bool = True,
+                 image: bool = False,
+                 encoding: str | None = None,
+                 check_magic_bytes: bool = True) -> list[TagReadResult]:
+        """Return a tag object or an error for every given input.
+
+        Each item of ``inputs`` is read independently using
+        :meth:`get`, so a corrupt or unsupported file only affects its own
+        result: parsing continues with the remaining inputs. Every input
+        yields one :class:`TagReadResult`, in the same order, holding either
+        the complete tag object or the original exception (for example a
+        :class:`ParseError` or :class:`UnsupportedFormatError`). Inputs may
+        be file paths (``str``, ``bytes`` or :class:`os.PathLike``) or open
+        binary file objects.
+        """
+        results: list[TagReadResult] = []
+        for source in inputs:
+            if isinstance(source, (str, bytes, PathLike)):
+                filename = source
+                file_obj = None
+            else:
+                filename = None
+                file_obj = source
+            try:
+                tag = cls.get(
+                    filename, file_obj=file_obj, tags=tags,
+                    duration=duration, image=image, encoding=encoding,
+                    check_magic_bytes=check_magic_bytes)
+            except Exception as exc:  # pylint: disable=broad-except
+                # Any failure is isolated to this single input, keeping
+                # the original exception type and message.
+                results.append(TagReadResult(source, error=exc))
+            else:
+                results.append(TagReadResult(source, tag=tag))
+        return results
 
     @classmethod
     def is_supported(cls, filename: bytes | str | PathLike[Any]) -> bool:
