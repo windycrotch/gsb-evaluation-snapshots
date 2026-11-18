@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { VideoSeekSlider, Props } from '..';
 
@@ -244,6 +244,244 @@ describe('VideoSeekSlider.tsx', () => {
 
       fireEvent.pointerMove(screen.getByTestId('main-track'), { clientX: 40 });
       expect(heatmap).toHaveClass('active');
+    });
+  });
+
+  describe('preview thumbnails loading states', () => {
+    beforeEach(() => {
+      vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(
+        100
+      );
+      vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
+        left: 0,
+        width: 100,
+      } as DOMRect);
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    const getTrack = (): HTMLElement => screen.getByTestId('main-track');
+
+    it('does not fetch when given already parsed thumbnails', () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+      render(
+        getWrapper({
+          max: 100000,
+          previewThumbnails: [
+            { fromMs: 0, toMs: 100000, url: 'sprite.jpg' },
+          ],
+        })
+      );
+
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it('calls onPreviewThumbnailsError once with the reason on non-2xx', async () => {
+      const onError = vi.fn();
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response('nope', { status: 404 })
+      );
+
+      render(
+        getWrapper({
+          max: 100000,
+          previewThumbnails: '/media/thumbs.vtt',
+          onPreviewThumbnailsError: onError,
+        })
+      );
+
+      await waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+
+      expect(onError.mock.calls[0][0].message).toBe('HTTP 404');
+      expect(warn).toHaveBeenCalledOnce();
+    });
+
+    it('calls onPreviewThumbnailsError when parsing fails', async () => {
+      const onError = vi.fn();
+      vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+        ok: true,
+        text: () => Promise.reject(new Error('corrupt vtt')),
+      } as Response);
+
+      render(
+        getWrapper({
+          max: 100000,
+          previewThumbnails: '/media/thumbs.vtt',
+          onPreviewThumbnailsError: onError,
+        })
+      );
+
+      await waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+
+      expect(onError.mock.calls[0][0].message).toBe('corrupt vtt');
+    });
+
+    it('does not call onPreviewThumbnailsError on success', async () => {
+      const onError = vi.fn();
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(
+          'WEBVTT\n\n00:00:00.000 --> 00:01:40.000\nsheet.jpg#xywh=0,0,160,90\n'
+        )
+      );
+
+      render(
+        getWrapper({
+          max: 100000,
+          previewThumbnails: '/media/thumbs.vtt',
+          onPreviewThumbnailsError: onError,
+        })
+      );
+
+      fireEvent.pointerMove(getTrack(), { clientX: 30 });
+      await screen.findByTestId('preview-screen');
+
+      expect(onError).not.toHaveBeenCalled();
+    });
+
+    it('falls back to getPreviewScreenUrl while the VTT is loading', () => {
+      vi.spyOn(globalThis, 'fetch').mockReturnValue(
+        new Promise(() => undefined)
+      );
+
+      render(
+        getWrapper({
+          max: 100000,
+          previewThumbnails: '/media/thumbs.vtt',
+          getPreviewScreenUrl: () => 'loading-fallback.jpg',
+        })
+      );
+
+      fireEvent.pointerMove(getTrack(), { clientX: 30 });
+
+      expect(screen.getByTestId('preview-screen').style.backgroundImage).toBe(
+        'url("loading-fallback.jpg")'
+      );
+    });
+
+    it('falls back to getPreviewScreenUrl after a loading failure', async () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response('nope', { status: 500 })
+      );
+
+      render(
+        getWrapper({
+          max: 100000,
+          previewThumbnails: '/media/thumbs.vtt',
+          getPreviewScreenUrl: () => 'fallback.jpg',
+        })
+      );
+
+      fireEvent.pointerMove(getTrack(), { clientX: 30 });
+
+      expect(
+        (await screen.findByTestId('preview-screen')).style.backgroundImage
+      ).toBe('url("fallback.jpg")');
+    });
+
+    it('shows no image on failure without fallback but keeps time and label', async () => {
+      const onError = vi.fn();
+      vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response('nope', { status: 404 })
+      );
+
+      render(
+        getWrapper({
+          max: 100000,
+          previewThumbnails: '/media/thumbs.vtt',
+          onPreviewThumbnailsError: onError,
+          timeCodes: [{ fromMs: 0, description: 'Intro' }],
+        })
+      );
+
+      fireEvent.pointerMove(getTrack(), { clientX: 30 });
+      await waitFor(() => expect(onError).toHaveBeenCalled());
+
+      expect(screen.queryByTestId('preview-screen')).not.toBeInTheDocument();
+
+      const hoverTime = screen.getByTestId('hover-time');
+      expect(hoverTime).toHaveTextContent('Intro');
+      expect(hoverTime).toHaveTextContent('00:00:30');
+    });
+
+    it('shows no image in a gap between cues without fallback', () => {
+      render(
+        getWrapper({
+          max: 100000,
+          previewThumbnails: [
+            { fromMs: 0, toMs: 40000, url: 'sprite.jpg' },
+            { fromMs: 60000, toMs: 100000, url: 'sprite.jpg' },
+          ],
+        })
+      );
+
+      fireEvent.pointerMove(getTrack(), { clientX: 50 });
+
+      expect(screen.queryByTestId('preview-screen')).not.toBeInTheDocument();
+      expect(screen.getByTestId('hover-time')).toHaveTextContent('00:00:50');
+    });
+
+    it('falls back to getPreviewScreenUrl in a gap between cues', () => {
+      render(
+        getWrapper({
+          max: 100000,
+          previewThumbnails: [
+            { fromMs: 0, toMs: 40000, url: 'sprite.jpg' },
+            { fromMs: 60000, toMs: 100000, url: 'sprite.jpg' },
+          ],
+          getPreviewScreenUrl: () => 'gap-fallback.jpg',
+        })
+      );
+
+      fireEvent.pointerMove(getTrack(), { clientX: 50 });
+
+      expect(screen.getByTestId('preview-screen').style.backgroundImage).toBe(
+        'url("gap-fallback.jpg")'
+      );
+    });
+
+    it('ignores a late response from a previous VTT url', async () => {
+      const pending = new Map<string, (response: Response) => void>();
+      vi.spyOn(globalThis, 'fetch').mockImplementation(
+        (input) =>
+          new Promise<Response>((resolve) =>
+            pending.set(String(input), resolve)
+          )
+      );
+
+      const { rerender } = render(
+        getWrapper({ max: 100000, previewThumbnails: '/a.vtt' })
+      );
+      rerender(getWrapper({ max: 100000, previewThumbnails: '/b.vtt' }));
+
+      await act(async () => {
+        pending
+          .get('http://localhost:3000/a.vtt')?.(
+            new Response(
+              'WEBVTT\n\n00:00:00.000 --> 00:01:40.000\na.jpg#xywh=0,0,160,90\n'
+            )
+          );
+        pending
+          .get('http://localhost:3000/b.vtt')?.(
+            new Response(
+              'WEBVTT\n\n00:00:00.000 --> 00:01:40.000\nb.jpg#xywh=0,0,160,90\n'
+            )
+          );
+      });
+
+      fireEvent.pointerMove(getTrack(), { clientX: 30 });
+
+      const preview = await screen.findByTestId('preview-screen');
+      const sprite = preview.firstElementChild as HTMLElement;
+
+      expect(sprite.style.backgroundImage).toContain('b.jpg');
+      expect(sprite.style.backgroundImage).not.toContain('a.jpg');
     });
   });
 });

@@ -36,6 +36,11 @@ export interface Props {
    * or already parsed thumbnails. Takes priority over `getPreviewScreenUrl`.
    */
   previewThumbnails?: string | PreviewThumbnail[];
+  /**
+   * Called once with the failure reason when loading `previewThumbnails`
+   * from a VTT URL fails (non-2xx response or parse error).
+   */
+  onPreviewThumbnailsError?: (error: Error) => void;
   /** Relative watch intensity, evenly spread over the whole track. Normalized by its maximum. */
   heatmap?: number[];
 }
@@ -56,13 +61,17 @@ export const VideoSeekSlider: React.FC<Props> = ({
   onChange = () => undefined,
   getPreviewScreenUrl,
   previewThumbnails,
+  onPreviewThumbnailsError,
   heatmap,
 }) => {
   const [seekHoverPosition, setSeekHoverPosition] = useState(0);
   const [isSeeking, setIsSeeking] = useState(false);
   const [trackWidth, setTrackWidth] = useState(0);
   const trackElement = useRef<HTMLDivElement>(null);
-  const thumbnails = usePreviewThumbnails(previewThumbnails);
+  const { thumbnails, status: thumbnailsStatus } = usePreviewThumbnails(
+    previewThumbnails,
+    onPreviewThumbnailsError
+  );
 
   useIsomorphicLayoutEffect(() => {
     const track = trackElement.current;
@@ -210,6 +219,7 @@ export const VideoSeekSlider: React.FC<Props> = ({
           trackWidth={trackWidth}
           getPreviewScreenUrl={getPreviewScreenUrl}
           previewThumbnails={thumbnails}
+          previewThumbnailsStatus={thumbnailsStatus}
           minutesPrefix={minutesPrefix}
           secondsPrefix={secondsPrefix}
         />

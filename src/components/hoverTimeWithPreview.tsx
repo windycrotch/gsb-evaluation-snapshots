@@ -3,6 +3,7 @@ import { getHoverTimePosition } from '../utils/getHoverTimePosition';
 import { timeToTimeString } from '../utils/timeToTimeString';
 import { findThumbnail } from '../utils/findThumbnail';
 import { PreviewThumbnail } from '../utils/parseThumbnailsVtt';
+import { PreviewThumbnailsStatus } from '../hooks/usePreviewThumbnails';
 import { PreviewImage } from './previewImage';
 
 interface Props {
@@ -18,6 +19,8 @@ interface Props {
   minutesPrefix?: string;
   getPreviewScreenUrl?: (hoverTimeValue: number) => string;
   previewThumbnails?: PreviewThumbnail[];
+  /** Loading state of `previewThumbnails`; omitted means already loaded. */
+  previewThumbnailsStatus?: PreviewThumbnailsStatus;
 }
 
 export const HoverTimeWithPreview: React.FC<Props> = ({
@@ -33,6 +36,7 @@ export const HoverTimeWithPreview: React.FC<Props> = ({
   secondsPrefix,
   getPreviewScreenUrl,
   previewThumbnails,
+  previewThumbnailsStatus = 'loaded',
 }) => {
   const hoverTimeElement = useRef<HTMLDivElement>(null);
   const preloadedThumbnails = useRef<PreviewThumbnail[]>(undefined);
@@ -70,8 +74,12 @@ export const HoverTimeWithPreview: React.FC<Props> = ({
     secondsPrefix
   );
 
+  // While loading or after a failure there are no thumbnails to match, so
+  // the hover area falls back to `getPreviewScreenUrl` (or shows no image).
   const thumbnail =
-    previewThumbnails && findThumbnail(previewThumbnails, hoverTimeValue);
+    previewThumbnailsStatus === 'loaded' &&
+    previewThumbnails &&
+    findThumbnail(previewThumbnails, hoverTimeValue);
   const previewUrl =
     !thumbnail && getPreviewScreenUrl && isThumbActive
       ? getPreviewScreenUrl(hoverTimeValue)
