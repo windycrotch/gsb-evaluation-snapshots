@@ -4,7 +4,7 @@
   "description": "Integration of node-canvas and headless-gl.",
   "main": "lib/index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node test/canvas-size.js"
   },
   "keywords": [],
   "author": "akira-cn",
