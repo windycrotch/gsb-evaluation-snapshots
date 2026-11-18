@@ -70,16 +70,67 @@ export type PluginOptions = Partial<LoadingOptions> & {
 };
 
 /**
+ * @typedef {Object} ChunkImportDiagnostic
+ * @description Import information of a shader chunk in a single load
+ * 
+ * @property {string}   path         Imported chunk absolute path
+ * @property {string[]} importers    Absolute paths of the files that imported the chunk
+ * @property {number}   importCount  Total number of times the chunk was imported
+ * @property {number}   skippedCount Imports skipped because of `removeDuplicatedImports`
+ */
+export type ChunkImportDiagnostic = {
+  path: string;
+  importers: string[];
+  importCount: number;
+  skippedCount: number;
+};
+
+/**
+ * @typedef {Object} DependencyDiagnostics
+ * @description Dependency report of a single shader load
+ * 
+ * @property {ChunkImportDiagnostic[]}               chunks Imported chunks in import order
+ * @property {Object<string, ChunkImportDiagnostic>} byPath Chunk diagnostics keyed by absolute path
+ */
+export type DependencyDiagnostics = {
+  chunks: ChunkImportDiagnostic[];
+  byPath: { [path: string]: ChunkImportDiagnostic };
+};
+
+/**
+ * @typedef {Object} LoadState
+ * @description Internal state of a single shader load
+ * 
+ * @property {Map<string, string[]>}              dependentChunks Map of shaders that import other chunks
+ * @property {Set<string>}                        includedChunks  Chunks already included in this load
+ * @property {Set<string>}                        warnedImports   Importer/chunk pairs already warned about
+ * @property {Map<string, ChunkImportDiagnostic>} records         Chunk diagnostics keyed by normalized path
+ * @property {string[]}                           importStack     Chunks currently being included
+ * @property {DependencyDiagnostics}              diagnostics     Dependency report of this load
+ */
+export type LoadState = {
+  dependentChunks: Map<string, string[]>;
+  includedChunks: Set<string>;
+  warnedImports: Set<string>;
+  records: Map<string, ChunkImportDiagnostic>;
+  importStack: string[];
+  diagnostics: DependencyDiagnostics;
+};
+
+/**
  * @since 1.1.2
  * @typedef {Object} LoadingOutput
  * 
- * @returns {LoadingOutput} Loaded, parsed (and minified)
- * shader output and Map of shaders that import other chunks
+ * @returns {LoadingOutput} Loaded, parsed (and minified) shader
+ * output, Map of shaders that import other chunks and per-chunk
+ * dependency diagnostics
  * 
  * @property {Map<string, string[]>} dependentChunks Map of shaders that import other chunks
+ * @property {DependencyDiagnostics} diagnostics     Per-chunk dependency diagnostics
  * @property {string}                outputShader    Shader file with included chunks
  */
 export type LoadingOutput = {
   dependentChunks: Map<string, string[]>;
+  diagnostics: DependencyDiagnostics;
   outputShader: string;
 };

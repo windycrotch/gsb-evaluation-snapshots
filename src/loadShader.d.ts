@@ -19,7 +19,8 @@ import type { LoadingOptions, LoadingOutput } from './types.d';
  *  - Minify output shader code
  * 
  * @returns {Promise<LoadingOutput>} Loaded, parsed (and minified)
- * shader output and Map of shaders that import other chunks
+ * shader output, Map of shaders that import other chunks and
+ * per-chunk dependency diagnostics
  */
 export default async function (
   source: string, shader: string,

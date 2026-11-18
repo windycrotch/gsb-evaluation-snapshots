@@ -192,7 +192,52 @@ void main (void) {
 }
 ```
 
+## Dependency Diagnostics ##
+
+Every call to the loader (`src/loadShader.js`) returns, along with `outputShader` and `dependentChunks`, a `diagnostics` object describing the chunks that were imported during that load:
+
+```js
+import loadShader from './src/loadShader.js';
+
+const { diagnostics, dependentChunks, outputShader } = await loadShader(source, path, {
+  defaultExtension: 'glsl',
+  warnDuplicatedImports: true,
+  removeDuplicatedImports: false,
+  importKeywords: ['#include'],
+  onComplete: undefined,
+  minify: false,
+  root: '/'
+});
+```
+
+`diagnostics.chunks` lists each imported chunk in import order, and `diagnostics.byPath` indexes the same objects by absolute path:
+
+```js
+{
+  path: '/src/glsl/chunk3.frag',        // Absolute path of the imported chunk
+  importers: ['/src/glsl/utils/chunk1.glsl', '/src/glsl/sibling.frag'],
+  importCount: 2,                       // How many times it was imported
+  skippedCount: 1                       // Imports skipped by `removeDuplicatedImports`
+}
+```
+
+- Duplicate imports keep being reported only when `warnDuplicatedImports` is `true`.
+- With `removeDuplicatedImports` set to `true` the chunk is inlined once, but `importCount` still counts every import and `skippedCount` counts the skipped ones.
+- Diagnostics are collected before `minify` and `onComplete` run, so they always describe the imported chunks rather than the final output.
+
+When an import cycle is found (for example `a → b → a`), the load throws an error containing the complete path chain. No partially expanded shader is returned, and the next load starts from a clean state:
+
+```text
+Recursion detected when importing "/src/glsl/a.frag".
+Import chain: "/src/glsl/main.frag" -> "/src/glsl/a.frag" -> "/src/glsl/b.frag" -> "/src/glsl/a.frag"
+Import cycle: "/src/glsl/a.frag" -> "/src/glsl/b.frag" -> "/src/glsl/a.frag"
+```
+
+The thrown error also exposes the paths programmatically as `error.chain` (from the entry shader to the repeated chunk) and `error.cycle` (from the repeated chunk back to itself).
+
 ## Change Log ##
+
+- Shader loads now return a `diagnostics` object with each imported chunk path, its importers and its import/skip counts, and recursion errors include the complete import path chain.
 
 - Starting from `v1.6.0` this plugin supports `onComplete` callback function to customize output shaders.
 
