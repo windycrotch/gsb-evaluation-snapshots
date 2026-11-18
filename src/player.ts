@@ -77,6 +77,11 @@ export class Player {
 	// advance the animation a frame and re-home the audio to the resulting clock
 	update(deltaTime: number) {
 		this.mixer.update(deltaTime);
+		this.syncAudio();
+	}
+
+	// re-project the audio to the animation clock; cheap when already in sync
+	private syncAudio() {
 		this.audio.sync(this.action.time, this.action.paused, this.playback.reverse, this.playback.speed);
 	}
 
@@ -94,11 +99,16 @@ export class Player {
 		this.action.paused = false;
 		this.mixer.update(0);
 		this.audio.restart();
+		// start the soundtrack now rather than on the next tick, so resuming never
+		// opens with a frame of silence
+		this.syncAudio();
 		this.save();
 	}
 
 	pause() {
 		this.action.paused = true;
+		// silence on the same event rather than at the next tick
+		this.syncAudio();
 		this.save();
 	}
 
@@ -106,15 +116,17 @@ export class Player {
 		this.action.time = 0;
 		this.mixer.update(0);
 		this.audio.restart();
+		this.syncAudio();
 		this.save();
 	}
 
-	// jump to an absolute clip time without touching the play/pause state; a scrub
-	// or arrow-key seek exceeds the drift window, so audio re-homes on its own next
-	// frame (a frame-step seek is smaller, but pauses, so it falls silent anyway)
+	// jump to an absolute clip time without touching the play/pause state. Sync right
+	// away so a scrub past the drift window re-homes immediately, while a smaller
+	// jump leaves the running source undisturbed — the engine decides which.
 	seekTo(time: number) {
 		this.action.time = THREE.MathUtils.clamp(time, 0, this.clip.duration);
 		this.mixer.update(0);
+		this.syncAudio();
 		this.save();
 	}
 
@@ -139,11 +151,17 @@ export class Player {
 	setSpeed(speed: number) {
 		this.playback.speed = speed;
 		this.applyTimeScale();
+		// apply the new rate to the running source now; the engine rides it on
+		// playbackRate rather than restarting, and going to zero falls silent at once
+		this.syncAudio();
 	}
 
 	setReverse(reverse: boolean) {
 		this.playback.reverse = reverse;
 		this.applyTimeScale();
+		// flip buffers and start from the mirrored position right away rather than
+		// leaving the old direction audible until the next animation frame
+		this.syncAudio();
 	}
 
 	setLoop(loop: boolean) {
@@ -154,6 +172,7 @@ export class Player {
 			this.action.reset();
 			this.mixer.update(0);
 			this.audio.restart();
+			this.syncAudio();
 		}
 		this.save();
 	}
@@ -185,8 +204,11 @@ export class Player {
 	// SOUND
 
 	setTrack(track: string) {
-		this.audio.track = track;
-		this.audio.restart();
+		// drops the old source immediately; the start at the matching position of the
+		// new file happens now rather than a frame later, so the switch never leaves
+		// a gap of silence
+		this.audio.setTrack(track);
+		this.syncAudio();
 		this.save();
 	}
 

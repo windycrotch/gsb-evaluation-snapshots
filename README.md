@@ -55,6 +55,7 @@ Then open the URL Vite prints (defaults to http://localhost:5173).
 | `npm run build`     | Production build into `dist/`            |
 | `npm run preview`   | Preview the production build locally     |
 | `npm run typecheck` | Type-check the project (`tsc --noEmit`)  |
+| `npm test`          | Run the audio engine unit tests (Vitest) |
 
 ## Credits
 
