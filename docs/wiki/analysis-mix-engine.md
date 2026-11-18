@@ -48,27 +48,52 @@ Creare una modalità `Radio Edit Mix Mode` che scelga automaticamente:
 
 ## Stato Implementazione
 
-Pipeline spiegabile implementata (analysis `version=2`, analyzer
-`par8dj-mixengine-v2`):
+Pipeline spiegabile implementata (analysis `version=3`, analyzer
+`par8dj-mixengine-v3`):
 
 - `analysis.version` e fallback frontend per analisi vecchie (nessun crash).
 - Timeline musicale a passi di 1s (`analysis.timeline`): `step`, `t` e array
   allineati `rms`, `onset`, `beatStrength`, `low/mid/high`, `brightness`,
-  `vocalRisk`, `tension`. Il `vocalRisk` è ora autorevole: Demucs gira
-  sull'INTERO brano (htdemucs, auto-split su CPU) e produce una timeline di
-  presenza vocale per-secondo (RMS dello stem `vocals`, gate soft 0.06..0.40)
-  allineata a `timeline.t`; `timeline.vocalSource` vale `"demucs"` quando
-  disponibile, altrimenti `"heuristic"` (VAD flatness/centroid + banda
-  200-4000Hz + energia come fallback, mai crash). Esposti a top-level
-  `firstVocalAt`/`lastVocalAt`/`vocalSource`.
+  `vocalRisk`, `tension`. Il `vocalRisk` è autorevole quando Demucs è
+  disponibile: Demucs gira sull'INTERO brano (htdemucs, auto-split su CPU) e
+  produce una timeline di presenza vocale per-secondo (RMS dello stem `vocals`,
+  gate soft 0.06..0.40) allineata a `timeline.t`; `timeline.vocalSource` vale
+  `"demucs"` in quel caso, altrimenti `"heuristic"` (VAD flatness/centroid +
+  banda 200-4000Hz + energia come fallback, mai crash).
+- **Finestra vocale sempre non-null** (`firstVocalAt`/`lastVocalAt` a top-level):
+  - `vocalSource="demucs"`: vengono dallo stem separato e sono autoritativi;
+    nessun percorso euristico li sovrascrive. Se Demucs restituisce la mappa
+    `vocalRisk` ma non i due estremi, la finestra viene completata dall'euristica
+    senza declassare `vocalSource`.
+  - `vocalSource="heuristic"` (stems off, Demucs assente o separazione fallita):
+    `heuristic_vocal_bounds` legge `timeline.vocalRisk` e prende primo/ultimo
+    secondo con rischio > 0.5 **e** quota di banda vocale sopra il baseline
+    "quieto" del brano (25° percentile, +15% relativo e +2 punti assoluti). Il
+    secondo controllo evita di inventare una finestra su rumore stazionario o su
+    un brano strumentale piatto, dove `vocalRisk` (normalizzato p10..p90)
+    coprirebbe comunque tutto 0..1.
+  - Nessuna evidenza vocale → `(0, duration)`, cioè "assumi voce ovunque": i
+    chiamanti restano prudenti e i campi non tornano mai `null`.
+  - Entrambi i valori sono clampati in `[0, duration]` e ordinati.
 - Stem vocali ON di default (`AUTODJ_STEMS=0` per disattivare): la mappa vocale è
   sempre calcolata. `intro_end` preferisce la battuta prima di `firstVocalAt`
-  quando il cantato apre il brano; il `mixPoint` rafforza l'evitamento voce (peso
-  `(1-voce)` più alto + forte penalità se voce>0.5) così l'uscita non cade mai su
-  una frase cantata (niente cantato su cantato) e l'ingresso resta su zona pulita.
+  quando il cantato apre il brano — ma SOLO con finestra Demucs: quella euristica
+  è troppo grezza per accorciare l'intro e non deve alterare l'ordinamento di
+  `entryPoint`.
+- `mixPoint` e voce: oltre al peso `(1-voce)` e alla penalità `-0.6` per
+  `voce>0.5`, una battuta dentro `[firstVocalAt, lastVocalAt]` con rischio > 0.5
+  viene portata **sotto ogni battuta pulita vicina** (cap relativo:
+  `min(score, peggiore_pulita - 0.25, 0.2)`), così lateness o un outro silenzioso
+  non possono riportarla in cima. `reasons` lo dice in chiaro
+  ("finestra vocale stimata (confini euristici): possibile cantato su cantato",
+  oppure "finestra vocale rilevata" con Demucs). `cueIn`/`entryPoint`
+  restano invariati in ordinamento e struttura; i candidati restano ordinati per
+  score decrescente con dedupe a 1.5s.
 - Cache analisi su file versionata (`~/.cache/par8dj-ai/analysis/<key>.json`,
   key = md5 dei byte del file + `ANALYSIS_VERSION` + stems/nostems): Demucs gira
-  una sola volta per brano, scrittura/lettura best-effort (mai fatale).
+  una sola volta per brano, scrittura/lettura best-effort (mai fatale). Le voci
+  con `firstVocalAt`/`lastVocalAt` nulli o `vocalSource` sconosciuto sono
+  trattate come cache-miss e rianalizzate.
 - Phrase grid multi-risoluzione (`analysis.phraseGrid`): valuta 16/32/64 beat e
   sceglie la più coerente; restano `firstBeat`/`beatInterval`/`phraseAnchor` per
   retro-compatibilità.
@@ -103,6 +128,9 @@ Iterazione su feedback reale "parte a metà / esce a 2/3 / cantato su cantato":
   il crossfade finisce con la canzone (niente taglio a 2/3).
 - **Niente cantato su cantato**: uscita scelta su zona a bassa voce + ingresso
   nell'intro strumentale; su clash residuo, power breve con mid-duck (mai taglio).
+  Con finestra vocale euristica (`vocalSource="heuristic"`) le battute cantate
+  dentro `[firstVocalAt, lastVocalAt]` vengono anche portate sotto ogni battuta
+  pulita vicina, non solo penalizzate di `-0.6`.
 - **Sezioni colorate**: l'intro colorato usa l'`introEnd` reale; guard anti-falso
   `break` su corpi a energia piatta.
 - **Override manuale ripristinato**: `bestCandidate` ora preferisce il campo singolo
@@ -113,8 +141,10 @@ Da consolidare:
 
 - testare su radio edit reali e annotare le correzioni manuali;
 - segmentazione strutturale (intro/build/drop/outro) più robusta su brani veri;
-- cache analisi versionata lato backend;
-- usare chroma locale + crest/LRA nello scoring.
+- usare chroma locale + crest/LRA nello scoring;
+- validare la soglia della finestra euristica (0.5 + baseline di banda) su brani
+  reali: ora è tarata su audio sintetico (3s silenzio + sezione vocale) e su un
+  brano strumentale piatto, non su un catalogo.
 
 ## Idee Valide Da AI-DSP-REVOLUTION
 

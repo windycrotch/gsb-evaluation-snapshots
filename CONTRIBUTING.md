@@ -17,6 +17,12 @@ npm run backend
 npm start
 ```
 
+Backend tests (synthetic audio, no Demucs model needed):
+
+```bash
+npm run test:backend
+```
+
 Open `http://127.0.0.1:5173`, import a few tracks, let them analyze, and press play.
 Full-track Demucs vocal analysis is on by default (slow on CPU the first time per
 track, then cached). Disable with `AUTODJ_STEMS=0 npm run backend`.

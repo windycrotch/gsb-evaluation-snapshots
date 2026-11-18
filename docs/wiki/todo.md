@@ -25,6 +25,9 @@ Il sistema deve poter rispondere a tre domande per ogni transizione:
   e indipendente, curva e EQ scelti su frase; player la consuma.
 - [x] Vocal risk su tutto il brano: VAD euristico sempre attivo nel timeline,
   Demucs lo raffina solo nelle zone intro/outro.
+- [x] Finestra vocale sempre disponibile: `firstVocalAt`/`lastVocalAt` non-null
+  anche senza Demucs (`vocalSource="heuristic"`), con penalità relativa delle
+  battute cantate nei `mixPoint`.
 - [x] Phrase detection multi-risoluzione: `analysis.phraseGrid` valuta 16/32/64
   beat e sceglie la griglia piu coerente.
 - [x] Cue-in professionale: candidato `cueIn` che fonde RMS, onset strength e
@@ -51,12 +54,12 @@ Il sistema deve poter rispondere a tre domande per ogni transizione:
 
 ## Fondamenta Necessarie
 
-- [x] Schema `analysis.version`: ogni analisi dichiara versione (2) e analyzer
-  (`par8dj-mixengine-v2`).
+- [x] Schema `analysis.version`: ogni analisi dichiara versione (3) e analyzer
+  (`par8dj-mixengine-v3`).
 - [x] Compatibilita con analisi vecchie: il frontend fa fallback quando mancano
   i campi nuovi (candidati/timeline/phraseGrid), nessun crash.
-- [ ] Cache analysis versionata: indispensabile per iterare su librerie reali
-  senza rianalizzare tutto.
+- [x] Cache analysis versionata: su file (`~/.cache/par8dj-ai/analysis/`), chiave
+  = byte del file + versione + stems/nostems; voci non valide = cache-miss.
 - [ ] Vista debug analisi: BPM confidence, phrase grid, sezioni, cue, candidati,
   motivazioni e rischio voce.
 - [ ] Test minimi su funzioni critiche: cue clamp, vocalOutro relativo, radio edit

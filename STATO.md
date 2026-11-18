@@ -48,8 +48,10 @@ Web MIDI e analisi avanzata richiedono `localhost`/`127.0.0.1` (contesto sicuro)
 - **Bande spettrali** low/mid/high normalizzate (`bandEnergy`)
 - **Voce intro/outro** via Demucs (opzionale): `vocals.vocalIntro/vocalOutro/density`
 - **Sezioni musicali** (`sections`): intro/build/drop/break/body/outro stimate da energia, onset, brightness spettrale, cue e frase.
-- **Pipeline mix spiegabile (analysis `version=2`, analyzer `par8dj-mixengine-v2`)**:
+- **Pipeline mix spiegabile (analysis `version=3`, analyzer `par8dj-mixengine-v3`)**:
   - `analysis.timeline` (passi 1s): `rms`, `onset`, `beatStrength`, `low/mid/high`, `brightness`, `vocalRisk` (VAD euristico sempre attivo), `tension`.
+  - `firstVocalAt`/`lastVocalAt` sempre non-null: da Demucs se disponibile (`vocalSource="demucs"`, autoritativo), altrimenti euristici (`vocalSource="heuristic"`); nessuna evidenza vocale → `[0, duration]`.
+  - `mixPoint`: le battute cantate dentro la finestra vocale vengono portate sotto ogni battuta pulita vicina, con `reasons` esplicite.
   - `analysis.phraseGrid`: phrase grid multi-risoluzione 16/32/64 beat con punteggio.
   - `analysis.candidates` (`cueIn/entryPoint/mixPoint/cueOut`): candidati con `score` e `reasons` in italiano; i campi singoli back-compat restano popolati.
   - `truePeak`, `lra`, `crest` oltre a `loudnessLufs`/`gain`.

@@ -67,8 +67,10 @@ TARGET_LUFS = -16.0
 
 # Analysis schema version. Bump whenever the JSON shape changes so the frontend
 # (and any cache) can migrate or fall back gracefully.
-ANALYSIS_VERSION = 2
-ANALYZER_ID = "par8dj-mixengine-v2"
+# v3: firstVocalAt/lastVocalAt are never null (heuristic fallback) and the
+# heuristic mixPoint penalty is explicit.
+ANALYSIS_VERSION = 3
+ANALYZER_ID = "par8dj-mixengine-v3"
 
 
 def _cache_key(path: str, use_stems: bool) -> str | None:
@@ -90,9 +92,19 @@ def _cache_read(key: str | None) -> dict[str, Any] | None:
         return None
     try:
         with open(CACHE_DIR / f"{key}.json", encoding="utf-8") as handle:
-            return json.load(handle)
+            cached = json.load(handle)
     except (OSError, ValueError):
         return None
+    # Entries written before the heuristic vocal window existed have null
+    # boundaries. Serving them would keep the very bug we just fixed alive, so
+    # they are treated as a miss and re-analyzed.
+    if not isinstance(cached, dict):
+        return None
+    if cached.get("firstVocalAt") is None or cached.get("lastVocalAt") is None:
+        return None
+    if cached.get("vocalSource") not in {"demucs", "heuristic"}:
+        return None
+    return cached
 
 
 def _cache_write(key: str | None, result: dict[str, Any]) -> None:
@@ -177,6 +189,22 @@ def _analyze_file_uncached(path: str, use_stems: bool = False) -> dict[str, Any]
         if timeline.get("vocalSource") != "demucs":
             refine_vocal_risk(timeline, vocals, duration)
 
+    # Demucs is authoritative when it succeeded, so its boundaries are never
+    # replaced here. Whenever it did not (stems disabled, demucs missing, or
+    # separation failed) derive first/last vocal from the heuristic risk curve:
+    # the frontend still needs a usable non-null window to avoid fading one
+    # vocal over another. A track with no vocal evidence spans [0, duration].
+    if timeline.get("vocalSource") != "demucs" or first_vocal_at is None or last_vocal_at is None:
+        # A Demucs map without boundaries still holds stem-derived vocalRisk, so
+        # the spectral band check (meant for the heuristic VAD) is skipped there.
+        stem_curve = timeline.get("vocalSource") == "demucs"
+        first_vocal_at, last_vocal_at = heuristic_vocal_bounds(
+            timeline, duration, require_band_contrast=not stem_curve
+        )
+        vocal_bounds_heuristic = True
+    else:
+        vocal_bounds_heuristic = False
+
     # Structural boundaries (timbre+harmony self-similarity, beat-synced). The
     # inspectable DSP baseline for intro/outro: real musical section changes, not
     # raw energy thresholds. Used to snap intro_end and outro_start.
@@ -196,7 +224,7 @@ def _analyze_file_uncached(path: str, use_stems: bool = False) -> dict[str, Any]
     # Explicit, scored, human-readable mix candidates on musical boundaries.
     candidates = build_candidates(
         timeline, phrasing, duration, cue_in, cue_out, outro_start, beat_interval,
-        struct_boundaries, first_vocal_at,
+        struct_boundaries, first_vocal_at, last_vocal_at, vocal_bounds_heuristic,
     )
     # Back-compat single fields = the top candidate of each kind.
     cue_in = top_time(candidates["cueIn"], cue_in)
@@ -407,6 +435,93 @@ def refine_vocal_risk(timeline: dict[str, Any], vocals: dict[str, Any], duration
             risk[i] = round(min(1.0, max(risk[i], 0.7)), 4)
 
 
+# A second counts as "sung" for the heuristic vocal bounds when its vocalRisk
+# clears this mark. It matches the mixPoint penalty threshold so the reported
+# window and the candidate scoring agree on what "voice" means.
+HEURISTIC_VOCAL_RISK = 0.5
+# vocalRisk is normalized per track (p10..p90), so a stationary track — pure
+# noise, a drone, a flat instrumental — still spreads across 0..1 and would
+# otherwise report a bogus sung window. A window only counts as vocal evidence
+# when its vocal-band (250-4000Hz) share also clears the track's own quiet
+# baseline by +15% relative AND +2 points absolute (the stricter of the two).
+VOCAL_BAND_RELATIVE = 0.15
+VOCAL_BAND_ABSOLUTE = 0.02
+# Baseline quantile for the vocal-band share: a track where vocals lead can carry
+# voice on half its windows, so the median would sit *on* the sung level.
+VOCAL_BAND_BASELINE_QUANTILE = 0.25
+
+
+def _band_baseline(mid: list[float]) -> float:
+    """Vocal-band share above which a window counts as sung for this track."""
+    ordered = sorted(mid)
+    rank = (len(ordered) - 1) * VOCAL_BAND_BASELINE_QUANTILE
+    low = int(math.floor(rank))
+    high = min(len(ordered) - 1, low + 1)
+    fraction = rank - low
+    baseline = ordered[low] * (1.0 - fraction) + ordered[high] * fraction
+    return max(
+        baseline * (1.0 + VOCAL_BAND_RELATIVE),
+        baseline + VOCAL_BAND_ABSOLUTE,
+    )
+
+
+def heuristic_vocal_bounds(
+    timeline: dict[str, Any],
+    duration: float,
+    require_band_contrast: bool = True,
+) -> tuple[float, float]:
+    """First/last vocal time from the always-on heuristic VAD curve.
+
+    Demucs unavailable (stems off, package missing, separation failed) must not
+    leave `firstVocalAt`/`lastVocalAt` null: the frontend picks entryPoint and
+    mixPoint from them, and a null window is exactly what lets a cut land on a
+    sung bar. A second is evidence when its `vocalRisk` clears
+    HEURISTIC_VOCAL_RISK *and* its vocal-band share rises above the track's own
+    quiet baseline, so a stationary/voiceless track reports no evidence instead
+    of a random slice. That second check only makes sense for the spectral VAD
+    curve: pass `require_band_contrast=False` when `timeline.vocalRisk` already
+    comes from separated stems. Boundaries are clamped into [0, duration], always
+    ordered, and a track with no clear vocal evidence returns [0, duration]
+    ("assume voice everywhere"), which keeps callers conservative. Never raises,
+    never returns None.
+    """
+    safe_duration = max(0.0, float(duration))
+    no_evidence = (0.0, safe_duration)
+    risk = list(timeline.get("vocalRisk") or [])
+    times = list(timeline.get("t") or [])
+    if not risk or not times or len(risk) != len(times):
+        return no_evidence
+
+    mid: list[float] = []
+    if require_band_contrast:
+        try:
+            mid = [float(v) for v in (timeline.get("mid") or [])]
+        except (TypeError, ValueError):
+            mid = []
+    has_band = len(mid) == len(times)
+    band_floor = 0.0
+    if has_band:
+        # Lower quantile, not the median: on a sung track up to half the windows
+        # carry voice, so the median sits on the sung level and nothing clears it.
+        band_floor = _band_baseline(mid)
+
+    hits: list[float] = []
+    for index, (time_value, risk_value) in enumerate(zip(times, risk)):
+        try:
+            if float(risk_value) <= HEURISTIC_VOCAL_RISK:
+                continue
+        except (TypeError, ValueError):
+            continue
+        if has_band and mid[index] <= band_floor:
+            continue
+        hits.append(float(time_value))
+    if not hits:
+        return no_evidence
+    first = min(max(min(hits), 0.0), safe_duration)
+    last = min(max(max(hits), 0.0), safe_duration)
+    return round(first, 2), round(last, 2)
+
+
 def crest_factor(y: np.ndarray, rms: np.ndarray) -> float | None:
     """Peak-to-RMS ratio in dB: high = dynamic/punchy, low = compressed/loud."""
     if y.size == 0 or rms.size == 0:
@@ -428,6 +543,8 @@ def build_candidates(
     beat_interval: float | None,
     struct_boundaries: list[float] | None = None,
     first_vocal_at: float | None = None,
+    last_vocal_at: float | None = None,
+    vocal_bounds_heuristic: bool = True,
 ) -> dict[str, list[dict[str, Any]]]:
     """Generate scored, explained mix candidates on musical boundaries only.
 
@@ -520,9 +637,12 @@ def build_candidates(
         intro_end = min(bar_boundaries, key=lambda b: abs(b - intro_end))
     # When a reliable (Demucs) first-vocal time is known and vocals lead the song,
     # the intro MUST end before the singing starts: prefer the bar at/just before
-    # firstVocalAt so the mix never spills onto the entering vocal.
+    # firstVocalAt so the mix never spills onto the entering vocal. The heuristic
+    # window deliberately does NOT steer introEnd: entryPoint ordering must stay
+    # exactly as before, and an estimated window is too coarse to shorten intros.
     if (
         first_vocal_at is not None
+        and not vocal_bounds_heuristic
         and float(first_vocal_at) > cue_in_eff + bars * 0.5
         and bar_boundaries
     ):
@@ -563,7 +683,14 @@ def build_candidates(
     if exit_floor >= latest:
         exit_floor = max(cue_in + 1.0, latest - bars_v * 4)
     span_out = max(1.0, latest - exit_floor)
+    # The sung window from Demucs (authoritative) or the heuristic VAD. Bars that
+    # fall inside it AND carry real vocal risk are the exact "vocal over vocal"
+    # failure, so they are pushed below every nearby clean bar.
+    vocal_lo = float(first_vocal_at) if first_vocal_at is not None else None
+    vocal_hi = float(last_vocal_at) if last_vocal_at is not None else None
+    heuristic_bounds = bool(vocal_bounds_heuristic)
     mix_candidates: list[dict[str, Any]] = []
+    vocal_penalised: list[int] = []
     for b in bar_boundaries:
         if b < exit_floor or b > latest + 0.5:
             continue
@@ -573,16 +700,49 @@ def build_candidates(
         # Vocal avoidance dominates: raise the (1-vocal) weight and add a strong
         # penalty for any sung bar so the exit never lands on a vocal phrase.
         score = 0.55 * (1 - v) + 0.32 * lateness + 0.13 * (1 - ten)
-        if v > 0.5:
-            score -= 0.6
         reasons = ["uscita vicino alla fine del brano, su frase"]
+        inside_vocal = (
+            vocal_lo is not None and vocal_hi is not None and vocal_lo <= b <= vocal_hi
+        )
+        sung = v > 0.5
+        if sung:
+            score -= 0.6
+            reasons.append(
+                # "Confini euristici", not "Demucs assente": a Demucs map that
+                # arrived without boundaries also lands here.
+                "finestra vocale stimata (confini euristici): possibile cantato su cantato"
+                if heuristic_bounds
+                else "finestra vocale rilevata: possibile cantato su cantato"
+            )
         reasons.append(
             "zona senza voce (niente cantato su cantato)" if v < 0.35
             else "voce presente in uscita"
         )
         if b >= outro_start:
             reasons.append("dentro l'outro naturale")
-        mix_candidates.append(make_candidate(b, score, reasons))
+        candidate = make_candidate(b, score, reasons)
+        mix_candidates.append(candidate)
+        if sung and inside_vocal:
+            vocal_penalised.append(len(mix_candidates) - 1)
+    # A bar inside the sung window that still carries vocal risk must rank below
+    # EVERY nearby clean bar, not merely below its own unpenalised score: cap it
+    # under the weakest clean candidate (relative margin), so lateness or a quiet
+    # exit zone can never lift a vocal bar back above an instrumental one. If the
+    # whole window is sung there is no clean bar to defer to — keep the plain
+    # -0.6 penalty so the least-risky/latest vocal bar still ranks first among
+    # bad options instead of collapsing every candidate to 0.
+    if vocal_penalised:
+        flagged = set(vocal_penalised)
+        clean_scores = [
+            c["score"] for i, c in enumerate(mix_candidates) if i not in flagged
+        ]
+        if clean_scores:
+            ceiling = min(clean_scores) - 0.25
+            for i in vocal_penalised:
+                mix_candidates[i]["score"] = round(
+                    float(np.clip(min(mix_candidates[i]["score"], ceiling, 0.2), 0.0, 1.0)),
+                    3,
+                )
     mix_candidates = dedupe_sort(mix_candidates)
     if not mix_candidates:
         mix_candidates = [make_candidate(

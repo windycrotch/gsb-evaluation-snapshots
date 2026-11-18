@@ -22,9 +22,13 @@ vocal risk sempre attivo e `plannedTransition` condivisa tra scoring, UI e playe
 - Start anche con analisi non pronta.
 - Platter/scratch browser grezzo ma funzionante.
 - Toggle `Radio edit` presente nella UI.
-- Backend produce `analysis.version=2` (analyzer `par8dj-mixengine-v2`).
+- Backend produce `analysis.version=3` (analyzer `par8dj-mixengine-v3`).
 - Timeline musicale a passi di 1s: `rms`, `onset`, `beatStrength`, `low/mid/high`,
   `brightness`, `vocalRisk` (VAD euristico sempre attivo, senza Demucs) e `tension`.
+- `firstVocalAt`/`lastVocalAt` sono SEMPRE non-null: con Demucs riuscito vengono
+  dallo stem (`vocalSource="demucs"`), altrimenti dalla curva euristica
+  (`vocalSource="heuristic"`). Un brano senza evidenza vocale riporta
+  `[0, duration]` invece di `null`, così il frontend non resta senza finestra.
 - Candidati di mix espliciti (`candidates.cueIn/entryPoint/mixPoint/cueOut`) con
   `score` e `reasons` in italiano, ordinati best-first; i campi singoli back-compat
   restano popolati dal candidato migliore.
@@ -46,7 +50,9 @@ vocal risk sempre attivo e `plannedTransition` condivisa tra scoring, UI e playe
 
 - `truePeak` può restare `null` quando Essentia non espone il descrittore (proxy
   da momentary loudness); non blocca nulla.
-- Vocal risk è euristico: Demucs lo raffina solo nelle zone intro/outro.
+- La finestra vocale euristica è una stima: ordina i candidati `mixPoint` ma non
+  deve essere letta come "qui canta sicuramente". Demucs resta la verità quando
+  disponibile.
 - Phrase/downbeat detection ancora senza modello dedicato (no madmom su Py3.13).
 - UI platter esteticamente grezza.
 - Time-stretch browser non è qualità Rubber Band.

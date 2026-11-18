@@ -7,7 +7,8 @@
   "scripts": {
     "start": "python3 -m http.server 5173 -d src",
     "backend": ".venv/bin/uvicorn backend.app:app --host 127.0.0.1 --port 8765",
-    "check:backend": ".venv/bin/python -m pip check && .venv/bin/python -m backend.selfcheck"
+    "check:backend": ".venv/bin/python -m pip check && .venv/bin/python -m backend.selfcheck",
+    "test:backend": ".venv/bin/python -m pytest backend/tests"
   },
   "devDependencies": {
     "puppeteer-core": "^25.1.0"
