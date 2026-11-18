@@ -9,7 +9,7 @@
                 ref="trunk"
                 class="line"
                 :class="['progress', paused ? 'pause' : 'play', !drag ? 'trans' : '']"
-                :style="{ width: `${(playedTime / totalTime) * 100}%` }"
+                :style="{ width: `${progressWidth()}%` }"
               ></div>
               <div id="circle" :class="{ trans: !drag }"></div>
             </div>
@@ -34,7 +34,7 @@
                   d="M79,62 C83,57.3333333 85,52.6666667 85,48 C85,43.3333333 83,38.6666667 79,34 L49,3"
                 ></path>
                 <path
-                  d="M95,69 C101.666667,61.6666667 105,54.3333333 105,47 C105,39.6666667 101.666667,32.3333333 95,25 L75.5,6 L49,33"
+                  d="M95,69 C101.666667,61.6666667 105,54.3333333 105,47 C105,39.6666667 101.6666667,32.3333333 95,25 L75.5,6 L49,33"
                 ></path>
               </svg>
             </div>
@@ -62,57 +62,59 @@
 </template>
 
 <script setup>
+import { buildTimeline, locate, clampTime, toGlobalTime, toFiniteNumber } from './timeline'
+
 export default {
   data() {
     return {
       list: [],
-      playerlist: [],
+      // 时间线：segments（合法片段，含全局起止）与 totalTime
+      timeline: { segments: [], totalTime: 0 },
       // new add ===
       playIndex: 0,
       RAFCancelReq: null,
       logo: '',
-      videoList: [],
       // 当前播放对象
       videoObj: {},
       // 是否暂停
       paused: true,
-      // 总时长
+      // 总时长（恒等于各合法片段 end-start 之和，不会为 NaN）
       totalTime: 0,
-      // 当前播放时长
+      // 当前全局播放时长
       playedTime: 0,
-      // 缓存进度条时间
+      // 缓存上一次 timeupdate 的视频 currentTime，用于累加全局时间
       cacheCurrentTime: 0,
       endFlag: false,
       // 动态增减
       activeLength: 0,
-      // 时间段节点记录,进度条快速定位
-      skipDict: [],
       // 是否展示进度条
       showDom: false,
-      // 是否已经绑定事件
+      // 是否正在拖动进度条
       drag: 0,
+      // 事件是否已绑定（避免重复绑定）
+      eventBound: false,
+      // 片段切换保护：同一边界只允许触发一次 playNext/finishPlay
+      switching: false,
     }
   },
   beforeDestroy() {
     this.setFree()
     console.log('desotory')
     document.removeEventListener('keydown', this.keydown)
-    document.removeEventListener('mousemove', this.mousemove)
+    document.removeEventListener('mousemove', this.mouseover)
     document.removeEventListener('mouseup', this.mouseup)
-    document.querySelector('#AutoCanvasId').removeEventListener('click', this.changeVideoState)
+    const canvas = document.querySelector('#AutoCanvasId')
+    if (canvas) {
+      canvas.removeEventListener('click', this.changeVideoState)
+    }
   },
   mounted() {
     let _self = this
     this.init()
-    _self.playerlist = _self.list.map((item) => {
-      return {
-        start: parseFloat(item.playPoint.start),
-        end: parseFloat(item.playPoint.end),
-      }
-    })
-    _self.videoList = _self.list
     _self.comTotalTime()
     document.addEventListener('keydown', _self.keydown)
+    document.addEventListener('mousemove', _self.mouseover)
+    document.addEventListener('mouseup', _self.mouseup)
     _self.$nextTick(() => {
       _self.gotoPlay()
     })
@@ -121,50 +123,57 @@ export default {
   methods: {
     initDrop2() {
       let _self = this
+      if (_self.eventBound) {
+        return
+      }
+      _self.eventBound = true
       _self.drag = 0
       let dropBtn = document.querySelector('#circle')
       //进度按钮被点击
       dropBtn.addEventListener('mousedown', function() {
         _self.drag = 1
-        if (_self.videoObj && _self.videoObj.played) {
+        if (_self.videoObj && !_self.videoObj.paused) {
           _self.videoObj.pause()
           _self.paused = true
         }
       })
-      //页面被释放
-      document.addEventListener('mouseup', _self.mouseup)
-      // //拖动事件
-      document.addEventListener('mousemove', _self.mouseover)
-      // AutoCanvasId
+      // 点击画布切换播放/暂停
       document.querySelector('#AutoCanvasId').addEventListener('click', _self.changeVideoState)
     },
+    // 进度条宽度百分比，总时长为 0 时避免除出 NaN/Infinity
+    progressWidth() {
+      if (!this.totalTime || !Number.isFinite(this.totalTime) || this.totalTime <= 0) {
+        return 0
+      }
+      const t = clampTime(this.timeline, this.playedTime)
+      return (t / this.totalTime) * 100
+    },
+    // 由指针在进度条上的位置换算全局时间（基于 bar 自身的包围盒，不再误用 offsetX）
+    timeFromPointer(clientX) {
+      let bar = document.querySelector('.bar')
+      if (!bar || !bar.offsetWidth) {
+        return 0
+      }
+      let rect = bar.getBoundingClientRect()
+      let x = clientX - rect.left
+      if (x < 0) {
+        x = 0
+      } else if (x > rect.width) {
+        x = rect.width
+      }
+      return (x / rect.width) * this.totalTime
+    },
     setValue(touch) {
-      let rate
       let _self = this
-      let dropBtn = document.querySelector('#circle')
-      let progress = document.querySelector('.bar')
-      let oLeft = touch.offsetX //滑块最左端到父元素最左端的距离
-      //拖动边界检测
-      if (oLeft < 0) {
-        oLeft = 0
-      } else if (oLeft > progress.offsetWidth) {
-        oLeft = progress.offsetWidth
-      }
-      let dropBtnWidth = dropBtn.offsetWidth / 2
-      let durationWidth = oLeft - dropBtnWidth
-      if (durationWidth < 1) {
-        durationWidth = 0
-      }
-      //拖动实时改变进度条
-      rate = (oLeft / progress.offsetWidth) * _self.totalTime
-      _self.playedTime = rate
+      // 拖动实时改变全局时间（先夹取，保证不越界、不为 NaN）
+      _self.playedTime = clampTime(_self.timeline, _self.timeFromPointer(touch.clientX))
     },
     mouseup() {
       let _self = this
       if (_self.drag === 1) {
-        this.skipProgress()
+        _self.skipProgress()
       }
-      this.drag = 0
+      _self.drag = 0
     },
     mouseover(e) {
       let _self = this
@@ -172,33 +181,37 @@ export default {
         _self.setValue(e)
       }
     },
-    // 快进跳转
+    // 拖动结束 / 点击进度条后的统一跳转：
+    // 由全局时间定位片段下标与片段内偏移，三者始终一致
     skipProgress() {
       let _self = this
-      let curIndex = 0
-      _self.skipDict.some((item, index) => {
-        if (_self.playedTime < item) {
-          curIndex = index
-          return true
-        }
-      })
-      _self.endFlag = false
-      _self.playIndex = curIndex
-      let shortSliceTime = 0
-      if (_self.playIndex == 0) {
-        shortSliceTime = _self.playedTime
-      } else {
-        shortSliceTime = _self.playedTime - _self.skipDict[curIndex - 1 > 0 ? curIndex - 1 : 0]
+      if (!_self.timeline.segments.length) {
+        return
       }
-      // console.log("重要：", _self.playedTime, shortSliceTime);
-      _self.VideoPlay(shortSliceTime)
+      const target = clampTime(_self.timeline, _self.playedTime)
+      _self.playedTime = target
+      const loc = locate(_self.timeline, target)
+
+      if (loc.ended) {
+        // 拖到总时长末端：视为最后一片段结束，停在末尾
+        _self.endFlag = true
+        _self.paused = true
+        _self.playIndex = _self.timeline.segments.length
+        if (_self.videoObj && !_self.videoObj.paused) {
+          _self.videoObj.pause()
+        }
+        return
+      }
+
+      _self.endFlag = false
+      _self.playIndex = loc.index
+      // 从该片段 start 加上片段内已过时间处开始播放
+      _self.VideoPlay(loc.offset)
     },
     // 点击快进跳转
     skipLine(e) {
       let _self = this
-      let barBox = document.getElementById('progressBar')
-      let rate = (e.offsetX / barBox.clientWidth) * _self.totalTime
-      _self.playedTime = rate
+      _self.playedTime = clampTime(_self.timeline, _self.timeFromPointer(e.clientX))
       _self.skipProgress()
     },
     init() {
@@ -217,17 +230,10 @@ export default {
         window.setTimeout(cb, 1000 / 60)
       })
     },
-    // 计算总时长
+    // 计算总时长：非法区间在 buildTimeline 内被丢弃，总时长恒为各合法片段时长之和
     comTotalTime() {
-      let _self = this
-      let totalTime = 0
-      _self.skipDict = []
-      this.playerlist.map((item) => {
-        let temp = item.end - item.start
-        totalTime += temp
-        _self.skipDict.push(totalTime)
-      })
-      this.totalTime = totalTime
+      this.timeline = buildTimeline(this.list)
+      this.totalTime = this.timeline.totalTime
     },
     close() {
       let _self = this
@@ -253,10 +259,12 @@ export default {
     // add 播放器核心方法
     async gotoPlay() {
       let _self = this
+      _self.switching = false
       _self.playIndex = 0
+      _self.playedTime = 0
       _self.paused = false
       _self.endFlag = false
-      _self.VideoPlay()
+      _self.VideoPlay(0)
     },
     // 截获当前视频播放器
     updateCurrentVideo(videoObj) {
@@ -264,15 +272,19 @@ export default {
     },
     // 播放 || 暂停
     changeVideoState() {
-      if (this.endFlag || (this.videoObj && this.videoObj.paused)) {
-        if (this.playIndex == this.playerlist.length) {
-          this.playedTime = 0
-          this.gotoPlay()
-          return
-        }
+      // 全部播完后再次播放：从头开始
+      if (this.endFlag || this.playIndex >= this.timeline.segments.length) {
+        this.gotoPlay()
+        return
+      }
+      if (!this.videoObj || !this.videoObj.play) {
+        return
+      }
+      if (this.videoObj.paused) {
+        // 恢复播放：不重建视频、不重新 seek，片段内位置保持不变
         this.videoObj.play()
         this.paused = false
-      } else if (this.videoObj && !this.videoObj.paused) {
+      } else {
         this.videoObj.pause()
         this.paused = true
       }
@@ -283,21 +295,26 @@ export default {
         this.videoObj.muted = !this.videoObj.muted
       }
     },
-    // 核心启动逻辑
+    // 核心启动逻辑：shortSliceTime 为片段内偏移（秒）
     async VideoPlay(shortSliceTime = 0) {
       let _self = this
-      if (_self.playIndex + 1 > _self.videoList.length) {
+      const segments = _self.timeline.segments
+      if (_self.playIndex < 0 || _self.playIndex >= segments.length) {
         return
       }
+      // 新片段开始，解除切换保护
+      _self.switching = false
       // console.log("_self.playIndex: " + _self.playIndex);
       // 准备工作start
       let elDom = document.querySelector('#VideoDom')
       let canvasDom = document.querySelector('#canvasDom')
       // 一、解析当前视频的各个参数 视频信息：1.当前播放路径、2.播放开始时间、3.播放结束时间、4.下部视频下标
-      let currentVideo = _self.videoList[_self.playIndex]
+      let segment = segments[_self.playIndex]
+      let currentVideo = segment.item
       let currentUrl = currentVideo.url
-      let currentStartTime = parseFloat(currentVideo.playPoint.start) + shortSliceTime
-      let currentEndTime = parseFloat(currentVideo.playPoint.end)
+      // 从该片段 start 加上片段内已过时间处开始播放
+      let currentStartTime = segment.start + toFiniteNumber(shortSliceTime, 0)
+      let currentEndTime = segment.end
       // logo信息
       let currentLogoInfo = {
         logo: _self.logo,
@@ -307,21 +324,9 @@ export default {
       let nextIndex = _self.playIndex + 1
       // 当前视频 配置end
 
-      // 二、是否有下一视频
-      if (!_self.videoList[nextIndex]) {
-        // 如果没有  则重置为零
-        nextIndex = 0
-      }
-      // 如果有  则配置下一视频的基本信息 视频信息：1.当前播放路径、2.播放开始时间
-      let nextVideo = _self.videoList[nextIndex]
-      let nextVideoUrl = nextVideo.url
-      let nextStartTime = parseFloat(nextVideo.playPoint.start)
-      //下一视频 配置end
-
       //创建
-      // 创建两部视频的Dom节点
+      // 创建当前视频的Dom节点
       let videoObj = await _self.createVideo(elDom, 'AutoVideoId')
-      let nextVideoObj = await _self.createVideo(elDom, 'preLoadVideoId', true)
       // 创建canvas的Dom节点
       let CanvasEle = await _self.createCanvas(canvasDom, 'AutoCanvasId') //document.getElementById('AutoCanvasId')
       let context = CanvasEle.getContext('2d')
@@ -329,6 +334,11 @@ export default {
       videoObj.src = currentUrl
       // 更新视频对象
       _self.updateCurrentVideo(videoObj)
+      // 全局时间与片段内偏移保持一致（跳转时 playedTime 已先定位，这里再校正一次）
+      _self.playedTime = clampTime(
+        _self.timeline,
+        toGlobalTime(_self.timeline, _self.playIndex, shortSliceTime)
+      )
       //视频源改变时，指定开始播放时间
       videoObj.ondurationchange = function() {
         // console.log("ondurationchange");
@@ -338,6 +348,7 @@ export default {
       //重新定位播放位置
       videoObj.onseeked = function() {
         // console.log("onseeked");
+        _self.cacheCurrentTime = videoObj.currentTime
         _self.paused = false
         _self.videoObj.volume = 1
         let playPromise = _self.videoObj.play()
@@ -346,29 +357,40 @@ export default {
           playPromise
             .then(() => {
               _self.initDrop2()
-              _self.videoObj.play()
             })
             .catch((error) => {
               console.log('sorry! 视频初始化失败', error)
             })
         }
       }
-      //播放位置改变
+      //播放位置改变：以视频 currentTime 的增量推进全局时间，暂停期间不产生增量
       videoObj.ontimeupdate = function() {
-        let updateTime = videoObj.currentTime - _self.cacheCurrentTime
-        if (updateTime >= 0 && _self.playedTime <= _self.totalTime) {
-          _self.playedTime = _self.playedTime + updateTime
-          _self.cacheCurrentTime = videoObj.currentTime
+        let delta = videoObj.currentTime - _self.cacheCurrentTime
+        // 过滤 seek/重置造成的回跳与脏值，保证全局时间不被污染、不出现 NaN
+        if (Number.isFinite(delta) && delta >= 0 && Number.isFinite(_self.playedTime)) {
+          _self.playedTime = clampTime(_self.timeline, _self.playedTime + delta)
         }
-        if (videoObj.currentTime > currentEndTime) {
+        _self.cacheCurrentTime = videoObj.currentTime
+        // 半开区间：到达片段 end 即切下一片段（分界点进入后一片段）
+        if (videoObj.currentTime >= currentEndTime && !_self.switching) {
           _self.playNext(videoObj)
+        }
+      }
+      // 兜底：源视频本身播完时若 timeupdate 未及时触发，也确保进入结束/下一片段流程
+      videoObj.onended = function() {
+        if (_self.switching) {
+          return
+        }
+        if (_self.playIndex < segments.length - 1) {
+          _self.playNext(videoObj)
+        } else {
+          _self.finishPlay()
         }
       }
 
       //开始播放
       videoObj.onplay = function() {
         // console.log("onplay");
-        // console.log("开始播放：", _self.videoObj.paused);
         CanvasEle.width = videoObj.width
         CanvasEle.height = videoObj.height
         _self.RAFCancelReq = _self.RAF(drawData)
@@ -378,12 +400,15 @@ export default {
         _self.showDom = true
       }
 
-      //预加载视频
-      nextVideoObj.src = nextVideoUrl
-      //视频源改变时，指定开始播放时间
-      nextVideoObj.ondurationchange = function() {
-        // console.log("ondurationchange");
-        nextVideoObj.currentTime = nextStartTime
+      // 二、是否有下一视频：有则预加载并定位到其 start，没有则不创建无效节点
+      let nextSegment = segments[nextIndex]
+      if (nextSegment) {
+        let nextVideoObj = await _self.createVideo(elDom, 'preLoadVideoId', true)
+        nextVideoObj.src = nextSegment.item.url
+        //视频源改变时，指定开始播放时间
+        nextVideoObj.ondurationchange = function() {
+          nextVideoObj.currentTime = nextSegment.start
+        }
       }
 
       //取消轮询
@@ -488,33 +513,59 @@ export default {
       return Obj
     },
 
+    // 全部片段播完：停在总时长末端，等待再次播放时从头开始
+    finishPlay() {
+      let _self = this
+      _self.switching = true
+      _self.playedTime = clampTime(_self.timeline, _self.totalTime)
+      _self.playIndex = _self.timeline.segments.length
+      _self.paused = true
+      _self.endFlag = true
+    },
     // 播放下一曲
     playNext(curVideo) {
       let _self = this
-      curVideo.pause()
-      _self.playIndex++
-      if (_self.playIndex > _self.list.length - 1) {
-        _self.paused = true
-        _self.endFlag = true
+      if (_self.switching) {
+        return
       }
-      _self.VideoPlay()
+      _self.switching = true
+      if (curVideo) {
+        curVideo.pause()
+      }
+      // 全局时间对齐到累计边界，保证分界点精确、不累积浮点误差
+      const nextIndex = _self.playIndex + 1
+      if (nextIndex >= _self.timeline.segments.length) {
+        _self.finishPlay()
+        return
+      }
+      const nextSeg = _self.timeline.segments[nextIndex]
+      _self.playedTime = clampTime(_self.timeline, nextSeg.globalStart)
+      _self.playIndex = nextIndex
+      _self.endFlag = false
+      // 后一片段从其 start（片段内偏移 0）开始
+      _self.VideoPlay(0)
     },
     sToHs(s) {
+      // 脏值兜底，避免展示 NaN
+      let num = Number.parseFloat(s)
+      if (!Number.isFinite(num) || num < 0) {
+        num = 0
+      }
       //计算分钟
       //算法：将秒数除以60，然后下舍入，既得到分钟数
-      s = parseFloat(s).toFixed(0)
+      num = num.toFixed(0)
       var h
-      h = Math.floor(s / 60)
+      h = Math.floor(num / 60)
       //计算秒
       //算法：取得秒%60的余数，既得到秒数
-      s = s % 60
+      num = num % 60
       //将变量转换为字符串
       h += ''
-      s += ''
+      num += ''
       //如果只有一位数，前面增加一个0
       h = h.length == 1 ? '0' + h : h
-      s = s.length == 1 ? '0' + s : s
-      return h + ':' + s
+      num = num.length == 1 ? '0' + num : num
+      return h + ':' + num
     },
   },
 }
