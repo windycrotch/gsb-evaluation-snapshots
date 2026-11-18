@@ -1,0 +1,848 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { act, renderHook, waitFor } from '@testing-library/react';
+import { useImageProcessor } from './useImageProcessor';
+import { filamentCatalog } from '../test/filamentCatalog';
+import {
+  getFilamentPresets,
+  getFilamentSet,
+  download3MFV2,
+  downloadPrintSettings,
+  downloadSTLV2,
+  processImage,
+  simulatePrintPreview,
+} from '../api/client';
+
+vi.mock('../api/client', () => ({
+  getFilamentPresets: vi.fn(),
+  processImage: vi.fn(),
+  simulatePrintPreview: vi.fn(),
+  downloadCSV: vi.fn(),
+  downloadSTLV2: vi.fn(),
+  downloadSVGSTLV2: vi.fn(),
+  download3MFV2: vi.fn(),
+  downloadPrintSettings: vi.fn(),
+  getFilamentSet: vi.fn(),
+}));
+
+const mockedProcessImage = vi.mocked(processImage);
+const mockedSimulatePrintPreview = vi.mocked(simulatePrintPreview);
+const mockedDownloadSTLV2 = vi.mocked(downloadSTLV2);
+const mockedDownload3MFV2 = vi.mocked(download3MFV2);
+const mockedDownloadPrintSettings = vi.mocked(downloadPrintSettings);
+
+async function renderProcessor() {
+  const hook = renderHook(() => useImageProcessor());
+  await waitFor(() => expect(hook.result.current.filamentCatalogLoading).toBe(false));
+  return hook;
+}
+
+type MockImageInstance = {
+  onload: ((this: GlobalEventHandlers, ev: Event) => unknown) | null;
+  onerror: ((this: GlobalEventHandlers, ev: Event | string) => unknown) | null;
+  width: number;
+  height: number;
+  src: string;
+  triggerLoad: () => void;
+};
+
+describe('useImageProcessor', () => {
+  /** A base64 label map of `cells` cells, all block 0. */
+  const zeroLabelMap = (cells: number) => btoa('\0'.repeat(cells));
+  const OriginalImage = globalThis.Image;
+  let createdImages: MockImageInstance[] = [];
+
+  beforeEach(() => {
+    localStorage.clear();
+    vi.mocked(getFilamentPresets).mockResolvedValue(structuredClone(filamentCatalog));
+    vi.mocked(getFilamentSet).mockResolvedValue({ maxLayerCount: 10, defaultBackingFilament: 'W' });
+    createdImages = [];
+
+    mockedProcessImage.mockResolvedValue({
+      colorBlocks: [],
+      labelMap: zeroLabelMap(48),
+      processedImage: 'data:image/png;base64,mock',
+      segmentationImage: 'data:image/png;base64,seg',
+      mappedBlockColors: [],
+      mappedBlendPalette: [],
+      imageDimensions: { width: 8, height: 6 },
+      printStack: {
+        opticalLayerCount: 4,
+        whiteBackingLayers: 3,
+        backingFilament: 'W',
+        totalLayerCount: 5,
+        totalHeightMm: 0.4,
+      },
+    });
+    mockedSimulatePrintPreview.mockResolvedValue({
+      processedImage: 'data:image/png;base64,sim',
+      mappedBlockColors: [],
+      mappedBlendPalette: [],
+      printStack: {
+        opticalLayerCount: 4,
+        whiteBackingLayers: 3,
+        backingFilament: 'W',
+        totalLayerCount: 5,
+        totalHeightMm: 0.4,
+      },
+    });
+    mockedDownloadSTLV2.mockResolvedValue(undefined);
+    mockedDownload3MFV2.mockResolvedValue(undefined);
+    mockedDownloadPrintSettings.mockResolvedValue(undefined);
+
+    Object.defineProperty(HTMLCanvasElement.prototype, 'getContext', {
+      configurable: true,
+      value: vi.fn(() => ({ drawImage: vi.fn() })),
+    });
+
+    Object.defineProperty(HTMLCanvasElement.prototype, 'toBlob', {
+      configurable: true,
+      value: (callback: BlobCallback) => callback(new Blob(['x'], { type: 'image/png' })),
+    });
+
+    globalThis.Image = class {
+      onload: ((this: GlobalEventHandlers, ev: Event) => unknown) | null = null;
+      onerror: ((this: GlobalEventHandlers, ev: Event | string) => unknown) | null = null;
+      width = 8;
+      height = 6;
+      private _src = '';
+
+      constructor() {
+        const self = this as unknown as MockImageInstance;
+        createdImages.push(self);
+      }
+
+      set src(value: string) {
+        this._src = value;
+      }
+
+      get src() {
+        return this._src;
+      }
+
+      triggerLoad() {
+        this.onload?.call(this as unknown as GlobalEventHandlers, new Event('load'));
+      }
+    } as unknown as typeof Image;
+  });
+
+  afterEach(() => {
+    globalThis.Image = OriginalImage;
+    vi.restoreAllMocks();
+  });
+
+  it('does not create any images on mount (no default bootstrap image)', async () => {
+    await renderProcessor();
+
+    // No images should be created on mount since bootstrap logic was removed
+    expect(createdImages).toHaveLength(0);
+    expect(mockedProcessImage).not.toHaveBeenCalled();
+  });
+
+  it('defaults to the Bambu CMYWK filament preset', async () => {
+    const { result } = await renderProcessor();
+
+    expect(result.current.filamentPreset).toBe('bambu_cmywk');
+    expect(result.current.filamentColors).toHaveLength(5);
+    expect(result.current.layerCount).toBe(4);
+    expect(result.current.maxLayerCount).toBe(10);
+    expect(result.current.filamentColors.some(color => color.name === 'Key')).toBe(true);
+    expect(result.current.filamentColors).toEqual(filamentCatalog.presets[0].colors);
+    expect(result.current.layerHeight).toBe(0.08);
+    expect(result.current.whiteBackingLayers).toBe(3);
+  });
+
+  it('uses catalog metadata and TD for an arbitrary preset identity', async () => {
+    const supplied = structuredClone(filamentCatalog);
+    supplied.presets = [{ ...supplied.presets[2], name: 'new-material-set' }];
+    supplied.defaults = { ...supplied.defaults, filament_preset: 'new-material-set', backing_layers: 2, regular_layer_height_mm: 0.1, transparent_layer_height_mm: 0.7 };
+    vi.mocked(getFilamentPresets).mockResolvedValueOnce(supplied);
+    const { result } = await renderProcessor();
+    expect(result.current.filamentPreset).toBe('new-material-set');
+    expect(result.current.layerHeight).toBe(0.7);
+    expect(result.current.whiteBackingLayers).toBe(2);
+  });
+
+  it('has no built-in fallback when catalog loading fails and retries the API', async () => {
+    vi.mocked(getFilamentPresets).mockRejectedValueOnce(new Error('Catalog unavailable'));
+    const { result } = await renderProcessor();
+    expect(result.current.filamentCatalogError).toBe('Catalog unavailable');
+    expect(result.current.filamentColors).toEqual([]);
+    expect(result.current.isFilamentConfigValid).toBe(false);
+    act(() => result.current.reloadFilamentCatalog());
+    await waitFor(() => expect(result.current.filamentCatalogLoading).toBe(false));
+    expect(result.current.filamentColors).toEqual(filamentCatalog.presets[0].colors);
+    expect(result.current.isFilamentConfigValid).toBe(true);
+  });
+
+  it('initializes a stored custom RGB preset after a delayed catalog response', async () => {
+    const customColors = filamentCatalog.presets[2].colors;
+    localStorage.setItem('tinting-voxel_filament_presets', JSON.stringify([
+      { id: 'saved', name: 'Saved RGB', colors: customColors, createdAt: 1, updatedAt: 1 },
+    ]));
+    localStorage.setItem('tinting-voxel_last_preset', 'saved');
+    let resolveCatalog!: (value: typeof filamentCatalog) => void;
+    vi.mocked(getFilamentPresets).mockReturnValueOnce(new Promise(resolve => { resolveCatalog = resolve; }));
+    const { result } = renderHook(() => useImageProcessor());
+    expect(result.current.filamentColors).toEqual([]);
+    expect(result.current.isFilamentConfigValid).toBe(false);
+    await act(async () => resolveCatalog(structuredClone(filamentCatalog)));
+    expect(result.current.filamentPreset).toBeNull();
+    expect(result.current.filamentColors).toEqual(customColors);
+    expect(result.current.layerHeight).toBe(filamentCatalog.defaults.transparent_layer_height_mm);
+    expect(result.current.whiteBackingLayers).toBe(filamentCatalog.defaults.backing_layers);
+  });
+
+  it('clamps the layer count to the fixed UI maximum', async () => {
+    const { result } = await renderProcessor();
+
+    act(() => {
+      result.current.loadPreset('clear_cmyw');
+      result.current.setLayerCount(11);
+    });
+
+    expect(result.current.filamentColors).toHaveLength(4);
+    expect(result.current.maxLayerCount).toBe(10);
+    expect(result.current.layerCount).toBe(10);
+  });
+
+  it('uses the layer maximum the backend reports for the filament set', async () => {
+    vi.mocked(getFilamentSet).mockResolvedValue({ maxLayerCount: 6, defaultBackingFilament: 'W' });
+    const { result } = await renderProcessor();
+
+    act(() => {
+      result.current.loadPreset('bambu_cmywk');
+      result.current.setLayerCount(10);
+    });
+
+    await waitFor(() => expect(result.current.maxLayerCount).toBe(6));
+    expect(result.current.layerCount).toBe(6);
+    expect(getFilamentSet).toHaveBeenLastCalledWith({ filamentPreset: 'bambu_cmywk' }, expect.any(AbortSignal));
+  });
+
+  it('backs each set with its default filament until the user picks one it contains', async () => {
+    vi.mocked(getFilamentSet).mockImplementation(async (filament) => ({
+      maxLayerCount: 10, defaultBackingFilament: filament.filamentPreset === 'clear_cmyg' ? 'G' : 'W',
+    }));
+    const { result } = await renderProcessor();
+
+    act(() => result.current.loadPreset('bambu_cmywk'));
+    await waitFor(() => expect(result.current.backingFilament).toBe('W'));
+    act(() => result.current.setBackingFilament('K'));
+    expect(result.current.backingFilament).toBe('K');
+    expect(result.current.printStack.backingFilament).toBe('K');
+
+    // Clear CMYG has no Key: its own default (grey) applies.
+    act(() => result.current.loadPreset('clear_cmyg'));
+    await waitFor(() => expect(result.current.backingFilament).toBe('G'));
+    act(() => result.current.loadPreset('bambu_cmywk'));
+    await waitFor(() => expect(result.current.backingFilament).toBe('K'));
+  });
+
+  it('raises the default layer height when the material set mean exceeds the API threshold', async () => {
+    const { result } = await renderProcessor();
+
+    // The API measurements exceed the shared threshold.
+    act(() => { result.current.loadPreset('clear_cmyw'); });
+    expect(result.current.allTransparent).toBe(true);
+    expect(result.current.layerHeight).toBe(0.84);
+
+    // The lower measured TDs restore the ordinary default.
+    act(() => { result.current.loadPreset('bambu_cmywk'); });
+    expect(result.current.allTransparent).toBe(false);
+    expect(result.current.layerHeight).toBe(0.08);
+  });
+
+  it('preserves a manually chosen layer height across classification flips', async () => {
+    const { result } = await renderProcessor();
+
+    act(() => {
+      result.current.setLayerHeight(0.3);
+      result.current.loadPreset('clear_cmyw');
+    });
+    expect(result.current.layerHeight).toBe(0.3);
+
+    act(() => { result.current.loadPreset('bambu_cmywk'); });
+    expect(result.current.layerHeight).toBe(0.3);
+  });
+
+  it.each([0.08, 0.84])('preserves explicitly chosen default-valued layer height %s across material changes', async (height) => {
+    const { result } = await renderProcessor();
+    act(() => result.current.setLayerHeight(0.3));
+    act(() => result.current.setLayerHeight(height));
+    act(() => result.current.loadPreset('clear_cmyw'));
+    expect(result.current.layerHeight).toBe(height);
+    act(() => result.current.loadPreset('bambu_cmywk'));
+    expect(result.current.layerHeight).toBe(height);
+  });
+
+  it('decodes the response label map and merges blocks in both index directions', async () => {
+    mockedProcessImage.mockResolvedValueOnce({
+      colorBlocks: [
+        { r: 255, g: 0, b: 0, hex: '#FF0000', count: 1 },
+        { r: 0, g: 255, b: 0, hex: '#00FF00', count: 1 },
+        { r: 0, g: 0, b: 255, hex: '#0000FF', count: 1 },
+      ],
+      labelMap: btoa(String.fromCharCode(0, 1, 2)),
+      processedImage: 'data:image/png;base64,mock', segmentationImage: 'data:image/png;base64,seg',
+      mappedBlockColors: [], mappedBlendPalette: [], imageDimensions: { width: 3, height: 1 },
+      printStack: { opticalLayerCount: 4, whiteBackingLayers: 3, backingFilament: 'W', totalLayerCount: 7, totalHeightMm: 0.56 },
+    });
+    const { result } = await renderProcessor();
+    const img = new globalThis.Image() as unknown as HTMLImageElement;
+    await act(async () => { result.current.handleApplyEdit(img); });
+    expect(result.current.colorBlocks.map(block => block.hex)).toEqual(['#FF0000', '#00FF00', '#0000FF']);
+    expect(result.current.labels).toEqual(Uint8Array.from([0, 1, 2]));
+
+    // Higher index merged into a lower one: the target keeps its index.
+    const previousLabels = result.current.labels!;
+    const previousLabelsSnapshot = Array.from(previousLabels);
+    const previousBlocks = result.current.colorBlocks;
+    const previousCounts = previousBlocks.map(block => block.count);
+    act(() => result.current.mergeColorBlocks(2, 0));
+    expect(result.current.colorBlocks.map(block => block.count)).toEqual([2, 1]);
+    expect(result.current.labels).toEqual(Uint8Array.from([0, 1, 0]));
+    expect(result.current.labels).not.toBe(previousLabels);
+    expect(result.current.colorBlocks).not.toBe(previousBlocks);
+    expect(Array.from(previousLabels)).toEqual(previousLabelsSnapshot);
+    expect(previousBlocks.map(block => block.count)).toEqual(previousCounts);
+
+    // Lower index merged into a higher one: compaction shifts the target down.
+    act(() => result.current.mergeColorBlocks(0, 1));
+    expect(result.current.colorBlocks.map(block => block.hex)).toEqual(['#00FF00']);
+    expect(result.current.colorBlocks[0].count).toBe(3);
+    expect(result.current.labels).toEqual(Uint8Array.from([0, 0, 0]));
+
+    // Counts always agree with the geometry the labels describe.
+    const derived = new Array(result.current.colorBlocks.length).fill(0);
+    for (const value of result.current.labels!) if (value !== 255) derived[value]++;
+    expect(result.current.colorBlocks.map(block => block.count)).toEqual(derived);
+  });
+
+  it('deletes a block into its nearest remaining color and compacts labels', async () => {
+    mockedProcessImage.mockResolvedValueOnce({
+      colorBlocks: [
+        { r: 255, g: 0, b: 0, hex: '#FF0000', count: 1 },
+        { r: 0, g: 255, b: 0, hex: '#00FF00', count: 1 },
+        { r: 0, g: 0, b: 255, hex: '#0000FF', count: 1 },
+      ],
+      labelMap: btoa(String.fromCharCode(0, 1, 2)),
+      processedImage: 'data:image/png;base64,mock', segmentationImage: 'data:image/png;base64,seg',
+      mappedBlockColors: [], mappedBlendPalette: [], imageDimensions: { width: 3, height: 1 },
+      printStack: { opticalLayerCount: 4, whiteBackingLayers: 3, backingFilament: 'W', totalLayerCount: 7, totalHeightMm: 0.56 },
+    });
+    const { result } = await renderProcessor();
+    const img = new globalThis.Image() as unknown as HTMLImageElement;
+    await act(async () => { result.current.handleApplyEdit(img); });
+
+    // Green is equidistant from red and blue; the first remaining block wins.
+    act(() => result.current.deleteColorBlock(1));
+    expect(result.current.colorBlocks.map(block => block.hex)).toEqual(['#FF0000', '#0000FF']);
+    expect(result.current.colorBlocks.map(block => block.count)).toEqual([2, 1]);
+    // Green's cell takes red (original index 0); blue compacts 2 -> 1.
+    expect(result.current.labels).toEqual(Uint8Array.from([0, 0, 1]));
+  });
+
+  it('deleting the first block keeps every cell inside the remaining block', async () => {
+    mockedProcessImage.mockResolvedValueOnce({
+      colorBlocks: [
+        { r: 255, g: 0, b: 0, hex: '#FF0000', count: 1 },
+        { r: 0, g: 0, b: 255, hex: '#0000FF', count: 2 },
+      ],
+      labelMap: btoa(String.fromCharCode(0, 1, 1)),
+      processedImage: 'data:image/png;base64,mock', segmentationImage: 'data:image/png;base64,seg',
+      mappedBlockColors: [], mappedBlendPalette: [], imageDimensions: { width: 3, height: 1 },
+      printStack: { opticalLayerCount: 4, whiteBackingLayers: 3, backingFilament: 'W', totalLayerCount: 7, totalHeightMm: 0.56 },
+    });
+    const { result } = await renderProcessor();
+    const img = new globalThis.Image() as unknown as HTMLImageElement;
+    await act(async () => { result.current.handleApplyEdit(img); });
+
+    act(() => result.current.deleteColorBlock(0));
+    expect(result.current.colorBlocks.map(block => block.hex)).toEqual(['#0000FF']);
+    expect(result.current.colorBlocks[0].count).toBe(3);
+    expect(result.current.labels).toEqual(Uint8Array.from([0, 0, 0]));
+  });
+
+  it('delete preserves empty cells while absorbing the deleted block', async () => {
+    mockedProcessImage.mockResolvedValueOnce({
+      colorBlocks: [
+        { r: 255, g: 0, b: 0, hex: '#FF0000', count: 1 },
+        { r: 0, g: 0, b: 255, hex: '#0000FF', count: 1 },
+      ],
+      // 0, EMPTY(255), 1
+      labelMap: btoa(String.fromCharCode(0, 255, 1)),
+      processedImage: 'data:image/png;base64,mock', segmentationImage: 'data:image/png;base64,seg',
+      mappedBlockColors: [], mappedBlendPalette: [], imageDimensions: { width: 3, height: 1 },
+      printStack: { opticalLayerCount: 4, whiteBackingLayers: 3, backingFilament: 'W', totalLayerCount: 7, totalHeightMm: 0.56 },
+    });
+    const { result } = await renderProcessor();
+    const img = new globalThis.Image() as unknown as HTMLImageElement;
+    await act(async () => { result.current.handleApplyEdit(img); });
+
+    act(() => result.current.deleteColorBlock(1));
+    expect(result.current.colorBlocks).toHaveLength(1);
+    expect(result.current.labels).toEqual(Uint8Array.from([0, 255, 0]));
+  });
+
+  it('keeps the selected backing in automatic preview refreshes, TD edits, and print settings', async () => {
+    mockedProcessImage.mockResolvedValueOnce({
+      colorBlocks: [{ r: 255, g: 0, b: 0, hex: '#FF0000', count: 1 }], labelMap: zeroLabelMap(48),
+      processedImage: 'data:image/png;base64,mock', segmentationImage: 'data:image/png;base64,seg',
+      mappedBlockColors: [], mappedBlendPalette: [], imageDimensions: { width: 8, height: 6 },
+      printStack: { opticalLayerCount: 4, whiteBackingLayers: 3, backingFilament: 'W', totalLayerCount: 7, totalHeightMm: 0.56 },
+    });
+    const { result } = await renderProcessor();
+    const img = new globalThis.Image() as unknown as HTMLImageElement;
+    await act(async () => { result.current.handleApplyEdit(img); });
+    mockedSimulatePrintPreview.mockClear();
+    act(() => result.current.setBackingFilament('K'));
+    await waitFor(() => expect(mockedSimulatePrintPreview).toHaveBeenLastCalledWith(
+      expect.objectContaining({ backingFilament: 'K', whiteBackingLayers: 3 }), expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    ));
+    act(() => result.current.updateFilamentColor(0, { ...result.current.filamentColors[0], transmission_distance: 3.25 }));
+    await waitFor(() => expect(mockedSimulatePrintPreview).toHaveBeenLastCalledWith(
+      expect.objectContaining({ backingFilament: 'K', filamentColors: expect.arrayContaining([expect.objectContaining({ transmission_distance: 3.25 })]) }), expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    ));
+    await act(async () => result.current.handleDownloadPrintSettings());
+    expect(mockedDownloadPrintSettings).toHaveBeenLastCalledWith(expect.objectContaining({ backingFilament: 'K', whiteBackingLayers: 3 }));
+    act(() => result.current.setBackingFilament('W'));
+    await waitFor(() => expect(mockedSimulatePrintPreview).toHaveBeenLastCalledWith(
+      expect.objectContaining({ backingFilament: 'W', whiteBackingLayers: 3 }), expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    ));
+  });
+
+  it('prints previews and exports against the image white processing reports', async () => {
+    const whitePoint: [number, number, number] = [0.75, 0.79, 0.78];
+    mockedProcessImage.mockResolvedValueOnce({
+      colorBlocks: [{ r: 206, g: 198, b: 182, hex: '#CEC6B6', count: 1 }], labelMap: zeroLabelMap(48),
+      processedImage: 'data:image/png;base64,mock', segmentationImage: 'data:image/png;base64,seg',
+      mappedBlockColors: [], mappedBlendPalette: [], imageDimensions: { width: 8, height: 6 },
+      printStack: { opticalLayerCount: 4, whiteBackingLayers: 3, backingFilament: 'W', totalLayerCount: 7, totalHeightMm: 0.56 },
+      whitePoint,
+    });
+    const { result } = await renderProcessor();
+    const img = new globalThis.Image() as unknown as HTMLImageElement;
+    await act(async () => { result.current.handleApplyEdit(img); });
+    mockedSimulatePrintPreview.mockClear();
+    act(() => result.current.setBackingFilament('K'));
+    await waitFor(() => expect(mockedSimulatePrintPreview).toHaveBeenLastCalledWith(
+      expect.objectContaining({ whitePoint }), expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    ));
+    await act(async () => result.current.handleDownloadSTL());
+    expect(mockedDownloadSTLV2).toHaveBeenLastCalledWith(
+      expect.objectContaining({ whitePoint }), expect.anything(),
+    );
+    await act(async () => result.current.handleDownload3MF());
+    expect(mockedDownload3MFV2).toHaveBeenLastCalledWith(
+      expect.objectContaining({ whitePoint }), expect.anything(),
+    );
+  });
+
+  it('classifies from API material measurements and threshold', async () => {
+    const { result } = await renderProcessor();
+
+    act(() => { result.current.loadPreset('clear_cmyw'); });
+    expect(result.current.allTransparent).toBe(true);
+    expect(result.current.layerHeight).toBe(0.84);
+
+    act(() => { result.current.loadPreset('bambu_cmywk'); });
+    expect(result.current.allTransparent).toBe(false);
+  });
+
+  it('sends filament config and layer settings when processing an image', async () => {
+    const { result } = await renderProcessor();
+    const img = new globalThis.Image() as unknown as HTMLImageElement;
+
+    await act(async () => {
+      result.current.handleApplyEdit(img);
+    });
+
+    expect(mockedProcessImage).toHaveBeenCalledWith(
+      expect.any(File),
+      expect.objectContaining({
+        mode: 'pixel',
+        layerHeight: 0.08,
+        layerCount: 4,
+        whiteBackingLayers: 3,
+        filamentPreset: 'bambu_cmywk',
+      }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    );
+  });
+
+  it('ignores a MouseEvent leaked into handleReprocess as the pixel-size override', async () => {
+    // onClick={handleReprocess} forwards the click event as the first
+    // argument; it must never serialize into pixelSize ("[object Object]").
+    const { result } = await renderProcessor();
+    const img = new globalThis.Image() as unknown as HTMLImageElement;
+
+    await act(async () => {
+      result.current.handleApplyEdit(img);
+    });
+    mockedProcessImage.mockClear();
+
+    await act(async () => {
+      (result.current.handleReprocess as unknown as (e: unknown) => void)({ type: 'click' });
+    });
+
+    const call = mockedProcessImage.mock.calls[0];
+    expect(call[1].pixelSize).toBe(result.current.pixelSize);
+    expect(call[1].pixelSize).not.toBe('[object Object]');
+  });
+
+  it('stores simulated preview data returned by svg mode', async () => {
+    mockedProcessImage.mockResolvedValueOnce({
+      vectorResults: [{ color: [255, 0, 0], regions: [], pixel_count: 48, polygon_points: 0 }],
+      processedImage: 'data:image/png;base64,svg-sim',
+      segmentationImage: 'data:image/png;base64,svg-seg',
+      mappedBlendPalette: [
+        {
+          code: 'CCMY',
+          rgb: [100, 100, 100],
+          hex: '#646464',
+          sourceRgb: [255, 0, 0],
+          sourceHex: '#FF0000',
+          pixelCount: 48,
+          pixelPercent: 100,
+        },
+      ],
+      imageDimensions: { width: 8, height: 6 },
+      printStack: {
+        opticalLayerCount: 4,
+        whiteBackingLayers: 3,
+        backingFilament: 'W',
+        totalLayerCount: 5,
+        totalHeightMm: 0.4,
+      },
+    });
+
+    const { result } = await renderProcessor();
+    const img = new globalThis.Image() as unknown as HTMLImageElement;
+
+    act(() => {
+      result.current.setMode('svg');
+    });
+
+    await act(async () => {
+      result.current.handleApplyEdit(img);
+    });
+
+    expect(result.current.mode).toBe('svg');
+    expect(result.current.processedImageUrl).toBe('data:image/png;base64,svg-sim');
+    expect(result.current.segmentationImageUrl).toBe('data:image/png;base64,svg-seg');
+    expect(result.current.mappedBlendPalette).toHaveLength(1);
+    expect(result.current.vectorResults).toHaveLength(1);
+  });
+
+  it('reprocesses pixel geometry before permitting a changed detail width to export', async () => {
+    mockedProcessImage.mockResolvedValue({
+      colorBlocks: [{ r: 0, g: 0, b: 0, hex: '#000000', count: 48 }], labelMap: zeroLabelMap(48),
+      processedImage: 'data:image/png;base64,pixel',
+      segmentationImage: 'data:image/png;base64,seg',
+      mappedBlockColors: [],
+      mappedBlendPalette: [],
+      imageDimensions: { width: 8, height: 6 },
+      printStack: { opticalLayerCount: 4, whiteBackingLayers: 3, backingFilament: 'W', totalLayerCount: 7, totalHeightMm: 0.56 },
+    });
+    const { result } = await renderProcessor();
+    const img = new globalThis.Image() as unknown as HTMLImageElement;
+    await act(async () => result.current.handleApplyEdit(img));
+    expect(result.current.renderReady).toBe(true);
+    mockedProcessImage.mockClear();
+
+    act(() => result.current.setDetailSize(0.62));
+    expect(result.current.renderReady).toBe(false);
+    await waitFor(() => expect(mockedProcessImage).toHaveBeenCalledWith(
+      expect.any(File), expect.objectContaining({ mode: 'pixel', detailSize: 0.62 }), expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    ));
+    await waitFor(() => expect(result.current.renderReady).toBe(true));
+  });
+
+  it('refreshes SVG preview and export geometry after backing changes', async () => {
+    mockedProcessImage.mockResolvedValue({
+      vectorResults: [{ color: [255, 0, 0], regions: [{ outer: [[0, 0], [7, 0], [7, 5]], holes: [] }], pixel_count: 48, polygon_points: 3 }],
+      processedImage: 'data:image/png;base64,svg',
+      segmentationImage: 'data:image/png;base64,seg',
+      mappedBlendPalette: [],
+      imageDimensions: { width: 8, height: 6 },
+      printStack: { opticalLayerCount: 4, whiteBackingLayers: 3, backingFilament: 'W', totalLayerCount: 7, totalHeightMm: 0.56 },
+    });
+    const { result } = await renderProcessor();
+    const img = new globalThis.Image() as unknown as HTMLImageElement;
+    act(() => result.current.setMode('svg'));
+    await act(async () => result.current.handleApplyEdit(img));
+    expect(result.current.renderReady).toBe(true);
+    mockedProcessImage.mockClear();
+
+    act(() => result.current.setBackingFilament('K'));
+    expect(result.current.renderReady).toBe(false);
+    await waitFor(() => expect(mockedProcessImage).toHaveBeenCalledWith(
+      expect.any(File), expect.objectContaining({ mode: 'svg', backingFilament: 'K' }), expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    ));
+    await waitFor(() => expect(result.current.renderReady).toBe(true));
+  });
+
+  it('preserves filamentPreset for STL downloads when a preset is selected', async () => {
+    const { result } = await renderProcessor();
+
+    await act(async () => {
+      await result.current.handleDownloadSTL();
+    });
+
+    expect(mockedDownloadSTLV2).toHaveBeenCalledWith(
+      expect.objectContaining({
+        filamentPreset: 'bambu_cmywk',
+      }),
+    expect.anything(),
+    );
+    expect(mockedDownloadSTLV2).toHaveBeenCalledWith(
+      expect.not.objectContaining({
+        filamentColors: expect.anything(),
+      }),
+      expect.anything(),
+    );
+  });
+
+  it('preserves filamentPreset for 3MF and print-settings downloads when a preset is selected', async () => {
+    const { result } = await renderProcessor();
+
+    await act(async () => {
+      await result.current.handleDownload3MF();
+      await result.current.handleDownloadPrintSettings();
+    });
+
+    expect(mockedDownload3MFV2).toHaveBeenCalledWith(
+      expect.objectContaining({
+        filamentPreset: 'bambu_cmywk',
+      }),
+    expect.anything(),
+    );
+    expect(mockedDownloadPrintSettings).toHaveBeenCalledWith(
+      expect.objectContaining({
+        filamentPreset: 'bambu_cmywk',
+      })
+    );
+  });
+
+  it('updates pixel size from the editable max dimension while preserving aspect ratio', async () => {
+    const { result } = await renderProcessor();
+    const img = new globalThis.Image() as unknown as HTMLImageElement;
+
+    await act(async () => {
+      result.current.handleApplyEdit(img);
+    });
+
+    act(() => {
+      result.current.setMaxDimension(10);
+    });
+
+    expect(result.current.pixelSize).toBeCloseTo(1.25);
+    expect(result.current.targetWidth).toBeCloseTo(10);
+    expect(result.current.targetHeight).toBeCloseTo(7.5);
+    expect(result.current.maxDimension).toBeCloseTo(10);
+  });
+
+  it('defaults max dimension to the processed image size when it is smaller than 200mm', async () => {
+    const { result } = await renderProcessor();
+    const img = new globalThis.Image() as unknown as HTMLImageElement;
+
+    await act(async () => {
+      result.current.handleApplyEdit(img);
+    });
+
+    expect(result.current.pixelSize).toBeCloseTo(1);
+    expect(result.current.targetWidth).toBeCloseTo(8);
+    expect(result.current.targetHeight).toBeCloseTo(6);
+    expect(result.current.maxDimension).toBeCloseTo(8);
+  });
+
+  it('caps the default max dimension at 200mm for larger processed images', async () => {
+    mockedProcessImage.mockResolvedValueOnce({
+      colorBlocks: [],
+      labelMap: zeroLabelMap(480000),
+      processedImage: 'data:image/png;base64,mock',
+      segmentationImage: 'data:image/png;base64,seg',
+      mappedBlockColors: [],
+      mappedBlendPalette: [],
+      imageDimensions: { width: 800, height: 600 },
+      printStack: {
+        opticalLayerCount: 4,
+        whiteBackingLayers: 3,
+        backingFilament: 'W',
+        totalLayerCount: 5,
+        totalHeightMm: 0.4,
+      },
+    });
+
+    const { result } = await renderProcessor();
+    const img = new globalThis.Image() as unknown as HTMLImageElement;
+    // Simulate a large image (800×600) so the 200mm cap kicks in
+    Object.defineProperty(img, 'width', { value: 800, configurable: true });
+    Object.defineProperty(img, 'height', { value: 600, configurable: true });
+
+    await act(async () => {
+      result.current.handleApplyEdit(img);
+    });
+
+    expect(result.current.pixelSize).toBeCloseTo(0.25);
+    expect(result.current.targetWidth).toBeCloseTo(200);
+    expect(result.current.targetHeight).toBeCloseTo(150);
+    expect(result.current.maxDimension).toBeCloseTo(200);
+  });
+
+  it('rasterizes an uploaded SVG at full size and opens it in the editor', async () => {
+    const drawImage = vi.fn();
+    Object.defineProperty(HTMLCanvasElement.prototype, 'getContext', {
+      configurable: true,
+      value: vi.fn(() => ({ drawImage })),
+    });
+    Object.defineProperty(HTMLCanvasElement.prototype, 'toDataURL', {
+      configurable: true,
+      value: () => 'data:image/png;base64,raster',
+    });
+    const { result } = await renderProcessor();
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><path d="M0 0h64v64z"/></svg>';
+
+    act(() => {
+      result.current.handleFile(new File([svg], 'logo.svg', { type: 'image/svg+xml' }));
+    });
+
+    await waitFor(() => expect(createdImages).toHaveLength(1));
+    expect(createdImages[0].src).toMatch(/^data:image\/svg\+xml/);
+    expect(decodeURIComponent(createdImages[0].src)).toContain('width="2048"');
+    act(() => createdImages[0].triggerLoad());
+
+    await waitFor(() => expect(createdImages).toHaveLength(2));
+    expect(drawImage).toHaveBeenCalledWith(createdImages[0], 0, 0, 2048, 2048);
+    expect(createdImages[1].src).toBe('data:image/png;base64,raster');
+    act(() => createdImages[1].triggerLoad());
+
+    await waitFor(() => expect(result.current.isEditing).toBe(true));
+    expect(result.current.rawImage).toBe(createdImages[1]);
+    expect(result.current.error).toBeNull();
+  });
+
+  it('reports an unreadable SVG instead of opening the editor', async () => {
+    const { result } = await renderProcessor();
+
+    act(() => {
+      result.current.handleFile(new File(['<svg'], 'broken.svg', { type: 'image/svg+xml' }));
+    });
+
+    await waitFor(() => expect(result.current.error).toBe(
+      'Failed to load image. The file may be corrupted or not a valid image.',
+    ));
+    expect(result.current.isEditing).toBe(false);
+  });
+
+  it('still rejects file types it cannot read', async () => {
+    const { result } = await renderProcessor();
+
+    act(() => {
+      result.current.handleFile(new File([''], 'photo.avif', { type: 'image/avif' }));
+    });
+
+    expect(result.current.error).toBe(
+      'Unsupported file type: image/avif. Please upload a PNG, JPEG, GIF, WebP, BMP, or SVG image.',
+    );
+  });
+
+  it('resamples a large photo to the model grid instead of rejecting it', async () => {
+    const { result } = await renderProcessor();
+    const img = new globalThis.Image() as unknown as HTMLImageElement;
+    Object.defineProperty(img, 'width', { value: 5000, configurable: true });
+    Object.defineProperty(img, 'height', { value: 4000, configurable: true });
+
+    await act(async () => {
+      result.current.handleApplyEdit(img);
+    });
+
+    expect(result.current.error).toBeNull();
+    // 20 MP at 200 mm fits the 2M-cell budget as a 1581 x 1264 grid.
+    const calls = mockedProcessImage.mock.calls;
+    const params = calls[calls.length - 1][1];
+    expect(params.pixelSize).toBeCloseTo(200 / 1581, 9);
+  });
+
+  it('falls back to filamentColors after the preset is edited into a custom config', async () => {
+    const { result } = await renderProcessor();
+    const img = new globalThis.Image() as unknown as HTMLImageElement;
+    await act(async () => { result.current.handleApplyEdit(img); });
+
+    act(() => {
+      result.current.updateFilamentColor(0, {
+        name: 'Cyan',
+        hex: '#0086D6',
+        transmission_distance: 3.25,
+      });
+    });
+
+    await act(async () => {
+      await result.current.handleDownloadSTL();
+    });
+
+    expect(mockedDownloadSTLV2).toHaveBeenCalledWith(
+      expect.objectContaining({
+        filamentColors: expect.arrayContaining([
+          expect.objectContaining({
+            transmission_distance: 3.25,
+          }),
+        ]),
+      }),
+      expect.anything(),
+    );
+    expect.anything(),
+    expect(mockedDownloadSTLV2).toHaveBeenCalledWith(
+      expect.not.objectContaining({
+        filamentPreset: expect.anything(),
+      }),
+      expect.anything(),
+    );
+  });
+
+  it('assigns a free code and requires a TD for a new custom color', async () => {
+    const { result } = await renderProcessor();
+
+    act(() => {
+      result.current.loadPreset('bambu_cmyw');
+      result.current.addFilamentColor();
+    });
+
+    expect(result.current.filamentColors).toHaveLength(5);
+    const added = result.current.filamentColors[4];
+    expect(added.name).toBe('A');
+    expect(added.transmission_distance).toBe(0);
+    expect(result.current.isFilamentConfigValid).toBe(false);
+  });
+
+  it('uses the explicitly edited scalar TD when editing a measured preset', async () => {
+    const { result } = await renderProcessor();
+    const img = new globalThis.Image() as unknown as HTMLImageElement;
+    await act(async () => { result.current.handleApplyEdit(img); });
+
+    act(() => {
+      result.current.loadPreset('bambu_cmyw');
+      result.current.updateFilamentColor(0, {
+        name: 'Cyan',
+        hex: '#3D79C6',
+        transmission_distance: 2.1,
+      });
+    });
+
+    await act(async () => {
+      await result.current.handleDownloadSTL();
+    });
+
+    expect(mockedDownloadSTLV2).toHaveBeenCalledWith(
+      expect.objectContaining({
+        filamentColors: expect.arrayContaining([
+          expect.objectContaining({
+            name: 'Cyan',
+            transmission_distance: 2.1,
+          }),
+        ]),
+      }),
+      expect.anything(),
+    );
+  });
+});

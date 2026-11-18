@@ -1,0 +1,32 @@
+import { english } from './resources';
+import { useTranslation } from './index';
+
+export function usePresetLabel() {
+  const { t, i18n } = useTranslation();
+  return (id: string | null, displayName: string): string => {
+    if (id === null) return t('filaments:custom');
+    if (!Object.prototype.hasOwnProperty.call(english.filaments, id)) return displayName;
+    return i18n.getFixedT(null, 'filaments')(id as keyof typeof english.filaments);
+  };
+}
+
+const parameterKeys = {
+  max_colors: 'search:max_colors', color_threshold: 'search:color_threshold',
+  num_colors: 'search:num_colors', epsilon: 'search:epsilon', min_area: 'search:min_area',
+  detail_size: 'search:detail_size', white_backing_layers: 'search:white_backing_layers', pixel_size: 'search:pixel_size',
+} as const;
+
+export function useParameterLabel() {
+  const { t } = useTranslation();
+  return (code: string): string => Object.prototype.hasOwnProperty.call(parameterKeys, code)
+    ? t(parameterKeys[code as keyof typeof parameterKeys]) : code;
+}
+
+// Lookup display metadata by identity; unknown catalog entries fall back to their supplied text.
+export function usePaletteText() {
+  const { i18n } = useTranslation();
+  return (key: string, fallback: string): string => {
+    if (!Object.prototype.hasOwnProperty.call(english.palettes, key)) return fallback;
+    return i18n.getFixedT(null, 'palettes')(key as keyof typeof english.palettes);
+  };
+}

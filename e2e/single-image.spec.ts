@@ -1,0 +1,134 @@
+import { test, expect } from '@playwright/test';
+import { uploadImage, uploadAndProcess } from './helpers';
+
+test.describe('Single Image Processing', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.goto('/');
+  });
+
+  test('page loads with correct title and elements', async ({ page }) => {
+    await expect(page.getByRole('heading', { name: /Image to STL/ })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Single Image' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Batch Processing' })).toBeVisible();
+  });
+
+  test('upload, process, and verify results', async ({ page }) => {
+    await uploadImage(page);
+
+    // Image editor should appear with Apply & Process button
+    await expect(page.getByRole('button', { name: /Apply & Process/ })).toBeVisible({
+      timeout: 10_000,
+    });
+
+    // Click Apply & Process to start processing
+    await page.getByRole('button', { name: /Apply & Process/ }).click();
+
+    // Wait for results
+    await expect(page.getByRole('button', { name: /Download STL/ })).toBeVisible({ timeout: 30_000 });
+
+    // Reprocess button should be visible
+    await expect(page.getByRole('button', { name: 'Reprocess' })).toBeVisible();
+  });
+
+  test('editing blocks relabels the grid and exports still succeed', async ({ page }) => {
+    await uploadAndProcess(page);
+    await expect(page.getByRole('button', { name: /Download STL/ })).toBeVisible({ timeout: 30_000 });
+
+    // Two or more blocks: select the first card and delete it into its nearest color.
+    const cards = page.getByRole('button', { name: /^Color block #/ });
+    const initial = await cards.count();
+    expect(initial).toBeGreaterThanOrEqual(2);
+    await cards.first().click();
+    await page.getByRole('button', { name: 'Delete' }).click();
+
+    const heading = page.getByRole('heading', { name: /Color Blocks \(\d+\)/ });
+    await expect(heading).toHaveText(`Color Blocks (${initial - 1})`, { timeout: 10_000 });
+
+    // The edited geometry still passes export validation end-to-end: the
+    // STL export must produce an actual download, not just not-error.
+    const downloadPromise = page.waitForEvent('download');
+    await page.getByRole('button', { name: /Download STL/ }).click();
+    const download = await downloadPromise;
+    expect(download.suggestedFilename()).toMatch(/\.zip$/);
+  });
+
+  test('usage events are accepted by the backend', async ({ page }) => {
+    const names: string[] = [];
+    const statuses: number[] = [];
+    page.on('response', response => {
+      if (new URL(response.url()).pathname !== '/api/events') return;
+      statuses.push(response.status());
+      const batch = response.request().postDataJSON() as { events: Array<{ name: string }> };
+      names.push(...batch.events.map(event => event.name));
+    });
+
+    await uploadAndProcess(page);
+    // Leaving the page sends whatever is still queued.
+    await page.evaluate(() => window.dispatchEvent(new Event('pagehide')));
+
+    await expect.poll(() => names).toEqual(
+      expect.arrayContaining(['page_view', 'image_selected', 'processing_completed']),
+    );
+    expect(statuses.every(status => status === 204)).toBe(true);
+  });
+
+  test('parameter sliders are visible and adjustable', async ({ page }) => {
+    // Settings panel is open by default
+    await expect(page.getByRole('slider', { name: 'Max Colors' })).toBeVisible();
+    await expect(page.getByRole('slider', { name: 'Layer Height' })).toBeVisible();
+    await expect(page.getByRole('slider', { name: 'Pixel Size' })).toBeVisible();
+    await expect(page.getByRole('spinbutton', { name: 'Backing layers' })).toBeVisible();
+  });
+
+  test('can toggle settings panel visibility', async ({ page }) => {
+    // Settings should be visible initially
+    await expect(page.getByRole('slider', { name: 'Max Colors' })).toBeVisible();
+
+    // Click settings toggle button (the gear icon in the header)
+    const settingsButton = page.locator('button').filter({
+      has: page.locator('svg.lucide-settings'),
+    });
+    await settingsButton.click();
+
+    // Settings should be hidden
+    await expect(page.getByRole('slider', { name: 'Max Colors' })).not.toBeVisible();
+
+    // Click again to show
+    await settingsButton.click();
+    await expect(page.getByRole('slider', { name: 'Max Colors' })).toBeVisible();
+  });
+
+  test('can switch between pixel and SVG modes', async ({ page }) => {
+    // Default is pixel mode
+    await expect(page.getByRole('slider', { name: 'Max Colors' })).toBeVisible();
+
+    // Switch to SVG mode
+    await page.getByRole('button', { name: /Vector/i }).first().click();
+
+    // SVG-specific params should appear
+    await expect(page.getByRole('slider', { name: 'Number of Colors' })).toBeVisible();
+    await expect(page.getByRole('slider', { name: 'Simplification' })).toBeVisible();
+    await expect(page.getByRole('slider', { name: 'Min Area' })).toBeVisible();
+
+    // Pixel-specific params should be hidden
+    await expect(page.getByRole('slider', { name: 'Max Colors' })).not.toBeVisible();
+  });
+
+  test('image editor cancel returns to upload state', async ({ page }) => {
+    await uploadImage(page);
+
+    // Editor should appear
+    await expect(page.getByRole('button', { name: /Cancel/ })).toBeVisible({
+      timeout: 10_000,
+    });
+
+    await page.getByRole('button', { name: /Cancel/ }).click();
+
+    // After cancel, rawImage is cleared and isEditing is false.
+    // Since image was never set via handleApplyEdit, the upload button should be visible again.
+    await expect(page.getByRole('button', { name: /Click or drag image here/ })).toBeVisible();
+
+    // Editor should be gone
+    await expect(page.getByRole('button', { name: /Apply & Process/ })).not.toBeVisible();
+  });
+});

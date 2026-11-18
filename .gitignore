@@ -1,0 +1,91 @@
+# Dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Build outputs
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+
+# Python
+backend/.hypothesis/
+backend/.venv/
+backend/*/__pycache__/
+backend/__pycache__/
+backend/**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.Python
+pip-log.txt
+pip-delete-this-directory.txt
+output/*
+
+# Test coverage
+.coverage
+backend/.coverage
+htmlcov/
+backend/htmlcov/
+
+# Test artifacts
+test-results/
+
+# Large local test images (not committed)
+backend/tests/fixtures/images-local/
+# Local-only specs that use those images
+e2e/local/
+
+# Temporary script reports
+*_RESULTS.md
+*_STATUS.md
+*_SUMMARY.md
+monitor_*.sh
+
+# AI Agent
+.claude/
+.mcp.json
+
+# Project lifecycle (local only)
+.project/
+
+# Docker
+docker-compose.override.yml
+feedback.md
+.crew/
+.playwright-mcp/
+.design/
+e2e/extract-color-mapping.spec.ts
+e2e/test-color-mapping-version.spec.ts
+.kiro/
+docs/ref
+docs/archive/
+.hypothesis/
+.sisyphus/
+.omo/
+
+# Private user-submitted bug reports
+bug-reports/
+backend/bug-reports/

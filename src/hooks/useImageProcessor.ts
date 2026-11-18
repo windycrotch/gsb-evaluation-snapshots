@@ -1,0 +1,992 @@
+/**
+ * Custom hook for image processing logic with mode support
+ */
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import type {
+  ColorBlockSummary,
+  MappedBlockColor,
+  MappedBlendPaletteEntry,
+  VectorColorResult,
+  ProcessingMode,
+  ProcessImageResponse,
+  SVGProcessImageResponse,
+  ProcessImageParams,
+  FilamentPreset,
+  FilamentColorConfig,
+  FilamentPresetsResponse,
+  FilamentSetInfo,
+  WhitePoint,
+} from '../api/types';
+import { filamentLabel, isAllTransparentFilaments, isFilamentColorConfig } from '../utils/filaments';
+import { decodeLabelMap, EMPTY_LABEL } from '../utils/labelMap';
+import type { ProcessingStage } from '../components/LoadingSpinner';
+import {
+  processImage,
+  getFilamentPresets,
+  simulatePrintPreview,
+  downloadCSV,
+  downloadSTLV2,
+  downloadSVGSTLV2,
+  download3MFV2,
+  downloadSVG3MFV2,
+  downloadPrintSettings,
+  getFilamentSet,
+} from '../api/client';
+import { oversizeAsk } from '../components/OversizeDialog';
+import { useFilamentStorage } from './useFilamentStorage';
+import { buildPrintStack } from '../utils/printStack';
+import { modelGridSize, modelPitch } from '../utils/modelGrid';
+import { sanitizeDiagnostic } from '../utils/bugReport';
+import { track } from '../utils/telemetry';
+import { SVG_RASTER_SIDE_PX, isSvgFile, rasterizeSvg } from '../utils/rasterizeSvg';
+
+const MIN_FILAMENT_COLORS = 4;
+
+/** Rebuild each block's count from the compacted labels in one pass over the
+ * grid, so counts always agree with the geometry they describe. */
+function blocksWithLabelCounts(blocks: ColorBlockSummary[], labels: Uint8Array): ColorBlockSummary[] {
+  const next = blocks.map(block => ({ ...block, count: 0 }));
+  for (let cell = 0; cell < labels.length; cell++) {
+    const value = labels[cell];
+    if (value !== EMPTY_LABEL) next[value].count++;
+  }
+  return next;
+}
+const MAX_FILAMENT_COLORS = 16;
+const MIN_COLOR_LAYERS = 4;
+const DEFAULT_MAX_DIMENSION_MM = 200;
+const MIN_PIXEL_SIZE_MM = 0.01;
+const MAX_PIXEL_SIZE_MM = 5.0;
+
+const clampPixelSize = (value: number) => Math.max(MIN_PIXEL_SIZE_MM, Math.min(MAX_PIXEL_SIZE_MM, value));
+
+
+const computeDefaultPixelSize = (widthPx: number, heightPx: number) => {
+  const longestSidePx = Math.max(widthPx, heightPx);
+  if (longestSidePx <= 0) return null;
+  const defaultMaxDimensionMm = Math.min(DEFAULT_MAX_DIMENSION_MM, longestSidePx);
+  return clampPixelSize(defaultMaxDimensionMm / longestSidePx);
+};
+
+const printableRenderKey = (params: ProcessImageParams) => JSON.stringify(
+  params.mode === 'pixel'
+    ? {
+        mode: params.mode,
+        pixelSize: params.pixelSize,
+        detailSize: params.detailSize,
+        pixelParams: params.pixelParams,
+      }
+    : params,
+);
+
+export const useImageProcessor = () => {
+  const [image, setImage] = useState<HTMLImageElement | null>(null);
+  const [currentImageFile, setCurrentImageFile] = useState<File | null>(null);
+  const [rawImage, setRawImage] = useState<HTMLImageElement | null>(null);
+  const [isEditing, setIsEditing] = useState(false);
+  const [processing, setProcessing] = useState(false);
+  const [processingStage, setProcessingStage] = useState<ProcessingStage>('idle');
+  const [error, setError] = useState<string | null>(null);
+
+  // Mode selection
+  const [mode, setMode] = useState<ProcessingMode>('pixel');
+
+  // Pixel mode state: block colors and their grid geometry travel as one
+  // value, so colors and labels never drift apart (utils/labelMap.ts).
+  const [pixelGeometry, setPixelGeometry] = useState<{ blocks: ColorBlockSummary[]; labels: Uint8Array } | null>(null);
+  const colorBlocks = useMemo(() => pixelGeometry?.blocks ?? [], [pixelGeometry]);
+  const [maxColors, setMaxColors] = useState(10);
+  const [colorThreshold, setColorThreshold] = useState(50);
+
+  // SVG mode state
+  const [vectorResults, setVectorResults] = useState<VectorColorResult[]>([]);
+  const [epsilon, setEpsilon] = useState(2.0);
+  const [minArea, setMinArea] = useState(4.0);
+  const [numColors, setNumColors] = useState(8);
+
+  // Shared state
+  const [processedImageUrl, setProcessedImageUrl] = useState<string | null>(null);
+  const [segmentationImageUrl, setSegmentationImageUrl] = useState<string | null>(null);
+  const [mappedBlockColors, setMappedBlockColors] = useState<MappedBlockColor[]>([]);
+  const [mappedBlendPalette, setMappedBlendPalette] = useState<MappedBlendPaletteEntry[]>([]);
+  // The image white processing reported; previews and exports print against it.
+  const [whitePoint, setWhitePoint] = useState<WhitePoint | null>(null);
+  const [imageDimensions, setImageDimensions] = useState({ width: 0, height: 0 });
+  const [layerHeight, setLayerHeightValue] = useState(0);
+  const layerHeightIsManualRef = useRef(false);
+  const setLayerHeight = useCallback((value: number) => {
+    layerHeightIsManualRef.current = true;
+    setLayerHeightValue(value);
+  }, []);
+  const [detailSize, setDetailSize] = useState(0.42);
+  const [pixelSize, setPixelSize] = useState(0.42);
+  const [layerCount, setLayerCount] = useState(MIN_COLOR_LAYERS);
+  const [whiteBackingLayers, setWhiteBackingLayers] = useState(0);
+  // The user's backing filament; the set's default applies until they choose one.
+  const [chosenBackingFilament, setBackingFilament] = useState<string | null>(null);
+
+  const filamentStorage = useFilamentStorage();
+  const savedFilamentsRef = useRef(filamentStorage);
+  savedFilamentsRef.current = filamentStorage;
+  const [filamentCatalog, setFilamentCatalog] = useState<FilamentPresetsResponse | null>(null);
+  const [filamentCatalogLoading, setFilamentCatalogLoading] = useState(true);
+  const [filamentCatalogError, setFilamentCatalogError] = useState<string | null>(null);
+  const [catalogRequest, setCatalogRequest] = useState(0);
+  const [filamentPreset, setFilamentPreset] = useState<FilamentPreset | null>(null);
+  const [filamentColors, setFilamentColors] = useState<FilamentColorConfig[]>([]);
+  const reloadFilamentCatalog = useCallback(() => setCatalogRequest(value => value + 1), []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setFilamentCatalogLoading(true);
+    setFilamentCatalogError(null);
+    getFilamentPresets(controller.signal).then(catalog => {
+      if (controller.signal.aborted) return;
+      const initial = catalog.presets.find(preset => preset.name === catalog.defaults.filament_preset);
+      if (!initial || initial.colors.length === 0 || !initial.colors.every(isFilamentColorConfig) || catalog.transparency.aggregation !== 'mean') {
+        throw new Error('Failed to get filament presets');
+      }
+      const storage = savedFilamentsRef.current;
+      const saved = storage.presets.find(preset => preset.id === storage.lastPresetId);
+      const colors = saved ? saved.colors : initial.colors;
+      setFilamentCatalog(catalog);
+      setFilamentPreset(saved ? null : initial.name);
+      setFilamentColors(structuredClone(colors));
+      setWhiteBackingLayers(catalog.defaults.backing_layers);
+      setLayerHeightValue(isAllTransparentFilaments(colors, catalog.transparency)
+        ? catalog.defaults.transparent_layer_height_mm : catalog.defaults.regular_layer_height_mm);
+    }).catch(err => {
+      if (!controller.signal.aborted) setFilamentCatalogError(err instanceof Error ? err.message : 'Failed to get filament presets');
+    }).finally(() => {
+      if (!controller.signal.aborted) setFilamentCatalogLoading(false);
+    });
+    return () => controller.abort();
+  }, [catalogRequest]);
+
+  const allTransparent = useMemo(
+    () => filamentCatalog !== null && isAllTransparentFilaments(filamentColors, filamentCatalog.transparency),
+    [filamentColors, filamentCatalog]
+  );
+  const previousTransparentRef = useRef(allTransparent);
+  useEffect(() => {
+    if (!filamentCatalog || previousTransparentRef.current === allTransparent) return;
+    previousTransparentRef.current = allTransparent;
+    const { regular_layer_height_mm: regular, transparent_layer_height_mm: transparent } = filamentCatalog.defaults;
+    if (!layerHeightIsManualRef.current) {
+      setLayerHeightValue(allTransparent ? transparent : regular);
+    }
+  }, [allTransparent, filamentCatalog]);
+
+  // Physical size is derived directly from pixelSize and image dimensions.
+  const targetWidth = imageDimensions.width > 0
+    ? Math.round(imageDimensions.width * pixelSize * 100) / 100
+    : 0;
+  const targetHeight = imageDimensions.height > 0
+    ? Math.round(imageDimensions.height * pixelSize * 100) / 100
+    : 0;
+  const maxDimension = Math.max(targetWidth, targetHeight);
+
+  const setMaxDimension = useCallback((dimensionMm: number) => {
+    const clampedDimension = Math.max(1, Math.min(500, dimensionMm));
+    const longestSidePx = Math.max(imageDimensions.width, imageDimensions.height);
+    if (longestSidePx <= 0) return;
+    setPixelSize(clampPixelSize(clampedDimension / longestSidePx));
+  }, [imageDimensions.height, imageDimensions.width]);
+
+  const handleSetPixelSize = useCallback((value: number) => {
+    setPixelSize(clampPixelSize(value));
+  }, []);
+
+  // Printable detail and model scale are independent physical settings.
+  const handleSetDetailSize = useCallback((value: number) => {
+    setDetailSize(value);
+  }, []);
+
+  // AbortController ref for cancelling in-flight image processing requests
+  const processAbortRef = useRef<AbortController | null>(null);
+  const previewAbortRef = useRef<AbortController | null>(null);
+  const skipNextPreviewRefreshRef = useRef(false);
+  const requestedRenderKeyRef = useRef<string | null>(null);
+  const completedRenderKeyRef = useRef<string | null>(null);
+  // Set to true when handleApplyEdit cannot determine image dimensions upfront;
+  // handleProcessImage will then apply the default after the API returns dimensions.
+
+  // Load a built-in preset into filamentColors
+  const loadPreset = useCallback((preset: FilamentPreset) => {
+    const selected = filamentCatalog?.presets.find(entry => entry.name === preset);
+    if (!selected) return;
+    setFilamentPreset(preset);
+    setFilamentColors(structuredClone(selected.colors));
+    filamentStorage.setLastPresetId(null);
+  }, [filamentStorage, filamentCatalog]);
+
+  // Load a saved (custom) preset's colors into the editor
+  const loadSavedPresetColors = useCallback((colors: FilamentColorConfig[]) => {
+    setFilamentPreset(null);
+    setFilamentColors(structuredClone(colors));
+  }, []);
+
+  // Update a single filament color by index
+  const updateFilamentColor = useCallback((index: number, updated: FilamentColorConfig) => {
+    setFilamentColors(prev => {
+      const next = [...prev];
+      next[index] = structuredClone(updated);
+      return next;
+    });
+    setFilamentPreset(null);
+  }, []);
+
+  // Add a new filament color
+  const addFilamentColor = useCallback(() => {
+    setFilamentColors(prev => {
+      if (prev.length >= MAX_FILAMENT_COLORS) return prev;
+      const labels = new Set(prev.map(filamentLabel));
+      let code = 'A'.charCodeAt(0);
+      while (labels.has(String.fromCharCode(code))) code++;
+      return [...prev, {
+        name: String.fromCharCode(code),
+        hex: '#808080',
+        transmission_distance: 0,
+      }];
+    });
+    setFilamentPreset(null);
+  }, []);
+
+  // Remove a filament color by index
+  const removeFilamentColor = useCallback((index: number) => {
+    setFilamentColors(prev => {
+      if (prev.length <= MIN_FILAMENT_COLORS) return prev;
+      return prev.filter((_, i) => i !== index);
+    });
+    setFilamentPreset(null);
+  }, []);
+
+  // Validate filament config
+  const isFilamentConfigValid = useMemo(() => {
+    if (filamentColors.length < MIN_FILAMENT_COLORS) return false;
+    if (filamentColors.length > MAX_FILAMENT_COLORS) return false;
+
+    if (!filamentCatalog || !filamentColors.every(isFilamentColorConfig)) return false;
+    const labels = filamentColors.map(filamentLabel);
+    if (new Set(labels).size !== labels.length) return false;
+    const hexValues = filamentColors.map(c => c.hex.toLowerCase());
+    if (new Set(hexValues).size !== hexValues.length) return false;
+
+    return true;
+  }, [filamentColors, filamentCatalog]);
+
+  const filamentRequestPayload = useMemo(
+    () => (filamentPreset ? { filamentPreset } : { filamentColors }),
+    [filamentColors, filamentPreset]
+  );
+
+  // The backend knows what each filament set can search within its time limit
+  // and which filament backs it by default; until it answers, the catalog's
+  // overall layer maximum applies.
+  const [filamentSet, setFilamentSet] = useState<FilamentSetInfo | null>(null);
+  const maxLayerCount = Math.max(
+    MIN_COLOR_LAYERS,
+    filamentSet?.maxLayerCount ?? filamentCatalog?.defaults.max_color_layers ?? MIN_COLOR_LAYERS,
+  );
+  // The backing filament printed: the user's choice while it belongs to the
+  // current set, otherwise the set's default.
+  const backingFilament = useMemo(() => {
+    const labels = filamentColors.map(filamentLabel);
+    return [chosenBackingFilament, filamentSet?.defaultBackingFilament]
+      .find((label): label is string => !!label && labels.includes(label));
+  }, [chosenBackingFilament, filamentSet, filamentColors]);
+  useEffect(() => {
+    if (!filamentCatalog || !isFilamentConfigValid) return;
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      getFilamentSet(filamentRequestPayload, controller.signal)
+        .then(setFilamentSet)
+        .catch(err => {
+          if (!controller.signal.aborted) console.error('Error describing the filament set:', err);
+        });
+    }, 300);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [filamentCatalog, isFilamentConfigValid, filamentRequestPayload]);
+
+  const handleSetLayerCount = useCallback((value: number) => {
+    setLayerCount(Math.max(MIN_COLOR_LAYERS, Math.min(maxLayerCount, value)));
+  }, [maxLayerCount]);
+
+  useEffect(() => {
+    setLayerCount(prev => Math.min(prev, maxLayerCount));
+  }, [maxLayerCount]);
+
+  const makeProcessParams = useCallback((currentMode?: ProcessingMode, overridePixelSize?: number, overrides?: Partial<{
+    maxColors: number; colorThreshold: number; epsilon: number; minArea: number; numColors: number;
+    detailSize: number; whiteBackingLayers: number;
+  }>): ProcessImageParams => {
+    const processingMode = currentMode ?? mode;
+    return {
+      mode: processingMode,
+      pixelSize: overridePixelSize ?? pixelSize,
+      layerHeight,
+      layerCount,
+      whiteBackingLayers: overrides?.whiteBackingLayers ?? whiteBackingLayers,
+      backingFilament,
+      ...filamentRequestPayload,
+      detailSize: overrides?.detailSize ?? detailSize,
+      pixelParams: processingMode === 'pixel'
+        ? { maxColors: overrides?.maxColors ?? maxColors, colorThreshold: overrides?.colorThreshold ?? colorThreshold }
+        : undefined,
+      svgParams: processingMode === 'svg'
+        ? { epsilon: overrides?.epsilon ?? epsilon, minArea: overrides?.minArea ?? minArea, numColors: overrides?.numColors ?? numColors }
+        : undefined,
+    };
+  }, [mode, pixelSize, detailSize, maxColors, colorThreshold, epsilon, minArea, numColors,
+    layerHeight, layerCount, whiteBackingLayers, backingFilament, filamentRequestPayload]);
+
+  // Process image by calling backend API
+  const handleProcessImage = useCallback(async (img: HTMLImageElement, currentMode?: ProcessingMode, overrideLongestMm?: number, overrides?: Partial<{
+    maxColors: number; colorThreshold: number; epsilon: number; minArea: number; numColors: number;
+    detailSize: number; whiteBackingLayers: number;
+  }>) => {
+    if (!isFilamentConfigValid) {
+      setError('Invalid filament color configuration');
+      return;
+    }
+    // Abort any in-flight processing request
+    if (processAbortRef.current) {
+      processAbortRef.current.abort();
+    }
+
+    const controller = new AbortController();
+    processAbortRef.current = controller;
+
+    setProcessing(true);
+    setProcessingStage('uploading');
+    setError(null);
+
+    // The physical size is the source of truth: resample the image to the
+    // model grid the backend will use, and send the pitch of that grid.
+    const longestMm = overrideLongestMm ?? maxDimension;
+    const sourcePitch = longestMm / Math.max(img.width, img.height);
+    const limits = filamentCatalog
+      ? { maxCells: filamentCatalog.defaults.max_model_cells, maxSidePx: filamentCatalog.defaults.max_model_side_px }
+      : null;
+    const grid = limits
+      ? modelGridSize(img.width, img.height, sourcePitch, modelPitch(
+        img.width, img.height, sourcePitch, overrides?.detailSize ?? detailSize, limits,
+      ))
+      : { width: img.width, height: img.height };
+    const requestParams = makeProcessParams(currentMode, longestMm / Math.max(grid.width, grid.height), overrides);
+    const processingMode = requestParams.mode;
+    const requestKey = printableRenderKey(requestParams);
+    requestedRenderKeyRef.current = requestKey;
+    const startedAt = performance.now();
+
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.width = grid.width;
+      canvas.height = grid.height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        throw new Error('Failed to get 2D canvas context');
+      }
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(img, 0, 0, grid.width, grid.height);
+
+      const blob = await new Promise<Blob>((resolve, reject) => {
+        canvas.toBlob((b) => {
+          if (b) resolve(b);
+          else reject(new Error('Failed to create blob from canvas'));
+        }, 'image/png');
+      });
+
+      const file = new File([blob], 'image.png', { type: 'image/png' });
+
+      setProcessingStage('processing');
+
+      let appliedLayerCount: number | null = null;
+      const result = await processImage(file, requestParams, {
+        signal: controller.signal,
+        labelKey: 'jobs:labelProcess',
+        onOversize: oversizeAsk.ask,
+        // Keep state AND the request key in step with a chosen downscale, so
+        // the retry converges instead of the auto-reprocess effect submitting
+        // the over-budget original again (review F6).
+        onSuggestionApplied: suggestion => {
+          if (suggestion.layerCount !== undefined) {
+            appliedLayerCount = Math.max(MIN_COLOR_LAYERS, suggestion.layerCount);
+            setLayerCount(appliedLayerCount);
+            requestedRenderKeyRef.current = printableRenderKey({
+              ...requestParams, layerCount: appliedLayerCount,
+            });
+          }
+        },
+      });
+
+      // Only update state if this request wasn't aborted
+      if (controller.signal.aborted) return;
+      // The retried request carried the suggested layers; the completed key
+      // must describe exactly what ran (requestKey was captured pre-suggestion).
+      completedRenderKeyRef.current = requestedRenderKeyRef.current;
+      // Upload, compute and download together, as the user waits for them.
+      track('processing_completed', {
+        mode: processingMode, ms: Math.round(performance.now() - startedAt), width: grid.width, height: grid.height,
+      });
+
+      setCurrentImageFile(file);
+      setImageDimensions(result.imageDimensions);
+
+      // Sync backend-confirmed parameters. pixelSize remains the actual model pitch.
+      if (result.pixelSize !== undefined && result.pixelSize !== null) {
+        setPixelSize(result.pixelSize);
+      }
+      if (result.detailSize !== undefined && result.detailSize !== null) {
+        setDetailSize(result.detailSize);
+      }
+      setWhitePoint(result.whitePoint ?? null);
+
+      if (processingMode === 'pixel') {
+        const pixelResult = result as ProcessImageResponse;
+        setProcessedImageUrl(pixelResult.processedImage);
+        setSegmentationImageUrl(pixelResult.segmentationImage);
+        setMappedBlockColors(pixelResult.mappedBlockColors);
+        setMappedBlendPalette(pixelResult.mappedBlendPalette);
+        setPixelGeometry({
+          blocks: pixelResult.colorBlocks,
+          labels: decodeLabelMap(pixelResult.labelMap),
+        });
+        skipNextPreviewRefreshRef.current = true;
+        setVectorResults([]);
+      } else {
+        const svgResult = result as SVGProcessImageResponse;
+        setProcessedImageUrl(svgResult.processedImage);
+        setSegmentationImageUrl(svgResult.segmentationImage);
+        setMappedBlockColors([]);
+        setMappedBlendPalette(svgResult.mappedBlendPalette);
+        setVectorResults(svgResult.vectorResults);
+        setPixelGeometry(null);
+      }
+
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return;
+      if (controller.signal.aborted) return;
+      console.error('Error processing image:', err);
+      setError(err instanceof Error ? err.message : 'Failed to process image');
+    } finally {
+      if (!controller.signal.aborted) {
+        setProcessing(false);
+        setProcessingStage('idle');
+      }
+    }
+  }, [makeProcessParams, isFilamentConfigValid, maxDimension, filamentCatalog, detailSize]);
+
+  const currentRenderKey = printableRenderKey(makeProcessParams());
+  const renderReady = completedRenderKeyRef.current === currentRenderKey;
+  const hasProcessedGeometry = mode === 'pixel' ? colorBlocks.length > 0 : vectorResults.length > 0;
+
+  // Changes to physical geometry require a new material assignment. SVG
+  // mapping changes also require a new printable preview before export.
+  useEffect(() => {
+    if (!image || !hasProcessedGeometry || !isFilamentConfigValid) return;
+    if (completedRenderKeyRef.current === currentRenderKey || requestedRenderKeyRef.current === currentRenderKey) return;
+    const timer = window.setTimeout(() => {
+      void handleProcessImage(image);
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [image, hasProcessedGeometry, isFilamentConfigValid, currentRenderKey, handleProcessImage]);
+
+
+  // Every message the user sees, including requests that failed before any response.
+  useEffect(() => {
+    if (error) track('error_shown', { detail: sanitizeDiagnostic(error) });
+  }, [error]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (processAbortRef.current) {
+        processAbortRef.current.abort();
+      }
+      if (previewAbortRef.current) {
+        previewAbortRef.current.abort();
+      }
+    };
+  }, []);
+
+  // Load a File into editing mode
+  const handleFile = (file: File) => {
+    const showInEditor = (img: HTMLImageElement, type: string) => {
+      track('image_selected', {
+        type, sizeMb: Math.round(file.size / 1e5) / 10, width: img.naturalWidth, height: img.naturalHeight,
+      });
+      setRawImage(img);
+      setIsEditing(true);
+    };
+
+    if (isSvgFile(file)) {
+      const longestSide = Math.min(SVG_RASTER_SIDE_PX, filamentCatalog?.defaults.max_model_side_px ?? SVG_RASTER_SIDE_PX);
+      rasterizeSvg(file, longestSide)
+        .then(img => showInEditor(img, 'image/svg+xml'))
+        .catch(() => setError('Failed to load image. The file may be corrupted or not a valid image.'));
+      return;
+    }
+
+    const validTypes = ['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/bmp'];
+    if (!validTypes.includes(file.type)) {
+      setError(`Unsupported file type: ${file.type}. Please upload a PNG, JPEG, GIF, WebP, BMP, or SVG image.`);
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const img = new Image();
+      img.onload = () => showInEditor(img, file.type);
+      img.onerror = () => {
+        setError('Failed to load image. The file may be corrupted or not a valid image.');
+      };
+      img.src = event.target?.result as string;
+    };
+    reader.onerror = () => {
+      setError('Failed to read file.');
+    };
+    reader.readAsDataURL(file);
+  };
+
+  // Handle image upload from file input
+  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    handleFile(file);
+    // Reset input to allow re-selecting the same file
+    e.target.value = '';
+  };
+
+  // Apply edited image from ImageEditor and start processing
+  const handleApplyEdit = useCallback((editedImg: HTMLImageElement) => {
+    const imgW = editedImg.naturalWidth || editedImg.width;
+    const imgH = editedImg.naturalHeight || editedImg.height;
+    const defaultPixelSize = computeDefaultPixelSize(imgW, imgH);
+    setImage(editedImg);
+    setRawImage(null);
+    setIsEditing(false);
+    if (defaultPixelSize === null) {
+      setError('Failed to load image. The file may be corrupted or not a valid image.');
+      return;
+    }
+    setPixelSize(defaultPixelSize);
+    handleProcessImage(editedImg, undefined, defaultPixelSize * Math.max(imgW, imgH));
+  }, [handleProcessImage]);
+
+  // Cancel editing and revert to previous state
+  const handleCancelEdit = useCallback(() => {
+    setRawImage(null);
+    setIsEditing(false);
+  }, []);
+
+  // Reprocess image with current parameters
+  const handleReprocess = (
+    overrideLongestMm?: number,
+    overrides?: Parameters<typeof handleProcessImage>[3],
+    modeOverride?: ProcessingMode,
+  ) => {
+    // onClick handlers forward the MouseEvent as the first argument; guard
+    // against non-number values leaking into the size override.
+    const longestMmOverride = typeof overrideLongestMm === 'number' ? overrideLongestMm : undefined;
+    if (image) {
+      handleProcessImage(image, modeOverride, longestMmOverride, overrides);
+    }
+  };
+
+  // Handle mode change
+  const handleModeChange = (newMode: ProcessingMode) => {
+    setMode(newMode);
+    if (image) {
+      handleProcessImage(image, newMode);
+    }
+  };
+
+  // Download CSV (only pixel mode)
+  const handleDownloadCSV = async () => {
+    if (mode !== 'pixel') {
+      setError('CSV download is only available in Pixel mode');
+      return;
+    }
+
+    try {
+      setError(null);
+      setProcessing(true);
+      setProcessingStage('generating');
+      await downloadCSV(colorBlocks);
+    } catch (err) {
+      console.error('Error downloading CSV:', err);
+      setError(err instanceof Error ? err.message : 'Failed to download CSV');
+    } finally {
+      setProcessing(false);
+      setProcessingStage('idle');
+    }
+  };
+
+  // Download STL ZIP using V2 API with filament colors
+  const handleDownloadSTL = async () => {
+    if (!isFilamentConfigValid) {
+      setError('Invalid filament color configuration');
+      return;
+    }
+
+    try {
+      setError(null);
+      setProcessing(true);
+      setProcessingStage('generating');
+
+      const commonParams = {
+        layerHeight,
+        pixelSize,
+        layerCount,
+        whiteBackingLayers,
+        backingFilament,
+        imageDimensions,
+        detailSize,
+        whitePoint,
+        ...filamentRequestPayload,
+      };
+
+      const exportOpts = {
+        labelKey: 'jobs:labelExport',
+        onOversize: oversizeAsk.ask,
+        onSuggestionApplied: (suggestion: { layerCount?: number }) => {
+          if (suggestion.layerCount !== undefined) setLayerCount(suggestion.layerCount);
+        },
+      };
+      if (mode === 'pixel') {
+        if (!pixelGeometry) return;
+        await downloadSTLV2({ colorBlocks, labels: pixelGeometry.labels, ...commonParams }, exportOpts);
+      } else {
+        await downloadSVGSTLV2({ vectorResults, ...commonParams }, exportOpts);
+      }
+    } catch (err) {
+      console.error('Error downloading STL:', err);
+      setError(err instanceof Error ? err.message : 'Failed to download STL');
+    } finally {
+      setProcessing(false);
+      setProcessingStage('idle');
+    }
+  };
+
+  // Download 3MF file using V2 API (pixel and SVG modes)
+  const handleDownload3MF = async () => {
+    if (!isFilamentConfigValid) {
+      setError('Invalid filament color configuration');
+      return;
+    }
+
+    try {
+      setError(null);
+      setProcessing(true);
+      setProcessingStage('generating');
+
+      const commonParams = {
+        layerHeight,
+        pixelSize,
+        layerCount,
+        whiteBackingLayers,
+        backingFilament,
+        imageDimensions,
+        detailSize,
+        whitePoint,
+        ...filamentRequestPayload,
+      };
+
+      const exportOpts = {
+        labelKey: 'jobs:labelExport',
+        onOversize: oversizeAsk.ask,
+        onSuggestionApplied: (suggestion: { layerCount?: number }) => {
+          if (suggestion.layerCount !== undefined) setLayerCount(suggestion.layerCount);
+        },
+      };
+      if (mode === 'pixel') {
+        if (!pixelGeometry) return;
+        await download3MFV2({ colorBlocks, labels: pixelGeometry.labels, ...commonParams }, exportOpts);
+      } else {
+        await downloadSVG3MFV2({ vectorResults, ...commonParams }, exportOpts);
+      }
+    } catch (err) {
+      console.error('Error downloading 3MF:', err);
+      setError(err instanceof Error ? err.message : 'Failed to download 3MF');
+    } finally {
+      setProcessing(false);
+      setProcessingStage('idle');
+    }
+  };
+
+  // Download print settings JSON
+  const handleDownloadPrintSettings = async () => {
+    if (!isFilamentConfigValid) {
+      setError('Invalid filament color configuration');
+      return;
+    }
+
+    try {
+      setError(null);
+      setProcessing(true);
+      setProcessingStage('generating');
+      await downloadPrintSettings({
+        layerHeight,
+        pixelSize,
+        layerCount,
+        whiteBackingLayers,
+        backingFilament,
+        imageDimensions,
+        detailSize,
+        ...filamentRequestPayload,
+      });
+    } catch (err) {
+      console.error('Error downloading print settings:', err);
+      setError(err instanceof Error ? err.message : 'Failed to download print settings');
+    } finally {
+      setProcessing(false);
+      setProcessingStage('idle');
+    }
+  };
+
+  const refreshSimulatedPreview = useCallback(async (blocks: ColorBlockSummary[], gridLabels: Uint8Array) => {
+    if (mode !== 'pixel' || blocks.length === 0 || imageDimensions.width === 0 || !isFilamentConfigValid) {
+      return;
+    }
+
+    if (previewAbortRef.current) {
+      previewAbortRef.current.abort();
+    }
+
+    const controller = new AbortController();
+    previewAbortRef.current = controller;
+
+    try {
+      const result = await simulatePrintPreview({
+        colorBlocks: blocks,
+        labels: gridLabels,
+        imageDimensions,
+        layerHeight,
+        layerCount,
+        whiteBackingLayers,
+        backingFilament,
+        whitePoint,
+        ...filamentRequestPayload,
+      }, {
+        signal: controller.signal,
+        labelKey: 'jobs:labelSimulate',
+        onOversize: oversizeAsk.ask,
+      });
+      if (controller.signal.aborted) return;
+      setProcessedImageUrl(result.processedImage);
+      setMappedBlockColors(result.mappedBlockColors);
+      setMappedBlendPalette(result.mappedBlendPalette);
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return;
+      if (controller.signal.aborted) return;
+      console.error('Error refreshing simulated preview:', err);
+      setError(err instanceof Error ? err.message : 'Failed to refresh simulated preview');
+    }
+  }, [
+    mode,
+    imageDimensions,
+    isFilamentConfigValid,
+    layerHeight,
+    layerCount,
+    filamentRequestPayload,
+    whiteBackingLayers,
+    backingFilament,
+    whitePoint,
+  ]);
+
+  // Keep the simulated print preview in sync with manual edits and filament changes.
+  useEffect(() => {
+    if (mode !== 'pixel') return;
+    if (!pixelGeometry || imageDimensions.width === 0) return;
+    if (skipNextPreviewRefreshRef.current) {
+      skipNextPreviewRefreshRef.current = false;
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      void refreshSimulatedPreview(pixelGeometry.blocks, pixelGeometry.labels);
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [mode, pixelGeometry, imageDimensions, layerHeight, layerCount, whiteBackingLayers, backingFilament, filamentRequestPayload, refreshSimulatedPreview]);
+
+  const printStack = useMemo(
+    () => buildPrintStack(
+      layerCount,
+      layerHeight,
+      whiteBackingLayers,
+      backingFilament ?? null,
+    ),
+[layerCount, layerHeight, whiteBackingLayers, backingFilament]
+  );
+
+  // Update a color block's RGB/hex values (manual color adjustment)
+  const updateColorBlock = useCallback((index: number, newHex: string) => {
+    setPixelGeometry(prev => {
+      if (!prev || index < 0 || index >= prev.blocks.length) return prev;
+      const hex = newHex.toUpperCase();
+      const r = parseInt(hex.slice(1, 3), 16);
+      const g = parseInt(hex.slice(3, 5), 16);
+      const b = parseInt(hex.slice(5, 7), 16);
+      const blocks = [...prev.blocks];
+      blocks[index] = { ...blocks[index], r, g, b, hex };
+      return { ...prev, blocks };
+    });
+    // Preview auto-regenerated via useEffect when the geometry changes
+  }, []);
+
+  // Merge one color block into another (relabel its cells, then compact indices)
+  const mergeColorBlocks = useCallback((sourceIndex: number, targetIndex: number) => {
+    setPixelGeometry(prev => {
+      if (!prev || sourceIndex === targetIndex) return prev;
+      if (sourceIndex < 0 || sourceIndex >= prev.blocks.length) return prev;
+      if (targetIndex < 0 || targetIndex >= prev.blocks.length) return prev;
+      // Relabel straight into post-compaction indices: the target's new index
+      // after the source is removed.
+      const adjustedTargetIndex = targetIndex > sourceIndex ? targetIndex - 1 : targetIndex;
+      const labels = new Uint8Array(prev.labels);
+      for (let cell = 0; cell < labels.length; cell++) {
+        const value = labels[cell];
+        if (value === EMPTY_LABEL) continue;
+        if (value === sourceIndex) labels[cell] = adjustedTargetIndex;
+        else if (value > sourceIndex) labels[cell] = value - 1;
+      }
+      return { blocks: blocksWithLabelCounts(prev.blocks.filter((_, i) => i !== sourceIndex), labels), labels };
+    });
+    // Preview auto-regenerated via useEffect when the geometry changes
+  }, []);
+
+  // Delete a color block by merging its cells into the nearest remaining color
+  const deleteColorBlock = useCallback((index: number) => {
+    setPixelGeometry(prev => {
+      if (!prev || prev.blocks.length <= 1) return prev;
+      if (index < 0 || index >= prev.blocks.length) return prev;
+      const deleted = prev.blocks[index];
+      const remaining = prev.blocks.filter((_, i) => i !== index);
+
+      let nearestIdx = 0;
+      let minDist = Infinity;
+      for (let i = 0; i < remaining.length; i++) {
+        const c = remaining[i];
+        const dist = Math.sqrt(
+          (c.r - deleted.r) ** 2 +
+          (c.g - deleted.g) ** 2 +
+          (c.b - deleted.b) ** 2
+        );
+        if (dist < minDist) {
+          minDist = dist;
+          nearestIdx = i;
+        }
+      }
+
+      // The nearest block's post-compaction index absorbs the deleted cells.
+      const labels = new Uint8Array(prev.labels);
+      for (let cell = 0; cell < labels.length; cell++) {
+        const value = labels[cell];
+        if (value === EMPTY_LABEL) continue;
+        if (value === index) labels[cell] = nearestIdx;
+        else if (value > index) labels[cell] = value - 1;
+      }
+      return { blocks: blocksWithLabelCounts(remaining, labels), labels };
+    });
+    // Preview auto-regenerated via useEffect when the geometry changes
+  }, []);
+
+  // Determine if we have results to show
+  const hasResults = mode === 'pixel' ? colorBlocks.length > 0 : vectorResults.length > 0;
+  const resultCount = mode === 'pixel' ? colorBlocks.length : vectorResults.length;
+
+  return {
+    // State
+    image,
+    currentImageFile,
+    rawImage,
+    isEditing,
+    processing,
+    processingStage,
+    error,
+    mode,
+    colorBlocks,
+    labels: pixelGeometry?.labels ?? null,
+    vectorResults,
+    processedImageUrl,
+    segmentationImageUrl,
+    mappedBlockColors,
+    mappedBlendPalette,
+    imageDimensions,
+    hasResults,
+    resultCount,
+    renderReady,
+
+    // Pixel mode params
+    maxColors,
+    colorThreshold,
+
+    // SVG mode params
+    epsilon,
+    minArea,
+    numColors,
+
+    // Shared params
+    layerHeight,
+    pixelSize,
+    detailSize,
+    layerCount,
+    whiteBackingLayers,
+    backingFilament,
+    setBackingFilament,
+    targetWidth,
+    targetHeight,
+    maxDimension,
+    maxLayerCount,
+    printStack,
+
+    // Filament state
+    filamentPresets: filamentCatalog?.presets ?? [],
+    maxModelSidePx: filamentCatalog?.defaults.max_model_side_px,
+    maxTargetColors: filamentCatalog?.defaults.max_target_colors,
+    filamentCatalogLoading,
+    filamentCatalogError,
+    reloadFilamentCatalog,
+    filamentPreset,
+    filamentColors,
+    isFilamentConfigValid,
+
+    // Filament storage (saved presets)
+    filamentStorage,
+
+    // Actions
+    setMode: handleModeChange,
+    setMaxColors,
+    setColorThreshold,
+    setEpsilon,
+    setMinArea,
+    setNumColors,
+    setLayerHeight,
+    allTransparent,
+    setLayerCount: handleSetLayerCount,
+    setPixelSize: handleSetPixelSize,
+    setDetailSize: handleSetDetailSize,
+    setWhiteBackingLayers,
+    setMaxDimension,
+    loadPreset,
+    loadSavedPresetColors,
+    updateFilamentColor,
+    addFilamentColor,
+    removeFilamentColor,
+    handleFile,
+    handleImageUpload,
+    handleApplyEdit,
+    handleCancelEdit,
+    handleReprocess,
+    handleDownloadCSV,
+    handleDownloadSTL,
+    handleDownload3MF,
+    handleDownloadPrintSettings,
+    updateColorBlock,
+    mergeColorBlocks,
+    deleteColorBlock,
+  };
+};
