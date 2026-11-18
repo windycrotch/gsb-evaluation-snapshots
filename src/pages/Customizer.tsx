@@ -4,6 +4,7 @@ import { AnimatePresence, motion } from "motion/react";
 import { useSnapshot } from "valtio";
 
 import state from "../store";
+import { decalFallbackState } from "../store/decalFallback";
 import { download } from "../assets";
 import { downloadCanvasToImage, reader } from "../config/helpers";
 import {
@@ -30,10 +31,31 @@ import type {
 
 type FilterTabState = Record<FilterTabName, boolean>;
 
+// Build the fallback notice text, naming exactly the decal type(s)
+// that failed to load and fell back to a default image.
+const getFallbackMessage = (logo: boolean, full: boolean): string | null => {
+  if (logo && full) {
+    return "The logo and full-texture images could not be loaded, so default images are shown. Please re-upload or regenerate them.";
+  }
+  if (logo) {
+    return "The logo image could not be loaded, so the default logo is shown. Please re-upload or regenerate it.";
+  }
+  if (full) {
+    return "The full-texture image could not be loaded, so the default texture is shown. Please re-upload or regenerate it.";
+  }
+  return null;
+};
+
 // Customizer
 const Customizer = () => {
   // current snapshot state
   const snap = useSnapshot(state);
+  // runtime-only decal fallback status (not persisted)
+  const decalFallback = useSnapshot(decalFallbackState);
+  const fallbackMessage = getFallbackMessage(
+    decalFallback.logo,
+    decalFallback.full,
+  );
 
   // file state
   const [file, setFile] = useState<File | null>(null);
@@ -248,6 +270,16 @@ const Customizer = () => {
               className="filtertabs-container"
               {...slideAnimation("up")}
             >
+              {/* decal fallback notice: only while a decal is using its default image */}
+              {fallbackMessage && (
+                <div
+                  role="alert"
+                  className="absolute bottom-full left-1/2 mb-3 w-72 -translate-x-1/2 rounded-lg border border-yellow-500/40 bg-yellow-100/95 px-4 py-2 text-xs text-yellow-900 shadow-lg"
+                >
+                  {fallbackMessage}
+                </div>
+              )}
+
               {FilterTabs.map((tab) => (
                 <Tab
                   key={tab.name}
