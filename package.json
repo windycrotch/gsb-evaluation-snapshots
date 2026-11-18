@@ -27,6 +27,9 @@
     "test": "vitest",
     "update": "./scripts/update.sh"
   },
+  "dependencies": {
+    "leafer-ui": "^2.3.4"
+  },
   "devDependencies": {
     "@rollup/plugin-commonjs": "^25.0.4",
     "@rollup/plugin-html": "^1.0.3",

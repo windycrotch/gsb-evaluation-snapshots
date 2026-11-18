@@ -1,14 +1,9 @@
-import { Leafer, Rect } from 'leafer-ui'
+/**
+ * 演示页入口：LeaferJS 性能与命中演示。
+ *
+ * 直接用浏览器打开页面即可（npm run start 后访问 http://localhost:10101），
+ * 可通过 ?count=5000 调整矩形数量，默认 20000，上限 100000。
+ */
+import { boot } from './src/demo/main'
 
-const leafer = new Leafer({ view: window })
-
-const rect = new Rect({
-    x: 100,
-    y: 100,
-    width: 100,
-    height: 100,
-    fill: '#32cd79',
-    draggable: true
-})
-
-leafer.add(rect)
+boot()
