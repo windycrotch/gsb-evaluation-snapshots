@@ -31,7 +31,9 @@ pnpm dev
 Open http://localhost:3000. The page is the demo and the documentation in one place: try
 the sources under the orb, tune the sliders, and copy the settings.
 
-`pnpm build` makes a production build and `pnpm typecheck` runs TypeScript alone.
+`pnpm build` makes a production build, `pnpm typecheck` runs TypeScript alone, and
+`pnpm test` runs the source-handoff tests (they use Node's own test runner, no extra
+packages).
 
 ### Host your own copy
 
@@ -56,6 +58,7 @@ any audio. Each file starts with a short licence notice; keep it (see
 | [`src/lib/orb/shaders.ts`](src/lib/orb/shaders.ts) | GLSL ES 3.00: a shared prelude (noise, the sphere lens, the voice ripple, lights, grain) and one fragment shader per look |
 | [`src/lib/orb/fluid.ts`](src/lib/orb/fluid.ts) | The voice's liquid: a 128 × 128 stable-fluids simulation per talking orb, plus an offset field that carries the colour. Add `?flow` or `?flow=grid` to the address to see it |
 | [`src/lib/orb/audio.ts`](src/lib/orb/audio.ts) | Web Audio: four self-calibrating bands, the microphone, this tab's audio, and a simulated voice |
+| [`src/lib/orb/handoff.ts`](src/lib/orb/handoff.ts) | The handoff between sources: ends the old source before the next opens, and fades the last heard levels to zero when a source fails or stops |
 | [`src/data/orb.ts`](src/data/orb.ts) | Types, palettes and defaults (the rest is this page's copy, and can go) |
 
 ```tsx

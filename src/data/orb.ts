@@ -408,6 +408,7 @@ export const ORB_LAB = {
       { path: "src/lib/orb/shaders.ts", body: "The four types, and the lens, noise, lights and grain they share." },
       { path: "src/lib/orb/fluid.ts", body: "The voice's liquid: a small stable-fluids simulation on the GPU." },
       { path: "src/lib/orb/audio.ts", body: "Web Audio: four calibrated bands, the mic, tab audio, a simulated voice." },
+      { path: "src/lib/orb/handoff.ts", body: "The source handoff: one source at a time, and a smooth fade to silence when one ends." },
       { path: "src/data/orb.ts", body: "Palettes, states, slider ranges and this page's words." },
     ],
   },

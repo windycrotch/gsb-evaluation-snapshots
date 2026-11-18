@@ -54,8 +54,8 @@ import {
   analyserForElement,
   openMicrophone,
   openTabAudio,
-  type LevelSource,
 } from "@/lib/orb/audio";
+import { VoiceHandoff, type OpenedVoice } from "@/lib/orb/handoff";
 import { cssColor, resolveColor } from "@/lib/orb/renderer";
 import { prefersReducedMotion } from "@/lib/motion";
 import { LinkError, fetchAudioLink, parseAudioLink, type AudioLink } from "./audio-link";
@@ -81,6 +81,12 @@ const INSIDE_PARAMS: Record<string, Partial<OrbParams>> = {
   drift: { ...QUIET, sphere: 0.85, warp: 0.8, speed: 1 },
   voice: {},
 };
+
+/* The idle voices: what the orb hears while nothing real plays, so every
+   state still has something to show. Attaching them through the handoffs
+   (below) is what ends whatever played before. */
+const idleVoice = (): OpenedVoice => ({ levels: new SimulatedVoice(1), stop: () => {} });
+const idleCaller = (): OpenedVoice => ({ levels: new SimulatedVoice(11, 0.85), stop: () => {} });
 
 /**
  * A section's head: its number and name small above the title on the left,
@@ -160,8 +166,12 @@ export default function VoiceOrbPage() {
   const [ground, setGround] = useState<Ground>("light");
   const [params, setParams] = useState<OrbParams>(ORB_PARAM_DEFAULTS);
   const [playing, setPlaying] = useState(false);
-  const [voice, setVoice] = useState<LevelSource | null>(null);
-  const [caller, setCaller] = useState<LevelSource | null>(null);
+  /* The handoffs are the page's two listeners: `voice` is what the stage
+     plays (sample, file, link, a YouTube tab share), `caller` is the
+     microphone. The orbs are given the handoffs themselves, so a source
+     change can never leave two sources driving one orb, and a source that
+     ends fades out instead of freezing (lib/orb/handoff.ts). */
+  const [handoff] = useState(() => ({ voice: new VoiceHandoff(), caller: new VoiceHandoff() }));
   const [micOn, setMicOn] = useState(false);
   const [micDenied, setMicDenied] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -181,8 +191,8 @@ export default function VoiceOrbPage() {
 
   const audioRef = useRef<HTMLAudioElement>(null);
   const youtube = useRef<YouTubeControls | null>(null);
-  const micStop = useRef<(() => void) | null>(null);
-  const tabStop = useRef<(() => void) | null>(null);
+  // Whether a tab-audio share is live for the YouTube player.
+  const tabSession = useRef(false);
   // A file just chosen plays as soon as its element is in.
   const playNext = useRef(false);
   const meterRefs = useRef<(HTMLSpanElement | null)[]>([]);
@@ -211,46 +221,33 @@ export default function VoiceOrbPage() {
 
   /* ---------- voice sources ---------- */
 
-  const stopMic = useCallback(() => {
-    micStop.current?.();
-    micStop.current = null;
-    setMicOn(false);
-  }, []);
+  /* Every change of what is heard goes through the handoffs: switching to a
+     new source ends the old one first (the microphone's tracks are released,
+     a tab share stops capturing, a file or the sample stops playing), and a
+     source that fails or ends fades the orb to silence rather than freezing
+     it on the last loud frame. */
 
-  const stopTab = useCallback(() => {
-    tabStop.current?.();
-    tabStop.current = null;
-    setTabHeard(null);
-  }, []);
-
-  const pauseAll = useCallback(() => {
-    audioRef.current?.pause();
-    youtube.current?.pause();
+  // A new source, file or video: end whatever played, settle the orb, and
+  // put the idle voices in until something real plays.
+  useEffect(() => {
+    tabSession.current = false;
     setPlaying(false);
-  }, []);
-
-  // Until something real plays, a simulated voice speaks for the agent and
-  // another for the caller, so every state has something to show. Play swaps
-  // in the real one; the microphone replaces the caller.
-  useEffect(() => {
-    setVoice(new SimulatedVoice(1));
-    setCaller(source === "microphone" ? null : new SimulatedVoice(11, 0.85));
-  }, [source, clip?.src, video?.id]);
-
-  // Leaving a source releases it and settles the orb.
-  useEffect(() => {
-    pauseAll();
+    setMicOn(false);
+    setTabHeard(null);
     setState((current) => (current === "talking" || current === "listening" ? "ready" : current));
-    if (source !== "microphone") stopMic();
-    if (source !== "link") stopTab();
-  }, [source, pauseAll, stopMic, stopTab]);
+    void handoff.voice.switchTo(idleVoice);
+    // The microphone has no idle caller: silence until it is turned on.
+    if (source === "microphone") handoff.caller.release();
+    else void handoff.caller.switchTo(idleCaller);
+  }, [source, clip?.src, video?.id, handoff]);
 
+  // Leaving the page ends both listeners.
   useEffect(
     () => () => {
-      stopMic();
-      stopTab();
+      handoff.voice.release();
+      handoff.caller.release();
     },
-    [stopMic, stopTab],
+    [handoff],
   );
 
   // A replaced file or link frees its object URL.
@@ -260,13 +257,14 @@ export default function VoiceOrbPage() {
   const startClip = useCallback(async () => {
     const audio = audioRef.current;
     if (!audio) return;
-    setVoice(new AnalyserLevels(analyserForElement(audio)));
-    try {
+    await handoff.voice.switchTo(async () => {
+      const analyser = analyserForElement(audio);
+      // Play inside the handoff: if the browser refuses, nothing is attached
+      // and the last heard levels fade out.
       await audio.play();
-    } catch {
-      /* Blocked until a press, or unplayable (onError says so). */
-    }
-  }, []);
+      return { levels: new AnalyserLevels(analyser), stop: () => audio.pause() };
+    });
+  }, [handoff]);
 
   // A file just chosen or dropped starts once its element has mounted.
   useEffect(() => {
@@ -276,7 +274,8 @@ export default function VoiceOrbPage() {
   }, [file, startClip]);
 
   const takeFile = (chosen: File) => {
-    pauseAll();
+    // Setting the file ends whatever plays now (the effect above) and the new
+    // clip starts once its element is in.
     setSource("file");
     setFileError(false);
     setFile({ src: URL.createObjectURL(chosen), title: chosen.name });
@@ -286,8 +285,11 @@ export default function VoiceOrbPage() {
   const loadLink = async () => {
     const text = linkText.trim() || ORB_LINK_EXAMPLE.url;
     const parsed = parseAudioLink(text);
-    pauseAll();
-    stopTab();
+    // Whatever plays now ends before the link is set up; if the link is
+    // invalid, the idle voice takes over and the message says what is wrong.
+    tabSession.current = false;
+    setPlaying(false);
+    void handoff.voice.switchTo(idleVoice);
     if (!parsed) {
       setLinkStatus("invalid");
       return;
@@ -313,18 +315,23 @@ export default function VoiceOrbPage() {
 
   const toggleMic = async () => {
     if (micOn) {
-      stopMic();
+      // Turning the microphone off releases its tracks and fades the orb.
+      handoff.caller.release();
+      setMicOn(false);
       setState("ready");
       return;
     }
-    try {
+    const result = await handoff.caller.switchTo(async () => {
       const mic = await openMicrophone();
-      micStop.current = mic.stop;
-      setCaller(new AnalyserLevels(mic.analyser));
+      return { levels: new AnalyserLevels(mic.analyser), stop: mic.stop };
+    });
+    if (result === "attached") {
       setMicOn(true);
       setMicDenied(false);
       setState("listening");
-    } catch {
+    } else if (result === "failed") {
+      // Declined or unavailable: the message says so, and the handoff fades
+      // whatever the caller heard before to zero.
       setMicDenied(true);
     }
   };
@@ -335,46 +342,68 @@ export default function VoiceOrbPage() {
     const player = youtube.current;
     if (!player) return;
     if (playing) {
+      // Pausing keeps the tab share open; the analyser hears the silence.
       player.pause();
       return;
     }
-    if (!tabStop.current) {
-      try {
+    if (!tabSession.current) {
+      const result = await handoff.voice.switchTo(async () => {
         const tab = await openTabAudio(() => {
-          tabStop.current = null;
+          // The share was ended from the browser's own UI.
+          tabSession.current = false;
           setTabHeard(false);
-          setVoice(new SimulatedVoice(1));
+          void handoff.voice.switchTo(idleVoice);
         });
-        tabStop.current = tab.stop;
-        setVoice(new AnalyserLevels(tab.analyser));
+        return {
+          levels: new AnalyserLevels(tab.analyser),
+          stop: () => {
+            tab.stop();
+            youtube.current?.pause();
+          },
+        };
+      });
+      if (result === "attached") {
+        tabSession.current = true;
         setTabHeard(true);
-      } catch {
-        setVoice(new SimulatedVoice(1));
+      } else if (result === "failed") {
+        // The share was declined or had no audio: say so and simulate.
         setTabHeard(false);
+        await handoff.voice.switchTo(idleVoice);
+      } else {
+        // Another source took over while the share prompt was open.
+        return;
       }
     }
     player.play();
   };
 
-  const onVideoState = useCallback((ytState: number) => {
-    if (ytState === YT_PLAYING) {
-      setPlaying(true);
-      setState("talking");
-    } else if (ytState === YT_PAUSED) {
-      setPlaying(false);
-      setState((current) => (current === "talking" ? "ready" : current));
-    } else if (ytState === YT_ENDED) {
-      setPlaying(false);
-      setState("settled");
-    }
-  }, []);
+  const onVideoState = useCallback(
+    (ytState: number) => {
+      if (ytState === YT_PLAYING) {
+        setPlaying(true);
+        setState("talking");
+      } else if (ytState === YT_PAUSED) {
+        setPlaying(false);
+        setState((current) => (current === "talking" ? "ready" : current));
+      } else if (ytState === YT_ENDED) {
+        // The video is over: end the tab share and fade the orb to silence.
+        tabSession.current = false;
+        handoff.voice.release();
+        setPlaying(false);
+        setState("settled");
+      }
+    },
+    [handoff],
+  );
 
   const togglePlay = async () => {
     if (source === "microphone") return toggleMic();
     if (video) return toggleVideo();
     const audio = audioRef.current;
     if (clip && audio) {
-      if (!audio.paused) audio.pause();
+      // Stopping ends the source (its stop pauses the element) and the last
+      // heard levels fade to zero.
+      if (!audio.paused) handoff.voice.release();
       else await startClip();
       return;
     }
@@ -417,10 +446,10 @@ export default function VoiceOrbPage() {
   const typeVoices = useMemo(() => ORB_VARIANTS.map((_, i) => new SimulatedVoice(61 + i)), []);
   const insideVoice = useMemo(() => new SimulatedVoice(81), []);
 
-  // The tuning preview mirrors the stage with its own readers of the same
-  // voices (a source read by two orbs would run at double speed).
-  const previewVoice = useMemo(() => voice?.twin?.() ?? null, [voice]);
-  const previewCaller = useMemo(() => caller?.twin?.() ?? null, [caller]);
+  // The tuning preview mirrors the stage with passive readers of the same
+  // handoffs (a source read by two orbs would run at double speed).
+  const previewVoice = useMemo(() => handoff.voice.twin(), [handoff]);
+  const previewCaller = useMemo(() => handoff.caller.twin(), [handoff]);
 
   return (
     <main className={`${styles.page} ${ground === "dark" ? styles.dark : ""}`}>
@@ -489,8 +518,8 @@ export default function VoiceOrbPage() {
                     palette={palette.id}
                     variant={variant}
                     state={state}
-                    voice={voice}
-                    caller={caller}
+                    voice={handoff.voice}
+                    caller={handoff.caller}
                     params={params}
                     // Shrinks with a phone's width rather than overflowing it.
                     size="min(320px, 70vw)"
@@ -607,6 +636,8 @@ export default function VoiceOrbPage() {
                 setState((current) => (current === "talking" ? "ready" : current));
               }}
               onEnded={() => {
+                // The clip is over: end the source and fade the orb to silence.
+                handoff.voice.release();
                 setPlaying(false);
                 setState("settled");
               }}
