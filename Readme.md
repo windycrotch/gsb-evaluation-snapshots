@@ -33,9 +33,13 @@ getDataURL(mimeType?: string, quality?: number): string;
 getCanvas(): HTMLCanvasElement;
 // returns a promise that resolves to an HTMLImageElement of the updated image
 genImage(mimeType?: string, quality?: number): Promise<HTMLImageElement>;
+// reports the viewfinder that was composited: { url, applied } or false
+viewfinder: false | { url: string; applied: boolean };
 ```
 
 If not provided, mimeType defaults to `image/jpeg` and quality defaults to `1`.
+
+When the effect uses a `viewfinder`, the result's `viewfinder` field tells you which URL was composited and that it was applied. If the texture cannot be loaded the promise rejects with an error whose message contains the viewfinder URL and the underlying reason (the original error is available as `error.cause`), so batch jobs can tell which image failed and why. Successful loads are cached per URL; failures are evicted so the next render retries.
 
 In a browser window, `getCanvas()` returns an `HTMLCanvasElement`. Use `getBlob(mimeType?, quality?): Promise<Blob>` to encode the result without building a data URL; it works everywhere, including Web Workers.
 
@@ -162,6 +166,11 @@ Higher performance when canvas blend modes are supported [caniuse.com/#feat=canv
 [MIT](http://www.opensource.org/licenses/mit-license.php)
 
 ## Changelog
+
+### Unreleased
+* The result object now reports the composited viewfinder as `viewfinder: { url, applied } | false`, so callers can verify which texture was used
+* Viewfinder load failures reject with an error naming the URL and the underlying reason (`error.cause`); the existing per-URL cache semantics are unchanged (successes are reused, failures are evicted and retried, concurrent renders share one load)
+* Added `TViewfinderResult` to the exported types
 
 ### 2.5.0
 * New effect `grain`: film grain (0–1) that shows most in the midtones. It scales with the image size and is the same on every run, so previews match full-size renders

@@ -74,12 +74,27 @@ export type TEffect = {
   readonly lightLeak: false | TLightLeak;
 };
 
+/** Reports which viewfinder texture was composited into a render. */
+export type TViewfinderResult = {
+  /** URL the viewfinder image was loaded from. */
+  readonly url: string;
+  /** Whether the texture was successfully composited into the result. */
+  readonly applied: boolean;
+};
+
 /**
  * The result of applying an effect. `C` is the canvas type the result lives
  * on: `HTMLCanvasElement` in a window (the default) and `OffscreenCanvas` in a
  * Web Worker, e.g. `vintagejs<OffscreenCanvas>(bitmap, effect)`.
  */
 export type TResult<C extends TCanvas = HTMLCanvasElement> = {
+  /**
+   * Info about the viewfinder that was composited, or `false` when the effect
+   * used no viewfinder. A failed viewfinder load rejects the render instead of
+   * producing a result, so a resolved result with a viewfinder has
+   * `applied: true`.
+   */
+  readonly viewfinder: false | TViewfinderResult;
   /** Only available on the main thread (`HTMLCanvasElement`); use `getBlob` in workers. */
   getDataURL(mimeType?: string, quality?: number): string;
   getCanvas(): C;

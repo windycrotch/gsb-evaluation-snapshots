@@ -4,6 +4,7 @@ import type {
   TDrawable,
   TResult,
   TUnaryFn,
+  TViewfinderResult,
 } from './types';
 
 import nullthrows from 'nullthrows';
@@ -143,7 +144,10 @@ export const loadImageWithCache = (() => {
   };
 })();
 
-export const getResult = <C extends TCanvas>(canvas: C): TResult<C> => {
+export const getResult = <C extends TCanvas>(
+  canvas: C,
+  viewfinder: false | TViewfinderResult = false,
+): TResult<C> => {
   const getDataURL = (
     mimeType: string = IMAGE_TYPE,
     quality: number = IMAGE_QUALITY,
@@ -157,6 +161,7 @@ export const getResult = <C extends TCanvas>(canvas: C): TResult<C> => {
   };
 
   return {
+    viewfinder,
     getDataURL,
     getCanvas(): C {
       return canvas;

@@ -19,6 +19,7 @@ export type {
   TRGBAColor,
   TRGBColor,
   TSource,
+  TViewfinderResult,
 } from './types';
 
 import {
@@ -94,6 +95,14 @@ const getLUT = (effect: TEffect): Array<TUint8Array> => {
   }
   const idArr = new Uint8ClampedArray(256).map((_, idx) => idx);
   return [idArr.map(rMod), idArr.map(gMod), idArr.map(bMod)];
+};
+
+const viewfinderError = (url: string, err: unknown): Error => {
+  const reason = err instanceof Error ? err.message : String(err);
+  const error = new Error(`Could not apply viewfinder ${url}: ${reason}`);
+  // `cause` needs ES2022 typings; assign it without widening the lib.
+  (error as Error & { cause?: unknown }).cause = err;
+  return error;
 };
 
 const applyEffect = (effect: TEffect) => {
@@ -185,7 +194,8 @@ const applyEffect = (effect: TEffect) => {
         return resolve(getResult(canvas));
       }
 
-      return loadImageWithCache(effect.viewfinder).then(img => {
+      const viewfinderUrl = effect.viewfinder;
+      return loadImageWithCache(viewfinderUrl).then(img => {
         if (supportsBlendModes) {
           ctx.globalCompositeOperation = 'multiply';
           ctx.drawImage(img, 0, 0, width, height);
@@ -197,8 +207,12 @@ const applyEffect = (effect: TEffect) => {
           ctx.putImageData(imageData, 0, 0);
         }
 
-        return resolve(getResult(canvas));
-      }, reject);
+        return resolve(getResult(canvas, { url: viewfinderUrl, applied: true }));
+      }, err => {
+        // Reject with the URL and the underlying failure so a batch job can
+        // tell which render failed and why.
+        reject(viewfinderError(viewfinderUrl, err));
+      });
     });
 };
 
