@@ -1,0 +1,56 @@
+仅供学习交流使用许可
+
+Copyright (c) 2026 crazywaterworld contributors
+
+1. 适用范围
+
+本许可适用于权利人有权按本条款许可的本项目原创代码、文档及其修改版本。
+第三方组件和既有授权内容的适用条款见第 5 条。
+
+2. 授权范围
+
+在遵守本许可的前提下，仅允许为非商业性的学习、技术研究、教学和交流目的
+使用、复制、修改和免费分发本软件及其修改版本。
+
+3. 用途限制
+
+商业使用须事先取得相应权利人的书面授权，包括出售、收费分发、提供付费服务、
+商业代运营，以及将本软件或其修改版本整合进商业产品或服务。
+其他超出第 2 条授权范围的用途同样须取得相应权利人的书面授权。
+
+4. 分发条件
+
+分发本软件或其修改版本时，应保留版权声明、本许可全文及适用的第三方许可，
+并明确标注所作修改。分发和使用均须遵守本许可约定的用途范围。
+
+5. 第三方组件与既有授权
+
+第三方代码、依赖及其他单独授权的内容，依其各自许可证使用和分发。
+本许可自包含本许可更新的版本起适用。历史版本及原有贡献中已按 ISC 或其他
+许可证授予的权利，依其发布时的许可确定。原 ISC 许可声明保留于下方附录，
+适用于这些既有授权内容。
+
+6. 责任限制
+
+本软件按现状提供，使用者自行承担使用风险。在适用法律允许的范围内，
+作者及贡献者免除一切明示或默示担保，以及因使用本软件而产生的损失责任。
+
+---
+
+附录　既有授权内容的 ISC 许可声明
+
+ISC License
+
+Copyright (c) 2026 crazywaterworld contributors
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.

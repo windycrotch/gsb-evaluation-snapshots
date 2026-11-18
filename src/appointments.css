@@ -1,0 +1,24 @@
+.appointments-heading { display:flex; align-items:center; justify-content:space-between; gap:8px 20px; flex-wrap:wrap }
+.appointments-heading h4 { font-weight:500 }
+#appointments-state { font-size:12px }
+#appointments-state[data-error=true] { color:var(--destructive) }
+#appointments-help { margin:6px 0 12px; line-height:1.6 }
+.appointments-priorities { margin:0; padding:0; list-style:none }
+.appointments-priority { display:grid; grid-template-columns:32px 20px minmax(0,1fr) auto; align-items:center; gap:8px; position:relative; min-height:52px; border-bottom:1px solid var(--border); padding:6px 0 }
+.appointments-priority:last-child { border-bottom:0 }
+.appointments-drag { width:32px; min-height:36px; padding:0; cursor:grab; touch-action:none; user-select:none }
+.appointments-drag:active { cursor:grabbing }
+.appointments-grip { display:inline-block; width:10px; height:16px; background:radial-gradient(circle,currentColor 1px,transparent 1.5px) 0 0 / 5px 5px; color:var(--muted-foreground) }
+.appointments-number { color:var(--muted-foreground); font-size:12px; font-variant-numeric:tabular-nums }
+.appointments-label { min-width:0; line-height:1.5 }
+.appointments-tools { display:flex; gap:4px }
+.appointments-tools button { white-space:nowrap }
+.appointments-priority[data-dragging=true] { opacity:.5 }
+.appointments-priority[data-drop=before]::before,.appointments-priority[data-drop=after]::after { content:''; position:absolute; left:0; right:0; height:2px; background:var(--primary); pointer-events:none }
+.appointments-priority[data-drop=before]::before { top:0 }
+.appointments-priority[data-drop=after]::after { bottom:0 }
+@media (max-width:420px) {
+  .appointments-priority { grid-template-columns:28px 14px minmax(0,1fr) auto; gap:5px }
+  .appointments-drag { width:28px }
+  .appointments-tools button { padding-inline:7px }
+}

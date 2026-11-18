@@ -1,0 +1,72 @@
+name: 问题反馈（附日志）
+description: 功能未执行、结果异常、掉线等问题，请附日志帮助定位。
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请先保留问题发生时的日志，不要先删除 data 目录或重新部署。
+        “已跳过”“等待确认”“材料扣款尚未确认”并不表示执行成功，请附上前后文。
+        希望异地登录后自动恢复时，请在登录设置开启自动重连，工具会按已配置的常规/深夜间隔、抖动和次数上限等待重连，再同步当前工厂、农田和库存。未运行挂机的账号恢复连接后保持挂机停止状态。
+        等待时间和已尝试次数会保存，重启后接续等待。等待期间修改登录设置会立即重算重试时间，页面刷新遵守等待。手动暂停、停止或断开会取消重试，关闭开关、凭证失效、协议错误或次数耗尽也会停止。
+        希望自行安排游戏时间时，上号前先暂停托管，退出游戏后手动恢复托管。同步读取失败会暂缓经营操作，自动重连或运行中的挂机会按相应策略重试，其他情况下由后续页面读取或开始挂机重试。已有相同问题的 issue 时，可直接到原帖补充日志。
+  - type: textarea
+    id: behavior
+    attributes:
+      label: 问题现象与复现步骤
+      description: 写明开启的功能、操作步骤、预期结果和实际结果。工厂/农田请写建筑和产品、手动生产/收成品/改种的情况，以及自动重连或恢复托管后的同步结果。海兽请写驻扎建筑及目标，舰队问题请写编号。
+      placeholder: |
+        1. 开启了……
+        2. 等待……后，日志显示……
+        预期：……
+        实际：……
+    validations:
+      required: true
+  - type: input
+    id: occurred_at
+    attributes:
+      label: 发生时间（北京时间）
+      placeholder: 2026-11-16 22:43 左右
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: 版本与启动方式
+      description: 可运行 git rev-parse --short HEAD 和 node -v；无法获取时请写下载日期或来源。
+      placeholder: |
+        工具版本/提交号：
+        Node.js 版本：
+        启动方式（npm start / start-console.cmd / 其他）：
+        游戏渠道（微信/抖音）：
+    validations:
+      required: true
+  - type: dropdown
+    id: concurrent_login
+    attributes:
+      label: 问题发生前后是否在游戏客户端登录了同一账号？
+      options:
+        - 没有同时上号
+        - 上号前已暂停托管
+        - 上号时没有暂停托管
+        - 不确定
+    validations:
+      required: true
+  - type: textarea
+    id: settings
+    attributes:
+      label: 相关设置
+      description: 附上挂机模块开关、对应详细配置截图；掉线/顶号问题请附登录设置，以及等待期间是否修改设置、重启或手动暂停/停止/断开。请遮去不相关个人信息。
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 诊断日志（可上传 ZIP）
+      description: |
+        复现后及时复制数据目录中的 protocol.log 和 protocol.log.1（如有），压缩后拖入此处。
+        默认目录是项目的 data/；设置了 CW_DATA_DIR 时使用该目录。日志轮转可能覆盖旧内容，请包含发生时间前后记录。
+        登录凭据写入前会脱敏。不要上传整个 data/、accounts.json、账号导出文件或登录凭据。
+        若无法取得日志，请说明原因；仅截图通常无法定位请求和回包问题。
+      placeholder: 在此拖入日志或 ZIP，也可说明无法提供日志的原因。
+    validations:
+      required: true

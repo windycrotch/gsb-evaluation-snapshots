@@ -1,0 +1,112 @@
+@layer page {
+  .page {
+    max-width: 980px;
+    margin: 0 auto;
+    padding: 8px 0 36px;
+  }
+  .heading {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px;
+    padding: 8px 0 24px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 20px;
+  }
+  .state {
+    flex: none;
+  }
+  .state[data-kind="error"],
+  .error {
+    color: var(--destructive);
+  }
+  .card {
+    margin-bottom: 16px;
+  }
+  .card p {
+    line-height: 1.5;
+  }
+  .toggleRow {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 20px;
+    padding: 4px 0;
+  }
+  .toggleRow > div {
+    display: grid;
+    gap: 4px;
+    min-width: 0;
+  }
+  .toggleRow strong {
+    font-size: 15px;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px 22px;
+    margin-top: 18px;
+  }
+  .grid label {
+    display: grid;
+    gap: 8px;
+    color: var(--muted-foreground);
+    font-weight: 400;
+  }
+  .grid label > span:first-child {
+    font-size: 13px;
+  }
+  .field {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--muted-foreground);
+  }
+  .field input {
+    flex: 1;
+    min-width: 0;
+    width: 100%;
+  }
+  .note {
+    margin-top: 12px;
+    font-size: 12px;
+  }
+  .timeGrid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .timeGrid input {
+    width: 100%;
+  }
+  .retryGrid {
+    grid-template-columns: minmax(0, 330px);
+  }
+  .actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 4px;
+    flex-wrap: wrap;
+  }
+  @media (max-width: 700px) {
+    .page {
+      padding-inline: 0;
+    }
+    .heading {
+      align-items: flex-start;
+      flex-direction: column;
+    }
+    .state {
+      align-self: flex-start;
+    }
+    .grid,
+    .timeGrid {
+      grid-template-columns: 1fr;
+    }
+    .actions {
+      justify-content: stretch;
+    }
+    .actions button {
+      flex: 1;
+    }
+  }
+}

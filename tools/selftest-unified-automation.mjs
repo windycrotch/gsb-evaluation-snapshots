@@ -1,0 +1,80 @@
+import assert from 'node:assert/strict';
+import fs from'node:fs';import os from'node:os';import path from'node:path';
+import {pirateAdvanceFixture}from'./fixtures/pirate-advance.mjs';
+import {runPirateAdvance,runSinglePirateHunt}from'../src/pirate-advance.mjs';
+import {inspectHunt}from'../src/pirates.mjs';
+import {dispatchReservationReason}from'../src/fleet-availability.mjs';
+import {settleFleetSnapshot}from'../src/fleet-settlement.mjs';
+import {collectAntiqueFloaters}from'../src/antique-floaters.mjs';
+import {createUsageLedger,defaultSettings,importAutomationSettings,SETTINGS_FORMAT}from'../src/automation-settings.mjs';
+import {automationControls,setAutomationControl}from'../src/automation-controls.mjs';
+import {treasureFixture,treasureSettings}from'./fixtures/treasure-loot.mjs';
+import {warForgeFixture,warForgeSettings}from'./fixtures/war-forge.mjs';
+import {readTreasureLoot,planTreasureLoot}from'../src/treasure-loot.mjs';
+import {readCityWar,planCityWar}from'../src/city-war.mjs';
+const dir=fs.mkdtempSync(path.join(os.tmpdir(),'cw-advance-test-'));let count=0;
+const ledger=()=>createUsageLedger('a',{file:path.join(dir,'ledger-'+(++count)+'.json')});
+const run=(f,extra={})=>runPirateAdvance({...f,options:f.settings.pirateHunt,ledger:f.ledger??ledger(),getSettings:()=>f.settings,enabled:()=>true,sleep:async()=>{},...extra});
+let tests=0;const test=async(name,fn)=>{await fn();tests++;console.log('通过：'+name);};
+await test('实际协议连续首杀1→2→3，仅个人记录确认才推进',async()=>{const f=pirateAdvanceFixture();const r=await run(f);assert.equal(r.wins,3);assert.equal(r.spent,900);assert.deepEqual(f.client.writes.map(x=>x.body.uid),[201,202,203]);});
+await test('战败即停止，不重复撞同一等级',async()=>{const f=pirateAdvanceFixture({mode:'lose'});const r=await run(f);assert.match(r.reason,/战败/);assert.equal(f.client.writes.length,1);});
+await test('等级、实际汽油库存、耐久和编队门控',async()=>{
+ for(const mutate of [f=>f.state.fuel=299,f=>f.fleet.durability=1,f=>f.building.fleet.formation.heroPositions=[],f=>f.state.stage=99]){const f=pirateAdvanceFixture();mutate(f);await run(f);assert.equal(f.client.writes.length,0);}
+ const f=pirateAdvanceFixture();f.settings.pirateHunt.maxLevel=1;assert.equal((await run(f)).wins,1);assert.equal(f.client.writes.length,1);
+});
+await test('旧汽油保留量与本次预算不再阻止连续首杀',async()=>{const f=pirateAdvanceFixture();Object.assign(f.settings.pirateHunt,{petrolReserve:3000,fuelBudget:1});const r=await run(f);assert.equal(r.wins,3);assert.equal(r.spent,900);assert.equal(f.client.writes.length,3);});
+await test('单次手动首杀忽略旧汽油限制，仍扣除其他任务待确认费用',async()=>{
+ for(const pending of [0,1]){
+  const f=pirateAdvanceFixture(),l=ledger();f.state.fuel=300;Object.assign(f.settings.pirateHunt,{petrolReserve:3000,fuelBudget:1});
+  if(pending)l.reserve({siliconPetrol:pending},{},{},{uniqueKey:'silicon-pending'});
+  const snap=await inspectHunt(f.client,f.config,f.player),act=()=>runSinglePirateHunt(f.client,f.config,f.player,{targetKey:snap.view.targets[0].targetKey,fleetKey:snap.view.fleets[0].key,enabled:()=>true,getSettings:()=>f.settings,ledger:l});
+  if(pending){await assert.rejects(act,/汽油不足/);assert.equal(f.client.writes.length,0);}else{await act();assert.equal(f.client.writes.length,1);assert.equal(l.confirmedCounters().piratePetrol,300);}
+ }
+});
+await test('仅配置重叠不阻止首杀，实际空闲舰队允许递进',async()=>{for(const key of ['treasure','cityWar']){const f=pirateAdvanceFixture();f.settings[key].enabled=true;f.settings[key].fleetIds=['1远征船'];const r=await run(f);assert.equal(r.wins,3);assert.equal(f.client.writes.length,3);}});
+await test('未知派遣跨重建和再次开启仍不重复',async()=>{const f=pirateAdvanceFixture({mode:'unknown'});f.ledger=ledger();assert.match((await run(f)).reason,/未知/);const again=pirateAdvanceFixture();again.ledger=f.ledger;assert.match((await run(again)).reason,/待确认/);assert.equal(again.client.writes.length,0);});
+await test('暂停及时停止，已发出的任务不强制召回',async()=>{const f=pirateAdvanceFixture({mode:'wait'}),controller=new AbortController();await run(f,{signal:controller.signal,onState:()=>controller.abort(new Error('手动停止'))});assert.equal(f.client.writes.length,1);});
+await test('首杀漏收战果但舰队归队后停止连续推进并释放意向预留',async()=>{
+ const f=pirateAdvanceFixture({mode:'wait'}),l=ledger();let waits=0;
+ const result=await run(f,{ledger:l,sleep:async()=>{
+  assert.equal(++waits,1);Object.assign(f.fleet,{state:1,curGridIdx:0,targetGridIdx:0});
+ }});
+ assert.match(result.reason,/已归队.*战果仍待确认/);assert.equal(f.client.writes.length,1);
+ const record=Object.values(l.keyRecords())[0];assert.equal(record.details.active,false);assert.equal(record.details.outcome,'started');
+ assert.equal(l.confirmedCounters().piratePetrol,300);assert.equal(dispatchReservationReason(f.client,f.settings,'treasure','1远征船'),'');
+ const resumed=pirateAdvanceFixture();resumed.ledger=l;assert.match((await run(resumed)).reason,/待确认/);assert.equal(resumed.client.writes.length,0);
+});
+await test('舰队先释放占用后读到迟到个人首杀胜利，连续推进仍能前往下一等级',async()=>{
+ const f=pirateAdvanceFixture({mode:'wait'}),l=ledger();let waits=0;
+ f.settings.pirateHunt.maxLevel=2;
+ const result=await run(f,{ledger:l,sleep:async()=>{
+  assert(++waits<=2);Object.assign(f.fleet,{state:1,curGridIdx:0,targetGridIdx:0});f.state.level=waits;
+ },prepareDispatch:async()=>{
+  settleFleetSnapshot(l,{worldId:f.player.worldId,fleets:[f.fleet],now:Math.floor(Date.now()/1000),kinds:['pirateFirst']});
+ }});
+ assert.equal(result.wins,2);assert.equal(f.client.writes.length,2);assert.equal(l.confirmedCounters().piratePetrol,600);
+});
+await test('发送前参数变化取消，不保留错误汽油额度',async()=>{const f=pirateAdvanceFixture();let on=true;const request=f.client.request;f.client.request=async(...a)=>{const r=await request(...a);if(a[0]==='WorldInfoRequest')on=false;return r;};const l=ledger();await run(f,{ledger:l,enabled:()=>on});assert.equal(f.client.writes.length,0);assert.equal(l.snapshot().uncertain,0);});
+await test('汽油库存延迟回写时仍按已派费用扣减可用库存',async()=>{const f=pirateAdvanceFixture();const request=f.client.request;f.client.request=async(...a)=>{const r=await request(...a);if(a[0]==='AllItemRequest')r.items.find(x=>x.itemId==='汽油').num=500;return r;};const r=await run(f);assert.equal(f.client.writes.length,1);assert.match(r.reason,/汽油不足/);});
+const chestConfig={tables:{GarbageProductionCfg:{data:[{id:'深海宝箱1',type:'打捞',production:['藏品蓝1碎片',1]},{id:'塑料垃圾1',type:'拾取',production:['塑料',1]}]}},materialName:id=>id};
+await test('藏品独立开关、10秒等待、真实协议确认奖励且不捞原料',async()=>{const f=pirateAdvanceFixture(),l=ledger(),out=[];let t=100;const act=()=>collectAntiqueFloaters(f.client,chestConfig,{enabled:()=>true,ledger:l,now:()=>t,report:e=>out.push(e)});await act();assert.equal(f.client.writes.length,0);t=111;await act();assert.equal(f.client.writes.length,1);assert.deepEqual(f.client.writes[0].body.floaterId,['深海宝箱1']);assert(out.some(e=>e.ok));await act();assert.equal(f.client.writes.length,1);});
+await test('藏品只读预览与关闭均不发送',async()=>{const f=pirateAdvanceFixture();const out=[];await collectAntiqueFloaters(f.client,chestConfig,{enabled:()=>true,dryRun:true,report:e=>out.push(e)});assert(out.some(e=>e.planned));await collectAntiqueFloaters(f.client,chestConfig,{enabled:()=>false,report:()=>assert.fail()});assert.equal(f.client.writes.length,0);});
+await test('藏品拒绝等待、未知跨重建不重复',async()=>{for(const mode of ['denied','unknown']){const f=pirateAdvanceFixture(),l=ledger();f.state.pickMode=mode;const opts={enabled:()=>true,ledger:l,report:()=>{},now:()=>100};await collectAntiqueFloaters(f.client,chestConfig,opts);try{await collectAntiqueFloaters(f.client,chestConfig,{...opts,now:()=>111});}catch(e){assert.equal(mode,'unknown');}await collectAntiqueFloaters(f.client,chestConfig,{...opts,now:()=>122});assert.equal(f.client.writes.length,1);if(mode==='unknown'){const again=pirateAdvanceFixture();await collectAntiqueFloaters(again.client,chestConfig,{...opts,now:()=>1000});assert.equal(again.client.writes.length,0);}}});
+await test('控制项唯一，修改建筑领取不连带改工厂领取，原始设置不变',async()=>{const all=automationControls.flatMap(c=>c.fields);assert.equal(new Set(all).size,all.length);const s=defaultSettings();s.factory.gain=false;s.building.collect=true;const old=structuredClone(s),n=setAutomationControl(s,'building.collect',false);assert.equal(n.factory.gain,false);assert.deepEqual(s,old);assert.equal(n.building.collect,false);});
+await test('旧版导入只补新默认，不更改原值',async()=>{const s=defaultSettings();delete s.pirateHunt;delete s.gather.antiqueFloaters;delete s.schedule.antiqueFloaters;delete s.schedule.heroRecruitRewards;s.building.collect=false;s.factory.gain=true;const n=importAutomationSettings({format:SETTINGS_FORMAT,version:1,settings:s});assert.equal(n.building.collect,false);assert.equal(n.factory.gain,true);assert.equal(n.gather.antiqueFloaters,false);assert.deepEqual(n.pirateHunt.fleetIds,[]);});
+await test('未确认首杀占用阻止巨轮与城战抢用同一舰队',async()=>{
+ const f=treasureFixture(),settings=treasureSettings(),snapshot=await readTreasureLoot(f.client,f.protocol,f.config,f.player);const keys={['pirate-first:'+snapshot.worldId+':1:1:201']:{confirmed:false,details:{buildingId:'1远征船',outcome:'unknown'}}};
+ const plan=planTreasureLoot(snapshot,f.config,settings,{keys});assert(!plan.actions.some(x=>x.buildingId==='1远征船'));assert(plan.notes.some(n=>/待确认/.test(n)));
+ const w=warForgeFixture(),ws=warForgeSettings(),war=await readCityWar(w.client,w.protocol,w.config,w.player,ws.cityWar,{mapLoader:w.mapLoader});war.attackDura=w.config.tables.WorldParamCfg.data.find(r=>r.paramName==='攻城战消耗耐久').paramValue;
+ const wp=planCityWar(war,ws,{keys:{['pirate-first:'+war.worldId+':1:1:201']:{confirmed:true,details:{buildingId:'1远征船',outcome:'started'}}}});assert(!wp.actions.some(x=>x.buildingId==='1远征船'));assert(wp.notes.some(n=>/首杀战果尚未确认/.test(n)));
+});
+await test('隔离HTTP控制保存、旧版本拒绝、账号隔离与暂停首杀拦截',async()=>{
+ process.env.CW_DATA_DIR=path.join(dir,'http');fs.mkdirSync(process.env.CW_DATA_DIR);
+ fs.writeFileSync(path.join(process.env.CW_DATA_DIR,'accounts.json'),JSON.stringify({version:1,activeId:'http-a',accounts:['a','b'].map(id=>({id:'http-'+id,label:'虚构 '+id,url:'ws://127.0.0.1:1',login:{},automation:{paused:true}}))}));
+ const {createConsole}=await import('../src/server.mjs');const app=createConsole({port:0});await app.listen();
+ const api=async(route,body,account='http-a')=>{const r=await fetch('http://127.0.0.1:'+app.server.address().port+'/api/'+route+'?account='+account,{method:body?'POST':'GET',headers:{'content-type':'application/json'},...(body?{body:JSON.stringify(body)}:{})});return{status:r.status,data:await r.json()};};
+ try{const a=await api('settings'),b=await api('settings',null,'http-b');const saved=await api('loop/control',{confirm:true,key:'building.collect',enabled:false,revision:a.data.revision});assert.equal(saved.status,200);assert.equal(saved.data.controls.find(x=>x.key==='building.collect').enabled,false);assert.equal((await api('settings')).data.settings.factory.gain,a.data.settings.factory.gain);
+ assert.equal((await api('loop/control',{confirm:true,key:'factory.gain',enabled:false,revision:a.data.revision})).status,400);assert.deepEqual((await api('settings',null,'http-b')).data.settings,b.data.settings);assert.equal((await api('pirates/advance/start',{confirm:true})).status,400);assert(!app.sessions.get('http-a').client);
+ }finally{await app.close();delete process.env.CW_DATA_DIR;}
+});
+console.log('统一挂机/首杀/藏品专项 '+tests+'/'+tests+' 通过');

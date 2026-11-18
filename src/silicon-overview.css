@@ -1,0 +1,66 @@
+.silicon-toolbar,.silicon-mine-heading,.silicon-fleet-heading { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px }
+.silicon-toolbar { margin-bottom:16px; font-size:12px }
+#silicon-refresh-seconds { width:72px }
+.silicon-summary { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:16px; margin-bottom:18px }
+.silicon-summary:empty,.silicon-fleets:empty,.silicon-mines:empty { display:none }
+.silicon-stat { display:flex; flex-direction:column; gap:5px; min-width:0; padding-left:12px; border-left:2px solid var(--border) }
+.silicon-stat>strong { font-size:20px; font-weight:600; font-variant-numeric:tabular-nums }
+.silicon-stat>span:first-child,.silicon-stat>small { font-size:12px }
+.silicon-stat>.silicon-countdown { font-weight:600; line-height:28px }
+.silicon-fleets,.silicon-mines { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; margin-bottom:16px }
+.silicon-fleet { min-width:0; padding:12px; background:var(--muted); border-radius:var(--radius) }
+.silicon-fleet-heading h3,.silicon-mine-heading h3 { font-size:14px; font-weight:600; display:flex; align-items:center; gap:10px }
+.silicon-fleet-heading>span,.silicon-fleet .dim { font-size:12px }
+.silicon-mining-status { color:var(--success); font-weight:600 }
+.silicon-fleet-location { margin-block:8px 4px; font-size:13px }
+.silicon-countdown { font-variant-numeric:tabular-nums; font-size:13px }
+.silicon-facts { display:grid; grid-template-columns:auto minmax(0,1fr); gap:4px 12px; margin-block:10px; font-size:12px }
+.silicon-facts dt { color:var(--muted-foreground) }
+.silicon-facts dd { text-align:right; overflow-wrap:anywhere; font-variant-numeric:tabular-nums }
+.silicon-mine { --mine-color:#2563eb; min-width:0; padding:14px; border:1px solid var(--border); border-top:3px solid var(--mine-color); border-radius:var(--radius); display:flex; flex-direction:column }
+.silicon-mine[data-tier=PURPLE] { --mine-color:#9333ea }
+.silicon-mine[data-tier=ORANGE] { --mine-color:#b45309 }
+[data-theme=dark] .silicon-mine[data-tier=BLUE] { --mine-color:#60a5fa }
+[data-theme=dark] .silicon-mine[data-tier=PURPLE] { --mine-color:#c084fc }
+[data-theme=dark] .silicon-mine[data-tier=ORANGE] { --mine-color:#fbbf24 }
+.silicon-crystal { width:12px; height:16px; flex:none; background:color-mix(in srgb,var(--mine-color) 18%,var(--card)); border:2px solid var(--mine-color); transform:rotate(30deg); border-radius:3px }
+.silicon-mine-heading>.dim { font-size:11px }
+.silicon-mine-count { font-size:12px; margin-block:12px }
+.silicon-slots { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:6px }
+.silicon-mine[data-tier=BLUE] .silicon-slots { grid-template-columns:repeat(3,minmax(0,1fr)) }
+.silicon-slot { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px; min-height:48px; padding:6px; border:1px solid var(--border); border-radius:6px; background:var(--card); color:var(--muted-foreground); cursor:pointer }
+.silicon-slot small { font-size:10px }
+.silicon-slot>span { font-size:13px; font-variant-numeric:tabular-nums }
+.silicon-slot[data-relation=empty] { border-style:dashed }
+.silicon-slot[data-relation=self] { background:var(--success-muted); color:var(--success); border-color:var(--success-border) }
+.silicon-slot[data-relation=ally] { color:var(--mine-color); background:color-mix(in srgb,var(--mine-color) 9%,var(--card)) }
+.silicon-slot[data-relation=other] { background:var(--muted); color:var(--foreground) }
+.silicon-slot[aria-expanded=true] { outline:2px solid var(--mine-color); outline-offset:1px }
+.silicon-slot:focus-visible { outline:2px solid var(--ring); outline-offset:3px }
+.silicon-slot-help { margin-top:10px; font-size:11px }
+#silicon-slot-popover { position:fixed; z-index:100; width:min(310px,calc(100vw - 24px)); padding:14px; border:1px solid var(--border); border-radius:var(--radius); background:var(--popover); color:var(--popover-foreground); box-shadow:0 8px 28px #0002; font-size:12px; overflow:auto; overscroll-behavior:contain; overflow-wrap:anywhere }
+#silicon-slot-popover[hidden] { display:none }
+.silicon-popover-heading { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:10px }
+.silicon-popover-heading strong { font-weight:600; min-width:0 }
+.silicon-popover-heading button { flex:none }
+#silicon-slot-popover .silicon-facts { grid-template-columns:auto minmax(0,1fr) }
+.silicon-rewards { margin-top:auto; padding-top:14px; font-size:11px }
+.silicon-rewards ul { display:flex; flex-wrap:wrap; gap:5px; margin-top:6px }
+.silicon-rewards li { background:var(--muted); padding:3px 6px; border-radius:4px }
+.silicon-empty { grid-column:1/-1; padding-block:8px }
+#silicon-notes { font-size:12px; line-height:1.7 }
+.silicon-feedback { margin-bottom:14px; padding:10px 12px; border:1px solid var(--border); border-radius:6px; font-size:13px; overflow-wrap:anywhere }
+#silicon-slot-popover [data-silicon-action],.silicon-fleet [data-silicon-action] { margin-top:10px }
+#silicon-action-dialog { width:min(520px,calc(100vw - 32px)) }
+#silicon-action-body { display:grid; gap:12px; margin-block:18px; font-size:13px; overflow-wrap:anywhere }
+.silicon-action-cost { font-weight:600; font-variant-numeric:tabular-nums }
+.silicon-action-fleets { display:grid; gap:8px; min-width:0 }
+.silicon-action-fleets legend { font-size:12px; color:var(--muted-foreground); margin-bottom:8px }
+.silicon-action-fleet { display:flex; align-items:center; gap:10px; padding:10px; border:1px solid var(--border); border-radius:6px; cursor:pointer; min-width:0 }
+.silicon-action-fleet:has(input:checked) { border-color:var(--ring); background:var(--muted) }
+.silicon-action-fleet.is-unavailable { cursor:default }
+.silicon-action-fleet>span { display:grid; gap:4px; min-width:0 }
+.silicon-action-fleet .dim,.silicon-action-fleet small { font-size:12px }
+.silicon-action-fleet input { flex:none }
+@media(max-width:900px) { .silicon-mines { grid-template-columns:repeat(2,minmax(0,1fr)) } .silicon-summary { grid-template-columns:repeat(2,minmax(0,1fr)) } }
+@media(max-width:600px) { .silicon-fleets,.silicon-mines { grid-template-columns:minmax(0,1fr) } .silicon-stat>strong { font-size:18px } .silicon-summary { gap:14px 10px } }

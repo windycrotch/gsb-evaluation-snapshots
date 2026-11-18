@@ -1,0 +1,269 @@
+import os from 'node:os';
+import assert from 'node:assert/strict';import fs from'node:fs';import path from'node:path';
+import { createUsageLedger, defaultSettings, saveAutomationSettings } from '../src/automation-settings.mjs';
+import { readMutualAid, mutualOptions, runGuildMutual, createGuildMutualTask, loadMutualPreset, saveMutualPreset } from '../src/guild-mutual.mjs';
+import { guildMutualFixture } from './fixtures/guild-mutual.mjs';
+const base=path.join(os.tmpdir(),'cw-guild-mutual-tests');fs.mkdirSync(base,{recursive:true});const dir=fs.mkdtempSync(path.join(base,'run-'));process.env.CW_DATA_DIR=dir;
+let serial=0;const results=[];const ledger=()=>createUsageLedger('qa',{file:path.join(dir,'ledger-'+serial+++'.json')});
+const context=(f,l)=>({...f,ledger:l,enabled:()=>f.client.connected,schedule:work=>work()});
+const run=(f,l,options,extra={})=>runGuildMutual(context(f,l),options,{wait:async()=>{},...extra});
+const check=async(name,work)=>{try{await work();results.push({name,passed:true});console.log('通过：'+name);}catch(e){results.push({name,passed:false,error:e.stack});console.error('失败：'+name+'\n'+e.stack);}};
+try{
+ await check('范围与0–20边界，指定盟友不能空选或用不精确ID',()=>{assert.equal(mutualOptions().target,20);for(const v of [-1,21,1.5,'20'])assert.throws(()=>mutualOptions({target:v}));assert.throws(()=>mutualOptions({mode:'selected'}));assert.throws(()=>mutualOptions({mode:'selected',memberIds:['9e16']}));assert.throws(()=>mutualOptions({askEnabled:true}));assert.equal(mutualOptions({target:0}).target,0);});
+ await check('互助预设按账号保存，未填完的选择不丢失且不能直接启动',()=>{
+  const preset={target:7,mode:'selected',memberIds:[],askEnabled:true,askTarget:9,askItemId:'',checkEverySeconds:1};
+  assert.deepEqual(saveMutualPreset('preset-a',preset),preset);assert.deepEqual(loadMutualPreset('preset-a'),preset);assert.equal(loadMutualPreset('preset-b').checkEverySeconds,15);assert.equal(loadMutualPreset('preset-b').target,20);
+  assert.throws(()=>mutualOptions(loadMutualPreset('preset-a')));assert.equal(createGuildMutualTask().view().running,false);
+  const selected={...preset,memberIds:['9007199254740995'],askItemId:'橡胶圈',mode:'all'};saveMutualPreset('preset-a',selected);assert.deepEqual(loadMutualPreset('preset-a').memberIds,selected.memberIds);
+  for(const checkEverySeconds of [0,-1,301,1.5,'1'])assert.throws(()=>saveMutualPreset('preset-a',{...selected,checkEverySeconds}));assert.deepEqual(loadMutualPreset('preset-a'),selected);
+ });
+ await check('自定等待间隔用于缺料检查，成功赠送节奏仍为一秒',async()=>{
+  const f=guildMutualFixture(),waits=[],steps=[];f.state.stock.橡胶圈=0;
+  const result=await run(f,ledger(),{target:1,checkEverySeconds:2},{wait:async ms=>{waits.push(ms);f.state.stock.橡胶圈=1;},onStep:step=>steps.push(step)});
+  assert.equal(result.sent,1);assert.deepEqual(waits,[2000,1000]);assert(steps.some(step=>/2秒后再检查/.test(step.reason)));
+ });
+ await check('前端预设保存串行处理后续编辑，切号与旧响应不会覆盖草稿',async()=>{
+  const source=fs.readFileSync(new URL('../src/ui/progression.js',import.meta.url),'utf8'),from=source.indexOf('function mutualPresetValues('),to=source.indexOf('function renderGuildMutual(',from);
+  assert(from>=0&&to>from);const drafts=new Map(),calls=[];let release;
+  const api=new Function('mutualDrafts','mutualWidgets','call',source.slice(from,to)+'; return {save:saveGuildMutualDraft};')(drafts,new Map(),async(route,request)=>{calls.push({route,payload:JSON.parse(request.body)});if(calls.length===1)await new Promise(resolve=>{release=resolve});return {preset:calls.at(-1).payload};});
+  const a={...mutualOptions(),version:1,savedVersion:0,valid:true,saving:null};drafts.set('a',a);drafts.set('b',{...mutualOptions(),target:3,version:1,savedVersion:0,valid:true,saving:null});
+  const first=api.save('a');a.target=8;a.version++;const again=api.save('a');await api.save('b');assert.equal(calls.length,2);release();await Promise.all([first,again]);
+  assert.deepEqual(calls.map(row=>row.route),['/api/guild/mutual/preset?account=a','/api/guild/mutual/preset?account=b','/api/guild/mutual/preset?account=a']);assert.equal(calls[2].payload.target,8);assert.equal(a.target,8);assert.equal(a.savedVersion,2);assert.equal(drafts.get('b').target,3);
+ });
+ await check('保存尚未回包时清空赠送或求助目标不落盘为0，补完后续存',async()=>{
+  const source=fs.readFileSync(new URL('../src/ui/progression.js',import.meta.url),'utf8'),from=source.indexOf('const mutualDrafts ='),to=source.indexOf('async function refreshGuildMutualState(',from);
+  assert(from>=0&&to>from);
+  for(const label of ['本工具今日赠送目标','游戏今日发起求助目标']){
+   const nodes=[],calls=[];let release;
+   function node(tag,cls,text=''){
+    const n={tag,cls,textContent:text,value:'',children:[],attrs:{},isConnected:true,
+     setAttribute(key,value){this.attrs[key]=value;},append(...items){this.children.push(...items);},add(option){this.children.push(option);},
+     querySelectorAll(tag){return this.children.flatMap(child=>[...(child.tag===tag?[child]:[]),...(child.querySelectorAll?.(tag)??[])]);},
+     checkValidity(){return !(this.required&&this.value==='')&&Number.isSafeInteger(Number(this.value))&&Number(this.value)>=Number(this.min)&&Number(this.value)<=Number(this.max);},
+     reportValidity(){return this.checkValidity();}};nodes.push(n);return n;
+   }
+   const env={node,call:async(route,request)=>{calls.push({route,payload:JSON.parse(request.body)});if(calls.length===1)await new Promise(resolve=>{release=resolve});return {preset:calls.at(-1).payload};}};
+   const api=new Function('env',`const current='a',snapshot={paused:false},disconnected=new Set(),el=env.node,clear=node=>{node.children=[];},smallButton=text=>el('button','',text),makeHelpTip=()=>el('span'),call=env.call,Option=function(text,value){this.text=text;this.value=value;};\n`+source.slice(from,to)+';return {render:renderGuildMutual,drafts:mutualDrafts};')(env);
+   api.render(node('div'),{preset:mutualOptions()},'a');
+   let input=nodes.find(n=>n.attrs['aria-label']===label);input.value='7';input.oninput();const draft=api.drafts.get('a'),pending=draft.saving;
+   input.value='';input.oninput();assert.equal(draft.valid,false);release();await pending;
+   assert.equal(calls.length,1);assert.equal(draft.savedVersion,1);assert.equal(draft.version,2);assert(nodes.some(n=>/预设尚未保存/.test(n.textContent)));
+   const field=label==='本工具今日赠送目标'?'target':'askTarget';assert.equal(draft[field],'');assert.equal(calls[0].payload[field],7);
+   api.render(node('div'),{preset:mutualOptions()},'a');input=nodes.filter(n=>n.attrs['aria-label']===label).at(-1);assert.equal(input.value,'');
+   input.value='9';input.oninput();await draft.saving;assert.equal(calls.length,2);assert.equal(calls[1].payload[field],9);assert.equal(draft.savedVersion,draft.version);assert.equal(draft.valid,true);
+  }
+ });
+ await check('仅一个橡胶圈完成20次相互赠送，每次一条，先收再送',async()=>{
+  const f=guildMutualFixture(),l=ledger();f.state.autoReturn=true;const result=await run(f,l,{target:20,mode:'selected',memberIds:[f.friend],askEnabled:true,askItemId:'橡胶圈',askTarget:20});
+  assert.equal(result.sent,20);assert.equal(result.received,20);assert.equal(result.published,20);assert.equal(f.state.stock.橡胶圈,1);assert.equal(f.state.peak,1);assert.equal(l.snapshot().counters.guildAidGifts,20);
+  const gifts=f.state.writes.filter(r=>r.name==='GuildAidHelpRequest');assert.equal(gifts.length,20);assert.equal(new Set(gifts.map(r=>r.id)).size,20);
+  const before=f.state.writes.length;await run(f,l,{target:20});assert.equal(f.state.writes.length,before);
+  const repeated=await run(f,l,{target:20,mode:'selected',memberIds:[f.friend],askEnabled:true,askItemId:'橡胶圈',askTarget:20});assert.match(repeated.reason,/已达到今日赠送目标20次/);assert.equal(f.state.writes.length,before);
+ });
+ await check('材料起初在盟友手上时也能循环并最后归还，不要求先备库存',async()=>{
+  const f=guildMutualFixture(),l=ledger();f.state.stock.橡胶圈=0;f.state.peak=0;f.state.peerStock=1;f.state.autoReturn=true;
+  const result=await run(f,l,{target:3,mode:'selected',memberIds:[f.friend],askEnabled:true,askItemId:'橡胶圈',askTarget:3},{wait:async ms=>{if(ms===15000)f.peerReturn();}});
+  assert.equal(result.sent,3);assert.equal(result.received,3);assert.equal(f.state.stock.橡胶圈,0);assert.equal(f.state.peerStock,1);assert.equal(f.state.peak,1);
+ });
+ await check('赠送到目标后只等最后回赠，收到后结束且不多送',async()=>{
+  const f=guildMutualFixture(),l=ledger();let waiting=0;
+  const result=await run(f,l,{target:1,askEnabled:true,askItemId:'橡胶圈',askTarget:1},{wait:async ms=>{if(ms===15000){waiting++;f.peerReturn();}}});
+  assert.equal(waiting,1);assert.equal(result.sent,1);assert.equal(result.received,1);assert.equal(f.state.stock.橡胶圈,1);
+ });
+ await check('旧的同材料求助未过期也不会导致收足回赠后无限等待',async()=>{
+  const f=guildMutualFixture(),l=ledger(),now=Math.floor(Date.now()/1000);f.state.autoReturn=true;
+  f.state.own=Array.from({length:20},(_,i)=>({reqId:String(9007199254780000n+BigInt(i)),reqItemId:'橡胶圈',endTime:now+3600}));
+  const r=await run(f,l,{target:20,askEnabled:true,askItemId:'橡胶圈',askTarget:20});assert.equal(r.sent,20);assert.equal(r.received,20);assert.equal(f.state.own.length,20);assert.equal(f.state.stock.橡胶圈,1);
+ });
+ await check('已有手动求助计入游戏目标，只发布剩余额度；0赠送不送材料',async()=>{
+  const f=guildMutualFixture(),l=ledger();f.state.askUsed=18;const result=await run(f,l,{target:0,askEnabled:true,askItemId:'橡胶圈',askTarget:20});
+  assert.equal(result.published,2);assert.equal(f.state.askUsed,20);assert.equal(result.sent,0);assert.equal(f.state.stock.橡胶圈,1);
+ });
+ await check('游戏已求助20次不等于赠送20次，赠送按本工具当日余额停止',async()=>{
+  const f=guildMutualFixture(),l=ledger();f.state.askUsed=20;f.state.stock.橡胶圈=10;const ticket=l.reserve({guildAidGifts:15},{guildAidGifts:20});l.confirm(ticket);
+  const result=await run(f,l,{target:20});assert.equal(result.sent,5);assert.equal(l.snapshot().counters.guildAidGifts,20);
+ });
+ await check('按完整盟友ID选择，同名不误送；同材料模式不送其他库存',async()=>{
+  const f=guildMutualFixture();f.state.requests[0].asker.playerId=f.other;f.state.requests[1].reqItemId='木材';
+  const s=await readMutualAid(f.client,f.config,f.player,mutualOptions({mode:'selected',memberIds:[f.friend],askEnabled:true,askItemId:'橡胶圈',askTarget:1}));assert(s.candidates.every(r=>r.memberId===f.friend&&r.itemId==='橡胶圈'));assert(s.candidates.every(r=>r.id!==f.state.requests[0].reqId));
+ });
+ await check('自己、黑名单、过期、缺料和未开放材料都不赠送',async()=>{
+  const f=guildMutualFixture();f.state.black=[{playerId:'9007199254740999',nickname:'黑名单'}];f.state.requests=f.state.requests.slice(0,5);f.state.requests[0].asker.playerId=f.player.playerId;f.state.requests[1].asker.playerId='9007199254740999';f.state.requests[2].endTime=1;f.state.requests[3].reqItemId='钻石';f.state.stock.橡胶圈=0;
+  const s=await readMutualAid(f.client,f.config,f.player,mutualOptions());assert.equal(s.candidates.length,0);assert.equal(f.state.writes.length,0);
+ });
+ await check('赠送回包未知或空奖励不算确认，持久预占额度且重建不重复',async()=>{
+  for(const failure of ['giftUnknown','giftEmpty']){const f=guildMutualFixture(),file=path.join(dir,failure+'.json');let l=createUsageLedger('qa',{file});f.state.failure=failure;const first=await run(f,l,{target:2});assert.equal(first.pending,true);assert.equal(first.sent,0);assert.equal(l.snapshot().counters.guildAidGifts,1);
+   const g=guildMutualFixture(f.state);g.state.failure='';l=createUsageLedger('qa',{file});const second=await run(g,l,{target:2});assert.equal(second.pending,true);assert.equal(g.state.writes.filter(r=>r.name==='GuildAidHelpRequest').length,1);}
+ });
+ await check('赠送成功同时补产，完整新库存不必低于赠送前数量',async()=>{
+  const f=guildMutualFixture(),l=ledger();f.state.onGift=()=>{f.state.stock.橡胶圈+=2;};
+  const result=await run(f,l,{target:2});assert.equal(result.sent,2);assert.equal(result.pending,undefined);assert.equal(f.state.stock.橡胶圈,3);assert.equal(l.snapshot().uncertain,0);
+ });
+ await check('回执已确认但库存读取失败，重建客户端和账本后核销且不重复赠送',async()=>{
+  const f=guildMutualFixture(),file=path.join(dir,'gift-ack-recovery.json');let l=createUsageLedger('qa',{file});
+  f.state.onRead=name=>{if(name==='AllItemRequest'&&f.state.writes.some(r=>r.name==='GuildAidHelpRequest'))throw Object.assign(Error('完整库存暂不可读'),{notSent:true,request:name});};
+  const first=await run(f,l,{target:1});assert.equal(first.pending,true);assert.equal(l.snapshot().uncertain,1);assert(Object.values(l.keyRecords()).some(r=>r.details.acknowledged));
+  f.state.onRead=null;f.state.stock.橡胶圈=8;const g=guildMutualFixture(f.state);l=createUsageLedger('qa',{file});
+  const recovered=await run(g,l,{target:1});assert.equal(recovered.pending,undefined);assert.equal(recovered.sent,0);assert.equal(l.snapshot().uncertain,0);assert.equal(g.state.writes.filter(r=>r.name==='GuildAidHelpRequest').length,1);
+ });
+ await check('赠送、领取与发布断线后重建核销，确认日志关联原操作且不重发或新增监听器', async () => {
+  for (const kind of ['gift', 'claim', 'ask']) {
+   const f = guildMutualFixture();
+   const file = path.join(dir, 'operation-recovery-' + kind + '.json');
+   const events = [];
+   const request = {gift: 'GuildAidHelpRequest', claim: 'GotMyGuildAidRequest', ask: 'GuildAidAskRequest'}[kind];
+   const options = kind === 'ask'
+    ? {target: 0, askEnabled: true, askItemId: '橡胶圈', askTarget: 1}
+    : {target: kind === 'gift' ? 1 : 0};
+   const disconnect = () => {
+    f.client.connected = false;
+    f.client.emit('close');
+   };
+   f.client.on('diagnostic', event => events.push(event));
+   if (kind === 'gift') {
+    f.state.onRead = name => {
+     if (name === 'AllItemRequest' && f.state.writes.length) {
+      disconnect();
+      throw Error('赠送回执后断线');
+     }
+    };
+   } else {
+    if (kind === 'claim') f.state.own = [{
+     reqId: '9007199254799902', reqItemId: '木材', endTime: Math.floor(Date.now() / 1000) + 100,
+     helper: {playerId: f.friend, nickname: '同名盟友'},
+    }];
+    const send = f.client.sendWatch;
+    f.client.sendWatch = async (name, ...args) => {
+     const result = await send(name, ...args);
+     if (name === request) {
+      disconnect();
+      throw Error('请求提交后断线');
+     }
+     return result;
+    };
+   }
+   const firstLedger = createUsageLedger('qa', {file});
+   assert.equal((await run(f, firstLedger, options)).pending, true);
+   const [[uniqueKey, record]] = Object.entries(firstLedger.keyRecords());
+   const operationEvents = events.filter(event => event.event === 'operation' && event.request === request);
+   assert.deepEqual(operationEvents.map(event => event.phase), ['reserved', 'unknown']);
+   assert(operationEvents.every(event => event.operationId === record.id && event.dedupeKey === uniqueKey));
+   for (const event of ['sent', 'close', 'state']) assert.equal(f.client.listenerCount(event), 0);
+   f.state.onRead = null;
+   const rebuilt = guildMutualFixture(f.state);
+   const recoveredLedger = createUsageLedger('qa', {file});
+   const recoveryEvents = [];
+   rebuilt.client.on('diagnostic', event => recoveryEvents.push(event));
+   assert.equal((await run(rebuilt, recoveredLedger, options)).pending, undefined);
+   assert.equal(recoveredLedger.keyRecords()[uniqueKey].confirmed, true);
+   assert.equal(recoveredLedger.snapshot().uncertain, 0);
+   assert.deepEqual(recoveryEvents, [{
+    event: 'operation', operationId: record.id, dedupeKey: uniqueKey,
+    module: 'guildMutual', request, phase: 'confirmed', result: 'confirmed',
+   }]);
+   await run(rebuilt, recoveredLedger, options);
+   assert.equal(recoveryEvents.length, 1);
+   assert.equal(f.state.writes.filter(row => row.name === request).length, 1);
+   for (const event of ['sent', 'close', 'state']) assert.equal(rebuilt.client.listenerCount(event), 0);
+  }
+ });
+ await check('旧互助记录缺少操作ID时按原键记录核销，保留防重且不虚构操作ID', async () => {
+  const f = guildMutualFixture();
+  const file = path.join(dir, 'operation-recovery-legacy.json');
+  const l = createUsageLedger('qa', {file});
+  const uniqueKey = `guildAidGift:${f.player.worldId}:${f.player.playerId}:9007199254749999`;
+  const events = [];
+  fs.writeFileSync(file, JSON.stringify({version: 1, accounts: {qa: {
+   day: l.snapshot().day, counters: {guildAidGifts: 1}, pending: {}, confirmed: {},
+   keys: {[uniqueKey]: {confirmed: false, details: {
+    kind: 'guildAidGift', worldId: f.player.worldId, playerId: f.player.playerId,
+    guildId: f.player.guildId, reqId: '9007199254749999', acknowledged: true,
+   }}},
+  }}}));
+  f.client.on('diagnostic', event => events.push(event));
+  await run(f, l, {target: 1});
+  assert.equal(l.keyRecords()[uniqueKey].confirmed, true);
+  assert.deepEqual(events, [{
+   event: 'operation', operationId: null, dedupeKey: uniqueKey,
+   module: 'guildMutual', request: 'GuildAidHelpRequest', phase: 'confirmed', result: 'confirmed',
+  }]);
+  await run(f, l, {target: 1});
+  assert.equal(events.length, 1);
+  assert.equal(f.state.writes.length, 0);
+  for (const event of ['sent', 'close', 'state']) assert.equal(f.client.listenerCount(event), 0);
+ });
+ await check('回执后无关材料库存异常也不能作为完整同步，修复读数后恢复',async()=>{
+  const f=guildMutualFixture(),l=ledger();f.state.onGift=()=>{f.state.stock.木材=-1;};
+  assert.equal((await run(f,l,{target:1})).pending,true);assert.equal(l.snapshot().uncertain,1);
+  f.state.onGift=null;f.state.stock.木材=20;assert.equal((await run(f,l,{target:1})).pending,undefined);assert.equal(l.snapshot().uncertain,0);
+ });
+ await check('已回执的赠送跨日核销旧额度，不计入新日且不重发',async()=>{
+  const f=guildMutualFixture(),file=path.join(dir,'gift-ack-next-day.json'),l=createUsageLedger('qa',{file,now:()=>Date.now()+f.client.serverClockOffsetMs});
+  f.state.onRead=name=>{if(name==='AllItemRequest'&&f.state.writes.length)throw Error('读取中断');};
+  assert.equal((await run(f,l,{target:1})).pending,true);f.state.onRead=null;f.client.serverClockOffsetMs=86400000;
+  const result=await run(f,l,{target:0});assert.equal(result.sent,0);assert.equal(l.snapshot().uncertain,0);assert.equal(l.snapshot().counters.guildAidGifts,undefined);assert.equal(f.state.writes.length,1);
+ });
+ await check('明确拒绝不消耗赠送预算，停止等待后不重发',async()=>{
+  const f=guildMutualFixture(),l=ledger(),control=new AbortController();f.state.failure='giftReject';await assert.rejects(run(f,l,{target:1},{signal:control.signal,wait:async()=>control.abort(new Error('测试停止'))}));assert.equal(l.snapshot().counters.guildAidGifts,0);assert.equal(f.state.stock.橡胶圈,1);
+ });
+ await check('赠送明确未发送释放持久预算和防重键，重新检查后可安全重试',async()=>{
+  const f=guildMutualFixture(),l=ledger(),original=f.client.request;let unsent=true,attempts=0;
+  f.client.request=async(name,...args)=>{if(name==='GuildAidHelpRequest'){attempts++;if(unsent)throw Object.assign(Error('写入前断开'),{notSent:true});}return original(name,...args);};
+  const result=await run(f,l,{target:1},{wait:async()=>{if(unsent){assert.equal(l.snapshot().uncertain,0);assert.equal(l.snapshot().counters.guildAidGifts,0);unsent=false;}}});
+  assert.equal(result.sent,1);assert.equal(attempts,2);assert.equal(f.state.writes.filter(r=>r.name==='GuildAidHelpRequest').length,1);assert.equal(l.snapshot().uncertain,0);
+ });
+ await check('发布求助明确未发送释放预算，下次开启可正常发布',async()=>{
+  const f=guildMutualFixture(),l=ledger(),original=f.client.sendWatch;let unsent=true;
+  f.client.sendWatch=async(name,...args)=>{if(name==='GuildAidAskRequest'&&unsent)throw Object.assign(Error('未发送'),{notSent:true});return original(name,...args);};
+  assert.equal((await run(f,l,{target:0,askEnabled:true,askItemId:'橡胶圈',askTarget:1})).pending,false);assert.equal(l.snapshot().uncertain,0);assert.equal(l.snapshot().counters.guildAidAsks,0);
+  unsent=false;assert.equal((await run(f,l,{target:0,askEnabled:true,askItemId:'橡胶圈',askTarget:1})).published,1);
+ });
+ await check('领取明确未发送释放辅助模块和持久防重，后续读取未发送则保留已发记录',async()=>{
+  for(const stage of ['write','read']){
+   const f=guildMutualFixture(),l=ledger(),send=f.client.sendWatch,request=f.client.request;let blocked=true;
+   f.state.own=[{reqId:'9007199254799901',reqItemId:'木材',endTime:Math.floor(Date.now()/1000)+100,helper:{playerId:f.friend,nickname:'同名盟友'}}];
+   f.client.sendWatch=async(name,...args)=>{if(stage==='write'&&blocked&&name==='GotMyGuildAidRequest')throw Object.assign(Error('未发送领取'),{notSent:true});return send(name,...args);};
+   f.client.request=async(name,...args)=>{if(stage==='read'&&blocked&&name==='MyGuildAidRequest'&&f.state.writes.length)throw Object.assign(Error('未发送回读'),{notSent:true,request:name});return request(name,...args);};
+   const first=await run(f,l,{target:0});assert.equal(first.pending,stage==='read');assert.equal(l.snapshot().uncertain,stage==='read'?1:0);
+   blocked=false;await run(f,l,{target:0});assert.equal(l.snapshot().uncertain,0);assert.equal(f.state.writes.filter(r=>r.name==='GotMyGuildAidRequest').length,1);
+  }
+ });
+ await check('发布未知保留记录；后续真实计数和新请求确认后才继续',async()=>{
+  const f=guildMutualFixture(),l=ledger();f.state.failure='askAcceptedUnknown';const first=await run(f,l,{target:0,askEnabled:true,askItemId:'橡胶圈',askTarget:2});assert.equal(first.pending,true);assert.equal(f.state.askUsed,1);f.state.failure='';const second=await run(f,l,{target:0,askEnabled:true,askItemId:'橡胶圈',askTarget:2});assert.equal(second.published,1);assert.equal(f.state.askUsed,2);
+ });
+ await check('个人领取未知跨客户端重建不重复，且不会继续赠送',async()=>{
+  const f=guildMutualFixture(),l=ledger();f.state.own=[{reqId:'9007199254799999',reqItemId:'木材',endTime:Math.floor(Date.now()/1000)+100,helper:{playerId:f.friend,nickname:'同名盟友'}}];f.state.failure='claimUnknown';assert.equal((await run(f,l,{target:1})).pending,true);const g=guildMutualFixture(f.state);assert.equal((await run(g,l,{target:1})).pending,true);assert.equal(f.state.writes.filter(r=>r.name==='GotMyGuildAidRequest').length,1);assert.equal(f.state.writes.filter(r=>r.name==='GuildAidHelpRequest').length,0);
+ });
+ await check('领取其他材料不冒充所选材料回赠，仍等待橡胶圈回来',async()=>{
+  const f=guildMutualFixture(),l=ledger();f.state.own=[{reqId:'9007199254799998',reqItemId:'木材',endTime:Math.floor(Date.now()/1000)+100,helper:{playerId:f.friend,nickname:'同名盟友'}}];let waits=0;
+  const r=await run(f,l,{target:1,askEnabled:true,askItemId:'橡胶圈',askTarget:1},{wait:async ms=>{if(ms===15000){waits++;f.peerReturn();}}});assert.equal(waits,1);assert.equal(r.received,2);assert.equal(f.state.stock.橡胶圈,1);
+ });
+ await check('暂停、换联盟、跨日均停止后续写入',async()=>{
+  const f=guildMutualFixture(),l=ledger();f.state.onRead=name=>{if(name==='AllItemRequest')f.client.connected=false;};const r=await run(f,l,{target:1});assert.equal(r.sent,0);assert.equal(f.state.writes.length,0);
+  const g=guildMutualFixture();g.state.onRead=name=>{if(name==='MyGuildAidRequest')g.player.guildId='9007199254741002';};await assert.rejects(run(g,ledger(),{target:1}));assert.equal(g.state.writes.length,0);
+  const h=guildMutualFixture();h.state.stock.橡胶圈=5;const end=await run(h,ledger(),{target:3},{wait:async()=>{h.client.serverClockOffsetMs=86400000;}});assert.equal(end.sent,1);assert.match(end.reason,/跨日/);
+ });
+ await check('重复开启拒绝，手动停止不再发送，重建任务不自动运行',async()=>{
+  const f=guildMutualFixture(),task=createGuildMutualTask();let release;task.start({target:1},()=>new Promise(r=>{release=r}));assert.throws(()=>task.start({target:1},()=>{}));task.stop();release(context(f,ledger()));await new Promise(r=>setImmediate(r));assert.equal(task.view().running,false);assert.equal(f.state.writes.length,0);assert.equal(createGuildMutualTask().view().running,false);
+ });
+ await check('HTTP暂停断线时也能保存预设，账号隔离且重启恢复但不自动开任务',async()=>{
+  fs.writeFileSync(path.join(dir,'accounts.json'),JSON.stringify({version:1,activeId:'preset-http-a',accounts:['preset-http-a','preset-http-b'].map(id=>({id,label:'预设验证',url:'ws://127.0.0.1:1',login:{},automation:{enabled:false,paused:true}}))}));
+  const {createConsole}=await import('../src/server.mjs'),preset={target:11,mode:'selected',memberIds:['9007199254740995'],askEnabled:true,askTarget:13,askItemId:'橡胶圈',checkEverySeconds:1};
+  let app=createConsole({port:0});
+  try{
+   await app.listen();let root='http://127.0.0.1:'+app.server.address().port;
+   const response=await fetch(root+'/api/guild/mutual/preset?account=preset-http-a',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(preset)});assert.equal(response.status,200);assert.deepEqual((await response.json()).preset,preset);
+   const read=id=>fetch(root+'/api/guild/mutual?account='+id).then(r=>r.json());assert.deepEqual((await read('preset-http-a')).preset,preset);assert.equal((await read('preset-http-b')).preset.target,20);
+   assert.equal(app.sessions.get('preset-http-a').client,null);assert.equal(app.sessions.get('preset-http-a').mutualAid.view().running,false);assert.equal(app.sessions.get('preset-http-a').loop.running,false);
+   app.server.closeAllConnections();await app.close();app=createConsole({port:0});await app.listen();root='http://127.0.0.1:'+app.server.address().port;
+   const state=await fetch(root+'/api/guild/mutual?account=preset-http-a').then(r=>r.json());assert.deepEqual(state.preset,preset);assert.equal(state.running,false);assert.equal(app.sessions.get('preset-http-a').client,null);
+  }finally{app.server.closeAllConnections();await app.close();}
+ });
+ await check('HTTP任务与盟友材料读取可用，不修改挂机/配置，暂停停止任务',async()=>{
+  const f=guildMutualFixture();fs.writeFileSync(path.join(dir,'accounts.json'),JSON.stringify({version:1,activeId:'http',accounts:[{id:'http',label:'互助验证',url:'ws://127.0.0.1:1',login:{},automation:{enabled:false,paused:true}}]}));saveAutomationSettings('http',defaultSettings(),{revision:0});const {createConsole}=await import('../src/server.mjs');const app=createConsole({port:0});await app.listen();const root='http://127.0.0.1:'+app.server.address().port;
+  try{await fetch(root+'/api/settings');const session=app.sessions.get('http');session.client=f.client;session.player=f.player;session.paused=false;const bytes=fs.readFileSync(path.join(dir,'automation-settings.json'));const opts=await fetch(root+'/api/guild/mutual/options').then(r=>r.json());assert(opts.members.some(m=>m.id===f.friend));assert(opts.materials.some(m=>m.id==='橡胶圈'));
+   const post=(route,body)=>fetch(root+route,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});assert.equal((await post('/api/guild/mutual/start',{confirm:true,target:1})).status,200);await new Promise(r=>setTimeout(r,1200));const state=await fetch(root+'/api/guild/mutual').then(r=>r.json());assert.equal(state.running,false);assert.equal(state.dailyUsed,1);assert.equal(session.loop.running,false);assert.deepEqual(fs.readFileSync(path.join(dir,'automation-settings.json')),bytes);
+   await post('/api/guild/mutual/start',{confirm:true,target:20});await post('/api/accounts/pause',{paused:true});await new Promise(r=>setTimeout(r,20));assert.equal(session.mutualAid.view().running,false);
+  }finally{app.server.closeAllConnections();await app.close();}
+ });
+}finally{const report={at:new Date().toISOString(),kind:'真实协议的虚构互赠，不连接或操作真实游戏',total:results.length,passed:results.filter(x=>x.passed).length,results};fs.writeFileSync(path.join(dir,'result.json'),JSON.stringify(report,null,2));console.log(`${report.passed}/${report.total} 通过`);console.log(path.join(dir,'result.json'));if(report.total!==report.passed)process.exitCode=1;}

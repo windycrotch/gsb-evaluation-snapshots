@@ -1,0 +1,230 @@
+import { normalize } from './worlds.mjs';
+import { uidText } from './hero-equipment.mjs';
+import { emitDiagnostic } from './trace-log.mjs';
+
+const integer = value => Number.isSafeInteger(value) && value >= 0;
+const read = async (client, name) => {
+  const value = normalize(await client.request(name + 'Request', {}, name + 'Response'));
+  // These optional wire fields have protobuf false/zero defaults. normalize()
+  // drops prototype defaults, but an omitted field is not a missing message.
+  if (name === 'CargoShips' && Array.isArray(value.ship)) value.ship = value.ship.map(ship => ({ ...ship, index: ship.index ?? 0,
+    orderItem: ship.orderItem?.map(slot => ({ ...slot, filled: slot.filled ?? false })) }));
+  if (name === 'OnWater') {
+    if (Array.isArray(value.workerOrder)) value.workerOrder = value.workerOrder.map(order => ({ ...order, index: order.index ?? 0 }));
+    if (value.orderOfTheDay) value.orderOfTheDay = { ...value.orderOfTheDay, orderNum: value.orderOfTheDay.orderNum ?? 0 };
+  }
+  return value;
+};
+const unique = (rows, key) => Array.isArray(rows) && rows.every(row => row && key(row) != null)
+  && new Set(rows.map(key)).size === rows.length;
+const buildingList = water => unique(water?.building, row => typeof row.buildingId === 'string' && row.buildingId ? row.buildingId : null) ? water.building : null;
+const orderSignature = order => order && JSON.stringify([order.workerId ?? 0, order.textId ?? 0,
+  order.refreshTime ?? 0, order.isSpecial ?? false, order.requirements]);
+const jobKey = job => JSON.stringify([job.idx, job.petId, job.startTime]);
+const factoryQueue = building => {
+  const jobs = building?.factory?.factoryQ;
+  if (!Array.isArray(jobs) || !jobs.every(row => typeof row?.productId === 'string' && row.productId)) return null;
+  // The server omits finishTime for queued slots that are not the currently
+  // active job. Those rows are still valid evidence when they carry a stable
+  // idx. An unkeyed row without finishTime remains invalid because it cannot
+  // be distinguished from the pre-action queue.
+  const keyed = jobs.filter(row => Number.isSafeInteger(row.idx) && row.idx >= 0);
+  if (!unique(keyed, row => row.idx)) return null;
+  if (jobs.some(row => row.finishTime == null && !(Number.isSafeInteger(row.idx) && row.idx >= 0))) return null;
+  if (jobs.some(row => row.finishTime != null && (!integer(row.finishTime) || row.finishTime <= 0))) return null;
+  return jobs;
+};
+const cargoAsset = asset => typeof asset?.id === 'string' && asset.id && integer(asset.num) && asset.num > 0;
+
+// Counting queue AND finished units keeps an old job maturing from proving a
+// new request, and also recognises products which finish before the next read.
+export function factoryProductionSnapshot(water, buildingId) {
+  const buildings = buildingList(water), building = buildings?.find(row => row.buildingId === buildingId);
+  const factory = building?.factory;
+  if (!integer(building?.level) || building.level < 1 || !Array.isArray(factory?.factoryQ)
+    || !Array.isArray(factory.finishedProducts)) return null;
+  const queue = factory.factoryQ, finished = factory.finishedProducts, totals = new Map();
+  if (!unique(queue, row => integer(row.idx ?? 0) ? row.idx ?? 0 : null)
+    || queue.some(row => typeof row.productId !== 'string' || !row.productId)
+    || !unique(finished, row => typeof row.id === 'string' && row.id ? row.id : null)
+    || finished.some(row => !integer(row.num))) return null;
+  for (const row of queue) totals.set(row.productId, (totals.get(row.productId) ?? 0) + 1);
+  for (const row of finished) totals.set(row.id, (totals.get(row.id) ?? 0) + row.num);
+  return { building, queue, totals };
+}
+
+export function factoryProductionOperation(water, buildingId, batch) {
+  const before = factoryProductionSnapshot(water, buildingId);
+  if (!before) throw new Error('无法完整确认排产前的队列和待收成品');
+  const baseline = new Map(before.totals);
+  const operation = { confirmed: false, factoryBuildingId: buildingId };
+  operation.verify = async client => {
+    const expected = new Map();
+    for (const step of batch.attempted) expected.set(step.body.productId, (expected.get(step.body.productId) ?? 0) + 1);
+    const details = snapshot => snapshot ? { level: snapshot.building.level, queue: snapshot.queue,
+      finished: snapshot.building.factory.finishedProducts, totals: Object.fromEntries(snapshot.totals) } : null;
+    const record = (confirmed, reason, after = null, error) => {
+      emitDiagnostic(client, 'factory-production-verification', { buildingId, expected: Object.fromEntries(expected),
+        before: details(before), after: details(after), confirmed, reason, ...(error ? { error: error.message } : {}) });
+      return confirmed;
+    };
+    if (!batch.sealed || !batch.attempted.length) return record(false, '批次尚未结束或没有已发送请求');
+    let next;
+    try { next = await read(client, 'OnWater'); }
+    catch (error) { record(false, '读取工厂状态失败，保留待确认记录', null, error); throw error; }
+    const after = factoryProductionSnapshot(next, buildingId);
+    if (!after) return record(false, '目标工厂队列或待收成品不完整');
+    if (after.building.level !== before.building.level) return record(false, '工厂等级已变化，不能归属原排产', after);
+    const serverNow = (Date.now() + (client.serverClockOffsetMs || 0)) / 1000;
+    if (after.building.factory.autoProductId && (next.autoProduceForever || next.autoProduceEndTime > serverNow)) return record(false, '原生自动生产已开启，不能归属新增成品', after);
+    const confirmed = [...expected].every(([id, count]) => (after.totals.get(id) ?? 0) - (baseline.get(id) ?? 0) >= count);
+    return record(confirmed, confirmed ? '队列与待收成品总量已增加到预期' : '队列与待收成品增量不足，保留待确认记录', after);
+  };
+  return operation;
+}
+export const petSpendSnapshot = buildings => {
+  const rooms = buildings.filter(row => row.petBreed);
+  if (!rooms.length || rooms.some(row => !Array.isArray(row.petBreed.breedQ) || !Array.isArray(row.petBreed.maturePets))) return null;
+  const jobs = rooms.flatMap(row => row.petBreed.breedQ), mature = rooms.flatMap(row => row.petBreed.maturePets);
+  if (!unique(jobs, row => integer(row.idx) ? row.idx : null)
+    || jobs.some(row => typeof row.petId !== 'string' || !row.petId || !integer(row.startTime)
+      || !integer(row.finishTime) || row.finishTime < row.startTime)
+    || mature.some(row => typeof row?.petId !== 'string' || !row.petId)) return null;
+  return { jobs, mature };
+};
+
+export function confirmPetSpend(before, after, request, body) {
+  if (!before || !after) return false;
+  if (request === 'PetFeedRequest') {
+    const prior = before.jobs.find(row => row.idx === body.jobIdx), job = after.jobs.find(row => row.idx === body.jobIdx);
+    return !!prior && prior.petId === job?.petId && prior.startTime === job.startTime && job.finishTime < prior.finishTime;
+  }
+  return request === 'PetBreedRequest' && (after.jobs.some(job => job.petId === body.petId
+    && !before.jobs.some(prior => jobKey(prior) === jobKey(job)))
+    || after.mature.filter(pet => pet.petId === body.petId).length
+      > before.mature.filter(pet => pet.petId === body.petId).length + before.jobs.filter(job => job.petId === body.petId).length);
+}
+
+// Keep immutable pre-action evidence, never a connection or settings closure.
+// A replacement connection can therefore finish the same read-only check.
+export async function captureSpendOperation(client, step, { waterSnapshot } = {}) {
+  if (typeof step.verifyGrowth === 'function') return { confirmed: false, verify: step.verifyGrowth };
+  if (step.request === 'StartFactoryProduceRequest' && step.factoryBatch?.operation) return step.factoryBatch.operation;
+  const body = structuredClone(step.body ?? {}), verify = structuredClone(step.verify ?? {});
+  const request = step.request;
+  const operation = { confirmed: false };
+  const probe = test => { operation.verify = test; return operation; };
+
+  if (request === 'PetUpgradeFeedRequest' && verify.petUid && integer(verify.fed) && integer(verify.grade)) {
+    return probe(async next => {
+      const raw = await next.request('AllPetRequest', {}, 'AllPetResponse');
+      const pets = raw?.pets?.map(pet => ({ ...normalize(pet), uid: uidText(pet.uid) }));
+      if (!unique(pets, pet => pet.uid)) return false;
+      const pet = pets.find(row => String(row.uid) === verify.petUid);
+      if (!pet || !integer(pet.grade ?? 0) || !Array.isArray(pet.profFeed)) return false;
+      let fed = 0;
+      for (const prof of pet.profFeed) {
+        if (!Array.isArray(prof.attrFeed) || prof.attrFeed.some(attr => !integer(attr.times))) return false;
+        fed += prof.attrFeed.reduce((sum, attr) => sum + attr.times, 0);
+      }
+      return fed > verify.fed || (pet.grade ?? 0) > verify.grade;
+    });
+  }
+  if (['MuseumSpeedUpExploreRequest', 'MuseumUpgradeExhibitionRequest', 'MuseumUpgradeKeywordRequest'].includes(request)) {
+    return probe(async next => {
+      const museum = await read(next, 'MuseumInfo');
+      if (request === 'MuseumSpeedUpExploreRequest') {
+        if (!unique(museum.exploreStages, row => row.stageId)) return false;
+        const end = museum.exploreStages.find(row => row.stageId === body.stageId)?.expedition?.endTime;
+        return integer(end) && end > 0 && integer(verify.endTime) && end < verify.endTime;
+      }
+      if (!unique(museum.exhibitions, row => row.exhibitionId)) return false;
+      const exhibition = museum.exhibitions.find(row => row.exhibitionId === body.exhibitionId);
+      const level = request === 'MuseumUpgradeExhibitionRequest' ? exhibition?.level : exhibition?.keywordLevels?.[verify.index];
+      return integer(level) && integer(verify.level) && level >= verify.level;
+    });
+  }
+  if (['HeroLevelUpRequest', 'HeroStarUpRequest', 'HeroSkillLevelUpRequest'].includes(request)) {
+    const target = request === 'HeroLevelUpRequest' ? step.targetLevel : step.to;
+    if (!integer(target)) return operation;
+    const levelOf = heroes => {
+      if (!unique(heroes, row => row.heroId)) return null;
+      const hero = heroes.find(row => row.heroId === body.heroId);
+      return request === 'HeroLevelUpRequest' ? hero?.level : request === 'HeroStarUpRequest' ? hero?.star : hero?.skillLevels?.[body.skillIdx - 1];
+    };
+    const prior = levelOf((await read(client, 'AllHero')).heroes);
+    if (!integer(prior) || prior >= target) return operation;
+    return probe(async next => {
+      const actual = levelOf((await read(next, 'AllHero')).heroes);
+      return integer(actual) && actual >= target;
+    });
+  }
+  if (['FillCargoShipRequest', 'SpeedUpShipRequest'].includes(request)) {
+    const before = (await read(client, 'CargoShips')).ship;
+    if (!unique(before, row => row.index)) return operation;
+    const index = body.shipIndex ?? body.index, ship = before.find(row => row.index === index);
+    if (!ship) return operation;
+    return probe(async next => {
+      const ships = (await read(next, 'CargoShips')).ship;
+      if (!unique(ships, row => row.index)) return false;
+      const after = ships.find(row => row.index === index);
+      if (!after) return false;
+      if (request === 'SpeedUpShipRequest') return integer(ship.arriveTime) && integer(after.arriveTime) && after.arriveTime > 0 && after.arriveTime < ship.arriveTime;
+      return Array.isArray(body.cargoIndex) && body.cargoIndex.length > 0 && body.cargoIndex.every(index => {
+        const old = ship.orderItem?.[index - 1], current = after.orderItem?.[index - 1];
+        return old?.filled === false && current?.filled === true && cargoAsset(old.asset) && cargoAsset(current.asset)
+          && old.asset.id === current.asset.id && old.asset.num === current.asset.num;
+      });
+    });
+  }
+  const waterRequests = new Set(['FinishWorkerOrderRequest', 'BuildBuildingRequest', 'UpgradeBuildingRequest',
+    'StartFactoryProduceRequest', 'SpeedUpUpgradeBuildingRequest', 'SpeedUpFactoryProduceRequest', 'FarmSpeedUpRequest',
+    'PetBreedRequest', 'PetFeedRequest', 'FishingLevelUpRequest', 'DivingLevelUpRequest', 'SalvageLevelUpRequest']);
+  if (!waterRequests.has(request)) return operation;
+  const before = waterSnapshot ? structuredClone(waterSnapshot) : await read(client, 'OnWater'), buildings = buildingList(before);
+  if (request === 'StartFactoryProduceRequest') {
+    // The single-request/manual path needs the same evidence as a batch: a
+    // product can finish before the next read, and an old queued slot starting
+    // is not proof of this new request.
+    return factoryProductionOperation(before, body.buildingId, { sealed: true, attempted: [{ body }] });
+  }
+  if (!buildings) return operation;
+  const old = buildings.find(row => row.buildingId === body.buildingId);
+  if (request === 'UpgradeBuildingRequest' && (!old || !integer(old.level))) return operation;
+  if (request === 'BuildBuildingRequest' && old && !integer(old.level)) return operation;
+  const oldPets = ['PetBreedRequest', 'PetFeedRequest'].includes(request) ? petSpendSnapshot(buildings) : null;
+  if (['PetBreedRequest', 'PetFeedRequest'].includes(request) && !oldPets) return operation;
+  const day = Math.floor((Date.now() + (client.serverClockOffsetMs || 0) + 28800000) / 86400000);
+  return probe(async next => {
+    const after = await read(next, 'OnWater'), currentBuildings = buildingList(after);
+    if (!currentBuildings) return false;
+    const current = currentBuildings.find(row => row.buildingId === body.buildingId);
+    if (request === 'FinishWorkerOrderRequest') {
+      if (!unique(before.workerOrder, row => row.index) || !unique(after.workerOrder, row => row.index)) return false;
+      const prior = before.workerOrder.find(row => row.index === body.index), order = after.workerOrder.find(row => row.index === body.index);
+      const count = before.orderOfTheDay?.orderNum, nextCount = after.orderOfTheDay?.orderNum;
+      return Array.isArray(prior?.requirements) && prior.requirements.length > 0 && prior.requirements.every(cargoAsset)
+        && orderSignature(prior) !== orderSignature(order) && integer(count) && integer(nextCount) && nextCount > count
+        && day === Math.floor((Date.now() + (next.serverClockOffsetMs || 0) + 28800000) / 86400000);
+    }
+    if (request === 'BuildBuildingRequest' || request === 'UpgradeBuildingRequest') {
+      if (!current || !integer(current.level)) return false;
+      return current.level > (old?.level ?? 0) || (integer(current.buildStartTime) && integer(current.buildFinishTime)
+        && current.buildStartTime > (old?.buildStartTime ?? 0) && current.buildFinishTime > current.buildStartTime);
+    }
+    if (request === 'SpeedUpUpgradeBuildingRequest') return integer(old?.buildFinishTime) && integer(current?.buildFinishTime)
+      && current.buildFinishTime > 0 && current.buildFinishTime < old.buildFinishTime && current.level === old.level;
+    if (request === 'SpeedUpFactoryProduceRequest') {
+      const job = factoryQueue(old)?.find(row => (row.idx ?? 0) === body.index), changed = factoryQueue(current)?.find(row => (row.idx ?? 0) === body.index);
+      return !!job && job.productId === changed?.productId && changed.finishTime < job.finishTime;
+    }
+    if (request === 'FarmSpeedUpRequest') return !!old?.farm?.productId && current?.farm?.productId === old.farm.productId
+      && current.farm.plantTime === old.farm.plantTime && integer(current.farm.ripeTime) && current.farm.ripeTime < old.farm.ripeTime;
+    if (request === 'PetBreedRequest' || request === 'PetFeedRequest') {
+      return confirmPetSpend(oldPets, petSpendSnapshot(currentBuildings), request, body);
+    }
+    const field = { FishingLevelUpRequest: 'fishingLevel', DivingLevelUpRequest: 'divingLevel', SalvageLevelUpRequest: 'salvageLevel' }[request];
+    return !!field && integer(before[field]?.level) && integer(after[field]?.level) && (after[field].level > before[field].level
+      || (after[field].level === before[field].level && integer(after[field].enhance) && after[field].enhance > (before[field].enhance ?? 0)));
+  });
+}

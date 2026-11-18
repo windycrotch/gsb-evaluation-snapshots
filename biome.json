@@ -1,0 +1,19 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.6.8/schema.json",
+  "vcs": { "enabled": false },
+  "files": {
+    "includes": [
+      "src/ui/client/**",
+      "src/ui-assets.mjs",
+      "tools/selftest-react-client*.mjs",
+      "vite.config.ts",
+      "tsconfig.ui.json",
+      "biome.json",
+      "!!output"
+    ]
+  },
+  "formatter": { "indentStyle": "space", "indentWidth": 2 },
+  "linter": { "enabled": true, "rules": { "preset": "recommended" } },
+  "css": { "parser": { "cssModules": true, "tailwindDirectives": true } },
+  "assist": { "actions": { "source": { "organizeImports": "on" } } }
+}

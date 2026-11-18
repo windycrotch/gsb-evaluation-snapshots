@@ -1,0 +1,390 @@
+// 完整挂机循环集成测试：虚构客户端、临时账本和虚拟时钟，不连接真实账号。
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-extended-loop-'));
+const originalDataDir = process.env.CW_DATA_DIR, originalNow = Date.now;
+process.env.CW_DATA_DIR = folder;
+const base = Date.UTC(2026, 10, 14, 4);
+let wall = base, serial = 0;
+Date.now = () => wall;
+const results = [];
+
+try {
+  // accounts.mjs 的数据路径在加载时确定，因此必须先隔离再导入。
+  const { runLoop, formatLoopStep } = await import('../src/loop.mjs');
+  const { createUsageLedger } = await import('../src/automation-settings.mjs');
+  const { watchFleetMaintenance } = await import('../src/fleet-maintenance.mjs');
+  const { dispatchReservationReason } = await import('../src/fleet-availability.mjs');
+  const { watchHeroRaidPushes } = await import('../src/hero-raid-automation.mjs');
+  const { loadConfig } = await import('../src/config.mjs');
+  const { siliconFixture, siliconSettings } = await import('./fixtures/silicon.mjs');
+  const { guildMutualFixture } = await import('./fixtures/guild-mutual.mjs');
+
+  function integration({ rounds = 1, mainEveryMs = 3600000, isEnabled = () => false, fixture = siliconFixture() } = {}) {
+    const settings = siliconSettings();
+    for (const key of Object.keys(settings.schedule)) settings.schedule[key] = false;
+    Object.assign(settings.loop, { world: false, tasks: false, dailies: false, heroes: false, everySeconds: mainEveryMs / 1000 });
+    settings.resident.rewards = false; settings.dailies.enabled = false; settings.progression.enabled = false;
+    const ledger = createUsageLedger('虚构扩展循环账号-' + (++serial), { file: path.join(folder, serial + '.json') });
+    const stop = { aborted: false }, sleeps = [], reports = [], violations = [], protocolCalls = [], protocolErrors = [];
+    let currentSettings = settings, scheduled = 0, active = false, inFlight = 0, maxInFlight = 0;
+    let queue = Promise.resolve(), sleepHook = null, reportHook = null;
+    const schedule = work => {
+      const job = queue.then(async () => {
+        if (active) violations.push('同账号队列任务出现重入');
+        assert.equal(active, false, '同账号不能同时执行两个队列任务');
+        active = true; scheduled++;
+        try { return await work(); } finally { active = false; }
+      });
+      queue = job.catch(() => {});
+      return job;
+    };
+    for (const method of ['request', 'sendWatch']) {
+      const original = fixture.client[method];
+      fixture.client[method] = async (...args) => {
+        if (!active) violations.push(args[0] + '绕过账号队列');
+        if (inFlight) violations.push(args[0] + '与写协议并发');
+        assert.equal(active, true, '协议必须在账号串行队列中执行');
+        assert.equal(inFlight, 0, '写协议期间不能并发其他操作');
+        if (method === 'sendWatch') { inFlight++; maxInFlight = Math.max(maxInFlight, inFlight); }
+        protocolCalls.push({ method, name: args[0], at: wall });
+        try { return await original(...args); }
+        catch (error) { protocolErrors.push({ name: args[0], message: error.message }); throw error; }
+        finally { if (method === 'sendWatch') inFlight--; }
+      };
+    }
+    const run = async () => {
+      const result = await runLoop(fixture.client, fixture.protocol, {
+        config: fixture.config, player: fixture.player, rounds, everyMs: mainEveryMs,
+        getEveryMs: () => mainEveryMs, allowMutate: true, isEnabled,
+        getSettings: () => currentSettings, usageLedger: ledger, stop, schedule,
+        sleep: async ms => {
+          assert(ms > 0, '不能零毫秒忙轮询');
+          sleeps.push(ms); assert(sleeps.length < 100, '等待必须有界，不能忙轮询');
+          if (sleepHook) await sleepHook(ms, sleeps.length); else wall += ms;
+        },
+        onStep: row => { reports.push(row); reportHook?.(row); }
+      });
+      await queue;
+      return result;
+    };
+    const clean = () => {
+      assert.deepEqual(violations, [], '不能绕开同账号协议队列');
+      assert.deepEqual(protocolErrors, [], '关闭其他模块时不能读取它们的协议，不能把协议错误吞入备注');
+      assert.deepEqual(reports.filter(row => row.error && !row.skipped), [], '挂机接线不能吞掉协议错误');
+      assert.equal(fixture.client.listenerCount('automationSettingsChanged'), 0, '退出循环应移除配置监听');
+    };
+    return Object.assign(fixture, { settings, ledger, stop, sleeps, reports, protocolCalls, run, schedule, clean,
+      getSettings: () => currentSettings, setSettings: value => { currentSettings = value; },
+      scheduled: () => scheduled, isScheduled: () => active, maxInFlight: () => maxInFlight,
+      sleepHook: fn => { sleepHook = fn; }, reportHook: fn => { reportHook = fn; } });
+  }
+  const test = async (name, run) => {
+    wall = base;
+    try { await run(); results.push(true); console.log('通过：' + name); }
+    catch (error) { results.push(false); console.error('失败：' + name + '\n' + error.stack); }
+  };
+  const dispatches = f => f.client.writes.filter(row => row.name === 'ChipMineSendFleetRequest');
+  const fillHighMine = f => { for (let index = 0; index < 3; index++) f.enemy(index, '占位船长' + index, 100000); };
+  const stopAfterDispatch = (f, count = 1) => f.reportHook(() => { if (dispatches(f).length >= count) f.stop.aborted = true; });
+
+  function allianceIntegration(options = {}) {
+    const fixture = guildMutualFixture();
+    fixture.config.tables.CargoUnlockCfg = { data: [{ index: 1, playerLevel: 9 }] };
+    const request = fixture.client.request;
+    fixture.client.request = async (name, ...args) => {
+      if (name === 'OnWaterRequest') return { workerOrder: [], buildings: [] };
+      if (name === 'WeekInfoRequest') return { activityTime: [] };
+      if (name === 'CargoShipsRequest') return { ship: [] };
+      return request(name, ...args);
+    };
+    const legacyKeys = new Set(['guildAidCollect', 'guildAidHelp']);
+    const f = integration({ ...options, fixture, isEnabled: key => legacyKeys.has(key) });
+    f.settings.silicon.enabled = false;
+    // 绕过配置规范化，模拟更新前仍留在内存与账号文件中的两项 true。
+    f.settings.schedule.guildAidCollect = f.settings.schedule.guildAidHelp = true;
+    Object.assign(f.settings.alliance, { enabled: true, mutual: true, autoHelp: true });
+    return f;
+  }
+
+  await test('旧互助开关残留开启时，联盟总开关关闭阻止所有互助读写', async () => {
+    const f = allianceIntegration(); f.settings.alliance.enabled = false;
+    await f.run();
+    assert.deepEqual(f.protocolCalls, [], '旧任务的启用回调仍为 true，也不能读取或执行互助');
+    f.clean();
+  });
+  await test('旧互助开关残留开启时，互助总开关关闭阻止所有互助读写', async () => {
+    const f = allianceIntegration(); f.settings.alliance.mutual = false;
+    await f.run();
+    assert.deepEqual(f.protocolCalls, [], '联盟总开关开启不能让旧收取或赠送入口复活');
+    f.clean();
+  });
+  for (const gate of ['enabled', 'mutual']) await test('运行中关闭联盟' + (gate === 'enabled' ? '总开关' : '互助') + '后，推送及下一轮不回退旧互助', async () => {
+    const f = allianceIntegration({ rounds: 2, mainEveryMs: 60000 });
+    const received = id => ({ reqId: id, reqItemId: '橡胶圈', endTime: Math.floor(wall / 1000) + 3600,
+      helper: { playerId: f.friend, nickname: '盟友' } });
+    f.state.own.push(received('9007199254780001'));
+    let callsAtDisable;
+    f.sleepHook((ms, index) => {
+      if (index === 1) {
+        assert(f.state.writes.some(row => row.name === 'GotMyGuildAidRequest'), '第一轮通过统一互助领取');
+        assert(f.state.writes.some(row => row.name === 'GuildAidHelpRequest'), '第一轮通过统一互助赠送');
+        wall += 1000; callsAtDisable = f.protocolCalls.length;
+        const next = structuredClone(f.getSettings()); next.alliance[gate] = false; f.setSettings(next);
+        f.state.own.push(received('9007199254780002'));
+        f.client.emit('automationSettingsChanged');
+        f.client.emit('message', { name: 'SCNewGuildAidAsk', body: {} });
+        f.client.emit('message', { name: 'SCGuildAidRemove', body: {} });
+      } else wall += ms;
+    });
+    const result = await f.run();
+    assert.equal(result.history.length, 2, '关闭后仍完整执行下一主轮');
+    assert.notEqual(callsAtDisable, undefined, '必须在运行期间执行关闭');
+    assert.equal(f.protocolCalls.length, callsAtDisable, '关闭后即使有旧开关、推送和新援助，也不能继续互助读写');
+    assert.equal(f.state.own.length, 1, '关闭后到达的援助不能被旧路径收取');
+    assert(f.sleeps.length >= 1); f.clean();
+  });
+
+  function withHeroRaid(f) {
+    f.settings.silicon.enabled = false;
+    Object.assign(f.settings.heroRaid, { enabled: true, challenge: true, lottery: true, orders: false, rewards: false });
+    const config = loadConfig();
+    f.config.tables.HeroRaidStageCfg = config.tables.HeroRaidStageCfg;
+    f.config.tables.HeroRaidLotteryCfg = config.tables.HeroRaidLotteryCfg;
+    f.config.tables.CargoUnlockCfg = config.tables.CargoUnlockCfg;
+    const now = Math.floor(wall / 1000);
+    const raid = { raidId: 1001, startTime: now - 86400, finishTime: now + 86400,
+      passedStage: 0, drawTimesInfo: { times: 0, gotIndex: 0 } };
+    let tickets = 10;
+    const wire = (name, body) => f.protocol[name].decode(f.protocol[name].encode(body).finish());
+    watchHeroRaidPushes(f.client);
+    f.client.emit('message', { name: 'SCAllActivity', body: wire('SCAllActivity', { raid: [raid] }) });
+    f.beforeRead = (name, body) => {
+      let reply;
+      if (name === 'HeroRaidChallengeRequest') {
+        assert.equal(body.raidId, raid.raidId);
+        raid.passedStage = body.stageId;
+        tickets++;
+        reply = { raidId: raid.raidId, stageId: body.stageId, initialData: { leftTeam: {}, rightTeams: [{}] },
+          reward: { asset: [{ type: 0, id: '英雄副本抽卡券', num: 1 }] } };
+        f.client.writes.push({ name, body: wire(name, body) });
+      } else if (name === 'HeroRaidPrizeRequest') {
+        assert.equal(body.raidId, raid.raidId);
+        assert(tickets >= body.times);
+        tickets -= body.times;
+        raid.drawTimesInfo.times += body.times;
+        reply = { prizeIndex: 1, gotInfo: structuredClone(raid.drawTimesInfo),
+          reward: { asset: [{ type: 0, id: '红技能书', num: 2 }] } };
+        f.client.writes.push({ name, body: wire(name, body) });
+      } else if (name === 'AllItemRequest') reply = { items: [{ itemId: '英雄副本抽卡券', num: tickets }] };
+      else if (name === 'WeekInfoRequest') reply = { activityTime: [] };
+      else if (name === 'CargoShipsRequest') reply = { ship: [] };
+      else return undefined;
+      return wire(name.replace(/Request$/, 'Response'), reply);
+    };
+    return f;
+  }
+
+  await test('只开超凡英雄时完整循环串行挑战与转盘抽奖，并保存确认记录', async () => {
+    const f = withHeroRaid(integration());
+    assert(Object.values(f.settings.schedule).every(value => value === false));
+    assert.equal(f.settings.loop.world, false);
+    await f.run();
+    assert.deepEqual(f.client.writes.map(row => row.name), ['HeroRaidChallengeRequest', 'HeroRaidPrizeRequest'], JSON.stringify(f.reports));
+    assert.equal(f.client.writes[1].body.times, 10);
+    assert.equal(f.scheduled(), 1);
+    const raidLogs = f.reports.filter(row => row.category === 'heroRaid.enabled').map(formatLoopStep);
+    assert(raidLogs.length > 0, '完整循环输出活动日志');
+    assert(raidLogs.every(message => message.startsWith('超凡英雄活动 · ') && !message.includes('heroRaid.enabled')));
+    const records = Object.values(f.ledger.keyRecords());
+    assert.deepEqual(records.map(row => row.details.kind).sort(), ['heroRaidChallenge', 'heroRaidLottery']);
+    assert(records.every(row => row.confirmed));
+    const persisted = createUsageLedger('虚构扩展循环账号-' + serial, { file: path.join(folder, serial + '.json') });
+    assert.deepEqual(persisted.keyRecords(), f.ledger.keyRecords());
+    f.clean();
+  });
+
+  await test('超凡英雄活动设置唤醒独立任务，关闭的基地总开关不阻断执行', async () => {
+    const f = withHeroRaid(integration({ rounds: 2 }));
+    f.settings.heroRaid.enabled = false;
+    f.sleepHook(() => {
+      assert.equal(f.isScheduled(), false);
+      assert.equal(f.protocolCalls.length, 0, JSON.stringify(f.protocolCalls));
+      wall += 1000;
+      const next = structuredClone(f.getSettings());
+      next.heroRaid.enabled = true;
+      f.setSettings(next);
+      f.client.emit('automationSettingsChanged');
+      assert.equal(f.protocolCalls.length, 0, '保存设置只唤醒调度');
+    });
+    f.reportHook(() => { if (f.client.writes.some(row => row.name === 'HeroRaidPrizeRequest')) f.stop.aborted = true; });
+    await f.run();
+    assert.deepEqual(f.sleeps, [3600000]);
+    assert.equal(wall - base, 1000);
+    assert.deepEqual(f.client.writes.map(row => row.name), ['HeroRaidChallengeRequest', 'HeroRaidPrizeRequest']);
+    assert.equal(f.scheduled(), 2);
+    f.clean();
+  });
+
+  await test('原生任务全关时三舰队仍由完整循环独立派遣，预算落盘', async () => {
+    const f = integration();
+    for (const fleet of f.settings.silicon.fleets) fleet.enabled = true;
+    assert(Object.values(f.settings.schedule).every(value => value === false));
+    await f.run();
+    assert.deepEqual(dispatches(f).map(row => row.body.fleetId), ['1远征船', '2远征船', '3远征船']);
+    assert.equal(new Set(dispatches(f).map(row => row.body.gridId + ':' + row.body.index)).size, 3);
+    assert.equal(f.ledger.snapshot().counters.siliconPetrol, 1500);
+    const persisted = createUsageLedger('虚构扩展循环账号-' + serial, { file: path.join(folder, serial + '.json') });
+    assert.equal(persisted.snapshot().counters.siliconPetrol, 1500, '读取磁盘账本仍有已确认消费');
+    assert.equal(f.maxInFlight(), 1); f.clean();
+  });
+  await test('关闭硅矿总开关保留舰队配置但不读写硅矿', async () => {
+    const f = integration(); f.settings.silicon.enabled = false;
+    for (const fleet of f.settings.silicon.fleets) fleet.enabled = true;
+    await f.run();
+    assert.equal(f.client.reads.length, 0); assert.equal(f.client.writes.length, 0); f.clean();
+  });
+  await test('只开总开关而三支舰队均关闭时没有派遣', async () => {
+    const f = integration(); for (const fleet of f.settings.silicon.fleets) fleet.enabled = false;
+    await f.run();
+    assert.equal(f.client.writes.length, 0); assert.equal(f.ledger.snapshot().counters.siliconPetrol ?? 0, 0); f.clean();
+  });
+  await test('一小时主循环之间按十分钟硅矿周期回读并派遣', async () => {
+    const f = integration({ rounds: 2 }); fillHighMine(f); stopAfterDispatch(f);
+    f.sleepHook(ms => { wall += ms; f.state.positions[5000] = f.state.positions[5000].filter(row => row.index !== 0); });
+    await f.run();
+    assert.deepEqual(f.sleeps, [600000]); assert.equal(wall - base, 600000);
+    assert.equal(dispatches(f).length, 1); assert(f.scheduled() >= 2); f.clean();
+  });
+  await test('有效追击配置使用两分钟独立检查周期', async () => {
+    const f = integration({ rounds: 2 }); fillHighMine(f); stopAfterDispatch(f);
+    Object.assign(f.settings.silicon.fleets[0], { pursuit: true, emptyOnly: false });
+    f.sleepHook(ms => { wall += ms; f.state.positions[5000] = []; });
+    await f.run();
+    assert.deepEqual(f.sleeps, [120000]); assert.equal(dispatches(f).length, 1); f.clean();
+  });
+  await test('保存新配置提前唤醒休眠中的关闭模块，不等下一主轮', async () => {
+    const f = integration({ rounds: 2 }); f.settings.silicon.enabled = false; stopAfterDispatch(f);
+    f.sleepHook(() => {
+      wall += 1000; assert.equal(f.isScheduled(), false);
+      const next = structuredClone(f.getSettings()); next.silicon.enabled = true; f.setSettings(next);
+      const before = f.protocolCalls.length;
+      f.client.emit('automationSettingsChanged');
+      assert.equal(f.protocolCalls.length, before, '保存事件只唤醒调度，不直接执行游戏协议');
+    });
+    await f.run();
+    assert.equal(f.sleeps[0], 3600000); assert.equal(wall - base, 1000);
+    assert.equal(dispatches(f).length, 1); f.clean();
+  });
+  await test('矿位推送风暴提前唤醒，回调不读写且不重复派遣', async () => {
+    const f = integration({ rounds: 2 }); fillHighMine(f); stopAfterDispatch(f);
+    f.sleepHook(() => {
+      wall += 1000; f.state.positions[5000] = [];
+      const before = f.protocolCalls.length;
+      for (let index = 0; index < 30; index++) f.client.emit('message', { name: 'SCChipMine', body: { gridId: 5000 } });
+      assert.equal(f.protocolCalls.length, before, '服务端推送不能直接发送协议');
+    });
+    await f.run();
+    assert.equal(wall - base, 1000); assert.equal(dispatches(f).length, 1);
+    const before = f.protocolCalls.length;
+    f.client.emit('message', { name: 'SCChipMine', body: { gridId: 5000 } });
+    await Promise.resolve(); assert.equal(f.protocolCalls.length, before, '停止挂机后推送不能执行任务'); f.clean();
+  });
+  await test('等待期间关闭总开关和随后推送都不能继续硅矿读取或派遣', async () => {
+    const f = integration({ rounds: 2 }); fillHighMine(f); let readsAtDisable;
+    f.sleepHook((ms, index) => {
+      if (index === 1) {
+        wall += 1000; readsAtDisable = f.client.reads.length;
+        const next = structuredClone(f.getSettings()); next.silicon.enabled = false; f.setSettings(next);
+        f.client.emit('automationSettingsChanged'); f.state.positions[5000] = [];
+        f.client.emit('message', { name: 'SCChipMine', body: { gridId: 5000 } });
+      } else wall += ms;
+    });
+    await f.run();
+    assert.equal(f.client.reads.length, readsAtDisable); assert.equal(dispatches(f).length, 0); f.clean();
+  });
+  await test('轮间关闭自动维修立即通过账号队列释放舰队预留', async () => {
+    const f = integration({ rounds: 2, mainEveryMs: 60000 }); f.settings.silicon.enabled = false;
+    Object.assign(f.settings.treasure, { enabled: true, autoJoin: false, follow: false, autoRepair: true,
+      fleetIds: ['1远征船'], checkEverySeconds: 300, petrolReserve: 0 });
+    f.state.fuel = 0; f.state.fleets[0].durability = 1000;
+    const maintenance = watchFleetMaintenance(f.client); let callsAtDisable;
+    f.sleepHook((ms, index) => {
+      assert.equal(f.isScheduled(), false);
+      if (index === 1) {
+        assert.equal(ms, 60000, '原维修检查与下一主轮都尚未到期');
+        assert.deepEqual(maintenance.held(), ['1远征船']);
+        assert.match(dispatchReservationReason(f.client, f.getSettings(), 'legacy', '1远征船'), /战后维修/);
+        wall += 1000; callsAtDisable = f.protocolCalls.length;
+        const next = structuredClone(f.getSettings()); next.treasure.autoRepair = false; f.setSettings(next);
+        f.client.emit('automationSettingsChanged');
+        assert.equal(f.protocolCalls.length, callsAtDisable, '设置事件不能直接发送协议');
+        assert.deepEqual(maintenance.held(), ['1远征船'], '释放应在账号队列中执行');
+      } else {
+        assert.equal(wall - base, 1000, '无需等待下一主轮或旧维修到期');
+        assert.deepEqual(maintenance.held(), [], '关闭维修后不能继续占用舰队');
+        assert.equal(dispatchReservationReason(f.client, f.getSettings(), 'legacy', '1远征船'), '');
+        assert.equal(f.protocolCalls.length, callsAtDisable, '关闭后的清理不应继续读取维修或派遣状态');
+        assert.equal(f.scheduled(), 2, '仅原主轮和设置唤醒清理各进入一次账号队列');
+        f.stop.aborted = true;
+      }
+    });
+    await f.run();
+    assert.equal(f.sleeps.length, 2); assert.equal(f.client.writes.length, 0); f.clean();
+  });
+  await test('最终回读期间关闭总开关阻止已排入队列的派遣', async () => {
+    const f = integration(); let lists = 0;
+    f.beforeRead = name => {
+      if (name === 'ChipMineListRequest' && ++lists === 2) {
+        const next = structuredClone(f.getSettings()); next.silicon.enabled = false; f.setSettings(next);
+        f.client.emit('automationSettingsChanged');
+      }
+    };
+    await f.run();
+    assert(lists >= 2); assert.equal(dispatches(f).length, 0);
+    assert.equal(f.ledger.snapshot().counters.siliconPetrol ?? 0, 0); f.clean();
+  });
+  await test('三舰队写入期间连续推送仍串行，后续复查不会重复发送', async () => {
+    const f = integration({ rounds: 2, mainEveryMs: 10000 });
+    for (const fleet of f.settings.silicon.fleets) fleet.enabled = true;
+    f.afterWrite = () => {
+      const before = f.protocolCalls.length;
+      for (let index = 0; index < 30; index++) f.client.emit('message', { name: 'SCMyFleetUpdate', body: {} });
+      assert.equal(f.protocolCalls.length, before, '在途推送只能安排后续队列检查');
+    };
+    await f.run();
+    assert.equal(dispatches(f).length, 3); assert.equal(f.maxInFlight(), 1);
+    assert.equal(f.ledger.snapshot().counters.siliconPetrol, 1500); assert(f.scheduled() >= 2); f.clean();
+  });
+  await test('挂机写入期间进入同账号的手动操作等待本轮结束，不并发消费', async () => {
+    const f = integration(); f.settings.silicon.fleets[1].enabled = true;
+    f.state.fleets[2].durability = 1999;
+    let manualJob;
+    f.afterWrite = name => {
+      if (name === 'ChipMineSendFleetRequest' && !manualJob) {
+        manualJob = f.schedule(() => f.client.sendWatch('RepairFleetRequest', { buildingId: '3远征船' }));
+        for (let index = 0; index < 20; index++) f.client.emit('message', { name: 'SCMyFleetUpdate', body: {} });
+      }
+    };
+    await f.run(); await manualJob;
+    assert.deepEqual(f.client.writes.map(row => row.name), ['ChipMineSendFleetRequest', 'ChipMineSendFleetRequest', 'RepairFleetRequest']);
+    assert.equal(f.state.fleets[2].state, 4); assert.equal(f.maxInFlight(), 1);
+    assert.equal(f.scheduled(), 2, '手动任务在挂机整轮之后单独进入同一队列'); f.clean();
+  });
+  await test('派遣结果未知跨主轮仍保留预算和矿位，不因空闲状态重发', async () => {
+    const f = integration({ rounds: 2, mainEveryMs: 600000 }); f.unknown = true;
+    await f.run();
+    assert.equal(dispatches(f).length, 1); assert.equal(f.ledger.snapshot().uncertain, 1);
+    assert.equal(f.ledger.pendingCounters().siliconPetrol, 500); f.clean();
+  });
+
+  console.log('扩展挂机循环测试：' + results.filter(Boolean).length + '/' + results.length + ' 项通过');
+  if (results.some(result => !result)) process.exitCode = 1;
+} finally {
+  Date.now = originalNow;
+  if (originalDataDir === undefined) delete process.env.CW_DATA_DIR; else process.env.CW_DATA_DIR = originalDataDir;
+  fs.rmSync(folder, { recursive: true, force: true });
+}
