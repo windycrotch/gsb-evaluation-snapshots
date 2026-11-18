@@ -356,7 +356,20 @@ nested buffer** after mutation throws `LIVE_FRAME_STALE`; drawing a stale lease
 also refuses before touching the renderer. Writes and backing-storage escape
 routes refuse as `LIVE_FRAME_READONLY`. `liveFrameChecks` can explicitly select
 this diagnostic behavior. Those leases allocate; they are reported separately
-from the production allocation measurement. Listener delivery creates the same
+from the production allocation measurement.
+
+Every borrowed frame also carries a non-throwing staleness query,
+`frame.isStale()`: it returns `true` once the frame's generation no longer
+matches the player's latest pose generation, so a caller can tell an expired
+borrow from a genuine read-only violation without probing by exception. The
+query never throws, never mutates the buffers and never renews the lease —
+an expired frame stays expired, and a fresh lease comes from `liveFrame()`.
+On a checked lease it agrees exactly with the read guard (`true` precisely
+when a read would throw `LIVE_FRAME_STALE`), and every nested view of the
+lease — the vertex buffer, an attachment's `clip.polygon` — answers the same
+query for the same lease. A production runtime frame is the reused buffer
+object itself, so its query stays `false`: its values are overwritten in place
+rather than expired. Listener delivery creates the same
 detached callback payloads as the oracle and is measured separately; the
 no-listener advance/liveFrame path reuses event records and frame buffers. The oracle fallback packs a borrowed
 view from its snapshot and also carries no zero-allocation promise.

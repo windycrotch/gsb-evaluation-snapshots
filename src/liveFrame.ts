@@ -50,6 +50,19 @@ export interface LiveFrame {
   readonly vertices: LiveNumbers;
   readonly tint: LiveNumbers;
   readonly attachments: readonly LiveAttachment[];
+  /**
+   * True once this frame's generation no longer matches the player's latest
+   * pose generation — the non-throwing staleness query, so a caller can tell an
+   * expired borrow from a genuine read-only violation without probing by
+   * exception. The query itself never throws, never mutates the buffers and
+   * never renews the lease; nested borrowed views (an attachment's `clip.polygon`,
+   * the vertex buffer) answer for the same lease. On a development checked
+   * lease it agrees exactly with the read guard: true precisely when a read
+   * would throw `LIVE_FRAME_STALE`. A production runtime frame is the reused
+   * buffer object itself, so its query stays false — its values are overwritten
+   * in place rather than expired.
+   */
+  isStale(): boolean;
 }
 
 /** @internal A stable array facade for the existing renderer interface, without vertex copies. */
@@ -69,12 +82,16 @@ export function checkedLiveFrame(frame: LiveFrame, current: () => number): LiveF
   const check = (): void => {
     if (current() !== generation) throw new Error(`LIVE_FRAME_STALE: borrowed generation ${frameGeneration} was invalidated; call liveFrame() again`);
   };
+  /** The non-throwing staleness query: exactly the lease's invalidation condition, observed. */
+  const staleQuery = (): boolean => current() !== generation;
   const wrap = <T extends object>(value: T): T => {
     const found = proxies.get(value);
     if (found) return found as T;
     // A separate extensible target avoids proxy invariants on frozen metadata.
     const proxy = new Proxy(Array.isArray(value) ? [] : {}, {
       get(_target, property) {
+        // The staleness query must work on an expired lease, so it answers before the guard.
+        if (property === 'isStale') return staleQuery;
         check();
         if (property === 'buffer' || property === 'set' || property === 'fill' || property === 'copyWithin' || property === 'reverse' || property === 'sort') {
           throw new Error(`LIVE_FRAME_READONLY: ${String(property)} does not expose the live backing store`);
@@ -135,8 +152,11 @@ export class RuntimeFrames {
   private readonly previousColor = new Float64Array(4).fill(Number.NaN);
   private drawn = 0;
   private epoch = 0;
+  /** The owning player's current pose generation; defaults to the frame's own, so a standalone view never reports stale. */
+  private readonly latestGeneration: () => number;
 
-  constructor(source: FrameSource, model?: RuntimeModel) {
+  constructor(source: FrameSource, model?: RuntimeModel, latestGeneration?: () => number) {
+    this.latestGeneration = latestGeneration ?? (() => this.epoch);
     this.model = model ?? compileRuntime(source.doc);
     this.pose = new RuntimePose(this.model);
     this.order = new Int32Array(this.model.slots.length);
@@ -188,6 +208,7 @@ export class RuntimeFrames {
     this.live = Object.freeze({
       get generation() { return owner.epoch; }, get count() { return owner.drawn; },
       drawOrder: this.order, vertices: this.pose.vertices, tint: this.tint, attachments: Object.freeze(metadata),
+      isStale: () => owner.epoch !== owner.latestGeneration(),
     });
     drawings.set(this.live, this.renderFrame);
   }
@@ -273,7 +294,7 @@ export class RuntimeFrames {
 }
 
 /** @internal Oracle fallback keeps the same borrowed-buffer layout, without a zero-allocation claim. */
-export function oracleLiveFrame(frame: PosedFrame, identities: ReadonlyMap<string, { attachment: string | null; skin: string | null }>, indices: ReadonlyMap<string, number>): LiveFrame {
+export function oracleLiveFrame(frame: PosedFrame, identities: ReadonlyMap<string, { attachment: string | null; skin: string | null }>, indices: ReadonlyMap<string, number>, stale: () => boolean = () => false): LiveFrame {
   let size = 0;
   for (const slot of frame.order) size += (slot.kind === 'region' ? slot.corners : slot.vertices).length;
   const vertices = new Float64Array(size);
@@ -293,7 +314,7 @@ export function oracleLiveFrame(frame: PosedFrame, identities: ReadonlyMap<strin
     offset += points.length;
     return metadata;
   });
-  const live = { generation: frame.generation ?? 0, count: attachments.length, drawOrder, vertices, tint, attachments };
+  const live = { generation: frame.generation ?? 0, count: attachments.length, drawOrder, vertices, tint, attachments, isStale: stale };
   drawings.set(live, frame);
   return live;
 }

@@ -2371,7 +2371,7 @@ export class RigPlayer {
       if (refused) this.poserLabel = `oracle: ${new RuntimeRefusal(refused.missing).message}`;
       return false;
     }
-    const frames = this.runtimeFrames ?? new RuntimeFrames(this.source, this.runtimeModel);
+    const frames = this.runtimeFrames ?? new RuntimeFrames(this.source, this.runtimeModel, () => this.poseGeneration);
     frames.pose.setAnimation(name);
     frames.pose.apply(0);
     this.runtimeFrames = frames;
@@ -2426,7 +2426,8 @@ export class RigPlayer {
       frame = this.runtimeFrames.live;
     } else {
       const identities = new Map(this.slotIdentity().slots.map(slot => [slot.slot, slot]));
-      frame = oracleLiveFrame(this.posedFrame(), identities, this.source.slotIndex);
+      const generation = this.poseGeneration;
+      frame = oracleLiveFrame(this.posedFrame(), identities, this.source.slotIndex, () => this.poseGeneration !== generation);
     }
     return this.liveChecks ? this.checkedFrame(frame) : frame;
   }

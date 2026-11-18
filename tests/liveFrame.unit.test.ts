@@ -4,7 +4,8 @@ import { checkedLiveFrame, type LiveFrame } from '../src/liveFrame.js';
 
 function frame(): LiveFrame {
   return { generation: 1, count: 1, drawOrder: new Int32Array([0]), vertices: new Float64Array([2, 3]), tint: new Float64Array([1, 1, 1, 1]),
-    attachments: Object.freeze([Object.freeze({ slot: 's', slotIndex: 0, attachment: 'named', skin: 'default', placeholder: 'p', kind: 'region' as const, region: 'r', page: 'page', pma: false, blend: 'Normal' as const, offset: 0, count: 2, uvs: Object.freeze([0, 1]), triangles: Object.freeze([0, 1, 2]), dark: null, clip: null })]) };
+    attachments: Object.freeze([Object.freeze({ slot: 's', slotIndex: 0, attachment: 'named', skin: 'default', placeholder: 'p', kind: 'region' as const, region: 'r', page: 'page', pma: false, blend: 'Normal' as const, offset: 0, count: 2, uvs: Object.freeze([0, 1]), triangles: Object.freeze([0, 1, 2]), dark: null, clip: null })]),
+    isStale: () => false };
 }
 
 test('held frame and nested buffers become stale; a fresh lease reads the next generation', () => {
@@ -36,4 +37,46 @@ test('unguarded borrowed source changes while detached numeric copies remain unc
   (source.vertices as Float64Array)[0] = 9;
   assert.equal(source.vertices[0], 9);
   assert.deepEqual(before, [2, 3]);
+});
+
+test('isStale reports expiration without throwing, mutating or renewing the lease', () => {
+  let generation = 1;
+  const source = frame();
+  const lease = checkedLiveFrame(source, () => generation);
+  const vertices = lease.vertices;
+  const uv = lease.attachments[0].uvs;
+  const attachment = lease.attachments[0];
+  // Nested views answer the same query on a checked lease (a runtime lease
+  // detail the buffer types do not declare).
+  const staleOf = (view: unknown): boolean => (view as { isStale(): boolean }).isStale();
+  // Fresh: the query is false, and repeating it without a pose change never misreports.
+  assert.equal(lease.isStale(), false);
+  assert.equal(lease.isStale(), false);
+  assert.equal(staleOf(vertices), false);
+  assert.equal(staleOf(uv), false);
+  assert.equal(vertices[0], 2);
+  assert.equal(lease.isStale(), false);
+  generation++;
+  // Stale: the query itself never throws, on the frame or any nested view.
+  assert.equal(lease.isStale(), true);
+  assert.equal(staleOf(vertices), true);
+  assert.equal(staleOf(uv), true);
+  assert.equal(staleOf(attachment), true);
+  // The query does not renew the lease: reads still throw, and repeated queries stay true.
+  assert.throws(() => lease.count, /LIVE_FRAME_STALE/);
+  assert.throws(() => vertices[0], /LIVE_FRAME_STALE/);
+  assert.equal(lease.isStale(), true);
+  // The buffers were not touched by the queries.
+  assert.equal(source.vertices[0], 2);
+  assert.equal(source.vertices[1], 3);
+  // A fresh lease on the next generation is not stale.
+  assert.equal(checkedLiveFrame(source, () => generation).isStale(), false);
+});
+
+test('isStale does not mask read-only violations on a fresh lease', () => {
+  const lease = checkedLiveFrame(frame(), () => 1);
+  assert.equal(lease.isStale(), false);
+  assert.throws(() => { (lease.vertices as { [i: number]: number })[0] = 8; }, /LIVE_FRAME_READONLY/);
+  assert.throws(() => Reflect.get(lease.vertices, 'buffer'), /LIVE_FRAME_READONLY/);
+  assert.equal(lease.isStale(), false);
 });

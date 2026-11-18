@@ -25,7 +25,7 @@ function pixels(player: RigPlayer): Uint8ClampedArray {
 
 export async function liveFrameProbe(rig: string, mutant: 'none' | 'vertices' | 'snapshot' | 'lease' = 'none') {
   const assets = await loadModel({ modelUrl: `/rigs/${rig}/skeleton.model.json` });
-  const rows: Array<{ animation: string; poser: string; frames: number; numeric: string[]; pixelDifferences: number; pixelValues: number; contentPixels: number; snapshotKept: boolean; stale: boolean; nestedStale: boolean; rendererStale: boolean; readonly: boolean; drawIdentity: boolean | null }> = [];
+  const rows: Array<{ animation: string; poser: string; frames: number; numeric: string[]; pixelDifferences: number; pixelValues: number; contentPixels: number; snapshotKept: boolean; stale: boolean; nestedStale: boolean; rendererStale: boolean; readonly: boolean; freshQuery: boolean; staleQuery: boolean; nestedStaleQuery: boolean; drawIdentity: boolean | null }> = [];
   try {
     for (const animation of assets.animations) {
       const roots = [document.createElement('div'), document.createElement('div')];
@@ -40,6 +40,7 @@ export async function liveFrameProbe(rig: string, mutant: 'none' | 'vertices' | 
         const numeric: string[] = [];
         let pixelDifferences = 0, pixelValues = 0, contentPixels = 0;
         let stale = false, nestedStale = false, rendererStale = false, readonly = false;
+        let freshQuery = false, staleQuery = false, nestedStaleQuery = false;
         let drawIdentity: boolean | null = null;
         const held = runtime.posedFrame();
         const kept = JSON.stringify(held);
@@ -47,8 +48,14 @@ export async function liveFrameProbe(rig: string, mutant: 'none' | 'vertices' | 
         for (const step of [0, 0.125, 0.375, 0.75]) {
           const lease = runtime.liveFrame();
           const nested = lease.vertices;
+          // The query is clean on a fresh borrow, and repeating it without a pose change never misreports.
+          freshQuery = lease.isStale() === false && lease.isStale() === false;
           runtime.advance(step); oracle.advance(step);
           if (step > 0) {
+            staleQuery = lease.isStale() === true;
+            // Raw production buffers carry the query on the frame only, not on nested views.
+            const nestedIsStale = (nested as unknown as { isStale?: () => boolean }).isStale;
+            nestedStaleQuery = typeof nestedIsStale === 'function' && nestedIsStale.call(nested) === true;
             try { void lease.count; } catch (error) { stale = String(error).includes('LIVE_FRAME_STALE'); }
             try { void nested.length; } catch (error) { nestedStale = String(error).includes('LIVE_FRAME_STALE'); }
             try { runtime.renderer.render(lease); } catch (error) { rendererStale = String(error).includes('LIVE_FRAME_STALE'); }
@@ -112,7 +119,7 @@ export async function liveFrameProbe(rig: string, mutant: 'none' | 'vertices' | 
             drawIdentity = before === after && vertices === after.vertices && tint === after.tint && order === after.drawOrder && attachments === after.attachments;
           } finally { production.dispose(); productionRoot.remove(); }
         } else drawIdentity = null; // Not measurable on the oracle fallback.
-        rows.push({ animation: animation.name, poser: runtime.poser, frames: count, numeric, pixelDifferences, pixelValues, contentPixels, snapshotKept: JSON.stringify(held) === kept, stale, nestedStale, rendererStale, readonly, drawIdentity });
+        rows.push({ animation: animation.name, poser: runtime.poser, frames: count, numeric, pixelDifferences, pixelValues, contentPixels, snapshotKept: JSON.stringify(held) === kept, stale, nestedStale, rendererStale, readonly, freshQuery, staleQuery, nestedStaleQuery, drawIdentity });
       } finally { runtime.dispose(); oracle.dispose(); roots.forEach(root => root.remove()); }
     }
     return { rig, rows };
@@ -235,4 +242,90 @@ export async function liveFrameNullIdentity(plantOldCheck = false) {
     }
     return rows;
   } finally { runtime.dispose(); oracle.dispose(); assets.dispose(); roots.forEach(root => root.remove()); }
+}
+
+/**
+ * The non-throwing staleness query on a real player: a fresh borrow reads and
+ * queries clean, one pose step expires it on the frame and every nested view,
+ * writes stay read-only violations, and the production reuse path keeps its
+ * values coherent with the snapshot.
+ */
+export async function liveFrameStaleQuery(rig: string, animation?: string) {
+  const assets = await loadModel({ modelUrl: `/rigs/${rig}/skeleton.model.json` });
+  const roots = [document.createElement('div'), document.createElement('div'), document.createElement('div')];
+  roots.forEach(root => document.body.append(root));
+  const checked = new RigPlayer(roots[0], assets, { mode: 'canvas', liveFrameChecks: true });
+  const production = new RigPlayer(roots[1], assets, { mode: 'canvas', liveFrameChecks: false });
+  const oracle = new RigPlayer(roots[2], assets, { mode: 'canvas', poser: 'oracle', liveFrameChecks: false });
+  const staleOf = (view: unknown): boolean => (view as { isStale(): boolean }).isStale();
+  try {
+    const name = animation ?? assets.animations[0].name;
+    checked.play(name); production.play(name); oracle.play(name);
+    checked.advance(0.125); production.advance(0.125); oracle.advance(0.125);
+
+    // Normal path: a fresh borrow reads and queries clean, repeatedly.
+    const frame = checked.liveFrame();
+    const generation = frame.generation;
+    const firstValue = frame.vertices[0];
+    const fresh = frame.isStale() === false;
+    const freshRepeated = frame.isStale() === false && frame.isStale() === false;
+    // Readonly path: a write refuses as a read-only violation, not a stale one,
+    // and the query afterwards is still clean.
+    let readonly = false;
+    try { Reflect.set(frame.vertices, '0', 123); } catch (error) { readonly = String(error).includes('LIVE_FRAME_READONLY'); }
+    const readonlyKeptFresh = frame.isStale() === false;
+    // Nested views captured before the step: the vertex buffer and a clip polygon.
+    const nested = frame.vertices;
+    let polygon: unknown = null;
+    for (let i = 0; i < frame.count; i++) {
+      const clip = frame.attachments[frame.drawOrder[i]].clip;
+      if (clip !== null) { polygon = clip.polygon; break; }
+    }
+
+    // Stale path: one pose step expires the borrow.
+    checked.advance(0.25);
+    const stale = frame.isStale() === true;
+    let staleRead = false;
+    try { void frame.count; } catch (error) { staleRead = String(error).includes('LIVE_FRAME_STALE'); }
+    // Querying does not renew the lease: repeated queries stay true.
+    const staleRepeated = frame.isStale() === true && frame.isStale() === true;
+    const nestedStale = staleOf(nested) === true;
+    let nestedRead = false;
+    try { void nested[0]; } catch (error) { nestedRead = String(error).includes('LIVE_FRAME_STALE'); }
+    const polygonStale = polygon === null ? null : staleOf(polygon) === true;
+    let polygonRead: boolean | null = null;
+    if (polygon !== null) {
+      try { void (polygon as Record<number, number>)[0]; } catch (error) { polygonRead = String(error).includes('LIVE_FRAME_STALE'); }
+    }
+
+    // A fresh lease on the new pose is clean; the expired one stays expired.
+    const next = checked.liveFrame();
+    const renewed = next.isStale() === false && frame.isStale() === true && next.generation !== generation;
+
+    // Production reuse path: the same buffers come back, values track the snapshot.
+    const before = production.liveFrame();
+    production.advance(0.25);
+    const after = production.liveFrame();
+    const snapshot = production.posedFrame();
+    let valuesMatch = after.count === snapshot.order.length;
+    for (let i = 0; i < after.count && valuesMatch; i++) {
+      const attachment = after.attachments[after.drawOrder[i]];
+      const slot = snapshot.order[i];
+      if (attachment.slot !== slot.slot) { valuesMatch = false; break; }
+      const points = slot.kind === 'region' ? slot.corners : slot.vertices;
+      for (let c = 0; c < points.length && valuesMatch; c++) if (!Object.is(after.vertices[attachment.offset + c], points[c])) valuesMatch = false;
+      for (let c = 0; c < 4 && valuesMatch; c++) if (!Object.is(after.tint[attachment.slotIndex * 4 + c], slot.tint[c])) valuesMatch = false;
+    }
+    const productionResult = { reused: before === after, queriedFresh: after.isStale() === false, valuesMatch };
+
+    // Oracle fallback: the raw borrowed frame keys its query off the generation.
+    const oracleFrame = oracle.liveFrame();
+    const oracleFresh = oracleFrame.isStale() === false;
+    oracle.advance(0.25);
+    const oracleStale = oracleFrame.isStale() === true;
+
+    return { rig, animation: name, poser: checked.poser, firstValue, fresh, freshRepeated, readonly, readonlyKeptFresh,
+      stale, staleRead, staleRepeated, nestedStale, nestedRead, polygonStale, polygonRead, renewed,
+      production: productionResult, oracleFresh, oracleStale };
+  } finally { checked.dispose(); production.dispose(); oracle.dispose(); roots.forEach(root => root.remove()); assets.dispose(); }
 }

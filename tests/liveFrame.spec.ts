@@ -62,10 +62,52 @@ for (const rig of ['walk', 'flex', 'squash', 'portrait', 'nod', 'look', 'ride', 
       expect(row.nestedStale).toBe(true);
       expect(row.rendererStale).toBe(true);
       expect(row.readonly).toBe(true);
+      expect(row.freshQuery).toBe(true);
+      expect(row.staleQuery).toBe(true);
+      expect(row.nestedStaleQuery).toBe(true);
       if (row.poser === 'runtime') expect(row.drawIdentity).toBe(true);
       else expect(row.drawIdentity).toBeNull();
     }
     console.log('LIVE_FRAME_CASE', JSON.stringify(result));
+  });
+}
+
+for (const [rig, animation] of [['figure', 'tilted_moved'], ['walk', undefined]] as Array<[string, string | undefined]>) {
+  test(`live frame isStale query: fresh, stale, nested and readonly paths: ${rig}`, async ({ page }) => {
+    await page.goto('/tests/harness.html');
+    await page.waitForFunction(() => Boolean(window.rigPlayHarness));
+    const result = await page.evaluate(([rig, animation]) => window.rigPlayHarness.liveFrameStaleQuery(rig, animation ?? undefined), [rig, animation] as [string, string | undefined]);
+    expect(result.poser, rig).toBe('runtime');
+    // Normal path: the fresh borrow queries clean, repeatedly, and reads real values.
+    expect(result.fresh, rig).toBe(true);
+    expect(result.freshRepeated, rig).toBe(true);
+    expect(typeof result.firstValue, rig).toBe('number');
+    // Readonly path: a write is a read-only violation, never confused with expiry.
+    expect(result.readonly, rig).toBe(true);
+    expect(result.readonlyKeptFresh, rig).toBe(true);
+    // Stale path: one pose step expires the borrow; the query observes it without throwing.
+    expect(result.stale, rig).toBe(true);
+    expect(result.staleRead, rig).toBe(true);
+    expect(result.staleRepeated, rig).toBe(true);
+    // Nested path: the vertex buffer (and the clip polygon, where the rig has one) agrees.
+    expect(result.nestedStale, rig).toBe(true);
+    expect(result.nestedRead, rig).toBe(true);
+    if (rig === 'figure') {
+      expect(result.polygonStale, rig).toBe(true);
+      expect(result.polygonRead, rig).toBe(true);
+    } else {
+      expect(result.polygonStale, rig).toBeNull();
+    }
+    // The query never renews: a fresh lease is clean while the expired one stays expired.
+    expect(result.renewed, rig).toBe(true);
+    // Production reuse path: same buffers, values coherent with the snapshot.
+    expect(result.production.reused, rig).toBe(true);
+    expect(result.production.queriedFresh, rig).toBe(true);
+    expect(result.production.valuesMatch, rig).toBe(true);
+    // Oracle fallback: the raw borrowed frame keys its query off the generation.
+    expect(result.oracleFresh, rig).toBe(true);
+    expect(result.oracleStale, rig).toBe(true);
+    console.log('LIVE_FRAME_STALE_QUERY', JSON.stringify(result));
   });
 }
 
@@ -87,7 +129,7 @@ test('planted vertex, snapshot and unchecked-lease defects fail their gates', as
   expect(corrupt.rows.some(row => row.poser === 'runtime' && row.numeric.length > 0)).toBe(true);
   expect(corrupt.rows.some(row => row.pixelDifferences > 0)).toBe(true);
   const unchecked = await page.evaluate(() => window.rigPlayHarness.liveFrameProbe('turned', 'lease'));
-  expect(unchecked.rows.some(row => row.poser === 'runtime' && !row.stale && !row.nestedStale && !row.rendererStale && !row.readonly)).toBe(true);
+  expect(unchecked.rows.some(row => row.poser === 'runtime' && !row.stale && !row.nestedStale && !row.rendererStale && !row.readonly && !row.staleQuery && !row.nestedStaleQuery)).toBe(true);
   const shared = await page.evaluate(() => window.rigPlayHarness.liveFrameProbe('walk', 'snapshot'));
   expect(shared.rows.some(row => row.poser === 'runtime' && !row.snapshotKept)).toBe(true);
 });
