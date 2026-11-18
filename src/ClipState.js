@@ -19,6 +19,28 @@ export default class ClipState extends EventEmitter {
     this._chunksBufferingFinished = false;
   }
 
+  // Seek to a new playback position. The allowed buffering boundary, the
+  // current playhead and the buffering-finished flag are updated together (in
+  // that order) so observers can never read a partially updated state after a
+  // jump.
+  seek(position = 0, lastAllowedPosition = 1) {
+    this._lastAllowedChunkIndex = this.getLastChunkIndexByPosition(lastAllowedPosition);
+
+    const previousChunkIndex = this._chunkIndex;
+    const nextChunkIndex = this.getChunkIndexByPosition(position);
+    this._chunkIndex = nextChunkIndex;
+
+    this._chunksBufferingFinished =
+      nextChunkIndex >= this._totalChunksCount ||
+      nextChunkIndex >= this._lastAllowedChunkIndex;
+
+    if (previousChunkIndex !== nextChunkIndex) {
+      this._fire('chunkIndexManuallyChanged', nextChunkIndex);
+    }
+
+    return nextChunkIndex;
+  }
+
   isChunkReady(wantedChunk) {
     const chunk = this._chunks[wantedChunk];
     return chunk && !Number.isNaN(chunk.duration);
@@ -73,14 +95,14 @@ export default class ClipState extends EventEmitter {
   }
 
   set chunkIndex(index) {
+    const previousIndex = this._chunkIndex;
+    this._chunkIndex = index;
     this._chunksBufferingFinished =
       index >= this._totalChunksCount || index >= this._lastAllowedChunkIndex;
     if (this._chunksBufferingFinished) {
       return;
     }
-    const diff = index - this._chunkIndex;
-    this._chunkIndex = index;
-    if (diff !== 1) {
+    if (index - previousIndex !== 1) {
       this._fire('chunkIndexManuallyChanged', this._chunkIndex);
     }
   }

@@ -234,18 +234,22 @@ export default class Player {
       clip.on('bufferchange', (isBuffering) => onBufferChange(isBuffering));
 
       this._playbackPositionInterval = setInterval(() => {
+        if (!this.currentlyPlaying) {
+          return;
+        }
+
         const { duration, currentTime } = clip;
-        if (duration === 0 || duration < currentTime) return;
+        if (duration === 0) return;
+
         let progress = currentTime / duration;
 
+        // The reported progress must always stay within [0, 1]. While paused,
+        // `clip.currentTime` stays at the paused position, so the reported
+        // progress neither grows nor snaps back to 0.
         if (progress < 0) {
           progress = 0;
         } else if (progress > 1) {
           progress = 1; // Prevent playback progress from exceeding 1 (100%)
-        }
-
-        if (!this.currentlyPlaying) {
-          return;
         }
 
         this.currentlyPlaying.lastReportedProgress = progress;
@@ -357,14 +361,27 @@ export default class Player {
     const newPosition = (clip.currentTime + seconds) / clip.duration;
 
     if (newPosition < 0) {
+      // Dragged past the beginning: switch to the previous track and stop the
+      // current clip instead of restarting it at position 0.
       this.stopAll();
       this.onPreviousTrack();
-    } else if (newPosition >= 1 && this.nextTrack) {
-      const nextTrack = this.nextTrack;
-      this.nextTrack = null;
+      return Promise.resolve();
+    }
 
-      this.playTrack(nextTrack);
-      this.onNextTrack(currentTrack, nextTrack);
+    if (newPosition >= 1) {
+      if (this.nextTrack) {
+        // Dragged past the end and another track is queued: switch to it.
+        const nextTrack = this.nextTrack;
+        this.nextTrack = null;
+
+        const playPromise = this.playTrack(nextTrack);
+        this.onNextTrack(currentTrack, nextTrack);
+        return playPromise || Promise.resolve();
+      }
+
+      // No next track: never trigger a track switch. Clamp to the end of the
+      // current track and let playback finish naturally.
+      return clip.setCurrentPosition(1) || Promise.resolve();
     }
 
     return clip.setCurrentPosition(newPosition);

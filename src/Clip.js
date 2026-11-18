@@ -60,6 +60,10 @@ export default class Clip extends EventEmitter {
     this._playbackProgress = 0;
     this._bufferingOffset = 0;
     this._lastBufferChange = null;
+    // Most recently observed position (in seconds). Kept while paused/stopped
+    // so progress reports do not snap back to 0 and seeks made while paused
+    // use the real playhead.
+    this._lastCurrentTime = 0;
 
     this._shouldStopBuffering = false;
     this._preBuffering = false;
@@ -299,9 +303,27 @@ export default class Clip extends EventEmitter {
     this._playbackState = PLAYBACK_STATE.STOPPED;
     this._fire('stop');
 
-    this._initialChunk = this._clipState.getChunkIndexByPosition(position);
-    this._clipState.lastAllowedChunkIndex = lastAllowedPosition;
-    this._clipState.chunkIndex = this._initialChunk;
+    // Update the playhead, the allowed buffering boundary and the
+    // buffering-finished flag atomically.
+    this._initialChunk = this._clipState.seek(position, lastAllowedPosition);
+
+    // Restart the internal playback clock at the new position so progress is
+    // measured from the jump instead of accumulating stale time.
+    this._playbackProgress = 0;
+    this._bufferingOffset = 0;
+    this._lastContextTimeAtStart = null;
+    this._lastCurrentTime = 0;
+    this._lastPlayedChunk = null;
+
+    // Buffering state must be re-evaluated around the new playhead, otherwise
+    // a stale "finished" event can fire early or a pending state can stick.
+    this._buffering = false;
+    this._buffered = false;
+    this._preBuffering = false;
+    this._preBuffered = false;
+    this._lastBufferChange = null;
+    this._shouldStopBuffering = false;
+    this.ended = false;
 
     let promise;
 
@@ -330,24 +352,38 @@ export default class Clip extends EventEmitter {
 
   get currentTime() {
     if (this._playbackState !== PLAYBACK_STATE.PLAYING) {
-      return 0;
+      // While paused or stopped the audio clock is not advancing, so keep
+      // reporting the position where playback actually stopped instead of
+      // snapping back to 0.
+      return this._lastCurrentTime;
     }
 
     const averageChunkDuration = this._loader ? this._loader.averageChunkDuration : 0;
     const offset = averageChunkDuration * this._initialChunk;
 
     if (this._useMediaSource) {
-      return offset + this._audioElement.currentTime;
+      this._lastCurrentTime = offset + this._audioElement.currentTime;
+      return this._lastCurrentTime;
     }
 
+    const currentChunkNotReady = !this._clipState.isChunkReady(
+      this._clipState.chunkIndex
+    );
     const isPlayingSilence =
-      this._scheduledEndTime == null || this.context.currentTime > this._scheduledEndTime;
+      (this._scheduledEndTime == null ||
+        this.context.currentTime > this._scheduledEndTime) &&
+      // A null `_scheduledEndTime` also occurs briefly right after play/resume
+      // while the first chunk is still being decoded. That is not buffering
+      // when the chunk is already available, so don't fire a spurious buffer
+      // event or jump back to the chunk boundary.
+      (this._scheduledEndTime != null || currentChunkNotReady);
 
     if (isPlayingSilence) {
       if (this._clipState.chunksBufferingFinished) {
         // Playback has finished.
         this.playbackEnded();
-        return averageChunkDuration * this._clipState.totalChunksCount;
+        this._lastCurrentTime = averageChunkDuration * this._clipState.totalChunksCount;
+        return this._lastCurrentTime;
       }
 
       // Player is buffering.
@@ -357,25 +393,30 @@ export default class Clip extends EventEmitter {
         this._bufferingOffset = this._playbackProgress;
       }
 
-      return offset + this._playbackProgress;
+      this._lastCurrentTime = offset + this._playbackProgress;
+      return this._lastCurrentTime;
     }
 
     // Player is playing back.
     this._onBufferChange(false);
 
     if (this._contextTimeAtStart === this._lastContextTimeAtStart) {
-      this._playbackProgress +=
-        this.context.currentTime -
-        this._contextTimeAtStart -
-        this._playbackProgress +
-        this._bufferingOffset;
+      // Same playback session as the previous reading: advance the progress by
+      // the audio-context time elapsed since that reading. Subtracting
+      // `_playbackProgress` here instead of the previous context timestamp made
+      // every reading after the first collapse back to `_bufferingOffset`.
+      this._playbackProgress =
+        this.context.currentTime - this._contextTimeAtStart + this._bufferingOffset;
     } else {
+      // A new session started (play/resume after a pause): begin at the offset
+      // accumulated up to the pause point.
       this._playbackProgress = this._bufferingOffset;
     }
 
     this._lastContextTimeAtStart = this._contextTimeAtStart;
 
-    return offset + this._playbackProgress;
+    this._lastCurrentTime = offset + this._playbackProgress;
+    return this._lastCurrentTime;
   }
 
   get duration() {
@@ -408,12 +449,16 @@ export default class Clip extends EventEmitter {
 
   _playUsingAudioContext() {
     debug('#_playUsingAudioContext');
-    this._playbackProgress = 0;
-    this._scheduledEndTime = null;
-
     if (this._playbackState !== PLAYBACK_STATE.PAUSED) {
+      // Fresh start (initial play or a seek): restart the internal clock.
+      this._playbackProgress = 0;
       this._bufferingOffset = 0;
     }
+    // When resuming from a pause, `_playbackProgress`/`_bufferingOffset` hold
+    // the position reached before pausing and must be preserved. Resetting them
+    // here would make playback jump back to the beginning of the chunk.
+    this._scheduledEndTime = null;
+    this._lastContextTimeAtStart = null;
 
     const timeOffset = 0;
     let playing = true;
