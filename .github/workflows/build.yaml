@@ -1,0 +1,122 @@
+# GitHub Actions workflow file.
+#
+# For more information, visit
+# https://docs.github.com/actions/learn-github-actions.
+
+---
+name: build
+
+# Makes workflow run on any push or pull request.
+on:
+  pull_request:
+    branches:
+      - "**"
+  push:
+    branches:
+      - "**"
+  workflow_dispatch:
+    inputs:
+      debug:
+        default: false
+        description: Use Tmate session for debugging
+        type: boolean
+      job:
+        default: test
+        description: CI job to run
+        options:
+          - build
+          - test
+        type: choice
+
+env:
+  NPM_CONFIG_CACHE: "${{ github.workspace }}/.cache/npm"
+  NPM_CONFIG_STORE_DIR: "${{ github.workspace }}/.cache/pnpm/store"
+  PLAYWRIGHT_BROWSERS_PATH: "${{ github.workspace }}/.cache/ms-playwright"
+
+jobs:
+  build:
+    if: >-
+      ${{ github.event_name != 'workflow_dispatch' || inputs.job == 'build' }}
+    name: Check code with linters
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code repository
+        uses: actions/checkout@v3
+      - name: Cache Node packages
+        uses: actions/cache@v3
+        with:
+          path: |
+            .cache
+            node_modules
+          key: >-
+            node-20_${{ runner.os }}_pnpm-${{ hashFiles('pnpm-lock.yaml') }}
+      - name: Install Node interpreter
+        uses: actions/setup-node@v3
+        with:
+          node-version: "20"
+      - name: Install Node packages
+        run: |
+          node --version
+          corepack enable pnpm
+          pnpm --version
+          pnpm install --frozen-lockfile
+      - name: Run linter checks
+        run: |
+          pnpm format
+          pnpm lint
+          pnpm build
+          pnpm bench
+      - name: Upload Lighthouse report
+        uses: actions/upload-artifact@v3
+        with:
+          name: lighthouse_report.html
+          path: lighthouse_report.html
+          retention-days: 10
+      - name: Setup Tmate session if debug enabled
+        if: >-
+          ${{ always() && github.event_name == 'workflow_dispatch' &&
+          inputs.debug }}
+        timeout-minutes: 60
+        uses: mxschmitt/action-tmate@v3
+
+  test:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.job == 'test' }}
+    name: Run test suite
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code repository
+        uses: actions/checkout@v3
+      - name: Cache Node packages
+        uses: actions/cache@v3
+        with:
+          path: |
+            .cache
+            node_modules
+          key: >-
+            node-20_${{ runner.os }}_pnpm-${{ hashFiles('pnpm-lock.yaml') }}
+      - name: Install Node interpreter
+        uses: actions/setup-node@v3
+        with:
+          node-version: "20"
+      - name: Install Node packages and browsers
+        run: |
+          node --version
+          corepack enable pnpm
+          pnpm --version
+          pnpm install --frozen-lockfile
+          npx playwright install --with-deps chromium
+      - name: Run test suite
+        run: pnpm test
+      - name: Upload Playwright screenshots and videos if tests fail
+        if: failure()
+        uses: actions/upload-artifact@v3
+        with:
+          name: playwright-captures
+          path: tests/results
+          retention-days: 30
+      - name: Setup Tmate session if debug enabled
+        if: >-
+          ${{ always() && github.event_name == 'workflow_dispatch' &&
+          inputs.debug }}
+        timeout-minutes: 60
+        uses: mxschmitt/action-tmate@v3
