@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import { FBXLoader } from "three/examples/jsm/loaders/FBXLoader.js";
-import { connectRadioToServer, receiveCommand } from "./radio.js";
+import { connectRadioToServer, receiveRadioState } from "./radio.js";
 
 // ---- Asset config (change here to use other files) ----
 const TOWN = {
@@ -1131,7 +1131,7 @@ function connect() {
     else if (m.t === "joined") createOther(m.player);
     else if (m.t === "left") removeOther(m.id);
     else if (m.t === "chat") receiveChat(m.id, m.name, m.text);
-    else if (m.t === "radio") receiveCommand(m.command);
+    else if (m.t === "radio") receiveRadioState(m);
     else if (m.t === "error") addToHistory("system", m.msg);
     else if (m.t === "name") {
       const o = others.get(m.id);
@@ -1167,11 +1167,16 @@ function connect() {
 const MULTIPLAYER = true;
 if (MULTIPLAYER) {
   connect();
-  // radio admin commands go to the server, with the saved password
-  connectRadioToServer((idx) => {
-    let password = "";
-    try { password = localStorage.getItem("admin-password") || ""; } catch {}
-    if (ws?.readyState === 1) ws.send(JSON.stringify({ t: "radio", idx, password }));
+  // radio admin commands and learned video durations go to the server
+  connectRadioToServer({
+    command: (idx) => {
+      let password = "";
+      try { password = localStorage.getItem("admin-password") || ""; } catch {}
+      if (ws?.readyState === 1) ws.send(JSON.stringify({ t: "radio", idx, password }));
+    },
+    duration: (id, sec) => {
+      if (ws?.readyState === 1) ws.send(JSON.stringify({ t: "radio-duration", id, sec }));
+    },
   });
 }
 

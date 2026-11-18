@@ -3,10 +3,14 @@
 //   client -> server: { t: "hello", name, gender } | { t: "pos", x, z, dir, step }
 //                     { t: "chat", text } | { t: "name", name } | { t: "gender", gender }
 //                     { t: "radio", idx, password }   (admin)
+//                     { t: "radio-duration", id, sec }   (video length learned by a player)
 //   server -> client: { t: "you", id } | { t: "state", players: [...] }
 //                     { t: "joined", player } | { t: "left", id } | { t: "pos", ... }
 //                     { t: "chat", id, name, text, at } | { t: "name", id, name }
-//                     { t: "gender", id, gender } | { t: "radio", command } | { t: "error", msg }
+//                     { t: "gender", id, gender } | { t: "error", msg }
+//                     { t: "radio", idx, sec, at }   (track, second inside it, SERVER time
+//                      of the snapshot — sent on join, on every cut and on new durations,
+//                      so nobody depends on their own clock)
 //
 // Security (the client is public, so nothing coming from it is trusted):
 //  - max message size, per-connection rate limit, max players per room
@@ -15,6 +19,11 @@
 //  - allowed origins (ALLOWED_ORIGINS) so other sites can't use this server
 //  - per IP: few connections, shared chat budget, admin lockout, progressive mute for spam
 //  - all text is stripped of control characters and truncated; numbers finite and clamped
+
+// The playlist is the same file the client uses, so both sides compute the same
+// track/second. Unknown durations count as 1h on both sides until a player
+// reports the real length ("radio-duration").
+import { PLAYLIST } from "../src/playlist.js";
 
 const MAX_PLAYERS = 100;
 // v1 has a single room; any other name is refused so nobody can spin up extra rooms (and extra cost)
@@ -33,6 +42,9 @@ const REPEAT_WINDOW_MS = 30_000; // ...inside this window counts as spam
 const RATES = { pos: [30, 20], chat: [8, 1], other: [10, 1] };
 
 const DIRS = ["down", "up", "left", "right"];
+const RADIO_START = Date.UTC(2026, 0, 1); // radio's time zero (same as the client)
+const FALLBACK_DURATION = 3600;
+const MAX_DURATION = 12 * 3600; // reported lengths outside [1, this] are refused
 const cleanText = (s, max) =>
   String(s ?? "")
     .replace(/[\u0000-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩]/g, "")
@@ -76,10 +88,52 @@ export class Room {
     this.state.acceptWebSocket(server);
     server.serializeAttachment({ id, name: "trainer", gender: "male", x: 0, z: 0, dir: "down", step: 0, ip });
     server.send(JSON.stringify({ t: "you", id }));
-    const radio = await this.state.storage.get("radio");
-    if (radio) server.send(JSON.stringify({ t: "radio", command: radio }));
+    // always send the radio state (with or without an admin command), so nobody
+    // has to guess the position from their own clock
+    server.send(JSON.stringify({ t: "radio", ...(await this.radioState()) }));
     server.send(JSON.stringify({ t: "state", players: this.players().filter((p) => p.id !== id) }));
     return new Response(null, { status: 101, webSocket: client });
+  }
+
+  // Current radio state on the SERVER clock: { idx, sec, at } — the track, the
+  // second inside it and the server time of the snapshot. With an admin command
+  // the position walks from it; without one, from the fixed radio zero.
+  async radioState() {
+    const durations = (await this.state.storage.get("radio-durations")) || {};
+    const len = (id) => {
+      const d = durations[id];
+      return Number.isFinite(d) && d > 0 ? d : FALLBACK_DURATION;
+    };
+    const now = Date.now();
+    let idx = 0,
+      sec = 0;
+    const command = await this.state.storage.get("radio");
+    if (command && Number.isFinite(command.idx) && Number.isFinite(command.at)) {
+      idx = ((command.idx % PLAYLIST.length) + PLAYLIST.length) % PLAYLIST.length;
+      let t = Math.max(0, (now - command.at) / 1000);
+      for (let n = 0; n < 1000; n++) {
+        const d = len(PLAYLIST[idx]);
+        if (t < d) {
+          sec = t;
+          break;
+        }
+        t -= d;
+        idx = (idx + 1) % PLAYLIST.length;
+      }
+    } else {
+      const total = PLAYLIST.reduce((s, id) => s + len(id), 0);
+      let t = (((now - RADIO_START) / 1000) % total + total) % total;
+      for (let i = 0; i < PLAYLIST.length; i++) {
+        const d = len(PLAYLIST[i]);
+        if (t < d) {
+          idx = i;
+          sec = t;
+          break;
+        }
+        t -= d;
+      }
+    }
+    return { idx, sec: Math.round(sec * 10) / 10, at: now };
   }
 
   // only each player's public fields (never the IP)
@@ -161,7 +215,18 @@ export class Room {
       await this.state.storage.delete(lockKey);
       const command = { idx: Math.max(0, Math.min(999, m.idx | 0)), at: Date.now() };
       await this.state.storage.put("radio", command);
-      this.broadcast({ t: "radio", command });
+      this.broadcast({ t: "radio", ...(await this.radioState()) });
+    } else if (m.t === "radio-duration") {
+      // a player learned a video's real length: keep it so the state computed
+      // here (joins, cuts) matches what everyone else is already hearing
+      const id = String(m.id ?? "");
+      const sec = Number(m.sec);
+      if (!PLAYLIST.includes(id) || !Number.isFinite(sec) || sec < 1 || sec > MAX_DURATION) return;
+      const durations = (await this.state.storage.get("radio-durations")) || {};
+      if (Math.abs((durations[id] || 0) - sec) < 0.5) return; // already known
+      durations[id] = Math.round(sec * 10) / 10;
+      await this.state.storage.put("radio-durations", durations);
+      this.broadcast({ t: "radio", ...(await this.radioState()) });
     } else if (m.t === "chat") {
       const text = cleanText(m.text, 140);
       if (!text) return;

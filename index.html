@@ -25,6 +25,8 @@
           color: #F2F2F5; background: rgba(0,0,0,.4); border: 1px solid rgba(255,255,255,.16); border-radius: 6px; cursor: pointer; pointer-events: auto; }
   #mute:hover, #mute.on { border-color: #ffc95a; color: #ffc95a; }
   #radio b { display: block; font-weight: 400; font-size: 13px; line-height: 18px; }
+  #progress { height: 3px; margin: 6px 0 4px; background: rgba(255,255,255,.14); border-radius: 2px; overflow: hidden; }
+  #progress i { display: block; height: 100%; width: 0; background: #ffc95a; }
   #chat { right: 20px; top: 20px; bottom: 20px; width: 320px; display: flex; flex-direction: column; }
   #chat header { padding: 18px 20px 14px; border-bottom: 1px solid rgba(255,255,255,.12); display: flex; justify-content: space-between; align-items: baseline; }
   #chat header b { font-weight: 400; font-size: 18px; }
@@ -133,6 +135,8 @@
 <div id="radio" class="glass">
   <div class="tv"><div id="yt"></div></div>
   <div><small>now playing <button id="mute" type="button" title="mute (M)" aria-label="mute"></button></small><b id="title">—</b>
+    <div id="progress"><i id="progress-bar"></i></div>
+    <small id="time">--:-- / --:--</small>
     <div id="admin" hidden>
       <button data-action="previous" title="previous">⏮</button>
       <button data-action="restart" title="restart">↺</button>
@@ -217,7 +221,12 @@
       resumeRadio();
       return;
     }
-    radioPromise = startRadio({ elPlayer: "yt", elTitle: document.querySelector("#title") }).catch((err) => {
+    radioPromise = startRadio({
+      elPlayer: "yt",
+      elTitle: document.querySelector("#title"),
+      elTime: document.querySelector("#time"),
+      elBar: document.querySelector("#progress-bar"),
+    }).catch((err) => {
       radioPromise = null;
       pause();
       console.error("Could not start the radio", err);
