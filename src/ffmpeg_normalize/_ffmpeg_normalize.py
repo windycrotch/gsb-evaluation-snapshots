@@ -461,6 +461,11 @@ class FFmpegNormalize:
         Peak mode uses the highest sample peak. RMS mode uses the average RMS,
         with gain capped by the highest sample peak. EBU uses average LUFS.
 
+        Files that failed to analyze and files that are skipped because they
+        are already within the threshold of the target are left out, so a
+        skipped file neither shifts the reference nor changes the gain applied
+        to the remaining files.
+
         Returns:
             float | None: The batch reference loudness value, or None if no measurements found.
 
@@ -471,7 +476,7 @@ class FFmpegNormalize:
         peaks: list[float] = []
 
         for media_file in self.media_files:
-            if media_file.status == "error":
+            if media_file.status == "error" or media_file.skip:
                 continue
             for stream in media_file._get_streams_to_normalize():
                 peak = stream.loudness_statistics.get("max")
@@ -495,10 +500,19 @@ class FFmpegNormalize:
 
         measurements = [value for value in measurements if math.isfinite(value)]
         if not measurements:
-            _logger.warning(
-                "No loudness measurements found for batch reference calculation. "
-                "Batch mode will not be applied."
-            )
+            if any(
+                media_file.status != "error" and not media_file.skip
+                for media_file in self.media_files
+            ):
+                _logger.warning(
+                    "No loudness measurements found for batch reference calculation. "
+                    "Batch mode will not be applied."
+                )
+            else:
+                _logger.info(
+                    "Batch mode: no files left to normalize after applying the "
+                    "threshold; no batch reference is needed."
+                )
             return None
 
         # Peak mode targets the loudest sample in the album. RMS mode targets
@@ -570,6 +584,11 @@ class FFmpegNormalize:
             self.validate_output_files(
                 [media_file.input_file for media_file in self.media_files],
                 [media_file.output_file for media_file in self.media_files],
+            )
+        if self.verify and self.dry_run:
+            _logger.warning(
+                "Encoded-output verification is skipped in dry-run mode: "
+                "no output is written, so nothing can be measured."
             )
         with ProgressDisplay(enabled=self.progress) as display:
             self.progress_display = display
@@ -644,10 +663,28 @@ class FFmpegNormalize:
                     self._record_failure(media_file, e, "analyzing")
                     continue
 
-            # Phase 2: Calculate batch reference loudness
+            # Decide which files are already at the target level before the
+            # reference is calculated. Their measurements are available now and
+            # must not influence the shared reference.
+            skipped_count = 0
+            for media_file in self.media_files:
+                if media_file.status == "error":
+                    continue
+                if media_file.decide_skip():
+                    skipped_count += 1
+            if skipped_count:
+                _logger.info(
+                    f"Batch mode: {skipped_count} of {self.file_count} file(s) "
+                    f"already within {self.threshold} of target level "
+                    f"{self.target_level}; they will be copied through and "
+                    "excluded from the batch reference"
+                )
+
+            # Calculate the shared batch reference. Files skipped above are
+            # excluded here (see _calculate_batch_reference).
             batch_reference = self._calculate_batch_reference()
 
-            # Phase 3: Run second pass on all files with batch reference
+            # Run the second pass on all files with the batch reference.
             _logger.info("Phase 2: Normalizing all files...")
             for index, media_file in self._iter_media_files("Normalization"):
                 # Skip files that already failed during analysis
@@ -655,11 +692,15 @@ class FFmpegNormalize:
                     _logger.debug(f"Skipping {media_file} because its analysis failed")
                     continue
 
-                _logger.info(
-                    f"Normalizing file {media_file} ({index + 1} of {self.file_count})"
-                )
+                if not media_file.skip:
+                    _logger.info(
+                        f"Normalizing file {media_file} ({index + 1} of {self.file_count})"
+                    )
 
                 try:
+                    # run_normalization copies a file already at target through
+                    # unchanged (using the phase-1 measurements) and normalizes
+                    # the rest against the shared reference.
                     media_file.run_normalization(batch_reference=batch_reference)
                     if self.verify and not self.dry_run:
                         media_file.verify_output()

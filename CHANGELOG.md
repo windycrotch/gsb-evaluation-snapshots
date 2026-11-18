@@ -1,3 +1,19 @@
+## [1.46.0] - 2026-11-19
+
+### 🚀 Features
+
+- Apply `--threshold` in batch mode and exclude skipped files from the shared gain reference
+- Verify every encoded output in a batch; a failed check marks only that file and keeps the batch running
+- Report verification as skipped (not passed) in dry runs
+
+### 🐛 Bug Fixes
+
+- *(batch)* Keep the shared gain unchanged when some album tracks are skipped
+
+### 📚 Documentation
+
+- Document threshold skipping and verification in batch workflows
+
 ## [1.45.2] - 2026-11-17
 
 ### 🚀 Features

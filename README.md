@@ -41,6 +41,8 @@ This program normalizes media files to a certain loudness level using the EBU R1
 
 ## 🆕 What's New
 
+- Version 1.46.0 makes the batch outcome auditable end to end. **`--threshold` now also works in `--batch` mode**: files within the threshold of the target are copied through, reported as `skipped`, and excluded from the shared album gain reference, so they never shift the gain applied to the remaining files. **`--verify`** re-measures every encoded output and judges it against `--verify-loudness-tolerance` (default `0.5`) and `--verify-peak-tolerance` (default `0.1`); a miss marks only that file as `error` (exit code non-zero) while the rest of the batch continues. Dry runs now state that verification was skipped instead of implying it passed. `--print-summary` shows skipped files with unchanged levels and zero gain, and lists verification results separately.
+
 - Version 1.45.0 has a **refreshed terminal interface** based on [rich](https://github.com/Textualize/rich): colored `--help` output, colored log messages, progress bars with the current file name and ETA, and a formatted `--print-summary` table. When ffmpeg fails, only the root cause is shown (once), and `--debug` shows the full ffmpeg output for bug reports. Redirected output stays plain text, and the `LEVEL: message` log format is unchanged.
 
     > ⚠️ **Breaking change:** Progress bars are now shown **by default** when stderr is an interactive terminal (unless `--quiet` is set). Non-interactive use, e.g. in scripts, cron jobs or with redirected output, is not affected. If you parse the output of an interactive session (for example via a pseudo-terminal), pass `--no-progress` to disable the bars. `-pr`/`--progress` still forces them on.

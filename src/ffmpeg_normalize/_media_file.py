@@ -76,7 +76,10 @@ class MediaFile:
             output_file (str): Path to output file
         """
         self.ffmpeg_normalize = ffmpeg_normalize
+        # Whether the file is copied through unchanged (see decide_skip) and
+        # whether that decision has already been made for this file.
         self.skip = False
+        self._skip_decided = False
         # Per-file outcome, reported in the --print-stats output: "normalized"
         # (default), "skipped" (already within threshold of target), or "error".
         # "error" is set by FFmpegNormalize.run_normalization when processing
@@ -316,28 +319,34 @@ class MediaFile:
                     f"Could not read timestamps from {self.input_file}: {e}"
                 )
 
+        # In batch mode the caller decides skips after the analysis phase, so
+        # the decision may already be made and no further measurement is
+        # needed to copy the file through.
+        already_at_target = self._skip_decided and self.skip
+
         # run the first pass to get loudness stats, unless in dynamic EBU mode or batch mode
         # (in batch mode, first pass is already done in FFmpegNormalize.run_normalization)
-        if batch_reference is None:
-            if not (
-                self.ffmpeg_normalize.dynamic
-                and self.ffmpeg_normalize.normalization_type == "ebu"
-            ):
-                self._first_pass()
+        if not already_at_target:
+            if batch_reference is None:
+                if not (
+                    self.ffmpeg_normalize.dynamic
+                    and self.ffmpeg_normalize.normalization_type == "ebu"
+                ):
+                    self._first_pass()
+                else:
+                    _logger.debug(
+                        "Dynamic EBU mode: First pass will not run, as it is not needed."
+                    )
             else:
                 _logger.debug(
-                    "Dynamic EBU mode: First pass will not run, as it is not needed."
+                    f"Batch mode: Skipping first pass (already completed), using batch reference = {batch_reference:.2f}"
                 )
-        else:
-            _logger.debug(
-                f"Batch mode: Skipping first pass (already completed), using batch reference = {batch_reference:.2f}"
-            )
 
         # If the file is already within the configured threshold of the target
         # level, skip normalization entirely and copy the input through to the
-        # output unchanged. This avoids needless re-encoding of files that are
-        # already at the target level.
-        if self._is_within_threshold():
+        # output unchanged. In batch mode this was already decided by the
+        # caller, and decide_skip() is idempotent.
+        if self.decide_skip():
             self._handle_skip()
             return
 
@@ -479,6 +488,28 @@ class MediaFile:
             )
         _logger.info(f"Encoded-output verification passed for {self.output_file}")
 
+    def decide_skip(self) -> bool:
+        """
+        Decide whether this file can be copied through instead of normalized,
+        record that decision on the file, and return it.
+
+        Batch mode needs the skip decision before it computes the shared gain
+        reference, because skipped files must not contribute to it. This method
+        is idempotent: calling it again (from ``run_normalization``) returns the
+        same result without re-evaluating. It also refuses to skip a file that
+        has already been marked as failed.
+
+        Returns:
+            bool: True if the file should be skipped, False otherwise.
+        """
+        if self.status == "error":
+            return False
+        if self._skip_decided:
+            return self.skip
+        self._skip_decided = True
+        self.skip = self._is_within_threshold()
+        return self.skip
+
     def _is_within_threshold(self) -> bool:
         """
         Return whether every stream selected for normalization is already
@@ -487,12 +518,14 @@ class MediaFile:
 
         The check compares the measured level against the absolute target level
         (integrated loudness for EBU, peak/RMS level otherwise). It is disabled
-        when the threshold is zero or less, in batch mode (where files are
-        adjusted relative to a shared reference rather than an absolute target),
-        in ReplayGain mode (which only writes tags), when a pre/post filter or
-        channel downmix is requested (since these change the audio), and when
-        the output extension differs from the input (since the file is copied
-        verbatim, a container change would otherwise produce an invalid file).
+        when the threshold is zero or less, in ReplayGain mode (which only
+        writes tags), when a pre/post filter or channel downmix is requested
+        (since these change the audio), and when the output extension differs
+        from the input (since the file is copied verbatim, a container change
+        would otherwise produce an invalid file). In batch mode the same
+        absolute target is used, and files reported as skipped are excluded
+        from the shared batch reference, so they do not shift the gain applied
+        to the remaining files.
 
         Returns:
             bool: True if the file should be skipped, False otherwise.
@@ -501,7 +534,7 @@ class MediaFile:
         if threshold <= 0:
             return False
 
-        if self.ffmpeg_normalize.batch or self.ffmpeg_normalize.replaygain:
+        if self.ffmpeg_normalize.replaygain:
             return False
 
         if (

@@ -213,7 +213,9 @@ When set to a positive value, a file whose measured level is within the threshol
 
 For EBU normalization, the measured integrated loudness is compared to the target level; for peak and RMS, the measured peak/RMS level is used. The true peak and loudness range are not considered for this decision.
 
-The default of 0 always normalizes. This option has no effect in batch or ReplayGain mode, or when a pre/post filter or channel downmix is used. Skipped files are only copied verbatim when the output keeps the input's extension; if the output format differs, the file is normalized normally so the requested format is produced.
+In `--batch` mode the same comparison against the absolute target applies. Skipped files are reported as `skipped`, copied through unchanged, and excluded from the shared batch reference, so they neither shift the reference nor change the gain applied to the remaining files; those files still receive one common gain.
+
+The default of 0 always normalizes. This option has no effect in ReplayGain mode, or when a pre/post filter or channel downmix is used. Skipped files are only copied verbatim when the output keeps the input's extension; if the output format differs, the file is normalized normally so the requested format is produced.
 
 ## EBU R128 Normalization
 

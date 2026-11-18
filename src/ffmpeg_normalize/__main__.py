@@ -328,8 +328,12 @@ def create_parser(suppress_defaults: bool = False) -> argparse.ArgumentParser:
         For EBU normalization, the measured integrated loudness is compared to
         the target level; for peak and RMS, the measured peak/RMS level is used.
 
-        The default of 0 always normalizes. Has no effect in batch or ReplayGain
-        mode, or when a pre/post filter or channel downmix is used.
+        In batch mode, the same comparison against the absolute target applies,
+        and skipped files are excluded from the shared batch gain reference, so
+        they do not change the gain applied to the remaining files.
+
+        The default of 0 always normalizes. Has no effect in ReplayGain mode,
+        or when a pre/post filter or channel downmix is used.
         """
         ),
         default=FFmpegNormalize.DEFAULTS["threshold"],
