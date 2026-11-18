@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: 2020-2024 tinytag Contributors
+# SPDX-License-Identifier: MIT
+
+*.py[cod]
+
+# Packages
+*.egg-info
+dist
+build
+__pycache__
+
+# Unit test / coverage reports
+.coverage
+.mypy_cache
+.pytest_cache
+
+# Mr Developer
+.mr.developer.cfg
+.project
+.pydevproject
+
+# Jetbrains
+.idea/
+.venv
+venv
+
+# Visual Studio Code
+.vscode

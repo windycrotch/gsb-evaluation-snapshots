@@ -1,0 +1,143 @@
+# SPDX-FileCopyrightText: 2022-2026 tinytag Contributors
+# SPDX-License-Identifier: MIT
+
+name: Tests
+on: [push, pull_request]
+permissions: {}
+env:
+  MIN_COVERAGE_PERCENTAGE: 100
+
+jobs:
+  tests:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        os: [ubuntu-26.04, macos-26, windows-2025]
+        python: [
+          '3.7', '3.8', '3.9', '3.10', '3.11', '3.12', '3.13', '3.14', '3.15', '3.16',
+          '3.14t', '3.15t', '3.16t',
+          'pypy-3.8', 'pypy-3.9', 'pypy-3.10', 'pypy-3.11', 'pypy-3.12'
+        ]
+        include:
+          - os: ubuntu-22.04
+            python: 3.7
+          - os: ubuntu-24.04
+            python: 3.8
+          - os: ubuntu-24.04
+            python: 3.9
+          - os: macos-15-intel
+            python: 3.7
+        exclude:
+          - os: ubuntu-26.04
+            python: 3.7
+          - os: ubuntu-26.04
+            python: 3.8
+          - os: ubuntu-26.04
+            python: 3.9
+          - os: macos-26
+            python: 3.7
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Set up Python ${{ matrix.python }}
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python }}
+          allow-prereleases: true
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: python -m pip install .[dev]
+
+      - name: PEP 8 style checks
+        run: python -m pycodestyle .
+
+      - name: Linting
+        run: python -m pylint --recursive=y .
+
+      - name: Typing (mypy)
+        run: python -m mypy -p tinytag
+
+      - name: Typing (pyright)
+        run: python -m pyright
+
+      - name: Unit tests
+        run: python -m coverage run --parallel-mode -m unittest
+        env:
+          TINYTAG_DEBUG: true
+
+      - name: Coverage report
+        run: |
+          coverage combine --keep --quiet
+          coverage report
+          coverage html --quiet
+
+      - name: Build package
+        run: python -m build
+
+      - name: Build package without isolation
+        run: python -m build --no-isolation
+
+      - name: Upload coverage data
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage-${{ matrix.os }}-${{ matrix.python }}
+          path: |
+            .coverage.*
+            htmlcov
+          include-hidden-files: true
+          if-no-files-found: error
+
+  coverage:
+    needs: tests
+    runs-on: ubuntu-slim
+    timeout-minutes: 15
+    permissions:
+      code-quality: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Download coverage data
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: coverage-*
+          merge-multiple: true
+
+      - name: Install dependencies
+        run: python -m pip install coverage
+
+      - name: Generate coverage report
+        run: |
+          coverage combine --quiet
+          coverage html --quiet
+          coverage xml --quiet
+
+      - name: Upload coverage report (HTML)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: combined-coverage-report
+          path: |
+            htmlcov
+            coverage.xml
+          if-no-files-found: error
+
+      - name: Upload coverage report (GitHub)
+        uses: actions/upload-code-coverage@2b21a77928be8d5168c2b9581a67f2adbebacc52 # v1.4.4
+        with:
+          file: coverage.xml
+          language: Python
+          label: code-coverage/tinytag
+          fail-on-error: false
+
+      - name: Show coverage report
+        run: coverage report --fail-under=${MIN_COVERAGE_PERCENTAGE}

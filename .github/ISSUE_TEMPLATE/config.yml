@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: 2025 tinytag Contributors
+# SPDX-License-Identifier: MIT
+
+blank_issues_enabled: false
+contact_links:
+  - name: Other
+    url: https://github.com/tinytag/tinytag/discussions
+    about: Question, discussion or anything else
