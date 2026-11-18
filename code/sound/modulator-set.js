@@ -9,7 +9,10 @@
 
 class ModulatorSet {
 
-    #implementation = { isFmEnabled: true, isAmEnabled: true };
+    #implementation = {
+        isFmEnabled: true, isAmEnabled: true,
+        preservedFmMasterGain: undefined, preservedAmMasterGain: undefined,
+    };
 
     constructor(audioContext, soundSourceFrequency) {
         if (audioContext)
@@ -59,28 +62,56 @@ class ModulatorSet {
             masterDepthMode.connect(audioParameter);
         } //connectTo
         if (frequencyAudioParameter) {
-            if (!this.#implementation.frequencyModulatatioMasterDepth)
+            if (!this.#implementation.frequencyModulatatioMasterDepth) {
                 this.#implementation.frequencyModulatatioMasterDepth = new GainNode(this.context, { gain: 1 });
-            connectTo(this.#implementation.frequencyModulatorList, this.#implementation.frequencyModulatatioMasterDepth, frequencyAudioParameter);    
+                if (!this.#implementation.isFmEnabled) {
+                    if (this.#implementation.preservedFmMasterGain == undefined)
+                        this.#implementation.preservedFmMasterGain = this.#implementation.frequencyModulatatioMasterDepth.gain.value;
+                    this.#implementation.frequencyModulatatioMasterDepth.gain.value = 0;
+                } //if disabled
+            } //if
+            connectTo(this.#implementation.frequencyModulatorList, this.#implementation.frequencyModulatatioMasterDepth, frequencyAudioParameter);
         } //if
         if (amplitudeAudioParameter) {
-            if (!this.#implementation.amplitudeModulatatioMasterDepth)
+            if (!this.#implementation.amplitudeModulatatioMasterDepth) {
                 this.#implementation.amplitudeModulatatioMasterDepth = new GainNode(this.context, { gain: 1 });
+                if (!this.#implementation.isAmEnabled) {
+                    if (this.#implementation.preservedAmMasterGain == undefined)
+                        this.#implementation.preservedAmMasterGain = this.#implementation.amplitudeModulatatioMasterDepth.gain.value;
+                    this.#implementation.amplitudeModulatatioMasterDepth.gain.value = 0;
+                } //if disabled
+            } //if
             connectTo(this.#implementation.amplitudeModulatorList, this.#implementation.amplitudeModulatatioMasterDepth, amplitudeAudioParameter);
         } //if
     } //connectToAudioParameters
 
     set frequencyModulationEnable(enable) {
-        if (!enable || !this.#implementation.preservedFmMasterGain)
-            this.#implementation.preservedFmMasterGain = this.#implementation.frequencyModulatatioMasterDepth.gain.value;
-        this.#implementation.frequencyModulatatioMasterDepth.gain.value = enable ? this.#implementation.preservedFmMasterGain : 0;
+        this.#implementation.isFmEnabled = enable;
+        const masterDepth = this.#implementation.frequencyModulatatioMasterDepth;
+        if (!masterDepth) return; // modulator is not connected to an audio parameter yet; state stays recorded
+        if (enable) {
+            if (this.#implementation.preservedFmMasterGain != undefined)
+                masterDepth.gain.value = this.#implementation.preservedFmMasterGain;
+        } else {
+            if (this.#implementation.preservedFmMasterGain == undefined)
+                this.#implementation.preservedFmMasterGain = masterDepth.gain.value; // save once; repeated off never overwrites with 0
+            masterDepth.gain.value = 0;
+        } //if
     } //set frequencyModulationEnable
     get frequencyModulationEnable() { return this.#implementation.isFmEnabled; }
-    
+
     set amplitudeModulationEnable(enable) {
-        if (!enable || !this.#implementation.preservedAmMasterGain)
-            this.#implementation.preservedAmMasterGain = this.#implementation.amplitudeModulatatioMasterDepth.gain.value;
-        this.#implementation.amplitudeModulatatioMasterDepth.gain.value = enable ? this.#implementation.preservedAmMasterGain : 0;
+        this.#implementation.isAmEnabled = enable;
+        const masterDepth = this.#implementation.amplitudeModulatatioMasterDepth;
+        if (!masterDepth) return; // modulator is not connected to an audio parameter yet; state stays recorded
+        if (enable) {
+            if (this.#implementation.preservedAmMasterGain != undefined)
+                masterDepth.gain.value = this.#implementation.preservedAmMasterGain;
+        } else {
+            if (this.#implementation.preservedAmMasterGain == undefined)
+                this.#implementation.preservedAmMasterGain = masterDepth.gain.value; // save once; repeated off never overwrites with 0
+            masterDepth.gain.value = 0;
+        } //if
     } //set amplitudeModulationEnable
     get amplitudeModulationEnable() { return this.#implementation.isAmEnabled; }
 

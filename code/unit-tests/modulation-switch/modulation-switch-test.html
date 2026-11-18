@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+
+<!--
+// Microtonal Fabric
+//
+// Local verification page for the Sound Builder FM/AM switch path.
+//
+// Opens directly from the file system (no server, no build step). It loads the
+// REAL sound sources together with a fake Web Audio implementation that records
+// every gain write, then runs modulation-switch-tests.js and renders the
+// result on the page (and in the browser console).
+-->
+
+<html lang="en-us">
+<head>
+    <title>Modulation switch tests &mdash; Microtonal Fabric</title>
+    <meta charset="utf-8"/>
+    <style>
+        body { font-family: sans-serif; margin: 1.5em; }
+        h1 { font-size: 120%; }
+        #summary { font-weight: bold; margin: 1em 0; }
+        #summary.ok { color: green; }
+        #summary.fail { color: red; }
+        table { border-collapse: collapse; }
+        td, th { border: solid thin gray; padding: 0.25em 0.75em; text-align: left; white-space: nowrap; }
+        tr.pass td.result { color: green; }
+        tr.fail td.result { color: red; font-weight: bold; }
+        td.detail { color: #555; font-family: monospace; }
+    </style>
+    <script src="../../agnostic/enumeration.js"></script>
+    <script src="../../SoundBuilder/main/default-instrument.js"></script>
+    <script src="../../sound/definition-set.js"></script>
+    <script src="../../sound/chain-node.js"></script>
+    <script src="../../sound/envelope.js"></script>
+    <script src="../../sound/modulator.js"></script>
+    <script src="../../sound/modulator-set.js"></script>
+    <script src="../../sound/tone.js"></script>
+    <script src="../../sound/instrument.js"></script>
+    <script src="fake-audio.js"></script>
+    <script src="modulation-switch-tests.js"></script>
+</head>
+
+<body>
+    <h1>Sound Builder FM/AM switch &mdash; local verification</h1>
+    <p id="status">Running&hellip;</p>
+    <p id="summary"></p>
+    <table>
+        <thead><tr><th>Result</th><th>Check</th><th>Detail</th></tr></thead>
+        <tbody id="results"></tbody>
+    </table>
+
+    <script>
+        fakeAudio.installGlobals();
+        const results = runModulationSwitchTests();
+        const failed = results.filter(r => !r.pass).length;
+        const summary = document.getElementById("summary");
+        summary.textContent = `${results.length - failed}/${results.length} checks passed`;
+        summary.className = failed === 0 ? "ok" : "fail";
+        document.getElementById("status").textContent =
+            failed === 0 ? "All checks passed." : `${failed} check(s) failed — see rows below and the console.`;
+        const body = document.getElementById("results");
+        for (const result of results) {
+            const row = document.createElement("tr");
+            row.className = result.pass ? "pass" : "fail";
+            const cellResult = document.createElement("td");
+            cellResult.className = "result";
+            cellResult.textContent = result.pass ? "PASS" : "FAIL";
+            const cellName = document.createElement("td");
+            cellName.textContent = result.name;
+            const cellDetail = document.createElement("td");
+            cellDetail.className = "detail";
+            cellDetail.textContent = result.detail;
+            row.append(cellResult, cellName, cellDetail);
+            body.appendChild(row);
+        } //loop
+        console.table(results);
+    </script>
+</body>
+</html>
