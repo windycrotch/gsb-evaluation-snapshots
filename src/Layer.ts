@@ -118,6 +118,10 @@ export class Layer {
     this.#state.onStep = handler;
   }
 
+  get isReady() {
+    return this.#state.isReady;
+  }
+
   get isActive() {
     return this.#state.isActive;
   }

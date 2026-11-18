@@ -164,6 +164,10 @@ An object that is passed to the `onStep` function. It contains the following pro
 
 ## Methods
 
+- `setLayers( layers )`: Replaces the whole layer stack at once. Every item must be a `Layer` instance — if any item
+  is invalid, an error is thrown and the current stack is left unchanged. When the engine is not running and a target
+  canvas is set, the target is redrawn once with the new stack only. The `layers` constructor option goes through the
+  same validation.
 - `addLayer( layer, shouldDraw = true )`: Adds a `Layer` instance the top of the layer stack. By default, draws to the target
   once the layer is ready.
 - `removeLayer( layer, shouldDraw = true )`: Removes a layer from the stack. If the layer was added to the engine multiple
@@ -179,3 +183,10 @@ An object that is passed to the `onStep` function. It contains the following pro
 - Since adding layers to an engine happens in an async mode, race conditions might happen. To handle any issues, you can use
   the promise exposed in `myLayer.sourcePromise` and/or avoid drawing to the canvas by passing the `shouldDraw` parameter as false to `addLayer`. Eg.: `myEngine.addLayer(myLayer, false)`.
 - The `<canvas>` element may easily become "tainted" by CORS. That should not be a problem for basic layer rendering, but can be a challenge if you need to do some advanced image processing. To avoid that, you could use some of the solutions [shown in MDN](https://developer.mozilla.org/en-US/docs/Web/HTML/CORS_enabled_image) or use base64 encoded images.
+
+# Development
+
+- `pnpm test`: Runs the automated test suite (Vitest). The tests live in `test/` and use self-made canvas/image
+  fakes (`test/fakes.ts`) instead of a DOM implementation, so they run in plain Node.
+- `pnpm typecheck`: Type-checks the sources without emitting.
+- `pnpm build`: Builds the package into `dist/`.

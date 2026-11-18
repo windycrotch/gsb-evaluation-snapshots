@@ -18,11 +18,12 @@
     "renderer"
   ],
   "scripts": {
-    "clean": "rimraf dist **/*.tsbuildinfo",
+    "clean": "rimraf dist --glob \"**/*.tsbuildinfo\"",
     "build": "pnpm clean && tsc",
     "lint": "eslint src --fix",
     "prepublishOnly": "eslint src && pnpm build",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
@@ -33,7 +34,8 @@
     "prettier": "3.9.10",
     "rimraf": "6.1.4",
     "typescript": "npm:@typescript/typescript6@6.0.2",
-    "typescript-eslint": "8.72.1"
+    "typescript-eslint": "8.72.1",
+    "vitest": "^5.1.0"
   },
   "type": "module",
   "types": "dist/index.d.ts",

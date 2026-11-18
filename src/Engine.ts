@@ -1,6 +1,7 @@
 import {
   ERROR_INVALID_LAYER,
   ERROR_INVALID_LAYER_ARRAY,
+  ERROR_INVALID_LAYER_ITEM,
   ERROR_INVALID_ONSTEP_CALLBACK,
   ERROR_INVALID_TARGET,
   VALID_TARGET_TYPES,
@@ -32,6 +33,7 @@ type EngineState = Omit<EngineOptions, "autoStart" | "target"> & {
   initialTime?: number;
   lastCallTime?: number;
   layersPromise?: Promise<ElementInfo[]>;
+  rafId?: number;
 };
 
 export class Engine {
@@ -41,6 +43,8 @@ export class Engine {
     isRunning: false,
     initialTime: null,
     lastCallTime: null,
+    layers: [],
+    rafId: null,
   };
 
   constructor(options: EngineOptions) {
@@ -83,31 +87,45 @@ export class Engine {
   }
 
   set layers(newLayers) {
+    this.setLayers(newLayers);
+  }
+
+  setLayers(newLayers: Layer[]) {
     if (!Array.isArray(newLayers)) throw new Error(ERROR_INVALID_LAYER_ARRAY);
 
-    this.#state.layers = [];
-    newLayers.forEach((layer) => this.addLayer(layer, false));
+    if (newLayers.some((layer) => !(layer instanceof Layer)))
+      throw new Error(ERROR_INVALID_LAYER_ITEM);
+
+    this.#state.layers = [...newLayers];
 
     this.#state.layersPromise = Promise.all(
       this.layers.map(({ sourcePromise }) => sourcePromise)
     );
 
-    if (this.target && !this.isRunning)
-      this.#state.layersPromise.then(this.draw);
+    if (this.target && !this.isRunning) this.draw();
   }
 
   addLayer(layer: Layer, shouldDraw = true) {
     if (layer instanceof Layer) {
       this.#state.layers = [...this.layers, layer];
 
-      if (shouldDraw) layer.sourcePromise.then(this.draw);
+      if (shouldDraw)
+        layer.sourcePromise.then(() => {
+          if (this.isRunning) this.draw();
+        });
     } else {
       console.warn(ERROR_INVALID_LAYER);
     }
   }
 
   removeLayer(layer: Layer, shouldDraw = true) {
-    this.#state.layers = this.layers.filter((item) => !Object.is(item, layer));
+    const index = this.layers.findIndex((item) => Object.is(item, layer));
+
+    if (index === -1) return;
+
+    const layers = this.layers;
+    layers.splice(index, 1);
+    this.#state.layers = layers;
 
     if (shouldDraw) this.draw();
   }
@@ -152,6 +170,8 @@ export class Engine {
   }
 
   start() {
+    if (this.isRunning) return;
+
     const now = performance.now();
 
     this.#state.isRunning = true;
@@ -163,6 +183,11 @@ export class Engine {
 
   stop() {
     this.#state.isRunning = false;
+
+    if (this.#state.rafId !== null) {
+      cancelAnimationFrame(this.#state.rafId);
+      this.#state.rafId = null;
+    }
   }
 
   #step = (now: number) => {
@@ -182,7 +207,7 @@ export class Engine {
 
     this.draw();
     this.#state.lastCallTime = now;
-    requestAnimationFrame(this.#step);
+    this.#state.rafId = requestAnimationFrame(this.#step);
   };
 
   clear = () =>
@@ -197,7 +222,7 @@ export class Engine {
     this.clear();
 
     this.layers.forEach((layer) => {
-      if (layer.isActive && layer.opacity) {
+      if (layer.isReady && layer.isActive && layer.opacity) {
         this.#state.context.globalAlpha = layer.opacity;
         this.#state.context.drawImage(layer.source, layer.posX, layer.posY);
       }

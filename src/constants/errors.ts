@@ -6,6 +6,8 @@ export const ERROR_INVALID_ONSTEP_CALLBACK =
   "The value provided to onStep is not a function";
 export const ERROR_INVALID_LAYER_ARRAY =
   "'layers' expects an Array of Layer instances";
+export const ERROR_INVALID_LAYER_ITEM =
+  "Every item in the 'layers' array must be a Layer instance. The layer stack was left unchanged.";
 
 export const ERROR_INVALID_SOURCE =
   'The "source" value must be a canvas or image element or a string selector to one of them.';
