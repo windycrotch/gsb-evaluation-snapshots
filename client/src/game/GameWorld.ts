@@ -1,6 +1,6 @@
 // Signal Meadow style: physics are immediate and forgiving; authored drawing uses stepped silhouettes and a limited palette.
 import { STAGES, cloneStage, type StageData } from "./levelData";
-import type { GameCallbacks, GameStatus, HudSnapshot, InputState, Rect } from "./types";
+import type { GameCallbacks, GameStatus, HudSnapshot, InputState, Platform, PlayerState, Rect } from "./types";
 
 const W = 640;
 const H = 360;
@@ -10,15 +10,24 @@ const MAX_SPEED = 3.5;
 const ACCEL = 0.38;
 const FRICTION = 0.78;
 const JUMP = -8.8;
+const COYOTE_FRAMES = 8;
+const JUMP_BUFFER_FRAMES = 8;
+const HURT_INVULNERABLE_FRAMES = 45;
+const MOVE_SUBSTEP = 6;
+const STAND_TOLERANCE = 0.6;
+const EPSILON = 0.001;
+
+const freshPlayer = (spawnX: number, spawnY: number): PlayerState => ({ x: spawnX, y: spawnY, w: 16, h: 26, vx: 0, vy: 0, onGround: false, facing: 1, anim: 0, hurt: 0 });
 
 export class GameWorld {
   readonly width = W;
   readonly height = H;
   private readonly callbacks: GameCallbacks;
   private readonly ctx: CanvasRenderingContext2D;
+  private readonly stages: StageData[];
   private input: InputState = { left: false, right: false, jump: false };
   private stageIndex = 0;
-  private stage: StageData = cloneStage(STAGES[0]);
+  private stage: StageData;
   private status: GameStatus = "menu";
   private score = 0;
   private lives = 3;
@@ -30,13 +39,25 @@ export class GameWorld {
   private wasJump = false;
   private message = "RUN THE RELAY";
   private time = 0;
-  private player = { x: 80, y: 220, w: 16, h: 26, vx: 0, vy: 0, onGround: false, facing: 1, anim: 0, hurt: 0 };
+  private player: PlayerState = freshPlayer(80, 220);
+  // Moving-platform riding: carrying is positional (never baked into vx), so leaving a
+  // platform or the platform reversing can never leave the player drifting.
+  private ridePlatform: Platform | null = null;
+  private lastRideVx = 0;
+  private airBoostVx = 0;
+  private readonly platformDx = new Map<Platform, number>();
 
-  constructor(ctx: CanvasRenderingContext2D, callbacks: GameCallbacks) { this.ctx = ctx; this.callbacks = callbacks; this.emitHud(); }
+  constructor(ctx: CanvasRenderingContext2D, callbacks: GameCallbacks, stages: StageData[] = STAGES) {
+    this.ctx = ctx;
+    this.callbacks = callbacks;
+    this.stages = stages.length > 0 ? stages : STAGES;
+    this.stage = cloneStage(this.stages[0]);
+    this.emitHud();
+  }
 
   setInput(next: Partial<InputState>) {
     this.input = { ...this.input, ...next };
-    if (next.jump && !this.wasJump) this.jumpBuffer = 8;
+    if (next.jump && !this.wasJump) this.jumpBuffer = JUMP_BUFFER_FRAMES;
     this.wasJump = Boolean(this.input.jump);
     if (this.status === "menu" && (next.jump || next.left || next.right)) this.start();
     if (this.status === "dead" && next.jump) this.restartAfterDeath();
@@ -56,11 +77,54 @@ export class GameWorld {
     else if (this.status === "paused") this.status = "playing";
   }
 
-  private loadStage(index: number) {
-    this.stageIndex = index; this.stage = cloneStage(STAGES[index]); this.spawnX = this.stage.spawn.x; this.spawnY = this.stage.spawn.y;
-    this.player = { x: this.spawnX, y: this.spawnY, w: 16, h: 26, vx: 0, vy: 0, onGround: false, facing: 1, anim: 0, hurt: 0 };
-    this.cameraX = 0; this.status = "playing"; this.message = this.stage.name; this.emitHud();
+  /** Read-only snapshot for automated tests and instrumentation; deep-copied so callers cannot mutate game state. */
+  inspect() {
+    const stage = this.stage;
+    return {
+      status: this.status,
+      stageIndex: this.stageIndex,
+      score: this.score,
+      lives: this.lives,
+      player: { ...this.player },
+      spawn: { x: this.spawnX, y: this.spawnY },
+      riding: this.ridePlatform ? { ...this.ridePlatform } : null,
+      stage: {
+        ...stage,
+        solids: stage.solids.map((item) => ({ ...item })),
+        hazards: stage.hazards.map((item) => ({ ...item })),
+        shards: stage.shards.map((item) => ({ ...item })),
+        enemies: stage.enemies.map((item) => ({ ...item })),
+        checkpoints: stage.checkpoints.map((item) => ({ ...item })),
+        platforms: stage.platforms.map((item) => ({ ...item })),
+        portal: { ...stage.portal },
+      } as StageData,
+    };
   }
+
+  private loadStage(index: number) {
+    const nextIndex = Math.max(0, Math.min(this.stages.length - 1, index));
+    this.stageIndex = nextIndex;
+    this.stage = cloneStage(this.stages[nextIndex]);
+    this.spawnX = this.stage.spawn.x;
+    this.spawnY = this.stage.spawn.y;
+    this.player = freshPlayer(this.spawnX, this.spawnY);
+    this.resetTransientState();
+    this.cameraX = 0;
+    this.status = "playing";
+    this.message = this.stage.name;
+    this.emitHud();
+  }
+
+  /** Clear anything tied to the previous stage or previous life so no state leaks across loads. */
+  private resetTransientState() {
+    this.jumpBuffer = 0;
+    this.coyote = 0;
+    this.ridePlatform = null;
+    this.lastRideVx = 0;
+    this.airBoostVx = 0;
+    this.platformDx.clear();
+  }
+
   private restartStage() { this.loadStage(this.stageIndex); this.message = "STAGE RESET"; this.emitHud(); }
   private restartAfterDeath() { if (this.lives <= 0) { this.lives = 3; this.score = 0; this.loadStage(0); } else this.loadStage(this.stageIndex); }
 
@@ -73,15 +137,60 @@ export class GameWorld {
 
   private update(step: number) {
     this.jumpBuffer = Math.max(0, this.jumpBuffer - step);
-    this.coyote = this.player.onGround ? 8 : Math.max(0, this.coyote - step);
+    this.coyote = this.player.onGround ? COYOTE_FRAMES : Math.max(0, this.coyote - step);
+    if (this.coyote <= 0) this.lastRideVx = 0;
+
+    // 1. Platforms move first, and a rider is translated by the platform's actual delta
+    //    for this frame (so reversals are followed immediately and nothing drifts).
+    this.platformDx.clear();
+    for (const item of this.stage.platforms) this.movePlatform(item, step);
+    // `ridePlatform` is only ever set at the end of a frame in which the player was
+    // grounded and standing on it, so trusting it here is safe. `carryX` resolves against
+    // solids and the level bounds, which may legitimately push the rider off the platform.
+    if (this.ridePlatform && this.stage.platforms.includes(this.ridePlatform)) {
+      this.carryX(this.platformDx.get(this.ridePlatform) ?? 0);
+    }
+    if (this.ridePlatform && !this.isStandingOn(this.ridePlatform)) this.ridePlatform = null;
+
+    // 2. Horizontal intent.
     if (this.input.left) { this.player.vx -= ACCEL * step; this.player.facing = -1; }
     if (this.input.right) { this.player.vx += ACCEL * step; this.player.facing = 1; }
-    if (!this.input.left && !this.input.right) this.player.vx *= Math.pow(FRICTION, step);
-    this.player.vx = Math.max(-MAX_SPEED, Math.min(MAX_SPEED, this.player.vx));
-    if (this.jumpBuffer > 0 && this.coyote > 0) { this.player.vy = JUMP; this.player.onGround = false; this.jumpBuffer = 0; this.coyote = 0; this.callbacks.onAudioCue?.("jump"); }
-    this.player.vy += GRAVITY * step; this.moveX(this.player.vx * step); this.player.onGround = false; this.moveY(this.player.vy * step);
+    if (!this.input.left && !this.input.right && this.player.onGround) this.player.vx *= Math.pow(FRICTION, step);
+    const speedCap = this.player.onGround ? MAX_SPEED : MAX_SPEED + Math.abs(this.airBoostVx);
+    this.player.vx = Math.max(-speedCap, Math.min(speedCap, this.player.vx));
+
+    // 3. Jump. A platform launch lends its horizontal velocity to the jump, and the cap
+    //    above keeps that momentum alive while airborne.
+    if (this.jumpBuffer > 0 && this.coyote > 0) {
+      this.player.vy = JUMP;
+      this.player.onGround = false;
+      this.jumpBuffer = 0;
+      this.coyote = 0;
+      const launch = this.ridePlatform?.vx ?? this.lastRideVx;
+      if (launch !== 0) { this.player.vx += launch; this.airBoostVx = launch; }
+      this.ridePlatform = null;
+      this.lastRideVx = 0;
+      this.callbacks.onAudioCue?.("jump");
+    }
+
+    // 4. Vertical motion first, then horizontal, both robust to fast frames.
+    this.player.vy += GRAVITY * step;
+    this.moveX(this.player.vx * step);
+    this.player.onGround = false;
+    this.moveY(this.player.vy * step);
+
+    // 5. Re-establish the rider from the resolved position. When the player is airborne,
+    //    `lastRideVx` survives the coyote window so an edge jump still launches with the
+    //    platform's momentum, and it is cleared by the coyote timer right after.
+    if (this.player.onGround) {
+      this.airBoostVx = 0;
+      this.ridePlatform = this.findRide();
+      this.lastRideVx = this.ridePlatform ? this.ridePlatform.vx : 0;
+    } else {
+      this.ridePlatform = null;
+    }
+
     this.player.anim += Math.abs(this.player.vx) * step * 0.28; this.player.hurt = Math.max(0, this.player.hurt - step);
-    for (const item of this.stage.platforms) { item.x += item.vx * step; if (item.x < item.minX || item.x > item.maxX) item.vx *= -1; }
     for (const item of this.stage.enemies) {
       if (!item.alive) continue;
       item.x += item.vx * step;
@@ -93,27 +202,113 @@ export class GameWorld {
       }
     }
     for (const item of this.stage.shards) { item.bob += step * 0.08; if (!item.collected && this.overlaps(this.player, item)) { item.collected = true; this.score += 100; this.callbacks.onAudioCue?.("collect"); } }
-    for (const item of this.stage.checkpoints) if (!item.active && this.overlaps(this.player, item)) { item.active = true; this.spawnX = item.x + 24; this.spawnY = item.y - 16; this.score += 250; this.message = "RELAY LOCKED"; this.callbacks.onAudioCue?.("checkpoint"); }
+    for (const item of this.stage.checkpoints) if (!item.active && this.overlaps(this.player, item)) { item.active = true; this.spawnX = Math.max(0, Math.min(this.stage.width - this.player.w, item.x + 24)); this.spawnY = item.y - 16; this.score += 250; this.message = "RELAY LOCKED"; this.callbacks.onAudioCue?.("checkpoint"); }
     if (this.stage.hazards.some((hazard) => this.overlaps(this.player, hazard)) || this.player.y > H + 80) this.hurt();
     if (this.overlaps(this.player, this.stage.portal)) this.finishStage();
     this.cameraX += (Math.max(0, this.player.x - 190) - this.cameraX) * 0.12;
     this.cameraX = Math.max(0, Math.min(this.stage.width - W, this.cameraX)); this.emitHud();
   }
 
-  private moveX(amount: number) { this.player.x += amount; for (const solid of this.allSolids()) if (this.overlaps(this.player, solid)) { this.player.x = amount > 0 ? solid.x - this.player.w : solid.x + solid.w; this.player.vx = 0; } this.player.x = Math.max(0, Math.min(this.stage.width - this.player.w, this.player.x)); }
-  private moveY(amount: number) { this.player.y += amount; for (const solid of this.allSolids()) if (this.overlaps(this.player, solid)) { if (amount > 0) { this.player.y = solid.y - this.player.h; this.player.vy = 0; this.player.onGround = true; } else if (amount < 0) { this.player.y = solid.y + solid.h; this.player.vy = 0; } } }
-  private allSolids() { return [...this.stage.solids, ...this.stage.platforms]; }
+  private movePlatform(platform: Platform, step: number) {
+    // Clamp the travel range to the level first so a platform pinned at a boundary still
+    // bounces (instead of keeping an outbound velocity and freezing there forever).
+    const rawMin = Math.min(platform.minX, platform.maxX);
+    const rawMax = Math.max(platform.minX, platform.maxX);
+    const lower = Math.max(0, Math.min(rawMin, this.stage.width - platform.w));
+    const upper = Math.max(lower, Math.min(rawMax, this.stage.width - platform.w));
+    const previous = platform.x;
+    let next = platform.x + platform.vx * step;
+    if (next <= lower) { next = lower + (lower - next); platform.vx = Math.abs(platform.vx); }
+    else if (next >= upper) { next = upper - (next - upper); platform.vx = -Math.abs(platform.vx); }
+    platform.x = Math.max(lower, Math.min(upper, next));
+    this.platformDx.set(platform, platform.x - previous);
+  }
+
+  /** Carry a rider horizontally, stopping at authored solids and the level bounds instead of squeezing through them. */
+  private carryX(amount: number) {
+    if (amount === 0) return;
+    this.player.x += amount;
+    for (const solid of this.stage.solids) {
+      if (!this.overlaps(this.player, solid)) continue;
+      this.player.x = amount > 0 ? solid.x - this.player.w : solid.x + solid.w;
+    }
+    this.player.x = Math.max(0, Math.min(this.stage.width - this.player.w, this.player.x));
+  }
+
+  private moveX(amount: number) {
+    if (amount === 0) return;
+    this.player.x += amount;
+    for (const solid of this.stage.solids) if (this.overlaps(this.player, solid)) { this.player.x = amount > 0 ? solid.x - this.player.w : solid.x + solid.w; this.player.vx = 0; }
+    const clamped = Math.max(0, Math.min(this.stage.width - this.player.w, this.player.x));
+    if (clamped !== this.player.x) this.player.vx = 0;
+    this.player.x = clamped;
+  }
+
+  private moveY(amount: number) {
+    if (amount === 0) return;
+    // Substep so a fast fall cannot tunnel through a 20px platform.
+    const slices = Math.max(1, Math.ceil(Math.abs(amount) / MOVE_SUBSTEP));
+    const slice = amount / slices;
+    for (let i = 0; i < slices; i += 1) {
+      const previousBottom = this.player.y + this.player.h;
+      this.player.y += slice;
+      for (const solid of this.stage.solids) {
+        if (!this.overlaps(this.player, solid)) continue;
+        if (slice > 0) { this.player.y = solid.y - this.player.h; this.player.vy = 0; this.player.onGround = true; }
+        else { this.player.y = solid.y + solid.h; this.player.vy = 0; }
+      }
+      if (slice <= 0) continue;
+      // Moving platforms are one-way: land on them only when descending onto their top.
+      for (const platform of this.stage.platforms) {
+        if (previousBottom > platform.y + EPSILON) continue;
+        if (!this.overlaps(this.player, platform)) continue;
+        this.player.y = platform.y - this.player.h;
+        this.player.vy = 0;
+        this.player.onGround = true;
+      }
+    }
+  }
+
+  private isStandingOn(platform: Platform) {
+    const bottom = this.player.y + this.player.h;
+    return Math.abs(bottom - platform.y) <= STAND_TOLERANCE && this.player.x + this.player.w > platform.x + EPSILON && this.player.x < platform.x + platform.w - EPSILON;
+  }
+
+  private findRide() {
+    for (const platform of this.stage.platforms) if (this.isStandingOn(platform)) return platform;
+    return null;
+  }
+
   private overlaps(a: Rect, b: Rect) { return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y; }
 
   private hurt() {
     if (this.player.hurt > 0) return;
-    this.lives -= 1; this.player.hurt = 45; this.callbacks.onAudioCue?.("hurt");
-    if (this.lives <= 0) { this.status = "dead"; this.message = "SIGNAL LOST — TAP JUMP"; this.emitHud(); return; }
-    this.player.x = this.spawnX; this.player.y = this.spawnY; this.player.vx = 0; this.player.vy = 0; this.message = "TRY THE ROUTE AGAIN";
+    this.lives -= 1; this.callbacks.onAudioCue?.("hurt");
+    if (this.lives <= 0) { this.player.hurt = HURT_INVULNERABLE_FRAMES; this.ridePlatform = null; this.lastRideVx = 0; this.airBoostVx = 0; this.status = "dead"; this.message = "SIGNAL LOST — TAP JUMP"; this.emitHud(); return; }
+    this.respawn();
+    this.message = "TRY THE ROUTE AGAIN";
   }
+
+  /** Return to the active checkpoint (or stage spawn) with a predictable pose and zero momentum. */
+  private respawn() {
+    this.player.x = this.spawnX;
+    this.player.y = this.spawnY;
+    this.player.vx = 0;
+    this.player.vy = 0;
+    this.player.onGround = false;
+    this.player.facing = 1;
+    this.player.anim = 0;
+    this.player.hurt = HURT_INVULNERABLE_FRAMES;
+    this.jumpBuffer = 0;
+    this.coyote = 0;
+    this.ridePlatform = null;
+    this.lastRideVx = 0;
+    this.airBoostVx = 0;
+  }
+
   private finishStage() {
     this.score += 500 + this.stage.shards.filter((s) => s.collected).length * 50; this.callbacks.onAudioCue?.("finish");
-    if (this.stageIndex < STAGES.length - 1) { this.loadStage(this.stageIndex + 1); this.message = "NEXT RELAY: " + this.stage.name; }
+    if (this.stageIndex < this.stages.length - 1) { this.loadStage(this.stageIndex + 1); this.message = "NEXT RELAY: " + this.stage.name; }
     else { this.status = "complete"; this.message = "ROUTE COMPLETE — TAP JUMP"; this.emitHud(); }
   }
 

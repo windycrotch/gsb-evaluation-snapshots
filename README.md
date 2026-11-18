@@ -96,6 +96,8 @@ Vite starts the development server using the repository’s `dev` script. Open t
 | --- | --- |
 | `pnpm dev` | Start the Vite development server |
 | `pnpm check` | Run TypeScript without emitting files |
+| `pnpm test` | Run the automated gameplay tests once |
+| `pnpm test:watch` | Re-run the automated gameplay tests on change |
 | `pnpm build` | Build the browser bundle and production server entry |
 | `pnpm start` | Run the built production server |
 | `pnpm preview` | Preview the Vite build locally |
@@ -168,10 +170,11 @@ Run the available static and production validations before opening a pull reques
 
 ```bash
 pnpm check
+pnpm test
 pnpm build
 ```
 
-The repository includes a GitHub Actions workflow named **CI** that runs these two commands on pushes and pull requests targeting `main`. No standalone automated test command or coverage report is currently defined; manually exercise the affected keyboard, touch, orientation, audio, and settings behavior when changing gameplay-facing code.
+The repository includes a GitHub Actions workflow named **CI** that runs these three commands on pushes and pull requests targeting `main`. The gameplay tests in `client/src/game/GameWorld.test.ts` drive the framework-agnostic `GameWorld` with authored stage data and a stub canvas context, so they need no browser or renderer. They cover moving-platform riding, platform-edge jumps, carry collision and level bounds, fast-fall landing, checkpoint respawn, invulnerability timing, and stage/restart lifecycle rules. Still manually exercise the keyboard, touch, orientation, audio, and settings behavior when changing gameplay-facing code.
 
 ---
 

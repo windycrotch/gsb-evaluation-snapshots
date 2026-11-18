@@ -3,6 +3,7 @@
 export type InputAction = "left" | "right" | "jump" | "pause" | "restart";
 export type InputState = { left: boolean; right: boolean; jump: boolean };
 export type Rect = { x: number; y: number; w: number; h: number };
+export type PlayerState = Rect & { vx: number; vy: number; onGround: boolean; facing: number; anim: number; hurt: number };
 export type Shard = Rect & { collected: boolean; bob: number };
 export type Enemy = Rect & { vx: number; alive: boolean; phase: number };
 export type Checkpoint = Rect & { active: boolean };
