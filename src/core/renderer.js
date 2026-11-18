@@ -31,35 +31,74 @@ class VexelRenderer {
         }
 
         if (backend === 'webgl' || backend === 'webgl2') {
-            if (this.webglRenderer) {
-                this.backend = backend;
-                return;
-            }
             const initialized = this._initWebGL(backend);
             if (!initialized) {
-                console.warn('WebGL initialization failed. Using canvas2d.');
+                console.warn('WebGL initialization failed. Falling back to canvas2d.');
+                this._activateCanvas2D();
                 this.backend = 'canvas2d';
+                this.dirty = true;
                 return;
             }
+            this.backend = backend;
+        } else {
+            this._activateCanvas2D();
+            this.backend = 'canvas2d';
         }
 
-        this.backend = backend;
         this.dirty = true;
     }
 
     _initWebGL(backend) {
         if (typeof window === 'undefined') return false;
-        if (this.webglRenderer) return true;
+        if (this.webglRenderer && this.webglRenderer.initialized) return true;
 
-        const VexelWebGLRenderer = window.VexelWebGLRenderer;
-        if (!VexelWebGLRenderer) return false;
+        const Ctor = window.VexelWebGLRenderer ||
+            (typeof VexelWebGLRenderer !== 'undefined' ? VexelWebGLRenderer : null);
+        if (!Ctor) return false;
 
-        this.webglRenderer = new VexelWebGLRenderer(this.vexel);
-        const ok = this.webglRenderer.init();
-        if (ok) {
-            this.backend = backend;
+        // Stash the 2D canvas/context so we can restore them on fallback.
+        if (!this._canvas2d) {
+            this._canvas2d = this.vexel.canvas;
+            this._ctx2d = this.vexel.ctx;
         }
-        return ok;
+
+        let renderer;
+        try {
+            renderer = new Ctor(this.vexel);
+            if (!renderer.init()) return false;
+        } catch (err) {
+            console.warn('WebGL initialization failed:', err);
+            return false;
+        }
+
+        this.webglRenderer = renderer;
+
+        // Swap the WebGL canvas into the DOM in place of the 2D canvas.
+        const parent = this._canvas2d.parentNode;
+        if (parent) {
+            parent.insertBefore(renderer.canvas, this._canvas2d);
+            parent.removeChild(this._canvas2d);
+        }
+        this.vexel.canvas = renderer.canvas;
+
+        return true;
+    }
+
+    _activateCanvas2D() {
+        if (this.webglRenderer) {
+            const glCanvas = this.webglRenderer.canvas;
+            const parent = glCanvas && glCanvas.parentNode;
+            if (parent && this._canvas2d) {
+                parent.insertBefore(this._canvas2d, glCanvas);
+                parent.removeChild(glCanvas);
+            }
+            this.webglRenderer.destroy();
+            this.webglRenderer = null;
+        }
+        if (this._canvas2d) {
+            this.vexel.canvas = this._canvas2d;
+            this.vexel.ctx = this._ctx2d;
+        }
     }
 
     render() {
@@ -75,7 +114,7 @@ class VexelRenderer {
             this.lastFPSTime = now;
         }
 
-        if (this.backend === 'webgl' || this.backend === 'webgl2') {
+        if ((this.backend === 'webgl' || this.backend === 'webgl2') && this.webglRenderer) {
             this._renderWebGL();
         } else {
             this._renderCanvas2D();
@@ -143,11 +182,19 @@ class VexelRenderer {
     }
 
     _renderWebGL() {
-        if (!this.webglRenderer) return;
+        if (!this.webglRenderer) {
+            this._renderCanvas2D();
+            return;
+        }
+
+        const overlayCtx = this.vexel.overlayCtx;
+        if (overlayCtx) {
+            overlayCtx.clearRect(0, 0, this.vexel.width, this.vexel.height);
+        }
 
         this.webglRenderer.begin();
 
-        const visibleShapes = this.vexel.canvas
+        const visibleShapes = (this.vexel.canvas && typeof this.vexel.canvas.getVisibleShapes === 'function')
             ? this.vexel.canvas.getVisibleShapes(this.vexel.shapes)
             : this.vexel.shapes.filter(s => s.visible !== false);
 
@@ -156,62 +203,85 @@ class VexelRenderer {
         }
 
         this.webglRenderer.end();
+
+        // The overlay is a separate 2D canvas stacked above the WebGL canvas,
+        // so selection feedback keeps working under the WebGL backend.
+        if (overlayCtx) {
+            this._renderOverlay(overlayCtx);
+        }
+
         this.stats.shapesRendered = visibleShapes.length;
         this.stats.drawCalls = this.webglRenderer.drawCalls;
+    }
+
+    _parseColor(color, opacity = 1) {
+        if (!color || color === 'transparent' || color === 'none') return null;
+
+        let parsed = null;
+        if (typeof VexelColor !== 'undefined' && VexelColor && typeof VexelColor.parse === 'function') {
+            parsed = VexelColor.parse(color);
+        } else if (typeof color === 'string' && color.charAt(0) === '#') {
+            let hex = color.slice(1);
+            if (hex.length === 3) {
+                hex = hex[0] + hex[0] + hex[1] + hex[1] + hex[2] + hex[2];
+            }
+            const num = parseInt(hex, 16);
+            if (hex.length === 6 && !isNaN(num)) {
+                parsed = { r: (num >> 16) & 0xFF, g: (num >> 8) & 0xFF, b: num & 0xFF, a: 1 };
+            }
+        }
+        if (!parsed) return null;
+
+        const alpha = Math.max(0, Math.min(255,
+            Math.round((parsed.a === undefined ? 1 : parsed.a) * opacity * 255)
+        ));
+        // Packed as 0xRRGGBBAA (matches VexelWebGLRenderer._unpackColor).
+        return (((parsed.r & 0xFF) << 24) | ((parsed.g & 0xFF) << 16) |
+                ((parsed.b & 0xFF) << 8) | alpha) >>> 0;
     }
 
     _renderShapeWebGL(shape) {
         if (!this.webglRenderer) return;
 
+        const wr = this.webglRenderer;
+        const opacity = shape.opacity !== undefined ? shape.opacity : 1;
+        const fillColor = this._parseColor(shape.fill, opacity);
+        const strokeColor = this._parseColor(shape.stroke, opacity);
+        const strokeWidth = shape.strokeWidth || 1;
+
         switch (shape.type) {
             case 'rectangle': {
-                let color = 0xFF5722FF;
-                if (shape.fill && shape.fill !== 'transparent') {
-                    const parsed = VexelColor ? VexelColor.parse(shape.fill) : null;
-                    if (parsed) {
-                        const a = Math.round((shape.opacity || 1) * 255);
-                        color = (a << 24) | (parsed.b << 16) | (parsed.g << 8) | parsed.r;
-                    }
+                // Matches VexelRectangle.draw(): rotate/scale about the center.
+                const transform = {
+                    scaleX: shape.scaleX === undefined ? 1 : shape.scaleX,
+                    scaleY: shape.scaleY === undefined ? 1 : shape.scaleY,
+                    rotation: ((shape.rotation || 0) * Math.PI) / 180
+                };
+                if (fillColor !== null) {
+                    wr.drawRect(shape.x, shape.y, shape.width, shape.height, fillColor, transform);
                 }
-                this.webglRenderer.drawRect(
-                    shape.x, shape.y,
-                    shape.width * shape.scaleX,
-                    shape.height * shape.scaleY,
-                    color
-                );
+                if (strokeColor !== null && strokeWidth > 0) {
+                    wr.drawRectOutline(shape.x, shape.y, shape.width, shape.height, strokeColor, strokeWidth, transform);
+                }
                 break;
             }
             case 'ellipse': {
-                let color = 0xFF5722FF;
-                if (shape.fill && shape.fill !== 'transparent') {
-                    const parsed = VexelColor ? VexelColor.parse(shape.fill) : null;
-                    if (parsed) {
-                        const a = Math.round((shape.opacity || 1) * 255);
-                        color = (a << 24) | (parsed.b << 16) | (parsed.g << 8) | parsed.r;
-                    }
+                const rotation = ((shape.rotation || 0) * Math.PI) / 180;
+                const rx = shape.radiusX * (shape.scaleX || 1);
+                const ry = shape.radiusY * (shape.scaleY || 1);
+                if (fillColor !== null) {
+                    wr.drawEllipse(shape.x, shape.y, rx, ry, fillColor, 64, rotation);
                 }
-                this.webglRenderer.drawEllipse(
-                    shape.x, shape.y,
-                    shape.radiusX, shape.radiusY,
-                    color
-                );
+                if (strokeColor !== null && strokeWidth > 0) {
+                    wr.drawEllipseOutline(shape.x, shape.y, rx, ry, strokeColor, strokeWidth, 64, rotation);
+                }
                 break;
             }
             case 'line': {
-                let color = 0x000000FF;
-                if (shape.stroke && shape.stroke !== 'none') {
-                    const parsed = VexelColor ? VexelColor.parse(shape.stroke) : null;
-                    if (parsed) {
-                        const a = Math.round((shape.opacity || 1) * 255);
-                        color = (a << 24) | (parsed.b << 16) | (parsed.g << 8) | parsed.r;
-                    }
-                }
-                this.webglRenderer.drawLine(
-                    shape.x1, shape.y1,
-                    shape.x2, shape.y2,
-                    color,
-                    shape.strokeWidth || 1
-                );
+                const color = strokeColor !== null ? strokeColor : 0x000000FF;
+                // strokeWidth is in world units; the view matrix scales it
+                // with zoom exactly like Canvas2D lineWidth.
+                wr.drawLine(shape.x1, shape.y1, shape.x2, shape.y2, color, strokeWidth);
                 break;
             }
             default: {
@@ -227,6 +297,7 @@ class VexelRenderer {
         ctx.save();
         ctx.translate(this.vexel.viewport.x, this.vexel.viewport.y);
         ctx.scale(this.vexel.viewport.zoom, this.vexel.viewport.zoom);
+        ctx.rotate(this.vexel.viewport.rotation || 0);
 
         for (const shape of selected) {
             const bounds = shape.getBounds();
@@ -369,10 +440,7 @@ class VexelRenderer {
     }
 
     destroy() {
-        if (this.webglRenderer) {
-            this.webglRenderer.destroy();
-            this.webglRenderer = null;
-        }
+        this._activateCanvas2D();
     }
 }
 

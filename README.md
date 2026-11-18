@@ -83,6 +83,23 @@ git clone https://github.com/spideythedev/vexel.git
 
 ## Examples
 
+### WebGL Backend Verification
+
+Open `examples/webgl-verification.html` directly in a browser (no build or server
+needed). It runs an automated test suite covering:
+
+- **Viewport alignment** — rectangles (with `scaleX`/`scaleY`), ellipses, and
+  lines render to the same positions/sizes under WebGL and Canvas2D across
+  pan, zoom (0.01–100), and rotation.
+- **Fallback** — when WebGL is unavailable or initialization fails, the
+  renderer falls back to Canvas2D and keeps rendering (no blank screen).
+- **Selection overlay** — the dashed selection box and eight handles stay
+  glued to shape bounds at 0.01×, 1×, and 100× zoom, with constant
+  on-screen line width and handle size.
+
+An interactive demo at the bottom of the page lets you switch backends and
+adjust zoom/rotation live.
+
 ### Basic Drawing
 
 ```javascript

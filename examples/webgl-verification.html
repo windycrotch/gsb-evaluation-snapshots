@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vexel WebGL 后端验证</title>
+    <style>
+        body { font-family: -apple-system, 'Segoe UI', Roboto, sans-serif; margin: 24px; background: #fafaf9; color: #1c1917; }
+        h1 { font-size: 20px; }
+        h2 { font-size: 15px; margin: 24px 0 8px; }
+        .case { font-family: monospace; font-size: 12px; padding: 3px 8px; border-radius: 4px; margin: 2px 0; }
+        .case.pass { background: #dcfce7; color: #166534; }
+        .case.fail { background: #fee2e2; color: #991b1b; }
+        .case.skip { background: #fef9c3; color: #854d0e; }
+        #summary { font-weight: 700; font-size: 14px; padding: 8px 12px; border-radius: 6px; display: inline-block; margin-bottom: 8px; }
+        #summary.pass { background: #dcfce7; color: #166534; }
+        #summary.fail { background: #fee2e2; color: #991b1b; }
+        #liveHost { border: 1px solid #d6d3d1; display: inline-block; margin-top: 8px; background: #fff; }
+        .controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 8px 0; font-size: 12px; }
+        .controls button, .controls select { font-size: 12px; padding: 4px 10px; }
+        .note { font-size: 12px; color: #78716c; }
+    </style>
+</head>
+<body>
+    <h1>Vexel WebGL 后端验证样例</h1>
+    <p class="note">直接用浏览器打开本文件即可运行（无需构建、无需服务器）。页面加载后自动执行全部测试。</p>
+    <div id="summary">运行中…</div>
+
+    <h2>A. 视口对齐：同一视口下 WebGL 与 Canvas2D 像素对比</h2>
+    <div id="testA"></div>
+
+    <h2>B. WebGL 不可用 / 初始化失败时回退 Canvas2D</h2>
+    <div id="testB"></div>
+
+    <h2>C. 极端倍率（0.01 / 1 / 100）下的选中框与控制点</h2>
+    <div id="testC"></div>
+
+    <h2>交互演示（上方测试 C 所用画布）</h2>
+    <div class="controls">
+        <label>后端
+            <select id="backendSel">
+                <option value="webgl">webgl</option>
+                <option value="canvas2d">canvas2d</option>
+            </select>
+        </label>
+        <button data-zoom="0.01">0.01×</button>
+        <button data-zoom="1">1×</button>
+        <button data-zoom="100">100×</button>
+        <label>视口旋转 <input id="rotInput" type="range" min="-3.14" max="3.14" step="0.01" value="0" style="width:140px"></label>
+        <span id="liveStatus" class="note"></span>
+    </div>
+    <div id="liveHost"></div>
+
+    <script src="../src/utils/color.js"></script>
+    <script src="../src/core/vexel.js"></script>
+    <script src="../src/renderer/webgl.js"></script>
+    <script src="../src/core/renderer.js"></script>
+    <script>
+    (function () {
+        'use strict';
+
+        var DPR = window.devicePixelRatio || 1;
+        var W = 480, H = 360;
+        var allResults = [];
+
+        function report(el, name, pass, details, skipped) {
+            allResults.push({ name: name, pass: pass, skipped: !!skipped });
+            var div = document.createElement('div');
+            div.className = 'case ' + (skipped ? 'skip' : (pass ? 'pass' : 'fail'));
+            div.textContent = (skipped ? 'SKIP ' : (pass ? 'PASS ' : 'FAIL ')) + name + (details ? ' — ' + details : '');
+            el.appendChild(div);
+        }
+
+        function snapshot(canvas) {
+            var scratch = document.createElement('canvas');
+            scratch.width = canvas.width;
+            scratch.height = canvas.height;
+            var sctx = scratch.getContext('2d');
+            sctx.drawImage(canvas, 0, 0);
+            return sctx.getImageData(0, 0, scratch.width, scratch.height);
+        }
+
+        function analyze(img) {
+            var d = img.data, minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity, count = 0;
+            for (var y = 0; y < img.height; y++) {
+                for (var x = 0; x < img.width; x++) {
+                    var a = d[(y * img.width + x) * 4 + 3];
+                    if (a > 10) {
+                        count++;
+                        if (x < minX) minX = x;
+                        if (x > maxX) maxX = x;
+                        if (y < minY) minY = y;
+                        if (y > maxY) maxY = y;
+                    }
+                }
+            }
+            return { minX: minX, minY: minY, maxX: maxX, maxY: maxY, count: count };
+        }
+
+        function compareImages(a, b) {
+            if (a.width !== b.width || a.height !== b.height) {
+                return { pass: false, details: 'canvas size mismatch' };
+            }
+            var A = analyze(a), B = analyze(b);
+            if (A.count === 0 || B.count === 0) {
+                return { pass: false, details: 'blank image (canvas2d=' + A.count + 'px, webgl=' + B.count + 'px)' };
+            }
+            var acx = (A.minX + A.maxX) / 2, acy = (A.minY + A.maxY) / 2;
+            var bcx = (B.minX + B.maxX) / 2, bcy = (B.minY + B.maxY) / 2;
+            var aw = A.maxX - A.minX + 1, ah = A.maxY - A.minY + 1;
+            var bw = B.maxX - B.minX + 1, bh = B.maxY - B.minY + 1;
+            var tol = Math.max(2.5, 0.03 * Math.max(aw, ah));
+            var dc = Math.hypot(acx - bcx, acy - bcy);
+            var ds = Math.max(Math.abs(aw - bw), Math.abs(ah - bh));
+
+            var union = 0, xor = 0, n = a.width * a.height;
+            for (var i = 0; i < n; i++) {
+                var pa = a.data[i * 4 + 3] > 10, pb = b.data[i * 4 + 3] > 10;
+                if (pa || pb) union++;
+                if (pa !== pb) xor++;
+            }
+            var ratio = union ? xor / union : 0;
+            // 画面只剩几个像素时（极端缩小），Canvas2D 与 MSAA 的抗锯齿覆盖率
+            // 逐像素必然不同，此时只以包围盒对齐为准。
+            var ratioThreshold = union < 500 ? 0.6 : 0.12;
+            var pass = dc <= tol && ds <= tol && ratio <= ratioThreshold;
+            return {
+                pass: pass,
+                details: 'centerΔ=' + dc.toFixed(2) + 'px sizeΔ=' + ds.toFixed(2) +
+                         'px edgeDiff=' + (ratio * 100).toFixed(1) + '% (tol=' + tol.toFixed(1) + 'px)'
+            };
+        }
+
+        function hiddenHost() {
+            var host = document.createElement('div');
+            host.style.display = 'none';
+            document.body.appendChild(host);
+            return host;
+        }
+
+        function makeVexel(host) {
+            var vex = new Vexel({ container: host, width: W, height: H });
+            // 停止 Vexel 内置渲染循环的干扰，完全由 VexelRenderer 驱动
+            vex.renderer.renderAll = function () {};
+            return vex;
+        }
+
+        // ------------------------------------------------------------------
+        // A. 视口对齐
+        // ------------------------------------------------------------------
+        function runAlignmentTests() {
+            var el = document.getElementById('testA');
+            var vex = makeVexel(hiddenHost());
+
+            // 矩形：scaleX/scaleY + 自身旋转；椭圆：半径 + 旋转；直线：线宽
+            vex.rectangle(60, 50, 200, 120, {
+                fill: '#FF5722', stroke: '#1c1917', strokeWidth: 4,
+                scaleX: 1.4, scaleY: 0.7, rotation: 25
+            });
+            vex.ellipse(330, 200, 80, 45, { fill: '#3B82F6', rotation: -15 });
+            vex.line(40, 300, 440, 260, { stroke: '#22C55E', strokeWidth: 6 });
+
+            var renderer = new VexelRenderer(vex);
+
+            function centerOn(wx, wy, zoom) {
+                return { x: W / 2 - wx * zoom, y: H / 2 - wy * zoom };
+            }
+
+            var configs = [
+                { name: 'zoom=1 无变换', x: 0, y: 0, zoom: 1, rotation: 0 },
+                { name: '平移 + zoom=0.5', x: 120, y: -60, zoom: 0.5, rotation: 0 },
+                (function () { var p = centerOn(240, 180, 0.01); return { name: 'zoom=0.01 极端缩小', x: p.x, y: p.y, zoom: 0.01, rotation: 0 }; })(),
+                (function () { var p = centerOn(240, 280, 100); return { name: 'zoom=100 极端放大（线宽随缩放）', x: p.x, y: p.y, zoom: 100, rotation: 0 }; })(),
+                { name: '旋转 0.5rad + zoom=1.5', x: 150, y: 80, zoom: 1.5, rotation: 0.5 },
+                { name: '旋转 -1.1rad + zoom=0.3 + 平移', x: -80, y: 200, zoom: 0.3, rotation: -1.1 }
+            ];
+
+            for (var i = 0; i < configs.length; i++) {
+                var cfg = configs[i];
+                vex.viewport.x = cfg.x;
+                vex.viewport.y = cfg.y;
+                vex.viewport.zoom = cfg.zoom;
+                vex.viewport.rotation = cfg.rotation;
+
+                renderer.setBackend('canvas2d');
+                renderer.render();
+                var ref = snapshot(vex.canvas);
+
+                renderer.setBackend('webgl');
+                if (renderer.backend !== 'webgl') {
+                    report(el, cfg.name, true, '此环境 WebGL 不可用，跳过像素对比（回退行为见测试 B）', true);
+                    continue;
+                }
+                renderer.render();
+                var test = snapshot(vex.canvas);
+
+                var cmp = compareImages(ref, test);
+                report(el, cfg.name, cmp.pass, cmp.details);
+            }
+
+            renderer.setBackend('canvas2d');
+        }
+
+        // ------------------------------------------------------------------
+        // B. 回退
+        // ------------------------------------------------------------------
+        function runFallbackTests() {
+            var el = document.getElementById('testB');
+
+            // B1: getContext('webgl'/'webgl2') 返回 null
+            var origGetContext = HTMLCanvasElement.prototype.getContext;
+            HTMLCanvasElement.prototype.getContext = function (type) {
+                if (typeof type === 'string' && type.indexOf('webgl') === 0) return null;
+                return origGetContext.apply(this, arguments);
+            };
+            try {
+                var vex = makeVexel(hiddenHost());
+                vex.rectangle(50, 50, 150, 100, { fill: '#FF5722' });
+                var r = new VexelRenderer(vex);
+                r.setBackend('webgl');
+                report(el, 'B1 WebGL 上下文不可用 → 回退 canvas2d',
+                    r.backend === 'canvas2d' && !r.webglRenderer, 'backend=' + r.backend);
+                r.render();
+                var count = analyze(snapshot(vex.canvas)).count;
+                report(el, 'B1 回退后画面正常渲染（非白屏）', count > 100, 'opaquePixels=' + count);
+            } finally {
+                HTMLCanvasElement.prototype.getContext = origGetContext;
+            }
+
+            // B2: init() 抛异常（模拟驱动/GPU 故障）
+            var origInit = VexelWebGLRenderer.prototype.init;
+            VexelWebGLRenderer.prototype.init = function () { throw new Error('simulated GPU failure'); };
+            try {
+                var vex2 = makeVexel(hiddenHost());
+                vex2.rectangle(50, 50, 150, 100, { fill: '#3B82F6' });
+                var r2 = new VexelRenderer(vex2);
+                r2.setBackend('webgl');
+                report(el, 'B2 init() 抛异常 → 回退 canvas2d',
+                    r2.backend === 'canvas2d' && !r2.webglRenderer, 'backend=' + r2.backend);
+                r2.render();
+                var count2 = analyze(snapshot(vex2.canvas)).count;
+                report(el, 'B2 回退后画面正常渲染（非白屏）', count2 > 100, 'opaquePixels=' + count2);
+            } finally {
+                VexelWebGLRenderer.prototype.init = origInit;
+            }
+
+            // B3: webgl ↔ canvas2d 往返切换
+            var vex3 = makeVexel(hiddenHost());
+            vex3.rectangle(50, 50, 150, 100, { fill: '#22C55E' });
+            var r3 = new VexelRenderer(vex3);
+            r3.setBackend('webgl');
+            if (r3.backend !== 'webgl') {
+                report(el, 'B3 WebGL↔Canvas2D 往返切换', true, 'WebGL 不可用，跳过（回退已在 B1/B2 验证）', true);
+            } else {
+                r3.render();
+                var glCount = analyze(snapshot(vex3.canvas)).count;
+                report(el, 'B3 WebGL 模式画面非空', glCount > 100, 'opaquePixels=' + glCount);
+                r3.setBackend('canvas2d');
+                var restored = r3.backend === 'canvas2d' && !r3.webglRenderer &&
+                    vex3.canvas.getContext('2d') === vex3.ctx;
+                r3.render();
+                var c2dCount = analyze(snapshot(vex3.canvas)).count;
+                report(el, 'B3 切回 canvas2d 后恢复 2D 画布', restored, 'backend=' + r3.backend);
+                report(el, 'B3 切回后画面正常渲染', c2dCount > 100, 'opaquePixels=' + c2dCount);
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // C. 极端倍率下的选中框
+        // ------------------------------------------------------------------
+        function runOverlayTests() {
+            var el = document.getElementById('testC');
+            var host = document.getElementById('liveHost');
+            var vex = makeVexel(host);
+            var shape = vex.rectangle(100, 80, 300, 160, { fill: '#FF5722' });
+            vex.select(shape);
+            var r = new VexelRenderer(vex);
+            r.setBackend('webgl');
+            var backendUsed = r.backend;
+
+            function worldToScreen(wx, wy) {
+                var rot = vex.viewport.rotation || 0;
+                var cos = Math.cos(rot), sin = Math.sin(rot);
+                return {
+                    x: vex.viewport.x + vex.viewport.zoom * (cos * wx - sin * wy),
+                    y: vex.viewport.y + vex.viewport.zoom * (sin * wx + cos * wy)
+                };
+            }
+
+            function overlayImage() {
+                return vex.overlayCtx.getImageData(0, 0, vex.overlayCanvas.width, vex.overlayCanvas.height);
+            }
+
+            function findNear(img, sx, sy, radius, pred) {
+                var x0 = Math.max(0, Math.floor(sx - radius)), x1 = Math.min(img.width - 1, Math.ceil(sx + radius));
+                var y0 = Math.max(0, Math.floor(sy - radius)), y1 = Math.min(img.height - 1, Math.ceil(sy + radius));
+                for (var y = y0; y <= y1; y++) {
+                    for (var x = x0; x <= x1; x++) {
+                        var i = (y * img.width + x) * 4;
+                        if (pred(img.data[i], img.data[i + 1], img.data[i + 2], img.data[i + 3])) {
+                            return { x: x, y: y };
+                        }
+                    }
+                }
+                return null;
+            }
+
+            function isWhite(r, g, bl, a) { return a > 100 && r > 220 && g > 220 && bl > 220; }
+            function isBlue(r, g, bl, a) { return a > 100 && bl > 120 && bl > r + 30 && g > r; }
+            function isHandlePixel(r, g, bl, a) { return isWhite(r, g, bl, a) || isBlue(r, g, bl, a); }
+
+            // 控制点水平跨度（设备像素）：沿中心行取最左/最右控制点像素。
+            // （水平虚线框边在中心行上下 2px 处，只扫中心行可避免误计。）
+            function measureHandleSize(img, sx, sy) {
+                var y = Math.round(sy);
+                var x0 = Math.max(0, Math.round(sx - 15 * DPR)), x1 = Math.min(img.width - 1, Math.round(sx + 15 * DPR));
+                var minX = Infinity, maxX = -Infinity;
+                for (var x = x0; x <= x1; x++) {
+                    var i = (y * img.width + x) * 4;
+                    if (isHandlePixel(img.data[i], img.data[i + 1], img.data[i + 2], img.data[i + 3])) {
+                        if (x < minX) minX = x;
+                        if (x > maxX) maxX = x;
+                    }
+                }
+                return maxX >= minX ? maxX - minX + 1 : 0;
+            }
+
+            // zoom=100 时大图形的手柄会合法地落在视口之外，
+            // 因此极端放大用一个世界尺寸极小的图形来验证手柄屏幕尺寸恒定。
+            var tiny = vex.rectangle(200, 150, 0.4, 0.3, { fill: '#3B82F6' });
+
+            function centerViewportOn(wx, wy, zoom) {
+                vex.viewport.zoom = zoom;
+                vex.viewport.x = W / 2 - wx * zoom;
+                vex.viewport.y = H / 2 - wy * zoom;
+            }
+
+            function handlesOf(b) {
+                return [
+                    [b.x, b.y], [b.x + b.width, b.y],
+                    [b.x, b.y + b.height], [b.x + b.width, b.y + b.height],
+                    [b.x + b.width / 2, b.y], [b.x + b.width / 2, b.y + b.height],
+                    [b.x, b.y + b.height / 2], [b.x + b.width, b.y + b.height / 2]
+                ];
+            }
+
+            var zoomCases = [
+                { z: 0.01, shape: shape },
+                { z: 1, shape: shape },
+                { z: 100, shape: tiny }
+            ];
+
+            for (var zi = 0; zi < zoomCases.length; zi++) {
+                var z = zoomCases[zi].z;
+                var b = zoomCases[zi].shape.getBounds();
+                var wcx = b.x + b.width / 2, wcy = b.y + b.height / 2;
+                var handlesWorld = handlesOf(b);
+
+                vex.deselectAll();
+                vex.select(zoomCases[zi].shape);
+                vex.viewport.rotation = 0;
+                centerViewportOn(wcx, wcy, z);
+                r.render();
+                var img = overlayImage();
+
+                var handlesOk = 0;
+                for (var hi = 0; hi < handlesWorld.length; hi++) {
+                    var s = worldToScreen(handlesWorld[hi][0], handlesWorld[hi][1]);
+                    if (findNear(img, s.x * DPR, s.y * DPR, 5 * DPR, isWhite)) handlesOk++;
+                }
+                report(el, 'zoom=' + z + ' 八个控制点可见（后端: ' + backendUsed + '）', handlesOk === 8, handlesOk + '/8');
+
+                // 虚线框四边（框线位于 bounds 外 2 屏幕像素处）
+                var edgeMidWorld = [
+                    [wcx, b.y - 2 / z], [wcx, b.y + b.height + 2 / z],
+                    [b.x - 2 / z, wcy], [b.x + b.width + 2 / z, wcy]
+                ];
+                var edgesOk = 0;
+                for (var ei = 0; ei < edgeMidWorld.length; ei++) {
+                    var es = worldToScreen(edgeMidWorld[ei][0], edgeMidWorld[ei][1]);
+                    if (findNear(img, es.x * DPR, es.y * DPR, 4.5 * DPR, isBlue)) edgesOk++;
+                }
+                report(el, 'zoom=' + z + ' 虚线框四边贴合图形边界', edgesOk === 4, edgesOk + '/4');
+
+                if (z >= 1) {
+                    var hs = worldToScreen(b.x, b.y);
+                    var size = measureHandleSize(img, hs.x * DPR, hs.y * DPR);
+                    var expect = 7 * DPR;
+                    report(el, 'zoom=' + z + ' 控制点屏幕尺寸恒定 ≈7px',
+                        Math.abs(size - expect) <= 2.5 * DPR,
+                        'measured=' + (size / DPR).toFixed(1) + 'px (CSS)');
+                }
+            }
+
+            // 视口旋转时覆盖层仍对齐（大图形，zoom=1）
+            var bb = shape.getBounds();
+            var bcx = bb.x + bb.width / 2, bcy = bb.y + bb.height / 2;
+            var bigHandles = handlesOf(bb);
+            vex.deselectAll();
+            vex.select(shape);
+            vex.viewport.zoom = 1;
+            vex.viewport.rotation = 0.4;
+            var cos = Math.cos(0.4), sin = Math.sin(0.4);
+            vex.viewport.x = W / 2 - (cos * bcx - sin * bcy);
+            vex.viewport.y = H / 2 - (sin * bcx + cos * bcy);
+            r.render();
+            var rotImg = overlayImage();
+            var rotOk = 0;
+            for (var ri = 0; ri < bigHandles.length; ri++) {
+                var rs = worldToScreen(bigHandles[ri][0], bigHandles[ri][1]);
+                if (findNear(rotImg, rs.x * DPR, rs.y * DPR, 5 * DPR, isWhite)) rotOk++;
+            }
+            report(el, '视口旋转 0.4rad 时八个控制点仍对齐', rotOk === 8, rotOk + '/8');
+
+            vex.viewport.rotation = 0;
+            return { vex: vex, renderer: r, shape: shape };
+        }
+
+        // ------------------------------------------------------------------
+        // 交互演示
+        // ------------------------------------------------------------------
+        function wireLiveDemo(live) {
+            var vex = live.vex, r = live.renderer, shape = live.shape;
+            var b = shape.getBounds();
+            var wcx = b.x + b.width / 2, wcy = b.y + b.height / 2;
+            var status = document.getElementById('liveStatus');
+            var backendSel = document.getElementById('backendSel');
+
+            function update() {
+                r.render();
+                backendSel.value = r.backend === 'canvas2d' ? 'canvas2d' : 'webgl';
+                status.textContent = 'backend=' + r.backend +
+                    ' zoom=' + vex.viewport.zoom +
+                    ' rotation=' + (vex.viewport.rotation || 0).toFixed(2) + 'rad';
+            }
+
+            backendSel.addEventListener('change', function () {
+                r.setBackend(backendSel.value);
+                update();
+            });
+
+            Array.prototype.forEach.call(document.querySelectorAll('button[data-zoom]'), function (btn) {
+                btn.addEventListener('click', function () {
+                    var z = parseFloat(btn.getAttribute('data-zoom'));
+                    vex.viewport.zoom = z;
+                    vex.viewport.x = W / 2 - wcx * z;
+                    vex.viewport.y = H / 2 - wcy * z;
+                    update();
+                });
+            });
+
+            document.getElementById('rotInput').addEventListener('input', function (e) {
+                vex.viewport.rotation = parseFloat(e.target.value);
+                update();
+            });
+
+            update();
+        }
+
+        // ------------------------------------------------------------------
+        try {
+            runAlignmentTests();
+        } catch (e) {
+            report(document.getElementById('testA'), '测试 A 执行异常: ' + e.message, false);
+        }
+        try {
+            runFallbackTests();
+        } catch (e) {
+            report(document.getElementById('testB'), '测试 B 执行异常: ' + e.message, false);
+        }
+        var live = null;
+        try {
+            live = runOverlayTests();
+        } catch (e) {
+            report(document.getElementById('testC'), '测试 C 执行异常: ' + e.message, false);
+        }
+        if (live) wireLiveDemo(live);
+
+        var failed = allResults.filter(function (r) { return !r.pass; }).length;
+        var summary = document.getElementById('summary');
+        summary.textContent = failed === 0
+            ? '全部通过（' + allResults.length + ' 项）'
+            : '失败 ' + failed + ' / ' + allResults.length + ' 项';
+        summary.className = failed === 0 ? 'pass' : 'fail';
+    })();
+    </script>
+</body>
+</html>

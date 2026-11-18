@@ -120,6 +120,7 @@ class Vexel {
         this.overlayCtx.save();
         this.overlayCtx.translate(this.viewport.x, this.viewport.y);
         this.overlayCtx.scale(this.viewport.zoom, this.viewport.zoom);
+        this.overlayCtx.rotate(this.viewport.rotation || 0);
         for (const shape of this.selectedShapes) {
             const bounds = shape.getBounds();
             this.overlayCtx.strokeStyle = '#4A90D9';
