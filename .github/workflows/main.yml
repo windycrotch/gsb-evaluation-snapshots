@@ -1,0 +1,56 @@
+name: build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/main.yml'
+      - '.github/workflows/buildx.yml'
+      - '.github/workflows/buildx-cuda.yml'
+      - '.dockerignore'
+      - 'api_server.py'
+      - 'diarizer.py'
+      - 'diarization_models.py'
+      - 'Dockerfile'
+      - 'Dockerfile.cuda'
+      - 'manage.sh'
+      - 'run.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  shellcheck:
+    if: github.repository_owner == 'hwdsl2'
+    uses: ./.github/workflows/shellcheck.yml
+
+  whisper_test:
+    if: github.repository_owner == 'hwdsl2'
+    uses: ./.github/workflows/whisper_test.yml
+
+  cuda_test:
+    if: github.repository_owner == 'hwdsl2'
+    uses: ./.github/workflows/cuda_test.yml
+
+  buildx:
+    if: github.ref == 'refs/heads/main'
+    needs: [shellcheck, whisper_test]
+    uses: ./.github/workflows/buildx.yml
+    secrets:
+      CACHE_NAME: ${{ secrets.CACHE_NAME }}
+      DOCKER_TOKEN: ${{ secrets.DOCKER_TOKEN }}
+      QUAY_USER: ${{ secrets.QUAY_USER }}
+      QUAY_TOKEN: ${{ secrets.QUAY_TOKEN }}
+      BUILD_ONLY: ${{ secrets.BUILD_ONLY }}
+
+  buildx-cuda:
+    if: github.ref == 'refs/heads/main'
+    needs: [shellcheck, whisper_test, cuda_test]
+    uses: ./.github/workflows/buildx-cuda.yml
+    secrets:
+      CACHE_NAME: ${{ secrets.CACHE_NAME }}
+      DOCKER_TOKEN: ${{ secrets.DOCKER_TOKEN }}
+      QUAY_USER: ${{ secrets.QUAY_USER }}
+      QUAY_TOKEN: ${{ secrets.QUAY_TOKEN }}
+      BUILD_ONLY: ${{ secrets.BUILD_ONLY }}

@@ -1,0 +1,439 @@
+name: whisper_test
+
+on: workflow_call
+
+permissions:
+  contents: read
+
+jobs:
+  whisper_test:
+    timeout-minutes: 45
+    runs-on: ${{ matrix.runner }}
+    if: github.repository_owner == 'hwdsl2'
+    strategy:
+      matrix:
+        test_id: [no-env, with-env, with-key, with-file, with-diarize, empty-key, existing-no-key]
+        runner: [ubuntu-24.04]
+        include:
+          - test_id: with-diarize
+            runner: ubuntu-24.04-arm
+      fail-fast: false
+    env:
+      TEST_ID: ${{ matrix.test_id }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Unit tests
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s .github/workflows/tests
+      - name: Test
+        run: |
+          [ ! -x /usr/bin/docker ] && exit 1
+
+          cd "$GITHUB_WORKSPACE"
+          pwd
+          ls -ld whisper.env.example
+
+          sed -i \
+            -e '/WHISPER_LOG_LEVEL=/s/# //' \
+            -e '/WHISPER_BEAM=/s/# //' \
+            whisper.env.example
+
+          set -x
+
+          docker build -t whisper-test .
+          python3 .github/workflows/tests/check_secret_mounts.py docker whisper-test
+
+          if [ "$TEST_ID" = "with-env" ]; then
+            # Plain, non-exported assignments must cross run.sh's env bridge.
+            printf '\nWHISPER_CONDITION_ON_PREVIOUS_TEXT=false\nWHISPER_NO_REPEAT_NGRAM_SIZE=3\nWHISPER_DIARIZE_THREADS=6\n' >> whisper.env.example
+          fi
+          if [ "$TEST_ID" = "with-diarize" ]; then
+            # A plain file's empty override must beat container env and inherit
+            # the file's Whisper thread count, without requiring export lines.
+            # Its embedding selection must also override the container setting.
+            printf '\nWHISPER_THREADS=2\nWHISPER_DIARIZATION=true\nWHISPER_DIARIZE_THREADS=\nWHISPER_DIARIZE_EMBEDDING_MODEL=wespeaker_en_voxceleb_resnet34_LM.onnx\n' >> whisper.env.example
+          fi
+          if [ "$TEST_ID" = "no-env" ]; then
+            # Invalid values fail before creating state or downloading models.
+            for assignment in WHISPER_CONDITION_ON_PREVIOUS_TEXT=yes WHISPER_NO_REPEAT_NGRAM_SIZE=2147483648 WHISPER_DIARIZE_THREADS=0 WHISPER_DIARIZE_THREADS=2147483648 WHISPER_DIARIZE_EMBEDDING_MODEL=unknown.onnx; do
+              if timeout 30 docker run --name whisper-invalid \
+                -e WHISPER_DISABLE_USAGE_COUNTS=1 -e "$assignment" whisper-test; then
+                echo "Expected invalid configuration to fail"; exit 1
+              else
+                result=$?
+                [ "$result" = 1 ] || { echo "Unexpected exit: $result"; exit 1; }
+              fi
+              docker logs whisper-invalid 2>&1 | grep -q "${assignment%%=*} must be"
+              if docker logs whisper-invalid 2>&1 | grep -q 'Loading model'; then
+                echo "Invalid configuration reached model loading"; exit 1
+              fi
+              docker rm -v whisper-invalid
+            done
+          fi
+
+          if [ "$TEST_ID" = "existing-no-key" ]; then
+            docker volume create whisper-test-data
+            docker run --rm --entrypoint sh \
+              -v whisper-test-data:/data \
+              whisper-test \
+              -c 'printf "%s" "existing" > /data/.server_addr'
+          fi
+
+          if [ "$TEST_ID" = "with-diarize" ]; then
+            docker run \
+              --name "$TEST_ID" \
+              --restart=always \
+              --cpus=2 \
+              -e WHISPER_DISABLE_USAGE_COUNTS=1 \
+              -v whisper-test-data:/var/lib/whisper \
+              -v ./whisper.env.example:/whisper.env:ro \
+              -e WHISPER_MODEL=tiny \
+              -e WHISPER_DIARIZATION=true \
+              -e WHISPER_DIARIZE_THREADS=1 \
+              -e WHISPER_DIARIZE_EMBEDDING_MODEL=nemo_en_titanet_large.onnx \
+              -p 9000:9000/tcp \
+              -d whisper-test
+          elif [ "$TEST_ID" = "with-env" ]; then
+            docker run \
+              --name "$TEST_ID" \
+              --restart=always \
+              -e WHISPER_DISABLE_USAGE_COUNTS=1 \
+              -v whisper-test-data:/var/lib/whisper \
+              -v ./whisper.env.example:/whisper.env:ro \
+              -e WHISPER_MODEL=tiny \
+              -p 9000:9000/tcp \
+              -d whisper-test
+          elif [ "$TEST_ID" = "no-env" ]; then
+            docker run \
+              --name "$TEST_ID" \
+              --restart=always \
+              -e WHISPER_DISABLE_USAGE_COUNTS=1 \
+              -v whisper-test-data:/var/lib/whisper \
+              -e WHISPER_MODEL=tiny \
+              -p 9000:9000/tcp \
+              -d whisper-test
+          elif [ "$TEST_ID" = "with-key" ]; then
+            docker run \
+              --name "$TEST_ID" \
+              --restart=always \
+              -e WHISPER_DISABLE_USAGE_COUNTS=1 \
+              -v whisper-test-data:/var/lib/whisper \
+              -e WHISPER_MODEL=tiny \
+              -e WHISPER_API_KEY=test-whisper-key \
+              -e WHISPER_CONDITION_ON_PREVIOUS_TEXT=FALSE \
+              -e WHISPER_NO_REPEAT_NGRAM_SIZE=3 \
+              -p 9000:9000/tcp \
+              -d whisper-test
+          elif [ "$TEST_ID" = "with-file" ]; then
+            secret_test_dir=$(mktemp -d)
+            trap 'rm -rf -- "$secret_test_dir"' EXIT
+            printf '%s\r\n' test-whisper-key > "$secret_test_dir/api-key"
+            chmod 644 "$secret_test_dir/api-key"
+            printf '%s\n' WHISPER_API_KEY_FILE=/run/secrets/api-key > "$secret_test_dir/service.env"
+            docker run \
+              --name "$TEST_ID" \
+              --restart=always \
+              -e WHISPER_DISABLE_USAGE_COUNTS=1 \
+              -v whisper-test-data:/var/lib/whisper \
+              -e WHISPER_MODEL=tiny \
+              -v "$secret_test_dir/api-key:/run/secrets/api-key:ro" \
+              -v "$secret_test_dir/service.env:/whisper.env:ro" \
+              -e WHISPER_CONDITION_ON_PREVIOUS_TEXT=FALSE \
+              -e WHISPER_NO_REPEAT_NGRAM_SIZE=3 \
+              -p 9000:9000/tcp \
+              -d whisper-test
+          elif [ "$TEST_ID" = "empty-key" ]; then
+            docker run \
+              --name "$TEST_ID" \
+              --restart=always \
+              -e WHISPER_DISABLE_USAGE_COUNTS=1 \
+              -v whisper-test-data:/var/lib/whisper \
+              -e WHISPER_MODEL=tiny \
+              -e WHISPER_API_KEY= \
+              -p 9000:9000/tcp \
+              -d whisper-test
+          elif [ "$TEST_ID" = "existing-no-key" ]; then
+            docker run \
+              --name "$TEST_ID" \
+              --restart=always \
+              -e WHISPER_DISABLE_USAGE_COUNTS=1 \
+              -v whisper-test-data:/var/lib/whisper \
+              -e WHISPER_MODEL=tiny \
+              -p 9000:9000/tcp \
+              -d whisper-test
+          fi
+
+          # Wait for server to be ready (up to 300 seconds for model download)
+          i=0
+          while [ "$i" -lt 300 ]; do
+            if docker exec "$TEST_ID" curl -sf http://127.0.0.1:9000/health >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+            i=$((i + 1))
+          done
+
+          docker ps | grep "$TEST_ID"
+          docker logs "$TEST_ID"
+          if [ "$TEST_ID" = "with-env" ] || { [ "$TEST_ID" = "with-key" ] || [ "$TEST_ID" = "with-file" ]; }; then
+            docker logs "$TEST_ID" 2>&1 | grep -q 'condition_on_previous_text=False no_repeat_ngram_size=3'
+          else
+            docker logs "$TEST_ID" 2>&1 | grep -q 'condition_on_previous_text=True no_repeat_ngram_size=0'
+          fi
+          if [ "$TEST_ID" = "existing-no-key" ]; then
+            docker logs "$TEST_ID" 2>&1 | grep -q 'Preserving no-auth behavior for backward compatibility'
+          fi
+
+          # Verify health endpoint
+          docker exec "$TEST_ID" curl -sf http://127.0.0.1:9000/health
+
+          if [ "$TEST_ID" = "with-file" ]; then
+            active_key=$(docker exec "$TEST_ID" whisper_manage --getkey)
+            [ "$active_key" = test-whisper-key ] || { echo "Active file key mismatch"; exit 1; }
+            docker exec "$TEST_ID" test ! -f /var/lib/whisper/.api_key
+            docker exec "$TEST_ID" test ! -f /var/lib/whisper/.auto_api_key_created
+            printf '%s' synthetic-inactive-key > "$secret_test_dir/api-key"
+            active_key=$(docker exec "$TEST_ID" whisper_manage --getkey)
+            [ "$active_key" = test-whisper-key ] || { echo "Helper reread inactive source"; exit 1; }
+          fi
+
+          # Build optional auth header args
+          whisper_curl_args=()
+          if { [ "$TEST_ID" = "with-key" ] || [ "$TEST_ID" = "with-file" ]; }; then
+            whisper_curl_args=(-H "Authorization: Bearer test-whisper-key")
+          elif [ "$TEST_ID" = "empty-key" ] || [ "$TEST_ID" = "existing-no-key" ]; then
+            whisper_key=$(docker exec "$TEST_ID" whisper_manage --getkey 2>/dev/null || true)
+            [ -z "$whisper_key" ] || { echo "Expected no Whisper API key, got $whisper_key"; exit 1; }
+            docker exec "$TEST_ID" test ! -f /var/lib/whisper/.api_key
+            docker exec "$TEST_ID" test ! -f /var/lib/whisper/.auto_api_key_created
+          else
+            whisper_key=$(docker exec "$TEST_ID" whisper_manage --getkey)
+            [ -n "$whisper_key" ] || { echo "Generated Whisper API key not found"; exit 1; }
+            docker exec "$TEST_ID" test -f /var/lib/whisper/.auto_api_key_created
+            whisper_curl_args=(-H "Authorization: Bearer $whisper_key")
+          fi
+
+          if [ "${#whisper_curl_args[@]}" -gt 0 ]; then
+            # Test auth enforcement when WHISPER_API_KEY is set/generated
+            http_code=$(curl -s -o /dev/null -w '%{http_code}' \
+              http://127.0.0.1:9000/v1/models 2>/dev/null || true)
+            [ "$http_code" = "401" ] || { echo "Expected 401 without key, got $http_code"; exit 1; }
+          else
+            # Explicit empty keys and existing no-key volumes preserve no-auth behavior.
+            curl -sf http://127.0.0.1:9000/v1/models | grep -q '"object"'
+          fi
+
+          # Verify models endpoint
+          curl -sf http://127.0.0.1:9000/v1/models \
+            "${whisper_curl_args[@]}" \
+            | grep -q '"object"'
+
+          # Test whisper_manage commands
+          docker exec "$TEST_ID" whisper_manage --showinfo
+          docker exec "$TEST_ID" whisper_manage --listmodels
+
+          # Test whisper_manage --downloadmodel (download already-cached model; verifies command works)
+          docker exec "$TEST_ID" whisper_manage --downloadmodel tiny
+
+          # Generate a minimal test audio file and test the transcription endpoint
+          if [ ! -x /usr/bin/ffmpeg ]; then
+            export DEBIAN_FRONTEND=noninteractive
+            sudo apt-get -yqq update
+            sudo apt-get -yqq install ffmpeg
+          fi
+          ffmpeg -y -f lavfi -i "sine=frequency=440:duration=1" -ar 16000 -ac 1 /tmp/test.wav
+
+          expect_transcription_400() {
+            http_code=$(curl -s -o /dev/null -w '%{http_code}' \
+              http://127.0.0.1:9000/v1/audio/transcriptions \
+              "${whisper_curl_args[@]}" \
+              "$@" 2>/dev/null || true)
+            [ "$http_code" = "400" ] || { echo "Expected 400, got $http_code"; exit 1; }
+          }
+
+          expect_transcription_400 \
+            -F file=@/tmp/test.wav -F model=gpt-4o-transcribe-diarize
+          expect_transcription_400 \
+            -F file=@/tmp/test.wav -F model=whisper-1 -F response_format=diarized_json
+          expect_transcription_400 \
+            -F file=@/tmp/test.wav -F model=whisper-1 -F 'include[]=logprobs'
+          expect_transcription_400 \
+            -F file=@/tmp/test.wav -F model=whisper-1 -F chunking_strategy=auto
+          expect_transcription_400 \
+            -F file=@/tmp/test.wav -F model=whisper-1 -F 'known_speaker_names[]=agent'
+          expect_transcription_400 \
+            -F file=@/tmp/test.wav -F model=whisper-1 -F 'known_speaker_references[]=data:audio/wav;base64,AAAA'
+          expect_transcription_400 \
+            -F file=@/tmp/test.wav -F model=whisper-1 -F temperature=1.01
+          expect_transcription_400 \
+            -F file=@/tmp/test.wav -F model=whisper-1 -F beam=11
+
+          http_code=$(curl -s -o /dev/null -w '%{http_code}' \
+            http://127.0.0.1:9000/v1/audio/translations \
+            "${whisper_curl_args[@]}" \
+            -F file=@/tmp/test.wav -F model=whisper-1 -F temperature=-0.01 2>/dev/null || true)
+          [ "$http_code" = "400" ] || { echo "Expected 400 for invalid translation temperature, got $http_code"; exit 1; }
+
+          # Test transcription endpoint (json format)
+          curl -sf http://127.0.0.1:9000/v1/audio/transcriptions \
+            "${whisper_curl_args[@]}" \
+            -F file=@/tmp/test.wav -F model=whisper-1 \
+            | grep -q '"text"'
+
+          # Test local faster-whisper beam override
+          curl -sf http://127.0.0.1:9000/v1/audio/transcriptions \
+            "${whisper_curl_args[@]}" \
+            -F file=@/tmp/test.wav -F model=whisper-1 -F beam=1 \
+            | grep -q '"text"'
+
+          # Test transcription endpoint (text format)
+          curl -sf http://127.0.0.1:9000/v1/audio/transcriptions \
+            "${whisper_curl_args[@]}" \
+            -F file=@/tmp/test.wav -F model=whisper-1 -F response_format=text
+
+          # Test transcription endpoint (verbose_json format)
+          curl -sf http://127.0.0.1:9000/v1/audio/transcriptions \
+            "${whisper_curl_args[@]}" \
+            -F file=@/tmp/test.wav -F model=whisper-1 -F response_format=verbose_json \
+            | grep -q '"segments"'
+
+          # Test transcription endpoint (srt format)
+          curl -sf http://127.0.0.1:9000/v1/audio/transcriptions \
+            "${whisper_curl_args[@]}" \
+            -F file=@/tmp/test.wav -F model=whisper-1 -F response_format=srt
+
+          # Test transcription endpoint (vtt format)
+          curl -sf http://127.0.0.1:9000/v1/audio/transcriptions \
+            "${whisper_curl_args[@]}" \
+            -F file=@/tmp/test.wav -F model=whisper-1 -F response_format=vtt
+
+          # Test transcription endpoint with explicit language
+          curl -sf http://127.0.0.1:9000/v1/audio/transcriptions \
+            "${whisper_curl_args[@]}" \
+            -F file=@/tmp/test.wav -F model=whisper-1 -F language=en \
+            | grep -q '"text"'
+
+          # Test streaming transcription endpoint (stream=true, SSE)
+          stream_output=$(curl -sN http://127.0.0.1:9000/v1/audio/transcriptions \
+            "${whisper_curl_args[@]}" \
+            -F file=@/tmp/test.wav -F model=whisper-1 -F stream=true)
+          echo "$stream_output" | grep -q '"transcript.text.done"'
+          echo "$stream_output" | grep -q '\[DONE\]'
+
+          translation_stream=$(curl --max-time 120 -sfN http://127.0.0.1:9000/v1/audio/translations \
+            "${whisper_curl_args[@]}" \
+            -F file=@/tmp/test.wav -F model=whisper-1 -F stream=true)
+          echo "$translation_stream" | grep -q '"transcript.text.done"'
+          echo "$translation_stream" | grep -q '\[DONE\]'
+
+          # Test word-level timestamps (verbose_json with timestamp_granularities[]=word)
+          wt_output=$(curl -sf http://127.0.0.1:9000/v1/audio/transcriptions \
+            "${whisper_curl_args[@]}" \
+            -F file=@/tmp/test.wav -F model=whisper-1 \
+            -F response_format=verbose_json -F "timestamp_granularities[]=word")
+          echo "$wt_output" | grep -q '"words"'
+
+          # Test translation endpoint (json format)
+          curl -sf http://127.0.0.1:9000/v1/audio/translations \
+            "${whisper_curl_args[@]}" \
+            -F file=@/tmp/test.wav -F model=whisper-1 \
+            | grep -q '"text"'
+
+          # Test translation endpoint (verbose_json format)
+          curl -sf http://127.0.0.1:9000/v1/audio/translations \
+            "${whisper_curl_args[@]}" \
+            -F file=@/tmp/test.wav -F model=whisper-1 -F response_format=verbose_json \
+            | grep -q '"translate"'
+
+          # Test diarization output (only when WHISPER_DIARIZATION=true)
+          if [ "$TEST_ID" = "with-diarize" ]; then
+            # Verify diarization loaded successfully
+            if docker logs "$TEST_ID" 2>&1 | grep -qi 'Failed to load diarizer'; then
+              echo "Diarizer failed to load:"
+              docker logs "$TEST_ID" 2>&1 | grep -i 'Failed to load diarizer'
+              exit 1
+            fi
+            docker logs "$TEST_ID" 2>&1 | grep -q 'Diarization enabled'
+            expected_embedding=wespeaker_en_voxceleb_resnet34_LM.onnx
+            docker logs "$TEST_ID" 2>&1 | grep -F "Diarization embedding model: $expected_embedding" >/dev/null
+            saved_embedding=$(docker exec "$TEST_ID" cat /var/lib/whisper/.diarize_embedding_model)
+            [ "$saved_embedding" = "$expected_embedding" ] || { echo "Incorrect saved embedding model"; exit 1; }
+            docker exec "$TEST_ID" test -f "/var/lib/whisper/$expected_embedding"
+            docker exec "$TEST_ID" test ! -f /var/lib/whisper/nemo_en_titanet_large.onnx
+
+            # Public two-speaker speech, pinned and checksum-verified. Never
+            # allow VAD-filtered silence to skip the diarization assertions.
+            curl --proto '=https' --proto-redir '=https' -fsSL --retry 2 --max-time 60 \
+              https://raw.githubusercontent.com/Azure-Samples/cognitive-services-speech-sdk/5886c5b7c528bf036508abfd8b4d449ddab0164a/sampledata/audiofiles/katiesteve.wav \
+              -o "$RUNNER_TEMP/whisper-diarization.wav"
+            printf '%s  %s\n' d9ab6bdcd8137223386e8a0ac1d0a723f7ed029310111b9c60ef9ed6cedb4828 \
+              "$RUNNER_TEMP/whisper-diarization.wav" | sha256sum -c -
+            docker cp "$RUNNER_TEMP/whisper-diarization.wav" "$TEST_ID:/tmp/test_diarize.wav"
+            diarize_output=$(curl --max-time 180 -sf http://127.0.0.1:9000/v1/audio/transcriptions \
+              "${whisper_curl_args[@]}" \
+              -F "file=@$RUNNER_TEMP/whisper-diarization.wav" -F model=whisper-1 -F response_format=verbose_json)
+            printf '%s' "$diarize_output" | python3 -c \
+              'import sys,json; d=json.load(sys.stdin); assert d["text"].strip() and d["segments"]; assert all(s.get("speaker", "").startswith("SPEAKER_") for s in d["segments"])'
+            docker logs "$TEST_ID" 2>&1 | grep 'Diarization enabled (num_threads=2 per model)' >/dev/null
+            docker cp .github/workflows/tests/check_diarization.py "$TEST_ID:/tmp/check_diarization.py"
+            # docker exec does not inherit exports from the entrypoint process.
+            # Pass the expected mounted-file selection explicitly to the helper.
+            timeout 900 docker exec -e "WHISPER_DIARIZE_EMBEDDING_MODEL=$expected_embedding" \
+              "$TEST_ID" python3 /tmp/check_diarization.py \
+              --api /opt/src/api_server.py --audio /tmp/test_diarize.wav \
+              --cache /var/lib/whisper --output /tmp/diarization-results.json
+            docker cp "$TEST_ID:/tmp/diarization-results.json" "$RUNNER_TEMP/diarization-results.json"
+            python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["embedding_model"] == sys.argv[2]' \
+              "$RUNNER_TEMP/diarization-results.json" "$expected_embedding"
+
+            # Test whisper_manage --downloaddiarize
+            manage_output=$(docker exec "$TEST_ID" whisper_manage --downloaddiarize)
+            printf '%s\n' "$manage_output"
+            printf '%s\n' "$manage_output" | grep -F "Speaker embedding model: $expected_embedding" >/dev/null
+            printf '%s\n' "$manage_output" | grep -F 'Diarization models verified:' >/dev/null
+          fi
+
+          docker restart "$TEST_ID"
+
+          sleep 15
+
+          # Wait for server to come back (up to 120 seconds)
+          i=0
+          while [ "$i" -lt 120 ]; do
+            if docker exec "$TEST_ID" curl -sf http://127.0.0.1:9000/health >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+            i=$((i + 1))
+          done
+
+          docker ps | grep "$TEST_ID"
+          docker logs "$TEST_ID"
+
+          # Verify server is healthy after restart
+          docker exec "$TEST_ID" curl -sf http://127.0.0.1:9000/health
+
+          if [ "$TEST_ID" = "no-env" ]; then
+            curl --proto '=https' --proto-redir '=https' -fsSL --retry 2 --max-time 60 \
+              https://raw.githubusercontent.com/openai/whisper/6e3be77e1a105e59086e3e21ff5f609fd6fa89a5/tests/jfk.flac \
+              -o /tmp/whisper-jfk.flac
+            printf '%s  %s\n' 63a4b1e4c1dc655ac70961ffbf518acd249df237e5a0152faae9a4a836949715 \
+              /tmp/whisper-jfk.flac | sha256sum -c -
+            docker cp /tmp/whisper-jfk.flac "$TEST_ID:/tmp/whisper-jfk.flac"
+            docker cp .github/workflows/tests/check_audio_decoding.py "$TEST_ID:/tmp/check_audio_decoding.py"
+            docker exec "$TEST_ID" python3 /tmp/check_audio_decoding.py \
+              --api /opt/src/api_server.py --audio /tmp/whisper-jfk.flac \
+              --cache /var/lib/whisper --output /tmp/audio-results.json
+          fi
+
+          exit 0
+      - name: Clear
+        if: always()
+        run: |
+          docker rm -f "$TEST_ID" || true
+          docker rm -fv whisper-invalid || true
+          docker volume rm whisper-test-data || true
+          docker rmi whisper-test || true
+          rm -f /tmp/whisper-jfk.flac
+          rm -f "$RUNNER_TEMP/whisper-diarization.wav" "$RUNNER_TEMP/diarization-results.json"
