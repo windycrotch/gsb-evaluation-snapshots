@@ -42,14 +42,14 @@ ruff format . && ruff check --fix . # formatting is applied on PRs by Ultralytic
 ```
 
 - Every entry point hard-codes dataset, model, cache, and buffer paths (many under `/root/ultra_louis_work/...`) and both `do_*.sh` scripts activate a `clipenv` conda env. Edit those paths before running anything.
-- There are no tests and no CI beyond `format.yml` (Ultralytics Actions) and `cla.yml`; nothing validates a change automatically, so run the affected script against a small slice of data before pushing.
+- There are no tests beyond the offline `tests/test_merge_refine.py` merge/refinement checks, and no CI beyond `format.yml` (Ultralytics Actions) and `cla.yml`; nothing validates a change against real data automatically, so run the affected script against a small slice of data before pushing.
 - Requires a Python environment with `ultralytics`, PyTorch, NumPy, Pillow, and Matplotlib. There is no `requirements.txt`.
 
 ## Architecture
 
 - `data_engine.py` — `DataEngine` is the single-process core: `load_cached_label()` reads Ultralytics `.cache` files in `grounding` or `detection` style, `load_yoloe()`/`set_classes()` configure the model (class names from a YAML or a precomputed `text_embed_pt`), `*_predict_and_update_labels*()` run predictions and merge them into the in-memory labels, and `save_cached_label()` writes the result back.
 - `data_engine_agent.py` — `DataEngineAgent` wraps the same work in multiprocessing: `multi_process_load_grounding_data()` explodes grounding JSON into per-image sample JSON under a buffer dir, `multi_process_batch_model_predict()` writes per-image prediction JSON, and `multi_process_merge_prediction()` folds predictions back into the samples. It communicates through JSON files in the buffer dir, not shared memory.
-- Merge rule: a prediction whose IoU against an existing box exceeds the threshold is dropped; the rest are appended to the label.
+- Merge rule: a prediction whose IoU against an existing box exceeds the threshold is dropped; the rest are appended to the label. `merge_and_refine_sample()` performs this for one image, registers appended texts in the image text table, re-selects box texts with visual prompt embeddings like `refine_text.py`, and writes a per-image audit record (`<merged stem>.record.json`) next to the merged sample JSON.
 - `refine_text.py` — refines grounding text prompts using YOLOE visual prompt embeddings and writes updated cache files.
 - `visual_json.py`, `data_visual*.py`, `grounding_dataset_visualizer.py` — rendering helpers, one per dataset flavor (Flickr, mixed, Object365).
 - **Known duplication:** `YoloBox` (box conversion + IoU) exists twice and the two copies have diverged — `data_engine.py` holds the original that `refine_text.py` imports, and `data_engine_agent.py` defines its own larger variant. Fix both together, or consolidate into `data_engine.py` and delete the other rather than adding a third.

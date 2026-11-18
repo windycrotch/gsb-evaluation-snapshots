@@ -44,6 +44,384 @@ def to_serializable(obj):
     return obj
 
 
+######################## Merge + text refinement ########################
+
+DEFAULT_MERGE_IOU_THRESHOLD = 0.5
+
+
+def _bbox_to_xyxy(bbox):
+    """Flatten a bbox payload into four ``x1, y1, x2, y2`` floats."""
+    arr = np.asarray(bbox, dtype=np.float64).reshape(-1)
+    if arr.size < 4:
+        raise ValueError(f"bbox must contain at least 4 values, got {arr.size}")
+    return arr[-4:]
+
+
+def _instance_text(instance):
+    """Return the first text label of an instance, or ``None`` when unlabeled."""
+    text = instance.text
+    if text is None:
+        return None
+    if isinstance(text, (list, tuple)):
+        return str(text[0]) if text else None
+    return str(text)
+
+
+def _dedupe(items):
+    """Deduplicate values while preserving their first-occurrence order."""
+    return list(dict.fromkeys(items))
+
+
+def _write_json(path, data):
+    """Atomically write JSON-serializable ``data`` to ``path``."""
+    path = os.fspath(path)
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as file:
+        json.dump(to_serializable(data), file, indent=4, ensure_ascii=False)
+    os.replace(tmp_path, path)
+
+
+def _default_record_path(merged_json):
+    """Derive the audit-record path next to a merged sample JSON file."""
+    stem, _ = os.path.splitext(os.fspath(merged_json))
+    return f"{stem}.record.json"
+
+
+def _sample_to_merged_dict(sample):
+    """Serialize a merged ``Sample`` while keeping the text table and cls indices."""
+    text_to_cls = {text: index for index, text in enumerate(sample.texts)}
+    instances = []
+    for instance in sample.instances:
+        data = instance.to_dict()
+        text = _instance_text(instance)
+        data["cls"] = text_to_cls.get(text)
+        instances.append(data)
+    other_data = dict(sample.other_data)
+    # Merged instances keep the internal pixel-space xyxy convention, unlike normalized xywh source labels.
+    other_data["bbox_format"] = "xyxy"
+    other_data["normalized"] = False
+    return {
+        "im_file": sample.im_file,
+        "shape": list(sample.shape) if sample.shape is not None else None,
+        "texts": [[text] for text in sample.texts],
+        "instances": instances,
+        "other_data": other_data,
+    }
+
+
+def _select_texts(similarity_fn, image_source, bboxes_xyxy, candidates):
+    """Run an injected similarity function and return one selected text per box.
+
+    ``similarity_fn`` may either return a ``(num_boxes, num_candidates)`` cosine-similarity matrix or a list with one
+    selected text per box. The matrix path matches ``refine_text.RefineGroundingDataset.vpe_text``: softmax is monotonic,
+    so taking the maximum cosine similarity selects the same text as ``(vpe @ tpe.T).softmax(-1).argmax(-1)``.
+    """
+    result = similarity_fn(image_source, bboxes_xyxy, candidates)
+    num_boxes = len(bboxes_xyxy)
+    if isinstance(result, (list, tuple)) and result and isinstance(result[0], str):
+        if len(result) != num_boxes:
+            raise ValueError(f"similarity_fn returned {len(result)} texts for {num_boxes} boxes")
+        return list(result), [None] * num_boxes
+    similarities = np.asarray(result, dtype=np.float64)
+    if similarities.shape != (num_boxes, len(candidates)):
+        raise ValueError(f"similarity_fn must return shape {(num_boxes, len(candidates))}, got {similarities.shape}")
+    best_indices = similarities.argmax(axis=1)
+    selected = [candidates[index] for index in best_indices]
+    scores = [float(similarities[row, index]) for row, index in enumerate(best_indices)]
+    return selected, scores
+
+
+class YoloeVisualTextSimilarity:
+    """Production similarity function backed by real YOLOE visual prompt and text embeddings."""
+
+    def __init__(self, engine=None, device="cuda", model=None):
+        """Initialize with an optional ``DataEngine``/model; the model is loaded lazily on first use."""
+        self.engine = engine
+        self.device = device
+        self._model = model
+
+    @property
+    def model(self):
+        """Return the YOLOE model, loading it through ``DataEngine`` when necessary."""
+        if self._model is None:
+            if self.engine is None:
+                self.engine = DataEngine(device=self.device)
+                self.engine.load_yoloe()
+            self._model = self.engine.model
+        return self._model
+
+    def __call__(self, image_source, bboxes_xyxy, texts):
+        """Return cosine similarities between each visual prompt and each candidate text."""
+        import torch
+        from ultralytics.models import yolo
+
+        model = self.model
+        predictor_cls = yolo.yoloe.YOLOEVPDetectPredictor
+        if type(model.predictor) is not predictor_cls:
+            model.predictor = predictor_cls(
+                overrides={"task": model.model.task, "mode": "predict", "save": False, "batch": 1},
+                _callbacks=model.callbacks,
+            )
+        bboxes_xyxy = np.asarray(bboxes_xyxy, dtype=np.float32).reshape(-1, 4)
+        prompts = {"bboxes": bboxes_xyxy, "cls": list(range(len(bboxes_xyxy)))}
+        num_cls = len(set(prompts["cls"]))
+        model.model.model[-1].nc = num_cls
+        model.model.model[-1].no = num_cls + model.model.model[-1].reg_max * 4
+        model.model.names = [f"object{i}" for i in range(num_cls)]
+        model.predictor.set_prompts(prompts.copy())
+        model.predictor.setup_model(model=model.model)
+
+        vpe = torch.nn.functional.normalize(model.predictor.get_vpe(image_source).squeeze(0), dim=-1, p=2)
+        tpe = torch.nn.functional.normalize(model.get_text_pe(list(texts)).squeeze(0), dim=-1, p=2)
+        return (vpe @ tpe.T).detach().cpu().numpy()
+
+
+def merge_and_refine_sample(
+    sample_json,
+    predict_json,
+    merged_json=None,
+    record_json=None,
+    *,
+    iou_threshold=DEFAULT_MERGE_IOU_THRESHOLD,
+    caption=None,
+    similarity_fn=None,
+    image_source=None,
+    refine=True,
+):
+    """Merge one grounding sample with its predictions, refine texts, and write an audit record.
+
+    Predicted boxes whose IoU with an existing box is greater than ``iou_threshold`` are dropped; the rest are
+    appended. Appended texts missing from the image text table are registered so that every instance's ``cls`` points
+    into that table. When ``refine`` is true, texts are re-selected with visual prompt embeddings exactly like
+    ``refine_text.RefineGroundingDataset.vpe_text``: candidates are the merged text table plus ``caption`` tokens
+    (``caption.replace(".", "").split()``), the box's highest cosine similarity wins, and the final text table keeps
+    only selected texts with re-indexed ``cls`` values. Unlike ``vpe_text``'s ``list(set(...))``, tables here keep
+    first-appearance order so the record is stable across runs.
+
+    Args:
+        sample_json: path to the existing grounding sample JSON.
+        predict_json: path to the model prediction JSON. A missing path is recorded as a skip, not raised.
+        merged_json: output path for the merged sample JSON. Defaults to ``<sample stem>.merged.json``.
+        record_json: output path for the audit record. Defaults to ``<merged stem>.record.json``.
+        iou_threshold: predictions with IoU strictly greater than this value are dropped.
+        caption: image caption used to add candidate words for text refinement.
+        similarity_fn: callable ``(image_source, bboxes_xyxy, texts) -> (N, M) similarities | list[str]``. Defaults to
+            :class:`YoloeVisualTextSimilarity`, which calls the real YOLOE embedding interface.
+        image_source: image path passed to ``similarity_fn``. Defaults to ``sample.im_file``.
+        refine: set false to merge only and record that refinement was disabled.
+
+    Returns:
+        dict: the audit record that was written to ``record_json``.
+    """
+    sample_path = os.fspath(sample_json) if isinstance(sample_json, (str, os.PathLike)) else None
+    predict_path = os.fspath(predict_json) if isinstance(predict_json, (str, os.PathLike)) else None
+    if sample_path is not None:
+        sample_json = sample_path
+    if predict_path is not None:
+        predict_json = predict_path
+
+    ground_sample = Sample()
+    ground_sample.load_from_grounding_label(sample_json)
+    ground_sample.texts = _dedupe(str(text) for text in ground_sample.texts)
+    texts_before = list(ground_sample.texts)
+
+    if merged_json is None:
+        if sample_path is None:
+            raise ValueError("merged_json is required when sample_json is not a path")
+        merged_json = f"{os.path.splitext(sample_path)[0]}.merged.json"
+    if record_json is None:
+        record_json = _default_record_path(merged_json)
+
+    shape = tuple(ground_sample.shape)
+    existing_boxes = [_bbox_to_xyxy(instance.bbox) for instance in ground_sample.instances]
+    yolo_existing = (
+        YoloBox(shape).load_from_xyxy(np.array(existing_boxes, dtype=np.float32)) if existing_boxes else None
+    )
+
+    entries = []
+    appended = []
+    texts_merged = list(texts_before)
+    predict_sample = None
+    prediction_missing = predict_json is None or (predict_path is not None and not os.path.exists(predict_path))
+    if not prediction_missing:
+        predict_sample = Sample()
+        predict_sample.load_from_json(predict_json)
+
+    predicted_instances = [] if predict_sample is None else predict_sample.instances
+    for pred_index, model_inst in enumerate(predicted_instances):
+        text = _instance_text(model_inst)
+        entry = {
+            "index": pred_index,
+            "bbox_xyxy": None,
+            "text": text,
+            "conf": to_serializable(model_inst.conf),
+            "status": "dropped",
+            "reason": None,
+            "max_iou": None,
+            "matched_existing_index": None,
+            "cls_merged": None,
+            "cls_final": None,
+            "text_registered": None,
+            "selected_text": None,
+            "similarity": None,
+        }
+        entries.append(entry)
+        if getattr(model_inst, "bbox", None) is None:
+            entry["reason"] = "invalid_bbox"
+            entry["error"] = "model instance has no bbox"
+            continue
+        try:
+            model_bbox = _bbox_to_xyxy(model_inst.bbox)
+        except Exception as error:
+            entry["reason"] = "invalid_bbox"
+            entry["error"] = str(error)
+            continue
+        entry["bbox_xyxy"] = model_bbox.tolist()
+
+        max_iou = 0.0
+        matched_index = None
+        if yolo_existing is not None:
+            ious = yolo_existing.iou(model_bbox)
+            if len(ious):
+                matched_index = int(np.argmax(ious))
+                max_iou = float(ious[matched_index])
+        entry["max_iou"] = max_iou
+        if yolo_existing is not None and max_iou > iou_threshold:
+            entry["reason"] = "overlap"
+            entry["matched_existing_index"] = matched_index
+            continue
+
+        entry["status"] = "appended"
+        entry["reason"] = "new"
+        appended_inst = copy.deepcopy(model_inst)
+        appended_inst.bbox = model_bbox.tolist()
+        if text is not None:
+            text_registered = text not in texts_merged
+            if text_registered:
+                texts_merged.append(text)
+            entry["text_registered"] = text_registered
+            entry["cls_merged"] = texts_merged.index(text)
+            appended_inst.text = [text]
+        entry["sample_index"] = len(ground_sample.instances) + len(appended)
+        appended.append(appended_inst)
+
+    ground_sample.instances.extend(appended)
+    ground_sample.texts = texts_merged
+    texts_after_merge = list(texts_merged)
+
+    if not existing_boxes:
+        reason = "empty_existing_boxes_and_predictions" if not predicted_instances else "empty_existing_boxes"
+    elif not predicted_instances:
+        reason = "empty_predictions"
+    else:
+        reason = None
+    if prediction_missing:
+        reason = "missing_prediction_file"
+
+    rerank = {"performed": False, "reason": None, "caption": caption, "candidates": [], "boxes": []}
+    if prediction_missing:
+        rerank["reason"] = "prediction_file_missing"
+    elif not refine:
+        rerank["reason"] = "refine_disabled"
+    elif not ground_sample.instances:
+        rerank["reason"] = "no_boxes"
+    else:
+        candidates = list(texts_after_merge)
+        if caption:
+            candidates = _dedupe(candidates + [token for token in caption.replace(".", "").split() if token])
+        rerank["candidates"] = candidates
+        if not candidates:
+            rerank["reason"] = "no_text_candidates"
+        else:
+            if similarity_fn is None:
+                similarity_fn = YoloeVisualTextSimilarity()
+            all_boxes = np.array([_bbox_to_xyxy(instance.bbox) for instance in ground_sample.instances])
+            selected, scores = _select_texts(
+                similarity_fn, image_source or ground_sample.im_file, all_boxes, candidates
+            )
+            texts_final = _dedupe(selected)
+            text_to_cls = {text: index for index, text in enumerate(texts_final)}
+            merged_to_cls = {text: index for index, text in enumerate(texts_after_merge)}
+            merged_texts = [_instance_text(instance) for instance in ground_sample.instances]
+            for box_index, (instance, text) in enumerate(zip(ground_sample.instances, selected)):
+                instance.text = [text]
+                rerank["boxes"].append(
+                    {
+                        "box_index": box_index,
+                        "text_before": merged_texts[box_index],
+                        "selected_text": text,
+                        "similarity": scores[box_index],
+                        "cls_merged": merged_to_cls.get(merged_texts[box_index]),
+                        "cls_final": text_to_cls[text],
+                    }
+                )
+            ground_sample.texts = texts_final
+            rerank["performed"] = True
+
+    text_to_cls = {text: index for index, text in enumerate(ground_sample.texts)}
+    for entry in entries:
+        if entry["status"] != "appended":
+            continue
+        sample_index = entry.pop("sample_index")
+        instance = ground_sample.instances[sample_index]
+        entry["cls_final"] = text_to_cls.get(_instance_text(instance))
+        entry["selected_text"] = _instance_text(instance)
+        if rerank["performed"]:
+            entry["similarity"] = rerank["boxes"][sample_index]["similarity"]
+
+    notes = []
+    if prediction_missing:
+        notes.append(
+            f"Prediction file not found ({predict_path}); merged sample keeps the existing labels and refinement was skipped."
+        )
+    if reason == "empty_existing_boxes":
+        notes.append("The sample has no existing boxes, so every valid prediction was appended.")
+    elif reason == "empty_predictions":
+        notes.append("The prediction file contains no instances; only text refinement could change the sample.")
+    elif reason == "empty_existing_boxes_and_predictions":
+        notes.append("Both the sample and the prediction file contain no boxes; nothing was merged.")
+    if rerank["reason"] == "no_text_candidates":
+        notes.append("No texts or caption tokens were available, so the text table was left unchanged.")
+    elif rerank["reason"] == "prediction_file_missing":
+        notes.append("Text refinement was skipped because predictions are missing.")
+    elif rerank["reason"] == "refine_disabled":
+        notes.append("Text refinement was disabled; the merged text table is reported as final.")
+
+    dropped = sum(1 for entry in entries if entry["status"] == "dropped")
+    record = {
+        "im_file": ground_sample.im_file,
+        "sample_json": sample_path,
+        "predict_json": predict_path,
+        "merged_json": os.fspath(merged_json),
+        "record_json": os.fspath(record_json),
+        "status": "skipped" if prediction_missing else "merged",
+        "reason": reason,
+        "notes": notes,
+        "iou_threshold": iou_threshold,
+        "counts": {
+            "existing_boxes": len(existing_boxes),
+            "predictions": len(predicted_instances),
+            "dropped": dropped,
+            "appended": len(appended),
+            "instances_final": len(ground_sample.instances),
+            "texts_before": len(texts_before),
+            "texts_after_merge": len(texts_after_merge),
+            "texts_final": len(ground_sample.texts),
+        },
+        "texts_before": texts_before,
+        "texts_after_merge": texts_after_merge,
+        "texts_final": list(ground_sample.texts),
+        "entries": entries,
+        "rerank": rerank,
+    }
+
+    _write_json(merged_json, _sample_to_merged_dict(ground_sample))
+    _write_json(record_json, record)
+    return record
+
+
 ######################## Grounding Data Loading Worker ########################
 
 
@@ -232,8 +610,10 @@ def _merge_prediction_to_sample_label(buffer_dir, sample_json, model_predict_jso
     """Merge model prediction results into one grounding sample label.
 
     step 1: first check the filename match, if false, raise error. step 2: check the dst file exist, if true, skip. step
-    3: merge model predictions into the sample label, ignoring IoU > 0.5. step 4: save the merged label to
-    buffer_dir/merge_prediction/.
+    3: merge model predictions into the sample label, ignoring IoU > 0.5. step 4: save the merged label and its audit
+    record to buffer_dir/merge_prediction/.
+
+    Batch workers have no caption or model loaded, so text refinement is deferred; the audit record says so.
 
     Args:
         buffer_dir: str, buffer directory to save results
@@ -248,36 +628,8 @@ def _merge_prediction_to_sample_label(buffer_dir, sample_json, model_predict_jso
         print(f"[merge] Skip existing: {dst_file}")
         return True
 
-    ground_sample = Sample()
-    ground_sample.load_from_grounding_label(sample_json)
-
-    predict_sample = Sample()
-    predict_sample.load_from_json(model_predict_json)
-
-    for model_inst in predict_sample.instances:
-        # Defensive: skip invalid model instances
-        if getattr(model_inst, "bbox", None) is None:
-            print(f"[merge][WARN] skipping model instance with empty bbox in '{sample_json}'")
-            continue
-        try:
-            model_bbox = YoloBox(ground_sample.shape).load_from_xyxy(model_inst.bbox)
-        except Exception as e:
-            print(f"[merge][WARN] failed to parse model bbox for '{sample_json}': {e}")
-            continue
-        ignore_flag = False
-        for sample_inst in ground_sample.instances:
-            sample_bbox = YoloBox(ground_sample.shape).load_from_xyxy(sample_inst.bbox)
-            iou = sample_bbox.iou(model_bbox.xyxy[0])
-            if iou > 0.5:
-                ignore_flag = True
-                break
-        if not ignore_flag:
-            ground_sample.instances.append(model_inst)
-
-    ground_sample.save_to_json(dst_file)
-    # print(f"[merge] Saved: {dst_file}")
+    merge_and_refine_sample(sample_json, model_predict_json, merged_json=dst_file, refine=False)
     return True
-    # print(f"Merged label saved to {dst_file}")
 
 
 def merge_prediction_worker(args):
@@ -496,7 +848,7 @@ class Sample:
         assert isinstance(grounding_data, dict), "grounding_data should be a dict"
         self.im_file = grounding_data.get("im_file")
         self.shape = grounding_data.get("shape")
-        for text in grounding_data.get("texts"):
+        for text in grounding_data.get("texts") or []:
             if isinstance(text, list):
                 assert len(text) == 1
                 self.texts.append(text[0])
@@ -510,11 +862,10 @@ class Sample:
         self.other_data["normalized"] = normalized
         assert normalized is True
         # assert bbox_format == "xywhn"
-        for cls, box, segment in zip(
-            grounding_data.get("cls", []),
-            grounding_data.get("bboxes", []),
-            grounding_data.get("segments", []),
-        ):
+        segments = grounding_data.get("segments") or []
+        for index, (cls, box) in enumerate(zip(grounding_data.get("cls") or [], grounding_data.get("bboxes") or [])):
+            # Segments are optional per box; index them separately so missing segments never truncate the boxes.
+            segment = segments[index] if index < len(segments) else None
             # Convert normalized xywh to xyxy for internal consistency
             bbox_xyxy = YoloBox(self.shape).load_from_xywhn_normalized(np.array([box], dtype=np.float32)).xyxy[0]
             # Create instance with xyxy bbox
