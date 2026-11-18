@@ -56,22 +56,39 @@ export function useBunnyStreamPlayer(
   const [state, dispatch] = React.useReducer(playerReducer, DEFAULT_PLAYER_STATE);
   const [progress, setProgress] = React.useState<PlayerProgress>(DEFAULT_PROGRESS);
 
-  // Reset state + progress when the source identity changes. This clears
-  // stale VOD state (videoId, duration, progress, playback state) when
-  // switching to live (which doesn't emit onReady) or between VOD sources.
-  // Uses a ref to track the previous key so the reset only fires on actual
-  // changes, not on every render.
+  // Monotonic source generation — the JS counterpart of the native
+  // `GenerationToken` (android/.../commands/GenerationToken.kt). Every
+  // source-key change bumps it; event handlers capture the generation they
+  // were created for and reject events once a newer generation owns the
+  // player, so late callbacks from the torn-down source can never write back
+  // into the new source's aggregated state.
+  const [generation, setGeneration] = React.useState(0);
+  const activeGenerationRef = React.useRef(generation);
+
+  // Reset state + progress when the source identity changes. The previous key
+  // is tracked in a ref so the reset fires only on actual changes, not on
+  // every render. This runs during render (React's documented
+  // "adjusting state when a prop changes" pattern) rather than in an effect:
+  // React restarts the render with the reset state before any event props are
+  // reconciled, leaving no window in which a queued old-source event could be
+  // delivered between the key change and the RESET commit.
   const prevSourceKey = React.useRef<string | number | undefined>(sourceKey);
-  React.useEffect(() => {
-    if (prevSourceKey.current !== sourceKey) {
-      prevSourceKey.current = sourceKey;
-      // Reset state + progress to defaults so stale VOD state (videoId,
-      // duration, progress, playback state) doesn't linger after a source
-      // change (e.g. VOD → live, which doesn't emit onReady).
-      dispatch({ type: 'RESET' });
-      setProgress(DEFAULT_PROGRESS);
-    }
-  }, [sourceKey]);
+  if (prevSourceKey.current !== sourceKey) {
+    prevSourceKey.current = sourceKey;
+    const nextGeneration = generation + 1;
+    // Publish immediately so even the handlers of the in-flight render are
+    // gated as stale before the restarted render lands.
+    activeGenerationRef.current = nextGeneration;
+    setGeneration(nextGeneration);
+    // Reset state + progress to defaults together: the high-frequency
+    // `progress` channel bypasses the reducer, so it must be zeroed in the
+    // same render as RESET — otherwise the progress bar could keep an old
+    // position while `state.durationMs` is already 0 for the loading source.
+    dispatch({ type: 'RESET' });
+    setProgress(DEFAULT_PROGRESS);
+  } else {
+    activeGenerationRef.current = generation;
+  }
 
   // Store user handlers in a ref so the memoised event handlers below have a
   // stable identity even when the user passes inline callbacks.
@@ -97,9 +114,15 @@ export function useBunnyStreamPlayer(
     [],
   );
 
+  // Recreated only when the generation changes: same-key rerenders keep the
+  // exact same handler identities, while a source change produces fresh
+  // handlers whose gate rejects every event tagged with the old generation.
   const eventHandlers = React.useMemo<PlayerEventHandlers>(
-    () => createPlayerEventHandlers(dispatch, setProgress, optionsRef),
-    [],
+    () =>
+      createPlayerEventHandlers(dispatch, setProgress, optionsRef, {
+        isActive: () => activeGenerationRef.current === generation,
+      }),
+    [generation],
   );
 
   return { ref, state, progress, controls, eventHandlers };

@@ -80,6 +80,13 @@ Pass a source identity key to `useBunnyStreamPlayer` or remount your screen per 
 Include explicit/effective library and token identity if those can change. Calling `initialize`
 again alone is not a React state update. Avoid simultaneously mounting multiple active VOD players.
 
+When the key changes, the hook resets both the aggregated `state` and the high-frequency
+`progress` to their defaults in the same render, and tags the new source with a fresh
+generation. Events from the previous source that arrive late during teardown (`onProgress`,
+`onReady`, `onError`, `onPlaybackStateChange`, and every other handler) are dropped before they
+can touch the new source — neither the internal state nor your option callbacks run for them.
+Omit the key to keep the legacy single-source behaviour where no reset or invalidation occurs.
+
 ## Thumbnails fail with HTTP 403
 
 Use `BunnyImage` or `bunnyImageSource` for recognized Bunny CDN URLs. For custom hostnames,

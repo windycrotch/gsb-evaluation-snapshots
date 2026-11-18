@@ -14,6 +14,18 @@ For earlier releases, see [GitHub Releases](https://github.com/BunnyWay/bunny-st
 
 ## [Unreleased]
 
+### Fixed
+
+- `useBunnyStreamPlayer`: when the `sourceKey` changes, late events from the
+  previous source (`onProgress`, `onReady`, `onError`,
+  `onPlaybackStateChange`, and the remaining handlers) are now invalidated via
+  a per-source generation token and can no longer write into the new source's
+  aggregated state or fire user callbacks. The high-frequency `progress`
+  channel is reset to zero together with `state` in the same render, so the
+  progress bar can no longer keep an old position while the new source's
+  duration is still zero. Same-key rerenders and calls without a `sourceKey`
+  keep their previous behaviour.
+
 ## [1.1.1] - 2026-11-05
 
 ### Added
