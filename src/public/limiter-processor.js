@@ -14,6 +14,14 @@
 
 const LOOKAHEAD_S = 0.005
 
+// The release parameter's declared range (seconds), mirrored in
+// parameterDescriptors below. Automation can push the k-rate value outside
+// it — or to 0, where 1 / (release * sampleRate) divides by zero — so
+// process() clamps to this range before turning it into a coefficient.
+const RELEASE_MIN_S = 0.005
+const RELEASE_MAX_S = 2
+const RELEASE_DEFAULT_S = 0.08
+
 class ChorusLimiter extends AudioWorkletProcessor {
     static get parameterDescriptors() {
         return [
@@ -26,9 +34,9 @@ class ChorusLimiter extends AudioWorkletProcessor {
             },
             {
                 name: 'release',
-                defaultValue: 0.08,
-                minValue: 0.005,
-                maxValue: 2,
+                defaultValue: RELEASE_DEFAULT_S,
+                minValue: RELEASE_MIN_S,
+                maxValue: RELEASE_MAX_S,
                 automationRate: 'k-rate'
             }
         ]
@@ -68,7 +76,16 @@ class ChorusLimiter extends AudioWorkletProcessor {
         const outL = outputs[0][0]
         const outR = outputs[0][1]
         const ceiling = parameters.ceiling[0]
-        const rel = 1 - Math.exp(-1 / (parameters.release[0] * sampleRate))
+        // Clamp the release to its declared range before it becomes a
+        // smoothing coefficient: automated to 0 the 1/x below divides by
+        // zero, past the max the recovery drags on for minutes, and a NaN
+        // would poison the gain for good. A non-finite value (NaN leaks
+        // through some automation paths) falls back to the default.
+        const rawRelease = parameters.release[0]
+        const releaseSec = Number.isFinite(rawRelease)
+            ? Math.min(RELEASE_MAX_S, Math.max(RELEASE_MIN_S, rawRelease))
+            : RELEASE_DEFAULT_S
+        const rel = 1 - Math.exp(-1 / (releaseSec * sampleRate))
         const att = this._attack
         const la = this._la
         const mask = this._mask

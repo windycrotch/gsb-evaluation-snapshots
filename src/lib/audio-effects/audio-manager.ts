@@ -10,12 +10,20 @@ const SILENCE_TICK_MS = 50
 export default class AudioManager {
     private _gainNode?: GainNode
     private _soundTouchNode?: AudioNode
-    // Output limiter (see ./limiter.ts): every processed chain ends
-    // soundTouch → gain → limiter → destination. The volume gain sits after
-    // the effects, not before them, so a boost past 100% does not drive the
-    // saturating effects harder; the limiter then holds the boosted sum under
-    // full scale. The bypass (extension off) goes straight to the destination.
+    // Output limiter (see ./limiter.ts): EVERY audible path ends
+    // … → limiter → destination — the processed chain, chain rebuilds,
+    // recovery from bypass, and the master-toggle bypass itself. The volume
+    // gain sits after the effects, not before them, so a boost past 100%
+    // does not drive the saturating effects harder; the limiter then holds
+    // the boosted sum under full scale. No path wires straight to the
+    // destination: when the limiter worklet cannot be loaded, a gain-1
+    // passthrough takes its place (with a console warning) so the topology
+    // — and the missing protection — stays visible instead of silent.
     private _limiterNode?: AudioWorkletNode
+    // Stand-in for the limiter when its module path is missing: a plain
+    // gain-1 node, so audio stays audible but unlimited (and diagnosable —
+    // see the warning where it is created) rather than a silent direct wire.
+    private _outputFallback?: GainNode
     private _audioContext?: AudioContext
     private _soundTouchManager?: SoundTouch | null
     private _destination?: AudioDestinationNode
@@ -160,14 +168,21 @@ export default class AudioManager {
 
             if (!this._soundTouchNode) await this.loadSoundTouch()
 
-            if (!this._limiterNode) {
+            if (!this._limiterNode && !this._outputFallback) {
                 const modulePath = sessionStorage.getItem('chorus:limiter_path')
                 if (modulePath) {
                     this._limiterNode = await createLimiter(this._audioContext, modulePath)
                 } else {
+                    // Never wire straight to the destination: a gain-1
+                    // passthrough keeps the output audible but unlimited,
+                    // and this warning is what makes the degradation
+                    // diagnosable instead of silent.
                     console.warn(
-                        'Limiter module path not found in session storage; running without'
+                        'Chorus: limiter module path (chorus:limiter_path) missing from ' +
+                            'session storage — output is NOT peak-limited and boosted audio ' +
+                            'will hard-clip at full scale. Routing through a passthrough node.'
                     )
+                    this._outputFallback = this._audioContext.createGain()
                 }
             }
 
@@ -400,17 +415,26 @@ export default class AudioManager {
         return Boolean(this.source && this.destination && this._gainNode && this._soundTouchNode)
     }
 
-    // The last hop of every processed chain: through the limiter to the
-    // destination. (Each connect is idempotent, so calling this on every
-    // rebuild is fine.)
+    // The last hop of every audible path: through the limiter (or its
+    // passthrough stand-in) to the destination. Every chain — normal
+    // playback, a rebuild, recovery from bypass, and the bypass itself —
+    // exits through here, so there is no wiring that skips the limiter.
+    // (Each connect is idempotent, so calling this on every rebuild is fine.)
     private connectToOutput(node: AudioNode) {
         if (!this.destination) return
-        if (!this._limiterNode) {
+        const out = this._limiterNode ?? this._outputFallback
+        if (!out) {
+            // Only reachable if the chain was wired before setupAudioChain
+            // finished — still audible, still loud about it.
+            console.warn(
+                'Chorus: no limiter or fallback output node available; connecting to the ' +
+                    'destination unlimited. Boosted audio may hard-clip.'
+            )
             node.connect(this.destination)
             return
         }
-        node.connect(this._limiterNode)
-        this._limiterNode.connect(this.destination)
+        node.connect(out)
+        out.connect(this.destination)
     }
 
     getGainPairing(effect: string) {
@@ -536,6 +560,7 @@ export default class AudioManager {
             this._gainNode.disconnect()
             this._soundTouchNode.disconnect()
             this._limiterNode?.disconnect()
+            this._outputFallback?.disconnect()
 
             // Disconnect active effects
             // NOTE: For effects with separate input/output nodes (equalizer, lofi rack),
@@ -670,9 +695,13 @@ export default class AudioManager {
     }
 
     /**
-     * Route the captured element straight to the destination, removing ALL Chorus
-     * processing (gain, soundTouch worklet, effects) from the signal path. Used by
-     * the master on/off toggle to make audio audibly identical to vanilla Spotify.
+     * Remove Chorus processing (soundTouch worklet, effects) from the signal
+     * path. Used by the master on/off toggle to make audio audibly identical
+     * to vanilla Spotify — except the volume gain and the output limiter,
+     * which stay in the path: the gain keeps toggling off from causing a
+     * loudness jump, and the limiter keeps a boosted volume from hard-clipping
+     * the destination while the extension is "off". No path bypasses the
+     * limiter.
      *
      * The AudioContext and MediaElementAudioSourceNode are deliberately KEPT alive:
      * an element can only ever be createMediaElementSource()'d once per page load,
@@ -686,12 +715,14 @@ export default class AudioManager {
         try {
             this.cleanupEffectChain()
             this._activeEffects = {}
-            // Passthrough WITH the gain node retained (source → gain → destination):
-            // keeps the current volume so toggling off causes no loudness jump, while
-            // the soundTouch worklet and all effects are dropped from the path (the
-            // worklet stops being pulled, so it stops consuming CPU).
+            // Passthrough WITH the gain node retained (source → gain → limiter →
+            // destination): keeps the current volume so toggling off causes no
+            // loudness jump, while the soundTouch worklet and all effects are
+            // dropped from the path (the worklet stops being pulled, so it stops
+            // consuming CPU). The limiter stays: "off" must not unmeter a
+            // boosted signal.
             this.source.connect(this._gainNode)
-            this._gainNode.connect(this.destination)
+            this.connectToOutput(this._gainNode)
         } catch (error) {
             console.warn('Error bypassing audio chain:', error)
         }
@@ -706,8 +737,9 @@ export default class AudioManager {
         if (!this.isConnectable || !this.source || !this.destination) return
 
         try {
-            // Clear the bypass wiring (source → gain → destination) before rebuilding,
-            // otherwise the gain node would feed both destination and soundTouch.
+            // Clear the bypass wiring (source → gain → limiter → destination)
+            // before rebuilding, otherwise the gain node would feed both the
+            // limiter and soundTouch.
             this.cleanupEffectChain()
             this._activeEffects = {}
             this.source.connect(this._soundTouchNode!)
@@ -748,6 +780,10 @@ export default class AudioManager {
             if (this._limiterNode) {
                 disposeWorklet(this._limiterNode)
                 this._limiterNode = undefined
+            }
+            if (this._outputFallback) {
+                this._outputFallback.disconnect()
+                this._outputFallback = undefined
             }
             if (this.destination) {
                 this._destination = undefined

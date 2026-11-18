@@ -44,10 +44,15 @@ function loadWorklet(): ProcessorClass {
 
 const Limiter = loadWorklet()
 
-function run(gen: (i: number) => [number, number], seconds: number, node = new Limiter({})) {
+function run(
+    gen: (i: number) => [number, number],
+    seconds: number,
+    node = new Limiter({}),
+    release: number = LIMITER.release
+) {
     const params = {
         ceiling: Float32Array.of(LIMITER.ceiling),
-        release: Float32Array.of(LIMITER.release)
+        release: Float32Array.of(release)
     }
     const blocks = Math.ceil((seconds * SR) / BLOCK)
     const outL = new Float32Array(blocks * BLOCK)
@@ -135,5 +140,35 @@ describe('output limiter worklet', () => {
         }
         const io = () => [[new Float32Array(BLOCK), new Float32Array(BLOCK)]]
         expect(node.process(io(), io(), params)).toBe(false)
+    })
+
+    // The release parameter is declared as 0.005–2 s. Automation can hand
+    // process() values outside that range — including 0, which used to make
+    // the 1/(release·sampleRate) coefficient divide by zero. The worklet
+    // clamps to the declared range, so recovery speed stays bounded and the
+    // output never goes NaN.
+    it.each([0, 0.005, 0.08, 2, 1000, -1, Number.NaN, Number.POSITIVE_INFINITY])(
+        'release=%s stays finite, under the ceiling, and NaN-free',
+        (release) => {
+            const { outL, outR } = run(music(3), 1, new Limiter({}), release)
+            for (let i = 0; i < outL.length; i++) {
+                expect(Number.isNaN(outL[i])).toBe(false)
+                expect(Number.isNaN(outR[i])).toBe(false)
+            }
+            const settle = SR * 0.1
+            expect(peakOf(outL, settle)).toBeLessThanOrEqual(1)
+            expect(peakOf(outR, settle)).toBeLessThanOrEqual(1)
+        }
+    )
+
+    it('treats out-of-range release values as the nearest declared bound', () => {
+        // Clamping makes 0 behave as 0.005 s and 1000 s as 2 s — identical
+        // output, sample for sample.
+        const atMin = run(music(3), 0.5, new Limiter({}), 0)
+        const clampedMin = run(music(3), 0.5, new Limiter({}), 0.005)
+        const atMax = run(music(3), 0.5, new Limiter({}), 1000)
+        const clampedMax = run(music(3), 0.5, new Limiter({}), 2)
+        expect(Array.from(atMin.outL)).toEqual(Array.from(clampedMin.outL))
+        expect(Array.from(atMax.outL)).toEqual(Array.from(clampedMax.outL))
     })
 })
