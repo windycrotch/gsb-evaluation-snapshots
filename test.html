@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ferrofluid switch — 本地测试</title>
+<style>
+  body { font: 14px/1.6 ui-monospace, SFMono-Regular, Consolas, "Courier New", monospace; margin: 24px; background: #151515; color: #ddd; }
+  h1 { font-size: 17px; margin: 0 0 4px; }
+  .note { color: #8a8a8a; margin: 4px 0; }
+  .note code { color: #bbb; }
+  #summary { font-size: 16px; font-weight: 700; margin: 12px 0; }
+  ol { padding-left: 28px; }
+  li { margin: 3px 0; }
+  .pass { color: #66dd66; }
+  .fail { color: #ee6655; }
+  iframe { width: 640px; height: 360px; border: 1px solid #333; display: block; margin: 6px 0 16px; }
+</style>
+</head>
+<body>
+<h1>Ferrofluid 暗色开关 — 本地交互测试</h1>
+<p class="note">纯本地运行：无网络、无第三方库。通过 <code>window.__ferro</code>（?debug）与合成指针/键盘事件驱动被测页面。</p>
+<p class="note">若浏览器因 file:// 同源策略拦截 iframe 读取，请在本目录运行 <code>python -m http.server 8000</code> 后访问
+  <code>http://localhost:8000/test.html</code>（仅为本地静态服务，不需要网络）。</p>
+<div id="summary">running…</div>
+<ol id="results"></ol>
+<p class="note">被测页面（normal，index.html?debug&amp;rm=0）：</p>
+<iframe id="fr1" title="normal"></iframe>
+<p class="note">被测页面（reduced motion，index.html?debug&amp;rm=1）：</p>
+<iframe id="fr2" title="reduced-motion"></iframe>
+<script>
+'use strict';
+
+const resultsEl = document.getElementById('results');
+const summaryEl = document.getElementById('summary');
+const results = [];
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function report(name, ok, detail) {
+  const li = document.createElement('li');
+  li.className = ok ? 'pass' : 'fail';
+  li.textContent = (ok ? 'PASS  ' : 'FAIL  ') + name + (detail ? '  —  ' + detail : '');
+  resultsEl.appendChild(li);
+  results.push({ name, ok, detail: detail || '' });
+}
+function assert(cond, msg) { if (!cond) throw new Error(msg); }
+async function test(name, fn) {
+  try { await fn(); report(name, true); }
+  catch (e) { report(name, false, (e && e.message) || String(e)); }
+}
+function finish() {
+  const passed = results.filter((r) => r.ok).length;
+  summaryEl.textContent = passed === results.length
+    ? `全部通过（${passed}/${results.length}）`
+    : `通过 ${passed}/${results.length}，失败 ${results.length - passed} 项`;
+  summaryEl.className = passed === results.length ? 'pass' : 'fail';
+  document.title = `[${passed}/${results.length}] ferrofluid 测试`;
+  window.__results = results;  // 供自动化读取
+}
+
+function loadFrame(ifr, src) {
+  return new Promise((resolve, reject) => {
+    const t0 = performance.now();
+    ifr.onload = () => {
+      (function poll() {
+        let blocked = false, ready = false;
+        try {
+          void ifr.contentWindow.document;  // 同源探针：跨域会抛异常
+          ready = !!ifr.contentWindow.__ferro;
+        } catch (e) { blocked = true; }
+        if (ready) return resolve(ifr.contentWindow);
+        if (blocked) return reject(new Error('浏览器拦截了 file:// 之间的 iframe 访问，请改用本地静态服务器打开（见页面顶部说明）'));
+        if (performance.now() - t0 > 30000) return reject(new Error('等待 __ferro 超时（被测页面需要 WebGL2，且须带 ?debug）'));
+        setTimeout(poll, 60);
+      })();
+    };
+    ifr.onerror = () => reject(new Error('iframe 加载失败：' + src));
+    ifr.src = src;
+  });
+}
+
+// 驱动一个被测 iframe：合成指针拖动、点击、键盘，全部落在被测页面的真实事件处理器上
+function driver(win) {
+  const doc = win.document;
+  const ferro = win.__ferro;
+  const btn = doc.getElementById('switch');
+  const screenOf = (x) => ferro.toScreen(x, 0, 0);  // 世界坐标 x（地面 y=0, z=0）→ iframe 客户区像素
+  const ptr = (type, cx, cy) => btn.dispatchEvent(new win.PointerEvent(type, {
+    pointerId: 7, isPrimary: true, button: 0, buttons: type === 'pointerup' ? 0 : 1,
+    clientX: cx, clientY: cy, bubbles: true, cancelable: true,
+  }));
+  const key = (k) => btn.dispatchEvent(new win.KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true }));
+  // xs：世界坐标 x 路径；delay：每步间隔；hold：松手前静止时间（>90ms 则末速度视为陈旧）
+  async function drag(xs, { delay = 12, hold = 0 } = {}) {
+    let [cx, cy] = screenOf(xs[0]);
+    ptr('pointerdown', cx, cy);
+    for (let i = 1; i < xs.length; i++) {
+      await sleep(delay);
+      [cx, cy] = screenOf(xs[i]);
+      ptr('pointermove', cx, cy);
+    }
+    if (hold > 0) {
+      await sleep(hold);
+      [cx, cy] = screenOf(xs[xs.length - 1]);
+      ptr('pointerup', cx, cy);
+    } else {
+      // 同一任务内松手：与最后一次移动的时间差≈0，保证速度判定有效、不受渲染负载影响
+      ptr('pointerup', cx, cy);
+    }
+  }
+  return { win, doc, ferro, btn, ptr, key, drag, screenOf };
+}
+
+(async () => {
+  let d;
+  try {
+    d = driver(await loadFrame(document.getElementById('fr1'), 'index.html?debug&rm=0'));
+  } catch (e) {
+    report('加载被测页面 index.html?debug&rm=0', false, e.message);
+    finish();
+    return;
+  }
+  const F = d.ferro;
+  F.pause();  // 暂停模拟循环：之后只靠 step() 推进，事件时序不受渲染影响
+
+  await test('__ferro 接口齐全（保留 pause/play/set/toggle/step/info）', async () => {
+    for (const k of ['pause', 'play', 'set', 'toggle', 'step', 'info', 'soundCheck', 'focusRing', 'cursor',
+                     'state', 'liquid', 'splashed', 'zoomed', 'muted', 'mute', 'counts', 'resetFlags', 'toScreen', 'toGround'])
+      assert(typeof F[k] === 'function', '缺少 __ferro.' + k);
+  });
+
+  await test('set/toggle 同步 aria-checked', async () => {
+    F.set(false); F.step(300);
+    assert(F.toggle() === true, 'toggle 应返回 true');
+    assert(F.state().on === true && F.state().ariaChecked === 'true', 'aria-checked 未同步为 true');
+    assert(F.toggle() === false, 'toggle 应返回 false');
+    assert(F.state().ariaChecked === 'false', 'aria-checked 未同步为 false');
+  });
+
+  await test('拖动到右端松手 → 开（位置判定）', async () => {
+    F.set(false); F.step(1500);
+    const m = F.liquid().mag;
+    await d.drag([m, -0.6, -0.2, 0.3, 0.92], { hold: 160 });
+    assert(F.state().on === true, 'on=' + F.state().on);
+    assert(F.state().ariaChecked === 'true', 'aria-checked 未同步');
+  });
+
+  await test('拖动到左端松手 → 关（位置判定）', async () => {
+    F.set(true); F.step(1500);
+    const m = F.liquid().mag;
+    await d.drag([m, 0.6, 0.2, -0.3, -0.92], { hold: 160 });
+    assert(F.state().on === false, 'on=' + F.state().on);
+    assert(F.state().ariaChecked === 'false', 'aria-checked 未同步');
+  });
+
+  await test('快速向右甩动（终点在中线左侧）→ 速度方向判定为开', async () => {
+    F.set(false); F.step(1500);
+    const m = F.liquid().mag;
+    await d.drag([m, -0.55, -0.28, -0.06], { delay: 12 });  // 终点 x<0，但末速向右且 >2.2
+    assert(F.state().on === true, '速度方向未生效，on=' + F.state().on);
+    assert(F.state().ariaChecked === 'true', 'aria-checked 未同步');
+  });
+
+  await test('快速向左甩动（终点在中线右侧）→ 速度方向判定为关', async () => {
+    F.set(true); F.step(1500);
+    const m = F.liquid().mag;
+    await d.drag([m, 0.55, 0.28, 0.06], { delay: 12 });  // 终点 x>0，但末速向左
+    assert(F.state().on === false, '速度方向未生效，on=' + F.state().on);
+    assert(F.state().ariaChecked === 'false', 'aria-checked 未同步');
+  });
+
+  await test('静止 >90ms 后松手：陈旧速度不得覆盖位置（快速右移后停在左侧 → 关）', async () => {
+    F.set(false); F.step(1500);
+    const m = F.liquid().mag;
+    await d.drag([m, -0.55, -0.28, -0.12], { delay: 12, hold: 200 });
+    assert(F.state().on === false, '陈旧速度覆盖了位置，on=' + F.state().on);
+  });
+
+  await test('静止 >90ms 后松手：陈旧速度不得覆盖位置（快速左移后停在右侧 → 开）', async () => {
+    F.set(true); F.step(1500);
+    const m = F.liquid().mag;
+    await d.drag([m, 0.55, 0.28, 0.12], { delay: 12, hold: 200 });
+    assert(F.state().on === true, '陈旧速度覆盖了位置，on=' + F.state().on);
+  });
+
+  await test('重复 set 同一状态：不重复触发翻转与尖刺喷发', async () => {
+    F.set(false); F.step(300);  // 先归位到关，避免受上一用例状态影响
+    F.resetFlags();
+    F.set(true); F.set(true); F.set(true);
+    assert(F.counts().flips === 1, 'flips=' + F.counts().flips + '（应为 1）');
+    F.step(1400);
+    const er = F.counts().erupts;
+    assert(er >= 1, '开启后未发生尖刺喷发');
+    F.set(true); F.set(true); F.step(300);
+    assert(F.counts().flips === 1, '重复 set(true) 引起额外翻转');
+    assert(F.counts().erupts === er, '重复 set(true) 引起额外喷发');
+    F.set(false); F.set(false);
+    assert(F.counts().flips === 2, 'flips=' + F.counts().flips + '（应为 2）');
+    assert(F.state().ariaChecked === 'false', 'aria-checked 未同步');
+  });
+
+  await test('点击（未拖动）切换状态', async () => {
+    F.set(false); F.step(400);
+    const [cx, cy] = d.screenOf(F.liquid().mag);
+    d.ptr('pointerdown', cx, cy); await sleep(40); d.ptr('pointerup', cx, cy);
+    assert(F.state().on === true, '第一次点击未切换为开');
+    d.ptr('pointerdown', cx, cy); await sleep(40); d.ptr('pointerup', cx, cy);
+    assert(F.state().on === false, '第二次点击未切换为关');
+  });
+
+  await test('空格/回车切换，方向键明确置开/置关', async () => {
+    F.set(false); F.step(200);
+    d.key(' ');     assert(F.state().on === true, '空格未切换为开');
+    d.key('Enter'); assert(F.state().on === false, '回车未切换为关');
+    const fl = F.counts().flips;
+    d.key('ArrowRight'); assert(F.state().on === true, 'ArrowRight 未置开');
+    d.key('ArrowRight'); assert(F.counts().flips === fl + 1, '重复 ArrowRight 引起额外翻转');
+    d.key('ArrowUp');    assert(F.state().on === true && F.counts().flips === fl + 1, 'ArrowUp 应置开且不重复触发');
+    d.key('ArrowLeft');  assert(F.state().on === false, 'ArrowLeft 未置关');
+    d.key('ArrowDown');  assert(F.state().on === false, 'ArrowDown 应保持关');
+    assert(F.state().ariaChecked === 'false', 'aria-checked 未同步');
+  });
+
+  await test('动量翻转产生飞溅；开启到位产生镜头缩放（normal 模式）', async () => {
+    F.resetFlags();
+    F.set(true); F.step(120);   // 液体向右加速
+    F.set(false);               // 反向翻转，携带动量 → 应飞溅
+    assert(F.splashed() === true && F.counts().splashes >= 1, '未发生飞溅');
+    F.step(300);
+    F.set(true); F.step(1600);  // 到位喷发 → 镜头缩放
+    assert(F.zoomed() === true && F.counts().zooms >= 1, '未发生镜头缩放');
+  });
+
+  await test('失焦/指针离开后光标不再吸引液体，重新进入恢复', async () => {
+    F.set(false); F.step(1500);
+    const [cx, cy] = F.toScreen(F.liquid().body, 0, 0);
+    F.cursor(cx, cy);           // 光标正对液体
+    F.step(700);
+    assert(F.info().cursorInside === true, 'cursor 应处于 inside');
+    const reach1 = F.info().reach;
+    assert(reach1 > 0.05, '光标未吸引液体，reach=' + reach1);
+    d.win.dispatchEvent(new d.win.Event('blur'));
+    assert(F.info().cursorInside === false, 'blur 后 inside 未清除');
+    F.step(700);
+    assert(F.info().reach < reach1 * 0.2, '失焦后光标仍在吸引液体，reach=' + F.info().reach);
+    d.win.dispatchEvent(new d.win.PointerEvent('pointermove', { clientX: cx, clientY: cy, bubbles: true }));
+    assert(F.info().cursorInside === true, '指针重新进入后未恢复');
+    d.doc.documentElement.dispatchEvent(new d.win.PointerEvent('pointerleave', { bubbles: true }));
+    assert(F.info().cursorInside === false, 'pointerleave 后 inside 未清除');
+  });
+
+  await test('静音状态接口', async () => {
+    F.mute(true);
+    assert(F.muted() === true && F.info().muted === true, '静音未生效');
+    F.mute(false);
+    assert(F.muted() === false && F.info().muted === false, '取消静音未生效');
+  });
+
+  // ─── reduced-motion：单独 iframe（?debug&rm=1），懒加载以免影响上面的事件计时 ───
+  try {
+    const d2 = driver(await loadFrame(document.getElementById('fr2'), 'index.html?debug&rm=1'));
+    const G = d2.ferro;
+    G.pause();
+
+    await test('reduced-motion：状态/aria/发光/黑膜生效，无缩放与飞溅', async () => {
+      assert(G.info().reducedMotion === true, '?rm=1 未启用 reduced-motion 行为');
+      G.resetFlags();
+      G.set(true);
+      G.step(2200);
+      assert(G.state().on === true && G.state().ariaChecked === 'true', '状态/aria-checked 未切换');
+      assert(G.counts().erupts >= 1, '尖刺喷发被错误禁用（应仍然喷发）');
+      assert(G.info().ink > 0.5, '黑色薄膜未铺开，ink=' + G.info().ink);
+      assert(G.info().glow > 0.2, '发光未生效，glow=' + G.info().glow);
+      assert(G.counts().zooms === 0 && G.zoomed() === false, 'reduced-motion 下出现镜头缩放');
+      assert(G.counts().splashes === 0 && G.splashed() === false, 'reduced-motion 下出现飞溅');
+      // 携带动量的反向翻转也不得产生飞溅
+      G.set(false); G.step(120); G.set(true);
+      assert(G.counts().splashes === 0 && G.splashed() === false, 'reduced-motion 下动量翻转产生飞溅');
+      G.step(1800);
+      assert(G.counts().zooms === 0 && G.zoomed() === false, 'reduced-motion 下出现镜头缩放');
+      assert(G.state().on === true && G.state().ariaChecked === 'true', '状态丢失');
+    });
+  } catch (e) {
+    report('加载被测页面 index.html?debug&rm=1', false, e.message);
+  }
+
+  finish();
+})().catch((e) => {
+  report('测试运行异常', false, String((e && e.stack) || e));
+  finish();
+});
+</script>
+</body>
+</html>

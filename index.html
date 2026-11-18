@@ -43,9 +43,13 @@
 (() => {
 'use strict';
 
-const DEBUG = new URLSearchParams(location.search).has('debug');
-const LOCK_RES = DEBUG || new URLSearchParams(location.search).has('hq');  // ?hq: full resolution, never adapts (for recording)
+const PARAMS = new URLSearchParams(location.search);
+const DEBUG = PARAMS.has('debug');
+const LOCK_RES = DEBUG || PARAMS.has('hq');  // ?hq: full resolution, never adapts (for recording)
 const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
+// ?rm=1 / ?rm=0 forces the reduced-motion behaviour on/off (test hook); otherwise the system setting rules
+const RM_FORCE = PARAMS.has('rm') ? PARAMS.get('rm') !== '0' : null;
+const rmActive = () => (RM_FORCE !== null ? RM_FORCE : reduceMotion.matches);
 
 // ─── world constants (shared with the shader) ───────────────────────────────
 const L = 0.95;      // half length of the groove's straight part
@@ -753,6 +757,7 @@ const S = {
   cursor: { sx: 0, sy: 0, x: 0, z: 0, inside: false },
   erupted: false, rOut: [0, 0, 0, 0], ink: 0, inkC: sp(L),
   zoom: sp(0), ripR: 0, ripA: 0, splash: [], focusVisible: false, sepA: false, sepB: false, events: [],
+  flips: 0, erupts: 0, splashes: 0, zooms: 0, splashed: false, zoomed: false,
 };
 function spring(s, target, w, z, dt) {
   s.v += (-w * w * (s.x - target) - 2 * z * w * s.v) * dt;
@@ -781,7 +786,7 @@ function splash(dir, v) {
       vz: fan * 3.2 + (Math.random() - 0.5) * 0.8,
     });
   }
-  if (n > 0) S.events.push(['splash', s, x]);
+  if (n > 0) { S.splashes++; S.splashed = true; S.events.push(['splash', s, x]); }
 }
 function stepSplash(dt) {
   const P = S.splash;
@@ -884,8 +889,8 @@ function step(dt) {
   }
   const F0 = sstep(0.86, 0.985, u) * calm;
   if (!S.erupted && F0 > 0.5) {
-    S.erupted = true; S.flash = 1; S.events.push(['erupt', 0, S.body.x]);
-    if (S.on && !reduceMotion.matches) { S.zoom.v += 0.42; S.ripR = 0.45; S.ripA = 1; }
+    S.erupted = true; S.flash = 1; S.erupts++; S.events.push(['erupt', 0, S.body.x]);
+    if (S.on && !rmActive()) { S.zoom.v += 0.42; S.ripR = 0.45; S.ripA = 1; S.zooms++; S.zoomed = true; }
   }
   else if (S.erupted && F0 < 0.25) { S.erupted = false; S.events.push(['retract', 0, S.body.x]); }
   // the film floods out from the crown, and drains back into the liquid the moment it is switched off
@@ -914,14 +919,14 @@ function step(dt) {
   S.ripR += dt * 4.6; S.ripA *= Math.exp(-dt * 2.1);
 
   // cursor acts as a weak magnet
-  const want = S.cursor.inside && !S.drag && !reduceMotion.matches ? sstep(1.25, 0.45, cd) : 0;
+  const want = S.cursor.inside && !S.drag && !rmActive() ? sstep(1.25, 0.45, cd) : 0;
   spring(S.reach, want * (1 - Math.min(speed * 0.5, 1)), 8, 0.9, dt);
-  const wantOver = S.cursor.inside && !S.drag && !reduceMotion.matches ? sstep(0.85, 0.08, cd) * calm : 0;
+  const wantOver = S.cursor.inside && !S.drag && !rmActive() ? sstep(0.85, 0.08, cd) * calm : 0;
   spring(S.hover, wantOver, 6.5, 1.0, dt);
 
   spring(S.focus, S.focusVisible ? 1 : 0, 18, 1.0, dt);
-  const px = reduceMotion.matches || !S.cursor.inside ? 0 : clamp(S.cursor.sx / cssW * 2 - 1, -1, 1);
-  const py = reduceMotion.matches || !S.cursor.inside ? 0 : clamp(S.cursor.sy / cssH * 2 - 1, -1, 1);
+  const px = rmActive() || !S.cursor.inside ? 0 : clamp(S.cursor.sx / cssW * 2 - 1, -1, 1);
+  const py = rmActive() || !S.cursor.inside ? 0 : clamp(S.cursor.sy / cssH * 2 - 1, -1, 1);
   spring(S.par[0], px, 3.2, 1.0, dt);
   spring(S.par[1], py, 3.2, 1.0, dt);
 }
@@ -1239,10 +1244,11 @@ function setOn(on) {
   hint.classList.add('gone');
   if (S.on === on) return;
   S.on = on;
+  S.flips++;
   btn.setAttribute('aria-checked', String(on));
   const dir = on ? 1 : -1, carried = -S.body.v * dir;  // momentum still flying the other way
   S.events.push(['flip', on, S.head.x]);
-  if (!S.drag && carried > 3 && !reduceMotion.matches) splash(-dir, carried);
+  if (!S.drag && carried > 3 && !rmActive()) splash(-dir, carried);
   if (!S.drag) { S.head.v += on ? 4.2 : -4.2; S.wob.v -= 2.2; }
 }
 const rubber = (x) => {
@@ -1252,7 +1258,7 @@ const rubber = (x) => {
 btn.addEventListener('pointerdown', (e) => {
   if (e.button !== 0 || S.press) return;
   audioInit();
-  btn.setPointerCapture(e.pointerId);
+  try { btn.setPointerCapture(e.pointerId); } catch (_) { /* synthetic or already-released pointer */ }
   const g = toGround(e.clientX, e.clientY);
   S.press = { id: e.pointerId, sx: e.clientX, sy: e.clientY, off: S.mag.x - g[0], dragging: false, lx: g[0], lt: e.timeStamp, vel: 0 };
   e.preventDefault();
@@ -1339,7 +1345,9 @@ function frame(now) {
     S.focusVisible = btn.matches(':focus-visible');
     advance(dt);
   }
-  render();
+  // while paused in debug mode nothing changes, so skip the render entirely:
+  // step()/focusRing() draw explicitly, and the loop stays cheap for scripted tests
+  if (!paused || !DEBUG) render();
   flushAudio(dt);
   if (!shown) { shown = true; canvas.classList.add('ready'); }
   // keep it smooth: lower resolution if the GPU can't keep up (judged only
@@ -1366,6 +1374,17 @@ if (DEBUG) window.__ferro = {
   play() { paused = false; last = performance.now(); },
   toggle() { setOn(!S.on); return S.on; },
   set(on) { setOn(!!on); return S.on; },
+  // acceptance hooks: current switch state, liquid position, splash/zoom flags, mute state
+  state() { return { on: S.on, ariaChecked: btn.getAttribute('aria-checked') }; },
+  liquid() { return { mag: +S.mag.x.toFixed(4), head: +S.head.x.toFixed(4), body: +S.body.x.toFixed(4), tail: +S.tail.x.toFixed(4) }; },
+  splashed() { return S.splashed; },
+  zoomed() { return S.zoomed; },
+  muted() { return Au.muted; },
+  mute(m) { setMuted(!!m); return Au.muted; },
+  counts() { return { flips: S.flips, erupts: S.erupts, splashes: S.splashes, zooms: S.zooms }; },
+  resetFlags() { S.splashed = S.zoomed = false; S.flips = S.erupts = S.splashes = S.zooms = 0; },
+  toScreen(x, y, z) { return toScreen([x, y, z]); },
+  toGround(px, py) { return toGround(px, py); },
   // renders a sequence of sound events offline and reports levels: { peak, rms } in dBFS
   async soundCheck(events, secs = 3) {
     const keep = { ...Au }, oc = new OfflineAudioContext(2, 48000 * secs, 48000);
@@ -1384,9 +1403,11 @@ if (DEBUG) window.__ferro = {
   step(ms) { advance(ms / 1000); render(); return this.info(); },
   info() {
     return {
-      on: S.on, t: +S.t.toFixed(3), hdr: HDR, audio: Au.ctx ? Au.ctx.state : 'none', muted: Au.muted, size: [W, H], pr: +pr.toFixed(2), quality: +quality.toFixed(2), ema: +ema.toFixed(1),
-      body: +S.body.x.toFixed(3), head: +S.head.x.toFixed(3), tail: +S.tail.x.toFixed(3),
+      on: S.on, ariaChecked: btn.getAttribute('aria-checked'), t: +S.t.toFixed(3), hdr: HDR, audio: Au.ctx ? Au.ctx.state : 'none', muted: Au.muted, size: [W, H], pr: +pr.toFixed(2), quality: +quality.toFixed(2), ema: +ema.toFixed(1),
+      mag: +S.mag.x.toFixed(3), body: +S.body.x.toFixed(3), head: +S.head.x.toFixed(3), tail: +S.tail.x.toFixed(3),
       rings: S.ring.map(r => +r.x.toFixed(3)), edge: +S.edge.x.toFixed(3), glow: +S.glowI.toFixed(3),
+      ink: +S.ink.toFixed(3), reach: +S.reach.x.toFixed(3), cursorInside: S.cursor.inside, reducedMotion: rmActive(),
+      flips: S.flips, erupts: S.erupts, splashes: S.splashes, zooms: S.zooms, splashed: S.splashed, zoomed: S.zoomed,
       button: btn.getBoundingClientRect().toJSON(),
     };
   },
