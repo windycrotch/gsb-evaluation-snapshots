@@ -72,7 +72,11 @@ export class CanvasManager {
 
   private config: CanvasConfig;
   private resizeObserver: ResizeObserver | null = null;
-  private readonly handleWindowResize = () => this.notifyRenderingSizeChange();
+  private readonly handleWindowResize = () => {
+    if (!this.canvasContainer) return;
+    const containerRect = this.canvasContainer.getBoundingClientRect();
+    this.updateCanvasSize(containerRect.width, containerRect.height);
+  };
 
   private _scale = 1;
   private _panTranslateX = 0;
@@ -173,6 +177,9 @@ export class CanvasManager {
 
     if (this.canvasContainer) {
       const containerRect = this.canvasContainer.getBoundingClientRect();
+      this._containerWidth = containerRect.width;
+      this._containerHeight = containerRect.height;
+
       this.updateCanvasStyleSize();
 
       this._constrainTransform();
@@ -200,12 +207,14 @@ export class CanvasManager {
     if (isPortrait) {
       this.canvasContainer.style.bottom = `${toolbarSize}px`;
       this.canvasContainer.style.right = "0";
-      this._containerHeight = Math.max(0, this._containerHeight - toolbarSize);
     } else {
       this.canvasContainer.style.right = `${toolbarSize}px`;
       this.canvasContainer.style.bottom = "0";
-      this._containerWidth = Math.max(0, this._containerWidth - toolbarSize);
     }
+
+    const containerRect = this.canvasContainer.getBoundingClientRect();
+    this._containerWidth = Math.max(0, containerRect.width);
+    this._containerHeight = Math.max(0, containerRect.height);
 
     if (this._isInitialScale && !this.isFixedSize) {
       this.calculateInitialScale();
