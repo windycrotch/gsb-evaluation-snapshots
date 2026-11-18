@@ -11,7 +11,7 @@ import {
   uploadFile,
 } from "./api";
 import type { JobStatus, SceneMetadata } from "./api";
-import type { ViewerHandle } from "./types";
+import type { StereoFeedback, ViewerHandle } from "./types";
 import { imageFromPasteEvent, readImageFromClipboard } from "./device/clipboard-image";
 import { SplatViewer } from "./viewer/SplatViewer";
 import { fetchPlyCameraFov } from "./ply_meta";
@@ -92,6 +92,11 @@ function App() {
   const [clampPx, setClampPx] = useState(0);
   const [swapLR, setSwapLR] = useState(false);
   const [hiResReady, setHiResReady] = useState(false);
+  // What the viewer's last frame actually used, after both limits applied.
+  // Reported from the render path rather than computed here, because only the
+  // viewer knows the backing-store size of an eye's viewport, which is what
+  // the pixel limit is measured in.
+  const [stereoFeedback, setStereoFeedback] = useState<StereoFeedback | null>(null);
   const viewerParams: ViewerParams = {
     mode,
     baseline,
@@ -502,6 +507,7 @@ function App() {
                 swapLR={swapLR}
                 onFovChange={handleFovChange}
                 onOffscreenReadyChange={setHiResReady}
+                onStereoFeedback={setStereoFeedback}
               />
             ) : (
               <div className="stage__empty">
@@ -768,31 +774,68 @@ function App() {
               <label className="field">
                 <span>
                   Depth compression
-                  <em>Below 1 flattens the scene, above 1 exaggerates it.</em>
+                  <output>{compression.toFixed(2)}×</output>
                 </span>
                 <input
-                  type="number"
-                  step="0.05"
-                  min="0.1"
+                  type="range"
+                  min="0.05"
                   max="2"
+                  step="0.05"
                   value={compression}
                   onChange={(e) => setCompression(Number(e.target.value))}
                 />
+                <em>
+                  Scales the eye separation, so the whole scene flattens or deepens
+                  without distorting it. Below 1 is flatter and easier on the eyes.
+                </em>
               </label>
               <label className="field">
                 <span>
-                  Disparity limit
-                  <em>Pixels. Caps how far apart the two eyes may put a point. 0 is no limit.</em>
+                  Background limit
+                  <output>{clampPx > 0 ? `${Math.round(clampPx)} px` : "off"}</output>
                 </span>
                 <input
-                  type="number"
-                  step="1"
+                  type="range"
                   min="0"
-                  max="500"
+                  max="120"
+                  step="1"
                   value={clampPx}
                   onChange={(e) => setClampPx(Number(e.target.value))}
                 />
+                <em>
+                  Caps how far apart the two eyes may put the far background, in
+                  pixels of one eye&apos;s viewport. 0 is no limit.
+                </em>
               </label>
+              {/* Both limits shorten the same baseline, so the tighter one wins.
+                  Showing what they came to is the only way to tell a control
+                  that is doing nothing from one that is simply not binding --
+                  and the second number is the one the pixel limit bounds. */}
+              <div className="stereo-readout" aria-live="polite">
+                {stereoFeedback === null ? (
+                  <p>Waiting for the first frame…</p>
+                ) : stereoFeedback.mode !== "sbs" ? (
+                  <p>Mono: one view, no eye separation.</p>
+                ) : (
+                  <>
+                    <p>
+                      Effective baseline{" "}
+                      <strong>{stereoFeedback.effectiveBaseline.toFixed(4)}</strong>{" "}
+                      · background separation{" "}
+                      <strong>{stereoFeedback.backgroundSeparationPx.toFixed(1)} px</strong>
+                    </p>
+                    <p className="stereo-readout__note">
+                      {stereoFeedback.eyeRejected
+                        ? "Head position unavailable; keeping the last good one."
+                        : stereoFeedback.limit === "clamp"
+                          ? "Limited by the background pixel cap; compression is not binding."
+                          : stereoFeedback.limit === "compression"
+                            ? "Limited by depth compression; the pixel cap is not binding."
+                            : "Neither limit is binding."}
+                    </p>
+                  </>
+                )}
+              </div>
               <label className="field">
                 <span>
                   Screen plane

@@ -49,3 +49,32 @@ export type StereoSettings = {
   /** Draw the left eye into the right half, for cross-eyed free viewing. */
   swapLR: boolean;
 };
+
+/**
+ * What the last rendered frame's stereo geometry actually came to.
+ *
+ * The compression and pixel-limit controls shorten the baseline rather than
+ * correcting the picture afterwards, so the numbers are worth showing: without
+ * them a control that has been made irrelevant by the other one is
+ * indistinguishable from a control that is simply not binding.
+ */
+export type StereoFeedback = {
+  mode: "mono" | "sbs";
+  /** Eye separation in scene units, after both limits have applied. */
+  effectiveBaseline: number;
+  /**
+   * The largest horizontal separation the far background can show between the
+   * eyes, in pixels of one eye's viewport. This is what the pixel limit bounds.
+   */
+  backgroundSeparationPx: number;
+  /** Which control shortened the baseline, or null when neither did. */
+  limit: "compression" | "clamp" | null;
+  /** Width of one eye's viewport, in backing-store pixels. */
+  eyeViewportWidthPx: number;
+  /**
+   * True when the last head position could not be used and the previous one
+   * is still on screen. The tracker can lose a face and report an eye behind
+   * the glass; that is clamped away rather than projected, and this says so.
+   */
+  eyeRejected: boolean;
+};

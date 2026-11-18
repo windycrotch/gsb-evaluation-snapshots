@@ -4,7 +4,8 @@
 // editor through `import("supersplat/src/embed")`. That pulled 4.2 MB of editor
 // in to obtain six functions, and pinned the project to an experimental branch.
 // Everything needed is in the engine: `GSplatComponent` draws the splats and
-// `CameraComponent.calculateProjection` is where off-axis stereo will attach.
+// `CameraComponent.calculateProjection` is what the off-axis stereo pair is
+// attached to, one eye per child camera.
 
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import * as pc from 'playcanvas';
@@ -15,8 +16,14 @@ import {
   sceneRotationForMode,
   sceneYawForDevice,
 } from '../device/levelling';
-import type { StereoSettings, ViewerHandle } from '../types';
-import { computeOffAxisFrustum, computeStereoEye, effectiveBaseline, sanitizeEye } from './off-axis';
+import type { StereoFeedback, StereoSettings, ViewerHandle } from '../types';
+import {
+  eyeDrawStates,
+  planOrbitEyes,
+  planWindowEyes,
+  type EyePlacement,
+  type StereoPlan,
+} from './stereo-plan';
 import {
   apexDistance,
   computeTrueWindowPlacement,
@@ -162,6 +169,16 @@ type Props = {
     windowHalfHeight: number; visibleFraction: number; eyeDistance: number;
   }) => void;
   /**
+   * What the stereo controls actually produced in the last frame.
+   *
+   * The two limits act on the input rather than being applied to the picture
+   * afterwards, so without this there is no way to tell a control that is doing
+   * nothing from one that is simply not binding. Reported from the render path
+   * rather than from the props, so it reflects the numbers the eyes were built
+   * from, including the viewport the pixel limit was measured against.
+   */
+  onStereoFeedback?: (feedback: StereoFeedback) => void;
+  /**
    * How far through downloading the scene we are, 0 to 1, and null when there
    * is nothing in flight.
    *
@@ -228,6 +245,21 @@ const DEFAULT_SUBJECT_DISTANCE = 3;
 // same movement gives 2.00 against 1.80.
 const NEAR_ANCHOR_QUANTILE = 0.001;
 const NEAR_ANCHOR_STRIDE = 16;
+
+// The head-tracked window's clip planes, in scene units.
+//
+// Fixed rather than following the eye, because the eye is bounded: an eye
+// cannot be nearer the glass than the sanitised minimum nor further than
+// MAX_SUPPORTED_EYE_Z, so the scene is always inside the same range. Building
+// the frustum's `far` from the eye each frame while the camera kept its own
+// value left the two disagreeing about what was clipped.
+//
+// The far plane is generous enough to clear the far background from any eye
+// position the tracker can report, and near enough to leave the depth buffer
+// comfortable: 0.05 against 2000 is a ratio of forty thousand, well within a
+// 24-bit buffer.
+const WINDOW_NEAR_CLIP = 0.05;
+const WINDOW_FAR_CLIP = 2000;
 
 /**
  * The median distance of the gaussians from the capture viewpoint.
@@ -315,6 +347,7 @@ export const SplatViewer = forwardRef<ViewerHandle, Props>(function SplatViewer(
     onSceneAspect,
     captureTangentHint = null,
     captureAspectHint = null,
+    onStereoFeedback,
   },
   ref,
 ) {
@@ -326,6 +359,10 @@ export const SplatViewer = forwardRef<ViewerHandle, Props>(function SplatViewer(
   const sceneRootRef = useRef<pc.Entity | null>(null);
   const headPoseRef = useRef<HeadPose | null>(headPose);
   const windowHalfHeightRef = useRef(1);
+  // The last head position a projection could actually be built from. A
+  // tracker that loses the face reports an eye at or behind the glass, and
+  // the picture is held at the last good placement rather than sliding away.
+  const lastValidEyeRef = useRef<{ x: number; y: number; z: number }>({ x: 0, y: 0, z: 2.5 });
   const onGestureRef = useRef(onGesture);
   onGestureRef.current = onGesture;
   const onPlacementRef = useRef(onPlacement);
@@ -334,6 +371,12 @@ export const SplatViewer = forwardRef<ViewerHandle, Props>(function SplatViewer(
   onSceneProgressRef.current = onSceneProgress;
   const onSceneAspectRef = useRef(onSceneAspect);
   onSceneAspectRef.current = onSceneAspect;
+  const onStereoFeedbackRef = useRef(onStereoFeedback);
+  onStereoFeedbackRef.current = onStereoFeedback;
+  // The last stereo numbers sent upstream, so a tracker running at thirty
+  // hertz does not re-render the page above it at the same rate when nothing
+  // about the stereo geometry has changed.
+  const reportedStereoRef = useRef<StereoFeedback | null>(null);
   const captureTangentRef = useRef<number | null>(null);
   const captureTangentHintRef = useRef<number | null>(captureTangentHint);
   captureTangentHintRef.current = captureTangentHint;
@@ -408,13 +451,107 @@ export const SplatViewer = forwardRef<ViewerHandle, Props>(function SplatViewer(
   }, []);
 
   /**
-   * Put the single eye where the viewer's head is, and skew the view volume.
+   * Hand a finished stereo plan to the two eye entities.
+   *
+   * Every eye is written on every call, including the ones the current mode
+   * does not use. That is the point: switching to mono used to leave the other
+   * eye disabled with the half-width viewport and asymmetric frustum it had
+   * while stereo was on, so the stale state survived until something happened
+   * to overwrite it. A disabled eye is now explicitly returned to a plain
+   * full-canvas camera with the engine's own symmetric projection.
+   *
+   * The eye is translated and never rotated. Rotation is what makes a toe-in
+   * pair, which puts the same feature at different heights in the two images;
+   * an off-axis pair moves the camera and skews the view volume instead.
+   */
+  const applyEyePlan = useCallback(
+    (plan: StereoPlan, positionFor: (eye: EyePlacement) => { x: number; y: number; z: number }) => {
+      const eyes = eyesRef.current;
+      const states = eyeDrawStates(plan);
+      eyes.forEach((entity, index) => {
+        const camera = entity.camera;
+        if (!camera) return;
+        const state = states[index];
+        if (!state) {
+          camera.enabled = false;
+          return;
+        }
+        // No rotation on any eye, ever. This also undoes a rotation left by
+        // some earlier path.
+        entity.setEulerAngles(0, 0, 0);
+        if (!state.eye || !state.frustum) {
+          // Not part of this frame's pair: switch it off and clear everything
+          // that would still describe the previous one.
+          camera.enabled = false;
+          camera.rect = new pc.Vec4(state.viewport.x, 0, state.viewport.width, 1);
+          camera.calculateProjection = null;
+          entity.setLocalPosition(0, 0, 0);
+          return;
+        }
+
+        camera.enabled = true;
+        const { x, y, z } = positionFor(state.eye);
+        entity.setLocalPosition(x, y, z);
+        camera.rect = new pc.Vec4(state.viewport.x, 0, state.viewport.width, 1);
+        // The renderer calls this with a matrix to write into, in place of
+        // building a symmetric perspective itself. The frustum was made for
+        // this eye, so its vertical extent is shared with the other eye by
+        // construction.
+        const { left, right, bottom, top, near, far } = state.frustum;
+        camera.calculateProjection = (projectionMatrix: pc.Mat4) => {
+          projectionMatrix.setFrustum(left, right, bottom, top, near, far);
+        };
+      });
+    },
+    [],
+  );
+
+  /**
+   * Report what the stereo controls came to, when that has changed.
+   *
+   * A head tracker emits at thirty-odd hertz. Sending the same four numbers up
+   * to React at that rate would re-render the page beside the picture for no
+   * visible gain, so only real changes are passed on.
+   */
+  const reportStereo = useCallback((plan: StereoPlan) => {
+    const next: StereoFeedback = {
+      mode: plan.mode,
+      effectiveBaseline: plan.effectiveBaseline,
+      backgroundSeparationPx: plan.backgroundSeparationPx,
+      limit: plan.limit,
+      eyeViewportWidthPx: plan.eyeViewportWidthPx,
+      eyeRejected: plan.eyeRejected,
+    };
+    const previous = reportedStereoRef.current;
+    if (previous
+      && previous.mode === next.mode
+      && previous.limit === next.limit
+      && previous.eyeRejected === next.eyeRejected
+      && Math.abs(previous.effectiveBaseline - next.effectiveBaseline) < 1e-9
+      && Math.abs(previous.backgroundSeparationPx - next.backgroundSeparationPx) < 1e-6
+      && Math.abs(previous.eyeViewportWidthPx - next.eyeViewportWidthPx) < 1e-6) {
+      return;
+    }
+    reportedStereoRef.current = next;
+    onStereoFeedbackRef.current?.(next);
+  }, []);
+
+  /**
+   * Put the eyes where the viewer's head is, and skew each view volume.
    *
    * The screen is a plane a fixed distance ahead of the scene's capture
    * viewpoint. The eye moves in front of it. Nothing rotates except the roll
    * that keeps the picture upright while the device is tilted, so what the
    * viewer sees changes only through parallax, which is what makes it read as
    * a window rather than as a scene being swung about.
+   *
+   * In side-by-side both eyes are placed at the head position and separated
+   * sideways along the window's own axis. Their vertical and depth positions
+   * are identical, so the two frusta share a vertical extent and the pair has
+   * no vertical disparity. An eye the tracker reports at or behind the glass,
+   * or beyond MAX_SUPPORTED_EYE_Z, is handled by `sanitizeEye`: the impossible
+   * ones are refused and the implausibly distant ones clamped, rather than
+   * feeding a degenerate eye into a projection.
    */
   const applyHeadPoseToEyes = useCallback((pose: HeadPose) => {
     const app = appRef.current;
@@ -424,7 +561,6 @@ export const SplatViewer = forwardRef<ViewerHandle, Props>(function SplatViewer(
 
     const width = app.graphicsDevice.width || 1;
     const height = app.graphicsDevice.height || 1;
-    const aspect = width / height;
 
     const tangent = captureTangentRef.current;
     // The whole head position is mapped so that a comfortable holding distance
@@ -432,13 +568,22 @@ export const SplatViewer = forwardRef<ViewerHandle, Props>(function SplatViewer(
     // measures sideways movement against an apex nearer than the device really
     // is, which multiplies the parallax and was reported as depth that felt
     // exaggerated and unpleasant.
-    const trackedEye = tangent && !pose.trueWindow
-      ? mapTrackedEye({
-        eye: pose.eye,
-        nominalZ: pose.screenDistance,
-        apex: apexDistance(tangent),
-      })
-      : pose.eye;
+    //
+    // A pose with an unusable nominal distance cannot be mapped. It is left as
+    // it came instead, so the plan below can reject or clamp it; throwing here
+    // would take down the frame rather than handle the tracker's bad sample.
+    let trackedEye = pose.eye;
+    if (tangent && !pose.trueWindow) {
+      try {
+        trackedEye = mapTrackedEye({
+          eye: pose.eye,
+          nominalZ: pose.screenDistance,
+          apex: apexDistance(tangent),
+        });
+      } catch {
+        trackedEye = pose.eye;
+      }
+    }
     // Gravity and the metric face tracker both observe a phone pitch. Applying
     // the attitude to the scene while projecting from the raw camera-frame eye
     // made those cues cancel once the phone stopped moving. True Window first
@@ -451,15 +596,12 @@ export const SplatViewer = forwardRef<ViewerHandle, Props>(function SplatViewer(
     // x motion. DeviceOrientation identifies the former, so it can be removed
     // without changing Reverse tracking, which is already correct for the
     // latter. Photo mode uses the same reference frame while Hold level is on.
-    const eye = sanitizeEye(eyeInYawReferenceFrame(
-      gravityReferencedEye,
-      pose.deviceYaw ?? 0,
-    ));
+    const rawEye = eyeInYawReferenceFrame(gravityReferencedEye, pose.deviceYaw ?? 0);
+
     // The window's size comes from the placement: it is whatever the
     // photograph's own field of view fills, seen from the calibrated eye. The
     // scene is fitted behind it when it loads.
     const halfHeight = windowHalfHeightRef.current;
-    const halfWidth = halfHeight * aspect;
 
     // The rig stays square to the window. True Window fuses the eye above into
     // the Hold-level reference frame. Scene attitude is resolved per axis:
@@ -488,42 +630,50 @@ export const SplatViewer = forwardRef<ViewerHandle, Props>(function SplatViewer(
       ),
     );
 
-    eyes.forEach((entity, index) => {
-      const camera = entity.camera;
-      if (!camera) return;
-      camera.enabled = index === 0;
-      if (!camera.enabled) return;
-      camera.rect = new pc.Vec4(0, 0, 1, 1);
-      // The window is at the origin, so the eye sits in front of it at eye.z.
-      entity.setLocalPosition(eye.x, eye.y, eye.z);
-      // Reach far enough to clear the scene from wherever the eye now is.
-      camera.farClip = Math.max(1000, eye.z * 4 + 1000);
-      const frustum = computeOffAxisFrustum({
-        eyeX: eye.x,
-        eyeY: eye.y,
-        eyeZ: eye.z,
-        screenHalfWidth: halfWidth,
-        screenHalfHeight: halfHeight,
-        near: camera.nearClip,
-        far: camera.farClip,
-      });
-      camera.calculateProjection = (projectionMatrix: pc.Mat4) => {
-        projectionMatrix.setFrustum(
-          frustum.left, frustum.right, frustum.bottom, frustum.top, frustum.near, frustum.far);
-      };
+    // An eye the tracker reports at or behind the glass, or beyond
+    // MAX_SUPPORTED_EYE_Z, is sanitised inside the plan: impossible positions
+    // are replaced by the last one a projection could be built from, and an
+    // implausibly distant one is clamped. Either way no degenerate frustum is
+    // produced.
+    const settings = stereoRef.current;
+
+    const plan = planWindowEyes({
+      mode: settings.mode,
+      eye: rawEye,
+      previousEye: lastValidEyeRef.current,
+      baseline: settings.baseline,
+      compression: settings.compression,
+      clampPx: settings.clampPx,
+      swapLR: settings.swapLR,
+      windowHalfHeight: halfHeight,
+      canvasWidthPx: width,
+      canvasHeightPx: height,
+      near: WINDOW_NEAR_CLIP,
+      far: WINDOW_FAR_CLIP,
     });
+    applyEyePlan(plan, (eye) => eye.position);
+    // Both eyes sit at the same depth and share these planes; the plan already
+    // built the frusta from them, so the camera and the projection agree.
+    for (const entity of eyes) {
+      if (entity.camera) entity.camera.farClip = WINDOW_FAR_CLIP;
+    }
+    if (!plan.eyeRejected) {
+      lastValidEyeRef.current = { ...plan.centreEye };
+    }
 
     // Reported from here rather than from the placement, because how much of
     // the photograph is on screen depends on where the eye actually is. Taking
     // it from the zoom alone said "100% of the frame" while the viewer was at
     // half the apex distance and seeing considerably more than the frame.
-    const viewTangent = halfHeight / eye.z;
+    const usedZ = plan.eyes[0]?.position.z ?? lastValidEyeRef.current.z;
+    const viewTangent = halfHeight / usedZ;
     onPlacementRef.current?.({
       windowHalfHeight: halfHeight,
       visibleFraction: tangent ? Math.min(1, viewTangent / tangent) : 1,
-      eyeDistance: eye.z,
+      eyeDistance: usedZ,
     });
-  }, []);
+    reportStereo(plan);
+  }, [applyEyePlan, reportStereo]);
 
   /**
    * Place and shape both eyes from the current stereo settings.
@@ -548,12 +698,6 @@ export const SplatViewer = forwardRef<ViewerHandle, Props>(function SplatViewer(
     }
 
     const settings = stereoRef.current;
-    const sbs = settings.mode === 'sbs';
-
-    const width = app.graphicsDevice.width || 1;
-    const height = app.graphicsDevice.height || 1;
-    const eyeWidthPx = sbs ? width / 2 : width;
-    const aspect = eyeWidthPx / height;
 
     // In pivot mode the plane of the screen is put at whatever the camera is
     // orbiting, which is the thing being looked at.
@@ -563,50 +707,31 @@ export const SplatViewer = forwardRef<ViewerHandle, Props>(function SplatViewer(
         ? settings.zeroParallaxDistance
         : orbitRef.current.distance);
 
-    const baseline = sbs
-      ? effectiveBaseline({
-        baseline: settings.baseline,
-        compression: settings.compression,
-        clampPx: settings.clampPx,
-        eyeViewportWidthPx: eyeWidthPx,
-        zeroParallaxDistance: zeroParallax,
-        fovYDeg: fovRef.current,
-        aspect,
-      })
-      : 0;
+    // Both eyes start at one sample frustum so the near plane is in hand; the
+    // plan itself is built from the engine's clip planes because those are
+    // what the projection must match.
+    const near = eyes[0]?.camera?.nearClip ?? 0.05;
+    const far = eyes[0]?.camera?.farClip ?? 5000;
 
-    eyes.forEach((eye, index) => {
-      const camera = eye.camera;
-      if (!camera) return;
-      const side = index === 0 ? 'left' : 'right';
-      camera.enabled = sbs || index === 0;
-      if (!camera.enabled) return;
-
-      const view = computeStereoEye(sbs ? side : 'centre', {
-        baseline,
-        zeroParallaxDistance: zeroParallax,
-        fovYDeg: fovRef.current,
-        aspect,
-        near: camera.nearClip,
-        far: camera.farClip,
-      });
-
-      eye.setLocalPosition(view.offsetX, 0, 0);
-      // Only the half of the frame each eye is drawn into is swapped. Swapping
-      // the eye positions instead would flip the sign of every off-axis shift
-      // and put the whole scene behind the screen, mirrored; this leaves the
-      // geometry alone and just exchanges where the two pictures land.
-      const leftHalfFirst = !settings.swapLR;
-      camera.rect = sbs
-        ? new pc.Vec4((index === 0) === leftHalfFirst ? 0 : 0.5, 0, 0.5, 1)
-        : new pc.Vec4(0, 0, 1, 1);
-      // The renderer hands this a matrix and expects it filled in.
-      camera.calculateProjection = (projectionMatrix: pc.Mat4) => {
-        const f = view.frustum;
-        projectionMatrix.setFrustum(f.left, f.right, f.bottom, f.top, f.near, f.far);
-      };
+    const plan = planOrbitEyes({
+      mode: settings.mode,
+      baseline: settings.baseline,
+      compression: settings.compression,
+      clampPx: settings.clampPx,
+      swapLR: settings.swapLR,
+      zeroParallaxDistance: zeroParallax,
+      fovYDeg: fovRef.current,
+      canvasWidthPx: app.graphicsDevice.width || 1,
+      canvasHeightPx: app.graphicsDevice.height || 1,
+      near,
+      far,
     });
-  }, [applyHeadPoseToEyes, applyWindowPlacement]);
+
+    // The rig carries the orbit position and orientation; the eyes are only
+    // displaced sideways inside it.
+    applyEyePlan(plan, (eye) => eye.position);
+    reportStereo(plan);
+  }, [applyEyePlan, applyHeadPoseToEyes, applyWindowPlacement, reportStereo]);
 
   const applyOrbitToCamera = useCallback(() => {
     const rig = cameraRef.current;
@@ -702,7 +827,7 @@ export const SplatViewer = forwardRef<ViewerHandle, Props>(function SplatViewer(
         // A rig carrying two eyes. The rig holds the orbit position and
         // orientation; each eye is displaced sideways within it and is never
         // rotated relative to the other, which is what keeps the pair fusable.
-        // Mono is the same rig with one eye at zero displacement, so there is
+        // Mono is the same rig with the second eye switched off, so there is
         // one code path rather than two.
         const rig = new pc.Entity('rig');
         app.root.addChild(rig);
@@ -1092,9 +1217,8 @@ export const SplatViewer = forwardRef<ViewerHandle, Props>(function SplatViewer(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fovDeg]);
 
-  // Held for Milestone 2, which gives these numbers their meaning by building
-  // an off-axis projection from them. Storing them now keeps the interface
-  // stable while the geometry is still the engine's symmetric default.
+  // A new head position is the thing the window is for, so each change rebuilds
+  // both eyes. The plan behind it is pure, so this stays cheap.
   useEffect(() => {
     headPoseRef.current = headPose;
     applyStereoToEyes();

@@ -15,7 +15,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { SplatViewer, type HeadPose } from './SplatViewer';
-import type { ViewerHandle } from '../types';
+import type { StereoFeedback, ViewerHandle } from '../types';
 import {
   MAX_TIP_DEG, MAX_ZOOM, MIN_ZOOM, TIP_GAIN, TWIST_GAIN, lifeSizeDistanceMm,
 } from './window-placement';
@@ -337,6 +337,30 @@ export function WindowViewer() {
   const distanceScaleRef = useRef(distanceScale);
   const rawHeadMmRef = useRef<number | null>(null);
   const [showDetail, setShowDetail] = useState(false);
+  // Stereo in the head-tracked page. A phone screen is wide enough to show a
+  // side-by-side pair behind a cheap viewer, and the point of doing it here
+  // rather than only in the editor is that the head tracker keeps moving the
+  // eyes apart as the head moves -- the same construction the editor uses, with
+  // the eye position coming from the face tracker instead of from an orbit.
+  //
+  // Off by default: a pair is uncomfortable without a viewer to fuse it, and
+  // somebody holding the phone to look through the window should not have to
+  // find the switch to turn it off.
+  const [stereo, setStereo] = useState(false);
+  // The two limits shorten the same baseline, so only one number matters. The
+  // range is chosen so that the compression is usually the binding one at its
+  // default and the pixel cap becomes it when the background is pulled down.
+  const [stereoCompression, setStereoCompression] = useState(1);
+  const [stereoClampPx, setStereoClampPx] = useState(0);
+  const [stereoFeedback, setStereoFeedback] = useState<StereoFeedback | null>(null);
+  // The virtual eye separation in window units, where one unit is half the
+  // screen's height. What matters is the ratio to the eye's distance, not the
+  // absolute number: the eye sits about two and a half units from the glass, so
+  // this is a separation-to-distance ratio of roughly one part in twenty --
+  // the same as the editor's own default, and well inside comfortable limits
+  // rather than the full interpupillary distance, which at this screen size
+  // would be a much harsher pair to fuse.
+  const STEREO_BASELINE = 0.12;
   // Double tap anywhere to clear the controls and the readout out of the way,
   // and again to bring them back.
   const [chromeHidden, setChromeHidden] = useState(false);
@@ -1000,13 +1024,13 @@ export function WindowViewer() {
           <SplatViewer
             ref={viewerRef}
             plyUrl={sceneUrl}
-            mode="mono"
-            baseline={0}
+            mode={stereo ? 'sbs' : 'mono'}
+            baseline={STEREO_BASELINE}
             fovDeg={geometry.viewing.verticalFovDeg}
             zeroParallaxMode="pivot"
             zeroParallaxDistance={geometry.viewing.baselineEyeZ}
-            compression={1}
-            clampPx={0}
+            compression={stereoCompression}
+            clampPx={stereoClampPx}
             swapLR={false}
             headPose={pose}
             captureTangentHint={captureProjection?.captureTangent}
@@ -1015,6 +1039,7 @@ export function WindowViewer() {
             onPlacement={setPlacement}
             onSceneProgress={setSceneProgress}
             onSceneAspect={fitZoomToAspect}
+            onStereoFeedback={setStereoFeedback}
           />
         ) : null}
       </div>
@@ -1038,6 +1063,11 @@ export function WindowViewer() {
             `world   1 unit = ${geometry.viewing.worldUnitMm.toFixed(2)} mm`,
             `head    raw ${rawHeadMmRef.current?.toFixed(0) ?? '-'} mm`
               + ` · x${distanceScale.toFixed(3)} · corrected ${headMm?.toFixed(0) ?? '-'} mm`,
+            stereoFeedback
+              ? `stereo  baseline ${stereoFeedback.effectiveBaseline.toFixed(4)}`
+                + ` · background ${stereoFeedback.backgroundSeparationPx.toFixed(1)} px`
+                + ` · ${stereoFeedback.eyeRejected ? 'head lost' : stereoFeedback.limit ?? 'unlimited'}`
+              : 'stereo  mono',
             placement
               ? `scene   eye ${(placement.eyeDistance * geometry.viewing.worldUnitMm).toFixed(0)} mm`
                 + ` · window ${placement.windowHalfHeight.toFixed(3)}`
@@ -1136,6 +1166,29 @@ export function WindowViewer() {
           onClick={toggleTrueWindow}>
           True window {trueWindow ? 'on' : 'off'}
         </button>
+        <button type="button" className={stereo ? 'on' : ''}
+          title="Draw the scene once for each eye, side by side, so a viewer held in front of the screen fuses them into depth. The head tracker separates the eyes as your head moves."
+          onClick={() => setStereo((v) => !v)}>
+          3D pair {stereo ? 'on' : 'off'}
+        </button>
+        {stereo && (
+          <button type="button" className={!stereoClampPx ? '' : 'on'}
+            title="Cap how far apart the two eyes may put the far background. 0 is no limit. Both this and the depth compression shorten the same eye separation, and the tighter one wins."
+            onClick={() => setStereoClampPx((v) => (v === 0 ? 16 : v === 16 ? 40 : 0))}>
+            Background cap {stereoClampPx ? `${stereoClampPx} px` : 'off'}
+          </button>
+        )}
+        {stereo && (
+          <button type="button" className={stereoCompression === 1 ? '' : 'on'}
+            title="Scale the eye separation. Below 1 flattens the scene and is easier to fuse; above 1 exaggerates it."
+            onClick={() => setStereoCompression((v) => {
+              const steps = [1, 0.75, 0.5, 0.25];
+              const i = steps.indexOf(v);
+              return steps[(i < 0 ? 0 : i + 1) % steps.length];
+            })}>
+            Compression {stereoCompression.toFixed(2)}×
+          </button>
+        )}
         <button type="button" className={pushMm ? 'on' : ''}
           title="Slide the whole miniature further behind the glass. More of it fits and it swings less when you turn it, at the cost of apparent size. It does not make the scene deeper."
           onClick={() => setPushMm((v) => {

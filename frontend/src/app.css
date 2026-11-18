@@ -220,6 +220,32 @@ kbd {
   flex: 1 0 100%;
 }
 
+/* What the two stereo limits came to, after the tighter one won. Tabular
+   figures so the numbers do not jitter as they change, and a quiet box so it
+   reads as feedback rather than as another control. */
+.stereo-readout {
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--bg);
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.stereo-readout p {
+  margin: 0;
+}
+
+.stereo-readout strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.stereo-readout__note {
+  margin-top: 0.25rem !important;
+  color: var(--text-dim);
+}
+
 .field--quiet {
   padding-top: 0.7rem;
   border-top: 1px solid var(--line);

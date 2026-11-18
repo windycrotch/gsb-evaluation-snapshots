@@ -179,16 +179,25 @@ instead of the viewpoint:
 The stereo settings, which appear in side-by-side mode:
 
 - **Eye separation** — metres between the two eyes. Larger means more depth, and more strain.
-- **Depth compression** — below 1 flattens the scene, above 1 exaggerates it.
-- **Disparity limit** — pixels. Caps how far apart the two eyes may put a point; 0 is no limit.
+- **Depth compression** — a scale on the eye separation, so below 1 flattens the scene and above 1 exaggerates it, without distorting it.
+- **Background limit** — pixels. Caps how far apart the two eyes may put the far background; 0 is no limit.
 - **Screen plane** — the depth that sits in the glass. Either follows what you look at, or a fixed distance you type in.
 - **Swap left and right** — off suits a side-by-side display or a headset; on is for free viewing cross-eyed, which is the only way a pair wider than your eyes can be fused. Exports follow it too.
+
+Both stereo limits shorten the same eye separation, so whichever is stricter wins. The readout under the controls shows the separation that is actually being drawn and the far-background pixel separation it produces, and says which of the two is doing the limiting — a control that is being overruled by the other looks identical to one that is doing nothing otherwise.
+
+The pair is built off-axis: each eye is a camera moved sideways and never rotated, projecting through an asymmetric view volume. A point in the plane of the screen therefore lands in the same place in both images, and the only difference between the two is horizontal — which is the only difference the eyes can fuse. Rotating the cameras inward instead (toe-in) puts the same feature at different heights in the two images, and that cannot be fused; it is what makes a long look at a stereo pair tiring.
+
+Other controls:
+
 - Framing lock: compensates camera distance while adjusting FOV to reduce framing drift
 - Comfort lock: auto-scales baseline based on zoom distance, with adjustable strength
 - SBS fullscreen button (enters fullscreen for the preview canvas)
 - Load local `.ply` files directly (skips ml-sharp; preview only)
 - Save/Load params.json for viewer state (job metadata + stereo controls + toggles)
 - Save PNG/JPG of the current preview canvas (mono or SBS)
+
+On the phone page, **3D pair** draws the same off-axis pair, with the head tracker moving the shared eye position as your head moves. **Background cap** and **Compression** behave as in the editor; tap the status line for the numbers.
 
 ### 360 image workflow (preview)
 
@@ -376,14 +385,20 @@ TLS は Tailscale が 443 で正規の証明書のまま終端するので、ス
 SBS 表示のときに出るステレオ設定は以下です。
 
 - **Eye separation** — 両眼間の距離（メートル）。大きいほど立体感が強く、目も疲れます。
-- **Depth compression** — 1 未満で奥行きが平たく、1 超で誇張されます。
-- **Disparity limit** — ピクセル。左右のずれの上限。0 は無制限。
+- **Depth compression** — 眼の間隔に掛かる倍率。1 未満で奥行きが平たく、1 超で誇張されます。形は歪みません。
+- **Background limit** — ピクセル。奥の背景が左右の眼でどれだけ離れて見えるかの上限。0 は無制限。
 - **Screen plane** — ガラス面と一致する奥行き。注視点に追従させるか、距離を直接指定します。
 - **Swap left and right** — オフは SBS 対応機器やゴーグル向け、オンは大画面での交差法向け（画面の幅が目の間隔を超えると平行法は成立しません）。書き出しにも反映されます。
+
+2つの制限は同じ眼の間隔を短くするので、厳しいほうが勝ちます。コントロール下の表示は、実際に描かれている間隔と、それが生む背景のピクセル間隔、そしてどちらの制限が効いているかを示します。片方に上書きされているコントロールは、何もしていないコントロールと見分けがつかないためです。
+
+左右の絵はオフアクシス方式で作られます。各眼は**横に平行移動するだけで回転しない**カメラで、非対称の視錐を通して描きます。したがって画面平面にある点は両眼で同じ位置に落ち、2枚の差は水平方向だけになります — 眼が融合できる唯一の差です。カメラを内側へ回すトウイン方式では、同じ点が左右で違う高さに落ち、融合できません。ステレオ画像を長く見ていると疲れるのはこれが原因です。
 
 `.ply` をローカルから直接開くこともできます（ml-sharp なしでプレビュー）。
 - params.json の Save/Load
 - 表示中の mono / SBS 画像を PNG/JPG 保存
+
+スマホのページでは **3D pair** が同じオフアクシスのペアを描き、頭の動きに合わせて共有の眼の位置を動かします。**Background cap** と **Compression** はエディタと同じ働きです。数字はステータス行をタップすると見られます。
 
 ### 360 画像ワークフロー（プレビュー）
 
