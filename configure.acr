@@ -1,0 +1,27 @@
+PKGNAME r2frida
+VERSION 6.2.6
+CONTACT pancake ; pancake@nowsecure.com
+
+USE_PKGCONFIG!
+
+LANG_C!
+
+EXEC! R2_VERSION r2 -v ;
+
+ARG_WITH PRECOMPILED_AGENT precompiled-agent do not require node/npm ;
+
+PKGCFG! R2_CFLAGS R2_LDFLAGS r_core
+CHKPRG CURL curl
+CHKPRG WGET wget
+CHKPRG! GIT git
+CHKPRG! XZ xz
+
+IFNOT HAVE_WGET {
+	IFNOT HAVE_CURL {
+		DIENOW You need curl or wget to download the Frida SDK ;
+	}
+}
+
+REPORT R2_VERSION ;
+
+SUBDIRS ./config.mk ./config.h ;
