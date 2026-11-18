@@ -1,0 +1,153 @@
+#changelog-modal {
+  width: 100%;
+  height: 100%;
+  background: rgba(6, 6, 10, 0.78);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  overflow: hidden;
+  z-index: 200;
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#changelog-modal .content {
+  width: 520px;
+  max-width: 90vw;
+  min-height: 360px;
+  max-height: 78vh;
+  background: rgba(16, 16, 24, 0.94);
+  backdrop-filter: blur(22px);
+  -webkit-backdrop-filter: blur(22px);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-top-color: rgba(244, 117, 33, 0.65);
+  padding: 28px 32px;
+  display: flex;
+  flex-direction: column;
+  color: #ffffff;
+  font-size: 0.95rem;
+  border-radius: 20px;
+  box-shadow: 0 28px 70px rgba(0, 0, 0, 0.85);
+}
+
+#changelog-modal .content .header {
+  font-size: 1.35rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  padding-bottom: 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+#changelog-modal .content .body {
+  position: relative;
+  flex: 1;
+  padding-top: 20px;
+  overflow-y: auto;
+}
+
+#changelog-modal .content .body .text-big {
+  font-size: 1.5rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  text-align: center;
+  color: #f47521;
+}
+
+#changelog-modal .content .body .text-small {
+  font-size: 1.05rem;
+  color: rgba(255, 255, 255, 0.78);
+  padding-top: 16px;
+}
+
+#changelog-modal .content .extra {
+  bottom: 24px;
+  position: absolute;
+  font-size: 0.8rem;
+  color: rgba(255, 255, 255, 0.48);
+}
+
+#changelog-modal .content .body .changes {
+  list-style: none;
+  padding: 8px 0 20px 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+#changelog-modal .content .body .changes li {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+#changelog-modal .content .body .changes li .change-title {
+  font-size: 0.95rem;
+  font-weight: 800;
+  color: #f47521;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 4px;
+}
+
+#changelog-modal .content .footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 16px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+#changelog-modal .content .footer .button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-width: 120px;
+  color: #0b0b0f;
+  background: linear-gradient(135deg, #f47521 0%, #ff8a3d 100%);
+  border: 1px solid #ff9d5c;
+  font-size: 0.95rem;
+  font-weight: 800;
+  padding: 10px 22px;
+  border-radius: 10px;
+  text-align: center;
+  cursor: pointer;
+  box-shadow: 0 8px 22px rgba(244, 117, 33, 0.35);
+  transition:
+    transform 0.16s ease,
+    box-shadow 0.16s ease,
+    background 0.16s ease,
+    border-color 0.16s ease;
+}
+
+#changelog-modal .content .footer .button.changelog-support-btn {
+  color: #ffffff;
+  background: rgba(255, 221, 0, 0.12);
+  border: 1px solid rgba(255, 221, 0, 0.45);
+  box-shadow: none;
+}
+
+#changelog-modal .content .footer .button.changelog-support-btn i {
+  color: #ffdd00;
+}
+
+#changelog-modal .content .footer .button.changelog-support-btn:hover,
+#changelog-modal .content .footer .button.changelog-support-btn.selected {
+  background: rgba(255, 221, 0, 0.22);
+  border-color: #ffdd00;
+  box-shadow: 0 6px 18px rgba(255, 221, 0, 0.22);
+  transform: translateY(-1px);
+}
+
+#changelog-modal .content .footer .button.changelog-close-btn:hover,
+#changelog-modal .content .footer .button.changelog-close-btn.selected {
+  box-shadow: 0 10px 26px rgba(244, 117, 33, 0.5);
+  transform: translateY(-1px);
+}

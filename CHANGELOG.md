@@ -1,0 +1,243 @@
+# Changelog
+
+All notable changes to **Crunchyroll Ubuntu Desktop** are documented in this file.
+
+## [v2.4.0] - 2026-11-18
+
+### Added
+- **Universal Star Ratings & Series Metadata Enrichment (`service.js`, `mappers/crunchyroll.js`, `mylist.js`, `history.js`, `home.js`):**
+  - Added batched `/content/v2/cms/objects` enrichment (`service.cmsObjects` + `mapper.enrichItemsWithSeriesMeta`) across **Watchlist**, **Custom Crunchylists**, **Watch History**, and **Home** episode/continue-watching cards so star ratings, launch years, `Sub`/`Dub` audio badges, and accurate `Ongoing`/`Completed` airing pills appear consistently everywhere.
+  - Upgraded **Browse** from `/content/v1/browse` to `/content/v2/discover/browse?ratings=true` for native star ratings on all browse grids.
+- **Full Movie Support Across Lists, Search & Watch History (`crunchyroll.js`, `home.details.js`, `home.episodes.js`, `history.js`, `search.js`):**
+  - Added full `movie_listing` and watched `movie` playback, details routing, and history/list card rendering alongside episodic series.
+
+### Fixed
+- **Long-Pause, Bluetooth Switch & Laptop Suspend/Resume Audio Recovery (`index.js`, `preload.js`, `player.js`, `video.js`):**
+  - Disabled Chromium out-of-process audio sandbox (`AudioServiceOutOfProcess`, `AudioServiceSandbox`) so PipeWire / PulseAudio streams survive idle corking on Ubuntu/Linux, granted local `speaker-selection` and `mediaKeySystem` permissions, held `powerSaveBlocker('prevent-display-sleep')` strictly during active playback, and forwarded Electron `powerMonitor` `suspend`/`resume` events.
+  - Added automatic `setSinkId('default')` -> `setSinkId('')` PipeWire stream re-binding after pauses `>= 5s` or `navigator.mediaDevices` `devicechange` (e.g. Galaxy Buds switching), exact-timestamp `video_v2` stream + Widevine license reload after pauses `>= 10m` or system wake (with Wi-Fi reconnect retry backoff), live `session.storage.access_token` injection in `dash.js` segment filters, pre-`attachSource` Widevine protection setup, and a `webkitAudioDecodedByteCount` silent-audio watchdog.
+- **API Resilience, Mark-as-Unwatched & Card Layout Polish (`service.js`, `session.js`, `home.episodes.js`, `home.css`, `mylist.css`, `history.css`):**
+  - Fixed false `AIRING` badges on finished historical simulcasts, fixed HTTP `400` when subtitle language is set to `Disabled`, fixed "Mark as Unwatched" via `DELETE /content/v2/discover/{account_id}/watch-history/{id}`, added centralized HTTP status validation with 1-time `401`/`403` token/cookie refresh retry, and eliminated badge/button/title CSS overlaps and `228px` row clipping.
+
+---
+
+## [v2.3.1] - 2026-11-11
+
+### Fixed
+- **Linear Single-Layer See-Through Opacity (Wayland & X11):** Eliminated quadratic double-opacity dimming (`0.5 * 0.5 = 0.25`) by applying ARGB CSS alpha on Wayland sessions and `_NET_WM_WINDOW_OPACITY` on pure X11 sessions without stacking both layers simultaneously.
+- **Buffering Exit Cleanup (`player.js`):** Fixed orphaned `dash.js` background audio and segment downloads when pressing Back/Escape while a video is still buffering.
+- **Startup Changelog Persistence (`session.js`):** Removed the legacy `v2.0.0` startup overwrite so the "What's New" modal only opens once per release.
+- **Memory, Gamepad, MPRIS & Multi-Monitor Stability:** Unslicked carousels before screen teardown, stopped idle 60fps gamepad polling when disabled, clamped restored window/PiP bounds across multi-monitor changes, cleared `mediaSession` handlers on exit, preserved active sleep timers across episode switches, hardened renderer CSP & HTML escaping, and aligned `StartupWMClass` and `ISC` Snap metadata.
+
+## [v2.3.0] - 2026-11-05
+
+### Added
+- **See-Through Player Window Translucency (`20%` - `100%`) (`index.js`, `preload.js`, `css/app.css`, `server/js/screen/video.js`, `js/app.js`):**
+  - Enabled 32-bit ARGB window visual (`transparent: true` on `BrowserWindow`) and added `setWindowOpacity` / `getWindowOpacity` IPC bridges plus CSS root-canvas transparency (`html, body { background: transparent !important; }` with `#000` backdrop moved to `body::before`) so lowering player translucency composites the entire Crunchyroll player window with your underlying code editor, terminal, or browser on Linux/Ubuntu.
+  - Added GNOME Wayland / XWayland fullscreen black-curtain bypass (`wasFullScreenBeforeTranslucent` in `index.js`): when lowering opacity below `100%` while fullscreen, automatically transitions out of exclusive `_NET_WM_STATE_FULLSCREEN` into full work-area bounds (`getFullWorkAreaBounds`) so the compositor renders the desktop behind the video, and restores fullscreen when returning to `100%` opacity or exiting the player.
+  - Scoped window translucency strictly to the video player (`body.player-active` via `window.syncPlayerOpacityContext` in `video.init()` and `video.destroy()`): leaving the player or reopening the app always restores `100%` solid opacity (`cr_window_opacity` is cleared on startup).
+  - Temporarily forces `100%` opacity (`body.capturing-screenshot` override + `setWindowOpacity(1.0)`) during `Ctrl + Shift + S` frame captures so saved PNGs are never washed out.
+- **Standing Vertical Popover Sliders & Circular Icon Buttons for Volume & Translucency (`server/js/screen/video.js`, `server/css/video.css`, `js/app.js`):**
+  - Replaced the horizontal bottom-bar sliders with compact top-right style circular buttons (`.osd-round-btn` inside `.osd-popup-control`) featuring live status badges (`#volume-badge`, `#opacity-badge`) that highlight in orange when muted or translucent (`< 100%`).
+  - Added frosted-glass standing vertical popover sliders (`.osd-standing-popover`, `.osd-standing-track`, `.osd-standing-fill`) that open upward on hover or drag with click-to-mute / click-to-toggle-translucency (`100%` <-> `65%` or last translucent level), vertical drag scrubbing, and `5%` mouse-wheel adjustment.
+  - Added an interactive CSS hover bridge (`.osd-standing-popover::after`), expanded bounding-box pointer tracking (`isPointerInPopupControl`), a `220ms` close grace timer, sibling popover auto-dismissal so adjacent Volume and Translucency popovers never overlap, OSD idle-hide protection while hovering or scrubbing a popover, and isolated seek-bar hover expansion.
+
+---
+
+## [v2.2.0] - 2026-11-05
+
+### Added
+- **In-Player Video Quality Selector & Live `Auto` Resolution Indicator (`server/js/core/player.js`, `server/js/screen/video.js`, `server/css/video.css`, `js/app.js`):**
+  - Added a Video Quality button (`fa-sliders`) in the top-right video player toolbar and keyboard shortcut `Q` that opens a frosted pill bar (`#quality-menu`) to switch between `Auto`, `1080p`, `720p`, `480p`, `360p`, and `240p` live mid-stream via `dash.js` without reloading the episode, synced with `session.storage.quality`.
+  - Hooked `dash.js` `QUALITY_CHANGE_RENDERED` and `STREAM_INITIALIZED` events (`player.getLiveResolutionHeight`) so `Auto` mode displays the active negotiated resolution in the menu (`Auto (1080p)`) and on the toolbar icon badge (`A 1080p`).
+- **Sleep Timer / Auto-Pause (`server/js/screen/video.js`, `server/css/video.css`, `js/app.js`):**
+  - Added a Sleep Timer button (`fa-moon`) in the top-right player toolbar and keyboard shortcut `T` with 6 options (`Off`, `This Ep`, `2 Eps`, `3 Eps`, `30m`, `60m`) and a live orange status badge on the toolbar icon.
+  - Automatically suppresses auto-advance and pauses playback at the end of the target episode count or countdown duration with a toast notification.
+- **Previous Episode Navigation (`server/js/screen/video.js`):**
+  - Added a Previous Episode button (`fa-backward-step`) in the player toolbar and keyboard shortcut `P` (`video.prevEpisode`), and wired the MediaSession `previoustrack` handler so pressing the hardware Previous key within the first 15 seconds jumps to the previous episode.
+- **Timeline Chapter Markers & Hover Chapter Labels (`server/js/screen/video.js`, `server/css/video.css`, `js/app.js`):**
+  - Added color-coded chapter markers (`#chapter-markers`) directly on the video progress bar for **Recap**, **Intro**, and **Credits** segments and appended the active segment name to the hover timestamp tooltip (`01:24 - Intro`, `22:10 - Credits`).
+- **`Ongoing` / `Completed` Airing Status, Next-Episode Countdown & Estimated Finale Badges (`server/js/core/mappers/crunchyroll.js`, `server/js/screen/home.details.js`, `server/js/screen/home.js`, `server/js/screen/mylist.js`, `server/css/home.css`, `js/app.js`):**
+  - Extracts native Crunchyroll `is_simulcast`, `is_complete`, and `series_launch_year` metadata for instant zero-latency **`Ongoing`** (emerald pulse dot), **`Completed`** (check badge), and launch year badges across the Home hero banner, Anime Details, My List, and poster cards (`AIRING` badge).
+  - Performs non-blocking, timeout-guarded (`3500ms`), two-tier cached (`Map` + `sessionStorage`) background enrichment via AniList GraphQL (`https://graphql.anilist.co`) to display planned episode counts (`6 / 12 Eps`), next-episode countdowns (`Ep 7 in 2d 14h`), and estimated season finale dates (`Est. Finale: Jun 28`) without ever blocking or delaying UI rendering.
+
+### Fixed
+- **Next-Episode Countdown Timer Sync on Skip Credits & Seek (`server/js/screen/video.js`, `server/js/core/player.js`):**
+  - Added `video.updateNextEpisodeCount()` and wired it into `skipCurrentSegment()`, `setPlayingTime()`, `nextEpisode()`, `player.seekBy()`, and `player.forwardTo()` so `#next-episode-count` always reflects the true remaining seconds of the episode after skipping credits or scrubbing.
+
+---
+
+## [v2.1.0] - 2026-11-02
+
+### Added
+- **Linux / GNOME Desktop Media Integration - MPRIS (`server/js/screen/video.js`, `server/js/core/player.js`):**
+  - Integrated the `navigator.mediaSession` API to broadcast live anime metadata (episode title, series name, season/episode number, and thumbnail artwork) and playback position state to the Ubuntu top-bar calendar/media tray, GNOME lock screen, hardware media keys (`Play/Pause`, `Next`, `Previous`), and Bluetooth earbuds.
+- **Custom List Rename & Input Prompt Modal (`#cr-prompt-modal` in `js/app.js`, `css/app.css`, `server/js/screen/home.details.js`, `server/js/screen/mylist.js`, `server/css/home.css`, `server/css/mylist.css`):**
+  - Added a frosted-glass input prompt modal (`window.showPromptDialog`) and edit/rename buttons (`.crunchylist-rename-btn` in the Manage Lists modal and `.mylist-rename-list-btn` on Custom List row headers in `My List`) backed by `service.renameCustomList` (`PATCH /content/v2/{account_id}/custom-lists/{list_id}`), complete with empty-name validation and confirmation toasts.
+- **Watch History Item Removal & Clear All History (`server/js/core/service.js`, `server/js/core/mappers/crunchyroll.js`, `server/js/screen/history.js`, `server/css/history.css`, `js/app.js`):**
+  - Added `service.deleteHistoryItem` and `service.clearHistory` API endpoints, a 1-click hover trash button (`.history-quick-remove`) on each Watch History card, and a header **Clear History** button (`#history-clear-all-btn`) guarded by the confirmation modal.
+- **In-Player Episodes Drawer Season Switcher (`server/js/screen/video.js`, `server/css/video.css`, `js/app.js`):**
+  - Added `<` / `>` season navigation buttons (`#player-season-prev` and `#player-season-next`, plus `Left` / `Right` arrow key support) inside the in-player Episodes drawer (`E`) so you can browse and play episodes from any season without leaving the video player.
+- **Subtitle Appearance Customization (`server/js/screen/settings.js`, `server/js/core/player.js`, `server/css/video.css`):**
+  - Added **Subtitle Size** (`Small 85%`, `Default 100%`, `Large 125%`, `Extra Large 150%`) and **Subtitle Background** (`Drop Shadow`, `Translucent Pill`, `Solid Dark Box`) preferences in **Settings**, persisted in `localStorage` (`cr_subtitle_prefs`).
+- **HUD-Free Video Frame Screenshot Capture (`index.js`, `preload.js`, `server/js/screen/video.js`, `server/css/video.css`, `js/app.js`):**
+  - Added a camera button in the player OSD and `Ctrl + Shift + S` shortcut that temporarily hides all HUD overlays (`body.capturing-screenshot`), saves a clean PNG frame to `~/Pictures/Crunchyroll/Crunchyroll_<Series>_S<X>E<Y>_<timestamp>.png`, copies the image to the system clipboard, and shows a confirmation toast.
+- **Recent Searches Chips & Episode Watched / Unwatched Toggle (`server/js/screen/search.js`, `server/css/search.css`, `server/js/screen/home.episodes.js`, `server/css/home.css`, `js/app.js`):**
+  - Added clickable **Recent Searches** chips (`#search-recent-bar`, up to 6 recent queries persisted in `localStorage`) with individual `x` remove buttons and a `Clear` action on the Search screen.
+  - Added a 1-click **Mark as Watched / Unwatched** checkmark button (`.episode-watched-toggle`) on every episode card in the Seasons & Episodes screen (`#home_episodes-screen`) that updates playhead state via `service.setHistory` and syncs the progress bar in-place.
+
+---
+
+## [v2.0.1] - 2026-11-01
+
+### Added
+- **Delete Custom List Confirmation Dialog (`#cr-confirm-modal`) & My List Row Delete Action (`js/app.js`, `css/app.css`, `server/js/screen/home.details.js`, `server/js/screen/mylist.js`, `server/css/mylist.css`):**
+  - Added a frosted-glass confirmation dialog (`"Delete Custom List? - Do you really want to delete <List Name>?"` with `Cancel` and `Delete List` actions, supporting both mouse and keyboard navigation) whenever deleting an entire Custom List from either the **Manage Lists** modal or the **My List** screen.
+  - Added a **Delete List** button (`.mylist-delete-list-btn`) on Custom List row headers in the **My List** screen (`#mylist-screen`).
+- **Watchlist & Custom List Confirmation Toast Notifications (`#cr-toast-container` in `js/app.js`, `css/app.css`, `server/js/screen/home.details.js`, `server/js/screen/mylist.js`):**
+  - Added slide-in frosted confirmation toasts in the bottom-right corner (`2.6s` auto-dismiss) confirming every list operation: adding/removing an anime on the Watchlist, adding/removing an anime in a Custom List, creating a new Custom List, removing an item via the quick-remove trash button in **My List**, and deleting a Custom List.
+- **Empty List Name Validation on `Create & Add` (`server/js/screen/home.details.js`, `server/css/home.css`):**
+  - Clicking **Create & Add** (or pressing `Enter`) with an empty Custom List name input now displays `"Please enter a name for your custom list"`, focuses `#crunchylist-new-input`, and highlights the input with `.input-error`.
+
+---
+
+## [v2.0.0] - 2026-10-31
+
+### Added
+- **Crunchyroll Star Ratings & `Sub | Dub` Badges (`server/js/core/service.js`, `server/js/core/mappers/crunchyroll.js`, `server/css/home.css`):**
+  - Enabled `ratings=true` on Crunchyroll CMS, Search, and Watchlist API requests and added `service.seriesInfo` for live series metadata enrichment.
+  - Added Crunchyroll Android/Web-style Star Rating pills (`4.9 (120K)`), `Sub | Dub` / `Sub` / `Dub` audio badges, maturity ratings, season/episode counts, and genre chips across the Home hero banner, Anime Details screen, My List screen, and poster/episode cards.
+- **Custom Lists ("Crunchylists") & Watchlist Manager (`server/js/screen/home.details.js`, `server/js/screen/mylist.js`, `server/js/core/service.js`, `server/css/home.css`):**
+  - Added a `Manage Lists` button on the Anime Details screen that opens an interactive frosted-glass modal for toggling Watchlist membership, adding/removing the series across any of your Custom Lists ("Crunchylists"), creating new Custom Lists, and deleting Custom Lists directly from the desktop app.
+  - Added a 1-click hover Trash button (`.mylist-quick-remove`) on every poster card in the `My List` screen (`Watchlist` and all Custom Lists) for instant removal.
+- **Skip Credits, Skip Recap & Playback Auto-Skip Settings (`server/js/screen/video.js`, `server/js/screen/settings.js`, `server/css/settings.css`):**
+  - Extended Crunchyroll skip-events integration (`static.crunchyroll.com/skip-events`) beyond `intro` to detect `recap` and `credits` segments, dynamically displaying **Skip Recap**, **Skip Intro**, and **Skip Credits** (clickable, `Enter`, or `S` shortcut).
+  - Added a **Playback & Auto-Skip** category in **Settings** with persistent toggle switches (`cr_playback_prefs`) for **Auto-Skip Intro**, **Auto-Skip Credits**, **Auto-Skip Recap**, **Auto-Play Next Episode**, and **Show Skip Buttons**.
+- **On-Screen `<- Back` Button & `Backspace` / `Alt+Left` Navigation (`js/app.js`, `css/app.css`, `server/js/main.js`):**
+  - Added a persistent, context-aware on-screen `<- Back` pill button (`#screen-back-btn`) in the top-left corner across all non-root screens (`Anime Details`, `Seasons & Episodes`, `Video Player`, `Category View`, `Search`, `Browse`, `My List`, `History`, `Settings`) that aligns to the screen's content rail and auto-hides with the video player OSD.
+  - Enabled `Backspace` and `Alt+Left` to step back across all screens when not focused in a text input.
+- **In-Player Episode List Drawer (`server/js/screen/video.js`, `server/css/video.css`, `js/app.js`):**
+  - Added an **Episodes (`E`)** button in the video player OSD and keyboard shortcut `E` that slides out a season episode drawer with thumbnails, watch progress bars, `Sub | Dub` badges, and 1-click episode switching without leaving the player.
+- **Premium Video Progress Bar & Full-Pill Volume Slider (`server/css/video.css`, `js/app.js`, `server/js/screen/video.js`):**
+  - Redesigned the video progress bar into a sleek `5px` pill track that expands to `12px` on hover with a glowing circular thumb, ghost hover-fill bar (`#seek-hover`), and floating timestamp pill (`#seek-tooltip`).
+  - Enabled click-and-drag volume scrubbing across the entire `#osd-volume` pill container (`#volume-bar` + dark pill background + percentage label), plus `5s` mouse-wheel timeline scrubbing over the progress bar.
+- **Redesigned Login Screen & About Page (`server/js/screen/login.js`, `server/css/login.css`, `server/js/screen/settings.js`, `server/css/settings.css`):**
+  - Upgraded the Login screen into a frosted glass card with leading icons, password visibility toggle (`Alt+V`), real-time Caps Lock warning pill, inline validation, and `Remember email` persistence.
+  - Redesigned **Settings -> About** with author credit (**Pulkit Mundra**), version badge (`v2.0.0`), runtime environment badges (Electron + Widevine CDM + Shaka Player), clickable external links (`GitHub Repository`, `Report an Issue`, `Author Portfolio`), and a Desktop Shortcuts cheat-sheet grid.
+- **Global UI/UX Polish (`css/app.css`, `server/css/search.css`, `server/js/screen/search.js`):**
+  - Added card hover lift and glow across Home, My List, Search, History, and Browse grids, custom dark/orange scrollbars, OSD icon tooltips, and a rounded Search pill bar with a clear (`X`) button.
+- **Unified Modernist Minimal UI System (`css/app.css`, `server/css/*.css`, `server/js/screen/history.js`, `server/js/screen/browse.js`, `server/js/screen/home.js`, `server/js/screen/search.js`, `server/js/screen/video.js`, `js/app.js`):**
+  - Eliminated all remaining legacy Samsung Tizen Smart TV UI elements across all 14 stylesheets and unified the entire app under a single frosted-obsidian modernist minimal aesthetic (`#08080c` base, `rgba(14, 14, 20, 0.88-0.94)` frosted glass surfaces with `backdrop-filter: blur(14px-22px)`, `1px-1.5px` hairline borders, `#f47521` accents, `10px-16px` rounded geometry, and tabular numerals).
+  - Replaced the left float-based Tizen menu (`server/css/menu.css`), `310x120px` black corner logo blob, `6px` neon box-shadows, `12px` progress bars, 90-degree rotated `.browse-back` text, flat `60%`-wide Anime Details action list, and flat black Seasons & Episodes screen (`server/css/home.css`, `server/css/mylist.css`) with a glassmorphic navigation rail, subtle corner watermark, `2px` rounded focus frames, `4px` gradient progress strips, frosted action pills, and a frosted split-pane Seasons & Episodes browser.
+  - Revamped Watch History (`server/js/screen/history.js`, `server/css/history.css`), Search results (`server/css/search.css`), Browse Categories (`server/css/browse.css`, `server/js/screen/browse.js`), Video Player OSD & Audio/Subtitles drawer (`server/css/video.css`, `server/js/screen/video.js`), Settings (`server/css/settings.css`), Profile Switcher (`server/css/profiles.css`), and all modal/overlay screens (`exit.css`, `changelog.css`, `keyboard.css`, `loading.css`) to match the revamped modernist design language.
+
+### Fixed
+- **Cursor Hiding Only inside Video Player (`js/app.js`, `css/app.css`):**
+  - Scoped `.hide-cursor` strictly to active video playback (`#video-screen`) and removed the duplicate 3s `app.js` cursor timer that caused the mouse cursor to vanish on non-video screens.
+- **X11 `CapsLock` Key-Release State Bug (`server/js/screen/login.js`):**
+  - Fixed an X11 `LockMask` quirk where `e.getModifierState("CapsLock")` remained `true` on `CapsLock` `keyup` when turning Caps Lock off.
+- **PiP Window Drag & Resize Lockup on GNOME Wayland / XWayland (`index.js`):**
+  - Fixed a race condition where clicking the unfocused PiP window's server-side titlebar or resize border from a native Wayland window fired `FocusIn` (`win.on("focus")`) before XWayland updated pointer coordinates (`screen.getCursorScreenPoint()`), causing `win.on("focus")` to call `setFullScreen(true)` in the middle of GNOME Mutter's interactive move/resize grab and leaving `_NET_WM_STATE_FULLSCREEN` stuck on the `560x315` window (which disabled `_NET_WM_ACTION_MOVE`, `_NET_WM_ACTION_RESIZE`, and window decorations).
+  - Added `enforceMiniWindowDecoratedState()` to guarantee that whenever `isMiniPlayer` is active, `_NET_WM_STATE_FULLSCREEN` and `maximized` are cleared and `setResizable(true)` / `setMovable(true)` are enforced.
+- **OSD Auto-Hide While Scrubbing, Audio/Sub Drawer Speed Reset, & Fractional Playhead Resume (`server/js/screen/video.js`, `server/js/core/player.js`, `server/js/core/mappers/crunchyroll.js`, `server/js/screen/search.js`):**
+  - Prevented OSD auto-hide while actively dragging the progress or volume slider, preserved active playback speed (`1.25x`, `1.5x`, etc.) and auto-closed the language drawer when switching audio/subtitles with the mouse, preserved exact second-level resume positions, and added request sequence guards (`search._reqId`) to prevent out-of-order search responses.
+- **In-Player Episodes Drawer Season Fallback & Full-Codebase Audit Fixes (`server/js/core/service.js`, `server/js/core/session.js`, `server/js/core/mappers/crunchyroll.js`, `server/js/screen/*.js`, `js/app.js`, `css/app.css`):**
+  - Fixed empty in-player Episodes drawer when starting playback via "Start Watching" / "Continue Watching" (`service.continue`) by resolving `season_id` and `series_id` from `panel.episode_metadata` and falling back to `/content/v2/cms/objects/{episodeId}` (`resolveEpisodeContext`) when `season_id` is absent.
+  - Validated HTTP `response.ok` and `access_token` presence across `service.token`, `service.refresh`, and `service.switchProfile` so invalid login credentials display the inline error banner instead of silently resetting the login screen.
+  - Fixed startup hang in `main.events.login` and `session.load_profiles` when profile/token refresh fails.
+  - Fixed `profilesScreen.getOptions()` rendering literal commas between profile cards and ensured a default selected profile card.
+  - Fixed `mapper.listByCategories` crash and wrong hero banner index when any subcategory returns empty items, and hardened `mapper.mapItems` with per-item `preventImageErrorTest` so a single missing thumbnail never wipes out an entire row.
+  - Added `.empty` (`pointer-events: none; opacity: 0`) to Slick dummy spacer items across `home.js`, `mylist.js`, and `home.episodes.js` so blank space after short rows cannot be hovered or clicked as ghost cards.
+  - Fixed `Esc`, `Backspace`, and `Right-Click` on the open sidebar menu closing the menu cleanly instead of popping up the "Exit Application" modal.
+  - Preserved `video.currentItem` metadata and refreshed episode context when switching audio or subtitle tracks inside the player.
+  - Scoped DOM selectors in `home.js`, `mylist.js`, `history.js`, and `search.js` to their respective screen containers to prevent cross-screen selector collisions when `home_details` is opened over `My List`, `History`, or `Search`, and guarded all arrow/Enter handlers against empty lists.
+  - **Home Hero Banner Direct Play & Stale `continue` State Fix (`server/js/screen/home.js`, `server/js/screen/home.details.js`, `js/app.js`):**
+    - Made the **Play** button on the Home screen Hero Banner immediately start playback (via `home_details.playItem`) while **More Information** opens the Anime Details view.
+    - Cleared `home_details.data.continue` at the start of `home_details.init` so clicking **Play** on a newly opened series before `service.continue` finishes can never launch the previous series' episode, and added a Season 1 Episode 1 fallback (`playItem`) when `service.continue` is unavailable.
+  - **Video Player Subtitle Fallback, Aspect Ratio Persistence, & Manual Quality Selection (`server/js/screen/video.js`, `server/js/core/player.js`):**
+    - Fixed a playback crash (`TypeError` on `video.subtitles[-1].url`) when an account's preferred subtitle language is unavailable on a stream by falling back to `Disabled` (`index 0`).
+    - Added language code fallbacks (`|| element.name`) in `setAudios` and `setSubtitles`, formatted `#title` and `#subtitle` cleanly for movies, preserved the selected aspect ratio (`contain`/`cover`/`fill`) across audio/subtitle/episode switches, and fixed `player.getQuality()` to return a valid integer bitrate index with closest-height fallback.
+  - **Episodes Screen Spacer Bounds, Browse Async Race Fix, Profile Switcher Back Navigation, & Modal Guards (`server/js/screen/home.episodes.js`, `server/js/screen/browse.js`, `server/js/screen/profiles.js`, `server/js/core/service.js`, `js/app.js`):**
+    - Prevented `KEY_DOWN` in `home_episodes.js` from scrolling into the 4 invisible `.episode.empty` spacer slides and guarded `.slick` access.
+    - Fixed an async hover race condition in `browse.js` when loading a category, added missing error handlers across all `session.refresh` calls in `service.js`, made `Esc` on the sidebar-opened Profile Switcher return cleanly to Home, and added `#crunchylist-modal` / `#player-episodes-slide` exclusions to `canHoverSidebarMenu`, `dblclick`, and `Ctrl+F`.
+  - **Settings Language List Squashing Fix, Playback Speed Icon & Menu, Skip Credits Stacking, Top Command Bar Redesign, & Post-Revamp Audit Fixes (`server/css/settings.css`, `server/js/screen/settings.js`, `server/css/video.css`, `server/js/screen/video.js`, `css/app.css`, `js/app.js`, `server/css/home.css`, `server/css/mylist.css`, `server/js/screen/mylist.js`, `server/css/search.css`, `server/js/screen/search.js`, `server/css/history.css`, `server/js/screen/history.js`):**
+    - Fixed `Subtitle Language` and `Application Language` lists in Settings being squashed into thin unreadable strips by removing `height: 100%; display: flex; justify-content: center;` compression on `.list-active`, adding `flex-shrink: 0; min-height: 52px;` on `li`, and enabling smooth native vertical scrolling (`overflow-y: auto` + styled scrollbar + `scrollIntoView`).
+    - Fixed the broken Playback Speed icon glyph in the video player OSD caused by `font-family: "Lato"` overriding `"Font Awesome 6 Free"` on `i.playback-speed`, upgraded the icon to `fa-gauge-high`, modernized `#speed-menu` with individual `.active` speed pills (`0.25x`..`2x`), and fixed `KEY_ENTER` priority in `video.js` so clicking top-right OSD buttons works during Recap, Intro, and Credits.
+    - Fixed **Skip Credits** (`#skip-intro`) overlapping the **Next Episode countdown card** (`.next-episode`) by toggling `#video-screen.next-ep-visible` to stack `#skip-intro` cleanly above `.next-episode` (`margin-bottom: 312px`), hiding `.next-episode` when seeking backward out of the credits window, and scaling both elements proportionally in `560x315` compact PiP mode.
+    - Redesigned the top hover window-control dock (`#top-center-dock` / `#floating-toolbar`) into a frosted-obsidian segmented command bar (`border-radius: 14px`) with a `48x4px` glass handle, ghost-segmented buttons, vertical divider between `Menu` and window actions (`Mini Float`, `Pin on Top`), and `<kbd>F9</kbd>` / `<kbd>F10</kbd>` keycap badges.
+    - Enabled native vertical scrolling (`overflow-y: auto` + `scrollTop` + `scrollIntoView`) inside the Video Player Audio & Subtitles drawer (`#audios` and `#subtitles`), fixed `.browse-back` overlapping `#screen-back-btn`, preserved `.details.full` when returning from Anime Details to the Home Hero Banner, replaced hardcoded `1920x1080` pixel focus frames on Home and My List rows with responsive `.slick-current .poster` focus rings, and converted Search (9 columns) and History (5 columns) to responsive CSS Grids with dynamic row pitch.
+  - **Animated Auto-Skip Countdown Fill, Click-Anywhere-to-Abort, & Professional Settings Copy (`server/js/screen/video.js`, `server/css/video.css`, `server/js/screen/settings.js`, `js/app.js`):**
+    - Updated **Settings -> Playback & Auto-Skip** labels and descriptions to clean, professional copy (`Auto-Skip Intro`, `Auto-Skip Credits`, `Auto-Skip Recap`, `Auto-Play Next Episode`, `Show Skip Buttons`).
+    - Replaced instantaneous auto-skip jumps with a smooth `3.2s` animated progress fill (`.skip-fill`) sweeping from the left edge to the right edge of `#skip-intro` with a soft glowing leading edge when `Auto-Skip Intro`, `Auto-Skip Credits`, or `Auto-Skip Recap` is active.
+    - Clicking `#skip-intro` (or pressing `Enter` / `S`) skips immediately, while clicking anywhere else in the player window (or pressing `Esc`, `Backspace`, `Right-Click`, `Space`, `K`, or seeking) aborts the auto-skip countdown for that segment without interrupting playback.
+  - **Back Button (`#screen-back-btn`) Title Overlap Fix Across All Screens (`css/app.css`, `server/css/video.css`, `server/css/home.css`, `server/css/mylist.css`, `server/css/history.css`, `server/css/browse.css`, `server/css/search.css`, `server/css/settings.css`):**
+    - Eliminated overlaps between `#screen-back-btn` (`<- Back`) and page/episode titles across Video Player OSD (`padding-top: 72px`, `54px` in compact PiP), Home Hero Banner & Anime Details (`height: 100vh` on `.home_details-screen .details.full` and safe `margin-top: auto` / `margin-bottom: auto` flex centering inside `padding-top: 76px`), Seasons & Episodes (`padding-top: 76px`), My List (`padding-top: 76px` with safe flex centering), Watch History (`padding-top: 76px`), Browse Categories (`padding-top: 76px`), Search (`margin-top: 74px`), and Settings (`margin-top: 76px`).
+  - **Multi-Pass Full-Codebase Audit Fixes (`server/js/core/mappers/crunchyroll.js`, `index.js`, `server/js/electron/controllerListener.js`, `server/js/screen/mylist.js`, `server/js/screen/home.episodes.js`, `server/js/screen/settings.js`, `server/js/screen/video.js`, `js/app.js`):**
+    - Enriched `mapper.history` items with `episode_number`, `season_number`, `episode_title`, `season_id`, and `series_id` so Watch History cards display `S1 E1` episode badges and in-player Episodes drawer lookup works when launched from History.
+    - Fixed `handleGamepadButtonPress` `aButton` `keyUp` event in `index.js` sending `"enter"` instead of `"space"`, and initialized `enabled = true` in `controllerListener.js` when `settings.controller` is unset on first launch.
+    - Scoped `var listToFetch` in `mylist.js`, guarded `responseList.data` and `responseItems.data`, styled the `mylist` error state, and prevented `translate.go()` from splitting user-defined Custom List titles containing dots.
+    - Added DOM existence guards in `home_episodes.load()` and `home_episodes.keyDown()` to prevent `TypeError` crashes on rapid Back navigation while requests are in flight.
+    - Hardened `settings.js` list navigation/action methods against negative indices, added HTML escaping for dynamic player strings in `video.js`, added a `1200ms` post-skip seek cooldown (`_skipCooldownUntil`) to prevent `#skip-intro` re-flashing during Shaka seek transitions, and added `isVideoDrawerOpen()` in `js/app.js` so the cursor and OSD stay active while the in-player Episodes drawer is open.
+  - **Settings & Drawer Scroll Fix, Compact Home Hero Banner (Option A), Pixel-Exact Back Button Rail Alignment, Top Dock Streamlining, & Scaled PiP Controls (`js/app.js`, `css/app.css`, `server/css/settings.css`, `server/css/home.css`, `server/css/mylist.css`, `server/css/history.css`, `server/css/browse.css`, `server/css/search.css`, `server/css/video.css`, `server/js/screen/settings.js`, `server/js/screen/video.js`):**
+    - Fixed sticky/stuttery scrolling in Settings (`Audio Language`, `Subtitle Language`, `Application Language`) and in-player drawers (`#audios`, `#subtitles`, `#player-episodes-list`, `#custom-lists-body`) caused by `js/app.js`'s `wheel` listener assigning `scrollTop += dy` on every wheel tick while `scroll-behavior: smooth` was active on the same `overflow-y: auto` container (which canceled and restarted smooth-scroll animations on every continuous wheel/trackpad tick).
+    - Applied **Option A** for the Home Screen Banner (`server/css/home.css`, `js/app.js`): `#home-screen .content .details` now uses a compact `36vh` hero banner while browsing rows (giving poster carousels `64vh` of vertical screen space) and expands to `52vh` when the top Hero Banner is focused on Home, while `.home_details-screen #home-screen .content .details.full` remains `100vh` on the dedicated Anime Details view.
+    - Aligned `#screen-back-btn` (`<- Back`) and all screen headers, titles, cards, and grids to a strict pixel-exact vertical plumb line (`124px` across all sidebar and details screens: `Home`, `Category View`, `Anime Details`, `My List`, `History`, `Browse`, `Search`, `Settings`; and `48px` on full-bleed screens: `Seasons & Episodes`, `Video Player`).
+    - Removed the redundant `Back` button from the top-center hover toolbar (`#floating-toolbar`) so it cleanly displays `Menu`, `Mini Float (F9)`, and `Pin on Top (F10)`.
+    - Scaled up all `body.compact-window` controls in CSS pixels (`#skip-intro`, `.next-episode`, `#floating-toolbar` / `.floating-btn`, `#screen-back-btn.on-video`, `#setting-options i`, and `.osd .progress` / `#osd-volume`) to compensate for Electron's `0.2916x` viewport zoom factor in `560x315` PiP mode so all buttons render at ~28-34 physical pixels tall with crisp ~11-13px physical text.
+  - **Centered Settings Card, Browse Lazy-Load Scroll Preservation, Full Last-Card Scroll Bounds, Back Button Alignment, & Post-Playback Home/Details Layout Recovery (`server/css/settings.css`, `server/css/search.css`, `server/css/home.css`, `css/app.css`, `server/js/screen/home.js`, `server/js/screen/home.details.js`, `server/js/screen/home.episodes.js`, `server/js/screen/video.js`, `server/js/core/service.js`, `server/js/core/session.js`, `server/js/core/mappers/crunchyroll.js`, `js/app.js`):**
+    - Restored center alignment on `#settings-screen` (`align-items: center; justify-content: center;`) and `#settings-screen .content` (`width: 78%; max-width: 1120px; height: 80vh; margin: 36px auto 0 auto;`) as well as `#search-screen .content .input` (`margin: 0 auto;`).
+    - Fixed Browse Category horizontal row lazy-loading resetting the row to the start and flashing the full-screen blocking loader by removing `loading.start()` / `loading.end()` from pagination requests and preserving `currentSlide` and `.slick-track` `_posX` / `translate3d` across `slickRemove` and `slickAdd` in `home.addToList`.
+    - Fixed the last card in horizontal rows on Home and My List being cut off in half when scrolling to the right by calculating `totalRowW` from `lastRealItem.offsetLeft + lastRealItem.offsetWidth + 64` instead of subtracting `firstItem.offsetLeft` (`124px` track left padding).
+    - Aligned `#screen-back-btn` across all screens (`left: 124px` across `Home Category View`, `Anime Details`, `Seasons & Episodes`, `Browse`, `My List`, `History`, `Search`; `left: max(11vw, calc(50vw - 560px))` aligned with the centered Settings card on `Settings`; and `left: 48px` on `Video Player`).
+    - Fixed missing cards on Home and missing action buttons (`Continue`, `Add to Watchlist`, `Manage Lists`, `Episodes` / `Play`, `More Info`) after watching an anime and returning by: (1) initializing `.row-content.slick()` before `.rows.slick()` in `home.init()`, (2) replacing `display: none` with `visibility: hidden; opacity: 0; pointer-events: none` on `.home_details-screen .rows` and adding `window.refreshSlickLayouts()` on `video.destroy()`, `home_details.destroy()`, `home_episodes.destroy()`, and `window.resize` so Slick never collapses hidden rows/cards to `0px`, (3) enforcing `height: 100vh` and `display: flex !important` on `.home_details-screen_buttons` on `home_details-screen` and refreshing `Continue` progress on `video.destroy()`, and (4) preserving `profile_id` (`grant_type: "refresh_token_profile_id"`) and queuing concurrent callers in `session.refresh` / `session.cookies` plus request generation guards in `mapper.home` and `mapper.listByCategories`.
+  - **Top Hover Menu Button in Video Player, Click-Only Settings Submenu Switching, Bounded Responsive Control Scaling, Home Bottom Space Fix, & Inline Browse Lazy-Loader (`server/js/main.js`, `server/js/screen/menu.js`, `server/js/screen/home.js`, `server/js/screen/video.js`, `index.js`, `js/app.js`, `css/app.css`, `server/css/menu.css`, `server/css/home.css`, `server/css/mylist.css`, `server/css/settings.css`, `server/css/video.css`, `server/css/exit.css`):**
+    - Fixed the `Menu` button (`#btn-nav-menu`) in the top hover dock not opening the navigation drawer on the Video Player (`#video-screen`), Anime Details (`home_details-screen`), and Seasons & Episodes (`home_episodes-screen`) screens by prioritizing `menu.isOpen` before `video.id` in `main.resolveState()`, raising `.open-menu #menu-screen` to `position: fixed; z-index: 9600 !important` (and `#exit-screen` to `z-index: 9800`), scoping `.home_details-screen:not(.open-menu) #menu-screen`, guarding `menu.open()` against pre-auth/login/profile screens, and keeping the cursor visible while the menu drawer or exit dialog is open.
+    - Fixed Settings submenus switching on hover instead of on click by removing the `mouseover` submenu auto-switch in `js/app.js` while keeping crisp CSS `:hover` visual feedback on both left and right Settings lists.
+    - Fixed top hover buttons (`#floating-toolbar`) and `#screen-back-btn` (both in-player and off-player) becoming oversized at ~half-screen and intermediate window aspect ratios by replacing the `< 1000px` binary size jump with a continuous, strictly capped `--ui-scale` CSS custom property (`clamp(...)` / `max-height`) and restricting `compact-window` to `<= 720x420` / PiP windows.
+    - Fixed the empty black space at the bottom of the Home and Category views when scrolling by setting `#home-screen .content .rows` to `height: calc(100vh - 36vh)` (`calc(100vh - 52vh)` when `.details.full`) and `#home-screen .content .rows > .slick-list` to `height: 100% !important; overflow: visible !important`.
+    - Added an inline loading spinner card (`.item.row-lazy-loader`) at the end of Browse Category horizontal rows (`home.setRowLoading`) while lazy-loading additional anime tiles.
+  - **Pre-Release Security Audit & DOM/IPC Hardening (`index.js`, `server/js/core/mappers/crunchyroll.js`, `server/js/screen/menu.js`, `server/js/screen/mylist.js`, `server/js/screen/home.js`, `server/js/screen/history.js`, `server/js/screen/search.js`, `server/js/screen/browse.js`, `server/js/screen/home.episodes.js`, `server/js/screen/video.js`):**
+    - Validated `event.sender === win.webContents` across all `ipcMain` handlers in `index.js` and replaced the prefix regex in `openExternal` with `new URL(url)` parsing and an exact `ALLOWED_EXTERNAL_HOSTS` `Set` (`https:` only) to prevent hostname-prefix bypasses (`CWE-20`, `CWE-601`).
+    - Escaped active profile display names (`menu.escapeHtml`) and validated avatar filenames (`/^[A-Za-z0-9._-]+$/`) in `menu.js` (`CWE-79`).
+    - Added `mapper.escapeHtml` and `mylist.escapeHtml` across `crunchyroll.js`, `mylist.js`, `home.js`, `history.js`, `search.js`, `browse.js`, `home.episodes.js`, and `video.js` so user-defined Custom List titles/IDs, metadata badges, and catalog strings are HTML/attribute-escaped before DOM insertion (`CWE-79`).
+    - Fixed top-right video player OSD tooltips (`#setting-options i`) remaining visible after moving the cursor away by clearing `.selected` and `video.option` on mouse leave, removing duplicate native `title` attributes, and right-aligning the rightmost (`Fullscreen`) tooltip.
+
+---
+
+## [v1.0.2] - 2026-10-30
+
+### Fixed
+- **Stuck Title & Bottom Bar After Resizing PiP Window on XWayland (`server/js/screen/video.js`):**
+  - Fixed a bug under GNOME Wayland / XWayland (`xwayland-keyboard`) where resizing the floating PiP window could leave a function key (`F4`, `keyCode: 115`) stuck in a synthetic auto-repeat `keydown` loop (`~30ms` interval) until another window was clicked.
+  - Updated `video.keyDown` to ignore all function keys `F1-F12` (`keyCode 112-123`) in addition to modifier keys, and added a `default: osd = false` branch so unhandled or stuck keys never reset `window.lastUserActivityAt` or wake up `#osd`.
+
+---
+
+## [v1.0.1] - 2026-10-30
+
+### Fixed
+- **PiP & Fullscreen OSD / Title & Bottom Bar Auto-Hide (`server/js/main.js`, `server/js/screen/video.js`, `js/app.js`):**
+  - Fixed a state priority bug in `main.resolveState()` where a previously hovered `#menu-screen` inside a hidden `#home-screen` could override `main.state` to `"menu-screen"` during video playback, preventing `video.hideOSD()` and `hide-cursor` from firing.
+  - Added immediate overlay/OSD dismissal (`forceHideAllOverlays()`) on `window.blur` (`Alt+Tab` into PiP), `document.mouseleave` (cursor leaving the PiP or Fullscreen window), and window mode transitions (`F9` / `F10`).
+  - Added a self-healing playback watchdog inside `video.setPlayingTime()` (`timeupdate`) that automatically hides `#osd` and `#top-center-dock` after `2.2s` of pointer/keyboard inactivity (`4.2s` when the speed selector is open), guaranteeing the title and bottom progress bar never get stuck on screen.
+  - Extended post-resize/zoom synthetic `mousemove` suppression to `650ms` to cover multi-stage `setZoomFactor` updates during PiP window transitions, and shortened the compact PiP idle OSD timeout to `1400ms`.
+- **Top Center Dock Stuck `:hover` State on X11/XWayland (`css/app.css`):**
+  - Scoped `#top-center-dock:hover` rules to `body:not(.hide-cursor)` and added explicit `opacity: 0 !important; pointer-events: none !important` rules when `body.hide-cursor` is active so X11 window teleportation cannot leave the top dock stuck visible.
+- **Progress Bar Scrubbing State Resolution (`js/app.js`):**
+  - Ensured `mousedown` resolves `main.state` before checking `video.id` when scrubbing the progress bar.
+
+---
+
+## [v1.0.0] - 2026-10-30
+
+### Added
+- **Smart Auto-PiP on `Alt+Tab` (`F10` / `Ctrl+T`):**
+  - Automatically shrinks into a `560x315` always-on-top floating Picture-in-Picture window in the bottom-right corner when switching to another app, and expands back to Fullscreen when returning via `Alt+Tab` or the Ubuntu dock icon.
+- **Manual Floating Mini-Player (`F9` / `Ctrl+M`):**
+  - Toggleable `560x315` floating window mode with persistent drag/resize position memory across transitions.
+- **Top-Center Auto-Hide Handle & Floating Pill (`#top-center-dock`):**
+  - Compact orange handle at the top-center of the window that expands on hover to provide 1-click access to `Mini Float (F9)` and `Pin on Top (F10)`.
+- **Full Mouse & Trackpad Navigation:**
+  - Smooth 2D wheel/trackpad scrolling across carousels, season/episode lists, and settings menus.
+  - Click-and-drag video progress bar scrubbing, single-click Play/Pause, double-click Fullscreen (`F11`), and right-click Back (`Esc`).
+- **One-Command Ubuntu Desktop Setup (`install.sh`):**
+  - Automated installation of Castlabs Electron (Widevine CDM) runtime, live-editable repository symlink, and desktop launcher integration.

@@ -1,0 +1,471 @@
+window.home_episodes = {
+  id: "home_episodes-screen",
+  previous: NaN,
+  data: {
+    seasons: NaN,
+    episodes: NaN,
+  },
+
+  unslick: function () {
+    var nodes = $(`.${home_episodes.id} .slick-initialized`).get().reverse();
+    nodes.forEach(function (el) {
+      try {
+        $(el).slick("unslick");
+      } catch (_) {}
+    });
+  },
+
+  init: function (item) {
+    home_episodes.unslick();
+    $(`.${home_episodes.id}`).remove();
+    var episode_contents = document.createElement("div");
+    episode_contents.className = `${home_episodes.id} ${home_episodes.id}_content`;
+
+    var esc =
+      typeof mapper !== "undefined" && mapper.escapeHtml
+        ? mapper.escapeHtml
+        : function (s) {
+            return String(s == null ? "" : s);
+          };
+
+    episode_contents.innerHTML = `
+    <div class="option seasons">
+      <div class="title resize">${esc(item.title)}</div>
+      <div class="seasons-list">
+        <div id="seasons-list-offset"></div>
+      </div>
+    </div>
+    <div class="option episodes active">
+      <div class="title"></div>
+      <div class="episodes-list"></div>
+    </div>
+    `;
+
+    $(`#${home.id}`).append(episode_contents);
+
+    loading.start();
+    service.seasons({
+      data: {
+        id: item.id,
+      },
+      success: function (response) {
+        loading.end();
+        home_episodes.data.seasons = mapper.seasons(response);
+        var seasons_html = "";
+        home_episodes.data.seasons.forEach((season, index) => {
+          var audio_locale =
+            season.audio_locale && season.audio_locale.length
+              ? `(<i class="fa-solid fa-volume-low"></i> ${esc(season.audio_locale)})`
+              : "";
+          seasons_html += `
+          <div class="season${index === 0 ? " selected active" : ""}">${esc(season.title)} ${audio_locale}</div>`;
+        });
+        $(".seasons #seasons-list-offset").eq(0).html(seasons_html);
+        if (home_episodes.data.seasons && home_episodes.data.seasons.length > 0) {
+          home_episodes.load(home_episodes.data.seasons[0]);
+        }
+      },
+      error: function (error) {
+        loading.end();
+        console.log(error);
+      },
+    });
+
+    $(`body`).addClass(`${home_episodes.id}`);
+
+    if (main.state !== home_episodes.id) {
+      home_episodes.previous = main.state;
+    }
+    main.state = home_episodes.id;
+  },
+
+  load: function (season) {
+    if (!season || !$(".episodes .title")[0] || !$(".episodes .episodes-list")[0]) return;
+    var esc =
+      typeof mapper !== "undefined" && mapper.escapeHtml
+        ? mapper.escapeHtml
+        : function (s) {
+            return String(s == null ? "" : s);
+          };
+    $(".episodes .title")[0].innerText = `${season.title}`;
+    var epListEl = $(".episodes .episodes-list")[0];
+    if ($(epListEl).hasClass("slick-initialized")) {
+      try {
+        $(epListEl).slick("unslick");
+      } catch (_) {}
+    }
+    epListEl.innerHTML = "";
+    loading.start();
+    service.episodes({
+      data: {
+        id: season.id,
+      },
+      success: function (response) {
+        mapper.episodes(response, function (result) {
+          home_episodes.data.episodes = result;
+          if (!$(".episodes .episodes-list")[0]) {
+            loading.end();
+            return;
+          }
+
+          var episodes_html = "";
+          home_episodes.data.episodes.forEach((episode, epIndex) => {
+            var subDubBadge = episode.subDub
+              ? `<span class="ep-subdub-badge">${esc(episode.subDub)}</span>`
+              : "";
+            var isWatched = Boolean(
+              episode.duration && episode.playhead >= episode.duration
+            );
+            var watchedBtn = `<button type="button" class="episode-watched-toggle${
+              isWatched ? " watched" : ""
+            }" data-ep-index="${epIndex}" title="${
+              isWatched ? "Mark as Unwatched" : "Mark as Watched"
+            }"><i class="fa-${
+              isWatched ? "solid" : "regular"
+            } fa-circle-check"></i><span>${
+              isWatched ? "Watched" : "Mark Watched"
+            }</span></button>`;
+            episodes_html += `
+            <div class="episode" data-ep-index="${epIndex}">
+              <div class="episode-image">
+                <img src="${esc(episode.background)}">
+                ${home_episodes.view(episode)}
+                ${home_episodes.premium(episode)}
+              </div>
+              <div class="episode-details">
+                <div class="episode-title-row">
+                  <div class="episode-title">${esc(episode.episode_number)}. ${esc(episode.title)} ${subDubBadge}</div>
+                  ${watchedBtn}
+                </div>
+                <div class="episode-description">${esc(episode.description)}</div>
+              </div>
+            </div>`;
+          });
+          for (var index = 0; index < 4; index++) {
+            episodes_html += `
+            <div class="episode empty">
+              <div class="episode-image">
+                <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=">
+              </div>
+            </div>`;
+          }
+          $(".episodes .episodes-list").eq(0).html(episodes_html);
+
+          $(".episodes .episodes-list").slick({
+            vertical: true,
+            dots: false,
+            arrows: false,
+            infinite: false,
+            slidesToShow: 5,
+            slidesToScroll: 1,
+            speed: 0,
+            waitForAnimate: false,
+          });
+
+          if ($(".episodes .episodes-list")[0] && $(".episodes .episodes-list")[0].slick) {
+            $(".episodes .episodes-list")[0].slick.slickGoTo(0);
+          }
+          loading.end();
+        });
+      },
+      error: function (error) {
+        loading.end();
+        console.log(error);
+      },
+    });
+  },
+
+  refreshEpisodeCard: function (epIndex, btnEl) {
+    if (
+      !home_episodes.data ||
+      !Array.isArray(home_episodes.data.episodes) ||
+      !home_episodes.data.episodes[epIndex]
+    ) {
+      return;
+    }
+    var ep = home_episodes.data.episodes[epIndex];
+    var durMin = ep.duration && ep.duration > 0 ? ep.duration : 24;
+    var nowWatched = Boolean(ep.playhead && ep.playhead >= durMin);
+    var cardEl =
+      (btnEl && btnEl.closest && btnEl.closest(".episode")) ||
+      document.querySelector(`.episodes-list .episode[data-ep-index="${epIndex}"]`);
+    if (!cardEl) return;
+    var imgWrap = cardEl.querySelector(".episode-image");
+    if (imgWrap) {
+      var oldProg = imgWrap.querySelector(".progress");
+      if (oldProg && oldProg.parentNode) {
+        oldProg.parentNode.removeChild(oldProg);
+      }
+      var newProgHtml = home_episodes.view(ep);
+      if (newProgHtml) {
+        imgWrap.insertAdjacentHTML("beforeend", newProgHtml);
+      }
+    }
+    var toggleBtn = cardEl.querySelector(".episode-watched-toggle");
+    if (toggleBtn) {
+      toggleBtn.classList.toggle("watched", nowWatched);
+      toggleBtn.title = nowWatched ? "Mark as Unwatched" : "Mark as Watched";
+      toggleBtn.innerHTML = `<i class="fa-${
+        nowWatched ? "solid" : "regular"
+      } fa-circle-check"></i><span>${
+        nowWatched ? "Watched" : "Mark Watched"
+      }</span>`;
+    }
+  },
+
+  toggleEpisodeWatched: function (epIndex, btnEl) {
+    if (
+      !home_episodes.data ||
+      !Array.isArray(home_episodes.data.episodes) ||
+      !home_episodes.data.episodes[epIndex]
+    ) {
+      return;
+    }
+    var ep = home_episodes.data.episodes[epIndex];
+    var durMin = ep.duration && ep.duration > 0 ? ep.duration : 24;
+    var currentlyWatched = Boolean(ep.playhead && ep.playhead >= durMin);
+    var nowWatched = !currentlyWatched;
+    var targetPlayheadSec = nowWatched ? Math.round(durMin * 60) : 0;
+
+    var onDone = function () {
+      ep.playhead = nowWatched ? durMin : 0;
+      home_episodes.refreshEpisodeCard(epIndex, btnEl);
+      if (typeof window.showToast === "function") {
+        var epLabel =
+          (ep.episode_number ? "E" + ep.episode_number + " - " : "") +
+          (ep.title || "Episode");
+        window.showToast(
+          'Marked "' +
+            epLabel +
+            '" as ' +
+            (nowWatched ? "Watched" : "Unwatched"),
+          nowWatched ? "added" : "removed"
+        );
+      }
+    };
+    var onFail = function () {
+      if (typeof window.showToast === "function") {
+        window.showToast("Failed to update episode watch status", "error");
+      }
+    };
+
+    if (nowWatched) {
+      service.setHistory({
+        data: {
+          content_id: ep.id,
+          playhead: targetPlayheadSec,
+        },
+        success: onDone,
+        error: onFail,
+      });
+    } else {
+      service.deleteHistoryItem({
+        data: {
+          content_id: ep.id,
+        },
+        success: onDone,
+        error: onFail,
+      });
+    }
+  },
+
+  view: function (episode) {
+    if (!episode.playhead || !episode.duration) return "";
+    var pct = Math.min(100, Math.max(0, (episode.playhead * 100) / episode.duration));
+    var remMin = Math.max(1, Math.round(episode.duration - episode.playhead));
+    return `<div class="progress" style="width: ${pct}%" value="${
+      episode.playhead >= episode.duration
+        ? translate.go("home.episodes.watched")
+        : remMin + "m"
+    }"></div>`;
+  },
+
+  premium: function (episode) {
+    try {
+      return !session.storage.account.premium && episode.premium
+        ? `<i class="fa-solid fa-crown premium"></i>`
+        : "";
+    } catch(e) {
+      console.error(e);
+      return episode.premium ? `<i class="fa-solid fa-crown premium"></i>` : "";
+    }
+  },
+
+  destroy: function () {
+    $(`body`).removeClass(`${home_episodes.id}`);
+    home_episodes.unslick();
+    $(`.${home_episodes.id}`).remove();
+    if (
+      typeof home_details !== "undefined" &&
+      document.body.classList.contains(home_details.id)
+    ) {
+      $(`#${home.id} .content > .details`).addClass("full");
+      if (typeof home_details.refreshContinue === "function") {
+        home_details.refreshContinue(false);
+      }
+    }
+    if (typeof main !== "undefined" && typeof main.resolveState === "function") {
+      main.state = main.resolveState() || home_episodes.previous;
+    } else {
+      main.state = home_episodes.previous;
+    }
+    if (typeof window.refreshSlickLayouts === "function") {
+      window.refreshSlickLayouts();
+    }
+  },
+
+  keyDown: function (event) {
+    switch (event.keyCode) {
+      case tvKey.IS_KEY_BACK(event.keyCode):
+        home_episodes.destroy();
+        break;
+      case tvKey.KEY_LEFT:
+        var options = $(
+          `.${home_episodes.id}.${home_episodes.id}_content .option`
+        );
+        var current = options.index(
+          $(`.${home_episodes.id}.${home_episodes.id}_content .option.active`)
+        );
+        options.removeClass("active");
+        options.eq(current > 0 ? current - 1 : current).addClass("active");
+        break;
+      case tvKey.KEY_RIGHT:
+        var options = $(
+          `.${home_episodes.id}.${home_episodes.id}_content .option`
+        );
+        var current = options.index(
+          $(`.${home_episodes.id}.${home_episodes.id}_content .option.active`)
+        );
+        options.removeClass("active");
+        options
+          .eq(current < options.length - 1 ? current + 1 : current)
+          .addClass("active");
+
+        options = $(`.seasons-list .season`);
+        current = options.index($(`.seasons-list .season.active`));
+        $(`.seasons-list .season`).removeClass("selected");
+
+        var seasonPitch = options.get(0) ? options.get(0).offsetHeight + 12 : 68;
+        var marginTop = 0;
+        if (options.length > 8 && current > 4) {
+          if (current > options.length - 4) {
+            marginTop = -((options.length - 8) * seasonPitch);
+          } else {
+            marginTop = -((current - 4) * seasonPitch);
+          }
+        }
+
+        options.eq(current).addClass("selected");
+        var offsetElRight = document.getElementById("seasons-list-offset");
+        if (offsetElRight) {
+          offsetElRight.style.marginTop = `${marginTop}px`;
+        }
+        break;
+      case tvKey.KEY_UP:
+        var options = $(
+          `.${home_episodes.id}.${home_episodes.id}_content .option`
+        );
+        var current = options.index(
+          $(`.${home_episodes.id}.${home_episodes.id}_content .option.active`)
+        );
+        if (current > 0) {
+          var epListEl = $(".episodes .episodes-list")[0];
+          if (epListEl && epListEl.slick) {
+            epListEl.slick.prev();
+          }
+        } else {
+          options = $(`.seasons-list .season`);
+          current = options.index($(`.seasons-list .season.selected`));
+
+          options.removeClass("selected");
+          var newCurrent = current > 0 ? current - 1 : current;
+          options.eq(newCurrent).addClass("selected");
+
+          var seasonPitch = options.get(0) ? options.get(0).offsetHeight + 12 : 68;
+          var marginTop = 0;
+          if (options.length > 8 && newCurrent > 4) {
+            if (newCurrent > options.length - 4) {
+              marginTop = -((options.length - 8) * seasonPitch);
+            } else {
+              marginTop = -((newCurrent - 4) * seasonPitch);
+            }
+          }
+
+          var offsetElUp = document.getElementById("seasons-list-offset");
+          if (offsetElUp) {
+            offsetElUp.style.marginTop = `${marginTop}px`;
+          }
+        }
+        break;
+      case tvKey.KEY_DOWN:
+        var options = $(
+          `.${home_episodes.id}.${home_episodes.id}_content .option`
+        );
+        var current = options.index(
+          $(`.${home_episodes.id}.${home_episodes.id}_content .option.active`)
+        );
+        if (current > 0) {
+          var epListEl = $(".episodes .episodes-list")[0];
+          if (
+            epListEl &&
+            epListEl.slick &&
+            home_episodes.data.episodes &&
+            epListEl.slick.currentSlide < home_episodes.data.episodes.length - 1
+          ) {
+            epListEl.slick.next();
+          }
+        } else {
+          options = $(`.seasons-list .season`);
+          current = options.index($(`.seasons-list .season.selected`));
+
+          options.removeClass("selected");
+          var newCurrent = current < options.length - 1 ? current + 1 : current;
+          options.eq(newCurrent).addClass("selected");
+
+          var seasonPitch = options.get(0) ? options.get(0).offsetHeight + 12 : 68;
+          var marginTop = 0;
+          if (options.length > 8 && newCurrent > 4) {
+            if (newCurrent > options.length - 4) {
+              marginTop = -((options.length - 8) * seasonPitch);
+            } else {
+              marginTop = -((newCurrent - 4) * seasonPitch);
+            }
+          }
+
+          var offsetElDown = document.getElementById("seasons-list-offset");
+          if (offsetElDown) {
+            offsetElDown.style.marginTop = `${marginTop}px`;
+          }
+        }
+        break;
+      case tvKey.KEY_ENTER:
+      case tvKey.KEY_PANEL_ENTER:
+        var options = $(
+          `.${home_episodes.id}.${home_episodes.id}_content .option`
+        );
+        var current = options.index(
+          $(`.${home_episodes.id}.${home_episodes.id}_content .option.active`)
+        );
+        if (current > 0) {
+          var epListEl = $(".episodes .episodes-list")[0];
+          var epItem =
+            epListEl && epListEl.slick && home_episodes.data.episodes
+              ? home_episodes.data.episodes[epListEl.slick.currentSlide]
+              : null;
+          if (epItem) {
+            video.init(epItem);
+          }
+        } else {
+          options = $(`.seasons-list .season`);
+          current = options.index($(`.seasons-list .season.selected`));
+
+          options.removeClass("active");
+          options.eq(current).addClass("active");
+          if (home_episodes.data.seasons && home_episodes.data.seasons[current]) {
+            home_episodes.load(home_episodes.data.seasons[current]);
+          }
+        }
+        break;
+    }
+  },
+};
