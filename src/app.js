@@ -1,0 +1,889 @@
+/* 墨息 · Ink Quiet — 离线沙盒疗愈（水墨半）
+ *
+ * 渲染底座：window.Suminagashi（第三方 MIT 引擎改编版，版权声明见 lib/suminagashi.js 文件头部）。
+ * 本文件负责“交互”——也就是 IDEAS.md 里反复说的那件事：
+ *   AI 在画，但笔权永远在用户手里；用户落笔，AI 立刻让位。
+ *
+ * 设计纪律（来自 IDEAS.md v3）：
+ *   - 不评分、不过关、不失败、不爆炸。
+ *   - AI 只出“意图”（往哪落、多干多湿），真正的笔触交给流体物理。
+ *   - AI 的墨不表达情绪，只回应节奏；不打扰、不覆盖用户的笔。
+ */
+
+(function () {
+  'use strict'
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]))
+  }
+
+  try {
+
+  // ── 中英双语 UI（字不多，直接上字典；不持久化——隐私承诺：什么都不存）──
+  const I18N = {
+    zh: {
+      modeInk: '墨', modeSand: '沙', modeFine: '精', modeStill: '静',
+      modeTipInk: '墨：AI 同伴陪你画，随时可打断它',
+      modeTipSand: '沙：九种材料的物理沙盒',
+      modeTipFine: '精：无 AI，细笔、少扩散，自己创作',
+      modeTipStill: '静：零扩散，像普通画布，但保留水墨质感',
+      hide: '隐藏', hideTip: '隐藏工具栏（快捷键 C）',
+      brush: '笔触', density: '浓度', patience: 'AI 耐心', aiBrush: 'AI 笔触',
+      clear: '归零', undo: '撤回', save: '存图', saved: '已保存 ✓',
+      aiOn: 'AI 同伴：开', aiOff: 'AI 同伴：关',
+      hintInk: '落笔，或让 AI 先画。你随时可以打断它。',
+      hintSand: '倒一把沙，或让 AI 慢慢堆一座小丘。你随时可以打断它。',
+      hintFine: '静心细画。AI 已让位，画布全归你。',
+      hintStill: '墨落纸上不散。像普通画布，只是带水墨质感。',
+      inkSumi: '松烟墨', inkShu: '朱', inkMatsuba: '松叶', inkAi: 'AI 的蓝', inkWhite: '白（减淡 / 留白）',
+      matSand: '沙（下落 / 沉水）', matFire: '火（上浮 / 烧尽 / 引爆炸弹 / 点燃植物）',
+      matWater: '水（下落 / 浇灭火 → 蒸汽）', matCloud: '云（上浮 / 下雨 / 凝水）',
+      matBomb: '炸弹颗粒（引信 / 碰火即爆）', matSeed: '种子（落水边发芽）',
+      matPlant: '植物（生长 / 遇火燃烧）', matSnow: '雪（慢落堆积 / 遇火化水）',
+      matSteam: '蒸汽（上升 / 凝回水滴）',
+      ariaBar: '画具', ariaMode: '物态', ariaInks: '你的墨色', ariaMats: '你的材料',
+      immersive: '按 C 呼出工具栏',
+      sound: '声音', soundRain: '雨', soundTide: '潮', soundVol: '音量', soundAria: '环境音',
+      movie: '录制', movieStop: '停止', movieProcessing: '生成中…', movieTooShort: '录太短', movieUnsupported: '不支持',
+      movieTip: '把创作过程录成约 15 秒小视频（再点一次结束）',
+      langTitle: '切换语言 / Language',
+      help: '需要帮助？',
+      helpTitle: '需要帮助？',
+      helpAbout: '这是一个离线小沙盒：水墨、沙、精细、静四种画法。没有账号、没有网络、不保存任何数据；它不评分、不诊断，也不能代替专业帮助。',
+      helpSteps: '如果你正难受，或身边有人需要帮助：先找一个信任的人聊聊，或拨打下面的热线。它们免费、保密。',
+      helpHotlinesTitle: '热线',
+      helpRegionCN: '中国大陆', helpRegionHK: '中国香港', helpRegionTW: '中国台湾', helpRegionMO: '中国澳门',
+      helpRegionUS: 'US / Canada', helpRegionUK: 'United Kingdom', helpRegionAU: 'Australia',
+      helpNote: '号码核对于 2026-10；请以官方最新公布为准。',
+      helpDisclaimer: '本站不提供医疗或心理服务，也不对你的情况承担责任。',
+      helpEmergency: '如有立即的生命危险，请先拨打当地急救电话（中国大陆 120 / 110）。',
+      helpClose: '回到画布',
+    },
+    en: {
+      modeInk: 'Ink', modeSand: 'Sand', modeFine: 'Fine', modeStill: 'Still',
+      modeTipInk: 'Ink: an AI companion paints with you — interrupt anytime',
+      modeTipSand: 'Sand: a physics sandbox with 9 materials',
+      modeTipFine: 'Fine: no AI, fine brush, minimal spread — create on your own',
+      modeTipStill: 'Still: no spread — a plain canvas with an ink-wash look',
+      hide: 'Hide', hideTip: 'Hide the toolbar (shortcut: C)',
+      brush: 'Brush', density: 'Density', patience: 'AI patience', aiBrush: 'AI brush',
+      clear: 'Clear', undo: 'Undo', save: 'Save PNG', saved: 'Saved ✓',
+      aiOn: 'AI companion: on', aiOff: 'AI companion: off',
+      hintInk: 'Paint, or let the AI start. You can interrupt it anytime.',
+      hintSand: 'Pour some sand, or let the AI pile a little dune. You can interrupt it anytime.',
+      hintFine: 'Paint finely. The AI steps aside — the canvas is all yours.',
+      hintStill: 'The ink stays where you put it — a plain canvas with an ink-wash feel.',
+      inkSumi: 'Pine soot', inkShu: 'Vermilion', inkMatsuba: 'Pine needle', inkAi: 'AI blue', inkWhite: 'White (lighten / blank)',
+      matSand: 'Sand (falls / sinks in water)', matFire: 'Fire (rises / burns out / detonates bombs / ignites plants)',
+      matWater: 'Water (falls / douses fire → steam)', matCloud: 'Cloud (rises / rains / condenses)',
+      matBomb: 'Bomb grains (fuse / explodes on fire)', matSeed: 'Seed (sprouts near water)',
+      matPlant: 'Plant (grows / burns)', matSnow: 'Snow (slow piles / melts by fire)',
+      matSteam: 'Steam (rises / condenses back to water)',
+      ariaBar: 'Tools', ariaMode: 'Mode', ariaInks: 'Your inks', ariaMats: 'Your materials',
+      immersive: '按 C 呼出工具栏',
+      immersive: 'Press C to show the toolbar',
+      sound: 'Sound', soundRain: 'Rain', soundTide: 'Tide', soundVol: 'Vol', soundAria: 'Ambience',
+      movie: 'Record', movieStop: 'Stop', movieProcessing: 'Encoding…', movieTooShort: 'Too short', movieUnsupported: 'No video',
+      movieTip: 'Record your creation as a ~15s clip (tap again to finish)',
+      langTitle: '切换语言 / Language',
+      help: 'Need Help?',
+      helpTitle: 'Need Help?',
+      helpAbout: 'This is an offline sandbox with four ways to unwind: ink, sand, fine art, still. No account, no network, nothing stored. It does not score, diagnose, or replace professional help.',
+      helpSteps: 'If you are struggling, or someone you know needs help: talk to someone you trust, or call a hotline below. They are free and confidential.',
+      helpHotlinesTitle: 'Hotlines',
+      helpRegionCN: 'Mainland China', helpRegionHK: 'Hong Kong, China', helpRegionTW: 'Taiwan, China', helpRegionMO: 'Macao, China',
+      helpRegionUS: 'US / Canada', helpRegionUK: 'United Kingdom', helpRegionAU: 'Australia',
+      helpNote: 'Numbers checked Oct 2026; refer to the official line for the latest.',
+      helpDisclaimer: 'This site does not provide medical or psychological services and accepts no liability for your situation.',
+      helpEmergency: 'If there is immediate danger to life, call your local emergency number first (120 / 110 in mainland China).',
+      helpClose: 'Back to canvas',
+    },
+  }
+
+  if (!window.Suminagashi) {
+    document.body.innerHTML = '<p style="padding:24px;font-family:sans-serif">引擎未加载（Suminagashi 缺失）。请确认 lib/ 下的文件就位。</p>'
+    window.__ink = { initError: 'Suminagashi not loaded' }
+    return
+  }
+
+  const canvas = document.getElementById('stage')
+  let engine = null
+  let initError = ''
+  try {
+    engine = new window.Suminagashi(canvas)
+  } catch (e) {
+    initError = String(e && e.message || e)
+    console.error('Suminagashi init failed:', e)
+  }
+  const INKS = window.INKS
+  // 沙盒引擎（叠加在墨画布之上的 2D 层）。缺失则沙模式不可用，但墨模式照常。
+  const sandCanvas = document.getElementById('sand-stage')
+  let sand = null
+  if (window.SandSim && sandCanvas) {
+    try { sand = new window.SandSim(sandCanvas) } catch (e) { console.error('SandSim init failed:', e) }
+  }
+
+  if (!engine) {
+    document.body.innerHTML = '<p style="padding:24px;font-family:sans-serif">WebGL 上下文不可用，无法启动水墨引擎。<br>错误：' + escapeHtml(initError) + '</p>'
+    window.__ink = { initError }
+    return
+  }
+
+  // AI 自己的调色盘（不含白色——白色是用户的橡皮，AI 不碰）。
+  // AI 会自己在这些颜色里慢慢换，让画面颜色流动但不喧哗。
+  const AI_PALETTE = [INKS.sumi, INKS.ai, INKS.shu, INKS.matsuba]
+  let aiColorIdx = 1 // 起始用那一抹安静的蓝
+
+  // ── 状态 ──
+  const state = {
+    drawing: false,
+    lastUV: null,            // 上一笔的归一化坐标 {x,y}
+    userInk: 'sumi',         // 用户当前墨色
+    strength: 1.4,           // 笔触强度（影响扩散/流动，也带一点底色）
+    concentration: 1.0,      // 浓度倍率（纯墨色深浅，不影响扩散）
+    aiOn: true,
+    aiPatience: 4.0,         // AI 两次落笔之间的秒数（=“耐心”旋钮）
+    aiSize: 1.0,             // AI 笔触大小（缩放落墨半径；用户可滑）
+    mode: 'ink',             // 当前物态：'ink' 或 'sand'
+    userEl: 'sand',          // 沙模式下用户当前材料
+    lang: 'zh',              // UI 语言：'zh' 或 'en'（不持久化）
+    lastUserActivity: -1e9,  // 用户最近一次落笔的时间戳(ms)
+    recentUser: [],          // 最近 ~3s 的用户落点，用于让 AI“绕开”
+  }
+  const YIELD_GRACE = 1500   // 用户停笔后，AI 要再等这么久才接手(ms)
+  const RECENT_WINDOW = 3000 // 记录用户落点的时间窗(ms)
+  let nextDropAt = performance.now() + state.aiPatience * 1000
+  let aiPour = null           // 沙模式 AI 的“倒沙/堆丘”连浇状态（由 advanceAiPour 每帧推进）
+  let lastSample = 0          // 上次感知整张纸明暗的时间戳(ms)
+  let canvasDark = 0          // 整张纸平均暗度：0=纸白，1=全黑（供 AI 自我收敛）
+
+  // 归零后的可撤回窗口（10 秒）。刻意不显示倒计时：只把「归零」按钮临时变成「撤回」。
+  const CLEAR_UNDO_MS = 10000
+  let clearUndoArmed = false
+  let clearUndoSnap = null    // { mode:'sand', snap } 或 { mode:'ink' }（墨的快照存在引擎里）
+  let clearUndoTimer = 0
+
+  // ── 坐标：屏幕像素 → 归一化 UV（y 翻转，因为 WebGL 原点在左下）──
+  function toUV(e, r) {
+    r = r || canvas.getBoundingClientRect()
+    let x = (e.clientX - r.left) / r.width
+    let y = 1 - (e.clientY - r.top) / r.height
+    x = Math.min(1, Math.max(0, x))
+    y = Math.min(1, Math.max(0, y))
+    return { x, y }
+  }
+
+  function markActivity(uv) {
+    const now = performance.now()
+    state.lastUserActivity = now
+    state.recentUser.push({ x: uv.x, y: uv.y, t: now })
+    if (state.recentUser.length > 60) state.recentUser.shift()
+  }
+
+  // 用户落一笔（连续笔触：沿方向注入墨 + 速度，墨会顺着笔迹流动）
+  function userStroke(uv) {
+    let dx = 0, dy = 0
+    if (state.lastUV) {
+      dx = uv.x - state.lastUV.x
+      dy = uv.y - state.lastUV.y
+    }
+    const rawLen = Math.hypot(dx, dy)
+    let nx, ny
+    if (rawLen > 1e-5) { nx = dx / rawLen; ny = dy / rawLen } else {
+      const a = Math.random() * Math.PI * 2
+      nx = Math.cos(a); ny = Math.sin(a)
+    }
+    const color = INKS[state.userInk] || INKS.sumi
+    // 静模式没有流速帮忙铺开：笔快了两次事件之间会「点断」。
+    // 沿路径补几个点，笔迹才像普通画布一样连续。
+    if (state.mode === 'still' && state.lastUV && rawLen > 0.008) {
+      const n = Math.ceil(rawLen / 0.008)
+      const from = state.lastUV
+      for (let i = 1; i <= n; i++) {
+        const t = i / n
+        engine.strokeInk(from.x + dx * t, from.y + dy * t, color, state.strength, nx, ny, 0.85)
+      }
+    } else {
+      engine.strokeInk(uv.x, uv.y, color, state.strength, nx, ny, 0.85)
+    }
+    markActivity(uv)
+    state.lastUV = uv
+  }
+
+  // ── 指针事件（鼠标 + 触摸统一）──
+  // 同一套事件，按当前模式分发：墨模式走流体笔触，沙模式走倒沙放置。
+  function pointerAct(uv, first) {
+    if (state.mode !== 'sand') {
+      userStroke(uv)
+    } else if (sand) {
+      const ny = 1 - uv.y           // 沙用顶→底坐标（UV 的 y=1 在顶部，需翻转）
+      if (first || !state.lastUV) sand.place(uv.x, ny, state.userEl, state.strength, 1)
+      else sand.placeLine(state.lastUV.x, 1 - state.lastUV.y, uv.x, ny, state.userEl, state.strength, 1)
+      markActivity(uv)
+    }
+    state.lastUV = uv
+  }
+  canvas.addEventListener('pointerdown', (e) => {
+    e.preventDefault()
+    cancelClearUndo()          // 又开始画了：关掉「撤回归零」窗口
+    state.drawing = true
+    state.lastUV = null
+    pointerAct(toUV(e), true)
+    fadeHint()
+  })
+  canvas.addEventListener('pointermove', (e) => {
+    if (!state.drawing) return
+    e.preventDefault()
+    // 合并事件：快速划动时浏览器会把多个移动点压进一个事件。逐个喂给引擎，
+    // 笔迹才不会「跳格」；只读一次 rect，避免每个点都触发布局计算。
+    const r = canvas.getBoundingClientRect()
+    const evs = (e.getCoalescedEvents && e.getCoalescedEvents()) || null
+    if (evs && evs.length > 1) {
+      for (let i = 0; i < evs.length; i++) pointerAct(toUV(evs[i], r), false)
+    } else {
+      pointerAct(toUV(e, r), false)
+    }
+  })
+  // 长按 / 右键不弹系统菜单，避免打断作画
+  canvas.addEventListener('contextmenu', (e) => e.preventDefault())
+  const stop = () => { state.drawing = false; state.lastUV = null }
+  canvas.addEventListener('pointerup', stop)
+  canvas.addEventListener('pointercancel', stop)
+  canvas.addEventListener('pointerleave', stop)
+
+  // ── “哑 AI”同伴（两模式共用一套让位规则）──
+  // 每隔 patience 秒，若用户已安静（停笔超过 YIELD_GRACE），才行动一次。
+  // 落点会避开用户最近的笔迹 → 这就是“让位 / 退开留白”。
+  function aiTick(now) {
+    if (state.mode === 'fine' || state.mode === 'still') { nextDropAt = now + state.aiPatience * 1000; return }
+    if (!state.aiOn) { nextDropAt = now + state.aiPatience * 1000; return }
+    if (now < nextDropAt) return
+    const sinceUser = now - state.lastUserActivity
+    if (sinceUser < YIELD_GRACE) {
+      // 用户还在画/刚停：这轮不打扰，等下一个周期再看
+      nextDropAt = now + state.aiPatience * 1000
+      return
+    }
+    if (state.mode === 'ink') aiTickInk(now)
+    else if (state.mode === 'sand') aiTickSandStart(now)
+  }
+
+  // 墨模式 AI：感知明暗自我收敛（暗了少画/提亮），并自己换色画一小段笔触
+  function aiTickInk(now) {
+    if (now - lastSample > 1000) { lastSample = now; sampleDarkness() }
+    const dark = canvasDark
+
+    // 偏暗收敛：太黑就少画，或直接用白色把过黑处刷开一点，别让画面闷死。
+    if (dark > 0.62) {
+      if (Math.random() < 0.55) { nextDropAt = now + state.aiPatience * 1000; return } // 这轮跳过，少画
+      aiStroke(INKS.white, 1.4, state.aiSize)   // 白色把过黑处提亮
+      nextDropAt = now + state.aiPatience * 1000
+      return
+    }
+    if (dark > 0.42) {
+      if (Math.random() < 0.5) { aiStroke(INKS.white, 1.4, state.aiSize); nextDropAt = now + state.aiPatience * 1000; return }
+    }
+
+    // AI 自己换色：多数时候沿用当前色（保持一段连贯），偶尔换到另一种，
+    // 于是随着时间推移画面颜色会自己流动起来——这就是“AI 自己换颜色”。
+    if (Math.random() < 0.35) {
+      let n = aiColorIdx
+      while (n === aiColorIdx) n = Math.floor(Math.random() * AI_PALETTE.length)
+      aiColorIdx = n
+    }
+    const ink = AI_PALETTE[aiColorIdx]
+    // 1.4：与用户默认笔触同强度；state.aiSize：用户可滑的“AI 笔触”大小
+    aiStroke(ink, 1.4, state.aiSize)
+
+    nextDropAt = now + state.aiPatience * 1000
+  }
+
+  // 沙模式 AI：开始一次“倒沙/堆丘”连浇（具体落粒由 advanceAiPour 每帧推进）
+  function aiTickSandStart(now) {
+    if (!sand) { nextDropAt = now + state.aiPatience * 1000; return }
+    if (sand.fullness() > 0.35) { nextDropAt = now + state.aiPatience * 1000; return } // 盒子太满就收手，避免糊成一团
+    const spot = pickYieldSpot()  // 屏幕 UV，已避开用户最近处
+    let sx, sy
+    if (Math.random() < 0.5) {
+      // 底部左右角落堆丘，把中心留给用户
+      sx = Math.random() < 0.5 ? (0.08 + Math.random() * 0.2) : (0.72 + Math.random() * 0.2)
+      sy = 0.1 + Math.random() * 0.2
+    } else { sx = spot.x; sy = spot.y }
+    aiPour = { x: sx, y: 1 - sy, el: chooseSandEl(), until: now + 1800 + Math.random() * 1000 }
+    nextDropAt = now + state.aiPatience * 1000
+  }
+
+  // 沙模式 AI 每帧推进一次连浇；用户刚动则让位（本帧不浇）
+  function advanceAiPour(now) {
+    if (state.mode !== 'sand' || !sand || !state.aiOn) { aiPour = null; return }
+    if (!aiPour) return
+    if (now - state.lastUserActivity < YIELD_GRACE) return  // 用户刚动 → 让位
+    if (now >= aiPour.until) { aiPour = null; return }
+    const n = Math.max(1, Math.round(state.aiSize * 3))
+    for (let k = 0; k < n; k++) sand.place(aiPour.x, aiPour.y, aiPour.el, 1, state.aiSize)
+  }
+
+  function chooseSandEl() {
+    const r = Math.random()
+    if (r < 0.28) return 'sand'
+    if (r < 0.45) return 'water'
+    if (r < 0.57) return 'cloud'
+    if (r < 0.66) return 'fire'
+    if (r < 0.78) return 'snow'
+    if (r < 0.87) return 'steam'
+    if (r < 0.96) return 'seed'
+    return 'bomb' // 炸弹权重低，AI 不会乱炸
+  }
+
+  // 采样整张纸的平均明暗：0=纸白，1=全黑。约每秒调一次，用来让 AI 自我收敛，
+  // 避免“墨永久不褪”后整张被盖成黑的。drawImage 直接读刚渲染的那一帧。
+  function sampleDarkness() {
+    try {
+      const gl = engine.renderer.domElement
+      engine.render(performance.now())   // 确保截到最新一帧
+      const c = document.createElement('canvas')
+      c.width = 64; c.height = 64
+      const ctx = c.getContext('2d')
+      ctx.drawImage(gl, 0, 0, c.width, c.height)
+      const d = ctx.getImageData(0, 0, c.width, c.height).data
+      let sum = 0
+      for (let i = 0; i < d.length; i += 4) {
+        const lum = (d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114) / 255
+        sum += lum
+      }
+      const avg = sum / (d.length / 4)   // 空白宣纸约 0.92
+      canvasDark = 1 - avg
+    } catch (e) {
+      // 采样失败就沿用上次的值，不打断作画
+    }
+  }
+
+  // AI 每轮画一小段连续笔触（多节缓慢转向的短划），而不是孤零零一滴，
+  // 这样看起来才像在“画”，而不是偶尔点一下。每节都避开用户的笔迹中心（让位/留白）。
+  // size：落墨半径倍率（由“AI 笔触”滑块控制，越大笔越粗）。
+  function aiStroke(ink, strength, size) {
+    const start = pickYieldSpot()
+    let x = start.x, y = start.y
+    let ang = Math.random() * Math.PI * 2
+    const segs = 7            // 一节短划 ≈ 一笔里的一小段
+    const stepLen = 0.045     // 每节在 UV 空间里挪动的距离
+    for (let i = 0; i < segs; i++) {
+      ang += (Math.random() - 0.5) * 0.9   // 轻微转向，走出柔和曲线而非直线
+      const dx = Math.cos(ang), dy = Math.sin(ang)
+      const nx = Math.min(1, Math.max(0, x + dx * stepLen))
+      const ny = Math.min(1, Math.max(0, y + dy * stepLen))
+      engine.strokeInk(nx, ny, ink, strength, dx, dy, size)
+      x = nx; y = ny
+    }
+  }
+
+  function pickYieldSpot() {
+    if (state.recentUser.length === 0) {
+      return { x: 0.15 + Math.random() * 0.7, y: 0.15 + Math.random() * 0.7 }
+    }
+    let cx = 0, cy = 0
+    for (const p of state.recentUser) { cx += p.x; cy += p.y }
+    cx /= state.recentUser.length; cy /= state.recentUser.length
+    // 试若干次，挑离用户中心最远、又不在边角的点
+    let best = null, bestD = -1
+    for (let i = 0; i < 12; i++) {
+      const x = 0.1 + Math.random() * 0.8
+      const y = 0.1 + Math.random() * 0.8
+      const d = Math.hypot(x - cx, y - cy)
+      if (d > bestD) { bestD = d; best = { x, y } }
+    }
+    return best || { x: 0.5, y: 0.5 }
+  }
+
+  // 合成抓取：把墨画布（WebGL）与沙画布（2D）叠成一张，供录制用。
+  // 沙模式下额外 re-render 一次墨引擎，确保 WebGL 缓冲此刻有效（drawImage 同帧读取）。
+  const capCv = document.createElement('canvas')
+  const capCtx = capCv.getContext('2d')
+  function grabComposite() {
+    if (state.mode === 'sand' && engine) engine.render(performance.now())
+    const stageCv = engine ? engine.renderer.domElement : null
+    const sandCv = (state.mode === 'sand' && sand) ? sand.canvas : null
+    const w = stageCv ? stageCv.width : (sandCv ? sandCv.width : 800)
+    const h = stageCv ? stageCv.height : (sandCv ? sandCv.height : 600)
+    capCv.width = w; capCv.height = h
+    capCtx.clearRect(0, 0, w, h)
+    if (stageCv) { try { capCtx.drawImage(stageCv, 0, 0, w, h) } catch (e) {} }
+    if (sandCv) { try { capCtx.drawImage(sandCv, 0, 0, w, h) } catch (e) {} }
+    return capCv
+  }
+
+  // ── 主循环：模拟一直推进，墨才会持续洇开、呼吸 ──
+  let last = performance.now()
+  function frame(now) {
+    let dt = (now - last) / 1000
+    last = now
+    if (dt > 0.05) dt = 0.05        // 切后台回来不要炸
+    if (state.mode !== 'sand' || !sand) {
+      engine.step(dt)
+      engine.render(now)
+    } else {
+      sand.step(dt)
+      sand.render(now)
+    }
+    // 短视频录制：仅在录制态抓取合成画面（Movie 内部节流到 ~10fps）
+    if (window.Movie && window.Movie.isRecording()) window.Movie.capture(grabComposite())
+    aiTick(now)
+    if (state.mode === 'sand') advanceAiPour(now)
+    requestAnimationFrame(frame)
+  }
+  requestAnimationFrame(frame)
+
+  // ── UI 绑定 ──
+  // 用 $() / on() 包一层：控件缺失时静默跳过。
+  // 这样 selftest.html 可以只放一块画布就复用同一份 app.js。
+  const $ = (id) => document.getElementById(id)
+  const on = (el, ev, fn) => { if (el) el.addEventListener(ev, fn) }
+
+  // 提示语元素：提前到 UI 绑定前定义，避免 setMode 在初始化期同步调用时访问 const hint 触发 TDZ 报错
+  const hint = $('hint')
+  let hintGone = false
+
+  const inkButtons = Array.from(document.querySelectorAll('#ink-group .ink'))
+  function setInk(name) {
+    state.userInk = name
+    inkButtons.forEach((b) => b.classList.toggle('active', b.dataset.ink === name))
+  }
+  inkButtons.forEach((b) => on(b, 'click', () => setInk(b.dataset.ink)))
+  setInk('sumi')
+
+  // 沙元素选择（复用 .ink 圆点样式）
+  const sandButtons = Array.from(document.querySelectorAll('#sand-group .ink'))
+  function setEl(name) {
+    state.userEl = name
+    sandButtons.forEach((b) => b.classList.toggle('active', b.dataset.el === name))
+  }
+  sandButtons.forEach((b) => on(b, 'click', () => setEl(b.dataset.el)))
+  setEl('sand')
+
+  // 墨 / 沙 / 精 / 静 模式切换（“同一个场，换笔 + 换物理，不是换程序”）
+  const modeBtns = Array.from(document.querySelectorAll('.mode-btn'))
+  // 精（fine）：笔触更细、扩散更少；静（still）：零扩散，像普通画布。
+  // 两种都不让 AI 插手；退出时恢复墨模式原参数。
+  const MODE_PARAMS = {
+    fine:  { SPLAT_RADIUS: 0.00035, SPLAT_VELOCITY: 0.1, CURL: 2 },
+    still: { SPLAT_RADIUS: 0.00016, SPLAT_VELOCITY: 0,   CURL: 0 },
+  }
+  let savedEngineParams = null
+  let savedAiOn = true
+  function setAiUi(isOn) {
+    if (!aiToggle) return
+    aiToggle.classList.toggle('on', isOn)
+    aiToggle.classList.toggle('off', !isOn)
+    aiToggle.setAttribute('aria-pressed', String(isOn))
+    aiToggle.textContent = isOn ? I18N[state.lang].aiOn : I18N[state.lang].aiOff
+  }
+  function setMode(m) {
+    const params = MODE_PARAMS[m] || null
+    const wasCustom = !!MODE_PARAMS[state.mode]
+    if (params) {
+      // 第一次离开墨模式时，记住墨模式的原参数，退出时好还原
+      if (!savedEngineParams) {
+        savedEngineParams = {
+          SPLAT_RADIUS: engine.config.SPLAT_RADIUS,
+          SPLAT_VELOCITY: engine.config.SPLAT_VELOCITY,
+          CURL: engine.config.CURL,
+        }
+        savedAiOn = state.aiOn
+      }
+      engine.config.SPLAT_RADIUS = params.SPLAT_RADIUS
+      engine.config.SPLAT_VELOCITY = params.SPLAT_VELOCITY
+      engine.config.CURL = params.CURL
+      state.aiOn = false
+      setAiUi(false)
+      // 静：清掉残留流速，否则切进来之前那股墨还会继续飘一会儿
+      if (m === 'still' && engine.clearVelocity) engine.clearVelocity()
+    } else if (wasCustom && savedEngineParams) {
+      engine.config.SPLAT_RADIUS = savedEngineParams.SPLAT_RADIUS
+      engine.config.SPLAT_VELOCITY = savedEngineParams.SPLAT_VELOCITY
+      engine.config.CURL = savedEngineParams.CURL
+      state.aiOn = savedAiOn
+      setAiUi(state.aiOn)
+      savedEngineParams = null
+    }
+    state.mode = m
+    document.body.classList.toggle('mode-sand', m === 'sand')
+    document.body.classList.toggle('mode-ink', m !== 'sand')
+    document.body.classList.toggle('mode-fine', m === 'fine')
+    document.body.classList.toggle('mode-still', m === 'still')
+    modeBtns.forEach((b) => {
+      const on2 = b.dataset.mode === m
+      b.classList.toggle('active', on2)
+      b.setAttribute('aria-selected', String(on2))
+    })
+    if (m === 'sand' && sand) sand.render(performance.now())  // 切回时立刻恢复沙画
+    const hintKey = m === 'sand' ? 'hintSand'
+      : (m === 'fine' ? 'hintFine' : (m === 'still' ? 'hintStill' : 'hintInk'))
+    setHint(I18N[state.lang][hintKey])
+    state.drawing = false
+    state.lastUV = null
+    cancelClearUndo()          // 切模式也关掉「撤回归零」窗口
+  }
+  modeBtns.forEach((b) => on(b, 'click', () => setMode(b.dataset.mode)))
+  setMode('ink')
+
+  // ── 中/EN 切换 ──
+  function applyLang() {
+    const dict = I18N[state.lang] || I18N.zh
+    document.querySelectorAll('[data-i18n]').forEach((el) => {
+      const k = el.getAttribute('data-i18n')
+      if (dict[k] != null) el.textContent = dict[k]
+    })
+    document.querySelectorAll('[data-i18n-title]').forEach((el) => {
+      const k = el.getAttribute('data-i18n-title')
+      if (dict[k] != null) { el.title = dict[k]; el.setAttribute('aria-label', dict[k]) }
+    })
+    document.querySelectorAll('[data-i18n-aria]').forEach((el) => {
+      const k = el.getAttribute('data-i18n-aria')
+      if (dict[k] != null) el.setAttribute('aria-label', dict[k])
+    })
+    if (aiToggle) aiToggle.textContent = state.aiOn ? dict.aiOn : dict.aiOff
+    const langBtn = $('lang')
+    if (langBtn) langBtn.textContent = state.lang === 'zh' ? 'EN' : '中文'
+    const hintKey = state.mode === 'sand' ? 'hintSand'
+      : (state.mode === 'fine' ? 'hintFine' : (state.mode === 'still' ? 'hintStill' : 'hintInk'))
+    if (!hintGone) setHint(dict[hintKey])
+    if (clearUndoArmed) setClearLabel(dict.undo)   // 撤回窗口开着时，标签随语言走
+  }
+  on($('lang'), 'click', () => {
+    state.lang = state.lang === 'zh' ? 'en' : 'zh'
+    applyLang()
+  })
+
+  // ── 沉浸模式：按 C 隐藏 / 呼出工具栏；画面空白时显示一行淡说明 ──
+  function isCanvasEmpty() {
+    try {
+      if (state.mode === 'sand' && sand) return sand.fullness() < 0.005
+      engine.render(performance.now())
+      const gl = engine.renderer.domElement
+      const c = document.createElement('canvas')
+      c.width = 64; c.height = 64
+      const ctx = c.getContext('2d')
+      ctx.drawImage(gl, 0, 0, 64, 64)
+      const d = ctx.getImageData(0, 0, 64, 64).data
+      let dark = 0
+      for (let i = 0; i < d.length; i += 4) {
+        const lum = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114
+        if (lum < 200) dark++
+      }
+      return dark / (d.length / 4) < 0.02   // 空白宣纸 ≈ 0，有墨明显 > 0
+    } catch (e) { return false }
+  }
+  let immersiveTimer = 0
+  // force=true: show the way back for a few seconds right after hiding, even if
+  // the canvas already has work on it (otherwise the shortcut is undiscoverable)
+  function updateImmersiveNote(force) {
+    const note = $('immersive-note')
+    if (!note) return
+    if (!document.body.classList.contains('bar-hidden')) { note.classList.remove('show'); return }
+    if (force) note.classList.add('show')
+    else note.classList.toggle('show', isCanvasEmpty())
+    clearTimeout(immersiveTimer)
+    immersiveTimer = setTimeout(() => updateImmersiveNote(false), force ? 3000 : 1500)
+  }
+  function toggleBarHidden() {
+    document.body.classList.toggle('bar-hidden')
+    updateImmersiveNote(true)
+  }
+  // 键盘快捷键（桌面顺手，不打断沉浸）：
+  //   1/2/3 切模式 · S 存图 · R 归零 · M 录制 · [ / ] 调笔触 · C 隐藏 · Esc 呼出
+  function isTypingTarget(t) {
+    return !!t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' ||
+      t.tagName === 'SELECT' || t.isContentEditable)
+  }
+  on(window, 'keydown', (e) => {
+    // 求助浮层打开时：只认 Esc，且不触发画布快捷键
+    if (helpModal && !helpModal.hidden) {
+      if (e.key === 'Escape') { e.preventDefault(); closeHelp() }
+      return
+    }
+    if (e.metaKey || e.ctrlKey || e.altKey) return       // 不抢系统 / 浏览器快捷键
+    if (isTypingTarget(e.target)) return                 // 在滑块等控件里正常操作
+    const k = e.key.toLowerCase()
+    if (k === '1') { e.preventDefault(); setMode('ink'); return }
+    if (k === '2') { if (!sand) return; e.preventDefault(); setMode('sand'); return }
+    if (k === '3') { e.preventDefault(); setMode('fine'); return }
+    if (k === '4') { e.preventDefault(); setMode('still'); return }
+    if (k === 's') { e.preventDefault(); const b = $('export'); if (b) b.click(); return }
+    if (k === 'r') { e.preventDefault(); const b = $('clear'); if (b) b.click(); return }
+    if (k === 'm') { e.preventDefault(); const b = $('movie'); if (b && !b.disabled) b.click(); return }
+    if (k === '[' || k === ']') { e.preventDefault(); adjustBrush(k === ']' ? 0.1 : -0.1); return }
+    if (k === 'c') { e.preventDefault(); toggleBarHidden(); return }
+    if (e.key === 'Escape') {                            // always a way back
+      document.body.classList.remove('bar-hidden')
+      updateImmersiveNote(false)
+    }
+  })
+  on($('hide'), 'click', toggleBarHidden)
+
+  // ── 求助浮层（Need Help?）──
+  // 盖在画布上；Esc、点背景、关闭按钮都能退回，且不打断正在进行的作画。
+  const helpBtn = $('help')
+  const helpModal = $('help-modal')
+  const helpCloseBtn = $('help-close')
+  function openHelp() {
+    if (!helpModal) return
+    helpModal.hidden = false
+    if (helpBtn) helpBtn.setAttribute('aria-expanded', 'true')
+    if (helpCloseBtn) helpCloseBtn.focus()
+  }
+  function closeHelp() {
+    if (!helpModal || helpModal.hidden) return
+    helpModal.hidden = true
+    if (helpBtn) { helpBtn.setAttribute('aria-expanded', 'false'); helpBtn.focus() }
+  }
+  on(helpBtn, 'click', openHelp)
+  on(helpCloseBtn, 'click', closeHelp)
+  on(helpModal, 'click', (e) => { if (e.target === helpModal) closeHelp() })  // 点背景关闭
+
+  const brushInput = $('brush')
+  function adjustBrush(delta) {
+    if (!brushInput) return
+    const cur = parseFloat(brushInput.value || '1.4')
+    const v = Math.min(3, Math.max(0.5, Math.round((cur + delta) * 10) / 10))
+    brushInput.value = String(v)
+    state.strength = v
+  }
+  on(brushInput, 'input', (e) => {
+    state.strength = parseFloat(e.target.value)
+  })
+
+  on($('concentration'), 'input', (e) => {
+    state.concentration = parseFloat(e.target.value)
+    engine.inkGain = state.concentration   // 渲染端统一生效：整张纸（含 AI 与已落的墨）立刻变浓/变淡
+  })
+
+  const aiToggle = $('ai-toggle')
+  on(aiToggle, 'click', () => {
+    state.aiOn = !state.aiOn
+    if (!aiToggle) return
+    aiToggle.classList.toggle('on', state.aiOn)
+    aiToggle.classList.toggle('off', !state.aiOn)
+    aiToggle.setAttribute('aria-pressed', String(state.aiOn))
+    aiToggle.textContent = state.aiOn ? I18N[state.lang].aiOn : I18N[state.lang].aiOff
+  })
+
+  const patience = $('patience')
+  const patienceVal = $('patience-val')
+  on(patience, 'input', (e) => {
+    state.aiPatience = parseFloat(e.target.value)
+    if (patienceVal) patienceVal.textContent = state.aiPatience + 's'
+    nextDropAt = performance.now() + state.aiPatience * 1000
+  })
+
+  on($('ai-size'), 'input', (e) => {
+    state.aiSize = parseFloat(e.target.value)
+  })
+
+  // ── 环境音景（纯合成白噪声，离线、无文件）──
+  // 按钮循环：关 → 雨 → 潮；音量滑块仅在开启时显示。默认关（隐私 + 安静）。
+  const soundBtn = $('sound')
+  const soundVol = $('sound-vol')
+  function refreshSoundBtn() {
+    if (!soundBtn || !window.Soundscape) return
+    const cur = window.Soundscape.current()
+    const dict = I18N[state.lang] || I18N.zh
+    const label = cur === 'off' ? dict.sound : (cur === 'rain' ? dict.soundRain : dict.soundTide)
+    soundBtn.textContent = label
+    soundBtn.setAttribute('aria-label', dict.soundAria + '：' + label)
+    soundBtn.classList.toggle('on', cur !== 'off')
+    document.body.classList.toggle('sound-on', cur !== 'off')
+  }
+  on(soundBtn, 'click', () => {
+    if (!window.Soundscape) return
+    const cur = window.Soundscape.current()
+    const next = cur === 'off' ? 'rain' : (cur === 'rain' ? 'tide' : 'off')
+    window.Soundscape.setPreset(next)   // 首次开启发生在用户点击这一手势内，满足自动播放策略
+    refreshSoundBtn()
+  })
+  on(soundVol, 'input', (e) => { if (window.Soundscape) window.Soundscape.setVolume(parseFloat(e.target.value)) })
+  if (window.Soundscape) refreshSoundBtn()
+
+  // ── 归零 + 「10 秒内可撤回」──
+  // 不显示倒计时：归零后按钮临时变成「撤回」，再点一次还原画面；10 秒后自动变回「归零」。
+  // 用户一旦再落笔或切换模式，撤回窗口即关闭（避免把旧画面贴回新笔触之上）。
+  function setClearLabel(text) { const b = $('clear'); if (b) b.textContent = text }
+  function cancelClearUndo() {
+    if (!clearUndoArmed) return
+    clearUndoArmed = false
+    clearUndoSnap = null
+    clearTimeout(clearUndoTimer)
+    const b = $('clear')
+    if (b) b.classList.remove('undo')
+    setClearLabel((I18N[state.lang] || I18N.zh).clear)
+  }
+  function armClearUndo() {
+    clearUndoArmed = true
+    const b = $('clear')
+    if (b) b.classList.add('undo')
+    setClearLabel((I18N[state.lang] || I18N.zh).undo)
+    clearTimeout(clearUndoTimer)
+    clearUndoTimer = setTimeout(cancelClearUndo, CLEAR_UNDO_MS)
+  }
+  function performClearUndo() {
+    if (!clearUndoArmed || !clearUndoSnap) { cancelClearUndo(); return }
+    if (clearUndoSnap.mode === 'sand' && sand) sand.restore(clearUndoSnap.snap)
+    else engine.restoreDye()
+    cancelClearUndo()
+  }
+
+  on($('clear'), 'click', () => {
+    if (clearUndoArmed) { performClearUndo(); return }   // 第二次点 = 撤回
+    // 第一次点 = 归零：先留一份可撤回的快照，再清空
+    // （并取消沙模式下 AI 正在进行的连浇，让它成为一次真正的重置）
+    if (state.mode === 'sand' && sand) {
+      clearUndoSnap = { mode: 'sand', snap: sand.snapshot() }
+      sand.clear(); aiPour = null
+    } else {
+      engine.snapshotDye()
+      clearUndoSnap = { mode: 'ink' }
+      engine.clear()
+    }
+    armClearUndo()
+  })
+
+  on($('export'), 'click', () => {
+    const btn = $('export')
+    try {
+      const useSand = (state.mode === 'sand' && sand)
+      if (useSand) sand.render(performance.now())      // 确保截的是最新一帧
+      else engine.render(performance.now())
+      const cv = useSand ? sand.canvas : engine.renderer.domElement
+      const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+      const name = (useSand ? 'ink-quiet-sand-' : 'ink-quiet-') + ts + '.png'
+      const fire = (href) => {
+        const a = document.createElement('a')
+        a.href = href
+        a.download = name
+        document.body.appendChild(a)
+        a.click()
+        a.remove()
+      }
+      // 优先 toBlob + 对象 URL：对 file:// 与 Safari 更稳（大画布也不会因 data URL 过长失败）
+      if (cv.toBlob) {
+        cv.toBlob((blob) => {
+          if (!blob) { fire(useSand ? sand.captureDataURL() : engine.captureDataURL()); return }
+          const url = URL.createObjectURL(blob)
+          fire(url)
+          setTimeout(() => URL.revokeObjectURL(url), 5000)
+        }, 'image/png')
+      } else {
+        fire(useSand ? sand.captureDataURL() : engine.captureDataURL())
+      }
+      if (btn) {
+        const t = btn.textContent
+        btn.textContent = I18N[state.lang].saved
+        setTimeout(() => { if (btn) btn.textContent = t }, 1500)
+      }
+    } catch (err) {
+      // 极端兜底：新标签页打开让用户另存为
+      try { window.open((state.mode === 'sand' && sand) ? sand.captureDataURL() : engine.captureDataURL(), '_blank', 'noopener') } catch (e2) {}
+    }
+  })
+
+  // ── 短视频录制：关 → 开 → 关，导出约 15 秒 MP4（不支持则 WebM）（离线、零网络）──
+  const movieBtn = $('movie')
+  let movieBusy = false
+  function movieDict() { return I18N[state.lang] || I18N.zh }
+  function movieRevert(btn, text, ms) { setTimeout(() => { if (btn) btn.textContent = text }, ms || 1600) }
+  on(movieBtn, 'click', () => {
+    if (!movieBtn || movieBusy || !window.Movie) return
+    const d = movieDict()
+    if (window.Movie.isRecording()) {
+      movieBtn.textContent = d.movieProcessing
+      movieBtn.classList.remove('rec')
+      movieBtn.disabled = true
+      movieBusy = true
+      window.Movie.stop().then((r) => {
+        movieBusy = false
+        movieBtn.disabled = false
+        if (r && r.ok) {
+          movieBtn.textContent = d.saved
+          movieRevert(movieBtn, d.movie, 1800)
+        } else {
+          const msg = (r && r.reason === 'too-short') ? d.movieTooShort
+            : (r && r.reason === 'unsupported') ? d.movieUnsupported : d.movie
+          movieBtn.textContent = msg
+          movieRevert(movieBtn, d.movie, 2000)
+        }
+      })
+    } else {
+      const res = window.Movie.start(grabComposite)
+      if (!res || !res.ok) {
+        movieBtn.textContent = d.movieUnsupported
+        movieRevert(movieBtn, d.movie, 2000)
+        return
+      }
+      movieBtn.textContent = d.movieStop
+      movieBtn.classList.add('rec')
+    }
+  })
+
+  // 窗口尺寸变化：两个引擎都重算模拟分辨率
+  let rt = 0
+  window.addEventListener('resize', () => {
+    clearTimeout(rt)
+    rt = setTimeout(() => { engine.resize(); if (sand) sand.resize() }, 120)
+  })
+
+  // ── PWA：仅 http(s) 下注册 Service Worker（桌面 Electron 走 file://，跳过）──
+  // 注册失败也不影响使用；离线缓存逻辑见 sw.js（只缓存本站同名文件）。
+  if ('serviceWorker' in navigator && location.protocol.indexOf('http') === 0 && !window.__electron) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('sw.js').then((reg) => {
+        // 主动问一次有没有新版本：否则浏览器可能要等下一次导航才发现 SW 变了。
+        try { reg.update() } catch (e) {}
+      }).catch(() => {})
+    })
+  }
+
+  // ── 屏幕常亮（Screen Wake Lock）：用应用时不让屏幕熄灭 ──
+  // 方便把沙盘 / 墨景长时间挂着看。Safari 目前不支持 → 特性探测后静默跳过。
+  let wakeLock = null
+  async function requestWakeLock() {
+    try {
+      if (!navigator.wakeLock || document.visibilityState !== 'visible' || wakeLock) return
+      wakeLock = await navigator.wakeLock.request('screen')
+      wakeLock.addEventListener('release', () => { wakeLock = null })
+    } catch (e) { wakeLock = null }
+  }
+  function releaseWakeLock() {
+    try { if (wakeLock) wakeLock.release() } catch (e) {}
+    wakeLock = null
+  }
+  on(document, 'visibilitychange', () => {
+    if (document.visibilityState === 'visible') requestWakeLock()
+    else releaseWakeLock()               // 切后台就放掉，别白白耗电
+  })
+  requestWakeLock()                      // 页面可见时先申请一次
+  on(window, 'pointerdown', requestWakeLock)   // 部分浏览器要求用户手势后才授予
+  on(window, 'keydown', requestWakeLock)
+
+  // 提示语：用户一开始画就淡出
+  function setHint(text) { if (hint && !hintGone) hint.textContent = text }
+  function fadeHint() {
+    if (hintGone || !hint) return
+    hintGone = true
+    hint.classList.add('gone')
+    setTimeout(() => hint && hint.remove(), 1300)
+  }
+  setTimeout(fadeHint, 6000) // 没动手也 6 秒后淡出
+
+  // 测试钩子：只给 selftest.html 用，正常打开页面时无副作用。
+  window.__ink = {
+    engine, sand, state, aiTick, advanceAiPour, setMode,
+    sound: window.Soundscape, movie: window.Movie,
+    clearUndoArmed: () => clearUndoArmed, performClearUndo, cancelClearUndo,
+    wakeLockSupported: () => !!navigator.wakeLock,
+  }
+
+  } catch (fatal) {
+    // 任何初始化期异常都暴露给 selftest，而不是让页面静默崩溃
+    window.__ink = { initError: String(fatal && fatal.stack || fatal.message || fatal) }
+    console.error('app.js 初始化失败：', fatal)
+  }
+})()

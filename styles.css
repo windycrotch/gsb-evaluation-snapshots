@@ -1,0 +1,295 @@
+:root {
+  --paper: #efeae0;
+  --bar-bg: rgba(28, 26, 23, 0.5);
+  --text: #f3eee2;
+  --text-dim: rgba(243, 238, 226, 0.6);
+  --accent: #16407a;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--paper);
+  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior: none;   /* 手机上禁止下拉刷新 / 橡皮筋，保持沉浸 */
+}
+
+#stage {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  touch-action: none;   /* 让手指直接在画上落墨，不触发页面滚动/缩放 */
+  cursor: crosshair;
+  z-index: 0;
+}
+
+/* 沙盒层：叠在墨画布之上，但完全不吃事件（事件落到下面的 #stage） */
+#sand-stage {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: none;
+  pointer-events: none;
+  z-index: 1;
+  cursor: crosshair;
+}
+body.mode-sand #sand-stage { display: block; }
+
+/* 控制条：底部一条，半透明、安静 */
+#bar {
+  position: fixed;
+  left: 50%;
+  bottom: max(14px, env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 12px;
+  padding-left: max(12px, env(safe-area-inset-left));
+  padding-right: max(12px, env(safe-area-inset-right));
+  max-width: calc(100vw - 24px);
+  flex-wrap: wrap;
+  justify-content: center;
+  background: var(--bar-bg);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-radius: 13px;
+  color: var(--text);
+  font-size: 12px;
+  user-select: none;
+  z-index: 5;   /* 永远在沙盒层之上，保证可点 */
+}
+
+/* 物态切换（墨 / 沙）：分段胶囊 */
+#mode-group { gap: 4px; padding: 3px; border-radius: 12px; background: rgba(255,255,255,0.08); }
+.mode-btn {
+  font: inherit;
+  color: var(--text-dim);
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  padding: 4px 10px;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.mode-btn:hover { color: var(--text); }
+.mode-btn.active { background: var(--accent); color: #fff; }
+
+/* 沙元素组：默认隐藏，沙模式才显示 */
+#sand-group { display: none; }
+body.mode-sand #sand-group { display: flex; }
+/* 墨专属控件：沙模式隐藏 */
+body.mode-sand .ink-only { display: none; }
+/* 墨色板：沙模式隐藏（沙模式只显示材料色，不再叠着墨的 5 色） */
+body.mode-sand #ink-group { display: none; }
+
+/* 元素圆点：浅色材料给描边，在深色工具条上才看得清 */
+.ink.swatch {
+  border: 1px solid rgba(20, 18, 15, 0.35);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.25);
+}
+
+.group { display: flex; gap: 8px; }
+
+.ink {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  background: var(--c);
+  cursor: pointer;
+  padding: 0;
+  transition: transform 0.12s ease, border-color 0.12s ease;
+}
+.ink:hover { transform: scale(1.12); }
+.ink.active { border-color: #fff; box-shadow: 0 0 0 2px rgba(255,255,255,0.35); }
+.ink.white { border-color: rgba(20, 18, 15, 0.4); }  /* 白按钮给深色描边，在浅纸与工具条上都看得清 */
+
+.slider {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.slider input[type="range"] { width: 72px; accent-color: var(--accent); }
+#patience-val { min-width: 26px; color: var(--text); }
+
+button.toggle, button.ghost {
+  font: inherit;
+  color: var(--text);
+  background: rgba(255,255,255,0.08);
+  border: 1px solid rgba(255,255,255,0.18);
+  border-radius: 9px;
+  padding: 5px 10px;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+button.toggle:hover, button.ghost:hover { background: rgba(255,255,255,0.16); }
+button.toggle.on { background: var(--accent); border-color: var(--accent); }
+button.toggle.off { opacity: 0.7; }
+
+/* 环境音：音量滑块仅在开启音景时显示 */
+.sound-only { display: none; }
+body.sound-on .sound-only { display: flex; }
+
+#hint {
+  position: fixed;
+  left: 50%;
+  top: max(22px, env(safe-area-inset-top));
+  transform: translateX(-50%);
+  margin: 0;
+  z-index: 5;
+  padding: 8px 16px;
+  color: rgba(40, 36, 30, 0.55);
+  background: rgba(239, 234, 224, 0.6);
+  border-radius: 999px;
+  font-size: 13px;
+  letter-spacing: 0.02em;
+  pointer-events: none;
+  transition: opacity 1.2s ease;
+}
+#hint.gone { opacity: 0; }
+
+/* 沉浸模式：按 C 隐藏工具栏，静看 AI 作画；画面空白时给一行淡说明 */
+body.bar-hidden #bar { display: none; }
+body.bar-hidden #hint { display: none; }
+#immersive-note {
+  position: fixed;
+  left: 50%;
+  bottom: 20px;
+  transform: translateX(-50%);
+  margin: 0;
+  z-index: 4;
+  padding: 6px 14px;
+  color: rgba(40, 36, 30, 0.45);
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  background: rgba(239, 234, 224, 0.45);
+  border-radius: 999px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.8s ease;
+  display: none;
+}
+body.bar-hidden #immersive-note { display: block; }
+#immersive-note.show { opacity: 1; }
+
+/* 录制按钮：录制态显示脉动的红点，直观提示“正在记录” */
+#movie.rec { color: #b23b2e; font-weight: 600; }
+#movie.rec::after {
+  content: '';
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-left: 6px;
+  border-radius: 50%;
+  background: #b23b2e;
+  vertical-align: middle;
+  animation: movie-pulse 1s ease-in-out infinite;
+}
+@keyframes movie-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.2; } }
+#movie:disabled { opacity: 0.6; cursor: default; }
+
+/* 归零可撤回：按钮临时进入「撤回」态，给一个安静的高亮（刻意不显示倒计时） */
+#clear.undo {
+  background: rgba(255, 255, 255, 0.22);
+  border-color: rgba(255, 255, 255, 0.55);
+}
+#clear.undo::before { content: '↩ '; }
+
+/* ── 移动端：加大触控目标、收紧间距，让工具栏在窄屏上整齐换行、手指好点 ── */
+
+/* 窄屏（手机 / 平板 / 小窗）：
+   不写宽度时 left:50% 会把可用宽度卡在「半屏」，工具栏会塌成一条竖井。
+   置为 max-content 让它可以铺满可用宽度、只按需换行。桌面宽窗不受影响。 */
+@media (max-width: 900px) {
+  #bar { width: max-content; }
+}
+
+@media (max-width: 640px) {
+  #bar { gap: 7px; padding: 6px 9px; font-size: 12px; border-radius: 12px; }
+  .group { gap: 6px; }
+  .mode-btn { padding: 6px 11px; }
+  .ink { width: 26px; height: 26px; }
+  .slider input[type="range"] { width: 64px; }
+  button.toggle, button.ghost { padding: 7px 11px; min-height: 34px; }
+}
+@media (max-width: 430px) {
+  #bar { gap: 6px; padding: 5px 8px; font-size: 11.5px; }
+  .ink { width: 24px; height: 24px; }
+  .slider input[type="range"] { width: 56px; }
+  .mode-btn { padding: 5px 9px; }
+  button.toggle, button.ghost { padding: 6px 9px; min-height: 32px; }
+}
+
+/* ── 求助浮层（Need Help?）：盖在画布上，纸张质感，可滚动 ── */
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: max(16px, env(safe-area-inset-top)) 16px max(16px, env(safe-area-inset-bottom));
+  background: rgba(20, 18, 15, 0.48);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+}
+.modal[hidden] { display: none; }
+
+.modal-panel {
+  width: min(560px, 100%);
+  max-height: min(82vh, 720px);
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+  background: var(--paper);
+  color: #2a241e;
+  border-radius: 16px;
+  padding: 22px 24px 20px;
+  box-shadow: 0 18px 60px rgba(20, 18, 15, 0.35);
+  font-size: 14px;
+  line-height: 1.65;
+}
+.modal-panel h2 { margin: 0 0 12px; font-size: 19px; }
+.modal-panel h3 {
+  margin: 18px 0 8px;
+  font-size: 13px;
+  color: #6b6257;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+.modal-panel p { margin: 0 0 12px; }
+
+.hotlines { width: 100%; border-collapse: collapse; margin: 4px 0 6px; font-size: 13px; }
+.hotlines th, .hotlines td {
+  text-align: left;
+  padding: 6px 0;
+  border-bottom: 1px solid #e3ddd2;
+  vertical-align: top;
+}
+.hotlines th { width: 32%; font-weight: 600; color: #4a4238; white-space: nowrap; }
+.hotlines td { font-variant-numeric: tabular-nums; }
+
+.modal-note { color: #8a8075; font-size: 12px; margin-top: 2px; }
+.modal-disclaimer { color: #6b6257; font-size: 12.5px; }
+
+#help-close {
+  margin-top: 8px;
+  color: #2a241e;
+  background: rgba(20, 18, 15, 0.06);
+  border-color: rgba(20, 18, 15, 0.18);
+}
+#help-close:hover { background: rgba(20, 18, 15, 0.12); }
+
+@media (max-width: 430px) {
+  .modal-panel { padding: 18px 16px 16px; border-radius: 14px; }
+  .hotlines th { width: 38%; white-space: normal; }
+}
