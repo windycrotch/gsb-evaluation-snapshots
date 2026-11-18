@@ -14,3 +14,6 @@ data/jurisidictions/data
 # local dev datasets (served by resolveLocalFirst; never deploy)
 public/*.parquet
 public/parking/
+
+# local test bundles
+.tmp-tests/

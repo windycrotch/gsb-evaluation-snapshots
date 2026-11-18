@@ -55,6 +55,10 @@ export function buildHexHeightfieldMesh(
     if (c.metric > maxMetric) maxMetric = c.metric;
   }
   if (occupied.size === 0) return empty;
+  // Every metric is zero/negative (or the set is empty after filtering): no
+  // relief would be emitted, so treat the build as empty rather than returning
+  // a bare slab — callers must not download a file for this.
+  if (maxMetric <= 0) return empty;
 
   // --- bbox of occupied cell boundaries ---
   let minLng = Infinity, minLat = Infinity, maxLng = -Infinity, maxLat = -Infinity;

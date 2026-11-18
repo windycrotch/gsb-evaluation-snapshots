@@ -15,7 +15,8 @@ import { PMTiles } from 'pmtiles';
 import { VectorTile } from '@mapbox/vector-tile';
 import Pbf from 'pbf';
 import { latLngToCell, getHexagonAreaAvg } from 'h3-js';
-import { requestMeshExport, type MeshExportResult } from './mesh/mesh.client';
+import { requestMeshExport, cancelMeshExport, type MeshExportResult } from './mesh/mesh.client';
+import { EMPTY_MESH_MESSAGE, formatPrintabilityReport } from './mesh/printability-report';
 
 export interface Print3DContext {
   archive: PMTiles;                                  // the city's PMTiles archive
@@ -165,12 +166,18 @@ export function init3DPrint(opts: Init3DPrintOpts) {
 
   const setStatus = (msg: string) => { if (status) status.textContent = msg; };
 
+  // An export in flight turns the button into Cancel. `cancelWorker` resolves the
+  // outer promise when the user cancels; it stays null during the hex-reading phase.
+  let busy = false;
+  let cancelWorker: (() => void) | null = null;
+
   // Reflect zoom state: disable at parcel zoom, otherwise show the on-screen resolution.
+  // While an export is running the button is kept enabled so it can act as Cancel.
   const updateState = () => {
     const ctx = opts.getContext();
     if (!ctx) return;
     const atParcelZoom = opts.map.getZoom() >= ctx.parcelMinZoom;
-    if (btn) btn.disabled = atParcelZoom;
+    if (btn && !busy) btn.disabled = atParcelZoom;
     if (info) {
       info.textContent = atParcelZoom
         ? 'Zoom out to a hex view to 3D print.'
@@ -180,23 +187,40 @@ export function init3DPrint(opts: Init3DPrintOpts) {
   opts.map.on('zoom', updateState);
   updateState();
 
-  btn?.addEventListener('click', async () => {
+  const resetButton = () => {
+    busy = false;
+    cancelWorker = null;
+    if (btn) { btn.textContent = 'Export STL'; }
+    updateState();
+  };
+
+  const runExport = async () => {
     const ctx = opts.getContext();
-    if (!ctx || btn.disabled) return;
+    if (!ctx) return;
     const field = opts.getField();
     if (!field) { setStatus('No metric selected.'); return; }
 
-    const prevLabel = btn.textContent;
-    btn.disabled = true; btn.textContent = 'Reading hexes…'; setStatus('');
+    busy = true;
+    let canceled = false;
+    if (btn) { btn.disabled = false; btn.textContent = 'Cancel export'; }
+    setStatus('');
+    // Cancel is available from the first tick: reading-phase cancel flips the
+    // local flag (checked after the await) and invalidates any worker job too.
+    cancelWorker = () => {
+      canceled = true;
+      cancelMeshExport(); // bumps the client's job id → old progress/results are dropped
+      setStatus('Export canceled.');
+    };
     try {
       const selectedOnly = regions?.value === 'selected';
       const { cells, res, rawCount } = await gatherCells(
         ctx, opts.map, opts.computeMetric, field, selectedOnly, opts.makeSelectedTest(), opts.getRegionField());
+      if (canceled) return;
       if (!cells.length) {
         setStatus('No hexes found at this view — zoom out to a hex view.');
         return;
       }
-      btn.textContent = 'Building mesh…';
+      if (btn) btn.textContent = 'Cancel export';
       setStatus(`${cells.length.toLocaleString()} hexes (r${res}) · ${rawCount.toLocaleString()} tile features`);
 
       const meshOpts = {
@@ -205,30 +229,47 @@ export function init3DPrint(opts: Init3DPrintOpts) {
         baseThicknessMm: Number(base?.value) || 2,
       };
       await new Promise<void>((resolve) => {
+        // Generation token: even if a stale worker message slipped past the
+        // client's job-id guard, only this run's callbacks can touch the panel.
+        let settled = false;
+        const finish = () => { if (!settled) { settled = true; resolve(); } };
+        cancelWorker = () => {
+          canceled = true;
+          cancelMeshExport();
+          setStatus('Export canceled.');
+          finish();
+        };
         requestMeshExport(cells, meshOpts, { stl: true, obj: false }, {
-          onProgress: (f) => { btn.textContent = `Building mesh… ${Math.round(f * 100)}%`; },
-          onError: (m) => { setStatus(`Export failed: ${m}`); resolve(); },
+          onProgress: (f) => { if (!canceled && btn) btn.textContent = `Building mesh… ${Math.round(f * 100)}%`; },
+          onError: (m) => { if (!canceled) setStatus(`Export failed: ${m}`); finish(); },
           onResult: (r: MeshExportResult) => {
-            if (r.stl) {
-              download(`hexes-r${res}.stl`, r.stl, 'model/stl');
-              const d = r.dims, rep = r.report;
-              // boundaryEdges === 0 means no holes (printable). nonManifoldEdges > 0 is
-              // expected here — adjacent hex columns share walls — and slicers union them.
-              setStatus(`Exported r${res} · ${r.triangleCount.toLocaleString()} tris · `
-                + `${d.x.toFixed(0)}×${d.y.toFixed(0)}×${d.z.toFixed(0)} mm · `
-                + (rep.boundaryEdges === 0 ? 'closed ✓ (no holes)' : `⚠ ${rep.boundaryEdges} open edges`));
-            } else {
-              setStatus('Export produced no geometry.');
+            if (canceled) { finish(); return; } // superseded/canceled result never reaches the UI
+            if (r.empty || !r.stl) {
+              // All metrics were zero/negative/empty: the builder made no geometry.
+              // Do not download anything; say so explicitly.
+              setStatus(EMPTY_MESH_MESSAGE);
+              finish();
+              return;
             }
-            resolve();
+            download(`hexes-r${res}.stl`, r.stl, 'model/stl');
+            const d = r.dims;
+            setStatus(
+              `Exported r${res} · ${d.x.toFixed(0)}×${d.y.toFixed(0)}×${d.z.toFixed(0)} mm\n`
+              + formatPrintabilityReport(r.report));
+            finish();
           },
         });
       });
     } catch (err) {
-      setStatus(`Export failed: ${String(err)}`);
+      if (!canceled) setStatus(`Export failed: ${String(err)}`);
     } finally {
-      btn.disabled = false; btn.textContent = prevLabel || 'Export STL';
-      updateState();
+      resetButton();
     }
+  };
+
+  btn?.addEventListener('click', () => {
+    if (busy) { cancelWorker?.(); return; }
+    if (btn.disabled) return; // parcel zoom: export stays disabled
+    void runExport();
   });
 }

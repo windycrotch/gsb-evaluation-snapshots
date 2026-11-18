@@ -10,6 +10,7 @@
 import { buildHexHeightfieldMesh, type HexCellInput, type HeightfieldOptions } from './heightfield-mesh';
 import { meshToBinarySTL, meshToOBJ } from './mesh-export';
 import { validateMesh } from './validate-mesh';
+import { isEmptyMesh } from './printability-report';
 
 interface BuildMsg {
   type: 'build';
@@ -37,11 +38,19 @@ ctx.onmessage = (e: MessageEvent<InMsg>) => {
     if (activeJobId !== jobId) return; // superseded / canceled
 
     ctx.postMessage({ type: 'progress', jobId, fraction: 0.95 });
+    const empty = isEmptyMesh(mesh);
     const report = validateMesh(mesh);
-    const out: any = { type: 'result', jobId, triangleCount: mesh.triangleCount, dims: mesh.dims, report };
+    const out: any = {
+      type: 'result', jobId, empty,
+      triangleCount: mesh.triangleCount, dims: mesh.dims, report,
+    };
+    // An empty build (all metrics non-positive/empty) carries no serializable
+    // geometry: send no file payload so the main thread cannot download anything.
     const transfer: Transferable[] = [];
-    if (formats.stl) { const buf = meshToBinarySTL(mesh); out.stl = buf; transfer.push(buf); }
-    if (formats.obj) { out.obj = meshToOBJ(mesh); }
+    if (!empty) {
+      if (formats.stl) { const buf = meshToBinarySTL(mesh); out.stl = buf; transfer.push(buf); }
+      if (formats.obj) { out.obj = meshToOBJ(mesh); }
+    }
     if (activeJobId !== jobId) return;
     ctx.postMessage(out, transfer);
   } catch (err) {

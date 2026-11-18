@@ -11,6 +11,7 @@ import type { MeshReport } from './validate-mesh';
 export interface MeshExportResult {
   stl?: ArrayBuffer;
   obj?: string;
+  empty: boolean;          // builder produced no geometry → no file payload exists
   triangleCount: number;
   dims: { x: number; y: number; z: number };
   report: MeshReport;
