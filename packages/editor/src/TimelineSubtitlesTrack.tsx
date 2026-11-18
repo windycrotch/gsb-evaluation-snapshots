@@ -3,6 +3,7 @@ import React, { createContext, useContext, useEffect, useMemo, useRef, useState 
 import VTT, { TextTrack, VTTCue } from "@react-av/vtt-core";
 import { useMediaTextTrackList } from "@react-av/vtt";
 import { TimelineTrack } from "./TimelineTrack";
+import { computeClampedMove } from "./timeline-track-utils";
 import { ClosedCaptioning } from "@phosphor-icons/react";
 import { useTimelineEditorContext } from './TimelineEditor';
 import { TimelineEntryLabel } from './TimelineEntryLabel';
@@ -200,13 +201,11 @@ export function TimelineSubtitlesTrack({
             onEntryMove={delta => {
                 if (!selectedEntry) return;
                 const cue = selectedEntry;
-                cue.startTime += delta;
-                cue.endTime += delta;
-                if (cue.startTime < 0) {
-                    const diff = cue.startTime;
-                    cue.startTime = 0;
-                    cue.endTime -= diff;
-                }
+                // clamp the start at 0 and shift the end by the same amount
+                // so the duration is preserved and the start never goes negative
+                const moved = computeClampedMove(cue.startTime, cue.endTime, delta);
+                cue.startTime = moved.start;
+                cue.endTime = moved.end;
                 forceRefresh();
             }}
             entries={entries}

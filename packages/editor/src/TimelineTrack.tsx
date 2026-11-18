@@ -7,6 +7,18 @@ import { TimelineOverflowContainer } from "./TimelineOverflowContainer";
 import { DraftElement, DragElement, PlayheadLine, TimelineElement } from "./TimelineElements";
 import { useEditorContext } from "./Editor";
 import { useTimelineEditorContext } from "./TimelineEditor";
+import {
+    clampResizeEnd,
+    clampResizeStart,
+    computeKeyboardMove,
+    computeKeyboardResize,
+    computeKeyboardSnapDelta,
+    computeMoveDelta,
+    computeMoveSnapDelta,
+    computeSnapDeltas,
+    pointerXToTime,
+    toFiniteMillis
+} from "./timeline-track-utils";
 
 export interface TimelineEntryData {
     start: number,
@@ -88,22 +100,14 @@ export function TimelineTrack({
         if (!duration || !interacting) return 0;
         const rect = containerRef.current?.getBoundingClientRect();
         if (!rect) return 0;
-        const currentTimestampOffset = (rect.width / 2);
-        const relativeAnchorX = anchor - rect.left;
-        const delta = relativeAnchorX - currentTimestampOffset;
-        const timeDelta = delta / (8 * 16) * interval;
-        return Math.min(duration, Math.max(0, currentTime + timeDelta));
+        return pointerXToTime(anchor, rect, currentTime, duration, interval);
     }, [duration, anchor, interval, currentTime, interacting]);
 
     const currentAnchorTime = useMemo(() => {
         if (!duration || !interacting) return 0;
         const rect = containerRef.current?.getBoundingClientRect();
         if (!rect) return 0;
-        const currentTimestampOffset = (rect.width / 2);
-        const relativeAnchorX = currentAnchor - rect.left;
-        const delta = relativeAnchorX - currentTimestampOffset;
-        const timeDelta = delta / (8 * 16) * interval;
-        return Math.min(duration, Math.max(0, currentTime + timeDelta));
+        return pointerXToTime(currentAnchor, rect, currentTime, duration, interval);
     }, [duration, currentAnchor, interval, currentTime, interacting]);
 
     const [snapDeltaStart, snapDeltaEnd] = useMemo(() => {
@@ -113,31 +117,27 @@ export function TimelineTrack({
 
         let start = 0;
         let end = 0;
+        let exclude: TimelineEntryData | undefined = undefined;
         if (dragging) {
             start = Math.min(anchorTime, currentAnchorTime);
             end = Math.max(anchorTime, currentAnchorTime);
         } else if (moving && selectedEntry) {
             const selected = entries?.find(entry => entry.symbol === selectedEntry.symbol);
             if (!selected) return [0, 0];
+            exclude = selected;
             start = selected.start + currentAnchorTime - anchorTime;
             end = selected.end + currentAnchorTime - anchorTime;
         } else if (resizing && selectedEntry) {
             const selected = entries?.find(entry => entry.symbol === selectedEntry.symbol);
             if (!selected) return [0, 0];
+            exclude = selected;
             start = resizing === "start" ? currentAnchorTime : selected.start;
             end = resizing === "end" ? currentAnchorTime : selected.end;
+        } else {
+            return [0, 0];
         }
-        
-        // find entry within snapping threshold
-        const snappingStartStart = entries.find(entry => Math.abs(entry.start - start) < snappingThreshold);
-        const snappingStartEnd = entries.find(entry => Math.abs(entry.end - start) < snappingThreshold);
-        const snappingEndStart = entries.find(entry => Math.abs(entry.start - end) < snappingThreshold);
-        const snappingEndEnd = entries.find(entry => Math.abs(entry.end - end) < snappingThreshold);
-        const startSnap = snappingStartStart?.start ?? snappingStartEnd?.end;
-        const endSnap = snappingEndStart?.start ?? snappingEndEnd?.end;
-        const snapDeltaStart = startSnap ? startSnap - start : 0;
-        const snapDeltaEnd = endSnap ? endSnap - end : 0;
-        return [snapDeltaStart, snapDeltaEnd];
+
+        return computeSnapDeltas(entries, start, end, snappingThreshold, exclude);
     }, [snap, entries, interval, dragging, moving, selectedEntry, resizing, anchorTime, currentAnchorTime]);
 
     function focusSelected() {
@@ -162,7 +162,7 @@ export function TimelineTrack({
             _draft: "draft"
         });
         if (moving) {
-            const snapDelta = (snapDeltaStart || snapDeltaEnd) ? Math.min(snapDeltaStart || Infinity, snapDeltaEnd || Infinity) : 0;
+            const snapDelta = computeMoveSnapDelta(snapDeltaStart, snapDeltaEnd);
             const delta = ((currentAnchorTime + snapDelta) - anchorTime);
             const entry = allEntries.findIndex(e => e.symbol === selectedEntry?.symbol);
             if (entry !== -1) {
@@ -184,10 +184,10 @@ export function TimelineTrack({
                 // now remove the entry
                 allEntries.splice(entry, 1);
                 if (resizing === "start") {
-                    e.start = Math.min(currentAnchorTime + snapDeltaStart, e.end - sizeThreshold);
+                    e.start = clampResizeStart(currentAnchorTime + snapDeltaStart, e.end, sizeThreshold);
                 }
                 if (resizing === "end") {
-                    e.end = Math.max(currentAnchorTime + snapDeltaEnd, e.start + sizeThreshold);
+                    e.end = clampResizeEnd(currentAnchorTime + snapDeltaEnd, e.start, sizeThreshold);
                 }
                 allEntries.push(e);
             }
@@ -271,8 +271,8 @@ export function TimelineTrack({
 
     function handleDraftCreate() {
         if (!dragging) return;
-        const start = Math.min(anchorTime, currentAnchorTime) + snapDeltaStart;
-        const end = Math.max(anchorTime, currentAnchorTime) + snapDeltaEnd;
+        const start = toFiniteMillis(Math.min(anchorTime, currentAnchorTime) + snapDeltaStart);
+        const end = toFiniteMillis(Math.max(anchorTime, currentAnchorTime) + snapDeltaEnd);
         onDraftCreate?.({start, end});
         setDragging(false);
     }
@@ -283,19 +283,19 @@ export function TimelineTrack({
             handleDraftCreate();
         } else if (moving) {
             focusSelected();
-            const snapDelta = (snapDeltaStart || snapDeltaEnd) ? Math.min(snapDeltaStart || Infinity, snapDeltaEnd || Infinity) : 0;
-            const delta = Math.round(((currentAnchorTime + snapDelta) - anchorTime) * 1000) / 1000;
+            const snapDelta = computeMoveSnapDelta(snapDeltaStart, snapDeltaEnd);
+            const delta = computeMoveDelta(anchorTime, currentAnchorTime, snapDelta);
             onEntryMove?.(delta);
             setMoving(false);
         } else if (resizing && selectedEntry) {
             focusSelected();
             const sizeThreshold = interval / 20;
             if (resizing === "start") {
-                const cleanedStart = Math.round(Math.min(currentAnchorTime + snapDeltaStart, selectedEntry.end - sizeThreshold) * 1000) / 1000;
-                onEntryResize?.(cleanedStart, selectedEntry.end);
+                const cleanedStart = toFiniteMillis(clampResizeStart(currentAnchorTime + snapDeltaStart, selectedEntry.end, sizeThreshold));
+                onEntryResize?.(cleanedStart, toFiniteMillis(selectedEntry.end));
             } else {
-                const cleanedEnd = Math.round(Math.max(currentAnchorTime + snapDeltaEnd, selectedEntry.start + sizeThreshold) * 1000) / 1000;
-                onEntryResize?.(selectedEntry.start, cleanedEnd);
+                const cleanedEnd = toFiniteMillis(clampResizeEnd(currentAnchorTime + snapDeltaEnd, selectedEntry.start, sizeThreshold));
+                onEntryResize?.(toFiniteMillis(selectedEntry.start), cleanedEnd);
             }
             setResizing(undefined);
         }
@@ -304,9 +304,10 @@ export function TimelineTrack({
     function handleKeyboardMove(delta: number) {
         const entry = selectedEntry;
         if (!entry) return;
-        onEntryMove?.(delta);
+        const move = computeKeyboardMove(entry, delta);
+        onEntryMove?.(move.delta);
         focusSelected();
-        setCurrentTime(entry.start + delta);
+        setCurrentTime(move.playhead);
     }
 
     function getSnappingEntry(entry: TimelineEntryData, end: boolean) {
@@ -326,8 +327,10 @@ export function TimelineTrack({
         // find the closest entry in the direction
         const closestEntry = getSnappingEntry(entry, end);
         if (!closestEntry) return;
-        const delta = end ? closestEntry.start - entry.end : closestEntry.end - entry.start;
+        const delta = computeKeyboardSnapDelta(entry, closestEntry, end);
         onEntryMove?.(delta);
+        focusSelected();
+        setCurrentTime(toFiniteMillis(entry.start + delta));
     }
 
     function handleKeyboardResize(e: React.KeyboardEvent, end: boolean, shrink = false) {
@@ -335,13 +338,10 @@ export function TimelineTrack({
         if (!entry) return;
         e.preventDefault();
         e.stopPropagation();
-        const delta = Math.round(Math.max(0.001, interval / 50) * 1000) / 1000;
+        const delta = toFiniteMillis(Math.max(0.001, interval / 50));
         const sizeThreshold = interval / 20;
-        if (end) {
-            onEntryResize?.(entry.start, shrink ? Math.max(entry.start + sizeThreshold, entry.end - delta) : entry.end + delta);
-        } else {
-            onEntryResize?.(shrink ? Math.min(entry.start + delta, entry.end - sizeThreshold) : entry.start - delta, entry.end);
-        }
+        const resized = computeKeyboardResize(entry, end, shrink, delta, sizeThreshold);
+        onEntryResize?.(resized.start, resized.end);
     }
 
     function handleKeyboardResizeSnap(e: React.KeyboardEvent, end: boolean) {
@@ -352,9 +352,9 @@ export function TimelineTrack({
         const closestEntry = getSnappingEntry(entry, end);
         if (!closestEntry) return;
         if (end) {
-            onEntryResize?.(entry.start, closestEntry.start);
+            onEntryResize?.(toFiniteMillis(entry.start), toFiniteMillis(closestEntry.start));
         } else {
-            onEntryResize?.(closestEntry.end, entry.end);
+            onEntryResize?.(toFiniteMillis(closestEntry.end), toFiniteMillis(entry.end));
         }
     }
 
