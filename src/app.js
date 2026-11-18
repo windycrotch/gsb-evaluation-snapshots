@@ -85,7 +85,8 @@ var APP_HTML = ''
   + '  <aside class="wt-panel" id="wtPanel">'
   + '    <div class="wt-head"><span class="wt-title">一起看 <b id="wtRoom"></b></span><span class="wt-online" id="wtOnline"></span>'
   + '      <button class="icon-btn" data-act="wt-share" aria-label="分享">' + icon('more') + '</button>'
-  + '      <button class="icon-btn" data-act="wt-close" aria-label="关闭">' + icon('close') + '</button></div>'
+  + '      <button class="icon-btn" data-act="wt-leave" aria-label="退出房间" title="退出房间">' + icon('back') + '</button>'
+  + '      <button class="icon-btn" data-act="wt-close" aria-label="收起" title="收起">' + icon('close') + '</button></div>'
   + '    <div class="wt-list" id="wtList"></div>'
   + '    <div class="wt-sync" id="wtSyncBar" style="display:none"></div>'
   + '    <div class="wt-input"><input id="wtInput" type="text" placeholder="说点什么" maxlength="500" autocomplete="off">'
@@ -287,7 +288,8 @@ function onAct(e) {
   if (act === 'pl-cast') { startCast(); return; }
   if (act === 'fav-current') { toggleFav(S.player.item); return; }
   if (act === 'wt-open') { wtEnter(S.player.item); return; }
-  if (act === 'wt-close') { wtLeave(); return; }
+  if (act === 'wt-close') { wtClose(); return; }
+  if (act === 'wt-leave') { wtLeave(); return; }
   if (act === 'wt-sync') { wtSync(); return; }
   if (act === 'wt-follow') { wtFollow(); return; }
   if (act === 'wt-share') { wtShare(); return; }
@@ -504,6 +506,7 @@ function unmount() {
   if (S.player.hls) { try { S.player.hls.destroy(); } catch (e) {} S.player.hls = null; }
   clearInterval(bannerTimer);
   stopAdWatch();
+  if (typeof wtLeave === 'function') { try { wtLeave(); } catch (e) {} }
   if (WT.client) { try { WT.client.end(true); } catch (e) {} WT.client = null; }
   document.removeEventListener('keydown', onKey);
   if (S.root.parentNode) S.root.parentNode.removeChild(S.root);
