@@ -57,6 +57,15 @@ pnpm dev
 Then open <http://localhost:8099/> in Chrome or Edge. Click the canvas to capture
 the pointer; that same click starts the sound.
 
+The movement can also be exercised with no browser and no GPU at all:
+
+```bash
+pnpm test          # node --test test/motion.test.mjs, ~0.1 s
+```
+
+See [Headless and deterministic](#headless-and-deterministic) below for what that
+covers and how to drive it from your own code.
+
 | control | does |
 | --- | --- |
 | mouse | look, once the pointer is locked by a click |
@@ -167,6 +176,71 @@ this particular thing is. The governor will also notice other demanding work on
 the machine and quietly drop quality to hold the frame rate, then climb back on
 its own when that work finishes — it tries a step up every so often and keeps the
 one that fits — so nothing is lost permanently and you should not need to reload.
+
+## Headless and deterministic
+
+The walk — the walking speed, the jog and the sprint, the jump and its
+single-press latch, the landing, the knee bend the landing hands the camera, the
+head bob and the eye — is a single pure function in [`src/motion.js`](src/motion.js).
+It has no dependency on `three`, the DOM, the keyboard or the clock, and
+`src/main.js` is now only an adapter: every frame it passes the step a fixed
+`dt`, the set of key codes held down, the facing and pitch the mouse set, and a
+`(x, z) → ground height` sampler, and writes the returned eye and pitch onto the
+camera. The lateral corridor it enforces against is pure arithmetic over a
+lookup table in [`src/confine.js`](src/confine.js), split out for the same reason.
+
+```js
+import { createState, stepMotion, cameraOf } from './src/motion.js';
+
+let s = createState(0, groundAt(0, 0), 0, path.headingAt(0), 0);
+const r = stepMotion(s, {
+  dt: 1 / 120,
+  keys: { KeyW: true },        // KeyA/KeyD/KeyS, ShiftLeft, ControlLeft, Space
+  yaw: s.yaw, pitch: s.pitch,
+  groundAt,                    // (x, z) → metres; NaN is refused, not propagated
+  corridor, path,              // optional; omit for an unconfined walk
+});
+s = r.state;                   // { x, y, z, vx, vy, vz, air, settle, bob, yaw, pitch, … }
+const eye = r.camera.eye;      // height of the eye *above the feet*, metres
+const err = r.error;           // null, or 'ground' when the sampler returned NaN
+```
+
+`stepMotion` never mutates the state it is given, so the same call twice is the
+same result and a replay is reproducible from the state alone. Both facts are
+asserted, not assumed: [`test/motion.test.mjs`](test/motion.test.mjs) drives the
+step for every property in this README in about a tenth of a second —
+
+- still and no keys is a **bit-identical fixed point** over hundreds of frames;
+- a step of zero or negative `dt` changes nothing and does not even sample the
+  ground;
+- the horizontal velocity is **unchanged for the whole arc** of a jump;
+- a jump fires **only on the rising edge** of Space — held Space is one jump, a
+  press still down at touchdown is not a second, and a press made mid-flight is
+  not banked into a landing;
+- the apex is 45 cm and the airtime is `2·v₀/g`;
+- a landing dips the eye by a fraction of the impact speed, deeper for a harder
+  landing, never overshoots level, and reaches **exactly zero in finite time**;
+- the eye offset and the pitch **cannot move each other**;
+- a `NaN` (or throwing) ground sample returns the entire previous state, holds
+  the position, flags `error: 'ground'`, and leaves the camera finite;
+- a jump that comes down on higher ground **lands early** and still dips;
+- at a side limit the outward velocity is bled off while forward walking keeps
+  its full 1.55 m/s, and at either end of the wash the along-wash velocity is
+  cut while a sidestep is not.
+
+To drive it from your own code, all you need is a ground sampler. A flat plate,
+a ramp and a hole demonstrate the three interesting paths:
+
+```js
+const flat  = () => 0;
+const ramp  = (x) => x * 0.2;                 // landing on rising ground
+const hole  = (x) => (x > 2 ? NaN : 0);       // a refused frame
+```
+
+Feed those to `stepMotion` with the keys you want and read `r.state`/`r.camera`.
+The real height field and the real corridor are exercised separately and in the
+page by `tools/_walktest.mjs` (the whole 330 m route, in Node) and
+`tools/_jump.mjs` (live, at capture resolution).
 
 ## What is not good enough yet
 

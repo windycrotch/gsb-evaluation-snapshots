@@ -12,7 +12,12 @@
  */
 import * as THREE from 'three';
 import { WashPath } from './path.js';
-import { buildCorridor, confine } from './corridor.js';
+import { buildCorridor } from './corridor.js';
+/* The walk itself — velocity, jump, landing dip, bob, and the eye — is a pure
+   step function with no dependency on the DOM, the scene or the keyboard. It
+   is the same code the tests drive frame by frame; this file only feeds it a
+   clock, a key set and a height sampler, and reads back the camera. */
+import { cameraOf, createState, stepMotion } from './motion.js';
 import { Terrain, buildTerrainMesh, makeTerrainMaterial, syncWind, applyScour } from './terrain.js';
 import { buildScatter } from './scatter.js';
 import { buildWalls, buildDistantButtes, buildTalus, makeRockMaterial } from './rock.js';
@@ -31,7 +36,6 @@ import { buildAtmosphere } from './atmosphere.js';
 import { createPerf } from './perf.js';
 import { createPost } from './post.js';
 
-const EYE = 1.65;
 const DEG = Math.PI / 180;
 
 /* ── the loading screen ────────────────────────────────────────────────────
@@ -329,21 +333,23 @@ syncWind(terrainMesh.material, audio.api);
    cross-section instead of being a number somebody chose. */
 const corridor = buildCorridor(path, terrain);
 
-const player = {
-  x: 0, y: 0, z: 0,
-  vx: 0, vz: 0,
-  vy: 0,         // only ever non-zero while airborne; see jump
-  air: false,
-  settle: 0,     // metres the eye is lowered by the landing; see arrest
-  settleV: 0,
-  yaw: 0,        // absolute world yaw, radians; 0 = looking straight down -Z
-  pitch: 0,
-  bob: 0,
-};
+/* The walker's state. Every field that the motion needs lives in one object
+   that `stepMotion` owns the shape of; `createState` is the authority for it.
+   `x`, `y`, `z` are the *feet*, and the eye is `y + camera.eye`. Nothing in
+   this file integrates the walk any more — `step` below hands the state, the
+   keys and the ground sampler to the pure step and takes back the next one. */
+const player = createState(0, 0, 0);
+/* Yaw is a world angle: 0 looks straight down −Z, up-wash. */
+player.yaw = path.headingAt(0);
 
 /* Degrees of pitch the arrival lift has spent; declared here because placeAt
    refills it and placeAt runs during boot. See arrivalLift. */
 let lifted = 0;
+
+/* Set when the ground sampler returns a non-finite height and the step refuses
+   the frame. Exposed as `api.groundFault` so a probe can ask what happened
+   rather than infer it from a frozen camera. */
+let groundFault = false;
 
 const _q = {};
 
@@ -358,11 +364,20 @@ function currentS() {
 
 function placeAt(d) {
   const p = path.posAt(d);
+  /* A teleport is not a step: it discards the airborne branch, the dip and the
+     bob outright, so a capture taken shortly after `walkTo` cannot be shot
+     through a dipping or mid-flight camera. `yaw` and `pitch` are the
+     operator's and are set by `lookAt`, not here. */
   player.x = p.x;
   player.z = p.z;
-  player.vx = 0; player.vz = 0; player.bob = 0;
+  player.vx = 0; player.vz = 0;
   player.vy = 0; player.air = false;
   player.settle = 0; player.settleV = 0;
+  player.bob = 0; player.bobPhase = 0;
+  /* The latch is cleared so a key held across a teleport cannot fire a jump
+     from the new spot: the next frame sees "was up", the frame after that is a
+     genuine press like any other. */
+  player.jumpHeld = false;
   player.y = groundAt(player.x, player.z);
   /* A teleport is a fresh approach, so the arrival lift's budget refills. It
      spends nothing here — only walking does — so this cannot move a capture. */
@@ -370,8 +385,12 @@ function placeAt(d) {
 }
 
 function syncCamera() {
-  camera.position.set(player.x, player.y + EYE + player.bob - player.settle, player.z);
-  camera.rotation.set(player.pitch, -player.yaw, 0, 'YXZ');
+  /* The eye is the camera's own vertical offset above the feet — eye height
+     plus bob minus landing dip, which `motion.js` computes and keeps separate
+     from pitch. Nothing here reaches into the step's arithmetic. */
+  const cam = cameraOf(player);
+  camera.position.set(player.x, player.y + cam.eye, player.z);
+  camera.rotation.set(cam.pitch, -player.yaw, 0, 'YXZ');
 }
 
 /* Both cascade cameras ride with the player, each quantised to its own texel
@@ -487,6 +506,11 @@ const perf = createPerf({
 
 /* ── first-person controls (human only; never touched by walkTo) ───────── */
 
+/* The keys are just a set of codes; everything about what they *mean* — which
+   of them walk, which sprint, and the jump latch that turns a held Space into
+   one jump — is in `src/motion.js`, where it can be driven and tested without
+   a keyboard. Key-up needs no handler beyond clearing the flag: the latch is
+   re-armed by the step seeing the key released, not by this listener. */
 const keys = Object.create(null);
 addEventListener('keydown', e => {
   keys[e.code] = true;
@@ -494,10 +518,7 @@ addEventListener('keydown', e => {
      and a canvas today that is a property of the page, not a promise. */
   if (e.code === 'Space') e.preventDefault();
 });
-addEventListener('keyup', e => {
-  keys[e.code] = false;
-  if (e.code === 'Space') jumpArmed = true;
-});
+addEventListener('keyup', e => { keys[e.code] = false; });
 canvas.addEventListener('click', () => canvas.requestPointerLock());
 
 /* Number keys jump to the eight framings the capture harness shoots, which are
@@ -581,183 +602,66 @@ function arrivalLift(dt, forward) {
   player.pitch = Math.min(1.45, player.pitch + give);
 }
 
-/* ── jump ──────────────────────────────────────────────────────────────── */
-
-/* A person's standing jump, and deliberately nothing more. Real gravity and a
-   45 cm apex put the whole thing at 0.61 s in the air, which is about what it
-   costs to hop a rill. Anything higher immediately reads as a platformer and
-   fights the tone of a walk you are supposed to take slowly.
+/* ── the step ────────────────────────────────────────────────────────────
  *
- * v0 = sqrt(2 g h). Stated that way rather than as a tuned number so that
- * changing the apex cannot silently desynchronise it from gravity. */
-const G = 9.81;
-const JUMP_H = 0.45;
-const JUMP_V = Math.sqrt(2 * G * JUMP_H);
-
-/* The single most important property of this feature is what it does *not*
-   touch: **the airborne state is entered only by pressing Space.** Terrain
-   never puts you in the air. Walking off a cut bank or down the talus keeps the
-   hard ground clamp that has always been there, so the walk is unchanged to the
-   last bit and only an explicit jump adds a ballistic arc. Letting the ground
-   fall away into flight would have been more "correct" and would have made
-   every undulation in a 330 m wash faintly bouncy. */
-let jumpArmed = true;
-
-/* The push-off, which is the part that makes a jump with no air steering
-   playable at all.
+ * The walk — the acceleration, the jump and its single-press latch, the
+ * landing, the knee bend, the bob and the eye — used to live here, in about a
+ * hundred and fifty lines threaded through the frame loop. It now lives in
+ * `src/motion.js` as one pure function, so the whole of it can be driven frame
+ * by frame in Node with no scene, no canvas and no keyboard, and so that
+ * "a still player is a fixed point" and "holding Space is one jump" are
+ * properties a test can fail rather than properties this file hopes for.
  *
- * Without it, jumping from a standstill while holding forward leaves the ground
- * at whatever velocity one frame of acceleration had built — about 0.15 m/s —
- * and since there is no steering in the air you land having gone nowhere. Tap
- * Space repeatedly and you are pinned to the spot. The walker simulation found
- * this immediately by covering 0.0 m in 6.7 minutes and 667 jumps.
+ * What is left here is the part that genuinely belongs to the page: the
+ * arrival lift (which is a camera nudge keyed to distance along this specific
+ * wash, not a property of walking), and the adapters that hand the pure step
+ * the clock, the key set and the ground. The comments that explain *why* each
+ * movement number is what it is moved with the numbers, into motion.js.
  *
- * The fix is not air control. A person standing still who jumps forward is not
- * steering mid-flight; they are choosing a takeoff velocity with their legs. So
- * the takeoff is allowed to reach walking pace in the direction being held, and
- * nothing beyond it: `max` with the speed already carried means this can only
- * ever raise a standstill to a walk and never add to a jog or a sprint. */
-function jump(ax, az) {
-  /* Rearmed on *keyup*, which is the whole of the anti-bunny-hop. Rearming on
-     landing instead reads like the obvious choice and is wrong: the key is still
-     down at the moment you touch the ground, so the next frame jumps again and
-     holding Space turns the walk into a pogo stick. */
-  if (!jumpArmed || player.air) return;
-  jumpArmed = false;
-  player.air = true;
-  player.vy = JUMP_V;
-
-  const l = Math.hypot(ax, az);
-  if (!l) return;                                   // a jump in place, on purpose
-  const v = Math.max(Math.hypot(player.vx, player.vz), 1.55);
-  player.vx = ax / l * v;
-  player.vz = az / l * v;
-}
-
-/* ── the landing settle ────────────────────────────────────────────────────
- *
- * A jump that arrests dead is correct and does not feel like a body: you arrive
- * at three metres a second and nothing happens. This is the knee bend.
- *
- * It is on **height and not pitch**, deliberately. The arrival lift spends a
- * bounded budget of pitch over the last forty-five metres and never pushes back
- * once spent; a settle that also wrote pitch would be drawing on a different
- * pocket of the same quantity, and the two would compose into something neither
- * of them describes. Nothing here touches `player.pitch`.
- *
- * It is a critically damped spring given an initial *velocity* rather than a
- * displacement, which is both the physical model — the impact hands the camera
- * downward speed and the legs arrest it — and the reason there is no pop. A
- * displacement would drop the eye instantly on the landing frame. The spring
- * takes 1/w to reach its lowest point, so the dip has a rise time.
- *
- * The amplitude therefore scales with how hard you land, for free and without a
- * curve to tune: peak dip is about 0.37 * v0 / w. A 3.4 m/s arrival on the flat
- * dips 3.9 cm, the 1.8 m/s clip off the cut bank dips 2.0 cm. A settle identical
- * either way is the thing that reads as an animation instead of a body.
- *
- * Critical damping means no overshoot, so the eye returns to level and does not
- * bounce past it. w = 8 puts the recovery at about 0.37 s, which is a knee. */
-const SETTLE_W = 8;
-const SETTLE_TRANSFER = 0.25;   // fraction of impact speed the eye takes on
-const SETTLE_VMAX = 1.5;        // m/s, so no fall can dip more than about 7 cm
-
-function arrest(impact) {
-  if (impact <= 0) return;
-  player.settleV += Math.min(impact, SETTLE_VMAX / SETTLE_TRANSFER) * SETTLE_TRANSFER;
-}
-
-function settleStep(dt) {
-  if (!player.settle && !player.settleV) return;      // exactly inert at rest
-  const a = -SETTLE_W * SETTLE_W * player.settle - 2 * SETTLE_W * player.settleV;
-  player.settleV += a * dt;
-  player.settle += player.settleV * dt;
-  /* Snapped to zero rather than left to approach it, for the same reason the
-     walking velocity is: a decaying exponential never arrives, and a camera that
-     never comes to rest breaks pixel-identical recapture. */
-  if (Math.abs(player.settle) < 1e-4 && Math.abs(player.settleV) < 1e-4) {
-    player.settle = 0; player.settleV = 0;
-  }
-}
-
+ * `stepMotion` returns a fresh state rather than mutating the one it was
+ * given — that is what lets a test step a copy and compare — so its fields are
+ * copied back onto the single long-lived `player` object at the end. The
+ * identity is kept stable deliberately: `_player` on the capture API and the
+ * probes that read `_player.air` are holding this object, and swapping it for
+ * a new one would leave them reading a fossil. */
 function step(dt) {
-  const f = (keys.KeyW ? 1 : 0) - (keys.KeyS ? 1 : 0);
-  const r = (keys.KeyD ? 1 : 0) - (keys.KeyA ? 1 : 0);
-  arrivalLift(dt, f);
-  /* 1.55 m/s is a real walking pace and it is the default because the scene is
-     meant to be walked. Shift is a jog; Shift with Ctrl is a frank cheat for
-     covering the wash quickly when you are looking for something. */
-  const sprint = keys.ShiftLeft || keys.ShiftRight;
-  const turbo = sprint && (keys.ControlLeft || keys.ControlRight);
-  const speed = turbo ? 12 : sprint ? 4.2 : 1.55;
+  const forward = (keys.KeyW ? 1 : 0) - (keys.KeyS ? 1 : 0);
+  arrivalLift(dt, forward);
 
-  let ax = 0, az = 0;
-  if (f || r) {
-    const s = Math.sin(player.yaw), c = Math.cos(player.yaw);
-    // forward = (sin yaw, -cos yaw); right = (cos yaw, sin yaw)
-    ax = s * f + c * r;
-    az = -c * f + s * r;
-    const l = Math.hypot(ax, az) || 1;
-    ax = ax / l * speed; az = az / l * speed;
-  }
+  const r = stepMotion(player, {
+    dt,
+    keys,
+    /* The mouse and the lift write these into `player`; passing them straight
+       through keeps the step's copy of the facing identical to the camera's. */
+    yaw: player.yaw,
+    pitch: player.pitch,
+    groundAt,
+    /* Confinement needs the wash's frame as well as its tables, so the pure
+       step is handed both. It applies them to velocity before integration,
+       exactly as this file used to, and is inert at rest. */
+    corridor,
+    path,
+  });
 
-  /* Critically damped approach to the target velocity, then an absolute snap
-     to zero — a decaying exponential never actually reaches rest, and a
-     never-resting player breaks pixel-identical recapture.
-
-     Skipped entirely while airborne: you keep the velocity you left the ground
-     with. That is both what a body does and the reason a jump cannot be used to
-     reach anywhere walking could not — no air steering means no using the arc to
-     round the corridor. */
-  if (!player.air) {
-    const k = 1 - Math.exp(-12 * dt);
-    player.vx += (ax - player.vx) * k;
-    player.vz += (az - player.vz) * k;
-    if (!f && !r && Math.hypot(player.vx, player.vz) < 0.004) { player.vx = 0; player.vz = 0; }
-  }
-
-  /* After the ground acceleration, so the takeoff carries the velocity this
-     frame built rather than last frame's. */
-  if (keys.Space) jump(ax, az);
-
-  /* Confinement acts on the velocity, before it is integrated, so it is not a
-     position fixup that can accumulate and so it is identically inert at rest —
-     the loop stays a fixed point when no key is held, which every capture
-     depends on. It also never fires in the middle of the wash: the limit is
-     eight to eighteen metres either side of the centreline the player walks. */
-  confine(corridor, path, player, path.atZ(player.z, _q), dt);
-
-  player.x += player.vx * dt;
-  player.z += player.vz * dt;
-
-  /* The ground clamp, which is the oldest solid thing in this file, is kept
-     exactly as it was for the grounded case. Airborne is the new branch and it
-     lands by the same clamp, so there is one definition of "on the ground" and
-     no way for the two to disagree.
-
-     The landing test is against the height *under where you now are*, not where
-     you took off, so an arc that carries you onto a rising talus lands early on
-     the slope and one over a cut bank falls the extra distance. Both reseat on
-     the field itself; neither needs a special case. */
-  const g0 = groundAt(player.x, player.z);
-  if (player.air) {
-    player.vy -= G * dt;
-    player.y += player.vy * dt;
-    if (player.y <= g0) {
-      player.y = g0;
-      player.air = false;
-      arrest(-player.vy);
-      player.vy = 0;
+  if (r.error) {
+    /* The ground sampler returned a non-finite height. The step has already
+       refused the frame: the player stays exactly where they were standing and
+       the camera fields describe that position, so no NaN can reach the eye.
+       There is no useful recovery from here — the height field is a pure
+       function of position, so the next frame at the same spot will fail the
+       same way — but reporting it once is what makes a broken height field
+       visible instead of a silent freeze. `groundFault` is also exposed on the
+       capture API so a probe can ask. */
+    if (!groundFault) {
+      groundFault = true;
+      console.error('motion: ground height was not finite at', player.x, player.z,
+        '— holding the last good position');
     }
-  } else {
-    player.y = g0;
+  } else if (groundFault) {
+    groundFault = false;
   }
-  settleStep(dt);
 
-  /* No headbob in the air — a body in flight is not taking steps. */
-  const sp = player.air ? 0 : Math.hypot(player.vx, player.vz);
-  if (sp < 0.004) player.bob = 0;
-  else player.bob = Math.sin((player.bob0 = (player.bob0 || 0) + dt * sp * 5.4)) * 0.032;
+  Object.assign(player, r.state);
 }
 
 /* ── frame probe ───────────────────────────────────────────────────────── */
@@ -921,7 +825,6 @@ const api = {
   renderOnce,
   walkTo(d) {
     placeAt(+d || 0);
-    player.bob0 = 0;
     syncCamera();
     syncShadow();
     /* Settles the air too: the particle clock becomes a pure function of the
@@ -971,6 +874,10 @@ const api = {
      head bob as a 1.6 s hop because the bob is bigger than the threshold. The
      state is not a proxy and cannot be fooled by either. */
   _player: player,
+  /* True while the last step refused its frame because the ground sampler
+     returned a non-finite height. The player is held at the last good position
+     for as long as it is set; a probe can watch it go true and back. */
+  get groundFault() { return groundFault; },
   _scene: scene, _camera: camera, _terrain: terrain, _path: path, _atmo: atmo,
   _post: post,
   /* When the loading message reached the screen, how long each generation phase

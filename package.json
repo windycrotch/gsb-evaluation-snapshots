@@ -7,7 +7,8 @@
   "scripts": {
     "dev": "node tools/serve.mjs",
     "shoot": "node tools/shoot.mjs",
-    "gate": "node tools/gate.mjs"
+    "gate": "node tools/gate.mjs",
+    "test": "node --test test/motion.test.mjs"
   },
   "devDependencies": {
     "playwright": "^1.62.0"

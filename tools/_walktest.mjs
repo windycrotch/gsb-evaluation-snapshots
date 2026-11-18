@@ -16,7 +16,13 @@
  */
 import { WashPath } from '../src/path.js';
 import { Terrain } from '../src/terrain.js';
-import { buildCorridor, confine, corridorAt, BAND } from '../src/corridor.js';
+import { buildCorridor, corridorAt, BAND } from '../src/corridor.js';
+/* The walk itself is imported, not copied. It used to be a hand-copied model of
+   src/main.js's `step` in this file — "keep them together" as the note said —
+   and keeping two copies of an integrator together is exactly the thing that
+   does not happen. It is now one pure function, loadable here, and this test
+   drives the same code the page does. */
+import { KEY, createState, stepMotion } from '../src/motion.js';
 
 const path = new WashPath();
 const terrain = new Terrain(path);
@@ -26,61 +32,36 @@ const DT = 1 / 120;
 const _q = {};
 const groundAt = (x, z) => terrain.heightAtQ(x, z, path.atZ(z, _q));
 
-/* Jump constants, mirroring src/main.js. */
+/* Jump constants, for the reports below. The step owns them; these are read
+   back only so a printed number and an asserted number cannot disagree. */
 const G = 9.81, JUMP_H = 0.45, JUMP_V = Math.sqrt(2 * G * JUMP_H);
 
 function spawn(d) {
   const p = path.posAt(d);
-  return { x: p.x, y: groundAt(p.x, p.z), z: p.z, vx: 0, vz: 0,
-           vy: 0, air: false,
-           yaw: path.headingAt(d), pitch: 0, bob: 0 };
+  const st = createState(p.x, groundAt(p.x, p.z), p.z, path.headingAt(d), 0);
+  return st;
 }
 
-/** One frame of src/main.js's `step`, with the keys given as f/r in [-1, 1].
- *  `sp` is the Space key: it jumps only from the ground, as in the page. */
+/** One frame of the real step. Keys are given as f/r in [-1, 1] (the shape the
+ *  rest of this file steers with) and `sp` is Space. Returns the corridor mask,
+ *  as the old copy did, so the call sites below do not change. */
 function step(pl, f, r, speed, sp) {
-  let ax = 0, az = 0;
-  if (f || r) {
-    const s = Math.sin(pl.yaw), c = Math.cos(pl.yaw);
-    ax = s * f + c * r;
-    az = -c * f + s * r;
-    const l = Math.hypot(ax, az) || 1;
-    ax = ax / l * speed; az = az / l * speed;
-  }
-  if (!pl.air) {
-    const k = 1 - Math.exp(-12 * DT);
-    pl.vx += (ax - pl.vx) * k;
-    pl.vz += (az - pl.vz) * k;
-    if (!f && !r && Math.hypot(pl.vx, pl.vz) < 0.004) { pl.vx = 0; pl.vz = 0; }
-  }
+  const keys = {};
+  if (f > 0) keys[KEY.FORWARD] = true;
+  if (f < 0) keys[KEY.BACK] = true;
+  if (r > 0) keys[KEY.RIGHT] = true;
+  if (r < 0) keys[KEY.LEFT] = true;
+  /* The caller names one of three speeds; map it back onto the key set the step
+     reads, so the step's own speed constants stay the authority. */
+  if (speed >= 12) keys[KEY.SHIFT] = keys[KEY.CTRL] = true;
+  else if (speed >= 4.2) keys[KEY.SHIFT] = true;
+  if (sp) keys[KEY.JUMP] = true;
 
-  /* The jump, after the ground acceleration, with the same push-off as the page. */
-  if (sp && !pl.air) {
-    pl.air = true; pl.vy = JUMP_V;
-    const l = Math.hypot(ax, az);
-    if (l) {
-      const v = Math.max(Math.hypot(pl.vx, pl.vz), 1.55);
-      pl.vx = ax / l * v; pl.vz = az / l * v;
-    }
-  }
-
-  /* Confinement runs airborne too, which is the reason a jump cannot be used to
-     cross the corridor: the limit is on lateral velocity and the arc has no
-     steering of its own to spend. */
-  const hit = confine(corridor, path, pl, path.atZ(pl.z, _q), DT);
-
-  pl.x += pl.vx * DT;
-  pl.z += pl.vz * DT;
-
-  const g0 = groundAt(pl.x, pl.z);
-  if (pl.air) {
-    pl.vy -= G * DT;
-    pl.y += pl.vy * DT;
-    if (pl.y <= g0) { pl.y = g0; pl.vy = 0; pl.air = false; }
-  } else {
-    pl.y = g0;
-  }
-  return hit;
+  const res = stepMotion(pl, { dt: DT, keys, groundAt, corridor, path });
+  /* `pl` is mutated in place for this test's convenience: the call sites treat
+     it as a running walker. */
+  Object.assign(pl, res.state);
+  return res.hit;
 }
 
 function state(pl) {

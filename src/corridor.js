@@ -59,6 +59,12 @@
  * the centreline, so no capture ever touches this code path.
  */
 import * as THREE from 'three';
+/* The per-frame half of this file — `corridorAt` and `confine` — lives in
+   confine.js, which imports nothing, so that src/motion.js can be loaded and
+   driven in a bare Node process. Re-exported here so the existing callers and
+   tools keep importing from one place. */
+import { BAND, confine, corridorAt } from './confine.js';
+export { BAND, confine, corridorAt };
 
 /* Table spacing. One metre is far finer than anything in the cross-section —
    the narrowest term in `frame()` has a 30 m wavelength — so the table is a
@@ -85,10 +91,10 @@ const R_MIN = 5.0, R_MAX = 26.0;
    — and an unsmoothed limit would catch and release as you slid along it. */
 const SMOOTH = 3;
 
-/* Width of the soft zone, in metres. Walk into it and the outward half of your
-   velocity is bled off across it, reaching zero at the limit itself. */
-export const BAND = 1.6;
-/* Tried and rejected: a wider band while airborne, on the reasoning that a
+/* The soft band's width, `BAND`, is defined in confine.js alongside the
+   arithmetic that uses it, because motion.js reads it too.
+ *
+ * Tried and rejected: a wider band while airborne, on the reasoning that a
    player in flight cannot steer away and so the band has to do its whole job
    against a fixed velocity. It works as arithmetic — the closest approach on a
    route jumped end to end goes from 1.63 m to 3.11 m — and it is wrong as
@@ -169,81 +175,3 @@ export function buildCorridor(path, terrain) {
   return { sMin, sMax, step: STEP, n, L: boxSmooth(rawL), R: boxSmooth(rawR) };
 }
 
-/** Half-width of the corridor at arc length `s`, on `side` (+1 right, −1 left). */
-export function corridorAt(cor, s, side) {
-  const a = side > 0 ? cor.R : cor.L;
-  let f = (s - cor.sMin) / cor.step;
-  f = f < 0 ? 0 : f > cor.n - 1.001 ? cor.n - 1.001 : f;
-  const i = f | 0, t = f - i;
-  return a[i] + (a[i + 1] - a[i]) * t;
-}
-
-/**
- * One frame of confinement, applied to the player's velocity before it is
- * integrated. `q` is the path frame already looked up for this position, so
- * this costs no extra table read.
- *
- * Mutates `player.vx`, `player.vz`, `player.x`, `player.z`, and returns a mask
- * of which limits engaged — 1 lateral, 2 along the wash. The game ignores it;
- * `tools/_walktest.mjs` needs the two apart, because a nudge at the head of the
- * walk is the walk ending and a nudge in the middle of it is a defect.
- */
-export function confine(cor, path, player, q, dt) {
-  let hit = 0;
-  const sin = Math.sin(q.th), cos = Math.cos(q.th);
-  /* The wash's own frame at the player: right is +u, forward is +s. */
-  const rx = cos, rz = sin;
-  const fx = sin, fz = -cos;
-
-  const u = (player.x - q.x) * cos;
-  const side = u >= 0 ? 1 : -1;
-
-  /* ── lateral ── */
-  const lim = corridorAt(cor, q.s, side);
-  const au = u < 0 ? -u : u;
-  const t = (au - (lim - BAND)) / BAND;
-  if (t > 0) {
-    const g = t > 1 ? 1 : t;
-    /* Outward-signed component of the velocity, in the corridor's own frame. */
-    const vOut = (player.vx * rx + player.vz * rz) * side;
-    if (vOut > 0) {
-      const cut = vOut * g;
-      player.vx -= cut * side * rx;
-      player.vz -= cut * side * rz;
-      hit |= 1;
-    }
-    if (au > lim) {
-      const back = Math.min(au - lim, RESTORE * dt);
-      player.x -= back * side * rx;
-      player.z -= back * side * rz;
-      hit |= 1;
-    }
-  }
-
-  /* ── along the wash ───────────────────────────────────────────────────────
-   * The same treatment at both ends of the walk. Without it, turning round at
-   * the start and walking gets you out of the mouth and onto ground the scene
-   * never intended to be stood on — the walls simply end — and it is the
-   * cheaper of the two failures to fix because there is nothing to collide
-   * with there at all. */
-  for (const [edge, dir] of [[cor.sMin, -1], [cor.sMax, 1]]) {
-    const d = (q.s - edge) * dir;          // positive = past the edge
-    const ts = (d + BAND) / BAND;
-    if (ts <= 0) continue;
-    const g = ts > 1 ? 1 : ts;
-    const vOut = (player.vx * fx + player.vz * fz) * dir;
-    if (vOut > 0) {
-      const cut = vOut * g;
-      player.vx -= cut * dir * fx;
-      player.vz -= cut * dir * fz;
-      hit |= 2;
-    }
-    if (d > 0) {
-      const back = Math.min(d, RESTORE * dt);
-      player.x -= back * dir * fx;
-      player.z -= back * dir * fz;
-      hit |= 2;
-    }
-  }
-  return hit;
-}
