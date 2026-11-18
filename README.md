@@ -199,10 +199,18 @@ cuts away from stroke ends and `dir_cap` optionally limits the number of parts. 
 written to the G-code as `; impasto section …`, drawn as a dot in the 2D view and as a cross in 3D.
 
 **Order.** Overlapping sections of different elements get a precedence (lower element first, within
-line width + nozzle radius). Colour batches are formed from that: all groups of a colour whose
-predecessors are done are printed together, the colour order follows the least purge. Inside a
-batch the sections are chained by a nearest-neighbour pass plus 2-opt and or-opt (`impasto/tour.py`),
-every move checked against the precedences. The cost of a chain is
+line width + nozzle radius + 0.05 mm). Colour batches are formed from that: a colour is printed as
+one run of all its elements whose predecessors are done; it comes back only when an overlap
+genuinely blocks it, so a "white – colour – white" stack yields three batches. Among the colours
+that may go next the one that can be finished completely wins, and the already loaded filament is
+kept while it still has work (no needless change). Without an explicit `color_order` the colour
+sequence is the one with the least total purge, estimated from the Bambu flush matrix with
+`purge_factor` and `min_purge` and starting from the loaded filament (asymmetric matrix, so order
+matters; solved exactly up to 10 colours). An explicit `color_order` is used instead, keeping only
+the slots that occur in the design (duplicates and unknown slots dropped) and appending the rest in
+slot order. `toolchanges`, `purge_mm3`, `batches` and `precedences` report exactly what the G-code
+does. Inside a batch the sections are chained by a nearest-neighbour pass plus 2-opt and or-opt
+(`impasto/tour.py`), every move checked against the precedences. The cost of a chain is
 `travel + weight × downhill`, so a long way round is only taken when it buys less descent than
 `dir_travel_weight` allows. The resulting travel is shown as *travel* in the stats bar, the cuts as
 `; impasto section …` in the G-code.
@@ -277,9 +285,10 @@ The `X-Impasto-Lang: de|en` header selects the language of backend messages.
 .venv/bin/python -m pytest -q
 ```
 
-140 tests cover the G-code parser, height map, path/pattern generation, uphill splitting, the
-ordering with precedences, wipe/coasting, self-crossings, curve speed, warp allowance, touch-off,
-slope compensation, the
+The tests cover the G-code parser, height map, path/pattern generation, uphill splitting, the
+ordering with precedences, colour order (least purge, explicit `color_order`), colour batches and
+their `; FilamentChangeGCodeStart`/`End` blocks, wipe/coasting, self-crossings, curve speed, warp
+allowance, touch-off, slope compensation, the
 collision check, filament changes (rendered against a real Bambu tool-change block), the AMS
 mapping and the HTTP API (including send and variants). The UI has no test runner; a JS syntax
 check and manual browser runs are used instead.

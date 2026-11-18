@@ -113,6 +113,81 @@ def _length(p: np.ndarray) -> float:
     return float(np.hypot(*np.diff(p, axis=0).T).sum()) if len(p) > 1 else 0.0
 
 
+def _least_purge_order(used: list[int], start: int, cost_fn) -> list[int]:
+    """Visit every slot once, starting from ``start``, with the least total purge.
+
+    ``cost_fn(old, new)`` is the purge volume of one change (as it is rendered in
+    the G-code).  The Bambu flush matrix is asymmetric, so the order matters.
+    Up to 10 colours the optimum is found exactly (Held-Karp over all orders);
+    beyond that a deterministic nearest-neighbour tour is used.
+    """
+    used = sorted({int(u) for u in used})
+    n = len(used)
+    if n <= 1:
+        return used
+    if n <= 10:
+        INF = float("inf")
+        full = 1 << n
+        cost = [[cost_fn(a, b) for b in used] for a in used]
+        first = [cost_fn(start, a) for a in used]
+        dp = [[INF] * n for _ in range(full)]
+        par = [[-1] * n for _ in range(full)]
+        for j in range(n):
+            dp[1 << j][j] = first[j]
+        for mask in range(full):
+            row = dp[mask]
+            for j in range(n):
+                c = row[j]
+                if c == INF:
+                    continue
+                cj = cost[j]
+                for k in range(n):
+                    if mask >> k & 1:
+                        continue
+                    v = c + cj[k]
+                    nm = mask | (1 << k)
+                    if v < dp[nm][k] - 1e-12:
+                        dp[nm][k] = v
+                        par[nm][k] = j
+        mask = full - 1
+        j = min(range(n), key=lambda q: (dp[mask][q], q))
+        seq: list[int] = []
+        while j >= 0:
+            seq.append(used[j])
+            pj = par[mask][j]
+            mask ^= 1 << j
+            j = pj
+        seq.reverse()
+        return seq
+    # many colours: nearest neighbour by purge, then a deterministic 2-opt pass
+    rem = list(used)
+    seq = []
+    cur = start
+    while rem:
+        k = min(range(len(rem)), key=lambda t: (cost_fn(cur, rem[t]), rem[t]))
+        cur = rem.pop(k)
+        seq.append(cur)
+
+    def total(s):
+        c, prev = 0.0, start
+        for v in s:
+            c += cost_fn(prev, v)
+            prev = v
+        return c
+
+    improved = True
+    best_c = total(seq)
+    while improved:
+        improved = False
+        for i in range(len(seq) - 1):
+            for j in range(i + 1, len(seq)):
+                cand = seq[:i] + seq[i:j + 1][::-1] + seq[j + 1:]
+                c = total(cand)
+                if c < best_c - 1e-9:
+                    seq, best_c, improved = cand, c, True
+    return seq
+
+
 @dataclass
 class Result:
     gcode: str
@@ -225,26 +300,39 @@ def generate(job: Job, tp: Toolpaths, g: Grid, paths: list[dict], params: Params
 
     cur_slot = tp.last_filament if tp.last_filament >= 0 else 0
 
+    def purge_between(old: int, new: int) -> float:
+        """purge volume of one filament change, exactly as it is rendered later"""
+        if old == new:
+            return 0.0
+        return max(p.min_purge, toolchange.purge_volume(job, old, new) * p.purge_factor)
+
     def colour_order(slots_: list[int]) -> list[int]:
-        """Colour sequence with the least purge (Bambu flush matrix), starting from the loaded filament."""
-        slots_ = sorted(set(slots_))
-        if not slots_:
+        """Order of the colours: explicit ``color_order`` wins, otherwise the
+        sequence with the least total purge from the loaded filament."""
+        used: list[int] = []            # slots in the order they appear in the design
+        seen: set[int] = set()
+        for s in slots_:
+            s = int(s)
+            if s not in seen:
+                seen.add(s)
+                used.append(s)
+        if not used:
             return []
         if p.color_order:
-            first = [s for s in p.color_order if s in slots_]
-            return first + [s for s in slots_ if s not in first]
-        if len(slots_) > 6:
-            return slots_
-        import itertools
-
-        def cost(seq):
-            c, prev = 0.0, cur_slot
-            for s in seq:
-                if s != prev:
-                    c += max(p.min_purge, toolchange.purge_volume(job, prev, s) * p.purge_factor) + 1e-3
-                prev = s
-            return c
-        return list(min(itertools.permutations(slots_), key=cost))
+            # keep the slots that occur in the design, in the requested order;
+            # the rest follow in their original (slot) order
+            picked: set[int] = set()
+            first: list[int] = []
+            for s in p.color_order:
+                try:
+                    s = int(s)
+                except (TypeError, ValueError):
+                    continue
+                if s in seen and s not in picked:
+                    picked.add(s)
+                    first.append(s)
+            return first + sorted(s for s in used if s not in picked)
+        return _least_purge_order(used, cur_slot, purge_between)
 
     W = Writer()
     base_z = max(tp.max_z, max(tp.layer_z) if tp.layer_z else tp.max_z)
@@ -549,24 +637,66 @@ def generate(job: Job, tp: Toolpaths, g: Grid, paths: list[dict], params: Params
     #      stacking allows (a colour comes back only where an overlap needs it)
     prio = colour_order([s for (_, s) in gkeys])
     rank = {s: i for i, s in enumerate(prio)}
-    batches: list[tuple[int, list]] = []
-    done_g: set = set()
-    remaining = list(gkeys)
-    while remaining:
-        avail = [k for k in remaining if gpred[k] <= done_g]
-        s_ = min({k[1] for k in avail}, key=lambda x: (rank.get(x, 99), x))
+    explicit = bool(p.color_order)
+    printable = {it["key"] for it in items}
+
+    def _grow(colour: int, remaining: list, done: set) -> set:
+        """every remaining group of ``colour`` that can be printed in one go"""
         batch: set = set()
         changed = True
         while changed:
             changed = False
             for k in remaining:
-                if k not in batch and k[1] == s_ and gpred[k] <= (done_g | batch):
+                if k not in batch and k[1] == colour and gpred[k] <= (done | batch):
                     batch.add(k)
                     changed = True
+        return batch
+
+    batches: list[tuple[int, list]] = []
+    done_g: set = set()
+    source_slot = cur_slot                  # filament that is in the nozzle right now
+    remaining = [k for k in gkeys if k in printable]
+    while remaining:
+        avail = [k for k in remaining if gpred[k] <= done_g]
+        if not avail:                       # cannot happen unless the precedences form a cycle
+            avail = remaining
+        avail_slots = {k[1] for k in avail}
+        per_colour = {s: {k for k in remaining if k[1] == s} for s in avail_slots}
+        cover = {s: _grow(s, remaining, done_g) for s in avail_slots}
+        # A colour that can be finished completely should be preferred: printing
+        # part of a colour and coming back to it later always costs an extra change.
+        complete = {s for s in avail_slots if cover[s] == per_colour[s]}
+        if explicit:
+            # the requested order is the plan: take the highest-ranked colour that may go now
+            s_ = min(avail_slots, key=lambda x: (rank.get(x, len(rank)), x))
+        else:
+            # Prefer a colour that can be finished now (a colour only comes back
+            # later when its stacking constraints really block it now); among
+            # those keep the filament already loaded when possible - that saves a
+            # change - and otherwise follow the least-purge colour order.
+            cands = complete or avail_slots
+            if source_slot in cands:
+                s_ = source_slot
+            else:
+                s_ = min(cands, key=lambda x: (rank.get(x, len(rank)), x))
+        batch = cover[s_]
         batches.append((s_, sorted(batch)))
+        source_slot = s_
         done_g |= batch
         remaining = [k for k in remaining if k not in batch]
+    # two batches of the same colour with nothing printed in between are one
+    # colour run - coalesce them so ``batches`` counts real changes of colour
+    merged: list[tuple[int, list]] = []
+    for s_, keys in batches:
+        if merged and merged[-1][0] == s_:
+            merged[-1] = (s_, sorted(set(merged[-1][1]) | set(keys)))
+        else:
+            merged.append((s_, keys))
+    batches = merged
     stats["batches"] = len(batches)
+    # every stacking constraint between two elements is counted once, whether
+    # the two land in the same colour batch or in different ones
+    stats["precedences"] = sum(len(v) for v in gpred.values())
 
     first = True
     tc_count = 0
@@ -578,7 +708,6 @@ def generate(job: Job, tp: Toolpaths, g: Grid, paths: list[dict], params: Params
         loc = {j: t for t, j in enumerate(bidx)}
         bitems = [items[j] for j in bidx]
         before = sorted((loc[a], loc[b]) for (a, b) in item_before if a in loc and b in loc)
-        stats["precedences"] += len(before)
         if slot != cur_slot:
             # ---- filament change, rendered by the printer's own template ----
             lift = max(W.z or 0, zn_max + 1.0)

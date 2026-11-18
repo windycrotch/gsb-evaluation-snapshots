@@ -264,9 +264,13 @@ function renderGenStats() {
   const stackInfo = stk > 0.5
     ? `<span title="${t("stats.stackedTip")}">${t("stats.stacked")} <b>${stk.toFixed(0)} mm</b></span>`
     : "";
+  const batchInfo = st.batches != null
+    ? `<span title="${t("stats.batchesTip")}">${t("stats.batches")} <b>${st.batches}</b></span>` : "";
+  const precInfo = st.precedences
+    ? `<span title="${t("stats.precedencesTip")}">${t("stats.precedences")} <b>${st.precedences}</b></span>` : "";
   $("statsBar").innerHTML = `<span>NON-PLANAR</span><b>${fmtTime(st.time_s)}</b>
     <span>${t("stats.toolchanges")} <b>${st.toolchanges}</b></span><span>${t("stats.purge")} <b>${(st.purge_mm3 / 1000).toFixed(2)} cm³</b></span>
-    ${parts.join(" ")}<span>Z ${st.min_z.toFixed(2)}–${st.max_z.toFixed(2)}</span>${stackInfo}${travelInfo}${retrInfo}${touchInfo}${dirInfo}${downInfo}<span>${t("stats.linesMs", { lines: app.gen.lines, ms: st.gen_ms })}</span>
+    ${parts.join(" ")}<span>Z ${st.min_z.toFixed(2)}–${st.max_z.toFixed(2)}</span>${stackInfo}${batchInfo}${precInfo}${travelInfo}${retrInfo}${touchInfo}${dirInfo}${downInfo}<span>${t("stats.linesMs", { lines: app.gen.lines, ms: st.gen_ms })}</span>
     ${st.collisions == null ? "" : `<span style="color:${st.collisions ? "var(--err,#ff3b30)" : "var(--ok,#6c6)"}">${t("stats.collisions")} <b>${st.collisions}</b> · ${st.coll_ms} ms</span>`}`;
 }
 
