@@ -93,9 +93,34 @@ The UI is a plain model–view–controller split; the DOM is never the source o
     SpaceNotes canvas, adapted to port-to-port cables.
   - `ModuleCard.tsx`, `board/Port.tsx`, `Scope.tsx`: a module node with ports,
     sliders and a live oscilloscope.
-- **Engine** — `src/worklet/`: `ModularProcessor` runs every module's DSP in one
-  AudioWorklet, with a `setParam` message that lets modules re-read params in
-  place via `applyParams`.
+- **Engine** — `src/worklet/`: `GraphRuntime` runs every module's DSP once per
+  block; `ModularProcessor` is the thin AudioWorklet shell around it (messages,
+  block rendering, scope), so the engine can also be driven directly from
+  tests. `setParam` messages let modules re-read params in place via
+  `applyParams`, with no rebuild.
+  - `orderGraph.ts`: per-block schedule. The graph is condensed into strongly
+    connected components and the component DAG is topologically sorted, so a
+    module always runs after whatever feeds it through an acyclic path. Within
+    a component the order is a reversed DFS post-order, which keeps the order
+    deterministic and leaves exactly one delayed cable per simple ring; every
+    module runs exactly once. Cables that close a loop read the source's
+    previous-block output, giving feedback one block (~2.7 ms at 48 kHz) of
+    delay.
+  - Inputs are gathered by summing every cable patched into the port, so
+    stacking two sources adds their voltages.
+
+## Tests
+
+```bash
+npm test            # vitest: scheduler invariants + engine rendering
+```
+
+The engine tests build their own patches (`tests/engine.test.ts`) rather than
+loading presets: an acyclic chain declared backwards, a single ring, a ring
+with branches hanging off it, two and three cables summed into one input, a
+live parameter change inside a running loop, and a self-patch. They assert
+the actual processing order, the per-block process count, the one-block
+feedback delay, and the summed voltages.
 
 ## Scripts
 
@@ -104,7 +129,8 @@ npm run dev         # dev server
 npm run build       # type-check + production build (dist/)
 npm run preview     # serve dist/
 npm run lint        # eslint
-npm run type-check  # app + worklet type-check
+npm run type-check  # app + worklet + tests type-check
+npm test            # vitest test suite
 ```
 
 ## Deploying

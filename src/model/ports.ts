@@ -1,6 +1,6 @@
 import { ModuleKind } from '../types/graph';
 
-// Port lists mirror ModularProcessor.getInputPorts / getOutputPorts.
+// Port lists mirror GraphRuntime.getInputPorts / getOutputPorts.
 export const INPUT_PORTS: Record<ModuleKind, readonly string[]> = {
   [ModuleKind.VCO]: ['pitch', 'fm'],
   [ModuleKind.VCA]: ['in', 'cv'],
