@@ -9,6 +9,8 @@
   "private": true,
   "scripts": {
     "build": "esbuild src/main.js --bundle --format=iife --target=es2020 --outfile=assets/game.js",
-    "test": "node tools/cdp-test.mjs"
+    "test": "node tools/cdp-test.mjs",
+    "test:progress": "node tools/progress-test.mjs",
+    "test:all": "node tools/progress-test.mjs && node tools/cdp-test.mjs"
   }
 }

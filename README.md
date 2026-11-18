@@ -93,16 +93,29 @@
 
 **性能** — 晶簇 / 岩石 / 荆棘用 InstancedMesh 合批；粒子是单个 600 容量的 GPU 点精灵池，收集、跳跃、冲刺、受击特效共用一个 Draw Call；相机用指数阻尼跟随，掉帧时不抖；内置自适应画质，帧率低于阈值会自动降分辨率与辉光强度。
 
-## 🧪 自动化冒烟测试
+## 🧪 自动化测试
 
-真机测试不靠"我觉得没问题"。仓库里带了一个基于 **Chrome DevTools 协议** 的端到端测试脚本，直接驱动真实浏览器：移动 → 跳跃 → 收集星屑 → 触发星门 → 跃迁换关 → 通关结算，并逐帧抓取 HUD 状态与 JS 异常。
+真机测试不靠"我觉得没问题"。仓库里带了两套基于 **Chrome DevTools 协议** 的端到端测试脚本，直接驱动真实浏览器。
+
+**收集进度生命周期回归测试**（`tools/progress-test.mjs`）覆盖四种情形：
+
+1. 正常收集一颗星屑 → 星球能量网格亮度、HUD 星屑计数与进度条、星门状态三者同步更新；
+2. 未集齐时走进星门 → 不换关；
+3. 重试本关 → 进度、HUD、亮度、星门全部归零，关卡对象不叠加；
+4. 跃迁到下一关 → 新关从零开始，上一关亮度不残留。
+
+额外验证掉入虚空只扣能量、不清空已收集进度，以及反复重建关卡时场景对象数不增长。
+
+**完整流程冒烟测试**（`tools/cdp-test.mjs`）覆盖移动 → 跳跃 → 收集 → 星门 → 跃迁 → 通关结算。
 
 ```bash
-python -m http.server 8123     # 先起个静态服务器
-node tools/cdp-test.mjs        # 跑完整流程
+npm run build            # 修改 src/ 后先重新打包 assets/game.js
+npm run test:progress    # 收集进度生命周期回归测试
+npm test                 # 完整流程冒烟测试
+npm run test:all         # 两套都跑
 ```
 
-当前状态：**全链路通过，0 JS 错误。**
+两个脚本都会自带临时静态服务器，无需手动起 `http.server`；需要本机安装 Chrome 或 Edge（也可用 `CHROME_PATH` 指定）。当前状态：**全部通过，0 JS 错误。**
 
 <a id="quickstart"></a>
 
@@ -127,12 +140,13 @@ python -m http.server 8123
 ## 🛠 开发
 
 ```bash
-npm install     # 只装 three 与 esbuild
-npm run build   # 重新打包 assets/game.js（单文件 IIFE）
-npm test        # 自动化冒烟测试（需先启动本地服务器）
+npm install          # 只装 three 与 esbuild
+npm run build        # 重新打包 assets/game.js（单文件 IIFE）
+npm run test:progress  # 收集进度生命周期回归测试
+npm test             # 完整流程冒烟测试
 ```
 
-调试参数：`index.html?auto` 跳过标题直接开局；`?sim` 自动行走（方便看摄像机与物理）。
+调试参数：`index.html?auto` 跳过标题直接开局；`?sim` 自动行走（方便看摄像机与物理）。运行时可通过 `window.__game` 读取 `level`、`player`、`levelIndex`，并调用 `buildLevel` / `retryLevel` / `startGame` 做本地验证。
 
 ## 📁 项目结构
 
@@ -149,6 +163,7 @@ src/
   audio.js            WebAudio 程序化配乐与音效
   hud.js / input.js   HUD 与输入（键鼠 + 触屏摇杆）
 tools/cdp-test.mjs    CDP 端到端冒烟测试
+tools/progress-test.mjs  CDP 收集进度生命周期回归测试
 preview/              截图
 ```
 
@@ -224,16 +239,29 @@ Nothing here is a downloaded model. Almost everything is computed.
 
 **Performance** — InstancedMesh for crystals, rocks and thorns; a single 600-capacity GPU point-sprite pool shared by every particle effect; exponentially damped camera follow; and an adaptive quality system that drops resolution and bloom strength when frame time slips.
 
-## 🧪 Automated smoke test
+## 🧪 Automated tests
 
-Testing isn't "looks fine to me." The repo ships an end-to-end script built on the **Chrome DevTools Protocol** that drives a real browser: move → jump → collect → trigger the gate → warp → victory, asserting HUD state and watching for JS exceptions along the way.
+Testing isn't "looks fine to me." The repo ships two end-to-end scripts built on the **Chrome DevTools Protocol** that drive a real browser.
+
+**Collection-progress lifecycle regression test** (`tools/progress-test.mjs`) covers the four cases that used to drift apart:
+
+1. collecting a shard → planet grid brightness, HUD counter/bar and gate state all update together;
+2. walking into the gate before the set is complete → no level change;
+3. retrying the level → progress, HUD, brightness and gate all reset, with no leftover level objects;
+4. warping to the next level → the new level starts from zero and the previous level's brightness never bleeds through.
+
+It also asserts that falling into the void only costs energy (never progress) and that repeated rebuilds don't grow the scene graph.
+
+**Full-flow smoke test** (`tools/cdp-test.mjs`) covers move → jump → collect → gate → warp → victory.
 
 ```bash
-python -m http.server 8123     # serve locally first
-node tools/cdp-test.mjs        # run the full flow
+npm run build            # rebuild assets/game.js after editing src/
+npm run test:progress    # collection-progress lifecycle regression
+npm test                 # full-flow smoke test
+npm run test:all         # both
 ```
 
-Status: **full flow passing, 0 JS errors.**
+Both scripts spin up their own temporary static server, so there's no need to start `http.server` by hand. Chrome or Edge must be installed (`CHROME_PATH` overrides the lookup). Status: **all passing, 0 JS errors.**
 
 ## 🚀 Run it
 
@@ -252,12 +280,13 @@ python -m http.server 8123
 ## 🛠 Development
 
 ```bash
-npm install     # three + esbuild, nothing else
-npm run build   # rebuild assets/game.js (single IIFE bundle)
-npm test        # CDP smoke test (needs a local server)
+npm install          # three + esbuild, nothing else
+npm run build        # rebuild assets/game.js (single IIFE bundle)
+npm run test:progress  # collection-progress lifecycle regression
+npm test             # full-flow CDP smoke test
 ```
 
-Debug flags: `index.html?auto` skips the title screen; `?sim` auto-walks for camera and physics inspection.
+Debug flags: `index.html?auto` skips the title screen; `?sim` auto-walks for camera and physics inspection. At runtime, `window.__game` exposes `level`, `player`, `levelIndex`, plus `buildLevel` / `retryLevel` / `startGame` for local verification.
 
 ## 📄 License
 

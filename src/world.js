@@ -30,6 +30,7 @@ export class Level {
     this.collected = 0;
     this.portal = null;
     this.portalUsed = false;
+    this.disposed = false;
     this.onCollect = null;
     this.onPortal = null;
     this.onDamage = null;
@@ -607,16 +608,33 @@ export class Level {
 
   setPortalActive(v) {
     if (!this.portal) return;
-    this.portal.active = v;
+    // 星门是收集进度的从属状态：只有收满全部星屑才允许点亮
+    this.portal.active = !!v && this.collected >= this.totalShards;
+  }
+
+  /**
+   * 收集进度唯一入口：collected 是本关唯一的真相来源。
+   * 能量网格亮度与星门激活状态都在这里由 collected 推导，
+   * 保证画面、HUD（由 main 读取 collected）和星门三者不会各说各话。
+   */
+  syncProgress() {
+    if (this.disposed) return;
+    const total = Math.max(0, this.totalShards);
+    this.collected = Math.max(0, Math.min(this.collected, total));
+    const ratio = total > 0 ? this.collected / total : 1;
+    for (const g of this.gridMats) {
+      g.mat.opacity = g.base * (1 + ratio * 3.4);
+    }
+    if (this.portal) {
+      this.portal.active = this.collected >= total;
+    }
   }
 
   // ---------------------------------------------------------------- update
   update(dt, t, player) {
-    const accent = this._accent;
-    const ratio = this.totalShards > 0 ? this.collected / this.totalShards : 1;
-    this.gridMats.forEach((g) => {
-      g.mat.opacity = g.base * (1 + ratio * 3.4);
-    });
+    if (this.disposed) return;
+    // 每帧从 collected 重新推导亮度与星门，避免被外部状态写乱
+    this.syncProgress();
 
     // 星屑
     for (const s of this.shards) {
@@ -709,12 +727,14 @@ export class Level {
   }
 
   _collect(s) {
+    if (this.disposed || s.taken) return;
     s.taken = true;
     this.root.remove(s.group);
     s.mesh.material.dispose();
     s.ring.material.dispose();
     s.halo.material.dispose();
     this.collected++;
+    this.syncProgress();
     this.particles.burst(s.pos, this.palette.accent2, {
       count: 26,
       speed: 6,
@@ -732,7 +752,6 @@ export class Level {
       grow: 0.4,
     });
     if (this.onCollect) this.onCollect(this.collected, this.totalShards, s.pos.clone());
-    if (this.collected >= this.totalShards) this.setPortalActive(true);
   }
 
   _damage(pos) {
@@ -741,10 +760,18 @@ export class Level {
   }
 
   dispose() {
+    if (this.disposed) return;
+    this.disposed = true;
     this.scene.remove(this.root);
     disposeObject(this.root);
+    this.gridMats = [];
     this.shards = [];
     this.thorns = [];
     this.shades = [];
+    this.portal = null;
+    this.onCollect = null;
+    this.onPortal = null;
+    this.onDamage = null;
+    this.onShadeNear = null;
   }
 }

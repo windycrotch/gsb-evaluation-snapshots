@@ -23,6 +23,7 @@ export class HUD {
     };
     this._toastTimer = null;
     this._lastTime = '';
+    this._lastShards = '';
     this.setHearts(3, 3);
   }
 
@@ -54,6 +55,9 @@ export class HUD {
   }
 
   setShards(now, total) {
+    const key = now + '/' + total;
+    if (key === this._lastShards) return;
+    this._lastShards = key;
     this.shardNow.textContent = String(now);
     this.shardTotal.textContent = String(total);
     const pct = total > 0 ? Math.min(1, now / total) : 0;

@@ -40,6 +40,7 @@ const player = new Player(stage.scene, PALETTES[0]);
 player.setDpr(stage.dpr);
 
 let level = null;
+let levelGen = 0;
 let mode = 'title';
 let levelIndex = 0;
 let elapsed = 0;
@@ -57,7 +58,14 @@ const clock = new THREE.Clock();
 const tmpV = new THREE.Vector3();
 
 // ------------------------------------------------------------------ level
+function syncShardHud() {
+  if (!level) return;
+  hud.setShards(level.collected, level.totalShards);
+}
+
 function buildLevel(index) {
+  // 每次重建都推进代际：旧的异步回调据此作废，避免污染新关卡
+  levelGen++;
   if (level) level.dispose();
   const palette = PALETTES[index];
   level = new Level({
@@ -78,7 +86,9 @@ function buildLevel(index) {
   stage.setAccent(palette.accent, palette.accent2);
   hud.setAccent(palette.accent);
   hud.setLevel(index, palette.name, palette.sub);
-  hud.setShards(0, level.totalShards);
+  // 亮度 / 星门 / HUD 全部由新关卡的 collected(=0) 推导
+  level.syncProgress();
+  syncShardHud();
   hud.setHearts(player.health, player.maxHealth);
 
   const b = level.bodies[0];
@@ -97,16 +107,21 @@ function buildLevel(index) {
 const camera = stage.camera;
 
 // ------------------------------------------------------------------ events
-function onCollect(count, total, pos) {  combo = Math.min(combo + 1, 10);
+function onCollect(count, total, pos) {
+  combo = Math.min(combo + 1, 10);
   comboTimer = 2.4;
   audio.collect(combo);
-  hud.setShards(count, total);
+  // 用当前关卡的 collected 作为唯一来源刷新 HUD
+  syncShardHud();
   shake = Math.max(shake, 0.05);
   if (count === 1 && !hintShown) {
     hud.toast('星屑共鸣 · 收集全部星屑点亮星门', 2200);
   }
   if (count >= total) {
+    const gen = levelGen;
     setTimeout(() => {
+      // 关卡已被重建（重试 / 跃迁）时，旧的提示不再生效
+      if (gen !== levelGen) return;
       if (mode === 'playing') {
         audio.portal();
         hud.toast('星门已开启 · 追随光柱前往下一星域', 3000, 'accent');
@@ -222,6 +237,7 @@ function retryLevel() {
   buildLevel(levelIndex);
   hud.hideScreens();
   hud.showHUD(true);
+  hud.fade(0, 260);
   mode = 'playing';
   input.clear();
   hud.toast('重新开始本星域', 1600);
@@ -258,18 +274,28 @@ function resumeGame() {
 }
 
 async function completeLevel() {
-  if (busy) return;
+  if (busy || !level) return;
+  // 未集齐时走进星门不得换关（星门状态本身也由 collected 推导）
+  if (level.collected < level.totalShards) return;
   busy = true;
-  const prevMode = mode;
+  const gen = levelGen;
+  const departing = level;
+  const abort = () => {
+    // 关卡已被外部重建（重试等），取消本次跃迁并把状态机拉回可玩
+    if (mode === 'transition') mode = 'playing';
+    busy = false;
+  };
   mode = 'transition';
   audio.warp();
   shake = 0.15;
   await wait(320);
+  if (gen !== levelGen) return abort();
   warpZoom = 1;
   await wait(420);
   await hud.fade(1, 620);
+  if (gen !== levelGen) return abort();
 
-  shardsBanked += level.collected;
+  shardsBanked += departing.collected;
   levelIndex++;
 
   if (levelIndex >= PALETTES.length) {
@@ -393,6 +419,9 @@ function animate() {
     player.idle(dt, t);
   }
 
+  // HUD 星屑计数每帧跟随当前关卡的 collected，杜绝事件漏刷导致的错位
+  if (level && mode !== 'title' && mode !== 'win') syncShardHud();
+
   updateCamera(dt);
   stage.composer.render();
 
@@ -501,6 +530,8 @@ window.__game = {
   },
   startGame,
   buildLevel,
+  retryLevel,
+  completeLevel,
   player,
   get level() {
     return level;
@@ -511,5 +542,8 @@ window.__game = {
   },
   set levelIndex(v) {
     levelIndex = v;
+  },
+  get shardsBanked() {
+    return shardsBanked;
   },
 };

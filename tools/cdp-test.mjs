@@ -1,29 +1,91 @@
 /**
  * CDP 冒烟测试：真实时间驱动游戏，验证物理 / 相机 / 计时 / 收集逻辑
  * 用法: node tools/cdp-test.mjs [--hold=W,D] [--shots=4]
+ * 自带静态服务器，无需手动启动 python -m http.server。
  */
 import { spawn } from 'node:child_process';
-import { writeFileSync, mkdirSync } from 'node:fs';
+import { createServer } from 'node:http';
+import { readFile } from 'node:fs/promises';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-const CHROME = 'C:/Program Files/Google/Chrome/Application/chrome.exe';
-const PORT = 9333;
-const URL_TO_OPEN = 'http://127.0.0.1:8123/?auto';
+const CHROME_CANDIDATES = [
+  process.env.CHROME_PATH,
+  'C:/Program Files/Google/Chrome/Application/chrome.exe',
+  'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
+  'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
+  '/usr/bin/google-chrome',
+  '/usr/bin/chromium',
+  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+].filter(Boolean);
+const CHROME = CHROME_CANDIDATES.find((p) => existsSync(p));
+if (!CHROME) {
+  console.error('找不到 Chrome / Edge，可用 CHROME_PATH 环境变量指定可执行文件。');
+  process.exit(2);
+}
+
+const MIME = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.png': 'image/png',
+  '.json': 'application/json; charset=utf-8',
+};
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function waitPort() {
-  for (let i = 0; i < 60; i++) {
+function startStaticServer() {
+  return new Promise((resolve, reject) => {
+    const server = createServer(async (req, res) => {
+      try {
+        const url = new URL(req.url, 'http://127.0.0.1');
+        let rel = decodeURIComponent(url.pathname);
+        if (rel === '/' || rel === '') rel = '/index.html';
+        const file = path.join(ROOT, rel);
+        if (!file.startsWith(ROOT)) {
+          res.writeHead(403).end();
+          return;
+        }
+        const data = await readFile(file);
+        res.writeHead(200, {
+          'Content-Type': MIME[path.extname(file)] || 'application/octet-stream',
+          'Cache-Control': 'no-store',
+        });
+        res.end(data);
+      } catch {
+        res.writeHead(404).end();
+      }
+    });
+    server.on('error', reject);
+    server.listen(0, '127.0.0.1', () => resolve({ server, port: server.address().port }));
+  });
+}
+
+async function findFreePort(start = 9500) {
+  for (let p = start; p < start + 80; p++) {
+    const free = await new Promise((resolve) => {
+      const s = createServer();
+      s.once('error', () => resolve(false));
+      s.listen(p, '127.0.0.1', () => s.close(() => resolve(true)));
+    });
+    if (free) return p;
+  }
+  throw new Error('no free port');
+}
+
+async function waitPort(port, tries = 120) {
+  for (let i = 0; i < tries; i++) {
     try {
-      const res = await fetch(`http://127.0.0.1:${PORT}/json/version`);
+      const res = await fetch(`http://127.0.0.1:${port}/json/version`);
       if (res.ok) return true;
     } catch {}
-    await sleep(300);
+    await sleep(200);
   }
-  throw new Error('chrome devtools port not ready');
+  return false;
 }
 
 class CDP {
@@ -68,19 +130,35 @@ const keyDef = (key) => {
 
 async function main() {
   mkdirSync(path.join(ROOT, ".shots"), { recursive: true });
+  const { server: httpServer, port: httpPort } = await startStaticServer();
+  const PORT = await findFreePort();
+  const userDataDir = path.join(os.tmpdir(), `cdp-game-test-${process.pid}`);
+  const chromeEnv = {
+    ...process.env,
+    LOCALAPPDATA: path.join(os.tmpdir(), 'cdp-game-test-local'),
+    APPDATA: path.join(os.tmpdir(), 'cdp-game-test-roaming'),
+  };
   const chrome = spawn(CHROME, [
     '--headless=new',
     '--enable-unsafe-swiftshader',
     '--no-sandbox',
     '--hide-scrollbars',
+    '--mute-audio',
     `--remote-debugging-port=${PORT}`,
     '--window-size=1280,720',
-    '--user-data-dir=' + path.join(process.env.TEMP || '/tmp', 'cdp-game-test'),
+    `--user-data-dir=${userDataDir}`,
     'about:blank',
-  ], { stdio: 'ignore' });
+  ], { stdio: 'ignore', env: chromeEnv });
+
+  const finish = async (code) => {
+    chrome.kill();
+    await new Promise((r) => httpServer.close(r));
+    await sleep(300);
+    process.exit(code);
+  };
 
   try {
-    await waitPort();
+    await waitPort(PORT);
     const list = await (await fetch(`http://127.0.0.1:${PORT}/json`)).json();
     const page = list.find((t) => t.type === 'page');
     const ws = new WebSocket(page.webSocketDebuggerUrl);
@@ -103,7 +181,7 @@ async function main() {
     await cdp.send('Page.enable');
     await cdp.send('Runtime.enable');
     await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 720, deviceScaleFactor: 1, mobile: false });
-    await cdp.send('Page.navigate', { url: URL_TO_OPEN });
+    await cdp.send('Page.navigate', { url: `http://127.0.0.1:${httpPort}/?auto` });
     await sleep(3000);
 
     const evaluate = async (expr) => {
@@ -232,9 +310,7 @@ async function main() {
 
     console.log('JS ERRORS:', errors.length ? errors.slice(0, 5) : 'none');
   } finally {
-    chrome.kill();
-    await sleep(300);
-    process.exit(0);
+    await finish(0);
   }
 }
 

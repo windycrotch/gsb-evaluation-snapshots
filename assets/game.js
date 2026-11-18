@@ -22746,6 +22746,7 @@ void main() {
       this.collected = 0;
       this.portal = null;
       this.portalUsed = false;
+      this.disposed = false;
       this.onCollect = null;
       this.onPortal = null;
       this.onDamage = null;
@@ -23280,15 +23281,29 @@ void main() {
     }
     setPortalActive(v) {
       if (!this.portal) return;
-      this.portal.active = v;
+      this.portal.active = !!v && this.collected >= this.totalShards;
+    }
+    /**
+     * 收集进度唯一入口：collected 是本关唯一的真相来源。
+     * 能量网格亮度与星门激活状态都在这里由 collected 推导，
+     * 保证画面、HUD（由 main 读取 collected）和星门三者不会各说各话。
+     */
+    syncProgress() {
+      if (this.disposed) return;
+      const total = Math.max(0, this.totalShards);
+      this.collected = Math.max(0, Math.min(this.collected, total));
+      const ratio = total > 0 ? this.collected / total : 1;
+      for (const g of this.gridMats) {
+        g.mat.opacity = g.base * (1 + ratio * 3.4);
+      }
+      if (this.portal) {
+        this.portal.active = this.collected >= total;
+      }
     }
     // ---------------------------------------------------------------- update
     update(dt, t, player2) {
-      const accent = this._accent;
-      const ratio = this.totalShards > 0 ? this.collected / this.totalShards : 1;
-      this.gridMats.forEach((g) => {
-        g.mat.opacity = g.base * (1 + ratio * 3.4);
-      });
+      if (this.disposed) return;
+      this.syncProgress();
       for (const s of this.shards) {
         if (s.taken) continue;
         const bob = Math.sin(t * 2.1 + s.phase) * 0.22;
@@ -23371,12 +23386,14 @@ void main() {
       }
     }
     _collect(s) {
+      if (this.disposed || s.taken) return;
       s.taken = true;
       this.root.remove(s.group);
       s.mesh.material.dispose();
       s.ring.material.dispose();
       s.halo.material.dispose();
       this.collected++;
+      this.syncProgress();
       this.particles.burst(s.pos, this.palette.accent2, {
         count: 26,
         speed: 6,
@@ -23394,18 +23411,25 @@ void main() {
         grow: 0.4
       });
       if (this.onCollect) this.onCollect(this.collected, this.totalShards, s.pos.clone());
-      if (this.collected >= this.totalShards) this.setPortalActive(true);
     }
     _damage(pos) {
       this.particles.burst(pos, 16727406, { count: 18, speed: 7, size: 0.45, life: 0.6, drag: 3 });
       if (this.onDamage) this.onDamage(pos);
     }
     dispose() {
+      if (this.disposed) return;
+      this.disposed = true;
       this.scene.remove(this.root);
       disposeObject(this.root);
+      this.gridMats = [];
       this.shards = [];
       this.thorns = [];
       this.shades = [];
+      this.portal = null;
+      this.onCollect = null;
+      this.onPortal = null;
+      this.onDamage = null;
+      this.onShadeNear = null;
     }
   };
 
@@ -23754,6 +23778,7 @@ void main() {
       };
       this._toastTimer = null;
       this._lastTime = "";
+      this._lastShards = "";
       this.setHearts(3, 3);
     }
     showHUD(v) {
@@ -23780,6 +23805,9 @@ void main() {
       }
     }
     setShards(now2, total) {
+      const key = now2 + "/" + total;
+      if (key === this._lastShards) return;
+      this._lastShards = key;
       this.shardNow.textContent = String(now2);
       this.shardTotal.textContent = String(total);
       const pct = total > 0 ? Math.min(1, now2 / total) : 0;
@@ -23875,6 +23903,7 @@ void main() {
   var player = new Player(stage.scene, PALETTES[0]);
   player.setDpr(stage.dpr);
   var level = null;
+  var levelGen = 0;
   var mode = "title";
   var levelIndex = 0;
   var elapsed = 0;
@@ -23889,7 +23918,12 @@ void main() {
   var hintShown = false;
   var clock = new Clock();
   var tmpV = new Vector3();
+  function syncShardHud() {
+    if (!level) return;
+    hud.setShards(level.collected, level.totalShards);
+  }
   function buildLevel(index) {
+    levelGen++;
     if (level) level.dispose();
     const palette = PALETTES[index];
     level = new Level({
@@ -23907,7 +23941,8 @@ void main() {
     stage.setAccent(palette.accent, palette.accent2);
     hud.setAccent(palette.accent);
     hud.setLevel(index, palette.name, palette.sub);
-    hud.setShards(0, level.totalShards);
+    level.syncProgress();
+    syncShardHud();
     hud.setHearts(player.health, player.maxHealth);
     const b = level.bodies[0];
     camera.position.copy(player.position).addScaledVector(player.normal, 6.2).addScaledVector(player.facing, -10);
@@ -23923,13 +23958,15 @@ void main() {
     combo = Math.min(combo + 1, 10);
     comboTimer = 2.4;
     audio.collect(combo);
-    hud.setShards(count, total);
+    syncShardHud();
     shake = Math.max(shake, 0.05);
     if (count === 1 && !hintShown) {
       hud.toast("\u661F\u5C51\u5171\u9E23 \xB7 \u6536\u96C6\u5168\u90E8\u661F\u5C51\u70B9\u4EAE\u661F\u95E8", 2200);
     }
     if (count >= total) {
+      const gen = levelGen;
       setTimeout(() => {
+        if (gen !== levelGen) return;
         if (mode === "playing") {
           audio.portal();
           hud.toast("\u661F\u95E8\u5DF2\u5F00\u542F \xB7 \u8FFD\u968F\u5149\u67F1\u524D\u5F80\u4E0B\u4E00\u661F\u57DF", 3e3, "accent");
@@ -24035,6 +24072,7 @@ void main() {
     buildLevel(levelIndex);
     hud.hideScreens();
     hud.showHUD(true);
+    hud.fade(0, 260);
     mode = "playing";
     input.clear();
     hud.toast("\u91CD\u65B0\u5F00\u59CB\u672C\u661F\u57DF", 1600);
@@ -24067,17 +24105,25 @@ void main() {
     input.clear();
   }
   async function completeLevel() {
-    if (busy) return;
+    if (busy || !level) return;
+    if (level.collected < level.totalShards) return;
     busy = true;
-    const prevMode = mode;
+    const gen = levelGen;
+    const departing = level;
+    const abort = () => {
+      if (mode === "transition") mode = "playing";
+      busy = false;
+    };
     mode = "transition";
     audio.warp();
     shake = 0.15;
     await wait(320);
+    if (gen !== levelGen) return abort();
     warpZoom = 1;
     await wait(420);
     await hud.fade(1, 620);
-    shardsBanked += level.collected;
+    if (gen !== levelGen) return abort();
+    shardsBanked += departing.collected;
     levelIndex++;
     if (levelIndex >= PALETTES.length) {
       showVictory();
@@ -24180,6 +24226,7 @@ void main() {
       if (level) level.update(dt, t, player);
       player.idle(dt, t);
     }
+    if (level && mode !== "title" && mode !== "win") syncShardHud();
     updateCamera(dt);
     stage.composer.render();
     fpsTime += dt;
@@ -24273,6 +24320,8 @@ void main() {
     },
     startGame,
     buildLevel,
+    retryLevel,
+    completeLevel,
     player,
     get level() {
       return level;
@@ -24283,6 +24332,9 @@ void main() {
     },
     set levelIndex(v) {
       levelIndex = v;
+    },
+    get shardsBanked() {
+      return shardsBanked;
     }
   };
 })();
