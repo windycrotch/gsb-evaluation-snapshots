@@ -57,6 +57,8 @@ export interface PluginSandboxRuntimeOptions {
 }
 
 interface PendingRpc {
+  /** Instance that initiated the call; stale after a reload, so failures never touch the new generation. */
+  instance: PluginInstance;
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
   timeoutId: number;
@@ -66,9 +68,22 @@ type RpcRequestWire = Extract<SandboxWireMessage, { kind: 'rpc' }>['request'];
 
 const PLUGIN_NET_MAX_BYTES = 2_097_152;
 const PLUGIN_NET_DEFAULT_TIMEOUT_MS = 120_000;
+const PLUGIN_NET_MIN_TIMEOUT_MS = 1_000;
+const PLUGIN_NET_MAX_TIMEOUT_MS = 300_000;
 const LOCAL_HOSTNAMES = new Set(['127.0.0.1', 'localhost', '[::1]', '0.0.0.0']);
 
 type LocalFetchRequest = { url: string; method: string; headers: Record<string, string>; body?: string; timeoutMs: number };
+
+/**
+ * Rejections coming from the RPC layer already reported the plugin status;
+ * API wrappers use this marker to avoid posting a second, vaguer error.
+ */
+class PluginRpcError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PluginRpcError';
+  }
+}
 
 /**
  * Plugins may only talk to loopback services (a local model server, etc.).
@@ -85,7 +100,7 @@ const buildLocalFetch = (url: string, options: { method?: string; body?: string;
     return 'net.fetch: only http/https URLs are allowed';
   }
   if (!LOCAL_HOSTNAMES.has(parsed.hostname)) {
-    return 'net.fetch: only localhost services are allowed (127.0.0.1, localhost, [::1])';
+    return 'net.fetch: only localhost services are allowed (127.0.0.1, localhost, [::1], 0.0.0.0)';
   }
   if (typeof options.body !== 'undefined' && typeof options.body !== 'string') {
     return 'net.fetch: body must be a string';
@@ -96,11 +111,11 @@ const buildLocalFetch = (url: string, options: { method?: string; body?: string;
     headers[name] = value;
   }
   const timeoutMs = typeof options.timeoutMs === 'number' && Number.isFinite(options.timeoutMs)
-    ? Math.max(1_000, Math.min(options.timeoutMs, 300_000))
+    ? Math.max(PLUGIN_NET_MIN_TIMEOUT_MS, Math.min(options.timeoutMs, PLUGIN_NET_MAX_TIMEOUT_MS))
     : PLUGIN_NET_DEFAULT_TIMEOUT_MS;
   return {
     url: parsed.href,
-    method: typeof options.method === 'string' && options.method.trim() ? options.method.trim().toUpperCase() : 'GET',
+    method: typeof options.method === 'string' && options.method.trim() ? options.method : 'GET',
     headers,
     body: options.body,
     timeoutMs,
@@ -117,6 +132,10 @@ const describeError = (error: unknown): string =>
  * can only act through the validated RPC surface provided here. Every handler
  * and plugin body runs in its own try/catch: a broken plugin reports an error
  * status but never breaks its neighbours or the runtime.
+ *
+ * Status reporting is generation-aware: a `load` message and `dispose()` cancel
+ * every pending RPC of the previous generation, and an answer arriving after
+ * that finds no pending request and can no longer change any state.
  */
 export class PluginSandboxRuntime {
   private readonly post: (message: SandboxWireMessage) => void;
@@ -138,16 +157,19 @@ export class PluginSandboxRuntime {
   }
 
   dispose(): void {
+    if (this.isDisposed) return;
     this.isDisposed = true;
+    // Reject first; the disposed flag makes sure no teardown rejection is
+    // surfaced as a fresh plugin-status message.
+    this.rejectAllPending(new PluginRpcError('Plugin sandbox disposed.'));
     this.disposeInstances();
-    for (const pending of this.pending.values()) {
-      clearTimeout(pending.timeoutId);
-      pending.reject(new Error('Plugin sandbox disposed.'));
-    }
-    this.pending.clear();
   }
 
   private loadPlugins(records: PluginWireRecord[]): void {
+    // A new batch replaces the whole generation: cancel in-flight requests of
+    // the previous instances before tearing them down, so neither their
+    // rejections nor a late host answer can touch the plugins loading now.
+    this.rejectAllPending(new PluginRpcError('Plugin reloaded before the host answered.'));
     this.disposeInstances();
     for (const record of records) {
       const instance: PluginInstance = {
@@ -164,8 +186,7 @@ export class PluginSandboxRuntime {
         if (typeof result === 'function') instance.cleanup = result as () => void;
         this.post({ kind: 'plugin-status', id: record.id, status: 'running' });
       } catch (error) {
-        instance.failed = true;
-        this.post({ kind: 'plugin-status', id: record.id, status: 'error', message: describeError(error) });
+        this.fail(instance, describeError(error));
       }
     }
   }
@@ -202,13 +223,7 @@ export class PluginSandboxRuntime {
         try {
           handler(parsed.data);
         } catch (error) {
-          instance.failed = true;
-          this.post({
-            kind: 'plugin-status',
-            id: instance.record.id,
-            status: 'error',
-            message: `${eventName.data}: ${describeError(error)}`,
-          });
+          this.fail(instance, `${eventName.data}: ${describeError(error)}`);
         }
       }
     }
@@ -216,37 +231,68 @@ export class PluginSandboxRuntime {
 
   private resolveRpc(id: string, result: { ok: boolean; value?: unknown; error?: string }): void {
     const pending = this.pending.get(id);
+    // Unknown id: the request already timed out, was reloaded away or the
+    // runtime was disposed. The late answer must not change any state.
     if (!pending) return;
     clearTimeout(pending.timeoutId);
     this.pending.delete(id);
-    if (result.ok) pending.resolve(result.value);
-    else pending.reject(new Error(result.error ?? 'Plugin request failed.'));
+    if (result.ok) {
+      pending.resolve(result.value);
+      return;
+    }
+    const error = new PluginRpcError(result.error ?? 'Plugin request failed.');
+    this.fail(pending.instance, error.message);
+    pending.reject(error);
   }
 
   private rpc<T>(instance: PluginInstance, request: RpcRequestWire): Promise<T> {
-    if (this.isDisposed) return Promise.reject(new Error('Plugin sandbox disposed.'));
+    if (this.isDisposed) return Promise.reject(new PluginRpcError('Plugin sandbox disposed.'));
     const id = crypto.randomUUID();
     return new Promise<T>((resolve, reject) => {
-      const timeoutId = window.setTimeout(() => {
-        this.pending.delete(id);
-        reject(new Error(`Plugin request timed out: ${request.method}`));
-      }, PLUGIN_RPC_TIMEOUT_MS);
-      this.pending.set(id, {
+      const entry: PendingRpc = {
+        instance,
         resolve: (value) => resolve(value as T),
         reject,
-        timeoutId,
-      });
+        timeoutId: 0,
+      };
+      entry.timeoutId = window.setTimeout(() => {
+        this.pending.delete(id);
+        const error = new PluginRpcError(`Plugin request timed out: ${request.method}`);
+        // Timeout is a real, observable failure: mark the plugin so reviewers
+        // can tell a dead local service apart from healthy plugin code.
+        this.fail(instance, error.message);
+        reject(error);
+      }, PLUGIN_RPC_TIMEOUT_MS);
+      this.pending.set(id, entry);
       try {
         this.post({ kind: 'rpc', id, pluginId: instance.record.id, request });
       } catch (error) {
-        clearTimeout(timeoutId);
+        clearTimeout(entry.timeoutId);
         this.pending.delete(id);
-        reject(new Error(describeError(error)));
+        const wrapped = new PluginRpcError(describeError(error));
+        this.fail(instance, wrapped.message);
+        reject(wrapped);
       }
     });
   }
 
+  /** Rejects (and clears the timers of) every pending request of the current generation. */
+  private rejectAllPending(error: Error): void {
+    const entries = [...this.pending.values()];
+    this.pending.clear();
+    for (const entry of entries) {
+      clearTimeout(entry.timeoutId);
+      entry.reject(error);
+    }
+  }
+
+  /**
+   * Reports an error status for a live instance. Silently drops statuses for
+   * instances that have already been reloaded away, or after disposal, so a
+   * stale callback can never overwrite the newest real result.
+   */
   private fail(instance: PluginInstance, message: string): void {
+    if (this.isDisposed || !this.instances.has(instance.record.id)) return;
     instance.failed = true;
     this.post({ kind: 'plugin-status', id: instance.record.id, status: 'error', message });
   }
@@ -254,6 +300,8 @@ export class PluginSandboxRuntime {
   private createApi(instance: PluginInstance): VacnetPluginApi {
     const guard = <T>(action: () => Promise<T>, context: string): Promise<T | void> =>
       action().catch((error: unknown) => {
+        // RPC failures (timeout, host error, reload/dispose) already reported.
+        if (error instanceof PluginRpcError) return;
         this.fail(instance, `${context}: ${describeError(error)}`);
       });
 
@@ -288,10 +336,9 @@ export class PluginSandboxRuntime {
         'emitPlayerCommand',
       ),
       storage: {
-        get: () => rpc<Record<string, unknown>>({ method: 'storage.get' }).catch((error: unknown) => {
-          this.fail(instance, `storage.get: ${describeError(error)}`);
-          return {};
-        }),
+        // RPC rejections already flipped the plugin to error; resolve with an
+        // empty object so plugin code has a stable fallback to continue with.
+        get: () => rpc<Record<string, unknown>>({ method: 'storage.get' }).catch(() => ({})),
         set: (key, value) => guard(
           () => rpc({ method: 'storage.set', key, value }),
           'storage.set',
@@ -307,16 +354,9 @@ export class PluginSandboxRuntime {
           if (!parsed.success) {
             return Promise.reject(new Error('settings.define: invalid definitions'));
           }
-          return rpc<Record<string, unknown>>({ method: 'settings.define', settings: parsed.data })
-            .catch((error: unknown) => {
-              this.fail(instance, `settings.define: ${describeError(error)}`);
-              return {};
-            });
+          return rpc<Record<string, unknown>>({ method: 'settings.define', settings: parsed.data }).catch(() => ({}));
         },
-        get: () => rpc<Record<string, unknown>>({ method: 'settings.get' }).catch((error: unknown) => {
-          this.fail(instance, `settings.get: ${describeError(error)}`);
-          return {};
-        }),
+        get: () => rpc<Record<string, unknown>>({ method: 'settings.get' }).catch(() => ({})),
       },
       net: {
         fetch: (url, options = {}) => {
