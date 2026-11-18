@@ -1,0 +1,65 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import test from 'node:test';
+import vm from 'node:vm';
+import { runScript } from './helpers/load-commonjs.js';
+
+// Load sidebar.js as the webview would, with an `iina` bridge that has no
+// preferences API, and return the registered message handlers.
+function loadSidebar() {
+  const logged = [];
+  const handlers = {};
+  const context = vm.createContext({
+    window: {
+      createSidebarAuthServerMethods: () => ({}),
+      createSidebarMediaMethods: () => ({}),
+    },
+    document: { readyState: 'loading', addEventListener() {} },
+    console: { log: (line) => logged.push(line) },
+    iina: {
+      onMessage: (name, callback) => {
+        handlers[name] = callback;
+      },
+      postMessage() {},
+    },
+  });
+  runScript('src/ui/sidebar/sidebar.js', context);
+  context.window.JellyfinSidebar.prototype.setupMessageHandlers.call({
+    handleClientIdentity() {},
+  });
+  return { logged, handlers };
+}
+
+test('sidebar debug logging follows the flag sent with the client identity', () => {
+  const { logged, handlers } = loadSidebar();
+  assert.equal(logged.length, 0, 'nothing is logged before the plugin sends the flag');
+
+  handlers['client-identity']({ deviceId: 'test-device', debugLogging: true });
+  assert.ok(logged.some((line) => line.includes('Received client-identity')));
+
+  logged.length = 0;
+  handlers['client-identity']({ deviceId: 'test-device', debugLogging: false });
+  assert.equal(logged.length, 0);
+});
+
+test('plugin sends the debug_logging preference with every client identity', () => {
+  const source = readFileSync('src/index.js', 'utf8');
+  assert.match(source, /debugLogging: Boolean\(preferences\.get\('debug_logging'\)\)/);
+  assert.doesNotMatch(source, /postMessage\('client-identity', getClientIdentity\(\)\)/);
+});
+
+test('the Quick Connect secret is redacted from logged request URLs', () => {
+  const { logged, handlers } = loadSidebar();
+  handlers['client-identity']({ deviceId: 'test-device', debugLogging: true });
+  logged.length = 0;
+
+  // The poll is logged by the sidebar's fetch wrapper as a request line.
+  handlers['client-identity']({
+    deviceId: 'GET request to: https://jf/QuickConnect/Connect?secret=0123456789abcdef',
+    debugLogging: true,
+  });
+
+  assert.ok(logged.length > 0);
+  assert.ok(logged.every((line) => !line.includes('0123456789abcdef')));
+  assert.ok(logged.some((line) => line.includes('secret=[redacted]')));
+});
