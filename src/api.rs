@@ -47,12 +47,20 @@ impl AppState {
     fn ferris_dir(&self) -> PathBuf {
         self.save_dir.join("ferris")
     }
+    /// Save, remembering the error for the HUD. Callers that must not carry on when the
+    /// disk write failed use `try_save` instead and react to the error.
     fn save(&self, progress: &Progress) {
+        let _ = self.try_save(progress);
+    }
+
+    /// Save and hand the error back to the caller (also recorded for the HUD).
+    fn try_save(&self, progress: &Progress) -> Result<(), String> {
         let result = progress.save(&self.save_path());
         if let Err(e) = &result {
             eprintln!("⚠ Saving failed: {e}");
         }
-        *self.save_error.lock().unwrap() = result.err();
+        *self.save_error.lock().unwrap() = result.as_ref().err().cloned();
+        result
     }
     fn level(&self, id: &str) -> Result<(&World, usize, &Level), ApiError> {
         World::find(&self.worlds, id)
@@ -138,8 +146,87 @@ impl AppState {
             "save_error": *self.save_error.lock().unwrap(),
         })
     }
+
+    /// Save the submitted code as this level's draft and record which attempt the run
+    /// belongs to (`Progress::generation`). Both happen under one lock, so a replay can't
+    /// slip in between the draft and the number it is paired with.
+    ///
+    /// If the draft can't be written, nothing is compiled: the caller gets a diagnosable
+    /// error instead of a result the player could mistake for a graded attempt. The
+    /// in-memory draft is rolled back too, so it never claims a save that didn't happen.
+    fn begin_run(&self, id: &str, code: &str) -> Result<u64, ApiError> {
+        let mut p = self.progress.lock().unwrap();
+        let previous = p.drafts.insert(id.to_string(), code.to_string());
+        if let Err(e) = self.try_save(&p) {
+            match previous {
+                Some(old) => {
+                    p.drafts.insert(id.to_string(), old);
+                }
+                None => {
+                    p.drafts.remove(id);
+                }
+            }
+            return Err(ApiError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Couldn't save your code, so it wasn't run: {e}"),
+            ));
+        }
+        Ok(p.generation(id))
+    }
+
+    /// Record a finished run. A run whose attempt has since been replayed away is stale:
+    /// the response says so (`stale: true`) and nothing — completion, XP, attempts,
+    /// replays — changes, because the result belongs to an attempt that no longer exists.
+    /// Any other run is graded normally, with XP only for the first clear.
+    fn finish_run(
+        &self,
+        world: &World,
+        li: usize,
+        level: &Level,
+        id: &str,
+        generation: u64,
+        result: &runner::RunResult,
+    ) -> Value {
+        let mut p = self.progress.lock().unwrap();
+        // Compare the exact attempt number this run started in, not just "did the counter
+        // change": two replays during one compile move 0 -> 2, and a run from either
+        // attempt 0 or attempt 1 is equally stale.
+        if p.is_stale(id, generation) {
+            return json!({
+                "result": result, "xp_gained": 0, "first_clear": false, "world_cleared": false,
+                "stale": true, "player": self.player(&p), "next_id": self.level_after(id),
+            });
+        }
+        p.days_played.insert(today());
+        p.record_errors(id, &result.error_codes);
+        let first_clear = result.passed && !p.completed.contains_key(id);
+        let mut xp_gained = 0;
+        if !p.completed.contains_key(id) {
+            *p.attempts.entry(id.to_string()).or_default() += 1;
+        }
+        if first_clear {
+            xp_gained = p.xp_for(id, level.xp);
+            p.xp += xp_gained;
+            let completion = Completion {
+                xp: xp_gained,
+                hints_used: p.hint_tier.get(id).copied().unwrap_or(0),
+                attempts: p.attempts.get(id).copied().unwrap_or(1),
+            };
+            p.completed.insert(id.to_string(), completion);
+            p.skipped.remove(id);
+            p.reached.insert(id.to_string());
+        }
+        let world_cleared = first_clear && li + 1 == world.levels.len();
+        self.save(&p);
+        json!({
+            "result": result, "xp_gained": xp_gained, "first_clear": first_clear,
+            "world_cleared": world_cleared, "player": self.player(&p), "next_id": self.level_after(id),
+        })
+    }
 }
 
+/// A request failure with an HTTP status and a message the page can show.
+#[derive(Debug)]
 pub struct ApiError(StatusCode, String);
 
 /// The longest code the game accepts to save or run (far more than any level needs).
@@ -337,48 +424,13 @@ async fn run_level(
     }
     // Save the submitted code *before* compiling. Edits the player makes while it compiles
     // are autosaved afterwards and must win, so the result below never touches the draft.
-    let generation = {
-        let mut p = s.progress.lock().unwrap();
-        p.drafts.insert(req.id.clone(), req.code.clone());
-        s.save(&p);
-        p.replays.get(&req.id).copied().unwrap_or(0)
-    };
+    // If that save fails, stop here: a result from code that was never stored is worse
+    // than an error the player can see.
+    let generation = s.begin_run(&req.id, &req.code)?;
     let result = runner::check_level(level, &req.code, &s.work_dir()).await;
-
-    let mut p = s.progress.lock().unwrap();
-    // The level was replayed while this compiled: the run belongs to the old attempt,
-    // so it must not clear (or count against) the fresh one.
-    if p.replays.get(&req.id).copied().unwrap_or(0) != generation {
-        return Ok(Json(json!({
-            "result": result, "xp_gained": 0, "first_clear": false, "world_cleared": false,
-            "stale": true, "player": s.player(&p), "next_id": s.level_after(&req.id),
-        })));
-    }
-    p.days_played.insert(today());
-    p.record_errors(&req.id, &result.error_codes);
-    let first_clear = result.passed && !p.completed.contains_key(&req.id);
-    let mut xp_gained = 0;
-    if !p.completed.contains_key(&req.id) {
-        *p.attempts.entry(req.id.clone()).or_default() += 1;
-    }
-    if first_clear {
-        xp_gained = p.xp_for(&req.id, level.xp);
-        p.xp += xp_gained;
-        let completion = Completion {
-            xp: xp_gained,
-            hints_used: p.hint_tier.get(&req.id).copied().unwrap_or(0),
-            attempts: p.attempts.get(&req.id).copied().unwrap_or(1),
-        };
-        p.completed.insert(req.id.clone(), completion);
-        p.skipped.remove(&req.id);
-        p.reached.insert(req.id.clone());
-    }
-    let world_cleared = first_clear && li + 1 == world.levels.len();
-    s.save(&p);
-    Ok(Json(json!({
-        "result": result, "xp_gained": xp_gained, "first_clear": first_clear,
-        "world_cleared": world_cleared, "player": s.player(&p), "next_id": s.level_after(&req.id),
-    })))
+    Ok(Json(s.finish_run(
+        world, li, level, &req.id, generation, &result,
+    )))
 }
 
 #[derive(Deserialize)]
@@ -468,8 +520,19 @@ async fn skip(State(s): State<Shared>, Json(req): Json<IdReq>) -> Result<Json<Va
 async fn replay(State(s): State<Shared>, Json(req): Json<IdReq>) -> Result<Json<Value>, ApiError> {
     s.playable(&req.id)?;
     let mut p = s.progress.lock().unwrap();
+    // The replay is one save: XP taken back, completion removed and the attempt number
+    // bumped together. If the write fails, the whole change is undone, so the player
+    // can't lose XP for an attempt that was never reset (and never see "reset" in a
+    // UI that then reloads the old progress).
+    let before = p.clone();
     let xp_returned = p.replay(&req.id);
-    s.save(&p);
+    if let Err(e) = s.try_save(&p) {
+        *p = before;
+        return Err(ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Couldn't save, so level {} wasn't reset: {e}", req.id),
+        ));
+    }
     Ok(Json(
         json!({ "xp_returned": xp_returned, "player": s.player(&p) }),
     ))
@@ -484,14 +547,25 @@ async fn save_draft(
     s.level(&req.id)?;
     check_code_size(&req.code)?;
     let mut p = s.progress.lock().unwrap();
-    p.drafts.insert(req.id, req.code);
-    s.save(&p);
-    match s.save_error.lock().unwrap().clone() {
-        Some(e) => Err(ApiError(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Couldn't save: {e}"),
-        )),
-        None => Ok(StatusCode::NO_CONTENT),
+    let previous = p.drafts.insert(req.id.clone(), req.code);
+    match s.try_save(&p) {
+        Ok(()) => Ok(StatusCode::NO_CONTENT),
+        Err(e) => {
+            // Don't keep a draft in memory that the save file never got: the page still
+            // holds the edit and will send it again.
+            match previous {
+                Some(old) => {
+                    p.drafts.insert(req.id, old);
+                }
+                None => {
+                    p.drafts.remove(&req.id);
+                }
+            }
+            Err(ApiError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Couldn't save: {e}"),
+            ))
+        }
     }
 }
 
@@ -882,7 +956,304 @@ fn explain_offline(output: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::model_name;
+    use super::*;
+    use crate::levels::{Check, Level, World};
+    use crate::progress::Progress;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("ferris-forge-api-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A level that would pass if it were compiled: the fake run results below decide
+    /// pass/fail, so no `rustc` is needed for the grading tests.
+    fn fake_level(id: &str) -> Level {
+        Level {
+            id: id.into(),
+            title: "A test level".into(),
+            kind: Kind::Fix,
+            book: vec![],
+            goal: "Print the thing.".into(),
+            lesson: String::new(),
+            c_compare: String::new(),
+            py_compare: String::new(),
+            starter: "fn main() {}".into(),
+            check: Check::Output,
+            expected_output: Some("hi".into()),
+            tests: None,
+            hints: vec!["a hint".into()],
+            solution: String::new(),
+            choices: vec![],
+            answer: None,
+            compile_fails: false,
+            explanation: String::new(),
+            xp: 30,
+            stdin: String::new(),
+            args: vec![],
+            env: Default::default(),
+            files: Default::default(),
+            expected_stderr: None,
+            min_tests: 0,
+        }
+    }
+
+    fn state_with(save_dir: PathBuf, progress: Progress, levels: Vec<Level>) -> Shared {
+        Arc::new(AppState {
+            save_dir,
+            worlds: vec![World {
+                id: 0,
+                name: "Test World".into(),
+                blurb: String::new(),
+                tag: None,
+                levels,
+                planned: vec![],
+            }],
+            book: Book {
+                base_url: String::new(),
+                sections: vec![],
+            },
+            progress: Mutex::new(progress),
+            usage: Arc::new(Mutex::new(None)),
+            save_error: Mutex::new(None),
+            notice: Mutex::new(None),
+            rustc: None,
+        })
+    }
+
+    /// A normal state whose save file can be written.
+    fn working_state(name: &str, progress: Progress) -> Shared {
+        state_with(
+            temp_dir(name),
+            progress,
+            vec![fake_level("0.1"), fake_level("0.2")],
+        )
+    }
+
+    /// A state whose save directory is gone, so every save fails. Used for the
+    /// "saving failed" paths: they must report the error and leave progress alone.
+    fn unwritable_state(name: &str, progress: Progress) -> Shared {
+        let dir = temp_dir(name).join("missing");
+        assert!(!dir.exists());
+        state_with(dir, progress, vec![fake_level("0.1")])
+    }
+
+    fn passed() -> runner::RunResult {
+        runner::RunResult {
+            compiled: true,
+            passed: true,
+            ..Default::default()
+        }
+    }
+
+    fn saved(state: &Shared) -> Progress {
+        Progress::load(&state.save_dir.join("progress.json"))
+            .unwrap()
+            .0
+    }
+
+    #[test]
+    fn a_cleared_level_pays_out_once() {
+        let s = working_state("normal", Progress::default());
+        let generation = s
+            .begin_run("0.1", "fn main() { println!(\"hi\"); }")
+            .unwrap();
+
+        let (_, li, level) = World::find(&s.worlds, "0.1").unwrap();
+        let first = s.finish_run(&s.worlds[0], li, level, "0.1", generation, &passed());
+        assert_eq!(first["first_clear"], true);
+        assert_eq!(first["xp_gained"], 30);
+        assert_eq!(first["stale"], Value::Null);
+        assert_eq!(s.progress.lock().unwrap().xp, 30);
+        assert_eq!(saved(&s).xp, 30, "the clear must reach the save file");
+        assert!(saved(&s).drafts.contains_key("0.1"));
+
+        // Running the same level again doesn't pay twice.
+        let again = s
+            .begin_run("0.1", "fn main() { println!(\"hi\"); }")
+            .unwrap();
+        let second = s.finish_run(&s.worlds[0], li, level, "0.1", again, &passed());
+        assert_eq!(second["first_clear"], false);
+        assert_eq!(second["xp_gained"], 0);
+        assert_eq!(s.progress.lock().unwrap().xp, 30);
+    }
+
+    #[tokio::test]
+    async fn a_run_from_before_a_replay_is_stale() {
+        let mut progress = Progress::default();
+        progress.completed.insert(
+            "0.1".into(),
+            Completion {
+                xp: 30,
+                hints_used: 0,
+                attempts: 1,
+            },
+        );
+        progress.xp = 30;
+        let s = working_state("stale-one", progress);
+
+        // Start a run, then replay the level while it compiles.
+        let generation = s.begin_run("0.1", "old attempt").unwrap();
+        let res = replay(State(s.clone()), Json(IdReq { id: "0.1".into() }))
+            .await
+            .unwrap();
+        assert_eq!(res.0["xp_returned"], 30);
+
+        let (_, li, level) = World::find(&s.worlds, "0.1").unwrap();
+        let out = s.finish_run(&s.worlds[0], li, level, "0.1", generation, &passed());
+        assert_eq!(out["stale"], true);
+        assert_eq!(out["xp_gained"], 0);
+        assert_eq!(out["first_clear"], false);
+        assert_eq!(out["world_cleared"], false);
+        let p = s.progress.lock().unwrap();
+        assert_eq!(p.xp, 0, "the old run must not earn XP for the new attempt");
+        assert!(
+            !p.completed.contains_key("0.1"),
+            "it must not clear the level"
+        );
+        assert_eq!(p.attempts.get("0.1"), None, "it must not count an attempt");
+        assert_eq!(
+            p.drafts.get("0.1"),
+            None,
+            "it must not revive the old draft"
+        );
+        assert_eq!(p.generation("0.1"), 1);
+    }
+
+    #[tokio::test]
+    async fn two_replays_in_a_row_make_both_earlier_runs_stale() {
+        let mut progress = Progress::default();
+        progress.completed.insert(
+            "0.1".into(),
+            Completion {
+                xp: 30,
+                hints_used: 0,
+                attempts: 1,
+            },
+        );
+        progress.xp = 30;
+        let s = working_state("stale-two", progress);
+
+        let run_a = s.begin_run("0.1", "run A").unwrap();
+        let first = replay(State(s.clone()), Json(IdReq { id: "0.1".into() }))
+            .await
+            .unwrap();
+        assert_eq!(first.0["xp_returned"], 30);
+        let run_b = s.begin_run("0.1", "run B").unwrap();
+        let second = replay(State(s.clone()), Json(IdReq { id: "0.1".into() }))
+            .await
+            .unwrap();
+        assert_eq!(
+            second.0["xp_returned"], 0,
+            "already reset, nothing left to return"
+        );
+        assert_eq!(s.progress.lock().unwrap().generation("0.1"), 2);
+
+        let (_, li, level) = World::find(&s.worlds, "0.1").unwrap();
+        for (label, generation) in [("A", run_a), ("B", run_b)] {
+            let out = s.finish_run(&s.worlds[0], li, level, "0.1", generation, &passed());
+            assert_eq!(out["stale"], true, "run {label} must be stale");
+            assert_eq!(out["xp_gained"], 0, "run {label} must pay no XP");
+            assert_eq!(out["first_clear"], false, "run {label} must not clear");
+        }
+        let p = s.progress.lock().unwrap();
+        assert_eq!(p.xp, 0);
+        assert!(!p.completed.contains_key("0.1"));
+        assert_eq!(p.generation("0.1"), 2, "replays themselves still count");
+    }
+
+    #[tokio::test]
+    async fn a_run_after_the_last_replay_still_clears() {
+        let s = working_state("after-replay", Progress::default());
+        let reset = replay(State(s.clone()), Json(IdReq { id: "0.1".into() }))
+            .await
+            .unwrap();
+        assert_eq!(reset.0["xp_returned"], 0);
+        let generation = s.begin_run("0.1", "fresh attempt").unwrap();
+        let (_, li, level) = World::find(&s.worlds, "0.1").unwrap();
+        let out = s.finish_run(&s.worlds[0], li, level, "0.1", generation, &passed());
+        assert_eq!(out["stale"], Value::Null);
+        assert_eq!(out["first_clear"], true);
+        assert_eq!(out["xp_gained"], 30);
+        assert_eq!(s.progress.lock().unwrap().xp, 30);
+    }
+
+    #[tokio::test]
+    async fn a_run_whose_draft_cannot_be_saved_does_not_run_or_score() {
+        let s = unwritable_state("run-save-fails", Progress::default());
+        let err = run_level(
+            State(s.clone()),
+            Json(CodeReq {
+                id: "0.1".into(),
+                code: "fn main() { println!(\"hi\"); }".into(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(err.1.contains("wasn't run"), "{}", err.1);
+        let p = s.progress.lock().unwrap();
+        assert!(p.drafts.is_empty(), "an unsaved draft must not linger");
+        assert!(p.completed.is_empty());
+        assert_eq!(p.xp, 0);
+        assert_eq!(p.generation("0.1"), 0);
+        assert!(
+            s.save_error.lock().unwrap().is_some(),
+            "error is diagnosable"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_replay_whose_save_fails_keeps_the_xp_and_the_clear() {
+        let mut progress = Progress::default();
+        progress.completed.insert(
+            "0.1".into(),
+            Completion {
+                xp: 30,
+                hints_used: 0,
+                attempts: 1,
+            },
+        );
+        progress.xp = 30;
+        let s = unwritable_state("replay-save-fails", progress);
+
+        let err = replay(State(s.clone()), Json(IdReq { id: "0.1".into() }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(err.1.contains("wasn't reset"), "{}", err.1);
+
+        let p = s.progress.lock().unwrap();
+        assert_eq!(
+            p.xp, 30,
+            "XP must not be taken back if the reset wasn't saved"
+        );
+        assert!(p.completed.contains_key("0.1"), "the clear must survive");
+        assert_eq!(p.generation("0.1"), 0, "no attempt number was bumped");
+        assert!(
+            s.save_error.lock().unwrap().is_some(),
+            "error is diagnosable"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_draft_whose_save_fails_is_reported_and_not_kept() {
+        let s = unwritable_state("draft-save-fails", Progress::default());
+        let err = save_draft(
+            State(s.clone()),
+            Json(CodeReq {
+                id: "0.1".into(),
+                code: "fn main() {}".into(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(err.1.starts_with("Couldn't save"), "{}", err.1);
+        assert!(s.progress.lock().unwrap().drafts.is_empty());
+    }
 
     #[test]
     fn model_names_come_from_ids() {
@@ -891,8 +1262,6 @@ mod tests {
         assert_eq!(model_name("claude-haiku-4-5-20251001"), "Claude Haiku 4.5");
         assert_eq!(model_name("claude-sonnet-6"), "Claude Sonnet 6");
     }
-
-    use super::verdict_is_idiomatic;
 
     #[test]
     fn reads_the_review_verdict() {

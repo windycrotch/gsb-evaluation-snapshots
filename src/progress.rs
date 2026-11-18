@@ -82,7 +82,8 @@ pub struct Progress {
     /// by Claude Code, e.g. "opus" -> "claude-opus-5-5". Names the model cards.
     pub models: BTreeMap<String, String>,
     /// How many times each level was replayed while the game has been running. A run
-    /// that started before a replay must not count, so it checks this didn't change.
+    /// that started before a replay must not count, so it records this number when it
+    /// starts and gives up if the level has been replayed since (see `is_stale`).
     #[serde(skip)]
     pub replays: BTreeMap<String, u64>,
 }
@@ -192,6 +193,23 @@ impl Progress {
         self.drafts.remove(level_id);
         *self.replays.entry(level_id.to_string()).or_default() += 1;
         xp
+    }
+
+    /// The attempt a level is on: 0 until it is first replayed, then one per replay.
+    /// A run records this before compiling so its result can be checked afterwards.
+    pub fn generation(&self, level_id: &str) -> u64 {
+        self.replays.get(level_id).copied().unwrap_or(0)
+    }
+
+    /// True when `generation` is no longer the level's current one, i.e. the run that
+    /// recorded it belongs to an attempt that has been replayed away.
+    ///
+    /// The values are compared exactly, not merely checked for a change: replaying twice
+    /// while one run compiles takes the level from 0 to 2, and every run started before
+    /// (at 0 or 1) must be stale. Counting only "did the counter move at all" could let
+    /// the older of the two runs look current.
+    pub fn is_stale(&self, level_id: &str, generation: u64) -> bool {
+        self.generation(level_id) != generation
     }
 
     pub fn record_errors(&mut self, level_id: &str, codes: &[String]) {
@@ -369,6 +387,32 @@ mod tests {
         assert!(
             !serde_json::to_string(&p).unwrap().contains("replays"),
             "not saved"
+        );
+    }
+
+    #[test]
+    fn two_replays_before_a_run_finishes_both_make_it_stale() {
+        let mut p = Progress::default();
+        let first = p.generation("1.1");
+        assert_eq!(first, 0);
+
+        // Run A starts at attempt 0, then the player replays twice while it compiles.
+        p.replay("1.1");
+        let second = p.generation("1.1");
+        p.replay("1.1");
+        assert_eq!(p.generation("1.1"), 2);
+
+        assert!(
+            p.is_stale("1.1", first),
+            "a run from before the first replay is stale"
+        );
+        assert!(
+            p.is_stale("1.1", second),
+            "a run from between the two replays is stale too"
+        );
+        assert!(
+            !p.is_stale("1.1", p.generation("1.1")),
+            "a run from the current attempt is live"
         );
     }
 
