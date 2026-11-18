@@ -1,0 +1,7 @@
+numpy>=2.1
+scipy>=1.14
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9
+paho-mqtt>=2.1
+cryptography>=43

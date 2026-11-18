@@ -1,0 +1,16 @@
+[Unit]
+Description=Impasto (web app :6868)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=%h/impasto
+Environment=IMPASTO_PORT=6868
+Environment=IMPASTO_HOST=0.0.0.0
+Environment=IMPASTO_DATA=%h/impasto/data
+ExecStart=%h/impasto/.venv/bin/python -m impasto.server
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

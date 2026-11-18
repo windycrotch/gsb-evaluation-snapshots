@@ -1,0 +1,8 @@
+.venv/
+_x/
+data/
+__pycache__/
+.pytest_cache/
+.playwright-mcp/
+*.gcode
+*.3mf
