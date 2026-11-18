@@ -111,8 +111,26 @@ start, about 1,000 tokens.
 ## Data and network use
 
 The server has no telemetry. It listens on `127.0.0.1:52000` for `playcanvas.com` and localhost
-pages, stops any other process holding that port, touches local files only for upload and download
+pages (plus any exact origins listed in `MCP_ALLOWED_ORIGINS`), takes turns with any other MCP
+server instance on that port without killing it, touches local files only for upload and download
 tools, and makes one outbound request: `download_build` fetches the archive URL the Editor reports.
+
+Any other MCP server instance on the port is asked to hand over rather than killed: the owner
+disconnects the Editor, releases the port and waits on standby to take it back if the new owner
+exits. Every request is answered only by the socket it was sent to, so other open pages cannot
+forge a reply.
+
+### `MCP_ALLOWED_ORIGINS`
+
+Browser pages may connect only from `https://playcanvas.com` (optionally with a port),
+`localhost` and `127.0.0.1` (http or https, optionally with a port). Other `playcanvas.com`
+subdomains, lookalike hosts, the http editor origin, opaque origins and LAN addresses are
+rejected; local processes that send no `Origin` may still connect. To allow additional pages,
+list exact origins, comma-separated:
+
+```bash
+MCP_ALLOWED_ORIGINS="https://mypage.example.com, http://192.168.1.20:8080" npx -y @playcanvas/editor-mcp-server
+```
 
 ## Contributing
 

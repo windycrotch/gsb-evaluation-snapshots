@@ -1,13 +1,10 @@
-import { execSync } from 'child_process';
-
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { ListPromptsRequestSchema, ListResourcesRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { WebSocket } from 'ws';
 
 import pkg from '../package.json' with { type: 'json' };
 
-import { parsePids } from './pids.ts';
+import { requestHandoff, waitForPortRelease } from './handoff.ts';
 import { register as registerAnimation } from './tools/animation.ts';
 import { register as registerAnimStateGraph } from './tools/animstategraph.ts';
 import { register as registerAsset } from './tools/asset.ts';
@@ -28,117 +25,26 @@ import { WSS } from './wss.ts';
 
 const PORT = parseInt(process.env.PORT || '52000', 10);
 
-// deduped PIDs listening on the port; parsing lives in parsePids so it's unit-testable
-const findPids = (port: number): string[] => {
-    try {
-        const cmd = process.platform === 'win32' ?
-            'netstat -ano -p TCP' :
-            `lsof -nP -iTCP:${port} -sTCP:LISTEN -t`;
-        return parsePids(execSync(cmd).toString(), process.platform, port);
-    } catch {
-        // No listener (lsof/netstat exit non-zero when nothing matches).
-        return [];
-    }
-};
-
-const kill = (pid: string) => {
-    if (process.platform === 'win32') {
-        try {
-            // /F = force, /T = tree kill (kills child processes too)
-            execSync(`taskkill /F /T /PID ${pid}`, { stdio: 'ignore' });
-        } catch {
-            // Ignore - process may already be dead
-        }
-        return;
-    }
-    try {
-        execSync(`kill -9 ${pid}`);
-    } catch {
-        // Ignore - process may already be dead
-    }
-};
-
-const own = String(process.pid);
-const stale = () => findPids(PORT).filter(p => p !== own);
-
-// Wait — with a bounded timeout so startup never hangs — for the port to free up.
-const waitForPortFree = (timeoutMs: number) => {
-    const deadline = Date.now() + timeoutMs;
-    return new Promise<void>((resolve) => {
-        const tick = () => {
-            if (!stale().length || Date.now() >= deadline) {
-                resolve();
-                return;
-            }
-            setTimeout(tick, 250);
-        };
-        tick();
-    });
-};
-
 // Ask whoever currently owns the port to gracefully hand it off, so the *newest*
 // (active) client ends up controlling the editor. The owner releases the port
 // without exiting, so its MCP client doesn't restart it — no kill/restart storm.
-const requestYield = (port: number, timeoutMs: number) => {
-    return new Promise<void>((resolve) => {
-        let settled = false;
-        const done = () => {
-            if (!settled) {
-                settled = true;
-                resolve();
-            }
-        };
-        let ws: WebSocket;
-        try {
-            ws = new WebSocket(`ws://127.0.0.1:${port}`);
-        } catch {
-            done();
-            return;
-        }
-        const timer = setTimeout(() => {
-            try {
-                ws.close();
-            } catch { /* noop */ }
-            done();
-        }, timeoutMs);
-        ws.on('open', () => {
-            try {
-                ws.send(JSON.stringify({ yield: true }));
-            } catch { /* noop */ }
-        });
-        ws.on('close', () => {
-            clearTimeout(timer);
-            done();
-        });
-        ws.on('error', () => {
-            clearTimeout(timer);
-            done();
-        });
-    });
-};
-
-// Take over the port from any existing instance so the active client controls
-// the editor. Prefer a graceful handoff (no killing); fall back to reclaiming
-// the port only if the current owner won't yield (old build, orphan, or hung).
-const existing = stale();
-if (existing.length) {
-    if (process.env.MCP_TAKEOVER === '1') {
-        console.error('[process] MCP_TAKEOVER=1: killing process(es) on port', PORT, existing.join(', '));
-        existing.forEach(kill);
-        await waitForPortFree(5000);
-    } else {
-        console.error('[process] Port', PORT, 'in use; requesting graceful handoff from the current owner');
-        await requestYield(PORT, 1500);
-        await waitForPortFree(3000);
-        if (stale().length) {
-            console.error('[process] No handoff; reclaiming port', PORT, 'from', stale().join(', '));
-            stale().forEach(kill);
-            await waitForPortFree(5000);
-        }
-    }
-    if (stale().length) {
-        console.error('[process] Port', PORT, 'still in use after timeout; will stand by and retry');
-    }
+// Nothing is ever killed and no PID table is consulted (netstat/lsof output is
+// localized and unreliable): the port is probed over the same websocket the
+// editor uses. If nobody usable answers, WSS stands by and retries binding.
+const handoff = await requestHandoff(PORT, 1500);
+if (handoff === 'owner' || handoff === 'yielded') {
+    // let the previous owner finish closing its listening socket before binding, so
+    // the takeover does not start with a string of EADDRINUSE stand-by retries.
+    const released = await waitForPortRelease(PORT, 2000);
+    console.error(
+        released
+            ? `[process] Port ${PORT} released by the previous owner; taking over.`
+            : `[process] Port ${PORT} was asked to hand off but is still listening; standing by and retrying.`
+    );
+} else if (handoff === 'none') {
+    console.error('[process] Nothing to hand off on port', PORT, '— starting as owner.');
+} else {
+    console.error('[process] The listener on port', PORT, 'did not answer the handoff request; leaving it alone and standing by.');
 }
 
 // Create a WebSocket server

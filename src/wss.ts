@@ -10,20 +10,18 @@ const PROTOCOL_VERSION = 1;
 // only one can own the port; the rest stand by and take over when the owner exits.
 const BIND_RETRY_DELAY = 3_000;
 
+// after yielding, wait longer than a regular retry before trying to take the port back,
+// so the instance that asked for the handoff has time to bind first.
+const HANDOFF_RETRY_DELAY = 5_000;
+
 // browsers don't apply CORS to websockets, so any open webpage can hit ws://localhost:<port>
 // (MCP spec DNS-rebinding warning). only the editor origin and local dev builds may connect;
 // other playcanvas.com subdomains (e.g. launch pages running project code) may not. no-Origin
 // clients (non-browser local processes, e.g. the yield handshake) are allowed too.
 // add exact extra origins via MCP_ALLOWED_ORIGINS (comma-separated).
-const ALLOWED_ORIGINS = /^https:\/\/playcanvas\.com$|^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/;
-
-const allowedOrigin = (origin: string) => {
-    if (ALLOWED_ORIGINS.test(origin)) {
-        return true;
-    }
-    const extra = process.env.MCP_ALLOWED_ORIGINS || '';
-    return extra.split(',').map(s => s.trim()).filter(Boolean).includes(origin);
-};
+// scheme, host and optional port must match exactly; paths, subdomains, lookalikes and the
+// http editor origin all fail.
+const DEFAULT_ALLOWED_ORIGINS = /^https:\/\/playcanvas\.com(?::\d{1,5})?$|^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d{1,5})?$/;
 
 // Chromium gates public→loopback behind a per-origin permission (Chrome 142+, websockets
 // from 147). a blocked socket looks like "nothing is listening", so failures must name it.
@@ -34,6 +32,27 @@ const LAUNCH_HINT = 'If it never connects, allow popups for the editor origin so
 
 // the blank /editor page only handles project tools
 const NO_PROJECT_HINT = 'No project is open in the Editor. Call list_projects or create_project, then open_project, and retry.';
+
+/**
+ * Whether a browser Origin may open a websocket to the editor bridge. Only the
+ * production editor origin, loopback dev builds, and exact extras are allowed;
+ * everything else (subdomains, lookalikes, http(s) editor variants, opaque
+ * `null`, LAN addresses) is rejected. An absent Origin (local process) is
+ * handled by the caller, not here.
+ *
+ * @param origin - The `Origin` request header value.
+ * @param extraOrigins - Additional exact origins (e.g. tests); merged with `MCP_ALLOWED_ORIGINS`.
+ * @returns True when the origin is allowed to connect.
+ */
+const isAllowedOrigin = (origin: string, extraOrigins: readonly string[] = []): boolean => {
+    if (DEFAULT_ALLOWED_ORIGINS.test(origin)) {
+        return true;
+    }
+    const configured = [...extraOrigins, ...(process.env.MCP_ALLOWED_ORIGINS || '').split(',')]
+        .map(s => s.trim())
+        .filter(Boolean);
+    return configured.includes(origin);
+};
 
 /**
  * Metadata attached to every tool response. `status`/`message` describe the
@@ -65,6 +84,35 @@ export type Envelope<T = unknown> = {
 };
 
 /**
+ * Observable counters for the bridge. They make port ownership changes, origin
+ * rejections, and response-routing drops inspectable (and testable) instead of
+ * only visible in log lines.
+ */
+export type WSSStats = {
+    /** Bind attempts, including standby retries. */
+    bindAttempts: number;
+    /** Times this instance successfully took the port. */
+    becameOwner: number;
+    /** Times this instance released the port for another instance. */
+    released: number;
+    /** Connections rejected by the Origin allowlist. */
+    rejectedOrigins: number;
+    /** Responses ignored because they arrived on a socket the request was not sent to. */
+    ignoredResponses: number;
+    /** Yield frames ignored because they came from a page with an Origin. */
+    ignoredYields: number;
+};
+
+export type WSSOptions = {
+    /** Delay between standby bind attempts (default 3000ms). */
+    bindRetryDelay?: number;
+    /** Delay before retrying the port after a graceful handoff (default 5000ms). */
+    handoffRetryDelay?: number;
+    /** Extra exact origins, in addition to `MCP_ALLOWED_ORIGINS`. */
+    allowedOrigins?: readonly string[];
+};
+
+/**
  * The raw payload returned by an editor method over the websocket.
  */
 type RawResult = {
@@ -76,10 +124,18 @@ type RawResult = {
 // project is null when the editor is on the blank /editor page (no project open)
 type Capabilities = { protocolVersion?: number; methods?: Set<string>; project?: number | null };
 
-class WSS {
-    private _server!: WebSocketServer;
+type Pending = {
+    socket: WebSocket;
+    name: string;
+    timer: ReturnType<typeof setTimeout>;
+    resolve: (res: RawResult) => void;
+    reject: (err: Error) => void;
+};
 
-    // the one socket; launch:*/ping and relayed runtime:* all ride it
+class WSS {
+    private _server: WebSocketServer | undefined;
+
+    // the one registered editor socket; launch:*/ping and relayed runtime:* all ride it
     private _editor: WebSocket | undefined;
 
     private _editorCaps: Capabilities | undefined;
@@ -88,7 +144,7 @@ class WSS {
     private _runtime: Capabilities | undefined;
 
     // keyed by request id; only the socket the request went to may answer it
-    private _callbacks = new Map<number, { socket: WebSocket; cb: (res: RawResult) => void }>();
+    private _callbacks = new Map<number, Pending>();
 
     private _id = 0;
 
@@ -100,10 +156,34 @@ class WSS {
 
     private _listening = false;
 
+    // true once a bind attempt found the port owned elsewhere (EADDRINUSE) or after a
+    // handoff; false again the moment this instance becomes the owner.
+    private _standby = false;
+
+    private _closed = false;
+
     private _bindTimer: ReturnType<typeof setTimeout> | null = null;
 
-    constructor(port: number) {
+    private _bindRetryDelay: number;
+
+    private _handoffRetryDelay: number;
+
+    private _extraOrigins: readonly string[];
+
+    private _stats: WSSStats = {
+        bindAttempts: 0,
+        becameOwner: 0,
+        released: 0,
+        rejectedOrigins: 0,
+        ignoredResponses: 0,
+        ignoredYields: 0
+    };
+
+    constructor(port: number, options: WSSOptions = {}) {
         this._port = port;
+        this._bindRetryDelay = options.bindRetryDelay ?? BIND_RETRY_DELAY;
+        this._handoffRetryDelay = options.handoffRetryDelay ?? HANDOFF_RETRY_DELAY;
+        this._extraOrigins = options.allowedOrigins ?? [];
         this._bind();
     }
 
@@ -115,40 +195,70 @@ class WSS {
      * agent MCP clients from fighting over the port.
      */
     private _bind() {
+        if (this._closed) {
+            return;
+        }
+        this._bindTimer = null;
+        this._stats.bindAttempts++;
         const server = new WebSocketServer({
             port: this._port,
 
             // loopback only — never expose the editor bridge to the LAN
             host: '127.0.0.1',
             verifyClient: ({ origin }: { origin?: string }) => {
-                if (!origin || allowedOrigin(origin)) {
+                if (!origin || isAllowedOrigin(origin, this._extraOrigins)) {
                     return true;
                 }
-                console.error(`[WSS] Rejected connection from disallowed origin: ${origin}`);
+                this._stats.rejectedOrigins++;
+                console.error(`[WSS] Rejected connection from disallowed origin "${origin}" (allowed: https://playcanvas.com, localhost, 127.0.0.1, plus MCP_ALLOWED_ORIGINS)`);
                 return false;
             }
         });
         this._server = server;
         server.on('listening', () => {
+            if (this._closed || this._server !== server) {
+                return;
+            }
             this._listening = true;
-            console.error('[WSS] Listening on port', this._port);
+            this._standby = false;
+            this._stats.becameOwner++;
+            console.error(`[WSS] Listening on 127.0.0.1:${this._port} (port owner)`);
         });
         server.on('error', (err: Error & { code?: string }) => {
-            if (err.code === 'EADDRINUSE') {
-                this._listening = false;
-                console.error(`[WSS] Port ${this._port} is owned by another MCP server instance; standing by and retrying (only one instance controls the editor at a time).`);
-                try {
-                    server.close();
-                } catch { /* already closing */ }
-                if (this._bindTimer) {
-                    clearTimeout(this._bindTimer);
-                }
-                this._bindTimer = setTimeout(() => this._bind(), BIND_RETRY_DELAY);
-            } else {
-                console.error('[WSS] Server error', err);
+            if (this._closed || this._server !== server) {
+                return;
             }
+
+            // an error after a successful listen is not a bind conflict; keep the
+            // existing listener rather than closing client sockets underneath it.
+            if (this._listening && err.code !== 'EADDRINUSE') {
+                console.error('[WSS] Server error', err);
+                return;
+            }
+            this._listening = false;
+            this._server = undefined;
+            if (err.code === 'EADDRINUSE') {
+                this._standby = true;
+                console.error(`[WSS] Standby: port ${this._port} is owned by another MCP server instance; retrying in ${this._bindRetryDelay}ms (only one instance controls the editor at a time).`);
+            } else {
+                console.error(`[WSS] Failed to bind 127.0.0.1:${this._port}; retrying in ${this._bindRetryDelay}ms`, err);
+            }
+            try {
+                server.close();
+            } catch { /* already closing */ }
+            this._scheduleBind(this._bindRetryDelay);
         });
         this._attachConnectionHandler(server);
+    }
+
+    private _scheduleBind(delay: number) {
+        if (this._closed) {
+            return;
+        }
+        if (this._bindTimer) {
+            clearTimeout(this._bindTimer);
+        }
+        this._bindTimer = setTimeout(() => this._bind(), delay);
     }
 
     private _attachConnectionHandler(server: WebSocketServer) {
@@ -157,63 +267,25 @@ class WSS {
         // disconnect would leak listeners and double-handle messages.
         server.on('connection', (ws, req) => {
 
-            // browsers always send an Origin, so only local processes arrive without one
+            // browsers always send an Origin, so only local processes arrive without
+            // one. an Origin-bearing page is never trusted for the yield handshake.
             const local = !req.headers.origin;
-            if (!this._editor) {
+            console.error(`[WSS] Peer connected (${local ? 'local process' : `origin ${req.headers.origin}`})`);
+
+            // backwards compatibility: an older editor build may never send a register
+            // frame, so the first *page* takes the editor slot provisionally. local
+            // processes (the handoff probe, port checks) never claim it, and a later
+            // register from any socket makes the registration authoritative.
+            if (!local && !this._editor) {
                 this._editor = ws;
                 this._editorGeneration++;
                 this._startPing();
             }
-            console.error('[WSS] Peer connected (assumed editor; awaiting registration)');
             ws.on('message', (data) => {
                 try {
-                    const msg = JSON.parse(data.toString());
-
-                    // a newer instance asks us to hand off the port so the active client
-                    // controls the editor. we release it (without exiting, so our client
-                    // doesn't restart us) and stand by to retake it if that instance exits —
-                    // "latest wins" without a kill/restart storm.
-                    if (msg.yield === true && local) {
-                        if (this._editor === ws) {
-                            this._editor = undefined;
-                        }
-                        console.error('[WSS] Yield requested; relinquishing port to a newer instance and standing by');
-                        try {
-                            ws.close();
-                        } catch { /* already closing */ }
-                        this._relinquish();
-                        return;
-                    }
-                    if (msg.register === 'editor') {
-                        this._editor = ws;
-                        this._editorCaps = {
-                            protocolVersion: Number.isInteger(msg.protocolVersion) ? msg.protocolVersion : undefined,
-                            methods: Array.isArray(msg.methods) ? new Set(msg.methods.filter((name: unknown) => typeof name === 'string')) : undefined,
-                            project: Number.isInteger(msg.project) || msg.project === null ? msg.project : undefined
-                        };
-                        this._editorGeneration++;
-                        this._startPing();
-                        console.error('[WSS] Registered editor');
-                        return;
-                    }
-
-                    // the launch page the editor relays for, or null once its window is gone
-                    if ('runtime' in msg && this._editor === ws) {
-                        this._runtime = msg.runtime ? {
-                            protocolVersion: Number.isInteger(msg.runtime.protocolVersion) ? msg.runtime.protocolVersion : undefined,
-                            methods: Array.isArray(msg.runtime.methods) ? new Set(msg.runtime.methods.filter((name: unknown) => typeof name === 'string')) : undefined
-                        } : undefined;
-                        console.error(`[WSS] Runtime relay ${msg.runtime ? 'attached' : 'detached'}`);
-                        return;
-                    }
-                    const { id, res } = msg;
-                    const pending = this._callbacks.get(id);
-                    if (pending?.socket === ws) {
-                        pending.cb(res);
-                        this._callbacks.delete(id);
-                    }
+                    this._onMessage(ws, local, data.toString());
                 } catch (e) {
-                    console.error('[WSS]', e);
+                    console.error('[WSS] Failed to handle frame', e);
                 }
             });
             ws.on('close', () => {
@@ -228,6 +300,7 @@ class WSS {
                         clearInterval(this._pingInterval);
                         this._pingInterval = null;
                     }
+                    this._failPending(ws, name => `The editor disconnected before answering '${name}'. Reconnect it (MCP button → CONNECT) and retry.`);
                 }
             });
 
@@ -240,6 +313,172 @@ class WSS {
                 } catch { /* already closing */ }
             });
         });
+    }
+
+    private _onMessage(ws: WebSocket, local: boolean, text: string) {
+        let msg: Record<string, unknown>;
+        try {
+            const parsed: unknown = JSON.parse(text);
+            if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+                console.error('[WSS] Ignored frame: expected a JSON object');
+                return;
+            }
+            msg = parsed as Record<string, unknown>;
+        } catch {
+            console.error('[WSS] Ignored frame: invalid JSON');
+            return;
+        }
+
+        // a local process may ask who owns this bridge before requesting a handoff.
+        if (msg.hello === true) {
+            if (!local) {
+                console.error('[WSS] Ignored identification request from a page with an Origin');
+                return;
+            }
+            this._sendFrame(ws, {
+                hello: true,
+                name: 'playcanvas-editor-mcp',
+                protocolVersion: PROTOCOL_VERSION,
+                port: this._port,
+                role: this._listening ? 'owner' : 'standby'
+            });
+            return;
+        }
+
+        // a newer instance asks us to hand off the port so the active client
+        // controls the editor. we release it (without exiting, so our client
+        // doesn't restart us) and stand by to retake it if that instance exits —
+        // "latest wins" without a kill/restart storm. only local processes (no
+        // Origin) may do this; an Origin-bearing page must never evict the owner.
+        if (msg.yield === true) {
+            if (!local) {
+                this._stats.ignoredYields++;
+                console.error('[WSS] Ignored yield request from a page with an Origin; only local processes may request a handoff');
+                return;
+            }
+            this._yield();
+            return;
+        }
+
+        if (msg.register === 'editor') {
+            this._registerEditor(ws, msg);
+            return;
+        }
+
+        // the launch page the editor relays for, or null once its window is gone
+        if ('runtime' in msg) {
+            if (this._editor !== ws) {
+                console.error('[WSS] Ignored runtime announce from a socket that is not the editor');
+                return;
+            }
+            const runtime = msg.runtime as { protocolVersion?: unknown; methods?: unknown } | null | undefined;
+            this._runtime = runtime ? {
+                protocolVersion: Number.isInteger(runtime.protocolVersion) ? runtime.protocolVersion as number : undefined,
+                methods: Array.isArray(runtime.methods) ? new Set(runtime.methods.filter((name): name is string => typeof name === 'string')) : undefined
+            } : undefined;
+            console.error(`[WSS] Runtime relay ${runtime ? 'attached' : 'detached'}`);
+            return;
+        }
+
+        // anything with an id is a response candidate. it must arrive on the exact
+        // socket the request was sent to; responses from any other connected page
+        // (including one replaying a guessed id) are dropped.
+        const id = msg.id;
+        if (!Number.isInteger(id)) {
+            return;
+        }
+        const pending = this._callbacks.get(id as number);
+        if (!pending) {
+            return;
+        }
+        if (pending.socket !== ws) {
+            this._stats.ignoredResponses++;
+            console.error(`[WSS] Ignored response for request ${id} from a socket the request was not sent to`);
+            return;
+        }
+        const res = msg.res;
+        if (!res || typeof res !== 'object' || Array.isArray(res)) {
+            this._settle(id as number, undefined, new Error(`The editor returned an invalid response for '${pending.name}'. Reload the editor page and retry.`));
+            return;
+        }
+        this._settle(id as number, res as RawResult);
+    }
+
+    private _sendFrame(ws: WebSocket, frame: Record<string, unknown>) {
+        if (ws.readyState !== WebSocket.OPEN) {
+            return;
+        }
+        try {
+            ws.send(JSON.stringify(frame));
+        } catch (err) {
+            console.error('[WSS] Failed to send frame', err);
+        }
+    }
+
+    private _registerEditor(ws: WebSocket, msg: Record<string, unknown>) {
+        const previous = this._editor;
+        if (previous && previous !== ws) {
+            console.error('[WSS] Replacing the editor connection with a newly registered one');
+            this._failPending(previous, name => `The editor reconnected before answering '${name}'. Retry against the new connection.`);
+            try {
+                previous.close(1000, 'REPLACED');
+            } catch { /* already closing */ }
+            this._runtime = undefined;
+        }
+        this._editor = ws;
+        this._editorCaps = {
+            protocolVersion: Number.isInteger(msg.protocolVersion) ? msg.protocolVersion as number : undefined,
+            methods: Array.isArray(msg.methods) ? new Set(msg.methods.filter((name): name is string => typeof name === 'string')) : undefined,
+            project: Number.isInteger(msg.project) || msg.project === null ? msg.project as number | null : undefined
+        };
+        this._editorGeneration++;
+        this._startPing();
+        console.error('[WSS] Registered editor');
+    }
+
+    /**
+     * Release the port to a newer instance and disconnect the editor so it
+     * reconnects to the new owner. The process keeps running and retries binding
+     * in the background, so it can take the port back if the new owner exits.
+     */
+    private _yield() {
+        console.error('[WSS] Yield requested by a local process; releasing the port, disconnecting the editor and standing by');
+        this._relinquish();
+    }
+
+    private _relinquish() {
+        this._listening = false;
+        this._standby = true;
+        this._stats.released++;
+        if (this._pingInterval) {
+            clearInterval(this._pingInterval);
+            this._pingInterval = null;
+        }
+        this._editor = undefined;
+        this._editorCaps = undefined;
+        this._runtime = undefined;
+
+        // requests cannot be answered once the editor is gone; fail them now instead
+        // of leaving callers waiting for the request timeout.
+        this._failAllPending(name => `The MCP server handed the editor bridge to another instance before '${name}' was answered. Retry once that instance has connected to the editor.`);
+
+        const server = this._server;
+        this._server = undefined;
+        if (server) {
+            // drop every open page too: they belong to this listener and would
+            // otherwise stay connected to a server that no longer accepts anyone.
+            for (const client of server.clients) {
+                try {
+                    client.close(1001, 'HANDOFF');
+                } catch { /* already closing */ }
+            }
+            try {
+                server.close();
+            } catch { /* already closing */ }
+        }
+
+        // give the requesting instance ample time to bind before we retry.
+        this._scheduleBind(this._handoffRetryDelay);
     }
 
     private _startPing() {
@@ -263,32 +502,36 @@ class WSS {
         }, PING_DELAY);
     }
 
-    /**
-     * Release the port and drop peers WITHOUT exiting the process, then re-enter
-     * standby so we automatically take the port back if the new owner exits.
-     * Used when a newer instance requests a graceful handoff.
-     */
-    private _relinquish() {
-        this._listening = false;
-        if (this._pingInterval) {
-            clearInterval(this._pingInterval);
-            this._pingInterval = null;
+    private _settle(id: number, res?: RawResult, err?: Error) {
+        const pending = this._callbacks.get(id);
+        if (!pending) {
+            return;
         }
+        this._callbacks.delete(id);
+        clearTimeout(pending.timer);
+        if (err) {
+            pending.reject(err);
+        } else {
+            pending.resolve(res as RawResult);
+        }
+    }
 
-        // drop the editor so it reconnects to the new owner
-        try {
-            this._editor?.close();
-        } catch { /* already closing */ }
-        this._editor = undefined;
-        this._editorCaps = undefined;
-        this._runtime = undefined;
-        try {
-            this._server.close();
-        } catch { /* already closing */ }
-        if (this._bindTimer) {
-            clearTimeout(this._bindTimer);
+    private _failPending(socket: WebSocket, message: (name: string) => string) {
+        for (const [id, pending] of this._callbacks) {
+            if (pending.socket === socket) {
+                this._callbacks.delete(id);
+                clearTimeout(pending.timer);
+                pending.reject(new Error(message(pending.name)));
+            }
         }
-        this._bindTimer = setTimeout(() => this._bind(), BIND_RETRY_DELAY);
+    }
+
+    private _failAllPending(message: (name: string) => string) {
+        for (const [id, pending] of this._callbacks) {
+            this._callbacks.delete(id);
+            clearTimeout(pending.timer);
+            pending.reject(new Error(message(pending.name)));
+        }
     }
 
     /**
@@ -360,6 +603,41 @@ class WSS {
         });
     }
 
+    /**
+     * Whether this instance currently owns the editor port.
+     */
+    get isOwner(): boolean {
+        return this._listening && !this._closed;
+    }
+
+    /**
+     * Whether this instance is standing by because another instance owns the port.
+     */
+    get isStandby(): boolean {
+        return !this._closed && this._standby;
+    }
+
+    /**
+     * Whether a registered editor socket is currently connected.
+     */
+    get editorConnected(): boolean {
+        return this._editor?.readyState === WebSocket.OPEN;
+    }
+
+    /**
+     * The port this instance controls (or is trying to control).
+     */
+    get port(): number {
+        return this._port;
+    }
+
+    /**
+     * A snapshot of the bridge's observable counters.
+     */
+    get stats(): Readonly<WSSStats> {
+        return { ...this._stats };
+    }
+
     private _send(name: string, ...args: unknown[]) {
 
         // runtime:* is relayed to the launch page, everything else the editor handles; one socket
@@ -372,10 +650,12 @@ class WSS {
                 return;
             }
             if (!socket) {
-                if (!this._listening) {
-                    reject(new Error(`This MCP server is on standby because another instance owns port ${this._port} (only one instance can control the editor at a time). Close the other MCP client/instance, or start this one with MCP_TAKEOVER=1 to force takeover, then retry.`));
-                } else {
+                if (this._standby) {
+                    reject(new Error(`This MCP server is on standby because another instance owns port ${this._port} (only one instance can control the editor at a time). Close the other MCP client/instance, or restart this one to request a fresh handoff, then retry.`));
+                } else if (this._listening) {
                     reject(new Error(`Editor not connected. Open the PlayCanvas Editor, click the MCP button at the bottom of the toolbar and press CONNECT, then retry. ${LNA_EDITOR_HINT}`));
+                } else {
+                    reject(new Error(`This MCP server is not listening on port ${this._port} yet (it may be starting or shutting down). Retry in a moment; a server on standby takes over automatically once the port frees.`));
                 }
                 return;
             }
@@ -406,10 +686,10 @@ class WSS {
             }, DEFAULT_TIMEOUT);
             this._callbacks.set(id, {
                 socket,
-                cb: (res: RawResult) => {
-                    clearTimeout(timer);
-                    resolve(res);
-                }
+                name,
+                timer,
+                resolve,
+                reject
             });
             try {
                 socket.send(JSON.stringify({ id, name, args }));
@@ -431,19 +711,31 @@ class WSS {
      * @returns The MCP tool response.
      */
     private _wrap(name: string, raw: RawResult | null, errorMessage?: string): CallToolResult {
-        const isError = !!errorMessage || !!raw?.error;
+        const rawError = typeof raw?.error === 'string' ? raw.error : raw?.error ? JSON.stringify(raw.error) : '';
+        const message = (errorMessage || rawError).trim();
+        const isError = !!message;
         const meta: Meta = {
             tool: name,
             status: isError ? 'error' : 'ok'
         };
-        if (isError) {
-            meta.message = errorMessage ?? raw?.error;
+
+        // the envelope invariants (tool/status/message) are owned by the server; an
+        // editor-supplied meta may add fields but must not rewrite the outcome.
+        if (raw?.meta && typeof raw.meta === 'object' && !Array.isArray(raw.meta)) {
+            for (const [key, value] of Object.entries(raw.meta)) {
+                if (key === 'tool' || key === 'status' || (key === 'message' && isError)) {
+                    continue;
+                }
+                meta[key] = value;
+            }
         }
-        if (raw?.meta) {
-            Object.assign(meta, raw.meta);
+        if (isError) {
+            meta.message = message || `The editor reported an unspecified error for '${name}'. Check the editor console, reload the page and retry.`;
         }
         const envelope: Envelope = {
-            data: isError ? null : (raw?.data ?? null),
+            // a successful response always carries data; a method with no payload
+            // resolves to an empty object rather than null so "ok" never looks empty.
+            data: isError ? null : (raw?.data ?? {}),
             meta
         };
         return {
@@ -512,8 +804,16 @@ class WSS {
             const mimeType = (raw.meta?.mimeType as string) || 'image/webp';
 
             // image tools return the image block plus a parallel text block with the same
-            // meta, so "all metadata lives in meta" holds for every tool (issue #11).
-            const meta: Meta = { tool: name, status: 'ok', ...(raw.meta || {}) };
+            // meta, so "all metadata lives in meta" holds for every tool (issue #11). the
+            // text companion still obeys the envelope: a successful response carries data,
+            // and the editor cannot rewrite the server-owned tool/status/message fields.
+            const meta: Meta = { tool: name, status: 'ok' };
+            for (const [key, value] of Object.entries(raw.meta || {})) {
+                if (key === 'tool' || key === 'status' || key === 'message') {
+                    continue;
+                }
+                meta[key] = value;
+            }
             return {
                 content: [
                     {
@@ -523,7 +823,7 @@ class WSS {
                     },
                     {
                         type: 'text',
-                        text: JSON.stringify({ data: null, meta })
+                        text: JSON.stringify({ data: { mimeType }, meta })
                     }
                 ]
             };
@@ -534,21 +834,40 @@ class WSS {
     }
 
     close() {
+        if (this._closed) {
+            return;
+        }
+        this._closed = true;
+        this._listening = false;
+        this._standby = false;
         if (this._pingInterval) {
             clearInterval(this._pingInterval);
+            this._pingInterval = null;
         }
         if (this._bindTimer) {
             clearTimeout(this._bindTimer);
             this._bindTimer = null;
         }
-        this._listening = false;
-        this._editor?.close(1000, 'FORCE');
+        this._failAllPending(name => `The MCP server shut down before '${name}' was answered. Restart the MCP client and retry.`);
         this._editor = undefined;
         this._editorCaps = undefined;
         this._runtime = undefined;
-        this._server.close();
+        const server = this._server;
+        this._server = undefined;
+        if (server) {
+            // terminate instead of close: waiting for peers to acknowledge would leave
+            // the listening socket (and the test process) alive indefinitely.
+            for (const client of server.clients) {
+                try {
+                    client.terminate();
+                } catch { /* already closed */ }
+            }
+            try {
+                server.close();
+            } catch { /* already closing */ }
+        }
         console.error('[WSS] Closed');
     }
 }
 
-export { WSS, LAUNCH_HINT };
+export { WSS, LAUNCH_HINT, isAllowedOrigin };

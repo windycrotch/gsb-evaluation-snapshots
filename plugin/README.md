@@ -13,8 +13,8 @@ npx -y @playcanvas/editor-mcp-server@0.7.1
 ```
 
 - `npx` downloads [`@playcanvas/editor-mcp-server`](https://www.npmjs.com/package/@playcanvas/editor-mcp-server) at that exact version from your npm registry on first run and caches it. The package is a single self-contained bundle with no runtime dependencies, built from [this repository](https://github.com/playcanvas/editor-mcp-server). It requires [Node.js](https://nodejs.org/) 22.18 or later.
-- The server talks to Claude over stdio and listens for the Editor on a WebSocket at `127.0.0.1:52000`. It is not reachable from your network, and browser pages can connect only from `playcanvas.com` or localhost origins.
-- Only one server can own the port. On startup, if another process is already listening on it, the server asks it to hand over and stops it if it doesn't.
+- The server talks to Claude over stdio and listens for the Editor on a WebSocket at `127.0.0.1:52000`. It is not reachable from your network, and browser pages can connect only from `playcanvas.com`, localhost and `127.0.0.1` origins (plus any exact origins you list in `MCP_ALLOWED_ORIGINS`). Local processes that send no `Origin` may connect too.
+- Only one server can own the port. If another MCP server instance already owns it, the new one asks it to hand over: the owner disconnects the Editor, releases the port and waits on standby to take it back if the new owner exits. Nothing is killed, and neither server exits.
 - The server reads and writes local files only when a tool asks it to, such as uploading an asset from disk or saving a downloaded asset or build. Build downloads fetch the build archive from the URL the Editor reports.
 - Project tools run inside the connected Editor tab with your signed-in session, the same way the Editor's own project manager does. They can create projects on your account (or an organization you belong to) and change a project's name, description or visibility. Opening a project reloads the tab into it.
 
