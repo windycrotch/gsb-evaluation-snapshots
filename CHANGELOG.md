@@ -6,6 +6,20 @@ All notable changes to Samovar Lite are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Playlist tidy and cleanup no longer let the highlighted current item drift. Sorting, reversing and
+  shuffling keep the current entry anchored to the same file by path (clearing it when the file leaves
+  the list); removing missing files or duplicates re-anchors a deleted current entry to the nearest
+  surviving item after its old position, then the nearest one before it, and the player's recorded
+  index is updated to match. Duplicates are removed by path keeping the first occurrence, and URLs are
+  exempt from the missing-files check.
+- The previous/next step rules are now explicit across repeat modes and shuffle: boundaries stop or
+  wrap per the repeat setting, an empty list always returns no item, and no-current starts at the
+  first or last entry. Tidy operations never change repeat or shuffle.
+- Every operation that changes the current item or the list contents emits exactly one change
+  notification so the title and highlight stay in sync.
+
 ## [1.0.0] - 2026-10-09
 
 First public release.

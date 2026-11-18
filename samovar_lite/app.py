@@ -392,7 +392,7 @@ class Player(QWidget):
         pl.closeRequested.connect(self.toggle_playlist)
         pl.repeatClicked.connect(self.cycle_repeat)
         pl.shuffleClicked.connect(self.toggle_shuffle)
-        pl.changed.connect(self._update_title)
+        pl.changed.connect(self._on_playlist_changed)
         pl.view.viewport().setMouseTracking(True)
 
         self.screenshotDone.connect(self._on_screenshot)
@@ -772,6 +772,15 @@ class Player(QWidget):
             codec = str(audio.get("codec") or "")
             items.append((AUDIO_CODECS.get(codec, codec.upper()), False))
         self.ctrl.badges.set_items(items)
+
+    def _on_playlist_changed(self):
+        # The panel tracks the current entry by path. When cleanup deletes the playing
+        # file it re-anchors to the nearest survivor; mirror that in the player so its
+        # recorded index (and the title/highlight) cannot drift. Reordering and
+        # play_row keep the same path, so playback itself is never interrupted.
+        if self.current_path is not None and self.playlist.current_path() != self.current_path:
+            self.current_path = self.playlist.current_path()
+        self._update_title()
 
     def _update_title(self):
         if not self.has_file() or not self.current_path:

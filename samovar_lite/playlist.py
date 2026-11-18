@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import queue
-import random
 import shutil
 import subprocess
 import threading
@@ -22,7 +21,8 @@ from PySide6.QtWidgets import (
 )
 
 from . import skin
-from .util import fmt_time, is_url, natural_key, title_of
+from .playlist_model import PlaylistModel
+from .util import fmt_time, is_url, title_of
 from .widgets import IconButton
 
 PATH_ROLE = Qt.UserRole
@@ -130,7 +130,7 @@ class _List(QListWidget):
 
     def dropEvent(self, event):
         super().dropEvent(event)
-        self.panel.changed.emit()
+        self.panel.on_view_reordered()
 
 
 class TextButton(QWidget):
@@ -178,6 +178,7 @@ class PlaylistPanel(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.model = PlaylistModel()
         self.current_item: QListWidgetItem | None = None
         self.view = _List(self)
         self.view.setItemDelegate(_Delegate(self))
@@ -207,7 +208,7 @@ class PlaylistPanel(QWidget):
         self.shuffle_btn = IconButton("shuffle", 28, FOOTER_H - 1, "Shuffle", color=skin.ICON_DIM, parent=self)
         self.repeat_btn.clicked.connect(self.repeatClicked)
         self.shuffle_btn.clicked.connect(self.shuffleClicked)
-        self.repeat_mode = "off"
+        self.set_modes("off", False)
         self._durationReady.connect(self._set_duration)
         self._prober = _DurationProber(self._durationReady.emit)
         if self._prober.ffprobe:
@@ -241,9 +242,9 @@ class PlaylistPanel(QWidget):
         p.fillRect(label_w, 0, 1, HEADER_H, skin.LINE)
         p.setPen(skin.TEXT_BRIGHT)
         p.drawText(QRectF(0, 0, label_w, HEADER_H - 1), Qt.AlignCenter, label)
-        count = self.view.count()
+        count = self.model.count()
         if count:
-            total = sum(self.view.item(i).data(DURATION_ROLE) or 0 for i in range(count))
+            total = sum(self.model.duration(i) or 0 for i in range(count))
             info = "%d item%s" % (count, "" if count == 1 else "s")
             if total:
                 info += "  ·  " + fmt_time(total)
@@ -257,125 +258,129 @@ class PlaylistPanel(QWidget):
 
     # -- model -----------------------------------------------------------------------------------
     def count(self) -> int:
-        return self.view.count()
+        return self.model.count()
 
     def path(self, row: int) -> str | None:
-        item = self.view.item(row)
-        return item.data(PATH_ROLE) if item else None
+        return self.model.path(row)
 
     def paths(self) -> list[str]:
-        return [self.view.item(i).data(PATH_ROLE) for i in range(self.view.count())]
+        return self.model.paths()
 
     def current_row(self) -> int:
-        return self.view.row(self.current_item) if self.current_item is not None else -1
+        return self.model.current_row()
 
-    def _make_item(self, path: str) -> QListWidgetItem:
+    def current_path(self) -> str | None:
+        return self.model.current_path()
+
+    def _queue_probe(self, path: str):
+        if self._prober.ffprobe and not is_url(path):
+            self._prober.jobs.put(path)
+
+    def _make_item(self, path: str, duration: float | None = None) -> QListWidgetItem:
         item = QListWidgetItem(title_of(path))
         item.setData(PATH_ROLE, path)
         item.setToolTip(path)
-        if self._prober.ffprobe and not is_url(path):
-            self._prober.jobs.put(path)
+        if duration:
+            item.setData(DURATION_ROLE, duration)
         return item
 
-    def set_items(self, paths: list[str]):
+    def _rebuild_view(self):
+        """Recreate the visible rows from the model (selection is a view-only state)."""
         self.view.clear()
-        self.current_item = None
-        for path in paths:
-            self.view.addItem(self._make_item(path))
-        self._refresh()
+        for path, duration in self.model.entries():
+            self.view.addItem(self._make_item(path, duration))
+        row = self.model.current_row()
+        self.current_item = self.view.item(row) if row >= 0 else None
+        if self.current_item is not None:
+            self.view.scrollToItem(self.current_item)
 
-    def add(self, paths: list[str]) -> int:
-        first = self.view.count()
-        for path in paths:
-            self.view.addItem(self._make_item(path))
-        self._refresh()
-        return first
-
-    def set_current(self, row: int):
+    def _sync_current(self):
+        row = self.model.current_row()
         self.current_item = self.view.item(row) if row >= 0 else None
         if self.current_item is not None:
             self.view.scrollToItem(self.current_item)
         self.view.viewport().update()
 
-    def _set_duration(self, path: str, duration: float):
-        for i in range(self.view.count()):
-            item = self.view.item(i)
-            if item.data(PATH_ROLE) == path and not item.data(DURATION_ROLE):
-                item.setData(DURATION_ROLE, duration)
+    def _refresh(self):
+        self._rebuild_view()
         self.update()
+        self.view.viewport().update()
+        self.changed.emit()
+
+    def set_items(self, paths: list[str]):
+        self.model.set_items(paths)
+        for path in paths:  # probe each entry once, when it enters the playlist
+            self._queue_probe(path)
+        self._refresh()
+
+    def add(self, paths: list[str]) -> int:
+        first = self.model.add(paths)
+        if paths:
+            for path in paths:
+                self._queue_probe(path)
+            self._refresh()
+        return first
+
+    def set_current(self, row: int):
+        if self.model.current_row() == row:
+            return
+        self.model.set_current(row)
+        # Keep the selection the user may have set instead of rebuilding the whole view.
+        self._sync_current()
+        self.update()
+        self.changed.emit()
+
+    def on_view_reordered(self):
+        """The user dragged rows inside the view; feed the new order back into the model."""
+        paths = [self.view.item(i).data(PATH_ROLE) for i in range(self.view.count())]
+        if paths == self.model.paths():
+            return
+        self.model.set_order(paths)
+        self._sync_current()
+        self.update()
+        self.changed.emit()
+
+    def _set_duration(self, path: str, duration: float):
+        if self.model.set_duration(path, duration):
+            for i in range(self.view.count()):
+                item = self.view.item(i)
+                if item.data(PATH_ROLE) == path and not item.data(DURATION_ROLE):
+                    item.setData(DURATION_ROLE, duration)
+            self.update()
 
     def set_duration(self, path: str, duration: float):
         if duration:
             self._set_duration(path, float(duration))
 
     def remove_selected(self):
-        for item in self.view.selectedItems():
-            if item is self.current_item:
-                self.current_item = None
-            self.view.takeItem(self.view.row(item))
-        self._refresh()
+        rows = [self.view.row(item) for item in self.view.selectedItems()]
+        if self.model.remove_rows(rows):
+            self._refresh()
 
     def clear(self):
-        self.view.clear()
-        self.current_item = None
+        if self.model.count() == 0:
+            return
+        self.model.clear()
         self._refresh()
 
     def sort_by(self, key: str):
-        entries = [
-            (self.view.item(i).data(PATH_ROLE), self.view.item(i).data(DURATION_ROLE)) for i in range(self.view.count())
-        ]
-        current = self.current_item.data(PATH_ROLE) if self.current_item is not None else None
-        if key == "name":
-            entries.sort(key=lambda e: natural_key(title_of(e[0])))
-        elif key == "path":
-            entries.sort(key=lambda e: natural_key(e[0]))
-        elif key == "duration":
-            entries.sort(key=lambda e: e[1] or 0)
-        elif key == "reverse":
-            entries.reverse()
-        elif key == "random":
-            random.shuffle(entries)
-        self.view.clear()
-        self.current_item = None
-        for path, duration in entries:
-            item = QListWidgetItem(title_of(path))
-            item.setData(PATH_ROLE, path)
-            item.setToolTip(path)
-            if duration:
-                item.setData(DURATION_ROLE, duration)
-            self.view.addItem(item)
-            if path == current and self.current_item is None:
-                self.current_item = item
+        if self.model.count() == 0:
+            return
+        self.model.sort(key)
         self._refresh()
 
     def step(self, direction: int, repeat: str, shuffle: bool) -> int:
         """Row to play after the current one, or -1 when the list is exhausted."""
-        count = self.view.count()
-        if count == 0:
-            return -1
-        row = self.current_row()
-        if shuffle and count > 1:
-            choices = [i for i in range(count) if i != row]
-            return random.choice(choices)
-        nxt = row + direction
-        if 0 <= nxt < count:
-            return nxt
-        if repeat == "all":
-            return nxt % count
-        return -1
+        return self.model.step(direction, repeat, shuffle)
 
     def set_modes(self, repeat: str, shuffle: bool):
-        self.repeat_mode = repeat
+        # Tidy operations never change these; this only records the player's mode state.
+        self.model.set_modes(repeat, shuffle)
         self.repeat_btn.set_checked(repeat != "off")
         self.repeat_btn.setToolTip(
             {"off": "Repeat: off", "one": "Repeat: current file", "all": "Repeat: playlist"}[repeat]
         )
         self.shuffle_btn.set_checked(shuffle)
-
-    def _refresh(self):
-        self.update()
-        self.view.viewport().update()
-        self.changed.emit()
 
     # -- menus -----------------------------------------------------------------------------------
     def _add_menu(self):
@@ -410,27 +415,13 @@ class PlaylistPanel(QWidget):
         menu.exec(pos)
 
     def _remove_missing(self):
-        for i in reversed(range(self.view.count())):
-            path = self.view.item(i).data(PATH_ROLE)
-            if not is_url(path) and not os.path.exists(path):
-                if self.view.item(i) is self.current_item:
-                    self.current_item = None
-                self.view.takeItem(i)
-        self._refresh()
+        # URLs are not filesystem paths and the model skips them when probing existence.
+        if self.model.remove_missing():
+            self._refresh()
 
     def _remove_duplicates(self):
-        seen = set()
-        i = 0
-        while i < self.view.count():
-            path = self.view.item(i).data(PATH_ROLE)
-            if path in seen:
-                if self.view.item(i) is self.current_item:
-                    self.current_item = None
-                self.view.takeItem(i)
-            else:
-                seen.add(path)
-                i += 1
-        self._refresh()
+        if self.model.remove_duplicates():
+            self._refresh()
 
     def _context_menu(self, pos):
         row = self.view.row(self.view.itemAt(pos)) if self.view.itemAt(pos) else -1
