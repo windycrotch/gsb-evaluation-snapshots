@@ -1,0 +1,43 @@
+{
+  "name": "clumsy",
+  "version": "1.2.0",
+  "description": "Draw math figures on canvas in an XKCD style",
+  "main": "clumsy.js",
+  "exports": {
+    ".": "./clumsy.js",
+    "./helpers": "./helpers/index.js"
+  },
+  "files": [
+    "clumsy.js",
+    "helpers",
+    "examples"
+  ],
+  "scripts": {
+    "test": "node --test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kreshikhin/clumsy.git"
+  },
+  "keywords": [
+    "figures",
+    "drawing",
+    "plotting",
+    "plot",
+    "canvas",
+    "animation",
+    "visualization",
+    "png",
+    "gif",
+    "xkcd"
+  ],
+  "author": "Denis Kreshikhin (https://github.com/kreshikhin)",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/kreshikhin/clumsy/issues"
+  },
+  "homepage": "https://github.com/kreshikhin/clumsy#readme",
+  "engines": {
+    "node": ">=18"
+  }
+}
