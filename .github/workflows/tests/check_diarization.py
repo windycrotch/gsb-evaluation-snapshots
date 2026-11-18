@@ -76,6 +76,7 @@ async def request(api, audio, stream=False, response_format="verbose_json"):
             result = json.loads(response.body)
             assert result["text"].strip() and result["segments"], "ASR has no speech segments"
             assert all(segment.get("speaker", "").startswith("SPEAKER_") for segment in result["segments"])
+            assert "diarization" not in result, "Successful diarization reported a degraded response"
             return result
         text = response.body.decode()
         assert "SPEAKER_" in text, response_format + " has no speaker labels"

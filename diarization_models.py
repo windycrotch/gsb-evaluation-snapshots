@@ -32,6 +32,46 @@ class ModelAsset(NamedTuple):
     sha256: str
 
 
+class ModelError(RuntimeError):
+    """Diarization model failure carrying a stable, client-visible reason code.
+
+    Callers (the API server) report ``reason`` in verbose_json and /health, so
+    the wording of the message may change without breaking that contract.
+    """
+
+    reason = "model_error"
+
+    def __init__(self, message: str, *, path: "Path | None" = None):
+        super().__init__(message)
+        self.path = path
+
+
+class ModelNotCachedError(ModelError):
+    """A required model is absent and downloads are disabled."""
+
+    reason = "model_not_cached"
+
+
+class ModelDownloadError(ModelError):
+    """The download command failed or produced no usable file."""
+
+    reason = "download_failed"
+
+
+class ModelVerificationError(ModelError):
+    """An existing or downloaded model file failed integrity verification.
+
+    ``check`` names the failed check: ``size``, ``sha256``, ``type`` or ``link``.
+    """
+
+    reason = "verification_failed"
+
+    def __init__(self, message: str, *, path: "Path | None" = None,
+                 check: str = "integrity"):
+        super().__init__(message, path=path)
+        self.check = check
+
+
 DEFAULT_EMBEDDING_MODEL = "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx"
 # Official speaker-recongition-models/checksum.txt, verified 2026-10-31.
 # Manifest SHA-256: c3a928cc16d165ce869553f71fcbe6fc1c1b513aee0665414548780a979b2325
@@ -116,53 +156,84 @@ def resolve_embedding_model(value: str = "") -> str:
     return value or DEFAULT_EMBEDDING_MODEL
 
 
-def _verified(path: Path, asset: ModelAsset) -> bool:
-    """Verify a regular file or symlink target; preserve invalid cache entries."""
+def _verified(path: Path, asset: ModelAsset, *, cached: bool = True) -> bool:
+    """Verify a regular file or symlink target; preserve invalid cache entries.
+
+    Returns False only when the path does not exist, so callers may download it.
+    Existing entries that fail verification are left untouched and reported with
+    their concrete path and failure reason (size or SHA-256), so a damaged shared
+    cache file is never silently replaced or deleted. ``cached=False`` labels a
+    freshly downloaded or extracted file, which still must not be published.
+    """
+    subject = "Cached model" if cached else "Downloaded model"
+    # Cached files are preserved for inspection; temporary downloads are discarded.
+    remedy = ("Move this file aside and retry with downloads enabled."
+              if cached else "The temporary file will not be used; retry the download.")
     try:
         # Follow cache links, then inspect the opened target before reading it.
         # Nonblocking opens prevent FIFO targets from hanging model startup.
         fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
     except FileNotFoundError as exc:
         if path.is_symlink():
-            raise RuntimeError(
-                f"Cached model symbolic link has no existing target: {path}. "
-                "Repair the link or move it aside and retry with downloads enabled."
+            raise ModelVerificationError(
+                f"{subject} symbolic link has no existing target: {path}. "
+                + remedy,
+                path=path, check="link",
             ) from exc
         return False
     except OSError as exc:
-        raise RuntimeError(f"Cannot safely read cached model {path}: {exc}") from exc
+        raise ModelError(
+            f"Cannot safely read {subject.lower()} {path}: {exc}", path=path,
+        ) from exc
     try:
         info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_size != asset.size:
-            valid = False
-        else:
-            digest = hashlib.sha256()
-            with os.fdopen(fd, "rb", closefd=False) as source:
-                for block in iter(lambda: source.read(1024 * 1024), b""):
-                    digest.update(block)
-            valid = digest.hexdigest() == asset.sha256
+        if not stat.S_ISREG(info.st_mode):
+            raise ModelVerificationError(
+                f"{subject} verification failed (not a regular file): {path}. " + remedy,
+                path=path, check="type",
+            )
+        if info.st_size != asset.size:
+            raise ModelVerificationError(
+                f"{subject} verification failed (size mismatch): {path} "
+                f"has {info.st_size} bytes, expected {asset.size}. " + remedy,
+                path=path, check="size",
+            )
+        digest = hashlib.sha256()
+        with os.fdopen(fd, "rb", closefd=False) as source:
+            for block in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(block)
+        actual = digest.hexdigest()
+        if actual != asset.sha256:
+            raise ModelVerificationError(
+                f"{subject} verification failed (SHA-256 mismatch): {path} "
+                f"has {actual}, expected {asset.sha256}. " + remedy,
+                path=path, check="sha256",
+            )
     finally:
         os.close(fd)
-    if not valid:
-        raise RuntimeError(
-            f"Cached model failed size/SHA-256 verification: {path}. "
-            "Move this file aside and retry with downloads enabled."
-        )
     return True
 
 
 def _download_file(url: str, dest: Path, asset: ModelAsset) -> None:
     logger.info("Downloading %s", url)
     # Allow 15 minutes per attempt, with an overall cap for three attempts plus a margin.
-    subprocess.run([
-        "curl", "--disable", "--fail", "--location", "--silent", "--show-error",
-        "--proto", "=https", "--proto-redir", "=https",
-        "--connect-timeout", "15", "--max-time", str(_DOWNLOAD_MAX_TIME),
-        "--retry", str(_DOWNLOAD_RETRIES), "--retry-delay", "2", "--max-filesize", str(asset.size),
-        "--output", str(dest), url,
-    ], check=True, timeout=_DOWNLOAD_PROCESS_TIMEOUT)
-    if not _verified(dest, asset):
-        raise RuntimeError(f"Download did not produce the expected file: {dest}")
+    try:
+        subprocess.run([
+            "curl", "--disable", "--fail", "--location", "--silent", "--show-error",
+            "--proto", "=https", "--proto-redir", "=https",
+            "--connect-timeout", "15", "--max-time", str(_DOWNLOAD_MAX_TIME),
+            "--retry", str(_DOWNLOAD_RETRIES), "--retry-delay", "2", "--max-filesize", str(asset.size),
+            "--output", str(dest), url,
+        ], check=True, timeout=_DOWNLOAD_PROCESS_TIMEOUT)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ModelDownloadError(
+            f"Diarization model download failed: {url} -> {dest}: {exc} "
+            "Check network access to the model release and retry."
+        ) from exc
+    if not _verified(dest, asset, cached=False):
+        raise ModelDownloadError(
+            f"Download did not produce the expected file: {url} -> {dest}"
+        )
 
 
 def _temporary(parent: Path):
@@ -192,16 +263,20 @@ def ensure_models(cache_dir: str, embedding_model: str = DEFAULT_EMBEDDING_MODEL
     seg_path = root / SEGMENTATION_MODEL
     emb_path = root / name
     if seg_path.parent.is_symlink() and not seg_path.parent.is_dir():
-        raise RuntimeError(
+        raise ModelVerificationError(
             f"Segmentation cache directory link must point to an existing directory: {seg_path.parent}. "
-            "Repair the link or move it aside and retry."
+            "Repair the link or move it aside and retry.",
+            path=seg_path.parent, check="link",
         )
     seg_path.parent.mkdir(exist_ok=True)
     missing_seg = not _verified(seg_path, _SEGMENTATION_ASSET)
     missing_emb = not _verified(emb_path, EMBEDDING_MODELS[name])
     if local_files_only and (missing_seg or missing_emb):
         missing = seg_path if missing_seg else emb_path
-        raise RuntimeError(f"WHISPER_LOCAL_ONLY prevents downloading missing diarization model: {missing}")
+        raise ModelNotCachedError(
+            f"WHISPER_LOCAL_ONLY prevents downloading missing diarization model: {missing}",
+            path=missing,
+        )
 
     if missing_seg:
         with _temporary(seg_path.parent) as directory:
@@ -214,24 +289,26 @@ def ensure_models(cache_dir: str, embedding_model: str = DEFAULT_EMBEDDING_MODEL
             with tarfile.open(archive, "r:bz2") as tar:
                 member = tar.getmember(SEGMENTATION_MODEL)
                 if not member.isfile() or member.size != _SEGMENTATION_ASSET.size:
-                    raise RuntimeError("Unexpected segmentation archive model member")
+                    raise ModelVerificationError(
+                        "Unexpected segmentation archive model member", check="archive")
                 with tar.extractfile(member) as source, (work / "model.onnx").open("wb") as dest:
                     remaining = _SEGMENTATION_ASSET.size
                     while remaining:
                         block = source.read(min(1024 * 1024, remaining))
                         if not block:
-                            raise RuntimeError("Truncated segmentation model")
+                            raise ModelVerificationError("Truncated segmentation model", check="archive")
                         dest.write(block)
                         remaining -= len(block)
                 license_member = tar.getmember(str(Path(SEGMENTATION_MODEL).parent / "LICENSE"))
                 if not license_member.isfile() or not 0 < license_member.size <= 65536:
-                    raise RuntimeError("Unexpected segmentation archive license member")
+                    raise ModelVerificationError(
+                        "Unexpected segmentation archive license member", check="archive")
                 with tar.extractfile(license_member) as source:
                     license_data = source.read(65537)
                 if len(license_data) != license_member.size:
-                    raise RuntimeError("Truncated segmentation license")
+                    raise ModelVerificationError("Truncated segmentation license", check="archive")
                 (work / "LICENSE").write_bytes(license_data)
-            _verified(work / "model.onnx", _SEGMENTATION_ASSET)
+            _verified(work / "model.onnx", _SEGMENTATION_ASSET, cached=False)
             # Retain the upstream copyright/license alongside downloaded weights.
             # Preserve a license already installed by the previous downloader.
             if not os.path.lexists(seg_path.parent / "LICENSE"):

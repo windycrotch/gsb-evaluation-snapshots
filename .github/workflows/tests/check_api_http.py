@@ -109,6 +109,7 @@ def check(source, baseline=None):
                             for auth in ({}, {"Authorization": "Bearer wrong"}):
                                 assert client.get("/v1/models", headers=auth).status_code == 401
                             assert client.get("/health").status_code == 200
+                            assert client.get("/health").json()["diarization"] == {"status": "disabled"}
                             for endpoint, task in (
                                 ("transcriptions", "transcribe"), ("translations", "translate")
                             ):
@@ -137,6 +138,8 @@ def check(source, baseline=None):
                                     data={"model": "whisper-1", "response_format": response_format},
                                 )
                                 assert response.status_code == 200, response.text
+                                if response_format == "verbose_json":
+                                    assert "diarization" not in response.json()
                             previous_calls = len(calls)
                             with mock.patch.object(api, "_max_upload_bytes", 1):
                                 response = client.post(

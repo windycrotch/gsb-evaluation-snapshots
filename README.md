@@ -197,7 +197,7 @@ This Docker image uses the following variables, that can be declared in an `env`
 | `WHISPER_MAX_UPLOAD_MB` | Maximum uploaded audio file size in MB. Requests above this limit return HTTP 413. Set to `0` to disable the limit. | `1024` |
 | `WHISPER_LOCAL_ONLY` | When set to any non-empty value (e.g. `true`), disables automatic HuggingFace and diarization ONNX model downloads. For offline or air-gapped deployments with pre-cached models. | *(not set)* |
 | `WHISPER_WORD_TIMESTAMPS` | When set to `true`, enables word-level timestamps globally for all requests. The `verbose_json` output will include a top-level `words` array with per-word timing and confidence. Can also be enabled per-request via `timestamp_granularities[]=word`. | *(not set)* |
-| `WHISPER_DIARIZATION` | Set to `true` to enable speaker diarization. Identifies who is speaking in each segment. Uses [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) with pyannote segmentation-3.0 ONNX models (~46 MB with the default embedding model, auto-downloaded on first use). Not supported in streaming mode. | *(not set)* |
+| `WHISPER_DIARIZATION` | Set to `true` to enable speaker diarization. Identifies who is speaking in each segment. Uses [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) with pyannote segmentation-3.0 ONNX models (~46 MB with the default embedding model, auto-downloaded on first use). Not supported in streaming mode. If separation fails, `verbose_json` reports it in a top-level `diarization` field and `/health` shows whether separation is actually available. | *(not set)* |
 | `WHISPER_DIARIZE_EMBEDDING_MODEL` | Speaker embedding model filename from the sherpa-onnx [speaker-recongition-models](https://github.com/k2-fsa/sherpa-onnx/releases/tag/speaker-recongition-models) release. The default is Mandarin-trained; for English, consider `wespeaker_en_voxceleb_resnet34_LM.onnx` or `nemo_en_titanet_large.onnx`. See [speaker embedding model](#speaker-diarization). | `3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx` |
 | `WHISPER_DIARIZE_NUM_SPEAKERS` | Exact number of speakers (if known). Improves clustering accuracy. Set to `-1` or leave unset for auto-detection. | `-1` |
 | `WHISPER_DIARIZE_THREADS` | CPU threads per segmentation/embedding model. Canonical decimal integer `1` through `2147483647`; unset/empty inherits `WHISPER_THREADS`. | `WHISPER_THREADS` |
@@ -809,8 +809,25 @@ docker exec whisper whisper_manage --downloaddiarize
 > [!IMPORTANT]
 > Diarization requires full audio analysis and is **not supported in streaming mode** (`stream=true`). If both are enabled, diarization is silently skipped.
 
-- Set `WHISPER_DIARIZE_NUM_SPEAKERS` if you know the exact number of speakers for better accuracy.
-- The diarization pipeline runs after transcription. Processing time depends on audio duration, hardware and thread settings, and can exceed transcription time.
+**When diarization fails:** with `WHISPER_DIARIZATION=true`, a model download or verification failure, a damaged cache file, or a diarization inference error does not fail the request. Transcription text is still returned, but the `verbose_json` response gains a top-level `diarization` object, and the segments have no `speaker` field:
+
+```json
+{
+  "text": "...",
+  "segments": [{"id": 0, "start": 1.0, "end": 3.5, "text": "..."}],
+  "diarization": {
+    "status": "unavailable",
+    "reason": "verification_failed",
+    "detail": "Cached model verification failed (SHA-256 mismatch): /var/lib/whisper/model.onnx has ..., expected .... Move this file aside and retry with downloads enabled."
+  }
+}
+```
+
+`reason` is a stable code: `download_failed`, `verification_failed`, `model_not_cached` (missing model with `WHISPER_LOCAL_ONLY`), `load_failed`, `inference_failed`, or `dependency_missing`. `detail` is a single-line summary that names the failing path. The field is **absent** when diarization succeeded, so callers can distinguish a genuine single-speaker result from a degraded one. The `text`, `srt`, `vtt` and minimal `json` outputs are unchanged by this field.
+
+`/health` reports the effective state in a `diarization` object — `{"status":"disabled"}` when `WHISPER_DIARIZATION` is unset, `{"status":"available"}` when the pipeline loaded, and `{"status":"unavailable","reason":...,"detail":...}` when loading failed. The endpoint still returns HTTP 200 because transcription remains available.
+
+**Model verification:** Diarization ONNX models, including files already in the cache, are checked against pinned sizes and SHA-256 hashes when the pipeline loads. Matching cached files are reused without downloading again. An existing cache file that fails verification is never replaced or deleted: the error names its path and whether the size or SHA-256 check failed. Move that file aside, then restart with downloads enabled to obtain a verified copy. Verification, download, or model-loading failures log a warning, disable diarization while transcription remains available, and are reported through the `diarization` field and `/health` described above. Newly downloaded models are verified before becoming cache files; incomplete or failed downloads are not used. Symbolic links to regular model files and to an existing segmentation directory are supported. Linked models must pass the same verification. Broken links and invalid targets are preserved and reported; repair them or move the cache entry aside before retrying.
 
 **Diarization threads:** Both the segmentation and embedding models now inherit `WHISPER_THREADS` (normally `2`) instead of using one thread each. This changes CPU resource use for existing diarization-enabled deployments. Set `WHISPER_DIARIZE_THREADS=1` to retain the previous per-model thread setting, or choose another count for your CPU budget. Removing or emptying the option restores inheritance, not the previous one-thread default.
 
@@ -828,8 +845,6 @@ WHISPER_DIARIZE_EMBEDDING_MODEL=wespeaker_en_voxceleb_resnet34_LM.onnx
 English-trained options include `wespeaker_en_voxceleb_resnet34_LM.onnx` (~27 MB) and `nemo_en_titanet_large.onnx` (~101 MB). Embedding file sizes vary by selection; these sizes exclude the shared segmentation model (~6 MB). No single model is best for every recording, so compare on your own audio. Use an exact, case-sensitive `.onnx` filename accepted by the maintained allowlist. Unknown nonempty values stop startup before model loading, even when diarization is disabled. The value accepts surrounding ASCII whitespace and at most one matching pair of outer quotes.
 
 The selected model is downloaded on first use and cached in the `/var/lib/whisper` volume next to any previously used model. `whisper_manage --downloaddiarize` pre-downloads the model the container was started with. Clustering thresholds are model-specific: after switching, re-tune `WHISPER_DIARIZE_THRESHOLD` or set `WHISPER_DIARIZE_NUM_SPEAKERS`. Unset or empty keeps the default model, so existing cache filenames and thresholds are unchanged.
-
-**Model verification:** Diarization ONNX models, including files already in the cache, are checked against pinned sizes and SHA-256 hashes when the pipeline loads. Matching cached files are reused without downloading again. An existing cache file that fails verification is preserved and identified in the logs. Move that file aside, then restart with downloads enabled to obtain a verified copy. Verification, download, or model-loading failures log a warning and disable diarization while transcription remains available. Newly downloaded models are verified before becoming cache files; incomplete or failed downloads are not used. Symbolic links to regular model files and to an existing segmentation directory are supported. Linked models must pass the same verification. Broken links and invalid targets are preserved and reported; repair them or move the cache entry aside before retrying.
 
 When diarization is enabled and automatic downloads are permitted, container and Colab startup waits include time for both ONNX downloads and their retries. Whisper-only and offline startup use a five-minute window. Waiting stops early if the server process exits.
 

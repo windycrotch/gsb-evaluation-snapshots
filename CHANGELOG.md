@@ -2,6 +2,26 @@
 
 Notable changes to ScribeCrate are documented here.
 
+## 2026-11-19
+
+### Added
+
+- Make diarization degradation observable. When `WHISPER_DIARIZATION=true` and
+  separation fails (download, size/SHA-256 verification, damaged cache files or
+  inference), `verbose_json` still returns the transcript but adds a top-level
+  `diarization` object with a stable `reason` code and a one-line `detail`. The
+  field is absent when diarization succeeds.
+- `/health` now reports the effective diarization state (`disabled`, `available`
+  or `unavailable` with a reason) instead of only logging load failures.
+
+### Changed
+
+- Cached model verification reports the concrete path and whether the size or
+  SHA-256 check failed. Damaged cache files are still preserved, never silently
+  replaced or deleted.
+- `text`, `srt`, `vtt` and minimal `json` outputs are unchanged; successful
+  diarization output is unchanged.
+
 ## 2026-11-15
 
 Release: `2026.11.1`

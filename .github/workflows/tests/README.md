@@ -19,7 +19,9 @@ checks, with separate model caches and output directories.
 - Unit tests cover API compatibility, decoding controls, configuration parsing,
   authentication, SSE cleanup and translation-model validation. Diarization
   tests cover thread inheritance, embedding selection, verified model caches,
-  offline behavior and startup readiness, with optional dependencies stubbed.
+  offline behavior, startup readiness, the observable degradation contract
+  (`verbose_json` `diarization` field and `/health` state), with optional
+  dependencies stubbed.
 - [Colab tests](test_colab_configuration.py) check configuration, runtime-file
   downloads and startup waiting with external operations mocked.
 - [HTTP checks](check_api_http.py) exercise real FastAPI routing with stubbed

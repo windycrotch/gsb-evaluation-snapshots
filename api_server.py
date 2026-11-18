@@ -27,7 +27,9 @@ import uvicorn
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
-from diarization_models import DEFAULT_EMBEDDING_MODEL, EMBEDDING_MODELS, resolve_embedding_model
+from diarization_models import (
+    DEFAULT_EMBEDDING_MODEL, EMBEDDING_MODELS, ModelError, resolve_embedding_model,
+)
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -52,7 +54,9 @@ _max_request_beam = 10  # maximum per-request beam override; 0 disables the cap
 _word_timestamps = False  # default for word-level timestamps
 _condition_on_previous_text = True  # preserve faster-whisper's decoding default
 _no_repeat_ngram_size = 0  # 0 disables repeated token n-gram restrictions
-_diarization_enabled = False  # set via WHISPER_DIARIZATION=true
+_diarization_enabled = False  # True only while a loaded pipeline can annotate speakers
+_diarization_requested = False  # WHISPER_DIARIZATION=true, even if loading failed
+_diarization_error = None  # {"reason": code, "detail": summary} when unavailable
 _diarize_threads = 2  # resolved independently of faster-whisper's thread parser
 _DEFAULT_DIARIZE_EMBEDDING_MODEL = DEFAULT_EMBEDDING_MODEL
 _diarize_embedding_model = _DEFAULT_DIARIZE_EMBEDDING_MODEL
@@ -102,11 +106,42 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _summarize_diarization_error(exc: BaseException, *, phase: str = "inference") -> dict:
+    """Convert a diarization failure into a stable reason plus a short summary.
+
+    verbose_json and /health expose ``reason``, so clients can branch on it.
+    ``detail`` is a single-line summary; it never includes stack traces.
+    """
+    if isinstance(exc, ModelError):
+        reason, message = exc.reason, str(exc)
+    elif isinstance(exc, ModuleNotFoundError):
+        reason = "dependency_missing"
+        message = f"Diarization dependency is unavailable: {exc}"
+    else:
+        reason = f"{phase}_failed"
+        message = str(exc) or type(exc).__name__
+    detail = " ".join(message.split())
+    if len(detail) > 500:
+        detail = detail[:497] + "..."
+    return {"reason": reason, "detail": detail}
+
+
+def _record_diarization_failure(exc: BaseException) -> None:
+    """Disable speaker annotation and publish the reason for /health."""
+    global _diarization_enabled, _diarization_error
+    _diarization_enabled = False
+    _diarization_error = _summarize_diarization_error(exc, phase="load")
+
+
 def _load_diarizer() -> None:
     """Conditionally load the sherpa-onnx diarization pipeline."""
-    global _diarization_enabled
+    global _diarization_enabled, _diarization_requested, _diarization_error
     if os.environ.get("WHISPER_DIARIZATION", "").strip().lower() != "true":
+        _diarization_requested = False
+        _diarization_enabled = False
+        _diarization_error = None
         return
+    _diarization_requested = True
     try:
         import diarizer
         cache_dir = os.environ.get("HF_HOME", "/var/lib/whisper")
@@ -122,11 +157,15 @@ def _load_diarizer() -> None:
             local_files_only=bool(os.environ.get("WHISPER_LOCAL_ONLY", "").strip()),
         )
         _diarization_enabled = True
+        _diarization_error = None
         logger.info("Diarization enabled (num_threads=%d per model).", _diarize_threads)
         logger.info("Diarization embedding model: %s", _diarize_embedding_model)
     except Exception as exc:
-        logger.warning("Failed to load diarizer (diarization disabled): %s", exc)
-        _diarization_enabled = False
+        _record_diarization_failure(exc)
+        logger.warning(
+            "Failed to load diarizer (diarization disabled; reason=%s): %s",
+            _diarization_error["reason"], _diarization_error["detail"],
+        )
 
 
 def _normalized_env_option(name: str) -> str:
@@ -539,8 +578,27 @@ async def _stream_sse(
 
 @app.get("/health", include_in_schema=False)
 async def health():
-    """Container liveness probe — used by run.sh to detect startup completion."""
-    return {"status": "ok", "model": _model_name}
+    """Container liveness probe — used by run.sh to detect startup completion.
+
+    ``diarization`` reports the effective state rather than the requested
+    configuration: ``disabled`` when WHISPER_DIARIZATION is off, ``available``
+    when the pipeline loaded, and ``unavailable`` with a reason/detail when
+    loading failed. The HTTP status stays 200 because transcription still works,
+    so existing liveness probes keep succeeding.
+    """
+    if not _diarization_requested:
+        diarization = {"status": "disabled"}
+    elif _diarization_enabled:
+        diarization = {"status": "available"}
+    else:
+        error = _diarization_error or {}
+        diarization = {
+            "status": "unavailable",
+            "reason": error.get("reason", "load_failed"),
+        }
+        if error.get("detail"):
+            diarization["detail"] = error["detail"]
+    return {"status": "ok", "model": _model_name, "diarization": diarization}
 
 
 @app.get("/v1/models")
@@ -719,6 +777,7 @@ async def _handle_audio(
         # Diarization (optional post-processing)
         # ------------------------------------------------------------------
         speaker_map = None  # {segment_index: speaker_label}
+        diarization_failure = None  # reported in verbose_json when no speakers
         if _diarization_enabled:
             try:
                 import diarizer
@@ -731,7 +790,18 @@ async def _handle_audio(
                 diarizer.assign_speakers(seg_dicts, turns)
                 speaker_map = {i: d["speaker"] for i, d in enumerate(seg_dicts)}
             except Exception as exc:
-                logger.warning("Diarization failed (returning without speakers): %s", exc)
+                diarization_failure = _summarize_diarization_error(exc, phase="inference")
+                logger.warning(
+                    "Diarization failed (returning without speakers; reason=%s): %s",
+                    diarization_failure["reason"], diarization_failure["detail"],
+                )
+        elif _diarization_requested:
+            # The pipeline failed at startup; say so on every request instead of
+            # letting callers mistake the missing labels for a single speaker.
+            diarization_failure = dict(_diarization_error or {})
+            diarization_failure.setdefault("reason", "load_failed")
+            diarization_failure.setdefault(
+                "detail", "Diarization models failed to load at startup.")
 
     finally:
         # Clean up temp file after both transcription and diarization
@@ -804,6 +874,15 @@ async def _handle_audio(
         }
         if wt_flag:
             resp["words"] = all_words
+        if diarization_failure:
+            # Present only when diarization was requested but did not run, so a
+            # caller can tell a real single-speaker result from a degraded one.
+            # The transcript, segments and words are unchanged.
+            resp["diarization"] = {
+                "status": "unavailable",
+                "reason": diarization_failure["reason"],
+                "detail": diarization_failure["detail"],
+            }
         return JSONResponse(resp)
 
     # Default: json — matches OpenAI's minimal response shape
