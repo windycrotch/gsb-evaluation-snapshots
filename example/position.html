@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>syngen example: position</title>
+    <script src="../dist/syngen.js"></script>
+    <style>
+      body {
+        font-family: sans-serif;
+        margin: 2em;
+        max-width: 960px;
+      }
+      fieldset {
+        margin-bottom: 1em;
+      }
+      label {
+        display: inline-block;
+        margin: 0.25em 1em 0.25em 0;
+      }
+      input[type="range"] {
+        vertical-align: middle;
+        width: 180px;
+      }
+      .value {
+        display: inline-block;
+        font-family: monospace;
+        min-width: 5em;
+      }
+      #readout {
+        background: #f4f4f4;
+        font-family: monospace;
+        padding: 1em;
+        white-space: pre;
+      }
+      #assertions li.pass {
+        color: #060;
+      }
+      #assertions li.fail {
+        color: #c00;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>syngen.position + syngen.sound</h1>
+    <p>
+      本示例演示监听者（syngen.position）与声源（syngen.sound）在三维声场中的相对关系。
+      移动监听者或声源后，下方读数会显示每帧重新计算的相对向量；
+      「运行断言」按钮会用脚本核对相对向量公式、radius 行为以及销毁后的每帧更新移除。
+    </p>
+    <p>
+      <button id="resume" type="button">Resume audio context</button>
+      <button id="create" type="button">创建声源</button>
+      <button id="destroy" type="button">销毁声源</button>
+      <button id="run" type="button">运行断言</button>
+    </p>
+
+    <fieldset>
+      <legend>监听者 syngen.position</legend>
+      <label>x <input id="listener-x" type="range" min="-20" max="20" step="0.5" value="0"><span class="value" id="listener-x-value"></span></label>
+      <label>y <input id="listener-y" type="range" min="-20" max="20" step="0.5" value="0"><span class="value" id="listener-y-value"></span></label>
+      <label>z <input id="listener-z" type="range" min="-20" max="20" step="0.5" value="0"><span class="value" id="listener-z-value"></span></label>
+      <label>yaw（朝向，度）<input id="listener-yaw" type="range" min="-180" max="180" step="1" value="0"><span class="value" id="listener-yaw-value"></span></label>
+    </fieldset>
+
+    <fieldset>
+      <legend>声源 syngen.sound</legend>
+      <label>x <input id="sound-x" type="range" min="-20" max="20" step="0.5" value="4"><span class="value" id="sound-x-value"></span></label>
+      <label>y <input id="sound-y" type="range" min="-20" max="20" step="0.5" value="0"><span class="value" id="sound-y-value"></span></label>
+      <label>z <input id="sound-z" type="range" min="-20" max="20" step="0.5" value="0"><span class="value" id="sound-z-value"></span></label>
+      <label>radius <input id="sound-radius" type="range" min="-1" max="25" step="0.5" value="0"><span class="value" id="sound-radius-value"></span></label>
+      <label>relative <input id="sound-relative" type="checkbox"></label>
+    </fieldset>
+
+    <h2>实时读数（每帧更新）</h2>
+    <div id="readout"></div>
+
+    <h2>断言结果</h2>
+    <ul id="assertions"></ul>
+
+    <script>
+      // Wait for the document to finish loading before touching audio
+      syngen.ready(() => {
+        // ---------------------------------------------------------------
+        // Helpers
+        // ---------------------------------------------------------------
+        const $ = (id) => document.getElementById(id)
+
+        const EPSILON = 1e-6
+
+        function approxVector(a, b, epsilon = EPSILON) {
+          return Math.abs(a.x - b.x) < epsilon
+            && Math.abs(a.y - b.y) < epsilon
+            && Math.abs(a.z - b.z) < epsilon
+        }
+
+        function formatVector(v) {
+          return `(${v.x.toFixed(3)}, ${v.y.toFixed(3)}, ${v.z.toFixed(3)})`
+        }
+
+        function nextFrame() {
+          return new Promise((resolve) => {
+            const handler = () => {
+              syngen.loop.off('frame', handler)
+              resolve()
+            }
+            syngen.loop.on('frame', handler)
+          })
+        }
+
+        async function waitFrames(count) {
+          for (let i = 0; i < count; i += 1) {
+            await nextFrame()
+          }
+        }
+
+        function wait(ms) {
+          return new Promise((resolve) => setTimeout(resolve, ms))
+        }
+
+        // ---------------------------------------------------------------
+        // Sound definition: a simple synth routed through the binaural chain
+        // ---------------------------------------------------------------
+        const demoSound = syngen.sound.extend({
+          fadeOutDuration: 0.25,
+          onConstruct: function () {
+            this.updateCount = 0
+            this.destroyed = false
+            this.destroyInitiated = false
+            this.lastFrameVector = null
+
+            this.synth = syngen.synth.simple({
+              frequency: 220,
+              gain: syngen.fn.fromDb(-18),
+              type: 'sawtooth',
+            }).filtered({
+              frequency: 880,
+            }).connect(this.output)
+
+            // Observe the vector handed to the binaural processor each frame.
+            // The original update is always called, so the real Web Audio
+            // chain (output -> binaural -> destination) stays intact.
+            const update = this.binaural.update.bind(this.binaural)
+            this.binaural.update = (relative) => {
+              this.lastFrameVector = syngen.tool.vector3d.create({
+                x: relative.x,
+                y: relative.y,
+                z: relative.z,
+              })
+              return update(relative)
+            }
+          },
+          onUpdate: function () {
+            this.updateCount += 1
+          },
+          onDestroy: function () {
+            // Runs after the fade-out, once output and binaural nodes
+            // have been disconnected by syngen.sound.destroy()
+            this.destroyed = true
+            this.synth.stop()
+          },
+        })
+
+        // ---------------------------------------------------------------
+        // UI state
+        // ---------------------------------------------------------------
+        let sound = null
+
+        function readNumber(id) {
+          return Number($(id).value)
+        }
+
+        function syncLabels() {
+          $('listener-x-value').textContent = readNumber('listener-x').toFixed(1)
+          $('listener-y-value').textContent = readNumber('listener-y').toFixed(1)
+          $('listener-z-value').textContent = readNumber('listener-z').toFixed(1)
+          $('listener-yaw-value').textContent = `${readNumber('listener-yaw').toFixed(0)}°`
+          $('sound-x-value').textContent = readNumber('sound-x').toFixed(1)
+          $('sound-y-value').textContent = readNumber('sound-y').toFixed(1)
+          $('sound-z-value').textContent = readNumber('sound-z').toFixed(1)
+          $('sound-radius-value').textContent = readNumber('sound-radius').toFixed(1)
+        }
+
+        function applyListener() {
+          syngen.position.setVector({
+            x: readNumber('listener-x'),
+            y: readNumber('listener-y'),
+            z: readNumber('listener-z'),
+          })
+          syngen.position.setEuler({
+            yaw: readNumber('listener-yaw') * Math.PI / 180,
+          })
+        }
+
+        function applySound() {
+          if (!isSoundAlive()) {
+            return
+          }
+          sound.setVector({
+            x: readNumber('sound-x'),
+            y: readNumber('sound-y'),
+            z: readNumber('sound-z'),
+          })
+          sound.radius = readNumber('sound-radius')
+          sound.relative = $('sound-relative').checked
+        }
+
+        function setListenerControls({x, y, z, yaw}) {
+          $('listener-x').value = x
+          $('listener-y').value = y
+          $('listener-z').value = z
+          $('listener-yaw').value = yaw
+          syncLabels()
+          applyListener()
+        }
+
+        function setSoundControls({x, y, z, radius, relative}) {
+          $('sound-x').value = x
+          $('sound-y').value = y
+          $('sound-z').value = z
+          $('sound-radius').value = radius
+          $('sound-relative').checked = relative
+          syncLabels()
+          applySound()
+        }
+
+        function isSoundAlive() {
+          return sound && !sound.destroyInitiated
+        }
+
+        function createSound() {
+          if (isSoundAlive()) {
+            return
+          }
+          sound = demoSound.instantiate({
+            radius: readNumber('sound-radius'),
+            relative: $('sound-relative').checked,
+            x: readNumber('sound-x'),
+            y: readNumber('sound-y'),
+            z: readNumber('sound-z'),
+          })
+        }
+
+        function destroySound() {
+          if (!isSoundAlive()) {
+            return
+          }
+          sound.destroyInitiated = true
+          sound.destroy()
+        }
+
+        // The documented formula, recomputed from live state:
+        //   relative == false: rotate_conj(subtractRadius(sound - listener, radius))
+        //   relative == true:  subtractRadius(sound, radius)
+        function expectedRelativeVector() {
+          const vector = sound.getVector()
+
+          if (sound.relative) {
+            return vector.subtractRadius(sound.radius)
+          }
+
+          return vector
+            .subtract(syngen.position.getVector())
+            .subtractRadius(sound.radius)
+            .rotateQuaternion(syngen.position.getQuaternion().conjugate())
+        }
+
+        // ---------------------------------------------------------------
+        // Per-frame readout
+        // ---------------------------------------------------------------
+        syngen.loop.on('frame', ({count}) => {
+          const listener = syngen.position.getVector(),
+            lines = [
+              `帧号:             ${count}`,
+              `监听者坐标:       ${formatVector(listener)}`,
+              `监听者 yaw:       ${readNumber('listener-yaw').toFixed(0)}°`,
+            ]
+
+          if (sound) {
+            const distance = sound.getVector().distance(listener)
+            lines.push(
+              `声源坐标:         ${formatVector(sound.getVector())}`,
+              `声源 radius:      ${sound.radius}`,
+              `声源 relative:    ${sound.relative}`,
+              `监听者-声源距离:  ${distance.toFixed(3)}`,
+              `相对向量(当前):   ${sound.destroyInitiated ? '(已销毁)' : formatVector(sound.getRelativeVector())}`,
+              `相对向量(期望值): ${sound.destroyInitiated ? '(已销毁)' : formatVector(expectedRelativeVector())}`,
+              `送入 binaural:    ${sound.lastFrameVector ? formatVector(sound.lastFrameVector) : '(无)'}`,
+              `onUpdate 调用数:  ${sound.updateCount}`,
+              `已销毁:           ${sound.destroyed}`,
+            )
+          } else {
+            lines.push('(尚未创建声源)')
+          }
+
+          $('readout').textContent = lines.join('\n')
+        })
+
+        // ---------------------------------------------------------------
+        // Assertions
+        // ---------------------------------------------------------------
+        function report(name, pass, detail = '') {
+          const item = document.createElement('li')
+          item.className = pass ? 'pass' : 'fail'
+          item.textContent = `${pass ? '✔' : '✘'} ${name}${detail ? ` — ${detail}` : ''}`
+          $('assertions').appendChild(item)
+          return pass
+        }
+
+        async function runAssertions() {
+          $('assertions').innerHTML = ''
+
+          // Ensure a fresh sound with a known state
+          destroySound()
+          setListenerControls({x: 0, y: 0, z: 0, yaw: 0})
+          setSoundControls({x: 4, y: 0, z: 0, radius: 0, relative: false})
+          createSound()
+          await waitFrames(2)
+
+          // 1. relative=false: moving/rotating the listener updates the
+          //    relative vector per the formula, on demand and per frame
+          setSoundControls({x: -4, y: 5, z: 2, radius: 1.5, relative: false})
+          setListenerControls({x: 3, y: -2, z: 1, yaw: 35})
+          await waitFrames(2)
+          const expected1 = expectedRelativeVector(),
+            actual1 = sound.getRelativeVector(),
+            framed1 = sound.lastFrameVector
+          report(
+            'relative=false：相对向量 = rotate_conj(subtractRadius(声源 - 监听者, radius))',
+            approxVector(actual1, expected1),
+            `实际 ${formatVector(actual1)} / 期望 ${formatVector(expected1)}`
+          )
+          report(
+            'relative=false：每帧送入 binaural 的向量与公式一致',
+            approxVector(framed1, expected1),
+            `帧内 ${formatVector(framed1)} / 期望 ${formatVector(expected1)}`
+          )
+
+          // Moving only the listener must change the relative vector
+          setListenerControls({x: -6, y: 4, z: -2, yaw: -80})
+          await waitFrames(2)
+          const expected1b = expectedRelativeVector(),
+            actual1b = sound.getRelativeVector()
+          report(
+            'relative=false：移动/转动监听者后相对向量按公式变化',
+            approxVector(actual1b, expected1b) && !approxVector(actual1b, actual1),
+            `移动后 ${formatVector(actual1b)} / 期望 ${formatVector(expected1b)}`
+          )
+
+          // 2. radius >= distance: relative vector collapses to the origin
+          setListenerControls({x: 0, y: 0, z: 0, yaw: 0})
+          setSoundControls({x: 3, y: 4, z: 0, radius: 25, relative: false})
+          await waitFrames(2)
+          const origin = syngen.tool.vector3d.create()
+          report(
+            'radius >= 距离：相对向量归零',
+            approxVector(sound.getRelativeVector(), origin) && approxVector(sound.lastFrameVector, origin),
+            `实际 ${formatVector(sound.getRelativeVector())}`
+          )
+
+          // 3. radius <= 0: vector is kept as-is (no shrink)
+          setSoundControls({x: 3, y: 4, z: 0, radius: 0, relative: false})
+          await waitFrames(2)
+          const unshrunk = sound.getVector()
+            .subtract(syngen.position.getVector())
+            .rotateQuaternion(syngen.position.getQuaternion().conjugate())
+          const passZero = approxVector(sound.getRelativeVector(), unshrunk)
+          setSoundControls({x: 3, y: 4, z: 0, radius: -1, relative: false})
+          await waitFrames(2)
+          report(
+            'radius <= 0：相对向量保持原值（不缩放）',
+            passZero && approxVector(sound.getRelativeVector(), unshrunk),
+            `radius=0 与 radius=-1 均为 ${formatVector(sound.getRelativeVector())}`
+          )
+
+          // 4. relative=true (negative path): listener movement must NOT
+          //    affect the relative vector; only radius is subtracted
+          setSoundControls({x: 2, y: 3, z: 4, radius: 1, relative: true})
+          setListenerControls({x: 0, y: 0, z: 0, yaw: 0})
+          await waitFrames(2)
+          const relativeBefore = sound.getRelativeVector(),
+            frameBefore = sound.lastFrameVector,
+            expectedRelativeOnly = sound.getVector().subtractRadius(1)
+          setListenerControls({x: -8, y: 6, z: -3, yaw: -120})
+          await waitFrames(2)
+          const relativeAfter = sound.getRelativeVector()
+          report(
+            'relative=true：相对向量 = 声源坐标 - radius（不经过监听者变换）',
+            approxVector(relativeBefore, expectedRelativeOnly),
+            `实际 ${formatVector(relativeBefore)} / 期望 ${formatVector(expectedRelativeOnly)}`
+          )
+          report(
+            'relative=true：监听者移动/转向不影响相对向量',
+            approxVector(relativeAfter, relativeBefore) && approxVector(sound.lastFrameVector, frameBefore),
+            `移动前 ${formatVector(relativeBefore)} / 移动后 ${formatVector(relativeAfter)}`
+          )
+
+          // 5. destroy(): per-frame updates stop, and after the fade-out
+          //    the output and binaural nodes are torn down (onDestroy runs)
+          setListenerControls({x: 0, y: 0, z: 0, yaw: 0})
+          setSoundControls({x: 4, y: 0, z: 0, radius: 0, relative: false})
+          await waitFrames(2)
+          const countAtDestroy = sound.updateCount
+          destroySound()
+          await waitFrames(5)
+          const countAfterFrames = sound.updateCount
+          report(
+            '销毁后：每帧 update 从 syngen.loop 的 frame 事件移除',
+            countAfterFrames === countAtDestroy,
+            `销毁时 ${countAtDestroy} 次 / 推进 5 帧后 ${countAfterFrames} 次`
+          )
+          await wait((sound.fadeOutDuration + 0.25) * 1000)
+          const countAfterFade = sound.updateCount
+          report(
+            '销毁后：淡出结束断开输出与双耳节点（onDestroy 已执行）',
+            sound.destroyed === true && countAfterFade === countAtDestroy,
+            `destroyed=${sound.destroyed}，onUpdate 仍为 ${countAfterFade} 次`
+          )
+
+          // Restore a usable state for further interactive exploration
+          setListenerControls({x: 0, y: 0, z: 0, yaw: 0})
+          setSoundControls({x: 4, y: 0, z: 0, radius: 0, relative: false})
+          createSound()
+
+          report('断言全部执行完毕', true)
+        }
+
+        // ---------------------------------------------------------------
+        // Wire up controls
+        // ---------------------------------------------------------------
+        $('resume').addEventListener('click', () => syngen.context().resume())
+        $('create').addEventListener('click', createSound)
+        $('destroy').addEventListener('click', destroySound)
+        $('run').addEventListener('click', runAssertions)
+
+        for (const id of ['listener-x', 'listener-y', 'listener-z', 'listener-yaw']) {
+          $(id).addEventListener('input', () => {
+            syncLabels()
+            applyListener()
+          })
+        }
+
+        for (const id of ['sound-x', 'sound-y', 'sound-z', 'sound-radius', 'sound-relative']) {
+          $(id).addEventListener('input', () => {
+            syncLabels()
+            applySound()
+          })
+        }
+
+        // Initialize state and start
+        syncLabels()
+        applyListener()
+        createSound()
+        syngen.loop.start()
+
+        // Test hook: open with #autorun to execute the assertions on load.
+        // With #autorun,report=<port> the results are also posted via
+        // sendBeacon to a local collector for headless verification.
+        if (location.hash.startsWith('#autorun')) {
+          runAssertions().then(() => {
+            const match = location.hash.match(/report=(\d+)/)
+            if (match) {
+              const lines = [...document.querySelectorAll('#assertions li')]
+                .map((li) => `${li.className.toUpperCase()} ${li.textContent}`)
+              navigator.sendBeacon(`http://127.0.0.1:${match[1]}/results`, lines.join('\n'))
+            }
+          })
+        }
+      })
+    </script>
+  </body>
+</html>
