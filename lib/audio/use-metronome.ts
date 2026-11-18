@@ -1,14 +1,17 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  DOWNBEAT_FREQUENCY,
+  NORMAL_FREQUENCY,
+  MetronomeEngine,
+} from "@/lib/audio/metronome-engine";
 
 // Chris Wilson's "A Tale of Two Clocks" lookahead scheduler.
 // AudioContext.currentTime gives sample-accurate timing; setInterval drives
 // the scheduling loop (which only queues events, never plays them directly).
-// Ported from Strumly.
-
-const LOOKAHEAD_MS = 25;
-const SCHEDULE_AHEAD_S = 0.1;
+// The timing/state machine itself lives in MetronomeEngine so it can be unit
+// tested without a browser; this hook wires it to the Web Audio graph.
 
 export interface UseMetronomeOptions {
   initialBpm?: number;
@@ -16,81 +19,95 @@ export interface UseMetronomeOptions {
 }
 
 export function useMetronome(opts: UseMetronomeOptions = {}) {
-  const [bpm, setBpm] = useState(opts.initialBpm ?? 90);
-  const [beatsPerBar, setBeatsPerBar] = useState(opts.initialBeatsPerBar ?? 4);
+  const [bpm, setBpmState] = useState(opts.initialBpm ?? 90);
+  const [beatsPerBar, setBeatsPerBarState] = useState(
+    opts.initialBeatsPerBar ?? 4,
+  );
   const [running, setRunning] = useState(false);
   const [currentBeat, setCurrentBeat] = useState<number | null>(null);
 
   const audioCtxRef = useRef<AudioContext | null>(null);
-  const nextNoteTimeRef = useRef<number>(0);
-  const beatCounterRef = useRef<number>(0);
-  const timerRef = useRef<number | null>(null);
-  const bpmRef = useRef(bpm);
-  const beatsRef = useRef(beatsPerBar);
+  const engineRef = useRef<MetronomeEngine | null>(null);
 
-  useEffect(() => {
-    bpmRef.current = bpm;
-  }, [bpm]);
-  useEffect(() => {
-    beatsRef.current = beatsPerBar;
-  }, [beatsPerBar]);
-
-  useEffect(() => () => stop(), []); // cleanup on unmount
-
-  const scheduleClick = useCallback((beatIndex: number, time: number) => {
-    const ctx = audioCtxRef.current;
-    if (!ctx) return;
-    const isDownbeat = beatIndex === 0;
-    const osc = ctx.createOscillator();
-    const env = ctx.createGain();
-    osc.frequency.value = isDownbeat ? 1200 : 800;
-    env.gain.setValueAtTime(0.0001, time);
-    env.gain.exponentialRampToValueAtTime(isDownbeat ? 0.6 : 0.4, time + 0.001);
-    env.gain.exponentialRampToValueAtTime(0.0001, time + 0.05);
-    osc.connect(env).connect(ctx.destination);
-    osc.start(time);
-    osc.stop(time + 0.06);
-
-    const delayMs = Math.max(0, (time - ctx.currentTime) * 1000);
-    window.setTimeout(() => setCurrentBeat(beatIndex), delayMs);
-  }, []);
-
-  const scheduler = useCallback(() => {
-    const ctx = audioCtxRef.current;
-    if (!ctx) return;
-    while (nextNoteTimeRef.current < ctx.currentTime + SCHEDULE_AHEAD_S) {
-      const beatIdx = beatCounterRef.current % beatsRef.current;
-      scheduleClick(beatIdx, nextNoteTimeRef.current);
-      const secondsPerBeat = 60.0 / bpmRef.current;
-      nextNoteTimeRef.current += secondsPerBeat;
-      beatCounterRef.current += 1;
-    }
-  }, [scheduleClick]);
-
-  function start() {
-    if (running) return;
-    if (!audioCtxRef.current) audioCtxRef.current = new AudioContext();
-    const ctx = audioCtxRef.current;
-    if (ctx.state === "suspended") ctx.resume();
-    beatCounterRef.current = 0;
-    nextNoteTimeRef.current = ctx.currentTime + 0.05;
-    setRunning(true);
-    timerRef.current = window.setInterval(scheduler, LOOKAHEAD_MS);
+  if (engineRef.current === null) {
+    engineRef.current = new MetronomeEngine({
+      bpm: opts.initialBpm ?? 90,
+      beatsPerBar: opts.initialBeatsPerBar ?? 4,
+      getAudioTime: () => audioCtxRef.current?.currentTime ?? 0,
+      scheduleClick: (beatIndex, isDownbeat, time) => {
+        const ctx = audioCtxRef.current;
+        if (!ctx) return () => {};
+        const osc = ctx.createOscillator();
+        const env = ctx.createGain();
+        osc.frequency.value = isDownbeat
+          ? DOWNBEAT_FREQUENCY
+          : NORMAL_FREQUENCY;
+        env.gain.setValueAtTime(0.0001, time);
+        env.gain.exponentialRampToValueAtTime(
+          isDownbeat ? 0.6 : 0.4,
+          time + 0.001,
+        );
+        env.gain.exponentialRampToValueAtTime(0.0001, time + 0.05);
+        osc.connect(env).connect(ctx.destination);
+        osc.start(time);
+        osc.stop(time + 0.06);
+        return () => {
+          try {
+            osc.stop(time);
+          } catch {
+            // Already stopped, nothing to cancel.
+          }
+          osc.disconnect();
+          env.disconnect();
+        };
+      },
+      onBeat: (beatIndex) => setCurrentBeat(beatIndex),
+    });
   }
 
-  function stop() {
-    if (timerRef.current !== null) {
-      window.clearInterval(timerRef.current);
-      timerRef.current = null;
+  const engine = engineRef.current;
+
+  // Cleanup on unmount: stop the loop and cancel anything still queued.
+  useEffect(() => () => engine.stop(), [engine]);
+
+  const setBpm = useCallback(
+    (next: number) => {
+      engine.setBpm(next);
+      setBpmState(next);
+    },
+    [engine],
+  );
+
+  const setBeatsPerBar = useCallback(
+    (next: number) => {
+      engine.setBeatsPerBar(next);
+      setBeatsPerBarState(next);
+    },
+    [engine],
+  );
+
+  const start = useCallback(() => {
+    if (engine.isRunning) return;
+    if (!audioCtxRef.current) {
+      audioCtxRef.current = new AudioContext();
     }
+    const ctx = audioCtxRef.current;
+    if (ctx.state === "suspended") void ctx.resume();
+    engine.start();
+    setRunning(true);
+  }, [engine]);
+
+  const stop = useCallback(() => {
+    if (!engine.isRunning) return;
+    engine.stop(); // also cancels queued clicks and pending indicator updates
     setRunning(false);
     setCurrentBeat(null);
-  }
+  }, [engine]);
 
-  function toggle() {
-    if (running) stop();
+  const toggle = useCallback(() => {
+    if (engine.isRunning) stop();
     else start();
-  }
+  }, [engine, start, stop]);
 
   return {
     bpm,

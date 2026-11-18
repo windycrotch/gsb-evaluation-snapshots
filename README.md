@@ -61,6 +61,7 @@ lib/
   audio/note.ts         # Hz <-> note math, standard-tuning reference
   audio/yin.ts          # YIN pitch detector
   audio/use-tuner.ts    # React hook for the tuner
+  audio/metronome-engine.ts # framework-agnostic lookahead scheduler state machine
   audio/use-metronome.ts # React hook for the metronome + tap-tempo helper
 public/
   tuner-audio-processor.js  # AudioWorklet for the tuner mic pump
