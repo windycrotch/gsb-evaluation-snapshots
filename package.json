@@ -10,6 +10,7 @@
     "indent": "eslint --fix src/agent",
     "prepare": "npm run build",
     "build": "frida-compile -Sco src/_agent.js src/agent/index.ts",
+    "test": "node --test test/agent/io-core.test.mjs",
     "watch": "frida-compile -Sco src/_agent.js -w src/agent/index.ts",
     "codecheck-ts": "eslint . --ext .ts --no-error-on-unmatched-pattern"
   },

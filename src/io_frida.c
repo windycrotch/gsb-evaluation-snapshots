@@ -531,17 +531,31 @@ static int __read(RIO *io, RIODesc *fd, ut8 *buf, int count) {
 	if (!result) {
 		return -1;
 	}
+	if (json_object_has_member (result, "ioError")) {
+		// the agent could not fulfill the read: report failure, never fake data
+		const char *reason = json_object_get_string_member (result, "ioError");
+		R_LOG_DEBUG ("read failed: %s", reason? reason: "unknown reason");
+		json_object_unref (result);
+		if (bytes) {
+			g_bytes_unref (bytes);
+		}
+		return -1;
+	}
 	if (bytes) {
 		gconstpointer data = g_bytes_get_data (bytes, &n);
 		if (data && buf) {
 			memcpy (buf, data, R_MIN (n, count));
 		}
 	} else {
-		memset (buf, 0xff, count);
+		// No payload and no failure marker: report zero bytes read instead of
+		// inventing 0xff contents the agent never produced.
+		R_LOG_DEBUG ("read returned no data");
 	}
 
 	json_object_unref (result);
-	g_bytes_unref (bytes);
+	if (bytes) {
+		g_bytes_unref (bytes);
+	}
 
 	return n;
 }
@@ -609,6 +623,13 @@ static int __write(RIO *io, RIODesc *fd, const ut8 *buf, int count) {
 
 	JsonObject *result = perform_request (rf, builder, g_bytes_new (buf, count), NULL);
 	if (!result) {
+		return -1;
+	}
+	if (json_object_has_member (result, "ioError")) {
+		// the agent refused the write (unmapped or non-writeable page)
+		const char *reason = json_object_get_string_member (result, "ioError");
+		R_LOG_DEBUG ("write failed: %s", reason? reason: "unknown reason");
+		json_object_unref (result);
 		return -1;
 	}
 	json_object_unref (result);

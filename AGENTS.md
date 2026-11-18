@@ -25,7 +25,10 @@ Agent build path: TypeScript -> `_agent.js` -> `_agent.h` -> C plugin.
 
 ## Tests
 
-- Location: `test/db/extras/`
+- Agent I/O unit tests: `npm test` (no process injection, no build step)
+  - Covers `src/agent/io-core.ts`: readable success, out-of-range failure,
+    non-writeable refusal, and `patch.code` executable writes.
+- Integration tests location: `test/db/extras/`
 - Runner: `make -C test` or `r2r -u db/extras`
 - Format:
 
