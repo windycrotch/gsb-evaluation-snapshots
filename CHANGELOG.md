@@ -6,3 +6,9 @@ see the commit logs. The format is based on
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
+
+### Fixed
+
+- Restart playback from the first step after stopping.
+- Apply tempo changes to subsequently scheduled steps.
+- Run at most one playback scheduler when play is toggled repeatedly.

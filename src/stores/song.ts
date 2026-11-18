@@ -76,16 +76,17 @@ export const useSongStore = defineStore("song", () => {
       return;
     }
 
-    player.value.loop = !player.value.loop;
     if (player.value.loop) {
-      const context = audio.context();
-      context.resume();
-      const gainNode = audio.gainNode();
-
-      gainNode.connect(context.destination);
-      player.value.timer = context.currentTime;
-      player.value.playTick(context, gainNode, tracks);
+      player.value.stop();
+      return;
     }
+
+    const context = audio.context();
+    context.resume();
+    const gainNode = audio.gainNode();
+
+    gainNode.connect(context.destination);
+    player.value.start(context, gainNode, tracks);
   }
 
   return {
