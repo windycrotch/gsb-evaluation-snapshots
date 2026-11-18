@@ -1,0 +1,173 @@
+{
+  "common": {
+    "language": "Language",
+    "languages": {
+      "en": "English",
+      "uk": "Українська"
+    },
+    "referenceOnly": "Reference only. Not for diagnosis, treatment planning, measurements, or implant workflows.",
+    "loadingViewerShell": "Loading viewer shell...",
+    "preparingViewer": "Preparing viewer...",
+    "openFolder": "Open scan",
+    "backToImport": "Back to import",
+    "hide": "Hide",
+    "show": "Show"
+  },
+  "importPage": {
+    "eyebrow": "CBCT scan viewer",
+    "title": "Voxel Viewer",
+    "version": "Version {{hash}}",
+    "description": "Inspect CBCT (Cone Beam Computed Tomography) scans directly in the browser from local study folders or DICOM files. The viewer parses supported exports locally and opens them as linked 2D slice views with a 3D volume overview.",
+    "github": "Star on GitHub",
+    "githubAccessible": "Open the Voxel Viewer source repository on GitHub",
+    "logoAlt": "Voxel Viewer cube logo",
+    "busyTitle": "Building viewer",
+    "busySubtitle": "Source: {{sourceLabel}}",
+    "importErrorTitle": "Could not open this source",
+    "selectedScanFolder": "Selected scan source",
+    "supportedFoldersTitle": "Supported sources",
+    "supportedFolders": {
+      "galileos": {
+        "title": "GALILEOS",
+        "description": "Legacy GALILEOS study volumes stored as compressed slice files.",
+        "instruction": "Select the study folder that contains <0>*_vol_0</0> and <1>*_vol_0_###</1>."
+      },
+      "oneVolume": {
+        "title": "OneVolume CT",
+        "description": "Native OneVolume volume stored in CT_0.vol.",
+        "instruction": "Select the <0>CT_*</0> folder, or the export root if you want the app to auto-detect the nested CT study folder."
+      },
+      "dicom": {
+        "title": "DICOM",
+        "description": "DICOM slice stacks and uncompressed enhanced multi-frame CT and MR volumes.",
+        "instruction": "Open the study folder or a single multi-frame file. Images in <0>DICOM/</0> may have a <1>.dcm</1> extension or no extension."
+      }
+    },
+    "referenceNote": "<0>Series_01/</0> is reference material only and is not imported."
+  },
+  "folderPicker": {
+    "title": "Open a scan",
+    "description": "Choose a local export folder or a single multi-frame DICOM file.",
+    "detail": "The app builds the volume in-browser and opens linked axial, sagittal, coronal, and 3D views.",
+    "source": "Source: {{label}}",
+    "unsupportedHint": "Folder selection needs directory upload support. You can still open a single DICOM file.",
+    "openSupported": "Open folder",
+    "openUnsupported": "Directory API unavailable",
+    "openFile": "Open DICOM file"
+  },
+  "importStatus": {
+    "progressLabel": "Scan import progress",
+    "progressValue": "{{stage}}, {{percent}}% complete",
+    "stages": {
+      "idle": "Idle",
+      "scanning": "Scanning",
+      "parsingMeta": "Parsing metadata",
+      "inflatingSlices": "Inflating slices",
+      "assembling": "Assembling volume",
+      "preparing3D": "Preparing 3D",
+      "ready": "Ready",
+      "error": "Error"
+    },
+    "progress": {
+      "selectFolder": "Select a supported CT source to begin",
+      "scanningSelectedFolder": "Scanning selected source",
+      "parsedMetadata": "Parsed {{formatLabel}} metadata",
+      "loadedScan": "Loaded {{scanId}}",
+      "importFailed": "Import failed",
+      "preparing3DRendering": "Preparing {{formatLabel}} 3D rendering",
+      "preparingGalileosVolumeBuffer": "Preparing GALILEOS volume buffer",
+      "inflatedGalileosSlice": "Inflated GALILEOS slice {{current}}/{{total}}",
+      "readingOneVolumeVoxelPayload": "Reading OneVolume voxel payload",
+      "decodedOneVolumeVoxelPayload": "Decoded OneVolume voxel payload",
+      "readingDicomSliceStack": "Reading DICOM slice stack",
+      "decodedDicomSlice": "Decoded DICOM slice {{current}}/{{total}}"
+    }
+  },
+  "viewerPage": {
+    "title": "Voxel Viewer study",
+    "loading": "Preparing viewer...",
+    "mainNavigationVolume": "Main navigation volume",
+    "nativeStatus": "Native",
+    "downsampledStatus": "Downsampled",
+    "preparingStatus": "Preparing",
+    "studyPanel": "Study panel",
+    "closeStudyPanel": "Close study panel"
+  },
+  "viewerSidebar": {
+    "study": "Study",
+    "series": "Series",
+    "display": "Display",
+    "navigation": "Navigation",
+    "navigationHelp": "Navigation help",
+    "window": "Window",
+    "windowHint": "Contrast span. Smaller window = more contrast.",
+    "level": "Level",
+    "levelHint": "Brightness bias. Higher level favors denser tissue.",
+    "cursor": "Cursor",
+    "cursorUnavailable": "n/a",
+    "thickSliceHint": "This series has thick slices, so cross-plane views are coarse.",
+    "dragHint": "Drag inside any 2D pane to scrub linked slices.",
+    "zoomHint": "Wheel or pinch to zoom; when zoomed, scrubbing keeps the crosshair centered when possible.",
+    "keyboardHint": "Focus a 2D pane, then use arrow keys to move the linked cursor, Shift + arrow keys for larger steps, plus or minus to zoom, and 0 to reset zoom.",
+    "orientationHint": "Coronal and sagittal views are flipped so superior anatomy stays at the top.",
+    "volumeSection": "3D using full volume.",
+    "volumeNative": "Native full-volume resolution.",
+    "volumeDownsampled": "Downsampled from full volume to fit GPU texture limits.",
+    "planeHint": "Colored planes in 3D match the current coronal, sagittal, and axial slices.",
+    "openFolder": "Open scan",
+    "backToImport": "Back to import",
+    "voxelsLabel": "{{dimensions}} voxels",
+    "spacingLabel": "{{spacing}} mm"
+  },
+  "axisViewport": {
+    "selectAxisView": "Select axis view",
+    "resetZoom": "Reset MPR zoom",
+    "surfaceLabel": "{{axis}} MPR navigation",
+    "keyboardInstructions": "Use arrow keys to move the linked cursor one voxel. Hold Shift for ten-voxel steps. Use plus and minus to zoom, or 0 to reset zoom. Pointer drag, wheel zoom, and pinch zoom remain available.",
+    "options": {
+      "coronal": "Coronal",
+      "sagittal": "Sagittal",
+      "axial": "Axial"
+    },
+    "coronal": {
+      "label": "Coronal",
+      "orientation": "Frontal · superior at top",
+      "status": "Y {{current}}/{{total}}"
+    },
+    "sagittal": {
+      "label": "Sagittal",
+      "orientation": "Lateral · superior at top",
+      "status": "X {{current}}/{{total}}"
+    },
+    "axial": {
+      "label": "Axial",
+      "orientation": "Occlusal",
+      "status": "Z {{current}}/{{total}}"
+    },
+    "noVolume": "No volume"
+  },
+  "volumeViewport3d": {
+    "surfaceLabel": "Interactive 3D volume",
+    "keyboardInstructions": "Drag to rotate and use the wheel or pinch to zoom. With this view focused, use arrow keys to rotate, plus and minus to zoom, or 0 to reset the view.",
+    "hideAxisViewsShort": "Hide axes",
+    "showAxisViewsShort": "Show axes",
+    "hideSidebarShort": "Hide panel",
+    "showSidebarShort": "Show panel",
+    "hidePlanesShort": "Hide planes",
+    "showPlanesShort": "Show planes",
+    "resetViewShort": "Reset 3D",
+    "previewError": "3D preview failed"
+  },
+  "errors": {
+    "failedToLoadSelectedScanFolder": "The selected scan could not be opened. Select the original source again and retry.",
+    "unsupportedFolderLayout": "This source is not supported. Select a GALILEOS study, a OneVolume export root, a DICOM slice folder, or a compatible multi-frame DICOM file.",
+    "sourceAccessDenied": "Access was not granted. Select the source again and allow the browser to read it.",
+    "folderReadFailed": "The browser could not read every file in this folder. Select the study folder again, or open a compatible multi-frame DICOM file instead.",
+    "unsupportedDicomEncoding": "This DICOM encoding is not supported. Choose an uncompressed enhanced multi-frame file or an uncompressed DICOM slice folder.",
+    "inconsistentDicomSeries": "The DICOM slices do not form one consistent series. Select a folder containing slices from a single series.",
+    "invalidDicomSource": "The selected DICOM source could not be read as a volume. Choose a complete slice folder or a compatible multi-frame file.",
+    "incompleteScanSource": "The selected scan is incomplete or its slice files are inconsistent. Select the original complete study folder.",
+    "invalidOneVolumeSource": "The OneVolume export could not be read. Select the folder containing the original CT_0.vol file or the complete export root.",
+    "processingFailed": "The browser could not build this volume. Close other memory-heavy tabs, then select the source and try again."
+  }
+}

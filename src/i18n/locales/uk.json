@@ -1,0 +1,173 @@
+{
+  "common": {
+    "language": "Мова",
+    "languages": {
+      "en": "English",
+      "uk": "Українська"
+    },
+    "referenceOnly": "Лише для довідки. Не для діагностики, планування лікування, вимірювань або імплантологічних робочих процесів.",
+    "loadingViewerShell": "Завантаження оболонки переглядача...",
+    "preparingViewer": "Підготовка переглядача...",
+    "openFolder": "Відкрити скан",
+    "backToImport": "Повернутися до імпорту",
+    "hide": "Сховати",
+    "show": "Показати"
+  },
+  "importPage": {
+    "eyebrow": "Переглядач КТ-знімків",
+    "title": "Voxel Viewer",
+    "version": "Версія {{hash}}",
+    "description": "Переглядайте КТ (Cone Beam Computed Tomography) безпосередньо в браузері з локальних папок досліджень або DICOM-файлів. Переглядач локально розбирає підтримувані експорти та відкриває їх як пов'язані 2D-зрізи з оглядом 3D-об'єму.",
+    "github": "Star on GitHub",
+    "githubAccessible": "Відкрити репозиторій вихідного коду Voxel Viewer на GitHub",
+    "logoAlt": "Логотип-куб Voxel Viewer",
+    "busyTitle": "Будується переглядач",
+    "busySubtitle": "Джерело: {{sourceLabel}}",
+    "importErrorTitle": "Не вдалося відкрити це джерело",
+    "selectedScanFolder": "Вибране джерело скану",
+    "supportedFoldersTitle": "Підтримувані джерела",
+    "supportedFolders": {
+      "galileos": {
+        "title": "GALILEOS",
+        "description": "Спадкові томи GALILEOS, збережені як стиснені файли зрізів.",
+        "instruction": "Виберіть папку дослідження, що містить <0>*_vol_0</0> і <1>*_vol_0_###</1>."
+      },
+      "oneVolume": {
+        "title": "OneVolume CT",
+        "description": "Нативний том OneVolume, збережений у CT_0.vol.",
+        "instruction": "Виберіть папку <0>CT_*</0> або корінь експорту, якщо хочете, щоб застосунок автоматично знайшов вкладену папку CT-дослідження."
+      },
+      "dicom": {
+        "title": "DICOM",
+        "description": "Стеки DICOM-зрізів і нестиснені багатокадрові об’єми Enhanced CT та Enhanced MR.",
+        "instruction": "Відкрийте папку дослідження або один багатокадровий файл. Зображення в <0>DICOM/</0> можуть мати розширення <1>.dcm</1> або бути без розширення."
+      }
+    },
+    "referenceNote": "<0>Series_01/</0> — лише довідковий матеріал і не імпортується."
+  },
+  "folderPicker": {
+    "title": "Відкрити скан",
+    "description": "Виберіть локальну папку експорту або один багатокадровий DICOM-файл.",
+    "detail": "Застосунок будує том у браузері та відкриває зв'язані аксіальні, сагітальні, корональні та 3D-види.",
+    "source": "Джерело: {{label}}",
+    "unsupportedHint": "Для вибору папки потрібна підтримка завантаження директорій. Один DICOM-файл усе одно можна відкрити.",
+    "openSupported": "Відкрити папку",
+    "openUnsupported": "API директорій недоступне",
+    "openFile": "Відкрити DICOM-файл"
+  },
+  "importStatus": {
+    "progressLabel": "Прогрес імпорту скану",
+    "progressValue": "{{stage}}, виконано {{percent}}%",
+    "stages": {
+      "idle": "Очікування",
+      "scanning": "Сканування",
+      "parsingMeta": "Розбір метаданих",
+      "inflatingSlices": "Розпакування зрізів",
+      "assembling": "Збір об'єму",
+      "preparing3D": "Підготовка 3D",
+      "ready": "Готово",
+      "error": "Помилка"
+    },
+    "progress": {
+      "selectFolder": "Виберіть підтримуване CT-джерело, щоб почати",
+      "scanningSelectedFolder": "Сканування вибраного джерела",
+      "parsedMetadata": "Метадані {{formatLabel}} розібрано",
+      "loadedScan": "Завантажено {{scanId}}",
+      "importFailed": "Імпорт не вдалося",
+      "preparing3DRendering": "Підготовка 3D-візуалізації для {{formatLabel}}",
+      "preparingGalileosVolumeBuffer": "Підготовка буфера об'єму GALILEOS",
+      "inflatedGalileosSlice": "Розпаковано зріз GALILEOS {{current}}/{{total}}",
+      "readingOneVolumeVoxelPayload": "Читання воксельного payload OneVolume",
+      "decodedOneVolumeVoxelPayload": "Payload вокселів OneVolume декодовано",
+      "readingDicomSliceStack": "Читання стека DICOM-зрізів",
+      "decodedDicomSlice": "Декодовано DICOM-зріз {{current}}/{{total}}"
+    }
+  },
+  "viewerPage": {
+    "title": "Дослідження у Voxel Viewer",
+    "loading": "Підготовка переглядача...",
+    "mainNavigationVolume": "Основний навігаційний об'єм",
+    "nativeStatus": "Нативний",
+    "downsampledStatus": "Зменшений",
+    "preparingStatus": "Підготовка",
+    "studyPanel": "Панель дослідження",
+    "closeStudyPanel": "Закрити панель дослідження"
+  },
+  "viewerSidebar": {
+    "study": "Дослідження",
+    "series": "Серія",
+    "display": "Відображення",
+    "navigation": "Навігація",
+    "navigationHelp": "Довідка з навігації",
+    "window": "Вікно",
+    "windowHint": "Діапазон контрасту. Менше вікно = більший контраст.",
+    "level": "Рівень",
+    "levelHint": "Зміщення яскравості. Вищий рівень підсилює щільніші тканини.",
+    "cursor": "Курсор",
+    "cursorUnavailable": "н/д",
+    "thickSliceHint": "У цій серії товсті зрізи, тому перехресні площини грубі.",
+    "dragHint": "Перетягуйте всередині будь-якої 2D-панелі, щоб прокручувати пов'язані зрізи.",
+    "zoomHint": "Колесо або пінч для масштабу; після збільшення прокрутка тримає перехрестя по центру, коли це можливо.",
+    "keyboardHint": "Сфокусуйте 2D-панель і використовуйте стрілки для переміщення зв'язаного курсора, Shift + стрілки для більших кроків, плюс або мінус для масштабу та 0 для скидання масштабу.",
+    "orientationHint": "Корональний і сагітальний вигляди перевернуті, щоб верхня анатомія залишалася вгорі.",
+    "volumeSection": "3D з повним об'ємом.",
+    "volumeNative": "Нативна роздільна здатність повного об'єму.",
+    "volumeDownsampled": "Зменшено з повного об'єму, щоб уміститись у ліміти GPU-текстури.",
+    "planeHint": "Кольорові площини в 3D відповідають поточним корональним, сагітальним і аксіальним зрізам.",
+    "openFolder": "Відкрити скан",
+    "backToImport": "Повернутися до імпорту",
+    "voxelsLabel": "{{dimensions}} вокселів",
+    "spacingLabel": "{{spacing}} мм"
+  },
+  "axisViewport": {
+    "selectAxisView": "Вибрати вісь перегляду",
+    "resetZoom": "Скинути масштаб MPR",
+    "surfaceLabel": "Навігація MPR: {{axis}} вид",
+    "keyboardInstructions": "Стрілки переміщують зв'язаний курсор на один воксель. Утримуйте Shift для кроків по десять вокселів. Плюс і мінус змінюють масштаб, а 0 скидає його. Перетягування, колесо та пінч залишаються доступними.",
+    "options": {
+      "coronal": "Корональний",
+      "sagittal": "Сагітальний",
+      "axial": "Аксіальний"
+    },
+    "coronal": {
+      "label": "Корональний",
+      "orientation": "Фронтальний · верх угорі",
+      "status": "Y {{current}}/{{total}}"
+    },
+    "sagittal": {
+      "label": "Сагітальний",
+      "orientation": "Латеральний · верх угорі",
+      "status": "X {{current}}/{{total}}"
+    },
+    "axial": {
+      "label": "Аксіальний",
+      "orientation": "Оклюзійний",
+      "status": "Z {{current}}/{{total}}"
+    },
+    "noVolume": "Немає об'єму"
+  },
+  "volumeViewport3d": {
+    "surfaceLabel": "Інтерактивний 3D-об'єм",
+    "keyboardInstructions": "Перетягуйте для обертання та використовуйте колесо або пінч для масштабу. Коли цей вид сфокусовано, стрілки обертають об'єм, плюс і мінус змінюють масштаб, а 0 скидає вид.",
+    "hideAxisViewsShort": "Сховати осі",
+    "showAxisViewsShort": "Показати осі",
+    "hideSidebarShort": "Сховати панель",
+    "showSidebarShort": "Показати панель",
+    "hidePlanesShort": "Сховати площини",
+    "showPlanesShort": "Показати площини",
+    "resetViewShort": "Скинути 3D",
+    "previewError": "3D-перегляд не вдалося запустити"
+  },
+  "errors": {
+    "failedToLoadSelectedScanFolder": "Вибраний скан не вдалося відкрити. Виберіть початкове джерело ще раз і повторіть спробу.",
+    "unsupportedFolderLayout": "Це джерело не підтримується. Виберіть дослідження GALILEOS, корінь експорту OneVolume, папку DICOM-зрізів або сумісний багатокадровий DICOM-файл.",
+    "sourceAccessDenied": "Доступ не надано. Виберіть джерело ще раз і дозвольте браузеру прочитати його.",
+    "folderReadFailed": "Браузер не зміг прочитати всі файли в цій папці. Виберіть папку дослідження ще раз або відкрийте сумісний багатокадровий DICOM-файл.",
+    "unsupportedDicomEncoding": "Це кодування DICOM не підтримується. Виберіть нестиснений багатокадровий файл Enhanced DICOM або папку з нестисненими DICOM-зрізами.",
+    "inconsistentDicomSeries": "DICOM-зрізи не утворюють одну узгоджену серію. Виберіть папку зі зрізами лише однієї серії.",
+    "invalidDicomSource": "Вибране DICOM-джерело не вдалося прочитати як об'єм. Виберіть повну папку зі зрізами або сумісний багатокадровий файл.",
+    "incompleteScanSource": "Вибраний скан неповний або його файли зрізів неузгоджені. Виберіть початкову повну папку дослідження.",
+    "invalidOneVolumeSource": "Експорт OneVolume не вдалося прочитати. Виберіть папку з початковим файлом CT_0.vol або повний корінь експорту.",
+    "processingFailed": "Браузер не зміг побудувати цей об'єм. Закрийте інші вкладки, що використовують багато пам'яті, потім виберіть джерело й повторіть спробу."
+  }
+}

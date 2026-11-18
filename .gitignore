@@ -1,0 +1,9 @@
+# Ignore node modules
+node_modules
+
+# Build output
+dist
+*.tsbuildinfo
+
+# Reference files
+ct
