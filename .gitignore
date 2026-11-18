@@ -1,0 +1,7 @@
+*.ts
+*.jpg
+*.png
+*.pt
+
+__pycahce__\
+*.pyc
