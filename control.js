@@ -3,6 +3,9 @@ import { videoOptions } from "./video-options.js";
 
 const $ = id => document.getElementById(id);
 const labels = { idle: "未启动", capturing: "正在捕获", running: "正常运行", interrupted: "捕获中断", error: "发生错误" };
+// Panel wording follows the engine's observable fields, not a guessed audio state.
+const contextLabels = { running: "输出运行中", suspended: "输出已暂停", interrupted: "输出被系统挂起", closed: "输出已关闭" };
+const contextText = value => contextLabels[value] || `输出状态：${value || "未知"}`;
 let state = idleState();
 let busy = false;
 let adjusting = false;
@@ -26,6 +29,16 @@ async function send(type, data = {}) {
   return reply.state;
 }
 
+function recoveryLine(state) {
+  // Audio engine only: surface the raw AudioContext state, the buffered audio
+  // still held and the bounded recovery attempt count as separate facts.
+  if (state.mode === "av" || !state.active || state.phase === "capturing") return "";
+  if (state.contextState === "running" || !state.contextState) return "";
+  const attempt = state.recoveryAttempt > 0 ? ` · 恢复第 ${state.recoveryAttempt}/${state.recoveryLimit || 3} 次` : "";
+  const buffer = state.bufferRemaining > 0.15 ? ` · 缓冲仍保留 ${state.bufferRemaining.toFixed(1)} 秒` : " · 缓冲已用尽";
+  return `${contextText(state.contextState)}${attempt}${buffer}`;
+}
+
 function render(next = state) {
   if (next) state = next;
   const tabTitle = state.active ? state.tabTitle : selectedTab?.title || state.tabTitle;
@@ -42,6 +55,11 @@ function render(next = state) {
       : state.transitionRemaining > 0.01 ? "正在切换到已有音频缓冲，不改变播放速度。"
         : av ? `输出 ${state.outputWidth || state.width || "—"} × ${state.outputHeight || state.height || "—"} · 实测 ${state.outputFps?.toFixed(1) ?? "—"}fps` : "独立处理标签页音频，网页画面继续播放。"
     : "点击开始延迟，捕获当前网页音频。关闭面板后仍会运行。");
+  // Buffered audio, an adjustment pause and the AudioContext are different
+  // states; each panel-visible field is reported on its own line.
+  const recovery = recoveryLine(state);
+  $("audio-state").textContent = recovery;
+  $("audio-state").hidden = !recovery;
   if (!adjusting && pendingDelay === null && !delaySending) showDelay(state.delay);
   $("start").disabled = busy || state.active || selectingTab;
   $("stop").disabled = busy || !state.active;

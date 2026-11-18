@@ -140,6 +140,18 @@ Popup 内用 input/change 事件模拟滑块预览与提交：预览显示 35.0 
 
 后续内容是 **1.0 版的历史验证**；其中独立窗口和有声渐变的描述不代表 1.1 当前行为。
 
+## 纯音频恢复与收尾（本次修改）
+
+聚焦执行 `node --test tests/audio-engine.test.js`（12 项通过）与全量 `npm test`（30 项通过，含 service-worker / av / video-capture），`npm run check` 通过。新增的模拟用例：
+
+- **设备变化后恢复成功**：`devicechange` 时 AudioContext 为 suspended，引擎保留同一采集流、同一 DelayGraph；快照先出现 `recovering`、`contextState: "suspended"`、缓冲仍大于 0，resume 成功后回到 `running` 且 `notice` 清空，采集次数仍为 1、音轨未停止。
+- **连续恢复失败达上限**：同一会话内 resume 抛错，严格尝试 3 次后进入 `error`；音轨停止、AudioContext 关闭、Gain 连接清空，日志中 `disconnect:gain` 早于 `track:stop`，错误文本说明已恢复网页原声并需要重启；之后再次 `devicechange` 不会复活旧会话。
+- **停止期间迟到的采集流**：等待 getUserMedia 时 Stop，晚到流被停止；不创建 MediaStreamSource、不建立任何音频图、不留下运行中的 AudioContext。
+- **重复停止与新会话隔离**：重复 Stop 不覆盖已结束状态；旧会话迟到的 `statechange` / `ended` 不影响之后启动的新会话。
+- 原有 3 次恢复用例更新为按会话身份丢弃迟到事件，仍断言恰好 3 次失败后释放。
+
+这是模拟 Chrome API 与假 AudioContext 的控制流验证，不证明真实插拔耳机、系统挂起或扬声器输出行为；真机设备切换仍待实测。
+
 ## 1.0 历史：单元测试与静态检查
 
 Node.js v22.20.0；通过 `npm test` 和聚焦的 `node --test tests/service-worker.test.js` 执行两个测试文件，合计 11 项通过，每次耗时低于 1 秒，不需要安装第三方依赖。

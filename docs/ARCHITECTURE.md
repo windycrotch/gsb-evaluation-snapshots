@@ -75,7 +75,9 @@ Offscreen 使用 **USER_MEDIA**，与官方 tabCapture 示例一致，它实际�
 - 调整时只在完全静音期间移动或跳转读头，避免旧版可听见的升降调。短暂停顿、淡入淡出及减少延迟造成的内容跳过仍然存在。频繁操作会重新安排当前暂停；初次缓冲尚未填满时，还需等待可用音频。始终只有一个输出链路，不混合两份解说。
 - 停止会丢弃全部缓冲，直接恢复当前直播声音，因此会跳到直播当前时刻；重新启动要再次等待缓冲。
 - 60 秒立体声 float32 缓冲在 48 kHz 下约 22 MiB（44.1 kHz 下约 20 MiB），另有浏览器开销；内存不会随着观看时长增长。纯音频模式没有 JS 样本队列、MediaRecorder 或逐段追加音频。
-- 暂时的 AudioContext `suspended` / `interrupted` 会尝试 resume，每次事件最多 3 次，各有 2 秒超时；失败就停止并恢复原声。系统默认音频设备变化交给 Chrome/Web Audio 的默认输出路由处理，收到 `devicechange` 时提示。设备事件可能受浏览器权限限制；没有无声检测，不保证发现所有设备问题。
+- 暂时的 AudioContext `suspended` / `interrupted` 或系统默认音频设备变化（`devicechange`）会触发恢复：保留现有标签页采集流与 DelayNode 缓冲，不重新申请采集、不重建音频图；每次中断最多尝试 resume 3 次，每次 2 秒超时。恢复成功回到运行态并清除提示；连续失败达到上限则进入错误态，先断开延迟输出（静音并断开 Gain/Delay/Source），再停止音轨、关闭 AudioContext，让 Chrome 恢复网页原声，并在面板给出可读错误。设备事件可能受浏览器权限限制；没有无声检测，不保证发现所有设备问题。
+- 状态快照分开提供 `bufferRemaining`（缓冲剩余）、`pauseRemaining`（调节延迟造成的暂停剩余）与 `contextState`（AudioContext 的 running/suspended/interrupted/closed），纯音频模式另带 `recovering`、`recoveryAttempt`、`recoveryLimit`。面板据此显示输出状态、恢复次数与仍在的缓冲，而不是把任一数值当作端到端延迟。
+- 停止或失败时先断开延迟输出，再停止音轨、关闭 AudioContext，避免延迟尾音盖在恢复后的网页原声上。重复停止复用同一次清理；启动中途中止会释放迟到的采集流且不为它建音频图；旧会话迟到的 `statechange` / `ended` 等事件按会话身份丢弃，不影响新会话。
 - 系统睡眠、Chrome 退出/更新、扩展重载/禁用、内存回收或标签页丢弃会影响采集。浏览器重启不自动采集。建议观看时保持 Mac 唤醒、避免主动丢弃直播标签页。
 - tabCapture 通常可跨刷新/导航保留；刷新不会主动重启采集，缓冲里可能仍有刷新前音频。如果 Chrome 结束流，安全释放并要求重新启动。跨来源导航后 activeTab 授权可能过期，再次启动须在新网页点击图标。
 - 只处理 Chrome 对指定标签页输出的声音/画面；DRM、浏览器内部页面等受 Chrome 采集限制。Safari 和未选择的 Chrome 标签页不在采集范围内。
