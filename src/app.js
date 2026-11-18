@@ -579,10 +579,15 @@ class App {
     });
   }
 
+  /**
+   * The taste of a new sound. It goes through the engine's preview slot, not
+   * the note pool, so it can never steal a key you're holding and it always
+   * settles itself — even the ringing presets, and even if you flick through
+   * presets faster than this one would last.
+   */
   auditionNote() {
     const midi = degreeToMidi(this.scale, 12);
-    this.engine.noteOn('preview', midi, 0.45);
-    setTimeout(() => this.engine.noteOff('preview'), 420);
+    this.engine.preview(midi, 0.45);
   }
 
   petTouch() {

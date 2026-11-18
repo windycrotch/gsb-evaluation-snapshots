@@ -1,9 +1,11 @@
 // What a preset's `build()` hands back, plus the two transient generators that
 // nearly every preset opens with.
 //
-// A voice is `{ release(t) -> endTime, kill(t) -> endTime }`. Presets built with
-// `ringVoice` ignore key release and let their own envelope finish, which makes
-// hammering the keys feel like a real toy instrument.
+// A voice is `{ release(t) -> endTime, kill(t) -> endTime, fade(t, s) -> endTime }`.
+// Presets built with `ringVoice` ignore key release and let their own envelope
+// finish, which makes hammering the keys feel like a real toy instrument. `fade`
+// is the polite version of `kill`: an audition that has overstayed its welcome
+// ducks out over a musical fade instead of being chopped.
 
 import { filter, gain, fadeOut, noiseBuffer, osc, stopAll } from './dsp.js';
 
@@ -21,6 +23,11 @@ export function ringVoice(nodes, tail, t0, length) {
       stopAll(nodes, e + 0.02);
       return e;
     },
+    fade(t, seconds = 0.12) {
+      const e = fadeOut(tail.gain, t, seconds);
+      stopAll(nodes, e + 0.02);
+      return e;
+    },
   };
 }
 
@@ -34,6 +41,11 @@ export function heldVoice(nodes, tail, releaseTime) {
     },
     kill(t) {
       const end = fadeOut(tail.gain, t, 0.02);
+      stopAll(nodes, end + 0.02);
+      return end;
+    },
+    fade(t, seconds = 0.12) {
+      const end = fadeOut(tail.gain, t, seconds);
       stopAll(nodes, end + 0.02);
       return end;
     },

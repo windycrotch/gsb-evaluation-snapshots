@@ -48,7 +48,11 @@ changes.
 A knob zone serves two gestures. `onPointerDown` starts a drag; if the pointer
 comes back up without having moved past the drag threshold, it counts as a click
 instead (`App.pressKnob`) — which is how the sound knob steps through the presets
-in the current pack.
+in the current pack. Any sound change ends in `App.applyPreset`, which ramps the
+engine's send levels, repaints the theme, tells the pet, and asks the engine for
+a short audition. The audition goes through `Engine.preview`, not `noteOn`: it
+has its own slot, so turning the knob while a key is held never steals or chokes
+that key. See [audio.md](audio.md#audition).
 
 Keyboard input is bound on `window` and uses `event.code`, so the mapping
 follows physical key positions rather than the user's layout.

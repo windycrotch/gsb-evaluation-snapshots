@@ -38,7 +38,9 @@ level that drives the VU meter, the screen glow, and the pet's energy.
 ## Voice lifecycle
 
 `src/audio/voice.js` owns the two shapes a voice can take. Both are objects with
-`release(t)` and `kill(t)`.
+`release(t)`, `kill(t)` and `fade(t, seconds)`. `release` is the player letting
+go, `kill` is silence now, and `fade` is a duck at a chosen rate — used to retire
+an audition without a click.
 
 **Ringing voices** (`ringVoice`) ignore key release and let their own envelope
 finish, with the oscillator stop time scheduled at build time. Bells, plucks,
@@ -64,6 +66,29 @@ the top of a pentatonic keyboard doesn't bite.
 `voice.js` also carries the transient generators the percussive presets share:
 `click` (a filtered impulse), `burst` (a windowed slice of the noise buffer
 through a filter that can sweep) and `blip` (a short pitched ping).
+
+## Audition
+
+Changing sound plays a short preview. It is deliberately *not* a note: the
+engine keeps one preview slot (`previewVoice`) beside the voice map, outside the
+`k<padIndex>` id space, outside the polyphony budget and outside the sustain
+set. So a preview can never steal a held key, a held key can never steal it, and
+sustain can never trap it.
+
+The slot retires itself:
+
+- after `PREVIEW_SECONDS` (0.5 s) it calls its own release envelope;
+- starting another preview first retires the old one with a `PREVIEW_CUT`
+  (0.03 s) fade, so flicking through sounds is a sequence of tastes rather than
+  a pile of overlapping tails;
+- a ringing preset ignores release, so if its own tail would outlast
+  `PREVIEW_TAIL` (0.9 s) the preview is faded out over `PREVIEW_FADE` (0.3 s) —
+  musical decay instead of a gate closing;
+- `panic` retires it immediately, along with every note.
+
+`Engine.stopPreview(mode)` is public: `'release'`, `'cut'` or `'kill'`.
+`voiceCount` still counts only played notes; `soundingCount` adds the preview and
+`previewActive` reports the slot for tests.
 
 ## DSP toolkit
 
@@ -176,6 +201,9 @@ renders.
 `Engine.tick` plays a short filtered noise burst plus a triangle blip for knob
 detents, sustain, and petting. Its one argument is pitch, so a knob *click* ticks
 lower than a detent: a button should feel heavier than a notch. Scale changes
-also trigger a
-three-note arpeggio of the new scale (`App.audition`), which doubles as a
-preview and lights up the corresponding keys.
+also trigger a three-note arpeggio of the new scale (`App.audition`), which
+doubles as a preview and lights up the corresponding keys.
+
+Sound changes tick as well, and then play one note through `Engine.preview`
+(see [Audition](#audition)). The preview lives outside the keyboard's voice
+pool, so auditioning never disturbs a chord you are holding.
