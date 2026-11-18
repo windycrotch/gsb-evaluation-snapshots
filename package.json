@@ -15,8 +15,8 @@
     "build:mac": "npm run build && electron-builder --mac dmg zip",
     "lint": "eslint .",
     "preview": "node server/start.mjs preview",
-    "test": "node --test server/projects.test.mjs && playwright test",
-    "test:integration": "node --test server/projects.test.mjs",
+    "test": "node --test server/projects.test.mjs tests/timeline-media.test.mjs && playwright test",
+    "test:integration": "node --test server/projects.test.mjs tests/timeline-media.test.mjs",
     "test:e2e": "playwright test",
     "test:desktop": "node --test desktop/desktop.test.mjs"
   },

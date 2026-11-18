@@ -12,7 +12,13 @@ export function createTimelineMedia(
   const clips = new Map<string, TimelineClip[]>();
   const mixers = new Map<string, Three.AnimationMixer>();
   const activeClips = new Map<string, string>();
-  const sounds = new Map<string, { segment: TimelineSound; audio: HTMLAudioElement; active: boolean }>();
+  const sounds = new Map<string, {
+    segment: TimelineSound;
+    audio: HTMLAudioElement;
+    active: boolean;
+    suspended: boolean;
+    lastOffset: number;
+  }>();
   const clipIds = new Set<string>();
   const soundIds = new Set<string>();
   const find = (id: string) => objects.find(item => item.id === id);
@@ -57,7 +63,17 @@ export function createTimelineMedia(
       const audio = new Audio(sound.url);
       audio.volume = sound.volume;
       audio.loop = sound.loop;
-      sounds.set(segment.id, { segment, audio, active: false });
+      audio.preload = 'auto';
+      const state = { segment, audio, active: false, suspended: false, lastOffset: 0 };
+      // The duration of a looped sound is needed for modulo alignment. Metadata
+      // may arrive after the first seek, so re-apply the pending offset then.
+      audio.addEventListener('loadedmetadata', () => {
+        if (audio.loop && Number.isFinite(audio.duration) && audio.duration > 0 &&
+            state.lastOffset >= audio.duration) {
+          audio.currentTime = state.lastOffset % audio.duration;
+        }
+      });
+      sounds.set(segment.id, state);
     }
   }
 
@@ -94,21 +110,49 @@ export function createTimelineMedia(
     for (const state of sounds.values()) {
       const { segment, audio } = state;
       const shouldPlay = running && time >= segment.start && time < segment.start + segment.duration;
+      const insideSegment = time >= segment.start && time < segment.start + segment.duration;
       if (!shouldPlay) {
-        if (state.active) audio.pause();
-        state.active = false;
-      } else {
-        if (!state.active || jumped) {
-          const offset = Math.max(0, time - segment.start);
+        // Pausing while still inside the segment only suspends playback, so a
+        // resume without a jump keeps its position. A jump while paused (or
+        // leaving the segment) invalidates that position: relocate right away
+        // so the sound stays in sync even while paused, and keep the suspended
+        // marker so the following resume does not relocate a second time.
+        if (state.active) {
+          audio.pause();
+          state.active = false;
+        }
+        if (!running && insideSegment) {
+          if (jumped) {
+            const offset = Math.max(0, time - segment.start);
+            state.lastOffset = offset;
+            audio.currentTime = audio.loop && Number.isFinite(audio.duration) && audio.duration > 0
+              ? offset % audio.duration : offset;
+          }
+          state.suspended = true;
+        } else {
+          state.suspended = false;
+        }
+        continue;
+      }
+      const offset = Math.max(0, time - segment.start);
+      if (!state.active) {
+        // Fresh entry: resume-without-jump keeps the position, every other entry
+        // (first entry, segment re-entry, jump while paused) re-aligns.
+        if (!state.suspended || jumped) {
+          state.lastOffset = offset;
           audio.currentTime = audio.loop && Number.isFinite(audio.duration) && audio.duration > 0
             ? offset % audio.duration : offset;
         }
-        if (!state.active) {
-          state.active = true;
-          void audio.play().catch(error => {
-            if (!stopped && state.active) reportError(`Timeline sound: ${error instanceof Error ? error.message : String(error)}`);
-          });
-        }
+        state.active = true;
+        state.suspended = false;
+        void audio.play().catch(error => {
+          if (!stopped && state.active) reportError(`Timeline sound: ${error instanceof Error ? error.message : String(error)}`);
+        });
+      } else if (jumped) {
+        // Time jumped mid-playback: relocate to the offset inside the segment.
+        state.lastOffset = offset;
+        audio.currentTime = audio.loop && Number.isFinite(audio.duration) && audio.duration > 0
+          ? offset % audio.duration : offset;
       }
     }
     previousTime = time;
