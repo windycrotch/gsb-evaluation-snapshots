@@ -45,6 +45,34 @@ class EditingContracts(unittest.TestCase):
                           {"start": 2, "end": 3, "text": "continuous"},
                           {"start": 3, "end": 4, "text": "continuous"}])
 
+    def test_caption_spanning_seam_splits_only_on_gaps_and_backjumps(self):
+        cue = [{"start": 1, "end": 5, "text": "spanning"}]
+        # Contiguity is about source time: a crop change never breaks a cue.
+        adjacent = [{"start": 1, "end": 3, "crop": {"x": 0}},
+                    {"start": 3, "end": 5, "crop": {"x": 1}}]
+        self.assertEqual(editor.remap_captions(cue, adjacent),
+                         [{"start": 0, "end": 4, "text": "spanning"}])
+        cases = [
+            # Gap: second clip holds only its 1.5s of source.
+            ([{"start": 1, "end": 3}, {"start": 3.5, "end": 5}],
+             [{"start": 0, "end": 2, "text": "spanning"},
+              {"start": 2, "end": 3.5, "text": "spanning"}]),
+            # Backwards jump: both clips contribute their full two seconds.
+            ([{"start": 3, "end": 5}, {"start": 1, "end": 3}],
+             [{"start": 0, "end": 2, "text": "spanning"},
+              {"start": 2, "end": 4, "text": "spanning"}]),
+        ]
+        for ranges, expected in cases:
+            with self.subTest(ranges=ranges):
+                self.assertEqual(editor.remap_captions(cue, ranges), expected)
+
+    def test_caption_is_truncated_at_range_edges_and_omitted_when_outside(self):
+        cues = [{"start": 0, "end": 1, "text": "before"},
+                {"start": 1, "end": 3, "text": "clipped"},
+                {"start": 5, "end": 6, "text": "after"}]
+        self.assertEqual(editor.remap_captions(cues, [{"start": 2, "end": 4}]),
+                         [{"start": 0, "end": 1, "text": "clipped"}])
+
     def test_large_caption_index_preserves_nested_overlaps_and_reordering(self):
         cues = [{"start": index, "end": index + .5, "text": str(index)} for index in range(10000)]
         cues.insert(0, {"start": 0, "end": 10000, "text": "overlap"})
@@ -217,15 +245,114 @@ class ProcessLifecycle(unittest.TestCase):
             self.assertEqual(output.read_bytes(), b"old export")
             self.assertFalse(list(Path(folder).glob(".hi-lite-export-*")))
 
-    def test_precancelled_export_never_probes(self):
+    def test_precancelled_export_never_probes_and_keeps_old_output(self):
         with tempfile.TemporaryDirectory() as folder:
-            source = Path(folder, "source.mp4")
+            source, output = Path(folder, "source.mp4"), Path(folder, "output.mp4")
             source.write_bytes(b"source")
+            output.write_bytes(b"old export")
             event = threading.Event()
             event.set()
             with patch.object(editor, "probe_source") as probe, self.assertRaises(editor.ExportCancelled):
-                editor.export_source_ranges(source, [{"start": 0, "end": 1}], Path(folder, "out.mp4"), cancel_event=event)
+                editor.export_source_ranges(source, [{"start": 0, "end": 1}], output, cancel_event=event)
             probe.assert_not_called()
+            self.assertEqual(output.read_bytes(), b"old export")
+            self.assertFalse(list(Path(folder).glob(".hi-lite-export-*")))
+
+    def test_cancel_during_render_keeps_old_output_and_does_not_reprobe(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source, output = Path(folder, "source.mp4"), Path(folder, "output.mp4")
+            source.write_bytes(b"source")
+            output.write_bytes(b"old export")
+            info = {"duration": 3, "width": 160, "height": 90, "fps": 10, "has_audio": False}
+            event = threading.Event()
+            commands = []
+
+            def cancel_during_first(command, **kwargs):
+                commands.append(command)
+                Path(kwargs.get("cwd", folder), command[-1]).write_bytes(b"partial")
+                # The first range render completed, but the user cancelled
+                # while it ran. The renderer must notice before the next range.
+                event.set()
+
+            with patch.object(editor, "probe_source", return_value=info) as probe, \
+                 patch.object(editor, "_run_process", side_effect=cancel_during_first), \
+                 self.assertRaises(editor.ExportCancelled):
+                editor.export_source_ranges(source, [{"start": 0, "end": 1}, {"start": 2, "end": 3}],
+                                            output, cancel_event=event)
+            # The source is probed once before the first render; cancelling
+            # during that render must not trigger another probe.
+            self.assertEqual(probe.call_count, 1)
+            self.assertEqual(len(commands), 1)
+            self.assertEqual(output.read_bytes(), b"old export")
+            self.assertFalse(list(Path(folder).glob(".hi-lite-export-*")))
+
+    def test_cancel_at_publish_boundary_preserves_old_output(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source, output = Path(folder, "source.mp4"), Path(folder, "output.mp4")
+            source.write_bytes(b"source")
+            output.write_bytes(b"old export")
+            info = {"duration": 3, "width": 160, "height": 90, "fps": 10, "has_audio": False}
+            event = threading.Event()
+            commands = []
+
+            def cancel_during_mux(command, **kwargs):
+                commands.append(command)
+                Path(kwargs.get("cwd", folder), command[-1]).write_bytes(b"complete")
+                # Cancel after the final mux wrote a complete file: the staged
+                # result must still not replace the caller's existing output.
+                event.set()
+
+            with patch.object(editor, "probe_source", return_value=info), \
+                 patch.object(editor, "_run_process", side_effect=cancel_during_mux), \
+                 self.assertRaises(editor.ExportCancelled):
+                editor.export_source_ranges(source, [{"start": 0, "end": 1}], output, cancel_event=event)
+            self.assertEqual(len(commands), 2)  # one range render plus the final mux
+            self.assertEqual(output.read_bytes(), b"old export")
+            self.assertFalse(list(Path(folder).glob(".hi-lite-export-*")))
+
+    def test_cues_that_vanish_at_ass_grain_are_not_silently_unburned(self):
+        # A 3ms cue overlaps the cut and is representable in SRT, but rounds to
+        # a zero-length ASS event. Burning it would produce a caption-free reel,
+        # so the export must refuse instead of succeeding quietly.
+        style = editor.validate_export_settings()["caption_style"]
+        self.assertEqual(editor._ass_subtitles([{"start": 0, "end": .003, "text": "sliver"}],
+                                               90, 160, style).count("Dialogue:"), 0)
+        with tempfile.TemporaryDirectory() as folder:
+            source, output = Path(folder, "source.mp4"), Path(folder, "output.mp4")
+            source.write_bytes(b"source")
+            output.write_bytes(b"old export")
+            info = {"duration": 3, "width": 160, "height": 90, "fps": 10, "has_audio": False}
+            with patch.object(editor, "probe_source", return_value=info):
+                with self.assertRaises(editor.NoCaptions):
+                    editor.export_source_ranges(source, [{"start": 0, "end": 1}], output,
+                                                captions=[{"start": 0, "end": .003, "text": "sliver"}],
+                                                settings={"burn_captions": True})
+            self.assertEqual(output.read_bytes(), b"old export")
+            self.assertFalse(list(Path(folder).glob(".hi-lite-export-*")))
+
+    def test_burn_captions_without_any_selected_caption_raises_no_captions(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source, output = Path(folder, "source.mp4"), Path(folder, "output.mp4")
+            source.write_bytes(b"source")
+            output.write_bytes(b"old export")
+            info = {"duration": 3, "width": 160, "height": 90, "fps": 10, "has_audio": False}
+            # Empty cues, blank-text cues and cues that all sit outside the
+            # selection share one outcome: nothing would be burned.
+            for captions in ([], [{"start": 0, "end": 1, "text": "   "}],
+                             [{"start": 2, "end": 3, "text": "unselected"}]):
+                with self.subTest(captions=captions), patch.object(editor, "probe_source", return_value=info):
+                    with self.assertRaises(editor.NoCaptions):
+                        editor.export_source_ranges(source, [{"start": 0, "end": 1}], output,
+                                                    captions=captions, settings={"burn_captions": True})
+                self.assertEqual(output.read_bytes(), b"old export")
+                self.assertFalse(list(Path(folder).glob(".hi-lite-export-*")))
+            # Without burn-in the same selection is a valid, caption-free export.
+            with patch.object(editor, "probe_source", return_value=info), \
+                 patch.object(editor, "_run_process", side_effect=lambda command, **kwargs: Path(
+                     kwargs.get("cwd", folder), command[-1]).write_bytes(b"finished")):
+                result = editor.export_source_ranges(source, [{"start": 0, "end": 1}], output,
+                                                     captions=[], settings={"burn_captions": False})
+            self.assertEqual(result["subtitles"], {})
 
 
 @unittest.skipUnless(shutil.which(editor.FFMPEG) and shutil.which(editor.FFPROBE), "ffmpeg and ffprobe required")
@@ -265,6 +392,59 @@ class RealMediaExport(unittest.TestCase):
                     averages = [sum(frame[index::3]) / (len(frame) / 3) for index in range(3)]
                     self.assertGreater(averages[channel], 150, averages)
                     self.assertEqual(averages.index(max(averages)), channel)
+
+    def test_reverse_order_with_distinct_crops_exports_source_pixel_order(self):
+        # A three-band source whose left/right halves hold different colors, so
+        # the exported pixel proves which source moment and which focal crop
+        # produced each output moment. Ranges are deliberately reversed and a
+        # later range carries no crop, exercising the global focal fallback.
+        bands = Path(self.folder.name, "bands.mp4")
+        filters = ("color=c=black:s=320x180:r=10,"
+                   "drawbox=c=magenta:t=fill:x=0:y=0:w=160:h=180:enable='gte(t,2)',"
+                   "drawbox=c=cyan:t=fill:x=160:y=0:w=160:h=180:enable='gte(t,2)',"
+                   "drawbox=c=blue:t=fill:x=0:y=0:w=160:h=180:enable='gte(t,1)*lt(t,2)',"
+                   "drawbox=c=yellow:t=fill:x=160:y=0:w=160:h=180:enable='gte(t,1)*lt(t,2)',"
+                   "drawbox=c=red:t=fill:x=0:y=0:w=160:h=180:enable='lt(t,1)',"
+                   "drawbox=c=lime:t=fill:x=160:y=0:w=160:h=180:enable='lt(t,1)'")
+        subprocess.run([editor.FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i", filters, "-t", "3",
+                        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-threads", "1", str(bands)], check=True)
+        palette = {"magenta": (255, 0, 255), "yellow": (255, 255, 0), "red": (255, 0, 0),
+                   "lime": (0, 255, 0), "blue": (0, 0, 255), "cyan": (0, 255, 255)}
+        cuts = [{"start": 2.0, "end": 2.4, "crop": {"x": 0}},        # left: magenta
+                {"start": 1.0, "end": 1.4, "crop": {"x": 1}},        # right: yellow
+                {"start": 0.0, "end": 0.4, "crop": {"x": 0}},        # left: red
+                {"start": 0.5, "end": 0.9}]                          # global x=1: lime
+        output = Path(self.folder.name, "reverse-crops.mp4")
+        result = editor.export_source_ranges(bands, cuts, output,
+            settings={"aspect_ratio": "9:16", "crop": {"x": 1, "y": .5}})
+        self.assertEqual(result["duration"], 1.6)
+        # Output moments follow the caller's order, not chronological source order.
+        for moment, expected in ((.2, "magenta"), (.6, "yellow"), (1.0, "red"), (1.4, "lime")):
+            with self.subTest(moment=moment):
+                frame = subprocess.check_output([editor.FFMPEG, "-v", "error", "-ss", str(moment),
+                    "-i", str(output), "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+                averages = [sum(frame[index::3]) / (len(frame) / 3) for index in range(3)]
+                nearest = min(palette, key=lambda name: sum((averages[i] - palette[name][i]) ** 2
+                                                             for i in range(3)))
+                self.assertEqual(nearest, expected, averages)
+        self.assertFalse(list(Path(self.folder.name).glob(".hi-lite-export-*")))
+
+    def test_long_caption_across_adjacent_seam_is_burned_once(self):
+        # Two adjacent ranges with different crops render separately but share
+        # source time, so a cue spanning their seam must stay one subtitle and
+        # one burned line, not become a duplicate. A gapped seam is the contrast.
+        cues = [{"start": 0, "end": 2, "text": "long seam cue"}]
+        adjacent = [{"start": 0, "end": 1, "crop": {"x": 0}},
+                    {"start": 1, "end": 2, "crop": {"x": 1}}]
+        output = Path(self.folder.name, "adjacent-caption.mp4")
+        result = editor.export_source_ranges(self.source, adjacent, output, captions=cues,
+                                             settings={"burn_captions": True, "aspect_ratio": "1:1"})
+        self.assertEqual(result["subtitles"]["srt"].count("long seam cue"), 1)
+        self.assertIn("00:00:00,000 --> 00:00:02,000", result["subtitles"]["srt"])
+        gapped = [{"start": 0, "end": .5}, {"start": 1.5, "end": 2}]
+        gap_result = editor.export_source_ranges(self.source, gapped, Path(self.folder.name, "gapped-caption.mp4"),
+                                                 captions=cues)
+        self.assertEqual(gap_result["subtitles"]["srt"].count("long seam cue"), 2)
 
     def test_caption_burn_in_and_silent_source(self):
         silent = Path(self.folder.name, "silent.mp4")

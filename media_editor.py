@@ -8,9 +8,12 @@ Public API:
 
 Ranges remain in the supplied order (including repeats). All timestamps passed
 in are original-source seconds. ``remap_captions`` and ``export_subtitles`` map
-edited captions onto the cut timeline. A range can override the global
-``crop: {x: 0.5, y: 0.5}`` focal point, normalized to [0, 1]. Output dimensions
-use the largest even-sized crop that fits the source, without upscaling.
+edited captions onto the cut timeline; only physically contiguous source time
+keeps one cue intact, so gaps and backwards jumps split it. A range can override
+the global ``crop: {x: 0.5, y: 0.5}`` focal point, normalized to [0, 1]. Output
+dimensions use the largest even-sized crop that fits the source, without
+upscaling. ``burn_captions`` raises ``NoCaptions`` when no selected cue could
+actually be burned.
 
 Only requested ranges are rendered, in a private staging directory. Processes
 are reaped on failure/cancellation, and the destination is replaced only after
@@ -317,16 +320,24 @@ def crop_geometry(width, height, aspect_ratio="original", crop=None):
     return {"width": out_width, "height": out_height, "x": int(x) // 2 * 2, "y": int(y) // 2 * 2}
 
 
+def _ass_timestamp(value):
+    """Centisecond ASS time; two cues are distinguishable only at that grain."""
+    total = int(value * 100 + 0.5)
+    seconds, fraction = divmod(total, 100)
+    minutes, seconds = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}:{minutes:02d}:{seconds:02d}.{fraction:02d}"
+
+
+def _ass_visible(cue):
+    # A cue shorter than a centisecond would render for no frames after ASS
+    # rounding, so it cannot count as burned text.
+    return _ass_timestamp(cue["start"]) != _ass_timestamp(cue["end"])
+
+
 def _ass_subtitles(cues, width, height, style):
     def color(value):
         return "&H00" + value[5:7] + value[3:5] + value[1:3]
-
-    def timestamp(value):
-        total = int(value * 100 + 0.5)
-        seconds, fraction = divmod(total, 100)
-        minutes, seconds = divmod(seconds, 60)
-        hours, minutes = divmod(minutes, 60)
-        return f"{hours}:{minutes:02d}:{seconds:02d}.{fraction:02d}"
 
     # Font size is expressed against a 1080px short edge, preserving legibility
     # relative to the viewport when the user switches portrait/square/landscape.
@@ -348,8 +359,9 @@ def _ass_subtitles(cues, width, height, style):
     for cue in cues:
         # Neutralize ASS override markup: user-edited text is never filter code.
         text = cue["text"].replace("\\", "\uFE68").replace("{", "\uFF5B").replace("}", "\uFF5D").replace("\n", "\\N")
-        if timestamp(cue["start"]) != timestamp(cue["end"]):
-            lines.append(f"Dialogue: 0,{timestamp(cue['start'])},{timestamp(cue['end'])},Default,,0,0,0,,{text}\n")
+        if _ass_visible(cue):
+            lines.append(f"Dialogue: 0,{_ass_timestamp(cue['start'])},{_ass_timestamp(cue['end'])},"
+                         f"Default,,0,0,0,,{text}\n")
     return header + "".join(lines)
 
 
@@ -381,8 +393,11 @@ def export_source_ranges(source_path, ranges, output_path, *, captions=None, set
     subtitles = {}
     if cues:
         subtitles = {fmt: serialize_subtitles(cues, fmt) for fmt in ("srt", "vtt")}
-    elif options["burn_captions"]:
-        raise NoCaptions("No captions overlap the selected source ranges.")
+    if options["burn_captions"] and not any(_ass_visible(cue) for cue in cues):
+        # No cue overlaps the cut, or the only overlaps are too short to render
+        # at ASS's centisecond grain. Either way burning would ship a
+        # caption-free video, so refuse instead of succeeding quietly.
+        raise NoCaptions("No captions in the selected ranges can be burned.")
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".hi-lite-export-", dir=output.parent) as temporary:
         stage = Path(temporary)
