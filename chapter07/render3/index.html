@@ -16,19 +16,26 @@
 
     <div class="control-panel">
       <label class="control-item">
-        设定分形次数：
-        <input id="divide" type="number" value="5" min="0" max="13"/>
+        设定分形次数（0~13 整数）：
+        <input id="divide" type="number" value="5" min="0" max="13" step="1"/>
       </label>
-
-      <button id="reset" class="control-item">重新绘制</button>
 
       <label class="control-item">
-        设定模糊距离：
-        <input id="distance" type="number" value="1"/>
+        设定模糊距离（纹理坐标偏移）：
+        <input id="distance" type="number" value="0.001" step="any"/>
       </label>
 
+      <p class="control-item hint">修改输入只更新“待应用参数”，点击“重新绘制”后才会生效并重新生成底图。</p>
+
+      <button id="reset" class="control-item">重新绘制</button>
       <button id="once" class="control-item">应用模糊</button>
       <button id="play" class="control-item">播放/暂停</button>
+
+      <div class="control-item applied-panel">
+        <div>当前已应用参数：</div>
+        <div>分形次数：<span id="applied-divide">-</span></div>
+        <div>模糊距离：<span id="applied-distance">-</span></div>
+      </div>
     </div>
   </div>
 

@@ -8,7 +8,9 @@ uniform float blurDistance;
 void main()
 {
   float s = 4.0;
-  float d = blurDistance / 1024.0;
+  // 模糊距离直接作为纹理坐标偏移使用，不再做任何缩放：
+  // 距离为 0 时四个采样点都落在当前纹素上，输出与原图一致。
+  float d = blurDistance;
   float x = fTexCoord.x;
   float y = fTexCoord.y;
 
