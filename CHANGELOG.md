@@ -6,6 +6,19 @@ This project adheres to [Semantic Versioning](https://semver.org) and follows th
 
 ---
 
+## [Unreleased]
+
+### Fixed
+
+- **Media**: stall detection no longer restarts while paused, AirPlay casting or already stalled; `media/stall/begin` fires only when the playhead advanced no more than 0.2 seconds within the `stallTimeout` window, and `media/stall/end` is published exactly once on recovery (playhead advancing more than 0.2 seconds or pause). A stalled state can no longer get stuck after recovery, and switching source resets any in-flight stall check. Setting `stallTimeout` to `0` fully disables the checks.
+- **Media**: switching sources while the former source is still loading cancels the pending load task before starting the new one, and a repeated request for the same `src` reuses the pending promise instead of loading twice.
+- **Media**: load failures are now classified as either a network error (HTTP status `>= 300`, or a failed/CORS-blocked HEAD probe, carrying the status code or reason) or an unsupported-format error. A reported unsupported format on a non `blob:` URL is verified with a HEAD probe first; the result is published via `media/error` and rejects the load promise. Cancelled loads no longer emit a stale error.
+- **Media**: the stall timer is now cleared with `clearTimeout` (it was incorrectly using `clearInterval`).
+
+### Added
+
+- **Tests**: local, dependency-free Node test runner suite (`npm test`) with controllable fake media element and player doubles, covering stall begin/recovery, disabled detection, source-switch promise reuse/cancellation and both load failure paths.
+
 ## [1.4.0] - 2026-09-07
 
 ### Added

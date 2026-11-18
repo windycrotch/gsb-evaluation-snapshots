@@ -128,6 +128,7 @@
         "build:dev": "vite build --mode dev:mjs --config ./scripts/build/vite.config.js && vite build --mode dev:iife --config ./scripts/build/vite.config.js",
         "lint": "echo 'Running ESLint...' && eslint src/** lib/** && echo 'Running Stylelint...' && stylelint assets/scss/**/*.scss",
         "lint:fix": "echo 'Running ESLint FIX...' && eslint src/** lib/** --fix && echo 'Running Stylelint FIX...' && stylelint assets/scss/**/*.scss --fix",
+        "test": "node --test \"test/**/*.test.js\"",
         "doc": "rimraf ./docs/jsdoc && jsdoc --configure ./scripts/docs/jsdoc.conf.json"
     }
 }

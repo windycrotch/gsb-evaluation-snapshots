@@ -316,7 +316,7 @@ export default class Media {
               { src } = metaData,
               prevTask = this.#loadTask;
 
-        // prevent double loading of the same resource, just return the pending priomise instead
+        // prevent double loading of the same resource, just reuse the pending promise instead
         if (src && src === this.#metaData?.src && prevTask?.status === 'pending') return prevTask.promise;
         // before executing new requests, cancel the previous one first.
         if (prevTask?.status === 'pending') await prevTask.cancel().catch(() => {});
@@ -337,7 +337,11 @@ export default class Media {
             pictureInPicture: rememberState ? this.#state.pictureInPicture : pictureInPicture
         };
 
+        // any stall detection from the former source must not carry over to the new load
+        clearTimeout(this.#stall.checkId);
+        this.#player.unsubscribe('media/timeupdate', this.#onStallEnd);
         this.#stall.state = 'clear';
+        this.#stall.preStallTime = -1;
 
         // try plugins first for a suitable handler
         for (const plugin of this.#plugins) {
@@ -376,6 +380,7 @@ export default class Media {
         this.#metaData.height = this.#videoEle.videoHeight;
 
         this.#player.publish('media/ready', clone(this.#metaData), this.#apiKey);
+        // AsyncTask resolves only while pending, so a late event of a cancelled load is a no-op
         this.#loadTask.resolve(clone(this.#metaData));
 
         if (this.#savedState.time > 0 && this.#state.seekable.length && !this.#state.liveStream) {
@@ -538,7 +543,11 @@ export default class Media {
      */
     #onStall = () => {
 
-        if (this.#stall.state === 'delaying' || this.#stall.state === 'stalled' || !this.#config.stallTimeout) return;
+        // stallTimeout of 0 disables stall checks entirely
+        if (!this.#config.stallTimeout) return;
+        // do not (re)start detection while paused, AirPlay casting, or a check is already running
+        if (this.#state.paused || this.#player.getState('media.airPlayActive')) return;
+        if (this.#stall.state === 'delaying' || this.#stall.state === 'stalled') return;
 
         this.#stall.preStallTime = this.#state.currentTime;
 
@@ -546,11 +555,19 @@ export default class Media {
 
             clearTimeout(this.#stall.checkId);
 
+            // playback resumed before the timeout elapsed, so there is no stall
+            if (Math.abs(this.#state.currentTime - this.#stall.preStallTime) > 0.2) {
+                this.#stall.state = 'clear';
+                this.#player.unsubscribe('media/timeupdate', this.#onStallEnd);
+                return;
+            }
             // prevent AirPlay stalling in certain situations (eg casting a live stream)
-            // TODO: evaulate better solution.
-            if (this.#player.getState('media.airPlayActive')) return;
-            if (Math.abs(this.#state.currentTime - this.#stall.preStallTime) > 0.2) return;
-            // playhead hasnt moved, so it seems we are stalled
+            if (this.#player.getState('media.airPlayActive') || this.#state.paused) {
+                this.#stall.state = 'clear';
+                this.#player.unsubscribe('media/timeupdate', this.#onStallEnd);
+                return;
+            }
+            // playhead hasnt moved more than 0.2 seconds within the timeout window, so it seems we are stalled
             this.#stall.state = 'stalled';
             this.#player.publish('media/stall/begin', this.#apiKey);
 
@@ -574,14 +591,14 @@ export default class Media {
      */
     #onStallEnd = () => {
 
-        const delta = Math.abs(this.#state.currentTime - this.#stall.preStallTime);
-
-        if (this.#stall.state !== 'clear' && (delta > 0.2 || this.#state.paused)) {
+        // recovery means the playhead advanced more than 0.2 seconds since the stall began, or playback was paused
+        if (this.#stall.state !== 'clear' && (this.#state.currentTime - this.#stall.preStallTime > 0.2 || this.#state.paused)) {
+            // end is published only once, and only if a begin was actually fired
             if (this.#stall.state === 'stalled') this.#player.publish('media/stall/end', this.#apiKey);
+            clearTimeout(this.#stall.checkId);
+            this.#player.unsubscribe('media/timeupdate', this.#onStallEnd);
             this.#stall.preStallTime = -1;
             this.#stall.state = 'clear';
-            this.#player.unsubscribe('media/timeupdate', this.#onStallEnd);
-            clearTimeout(this.#stall.checkId);
         }
 
     };
@@ -616,7 +633,7 @@ export default class Media {
      */
     #onStreamEvent = async event => {
 
-        const { type, target } = event;
+        const { type } = event;
 
         if (type === 'timeupdate' && (isNaN(this.#videoEle.duration) || !isFinite(this.#videoEle.duration))) {
             // prevent chrome from firing timeupdates when medium is not loaded yet
@@ -631,23 +648,66 @@ export default class Media {
         // Fire a pause event in case an error occurred (Because native engines seem to forget that!)
         this.#player.publish('media/pause', this.#apiKey);
 
-        let error = event.error || target.error || {};
-        const src = this.#player.getState('media.src');
+        const error = await this.#classifyStreamError(event);
 
-        if (error?.code === error.MEDIA_ERR_SRC_NOT_SUPPORTED && !src.startsWith('blob:')) {
-            // check if 'MEDIA_ERR_SRC_NOT_SUPPORTED' actually is due to an http error
-            try {
-                const response = await fetch(src, { method: 'HEAD' });
-                // definitely a http error, so switch errors with a more appropriate (synthetic) one
-                if (response.status >= 300) error = new ExtendedMediaError(2, { status: response.status, message: `HTTP ERROR: ${response.status}` });
-            } catch (e) {
-                // fails without response, most likely a CORS issue, but still counts as network error
-                error = e.constructor === ExtendedMediaError ? e : new ExtendedMediaError(2, { message: e.message, cause: e });
-            }
-        }
+        // classification was aborted because the load was cancelled, so nothing to report
+        if (!error) return;
+
+        const loadTask = this.#loadTask;
 
         this.#player.publish('media/error', { error }, this.#apiKey);
-        if (this.#loadTask.status === 'pending') this.#loadTask.reject(error);
+        if (loadTask?.status === 'pending') loadTask.reject(error);
+
+    };
+
+    /**
+     * Normalizes a native media error into either a network error (code 2, carrying HTTP status or reason)
+     * or an unsupported-format error (code 4). A 'MEDIA_ERR_SRC_NOT_SUPPORTED' on a non blob: URL is
+     * probed with a HEAD request first, because browsers often report unreachable or CORS-blocked
+     * resources as unsupported format.
+     * @param   {Event}                          event  The native error event.
+     * @returns {Promise<ExtendedMediaError|MediaError>}  The classified error.
+     */
+    #classifyStreamError = async event => {
+
+        const error = event.error || event.target.error || {},
+              src = this.#metaData?.src || this.#player.getState('media.src') || '';
+
+        // native network errors (e.g. connection loss) stay network errors, enriched with a reason
+        if (error.code === ExtendedMediaError.MEDIA_ERR_NETWORK) {
+            if (error instanceof ExtendedMediaError) return error;
+            return new ExtendedMediaError(ExtendedMediaError.MEDIA_ERR_NETWORK, {
+                message: error.message || 'Network error while loading media.',
+                cause: error
+            });
+        }
+
+        const isUnsupported = error.code === ExtendedMediaError.MEDIA_ERR_SRC_NOT_SUPPORTED;
+
+        // format error on blob: URLs cannot be re-validated over HTTP, and other codes (abort/decode/drm) pass through unchanged
+        if (!isUnsupported || src.startsWith('blob:')) return error;
+
+        // the browser claims the format is unsupported - verify whether the resource is actually reachable first
+        let response;
+
+        try {
+            response = await fetch(src, { method: 'HEAD', signal: this.#loadTask?.signal });
+        } catch (e) {
+            // a cancelled load must not produce any error classification
+            if (e.name === 'AbortError') return null;
+            // request failed without response, most likely a CORS issue, but still counts as a network error
+            return new ExtendedMediaError(ExtendedMediaError.MEDIA_ERR_NETWORK, { message: e.message, cause: e });
+        }
+
+        // definitely an http error, so switch errors with a more appropriate (synthetic) one
+        if (response.status >= 300) {
+            return new ExtendedMediaError(ExtendedMediaError.MEDIA_ERR_NETWORK, { status: response.status, message: `HTTP ERROR: ${response.status}` });
+        }
+
+        // resource is reachable, so the browser was right: the format is genuinely not supported
+        return error instanceof ExtendedMediaError
+            ? error
+            : new ExtendedMediaError(ExtendedMediaError.MEDIA_ERR_SRC_NOT_SUPPORTED, { message: error.message || 'Media format not supported.', cause: error });
 
     };
 
@@ -734,7 +794,8 @@ export default class Media {
             this.#videoEle.removeEventListener(eventName, this.#onStreamEvent);
         });
 
-        clearInterval(this.#stall.checkId);
+        clearTimeout(this.#stall.checkId);
+        this.#stall.checkId = -1;
         this.#player.unsubscribe('media/timeupdate', this.#onStallEnd);
         this.#videoEle.removeEventListener('loadedmetadata', this.#onLoaded);
 
