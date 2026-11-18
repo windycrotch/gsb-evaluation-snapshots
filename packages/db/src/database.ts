@@ -146,6 +146,15 @@ export interface VideoPostStatsTable {
 export type VideoMediaStatus = 'pending' | 'processing' | 'ready' | 'failed' | 'removing'
 
 /**
+ * Where in the media pipeline a job is, for observability. Unlike `status`
+ * (which drives claiming), `stage` is set as the worker progresses:
+ * `queued` → `downloading` → `transcoding` → `publishing` → `done`, or
+ * `failed` from any step; `removing` tracks rendition deletion.
+ */
+export type VideoMediaStage =
+  'queued' | 'downloading' | 'transcoding' | 'publishing' | 'done' | 'failed' | 'removing'
+
+/**
  * Derived HLS renditions of one video blob, and the media service's job queue.
  * Keyed by blob, not post: posts reusing an upload share renditions.
  */
@@ -154,6 +163,8 @@ export interface VideoMediaTable {
   /** CID of the source blob on the author's PDS; also the media storage key. */
   video_cid: string
   status: ColumnType<VideoMediaStatus, VideoMediaStatus | undefined, VideoMediaStatus>
+  /** Pipeline step the job is at; updated as the worker progresses. */
+  stage: ColumnType<VideoMediaStage, VideoMediaStage | undefined, VideoMediaStage>
   attempts: Generated<number>
   last_error: string | null
   /** When a worker took the job; stale claims are retried. */

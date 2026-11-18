@@ -10,6 +10,7 @@ export {
   type VideoCommentTable,
   type VideoLikeTable,
   type VideoMediaStatus,
+  type VideoMediaStage,
   type VideoMediaTable,
   type VideoPostStatsTable,
   type VideoPostTable,

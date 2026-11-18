@@ -1,4 +1,4 @@
-import { purpose, type Database } from '@openreel/db'
+import { purpose, type Database, type VideoMediaStage } from '@openreel/db'
 import { sql, type Kysely } from 'kysely'
 
 export interface Job {
@@ -12,9 +12,11 @@ const STALE_CLAIM = sql`interval '15 minutes'`
 
 /**
  * Claims the oldest runnable job: pending, failed but due a retry (backing off
- * a minute per attempt), or claimed by a worker that went quiet. `SKIP LOCKED`
- * lets several workers poll the same table without blocking each other. Blobs
- * no post references any more (deleted before transcoding) are skipped.
+ * a minute per attempt), or processing but not updated for 15 minutes (the
+ * worker heartbeats via `stage` changes, so silence means it died).
+ * `SKIP LOCKED` lets several workers poll the same table without blocking each
+ * other. Blobs no post references any more (deleted before transcoding) are
+ * skipped.
  */
 export async function claimJob(
   db: Kysely<Database>,
@@ -22,7 +24,8 @@ export async function claimJob(
 ): Promise<Job | undefined> {
   const query = sql<{ author_did: string; video_cid: string; attempts: number }>`
     update video_media
-    set status = 'processing', claimed_at = now(), attempts = attempts + 1, updated_at = now()
+    set status = 'processing', stage = 'downloading',
+        claimed_at = now(), attempts = attempts + 1, updated_at = now()
     where (author_did, video_cid) = (
       select m.author_did, m.video_cid from video_media m
       where (
@@ -30,7 +33,7 @@ export async function claimJob(
           or (m.status = 'failed' and m.attempts < ${maxAttempts}
               and m.updated_at < now() - m.attempts * interval '1 minute')
           or (m.status = 'processing' and m.attempts < ${maxAttempts}
-              and m.claimed_at < now() - ${STALE_CLAIM})
+              and m.updated_at < now() - ${STALE_CLAIM})
         )
         and exists (
           select 1 from video_post p
@@ -62,7 +65,7 @@ export interface Removal {
 export async function claimRemoval(db: Kysely<Database>): Promise<Removal | undefined> {
   const query = sql<{ author_did: string; video_cid: string }>`
     update video_media
-    set claimed_at = now(), updated_at = now()
+    set stage = 'removing', claimed_at = now(), updated_at = now()
     where (author_did, video_cid) = (
       select m.author_did, m.video_cid from video_media m
       where m.status = 'removing'
@@ -94,6 +97,25 @@ export async function completeRemoval(db: Kysely<Database>, removal: Removal): P
   )
 }
 
+/**
+ * Records which pipeline step a claimed job is at, so operators can see where
+ * each video is stuck. Only meaningful while the job is `processing`.
+ */
+export async function setStage(
+  db: Kysely<Database>,
+  job: Job,
+  stage: VideoMediaStage,
+): Promise<void> {
+  await purpose('Record job stage', () =>
+    db
+      .updateTable('video_media')
+      .set({ stage, updated_at: new Date() })
+      .where('author_did', '=', job.authorDid)
+      .where('video_cid', '=', job.videoCid)
+      .execute(),
+  )
+}
+
 export async function completeJob(
   db: Kysely<Database>,
   job: Job,
@@ -103,6 +125,7 @@ export async function completeJob(
     .updateTable('video_media')
     .set({
       status: 'ready',
+      stage: 'done',
       width: media.width,
       height: media.height,
       duration_ms: media.durationMs,
@@ -119,15 +142,34 @@ export async function failJob(db: Kysely<Database>, job: Job, error: string): Pr
   await purpose('Record transcode failure', () =>
     db
       .updateTable('video_media')
-      .set({ status: 'failed', last_error: error.slice(0, 2_000), updated_at: new Date() })
+      .set({
+        status: 'failed',
+        stage: 'failed',
+        last_error: error.slice(0, 2_000),
+        updated_at: new Date(),
+      })
       .where('author_did', '=', job.authorDid)
       .where('video_cid', '=', job.videoCid)
       .execute(),
   )
 }
 
-/** Job counts by status, for the status endpoint. */
-export async function queueStats(db: Kysely<Database>): Promise<Record<string, number>> {
+/** Job counts by status plus the oldest pending job's wait, for the status endpoint. */
+export interface QueueStats {
+  pending: number
+  processing: number
+  ready: number
+  failed: number
+  removing: number
+  /** Seconds the oldest `pending` job has been waiting; 0 when none is. */
+  oldestPendingSeconds: number
+}
+
+/**
+ * Reads the queue depth straight from the table: every status is counted even
+ * when it has no rows, and an empty queue reports zeros rather than an error.
+ */
+export async function queueStats(db: Kysely<Database>): Promise<QueueStats> {
   const rows = await purpose('Count transcode jobs by status', () =>
     db
       .selectFrom('video_media')
@@ -135,13 +177,23 @@ export async function queueStats(db: Kysely<Database>): Promise<Record<string, n
       .groupBy('status')
       .execute(),
   )
-  const stats: Record<string, number> = {
+  const stats: QueueStats = {
     pending: 0,
     processing: 0,
     ready: 0,
     failed: 0,
     removing: 0,
+    oldestPendingSeconds: 0,
   }
   for (const row of rows) stats[row.status] = Number(row.count)
+
+  const oldest = await purpose('Oldest pending job wait', () =>
+    sql<{ wait: number | null }>`
+      select greatest(extract(epoch from now() - min(created_at)), 0)::integer as wait
+      from video_media
+      where status = 'pending'
+    `.execute(db),
+  )
+  stats.oldestPendingSeconds = oldest.rows[0]?.wait ?? 0
   return stats
 }

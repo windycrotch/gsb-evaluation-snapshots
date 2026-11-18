@@ -13,6 +13,7 @@ import {
   completeJob,
   completeRemoval,
   failJob,
+  setStage,
   type Job,
   type Removal,
 } from './jobs.ts'
@@ -121,11 +122,13 @@ export class Worker {
         },
       )
       const out = join(work, 'out')
+      await setStage(db, job, 'transcoding')
       const result = await traceStep(
         'Transcode to HLS renditions',
         { kind: 'work', what: 'ffmpeg → HLS' },
         () => transcode(source, out),
       )
+      await setStage(db, job, 'publishing')
       await traceStep(
         'Publish HLS renditions',
         { kind: 'store', target: store.name },

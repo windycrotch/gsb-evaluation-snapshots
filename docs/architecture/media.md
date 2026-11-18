@@ -21,7 +21,7 @@ iOS ──HLS──▶ media-cdn (nginx) ◀────────────
 |---|---|---|
 | AppView | `GET /xrpc/social.openreel.feed.getFeed?limit&cursor&feed` | Hydrated, playable posts. `feed` defaults to the chronological feed |
 | feedgen | `GET /xrpc/social.openreel.feed.getFeedSkeleton?feed&limit&cursor` | Post URIs only |
-| media | `GET /status` | Job counts by status |
+| media | `GET /status` | Job counts by status, plus the oldest pending job's wait in seconds |
 | media-cdn | `/<did>/<cid>/playlist.m3u8`, `/<did>/<cid>/poster.jpg` | Static files |
 
 On AWS (ADR-0007) the AppView is at `https://dev.openreel.social/appview/`,
@@ -72,8 +72,16 @@ are left behind, unreferenced.
 
 `video_media.status` goes `pending` → `processing` → `ready`, or → `failed`.
 Failed jobs are retried with a one-minute-per-attempt backoff, up to
-`MEDIA_MAX_ATTEMPTS` (3). A job left in `processing` for 15 minutes (a crashed
-worker) is reclaimed. `last_error` holds the most recent failure.
+`MEDIA_MAX_ATTEMPTS` (3). A `processing` job not updated for 15 minutes (a
+crashed worker) is reclaimed. `last_error` holds the most recent failure.
+
+Alongside `status`, `video_media.stage` says where in the pipeline the job is,
+so operations can see what each video is stuck on: `queued` → `downloading` →
+`transcoding` → `publishing` → `done`, or `failed` from any step; `removing`
+while renditions are being deleted. `attempts` counts the tries so far.
+`GET /status` reports the row count per status and how long the oldest
+`pending` job has been waiting (`oldestPendingSeconds`, 0 when the queue is
+empty).
 
 When the last indexed post using a blob goes (deleted by its author, taken
 down, or purged with its account), the AppView sets the row to `removing`.

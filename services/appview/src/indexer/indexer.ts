@@ -110,6 +110,7 @@ export class Indexer {
               .columns(['author_did', 'video_cid'])
               .doUpdateSet({
                 status: 'pending',
+                stage: 'queued',
                 attempts: 0,
                 claimed_at: null,
                 last_error: null,
@@ -478,7 +479,7 @@ async function releaseMedia(db: Kysely<Database>, did: string, videoCids: string
   await purpose('Queue renditions of unused blobs for removal', () =>
     db
       .updateTable('video_media as m')
-      .set({ status: 'removing', claimed_at: null, updated_at: new Date() })
+      .set({ status: 'removing', stage: 'removing', claimed_at: null, updated_at: new Date() })
       .where('m.author_did', '=', did)
       .where('m.video_cid', 'in', [...new Set(videoCids)])
       .where((eb) =>

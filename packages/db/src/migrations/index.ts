@@ -6,6 +6,7 @@ import * as likes from './0003_likes.ts'
 import * as comments from './0004_comments.ts'
 import * as moderation from './0005_moderation.ts'
 import * as likeRatioStats from './0006_like_ratio_stats.ts'
+import * as mediaJobStages from './0007_media_job_stages.ts'
 
 /**
  * Every migration, keyed by name. Kysely applies migrations in the lexical order
@@ -28,6 +29,7 @@ export const migrations: Record<string, Migration> = {
   '0004_comments': comments,
   '0005_moderation': moderation,
   '0006_like_ratio_stats': likeRatioStats,
+  '0007_media_job_stages': mediaJobStages,
 }
 
 /** A `MigrationProvider` backed by the in-memory {@link migrations} map. */
