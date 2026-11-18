@@ -181,6 +181,7 @@ class BaseRenderCanvas:
             "loop": "no-loop",  # set below in most cases
         }
         self._size_info = SizeInfo()
+        self.__last_reported_size = None  # (physical_size, pixel_ratio)
 
         # Events and scheduler
         self._events = EventEmitter()
@@ -372,25 +373,62 @@ class BaseRenderCanvas:
 
     # %% Scheduling and drawing
 
-    def __maybe_emit_resize_event(self):
-        if self._size_info["changed"]:
-            self._size_info["changed"] = False
-            # Keep context up-to-date
-            if self._canvas_context is not None:
-                self._canvas_context._rc_set_size_dict(self._size_info)
-            # Keep event listeners up-to-date
-            lsize = self._size_info["logical_size"]
-            self._events.emit(
-                {
-                    "event_type": "resize",
-                    "width": lsize[0],
-                    "height": lsize[1],
-                    "pixel_ratio": self._size_info["total_pixel_ratio"],
-                    # Would be nice to have more details. But as it is now, PyGfx errors if we add fields it does not know, so let's do later.
-                    # "logical_size": self._size_info["logical_size"],
-                    # "physical_size": self._size_info["physical_size"],
-                }
-            )
+    def _consume_size_change(self) -> bool:
+        """Consume a pending size change, if there is one.
+
+        This is called right before a draw, so that the context and the event
+        listeners are up-to-date with the size that the draw is about to use.
+
+        The size change is only consumed when the draw can actually proceed.
+        When a draw is cancelled (e.g. a zero size, no context, or no draw
+        function), the change is kept, so that the next valid draw reports it.
+
+        Returns whether a resize event was emitted.
+        """
+        if not self._size_info["changed"]:
+            return False
+        # Consume now. If the size changes again during the draw, SizeInfo
+        # marks it as changed again, and the next draw consumes it.
+        self._size_info["changed"] = False
+        return self.__update_context_and_maybe_emit_resize()
+
+    def __update_context_and_maybe_emit_resize(self) -> bool:
+        """Bring the context up-to-date, and emit a resize event if needed.
+
+        The event's size is derived from the same size info that the draw uses,
+        so that the reported size and the drawn (physical) size always match.
+        Repeated reports of the same size are suppressed.
+
+        Returns whether a resize event was emitted.
+        """
+        size_info = self._size_info
+        physical_size = size_info["physical_size"]
+        pixel_ratio = size_info["total_pixel_ratio"]
+
+        # Don't do anything if the size is the same as the last report.
+        if (physical_size, pixel_ratio) == self.__last_reported_size:
+            return False
+        self.__last_reported_size = (physical_size, pixel_ratio)
+
+        # Keep the context up-to-date. It stores the same dict object, but this
+        # call is how it learns about the new size (and e.g. resizes textures).
+        if self._canvas_context is not None:
+            self._canvas_context._rc_set_size_dict(size_info)
+
+        # Keep event listeners up-to-date. The width and height are derived
+        # from the same physical size and pixel ratio as the draw uses.
+        self._events.emit(
+            {
+                "event_type": "resize",
+                "width": physical_size[0] / pixel_ratio,
+                "height": physical_size[1] / pixel_ratio,
+                "pixel_ratio": pixel_ratio,
+                # Would be nice to have more details. But as it is now, PyGfx errors if we add fields it does not know, so let's do later.
+                # "logical_size": self._size_info["logical_size"],
+                # "physical_size": self._size_info["physical_size"],
+            }
+        )
+        return True
 
     def _process_events(self):
         """Process events and animations.
@@ -405,8 +443,12 @@ class BaseRenderCanvas:
         # Get events from the GUI into our event mechanism.
         self._rc_gui_poll()
 
-        # If the canvas changed size, send event
-        self.__maybe_emit_resize_event()
+        # If the canvas changed size, send event.
+        # Note that the change is not consumed here; that happens right before
+        # a draw, so that a size change also triggers a draw in the scheduler,
+        # and the last resize event always matches the size that is drawn.
+        if self._size_info["changed"]:
+            self.__update_context_and_maybe_emit_resize()
 
         # Flush our events, so downstream code can update stuff.
         # Maybe that downstream code request a new draw.
@@ -574,7 +616,9 @@ class BaseRenderCanvas:
                 return
 
             # Make sure that the user-code is up-to-date with the current size before it draws.
-            self.__maybe_emit_resize_event()
+            # This consumes the pending size change, so that a size change during the draw
+            # (which sets 'changed' again) results in another draw in the next tick.
+            self._consume_size_change()
 
             # Emit before-draw
             self._events.emit({"event_type": "before_draw"})

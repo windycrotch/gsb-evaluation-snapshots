@@ -141,6 +141,10 @@ class Scheduler:
 
             # Determine whether to draw or not yet
 
+            # Get canvas object or stop the loop. Make sure to delete this reference asap
+            if (canvas := self.get_canvas()) is None:
+                break
+
             do_draw = False
 
             if not self._enabled:
@@ -158,18 +162,15 @@ class Scheduler:
                     do_draw = True
                 elif self._min_fps > 0 and now - last_draw_time > 1 / self._min_fps:
                     do_draw = True
+                elif canvas._size_info["changed"]:
+                    # A size change should always draw, so that the change is
+                    # consumed right before the draw and the resize event
+                    # matches the size that is drawn.
+                    do_draw = True
             elif self._mode == "manual":
                 pass
             else:
                 raise RuntimeError(f"Unexpected scheduling mode: '{self._mode}'")
-
-            # Get canvas object or stop the loop. Make sure to delete this reference asap
-            if (canvas := self.get_canvas()) is None:
-                break
-
-            # A resize should always draw.
-            if not do_draw:
-                do_draw = canvas._size_info["changed"]
 
             if do_draw:
                 # We do a draw and wait for the full draw to complete, including
