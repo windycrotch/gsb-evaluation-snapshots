@@ -26,12 +26,19 @@ const getShipSpeed = (
 ) => {
   const { power, tacking, sailType, minimumCrew, capacity } = shipData[ship.id];
   const directionDelta = getHeadingWindDelta(heading, wind.direction);
-  const shipWindFactor = shipWindFactorMap[sailType][directionDelta];
 
   /*
-   TODO if wind speed = 0 as a mechanic is introduced,
-    ships with oars should count as having 2 wind speed
+    A pure headwind must never result in a higher speed than a side
+    headwind. Clamp the factor so no data entry can make sailing directly
+    into the wind faster than sailing at an angle to it.
    */
+  const windFactors = shipWindFactorMap[sailType];
+  const shipWindFactor =
+    directionDelta === 4
+      ? Math.min(windFactors[4], windFactors[3])
+      : windFactors[directionDelta];
+
+  // ships with oars can row when there is no wind, counting as a minimum wind speed of 3
   const windSpeed = hasOars(ship.id) ? Math.max(3, wind.speed) : wind.speed;
 
   const propulsionFactor = (power * shipWindFactor * windSpeed) / 150;

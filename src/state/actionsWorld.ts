@@ -121,6 +121,14 @@ export const setDockedFleetPositions = () => {
 };
 
 export const setSail = () => {
+  /*
+    The fleet must have a position before heading out to sea. When docked
+    without one (e.g. at the start of the game), it is placed adjacent to
+    the port. Not having a position while not in port is a bug, in which
+    case a clear error is thrown instead of silently continuing.
+   */
+  setDockedFleetPositions();
+
   state.portId = null;
   state.buildingId = null;
 
@@ -130,4 +138,7 @@ export const setSail = () => {
 
   updateGeneral();
   updateProvisions();
+
+  state.dayAtSea = 0;
+  updateInterface.dayAtSea(state.dayAtSea);
 };

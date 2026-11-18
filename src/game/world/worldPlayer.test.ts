@@ -1,11 +1,13 @@
-import { describe, expect, test, vi } from 'vitest';
+import { beforeEach, describe, expect, test, vi } from 'vitest';
 import createWorldPlayer from './worldPlayer';
+import updateInterface from '../../state/updateInterface';
+import state from '../../state/state';
 import { Position } from '../../types';
 
 vi.mock('../../state/updateInterface', () => ({
   default: {
-    playerFleetDirection: () => {},
-    playerFleetSpeed: () => {},
+    playerFleetDirection: vi.fn(),
+    playerFleetSpeed: vi.fn(),
   },
 }));
 
@@ -255,5 +257,106 @@ describe('worldPlayer', () => {
     player.move('n', collisionAt(collisionTiles));
     player.update();
     expectPositionToBeCloseTo(player.position(), { x: 3, y: 0.9 });
+  });
+});
+
+describe('updateSpeed', () => {
+  const playerFleetSpeed = vi.mocked(updateInterface.playerFleetSpeed);
+
+  beforeEach(() => {
+    playerFleetSpeed.mockClear();
+    state.wind = { direction: 0, speed: 3 };
+  });
+
+  test('pushes the calculated speed once a heading is set', () => {
+    const player = createWorldPlayer({ x: 0, y: 0 }, 0, 'n');
+
+    player.setHeading('n');
+    player.updateSpeed();
+
+    expect(playerFleetSpeed).toHaveBeenCalledTimes(1);
+    expect(playerFleetSpeed).toHaveBeenLastCalledWith(40);
+  });
+
+  test('speed is 0 when no heading is set', () => {
+    const player = createWorldPlayer({ x: 0, y: 0 }, 0, 'n');
+
+    player.updateSpeed();
+
+    expect(playerFleetSpeed).toHaveBeenCalledTimes(1);
+    expect(playerFleetSpeed).toHaveBeenLastCalledWith(0);
+  });
+
+  test('speed is recalculated as 0 when the heading is cleared', () => {
+    const player = createWorldPlayer({ x: 0, y: 0 }, 0, 'n');
+
+    player.setHeading('n');
+    player.updateSpeed();
+    player.setHeading('');
+    player.updateSpeed();
+
+    expect(playerFleetSpeed).toHaveBeenCalledTimes(2);
+    expect(playerFleetSpeed).toHaveBeenLastCalledWith(0);
+  });
+
+  test('repeated calls do not push the same speed again', () => {
+    const player = createWorldPlayer({ x: 0, y: 0 }, 0, 'n');
+
+    player.setHeading('n');
+    player.updateSpeed();
+    player.updateSpeed();
+    player.updateSpeed();
+
+    expect(playerFleetSpeed).toHaveBeenCalledTimes(1);
+  });
+
+  test('a new wind object with identical values does not trigger a push', () => {
+    const player = createWorldPlayer({ x: 0, y: 0 }, 0, 'n');
+
+    player.setHeading('n');
+    player.updateSpeed();
+
+    state.wind = { direction: 0, speed: 3 };
+    player.updateSpeed();
+
+    expect(playerFleetSpeed).toHaveBeenCalledTimes(1);
+  });
+
+  test('pushes again when the wind changes', () => {
+    const player = createWorldPlayer({ x: 0, y: 0 }, 0, 'n');
+
+    player.setHeading('n');
+    player.updateSpeed();
+
+    state.wind = { direction: 1, speed: 3 };
+    player.updateSpeed();
+
+    state.wind = { direction: 1, speed: 5 };
+    player.updateSpeed();
+
+    expect(playerFleetSpeed).toHaveBeenCalledTimes(3);
+  });
+
+  test('detects wind mutated in place', () => {
+    const player = createWorldPlayer({ x: 0, y: 0 }, 0, 'n');
+
+    player.setHeading('n');
+    player.updateSpeed();
+
+    state.wind.speed = 6;
+    player.updateSpeed();
+
+    expect(playerFleetSpeed).toHaveBeenCalledTimes(2);
+  });
+
+  test('pushes again when the heading changes', () => {
+    const player = createWorldPlayer({ x: 0, y: 0 }, 0, 'n');
+
+    player.setHeading('n');
+    player.updateSpeed();
+    player.setHeading('e');
+    player.updateSpeed();
+
+    expect(playerFleetSpeed).toHaveBeenCalledTimes(2);
   });
 });

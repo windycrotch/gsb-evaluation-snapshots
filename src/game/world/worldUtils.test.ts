@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { getHeadingWindDelta } from './worldUtils';
+import { getHeadingWindDelta, hasOars } from './worldUtils';
 import {
   getFromToAccountingForWrapAround,
   getXWrapAround,
@@ -29,6 +29,19 @@ describe('getDirectionDelta', () => {
   test('headwind', () => {
     expect(getHeadingWindDelta(5, 1)).toEqual(4);
     expect(getHeadingWindDelta(2, 6)).toEqual(4);
+  });
+});
+
+describe('hasOars', () => {
+  test('ships with a numerical id of 19 or higher have oars', () => {
+    expect(hasOars('19')).toEqual(true);
+    expect(hasOars('20')).toEqual(true);
+    expect(hasOars('25')).toEqual(true);
+  });
+
+  test('ships with a numerical id below 19 have no oars', () => {
+    expect(hasOars('18')).toEqual(false);
+    expect(hasOars('1')).toEqual(false);
   });
 });
 

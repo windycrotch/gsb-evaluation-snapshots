@@ -28,10 +28,19 @@ vi.mock('../../data/shipData', () => ({
       capacity: 100,
       sailType: 1,
     },
+    '20': {
+      name: 'Ship whose sail data would favor a pure headwind',
+      tacking: 100,
+      power: 20,
+      minimumCrew: 5,
+      capacity: 100,
+      sailType: 3,
+    },
   },
   shipWindFactorMap: {
     1: [10, 8, 6, 4, 2],
     2: [10, 10, 10, 10, 10], // for the tacking test, ensuring that shipWindFactor won’t be a factor
+    3: [10, 10, 10, 4, 8], // pathological data: pure headwind factor exceeds side headwind
   },
 }));
 
@@ -60,6 +69,35 @@ describe('getShipSpeed', () => {
     expect(byWindSpeed(0)).toEqual(byWindSpeed(1));
     expect(byWindSpeed(1)).toEqual(byWindSpeed(3));
     expect(byWindSpeed(4)).toBeGreaterThan(byWindSpeed(3));
+  });
+
+  test('ships with oars keep moving without wind, ships without oars stall', () => {
+    const speedWithoutWind = (id: string) =>
+      getShipSpeed({ id, cargo: [], crew: 5 }, sailor, 0, {
+        direction: 0,
+        speed: 0,
+      });
+
+    expect(speedWithoutWind('19')).toBeGreaterThan(0);
+    expect(speedWithoutWind('1')).toEqual(0);
+  });
+
+  test('a pure headwind is never faster than a side headwind', () => {
+    const byWindDirection = (id: string) => (direction: number) =>
+      getShipSpeed({ id, cargo: [], crew: 5 }, sailor, 0, {
+        direction,
+        speed: 5,
+      });
+
+    // regular sail data
+    expect(byWindDirection('1')(4)).toBeLessThanOrEqual(
+      byWindDirection('1')(3),
+    );
+
+    // even pathological sail data must not make a pure headwind faster
+    expect(byWindDirection('20')(4)).toBeLessThanOrEqual(
+      byWindDirection('20')(3),
+    );
   });
 
   test('depends on wind direction relative to heading', () => {
