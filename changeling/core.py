@@ -10,7 +10,7 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 # opennsfw2 (the NSFW check) is written for Keras 2; TensorFlow 2.16+ ships Keras 3 unless told otherwise
 os.environ.setdefault('TF_USE_LEGACY_KERAS', '1')
 import warnings
-from typing import List
+from typing import List, Optional
 import platform
 import signal
 import shutil
@@ -19,6 +19,7 @@ import onnxruntime
 import tensorflow
 import changeling.globals
 import changeling.metadata
+from changeling import outcome
 from changeling import progress
 import changeling.ui as ui
 from changeling.predictor import predict_image, predict_video
@@ -141,29 +142,73 @@ def update_status(message: str, scope: str = 'CHANGELING.CORE') -> None:
 
 
 def start() -> None:
-    """The whole job, start to finish, reporting each stage to the window's completion bar."""
+    """The whole job, start to finish, reporting each stage to the window's completion bar.
+
+    Headless, the run ends with exactly one structured result line and a matching exit code
+    (changeling.outcome); windowed, only the status bar and the bar change, as before."""
     try:
-        ok, message = run_job()
+        status, message = run_job()
     except SystemExit:
         raise
     except Exception as error:  # the window says what went wrong instead of the job vanishing
-        ok, message = False, f'Failed: {error}'
+        status, message = outcome.FAILED, f'Failed: {error}'
         print(f'[CHANGELING.CORE] {message}')
-    if ok and changeling.globals.output_path and os.path.exists(changeling.globals.output_path):
+    if changeling.globals.headless:
+        if status != outcome.SUCCESS and changeling.globals.target_path:
+            clean_temp(changeling.globals.target_path)  # a refused or failed job leaves no temp frames
+        outcome.conclude(status, message, changeling.globals.output_path if status == outcome.SUCCESS else None)
+    if status == outcome.SUCCESS and changeling.globals.output_path and os.path.exists(changeling.globals.output_path):
         try:
             from gallery import remember            # the Changeling gallery (gallery.py, next to run.py)
             remember(changeling.globals.output_path, 'Imago')
         except ImportError:
             pass
-    progress.finish(message, ok)
+    progress.finish(message, status == outcome.SUCCESS)
+
+
+def check_inputs() -> Optional[str]:
+    """Why the job can never start, or None: the same input checks the frame processors' pre_start() makes."""
+    if not is_image(changeling.globals.source_path):
+        return 'Select an image for source path.'
+    import cv2
+    from changeling.face_analyser import get_one_face
+    if not get_one_face(cv2.imread(changeling.globals.source_path)):
+        return 'No face in source path detected.'
+    if not is_image(changeling.globals.target_path) and not is_video(changeling.globals.target_path):
+        return 'Select an image or video for target path.'
+    return None
+
+
+def output_state() -> tuple:
+    """(existed, mtime) of the output file before the job runs, so an old file left over from an
+    earlier run is never mistaken for this run's result."""
+    path = changeling.globals.output_path
+    if path and os.path.isfile(path):
+        return True, os.path.getmtime(path)
+    return False, None
+
+
+def output_produced(before: tuple) -> bool:
+    """True only if this run (re)wrote the output file: it exists now and is not the stale one from before."""
+    path = changeling.globals.output_path
+    if not path or not os.path.isfile(path):
+        return False
+    existed, mtime = before
+    return not existed or os.path.getmtime(path) != mtime
 
 
 def run_job() -> tuple:
-    """(ok, message) for one job: an image or a video."""
+    """(outcome status, message) for one job: an image or a video. The status is one of
+    changeling.outcome's categories, so a headless run can end in a script-readable way."""
+    reason = check_inputs()
+    if reason:
+        update_status(reason)
+        return outcome.INVALID_INPUT, reason
     for frame_processor in get_frame_processors_modules(changeling.globals.frame_processors):
         if not frame_processor.pre_start():
-            return False, progress.snapshot()['message'] or 'Not started.'
+            return outcome.INVALID_INPUT, progress.snapshot()['message'] or 'Not started.'
     target = changeling.globals.target_path
+    before = output_state()
     # process image to image
     if has_image_extension(target):
         progress.begin('Checking the picture')
@@ -175,11 +220,11 @@ def run_job() -> tuple:
             update_status('Progressing...', frame_processor.NAME)
             frame_processor.process_image(changeling.globals.source_path, changeling.globals.output_path, changeling.globals.output_path)
             frame_processor.post_process()
-        if is_image(target):
+        if output_produced(before):
             update_status('Processing to image succeed!')
-            return True, f'Done: {os.path.basename(changeling.globals.output_path)}'
+            return outcome.SUCCESS, f'Done: {os.path.basename(changeling.globals.output_path)}'
         update_status('Processing to image failed!')
-        return False, 'Processing the image failed.'
+        return outcome.FAILED, 'Processing the image failed: no output file was created.'
     # process image to videos
     progress.begin('Checking the video')
     if predict_video(target):
@@ -197,7 +242,7 @@ def run_job() -> tuple:
     temp_frame_paths = get_temp_frame_paths(target)
     if not temp_frame_paths:
         update_status('Frames not found...')
-        return False, 'No frames came out of the video.'
+        return outcome.FAILED, 'No frames came out of the video.'
     for frame_processor in get_frame_processors_modules(changeling.globals.frame_processors):
         progress.begin(STAGES.get(frame_processor.NAME, 'Working'), total=len(temp_frame_paths))
         update_status('Progressing...', frame_processor.NAME)
@@ -224,17 +269,19 @@ def run_job() -> tuple:
     progress.begin('Cleaning up')
     update_status('Cleaning temporary resources...')
     clean_temp(target)
-    if is_video(target):
+    if output_produced(before):
         update_status('Processing to video succeed!')
-        return True, f'Done: {os.path.basename(changeling.globals.output_path)}'
+        return outcome.SUCCESS, f'Done: {os.path.basename(changeling.globals.output_path)}'
     update_status('Processing to video failed!')
-    return False, 'Processing the video failed.'
+    return outcome.FAILED, 'Processing the video failed: no output file was created.'
 
 
 def blocked() -> None:
     update_status('The target was flagged as NSFW, so it was not processed.')
     if changeling.globals.target_path:
         clean_temp(changeling.globals.target_path)
+    if changeling.globals.headless:
+        outcome.conclude(outcome.REFUSED, 'The target was flagged as NSFW, so it was not processed.')
     if not changeling.globals.headless:  # the window stays open: just this job stops
         progress.finish('Refused: the target was flagged as NSFW.', ok=False)
     sys.exit(3)
@@ -249,10 +296,14 @@ def destroy() -> None:
 def run() -> None:
     parse_args()
     if not pre_check():
+        if changeling.globals.headless:
+            outcome.conclude(outcome.FAILED, 'Pre-checks failed: a supported Python and ffmpeg are needed.')
         return
     # every processor the window can switch on gets its models now, not just the ones picked
     for frame_processor in get_frame_processors_modules(sorted(set(changeling.globals.frame_processors) | {'face_swapper', 'face_enhancer'})):
         if not frame_processor.pre_check():
+            if changeling.globals.headless:
+                outcome.conclude(outcome.FAILED, 'Pre-checks failed: a frame processor is not ready.')
             return
     limit_resources()
     if changeling.globals.headless:
