@@ -425,6 +425,21 @@ class nvstreamingdecoder:
                     f"[Decoder] Batch {self.frame_batch_idx} of size {self.frame_batch_size} is decoded"
                 ) if self.frame_batch_idx % 50 == 0 else None
 
+                # The client may re-initiate the stream with a different batch size
+                # while this decoder (and its pre-allocated tensor) is reused.
+                # Rebuild the RGB tensor so its batch dimension always matches
+                # the current batch size, otherwise cvtcolor_into would see
+                # mismatched batch dimensions.
+                if (
+                    self.cvcuda_RGBtensor_batch is None
+                    or self.cvcuda_RGBtensor_batch.shape[0] != self.frame_batch_size
+                ):
+                    self.cvcuda_RGBtensor_batch = cvcuda.Tensor(
+                        (self.frame_batch_size, self.h, self.w, 3),
+                        nvcv.Type.U8,
+                        nvcv.TensorLayout.NHWC,
+                    )
+
                 # [N,H,W]
                 image_tensor_nhwc = torch.stack(self.frame_batch)
                 # [N,H,W] to [N,H,W,1] 4D torch tensor
@@ -457,14 +472,6 @@ class nvstreamingdecoder:
 
     def flush(self):
         self.logger.log_info("[Decoder] Received EOF packet. Start flushing surfaces")
-        last_frame_batch_size = (
-            len(self.frame_batch) + self.total_frames - self.total_decoded
-        )
-        self.cvcuda_RGBtensor_batch = cvcuda.Tensor(
-            (last_frame_batch_size, self.h, self.w, 3),
-            nvcv.Type.U8,
-            nvcv.TensorLayout.NHWC,
-        )
 
         # due to the async nature, when the last packet is received, there are surface data in the pipe
         # that needs to be flushed. Data size unknown, could be multiple surfaces so need while loop.
@@ -475,6 +482,21 @@ class nvstreamingdecoder:
                 break
             self.total_decoded += 1
             self.frame_batch.append(self.surface_to_tensor(surface_nv12))
+
+        # Determine the last batch size from the frames actually collected.
+        # The decoder's async buffering means the flushed frame count may not
+        # match total_frames - total_decoded, so estimating the size upfront
+        # can make torch.stack disagree with the pre-allocated tensor.
+        last_frame_batch_size = len(self.frame_batch)
+        if last_frame_batch_size == 0:
+            self.logger.log_info("[Decoder] Flush produced no frames. Nothing to return.")
+            return None
+
+        self.cvcuda_RGBtensor_batch = cvcuda.Tensor(
+            (last_frame_batch_size, self.h, self.w, 3),
+            nvcv.Type.U8,
+            nvcv.TensorLayout.NHWC,
+        )
 
         self.logger.log_info(
             f"[Decoder] Batch {self.frame_batch_idx} of size {last_frame_batch_size} is flushed"
@@ -620,10 +642,13 @@ class nvstreamingencoder:
         :param frame_batch: NHWC cvcuda RGB tensor
         """
 
-        batch_size, width, height = (
+        # frame_batch is an NHWC tensor: dim 1 is height, dim 2 is width.
+        # Keep the extraction explicit so width/height are never swapped
+        # for non-square frames.
+        batch_size, height, width = (
             frame_batch.shape[0],
-            frame_batch.shape[2],
             frame_batch.shape[1],
+            frame_batch.shape[2],
         )
         self.width, self.height = width, height
 
@@ -644,9 +669,9 @@ class nvstreamingencoder:
             )
 
         # docs_tag: begin_alloc_cvcuda_videobatchdecoder_vpf
-        # Allocate only for the first time or for the last batch.
+        # Allocate on the first use (None) or whenever the batch size changes.
         if (
-            not self.cvcuda_YUVtensor_batch
+            self.cvcuda_YUVtensor_batch is None
             or batch_size != self.cvcuda_YUVtensor_batch.shape[0]
         ):
             self.cvcuda_YUVtensor_batch = cvcuda.Tensor(
