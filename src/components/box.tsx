@@ -16,8 +16,8 @@ export type BoxProps = Box3 & {
 const isDrawable = (x: number, y: number, z: number, w: number, d: number, h: number): boolean => [x, y, z, w, d, h].every(Number.isFinite) && w >= 0 && d >= 0 && h >= 0
 
 export function Box({ x, y, z, w, d, h, r = 0, className, top: lid, front: frontFace, side: sideFace, children }: BoxProps): ReactNode {
-  if (DEV) check("box", { x, y, z, w, d, h }, `<Box x={${x}} y={${y}} z={${z}} w={${w}} d={${d}} h={${h}}> cannot be drawn`)
   const drawable = isDrawable(x, y, z, w, d, h)
+  if (DEV && !drawable) check("box", { x, y, z, w, d, h }, `<Box x={${x}} y={${y}} z={${z}} w={${w}} d={${d}} h={${h}}> cannot be drawn`)
   const corner = drawable ? radius({ x, y, z, w, d, h }, Number.isFinite(r) ? r : 0) : 0
   const hullPath = useMemo(() => (drawable ? outline({ x, y, z, w, d, h }, corner) : ""), [drawable, x, y, z, w, d, h, corner])
   if (!drawable) return null

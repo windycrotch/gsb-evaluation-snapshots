@@ -16,7 +16,7 @@ Core API:
 - Motion tokens: `--ik-ease`, `--ik-ease-out`, `--ik-ease-move`, `--ik-ease-fall`, `--ik-spring` (a `linear()` spring) and `--ik-t-press/hover/state/move/spring`, `--ik-stagger`.
 - `frame`, `project`, `top`, `front`, `side`, `path`, `curve`, `outline`: the geometry.
 - `useDemoTap(onTap, { delay })`, `<Cursor at phase>`, `<Ripple x y z w d r>`, `<Signal points>`, `<Flight from to>`: guided motion. The figure presses its hot part once on first view, a ripple marks where to press, signals and flights carry the effect from cause to result.
-- `react-isokit/schema`: zod schemas for every input (`box3Schema`, `fitSchema`, `soundConfigSchema`, …) and `describe(error)`; types are inferred from them. Development builds warn about bad input; production skips the checks.
+- `react-isokit/schema`: zod schemas for every input (`box3Schema`, `fitSchema`, `soundConfigSchema`, …) and `describe(error)`; types are inferred from them. Development builds warn about bad input and show the reason on the plate itself (an `ik-note` naming the bad parameter); production skips the checks.
 
 ## Docs
 - [README](https://github.com/aadilghani1/isokit#readme): full API, styling, performance and accessibility.

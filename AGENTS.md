@@ -31,7 +31,7 @@ src/
   drafting.ts                 the react-isokit/drafting entry: Dimension, Callout, dimension
   class-names.ts              joins class names
   environment.ts              browser feature guards: window, IntersectionObserver, reduced motion, user activation
-  development-checks.ts       schema checks that run only in development and warn once per problem
+  development-checks.ts       schema checks that run only in development and warn once per problem; figureProblems words the note Plate shows
   geometry/                   pure math, no React, no DOM
     projection.ts             project, the three face planes (top, front, side), path
     framing.ts                frame and corners: the viewBox that fits a pose

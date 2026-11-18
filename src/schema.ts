@@ -1,6 +1,7 @@
 import * as z from "zod/mini"
 
-const finite = (what: string) => z.number(`${what} must be a number`).check(z.refine(Number.isFinite, `${what} must be a finite number`))
+const finite = (what: string) =>
+  z.custom<number>((value) => typeof value === "number", `${what} must be a number`).check(z.refine(Number.isFinite, `${what} must be a finite number`))
 const size = (what: string) => finite(what).check(z.gte(0, `${what} cannot be negative`))
 
 export const vec3Schema = z.readonly(z.tuple([finite("x"), finite("y"), finite("z")]))

@@ -85,7 +85,7 @@ Size `ik-label` text with CSS `font-size`, not the `fontSize` attribute: the cla
 
 ## Validation
 
-All input types come from zod schemas in `react-isokit/schema` (`box3Schema`, `vec3Schema`, `fitSchema`, `soundConfigSchema`, `soundOptionsSchema`, `soundNameSchema`, `describe`). In development the components warn in the console about bad boxes, frames and sounds: read the console when you check a figure, and fix every `react-isokit:` warning. If a figure's data comes from JSON or another tool, validate it with the schemas before drawing.
+All input types come from zod schemas in `react-isokit/schema` (`box3Schema`, `vec3Schema`, `fitSchema`, `soundConfigSchema`, `soundOptionsSchema`, `soundNameSchema`, `describe`). In development the components warn in the console about bad boxes, frames and sounds: read the console when you check a figure, and fix every `react-isokit:` warning. The plate also shows the reason in the figure's area (`.ik-note`, e.g. `w cannot be negative`) when it cannot be drawn, so an empty plate is visible while you work. If a figure's data comes from JSON or another tool, validate it with the schemas before drawing.
 
 ## Sound
 

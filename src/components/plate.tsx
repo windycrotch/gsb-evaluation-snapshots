@@ -1,6 +1,6 @@
 import { type CSSProperties, type ReactNode, type RefObject, type SVGProps, useEffect, useId, useRef, useState } from "react"
 import { classNames } from "../class-names"
-import { check, DEV } from "../development-checks"
+import { check, DEV, figureProblems } from "../development-checks"
 import { canObserveIntersection } from "../environment"
 import { frame } from "../geometry/framing"
 import { gridSheet, gridTile } from "../geometry/grid"
@@ -48,6 +48,7 @@ export function Plate({ label, fit, aspect = 1.25, pad = 0.07, viewBox, fig, nam
   const [plate, awake] = useNearViewport()
   const gridId = `ik-grid${useId().replace(/[^\w-]/g, "")}`
   if (DEV && !viewBox && !fit?.length) check("fit", undefined, `<Plate label="${label}"> needs a fit (boxes or points) or a viewBox`)
+  const problems = DEV ? figureProblems(fit, viewBox) : []
   const box = viewBox ?? frame(fit ?? [], aspect, pad)
   const hasHeader = fig != null || name != null
   const hasFooter = hint !== undefined || readout !== undefined
@@ -68,6 +69,14 @@ export function Plate({ label, fit, aspect = 1.25, pad = 0.07, viewBox, fig, nam
         <rect className="ik-grid" {...gridSheet(box)} fill={`url(#${gridId})`} />
         {children}
       </svg>
+      {problems.length > 0 && (
+        <div className="ik-note" role="note">
+          <b>Figure cannot be drawn</b>
+          {problems.map((problem) => (
+            <span key={problem}>{problem}</span>
+          ))}
+        </div>
+      )}
       {(hasFooter || credit) && (
         <div className="ik-footer">
           {hasFooter && (

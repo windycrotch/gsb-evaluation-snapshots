@@ -46,5 +46,6 @@ describe("figure catalog", () => {
     expect(html).toContain('role="group"')
     expect(html).toContain('role="button"')
     expect(html.match(/class="ik-credit"/g)).toHaveLength(1)
+    expect(html).not.toContain('class="ik-note"')
   })
 })

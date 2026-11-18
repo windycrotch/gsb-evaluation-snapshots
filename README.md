@@ -175,7 +175,7 @@ react-isokit: <Box x={0} y={0} z={0} w={-5} d={10} h={10}> cannot be drawn
   → at w
 ```
 
-Production builds skip the checks entirely, never load zod, and clamp bad input instead of breaking. To validate figure data you did not write yourself (JSON, a CMS, an agent's output), import the schemas:
+In a development build the plate itself also says why it is empty: `Plate` draws a small `ik-note` in the figure's area ("Figure cannot be drawn", then the reason for each distinct problem, e.g. `w cannot be negative`), once per distinct problem rather than once per re-render. Production builds skip the checks entirely, never load zod, and clamp bad input instead of breaking. To validate figure data you did not write yourself (JSON, a CMS, an agent's output), import the schemas:
 
 ```ts
 import { box3Schema, describe } from "react-isokit/schema"
@@ -201,6 +201,7 @@ Everything is drawn with a few classes and coloured by `--ik-*` custom propertie
 | `ik-screen`, `ik-screen-text`, `ik-screen-line` | Displays and what they show. |
 | `ik-label` | Small engraved labels. Size them with CSS (`font-size`), not the `fontSize` attribute: CSS wins over SVG presentation attributes. |
 | `ik-enter`, `ik-pulse`, `ik-blink`, `ik-float`, `ik-loop` | Ready-made motion; loops sleep offscreen. |
+| `ik-note` | The development-only note a `Plate` shows when its figure cannot be drawn. Never rendered in production. |
 
 Restyle with `--ik-panel`, `--ik-top`, `--ik-front`, `--ik-side`, `--ik-well`, `--ik-line`, `--ik-detail`, `--ik-live`, `--ik-ink`, `--ik-ink-hi`, `--ik-screen`, `--ik-screen-ink`, `--ik-screen-font`, `--ik-border`, and `--ik-glow`, `--ik-glow-size`, `--ik-glow-strength` for light.
 
