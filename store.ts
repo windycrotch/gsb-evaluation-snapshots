@@ -8,9 +8,9 @@ import {
   LoadedModel,
   Vec3,
 } from './types';
+import { layoutNewModels, relayoutModels } from './utils/layout';
 
 const VALID_EXTENSIONS = new Set(['obj', 'stl', '3mf']);
-const LAYOUT_GAP = 10;
 
 const generateModelColor = () => {
   const hue = Math.floor(Math.random() * 360);
@@ -21,76 +21,6 @@ const getDefaultScreenSize = () => ({
   width: typeof window !== 'undefined' ? window.screen.width : 1920,
   height: typeof window !== 'undefined' ? window.screen.height : 1080,
 });
-
-/**
- * Assigns initial X-axis positions to newly dimensioned models without
- * overwriting any positions that already exist (including user drags).
- */
-const layoutNewModels = (
-  models: LoadedModel[],
-  dimensions: Record<string, Vec3>,
-  existingPositions: Record<string, Vec3>,
-  scales: Record<string, Vec3>
-): Record<string, Vec3> => {
-  const nextPositions: Record<string, Vec3> = { ...existingPositions };
-  const newlyDimensioned: LoadedModel[] = [];
-  let hasPositionedModels = false;
-  let maxRightEdge = -Infinity;
-
-  for (const model of models) {
-    const dim = dimensions[model.id];
-    const existingPos = existingPositions[model.id];
-
-    if (existingPos) {
-      hasPositionedModels = true;
-      if (dim) {
-        const scaleX = Math.abs(scales[model.id]?.x ?? 1);
-        const halfWidth = (dim.x * scaleX) / 2;
-        maxRightEdge = Math.max(maxRightEdge, existingPos.x + halfWidth);
-      }
-    } else if (dim) {
-      newlyDimensioned.push(model);
-    }
-  }
-
-  if (newlyDimensioned.length === 0) {
-    return nextPositions;
-  }
-
-  if (!hasPositionedModels) {
-    // Fresh plate: center the initial batch around X = 0.
-    let currentX = 0;
-    for (const model of newlyDimensioned) {
-      const dim = dimensions[model.id];
-      const scaleX = Math.abs(scales[model.id]?.x ?? 1);
-      const width = dim.x * scaleX;
-      nextPositions[model.id] = { x: currentX + width / 2, y: 0, z: 0 };
-      currentX += width + LAYOUT_GAP;
-    }
-
-    const totalWidth = currentX - LAYOUT_GAP;
-    const shiftX = totalWidth > 0 ? -totalWidth / 2 : 0;
-    for (const model of newlyDimensioned) {
-      nextPositions[model.id] = {
-        ...nextPositions[model.id],
-        x: nextPositions[model.id].x + shiftX,
-      };
-    }
-    return nextPositions;
-  }
-
-  // Append newly loaded models to the right of existing ones.
-  let cursorX = Number.isFinite(maxRightEdge) ? maxRightEdge + LAYOUT_GAP : 0;
-  for (const model of newlyDimensioned) {
-    const dim = dimensions[model.id];
-    const scaleX = Math.abs(scales[model.id]?.x ?? 1);
-    const width = dim.x * scaleX;
-    nextPositions[model.id] = { x: cursorX + width / 2, y: 0, z: 0 };
-    cursorX += width + LAYOUT_GAP;
-  }
-
-  return nextPositions;
-};
 
 // Debounce state for batching simultaneous model dimension updates.
 let dimensionUpdateTimer: ReturnType<typeof setTimeout> | null = null;
@@ -150,6 +80,7 @@ export const useStore = create<ViewerState & ArState>()(
       modelPositions: {},
       modelRotations: {},
       modelScales: {},
+      manuallyPositionedModelIds: [],
 
       addModels: (files) => {
         const validFiles: File[] = [];
@@ -229,6 +160,20 @@ export const useStore = create<ViewerState & ArState>()(
           const { [id]: _rot, ...remainingRotations } = state.modelRotations;
           const { [id]: _scale, ...remainingScales } = state.modelScales;
           const { [id]: _pos, ...remainingPositions } = state.modelPositions;
+          const remainingAnchorIds = state.manuallyPositionedModelIds.filter(
+            (anchorId) => anchorId !== id
+          );
+
+          // Synchronous compaction in original order. Manual anchors stay put;
+          // only non-anchored models to the right of a gap are shifted, so the
+          // result always matches the final model set even on rapid deletes.
+          const relaidPositions = relayoutModels({
+            modelIds: newModels.map((m) => m.id),
+            dimensions: remainingDimensions,
+            positions: remainingPositions,
+            scales: remainingScales,
+            anchorIds: new Set(remainingAnchorIds),
+          });
 
           return {
             models: newModels,
@@ -236,7 +181,8 @@ export const useStore = create<ViewerState & ArState>()(
             modelDimensions: remainingDimensions,
             modelRotations: remainingRotations,
             modelScales: remainingScales,
-            modelPositions: remainingPositions,
+            modelPositions: relaidPositions,
+            manuallyPositionedModelIds: remainingAnchorIds,
           };
         });
       },
@@ -301,12 +247,12 @@ export const useStore = create<ViewerState & ArState>()(
               ...validUpdates,
             };
 
-            const newPositions = layoutNewModels(
-              state.models,
-              newDimensions,
-              state.modelPositions,
-              state.modelScales
-            );
+            const newPositions = layoutNewModels({
+              modelIds: state.models.map((m) => m.id),
+              dimensions: newDimensions,
+              positions: state.modelPositions,
+              scales: state.modelScales,
+            });
 
             return {
               modelDimensions: newDimensions,
@@ -319,15 +265,70 @@ export const useStore = create<ViewerState & ArState>()(
       updateModelTransform: (id, transform) => {
         set((state) => {
           const updates: Partial<ViewerState> = {};
+          let nextPositions = state.modelPositions;
+          let nextScales = state.modelScales;
+          let anchorIds = state.manuallyPositionedModelIds;
+          let positionChanged = false;
+          let scaleChanged = false;
+
           if (transform.position) {
-            updates.modelPositions = { ...state.modelPositions, [id]: transform.position };
+            const current = state.modelPositions[id];
+            const next = transform.position;
+            if (
+              !current ||
+              current.x !== next.x ||
+              current.y !== next.y ||
+              current.z !== next.z
+            ) {
+              positionChanged = true;
+              nextPositions = { ...state.modelPositions, [id]: next };
+              // A genuine user move turns the model into a fixed layout anchor.
+              if (!anchorIds.includes(id)) {
+                anchorIds = [...anchorIds, id];
+              }
+            }
           }
+
           if (transform.rotation) {
-            updates.modelRotations = { ...state.modelRotations, [id]: transform.rotation };
+            updates.modelRotations = {
+              ...state.modelRotations,
+              [id]: transform.rotation,
+            };
           }
+
           if (transform.scale) {
-            updates.modelScales = { ...state.modelScales, [id]: transform.scale };
+            const current = state.modelScales[id];
+            const next = transform.scale;
+            if (
+              !current ||
+              current.x !== next.x ||
+              current.y !== next.y ||
+              current.z !== next.z
+            ) {
+              scaleChanged = true;
+              nextScales = { ...state.modelScales, [id]: next };
+            }
           }
+
+          if (!positionChanged && !scaleChanged) {
+            return updates;
+          }
+
+          // Synchronous, idempotent re-layout from the final state. Because the
+          // whole chain is recomputed in one commit, rapid consecutive
+          // scale/move operations converge on the final arrangement with no
+          // debounce or async callback able to restore stale positions.
+          const relaidPositions = relayoutModels({
+            modelIds: state.models.map((m) => m.id),
+            dimensions: state.modelDimensions,
+            positions: nextPositions,
+            scales: nextScales,
+            anchorIds: new Set(anchorIds),
+          });
+
+          updates.modelPositions = relaidPositions;
+          updates.modelScales = nextScales;
+          updates.manuallyPositionedModelIds = anchorIds;
           return updates;
         });
       },

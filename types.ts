@@ -39,6 +39,11 @@ export interface ViewerState {
   modelRotations: Record<string, Vec3>; // in radians
   modelScales: Record<string, Vec3>;
 
+  // Models the user has manually moved (gizmo drag or numeric position edit).
+  // These are fixed layout anchors: auto-layout never moves them and may only
+  // shift non-anchored models positioned to their right.
+  manuallyPositionedModelIds: string[];
+
   // Actions
   addModels: (files: File[]) => void;
   addExampleModel: () => Promise<void>;

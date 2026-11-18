@@ -48,7 +48,27 @@ Scripts:
 npm run typecheck
 npm run build
 npm run preview
+npm test
 ```
+
+## Testing
+
+`npm test` runs the suite on Node's built-in test runner with native
+TypeScript type stripping — no packages to install, no network access, and no
+external model files. All inputs (model dimensions, positions, scales) are
+constructed in-process.
+
+The tests cover the pure, side-effect-free modules under `utils/`:
+
+* `utils/layout.ts` — build-plate arrangement: scaling a middle model shifts
+  every model to its right while restoring the 10 mm edge gap, deletion
+  re-compacts survivors in original order, manually dragged models act as
+  fixed anchors that layout never overwrites, and rapid scale/delete sequences
+  converge on the final state.
+* `utils/scale1to1.ts` — the orthographic 1:1 judgment: true scale means the
+  camera zoom matches `PPI / 25.4` pixels per millimeter within a strictly
+  less-than 1.5% relative error, including the two sides of the 0.015
+  boundary and PPI changes.
 
 ## Tech Stack
 

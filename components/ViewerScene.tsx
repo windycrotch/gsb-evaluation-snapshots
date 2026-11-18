@@ -10,6 +10,7 @@ import {
 } from 'three';
 import { useStore } from '../store';
 import { ErrorBoundary } from './ErrorBoundary';
+import { isOrthographic1to1, ONE_TO_ONE_TOLERANCE } from '../utils/scale1to1';
 
 const ModelWrapper = React.lazy(() =>
   import('./Model').then((module) => ({ default: module.ModelWrapper }))
@@ -75,18 +76,20 @@ const SceneContent: React.FC<{
     const controls = controlsRef.current;
     if (!controls) return;
 
-    const tolerance = 0.015;
     let isMatch = false;
 
     if (camera.type === 'PerspectiveCamera') {
       const idealDist = size.height * perspectiveFactor;
       if (idealDist > 0) {
-        isMatch = Math.abs(controls.distance - idealDist) / idealDist < tolerance;
+        isMatch = Math.abs(controls.distance - idealDist) / idealDist < ONE_TO_ONE_TOLERANCE;
       }
     } else if (camera.type === 'OrthographicCamera') {
       const cam = camera as OrthographicCamera;
       if (cam.zoom) {
-        isMatch = Math.abs(cam.zoom - ppm) / ppm < tolerance;
+        // True 1:1 means orthographic zoom == target pixels per mm (PPI / 25.4),
+        // within a 1.5% relative error. Recomputed from the live PPI every call,
+        // so changing PPI updates the target immediately.
+        isMatch = isOrthographic1to1(cam.zoom, state.ppi);
       }
     }
 
