@@ -98,6 +98,28 @@ source.start();
 
 ```
 
+## Options
+
+An optional second argument controls how long the unlock attempt stays pending:
+
+```typescript
+webAudioUnlock(context, {
+    // Reject with a 'webAudioUnlock: timeout ...' error if no trusted
+    // gesture unlocks the context within the given time (measured from
+    // the moment the gesture listeners are registered).
+    timeoutMs: 10000,
+
+    // Reject with a 'webAudioUnlock: aborted ...' error when this
+    // signal aborts; also rejects immediately if it is already aborted.
+    signal: abortController.signal,
+});
+```
+
+In both cases all registered gesture listeners are removed, and the promise
+settles exactly once — a late `resume()` callback can no longer resolve or
+reject it. The promise also rejects if `resume()` succeeds but the
+`AudioContext` state is still not `'running'`.
+
 ## License
 
   The MIT License (MIT), Copyright 2017 [Pavle Goloskokovic](https://github.com/pavle-goloskokovic)
