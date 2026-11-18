@@ -173,7 +173,16 @@ def _build_mapped_blend_palette(
     result_codes: list[str],
     result_rgbs: list[tuple[int, int, int]],
     total_pixels: int,
+    sort_by_count: bool = False,
 ) -> list[dict]:
+    """One palette entry per non-empty source entry, zipped in input order.
+
+    The entries, codes and mapped RGBs describe the same sources in the same
+    order, so the returned palette stays aligned with the caller's blocks and
+    mapped block colors. Zero-count sources are dropped; ``sort_by_count``
+    re-orders the remainder by pixel count (used by the SVG path, whose
+    regions are not frequency-sorted).
+    """
     mapped_blend_palette = []
     for entry, code, rgb in zip(entries, result_codes, result_rgbs):
         source_rgb = (
@@ -194,7 +203,8 @@ def _build_mapped_blend_palette(
             "pixelPercent": round(pixel_count * 100.0 / total_pixels, 4),
         })
 
-    mapped_blend_palette.sort(key=lambda entry: entry["pixelCount"], reverse=True)
+    if sort_by_count:
+        mapped_blend_palette.sort(key=lambda entry: entry["pixelCount"], reverse=True)
     return mapped_blend_palette
 
 
@@ -223,14 +233,22 @@ def build_simulated_print_preview(
     counts = block_cell_counts(labels, len(color_blocks))
     total_pixels = max(1, int(counts.sum()))
 
+    # Only blocks that actually occupy a cell participate: every downstream
+    # list (blocks, mapped colors, palette) is zipped from this same kept
+    # ordering, so their lengths and indices always correspond.
+    kept = [
+        (block, int(count))
+        for block, count in zip(color_blocks, counts.tolist(), strict=True)
+        if count > 0
+    ]
     source_entries = [
         {
             "r": int(block['r']),
             "g": int(block['g']),
             "b": int(block['b']),
-            "pixelCount": int(count),
+            "pixelCount": count,
         }
-        for block, count in zip(color_blocks, counts.tolist())
+        for block, count in kept
     ]
     source_colors = [
         (entry["r"], entry["g"], entry["b"])
@@ -247,15 +265,19 @@ def build_simulated_print_preview(
         white_point=white_point,
     )
 
-    processed_image = _render_labels(labels, result_rgbs)
+    remap = np.full(EMPTY + 1, EMPTY, dtype=np.uint8)
+    remap[np.nonzero(counts > 0)[0]] = np.arange(len(kept), dtype=np.uint8)
+    preview_labels = remap[labels]
+    processed_image = _render_labels(preview_labels, result_rgbs)
 
-    mapped_block_colors = []
-    for code, rgb in zip(result_codes, result_rgbs):
-        mapped_block_colors.append({
+    mapped_block_colors = [
+        {
             "code": code,
             "rgb": list(rgb),
             "hex": _rgb_to_hex(rgb),
-        })
+        }
+        for code, rgb in zip(result_codes, result_rgbs, strict=True)
+    ]
 
     return {
         "processedImage": processed_image,
@@ -350,6 +372,7 @@ def build_vector_simulated_preview(
             result_codes=result_codes,
             result_rgbs=result_rgbs,
             total_pixels=partition.size,
+            sort_by_count=True,
         ),
         "printStack": build_print_stack(
             layer_count=layer_count,
@@ -480,11 +503,18 @@ def load_model_grid(
     """An upload as RGB resampled to its model grid; returns the image and its pitch in mm.
 
     Transparent areas become white: no filament there leaves the white base.
+    Every mode carrying an alpha channel (RGBA, LA, PA, transparent P) is
+    composited over white before conversion, so transparency never becomes a
+    color of its own and takes no part in clustering.
     """
     img = Image.open(BytesIO(image_bytes))
-    if img.mode == 'RGBA':
-        background = Image.new('RGB', img.size, (255, 255, 255))
-        background.paste(img, mask=img.split()[3])
+    # An alpha channel, or a palette image with a transparency index, carries
+    # transparency: composite over white so it never becomes a color of its
+    # own (e.g. the palette's black index 0) and takes no part in clustering.
+    if "A" in img.getbands() or "transparency" in img.info:
+        rgba = img.convert('RGBA')
+        background = Image.new('RGB', rgba.size, (255, 255, 255))
+        background.paste(rgba, mask=rgba.split()[3])
         img = background
     else:
         img = img.convert('RGB')
@@ -658,8 +688,23 @@ def process_image(
         counts = block_cell_counts(labels, len(color_blocks))
         color_blocks, labels = _keep_blocks(color_blocks, labels, [i for i in range(len(color_blocks)) if counts[i] > 0])
 
-    # Counts and hex values per block.
+    # Counts per block; every kept block occupies at least one grid cell.
     counts = block_cell_counts(labels, len(color_blocks))
+    if len(color_blocks) == 0 or int(counts.sum()) != width * height:
+        raise RuntimeError(
+            f"Color blocks cover {int(counts.sum())} of {width * height} grid cells; "
+            "the label map must assign every cell to a kept block"
+        )
+
+    # Truncation reassignment and the printability cleanup can change block
+    # sizes, so re-establish one canonical order: largest block first. The
+    # label map is relabelled to match, making colorBlocks, mappedBlockColors
+    # and mappedBlendPalette share both length and index correspondence.
+    order = sorted(range(len(color_blocks)), key=lambda i: -int(counts[i]))
+    color_blocks, labels = _keep_blocks(color_blocks, labels, order)
+    counts = block_cell_counts(labels, len(color_blocks))
+
+    # Counts and hex values per block.
     for color, count in zip(color_blocks, counts.tolist()):
         color['count'] = count
         color['hex'] = f"#{color['r']:02x}{color['g']:02x}{color['b']:02x}"
@@ -679,6 +724,35 @@ def process_image(
         backing_filament=backing_filament,
         white_point=white,
     )
+
+    # Contract check: the three color lists stay one-to-one and the palette
+    # accounts for every cell of the model grid exactly once.
+    palette = simulated_preview['mappedBlendPalette']
+    mapped_block_colors = simulated_preview['mappedBlockColors']
+    total_cells = width * height
+    if not (len(color_blocks) == len(mapped_block_colors) == len(palette)):
+        raise RuntimeError(
+            "colorBlocks, mappedBlockColors and mappedBlendPalette disagree on length: "
+            f"{len(color_blocks)} vs {len(mapped_block_colors)} vs {len(palette)}"
+        )
+    palette_pixels = sum(int(entry['pixelCount']) for entry in palette)
+    if palette_pixels != total_cells:
+        raise RuntimeError(
+            f"mappedBlendPalette covers {palette_pixels} cells; the grid has {total_cells}"
+        )
+    if any(
+        palette[i]['pixelCount'] < palette[i + 1]['pixelCount']
+        for i in range(len(palette) - 1)
+    ):
+        raise RuntimeError("mappedBlendPalette must be ordered by pixelCount descending")
+    for index, (block, mapped, entry) in enumerate(
+        zip(color_blocks, mapped_block_colors, palette, strict=True)
+    ):
+        source_rgb = [int(block['r']), int(block['g']), int(block['b'])]
+        if entry['sourceRgb'] != source_rgb or entry['pixelCount'] != int(block['count']):
+            raise RuntimeError(f"Palette entry {index} no longer matches its color block")
+        if mapped['code'] != entry['code'] or mapped['rgb'] != entry['rgb']:
+            raise RuntimeError(f"Mapped block color {index} no longer matches its palette entry")
 
     return {
         'colorBlocks': color_blocks,

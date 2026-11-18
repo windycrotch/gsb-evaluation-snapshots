@@ -19,6 +19,11 @@ from services.image_processor import (
 )
 from tests.label_maps import labels_from_blocks
 
+PNG_PREFIX = "data:image/png;base64,"
+PALETTE_ENTRY_KEYS = {
+    "code", "rgb", "hex", "sourceRgb", "sourceHex", "pixelCount", "pixelPercent",
+}
+
 
 def _create_image_bytes(width, height, color=(255, 0, 0), fmt='PNG'):
     """Create an image of given size and return as bytes."""
@@ -434,3 +439,220 @@ def test_exports_reuse_the_mapping_processing_computed(monkeypatch):
     del matrix
     gc.collect()
     assert matrix_id not in image_processor._mapping_cache
+
+
+def _rgba_png(pixels: np.ndarray) -> bytes:
+    """PNG bytes of an RGBA uint8 array (height, width, 4)."""
+    buffer = BytesIO()
+    Image.fromarray(pixels).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _rgb_png(pixels: np.ndarray) -> bytes:
+    """PNG bytes of an RGB uint8 array (height, width, 3)."""
+    buffer = BytesIO()
+    Image.fromarray(pixels).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _decode_png_data_url(data_url: str) -> np.ndarray:
+    assert data_url.startswith(PNG_PREFIX)
+    raw = base64.b64decode(data_url[len(PNG_PREFIX):])
+    # Image.open raises on a malformed payload; the prefix check confirms PNG.
+    with Image.open(BytesIO(raw)) as decoded:
+        assert decoded.format == "PNG"
+        return np.array(decoded.convert("RGB"))
+
+
+class TestProcessImageColorInvariants:
+    """The post-truncation contract: the three color lists stay one-to-one,
+    only occupied colors survive, and the palette pixels conserve the grid."""
+
+    def _assert_invariants(self, result: dict):
+        blocks = result["colorBlocks"]
+        mapped = result["mappedBlockColors"]
+        palette = result["mappedBlendPalette"]
+        width = result["imageDimensions"]["width"]
+        height = result["imageDimensions"]["height"]
+        total_cells = width * height
+
+        # The lists share length and index correspondence.
+        assert len(blocks) >= 1
+        assert len(blocks) == len(mapped) == len(palette)
+
+        # Every kept block actually occupies at least one grid cell.
+        assert all(int(block["count"]) > 0 for block in blocks)
+
+        # Palette entries carry the full required schema.
+        for entry in palette:
+            assert set(entry.keys()) == PALETTE_ENTRY_KEYS
+            assert len(entry["rgb"]) == 3 and len(entry["sourceRgb"]) == 3
+            assert entry["hex"][0] == "#" and entry["sourceHex"][0] == "#"
+            assert entry["pixelCount"] >= 1
+            assert 0 <= entry["pixelPercent"] <= 100
+
+        # Same order, index by index: block -> mapped color -> palette entry.
+        for block, mapped_color, entry in zip(blocks, mapped, palette, strict=True):
+            source_rgb = [int(block["r"]), int(block["g"]), int(block["b"])]
+            assert entry["sourceRgb"] == source_rgb
+            assert entry["sourceHex"].lower() == block["hex"].lower()
+            assert entry["pixelCount"] == int(block["count"])
+            assert mapped_color["code"] == entry["code"]
+            assert mapped_color["rgb"] == entry["rgb"]
+            assert mapped_color["hex"] == entry["hex"]
+
+        # Pixel conservation: the palette accounts for every grid cell once.
+        assert sum(entry["pixelCount"] for entry in palette) == total_cells
+        assert sum(block["count"] for block in blocks) == total_cells
+        assert sum(entry["pixelPercent"] for entry in palette) == pytest.approx(100.0, abs=0.01)
+
+        # The entries are pixelCount-descending (blocks follow the same order).
+        counts = [entry["pixelCount"] for entry in palette]
+        assert counts == sorted(counts, reverse=True)
+
+        # Both preview images are valid PNG data URLs at the reported size.
+        for key in ("processedImage", "segmentationImage"):
+            assert result[key].startswith(PNG_PREFIX)
+            decoded = _decode_png_data_url(result[key])
+            assert decoded.shape == (height, width, 3)
+
+        # The label map assigns every cell a kept block index.
+        labels = result["labels"]
+        assert labels.shape == (height, width)
+        assert int(labels.min()) >= 0 and int(labels.max()) < len(blocks)
+        assert set(np.unique(labels).tolist()) == set(range(len(blocks)))
+
+    def test_fully_transparent_image_becomes_one_white_block(self):
+        """A fully transparent image composites onto the white substrate: the
+        transparency never becomes a color of its own."""
+        pixels = np.zeros((4, 5, 4), dtype=np.uint8)  # alpha 0 everywhere
+        result = process_image(_rgba_png(pixels), max_colors=4)
+
+        self._assert_invariants(result)
+        assert result["imageDimensions"] == {"width": 5, "height": 4}
+        assert len(result["colorBlocks"]) == 1
+        block = result["colorBlocks"][0]
+        assert (block["r"], block["g"], block["b"]) == (255, 255, 255)
+        assert block["count"] == 20
+        entry = result["mappedBlendPalette"][0]
+        assert entry["sourceRgb"] == [255, 255, 255]
+        assert entry["pixelCount"] == 20 and entry["pixelPercent"] == 100.0
+
+    def test_transparent_and_opaque_mix_treats_transparency_as_white(self):
+        """Transparent cells join the white substrate instead of clustering."""
+        pixels = np.zeros((6, 4, 4), dtype=np.uint8)
+        pixels[3:, :] = (255, 0, 0, 255)  # bottom half opaque red, top half transparent
+
+        result = process_image(_rgba_png(pixels), max_colors=4)
+        self._assert_invariants(result)
+
+        by_rgb = {
+            (block["r"], block["g"], block["b"]): block["count"]
+            for block in result["colorBlocks"]
+        }
+        assert by_rgb == {(255, 0, 0): 12, (255, 255, 255): 12}
+
+        segmentation = _decode_png_data_url(result["segmentationImage"])
+        # The transparent top half renders as the white substrate.
+        assert np.all(segmentation[:3] == 255)
+        assert np.all(segmentation[3:] == [255, 0, 0])
+
+    def test_palette_transparency_index_composites_over_white(self):
+        """A palette PNG's transparency index is white, not the palette entry."""
+        image = Image.new("P", (4, 4), 0)
+        image.info["transparency"] = 0  # palette index 0 is fully transparent
+        buffer = BytesIO()
+        image.save(buffer, format="PNG")
+
+        result = process_image(buffer.getvalue(), max_colors=4)
+        self._assert_invariants(result)
+        assert len(result["colorBlocks"]) == 1
+        assert (result["colorBlocks"][0]["r"], result["colorBlocks"][0]["g"],
+                result["colorBlocks"][0]["b"]) == (255, 255, 255)
+
+    def test_partial_alpha_blends_into_the_white_substrate(self):
+        """Semi-transparent pixels are alpha-composited, not dropped."""
+        pixels = np.zeros((2, 2, 4), dtype=np.uint8)
+        pixels[:] = (255, 0, 0, 128)  # red at 50% over white
+
+        result = process_image(_rgba_png(pixels), max_colors=4)
+        self._assert_invariants(result)
+        block = result["colorBlocks"][0]
+        assert block["count"] == 4
+        # 0.5 * 255 red over white -> 255, ~127, ~127; never a separate color.
+        assert block["r"] == 255 and 110 <= block["g"] <= 145 and 110 <= block["b"] <= 145
+
+    @pytest.mark.parametrize("size", [(1, 200), (200, 1), (1, 1)])
+    def test_extreme_aspect_ratio_keeps_aspect_and_minimum_side(self, size):
+        """Resampling keeps both sides >= 1 px and the original aspect ratio."""
+        width, height = size
+        pixels = np.zeros((height, width, 3), dtype=np.uint8)
+        pixels[..., 0] = 40  # dark red, distinct from white
+        result = process_image(_rgb_png(pixels), max_colors=2)
+        self._assert_invariants(result)
+
+        out_w = result["imageDimensions"]["width"]
+        out_h = result["imageDimensions"]["height"]
+        assert out_w >= 1 and out_h >= 1
+        assert max(out_w, out_h) <= MAX_PROCESSING_DIMENSION
+        # The grid is a downscaled version of the original, never transposed.
+        assert (out_w == width and out_h <= height) or (out_h == height and out_w <= width)
+        assert pytest.approx(out_w / out_h, rel=0.02) == width / height
+
+    def test_long_side_is_capped_for_a_gigantic_strip(self):
+        width, height = 1, MAX_PROCESSING_DIMENSION + 500
+        pixels = np.full((height, width, 3), (10, 20, 30), dtype=np.uint8)
+        result = process_image(_rgb_png(pixels), max_colors=2)
+        self._assert_invariants(result)
+        assert result["imageDimensions"]["width"] == 1
+        assert result["imageDimensions"]["height"] <= MAX_PROCESSING_DIMENSION
+
+    def test_max_colors_below_the_real_color_count_truncates_and_conserves(self):
+        """Four distinct colors truncated to two: exactly two blocks, all
+        pixels reassigned, counts still summing to the whole grid."""
+        columns = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0)]
+        pixels = np.zeros((4, 4, 3), dtype=np.uint8)
+        for x, color in enumerate(columns):
+            pixels[:, x] = color
+
+        result = process_image(_rgb_png(pixels), max_colors=2, color_threshold=0)
+        self._assert_invariants(result)
+        assert len(result["colorBlocks"]) == 2
+        # The truncated-away colors were folded into the surviving main
+        # colors, so every palette source is one of the image's own colors and
+        # no pixel was lost.
+        assert sum(block["count"] for block in result["colorBlocks"]) == 16
+        assert all(
+            tuple(entry["sourceRgb"]) in set(columns)
+            for entry in result["mappedBlendPalette"]
+        )
+
+    def test_single_color_image(self):
+        """A flat image yields one block covering the whole grid."""
+        pixels = np.full((3, 3, 3), (0, 0, 255), dtype=np.uint8)
+        result = process_image(_rgb_png(pixels), max_colors=10)
+        self._assert_invariants(result)
+
+        assert len(result["colorBlocks"]) == 1
+        block = result["colorBlocks"][0]
+        assert (block["r"], block["g"], block["b"]) == (0, 0, 255)
+        assert block["count"] == 9
+        entry = result["mappedBlendPalette"][0]
+        assert entry["sourceRgb"] == [0, 0, 255]
+        assert entry["sourceHex"] == "#0000FF"
+        assert entry["pixelCount"] == 9 and entry["pixelPercent"] == 100.0
+        assert len(entry["code"]) >= 1 and len(entry["rgb"]) == 3
+
+    def test_blocks_are_largest_first_under_unequal_counts(self):
+        """The canonical descending order survives even when the truncation
+        step would otherwise leave blocks in a non-frequency order."""
+        # 8 red cells, 2 green, 2 blue -> blocks must arrive largest first.
+        pixels = np.full((2, 6, 3), (255, 0, 0), dtype=np.uint8)
+        pixels[:, 4] = (0, 255, 0)
+        pixels[:, 5] = (0, 0, 255)
+
+        result = process_image(_rgb_png(pixels), max_colors=3, color_threshold=0)
+        self._assert_invariants(result)
+        assert [block["count"] for block in result["colorBlocks"]] == [8, 2, 2]
+        assert [entry["pixelCount"] for entry in result["mappedBlendPalette"]] == [8, 2, 2]
+
