@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<!--
+	Verification harness for Expression.SummationLike keyboard navigation
+	(P/N/U/D transition tables) against the real canvas rendering.
+
+	Open this file in a browser, or run headless, e.g.:
+	chrome --headless=new --dump-dom "file:///path/to/test/summation-navigation.html"
+
+	The page builds summation expressions with 2, 3, 4 and 5 children,
+	selects every child, presses every direction, and checks that:
+	  1. the new selection is exactly the child dictated by the transition
+	     tables (Expression.SummationLike.P/N/U/D), and the selection box
+	     (Expression.getRectangle / drawSelecionShape, accumulating x/y
+	     along the parent chain) coincides with where the child is actually
+	     drawn on the canvas (hit-test + pixel checks);
+	  2. table entries of -1 delegate the movement to the parent expression;
+	     if no ancestor accepts the direction, the selection stays put and
+	     no error is raised;
+	  3. all of the above holds for 2, 3, 4 and 5 children.
+	The transition tables themselves are NOT modified by this harness.
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<title>SummationLike navigation verification</title>
+<style>
+	body { font-family: sans-serif; }
+	#summary { font-size: 1.4em; font-weight: bold; padding: 0.4em; margin: 0.4em 0; }
+	#summary.pass { background: #c8f7c5; }
+	#summary.fail { background: #f7c5c5; }
+	figure { display: inline-block; margin: 0.5em; padding: 0.5em; border: 1px solid #ccc; }
+	figcaption { text-align: center; font-size: 0.9em; }
+	pre { font-size: 12px; }
+</style>
+</head>
+<body>
+<h1>Expression.SummationLike — navigation vs. transition tables</h1>
+<div id="summary">running…</div>
+<div id="canvases"></div>
+<script>
+// Minimal stub of the Formulae global that formulae/expression.js expects.
+var Formulae = {
+	fontSize: 24,
+	ltr: true,
+	ROW_INPUT: 0,
+	ROW_OUTPUT: 1,
+	ROW_EXPORT: 2
+};
+</script>
+<script src="../formulae/expression.js"></script>
+<script src="summation-navigation.js"></script>
+</body>
+</html>
