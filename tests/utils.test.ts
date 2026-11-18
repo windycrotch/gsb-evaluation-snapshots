@@ -128,14 +128,34 @@ describe('RingBuffer', () => {
 
   it('should handle edge case with size 1 buffer', () => {
     const smallBuffer = new RingBuffer(Float32Array, 1)
-    
+
     smallBuffer.put(1.0)
     expect(smallBuffer.length).toBe(1)
     expect(smallBuffer.get(0)).toBe(1.0)
-    
+
     smallBuffer.put(2.0) // Should overwrite
     expect(smallBuffer.length).toBe(1)
     expect(smallBuffer.get(0)).toBe(2.0)
+  })
+
+  it('should round a fractional size down to an integer capacity', () => {
+    // Callers derive sizes from fractional factors (e.g. 65 * 20 * 1.1).
+    // A fractional capacity makes the modulo indices non-integer, after which
+    // every write is discarded and every read returns undefined.
+    const fractionalBuffer = new RingBuffer(Uint8Array, 62 * 20 * 1.1)
+    expect(fractionalBuffer.capacity).toBe(1364)
+
+    for (let i = 0; i < 3000; i++) fractionalBuffer.put(i & 1)
+
+    expect(fractionalBuffer.length).toBe(1364)
+    for (let i = 0; i < fractionalBuffer.length; i++) {
+      expect(fractionalBuffer.get(i)).toBeDefined()
+    }
+  })
+
+  it('should reject a non-positive or non-finite size', () => {
+    expect(() => new RingBuffer(Float32Array, 0)).toThrow()
+    expect(() => new RingBuffer(Float32Array, NaN)).toThrow()
   })
 
   it('should handle empty buffer toArray', () => {

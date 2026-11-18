@@ -13,8 +13,16 @@ export class RingBuffer<T extends TypedArray> {
 
   constructor(ArrayType: TypedArrayConstructor<T>, size: number) {
     this.ArrayType = ArrayType;
-    this.buffer = new ArrayType(size) as T;
-    this.maxLength = size;
+    // Capacity must be an integer: callers may compute it from fractional
+    // factors (e.g. sample counts scaled by 1.1). A fractional capacity makes
+    // the modulo indices drift off integers, so writes land outside the
+    // backing store and every read returns undefined.
+    const capacity = Math.floor(size);
+    if (!Number.isFinite(capacity) || capacity < 1) {
+      throw new Error(`RingBuffer size must be a positive number, got ${size}`);
+    }
+    this.maxLength = capacity;
+    this.buffer = new ArrayType(capacity) as T;
   }
 
   get length(): number {

@@ -16,6 +16,12 @@ export interface FSKConfig extends BaseModulatorConfig {
   adaptiveThreshold: boolean;
 }
 
+/** Silence threshold used until a sync window provides a measured amplitude. */
+const DEFAULT_SILENCE_THRESHOLD = 0.01;
+
+/** Fraction of the average sync-window amplitude used as the silence threshold. */
+const SILENCE_THRESHOLD_RATIO = 0.1;
+
 export const DEFAULT_FSK_CONFIG: FSKConfig = {
   sampleRate: 48000,
   baudRate: 1200,
@@ -124,8 +130,12 @@ export class FSKCore extends BaseModulator<FSKConfig> {
   // Byte assembly state
   private readonly byteState = { current: 0, bitPosition: 0, buffer: [] as number[] };
   
-  // Silence detection state  
-  private readonly silence = { threshold: 0.01, samplesForEOD: 0, sampleCount: 0 };
+  // Silence detection state
+  private readonly silence = {
+    threshold: DEFAULT_SILENCE_THRESHOLD,
+    samplesForEOD: 0,
+    sampleCount: 0
+  };
 
   // Debug counters
   private readonly debug = { syncDetections: 0, demodulationCalls: 0, totalSamples: 0 };
@@ -150,6 +160,7 @@ export class FSKCore extends BaseModulator<FSKConfig> {
     this.frame.syncAmplitudeBuffer = new RingBuffer(Float32Array, this.params.downsampledSamplesPerBit * 8);
     
     // Reset all state
+    this.byteState.buffer = [];
     this.resetState();
     
     this.ready = true;
@@ -176,15 +187,40 @@ export class FSKCore extends BaseModulator<FSKConfig> {
     // Reset all state objects
     Object.assign(this.iqState, { localOscPhase: 0, lastPhase: 0 });
     Object.assign(this.bitSync, { globalSampleCounter: 0, bitSampleCounter: 0, bitAccumulator: 0, bitAccumCount: 0, nextBitSampleIndex: 0 });
-    Object.assign(this.byteState, { current: 0, bitPosition: 0 });
-    this.frame.started = false;
+    this.abortFrame();
     this.silence.sampleCount = 0;
-    
+    // A silence threshold measured from a previous frame's sync window must not
+    // outlive that frame: a single loud (or otherwise bad) frame would otherwise
+    // make every quieter frame look like silence for the rest of the session.
+    this.silence.threshold = DEFAULT_SILENCE_THRESHOLD;
+
     // Reset filters and downsampling state
     this.dsp.iqFilters?.i.reset();
     this.dsp.iqFilters?.q.reset();
     this.dsp.postFilter?.reset();
     Object.assign(this.downsample, { counter: 0, iAccumulator: 0, qAccumulator: 0 });
+  }
+
+  /**
+   * Abandon the frame currently being received and return to the "looking for
+   * preamble" state, so that a later frame in the same stream can be acquired.
+   *
+   * Completed bytes already collected in `byteState.buffer` are intentionally
+   * preserved: they are valid data and callers still need them even when the
+   * frame that followed them was corrupted.
+   *
+   * The bit clock is re-derived from scratch when the next preamble is found, so
+   * only the per-frame bit accumulators are cleared here; the global sample
+   * counter and the I/Q filters keep running to avoid a transient at re-sync.
+   */
+  private abortFrame(): void {
+    this.frame.started = false;
+    Object.assign(this.byteState, { current: 0, bitPosition: 0 });
+    Object.assign(this.bitSync, { bitAccumulator: 0, bitAccumCount: 0, bitSampleCounter: 0, nextBitSampleIndex: 0 });
+    this.silence.sampleCount = 0;
+    // Discard any threshold derived from the frame that just failed; the next
+    // successful sync recomputes it from its own sync window.
+    this.silence.threshold = DEFAULT_SILENCE_THRESHOLD;
   }
 
   async demodulateData(samples: Float32Array): Promise<Uint8Array> {
@@ -287,6 +323,8 @@ export class FSKCore extends BaseModulator<FSKConfig> {
       this.silence.sampleCount++;
       if (this.silence.sampleCount >= this.silence.samplesForEOD) {
         this.emit('eod');
+        // Clear the frame/bit state so the next transmission can be acquired,
+        // but keep bytes that were already completed successfully.
         this.resetState();
         return true;
       }
@@ -318,12 +356,9 @@ export class FSKCore extends BaseModulator<FSKConfig> {
           Object.assign(this.bitSync, { bitAccumulator: 0, bitAccumCount: 0, bitSampleCounter: 0, nextBitSampleIndex: 0 });
           this.debug.syncDetections++;
 
-          // Set silence threshold based on average amplitude
-          let sum = 0;
-          for (let i = 0; i < this.frame.syncAmplitudeBuffer.length; i++) {
-            sum += this.frame.syncAmplitudeBuffer.get(i);
-          }
-          this.silence.threshold = (sum / this.frame.syncAmplitudeBuffer.length) * 0.1;
+          // Set silence threshold based on the amplitude of this sync window.
+          // Recomputed on every (re)sync so a bad frame cannot poison it.
+          this.silence.threshold = this.measureSilenceThreshold();
         }
       }
     } else {
@@ -343,34 +378,63 @@ export class FSKCore extends BaseModulator<FSKConfig> {
     return false; // Continue processing
   }
 
+  /**
+   * Derive the silence threshold from the mean amplitude of the most recent
+   * sync window. Clamped to the default floor so that a very quiet or empty
+   * window cannot set the threshold to zero (which would disable silence
+   * detection and leave the frame state machine running forever).
+   */
+  private measureSilenceThreshold(): number {
+    const buffer = this.frame.syncAmplitudeBuffer;
+    if (!buffer || buffer.length === 0) return DEFAULT_SILENCE_THRESHOLD;
+
+    let sum = 0;
+    for (let i = 0; i < buffer.length; i++) sum += buffer.get(i);
+    const average = sum / buffer.length;
+    return Math.max(DEFAULT_SILENCE_THRESHOLD, average * SILENCE_THRESHOLD_RATIO);
+  }
+
   private processByte(bit: number): void {
     const { bitPosition } = this.byteState;
-    const stopBitPosition = this.config.parity === 'none' ? 9 : 10;
-    
-    if (bitPosition === 0) {
-      // Start bit validation
+    // Byte layout: start bit(s), 8 data bits (MSB first), optional parity,
+    // stop bit(s). The frame geometry must follow the configuration; a fixed
+    // layout silently frames every byte wrong when stopBits/startBits differ
+    // from 1, which both corrupts data and triggers endless re-syncs.
+    const { startBits, stopBits, parity } = this.config;
+    const parityBits = parity === 'none' ? 0 : 1;
+    const dataStart = startBits;
+    const dataEnd = startBits + 7;
+    const parityPosition = startBits + 8;
+    const firstStopPosition = startBits + 8 + parityBits;
+    const lastBitPosition = firstStopPosition + stopBits - 1;
+
+    if (bitPosition < startBits) {
+      // Start bit validation: a framing error means the byte boundary was lost,
+      // so drop back to sync hunting instead of staying "started" forever.
       if (bit !== 0) {
-        this.resetState();
+        this.abortFrame();
         return;
       }
-    } else if (bitPosition >= 1 && bitPosition <= 8) {
-      // Data bits (MSB first)
-      this.byteState.current |= (bit << (8 - bitPosition));
-    } else if (this.config.parity !== 'none' && bitPosition === 9) {
+    } else if (bitPosition >= dataStart && bitPosition <= dataEnd) {
+      // Data bits (MSB first): the first data bit lands in bit 7.
+      this.byteState.current |= (bit << (dataEnd - bitPosition));
+    } else if (parityBits === 1 && bitPosition === parityPosition) {
       // Parity bit (validation could be added here)
-    } else if (bitPosition === stopBitPosition) {
-      // Stop bit validation and byte completion
+    } else if (bitPosition >= firstStopPosition && bitPosition <= lastBitPosition) {
+      // Stop bit validation; the byte completes on the final stop bit.
       if (bit !== 1) {
-        this.frame.started = false;
+        this.abortFrame();
         return;
       }
-      this.byteState.buffer.push(this.byteState.current);
-      Object.assign(this.byteState, { current: 0, bitPosition: -1 }); // -1 because it will be incremented below
+      if (bitPosition === lastBitPosition) {
+        this.byteState.buffer.push(this.byteState.current);
+        Object.assign(this.byteState, { current: 0, bitPosition: -1 }); // -1 because it will be incremented below
+      }
     } else {
-      this.frame.started = false;
+      this.abortFrame();
       return;
     }
-    
+
     this.byteState.bitPosition++;
   }
 
@@ -464,6 +528,7 @@ export class FSKCore extends BaseModulator<FSKConfig> {
   reset(): void {
     this.resetState();
     this.frame.syncSamplesBuffer?.clear();
+    this.frame.syncAmplitudeBuffer?.clear();
     this.byteState.buffer = [];
     Object.assign(this.debug, { syncDetections: 0, demodulationCalls: 0, totalSamples: 0 });
   }
