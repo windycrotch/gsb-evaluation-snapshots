@@ -186,6 +186,29 @@ describe('Clumsy', function() {
         );
     });
 
+    it('keeps break points through rescale and replot', function() {
+        const clumsy = createClumsy();
+        clumsy.padding(0);
+        clumsy.range(0, 100);
+        clumsy.step(20);
+        clumsy.radius(0);
+
+        const line = [
+            { x: 0, y: 0 },
+            { x: 10, y: 0, break: true, mark: 'm', normal: { x: 0, y: 1 }, tick_size: 7 }
+        ];
+
+        const rescaled = clumsy.rescale(line);
+        assert.equal(rescaled[1].break, true);
+        assert.equal(rescaled[1].mark, 'm');
+        assert.deepEqual(rescaled[1].normal, { x: 0, y: 1 });
+        assert.equal(rescaled[1].tick_size, 7);
+
+        const replotted = clumsy.replot(rescaled);
+        assert.equal(replotted[1].break, true);
+        assert.equal(replotted[1].mark, 'm');
+    });
+
     it('stops replotting an empty line', function() {
         const clumsy = createClumsy();
         assert.deepEqual(clumsy.replot([]), []);
@@ -363,6 +386,218 @@ describe('Clumsy', function() {
             canvas.ctx.calls.filter((call) => call[0] === 'fillText').map((call) => call[1]),
             ['a', 'b']
         );
+    });
+
+    it('splits a curve into subpaths at break points', function() {
+        const canvas = createCanvas(100, 100);
+        const clumsy = new Clumsy(canvas);
+        clumsy.padding(0);
+        clumsy.range(0, 100);
+        clumsy.step(10);
+        clumsy.radius(0);
+
+        clumsy.draw([
+            { x: 0, y: 0 },
+            { x: 10, y: 0 },
+            { x: 20, y: 0, break: true },
+            { x: 30, y: 0 },
+            { x: 40, y: 0 },
+            { x: 50, y: 0 }
+        ]);
+
+        const curveCalls = canvas.ctx.calls.filter((call) =>
+            call[0] === 'beginPath' ||
+            call[0] === 'moveTo' ||
+            call[0] === 'lineTo' ||
+            call[0] === 'quadraticCurveTo' ||
+            call[0] === 'stroke'
+        );
+
+        assert.equal(curveCalls.filter((call) => call[0] === 'beginPath').length, 2);
+        assert.equal(curveCalls.filter((call) => call[0] === 'stroke').length, 2);
+        assert.deepEqual(
+            curveCalls.filter((call) => call[0] === 'moveTo'),
+            [['moveTo', 0, 100], ['moveTo', 30, 100]]
+        );
+
+        // Each side is smoothed on its own: the first subpath ends at the
+        // break point and the second one starts after the gap, so no curve
+        // segment spans from one side to the other.
+        assert.deepEqual(
+            curveCalls.filter((call) => call[0] === 'lineTo' || call[0] === 'quadraticCurveTo'),
+            [
+                ['quadraticCurveTo', 10, 100, 20, 100],
+                ['quadraticCurveTo', 40, 100, 50, 100]
+            ]
+        );
+    });
+
+    it('smooths every subpath up to its own last point', function() {
+        const canvas = createCanvas(100, 100);
+        const clumsy = new Clumsy(canvas);
+        clumsy.padding(0);
+        clumsy.range(0, 100);
+        clumsy.step(10);
+        clumsy.radius(0);
+
+        clumsy.draw([
+            { x: 0, y: 0 },
+            { x: 10, y: 0 },
+            { x: 20, y: 0, break: true },
+            { x: 30, y: 0 },
+            { x: 40, y: 0 },
+            { x: 50, y: 0 }
+        ]);
+
+        const curveCalls = canvas.ctx.calls.filter((call) =>
+            call[0] === 'beginPath' ||
+            call[0] === 'moveTo' ||
+            call[0] === 'quadraticCurveTo' ||
+            call[0] === 'stroke'
+        );
+        assert.equal(curveCalls.filter((call) => call[0] === 'beginPath').length, 2);
+
+        // The last curve of each subpath ends at its own last point.
+        const ends = curveCalls
+            .filter((call) => call[0] === 'quadraticCurveTo')
+            .map((call) => call.slice(3));
+        assert.deepEqual(ends.at(0), [20, 100]);
+        assert.deepEqual(ends.at(-1), [50, 100]);
+    });
+
+    it('draws an unbroken curve exactly as before', function() {
+        const canvas = createCanvas(100, 100);
+        const clumsy = new Clumsy(canvas);
+        clumsy.padding(0);
+        clumsy.range(0, 100);
+        clumsy.step(10);
+        clumsy.radius(0);
+
+        const last = clumsy.draw([
+            { x: 0, y: 0 },
+            { x: 10, y: 0 },
+            { x: 20, y: 0 }
+        ]);
+
+        assert.deepEqual(
+            canvas.ctx.calls.filter((call) =>
+                call[0] === 'beginPath' ||
+                call[0] === 'moveTo' ||
+                call[0] === 'quadraticCurveTo' ||
+                call[0] === 'stroke'
+            ),
+            [
+                ['beginPath'],
+                ['moveTo', 0, 100],
+                ['quadraticCurveTo', 10, 100, 20, 100],
+                ['stroke', '#000', 1]
+            ]
+        );
+        assert.deepEqual(last, { x: 20, y: 100, direction: { x: 1, y: 0 } });
+    });
+
+    it('ends 3- and 4-point curves at the rescaled last point', function() {
+        for (const line of [
+            [{ x: 0, y: 0 }, { x: 50, y: 80 }, { x: 100, y: 0 }],
+            [{ x: 0, y: 0 }, { x: 33, y: 60 }, { x: 66, y: 60 }, { x: 100, y: 0 }]
+        ]) {
+            const canvas = createCanvas(100, 100);
+            const clumsy = new Clumsy(canvas);
+            clumsy.padding(0);
+            clumsy.range(0, 100);
+            clumsy.step(10);
+            clumsy.radius(0);
+
+            const rescaledLine = clumsy.rescale(line);
+            const last = clumsy.draw(line);
+            const expected = rescaledLine.at(-1);
+
+            assert.equal(last.x, expected.x);
+            assert.equal(last.y, expected.y);
+
+            assert.ok(canvas.ctx.calls.every((call) =>
+                call.slice(1).every((value) => typeof value !== 'number' || !Number.isNaN(value))
+            ));
+
+            const curves = canvas.ctx.calls.filter((call) => call[0] === 'quadraticCurveTo');
+            assert.deepEqual(curves.at(-1).slice(3), [expected.x, expected.y]);
+        }
+    });
+
+    it('does not mutate points or produce NaN for degenerate curves', function() {
+        const canvas = createCanvas(100, 100);
+        const clumsy = new Clumsy(canvas);
+        clumsy.padding(0);
+        clumsy.range(0, 100);
+        clumsy.step(20);
+        clumsy.radius(4);
+        clumsy.seed(5);
+
+        const line = [
+            { x: 0, y: 0 },
+            { x: 0, y: 0, break: true },
+            { x: 50, y: 50 }
+        ];
+        const snapshot = JSON.parse(JSON.stringify(line));
+
+        clumsy.draw(line);
+
+        assert.deepEqual(line, snapshot);
+        assert.ok(canvas.ctx.calls.every((call) =>
+            call.slice(1).every((value) => typeof value !== 'number' || !Number.isNaN(value))
+        ));
+    });
+
+    it('keeps the last direction across break points', function() {
+        const canvas = createCanvas(100, 100);
+        const clumsy = new Clumsy(canvas);
+        clumsy.padding(0);
+        clumsy.range(0, 100);
+        clumsy.step(10);
+        clumsy.radius(0);
+
+        const last = clumsy.draw([
+            { x: 0, y: 0 },
+            { x: 10, y: 0, break: true },
+            { x: 90, y: 0 },
+            { x: 100, y: 0 }
+        ]);
+
+        assert.deepEqual(last.direction, { x: 1, y: 0 });
+    });
+
+    it('jitters a break point without dropping the break', function() {
+        const clumsy = createClumsy();
+        clumsy.step(20);
+        clumsy.radius(8);
+        clumsy.seed(3);
+
+        const replotted = clumsy.replot([
+            { x: 0, y: 0 },
+            { x: 100, y: 0, break: true },
+            { x: 200, y: 0 }
+        ]);
+        const breakPoint = replotted.find((point) => point.break === true);
+
+        assert.ok(breakPoint);
+        assert.ok(breakPoint.y !== 0);
+    });
+
+    it('does not produce NaN for a zero-length last segment', function() {
+        const canvas = createCanvas(100, 100);
+        const clumsy = new Clumsy(canvas);
+        clumsy.padding(0);
+        clumsy.range(0, 100);
+        clumsy.step(1000);
+        clumsy.radius(0);
+
+        const last = clumsy.draw([{ x: 10, y: 10 }, { x: 10, y: 10 }]);
+
+        assert.ok(Number.isFinite(last.direction.x));
+        assert.ok(Number.isFinite(last.direction.y));
+        assert.ok(canvas.ctx.calls.every((call) =>
+            call.slice(1).every((value) => typeof value !== 'number' || !Number.isNaN(value))
+        ));
     });
 
     it('overdraws the same curve without changing the input', function() {

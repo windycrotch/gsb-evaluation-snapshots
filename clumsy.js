@@ -178,32 +178,56 @@ function Clumsy(canvas){
         var rescaledLine = self.rescale(line);
         var replottedLine = self.replot(rescaledLine);
 
-        ctx.beginPath();
-        ctx.moveTo(replottedLine[0].x, replottedLine[0].y);
-        var last = replottedLine[0];
-
-        if(replottedLine.length > 2){
-            for(var i = 1; i < replottedLine.length - 2; i ++){
-                var point = replottedLine[i];
-                var nextPoint = replottedLine[i+1];
-
-                var xc = (point.x + nextPoint.x) / 2;
-                var yc = (point.y + nextPoint.y) / 2;
-                ctx.quadraticCurveTo(point.x, point.y, xc, yc);
+        // A point with `break: true` ends the current subpath before the next
+        // point, so a sharp corner is not smoothed into an arc. The break is
+        // honoured on the replotted curve, after thinning and jitter.
+        var subpaths = [[replottedLine[0]]];
+        for(var i = 1; i < replottedLine.length; i++){
+            // A break on the last point has nothing after it, so it does not
+            // open an extra subpath.
+            if(replottedLine[i - 1].break === true){
+                subpaths.push([]);
             }
-
-            ctx.quadraticCurveTo(replottedLine[i].x, replottedLine[i].y, replottedLine[i+1].x,replottedLine[i+1].y);
-                    var last = {x: replottedLine[i+1].x, y:replottedLine[i+1].y};
-            last = replottedLine[i+1];
-        }else{
-            ctx.lineTo(replottedLine[1].x, replottedLine[1].y);
-            last = replottedLine[1];
+            subpaths[subpaths.length - 1].push(replottedLine[i]);
         }
 
-        ctx.stroke();
+        for(var s = 0; s < subpaths.length; s++){
+            var subpath = subpaths[s];
 
-        for(var i = 0; i < replottedLine.length; i++){
-            var point = replottedLine[i];
+            // A lone point has no segment to stroke, e.g. when a break sits on
+            // an endpoint or two breaks are neighbours.
+            if(subpath.length < 2) continue;
+
+            ctx.beginPath();
+            ctx.moveTo(subpath[0].x, subpath[0].y);
+
+            if(subpath.length === 2){
+                ctx.lineTo(subpath[1].x, subpath[1].y);
+            }else if(subpath.length > 2){
+                for(var j = 1; j < subpath.length - 2; j++){
+                    var point = subpath[j];
+                    var nextPoint = subpath[j+1];
+
+                    var xc = (point.x + nextPoint.x) / 2;
+                    var yc = (point.y + nextPoint.y) / 2;
+                    ctx.quadraticCurveTo(point.x, point.y, xc, yc);
+                }
+
+                // Finish the subpath exactly at its last point.
+                var penultimate = subpath[subpath.length - 2];
+                var endPoint = subpath[subpath.length - 1];
+                ctx.quadraticCurveTo(
+                    penultimate.x, penultimate.y,
+                    endPoint.x, endPoint.y);
+            }
+
+            ctx.stroke();
+        }
+
+        var last = replottedLine[replottedLine.length - 1];
+
+        for(var k = 0; k < replottedLine.length; k++){
+            var point = replottedLine[k];
 
             if(point.mark === undefined) continue;
             var tick_size = point.tick_size || 10;
@@ -223,13 +247,26 @@ function Clumsy(canvas){
         }
 
         if(replottedLine.length >= 2){
+            // Take the direction of the last non-degenerate segment so a
+            // repeated point never produces NaN coordinates.
             var l = replottedLine.length - 1;
-            var p0 = replottedLine[l-1];
-            var p1 = replottedLine[l];
+            var dir = {x: 0, y: 0};
+            var dir_length = 0;
 
-            var dir = { x: p1.x - p0.x, y: p1.y - p0.y};
-            var dir_length = Math.sqrt(dir.x*dir.x+dir.y*dir.y);
-            last.direction = {x: dir.x / dir_length, y: dir.y / dir_length};
+            while(l > 0 && dir_length === 0){
+                dir = {
+                    x: replottedLine[l].x - replottedLine[l-1].x,
+                    y: replottedLine[l].y - replottedLine[l-1].y
+                };
+                dir_length = Math.sqrt(dir.x*dir.x + dir.y*dir.y);
+                l--;
+            }
+
+            if(dir_length !== 0){
+                last.direction = {x: dir.x / dir_length, y: dir.y / dir_length};
+            }else{
+                last.direction = {x: 0, y: 0};
+            }
         };
 
 
@@ -252,6 +289,7 @@ function Clumsy(canvas){
             if(point.mark !== undefined) rescaled.mark = point.mark;
             if(point.normal !== undefined) rescaled.normal = point.normal;
             if(point.tick_size !== undefined) rescaled.tick_size = point.tick_size;
+            if(point.break !== undefined) rescaled.break = point.break;
 
             result.push(rescaled);
         };
@@ -271,6 +309,7 @@ function Clumsy(canvas){
             if(point.mark !== undefined) copy.mark = point.mark;
             if(point.normal !== undefined) copy.normal = point.normal;
             if(point.tick_size !== undefined) copy.tick_size = point.tick_size;
+            if(point.break !== undefined) copy.break = point.break;
             return copy;
         }
 

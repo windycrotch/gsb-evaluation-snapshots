@@ -310,9 +310,14 @@ Draws a curve by array of point in `{x: x, y: y}` format.
 
 * `curve` is [{x: x0, y: y0}, ... {x: xn-1, yn-1}]
 
+A point may set `break: true` to leave a gap before the next point. The curve is stroked as separate subpaths, so a sharp corner stays sharp instead of being smoothed. The `break` point itself is replotted like any other point.
+
 ```js
 // Draws line from (0,0) to (1,1).
 clumsy.draw([{x: 0, y:0}, {x: 1, y:1}]);
+
+// Draws two separate segments: (0,0)-(1,0) and (2,0)-(3,0).
+clumsy.draw([{x: 0, y:0}, {x: 1, y:0, break: true}, {x: 2, y:0}, {x: 3, y:0}]);
 ```
 
 <a name="fillText"></a>
