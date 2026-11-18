@@ -3,7 +3,7 @@
 import { useRef, useEffect, useCallback } from 'react';
 import { useFrame } from '@react-three/fiber';
 import { useSatellites } from '@/hooks/useSatellites';
-import { initSatelliteRecords, propagateBatch, propagateSingle } from '@/lib/satellites/propagator';
+import { propagateBatch, propagateSingle } from '@/lib/satellites/propagator';
 import {
   setTLEData,
   setSatrecObjects,
@@ -14,12 +14,13 @@ import {
   setRAANArray,
   setISLCapableArray,
   setCurrentRoute,
+  setCatalogIndexMapping,
+  getVisibleToOriginalMapping,
 } from '@/lib/satellites/satellite-store';
-import { computeISLArrays } from '@/lib/satellites/isl-capability';
-import { parseLaunchYear } from '@/lib/satellites/tle-parse';
+import { buildVisibleCatalog, remapConnectedIndex } from '@/lib/satellites/catalog-builder';
 import { resetRouteState } from '@/lib/utils/isl-pathfinder';
 import { useAppStore } from '@/stores/app-store';
-import { isOperationalAltitude } from '@/lib/config';
+import type { TLEData } from '@/lib/satellites/tle-fetcher';
 import type { SatRec } from '@/lib/satellites/propagator';
 
 const NUM_BATCHES = 6;
@@ -35,86 +36,74 @@ export default function SatellitePropagator() {
   const positionsRef = useRef<Float32Array | null>(null);
   const batchIndexRef = useRef(0);
   const countRef = useRef(0);
+  // Visible TLE catalog from the previous rebuild, retained so the connected
+  // satellite can be identified across the next rebuild (the store's TLE is
+  // overwritten during the rebuild itself).
+  const previousTleRef = useRef<TLEData[]>([]);
   const altitudeFilter = useAppStore((s) => s.altitudeFilter);
 
-  // Initialize satrecs when TLE data arrives or filter changes
+  // Rebuild the visible catalog when TLE data arrives or the filter changes.
+  // A rebuild re-meanings every visible index, so the rebuild owns the
+  // visible↔original index mapping and translates (or drops) the connected
+  // satellite through it instead of letting a stale index point at another
+  // satellite or an out-of-bounds slot.
   useEffect(() => {
     if (!tleData || tleData.length === 0) return;
 
-    const totalCount = tleData.length;
-    const allSatrecs = initSatelliteRecords(tleData);
     const now = new Date();
+    const previousConnectedIndex = useAppStore.getState().connectedSatelliteIndex;
+    const previousTle = previousTleRef.current;
+    const previousMapping = getVisibleToOriginalMapping();
 
-    // Propagate all satellites once to get altitudes
-    const allInclinations = new Float32Array(totalCount);
-    const allAltitudes = new Float32Array(totalCount);
-    const allLaunchYears = new Uint16Array(totalCount);
-    for (let i = 0; i < totalCount; i++) {
-      const inc = parseFloat(tleData[i].line2.substring(8, 16));
-      allInclinations[i] = isNaN(inc) ? 53 : inc;
-      const data = propagateSingle(allSatrecs[i], now);
-      allAltitudes[i] = data ? data.altitudeKm : 0;
-      allLaunchYears[i] = parseLaunchYear(tleData[i].line1);
-    }
-    setFullCatalog(totalCount, allInclinations, allAltitudes, allLaunchYears);
+    const catalog = buildVisibleCatalog(tleData, altitudeFilter, now);
 
-    let filteredTle = tleData;
-    let filteredSatrecs = allSatrecs;
-
-    if (altitudeFilter) {
-      const filteredIndices: number[] = [];
-      for (let i = 0; i < totalCount; i++) {
-        if (isOperationalAltitude(allInclinations[i], allAltitudes[i])) {
-          filteredIndices.push(i);
-        }
-      }
-      filteredTle = filteredIndices.map((i) => tleData[i]);
-      filteredSatrecs = filteredIndices.map((i) => allSatrecs[i]);
-    }
-
-    console.log(`Showing ${filteredSatrecs.length} satellites${altitudeFilter ? ` (filtered from ${totalCount})` : ''}`);
-
-    setTLEData(filteredTle);
-    setSatrecObjects(filteredSatrecs);
-    satrecsRef.current = filteredSatrecs;
-
-    const count = filteredSatrecs.length;
-    countRef.current = count;
-    const posArr = new Float32Array(count * 3);
-    positionsRef.current = posArr;
-    setPositionsArray(posArr);
-
-    // Parse inclinations from TLE line2
-    const inclinations = new Float32Array(count);
-    for (let i = 0; i < count; i++) {
-      const inc = parseFloat(filteredTle[i].line2.substring(8, 16));
-      inclinations[i] = isNaN(inc) ? 53 : inc;
-    }
-    setInclinationsArray(inclinations);
-
-    // Build RAAN + ISL arrays for the filtered set
-    const filteredLines2 = filteredTle.map((t) => t.line2);
-    const filteredLaunchYears = new Uint16Array(count);
-    for (let i = 0; i < count; i++) {
-      filteredLaunchYears[i] = parseLaunchYear(filteredTle[i].line1);
-    }
-    const { raanArray: filteredRaans, islCapableArray: filteredIsl } = computeISLArrays(
-      filteredLines2, inclinations, filteredLaunchYears, count,
+    console.log(
+      `Showing ${catalog.tleData.length} satellites${altitudeFilter ? ` (filtered from ${catalog.originalCount})` : ''}`,
     );
-    setRAANArray(filteredRaans);
-    setISLCapableArray(filteredIsl);
 
-    // Initial propagation
-    propagateBatch(filteredSatrecs, now, 0, count, posArr);
+    setTLEData(catalog.tleData);
+    setSatrecObjects(catalog.satrecs);
+    satrecsRef.current = catalog.satrecs;
+    previousTleRef.current = catalog.tleData;
+
+    const count = catalog.satrecs.length;
+    countRef.current = count;
+    positionsRef.current = catalog.positions;
+    setPositionsArray(catalog.positions);
+    setInclinationsArray(catalog.inclinations);
+    setRAANArray(catalog.raanArray);
+    setISLCapableArray(catalog.islCapableArray);
+    setFullCatalog(
+      catalog.fullCatalog.count,
+      catalog.fullCatalog.inclinations,
+      catalog.fullCatalog.altitudes,
+      catalog.fullCatalog.launchYears,
+    );
+    // Explicit visible↔original mapping — consumers must not treat a visible
+    // index as an original-catalog index.
+    setCatalogIndexMapping(catalog.visibleToOriginal, catalog.originalCount);
 
     console.log(`Loaded ${count} satellites`);
     useAppStore.getState().setSatellitesLoaded(true);
-    // Indices into the previous catalog now point at different satellites —
-    // drop the connected satellite and any held route so nothing reads the
-    // new positionsArray with a stale index (NaN geometry / wrong satellite).
-    useAppStore.getState().setConnectedSatellite(null);
+
+    // Route indices are always rebuilt from scratch — a held route's hop
+    // indices cannot survive the re-meaning. The connected satellite is only
+    // retained when the same physical satellite remains visible; otherwise
+    // its state goes null rather than silently highlighting another satellite
+    // or reading an out-of-bounds position.
     setCurrentRoute(null);
     resetRouteState();
+    const nextConnectedIndex = remapConnectedIndex(
+      previousConnectedIndex,
+      previousTle,
+      previousMapping.length > 0 ? previousMapping : null,
+      catalog.tleData,
+      catalog.originalToVisible,
+    );
+    if (nextConnectedIndex === null) {
+      setConnectedOrbitalData(null);
+    }
+    useAppStore.getState().setConnectedSatellite(nextConnectedIndex);
     useAppStore.getState().bumpSatellitesVersion();
   }, [tleData, altitudeFilter]);
 

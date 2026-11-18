@@ -25,6 +25,17 @@ let fullCatalogLaunchYears: Uint16Array | null = null;
 let raanArray: Float32Array | null = null;
 let islCapableArray: Uint8Array | null = null;
 
+// Index mapping between the visible (possibly altitude-filtered) catalog and
+// the full unfiltered catalog. All render/state indices in this module refer
+// to the VISIBLE catalog; the mapping is the only sanctioned way to reach the
+// underlying satellite — visible index N must never be treated as an original
+// catalog index after a filter toggle.
+//   visibleToOriginal[visibleIdx] = original catalog index
+//   originalToVisible[originalIdx] = visible catalog index, or -1 when filtered out
+let visibleToOriginalIndices: Int32Array = new Int32Array(0);
+let originalToVisibleIndices: Int32Array = new Int32Array(0);
+let originalCatalogCount = 0;
+
 // Current ISL route
 export interface RoutePath {
   type: 'direct' | 'isl';
@@ -150,6 +161,56 @@ export function setISLCapableArray(capable: Uint8Array): void {
 /** Get the ISL capability array */
 export function getISLCapableArray(): Uint8Array | null {
   return islCapableArray;
+}
+
+/**
+ * Store the mapping between visible-catalog indices and original-catalog
+ * indices. The reverse mapping is derived here so the two directions can
+ * never disagree. Called on every catalog rebuild (TLE refresh or filter
+ * toggle) — an unfiltered catalog passes the identity permutation.
+ */
+export function setCatalogIndexMapping(
+  visibleToOriginal: Int32Array | number[],
+  totalOriginalCount: number,
+): void {
+  const forward = visibleToOriginal instanceof Int32Array
+    ? visibleToOriginal
+    : Int32Array.from(visibleToOriginal);
+  const reverse = new Int32Array(totalOriginalCount).fill(-1);
+  for (let visibleIdx = 0; visibleIdx < forward.length; visibleIdx++) {
+    const originalIdx = forward[visibleIdx];
+    if (originalIdx >= 0 && originalIdx < totalOriginalCount) {
+      reverse[originalIdx] = visibleIdx;
+    }
+  }
+  visibleToOriginalIndices = forward;
+  originalToVisibleIndices = reverse;
+  originalCatalogCount = totalOriginalCount;
+}
+
+/** Map a visible-catalog index to its original-catalog index.
+ *  Returns -1 when the index is out of range. */
+export function getOriginalIndex(visibleIndex: number): number {
+  if (visibleIndex < 0 || visibleIndex >= visibleToOriginalIndices.length) return -1;
+  return visibleToOriginalIndices[visibleIndex];
+}
+
+/** Map an original-catalog index to its current visible-catalog index.
+ *  Returns -1 when the satellite was filtered out (or never existed). */
+export function getVisibleIndex(originalIndex: number): number {
+  if (originalIndex < 0 || originalIndex >= originalToVisibleIndices.length) return -1;
+  return originalToVisibleIndices[originalIndex];
+}
+
+/** Get the full visible→original index mapping (render/state consumers use
+ *  this instead of assuming visible indices equal original indices). */
+export function getVisibleToOriginalMapping(): Int32Array {
+  return visibleToOriginalIndices;
+}
+
+/** Number of satellites in the original (unfiltered) catalog. */
+export function getOriginalCatalogCount(): number {
+  return originalCatalogCount;
 }
 
 /** Set the current ISL route */
