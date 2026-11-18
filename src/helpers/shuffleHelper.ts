@@ -22,19 +22,18 @@ export const shuffleQueue = (queue: MediaTrack[], currentTrackId?: string): Medi
     return shuffleArray([...queue]);
   }
 
-  // Get tracks before and after current
-  const beforeCurrent = queue.slice(0, currentIndex);
-  const afterCurrent = queue.slice(currentIndex + 1);
+  // Get tracks before and after current. Other entries sharing the current
+  // track id are dropped so the current track appears exactly once in the
+  // result (a queue may legitimately contain the same id more than once).
+  const beforeCurrent = queue.slice(0, currentIndex).filter((track) => track.id !== currentTrackId);
+  const afterCurrent = queue.slice(currentIndex + 1).filter((track) => track.id !== currentTrackId);
 
   // Shuffle all tracks except current
   const shuffledRest = shuffleArray([...beforeCurrent, ...afterCurrent]);
 
-  // Reinsert current track at its original position
-  return [
-    ...shuffledRest.slice(0, currentIndex),
-    queue[currentIndex],
-    ...shuffledRest.slice(currentIndex),
-  ];
+  // Reinsert current track where it was relative to the retained tracks
+  const position = Math.min(beforeCurrent.length, shuffledRest.length);
+  return [...shuffledRest.slice(0, position), queue[currentIndex], ...shuffledRest.slice(position)];
 };
 
 /**

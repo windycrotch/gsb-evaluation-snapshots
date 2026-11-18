@@ -32,8 +32,14 @@ class AudioX {
   private _audio: HTMLAudioElement;
   private isPlayLogEnabled: boolean;
   private static _instance: AudioX;
-  private _queue: MediaTrack[];
+  private _queue: MediaTrack[] = [];
   private _currentQueueIndex = 0;
+  /**
+   * Set when the currently playing track was removed from the queue. Points at
+   * the entry playNext has to resume from, because that entry moved into the
+   * slot the removed track used to occupy.
+   */
+  private _pendingQueueIndex: number | null = null;
   private _fetchFn: (mediaTrack: MediaTrack) => Promise<void>;
   private eqStatus: EqualizerStatus = 'IDEAL';
   private isEqEnabled = false;
@@ -139,6 +145,9 @@ class AudioX {
       const index = queue.findIndex((track) => mediaTrack.id === track.id);
       if (index > -1) {
         this._currentQueueIndex = index;
+        // The track is being started explicitly, so any resume position left
+        // over from a removed track is no longer relevant.
+        this._pendingQueueIndex = null;
       }
     }
 
@@ -361,7 +370,7 @@ class AudioX {
     this.clearQueue();
     const audioState = getLatestState('AUDIO_X_STATE') as AudioState;
     const playerQueue = isValidArray(queue) ? queue.slice() : [];
-    const currentTrack = isValidObject(audioState.currentTrack)
+    const currentTrack = isValidObject(audioState?.currentTrack)
       ? audioState.currentTrack
       : undefined;
 
@@ -373,9 +382,13 @@ class AudioX {
         this._queue = playerQueue.reverse();
         break;
       case 'SHUFFLE': {
-        const newQueue = shuffleQueue(playerQueue, currentTrack?.id);
-        this.addQueue(newQueue, 'DEFAULT');
+        // Keep the order the caller handed us so shuffle can be turned back off.
+        this.originalQueue = playerQueue.slice();
+        this._queue = shuffleQueue(playerQueue, currentTrack?.id);
         this.isShuffled = true;
+        // The current track is kept by shuffleQueue, make sure the cursor
+        // still points at it so playNext continues in the shuffled order.
+        this.syncCurrentQueueIndex(currentTrack?.id);
         break;
       }
       default:
@@ -391,13 +404,15 @@ class AudioX {
   }
 
   playNext() {
-    const index = this._currentQueueIndex + 1;
+    const index = this.getNextQueueIndex();
     if (this?._queue?.length > index) {
       const nextTrack = this._queue[index];
       this.addMediaAndPlay(nextTrack, this._fetchFn);
       this._currentQueueIndex = index;
+      this._pendingQueueIndex = null;
     } else {
       // stop the audio and end trigger queue ended
+      this._pendingQueueIndex = null;
       this.stop();
       notify('AUDIO_STATE', {
         playbackState: PLAYBACK_STATE.QUEUE_ENDED,
@@ -406,51 +421,84 @@ class AudioX {
   }
 
   playPrevious() {
-    const index = this?._currentQueueIndex - 1;
+    const index = this.getPreviousQueueIndex();
 
     if (index >= 0) {
       const previousTrack = this?._queue[index];
       this.addMediaAndPlay(previousTrack, this._fetchFn);
       this._currentQueueIndex = index;
+      this._pendingQueueIndex = null;
     } else {
       console.log('At the beginning of the queue');
     }
   }
 
   clearQueue() {
-    if (this._queue && isValidArray(this._queue)) {
-      this._queue = [];
-      this._currentQueueIndex = 0;
-    }
+    this._queue = [];
+    this._currentQueueIndex = 0;
+    this._pendingQueueIndex = null;
+    this.originalQueue = [];
+    this.isShuffled = false;
   }
 
   addToQueue(mediaTracks: MediaTrack | MediaTrack[]) {
-    if (this._queue && isValidArray(this._queue)) {
-      if (Array.isArray(mediaTracks)) {
-        this._queue = [...this._queue, ...mediaTracks];
-      } else {
-        this._queue.push(mediaTracks);
-      }
+    if (!mediaTracks) {
+      return;
+    }
+
+    const tracks = Array.isArray(mediaTracks) ? mediaTracks : [mediaTracks];
+    if (!tracks.length) {
+      return;
+    }
+
+    if (!this._queue) {
+      this._queue = [];
+    }
+    this._queue = [...this._queue, ...tracks];
+
+    // While shuffled the original order is the source of truth when shuffle is
+    // turned off, so newly added tracks have to land there too.
+    if (this.isShuffled) {
+      this.originalQueue = [...this.originalQueue, ...tracks];
     }
   }
 
   toggleShuffle() {
     // isShuffled is false initially
     const audioState = getLatestState('AUDIO_X_STATE') as AudioState;
-    const currentQueue = this._queue ?? this.getQueue();
-    this.clearQueue(); // clearing Queue to check if it still stays
-    const currentTrack = isValidObject(audioState.currentTrack)
-      ? audioState.currentTrack
+    const previousQueue = this.getQueue().slice();
+    const previousIndex = this._currentQueueIndex;
+    // Only a track that is actually playing has to keep its slot; with an
+    // idle player the whole queue is free to be shuffled.
+    const currentTrackId = isValidObject(audioState?.currentTrack)
+      ? audioState.currentTrack.id
       : undefined;
+
     if (!this.isShuffled) {
-      this.originalQueue = [...currentQueue];
-      const newQueue = shuffleQueue(currentQueue, currentTrack?.id);
-      this.addQueue(newQueue, 'DEFAULT');
+      // Remember the order the caller originally gave us, not the current one.
+      this.originalQueue = previousQueue;
+      this._queue = shuffleQueue(previousQueue, currentTrackId);
+      this.syncCurrentQueueIndex(currentTrackId);
       this.isShuffled = true;
     } else {
-      if (!this.isShuffled || !this.originalQueue.length) return;
-      this.addQueue(this.originalQueue, 'DEFAULT');
+      if (!this.originalQueue.length) {
+        this.isShuffled = false;
+        return;
+      }
+      // Restore the pre-shuffle order and keep the cursor on the current track.
+      const restoredQueue = this.originalQueue.slice();
+      const restoredIndex = currentTrackId
+        ? restoredQueue.findIndex((track) => track.id === currentTrackId)
+        : -1;
+      this._queue = restoredQueue;
+      this._currentQueueIndex = restoredIndex > -1 ? restoredIndex : previousIndex;
+      this._pendingQueueIndex = null;
       this.isShuffled = false;
+    }
+    this.clampQueueIndex();
+    handleQueuePlayback();
+    if (this.showNotificationsActions) {
+      attachMediaSessionHandlers();
     }
   }
 
@@ -481,14 +529,114 @@ class AudioX {
   }
 
   removeFromQueue(mediaTrack: MediaTrack) {
-    if (this._queue && isValidArray(this._queue)) {
-      const queue = this._queue.filter((track: MediaTrack) => track.id === mediaTrack.id);
-      this._queue = queue;
+    if (!mediaTrack || !this._queue || !isValidArray(this._queue)) {
+      return;
     }
+
+    const index = this._queue.findIndex((track: MediaTrack) => track.id === mediaTrack.id);
+    if (index === -1) {
+      return;
+    }
+
+    // Remove only the matching entry so the remaining order is preserved.
+    this._queue = [...this._queue.slice(0, index), ...this._queue.slice(index + 1)];
+
+    if (this.originalQueue.length) {
+      const originalIndex = this.originalQueue.findIndex(
+        (track: MediaTrack) => track.id === mediaTrack.id,
+      );
+      if (originalIndex > -1) {
+        this.originalQueue = [
+          ...this.originalQueue.slice(0, originalIndex),
+          ...this.originalQueue.slice(originalIndex + 1),
+        ];
+      }
+    }
+
+    if (this._queue.length === 0) {
+      this._currentQueueIndex = 0;
+      this._pendingQueueIndex = null;
+      return;
+    }
+
+    // Keep a pending resume position (set when the playing track was removed)
+    // pointing at the same successor after this removal.
+    if (this._pendingQueueIndex !== null) {
+      if (index < this._pendingQueueIndex) {
+        this._pendingQueueIndex -= 1;
+      }
+      this._pendingQueueIndex = Math.min(this._pendingQueueIndex, this._queue.length - 1);
+    }
+
+    if (index < this._currentQueueIndex) {
+      // Everything left of the cursor shifted one position left.
+      this._currentQueueIndex -= 1;
+    } else if (index === this._currentQueueIndex) {
+      // The playing track is gone. The next track now sits in the slot the
+      // removed track occupied; point the cursor just before it so playNext
+      // continues with the original next track instead of skipping one.
+      this._pendingQueueIndex = this._currentQueueIndex;
+      this._currentQueueIndex = Math.min(this._currentQueueIndex, this._queue.length - 1);
+      return;
+    }
+    this._currentQueueIndex = Math.min(
+      Math.max(this._currentQueueIndex, 0),
+      this._queue.length - 1,
+    );
+  }
+
+  /**
+   * Starts playback of the queue entry at the given position.
+   * Used by queue loop to jump back to the first track.
+   */
+  playFromQueue(index: number) {
+    const queue = this.getQueue();
+    if (!isValidArray(queue)) {
+      return;
+    }
+    const target = Math.min(Math.max(index, 0), queue.length - 1);
+    this._currentQueueIndex = target;
+    this._pendingQueueIndex = null;
+    this.addMediaAndPlay(queue[target], this._fetchFn);
   }
 
   getQueue() {
     return this._queue && isValidArray(this._queue) ? this._queue : [];
+  }
+
+  private getNextQueueIndex() {
+    if (this._pendingQueueIndex !== null) {
+      return this._pendingQueueIndex;
+    }
+    return this._currentQueueIndex + 1;
+  }
+
+  private getPreviousQueueIndex() {
+    if (this._pendingQueueIndex !== null) {
+      return this._pendingQueueIndex - 1;
+    }
+    return this._currentQueueIndex - 1;
+  }
+
+  private syncCurrentQueueIndex(currentTrackId?: string) {
+    this._pendingQueueIndex = null;
+    if (currentTrackId) {
+      const index = this._queue.findIndex((track) => track.id === currentTrackId);
+      if (index > -1) {
+        this._currentQueueIndex = index;
+        return;
+      }
+    }
+    this.clampQueueIndex();
+  }
+
+  private clampQueueIndex() {
+    const length = this._queue?.length ?? 0;
+    if (length === 0) {
+      this._currentQueueIndex = 0;
+      return;
+    }
+    this._currentQueueIndex = Math.min(Math.max(this._currentQueueIndex, 0), length - 1);
   }
 
   get id() {

@@ -6,7 +6,8 @@
   "types": "./dist/index.d.ts",
   "type": "module",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "build": "npm run clean && tsup src/index.ts",
     "start": "npm run build -- --watch",
     "release": "release-it",
@@ -44,13 +45,16 @@
     "@release-it/conventional-changelog": "^10.0.0",
     "@swc/core": "^1.11.21",
     "@types/node": "^22.14.1",
+    "@vitest/browser": "^3.2.7",
     "commitlint": "^19.8.0",
     "lefthook": "^1.11.10",
+    "playwright": "^1.65.1",
     "release-it": "^18.1.2",
     "rimraf": "^6.0.1",
     "terser": "^5.39.0",
     "tsup": "^8.4.0",
-    "typescript": "^5.8.3"
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.7"
   },
   "repository": {
     "type": "git",

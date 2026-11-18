@@ -231,6 +231,22 @@ const instance = AudioX.getAudioInstance();  // Get raw audio element
 
 Found a bug? Want to add a feature? Contributions are welcome! Please raise an issue or submit a PR.
 
+### Running the tests
+
+Queue and loop behaviour is covered by browser tests that run against real
+`MediaTrack` fixtures (short WAV files generated as data URLs), so playback
+events such as `ended` and `queueended` are exercised for real.
+
+```bash
+# One-time: fetch the browser Vitest drives.
+npx playwright install chromium
+
+npm test
+```
+
+Set `AUDIO_X_TEST_CHANNEL=chrome` (or `msedge`) to reuse a locally installed
+browser instead of the Playwright-managed one.
+
 ## Author
 
 Ashish Kumar - [afkcodes](https://afk.codes)

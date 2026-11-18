@@ -102,7 +102,19 @@ const loadScript = (url: string, onLoad: () => void, name: string): Promise<void
   });
 };
 
+let queueEndedListenerAttached = false;
+
+/**
+ * Advances to the next track when the current one ends.
+ * The listener is attached only once so repeated `addQueue` calls cannot make a
+ * single `ended` event advance the queue multiple times.
+ */
 const handleQueuePlayback = () => {
+  if (queueEndedListenerAttached) {
+    return;
+  }
+  queueEndedListenerAttached = true;
+
   const audio = new AudioX();
   let hasEnded = false;
 
@@ -145,27 +157,46 @@ const shuffle = <T>(array: T[]): T[] => {
   return shuffledArray;
 };
 
+let activeLoopMode: LoopMode = 'OFF';
+let detachQueueLoopListener: (() => void) | null = null;
+
 const handleLoopPlayback = (loopMode: LoopMode) => {
   const audio = new AudioX();
   const audioInstance = AudioX.getAudioInstance();
 
-  if (loopMode === 'OFF') {
-    audioInstance.loop = false;
+  activeLoopMode = loopMode;
+
+  // SINGLE loops the media element itself, every other mode must turn it off,
+  // otherwise the queue loop and the single-track loop keep firing together.
+  audioInstance.loop = loopMode === 'SINGLE';
+
+  // Always drop the previous queue loop listener before deciding whether this
+  // mode needs one, so repeated loop('QUEUE') calls cannot stack listeners.
+  if (detachQueueLoopListener) {
+    detachQueueLoopListener();
+    detachQueueLoopListener = null;
   }
-  if (loopMode === 'SINGLE') {
-    audioInstance.loop = true;
+
+  if (loopMode !== 'QUEUE') {
+    return;
   }
-  if (loopMode === 'QUEUE') {
+
+  detachQueueLoopListener = listen('AUDIO_STATE', (audioState: AudioState) => {
+    if (activeLoopMode !== 'QUEUE') {
+      return;
+    }
+    if (audioState.playbackState !== 'queueended') {
+      return;
+    }
+    // Resolve the queue at the time the event fires, not when loop was enabled.
     const queue = audio.getQueue();
-    // switching off single
-    handleLoopPlayback('OFF');
-    console.log('LOOP_MODE', loopMode);
-    listen('AUDIO_STATE', (audioState: AudioState) => {
-      if (audioState.playbackState === 'queueended' && isValidArray(queue)) {
-        audio.addMediaAndPlay(queue[0]);
-      }
-    });
-  }
+    if (!isValidArray(queue)) {
+      return;
+    }
+    // Restart from the first track and move the cursor back to it so playNext
+    // continues from the second track instead of ending the queue again.
+    audio.playFromQueue(0);
+  });
 };
 
 const diffChecker = (d1: any, d2: any): boolean => {

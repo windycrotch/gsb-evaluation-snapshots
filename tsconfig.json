@@ -23,6 +23,6 @@
     "outDir": "dist",
     "baseUrl": "src"
   },
-  "include": ["src/**/*.ts", "src/**/*.json", ".env"],
+  "include": ["src/**/*.ts", "src/**/*.json", "test/**/*.ts", ".env"],
   "exclude": ["node_modules", "src/http", "src/logs", "src/tests"]
 }
