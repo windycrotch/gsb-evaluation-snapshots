@@ -44,7 +44,10 @@ const stop_osc = (
 export type StopPlaying = () => void;
 
 export const start_playing_note = (
-	state: { playing_notes: SvelteSet<Midi> },
+	state: {
+		playing_notes: SvelteSet<Midi>;
+		active_gains?: Set<GainNode>;
+	},
 	ac: AudioContext,
 	note: Midi,
 	volume: Volume = DEFAULT_VOLUME,
@@ -61,13 +64,31 @@ export const start_playing_note = (
 	osc.connect(gain);
 
 	state.playing_notes.add(note);
+	state.active_gains?.add(gain);
 
 	let disposed = false;
 	return () => {
 		if (disposed) return;
 		disposed = true;
+		state.active_gains?.delete(gain);
 		stop_osc(ac, 10, gain, osc);
 
 		state.playing_notes.delete(note);
 	};
+};
+
+/**
+ * Smoothly retargets every gain that's currently sounding to the gain for `volume`,
+ * so dragging the volume changes notes already playing instead of only future ones.
+ * New notes are started at the current volume by `start_playing_note`.
+ */
+export const update_playing_gains = (
+	active_gains: ReadonlySet<GainNode>,
+	ac: AudioContext,
+	volume: Volume
+): void => {
+	const target_gain = volume_to_gain(volume);
+	for (const gain of active_gains) {
+		gain.gain.setTargetAtTime(target_gain, ac.currentTime, SMOOTH_GAIN_TIME_CONSTANT);
+	}
 };

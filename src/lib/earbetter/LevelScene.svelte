@@ -2,7 +2,6 @@
 	import { is_editable, swallow } from '@fuzdev/fuz_util/dom.ts';
 	import { scale, fly } from 'svelte/transition';
 	import { plural } from '@fuzdev/fuz_util/string.ts';
-	import { onMount } from 'svelte';
 	import type { Attachment } from 'svelte/attachments';
 
 	import { LevelStats, type Level } from './level.svelte.ts';
@@ -10,6 +9,7 @@
 	import LevelProgressIndicator from './LevelProgressIndicator.svelte';
 	import TrialProgressIndicator from './TrialProgressIndicator.svelte';
 	import MidiInput from '../MidiInput.svelte';
+	import InitMidiButton from '../InitMidiButton.svelte';
 	import type { Midi } from '../music.ts';
 	import LevelStatsSummary from './LevelStatsSummary.svelte';
 	import TextBurst from '../TextBurst.svelte';
@@ -32,10 +32,22 @@
 	const pressed_keys = $derived(level.status === 'presenting_prompt' ? null : app.playing_notes);
 	const highlighted_keys = $derived(level.trial && new Set([level.trial.sequence[0]!]));
 
-	// the parent keys this component on `level`, so each level starts on mount
-	onMount(() => {
-		level.start(); // TODO problem here is the audio context needs to be resumed, so if it's not ready maybe have a start button
-	});
+	// the level starts from the gate's button, so plugging and unplugging devices is visible first
+	let started = $state(false);
+	const begin = (): void => {
+		if (!app.midi_inputs?.length) return;
+		level.start();
+		started = true;
+	};
+
+	const midi_inputs = $derived(app.midi_inputs);
+	const selected_midi_input = $derived(app.selected_midi_input);
+	const has_midi_inputs = $derived((midi_inputs?.length ?? 0) > 0);
+
+	const on_select_input = (e: Event): void => {
+		const id = (e.currentTarget as HTMLSelectElement).value;
+		app.select_midi_input(midi_inputs?.find((input) => input.id === id) ?? null);
+	};
 
 	const on_press_key = (note: Midi): void => {
 		level.guess(note);
@@ -71,7 +83,7 @@
 		}
 	};
 	const keydown = (e: KeyboardEvent) => {
-		if (is_editable(e.target) || e.ctrlKey || e.shiftKey || e.altKey || e.metaKey) {
+		if (!started || is_editable(e.target) || e.ctrlKey || e.shiftKey || e.altKey || e.metaKey) {
 			return;
 		}
 		switch (e.key) {
@@ -115,7 +127,7 @@
 
 <svelte:window onkeydowncapture={keydown} />
 <MidiInput
-	inputs={app.midi_inputs}
+	inputs={selected_midi_input ? [selected_midi_input] : null}
 	onnotestart={(note, velocity) => {
 		// TODO should this be ignored if it's not an enabled key? should the level itself ignore the guess?
 		if (level.status === 'complete') {
@@ -126,87 +138,125 @@
 	}}
 	onnotestop={app.stop_note}
 />
-<!-- hide from screen readers, see keyboard commands -->
-<div class="level" class:initial onclick={click} aria-hidden="true">
-	<div class="level_progress" title="level progress">
-		<LevelProgressIndicator {level} />
+
+{#if !started}
+	<div class="box start_gate">
+		<h1 class="my_0">{level_data.name}</h1>
+		<label class="width:100%">
+			<div class="title">MIDI input</div>
+			{#if midi_inputs?.length}
+				<select class="width:100%" value={selected_midi_input?.id ?? ''} onchange={on_select_input}>
+					{#each midi_inputs as midi_input (midi_input.id)}
+						<option value={midi_input.id}>{midi_input.name}</option>
+					{/each}
+				</select>
+			{:else}
+				<select class="width:100%" disabled>
+					<option>No MIDI device detected</option>
+				</select>
+			{/if}
+		</label>
+		<InitMidiButton midi_state={app} />
+		<button type="button" class="big width:100%" onclick={begin} disabled={!has_midi_inputs}>
+			start training
+		</button>
+		{#if !has_midi_inputs}
+			<p class="m_0">
+				<small>No MIDI device detected — connect a keyboard to start training.</small>
+			</p>
+		{/if}
 	</div>
-	<div class="trial_progress" title="trial progress">
-		<TrialProgressIndicator {level} />
-	</div>
-	<div class="piano_wrapper" style:padding="{piano_padding}px" bind:this={piano_wrapper_el}>
-		<Piano
-			min_note={level_data.min_note}
-			max_note={level_data.max_note}
-			enabled_notes={level.trial?.valid_notes}
-			{pressed_keys}
-			{highlighted_keys}
-			onpress={level.status === 'waiting_for_input'
-				? (note) => on_press_key(note)
-				: level.status === 'complete'
-					? (note) => app.start_note(note)
-					: undefined}
-			onrelease={level.status === 'complete' ? app.stop_note : undefined}
-		/>
-	</div>
-	<div class="feedback" class:success class:failure class:complete>
-		{#if complete}
-			<div class="completed_level_feedback">
-				<div class="pane shadow_xl shadow_d_50 p_xl3 pt_0 box" transition:scale>
-					<div class="box row" in:scale={{ duration: 3000 }}>
-						<div class="completed_header_icon" in:fly={{ duration: 4000, x: -200 }}>♫</div>
-						<div class="completed_header_icon" in:fly={{ duration: 4000, x: 200 }}>
-							♩<sup>♪</sup>
+{:else}
+	<!-- hide from screen readers, see keyboard commands -->
+	<div class="level" class:initial onclick={click} aria-hidden="true">
+		<div class="level_progress" title="level progress">
+			<LevelProgressIndicator {level} />
+		</div>
+		<div class="trial_progress" title="trial progress">
+			<TrialProgressIndicator {level} />
+		</div>
+		<div class="piano_wrapper" style:padding="{piano_padding}px" bind:this={piano_wrapper_el}>
+			<Piano
+				min_note={level_data.min_note}
+				max_note={level_data.max_note}
+				enabled_notes={level.trial?.valid_notes}
+				{pressed_keys}
+				{highlighted_keys}
+				onpress={level.status === 'waiting_for_input'
+					? (note) => on_press_key(note)
+					: level.status === 'complete'
+						? (note) => app.start_note(note)
+						: undefined}
+				onrelease={level.status === 'complete' ? app.stop_note : undefined}
+			/>
+		</div>
+		<div class="feedback" class:success class:failure class:complete>
+			{#if complete}
+				<div class="completed_level_feedback">
+					<div class="pane shadow_xl shadow_d_50 p_xl3 pt_0 box" transition:scale>
+						<div class="box row" in:scale={{ duration: 3000 }}>
+							<div class="completed_header_icon" in:fly={{ duration: 4000, x: -200 }}>♫</div>
+							<div class="completed_header_icon" in:fly={{ duration: 4000, x: 200 }}>
+								♩<sup>♪</sup>
+							</div>
 						</div>
-					</div>
-					<!-- TODO buggy in Svelte 5 -   -->
-					<div class="panel p_md mb_md box width:100%">
+						<!-- TODO buggy in Svelte 5 -   -->
 						<div class="panel p_md mb_md box">
-							{#if level.mistakes === 0}
-								<div class="font_size_xl3 text-align:center">flawless run!</div>
+							<div class="panel p_md mb_md box">
+								{#if level.mistakes === 0}
+									<div class="font_size_xl3 text-align:center">flawless run!</div>
+								{:else}
+									<div class="font_size_xl3">
+										{level.mistakes}
+									</div>
+									<div>
+										mistake{plural(level.mistakes)} this run
+									</div>
+								{/if}
+							</div>
+							<div class="panel p_md">
+								<LevelStatsSummary {level_data} {level_stats} />
+							</div>
+						</div>
+						<!-- TODO buggy in Svelte 5 - in:scale={{delay: 500}} -->
+						<button type="button" class="big mb_md" onclick={() => exit_level()}>
+							go back to the map &nbsp;<code>Space</code>
+						</button>
+						<!-- TODO buggy in Svelte 5 - in:scale={{delay: 750}} -->
+						<button type="button" class="big" onclick={() => level.reset()}>
+							replay level &nbsp;<code>r</code>
+						</button>
+					</div>
+				</div>
+			{/if}
+			{#if level.feedback}
+				{@const feedback = level.feedback}
+				<div class="feedback_text_bursts">
+					{#key feedback}
+						<div {@attach place_at_note(feedback.note)}>
+							{#if feedback.kind === 'success'}
+								<TextBurst count={11} items={['🎵', '🎶', '🌸', '🌻', '🌼', '🍀']} />
 							{:else}
-								<div class="font_size_xl3">
-									{level.mistakes}
-								</div>
-								<div>
-									mistake{plural(level.mistakes)} this run
-								</div>
+								<!-- TODO grayscale? -->
+								<TextBurst count={5} items={['🦜', '⁉', '❔', '❌']} />
 							{/if}
 						</div>
-						<div class="panel p_md">
-							<LevelStatsSummary {level_data} {level_stats} />
-						</div>
-					</div>
-					<!-- TODO buggy in Svelte 5 - in:scale={{delay: 500}} -->
-					<button type="button" class="big mb_md" onclick={() => exit_level()}>
-						go back to the map &nbsp;<code>Space</code>
-					</button>
-					<!-- TODO buggy in Svelte 5 - in:scale={{delay: 750}} -->
-					<button type="button" class="big" onclick={() => level.reset()}>
-						replay level &nbsp;<code>r</code>
-					</button>
+					{/key}
 				</div>
-			</div>
-		{/if}
-		{#if level.feedback}
-			{@const feedback = level.feedback}
-			<div class="feedback_text_bursts">
-				{#key feedback}
-					<div {@attach place_at_note(feedback.note)}>
-						{#if feedback.kind === 'success'}
-							<TextBurst count={11} items={['🎵', '🎶', '🌸', '🌻', '🌼', '🍀']} />
-						{:else}
-							<!-- TODO grayscale? -->
-							<TextBurst count={5} items={['🦜', '⁉', '❔', '❌']} />
-						{/if}
-					</div>
-				{/key}
-			</div>
-		{/if}
+			{/if}
+		</div>
 	</div>
-</div>
+{/if}
 
 <style>
+	.start_gate {
+		max-width: 480px;
+		margin: auto;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: var(--space_md);
+	}
 	.level {
 		--level_progress_height: 50px;
 		position: absolute;

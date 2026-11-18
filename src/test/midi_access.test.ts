@@ -61,3 +61,43 @@ test('a reset discards a request still pending', async () => {
 	assert.strictEqual(await second, second_access);
 	assert.strictEqual(state.midi_access, second_access);
 });
+
+// mirrors InitMidiButton's click flow: a rejected authorization is surfaced and forgotten,
+// so clicking again starts a fresh request that can succeed and replace the error state
+test('after a failed authorization the button flow can reset, retry, and succeed', async () => {
+	const state = create_state();
+	const denied = vi.fn(() => Promise.reject(new Error('permission denied')));
+	const granted = vi.fn(() => Promise.resolve(create_access()));
+
+	await assert_rejects(
+		async () => {
+			reset_midi_access(state);
+			await request_access(state, denied);
+		},
+		/permission denied/
+	);
+	assert.strictEqual(state.midi_access, null);
+
+	const access = create_access();
+	granted.mockImplementation(() => Promise.resolve(access));
+	reset_midi_access(state);
+	assert.strictEqual(await request_access(state, granted), access);
+	assert.strictEqual(state.midi_access, access);
+	assert.strictEqual(denied.mock.calls.length, 1);
+	assert.strictEqual(granted.mock.calls.length, 1);
+
+	// once granted, later clicks reuse the access instead of requesting again
+	assert.strictEqual(await request_access(state, granted), access);
+	assert.strictEqual(granted.mock.calls.length, 1);
+});
+
+// a browser without WebMIDI makes `request_midi_access` throw, which `request_access` must not swallow
+test('an unsupported browser rejects with the readable error intact', async () => {
+	const state = create_state();
+	const unsupported = vi.fn(() => Promise.reject(new Error('MIDI is not supported in this browser')));
+	await assert_rejects(() => request_access(state, unsupported), /not supported/);
+	assert.strictEqual(state.midi_access, null);
+	// the failure is forgotten, so the next call retries
+	const access = create_access();
+	assert.strictEqual(await request_access(state, () => Promise.resolve(access)), access);
+});

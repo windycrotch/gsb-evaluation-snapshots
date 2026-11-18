@@ -21,8 +21,10 @@
 	const midi_inputs = $derived(midi_state.midi_inputs);
 	const midi_input_count = $derived(midi_inputs?.length ?? 0);
 
+	// only an in-flight request disables the button, so a granted access with no devices
+	// can be requested again after plugging one in, and a failure stays retryable
 	// eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
-	const disabled = $derived(midi_input_count > 0 || (request_status as AsyncStatus) === 'pending'); // TODO the cast is due to a typechecking bug (likely `svelte-check`)
+	const disabled = $derived((request_status as AsyncStatus) === 'pending'); // TODO the cast is due to a typechecking bug (likely `svelte-check`)
 
 	let request_error: string | undefined = $state();
 </script>
@@ -32,6 +34,7 @@
 	class="big"
 	onclick={async () => {
 		request_status = 'pending';
+		request_error = undefined;
 		try {
 			// TODO @many source from `audio` in context, makes this convoluted
 			reset_midi_access(midi_state);
@@ -39,30 +42,30 @@
 			request_status = 'success';
 		} catch (err) {
 			request_status = 'failure';
-			request_error = err.message;
+			request_error = err instanceof Error ? err.message : String(err);
 		}
 	}}
 	{disabled}
 	title={midi_state.midi_access ? 'MIDI is ready!' : 'connect your MIDI device [c]'}
 >
 	{#if midi_state.midi_access}
-		{#if midi_inputs?.length}
+		{#if midi_input_count}
 			<div>
 				<div>MIDI devices</div>
 				<ul>
-					{#each midi_inputs as midi_input (midi_input)}
+					{#each midi_inputs ?? [] as midi_input (midi_input)}
 						<li><small>{midi_input.name}</small></li>
 					{/each}
 				</ul>
 			</div>
 		{:else}
-			<span in:fade>no MIDI devices found, try again?</span>
+			<span in:fade>MIDI ready, but no devices are connected — plug one in</span>
 		{/if}
 	{:else if request_status === 'pending'}
 		<span in:fade>requesting MIDI access</span>
 	{:else if request_status === 'failure'}
 		<span in:fade>
-			failed to request MIDI access{#if request_error}: {request_error}{/if}
+			failed to request MIDI access{#if request_error}: {request_error}{/if} — try again
 		</span>
 	{:else}
 		connect MIDI &nbsp;<code>c</code>

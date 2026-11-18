@@ -5,12 +5,27 @@ import { DEFAULT_INSTRUMENT, DEFAULT_VOLUME } from '#lib/audio_helpers.ts';
 import { freq_to_midi, DEFAULT_TUNING, type Midi } from '#lib/music.ts';
 import type { LevelAudioState } from '#lib/earbetter/level.svelte.ts';
 
+export interface FakeAudioParam {
+	value: number;
+	setTargetAtTime: ReturnType<typeof vi.fn>;
+	setValueAtTime: ReturnType<typeof vi.fn>;
+}
+
+export interface FakeGainNode {
+	gain: FakeAudioParam;
+	connect: ReturnType<typeof vi.fn>;
+}
+
 export interface FakeAudioContext {
 	ac: AudioContext;
 	/**
 	 * Every note started on an oscillator, in order, recovered from its frequency.
 	 */
 	played: Array<Midi>;
+	/**
+	 * Every gain node created, in order, so tests can inspect and retarget active gains.
+	 */
+	gains: Array<FakeGainNode>;
 }
 
 /**
@@ -19,11 +34,20 @@ export interface FakeAudioContext {
  */
 export const create_fake_audio_context = (): FakeAudioContext => {
 	const played: Array<Midi> = [];
-	const create_param = () => ({ value: 0, setTargetAtTime: vi.fn(), setValueAtTime: vi.fn() });
+	const gains: Array<FakeGainNode> = [];
+	const create_param = (): FakeAudioParam => ({
+		value: 0,
+		setTargetAtTime: vi.fn(),
+		setValueAtTime: vi.fn()
+	});
 	const ac = {
 		currentTime: 0,
 		destination: {},
-		createGain: () => ({ gain: create_param(), connect: vi.fn() }),
+		createGain: () => {
+			const gain: FakeGainNode = { gain: create_param(), connect: vi.fn() };
+			gains.push(gain);
+			return gain as unknown as GainNode;
+		},
 		createOscillator: () => {
 			const frequency = create_param();
 			return {
@@ -38,7 +62,7 @@ export const create_fake_audio_context = (): FakeAudioContext => {
 			};
 		}
 	};
-	return { ac: ac as unknown as AudioContext, played };
+	return { ac: ac as unknown as AudioContext, played, gains };
 };
 
 export const create_level_audio_state = (): LevelAudioState => ({

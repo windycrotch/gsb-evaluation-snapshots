@@ -18,9 +18,10 @@ import { RealmId, RealmData } from './realm.ts';
 import default_project_data from '../projects/default_project.ts';
 import { to_next_name } from '../entity.ts';
 import { with_velocity, type Instrument, type Volume } from '../audio_helpers.ts';
-import { start_playing_note, type StopPlaying } from '../play_note.ts';
+import { start_playing_note, update_playing_gains, type StopPlaying } from '../play_note.ts';
 import { to_notes_in_scale, type Midi, type PitchClass, type Scale } from '../music.ts';
 import { MidiInputs } from '../midi_inputs.svelte.ts';
+import { MidiInputSelection } from '../midi_input_selection.svelte.ts';
 import { SiteData } from '../site_data.ts';
 
 // TODO refactor all storage calls, and rethink in signals instead of all top-level orchestration (that's less reusable)
@@ -121,7 +122,12 @@ export class App {
 		return this.site_data.volume;
 	}
 	set volume(volume: Volume) {
-		if (volume !== this.site_data.volume) this.site_data = { ...this.site_data, volume };
+		if (volume === this.site_data.volume) return;
+		this.site_data = { ...this.site_data, volume };
+		// retarget every gain that's currently sounding, so notes already playing change volume too
+		if (this.#active_gains.size) {
+			update_playing_gains(this.#active_gains, this.get_audio_context(), volume);
+		}
 	}
 	get instrument(): Instrument {
 		return this.site_data.instrument;
@@ -149,16 +155,38 @@ export class App {
 	playing_notes: SvelteSet<Midi> = new SvelteSet();
 
 	/**
+	 * The gain nodes of every note currently sounding, so a volume change
+	 * can retarget them all with `setTargetAtTime`. Plain state: nothing renders from it.
+	 */
+	readonly #active_gains: Set<GainNode> = new Set();
+
+	/**
 	 * Holds the result of `navigator.requestMIDIAccess`.
 	 */
 	midi_access: MIDIAccess | null = $state(null);
 	#midi_inputs: MidiInputs | null = $derived(this.midi_access && new MidiInputs(this.midi_access));
+	#midi_input_selection: MidiInputSelection | null = $derived(
+		this.#midi_inputs && new MidiInputSelection(this.#midi_inputs)
+	);
 	/**
 	 * The connected MIDI inputs, updated as devices connect and disconnect.
 	 */
 	get midi_inputs(): Array<MIDIInput> | null {
 		return this.#midi_inputs?.current ?? null;
 	}
+	/**
+	 * The user's chosen MIDI input, falling back to the first connected one,
+	 * or `null` while MIDI is unavailable or no devices are connected.
+	 */
+	get selected_midi_input(): MIDIInput | null {
+		return this.#midi_input_selection?.selected ?? null;
+	}
+	/**
+	 * Selects a MIDI input by its connected object, or clears the explicit choice with `null`.
+	 */
+	select_midi_input = (input: MIDIInput | null): void => {
+		this.#midi_input_selection?.select(input);
+	};
 
 	/**
 	 * The mounted level and realm forms, registered by their `register_form` attachments,
@@ -193,7 +221,7 @@ export class App {
 		this.#held_notes.set(
 			note,
 			start_playing_note(
-				this,
+				{ playing_notes: this.playing_notes, active_gains: this.#active_gains },
 				this.get_audio_context(),
 				note,
 				with_velocity(this.volume, velocity),
