@@ -48,14 +48,94 @@ export type HowlEntry = { instance: Howl; subscriptions: number };
 const howlInstanceCache: Record<string, HowlEntry> = {};
 
 /**
+ * In-flight Howl creations, keyed by sound name. This guarantees that
+ * concurrent claims for the same sound only create a single Howl instance.
+ */
+const howlCreationPromises: Record<string, Promise<HowlEntry>> = {};
+
+/**
+ * Snapshot of the runtime cache state for a single sound.
+ * Useful for debugging and for callers that need to verify reference counting.
+ */
+export interface SoundCacheState {
+  /** The sound name this snapshot describes */
+  name: SoundName;
+  /** Whether a Howl instance currently exists in the cache */
+  hasHowl: boolean;
+  /** Alias of {@link hasHowl} */
+  created: boolean;
+  /** Number of outstanding claims (never negative) */
+  subscriptions: number;
+  /** Whether the Howl instance reports itself as playing */
+  isPlaying: boolean;
+  /** Alias of {@link isPlaying} */
+  playing: boolean;
+  /** Whether the blob for this sound is present in the blob cache */
+  hasBlob: boolean;
+  /** Alias of {@link hasBlob} */
+  blobCached: boolean;
+}
+
+/**
+ * Read-only view of the cache/reference-count state for a sound.
+ * Returns zeroed values when the sound has never been loaded.
+ */
+export function getSoundCacheState(name: SoundName): SoundCacheState {
+  const entry = howlInstanceCache[name];
+  const hasHowl = Boolean(entry);
+
+  let isPlaying = false;
+  if (entry) {
+    try {
+      isPlaying = entry.instance.playing();
+    } catch (_e) {
+      isPlaying = false;
+    }
+  }
+
+  const hasBlob = Boolean(soundBlobCache[name]);
+
+  return {
+    name,
+    hasHowl,
+    created: hasHowl,
+    subscriptions: entry ? entry.subscriptions : 0,
+    isPlaying,
+    playing: isPlaying,
+    hasBlob,
+    blobCached: hasBlob,
+  };
+}
+
+/**
+ * Get (or start) the shared blob request for a sound. Failed requests are
+ * removed from the cache so a later attempt can retry instead of being stuck
+ * with a permanently rejected promise.
+ */
+function getOrFetchSoundBlob(name: SoundName): Promise<Blob> {
+  const cached = soundBlobCache[name];
+  if (cached) return cached;
+
+  const promise = fetchSoundBlob(name);
+  soundBlobCache[name] = promise;
+
+  const forget = () => {
+    if (soundBlobCache[name] === promise) delete soundBlobCache[name];
+  };
+  // `promise` itself is still returned/awaited by callers, so this derived
+  // rejection handler does not swallow the error.
+  promise.then(undefined, forget);
+
+  return promise;
+}
+
+/**
  * Make a sound loader function that first tries local files then falls back to CDN
  */
 export function makeRemoteSound(name: SoundName): () => Promise<HowlEntry> {
   return async () => {
     // First fetch the blob data if not already in cache
-    if (!soundBlobCache[name]) {
-      soundBlobCache[name] = fetchSoundBlob(name);
-    }
+    getOrFetchSoundBlob(name);
 
     // Create or return the Howl instance
     return createOrGetHowlInstance(name);
@@ -71,6 +151,8 @@ export async function claimSound(name: SoundName): Promise<Howl> {
 
 export function freeSound(name: SoundName) {
   const entry = howlInstanceCache[name];
+  // Never let the reference count go negative: freeing more often than
+  // claiming is a no-op rather than a corruption of the count.
   if (entry && entry.subscriptions > 0) entry.subscriptions -= 1;
 
   cleanupUnusedSound(name);
@@ -78,8 +160,17 @@ export function freeSound(name: SoundName) {
   return null;
 }
 
+function soundUnavailableError(name: SoundName): Error {
+  return new Error(
+    `Failed to load sound "${name}": unavailable in local files and on the CDN (本地/CDN 均不可用)`
+  );
+}
+
 /**
  * Fetches sound data as a blob, from local filesystem or CDN
+ *
+ * Local probing failures (non-2xx HEAD, non-audio content type, timeout,
+ * network error) are never fatal: they always fall through to the CDN.
  */
 export async function fetchSoundBlob(name: SoundName): Promise<Blob> {
   try {
@@ -88,60 +179,76 @@ export async function fetchSoundBlob(name: SoundName): Promise<Blob> {
     if (localPath) {
       const response = await fetch(localPath);
       if (response.ok) return await response.blob();
+      console.warn(`Local sound "${name}" returned status ${response.status}, falling back to CDN`);
     }
   } catch (error) {
     console.warn(`Error loading local sound "${name}", falling back to CDN:`, error);
   }
 
-  if (!isLibrarySoundName(name)) throw new Error(`Failed to load custom sound "${name}"`);
+  // Only library sounds have a manifest entry to fall back to.
+  if (!isLibrarySoundName(name)) throw soundUnavailableError(name);
 
   // Fall back to CDN
   const soundInfo = manifest.sounds[name];
   const soundUrl = `${cdnBaseUrl}/${soundInfo.src}`;
 
-  const response = await fetch(soundUrl);
-  if (!response.ok) {
-    throw new Error(`Failed to fetch sound "${name}" from CDN`);
+  let response: Response;
+  try {
+    response = await fetch(soundUrl);
+  } catch (error) {
+    console.warn(`Error fetching sound "${name}" from CDN:`, error);
+    throw soundUnavailableError(name);
   }
+
+  if (!response.ok) throw soundUnavailableError(name);
 
   return await response.blob();
 }
 
 /**
- * Creates a Howl instance from a cached blob or fetches it if needed
+ * Creates a Howl instance from a cached blob or fetches it if needed.
+ * Concurrent calls for the same name share a single in-flight creation.
  */
-async function createOrGetHowlInstance(name: SoundName): Promise<HowlEntry> {
+function createOrGetHowlInstance(name: SoundName): Promise<HowlEntry> {
   // Return existing instance if available
-  if (howlInstanceCache[name]) {
-    return howlInstanceCache[name];
-  }
+  const existing = howlInstanceCache[name];
+  if (existing) return Promise.resolve(existing);
 
-  // Fetch the blob if not already in progress
-  if (!soundBlobCache[name]) {
-    soundBlobCache[name] = fetchSoundBlob(name);
-  }
+  // Join an in-flight creation if one exists
+  const inFlight = howlCreationPromises[name];
+  if (inFlight) return inFlight;
 
-  // Wait for the blob to be fetched
-  const blob = await soundBlobCache[name];
+  const creation = (async () => {
+    // Wait for the shared blob request to complete
+    const blob = await getOrFetchSoundBlob(name);
 
-  // Create object URL from blob
-  const objectUrl = URL.createObjectURL(blob);
+    // Create object URL from blob
+    const objectUrl = URL.createObjectURL(blob);
 
-  // Create new Howl instance
-  const howl = new Howl({
-    src: [objectUrl],
-    format: ["mp3"],
-    html5: true, // Enable streaming to reduce memory usage
-    onload: () => {
-      // Store object URL reference to revoke later
-      (howl as any)._objectUrl = objectUrl;
-    },
-  });
+    // Create new Howl instance
+    const howl = new Howl({
+      src: [objectUrl],
+      format: ["mp3"],
+      html5: true, // Enable streaming to reduce memory usage
+    });
+    // Store object URL reference to revoke later
+    (howl as any)._objectUrl = objectUrl;
 
-  // Store in cache
-  howlInstanceCache[name] = { instance: howl, subscriptions: 0 };
+    // Store in cache
+    const entry: HowlEntry = { instance: howl, subscriptions: 0 };
+    howlInstanceCache[name] = entry;
 
-  return howlInstanceCache[name];
+    return entry;
+  })();
+
+  howlCreationPromises[name] = creation;
+
+  const clearInFlight = () => {
+    if (howlCreationPromises[name] === creation) delete howlCreationPromises[name];
+  };
+  creation.then(clearInFlight, clearInFlight);
+
+  return creation;
 }
 
 /**
@@ -150,11 +257,8 @@ async function createOrGetHowlInstance(name: SoundName): Promise<HowlEntry> {
 export function preloadSounds(names: SoundName[]): Promise<void[]> {
   return Promise.all(
     names.map(async (name) => {
-      if (!soundBlobCache[name]) {
-        soundBlobCache[name] = fetchSoundBlob(name);
-      }
-      // Just ensure the blob is fetched but don't create Howl instance yet
-      await soundBlobCache[name];
+      // Just ensure the shared blob request is fetched but don't create a Howl instance yet
+      await getOrFetchSoundBlob(name);
     })
   );
 }
@@ -237,19 +341,21 @@ export async function getLocalSoundPath(name: SoundName): Promise<string | null>
   if (!isLibrarySoundName(name)) return name;
 
   const publicPath = `/sounds/${name}.mp3`;
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
   try {
     // Add a timeout of 300ms to quickly fall back to CDN if file isn't available
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 300);
+    timeoutId = setTimeout(() => controller.abort(), 300);
 
     const response = await fetch(publicPath, { method: "HEAD", signal: controller.signal });
-    clearTimeout(timeoutId);
 
     if (!response.ok) return null;
     if (!response.headers.get("content-type")?.toLowerCase().startsWith("audio")) return null;
 
     return publicPath;
-  } catch (_e) { /* local file not available */ }
+  } catch (_e) { /* local file not available */ } finally {
+    if (timeoutId !== undefined) clearTimeout(timeoutId);
+  }
 
   return null;
 }
@@ -260,10 +366,23 @@ export async function getLocalSoundPath(name: SoundName): Promise<string | null>
  */
 export function cleanupUnusedSound(name: string): void {
   const entry = howlInstanceCache[name];
-  if (!entry || entry.instance.playing() || entry.subscriptions > 0) return;
+  if (!entry) return;
+
+  // Keep the instance around while it is claimed or still playing.
+  if (entry.subscriptions > 0) return;
+  let playing = false;
+  try {
+    playing = entry.instance.playing();
+  } catch (_e) {
+    playing = false;
+  }
+  if (playing) return;
 
   const { instance } = entry;
-  if ((instance as any)._objectUrl) URL.revokeObjectURL((instance as any)._objectUrl);
+  if ((instance as any)._objectUrl) {
+    URL.revokeObjectURL((instance as any)._objectUrl);
+    delete (instance as any)._objectUrl;
+  }
   instance.unload();
   delete howlInstanceCache[name];
 }
@@ -351,6 +470,7 @@ export function __resetForTesting(): void {
   audioUnlockInitialized = false;
   for (const key of Object.keys(soundBlobCache)) delete soundBlobCache[key];
   for (const key of Object.keys(howlInstanceCache)) delete howlInstanceCache[key];
+  for (const key of Object.keys(howlCreationPromises)) delete howlCreationPromises[key];
 }
 
 // Initialize sound state

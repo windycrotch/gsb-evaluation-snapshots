@@ -91,9 +91,11 @@ describe('fetchSoundBlob', () => {
   it('throws for unknown custom sound when fetch fails', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('fail')));
-    await expect(fetchSoundBlob('my-custom-sound-xyz')).rejects.toThrow(
-      'Failed to load custom sound "my-custom-sound-xyz"'
-    );
+    const error = await fetchSoundBlob('my-custom-sound-xyz').catch((err: Error) => err);
+    expect(error).toBeInstanceOf(Error);
+    const message = (error as Error).message;
+    expect(message).toContain('my-custom-sound-xyz');
+    expect(message).toContain('本地/CDN 均不可用');
   });
 });
 

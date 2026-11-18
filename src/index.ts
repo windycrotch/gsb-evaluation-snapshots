@@ -3,6 +3,7 @@ export {
   checkAudioPermission,
   fetchSoundBlob,
   getCDNUrl,
+  getSoundCacheState,
   isSoundEnabled,
   makeRemoteSound,
   playSound,
@@ -10,6 +11,8 @@ export {
   setCDNUrl,
   setSoundEnabled,
 } from "./runtime";
+
+export type { HowlEntry, SoundCacheState, SoundName } from "./runtime";
 
 // Export hooks
 export { useSound, useSoundEnabled, useSoundOnChange } from "./hooks";
