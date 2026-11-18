@@ -1,0 +1,36 @@
+import type { Migration, MigrationProvider } from 'kysely/migration'
+
+import * as initialSchema from './0001_initial_schema.ts'
+import * as videoMedia from './0002_video_media.ts'
+import * as likes from './0003_likes.ts'
+import * as comments from './0004_comments.ts'
+import * as moderation from './0005_moderation.ts'
+import * as likeRatioStats from './0006_like_ratio_stats.ts'
+
+/**
+ * Every migration, keyed by name. Kysely applies migrations in the lexical order
+ * of their keys and records the applied names in `kysely_migration`, so:
+ *
+ * - names are `NNNN_snake_case_description` with a zero-padded prefix that
+ *   sorts after every existing entry;
+ * - a migration is never renamed, removed, or edited once it has merged to
+ *   `main`. Schema changes are new migrations;
+ * - every migration has a `down` so `resetDatabase` can unwind it.
+ *
+ * Migrations are registered here explicitly rather than discovered from the
+ * filesystem so the compiled `dist/` output needs no directory scanning and the
+ * list is visible in one place.
+ */
+export const migrations: Record<string, Migration> = {
+  '0001_initial_schema': initialSchema,
+  '0002_video_media': videoMedia,
+  '0003_likes': likes,
+  '0004_comments': comments,
+  '0005_moderation': moderation,
+  '0006_like_ratio_stats': likeRatioStats,
+}
+
+/** A `MigrationProvider` backed by the in-memory {@link migrations} map. */
+export const migrationProvider: MigrationProvider = {
+  getMigrations: () => Promise.resolve(migrations),
+}

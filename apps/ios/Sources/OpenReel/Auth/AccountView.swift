@@ -1,0 +1,85 @@
+import OpenReelATProto
+import SwiftUI
+
+/// Shows who is signed in and where their data lives, with sign-out.
+struct AccountView: View {
+    let auth: AuthController
+    let session: OAuthSession
+    /// Set when the server could not be reached on launch.
+    let unavailability: ServerUnavailability?
+    let moderation: ModerationController
+    /// Presented modally (with a Done button) rather than as a tab.
+    var isSheet = true
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var isSigningOut = false
+    @AppStorage(WatchEventRecorder.sharingKey) private var sharesWatchHistory = false
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if let unavailability {
+                    Section {
+                        Label(UserFacingError.message(for: unavailability), systemImage: "wifi.exclamationmark")
+                            .foregroundStyle(.orange)
+                        Button("Try Again") {
+                            Task { await auth.restore() }
+                        }
+                    }
+                }
+
+                Section("Identity") {
+                    LabeledContent("Handle", value: session.handle.map { "@\($0.rawValue)" } ?? "Unverified")
+                    LabeledContent("DID", value: session.did.rawValue)
+                        .textSelection(.enabled)
+                }
+
+                Section("Server") {
+                    LabeledContent("PDS", value: session.pdsURL.absoluteString)
+                    LabeledContent("Authorization", value: session.authorizationServer.issuer.absoluteString)
+                    if let expiresAt = session.expiresAt {
+                        LabeledContent("Token renews", value: expiresAt, format: .relative(presentation: .named))
+                    }
+                }
+
+                Section {
+                    NavigationLink {
+                        ModerationSettingsView(moderation: moderation)
+                    } label: {
+                        Label("Moderation", systemImage: "hand.raised")
+                    }
+                } footer: {
+                    Text("Choose what to blur or hide, and see who moderates what you watch.")
+                }
+
+                Section {
+                    Toggle("Share Watch History", isOn: $sharesWatchHistory)
+                } header: {
+                    Text("Engagement")
+                } footer: {
+                    Text("Publishes a watch event to your PDS for each video you watch for at least \(WatchEventRecorder.minimumWatchMs / 1000) seconds. Anyone can read them. Feeds ranked by views count them.")
+                }
+
+                Section {
+                    Button("Sign Out", role: .destructive) {
+                        isSigningOut = true
+                        Task {
+                            await auth.signOut()
+                            dismiss()
+                        }
+                    }
+                    .disabled(isSigningOut)
+                }
+            }
+            .navigationTitle("Account")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                if isSheet {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") { dismiss() }
+                    }
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,14 @@
+{
+  "recommendations": [
+    "esbenp.prettier-vscode",
+    "dbaeumer.vscode-eslint",
+    "charliermarsh.ruff",
+    "swiftlang.swift-vscode",
+    "ms-azuretools.vscode-containers",
+    "docker.docker",
+    "editorconfig.editorconfig",
+    "redhat.vscode-yaml",
+    "github.vscode-github-actions",
+    "github.vscode-pull-request-github"
+  ]
+}

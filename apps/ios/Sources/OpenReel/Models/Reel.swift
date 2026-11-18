@@ -1,0 +1,65 @@
+import Foundation
+import OpenReelATProto
+
+/// What one feed cell shows, derived from an AppView post view.
+struct Reel: Identifiable, Hashable {
+    /// The post's AT-URI.
+    let id: String
+    /// CID of the post version shown, for references such as watch events.
+    let cid: String
+    let authorDID: String
+    let authorHandle: String
+    let caption: String
+    let tags: [String]
+    /// HLS multivariant playlist.
+    let videoURL: URL
+    let posterURL: URL?
+    /// Width over height, when the AppView knows it.
+    let aspectRatio: Double?
+    /// Length of the video, as transcoded if known, else as the author claimed.
+    let durationMs: Int?
+    /// Likes as the AppView last counted them; `LikeStore` adds the viewer's
+    /// own change until the AppView catches up.
+    let likeCount: Int
+    /// Comments as the AppView last counted them; 0 from an AppView that
+    /// does not count them.
+    let commentCount: Int
+    let accessibilityLabel: String?
+    /// Labels that apply to the post: the AppView's (from the labelers the
+    /// app subscribes to) and the author's own content warnings.
+    /// `ModerationController` decides what they mean for the viewer.
+    var moderationCauses: [ModerationCause] = []
+
+    init(post: VideoPostView) {
+        id = post.uri
+        cid = post.cid
+        authorDID = post.author.did
+        // The AppView reports the handle the DID document claims; fall back to
+        // the DID for accounts without one.
+        authorHandle = post.author.handle.map { "@\($0)" } ?? post.author.did
+        caption = post.record?.caption ?? ""
+        tags = post.record?.tags ?? []
+        videoURL = post.playlist
+        posterURL = post.thumbnail
+        aspectRatio = post.aspectRatio?.value
+        durationMs = post.durationMs ?? post.record?.durationMs
+        likeCount = post.likeCount ?? 0
+        commentCount = post.commentCount ?? 0
+        accessibilityLabel = post.record?.alt
+        moderationCauses = ModerationPolicy.causes(
+            labels: post.labels,
+            selfLabels: post.record?.selfLabels ?? [],
+            postURI: post.uri,
+            authorDID: post.author.did
+        )
+    }
+
+    var strongRef: StrongRef { StrongRef(uri: id, cid: cid) }
+
+    /// Portrait clips fill the screen; landscape and square ones are
+    /// letterboxed rather than cropped to a sliver.
+    var fillsScreen: Bool {
+        guard let aspectRatio else { return true }
+        return aspectRatio < 0.8
+    }
+}

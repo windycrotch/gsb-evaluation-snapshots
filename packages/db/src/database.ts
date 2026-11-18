@@ -1,0 +1,237 @@
+import { Kysely, PostgresDialect, type ColumnType, type Generated } from 'kysely'
+import pg from 'pg'
+
+import { notifyPublisher, setTraceSink, sqlTap, type CreateDbOptions } from './trace.ts'
+
+/**
+ * A `timestamptz` column: read back as a `Date`, written as a `Date` or an
+ * ISO-8601 string.
+ */
+export type Timestamp = ColumnType<Date, Date | string, Date | string>
+
+/** A `timestamptz` column with a database default, so inserts may omit it. */
+export type GeneratedTimestamp = ColumnType<Date, Date | string | undefined, Date | string>
+
+/**
+ * Table types for the shared OpenReel database.
+ *
+ * This is an index over AT Protocol records, not the system of record: the
+ * canonical `social.openreel.*` records live in users' repositories on their
+ * PDS, and every row here can be rebuilt from the firehose. Columns use
+ * `snake_case`, times are `timestamptz`, and strings are `text`.
+ *
+ * The interface is hand-written and must be kept in step with the migrations
+ * under `src/migrations/`. Generating it with kysely-codegen is a possible later
+ * step (see ADR-0003).
+ */
+export interface Database {
+  actor: ActorTable
+  video_post: VideoPostTable
+  watch_event: WatchEventTable
+  video_like: VideoLikeTable
+  video_comment: VideoCommentTable
+  video_post_stats: VideoPostStatsTable
+  video_media: VideoMediaTable
+  sync_cursor: SyncCursorTable
+  moderation_takedown: ModerationTakedownTable
+}
+
+/** An account seen on the network, keyed by DID. */
+export interface ActorTable {
+  did: string
+  /** Current handle, if resolved. Handles change; DIDs do not. */
+  handle: string | null
+  indexed_at: GeneratedTimestamp
+}
+
+/** Index of a `social.openreel.video.post` record. */
+export interface VideoPostTable {
+  /** AT-URI of the record (`at://<did>/<collection>/<rkey>`). */
+  uri: string
+  /** CID of the record version that was indexed. */
+  cid: string
+  author_did: string
+  caption: string | null
+  duration_ms: number | null
+  /** CID of the video blob on the author's PDS. */
+  video_cid: string | null
+  thumbnail_cid: string | null
+  /** `createdAt` as claimed by the record. */
+  created_at: Timestamp
+  indexed_at: GeneratedTimestamp
+  /** Feed order: the earlier of `created_at` and first-indexed time. */
+  sort_at: GeneratedTimestamp
+  /** `aspectRatio` from the record; a ratio, not pixel dimensions. */
+  aspect_width: number | null
+  aspect_height: number | null
+  /** The record as indexed (JSON); write it with `JSON.stringify`. */
+  record: ColumnType<Record<string, unknown> | null, string | null, string | null>
+}
+
+/** Index of a `social.openreel.engagement.watchEvent` record. */
+export interface WatchEventTable {
+  uri: string
+  cid: string
+  /** DID of the viewer whose repository holds the record. */
+  actor_did: string
+  /** AT-URI of the video post that was watched. Not a foreign key: the post may not be indexed yet. */
+  subject_uri: string
+  subject_cid: string | null
+  watch_duration_ms: number | null
+  /** Fraction of the video watched, 0-1. */
+  completion_rate: number | null
+  sound_enabled: boolean | null
+  rewatch_count: number | null
+  created_at: Timestamp
+  indexed_at: GeneratedTimestamp
+}
+
+/** Index of a `social.openreel.engagement.like` record. */
+export interface VideoLikeTable {
+  uri: string
+  cid: string
+  /** DID of the account whose repository holds the like. */
+  actor_did: string
+  /** AT-URI of the liked video post. Not a foreign key: the post may not be indexed yet. */
+  subject_uri: string
+  subject_cid: string | null
+  created_at: Timestamp
+  indexed_at: GeneratedTimestamp
+}
+
+/**
+ * Index of a `social.openreel.video.comment` record. Only comments whose video
+ * (and, for a reply, whose top-level comment) is indexed are stored.
+ */
+export interface VideoCommentTable {
+  uri: string
+  cid: string
+  author_did: string
+  /** AT-URI of the video post; deleting the post deletes its comments. */
+  subject_uri: string
+  subject_cid: string | null
+  /** AT-URI of the top-level comment this replies to; null for a top-level comment. */
+  parent_uri: string | null
+  text: string
+  /** `createdAt` as claimed by the record. */
+  created_at: Timestamp
+  indexed_at: GeneratedTimestamp
+  /** Display order: the earlier of `created_at` and first-indexed time. */
+  sort_at: GeneratedTimestamp
+  /** The record as indexed (JSON); write it with `JSON.stringify`. */
+  record: ColumnType<Record<string, unknown>, string, string>
+}
+
+/**
+ * Aggregate engagement per video post, derived from `watch_event`,
+ * `video_like`, and `video_comment`. This is the seam feed generators read from; nothing individual
+ * is stored here.
+ */
+export interface VideoPostStatsTable {
+  uri: string
+  view_count: Generated<number>
+  /** Distinct accounts that like the post. */
+  like_count: Generated<number>
+  /** Indexed comments, top-level and replies together. */
+  comment_count: Generated<number>
+  /** Distinct accounts that shared a watch of the post (opted in to watch history). */
+  viewer_count: Generated<number>
+  /** How many of those `viewer_count` accounts also like the post. */
+  viewer_like_count: Generated<number>
+  avg_completion_rate: number | null
+  updated_at: GeneratedTimestamp
+}
+
+/** `removing`: no indexed post uses the blob any more; the media service deletes its renditions. */
+export type VideoMediaStatus = 'pending' | 'processing' | 'ready' | 'failed' | 'removing'
+
+/**
+ * Derived HLS renditions of one video blob, and the media service's job queue.
+ * Keyed by blob, not post: posts reusing an upload share renditions.
+ */
+export interface VideoMediaTable {
+  author_did: string
+  /** CID of the source blob on the author's PDS; also the media storage key. */
+  video_cid: string
+  status: ColumnType<VideoMediaStatus, VideoMediaStatus | undefined, VideoMediaStatus>
+  attempts: Generated<number>
+  last_error: string | null
+  /** When a worker took the job; stale claims are retried. */
+  claimed_at: Timestamp | null
+  /** Pixel dimensions of the highest rendition, once ready. */
+  width: number | null
+  height: number | null
+  /** Duration measured from the source by the media pipeline. */
+  duration_ms: number | null
+  ready_at: Timestamp | null
+  created_at: GeneratedTimestamp
+  updated_at: GeneratedTimestamp
+}
+
+/**
+ * An account (DID) or record (AT-URI) an operator took down. The indexer
+ * drops what it has for the subject and does not index it again.
+ */
+export interface ModerationTakedownTable {
+  subject: string
+  /** The moderation action's reference (`takedownRef`). */
+  ref: string
+  created_at: GeneratedTimestamp
+}
+
+/** Where a firehose consumer resumes after a restart (Jetstream `time_us`). */
+export interface SyncCursorTable {
+  name: string
+  cursor: number
+  updated_at: GeneratedTimestamp
+}
+
+/**
+ * Postgres returns `bigint` (int8) as a string because it can exceed
+ * `Number.MAX_SAFE_INTEGER`. Counters in this schema never will, so parse to a
+ * number for this pool only rather than mutating the global `pg` type registry.
+ */
+const int8AsNumber: pg.CustomTypesConfig = {
+  getTypeParser: (id, format): ((value: string) => unknown) => {
+    if (id === pg.types.builtins.INT8 && format !== 'binary') return Number
+    // pg-types declares its parsers as `any`; narrow at the boundary.
+    const parser: unknown = pg.types.getTypeParser(id, format)
+    if (typeof parser !== 'function') {
+      throw new Error(`pg-types returned no parser for type oid ${id}`)
+    }
+    return parser as (value: string) => unknown
+  },
+}
+
+/**
+ * Opens a connection pool to `connectionString` and wraps it in a typed Kysely
+ * instance. Nothing is connected until the first query. Close it with
+ * {@link closeDb}. `options.queryTap` traces this process for the admin
+ * service's system map (see `trace.ts`).
+ */
+export function createDb(
+  connectionString: string,
+  options: CreateDbOptions = {},
+): Kysely<Database> {
+  if (connectionString.trim() === '') {
+    throw new Error('createDb: connection string is empty; set DATABASE_URL')
+  }
+
+  const pool = new pg.Pool({ connectionString, types: int8AsNumber })
+
+  if (options.queryTap === undefined) {
+    return new Kysely<Database>({ dialect: new PostgresDialect({ pool }) })
+  }
+  setTraceSink(options.queryTap, notifyPublisher(pool))
+  const tap = sqlTap()
+  return new Kysely<Database>({
+    dialect: new PostgresDialect({ pool }),
+    log: tap.log,
+    plugins: [tap.plugin],
+  })
+}
+
+/** Ends every pooled connection. The instance must not be used afterwards. */
+export async function closeDb(db: Kysely<Database>): Promise<void> {
+  await db.destroy()
+}

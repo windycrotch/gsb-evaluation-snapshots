@@ -1,0 +1,1517 @@
+/**
+ * GENERATED CODE - DO NOT MODIFY
+ */
+import {
+  type LexiconDoc,
+  Lexicons,
+  ValidationError,
+  type ValidationResult,
+} from '@atproto/lexicon'
+import { type $Typed, is$typed, maybe$typed } from './util.js'
+
+export const schemaDict = {
+  ComAtprotoLabelDefs: {
+    lexicon: 1,
+    id: 'com.atproto.label.defs',
+    defs: {
+      label: {
+        type: 'object',
+        description:
+          'Metadata tag on an atproto resource (eg, repo or record).',
+        required: ['src', 'uri', 'val', 'cts'],
+        properties: {
+          ver: {
+            type: 'integer',
+            description: 'The AT Protocol version of the label object.',
+          },
+          src: {
+            type: 'string',
+            format: 'did',
+            description: 'DID of the actor who created this label.',
+          },
+          uri: {
+            type: 'string',
+            format: 'uri',
+            description:
+              'AT URI of the record, repository (account), or other resource that this label applies to.',
+          },
+          cid: {
+            type: 'string',
+            format: 'cid',
+            description:
+              "Optionally, CID specifying the specific version of 'uri' resource this label applies to.",
+          },
+          val: {
+            type: 'string',
+            maxLength: 128,
+            description:
+              'The short string name of the value or type of this label.',
+          },
+          neg: {
+            type: 'boolean',
+            description:
+              'If true, this is a negation label, overwriting a previous label.',
+          },
+          cts: {
+            type: 'string',
+            format: 'datetime',
+            description: 'Timestamp when this label was created.',
+          },
+          exp: {
+            type: 'string',
+            format: 'datetime',
+            description:
+              'Timestamp at which this label expires (no longer applies).',
+          },
+          sig: {
+            type: 'bytes',
+            description: 'Signature of dag-cbor encoded label.',
+          },
+        },
+      },
+      selfLabels: {
+        type: 'object',
+        description:
+          'Metadata tags on an atproto record, published by the author within the record.',
+        required: ['values'],
+        properties: {
+          values: {
+            type: 'array',
+            items: {
+              type: 'ref',
+              ref: 'lex:com.atproto.label.defs#selfLabel',
+            },
+            maxLength: 10,
+          },
+        },
+      },
+      selfLabel: {
+        type: 'object',
+        description:
+          'Metadata tag on an atproto record, published by the author within the record. Note that schemas should use #selfLabels, not #selfLabel.',
+        required: ['val'],
+        properties: {
+          val: {
+            type: 'string',
+            maxLength: 128,
+            description:
+              'The short string name of the value or type of this label.',
+          },
+        },
+      },
+      labelValueDefinition: {
+        type: 'object',
+        description:
+          'Declares a label value and its expected interpretations and behaviors.',
+        required: ['identifier', 'severity', 'blurs', 'locales'],
+        properties: {
+          identifier: {
+            type: 'string',
+            description:
+              "The value of the label being defined. Must only include lowercase ascii and the '-' character ([a-z-]+).",
+            maxLength: 100,
+            maxGraphemes: 100,
+          },
+          severity: {
+            type: 'string',
+            description:
+              "How should a client visually convey this label? 'inform' means neutral and informational; 'alert' means negative and warning; 'none' means show nothing.",
+            knownValues: ['inform', 'alert', 'none'],
+          },
+          blurs: {
+            type: 'string',
+            description:
+              "What should this label hide in the UI, if applied? 'content' hides all of the target; 'media' hides the images/video/audio; 'none' hides nothing.",
+            knownValues: ['content', 'media', 'none'],
+          },
+          defaultSetting: {
+            type: 'string',
+            description: 'The default setting for this label.',
+            knownValues: ['ignore', 'warn', 'hide'],
+            default: 'warn',
+          },
+          adultOnly: {
+            type: 'boolean',
+            description:
+              'Does the user need to have adult content enabled in order to configure this label?',
+          },
+          locales: {
+            type: 'array',
+            items: {
+              type: 'ref',
+              ref: 'lex:com.atproto.label.defs#labelValueDefinitionStrings',
+            },
+          },
+        },
+      },
+      labelValueDefinitionStrings: {
+        type: 'object',
+        description:
+          'Strings which describe the label in the UI, localized into a specific language.',
+        required: ['lang', 'name', 'description'],
+        properties: {
+          lang: {
+            type: 'string',
+            description:
+              'The code of the language these strings are written in.',
+            format: 'language',
+          },
+          name: {
+            type: 'string',
+            description: 'A short human-readable name for the label.',
+            maxGraphemes: 64,
+            maxLength: 640,
+          },
+          description: {
+            type: 'string',
+            description:
+              'A longer description of what the label means and why it might be applied.',
+            maxGraphemes: 10000,
+            maxLength: 100000,
+          },
+        },
+      },
+      labelValue: {
+        type: 'string',
+        knownValues: [
+          '!hide',
+          '!warn',
+          '!no-unauthenticated',
+          'porn',
+          'sexual',
+          'nudity',
+          'graphic-media',
+          'bot',
+        ],
+      },
+    },
+  },
+  ComAtprotoRepoCreateRecord: {
+    lexicon: 1,
+    id: 'com.atproto.repo.createRecord',
+    defs: {
+      main: {
+        type: 'procedure',
+        description:
+          'Create a single new repository record. Requires auth, implemented by PDS.',
+        input: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['repo', 'collection', 'record'],
+            properties: {
+              repo: {
+                type: 'string',
+                format: 'at-identifier',
+                description:
+                  'The handle or DID of the repo (aka, current account).',
+              },
+              collection: {
+                type: 'string',
+                format: 'nsid',
+                description: 'The NSID of the record collection.',
+              },
+              rkey: {
+                type: 'string',
+                format: 'record-key',
+                description: 'The Record Key.',
+                maxLength: 512,
+              },
+              validate: {
+                type: 'boolean',
+                description:
+                  "Can be set to 'false' to skip Lexicon schema validation of record data, 'true' to require it, or leave unset to validate only for known Lexicons.",
+              },
+              record: {
+                type: 'unknown',
+                description: 'The record itself. Must contain a $type field.',
+              },
+              swapCommit: {
+                type: 'string',
+                format: 'cid',
+                description:
+                  'Compare and swap with the previous commit by CID.',
+              },
+            },
+          },
+        },
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['uri', 'cid'],
+            properties: {
+              uri: {
+                type: 'string',
+                format: 'at-uri',
+              },
+              cid: {
+                type: 'string',
+                format: 'cid',
+              },
+              commit: {
+                type: 'ref',
+                ref: 'lex:com.atproto.repo.defs#commitMeta',
+              },
+              validationStatus: {
+                type: 'string',
+                knownValues: ['valid', 'unknown'],
+              },
+            },
+          },
+        },
+        errors: [
+          {
+            name: 'InvalidSwap',
+            description:
+              "Indicates that 'swapCommit' didn't match current repo commit.",
+          },
+        ],
+      },
+    },
+  },
+  ComAtprotoRepoDefs: {
+    lexicon: 1,
+    id: 'com.atproto.repo.defs',
+    defs: {
+      commitMeta: {
+        type: 'object',
+        required: ['cid', 'rev'],
+        properties: {
+          cid: {
+            type: 'string',
+            format: 'cid',
+          },
+          rev: {
+            type: 'string',
+            format: 'tid',
+          },
+        },
+      },
+    },
+  },
+  ComAtprotoRepoDeleteRecord: {
+    lexicon: 1,
+    id: 'com.atproto.repo.deleteRecord',
+    defs: {
+      main: {
+        type: 'procedure',
+        description:
+          "Delete a repository record, or ensure it doesn't exist. Requires auth, implemented by PDS.",
+        input: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['repo', 'collection', 'rkey'],
+            properties: {
+              repo: {
+                type: 'string',
+                format: 'at-identifier',
+                description:
+                  'The handle or DID of the repo (aka, current account).',
+              },
+              collection: {
+                type: 'string',
+                format: 'nsid',
+                description: 'The NSID of the record collection.',
+              },
+              rkey: {
+                type: 'string',
+                format: 'record-key',
+                description: 'The Record Key.',
+              },
+              swapRecord: {
+                type: 'string',
+                format: 'cid',
+                description:
+                  'Compare and swap with the previous record by CID.',
+              },
+              swapCommit: {
+                type: 'string',
+                format: 'cid',
+                description:
+                  'Compare and swap with the previous commit by CID.',
+              },
+            },
+          },
+        },
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            properties: {
+              commit: {
+                type: 'ref',
+                ref: 'lex:com.atproto.repo.defs#commitMeta',
+              },
+            },
+          },
+        },
+        errors: [
+          {
+            name: 'InvalidSwap',
+          },
+        ],
+      },
+    },
+  },
+  ComAtprotoRepoGetRecord: {
+    lexicon: 1,
+    id: 'com.atproto.repo.getRecord',
+    defs: {
+      main: {
+        type: 'query',
+        description:
+          'Get a single record from a repository. Does not require auth.',
+        parameters: {
+          type: 'params',
+          required: ['repo', 'collection', 'rkey'],
+          properties: {
+            repo: {
+              type: 'string',
+              format: 'at-identifier',
+              description: 'The handle or DID of the repo.',
+            },
+            collection: {
+              type: 'string',
+              format: 'nsid',
+              description: 'The NSID of the record collection.',
+            },
+            rkey: {
+              type: 'string',
+              description: 'The Record Key.',
+              format: 'record-key',
+            },
+            cid: {
+              type: 'string',
+              format: 'cid',
+              description:
+                'The CID of the version of the record. If not specified, then return the most recent version.',
+            },
+          },
+        },
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['uri', 'value'],
+            properties: {
+              uri: {
+                type: 'string',
+                format: 'at-uri',
+              },
+              cid: {
+                type: 'string',
+                format: 'cid',
+              },
+              value: {
+                type: 'unknown',
+              },
+            },
+          },
+        },
+        errors: [
+          {
+            name: 'RecordNotFound',
+          },
+        ],
+      },
+    },
+  },
+  ComAtprotoRepoListRecords: {
+    lexicon: 1,
+    id: 'com.atproto.repo.listRecords',
+    defs: {
+      main: {
+        type: 'query',
+        description:
+          'List a range of records in a repository, matching a specific collection. Does not require auth.',
+        parameters: {
+          type: 'params',
+          required: ['repo', 'collection'],
+          properties: {
+            repo: {
+              type: 'string',
+              format: 'at-identifier',
+              description: 'The handle or DID of the repo.',
+            },
+            collection: {
+              type: 'string',
+              format: 'nsid',
+              description: 'The NSID of the record type.',
+            },
+            limit: {
+              type: 'integer',
+              minimum: 1,
+              maximum: 100,
+              default: 50,
+              description: 'The number of records to return.',
+            },
+            cursor: {
+              type: 'string',
+            },
+            reverse: {
+              type: 'boolean',
+              description: 'Flag to reverse the order of the returned records.',
+            },
+          },
+        },
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['records'],
+            properties: {
+              cursor: {
+                type: 'string',
+              },
+              records: {
+                type: 'array',
+                items: {
+                  type: 'ref',
+                  ref: 'lex:com.atproto.repo.listRecords#record',
+                },
+              },
+            },
+          },
+        },
+      },
+      record: {
+        type: 'object',
+        required: ['uri', 'cid', 'value'],
+        properties: {
+          uri: {
+            type: 'string',
+            format: 'at-uri',
+          },
+          cid: {
+            type: 'string',
+            format: 'cid',
+          },
+          value: {
+            type: 'unknown',
+          },
+        },
+      },
+    },
+  },
+  ComAtprotoRepoPutRecord: {
+    lexicon: 1,
+    id: 'com.atproto.repo.putRecord',
+    defs: {
+      main: {
+        type: 'procedure',
+        description:
+          'Write a repository record, creating or updating it as needed. Requires auth, implemented by PDS.',
+        input: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['repo', 'collection', 'rkey', 'record'],
+            nullable: ['swapRecord'],
+            properties: {
+              repo: {
+                type: 'string',
+                format: 'at-identifier',
+                description:
+                  'The handle or DID of the repo (aka, current account).',
+              },
+              collection: {
+                type: 'string',
+                format: 'nsid',
+                description: 'The NSID of the record collection.',
+              },
+              rkey: {
+                type: 'string',
+                format: 'record-key',
+                description: 'The Record Key.',
+                maxLength: 512,
+              },
+              validate: {
+                type: 'boolean',
+                description:
+                  "Can be set to 'false' to skip Lexicon schema validation of record data, 'true' to require it, or leave unset to validate only for known Lexicons.",
+              },
+              record: {
+                type: 'unknown',
+                description: 'The record to write.',
+              },
+              swapRecord: {
+                type: 'string',
+                format: 'cid',
+                description:
+                  'Compare and swap with the previous record by CID. WARNING: nullable and optional field; may cause problems with golang implementation',
+              },
+              swapCommit: {
+                type: 'string',
+                format: 'cid',
+                description:
+                  'Compare and swap with the previous commit by CID.',
+              },
+            },
+          },
+        },
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['uri', 'cid'],
+            properties: {
+              uri: {
+                type: 'string',
+                format: 'at-uri',
+              },
+              cid: {
+                type: 'string',
+                format: 'cid',
+              },
+              commit: {
+                type: 'ref',
+                ref: 'lex:com.atproto.repo.defs#commitMeta',
+              },
+              validationStatus: {
+                type: 'string',
+                knownValues: ['valid', 'unknown'],
+              },
+            },
+          },
+        },
+        errors: [
+          {
+            name: 'InvalidSwap',
+          },
+        ],
+      },
+    },
+  },
+  ComAtprotoRepoStrongRef: {
+    lexicon: 1,
+    id: 'com.atproto.repo.strongRef',
+    description: 'A URI with a content-hash fingerprint.',
+    defs: {
+      main: {
+        type: 'object',
+        required: ['uri', 'cid'],
+        properties: {
+          uri: {
+            type: 'string',
+            format: 'at-uri',
+          },
+          cid: {
+            type: 'string',
+            format: 'cid',
+          },
+        },
+      },
+    },
+  },
+  SocialOpenreelEngagementCompletionRate: {
+    lexicon: 1,
+    id: 'social.openreel.engagement.completionRate',
+    defs: {
+      main: {
+        type: 'object',
+        description:
+          'Anonymized aggregate engagement for one video, computed by an indexing service from many watch events and published to feed generators. This is a derived value returned by services, not a record stored in user repositories. Lexicon has no floating-point type, so ratios are expressed in basis points (1/100 of a percent, 0-10000).',
+        required: [
+          'subject',
+          'totalViews',
+          'avgCompletionRateBps',
+          'computedAt',
+        ],
+        properties: {
+          subject: {
+            type: 'string',
+            description:
+              'AT-URI of the social.openreel.video.post the aggregate describes.',
+            format: 'at-uri',
+          },
+          totalViews: {
+            type: 'integer',
+            description:
+              'Number of watch events included in the aggregate. Publishers should withhold aggregates below their anonymity threshold.',
+            minimum: 0,
+          },
+          avgCompletionRateBps: {
+            type: 'integer',
+            description:
+              'Mean of min(watchDurationMs / videoDurationMs, 1) across included watch events, in basis points.',
+            minimum: 0,
+            maximum: 10000,
+          },
+          likeRatioBps: {
+            type: 'integer',
+            description: 'Likes divided by totalViews, in basis points.',
+            minimum: 0,
+            maximum: 10000,
+          },
+          computedAt: {
+            type: 'string',
+            description: 'When the aggregate was computed.',
+            format: 'datetime',
+          },
+        },
+      },
+    },
+  },
+  SocialOpenreelEngagementLike: {
+    lexicon: 1,
+    id: 'social.openreel.engagement.like',
+    defs: {
+      main: {
+        type: 'record',
+        description:
+          "The repository owner likes a video. Written to the liker's own repository; deleting the record removes the like. Like other repository records it is public. Mirrors app.bsky.feed.like, scoped to OpenReel video posts.",
+        key: 'tid',
+        record: {
+          type: 'object',
+          required: ['subject', 'createdAt'],
+          properties: {
+            subject: {
+              type: 'ref',
+              description:
+                'The social.openreel.video.post that was liked, pinned to the version seen.',
+              ref: 'lex:com.atproto.repo.strongRef',
+            },
+            createdAt: {
+              type: 'string',
+              description: 'Client-declared timestamp when the like was made.',
+              format: 'datetime',
+            },
+          },
+        },
+      },
+    },
+  },
+  SocialOpenreelEngagementWatchEvent: {
+    lexicon: 1,
+    id: 'social.openreel.engagement.watchEvent',
+    defs: {
+      main: {
+        type: 'record',
+        description:
+          "A single watch session of one video by the repository owner. Written to the viewer's own repository so the viewer retains ownership of their engagement history. Records in a public repository are readable by anyone; clients must only write watch events the viewer has consented to publish.",
+        key: 'tid',
+        record: {
+          type: 'object',
+          required: [
+            'subject',
+            'watchDurationMs',
+            'videoDurationMs',
+            'createdAt',
+          ],
+          properties: {
+            subject: {
+              type: 'ref',
+              description:
+                'The social.openreel.video.post that was watched, pinned to the version seen.',
+              ref: 'lex:com.atproto.repo.strongRef',
+            },
+            watchDurationMs: {
+              type: 'integer',
+              description:
+                'Total milliseconds of playback across the session, including any rewatches. May exceed videoDurationMs.',
+              minimum: 0,
+            },
+            videoDurationMs: {
+              type: 'integer',
+              description:
+                'Duration of the video in milliseconds at the time it was watched, so completion can be derived without hydrating the post.',
+              minimum: 1,
+            },
+            soundEnabled: {
+              type: 'boolean',
+              description:
+                'Whether audio was unmuted for at least part of the session.',
+            },
+            rewatchCount: {
+              type: 'integer',
+              description:
+                'Number of times playback looped or was restarted within the session. Zero for a single pass.',
+              minimum: 0,
+            },
+            context: {
+              type: 'string',
+              description: 'Surface the video was watched from.',
+              knownValues: ['feed', 'profile', 'search', 'direct'],
+            },
+            createdAt: {
+              type: 'string',
+              description:
+                'Client-declared timestamp when the watch session ended.',
+              format: 'datetime',
+            },
+          },
+        },
+      },
+    },
+  },
+  SocialOpenreelFeedDefs: {
+    lexicon: 1,
+    id: 'social.openreel.feed.defs',
+    defs: {
+      generatorView: {
+        type: 'object',
+        description:
+          'A feed a client can offer the viewer, with its ranking method disclosed. Mirrors the social.openreel.feed.generator record, plus the AT-URI to pass to getFeed and, for weighted feeds, the weights applied.',
+        required: ['uri', 'displayName', 'rankingCriteria'],
+        properties: {
+          uri: {
+            type: 'string',
+            description:
+              "AT-URI of the social.openreel.feed.generator record; the 'feed' parameter of getFeed.",
+            format: 'at-uri',
+          },
+          displayName: {
+            type: 'string',
+            maxGraphemes: 24,
+            maxLength: 240,
+          },
+          description: {
+            type: 'string',
+            maxGraphemes: 300,
+            maxLength: 3000,
+          },
+          rankingCriteria: {
+            type: 'string',
+            description:
+              'Self-declared family of ranking method; see social.openreel.feed.generator.',
+            knownValues: [
+              'chronological',
+              'heuristic',
+              'social',
+              'personalized',
+              'collaborative',
+              'hybrid',
+            ],
+          },
+          weights: {
+            type: 'array',
+            description:
+              'The signals a weighted feed scores posts by and how much each counts. Absent for feeds that are not a weighted sum, such as chronological ones.',
+            items: {
+              type: 'ref',
+              ref: 'lex:social.openreel.feed.defs#rankingWeight',
+            },
+          },
+        },
+      },
+      rankingWeight: {
+        type: 'object',
+        description:
+          "One term of a weighted feed's score. Each signal is normalized to 0-1 before weighting.",
+        required: ['signal', 'weightBps'],
+        properties: {
+          signal: {
+            type: 'string',
+            description:
+              "'views' is a post's view count (indexed social.openreel.engagement.watchEvent records) relative to the most-viewed post; 'likes' is its like count (indexed social.openreel.engagement.like records) relative to the most-liked post; 'recency' decays from 1 by half every halfLifeHours; 'completion' is its mean completion rate; 'likeRatio' is the share of accounts that published a watch event for it that also like it, so likes from accounts that do not publish watch events are not counted. Generators may smooth 'completion' and 'likeRatio' toward a site-wide mean for posts with few views.",
+            knownValues: [
+              'views',
+              'likes',
+              'recency',
+              'completion',
+              'likeRatio',
+            ],
+          },
+          weightBps: {
+            type: 'integer',
+            description:
+              "Share of the score in basis points; a feed's weights sum to 10000.",
+            minimum: 0,
+            maximum: 10000,
+          },
+          halfLifeHours: {
+            type: 'integer',
+            description:
+              "For time-decayed signals such as 'recency': hours for the signal to fall by half.",
+            minimum: 1,
+          },
+        },
+      },
+    },
+  },
+  SocialOpenreelFeedDescribeFeedGenerator: {
+    lexicon: 1,
+    id: 'social.openreel.feed.describeFeedGenerator',
+    defs: {
+      main: {
+        type: 'query',
+        description:
+          'Describe the feeds a feed generator serves. Counterpart of app.bsky.feed.describeFeedGenerator, but returns full views with ranking weights so an AppView can list feeds without generator records having been published.',
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['feeds'],
+            properties: {
+              feeds: {
+                type: 'array',
+                items: {
+                  type: 'ref',
+                  ref: 'lex:social.openreel.feed.defs#generatorView',
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  },
+  SocialOpenreelFeedGenerator: {
+    lexicon: 1,
+    id: 'social.openreel.feed.generator',
+    defs: {
+      main: {
+        type: 'record',
+        description:
+          'Declares a video feed generator and the ranking approach it uses, so clients can present user-selectable feeds with their method disclosed. The record can exist in any repository; its AT-URI is the feed URI passed to getFeedSkeleton.',
+        key: 'any',
+        record: {
+          type: 'object',
+          required: ['did', 'displayName', 'rankingCriteria', 'createdAt'],
+          properties: {
+            did: {
+              type: 'string',
+              description: 'DID of the service that serves this feed.',
+              format: 'did',
+            },
+            displayName: {
+              type: 'string',
+              maxGraphemes: 24,
+              maxLength: 240,
+            },
+            description: {
+              type: 'string',
+              maxGraphemes: 300,
+              maxLength: 3000,
+            },
+            avatar: {
+              type: 'blob',
+              accept: ['image/png', 'image/jpeg'],
+              maxSize: 1000000,
+            },
+            rankingCriteria: {
+              type: 'string',
+              description:
+                "Self-declared family of ranking method. 'chronological' and 'heuristic' use no individual data; 'social' uses the public follow graph; 'personalized' and 'collaborative' require opted-in engagement data; 'hybrid' combines families.",
+              knownValues: [
+                'chronological',
+                'heuristic',
+                'social',
+                'personalized',
+                'collaborative',
+                'hybrid',
+              ],
+            },
+            createdAt: {
+              type: 'string',
+              format: 'datetime',
+            },
+          },
+        },
+      },
+    },
+  },
+  SocialOpenreelFeedGetAuthorFeed: {
+    lexicon: 1,
+    id: 'social.openreel.feed.getAuthorFeed',
+    defs: {
+      main: {
+        type: 'query',
+        description:
+          "Get one account's video posts from an AppView, newest first, hydrated like getFeed. Posts the AppView cannot play (not indexed yet, media not ready, deleted, or taken down) are omitted; an account with none returns an empty feed.",
+        parameters: {
+          type: 'params',
+          required: ['actor'],
+          properties: {
+            actor: {
+              type: 'string',
+              description: 'DID or handle of the account.',
+              format: 'at-identifier',
+            },
+            limit: {
+              type: 'integer',
+              minimum: 1,
+              maximum: 100,
+              default: 30,
+            },
+            cursor: {
+              type: 'string',
+            },
+          },
+        },
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['feed'],
+            properties: {
+              cursor: {
+                type: 'string',
+              },
+              feed: {
+                type: 'array',
+                items: {
+                  type: 'ref',
+                  ref: 'lex:social.openreel.video.defs#postView',
+                },
+              },
+            },
+          },
+        },
+        errors: [
+          {
+            name: 'NotFound',
+            description: 'The actor is a handle the AppView has not seen.',
+          },
+        ],
+      },
+    },
+  },
+  SocialOpenreelFeedGetFeed: {
+    lexicon: 1,
+    id: 'social.openreel.feed.getFeed',
+    defs: {
+      main: {
+        type: 'query',
+        description:
+          "Get a hydrated, playable video feed from an AppView. The AppView requests the skeleton from the feed's generator and hydrates each post; posts it cannot hydrate (not indexed yet, media not ready, or deleted) are omitted.",
+        parameters: {
+          type: 'params',
+          properties: {
+            feed: {
+              type: 'string',
+              description:
+                "AT-URI of the social.openreel.feed.generator record. Defaults to the AppView's default feed.",
+              format: 'at-uri',
+            },
+            limit: {
+              type: 'integer',
+              minimum: 1,
+              maximum: 100,
+              default: 30,
+            },
+            cursor: {
+              type: 'string',
+            },
+          },
+        },
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['feed'],
+            properties: {
+              cursor: {
+                type: 'string',
+              },
+              feed: {
+                type: 'array',
+                items: {
+                  type: 'ref',
+                  ref: 'lex:social.openreel.video.defs#postView',
+                },
+              },
+            },
+          },
+        },
+        errors: [
+          {
+            name: 'UnknownFeed',
+          },
+        ],
+      },
+    },
+  },
+  SocialOpenreelFeedGetFeedSkeleton: {
+    lexicon: 1,
+    id: 'social.openreel.feed.getFeedSkeleton',
+    defs: {
+      main: {
+        type: 'query',
+        description:
+          'Get a ranked list of video post URIs from a feed generator. Mirrors app.bsky.feed.getFeedSkeleton: generators return references only, and the AppView hydrates them.',
+        parameters: {
+          type: 'params',
+          required: ['feed'],
+          properties: {
+            feed: {
+              type: 'string',
+              description:
+                'AT-URI of the social.openreel.feed.generator record for the requested feed.',
+              format: 'at-uri',
+            },
+            limit: {
+              type: 'integer',
+              minimum: 1,
+              maximum: 100,
+              default: 30,
+            },
+            cursor: {
+              type: 'string',
+            },
+          },
+        },
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['feed'],
+            properties: {
+              cursor: {
+                type: 'string',
+              },
+              feed: {
+                type: 'array',
+                items: {
+                  type: 'ref',
+                  ref: 'lex:social.openreel.feed.getFeedSkeleton#skeletonFeedPost',
+                },
+              },
+            },
+          },
+        },
+        errors: [
+          {
+            name: 'UnknownFeed',
+          },
+        ],
+      },
+      skeletonFeedPost: {
+        type: 'object',
+        required: ['post'],
+        properties: {
+          post: {
+            type: 'string',
+            format: 'at-uri',
+          },
+        },
+      },
+    },
+  },
+  SocialOpenreelFeedGetSuggestedFeeds: {
+    lexicon: 1,
+    id: 'social.openreel.feed.getSuggestedFeeds',
+    defs: {
+      main: {
+        type: 'query',
+        description:
+          "Get the feeds an AppView suggests to clients, in display order, with each one's ranking method disclosed. The first feed is the AppView's suggested default.",
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['feeds'],
+            properties: {
+              feeds: {
+                type: 'array',
+                items: {
+                  type: 'ref',
+                  ref: 'lex:social.openreel.feed.defs#generatorView',
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  },
+  SocialOpenreelVideoComment: {
+    lexicon: 1,
+    id: 'social.openreel.video.comment',
+    defs: {
+      main: {
+        type: 'record',
+        description:
+          "A comment on a video, written to the commenter's own repository; deleting the record removes the comment. Like other repository records it is public. Threads are one level deep: a reply points at the top-level comment it belongs to, and replying to a reply points at that same top-level comment.",
+        key: 'tid',
+        record: {
+          type: 'object',
+          required: ['subject', 'text', 'createdAt'],
+          properties: {
+            subject: {
+              type: 'ref',
+              description:
+                'The social.openreel.video.post the comment is on, pinned to the version seen.',
+              ref: 'lex:com.atproto.repo.strongRef',
+            },
+            parent: {
+              type: 'ref',
+              description:
+                'The top-level social.openreel.video.comment on the same video that this replies to. Omitted for a top-level comment.',
+              ref: 'lex:com.atproto.repo.strongRef',
+            },
+            text: {
+              type: 'string',
+              description: "The comment's text.",
+              minLength: 1,
+              maxGraphemes: 300,
+              maxLength: 3000,
+            },
+            createdAt: {
+              type: 'string',
+              description:
+                'Client-declared timestamp when the comment was written.',
+              format: 'datetime',
+            },
+          },
+        },
+      },
+    },
+  },
+  SocialOpenreelVideoDefs: {
+    lexicon: 1,
+    id: 'social.openreel.video.defs',
+    defs: {
+      postView: {
+        type: 'object',
+        description:
+          "A video post hydrated by an AppView: the author's record plus derived, playable media. 'playlist' and 'thumbnail' point at renditions the AppView's media pipeline produced from the record's video blob; they are not part of the record.",
+        required: ['uri', 'cid', 'author', 'record', 'playlist', 'indexedAt'],
+        properties: {
+          uri: {
+            type: 'string',
+            format: 'at-uri',
+          },
+          cid: {
+            type: 'string',
+            format: 'cid',
+          },
+          author: {
+            type: 'ref',
+            ref: 'lex:social.openreel.video.defs#authorView',
+          },
+          record: {
+            type: 'unknown',
+            description:
+              "The social.openreel.video.post record as stored in the author's repository.",
+          },
+          playlist: {
+            type: 'string',
+            description: 'HLS multivariant playlist (.m3u8) for the video.',
+            format: 'uri',
+          },
+          thumbnail: {
+            type: 'string',
+            description: 'Poster image shown before playback starts.',
+            format: 'uri',
+          },
+          aspectRatio: {
+            type: 'ref',
+            ref: 'lex:social.openreel.video.post#aspectRatio',
+          },
+          durationMs: {
+            type: 'integer',
+            description:
+              'Duration of the transcoded video in milliseconds, as measured by the media pipeline.',
+            minimum: 1,
+          },
+          likeCount: {
+            type: 'integer',
+            description:
+              'Number of accounts the AppView has seen like the post (social.openreel.engagement.like records).',
+            minimum: 0,
+          },
+          commentCount: {
+            type: 'integer',
+            description:
+              'Number of comments (top-level and replies) the AppView has indexed on the post (social.openreel.video.comment records).',
+            minimum: 0,
+          },
+          indexedAt: {
+            type: 'string',
+            format: 'datetime',
+          },
+          labels: {
+            type: 'array',
+            description:
+              "Moderation labels on the post or its author from the labelers the request asked for (atproto-accept-labelers), plus the author's self-labels. Retracted (neg) and expired labels may be included; clients resolve them.",
+            items: {
+              type: 'ref',
+              ref: 'lex:com.atproto.label.defs#label',
+            },
+          },
+        },
+      },
+      commentView: {
+        type: 'object',
+        description: 'A comment hydrated by an AppView.',
+        required: ['uri', 'cid', 'author', 'record', 'indexedAt'],
+        properties: {
+          uri: {
+            type: 'string',
+            format: 'at-uri',
+          },
+          cid: {
+            type: 'string',
+            format: 'cid',
+          },
+          author: {
+            type: 'ref',
+            ref: 'lex:social.openreel.video.defs#authorView',
+          },
+          record: {
+            type: 'unknown',
+            description:
+              "The social.openreel.video.comment record as stored in the author's repository.",
+          },
+          replyCount: {
+            type: 'integer',
+            description:
+              'Replies the AppView has indexed. Only set on top-level comments.',
+            minimum: 0,
+          },
+          indexedAt: {
+            type: 'string',
+            format: 'datetime',
+          },
+          labels: {
+            type: 'array',
+            description:
+              'Moderation labels on the comment or its author, as on postView.',
+            items: {
+              type: 'ref',
+              ref: 'lex:com.atproto.label.defs#label',
+            },
+          },
+        },
+      },
+      authorView: {
+        type: 'object',
+        required: ['did'],
+        properties: {
+          did: {
+            type: 'string',
+            format: 'did',
+          },
+          handle: {
+            type: 'string',
+            description: "Handle claimed in the author's DID document, if any.",
+            format: 'handle',
+          },
+        },
+      },
+    },
+  },
+  SocialOpenreelVideoGetComments: {
+    lexicon: 1,
+    id: 'social.openreel.video.getComments',
+    defs: {
+      main: {
+        type: 'query',
+        description:
+          "Get the comments on a video from an AppView: its top-level comments, or with 'parent' the replies to one of them. Comments the AppView has not indexed, or whose author or record was taken down, are omitted. Ordering is the AppView's choice; the reference AppView returns top-level comments newest first and replies oldest first.",
+        parameters: {
+          type: 'params',
+          required: ['uri'],
+          properties: {
+            uri: {
+              type: 'string',
+              description: 'AT-URI of the social.openreel.video.post.',
+              format: 'at-uri',
+            },
+            parent: {
+              type: 'string',
+              description:
+                'AT-URI of a top-level comment on the video; returns its replies instead of the top-level comments.',
+              format: 'at-uri',
+            },
+            limit: {
+              type: 'integer',
+              minimum: 1,
+              maximum: 100,
+              default: 30,
+            },
+            cursor: {
+              type: 'string',
+            },
+          },
+        },
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['comments'],
+            properties: {
+              cursor: {
+                type: 'string',
+              },
+              comments: {
+                type: 'array',
+                items: {
+                  type: 'ref',
+                  ref: 'lex:social.openreel.video.defs#commentView',
+                },
+              },
+            },
+          },
+        },
+        errors: [
+          {
+            name: 'NotFound',
+            description: 'The video is not indexed or was removed.',
+          },
+        ],
+      },
+    },
+  },
+  SocialOpenreelVideoPost: {
+    lexicon: 1,
+    id: 'social.openreel.video.post',
+    defs: {
+      main: {
+        type: 'record',
+        description:
+          'A short-form video post. The record holds portable canonical metadata and a reference to the uploaded video blob; transcoded renditions (HLS) are derived by the media pipeline and are not part of the record.',
+        key: 'tid',
+        record: {
+          type: 'object',
+          required: ['video', 'durationMs', 'createdAt'],
+          properties: {
+            video: {
+              type: 'blob',
+              description: 'The source video as uploaded by the author.',
+              accept: ['video/*'],
+              maxSize: 100000000,
+            },
+            caption: {
+              type: 'string',
+              description: 'Author-written caption shown with the video.',
+              maxGraphemes: 300,
+              maxLength: 3000,
+            },
+            tags: {
+              type: 'array',
+              description:
+                "Hashtags without the leading '#', used for discovery.",
+              maxLength: 8,
+              items: {
+                type: 'string',
+                maxGraphemes: 64,
+                maxLength: 640,
+              },
+            },
+            durationMs: {
+              type: 'integer',
+              description:
+                'Duration of the video in milliseconds, as measured by the client at upload time.',
+              minimum: 1,
+            },
+            aspectRatio: {
+              type: 'ref',
+              ref: 'lex:social.openreel.video.post#aspectRatio',
+            },
+            thumbnail: {
+              type: 'blob',
+              description: 'Poster image displayed before playback starts.',
+              accept: ['image/*'],
+              maxSize: 1000000,
+            },
+            alt: {
+              type: 'string',
+              description: 'Alt text describing the video for accessibility.',
+              maxGraphemes: 1000,
+              maxLength: 10000,
+            },
+            langs: {
+              type: 'array',
+              description:
+                'Languages spoken or captioned in the video, as BCP-47 tags.',
+              maxLength: 3,
+              items: {
+                type: 'string',
+                format: 'language',
+              },
+            },
+            labels: {
+              type: 'union',
+              description:
+                'Self-applied labels, for example adult content markers.',
+              refs: ['lex:com.atproto.label.defs#selfLabels'],
+            },
+            createdAt: {
+              type: 'string',
+              description:
+                'Client-declared timestamp when the post was created.',
+              format: 'datetime',
+            },
+          },
+        },
+      },
+      aspectRatio: {
+        type: 'object',
+        description:
+          'Display aspect ratio as a width:height pair. Only the ratio is meaningful; the values are not pixel dimensions.',
+        required: ['width', 'height'],
+        properties: {
+          width: {
+            type: 'integer',
+            minimum: 1,
+          },
+          height: {
+            type: 'integer',
+            minimum: 1,
+          },
+        },
+      },
+    },
+  },
+} as const satisfies Record<string, LexiconDoc>
+export const schemas = Object.values(schemaDict) satisfies LexiconDoc[]
+export const lexicons: Lexicons = new Lexicons(schemas)
+
+export function validate<T extends { $type: string }>(
+  v: unknown,
+  id: string,
+  hash: string,
+  requiredType: true,
+): ValidationResult<T>
+export function validate<T extends { $type?: string }>(
+  v: unknown,
+  id: string,
+  hash: string,
+  requiredType?: false,
+): ValidationResult<T>
+export function validate(
+  v: unknown,
+  id: string,
+  hash: string,
+  requiredType?: boolean,
+): ValidationResult {
+  return (requiredType ? is$typed : maybe$typed)(v, id, hash)
+    ? lexicons.validate(`${id}#${hash}`, v)
+    : {
+        success: false,
+        error: new ValidationError(
+          `Must be an object with "${hash === 'main' ? id : `${id}#${hash}`}" $type property`,
+        ),
+      }
+}
+
+export const ids = {
+  ComAtprotoLabelDefs: 'com.atproto.label.defs',
+  ComAtprotoRepoCreateRecord: 'com.atproto.repo.createRecord',
+  ComAtprotoRepoDefs: 'com.atproto.repo.defs',
+  ComAtprotoRepoDeleteRecord: 'com.atproto.repo.deleteRecord',
+  ComAtprotoRepoGetRecord: 'com.atproto.repo.getRecord',
+  ComAtprotoRepoListRecords: 'com.atproto.repo.listRecords',
+  ComAtprotoRepoPutRecord: 'com.atproto.repo.putRecord',
+  ComAtprotoRepoStrongRef: 'com.atproto.repo.strongRef',
+  SocialOpenreelEngagementCompletionRate:
+    'social.openreel.engagement.completionRate',
+  SocialOpenreelEngagementLike: 'social.openreel.engagement.like',
+  SocialOpenreelEngagementWatchEvent: 'social.openreel.engagement.watchEvent',
+  SocialOpenreelFeedDefs: 'social.openreel.feed.defs',
+  SocialOpenreelFeedDescribeFeedGenerator:
+    'social.openreel.feed.describeFeedGenerator',
+  SocialOpenreelFeedGenerator: 'social.openreel.feed.generator',
+  SocialOpenreelFeedGetAuthorFeed: 'social.openreel.feed.getAuthorFeed',
+  SocialOpenreelFeedGetFeed: 'social.openreel.feed.getFeed',
+  SocialOpenreelFeedGetFeedSkeleton: 'social.openreel.feed.getFeedSkeleton',
+  SocialOpenreelFeedGetSuggestedFeeds: 'social.openreel.feed.getSuggestedFeeds',
+  SocialOpenreelVideoComment: 'social.openreel.video.comment',
+  SocialOpenreelVideoDefs: 'social.openreel.video.defs',
+  SocialOpenreelVideoGetComments: 'social.openreel.video.getComments',
+  SocialOpenreelVideoPost: 'social.openreel.video.post',
+} as const

@@ -1,0 +1,251 @@
+import Foundation
+
+/// `social.openreel.video.defs#postView`: a video post the AppView has
+/// hydrated with playable media. `playlist` and `thumbnail` point at the media
+/// pipeline's renditions, not at the author's PDS.
+public struct VideoPostView: Decodable, Sendable, Equatable, Identifiable {
+    public let uri: String
+    public let cid: String
+    public let author: VideoAuthorView
+    /// The `social.openreel.video.post` record, or `nil` if it did not decode.
+    /// The Lexicon types it as `unknown`, so a record written by a newer
+    /// client must not make the whole feed page unreadable.
+    public let record: VideoPostRecord?
+    public let playlist: URL
+    public let thumbnail: URL?
+    public let aspectRatio: VideoAspectRatio?
+    public let durationMs: Int?
+    /// Accounts the AppView has seen like the post; `nil` from an AppView
+    /// that does not count likes.
+    public let likeCount: Int?
+    /// Comments the AppView has indexed; `nil` from an AppView that does not
+    /// count them.
+    public let commentCount: Int?
+    public let indexedAt: String
+    /// Labels the AppView attached for the post or its author, from the
+    /// labelers the request asked for (`atproto-accept-labelers`). Empty from
+    /// an AppView that does not serve labels.
+    public let labels: [ATLabel]
+
+    public var id: String { uri }
+
+    public init(
+        uri: String,
+        cid: String,
+        author: VideoAuthorView,
+        record: VideoPostRecord?,
+        playlist: URL,
+        thumbnail: URL? = nil,
+        aspectRatio: VideoAspectRatio? = nil,
+        durationMs: Int? = nil,
+        likeCount: Int? = nil,
+        commentCount: Int? = nil,
+        indexedAt: String,
+        labels: [ATLabel] = []
+    ) {
+        self.uri = uri
+        self.cid = cid
+        self.author = author
+        self.record = record
+        self.playlist = playlist
+        self.thumbnail = thumbnail
+        self.aspectRatio = aspectRatio
+        self.durationMs = durationMs
+        self.likeCount = likeCount
+        self.commentCount = commentCount
+        self.indexedAt = indexedAt
+        self.labels = labels
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case uri, cid, author, record, playlist, thumbnail, aspectRatio, durationMs, likeCount, commentCount, indexedAt, labels
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        uri = try container.decode(String.self, forKey: .uri)
+        cid = try container.decode(String.self, forKey: .cid)
+        author = try container.decode(VideoAuthorView.self, forKey: .author)
+        record = try? container.decodeIfPresent(VideoPostRecord.self, forKey: .record)
+        playlist = try container.decode(URL.self, forKey: .playlist)
+        thumbnail = try? container.decodeIfPresent(URL.self, forKey: .thumbnail)
+        aspectRatio = try? container.decodeIfPresent(VideoAspectRatio.self, forKey: .aspectRatio)
+        durationMs = try? container.decodeIfPresent(Int.self, forKey: .durationMs)
+        likeCount = try? container.decodeIfPresent(Int.self, forKey: .likeCount)
+        commentCount = try? container.decodeIfPresent(Int.self, forKey: .commentCount)
+        indexedAt = try container.decode(String.self, forKey: .indexedAt)
+        // One malformed label drops that label, not the post.
+        labels = (try? container.decodeIfPresent([Lenient<ATLabel>].self, forKey: .labels))?
+            .compactMap(\.value) ?? []
+    }
+}
+
+/// Decodes `Value` if it can and `nil` otherwise, so one bad element of an
+/// array doesn't fail the whole array.
+struct Lenient<Value: Decodable>: Decodable {
+    let value: Value?
+
+    init(from decoder: Decoder) throws {
+        value = try? Value(from: decoder)
+    }
+}
+
+/// `social.openreel.video.defs#authorView`.
+public struct VideoAuthorView: Decodable, Sendable, Equatable {
+    public let did: String
+    /// Claimed in the author's DID document; the AppView does not verify it yet.
+    public let handle: String?
+
+    public init(did: String, handle: String? = nil) {
+        self.did = did
+        self.handle = handle
+    }
+}
+
+/// `social.openreel.video.post#aspectRatio`. Only the ratio is meaningful.
+public struct VideoAspectRatio: Codable, Sendable, Equatable {
+    public let width: Int
+    public let height: Int
+
+    public init(width: Int, height: Int) {
+        self.width = width
+        self.height = height
+    }
+
+    /// The ratio of a display size in pixels, in lowest terms (1080×1920 is
+    /// 9:16), or `nil` if either side rounds to less than one pixel.
+    public init?(displayWidth: Double, displayHeight: Double) {
+        let width = Int(displayWidth.magnitude.rounded())
+        let height = Int(displayHeight.magnitude.rounded())
+        guard width > 0, height > 0 else { return nil }
+        var (a, b) = (width, height)
+        while b != 0 { (a, b) = (b, a % b) }
+        self.init(width: width / a, height: height / a)
+    }
+
+    /// Width over height, or `nil` for a ratio with a non-positive side.
+    public var value: Double? {
+        guard width > 0, height > 0 else { return nil }
+        return Double(width) / Double(height)
+    }
+}
+
+/// The display fields of a `social.openreel.video.post` record. Blob refs
+/// are left out until the client has a use for them.
+public struct VideoPostRecord: Decodable, Sendable, Equatable {
+    public let caption: String?
+    public let tags: [String]?
+    public let alt: String?
+    public let durationMs: Int?
+    public let createdAt: String?
+    /// The author's own content warnings (`com.atproto.label.defs#selfLabels`).
+    public let selfLabels: [String]
+
+    public init(caption: String? = nil, tags: [String]? = nil, alt: String? = nil, durationMs: Int? = nil,
+                createdAt: String? = nil, selfLabels: [String] = []) {
+        self.caption = caption
+        self.tags = tags
+        self.alt = alt
+        self.durationMs = durationMs
+        self.createdAt = createdAt
+        self.selfLabels = selfLabels
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case caption, tags, alt, durationMs, createdAt, labels
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        caption = try container.decodeIfPresent(String.self, forKey: .caption)
+        tags = try container.decodeIfPresent([String].self, forKey: .tags)
+        alt = try container.decodeIfPresent(String.self, forKey: .alt)
+        durationMs = try container.decodeIfPresent(Int.self, forKey: .durationMs)
+        createdAt = try container.decodeIfPresent(String.self, forKey: .createdAt)
+        // `labels` is an open union; only self-labels are understood.
+        selfLabels = (try? container.decodeIfPresent(SelfLabels.self, forKey: .labels))?.values ?? []
+    }
+}
+
+/// One page of `social.openreel.feed.getFeed`. A `nil` cursor is the end of
+/// the feed.
+public struct VideoFeedPage: Decodable, Sendable, Equatable {
+    public let feed: [VideoPostView]
+    public let cursor: String?
+
+    public init(feed: [VideoPostView], cursor: String? = nil) {
+        self.feed = feed
+        self.cursor = cursor
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case feed, cursor
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        // Decode posts one at a time so one malformed view drops that post,
+        // not the page.
+        var items = try container.nestedUnkeyedContainer(forKey: .feed)
+        var posts: [VideoPostView] = []
+        while !items.isAtEnd {
+            if let post = try? items.decode(VideoPostView.self) {
+                posts.append(post)
+            } else {
+                _ = try items.decode(Skip.self)
+            }
+        }
+        feed = posts
+        cursor = try container.decodeIfPresent(String.self, forKey: .cursor)
+    }
+
+    /// Consumes one array element of any shape.
+    private struct Skip: Decodable {
+        init(from decoder: Decoder) throws {}
+    }
+}
+
+/// Unauthenticated reads from an OpenReel AppView. `getFeed` is public data,
+/// so it does not go through the session manager.
+public struct AppViewClient: Sendable {
+    public static let getFeedNSID = "social.openreel.feed.getFeed"
+    public static let getSuggestedFeedsNSID = "social.openreel.feed.getSuggestedFeeds"
+
+    private let xrpc: XRPCClient
+    /// Labelers whose labels to ask for on every read.
+    public let labelers: [LabelerSubscription]
+
+    public init(serviceURL: URL, labelers: [LabelerSubscription] = [], transport: any HTTPTransport = URLSessionTransport()) {
+        self.xrpc = XRPCClient(serviceURL: serviceURL, transport: transport)
+        self.labelers = labelers
+    }
+
+    /// A read that carries `atproto-accept-labelers`, so the AppView attaches
+    /// the subscribed labelers' labels.
+    func query<Output: Decodable>(_ nsid: String, parameters: [String: String], as type: Output.Type) async throws -> Output {
+        try await xrpc.query(nsid, parameters: parameters, headers: headers, as: type)
+    }
+
+    private var headers: [String: String] {
+        LabelerSubscription.headerValue(labelers).map { [LabelerSubscription.acceptLabelersHeader: $0] } ?? [:]
+    }
+
+    public var serviceURL: URL { xrpc.serviceURL }
+
+    /// One page of hydrated, playable posts. `feed` is a generator record's
+    /// AT-URI; `nil` asks for the AppView's default feed. Posts whose media is
+    /// not ready are omitted by the AppView, so a page can be shorter than
+    /// `limit` (even empty) and still have a cursor.
+    public func getFeed(feed: String? = nil, limit: Int? = nil, cursor: String? = nil) async throws -> VideoFeedPage {
+        var parameters: [String: String] = [:]
+        if let feed { parameters["feed"] = feed }
+        if let limit { parameters["limit"] = String(limit) }
+        if let cursor { parameters["cursor"] = cursor }
+        return try await query(Self.getFeedNSID, parameters: parameters, as: VideoFeedPage.self)
+    }
+
+    /// The feeds this AppView offers, default first, with how each ranks.
+    public func getSuggestedFeeds() async throws -> [FeedGeneratorView] {
+        try await xrpc.query(Self.getSuggestedFeedsNSID, as: SuggestedFeedsOutput.self).feeds
+    }
+}
