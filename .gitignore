@@ -1,0 +1,13 @@
+node_modules/
+output/
+dist/
+*.pem
+*.crx
+.DS_Store
+.env
+.env.*
+!.env.example
+*.log
+.codex/
+.agents/
+.aws/

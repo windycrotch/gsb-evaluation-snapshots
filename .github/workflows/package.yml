@@ -1,0 +1,67 @@
+name: Package extension
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: package-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+          package-manager-cache: false
+      - name: Check extension
+        run: npm run check
+      - name: Build signed CRX and ZIP
+        env:
+          CRX_PRIVATE_KEY: ${{ secrets.CRX_PRIVATE_KEY }}
+          CHROME_PATH: google-chrome
+        run: npm run package
+      - name: Upload packages
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: BilibiliLiveDelay-${{ github.run_number }}
+          path: |
+            dist/*.crx
+            dist/*.zip
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 30
+      - name: Publish GitHub Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          if gh release view "$tag" --json isDraft --jq .isDraft > "$RUNNER_TEMP/release-is-draft"; then
+            if [[ "$(cat "$RUNNER_TEMP/release-is-draft")" != true ]]; then
+              echo "::error::Release $tag is already published; refusing to replace its assets."
+              exit 1
+            fi
+          else
+            notes="docs/releases/$tag.md"
+            if [[ -f "$notes" ]]; then
+              gh release create "$tag" --verify-tag --draft --title "BilibiliLiveDelay $tag" --notes-file "$notes"
+            else
+              gh release create "$tag" --verify-tag --draft --title "BilibiliLiveDelay $tag" --generate-notes
+            fi
+          fi
+          gh release upload "$tag" dist/*.crx dist/*.zip dist/SHA256SUMS --clobber
+          gh release edit "$tag" --draft=false

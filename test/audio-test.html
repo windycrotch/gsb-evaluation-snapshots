@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Live Audio Sync · 音频测量源</title>
+  <link rel="stylesheet" href="../control.css">
+  <link rel="stylesheet" href="test.css">
+</head>
+<body>
+<main class="test-main">
+  <header><div class="app-mark" aria-hidden="true">♪</div><div><h1>音频测量源</h1><p>独立时钟 · 每 8 秒一个短音</p></div></header>
+  <section class="card">
+    <p>点击启动，然后在此标签页点击扩展图标。每个音由一个主提示音和 1–16 个较轻短音组成，用短音数量识别编号；128 秒循环一次。</p>
+    <div class="actions"><button id="source-start" class="primary">启动测试音</button><button id="source-stop" disabled>停止测试音</button></div>
+    <div class="test-clock"><span id="clock">00:00.000</span><span id="pulse" class="pulse">等待启动</span></div>
+    <p id="source-info" class="detail" role="status">测试音从 AudioBuffer 循环输出，不依赖后台标签页的 JS 定时器调度。</p>
+  </section>
+  <section class="card">
+    <h2>记录你听到的声音</h2>
+    <p>听到主提示音时，选择声音编号后点击记录。实测值 = 记录时间 − 对应音的输入时间。包含人工反应时间、设备与系统输出延迟，不能作为精密标定。</p>
+    <div class="measurement-row"><label for="heard-id">声音编号</label><select id="heard-id"></select><button id="mark-heard" disabled>我听到了</button></div>
+    <p id="measurement" class="detail">切勿把扩展设置的目标数值填作实测值。</p>
+    <ol id="heard-log" class="log"></ol>
+  </section>
+  <section class="card">
+    <h2>输入时间标记</h2><ol id="source-log" class="log"></ol>
+    <p class="footnote">前台显示依赖 UI 刷新；切到后台时显示可暂停，音频仍由音频线程循环播放。切回后重新按音频时钟计算编号。源计时是 AudioContext 时间，不是扬声器输出测量。</p>
+  </section>
+  <p class="footnote">测量 0／1／10／30／60 秒请每次停止扩展、设值后重新启动，并等待初始缓冲结束。建议用手机同时录制屏幕与扬声器，以减少点击反应误差。</p>
+</main>
+<script type="module" src="audio-test.js"></script>
+</body>
+</html>

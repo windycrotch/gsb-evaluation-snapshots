@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Live Audio Sync</title>
+  <link rel="stylesheet" href="control.css">
+</head>
+<body class="toolbar-popup">
+  <main>
+    <header>
+      <div class="app-mark" aria-hidden="true">≈</div>
+      <div><h1>Live Audio Sync</h1><p>直播音画同步</p></div>
+    </header>
+    <section class="card target">
+      <span class="eyebrow">捕获标签页</span>
+      <p id="tab-title" class="tab-title">尚未选择</p>
+      <div class="status-line" role="status" aria-live="polite">
+        <span id="status-dot" class="dot"></span><span id="status-label">未启动</span>
+      </div>
+      <p id="status-detail" class="detail">点击开始延迟，捕获当前网页的音频。</p>
+    </section>
+    <div class="mode-row"><label for="mode">延迟模式</label><select id="mode"><option value="audio">纯音频</option><option value="av">音画一起</option></select></div>
+    <section id="video-settings" class="card" aria-label="音画采集设置" hidden>
+      <div class="video-fields">
+        <label>采集范围<select id="region"><option value="player">自动识别播放器</option><option value="manual">手动框选</option><option value="tab">整个标签页</option></select></label>
+        <label>目标画质<select id="quality"><option value="720p30">720p / 30fps</option><option value="720p60">720p / 60fps</option><option value="1080p30">1080p / 30fps</option><option value="1080p60">1080p / 60fps</option></select></label>
+      </div>
+      <button id="pick-region" class="text-button" hidden>框选当前网页的视频区域</button>
+      <p id="video-format" class="footnote" hidden></p>
+      <p class="footnote">停止后可切换。网页画面经重编码，画质受源视频与设备限制。</p>
+    </section>
+    <section class="card delay-card" aria-label="延迟设置">
+      <div class="delay-header"><label for="delay-slider">目标延迟</label><button id="reset" class="text-button">恢复 30 秒</button></div>
+      <div class="readout"><output id="delay-value" for="delay-slider">30.0</output><span>秒</span></div>
+      <input id="delay-slider" type="range" min="0" max="60" step="0.1" value="30" aria-label="目标延迟，单位秒">
+      <div class="range-labels"><span>0 秒</span><span>60 秒</span></div>
+      <div class="fine-controls"><button id="decrease">−0.5s</button><button id="increase">+0.5s</button></div>
+      <p class="footnote">增加延迟会暂停输出并倒计时恢复；减少延迟会跳到已有缓冲。松开滑块后应用。</p>
+    </section>
+    <p id="error" class="error" role="alert" hidden></p>
+    <div class="actions"><button id="start" class="primary">开始延迟</button><button id="stop" class="secondary" disabled>停止延迟</button></div>
+    <button id="open-viewer" class="text-button viewer-link" hidden>显示延迟播放页</button>
+    <footer>关闭面板后继续运行，点击图标再次调整。<br>目标数值与缓冲位置差均不代表实测延迟。</footer>
+  </main>
+  <script type="module" src="control.js"></script>
+</body>
+</html>

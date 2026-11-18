@@ -1,0 +1,10 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>DelayNode 信号测量</title><link rel="stylesheet" href="../control.css"><link rel="stylesheet" href="test.css"></head>
+<body><main class="test-main">
+  <h1>DelayNode 信号测量</h1>
+  <p>使用扩展同一份 DelayGraph，在浏览器 OfflineAudioContext 中渲染脉冲。实测值取自输出样本位置，不读取设置值作为结果；不包含标签页采集和扬声器延迟。</p>
+  <button id="run" class="primary">运行测量</button><p id="summary" role="status">等待运行</p>
+  <table><thead><tr><th>场景</th><th>目标</th><th>实测</th><th>结果</th></tr></thead><tbody id="results"></tbody></table>
+  <script type="module" src="offline-audio.js"></script>
+</main></body></html>

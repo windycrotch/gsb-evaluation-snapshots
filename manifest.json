@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "Live Audio Sync · 直播音画延迟",
+  "version": "1.3.0",
+  "description": "独立延迟标签页音频或播放器音画，支持区域裁剪及最高 1080p/60fps 目标档位。",
+  "minimum_chrome_version": "116",
+  "permissions": ["activeTab", "tabCapture", "offscreen", "storage", "scripting"],
+  "background": { "service_worker": "service-worker.js", "type": "module" },
+  "action": {
+    "default_title": "Live Audio Sync · 调整直播音画延迟",
+    "default_popup": "control.html"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'; connect-src 'self'; media-src 'self' blob:"
+  }
+}

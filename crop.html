@@ -1,0 +1,7 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Live Audio Sync · 框选视频区域</title><link rel="stylesheet" href="crop.css"></head>
+<body><main><h1>框选视频区域</h1><p id="instruction">在网页预览上拖动，框选要延迟播放的画面。</p>
+<div id="preview"><img id="image" alt="当前直播网页预览" draggable="false"><div id="selection" hidden></div></div>
+<div class="actions"><span id="size">尚未选择</span><button id="cancel">取消</button><button id="save" disabled>使用这个区域</button></div>
+<p id="error" role="alert" hidden></p><p class="note">这是一张本地预览截图，框选不会暂停直播。完成后回到插件面板点击开始；滚动原网页或改变窗口尺寸后需要重新框选。</p></main><script type="module" src="crop.js"></script></body></html>

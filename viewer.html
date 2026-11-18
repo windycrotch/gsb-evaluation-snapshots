@@ -1,0 +1,9 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Live Audio Sync · 延迟播放</title><link rel="stylesheet" href="viewer.css"></head>
+<body>
+  <header><div><strong>Live Audio Sync · 音画延迟</strong><p id="title">正在连接捕获标签页…</p></div><button id="fullscreen">全屏</button></header>
+  <main id="stage"><video id="video" playsinline preload="auto"></video><div id="overlay" role="status"><p id="status">正在准备音画缓冲…</p><button id="play" hidden>播放声音与画面</button></div></main>
+  <footer><span id="detail">实际输出尺寸与帧率将在缓冲就绪后显示</span><span>点击插件图标调整延迟 · 关闭此播放页会停止采集并恢复网页原声</span></footer>
+  <script type="module" src="viewer.js"></script>
+</body></html>
