@@ -106,9 +106,15 @@ export function usePlatformerController(entityId: EntityId, opts: PlatformerCont
       state.jumpCooldown = Math.max(0, state.jumpCooldown - dt)
 
       const jumpPressed = jumpKeys.some((k) => input.isPressed(k)) || gpJumpPressed
+      const jumpHeld = jumpKeys.some((k) => input.isDown(k)) || gpJump
       const canJumpEarly = state.coyoteTimer > 0 || state.jumpsLeft > 0
-      if (jumpPressed && state.jumpCooldown <= 0 && canJumpEarly) state.jumpBuffer = jumpBuffer
-      else if (!jumpKeys.some((k) => input.isDown(k)) && !gpJump) state.jumpBuffer = Math.max(0, state.jumpBuffer - dt)
+      // Buffer every fresh jump edge while a jump is still possible, even
+      // during the cooldown: the cooldown gates the *execution* below, not the
+      // buffering, so a press landed mid-cooldown still fires once it ends.
+      if (jumpPressed && canJumpEarly) state.jumpBuffer = jumpBuffer
+      // The buffer only drains while the jump key is up — holding the key
+      // keeps the buffered jump alive instead of leaking it away.
+      else if (!jumpHeld) state.jumpBuffer = Math.max(0, state.jumpBuffer - dt)
 
       const left = leftKeys.some((k) => input.isDown(k)) || gpLeft
       const right = rightKeys.some((k) => input.isDown(k)) || gpRight
@@ -140,8 +146,10 @@ export function usePlatformerController(entityId: EntityId, opts: PlatformerCont
         state.jumpCooldown = jumpCooldown
       }
 
-      const jumpHeld = jumpKeys.some((k) => input.isDown(k)) || gpJump
-      if (!jumpHeld && rb.vy < -120) rb.vy += 800 * dt
+      // Variable jump height: releasing the key while still rising cuts the
+      // jump. Gated on being airborne so the damping never lingers after a
+      // landing (a grounded body with residual upward velocity keeps it).
+      if (!jumpHeld && !rb.onGround && rb.vy < -120) rb.vy += 800 * dt
     }
 
     engine.ecs.addComponent(entityId, createScript(updateFn))
