@@ -35,6 +35,7 @@
     "build": "tsc",
     "watch": "tsc --watch",
     "lint": "eslint .",
+    "test": "vitest run",
     "prepublishOnly": "npm run build",
     "docs": "typedoc"
   },
@@ -48,7 +49,8 @@
     "typedoc": "^0.28.16",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.53.0",
-    "vite": "^7.3.1"
+    "vite": "^7.3.1",
+    "vitest": "^5.1.0"
   },
   "dependencies": {
     "@ain1084/audio-frame-buffer": "^0.2.0"

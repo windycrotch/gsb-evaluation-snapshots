@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": [
+      "audioworklet",
+      "vite/client",
+      "node"
+    ]
+  },
+  "include": ["src", "test", "vitest.config.ts"]
+}

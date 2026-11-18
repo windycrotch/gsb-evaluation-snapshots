@@ -13,6 +13,7 @@ class Context {
   private readonly _frameBufferFiller: FrameBufferFiller
   private readonly _fillInterval: number
   private _timerId: number = 0
+  private _isStopNotified = false
 
   /**
    * Creates an instance ofContext.
@@ -23,7 +24,7 @@ class Context {
     this._frameBufferWriter = new FrameBufferWriter(context)
     this._frameBufferFiller = frameBufferFiller
     this._fillInterval = context.fillInterval
-    this._isContinuePlayback = this.fillBuffer()
+    this._isContinuePlayback = this.fillBufferSafely()
   }
 
   /**
@@ -35,18 +36,36 @@ class Context {
       return
     }
     this._timerId = self.setInterval(() => {
-      if (!this._frameBufferFiller.fill(this._frameBufferWriter)) {
+      if (!this._timerId) {
+        return
+      }
+      let isContinuePlayback: boolean
+      try {
+        isContinuePlayback = this._frameBufferFiller.fill(this._frameBufferWriter)
+      }
+      catch {
+        // The filler threw: stop the timer and notify the strategy so the
+        // node stops at the frames written so far.
         this.stopFrames()
-        self.clearInterval(this._timerId)
-        this._timerId = 0
+        return
+      }
+      if (!isContinuePlayback) {
+        this.stopFrames()
       }
     }, this._fillInterval)
   }
 
   /**
-   * Stops the buffer filling process.
+   * Notifies the strategy that filling has stopped at the current frame
+   * position. The timer is stopped first and the notification is sent at
+   * most once, so no message is posted after the worker is torn down.
    */
   public stopFrames() {
+    if (this._isStopNotified) {
+      return
+    }
+    this._isStopNotified = true
+    this.stop()
     const message: MessageToStrategy = {
       type: 'stop',
       stopFrames: this._frameBufferWriter.totalFrames,
@@ -70,6 +89,19 @@ class Context {
    */
   private fillBuffer(): boolean {
     return this._frameBufferFiller.fill(this._frameBufferWriter)
+  }
+
+  /**
+   * Fill the buffer, treating a thrown error as "do not continue playback".
+   * @returns A boolean indicating whether to continue playback.
+   */
+  private fillBufferSafely(): boolean {
+    try {
+      return this.fillBuffer()
+    }
+    catch {
+      return false
+    }
   }
 }
 

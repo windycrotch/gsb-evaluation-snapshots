@@ -26,6 +26,7 @@ class Context<FillerParams> {
   private readonly _bufferContext: FillerFrameBufferContext
   private readonly _fillerParam: FillerParams
   private readonly _worker: Worker
+  private _isStopped = false
 
   /**
    * Creates an instance of PlayContext.
@@ -55,6 +56,9 @@ class Context<FillerParams> {
    * @param ev - The message event from the worker.
    */
   private handleWorkerMessage(ev: MessageEvent<MessageToStrategy>): void {
+    if (this._isStopped) {
+      return
+    }
     if (ev.data.type === 'stop') {
       this._node.stop(ev.data.stopFrames)
     }
@@ -86,6 +90,9 @@ class Context<FillerParams> {
    * Starts the buffer filling process by sending the 'start' message to the worker.
    */
   public start() {
+    if (this._isStopped) {
+      return
+    }
     const message: MessageToWorker<FillerParams> = {
       type: 'start',
     }
@@ -94,8 +101,14 @@ class Context<FillerParams> {
 
   /**
    * Stops the worker and terminates it.
+   * This method is idempotent: once the worker has been terminated, no
+   * further messages are sent to or accepted from it.
    */
   public stopped() {
+    if (this._isStopped) {
+      return
+    }
+    this._isStopped = true
     this._worker.onmessage = null
     this._worker.terminate()
   }
@@ -144,11 +157,13 @@ export class WorkerBufferWriteStrategy<FillerParam> implements BufferWriteStrate
 
   /**
    * Stops the strategy.
+   * Terminates the worker. Safe to call multiple times.
    */
   onStopped(): void {
     if (!this._context) {
-      throw new Error('Invalid state: context is null.')
+      return
     }
     this._context.stopped()
+    this._context = null
   }
 }

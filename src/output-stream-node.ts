@@ -28,6 +28,7 @@ export class OutputStreamNode extends AudioWorkletNode {
   private readonly _totalReadFrames: BigUint64Array
   private readonly _strategy: BufferWriteStrategy
   private _state: StreamState = 'ready'
+  private _stopPromise: Promise<void> | null = null
 
   /**
    * Creates an instance of OutputStreamNode.
@@ -102,26 +103,28 @@ export class OutputStreamNode extends AudioWorkletNode {
    */
   public stop(framePosition: bigint = BigInt(0)): Promise<void> {
     switch (this._state) {
-      case 'started':
-        return new Promise((resolve) => {
-          this._state = 'stopping'
-          const message: MessageToProcessor = { type: 'stop', framePosition: framePosition }
-          this.port.postMessage(message)
+      case 'started': {
+        this._state = 'stopping'
+        this._stopPromise = new Promise((resolve) => {
           this.addEventListener(StopEvent.type, () => {
             resolve()
           }, { once: true })
         })
+        const message: MessageToProcessor = { type: 'stop', framePosition: framePosition }
+        this.port.postMessage(message)
+        return this._stopPromise
+      }
+      case 'stopping':
+        // A stop is already in flight. Repeated calls share the same promise
+        // and must neither post another message nor throw.
+        return this._stopPromise ?? Promise.resolve()
       case 'ready':
         this.handleStopped()
-        break
-      case 'stopped':
-        break
-      case 'stopping':
-        break
+        return Promise.resolve()
       default:
-        throw new Error(`Cannot stop playback. Current state: ${this._state}`)
+        // 'stopped': repeated stop calls are a no-op.
+        return Promise.resolve()
     }
-    return Promise.resolve()
   }
 
   /**
@@ -131,8 +134,14 @@ export class OutputStreamNode extends AudioWorkletNode {
   private handleMessage(event: MessageEvent<MessageToAudioNode>): void {
     switch (event.data.type) {
       case 'stop':
-        this.handleStopped()
+        // Only a stop requested while 'started' (now 'stopping') produces a
+        // StopEvent. Duplicate or late stop notifications are ignored so the
+        // event is dispatched exactly once.
+        if (this._state !== 'stopping') {
+          return
+        }
         this.dispatchEvent(new StopEvent(event.data.totalProcessedFrames))
+        this.handleStopped()
         break
       case 'underrun':
         this.dispatchEvent(new UnderrunEvent(event.data.underrunFrameCount))
@@ -145,13 +154,17 @@ export class OutputStreamNode extends AudioWorkletNode {
   /**
    * Handles the stopping of the node.
    * Disconnects the node and closes the port.
+   * This method is idempotent: it runs its teardown only once.
    */
   private handleStopped() {
+    if (this._state === 'stopped') {
+      return
+    }
+    this._state = 'stopped'
     this._strategy.onStopped()
     this.disconnect()
     this.port.close()
     this.port.onmessage = null
-    this._state = 'stopped'
   }
 
   /**

@@ -23,14 +23,22 @@ class PlayContext {
       if (!this._timerId || !node.isStart) {
         return
       }
+      let isContinuePlayback: boolean
       try {
-        if (!filler.fill(writer)) {
-          node.stop(writer.totalFrames)
-        }
+        isContinuePlayback = filler.fill(writer)
       }
       catch {
+        // The filler threw: stop the timer first so it cannot fire again,
+        // then stop the node at the frames written so far.
         this.cleanup()
-        node.stop()
+        node.stop(writer.totalFrames)
+        return
+      }
+      if (!isContinuePlayback) {
+        // The filler is done: stop the timer first so it cannot fire again,
+        // then stop the node at the frames written so far.
+        this.cleanup()
+        node.stop(writer.totalFrames)
       }
     }, fillInterval)
   }
@@ -40,7 +48,7 @@ class PlayContext {
    */
   public cleanup() {
     if (this._timerId) {
-      clearInterval(this._timerId)
+      window.clearInterval(this._timerId)
       this._timerId = 0
     }
   }
@@ -66,7 +74,22 @@ export class TimedBufferWriteStrategy implements BufferWriteStrategy {
     this._writer = new FrameBufferWriter(bufferContext)
     this._filler = filler
     this._interval = bufferContext.fillInterval
-    this._isContinuePlayback = this._filler.fill(this._writer)
+    this._isContinuePlayback = this.fillInitial()
+  }
+
+  /**
+   * Performs the initial buffer fill.
+   * A filler that throws during the initial fill is treated as
+   * "do not continue playback" so the node stops gracefully.
+   * @returns A boolean indicating whether to continue playback.
+   */
+  private fillInitial(): boolean {
+    try {
+      return this._filler.fill(this._writer)
+    }
+    catch {
+      return false
+    }
   }
 
   /**
