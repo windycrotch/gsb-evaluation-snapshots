@@ -4,6 +4,20 @@
 <title>JZZ.input.Qwerty</title>
 <style type="text/css">
 button { text-align:left;}
+#midi-log {
+  height: 180px;
+  overflow-y: auto;
+  border: 1px solid #888;
+  padding: 4px 8px;
+  font-family: monospace;
+  font-size: 12px;
+  background: #fafafa;
+}
+#midi-log div { white-space: pre; }
+.note-on  { color: #060; }
+.note-off { color: #900; }
+.other    { color: #555; }
+.octave-controls button { font-size: 14px; padding: 2px 10px; }
 </style>
 <script src="../node_modules/jzz/javascript/JZZ.js"></script>
 <script src="../node_modules/jzz-synth-tiny/javascript/JZZ.synth.Tiny.js"></script>
@@ -15,19 +29,74 @@ button { text-align:left;}
 <h1>JZZ.input.Qwerty</h1>
 <p>JZZ.input.Qwerty(...)</p>
 <p id=qwerty1>qwerty1</p>
+<div class="octave-controls">
+  Octave of qh1:
+  <button id="qh1-oct-down" type="button">-</button>
+  <span id="qh1-start-note">C4</span>
+  <button id="qh1-oct-up" type="button">+</button>
+</div>
 <p>JZZ.input.Qwerty.register(...)</p>
 <p id=qwerty2>qwerty2</p>
+
+<h2>MIDI message monitor</h2>
+<p>Every note-on (0x90) / note-off (0x80) emitted by the virtual keyboards is listed below.</p>
+<div id="midi-log"></div>
+<button id="clear-log" type="button">Clear log</button>
 
 <script><!--
 JZZ.synth.Tiny.register('Web Audio');
 var output = JZZ().openMidiOut(/^((?!Midi Through).)*$/i);
-JZZ.input.Qwerty('qh1', { id: 'qwerty1', width: 281, height: 150, octaves: 1, startNote: 'C4' })
-     .or(function(){ alert('Cannot open MIDI In!\n' + this.err()); })
-     .connect(output);
+
+// Reverse MIDI note number -> note name for the on-screen monitor.
+var NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+function noteName(n) {
+  return NOTE_NAMES[n % 12] + (Math.floor(n / 12) - 1);
+}
+function pad2(x) { return (x < 16 ? '0' : '') + x.toString(16).toUpperCase(); }
+
+var logEl = document.getElementById('midi-log');
+function logMessage(portName, msg) {
+  var status = msg[0] & 0xf0, channel = msg[0] & 0x0f;
+  var cls, kind;
+  if (status === 0x90 && msg[2] > 0) { cls = 'note-on';  kind = 'note-on '; }
+  else if (status === 0x80 || (status === 0x90 && msg[2] === 0)) { cls = 'note-off'; kind = 'note-off'; }
+  else { cls = 'other'; kind = 'other    '; }
+  var hex = '0x' + msg.map(pad2).join(' 0x');
+  var text = portName + '  ' + kind + '  ch' + channel + '  ' +
+             noteName(msg[1]) + ' (' + msg[1] + ')  vel ' + msg[2] + '   [' + hex + ']';
+  var line = document.createElement('div');
+  line.className = cls;
+  line.appendChild(document.createTextNode(text));
+  logEl.appendChild(line);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+document.getElementById('clear-log').addEventListener('click', function () {
+  logEl.innerHTML = '';
+});
+
+var qh1 = JZZ.input.Qwerty('qh1', { id: 'qwerty1', width: 281, height: 150, octaves: 1, startNote: 'C4' })
+     .or(function(){ alert('Cannot open MIDI In!\n' + this.err()); });
+qh1.connect(output);
+qh1.connect(function (msg) { logMessage('qh1', msg); });
+
 JZZ.input.Qwerty.register('qh2', { id: 'qwerty2', width: 281, height: 150, octaves: 1, startNote: 'C5' });
-JZZ().openMidiIn('qh2')
-     .or(function(){ alert('Cannot open MIDI In!\n' + this.err()); })
-     .connect(output);
+var qh2 = JZZ().openMidiIn('qh2')
+     .or(function(){ alert('Cannot open MIDI In!\n' + this.err()); });
+qh2.connect(output);
+qh2.connect(function (msg) { logMessage('qh2', msg); });
+
+// Octave switcher: rebuild qh1 on a new startNote. Keys already held keep
+// the note name captured at key-down time and release with their old note.
+var qh1Start = 'C4';
+function shiftQh1Octave(delta) {
+  var noteLetter = qh1Start.slice(0, -1);
+  var octave = parseInt(qh1Start.slice(-1), 10) + delta;
+  qh1Start = noteLetter + octave;
+  qh1.qwerty.setStartNote(qh1Start);
+  document.getElementById('qh1-start-note').textContent = qh1Start;
+}
+document.getElementById('qh1-oct-down').addEventListener('click', function () { shiftQh1Octave(-1); });
+document.getElementById('qh1-oct-up').addEventListener('click', function () { shiftQh1Octave(1); });
 --></script>
 
 </body>

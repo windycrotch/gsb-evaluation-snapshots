@@ -27,18 +27,25 @@
   }
 
   Engine.prototype._openIn = function(port, name) {
+    var qwerty;
     try {
-      var qwerty = new QwertyHancock(this._arg);
-      qwerty.keyDown = function (note, frequency) {
-        port._emit(JZZ.MIDI(0x90, note, 127));
-      };
-      qwerty.keyUp = function (note, frequency) {
-        port._emit(JZZ.MIDI(0x80, note, 127));
-      };
+      qwerty = new QwertyHancock(this._arg);
     }
     catch (e) {
+      // The keyboard library failed to construct: surface the error
+      // through the port instead of silently dropping it.
       port._crash(e.toString());
+      return;
     }
+    qwerty.keyDown = function (note, frequency) {
+      port._emit(JZZ.MIDI(0x90, note, 127));
+    };
+    qwerty.keyUp = function (note, frequency) {
+      port._emit(JZZ.MIDI(0x80, note, 127));
+    };
+    // Keep the underlying keyboard reachable from the port, e.g. to switch
+    // the starting octave at runtime via port.qwerty.setStartNote('A4').
+    port.qwerty = qwerty;
     port._info = this._info(name);
     port._resume();
   }

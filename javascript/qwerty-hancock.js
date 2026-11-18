@@ -1,5 +1,5 @@
 /*
- * Qwerty Hancock keyboard library v0.5.1
+ * Qwerty Hancock keyboard library v0.5.2
  * The web keyboard for now people.
  * Copyright 2012-15, Stuart Memo
  *
@@ -15,9 +15,20 @@
      * In node context (browserify), `this` is the node global.
      */
     var globalWindow = typeof global === 'undefined' ? root : root.window;
-    var version = '0.5.1',
+    var version = '0.5.2',
         settings = {},
+        // Is the mouse button currently held down on the keyboard?
         mouse_is_down = false,
+        // Notes currently sounding because of the ongoing mouse press.
+        // The last entry is the note under the pointer. Re-entering any
+        // note in this list never re-triggers a note-on; mouseUp releases
+        // exactly the notes still sounding, each once.
+        mouse_notes_on = [],
+        // Notes that were switched on at some point during the ongoing
+        // press, so dragging back over them can never start them twice.
+        mouse_notes_seen = {},
+        // keyCode -> note name captured at key-down time, so key-up always
+        // releases the same note even if the octave was changed meanwhile.
         keysDown = {},
         key_map = {
             65: 'Cl',
@@ -86,10 +97,19 @@
             settings.height = container.offsetHeight;
         }
 
-        settings.startOctave = parseInt(settings.startNote.charAt(1), 10);
+        settings.startOctave = getOctaveOfNote(settings.startNote);
 
         createKeyboard();
         addListeners.call(this, container);
+    };
+
+    /**
+     * Extract the octave number from a note name such as 'A3' or 'C#5'.
+     * @param  {string} note Note name whose final character(s) are the octave.
+     * @return {number} Octave number.
+     */
+    var getOctaveOfNote = function (note) {
+        return parseInt(note.charAt(note.length - 1), 10);
     };
 
     /**
@@ -124,7 +144,7 @@
      * @param  {element} el DOM element to change colour of.
      */
     var lightenUp = function lightenUp (el) {
-        if (el !== null || typeof el === undefined) {
+        if (el !== null && typeof el !== 'undefined') {
             el.style.backgroundColor = settings.activeColour;
         }
     };
@@ -244,10 +264,18 @@
 
     /**
     * Call user's mouseDown event.
+    *
+    * Starts the press with the pressed note. mouse_notes_seen remembers
+    * every note switched on during the whole press so a note can never
+    * receive a second note-on, while mouse_notes_on holds the notes that
+    * are still sounding and therefore still need a note-off.
     */
     var mouseDown = function (element, callback) {
         if (element.tagName.toLowerCase() == 'li') {
             mouse_is_down = true;
+            mouse_notes_on = [element.title];
+            mouse_notes_seen = {};
+            mouse_notes_seen[element.title] = true;
             lightenUp(element);
             callback(element.title, getFrequencyOfNote(element.title));
         }
@@ -255,33 +283,72 @@
 
     /**
     * Call user's mouseUp event.
+    *
+    * Releases every note still held by this press, each exactly once;
+    * the note that was switched on first is therefore guaranteed its
+    * matching note-off even if the pointer was dragged around the
+    * keyboard or released outside it.
     */
     var mouseUp = function (element, callback) {
-        if (element.tagName.toLowerCase() == 'li') {
-            mouse_is_down = false;
-            darkenDown(element);
-            callback(element.title, getFrequencyOfNote(element.title));
+        var note;
+
+        if (!mouse_is_down || mouse_notes_on.length === 0) {
+            return;
         }
+
+        mouse_is_down = false;
+
+        while (mouse_notes_on.length) {
+            note = mouse_notes_on.pop();
+            darkenDown(document.getElementById(note));
+            callback(note, getFrequencyOfNote(note));
+        }
+
+        mouse_notes_seen = {};
     };
 
     /**
     * Call user's mouseDown if required.
+    *
+    * Fires only while the mouse button is held. Entering a note that was
+    * already switched on during this press (e.g. the mouseover that
+    * follows a mousedown on the same key, or dragging out of a key and
+    * back into it) does nothing; entering a new note switches the
+    * previously sounding note off and the new note on, supporting
+    * glissando without ever repeating a note-on or dropping a note-off.
+    *
+    * @param {element}  element      DOM element under the pointer.
+    * @param {function} downCallback User's note-down callback.
+    * @param {function} upCallback   User's note-up callback.
     */
-    var mouseOver = function (element, callback) {
-        if (mouse_is_down) {
+    var mouseOver = function (element, downCallback, upCallback) {
+        var previous_note;
+
+        if (mouse_is_down && element.tagName.toLowerCase() == 'li') {
+            if (element.title in mouse_notes_seen) {
+                // Already switched on during this press: do not retrigger.
+                return;
+            }
+
+            previous_note = mouse_notes_on.pop();
+            darkenDown(document.getElementById(previous_note));
+            upCallback(previous_note, getFrequencyOfNote(previous_note));
+
+            mouse_notes_on.push(element.title);
+            mouse_notes_seen[element.title] = true;
             lightenUp(element);
-            callback(element.title, getFrequencyOfNote(element.title));
+            downCallback(element.title, getFrequencyOfNote(element.title));
         }
     };
 
     /**
-    * Call user's mouseUp if required.
+    * Moving off a key while the button is held must not send a note-off:
+    * notes are released either when the pointer enters another key or on
+    * mouseUp (which also covers releasing the button outside the
+    * keyboard), otherwise notes would get stuck.
     */
     var mouseOut = function (element, callback) {
-        if (mouse_is_down) {
-            darkenDown(element);
-            callback(element.title, getFrequencyOfNote(element.title));
-        }
+        return;
     };
 
     /**
@@ -378,12 +445,35 @@
         setKeyPressOffset(keyboard.whiteNotes);
         styleKeyboard(keyboard);
 
+        // When the keyboard is rebuilt (e.g. after an octave change) drop the
+        // previously generated key list; the event listeners live on the
+        // container/window and therefore must not be registered again.
+        while (keyboard.container.firstChild) {
+            keyboard.container.removeChild(keyboard.container.firstChild);
+        }
+
         // Add keys to keyboard, and keyboard to container.
         addKeysToKeyboard(keyboard);
 
         keyboard.container.appendChild(keyboard.el);
 
         return keyboard;
+    };
+
+    /**
+     * Change the starting note (typically its octave) at runtime and rebuild
+     * the keyboard. Notes already held down keep the note names captured at
+     * their key-down time, so their key-up still releases the original note.
+     * @param  {string} startNote New starting note, e.g. 'A4'.
+     */
+    var setStartNote = function (startNote) {
+        if (typeof startNote !== 'string' || startNote.length < 2) {
+            return;
+        }
+
+        settings.startNote = startNote;
+        settings.startOctave = getOctaveOfNote(startNote);
+        createKeyboard();
     };
 
     var getKeyPressed = function (keyCode) {
@@ -401,41 +491,53 @@
     var keyboardDown = function (key, callback) {
         var key_pressed;
 
+        // Repeated keydown events while the key is held must not send
+        // another note-on.
         if (key.keyCode in keysDown) {
            return;
         }
 
-       keysDown[key.keyCode] = true;
-
-       if (typeof key_map[key.keyCode] !== 'undefined') {
-            key_pressed = getKeyPressed(key.keyCode);
-
-            // Call user's noteDown function.
-            callback(key_pressed, getFrequencyOfNote(key_pressed));
-            lightenUp(document.getElementById(key_pressed));
+       if (typeof key_map[key.keyCode] === 'undefined') {
+            return;
        }
+
+       // Capture the note name at press time so key-up releases the same
+       // note even when the octave is changed while the key is held.
+       key_pressed = getKeyPressed(key.keyCode);
+       keysDown[key.keyCode] = key_pressed;
+
+       // Call user's noteDown function.
+       callback(key_pressed, getFrequencyOfNote(key_pressed));
+       lightenUp(document.getElementById(key_pressed));
     };
 
     /**
      * Handle a keyboard key being released.
      * @param {element} key The DOM element of the key that was released.
-     * @param {callback} callback The user's noteDown function.
+     * @param {callback} callback The user's noteUp function.
      */
     var keyboardUp = function (key, callback) {
-        var key_pressed;
+        var key_pressed = keysDown[key.keyCode];
+
+        // Ignore key-ups without a matching key-down so no note-off is
+        // ever emitted without a preceding note-on.
+        if (typeof key_pressed === 'undefined') {
+            return;
+        }
 
         delete keysDown[key.keyCode];
 
-        if (typeof key_map[key.keyCode] !== 'undefined') {
-            key_pressed = getKeyPressed(key.keyCode);
-            // Call user's noteDown function.
-            callback(key_pressed, getFrequencyOfNote(key_pressed));
-            darkenDown(document.getElementById(key_pressed));
-        }
+        // Release the note captured at key-down time, never a note of the
+        // same name from a different octave selected afterwards.
+        callback(key_pressed, getFrequencyOfNote(key_pressed));
+        darkenDown(document.getElementById(key_pressed));
     };
 
     /**
      * Add event listeners to keyboard.
+     *
+     * Listeners are attached to the container and the window only, so
+     * rebuilding the keyboard's key elements never registers duplicates.
      * @param {element} keyboard_element
      */
     var addListeners = function (keyboard_element) {
@@ -456,17 +558,25 @@
             mouseDown(event.target, that.keyDown);
         });
 
-        // Mouse is released from keyboard element.
+        // Mouse is released over the keyboard element.
         keyboard_element.addEventListener('mouseup', function (event) {
+            mouseUp(event.target, that.keyUp);
+        });
+
+        // Releasing the button anywhere (e.g. after dragging the pointer
+        // outside the keyboard) must still send the pending note-off,
+        // otherwise the note would hang and mouse_is_down would stay stuck.
+        globalWindow.addEventListener('mouseup', function (event) {
             mouseUp(event.target, that.keyUp);
         });
 
         // Mouse is moved over keyboard element.
         keyboard_element.addEventListener('mouseover', function (event) {
-            mouseOver(event.target, that.keyDown);
+            mouseOver(event.target, that.keyDown, that.keyUp);
         });
 
-        // Mouse is moved out of keyvoard element.
+        // Moving off a key never triggers a note-off by itself; the note is
+        // released on mouseup. The handler is kept for API compatibility.
         keyboard_element.addEventListener('mouseout', function (event) {
             mouseOut(event.target, that.keyUp);
         });
@@ -482,11 +592,11 @@
             });
 
             keyboard_element.addEventListener('touchleave', function (event) {
-                mouseOut(event.target, that.keyUp);
+                mouseUp(event.target, that.keyUp);
             });
 
             keyboard_element.addEventListener('touchcancel', function (event) {
-                mouseOut(event.target, that.keyUp);
+                mouseUp(event.target, that.keyUp);
             });
         }
     };
@@ -504,6 +614,11 @@
 
         this.keyUp = function () {
             // Placeholder function.
+        };
+
+        // Rebuild the keyboard for a new starting note/octave at runtime.
+        this.setStartNote = function (startNote) {
+            setStartNote(startNote);
         };
 
         init.call(this, settings);

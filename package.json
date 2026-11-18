@@ -16,5 +16,9 @@
     "jzz": "^1.9.3",
     "jzz-synth-tiny": "^1.4.3"
   },
+  "scripts": {
+    "test": "node test/test-qwerty-hancock.js && node test/test-jzz-input-qwerty.js && node test/test-page-flow.js && node test/check-html.js",
+    "build": "grunt"
+  },
   "private": true
 }

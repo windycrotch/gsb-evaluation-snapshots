@@ -141,6 +141,23 @@ A wrapper for the [**Qwerty-Hancock**](https://github.com/stuartmemo/qwerty-hanc
 
 Works wherewer the mouse and keyboard inputs are available.
 
+Note on/off guarantees:
+
+- holding a computer-keyboard key or a mouse button sends exactly one
+  note-on and, on release, exactly one note-off — auto-repeat and stray
+  key-ups never produce extra messages;
+- the note name is captured when a key is pressed, so changing the
+  starting octave while a key is still held releases the original note,
+  while newly pressed keys use the new octave. Switch at runtime with
+  `port.qwerty.setStartNote('A4')`;
+- dragging the mouse out of a key and back never repeats a note-on, and
+  releasing the mouse button outside the keyboard still closes the note;
+- if the Qwerty-Hancock constructor throws, the error is reported through
+  the port (`_crash`) and surfaces on `.or(...)` instead of being swallowed.
+
+See `html/qwerty.html` for an interactive demo with an on-page MIDI
+message monitor and octave switcher; `npm test` runs the behaviour tests.
+
 [![qwerty](https://jazz-soft.github.io/img/qwerty.png)](https://jazz-soft.github.io/modules/qwerty)
 
 ##### Example
