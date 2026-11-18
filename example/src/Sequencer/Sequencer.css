@@ -1,0 +1,206 @@
+.sequencer .ant-card-body {
+  padding: 24px 24px 0;
+}
+
+.sequencer-bpm {
+  position: absolute;
+  top: 2px;
+  left: 49px;
+}
+
+.sequencer-btn {
+  margin-right: 1rem;
+  margin-bottom: 24px;
+  padding: 1.5rem 1.5rem 2.5rem;
+  width: 170px;
+  font-size: 16px;
+  color: #bbb;
+  background: #333;
+  border: none;
+}
+
+.sequencer-btn:nth-child(16n) {
+  margin-right: 0;
+}
+
+.sequencer-btn:after {
+  border: 0 solid #666;
+}
+
+.sequencer-btn:hover,
+.sequencer-btn.sequencer-step.sequencer-step-trigger:hover,
+.sequencer-transport-btn:focus:hover {
+  background: #444;
+  color: #fff;
+}
+
+.sequencer-transport-btn:disabled {
+  cursor: default;
+}
+
+.sequencer-btn:focus {
+  background: #2a2a2a;
+  color: #aaa;
+}
+
+.sequencer-btn:disabled,
+.sequencer-btn:disabled:hover {
+  background: #2a2a2a;
+  color: #666;
+}
+
+.sequencer-transport-record-btn {
+  width: 180px;
+}
+
+.sequencer-transport-record-btn:focus {
+  color: #fff;
+  background: #333;
+}
+
+.sequencer-transport-record-btn.sequencer-transport-record-btn-recording {
+  background: #b64a4a;
+  color: #fff;
+}
+
+.sequencer-transport-record-btn.sequencer-transport-record-btn-recording:hover {
+  background: #ce6262;
+}
+
+.sequencer-transport-record-btn.sequencer-transport-record-btn-recording:active {
+  background: #824545;
+  transition: all 0.3s;
+}
+
+.sequencer-transport-record-btn.sequencer-transport-record-btn-recording:active span {
+  opacity: 0.6;
+  transition: all 0.3s;
+}
+
+.sequencer-transport-btn {
+  margin: 1rem 0.5rem;
+  padding: 1rem 2.5rem 2.6rem;
+  color: #fff;
+}
+
+.sequencer-transport-btn:active img {
+  opacity: 0.5;
+}
+
+.sequencer-transport-btn span {
+  position: relative;
+  top: 1px;
+  margin-left: 12px;
+}
+
+.sequencer-transport-btn img {
+  width: 15px;
+  transition: opacity 0.3s;
+}
+
+.sequencer-transport-play-btn img {
+  width: 16px;
+}
+
+.sequencer-transport-clear-btn img {
+  width: 14px;
+}
+
+.sequencer-btn:disabled img {
+  opacity: 0.285;
+}
+
+.sequencer-steps {
+  margin-top: 1rem;
+}
+
+.sequencer-step {
+  width: 77.5px;
+  padding: 1.9rem 0 2.5rem;
+  transition: color 0.3s;
+}
+
+.sequencer-step:after {
+  content: '';
+  position: absolute;
+  top: auto;
+  right: auto;
+  bottom: 6px;
+  left: 50%;
+  margin-left: -4px;
+  width: 8px;
+  height: 8px;
+  display: block;
+  opacity: 1;
+  background: #1a1a1a;
+  border-radius: 100%;
+  animation: none;
+  -webkit-animation: none;
+}
+
+.sequencer-step:focus {
+  color: #bbb;
+  background: #333;
+}
+
+.sequencer-transport-btn:active:not(.sequencer-transport-record-btn-recording),
+.sequencer-transport-btn:active:hover:not(.sequencer-transport-record-btn-recording) {
+  color: #bbb;
+  background: #333;
+  transition: all 0.3s;
+}
+
+.sequencer-step.sequencer-step-selected {
+  background: #2a2a2a;
+  color: #aaa;
+}
+
+.sequencer-step.sequencer-step-trigger {
+  background: #333;
+}
+
+.sequencer-step.sequencer-step-active {
+  background: #444;
+  color: #fff;
+}
+
+.sequencer-step.sequencer-step-trigger:after,
+.sequencer-step.sequencer-step-trigger.sequencer-step-selected:after {
+  background: #4bff00;
+}
+
+.sequencer-steps-recording .sequencer-step-active.sequencer-step-selected:after,
+.sequencer-step.sequencer-step-selected:after {
+  background: #b64a4a;
+}
+
+.sequencer-step.sequencer-step-trigger:not(.sequencer-step-active) {
+  transition: none;
+}
+
+.sequencer-step.sequencer-step-marker:before {
+  content: '';
+  position: absolute;
+  top: 6px;
+  left: 50%;
+  margin-left: -25px;
+  width: 50px;
+  height: 4px;
+  display: block;
+  opacity: 1;
+  background: #666;
+}
+
+.sequencer-metronome-switch {
+  margin-top: 1rem;
+  padding: 0.6rem 1.2rem 0.6rem 1.6rem;
+  width: 222px;
+  float: right;
+  background: #2a2a2a;
+  border-radius: 4px;
+}
+
+.sequencer-metronome-switch img {
+  margin: 9px 3px 0 0;
+  width: 12px;
+}

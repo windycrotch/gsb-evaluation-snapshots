@@ -1,0 +1,68 @@
+.ant-layout-header {
+  margin: 0.5rem auto 0;
+  padding: 1rem 0.5rem 0 2.5rem;
+  max-width: 1560px;
+  height: auto;
+  background: none;
+}
+
+.logo {
+  font-size: 24px;
+}
+
+.logo img {
+  width: 110px;
+}
+
+.menu {
+  background: none;
+  border-bottom: 0;
+  font-family: 'Francois One', monospace;
+}
+
+.ant-menu-item {
+  padding-top: 4px;
+  margin-right: 1.5rem;
+  font-size: 18px;
+}
+
+.ant-menu.ant-menu-dark .ant-menu-item.ant-menu-item-selected {
+  background: none;
+  border-bottom: 3px solid #8500ff;
+}
+
+.external-link-icon {
+  margin-left: 10px;
+  font-size: 15px;
+  font-weight: 900;
+  color: #777;
+}
+
+.computer-keyboard-btn {
+  margin-top: 1rem;
+  padding: 0.5rem;
+  height: auto;
+  float: right;
+  background: #333;
+  border: 0;
+}
+
+.computer-keyboard-btn:hover {
+  background: #444;
+}
+
+.computer-keyboard-btn:focus {
+  background: #2a2a2a;
+  color: #aaa;
+}
+
+.computer-keyboard-btn img {
+  width: 30px;
+  opacity: 0.7;
+}
+
+.computer-keyboard-btn:after {
+  background: #1a1a1a;
+  animation: none;
+  -webkit-animation: none;
+}

@@ -1,0 +1,126 @@
+{
+  "name": "wavedef",
+  "version": "0.2.0",
+  "description": "A synthesizer library built on the Web Audio API",
+  "main": "lib/wavedef.min.js",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zakangelle/wavedef.git"
+  },
+  "keywords": [
+    "synth",
+    "synthesizer",
+    "sequencer",
+    "oscillator",
+    "lfo",
+    "adsr",
+    "envelope",
+    "filter",
+    "keyboard",
+    "keys",
+    "mixer",
+    "web",
+    "audio",
+    "api",
+    "music"
+  ],
+  "author": "Zak Angelle, Drake Champagne",
+  "license": "MIT",
+  "devDependencies": {
+    "ajv": "^6.5.1",
+    "babel-core": "6.26.0",
+    "babel-eslint": "7.2.3",
+    "babel-jest": "20.0.3",
+    "babel-loader": "^7.1.4",
+    "babel-plugin-import": "^1.7.0",
+    "babel-plugin-transform-es2015-modules-commonjs": "^6.26.2",
+    "babel-plugin-transform-runtime": "^6.23.0",
+    "babel-preset-env": "^1.7.0",
+    "babel-preset-stage-0": "^6.24.1",
+    "babel-runtime": "6.26.0",
+    "coveralls": "^3.0.1",
+    "eslint": "^4.10.0",
+    "eslint-config-airbnb-base": "^12.1.0",
+    "eslint-loader": "^2.0.0",
+    "eslint-plugin-import": "^2.8.0",
+    "eslint-plugin-jest": "^21.17.0",
+    "husky": "^1.0.0-rc.9",
+    "jest": "^22.4.2",
+    "web-audio-test-api": "^0.5.2",
+    "webpack": "^3.12.0",
+    "webpack-cli": "^3.0.8"
+  },
+  "dependencies": {
+    "audio-context": "^1.0.3",
+    "mousetrap": "^1.6.1",
+    "note-to-frequency": "^1.4.1",
+    "startaudiocontext": "^1.2.1",
+    "stereo-panner-node": "^1.4.0",
+    "tunajs": "^1.0.1"
+  },
+  "scripts": {
+    "lint": "eslint src",
+    "test": "node scripts/test.js --env=jsdom",
+    "coverage": "npm test -- --coverage",
+    "coverage:report": "npm run coverage && cat ./coverage/lcov.info | coveralls",
+    "build": "webpack",
+    "prepare": "npm run build",
+    "heroku-postbuild": "cd example && npm install && npm run build"
+  },
+  "jest": {
+    "collectCoverageFrom": [
+      "src/modules/**/*.js",
+      "src/helpers/**/*.js"
+    ],
+    "testMatch": [
+      "<rootDir>/src/modules/**/*.test.js",
+      "<rootDir>/src/helpers/**/*.test.js"
+    ],
+    "testEnvironment": "node",
+    "testURL": "http://localhost",
+    "transform": {
+      "^.+\\.js$": "<rootDir>/node_modules/babel-jest"
+    },
+    "transformIgnorePatterns": [
+      "[/\\\\]node_modules[/\\\\].+\\.(js|jsx|mjs)$"
+    ],
+    "moduleFileExtensions": [
+      "js",
+      "json"
+    ]
+  },
+  "babel": {
+    "presets": [
+      "env",
+      "stage-0"
+    ],
+    "plugins": [
+      [
+        "transform-runtime",
+        {
+          "polyfill": false,
+          "regenerator": true
+        }
+      ],
+      "transform-es2015-modules-commonjs"
+    ]
+  },
+  "eslintConfig": {
+    "parser": "babel-eslint",
+    "extends": [
+      "airbnb-base",
+      "plugin:jest/recommended"
+    ],
+    "env": {
+      "browser": true,
+      "node": true
+    },
+    "rules": {
+      "no-new": 0,
+      "no-plusplus": 0,
+      "no-param-reassign": 0,
+      "function-paren-newline": 0,
+      "import/prefer-default-export": 0
+    }
+  }
+}
