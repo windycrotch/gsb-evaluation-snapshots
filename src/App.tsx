@@ -17,6 +17,7 @@ import { cn }                      from '@lib/utils';
 
 import { CanvasHost }              from '@components/CanvasHost';
 import { ControlPanel }            from '@components/ControlPanel';
+import { PlaybackOverlay }         from '@components/PlaybackOverlay';
 
 import type { Preset }             from '@data/presets';
 
@@ -44,6 +45,7 @@ export default function App() {
   const [isDragOver, setIsDragOver]     = useState(false);
   const [mathActive, setMathActive]     = useState(false);
   const [fps, setFps]                   = useState<number | null>(null);
+  const [videoSource, setVideoSource]   = useState<VideoSource | null>(null);
 
   // ── Renderer bootstrap ─────────────────────────────────────────────────
   useEffect(() => {
@@ -99,6 +101,10 @@ export default function App() {
         prev?.stop();
         prev?.dispose();
         sourceRef.current = next;
+
+        // Only video-backed sources expose a playback readout.  Any other
+        // source clears it (image / GIF / math shader).
+        setVideoSource(next instanceof VideoSource ? next : null);
 
         rendererRef.current?.setSourceTexture(next.texture);
         rendererRef.current?.stopLoop();
@@ -302,12 +308,17 @@ export default function App() {
             </div>
           )}
 
-          {/* FPS overlay */}
+          {/* FPS + playback overlay */}
           {fps !== null && (
             <div className="pointer-events-none absolute left-2 top-2 font-mono text-[10px] tabular-nums text-zinc-700 select-none">
               {fps} fps
             </div>
           )}
+
+          <PlaybackOverlay
+            source={videoSource}
+            className="pointer-events-none absolute left-2 top-6 font-mono text-[10px] text-zinc-500 select-none"
+          />
 
           {/* Decoding overlay */}
           {loadState === 'loading' && (

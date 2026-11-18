@@ -23,6 +23,7 @@ AuraASCII converts images, GIFs, live video streams, and procedural GLSL math ex
 - **60 FPS rendering** - Two-pass WebGL2 pipeline with GlyphAtlas pre-rendering; zero per-frame CPU text calls
 - **8 built-in presets** - Matrix, Amber, Cyan, Classic, Blueprint, Binary, Plasma, Ghost; fully customizable colors and charset
 - **PNG export and clipboard copy** - Download the current frame as PNG or copy the raw ASCII text grid
+- **Video playback readout** - Position, duration and presented-frame count for file video and webcam streams, with pause/resume; frame counting uses `requestVideoFrameCallback` when available and falls back to render ticks
 - **Fully client-side** - Zero server calls; all processing happens in the browser
 
 ---
@@ -140,6 +141,7 @@ Opens the Vite dev server at `http://localhost:5173`. The WebGL canvas renders a
 npm run dev        # Vite dev server with HMR
 npm run typecheck  # TypeScript strict-mode check (no emit)
 npm run lint       # ESLint with TypeScript rules
+npm run test       # Offline unit tests (Node's built-in runner, Node >= 22.6)
 npm run build      # Production build to dist/
 npm run preview    # Serve dist/ locally to verify
 ```
