@@ -1,0 +1,11 @@
+node_modules/
+dist/
+dist-cdn/
+.vscode/
+.env
+*.zip
+playwright-report/
+test-results/
+.deploy.lock
+__pycache__/
+*.pyc

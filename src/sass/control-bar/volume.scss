@@ -1,0 +1,65 @@
+@use 'tooltip';
+
+.fluid_control_volume_container {
+  height: 24px;
+  width: 56px;
+  left: 15px;
+  z-index: 2;
+  opacity: 0.8;
+  transition: opacity 0.3s ease-in-out;
+  display: none;
+  position: relative;
+  align-items: center;
+
+  &:hover {
+    opacity: 1;
+  }
+
+  .fluid_control_volume {
+    position: relative;
+    height: 3px;
+    width: 100%;
+    background-color: rgba(171, 172, 172, 0.68);
+    z-index: 3;
+
+    .fluid_control_scrubber_volume_container {
+      background-color: #fff;
+      height: 3px;
+      display: flex;
+      align-items: center;
+
+      .fluid_control_scrubber_volume {
+        position: absolute;
+        width: 12px;
+        height: 12px;
+        border-radius: 6px;
+        background-color: #fff;
+      }
+    }
+  }
+
+}
+
+.fluid_video_wrapper.fluid_volume_bar_available .fluid_control_volume_container {
+  display: flex;
+}
+
+.fluid_control_volume_container .fluid_volume_tooltip {
+  left: 0;
+  bottom: calc(100% + 16px);
+  @include tooltip.tooltip-base(4);
+}
+
+.fluid_control_volume_container .fluid_volume_tooltip.fluid_volume_tooltip_visible {
+  opacity: 1;
+  visibility: visible;
+  transform: translateX(calc(-50% + var(--tooltip-shift, 0px))) translateY(0);
+}
+
+.fluid_mobile .fluid_control_volume_container .fluid_volume_tooltip {
+  display: none !important;
+}
+
+.fluid_controls_container.no_volume_bar .fluid_control_volume_container {
+  display: none;
+}

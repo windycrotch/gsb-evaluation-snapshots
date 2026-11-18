@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, user-scalable=no, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0"
+    />
+    <meta http-equiv="X-UA-Compatible" content="ie=edge" />
+    <title>VOD with subtitles</title>
+    <%= htmlWebpackPlugin.tags.headTags %>
+    <style lang="css">
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 16px;
+        padding: 24px;
+        box-sizing: border-box;
+      }
+
+      #fluid-player-e2e-case {
+        width: clamp(320px, 50vw, 960px);
+        max-width: 90vw;
+        margin: 0 auto;
+        height: auto;
+        aspect-ratio: 16 / 9;
+      }
+    </style>
+  </head>
+  <body>
+    <video id="fluid-player-e2e-case">
+      <source
+        src="https://media.w3.org/2010/05/sintel/trailer.mp4"
+        type="video/mp4"
+      />
+      <track label="English" kind="subtitles" srclang="en" src="static/subtitles/english.vtt" />
+      <track label="Deutsch" kind="subtitles" srclang="de" src="static/subtitles/deutsch.vtt" />
+    </video>
+
+    <%= htmlWebpackPlugin.tags.bodyTags %>
+
+    <script>
+      fluidPlayer('fluid-player-e2e-case', {
+        layoutControls: {
+          subtitles: {
+            active: true,
+            language: 'en',
+          },
+          menu: {
+            subtitles: true,
+          },
+        },
+      });
+    </script>
+  </body>
+</html>

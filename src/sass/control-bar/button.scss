@@ -1,0 +1,46 @@
+@use 'tooltip';
+
+.fluid_button {
+  display: inline-block;
+  width: 24px;
+  height: 24px;
+  position: relative;
+  cursor: pointer;
+
+  &:before {
+    content: '';
+    background: url('../static/fluid-icons.svg') no-repeat;
+    position: absolute;
+    inset: 0;
+    height: 24px;
+    width: 24px;
+    opacity: 0.8;
+    transition: opacity 0.3s ease-in-out;
+  }
+
+  &:hover::before {
+    opacity: 1;
+  }
+}
+
+.fluid_button_tooltip {
+  left: 50%;
+  bottom: calc(100% + 16px);
+  @include tooltip.tooltip-base(3);
+}
+
+.fluid_button:hover .fluid_button_tooltip {
+  opacity: 1;
+  visibility: visible;
+  transform: translateX(calc(-50% + var(--tooltip-shift, 0px))) translateY(0);
+}
+
+.fluid_button.cvp_rotate .fluid_button_tooltip {
+  opacity: 0;
+  visibility: hidden;
+  transform: translateX(calc(-50% + var(--tooltip-shift, 0px))) translateY(6px);
+}
+
+.fluid_mobile .fluid_button_tooltip {
+  display: none !important;
+}

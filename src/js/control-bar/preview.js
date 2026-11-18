@@ -1,0 +1,29 @@
+import PreviewThumbnails from './preview-thumbnails';
+import PreviewTime from './preview-time';
+
+class Preview {
+  constructor(player) {
+    this.player = player;
+    this.init();
+  }
+
+  init = () => {
+    const { player } = this;
+
+    this.current = new PreviewThumbnails(player);
+    this.current
+      .init()
+      .catch((error) => {
+        if (error.name !== 'AbortError') {
+          player.debug.error(error);
+        }
+      })
+      .finally(() => {
+        if (!this.current.loaded && !this.current.destroyed) {
+          this.current = new PreviewTime(player);
+        }
+      });
+  };
+}
+
+export default Preview;

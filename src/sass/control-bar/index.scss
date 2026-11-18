@@ -1,0 +1,121 @@
+@use 'button';
+@use 'progress';
+@use 'preview-time';
+@use 'preview-thumbnails';
+@use 'subtitles';
+@use 'time-display';
+@use 'live';
+@use 'volume';
+@use 'theatre';
+@use 'menu';
+
+.fluid_controls_container {
+  color: #fff;
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  /* FF3.6-15 */
+  background: -moz-linear-gradient(top, rgba(0, 0, 0, 0) 0%, rgba(0, 0, 0, 0.6) 100%);
+  /* Chrome10-25,Safari5.1-6 */
+  background: -webkit-linear-gradient(top, rgba(0, 0, 0, 0) 0%, rgba(0, 0, 0, 0.6) 100%);
+  /* W3C, IE10+, FF16+, Chrome26+, Opera12+, Safari7+ */
+  background: linear-gradient(to bottom, rgba(0, 0, 0, 0) 0%, rgba(0, 0, 0, 0.6) 100%);
+  /* IE6-9 */
+  filter: progid:DXImageTransform.Microsoft.gradient(startColorstr='#00000000', endColorstr='#ad000000', GradientType=0);
+  height: 53px;
+  z-index: 1;
+
+  .fluid_slider {
+    cursor: pointer;
+    touch-action: none;
+  }
+
+  .fluid_controls {
+    position: absolute;
+    width: 100%;
+    height: 24px;
+    top: 23px;
+    display: flex;
+  }
+
+  .fluid_controls_left {
+    display: flex;
+    align-items: center;
+    flex: 1;
+    min-width: 0;
+    margin-left: 20px;
+  }
+
+  .fluid_controls_right {
+    display: flex;
+    align-items: center;
+    flex-shrink: 0;
+    height: 24px;
+    margin-right: 20px;
+
+    .fluid_button:not(:last-child) {
+      margin-right: 5px;
+    }
+  }
+}
+
+.fluid_desktop .fluid_controls .fluid_button {
+  flex: 0 0 24px;
+}
+
+.fluid_button_play:before {
+  background-position: -15px -16.5px;
+}
+
+.fluid_button_pause:before {
+  background-position: -15px -55px;
+}
+
+.fluid_button_volume:before {
+  background-position: -52px -16.5px;
+}
+
+.fluid_button_mute:before {
+  background-position: -52px -54.5px;
+}
+
+.fluid_button_download:before {
+  background-position: -196px -16.5px;
+}
+
+.fluid_button_theatre:before {
+  background-position: -196px -54px;
+}
+
+.fluid_button_fullscreen:before {
+  background-position: -88px -17px;
+}
+
+.fluid_button_fullscreen_exit:before {
+  background-position: -88px -55px;
+}
+
+.fluid_button_skip_back {
+  margin-left: 5px;
+
+  &::before {
+    background: url('../static/skip-backward.svg') no-repeat;
+    background-position: 0px 1px;
+  }
+}
+
+.fluid_button_skip_forward:before {
+  background: url('../static/skip-forward.svg') no-repeat;
+  background-position: 0px 1px;
+}
+
+.fluid_button_volume,
+.fluid_button_mute {
+  left: 10px;
+}
+
+.fluid_button_theatre,
+.fluid_button_download {
+  display: none;
+}

@@ -1,0 +1,75 @@
+.fluid_subtitles_container {
+  color: #fff;
+  font-size: 15px;
+  text-align: center;
+  display: flex;
+  justify-content: center;
+  position: absolute;
+  width: 100%;
+  bottom: 0;
+  left: 0;
+  padding: 15px 0;
+  transition: transform 0.3s ease-in-out;
+  pointer-events: none;
+
+  .fluid_subtitles {
+    display: inline-block;
+    font-size: 1em;
+    white-space: pre-line;
+    border-radius: 4px;
+
+    &:empty {
+      display: none;
+    }
+  }
+
+  .fluid_subtitles_container_line {
+    display: flex;
+    justify-content: center;
+  }
+
+  .fluid_subtitles_block {
+    background: var(--background-subtitle);
+  }
+
+  .fluid_subtitles_line {
+    background: var(--background-subtitle);
+    display: flex;
+    justify-content: center;
+    display: inline;
+    padding: 1px;
+
+    &:first-child {
+      margin-top: 0;
+    }
+  }
+
+  &.fluid_vttjs {
+    position: absolute;
+    bottom: 1em;
+    left: 0;
+    right: 0;
+    top: 0;
+    padding: 0;
+    width: initial;
+  }
+}
+
+.fluid_controls_container {
+  &.initial_controls_show,
+  &.fade_in {
+    ~ .fluid_subtitles_container {
+      &.fluid_vttjs {
+        bottom: 3em;
+      }
+
+      &:not(.fluid_vttjs) {
+        transform: translateY(-40px);
+      }
+    }
+  }
+}
+
+.fluid_video_wrapper::-webkit-media-text-track-container {
+  display: none;
+}

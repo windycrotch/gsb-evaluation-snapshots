@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, user-scalable=no, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0"
+    />
+    <meta http-equiv="X-UA-Compatible" content="ie=edge" />
+    <title>HLS VOD with audio</title>
+    <%= htmlWebpackPlugin.tags.headTags %>
+    <style lang="css">
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 16px;
+        padding: 24px;
+        box-sizing: border-box;
+      }
+
+      #fluid-player-e2e-case {
+        width: clamp(320px, 50vw, 960px);
+        max-width: 90vw;
+        margin: 0 auto;
+        height: auto;
+        aspect-ratio: 16 / 9;
+      }
+    </style>
+  </head>
+  <body>
+    <video id="fluid-player-e2e-case">
+      <source
+        src="https://d2zihajmogu5jn.cloudfront.net/bipbop-advanced/bipbop_16x9_variant.m3u8"
+        type="application/x-mpegURL"
+      />
+    </video>
+
+    <%= htmlWebpackPlugin.tags.bodyTags %>
+
+    <script>
+      fluidPlayer('fluid-player-e2e-case', {
+        layoutControls: {
+          menu: {
+            audio: true,
+          },
+        },
+      });
+    </script>
+  </body>
+</html>

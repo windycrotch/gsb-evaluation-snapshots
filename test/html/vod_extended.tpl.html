@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, user-scalable=no, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0"
+    />
+    <meta http-equiv="X-UA-Compatible" content="ie=edge" />
+    <title>VOD extended</title>
+    <%= htmlWebpackPlugin.tags.headTags %>
+    <style lang="css">
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 16px;
+        padding: 24px;
+        box-sizing: border-box;
+      }
+
+      #fluid-player-e2e-case {
+        width: clamp(320px, 50vw, 960px);
+        max-width: 90vw;
+        margin: 0 auto;
+        height: auto;
+        aspect-ratio: 16 / 9;
+      }
+    </style>
+  </head>
+  <body>
+    <video id="fluid-player-e2e-case">
+      <source
+        src="https://cdn.fluidplayer.com/videos/valerian-1080p.mkv"
+        data-fluid-hd
+        title="1080p"
+        type="video/x-matroska"
+      />
+      <source src="https://cdn.fluidplayer.com/videos/valerian-720p.mkv" data-fluid-hd title="720p" type="video/x-matroska" />
+      <source src="https://cdn.fluidplayer.com/videos/valerian-480p.mkv" title="480p" type="video/x-matroska" />
+    </video>
+
+    <%= htmlWebpackPlugin.tags.bodyTags %>
+
+    <script>
+      fluidPlayer('fluid-player-e2e-case', {
+        layoutControls: {
+          primaryColor: '#dd2e44',
+          timelinePreview: {
+            file: 'static/thumbnails.vtt',
+            type: 'VTT',
+          },
+          logo: {
+            imageUrl: 'static/logo.png',
+            position: 'top right',
+            clickUrl: 'https://fluidplayer.com',
+            hideWithControls: true,
+          },
+          fillToContainer: true,
+          posterImage: 'static/video-thumbnail.jpg',
+          allowDownload: true,
+          htmlOnPauseBlock: {
+            html: '<button>hello world</button>',
+            height: 100,
+            width: 200,
+          },
+        },
+      });
+    </script>
+  </body>
+</html>

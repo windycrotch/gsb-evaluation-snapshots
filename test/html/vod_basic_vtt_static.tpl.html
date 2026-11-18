@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>VOD with static thumbnails</title>
+    <%= htmlWebpackPlugin.tags.headTags %>
+    <style>
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+      }
+
+      #fluid-player-e2e-case {
+        width: clamp(320px, 50vw, 960px);
+        max-width: 90vw;
+        aspect-ratio: 16 / 9;
+      }
+    </style>
+  </head>
+  <body>
+    <video id="fluid-player-e2e-case">
+      <source src="https://cdn.fluidplayer.com/videos/valerian-1080p.mkv" data-fluid-hd title="1080p" type="video/x-matroska" />
+      <source src="https://cdn.fluidplayer.com/videos/valerian-720p.mkv" data-fluid-hd title="720p" type="video/x-matroska" />
+      <source src="https://cdn.fluidplayer.com/videos/valerian-480p.mkv" title="480p" type="video/x-matroska" />
+    </video>
+
+    <%= htmlWebpackPlugin.tags.bodyTags %>
+
+    <script>
+      fluidPlayer('fluid-player-e2e-case', {
+        layoutControls: {
+          timelinePreview: {
+            type: 'static',
+            frames: Array.from({ length: 6 }, (_, index) => ({
+              startTime: index * 0.5,
+              endTime: (index + 1) * 0.5,
+              image: 'static/thumbnails.jpg',
+              x: index * 200,
+              y: 0,
+              w: 200,
+              h: 84,
+            })),
+          },
+        },
+      });
+    </script>
+  </body>
+</html>
