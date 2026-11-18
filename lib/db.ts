@@ -132,6 +132,17 @@ function normalizePageTitle(title: string): string {
   return title.replace(/_/g, ' ').trim().toLowerCase();
 }
 
+/** Close the shared SQLite connection (mainly for tests; the next getDb() reopens it). */
+export function closeDatabase(): void {
+  if (!db) return;
+  try {
+    db.close();
+  } catch {
+    // Already closed.
+  }
+  db = null;
+}
+
 function isConnectionContext(value: unknown): value is WikiConnectionContext | null {
   return value === null || value === 'lead' || value === 'article' || value === 'see_also';
 }

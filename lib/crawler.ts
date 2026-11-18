@@ -2,7 +2,7 @@ import Graph from 'graphology';
 import { getPageLinksBatch, getPageViews, titleToUrl } from './wikipedia';
 import type { PageLinksAccumulatedPage, PageLinksBatchResult } from './wikipedia';
 import { isJunkTitle } from './filters';
-import type { CrawlProgress, WikiNode, WikiEdge } from '@/types/graph';
+import type { CrawlProgress, CrawlTruncation, WikiNode, WikiEdge } from '@/types/graph';
 import { randomUUID } from 'node:crypto';
 
 const WIKIPEDIA_BATCH_SIZE = 8;
@@ -90,6 +90,7 @@ export async function crawlWikipedia(options: CrawlOptions): Promise<{
   seedId: string;
   partial: boolean;
   failedTitles: string[];
+  truncation?: CrawlTruncation;
 }> {
   const {
     seedTitle,
@@ -141,6 +142,7 @@ export async function crawlWikipedia(options: CrawlOptions): Promise<{
   let activeWork = 0;
   let requestsUsed = 0;
   let budgetExhausted = false;
+  const truncatedTitles = new Set<string>();
   const consumeRequestBudget = (): boolean => {
     if (signal?.aborted) return false;
     if (requestsUsed >= requestBudget) {
@@ -217,6 +219,7 @@ export async function crawlWikipedia(options: CrawlOptions): Promise<{
       }
       if (requestsUsed >= requestBudget) {
         budgetExhausted = true;
+        for (const title of titles) truncatedTitles.add(title);
         return null;
       }
 
@@ -434,11 +437,19 @@ export async function crawlWikipedia(options: CrawlOptions): Promise<{
         }
         await processBatch(batches[nextBatchIndex++]);
       }
-      if (nextBatchIndex < batches.length && requestsUsed >= requestBudget) budgetExhausted = true;
+      if (nextBatchIndex < batches.length && requestsUsed >= requestBudget) {
+        budgetExhausted = true;
+        for (const pendingBatch of batches.slice(nextBatchIndex)) {
+          for (const item of pendingBatch) truncatedTitles.add(item.title);
+        }
+      }
     });
     await Promise.all(workers);
   }
-  if (progress.queue.length > 0 && requestsUsed >= requestBudget) budgetExhausted = true;
+  if (progress.queue.length > 0 && requestsUsed >= requestBudget) {
+    budgetExhausted = true;
+    for (const item of progress.queue) truncatedTitles.add(item.title);
+  }
 
   const edgeKeys = new Set<string>();
   const edges: WikiEdge[] = [];
@@ -469,12 +480,22 @@ export async function crawlWikipedia(options: CrawlOptions): Promise<{
   emitProgress(true);
 
   const resolvedSeedId = getCanonicalTitle(seedTitle, progress.resolvedTitles);
+  const partial = progress.failedTitles.size > 0 || budgetExhausted;
+  const failedTitles = [...progress.failedTitles];
+  const truncation: CrawlTruncation | undefined = partial
+    ? {
+        // Budget exhaustion is a deliberate cap, so it takes precedence over upstream failures.
+        reason: budgetExhausted ? 'budget' : 'upstream',
+        titles: [...new Set([...failedTitles, ...truncatedTitles])],
+      }
+    : undefined;
   return {
     nodes: progress.nodes,
     edges,
     seedId: resolvedSeedId,
-    partial: progress.failedTitles.size > 0 || budgetExhausted,
-    failedTitles: [...progress.failedTitles],
+    partial,
+    failedTitles,
+    truncation,
   };
 }
 

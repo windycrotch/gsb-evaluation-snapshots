@@ -47,6 +47,10 @@ beforeAll(async () => {
 afterAll(() => {
   delete process.env.WIKICRAWL_DB_PATH;
 
+  // Release the SQLite file handles before removing the temp directory (Windows
+  // refuses to delete files that are still open).
+  dbModule.closeDatabase();
+
   if (tempDir) {
     rmSync(tempDir, { recursive: true, force: true });
   }

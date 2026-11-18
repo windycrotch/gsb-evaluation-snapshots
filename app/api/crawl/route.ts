@@ -296,7 +296,7 @@ export async function POST(request: NextRequest) {
           sendStreamEvent(controller, 'progress', { progress: crawlProgress });
         }, 2000);
         try {
-          const { nodes: crawledNodes, edges: crawledEdges, seedId: crawledSeedId, partial, failedTitles } = await crawlWikipedia({
+          const { nodes: crawledNodes, edges: crawledEdges, seedId: crawledSeedId, partial, failedTitles, truncation } = await crawlWikipedia({
             seedTitle,
             depth: validatedDepth,
             maxNodes: validatedMaxNodes,
@@ -359,12 +359,11 @@ export async function POST(request: NextRequest) {
           }]));
           sendStreamEvent(controller, 'analysis', { metrics: allMetrics, communities });
 
-          // Expand responses are deltas: only new nodes/edges, plus updated metrics for known nodes.
+          // Expand responses are deltas: only new nodes/edges, but metrics cover every node of
+          // the merged graph (known + new) so the client never recomputes analysis itself.
           const resultNodes = isExpand ? analyzedNodes.filter((node) => deltaNodeIds.has(node.id)) : analyzedNodes;
           const resultEdges = isExpand ? deltaEdges : validAnalysisEdges;
-          const resultMetrics = isExpand
-            ? Object.fromEntries(Object.entries(allMetrics).filter(([id]) => !deltaNodeIds.has(id)))
-            : undefined;
+          const resultMetrics = isExpand ? allMetrics : undefined;
 
           const result: CrawlResult = {
             id: nanoid(),
@@ -377,6 +376,7 @@ export async function POST(request: NextRequest) {
             progress: { done: 1, target: 1 },
             partial,
             failedTitles,
+            truncation,
             metrics: resultMetrics,
           };
 

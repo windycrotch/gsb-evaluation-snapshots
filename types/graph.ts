@@ -41,6 +41,13 @@ export interface CrawlProgress {
   target: number;
 }
 
+export interface CrawlTruncation {
+  /** 'budget' when the request budget was exhausted (wins over 'upstream'), else 'upstream'. */
+  reason: 'budget' | 'upstream';
+  /** Titles of pages that were not fully fetched (failed or never processed). */
+  titles: string[];
+}
+
 export interface NodeMetrics {
   pagerank: number;
   betweenness: number;
@@ -60,7 +67,9 @@ export interface CrawlResult {
   progress?: CrawlProgress;
   partial?: boolean;
   failedTitles?: string[];
-  /** Updated metrics for nodes not included in `nodes` (used by expand deltas). */
+  /** Present when `partial` is true: why the crawl was cut short and which pages are missing. */
+  truncation?: CrawlTruncation;
+  /** Metrics for every node of the merged graph (known + new nodes) on expand responses. */
   metrics?: { [nodeId: string]: NodeMetrics };
 }
 

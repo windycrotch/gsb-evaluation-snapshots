@@ -30,6 +30,12 @@ async function postCrawl(body: Record<string, unknown>, clientIp?: string): Prom
   return POST(request as never);
 }
 
+function parseDoneResult(stream: string): CrawlResult {
+  const doneEvent = stream.split('\n\n').find((event) => event.startsWith('event: done'));
+  const payloadLine = doneEvent?.split('\n').find((line) => line.startsWith('data:'));
+  return JSON.parse(payloadLine!.slice(5)).result as CrawlResult;
+}
+
 describe('crawl route', () => {
   it('returns not_found with suggestions for a missing seed', async () => {
     const mock = installMockMediaWiki();
@@ -266,18 +272,28 @@ it('preserves expansion edges between known nodes and from new nodes to known no
       knownEdgeIndexPairs: [[0, 1]],
       baseDepth: 0,
     }, '192.0.2.92');
-    const stream = await response.text();
-    const doneEvent = stream.split('\n\n').find((event) => event.startsWith('event: done'));
-    const payloadLine = doneEvent?.split('\n').find((line) => line.startsWith('data:'));
-    const result = JSON.parse(payloadLine!.slice(5)).result as CrawlResult;
+    const result = parseDoneResult(await response.text());
     const edgeKeys = result.edges.map((edge) => `${edge.source}|${edge.target}`);
 
     expect(result.nodes.map((node) => node.id)).toEqual(['New A']);
+    // The seed is a known node and filtered from the delta nodes, but its new
+    // out-edges to known nodes must survive in the delta edges.
     expect(result.edges).toContainEqual({ source: 'Expanded', target: 'Page 1' });
     expect(result.edges).toContainEqual({ source: 'New A', target: 'Known B' });
     expect(edgeKeys).not.toContain('New A|New A');
     expect(edgeKeys).not.toContain('New A|Outside');
     expect(new Set(edgeKeys).size).toBe(edgeKeys.length);
+    // Metrics cover the whole merged graph: known nodes and new nodes alike.
+    expect(Object.keys(result.metrics ?? {}).sort()).toEqual(['Expanded', 'Known B', 'New A', 'Page 1']);
+    for (const nodeMetrics of Object.values(result.metrics ?? {})) {
+      expect(nodeMetrics).toEqual(expect.objectContaining({
+        pagerank: expect.any(Number),
+        betweenness: expect.any(Number),
+        communityId: expect.any(Number),
+        inDegree: expect.any(Number),
+        outDegree: expect.any(Number),
+      }));
+    }
     expect(database.setCachedResult).not.toHaveBeenCalled();
   } finally {
     globalThis.fetch = originalFetch;
@@ -309,6 +325,44 @@ it('returns budget-truncated crawl results without caching them as complete', as
     expect(response.status).toBe(200);
     expect(linkRequests).toBeGreaterThanOrEqual(200);
     expect(body).toContain('"partial":true');
+    const result = parseDoneResult(body);
+    expect(result.partial).toBe(true);
+    expect(result.truncation?.reason).toBe('budget');
+    expect(result.truncation?.titles.length).toBeGreaterThan(0);
+    expect(database.setCachedResult).not.toHaveBeenCalled();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+it('reports truncation reason upstream when only upstream requests fail', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input) => {
+    const url = new URL(input.toString());
+    const property = url.searchParams.get('prop');
+    if (property === 'pageviews') {
+      return Response.json({ query: { pages: [] } });
+    }
+    const titles = (url.searchParams.get('titles') ?? '').split('|').filter(Boolean);
+    if (titles.includes('Page 0')) {
+      return Response.json({
+        query: {
+          pages: [{ pageid: 1, title: 'Page 0', links: [{ title: 'Page 1' }, { title: 'Page 2' }] }],
+        },
+      });
+    }
+    return new Response('upstream unavailable', { status: 503 });
+  }) as typeof fetch;
+  vi.mocked(database.setCachedResult).mockClear();
+
+  try {
+    const response = await postCrawl({ seedTitle: 'Page 0', depth: 1, maxNodes: 50 }, '192.0.2.89');
+    const result = parseDoneResult(await response.text());
+
+    expect(response.status).toBe(200);
+    expect(result.partial).toBe(true);
+    expect(result.truncation?.reason).toBe('upstream');
+    expect(result.truncation?.titles).toEqual(expect.arrayContaining(['Page 1', 'Page 2']));
     expect(database.setCachedResult).not.toHaveBeenCalled();
   } finally {
     globalThis.fetch = originalFetch;
