@@ -1224,10 +1224,23 @@ class PlaybackCore(QObject):
         throttled URL. Healing it with a fresh URL (the same mid-song
         rejoin the error path uses) keeps the song playing instead of
         skipping ahead or falling silent.
+
+        During a crossfade takeover the outgoing stream's relays belong
+        to a stream the shadow is already replacing: neither a late
+        EndOfMedia nor a truncation-looking one may rejoin it, and the
+        queue advance stays the promotion's job, exactly once.
         """
+        ctl = self._xf
+        if ctl is not None and ctl.state in (CrossfadeController.CROSSFADING,
+                                             CrossfadeController.DONE):
+            # The ramp (or its just-finished promotion) owns the room
+            # now. Absorb the old stream's relay — healing it would
+            # reload a dead primary behind the shadow's back.
+            return
         current = self.engine.current
         if (current is not None
                 and self._stream_played
+                and self._last_pos_ms > 0
                 and self._is_premature_end(current)):
             log.warning(
                 "stream for %r ended at %sms of ~%ss — treating as truncation",
@@ -1354,6 +1367,7 @@ class PlaybackCore(QObject):
                     current = self.engine.current
                     healed = (
                         self._stream_played
+                        and self._last_pos_ms > 0
                         and current is not None
                         and self._try_rejoin(current, "stalled")
                     )
