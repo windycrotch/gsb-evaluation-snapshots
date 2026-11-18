@@ -1,0 +1,117 @@
+version: 2
+
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+      time: "08:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "github-actions"
+    groups:
+      github-actions-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+      time: "08:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    # Raise manifest requirements together with the lockfile for version updates.
+    # Security updates can still produce lockfile-only PRs for allowed packages.
+    versioning-strategy: "increase"
+    exclude-paths:
+      - "example/**"
+      - "example-expo/**"
+    # Only maintain the library's React Native, Expo plugin and build stack.
+    # Keep names explicit: broad wildcards also match unrelated tooling.
+    allow:
+      - dependency-name: "react"
+        dependency-type: "direct"
+      - dependency-name: "react-native"
+        dependency-type: "direct"
+      - dependency-name: "@react-native-community/cli"
+        dependency-type: "direct"
+      - dependency-name: "@react-native/babel-preset"
+        dependency-type: "direct"
+      - dependency-name: "@react-native/jest-preset"
+        dependency-type: "direct"
+      - dependency-name: "@types/react"
+        dependency-type: "direct"
+      - dependency-name: "@expo/config-plugins"
+        dependency-type: "direct"
+      - dependency-name: "typescript"
+        dependency-type: "direct"
+      - dependency-name: "react-native-builder-bob"
+        dependency-type: "direct"
+    commit-message:
+      prefix: "deps"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "npm"
+    groups:
+      react-native-minor-patch:
+        patterns:
+          - "react"
+          - "react-native"
+          - "@react-native-community/cli"
+          - "@react-native/babel-preset"
+          - "@react-native/jest-preset"
+          - "@types/react"
+        update-types:
+          - "minor"
+          - "patch"
+      library-build-minor-patch:
+        patterns:
+          - "@expo/config-plugins"
+          - "typescript"
+          - "react-native-builder-bob"
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "gradle"
+    directory: "/android"
+    schedule:
+      interval: "monthly"
+      time: "08:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "gradle"
+    ignore:
+      # Update manually together with the Bunny Stream Android SDK baseline.
+      # Calendar-version minor bumps can also change Android build requirements.
+      - dependency-name: "androidx.compose:compose-bom"
+      # media3 is the playback engine — must stay in lockstep with the version
+      # the Bunny Stream Android SDK ships; mixed media3 versions break playback.
+      - dependency-name: "androidx.media3:*"
+    groups:
+      androidx-minor-patch:
+        patterns:
+          - "androidx.*"
+        update-types:
+          - "minor"
+          - "patch"
+      kotlin-tooling-minor-patch:
+        patterns:
+          - "org.jetbrains.kotlin*"
+          - "com.android.tools.build"
+        update-types:
+          - "minor"
+          - "patch"

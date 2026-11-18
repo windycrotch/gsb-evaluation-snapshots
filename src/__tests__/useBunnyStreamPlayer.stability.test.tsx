@@ -1,0 +1,67 @@
+import type { PlayerEventHandlers } from '../player/hooks/useBunnyStreamPlayer.types';
+
+import { describe, expect, it, jest } from '@jest/globals';
+
+import { renderPlayerHook } from './helpers';
+
+// --- Stable identities ---
+
+describe('useBunnyStreamPlayer stable identities', () => {
+  it('controls has a stable identity across renders', async () => {
+    const { result, rerender, unmount } = await renderPlayerHook();
+    const controlsBefore = result.current.controls;
+    await rerender(undefined);
+    expect(result.current.controls).toBe(controlsBefore);
+    await unmount();
+  });
+
+  it('eventHandlers has a stable identity across renders', async () => {
+    const { result, rerender, unmount } = await renderPlayerHook();
+    const handlersBefore: PlayerEventHandlers = result.current.eventHandlers;
+    await rerender(undefined);
+    expect(result.current.eventHandlers).toBe(handlersBefore);
+    await unmount();
+  });
+
+  it('controls proxies through to the ref', async () => {
+    const { result, unmount } = await renderPlayerHook();
+    // Attach a fake ref so we can assert the controls call through.
+    const fakeRef = {
+      play: jest.fn(),
+      pause: jest.fn(),
+      seekTo: jest.fn(),
+      skipForward: jest.fn(),
+      skipBackward: jest.fn(),
+      setVolume: jest.fn(),
+      setPlaybackRate: jest.fn(),
+      mute: jest.fn(),
+      unmute: jest.fn(),
+      enterPiP: jest.fn(),
+      setVideoQuality: jest.fn(),
+    };
+    result.current.ref.current = fakeRef;
+    result.current.controls.play();
+    result.current.controls.pause();
+    result.current.controls.seekTo(5000);
+    result.current.controls.skipForward();
+    result.current.controls.skipBackward();
+    result.current.controls.setVolume(0.3);
+    result.current.controls.setPlaybackRate(1.5);
+    result.current.controls.mute();
+    result.current.controls.unmute();
+    result.current.controls.enterPiP();
+    result.current.controls.setVideoQuality({ maxHeight: 720 });
+    expect(fakeRef.play).toHaveBeenCalledTimes(1);
+    expect(fakeRef.pause).toHaveBeenCalledTimes(1);
+    expect(fakeRef.seekTo).toHaveBeenCalledWith(5000);
+    expect(fakeRef.skipForward).toHaveBeenCalledTimes(1);
+    expect(fakeRef.skipBackward).toHaveBeenCalledTimes(1);
+    expect(fakeRef.setVolume).toHaveBeenCalledWith(0.3);
+    expect(fakeRef.setPlaybackRate).toHaveBeenCalledWith(1.5);
+    expect(fakeRef.mute).toHaveBeenCalledTimes(1);
+    expect(fakeRef.unmute).toHaveBeenCalledTimes(1);
+    expect(fakeRef.enterPiP).toHaveBeenCalledTimes(1);
+    expect(fakeRef.setVideoQuality).toHaveBeenCalledWith({ maxHeight: 720 });
+    await unmount();
+  });
+});

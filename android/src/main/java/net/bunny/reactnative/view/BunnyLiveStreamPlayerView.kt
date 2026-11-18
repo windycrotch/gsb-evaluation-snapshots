@@ -1,0 +1,595 @@
+package net.bunny.reactnative.view
+
+import android.content.Context
+import android.util.Log
+import android.view.ViewGroup
+import android.widget.FrameLayout
+import org.json.JSONObject
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.ComposeView
+import androidx.compose.ui.platform.ViewCompositionStrategy
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.LifecycleRegistry
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.ViewModelStore
+import androidx.lifecycle.ViewModelStoreOwner
+import androidx.lifecycle.findViewTreeLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
+import androidx.lifecycle.setViewTreeLifecycleOwner
+import androidx.lifecycle.setViewTreeViewModelStoreOwner
+import androidx.compose.runtime.mutableStateOf
+import net.bunny.bunnystreamplayer.model.PlayerWatermark
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import net.bunny.bunnystreamplayer.DefaultBunnyPlayer
+import net.bunny.bunnystreamplayer.livestream.BunnyLiveStreamPlayer
+import net.bunny.bunnystreamplayer.livestream.BunnyLiveStreamPlayerViewModel
+import net.bunny.bunnystreamplayer.livestream.LiveStreamPlayerState
+import net.bunny.reactnative.events.FabricEventEmitter
+import net.bunny.reactnative.ownership.BunnyPlayerLease
+import net.bunny.reactnative.state.RnEvent
+import net.bunny.reactnative.state.requiresLiveSpeedReset
+
+/**
+ * React Native Fabric wrapper that hosts the SDK's Compose
+ * [BunnyLiveStreamPlayer] composable inside a [ComposeView].
+ *
+ * The SDK ships live playback as a Compose composable (not a classic `View`),
+ * so the bridge cannot reuse the VOD `BunnyStreamPlayerView` path. Instead we:
+ *
+ *  1. Wrap a [ComposeView] in this `FrameLayout`.
+ *  2. Propagate `LifecycleOwner` and `ViewModelStoreOwner` from a bridge-owned
+ *     [HostingLifecycleOwner] to the Compose tree (the composable calls
+ *     `viewModel(...)` and `collectAsStateWithLifecycle()`, both of which need
+ *     those owner present in the view tree). `SavedStateRegistryOwner` is not
+ *     set — the SDK live composable does not use `rememberSaveable`, and
+ *     `ComposeView` creates its own `SavedStateRegistryOwner` from the
+ *     `LifecycleOwner` when one is not found in the view tree.
+ *  3. Create a bridge-owned [BunnyLiveStreamPlayerViewModel] via
+ *     [ViewModelProvider] tied to [hostingOwner]'s `ViewModelStore`, and pass
+ *     it to the composable via the `viewModel` parameter. This avoids the
+ *     composable creating its own ViewModel (which would double-poll) and lets
+ *     the bridge collect `state` / `terminalError` and forward them to JS.
+ *  4. Render [BunnyLiveStreamPlayer] with the source props. The composable
+ *     owns polling, the state resolver, countdown/trailer overlays, DVR,
+ *     recovery and the live → VOD hand-off — the bridge does not reimplement
+ *     any of it (no resolver/polling duplication in JS).
+ *  5. Forward `onVideoSizeChanged` and `onLiveStateChange` to JS via the
+ *     Fabric emitter. `onLiveStateChange` carries the SDK's
+ *     [LiveStreamPlayerState] (loading / offline / countdown / trailer / live
+ *     / vod) plus an `isLive` boolean, so JS can drive custom UI without
+ *     duplicating the state resolver.
+ *
+ * Source changes (`streamId`/`libraryId`/`token`/`expires`) trigger a
+ * controlled recomposition: the composable's `LaunchedEffect(libraryId,
+ * streamId)` re-runs and calls `viewModel.start(...)`, which is idempotent for
+ * the same `streamId` but starts a new stream when the id changes. Because the
+ * SDK ViewModel ignores a second `start()` with a different stream (see
+ * `BunnyLiveStreamPlayerViewModel`), the ViewManager remounts this view on
+ * `streamId` change via a `key` prop in the public TS wrapper (reset on
+ * source identity change).
+ *
+ * Lifecycle: the composable's `DisposableEffect` observes
+ * `LocalLifecycleOwner.current` (our [HostingLifecycleOwner]) and calls
+ * `viewModel.onForeground()/onBackground()` on ON_START/ON_STOP. We forward
+ * the **host Activity's** ON_START/ON_STOP to our hosting owner so polling
+ * pauses when the app goes to background (not just when the view detaches).
+ * On detach we additionally dispatch ON_STOP as a safety net.
+ *
+ * State collection: we collect `viewModel.state` and `viewModel.terminalError`
+ * in a [CoroutineScope] tied to the view, using `repeatOnLifecycle(STARTED)`
+ * so collection pauses when the lifecycle drops below STARTED (matching the
+ * composable's own `collectAsStateWithLifecycle` behaviour).
+ *
+ * Lease: the live composable internally creates a [BunnyStreamPlayer] which
+ * uses the `DefaultBunnyPlayer` singleton — the same engine the VOD path
+ * uses. We acquire a [BunnyPlayerLease] on attach so that mounting a live
+ * view revokes any active VOD lease (and vice versa). This does NOT fully
+ * isolate the engines (the live composable's internal `BunnyStreamPlayer`
+ * bypasses the bridge), but it ensures the VOD view cleans up when live
+ * mounts. Concurrent VOD + live is not supported.
+ *
+ * Cleanup: `onDropViewInstance` calls [cleanup], which cancels the coroutine
+ * scope, dispatches `ON_DESTROY` (disposing the composition, cancelling
+ * polling and releasing the player), clears the ViewModelStore (calling
+ * `viewModel.onCleared()`, cancelling `viewModelScope`), and releases the
+ * lease.
+ */
+class BunnyLiveStreamPlayerView(
+  context: Context,
+) : FrameLayout(context) {
+
+  /** Event emitter for Fabric direct events. Null if not a ReactContext. */
+  private val emitter: FabricEventEmitter? = FabricEventEmitter.forView(this)
+
+  /**
+   * Owner that provides `Lifecycle` and `ViewModelStore` to the Compose tree
+   * hosted in [composeView]. We create our own (rather than reusing the
+   * Activity's) so that disposing this view's composition does not tear down
+   * the host Activity's state, and so the bridge can explicitly start/stop
+   * the lifecycle when the view attaches/detaches or the app goes to
+   * background/foreground.
+   */
+  private val hostingOwner = HostingLifecycleOwner()
+
+  /**
+   * Bridge-owned [BunnyLiveStreamPlayerViewModel], tied to [hostingOwner]'s
+   * `ViewModelStore` via [ViewModelProvider]. Passed to the composable so it
+   * doesn't create its own (which would double-poll). The composable's
+   * `LaunchedEffect(libraryId, streamId)` calls `viewModel.start(...)` on this
+   * instance, and its `DisposableEffect` observes our [hostingOwner] lifecycle
+   * to call `onForeground()/onBackground()`.
+   *
+   * `onCleared()` is called when the `ViewModelStore` is cleared in [cleanup].
+   */
+  private val viewModel: BunnyLiveStreamPlayerViewModel by lazy {
+    ViewModelProvider(hostingOwner)[BunnyLiveStreamPlayerViewModel::class.java]
+  }
+
+  /**
+   * Coroutine scope for collecting `viewModel.state` / `terminalError`.
+   * Cancelled in [cleanup]. Uses `Dispatchers.Main.immediate` so events are
+   * dispatched on the UI thread without a context switch.
+   */
+  private val stateScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+  /**
+   * Lease on the `DefaultBunnyPlayer` singleton. Acquired on attach, released
+   * on cleanup. Ensures the VOD view is revoked when live mounts.
+   */
+  private var lease: BunnyPlayerLease? = null
+
+  /**
+   * Observer on the host Activity's lifecycle, used to forward ON_START/ON_STOP
+   * to [hostingOwner] so polling pauses when the app goes to background.
+   * Removed on detach.
+   */
+  private var activityLifecycle: LifecycleOwner? = null
+  private var activityObserver: LifecycleEventObserver? = null
+
+  /** The Compose host. Added as the only child, sized to fill. */
+  private val composeView: ComposeView = ComposeView(context).also { cv ->
+    // Propagate owners to the ComposeView so the SDK composable's
+    // viewModel() / collectAsStateWithLifecycle() find them in the view tree.
+    cv.setViewTreeLifecycleOwner(hostingOwner)
+    cv.setViewTreeViewModelStoreOwner(hostingOwner)
+    // Dispose the composition when the lifecycle reaches DESTROYED — Fabric
+    // can detach/reattach during recycle, and we don't want a dangling
+    // composition holding a player. The composable's DisposableEffect runs
+    // its cleanup (viewModel.onBackground) on dispose.
+    cv.setViewCompositionStrategy(
+      ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed,
+    )
+    addView(cv, LayoutParams(MATCH_PARENT, MATCH_PARENT))
+  }
+
+  /** Latest committed source props. */
+  private var source: LiveSource = LiveSource.Empty
+
+  /** Idempotent cleanup guard. */
+  private var cleanedUp = false
+  private var livePlaybackActive = false
+
+  init {
+    // Propagate our hosting owner down from this FrameLayout too, so any
+    // view-tree walk that starts above composeView still finds the owners.
+    setViewTreeLifecycleOwner(hostingOwner)
+    setViewTreeViewModelStoreOwner(hostingOwner)
+
+    // Start collecting live state and terminal errors. repeatOnLifecycle
+    // pauses collection when the lifecycle drops below STARTED, matching
+    // the composable's own collectAsStateWithLifecycle behaviour.
+    stateScope.launch {
+      hostingOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+        launch {
+          viewModel.state.collect { state ->
+            livePlaybackActive = state is LiveStreamPlayerState.LivePlay
+            emitter?.dispatch(
+              RnEvent("onLiveStateChange") {
+                liveStateToPayload(state)
+              },
+            )
+          }
+        }
+        launch {
+          viewModel.terminalError.collect { error ->
+            if (error != null) {
+              emitter?.dispatch(
+                RnEvent("onLiveError") {
+                  mapOf("message" to error)
+                },
+              )
+            }
+          }
+        }
+        launch {
+          // Verified against SDK 4.0.0: the live UI pins playbackSpeeds to 1.0×,
+          // but the engine's STATE_READY listener still calls loadSavedSpeed()
+          // when PlaybackSpeedConfig.rememberLastSpeed is on (the default), so a
+          // saved VOD speed can be restored on live playback. This polling
+          // remains necessary until the SDK disables speed restore for live.
+          while (isActive) {
+            DefaultBunnyPlayer.getInstance(context).currentPlayer?.let { player ->
+              if (requiresLiveSpeedReset(livePlaybackActive, player.playbackParameters.speed)) {
+                player.setPlaybackSpeed(1.0f)
+              }
+            }
+            delay(LIVE_SPEED_CHECK_INTERVAL_MS)
+          }
+        }
+      }
+    }
+  }
+
+  // --- Prop accumulation ---
+
+  private var pendingLibraryId: Long = 0L
+  private var pendingStreamId: String = ""
+  private var pendingToken: String? = null
+  private var pendingExpires: Long? = null
+  private var pendingControls: Boolean = true
+  private var pendingWatermark: String? = null
+
+  /**
+   * Compose state exposed to [LivePlayerContent]. Updates trigger recomposition
+   * without reloading the source.
+   */
+  private val controlsState = mutableStateOf(true)
+  private val watermarkState = mutableStateOf<PlayerWatermark?>(null)
+
+  fun setLibraryId(value: Double) {
+    if (value.isFinite() && value > 0 && value % 1.0 == 0.0) {
+      pendingLibraryId = value.toLong()
+    }
+  }
+
+  fun setStreamId(value: String?) {
+    pendingStreamId = value.orEmpty()
+  }
+
+  fun setToken(value: String?) {
+    pendingToken = value
+  }
+
+  fun setControls(value: Boolean) {
+    pendingControls = value
+  }
+
+  fun setWatermark(value: String?) {
+    pendingWatermark = value
+  }
+
+  fun setExpires(value: Double) {
+    if (value.isFinite() && value >= 0 && value % 1.0 == 0.0) {
+      pendingExpires = value.toLong()
+    } else {
+      pendingExpires = null
+    }
+  }
+
+  /**
+   * Snapshots accumulated props and (re)composes if the source identity
+   * changed. Called from the ViewManager's `onAfterUpdateTransaction`.
+   */
+  fun commitProps() {
+    val next = LiveSource(
+      libraryId = pendingLibraryId,
+      streamId = pendingStreamId,
+      token = pendingToken,
+      expires = pendingExpires,
+    )
+    val prev = source
+    val sourceChanged = next != prev
+
+    if (sourceChanged && next.streamId.isNotBlank()) {
+      source = next
+      composeView.setContent { LivePlayerContent(next) }
+    }
+
+    // Apply non-source props even when the source is unchanged. These
+    // trigger Compose recomposition rather than a source reload.
+    if (controlsState.value != pendingControls) {
+      controlsState.value = pendingControls
+    }
+    val newWatermark = parseWatermark(pendingWatermark)
+    if (watermarkState.value != newWatermark) {
+      watermarkState.value = newWatermark
+    }
+  }
+
+  /**
+   * The Compose content: a thin wrapper that forwards `onVideoSizeChanged`
+   * to the Fabric emitter and renders the SDK composable with our
+   * bridge-owned [viewModel].
+   */
+  @Composable
+  private fun LivePlayerContent(src: LiveSource) {
+    val em = emitter
+    val onSize: ((Int, Int) -> Unit)? = em?.let { e ->
+      { width, height ->
+        e.dispatch(
+          RnEvent("onVideoSizeChange") {
+            mapOf("width" to width, "height" to height)
+          },
+        )
+      }
+    }
+    // remember(src) so the lambda identity is stable for a given source —
+    // avoids unnecessary recompositions of the SDK composable.
+    val rememberedOnSize = remember(src) { onSize }
+    BunnyLiveStreamPlayer(
+      libraryId = src.libraryId,
+      streamId = src.streamId,
+      token = src.token,
+      expires = src.expires,
+      modifier = Modifier,
+      controlsEnabled = controlsState.value,
+      watermark = watermarkState.value,
+      onVideoSizeChanged = rememberedOnSize,
+      viewModel = viewModel,
+    )
+  }
+
+  // --- Lifecycle ---
+
+  override fun onAttachedToWindow() {
+    super.onAttachedToWindow()
+    // If cleanup already ran (host is DESTROYED), do not touch the lifecycle —
+    // React Native may re-attach a recycled view after drop. Bail out early.
+    if (hostingOwner.isDestroyed) return
+    // Acquire the player lease — revokes any active VOD lease so the VOD
+    // view cleans up. The live composable uses the same DefaultBunnyPlayer
+    // singleton internally; concurrent VOD + live is not supported.
+    if (lease == null) {
+      lease = BunnyPlayerLease(onRevoke = {
+        // Another view (VOD) is taking ownership — pause our polling.
+        if (!hostingOwner.isDestroyed) {
+          hostingOwner.handleLifecycleEvent(Lifecycle.Event.ON_STOP)
+        }
+      }).also { it.acquire() }
+    }
+
+    // Track the host Activity's lifecycle so polling pauses when the app
+    // goes to background (not just when the view detaches). We look up
+    // the parent's lifecycle owner because we set our own on `this`.
+    val activityOwner = findActivityLifecycleOwner()
+    if (activityOwner != null && activityLifecycle !== activityOwner) {
+      // Remove any previous observer if the parent changed.
+      activityLifecycle?.let { old ->
+        activityObserver?.let { obs -> old.lifecycle.removeObserver(obs) }
+      }
+      activityLifecycle = activityOwner
+      val obs = LifecycleEventObserver { _, event ->
+        when (event) {
+          Lifecycle.Event.ON_START -> hostingOwner.handleLifecycleEvent(Lifecycle.Event.ON_START)
+          Lifecycle.Event.ON_STOP -> hostingOwner.handleLifecycleEvent(Lifecycle.Event.ON_STOP)
+          else -> Unit
+        }
+      }
+      activityObserver = obs
+      activityOwner.lifecycle.addObserver(obs)
+    }
+
+    // Start the hosted lifecycle when the view attaches — the SDK composable's
+    // DisposableEffect observes ON_START to begin polling. If we're tracking
+    // the Activity lifecycle, the observer above will also fire ON_START if
+    // the Activity is currently started; this duplicate is harmless because
+    // LifecycleRegistry deduplicates state transitions.
+    hostingOwner.handleLifecycleEvent(Lifecycle.Event.ON_START)
+    post {
+      if (!hostingOwner.isDestroyed && composeView.isAttachedToWindow) {
+        val childWidth = measuredWidth
+        val childHeight = measuredHeight
+        if (childWidth > 0 && childHeight > 0) {
+          composeView.measure(
+            MeasureSpec.makeMeasureSpec(childWidth, MeasureSpec.EXACTLY),
+            MeasureSpec.makeMeasureSpec(childHeight, MeasureSpec.EXACTLY),
+          )
+          composeView.layout(0, 0, childWidth, childHeight)
+        }
+      }
+    }
+  }
+
+  override fun onDetachedFromWindow() {
+    // Pause polling before detaching — ON_STOP triggers viewModel.onBackground().
+    // Guard against DESTROYED: if cleanup() already ran (which dispatches
+    // ON_DESTROY), React Native may still call onDetachedFromWindow on the
+    // recycled view. LifecycleRegistry forbids moving back from DESTROYED.
+    if (!hostingOwner.isDestroyed) {
+      hostingOwner.handleLifecycleEvent(Lifecycle.Event.ON_STOP)
+    }
+    // Stop observing the Activity lifecycle while detached.
+    activityLifecycle?.let { old ->
+      activityObserver?.let { obs -> old.lifecycle.removeObserver(obs) }
+    }
+    activityLifecycle = null
+    activityObserver = null
+    super.onDetachedFromWindow()
+  }
+
+  /**
+   * Finds the host Activity's [LifecycleOwner] by walking up the parent view
+   * tree (skipping `this`, which has our [HostingLifecycleOwner]).
+   */
+  private fun findActivityLifecycleOwner(): LifecycleOwner? {
+    val p = parent as? android.view.View ?: return null
+    return p.findViewTreeLifecycleOwner()
+  }
+
+  // --- Sizing / layout (same as VOD view) ---
+
+  override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+    val width = MeasureSpec.getSize(widthMeasureSpec)
+    val height = MeasureSpec.getSize(heightMeasureSpec)
+    setMeasuredDimension(width, height)
+    // Skip measuring the ComposeView if it is not attached to a window yet —
+    // ComposeView.onMeasure tries to resolve the window recomposer, which
+    // throws "Cannot locate windowRecomposer ... is not attached to a window"
+    // when measured before attach. Fabric can trigger a layout pass during
+    // mount before the view is attached.
+    if (composeView.isAttachedToWindow) {
+      measureChildWithMargins(composeView, widthMeasureSpec, 0, heightMeasureSpec, 0)
+    }
+  }
+
+  override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
+    if (childCount == 0) return
+    val child = getChildAt(0)
+    child.layout(0, 0, right - left, bottom - top)
+  }
+
+  // --- Cleanup ---
+
+  /** Called from ViewManager.onDropViewInstance. Idempotent. */
+  fun cleanup() {
+    if (cleanedUp) return
+    cleanedUp = true
+    // Cancel state collection coroutines.
+    stateScope.cancel()
+    // Remove Activity lifecycle observer if still attached.
+    activityLifecycle?.let { old ->
+      activityObserver?.let { obs -> old.lifecycle.removeObserver(obs) }
+    }
+    activityLifecycle = null
+    activityObserver = null
+    // Dispatch ON_DESTROY — disposes the composition (DisposeOnViewTreeLifecycleDestroyed),
+    // which runs the composable's DisposableEffect cleanup (viewModel.onBackground).
+    hostingOwner.handleLifecycleEvent(Lifecycle.Event.ON_DESTROY)
+    // Clear the ViewModelStore — calls viewModel.onCleared(), cancelling
+    // viewModelScope coroutines including any in-flight polling.
+    hostingOwner.clearStore()
+    // Release the player lease.
+    lease?.release()
+    lease = null
+    removeAllViews()
+  }
+
+  /**
+   * Maps the SDK's [LiveStreamPlayerState] sealed interface to a JS-friendly
+   * payload. `state` is a lowercase string matching the SDK's branch names;
+   * `isLive` is `true` only for [LiveStreamPlayerState.LivePlay].
+   */
+  private fun liveStateToPayload(state: LiveStreamPlayerState): Map<String, Any?> =
+    when (state) {
+      is LiveStreamPlayerState.Loading -> mapOf(
+        "state" to "loading",
+        "isLive" to false,
+      )
+      is LiveStreamPlayerState.Offline -> mapOf(
+        "state" to "offline",
+        "isLive" to false,
+        "reason" to state.reason.name.lowercase(),
+      )
+      is LiveStreamPlayerState.Countdown -> mapOf(
+        "state" to "countdown",
+        "isLive" to false,
+        "targetEpochMs" to state.targetEpochMs,
+        "title" to state.title,
+      )
+      is LiveStreamPlayerState.Trailer -> mapOf(
+        "state" to "trailer",
+        "isLive" to false,
+      )
+      is LiveStreamPlayerState.LivePlay -> mapOf(
+        "state" to "live",
+        "isLive" to true,
+        "dvrEnabled" to state.dvrEnabled,
+      )
+      is LiveStreamPlayerState.VodPlay -> mapOf(
+        "state" to "vod",
+        "isLive" to false,
+      )
+    }
+
+  /**
+   * Parses the JSON-serialized watermark prop into the SDK's [PlayerWatermark].
+   * Returns `null` when the prop is absent, blank, or malformed.
+   */
+  private fun parseWatermark(json: String?): PlayerWatermark? {
+    if (json.isNullOrBlank()) return null
+    return try {
+      val obj = JSONObject(json)
+      PlayerWatermark(
+        imageUrl = obj.getString("imageUrl"),
+        position = parseWatermarkPosition(obj.optString("position", "topTrailing")),
+        relativeWidth = obj.optDouble("relativeWidth", 0.18).toFloat(),
+        opacity = obj.optDouble("opacity", 0.85).toFloat(),
+        marginDp = obj.optDouble("margin", 12.0).toFloat(),
+      )
+    } catch (_: Exception) {
+      Log.w("BunnyLiveStreamPlayerView", "Failed to parse watermark prop; ignoring: ${json.take(80)}")
+      null
+    }
+  }
+
+  private fun parseWatermarkPosition(value: String): PlayerWatermark.Position =
+    when (value) {
+      "topLeading" -> PlayerWatermark.Position.TOP_LEADING
+      "topTrailing" -> PlayerWatermark.Position.TOP_TRAILING
+      "bottomLeading" -> PlayerWatermark.Position.BOTTOM_LEADING
+      "bottomTrailing" -> PlayerWatermark.Position.BOTTOM_TRAILING
+      "center" -> PlayerWatermark.Position.CENTER
+      else -> PlayerWatermark.Position.TOP_TRAILING
+    }
+
+  /** Immutable snapshot of the live source props. */
+  private data class LiveSource(
+    val libraryId: Long,
+    val streamId: String,
+    val token: String?,
+    val expires: Long?,
+  ) {
+    companion object {
+      val Empty = LiveSource(0L, "", null, null)
+    }
+  }
+
+  companion object {
+    private const val LIVE_SPEED_CHECK_INTERVAL_MS = 100L
+    private val MATCH_PARENT = ViewGroup.LayoutParams.MATCH_PARENT
+  }
+}
+
+/**
+ * A combined `LifecycleOwner` + `ViewModelStoreOwner` that the bridge controls
+ * explicitly. This decouples the hosted Compose tree's lifecycle from the host
+ * Activity's so that detaching this view (Fabric can recycle views) does not
+ * tear down the Activity's state, and so the bridge can drive
+ * `ON_START`/`ON_STOP`/`ON_DESTROY` at attach/detach/drop time or when the
+ * Activity goes to background/foreground.
+ */
+private class HostingLifecycleOwner : LifecycleOwner, ViewModelStoreOwner {
+
+  private val lifecycleRegistry = LifecycleRegistry(this)
+  private val store = ViewModelStore()
+
+  override val lifecycle: Lifecycle get() = lifecycleRegistry
+  override val viewModelStore: ViewModelStore get() = store
+
+  /** True once [handleLifecycleEvent] has dispatched [Lifecycle.Event.ON_DESTROY]. */
+  val isDestroyed: Boolean get() = lifecycleRegistry.currentState == Lifecycle.State.DESTROYED
+
+  fun handleLifecycleEvent(event: Lifecycle.Event) {
+    // Ignore any event once we've reached DESTROYED — React Native may
+    // re-attach/detach a recycled view after cleanup, and LifecycleRegistry
+    // throws on transitions out of DESTROYED.
+    if (isDestroyed && event != Lifecycle.Event.ON_DESTROY) return
+    lifecycleRegistry.handleLifecycleEvent(event)
+  }
+
+  /** Clears the ViewModelStore, cancelling all viewModelScope coroutines. */
+  fun clearStore() {
+    store.clear()
+  }
+}

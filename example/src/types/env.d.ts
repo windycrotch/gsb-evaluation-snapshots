@@ -1,0 +1,15 @@
+declare module '@env' {
+  export const BUNNY_ACCESS_KEY: string;
+  export const BUNNY_LIBRARY_ID: string;
+  // Comma-separated list of video IDs (e.g. "id1,id2,id3")
+  export const BUNNY_VIDEO_IDS: string;
+  // Legacy single video ID (kept for backwards compatibility)
+  export const BUNNY_VIDEO_ID: string;
+  // Comma-separated list of live stream IDs (e.g. "id1,id2")
+  export const BUNNY_STREAM_IDS: string;
+  // Legacy single live stream ID
+  export const BUNNY_STREAM_ID: string;
+  // Token authentication key (optional — only for token-authenticated libraries).
+  // A different value from BUNNY_ACCESS_KEY: it signs embed-view/playback tokens.
+  export const BUNNY_TOKEN_AUTH_KEY: string;
+}

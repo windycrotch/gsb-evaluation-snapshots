@@ -1,0 +1,12 @@
+{
+  "extends": "./node_modules/@react-native/typescript-config/tsconfig.json",
+  "compilerOptions": {
+    "types": ["jest"],
+    "paths": {
+      "@bunny.net/stream-react-native": ["../src/index.ts"]
+    },
+    "customConditions": ["bunny-stream-react-native-source"]
+  },
+  "include": ["**/*.ts", "**/*.tsx"],
+  "exclude": ["**/node_modules", "**/Pods"]
+}

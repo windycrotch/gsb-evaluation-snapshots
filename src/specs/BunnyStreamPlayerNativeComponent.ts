@@ -1,0 +1,171 @@
+import type { HostComponent, ViewProps } from 'react-native';
+import type {
+  DirectEventHandler,
+  Double,
+  Int32,
+  WithDefault,
+} from 'react-native/Libraries/Types/CodegenTypes';
+
+import { codegenNativeCommands, codegenNativeComponent } from 'react-native';
+
+export type PlayerPlaybackState =
+  'idle' | 'loading' | 'ready' | 'playing' | 'paused' | 'ended' | 'error';
+
+export type PlayerReadyEvent = Readonly<{
+  videoId: string;
+  durationMs: Double;
+}>;
+
+export type PlayerStateChangeEvent = Readonly<{
+  state: string;
+  positionMs: Double;
+}>;
+
+export type PlayerProgressEvent = Readonly<{
+  positionMs: Double;
+  durationMs: Double;
+  progress: Double;
+}>;
+
+export type PlayerErrorEvent = Readonly<{
+  code: string;
+  message: string;
+  nativeCode?: string;
+  /**
+   * Stable, cross-platform failure class:
+   * - 'unavailable' — the stream is refused for this viewer and retrying
+   *   cannot help: the CDN answered HTTP 403 (geo-blocking, referrer
+   *   protection or token auth are deliberately not told apart) or the CDN
+   *   host was rejected at DNS level (Bunny "Blocked countries" resolves
+   *   the host to a sinkhole like 127.0.0.1).
+   * - 'network' — the device has no usable connection; retryable.
+   * - 'unknown' — anything else.
+   */
+  category?: string;
+  /**
+   * HTTP status the CDN answered with, when the platform reports one.
+   * Android only — the iOS SDK does not expose the status.
+   * Fabric uses 0 for a missing scalar on iOS; the public wrapper omits it.
+   */
+  httpStatus?: Int32;
+}>;
+
+export type PlayerBufferingEvent = Readonly<{
+  isBuffering: boolean;
+}>;
+
+export type PlayerPositionEvent = Readonly<{
+  positionMs: Double;
+  durationMs: Double;
+}>;
+
+export type PlayerVolumeChangeEvent = Readonly<{
+  volume: Double;
+  isMuted: boolean;
+}>;
+
+export type PlayerPlaybackRateChangeEvent = Readonly<{
+  rate: Double;
+}>;
+
+export type PlayerVideoSizeChangeEvent = Readonly<{
+  width: Int32;
+  height: Int32;
+}>;
+
+export type PlayerPlaybackErrorEvent = Readonly<{
+  message: string;
+}>;
+
+// Chapters, moments, retention graph (Android-only events).
+// Codegen does not support arrays in event payloads, so the lists are
+// serialized as JSON strings and deserialized on the JS side.
+export type ChaptersUpdatedEvent = Readonly<{
+  chapters: string;
+}>;
+
+export type MomentsUpdatedEvent = Readonly<{
+  moments: string;
+}>;
+
+export type RetentionGraphUpdatedEvent = Readonly<{
+  points: string;
+}>;
+
+// Resume position (Android-only event).
+export type ResumePositionAvailableEvent = Readonly<{
+  position: string;
+}>;
+
+// Cast handover (Android-only event). `playerType` is
+// 'default' or 'cast'; iOS never emits this event.
+export type PlayerTypeChangeEvent = Readonly<{
+  playerType: string;
+}>;
+
+export interface NativeProps extends ViewProps {
+  videoId: string;
+  libraryId?: Double;
+  token?: string;
+  expires?: Double;
+  autoPlay?: WithDefault<boolean, true>;
+  controls?: WithDefault<boolean, true>;
+  watermark?: string;
+  onReady?: DirectEventHandler<PlayerReadyEvent> | null;
+  onPlaybackStateChange?: DirectEventHandler<PlayerStateChangeEvent> | null;
+  onProgress?: DirectEventHandler<PlayerProgressEvent> | null;
+  onError?: DirectEventHandler<PlayerErrorEvent> | null;
+  onBuffering?: DirectEventHandler<PlayerBufferingEvent> | null;
+  onPlay?: DirectEventHandler<PlayerPositionEvent> | null;
+  onPause?: DirectEventHandler<PlayerPositionEvent> | null;
+  onEnd?: DirectEventHandler<PlayerPositionEvent> | null;
+  onVolumeChange?: DirectEventHandler<PlayerVolumeChangeEvent> | null;
+  onPlaybackRateChange?: DirectEventHandler<PlayerPlaybackRateChangeEvent> | null;
+  onVideoSizeChange?: DirectEventHandler<PlayerVideoSizeChangeEvent> | null;
+  onPlaybackError?: DirectEventHandler<PlayerPlaybackErrorEvent> | null;
+  // Android-only player events (iOS does not expose these).
+  resumeConfig?: string; // JSON-serialized ResumeConfig (Android-only).
+  onChaptersUpdated?: DirectEventHandler<ChaptersUpdatedEvent> | null;
+  onMomentsUpdated?: DirectEventHandler<MomentsUpdatedEvent> | null;
+  onRetentionGraphUpdated?: DirectEventHandler<RetentionGraphUpdatedEvent> | null;
+  onResumePositionAvailable?: DirectEventHandler<ResumePositionAvailableEvent> | null;
+  // Android-only: route video through `playVideoWithTVDetection`,
+  // which launches the `net.bunny:tv` activity when the device is a TV and the
+  // artifact is on the classpath, otherwise falls back to `playVideo`.
+  useNativeTvPlayer?: WithDefault<boolean, false>;
+  onPlayerTypeChange?: DirectEventHandler<PlayerTypeChangeEvent> | null;
+}
+
+export interface NativeCommands {
+  play: (viewRef: React.ElementRef<HostComponent<NativeProps>>) => void;
+  pause: (viewRef: React.ElementRef<HostComponent<NativeProps>>) => void;
+  seekTo: (viewRef: React.ElementRef<HostComponent<NativeProps>>, positionMs: Double) => void;
+  setVolume: (viewRef: React.ElementRef<HostComponent<NativeProps>>, volume: Double) => void;
+  setPlaybackRate: (viewRef: React.ElementRef<HostComponent<NativeProps>>, rate: Double) => void;
+  mute: (viewRef: React.ElementRef<HostComponent<NativeProps>>) => void;
+  unmute: (viewRef: React.ElementRef<HostComponent<NativeProps>>) => void;
+  // Android-only: enters picture-in-picture on the host activity.
+  // No-op on iOS (the SDK exposes no public PiP API).
+  enterPiP: (viewRef: React.ElementRef<HostComponent<NativeProps>>) => void;
+  // Android-only: applies a track-selection constraint on the VOD
+  // engine (JSON-serialized VideoQualityPreference). No-op on iOS.
+  setVideoQuality: (viewRef: React.ElementRef<HostComponent<NativeProps>>, quality: string) => void;
+}
+
+export const Commands: NativeCommands = codegenNativeCommands<NativeCommands>({
+  supportedCommands: [
+    'play',
+    'pause',
+    'seekTo',
+    'setVolume',
+    'setPlaybackRate',
+    'mute',
+    'unmute',
+    'enterPiP',
+    'setVideoQuality',
+  ],
+});
+
+export default codegenNativeComponent<NativeProps>(
+  'BunnyStreamPlayerView',
+) as HostComponent<NativeProps>;

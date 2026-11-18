@@ -1,0 +1,303 @@
+import type {
+  BunnyStreamPlayerProps,
+  BunnyVodPlayerRef,
+  Chapter,
+  Moment,
+  PlaybackPosition,
+  PlayerType,
+  RetentionGraphEntry,
+  PlayerWatermark,
+  VideoQualityPreference,
+} from './BunnyStreamPlayer.types';
+import type { HostComponent } from 'react-native';
+
+import * as React from 'react';
+
+import { normalizeLiveStateEvent } from '../internal/liveStateEvent';
+import { normalizePlayerErrorEvent } from '../internal/playerErrorEvent';
+import BunnyLiveStreamPlayerNativeComponent, {
+  type NativeProps as LiveNativeProps,
+} from '../specs/BunnyLiveStreamPlayerNativeComponent';
+import BunnyStreamPlayerNativeComponent, {
+  Commands as NativeCommands,
+  type NativeProps as VodNativeProps,
+} from '../specs/BunnyStreamPlayerNativeComponent';
+import { resolveLibraryId } from './resolveLibraryId';
+import { sourceIdentityKey } from './sourceIdentity';
+
+const NativeVodView = BunnyStreamPlayerNativeComponent as unknown as HostComponent<VodNativeProps>;
+const NativeLiveView =
+  BunnyLiveStreamPlayerNativeComponent as unknown as HostComponent<LiveNativeProps>;
+
+/** Serializes a {@link VideoQualityPreference} for the native bridge. */
+export const serializeWatermark = (
+  watermark: PlayerWatermark | null | undefined,
+): string | undefined => {
+  if (watermark == null) return undefined;
+  if (!/^https?:\/\//i.test(watermark.imageUrl)) {
+    throw new TypeError('watermark.imageUrl must be an absolute HTTP(S) URL');
+  }
+  if (
+    watermark.relativeWidth != null &&
+    (watermark.relativeWidth < 0 || watermark.relativeWidth > 1)
+  ) {
+    throw new RangeError('watermark.relativeWidth must be between 0 and 1');
+  }
+  if (watermark.opacity != null && (watermark.opacity < 0 || watermark.opacity > 1)) {
+    throw new RangeError('watermark.opacity must be between 0 and 1');
+  }
+  if (watermark.margin != null && watermark.margin < 0) {
+    throw new RangeError('watermark.margin must be non-negative');
+  }
+  return JSON.stringify(watermark);
+};
+
+const serializeVideoQuality = (quality: VideoQualityPreference): string => {
+  if (quality === 'auto') return JSON.stringify({ mode: 'auto' });
+  if ('maxBitrate' in quality) {
+    return JSON.stringify({ mode: 'bitrate', bitrate: quality.maxBitrate });
+  }
+  if ('maxWidth' in quality) {
+    return JSON.stringify({ mode: 'size', width: quality.maxWidth, height: quality.maxHeight });
+  }
+  return JSON.stringify({ mode: 'height', height: quality.maxHeight });
+};
+
+/** Transforms a native event prop; events whose payload fails to map are dropped. */
+const mappedEventProp = <N extends Record<string, unknown>, P>(
+  handler: ((event: { nativeEvent: P }) => void) | undefined,
+  map: (nativeEvent: N) => P,
+): ((event: { nativeEvent: N }) => void) | undefined =>
+  handler == null
+    ? undefined
+    : (event) => {
+        try {
+          handler({ nativeEvent: map(event.nativeEvent) });
+        } catch {
+          /* ignore malformed payload */
+        }
+      };
+
+/**
+ * `BunnyStreamPlayer` renders the native Bunny Stream player for VOD or live
+ * sources. It selects the internal native host automatically and remounts it
+ * when the source identity changes, so the SDK ViewModel and player engine are
+ * cleanly torn down and recreated.
+ *
+ * The player fills its parent. Only one active VOD instance is supported at a
+ * time because of the native SDK singleton design. Live uses a separate native
+ * host but shares the same public component.
+ *
+ * @example
+ * ```tsx
+ * <BunnyStreamPlayer source={{ type: 'vod', videoId }} autoPlay />
+ * <BunnyStreamPlayer source={{ type: 'live', streamId, libraryId }} />
+ * ```
+ */
+type VodView = React.ElementRef<HostComponent<VodNativeProps>> | null;
+
+export const BunnyStreamPlayer = React.forwardRef<BunnyVodPlayerRef, BunnyStreamPlayerProps>(
+  (props, ref) => {
+    const { source, ...rest } = props;
+    // The SDK does not expose a public live controller, so VOD commands are
+    // guarded here instead of being sent to the commandless live native host.
+    const sourceTypeRef = React.useRef(source.type);
+    sourceTypeRef.current = source.type;
+    // The ref holds either native host and is cast to the relevant Codegen type
+    // only when a command or host-specific prop is used.
+    const nativeRef = React.useRef<unknown>(null);
+
+    // Tracks the last known VOD position so skipForward/skipBackward can seek
+    // relative to it without a round-trip to the native side.
+    const lastPositionRef = React.useRef(0);
+
+    // Guards a VOD-only command: no-op for live sources, then resolves the
+    // native view and invokes the Codegen command on it.
+    const runVodCommand = (fn: (view: NonNullable<VodView>) => void) => {
+      if (sourceTypeRef.current !== 'vod') return;
+      const view = nativeRef.current as VodView;
+      if (view) fn(view);
+    };
+
+    React.useImperativeHandle(ref, () => ({
+      play: () => runVodCommand((view) => NativeCommands.play(view)),
+      pause: () => runVodCommand((view) => NativeCommands.pause(view)),
+      seekTo: (positionMs: number) =>
+        runVodCommand((view) => NativeCommands.seekTo(view, positionMs)),
+      skipForward: (offsetMs = 10_000) =>
+        runVodCommand((view) => NativeCommands.seekTo(view, lastPositionRef.current + offsetMs)),
+      skipBackward: (offsetMs = 10_000) =>
+        runVodCommand((view) =>
+          NativeCommands.seekTo(view, Math.max(0, lastPositionRef.current - offsetMs)),
+        ),
+      setVolume: (volume: number) =>
+        runVodCommand((view) => NativeCommands.setVolume(view, volume)),
+      setPlaybackRate: (rate: number) =>
+        runVodCommand((view) => NativeCommands.setPlaybackRate(view, rate)),
+      mute: () => runVodCommand((view) => NativeCommands.mute(view)),
+      unmute: () => runVodCommand((view) => NativeCommands.unmute(view)),
+      enterPiP: () => runVodCommand((view) => NativeCommands.enterPiP(view)),
+      setVideoQuality: (quality: VideoQualityPreference) =>
+        runVodCommand((view) =>
+          NativeCommands.setVideoQuality(view, serializeVideoQuality(quality)),
+        ),
+    }));
+
+    // A source identity change remounts the native host so the previous player
+    // and SDK-owned state are fully released.
+    const libraryIdResolution = resolveLibraryId(source.libraryId);
+    const hostKey = sourceIdentityKey(
+      libraryIdResolution.ok ? { ...source, libraryId: libraryIdResolution.libraryId } : source,
+    );
+
+    // Keep generic ViewProps separate from host-specific props and events.
+    const {
+      autoPlay,
+      controls,
+      watermark,
+      onReady,
+      onPlaybackStateChange,
+      onProgress,
+      onError,
+      onBuffering,
+      onPlay,
+      onPause,
+      onEnd,
+      onVolumeChange,
+      onPlaybackRateChange,
+      onVideoSizeChange,
+      onPlaybackError,
+      onLiveStateChange,
+      onLiveError,
+      onChaptersUpdated,
+      onMomentsUpdated,
+      onRetentionGraphUpdated,
+      onResumePositionAvailable,
+      resumeConfig,
+      useNativeTvPlayer,
+      onPlayerTypeChange,
+      style,
+      ...viewProps
+    } = rest;
+
+    const configurationError = libraryIdResolution.ok ? undefined : libraryIdResolution.error;
+    const configurationErrorKey = configurationError
+      ? JSON.stringify([hostKey, configurationError.code, configurationError.message])
+      : undefined;
+    const reportedErrorKey = React.useRef<string | undefined>(undefined);
+
+    React.useEffect(() => {
+      if (!configurationError) {
+        reportedErrorKey.current = undefined;
+        return;
+      }
+      if (onError && reportedErrorKey.current !== configurationErrorKey) {
+        reportedErrorKey.current = configurationErrorKey;
+        onError({ nativeEvent: configurationError });
+      }
+    }, [configurationError, configurationErrorKey, onError]);
+
+    if (!libraryIdResolution.ok) {
+      if (!onError) {
+        throw new Error(`${libraryIdResolution.error.code}: ${libraryIdResolution.error.message}`);
+      }
+      return null;
+    }
+
+    const nativeWatermark = serializeWatermark(watermark);
+
+    // Track the last known VOD position for skipForward/skipBackward.
+    const trackedOnProgress = onProgress
+      ? (event: { nativeEvent: { positionMs: number; durationMs: number; progress: number } }) => {
+          lastPositionRef.current = event.nativeEvent.positionMs;
+          onProgress(event);
+        }
+      : undefined;
+
+    if (source.type === 'live') {
+      const nativeOnLiveStateChange: LiveNativeProps['onLiveStateChange'] = onLiveStateChange
+        ? (event) => {
+            const nativeEvent = normalizeLiveStateEvent(event.nativeEvent);
+            onLiveStateChange({ nativeEvent });
+          }
+        : undefined;
+
+      // The live SDK reports terminal failures through `onLiveError`; its
+      // native recovery flow owns lower-level playback errors.
+      void onPlaybackError;
+      return (
+        <NativeLiveView
+          key={hostKey}
+          ref={
+            nativeRef as React.RefObject<React.ElementRef<HostComponent<LiveNativeProps>> | null>
+          }
+          libraryId={libraryIdResolution.libraryId}
+          streamId={source.streamId}
+          token={source.token}
+          expires={source.expires}
+          controls={controls}
+          watermark={nativeWatermark}
+          onVideoSizeChange={onVideoSizeChange}
+          onLiveStateChange={nativeOnLiveStateChange}
+          onLiveError={onLiveError}
+          style={style}
+          {...viewProps}
+        />
+      );
+    }
+
+    return (
+      <NativeVodView
+        key={hostKey}
+        ref={nativeRef as React.RefObject<React.ElementRef<HostComponent<VodNativeProps>> | null>}
+        videoId={source.videoId}
+        libraryId={libraryIdResolution.libraryId}
+        token={source.token}
+        expires={source.expires}
+        autoPlay={autoPlay}
+        controls={controls}
+        watermark={nativeWatermark}
+        onReady={onReady}
+        onPlaybackStateChange={onPlaybackStateChange}
+        onProgress={trackedOnProgress}
+        onError={
+          onError
+            ? (event) =>
+                onError({
+                  nativeEvent: normalizePlayerErrorEvent(event.nativeEvent),
+                })
+            : undefined
+        }
+        onBuffering={onBuffering}
+        onPlay={onPlay}
+        onPause={onPause}
+        onEnd={onEnd}
+        onVolumeChange={onVolumeChange}
+        onPlaybackRateChange={onPlaybackRateChange}
+        onVideoSizeChange={onVideoSizeChange}
+        onPlaybackError={onPlaybackError}
+        resumeConfig={resumeConfig ? JSON.stringify(resumeConfig) : undefined}
+        onChaptersUpdated={mappedEventProp(onChaptersUpdated, (e) => ({
+          chapters: JSON.parse(e.chapters) as Chapter[],
+        }))}
+        onMomentsUpdated={mappedEventProp(onMomentsUpdated, (e) => ({
+          moments: JSON.parse(e.moments) as Moment[],
+        }))}
+        onRetentionGraphUpdated={mappedEventProp(onRetentionGraphUpdated, (e) => ({
+          points: JSON.parse(e.points) as RetentionGraphEntry[],
+        }))}
+        onResumePositionAvailable={mappedEventProp(onResumePositionAvailable, (e) => ({
+          position: JSON.parse(e.position) as PlaybackPosition,
+        }))}
+        useNativeTvPlayer={useNativeTvPlayer}
+        onPlayerTypeChange={mappedEventProp(onPlayerTypeChange, (e) => ({
+          playerType: (e.playerType === 'cast' ? 'cast' : 'default') as PlayerType,
+        }))}
+        style={style}
+        {...viewProps}
+      />
+    );
+  },
+);
+
+BunnyStreamPlayer.displayName = 'BunnyStreamPlayer';
