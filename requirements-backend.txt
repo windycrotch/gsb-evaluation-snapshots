@@ -1,0 +1,19 @@
+# Minimal dependencies for the packaged backend (PyInstaller build).
+# Keep this slim: everything here ends up inside backend.exe.
+flask
+flask_cors
+moviepy
+requests
+faster-whisper
+# faster-whisper 1.2.1 calls av.open(..., metadata_errors=...), which PyAV 19
+# removed; with av>=19 every transcription fails with a TypeError. Its own
+# requirement is an unbounded av>=11, so cap it here until faster-whisper
+# ships a compatible release.
+av>=11,<19
+pandas
+openpyxl
+python-dotenv
+
+# NOTE: g4f is deliberately absent and must never be added here (or to any
+# other requirements file) - it must never install automatically with
+# Hi-Lite. See CONTRIBUTING.md "Custom third-party providers".
