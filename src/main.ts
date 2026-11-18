@@ -5,7 +5,8 @@ import { Renderer } from "./rendering/renderer";
 
 import { CLIP_HEIGHT, box } from "./model/manifold";
 import { mesh2geometry } from "./model/export";
-import { TMFLoader } from "./model/load";
+import { buildDownload, downloadFilename } from "./model/build";
+import { DownloadManager } from "./download";
 import { Animate, immediate } from "./animate";
 
 import { Dyn } from "twrl";
@@ -100,7 +101,30 @@ const partPositioning = new Dyn<PartPosition>({ tag: "static", position: 0 });
 
 /// MODEL
 
-const tmfLoader = new TMFLoader();
+// Download link, updated (only) when the part is at rest
+const link = document.querySelector("a")!;
+
+// Regenerates the downloadable 3MF so that it matches the committed
+// dimensions and the resting orientation shown on screen
+const downloadManager = new DownloadManager(
+  {
+    height: modelDimensions.height.latest,
+    width: modelDimensions.width.latest,
+    depth: modelDimensions.depth.latest,
+    radius: modelDimensions.radius.latest,
+    wall: modelDimensions.wall.latest,
+    bottom: modelDimensions.bottom.latest,
+  },
+  buildDownload,
+  downloadFilename,
+  ({ blob, filename }) => {
+    if (link.href) {
+      URL.revokeObjectURL(link.href);
+    }
+    link.href = URL.createObjectURL(blob);
+    link.download = filename;
+  },
+);
 
 // Reloads the model seen on page
 async function reloadModel(
@@ -127,8 +151,14 @@ Dyn.sequence([
   modelDimensions.wall,
   modelDimensions.bottom,
 ] as const).addListener(([h, w, d, r, wa, bo]) => {
-  const filename = `skapa-${w}-${d}-${h}.3mf`;
-  tmfLoader.load(box(h, w, d, r, wa, bo), filename);
+  downloadManager.setDimensions({
+    height: h,
+    width: w,
+    depth: d,
+    radius: r,
+    wall: wa,
+    bottom: bo,
+  });
 });
 
 /// RENDER
@@ -172,6 +202,9 @@ const bound = (v: number, [lo, hi]: [number, number]): number =>
 
 partPositioning.addListener((val) => {
   if (val.tag === "static") {
+    // The part snapped to a resting orientation; the download is regenerated
+    // with this orientation once the rotation animation has settled
+    downloadManager.setOrientation(val.position);
     rotation.startAnimationTo(val.position);
   } else if (val.tag === "moving") {
     /* the delta of width (between -1 and 1, so 2) per delta of (horizontal, CSS) pixel */
@@ -203,9 +236,6 @@ DIMENSIONS.forEach((dim) =>
 );
 
 /// DOM
-
-// Download button
-const link = document.querySelector("a")!;
 
 const controls = document.querySelector("#controls") as HTMLDivElement;
 
@@ -470,19 +500,15 @@ let modelLoadStarted: undefined | DOMHighResTimeStamp;
 function loop(nowMillis: DOMHighResTimeStamp) {
   requestAnimationFrame(loop);
 
-  // Reload 3mf if necessary
-  const newTmf = tmfLoader.take();
-  if (newTmf !== undefined) {
-    // Update the download link
-    link.href = URL.createObjectURL(newTmf.blob);
-    link.download = newTmf.filename;
-  }
-
   // Handle rotation animation
   const rotationUpdated = rotation.update();
   if (rotationUpdated) {
     mesh.rotation.z = rotation.current * Math.PI + MESH_ROTATION_DELTA;
   }
+
+  // Tell the download manager whether a rotation animation is underway;
+  // the download is only regenerated once the part has settled
+  downloadManager.setRotating(rotation.isAnimating());
 
   // Handle dimensions animation
   const dimensionsUpdated = DIMENSIONS.reduce(

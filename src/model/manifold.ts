@@ -15,11 +15,28 @@ class ManifoldModule {
       return this.wasm;
     }
 
-    this.wasm = await init({ locateFile: () => manifold_wasm });
+    this.wasm = await init({ locateFile: () => locateWasm() });
 
     await this.wasm.setup();
     return this.wasm;
   }
+}
+
+// Locate the manifold WASM file. In the browser, the `?url` import is a
+// root-relative URL served by vite. In Node (e.g. tests), emscripten reads
+// the file from disk, so resolve the root-relative path against the current
+// working directory.
+function locateWasm(): string {
+  const proc = (
+    globalThis as {
+      process?: { versions?: { node?: string }; cwd?: () => string };
+    }
+  ).process;
+  const isNode = typeof proc?.versions?.node === "string";
+  if (isNode && proc.cwd !== undefined && manifold_wasm.startsWith("/")) {
+    return proc.cwd() + manifold_wasm;
+  }
+  return manifold_wasm;
 }
 
 // Generates a CCW arc (quarter)

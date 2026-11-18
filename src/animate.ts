@@ -72,6 +72,11 @@ export class Animate {
     };
   }
 
+  // Whether an animation is currently underway
+  public isAnimating(): boolean {
+    return this.animation !== undefined;
+  }
+
   // Returns true if the value was updated
   public update(): boolean {
     if (this.animation === undefined) {
