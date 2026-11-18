@@ -1,0 +1,54 @@
+{
+  "name": "canvas-gauge-card-continued",
+  "version": "2026.11.16",
+  "description": "Home Assistant Lovelace custom card for gauges (Continued)",
+  "keywords": [
+    "home-assistant",
+    "homeassistant",
+    "hass",
+    "automation",
+    "lovelace",
+    "custom-cards",
+    "canvas-gauge",
+    "continued",
+    "community-maintained"
+  ],
+  "module": "canvas-gauge-card.js",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sxdjt/canvas-gauge-card-continued.git"
+  },
+  "bugs": {
+    "url": "https://github.com/sxdjt/canvas-gauge-card-continued/issues"
+  },
+  "homepage": "https://github.com/sxdjt/canvas-gauge-card-continued#readme",
+  "author": "Original: @helto4real | Continued: Community",
+  "license": "MIT",
+  "devDependencies": {
+    "@babel/core": "^7.29.0",
+    "@eslint/js": "^10.0.0",
+    "@rollup/plugin-babel": "^7.0.0",
+    "@rollup/plugin-commonjs": "^29.0.2",
+    "@rollup/plugin-json": "^6.1.0",
+    "@rollup/plugin-node-resolve": "^16.0.3",
+    "@typescript-eslint/eslint-plugin": "^8.58.0",
+    "@typescript-eslint/parser": "^8.58.0",
+    "eslint": "^10.0.0",
+    "rollup": "^4.60.1",
+    "rollup-plugin-typescript2": "^0.37.0",
+    "typescript": "^6.0.2",
+    "typescript-eslint": "^8.58.0"
+  },
+  "dependencies": {
+    "canvas-gauges": "2.1.7",
+    "home-assistant-js-websocket": "^9.6.0",
+    "lit": "^3.3.2"
+  },
+  "type": "module",
+  "scripts": {
+    "prebuild": "node scripts/audit-gate.js",
+    "build-debug": "rollup -c -m inline",
+    "build": "rollup -c",
+    "lint": "eslint src"
+  }
+}
