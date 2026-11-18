@@ -167,11 +167,10 @@ export class Enemy extends Fighter {
         const far = Math.hypot(dx, this.pos.z - hero.pos.z) > ENGAGE.leaveDistance;
         this.farTime = far ? this.farTime + dt : 0;
         if (this.farTime > ENGAGE.leaveAfter || (this.turnTime > this.engageFor && this.sinceContact > ENGAGE.quietTime)) {
-          turns.note(this.farTime > ENGAGE.leaveAfter ? 'Volt walked away' : 'fight paused');
-          turns.release(this);
+          turns.release(this, this.farTime > ENGAGE.leaveAfter ? 'Volt walked away' : 'fight paused');
           return;
         }
-      } else if (this.turnTime > TURN_TIMEOUT) { turns.note('could not reach Volt'); turns.release(this); return; }
+      } else if (this.turnTime > TURN_TIMEOUT) { turns.release(this, 'could not reach Volt'); return; }
       const adx = Math.abs(dx), adz = Math.abs(this.pos.z - hero.pos.z);
       if (!this.plan) this.plan = this.pickAttack(adx);
       const def = ATTACKS[this.plan.name];
@@ -316,15 +315,20 @@ export class Enemy extends Fighter {
   }
 }
 
-// Only one enemy at a time may attack. The next turn goes to a random waiting enemy,
-// more likely the longer it has waited.
+// Only one enemy at a time may attack. Whenever a turn ends — the holder is knocked out,
+// leaves the street, walks away, times out, or Volt pulls another enemy into the fight —
+// the turn is freed at once, the street stays quiet for one pause, and then the turn goes
+// to a waiting enemy, more likely the longer it has waited.
 export class AttackTurns {
   constructor() { this.gap = 0; this.reset(); }
   reset() { this.holder = null; this.cooldown = 0; this.ends = {}; }
   note(reason) { this.ends[reason] = (this.ends[reason] ?? 0) + 1; }
   pause() { return jitter(this.gap, RANDOM.turnGapJitter); }
-  release(e) {
+  // The turn ends. It is free right away, but nobody new is picked until the pause has
+  // passed; the old holder needs a moment before it may be picked again.
+  release(e, reason = null) {
     if (this.holder !== e) return;
+    if (reason) this.note(reason);
     this.holder = null;
     this.cooldown = this.pause();
     e.cooldown = Math.max(e.cooldown, e.attackDelay);
@@ -332,9 +336,16 @@ export class AttackTurns {
   }
   // Volt hit an enemy: that enemy fights back, unless the current holder is mid-attack.
   engage(e) {
-    if (!e.alive || e.entering || this.holder === e) { if (this.holder === e) e.engaged = true; return; }
-    // Keep the current fight going: no switch while its enemy is attacking or was in a blow in the last second.
-    const busy = ['attack', 'windup', 'charge', 'roar', 'hop'].includes(this.holder?.state);
+    if (!e.alive || e.entering) return;
+    if (this.holder === e) { e.engaged = true; return; }
+    // A holder that was just knocked out or left the street no longer blocks the handoff.
+    if (this.holder && (!this.holder.alive || this.holder.removed)) {
+      this.note(this.holder.removed ? 'holder left the street' : 'holder knocked out');
+      this.holder = null;
+    }
+    // Keep the current fight going: no switch while its enemy is attacking, winding up or
+    // charging, or was in a blow in the last second.
+    const busy = ['attack', 'windup', 'charge'].includes(this.holder?.state);
     if (this.holder && (busy || (this.holder.engaged && this.holder.sinceContact < 1))) return;
     if (this.holder) { this.note(this.holder.engaged ? 'Volt hit another enemy (mid-fight)' : 'Volt hit another enemy'); const old = this.holder; this.holder = null; old.engaged = false; old.cooldown = Math.max(old.cooldown, old.attackDelay); }
     this.holder = e;
@@ -342,7 +353,9 @@ export class AttackTurns {
   }
   update(dt, enemies) {
     this.cooldown -= dt;
-    if (this.holder && (!this.holder.alive || this.holder.removed)) this.holder = null;
+    // A holder that was knocked out or removed drops the turn at once; the pause still applies.
+    if (this.holder && (!this.holder.alive || this.holder.removed))
+      this.release(this.holder, this.holder.removed ? 'holder left the street' : 'holder knocked out');
     if (this.holder || this.cooldown > 0) return;
     const ready = enemies.filter(e => e.alive && !e.entering && e.cooldown <= 0 && ['wait', 'idle', 'walk'].includes(e.state));
     if (!ready.length) return;

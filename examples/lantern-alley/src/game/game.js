@@ -105,7 +105,6 @@ export class Game {
     }
 
     hero.update(dt, this.input, this.enemies);
-    this.turns.update(dt, this.enemies);
     for (const e of this.enemies) e.update(dt, hero, this.turns, this.enemies);
 
     const onHit = h => {
@@ -146,6 +145,11 @@ export class Game {
       if (f >= 1) e.remove();
     }
     this.enemies = this.enemies.filter(e => !e.removed);
+
+    // Turn keeping comes last, after this step's hits and removals: a holder that was
+    // knocked out or left the street drops the turn in the same step (and the pause
+    // before the next holder starts now), so two enemies never hold the turn at once.
+    this.turns.update(dt, this.enemies);
 
     // Round flow
     if (!this.result) {
