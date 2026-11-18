@@ -31,9 +31,10 @@ type GatePair = {
   gapSize: number;
   scored: boolean;
   bodyMaterials: [StandardMaterial, StandardMaterial];
+  capMaterial: StandardMaterial;
 };
 
-const CONFIG = {
+export const CONFIG = {
   gravity: -27,
   flapVelocity: 9.8,
   startingSpeed: 4.65,
@@ -149,7 +150,7 @@ export class GameWorld {
       gate.x -= this.speed * cappedDelta;
       this.positionGate(gate);
 
-      if (!gate.scored && gate.x + CONFIG.obstacleWidth / 2 < CONFIG.playerX - CONFIG.playerWidth / 2) {
+      if (!gate.scored && this.hasGateClearedPlayer(gate)) {
         gate.scored = true;
         this.score += 1;
         this.emitState();
@@ -158,10 +159,9 @@ export class GameWorld {
 
     while (this.gates.length && this.gates[0].x < -this.viewportWidth / 2 - 2) {
       const oldGate = this.gates.shift();
-      oldGate?.top.dispose();
-      oldGate?.bottom.dispose();
-      oldGate?.topCap.dispose();
-      oldGate?.bottomCap.dispose();
+      if (oldGate) {
+        this.releaseGate(oldGate);
+      }
     }
 
     const tail = this.gates[this.gates.length - 1];
@@ -253,12 +253,7 @@ export class GameWorld {
   }
 
   private resetScene() {
-    this.gates.splice(0).forEach((gate) => {
-      gate.top.dispose();
-      gate.bottom.dispose();
-      gate.topCap.dispose();
-      gate.bottomCap.dispose();
-    });
+    this.gates.splice(0).forEach((gate) => this.releaseGate(gate));
     this.score = 0;
     this.playerY = 0;
     this.velocity = 0;
@@ -319,9 +314,41 @@ export class GameWorld {
       gapSize,
       scored: false,
       bodyMaterials: [topMaterial, bottomMaterial],
+      capMaterial,
     };
     this.gates.push(gate);
     this.positionGate(gate);
+  }
+
+  /**
+   * A gate contributes its single point once its horizontal interval has fully
+   * crossed the player's interval: it approached from the right, overlapped (or
+   * skipped the overlap within one fast frame), and ended up entirely on the
+   * left. Gates only travel leftwards, so this transition happens exactly once
+   * per gate; the `scored` flag makes that idempotent.
+   */
+  private hasGateClearedPlayer(gate: GatePair) {
+    const gateLeft = gate.x - CONFIG.obstacleWidth / 2;
+    const gateRight = gate.x + CONFIG.obstacleWidth / 2;
+    const playerLeft = CONFIG.playerX - CONFIG.playerWidth / 2;
+    const playerRight = CONFIG.playerX + CONFIG.playerWidth / 2;
+    const overlapsPlayer = gateLeft <= playerRight && gateRight >= playerLeft;
+    return !overlapsPlayer && gateRight < playerLeft;
+  }
+
+  /** Disposes a gate's meshes together with the materials created for it. */
+  private releaseGate(gate: GatePair) {
+    gate.top.dispose();
+    gate.bottom.dispose();
+    gate.topCap.dispose();
+    gate.bottomCap.dispose();
+    for (const material of [...gate.bodyMaterials, gate.capMaterial]) {
+      material.dispose();
+      const index = this.materials.indexOf(material);
+      if (index !== -1) {
+        this.materials.splice(index, 1);
+      }
+    }
   }
 
   private positionGate(gate: GatePair) {
