@@ -37,6 +37,23 @@ const makeCanvas = (width = 400, height = 40): HTMLCanvasElement => {
   return canvas;
 };
 
+/** Peaks used to distinguish tracks — a successful render draws exactly these bar heights. */
+const track1Peaks = new Float32Array([0.2, 0.8, 0.6, 0.4]);
+const track2Peaks = new Float32Array([0.9, 0.1, 0.5, 0.3]);
+
+const switchToTrack = (trackNumber: string, duration = 100): void => {
+  fakeAppCore = new FakeAppCore({
+    featureFlags: { ...PLUME_DEFAULTS.featureFlags, waveform: true },
+    currentTime: 0,
+    duration,
+    trackNumber,
+  });
+};
+
+/** Reconstructs the peak-derived bar heights observed by fillRect calls on a mock 2D context. */
+const drawnBarHeights = (ctx: ReturnType<typeof makeMockCtx>): number[] =>
+  ctx.fillRect.mock.calls.map((call) => call[3] as number);
+
 import {
   attachWaveformSeekHandler,
   clearPeaksCache,
@@ -521,5 +538,310 @@ describe("attachWaveformSeekHandler", () => {
       expect.anything(),
       fakeMusicPlayer
     );
+  });
+
+  it("seeks to 0 instead of NaN when the canvas reports a zero width", () => {
+    const canvas = makeCanvas(400, 40);
+    vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue(mockRect(0, 0));
+
+    attachWaveformSeekHandler(canvas);
+    canvas.dispatchEvent(new MouseEvent("click", { clientX: 10, bubbles: true }));
+
+    expect(mockSeekToProgress).toHaveBeenCalledWith(0, expect.anything(), fakeMusicPlayer);
+  });
+
+  it("seeks to full granularity on a zero-width canvas click at a negative clientX", () => {
+    const canvas = makeCanvas(400, 40);
+    vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue(mockRect(0, 0));
+
+    attachWaveformSeekHandler(canvas);
+    canvas.dispatchEvent(new MouseEvent("click", { clientX: -5, bubbles: true }));
+
+    // width 0 → raw fraction 0 → clamped 0 (no NaN, no negative value)
+    expect(mockSeekToProgress).toHaveBeenCalledWith(0, expect.anything(), fakeMusicPlayer);
+  });
+});
+
+describe("per-track peaks cache", () => {
+  beforeEach(() => {
+    switchToTrack("1/3");
+  });
+
+  it("caches peaks under the current track number and decodes a different track separately", async () => {
+    mockDecodeWaveformForCurrentTrack.mockResolvedValueOnce(track1Peaks).mockResolvedValueOnce(track2Peaks);
+
+    // Track 1: decode + render, cache key t1/3
+    const canvas1 = makeCanvas();
+    const ctx1 = makeMockCtx();
+    vi.spyOn(canvas1, "getContext").mockReturnValue(ctx1 as unknown as CanvasRenderingContext2D);
+    await triggerWaveformDecode(canvas1);
+    expect(drawnBarHeights(ctx1)).toHaveLength(track1Peaks.length);
+    expect(mockDecodeWaveformForCurrentTrack).toHaveBeenCalledTimes(1);
+
+    // Switch to track 2 on the same canvas — the old peaks must not be reused
+    clearWaveform(canvas1);
+    switchToTrack("2/3");
+    const ctx2 = makeMockCtx();
+    vi.spyOn(canvas1, "getContext").mockReturnValue(ctx2 as unknown as CanvasRenderingContext2D);
+    await triggerWaveformDecode(canvas1);
+
+    expect(mockDecodeWaveformForCurrentTrack).toHaveBeenCalledTimes(2);
+    expect(drawnBarHeights(ctx2)).toEqual(Array.from(track2Peaks, (p) => 40 * 0.1 + p * 40 * 0.9));
+  });
+
+  it("reuses the cached peaks of a track when navigating back without re-decoding", async () => {
+    mockDecodeWaveformForCurrentTrack.mockResolvedValueOnce(track1Peaks).mockResolvedValueOnce(track2Peaks);
+
+    const canvas = makeCanvas();
+    const ctx = makeMockCtx();
+    vi.spyOn(canvas, "getContext").mockReturnValue(ctx as unknown as CanvasRenderingContext2D);
+
+    await triggerWaveformDecode(canvas); // track 1 decoded
+    clearWaveform(canvas);
+    switchToTrack("2/3");
+    await triggerWaveformDecode(canvas); // track 2 decoded
+    clearWaveform(canvas);
+    switchToTrack("1/3"); // back to track 1
+    ctx.fillRect.mockClear();
+
+    await triggerWaveformDecode(canvas);
+
+    expect(mockDecodeWaveformForCurrentTrack).toHaveBeenCalledTimes(2); // no third decode
+    // Rendered bars match track 1 peaks, not track 2
+    const height = 40;
+    const expected = Array.from(track1Peaks, (p) => height * 0.1 + p * height * 0.9);
+    expect(drawnBarHeights(ctx)).toEqual(expected);
+  });
+
+  it("keeps distinct cache entries per track simultaneously", async () => {
+    mockDecodeWaveformForCurrentTrack.mockResolvedValueOnce(track1Peaks).mockResolvedValueOnce(track2Peaks);
+
+    const canvas = makeCanvas();
+    const ctx = makeMockCtx();
+    vi.spyOn(canvas, "getContext").mockReturnValue(ctx as unknown as CanvasRenderingContext2D);
+
+    await triggerWaveformDecode(canvas); // seeds t1/3
+    clearWaveform(canvas);
+    switchToTrack("2/3");
+    await triggerWaveformDecode(canvas); // seeds t2/3
+    mockDecodeWaveformForCurrentTrack.mockClear();
+
+    // Both tracks now hit their own cache and render their own peaks
+    clearWaveform(canvas);
+    switchToTrack("2/3");
+    ctx.fillRect.mockClear();
+    await triggerWaveformDecode(canvas);
+    const track2Heights = drawnBarHeights(ctx);
+
+    clearWaveform(canvas);
+    switchToTrack("1/3");
+    ctx.fillRect.mockClear();
+    await triggerWaveformDecode(canvas);
+    const track1Heights = drawnBarHeights(ctx);
+
+    expect(mockDecodeWaveformForCurrentTrack).not.toHaveBeenCalled();
+    expect(track1Heights).not.toEqual(track2Heights);
+    expect(track1Heights).toEqual(Array.from(track1Peaks, (p) => 40 * 0.1 + p * 40 * 0.9));
+    expect(track2Heights).toEqual(Array.from(track2Peaks, (p) => 40 * 0.1 + p * 40 * 0.9));
+  });
+});
+
+describe("over-length tracks", () => {
+  beforeEach(() => {
+    switchToTrack("1/2");
+  });
+
+  it("hides the canvas and skips decode above the duration cap even with another track cached", async () => {
+    mockDecodeWaveformForCurrentTrack.mockResolvedValue(track1Peaks);
+
+    // Seed a normal track's cache first
+    const seedCanvas = makeCanvas();
+    vi.spyOn(seedCanvas, "getContext").mockReturnValue(makeMockCtx() as unknown as CanvasRenderingContext2D);
+    await triggerWaveformDecode(seedCanvas);
+    mockDecodeWaveformForCurrentTrack.mockClear();
+
+    // Navigate to an over-length track
+    switchToTrack("2/2", PLUME_CONSTANTS.WAVEFORM_MAX_DURATION_SECONDS + 1);
+    const canvas = makeCanvas();
+    canvas.classList.remove(PLUME_CSS_CLASSES.featureHidden);
+
+    await triggerWaveformDecode(canvas);
+
+    expect(canvas.classList.contains(PLUME_CSS_CLASSES.featureHidden)).toBe(true);
+    expect(mockDecodeWaveformForCurrentTrack).not.toHaveBeenCalled();
+  });
+
+  it("does not serve cached peaks from another track to an over-length track", async () => {
+    mockDecodeWaveformForCurrentTrack.mockResolvedValue(track1Peaks);
+    const seedCanvas = makeCanvas();
+    vi.spyOn(seedCanvas, "getContext").mockReturnValue(makeMockCtx() as unknown as CanvasRenderingContext2D);
+    await triggerWaveformDecode(seedCanvas);
+
+    switchToTrack("2/2", PLUME_CONSTANTS.WAVEFORM_MAX_DURATION_SECONDS + 1);
+    const canvas = makeCanvas();
+    const ctx = makeMockCtx();
+    vi.spyOn(canvas, "getContext").mockReturnValue(ctx as unknown as CanvasRenderingContext2D);
+
+    await triggerWaveformDecode(canvas);
+
+    expect(ctx.fillRect).not.toHaveBeenCalled();
+  });
+});
+
+describe("async decode races across track switches", () => {
+  beforeEach(() => {
+    switchToTrack("1/2");
+  });
+
+  it("drops a stale decode result after switching tracks: no paint on the new canvas", async () => {
+    let resolveTrack1!: (peaks: Float32Array | null) => void;
+    mockDecodeWaveformForCurrentTrack
+      .mockReturnValueOnce(new Promise((r) => (resolveTrack1 = r)))
+      .mockResolvedValueOnce(track2Peaks);
+
+    const canvas = makeCanvas();
+    const ctx = makeMockCtx();
+    vi.spyOn(canvas, "getContext").mockReturnValue(ctx as unknown as CanvasRenderingContext2D);
+
+    const track1Promise = triggerWaveformDecode(canvas);
+    // User switches to track 2 before track 1's decode returns
+    clearWaveform(canvas);
+    switchToTrack("2/2");
+    const track2Promise = triggerWaveformDecode(canvas);
+
+    // Track 2's decode resolves first and renders
+    await track2Promise;
+    const track2Heights = drawnBarHeights(ctx);
+    expect(track2Heights).toEqual(Array.from(track2Peaks, (p) => 40 * 0.1 + p * 40 * 0.9));
+
+    // Track 1's stale decode resolves afterwards — it must not repaint the canvas
+    ctx.fillRect.mockClear();
+    resolveTrack1(track1Peaks);
+    await track1Promise;
+
+    expect(ctx.fillRect).not.toHaveBeenCalled();
+    // Canvas still shows track 2's peaks
+    expect(canvas.classList.contains(PLUME_CSS_CLASSES.featureHidden)).toBe(false);
+  });
+
+  it("never writes a stale decode result into the new track's cache key", async () => {
+    let resolveTrack1!: (peaks: Float32Array | null) => void;
+    mockDecodeWaveformForCurrentTrack
+      .mockReturnValueOnce(new Promise((r) => (resolveTrack1 = r)))
+      .mockResolvedValueOnce(track2Peaks);
+
+    const canvas = makeCanvas();
+    const ctx = makeMockCtx();
+    vi.spyOn(canvas, "getContext").mockReturnValue(ctx as unknown as CanvasRenderingContext2D);
+
+    const stalePromise = triggerWaveformDecode(canvas);
+    clearWaveform(canvas);
+    switchToTrack("2/2");
+    await triggerWaveformDecode(canvas); // t2/2 cache seeded with track2Peaks
+
+    resolveTrack1(track1Peaks);
+    await stalePromise;
+
+    // A later trigger for track 2 must render track 2 peaks from its own cache — no decode, no track 1 data
+    mockDecodeWaveformForCurrentTrack.mockClear();
+    ctx.fillRect.mockClear();
+    await triggerWaveformDecode(canvas);
+
+    expect(mockDecodeWaveformForCurrentTrack).not.toHaveBeenCalled();
+    expect(drawnBarHeights(ctx)).toEqual(Array.from(track2Peaks, (p) => 40 * 0.1 + p * 40 * 0.9));
+  });
+
+  it("treats a feature-flag toggle-off during decode as a stale generation", async () => {
+    let resolveDecode!: (peaks: Float32Array | null) => void;
+    mockDecodeWaveformForCurrentTrack.mockReturnValue(new Promise((r) => (resolveDecode = r)));
+
+    const canvas = makeCanvas();
+    const ctx = makeMockCtx();
+    vi.spyOn(canvas, "getContext").mockReturnValue(ctx as unknown as CanvasRenderingContext2D);
+
+    const promise = triggerWaveformDecode(canvas);
+
+    fakeAppCore = new FakeAppCore({
+      featureFlags: { ...PLUME_DEFAULTS.featureFlags, waveform: false },
+      currentTime: 0,
+      duration: 100,
+      trackNumber: "1/2",
+    });
+    await triggerWaveformDecode(canvas); // flag off → hidden, generation bumped
+    ctx.fillRect.mockClear();
+
+    resolveDecode(track1Peaks);
+    await promise;
+
+    expect(canvas.classList.contains(PLUME_CSS_CLASSES.featureHidden)).toBe(true);
+    expect(ctx.fillRect).not.toHaveBeenCalled();
+  });
+
+  it("invalidates decodes per canvas: two canvases keep independent generations", async () => {
+    let resolveSlow!: (peaks: Float32Array | null) => void;
+    mockDecodeWaveformForCurrentTrack
+      .mockReturnValueOnce(new Promise((r) => (resolveSlow = r))) // canvas A, track 1 (slow)
+      .mockResolvedValueOnce(track2Peaks); // canvas B, track 2
+
+    const canvasA = makeCanvas();
+    const ctxA = makeMockCtx();
+    vi.spyOn(canvasA, "getContext").mockReturnValue(ctxA as unknown as CanvasRenderingContext2D);
+    const canvasB = makeCanvas();
+    const ctxB = makeMockCtx();
+    vi.spyOn(canvasB, "getContext").mockReturnValue(ctxB as unknown as CanvasRenderingContext2D);
+
+    const slowPromise = triggerWaveformDecode(canvasA);
+
+    // Canvas A is explicitly cleared (e.g. main player hidden) while its decode is still running
+    clearWaveform(canvasA);
+
+    // A different canvas keeps decoding independently and finishes with track 2 peaks
+    switchToTrack("2/2");
+    await triggerWaveformDecode(canvasB);
+
+    expect(drawnBarHeights(ctxB)).toEqual(Array.from(track2Peaks, (p) => 40 * 0.1 + p * 40 * 0.9));
+
+    // Canvas A's stale decode resolves — its own generation invalidates it, canvas B stays untouched
+    resolveSlow(track1Peaks);
+    await slowPromise;
+
+    expect(ctxA.fillRect).not.toHaveBeenCalled();
+    expect(drawnBarHeights(ctxB)).toEqual(Array.from(track2Peaks, (p) => 40 * 0.1 + p * 40 * 0.9));
+  });
+});
+
+describe("syncWaveformPlayhead cache gating across tracks", () => {
+  beforeEach(() => {
+    switchToTrack("1/2");
+  });
+
+  it("stays blank when the current track has no cached peaks even if another track does", async () => {
+    mockDecodeWaveformForCurrentTrack.mockResolvedValue(track1Peaks);
+    const seedCanvas = makeCanvas();
+    vi.spyOn(seedCanvas, "getContext").mockReturnValue(makeMockCtx() as unknown as CanvasRenderingContext2D);
+    await triggerWaveformDecode(seedCanvas); // seeds only t1/2
+
+    // New track without its own cache
+    switchToTrack("2/2");
+    const canvas = makeCanvas();
+    const ctx = makeMockCtx();
+    vi.spyOn(canvas, "getContext").mockReturnValue(ctx as unknown as CanvasRenderingContext2D);
+
+    syncWaveformPlayhead(canvas, 0.75);
+
+    expect(ctx.fillRect).not.toHaveBeenCalled();
+  });
+
+  it("redraws with the current track's cached peaks during playback", async () => {
+    mockDecodeWaveformForCurrentTrack.mockResolvedValue(track1Peaks);
+    const canvas = makeCanvas();
+    const ctx = makeMockCtx();
+    vi.spyOn(canvas, "getContext").mockReturnValue(ctx as unknown as CanvasRenderingContext2D);
+    await triggerWaveformDecode(canvas);
+    ctx.fillRect.mockClear();
+
+    syncWaveformPlayhead(canvas, 0.5);
+
+    expect(drawnBarHeights(ctx)).toEqual(Array.from(track1Peaks, (p) => 40 * 0.1 + p * 40 * 0.9));
   });
 });

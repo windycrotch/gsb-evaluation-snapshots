@@ -8,7 +8,18 @@ import { getString } from "@/shared/i18n";
 
 // Peaks are cached per track and survive clearWaveform (track navigation back reuses the cache).
 const peaksCache = new Map<string, Float32Array>();
-let decodeAbortFlag = false;
+
+// Per-canvas decode generations. Each new decode (or clearWaveform) bumps a canvas's generation,
+// so an async decode result that resolves after a track switch can never paint the new track's
+// canvas nor write peaks under the wrong cache key. A shared boolean flag would cross wires
+// between the main and fullscreen canvases and between consecutive tracks.
+const decodeGenerations = new WeakMap<HTMLCanvasElement, number>();
+
+const bumpGeneration = (canvas: HTMLCanvasElement): number => {
+  const next = (decodeGenerations.get(canvas) ?? 0) + 1;
+  decodeGenerations.set(canvas, next);
+  return next;
+};
 
 // Track number as cache key — unique within a page session.
 const getCacheKey = (): string => {
@@ -65,12 +76,24 @@ export const renderWaveform = (
 export const triggerWaveformDecode = async (canvas: HTMLCanvasElement): Promise<void> => {
   const appState = getAppCoreInstance().getState();
 
+  // Any in-flight decode for this canvas belongs to an older track (or was disabled):
+  // bumping the generation invalidates it before any early return.
+  const generation = bumpGeneration(canvas);
+
   if (!appState.featureFlags.waveform) {
     canvas.classList.add(PLUME_CSS_CLASSES.featureHidden);
     return;
   }
 
   const cacheKey = getCacheKey();
+
+  // Tracks beyond the duration cap never get a waveform. This runs before the cache fast path so
+  // an over-length track stays hidden even if peaks from another track are already cached, and no
+  // decode is ever started for it.
+  if (appState.duration > PLUME_CONSTANTS.WAVEFORM_MAX_DURATION_SECONDS) {
+    canvas.classList.add(PLUME_CSS_CLASSES.featureHidden);
+    return;
+  }
 
   // Fast path: peaks already cached for this track — skip decode and render immediately.
   if (peaksCache.has(cacheKey)) {
@@ -81,26 +104,21 @@ export const triggerWaveformDecode = async (canvas: HTMLCanvasElement): Promise<
     return;
   }
 
-  if (appState.duration > PLUME_CONSTANTS.WAVEFORM_MAX_DURATION_SECONDS) {
-    canvas.classList.add(PLUME_CSS_CLASSES.featureHidden);
-    return;
-  }
-
   // Show loading state while decode runs (CSS pulse + aria label; no canvas drawing)
-  decodeAbortFlag = false;
   canvas.classList.remove(PLUME_CSS_CLASSES.featureHidden);
   canvas.classList.add(PLUME_CSS_CLASSES.waveformLoading);
   canvas.ariaLabel = getString("ARIA__WAVEFORM_CANVAS__LOADING");
 
   const peaks = await decodeWaveformForCurrentTrack();
 
+  // The user switched track (or toggled the feature off) while the decode was in flight.
+  // The canvas now belongs to a newer generation: drop the stale result entirely — never touch
+  // the canvas and never write peaks under a cache key the caller no longer represents.
+  if (decodeGenerations.get(canvas) !== generation) return;
+
   canvas.classList.remove(PLUME_CSS_CLASSES.waveformLoading);
   canvas.ariaLabel = getString("ARIA__WAVEFORM_CANVAS");
 
-  if (decodeAbortFlag) {
-    canvas.classList.add(PLUME_CSS_CLASSES.featureHidden);
-    return;
-  }
   if (!peaks) {
     canvas.classList.add(PLUME_CSS_CLASSES.featureHidden);
     return;
@@ -109,14 +127,15 @@ export const triggerWaveformDecode = async (canvas: HTMLCanvasElement): Promise<
   peaksCache.set(cacheKey, peaks);
 
   const newAppState = getAppCoreInstance().getState();
-  const progressFraction = !!newAppState.duration ? newAppState.currentTime / newAppState.duration : 0;
+  const progressFraction = newAppState.duration ? newAppState.currentTime / newAppState.duration : 0;
 
   renderWaveform(canvas, peaks, progressFraction, getAccentColor());
 };
 
 export const clearWaveform = (canvas: HTMLCanvasElement): void => {
-  decodeAbortFlag = true;
-  // Peaks cache is preserved — navigation back to this track skips the decode.
+  // Invalidate any in-flight decode for this canvas. The peaks cache itself is preserved —
+  // navigation back to this track still skips the decode.
+  bumpGeneration(canvas);
 
   canvas.classList.remove(PLUME_CSS_CLASSES.waveformLoading);
   canvas.classList.add(PLUME_CSS_CLASSES.featureHidden);
@@ -129,7 +148,9 @@ export const clearWaveform = (canvas: HTMLCanvasElement): void => {
 export const attachWaveformSeekHandler = (canvas: HTMLCanvasElement): void => {
   canvas.addEventListener("click", (e: MouseEvent) => {
     const rect = canvas.getBoundingClientRect();
-    const fraction = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    const rawFraction = rect.width > 0 ? (e.clientX - rect.left) / rect.width : 0;
+    // Clamp to [0, 1] so clicks outside the canvas edges seek to the start/end rather than NaN.
+    const fraction = Math.max(0, Math.min(1, rawFraction));
     seekToProgress(
       fraction * PLUME_CONSTANTS.PROGRESS_SLIDER_GRANULARITY,
       getAppCoreInstance(),
