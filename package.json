@@ -1,0 +1,9 @@
+{
+  "name": "music-visualizer",
+  "version": "1.0.0",
+  "description": "THREE.js / Web Audio music visualizer with local automated acceptance tests",
+  "private": true,
+  "scripts": {
+    "test": "node tests/run-acceptance.js"
+  }
+}

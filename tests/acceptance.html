@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Music Visualizer - Acceptance Tests</title>
+        <style>
+            body {
+                margin: 0;
+                padding: 16px;
+                background: #14121a;
+                color: #f3f0f6;
+                font: 14px/1.5 system-ui, sans-serif;
+            }
+            h1 { font-size: 1.15rem; margin: 0 0 8px; }
+            #harness {
+                position: relative;
+                width: 1000px;
+                height: 600px;
+                border: 1px solid #4a4355;
+                border-radius: 8px;
+                overflow: hidden;
+                background: #000;
+            }
+            #app-frame {
+                width: 100%;
+                height: 100%;
+                border: 0;
+                display: block;
+            }
+            #results {
+                margin-top: 14px;
+                max-width: 1000px;
+                font-family: ui-monospace, Consolas, monospace;
+                font-size: 13px;
+                white-space: pre-wrap;
+            }
+            .pass { color: #7ee787; }
+            .fail { color: #ff7b72; font-weight: 700; }
+            .skip { color: #d29922; }
+            .group { color: #a9b7ff; font-weight: 700; margin-top: 10px; }
+            #summary { margin-top: 12px; font-size: 15px; font-weight: 700; }
+            #status { margin-top: 6px; color: #bbb3c5; }
+        </style>
+    </head>
+    <body>
+        <h1>Music Visualizer — Automated Acceptance Tests</h1>
+        <p>
+            Runs the real <code>js/main.js</code> inside an iframe against an in-memory
+            Firebase stub and locally generated WAV audio. No real Firebase credentials
+            and no network access are required.
+        </p>
+        <div id="harness">
+            <iframe id="app-frame" src="app-frame.html" title="Application under test"></iframe>
+        </div>
+        <div id="results" role="log" aria-live="polite"></div>
+        <div id="summary"></div>
+        <div id="status">Starting…</div>
+
+        <script src="acceptance-runner.js"></script>
+    </body>
+</html>

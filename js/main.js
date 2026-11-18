@@ -1,6 +1,5 @@
 var audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 var analyser = audioCtx.createAnalyser();
-var source;
 var gui;
 var resizeVisualizer;
 var defaultSong = "https://firebasestorage.googleapis.com/v0/b/kantelabs-threejs.appspot.com/o/03%20-%20Smooth%20Operator.mp3?alt=media&token=27e95f4c-b4fb-4160-9bdc-02833cf65a84";
@@ -20,6 +19,14 @@ window.onload = function () {
     var selectedSong;
     var currentSongUrl = defaultSong;
     var searchQuery = '';
+
+    // The visualizer is built once and reused for every track. These keep track
+    // of the one audio element / MediaElementSource currently feeding analyser.
+    var audioDiv = document.querySelector('.audio-container');
+    var audioPlayer = null;
+    var currentSource = null;
+    var currentObjectUrl = null;
+    var totalSourcesCreated = 0;
 
     function getSongFilename(url) {
         try {
@@ -111,18 +118,21 @@ window.onload = function () {
     var storageRef = firebase.storage().ref();
     var dbRoot = firebase.database().ref();
     var songsRef = dbRoot.child('songs');
-    var audioDiv = document.querySelector('.audio-container');
-    var audioPlayer = new Audio(defaultSong)
-    audioPlayer.crossOrigin = "anonymous";
-    addAudioPlayer(audioPlayer);
 
     unlockAudioContext(audioCtx);
 
+    // The scene, analyser wiring and requestAnimationFrame loop are created once.
+    // Only the media element source is swapped when the track changes.
+    analyser.fftSize = 256; // 256 for analyser.getByteFrequencyData(dataArray) and 2048 for analyser.getByteTimeDomainData(dataArray)
+    var bufferLength = analyser.frequencyBinCount;
+    var dataArray = new Uint8Array(bufferLength)
+    console.log(bufferLength)
+    buildVisualizer(analyser, dataArray);
+
     if (window.ResizeObserver) {
         new ResizeObserver(() => resizeVisualizer()).observe(document.body);
-    } else {
-        window.addEventListener('resize', () => resizeVisualizer());
     }
+    window.addEventListener('resize', () => resizeVisualizer());
 
     //Searches for and loads previous songs uploaded to firebase
     songsRef.on('child_added', snapshot => {
@@ -134,8 +144,7 @@ window.onload = function () {
         button.type = 'button';
         button.textContent = button.title = snapshot.key;
         button.addEventListener('click', () => {
-            audioPlayer.src = songUrl;
-            setCurrentTrack(snapshot.key, songUrl, button);
+            switchToTrack(snapshot.key, songUrl, button, null);
             if (narrowLayout.matches) closeLibrary();
         });
         item.appendChild(button);
@@ -147,7 +156,7 @@ window.onload = function () {
     });
 
     function updatePlayingIndicator() {
-        if (!selectedSong) return;
+        if (!selectedSong || selectedSong !== getCurrentSongButton()) return;
         const playing = !audioPlayer.paused && !audioPlayer.ended && !audioPlayer.error &&
             audioPlayer.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA;
         selectedSong.toggleAttribute('data-playing', playing);
@@ -158,23 +167,88 @@ window.onload = function () {
         }
     }
 
+    function getCurrentSongButton() {
+        return selectedSong && selectedSong.isConnected ? selectedSong : null;
+    }
+
     function selectSong(button) {
+        // The playing marker may only ever live on the current track's button.
+        for (const marked of prevSongs.querySelectorAll('[data-playing]')) {
+            marked.removeAttribute('data-playing');
+            marked.removeAttribute('aria-description');
+        }
         if (selectedSong) {
             selectedSong.removeAttribute('aria-current');
             selectedSong.removeAttribute('data-playing');
             selectedSong.removeAttribute('aria-description');
         }
-        selectedSong = button;
+        selectedSong = button || null;
         if (selectedSong) {
             selectedSong.setAttribute('aria-current', 'true');
             updatePlayingIndicator();
         }
     }
 
-    function setCurrentTrack(name, url, button) {
-        trackTitle.textContent = trackTitle.title = name;
+    function disconnectCurrentSource() {
+        // Tear down the previous audio path completely so only the new track
+        // can reach the analyser: stop the element, cut every Web Audio
+        // connection it owns, release its object URL and remove it from the DOM.
+        if (audioPlayer) {
+            audioPlayer.pause();
+            audioPlayer.removeAttribute('src');
+            audioPlayer.load();
+            for (const event of ['play', 'playing', 'pause', 'ended', 'emptied', 'waiting', 'seeked', 'error']) {
+                audioPlayer.removeEventListener(event, updatePlayingIndicator);
+            }
+        }
+        if (currentSource) {
+            try {
+                currentSource.disconnect();
+            } catch (e) {
+                console.log(e);
+            }
+            currentSource = null;
+        }
+        if (currentObjectUrl) {
+            URL.revokeObjectURL(currentObjectUrl);
+            currentObjectUrl = null;
+        }
+        if (audioPlayer && audioPlayer.isConnected) {
+            audioPlayer.remove();
+        }
+        audioPlayer = null;
+    }
+
+    function connectTrack(name, url, button, objectUrl) {
+        var player = new Audio(url);
+        player.crossOrigin = "anonymous";
+        player.controls = true;
+
+        // One MediaElementAudioSourceNode per audio element. The previous one
+        // was disconnected above, so the analyser keeps exactly one active source.
+        var source = audioCtx.createMediaElementSource(player);
+        source.connect(analyser);
+        analyser.connect(audioCtx.destination);
+        totalSourcesCreated++;
+
+        player.addEventListener('play', () => audioCtx.resume());
+        for (const event of ['playing', 'pause', 'ended', 'emptied', 'waiting', 'seeked', 'error']) {
+            player.addEventListener(event, updatePlayingIndicator);
+        }
+
+        audioDiv.replaceChildren(player);
+
+        audioPlayer = player;
+        currentSource = source;
+        currentObjectUrl = objectUrl || null;
         currentSongUrl = url;
+        trackTitle.textContent = trackTitle.title = name;
         selectSong(button);
+    }
+
+    function switchToTrack(name, url, button, objectUrl) {
+        disconnectCurrentSource();
+        connectTrack(name, url, button, objectUrl);
     }
 
     fileUpload.onchange = (event) => {
@@ -194,52 +268,70 @@ window.onload = function () {
             .catch(err => console.log(err))
 
         //Creates a temporary url for the file that was uploaded so that it could be played the audio element
-        audioPlayer = new Audio(URL.createObjectURL(file));
-        audioPlayer.crossOrigin = "anonymous";
-        setCurrentTrack(songName, audioPlayer.src);
-        addAudioPlayer(audioPlayer);
+        var objectUrl = URL.createObjectURL(file);
+        switchToTrack(songName, objectUrl, null, objectUrl);
+        // Resetting the input makes selecting the same file again fire onchange,
+        // while switchToTrack still tears down the previous element/source first.
+        fileUpload.value = '';
         if (narrowLayout.matches) closeLibrary();
     }
 
-    function addAudioPlayer(audioPlayer) {
-        //Prevents local memory of audio files so you can create a new instance on upload
-        audioDiv.firstChild !== null ? (audioDiv.firstElementChild.remove(), (audioDiv.appendChild(audioPlayer))) : audioDiv.appendChild(audioPlayer);
-        audioPlayer.controls = true;
-        audioPlayer.addEventListener('play', () => audioCtx.resume());
-        for (const event of ['playing', 'pause', 'ended', 'emptied', 'waiting', 'seeked', 'error']) {
-            audioPlayer.addEventListener(event, updatePlayingIndicator);
-        }
+    // Start with the built-in default song. Its button (if any) is marked once
+    // the Firebase library list arrives.
+    connectTrack(trackTitle.textContent, defaultSong, null, null);
 
-        analyzeAudio(audioPlayer);
-    }
+    // Read-only hooks used by the local acceptance page (tests/acceptance.html).
+    window.__musicVisualizer = {
+        get activeSourceCount() {
+            return currentSource ? 1 : 0;
+        },
+        get totalSourcesCreated() {
+            return totalSourcesCreated;
+        },
+        get currentSourceConnected() {
+            return !!currentSource;
+        },
+        get audioElementCount() {
+            return audioDiv.querySelectorAll('audio').length;
+        },
+        get selectedSongName() {
+            return selectedSong ? selectedSong.textContent : null;
+        },
+        get audioPlayer() {
+            return audioPlayer;
+        },
+        get playingMarkerCount() {
+            return prevSongs.querySelectorAll('button[data-playing]').length;
+        },
+        get playingMarkerOnSelected() {
+            return selectedSong ? selectedSong.hasAttribute('data-playing') : false;
+        },
+        get cameraAspect() {
+            return resizeVisualizer._camera ? resizeVisualizer._camera.aspect : null;
+        },
+        get canvas() {
+            return document.querySelector('canvas');
+        },
+        get narrowLayout() {
+            return narrowLayout;
+        },
+        get library() {
+            return library;
+        },
+        get settings() {
+            return settings;
+        }
+    };
 }
 
-function analyzeAudio(audioPlayer) {
-    // AnalyserNode is necessary to provide real-time frequency and time-domain analysis information. It is an AudioNode that passes the audio stream unchanged from the input to the output, but allows you to take the generated data, process it, and create audio visualizations.
-    source = audioCtx.createMediaElementSource(audioPlayer) // Uploaded audio becomes the source for the media stream
-    source.connect(analyser)
-    analyser.connect(audioCtx.destination)
-
-    analyser.fftSize = 256; // 256 for analyser.getByteFrequencyData(dataArray) and 2048 for analyser.getByteTimeDomainData(dataArray)
-    var bufferLength = analyser.frequencyBinCount;
-    var dataArray = new Uint8Array(bufferLength)
-    console.log(bufferLength)
-
+function buildVisualizer(analyser, dataArray) {
     //Scene Details
     var scene = new THREE.Scene(); //new scene instance
     scene.background = new THREE.Color(0x000000);
     scene.fog = new THREE.FogExp2(0xcccccc, 0.002);
 
     var renderer = new THREE.WebGLRenderer();
-    if (document.querySelector('canvas')) {
-        cancelAnimationFrame(animate);
-        scene.remove.apply(scene, scene.children);
-        document.querySelector('canvas').remove();
-        document.body.appendChild(renderer.domElement);
-
-    } else {
-        document.body.appendChild(renderer.domElement)
-    }
+    document.body.appendChild(renderer.domElement)
 
     //Lighting Details
     var light = new THREE.AmbientLight(0x505050);
@@ -269,12 +361,17 @@ function analyzeAudio(audioPlayer) {
     camera.lookAt(scene.position);
 
     resizeVisualizer = function () {
-        var width = document.body.clientWidth;
-        var height = document.body.clientHeight;
+        // Keep the drawing buffer, renderer size and camera aspect ratio all in
+        // sync with the actual viewport (including device pixel ratio).
+        var width = window.innerWidth || document.body.clientWidth;
+        var height = window.innerHeight || document.body.clientHeight;
+        var pixelRatio = window.devicePixelRatio || 1;
         camera.aspect = width / height;
         camera.updateProjectionMatrix();
+        renderer.setPixelRatio(pixelRatio);
         renderer.setSize(width, height, false);
     };
+    resizeVisualizer._camera = camera;
     resizeVisualizer();
 
     //Controls Details
