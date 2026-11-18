@@ -42,6 +42,10 @@ export class Phasor {
     this.deltaPhase = (2 * Math.PI * frequency) / sampleRate;
   }
 
+  reset(): void {
+    this.phase = 0;
+  }
+
   rotate(): Complex {
     const result = new Complex(Math.cos(this.phase), Math.sin(this.phase));
     this.phase += this.deltaPhase;
@@ -304,5 +308,12 @@ export class ComplexConvolution {
       filter.taps[i] = kaiser.window(2.0, i, filter.length) * Filter.lowPass(cutoffFrequency, sampleRate, i, filter.length);
     }
     return filter;
+  }
+
+  reset(): void {
+    this.real.fill(0);
+    this.imag.fill(0);
+    this.pos = 0;
+    this.sum.set(0, 0);
   }
 }

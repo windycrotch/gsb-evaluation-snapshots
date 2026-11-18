@@ -139,6 +139,51 @@ export const SSTV_MODES = {
   },
 } as const;
 
+/**
+ * Configurable margin used to validate the spacing between two consecutive
+ * sync pulses. The allowed deviation from a mode's `scanTime` is
+ * `scanTime * relative + marginMs`, so slower modes automatically get a
+ * proportionally wider window while still rejecting a missing line
+ * (roughly 2x scanTime) or a spurious half-line sync.
+ */
+export interface LineTimingToleranceOptions {
+  /** Fraction of `scanTime` that may be deviated from. Default 0.1 (10%). */
+  readonly relative?: number;
+  /** Extra absolute margin on top of the relative one. Default 15ms. */
+  readonly marginMs?: number;
+}
+
+export const DEFAULT_LINE_TIMING_RELATIVE_TOLERANCE = 0.1;
+export const DEFAULT_LINE_TIMING_MARGIN_MS = 15;
+
+/**
+ * Maximum allowed |measured line distance - scanTime| in milliseconds.
+ * @param scanTimeMs The mode's nominal line duration in milliseconds.
+ * @param options Optional overrides for the relative and absolute margins.
+ */
+export function lineTimingToleranceMs(
+  scanTimeMs: number,
+  options: LineTimingToleranceOptions = {}
+): number {
+  const relative = options.relative ?? DEFAULT_LINE_TIMING_RELATIVE_TOLERANCE;
+  const marginMs = options.marginMs ?? DEFAULT_LINE_TIMING_MARGIN_MS;
+  return Math.max(0, scanTimeMs * Math.max(0, relative) + Math.max(0, marginMs));
+}
+
+/**
+ * Decide whether two consecutive sync pulses are spaced like one scan line of
+ * the given mode. Both a missing sync (roughly 2x scanTime) and a spurious
+ * half-line sync (well under scanTime) must be rejected, while normal timing
+ * jitter has to pass.
+ */
+export function isLineSpacingWithinTolerance(
+  distanceMs: number,
+  scanTimeMs: number,
+  options: LineTimingToleranceOptions = {}
+): boolean {
+  return Math.abs(distanceMs - scanTimeMs) <= lineTimingToleranceMs(scanTimeMs, options);
+}
+
 // Frequency constants
 export const FREQ_SYNC = 1200; // Hz - sync pulse
 export const FREQ_BLACK = 1500; // Hz - black level

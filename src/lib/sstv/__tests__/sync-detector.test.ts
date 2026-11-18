@@ -1,4 +1,30 @@
-import { SyncDetector, SyncPulseWidth } from '../sync-detector';
+import { SyncDetector, SyncPulseWidth, SyncPulseEvent } from '../sync-detector';
+import {
+  SYNC_FREQ,
+  BLACK_FREQ,
+  Tone,
+  renderTones,
+  leadIn,
+  syncEndIndices,
+} from '../test-support/synthetic-audio';
+
+/** Run a buffer through a detector in fixed-size chunks, collecting events. */
+function processInChunks(
+  detector: SyncDetector,
+  samples: Float32Array,
+  chunkSize: number
+): { chunkStart: number; event: SyncPulseEvent }[] {
+  const events: { chunkStart: number; event: SyncPulseEvent }[] = [];
+  for (let offset = 0; offset < samples.length; offset += chunkSize) {
+    const chunk = samples.subarray(offset, Math.min(offset + chunkSize, samples.length));
+    const demodulated = new Float32Array(chunk.length);
+    const result = detector.process(chunk, demodulated);
+    for (const event of result.detections) {
+      events.push({ chunkStart: offset, event });
+    }
+  }
+  return events;
+}
 
 describe('SyncDetector', () => {
   const sampleRate = 48000;
@@ -256,6 +282,228 @@ describe('SyncDetector', () => {
       ]);
 
       expect(values.size).toBe(4);
+    });
+  });
+
+  describe('Pulse width across process() calls', () => {
+    /** 9ms and 20ms pulses separated by black level, with a lead-in. */
+    const pulses: Tone[] = [
+      leadIn(100),
+      { freq: SYNC_FREQ, ms: 9 },
+      { freq: BLACK_FREQ, ms: 100 },
+      { freq: SYNC_FREQ, ms: 20 },
+      { freq: BLACK_FREQ, ms: 100 },
+    ];
+
+    test('measures an unsplit 9ms pulse as NineMilliSeconds', () => {
+      const detector = new SyncDetector(sampleRate);
+      const audio = renderTones(pulses, sampleRate);
+
+      const events = processInChunks(detector, audio, audio.length);
+
+      expect(events.map(e => e.event.width)).toEqual([
+        SyncPulseWidth.NineMilliSeconds,
+        SyncPulseWidth.TwentyMilliSeconds,
+      ]);
+    });
+
+    test('recognises a 9ms pulse split across two process() calls', () => {
+      const audio = renderTones(pulses, sampleRate);
+      const truth = syncEndIndices(pulses, sampleRate);
+      // Place the chunk boundary inside the first pulse so the pulse straddles
+      // the two calls. The detector never sees a whole pulse in either call.
+      const chunkSize = truth[0] - Math.round(0.003 * sampleRate);
+
+      const events = processInChunks(new SyncDetector(sampleRate), audio, chunkSize);
+
+      expect(events.length).toBe(2);
+      expect(events[0].event.width).toBe(SyncPulseWidth.NineMilliSeconds);
+    });
+
+    test('recognises a 20ms pulse split across two process() calls', () => {
+      const audio = renderTones(pulses, sampleRate);
+      const truth = syncEndIndices(pulses, sampleRate);
+      const chunkSize = truth[1] - Math.round(0.005 * sampleRate);
+
+      const events = processInChunks(new SyncDetector(sampleRate), audio, chunkSize);
+
+      expect(events.map(e => e.event.width)).toContain(SyncPulseWidth.TwentyMilliSeconds);
+    });
+
+    test('reports every pulse that ends inside a single large call', () => {
+      const audio = renderTones(pulses, sampleRate);
+
+      // One call containing both pulses: the result must not collapse to the
+      // last pulse only.
+      const events = processInChunks(new SyncDetector(sampleRate), audio, audio.length);
+
+      expect(events.map(e => e.event.width)).toEqual([
+        SyncPulseWidth.NineMilliSeconds,
+        SyncPulseWidth.TwentyMilliSeconds,
+      ]);
+      // Ordered by position within the chunk.
+      expect(events[0].event.offset).toBeLessThan(events[1].event.offset);
+    });
+
+    test('keeps the single-result fields consistent with the detection list', () => {
+      const audio = renderTones(pulses, sampleRate);
+      const detector = new SyncDetector(sampleRate);
+
+      const result = detector.process(audio, new Float32Array(audio.length));
+
+      expect(result.detections.length).toBe(2);
+      const last = result.detections[result.detections.length - 1];
+      expect(result.detected).toBe(true);
+      expect(result.width).toBe(last.width);
+      expect(result.offset).toBe(last.offset);
+      expect(result.frequencyOffset).toBe(last.frequencyOffset);
+    });
+
+    test.each([32, 100, 251, 512, 1024, 4096])(
+      'reports every pulse at chunk size %i, independent of chunking',
+      chunkSize => {
+        const audio = renderTones(pulses, sampleRate);
+
+        const events = processInChunks(new SyncDetector(sampleRate), audio, chunkSize);
+
+        expect(events.map(e => e.event.width)).toEqual([
+          SyncPulseWidth.NineMilliSeconds,
+          SyncPulseWidth.TwentyMilliSeconds,
+        ]);
+      }
+    );
+
+    test('reports pulse width as 5ms for a VIS-style short pulse', () => {
+      const audio = renderTones(
+        [leadIn(100), { freq: SYNC_FREQ, ms: 5 }, { freq: BLACK_FREQ, ms: 100 }],
+        sampleRate
+      );
+
+      const events = processInChunks(new SyncDetector(sampleRate), audio, 512);
+
+      expect(events.length).toBe(1);
+      expect(events[0].event.width).toBe(SyncPulseWidth.FiveMilliSeconds);
+    });
+  });
+
+  describe('Pulse-end offset contract', () => {
+    const tones: Tone[] = [
+      leadIn(100),
+      { freq: SYNC_FREQ, ms: 9 },
+      { freq: BLACK_FREQ, ms: 150 },
+      { freq: SYNC_FREQ, ms: 9 },
+      { freq: BLACK_FREQ, ms: 150 },
+    ];
+
+    test.each([64, 100, 512, 1024, 4096, 24000])(
+      'offset addresses a sample inside the current chunk at chunk size %i',
+      chunkSize => {
+        const audio = renderTones(tones, sampleRate);
+
+        const events = processInChunks(new SyncDetector(sampleRate), audio, chunkSize);
+
+        expect(events.length).toBe(2);
+        for (const { event } of events) {
+          expect(Number.isInteger(event.offset)).toBe(true);
+          expect(event.offset).toBeGreaterThanOrEqual(0);
+          expect(event.offset).toBeLessThan(chunkSize);
+        }
+      }
+    );
+
+    test.each([64, 256, 1024, 4096])(
+      'chunkStart + offset lands within a few ms of the true pulse end (chunk %i)',
+      chunkSize => {
+        const audio = renderTones(tones, sampleRate);
+        const truth = syncEndIndices(tones, sampleRate);
+
+        const events = processInChunks(new SyncDetector(sampleRate), audio, chunkSize);
+
+        expect(events.length).toBe(2);
+        events.forEach(({ chunkStart, event }, index) => {
+          const absolute = chunkStart + event.offset;
+          // The detector's smoothing chain delays the observed edge; tolerate
+          // that fixed lag but nothing larger.
+          expect(Math.abs(absolute - truth[index])).toBeLessThan(
+            Math.round(0.006 * sampleRate)
+          );
+        });
+      }
+    );
+  });
+
+  describe('Reset clears cross-buffer state', () => {
+    test('drops the in-progress pulse counter on reset', () => {
+      const detector = new SyncDetector(sampleRate);
+      const preSync = renderTones([leadIn(100), { freq: SYNC_FREQ, ms: 6 }], sampleRate);
+      const restOfPulse = renderTones(
+        [{ freq: SYNC_FREQ, ms: 3 }, { freq: BLACK_FREQ, ms: 100 }],
+        sampleRate
+      );
+
+      // Six of the nine sync milliseconds go through first; without a reset the
+      // remaining three would complete a valid 9ms pulse.
+      const demodulated = new Float32Array(preSync.length);
+      detector.process(preSync, demodulated);
+
+      detector.reset();
+
+      const restDemodulated = new Float32Array(restOfPulse.length);
+      const afterReset = detector.process(restOfPulse, restDemodulated);
+
+      // A full 9ms/20ms pulse must not be reported. (Filter transients right
+      // after a reset can register as a short 5ms pulse, which is not a line
+      // sync and is ignored by the decoder.)
+      expect(
+        afterReset.detections.some(
+          d => d.width === SyncPulseWidth.NineMilliSeconds ||
+               d.width === SyncPulseWidth.TwentyMilliSeconds
+        )
+      ).toBe(false);
+    });
+
+    test('detects reliably again after reset, including split pulses', () => {
+      const detector = new SyncDetector(sampleRate);
+      const tones: Tone[] = [
+        leadIn(100),
+        { freq: SYNC_FREQ, ms: 9 },
+        { freq: BLACK_FREQ, ms: 100 },
+      ];
+      const audio = renderTones(tones, sampleRate);
+
+      // Warm the detector up, then reset so all filters start clean.
+      const warmupDemod = new Float32Array(1024);
+      detector.process(audio.subarray(0, 1024), warmupDemod);
+      detector.reset();
+
+      const truth = syncEndIndices(tones, sampleRate);
+      const chunkSize = truth[0] - Math.round(0.004 * sampleRate);
+      const events = processInChunks(detector, audio, chunkSize);
+
+      expect(events.map(e => e.event.width)).toEqual([SyncPulseWidth.NineMilliSeconds]);
+    });
+
+    test('reset() during a pulse does not leak the partial width into the next pulse', () => {
+      const detector = new SyncDetector(sampleRate);
+      const firstHalf = renderTones(
+        [leadIn(50), { freq: SYNC_FREQ, ms: 7 }],
+        sampleRate
+      );
+      detector.process(firstHalf, new Float32Array(firstHalf.length));
+
+      detector.reset();
+
+      const fresh = new SyncDetector(sampleRate);
+      const probe = renderTones(
+        [leadIn(50), { freq: SYNC_FREQ, ms: 14 }],
+        sampleRate
+      );
+      const events = processInChunks(detector, probe, 512);
+      const referenceEvents = processInChunks(fresh, probe, 512);
+
+      expect(events.map(e => e.event.width)).toEqual(
+        referenceEvents.map(e => e.event.width)
+      );
     });
   });
 });

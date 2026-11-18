@@ -1,4 +1,10 @@
-import { SSTV_MODES } from '../constants';
+import {
+  SSTV_MODES,
+  lineTimingToleranceMs,
+  isLineSpacingWithinTolerance,
+  DEFAULT_LINE_TIMING_RELATIVE_TOLERANCE,
+  DEFAULT_LINE_TIMING_MARGIN_MS,
+} from '../constants';
 
 describe('SSTV Mode Constants', () => {
   describe('Robot36 Mode', () => {
@@ -168,5 +174,61 @@ describe('SSTV Mode Constants', () => {
       expect(pd160Dwell).toBeGreaterThan(pd120Dwell);
       expect(pd160Dwell).toBeGreaterThan(pd180Dwell);
     });
+  });
+});
+
+describe('Line timing tolerance', () => {
+  test('uses the documented default margins', () => {
+    const scanTime = 400;
+    expect(lineTimingToleranceMs(scanTime)).toBeCloseTo(
+      scanTime * DEFAULT_LINE_TIMING_RELATIVE_TOLERANCE + DEFAULT_LINE_TIMING_MARGIN_MS,
+      6
+    );
+  });
+
+  test('scales with scanTime', () => {
+    const robot36 = lineTimingToleranceMs(SSTV_MODES.ROBOT36.scanTime);
+    const pd120 = lineTimingToleranceMs(SSTV_MODES.PD120.scanTime);
+    expect(pd120).toBeGreaterThan(robot36);
+  });
+
+  test('stays below the spacing produced by a missing sync', () => {
+    // A missed sync yields ~2x scanTime; the band must not stretch that far.
+    for (const mode of Object.values(SSTV_MODES)) {
+      expect(lineTimingToleranceMs(mode.scanTime)).toBeLessThan(mode.scanTime);
+    }
+  });
+
+  test('accepts an exact scanTime spacing', () => {
+    for (const mode of Object.values(SSTV_MODES)) {
+      expect(isLineSpacingWithinTolerance(mode.scanTime, mode.scanTime)).toBe(true);
+    }
+  });
+
+  test('accepts realistic jitter and rejects gross deviations', () => {
+    const scanTime = SSTV_MODES.PD120.scanTime;
+    const tolerance = lineTimingToleranceMs(scanTime);
+
+    // A few percent of jitter must pass.
+    expect(isLineSpacingWithinTolerance(scanTime * 1.03, scanTime)).toBe(true);
+    expect(isLineSpacingWithinTolerance(scanTime * 0.97, scanTime)).toBe(true);
+
+    // Clearly wrong spacings must fail.
+    expect(isLineSpacingWithinTolerance(scanTime - tolerance - 1, scanTime)).toBe(false);
+    expect(isLineSpacingWithinTolerance(scanTime * 2, scanTime)).toBe(false);
+    expect(isLineSpacingWithinTolerance(scanTime * 0.25, scanTime)).toBe(false);
+  });
+
+  test('honours explicit overrides', () => {
+    const scanTime = 300;
+    expect(lineTimingToleranceMs(scanTime, { relative: 0, marginMs: 0 })).toBe(0);
+    expect(lineTimingToleranceMs(scanTime, { relative: 0.5, marginMs: 0 })).toBeCloseTo(150, 6);
+
+    expect(isLineSpacingWithinTolerance(scanTime + 20, scanTime, { relative: 0, marginMs: 10 })).toBe(false);
+    expect(isLineSpacingWithinTolerance(scanTime + 20, scanTime, { relative: 0, marginMs: 25 })).toBe(true);
+  });
+
+  test('never returns a negative tolerance', () => {
+    expect(lineTimingToleranceMs(100, { relative: -1, marginMs: -50 })).toBe(0);
   });
 });

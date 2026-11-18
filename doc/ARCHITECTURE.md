@@ -136,6 +136,9 @@ src/lib/sstv/
 │       ├── FM demodulates baseband signal
 │       ├── Applies moving average filter
 │       ├── Uses Schmitt trigger to detect sync threshold crossings
+│       ├── Measures pulse width across process() calls (state survives chunks)
+│       ├── Reports every pulse in the chunk, with a delay-compensated offset
+│       │   that always addresses a sample inside that chunk
 │       └── Returns pulse width classification + frequency offset calibration
 │
 ├── robot36-line-decoder.ts # Robot36 line decoding
@@ -192,13 +195,18 @@ The decoder processes audio in a multi-stage pipeline:
    ├── FM demodulate: instantaneous_frequency = arg(sample × conj(prev)) / π
    ├── Apply moving average filter (smoothing)
    ├── Schmitt trigger: detect frequency drops below -1.750 threshold (1200Hz sync)
-   ├── Measure pulse width duration
+   ├── Measure pulse width duration (counter persists across process() calls,
+   │   so a pulse straddling an audio chunk boundary is still measured whole)
    └── Classify: 5ms (VIS half), 9ms (scan line), 20ms (VIS full)
 
 4. LINE EXTRACTION
-   ├── When 9ms sync detected, calculate distance to previous sync
-   ├── Extract demodulated samples between sync boundaries
-   └── Pass to Robot36LineDecoder
+   ├── When a 9ms/20ms sync completes, compute the distance to the previous sync
+   ├── Validate the distance against the mode's scanTime ± tolerance
+   │   (tolerance = scanTime × 10% + 15ms by default; configurable per decoder)
+   ├── If in tolerance: extract demodulated samples between the two syncs
+   ├── If out of tolerance: drop the line, leave currentLine unchanged, and
+   │   re-anchor on the new sync so the next interval is measured cleanly
+   └── Pass the extracted samples to the mode's line decoder
 
 5. LINE DECODING (Robot36LineDecoder.decodeScanLine)
    ├── Parse line structure: sync → porch → Y → separator → porch → chroma

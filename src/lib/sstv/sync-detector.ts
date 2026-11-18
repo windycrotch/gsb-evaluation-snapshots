@@ -21,11 +21,32 @@ export enum SyncPulseWidth {
   None,
 }
 
-export interface SyncPulseDetection {
-  detected: boolean;
+/** A single sync pulse that ended inside the chunk just processed. */
+export interface SyncPulseEvent {
   width: SyncPulseWidth;
-  offset: number; // Sample offset where sync pulse ended
-  frequencyOffset: number; // Frequency calibration offset
+  /**
+   * Sample offset, relative to the START of the samples passed to the current
+   * `process()` call, where the sync pulse ended (delay compensated).
+   *
+   * The value always addresses a sample inside the current call (`0 <= offset
+   * < samples.length`). When a pulse spans more than one `process()` call the
+   * pulse-end transition is observed in the call that receives the trailing
+   * part of the pulse, so the reported position is in that chunk. Callers
+   * translate it to an absolute buffer position with
+   * `chunkStart + offset` (modulo the buffer size).
+   */
+  offset: number;
+  frequencyOffset: number;
+}
+
+export interface SyncPulseDetection extends SyncPulseEvent {
+  detected: boolean;
+  /**
+   * Every valid sync pulse detected during this call, in the order they ended.
+   * The top-level fields mirror the last entry so that simple callers can keep
+   * using the single-result shape.
+   */
+  detections: SyncPulseEvent[];
 }
 
 export class SyncDetector {
@@ -36,6 +57,9 @@ export class SyncDetector {
   private baseBandOscillator: Phasor;
   private syncPulseValueDelay: Delay;
 
+  // Width measurement state. This counter is deliberately a field (not a local
+  // of process()) so that a pulse straddling two process() calls keeps
+  // accumulating instead of being restarted at each chunk boundary.
   private syncPulseCounter: number = 0;
   private centerFrequency: number;
   private scanLineBandwidth: number;
@@ -121,6 +145,18 @@ export class SyncDetector {
   }
 
   /**
+   * Keep the reported pulse-end offset addressable inside the chunk that is
+   * currently being processed. A filter-delay correction can push the position
+   * before sample 0 when the pulse started in an earlier chunk.
+   */
+  private clampOffsetToChunk(offset: number, chunkLength: number): number {
+    if (chunkLength <= 0) return 0;
+    if (offset < 0) return 0;
+    if (offset > chunkLength - 1) return chunkLength - 1;
+    return offset;
+  }
+
+  /**
    * Process audio samples and detect sync pulses
    * @param samples Input audio samples
    * @param demodulated Output buffer for demodulated frequency values
@@ -131,8 +167,13 @@ export class SyncDetector {
     let syncPulseWidth = SyncPulseWidth.None;
     let syncPulseOffset = 0;
     let frequencyOffset = 0;
+    const detections: SyncPulseEvent[] = [];
 
     this.debugSampleCount += samples.length;
+
+    // Number of samples the detection path lags behind the true pulse edge.
+    // Used to map the observed trigger release back to the pulse end.
+    const pulseEndDelay = this.syncPulseFilterDelay;
 
     // Track demodulated value statistics
     let minDemod = Infinity;
@@ -167,7 +208,10 @@ export class SyncDetector {
         this.debugMaxCounter = this.syncPulseCounter;
       }
 
-      // Sync pulse detection using Schmitt trigger
+      // Sync pulse detection using Schmitt trigger.
+      // `syncPulseCounter` lives on the instance, so a pulse that straddles two
+      // process() calls keeps accumulating across the chunk boundary instead of
+      // being restarted (which would mis-measure or miss the pulse).
       if (!this.syncPulseTrigger.latch(syncPulseValue)) {
         // In sync pulse (low frequency)
         this.syncPulseCounter++;
@@ -200,10 +244,20 @@ export class SyncDetector {
           syncPulseWidth = SyncPulseWidth.TwentyMilliSeconds;
         }
 
-        syncPulseOffset = i - this.syncPulseFilterDelay;
+        // Map the observed (filter-delayed) release point back to the true pulse
+        // end. For a pulse that started in a previous call the compensated
+        // position can fall before this chunk; the result is clamped so the
+        // returned offset always addresses a sample inside the current call.
+        // Callers convert it with `chunkStart + offset`.
+        syncPulseOffset = this.clampOffsetToChunk(i - pulseEndDelay, samples.length);
         frequencyOffset = syncPulseDelayedValue - this.syncPulseFrequencyValue;
         syncPulseDetected = true;
         console.log(`✅ Valid sync detected: width=${syncPulseWidth}, counter=${this.syncPulseCounter}, freqOffset=${frequencyOffset.toFixed(3)}`);
+        detections.push({
+          width: syncPulseWidth,
+          offset: syncPulseOffset,
+          frequencyOffset,
+        });
         this.syncPulseCounter = 0;
         this.debugMaxCounter = 0;
       }
@@ -238,14 +292,22 @@ export class SyncDetector {
       width: syncPulseWidth,
       offset: syncPulseOffset,
       frequencyOffset,
+      detections,
     };
   }
 
   reset(): void {
+    // Everything that carries state from one process() call (and therefore
+    // from one audio buffer) to the next must be cleared here.
     this.syncPulseFilter.reset();
     this.frequencyModulation.reset();
     this.syncPulseTrigger.reset();
     this.syncPulseValueDelay.reset();
+    this.baseBandLowPass.reset();
+    this.baseBandOscillator.reset();
     this.syncPulseCounter = 0;
+    this.debugSampleCount = 0;
+    this.debugLastLogTime = 0;
+    this.debugMaxCounter = 0;
   }
 }

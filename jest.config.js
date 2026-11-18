@@ -19,6 +19,7 @@ const customJestConfig = {
     'src/**/*.{js,jsx,ts,tsx}',
     '!src/**/*.d.ts',
     '!src/**/*.stories.{js,jsx,ts,tsx}',
+    '!src/**/test-support/**', // Test-only synthetic signal generators
     '!src/app/**', // Exclude app directory (integration tests separate)
   ],
   coverageThreshold: {

@@ -1,5 +1,12 @@
-import { SSTV_MODES, SSTVMode, SAMPLE_RATE } from './constants';
-import { SyncDetector, SyncPulseWidth } from './sync-detector';
+import {
+  SSTV_MODES,
+  SSTVMode,
+  SAMPLE_RATE,
+  lineTimingToleranceMs,
+  isLineSpacingWithinTolerance,
+  LineTimingToleranceOptions,
+} from './constants';
+import { SyncDetector, SyncPulseWidth, SyncPulseEvent } from './sync-detector';
 import { Robot36LineDecoder, DecodedLine as Robot36DecodedLine } from './robot36-line-decoder';
 import { Robot72LineDecoder, DecodedLine as Robot72DecodedLine } from './robot72-line-decoder';
 import { PD120LineDecoder, DecodedLine as PD120DecodedLine } from './pd120-line-decoder';
@@ -24,7 +31,17 @@ export interface DecoderStats {
   frequency: number;
   signalStrength: number; // 0-100 percentage
   snr: number | null; // Signal-to-Noise Ratio in dB (null if not available)
+  /** Lines discarded because their sync spacing was outside the mode's tolerance. */
+  linesDropped: number;
 }
+
+/**
+ * Minimum spacing (ms) between two accepted sync pulses. Anything closer is
+ * treated as a double detection of the same pulse rather than a line boundary.
+ * This is well below the shortest SSTV line (Robot36 at 150ms) but above the
+ * longest sync pulse (20ms) plus noise.
+ */
+const MIN_SYNC_SPACING_MS = 40;
 
 /**
  * Main SSTV Decoder using sync detection and line-based processing
@@ -48,20 +65,41 @@ export class SSTVDecoder {
   private syncDetector: SyncDetector;
   private lineDecoder: Robot36LineDecoder | Robot72LineDecoder | PD120LineDecoder | PD160LineDecoder | PD180LineDecoder | ScottieS1LineDecoder | ScottieS2LineDecoder;
 
-  // Line boundaries detected by sync pulses
+  // Line boundaries detected by sync pulses. Positions are absolute modulo the
+  // circular buffer size, so they survive across processSamples() calls.
   private lastSyncPos: number = -1;
   private lastSyncWidth: SyncPulseWidth | null = null;
 
   // Frequency calibration
   private frequencyOffset: number = 0;
 
+  // Line timing validation. The allowed distance between two sync pulses is
+  // the mode's scanTime ± tolerance. Lines outside that window are dropped so
+  // that a missed/extra sync cannot shift every following row.
+  private readonly lineTimingToleranceSamples: number;
+
+  // Number of lines discarded by the timing gate.
+  private linesDropped: number = 0;
+
   // Signal strength tracking
   private signalStrength: number = 0;
 
-  constructor(sampleRate: number = SAMPLE_RATE, modeName: keyof typeof SSTV_MODES = 'ROBOT36') {
+  // Default tolerance is derived from the mode's scanTime; callers may override
+  // the relative/absolute margins through the constructor.
+  private readonly timingTolerance: LineTimingToleranceOptions;
+
+  constructor(
+    sampleRate: number = SAMPLE_RATE,
+    modeName: keyof typeof SSTV_MODES = 'ROBOT36',
+    timingTolerance: LineTimingToleranceOptions = {}
+  ) {
     this.sampleRate = sampleRate;
     this.modeName = modeName;
     this.mode = SSTV_MODES[modeName];
+    this.timingTolerance = timingTolerance;
+
+    const toleranceMs = lineTimingToleranceMs(this.mode.scanTime, timingTolerance);
+    this.lineTimingToleranceSamples = (toleranceMs / 1000) * sampleRate;
 
     // Initialize image data based on mode dimensions
     this.imageData = new Uint8ClampedArray(this.mode.width * this.mode.height * 4);
@@ -126,6 +164,7 @@ export class SSTVDecoder {
     // Process samples through sync detector FIRST to get demodulated values
     const demodulated = new Float32Array(samples.length);
     const result = this.syncDetector.process(samples, demodulated);
+    const chunkStartPos = this.bufferWritePos;
 
     // Store both raw audio AND demodulated samples in circular buffers
     for (let i = 0; i < samples.length; i++) {
@@ -142,36 +181,70 @@ export class SSTVDecoder {
       this.lastLogTime = now;
     }
 
-    if (result.detected) {
-      console.log(`🎯 Sync DETECTED! width=${result.width}, offset=${result.offset}, freqOffset=${result.frequencyOffset.toFixed(1)}Hz`);
-
-      // Calculate absolute position in buffer (where sync pulse ended)
-      const syncEndPos = (this.bufferWritePos - samples.length + result.offset + this.bufferSize) % this.bufferSize;
-
-      // Only process if this is a new sync pulse (9ms or 20ms)
-      if ((result.width === SyncPulseWidth.NineMilliSeconds || result.width === SyncPulseWidth.TwentyMilliSeconds) &&
-          (this.lastSyncPos === -1 || this.distanceInBuffer(this.lastSyncPos, syncEndPos) > this.sampleRate * 0.1)) {
-
-        // Update frequency calibration
-        this.frequencyOffset = result.frequencyOffset;
-
-        // If we have a previous sync, decode the line between them
-        if (this.lastSyncPos !== -1) {
-          const distance = this.distanceInBuffer(this.lastSyncPos, syncEndPos);
-          console.log(`📏 Decoding line between syncs: distance=${distance} samples (${(distance/this.sampleRate*1000).toFixed(1)}ms)`);
-          this.decodeLine(this.lastSyncPos, syncEndPos);
-        }
-
-        this.lastSyncPos = syncEndPos;
-        this.lastSyncWidth = result.width;
-      } else if (result.width === SyncPulseWidth.FiveMilliSeconds) {
-        console.log(`⏭️ Skipping 5ms sync (VIS code)`);
-      } else {
-        console.log(`⏭️ Skipping sync: too close to last`);
-      }
+    // Handle every pulse that ended inside this chunk, oldest first. A large
+    // chunk can contain more than one pulse; dropping all but the last would
+    // silently lose line boundaries.
+    for (const detection of result.detections) {
+      this.handleSyncDetection(detection, chunkStartPos);
     }
 
     this.absoluteSamplePosition += samples.length;
+  }
+
+  /**
+   * Advance line tracking for one detected sync pulse.
+   * @param detection Pulse reported by the sync detector
+   * @param chunkStartPos Absolute (circular) buffer position of sample 0 of the
+   *   chunk that produced this detection
+   */
+  private handleSyncDetection(detection: SyncPulseEvent, chunkStartPos: number): void {
+    const syncEndPos = (chunkStartPos + detection.offset + this.bufferSize) % this.bufferSize;
+
+    // Only process if this is a new sync pulse (9ms or 20ms)
+    if (detection.width !== SyncPulseWidth.NineMilliSeconds &&
+        detection.width !== SyncPulseWidth.TwentyMilliSeconds) {
+      console.log(`⏭️ Skipping 5ms sync (VIS code)`);
+      return;
+    }
+
+    const minSyncSpacing = (MIN_SYNC_SPACING_MS / 1000) * this.sampleRate;
+    if (this.lastSyncPos !== -1 && this.distanceInBuffer(this.lastSyncPos, syncEndPos) <= minSyncSpacing) {
+      // Same pulse seen twice (e.g. trigger chattered) - keep the older anchor.
+      console.log(`⏭️ Skipping sync: too close to last`);
+      return;
+    }
+
+    // Update frequency calibration
+    this.frequencyOffset = detection.frequencyOffset;
+
+    if (this.lastSyncPos !== -1) {
+      const distance = this.distanceInBuffer(this.lastSyncPos, syncEndPos);
+      const distanceMs = (distance / this.sampleRate) * 1000;
+      const expectedMs = this.mode.scanTime;
+      const toleranceMs = (this.lineTimingToleranceSamples / this.sampleRate) * 1000;
+
+      console.log(
+        `📏 Sync spacing: distance=${distance} samples (${distanceMs.toFixed(1)}ms), ` +
+        `expected=${expectedMs.toFixed(1)}ms ± ${toleranceMs.toFixed(1)}ms`
+      );
+
+      if (isLineSpacingWithinTolerance(distanceMs, expectedMs, this.timingTolerance)) {
+        this.decodeLine(this.lastSyncPos, syncEndPos);
+      } else {
+        // The spacing is not a plausible line duration for this mode: a sync
+        // was missed, or this pulse is spurious. Drop the line, leave
+        // currentLine untouched, and re-anchor on this pulse so the next
+        // interval is measured from a known-good boundary.
+        this.linesDropped++;
+        console.log(
+          `🚫 Dropping line: spacing ${distanceMs.toFixed(1)}ms outside ` +
+          `${expectedMs.toFixed(1)}ms ± ${toleranceMs.toFixed(1)}ms`
+        );
+      }
+    }
+
+    this.lastSyncPos = syncEndPos;
+    this.lastSyncWidth = detection.width;
   }
 
   /**
@@ -268,6 +341,7 @@ export class SSTVDecoder {
       frequency: Math.round(1900 + this.frequencyOffset), // Center frequency + offset
       signalStrength: Math.round(this.signalStrength),
       snr: null, // SNR will be calculated by the audio processor with AnalyserNode
+      linesDropped: this.linesDropped,
     };
   }
 
@@ -290,6 +364,7 @@ export class SSTVDecoder {
     this.lastSyncPos = -1;
     this.lastSyncWidth = null;
     this.frequencyOffset = 0;
+    this.linesDropped = 0;
     this.sampleCounter = 0;
     this.lastLogTime = 0;
     this.absoluteSamplePosition = 0;
@@ -300,6 +375,7 @@ export class SSTVDecoder {
 
     // Clear audio buffer
     this.audioBuffer.fill(0);
+    this.demodulatedBuffer.fill(0);
 
     // Clear image data to black
     for (let i = 0; i < this.imageData.length; i += 4) {
