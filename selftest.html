@@ -691,6 +691,308 @@
         hook.setMode('ink')
       }
 
+      // ════════════════════════════════════════════════════════════════════
+      // 专项：「归零 → 10 秒内撤回」完整链路（沙 / 墨遵守同一套可观察规则）
+      // 覆盖：正常撤回、超时失效、落笔失效、切模式失效、尺寸变化安全放弃、连续两次归零。
+      // 全程本地执行，无任何网络请求；超时用测试钩子把窗口改短，不空等 10 秒。
+      // ════════════════════════════════════════════════════════════════════
+      {
+        const clearBtnT = document.getElementById('clear')
+        const stageT = document.getElementById('stage')
+        const wait = (ms) => new Promise((r) => setTimeout(r, ms))
+        const undoClassOn = () => clearBtnT.classList.contains('undo')
+        const clearLabel = () =>
+          (hook.state.lang === 'en' ? 'Clear' : '归零')
+        const undoLabel = () =>
+          (hook.state.lang === 'en' ? 'Undo' : '撤回')
+        hook.state.aiOn = false
+
+        // ── 墨模式（含精 / 静，它们共用同一水墨引擎与同一套撤回状态机）──
+        hook.setMode('ink')
+
+        // U1) 正常归零后撤回：清空 → 按钮变「撤回」→ 再点恢复归零前画面，窗口随即关闭
+        engine.clear(); pump(2)
+        engine.strokeInk(0.5, 0.5, window.INKS.sumi, 2.0, 1, 0, 0.9)
+        pump(20)
+        const u1Before = inkFraction()
+        clearBtnT.click()                                   // 归零
+        pump(2)
+        const u1Cleared = inkFraction()
+        const u1Armed = hook.clearUndoArmed()
+        const u1UndoLook = undoClassOn() && clearBtnT.textContent === undoLabel()
+        clearBtnT.click()                                   // 撤回
+        pump(4)
+        const u1Restored = inkFraction()
+        check('撤回链路 U1（墨）：归零后 10 秒内撤回恢复画面',
+              u1Cleared < 0.02 && u1Armed && u1Restored > u1Before * 0.8,
+              'before=' + u1Before.toFixed(4) + ' cleared=' + u1Cleared.toFixed(4) + ' undo=' + u1Restored.toFixed(4))
+        check('撤回链路 U1（墨）：撤回后窗口关闭、按钮文字与样式回到「归零」',
+              hook.clearUndoArmed() === false && !undoClassOn() && clearBtnT.textContent === clearLabel(),
+              'armed=' + hook.clearUndoArmed() + ' class=' + undoClassOn() + ' label="' + clearBtnT.textContent + '"')
+        check('撤回链路 U1（墨）：归零时按钮进入「撤回」态（样式 + 文案）',
+              u1UndoLook, 'undoStyle=' + u1UndoLook)
+
+        // U2) 超过 10 秒：窗口自动关闭，再点只执行一次新的归零（不会恢复旧画面）
+        engine.clear(); pump(2)
+        engine.strokeInk(0.4, 0.5, window.INKS.shu, 2.0, 1, 0, 0.9)
+        pump(12)
+        const u2Ink = inkFraction()
+        hook.setClearUndoMs(40)                             // 把 10s 窗口临时改短
+        clearBtnT.click()                                   // 归零
+        const u2ArmedRightAway = hook.clearUndoArmed()
+        await wait(140)                                     // 等短窗口超时
+        const u2TimedOut = !hook.clearUndoArmed() && !undoClassOn() &&
+                           clearBtnT.textContent === clearLabel()
+        engine.strokeInk(0.6, 0.5, window.INKS.sumi, 2.0, 1, 0, 0.9) // 超时后的新墨
+        pump(8)
+        const u2NewInk = inkFraction()
+        clearBtnT.click()                                   // 此时点击 = 一次新的归零
+        pump(2)
+        const u2AfterNewClear = inkFraction()
+        hook.setClearUndoMs(10000)                          // 还原真实窗口
+        check('撤回链路 U2（墨）：超时后撤回窗口自动关闭、按钮复位',
+              u2ArmedRightAway && u2TimedOut,
+              'armedAtClear=' + u2ArmedRightAway + ' timedOut=' + u2TimedOut)
+        check('撤回链路 U2（墨）：超时后再点只执行新归零（新墨被清、旧画不恢复）',
+              u2AfterNewClear < 0.02 && u2NewInk > 0.003,
+              'newInk=' + u2NewInk.toFixed(4) + ' afterClear=' + u2AfterNewClear.toFixed(4) + ' oldWouldBe=' + u2Ink.toFixed(4))
+        hook.cancelClearUndo()
+
+        // U3) 归零后重新落笔：撤回窗口立即关闭，再点是新归零（旧画不被贴回新笔触之上）
+        engine.clear(); pump(2)
+        engine.strokeInk(0.3, 0.5, window.INKS.sumi, 2.0, 1, 0, 0.9)
+        pump(8)
+        clearBtnT.click()                                   // 归零（武装）
+        const u3Armed = hook.clearUndoArmed()
+        stageT.dispatchEvent(new PointerEvent('pointerdown',
+          { clientX: 200, clientY: 200, bubbles: true, cancelable: true }))  // 重新落笔
+        const u3CanceledByStroke = !hook.clearUndoArmed() && !undoClassOn() &&
+                                   clearBtnT.textContent === clearLabel()
+        pump(4)
+        const u3FreshInk = inkFraction()
+        clearBtnT.click()                                   // 新归零
+        pump(2)
+        check('撤回链路 U3（墨）：重新落笔即关闭撤回窗口、按钮复位',
+              u3Armed && u3CanceledByStroke,
+              'armed=' + u3Armed + ' canceled=' + u3CanceledByStroke)
+        check('撤回链路 U3（墨）：落笔后再点是新归零（不恢复旧快照）',
+              inkFraction() < 0.02 && u3FreshInk > 0.003,
+              'freshInk=' + u3FreshInk.toFixed(4) + ' afterClear=' + inkFraction().toFixed(4))
+        hook.cancelClearUndo()
+
+        // U4) 归零后切换模式：撤回窗口关闭（墨 → 沙 与 沙 → 墨 两个方向都验）
+        engine.clear(); pump(2)
+        engine.strokeInk(0.5, 0.5, window.INKS.sumi, 2.0, 1, 0, 0.9)
+        pump(6)
+        clearBtnT.click()                                   // 墨下归零（武装）
+        const u4ArmedInk = hook.clearUndoArmed()
+        hook.setMode('sand')                                // 切到沙 → 窗口应关闭
+        const u4ClosedInkToSand = !hook.clearUndoArmed() && !undoClassOn()
+        if (hook.sand) {
+          hook.sand.clear(); hook.sand.place(0.5, 0.5, 'sand', 4, 1)
+          clearBtnT.click()                                 // 沙下归零（武装）
+          const u4ArmedSand = hook.clearUndoArmed()
+          hook.setMode('ink')                               // 切回墨 → 窗口应关闭
+          var u4ClosedSandToInk = !hook.clearUndoArmed() && !undoClassOn()
+          check('撤回链路 U4：切模式即关闭撤回窗口（墨→沙 与 沙→墨）',
+                u4ArmedInk && u4ClosedInkToSand && u4ArmedSand && u4ClosedSandToInk,
+                'inkArmed=' + u4ArmedInk + ' closed1=' + u4ClosedInkToSand +
+                ' sandArmed=' + u4ArmedSand + ' closed2=' + u4ClosedSandToInk)
+        } else {
+          check('撤回链路 U4：切模式即关闭撤回窗口（墨→沙）',
+                u4ArmedInk && u4ClosedInkToSand,
+                'inkArmed=' + u4ArmedInk + ' closed=' + u4ClosedInkToSand)
+        }
+
+        // U5) 墨模式尺寸变化：引擎重建纹理会让旧快照失效，撤回窗口必须安全关闭
+        hook.setMode('ink')
+        engine.clear(); pump(2)
+        engine.strokeInk(0.5, 0.5, window.INKS.ai, 2.0, 1, 0, 0.9)
+        pump(8)
+        clearBtnT.click()                                   // 归零（武装，旧染料快照留在引擎里）
+        const u5Armed = hook.clearUndoArmed()
+        hook.flushResize()                                  // 同步执行尺寸变化处理（与 resize 事件同一函数）
+        check('撤回链路 U5（墨）：尺寸变化后撤回被安全放弃（窗口关闭、按钮复位、快照清空）',
+              u5Armed && !hook.clearUndoArmed() && !undoClassOn() &&
+              clearBtnT.textContent === clearLabel() && hook.clearUndoSnapshot() === null,
+              'armedBefore=' + u5Armed + ' armedAfter=' + hook.clearUndoArmed() +
+              ' class=' + undoClassOn() + ' snap=' + (hook.clearUndoSnapshot() === null ? 'null' : 'leaked'))
+
+        // ── 沙模式 ──
+        if (hook.sand) {
+          const sandT = hook.sand
+          hook.setMode('sand')
+          hook.state.aiOn = false
+
+          // U6) 沙正常归零后撤回：fullness 与各材料数量逐项与快照一致
+          sandT.clear()
+          sandT.place(0.3, 0.3, 'sand', 4, 1)
+          sandT.place(0.7, 0.35, 'water', 4, 1)
+          sandT.place(0.5, 0.2, 'snow', 3, 1)
+          for (let i = 0; i < 6; i++) sandT.step(0.02)
+          const u6Full = sandT.fullness()
+          const u6Counts = {}
+          for (const k in window.SAND) u6Counts[k] = sandT.countOf(window.SAND[k])
+          clearBtnT.click()                                 // 归零
+          const u6Cleared = sandT.fullness()
+          const u6Armed = hook.clearUndoArmed()
+          clearBtnT.click()                                 // 撤回
+          let u6CountsMatch = true
+          for (const k in window.SAND) {
+            if (sandT.countOf(window.SAND[k]) !== u6Counts[k]) u6CountsMatch = false
+          }
+          check('撤回链路 U6（沙）：归零后撤回恢复全部颗粒',
+                u6Cleared === 0 && u6Armed && sandT.fullness() === u6Full && u6CountsMatch,
+                'fullness ' + u6Cleared + '→' + sandT.fullness().toFixed(4) +
+                ' countsMatch=' + u6CountsMatch)
+          check('撤回链路 U6（沙）：撤回后窗口关闭、按钮复位',
+                !hook.clearUndoArmed() && !undoClassOn() && clearBtnT.textContent === clearLabel(),
+                'armed=' + hook.clearUndoArmed())
+
+          // U7) 沙归零后重新落笔（真实指针事件倒新材料）：窗口关闭，新材料保留，再点是新归零
+          sandT.clear(); sandT.place(0.5, 0.5, 'sand', 4, 1)
+          for (let i = 0; i < 4; i++) sandT.step(0.02)
+          clearBtnT.click()                                 // 归零（武装）
+          const u7Armed = hook.clearUndoArmed()
+          // 选水，再走真实 pointerdown（与用户手指完全同一条路径，app 会在落笔瞬间关窗）
+          document.querySelector('#sand-group .ink[data-el="water"]').click()
+          stageT.dispatchEvent(new PointerEvent('pointerdown',
+            { clientX: 200, clientY: 150, bubbles: true, cancelable: true }))
+          const u7Fresh = sandT.countOf(window.SAND.WATER)
+          const u7Canceled = !hook.clearUndoArmed() && !undoClassOn() &&
+                             clearBtnT.textContent === clearLabel()
+          clearBtnT.click()                                 // 新归零
+          check('撤回链路 U7（沙）：重新落笔即关闭撤回窗口，新材料不被旧快照覆盖',
+                u7Armed && u7Canceled && u7Fresh > 0,
+                'armed=' + u7Armed + ' canceled=' + u7Canceled + ' freshWater=' + u7Fresh)
+          check('撤回链路 U7（沙）：落笔后再点是新归零（新材料被清、旧快照不恢复）',
+                sandT.fullness() === 0 && sandT.countOf(window.SAND.WATER) === 0,
+                'fullness=' + sandT.fullness())
+          hook.cancelClearUndo()
+
+          // U8) 沙模式尺寸变化：撤回窗口必须安全关闭、快照被应用层丢弃（绝不把旧快照再贴回去）。
+          // 这是用户可观察的契约；「网格重建后旧快照无法还原」由 U10b 的引擎级重建测试精确覆盖。
+          sandT.clear(); sandT.place(0.5, 0.5, 'sand', 6, 1)
+          for (let i = 0; i < 4; i++) sandT.step(0.02)
+          clearBtnT.click()                                 // 归零（武装，保存旧网格快照）
+          const u8Armed = hook.clearUndoArmed()
+          const u8HadSnapshot = hook.clearUndoSnapshot() !== null
+          hook.flushResize()                                // 同步执行尺寸变化处理（与 resize 事件同一函数）
+          check('撤回链路 U8（沙）：尺寸变化后撤回被安全放弃（窗口关闭、按钮复位、快照丢弃）',
+                u8Armed && u8HadSnapshot &&
+                !hook.clearUndoArmed() && !undoClassOn() &&
+                clearBtnT.textContent === clearLabel() && hook.clearUndoSnapshot() === null,
+                'armedBefore=' + u8Armed + ' hadSnapshot=' + u8HadSnapshot +
+                ' armedAfter=' + hook.clearUndoArmed() + ' class=' + undoClassOn())
+
+          // U9) 连续两次归零：第二次点是撤回；其后再归零是一份全新快照，第一次的快照不会复活
+          sandT.clear(); sandT.place(0.5, 0.5, 'sand', 5, 1)
+          for (let i = 0; i < 4; i++) sandT.step(0.02)
+          const u9N = sandT.countOf(window.SAND.SAND)
+          clearBtnT.click()                                 // 第一次归零（武装，快照=u9N）
+          const u9AfterFirstClear = sandT.countOf(window.SAND.SAND)
+          clearBtnT.click()                                 // 第二次点 = 撤回 → 恢复 u9N，窗口关闭
+          const u9Restored = sandT.countOf(window.SAND.SAND)
+          const u9Disarmed = !hook.clearUndoArmed()
+          clearBtnT.click()                                 // 第三次点 = 全新归零（新快照=当前 u9N）
+          const u9AfterSecondClear = sandT.countOf(window.SAND.SAND)
+          const u9ReArmed = hook.clearUndoArmed()
+          clearBtnT.click()                                 // 第四次点 = 撤回第二次归零
+          const u9SecondRestore = sandT.countOf(window.SAND.SAND)
+          check('撤回链路 U9（沙）：连续两次归零各自独立（撤回第二次归零不会复活第一次的旧状态）',
+                u9AfterFirstClear === 0 && u9Restored === u9N && u9Disarmed &&
+                u9AfterSecondClear === 0 && u9ReArmed && u9SecondRestore === u9N &&
+                !undoClassOn(),
+                'N=' + u9N + ' firstClear=' + u9AfterFirstClear + ' restore1=' + u9Restored +
+                ' secondClear=' + u9AfterSecondClear + ' restore2=' + u9SecondRestore)
+          hook.cancelClearUndo()
+
+          // U10) 引擎级护栏：快照记录网格宽高；等面积但宽高不同 / 空快照一律拒绝还原
+          const probe = new window.SandSim(document.createElement('canvas'), { seed: 7 })
+          probe.place(0.5, 0.5, 'sand', 3, 1)
+          const good = probe.snapshot()
+          const u10Dims = good.w === probe.gridW && good.h === probe.gridH &&
+                          ArrayBuffer.isView(good.type)
+          // 构造一张总长度相同、但宽高不同的“错网格”快照
+          const badDims = (function () {
+            const b = { w: probe.gridW + 4, h: probe.gridH, type: good.type.slice(),
+                        meta: good.meta.slice(), life: good.life.slice() }
+            // 保持总长度相等：截断 / 补齐到当前网格长度，证明仅靠长度校验会误判
+            const cur = probe.gridW * probe.gridH
+            if (b.type.length !== cur) {
+              b.type = good.type.slice(0, cur)
+              b.meta = good.meta.slice(0, cur)
+              b.life = good.life.slice(0, cur)
+            }
+            return b
+          })()
+          const u10RejectDims = probe.restore(badDims) === false
+          const u10RejectNull = probe.restore(null) === false &&
+                                probe.restore({}) === false &&
+                                probe.restore({ type: good.type }) === false
+          const u10Good = probe.restore(good) === true &&
+                          probe.countOf(window.SAND.SAND) > 0
+          check('撤回链路 U10（沙引擎护栏）：快照带网格维度，维度不符 / 空快照被拒绝、合法快照可还原',
+                u10Dims && u10RejectDims && u10RejectNull && u10Good,
+                'dims=' + u10Dims + ' rejectDims=' + u10RejectDims +
+                ' rejectNull=' + u10RejectNull + ' good=' + u10Good)
+
+          // U10b) 真实尺寸变化：改写视口尺寸触发网格重建，重建前的旧快照必须被拒绝还原
+          // （这正是「窗口尺寸变化导致沙网格重建时，旧快照不能再被贴回」的引擎级保证）。
+          const probe2 = new window.SandSim(document.createElement('canvas'), { seed: 11 })
+          const vpW = Object.getOwnPropertyDescriptor(window, 'innerWidth')
+          const vpH = Object.getOwnPropertyDescriptor(window, 'innerHeight')
+          const setViewport = (w, h) => {
+            Object.defineProperty(window, 'innerWidth', { configurable: true, value: w })
+            Object.defineProperty(window, 'innerHeight', { configurable: true, value: h })
+          }
+          setViewport(1000, 600)
+          probe2.resize()
+          probe2.clear(); probe2.place(0.5, 0.5, 'sand', 4, 1)
+          const preSnap = probe2.snapshot()
+          const preDims = probe2.gridW + 'x' + probe2.gridH
+          setViewport(700, 900)                               // 明显改变宽高比 → 网格宽高都变
+          probe2.resize()
+          const postDims = probe2.gridW + 'x' + probe2.gridH
+          const u10bRebuilt = preDims !== postDims && probe2.gridW > 0 && probe2.gridH > 0
+          const u10bRejected = probe2.restore(preSnap) === false
+          if (vpW) { Object.defineProperty(window, 'innerWidth', vpW) } else { delete window.innerWidth }
+          if (vpH) { Object.defineProperty(window, 'innerHeight', vpH) } else { delete window.innerHeight }
+          check('撤回链路 U10b（沙引擎护栏）：网格重建后旧快照被安全拒绝（不贴错位 / 空白内容）',
+                u10bRebuilt && u10bRejected,
+                'grid ' + preDims + '→' + postDims + ' rejected=' + u10bRejected)
+          probe.dispose && probe.dispose()
+          probe2.dispose && probe2.dispose()
+        }
+
+        // U11) 水墨引擎级护栏：有快照可还原；resize 重建纹理后旧快照被销毁、还原返回 false。
+        // 用一块显式给定 CSS 尺寸、挂到离屏容器的画布驱动一次真实 resize（无头窗口本身视口为 0，
+        // 游离画布的 clientWidth 恒为 0，必须进文档 CSS 尺寸才生效）。
+        {
+          const inkHost = document.createElement('div')
+          inkHost.style.cssText = 'position:fixed;left:-9999px;top:-9999px;overflow:hidden'
+          const inkCanvas = document.createElement('canvas')
+          inkCanvas.style.width = '400px'; inkCanvas.style.height = '300px'
+          inkHost.appendChild(inkCanvas)
+          document.body.appendChild(inkHost)
+          const inkProbe = new window.Suminagashi(inkCanvas)
+          inkProbe.strokeInk(0.5, 0.5, window.INKS.sumi, 2.0, 1, 0, 0.9)
+          inkProbe.snapshotDye()
+          const u11RestoreOk = inkProbe.restoreDye() === true
+          // 改 CSS 尺寸后再 resize：染料 / 速度纹理按新尺寸重建，旧快照纹理被销毁
+          inkCanvas.style.width = '520px'; inkCanvas.style.height = '260px'
+          inkProbe.resize()
+          const u11Invalidated = inkProbe.restoreDye() === false
+          check('撤回链路 U11（墨引擎护栏）：快照可还原；resize 后旧快照失效并安全拒绝',
+                u11RestoreOk && u11Invalidated,
+                'restoreOk=' + u11RestoreOk + ' invalidated=' + u11Invalidated)
+          inkProbe.dispose && inkProbe.dispose()
+          inkHost.remove()
+        }
+
+        hook.setMode('ink')
+      }
+
       render()
     }
 

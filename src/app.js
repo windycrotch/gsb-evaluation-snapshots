@@ -159,6 +159,7 @@
 
   // 归零后的可撤回窗口（10 秒）。刻意不显示倒计时：只把「归零」按钮临时变成「撤回」。
   const CLEAR_UNDO_MS = 10000
+  let clearUndoWindowMs = CLEAR_UNDO_MS   // 仅 selftest 可临时改短，用于确定性地验证超时
   let clearUndoArmed = false
   let clearUndoSnap = null    // { mode:'sand', snap } 或 { mode:'ink' }（墨的快照存在引擎里）
   let clearUndoTimer = 0
@@ -722,13 +723,26 @@
     if (b) b.classList.add('undo')
     setClearLabel((I18N[state.lang] || I18N.zh).undo)
     clearTimeout(clearUndoTimer)
-    clearUndoTimer = setTimeout(cancelClearUndo, CLEAR_UNDO_MS)
+    clearUndoTimer = setTimeout(cancelClearUndo, clearUndoWindowMs)
   }
   function performClearUndo() {
     if (!clearUndoArmed || !clearUndoSnap) { cancelClearUndo(); return }
-    if (clearUndoSnap.mode === 'sand' && sand) sand.restore(clearUndoSnap.snap)
-    else engine.restoreDye()
+    const wasSand = clearUndoSnap.mode === 'sand'
+    // 恢复必须成功才关闭窗口；任一引擎因尺寸变化等原因拒绝快照时，
+    // 也安全关闭窗口（按钮回到「归零」），绝不留下「点了没反应」的假撤回。
+    let ok = false
+    if (wasSand) {
+      // 沙引擎若已不存在，快照无可贴回之处 → 放弃恢复而不是误清墨画面
+      if (sand) ok = sand.restore(clearUndoSnap.snap)
+    } else {
+      ok = !!engine.restoreDye()
+    }
     cancelClearUndo()
+    if (!ok) return
+    // 立即重绘一帧，让恢复的画面马上可见（rAF 主循环在后台标签页等场景可能暂停）。
+    // 恢复动作只贴回快照，不会再触发一次归零。
+    if (wasSand) { if (sand) { try { sand.render(performance.now()) } catch (e) {} } }
+    else { try { engine.render(performance.now()) } catch (e) {} }
   }
 
   on($('clear'), 'click', () => {
@@ -823,11 +837,20 @@
     }
   })
 
-  // 窗口尺寸变化：两个引擎都重算模拟分辨率
+  // 窗口尺寸变化：两个引擎都重算模拟分辨率。
+  // 网格 / 纹理一旦重建，归零前的旧快照就再也贴不回去了
+  //（墨引擎的 resize 会销毁快照纹理；沙网格尺寸变化后 restore 会拒绝旧网格快照）。
+  // 因此先关闭撤回窗口、让按钮回到「归零」：安全放弃恢复，而不是让用户点「撤回」
+  // 后看到一张错位 / 空白的画，按钮却已经复位。
   let rt = 0
+  function handleResize() {
+    cancelClearUndo()
+    engine.resize()
+    if (sand) sand.resize()
+  }
   window.addEventListener('resize', () => {
     clearTimeout(rt)
-    rt = setTimeout(() => { engine.resize(); if (sand) sand.resize() }, 120)
+    rt = setTimeout(handleResize, 120)
   })
 
   // ── PWA：仅 http(s) 下注册 Service Worker（桌面 Electron 走 file://，跳过）──
@@ -878,6 +901,20 @@
     engine, sand, state, aiTick, advanceAiPour, setMode,
     sound: window.Soundscape, movie: window.Movie,
     clearUndoArmed: () => clearUndoArmed, performClearUndo, cancelClearUndo,
+    // 撤回窗口时长：默认 10s；selftest 用 setClearUndoMs 临时改短来验证超时逻辑。
+    clearUndoMs: () => clearUndoWindowMs,
+    setClearUndoMs: (ms) => {
+      clearUndoWindowMs = Math.max(0, Number(ms) || 0)
+      // 窗口已开着时，按新时长重新计时（测试才能稳定等到一次自动关闭）
+      if (clearUndoArmed) {
+        clearTimeout(clearUndoTimer)
+        clearUndoTimer = setTimeout(cancelClearUndo, clearUndoWindowMs)
+      }
+    },
+    // 读取当前归零快照（null = 没有可撤回的快照），供测试断言尺寸失效场景
+    clearUndoSnapshot: () => clearUndoSnap,
+    // 立即执行一次「窗口尺寸变化」处理（跳过 120ms 防抖），供 selftest 确定性验证
+    flushResize: handleResize,
     wakeLockSupported: () => !!navigator.wakeLock,
   }
 
