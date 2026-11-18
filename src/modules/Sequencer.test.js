@@ -2,6 +2,15 @@ import 'web-audio-test-api';
 import Sequencer from './Sequencer';
 
 describe('Sequencer', () => {
+  const realDateNow = Date.now;
+
+  afterEach(() => {
+    global.Date.now = realDateNow;
+    jest.clearAllTimers();
+    jest.useRealTimers();
+    jest.restoreAllMocks();
+  });
+
   it('should set default params', () => {
     const sequencer = new Sequencer();
 
@@ -327,14 +336,212 @@ describe('Sequencer', () => {
 
   it('should stop', () => {
     const sequencer = new Sequencer();
-    const spy = jest.spyOn(window, 'clearInterval');
+    const spy = jest.spyOn(window, 'clearTimeout');
 
     sequencer.activeStep = 8;
+    sequencer.sequence = setTimeout(() => {}, 0);
+    const { sequence } = sequencer;
     sequencer.stop();
 
     expect(sequencer.activeStep).toEqual(1);
     expect(sequencer.playing).toEqual(false);
-    expect(spy).toHaveBeenCalledWith(sequencer.sequence);
+    expect(sequencer.sequence).toEqual(null);
+    expect(spy).toHaveBeenCalledWith(sequence);
+  });
+
+  it('should not throw or alter triggers when stopped repeatedly', () => {
+    jest.useFakeTimers();
+
+    const sequencer = new Sequencer();
+    const fn = jest.fn();
+
+    sequencer.triggerAtStep(3, fn);
+    sequencer.start();
+    jest.advanceTimersByTime(250);
+    sequencer.stop();
+    const stateAfterStop = {
+      activeStep: sequencer.activeStep,
+      playing: sequencer.playing,
+      stepTriggers: sequencer.stepTriggers,
+    };
+
+    expect(() => sequencer.stop()).not.toThrow();
+    sequencer.stop();
+
+    expect(sequencer.activeStep).toEqual(stateAfterStop.activeStep);
+    expect(sequencer.playing).toEqual(stateAfterStop.playing);
+    expect(sequencer.stepTriggers).toEqual(stateAfterStop.stepTriggers);
+    expect(sequencer.stepTriggers[3]).toEqual(fn);
+
+    jest.advanceTimersByTime(2000);
+
+    expect(sequencer.activeStep).toEqual(1);
+    expect(sequencer.playing).toEqual(false);
+  });
+
+  it('should not stack timer chains when restarting after stop', () => {
+    jest.useFakeTimers();
+
+    const sequencer = new Sequencer();
+    const triggerStep = jest.spyOn(sequencer, 'triggerStep');
+
+    sequencer.start();
+    jest.advanceTimersByTime(250);
+
+    expect(triggerStep.mock.calls).toHaveLength(3);
+    expect(sequencer.activeStep).toEqual(3);
+
+    sequencer.stop();
+
+    expect(sequencer.playing).toEqual(false);
+    expect(sequencer.activeStep).toEqual(1);
+    expect(sequencer.sequence).toEqual(null);
+
+    triggerStep.mockClear();
+    sequencer.start();
+    jest.advanceTimersByTime(250);
+
+    // A single timer chain means one trigger per interval (no doubled steps)
+    expect(triggerStep.mock.calls).toHaveLength(3);
+    expect(sequencer.activeStep).toEqual(3);
+  });
+
+  it('should ignore start while a sequence loop is already running', () => {
+    jest.useFakeTimers();
+
+    const sequencer = new Sequencer();
+    const triggerStep = jest.spyOn(sequencer, 'triggerStep');
+
+    sequencer.start();
+    const pendingSequence = sequencer.sequence;
+    sequencer.start();
+
+    expect(sequencer.sequence).toEqual(pendingSequence);
+
+    jest.advanceTimersByTime(250);
+
+    expect(triggerStep.mock.calls).toHaveLength(3);
+    expect(sequencer.activeStep).toEqual(3);
+  });
+
+  it('should clear recording residue and pending timer on reset', () => {
+    jest.useFakeTimers();
+
+    const sequencer = new Sequencer();
+    const fn = jest.fn();
+    const triggerStep = jest.spyOn(sequencer, 'triggerStep');
+
+    sequencer.setBpm(150);
+    sequencer.record();
+    sequencer.start();
+    jest.advanceTimersByTime(250);
+    sequencer.triggerAtStep(sequencer.activeStep, fn);
+    sequencer.setSelectedStep(sequencer.activeStep);
+
+    sequencer.reset();
+
+    expect(sequencer.bpm).toEqual(sequencer.originalBpm);
+    expect(sequencer.playing).toEqual(false);
+    expect(sequencer.recording).toEqual(false);
+    expect(sequencer.activeStep).toEqual(1);
+    expect(sequencer.selectedStep).toEqual(null);
+    expect(sequencer.stepTriggers).toEqual({});
+    expect(sequencer.triggerCallbacks).toEqual([]);
+    expect(sequencer.onStepSelectCallbacks).toEqual([]);
+    expect(sequencer.onSetTriggerCallbacks).toEqual([]);
+    expect(sequencer.sequence).toEqual(null);
+
+    const callsAfterReset = triggerStep.mock.calls.length;
+    jest.advanceTimersByTime(2000);
+
+    // The timer from the recording session must not survive the reset
+    expect(triggerStep.mock.calls).toHaveLength(callsAfterReset);
+    expect(sequencer.activeStep).toEqual(1);
+    expect(sequencer.playing).toEqual(false);
+    expect(fn.mock.calls).toHaveLength(0);
+  });
+
+  it('should follow activeStep with selectedStep while recording', () => {
+    jest.useFakeTimers();
+
+    const sequencer = new Sequencer();
+
+    sequencer.record();
+    sequencer.start();
+
+    expect(sequencer.selectedStep).toEqual(1);
+    expect(sequencer.activeStep).toEqual(1);
+
+    jest.advanceTimersByTime(125);
+
+    expect(sequencer.activeStep).toEqual(2);
+    expect(sequencer.selectedStep).toEqual(2);
+
+    jest.advanceTimersByTime(250);
+
+    expect(sequencer.activeStep).toEqual(4);
+    expect(sequencer.selectedStep).toEqual(4);
+
+    sequencer.stopRecord();
+
+    expect(sequencer.selectedStep).toEqual(null);
+
+    jest.advanceTimersByTime(250);
+
+    // selectedStep stays cleared and is not overwritten by advancing steps
+    expect(sequencer.selectedStep).toEqual(null);
+    expect(sequencer.activeStep).toEqual(6);
+  });
+
+  it('should wrap selectedStep back to 1 when recording past the last step', () => {
+    jest.useFakeTimers();
+
+    const sequencer = new Sequencer({ steps: 4 });
+
+    sequencer.record();
+    sequencer.start();
+    jest.advanceTimersByTime(sequencer.getStepInterval() * 4);
+
+    expect(sequencer.activeStep).toEqual(1);
+    expect(sequencer.selectedStep).toEqual(1);
+  });
+
+  it('should clear selectedStep after triggering when not recording', () => {
+    const sequencer = new Sequencer();
+    const fn = jest.fn();
+
+    sequencer.setSelectedStep(9);
+    sequencer.triggerAtSelectedStep(fn);
+
+    expect(sequencer.stepTriggers[9]).toEqual(fn);
+    expect(sequencer.selectedStep).toEqual(null);
+  });
+
+  it('should keep selectedStep after triggering while recording', () => {
+    jest.useFakeTimers();
+
+    const sequencer = new Sequencer();
+    const fn = jest.fn();
+
+    sequencer.record();
+    sequencer.start();
+    jest.advanceTimersByTime(250);
+
+    const { selectedStep } = sequencer;
+    sequencer.triggerAtSelectedStep(fn);
+
+    expect(sequencer.selectedStep).toEqual(selectedStep);
+    expect(sequencer.stepTriggers[selectedStep]).toEqual(fn);
+  });
+
+  it('should return the current selectedStep from quantize when not recording', () => {
+    const sequencer = new Sequencer();
+
+    sequencer.sequenceTimestamp = 1000;
+    global.Date.now = () => 1070;
+    sequencer.setSelectedStep(7);
+
+    expect(sequencer.quantizeStepTrigger()).toEqual(7);
   });
 
   it('should record', () => {

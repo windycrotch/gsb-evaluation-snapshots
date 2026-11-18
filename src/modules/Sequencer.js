@@ -21,6 +21,7 @@ export default class Sequencer {
     this.recording = false;
     this.metronomeOn = true;
     this.sequenceTimestamp = null;
+    this.sequence = null;
     this.stepTriggers = {};
     this.triggerCallbacks = [];
     this.onStepSelectCallbacks = [];
@@ -143,11 +144,18 @@ export default class Sequencer {
   }
 
   start() {
+    // Prevent stacking timer chains when start is called while a loop
+    // from a previous start is still pending
+    if (this.sequence) {
+      return;
+    }
+
     const { activeStep } = this;
     const interval = this.getStepInterval();
     this.playing = true;
 
     if (this.recording) {
+      this.selectedStep = activeStep;
       this.triggerMetronome();
     }
 
@@ -156,6 +164,7 @@ export default class Sequencer {
     this.sequenceTimestamp = Date.now();
 
     this.sequence = setTimeout(() => {
+      this.sequence = null;
       this.activeStep = activeStep === this.steps ? 1 : activeStep + 1;
 
       if (this.recording) {
@@ -167,9 +176,10 @@ export default class Sequencer {
   }
 
   stop() {
+    clearTimeout(this.sequence);
+    this.sequence = null;
     this.playing = false;
     this.activeStep = 1;
-    clearInterval(this.sequence);
   }
 
   record() {
@@ -191,6 +201,9 @@ export default class Sequencer {
   }
 
   reset() {
+    this.stop();
+    this.stopRecord();
+
     this.bpm = this.originalBpm;
     this.activeStep = 1;
     this.selectedStep = null;
@@ -198,8 +211,5 @@ export default class Sequencer {
     this.triggerCallbacks = [];
     this.onStepSelectCallbacks = [];
     this.onSetTriggerCallbacks = [];
-
-    this.stop();
-    this.stopRecord();
   }
 }
