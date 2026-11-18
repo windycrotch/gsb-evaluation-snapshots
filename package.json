@@ -40,7 +40,8 @@
   "scripts": {
     "build": "rimraf dist && rollup -c",
     "dev": "rollup -w -c",
-    "prepare": "npm run build"
+    "prepare": "npm run build",
+    "verify": "node scripts/verify-geometry.mjs"
   },
   "dependencies": {
     "@turf/boolean-point-in-polygon": "^7.2",
@@ -66,6 +67,7 @@
     "rimraf": "^6.1.4",
     "rollup": "^4.68.0",
     "rollup-plugin-dts": "^6.5.1",
+    "three": "^0.170.0",
     "typescript": "^7.0.2"
   },
   "engines": {

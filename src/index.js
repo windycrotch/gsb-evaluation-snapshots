@@ -3,7 +3,7 @@ import {
   Float32BufferAttribute
 } from 'three';
 
-const THREE = window.THREE
+const THREE = typeof window !== 'undefined' && window.THREE
   ? window.THREE // Prefer consumption from global THREE, if exists
   : {
   BufferGeometry,
@@ -13,7 +13,7 @@ const THREE = window.THREE
 import { merge as flatten } from 'd3-array';
 import { flatten as earcutFlatten } from 'earcut';
 
-import geoPolygonTriangulate from './geoPolygonTriangulate';
+import geoPolygonTriangulate from './geoPolygonTriangulate.js';
 
 // support both modes for backwards threejs compatibility
 const setAttributeFn = new THREE.BufferGeometry().setAttribute ? 'setAttribute' : 'addAttribute';
@@ -49,9 +49,11 @@ class ConicPolygonGeometry extends THREE.BufferGeometry {
     let vertices = [];
     let uvs = [];
     let indices = [];
-    let groupCnt = 0; // add groups to apply different materials to torso / caps
-
-    const addGroup = groupData => {
+    // fixed group slots: 0 = side, 1 = bottom cap, 2 = top cap. Passing the
+    // material index explicitly keeps the documented numbering stable even
+    // when one of the optional surfaces is disabled (a plain running counter
+    // would renumber the top cap to 1 when the bottom cap is turned off).
+    const addGroup = (groupData, materialIndex) => {
       const prevVertCnt = Math.round(vertices.length / 3);
       const prevIndCnt = indices.length;
 
@@ -59,12 +61,12 @@ class ConicPolygonGeometry extends THREE.BufferGeometry {
       uvs = uvs.concat(groupData.uvs);
       indices = indices.concat(!prevVertCnt ? groupData.indices : groupData.indices.map(ind => ind + prevVertCnt));
 
-      this.addGroup(prevIndCnt, indices.length - prevIndCnt, groupCnt++);
+      this.addGroup(prevIndCnt, indices.length - prevIndCnt, materialIndex);
     };
 
-    includeSides && addGroup(generateTorso());
-    closedBottom && addGroup(generateCap(bottomHeight, false));
-    closedTop && addGroup(generateCap(topHeight, true));
+    includeSides && addGroup(generateTorso(), 0);
+    closedBottom && addGroup(generateCap(bottomHeight, false), 1);
+    closedTop && addGroup(generateCap(topHeight, true), 2);
 
     // build geometry
     this.setIndex(indices);
