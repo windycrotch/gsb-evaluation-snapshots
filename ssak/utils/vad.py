@@ -38,11 +38,20 @@ def get_vad_segments(
             dilatation of speech segments (seconds)
         output_sample: bool
             if True, return start and end in samples instead of seconds
+            Samples always refer to the original input audio (at `sample_rate`),
+            and seconds always refer to the original input duration, even when
+            the method internally resamples the audio (e.g. silero at 16 kHz).
         plot: bool
             if True, plot result
             if string, save plot to file
         verbose: bool
             if True, display information when loading models
+
+    Returns a (possibly empty) list of `{"start": ..., "end": ...}` dictionaries.
+    Every segment is guaranteed to lie within `[0, original audio duration]`
+    (or `[0, number of samples of the original audio]` when `output_sample` is
+    True), including after `dilatation` merging. An empty audio or an audio
+    without any detected speech yields an empty list.
     """
     global silero_vad_model, silero_get_speech_ts, pyannote_vad_pipeline
 
@@ -59,7 +68,32 @@ def get_vad_segments(
 
     if isinstance(audio, str):
         (audio, sample_rate) = load_audio(audio, sample_rate=None, return_format=format, verbose=verbose)
+    if isinstance(audio, list):
+        audio = np.asarray(audio)
+
+    if getattr(audio, "ndim", 1) == 2:
+        # VAD only analyzes mono audio. Downmix explicitly, because the implicit
+        # channel handling in `conform_audio` is wrong for some memory layouts.
+        is_numpy = isinstance(audio, np.ndarray)
+        if audio.shape[0] <= audio.shape[1]:
+            # (channels, samples)
+            audio = audio.mean(axis=0) if is_numpy else audio.mean(dim=0)
+        else:
+            # (samples, channels)
+            audio = audio.mean(axis=1) if is_numpy else audio.mean(dim=1)
+
+    # Keep track of the ORIGINAL input audio before any internal resampling:
+    # all returned timestamps must refer to this timeline (not to the resampled one).
+    original_num_samples = audio.shape[-1]
+    original_duration = original_num_samples / sample_rate
+    if original_num_samples == 0:
+        # Nothing to analyze: no speech can be detected in an empty audio.
+        return []
+
     audio = conform_audio(audio, sample_rate, sample_rate=sample_rate_target, return_format=format, verbose=verbose)
+    conformed_num_samples = audio.shape[-1]
+    if conformed_num_samples == 0:
+        return []
 
     if sample_rate_target is None:
         sample_rate_target = sample_rate
@@ -108,6 +142,11 @@ def get_vad_segments(
     elif method == "auditok":
         import auditok
 
+        # Auditok cannot analyze audio shorter than the requested minimum duration
+        # (and no such audio could contain a long-enough speech event anyway).
+        if conformed_num_samples / sample_rate_target < min_speech_duration:
+            return []
+
         data = (audio * 32767).astype(np.int16).tobytes()
 
         segments = auditok.split(
@@ -116,7 +155,7 @@ def get_vad_segments(
             channels=1,  # number of channels
             sample_width=2,  # number of bytes per sample
             min_dur=min_speech_duration,  # minimum duration of a valid audio event in seconds
-            max_dur=len(audio) / sample_rate_target,  # maximum duration of an event
+            max_dur=conformed_num_samples / sample_rate_target,  # maximum duration of an event
             max_silence=min_silence_duration,  # maximum duration of tolerated continuous silence within an event
             energy_threshold=50,
             drop_trailing_silence=True,
@@ -125,21 +164,36 @@ def get_vad_segments(
         if auditok.__version__ >= "0.3.0":
 
             def auditok_segment_to_dict(s):
-                return {"start": s.start * sample_rate, "end": s.end * sample_rate}
+                return {"start": s.start * sample_rate_target, "end": s.end * sample_rate_target}
         else:
 
             def auditok_segment_to_dict(s):
-                return {"start": s._meta.start * sample_rate, "end": s._meta.end * sample_rate}
+                return {"start": s._meta.start * sample_rate_target, "end": s._meta.end * sample_rate_target}
 
         segments = [auditok_segment_to_dict(s) for s in segments]
 
+    # Segmentation methods work in their own analysis timeline (`sample_rate_target`),
+    # which differs from the input timeline for silero (resampled to 16 kHz).
+    # Sanitize their output in that timeline first, then convert once at the end.
+    segments = [{"start": float(seg["start"]), "end": float(seg["end"])} for seg in segments]
+    segments.sort(key=lambda seg: seg["start"])
+    for seg in segments:
+        seg["start"] = min(max(seg["start"], 0.0), float(conformed_num_samples))
+        seg["end"] = min(max(seg["end"], 0.0), float(conformed_num_samples))
+    # Clamping may have collapsed some segments onto the audio boundaries.
+    segments = [seg for seg in segments if seg["end"] > seg["start"]]
+
     if dilatation > 0:
-        dilatation = round(dilatation * sample_rate_target)
+        dilatation_samples = round(float(dilatation) * sample_rate_target)
         new_segments = []
         for seg in segments:
-            new_seg = {"start": max(0, seg["start"] - dilatation), "end": min(len(audio), seg["end"] + dilatation)}
+            new_seg = {
+                "start": max(0.0, seg["start"] - dilatation_samples),
+                "end": min(float(conformed_num_samples), seg["end"] + dilatation_samples),
+            }
             if len(new_segments) > 0 and new_segments[-1]["end"] >= new_seg["start"]:
-                new_segments[-1]["end"] = new_seg["end"]
+                # Merge with previous segment. The dilated end must never decrease.
+                new_segments[-1]["end"] = max(new_segments[-1]["end"], new_seg["end"])
             else:
                 new_segments.append(new_seg)
         segments = new_segments
@@ -159,16 +213,17 @@ def get_vad_segments(
         else:
             plt.show()
 
-    ratio = sample_rate / sample_rate_target if output_sample else 1 / sample_rate_target
-
-    if ratio != 1.0:
-        for seg in segments:
-            seg["start"] *= ratio
-            seg["end"] *= ratio
-    if output_sample:
-        for seg in segments:
-            seg["start"] = round(seg["start"])
-            seg["end"] = round(seg["end"])
+    # Map analysis-timeline coordinates back to the ORIGINAL input audio timeline.
+    # One analysis sample is `1 / sample_rate_target` seconds of the original audio,
+    # and `sample_rate / sample_rate_target` samples of the original audio.
+    for seg in segments:
+        for key in ("start", "end"):
+            if output_sample:
+                value = seg[key] * sample_rate / sample_rate_target
+                seg[key] = min(max(round(value), 0), original_num_samples)
+            else:
+                value = seg[key] / sample_rate_target
+                seg[key] = float(min(max(value, 0.0), original_duration))
 
     return segments
 
@@ -185,10 +240,21 @@ def remove_non_speech(
     """
     Remove non-speech segments from audio (using Silero or Auditok, see get_vad_segments),
     glue the speech segments together and return the result along with
-    a function to convert timestamps from the new audio to the original audio
+    a function to convert timestamps from the new audio to the original audio.
+
+    When no speech is detected, the whole audio is kept as a single segment
+    (fallback), so the returned audio and mapping function stay usable.
+    The mapping function always returns values within the original audio range
+    and is monotonically non-decreasing.
     """
     if isinstance(audio, str):
         (audio, sample_rate) = load_audio(audio, sample_rate=None, return_format="torch", mono=False, verbose=verbose)
+
+    if isinstance(audio, list):
+        audio = np.asarray(audio)
+
+    num_samples = audio.shape[-1]
+    duration = num_samples / sample_rate
 
     segments = get_vad_segments(
         audio,
@@ -199,9 +265,20 @@ def remove_non_speech(
         **kwargs,
     )
 
-    segments = [(seg["start"], seg["end"]) for seg in segments]
+    # Normalize segments: clamp to the original audio, sort, and merge overlaps.
+    # This guarantees the timestamp mapping below stays monotonic.
+    segments = [(min(max(round(seg["start"]), 0), num_samples), min(max(round(seg["end"]), 0), num_samples)) for seg in segments]
+    segments = [(s, e) for s, e in segments if e > s]
+    segments.sort()
+    merged = []
+    for s, e in segments:
+        if merged and s <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+        else:
+            merged.append((s, e))
+    segments = merged
     if len(segments) == 0:
-        segments = [(0, audio.shape[-1])]
+        segments = [(0, num_samples)]
     if verbose:
         print(segments)
 
@@ -218,8 +295,10 @@ def remove_non_speech(
             print(f"Save audio to {path}")
         save_audio(path, audio_speech, sample_rate)
 
+    total_duration = num_samples
     if not use_sample:
         segments = [(float(s) / sample_rate, float(e) / sample_rate) for s, e in segments]
+        total_duration = duration
         if verbose:
             print(segments)
 
@@ -240,19 +319,28 @@ def remove_non_speech(
     # if not isinstance(audio, torch.Tensor):
     #     audio_speech = audio_speech.numpy()
 
-    return audio_speech, lambda t, t2=None: convert_timestamps(segments, t, t2)
+    return audio_speech, lambda t, t2=None: convert_timestamps(segments, t, t2, total_duration=total_duration)
 
 
-def convert_timestamps(segments, t, t2=None):
+def convert_timestamps(segments, t, t2=None, total_duration=None):
     """
     Convert timestamp from audio without non-speech segments to original audio (with non-speech segments)
 
     parameters:
-        segments: list of tuple (start, end) corresponding to non-speech segments in original audio
+        segments: list of tuple (start, end) corresponding to speech segments in original audio
         t: timestamp to convert
         t2: second timestamp to convert (optional), when the two timestamps should be in the same segment
+        total_duration: duration (or number of samples) of the original audio (optional).
+            If provided, results are clamped to [0, total_duration].
     """
     assert len(segments)
+
+    def clamp(value):
+        value = max(value, 0)
+        if total_duration is not None:
+            value = min(value, total_duration)
+        return value
+
     ioffset = 0  # Input offset
     ooffset = 0  # Output offset
     ipreviousend = 0
@@ -277,8 +365,8 @@ def convert_timestamps(segments, t, t2=None):
         result = sorted(result, key=lambda x: abs(abs(t2 - t) - abs(x[1] - x[0])))
     result = result[0]
     if t2 is None:
-        result = result[0]
-    return result
+        return clamp(result[0])
+    return [clamp(result[0]), clamp(result[1])]
 
 
 if __name__ == "__main__":
