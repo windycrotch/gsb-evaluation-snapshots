@@ -41,6 +41,7 @@ import Gauge from "canvas-gauges";
 import { HomeAssistant, CanvasGuageCardConfig } from "./types.js";
 import { CARD_VERSION } from "./const.js";
 import { localize } from "./localize/localize.js";
+import { buildGaugeOptions } from "./gauge-helpers.js";
 import "./editor.js";
 
 // Check if config or Entity changed
@@ -85,24 +86,8 @@ console.info(
   documentationURL: "https://github.com/sxdjt/canvas-gauge-card-continued",
 });
 
-// canvas-gauges throws on a gradient color it cannot parse (e.g. "#1a" part-typed in the
-// editor) and a canvas cannot draw var(--token), so such colors fall back to the library
-// default. Empty strings ("no gradient") and per-tick color arrays pass through
-function isDrawableColor(value: unknown): boolean {
-  if (typeof value !== "string" || value === "") {
-    return true;
-  }
-  return CSS.supports("color", value) && !value.includes("var(");
-}
-
-// canvas-gauges labels the scale 0-100 whatever minValue and maxValue are, so configs
-// without their own majorTicks get 6 labels spread over the real range
-function defaultMajorTicks(min: number, max: number): number[] | undefined {
-  if (!Number.isFinite(min) || !Number.isFinite(max) || max <= min) {
-    return undefined;
-  }
-  return Array.from({ length: 6 }, (_, i) => Number((min + ((max - min) * i) / 5).toFixed(2)));
-}
+// canvas color, default-tick and option-building rules live in gauge-helpers so
+// they can be unit-tested without a DOM
 
 @customElement("canvas-gauge-card")
 export class CanvasGaugeCard extends LitElement {
@@ -194,25 +179,7 @@ export class CanvasGaugeCard extends LitElement {
       // canvas-gauges applies some options only in its constructor (borders, animationRule,
       // animationDuration, the linear needle/tick/number sides, radial angle limits), so every
       // option goes in here. Setting them on gauge.options afterwards silently ignored those
-      const options: Record<string, unknown> = {};
-      for (const key in this._config?.gauge) {
-        if (Object.prototype.hasOwnProperty.call(this._config?.gauge, key)) {
-          const value = this._config!.gauge[key];
-          if (key.startsWith("color") && !isDrawableColor(value)) {
-            continue;
-          }
-          options[key] = value;
-        }
-      }
-      if (options.majorTicks === undefined) {
-        // 0 and 100 are the canvas-gauges defaults
-        const ticks = defaultMajorTicks(Number(options.minValue ?? 0), Number(options.maxValue ?? 100));
-        if (ticks) {
-          options.majorTicks = ticks;
-        }
-      }
-      options.renderTo = this._canvasElement;
-      options.value = 0;
+      const options = buildGaugeOptions(this._config!.gauge, this._canvasElement);
 
       let gauge;
       if (this._config?.gauge.type == "linear-gauge") {

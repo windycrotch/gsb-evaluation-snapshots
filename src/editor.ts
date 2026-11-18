@@ -3,6 +3,13 @@ import { customElement, property, state } from "lit/decorators.js";
 
 import { HomeAssistant, CanvasGuageCardConfig } from "./types.js";
 import { localize } from "./localize/localize.js";
+import {
+  fieldNames,
+  isInvalidColor,
+  sanitizeCardColors,
+  sanitizeGaugeColors,
+  withoutEmpty,
+} from "./gauge-helpers.js";
 
 // Same domains as Home Assistant's built-in gauge card editor
 const GAUGE_DOMAINS = ["counter", "input_number", "number", "sensor"];
@@ -191,32 +198,6 @@ function buildSchema(radial: boolean): readonly object[] {
   ];
 }
 
-// Field names in a section, including those inside grids
-function fieldNames(schema: readonly any[]): string[] {
-  return schema.reduce<string[]>(
-    (names, item) => names.concat(item.schema ? fieldNames(item.schema) : [item.name]),
-    [],
-  );
-}
-
-// Removes cleared fields so they do not linger in the YAML as empty values.
-// Empty arrays are kept: canvas-gauges treats e.g. highlights: [] as "no highlights"
-function withoutEmpty(obj: Record<string, any>): Record<string, any> {
-  const out: Record<string, any> = {};
-  for (const [key, value] of Object.entries(obj)) {
-    if (value === undefined || value === null || value === "") continue;
-    out[key] = value;
-  }
-  return out;
-}
-
-// Gauge colors are drawn on a canvas, which cannot resolve var(--token). Blank is not an
-// error: every color is optional. Arrays (per-tick colors set in YAML) are not checked
-function isInvalidColor(color: unknown, allowVar: boolean): boolean {
-  return typeof color === "string" && color !== ""
-    && (!CSS.supports("color", color) || (!allowVar && color.includes("var(")));
-}
-
 @customElement("canvas-gauge-card-editor")
 export class CanvasGaugeCardEditor extends LitElement {
   @property({ attribute: false }) public hass?: HomeAssistant;
@@ -226,6 +207,11 @@ export class CanvasGaugeCardEditor extends LitElement {
   // Form data, rebuilt when the config changes. Every gauge section gets the same object,
   // so the one section ha-form replaced on a change can be found by identity
   private _data: Record<string, any> = {};
+  // Invalid color text is not written to the config, but the field has to keep showing it
+  // with its error, so rejected drafts are remembered here until the user fixes the value
+  private _gaugeColorDraft: Record<string, any> = {};
+  private _highlightColorDraft: Record<number, string> = {};
+  private _cardColorDraft: Record<string, any> = {};
 
   public setConfig(config: CanvasGuageCardConfig): void {
     this._config = config;
@@ -233,14 +219,54 @@ export class CanvasGaugeCardEditor extends LitElement {
 
   protected willUpdate(changedProps: PropertyValues): void {
     if (!changedProps.has("_config") || !this._config) return;
-    const gauge = { ...GAUGE_DISPLAY_DEFAULTS, ...(this._config.gauge ?? {}) };
-    const data: Record<string, any> = { ...this._config };
+    // A YAML edit can land an invalid color directly in the config; collect any
+    // such values here. They are merged with drafts the editor itself rejected
+    // earlier (those keys are absent from the sanitized config), so an errored
+    // value stays visible until the user types something valid
+    const gaugeDrafts = this._collectInvalidGaugeColors(this._config.gauge ?? {});
+    const mergedGaugeDraft: Record<string, any> = { ...this._gaugeColorDraft };
+    for (const [key, color] of Object.entries(gaugeDrafts.colors)) {
+      mergedGaugeDraft[key] = color;
+    }
+    const mergedHighlightDraft: Record<number, string> = { ...this._highlightColorDraft };
+    for (const [index, color] of Object.entries(gaugeDrafts.highlights)) {
+      mergedHighlightDraft[Number(index)] = color;
+    }
+    this._gaugeColorDraft = mergedGaugeDraft;
+    this._highlightColorDraft = mergedHighlightDraft;
+    this._cardColorDraft = {
+      ...this._cardColorDraft,
+      ...this._collectInvalidCardColors(this._config),
+    };
+    const gauge = {
+      ...GAUGE_DISPLAY_DEFAULTS,
+      ...(this._config.gauge ?? {}),
+      ...this._gaugeColorDraft,
+    };
+    // Re-apply rejected highlight colors on top of the sanitized config array.
+    // Drop drafts whose highlight no longer exists (the array was shortened)
+    if (Object.keys(this._highlightColorDraft).length > 0 && Array.isArray(gauge.highlights)) {
+      const count = gauge.highlights.length;
+      const pruned: Record<number, string> = {};
+      for (const [i, color] of Object.entries(this._highlightColorDraft)) {
+        if (Number(i) < count) pruned[Number(i)] = color;
+      }
+      this._highlightColorDraft = pruned;
+      gauge.highlights = gauge.highlights.map((highlight: any, i: number) =>
+        i in this._highlightColorDraft
+          ? { ...highlight, color: this._highlightColorDraft[i] }
+          : highlight
+      );
+    } else if (!Array.isArray(gauge.highlights)) {
+      this._highlightColorDraft = {};
+    }
+    const data: Record<string, any> = { ...this._config, ...this._cardColorDraft };
     for (const key of SECTION_KEYS) {
       data[key] = gauge;
     }
     data.gauge_text = {
       ...gauge,
-      name_color: this._config.name_color,
+      name_color: this._cardColorDraft.name_color ?? this._config.name_color,
       name_bold: this._config.name_bold ?? false,
     };
     this._data = data;
@@ -267,7 +293,7 @@ export class CanvasGaugeCardEditor extends LitElement {
   private _errors(radial: boolean): Record<string, string | string[]> | undefined {
     if (!this._config) return undefined;
     const errors: Record<string, string | string[]> = {};
-    if (isInvalidColor(this._config.background_color, true)) {
+    if (isInvalidColor(this._data.background_color, true)) {
       errors.background_color = this._colorError("background_color", true);
     }
     const sections = gaugeSections(radial);
@@ -312,23 +338,69 @@ export class CanvasGaugeCardEditor extends LitElement {
     }
     value.name_bold = value.name_bold || undefined;
 
+    // Keep invalid color text on screen with its error, but never write it to
+    // the config: var(--token) and unparseable colors cannot be drawn on canvas
+    const gaugeDrafts = this._collectInvalidGaugeColors(gauge);
+    this._gaugeColorDraft = gaugeDrafts.colors;
+    this._highlightColorDraft = gaugeDrafts.highlights;
+    this._cardColorDraft = this._collectInvalidCardColors(value);
+
     // Drop display-only defaults the user did not set or change
+    const sanitizedGauge = sanitizeGaugeColors(gauge);
     for (const [key, def] of Object.entries(GAUGE_DISPLAY_DEFAULTS)) {
-      if (this._config.gauge?.[key] === undefined && gauge[key] === def) {
-        delete gauge[key];
+      if (this._config.gauge?.[key] === undefined && sanitizedGauge[key] === def) {
+        delete sanitizedGauge[key];
       }
     }
     // An empty tick list means "generate from min and max" (see the card), so remove it
-    if (Array.isArray(gauge.majorTicks) && gauge.majorTicks.length === 0) {
-      delete gauge.majorTicks;
+    if (Array.isArray(sanitizedGauge.majorTicks) && sanitizedGauge.majorTicks.length === 0) {
+      delete sanitizedGauge.majorTicks;
     }
-    const config = withoutEmpty({ ...value, gauge: withoutEmpty(gauge) });
+    const config = sanitizeCardColors(
+      withoutEmpty({ ...value, gauge: withoutEmpty(sanitizedGauge) }),
+    );
 
     this.dispatchEvent(new CustomEvent("config-changed", {
       detail: { config },
       bubbles: true,
       composed: true,
     }));
+  }
+
+  // Picks out the gauge color fields whose current value a canvas cannot use,
+  // plus highlight colors keyed by index, so they can stay visible as an
+  // errored draft instead of being dropped silently from the form
+  private _collectInvalidGaugeColors(data: Record<string, any>): {
+    colors: Record<string, any>;
+    highlights: Record<number, string>;
+  } {
+    const colors: Record<string, any> = {};
+    for (const [key, color] of Object.entries(data)) {
+      if (key.startsWith("color") && isInvalidColor(color, false)) {
+        colors[key] = color;
+      }
+    }
+    const highlights: Record<number, string> = {};
+    if (Array.isArray(data.highlights)) {
+      data.highlights.forEach((highlight: any, i: number) => {
+        if (highlight && isInvalidColor(highlight.color, false)) {
+          highlights[i] = highlight.color;
+        }
+      });
+    }
+    return { colors, highlights };
+  }
+
+  // Card-level colors. background_color and name_color allow var(--token);
+  // only values CSS itself cannot parse are rejected
+  private _collectInvalidCardColors(data: Record<string, any>): Record<string, any> {
+    const draft: Record<string, any> = {};
+    for (const key of ["background_color", "name_color"]) {
+      if (isInvalidColor(data[key], true)) {
+        draft[key] = data[key];
+      }
+    }
+    return draft;
   }
 
   protected render(): TemplateResult | void {

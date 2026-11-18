@@ -14,7 +14,13 @@ const ALLOWLIST = {
   'GHSA-fc5q-39xc-vjpf': 'picomatch ReDoS, no patched version (added 2026-11-17)',
 };
 
-const result = spawnSync('npm', ['audit', '--json'], { encoding: 'utf8' });
+// On Windows npm is npm.cmd, which is not a directly spawnable executable
+// (spawnSync('npm', ...) fails with ENOENT there); invoke it through a shell.
+// Other platforms run npm directly so args stay un-concatenated.
+const isWindows = process.platform === 'win32';
+const result = isWindows
+  ? spawnSync('npm.cmd audit --json', { encoding: 'utf8', shell: true })
+  : spawnSync('npm', ['audit', '--json'], { encoding: 'utf8' });
 
 let report;
 try {
