@@ -1,0 +1,22 @@
+[build]
+  command = "pnpm run build"
+  publish = "dist"
+  functions = "netlify/functions"
+  ignore = "git diff HEAD^ HEAD --name-only | grep -qEv '(\\.md$|LICENSE$|\\.env\\.example$|^\\.github/|^\\.vscode/)' && exit 1 || exit 0"
+
+[[redirects]]
+  from = "/api/v1/dalle"
+  to = "/.netlify/functions/dalle"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/v1/ai-settings"
+  to = "/.netlify/functions/ai-settings"
+  status = 200
+  force = true
+
+[dev]
+  command = "pnpm run dev"
+  targetPort = 5173
+  port = 8888
