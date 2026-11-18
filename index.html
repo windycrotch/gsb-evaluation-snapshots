@@ -695,6 +695,131 @@
         </a>
     </div>
 
+    <script id="aether-wav-core">
+        // ÆtherStrum WAV recorder core.
+        // Pure, DOM-free sample-concatenation and WAV-encoding logic, shared by
+        // the app (below) and by test-recorder.html, which extracts this block
+        // by its id so the tests exercise the real shipping code.
+        window.AetherWav = (function () {
+            'use strict';
+
+            var NUM_CHANNELS = 2;
+            var BITS_PER_SAMPLE = 16;
+
+            // Concatenate captured interleaved float32 chunks into one buffer.
+            function combineChunks(chunks) {
+                var totalLength = 0;
+                for (var i = 0; i < chunks.length; i++) totalLength += chunks[i].length;
+                var combined = new Float32Array(totalLength);
+                var offset = 0;
+                for (var i = 0; i < chunks.length; i++) {
+                    combined.set(chunks[i], offset);
+                    offset += chunks[i].length;
+                }
+                return combined;
+            }
+
+            function hasNonZeroSample(samples) {
+                for (var i = 0; i < samples.length; i++) {
+                    if (samples[i] !== 0) return true;
+                }
+                return false;
+            }
+
+            function writeString(view, offset, string) {
+                for (var i = 0; i < string.length; i++) {
+                    view.setUint8(offset + i, string.charCodeAt(i));
+                }
+            }
+
+            // Encode interleaved float32 stereo samples as a 16-bit PCM WAV.
+            // Every header field describes the actual payload:
+            //   RIFF size = 36 + data bytes, data size = actual PCM byte count.
+            function encodeWav(samples, sampleRate) {
+                var bytesPerSample = BITS_PER_SAMPLE / 8;
+                var blockAlign = NUM_CHANNELS * bytesPerSample;
+                var dataSize = samples.length * bytesPerSample;
+
+                var buffer = new ArrayBuffer(44 + dataSize);
+                var view = new DataView(buffer);
+
+                // RIFF chunk descriptor
+                writeString(view, 0, 'RIFF');
+                view.setUint32(4, 36 + dataSize, true);
+                writeString(view, 8, 'WAVE');
+
+                // fmt sub-chunk
+                writeString(view, 12, 'fmt ');
+                view.setUint32(16, 16, true);                      // SubChunk1Size
+                view.setUint16(20, 1, true);                       // AudioFormat (PCM)
+                view.setUint16(22, NUM_CHANNELS, true);            // NumChannels
+                view.setUint32(24, sampleRate, true);              // SampleRate
+                view.setUint32(28, sampleRate * blockAlign, true); // ByteRate
+                view.setUint16(32, blockAlign, true);              // BlockAlign
+                view.setUint16(34, BITS_PER_SAMPLE, true);         // BitsPerSample
+
+                // data sub-chunk
+                writeString(view, 36, 'data');
+                view.setUint32(40, dataSize, true);
+
+                // Convert float samples to 16-bit PCM
+                var offset = 44;
+                for (var i = 0; i < samples.length; i++) {
+                    var sample = Math.max(-1, Math.min(1, samples[i]));
+                    var val = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
+                    view.setInt16(offset, val, true);
+                    offset += bytesPerSample;
+                }
+
+                return buffer;
+            }
+
+            // Stateful recorder: collects pushed chunks between start() and stop().
+            // start() while already capturing is a no-op (returns false) so a
+            // double "start" can never wipe in-progress audio; stop() while not
+            // capturing, or with zero captured samples, returns null so callers
+            // can refuse to download an empty file.
+            function createWavRecorder(sampleRate) {
+                var chunks = [];
+                var capturing = false;
+
+                return {
+                    start: function () {
+                        if (capturing) return false;
+                        chunks = [];
+                        capturing = true;
+                        return true;
+                    },
+                    push: function (chunk) {
+                        if (capturing && chunk && chunk.length) chunks.push(chunk);
+                    },
+                    isCapturing: function () { return capturing; },
+                    stop: function () {
+                        if (!capturing) return null;
+                        capturing = false;
+                        var combined = combineChunks(chunks);
+                        chunks = [];
+                        if (combined.length === 0) return null; // empty recording: nothing to save
+                        return {
+                            blob: new Blob([encodeWav(combined, sampleRate)], { type: 'audio/wav' }),
+                            sampleCount: combined.length / NUM_CHANNELS,
+                            hasNonZero: hasNonZeroSample(combined)
+                        };
+                    }
+                };
+            }
+
+            return {
+                NUM_CHANNELS: NUM_CHANNELS,
+                BITS_PER_SAMPLE: BITS_PER_SAMPLE,
+                combineChunks: combineChunks,
+                hasNonZeroSample: hasNonZeroSample,
+                encodeWav: encodeWav,
+                createWavRecorder: createWavRecorder
+            };
+        })();
+    </script>
+
     <script>
         // Constants
         const NUM_STRINGS = 13;
@@ -867,6 +992,7 @@
         let reverbNode; // Add reverb node
         let dryGainNode;  // Add dry gain node reference
         let wetGainNode;  // Add wet gain node reference
+        let recordTapNode; // Bus that feeds the WAV recorder tap
         let mediaRecorder;
         let isRecording = false;
         let recordingStartTime = 0;
@@ -1481,142 +1607,69 @@
                 dryGainNode.gain.value = 0.7;
                 wetGainNode.gain.value = 0.3;
 
-                setupAudioRouting();
+                // WAV recorder setup — the pure recorder core lives in the
+                // `aether-wav-core` script block so tests can reuse it.
+                const wavRecorder = window.AetherWav.createWavRecorder(audioContext.sampleRate);
 
-                // Create oscillators
-                createOscillators();
-
-                // WAV recorder setup
-                let audioSamples = [];
-                let isCapturing = false;
-
-                // Set up a processor node and analyser for capturing audio
+                // Dedicated recording tap. setupAudioRouting() connects whatever
+                // currently feeds the speakers (the master bus, or the dry+wet
+                // buses when reverb is on) into this node, so re-routing for a
+                // reverb change or rebuilding oscillators for a new instrument
+                // never drops or clears the audio already captured.
+                recordTapNode = audioContext.createGain();
                 const scriptNode = audioContext.createScriptProcessor(4096, 2, 2);
-                const analyser = audioContext.createAnalyser();
-                masterGainNode.connect(analyser);
-                analyser.connect(scriptNode);
+                recordTapNode.connect(scriptNode);
+                // The processor never writes to its output buffer, so this
+                // connection stays silent; it only keeps the node pulling.
                 scriptNode.connect(audioContext.destination);
 
-                // For WAV recording
                 scriptNode.onaudioprocess = function(event) {
-                    if (!isCapturing) return;
-
-                    // Get audio data from both channels
+                    // Interleave both channels and hand them to the recorder
                     const left = event.inputBuffer.getChannelData(0);
                     const right = event.inputBuffer.getChannelData(1);
 
-                    // Interleave the channels and store
                     const samples = new Float32Array(left.length * 2);
                     for (let i = 0; i < left.length; i++) {
                         samples[i * 2] = left[i];
                         samples[i * 2 + 1] = right[i];
                     }
 
-                    audioSamples.push(samples);
+                    wavRecorder.push(samples);
                 };
 
-                // Helper to start/stop WAV recording
-                const wavRecorder = {
-                    start: function() {
-                        audioSamples = [];
-                        isCapturing = true;
-                    },
-                    stop: function() {
-                        isCapturing = false;
-                        return this.createWavFile();
-                    },
-                    createWavFile: function() {
-                        // Combine all audio samples
-                        let totalLength = 0;
-                        for (let i = 0; i < audioSamples.length; i++) {
-                            totalLength += audioSamples[i].length;
-                        }
+                setupAudioRouting();
 
-                        const combinedSamples = new Float32Array(totalLength);
-                        let offset = 0;
-                        for (let i = 0; i < audioSamples.length; i++) {
-                            combinedSamples.set(audioSamples[i], offset);
-                            offset += audioSamples[i].length;
-                        }
+                // Create oscillators
+                createOscillators();
 
-                        // Create WAV file
-                        const wavBuffer = this.createWavBuffer(combinedSamples);
-                        return new Blob([wavBuffer], { type: 'audio/wav' });
-                    },
-                    createWavBuffer: function(samples) {
-                        const numChannels = 2;
-                        const sampleRate = audioContext.sampleRate;
-                        const bitsPerSample = 16;
-                        const bytesPerSample = bitsPerSample / 8;
-                        const blockAlign = numChannels * bytesPerSample;
-
-                        // Convert float samples to 16-bit PCM
-                        const numSamples = samples.length / numChannels;
-                        const pcmData = new DataView(new ArrayBuffer(numSamples * blockAlign));
-
-                        let pcmOffset = 0;
-                        for (let i = 0; i < samples.length; i++) {
-                            // Convert float to int16
-                            const sample = Math.max(-1, Math.min(1, samples[i]));
-                            const val = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
-                            pcmData.setInt16(pcmOffset, val, true);
-                            pcmOffset += bytesPerSample;
-                        }
-
-                        // Create WAV file header
-                        const headerSize = 44;
-                        const dataSize = pcmData.byteLength;
-                        const wavData = new DataView(new ArrayBuffer(headerSize + dataSize));
-
-                        // RIFF chunk descriptor
-                        this.writeString(wavData, 0, 'RIFF');
-                        wavData.setUint32(4, 36 + dataSize, true);
-                        this.writeString(wavData, 8, 'WAVE');
-
-                        // fmt sub-chunk
-                        this.writeString(wavData, 12, 'fmt ');
-                        wavData.setUint32(16, 16, true);          // SubChunk1Size
-                        wavData.setUint16(20, 1, true);           // AudioFormat (PCM)
-                        wavData.setUint16(22, numChannels, true); // NumChannels
-                        wavData.setUint32(24, sampleRate, true);  // SampleRate
-                        wavData.setUint32(28, sampleRate * blockAlign, true); // ByteRate
-                        wavData.setUint16(32, blockAlign, true);  // BlockAlign
-                        wavData.setUint16(34, bitsPerSample, true); // BitsPerSample
-
-                        // data sub-chunk
-                        this.writeString(wavData, 36, 'data');
-                        wavData.setUint32(40, dataSize, true);
-
-                        // Copy PCM data
-                        const wavBytes = new Uint8Array(wavData.buffer);
-                        const pcmBytes = new Uint8Array(pcmData.buffer);
-                        wavBytes.set(pcmBytes, headerSize);
-
-                        return wavData.buffer;
-                    },
-                    writeString: function(view, offset, string) {
-                        for (let i = 0; i < string.length; i++) {
-                            view.setUint8(offset + i, string.charCodeAt(i));
-                        }
-                    }
-                };
-
-                // Use our custom WAV recorder instead of MediaRecorder
+                // Custom WAV recorder (no MediaRecorder) so we control the
+                // exact PCM layout and can reject empty recordings.
                 mediaRecorder = {
                     start: function() {
-                        wavRecorder.start();
+                        // Returns false if already capturing — a repeated
+                        // "start" must never wipe the in-progress recording.
+                        return wavRecorder.start();
                     },
                     stop: function() {
-                        const wavBlob = wavRecorder.stop();
+                        const result = wavRecorder.stop();
+                        // Empty recording (no samples captured): don't download.
+                        if (!result || !result.blob) return false;
+
                         const now = new Date();
                         const timestamp = `${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}${String(now.getSeconds()).padStart(2, '0')}`;
-                        const url = URL.createObjectURL(wavBlob);
+                        const url = URL.createObjectURL(result.blob);
 
                         // Create download link
                         const a = document.createElement('a');
                         a.href = url;
                         a.download = `aether-strings-${timestamp}.wav`;
+                        document.body.appendChild(a);
                         a.click();
+                        a.remove();
+
+                        // Release the object URL once the download has started
+                        setTimeout(function() { URL.revokeObjectURL(url); }, 10000);
+                        return true;
                     }
                 };
             } catch (error) {
@@ -1669,6 +1722,19 @@
             } else {
                 // Direct routing when reverb is disabled
                 masterGainNode.connect(audioContext.destination);
+            }
+
+            // Feed the recording tap so it always mirrors the speaker output.
+            // The buses were disconnected above, so these connections never
+            // duplicate — recording survives reverb toggles and instrument
+            // switches with already-captured audio intact.
+            if (recordTapNode) {
+                if (settings.reverbEnabled) {
+                    dryGainNode.connect(recordTapNode);
+                    wetGainNode.connect(recordTapNode);
+                } else {
+                    masterGainNode.connect(recordTapNode);
+                }
             }
         }
 
@@ -2080,6 +2146,13 @@
 
                     if (settings.isPlaying) {
                         playBtn.innerHTML = '<i class="ph ph-speaker-high"></i>';
+
+                        // Restore the master gain (muting ramped it to 0)
+                        if (masterGainNode) {
+                            masterGainNode.gain.cancelScheduledValues(audioContext.currentTime);
+                            masterGainNode.gain.setValueAtTime(masterGainNode.gain.value, audioContext.currentTime);
+                            masterGainNode.gain.linearRampToValueAtTime(settings.volume, audioContext.currentTime + 0.1);
+                        }
                     } else {
                         playBtn.innerHTML = '<i class="ph ph-speaker-slash"></i>';
 
@@ -2263,57 +2336,78 @@
     </script>
     <script>
         const recordBtn = document.getElementById('recordBtn');
+        // Guards against rapid repeat clicks so a click burst can never fire
+        // two starts or two stops in a row.
+        let recordClickLocked = false;
         if (recordBtn) {
-            recordBtn.addEventListener('click', function() {
+            recordBtn.addEventListener('click', async function() {
+                if (recordClickLocked) return;
+                recordClickLocked = true;
+                setTimeout(function() { recordClickLocked = false; }, 300);
+
                 if (!audioContext) {
-                    initAudio();
+                    await initAudio();
                 }
-                
+                if (audioContext && audioContext.state === 'suspended') {
+                    await audioContext.resume();
+                }
+
+                if (!mediaRecorder) {
+                    alert('Recording is not supported in this browser.');
+                    return;
+                }
+
                 if (!isRecording) {
-                    // Start recording
-                    if (mediaRecorder) {
-                        mediaRecorder.start();
-                        isRecording = true;
-                        recordBtn.classList.add('recording');
-                        recordingTime.classList.add('visible');
-                        
-                        // Change to a red circle (dot) when recording
-                        recordBtn.innerHTML = `
-                            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="#FF4B4B" viewBox="0 0 256 256">
-                                <circle cx="128" cy="128" r="96" />
-                            </svg>
-                        `;
-                        
-                        // Start timer
-                        recordingStartTime = Date.now();
-                        recordingInterval = setInterval(updateRecordingTime, 1000);
-                        
-                        // Ensure audio is playing
-                        if (!settings.isPlaying) {
-                            settings.isPlaying = true;
-                            playBtn.innerHTML = '<i class="ph ph-speaker-high"></i>';
-                            playBtn.classList.add('active');
-                        }
-                    } else {
-                        alert('Recording is not supported in this browser.');
+                    // Start recording — start() is a no-op if already capturing
+                    if (!mediaRecorder.start()) return;
+                    isRecording = true;
+                    recordBtn.classList.add('recording');
+                    recordingTime.classList.add('visible');
+
+                    // Change to a red circle (dot) when recording
+                    recordBtn.innerHTML = `
+                        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="#FF4B4B" viewBox="0 0 256 256">
+                            <circle cx="128" cy="128" r="96" />
+                        </svg>
+                    `;
+
+                    // Start timer
+                    recordingStartTime = Date.now();
+                    recordingInterval = setInterval(updateRecordingTime, 1000);
+
+                    // Ensure audio is playing
+                    if (!settings.isPlaying) {
+                        settings.isPlaying = true;
+                        playBtn.innerHTML = '<i class="ph ph-speaker-high"></i>';
+                        playBtn.classList.add('active');
+                    }
+
+                    // Restore the master gain as well — muting ramps it to 0,
+                    // and without this the recording would be all zeros.
+                    if (masterGainNode && audioContext) {
+                        masterGainNode.gain.cancelScheduledValues(audioContext.currentTime);
+                        masterGainNode.gain.setValueAtTime(masterGainNode.gain.value, audioContext.currentTime);
+                        masterGainNode.gain.linearRampToValueAtTime(settings.volume, audioContext.currentTime + 0.1);
                     }
                 } else {
-                    // Stop recording
-                    if (mediaRecorder) {
-                        mediaRecorder.stop();
-                        isRecording = false;
-                        recordBtn.classList.remove('recording');
-                        recordingTime.classList.remove('visible');
-                        
-                        // Change back to microphone icon
-                        recordBtn.innerHTML = `
-                            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="#FF4B4B" viewBox="0 0 256 256">
-                                <path d="M128,176a48.05,48.05,0,0,0,48-48V64a48,48,0,0,0-96,0v64A48.05,48.05,0,0,0,128,176ZM96,64a32,32,0,0,1,64,0v64a32,32,0,0,1-64,0Zm40,143.54V232a8,8,0,0,1-16,0V207.54A80.09,80.09,0,0,1,48,128a8,8,0,0,1,16,0,64,64,0,0,0,128,0,8,8,0,0,1,16,0A80.09,80.09,0,0,1,136,207.54Z"></path>
-                            </svg>
-                        `;
-                        
-                        // Stop timer
-                        clearInterval(recordingInterval);
+                    // Stop recording — stop() is a no-op if not capturing
+                    const saved = mediaRecorder.stop();
+                    isRecording = false;
+                    recordBtn.classList.remove('recording');
+                    recordingTime.classList.remove('visible');
+
+                    // Change back to microphone icon
+                    recordBtn.innerHTML = `
+                        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="#FF4B4B" viewBox="0 0 256 256">
+                            <path d="M128,176a48.05,48.05,0,0,0,48-48V64a48,48,0,0,0-96,0v64A48.05,48.05,0,0,0,128,176ZM96,64a32,32,0,0,1,64,0v64a32,32,0,0,1-64,0Zm40,143.54V232a8,8,0,0,1-16,0V207.54A80.09,80.09,0,0,1,48,128a8,8,0,0,1,16,0,64,64,0,0,0,128,0,8,8,0,0,1,16,0A80.09,80.09,0,0,1,136,207.54Z"></path>
+                        </svg>
+                    `;
+
+                    // Stop timer
+                    clearInterval(recordingInterval);
+
+                    if (!saved) {
+                        alert('没有录到任何声音，未生成录音文件。\nNothing was recorded, so no file was saved.');
                     }
                 }
             });

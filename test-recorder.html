@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ÆtherStrum 录音器测试 — Recorder Tests</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            max-width: 860px;
+            margin: 2rem auto;
+            padding: 0 1.5rem;
+            background: #0f1420;
+            color: #e6e9f0;
+        }
+        h1 { font-size: 1.4rem; }
+        h1 small { color: #8b93a7; font-weight: normal; }
+        .howto {
+            background: #1a2132;
+            border: 1px solid #2c3752;
+            border-radius: 8px;
+            padding: 0.8rem 1.2rem;
+            font-size: 0.9rem;
+            line-height: 1.6;
+        }
+        .howto code {
+            background: #0b0e16;
+            padding: 0.1em 0.45em;
+            border-radius: 4px;
+            color: #7ee0a3;
+        }
+        ul#results { list-style: none; padding: 0; }
+        ul#results li {
+            margin: 0.4rem 0;
+            padding: 0.55rem 0.9rem;
+            border-radius: 6px;
+            background: #1a2132;
+            border-left: 4px solid #555;
+            font-size: 0.92rem;
+        }
+        li.pass { border-left-color: #2ecc71; }
+        li.fail { border-left-color: #e74c3c; }
+        li .detail { color: #8b93a7; display: block; font-size: 0.82rem; margin-top: 0.15rem; }
+        #summary { font-weight: 600; margin-top: 1rem; }
+        #summary.ok { color: #2ecc71; }
+        #summary.bad { color: #e74c3c; }
+        #fatal { color: #e74c3c; white-space: pre-wrap; }
+    </style>
+</head>
+<body>
+    <h1>ÆtherStrum 录音链路测试 <small>Recorder pipeline tests</small></h1>
+
+    <div class="howto">
+        <strong>如何运行 / How to run</strong><br>
+        本页会通过 <code>fetch('index.html')</code> 提取 index.html 中
+        <code>&lt;script id="aether-wav-core"&gt;</code> 的真实录音核心代码并直接测试它。
+        由于浏览器通常禁止 <code>file://</code> 页面读取本地文件，请在仓库目录启动一个本地服务器：<br>
+        <code>python -m http.server 8000</code>（或 <code>npx serve</code>）<br>
+        然后打开 <code>http://localhost:8000/test-recorder.html</code>。
+        Firefox 直接双击打开本文件通常也可以。
+    </div>
+
+    <p id="fatal"></p>
+    <ul id="results"></ul>
+    <p id="summary"></p>
+
+    <script>
+        'use strict';
+
+        const resultsEl = document.getElementById('results');
+        const summaryEl = document.getElementById('summary');
+        let passCount = 0, failCount = 0;
+
+        function report(name, pass, detail) {
+            const li = document.createElement('li');
+            li.className = pass ? 'pass' : 'fail';
+            li.textContent = (pass ? '✓ ' : '✗ ') + name;
+            if (detail) {
+                const d = document.createElement('span');
+                d.className = 'detail';
+                d.textContent = detail;
+                li.appendChild(d);
+            }
+            resultsEl.appendChild(li);
+            pass ? passCount++ : failCount++;
+        }
+
+        function readAscii(view, offset, len) {
+            let s = '';
+            for (let i = 0; i < len; i++) s += String.fromCharCode(view.getUint8(offset + i));
+            return s;
+        }
+
+        // ---- synthetic signal generators ------------------------------------
+        const SR = 48000;
+
+        // Interleaved stereo silence, `seconds` long
+        function makeSilence(seconds) {
+            return new Float32Array(Math.round(SR * seconds) * 2);
+        }
+
+        // Interleaved stereo sine wave
+        function makeSine(seconds, freq, amp) {
+            const frames = Math.round(SR * seconds);
+            const out = new Float32Array(frames * 2);
+            for (let i = 0; i < frames; i++) {
+                const v = amp * Math.sin(2 * Math.PI * freq * i / SR);
+                out[i * 2] = v;
+                out[i * 2 + 1] = v;
+            }
+            return out;
+        }
+
+        // ---- load the real recorder core out of index.html -------------------
+        async function loadCore() {
+            const resp = await fetch('index.html');
+            if (!resp.ok) throw new Error('fetch index.html failed: HTTP ' + resp.status);
+            const html = await resp.text();
+            const doc = new DOMParser().parseFromString(html, 'text/html');
+            const block = doc.getElementById('aether-wav-core');
+            if (!block) throw new Error('index.html 中找不到 <script id="aether-wav-core">');
+            (0, eval)(block.textContent); // indirect eval → defines window.AetherWav
+            if (!window.AetherWav) throw new Error('执行录音核心后 window.AetherWav 仍不存在');
+            return window.AetherWav;
+        }
+
+        async function run() {
+            const AetherWav = await loadCore();
+            report('加载 index.html 中的真实录音核心 (aether-wav-core)', true,
+                'combineChunks / encodeWav / createWavRecorder 均来自 index.html');
+
+            // =================================================================
+            // 路径 1：静音段 + 正弦段拼接后，文件里必须有非零采样
+            // =================================================================
+            const SILENT_S = 0.25, SINE_S = 0.5;
+            const rec1 = AetherWav.createWavRecorder(SR);
+            rec1.start();
+            rec1.push(makeSilence(SILENT_S));   // 先录到一段静音
+            rec1.push(makeSine(SINE_S, 440, 0.5)); // 再录到一段 440Hz 正弦
+            const res1 = rec1.stop();
+
+            report('非零采样：录音结果存在且标记为含非零采样',
+                !!(res1 && res1.blob && res1.hasNonZero === true),
+                res1 ? 'sampleCount=' + res1.sampleCount + ', hasNonZero=' + res1.hasNonZero : 'stop() 返回 null');
+
+            const expectedFrames = Math.round(SR * SILENT_S) + Math.round(SR * SINE_S);
+            report('非零采样：采样帧数与推入的静音段+正弦段一致',
+                !!res1 && res1.sampleCount === expectedFrames,
+                '期望 ' + expectedFrames + ' 帧，实际 ' + (res1 && res1.sampleCount));
+
+            // 解码 WAV，验证拼接顺序：前段全零、后段有非零
+            const buf1 = await res1.blob.arrayBuffer();
+            const dv1 = new DataView(buf1);
+            const dataOff = 44;
+            const totalSamples = (buf1.byteLength - dataOff) / 2;
+            const silentSamples = Math.round(SR * SILENT_S) * 2;
+            let prefixAllZero = totalSamples >= silentSamples;
+            for (let i = 0; i < silentSamples && prefixAllZero; i++) {
+                if (dv1.getInt16(dataOff + i * 2, true) !== 0) prefixAllZero = false;
+            }
+            let tailHasNonZero = false;
+            for (let i = silentSamples; i < totalSamples; i++) {
+                if (dv1.getInt16(dataOff + i * 2, true) !== 0) { tailHasNonZero = true; break; }
+            }
+            report('非零采样：拼接顺序正确（静音段在前全零，正弦段在后含非零）',
+                prefixAllZero && tailHasNonZero,
+                '静音前缀全零=' + prefixAllZero + '，正弦尾部含非零=' + tailHasNonZero);
+
+            // =================================================================
+            // 路径 2：WAV 头字段必须与实际数据一致
+            // =================================================================
+            const dataSize = buf1.byteLength - 44;
+            const checks = [
+                ['RIFF 标识', readAscii(dv1, 0, 4) === 'RIFF'],
+                ['RIFF 长度 = 36 + 数据字节数 (' + dataSize + ')', dv1.getUint32(4, true) === 36 + dataSize],
+                ['WAVE 标识', readAscii(dv1, 8, 4) === 'WAVE'],
+                ['fmt 子块标识', readAscii(dv1, 12, 4) === 'fmt '],
+                ['fmt 子块长度 = 16', dv1.getUint32(16, true) === 16],
+                ['音频格式 = 1 (PCM)', dv1.getUint16(20, true) === 1],
+                ['声道数 = 2', dv1.getUint16(22, true) === 2],
+                ['采样率 = ' + SR, dv1.getUint32(24, true) === SR],
+                ['字节率 = 采样率×4', dv1.getUint32(28, true) === SR * 4],
+                ['块对齐 = 4', dv1.getUint16(32, true) === 4],
+                ['位深 = 16', dv1.getUint16(34, true) === 16],
+                ['data 子块标识', readAscii(dv1, 36, 4) === 'data'],
+                ['data 长度 = 实际 PCM 字节数', dv1.getUint32(40, true) === dataSize],
+                ['data 长度 = 帧数×2声道×2字节', dv1.getUint32(40, true) === expectedFrames * 2 * 2],
+            ];
+            checks.forEach(([name, ok]) => report('WAV 头：' + name, ok));
+
+            // 用 AudioContext 独立解码一遍，旁证文件合法（若环境支持）
+            if (window.AudioContext || window.webkitAudioContext) {
+                try {
+                    const AC = window.AudioContext || window.webkitAudioContext;
+                    const probe = new AC();
+                    const decoded = await probe.decodeAudioData(buf1.slice(0));
+                    report('WAV 头：AudioContext 可解码，声道/采样率与头部一致',
+                        decoded.numberOfChannels === 2 && decoded.sampleRate === SR,
+                        'channels=' + decoded.numberOfChannels + ', sampleRate=' + decoded.sampleRate +
+                        ', duration=' + decoded.duration.toFixed(3) + 's');
+                    probe.close && probe.close();
+                } catch (e) {
+                    report('WAV 头：AudioContext 可解码', false, String(e));
+                }
+            }
+
+            // =================================================================
+            // 路径 3：空录音（未采到任何样本）必须被拒绝
+            // =================================================================
+            const rec2 = AetherWav.createWavRecorder(SR);
+            rec2.start();
+            const empty = rec2.stop(); // 一个样本都没采到
+            report('空录音：未采到任何样本时 stop() 返回 null（不生成文件）',
+                empty === null, 'stop() → ' + String(empty));
+
+            // 附带：幂等性 —— 不允许出现两次 start / 两次 stop
+            const rec3 = AetherWav.createWavRecorder(SR);
+            const firstStart = rec3.start();
+            const secondStart = rec3.start(); // 重复 start 必须是 no-op
+            rec3.push(makeSine(0.1, 220, 0.5)); // 若第二次 start 清空数据，这里之后仍应有数据
+            const stopOnce = rec3.stop();
+            const stopTwice = rec3.stop();      // 重复 stop 必须是 no-op
+            report('幂等：重复 start 不清空进行中的录音，重复 stop 不重复产出',
+                firstStart === true && secondStart === false &&
+                !!(stopOnce && stopOnce.blob) && stopTwice === null,
+                'start→' + firstStart + '/' + secondStart +
+                ', stop→' + (stopOnce ? 'blob(' + stopOnce.sampleCount + '帧)' : 'null') + '/' + String(stopTwice));
+
+            // =================================================================
+            summaryEl.textContent = failCount === 0
+                ? `全部通过：${passCount}/${passCount + failCount}`
+                : `失败 ${failCount} 项，通过 ${passCount}/${passCount + failCount}`;
+            summaryEl.className = failCount === 0 ? 'ok' : 'bad';
+        }
+
+        run().catch(err => {
+            document.getElementById('fatal').textContent =
+                '无法运行测试：' + err.message +
+                '\n\n如果是直接双击以 file:// 打开的，请改用本地服务器：' +
+                '\n  python -m http.server 8000' +
+                '\n然后访问 http://localhost:8000/test-recorder.html';
+            console.error(err);
+        });
+    </script>
+</body>
+</html>
