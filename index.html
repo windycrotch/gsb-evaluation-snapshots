@@ -142,23 +142,32 @@
     var S={ level:'nat', selProv:null, selKab:null };
     var hover=null, hiKey=null, pickKey=null, drag=null, pointers={}, pinchDist=null, pinchActive=false;
 
-    function paintPred(cv2, pred, bb, fill, borderHex){
+    // mask (grid biner, mis. WG): sel bernilai truthy tidak pernah dicat dan tidak
+    // pernah dianggap "di luar" wilayah, jadi tepinya tidak melahirkan garis palsu.
+    function paintPred(cv2, pred, bb, fill, borderHex, mask){
       var ctx=cv2.getContext('2d'); ctx.clearRect(0,0,W,H); var img=ctx.getImageData(0,0,W,H), d=img.data, fb=hex(borderHex);
-      for(var y=bb.y0;y<=bb.y1;y++)for(var x=bb.x0;x<=bb.x1;x++){ var o=y*W+x; if(!pred(o))continue;
-        var edge=(x===0||!pred(o-1))||(x===W-1||!pred(o+1))||(y===0||!pred(o-W))||(y===H-1||!pred(o+W)); var q=o*4;
+      var outside=function(o){ return (mask&&mask[o])||!pred(o); };
+      for(var y=bb.y0;y<=bb.y1;y++)for(var x=bb.x0;x<=bb.x1;x++){ var o=y*W+x; if(mask&&mask[o])continue; if(!pred(o))continue;
+        var edge=(x===0||outside(o-1))||(x===W-1||outside(o+1))||(y===0||outside(o-W))||(y===H-1||outside(o+W)); var q=o*4;
         if(edge){ d[q]=fb[0];d[q+1]=fb[1];d[q+2]=fb[2];d[q+3]=255; } else { d[q]=fill[0];d[q+1]=fill[1];d[q+2]=fill[2];d[q+3]=fill[3]; } }
       ctx.putImageData(img,0,0);
     }
     function buildProvKab(pi){
       var p=D.prov[pi], ctx=provKabCv.getContext('2d'); ctx.clearRect(0,0,W,H); var img=ctx.getImageData(0,0,W,H), d=img.data;
       var inProv={}; (D.provKab[pi]||[]).forEach(function(k){ inProv[k]=1; });
-      for(var y=p.y0;y<=p.y1;y++)for(var x=p.x0;x<=p.x1;x++){ var o=y*W+x, kv=KG[o]; if(kv===SEA16||!inProv[kv])continue;
+      // Sel danau/waduk (WG) tidak pernah diisi warna kab/kota dan tidak ikut
+      // menentukan batas: tetangga air diperlakukan seolah sel kab itu sendiri,
+      // jadi tepi danau tidak pernah digaris maupun memicu batas palsu.
+      // Tanpa waterRle, WG=null dan perilaku lama (tetap berbasis KG) dipertahankan.
+      for(var y=p.y0;y<=p.y1;y++)for(var x=p.x0;x<=p.x1;x++){ var o=y*W+x, kv=KG[o]; if(kv===SEA16||!inProv[kv]||(WG&&WG[o]))continue;
         var fillc=rgb[bProv(D.kab[kv].m)];
-        var edge=(x===0||KG[o-1]!==kv)||(x===W-1||KG[o+1]!==kv)||(y===0||KG[o-W]!==kv)||(y===H-1||KG[o+W]!==kv); var q=o*4;
+        var sameL=x===0||(WG&&WG[o-1])||KG[o-1]===kv, sameR=x===W-1||(WG&&WG[o+1])||KG[o+1]===kv;
+        var sameU=y===0||(WG&&WG[o-W])||KG[o-W]===kv, sameD=y===H-1||(WG&&WG[o+W])||KG[o+W]===kv;
+        var edge=!(sameL&&sameR&&sameU&&sameD); var q=o*4;
         if(edge){ d[q]=7;d[q+1]=11;d[q+2]=20;d[q+3]=255; } else { d[q]=fillc[0];d[q+1]=fillc[1];d[q+2]=fillc[2];d[q+3]=255; } }
       ctx.putImageData(img,0,0);
     }
-    function buildHi(hv){ if(hv.type==='prov'){ var p=D.prov[hv.idx]; paintPred(hiCv,function(o){return PG[o]===hv.idx;},p,[255,255,255,66],'#FFE500'); } else { var k=D.kab[hv.idx]; paintPred(hiCv,function(o){return KG[o]===hv.idx;},k,[255,255,255,80],'#FFE500'); } }
+    function buildHi(hv){ if(hv.type==='prov'){ var p=D.prov[hv.idx]; paintPred(hiCv,function(o){return PG[o]===hv.idx;},p,[255,255,255,66],'#FFE500'); } else { var k=D.kab[hv.idx]; paintPred(hiCv,function(o){return KG[o]===hv.idx;},k,[255,255,255,80],'#FFE500',WG); } }
 
     function draw(){
       var ctx=cv.getContext('2d'); ctx.imageSmoothingEnabled=false; var dw=cv.width, dh=cv.height;
@@ -167,7 +176,7 @@
       if(S.level==='prov'){
         ctx.fillStyle='rgba(7,11,20,0.68)'; ctx.fillRect(0,0,dw,dh);
         ctx.drawImage(provKabCv, view.vx,view.vy,view.vw,view.vh, 0,0,dw,dh);
-        if(S.selKab!=null){ if(pickKey!==S.selKab){ var k=D.kab[S.selKab]; paintPred(pickCv,function(o){return KG[o]===S.selKab;},k,[255,255,255,60],'#00E5FF'); pickKey=S.selKab; } ctx.drawImage(pickCv, view.vx,view.vy,view.vw,view.vh, 0,0,dw,dh); }
+        if(S.selKab!=null){ if(pickKey!==S.selKab){ var k=D.kab[S.selKab]; paintPred(pickCv,function(o){return KG[o]===S.selKab;},k,[255,255,255,60],'#00E5FF',WG); pickKey=S.selKab; } ctx.drawImage(pickCv, view.vx,view.vy,view.vw,view.vh, 0,0,dw,dh); }
       }
       if(hover){ var active = S.level==='prov' ? (hover.type==='kab'&&hover.idx!==S.selKab) : (hover.type==='prov');
         if(active){ var key=hover.type+hover.idx; if(hiKey!==key){ buildHi(hover); hiKey=key; } ctx.drawImage(hiCv, view.vx,view.vy,view.vw,view.vh, 0,0,dw,dh); } }

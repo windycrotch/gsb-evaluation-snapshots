@@ -1,0 +1,9 @@
+{
+  "name": "peta-pixel-water-tests",
+  "private": true,
+  "type": "commonjs",
+  "description": "Local-only Playwright harness for water-layer rendering tests. Not part of the runtime app; the demo itself stays dependency-free.",
+  "scripts": {
+    "test": "node test-water.mjs"
+  }
+}
