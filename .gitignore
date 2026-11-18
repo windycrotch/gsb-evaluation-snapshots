@@ -13,3 +13,4 @@ coverage
 docs
 .vs
 package-lock.json
+/dist-test

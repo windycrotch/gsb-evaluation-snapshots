@@ -36,6 +36,8 @@
     "prebuild": "rimraf dist",
     "build": "tsc --module commonjs && rollup -c rollup.config.ts",
     "server": "http-server -c-1",
+    "pretest": "rimraf dist-test",
+    "test": "tsc -p tsconfig.test.json && node dist-test/test/hit-test.js",
     "start": "rollup -c rollup.serve.config.ts -w"
   }
 }

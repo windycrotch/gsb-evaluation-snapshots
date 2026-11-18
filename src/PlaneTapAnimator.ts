@@ -73,6 +73,25 @@ export class PlaneTapAnimator {
         this.randomBanking[index] = bankingDirection * (0.5 + Math.random() * 0.5) * this.bankingOffset;
     }
 
+    /**
+     * Stops all animations and clears all offsets.
+     *
+     * Must be called when the formation changes: draw order indices refer to
+     * different planes afterwards, so a running animation must not carry over
+     * to a plane at a different position.
+     */
+    reset(): void {
+        this.timers.fill(0);
+        this.running.fill(false);
+        this.offsetsX.fill(0);
+        this.offsetsY.fill(0);
+        this.offsetsZ.fill(0);
+        this.offsetsBanking.fill(0);
+        this.randomX.fill(0);
+        this.randomY.fill(0);
+        this.randomBanking.fill(0);
+    }
+
     /** Advances all running animations by the given number of milliseconds. */
     update(deltaMs: number): void {
         for (let i = 0; i < this.timers.length; i++) {

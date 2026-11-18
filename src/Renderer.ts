@@ -8,7 +8,7 @@ import { DiffuseScrollingFilteredShader } from "./shaders/DiffuseScrollingFilter
 import { DiffuseScrollingFilteredTransitionShader } from "./shaders/DiffuseScrollingFilteredTransitionShader";
 import { WindStripeShader } from "./shaders/WindStripeShader";
 import { PlaneTapAnimator } from "./PlaneTapAnimator";
-import { distancePointToLine, findLinePlaneIntersectionCoords } from "./MathUtils";
+import { computeTapRay, pickPlaneOnRay } from "./MathUtils";
 
 const FOV_LANDSCAPE = 25.0;
 const FOV_PORTRAIT = 35.0;
@@ -151,12 +151,8 @@ export class Renderer extends BaseRenderer {
     /** Distance from the tap ray to a plane center that still counts as a hit. */
     private readonly TAP_HIT_RADIUS = 35;
 
-    private matTapViewInverted = mat4.create();
-    private matTapViewProjection = mat4.create();
-    private matTapViewProjectionInverted = mat4.create();
     private vecTapCamera = vec3.create();
-    private vecTapFar = vec3.create();
-    private vecTapGround = vec3.create();
+    private vecTapDirection = vec3.create();
 
     public config = {
         planeHeight: 100,
@@ -173,6 +169,9 @@ export class Renderer extends BaseRenderer {
         currentTerrain: 0,
         formation: Formation.Triangle
     };
+
+    /** Formation the tap animator state currently belongs to. */
+    private tapAnimatorFormation = this.config.formation;
 
     private readyCallback: (() => void) | undefined;
 
@@ -443,6 +442,13 @@ export class Renderer extends BaseRenderer {
             }
         }
 
+        if (this.config.formation !== this.tapAnimatorFormation) {
+            // Draw order indices refer to different planes now; running
+            // animations must not carry over to the new formation.
+            this.tapAnimatorFormation = this.config.formation;
+            this.planeTapAnimator.reset();
+        }
+
         this.planeTapAnimator.update(deltaTime);
         this.lastTime = timeNow;
     }
@@ -693,86 +699,41 @@ export class Renderer extends BaseRenderer {
 
     /** Handles a tap at the given client coordinates. */
     private handleTap(clientX: number, clientY: number): void {
-console.log(`Tap at ${clientX}, ${clientY}`);
         if (this.statePlane !== PlaneState.NORMAL) {
             return;
         }
 
-        const ground = this.getTapGroundIntersection(clientX, clientY);
-        if (ground === null) {
+        const canvas = this.canvas;
+        if (canvas === undefined) {
             return;
         }
 
-        const cameraX = this.vecTapCamera[0];
-        const cameraY = this.vecTapCamera[1];
-        const cameraZ = this.vecTapCamera[2];
-        const forwardX = this.vecTapFar[0] - cameraX;
-        const forwardY = this.vecTapFar[1] - cameraY;
-        const forwardZ = this.vecTapFar[2] - cameraZ;
+        // Convert client coordinates to NDC using the canvas' displayed size.
+        const rect = canvas.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) {
+            return;
+        }
+        const ndcX = ((clientX - rect.left) / rect.width) * 2 - 1;
+        const ndcY = 1 - ((clientY - rect.top) / rect.height) * 2;
+
+        // Ray from the camera through the tapped point.
+        if (!computeTapRay(ndcX, ndcY, this.mVMatrix, this.mProjMatrix, this.vecTapCamera, this.vecTapDirection)) {
+            return;
+        }
 
         const planes = this.getFormationPlanes(this.config.formation);
-        let hitIndex = -1;
-        let hitDistance = this.TAP_HIT_RADIUS;
+        const positions = planes.map(plane => this.getPlanePosition(plane));
 
-        for (let i = 0; i < planes.length; i++) {
-            const [planeX, planeY, planeZ] = this.getPlanePosition(planes[i]);
-
-            // Ignore planes behind the camera.
-            if ((planeX - cameraX) * forwardX + (planeY - cameraY) * forwardY + (planeZ - cameraZ) * forwardZ <= 0) {
-                continue;
-            }
-
-            const distance = distancePointToLine(
-                planeX, planeY, planeZ,
-                cameraX, cameraY, cameraZ,
-                ground[0], ground[1], ground[2]
-            );
-
-            if (distance < hitDistance) {
-                hitDistance = distance;
-                hitIndex = i;
-            }
-        }
+        const hitIndex = pickPlaneOnRay(
+            this.vecTapCamera[0], this.vecTapCamera[1], this.vecTapCamera[2],
+            this.vecTapDirection[0], this.vecTapDirection[1], this.vecTapDirection[2],
+            positions,
+            this.TAP_HIT_RADIUS
+        );
 
         if (hitIndex !== -1) {
             this.planeTapAnimator.tap(hitIndex);
         }
-    }
-
-    /**
-     * Casts a ray from the camera through the given client coordinates and
-     * returns its intersection with the horizontal plane at z = 0.
-     */
-    private getTapGroundIntersection(clientX: number, clientY: number): vec3 | null {
-        const canvas = this.canvas;
-        if (canvas === undefined) {
-            return null;
-        }
-
-        const rect = canvas.getBoundingClientRect();
-        if (rect.width === 0 || rect.height === 0) {
-            return null;
-        }
-
-        mat4.multiply(this.matTapViewProjection, this.mProjMatrix, this.mVMatrix);
-        if (mat4.invert(this.matTapViewProjectionInverted, this.matTapViewProjection) === null
-            || mat4.invert(this.matTapViewInverted, this.mVMatrix) === null) {
-            return null;
-        }
-        mat4.getTranslation(this.vecTapCamera, this.matTapViewInverted);
-
-        const ndcX = ((clientX - rect.left) / rect.width) * 2 - 1;
-        const ndcY = 1 - ((clientY - rect.top) / rect.height) * 2;
-
-        vec3.set(this.vecTapFar, ndcX, ndcY, 1);
-        vec3.transformMat4(this.vecTapFar, this.vecTapFar, this.matTapViewProjectionInverted);
-
-        return findLinePlaneIntersectionCoords(
-            this.vecTapCamera[0], this.vecTapCamera[1], this.vecTapCamera[2],
-            this.vecTapFar[0], this.vecTapFar[1], this.vecTapFar[2],
-            0, 0, 1, 0, // Horizontal plane z = 0.
-            this.vecTapGround
-        );
     }
 
     private drawWind(): void {
