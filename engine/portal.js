@@ -130,6 +130,8 @@ export function createPortal({ stage, world, onOpen }) {
 // ---------- The list ----------
 const sources = (Array.isArray(config.portal.directory) ? config.portal.directory : []).filter(Boolean);
 const directory = createDirectory(sources);
+// Test-only: clear the shared directory cache between independent test cases.
+export const __resetDirectoryForTests = () => directory.__resetForTests?.();
 const worldUrl = worldURL, key = worldKey;
 const storageKey = name => `homecraft-${name}:${key(location.href)}`;
 export const isCurrentWorld = url => key(url) === key(location.href);

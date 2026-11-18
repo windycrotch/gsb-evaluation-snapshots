@@ -35,7 +35,7 @@ async function go(world) {
   if (href) navigateDoor(href);
 }
 
-function worlds(zh, dir, ready = true) {
+export function worlds(zh, dir, ready = true) {
   const pick = v => (typeof v === 'string' ? v : v && typeof v === 'object' ? (zh ? v.zh ?? v.en : v.en ?? v.zh) : '');
   const words = (v, n) => String(pick(v) || '').replace(/\s+/g, ' ').trim().slice(0, n);
   const blocked = (Array.isArray(dir?.blocked) ? dir.blocked : []).map(key).filter(Boolean);

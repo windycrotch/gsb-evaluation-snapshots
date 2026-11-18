@@ -28,6 +28,7 @@
     "serve": "python3 tools/serve.py",
     "update": "npx --yes https://github.com/terryHu7/homecraft/releases/latest/download/homecraft-updater.tgz",
     "test:updates": "node --test tools/update-engine.test.mjs",
+    "test:portal": "node --import ./tools/portal-test-setup.mjs --test tools/portal/door-directory.test.mjs tools/portal/door-protocol.test.mjs tools/portal/portal-listing.test.mjs tools/portal/worlds-ui.test.mjs tools/portal/plugin-door.test.mjs",
     "release:prepare": "node tools/prepare-release.mjs",
     "check:site": "node tools/check-site.mjs",
     "check": "node tools/check-site.mjs && node tools/check.mjs",

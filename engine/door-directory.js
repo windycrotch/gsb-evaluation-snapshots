@@ -4,7 +4,7 @@
 export function createDirectory(sources, { maxAge = 60000, timeout = 3500 } = {}) {
   const urls = [...new Set((Array.isArray(sources) ? sources : []).filter(url => typeof url === 'string' && url))];
   let snapshot = null, checkedAt = null, pending = null;
-  return {
+  const directory = {
     peek: () => snapshot,
     read(force = false) {
       if (pending) return pending;
@@ -23,6 +23,13 @@ export function createDirectory(sources, { maxAge = 60000, timeout = 3500 } = {}
       return pending;
     },
   };
+  // Test-only seam: drop every cached state so each test starts cold. It does
+  // nothing in production because nothing calls it outside the test suite.
+  Object.defineProperty(directory, '__resetForTests', {
+    value() { snapshot = null; checkedAt = null; pending = null; },
+    enumerable: false,
+  });
+  return directory;
 }
 
 // Mirrors carry the same directory: use the first valid answer so a stalled
