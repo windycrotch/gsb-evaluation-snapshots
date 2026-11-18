@@ -1,0 +1,102 @@
+*[role=tablist]{
+  display: flex;
+  flex-direction: row;
+  position: relative;
+  
+  > * {
+    flex-grow: 0;
+    &:has( > label[role=tab] ):has( > *[role=tabpanel] ) {
+      > label[role=tab] > input[type=radio],
+      > input[type=radio] {
+        display: none;
+      }
+      
+      /*
+        first and last are filler elements.
+      */
+      &:last-child {
+        flex-grow: 1;
+        
+        &::after {
+          content: ' ';
+          width: 100%;
+          border-bottom-style: solid;
+          border-color: var( --huey-light-border-color );
+          border-width: 2px;
+          display: block;
+          margin-top: 2px;
+        }
+      }
+      
+      &:first-child::before {
+        content: ' ';
+        width: 10px;
+        border-bottom-style: solid;
+        border-color: var( --huey-light-border-color );
+        border-width: 2px;
+        display: block;
+        position: absolute;
+        margin-left: -10px;
+        margin-top: 19px;
+      }
+      
+      > label[role=tab] {
+        border-style: solid;
+        border-color: var( --huey-light-border-color );
+        border-width: 2px;
+        border-radius: 18px 8px 0px 0px;
+        padding: 2px 4px 2px 4px;
+        background-color: var( --huey-dark-background-color );
+        white-space: nowrap;
+        text-overflow: ellipsis;
+        color: var( --huey-foreground-color );
+        
+        &:hover {
+          background-color: var( --huey-light-background-color );
+          border-color: var( --huey-light-border-color );
+        }
+      }
+      
+      > *[role=tabpanel] {
+        position: absolute;
+        top: 24px;
+        left: 0px;
+        right: 0px;
+        height: calc( 100% - 24px );
+        display: none;
+        overflow: auto;  
+      }
+
+      &:has( > label[role=tab] + input[type=radio]:checked ),
+      &:has( > label[role=tab] > input[type=radio]:checked ) 
+      {
+        > label[role=tab] {
+          border-bottom-color: var( --huey-medium-background-color );
+          background-color: var( --huey-medium-background-color );
+          /* make the tab 'pop' */
+          vertical-align: middle;
+        }
+
+        > *[role=tabpanel] {
+          display: block;
+        }
+
+      }
+      
+    }
+
+    &:has( > label[role=tab] + input[type=radio]:checked ):last-child::after,
+    &:has( > label[role=tab] > input[type=radio]:checked ):last-child::after  {
+      margin-top: 0px;
+    }
+
+  }
+
+}
+  
+/* see rule above. This is an extra rule to ensure there is room for the resizer */
+*.resizeHorizontal[role=tablist]> * > *[role=tabpanel] {
+  height: calc( 100% - 40px );
+}
+
+

@@ -1,0 +1,26 @@
+dialog#datasourceSettingsDialog {
+  width: 700px;
+  height: 725px;
+  resize: both;
+  
+  > header {
+    &::before {
+      content: var( --icon-settings );
+    }
+  }
+}
+
+
+#csvReaderDelim,
+#csvReaderQuote,
+#csvReaderEscape,
+#csvReaderDecimalSeparator,
+#csvReaderDateformat,
+#csvReaderTimestampformat,
+#csvReaderNullstr {
+  font-family: var( --huey-mono-font-family );
+}
+
+output#datasourceFileSize:not(:empty):after {
+  content: ' bytes';
+}

@@ -1,0 +1,25 @@
+#settingsDialog {  
+  /* center the dialog */
+  left: calc( 50vw - 325px );
+  top: calc( 50vh - 206px );
+  resize: both;
+  padding: 0px .5em .25em 1em;
+  min-height: 412px;
+  min-width: 580px;
+  width: 650px;
+  height: 412px;
+
+  > header {
+    &::before {
+      content: var( --icon-settings );
+    }
+  }
+}
+
+menu[role=toolbar] > label[for=settingsButton]:has( > button#settingsButton ) {
+  float: right;
+
+  &::before {
+    content: var( --icon-settings );
+  }
+}

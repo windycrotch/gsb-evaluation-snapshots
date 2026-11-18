@@ -1,0 +1,498 @@
+/**
+* Prevent Query UI events when the pivot table is busy:
+*/
+.workarea:has( > .pivotTableUiContainer[aria-busy=true] ) > .queryUi {
+  pointer-events: none;
+}
+
+
+.queryUi {
+  display: flex;
+  flex-direction: column;
+  padding-left: 4px;
+  padding-right: 2px;
+  user-select: none;
+
+  section[data-axis],
+  menu,
+  ol,
+  li {
+    margin-block: 0px;
+    margin-inline: 0px;
+    padding-inline: 0px;
+  }
+
+  > section[data-axis] {
+    display: flex;
+    flex-direction: row;
+    margin-top: 1px;
+    min-height: 26px;
+
+    > header {
+      display: flex;
+      flex-direction: row;
+
+      > label {
+        width: 24px;
+      }
+
+      > h1 {
+        font-size: 1em;
+        font-weight: normal;
+        display: inline-block;
+        width: 64px;
+        margin-block: 0px;
+      }
+
+      > h1:after {
+        content: ':';
+      }
+    }
+
+    > footer {
+
+      > label {
+        display: inline-block;
+        width: 20px;
+        padding-left: 4px;
+      }
+
+      > label:has( > button )::after {
+        content: var( --icon-trash );
+      }
+    }
+
+        
+    > ol {
+      flex-grow: 1;
+      list-style-type: none;
+      background-color: var( --huey-light-background-color );
+      margin: 0px;
+      padding: 0px;
+      display: inline-block;
+      
+      /** 
+      * https://github.com/rpbouman/huey/issues/244 
+      * make the area where the axis items are resizeable so that if there are too many items, 
+      * the user can control how much space is allocated on the axis
+      */
+      
+      /* ensures the area can always have at least one line of items fully visible*/
+      min-height: 24px; 
+      /* allow the user to scroll through the items when not all items can fit in the area*/
+      overflow-y: auto; 
+
+      border-color: var( --huey-light-border-color );
+      background-color: var( --huey-light-background-color );
+      border-style: solid;
+      border-width: 1px;
+      border-radius: 15px;
+
+      &::-webkit-scrollbar-corner{
+        background-color: var( --huey-light-background-color );
+        border-style: none;
+      }
+
+      /* query ui axis item */
+      > li {
+        border-color: var( --huey-light-border-color );
+        background-color: var( --huey-medium-background-color );
+        white-space: nowrap;
+        display: inline-block;
+        border-style: solid;
+        border-width: 1px;
+        border-radius: 15px;
+        margin: 1px 0px 1px 1px;
+        vertical-align: top;
+
+        > details {
+          display: inline-block;
+
+          > ol > li {
+            margin-left: 1em;
+          }
+        }
+
+        /* label holding the item caption */
+        > details > summary > span,
+        > span {
+          margin-left: 0px;
+        }
+
+        > details:has( > ol > li )> summary > span {
+          margin-left: 0px;
+        }
+
+        /* buttons to move the item */
+        > label:first-child:has( > button )::after {
+          /* chevron left */
+          content: var( --icon-chevron-left );
+          vertical-align: top;
+        }
+
+        > label:last-child:has( > button )::after {
+          /* chevron right */
+          content: var( --icon-chevron-right );
+          vertical-align: top;
+        }
+
+        /* axis item actions */
+        > menu {
+          display: inline-block;
+          vertical-align: top;
+          margin: 0px;
+
+          /* axis item action to remove item from axis */
+          > label:nth-child(3):has( > button )::after {
+            content: var( --icon-trash );
+          }
+        }
+
+        &:first-child {
+          > label:first-child:has( > button )::after {
+            visibility: hidden;
+            display: none;
+          }
+          
+          /* label holding the item caption */
+          > details,
+          > span {
+            margin-left: 8px;
+          }
+        }
+
+        &:last-child {
+          
+          > label:last-child:has( > button )::after {
+            visibility: hidden;
+            display: none;
+          }
+
+          /* label holding the item caption */
+          > menu {
+            margin-right: 6px;
+          }
+        }
+
+        /**
+        * Icon consumer for derivations and aggregators.
+        * The --item-icon custom property is assigned in derivation-aggregator-icons.css.
+        * content: var(--item-icon) is set here on the general rule so that all
+        * derivation/aggregator items automatically receive the correct icon.
+        */
+        &:is( 
+          [data-derivation], 
+          [data-aggregator]
+        ) > span:before,
+        &:is( 
+          [data-derivation], 
+          [data-aggregator]
+        ) > details > summary > span:before 
+        {
+          width: 20px;
+          font-family: var( --huey-icon-font-family ) !important;
+          font-size: var( --huey-icon-medium );
+          color: var( --huey-icon-color );
+          vertical-align: -15%;
+          display: inline-block;
+          content: var( --item-icon );
+        }
+
+        &[data-is-being-edited-by-filter-dialog=true] {
+          background-color: var( --huey-dark-background-color );
+          border-color: var( --huey-dark-border-color );
+          > details {
+            > summary {
+              font-weight: bold;
+            }
+          }
+        }
+
+      }
+
+    }
+  }
+  
+  > section {
+    
+    &[data-axis] {
+      
+      > ol {
+        
+        /* item separators for d */
+        &::after, 
+        > li::before {
+          width: 3px;
+          height: 20px;
+          background-color: transparent;
+          display: inline-block;
+          content: '';
+        }
+        
+        &::after {
+          top: 2px;
+          position: relative;
+        }
+        
+        > li {
+          
+          &::before {
+            float: left;
+          }
+          
+        }
+      }
+      
+      &:last-child {
+        margin-bottom: 1px;
+      }
+      
+      /* end of item separatores */
+      &:has( > ol:empty ) {
+        
+        > *:is(header, footer) {
+          > label {
+            pointer-events: none;
+          }
+        }
+        
+      }
+      
+      &[data-dragover] > ol:empty::after,
+      &[data-dragover] > ol:has( > li[data-dragoverside=right]:last-child )::after,
+      &[data-dragover='0'] > ol::after,
+      > ol > li[data-dragoverside=left]::before,
+      > ol > li[data-dragoverside=right] + li::before {
+        background-color: var( --huey-highlight-background-color ) ;
+      }
+      
+      /* filter axis header icon */
+      &[data-axis=filters] > header > label:has( > button )::after {
+        content: var( --icon-filter );
+      }
+
+      &[data-axis=columns] {
+        > header {
+          > label {
+            &:has( > button ) {
+              
+              /* Columns axis header icon */
+              &::after {
+                content: var( --icon-table-row );
+              }
+              
+              /* axis icon is a button to flip the non-cells axes */
+              &:hover::after {
+                content: var( --icon-table-column );
+              }
+            }
+          }
+        }
+        
+        /* axis item action to move item to other axis */
+        > ol > li > menu > label:nth-child(2):has( > button )::after {
+          content: var( --icon-table-column );
+        }
+      }
+      
+      &[data-axis=rows] {
+        > header {
+          > label {
+            &:has( > button ) {
+              
+              /* Rows axis header icon */
+              &::after {
+                content: var( --icon-table-column );
+              }
+              
+              /* axis icon is a button to flip the non-cells axes */
+              &:hover::after {
+                content: var( --icon-table-row );
+              }
+            }
+          }
+        }
+
+        /* axis item action to move item to other axis */
+        > ol > li > menu > label:nth-child(2):has( > button )::after {
+          content: var( --icon-table-row );
+        }
+      }
+
+      /* Cells axis header icon */
+      &[data-axis=cells] > header > label:has( > button )::after {
+        content: var( --icon-layout-grid );
+      }
+
+      &:is(
+        [data-axis=rows],
+        [data-axis=columns]
+      ) > ol > li > menu > label:nth-child(1) {
+        
+        &:has( 
+          > input[type=checkbox] 
+        )::after {
+          content: var( --icon-abacus );
+        }
+
+        &:has( 
+          > input[type=checkbox]:checked
+        )::after {
+          color: var( --huey-icon-highlight );
+        }
+      }
+      
+      &[data-axis=filters] > ol {
+        > li {
+
+          > details {
+            
+            /* filter without items does not have expandable element */
+            &:has( > ol:empty ) > summary {
+              list-style: none;
+            }
+
+            > summary::marker {
+            }
+            
+            > ol[role=menu] {
+              
+              > li[role=menuitem] {
+                
+                display: list-item;
+                width: 100%;
+                
+                > label:has( > input[type=checkbox] ) {
+                  display: inline-block;
+                  width: 100%; 
+                  > span {
+                    display: inline-block;
+                    width: 100%;
+                    position: relative;
+                    left: -10px;
+                    top: -2px;
+                  }
+                }
+                
+                > label:has( > input[type=checkbox] ):before,
+                > label:has( > button ):before {
+                  display: inline-block;
+                  width: 24px;
+                  padding: 0px 2px 0px 2px;
+                  font-family: var( --huey-icon-font-family ) !important;
+                  font-size: var( --huey-icon-medium );
+                }
+                
+                > label:has( > input[type=checkbox] ):before {
+                  content: var( --icon-square );
+                  color: var( --huey-icon-color-subtle );
+                }
+                
+                > label:has( > input[type=checkbox]:checked ):before {
+                  content: var( --icon-checkbox );
+                  color: var( --huey-icon-color );
+                }            
+                
+                > label:has( > button ) {
+                  display: inline-block;
+                  width: 24px;
+                  position: relative;
+                  right: -6px;
+                }
+                
+                > label:has( > button ):before {
+                  width: 24px;
+                  content: var( --icon-trash );
+                  color: var( --huey-icon-color-subtle );
+                }
+                
+                &:has( > label > input[type=checkbox] ):hover {
+                  background-color: var( --huey-light-background-color );
+                }
+
+                &:has( 
+                  > label > input[type=checkbox], 
+                  > label > button 
+                ):hover > label::before {
+                  color: var( --huey-icon-color-highlight );
+                }
+              }
+            }
+          }
+
+          > menu {
+            > label:nth-child(1):has( > button )::after {
+              content: var( --icon-filter-check);
+            }
+
+            > label:nth-child(2):has( > button )::after {
+              content: var( --icon-trash);
+            }
+          }
+          
+          /* Filter axis item filter icon */
+          &:has( > details > ol > li ) > menu > label:nth-child(1):has( > button )::after {
+            color: var( --huey-icon-highlight );
+          }
+
+          &[data-filterType] {
+            > details > header{
+              /* 
+              * issue https://github.com/rpbouman/huey/issues/245: 
+              * label text indicating the filter type.
+              */
+              margin: .5em 0em .5em 0em;
+              font-weight: bold;
+            }
+            
+            &[data-filterType=like] > menu > label:nth-child(1):has( > button )::after {
+              content: var( --icon-filter-question);
+            }
+
+            &[data-filterType=between] > menu > label:nth-child(1):has( > button )::after {
+              content: var( --icon-filter-code );
+            }
+
+            &[data-filterType^=not] > menu > label:nth-child(1):has( > button )::after {
+              content: var( --icon-filter-exclamation );
+            }
+          }
+          
+        }
+      }
+    }
+  }
+
+  label {
+
+    > button,
+    > input[type=checkbox] {
+      display: none;
+    }
+    
+    &:has( 
+      > input[type=checkbox], 
+      > button
+    )::after {
+      width: 24px;
+      font-family: var( --huey-icon-font-family ) !important;
+      font-size: var( --huey-icon-medium );
+      color: var( --huey-icon-color-subtle );
+    }
+    
+    &:has( 
+      > input[type=checkbox],
+      > button
+    ):hover::after {
+      color: var( --huey-icon-color-highlight );
+    }
+  }
+
+}
+
+.queryUi[data-cellheadersaxis=columns] > section[data-axis=cells] > header > label:has( > button ):hover::after {
+  content: var( --icon-table-column );
+}
+.queryUi[data-cellheadersaxis=rows] > section[data-axis=cells] > header > label:has( > button ):hover::after {
+  content: var( --icon-table-row );
+}

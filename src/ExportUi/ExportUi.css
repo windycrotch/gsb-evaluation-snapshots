@@ -1,0 +1,105 @@
+dialog#exportDialog {
+  /* center the dialog */
+  left: calc( 50vw - 365px );
+  top: calc( 50vh - 242px );
+    
+  width: 730px;
+  height: 484px;
+  resize: both;
+
+  &[aria-busy=true] > dialog[role=progressbar] {
+    display: flex;
+    flex-direction: column;
+  }
+  
+  &[aria-busy=false] > dialog[role=progressbar] {
+    display: none;
+  }
+  
+  > header {
+    
+    &::before {
+      content: var( --icon-download );
+    }
+    
+    > form {
+      > input#exportTitleTemplate {
+        width: calc( 100% - 14px);
+      }
+    }
+    
+    > h3 {
+      position: relative;
+    }
+  }
+  
+  > dialog[role=progressbar] {
+    z-index: 1;
+    width: 200px;
+    
+    > header > h3[role=status] {
+      font-size: smaller;
+    }
+  }
+  
+  #exportDelimitedDateFormat,
+  #exportDelimitedTimestampFormat,
+  #exportDelimitedNullString,
+  #exportDelimitedColumnDelimiter,
+  #exportDelimitedQuote,
+  #exportDelimitedEscape,
+  #exportJsonDateFormat,
+  #exportJsonTimestampFormat {
+    font-family: var( --huey-mono-font-family );
+  }
+  
+}
+
+form > fieldset {
+  grid-column: span 1;
+}
+
+menu[role=toolbar] {
+  > label[for=exportButton] { 
+    float: right;
+
+    /* export is not available by default, ...  */
+    display: none;
+    
+    &::before {
+      content: var( --icon-download );
+    }
+
+  }
+}
+
+/* ...but one when either the columns, rows or cells axis has at least one item, the export button is available. */
+body > main:has( > #workarea > #queryUi > section:is( [data-axis=columns], [data-axis=rows], [data-axis=cells] ) > ol > li )
+{
+  > menu[role=toolbar] > label[for=exportButton] {
+    display: block;
+  }
+}
+form#exportParquetSettings {
+  > fieldset:has( > input#exportParquetCompressionLevel ) {
+
+    > label[for=exportParquetCompressionLevel] {
+      display: none;
+    }
+
+    > input#exportParquetCompressionLevel {
+      display: none;
+    }
+  }
+
+  > fieldset:has( > select#exportParquetCompression > option[value=ZSTD]:checked ) {
+    > label[for=exportParquetCompressionLevel] {
+      display: inline;
+    }
+
+    > input#exportParquetCompressionLevel {
+      display: inline;
+    }
+  }
+
+}
