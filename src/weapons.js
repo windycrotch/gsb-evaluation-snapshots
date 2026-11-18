@@ -16,6 +16,7 @@
  */
 
 import { Mine, OrbitShard, Projectile } from './entities.js';
+import { GameState } from './config.js';
 
 export class Weapon {
     constructor(def) {
@@ -317,6 +318,21 @@ export class Weapon {
     }
 
     /**
+     * Cooperative slow application: a new slow only replaces the one already
+     * ticking when it is at least as long AND at least as strong. A shorter
+     * and/or weaker slow never overwrites a longer/stronger one, so a
+     * high-potency slow from another source can't be diluted by a nova tick.
+     */
+    static _applySlow(enemy, slowDur, slowPct) {
+        const curT = enemy.slowTimer || 0;
+        const curP = enemy.slowPct || 0;
+        if (slowDur >= curT && slowPct >= curP) {
+            enemy.slowTimer = slowDur;
+            enemy.slowPct = slowPct;
+        }
+    }
+
+    /**
      * Frost Nova: radial burst centred on the hero that damages every foe
      * within `range` and applies a timed slow. Evolved variant fires a
      * second delayed ring at 60% strength for a staggered AOE.
@@ -339,10 +355,7 @@ export class Weapon {
                 const dmg = this._rollCrit(player, game, baseDmg, enemy.x, enemy.y - 20, '#88ddff');
                 enemy.takeDamage(dmg);
                 // Slow is cooperative: entities.js reads `slowTimer` / `slowPct`.
-                if (!enemy.slowTimer || enemy.slowTimer < slowDur) {
-                    enemy.slowTimer = slowDur;
-                    enemy.slowPct = slowPct;
-                }
+                Weapon._applySlow(enemy, slowDur, slowPct);
             }
         }
         game.createParticles(player.x, player.y, '#aaeeff', 24);
@@ -353,8 +366,16 @@ export class Weapon {
             // fire-time so a stat change between pulses doesn't retro-buff.
             const r = range;
             const d2 = baseDmg * 0.6;
+            // Settle-once guard: this nova's aftershock may resolve exactly
+            // one time, no matter how often the callback is invoked.
+            let settled = false;
             game.effects?.schedule?.(0.4, () => {
+                if (settled) return;
+                settled = true;
+                // Silent abort — no damage, particles, or audio — when the
+                // player is dead or the run has already ended.
                 if (!game.player || game.player.dead) return;
+                if (game.state === GameState.GAMEOVER) return;
                 // iter-16 perf: spatial probe for the delayed pulse too —
                 // by the time it fires the enemy roster may have grown,
                 // and the linear scan was the dominant cost on tundra
