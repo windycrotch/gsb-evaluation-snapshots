@@ -698,33 +698,42 @@ const Dungeon = (() => {
     }
   }
   // 필드 깔기 (v0.100): 기술(그래스필드 등) 또는 메이커 특성. 그 층이 끝날 때까지
+  // 바뀐 내용은 FIELD_EVENTS에 기록하고 반환한다 (같은 필드를 다시 깔면 턴만 초기화하고 null)
   function setTerrain(t, src, at, byMove) {
-    if (D.terrain === t) { D.terrainT = TERRAIN_TURNS; return; }   // 같은 필드: 턴만 처음부터
+    if (D.terrain === t) { D.terrainT = TERRAIN_TURNS; return null; }   // 같은 필드: 턴만 처음부터
+    const ev = noteFieldEvent('terrain', D.terrain, t);   // 덮어쓰기면 from에 이전 필드
     D.terrain = t; CUR_TERRAIN = t; D.terrainT = TERRAIN_TURNS; D.terrainParty = !!(src && party(src));
     const msg = L(`발밑이 ${TERRAINS[t].icon} ${jo(TERRAINS[t].n, '으로')} 바뀌었다!`, `The ground became ${TERRAINS[t].icon} ${TERRAINS[t].n}!`);
     if (byMove) { if (src.player || seen(src)) log(msg, at); } else abLog(src, msg, at);
+    return ev;
   }
   // 제로포밍 (v0.100): 날씨와 필드를 모두 없앤다 (전용 날씨도. 그 층의 원래 날씨도 없앤다)
   function clearField(src, at) {
-    if (!D.weather && !D.terrain) return;
+    if (!D.weather && !D.terrain) return null;
+    const evs = [];
+    if (D.weather) evs.push(noteFieldEvent('weather', D.weather, null));
+    if (D.terrain) evs.push(noteFieldEvent('terrain', D.terrain, null));
     D.weather = null; CUR_WEATHER = null; D.baseWeather = null; D.wxLock = null; D.terrain = null; CUR_TERRAIN = null;
     abLog(src, L(`${jo(nm(src), '은')} 날씨와 필드의 영향을 모두 없앴다!`, `${nm(src)} cleared all weather and terrain!`), at);
     applyForecast(D.player); D.mons.forEach(applyForecast);
+    return evs;
   }
   // byMove: 기술(비바라기 등)로 바꿨으면 특성 이름 없이 알린다
   function setWeather(w, src, at, byMove) {
-    if (D.weather === w) return;
+    if (D.weather === w) return null;
     // 전용 날씨(아주 강한 햇살 등)는 부른 포켓몬이 쓰러지기 전에는 보통 날씨로 바뀌지 않는다 (다른 전용 날씨로는 바뀜)
     const lock = D.wxLock;
     if (lock && lock.hp > 0 && !lock.dead && !EXTREME_WX.includes(w)) {
       if (byMove ? (src.player || seen(src)) : true) log(L(`그러나 ${WEATHERS[D.weather].n} 때문에 날씨가 바뀌지 않았다!`, `But the weather didn't change because of the ${WEATHERS[D.weather].n}!`), at);
-      return;
+      return null;
     }
     D.wxLock = EXTREME_WX.includes(w) ? src : null;
+    const ev = noteFieldEvent('weather', D.weather, w);   // 덮어쓰기면 from에 이전 날씨
     D.weather = w; CUR_WEATHER = w;
     const msg = L(`날씨가 ${WEATHERS[w].icon} ${jo(WEATHERS[w].n, '으로')} 바뀌었다!`, `The weather became ${WEATHERS[w].icon} ${WEATHERS[w].n}!`);
     if (byMove) { if (src.player || seen(src)) log(msg, at); } else abLog(src, msg, at);
     applyForecast(D.player); D.mons.forEach(applyForecast);
+    return ev;
   }
   function applyForecast(c) {
     if (c.sp === 421) { if (D && D.player) formCheck(c); return; }   // 체리꼬: 쾌청이면 포지폼 (플라워기프트, v0.99)
@@ -1570,6 +1579,7 @@ const Dungeon = (() => {
   function endExtremeWeather(at) {
     const old = D.weather; D.wxLock = null;
     D.weather = D.baseWeather || null; CUR_WEATHER = D.weather;
+    noteFieldEvent('weather', old, D.weather);
     log(L(`${WEATHERS[old].icon} ${jo(WEATHERS[old].n, '이')} 그쳤다.`, `${WEATHERS[old].icon} The ${WEATHERS[old].n} ended.`), at);
     applyForecast(D.player); D.mons.forEach(applyForecast);
   }
@@ -2780,6 +2790,7 @@ const Dungeon = (() => {
     for (const c of [p, ...D.mons]) if (c.hp > 0 && !passable(c, c.x, c.y)) unstick(c);
     if (D.terrain && --D.terrainT <= 0) {   // 필드가 끝났다
       log(L(`발밑의 ${TERRAINS[D.terrain].icon} ${jo(TERRAINS[D.terrain].n, '이')} 사라졌다.`, `The ${TERRAINS[D.terrain].icon} ${TERRAINS[D.terrain].n} faded.`), Math.max(T.cursor, T.moveEnd));
+      noteFieldEvent('terrain', D.terrain, null);
       D.terrain = null; CUR_TERRAIN = null;
     }
     if (D.terrain === 'grassy' && D.turn % SAND_EVERY === 0) {   // 그래스필드: 땅에 있는 포켓몬이 조금씩 회복

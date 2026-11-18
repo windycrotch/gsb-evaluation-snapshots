@@ -161,6 +161,50 @@ function weatherNow() {
   if (typeof Dungeon !== 'undefined' && Dungeon.floor && abilityOf(Dungeon.floor.player).cloudNine) return null;
   return CUR_WEATHER;
 }
+
+// ── 날씨·필드 결산 (한 곳에서): 현재 유효한 상태(weatherNow()·CUR_TERRAIN)만 본다 ──
+//  날씨부정·에어록으로 날씨가 무효면 weatherNow()가 null이라 위력·방어·명중 보정이 모두 빠진다
+//  필드를 덮어쓰거나 지우면 CUR_TERRAIN 하나만 바뀌므로 이전 필드 효과가 남지 않는다
+const fieldState = () => ({ weather: weatherNow(), terrain: CUR_TERRAIN || null });
+// 날씨·필드 변경 기록: 설정·덮어쓰기·해제가 모두 여기 쌓인다 (js/dungeon.js setWeather·setTerrain·clearField 등)
+const FIELD_EVENTS = [];
+function noteFieldEvent(kind, from, to) {
+  const ev = { kind, from: from || null, to: to || null };
+  FIELD_EVENTS.push(ev);
+  if (FIELD_EVENTS.length > 200) FIELD_EVENTS.splice(0, 100);   // 로그가 무한히 커지지 않게
+  return ev;
+}
+// 날씨 → 위력 배율: 쾌청 불꽃 1.5·물 0.5, 비 물 1.5·불꽃 0.5 (하이드로스팀은 쾌청에서 오히려 1.5)
+function weatherPowerMul(W, mt, move) {
+  if (W === 'sun') return mt === 10 ? 1.5 : mt === 11 ? (move.id === 876 ? 1.5 : 0.5) : 1;
+  if (W === 'rain') return mt === 11 ? 1.5 : mt === 10 ? 0.5 : 1;
+  return 1;
+}
+// 날씨 → 방어 배율: 모래바람이면 바위 타입의 특수방어 1.5, 설경이면 얼음 타입의 방어 1.5
+function weatherDefMul(W, def, phys) {
+  if (W === 'sand' && !phys && def.types.includes(6)) return 1.5;
+  if (W === 'snow' && phys && def.types.includes(15)) return 1.5;
+  return 1;
+}
+// 날씨 → 명중 배율: 안개 0.9 (끝없는 던전의 짙은 안개는 0.8)
+const weatherAccMul = (W, raw) => W === 'fog' ? (raw === 'hfog' ? 0.8 : 0.9) : 1;
+// 필드 → 위력 배율: 네 필드 모두 땅에 있는 쪽이 쓰는 해당 타입 기술 1.3배
+//  미스트: 땅에 있는 상대가 받는 드래곤 기술 절반 / 그래스: 땅에 있는 상대가 받는 지진류 절반
+//  (비행 타입·부유 특성은 떠 있어서 필드 효과를 주지도 받지도 않는다)
+function terrainPowerMul(att, def, move, mt) {
+  const t = CUR_TERRAIN;
+  if (!t) return 1;
+  const T = TERRAINS[t];
+  let m = 1;
+  if (mt === T.type && grounded(att)) m *= 1.3;
+  if (t === 'misty' && mt === 16 && def && grounded(def)) m *= 0.5;
+  if (t === 'grassy' && QUAKE_MOVES.includes(move.id) && def && grounded(def)) m *= 0.5;
+  if (move.id === TERRAIN_PULSE && grounded(att)) m *= 2;   // 대지의파동: 필드가 있으면 위력 2배 (타입도 필드 타입, moveType)
+  if (move.id === EXPANDING_FORCE && t === 'psychic' && grounded(att)) m *= 1.5;
+  if (move.id === MISTY_EXPLOSION && t === 'misty' && grounded(att)) m *= 1.5;
+  if (move.id === RISING_VOLTAGE && t === 'electric' && def && grounded(def)) m *= 2;   // 라이징볼트: 맞는 상대가 땅에 있으면 위력 2배
+  return m;
+}
 // 스피드: 명중률·회피율 보정에 쓰인다
 function speedOf(c) {
   let s = c.spe * (abVal(c, 'speedMul') || 1) * (heldOf(c).speedMul || 1) * (c.player && c.partners === 0 ? SOLO_STAT_MUL : 1);
@@ -244,17 +288,8 @@ function powerMul(att, def, move, mt, A) {
   if (A.rival && def.types.some(t => att.types.includes(t))) m *= 1.25;
   if (A.vsTypeMul) for (const t of def.types) if (A.vsTypeMul[t]) m *= A.vsTypeMul[t];
   if (att.flashFire && mt === 10) m *= 1.5;
-  // 필드: 땅에 있는 쪽이 그 타입 기술 1.3배 (그래스·일렉트릭·사이코), 미스트필드는 땅에 있는 상대가 받는 드래곤 기술 절반, 그래스필드는 지진 등 절반
-  if (CUR_TERRAIN) {
-    const T = TERRAINS[CUR_TERRAIN];
-    if (CUR_TERRAIN !== 'misty' && mt === T.type && grounded(att)) m *= 1.3;
-    if (CUR_TERRAIN === 'misty' && mt === 16 && def && grounded(def)) m *= 0.5;
-    if (CUR_TERRAIN === 'grassy' && QUAKE_MOVES.includes(move.id) && def && grounded(def)) m *= 0.5;
-    if (move.id === TERRAIN_PULSE && grounded(att)) m *= 2;   // 대지의파동: 필드가 있으면 위력 2배 (타입도 필드 타입, moveType)
-    if (move.id === EXPANDING_FORCE && CUR_TERRAIN === 'psychic' && grounded(att)) m *= 1.5;
-    if (move.id === MISTY_EXPLOSION && CUR_TERRAIN === 'misty' && grounded(att)) m *= 1.5;
-    if (move.id === RISING_VOLTAGE && CUR_TERRAIN === 'electric' && def && grounded(def)) m *= 2;   // 라이징볼트 (v0.101): 쓰는 쪽이 아니라 맞는 상대가 땅에 있으면 위력 2배
-  }
+  // 필드: 현재 필드 하나만 본다 (땅에 있는 포켓몬만, terrainPowerMul)
+  m *= terrainPowerMul(att, def, move, mt);
   return m;
 }
 // 방어 측 데미지 배율
@@ -278,8 +313,9 @@ function moveEff(att, def, move, mt, A) {
   return typeEff(mt, types, move.id);
 }
 
-// 실제 피해 계산 (명중 판정 포함)
-function calcHit(att, def, move) {
+// 실제 피해 계산 (명중 판정 포함). 날씨·필드는 현재 유효한 상태만 반영한다 (weatherPowerMul·weatherDefMul·weatherAccMul·terrainPowerMul)
+// 반환: 빗나가면 { miss: true }, 맞으면 { hit: true, dmg, eff, crit } (변화 기술은 dmg 0·eff 1)
+function settleHit(att, def, move) {
   const A = abilityOf(att), Dd = defAbility(att, def);
   const wxa = typeof MOVE_RULES !== 'undefined' && MOVE_RULES[move.id] && MOVE_RULES[move.id].wxAcc, wxw = wxa && wxa[weatherNow()];   // 번개·눈보라 등
   if (wxw === 'sure') { /* 날씨 덕분에 반드시 맞는다 */ }
@@ -291,13 +327,13 @@ function calcHit(att, def, move) {
     if (Dd.foeAcc) acc *= Dd.foeAcc;
     acc *= (heldOf(att).accMul || 1) * (heldOf(def).foeAcc || 1);
     acc *= speedAccMul(att, def);
-    if (weatherNow() === 'fog') acc *= weatherRaw() === 'hfog' ? 0.8 : 0.9;   // 짙은 안개 (끝없는 던전 규칙)
+    acc *= weatherAccMul(weatherNow(), weatherRaw());   // 안개 (날씨가 무효화됐으면 벌칙도 없다)
     if (Math.random() * 100 >= acc) return { miss: true };
   }
   if (move.c === 1) return { hit: true, dmg: 0, eff: 1 };
   const mt = moveType(att, move);
   let eff = moveEff(att, def, move, mt, A);
-  if (weatherRaw() === 'wind' && mt && def.types.includes(3) && typeEff(mt, [3]) > 1) eff /= TYPE_MUL[2];   // 난기류: 비행의 약점을 지운다
+  if (weatherNow() === 'wind' && mt && def.types.includes(3) && typeEff(mt, [3]) > 1) eff /= TYPE_MUL[2];   // 난기류: 비행의 약점을 지운다 (무효화된 날씨는 적용 안 함)
   if (Dd.levitate && mt === 5 && move.id !== THOUSAND_ARROWS) eff = 0;
   if (Dd.immuneFlag && hasFlag(move, Dd.immuneFlag)) eff = 0;
   if (Dd.wonderGuard && eff <= 1 && !(move.basic && Math.random() < WONDER_GUARD_BASIC)) eff = 0;
@@ -309,8 +345,7 @@ function calcHit(att, def, move) {
   let Atk = (phys ? att.atk : att.spa) * statMul(att, phys ? 'atk' : 'spa') * stageMul(aSt);
   let Def = (phys ? def.def : def.spd) * statMul(def, phys ? 'def' : 'spd', !!A.moldBreaker) * stageMul(dSt);   // 틀깨기: 상대의 이상한비늘·플라워기프트 무시
   const W = weatherNow();
-  if (W === 'sand' && !phys && def.types.includes(6)) Def *= 1.5;
-  if (W === 'snow' && phys && def.types.includes(15)) Def *= 1.5;
+  Def *= weatherDefMul(W, def, phys);   // 모래바람 바위 특방·설경 얼음 방어
   if (phys && att.status === 'brn' && !A.guts) Atk *= 0.5;
   const Ha = heldOf(att);
   const critStage = (move.cr || 0) + (A.critStage || 0) + (Ha.critStage || 0) + (att.critBoost || 0);
@@ -323,8 +358,7 @@ function calcHit(att, def, move) {
   if (Ha.seBoost && eff > 1) dmg *= Ha.seBoost;
   if (A.neuroforce && eff > 1) dmg *= 1.25;   // 브레인포스
   const Wa = A.megaSol ? 'sun' : W;   // 메가솔라: 자기 기술은 늘 쾌청처럼
-  if (Wa === 'sun') dmg *= mt === 10 ? 1.5 : mt === 11 ? (move.id === 876 ? 1.5 : 0.5) : 1;   // 하이드로스팀은 쾌청에서 오히려 1.5배
-  if (Wa === 'rain') dmg *= mt === 11 ? 1.5 : mt === 10 ? 0.5 : 1;
+  dmg *= weatherPowerMul(Wa, mt, move);   // 쾌청·비의 타입 위력 보정
   if (A.tinted && eff < 1) dmg *= 2;
   dmg *= (crit ? (A.sniper ? 2.25 : 1.5) : 1) * (0.85 + Math.random() * 0.15);
   dmg *= guardMul(def, Dd, move, mt, eff);
@@ -333,6 +367,8 @@ function calcHit(att, def, move) {
   // 위: 혼자 탐험 보정 (동료와 함께 들어왔으면 모두 쓰러져도 없음)
   return { hit: true, dmg: Math.max(1, Math.floor(dmg)), eff, crit };
 }
+// 기존 진입점: 새 결산(settleHit)으로 위임하므로 결과가 항상 같다
+function calcHit(att, def, move) { return settleHit(att, def, move); }
 
 // 자동 전투·동료 AI용 예상 점수 (실제 계산의 상성·면역·방어 특성·날씨를 반영. 효과가 없으면 0)
 function moveScore(att, def, move) {
@@ -344,13 +380,13 @@ function moveScore(att, def, move) {
   const hits = move.hits ? (Ab.skillLink ? move.hits[1] : (move.hits[0] + move.hits[1]) / 2) : 1;
   let eff = moveEff(att, def, move, mt, Ab);
   if (WX_BLOCK[weatherRaw()] === mt) return 0;   // 아주 강한 햇살의 물 기술, 강한 비의 불꽃 기술은 실패한다
-  if (weatherRaw() === 'wind' && mt && def.types.includes(3) && typeEff(mt, [3]) > 1) eff /= TYPE_MUL[2];
+  if (weatherNow() === 'wind' && mt && def.types.includes(3) && typeEff(mt, [3]) > 1) eff /= TYPE_MUL[2];
   // 면역: 부유(땅), 흡수 특성(저수·건조한피부·축전 등), 방음·방탄 같은 기술 종류 면역
   if ((Dd.levitate && mt === 5 && move.id !== THOUSAND_ARROWS) || (Dd.absorb && Dd.absorb.t === mt) || (Dd.immuneFlag && hasFlag(move, Dd.immuneFlag))) return 0;
   if (Dd.wonderGuard && eff <= 1) eff = move.basic ? eff * WONDER_GUARD_BASIC : 0;
   if (!eff) return 0;
   const W = Ab.megaSol ? 'sun' : weatherNow();
-  const wx = W === 'sun' ? (mt === 10 ? 1.5 : mt === 11 ? (move.id === 876 ? 1.5 : 0.5) : 1) : W === 'rain' ? (mt === 11 ? 1.5 : mt === 10 ? 0.5 : 1) : 1;
+  const wx = weatherPowerMul(W, mt, move);   // 쾌청·비 보정 (실제 계산과 같은 함수)
   const tinted = Ab.tinted && eff < 1 ? 2 : 1;
   const wall = (phys ? def.reflectT : def.screenT) ? 0.5 : 1;
   return move.p * powerMul(att, def, move, mt, Ab) * hits * stab * eff * wx * tinted * wall * guardMul(def, Dd, move, mt, eff) * (A / D) * ((move.a || 100) / 100);

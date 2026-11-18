@@ -84,7 +84,7 @@ const DEFS_EN = {
   },
   terrains: {
     grassy: ['Grassy Terrain', 'Grounded Pokémon recover 1/16 of max HP every 8 turns and Grass moves ×1.3. Half damage from Earthquake, Bulldoze and Magnitude.'],
-    misty: ['Misty Terrain', 'Grounded Pokémon cannot get status conditions or confusion, and take half damage from Dragon moves.'],
+    misty: ['Misty Terrain', 'Grounded Pokémon cannot get status conditions or confusion, and Fairy moves ×1.3. They take half damage from Dragon moves.'],
     electric: ['Electric Terrain', 'Grounded Pokémon cannot fall asleep, and Electric moves ×1.3.'],
     psychic: ['Psychic Terrain', 'Grounded Pokémon are not hit by priority moves (Quick Attack etc.), and Psychic moves ×1.3.'],
   },
