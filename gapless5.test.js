@@ -327,6 +327,218 @@ describe('Gapless-5 object with tracklist', () => {
   });
 });
 
+describe('Gapless-5 object in shuffle mode', () => {
+  // Asserts that every index-based accessor agrees on which track is current.
+  const expectConsistentIndexing = (player) => {
+    const tracks = player.getTracks();
+    const currentIndex = player.getIndex();
+    const currentSourceIndex = player.getIndex(true);
+    const currentPath = player.getTrack();
+
+    // getIndex() is an index into getTracks()
+    expect(tracks[currentIndex]).toBe(currentPath);
+    // getIndex(true) is an index into the unshuffled source array
+    expect(player.playlist.sources[currentSourceIndex].audioPath).toBe(currentPath);
+    // findTrack(path) is an index into getTracks()
+    expect(player.findTrack(currentPath)).toBe(currentIndex);
+  };
+
+  const createShuffledPlayer = (testTracks, options = {}) => {
+    const player = new Gapless5({
+      ...INIT_OPTIONS,
+      tracks: testTracks,
+      ...options,
+    });
+    player.shuffle();
+    player.next(); // commit the deferred shuffle
+    expect(player.isShuffled()).toBe(true);
+    return player;
+  };
+
+  it('keeps getTracks, getIndex, getIndex(true) and findTrack consistent', () => {
+    const player = createShuffledPlayer(TRACKS);
+
+    expectConsistentIndexing(player);
+    expect(player.getTracks()).not.toStrictEqual(TRACKS);
+    expect(new Set(player.getTracks())).toStrictEqual(new Set(TRACKS));
+
+    // navigate in play order and re-check consistency at every step
+    for (let i = 0; i < TRACKS.length; i++) {
+      player.next();
+      expectConsistentIndexing(player);
+    }
+  });
+
+  it('adds and removes tracks in play order while shuffling', () => {
+    const testTracks = [ 'track1.mp3', 'track2.mp3', 'track3.mp3', 'track4.mp3', 'track5.mp3' ];
+    const player = createShuffledPlayer(testTracks);
+    const initialOrder = player.getTracks();
+
+    player.gotoTrack(2);
+    expectConsistentIndexing(player);
+    const currentPath = player.getTrack();
+
+    // insert a new track in the middle of the play order
+    player.insertTrack(2, 'inserted.mp3');
+    expect(player.getTracks()[2]).toBe('inserted.mp3');
+    expectConsistentIndexing(player);
+    expect(player.getTrack()).toBe(currentPath);
+
+    // remove a non-current track by path
+    const removablePath = player.getTracks().find((track) => track !== player.getTrack());
+    const expectedRemaining = player.getTracks().filter((track) => track !== removablePath);
+    player.removeTrack(removablePath);
+    expect(player.getTracks()).toStrictEqual(expectedRemaining);
+    expect(player.getTrack()).toBe(currentPath);
+    expectConsistentIndexing(player);
+
+    player.removeAllTracks();
+    expect(player.getTracks()).toStrictEqual([]);
+    expect(player.getIndex()).toBe(-1);
+    expect(initialOrder.length).toBe(testTracks.length);
+  });
+
+  it('removes a non-current track by path without changing the playing track', () => {
+    const testTracks = [ 'track1.mp3', 'track2.mp3', 'track3.mp3', 'track4.mp3', 'track5.mp3' ];
+    const player = createShuffledPlayer(testTracks);
+
+    player.gotoTrack(2);
+    const playingPath = player.getTrack();
+    const pathToRemove = player.getTracks()[0];
+
+    player.onnext = jest.fn();
+    player.removeTrack(pathToRemove);
+
+    expect(player.getTrack()).toBe(playingPath);
+    expect(player.getTracks()).not.toContain(pathToRemove);
+    expect(player.getTracks().length).toBe(testTracks.length - 1);
+    // removing a non-current track must not report a track change
+    expect(player.onnext).not.toHaveBeenCalled();
+    expectConsistentIndexing(player);
+  });
+
+  it('removes the current track by path and advances to the track that slid into its slot', () => {
+    const testTracks = [ 'track1.mp3', 'track2.mp3', 'track3.mp3', 'track4.mp3', 'track5.mp3' ];
+    const player = createShuffledPlayer(testTracks);
+
+    player.gotoTrack(1);
+    expect(player.getIndex()).toBe(1);
+    const orderBefore = player.getTracks();
+    const playingPath = player.getTrack();
+    const pathToRemove = player.getTrack();
+    const expectedNextPath = orderBefore[2]; // the track that slides into slot 1
+
+    player.onnext = jest.fn();
+    player.onplayrequest = jest.fn();
+    player.removeTrack(pathToRemove);
+
+    expect(player.getIndex()).toBe(1);
+    expect(player.getTrack()).toBe(expectedNextPath);
+    expect(player.getTracks()[player.getIndex()]).toBe(player.getTrack());
+    expect(player.getTracks()).not.toContain(pathToRemove);
+    expect(player.onnext).toHaveBeenCalledWith(playingPath, expectedNextPath);
+    expectConsistentIndexing(player);
+  });
+
+  it('removes the current track by numeric play-order index', () => {
+    const testTracks = [ 'track1.mp3', 'track2.mp3', 'track3.mp3', 'track4.mp3', 'track5.mp3' ];
+    const player = createShuffledPlayer(testTracks);
+
+    player.gotoTrack(2);
+    const playingPath = player.getTrack();
+    const orderBefore = player.getTracks();
+    const expectedNextPath = orderBefore[3];
+
+    player.removeTrack(player.getIndex());
+
+    expect(player.getTrack()).toBe(expectedNextPath);
+    expect(player.getTrack()).not.toBe(playingPath);
+    expect(player.getTracks().length).toBe(testTracks.length - 1);
+    expectConsistentIndexing(player);
+  });
+
+  it('removes the current tail track: loop on wraps to first, loop off clamps and stops', () => {
+    const testTracks = [ 'track1.mp3', 'track2.mp3', 'track3.mp3', 'track4.mp3', 'track5.mp3' ];
+
+    // loop on: wrap around and keep playing
+    const loopPlayer = createShuffledPlayer(testTracks, { loop: true });
+    loopPlayer.gotoTrack(loopPlayer.totalTracks() - 1);
+    const loopOrder = loopPlayer.getTracks();
+    const tailPath = loopPlayer.getTrack();
+    loopPlayer.playlist.sources[loopPlayer.getIndex(true)].inPlayState = () => true;
+    loopPlayer.onnext = jest.fn();
+    loopPlayer.onplayrequest = jest.fn();
+
+    loopPlayer.removeTrack(tailPath);
+
+    expect(loopPlayer.getIndex()).toBe(0);
+    expect(loopPlayer.getTrack()).toBe(loopOrder[0]);
+    expect(loopPlayer.onnext).toHaveBeenCalledWith(tailPath, loopOrder[0]);
+    expect(loopPlayer.onplayrequest).toHaveBeenCalledTimes(1);
+    expect(loopPlayer.onplayrequest).toHaveBeenCalledWith(loopOrder[0]);
+    expectConsistentIndexing(loopPlayer);
+
+    // loop off: clamp to the new last track and do not auto-play
+    const stopPlayer = createShuffledPlayer(testTracks, { loop: false });
+    stopPlayer.gotoTrack(stopPlayer.totalTracks() - 1);
+    const stopOrder = stopPlayer.getTracks();
+    const stopTailPath = stopPlayer.getTrack();
+    const newLastPath = stopOrder[stopOrder.length - 2];
+    stopPlayer.playlist.sources[stopPlayer.getIndex(true)].inPlayState = () => true;
+    stopPlayer.onnext = jest.fn();
+    stopPlayer.onplayrequest = jest.fn();
+
+    stopPlayer.removeTrack(stopTailPath);
+
+    expect(stopPlayer.getIndex()).toBe(stopPlayer.totalTracks() - 1);
+    expect(stopPlayer.getTrack()).toBe(newLastPath);
+    expect(stopPlayer.onnext).toHaveBeenCalledWith(stopTailPath, newLastPath);
+    expect(stopPlayer.onplayrequest).not.toHaveBeenCalled();
+    expectConsistentIndexing(stopPlayer);
+  });
+
+  it('removes queued and fading tracks consistently while shuffled', () => {
+    const testTracks = [ 'track1.mp3', 'track2.mp3', 'track3.mp3', 'track4.mp3', 'track5.mp3' ];
+    const player = createShuffledPlayer(testTracks);
+
+    player.gotoTrack(1);
+    const queuedPath = player.getTracks()[4];
+    player.queueTrack(queuedPath);
+    player.fadingTrack = player.getIndex(true); // source-array index
+
+    const playingPath = player.getTrack();
+    player.removeTrack(player.getTracks()[3]);
+
+    expect(player.getTrack()).toBe(playingPath);
+    expect(player.queuedTrack).toBe(queuedPath);
+    expectConsistentIndexing(player);
+  });
+
+  it('leaves shuffle mode when too few tracks remain, but only if shuffled', () => {
+    const testTracks = [ 'track1.mp3', 'track2.mp3', 'track3.mp3' ];
+    const player = createShuffledPlayer(testTracks);
+
+    // pick a non-zero slot so removing play index 0 never removes the current track
+    player.gotoTrack(1);
+    const playingPath = player.getTrack();
+    const pathToRemove = player.getTracks()[0];
+    player.removeTrack(pathToRemove);
+
+    expect(player.totalTracks()).toBe(2);
+    expect(player.isShuffled()).toBe(false);
+    // exiting shuffle restores the source order of the tracks that remain
+    expect(player.getTracks()).toStrictEqual(testTracks.filter((track) => track !== pathToRemove));
+    expect(player.getTrack()).toBe(playingPath);
+    expectConsistentIndexing(player);
+
+    // a never-shuffled player dropping to 2 tracks stays unshuffled
+    const plainPlayer = new Gapless5({ ...INIT_OPTIONS, tracks: testTracks });
+    plainPlayer.removeTrack(0);
+    expect(plainPlayer.isShuffled()).toBe(false);
+    expectConsistentIndexing(plainPlayer);
+  });
+});
+
 describe('Gapless-5 object with load limit', () => {
   it('obeys load limit', () => {
     const player = new Gapless5({
@@ -350,5 +562,111 @@ describe('Gapless-5 object with load limit', () => {
     expect(loadedTracks.size).toBe(2);
     player.removeAllTracks();
     expect(loadedTracks.size).toBe(0);
+  });
+
+  // Returns the audio paths whose sources are currently loaded (not None).
+  const getLoadedTracks = (player) => player.playlist.sources
+    .filter((source) => source.getState() !== 0)
+    .map((source) => source.audioPath);
+
+  it('centers the loadable window on the current track in shuffle order', () => {
+    const shuffleTracks = [ 'a.mp3', 'b.mp3', 'c.mp3', 'd.mp3', 'e.mp3', 'f.mp3', 'g.mp3' ];
+    const player = new Gapless5({
+      ...INIT_OPTIONS,
+      tracks: shuffleTracks,
+      loadLimit: 3,
+    });
+
+    player.shuffle();
+    player.next(); // commit the shuffle
+
+    for (let i = 0; i < shuffleTracks.length; i++) {
+      const playOrder = player.getTracks();
+      const currentIndex = player.getIndex();
+      const currentPath = player.getTrack();
+
+      // expected window: loadLimit tracks centered on the current track, clamped
+      const windowSize = Math.min(3, playOrder.length);
+      const startIndex = Math.max(0, Math.min(currentIndex - Math.floor((windowSize - 1) / 2),
+        playOrder.length - windowSize));
+      const expected = new Set(playOrder.slice(startIndex, startIndex + windowSize));
+      expect(expected.has(currentPath)).toBe(true);
+      // the window must be centered: the current track is at most one slot from the middle
+      const currentOffset = currentIndex - startIndex;
+      expect(Math.abs(currentOffset - Math.floor((windowSize - 1) / 2))).toBeLessThanOrEqual(1);
+
+      const loadableSourceIndices = player.playlist.loadableTracks();
+      const loadablePaths = new Set(
+        [ ...loadableSourceIndices ].map((sourceIndex) => player.playlist.sources[sourceIndex].audioPath),
+      );
+      expect(loadablePaths).toStrictEqual(expected);
+      expect(getLoadedTracks(player).length).toBe(expected.size);
+      expect(getLoadedTracks(player).sort()).toStrictEqual([ ...expected ].sort());
+      expect(getLoadedTracks(player)).toContain(currentPath);
+
+      player.next();
+    }
+  });
+
+  it('never unloads the queued or fading track in shuffle order', () => {
+    const shuffleTracks = [ 'a.mp3', 'b.mp3', 'c.mp3', 'd.mp3', 'e.mp3', 'f.mp3', 'g.mp3' ];
+    const player = new Gapless5({
+      ...INIT_OPTIONS,
+      tracks: shuffleTracks,
+      loadLimit: 2,
+    });
+
+    player.shuffle();
+    player.next(); // commit the shuffle
+    player.gotoTrack(0);
+
+    // Queue a far-away track and mark another far-away track as fading.
+    const playOrder = player.getTracks();
+    const queuedPath = playOrder[playOrder.length - 1];
+    const fadingPath = playOrder[playOrder.length - 2];
+    player.queueTrack(queuedPath);
+    player.fadingTrack = player.playlist.getSourceIndexed(
+      player.findTrack(fadingPath),
+    ).index;
+    player.playlist.updateLoading();
+
+    const loaded = getLoadedTracks(player);
+    expect(loaded).toContain(queuedPath);
+    expect(loaded).toContain(fadingPath);
+    expect(loaded).toContain(player.getTrack());
+
+    // Both extra tracks stay resident after moving the current track.
+    player.gotoTrack(1);
+    player.playlist.updateLoading();
+    const loadedAfterMove = getLoadedTracks(player);
+    expect(loadedAfterMove).toContain(queuedPath);
+    expect(loadedAfterMove).toContain(fadingPath);
+    expect(loadedAfterMove).toContain(player.getTrack());
+    expect(loadedAfterMove.length).toBeLessThanOrEqual(4); // window of 2 + 2 pinned
+  });
+
+  it('keeps track identity stable through removal while load-limited and shuffled', () => {
+    const shuffleTracks = [ 'a.mp3', 'b.mp3', 'c.mp3', 'd.mp3', 'e.mp3' ];
+    const player = new Gapless5({
+      ...INIT_OPTIONS,
+      tracks: shuffleTracks,
+      loadLimit: 2,
+    });
+
+    player.shuffle();
+    player.next(); // commit the shuffle
+    player.gotoTrack(2);
+    const playingPath = player.getTrack();
+
+    // Remove a track outside the current load window; the current track and
+    // its loadable neighbours must be unaffected.
+    const nonCurrentPath = player.getTracks()[0];
+    player.removeTrack(nonCurrentPath);
+
+    expect(player.getTrack()).toBe(playingPath);
+    expect(player.getTracks()[player.getIndex()]).toBe(playingPath);
+    expect(player.playlist.sources[player.getIndex(true)].audioPath).toBe(playingPath);
+    expect(getLoadedTracks(player)).toContain(playingPath);
+    expect(getLoadedTracks(player)).not.toContain(nonCurrentPath);
   });
 });

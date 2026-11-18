@@ -544,10 +544,11 @@ function Gapless5FileList(parentPlayer, parentLog, inShuffle, inLoadLimit = -1, 
   // Playlist and Track Items
   this.sources = []; // List of Gapless5Sources
   this.startingTrack = 0;
-  this.trackNumber = -1; // Displayed track index in GUI
+  this.trackNumber = -1; // Current track index in PLAY ORDER (i.e. shuffled order when shuffled)
 
   // If the tracklist ordering changes, after a pre/next song,
-  // the playlist needs to be regenerated
+  // the playlist needs to be regenerated.
+  // When shuffled, shuffledIndices maps play-order index -> source-array index.
   this.shuffledIndices = [];
   this.shuffleMode = Boolean(inShuffle); // Ordered (false) or Shuffle (true)
   this.shuffleRequest = null;
@@ -556,14 +557,18 @@ function Gapless5FileList(parentPlayer, parentLog, inShuffle, inLoadLimit = -1, 
 
   // PRIVATE METHODS
 
+  // startingTrack is always an index into the source array (as documented);
+  // trackNumber is always an index in play order.
   this.setStartingTrack = (newStartingTrack) => {
+    let sourceIndex = 0;
     if (newStartingTrack === 'random') {
-      this.startingTrack = Math.floor(Math.random() * this.sources.length);
+      sourceIndex = Math.floor(Math.random() * this.sources.length);
     } else {
-      this.startingTrack = newStartingTrack || 0;
+      sourceIndex = newStartingTrack || 0;
     }
+    this.startingTrack = sourceIndex;
+    this.trackNumber = (sourceIndex === -1) ? -1 : this.getPlaylistIndex(sourceIndex);
     log.debug(`Setting starting track to ${this.startingTrack}`);
-    this.trackNumber = this.startingTrack;
   };
 
   this.currentSource = () => {
@@ -571,42 +576,63 @@ function Gapless5FileList(parentPlayer, parentLog, inShuffle, inLoadLimit = -1, 
       return null;
     }
     const { source } = this.getSourceIndexed(this.trackNumber);
-    return source;
+    return source || null;
   };
 
+  // index is an index in play order
   this.isLastTrack = (index) => (index === this.sources.length - 1) && !player.loop && (player.queuedTrack === null);
 
   this.setCrossfade = (crossfadeIn, crossfadeOut) => {
-    this.currentSource().setCrossfade(crossfadeIn, this.isLastTrack(this.trackNumber) ? 0 : crossfadeOut);
+    const source = this.currentSource();
+    if (source) {
+      source.setCrossfade(crossfadeIn, this.isLastTrack(this.trackNumber) ? 0 : crossfadeOut);
+    }
   };
 
   this.gotoTrack = (pointOrPath, forcePlay, allowOverride, crossfadeEnabled) => {
-    const { index: prevIndex, source: prevSource } = this.getSourceIndexed(this.trackNumber);
+    const { index: prevSourceIndex, source: prevSource } = this.getSourceIndexed(this.trackNumber);
     // TODO: why is this returning false when queuedState was Play?
-    const wasPlaying = prevSource.isPlayActive(true);
+    const wasPlaying = prevSource ? prevSource.isPlayActive(true) : false;
+    // requestedIndex is an index in play order (shuffled order when shuffled)
     const requestedIndex = this.indexFromTrack(pointOrPath);
-    this.stopAllTracks(true, crossfadeEnabled ? [ player.fadingTrack ] : []);
+    // resolve the requested track to its source-array index, so that the
+    // target stays the same track even if the play order changes below
+    const targetSourceIndex = this.getSourceIndexed(requestedIndex).index;
+    // fadingTrack is already a source-array index
+    const fadingSourceIndex = (crossfadeEnabled && player.fadingTrack !== null) ?
+      player.fadingTrack : -1;
+    this.stopAllTracks(true, fadingSourceIndex >= 0 ? [ fadingSourceIndex ] : []);
 
-    const updateShuffle = (nextIndex) => {
-      if (this.shuffleRequest !== null) {
-        if (this.shuffleRequest) {
-          this.shuffleRequest = null;
-          return enableShuffle(nextIndex);
-        }
-        this.shuffleRequest = null;
-        return disableShuffle(nextIndex);
+    let nextTrackNumber = requestedIndex;
+    if (allowOverride && this.shuffleRequest !== null) {
+      const nextShuffle = this.shuffleRequest;
+      const currentSourceIndex = (this.trackNumber >= 0) ?
+        this.getSourceIndexed(this.trackNumber).index : -1;
+      this.shuffleRequest = null;
+      if (nextShuffle) {
+        // Commit a deferred shuffle. If preserving, the current track stays
+        // at its existing play-order position; a numeric request addresses
+        // the new play order, while a path request must land on that exact
+        // track wherever the shuffle put it.
+        const preserveIndex = this.preserveCurrent ? this.trackNumber : -1;
+        enableShuffle(currentSourceIndex, preserveIndex);
+        nextTrackNumber = (typeof pointOrPath === 'string') ?
+          this.shuffledIndices.indexOf(targetSourceIndex) : requestedIndex;
+      } else {
+        // Commit a deferred un-shuffle; play order becomes the source order,
+        // so navigate to the source index of the requested (shuffled) track.
+        nextTrackNumber = disableShuffle(targetSourceIndex);
       }
-      return nextIndex;
-    };
+    }
 
-    this.trackNumber = allowOverride ? updateShuffle(requestedIndex) : requestedIndex;
+    this.trackNumber = nextTrackNumber;
     log.debug(`Setting track number to ${this.trackNumber}`);
     this.updateLoading();
     player.scrub(0, true);
 
-    const { index: nextIndex, source: nextSource } = this.getSourceIndexed(this.trackNumber);
+    const { index: nextSourceIndex, source: nextSource } = this.getSourceIndexed(this.trackNumber);
 
-    if (prevIndex === nextIndex) {
+    if (prevSourceIndex === nextSourceIndex) {
       if (forcePlay || wasPlaying) {
         prevSource.stop();
         prevSource.play();
@@ -618,7 +644,7 @@ function Gapless5FileList(parentPlayer, parentLog, inShuffle, inLoadLimit = -1, 
     }
     if (forcePlay || wasPlaying) {
       const crossfadeIn = crossfadeEnabled ? player.crossfade : 0;
-      const crossfadeOut = crossfadeEnabled && !this.isLastTrack(nextIndex) ? player.crossfade : 0;
+      const crossfadeOut = crossfadeEnabled && !this.isLastTrack(this.trackNumber) ? player.crossfade : 0;
       nextSource.setCrossfade(crossfadeIn, crossfadeOut);
       nextSource.play();
     }
@@ -626,47 +652,63 @@ function Gapless5FileList(parentPlayer, parentLog, inShuffle, inLoadLimit = -1, 
     return this.trackNumber;
   };
 
-  // Going into shuffle mode. Remake the list
-  const enableShuffle = (nextIndex) => {
-    // Shuffle the list
-    const indices = Array.from(Array(this.sources.length).keys());
-    for (let n = 0; n < indices.length - 1; n++) {
-      const k = n + Math.floor(Math.random() * (indices.length - n));
+  // Going into shuffle mode. Remake the play order.
+  // `currentSourceIndex` is the source-array index of the track that should
+  // remain current (-1 if none). If `preservePlayIndex` is a valid play-order
+  // index, that track stays at that position; otherwise it moves with the
+  // shuffle. Returns the track's new play-order index (or -1).
+  const enableShuffle = (currentSourceIndex, preservePlayIndex) => {
+    const numTracks = this.sources.length;
+    // Fisher-Yates shuffle of the source indices
+    const indices = Array.from(Array(numTracks).keys());
+    for (let n = 0; n < numTracks - 1; n++) {
+      const k = n + Math.floor(Math.random() * (numTracks - n));
       [ indices[k], indices[n] ] = [ indices[n], indices[k] ];
     }
 
-    if (this.preserveCurrent && this.trackNumber === indices[nextIndex]) {
-      // make sure our current shuffled index matches what is playing
-      [ indices[this.trackNumber], indices[nextIndex] ] = [ indices[nextIndex], indices[this.trackNumber] ];
+    const isValidIndex = (value) => (typeof value === 'number') && value >= 0 && value < numTracks;
+    const hasCurrent = isValidIndex(currentSourceIndex);
+    const keepIndex = (hasCurrent && isValidIndex(preservePlayIndex)) ? preservePlayIndex : -1;
+
+    if (keepIndex >= 0) {
+      // put the current track back at the play-order position it came from
+      const fromIndex = indices.indexOf(currentSourceIndex);
+      [ indices[keepIndex], indices[fromIndex] ] = [ indices[fromIndex], indices[keepIndex] ];
     }
 
-    // if shuffle happens to be identical to original list (more likely with fewer tracks),
-    // swap another two tracks
-    if (JSON.stringify(indices) === JSON.stringify(Array.from(Array(this.sources.length).keys()))) {
-      const subIndices = indices.filter((index) => index !== this.trackNumber);
-      const subIndex1 = Math.floor(Math.random() * (subIndices.length));
-      const subIndex2 = (subIndex1 + 1) % subIndices.length;
-      const index1 = indices[subIndices[subIndex1]];
-      const index2 = indices[subIndices[subIndex2]];
-      [ indices[index1], indices[index2] ] = [ indices[index2], indices[index1] ];
+    // if shuffle happens to be identical to original list (more likely with
+    // fewer tracks), swap two other tracks so the play order visibly changes
+    const isIdentity = indices.every((value, i) => value === i);
+    if (numTracks > 1 && isIdentity) {
+      const freeSlots = [];
+      for (let i = 0; i < numTracks; i++) {
+        if (i !== keepIndex) {
+          freeSlots.push(i);
+        }
+      }
+      if (freeSlots.length > 1) {
+        const slot1 = freeSlots[0];
+        const slot2 = freeSlots[1];
+        [ indices[slot1], indices[slot2] ] = [ indices[slot2], indices[slot1] ];
+      }
     }
 
     this.shuffledIndices = indices;
     this.shuffleMode = true;
     log.debug(`Shuffled tracks: ${this.shuffledIndices}`);
-    return nextIndex;
+
+    if (hasCurrent) {
+      return indices.indexOf(currentSourceIndex);
+    }
+    return -1;
   };
 
-  // Leaving shuffle mode.
-  const disableShuffle = (nextIndex) => {
+  // Leaving shuffle mode. Play order becomes the source order, so the
+  // play-order index of a track is its source-array index.
+  const disableShuffle = (currentSourceIndex) => {
     this.shuffleMode = false;
     log.debug('Disabling shuffle');
-
-    if (this.preserveCurrent && this.shuffledIndices[this.trackNumber] === nextIndex) {
-      // avoid playing the same track twice, skip to next track
-      return (nextIndex + 1) % this.numTracks();
-    }
-    return nextIndex;
+    return (typeof currentSourceIndex === 'number') ? currentSourceIndex : 0;
   };
 
   // PUBLIC METHODS
@@ -687,8 +729,9 @@ function Gapless5FileList(parentPlayer, parentLog, inShuffle, inLoadLimit = -1, 
   };
 
   this.stopAllTracks = (resetPositions, excludedTracks = []) => {
+    // excludedTracks are source-array indices
     for (let i = 0; i < this.sources.length; i++) {
-      if (!excludedTracks.includes(this.getPlaylistIndex(i))) {
+      if (!excludedTracks.includes(i)) {
         this.sources[i].stop(resetPositions);
       }
     }
@@ -699,10 +742,15 @@ function Gapless5FileList(parentPlayer, parentLog, inShuffle, inLoadLimit = -1, 
       this.sources[i].unload(); // also calls stop
     }
     if (flushList) {
-      this.shuffledIndices = [];
+      this.shuffleMode = false;
+      this.shuffleRequest = null;
+      this.preserveCurrent = true;
       this.setStartingTrack(-1);
     }
     this.sources = [];
+    this.trackNumber = -1;
+    // An emptied list cannot keep a stale play order around.
+    this.shuffledIndices = [];
   };
 
   this.setPlaybackRate = (rate) => {
@@ -714,12 +762,25 @@ function Gapless5FileList(parentPlayer, parentLog, inShuffle, inLoadLimit = -1, 
   // Toggle shuffle mode or not, and prepare for rebasing the playlist
   // upon changing to the next available song. NOTE that each function here
   // changes flags, so the logic must exclude any logic if a revert occurs.
+  //
+  // When preserveCurrent is true the new play order is applied lazily, on the
+  // next track change (gotoTrack with allowOverride). When it is false the
+  // order changes immediately, and the current track moves to a random slot.
   this.setShuffle = (nextShuffle, preserveCurrent = true) => {
-    this.shuffleRequest = nextShuffle;
     this.preserveCurrent = preserveCurrent;
-    if (!preserveCurrent) {
-      enableShuffle(this.trackNumber);
+    if (preserveCurrent) {
+      this.shuffleRequest = nextShuffle;
+      return;
     }
+    const hasCurrent = this.trackNumber >= 0 && this.numTracks() > 0;
+    const currentSourceIndex = hasCurrent ? this.getSourceIndexed(this.trackNumber).index : -1;
+    this.shuffleRequest = null;
+    this.trackNumber = nextShuffle ?
+      enableShuffle(currentSourceIndex, -1) :
+      disableShuffle(currentSourceIndex);
+    // The play order changed immediately, so the load window (which is
+    // defined in play order) must be recomputed right away.
+    this.updateLoading();
   };
 
   this.isShuffled = () => {
@@ -736,7 +797,9 @@ function Gapless5FileList(parentPlayer, parentLog, inShuffle, inLoadLimit = -1, 
     const tracks = [];
     for (let i = 0; i < this.numTracks(); i++) {
       const { source } = this.getSourceIndexed(i);
-      tracks.push(source.audioPath);
+      if (source) {
+        tracks.push(source.audioPath);
+      }
     }
     return tracks;
   };
@@ -748,31 +811,57 @@ function Gapless5FileList(parentPlayer, parentLog, inShuffle, inLoadLimit = -1, 
   // returns index in play order
   this.findTrack = (path) => this.getTracks().indexOf(path);
 
-  // returns source + index in play order
+  // index is an index in play order; returns the source and its source-array index
   this.getSourceIndexed = (index) => {
+    if (index < 0 || index >= this.numTracks()) {
+      return { index: -1, source: undefined };
+    }
     const realIndex = this.shuffleMode ? this.shuffledIndices[index] : index;
     return { index: realIndex, source: this.sources[realIndex] };
   };
 
-  this.getPlaylistIndex = (index) => this.shuffleMode ? this.shuffledIndices.indexOf(index) : index;
-
-  // inclusive start, exclusive end
-  const generateIntRange = (first, last) => Array.from({ length: (1 + last - first) }, (_v, k) => k + first);
-
-  // returns set of actual indices (not shuffled)
-  this.loadableTracks = () => {
-    if (this.loadLimit === -1) {
-      return new Set(generateIntRange(0, this.sources.length));
+  // index is a source-array index; returns its index in play order
+  this.getPlaylistIndex = (index) => {
+    if (index < 0 || index >= this.sources.length) {
+      return -1;
     }
-    // loadable tracks are a range where size=loadLimit, centered around current track
-    const startTrack = Math.round(Math.max(0, this.trackNumber - ((this.loadLimit - 1) / 2)));
-    const endTrack = Math.round(Math.min(this.sources.length, this.trackNumber + (this.loadLimit / 2)));
-    const loadableIndices = new Set(generateIntRange(startTrack, endTrack));
+    if (!this.shuffleMode) {
+      return index;
+    }
+    return this.shuffledIndices.indexOf(index);
+  };
+
+  // returns set of source-array indices that may stay loaded.
+  // The window is centered on the current track in play order, so in
+  // shuffle mode it covers the tracks immediately before/after the current
+  // one in the randomized queue.
+  this.loadableTracks = () => {
+    const loadableIndices = new Set();
+    if (this.loadLimit === -1) {
+      for (let i = 0; i < this.sources.length; i++) {
+        loadableIndices.add(i);
+      }
+      return loadableIndices;
+    }
+    if (this.numTracks() > 0 && this.trackNumber >= 0) {
+      const windowSize = Math.min(this.loadLimit, this.numTracks());
+      let startPlayIndex = this.trackNumber - Math.floor((windowSize - 1) / 2);
+      startPlayIndex = Math.max(0, Math.min(startPlayIndex, this.numTracks() - windowSize));
+      for (let i = startPlayIndex; i < startPlayIndex + windowSize; i++) {
+        loadableIndices.add(this.getSourceIndexed(i).index);
+      }
+    }
+    // The queued and fading tracks must never be unloaded, regardless of
+    // where they are relative to the current track.
     if (player.queuedTrack !== null) {
-      loadableIndices.add(this.indexFromTrack(player.queuedTrack));
+      const queuedPlayIndex = this.indexFromTrack(player.queuedTrack);
+      if (queuedPlayIndex >= 0) {
+        loadableIndices.add(this.getSourceIndexed(queuedPlayIndex).index);
+      }
     }
     if (player.fadingTrack !== null) {
-      loadableIndices.add(this.indexFromTrack(player.fadingTrack));
+      // fadingTrack is a source-array index, independent of play order
+      loadableIndices.add(player.fadingTrack);
     }
     log.debug(`Loadable indices: ${JSON.stringify([ ...loadableIndices ])}`);
     return loadableIndices;
@@ -782,41 +871,52 @@ function Gapless5FileList(parentPlayer, parentLog, inShuffle, inLoadLimit = -1, 
     const loadableSet = this.loadableTracks();
 
     // make sure to load current track before surrounding tracks
-    const curSourceIndex = this.getPlaylistIndex(this.trackNumber);
-    const curSource = this.sources[curSourceIndex];
-    if (loadableSet.has(curSourceIndex) && (curSource.getState() === Gapless5State.None)) {
+    const { index: curSourceIndex, source: curSource } = this.getSourceIndexed(this.trackNumber);
+    if (curSource && loadableSet.has(curSourceIndex) && (curSource.getState() === Gapless5State.None)) {
       log.debug(`Loading track ${curSourceIndex}: ${curSource.audioPath}`);
       curSource.load();
-    } else {
-      for (const [ index, source ] of this.sources.entries()) {
-        const playlistIndex = this.getPlaylistIndex(index);
-        const shouldLoad = loadableSet.has(playlistIndex);
-        const hasLoaded = source.getState() !== Gapless5State.None;
-        if (shouldLoad !== hasLoaded) {
-          if (shouldLoad) {
-            log.debug(`Loading track ${playlistIndex}: ${source.audioPath}`);
-            source.load();
-          } else {
-            source.unload();
-            log.debug(`Unloaded track ${playlistIndex}: ${source.audioPath}`);
-          }
+    }
+    // Reconcile the rest of the playlist against the loadable set, so that
+    // tracks that have fallen outside the window (in play order) are freed.
+    for (const [ sourceIndex, source ] of this.sources.entries()) {
+      const shouldLoad = loadableSet.has(sourceIndex);
+      const hasLoaded = source.getState() !== Gapless5State.None;
+      if (shouldLoad !== hasLoaded) {
+        if (shouldLoad) {
+          log.debug(`Loading track ${sourceIndex}: ${source.audioPath}`);
+          source.load();
+        } else {
+          source.unload();
+          log.debug(`Unloaded track ${sourceIndex}: ${source.audioPath}`);
         }
       }
     }
   };
 
   // Add a new song into the FileList object.
+  // `index` is an insertion point in play order.
   this.add = (index, audioPath) => {
     const source = new Gapless5Source(player, log, audioPath);
-    this.sources.splice(index, 0, source);
-
-    // insert new index in random position
-    this.shuffledIndices.splice(Math.floor(Math.random() * this.numTracks()), 0, this.numTracks() - 1);
-
-    // Shift trackNumber if the insert file is earlier in the list
-    if (index <= this.trackNumber || this.trackNumber === -1) {
-      this.trackNumber = this.trackNumber + 1;
-      if (this.trackNumber > 0) {
+    if (this.shuffleMode) {
+      // New source is appended to the source array, but placed at the
+      // requested position in play order.
+      this.sources.push(source);
+      const sourceIndex = this.sources.length - 1;
+      const playIndex = Math.max(0, Math.min(index, this.shuffledIndices.length));
+      this.shuffledIndices.splice(playIndex, 0, sourceIndex);
+      if (this.trackNumber === -1) {
+        this.trackNumber = 0;
+      } else if (playIndex <= this.trackNumber) {
+        this.trackNumber = this.trackNumber + 1;
+        log.debug(`Insertion shifted current track number to ${this.trackNumber}`);
+      }
+    } else {
+      this.sources.splice(index, 0, source);
+      this.shuffledIndices = Array.from(Array(this.sources.length).keys());
+      if (this.trackNumber === -1) {
+        this.trackNumber = 0;
+      } else if (index <= this.trackNumber) {
+        this.trackNumber = this.trackNumber + 1;
         log.debug(`Insertion shifted current track number to ${this.trackNumber}`);
       }
     }
@@ -824,24 +924,50 @@ function Gapless5FileList(parentPlayer, parentLog, inShuffle, inLoadLimit = -1, 
   };
 
   // Remove a song from the FileList object.
+  // `index` is an index in play order.
   this.remove = (index) => {
-    this.sources.splice(index, 1);
-    this.shuffledIndices.splice(this.shuffledIndices.indexOf(index), 1);
-    for (let i = 0; i < this.shuffledIndices.length; i++) {
-      if (this.shuffledIndices[i] >= index) {
-        this.shuffledIndices[i] = this.shuffledIndices[i] - 1;
+    const { index: sourceIndex, source: removedSource } = this.getSourceIndexed(index);
+    if (sourceIndex < 0 || !removedSource) {
+      return;
+    }
+    const oldTrackNumber = this.trackNumber;
+    this.sources.splice(sourceIndex, 1);
+    if (this.shuffleMode) {
+      const playIndex = this.shuffledIndices.indexOf(sourceIndex);
+      if (playIndex >= 0) {
+        this.shuffledIndices.splice(playIndex, 1);
       }
+      for (let i = 0; i < this.shuffledIndices.length; i++) {
+        if (this.shuffledIndices[i] > sourceIndex) {
+          this.shuffledIndices[i] = this.shuffledIndices[i] - 1;
+        }
+      }
+    } else {
+      this.shuffledIndices = Array.from(Array(this.sources.length).keys());
+    }
+
+    // Keep the queued/fading bookkeeping pointing at the right tracks.
+    // fadingTrack is a source-array index; queuedTrack is an audio path.
+    if (player.fadingTrack !== null) {
+      if (player.fadingTrack === sourceIndex) {
+        player.fadingTrack = null;
+      } else if (player.fadingTrack > sourceIndex) {
+        player.fadingTrack = player.fadingTrack - 1;
+      }
+    }
+    if (player.queuedTrack !== null && player.queuedTrack === removedSource.audioPath) {
+      player.queuedTrack = null;
     }
 
     const newLength = this.numTracks();
     if (newLength === 0) {
       this.trackNumber = -1;
-    } else if (index < this.trackNumber) {
+    } else if (oldTrackNumber > index) {
       // Removed a track before the current one — current shifts left.
-      this.trackNumber = this.trackNumber - 1;
+      this.trackNumber = oldTrackNumber - 1;
       log.debug(`Decrementing track number to ${this.trackNumber}`);
-    } else if (index === this.trackNumber && this.trackNumber >= newLength) {
-      // Removed the current track AND it was the last in the list —
+    } else if (oldTrackNumber >= newLength) {
+      // Removed the current track AND it was the last in play order —
       // clamp to the new last track.
       this.trackNumber = newLength - 1;
       log.debug(`Clamping track number to ${this.trackNumber}`);
@@ -851,11 +977,23 @@ function Gapless5FileList(parentPlayer, parentLog, inShuffle, inLoadLimit = -1, 
     // we removed a track after current (current still points at the
     // same source).
 
-    if (this.isShuffled() && !player.canShuffle()) {
-      this.setShuffle(false);
+    // Leave shuffle mode when there are too few tracks left to shuffle.
+    // Only do this if shuffle was actually active (never when the player
+    // has never been shuffled). The order becomes the source order, and
+    // the current track is located by its source index so it stays put.
+    if ((this.shuffleMode || this.shuffleRequest === true) && !player.canShuffle()) {
+      const currentSourceIndex = (this.trackNumber >= 0 && newLength > 0) ?
+        this.getSourceIndexed(this.trackNumber).index : -1;
+      this.shuffleMode = false;
+      this.shuffleRequest = null;
+      this.preserveCurrent = true;
+      this.shuffledIndices = Array.from(Array(newLength).keys());
+      if (currentSourceIndex >= 0) {
+        this.trackNumber = currentSourceIndex;
+      }
+      log.debug('Disabling shuffle: not enough tracks to shuffle');
       player.uiDirty = true;
     }
-
     if (newLength > 0) {
       this.updateLoading();
     }
@@ -865,7 +1003,10 @@ function Gapless5FileList(parentPlayer, parentLog, inShuffle, inLoadLimit = -1, 
   if (inTracks.length > 0) {
     for (let i = 0; i < inTracks.length; i++) {
       this.sources.push(new Gapless5Source(player, log, inTracks[i]));
-      this.shuffledIndices.splice(Math.floor(Math.random() * this.numTracks()), 0, this.numTracks() - 1);
+    }
+    this.shuffledIndices = Array.from(Array(this.sources.length).keys());
+    if (this.shuffleMode) {
+      enableShuffle(-1, false);
     }
     this.setStartingTrack(inStartingTrack);
     this.updateLoading();
@@ -1288,7 +1429,7 @@ function Gapless5(options = {}, deprecated = {}) { // eslint-disable-line no-unu
             }
             this.fadingTrack = null;
           };
-          this.fadingTrack = this.getIndex();
+          this.fadingTrack = this.getIndex(true); // source-array index
           window.setTimeout(() => {
             tryStopFadingTrack();
           }, this.crossfade);
@@ -1498,7 +1639,11 @@ function Gapless5(options = {}, deprecated = {}) { // eslint-disable-line no-unu
     if (!isValidIndex(this.playlist.indexFromTrack(pointOrPath))) {
       log.error(`Cannot queue missing track: ${pointOrPath}`);
     } else {
-      this.queuedTrack = pointOrPath;
+      // Store the path so the queued track stays the same track even if
+      // the play (shuffle) order changes before it is played.
+      const index = this.playlist.indexFromTrack(pointOrPath);
+      this.queuedTrack = (typeof pointOrPath === 'string') ?
+        pointOrPath : this.playlist.getTracks()[index];
       this.playlist.updateLoading();
     }
   };
@@ -1714,8 +1859,8 @@ function Gapless5(options = {}, deprecated = {}) { // eslint-disable-line no-unu
 
   const getFadingSource = () => {
     if (this.fadingTrack !== null) {
-      const { source: fadingSource } = this.playlist.getSourceIndexed(this.fadingTrack);
-      return fadingSource;
+      // fadingTrack is a source-array index
+      return this.playlist.sources[this.fadingTrack] || null;
     }
     return null;
   };
