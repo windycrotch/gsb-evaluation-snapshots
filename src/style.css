@@ -1,0 +1,53 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+  cursor: default;
+  user-select: none;
+  -webkit-user-select: none;
+  /* Dragging the shell moves the window; interactive zones opt out below. */
+  -webkit-app-region: drag;
+}
+
+#stage {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+#panel {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+
+#hit {
+  position: absolute;
+  inset: 0;
+}
+
+#hit > * {
+  position: absolute;
+  -webkit-app-region: no-drag;
+}
+
+.zone-key,
+.zone-knob,
+.zone-icon {
+  cursor: pointer;
+}
+
+.zone-screen {
+  cursor: grab;
+}

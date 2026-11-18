@@ -1,0 +1,26 @@
+{
+  "name": "desksynth",
+  "productName": "DeskSynth",
+  "version": "0.1.0",
+  "description": "A juicy pixel pocket synth that lives on your desktop, with a little pet inside.",
+  "author": "Sven Schmid",
+  "homepage": "https://github.com/SvenSchmid/desksynth",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SvenSchmid/desksynth.git"
+  },
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "keywords": [
+    "synth",
+    "pixel",
+    "desktop",
+    "webaudio"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^33.4.11"
+  }
+}
