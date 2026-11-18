@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Borders &amp; Crowns</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@400;500;600;700&family=Marcellus&display=swap" rel="stylesheet">
+<style>
+/* Layout idea: the map is the whole screen; a brass-trimmed command bar on top, one dossier panel on the right, the turn button anchored bottom right. */
+:root{
+  color-scheme: dark;
+  --ink:#0a0e14;         /* ocean and page */
+  --slate:#141b25;       /* panels */
+  --slate-2:#1c2533;     /* raised controls */
+  --line:#2c3848;        /* hairlines */
+  --paper:#e9e3d3;       /* main text */
+  --dim:#93a0b2;         /* secondary text */
+  --brass:#d9a441;       /* the one accent */
+  --war:#d2553f;
+  --peace:#5fae7c;
+  --ally:#5b9bd8;
+  --display:"Marcellus", Georgia, "Times New Roman", serif;
+  --ui:"Barlow Semi Condensed", "Arial Narrow", "Segoe UI", system-ui, sans-serif;
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--ink);color:var(--paper);font:500 15px/1.35 var(--ui);overflow:hidden;-webkit-font-smoothing:antialiased}
+button,input,select{font:inherit;color:inherit}
+#map{position:absolute;inset:0;width:100%;height:100%;display:block;touch-action:none;cursor:grab}
+#map.drag{cursor:grabbing}
+#map.aim{cursor:crosshair}
+#legend{position:absolute;left:50%;bottom:16px;transform:translateX(-50%);background:#141b25ee;border:1px solid var(--line);border-radius:4px;padding:7px 12px;z-index:3;display:none;font-size:13.5px;text-align:center;max-width:calc(100% - 420px)}
+#legend i{display:block;width:170px;height:10px;border-radius:2px;box-shadow:0 0 0 1px #0008}
+#legend small{color:var(--dim);font-size:12.5px}
+.num{font-variant-numeric:tabular-nums}
+
+/* command bar */
+#bar{position:absolute;left:0;right:0;top:0;display:flex;flex-wrap:wrap;align-items:center;gap:6px 18px;padding:8px 14px;background:linear-gradient(#141b25f2,#141b25e0);border-bottom:1px solid var(--line);box-shadow:0 1px 0 #d9a44133;z-index:5}
+#bar .nation{display:flex;align-items:center;gap:9px;font:400 19px/1 var(--display);letter-spacing:.04em;margin-right:6px}
+.chip{width:14px;height:20px;border-radius:2px;box-shadow:0 0 0 1px #0008, inset 0 0 0 1px #fff3;flex:none}
+.stat{display:flex;flex-direction:column;line-height:1.1}
+.stat small{font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--dim)}
+.stat b{font-weight:600;font-size:16px}
+.stat b i{font-style:normal;font-weight:500;font-size:13px;color:var(--peace)}
+.stat b i.neg{color:var(--war)}
+#bar .spacer{flex:1}
+.btn{background:var(--slate-2);border:1px solid var(--line);border-radius:4px;padding:6px 11px;cursor:pointer;font-weight:600;letter-spacing:.02em}
+.btn:hover{border-color:#51627a;background:#232e3f}
+.btn:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid var(--brass);outline-offset:1px}
+.btn[disabled]{opacity:.42;cursor:not-allowed}
+.btn.brass{background:var(--brass);border-color:#f0c56d;color:#1a1408}
+.btn.brass:hover{background:#e6b452}
+.btn.war{border-color:#8a3a2c;color:#f0a493}
+.btn.brass.war{background:#b13f2b;border-color:#f08a70;color:#fff}
+.btn.brass.war:hover{background:#c64a34}
+.btn.sm{padding:4px 8px;font-size:13.5px}
+select{background:var(--slate-2);border:1px solid var(--line);border-radius:4px;padding:6px 8px;font-weight:600}
+
+/* dossier */
+#panel{position:absolute;right:12px;top:66px;width:316px;max-height:calc(100% - 150px);overflow:auto;background:#141b25f5;border:1px solid var(--line);border-top:2px solid var(--brass);border-radius:4px;padding:13px 14px 14px;z-index:4;display:none}
+#panel h3{font:400 21px/1.15 var(--display);letter-spacing:.03em;margin:0 0 2px;text-wrap:balance}
+#panel .sub{color:var(--dim);margin-bottom:10px;display:flex;align-items:center;gap:7px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:7px 12px;margin:8px 0 12px}
+.grid div{display:flex;flex-direction:column;line-height:1.15}
+.grid small{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--dim)}
+.grid b{font-weight:600;font-size:16px}
+.sect{border-top:1px solid var(--line);padding-top:10px;margin-top:10px}
+.sect h4{margin:0 0 7px;font-size:12px;letter-spacing:.1em;text-transform:uppercase;color:var(--brass);font-weight:600}
+.row{display:flex;gap:7px;align-items:center;flex-wrap:wrap}
+.row + .row{margin-top:7px}
+input[type=range]{flex:1;min-width:120px;accent-color:var(--brass)}
+.hint{color:var(--dim);font-size:13.5px;margin:6px 0 0}
+.pill{display:inline-block;padding:1px 8px;border-radius:10px;font-size:12.5px;font-weight:600;letter-spacing:.04em;border:1px solid}
+.pill.war{color:#f0a493;border-color:#8a3a2c;background:#3a1b16}
+.pill.ally{color:#a9cdf0;border-color:#2f5d8a;background:#16273a}
+.pill.peace{color:#b9c3d0;border-color:var(--line);background:var(--slate-2)}
+.pill.truce{color:#e7cf95;border-color:#7a6230;background:#2c2412}
+.relbar{height:6px;border-radius:3px;background:linear-gradient(90deg,#a8452f,#566070 50%,#4c9a6b);position:relative;margin:6px 0 2px}
+.relbar i{position:absolute;top:-3px;width:3px;height:12px;background:var(--paper);border-radius:1px;transform:translateX(-1px)}
+.orders{list-style:none;margin:0;padding:0}
+.orders li{display:flex;justify-content:space-between;gap:8px;align-items:center;padding:3px 0;font-size:14px}
+.x{background:none;border:0;color:var(--dim);cursor:pointer;font-size:16px;padding:0 4px}
+.x:hover{color:var(--war)}
+
+/* turn + log */
+#turnbox{position:absolute;right:12px;bottom:14px;z-index:5;display:flex;gap:8px;align-items:stretch}
+#btn-auto{padding:0 16px;font:400 15px/1 var(--display);letter-spacing:.06em;text-transform:uppercase}
+#endturn{padding:13px 26px;font:400 18px/1 var(--display);letter-spacing:.08em;text-transform:uppercase;display:none}
+#log{position:absolute;left:12px;bottom:14px;width:min(370px,calc(100% - 340px));max-height:190px;overflow:auto;background:#141b25e8;border:1px solid var(--line);border-radius:4px;padding:8px 11px;z-index:3;font-size:13.5px;display:none}
+#log p{margin:0 0 3px;color:var(--dim)}
+#log p b{color:var(--paper);font-weight:600}
+#log p.war{color:#eaa091}#log p.good{color:#9fd3b2}#log p.me{color:var(--paper)}
+#log p span{color:#5f6c7d;margin-right:6px}
+
+/* start card */
+#start{position:absolute;left:14px;top:14px;width:min(380px,calc(100% - 28px));max-height:calc(100% - 28px);overflow:auto;background:#141b25f7;border:1px solid var(--line);border-top:2px solid var(--brass);border-radius:4px;padding:18px 18px 16px;z-index:6}
+#start h1{font:400 34px/1 var(--display);letter-spacing:.07em;margin:0 0 4px;text-transform:uppercase}
+#start .tag{color:var(--dim);margin:0 0 14px}
+#start label{display:block;font-size:12px;letter-spacing:.1em;text-transform:uppercase;color:var(--brass);font-weight:600;margin-bottom:5px}
+#pick{width:100%;background:var(--slate-2);border:1px solid var(--line);border-radius:4px;padding:8px 10px}
+#start .big{width:100%;padding:12px;font:400 17px/1 var(--display);letter-spacing:.07em;text-transform:uppercase;margin-top:6px}
+.slots{display:flex;gap:8px}
+.slot{flex:1;display:flex;flex-direction:column;align-items:flex-start;gap:1px;text-align:left;min-width:0}
+.slot small{font-weight:500;font-size:12.5px;opacity:.85;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+#conts .row{margin-top:6px}
+#slotmenu{position:fixed;z-index:20;background:var(--slate);border:1px solid var(--line);border-top:2px solid var(--brass);border-radius:4px;padding:5px;display:flex;flex-direction:column;gap:4px;min-width:140px;box-shadow:0 6px 20px #000a}
+#slotmenu .btn{text-align:left}
+#start ul{margin:6px 0 0;padding-left:18px;color:var(--dim);font-size:14px}
+#start ul li{margin-bottom:3px}
+
+/* tutorial */
+#tut{position:absolute;left:12px;top:74px;width:min(340px,calc(100% - 24px));z-index:12;background:#141b25fa;border:1px solid var(--line);border-top:2px solid var(--brass);border-radius:4px;padding:10px 14px 13px;display:none;box-shadow:0 8px 24px #000a}
+#tut small{color:var(--brass);letter-spacing:.1em;text-transform:uppercase;font-size:11px;font-weight:600}
+#tut .pbar{height:3px;background:var(--line);border-radius:2px;margin:6px 0 9px}
+#tut .pbar i{display:block;height:100%;background:var(--brass);border-radius:2px;transition:width .3s}
+#tut h3{font:400 21px/1.15 var(--display);letter-spacing:.03em;margin:0 0 6px}
+#tut p{margin:0 0 11px;color:#cfd5de;font-size:14.5px}
+@keyframes tutpulse{0%,100%{box-shadow:0 0 0 0 #ffd47999}50%{box-shadow:0 0 0 8px #ffd47900}}
+.tut-hl{outline:2px solid #ffd479 !important;outline-offset:2px;animation:tutpulse 1.2s infinite}
+
+/* modal */
+#veil{position:absolute;inset:0;background:#05080cb8;z-index:9;display:none;align-items:center;justify-content:center;padding:16px}
+#modal{width:min(560px,100%);max-height:calc(100% - 20px);overflow:auto;background:var(--slate);border:1px solid var(--line);border-top:2px solid var(--brass);border-radius:4px;padding:18px}
+#modal h2{font:400 23px/1.15 var(--display);letter-spacing:.04em;margin:0 0 10px;text-wrap:balance}
+#modal .body{color:#cfd5de}
+#modal .body p{margin:0 0 9px}
+#modal h4{margin:12px 0 5px;font-size:12px;letter-spacing:.1em;text-transform:uppercase;color:var(--brass);font-weight:600}
+.chk{display:block;padding:2px 0;font-size:14.5px;cursor:pointer}
+.chk input{accent-color:var(--brass);margin-right:6px}
+#modal .acts{display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;margin-top:14px}
+table{width:100%;border-collapse:collapse;font-size:14.5px}
+th{font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--dim);font-weight:600;text-align:left;padding:4px 6px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--slate)}
+td{padding:5px 6px;border-bottom:1px solid #222c3a}
+td.r,th.r{text-align:right}
+tr.me td{color:var(--brass)}
+tr.click{cursor:pointer}
+tr.click:hover td{background:#1c2533}
+.tblwrap{max-height:52vh;overflow:auto;margin-top:6px}
+#toast{position:absolute;left:50%;top:70px;transform:translateX(-50%);background:#1c2533;border:1px solid var(--brass);border-radius:4px;padding:7px 14px;z-index:8;display:none;font-weight:600;max-width:calc(100% - 32px)}
+
+@media (max-width:760px){
+  #bar{gap:4px 12px;padding:6px 10px}
+  #bar .nation{font-size:16px}
+  .stat b{font-size:14.5px}
+  #panel{left:8px;right:8px;top:auto;bottom:70px;width:auto;max-height:44%}
+  #log{display:none !important}
+  #legend{bottom:66px;max-width:calc(100% - 16px)}
+  #turnbox{right:8px;bottom:10px}
+  #endturn{padding:12px 18px}
+  #tut{top:124px;max-height:30%;overflow:auto}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none !important;animation:none !important}}
+</style>
+</head>
+<body>
+<canvas id="map" aria-label="World map"></canvas>
+
+<div id="bar" style="display:none">
+  <div class="nation"><span class="chip" id="b-chip"></span><span id="b-name"></span></div>
+  <div class="stat"><small>Gold</small><b class="num" id="b-gold"></b></div>
+  <div class="stat"><small>Actions</small><b class="num" id="b-mp"></b></div>
+  <div class="stat"><small>Diplomacy</small><b class="num" id="b-dp"></b></div>
+  <div class="stat"><small>Army</small><b class="num" id="b-army"></b></div>
+  <div class="stat"><small>Provinces</small><b class="num" id="b-prov"></b></div>
+  <div class="stat"><small>Turn</small><b class="num" id="b-turn"></b></div>
+  <div class="stat" id="b-warbox" style="display:none"><small style="color:var(--war)">At war with</small><b id="b-war"></b></div>
+  <div class="spacer"></div>
+  <select id="mode" aria-label="Map mode">
+    <option value="pol">Political map</option>
+    <option value="dip">Diplomatic map</option>
+    <option value="pop">Population map</option>
+    <option value="inc">Income map</option>
+  </select>
+  <button class="btn" id="btn-realm">Realm</button>
+  <button class="btn" id="btn-dip">Diplomacy</button>
+  <button class="btn" id="btn-rank">Rankings</button>
+  <button class="btn" id="btn-menu">Menu</button>
+</div>
+
+<div id="panel"></div>
+<div id="log" aria-live="polite"></div>
+<div id="turnbox"><button class="btn" id="btn-auto" title="Pass turns automatically, three per second" style="display:none">Auto turns</button><button class="btn brass" id="endturn">End turn</button></div>
+<div id="tut" role="region" aria-label="Tutorial"><div class="row" style="justify-content:space-between;flex-wrap:nowrap"><small id="tut-n"></small><button class="x" id="tut-x" title="Leave the tutorial" aria-label="Leave the tutorial">×</button></div><div class="pbar"><i id="tut-bar"></i></div><h3 id="tut-t"></h3><p id="tut-p"></p><div class="row"><button class="btn brass" id="tut-next">Next</button><button class="btn sm" id="tut-skip">Skip this step</button></div></div>
+<div id="toast" role="status"></div>
+<div id="legend"></div>
+
+<div id="start">
+  <h1>Borders &amp; Crowns</h1>
+  <p class="tag">Turn-based grand strategy on the real world map. <span id="counts"></span></p>
+  <label for="pick">Choose your nation</label>
+  <input id="pick" list="nations" autocomplete="off" placeholder="Type a country or click the map">
+  <datalist id="nations"></datalist>
+  <div id="pickinfo"></div>
+  <label style="margin-top:12px">Save slot for a new game</label>
+  <div class="slots" id="slots"></div>
+  <p class="hint" id="slothint" style="margin:4px 0 8px"></p>
+  <button class="btn brass big" id="go">Start</button>
+  <div id="conts"></div>
+  <button class="btn big" id="btn-tut" style="margin-top:8px">Tutorial: learn the basics</button>
+  <div class="sect">
+    <h4>How to play</h4>
+    <ul>
+      <li>New here? Press <b>Tutorial</b> above for a short guided practice game.</li>
+      <li>Click one of your provinces, then a highlighted neighbour, to move or attack.</li>
+      <li>Right-click a distant province to march there by the shortest route, turn after turn.</li>
+      <li>Gather all armies in one province, or give realm-wide orders, with one click.</li>
+      <li>Recruit soldiers and develop provinces with gold.</li>
+      <li>Open a foreign province to declare war, make peace or seek an alliance.</li>
+      <li>Orders are carried out when you press End turn.</li>
+      <li>Drag to pan, scroll or pinch to zoom.</li>
+    </ul>
+  </div>
+</div>
+
+<div id="slotmenu" style="display:none"></div>
+<div id="veil"><div id="modal" role="dialog" aria-modal="true"><h2 id="m-title"></h2><div class="body" id="m-body"></div><div class="acts" id="m-acts"></div></div></div>
+
+<script>
+const D = /*__DATA__*/;
+/*__GAME__*/
+</script>
+</body>
+</html>
