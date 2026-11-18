@@ -61,13 +61,19 @@ export async function runVideoExport<TFrame>(
       const frame = await frameSource.renderFrame(timelineFrame);
 
       // The frame must be released even if encoding throws, so it is the
-      // writer's turn inside its own try — otherwise a mid-export encoder error
-      // would leak the last decoded frame.
+      // writer's turn inside its own try. A cleanup failure must not mask the
+      // encoder's real error — that is the error the caller needs to see.
       try {
         await videoWriter.addFrame(frame, frameTimestampMicros(plan, i), frameDuration);
-      } finally {
-        release(frame);
+      } catch (error) {
+        try {
+          release(frame);
+        } catch {
+          // Swallowed only to preserve the encoder error below.
+        }
+        throw error;
       }
+      release(frame);
 
       report("rendering", i + 1);
     }

@@ -8,7 +8,28 @@
  * unit-tested without a browser.
  */
 
-import type { ExportSettings, Frame, ProjectDocument, Size } from "@cutaway/types";
+import type { Clip, ExportSettings, Frame, ProjectDocument, Size } from "@cutaway/types";
+
+/**
+ * What a range would actually render, reported back to the user.
+ *
+ * The counts are what the renderer will draw, not what geometrically overlaps:
+ * hidden clips and clips on hidden tracks are excluded. This is the answer to
+ * "did my export actually capture anything?" before the user waits for a file.
+ */
+export interface ExportContentSummary {
+  /** Visible clips that draw something (video, image, text, …). */
+  visual: number;
+  /** Visible audio clips — they make a render worthwhile even with no picture. */
+  audio: number;
+  /** Caption blocks overlapping the range. */
+  captions: number;
+  /**
+   * Non-fatal things worth telling the user before they wait for a render —
+   * chiefly that the picture will be black. Empty for an ordinary export.
+   */
+  warnings: string[];
+}
 
 /** A validated, backend-agnostic description of an export job. */
 export interface ExportPlan {
@@ -28,14 +49,19 @@ export interface ExportPlan {
   audioCodec: ExportSettings["audioCodec"];
   videoBitrate: number;
   audioBitrate: number;
+  /** What the range will actually render, and any non-fatal caveats. */
+  contentSummary: ExportContentSummary;
   /**
    * Non-fatal things worth telling the user before they wait for a render —
    * chiefly that the picture will be black. Empty for an ordinary export.
+   *
+   * Kept at the top level for convenience; it is the same array as
+   * {@link ExportContentSummary.warnings}.
    */
   warnings: string[];
 }
 
-/** What actually falls inside an export range, used to catch empty renders. */
+/** Counts for one bucket of a range scan, used to catch empty renders. */
 interface RangeContent {
   /** Clips that draw something (video, image, text). */
   visual: number;
@@ -45,36 +71,86 @@ interface RangeContent {
   captions: number;
 }
 
+/** Visible and concealed content in a range, so errors can explain which it is. */
+interface RangeScan {
+  visible: RangeContent;
+  /** Content the range *would* have if it were not hidden. */
+  hidden: RangeContent;
+}
+
 /**
- * Counts what a range would actually render.
+ * Finds the last frame at which a visual clip still draws, accounting for a
+ * transition tail.
+ *
+ * The renderer's `transitionOpacity` pulls the outgoing clip past its own end
+ * for the duration of the *next* clip's `transitionIn`, but only on an exact
+ * cut (`next.startFrame === clipEnd`) — a gap has nothing to crossfade into.
+ * Counting must match that exactly: a range covering only the fade-out tail is
+ * still content, and refusing it would be a false "nothing to export". Audio
+ * clips have no transition rendering, so they keep their plain end.
+ */
+function visibleEndFor(clip: Clip, next: Clip | undefined): Frame {
+  const clipEnd = clip.startFrame + clip.durationFrames;
+  if (clip.content.kind === "audio") return clipEnd;
+
+  const transition = next?.transitionIn;
+  if (
+    next &&
+    transition &&
+    transition.durationFrames > 0 &&
+    next.startFrame === clipEnd // only an exact cut crossfades
+  ) {
+    return clipEnd + transition.durationFrames;
+  }
+  return clipEnd;
+}
+
+/**
+ * Counts what a range would actually render, and what it would render if
+ * nothing were hidden.
  *
  * Hidden clips and clips on hidden tracks are skipped, because the renderer
  * skips them too — counting them would let a "there is content here" check pass
  * for a range that draws nothing. Ranges are half-open on both sides, matching
- * the timeline.
+ * the timeline: `[start, end)`. Every caption block that overlaps the range
+ * counts once.
  */
-function contentInRange(project: ProjectDocument, start: Frame, end: Frame): RangeContent {
+function contentInRange(project: ProjectDocument, start: Frame, end: Frame): RangeScan {
   const { clips, tracks, captionTracks } = project.entities;
-  const content: RangeContent = { visual: 0, audio: 0, captions: 0 };
+  const visible: RangeContent = { visual: 0, audio: 0, captions: 0 };
+  const hidden: RangeContent = { visual: 0, audio: 0, captions: 0 };
 
+  // Group by track and sort by start, mirroring how the renderer pairs each
+  // clip with the next one on its track to resolve transition tails.
+  const clipsByTrack = new Map<string, Clip[]>();
   for (const clip of Object.values(clips)) {
-    const clipEnd = clip.startFrame + clip.durationFrames;
-    if (clipEnd <= start || clip.startFrame >= end) continue;
-    if (clip.hidden || tracks[clip.trackId]?.hidden) continue;
-    if (clip.content.kind === "audio") content.audio += 1;
-    else content.visual += 1;
+    const trackClips = clipsByTrack.get(clip.trackId);
+    if (trackClips) trackClips.push(clip);
+    else clipsByTrack.set(clip.trackId, [clip]);
+  }
+
+  for (const trackClips of clipsByTrack.values()) {
+    trackClips.sort((a, b) => a.startFrame - b.startFrame);
+
+    trackClips.forEach((clip, index) => {
+      const drawEnd = visibleEndFor(clip, trackClips[index + 1]);
+      if (drawEnd <= start || clip.startFrame >= end) return;
+
+      const bucket = clip.hidden || tracks[clip.trackId]?.hidden ? hidden : visible;
+      if (clip.content.kind === "audio") bucket.audio += 1;
+      else bucket.visual += 1;
+    });
   }
 
   for (const track of Object.values(captionTracks)) {
     for (const block of track.blocks) {
       if (block.endFrame > start && block.startFrame < end) {
-        content.captions += 1;
-        break;
+        visible.captions += 1;
       }
     }
   }
 
-  return content;
+  return { visible, hidden };
 }
 
 /** Thrown when settings cannot produce a valid export. Carries a user-facing reason. */
@@ -120,10 +196,18 @@ export function planExport(project: ProjectDocument, settings: ExportSettings): 
   // A range with nothing in it renders a file that is blank and silent. That is
   // never what someone means by "export", and letting it through silently is
   // indistinguishable from a broken encoder — so refuse it with the reason.
-  const content = contentInRange(project, startFrame, endFrame);
+  // The reason distinguishes "the range is empty" from "the content is there but
+  // hidden", because the fix for each is different.
+  const { visible: content, hidden } = contentInRange(project, startFrame, endFrame);
   if (content.visual === 0 && content.audio === 0 && content.captions === 0) {
+    const hiddenTotal = hidden.visual + hidden.audio + hidden.captions;
+    if (hiddenTotal > 0) {
+      throw new ExportPlanError(
+        `Nothing to export in this range — all ${hiddenTotal} item(s) it contains are hidden. Make the clips or their tracks visible and try again.`,
+      );
+    }
     throw new ExportPlanError(
-      "Nothing to export in this range — it contains no clips. Check your in/out points, and that the tracks you want are not hidden.",
+      "Nothing to export in this range — it contains no clips. Check your in/out points.",
     );
   }
 
@@ -133,6 +217,13 @@ export function planExport(project: ProjectDocument, settings: ExportSettings): 
   if (content.visual === 0 && content.captions === 0) {
     warnings.push("This range has audio but no visible clips, so the picture will be black.");
   }
+
+  const contentSummary: ExportContentSummary = {
+    visual: content.visual,
+    audio: content.audio,
+    captions: content.captions,
+    warnings,
+  };
 
   return {
     startFrame,
@@ -146,6 +237,7 @@ export function planExport(project: ProjectDocument, settings: ExportSettings): 
     audioCodec: settings.audioCodec,
     videoBitrate: settings.videoBitrate,
     audioBitrate: settings.audioBitrate,
+    contentSummary,
     warnings,
   };
 }

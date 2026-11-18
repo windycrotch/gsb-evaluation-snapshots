@@ -156,16 +156,22 @@ describe("runVideoExport", () => {
 
   it("aborts before rendering when the signal is already aborted", async () => {
     const source = fakeSource();
+    const writer = fakeWriter();
     await expect(
       runVideoExport({
         plan: plan(5),
         frameSource: source,
-        videoWriter: fakeWriter(),
+        videoWriter: writer,
         signal: AbortSignal.abort(),
       }),
     ).rejects.toBeInstanceOf(ExportCancelledError);
+    // Not a single frame was rendered, and neither the encoder nor the muxer ran.
     expect(source.renderFrame).not.toHaveBeenCalled();
+    expect(writer.addFrame).not.toHaveBeenCalled();
+    expect(writer.finalize).not.toHaveBeenCalled();
+    // Each resource is disposed exactly once.
     expect(source.dispose).toHaveBeenCalledOnce();
+    expect(writer.dispose).toHaveBeenCalledOnce();
   });
 
   it("stops mid-export when cancelled and still disposes", async () => {
@@ -212,7 +218,35 @@ describe("runVideoExport", () => {
     await expect(
       runVideoExport({ plan: plan(3), frameSource: source, videoWriter: writer }),
     ).rejects.toThrow("encoder blew up");
+    // The failing frame is released, and both resources are torn down exactly
+    // once even though the writer threw mid-export.
     expect(close).toHaveBeenCalledOnce();
+    expect(source.dispose).toHaveBeenCalledOnce();
+    expect(writer.dispose).toHaveBeenCalledOnce();
+  });
+
+  it("surfaces the encoder's original error even when releasing the frame fails", async () => {
+    const encoderError = new Error("encoder blew up");
+    const source: FrameSource<FakeFrame> = {
+      renderFrame: async (frame) => ({
+        frame,
+        close: () => {
+          throw new Error("close failed");
+        },
+      }),
+      dispose: vi.fn(),
+    };
+    const writer: VideoWriter<FakeFrame> = {
+      addFrame: async () => {
+        throw encoderError;
+      },
+      finalize: async () => new Uint8Array(),
+      dispose: vi.fn(),
+    };
+
+    await expect(
+      runVideoExport({ plan: plan(2), frameSource: source, videoWriter: writer }),
+    ).rejects.toBe(encoderError);
     expect(source.dispose).toHaveBeenCalledOnce();
     expect(writer.dispose).toHaveBeenCalledOnce();
   });
