@@ -1,0 +1,275 @@
+// Parallel execution support for the WASM backend using Web Workers.
+//
+// This requires `crossOriginIsolated` to be true, which is only the case if
+// the page is served with headers:
+//
+// ```text
+// Cross-Origin-Opener-Policy: same-origin
+// Cross-Origin-Embedder-Policy: require-corp
+// ```
+
+import { cpuRoutineJSForWorkers, type Routine } from "../../routine";
+
+/** Check if SharedArrayBuffer is available. */
+export function hasSharedArrayBuffer(): boolean {
+  // Node.js has SharedArrayBuffer but not Worker, so check both.
+  return (
+    typeof SharedArrayBuffer !== "undefined" && typeof Worker !== "undefined"
+  );
+}
+
+// A worker message has meaningful fixed overhead. Spreading smaller kernels
+// across more workers costs more than the extra parallelism saves.
+const MIN_ELEMS_PER_THREAD = 512;
+const MAX_CACHED_KERNELS_PER_WORKER = 256;
+
+const WORKER_SOURCE = `
+${cpuRoutineJSForWorkers()}
+
+let memory = null;
+
+const kernelLru = new Map();
+function kernelFunc(kernelHash, module) {
+  let func = kernelLru.get(kernelHash);
+  if (func !== undefined) {
+    kernelLru.delete(kernelHash);
+    kernelLru.set(kernelHash, func);
+    return func;
+  }
+  const instance = new WebAssembly.Instance(module, { env: { memory } });
+  func = instance.exports.kernel;
+  kernelLru.set(kernelHash, func);
+  if (kernelLru.size > ${MAX_CACHED_KERNELS_PER_WORKER}) {
+    kernelLru.delete(kernelLru.keys().next().value);
+  }
+  return func;
+}
+
+self.onmessage = (e) => {
+  const msg = e.data;
+  if (msg.type === "init") {
+    memory = msg.memory;
+    postMessage({ type: "ready" });
+    return;
+  }
+  try {
+    if (msg.type === "kernel") {
+      const { kernelHash, module, ptrs, begin, end } = msg;
+      kernelFunc(kernelHash, module)(...ptrs, begin, end);
+    } else if (msg.type === "routine") {
+      const inputs = msg.inputs.map(({ ptr, size }) =>
+        new Uint8Array(memory.buffer, ptr, size)
+      );
+      const outputs = msg.outputs.map(({ ptr, size }) =>
+        new Uint8Array(memory.buffer, ptr, size)
+      );
+      __minify_safe_runCpuRoutine(msg.routine, inputs, outputs);
+    } else {
+      throw new Error("Unknown wasm worker message: " + msg.type);
+    }
+    postMessage({ type: "done", ok: true });
+  } catch (err) {
+    postMessage({ type: "done", ok: false, error: String(err) });
+  }
+};
+`;
+
+interface RoutineBuffer {
+  ptr: number;
+  size: number;
+}
+
+type RoutinePayload = Pick<Routine, "name" | "type" | "params">;
+
+/** Pool of Web Workers for parallel WASM kernel dispatch. */
+export class WasmWorkerPool {
+  #memory: WebAssembly.Memory;
+  #numWorkers: number;
+  #workers: Worker[] = [];
+  #ready: Promise<void> = Promise.resolve();
+  /** Serializes dispatches so concurrent read() calls don't clobber onmessage. */
+  #queue: Promise<void> = Promise.resolve();
+  #epoch: bigint = 0n;
+  #epochEnd: bigint = 0n;
+  #hooks: Map<bigint, (() => void)[]> = new Map();
+
+  constructor(memory: WebAssembly.Memory, numWorkers: number) {
+    if (numWorkers <= 0) {
+      throw new Error("numWorkers must be positive");
+    }
+    this.#memory = memory;
+    this.#numWorkers = numWorkers;
+  }
+
+  get epoch(): bigint {
+    return this.#epoch;
+  }
+
+  waitForEpoch(target: bigint): Promise<void> {
+    if (target <= this.#epoch) return Promise.resolve();
+    return new Promise((resolve) => {
+      if (target <= this.#epoch) return resolve();
+      const hooks = this.#hooks.get(target);
+      if (hooks) hooks.push(resolve);
+      else this.#hooks.set(target, [resolve]);
+    });
+  }
+
+  #ensureInit() {
+    if (this.#workers.length > 0) return;
+    // Called lazily to avoid creating workers if not used.
+    const blob = new Blob([WORKER_SOURCE], { type: "application/javascript" });
+    const url = URL.createObjectURL(blob);
+    this.#workers = [];
+    const readyPromises: Promise<void>[] = [];
+    for (let i = 0; i < this.#numWorkers; i++) {
+      const worker = new Worker(url, { type: "module" });
+      this.#workers.push(worker);
+      readyPromises.push(
+        new Promise<void>((resolve, reject) => {
+          worker.onmessage = () => resolve();
+          worker.onerror = (e) =>
+            reject(new Error(e.message || "Worker failed to load"));
+        }),
+      );
+      worker.postMessage({ type: "init", memory: this.#memory });
+    }
+    this.#ready = Promise.all(readyPromises).then(() => {
+      URL.revokeObjectURL(url);
+    });
+    this.#queue = this.#ready;
+  }
+
+  /**
+   * Dispatch a kernel across multiple workers.
+   *
+   * Returns an epoch that can be used to wait for the ongoing work to complete,
+   * which is guaranteed to be monotonically increasing.
+   */
+  dispatch(
+    kernelHash: string,
+    module: WebAssembly.Module,
+    ptrs: number[],
+    size: number,
+    chunkAlignment: number = 16,
+    minWorkPerWorker: number = MIN_ELEMS_PER_THREAD,
+  ): bigint {
+    return this.#enqueue(() =>
+      this.#dispatchNow(
+        kernelHash,
+        module,
+        ptrs,
+        size,
+        chunkAlignment,
+        minWorkPerWorker,
+      ),
+    );
+  }
+
+  /**
+   * Dispatch a CPU fallback routine on a worker.
+   *
+   * This uses the same serial queue as generated wasm kernels so routine reads
+   * observe prior async writes and later kernels observe routine outputs.
+   */
+  dispatchRoutine(
+    routine: RoutinePayload,
+    inputs: RoutineBuffer[],
+    outputs: RoutineBuffer[],
+  ): bigint {
+    return this.#enqueue(() =>
+      this.#dispatchRoutineNow(routine, inputs, outputs),
+    );
+  }
+
+  #enqueue(job: () => Promise<void>): bigint {
+    this.#ensureInit();
+    this.#epochEnd++;
+    const result = this.#queue.then(job);
+    this.#queue = result
+      .then(
+        () => {},
+        () => {}, // Swallow errors to avoid blocking the queue.
+      )
+      .then(() => {
+        this.#epoch++;
+        const hooks = this.#hooks.get(this.#epoch);
+        if (hooks) {
+          for (const hook of hooks) hook();
+          this.#hooks.delete(this.#epoch);
+        }
+      });
+    return this.#epochEnd;
+  }
+
+  async #dispatchNow(
+    kernelHash: string,
+    module: WebAssembly.Module,
+    ptrs: number[],
+    size: number,
+    chunkAlignment: number,
+    minWorkPerWorker: number,
+  ): Promise<void> {
+    if (size === 0) return;
+    const n = Math.min(
+      this.#workers.length,
+      Math.ceil(size / minWorkPerWorker),
+    );
+    const chunkSize = Math.ceil(size / n / chunkAlignment) * chunkAlignment;
+    const promises: Promise<void>[] = [];
+    for (let i = 0; i < n; i++) {
+      const begin = i * chunkSize;
+      const end = Math.min(begin + chunkSize, size);
+      if (begin >= size) break;
+      const worker = this.#workers[i];
+      promises.push(
+        new Promise<void>((resolve, reject) => {
+          worker.onmessage = (e) => {
+            if (e.data.ok) resolve();
+            else reject(new Error(`Worker error: ${e.data.error}`));
+          };
+          worker.postMessage({
+            type: "kernel",
+            kernelHash,
+            module,
+            ptrs,
+            begin,
+            end,
+          });
+        }),
+      );
+    }
+    await Promise.all(promises);
+  }
+
+  async #dispatchRoutineNow(
+    routine: RoutinePayload,
+    inputs: RoutineBuffer[],
+    outputs: RoutineBuffer[],
+  ): Promise<void> {
+    const worker = this.#workers[0];
+    await new Promise<void>((resolve, reject) => {
+      worker.onmessage = (e) => {
+        if (e.data.ok) resolve();
+        else reject(new Error(`Worker error: ${e.data.error}`));
+      };
+      worker.postMessage({ type: "routine", routine, inputs, outputs });
+    });
+  }
+}
+
+/** Try to create a worker pool. Returns null if workers are unavailable. */
+export function createWorkerPool(
+  memory: WebAssembly.Memory,
+): WasmWorkerPool | null {
+  if (!hasSharedArrayBuffer()) return null;
+  try {
+    const numWorkers = Math.max(
+      1,
+      (typeof navigator !== "undefined" && navigator.hardwareConcurrency) || 4,
+    );
+    return new WasmWorkerPool(memory, numWorkers);
+  } catch {
+    return null;
+  }
+}

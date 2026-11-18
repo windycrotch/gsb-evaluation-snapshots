@@ -1,0 +1,374 @@
+import { expect, test } from "vitest";
+
+import { AluExp, AluOp, DType } from "./alu";
+
+test("AluExp can be evaluated", () => {
+  const e = AluExp.i32(3);
+  expect(e.evaluate({})).toEqual(3);
+
+  const e2 = AluExp.add(AluExp.i32(3), AluExp.i32(4));
+  expect(e2.evaluate({})).toEqual(7);
+
+  const e3 = AluExp.add(AluExp.i32(3), e2);
+  expect(e3.evaluate({})).toEqual(10);
+
+  const e4 = AluExp.mul(AluExp.special(DType.Int32, "idx", 10), AluExp.i32(50));
+  expect(e4.evaluate({ idx: 10 })).toEqual(500);
+});
+
+test("AluExp works with ternaries", () => {
+  const x = AluExp.special(DType.Int32, "x", 100);
+
+  const e = AluExp.where(
+    AluExp.cmplt(x, AluExp.i32(70)),
+    AluExp.i32(0),
+    AluExp.i32(1),
+  );
+  expect(e.dtype).toBe(DType.Int32);
+  expect(e.src).toHaveLength(3);
+  expect(e.src[0].dtype).toBe(DType.Bool);
+  expect(e.evaluate({ x: 50 })).toEqual(0);
+  expect(e.evaluate({ x: 69 })).toEqual(0);
+  expect(e.evaluate({ x: 70 })).toEqual(1);
+  expect(e.evaluate({ x: 80 })).toEqual(1);
+});
+
+test("AluExp handles boolean ops", () => {
+  const t = AluExp.bool(true);
+  const f = AluExp.bool(false);
+
+  expect(AluExp.mul(t, t).evaluate({})).toBe(1);
+  expect(AluExp.mul(t, f).evaluate({})).toBe(0);
+  expect(AluExp.mul(f, f).evaluate({})).toBe(0);
+
+  expect(AluExp.add(t, t).evaluate({})).toBe(1);
+  expect(AluExp.add(t, f).evaluate({})).toBe(1);
+  expect(AluExp.add(f, f).evaluate({})).toBe(0);
+});
+
+test("AluExp has .min and .max", () => {
+  const e = AluExp.add(AluExp.i32(3), AluExp.i32(4));
+  expect(e.min).toEqual(7);
+  expect(e.max).toEqual(7);
+
+  const e2 = AluExp.add(
+    AluExp.special(DType.Int32, "x", 10),
+    AluExp.special(DType.Int32, "y", 20),
+  );
+  expect(e2.min).toEqual(0);
+  expect(e2.max).toEqual(28);
+});
+
+test("AluExp range analysis preserves uint32 wrapping arithmetic", () => {
+  const x = AluExp.variable(DType.Uint32, "x");
+  const neg = AluExp.sub(AluExp.u32(0), x);
+
+  expect([neg.min, neg.max]).toEqual([0, 0xffffffff]);
+  expect(neg.simplify().op).toBe(AluOp.Sub);
+});
+
+test("AluExp raises TypeError for unsupported dtypes", () => {
+  expect(() => AluExp.sin(AluExp.bool(true))).toThrow(TypeError);
+  expect(() => AluExp.cos(AluExp.bool(false))).toThrow(TypeError);
+  expect(() => AluExp.reciprocal(AluExp.bool(true))).toThrow(TypeError);
+});
+
+test("AluOp.Min and AluOp.Max", () => {
+  const a = AluExp.i32(3);
+  const b = AluExp.i32(4);
+  const minOp = AluExp.min(a, b);
+  expect(minOp.evaluate({})).toBe(3);
+  expect(minOp.dtype).toBe(DType.Int32);
+
+  const maxOp = AluExp.max(a, b);
+  expect(maxOp.evaluate({})).toBe(4);
+  expect(maxOp.dtype).toBe(DType.Int32);
+
+  const c = AluExp.special(DType.Int32, "c", 5);
+  const minOp2 = AluExp.min(a, c);
+  expect(minOp2.evaluate({ c: 2 })).toBe(2);
+});
+
+test("AluOp.Cmpne", () => {
+  expect(AluExp.cmpne(AluExp.i32(3), AluExp.i32(4)).evaluate({})).toBe(1);
+  expect(AluExp.cmpne(AluExp.i32(5), AluExp.i32(5)).evaluate({})).toBe(0);
+
+  expect(AluExp.cmpne(AluExp.f32(3.0), AluExp.f32(4.0)).evaluate({})).toBe(1);
+  expect(AluExp.cmpne(AluExp.f32(2.5), AluExp.f32(2.5)).evaluate({})).toBe(0);
+
+  expect(AluExp.cmpne(AluExp.f32(NaN), AluExp.f32(NaN)).evaluate({})).toBe(1);
+});
+
+test("AluOp.Exp", () => {
+  const e = AluExp.exp(AluExp.f32(3));
+  expect(e.evaluate({})).toBeCloseTo(Math.E ** 3);
+  expect(e.dtype).toBe(DType.Float32);
+
+  const e2 = AluExp.exp(AluExp.f32(0.25));
+  expect(e2.evaluate({})).toBeCloseTo(Math.E ** 0.25);
+});
+
+test("AluOp.Log", () => {
+  const e = AluExp.log(AluExp.f32(8));
+  expect(e.evaluate({})).toBeCloseTo(Math.log(8));
+  expect(e.dtype).toBe(DType.Float32);
+
+  const e2 = AluExp.log(AluExp.f32(0.25));
+  expect(e2.evaluate({})).toBeCloseTo(Math.log(0.25));
+
+  const e3 = AluExp.log(AluExp.f32(-1));
+  expect(e3.evaluate({})).toBeNaN();
+});
+
+test("AluOp.Erf", () => {
+  const e = AluExp.erf(AluExp.f32(1));
+  expect(e.evaluate({})).toBeCloseTo(0.84270079, 5);
+  expect(e.dtype).toBe(DType.Float32);
+
+  const e2 = AluExp.erf(AluExp.f32(0));
+  expect(e2.evaluate({})).toBeCloseTo(0.0, 5);
+
+  const e3 = AluExp.erf(AluExp.f32(-1));
+  expect(e3.evaluate({})).toBeCloseTo(-0.84270079, 5);
+});
+
+test("AluOp.Erfc", () => {
+  const e = AluExp.erfc(AluExp.f32(1));
+  expect(e.evaluate({})).toBeCloseTo(0.15729921, 5);
+  expect(e.dtype).toBe(DType.Float32);
+
+  const e2 = AluExp.erfc(AluExp.f32(100));
+  expect(e2.evaluate({})).toBeCloseTo(0.0, 5);
+
+  const e3 = AluExp.erfc(AluExp.f32(-1));
+  expect(e3.evaluate({})).toBeCloseTo(1.84270079, 5);
+});
+
+test("AluOp.Sqrt", () => {
+  const e = AluExp.sqrt(AluExp.f32(16));
+  expect(e.evaluate({})).toBe(4);
+  expect(e.dtype).toBe(DType.Float32);
+});
+
+test("AluOp.Cast", () => {
+  const e = AluExp.cast(DType.Float32, AluExp.i32(42));
+  expect(e.evaluate({})).toBe(42);
+  expect(e.dtype).toBe(DType.Float32);
+
+  const e2 = AluExp.cast(DType.Int32, AluExp.f32(3.14));
+  expect(e2.evaluate({})).toBe(3);
+  expect(e2.dtype).toBe(DType.Int32);
+
+  const e3 = AluExp.cast(DType.Int32, AluExp.bool(true));
+  expect(e3.evaluate({})).toBe(1);
+  expect(e3.dtype).toBe(DType.Int32);
+
+  const e4 = AluExp.cast(DType.Bool, AluExp.i32(5));
+  expect(e4.evaluate({})).toBe(1);
+  expect(e4.dtype).toBe(DType.Bool);
+
+  const e5 = AluExp.cast(DType.Bool, AluExp.i32(0));
+  expect(e5.evaluate({})).toBe(0);
+  expect(e5.dtype).toBe(DType.Bool);
+
+  // Range of cast should be correct when casting arbitrary int32 to uint32.
+  const e6 = AluExp.cast(DType.Uint32, AluExp.variable(DType.Int32, "x"));
+  expect(e6.min).toBe(0);
+  expect(e6.max).toBeGreaterThanOrEqual(4294967295);
+});
+
+test("AluOp.Bitcast", () => {
+  // Assumes little-endian byte order, which is used in modern browsers.
+  const e = AluExp.bitcast(DType.Float32, AluExp.i32(0x3f800000)); // 1.0 in IEEE 754
+  expect(e.evaluate({})).toBe(1.0);
+  expect(e.dtype).toBe(DType.Float32);
+
+  // Try also bitcasting Infinity and NaN.
+  const e2 = AluExp.bitcast(DType.Int32, AluExp.f32(Infinity));
+  expect(e2.evaluate({})).toBe(0x7f800000); // IEEE 754 representation of Infinity
+  const e3 = AluExp.bitcast(DType.Int32, AluExp.f32(NaN));
+  expect(e3.evaluate({})).toBe(0x7fc00000); // IEEE 754 representation of NaN
+
+  // Cast two's complement integers.
+  const e4 = AluExp.bitcast(DType.Uint32, AluExp.i32(-1));
+  expect(e4.evaluate({})).toBe(0xffffffff); // -1 in two's complement is 0xffffffff in uint32
+
+  // Invalid bitcast types should throw.
+  expect(() => AluExp.bitcast(DType.Bool, AluExp.i32(1))).toThrow(TypeError);
+  expect(() => AluExp.bitcast(DType.Float32, AluExp.bool(true))).toThrow(
+    TypeError,
+  );
+  expect(() => AluExp.bitcast(DType.Int32, AluExp.bool(false))).toThrow(
+    TypeError,
+  );
+  expect(() => AluExp.bitcast(DType.Uint32, AluExp.bool(true))).toThrow(
+    TypeError,
+  );
+  expect(() => AluExp.bitcast(DType.Bool, AluExp.f32(1.0))).toThrow(TypeError);
+});
+
+test("AluOp.BitCount", () => {
+  const x = AluExp.variable(DType.Uint32, "x");
+  const count = AluExp.bitCount(x);
+  expect(count.dtype).toBe(DType.Int32);
+  expect([count.min, count.max]).toEqual([0, 32]);
+  expect(
+    AluExp.bitCount(AluExp.const(DType.Uint32, 0xffffffff)).resolve(),
+  ).toBe(32);
+  expect(() => AluExp.bitCount(AluExp.f32(1))).toThrow(TypeError);
+});
+
+test("AluOp.Threefry2x32", () => {
+  const k0 = AluExp.u32(0);
+  const k1 = AluExp.u32(0);
+  const c0 = AluExp.u32(0);
+  const c1 = AluExp.u32(0);
+  const exp = AluExp.threefry2x32(k0, k1, c0, c1);
+  expect(exp.evaluate({})).toBe((1797259609 ^ 2579123966) >>> 0); // x0 ^ x1
+});
+
+test("AluOp.Idiv", () => {
+  // Make sure that idiv uses truncating division.
+  const e = AluExp.idiv(AluExp.i32(7), AluExp.i32(3));
+  expect(e.evaluate({})).toBe(2);
+
+  const e2 = AluExp.idiv(AluExp.i32(-7), AluExp.i32(3));
+  expect(e2.evaluate({})).toBe(-2);
+  expect(e2.min).toBe(-2);
+  expect(e2.max).toBe(-2);
+});
+
+test("AluOp.Idiv simplification preserves negative residuals", () => {
+  const i = AluExp.special(DType.Int32, "i", 3);
+  const e = AluExp.idiv(
+    AluExp.add(AluExp.mul(i, AluExp.i32(2)), AluExp.i32(-1)),
+    AluExp.i32(2),
+  );
+  const values = [0, 1, 2].map((i) => e.evaluate({ i }));
+  const simplified = e.simplify();
+  const normalize = (x: number) => (Object.is(x, -0) ? 0 : x);
+
+  expect(values.map(normalize)).toEqual([0, 0, 1]);
+  expect(
+    [0, 1, 2].map((i) => simplified.evaluate({ i })).map(normalize),
+  ).toEqual(values.map(normalize));
+});
+
+test("AluOp.Idiv simplification preserves negative denominators", () => {
+  const i = AluExp.special(DType.Int32, "i", 3);
+  const e = AluExp.idiv(
+    AluExp.add(AluExp.mul(i, AluExp.i32(-2)), AluExp.i32(1)),
+    AluExp.i32(-2),
+  );
+  const values = [0, 1, 2].map((i) => e.evaluate({ i }));
+  const simplified = e.simplify();
+  const normalize = (x: number) => (Object.is(x, -0) ? 0 : x);
+
+  expect(values.map(normalize)).toEqual([0, 0, 1]);
+  expect(
+    [0, 1, 2].map((i) => simplified.evaluate({ i })).map(normalize),
+  ).toEqual(values.map(normalize));
+});
+
+test("AluOp.Mod", () => {
+  // Make sure that mod uses the sign of the numerator.
+  const e = AluExp.mod(AluExp.i32(7), AluExp.i32(3));
+  expect(e.evaluate({})).toBe(1);
+
+  const e2 = AluExp.mod(AluExp.i32(-7), AluExp.i32(3));
+  expect(e2.evaluate({})).toBe(-1);
+  expect(e2.min).toBeLessThanOrEqual(-1);
+  expect(e2.max).toBeGreaterThanOrEqual(-1);
+
+  const e3 = AluExp.mod(AluExp.i32(7), AluExp.i32(-3));
+  expect(e3.evaluate({})).toBe(1);
+  expect(e3.min).toBeLessThanOrEqual(1);
+  expect(e3.max).toBeGreaterThanOrEqual(1);
+
+  // Floating point mod also works.
+  const e4 = AluExp.mod(AluExp.f32(5.5), AluExp.f32(-1.7));
+  expect(e4.evaluate({})).toBeCloseTo(0.4);
+});
+
+test("AluOp.Floor", () => {
+  const e = AluExp.floor(AluExp.f32(3.7));
+  expect(e.evaluate({})).toBe(3);
+  expect(e.dtype).toBe(DType.Float32);
+
+  const e2 = AluExp.floor(AluExp.f32(-2.3));
+  expect(e2.evaluate({})).toBe(-3);
+
+  const e3 = AluExp.floor(AluExp.f32(0.0));
+  expect(e3.evaluate({})).toBe(0);
+
+  const e4 = AluExp.floor(AluExp.i32(0));
+  expect(e4.op).toBe(AluOp.Const); // Floor on integers is a no-op
+
+  const e5 = AluExp.floor(AluExp.f32(Infinity));
+  expect(e5.evaluate({})).toBe(Infinity);
+});
+
+test("AluOp.Ceil", () => {
+  const e = AluExp.ceil(AluExp.f32(3.2));
+  expect(e.evaluate({})).toBe(4);
+  expect(e.dtype).toBe(DType.Float32);
+
+  const e2 = AluExp.ceil(AluExp.f32(-2.8));
+  expect(e2.evaluate({})).toBe(-2);
+
+  const e3 = AluExp.ceil(AluExp.f32(0.0));
+  expect(e3.evaluate({})).toBe(0);
+});
+
+test("AluExp.evaluate computes shared subexpressions once", () => {
+  // Each step uses the previous value two or three times, so evaluating every
+  // path through the DAG separately would take about 2.5^24 steps.
+  const depth = 24;
+  let loads = 0;
+  const globals = (gid: number, bufidx: number) => {
+    loads++;
+    return [-1.5, -0.25, 0.5, 2][bufidx];
+  };
+  const x = AluExp.globalIndex(
+    DType.Float32,
+    0,
+    4,
+    AluExp.variable(DType.Int32, "idx"),
+  );
+  let y = x;
+  for (let i = 0; i < depth; i++) {
+    if (i % 2 === 0) {
+      y = AluExp.add(AluExp.sin(y), AluExp.cos(y));
+    } else {
+      const sq = AluExp.mul(y, y);
+      y = AluExp.where(AluExp.cmplt(y, AluExp.f32(1)), sq, AluExp.sub(y, sq));
+    }
+  }
+
+  for (let idx = 0; idx < 4; idx++) {
+    let r = globals(0, idx);
+    for (let i = 0; i < depth; i++) {
+      if (i % 2 === 0) r = Math.sin(r) + Math.cos(r);
+      else r = r < 1 ? r * r : r - r * r;
+    }
+    loads = 0;
+    expect(y.evaluate({ idx }, globals)).toBeCloseTo(r, 10);
+    expect(loads).toBe(1);
+  }
+});
+
+test("AluExp.evaluate does not evaluate the untaken where branch", () => {
+  const globals = (gid: number, bufidx: number) => {
+    if (bufidx !== 0) throw new Error("out of bounds: " + bufidx);
+    return 5;
+  };
+  const idx = AluExp.variable(DType.Int32, "idx");
+  const load = AluExp.globalIndex(DType.Int32, 0, 1, idx);
+  const e = AluExp.where(
+    AluExp.cmplt(idx, AluExp.i32(1)),
+    AluExp.add(load, load),
+    AluExp.i32(-1),
+  );
+  expect(e.evaluate({ idx: 0 }, globals)).toBe(10);
+  expect(e.evaluate({ idx: 3 }, globals)).toBe(-1);
+});

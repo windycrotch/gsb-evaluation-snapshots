@@ -1,0 +1,45 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+
+  "buildCommand": "( cd website && pnpm check && pnpm lint && pnpm build ) && pnpm run docs && cp -r docs/ website/build/docs",
+  "outputDirectory": "website/build",
+  "installCommand": "pnpm install --frozen-lockfile && pnpm build",
+
+  "cleanUrls": true,
+  "redirects": [
+    {
+      "source": "/docs",
+      "destination": "/docs/"
+    }
+  ],
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": "/200"
+    }
+  ],
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        {
+          "key": "Cross-Origin-Opener-Policy",
+          "value": "same-origin"
+        },
+        {
+          "key": "Cross-Origin-Embedder-Policy",
+          "value": "require-corp"
+        }
+      ]
+    },
+    {
+      "source": "/_app/immutable/(.*)",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=31536000, immutable"
+        }
+      ]
+    }
+  ]
+}

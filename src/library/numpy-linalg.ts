@@ -1,0 +1,484 @@
+import * as lax from "./lax";
+import { triangularSolve } from "./lax-linalg";
+import * as np from "./numpy";
+import { Array, ArrayLike, fudgeArray } from "../frontend/array";
+import { promoteToFloat } from "../frontend/core";
+import { checkAxis, checkSquare, generalBroadcast, range } from "../utils";
+
+/**
+ * Compute the Cholesky decomposition of a (batched) positive-definite matrix.
+ *
+ * This is like `jax.lax.linalg.cholesky()`, except with an option to symmetrize
+ * the input matrix, which is on by default.
+ */
+export function cholesky(
+  a: ArrayLike,
+  {
+    upper = false,
+    symmetrizeInput = true,
+  }: {
+    upper?: boolean;
+    symmetrizeInput?: boolean;
+  } = {},
+): Array {
+  a = fudgeArray(a);
+  checkSquare("cholesky", a.shape);
+  if (symmetrizeInput) {
+    a = a.ref.add(np.matrixTranspose(a)).mul(0.5);
+  }
+  return lax.linalg.cholesky(a, { upper });
+}
+
+/**
+ * Compute the cross-product of two 3D vectors.
+ *
+ * This is a simpler and less flexible version of `jax.numpy.cross()`.
+ * Both inputs must have size 3 along the specified axis.
+ */
+export function cross(x1: ArrayLike, x2: ArrayLike, axis: number = -1): Array {
+  const a1 = checkAxis(axis, np.ndim(x1));
+  const a2 = checkAxis(axis, np.ndim(x2));
+  if (np.shape(x1)[a1] !== 3)
+    throw new Error(
+      `linalg.cross: x1 must have size 3 along axis ${axis}, got ${np.shape(x1)[a1]}`,
+    );
+  if (np.shape(x2)[a2] !== 3)
+    throw new Error(
+      `linalg.cross: x2 must have size 3 along axis ${axis}, got ${np.shape(x2)[a2]}`,
+    );
+  return np.cross(x1, x2, { axis });
+}
+
+/** Compute the determinant of a square matrix (batched). */
+export function det(a: ArrayLike): Array {
+  a = fudgeArray(a);
+  const n = checkSquare("det", a.shape);
+  const [lu, pivots, permutation] = lax.linalg.lu(a);
+  permutation.dispose();
+
+  const parity = pivots.notEqual(np.arange(n)).astype(np.int32).sum(-1).mod(2);
+  const sign = parity.mul(-2).add(1); // (-1)^parity
+  const diag = lu.diagonal(0, -1, -2);
+  return np.prod(diag, -1).mul(sign);
+}
+
+export { diagonal } from "./numpy";
+
+type EighOpts = {
+  symmetrizeInput?: boolean;
+};
+
+/**
+ * Compute eigenvalues and eigenvectors of real symmetric matrices.
+ *
+ * The returned eigenvalues are sorted in ascending order, and eigenvectors are
+ * returned as columns.
+ */
+export function eigh(a: ArrayLike, opts?: EighOpts): [Array, Array] {
+  const [vectors, values] = lax.linalg.eigh(a, {
+    symmetrizeInput: opts?.symmetrizeInput,
+  });
+  return [values, vectors];
+}
+
+/** Compute eigenvalues of real symmetric matrices. */
+export function eigvalsh(a: ArrayLike, opts?: EighOpts): Array {
+  const [vectors, values] = lax.linalg.eigh(a, {
+    symmetrizeInput: opts?.symmetrizeInput,
+  });
+  vectors.dispose();
+  return values;
+}
+
+/** @inline */
+type SvdOpts = {
+  fullMatrices?: boolean;
+  computeUv?: boolean;
+};
+
+export function svd(a: ArrayLike, opts: SvdOpts & { computeUv: false }): Array;
+export function svd(a: ArrayLike, opts?: SvdOpts): [Array, Array, Array];
+/**
+ * Singular value decomposition of real matrices.
+ *
+ * This currently computes a thin SVD via symmetric eigendecomposition. It
+ * supports `fullMatrices=false`; `fullMatrices=true` is accepted only for
+ * square inputs where thin and full output shapes match.
+ */
+export function svd(
+  a: ArrayLike,
+  opts?: SvdOpts,
+): [Array, Array, Array] | Array {
+  const result = lax.linalg.svd(a, {
+    fullMatrices: opts?.fullMatrices,
+    computeUv: opts?.computeUv,
+  });
+  if (opts?.computeUv === false) return result as Array;
+  return result as [Array, Array, Array];
+}
+
+/** Compute singular values of real matrices. */
+export function svdvals(a: ArrayLike): Array {
+  return lax.linalg.svd(a, { computeUv: false }) as Array;
+}
+
+/** Compute the inverse of a square matrix (batched). */
+export function inv(a: ArrayLike): Array {
+  a = fudgeArray(a);
+  const n = checkSquare("inv", a.shape);
+  return solve(a, np.eye(n, undefined, { dtype: a.dtype }));
+}
+
+/**
+ * Return the least-squares solution to a linear equation.
+ *
+ * For overdetermined systems, this finds the `x` that minimizes `norm(ax - b)`.
+ * For underdetermined systems, this finds the minimum-norm solution for `x`.
+ *
+ * This currently uses Cholesky decomposition to solve the normal equations,
+ * under the hood. The method is not as robust as QR or SVD.
+ *
+ * @param a coefficient matrix of shape `(M, N)`
+ * @param b right-hand side of shape `(M,)` or `(M, K)`
+ * @return least-squares solution of shape `(N,)` or `(N, K)`
+ */
+export function lstsq(a: ArrayLike, b: ArrayLike): Array {
+  a = fudgeArray(a);
+  b = fudgeArray(b);
+  if (a.ndim !== 2)
+    throw new Error(`lstsq: 'a' must be a 2D array, got ${a.aval}`);
+  const [m, n] = a.shape;
+  if (b.shape[0] !== m)
+    throw new Error(
+      `lstsq: leading dimension of 'b' must match number of rows of 'a', got ${b.aval}`,
+    );
+  const at = np.matrixTranspose(a.ref);
+  if (m <= n) {
+    // Underdetermined or square system: A.T @ (A @ A.T)^-1 @ B
+    const aat = np.matmul(a, at.ref); // A @ A.T, shape (M, M)
+    const l = cholesky(aat, { symmetrizeInput: false }); // L @ L.T = A @ A.T
+    const lb = triangularSolve(l.ref, b, { leftSide: true, lower: true }); // L^-1 @ B
+    const llb = triangularSolve(l, lb, {
+      leftSide: true,
+      lower: true,
+      transposeA: true,
+    }); // (A @ A.T)^-1 @ B
+    return np.matmul(at, llb); // A.T @ (A @ A.T)^-1 @ B
+  } else {
+    // Overdetermined system: (A.T @ A)^-1 @ A.T @ B
+    const ata = np.matmul(at.ref, a); // A.T @ A, shape (N, N)
+    const l = cholesky(ata, { symmetrizeInput: false }); // L @ L.T = A.T @ A
+    const atb = np.matmul(at, b); // A.T @ B
+    const lb = triangularSolve(l.ref, atb, { leftSide: true, lower: true }); // L^-1 @ A.T @ B
+    const llb = triangularSolve(l, lb, {
+      leftSide: true,
+      lower: true,
+      transposeA: true,
+    }); // (A.T @ A)^-1 @ A.T @ B
+    return llb;
+  }
+}
+
+export { matmul } from "./numpy";
+
+/** Raise a square matrix to an integer power, via repeated squarings. */
+export function matrixPower(a: ArrayLike, n: number): Array {
+  if (!Number.isInteger(n))
+    throw new Error(`matrixPower: exponent must be an integer, got ${n}`);
+  a = fudgeArray(a);
+  const m = checkSquare("matrixPower", a.shape);
+  if (n === 0) {
+    const dtype = a.dtype;
+    a.dispose();
+    return np.broadcastTo(np.eye(m, undefined, { dtype }), a.shape);
+  }
+  if (n < 0) {
+    a = inv(a);
+    n = -n;
+  }
+  let result: Array | null = null;
+  let a2k = a; // a^(2^k)
+  for (let k = 0; n; k++) {
+    if (k > 0) a2k = np.matmul(a2k.ref, a2k);
+    if (n % 2 === 1)
+      result = result === null ? a2k.ref : np.matmul(result, a2k.ref);
+    n = Math.floor(n / 2);
+  }
+  a2k.dispose();
+  return result!;
+}
+
+export { matrixTranspose } from "./numpy";
+
+/**
+ * Compute the dot product of two or more arrays in a single function call,
+ * while automatically selecting the fastest evaluation order.
+ *
+ * If the first argument is 1D, it is treated as a row vector. If the last
+ * argument is 1D, it is a column vector. All other intermediate arguments
+ * must be 2D matrices.
+ *
+ * Equivalent to `jax.numpy.einsum()` with the appropriate subscripts.
+ */
+export function multiDot(arrays: Array[]): Array {
+  if (arrays.length < 2) throw new Error("Expected at least two arrays");
+  if (arrays[0].ndim === 1) {
+    const [first, ...rest] = arrays;
+    return multiDot([first.reshape([1, -1]), ...rest]).slice(0);
+  }
+  if (arrays[arrays.length - 1].ndim === 1) {
+    const [rest, last] = [arrays.slice(0, -1), arrays[arrays.length - 1]];
+    return multiDot([...rest, last.reshape([-1, 1])]).slice([], 0);
+  }
+  for (let i = 0; i < arrays.length; i++) {
+    if (arrays[i].ndim !== 2) {
+      throw new Error(
+        `multiDot: expected 2D, got ${arrays[i].aval} at index ${i}`,
+      );
+    }
+  }
+  const einsumArgs: (Array | number[])[] = []; // Alternate arrays and indices
+  for (let i = 0; i < arrays.length; i++) {
+    einsumArgs.push(arrays[i], [i, i + 1]);
+  }
+  return np.einsum(...einsumArgs);
+}
+
+export { outer } from "./numpy";
+
+/** Return sign and natural logarithm of the determinant of `a`. */
+export function slogdet(a: ArrayLike): [Array, Array] {
+  a = fudgeArray(a);
+  const n = checkSquare("slogdet", a.shape);
+  const [lu, pivots, permutation] = lax.linalg.lu(a);
+  permutation.dispose();
+
+  let parity = pivots.notEqual(np.arange(n)).astype(np.int32).sum(-1);
+  const diag = lu.diagonal(0, -1, -2);
+  parity = parity.add(diag.ref.less(0).astype(np.int32).sum(-1)).mod(2);
+  const logabsdet = np.log(np.abs(diag)).sum(-1);
+  const sign = parity.mul(-2).add(1); // (-1)^parity
+  return [sign, logabsdet];
+}
+
+/**
+ * Solve a linear system of equations.
+ *
+ * This solves a (batched) linear system of equations `a @ x = b` for `x` given
+ * `a` and `b`. If `a` is singular, this will return `nan` or `inf` values.
+ *
+ * @param a - Coefficient matrix of shape `(..., N, N)`.
+ * @param b - Values of shape `(N,)` or `(..., N, M)`.
+ * @returns Solution `x` of shape `(..., N)` or `(..., N, M)`.
+ */
+export function solve(a: ArrayLike, b: ArrayLike): Array {
+  a = fudgeArray(a);
+  b = fudgeArray(b);
+  const n = checkSquare("solve", a.shape);
+  if (b.ndim === 0) throw new Error(`solve: b cannot be scalar`);
+  const bIs1d = b.ndim === 1;
+  if (bIs1d) {
+    b = b.reshape([...b.shape, 1]); // We'll remove this at the end.
+  }
+  if (b.shape[b.ndim - 2] !== n) {
+    throw new Error(
+      `solve: leading dimension of b must match size of a, got a=${a.aval}, b=${b.aval}`,
+    );
+  }
+  const m = b.shape[b.ndim - 1];
+  const batchDims = generalBroadcast(
+    a.shape.slice(0, -2),
+    b.shape.slice(0, -2),
+  );
+  a = np.broadcastTo(a, [...batchDims, n, n]);
+  b = np.broadcastTo(b, [...batchDims, n, m]);
+
+  // Compute the LU decomposition with partial pivoting.
+  const [lu, pivots, permutation] = lax.linalg.lu(a);
+  pivots.dispose();
+
+  // L @ U @ x = P @ b
+  const P = np
+    .arange(n)
+    .equal(permutation.reshape([...permutation.shape, 1]))
+    .astype(b.dtype);
+  const LPb = triangularSolve(lu.ref, np.matmul(P, b), {
+    leftSide: true,
+    lower: true,
+    unitDiagonal: true,
+  });
+  let x = triangularSolve(lu, LPb, { leftSide: true, lower: false });
+  if (bIs1d) {
+    x = np.squeeze(x, -1);
+  }
+  return x;
+}
+
+export { tensordot } from "./numpy";
+export { trace } from "./numpy";
+export { vecdot } from "./numpy";
+
+/**
+ * Compute the matrix or vector norm of an array.
+ *
+ * The behavior depends on the `axis` argument, matching `jax.numpy.linalg.norm()`:
+ * - If `axis` is null and `ord` is null, computes the 2-norm of the flattened
+ *   array (any rank is allowed).
+ * - If `axis` is null and `ord` is given, the input must be 1D (vector norm)
+ *   or 2D (matrix norm).
+ * - If `axis` is an integer, computes a vector norm over that axis.
+ * - If `axis` is a pair of integers, computes a matrix norm over those axes.
+ *
+ * @param x - Input array.
+ * @param ord - Order of the norm (default: 2-norm for vectors, Frobenius norm for matrices).
+ * @param axis - Axis or pair of axes to reduce over (default: all axes).
+ * @param keepdims - Whether to keep reduced dimensions as size 1.
+ * @returns The norm of `x`, reduced over the given axes.
+ */
+export function norm(
+  x: ArrayLike,
+  {
+    ord = null,
+    axis = null,
+    keepdims = false,
+  }: {
+    ord?: number | "f" | "fro" | "nuc" | null;
+    axis?: number | number[] | null;
+    keepdims?: boolean;
+  } = {},
+): Array {
+  x = fudgeArray(promoteToFloat(x));
+  const ndim = x.ndim;
+
+  let axes: number[];
+  if (axis === null) {
+    if (ord === null) {
+      // NumPy allows arbitrary rank inputs when `ord` is not specified.
+      return np.sqrt(np.sum(np.square(x), null, { keepdims }));
+    }
+    axes = range(ndim);
+  } else if (typeof axis === "number") {
+    axes = [checkAxis(axis, ndim)];
+  } else {
+    axes = axis.map((a) => checkAxis(a, ndim));
+  }
+
+  if (axes.length === 1) {
+    if (typeof ord === "string")
+      throw new Error(`norm: invalid order '${ord}' for vector norm`);
+    return vectorNorm(x, { ord: ord ?? 2, axis: axes[0], keepdims });
+  } else if (axes.length === 2) {
+    let [rowAxis, colAxis] = axes;
+    if (rowAxis === colAxis)
+      throw new Error(`norm: duplicate axes ${JSON.stringify(axis)}`);
+    if (ord === null || ord === "f" || ord === "fro") {
+      return np.sqrt(np.sum(np.square(x), axes, { keepdims }));
+    } else if (ord === 1 || ord === -1) {
+      const sums = np.sum(np.abs(x), rowAxis, { keepdims });
+      if (!keepdims && colAxis > rowAxis) colAxis -= 1;
+      return ord === 1
+        ? np.max(sums, colAxis, { keepdims })
+        : np.min(sums, colAxis, { keepdims });
+    } else if (ord === Infinity || ord === -Infinity) {
+      const sums = np.sum(np.abs(x), colAxis, { keepdims });
+      if (!keepdims && rowAxis > colAxis) rowAxis -= 1;
+      return ord === Infinity
+        ? np.max(sums, rowAxis, { keepdims })
+        : np.min(sums, rowAxis, { keepdims });
+    } else if (ord === 2 || ord === -2 || ord === "nuc") {
+      // Norms defined in terms of singular values.
+      let y = np.moveaxis(x, rowAxis, -1);
+      y = np.moveaxis(y, colAxis > rowAxis ? colAxis - 1 : colAxis, -1);
+      const s = svdvals(y);
+      const result =
+        ord === 2 ? np.max(s, -1) : ord === -2 ? np.min(s, -1) : np.sum(s, -1);
+      return keepdims ? np.expandDims(result, axes) : result;
+    } else {
+      throw new Error(`norm: invalid order '${ord}' for matrix norm`);
+    }
+  } else {
+    throw new Error(
+      `norm: axis must be null, an integer, or a pair of integers, got ${JSON.stringify(axis)}`,
+    );
+  }
+}
+
+/**
+ * Compute the vector norm of an array.
+ *
+ * @param x - Input array.
+ * @param ord - Order of the norm (default 2). Supports `Infinity`, `-Infinity`, `0`, or any real number.
+ * @param axis - Axis/axes to reduce over (default: all axes).
+ * @param keepdims - Whether to keep reduced dimensions as size 1.
+ * @returns The norm of `x`, reduced over the given axes.
+ */
+export function vectorNorm(
+  x: ArrayLike,
+  {
+    ord = 2,
+    axis = null,
+    keepdims = false,
+  }: {
+    ord?: number;
+    axis?: number | number[] | null;
+    keepdims?: boolean;
+  } = {},
+): Array {
+  x = fudgeArray(x);
+  const ax = axis ?? null;
+
+  if (ord === Infinity) {
+    return np.max(np.abs(x), ax, { keepdims });
+  } else if (ord === -Infinity) {
+    return np.min(np.abs(x), ax, { keepdims });
+  } else if (ord === 0) {
+    return x.notEqual(0).astype(x.dtype).sum(ax, { keepdims });
+  } else {
+    return np.power(np.power(np.abs(x), ord).sum(ax, { keepdims }), 1 / ord);
+  }
+}
+
+/**
+ * Calculates the matrix norm of a matrix or a stack of matrices.
+ * @param x - Input Array (..., M, N)
+ * @param ord - Order of the norm (default "fro").
+ * @param keepdims - Whether to keep reduced dimensions as size 1 or collapse axes.
+ * @returns Matrix norm of input array. If `keepdims` is `true`, the result has shape (..., 1, 1). Otherwise, it has shape (...,).
+ */
+export function matrixNorm(
+  x: ArrayLike,
+  {
+    ord = "fro",
+    keepdims = false,
+  }: { ord?: number | "fro" | "nuc"; keepdims?: boolean } = {},
+): Array {
+  x = fudgeArray(x);
+  if (x.ndim < 2) {
+    throw new Error(
+      `Input must be at least 2-dimensional. Recieved ${x.ndim}-dimensional array`,
+    );
+  }
+  if (ord === "fro") {
+    return np.sqrt(np.sum(np.square(x), [-2, -1], { keepdims }));
+  } else if (ord === "nuc") {
+    throw new Error("Order nuc is not supported");
+  } else if (ord === -1) {
+    return np.min(np.sum(np.abs(x), [-2], { keepdims }), [-1], { keepdims });
+  } else if (ord === 1) {
+    return np.max(np.sum(np.abs(x), [-2], { keepdims }), [-1], { keepdims });
+  } else if (ord === -2) {
+    throw new Error("Order -2 is not supported");
+  } else if (ord === 2) {
+    throw new Error("Order 2 is not supported");
+  } else if (ord === -Infinity) {
+    return np.min(np.sum(np.abs(x), [-1], { keepdims }), [keepdims ? -2 : -1], {
+      keepdims,
+    });
+  } else if (ord === Infinity) {
+    return np.max(np.sum(np.abs(x), [-1], { keepdims }), [keepdims ? -2 : -1], {
+      keepdims,
+    });
+  } else {
+    throw new Error(`Order ${ord} is not supported`);
+  }
+}

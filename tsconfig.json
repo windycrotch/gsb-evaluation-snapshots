@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "target": "ESNext",
+    "lib": ["ESNext", "DOM", "DOM.AsyncIterable", "ESNext.Disposable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "paths": {
+      "@jax-js/jax": ["."]
+    },
+    "types": ["@webgpu/types"],
+    "noEmit": true,
+    "skipLibCheck": true
+  },
+  "exclude": ["**/node_modules", "**/*.config.js", "**/dist", "website"]
+}

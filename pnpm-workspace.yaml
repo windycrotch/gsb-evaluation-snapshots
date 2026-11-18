@@ -1,0 +1,17 @@
+packages:
+  - packages/*
+  - website
+
+ignoreWorkspaceRootCheck: true
+minimumReleaseAge: 0
+
+allowBuilds:
+  "@jax-js/jax": true
+  "@tailwindcss/oxide": true
+  core-js: true
+  esbuild: true
+  msw: true
+  protobufjs: true
+
+overrides:
+  "@tensorflow/tfjs-core>@webgpu/types": "^0.1.68"

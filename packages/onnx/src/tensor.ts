@@ -1,0 +1,296 @@
+// Tensor conversion utilities for ONNX to jax-js.
+
+import { DType, numpy as np } from "@jax-js/jax";
+import type { TensorProto } from "onnx-buf";
+import { TensorProto_DataType } from "onnx-buf";
+
+export type Operand = np.Array | StaticArray;
+
+/**
+ * These arrays can be calculated from input shapes as constant; they live on
+ * CPU and don't participate in the tracing.
+ *
+ * We implement a limited subset of operations used by ONNX graphs for shape
+ * manipulation within the graph. This allows us to make more graphs traceable
+ * by JIT when operations like `Reshape` depend on the _values_ of operands,
+ * and those operands are `StaticArray` instead of `np.Array`.
+ *
+ * Int32 holds int32/bool values. Float32 is used for small shape-control
+ * constants like Resize scales that need to stay readable during tracing.
+ */
+export type StaticArrayData =
+  | Int32Array<ArrayBuffer>
+  | Float32Array<ArrayBuffer>;
+
+export class StaticArray {
+  readonly data: StaticArrayData;
+  readonly shape: number[];
+  readonly dtype: DType;
+
+  constructor(data: number[] | StaticArrayData, shape: number[], dtype: DType) {
+    this.data =
+      dtype === np.float32 ? new Float32Array(data) : new Int32Array(data);
+    this.shape = shape;
+    this.dtype = dtype;
+  }
+
+  toJax() {
+    return np.array(this.data, { shape: this.shape, dtype: this.dtype });
+  }
+
+  /**
+   * Broadcast this array to a new shape, similar to np.broadcastTo.
+   * Supports expanding dims of size 1 and prepending new dims at front.
+   */
+  broadcastTo(newShape: number[]): StaticArray {
+    if (
+      this.shape.length === newShape.length &&
+      this.shape.every((v, i) => v === newShape[i])
+    ) {
+      return this; // No broadcasting needed
+    }
+
+    // Pad shape with 1s at the front to match newShape length
+    const padded = [
+      ...new Array(newShape.length - this.shape.length).fill(1),
+      ...this.shape,
+    ];
+
+    // Validate broadcast compatibility
+    for (let i = 0; i < newShape.length; i++) {
+      if (padded[i] !== 1 && padded[i] !== newShape[i]) {
+        throw new Error(
+          `Cannot broadcast shape [${this.shape}] to [${newShape}]`,
+        );
+      }
+    }
+
+    // Calculate strides for the padded shape (0 for broadcast dims)
+    const strides: number[] = new Array(newShape.length);
+    let stride = 1;
+    for (let i = newShape.length - 1; i >= 0; i--) {
+      strides[i] = padded[i] === 1 ? 0 : stride;
+      stride *= padded[i];
+    }
+
+    // Build the new data array
+    const newSize = newShape.reduce((a, b) => a * b, 1);
+    const newData =
+      this.dtype === np.float32
+        ? new Float32Array(newSize)
+        : new Int32Array(newSize);
+
+    for (let i = 0; i < newSize; i++) {
+      // Convert flat index to multi-dimensional indices
+      let remaining = i;
+      let srcIndex = 0;
+      for (let d = 0; d < newShape.length; d++) {
+        const size = newShape.slice(d + 1).reduce((a, b) => a * b, 1);
+        const idx = Math.floor(remaining / size);
+        remaining = remaining % size;
+        srcIndex += idx * strides[d];
+      }
+      newData[i] = this.data[srcIndex];
+    }
+
+    return new StaticArray(newData, newShape, this.dtype);
+  }
+}
+
+export function operandToJax(op: Operand): np.Array {
+  return op instanceof StaticArray ? op.toJax() : op;
+}
+
+export function operandRef(op: Operand): Operand {
+  return op instanceof StaticArray ? op : op.ref;
+}
+
+export function operandToJs(op: Operand): any {
+  return op instanceof StaticArray
+    ? makeShapedJsArray(op.data, op.shape)
+    : op.js();
+}
+
+function makeShapedJsArray(data: StaticArrayData, shape: number[]): any {
+  if (shape.length === 0) return data[0];
+  const ret = [];
+  for (let i = 0; i < shape[0]; i++) {
+    const subShape = shape.slice(1);
+    const subSize = subShape.reduce((a, b) => a * b, 1);
+    const subData = data.slice(i * subSize, (i + 1) * subSize);
+    ret.push(makeShapedJsArray(subData, subShape));
+  }
+  return ret;
+}
+
+/** Convert an ONNX data type to a jax-js DType. */
+export function onnxDtypeToJax(onnxType: TensorProto_DataType): DType {
+  switch (onnxType) {
+    case TensorProto_DataType.FLOAT:
+      return np.float32;
+    case TensorProto_DataType.INT32:
+      return np.int32;
+    case TensorProto_DataType.INT64: // int64 is used in shapes, we map to int32
+      return np.int32;
+    case TensorProto_DataType.UINT64: // uint64 may be used, we map to uint32
+      return np.uint32;
+    case TensorProto_DataType.FLOAT16:
+      return np.float16;
+    case TensorProto_DataType.DOUBLE:
+      return np.float64;
+    case TensorProto_DataType.BOOL:
+      return np.bool;
+    case TensorProto_DataType.UINT32:
+      return np.uint32;
+    case TensorProto_DataType.UINT8:
+    case TensorProto_DataType.INT8:
+    case TensorProto_DataType.UINT16:
+    case TensorProto_DataType.INT16:
+    default:
+      throw new Error(`Unsupported ONNX dtype: ${onnxType}`);
+  }
+}
+
+/** Parse raw tensor data based on ONNX data type. */
+function parseRawData(
+  rawData: Uint8Array<ArrayBuffer>,
+  dataType: TensorProto_DataType,
+):
+  | Float32Array<ArrayBuffer>
+  | Int32Array<ArrayBuffer>
+  | Uint32Array<ArrayBuffer>
+  | Float64Array<ArrayBuffer>
+  | Float16Array<ArrayBuffer> {
+  const buffer = rawData.buffer.slice(
+    rawData.byteOffset,
+    rawData.byteOffset + rawData.byteLength,
+  );
+
+  switch (dataType) {
+    case TensorProto_DataType.FLOAT:
+      return new Float32Array(buffer);
+    case TensorProto_DataType.INT32:
+      return new Int32Array(buffer);
+    case TensorProto_DataType.UINT32:
+      return new Uint32Array(buffer);
+    case TensorProto_DataType.DOUBLE:
+      return new Float64Array(buffer);
+    case TensorProto_DataType.FLOAT16:
+      return new Float16Array(buffer);
+    case TensorProto_DataType.INT64: {
+      // INT64 stored as 8 bytes per element, convert to Int32
+      // Clamp to INT32 range to avoid overflow issues
+      const i64 = new BigInt64Array(buffer);
+      const INT32_MAX = BigInt(2147483647);
+      const INT32_MIN = BigInt(-2147483648);
+      return new Int32Array(
+        Array.from(i64, (v) => {
+          if (v > INT32_MAX) return Number(INT32_MAX);
+          if (v < INT32_MIN) return Number(INT32_MIN);
+          return Number(v);
+        }),
+      );
+    }
+    case TensorProto_DataType.UINT64: {
+      // UINT64 stored as 8 bytes per element, convert to Uint32
+      // Clamp to UINT32 range to avoid overflow issues
+      const u64 = new BigUint64Array(buffer);
+      const UINT32_MAX = BigInt(4294967295);
+      return new Uint32Array(
+        Array.from(u64, (v) =>
+          v > UINT32_MAX ? Number(UINT32_MAX) : Number(v),
+        ),
+      );
+    }
+    case TensorProto_DataType.BOOL: {
+      // Bool is stored as 1 byte per element
+      return new Int32Array(Array.from(rawData, (v) => (v ? 1 : 0)));
+    }
+    case TensorProto_DataType.INT8: {
+      const i8 = new Int8Array(buffer);
+      return new Int32Array(i8);
+    }
+    case TensorProto_DataType.UINT8: {
+      return new Int32Array(rawData);
+    }
+    case TensorProto_DataType.INT16: {
+      const i16 = new Int16Array(buffer);
+      return new Int32Array(i16);
+    }
+    case TensorProto_DataType.UINT16: {
+      const u16 = new Uint16Array(buffer);
+      return new Int32Array(u16);
+    }
+    default:
+      throw new Error(`Unsupported raw data type: ${dataType}`);
+  }
+}
+
+/** Convert an ONNX TensorProto to an operand. */
+export function tensorToOperand(tensor: TensorProto): Operand {
+  const shape = tensor.dims.map(Number);
+  const dtype = onnxDtypeToJax(tensor.dataType);
+
+  // Determine data source and convert
+  let data:
+    | Float32Array<ArrayBuffer>
+    | Int32Array<ArrayBuffer>
+    | Uint32Array<ArrayBuffer>
+    | Float64Array<ArrayBuffer>
+    | Float16Array<ArrayBuffer>;
+
+  if (tensor.rawData.length > 0) {
+    // Most common: raw binary data
+    data = parseRawData(tensor.rawData, tensor.dataType);
+  } else if (tensor.floatData.length > 0) {
+    data = Float32Array.from(tensor.floatData);
+  } else if (tensor.int32Data.length > 0) {
+    data = Int32Array.from(tensor.int32Data);
+  } else if (tensor.doubleData.length > 0) {
+    data = Float64Array.from(tensor.doubleData);
+  } else if (tensor.int64Data.length > 0) {
+    // We don't support int64 or uint64 natively, convert to int32/uint32.
+    // Clamp to INT32 range to avoid overflow issues.
+    const INT32_MAX = BigInt(2147483647);
+    const INT32_MIN = BigInt(-2147483648);
+    data = Int32Array.from(
+      tensor.int64Data.map((v) => {
+        if (v > INT32_MAX) return Number(INT32_MAX);
+        if (v < INT32_MIN) return Number(INT32_MIN);
+        return Number(v);
+      }),
+    );
+  } else if (tensor.uint64Data.length > 0) {
+    // Clamp to UINT32 range to avoid overflow issues.
+    const UINT32_MAX = BigInt(4294967295);
+    data = Uint32Array.from(
+      tensor.uint64Data.map((v) =>
+        v > UINT32_MAX ? Number(UINT32_MAX) : Number(v),
+      ),
+    );
+  } else {
+    // Empty tensor or scalar with no data
+    if (shape.length === 0 || shape.reduce((a, b) => a * b, 1) === 0) {
+      // Return empty array with correct shape
+      return np.zeros(shape.length === 0 ? [] : shape, { dtype });
+    }
+    throw new Error(`Tensor ${tensor.name} has no data`);
+  }
+
+  if (
+    (dtype === np.int32 || dtype === np.bool) &&
+    data instanceof Int32Array &&
+    data.length < 16
+  ) {
+    return new StaticArray(data, shape, dtype);
+  }
+  if (
+    dtype === np.float32 &&
+    data instanceof Float32Array &&
+    data.length < 16
+  ) {
+    return new StaticArray(data, shape, dtype);
+  }
+
+  return np.array(data, { shape, dtype });
+}
