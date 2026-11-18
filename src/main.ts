@@ -54,6 +54,14 @@ life.animator = animator;
 const afterFrameQueue: (() => void)[] = [];
 const afterFrame = (fn: () => void) => afterFrameQueue.push(fn);
 const shutters = new Shutters({ camera, renderer, post, scene, afterFrame });
+// While the centre panel is covered (wings shut, including a degraded close), its story points and
+// their audio focus must be unreachable; opening the wings restores them.
+shutters.onCover = (covering) => {
+  if (covering) {
+    if (ui.current) ui.closeStory(); // also runs onStoryClose -> sound.focus(null)
+    else sound.focus(null);
+  }
+};
 
 const ui = new UI({
   root: document.getElementById('ui')!, camera, renderer, post, scene,

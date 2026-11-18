@@ -186,6 +186,9 @@ body.reading .zoom { right: calc(var(--story-w) + 2 * var(--margin)); }
 .shutters .face { position: absolute; inset: 0; backface-visibility: hidden; -webkit-backface-visibility: hidden; overflow: hidden; }
 .shutters .face.back { transform: rotateY(180deg); }
 .shutters .face canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+/* degraded exterior (stroke data missing or failed): plain backs get a thin chalk key line,
+   so the fallback is visible rather than indistinguishable from a blank panel */
+.shutters.no-exterior .face.front canvas { outline: 1px solid rgba(214, 200, 168, 0.5); outline-offset: -1px; }
 
 /* ---------- tablets and phones: the story is a sheet at the foot of the screen ---------- */
 @media (max-width: 768px) {

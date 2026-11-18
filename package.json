@@ -16,6 +16,8 @@
     "preview": "vite preview",
     "typecheck": "tsc -b",
     "check": "npm run typecheck && npm run build",
+    "test:shutters": "node --experimental-strip-types --test tests/shutters.test.ts",
+    "test": "npm run test:shutters",
     "prepare-sources": "node tools/prepare.ts",
     "paint": "node tools/paint.ts",
     "deploy": "cf deploy"

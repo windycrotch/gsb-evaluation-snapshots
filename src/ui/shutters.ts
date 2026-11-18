@@ -3,41 +3,47 @@
 // stroke data; the closed triptych stays on the board and can be explored like the rest.
 // A shutter's back face is a capture of its freshly painted wing, so when it opens again it
 // lands exactly on the live painting underneath.
+//
+// All interleaving rules live in ShutterMachine (shutterMachine.ts): this DOM layer owns only
+// the hinge geometry, the wing captures and the WebGL exterior painting. The swing duration
+// (SWING_MS) and the hinge math below are unchanged, as is the front (interior) paint path.
 import { ExteriorPainter, EXT_W, EXT_H, EXT_SPLIT } from '../engine/exteriorPainter.ts';
-import { WORLD_W, WORLD_H } from '../world.ts';
+import { WORLD_W, WORLD_H, GROUND } from '../world.ts';
 import type { Rect } from '../world.ts';
 import type { Camera } from '../engine/camera.ts';
 import type { Post } from '../engine/post.ts';
 import type { Renderer } from '../engine/renderer.ts';
 import type { Scene } from '../scene.ts';
+import { ShutterMachine, ease, SWING_MS } from './shutterMachine.ts';
+import type { FrameClock, ShutterState, ExteriorStatus } from './shutterMachine.ts';
 
-const SWING_MS = 2600;
-const ease = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
+export { SWING_MS };
 
 export class Shutters {
   camera: Camera;
   renderer: Renderer;
   post: Post;
   afterFrame: (fn: () => void) => void; // runs fn right after the next frame is drawn
-  state: 'open' | 'closing' | 'closed' | 'opening';
+  machine: ShutterMachine;
   C: Rect; // the centre panel, inside the frame
   L: { x0: number; x1: number }; // the wings' spans, world px
   R: { x0: number; x1: number };
   painter: ExteriorPainter | null;
   strokeView: boolean;
   root: HTMLDivElement | null; // built on the first close
-  p: number;
   sl!: HTMLElement; // the shutters and their faces, made with root
   sr!: HTMLElement;
   fronts!: HTMLCanvasElement[];
   backs!: HTMLCanvasElement[];
+  // Fired when the centre panel becomes covered (true) or visible again (false). main.ts uses it
+  // to drop the audio focus on close and restore interaction on open.
+  onCover: ((covering: boolean) => void) | null;
 
   constructor({ camera, renderer, post, scene, afterFrame }: { camera: Camera; renderer: Renderer; post: Post; scene: Scene; afterFrame: (fn: () => void) => void }) {
     this.camera = camera;
     this.renderer = renderer;
     this.post = post;
     this.afterFrame = afterFrame;
-    this.state = 'open'; // open | closing | closed | opening
     const inset = 140; // matches the frame inset in post.ts
     const [eden, centre, hell] = scene.panels;
     this.C = { x0: centre.x0 + inset, x1: centre.x1 - inset, y0: centre.y0 + inset, y1: centre.y1 - inset };
@@ -46,16 +52,39 @@ export class Shutters {
     this.painter = null;
     this.strokeView = false;
     this.root = null;
-    this.p = 1; // 0 closed .. 1 open
+    this.onCover = null;
+    const clock: FrameClock = {
+      now: () => performance.now(),
+      raf: (cb) => requestAnimationFrame(cb),
+      reducedMotion: () => window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+    };
+    this.machine = new ShutterMachine(clock, {
+      prepareClose: () => this.prepareClose(),
+      paintExterior: () => this.paintExterior(),
+      prepareOpen: () => this.prepareOpen(),
+      place: (p) => this.placeFrame(p),
+      onClosed: () => {
+        this.camera.setFramed(this.C);
+        this.onCover?.(true); // centre covered: block stories and the sound focus
+      },
+      onOpened: () => {
+        this.post.hideWings = 0;
+        if (this.root) this.root.style.display = 'none';
+        this.onCover?.(false);
+      },
+    });
   }
 
-  get busy(): boolean { return this.state === 'closing' || this.state === 'opening'; }
+  // The machine's state and angle, exposed under the names the rest of the app already uses.
+  get state(): ShutterState { return this.machine.state; }
+  get busy(): boolean { return this.machine.busy; }
+  get p(): number { return this.machine.p; } // 0 closed .. 1 open
+  get exterior(): ExteriorStatus { return this.machine.exterior; }
   get strokes(): number { return this.painter ? this.painter.drawn : 0; }
 
-  toggle(): Promise<void> {
-    if (this.busy) return Promise.resolve();
-    return this.state === 'open' ? this.close() : this.open();
-  }
+  toggle(): Promise<void> { return this.machine.toggle(); }
+  close(): Promise<void> { return this.machine.close(); }
+  open(): Promise<void> { return this.machine.open(); }
 
   build(): void {
     const root = document.createElement('div');
@@ -71,27 +100,66 @@ export class Shutters {
   }
 
   // Paint the exterior (once, and again when the stroke view is switched) into both faces.
-  async paintFaces(): Promise<void> {
-    if (!this.painter) {
-      this.painter = new ExteriorPainter(EXT_W * 2); // twice the photo's resolution: crisp brushwork when zoomed
-      await this.painter.load();
-    } else this.painter.reset();
-    this.painter.strokeView = this.strokeView;
-    this.painter.paintTo(1);
+  // Never throws: missing or failed stroke data degrades to plain chalk-ground backs and the
+  // wings still close, so the triptych cannot jam on a failed fetch.
+  async paintFaces(): Promise<boolean> {
+    try {
+      if (!this.painter) {
+        this.machine.exterior = 'loading';
+        this.painter = new ExteriorPainter(EXT_W * 2); // twice the photo's resolution: crisp brushwork when zoomed
+        await this.painter.load();
+      } else this.painter.reset();
+      this.painter.strokeView = this.strokeView;
+      this.painter.paintTo(1);
+      const fh = Math.round((EXT_H * 2) / 0.92), fw = Math.round(fh * ((this.C.x1 - this.C.x0) / 2) / (this.C.y1 - this.C.y0));
+      for (const [i, cv] of this.fronts.entries()) {
+        cv.width = fw; cv.height = fh;
+        const ctx = cv.getContext('2d')!;
+        this.paintFrame(ctx, fw, fh, i);
+        const sg = this.sight(i, fw, fh);
+        const sx = i === 0 ? 0 : EXT_SPLIT, sw = i === 0 ? EXT_SPLIT : EXT_W - EXT_SPLIT;
+        this.painter.blit(ctx, sx, sw, sg.x, sg.y, sg.w, sg.h);
+      }
+      this.machine.exterior = 'ready';
+      this.root?.classList.remove('no-exterior');
+      return true;
+    } catch (err) {
+      // The painter (and its GL context) is unusable: drop it so a later toggle can retry, and
+      // show observable plain backs rather than a blank or frozen exterior.
+      this.painter = null;
+      this.paintPlainFaces();
+      this.machine.exterior = 'unavailable';
+      this.root?.classList.add('no-exterior');
+      throw err; // the machine records the degradation and warns once
+    }
+  }
+
+  // Degraded faces: the oak frame with an empty chalk-ground panel, no exterior strokes.
+  paintPlainFaces(): void {
+    if (!this.root) return;
     const fh = Math.round((EXT_H * 2) / 0.92), fw = Math.round(fh * ((this.C.x1 - this.C.x0) / 2) / (this.C.y1 - this.C.y0));
     for (const [i, cv] of this.fronts.entries()) {
       cv.width = fw; cv.height = fh;
       const ctx = cv.getContext('2d')!;
       this.paintFrame(ctx, fw, fh, i);
       const sg = this.sight(i, fw, fh);
-      const sx = i === 0 ? 0 : EXT_SPLIT, sw = i === 0 ? EXT_SPLIT : EXT_W - EXT_SPLIT;
-      this.painter.blit(ctx, sx, sw, sg.x, sg.y, sg.w, sg.h);
+      ctx.fillStyle = `rgb(${GROUND[0]}, ${GROUND[1]}, ${GROUND[2]})`;
+      ctx.fillRect(sg.x, sg.y, sg.w, sg.h);
     }
+  }
+
+  // Machine hook: the exterior repaint requested by a stroke-view switch. Serialised and
+  // deferred behind swings by the machine, so this never races a frame or changes the angle.
+  private async paintExterior(): Promise<void> {
+    const ok = await this.paintFaces();
+    if (!ok) throw new Error('exterior stroke data unavailable');
   }
 
   async setStrokeView(on: boolean): Promise<void> {
     this.strokeView = on;
-    if (this.painter) await this.paintFaces();
+    // No painter yet: the next close paints straight from this view. A failed load left painter
+    // null too; repaint() would only redo the same failing fetch, so stay on the plain backs.
+    if (this.painter) await this.machine.repaint();
   }
 
   // Painted-area rect inside shutter i's face, from the photo's proportions.
@@ -132,18 +200,19 @@ export class Shutters {
     gilt(sg.x - u * 2, sg.y - u * 2, sg.w + u * 4, sg.h + u * 4, u * 2);
   }
 
-  // Shutter positions from the current camera; p: 0 closed .. 1 open.
-  place(): void {
+  // Shutter positions from the current camera; p: 0 closed .. 1 open. Pure geometry from p and
+  // the camera: a resize only recomputes the same angle, it never moves p.
+  placeFrame(p: number): void {
     const s = (x: number, y: number) => this.camera.worldToScreen(x, y);
     const [cx0, cy0] = s(this.C.x0, this.C.y0), [cx1, cy1] = s(this.C.x1, this.C.y1);
     const [lx0] = s(this.L.x0, 0), [lx1] = s(this.L.x1, 0), [rx0] = s(this.R.x0, 0), [rx1] = s(this.R.x1, 0);
-    const e = ease(this.p);
+    const e = ease(p);
     const half = (cx1 - cx0) / 2, h = cy1 - cy0;
     const wL = half + (lx1 - lx0 - half) * e, wR = half + (rx1 - rx0 - half) * e;
     const dL = (lx1 - cx0) * e, dR = (rx0 - cx1) * e;
     // shut, they are the painting the fixed frame shows: clipped to its opening as the camera zooms;
     // inside a hugging frame they swing behind it too
-    if (this.state === 'closed' || this.camera.hug) { const O = this.camera.opening(); this.root!.style.clipPath = `inset(${O.y0}px ${this.camera.w - O.x1}px ${this.camera.h - O.y1}px ${O.x0}px)`; }
+    if (this.machine.state === 'closed' || this.camera.hug) { const O = this.camera.opening(); this.root!.style.clipPath = `inset(${O.y0}px ${this.camera.w - O.x1}px ${this.camera.h - O.y1}px ${O.x0}px)`; }
     else this.root!.style.clipPath = '';
     this.root!.style.perspective = `${Math.round((cx1 - cx0) * 2.4)}px`;
     this.root!.style.perspectiveOrigin = `${(cx0 + cx1) / 2}px ${(cy0 + cy1) / 2}px`;
@@ -186,46 +255,27 @@ export class Shutters {
     });
   }
 
-  swing(from: number, to: number): Promise<void> {
-    return new Promise<void>((res) => {
-      const t0 = performance.now();
-      const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-      const tick = (now: number) => {
-        const u = reduce ? 1 : Math.min(1, (now - t0) / SWING_MS);
-        this.p = from + (to - from) * u;
-        this.place();
-        if (u < 1) requestAnimationFrame(tick); else res();
-      };
-      requestAnimationFrame(tick);
-    });
-  }
-
-  async close(): Promise<void> {
-    this.state = 'closing';
+  // Machine hook: everything before the closing swing. Failures here are normal degradation,
+  // not aborts — paintFaces has already fallen back to plain backs by the time it throws.
+  private async prepareClose(): Promise<void> {
     if (!this.root) this.build();
-    const painting = this.paintFaces();
+    const painting = this.paintFaces().catch(() => false);
     await this.whole();
     await painting;
     this.root!.style.display = '';
-    this.p = 1; this.place();
+    this.placeFrame(1); // open pose before the first swing frame; p itself is owned by the machine
     this.post.hideWings = 1;
-    await this.swing(1, 0);
-    this.state = 'closed';
-    this.camera.setFramed(this.C);
   }
 
-  async open(): Promise<void> {
-    this.state = 'opening';
+  private async prepareOpen(): Promise<void> {
     this.camera.setFramed(this.camera.painting);
     await this.whole();
-    await this.swing(0, 1);
-    this.post.hideWings = 0;
-    this.root!.style.display = 'none';
-    this.state = 'open';
   }
 
-  // Keep the closed shutters glued to the board while the camera moves.
+  // Keep the shutters glued to the board while the camera moves or the window is resized.
+  // Recomputing geometry at the machine's current p means a resize mid-swing cannot jump the
+  // angle: only the screen mapping changes, p is untouched.
   frame(): void {
-    if (this.root && this.state === 'closed') this.place();
+    if (this.root && this.machine.state !== 'open') this.placeFrame(this.machine.p);
   }
 }
