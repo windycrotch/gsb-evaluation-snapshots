@@ -1,4 +1,4 @@
-[Overview](#overview) • [Hotkeys](#list-of-hotkeys) • [Installation](#installation) • [Credits](#credits)
+[Overview](#overview) • [Hotkeys](#list-of-hotkeys) • [Installation](#installation) • [Security](#security-file-operations) • [Credits](#credits)
 # Music Folder Player
 by ltGuillaume: [Codeberg](https://codeberg.org/ltguillaume) | [GitHub](https://github.com/ltguillaume) | [Buy me a beer](https://coff.ee/ltguillaume) 🍺
 
@@ -76,6 +76,23 @@ A list of all hotkeys can be found in the [Wiki](https://codeberg.org/ltguillaum
 
 ## Installation
 You can have a test setup running within 2 minutes. For all the details, check the [Wiki](https://codeberg.org/ltguillaume/music-folder-player/wiki).
+
+## Security: file operations
+`music.php` serves the library script and the download, playlist download, playlist save and playlist delete endpoints. All of these are confined to the configured `root` and `playlistdir` from `music(.defaults).ini`:
+
+- Download paths are normalized and must resolve inside `root`; absolute paths, `..` traversal (including backslash and encoded variants), empty paths and paths pointing at the server's own files are rejected with a `400` and a generic message. Errors never contain absolute server paths. (When `root` is configured as an absolute path, the one absolute prefix that stays inside it is accepted, since clients send exactly that.)
+- Playlist names must be a single plain path segment: no path separators, no `.`/`..`, no leading dot, no control characters. They are rejected on download, save and delete.
+- Deleting a playlist unlinks exactly that one playlist file. User input is never used as a wildcard pattern, so a name like `Mix*` cannot remove other files.
+- Playlist contents are re-validated when downloaded: entries that leave `root` make the request fail instead of leaking files, and the resulting archive stores relative paths only.
+
+### Verifying locally
+The repository ships a self-contained test that sets up a temporary installation (library, playlist directory and an `outside` directory that must stay unreachable), starts PHP's built-in server and exercises both legitimate and malicious requests:
+
+```
+php tests/path-security-test.php
+```
+
+The test check covers legitimate downloads, playlist listings, sub-library and single-song views as well as playlist save, overwrite (with its timestamped backup) and delete. Every malicious request must be rejected and must leave the library, playlist directory and `outside` directory byte-for-byte unchanged. A second installation with an absolute `root` is spun up as well, to confirm that its configured prefix keeps working while every other absolute path is refused. Folder and playlist downloads are archived with `7z` (Windows) or `zip` (elsewhere); when neither is installed those four checks are reported as `SKIP` and the rest still runs. Exit code `0` means everything passed.
 
 ## Credits
 - Some concepts of this project are based on the excellent [HTML5 Music Player](https://github.com/GM-Script-Writer-62850/HTML5-Music-Player) by [GM-Script-Writer-62850](https://github.com/GM-Script-Writer-62850)
