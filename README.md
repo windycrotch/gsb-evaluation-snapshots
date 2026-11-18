@@ -105,6 +105,7 @@ npm run dev      # backend + frontend for local play
 npm run build    # production bundle build check
 npm run preview  # Vite preview of the built frontend
 npm start        # Express server
+npm test         # local Node tests for AI action parsing (no API key needed)
 ```
 
 ## Notes

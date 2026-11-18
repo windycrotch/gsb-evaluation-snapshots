@@ -1,5 +1,12 @@
 // game/prompts.js — FIXED: AIs now get full game rules, role awareness, teammate info,
 // game log access, win conditions, and explicit anti-self-vote instructions.
+//
+// Action prompts (vote / night) are deliberately strict: they ask for exactly one
+// player name (or "abstain" for votes) and repeat the injected legal-target list.
+// game/ai-agent.js validates whatever comes back against that same list, so the
+// prompt and the parser share one definition of a legal target.
+
+import { getLegalTargets, ACTION } from './ai-agent.js';
 
 export function buildSystemPrompt(player, state) {
   const mafiaPartners = player.role === 'mafia'
@@ -182,47 +189,73 @@ function nightSafetyNote(player) {
   return '';
 }
 
+// ── Shared action-prompt helpers ─────────────────────────────────────────────
+// Every action prompt lists the legal targets exactly as game/ai-agent.js will
+// validate them, so "the model named a real player" and "the game can apply it"
+// never drift apart. Names are quoted so multi-word names stay unambiguous.
+
+function quoteNames(players) {
+  return players.map(p => `"${p.name}"`).join(', ');
+}
+
+function legalNamesFor(action, player, state) {
+  return getLegalTargets(action, player, state.players || []);
+}
+
+const STRICT_ONE_NAME = 'Reply with ONLY one name from that list — no sentence, no reasoning, no punctuation around it.';
+
 export function buildVotePrompt(player, state) {
-  const targets     = state.players.filter(p => p.alive && p.id !== player.id);
-  const chatSummary = state.chatLog.slice(-12).map(m => `${m.name}: "${m.text}"`).join('\n');
-  const names       = targets.map(p => p.name).join(', ');
-  const selfName    = player.name;
+  const targets     = legalNamesFor(ACTION.VOTE, player, state);
+  const chatSummary = (state.chatLog || []).slice(-12).map(m => `${m.name}: "${m.text}"`).join('\n');
 
   // Pull previous vote records from game log so AI knows who voted who
   const pastVotes = (state.gameLog || []).filter(l => l.includes('VOTES:')).slice(-3).join('\n');
   const voteHistory = pastVotes ? `\nPREVIOUS VOTE RECORDS:\n${pastVotes}` : '';
+  const noneLegal = targets.length === 0;
+  const targetLine = noneLegal
+    ? 'There are no legal players to vote for right now — you must abstain.'
+    : `Legal vote targets: ${quoteNames(targets)}`;
+  const teamLine = player.role === 'mafia'
+    ? '\nYou are MAFIA: you may not vote for yourself or a mafia teammate. Those names are already excluded from the list above.'
+    : '\nYou may not vote for yourself. That name is already excluded from the list above.';
 
   return {
     system: buildSystemPrompt(player, state),
     user: `VOTE PHASE — Choose one player to vote out OR abstain if you have no strong suspicion.${voteHistory}
-Valid targets (DO NOT vote for yourself — "${selfName}" is NOT a valid target): ${names}
+${targetLine}${teamLine}
 Recent discussion:\n${chatSummary}
 
 STRICT TIMER: You have 45 seconds total to cast your vote.
-If you do not answer with one exact player name or "abstain" before the 45-second timer expires, your vote will not count.
-RULES: You may vote for one player OR respond with "abstain" if you genuinely cannot decide.
-If the majority of players abstain, nobody is eliminated today — so only abstain if truly uncertain.
-Respond with ONLY the exact player name OR the word "abstain". Nothing else.`,
+RESPONSE FORMAT: Reply with exactly one player name copied from the legal list above, or the single word "abstain".
+Do not explain your choice. Do not write a sentence. Do not name anyone outside the list.
+A reply that is not exactly one legal name or "abstain" is recorded as an abstention.`,
   };
 }
 
 export function buildNightMafiaPrompt(player, state, targets) {
-  const names      = targets.map(p => p.name).join(', ');
+  const legal = Array.isArray(targets) && targets.length
+    ? targets.filter(p => p && p.alive !== false && p.role !== 'mafia' && p.id !== player.id)
+    : legalNamesFor(ACTION.MAFIA_KILL, player, state);
+  const names      = quoteNames(legal);
   const mafiaTeam  = state.players.filter(p => p.role === 'mafia').map(p => p.name).join(', ');
   return {
     system: `You are ${player.name}, playing the MAFIA role in a social deduction board game (like Among Us / Werewolf).${nightSafetyNote(player)}
-YOUR TEAM (DO NOT vote against these): ${mafiaTeam}
-You must choose a TOWN player to vote out tonight. Town = Villagers, Sheriff, Doctor.
-Sheriff and Doctor are highest priority — they counter your strategy.`,
-    user: `NIGHT PHASE — Choose one Town player to vote out.
-Valid targets (DO NOT pick a teammate or yourself): ${names}
-Respond with ONLY the exact name. Must be one of: ${names}`,
+YOUR TEAM (never name them): ${mafiaTeam}
+You must choose one TOWN player to eliminate tonight. Town = Villagers, Sheriff, Doctor.
+Sheriff and Doctor are highest priority — they counter your strategy.
+You may never name yourself or a mafia teammate.`,
+    user: `NIGHT PHASE — Choose one Town player to eliminate.
+Legal kill targets: ${names || '(none available)'}
+${STRICT_ONE_NAME}
+Any other answer — including a teammate, yourself, or a player not in the list — is recorded as no night action.`,
   };
 }
 
 export function buildMafiaDiscussPrompt(player, state, targets, otherMafiaNames) {
-  const names      = targets.map(p => p.name).join(', ');
-  const recentChat = state.chatLog.slice(-6).map(m => `${m.name}: "${m.text}"`).join('\n');
+  const legalTargets = (Array.isArray(targets) && targets.length ? targets : state.players)
+    .filter(p => p && p.alive !== false && p.role !== 'mafia' && p.id !== player.id);
+  const names      = legalTargets.map(p => p.name).join(', ');
+  const recentChat = (state.chatLog || []).slice(-6).map(m => `${m.name}: "${m.text}"`).join('\n');
   const deadList   = state.players.filter(p => !p.alive).map(p => `${p.name}[${p.role}]`).join(', ') || 'none';
   const aliveMafia = state.players.filter(p => p.alive && p.role === 'mafia').length;
   const aliveTown  = state.players.filter(p => p.alive && p.role !== 'mafia').length;
@@ -242,15 +275,17 @@ Partners: ${otherMafiaNames || 'solo'}
 Town targets: ${names}
 Recent day discussion:\n${recentChat || '(none yet)'}
 
-Discuss strategy and NAME ONE TARGET everyone should agree on. If you don't align on one name, nobody is voted out tonight. Under 25 words. Be direct and decisive.`,
+Discuss strategy and NAME ONE TARGET everyone should agree on. If you don't align on one name, nobody is voted out tonight. Under 25 words. Be direct and decisive.
+End with a final line in the exact form "TARGET: <name>", using one name from the target list.`,
   };
 }
 
 export function buildNightSheriffPrompt(player, state) {
-  const uninvestigated = state.players
-    .filter(p => p.alive && p.id !== player.id && !state.investigationHistory?.[p.id])
+  const legal = legalNamesFor(ACTION.SHERIFF_INVESTIGATE, player, state);
+  const uninvestigated = legal
+    .filter(p => !state.investigationHistory?.[p.id])
     .map(p => p.name).join(', ');
-  const allTargets = state.players.filter(p => p.alive && p.id !== player.id).map(p => p.name).join(', ');
+  const allTargets = quoteNames(legal);
   const confirmed = Object.entries(state.investigationHistory || {})
     .map(([id, r]) => { const p = state.players.find(x => x.id === id); return p ? `${p.name}:${r}` : ''; })
     .filter(Boolean).join(', ');
@@ -258,16 +293,24 @@ export function buildNightSheriffPrompt(player, state) {
     system: `You are ${player.name}, the SHERIFF in a Mafia board game.${nightSafetyNote(player)}
 ABILITY: Investigate one player tonight. If they are Mafia you INSTANTLY catch them. If they are Town, nothing happens — you cannot affect innocent players.
 STRATEGY: Prioritise uninvestigated players. Pick whoever you most suspect is Mafia.
+You may never investigate yourself.
 Previous investigations: ${confirmed || 'none yet'}.`,
-    user: `Uninvestigated players: ${uninvestigated || 'none — re-investigate if needed'}. All alive targets: ${allTargets}\nRespond with ONLY the exact player name to investigate tonight.`,
+    user: `Uninvestigated players: ${uninvestigated || 'none — re-investigate if needed'}.
+Legal investigation targets: ${allTargets || '(none available)'}
+${STRICT_ONE_NAME}
+Any other answer is recorded as no investigation.`,
   };
 }
 
 export function buildNightDoctorPrompt(player, state) {
-  const targets = state.players.filter(p => p.alive).map(p => p.name).join(', ');
+  const legal = legalNamesFor(ACTION.DOCTOR_PROTECT, player, state);
+  const targets = quoteNames(legal);
   return {
-    system: `You are ${player.name}, the DOCTOR in a Mafia board game. Choose one player to protect tonight. You can protect yourself.${nightSafetyNote(player)}`,
-    user: `Who to protect tonight? Options: ${targets}\nRespond with ONLY the exact player name.`,
+    system: `You are ${player.name}, the DOCTOR in a Mafia board game. Choose one player to protect tonight. You ARE allowed to protect yourself.${nightSafetyNote(player)}`,
+    user: `Who to protect tonight?
+Legal protection targets: ${targets || '(none available)'}
+${STRICT_ONE_NAME}
+Any other answer is recorded as no protection.`,
   };
 }
 

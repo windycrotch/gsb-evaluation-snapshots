@@ -7,6 +7,11 @@ import {
   buildNightMafiaPrompt, buildNightSheriffPrompt, buildNightDoctorPrompt,
   buildMafiaDiscussPrompt
 } from './prompts.js';
+import {
+  ACTION, ACTION_STATUS,
+  getLegalTargets, parseActionResponse, requestActionDecision,
+  createActionGate, describeActionOutcome,
+} from './ai-agent.js';
 import { setGameActive } from '../src/state.js';
 import { DeathHandler } from '../src/utils/DeathHandler.js';
 import { drawBrandLogoCanvas } from '../src/characters/LogoTextures.js';
@@ -789,6 +794,13 @@ export class GameEngine {
     return err;
   }
 
+  /** Runtime errors are stored as { code, source, ts }; extract the code string. */
+  _runtimeErrorCode(err, model = '') {
+    if (!err) return '';
+    const raw = typeof err === 'string' ? err : err.code;
+    return this._normalizeAiErrorCode(raw, model);
+  }
+
   _normalizeAiErrorCode(raw, model = '') {
     if (!raw) return '';
     const text = String(raw).trim();
@@ -1454,7 +1466,16 @@ export class GameEngine {
   // ─── VOTE PHASE ─────────────────────────────────────────────────────────────
 
   _startVotePhase() {
+    // One vote phase per day: a duplicate timer/callback must not restart it.
+    if (!this.state) return;
+    if (this.state.phase === 'VOTE' || this.state.phase === 'ELIMINATING' || this.state.phase === 'GAMEOVER') {
+      console.log('[VOTE] blocked — phase is already ' + this.state.phase);
+      return;
+    }
     this.state.phase = 'VOTE';
+    this.state._voteResolved = false;
+    this.state._collectingVotes = false;
+    this.state._voteGates = new Map();
     this.voiceEngine?.stop(); // cut any lingering day speech
     this.state.votes = {};
     document.getElementById('phase-badge').textContent = 'VOTE';
@@ -1539,34 +1560,89 @@ export class GameEngine {
   }
 
   async _collectAiVotes(alive, tallyEl, votePanel) {
+    // Vote collection is one-shot per vote phase. A duplicate call (e.g. the
+    // human's auto-abstain timer firing after they already clicked) must not
+    // produce a second round of AI votes.
+    if (this.state._collectingVotes || this.state._voteResolved) {
+      console.log('[VOTE] duplicate _collectAiVotes ignored');
+      return;
+    }
+    this.state._collectingVotes = true;
+
     const aiPlayers = alive.filter(p => !p.isHuman);
+    // Persistent per-voter gates live on the game state, so a duplicated
+    // callback (double click, repeated retry, late resolution) for the same
+    // voter is ignored even if it arrives in a later microtask.
+    if (!this.state._voteGates) this.state._voteGates = new Map();
+
     const voteJobs = aiPlayers.map(async (player) => {
+      let gate = this.state._voteGates.get(player.id);
+      if (!gate) {
+        gate = createActionGate();
+        this.state._voteGates.set(player.id, gate);
+      }
+      if (gate.settled) return; // duplicate callback — ignore completely
+
       const prompt = buildVotePrompt(player, this.state);
+      let outcome;
+
       try {
-        const voteContent = await this._aiDecide(
-          player,
-          prompt.system,
-          prompt.user,
-          1,
-          { timeoutMs: DAY_VOTE_LIMIT_MS }
-        );
-        const target = voteContent === null ? 'skip' : this._parseVoteTarget(voteContent, alive, player.id);
-        this.state.votes[player.id] = target;
-        if (target !== 'skip') {
-          this.charManager.playVoteAnimation(player.id);
-          this.soundEngine.play('vote');
-          this.hud.addChat(player.name, '[casts their vote]');
-        }
-        tallyEl.innerHTML = this._getTallyDisplay(alive);
-        if (this._spectateMode || this.specHUD?._active) {
-          this.specHUD.updateVote(player.id, target, alive);
-        }
+        outcome = await this._requestAiAction(player, {
+          action: ACTION.VOTE,
+          systemPrompt: prompt.system,
+          userMessage: prompt.user,
+          players: this.state.players,
+          alivePlayers: alive,
+          timeoutMs: DAY_VOTE_LIMIT_MS,
+          // POSTed token stream: a vote that arrives partially before the
+          // deadline can still be salvaged from its unique legal name.
+          stream: 'post',
+        });
       } catch {
-        this.state.votes[player.id] = 'skip';
-        tallyEl.innerHTML = this._getTallyDisplay(alive);
-        if (this._spectateMode || this.specHUD?._active) {
-          this.specHUD.updateVote(player.id, 'skip', alive);
-        }
+        // _requestAiAction should never throw, but never let a vote job reject.
+        outcome = parseActionResponse('', {
+          action: ACTION.VOTE,
+          actor: player,
+          players: this.state.players,
+          errorCode: 'NETWORK_ERROR',
+        });
+      }
+
+      const target = outcome.ok ? outcome.targetId : 'skip';
+      const submission = gate.submit(target);
+      if (!submission.accepted) return; // a later result may never overwrite the first
+
+      this.state.votes[player.id] = target;
+
+      if (target !== 'skip') {
+        this.charManager.playVoteAnimation(player.id);
+        this.soundEngine.play('vote');
+        this.hud.addChat(player.name, '[casts their vote]');
+      } else if (outcome.ok) {
+        // Shouldn't happen (ok implies a target) — never silently drop it.
+        this._logActionDegraded(player, {
+          ...outcome,
+          ok: false,
+          status: ACTION_STATUS.INVALID_TARGET,
+          code: 'TARGET_MISSING',
+          reason: 'The decision resolved without a usable target.',
+        }, { day: this.state.day, phase: 'Day' });
+      } else if (outcome.status === ACTION_STATUS.ABSTAIN) {
+        // Explicit abstention: allowed, but still recorded in the game log.
+        const line = `Day ${this.state.day}: ${player.name} abstained from the vote (the model chose abstain).`;
+        try { this.state.gameLog.push(line); } catch {}
+        try { this.hud.addChat('SYSTEM', line); } catch {}
+      } else {
+        // Invalid name / timeout / network error — record a readable reason once.
+        this._logActionDegraded(player, outcome, {
+          day: this.state.day,
+          phase: 'Day',
+        });
+      }
+
+      tallyEl.innerHTML = this._getTallyDisplay(alive);
+      if (this._spectateMode || this.specHUD?._active) {
+        this.specHUD.updateVote(player.id, target, alive);
       }
     });
 
@@ -1575,6 +1651,63 @@ export class GameEngine {
     await this._sleep(800);
     votePanel.classList.remove('visible');
     this._resolveVote(alive);
+  }
+
+  // Append a readable, non-throwing game-log entry for a failed action.
+  _logActionDegraded(player, outcome, { day, phase } = {}) {
+    const line = describeActionOutcome(outcome, {
+      action: outcome?.action,
+      actorName: player?.name,
+      day,
+      phase,
+    });
+    try { this.state.gameLog.push(line); } catch {}
+    try { this.hud.addChat('SYSTEM', `[${phase || 'ACTION'}] ${line}`); } catch {}
+    try {
+      if (this._spectateMode && this.specHUD?._active) {
+        this.specHUD.addEvent(`${player?.name || 'AI'}: ${outcome?.code || 'invalid action'}`, 'warning');
+      }
+    } catch {}
+    return line;
+  }
+
+  /**
+   * Record an action that DID apply but only after a degraded path
+   * (e.g. a unique legal name recovered from timed-out partial text).
+   * Distinct from _logActionDegraded, which is for actions that were dropped.
+   */
+  _logActionEvent(player, outcome, { day, phase } = {}) {
+    const line = describeActionOutcome(outcome, {
+      action: outcome?.action,
+      actorName: player?.name,
+      day,
+      phase,
+    });
+    try { this.state.gameLog.push(line); } catch {}
+    try { this.hud.addChat('SYSTEM', line); } catch {}
+    return line;
+  }
+
+  /**
+   * Commit a night action at most once per gate key.
+   * A late duplicate callback (double resolution, duplicated timer) is dropped
+   * before it can overwrite the authoritative target.
+   */
+  _commitActionOnce(key, apply) {
+    if (!this.state) return false;
+    if (!this.state._actionGates) this.state._actionGates = new Map();
+    let gate = this.state._actionGates.get(key);
+    if (!gate) {
+      gate = createActionGate();
+      this.state._actionGates.set(key, gate);
+    }
+    const submission = gate.submit(true);
+    if (!submission.accepted) {
+      console.log(`[ACTION] duplicate commit for ${key} ignored`);
+      return false;
+    }
+    apply();
+    return true;
   }
 
   _getTallyDisplay(alive) {
@@ -1590,6 +1723,12 @@ export class GameEngine {
   }
 
   _resolveVote(alive) {
+    // Guard against a duplicate resolution (late callback / doubled timer).
+    if (this.state._voteResolved) {
+      console.log('[VOTE] _resolveVote already ran — ignoring duplicate');
+      return;
+    }
+    this.state._voteResolved = true;
     console.log('[VOTE] _resolveVote called, votes:', JSON.stringify(this.state.votes).slice(0,100));
     const tally = {};
     Object.values(this.state.votes).forEach(t => { if (t && t !== 'skip') tally[t] = (tally[t]||0) + 1; });
@@ -1963,6 +2102,9 @@ export class GameEngine {
     this.state.doctorProtectedId = null;
     this.state._nightActionsCompleted = false; // Flag to prevent double-processing
     this.state._nightProcessingPath = null; // Track which path is processing night actions
+    // Per-night one-shot gates: each role acts at most once, even if two
+    // code paths (timer + cinematic callback) race to resolve the same action.
+    this.state._actionGates = new Map();
     
     console.log('[NIGHT] State reset — killTarget: null, sheriffKill: null, protected: null');
     // Subtitle goes back up at night to clear night panel UI
@@ -2887,38 +3029,62 @@ export class GameEngine {
       this._spectatorThought(attacker, 'final decision — weighing the options...', true);
       await this._sleep(400);
 
-      // Retry up to 4× — some models misformat names on first attempt
-      let killContent = null;
+      // Retry up to 4× — some models misformat names on first attempt.
+      // Failures are logged once, after the loop, so a retry that eventually
+      // succeeds does not spam the game log with stale errors.
+      let killOutcome = null;
+      let killTarget  = null;
       let lastKillErr = null;
       for (let _ka = 0; _ka < 4; _ka++) {
         this._spectatorThought(attacker, _ka > 0 ? `retry ${_ka} — naming target...` : 'choosing tonight\'s target...', true);
-        killContent = await this._aiDecide(attacker, killPrompt.system, killPromptUser);
+        killOutcome = await this._requestAiAction(attacker, {
+          action: ACTION.MAFIA_KILL,
+          systemPrompt: killPrompt.system,
+          userMessage: killPromptUser,
+          players: this.state.players,
+          alivePlayers: targets,
+          // Token stream so a partial answer can still yield a legal target.
+          stream: 'post',
+        });
         const decideErr = this._consumeAiRuntimeError(attacker);
-        if (decideErr) {
-          lastKillErr = decideErr;
-          this._surfaceAiRuntimeFailure(attacker, decideErr, {
-            contextLabel: 'mafia target selection',
-            showBubble: false,
-            showSubtitle: false,
-          });
+        if (decideErr) lastKillErr = decideErr;
+
+        if (killOutcome.ok) {
+          killTarget = this._isLegalActionTarget(ACTION.MAFIA_KILL, attacker, killOutcome.targetId, targets);
+          if (killTarget) break;
+          // Parsed but not legal (stale roster) — downgrade before logging.
+          killOutcome = {
+            ...killOutcome,
+            ok: false,
+            status: ACTION_STATUS.INVALID_TARGET,
+            code: 'TARGET_NOT_LEGAL',
+            reason: 'The chosen player is no longer a legal kill target.',
+            targetId: null,
+            targetName: null,
+          };
         }
-        if (killContent && this._parseTarget(killContent, targets, attacker.id)) break;
         await this._sleep(300);
       }
 
-      if (killContent) {
-        const parsedTarget = this._parseTarget(killContent, targets, attacker.id);
+      if (killTarget) {
+        const parsedTarget = killTarget.id;
         console.log(`[MAFIA KILL] Ringleader ${attacker.name} chose target ID: ${parsedTarget}`);
-        console.log(`[MAFIA KILL] AI response: "${killContent.substring(0, 100)}..."`);
-        
+        console.log(`[MAFIA KILL] AI response: "${String(killOutcome.rawText || '').substring(0, 100)}..."`);
+        // A salvaged (partial) answer is still applied — log how it was obtained.
+        if (killOutcome.partial) {
+          this._logActionEvent(attacker, killOutcome, { day: this.state.day, phase: 'Night' });
+        }
+
         // CRITICAL FIX: Only set kill target if not already set by another path
         if (!this.state._mafiaKillTarget) {
-          this.state._mafiaKillTarget = parsedTarget;
-          console.log(`[MAFIA KILL] Target set to: ${parsedTarget}`);
+          this._commitActionOnce('mafia', () => {
+            this.state._mafiaKillTarget = parsedTarget;
+          });
+          console.log(`[MAFIA KILL] Target set to: ${this.state._mafiaKillTarget}`);
         } else {
           console.log(`[MAFIA KILL] Target already set to ${this.state._mafiaKillTarget} — keeping existing`);
         }
-        
+
         const victim = alive.find(p => p.id === this.state._mafiaKillTarget);
         if (victim) {
           const char = this.charManager.getCharacter(attacker.id);
@@ -2934,11 +3100,16 @@ export class GameEngine {
           await this._nightSpeakAndWait(attacker, declText, 2500);
         }
       } else {
-        const fallbackTarget = [...targets].sort((a, b) => (a.seatIndex ?? 999) - (b.seatIndex ?? 999))[0];
-        this.state._mafiaKillTarget = fallbackTarget?.id;
-        const fallbackName = fallbackTarget?.name || 'none';
-        this.hud.addChat('SYSTEM', `[MODEL ERROR] Mafia produced no valid target. Deterministic fallback applied: ${fallbackName}.`);
-        this._cotAddEntry('mafia', '▲ FAILSAFE', `No valid model output. Fallback target: ${fallbackName}.`, true);
+        // No legal target — nobody dies tonight. Never invent a random victim.
+        this.state._mafiaKillTarget = null;
+        this._logActionDegraded(attacker, killOutcome || parseActionResponse('', {
+          action: ACTION.MAFIA_KILL,
+          actor: attacker,
+          players: targets,
+          knownPlayers: this.state.players,
+          errorCode: 'EMPTY_RESPONSE',
+        }), { day: this.state.day, phase: 'Night' });
+        this._cotAddEntry('mafia', '▲ NO ACTION', 'No legal kill target was confirmed — the mafia strikes no one tonight.', true);
         if (lastKillErr) {
           this._surfaceAiRuntimeFailure(attacker, lastKillErr, {
             contextLabel: 'mafia target selection',
@@ -2980,8 +3151,29 @@ export class GameEngine {
         showPublicAnswer: false,  // keep out of speech bubbles / subtitle
         showCotAnswer: true,      // show the investigation decision in spectator CoT feed
       });
-      const sheriffErr = this._consumeAiRuntimeError(aiSheriff);
-      if (sheriffErr) {
+      const sheriffErr = this._runtimeErrorCode(this._consumeAiRuntimeError(aiSheriff), aiSheriff.model);
+
+      this.charManager.setThinking(aiSheriff.id, false);
+      // Validate the streamed answer against the legal target list. A timeline
+      // timeout that already produced a unique legal name is salvaged by
+      // _resolveNightActionText (partial = true); anything else means no action.
+      const { target: sheriffTarget, outcome: sheriffOutcome } = this._resolveNightActionText(
+        aiSheriff,
+        content || '',
+        ACTION.SHERIFF_INVESTIGATE,
+        alive.filter(p => p.id !== aiSheriff.id),
+        {
+          // Passing the transport error lets the parser salvage a unique legal
+          // name from a timed-out partial answer, and otherwise report TIMEOUT.
+          errorCode: sheriffErr || (content ? '' : 'EMPTY_RESPONSE'),
+          partial: Boolean(content) && Boolean(sheriffErr),
+          logFailure: false,
+        }
+      );
+
+      // Only surface a model failure when it cost the action; a salvaged target
+      // is already reported (with its reason) in the game log.
+      if (sheriffErr && !sheriffTarget) {
         this._surfaceAiRuntimeFailure(aiSheriff, sheriffErr, {
           contextLabel: 'sheriff investigation',
           showBubble: !content,
@@ -2990,26 +3182,25 @@ export class GameEngine {
         });
       }
 
-      this.charManager.setThinking(aiSheriff.id, false);
-      const _shTargets = alive.filter(p => p.id !== aiSheriff.id);
-      // Fallback: if sheriff returns nothing / unparseable, pick a random uninvestigated player
-      let _shContent = content;
-      if (!_shContent || !this._parseTarget(_shContent, _shTargets, aiSheriff.id)) {
-        const uninv = _shTargets.filter(p => !this.state.investigationHistory?.[p.id]);
-        const fallback = uninv.length ? uninv[0].name : _shTargets[0]?.name;
-        _shContent = fallback || '';
-        console.log('[SHERIFF] empty/bad response — fallback pick:', fallback);
-      }
-      if (_shContent) {
-        const targetId = this._parseTarget(_shContent, _shTargets, aiSheriff.id);
+      if (sheriffTarget) {
+        const targetId = sheriffTarget.id;
         const target   = this.state.players.find(p => p.id === targetId);
         if (target) {
-          this.state.investigationHistory[target.id] = target.role === 'mafia' ? 'mafia' : 'town';
+          // One-shot commit: the investigation (and the kill flag) is applied
+          // exactly once even if another path races to resolve it.
+          const committed = this._commitActionOnce('sheriff', () => {
+            this.state.investigationHistory[target.id] = target.role === 'mafia' ? 'mafia' : 'town';
+            if (target.role === 'mafia') this.state._sheriffNightKill = target.id;
+          });
+          if (!committed) console.log('[SHERIFF] duplicate action commit ignored');
           this.hud.refreshPlayerList(this.state);
+
+          if (sheriffOutcome.partial) {
+            this._logActionEvent(aiSheriff, sheriffOutcome, { day: this.state.day, phase: 'Night' });
+          }
 
           if (target.role === 'mafia') {
             // Confirmed Mafia — sheriff executes immediately
-            this.state._sheriffNightKill = target.id;
             const reportText = `Investigated ${target.name}: Mafia confirmed. Executing now.`;
             if (this._specCurrentGroup === 'sheriff') this._cinematicSnapToPlayer(aiSheriff, false, true);
             this.hud.addChat('SYSTEM', `◆ Sheriff confirmed ${target.name} is MAFIA — kill shot fired!`);
@@ -3022,6 +3213,10 @@ export class GameEngine {
             await this._nightSpeakAndWait(aiSheriff, reportText, 2500);
           }
         }
+      } else {
+        // No legal investigation — no action, and no invented fallback target.
+        this._logActionDegraded(aiSheriff, sheriffOutcome, { day: this.state.day, phase: 'Night' });
+        this._cotAddEntry('sheriff', '◆ NO ACTION', 'No legal investigation target was confirmed — no investigation tonight.', true);
       }
 
       if (this._specCurrentGroup === 'sheriff') {
@@ -3061,8 +3256,22 @@ export class GameEngine {
         showPublicAnswer: false,  // keep out of speech bubbles / subtitle
         showCotAnswer: true,      // show the protection decision in spectator CoT feed
       });
-      const doctorErr = this._consumeAiRuntimeError(aiDoctor);
-      if (doctorErr) {
+      const doctorErr = this._runtimeErrorCode(this._consumeAiRuntimeError(aiDoctor), aiDoctor.model);
+
+      this.charManager.setThinking(aiDoctor.id, false);
+      const { target: doctorTarget, outcome: doctorOutcome } = this._resolveNightActionText(
+        aiDoctor,
+        docContent || '',
+        ACTION.DOCTOR_PROTECT,
+        alive,
+        {
+          errorCode: doctorErr || (docContent ? '' : 'EMPTY_RESPONSE'),
+          partial: Boolean(docContent) && Boolean(doctorErr),
+          logFailure: false,
+        }
+      );
+
+      if (doctorErr && !doctorTarget) {
         this._surfaceAiRuntimeFailure(aiDoctor, doctorErr, {
           contextLabel: 'doctor protection',
           showBubble: !docContent,
@@ -3071,17 +3280,21 @@ export class GameEngine {
         });
       }
 
-      this.charManager.setThinking(aiDoctor.id, false);
-      if (docContent) {
-        const targetId = this._parseTarget(docContent, alive, aiDoctor.id);
-        const target   = this.state.players.find(p => p.id === targetId);
-        if (target) {
-          this.state.doctorProtectedId = target.id;
-          const protText = '✚ Protecting ' + target.name + ' tonight.';
-          if (this._specCurrentGroup === 'doctor') this._cinematicSnapToPlayer(aiDoctor, false, true);
-          this.hud.addChat('SYSTEM', protText);
-          await this._nightSpeakAndWait(aiDoctor, protText, 2500);
+      if (doctorTarget) {
+        const committed = this._commitActionOnce('doctor', () => {
+          this.state.doctorProtectedId = doctorTarget.id;
+        });
+        if (!committed) console.log('[DOCTOR] duplicate action commit ignored');
+        const protText = '✚ Protecting ' + doctorTarget.name + ' tonight.';
+        if (doctorOutcome.partial) {
+          this._logActionEvent(aiDoctor, doctorOutcome, { day: this.state.day, phase: 'Night' });
         }
+        if (this._specCurrentGroup === 'doctor') this._cinematicSnapToPlayer(aiDoctor, false, true);
+        this.hud.addChat('SYSTEM', protText);
+        await this._nightSpeakAndWait(aiDoctor, protText, 2500);
+      } else {
+        this._logActionDegraded(aiDoctor, doctorOutcome, { day: this.state.day, phase: 'Night' });
+        this._cotAddEntry('doctor', '✚ NO ACTION', 'No legal protection target was confirmed — nobody is protected tonight.', true);
       }
 
       if (this._specCurrentGroup === 'doctor') {
@@ -3220,31 +3433,76 @@ export class GameEngine {
   // Helpers — isolated AI role actions with retries=1 (simple name responses don't need 3 attempts)
   async _runAiSheriffSilent(aiSheriff, alive) {
     if (!aiSheriff) return;
+    const legalPool = alive.filter(p => p.id !== aiSheriff.id);
+    let outcome;
     try {
-      const prompt   = buildNightSheriffPrompt(aiSheriff, this.state);
-      const content  = await this._aiDecide(aiSheriff, prompt.system, prompt.user, 1);
-      if (content) {
-        const targetId = this._parseTarget(content, alive.filter(p => p.id !== aiSheriff.id), aiSheriff.id);
-        const target   = this.state.players.find(p => p.id === targetId);
-        if (target) {
-          this.state.investigationHistory[target.id] = target.role === 'mafia' ? 'mafia' : 'town';
-          if (target.role === 'mafia') this.state._sheriffNightKill = target.id;
-        }
-      }
-    } catch {}
+      const prompt = buildNightSheriffPrompt(aiSheriff, this.state);
+      outcome = await this._requestAiAction(aiSheriff, {
+        action: ACTION.SHERIFF_INVESTIGATE,
+        systemPrompt: prompt.system,
+        userMessage: prompt.user,
+        players: this.state.players,
+        alivePlayers: legalPool,
+        stream: 'post',
+      });
+    } catch {
+      outcome = parseActionResponse('', {
+        action: ACTION.SHERIFF_INVESTIGATE,
+        actor: aiSheriff,
+        players: legalPool,
+        errorCode: 'NETWORK_ERROR',
+      });
+    }
+
+    const target = outcome.ok
+      ? this._isLegalActionTarget(ACTION.SHERIFF_INVESTIGATE, aiSheriff, outcome.targetId, legalPool)
+      : null;
+
+    if (!target) {
+      this._logActionDegraded(aiSheriff, outcome, { day: this.state?.day, phase: 'Night' });
+      return;
+    }
+
+    this._commitActionOnce('sheriff', () => {
+      this.state.investigationHistory[target.id] = target.role === 'mafia' ? 'mafia' : 'town';
+      if (target.role === 'mafia') this.state._sheriffNightKill = target.id;
+    });
+    if (outcome.partial) this._logActionEvent(aiSheriff, outcome, { day: this.state?.day, phase: 'Night' });
   }
 
   async _runAiDoctorSilent(aiDoctor, alive) {
     if (!aiDoctor) return;
+    let outcome;
     try {
-      const prompt     = buildNightDoctorPrompt(aiDoctor, this.state);
-      const docContent = await this._aiDecide(aiDoctor, prompt.system, prompt.user, 1);
-      if (docContent) {
-        const targetId = this._parseTarget(docContent, alive, aiDoctor.id);
-        const target   = this.state.players.find(p => p.id === targetId);
-        if (target) this.state.doctorProtectedId = target.id;
-      }
-    } catch {}
+      const prompt = buildNightDoctorPrompt(aiDoctor, this.state);
+      outcome = await this._requestAiAction(aiDoctor, {
+        action: ACTION.DOCTOR_PROTECT,
+        systemPrompt: prompt.system,
+        userMessage: prompt.user,
+        players: this.state.players,
+        alivePlayers: alive,
+        stream: 'post',
+      });
+    } catch {
+      outcome = parseActionResponse('', {
+        action: ACTION.DOCTOR_PROTECT,
+        actor: aiDoctor,
+        players: alive,
+        errorCode: 'NETWORK_ERROR',
+      });
+    }
+
+    const target = outcome.ok
+      ? this._isLegalActionTarget(ACTION.DOCTOR_PROTECT, aiDoctor, outcome.targetId, alive)
+      : null;
+
+    if (!target) {
+      this._logActionDegraded(aiDoctor, outcome, { day: this.state?.day, phase: 'Night' });
+      return;
+    }
+
+    this._commitActionOnce('doctor', () => { this.state.doctorProtectedId = target.id; });
+    if (outcome.partial) this._logActionEvent(aiDoctor, outcome, { day: this.state?.day, phase: 'Night' });
   }
 
   // Keep old name as alias so any legacy spectator path still works
@@ -3283,8 +3541,12 @@ export class GameEngine {
         else if (humanVote && leaders.includes(humanVote)) best = humanVote;
         else best = null; // true tie — no kill
       }
-      if (!best && Object.keys(tally).length === 0) {
-        best = humanVote || nonMafia[Math.floor(Math.random()*nonMafia.length)]?.id;
+      if (!best && !humanVote) {
+        // No usable AI vote and no human pick — nobody dies tonight. Never
+        // invent a random victim to paper over a failed decision.
+        best = null;
+        this.hud.addChat('SYSTEM', '[NIGHT] Mafia could not settle on a legal target — no one is eliminated tonight.');
+        try { this.state.gameLog.push(`Night ${this.state.day}: The Mafia failed to settle on a legal target, so no one was eliminated.`); } catch {}
       }
       this.state._mafiaKillTarget = best;
       // Chain sequentially to sheriff, then doctor, then resolve
@@ -3309,6 +3571,8 @@ export class GameEngine {
       btn.innerHTML = `<canvas class="vtb-face-canvas" width="48" height="48"></canvas><div class="vtb-name">${p.name}</div>`;
       _drawVtbFace(btn.querySelector('.vtb-face-canvas'), p);
       btn.onclick = () => {
+        // Duplicate clicks / late callbacks must not change a locked-in vote.
+        if (resolved) return;
         grid.querySelectorAll('.vote-target-btn').forEach(b => b.classList.remove('selected'));
         btn.classList.add('selected');
         humanVote = p.id;
@@ -3327,6 +3591,33 @@ export class GameEngine {
     });
   }
 
+  /**
+   * Mafia bunker discussion: ask each member to speak and end with
+   * "TARGET: <name>". Only a uniquely identified legal target counts as a vote.
+   * Returns the structured outcome (never throws) so callers can log reasons.
+   */
+  async _requestMafiaDiscussionVote(mafioso, prompt, userMessage, targets) {
+    let outcome;
+    try {
+      outcome = await this._requestAiAction(mafioso, {
+        action: ACTION.MAFIA_KILL,
+        systemPrompt: prompt.system,
+        userMessage,
+        players: this.state.players,
+        alivePlayers: targets,
+        stream: 'post',
+      });
+    } catch {
+      outcome = parseActionResponse('', {
+        action: ACTION.MAFIA_KILL,
+        actor: mafioso,
+        players: targets,
+        errorCode: 'NETWORK_ERROR',
+      });
+    }
+    return outcome;
+  }
+
   async _runMafiaDiscussionAndVote(aiMafia, alive, chatFeed, mafiaVotes) {
     const targets      = alive.filter(p => p.role !== 'mafia');
     const aiMafiaNames = aiMafia.map(p => p.name).join(', ');
@@ -3335,49 +3626,60 @@ export class GameEngine {
     // Single discussion pass — each member speaks and implicitly names their target.
     // We parse the vote from the discussion text directly, eliminating a full extra round of API calls.
     for (const mafioso of aiMafia) {
-      try {
-        const prompt  = buildMafiaDiscussPrompt(mafioso, this.state, targets, aiMafiaNames);
-        const context = discussionLog.length
-          ? `\n\nMafia discussion so far:\n${discussionLog.map((l, i) => `${i + 1}. ${l}`).join('\n')}`
-          : '\n\nYou open the discussion. Name the exact target you want to hit tonight.';
-        const userMsg = prompt.user + context + '\n\nEnd your message by naming your exact target choice.';
-        // retries=1 — night decisions are simple name responses; no need to burn 3 attempts
-        const res = await this._aiDecide(mafioso, prompt.system, userMsg, 1);
-        if (res) {
-          discussionLog.push(`${mafioso.name}: ${res}`);
-          // Parse target directly from discussion — avoids a second API call per member
-          const targetId = this._parseTarget(res, targets, mafioso.id);
-          mafiaVotes[mafioso.id] = targetId;
-          if (chatFeed) {
-            const row = document.createElement('div');
-            row.style.cssText = 'margin-bottom:0.35rem;border-bottom:1px solid rgba(139,0,0,0.2);padding-bottom:0.35rem;';
-            const targetName = targetId ? targets.find(p => p.id === targetId)?.name : null;
-            row.innerHTML = `<span style="color:#ef4444;font-weight:700">${mafioso.name}:</span> ${res}`
-              + (targetName ? ` <span style="color:#fca5a5;font-size:0.78rem"> → ${targetName}</span>` : '');
-            chatFeed.appendChild(row);
-            chatFeed.scrollTop = chatFeed.scrollHeight;
-          }
-        }
-      } catch {}
+      const prompt  = buildMafiaDiscussPrompt(mafioso, this.state, targets, aiMafiaNames);
+      const context = discussionLog.length
+        ? `\n\nMafia discussion so far:\n${discussionLog.map((l, i) => `${i + 1}. ${l}`).join('\n')}`
+        : '\n\nYou open the discussion. Name the exact target you want to hit tonight.';
+      const userMsg = prompt.user + context + '\n\nEnd your message with the line "TARGET: <name>".';
+      const outcome = await this._requestMafiaDiscussionVote(mafioso, prompt, userMsg, targets);
+      const res = outcome.rawText;
+
+      if (res && res.trim()) discussionLog.push(`${mafioso.name}: ${res}`);
+
+      const target = outcome.ok
+        ? this._isLegalActionTarget(ACTION.MAFIA_KILL, mafioso, outcome.targetId, targets)
+        : null;
+      if (target) {
+        mafiaVotes[mafioso.id] = target.id;
+      } else {
+        // No vote recorded — keep the reason in the game log so it is auditable.
+        this._logActionDegraded(mafioso, outcome, { day: this.state?.day, phase: 'Night' });
+      }
+
+      if (chatFeed && res && res.trim()) {
+        const row = document.createElement('div');
+        row.style.cssText = 'margin-bottom:0.35rem;border-bottom:1px solid rgba(139,0,0,0.2);padding-bottom:0.35rem;';
+        row.innerHTML = `<span style="color:#ef4444;font-weight:700">${mafioso.name}:</span> ${res}`
+          + (target ? ` <span style="color:#fca5a5;font-size:0.78rem"> → ${target.name}</span>` : '');
+        chatFeed.appendChild(row);
+        chatFeed.scrollTop = chatFeed.scrollHeight;
+      }
+
       await this._sleep(300); // reduced from 600ms — just enough for UI to breathe
     }
 
     // Fallback: if discussion parsing yielded no valid votes, fire ONE lightweight kill-decision call
     const hasVotes = Object.values(mafiaVotes).some(v => v);
     if (!hasVotes && aiMafia.length > 0) {
-      try {
-        const attacker   = aiMafia[0];
-        const killPrompt = buildNightMafiaPrompt(attacker, this.state, targets);
-        const killUser   = killPrompt.user
-          + (discussionLog.length
-              ? `\n\nBunker discussion:\n${discussionLog.join('\n')}\n\nChoose final target — respond with ONLY the player name.`
-              : '\n\nRespond with ONLY the player name.');
-        const res = await this._aiDecide(attacker, killPrompt.system, killUser, 1);
-        if (res) {
-          const targetId = this._parseTarget(res, targets, attacker.id);
-          if (targetId) mafiaVotes[attacker.id] = targetId;
-        }
-      } catch {}
+      const attacker   = aiMafia[0];
+      const killPrompt = buildNightMafiaPrompt(attacker, this.state, targets);
+      const killUser   = killPrompt.user
+        + (discussionLog.length
+            ? `\n\nBunker discussion:\n${discussionLog.join('\n')}\n\nChoose final target — respond with ONLY the player name.`
+            : '\n\nRespond with ONLY the player name.');
+      const outcome = await this._requestAiAction(attacker, {
+        action: ACTION.MAFIA_KILL,
+        systemPrompt: killPrompt.system,
+        userMessage: killUser,
+        players: this.state.players,
+        alivePlayers: targets,
+        stream: 'post',
+      });
+      const target = outcome.ok
+        ? this._isLegalActionTarget(ACTION.MAFIA_KILL, attacker, outcome.targetId, targets)
+        : null;
+      if (target) mafiaVotes[attacker.id] = target.id;
+      else this._logActionDegraded(attacker, outcome, { day: this.state?.day, phase: 'Night' });
     }
   }
 
@@ -3524,35 +3826,8 @@ export class GameEngine {
     const aiDoctor  = alive.find(p => !p.isHuman && p.role === 'doctor' && !humanAlreadyActed);
 
     await Promise.all([
-      // Sheriff
-      (async () => {
-        if (!aiSheriff) return;
-        try {
-          const prompt  = buildNightSheriffPrompt(aiSheriff, this.state);
-          const content = await this._aiDecide(aiSheriff, prompt.system, prompt.user, 1);
-          if (content) {
-            const targetId = this._parseTarget(content, alive.filter(p => p.id !== aiSheriff.id), aiSheriff.id);
-            const target   = this.state.players.find(p => p.id === targetId);
-            if (target) {
-              this.state.investigationHistory[target.id] = target.role === 'mafia' ? 'mafia' : 'town';
-              if (target.role === 'mafia') this.state._sheriffNightKill = target.id;
-            }
-          }
-        } catch {}
-      })(),
-      // Doctor
-      (async () => {
-        if (!aiDoctor) return;
-        try {
-          const prompt     = buildNightDoctorPrompt(aiDoctor, this.state);
-          const docContent = await this._aiDecide(aiDoctor, prompt.system, prompt.user, 1);
-          if (docContent) {
-            const targetId = this._parseTarget(docContent, alive, aiDoctor.id);
-            const target   = this.state.players.find(p => p.id === targetId);
-            if (target) this.state.doctorProtectedId = target.id;
-          }
-        } catch {}
-      })(),
+      this._runAiSheriffSilent(aiSheriff, alive),
+      this._runAiDoctorSilent(aiDoctor, alive),
     ]);
 
     const aiMafia = alive.filter(p => !p.isHuman && p.role === 'mafia');
@@ -3568,36 +3843,40 @@ export class GameEngine {
       const discussLog = [];
 
       for (const mafioso of aiMafia) {
-        try {
-          const prompt  = buildMafiaDiscussPrompt(mafioso, this.state, targets, mafiaNames);
-          const context = discussLog.length
-            ? `\n\nMafia discussion so far:\n${discussLog.map((l, i) => `${i + 1}. ${l}`).join('\n')}`
-            : '\n\nYou open the discussion. Name the exact target you want to hit tonight.';
-          const userMsg = prompt.user + context + '\n\nEnd your message by naming your exact target choice.';
-          const content = await this._aiDecide(mafioso, prompt.system, userMsg, 1);
-          if (content) {
-            discussLog.push(`${mafioso.name}: ${content}`);
-            const targetId = this._parseTarget(content, targets, mafioso.id);
-            if (targetId && targetId !== 'skip') {
-              votes.set(targetId, (votes.get(targetId) || 0) + 1);
-            }
-          }
-        } catch {}
+        const prompt  = buildMafiaDiscussPrompt(mafioso, this.state, targets, mafiaNames);
+        const context = discussLog.length
+          ? `\n\nMafia discussion so far:\n${discussLog.map((l, i) => `${i + 1}. ${l}`).join('\n')}`
+          : '\n\nYou open the discussion. Name the exact target you want to hit tonight.';
+        const userMsg = prompt.user + context + '\n\nEnd your message with the line "TARGET: <name>".';
+        const outcome = await this._requestMafiaDiscussionVote(mafioso, prompt, userMsg, targets);
+        if (outcome.rawText && outcome.rawText.trim()) {
+          discussLog.push(`${mafioso.name}: ${outcome.rawText}`);
+        }
+        const target = outcome.ok
+          ? this._isLegalActionTarget(ACTION.MAFIA_KILL, mafioso, outcome.targetId, targets)
+          : null;
+        if (target) votes.set(target.id, (votes.get(target.id) || 0) + 1);
+        else this._logActionDegraded(mafioso, outcome, { day: this.state?.day, phase: 'Night' });
       }
 
       // Fallback: if no targets parsed from discussion, one kill-decision call from lead mafia
       if (votes.size === 0 && aiMafia.length > 0) {
-        try {
-          const attacker   = aiMafia[0];
-          const killPrompt = buildNightMafiaPrompt(attacker, this.state, targets);
-          const killUser   = killPrompt.user
-            + (discussLog.length ? `\n\nBunker discussion:\n${discussLog.join('\n')}\n\nChoose final target — respond with ONLY the player name.` : '\n\nRespond with ONLY the player name.');
-          const content = await this._aiDecide(attacker, killPrompt.system, killUser, 1);
-          if (content) {
-            const targetId = this._parseTarget(content, targets, attacker.id);
-            if (targetId) votes.set(targetId, 1);
-          }
-        } catch {}
+        const attacker   = aiMafia[0];
+        const killPrompt = buildNightMafiaPrompt(attacker, this.state, targets);
+        const killUser   = killPrompt.user
+          + (discussLog.length ? `\n\nBunker discussion:\n${discussLog.join('\n')}\n\nChoose final target — respond with ONLY the player name.` : '\n\nRespond with ONLY the player name.');
+        const outcome = await this._requestAiAction(attacker, {
+          action: ACTION.MAFIA_KILL,
+          systemPrompt: killPrompt.system,
+          userMessage: killUser,
+          players: this.state.players,
+          alivePlayers: targets,
+        });
+        const target = outcome.ok
+          ? this._isLegalActionTarget(ACTION.MAFIA_KILL, attacker, outcome.targetId, targets)
+          : null;
+        if (target) votes.set(target.id, 1);
+        else this._logActionDegraded(attacker, outcome, { day: this.state?.day, phase: 'Night' });
       }
 
       // Determine kill target based on majority vote
@@ -3892,84 +4171,124 @@ export class GameEngine {
   }
 
   _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-  _parseTarget(text, pool, excludeId) {
-    const lower = text.toLowerCase();
-    for (const p of pool) { if (p.id !== excludeId && lower.includes(p.name.toLowerCase())) return p.id; }
-    const others = pool.filter(p => p.id !== excludeId);
-    return others[Math.floor(Math.random() * others.length)]?.id || 'skip';
-  }
 
-  _parseVoteTarget(text, pool, excludeId) {
-    const lower = (text || '').toLowerCase().trim();
-    if (!lower || /\b(abstain|skip|pass|no vote)\b/.test(lower)) return 'skip';
-    for (const p of pool) {
-      if (p.id !== excludeId && lower.includes(p.name.toLowerCase())) return p.id;
-    }
-    return 'skip';
-  }
+  /**
+   * Ask an AI player for a structured vote / night action.
+   *
+   * Returns a structured outcome from game/ai-agent.js and never throws:
+   *   { ok, status, code, reason, targetId, targetName, partial, ... }
+   *
+   * The caller decides the downgrade (vote → abstain, night action → no action)
+   * and is responsible for logging the reason via _logActionDegraded().
+   */
+  async _requestAiAction(player, {
+    action,
+    systemPrompt,
+    userMessage,
+    players = null,
+    alivePlayers = null,
+    timeoutMs = null,
+    stream = false,
+    fetchImpl = null,
+    eventSourceFactory = null,
+  } = {}) {
+    const pool = Array.isArray(players) ? players : (this.state?.players || []);
+    const alivePool = Array.isArray(alivePlayers) ? alivePlayers : pool.filter(p => p.alive);
+    const resolvedTimeout = timeoutMs || _clientFetchTimeout(player.model, 35000);
 
-  // Retry wrapper for ai-decide calls - tries up to 3 times on transient failures.
-  // MODEL_NOT_FOUND / auth errors bail immediately (no point retrying a dead model).
-  async _aiDecide(player, systemPrompt, userMessage, retries = 3, options = {}) {
-    const timeoutMs = options.timeoutMs || _clientFetchTimeout(player.model, 35000);
-    const retryDelayMs = options.retryDelayMs ?? 1000;
-    const timeoutRetryDelayMs = options.timeoutRetryDelayMs ?? 500;
-    let lastError = '';
     this._setAiRuntimeError(player, null);
 
-    for (let attempt = 0; attempt < retries; attempt++) {
-      try {
-        const res = await fetch('/api/ai-decide', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            apiKey: this.state.apiKey,
-            model: player.model,
-            systemPrompt,
-            userMessage,
-          }),
-          signal: AbortSignal.timeout(timeoutMs),
-        });
-        const data = await res.json();
-        // Hard stops — don't retry these
-        if (data.error === 'INSUFFICIENT_CREDITS') {
-          this._setAiRuntimeError(player, data.error, 'decide');
-          this._showCreditError();
-          return null;
-        }
-        if (data.error === 'INVALID_API_KEY') {
-          this._setAiRuntimeError(player, data.error, 'decide');
-          return null;
-        }
-        if (data.error && data.error.startsWith('MODEL_NOT_FOUND')) {
-          console.warn(`[decide] ${player.model} not found — skipping retries`);
-          this._setAiRuntimeError(player, data.error, 'decide');
-          return null; // model is dead, retrying wastes time
-        }
-        if (data.error) {
-          lastError = this._normalizeAiErrorCode(data.error, player.model);
-          if (attempt < retries - 1) await this._sleep(retryDelayMs);
-          continue;
-        }
-        if (data.content && data.content.trim().length > 0) {
-          this._setAiRuntimeError(player, null);
-          return data.content;
-        }
-        lastError = 'EMPTY_RESPONSE';
-        // Empty response - retry after short delay (transient issue)
-        if (attempt < retries - 1) await this._sleep(retryDelayMs);
-      } catch (e) {
-        if (e.name === 'AbortError' || e.name === 'TimeoutError') {
-          lastError = `TIMEOUT:${player.model}`;
-          if (attempt < retries - 1) await this._sleep(timeoutRetryDelayMs);
-        } else {
-          lastError = this._normalizeAiErrorCode(e?.message || 'API_ERROR_NETWORK', player.model);
-          if (attempt < retries - 1) await this._sleep(retryDelayMs);
-        }
-      }
+    let outcome;
+    try {
+      outcome = await requestActionDecision({
+        action,
+        actor: player,
+        players: alivePool,
+        // Full roster so rejected names (dead / self / teammate) get a reason.
+        knownPlayers: pool,
+        apiKey: this.state?.apiKey,
+        model: player.model,
+        systemPrompt,
+        userMessage,
+        timeoutMs: resolvedTimeout,
+        stream,
+        fetchImpl,
+        eventSourceFactory,
+      });
+    } catch (e) {
+      // Defensive: requestActionDecision is documented as non-throwing.
+      outcome = parseActionResponse('', {
+        action,
+        actor: player,
+        players: alivePool,
+        knownPlayers: pool,
+        errorCode: 'NETWORK_ERROR',
+      });
+      console.warn(`[action] ${player?.name} ${action} threw unexpectedly:`, e?.message || e);
     }
-    this._setAiRuntimeError(player, lastError || 'EMPTY_RESPONSE', 'decide');
-    return null; // all retries exhausted
+
+    // Mirror transport failures into the existing runtime-error surface so the
+    // UI still shows "timeout / network" exactly once.
+    if (!outcome.ok &&
+        (outcome.status === ACTION_STATUS.TIMEOUT ||
+         outcome.status === ACTION_STATUS.NETWORK_ERROR ||
+         outcome.status === ACTION_STATUS.API_ERROR)) {
+      const code = outcome.status === ACTION_STATUS.TIMEOUT
+        ? `TIMEOUT:${player.model}`
+        : outcome.code;
+      this._setAiRuntimeError(player, code, 'action');
+      // Out of credits affects the whole game, not just this action.
+      if (code === 'INSUFFICIENT_CREDITS') {
+        try { this._showCreditError(); } catch {}
+      }
+    } else {
+      this._setAiRuntimeError(player, null);
+    }
+
+    return outcome;
+  }
+
+  // Structural sanity for a parsed target — must be a live, legal player.
+  _isLegalActionTarget(action, actor, targetId, alivePool) {
+    if (!targetId) return null;
+    const pool = Array.isArray(alivePool) ? alivePool : (this.state?.players || []).filter(p => p.alive);
+    const target = pool.find(p => p.id === targetId);
+    if (!target || target.alive === false) return null;
+    const legal = getLegalTargets(action, actor, pool);
+    return legal.some(p => p.id === targetId) ? target : null;
+  }
+
+  /**
+   * Validate text that was already obtained (e.g. from a streaming call) as a
+   * night-action answer. Returns { target, outcome }; `target` is null when the
+   * action must be treated as "no action".
+   *
+   * Logging is opt-in so retry loops can log exactly once at the end.
+   */
+  _resolveNightActionText(player, text, action, alivePlayers, {
+    errorCode = '',
+    partial = false,
+    logFailure = true,
+  } = {}) {
+    const outcome = parseActionResponse(text, {
+      action,
+      actor: player,
+      players: alivePlayers,
+      // Full roster (incl. dead players) so rejections explain themselves.
+      knownPlayers: this.state?.players || alivePlayers,
+      errorCode,
+      partial,
+    });
+    const target = outcome.ok
+      ? this._isLegalActionTarget(action, player, outcome.targetId, alivePlayers)
+      : null;
+    if (!target && logFailure) {
+      this._logActionDegraded(player, outcome, {
+        day: this.state?.day,
+        phase: 'Night',
+      });
+    }
+    return { target, outcome };
   }
 }
 
