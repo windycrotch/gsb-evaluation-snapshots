@@ -7,13 +7,14 @@ from __future__ import annotations
 
 import atexit
 import logging
+import math
 import queue
 import threading
 import weakref
 
 import numpy as np
 
-from .core import SR, VoxLock
+from .core import SAMPLE, SR, VoxLock
 
 try:
     import soxr
@@ -79,10 +80,18 @@ class Caller:
 
     The worker runs the model on `chunk_ms` of audio at a time (None: whatever has arrived) and gets one chunk's time
     to finish it, so the default delay is two chunks (or frames, if longer) plus VoxLock's 24 ms and the resampling.
+
+    `state` reports where a call stands: "pass" until VoxLock locks onto the caller (the audio goes out unchanged),
+    "locked" once it isolates, and "degraded" while a locked call's model output has not arrived in time (that
+    stretch goes out unprocessed, and the state returns to "locked" once the model catches up). `locked_at` is the
+    input position, in samples of the then-current segment, at which the lock was taken, or None before it; both
+    survive a track change by the same caller (a new segment), while a new caller means a new Caller.
     """
 
     def __init__(self, *, voice_sample=None, sample_seconds=3.0, threads=1, model_dir=None, precision="int8",
                  chunk_ms=None, delay_ms=None):
+        if voice_sample is not None and len(voice_sample) < SAMPLE:
+            raise ValueError(f"the voice sample must be at least 3 s long, got {len(voice_sample) / SR:.2f} s")
         self.voice_sample, self.sample_seconds = voice_sample, sample_seconds
         self.threads, self.model_dir, self.precision = threads, model_dir, precision
         self.chunk_ms, self.delay_ms = chunk_ms, delay_ms
@@ -90,6 +99,8 @@ class Caller:
         self.lock = threading.Lock()
         self.seg = 0
         self.locked = False                  # set by the worker once VoxLock isolates
+        self._locked_at = None               # input position at which the lock was taken
+        self._degraded = False               # locked, but the last output frame went out partly unprocessed
         self.iso = np.zeros(0, np.float32)   # isolated audio of the current segment, from position iso_at on
         self.iso_at = 0
         self.taken = 0                       # input samples of the current segment the model has run
@@ -103,11 +114,27 @@ class Caller:
         self.closed = True
         self.inbox.put(None)
 
+    @property
+    def state(self):
+        """"pass" until VoxLock locks onto the caller, "locked" once it isolates, "degraded" while a locked call's
+        model output has not arrived in time. Read-only; the worker and `process` keep it current."""
+        if not self.locked:
+            return "pass"
+        return "degraded" if self._degraded else "locked"
+
+    @property
+    def locked_at(self):
+        """The input position, in samples of the then-current segment, at which the lock was taken; None before it.
+        Unchanged by later segments of the same caller."""
+        return self._locked_at
+
     def start_segment(self, rate, n):
         """A new track or rate, or frames the framework skipped: restart the delay line, keep the voice lock."""
+        ms = self.delay_ms
+        if ms is not None and not (math.isfinite(ms) and ms >= 0):
+            raise ValueError(f"delay_ms must be a non-negative finite number of milliseconds, got {ms}")
         _, _, hold = _resamplers(rate)
         step = max(n, rate * self.chunk_ms // 1000 if self.chunk_ms else 0)
-        ms = self.delay_ms
         self.delay = int(round(rate * ms / 1000)) if ms is not None else 2 * step + rate * LATENCY_MS // 1000 + hold
         self.rate = rate
         self.raw = np.zeros(0, np.float32); self.raw_at = 0
@@ -115,6 +142,7 @@ class Caller:
         self.gain = 0.0
         self.fade = 1.0 / max(1, rate // 100)          # 10 ms crossfades
         self.missed = 0                                # samples sent out unprocessed after the lock
+        self._degraded = False
         self.seg += 1
         with self.lock:
             self.iso = np.zeros(0, np.float32); self.iso_at = 0; self.taken = 0
@@ -153,6 +181,7 @@ class Caller:
             if n_pending < max(chunk, 1):
                 continue
             x = np.concatenate(pending); pending, n_pending = [], 0
+            n_in_before = n_in
             for i in range(0, len(x), SR):                     # a second at a time: a closed call stops soon
                 if self.closed:
                     return
@@ -167,7 +196,12 @@ class Caller:
                 with self.lock:
                     if seg == self.seg:
                         self.iso = np.concatenate([self.iso, y.astype(np.float32, copy=False)])
-                        self.locked = getattr(stream, "locked", True)
+                        locked = getattr(stream, "locked", True)
+                        if locked and not self.locked:
+                            # the input position the lock was taken at: this batch's input samples
+                            # prorated by the 16 kHz samples of it run so far
+                            self._locked_at = self.taken + taken * (n_in - n_in_before) // max(1, len(x))
+                        self.locked = locked
             with self.lock:
                 if seg == self.seg:
                     self.taken += taken
@@ -187,7 +221,9 @@ class Caller:
         if hi > lo:
             raw = self.raw[lo - self.raw_at: hi - self.raw_at]
             have = int(np.clip(iso_at + len(iso) - lo, 0, hi - lo)) if locked else 0
-            self.missed += (hi - lo - have) if locked else 0
+            if locked:
+                self.missed += hi - lo - have
+                self._degraded = have < hi - lo      # caught up again once a frame is fully covered
             g = np.zeros(hi - lo, np.float32)                   # share of isolated audio: fades in, snaps off
             g[:have] = np.minimum(self.gain + self.fade * np.arange(1, have + 1, dtype=np.float32), 1.0)
             self.gain = float(g[-1])

@@ -77,6 +77,19 @@ class VoxLockFilter(BaseAudioFilter):
         c = self._caller
         return 1000 * c.delay / c.rate if c is not None and c.rate else None
 
+    @property
+    def state(self) -> str:
+        """"pass" until VoxLock locks onto the caller, "locked" once it isolates, "degraded" while the model is
+        behind on a locked call."""
+        c = self._caller
+        return c.state if c is not None else "pass"
+
+    @property
+    def locked_at(self) -> int | None:
+        """The input position, in samples, at which the caller's voice lock was taken; None before it."""
+        c = self._caller
+        return c.locked_at if c is not None else None
+
     async def start(self, sample_rate: int):
         """Load the model and start the worker for the transport's sample rate.
 

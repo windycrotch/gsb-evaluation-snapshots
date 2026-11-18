@@ -116,6 +116,20 @@ class VoxLockFilter(rtc.FrameProcessor[rtc.AudioFrame]):
         c = self._caller
         return 1000 * c.delay / c.rate if c is not None and c.rate else None
 
+    @property
+    def state(self) -> str:
+        """"pass" until VoxLock locks onto the caller, "locked" once it isolates, "degraded" while the model is
+        behind on a locked call. A different participant starts over at "pass"."""
+        c = self._caller
+        return c.state if c is not None else "pass"
+
+    @property
+    def locked_at(self) -> int | None:
+        """The input position, in samples, at which the caller's voice lock was taken; None before it. Unchanged
+        when the caller's track changes (a microphone toggle)."""
+        c = self._caller
+        return c.locked_at if c is not None else None
+
     def _process(self, frame: rtc.AudioFrame) -> rtc.AudioFrame:
         if not self._enabled or _pre_connect():
             return frame
