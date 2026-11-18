@@ -85,6 +85,7 @@ const cases = [
   ['selftest-account-add-ui.mjs'],
   ['selftest-console-output.mjs'],
   ['selftest-platform-recovery.mjs'],
+  ['selftest-mitm-frames.mjs'],
   ['selftest-capture-recovery-http.mjs'],
   ['selftest-phone-login.mjs'],
   ['selftest-phone-login-http.mjs'],

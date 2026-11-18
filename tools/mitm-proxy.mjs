@@ -31,70 +31,161 @@ export function decodeWsFrame(bytes) {
   }
 }
 
-function makeFrameReader(onMessage) {
+// RFC 6455 帧读取器：把可能跨 TCP 包、可能分片的 WebSocket 帧重组成完整消息。
+// 读取器本身不抛异常，异常分两类：
+// - 协议违规（扩展位、非法 opcode、非法分片序列等）：永久停止该连接的帧解析并回调 onProtocolError；
+// - 消息超过 16 MiB：放弃整条消息（继续排空它在网上的剩余字节），回调 onOversize，
+//   排空完成后仍可解析同一连接的后续消息，已缓冲的半截内容绝不交给解码或凭证写入。
+export const MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
+const OPCODE_CONTINUATION = 0x0;
+const OPCODE_CLOSE = 0x8;
+const OPCODE_PING = 0x9;
+const OPCODE_PONG = 0xa;
+const CONTROL_PAYLOAD_LIMIT = 125;
+
+export function makeFrameReader(onMessage, { onProtocolError = () => {}, onOversize = () => {} } = {}) {
   let buffer = Buffer.alloc(0);
   let fragments = [];
   let fragmentedOpcode = null;
   let fragmentedLength = 0;
+  // 正在排空的帧：remaining 为剩余字节（含掩码键），endsDrop 表示排完即结束超限消息的丢弃。
+  let skip = null;
+  let droppingMessage = false;
   let failed = false;
-  const maxMessageBytes = 16 * 1024 * 1024;
-  return (chunk) => {
+
+  function fail(reason) {
+    failed = true;
+    buffer = Buffer.alloc(0);
+    fragments = [];
+    fragmentedOpcode = null;
+    fragmentedLength = 0;
+    skip = null;
+    droppingMessage = false;
+    onProtocolError(reason);
+  }
+
+  function resetFragments() {
+    fragments = [];
+    fragmentedOpcode = null;
+    fragmentedLength = 0;
+  }
+
+  // 放弃当前超限消息：清掉已缓冲的分片，改为按字节排空，避免半截内容被解码或写入。
+  function startDrop(frameLengthBig, fin, headerLength, masked) {
+    onOversize(Number(frameLengthBig > BigInt(MAX_MESSAGE_BYTES)
+      ? frameLengthBig : BigInt(fragmentedLength) + frameLengthBig));
+    resetFragments();
+    droppingMessage = !fin;
+    buffer = buffer.subarray(headerLength);
+    // 剩余字节含可选的 4 字节掩码键，必须一起排空，后续帧才能对齐。
+    skip = { remaining: frameLengthBig + (masked ? 4n : 0n), endsDrop: fin };
+  }
+
+  return function feed(chunk) {
     if (failed) return;
     buffer = Buffer.concat([buffer, chunk]);
     for (;;) {
+      if (skip) {
+        const take = buffer.length > skip.remaining ? Number(skip.remaining) : buffer.length;
+        buffer = buffer.subarray(take);
+        skip.remaining -= BigInt(take);
+        if (skip.remaining > 0n) return;
+        const endsDrop = skip.endsDrop;
+        skip = null;
+        if (endsDrop) droppingMessage = false;
+        continue;
+      }
       if (buffer.length < 2) return;
-      const fin = (buffer[0] & 0x80) !== 0;
-      // Extensions (including permessage-deflate) are not negotiated by this proxy.
-      if (buffer[0] & 0x70) { failed = true; buffer = Buffer.alloc(0); return; }
-      const opcode = buffer[0] & 0x0f;
+      const firstByte = buffer[0];
+      const fin = (firstByte & 0x80) !== 0;
+      const rsv = firstByte & 0x70;
+      // 代理在 Upgrade 时已剥除扩展协商，RSV 置位只可能来自 permessage-deflate 等未支持的扩展。
+      if (rsv) {
+        fail(`WebSocket 帧带有未协商的扩展位（RSV=0x${rsv.toString(16)}，如 permessage-deflate 压缩），停止解析该连接`);
+        return;
+      }
+      const opcode = firstByte & 0x0f;
       const masked = (buffer[1] & 0x80) !== 0;
-      let length = buffer[1] & 0x7f;
-      let offset = 2;
-      if (length === 126) {
+      const shortLength = buffer[1] & 0x7f;
+      let headerLength = 2;
+      let frameLengthBig;
+      if (shortLength === 126) {
         if (buffer.length < 4) return;
-        length = buffer.readUInt16BE(2);
-        offset = 4;
-      } else if (length === 127) {
+        frameLengthBig = BigInt(buffer.readUInt16BE(2));
+        headerLength = 4;
+      } else if (shortLength === 127) {
         if (buffer.length < 10) return;
-        const wideLength = buffer.readBigUInt64BE(2);
-        if (wideLength > BigInt(maxMessageBytes)) { failed = true; buffer = Buffer.alloc(0); return; }
-        length = Number(wideLength);
-        offset = 10;
+        frameLengthBig = buffer.readBigUInt64BE(2);
+        headerLength = 10;
+      } else {
+        frameLengthBig = BigInt(shortLength);
       }
-      if (length > maxMessageBytes) { failed = true; buffer = Buffer.alloc(0); return; }
-      let mask = null;
+      const isControl = opcode >= 0x8;
+      if (isControl && opcode !== OPCODE_CLOSE && opcode !== OPCODE_PING && opcode !== OPCODE_PONG) {
+        fail(`非法 WebSocket 控制帧 opcode=0x${opcode.toString(16)}，停止解析该连接`);
+        return;
+      }
+      if (!isControl && opcode !== OPCODE_CONTINUATION && opcode !== 0x1 && opcode !== 0x2) {
+        fail(`非法 WebSocket 数据帧 opcode=0x${opcode.toString(16)}，停止解析该连接`);
+        return;
+      }
+      if (isControl) {
+        if (!fin) {
+          fail(`控制帧 opcode=0x${opcode.toString(16)} 不允许分片，停止解析该连接`);
+          return;
+        }
+        if (frameLengthBig > BigInt(CONTROL_PAYLOAD_LIMIT)) {
+          fail(`控制帧 opcode=0x${opcode.toString(16)} 载荷 ${frameLengthBig} 字节超过 ${CONTROL_PAYLOAD_LIMIT} 字节上限，停止解析该连接`);
+          return;
+        }
+      } else if (!droppingMessage) {
+        if (opcode === OPCODE_CONTINUATION && fragmentedOpcode === null) {
+          fail('收到续帧（opcode=0x0）但没有进行中的分片消息，停止解析该连接');
+          return;
+        }
+        if ((opcode === 0x1 || opcode === 0x2) && fragmentedOpcode !== null) {
+          fail(`分片消息尚未结束就收到新的数据帧 opcode=0x${opcode.toString(16)}，停止解析该连接`);
+          return;
+        }
+      }
+      // 超限预判不依赖完整载荷到达，避免先把十几 MiB 数据缓进内存。
+      const accumulated = isControl ? 0
+        : fragmentedLength + (frameLengthBig > BigInt(MAX_MESSAGE_BYTES)
+          ? MAX_MESSAGE_BYTES : Number(frameLengthBig));
+      const frameTooLarge = !isControl
+        && (frameLengthBig > BigInt(MAX_MESSAGE_BYTES) || accumulated > MAX_MESSAGE_BYTES);
+      if (frameTooLarge) {
+        startDrop(frameLengthBig, fin, headerLength, masked);
+        continue;
+      }
+      const frameLength = Number(frameLengthBig);
+      const totalLength = headerLength + frameLength + (masked ? 4 : 0);
+      if (buffer.length < totalLength) return;
+      buffer = buffer.subarray(headerLength);
+      let payload = buffer.subarray(0, frameLength + (masked ? 4 : 0));
+      buffer = buffer.subarray(payload.length);
       if (masked) {
-        if (buffer.length < offset + 4) return;
-        mask = buffer.subarray(offset, offset + 4);
-        offset += 4;
+        const key = payload.subarray(0, 4);
+        payload = Buffer.from(payload.subarray(4));
+        for (let i = 0; i < payload.length; i += 1) payload[i] ^= key[i % 4];
       }
-      if (buffer.length < offset + length) return;
-      let payload = buffer.subarray(offset, offset + length);
-      if (mask) {
-        payload = Buffer.from(payload);
-        for (let i = 0; i < payload.length; i += 1) payload[i] ^= mask[i % 4];
+      // 超限消息的后续分片（含其间穿插的控制帧）整帧丢弃，不放行、不解码；
+      // 穿插的控制帧同样带 FIN，只有数据帧的 FIN 才表示这条超限消息真正结束。
+      if (droppingMessage) {
+        if (fin && !isControl) droppingMessage = false;
+        continue;
       }
-      buffer = buffer.subarray(offset + length);
-      if (opcode === 0x8) {
+      if (opcode === OPCODE_CLOSE) {
         onMessage({ opcode, payload });
         return;
       }
-      if (opcode === 0x9 || opcode === 0xa) continue;
-      if (opcode === 1 || opcode === 2) {
-        if (fragmentedOpcode !== null) { failed = true; return; }
-        fragmentedOpcode = opcode;
-      } else if (opcode !== 0 || fragmentedOpcode === null) {
-        failed = true;
-        return;
-      }
+      if (opcode === OPCODE_PING || opcode === OPCODE_PONG) continue;
+      if (opcode === 0x1 || opcode === 0x2) fragmentedOpcode = opcode;
       fragmentedLength += payload.length;
-      if (fragmentedLength > maxMessageBytes) { failed = true; fragments = []; return; }
       fragments.push(payload);
       if (fin) {
         onMessage({ opcode: fragmentedOpcode, payload: Buffer.concat(fragments) });
-        fragments = [];
-        fragmentedOpcode = null;
-        fragmentedLength = 0;
+        resetFragments();
       }
     }
   };
@@ -163,6 +254,13 @@ export function createProxy({
       if (direction === 'up') log('ws', `${context} 上行 ${decoded.name} seq=${decoded.seq}`);
       else log('ws', `${context} 下行 ${decoded.name} seq=${decoded.seq}`);
       onFrame?.({ direction, context, name: decoded.name, seq: decoded.seq, body: decoded.body });
+    }, {
+      onProtocolError: (reason) => {
+        log('ws', `${context} ${direction === 'up' ? '上行' : '下行'}${reason}；已停止解析该连接，此前已采集的凭证不受影响`);
+      },
+      onOversize: (bytes) => {
+        log('ws', `${context} ${direction === 'up' ? '上行' : '下行'}消息 ${bytes} 字节超过 ${MAX_MESSAGE_BYTES} 字节上限，已放弃该消息，不写入任何凭证`);
+      },
     });
     socket.on('data', reader);
     return reader;

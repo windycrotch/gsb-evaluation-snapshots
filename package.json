@@ -22,7 +22,7 @@
     "test:dropdowns:browser": "npm run build:ui && node tools/selftest-dropdowns-browser.mjs",
     "test:production": "node tools/selftest-production-eligibility.mjs && node tools/selftest-production-optimizer.mjs && node tools/selftest-production-snapshot.mjs && node tools/selftest-production-timing.mjs && node tools/selftest-production-planning.mjs && node tools/selftest-production-plan-http.mjs && node tools/selftest-production-planning-ui.mjs",
     "test:core-subset": "node tools/selftest-trial-sweeps.mjs && node tools/selftest-hero-equipment.mjs && node tools/selftest-guild.mjs && node tools/selftest-fleet-formation.mjs && node tools/selftest-pirate-hunt.mjs",
-    "test:capture": "node tools/selftest-raw-capture.mjs && node tools/selftest-douyin-cli.mjs",
+    "test:capture": "node tools/selftest-mitm-frames.mjs && node tools/selftest-raw-capture.mjs && node tools/selftest-douyin-cli.mjs",
     "test:config": "node tools/selftest-config-cache.mjs && node tools/selftest-resource-version.mjs && node tools/selftest-resource-updater.mjs && node tools/selftest-protocol-updates.mjs && node tools/selftest-protocol-refresh-http.mjs && node tools/selftest-settings-runtime.mjs && node tools/selftest-unified-action-migration.mjs && node tools/selftest-museum-module-settings.mjs && node tools/selftest-settings-upgrade-http.mjs && npm run test:world-boss",
     "test:world-boss": "node tools/selftest-world-boss-fleets.mjs && node tools/selftest-world-boss-lineups.mjs",
     "test:wxapkg": "node tools/selftest-wxapkg.mjs",
