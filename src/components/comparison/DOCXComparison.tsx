@@ -1,18 +1,23 @@
-import { useState, useMemo, useRef } from 'react'
+import { useState, useMemo, useRef, useEffect, useCallback } from 'react'
 import { useTimelineStore } from '../../stores/timelineStore'
 import { useMediaStore } from '../../stores/mediaStore'
 import { usePlaybackStore } from '../../stores/playbackStore'
 import { cn } from '../../lib/utils'
 import { FileText, Columns, AlignJustify, Filter, BarChart3, ChevronUp, ChevronDown } from 'lucide-react'
 import { diffWords } from 'diff'
+import {
+  buildContextSnippet,
+  computeChangeOffsets,
+  computeChangePositions,
+  computeContextFlags,
+  computeRatioScrollTop,
+  computeSyncedScrollTop,
+  isChangeDiff,
+  type TextDiff
+} from '../../lib/docxDiff'
+import { getScrollTopForTextOffset } from '../../lib/docxScroll'
 
 type ViewMode = 'side-by-side' | 'unified' | 'changes-only'
-
-interface TextDiff {
-  value: string
-  added?: boolean
-  removed?: boolean
-}
 
 export function DOCXComparison() {
   const { tracks } = useTimelineStore()
@@ -22,11 +27,17 @@ export function DOCXComparison() {
   const [viewMode, setViewMode] = useState<ViewMode>('side-by-side')
   const [syncScroll, setSyncScroll] = useState(true)
   const [showHtml, setShowHtml] = useState(true)
-  const [currentChangeIdx, setCurrentChangeIdx] = useState(0)
+  // Cursor is stored together with the change list it belongs to. When the
+  // documents change the key no longer matches and the cursor resets to the
+  // first change without an extra render pass.
+  const [changeCursor, setChangeCursor] = useState<{ key: string; index: number }>({ key: '', index: 0 })
 
   const scrollRefA = useRef<HTMLDivElement>(null)
   const scrollRefB = useRef<HTMLDivElement>(null)
   const changeRefs = useRef<(HTMLSpanElement | null)[]>([])
+  // Scroll positions we wrote programmatically, per pane. Used to ignore the
+  // scroll event the browser echoes back so the two panes do not fight.
+  const expectedScrollRef = useRef<{ a: number | null; b: number | null }>({ a: null, b: null })
 
   // Get current clips at playhead
   const trackA = tracks.find(t => t.type === 'a')
@@ -59,18 +70,32 @@ export function DOCXComparison() {
     return diffs as TextDiff[]
   }, [contentA, contentB])
 
-  // Find change positions for navigation
-  const changePositions = useMemo(() => {
-    const positions: number[] = []
-    textDiffs.forEach((diff, idx) => {
-      if (diff.added || diff.removed) {
-        positions.push(idx)
-      }
-    })
-    return positions
+  // Find change positions for navigation. Whitespace-only added/removed
+  // segments are not user-visible changes, so they get no counter entry.
+  const changePositions = useMemo(() => computeChangePositions(textDiffs), [textDiffs])
+
+  // Character offsets of every diff segment in A and B, for side-by-side navigation
+  const changeOffsets = useMemo(() => computeChangeOffsets(textDiffs), [textDiffs])
+
+  // Which unchanged segments are directly adjacent to a change (for "changes only")
+  const contextFlags = useMemo(() => computeContextFlags(textDiffs), [textDiffs])
+
+  // Keep the cursor valid for the current documents. Deriving the safe index
+  // (instead of trusting the stored value) guarantees the highlight and the
+  // "n/total" counter can never point at different entries.
+  const changeKey = `${contentA?.text?.length ?? 0}:${contentB?.text?.length ?? 0}:${changePositions.join(',')}`
+  const storedIdx = changeCursor.key === changeKey ? changeCursor.index : 0
+  const hasChanges = changePositions.length > 0
+  const safeChangeIdx = hasChanges
+    ? Math.min(Math.max(storedIdx, 0), changePositions.length - 1)
+    : 0
+
+  // Keep the change ref array in sync with the rendered diff segments
+  useEffect(() => {
+    changeRefs.current.length = textDiffs.length
   }, [textDiffs])
 
-  // Calculate statistics
+  // Calculate statistics (unchanged measure: word counts / added / removed / similarity)
   const stats = useMemo(() => {
     const textA = contentA?.text || ''
     const textB = contentB?.text || ''
@@ -99,38 +124,99 @@ export function DOCXComparison() {
       added,
       removed,
       unchanged,
-      matchPercent,
-      totalChanges: changePositions.length
+      matchPercent
     }
-  }, [contentA, contentB, textDiffs, changePositions, mediaA, mediaB])
+  }, [contentA, contentB, textDiffs, mediaA, mediaB])
+
+  const applyScrollTop = useCallback((pane: 'a' | 'b', el: HTMLDivElement | null, top: number) => {
+    if (!el) return
+    const before = el.scrollTop
+    el.scrollTop = top
+    // Reading back gives the browser-clamped value. Nothing moved => no scroll
+    // event will fire, so there is nothing to guard against. Otherwise the guard
+    // stays until that pane's own scroll event clears it (see handleScroll),
+    // which keeps the two panes from echoing each other back and forth.
+    const after = el.scrollTop
+    expectedScrollRef.current[pane] = Math.abs(after - before) > 0.5 ? after : null
+  }, [])
 
   // Synced scroll handler
   const handleScroll = (source: 'a' | 'b') => {
     if (!syncScroll) return
-    const srcRef = source === 'a' ? scrollRefA : scrollRefB
-    const dstRef = source === 'a' ? scrollRefB : scrollRefA
+    const sourcePane = source === 'a' ? 'a' : 'b'
+    const targetPane = source === 'a' ? 'b' : 'a'
+    const src = source === 'a' ? scrollRefA.current : scrollRefB.current
+    const dst = source === 'a' ? scrollRefB.current : scrollRefA.current
 
-    if (srcRef.current && dstRef.current) {
-      const scrollRatio = srcRef.current.scrollTop / (srcRef.current.scrollHeight - srcRef.current.clientHeight)
-      dstRef.current.scrollTop = scrollRatio * (dstRef.current.scrollHeight - dstRef.current.clientHeight)
+    if (!src || !dst) return
+
+    // Ignore the echo of our own programmatic scroll.
+    const expected = expectedScrollRef.current[sourcePane]
+    if (expected != null) {
+      expectedScrollRef.current[sourcePane] = null
+      if (Math.abs(src.scrollTop - expected) <= 1) return
     }
+
+    const targetTop = computeSyncedScrollTop(src, dst)
+    // Pane cannot scroll (content fits) or has no measurable scroll range:
+    // leave the other pane alone rather than snapping it to the top.
+    if (targetTop == null) return
+
+    applyScrollTop(targetPane, dst, targetTop)
   }
 
-  // Navigate to change
-  const navigateToChange = (direction: 'prev' | 'next') => {
-    if (changePositions.length === 0) return
+  const handleSyncScrollToggle = (enabled: boolean) => {
+    setSyncScroll(enabled)
+    expectedScrollRef.current = { a: null, b: null }
+  }
 
-    let newIdx = currentChangeIdx
-    if (direction === 'next') {
-      newIdx = (currentChangeIdx + 1) % changePositions.length
-    } else {
-      newIdx = (currentChangeIdx - 1 + changePositions.length) % changePositions.length
+  // Scroll both panes of the side-by-side view to a change. The rendered pane
+  // is authoritative (it knows real paragraph heights); a proportional estimate
+  // is used only when the pane cannot be measured.
+  const scrollPanesToChange = useCallback((diffIndex: number) => {
+    const lengthA = contentA?.text?.length || 0
+    const lengthB = contentB?.text?.length || 0
+
+    const offsetA = changeOffsets.a[diffIndex] || 0
+    const offsetB = changeOffsets.b[diffIndex] || 0
+
+    const paneA = scrollRefA.current
+    const paneB = scrollRefB.current
+
+    if (paneA) {
+      const measured = getScrollTopForTextOffset(paneA, offsetA, lengthA)
+      const top = measured ?? computeRatioScrollTop(lengthA > 0 ? offsetA / lengthA : 0, paneA)
+      if (top != null) applyScrollTop('a', paneA, top)
+    }
+    if (paneB) {
+      const measured = getScrollTopForTextOffset(paneB, offsetB, lengthB)
+      const top = measured ?? computeRatioScrollTop(lengthB > 0 ? offsetB / lengthB : 0, paneB)
+      if (top != null) applyScrollTop('b', paneB, top)
+    }
+  }, [contentA, contentB, changeOffsets, applyScrollTop])
+
+  // Navigate to change (wraps around in both directions)
+  const navigateToChange = (direction: 'prev' | 'next') => {
+    if (!hasChanges) return
+
+    const total = changePositions.length
+    const newIdx = direction === 'next'
+      ? (safeChangeIdx + 1) % total
+      : (safeChangeIdx - 1 + total) % total
+
+    setChangeCursor({ key: changeKey, index: newIdx })
+
+    const diffIndex = changePositions[newIdx]
+    if (diffIndex === undefined) return
+
+    if (viewMode === 'side-by-side') {
+      // The side-by-side panes render the original document, not per-change
+      // spans, so translate the change's character offset into a scroll position.
+      scrollPanesToChange(diffIndex)
+      return
     }
 
-    setCurrentChangeIdx(newIdx)
-
-    // Scroll to change
-    const changeRef = changeRefs.current[changePositions[newIdx]]
+    const changeRef = changeRefs.current[diffIndex]
     if (changeRef) {
       changeRef.scrollIntoView({ behavior: 'smooth', block: 'center' })
     }
@@ -200,7 +286,7 @@ export function DOCXComparison() {
                 <input
                   type="checkbox"
                   checked={syncScroll}
-                  onChange={(e) => setSyncScroll(e.target.checked)}
+                  onChange={(e) => handleSyncScrollToggle(e.target.checked)}
                   className="rounded"
                 />
                 Sync Scroll
@@ -217,9 +303,9 @@ export function DOCXComparison() {
             </>
           )}
 
-          {/* Change navigation */}
-          {changePositions.length > 0 && (
-            <div className="flex items-center gap-1 ml-2">
+          {/* Change navigation - only when there is at least one real change */}
+          {hasChanges && (
+            <div className="flex items-center gap-1 ml-2" data-testid="docx-change-nav">
               <button
                 onClick={() => navigateToChange('prev')}
                 className="p-1 text-text-muted hover:text-text-primary hover:bg-surface rounded"
@@ -227,8 +313,8 @@ export function DOCXComparison() {
               >
                 <ChevronUp className="w-4 h-4" />
               </button>
-              <span className="text-xs text-text-muted">
-                {currentChangeIdx + 1}/{changePositions.length}
+              <span className="text-xs text-text-muted" data-testid="docx-change-count">
+                {safeChangeIdx + 1}/{changePositions.length}
               </span>
               <button
                 onClick={() => navigateToChange('next')}
@@ -266,6 +352,7 @@ export function DOCXComparison() {
               </div>
               <div
                 ref={scrollRefA}
+                data-testid="docx-pane-a"
                 className="flex-1 overflow-auto p-4"
                 onScroll={() => handleScroll('a')}
               >
@@ -289,6 +376,7 @@ export function DOCXComparison() {
               </div>
               <div
                 ref={scrollRefB}
+                data-testid="docx-pane-b"
                 className="flex-1 overflow-auto p-4"
                 onScroll={() => handleScroll('b')}
               >
@@ -305,39 +393,51 @@ export function DOCXComparison() {
               </div>
             </div>
           </div>
+        ) : viewMode === 'changes-only' && !hasChanges ? (
+          /* Empty state: changes-only view with no differences to show */
+          <div className="h-full flex items-center justify-center text-text-muted">
+            <div className="text-center">
+              <Filter className="w-12 h-12 mx-auto mb-4 opacity-30" />
+              <p className="text-lg">No changes</p>
+              <p className="text-sm mt-2">The two documents are identical, so there is nothing to filter.</p>
+            </div>
+          </div>
         ) : (
           /* Unified/Changes view */
           <div className="h-full overflow-auto p-4">
             <div className="max-w-4xl mx-auto">
               <div className="text-sm leading-relaxed">
                 {textDiffs.map((diff, idx) => {
-                  // Skip unchanged text in changes-only mode
-                  if (viewMode === 'changes-only' && !diff.added && !diff.removed) {
-                    // Show ellipsis for context
-                    if (idx > 0 && idx < textDiffs.length - 1) {
-                      const prevDiff = textDiffs[idx - 1]
-                      const nextDiff = textDiffs[idx + 1]
-                      if ((prevDiff.added || prevDiff.removed) || (nextDiff.added || nextDiff.removed)) {
-                        return (
-                          <span key={idx} className="text-text-muted">
-                            {diff.value.slice(0, 50)}...
-                          </span>
-                        )
-                      }
-                    }
-                    return null
+                  const isChange = isChangeDiff(diff)
+
+                  // In changes-only mode, unchanged text is folded unless it is
+                  // directly next to a change. The kept snippet is word-based so
+                  // it never cuts through a word or a change highlight.
+                  if (viewMode === 'changes-only' && !isChange) {
+                    const snippet = buildContextSnippet(
+                      diff.value,
+                      contextFlags.before[idx],
+                      contextFlags.after[idx]
+                    )
+                    if (snippet == null) return null
+                    return (
+                      <span key={idx} className="text-text-muted">
+                        {snippet}
+                      </span>
+                    )
                   }
 
-                  const isChange = diff.added || diff.removed
-                  const isCurrentChange = changePositions[currentChangeIdx] === idx
+                  const isCurrentChange = isChange && changePositions[safeChangeIdx] === idx
 
                   return (
                     <span
                       key={idx}
                       ref={el => { if (isChange) changeRefs.current[idx] = el }}
                       className={cn(
-                        diff.added && 'bg-green-500/20 text-green-400',
-                        diff.removed && 'bg-red-500/20 text-red-400 line-through',
+                        // Highlight only counted changes so every visible mark
+                        // has a matching entry in the "n/total" counter.
+                        isChange && diff.added && 'bg-green-500/20 text-green-400',
+                        isChange && diff.removed && 'bg-red-500/20 text-red-400 line-through',
                         isCurrentChange && 'ring-2 ring-accent ring-offset-2 ring-offset-background rounded'
                       )}
                     >

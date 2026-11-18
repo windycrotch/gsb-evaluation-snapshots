@@ -21,4 +21,5 @@ jobs:
       - run: npm ci
       - run: npx playwright install --with-deps chromium
       - run: npm run test:security
+      - run: npm run test:docx
       - run: npm run build
