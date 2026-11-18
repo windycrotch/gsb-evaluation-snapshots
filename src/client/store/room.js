@@ -80,6 +80,11 @@ export default function room(state = initialState, action) {
             return { ...state, connected: false };
 
         case ROOM_ME:
+            // Idempotent: on reconnection user:me is re-sent, but the user was never removed.
+            if (state.users.some(userState => userState.id === payload.id)) {
+                return { ...state, me: payload.id };
+            }
+
             return {
                 ...state,
                 me: payload.id,
@@ -87,6 +92,11 @@ export default function room(state = initialState, action) {
             };
 
         case ROOM_USER_ADD:
+            // Idempotent: a re-sent user:add (e.g. after a reconnection) must not duplicate a member.
+            if (state.users.some(userState => userState.id === payload.id)) {
+                return state;
+            }
+
             return {
                 ...state,
                 users: state.users.concat([ user(undefined, action) ]),

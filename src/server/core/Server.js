@@ -6,7 +6,8 @@ export default class Server extends NetcodeServer {
     constructor(port = 8001, hostname = '0.0.0.0') {
         super(port, hostname, new BinaryEncoder(events), 30, Math.pow(2, 12), undefined, false);
 
-        this.joinMatcher = new RegExp('^/([^/]+)/?$');
+        // /room-id or /room-id/ with an optional ?token=<stable identity> query string
+        this.joinMatcher = new RegExp('^/([^/?]+)/?(?:\\?[^#]*)?$');
         this.rooms = new RoomManager();
 
         this.onRequest = this.onRequest.bind(this);
@@ -104,9 +105,32 @@ export default class Server extends NetcodeServer {
 
         const [ id ] = attributes.slice(1);
 
+        // Stable identity carried by the client to prove who it is across reconnections.
+        client.token = this.parseToken(request.url);
+
         this.rooms.findOrCreate(id).addClient(client);
 
         console.info(`Client ${client.id} joined.`);
+    }
+
+    /**
+     * Extract the stable identity token from the connection query string.
+     *
+     * @param {String} url
+     *
+     * @return {String|null}
+     */
+    parseToken(url) {
+        const questionMark = url.indexOf('?');
+
+        if (questionMark === -1) {
+            return null;
+        }
+
+        const parameters = new URLSearchParams(url.slice(questionMark + 1));
+        const token = parameters.get('token');
+
+        return token || null;
     }
 
     /**
