@@ -103,6 +103,24 @@ export class UI {
   showResult(winnerName, winnerLabel, s1, s2) {
     $('result-winner').textContent = `${winnerLabel} ${winnerName} 获胜！`;
     $('result-score').textContent = `${s1} - ${s2}`;
+    this.setResultBusy(null);
     this.show('screen-result');
+  }
+
+  /** 联机结算按钮的“等待对手”状态；传 null 恢复 */
+  setResultBusy(text) {
+    const btn = $('btn-rematch');
+    if (!btn) return;
+    if (!text) {
+      if (this._resultBusy) {
+        btn.disabled = false;
+        btn.textContent = '再来一局';
+        this._resultBusy = false;
+      }
+      return;
+    }
+    this._resultBusy = true;
+    btn.disabled = true;
+    btn.textContent = text;
   }
 }
