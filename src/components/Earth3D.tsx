@@ -8,6 +8,12 @@ import { getUmbraPosition, getSubSolarPoint, latLonToVector3 } from '../utils/as
 interface Earth3DProps {
   currentTimestamp: number;
   selectedStation: ObservationStation | null;
+  /**
+   * Station set currently in effect. Defaults to the 2026 global list so the
+   * default simulation is unchanged; during a historical replay the parent
+   * passes the scenario's own stations so only those markers are rendered.
+   */
+  stations?: ObservationStation[];
   umbraPath?: { time: number; coords: LatLon; name?: string }[];
   onSelectStation: (station: ObservationStation) => void;
   cameraMode: 'free' | 'follow-shadow' | 'focused-station' | 'top-down' | 'spain-fixed';
@@ -146,6 +152,7 @@ const generateGreatCircleArc = (coord1: LatLon, coord2: LatLon, radius: number, 
 export const Earth3D: React.FC<Earth3DProps> = ({
   currentTimestamp,
   selectedStation,
+  stations = OBSERVATION_STATIONS,
   umbraPath = UMBRA_PATH_WAYPOINTS,
   onSelectStation,
   cameraMode,
@@ -861,7 +868,7 @@ export const Earth3D: React.FC<Earth3DProps> = ({
         stationMarkersRef.current?.add(hudGroup);
       };
 
-      OBSERVATION_STATIONS.forEach((station) => {
+      stations.forEach((station) => {
         const isSelected = selectedStation?.id === station.id && !selectedStation?.isCustom;
         createOrbitalHud(station.coords, isSelected, station.name, false, station);
       });
@@ -1001,7 +1008,7 @@ export const Earth3D: React.FC<Earth3DProps> = ({
         controlsRef.current.target.set(0, 0, 0);
       }
     }
-  }, [currentTimestamp, selectedStation, cameraMode, cameraResetTrigger, showPathLine, showPenumbra, showDayNightTerminator, showCelestialIcons]);
+  }, [currentTimestamp, selectedStation, stations, umbraPath, cameraMode, cameraResetTrigger, showPathLine, showPenumbra, showDayNightTerminator, showCelestialIcons]);
 
   // Handle Click on Globe / Markers
   const handleClick = (event: React.MouseEvent<HTMLDivElement>) => {

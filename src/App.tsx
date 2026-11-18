@@ -248,6 +248,7 @@ export default function App() {
           <Earth3D
             currentTimestamp={currentTimestamp}
             selectedStation={activeStation}
+            stations={activeStations}
             umbraPath={activeHistoricalScenario?.waypoints}
             onSelectStation={handleSelectStation}
             cameraMode={cameraMode}
@@ -281,7 +282,18 @@ export default function App() {
               eclipse={activeHistoricalEclipse}
               scenario={activeHistoricalScenario}
               currentTimestamp={currentTimestamp}
-              onExit={() => { setActiveHistoricalId(null); setCurrentTimestamp(DEFAULT_START_SECONDS); setIsPlaying(true); }}
+              onExit={() => {
+                setActiveHistoricalId(null);
+                setCurrentTimestamp(DEFAULT_START_SECONDS);
+                setIsPlaying(true);
+                // Restore the default 2026 simulation: drop any replay/custom selection
+                // and re-pin to the station auto-tracking would choose at the reset time.
+                setCustomStation(null);
+                setSelectedStation(getAutoTrackingStation(DEFAULT_START_SECONDS, OBSERVATION_STATIONS));
+                setTrackingMode('auto');
+                setCameraMode('follow-shadow');
+                setCameraResetTrigger((prev) => prev + 1);
+              }}
             /> : <PathTimelinePanel
               scenario={activeHistoricalScenario}
               currentTimestamp={currentTimestamp}

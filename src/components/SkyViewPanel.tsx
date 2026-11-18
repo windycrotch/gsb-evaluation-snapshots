@@ -24,14 +24,54 @@ export const SkyViewPanel: React.FC<SkyViewPanelProps> = ({
   // In the late afternoon sky looking west (Northern Hemisphere), the Moon enters from below / lower-right
   // and exits towards above / upper-left across the solar disk.
   const obscurationRatio = Math.min(100, Math.max(0, obscurationPercentage)) / 100;
-  const isEgress = currentPhase === 'Partial (Egress)' || (telemetry.timeToNextPhase?.includes('Eclipse ends') ?? false);
-  
+
+  // The Moon's side of the solar disk is decided from the CURRENT TIME and the
+  // station's own eclipse window, not inferred from the magnitude alone:
+  //   t < C1 (startPartial / 初亏)      -> approaching on the ingress side, clear of the Sun
+  //   C1 <= t < peak                    -> ingress, overlapping the disk
+  //   peak <= t <= C4 (endPartial / 复圆) -> egress, overlapping the disk
+  //   t > C4                            -> recovered, departing on the egress side, clear of the Sun
+  // This keeps historical replays consistent with the telemetry panel regardless
+  // of when their eclipse window falls.
+  const parseClockToSeconds = (value?: string): number | null => {
+    if (!value) return null;
+    const [h, m, s] = value.split(':').map(Number);
+    if ([h, m].some((n) => Number.isNaN(n))) return null;
+    return h * 3600 + m * 60 + (Number.isNaN(s) ? 0 : s);
+  };
+
+  const windowStart = parseClockToSeconds(selectedStation.eclipseTimes.startPartial);
+  const windowPeak = parseClockToSeconds(selectedStation.eclipseTimes.peakTotality);
+  const windowEnd = parseClockToSeconds(selectedStation.eclipseTimes.endPartial);
+
+  let isEgress = false;
+  let isOffDisk = false;
+  if (windowStart !== null && windowEnd !== null) {
+    if (currentTimestamp < windowStart) {
+      // First contact has not happened yet: Moon must not cover the solar disk.
+      isOffDisk = true;
+      isEgress = false;
+    } else if (currentTimestamp > windowEnd) {
+      // Fourth contact (recovery) has passed: Moon must not cover the solar disk.
+      isOffDisk = true;
+      isEgress = true;
+    } else if (windowPeak !== null && currentTimestamp >= windowPeak) {
+      isEgress = true;
+    }
+  } else {
+    // Fallback for points without a usable window: infer the side from telemetry.
+    isEgress = currentPhase === 'Partial (Egress)' || (telemetry.timeToNextPhase?.includes('Eclipse ends') ?? false);
+  }
+
   // Base trajectory angle for the 2026 August sunset eclipse (~65° in the local horizon frame)
   // Ingress: Moon approaches from lower-right (+X, +Y in screen coordinates)
   // Egress: Moon moves away towards upper-left (-X, -Y in screen coordinates)
   const trajectoryAngleRad = 1.13; // ~65 degrees downwards
   const activeAngle = isEgress ? (trajectoryAngleRad + Math.PI) : trajectoryAngleRad;
-  const distancePx = isTotality ? 0 : (1.0 - obscurationRatio) * 165;
+  // Largest rendered disk radius (lg breakpoint = 88px) plus clearance, guaranteeing
+  // the parked Moon never overlaps the solar disk before C1 or after C4.
+  const OFF_DISK_DISTANCE_PX = 180;
+  const distancePx = isTotality ? 0 : isOffDisk ? OFF_DISK_DISTANCE_PX : (1.0 - obscurationRatio) * 165;
   const moonX = Math.cos(activeAngle) * distancePx;
   const moonY = Math.sin(activeAngle) * distancePx;
 
@@ -140,7 +180,7 @@ export const SkyViewPanel: React.FC<SkyViewPanelProps> = ({
 
           {/* 4. The Moon Disc */}
           <div
-            className="absolute w-36 h-36 sm:w-40 sm:h-40 lg:w-44 lg:h-44 rounded-full bg-[#050505] z-20 transition-transform duration-100 ease-out"
+            className={`absolute w-36 h-36 sm:w-40 sm:h-40 lg:w-44 lg:h-44 rounded-full bg-[#050505] z-20 transition-all duration-100 ease-out ${isOffDisk ? 'opacity-60 ring-1 ring-slate-500/40' : 'opacity-100'}`}
             style={{
               transform: `translate(${moonX}px, ${moonY}px)`
             }}
