@@ -1,6 +1,24 @@
 {
-  "name": "sleek-hub",
+  "name": "bhop-fixed-step",
   "version": "0.1.0",
+  "description": "Minimal Source-style bunny-hop core: fixed 128 Hz simulation, frame-rate independent mouse split, 30 u/s air wish cap, landing-tick auto-hop.",
   "type": "module",
-  "main": "./src/index.ts"
+  "main": "./src/engine.js",
+  "exports": {
+    ".": "./src/engine.js",
+    "./physics": "./src/physics.js",
+    "./constants": "./src/constants.js",
+    "./driver": "./src/driver.js"
+  },
+  "scripts": {
+    "test": "node --test \"test/**/*.test.js\"",
+    "sample": "node scripts/sample.mjs",
+    "build:site": "node scripts/build-site.mjs",
+    "serve": "node scripts/serve.mjs",
+    "verify": "npm run build:site && npm test && npm run sample"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  }
 }

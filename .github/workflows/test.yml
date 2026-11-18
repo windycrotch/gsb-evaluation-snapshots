@@ -1,0 +1,21 @@
+name: Test
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      # No dependencies to install; everything runs on the Node standard library.
+      - name: Build browser bundle
+        run: node scripts/build-site.mjs
+      - name: Rule and acceptance tests
+        run: node --test "test/**/*.test.js"
+      - name: Reproducible sample (asserts cross-rate trajectory equality)
+        run: node scripts/sample.mjs
