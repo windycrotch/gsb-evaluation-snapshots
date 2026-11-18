@@ -1,0 +1,445 @@
+.viewer {
+  position: absolute;
+  inset: 0;
+  background: #0a0a0a;
+  overflow: hidden;
+}
+
+.statusOverlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #ddd;
+  font-size: 0.95rem;
+  letter-spacing: 0.02em;
+}
+
+.backButton {
+  position: absolute;
+  top: 1rem;
+  left: 1rem;
+  z-index: 2;
+  padding: 0.55rem 1rem;
+  background: rgba(20, 20, 20, 0.85);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  font-size: 0.85rem;
+  font-weight: 500;
+  cursor: pointer;
+  backdrop-filter: blur(8px);
+}
+
+.backButton:hover {
+  background: rgba(40, 40, 40, 0.9);
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 12%);
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+  z-index: 2;
+  padding: 0;
+  background: rgba(20, 20, 20, 0.85);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  width: 18rem;
+  backdrop-filter: blur(8px);
+  font-size: 0.85rem;
+  overflow: hidden;
+}
+.panelScroll {
+  overflow-y: auto;
+  overflow-x: hidden;
+  flex: 1;
+  min-height: 0;
+  padding: 0.5rem 0.85rem 0 0.85rem;
+}
+.panelFooter {
+  flex-shrink: 0;
+  border-top: 1px solid #333;
+  padding: 8px 0.85rem 0.85rem 0.85rem;
+  margin-top: 4px;
+}
+
+.group {
+  border: none;
+  padding: 0;
+  margin: 0 0 0.6rem;
+}
+
+.group legend {
+  padding: 0;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  opacity: 0.55;
+  margin-bottom: 0.4rem;
+}
+
+.radio,
+.check {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.15rem 0;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+.radio input,
+.check input {
+  accent-color: #2d7af7;
+}
+
+.slider {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+}
+
+.slider span:first-child {
+  opacity: 0.7;
+  font-size: 0.78rem;
+}
+
+.slider input[type="range"] {
+  grid-column: 1 / -1;
+  width: 100%;
+  accent-color: #2d7af7;
+}
+
+.value {
+  font-family: "Menlo", "Consolas", monospace;
+  font-size: 0.82rem;
+}
+
+.muted {
+  opacity: 0.5;
+  font-size: 0.78rem;
+}
+
+.error {
+  color: #e07070;
+  font-size: 0.78rem;
+}
+
+.stats {
+  margin-top: 0.4rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  opacity: 0.7;
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+
+.control {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.control span:first-child {
+  opacity: 0.7;
+  font-size: 0.78rem;
+}
+
+.value {
+  font-family: "Menlo", "Consolas", monospace;
+  font-size: 0.85rem;
+}
+
+.control input[type="range"] {
+  grid-column: 1 / -1;
+  width: 100%;
+  accent-color: #2d7af7;
+}
+
+.stats {
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  opacity: 0.7;
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+
+.section {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  margin-bottom: 0.4rem;
+  padding-bottom: 0.2rem;
+}
+
+.section:last-child {
+  border-bottom: none;
+}
+
+.sectionHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  box-sizing: border-box;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 5px;
+  color: #fff;
+  padding: 0.4rem 0.6rem;
+  margin-bottom: 0.5rem;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  opacity: 0.85;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    opacity 0.15s ease;
+}
+
+.sectionHeader:hover {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.09);
+}
+
+.sectionChevron {
+  flex-shrink: 0;
+  opacity: 0.6;
+  transform: rotate(-90deg);
+  transition: transform 0.2s ease;
+}
+
+.sectionChevronOpen {
+  transform: rotate(0deg);
+}
+
+.sectionBody {
+  overflow: hidden;
+  max-height: 0;
+  transition: max-height 0.25s ease;
+}
+
+.sectionBodyOpen {
+  max-height: 2000px;
+}
+
+.infoGrid {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.3rem 0.6rem;
+  align-items: start;
+  padding: 0.1rem 0 0.5rem;
+  font-size: 0.8rem;
+  overflow: visible;
+}
+
+.infoGrid > span:nth-child(odd) {
+  opacity: 0.6;
+  font-size: 0.75rem;
+}
+
+.infoValue {
+  font-family: "Menlo", "Consolas", monospace;
+  text-align: right;
+  font-size: 0.78rem;
+  max-width: 11rem;
+  word-break: break-word;
+}
+
+.tooltip {
+  width: 200px;
+  padding: 0.5rem 0.6rem;
+  border-radius: 4px;
+  background: rgba(20, 20, 20, 0.97);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: #eee;
+  font-size: 0.7rem;
+  line-height: 1.4;
+  pointer-events: none;
+  white-space: normal;
+  word-break: break-word;
+  z-index: 9999;
+}
+
+.infoIcon {
+  cursor: help;
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+.infoIcon:hover .tooltip {
+  display: block;
+}
+
+.attribution {
+  position: absolute;
+  bottom: 0.5rem;
+  right: 19.5rem;
+  z-index: 2;
+  font-size: 0.68rem;
+  color: rgba(255, 255, 255, 0.7);
+  background: rgba(0, 0, 0, 0.55);
+  padding: 0.2rem 0.5rem;
+  border-radius: 3px;
+}
+
+.checkRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.15rem 0;
+  gap: 0.5rem;
+}
+
+.checkRow .check {
+  padding: 0;
+  flex: 1;
+}
+
+.gearButton {
+  background: transparent;
+  border: none;
+  color: #fff;
+  opacity: 0.4;
+  cursor: pointer;
+  padding: 0.2rem 0.3rem;
+  border-radius: 3px;
+  display: flex;
+  align-items: center;
+  transition:
+    opacity 0.15s ease,
+    background 0.15s ease;
+}
+
+.gearButton:hover:not(:disabled) {
+  opacity: 0.9;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.gearButton:disabled {
+  opacity: 0.15;
+  cursor: not-allowed;
+}
+
+.gearActive {
+  opacity: 1 !important;
+  color: #2d7af7;
+}
+
+.subPanel {
+  margin: 0.3rem 0 0.5rem 0.4rem;
+  padding: 0.55rem 0.7rem;
+  border-left: 2px solid rgba(45, 122, 247, 0.4);
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 0 4px 4px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.subPanel .slider {
+  font-size: 0.78rem;
+}
+
+.subPanel .check {
+  font-size: 0.8rem;
+}
+.exportButton {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.6rem;
+  background: #2d7af7;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  letter-spacing: 0.03em;
+  transition: background 0.15s ease;
+  display: block;
+  text-align: center;
+}
+
+.exportButton:hover:not(:disabled) {
+  background: #1a65e0;
+}
+
+.exportButton:disabled {
+  background: #1a3a6e;
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* ── Mobile panel handle (hidden on desktop) ── */
+.panelHandle {
+  display: none;
+}
+
+.panelHandlePill {
+  width: 36px;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.22);
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+.chevronIcon {
+  opacity: 0.45;
+  /* Default: points UP → hint to expand the sheet */
+  transform: rotate(180deg);
+  transition: transform 0.3s cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+.chevronFlipped {
+  /* Points DOWN → hint to collapse the sheet */
+  transform: rotate(0deg);
+}
+
+/* ── Mobile: bottom sheet layout ── */
+@media (max-width: 640px) {
+  .panel {
+    top: auto;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    width: 100%;
+    max-height: 75vh;
+    border-radius: 14px 14px 0 0;
+    padding-top: 0;
+    /* Slide down so only the 44px handle is visible */
+    transform: translateY(calc(100% - 44px));
+    transition: transform 0.3s cubic-bezier(0.32, 0.72, 0, 1);
+  }
+
+  .panelOpen {
+    transform: translateY(0);
+  }
+
+  .panelHandle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    height: 44px;
+    flex-shrink: 0;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .attribution {
+    right: 0.5rem;
+    bottom: 3rem;
+  }
+}
