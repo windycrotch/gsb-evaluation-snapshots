@@ -1358,13 +1358,22 @@ export class Sprite {
     this.touch();
   }
 
+  /**
+   * Turns the whole canvas by quarter turns clockwise. Cels, slices and background layers turn
+   * with it. Odd turns swap the canvas sides, so a locked fixed size only allows the turn when
+   * it ends at exactly that size; the operation is then refused as a whole and records no step.
+   * One successful turn is one undo step; 0 or a multiple of 4 does nothing at all.
+   */
   rotateSprite(turns: number) {
+    // Only whole quarter turns are meaningful; anything else leaves the document alone
+    if (!Number.isInteger(turns)) return;
     turns = ((turns % 4) + 4) % 4;
     if (!turns) return;
-    if (turns % 2 && this.refuseSize(this.height, this.width)) return;
+    const { width: W, height: H } = this;
+    // Quarter turns trade the sides: a fixed size only allows the turn that ends at exactly it
+    if (turns % 2 && this.refuseSize(H, W)) return;
     this.dropFloating();
     this.checkpoint('Rotate canvas');
-    const { width: W, height: H } = this;
     this.mapAllCels(c => {
       const r = rotate(c, turns);
       // Where the cel's rectangle lands after turning the whole canvas
@@ -1372,16 +1381,35 @@ export class Sprite {
       const y = turns === 1 ? c.x : turns === 2 ? H - c.y - c.h : W - c.x - c.w;
       return { x, y, w: r.w, h: r.h, data: r.data };
     });
-    // Slices keep their boxes (9-slice centers and pivots are dropped: they no longer fit the turned art)
     this.mapSliceKeys(k => {
+      // Keys of zero size only mark a frame as hidden: there is no geometry to turn
+      if (k.w <= 0 || k.h <= 0) return k;
       const x = turns === 1 ? H - k.y - k.h : turns === 2 ? W - k.x - k.w : k.y;
       const y = turns === 1 ? k.x : turns === 2 ? H - k.y - k.h : W - k.x - k.w;
-      return { frame: k.frame, x, y, w: turns % 2 ? k.h : k.w, h: turns % 2 ? k.w : k.h };
+      const next: SliceKey = {
+        frame: k.frame, x, y,
+        w: turns % 2 ? k.h : k.w,
+        h: turns % 2 ? k.w : k.h,
+      };
+      // A half turn keeps the slice's own orientation, so its 9-slice middle and pivot still
+      // describe the same part of the art: mirror them inside the slice. Quarter turns swap
+      // the horizontal and vertical sides of the box; keeping the old relative boxes would
+      // leave data that no longer matches the turned art, so they are dropped explicitly.
+      if (turns === 2) {
+        if (k.center) next.center = {
+          x: k.w - k.center.x - k.center.w, y: k.h - k.center.y - k.center.h,
+          w: k.center.w, h: k.center.h,
+        };
+        if (k.pivot) next.pivot = { x: k.w - k.pivot.x, y: k.h - k.pivot.y };
+      }
+      return next;
     });
     if (turns % 2) {
       [this.width, this.height] = [H, W];
       [this.pixelRatioX, this.pixelRatioY] = [this.pixelRatioY, this.pixelRatioX];
     }
+    // Background cels always cover exactly the canvas: turn the pixels, then fit them to its new size
+    this.refitBackgrounds();
     this.mask = null;
     this.touch();
   }
