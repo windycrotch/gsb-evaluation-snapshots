@@ -37,6 +37,25 @@ type Segment = {
 const MAX_AHEAD_SECONDS = 5;
 
 /**
+ * What the player says when the service breaks the body before any frame was buffered.
+ *
+ * This is the "never showed anything" case: the loading overlay was still up, so the message
+ * has to make clear the failure happened while the first picture was still being built rather
+ * than somewhere inside a scene the user was watching.
+ */
+const STOPPED_BEFORE_PICTURE =
+    "The preview stopped before it produced a picture. The service log has the reason.";
+
+/**
+ * What the player says when a stream that was already showing frames breaks mid-scene.
+ *
+ * The picture existed and then the body ended, so the wording must not read like an opening
+ * failure; the user had already been watching this scene.
+ */
+const STOPPED_MID_SCENE =
+    "The preview stopped before this scene finished. The service log has the reason.";
+
+/**
  * Seconds of played media to keep behind the playhead so a backward seek is still a hit.
  *
  * Chromium caps one `SourceBuffer` at roughly 150 MB. The proxy is a few megabits a second,
@@ -314,24 +333,42 @@ export class PreviewStream {
     #pumping = false;
     #closed = false;
     #abort: AbortController | null = null;
-    /** Resolved by the next `timeupdate`, which is when the playhead has moved. */
-    #demand: (() => void) | null = null;
+    /**
+     * Resolves the read parked by `#appetite`. One read waits at a time, so there is at most
+     * one waiter: a new wait can only start after the previous one was released.
+     */
+    #releaseWait: (() => void) | null = null;
+    /**
+     * Keep filling instead of throttling, latched by `pause` or `seeking` and cleared by the
+     * next `timeupdate`.
+     *
+     * Releasing one wait is not enough on its own: the buffer stays ahead after a pause, so
+     * the very next `#appetite` check would park again and the body's end or failure could
+     * never be observed. A pause or a jump means "feed me now", so reads run on until normal
+     * playback movement resumes and re-arms the ahead-buffer throttle.
+     */
+    #fillOnDemand = false;
     /** The buffer operation in flight; appends and trims never overlap. */
     #operation: Promise<void> = Promise.resolve();
     #lastTrim = 0;
+    /**
+     * Whether the session has buffered at least one media fragment, not just an init segment.
+     *
+     * This is the line between an interruption that never showed a picture (the loading
+     * overlay was still up) and one that cut a scene the user was already watching: the two
+     * failures get different messages.
+     */
+    #produced = false;
     /** The session handed the URL to the element because MediaSource refused its codec. */
     #direct = false;
 
     constructor(element: HTMLVideoElement, events: PreviewStreamEvents = {}) {
         this.#element = element;
         this.#events = events;
+        // `timeupdate` is always relevant: it also drives the periodic trim and the buffered
+        // range report. The `pause` and `seeking` releases exist only while a read is parked,
+        // so they are registered per wait and removed when the wait is released or closed.
         element.addEventListener("timeupdate", this.#onTimeUpdate);
-        // A read that was throttled because the buffer was ahead is waiting for the
-        // playhead to move. A pause or a seek stops the playhead instead, so it has to
-        // release that wait too: otherwise a hold for a starved picture deadlocked the
-        // very append that would have fed it.
-        element.addEventListener("pause", this.#onDemand);
-        element.addEventListener("seeking", this.#onDemand);
     }
 
     /** True when this browser can host a MediaSource session at all. */
@@ -407,11 +444,8 @@ export class PreviewStream {
         this.#closed = true;
         this.#abort?.abort();
         this.#abort = null;
-        this.#demand?.();
-        this.#demand = null;
+        this.#cancelWait();
         this.#element.removeEventListener("timeupdate", this.#onTimeUpdate);
-        this.#element.removeEventListener("pause", this.#onDemand);
-        this.#element.removeEventListener("seeking", this.#onDemand);
         if (this.#objectUrl !== null) {
             URL.revokeObjectURL(this.#objectUrl);
             this.#objectUrl = null;
@@ -419,6 +453,8 @@ export class PreviewStream {
         this.#segments = [];
         this.#buffer = null;
         this.#media = null;
+        this.#produced = false;
+        this.#fillOnDemand = false;
         try {
             this.#element.removeAttribute("src");
             this.#element.load();
@@ -427,14 +463,34 @@ export class PreviewStream {
         }
     }
 
-    /** Release a throttled read: the playhead moved, paused, or jumped. */
+    /**
+     * Release a parked read and drop the listeners that can release it.
+     *
+     * Every wait registers its own `pause`/`seeking` listeners; removing them on release
+     * means an event after the fact cannot touch a later wait, and `close` can free a read
+     * parked on an element whose playhead never moves. Safe to call when nothing is parked.
+     */
+    #cancelWait(): void {
+        const release = this.#releaseWait;
+        if (release === null) {
+            return;
+        }
+        this.#releaseWait = null;
+        this.#element.removeEventListener("pause", this.#onDemand);
+        this.#element.removeEventListener("seeking", this.#onDemand);
+        release();
+    }
+
+    /** Release a throttled read: the element was paused or the playhead jumped. */
     #onDemand = () => {
-        this.#demand?.();
-        this.#demand = null;
+        this.#fillOnDemand = true;
+        this.#cancelWait();
     };
 
     #onTimeUpdate = () => {
-        this.#onDemand();
+        // Normal playback movement resumes the ahead-buffer throttle.
+        this.#fillOnDemand = false;
+        this.#cancelWait();
         const now = performance.now();
         if (now - this.#lastTrim > 500) {
             this.#lastTrim = now;
@@ -442,6 +498,26 @@ export class PreviewStream {
         }
         this.#reportBuffered();
     };
+
+    /**
+     * Park the read until the playhead moves, the element is paused, or it seeks.
+     *
+     * The buffer is already more than `MAX_AHEAD_SECONDS` past the playhead, so reading on
+     * would only push memory toward the SourceBuffer quota. A paused element never fires
+     * `timeupdate`, and a seek jumps the playhead instead of advancing it; without those two
+     * releases the read could wait forever, the next fragment would never append, and the
+     * picture would sit behind its loading overlay.
+     */
+    async #waitForDemand(): Promise<void> {
+        if (this.#closed) {
+            return;
+        }
+        await new Promise<void>((resolve) => {
+            this.#releaseWait = resolve;
+            this.#element.addEventListener("pause", this.#onDemand);
+            this.#element.addEventListener("seeking", this.#onDemand);
+        });
+    }
 
     #reportBuffered(): void {
         const buffered = this.#element.buffered;
@@ -545,7 +621,16 @@ export class PreviewStream {
                         }
                     };
                     const done = () => settle();
-                    const failed = () => settle(new Error("The media source rejected a fragment."));
+                    // A real buffer failure keeps its DOMException: the quota recovery in
+                    // `#append` recognises `QuotaExceededError`, so replacing it with a generic
+                    // Error would turn a recoverable memory-pressure blip into a failed preview.
+                    const failed = (event: Event) => {
+                        const reason =
+                            "error" in event && event.error instanceof Error
+                                ? event.error
+                                : new Error("The media source rejected a fragment.");
+                        settle(reason);
+                    };
                     buffer.addEventListener("updateend", done);
                     buffer.addEventListener("error", failed);
                     try {
@@ -577,11 +662,9 @@ export class PreviewStream {
 
     /** Wait while the buffer is ahead of the playhead, so a chunk cannot fill memory. */
     async #appetite(): Promise<void> {
-        // A paused element never fires `timeupdate`, so waiting for one here deadlocked the
-        // read after eight seconds: the chunk never finished, the player never became
-        // playable, and pressing Play was the only thing that could release the wait. Fill
-        // while paused; one window or scene is bounded, and the cap still applies in motion.
-        if (this.#element.paused) {
+        // A pause or seek latched "keep filling": drain the body rather than parking, so a
+        // paused review or a backward scrub cannot deadlock the append that feeds its picture.
+        if (this.#fillOnDemand) {
             return;
         }
         const ranges = this.#element.buffered;
@@ -592,9 +675,11 @@ export class PreviewStream {
         if (end - this.#element.currentTime <= MAX_AHEAD_SECONDS) {
             return;
         }
-        await new Promise<void>((resolve) => {
-            this.#demand = resolve;
-        });
+        // A read parked here is released by `timeupdate` while playback advances and by the
+        // `pause` and `seeking` events the listener installs. Pausing or jumping must not
+        // strand the append that would have fed the starved picture, and a later `#appetite`
+        // check parks again if the new playhead is still behind a full buffer.
+        await this.#waitForDemand();
     }
 
     async #pump(): Promise<void> {
@@ -661,13 +746,11 @@ export class PreviewStream {
                     throw error;
                 }
                 // The service breaks the body when a build fails, so a rejected read is how
-                // a stopped encoder is told apart from a scene that simply ended. The reason
-                // itself is in the service log; naming the stage is what the player can say.
-                throw new Error(
-                    this.#buffer === null
-                        ? "The preview stopped before it produced a picture. The service log has the reason."
-                        : "The preview stopped before this scene finished. The service log has the reason.",
-                );
+                // a stopped encoder is told apart from a scene that simply ended. Whether a
+                // picture was ever produced is what distinguishes a failure behind the
+                // loading overlay from one that interrupted a scene the user was watching;
+                // the reason itself is in the service log.
+                throw new Error(this.#produced ? STOPPED_MID_SCENE : STOPPED_BEFORE_PICTURE);
             }
             const { done, value } = read;
             if (done) {
@@ -703,6 +786,12 @@ export class PreviewStream {
                 const bytes = pending;
                 pending = EMPTY;
                 await this.#append(bytes);
+                // An init segment alone carries no picture. The first `moof` is the first
+                // media fragment, so only from here on does an interruption read as a cut to
+                // a scene the user was actually watching rather than a never-started preview.
+                if (!this.#produced && this.#containsBox(bytes, "moof")) {
+                    this.#produced = true;
+                }
             }
             if (!announced && this.#buffer !== null) {
                 announced = true;
@@ -712,10 +801,18 @@ export class PreviewStream {
         }
         if (pending.length > 0 && this.#buffer !== null) {
             await this.#append(pending);
+            if (!this.#produced && this.#containsBox(pending, "moof")) {
+                this.#produced = true;
+            }
         }
         if (!ready) {
             throw new Error("The preview stream ended before its index was readable.");
         }
+    }
+
+    /** Whether `bytes` contains a complete top-level box of `type`. */
+    #containsBox(bytes: Bytes, type: string): boolean {
+        return boxes(bytes, 0, bytes.length).found.some((entry) => entry.type === type);
     }
 
     /**
@@ -730,6 +827,9 @@ export class PreviewStream {
         this.#buffer = null;
         this.#abort?.abort();
         this.#abort = null;
+        // Any read parked on buffer appetite belongs to the MediaSource session this is
+        // abandoning; release it so the returning `#load` does not wait on a dead buffer.
+        this.#cancelWait();
         try {
             this.#element.src = url;
             this.#element.load();
@@ -747,7 +847,17 @@ export class PreviewStream {
         if (!MediaSource.isTypeSupported(mime)) {
             throw new UnsupportedCodec(`MediaSource does not accept ${mime}`);
         }
-        this.#buffer = media.addSourceBuffer(mime);
+        try {
+            this.#buffer = media.addSourceBuffer(mime);
+        } catch (error) {
+            // `isTypeSupported` is a capability hint: an engine can still refuse the buffer
+            // when the session opens. That rejection is the same unsupported-codec condition,
+            // so the element gets the URL directly instead of failing the preview.
+            if (error instanceof DOMException && error.name === "NotSupportedError") {
+                throw new UnsupportedCodec(`MediaSource does not accept ${mime}`);
+            }
+            throw error;
+        }
         // The element's clock starts at zero for the session; every later segment is placed
         // by its own `timestampOffset`.
         this.#reportBuffered();
