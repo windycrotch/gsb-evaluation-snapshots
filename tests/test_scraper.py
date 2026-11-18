@@ -285,6 +285,320 @@ class FallbackTest(unittest.TestCase):
             self.assertEqual(data["charts"][0]["rows"][0]["title"], "x")
             self.assertIn("site down", data["errors"][0])
 
+    def test_failed_multi_chart_job_keeps_every_declared_chart(self):
+        """A job declaring two charts brings back both old charts, not just the first."""
+        def boom():
+            raise RuntimeError("boom")
+
+        fake = mock.Mock()
+        fake.SOURCE = {"id": "fake", "name": {"zh": "假"}, "region": "tw", "site_url": "https://example.com/"}
+        fake.JOBS = [{"name": "pair", "charts": ["a", "b"], "fetch": boom}]
+        with tempfile.TemporaryDirectory() as tmp:
+            site, hist = Path(tmp) / "site", Path(tmp) / "hist"
+            site.mkdir()
+            old = {"charts": [
+                {"id": "a", "title": {"zh": "A"}, "rows": [{"rank": 1, "title": "xa"}], "stale": False},
+                {"id": "b", "title": {"zh": "B"}, "rows": [{"rank": 2, "title": "xb"}], "stale": False},
+                {"id": "c", "title": {"zh": "C"}, "rows": [{"rank": 3, "title": "xc"}], "stale": False},
+            ]}
+            (site / "fake.json").write_text(json.dumps(old), encoding="utf-8")
+            with mock.patch.object(main, "SITE_DATA", site), mock.patch("sys.stderr"):
+                data, _, _ = main.run_source(fake, History(hist))
+            self.assertEqual([c["id"] for c in data["charts"]], ["a", "b"])
+            self.assertTrue(all(c["stale"] for c in data["charts"]))
+            self.assertNotIn("c", [c["id"] for c in data["charts"]])
+
+    def test_no_previous_copy_is_not_published_as_an_empty_chart(self):
+        """With nothing to fall back to, the chart is left out and the file is not blanked."""
+        def boom():
+            raise RuntimeError("site down")
+
+        fake = mock.Mock()
+        fake.SOURCE = {"id": "fake", "name": {"zh": "假"}, "region": "tw", "site_url": "https://example.com/"}
+        fake.JOBS = [{"name": "a", "charts": ["a"], "fetch": boom}]
+        with tempfile.TemporaryDirectory() as tmp:
+            site, hist = Path(tmp) / "site", Path(tmp) / "hist"
+            site.mkdir()
+            with mock.patch.object(main, "SITE_DATA", site), mock.patch("sys.stderr"):
+                data, ok, total = main.run_source(fake, History(hist))
+            self.assertEqual((ok, total), (0, 1))
+            self.assertEqual(data["charts"], [])
+            self.assertFalse((site / "fake.json").exists())  # nothing written, not an empty chart
+            self.assertIn("no previous copy", data["errors"][0])
+
+    def test_all_charts_failing_does_not_overwrite_a_previous_file(self):
+        def boom():
+            raise RuntimeError("site down")
+
+        fake = mock.Mock()
+        fake.SOURCE = {"id": "fake", "name": {"zh": "假"}, "region": "tw", "site_url": "https://example.com/"}
+        fake.JOBS = [{"name": "b", "charts": ["b"], "fetch": boom}]  # "a" exists on disk, "b" does not
+        with tempfile.TemporaryDirectory() as tmp:
+            site, hist = Path(tmp) / "site", Path(tmp) / "hist"
+            site.mkdir()
+            (site / "fake.json").write_text(json.dumps(
+                {"charts": [{"id": "a", "rows": [{"rank": 1, "title": "x"}]}], "errors": []}
+            ), encoding="utf-8")
+            before = (site / "fake.json").read_text(encoding="utf-8")
+            with mock.patch.object(main, "SITE_DATA", site), mock.patch("sys.stderr"):
+                main.run_source(fake, History(hist))
+            self.assertEqual((site / "fake.json").read_text(encoding="utf-8"), before)
+
+    def test_partial_response_keeps_undelivered_chart(self):
+        """fetch() returning only one of its declared charts still keeps the other's old copy."""
+        fake = mock.Mock()
+        fake.SOURCE = {"id": "fake", "name": {"zh": "假"}, "region": "tw", "site_url": "https://example.com/"}
+        fake.JOBS = [{"name": "pair", "charts": ["a", "b"], "fetch": lambda: [
+            {"id": "a", "title": {"zh": "A"}, "period": "2026/11/10 ~ 2026/11/16",
+             "prev_from": "site", "rows": [{"rank": 1, "title": "new"}]}]}]
+        with tempfile.TemporaryDirectory() as tmp:
+            site, hist = Path(tmp) / "site", Path(tmp) / "hist"
+            site.mkdir()
+            (site / "fake.json").write_text(json.dumps({"charts": [
+                {"id": "a", "rows": [{"rank": 1, "title": "old-a"}]},
+                {"id": "b", "rows": [{"rank": 2, "title": "old-b"}]}]}), encoding="utf-8")
+            with mock.patch.object(main, "SITE_DATA", site), mock.patch("sys.stderr"):
+                data, ok, _ = main.run_source(fake, History(hist))
+            by_id = {c["id"]: c for c in data["charts"]}
+            self.assertEqual(by_id["a"]["rows"][0]["title"], "new")
+            self.assertFalse(by_id["a"]["stale"])
+            self.assertTrue(by_id["b"]["stale"])
+            self.assertEqual(by_id["b"]["rows"][0]["title"], "old-b")
+            self.assertEqual(ok, 1)
+            self.assertTrue(any(e.startswith("pair") and "missing" in e for e in data["errors"]))
+
+    def test_empty_fetch_result_is_a_failure(self):
+        """A job that "succeeds" with no chart at all must fall back, not count as success."""
+        fake = mock.Mock()
+        fake.SOURCE = {"id": "fake", "name": {"zh": "假"}, "region": "tw", "site_url": "https://example.com/"}
+        fake.JOBS = [{"name": "a", "charts": ["a"], "fetch": lambda: []},
+                     {"name": "b", "charts": ["b"], "fetch": lambda: [{"id": "b", "rows": []}]}]
+        with tempfile.TemporaryDirectory() as tmp:
+            site, hist = Path(tmp) / "site", Path(tmp) / "hist"
+            site.mkdir()
+            (site / "fake.json").write_text(json.dumps({"charts": [
+                {"id": "a", "rows": [{"rank": 1, "title": "old-a"}]},
+                {"id": "b", "rows": [{"rank": 1, "title": "old-b"}]}]}), encoding="utf-8")
+            with mock.patch.object(main, "SITE_DATA", site), mock.patch("sys.stderr"):
+                data, ok, _ = main.run_source(fake, History(hist))
+            self.assertEqual(ok, 0)
+            self.assertEqual([c["id"] for c in data["charts"]], ["a", "b"])
+            self.assertTrue(all(c["stale"] for c in data["charts"]))
+            self.assertEqual([c["rows"][0]["title"] for c in data["charts"]], ["old-a", "old-b"])
+
+
+class ExitCodeTest(unittest.TestCase):
+    @staticmethod
+    def module(source_id, jobs):
+        fake = mock.Mock()
+        fake.SOURCE = {"id": source_id, "name": {"zh": source_id}, "region": "tw",
+                       "site_url": f"https://example.com/{source_id}/"}
+        fake.JOBS = jobs
+        return fake
+
+    @staticmethod
+    def chart(cid="a", title="new"):
+        return {"id": cid, "title": {"zh": cid}, "period": "2026/11/10 ~ 2026/11/16",
+                "prev_from": "site", "rows": [{"rank": 1, "title": title}]}
+
+    def run_main(self, modules):
+        with tempfile.TemporaryDirectory() as tmp:
+            site, hist = Path(tmp) / "site", Path(tmp) / "hist"
+            site.mkdir()
+            with mock.patch.object(main, "SITE_DATA", site), mock.patch.object(main, "HISTORY", hist), \
+                    mock.patch.object(main, "ALL", modules), \
+                    mock.patch.object(main.enrich, "apply_files", return_value={}), \
+                    mock.patch("sys.stderr"):
+                return main.main([])
+
+    def test_one_success_of_two_is_exit_zero(self):
+        def boom():
+            raise RuntimeError("down")
+
+        modules = [self.module("fake", [
+            {"name": "ok", "charts": ["a"], "fetch": lambda: [self.chart("a")]},
+            {"name": "bad", "charts": ["b"], "fetch": boom},
+        ])]
+        self.assertEqual(self.run_main(modules), 0)
+
+    def test_all_jobs_failing_is_exit_one(self):
+        def boom():
+            raise RuntimeError("down")
+
+        modules = [self.module("fake", [
+            {"name": "bad1", "charts": ["a"], "fetch": boom},
+            {"name": "bad2", "charts": ["b"], "fetch": boom},
+        ])]
+        self.assertEqual(self.run_main(modules), 1)
+
+    def test_one_source_failure_does_not_sink_the_others(self):
+        def boom():
+            raise RuntimeError("down")
+
+        modules = [
+            self.module("bad", [{"name": "x", "charts": ["x"], "fetch": boom}]),
+            self.module("good", [{"name": "y", "charts": ["y"], "fetch": lambda: [self.chart("y")]}]),
+        ]
+        self.assertEqual(self.run_main(modules), 0)
+
+
+class HistoryLookupTest(unittest.TestCase):
+    def test_pipeline_history_source_without_snapshot_stays_unknown(self):
+        """A history-backed chart published with no snapshot keeps last_rank/is_new null."""
+        fake = mock.Mock()
+        fake.SOURCE = {"id": "fake", "name": {"zh": "假"}, "region": "jp", "site_url": "https://example.com/"}
+        fake.JOBS = [{"name": "w", "charts": ["w"], "fetch": lambda: [
+            {"id": "w", "title": {"zh": "W"}, "period": "2026/11/09 ~ 2026/11/15",
+             "prev_from": "history", "rows": [
+                 {"rank": 1, "title": "A", "artist": "x", "song_no": "1"},
+                 {"rank": 2, "title": "B", "artist": "y", "song_url": "https://example.com/2"}]}]}]
+        with tempfile.TemporaryDirectory() as tmp:
+            site, hist = Path(tmp) / "site", Path(tmp) / "hist"
+            site.mkdir()
+            with mock.patch.object(main, "SITE_DATA", site), mock.patch("sys.stderr"):
+                data, _, _ = main.run_source(fake, History(hist))
+            rows = data["charts"][0]["rows"]
+            self.assertEqual([(r["last_rank"], r["is_new"]) for r in rows], [(None, None), (None, None)])
+            self.assertEqual(data["charts"][0]["period_key"], "2026-11-09_2026-11-15")
+            self.assertEqual(data["charts"][0]["rank_change"], "history")
+
+    def test_pipeline_history_source_uses_the_strictly_older_snapshot(self):
+        """End to end: a saved snapshot feeds last_rank, full-width/case variants included."""
+        fake = mock.Mock()
+        fake.SOURCE = {"id": "fake", "name": {"zh": "假"}, "region": "jp", "site_url": "https://example.com/"}
+        fake.JOBS = [{"name": "w", "charts": ["w"], "fetch": lambda: [
+            {"id": "w", "title": {"zh": "W"}, "period": "2026/11/09 ~ 2026/11/15",
+             "prev_from": "history", "rows": [{"rank": 1, "title": "ａ", "artist": "Ｘ"}]}]}]
+        with tempfile.TemporaryDirectory() as tmp:
+            site, hist = Path(tmp) / "site", Path(tmp) / "hist"
+            site.mkdir()
+            old = hist / "fake" / "w"
+            old.mkdir(parents=True)
+            (old / "2026-11-02_2026-11-08.json").write_text(json.dumps(
+                {"period": "2026/11/02 ~ 2026/11/08", "rows": [{"rank": 6, "title": "A", "artist": "x"}]}
+            ), encoding="utf-8")
+            with mock.patch.object(main, "SITE_DATA", site), mock.patch("sys.stderr"):
+                data, _, _ = main.run_source(fake, History(hist))
+            row = data["charts"][0]["rows"][0]
+            self.assertEqual((row["last_rank"], row["is_new"]), (6, False))
+
+    def chart(self, key, rows):
+        return {"id": "w", "period": key, "period_key": key, "rows": rows}
+
+    def test_missing_history_leaves_both_null(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cur = self.chart("2026-11-01", [{"rank": 1, "title": "A", "artist": "x"}])
+            History(Path(tmp) / "hist").fill_previous_ranks("src", cur)
+            self.assertEqual([(r["last_rank"], r["is_new"]) for r in cur["rows"]], [(None, None)])
+
+    def test_only_later_snapshots_do_not_count_as_previous(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            h = History(Path(tmp))
+            h.save("src", self.chart("2026-11-02_2026-11-08", [{"rank": 1, "title": "A", "artist": "x"}]))
+            cur = self.chart("2026-10-26_2026-11-01", [{"rank": 1, "title": "A", "artist": "x"}])
+            h.fill_previous_ranks("src", cur)
+            self.assertEqual((cur["rows"][0]["last_rank"], cur["rows"][0]["is_new"]), (None, None))
+
+    def test_bad_period_key_never_matches_a_snapshot(self):
+        """A malformed period key must leave ranks unknown, not mark everything new."""
+        with tempfile.TemporaryDirectory() as tmp:
+            h = History(Path(tmp))
+            h.save("src", self.chart("2026-10-26_2026-11-01", [{"rank": 1, "title": "A", "artist": "x"}]))
+            cur = self.chart("2026-13-99_2026-11-01", [{"rank": 1, "title": "A", "artist": "x"}])
+            h.fill_previous_ranks("src", cur)
+            self.assertEqual((cur["rows"][0]["last_rank"], cur["rows"][0]["is_new"]), (None, None))
+
+    def test_unreadable_or_empty_latest_snapshot_is_unknown(self):
+        """The latest older snapshot is the only reference; a broken one means unknown."""
+        with tempfile.TemporaryDirectory() as tmp:
+            h = History(Path(tmp))
+            d = Path(tmp) / "src" / "w"
+            d.mkdir(parents=True)
+            (d / "2026-10-19_2026-10-25.json").write_text('{"rows": []}', encoding="utf-8")
+            (d / "2026-10-12_2026-10-18.json").write_text(
+                '{"rows": [{"rank": 5, "title": "A", "artist": "x"}]}', encoding="utf-8")
+            cur = self.chart("2026-11-02_2026-11-08", [{"rank": 1, "title": "A", "artist": "x"}])
+            h.fill_previous_ranks("src", cur)
+            self.assertEqual((cur["rows"][0]["last_rank"], cur["rows"][0]["is_new"]), (None, None))
+            (d / "2026-10-19_2026-10-25.json").unlink()
+            self.assertEqual(h.previous("src", "w", "2026-11-02_2026-11-08")["rows"][0]["rank"], 5)
+
+    def test_unreadable_snapshot_is_unknown_not_a_crash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            h = History(Path(tmp))
+            d = Path(tmp) / "src" / "w"
+            d.mkdir(parents=True)
+            (d / "2026-10-26_2026-11-01.json").write_text("{not json", encoding="utf-8")
+            cur = self.chart("2026-11-02_2026-11-08", [{"rank": 1, "title": "A", "artist": "x"}])
+            h.fill_previous_ranks("src", cur)
+            self.assertEqual((cur["rows"][0]["last_rank"], cur["rows"][0]["is_new"]), (None, None))
+
+    def test_fullwidth_and_case_differences_match(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            h = History(Path(tmp))
+            h.save("src", self.chart("2026-10-26_2026-11-01", [
+                {"rank": 1, "title": "Ａ Ｂ Ｃ", "artist": "Ｘ"},
+                {"rank": 2, "title": "Song", "artist": "Artist"},
+            ]))
+            cur = self.chart("2026-11-02_2026-11-08", [
+                {"rank": 1, "title": "abc", "artist": "x"},
+                {"rank": 2, "title": "ｓｏｎｇ", "artist": "ａｒｔｉｓｔ"},
+                {"rank": 3, "title": "Unheard", "artist": "y"},
+            ])
+            h.fill_previous_ranks("src", cur)
+            self.assertEqual([(r["last_rank"], r["is_new"]) for r in cur["rows"]],
+                             [(1, False), (2, False), (None, True)])
+
+    def test_song_number_and_url_identity_survive_a_retitle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            h = History(Path(tmp))
+            h.save("src", self.chart("2026-10-26_2026-11-01", [
+                {"rank": 4, "title": "Old name", "artist": "Artist", "song_no": "12-34"},
+                {"rank": 7, "title": "Old name 2", "artist": "Artist",
+                 "song_url": "https://example.com/song/77"},
+            ]))
+            cur = self.chart("2026-11-02_2026-11-08", [
+                {"rank": 1, "title": "New name", "artist": "Artist", "song_no": "12-34"},
+                {"rank": 2, "title": "New name 2", "artist": "Artist", "song_url": "https://example.com/song/77"},
+            ])
+            h.fill_previous_ranks("src", cur)
+            self.assertEqual([r["last_rank"] for r in cur["rows"]], [4, 7])
+
+    def test_snapshot_keeps_only_identity_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            h = History(Path(tmp))
+            chart = self.chart("2026-11-02", [
+                {"rank": 1, "title": "A", "artist": "x", "song_no": "1", "genre": "Pop", "bpm": 120}])
+            h.save("src", chart)
+            saved = json.loads((Path(tmp) / "src" / "w" / "2026-11-02.json").read_text(encoding="utf-8"))
+            self.assertEqual(set(saved["rows"][0]), {"rank", "title", "artist", "song_no"})
+
+    def test_empty_chart_is_not_saved_as_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            h = History(Path(tmp))
+            h.save("src", self.chart("2026-11-02", []))
+            self.assertFalse((Path(tmp) / "src" / "w" / "2026-11-02.json").exists())
+
+
+class PeriodKeyShapeTest(unittest.TestCase):
+    def test_fallback_when_period_has_no_date(self):
+        self.assertEqual(period_key("period unknown", "2026-11-18"), "2026-11-18")
+        self.assertEqual(period_key("", "2026-11-18"), "2026-11-18")
+
+    def test_other_separators_and_full_width(self):
+        self.assertEqual(period_key("2026-10-26 ~ 2026-11-01", "x"), "2026-10-26_2026-11-01")
+        self.assertEqual(period_key("２０２６／１０／２６", "x"), "2026-10-26")
+
+    def test_joysound_month_key_and_history_key_validation(self):
+        from scraper.history import valid_key
+        self.assertEqual(period_key("2026/10", "x"), "2026-10")
+        self.assertTrue(valid_key("2026-10"))
+        self.assertTrue(valid_key("2026-11-09_2026-11-15"))
+        self.assertFalse(valid_key("2026-13-01"))
+        self.assertFalse(valid_key("not-a-period"))
+        self.assertFalse(valid_key(""))
+        self.assertFalse(valid_key(None))
+
 
 class HashtagTest(unittest.TestCase):
     def entry(self, **over):
