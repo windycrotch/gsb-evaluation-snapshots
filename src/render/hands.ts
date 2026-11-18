@@ -147,6 +147,8 @@ function fingerAt(f: Finger, t: number): { tip: Pt; press: number } {
 
 /** pxPerPt — frame pixels per scene point (shadow sizes are in pixels). */
 export function drawHands(ctx: Ctx2D, tl: Timeline, t: number, pxPerPt: number): void {
+  // `tl.breaks` already holds the scaled times (the timeline is multiplied to fit maxDuration),
+  // so the departure and the return follow the video as encoded, not the pre-scale seconds.
   const brk = breakAt(tl, t);
   plan(tl).forEach((f, i) => {
     const { tip, press } = fingerAt(f, t);

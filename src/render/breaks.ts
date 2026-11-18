@@ -18,6 +18,21 @@ export interface BreakPose {
   brk: Break;
 }
 
+/**
+ * Breaks shorter than this are treated as inactive. The timeline is squeezed to fit `maxDuration`
+ * (all event and break times are multiplied by the same factor), so a break can end up a few
+ * milliseconds long or even zero-length. Choreographing a departure and a smoke cloud into that
+ * would only flash for a frame or two — and a zero-length interval would divide by zero.
+ * Skip it instead: the hand keeps typing and nothing is left on screen.
+ * 0.2 s is six frames at 30 fps — below that the animation is not readable anyway.
+ */
+export const MIN_BREAK_DURATION = 0.2;
+
+/** Whether a break is long enough to play its animation. Guards against zero/NaN/inverted intervals. */
+export function isBreakActive(brk: Break): boolean {
+  return Number.isFinite(brk.t0) && Number.isFinite(brk.t1) && brk.t1 - brk.t0 >= MIN_BREAK_DURATION;
+}
+
 /** Hand fully out of the frame (down and to the right), prop included. */
 const OUT: Pt = { x: 280, y: 420 };
 /** Holding the prop in view (the hand itself is placed by ANCHOR). */
@@ -36,17 +51,28 @@ const lerp = (a: Pt, b: Pt, p: number): Pt => ({ x: a.x + (b.x - a.x) * p, y: a.
 /** Progress of segment [a, b] at time u, eased. */
 const seg = (u: number, a: number, b: number) => ease(clamp01((u - a) / (b - a)));
 
+/**
+ * The break active at time t, or null. Times are the ones stored in `Timeline.breaks`, i.e. already
+ * scaled by `generateTimeline` to fit the video length. Breaks squeezed below MIN_BREAK_DURATION are
+ * treated as absent, so the hand just keeps typing and no stale animation can show up.
+ */
 export function breakAt(tl: Timeline, t: number): Break | null {
-  for (const b of tl.breaks ?? []) if (t >= b.t0 && t <= b.t1) return b;
+  for (const b of tl.breaks ?? []) {
+    if (isBreakActive(b) && t >= b.t0 && t <= b.t1) return b;
+  }
   return null;
 }
 
 /**
  * Choreography in fractions of the break (so it survives the timeline being stretched or squeezed):
  * out → in with the prop → hold → raise → hold at the mouth → lower → hold → out → in empty-handed.
+ * `t` is absolute, but everything is derived from the break’s own t0/t1 — the only times the timeline
+ * has after scaling — so a compressed or stretched break plays the same way, just faster or slower.
+ * An inactive (degenerate/too short) break returns a neutral pose instead of dividing by zero.
  */
 export function breakPose(brk: Break, t: number): BreakPose {
-  const u = (t - brk.t0) / (brk.t1 - brk.t0);
+  if (!isBreakActive(brk)) return { offset: { x: 0, y: 0 }, prop: null, raise: 0, brk };
+  const u = clamp01((t - brk.t0) / (brk.t1 - brk.t0));
   const raised = Math.min(seg(u, 0.36, 0.46), 1 - seg(u, 0.56, 0.66));
   if (u < 0.1) return { offset: lerp({ x: 0, y: 0 }, OUT, seg(u, 0, 0.1)), prop: null, raise: 0, brk };
   if (u < 0.13) return { offset: OUT, prop: null, raise: 0, brk };
@@ -464,12 +490,31 @@ function drawWisp(ctx: Ctx2D, from: Pt, height: number, phase: number, color: st
   ctx.restore();
 }
 
+/** When the exhale starts and ends, as fractions of the break (right after the drag, until the hand is back). */
+const EXHALE_START = 0.6;
+const EXHALE_END = 1;
+
+/**
+ * When the exhale plays, in absolute seconds. Both edges are fractions of the t0/t1 actually stored
+ * in `Timeline.breaks` — i.e. already scaled by `generateTimeline` — so a squeezed break gets a
+ * correspondingly shorter exhale and a stretched one a longer exhale, exactly like the rest of the
+ * break choreography. The window can never leave the break. Returns null for coffee breaks and for
+ * breaks too short to animate.
+ */
+export function exhaleWindow(brk: Break): { start: number; end: number } | null {
+  if (brk.kind !== 'smoke' || !isBreakActive(brk)) return null;
+  const len = brk.t1 - brk.t0;
+  const start = brk.t0 + len * EXHALE_START;
+  const end = brk.t0 + len * EXHALE_END;
+  return end > start ? { start, end } : null;
+}
+
 /** After a drag: a cloud of smoke is blown over the phone from the bottom of the frame and dissolves. */
 export function drawExhale(ctx: Ctx2D, tl: Timeline, t: number, frameBottom: number): void {
   for (const b of tl.breaks ?? []) {
-    if (b.kind !== 'smoke') continue;
-    const start = b.t0 + (b.t1 - b.t0) * 0.6;
-    const p = (t - start) / 2.2;
+    const win = exhaleWindow(b);
+    if (!win) continue;
+    const p = (t - win.start) / (win.end - win.start);
     if (p < 0 || p > 1) continue;
     const alpha = 0.95 * Math.sin(Math.PI * Math.min(1, p * 1.4)) * (1 - p);
     const puffs = [
