@@ -1,0 +1,14 @@
+# Exclude build artifacts
+# Generated on 2026-11-15
+node_modules/* linguist-vendored
+*.png binary
+*.ico binary
+*.bat text eol=crlf
+*.woff2 binary
+
+examples/site/index.html linguist-vendored
+examples/site/**/*.html linguist-vendored
+go.sum linguist-generated
+
+*.tsx linguist-detectable
+*.jpg binary

@@ -1,0 +1,5 @@
+.cache/
+.env
+*.log
+.next/
+.DS_Store
