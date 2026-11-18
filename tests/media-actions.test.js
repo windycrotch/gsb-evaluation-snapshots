@@ -885,6 +885,94 @@ test('a subtitle downloaded again stays selected if it was playing', async () =>
   assert.equal(mpv.tracks.find((track) => track.selected && track.type === 'sub').id, 3);
 });
 
+test('a re-downloaded subtitle that was not playing does not take over', async () => {
+  const mpv = mpvWithTracks([
+    { id: 1, type: 'audio', lang: 'jpn', title: 'Japanese', selected: true },
+    { id: 2, type: 'sub', lang: 'jpn', title: 'Japanese' },
+  ]);
+  const { manager } = loadMediaActions({
+    mpv,
+    preferences: selectionPreferences(),
+    fetchPlaybackInfo: externalEnglishSubtitle(),
+  });
+
+  manager.updateFromFileUrl(E01);
+  manager.selectPreferredTracks();
+  await manager.downloadAllSubtitles('https://jf', 'e01', 'K');
+  assert.equal(mpv.selected.sid, '3'); // the downloaded English subtitle
+
+  mpv.set('sid', '2'); // the viewer switches to the Japanese subtitle
+  await manager.downloadAllSubtitles('https://jf', 'e01', 'K');
+
+  // The English track was replaced under a new id, but left unselected.
+  assert.deepEqual(
+    mpv.commands.map(([command]) => command),
+    ['sub-add', 'sub-remove', 'sub-add']
+  );
+  const subtitles = mpv.tracks.filter((track) => track.type === 'sub');
+  assert.equal(subtitles.length, 2);
+  const readded = subtitles.find((track) => track.lang === 'en');
+  assert.equal(readded.id, 4);
+  assert.equal(readded.selected, undefined);
+  assert.equal(mpv.selected.sid, '2');
+});
+
+test('downloads for two files interleaved only reach the file still playing', async () => {
+  const slow = deferred();
+  const mpv = mpvWithTracks([
+    { id: 1, type: 'audio', lang: 'jpn', title: 'Japanese', selected: true },
+  ]);
+  const { manager } = loadMediaActions({
+    mpv,
+    preferences: selectionPreferences(),
+    http: {
+      download: (url) => (url.includes('/Videos/e01/') ? slow.promise : Promise.resolve()),
+    },
+    fetchPlaybackInfo: externalEnglishSubtitle(),
+  });
+
+  manager.updateFromFileUrl(E01);
+  const first = manager.downloadAllSubtitles('https://jf', 'e01', 'K');
+  await new Promise((resolve) => setImmediate(resolve)); // e01's download is in flight
+  manager.updateFromFileUrl(E02);
+  await manager.downloadAllSubtitles('https://jf', 'e02', 'K');
+  slow.resolve();
+  await first;
+
+  const subtitles = mpv.tracks.filter((track) => track.type === 'sub');
+  assert.equal(subtitles.length, 1);
+  assert.match(subtitles[0]['external-filename'], /jellyfin_e02_/);
+  assert.equal(mpv.selected.sid, String(subtitles[0].id));
+});
+
+test('a manual download is not undone by an automatic download finishing later', async () => {
+  const mpv = mpvWithTracks([
+    { id: 1, type: 'audio', lang: 'eng', title: 'English', selected: true },
+  ]);
+  const { manager } = loadMediaActions({
+    mpv,
+    preferences: selectionPreferences(),
+    fetchPlaybackInfo: externalEnglishSubtitle(),
+  });
+
+  manager.updateFromFileUrl(E01);
+  manager.selectPreferredTracks(); // audio is English: no subtitle is turned on
+  assert.equal(
+    mpv.tracks.some((track) => track.type === 'sub' && track.selected),
+    false
+  );
+  await manager.downloadAllSubtitles('https://jf', 'e01', 'K', { manual: true });
+  assert.equal(mpv.selected.sid, '2'); // the manual download is shown
+
+  // An automatic re-download replaces the track; the new file of the same
+  // subtitle takes over the selection instead of subtitles turning off again.
+  await manager.downloadAllSubtitles('https://jf', 'e01', 'K');
+
+  assert.equal(mpv.selected.sid, '3');
+  const selected = mpv.tracks.find((track) => track.type === 'sub' && track.selected);
+  assert.equal(selected.lang, 'en');
+});
+
 test('a manual download picks the best-ranked full subtitle among the downloads', async () => {
   const mpv = mpvWithTracks([
     { id: 1, type: 'audio', lang: 'jpn', title: 'Japanese', selected: true },

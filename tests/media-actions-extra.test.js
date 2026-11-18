@@ -559,3 +559,107 @@ test('the last Jellyfin item is forgotten when a local file plays', () => {
   harness.manager.manualSetTitle();
   assert.deepEqual(harness.osd, ['No Jellyfin media detected. Please open a Jellyfin URL first.']);
 });
+
+test('a selection whose downloads went stale before the last one finishes changes nothing', async () => {
+  const last = deferred();
+  const harness = createManager({
+    prefs: { download_all_subtitles: true, show_notifications: true },
+    fetchPlaybackInfo: withStreams(sidecar(1), sidecar(2)),
+    http: {
+      download: async (url) => {
+        if (url.includes('/Subtitles/2/')) await last.promise;
+      },
+    },
+  });
+
+  harness.manager.updateFromFileUrl(STREAM);
+  const pending = harness.manager.downloadAllSubtitles('https://jf.example', ITEM, 'K');
+  await flush();
+  // The first subtitle is already loaded when the file ends.
+  assert.equal(harness.state.tracks.length, 1);
+  harness.manager.invalidatePendingResults();
+  last.resolve();
+  await pending;
+
+  // The second download is dropped and the final selection never runs: the
+  // first track is left unselected and nothing is announced as downloaded.
+  assert.equal(harness.state.tracks.length, 1);
+  assert.equal(harness.state.sid, undefined);
+  assert.deepEqual(harness.osd, ['Loaded external eng subtitle']);
+});
+
+test('results for the next file still apply after the previous one ended', async () => {
+  const harness = createManager({ fetchPlaybackInfo: withStreams(sidecar(1)) });
+
+  harness.manager.updateFromFileUrl(STREAM);
+  harness.manager.invalidatePendingResults(); // the file ended
+  harness.manager.updateFromFileUrl(OTHER_STREAM);
+  await harness.manager.setVideoTitleFromMetadata('https://jf.example', OTHER, 'K');
+  await harness.manager.downloadAllSubtitles('https://jf.example', OTHER, 'K');
+
+  assert.equal(harness.state.title, 'Pilot');
+  assert.equal(harness.state.tracks.length, 1);
+  assert.equal(harness.state.sid, '1');
+});
+
+test('a manual download after a local file plays only prompts, without a request', async () => {
+  const requests = [];
+  const harness = createManager({
+    status: { url: '/Users/me/Movies/home.mp4' },
+    fetchPlaybackInfo: async (...args) => {
+      requests.push(args);
+      return {};
+    },
+  });
+
+  harness.manager.updateFromFileUrl(STREAM);
+  harness.manager.updateFromFileUrl('/Users/me/Movies/home.mp4');
+  harness.manager.manualDownloadSubtitles();
+  await flush();
+
+  assert.deepEqual(harness.osd, ['No Jellyfin media detected. Please open a Jellyfin URL first.']);
+  assert.deepEqual(requests, []);
+  assert.deepEqual(harness.downloads, []);
+});
+
+test('a manual download falls back to the signs track in a preferred language', async () => {
+  const harness = createManager({
+    prefs: {
+      select_preferred_tracks: true,
+      preferred_languages: 'en',
+      download_all_subtitles: true,
+    },
+    fetchPlaybackInfo: withStreams(
+      sidecar(1, { Language: 'fre', Title: 'Français' }),
+      sidecar(2, { Language: 'eng', Title: 'Signs', IsForced: true })
+    ),
+  });
+
+  harness.manager.updateFromFileUrl(STREAM);
+  await harness.manager.downloadAllSubtitles('https://jf.example', ITEM, 'K', { manual: true });
+
+  // No full subtitle in a preferred language, so the English signs track
+  // shows rather than the newer French full one.
+  assert.equal(harness.state.sid, '2');
+  assert.equal(harness.state.tracks[1].title, 'Signs (Forced)');
+});
+
+test('a manual download without a preferred language match shows the newest download', async () => {
+  const harness = createManager({
+    prefs: {
+      select_preferred_tracks: true,
+      preferred_languages: 'en',
+      download_all_subtitles: true,
+    },
+    fetchPlaybackInfo: withStreams(
+      sidecar(1, { Language: 'fre', Title: 'Français' }),
+      sidecar(2, { Language: 'jpn', Title: '日本語' })
+    ),
+  });
+
+  harness.manager.updateFromFileUrl(STREAM);
+  await harness.manager.downloadAllSubtitles('https://jf.example', ITEM, 'K', { manual: true });
+
+  assert.equal(harness.state.sid, '2');
+  assert.equal(harness.state.tracks[1].lang, 'jpn');
+});
