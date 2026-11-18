@@ -1,4 +1,5 @@
 import { isLoaded, portValue, register, type Choice } from '../settings/registry.ts';
+import type { LoadSummary } from '../../mods/engine.ts';
 
 // window.OmoriMod: the API mod scripts program against, plus error capture that blames the right mod.
 // Everything a mod does through this API is wrapped so one broken mod logs an error instead of killing the game.
@@ -146,9 +147,15 @@ function scoped(mod: string): ScopedApi {
 export interface ModInfo { id: string; name: string; version: string; enabled: boolean }
 export const modInfo: ModInfo[] = [];
 
+/** What the last mod load decided: enabled mods in load order, disabled ones with reasons. Set by the runtime. */
+let summary: LoadSummary | null = null;
+export const setLoadSummary = (s: LoadSummary | null) => { summary = s; };
+
 export const OmoriMod = {
     apiVersion: 1,
     mods: modInfo,
+    /** The current load summary (see `engine.loadSummary`), or null before mods have loaded. */
+    get loadSummary(): LoadSummary | null { return summary; },
     /** API bound to the calling mod (call it at the top of your script so errors are attributed to you). */
     scope(id?: string): ScopedApi {
         const mod = id ?? current?.id ?? blame(new Error().stack) ?? '(unknown)';

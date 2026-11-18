@@ -21,6 +21,20 @@ export interface ModSource {
     disabled?: boolean;
 }
 
+/**
+ * Why the engine does not load a mod. The kinds are the ones a player needs to tell apart in the load
+ * summary: "I switched it off" is very different from "something it needs is missing".
+ */
+export type DisableReasonKind = 'user-disabled' | 'invalid-manifest' | 'duplicate-id' | 'missing-dependency' | 'dependency-cycle';
+
+export interface DisableReason {
+    kind: DisableReasonKind;
+    /** a short, player-readable explanation */
+    message: string;
+    /** ids involved in the decision: the missing dependency, the members of a cycle, the winning duplicate */
+    mods?: string[];
+}
+
 export interface LoadedMod extends ModDef {
     origin: string;
     enabled: boolean;
@@ -28,6 +42,53 @@ export interface LoadedMod extends ModDef {
     userDisabled: boolean;
     order: number;
     tree: Tree;
+    /** why this mod is not enabled; undefined for enabled mods (and cleared while loading) */
+    disableReason?: DisableReason;
+}
+
+/** A declared `excludes` clash between two enabled mods. A warning only: both stay enabled. */
+export interface LoadConflict {
+    kind: 'declared-conflict';
+    /** the mod that declared the exclusion */
+    mod: string;
+    /** the id or satisfying alias it excludes */
+    target: string;
+    /** enabled mods providing that target (each stays enabled) */
+    others: string[];
+    message: string;
+}
+
+export interface EnabledModSummary {
+    /** 1-based position in the final load order */
+    order: number;
+    id: string;
+    name: string;
+    version: string;
+    origin: string;
+}
+
+export interface DisabledModSummary {
+    id: string;
+    name: string;
+    version: string;
+    origin: string;
+    /** true when the player turned it off in the active profile */
+    userDisabled: boolean;
+    reason: DisableReason;
+}
+
+/**
+ * A player-facing snapshot of one mod load: enabled mods in the order the engine actually applies them,
+ * disabled mods with a reason each, and declared conflicts that were downgraded to warnings.
+ * Refreshed by `ModEngine.load()`, so it always matches what the engine resolved.
+ */
+export interface LoadSummary {
+    /** engine version this snapshot belongs to (incremented on every load) */
+    version: number;
+    enabled: EnabledModSummary[];
+    disabled: DisabledModSummary[];
+    conflicts: LoadConflict[];
+    counts: { total: number; enabled: number; disabled: number; conflicts: number };
 }
 
 const dec = new TextDecoder(), enc = new TextEncoder();
@@ -48,11 +109,18 @@ export class ModEngine {
     mods: LoadedMod[] = [];
     diagnostics: Diagnostic[] = [];
     version = 0;
+    /** What the last `load()` decided, in the player's terms. Rebuilt on every load, so it always matches `activeMods()`. */
+    loadSummary: LoadSummary = {
+        version: 0, enabled: [], disabled: [], conflicts: [],
+        counts: { total: 0, enabled: 0, disabled: 0, conflicts: 0 },
+    };
     /** set by the host once it has read the game's System data; needed to encode replaced images and audio */
     assetKey: Uint8Array | null = null;
     private edits = new Map<string, { mod: LoadedMod; edit: Edit }[]>(); // lowercase game path -> ordered edits
     private generated = new Map<string, Uint8Array>(); // finished bytes made by other code (patched images)
     private cache = new Map<string, { sig: string; bytes: Uint8Array }>();
+    /** declared `excludes` clashes found by the load in progress (published through `loadSummary`) */
+    private lastConflicts: LoadConflict[] = [];
 
     constructor(
         private getKey: () => string | null = () => null,
@@ -73,23 +141,46 @@ export class ModEngine {
         this.version++;
         this.mods = []; this.edits.clear(); this.cache.clear(); this.generated.clear();
         this.diagnostics = [];
+        this.lastConflicts = [];
+        this.loadSummary = { version: this.version, enabled: [], disabled: [], conflicts: [], counts: { total: 0, enabled: 0, disabled: 0, conflicts: 0 } };
 
         const found: LoadedMod[] = [];
+        const unreadable: DisabledModSummary[] = [];
         for (const src of sources) {
             try {
                 const def = loadMod(src.tree, src.label);
                 found.push({ ...def, origin: src.origin ?? src.label, enabled: !src.disabled, userDisabled: !!src.disabled, order: 0, tree: src.tree });
             } catch (e) {
-                this.log('error', `cannot read mod "${src.label}": ${(e as Error).message}`, { mod: src.label });
+                const why = (e as Error).message;
+                this.log('error', `cannot read mod "${src.label}": ${why}`, { mod: src.label });
+                unreadable.push({
+                    id: src.label, name: src.label, version: '?', origin: src.origin ?? src.label, userDisabled: !!src.disabled,
+                    reason: { kind: 'invalid-manifest', message: `cannot read this mod: ${why}` },
+                });
             }
         }
         for (const m of found) {
             for (const w of m.warnings) this.log('warn', w, { mod: m.id });
             for (const e of m.errors) this.log('error', e, { mod: m.id });
-            if (m.errors.length) m.enabled = false;
+            if (m.userDisabled) {
+                m.enabled = false;
+                m.disableReason = { kind: 'user-disabled', message: 'switched off in this profile' };
+                continue;
+            }
+            if (m.errors.length) {
+                m.enabled = false;
+                m.disableReason = { kind: 'invalid-manifest', message: `mod.json cannot be loaded: ${m.errors.join('; ')}` };
+            }
         }
         this.order(found);
-        this.checkCompatibility(found);
+        // `requires` can disable a mod that others list in `dependencies`; re-settle ordering until nothing changes
+        for (;;) {
+            const before = found.filter(m => m.enabled).length;
+            this.checkCompatibility(found);
+            if (found.filter(m => m.enabled).length === before) break;
+            this.order(found);
+        }
+        this.collectConflicts(found);
         // compatibility can disable mods after ordering; keep order numbers dense
         found.filter(m => m.enabled).sort((a, b) => a.order - b.order).forEach((m, i) => (m.order = i));
         this.mods = found;
@@ -99,39 +190,122 @@ export class ModEngine {
                 (this.edits.get(k) ?? this.edits.set(k, []).get(k)!).push({ mod: m, edit });
             }
         }
+        this.detectConflicts();
+        this.loadSummary = this.buildSummary(found, unreadable);
         const on = this.mods.filter(m => m.enabled);
         this.log('info', `${on.length} mod(s) active${on.length ? ': ' + on.map(m => `${m.id}@${m.version}`).join(', ') : ''}; ${this.mods.length - on.length} disabled`);
-        this.detectConflicts();
+    }
+
+    /** Disable `m` once, keeping the first reason (a user's own choice is never overwritten by a later symptom). */
+    private disable(m: LoadedMod, reason: DisableReason) {
+        if (!m.enabled && m.disableReason) return;
+        m.enabled = false;
+        m.disableReason ??= reason;
     }
 
     /** Dependencies first, then `loadAfter`, otherwise by priority (lower first) and id. Missing deps / cycles disable the mod with a clear reason. */
     private order(mods: LoadedMod[]) {
         const byId = new Map<string, LoadedMod>();
         for (const m of mods) {
-            if (byId.has(m.id)) { this.log('error', `duplicate mod id "${m.id}" (${m.origin} ignored)`, { mod: m.id }); m.enabled = false; }
-            else byId.set(m.id, m);
+            const prev = byId.get(m.id);
+            if (!prev) { byId.set(m.id, m); continue; }
+            // The first copy with an id keeps it; every later copy is ignored, whether the first runs or not.
+            if (!m.enabled) continue; // already disabled for its own reason
+            this.log('error', `duplicate mod id "${m.id}" (${m.origin} ignored)`, { mod: m.id });
+            this.disable(m, {
+                kind: 'duplicate-id',
+                message: `another mod with id "${m.id}" (${prev.origin}) comes first, so this copy is ignored`,
+                mods: [m.id],
+            });
+        }        for (;;) {
+            this.dropOrphans(mods, byId);
+            const cycles = this.findDependencyCycles(mods, byId);
+            if (!cycles.length) break;
+            for (const cycle of cycles) {
+                const names = [...cycle.map(m => m.id), cycle[0]!.id].join(' -> ');
+                const ids = cycle.map(m => m.id);
+                for (const m of cycle) {
+                    this.log('error', `dependency cycle through "${m.id}"`, { mod: m.id });
+                    this.disable(m, {
+                        kind: 'dependency-cycle',
+                        message: `part of a dependency cycle (${names}); none of them can be loaded first`,
+                        mods: ids,
+                    });
+                }
+            }
         }
+        // Ordering: dependencies are acyclic here. `loadAfter` is a soft wish, so an edge that would close a
+        // loop is dropped with a warning instead of taking mods down.
+        const active = mods.filter(m => m.enabled).sort((a, b) => a.priority - b.priority || a.id.localeCompare(b.id));
+        const done = new Set<string>(), visiting = new Set<string>(), out: LoadedMod[] = [];
+        const visit = (m: LoadedMod) => {
+            if (done.has(m.id) || !m.enabled) return;
+            if (visiting.has(m.id)) return;
+            visiting.add(m.id);
+            for (const d of m.dependencies) { const dm = byId.get(d); if (dm?.enabled) visit(dm); }
+            for (const d of m.loadAfter) {
+                const dm = byId.get(d);
+                if (!dm?.enabled) continue;
+                if (visiting.has(dm.id)) { this.log('warn', `loadAfter "${d}" would form an ordering cycle; ignored`, { mod: m.id }); continue; }
+                visit(dm);
+            }
+            visiting.delete(m.id); done.add(m.id);
+            out.push(m);
+        };
+        active.forEach(visit);
+        out.forEach((m, i) => (m.order = i));
+    }
+
+    /** Disable every enabled mod whose `dependencies` are missing or not enabled, repeating until nothing changes. */
+    private dropOrphans(mods: LoadedMod[], byId: Map<string, LoadedMod>) {
         for (let changed = true; changed;) { // disabling a mod can orphan its dependents
             changed = false;
             for (const m of mods) {
                 if (!m.enabled) continue;
                 for (const d of m.dependencies) {
-                    if (!byId.get(d)?.enabled) { this.log('error', `requires mod "${d}", which is ${byId.has(d) ? 'disabled' : 'not installed'}`, { mod: m.id }); m.enabled = false; changed = true; break; }
+                    const dep = byId.get(d);
+                    if (dep?.enabled) continue;
+                    const what = !dep ? 'not installed' : 'disabled';
+                    this.log('error', `requires mod "${d}", which is ${what}`, { mod: m.id });
+                    this.disable(m, {
+                        kind: 'missing-dependency',
+                        message: dep
+                            ? `needs "${d}", which is disabled${dep.disableReason ? ` (${dep.disableReason.message})` : ''}`
+                            : `needs "${d}", which is not installed`,
+                        mods: [d],
+                    });
+                    changed = true; break;
                 }
             }
         }
-        const active = mods.filter(m => m.enabled).sort((a, b) => a.priority - b.priority || a.id.localeCompare(b.id));
-        const done = new Set<string>(), visiting = new Set<string>(), out: LoadedMod[] = [];
-        const visit = (m: LoadedMod) => {
-            if (done.has(m.id)) return;
-            if (visiting.has(m.id)) { this.log('error', `dependency cycle through "${m.id}"`, { mod: m.id }); m.enabled = false; return; }
-            visiting.add(m.id);
-            for (const d of [...m.dependencies, ...m.loadAfter]) { const dm = byId.get(d); if (dm?.enabled) visit(dm); }
-            visiting.delete(m.id); done.add(m.id);
-            if (m.enabled) out.push(m);
+    }
+
+    /** Each dependency cycle among the enabled mods (self-dependency included), as its members in dependency order. */
+    private findDependencyCycles(mods: LoadedMod[], byId: Map<string, LoadedMod>): LoadedMod[][] {
+        const live = mods.filter(m => m.enabled);
+        const index = new Map<string, number>(), low = new Map<string, number>(), stack: LoadedMod[] = [], onStack = new Set<string>();
+        const cycles: LoadedMod[][] = [];
+        let next = 0;
+        const strong = (m: LoadedMod) => { // Tarjan: a strongly connected component with a dependency edge inside is a cycle
+            index.set(m.id, next); low.set(m.id, next); next++;
+            stack.push(m); onStack.add(m.id);
+            const edges = m.dependencies.map(d => byId.get(d)).filter((x): x is LoadedMod => !!x?.enabled);
+            for (const d of edges) {
+                if (!index.has(d.id)) { strong(d); low.set(m.id, Math.min(low.get(m.id)!, low.get(d.id)!)); }
+                else if (onStack.has(d.id)) low.set(m.id, Math.min(low.get(m.id)!, index.get(d.id)!));
+            }
+            if (low.get(m.id) !== index.get(m.id)) return;
+            const scc: LoadedMod[] = [];
+            for (;;) {
+                const x = stack.pop()!;
+                onStack.delete(x.id); scc.push(x);
+                if (x === m) break;
+            }
+            const selfLoop = scc.length === 1 && scc[0]!.dependencies.includes(scc[0]!.id);
+            if (scc.length > 1 || selfLoop) cycles.push(scc.reverse());
         };
-        active.forEach(visit);
-        out.forEach((m, i) => (m.order = i));
+        for (const m of live) if (!index.has(m.id)) strong(m);
+        return cycles;
     }
 
     /**
@@ -158,17 +332,31 @@ export class ModEngine {
                 for (const req of m.requires) {
                     if (skips.has(req.toLowerCase()) || satisfied.has(req.toLowerCase())) continue;
                     this.log('error', `requires "${req}", which is not installed or not enabled`, { mod: m.id });
-                    m.enabled = false; changed = true; break;
+                    this.disable(m, {
+                        kind: 'missing-dependency',
+                        message: `requires "${req}", which is not installed or not enabled`,
+                        mods: [req],
+                    });
+                    changed = true; break;
                 }
             }
         }
+    }
+
+    /** Declared `excludes` clashes among the mods that ended up enabled. Warnings only; both sides keep running. */
+    private collectConflicts(mods: LoadedMod[]) {
+        this.lastConflicts = [];
         const live = mods.filter(m => m.enabled);
-        const satisfiedBy = new Map<string, string[]>();
-        for (const m of live) for (const k of [m.id, ...m.satisfies]) (satisfiedBy.get(k.toLowerCase()) ?? satisfiedBy.set(k.toLowerCase(), []).get(k.toLowerCase())!).push(m.name);
+        const satisfiedBy = new Map<string, { id: string; name: string }[]>();
+        for (const m of live) for (const k of [m.id, ...m.satisfies]) (satisfiedBy.get(k.toLowerCase()) ?? satisfiedBy.set(k.toLowerCase(), []).get(k.toLowerCase())!).push({ id: m.id, name: m.name });
         for (const m of live) {
             for (const ex of m.excludes) {
-                const others = (satisfiedBy.get(ex.toLowerCase()) ?? []).filter(n => n !== m.name);
-                if (others.length) this.log('warn', `declares that it conflicts with "${ex}" (${others.join(', ')}), which is also enabled; they may fight over the same files`, { mod: m.id });
+                const others = (satisfiedBy.get(ex.toLowerCase()) ?? []).filter(o => o.name !== m.name);
+                if (!others.length) continue;
+                const names = others.map(o => o.name);
+                const message = `declares that it conflicts with "${ex}" (${names.join(', ')}), which is also enabled; they may fight over the same files`;
+                this.log('warn', message, { mod: m.id });
+                this.lastConflicts.push({ kind: 'declared-conflict', mod: m.id, target: ex, others: others.map(o => o.id), message });
             }
         }
     }
@@ -180,6 +368,26 @@ export class ModEngine {
                 this.log('warn', `${target}: replaced by ${replacers.map(r => r.mod.id).join(' then ')}; the last one wins. Use a patch instead of a full replace to combine mods.`);
             }
         }
+    }
+
+    /** Build the player-facing snapshot from what ordering and compatibility settled on. */
+    private buildSummary(mods: LoadedMod[], unreadable: DisabledModSummary[]): LoadSummary {
+        const enabled: EnabledModSummary[] = mods
+            .filter(m => m.enabled)
+            .sort((a, b) => a.order - b.order)
+            .map((m, i) => ({ order: i + 1, id: m.id, name: m.name, version: m.version, origin: m.origin }));
+        const disabled: DisabledModSummary[] = mods
+            .filter(m => !m.enabled)
+            .map(m => ({
+                id: m.id, name: m.name, version: m.version, origin: m.origin, userDisabled: m.userDisabled,
+                reason: m.disableReason ?? (m.userDisabled
+                    ? { kind: 'user-disabled', message: 'switched off in this profile' }
+                    : { kind: 'invalid-manifest', message: m.errors.join('; ') || 'could not be loaded' }),
+            }));
+        disabled.push(...unreadable);
+        const conflicts = [...this.lastConflicts];
+        const total = enabled.length + disabled.length;
+        return { version: this.version, enabled, disabled, conflicts, counts: { total, enabled: enabled.length, disabled: disabled.length, conflicts: conflicts.length } };
     }
 
     // ------------------------------------------------------------ queries

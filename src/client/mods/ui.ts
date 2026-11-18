@@ -1,6 +1,7 @@
 // Mod manager: drop a .zip (or folder) anywhere on the page to install it; F8 or the corner tab opens the panel.
 // Installing only adds to the library; where a mod runs is a per-profile choice, and each profile has its own saves.
 import { loadMod } from '../../mods/manifest.ts';
+import type { DisableReasonKind } from '../../mods/engine.ts';
 import { memTree, treeFromEntries, treeToZip, zipTreeFromBytes, type Tree } from '../../mods/vfs.ts';
 import { planInstall } from '../../mods/pack.ts';
 import { ARCHIVE_ACCEPT, ArchiveError, readArchive } from './archive.ts';
@@ -273,6 +274,54 @@ async function enableHere(keys: string[]) {
 
 const fmtTime = (t: number) => new Date(t).toLocaleString();
 const slug = (s: string) => s.replace(/\W+/g, '_');
+
+/** Player-facing labels for the reasons the engine records. */
+const REASON_LABEL: Record<DisableReasonKind, string> = {
+    'user-disabled': 'Off in this profile',
+    'invalid-manifest': 'Invalid mod.json',
+    'duplicate-id': 'Duplicate id',
+    'missing-dependency': 'Missing dependency',
+    'dependency-cycle': 'Dependency cycle',
+};
+
+/**
+ * The load summary section: enabled mods in the engine's own load order, then disabled ones with a reason.
+ * It mirrors `engine.loadSummary` exactly, so what is shown is what the engine resolved.
+ */
+function loadSummarySection(): (Node | string)[] {
+    const s = engine.loadSummary;
+    const out: (Node | string)[] = [el('div', { class: 'omm-h' }, 'Load order & active mods')];
+    if (!s.counts.total) {
+        out.push(el('div', { class: 'omm-meta' }, 'Nothing loaded yet.'));
+        return out;
+    }
+    out.push(el('div', { class: 'omm-meta', style: 'margin:0 0 8px' },
+        `${s.counts.enabled} active of ${s.counts.total}${s.counts.disabled ? ` · ${s.counts.disabled} disabled` : ''}${s.counts.conflicts ? ` · ${s.counts.conflicts} conflict warning${s.counts.conflicts === 1 ? '' : 's'}` : ''}`));
+    if (!s.enabled.length) out.push(el('div', { class: 'omm-meta' }, 'No mod is active.'));
+    for (const m of s.enabled) {
+        out.push(el('div', { class: 'omm-mod' }, el('div', { class: 'omm-row' },
+            el('div', { class: 'grow' },
+                el('div', { class: 'omm-name' }, `${m.order}. ${m.name}`),
+                el('div', { class: 'omm-meta' }, `${m.id} · v${m.version}${m.origin ? ` · ${m.origin}` : ''}`)))));
+    }
+    for (const c of s.conflicts) {
+        out.push(el('div', { class: 'omm-mod' }, el('div', { class: 'omm-row' },
+            el('div', { class: 'grow' }, el('div', { class: 'omm-name' }, `${c.mod} ⇄ ${c.target}`)),
+            el('div', { class: 'omm-msg warn' }, `${c.message} Both stay enabled: this is a warning, not a disable.`))));
+    }
+    if (s.disabled.length) {
+        out.push(el('div', { class: 'omm-h' }, 'Disabled mods'));
+        for (const m of s.disabled) {
+            out.push(el('div', { class: 'omm-mod off' + (m.reason.kind === 'user-disabled' ? '' : ' bad') },
+                el('div', { class: 'omm-row' }, el('div', { class: 'grow' },
+                    el('div', { class: 'omm-name' }, m.name),
+                    el('div', { class: 'omm-meta' }, `${m.id} · v${m.version}${m.origin ? ` · ${m.origin}` : ''}`))),
+                el('div', { class: `omm-msg ${m.reason.kind === 'user-disabled' ? '' : 'error'}` },
+                    `${REASON_LABEL[m.reason.kind]}: ${m.reason.message}`)));
+        }
+    }
+    return out;
+}
 function download(name: string, bytes: Uint8Array) {
     const a = el('a', { href: URL.createObjectURL(new Blob([bytes as BlobPart], { type: 'application/zip' })), download: name });
     document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
@@ -323,6 +372,8 @@ async function render() {
     for (const f of failures) kids.push(el('div', { class: 'omm-msg error' }, f));
     for (const n of notes) kids.push(el('div', { class: 'omm-meta', style: 'margin:4px 0' }, `Skipped ${n}`));
 
+    if (!SAFE_MODE) kids.push(...loadSummarySection());
+
     // ---- mod library, with this profile's on/off state
     kids.push(el('div', { class: 'omm-h' }, 'Mod library'));
     if (records.length > 1 && profile) {
@@ -337,6 +388,7 @@ async function render() {
             el('button', { textContent: 'Enable all', onclick: () => void setAll(true) }), el('button', { textContent: 'Disable all', onclick: () => void setAll(false) })));
     }
     if (!records.length) kids.push(el('div', { class: 'omm-meta' }, 'No mods installed.'));
+
     const loaded = new Map(engine.mods.map(m => [m.origin, m]));
     for (const rec of records) {
         const m = loaded.get(rec.key);

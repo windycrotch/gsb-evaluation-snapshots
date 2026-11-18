@@ -46,6 +46,11 @@ interface OmoriModApi {
     readonly apiVersion: 1;
     /** every mod known to this session */
     readonly mods: { id: string; name: string; version: string; enabled: boolean }[];
+    /**
+     * What the last mod load resolved: enabled mods in load order, disabled mods with a reason, and
+     * declared mutual exclusions that were downgraded to warnings. Null in safe mode (?mods=0).
+     */
+    readonly loadSummary: OmoriModLoadSummary | null;
     /** call at the top of a script to get an API bound to your mod id */
     scope(id?: string): OmoriModScope;
     /** is a mod with this id installed and enabled? (for soft dependencies) */
@@ -77,3 +82,18 @@ interface OmoriModApi {
 }
 
 declare const OmoriMod: OmoriModApi;
+
+/** Why the loader does not run a mod. */
+type OmoriModDisableKind = 'user-disabled' | 'invalid-manifest' | 'duplicate-id' | 'missing-dependency' | 'dependency-cycle';
+
+interface OmoriModLoadSummary {
+    /** bumped on every reload of the mod set; the summary always describes the current one */
+    version: number;
+    /** enabled mods, already in the order the engine applies them */
+    enabled: { order: number; id: string; name: string; version: string; origin: string }[];
+    /** mods that are installed but not running, with the reason */
+    disabled: { id: string; name: string; version: string; origin: string; userDisabled: boolean; reason: { kind: OmoriModDisableKind; message: string; mods?: string[] } }[];
+    /** declared `excludes` clashes; both sides stay enabled */
+    conflicts: { kind: 'declared-conflict'; mod: string; target: string; others: string[]; message: string }[];
+    counts: { total: number; enabled: number; disabled: number; conflicts: number };
+}

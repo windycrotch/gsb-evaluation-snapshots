@@ -87,7 +87,7 @@ function check(paths: string[]) {
         bad += failed;
         console.log(`${failed ? '✗' : '✓'} ${m.id}@${m.version} (${m.format}): ${m.edits.length} edit(s), ${m.scripts.length} script(s)${failed ? `, ${failed} file(s) failed` : ''}`);
     }
-    for (const m of e.mods.filter(x => !x.enabled)) console.log(`✗ ${m.id}: disabled (${m.errors.join('; ') || 'dependency problem'})`);
+    for (const m of e.mods.filter(x => !x.enabled)) console.log(`✗ ${m.id}: disabled (${m.disableReason?.message || m.errors.join('; ') || 'dependency problem'})`);
     process.exit(bad ? 1 : 0);
 }
 

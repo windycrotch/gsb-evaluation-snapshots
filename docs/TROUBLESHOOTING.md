@@ -34,6 +34,7 @@ In your browser's storage (IndexedDB), under the active profile, not in the game
 
 - `bun run mod check <mod>` validates it and dry-runs every edit against your real game files; fix whatever it reports.
 - The Mods panel (F8) shows each mod's errors. A patch that fails is skipped and the rest of the mod still loads.
+- The panel's *Load order & active mods* section lists what the loader actually runs, in order, and why each disabled mod is disabled (off in this profile, missing dependency, dependency cycle, duplicate id, invalid mod.json). "Missing dependency" includes a dependency that is installed but switched off or itself disabled; the reason names it.
 - Mod scripts share one global scope: wrap yours in `(() => { ... })();` or a top-level `const` can clash with another mod's.
 - If two mods replace the same file, the later one wins and a warning is logged; prefer patches.
 

@@ -16,6 +16,18 @@ Mods never touch your game folder. They are layered on top of it in the browser,
 
 **When something breaks.** A red badge on the Mods tab means a mod reported an error; the panel names the mod and shows the message. A broken mod never stops the game from starting. Add `?mods=0` to the address to start with no mods at all. Errors are also written to `latest.log` next to the server.
 
+**What actually loaded.** The Mods panel (F8) starts with *Load order & active mods*: every enabled mod with its id, version and its number in the order the game applies it, followed by the mods that are installed but not running, each with a reason:
+
+| Reason | What it means |
+|---|---|
+| *Off in this profile* | you switched it off (or it is not in this profile's list) |
+| *Missing dependency* | a mod listed in `dependencies`, or a OneLoader `requires`, is not installed or is itself disabled |
+| *Dependency cycle* | the mods need each other in a loop, so none of them can load first; all of them are left out |
+| *Duplicate id* | another copy of the same id came first; the later copy is ignored |
+| *Invalid mod.json* | the manifest cannot be read (the message says what is wrong) |
+
+Mutual exclusions (`excludes`) are listed as a **conflict warning** instead: both mods stay enabled and both appear in the active list, because disabling a whole pack over one clash would be worse. The same summary is available to scripts as `OmoriMod.loadSummary`.
+
 **OneLoader / GOMORI mods** (`manifestVersion: 1`) install the same way. See *Compatibility* below for what is and isn't supported.
 
 ## For mod authors

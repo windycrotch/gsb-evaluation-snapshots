@@ -4,7 +4,7 @@ import { ModEngine, assetKeyFromSystem, type Diagnostic, type LoadedMod } from '
 import type { ClientScript } from '../../mods/manifest.ts';
 import { zipTreeFromBytes } from '../../mods/vfs.ts';
 import { setModLayer } from '../shim/fs.ts';
-import { modInfo, report, setCurrent } from './api.ts';
+import { modInfo, report, setCurrent, setLoadSummary } from './api.ts';
 import { installModLoaderShim, runExec, type ModLoaderShim } from './compat.ts';
 import { applyImageDeltas } from './olid.ts';
 import { patchPluginList } from './plugins.ts';
@@ -51,6 +51,7 @@ export async function initMods(gameKey: string): Promise<void> {
     } catch (e) { report('(mods)', e, 'could not read profiles'); }
     if (SAFE_MODE) {
         console.warn('[mods] safe mode (?mods=0): no mods loaded');
+        setLoadSummary(null);
         await syncServiceWorker(true);
         return;
     }
@@ -67,6 +68,7 @@ export async function initMods(gameKey: string): Promise<void> {
         return;
     }
     modInfo.splice(0, modInfo.length, ...engine.mods.map(m => ({ id: m.id, name: m.name, version: m.version, enabled: m.enabled })));
+    setLoadSummary(engine.loadSummary);
     setModLayer({
         has: k => engine.hasEdits(k) && engine.isEncrypted(k),
         resolve: (k, base) => engine.resolve(k, base),

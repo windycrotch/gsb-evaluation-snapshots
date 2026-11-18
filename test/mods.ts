@@ -121,6 +121,7 @@ try {
         return {
             item: $dataItems[2].name, desc: $dataItems[2].description, armor: (globalThis as any).$dataArmors[1]?.name,
             iconLen: icon.length, mods: (globalThis as any).OmoriMod.mods.map((m: any) => `${m.id}:${m.enabled}`),
+            summary: (globalThis as any).OmoriMod.loadSummary?.enabled.map((m: any) => m.id) ?? [],
             sw: !!navigator.serviceWorker.controller,
         };
     });
@@ -128,6 +129,7 @@ try {
     check(r.armor === 'ONELOADER ARMOR', `OneLoader v1 zip: files.data replacement applied (${r.armor})`);
     check(r.sw && r.iconLen === PNG.length && r.iconLen !== ICON.length, `service worker serves the replaced icon (${r.iconLen} bytes, vanilla ${ICON.length})`);
     check(r.mods.includes('hello-mod:true') && r.mods.includes('broken-mod:true'), `mods registered: ${r.mods.join(', ')}`);
+    check(r.summary.includes('hello-mod') && r.summary.includes('ol-mod'), `load summary lists the active mods in order: ${r.summary.join(', ')}`);
     const names = await page.evaluate(() => [3, 4].map(i => $dataItems[i].name));
     check(names[1] === 'TARBALL SNACK' && r.mods.includes('tgz-mod:true'), `.tar.gz mod installed and applied, wrapper folder stripped (${names[1]})`);
     if (have7z) check(names[0] === 'SEVEN ZIP STEAK' && r.mods.includes('seven-mod:true'), `.7z mod installed and applied, wrapper folder stripped (${names[0]})`);
@@ -142,6 +144,7 @@ try {
     const txt = await page.evaluate(() => document.getElementById('omm-panel')!.innerText);
     check(/broken-mod/.test(txt) && /boom/.test(txt), 'panel attributes the script error to broken-mod');
     check(/99999/.test(txt), 'panel reports the failing patch path');
+    check(/Load order & active mods/.test(txt) && /1\. /.test(txt), 'panel shows the load summary with numbered active mods');
     const logPath = 'latest.log';
     await sleep(500);
     const log = existsSync(logPath) ? readFileSync(logPath, 'utf8') : '';
