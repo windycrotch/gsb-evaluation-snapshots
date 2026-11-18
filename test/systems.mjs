@@ -51,6 +51,123 @@ function flying({ ias = 95, alt = 1500, heading = 0, throttle = 0.65 } = {}) {
   check('Ice melts in warm air', sys.ice < 0.05, `ice ${sys.ice.toFixed(2)} after 15 min at +12 C`);
 }
 
+// ---- stall warning horn: it must track the wing's real stall margin, not a fixed speed.
+// Free-flight entries use the same trim and power for clean and iced aircraft; the
+// pinned harnesses hold the aircraft in a steady wind-tunnel airflow so sideslip and
+// ground-effect thresholds can be read off without a pilot compensating them away.
+{
+  // (1) severe ice: identical trim, identical throttle, slow pull -> the horn leads
+  // the clean-aircraft one by a comfortable margin, yet stays silent in iced cruise
+  const hornEntry = (ice) => {
+    const { fm, ap, run } = flying({ ias: 85, alt: 1500, throttle: 0.55 });
+    fm.fx.ice = ice;
+    run(30, clear, () => { fm.fx.ice = ice; });
+    const stick0 = fm.ctl.pitch, thr0 = fm.ctl.throttle, trim0 = fm.ctl.trim;
+    ap.on = false;
+    let warnKt = 0, stallKt = 0;
+    run(40, clear, (t) => {
+      fm.fx.ice = ice;
+      fm.ctl.pitch = Math.min(1, stick0 + t / 14);
+      fm.ctl.throttle = thr0; fm.ctl.trim = trim0;
+      fm.ctl.yaw = Math.max(-1, Math.min(1, 3 * fm.out.beta));
+      if (!warnKt && fm.out.stallWarn > 0.3) warnKt = fm.out.ias / KT;
+      if (!stallKt && fm.out.stalled > 0.3) { stallKt = fm.out.ias / KT; return false; }
+    });
+    return { warnKt, stallKt };
+  };
+  const c = hornEntry(0), i = hornEntry(1);
+  row('Severe ice sounds the horn earlier than the clean wing', i.warnKt - c.warnKt, 12, 'kt', 6);
+  row('...and still before the iced wing actually stalls', i.warnKt - i.stallKt, 1.5, 'kt', 1.2);
+  {
+    const { fm, run } = flying({ ias: 85, alt: 1500, throttle: 0.8 });
+    let loudest = 0;
+    run(60, clear, () => { fm.fx.ice = 1; loudest = Math.max(loudest, fm.out.stallWarn); });
+    check('No nuisance horn in trimmed, severely iced cruise', loudest < 0.1, `peak stallWarn ${loudest.toFixed(2)} at ${(fm.out.ias / KT).toFixed(0)} kt`);
+  }
+}
+{
+  // (2) sideslip bends the local angle of attack: at one alpha near the clean
+  // threshold, a steady slip pushes the harder-working wing over it
+  const pin = new FlightModel(stillAir);
+  const V = 60 * KT, agl = 2000;
+  pin.reset({ alt: agl, speed: V, pitch: 0, throttle: 0 });
+  pin.ctl.mixture = 1;
+  const hold = (alpha, beta) => {
+    const ca = Math.cos(alpha / 2), sa = Math.sin(alpha / 2);
+    pin.q[0] = ca; pin.q[1] = 0; pin.q[2] = sa; pin.q[3] = 0;
+    const u = V * Math.cos(beta) * Math.cos(alpha), w = V * Math.cos(beta) * Math.sin(alpha), v = V * Math.sin(beta);
+    pin.vel[0] = (ca * ca - sa * sa) * u + 2 * ca * sa * w; pin.vel[1] = v; pin.vel[2] = 2 * ca * sa * u + (ca * ca - sa * sa) * w;
+    pin.w[0] = pin.w[1] = pin.w[2] = 0; pin.pos[2] = -agl;
+  };
+  const hornAt = (betaDeg) => {
+    const b = betaDeg * D2R;
+    for (let deg = 0; deg <= 12; deg += 0.1) {
+      const a = deg * D2R;
+      for (let k = 0; k < 240; k++) { hold(a, b); pin.step(DT); }
+      hold(a, b); pin.step(DT);
+      if (pin.out.stallWarn > 0.3) return deg;
+    }
+    return 99;
+  };
+  const aZero = hornAt(0), aSlip = hornAt(12);
+  row('Sideslip lowers the horn angle of attack', aZero - aSlip, 0.2, 'deg', 0.15);
+  check('Horn threshold depends on which way the aircraft is slipping', aSlip < aZero, `${aZero.toFixed(1)} deg wings level vs ${aSlip.toFixed(1)} deg in a 12 deg slip`);
+}
+{
+  // (3) ground effect cushions the wing: on an equal-lift deceleration the horn
+  // moves to a lower speed near the runway and never cries wolf above the flare
+  const geHorn = (agl, cushionKt) => {
+    const fm = new FlightModel(stillAir);
+    const G0 = 9.80665;
+    fm.reset({ alt: agl, speed: 60 * KT, pitch: 0.05, throttle: 0.2 });
+    fm.ctl.flaps = 1; fm.flapPos = 1; fm.ctl.mixture = 1;
+    const m = fm.mass, S = fm.S, rho = 1.225;
+    let onset = 0, nuisance = 0;
+    for (let kt = 60; kt >= 40; kt -= 0.25) {
+      const V = kt * KT, clTrim = m * G0 / (0.5 * rho * V * V * S);
+      let elev = 0.2;
+      for (let k = 0; k < 360; k++) {
+        const qS = 0.5 * fm.out.rho * V * V * S;
+        const cl = -fm.out.az * fm.out.mass / qS * Math.cos(fm.out.alpha) + (fm.out.ax * fm.out.mass / qS) * Math.sin(fm.out.alpha);
+        elev = Math.max(-1, Math.min(1, elev + 0.02 * (clTrim - cl)));
+        fm.ctl.pitch = elev;
+        const a = 2 * Math.asin(Math.max(-1, Math.min(1, fm.q[2])));
+        const ca = Math.cos(a / 2), sa = Math.sin(a / 2);
+        fm.vel[0] = (ca * ca - sa * sa) * V; fm.vel[1] = 0; fm.vel[2] = 2 * ca * sa * V;
+        fm.w[0] = fm.w[1] = fm.w[2] = 0; fm.pos[0] = 0; fm.pos[1] = 0; fm.pos[2] = -agl;
+        fm.step(DT);
+      }
+      // the comfortable cushion: faster than the speed that sounds the horn up high
+      if (cushionKt !== null && kt >= cushionKt) nuisance = Math.max(nuisance, fm.out.stallWarn);
+      if (!onset && fm.out.stallWarn > 0.3) onset = kt;
+      if (fm.out.onGround) break;
+    }
+    return { onset, nuisance };
+  };
+  const high = geHorn(14, null), low = geHorn(2.2, high.onset);
+  row('Ground effect delays the horn to a lower speed', high.onset - low.onset, 0.6, 'kt', 0.4);
+  check('No horn while still flying comfortably in low-speed ground effect', low.nuisance < 0.1, `peak stallWarn above the cushion: ${low.nuisance.toFixed(2)}`);
+}
+{
+  // (4) once the angle of attack comes back off, the horn clears immediately
+  const { fm, ap, run } = flying({ ias: 70, alt: 2000, throttle: 0.12 });
+  run(20); ap.on = false;
+  const stick0 = fm.ctl.pitch;
+  let loudest = 0, releasedAt = 0, clearedAfter = null;
+  run(30, clear, (t) => {
+    if (t < 12) fm.ctl.pitch = Math.min(1, stick0 + t / 12);
+    else {
+      if (!releasedAt) releasedAt = t;
+      fm.ctl.pitch = 0;
+    }
+    fm.ctl.yaw = Math.max(-1, Math.min(1, 3 * fm.out.beta));
+    loudest = Math.max(loudest, fm.out.stallWarn);
+    if (releasedAt && clearedAfter === null && fm.out.stallWarn < 0.1) { clearedAfter = t - releasedAt; return false; }
+  });
+  check('The horn genuinely sounds before the release', loudest > 0.8, `peak stallWarn ${loudest.toFixed(2)}`);
+  row('The horn silences within a second of easing back pressure', clearedAfter ?? 99, 0.1, 's', 0.8);
+}
+
 // ---- vacuum failure: the attitude indicator leans over slowly, and no flag drops
 {
   const { fm, sys, run } = flying();

@@ -224,6 +224,28 @@ export function validate(def) {
     row('Stall angle of attack', alphaBreak / D2R, hb.stallAlpha || [16.5, 5], 'deg');
     row('Recovers after releasing the stick', recovered || 99, [1.5, 2.5], 's');
   }
+  // ---- the stall horn reads the wing's real margin: it leads the break and clears on release
+  {
+    const { fm } = make({ alt: 1500, ias: vs1 * 1.25, throttle: powered ? 0.12 : 0 });
+    let stick0 = 0.05, hornKt = 0, breakKt = 0, tRelease = 0, clearAfter = null, loudest = 0;
+    if (!powered) { const ap2 = new Autopilot(fm); ap2.engage('ias'); ap2.ias = vs1 * 1.25 * KT; run(fm, ap2, 20); ap2.on = false; stick0 = fm.ctl.pitch; fm.ctl.roll = 0; }
+    run(fm, null, 40, (t) => {
+      const o = fm.out;
+      if (!breakKt) {
+        fm.ctl.pitch = Math.min(1, stick0 + t / 14);
+        fm.ctl.yaw = clampN(3 * o.beta, -1, 1);
+        loudest = Math.max(loudest, o.stallWarn);
+        if (!hornKt && o.stallWarn > 0.3) hornKt = cas(fm);
+        if (t > 5 && o.stalled > 0.3) { breakKt = cas(fm); tRelease = t; fm.ctl.pitch = 0; fm.ctl.yaw = 0; }
+      } else if (clearAfter === null) {
+        fm.ctl.pitch = 0; fm.ctl.yaw = 0;
+        if (o.stallWarn < 0.1) { clearAfter = t - tRelease; return false; }
+      }
+    });
+    check('Stall horn sounds before the wing breaks', hornKt > 0 && breakKt > 0 && hornKt >= breakKt + 1.5);
+    check('Stall horn gives a usable margin over the stall', hornKt - breakKt >= 2.5);
+    row('Horn clears once the angle of attack eases', clearAfter ?? 99, [0.25, 0.6], 's');
+  }
   // ---- landing: fly the approach speed, flare, stop
   if (hb.landing) {
     const L = hb.landing, fm = new FlightModel(def);

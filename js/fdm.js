@@ -140,7 +140,7 @@ function buildWing(d) {
     alpha0: F(), clmax: F(), flap: F(), ail: F(), spoil: F(),
     ex: new Float64Array(N + 1), ey: new Float64Array(N + 1), ez: new Float64Array(N + 1),
     A: new Float64Array(N * N), Aimg: new Float64Array(N * N), hasImage: false,
-    gamma: F(), wi: F(), lu: F(), lv: F(), lw: F(), a0: F(), cmx: F(), f: F(), cl: F(), tmp: F(),
+    gamma: F(), wi: F(), lu: F(), lv: F(), lw: F(), a0: F(), cmx: F(), f: F(), t: F(), cl: F(), tmp: F(),
     edge: new Float64Array(N + 1), warnIdx: 0, relax: 0.1,
   };
   // dihedral may be one angle or a table along the span (a cranked wing)
@@ -163,7 +163,7 @@ function buildWing(d) {
     W.flap[i] = overlap(ay - dy / 2, ay + dy / 2, d.flap);
     W.ail[i] = side * overlap(ay - dy / 2, ay + dy / 2, d.aileron);
     W.spoil[i] = overlap(ay - dy / 2, ay + dy / 2, d.spoiler);
-    const dv = Math.abs(y + 0.27 * half);                     // the stall vane sits inboard on the left wing
+    const dv = Math.abs(y + 0.27 * half);                     // the physical stall vane sits inboard on the left wing (retained for reference; the horn uses the full-span margin)
     if (dv < warnBest) { warnBest = dv; W.warnIdx = i; }
   }
   // downwash at strip i per unit circulation on strip j: its two trailing legs
@@ -273,6 +273,7 @@ export class FlightModel {
     this.time = 0;
     this.egt = 20; this.oilT = 20; this.cht = 20;
     this.vsiLag = 0;
+    this._warnMargin = 0;
     this.touchdowns = 0;
     this.gearLoad = def.gear.contacts.map(() => 0);
     this.out = {
@@ -315,6 +316,7 @@ export class FlightModel {
     for (const el of this.els) el.wake[0] = el.wake[1] = el.wake[2] = 0;
     this.egt = running ? 600 : this.out.oat; this.oilT = running ? 80 : this.out.oat; this.cht = running ? 150 : this.out.oat;
     this.vsiLag = 0;
+    this._warnMargin = 0;
     this._wasAir = !onGround;
     this.step(1e-4);
   }
@@ -505,7 +507,7 @@ export class FlightModel {
       Gm.set(W.tmp);
     }
     // forces on each strip, in the flow it actually sees
-    let sepS = 0, warnMax = 0;
+    let sepS = 0;
     for (let i = 0; i < N; i++) {
       const rx = W.x[i], ry = W.y[i], rz = W.z[i];
       const cx = W.cx[i], cz = W.cz[i], nx = W.nx[i], ny = W.ny[i], nz = W.nz[i];
@@ -513,7 +515,7 @@ export class FlightModel {
       const vc = W.lu[i] * cx + vz * cz;
       const vn = W.lu[i] * nx + W.lv[i] * ny + vz * nz;
       const q2 = vc * vc + vn * vn;
-      if (q2 < 1e-3) { W.f[i] = 1; W.cl[i] = 0; continue; }
+      if (q2 < 1e-3) { W.f[i] = 1; W.t[i] = 0; W.cl[i] = 0; continue; }
       const al = Math.atan2(-vn, vc);
       const aeff = al - W.a0[i];
       section(aeff, W.a2d, W.cmx[i], SEC.clmin, W.sep);
@@ -533,9 +535,42 @@ export class FlightModel {
       My += rz * fx - rx * fz + qS * W.chord[i] * cm;
       Mz += rx * fy - ry * fx;
       sepS += (1 - f) * W.S[i];
-      if (i === W.warnIdx && aeff > 0) warnMax = _sec.t;
+      // t is how close this strip runs to its own section stall (1 = at it). Ice lowers
+      // cmx (the local clmax) and sideslip bends the local flow, both already inside
+      // aeff. Ground effect adds the mirror vortices' upwash: it relieves the downwash
+      // this strip actually works against, so the horn credits that margin instead of
+      // reading the geometric alpha and crying wolf in a slow, cushioned flare.
+      let tWarn = _sec.t;
+      if (hasImg) {
+        let img = 0;
+        const row = i * N;
+        for (let j = 0; j < N; j++) img += Aimg[row + j] * Gm[j];
+        if (img < 0) {                          // image-induced upwash -> smaller effective alpha
+          const vcRel = Math.max(8, vc);
+          const aEffGE = aeff + img / vcRel;
+          if (aEffGE > 0) {
+            const aStall = (W.cmx[i] > 0 ? W.cmx[i] : SEC.clmin) / Math.max(1e-6, W.a2d * kappa(W.sep));
+            tWarn = Math.abs(aEffGE) / aStall;
+          } else tWarn = 0;
+        }
+      }
+      W.t[i] = aeff > 0 ? tWarn : 0;
       W.f[i] = f; W.cl[i] = cl;
     }
+    // Stall margin across the whole wing: area-weighted means of each strip's stall
+    // ratio, not a single vane. In a sideslip the two halves see different local
+    // angles of attack, so the horn follows whichever wing is nearer the stall
+    // (most of the weight on the worse wing, the rest on the full-span average;
+    // the two are equal in symmetric flight, so clean behaviour is unchanged).
+    let warnSum = 0, warnS = 0, lSum = 0, lS = 0, rSum = 0, rS = 0;
+    for (let i = 0; i < N; i++) {
+      const t = W.t[i], s = W.S[i];
+      warnSum += t * s; warnS += s;
+      if (i < N / 2) { lSum += t * s; lS += s; } else { rSum += t * s; rS += s; }
+    }
+    const warnSpan = warnSum / warnS;
+    const warnSide = Math.max(lSum / lS, rSum / rS);
+    this._warnMargin = 0.3 * warnSpan + 0.7 * warnSide;
 
     // ---------------- the wake at the tail
     // Every other step, find the velocity the wing's vortex system induces at
@@ -781,7 +816,10 @@ export class FlightModel {
     o.egt = this.egt; o.oilT = this.oilT; o.cht = this.cht;
     o.oilP = clamp(this.rpm / 1000, 0, 1) * (75 - 0.12 * Math.max(0, this.oilT - 80)) * (0.55 + 0.45 * clamp(this.rpm / 2400, 0, 1)) / 0.775 * 0.775;
     o.map = (atm.p / 3386.39) * (0.36 + 0.61 * (1 - Math.pow(1 - c.throttle, 1.6))) * (1 - 0.00003 * Math.max(0, this.rpm - 1000) * (1 - c.throttle));
-    o.stallWarn = !onGround && o.ias > 12 ? smooth(0.80, 0.86, warnMax) : 0;
+    // The horn answers the wing's real stall margin: the strip synthesis already
+    // includes iced clmax, sideslip and the ground-effect downwash, with no latching,
+    // so easing the angle of attack silences it on the next step.
+    o.stallWarn = !onGround && o.ias > 12 ? smooth(0.78, 0.85, this._warnMargin) : 0;
     o.stalled = sepS / this.S;       // fraction of the wing area that has let go
     o.onGround = onGround; o.wheelSpeed = onGround ? wheelSpeed : 0; o.groundLoad = groundLoad; o.scrape = scrape;
     o.flapPos = this.flapPos; o.flapMoving = this.flapPos !== fp0;
