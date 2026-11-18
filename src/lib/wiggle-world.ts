@@ -1,7 +1,15 @@
 import { BOT_NAMES, thinkBot } from './wiggle-bots';
 import { eatFood, pelletAt, randomFood, type Food } from './wiggle-food';
 import { isSuper, resolveContacts } from './wiggle-rules';
-import { canBoost, createSnake, moveSnake, START_MASS, type Snake, type Vec } from './wiggle-snake';
+import {
+  canBoost,
+  createSnake,
+  MIN_BOOST_MASS,
+  moveSnake,
+  START_MASS,
+  type Snake,
+  type Vec,
+} from './wiggle-snake';
 
 export const ARENA_RADIUS = 3000;
 export const FOOD_TARGET = 900;
@@ -9,6 +17,8 @@ export const BOT_COUNT = 14;
 const BOOST_COST = 8;
 const DROP_EVERY = 0.12;
 const SAFE_SPAWN = 700;
+/** Physics always advances in slices no longer than this, so big frames play out like many small ones. */
+const FIXED_STEP = 1 / 30;
 
 export type WorldEvent =
   { type: 'gobble'; eater: Snake; victim: Snake } | { type: 'munch'; snake: Snake; value: number };
@@ -104,29 +114,49 @@ export function spawnPlayer(world: World, skin: number) {
 }
 
 export function stepWorld(world: World, dt: number) {
-  world.time += dt;
+  // Split the frame into fixed-length slices (plus a short remainder) so a stuttering phone or a
+  // background tab returning to focus produces exactly the same play as a smooth 60fps stream.
+  const fullSteps = Math.floor(dt / FIXED_STEP);
+  const remainder = dt - fullSteps * FIXED_STEP;
+  const steps = fullSteps + (remainder > 0 ? 1 : 0);
   const { player } = world;
   const superSnake = player?.alive && isSuper(world, player) ? player : null;
   const surroundings = { ...world, superSnake };
-  for (const snake of world.snakes) {
-    if (!snake.alive) continue;
-    if (!snake.isPlayer) thinkBot(snake, surroundings, dt);
-    moveSnake(snake, dt, world.arenaRadius);
-    dropBoostTrail(world, snake, dt);
-    const value = eatFood(snake, world.foods, dt);
-    if (value > 0) world.events.push({ type: 'munch', snake, value });
+  for (let step = 0; step < steps; step++) {
+    const stepDt = step < fullSteps ? FIXED_STEP : remainder;
+    if (stepDt <= 0) continue;
+    world.time += stepDt;
+    for (const snake of world.snakes) {
+      if (!snake.alive) continue;
+      // Bots re-plan on their own timer; the original cadence is preserved by only thinking once,
+      // in the first substep, with the whole frame's dt as the planning window.
+      if (!snake.isPlayer && step === 0) thinkBot(snake, surroundings, dt);
+      moveSnake(snake, stepDt, world.arenaRadius);
+      dropBoostTrail(world, snake, stepDt);
+      const value = eatFood(snake, world.foods, stepDt);
+      if (value > 0) world.events.push({ type: 'munch', snake, value });
+    }
+    resolveContacts(world);
   }
-  resolveContacts(world);
   refill(world);
 }
 
 function dropBoostTrail(world: World, snake: Snake, dt: number) {
-  if (!canBoost(snake)) {
+  if (!snake.alive || !canBoost(snake)) {
     snake.dropTimer = 0;
     return;
   }
-  snake.mass -= BOOST_COST * dt;
-  snake.dropTimer += dt;
+  // Only mass strictly above the threshold may be spent; clamp to the threshold instead of
+  // overshooting it inside a single substep, and stop spending once it has been reached.
+  const spendable = snake.mass - MIN_BOOST_MASS;
+  const cost = BOOST_COST * dt;
+  const activeTime = cost <= spendable ? dt : spendable / BOOST_COST;
+  if (activeTime <= 0) {
+    snake.dropTimer = 0;
+    return;
+  }
+  snake.mass = cost <= spendable ? snake.mass - cost : MIN_BOOST_MASS;
+  snake.dropTimer += activeTime;
   if (snake.dropTimer < DROP_EVERY) return;
   snake.dropTimer -= DROP_EVERY;
   const tail = snake.body[snake.body.length - 1];

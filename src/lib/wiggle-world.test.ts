@@ -8,7 +8,7 @@ import {
   SUPER_DURATION,
   superState,
 } from './wiggle-rules';
-import { createSnake, radiusFor, START_MASS } from './wiggle-snake';
+import { createSnake, MIN_BOOST_MASS, radiusFor, START_MASS } from './wiggle-snake';
 import {
   BOT_COUNT,
   createWorld,
@@ -157,6 +157,20 @@ describe('super button', () => {
 });
 
 describe('stepWorld', () => {
+  const PELLET_VALUE = 8 * 0.12 * 0.75;
+  const countPellets = (world: World) =>
+    world.foods.filter((f) => Math.abs(f.value - PELLET_VALUE) < 1e-9).length;
+
+  function boostingWorld(mass: number) {
+    const world = emptyWorld();
+    world.arenaRadius = 100_000;
+    const player = snake(mass, 0, 0, 0, true);
+    player.boosting = true;
+    world.snakes = [player];
+    world.player = player;
+    return { world, player };
+  }
+
   it('burns mass while boosting and leaves a trail of dots', () => {
     const world = emptyWorld();
     world.arenaRadius = 100_000;
@@ -167,6 +181,56 @@ describe('stepWorld', () => {
     for (let i = 0; i < 30; i++) stepWorld(world, 1 / 60);
     expect(player.mass).toBeLessThan(100);
     expect(world.foods.some((f) => Math.abs(f.value - 0.72) < 1e-9)).toBe(true);
+  });
+
+  it('drains the same mass and leaves the same dots for one big frame and many small ones', () => {
+    const oneBigFrame = boostingWorld(100);
+    stepWorld(oneBigFrame.world, 0.5);
+
+    const manyFrames = boostingWorld(100);
+    for (let i = 0; i < 30; i++) stepWorld(manyFrames.world, 1 / 60);
+
+    expect(oneBigFrame.world.time).toBeCloseTo(0.5, 10);
+    expect(manyFrames.world.time).toBeCloseTo(oneBigFrame.world.time, 10);
+    expect(oneBigFrame.player.mass).toBeCloseTo(manyFrames.player.mass, 10);
+    expect(countPellets(oneBigFrame.world)).toBe(countPellets(manyFrames.world));
+    expect(countPellets(oneBigFrame.world)).toBeGreaterThan(0);
+  });
+
+  it('stops draining and dropping dots as soon as mass reaches the boost threshold', () => {
+    const { world, player } = boostingWorld(MIN_BOOST_MASS + 0.5);
+
+    for (let i = 0; i < 60; i++) stepWorld(world, 1 / 60);
+    expect(player.mass).toBeGreaterThanOrEqual(MIN_BOOST_MASS);
+    expect(player.mass).toBeCloseTo(MIN_BOOST_MASS, 10);
+    const pellets = countPellets(world);
+
+    // still holding boost past the threshold: no more mass spent, no new dots
+    for (let i = 0; i < 60; i++) stepWorld(world, 1 / 60);
+    expect(player.mass).toBeCloseTo(MIN_BOOST_MASS, 10);
+    expect(countPellets(world)).toBe(pellets);
+  });
+
+  it('never spends mass below the threshold inside a single long frame', () => {
+    const { world, player } = boostingWorld(MIN_BOOST_MASS + 0.5);
+    stepWorld(world, 0.5);
+    expect(player.mass).toBe(MIN_BOOST_MASS);
+  });
+
+  it('cannot boost when mass is exactly MIN_BOOST_MASS', () => {
+    const { world, player } = boostingWorld(MIN_BOOST_MASS);
+    for (let i = 0; i < 30; i++) stepWorld(world, 1 / 60);
+    expect(player.mass).toBe(MIN_BOOST_MASS);
+    expect(countPellets(world)).toBe(0);
+    expect(player.dropTimer).toBe(0);
+  });
+
+  it('does not drain a dead player while the boost button is held', () => {
+    const { world, player } = boostingWorld(100);
+    player.alive = false;
+    stepWorld(world, 0.5);
+    expect(player.mass).toBe(100);
+    expect(countPellets(world)).toBe(0);
   });
 
   it('runs a whole minute of play without breaking', () => {
