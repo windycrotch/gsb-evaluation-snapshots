@@ -86,7 +86,9 @@ hashtags:
 
 # Subtitle block position (optional), per format. Fraction of the central area
 # measured from its top; a value below 0.5 is measured from the bottom instead.
-# One text line is worth about 0.07 in a vertical video.
+# One text line is worth about 0.07 in a vertical video. The block is kept
+# inside the central area: extra wrapped lines beyond the format's limit
+# (vertical 5, square 3, horizontal 2) are dropped rather than drawn off-band.
 subtitles:
   vertical:
     y_offset: 0.84

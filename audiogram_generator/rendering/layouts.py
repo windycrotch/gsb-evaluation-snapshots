@@ -75,9 +75,12 @@ def apply_subtitle_overrides(config):
     startup instead, and resets to the built-in defaults every call so repeated
     runs in one process (tests) do not accumulate.
     """
-    subtitles = (config or {}).get('subtitles') or {}
+    subtitles = (config or {}).get('subtitles')
+    if not isinstance(subtitles, dict):
+        subtitles = {}
     for fmt, default in SUBTITLE_Y_OFFSET_DEFAULTS.items():
-        override = (subtitles.get(fmt) or {}).get('y_offset', default)
+        fmt_cfg = subtitles.get(fmt)
+        override = fmt_cfg.get('y_offset', default) if isinstance(fmt_cfg, dict) else default
         try:
             value = float(override)
         except (TypeError, ValueError):
@@ -353,12 +356,53 @@ def _precompute_transcript(width, height, layout_config, colors, fonts=None):
     else:
         transcript_y = central_top + int(central_height * layout_config['transcript_y_offset'])
 
+    # The subtitle block must stay inside the central band: _render_subtitle_lines
+    # uses these bounds to cap the number of lines and to shift the block.
+    style['min_y'] = central_top
+    style['max_y'] = central_bottom
+
     return {
         'font': font_transcript,
         'style': style,
         'max_width': max_width,
         'transcript_y': transcript_y,
     }
+
+
+# Two chunk boundaries closer than this are considered the same instant; this
+# absorbs the rounding noise of independently parsed SRT timestamps so a
+# boundary frame never falls into the gap between two contiguous chunks.
+_CHUNK_BOUNDARY_EPSILON = 1e-6
+
+
+def _select_transcript_chunk(transcript_chunks, current_time):
+    """Return the chunk visible at ``current_time``, or None.
+
+    Intervals are half-open ``[start, end)``. Chunks whose timestamps are
+    contiguous (``prev.end == next.start``) are snapped to the later start, so
+    the boundary frame always shows the *next* chunk — never a blank frame and
+    never two chunks at once. When chunks overlap, the one that starts latest
+    wins, which makes the result independent of the input order.
+    """
+    if not transcript_chunks:
+        return None
+
+    ordered = sorted(transcript_chunks, key=lambda c: c['start'])
+
+    selected = None
+    for i, chunk in enumerate(ordered):
+        start = chunk['start']
+        if start > current_time:
+            break
+        end = chunk['end']
+        # Snap an end that lands on (or microscopically past) the next start.
+        if i + 1 < len(ordered):
+            next_start = ordered[i + 1]['start']
+            if abs(end - next_start) <= _CHUNK_BOUNDARY_EPSILON:
+                end = next_start
+        if start <= current_time < end:
+            selected = chunk
+    return selected
 
 
 def _render_transcript(img, draw, width, height, central_top, central_height, central_bottom,
@@ -371,11 +415,8 @@ def _render_transcript(img, draw, width, height, central_top, central_height, ce
     if not transcript_chunks:
         return img, draw
 
-    current_text = ""
-    for chunk in transcript_chunks:
-        if chunk['start'] <= current_time < chunk['end']:
-            current_text = chunk['text']
-            break
+    current_chunk = _select_transcript_chunk(transcript_chunks, current_time)
+    current_text = current_chunk['text'] if current_chunk else ""
 
     if not current_text:
         return img, draw

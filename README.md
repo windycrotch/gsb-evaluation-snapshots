@@ -168,6 +168,13 @@ One text line is worth roughly `0.07` in a vertical video, so `0.84 -> 0.91`
 moves the block down by about one line. Out-of-range or non-numeric values are
 ignored with a warning, keeping the default.
 
+The block is kept inside the central band: text that wraps past the format's
+line limit (`vertical` 5, `square` 3, `horizontal` 2) is truncated to the first
+lines, and the block is nudged back inside if the configured offset would push
+it past the band's top or bottom edge. Subtitles are shown one at a time with
+half-open `[start, end)` intervals: when one chunk ends exactly where the next
+begins, the boundary frame already shows the *next* text — no blank frame.
+
 Only the position is configurable: line count, width, padding and shadow are
 still constants in `rendering/compositor.py`.
 

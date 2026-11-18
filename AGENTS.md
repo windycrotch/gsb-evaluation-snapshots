@@ -18,6 +18,13 @@ by `apply_subtitle_overrides()` (called once in `cli.py`), because passing it as
 would mean touching a dozen signatures for one float. If a subtitle position looks wrong,
 look there, not at the render call.
 
+**Subtitle timing and fitting:** the per-frame chunk lookup lives in
+`_select_transcript_chunk()` (`rendering/layouts.py`) and uses half-open `[start, end)`
+intervals, so a frame on a boundary belongs to the *next* chunk. `_precompute_transcript()`
+also writes the central band's pixel bounds into `style['min_y']` / `style['max_y']`;
+`_render_subtitle_lines()` (`rendering/compositor.py`) uses them to cap the line count and
+keep the block — and its equal-width background boxes — inside the band.
+
 ---
 
 ## Running tests

@@ -34,6 +34,7 @@ from audiogram_generator.rendering.layouts import (  # noqa: F401
     _render_logo,
     _render_footer,
     _precompute_transcript,
+    _select_transcript_chunk,
     _render_transcript,
     _precompute_cta,
     _render_cta,

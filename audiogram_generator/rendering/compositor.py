@@ -82,6 +82,12 @@ def _draw_rounded_box_with_shadow(base_img, box, fill, radius=16, shadow=True,
 def _render_subtitle_lines(img, draw, text, font, start_y, max_width, style):
     """Word-wrap and draw subtitle lines with backgrounds.
 
+    The number of lines is capped by ``style['max_lines']`` (and, when the
+    caller supplies the central band via ``style['min_y']``/``style['max_y']``,
+    by how many lines actually fit between those bounds). All background boxes
+    share the same width and horizontal centre, and consecutive rows never
+    overlap vertically.
+
     Returns (img, total_height_drawn).
     """
     words = text.split()
@@ -99,7 +105,13 @@ def _render_subtitle_lines(img, draw, text, font, start_y, max_width, style):
     if current.strip():
         lines.append(current.strip())
 
-    lines = lines[: style.get('max_lines', 5)]
+    try:
+        max_lines = max(1, int(style.get('max_lines', 5)))
+    except (TypeError, ValueError):
+        max_lines = 5
+    lines = lines[:max_lines]
+    if not lines:
+        return img, 0
 
     padding = int(style.get('padding', 0))
     inner_left = 0 + padding
@@ -112,16 +124,61 @@ def _render_subtitle_lines(img, draw, text, font, start_y, max_width, style):
     except Exception:
         sample_bbox = draw.textbbox((0, 0), "Hg", font=font)
         constant_line_height = (sample_bbox[3] - sample_bbox[1])
+    constant_line_height = max(1, int(constant_line_height))
+
+    # Measure every line first: boxes are as wide as the widest line so that
+    # multi-line subtitle blocks line up on both edges and share one centre.
+    line_widths = []
+    text_height = 0
+    for line in lines:
+        bbox = draw.textbbox((0, 0), line, font=font)
+        line_widths.append(bbox[2] - bbox[0])
+        text_height = max(text_height, bbox[3] - bbox[1])
+    text_height = max(1, int(text_height))
+
+    box_height = text_height + 2 * padding
+    line_advance = max(int(constant_line_height * style['line_spacing']), box_height)
+
+    # Keep the whole block inside the central band when its bounds are known:
+    # cap the number of lines to what fits, then slide the block back inside.
+    min_y = style.get('min_y')
+    max_y = style.get('max_y')
+    if min_y is not None and max_y is not None and max_y > min_y:
+        band_height = max_y - min_y
+        fitting = 1 + max(0, (band_height - box_height) // line_advance)
+        lines = lines[:max(1, fitting)]
+        line_widths = line_widths[:len(lines)]
+    else:
+        min_y = max_y = None
+
+    block_height = (len(lines) - 1) * line_advance + box_height
+    if min_y is not None:
+        # max_y is exclusive (it is where the footer starts), so the last
+        # painted row must stay at max_y - 1 or above.
+        bottom_limit = max_y - 1
+        if start_y - padding < min_y:
+            start_y = min_y + padding
+        if start_y - padding + block_height > bottom_limit:
+            start_y = bottom_limit - block_height + padding
+        if start_y - padding < min_y:
+            start_y = min_y + padding
+
+    box_width = max(line_widths) + 2 * padding
+    if len(lines) == 1:
+        # Preserve the historical single-line box exactly.
+        box_left = inner_left + (area_width - line_widths[0]) // 2 - padding
+    else:
+        box_left = inner_left + (area_width - box_width) // 2
+    box_right = box_left + box_width
 
     total_height = 0
     for i, line in enumerate(lines):
         bbox = draw.textbbox((0, 0), line, font=font)
         lw = bbox[2] - bbox[0]
-        lh = bbox[3] - bbox[1]
         line_x = inner_left + (area_width - lw) // 2
         line_y = start_y + int(total_height)
 
-        box = (line_x - padding, line_y - padding, line_x + lw + padding, line_y + lh + padding)
+        box = (box_left, line_y - padding, box_right, line_y + text_height + padding)
         img = _draw_rounded_box_with_shadow(
             img, box, style['bg_color'],
             radius=style['radius'],
@@ -132,7 +189,6 @@ def _render_subtitle_lines(img, draw, text, font, start_y, max_width, style):
         draw = ImageDraw.Draw(img)
         draw.text((line_x, line_y), line, fill=style['text_color'], font=font)
 
-        line_advance = int(constant_line_height * style['line_spacing'])
         total_height += line_advance
 
     return img, int(total_height)

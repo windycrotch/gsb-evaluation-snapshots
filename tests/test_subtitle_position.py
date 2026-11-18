@@ -45,3 +45,21 @@ def test_invalid_values_keep_the_default(bad, caplog):
 def test_integer_bounds_are_accepted():
     apply_subtitle_overrides({'subtitles': {'vertical': {'y_offset': 1}}})
     assert LAYOUT_CONFIGS['vertical']['transcript_y_offset'] == 1.0
+
+
+@pytest.mark.parametrize("bad_subtitles", [
+    "not-a-dict",
+    {'vertical': "not-a-dict"},
+    {'vertical': None},
+    [1, 2, 3],
+])
+def test_malformed_subtitles_block_keeps_defaults(bad_subtitles):
+    apply_subtitle_overrides({'subtitles': bad_subtitles})
+    for fmt, default in SUBTITLE_Y_OFFSET_DEFAULTS.items():
+        assert LAYOUT_CONFIGS[fmt]['transcript_y_offset'] == default
+
+
+def test_nan_offset_keeps_the_default(caplog):
+    apply_subtitle_overrides({'subtitles': {'square': {'y_offset': float('nan')}}})
+    assert LAYOUT_CONFIGS['square']['transcript_y_offset'] == SUBTITLE_Y_OFFSET_DEFAULTS['square']
+    assert any('y_offset' in rec.getMessage() for rec in caplog.records)
