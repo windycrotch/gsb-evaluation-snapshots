@@ -1,5 +1,5 @@
 import type { EventHandle } from '@playcanvas/observer';
-import { Container } from '@playcanvas/pcui';
+import { Button, Container, Label } from '@playcanvas/pcui';
 import type { ContainerArgs } from '@playcanvas/pcui';
 
 import { InfoPanel } from './info-panel';
@@ -8,12 +8,18 @@ import type { Renderer } from './renderer';
 import type { TextureDoc } from './texture-doc';
 import type { TextureManager } from './texture-manager';
 import { TextureView } from './texture-view';
+import { TextureViewControls } from './texture-view-controls';
 
 class ViewportPanel extends Container {
     renderer: Renderer;
     canvas: RenderCanvas;
     view: TextureView;
+    controls: TextureViewControls;
     texture: TextureDoc | null;
+    toolbar: Container;
+    fitButton: Button;
+    actualSizeButton: Button;
+    cursorLabel: Label;
 
     constructor(renderer: Renderer, textureManager: TextureManager, args: ContainerArgs = {}) {
         Object.assign(args, {
@@ -27,69 +33,120 @@ class ViewportPanel extends Container {
         this.renderer = renderer;
         this.canvas = new RenderCanvas(renderer);
         this.view = new TextureView(this.canvas);
+        this.controls = new TextureViewControls(this.view.state, () => this.view.requestRender());
         this.texture = null;
 
+        // overlay toolbar and cursor readout, positioned over the top-left of the canvas
+        this.toolbar = new Container({
+            class: 'texture-view-toolbar',
+            flex: true,
+            flexDirection: 'row'
+        });
+
+        this.fitButton = new Button({
+            class: 'texture-view-button',
+            text: '适应窗口'
+        });
+
+        this.actualSizeButton = new Button({
+            class: 'texture-view-button',
+            text: '1:1'
+        });
+
+        this.cursorLabel = new Label({
+            class: 'texture-view-cursor',
+            text: '-'
+        });
+
+        this.toolbar.append(this.fitButton);
+        this.toolbar.append(this.actualSizeButton);
+        this.toolbar.append(this.cursorLabel);
+
         this.append(this.canvas);
+        this.append(this.toolbar);
         this.append(new InfoPanel(textureManager));
 
-        // handle mouse events
-        this.dom.addEventListener('wheel', (event: WheelEvent) => {
-            const rect = (event.target as HTMLElement).getBoundingClientRect();
-            const x = event.clientX - rect.left;
-            const y = event.clientY - rect.top;
-            this.view.setScale(
-                this.view.scale - event.deltaY * 0.01,
-                x * window.devicePixelRatio,
-                y * window.devicePixelRatio
-            );
+        // keep the readout in sync with the controller
+        this.controls.onCursor((text: string) => {
+            this.cursorLabel.text = text;
         });
 
-        let mx = 0;
-        let my = 0;
+        // pointer position in device pixels, relative to the canvas
+        const pointerPosition = (event: MouseEvent): { x: number; y: number } => {
+            const rect = this.canvas.dom.getBoundingClientRect();
+            const ratio = window.devicePixelRatio;
+            return {
+                x: (event.clientX - rect.left) * ratio,
+                y: (event.clientY - rect.top) * ratio
+            };
+        };
+
+        // zoom with the mouse wheel, anchoring the texel under the cursor
+        this.canvas.dom.addEventListener(
+            'wheel',
+            (event: WheelEvent) => {
+                event.preventDefault();
+
+                if (!this.view.texture) {
+                    return;
+                }
+
+                const { x, y } = pointerPosition(event);
+                this.controls.wheel(event.deltaY, x, y);
+            },
+            { passive: false }
+        );
+
         let dragging = false;
 
-        this.dom.addEventListener('mousedown', (event: MouseEvent) => {
+        this.canvas.dom.addEventListener('mousedown', (event: MouseEvent) => {
+            if (event.button !== 0) {
+                return;
+            }
             event.preventDefault();
-            mx = event.offsetX;
-            my = event.offsetY;
+            const { x, y } = pointerPosition(event);
+            this.controls.dragStart(x, y);
             dragging = true;
+            this.dom.classList.add('dragging');
         });
 
-        this.dom.addEventListener('mousemove', (event: MouseEvent) => {
-            const ratio = window.devicePixelRatio;
-
+        // track the pointer over the canvas even when the button is not pressed
+        this.canvas.dom.addEventListener('mousemove', (event: MouseEvent) => {
             if (dragging) {
-                this.view.setOffset(
-                    this.view.offsetX + (event.offsetX - mx) * ratio,
-                    this.view.offsetY - (event.offsetY - my) * ratio
-                );
-                mx = event.offsetX;
-                my = event.offsetY;
+                return;
             }
-
-            const t = this.view.texture;
-            if (t) {
-                const uv = this.view.pixelToTexel(event.offsetX * ratio, this.view.viewportH - event.offsetY * ratio);
-
-                if (uv.u >= 0 && uv.v >= 0 && uv.u < t.width! && uv.v < t.height!) {
-                    uv.u = Math.floor(uv.u / Math.pow(2, this.view.mipmap));
-                    uv.v = Math.floor((t.height! - uv.v) / Math.pow(2, this.view.mipmap));
-                    // this.cursorTexel.text = `${uv.u.toFixed(0)},${uv.v.toFixed(0)}`;
-                } else {
-                    // this.cursorTexel.text = `-`;
-                }
-            }
+            const { x, y } = pointerPosition(event);
+            this.controls.sample(x, y);
         });
 
-        this.dom.addEventListener('mouseup', () => {
+        // the canvas is the only place where the cursor position means anything, so hide the
+        // readout whenever the pointer leaves it
+        this.canvas.dom.addEventListener('mouseleave', () => {
+            this.controls.resetPointer();
+        });
+
+        // drags can continue outside the canvas, so listen on the window while dragging
+        window.addEventListener('mousemove', (event: MouseEvent) => {
+            if (!dragging) {
+                return;
+            }
+
+            const rect = this.canvas.dom.getBoundingClientRect();
+            const ratio = window.devicePixelRatio;
+            this.controls.dragTo((event.clientX - rect.left) * ratio, (event.clientY - rect.top) * ratio);
+        });
+
+        window.addEventListener('mouseup', () => {
             dragging = false;
+            this.dom.classList.remove('dragging');
         });
 
-        textureManager.on('textureDocAdded', () => {
-            // doc.settings.patch({
-            //     viewport: {
-            //     }
-            // });
+        this.fitButton.on('click', () => {
+            this.controls.fit();
+        });
+
+        this.actualSizeButton.on('click', () => {
+            this.controls.actualSize();
         });
 
         const events: EventHandle[] = [];
@@ -104,12 +161,16 @@ class ViewportPanel extends Container {
             );
             events.push(
                 texture.settings.on('view.face:set', (value: string) => {
+                    // switching cubemap faces resets the view and clears the cursor readout
                     this.view.setFace(parseInt(value, 10));
+                    this.controls.resetPointer();
                 })
             );
             events.push(
                 texture.settings.on('view.mipmap:set', (value: string) => {
                     this.view.setMipmap(parseInt(value, 10));
+                    this.controls.mipmap = parseInt(value, 10);
+                    this.controls.refresh();
                 })
             );
             events.push(
@@ -129,7 +190,17 @@ class ViewportPanel extends Container {
             );
 
             this.texture = texture;
+
+            // selecting a texture resets the view to fit-window and clears the cursor readout
             this.view.setTexture(this.texture);
+            this.controls.resetPointer();
+        });
+
+        textureManager.on('textureDocAdded', () => {
+            // doc.settings.patch({
+            //     viewport: {
+            //     }
+            // });
         });
     }
 }

@@ -19,6 +19,8 @@ https://playcanvas.com/texture-tool
 - **Texture Inspection** - View texture dimensions, pixel format, structure (2D/cubemap), and encoding
 - **Mipmap Visualization** - Browse individual mipmap levels
 - **Cubemap Face Navigation** - View and inspect individual cubemap faces
+- **Zoom & Pan** - Wheel zoom anchored at the cursor, drag to pan, plus fit-window and 1:1 shortcuts
+- **Texel Readout** - See the texture pixel under the cursor, measured from the top-left corner
 - **Alpha Channel** - Toggle alpha channel visualization with checkerboard background
 - **Filtering Toggle** - Switch between linear and nearest filtering
 - **Reprojection** - Convert between equirectangular and cubemap projections
@@ -42,6 +44,23 @@ The texture tool can load the following texture formats:
 ## Viewing Textures
 
 Drag and drop texture files directly into the tool to load them. Multiple textures can be loaded and inspected simultaneously using the file browser panel.
+
+### Viewing controls
+
+The preview area has a small toolbar in its top-left corner:
+
+| Control  | Action                                                                                             |
+| -------- | -------------------------------------------------------------------------------------------------- |
+| Wheel    | Zoom in and out, keeping the texel under the cursor in place                                       |
+| Drag     | Pan; the texture stays centered when it is smaller than the viewport and cannot leave it otherwise |
+| 适应窗口 | Fit the whole texture inside the preview                                                           |
+| 1:1      | Show one texel per CSS pixel (accounting for the device pixel ratio)                               |
+
+The readout to the right of the buttons shows the texture pixel under the cursor as `x,y`, with
+the origin at the top-left corner of the texture. It shows `-` while the cursor is outside the
+texture, for cubemaps it is relative to the selected face, and it follows the selected mip level.
+Selecting a different texture or a different cubemap face resets the zoom and pan to the
+fit-window state and clears the readout.
 
 ### Supported URL Parameters
 
@@ -82,6 +101,19 @@ Run:
     npm run develop
 
 Open a browser and navigate to http://localhost:3000.
+
+## Testing
+
+The test suite runs on Node's built-in test runner against locally generated textures, so it needs
+no browser, GPU, or network access:
+
+```
+npm test
+```
+
+It covers the preview's zoom and pan maths (cursor-anchored zoom, pan bounds and centering, the
+fit-window and 1:1 scales, the cursor texel readout, and the reset on texture and cubemap face
+changes) using sample 2D textures and cubemaps built in `test/fixtures`.
 
 ## Library integration testing
 
