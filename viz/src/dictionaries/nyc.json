@@ -1,0 +1,26 @@
+{
+  "_config": {
+    "usePmtiles": true,
+    "pmtilesUrl": "nyc-ny-parcels.pmtiles",
+    "pmtilesMetadataUrl": "nyc-ny-parcels-metadata.json",
+    "lowZoomOpacityMultiplier": 1.0,
+    "lowZoomFadeStart": 12.5,
+    "lowZoomFadeEnd": 13,
+    "parcelMinZoom": 13,
+    "hasParkingData": true
+  },
+  "bbl": "BBL",
+  "tax_class": "NYC Tax Class",
+  "exemption_flag": "Exemption Flag",
+  "property_land_use_category": "Property Category (Original)",
+  "property_land_use_refined": "Property Category (Refined)",
+  "full_market_value": "Full Market Value (DOF)",
+  "full_market_value_per_sqft": "Full market value/land ft²",
+  "current_full_land_value": "Land Market Value (DOF)",
+  "land_value_per_sqft": "Land value/land ft²",
+  "improvement_value": "Improvements Market Value (DOF)",
+  "improvement_value_per_sqft": "Improvements value/land ft²",
+  "assessed_land_value": "Land Assessed Value (fractional)",
+  "assessed_total_value": "Total Assessed Value (fractional)",
+  "link": "Parcel Link"
+}

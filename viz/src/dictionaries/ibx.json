@@ -1,0 +1,23 @@
+{
+  "_config": {
+    "hasParkingData": true
+  },
+  "OBJECTID": "Object ID",
+  "BBL": "BBL",
+  "Borough": "Borough",
+  "Block": "Block",
+  "Lot": "Lot",
+  "Address": "Address",
+  "LandUse": "Land Use",
+  "BldgClass": "Building Class",
+  "LotArea": "Lot Area (sq ft)",
+  "BldgArea": "Building Area (sq ft)",
+  "AssessLand": "Assessed Land Value",
+  "AssessTot": "Total Assessed Value",
+  "YearBuilt": "Year Built",
+  "NumFloors": "Number of Floors",
+  "UnitsRes": "Residential Units",
+  "UnitsTotal": "Total Units",
+  "PROPERTY_CATEGORY": "Property Category (Original)",
+  "property_land_use_refined": "Property Category (Refined)"
+}
