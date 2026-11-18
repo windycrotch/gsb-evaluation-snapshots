@@ -45,14 +45,30 @@ export default class WebGLTextureLoaderAsyncHashCache<T> extends WebGLTextureLoa
     if (maybePromise) return maybePromise;
     const d = this.loadNoCache(input);
     this.disposes.set(hash, d.dispose);
-    const promise = d.promise.then((result) => {
-      if (!this.promises.has(hash)) {
-        return neverEnding;
-      }
-      this.disposes.delete(hash);
-      this.results.set(hash, result);
-      return result;
-    });
+    const promise: Promise<TextureAndSize> = d.promise.then(
+      (result) => {
+        // Drop results that were cancelled, superseded by a newer load for
+        // the same hash, or that arrive after dispose.
+        if (this._disposed || this.promises.get(hash) !== promise) {
+          return neverEnding;
+        }
+        this.disposes.delete(hash);
+        this.results.set(hash, result);
+        return result;
+      },
+      (error: unknown) => {
+        // Failure must not poison the cache: drop this hash's entries so a
+        // later load() calls loadNoCache again instead of reusing the
+        // rejected promise. The rejection reason is forwarded unchanged.
+        // Only touch the entries if they still belong to this attempt
+        // (a cancel or a newer load may have replaced them already).
+        if (this.promises.get(hash) === promise) {
+          this.promises.delete(hash);
+          this.disposes.delete(hash);
+        }
+        throw error;
+      },
+    );
     this.promises.set(hash, promise);
     return promise;
   }
