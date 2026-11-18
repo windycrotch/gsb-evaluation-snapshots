@@ -1,29 +1,59 @@
 {{- /* Video – wavecast utility shortcode
   Usage: {{< video src="video.mp4" poster="poster.jpg" caption="Video caption" >}}
-  HTML5 <video> with optional poster and caption.
+  HTML5 <video> with optional poster, caption and subtitle tracks.
+  Local files (page bundle or assets/) are resolved to their published
+  URLs; remote http(s) URLs are used as-is.
   Autoplay always implies muted (browser requirement).
+
+  captions: comma-separated "langCode-file" pairs, e.g.
+    captions="zh-Hans-cn.vtt,en-captions.vtt"
+  Each pair renders a <track kind="subtitles"> element.
 */ -}}
 {{- $src := .Get "src" -}}
 {{- /* Validate video src URL scheme */ -}}
+{{- $remote := false -}}
 {{- if $src }}
   {{- $scheme := urls.Parse $src }}
   {{- if and $scheme.Scheme (not (or (eq $scheme.Scheme "http") (eq $scheme.Scheme "https"))) }}
-    {{- errorf "video: src must use http or https scheme, got %q" $scheme.Scheme }}
+    {{- errorf "video: src must use http or https scheme, got %q. See %s" $scheme.Scheme .Position }}
   {{- end }}
+  {{- $remote = or (eq $scheme.Scheme "http") (eq $scheme.Scheme "https") (hasPrefix $src "//") }}
 {{- end -}}
 {{- $poster := .Get "poster" -}}
 {{- $caption := .Get "caption" -}}
 {{- $width := .Get "width" -}}
+{{- $captions := .Get "captions" | default "" -}}
 {{- $autoplay := eq (.Get "autoplay" | default "false") "true" -}}
 {{- $loop := eq (.Get "loop" | default "false") "true" -}}
 {{- $muted := or $autoplay (eq (.Get "muted" | default "false") "true") -}}
 {{- $controls := ne (.Get "controls" | default "true") "false" -}}
-{{- /* Auto-detect video type from file extension */ -}}
+
+{{- /* Resolve local vs remote source: page bundle first, then global assets.
+       Remote URLs are never looked up as local resources. */ -}}
+{{- $videoURL := $src -}}
+{{- $localVideo := false -}}
+{{- if not $remote -}}
+  {{- $localVideo = .Page.Resources.GetMatch $src -}}
+  {{- if not $localVideo -}}
+    {{- $localVideo = resources.GetMatch $src -}}
+  {{- end -}}
+{{- end -}}
+{{- if $localVideo -}}
+  {{- $videoURL = $localVideo.RelPermalink -}}
+{{- end -}}
+
+{{- /* MIME type: explicit param > local resource media type > extension guess */ -}}
 {{- $vidtype := .Get "type" | default "" -}}
 {{- if not $vidtype -}}
-  {{- if hasSuffix $src ".webm" }}{{ $vidtype = "video/webm" }}
-  {{- else if hasSuffix $src ".ogg" }}{{ $vidtype = "video/ogg" }}
-  {{- else }}{{ $vidtype = "video/mp4" }}{{ end -}}
+  {{- if $localVideo -}}
+    {{- $vidtype = $localVideo.MediaType.Type -}}
+  {{- else if hasSuffix $src ".webm" -}}
+    {{- $vidtype = "video/webm" -}}
+  {{- else if hasSuffix $src ".ogg" -}}
+    {{- $vidtype = "video/ogg" -}}
+  {{- else -}}
+    {{- $vidtype = "video/mp4" -}}
+  {{- end -}}
 {{- end -}}
 
 <figure class="wvc-video">
@@ -35,7 +65,33 @@
     {{- with $poster }} poster="{{ . }}"{{ end -}}
     {{- with $width }} width="{{ . }}"{{ end -}}
   >
-    <source src="{{ $src }}" type="{{ $vidtype }}">
+    <source src="{{ $videoURL }}" type="{{ $vidtype }}">
+    {{- with $captions -}}
+      {{- range (split . ",") -}}
+        {{- $entry := trim . " " -}}
+        {{- /* Split on hyphens: the language code (which may itself contain
+               hyphens, e.g. zh-Hans) is everything before the last hyphen,
+               the file path is everything after it. */ -}}
+        {{- $parts := split $entry "-" -}}
+        {{- $lang := delimit (first (sub (len $parts) 1) $parts) "-" -}}
+        {{- $trackSrc := index (last 1 $parts) 0 -}}
+        {{- if or (lt (len $parts) 2) (not $lang) -}}
+          {{- errorf "video: invalid captions entry %q, expected \"lang-file\" (e.g. \"en-captions.vtt\"). See %s" $entry $.Position -}}
+        {{- end -}}
+        {{- $trackURL := $trackSrc -}}
+        {{- $trackRemote := or (hasPrefix $trackSrc "http://") (hasPrefix $trackSrc "https://") (hasPrefix $trackSrc "//") -}}
+        {{- if not $trackRemote -}}
+          {{- $trackRes := $.Page.Resources.GetMatch $trackSrc -}}
+          {{- if not $trackRes -}}
+            {{- $trackRes = resources.GetMatch $trackSrc -}}
+          {{- end -}}
+          {{- with $trackRes -}}
+            {{- $trackURL = .RelPermalink -}}
+          {{- end -}}
+        {{- end -}}
+    <track kind="subtitles" srclang="{{ $lang }}" src="{{ $trackURL }}" label="{{ $lang }}">
+      {{- end -}}
+    {{- end -}}
     {{ i18n "video_unsupported" }}
   </video>
   {{- with $caption -}}

@@ -53,10 +53,13 @@
 {{- $audioURL  := $src -}}
 {{- $audioType := $type -}}
 
-{{- /* Try page-scoped resource first, then global */ -}}
-{{- $localAudio := .Page.Resources.GetMatch $src -}}
-{{- if not $localAudio -}}
-  {{- $localAudio = resources.GetMatch $src -}}
+{{- /* Try page-scoped resource first, then global (local paths only) */ -}}
+{{- $localAudio := false -}}
+{{- if not (or (hasPrefix $src "http://") (hasPrefix $src "https://") (hasPrefix $src "//")) -}}
+  {{- $localAudio = .Page.Resources.GetMatch $src -}}
+  {{- if not $localAudio -}}
+    {{- $localAudio = resources.GetMatch $src -}}
+  {{- end -}}
 {{- end -}}
 
 {{- if $localAudio -}}

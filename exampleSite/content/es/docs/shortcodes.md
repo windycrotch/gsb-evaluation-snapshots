@@ -96,10 +96,14 @@ Elemento `<figure>` HTML5 mejorado con caption opcional, carga diferida y soport
 
 ## Video
 
-`<video>` HTML5 con póster y caption opcionales.
+`<video>` HTML5 con póster y caption opcionales. El `src` puede ser una URL
+remota o un archivo local del page bundle / directorio `assets/` (se resuelve
+a su URL publicada automáticamente). Usa `captions` para añadir pistas de
+subtítulos como pares `códigoDeIdioma-archivo` separados por comas.
 
 ```
 {{</* video src="https://www.w3schools.com/html/mov_bbb.mp4" poster="https://picsum.photos/800/450" caption="Video de muestra Big Buck Bunny." */>}}
+{{</* video src="video.mp4" captions="zh-Hans-cn.vtt,en-captions.vtt" */>}}
 ```
 
 {{< video src="https://www.w3schools.com/html/mov_bbb.mp4" poster="https://picsum.photos/800/450" caption="Video de muestra Big Buck Bunny." >}}

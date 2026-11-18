@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- `video` shortcode resolves local `src` files (page bundle or `assets/`)
+  to their published `RelPermalink` and derives the `<source>` MIME type
+  from the resource's media type; remote http(s) URLs are used as-is with
+  the type inferred from the file extension (explicit `type` always wins).
+- `captions` parameter on the `video` shortcode: comma-separated
+  `langCode-file` pairs (e.g. `zh-Hans-cn.vtt,en-captions.vtt`) render one
+  `<track kind="subtitles">` per entry, with local subtitle files resolved
+  through the same resource pipeline. Malformed entries fail the build with
+  an error pointing at the shortcode position.
+
+### Fixed
+
+- `video` and `podcast-player` shortcodes no longer pass remote http(s)
+  URLs to `resources.GetMatch`, which crashed the build on Windows with a
+  "filename syntax is incorrect" error.
+
 ### Changed
 
 - Documentation clarifies that a navigation framework (htmx / Turbo /

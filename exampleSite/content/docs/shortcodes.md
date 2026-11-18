@@ -96,10 +96,14 @@ Enhanced HTML5 `<figure>` with optional caption, lazy loading, and resource supp
 
 ## Video
 
-HTML5 `<video>` with optional poster and caption.
+HTML5 `<video>` with optional poster and caption. The `src` can be a remote
+URL or a local file from the page bundle / `assets/` directory (resolved to
+its published URL automatically). Use `captions` to add subtitle tracks as
+comma-separated `langCode-file` pairs.
 
 ```go-html-template
 {{</* video src="https://www.w3schools.com/html/mov_bbb.mp4" poster="https://picsum.photos/800/450" caption="Big Buck Bunny sample video." */>}}
+{{</* video src="video.mp4" captions="zh-Hans-cn.vtt,en-captions.vtt" */>}}
 ```
 
 {{< video src="https://www.w3schools.com/html/mov_bbb.mp4" poster="https://picsum.photos/800/450" caption="Big Buck Bunny sample video." >}}
