@@ -7,10 +7,18 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 ## [Unreleased]
 ### Added
 - `.ghps` config
+- Reopen local videos/subtitles from Recent Plays via stored File System Access handles, with a manual re-pick fallback that resumes the saved progress and subtitle
+- `recent-store.js` pure recent-list logic module (normalization, tolerant import, handle-free export, MRU ordering, 30-entry cap)
+- `fs-handles.js` IndexedDB persistence for `FileSystemFileHandle` objects
+- Dependency-free Node.js test suite under `tests/` and an acceptance import sample
 ### Changed
 - Unnecessary page reload bug fixed
 - `loadFromQuery` function modified
 - `README.md` updated
+- Importing records containing local entries no longer fails or drops the other valid records; malformed rows are skipped individually
+- Exported JSON never contains non-serializable file handles or internal handle keys
+- Same-title local entries update to the new usable reference while preserving progress, keeping the 30-entry most-recent-first ordering
+- `getRecent` / `saveRecent` / `updateProgress` / `loadPlayerTime` refactored onto the shared recent-store logic
 ## [1.4] - 2026-10-03
 ### Added
 - `KeyP` keyboard shortcut

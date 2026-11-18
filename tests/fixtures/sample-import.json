@@ -1,0 +1,34 @@
+[
+  {
+    "title": "local-movie.mp4",
+    "video": "blob:https://neovid.top/00000000-0000-0000-0000-000000000001",
+    "videoType": "local",
+    "subtitle": "",
+    "subtitleType": "url",
+    "progress": 35
+  },
+  {
+    "title": "local-with-subtitle.mkv",
+    "video": "blob:https://neovid.top/00000000-0000-0000-0000-000000000002",
+    "videoType": "local",
+    "subtitle": "blob:https://neovid.top/00000000-0000-0000-0000-000000000003",
+    "subtitleType": "local",
+    "progress": 97
+  },
+  {
+    "title": "online-clip.mp4",
+    "video": "https://example.com/media/clip.mp4",
+    "videoType": "url",
+    "subtitle": "https://example.com/media/clip.vtt",
+    "subtitleType": "url",
+    "progress": 12
+  },
+  {
+    "title": "finished-local.mp4",
+    "video": "blob:https://neovid.top/00000000-0000-0000-0000-000000000004",
+    "videoType": "local",
+    "subtitle": "",
+    "subtitleType": "url",
+    "progress": 100
+  }
+]

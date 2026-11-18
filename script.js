@@ -31,8 +31,9 @@ const CONFIG = {
     WATCH_LATER_ADDED: "Video added to list.",
     SELECT_VIDEO: "Please enter a video URL.",
     SELECT_LOCAL_VIDEO: "Please select a local video file.",
-    RESELECT_LOCAL_VIDEO: "Please reselect the local video.",
-    RESELECT_LOCAL_SUBTITLE: "Please reselect the local subtitle.",
+    RESELECT_LOCAL_VIDEO: "Please reselect the local video to resume playback.",
+    RESELECT_LOCAL_SUBTITLE: "Please reselect the local subtitle file.",
+    REOPEN_LOCAL_ERROR: "The local file could not be opened. Please try again.",
     UPDATE_AVAILABLE: "A new version is available. Reload now?"
   },
 
@@ -103,7 +104,36 @@ function showPrompt(title, defaultValue = "", options = {}) {
 }
 
 function getRecent() {
-  return JSON.parse(localStorage.getItem(CONFIG.STORAGE_KEYS.RECENT) || "[]");
+  let parsed = [];
+  try {
+    parsed = JSON.parse(localStorage.getItem(CONFIG.STORAGE_KEYS.RECENT) || "[]");
+  } catch {
+    parsed = [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  // Normalize defensively: corrupted/legacy rows are dropped instead of
+  // breaking rendering, and internal handle-key fields are merged back from
+  // the raw row so IndexedDB lookups keep working.
+  return parsed
+    .map(raw => {
+      const item = RecentStore.normalizeRecentItem(raw);
+      if (!item) return null;
+      return { ...item, ...preserveHandleFields(raw) };
+    })
+    .filter(Boolean);
+}
+
+// Normalization strips internal handle-key fields; copy them back when the
+// raw row actually contains usable string keys.
+function preserveHandleFields(raw) {
+  const preserved = {};
+  if (!raw || typeof raw !== "object") return preserved;
+  Object.values(RecentStore.HANDLE_KEYS).forEach(key => {
+    if (typeof raw[key] === "string" && raw[key]) {
+      preserved[key] = raw[key];
+    }
+  });
+  return preserved;
 }
 
 function setRecent(data) {
@@ -284,20 +314,22 @@ function playVideo(video, subtitle = "", title = null, videoType = "url", subtit
 }
 
 
-function saveRecent(title, video, videoType, subtitle="", subtitleType="url") {
-  let recent = getRecent();
-  let progress = 0;
-  const idx = recent.findIndex(item => item.title===title);
-  if(idx!==-1) {
-    progress = recent[idx].progress;
+function saveRecent(title, video, videoType, subtitle = "", subtitleType = "url", extra = null) {
+  const recent = getRecent();
+  const entry = {
+    title,
+    video,
+    videoType,
+    subtitle,
+    subtitleType,
+    progress: 0,
+  };
+  if (extra && typeof extra === "object") {
+    Object.assign(entry, extra);
   }
-
-  recent = recent.filter(item => !(item.title===title));
-
-  recent.unshift({title, video, videoType, subtitle, subtitleType, progress});
-  if(recent.length>CONFIG.LIMITS.RECENT_SIZE) recent = recent.slice(0,CONFIG.LIMITS.RECENT_SIZE);
-
-  setRecent(recent);
+  // Same title -> replace reference, preserve saved progress, move to front,
+  // keep the 30-entry cap and most-recent-first ordering.
+  setRecent(RecentStore.upsertRecent(recent, entry));
   renderRecent();
 }
 
@@ -306,9 +338,13 @@ function removeRecent(title) {
     confirmText: "Remove"
   }).then((result) => {
       if (result.isConfirmed) {
-        let recent = getRecent();
-        recent = recent.filter(item => !(item.title===title));
-        setRecent(recent);
+        const recent = getRecent();
+        const removed = recent.find(item => item.title === title);
+        if (removed) {
+          FsHandles.deleteHandle(removed[RecentStore.HANDLE_KEYS.VIDEO]);
+          FsHandles.deleteHandle(removed[RecentStore.HANDLE_KEYS.SUBTITLE]);
+        }
+        setRecent(recent.filter(item => !(item.title === title)));
         renderRecent();
       }
     });
@@ -318,6 +354,10 @@ function removeAllVideos() {
   showConfirm(CONFIG.MESSAGES.CONFIRM_REMOVE_ALL)
   .then(result => {
     if (result.isConfirmed) {
+      getRecent().forEach(item => {
+        FsHandles.deleteHandle(item[RecentStore.HANDLE_KEYS.VIDEO]);
+        FsHandles.deleteHandle(item[RecentStore.HANDLE_KEYS.SUBTITLE]);
+      });
       setRecent([]);
       renderRecent();
     }
@@ -326,7 +366,7 @@ function removeAllVideos() {
 
 function updateProgress() {
   if(!state.currentVideo || !DOM.player.duration) return;
-  const percent = Math.min(100, Math.round((DOM.player.currentTime/DOM.player.duration)*100));
+  const percent = RecentStore.calculateProgress(DOM.player.currentTime, DOM.player.duration);
   let recent = getRecent();
   const idx = recent.findIndex(item => item.video===state.currentVideo);
   if(idx!==-1) {
@@ -341,9 +381,10 @@ function loadPlayerTime() {
   let recent = getRecent();
   const idx = recent.findIndex(item => item.video===state.currentVideo);
   if(idx!==-1) {
+    // Keep the original percentage-based resume logic.
     const currentTime = (recent[idx].progress / 100) * DOM.player.duration
     DOM.player.currentTime = currentTime;
-    
+
   }
 }
 
@@ -389,28 +430,25 @@ function attachRecentEvents(item, spanTitle, spanRemove) {
   });
 
   spanTitle.addEventListener("click", () => {
-    let isDataLoaded = false;
-    if(item.videoType==="url"){
-      DOM.videoUrl.value = item.video;
-      isDataLoaded = true;
+    if (item.videoType === "local") {
+      // Reopen via the stored File System handle when the browser supports
+      // it, otherwise guide the user through re-picking the file and then
+      // resume with the original progress/subtitle instead of just alerting.
+      reselectLocalEntry(item);
+      return;
     }
-    else{
-      DOM.videoUrl.value = "";
-      showAlert(CONFIG.MESSAGES.RESELECT_LOCAL_VIDEO, {icon: "info"});
-    }
+
+    DOM.videoUrl.value = item.video;
     if (item.subtitle) {
-      if (item.subtitleType==="url") {
+      if (item.subtitleType === "url") {
         DOM.subtitleUrl.value = item.subtitle;
-        isDataLoaded = true;   
-      }
-      else{
+      } else {
+        // URL video with a local subtitle: only the subtitle needs re-picking.
         DOM.subtitleUrl.value = "";
-        showAlert(CONFIG.MESSAGES.RESELECT_LOCAL_SUBTITLE, {icon: "info"});
+        showAlert(CONFIG.MESSAGES.RESELECT_LOCAL_SUBTITLE, { icon: "info" });
       }
     }
-    if (isDataLoaded) {
-      DOM.form.scrollIntoView({"behavior": "smooth"});
-    }
+    DOM.form.scrollIntoView({ behavior: "smooth" });
   });
 }
 
@@ -478,6 +516,184 @@ function revokeCurrentMedia() {
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* Local file reopening: File System Access handles + manual fallback */
+/* ------------------------------------------------------------------ */
+
+function supportsFileSystemAccess() {
+  return (
+    typeof window !== "undefined" &&
+    typeof window.showOpenFilePicker === "function" &&
+    typeof window.FileSystemFileHandle !== "undefined" &&
+    FsHandles.isAvailable()
+  );
+}
+
+async function queryHandlePermission(handle) {
+  if (!handle.queryPermission) return "prompt";
+  try {
+    return await handle.queryPermission({ mode: "read" });
+  } catch {
+    return "prompt";
+  }
+}
+
+async function requestHandlePermission(handle) {
+  if (!handle.requestPermission) return "denied";
+  try {
+    return await handle.requestPermission({ mode: "read" });
+  } catch {
+    return "denied";
+  }
+}
+
+async function showFileSystemPicker(options) {
+  const pickerTypes =
+    options.kind === "subtitle"
+      ? [{ description: "Subtitles", accept: { "text/vtt": [".vtt"], "application/x-subrip": [".srt"] } }]
+      : [{ description: "Videos", accept: { "video/*": [] } }];
+
+  const [handle] = await window.showOpenFilePicker({
+    types: pickerTypes,
+    excludeAcceptAllOption: false,
+    id: options.id,
+  });
+  if (!handle) return null;
+  const file = await handle.getFile();
+  // Surface the handle on the file so the caller can persist it without
+  // a second getFile() round trip.
+  try {
+    Object.defineProperty(file, "handle", { value: handle, configurable: true });
+  } catch {
+    /* Non-writable file object: handle is simply unavailable. */
+  }
+  return file;
+}
+
+// Fallback used when the File System Access API is unavailable: a plain
+// <input type="file"> picker. Resolves null when the user cancels.
+function showInputFilePicker(options) {
+  return new Promise(resolve => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = options.kind === "subtitle" ? ".vtt,.srt" : "video/*";
+    input.style.display = "none";
+
+    let settled = false;
+    const cleanup = () => {
+      window.setTimeout(() => input.remove(), 0);
+      document.removeEventListener("focus", onFocus, true);
+    };
+    const finish = file => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(file || null);
+    };
+    // Cancelling a native file dialog fires no "change" event; the window
+    // regaining focus is the signal that no file was selected.
+    const onFocus = () => window.setTimeout(() => {
+      if (!settled && input.files.length === 0) finish(null);
+    }, 300);
+
+    input.addEventListener("change", () => finish(input.files[0] || null), { once: true });
+    document.addEventListener("focus", onFocus, true);
+    document.body.appendChild(input);
+    input.click();
+  });
+}
+
+// Services object consumed by RecentStore.resolveLocalEntry().
+const localFileServices = {
+  supportsFsAccess: supportsFileSystemAccess,
+  getHandle: key => FsHandles.getHandle(key),
+  queryPermission: queryHandlePermission,
+  requestPermission: requestHandlePermission,
+  openPicker: options =>
+    supportsFileSystemAccess()
+      ? showFileSystemPicker(options)
+      : showInputFilePicker(options),
+  notify: kind => {
+    if (kind === "subtitle") {
+      showAlert(CONFIG.MESSAGES.RESELECT_LOCAL_SUBTITLE, { icon: "info" });
+    } else {
+      showAlert(CONFIG.MESSAGES.RESELECT_LOCAL_VIDEO, { icon: "info" });
+    }
+  },
+};
+
+// Re-open a local recent entry: stored handle first (when supported),
+// otherwise guide the user through re-picking the file(s), then resume
+// playback with the original record's progress and subtitle.
+async function reselectLocalEntry(item) {
+  try {
+    const resolved = await RecentStore.resolveLocalEntry(item, localFileServices);
+    if (!resolved || !resolved.video) return;
+
+    const videoFile = resolved.video.file;
+    const subtitleFile = resolved.subtitle ? resolved.subtitle.file : null;
+
+    const videoUrl = URL.createObjectURL(videoFile);
+    const subtitleUrl = subtitleFile ? URL.createObjectURL(subtitleFile) : "";
+
+    // Persist handles when the picker produced new ones; keys are derived
+    // from the (unique) title and never written into exported JSON.
+    const handleKeys = {};
+    const videoHandleKey = RecentStore.handleKeyFor(item.title, "video");
+    const videoHandle =
+      resolved.video.handle ||
+      (supportsFileSystemAccess() && videoFile && videoFile.handle) ||
+      null;
+    if (videoHandle) {
+      await FsHandles.saveHandle(videoHandleKey, videoHandle);
+      handleKeys.video = videoHandleKey;
+    }
+
+    if (subtitleFile) {
+      const subtitleHandleKey = RecentStore.handleKeyFor(item.title, "subtitle");
+      const subtitleHandle =
+        (resolved.subtitle && resolved.subtitle.handle) ||
+        (supportsFileSystemAccess() && subtitleFile.handle) ||
+        null;
+      if (subtitleHandle) {
+        await FsHandles.saveHandle(subtitleHandleKey, subtitleHandle);
+        handleKeys.subtitle = subtitleHandleKey;
+      }
+    }
+
+    const record = RecentStore.buildResolvedRecord(
+      item,
+      { videoUrl, subtitleUrl },
+      handleKeys
+    );
+
+    // Same-title entry is replaced by the fresh, usable reference and moved
+    // to the front; the 30-entry cap and ordering remain enforced.
+    setRecent(RecentStore.upsertRecent(getRecent(), record));
+    renderRecent();
+
+    DOM.videoLoadSelect.value = "local";
+    DOM.videoUrl.style.display = "none";
+    DOM.videoFile.style.display = "block";
+    if (record.subtitle && record.subtitleType === "local") {
+      DOM.subtitleLoadSelect.value = "local";
+      DOM.subtitleUrl.style.display = "none";
+      DOM.subtitleFile.style.display = "block";
+    }
+
+    playVideo(
+      record.video,
+      record.subtitle,
+      record.title,
+      "local",
+      record.subtitle ? record.subtitleType : "url"
+    );
+    // loadedmetadata -> loadPlayerTime() restores the saved percentage.
+  } catch (error) {
+    showAlert(CONFIG.MESSAGES.REOPEN_LOCAL_ERROR, { icon: "error" });
+  }
+}
+
 
 
 DOM.videoLoadSelect.addEventListener("change", () => {
@@ -540,8 +756,8 @@ DOM.skipButton.addEventListener("click", () => {
   DOM.skipButton.style.display = "none";
 });
 DOM.exportButton.addEventListener("click", () => {
-  const data = getRecent();
-  if (!data) {
+  const data = RecentStore.serializeRecent(getRecent());
+  if (!data.length) {
     showAlert(CONFIG.MESSAGES.EXPORT_EMPTY, {icon: "info"});
     return;
   }
@@ -558,10 +774,12 @@ DOM.exportButton.addEventListener("click", () => {
     let fileName = (result.value || CONFIG.FILES.EXPORT_DEFAULT_NAME)
     .trim()
     .replaceAll(" ", "-");
-  
+
   if (!fileName) {
     fileName = CONFIG.FILES.EXPORT_DEFAULT_NAME;
   }
+  // serializeRecent() guarantees plain JSON-safe objects: no
+  // FileSystemFileHandle or internal handle key can reach the file.
   const blob = new Blob([JSON.stringify(data)], { type: CONFIG.FILES.EXPORT_TYPE });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
@@ -594,21 +812,12 @@ DOM.recentFile.addEventListener("change", () => {
   reader.onload = () => {
     try {
       const parsed = JSON.parse(reader.result);
-      if (!Array.isArray(parsed)) throw new Error();
-      const isValid = parsed.every(item =>
-        item &&
-        typeof item === "object" &&
-        typeof item.title === "string" &&
-        typeof item.video === "string" &&
-        (item.videoType === "url" || item.videoType === "local") &&
-        (item.subtitle === "" || typeof item.subtitle === "string") &&
-        (item.subtitleType === "url" || item.subtitleType === "local") &&
-        typeof item.progress === "number" &&
-        item.progress >= 0 &&
-        item.progress <= 100
-      );
-      if (!isValid) throw new Error();
-      setRecent(parsed);
+      // Local entries without handles are accepted: invalid rows are
+      // dropped individually, so one bad/local row can no longer reject
+      // the whole import or erase the other records.
+      const normalized = RecentStore.normalizeImportedRecords(parsed);
+      if (!Array.isArray(parsed) || normalized.length === 0) throw new Error();
+      setRecent(normalized);
       renderRecent();
       showAlert(CONFIG.MESSAGES.IMPORT_SUCCESS, {icon: "success"});
     } catch {
@@ -720,7 +929,7 @@ DOM.resumeButton.addEventListener("click", () => {
   }
   const item = recent[0];
   if (item.videoType !== "url") {
-    showAlert(CONFIG.MESSAGES.RESELECT_LOCAL_VIDEO, {icon: "info"});
+    reselectLocalEntry(item);
     return;
   }
   DOM.videoUrl.value = item.video;

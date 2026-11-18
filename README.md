@@ -93,6 +93,38 @@ Then open your browser and visit:
 http://localhost:5005
 ```
 
+### Reopening local files from Recent Plays
+
+Local videos and subtitles use temporary `blob:` URLs that do not survive a
+page reload. When you click a local entry in **Recent Plays**:
+
+- If your browser supports the [File System Access API](https://developer.mozilla.org/docs/Web/API/File_System_Access_API),
+  Neovid reopens the file through the handle stored in IndexedDB (you may be
+  asked for permission once) and resumes from the saved progress.
+- Otherwise (or when the stored handle is missing/denied/stale), you are guided
+  to re-pick the file(s); playback then resumes with the original progress and
+  subtitle instead of only showing a warning.
+
+Handles are kept in IndexedDB, never in `localStorage`, and are never written
+into exported JSON files.
+
+### Automated tests
+
+The pure recent-store logic is covered by dependency-free tests run with the
+Node.js built-in test runner (Node 18+):
+
+```console
+npm test
+# or, without npm:
+node --test tests/**/*.test.js
+```
+
+The suite covers local-entry reselect and progress restoration, the manual
+re-pick fallback when no handle is available, import tolerance for local
+entries (other records are preserved), and export output that contains no
+handle fields. A hand-checkable import sample lives in
+`tests/fixtures/sample-import.json`.
+
 ## Dependencies
 
 - [SweetAlert2](https://sweetalert2.github.io/) v11.26.24
