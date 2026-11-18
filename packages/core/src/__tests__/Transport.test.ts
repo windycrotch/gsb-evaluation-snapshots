@@ -981,4 +981,64 @@ describe('TransportBus', () => {
 
     expect(true).toBe(true);
   });
+
+  it('should forward aggregate state on start and stop', () => {
+    const context = createMockAudioContext(0);
+    const transport = new Transport(context, { bpm: 100 });
+    const bus = new TransportBus(transport);
+
+    const listener = jest.fn();
+    bus.on('state', listener);
+
+    transport.start(0);
+    expect(listener).toHaveBeenLastCalledWith({ bpm: 100, isRunning: true });
+
+    transport.stop(1);
+    expect(listener).toHaveBeenLastCalledWith({ bpm: 100, isRunning: false });
+
+    bus.dispose();
+  });
+
+  it('should forward aggregate state on tempo changes', () => {
+    const context = createMockAudioContext(0);
+    const transport = new Transport(context, { bpm: 100 });
+    const bus = new TransportBus(transport);
+
+    const listener = jest.fn();
+    bus.on('state', listener);
+
+    transport.start(0);
+    transport.setTempo(150, 0);
+
+    expect(listener).toHaveBeenLastCalledWith({ bpm: 150, isRunning: true });
+
+    bus.dispose();
+  });
+
+  it('should expose the shared state snapshot', () => {
+    const context = createMockAudioContext(0);
+    const transport = new Transport(context, { bpm: 90 });
+    const bus = new TransportBus(transport);
+
+    expect(bus.getState()).toEqual({ bpm: 90, isRunning: false });
+
+    transport.start(0);
+    expect(bus.getState()).toEqual({ bpm: 90, isRunning: true });
+
+    bus.dispose();
+  });
+
+  it('should not forward state after dispose', () => {
+    const context = createMockAudioContext();
+    const transport = new Transport(context);
+    const bus = new TransportBus(transport);
+
+    const listener = jest.fn();
+    bus.on('state', listener);
+    bus.dispose();
+
+    transport.start();
+
+    expect(listener).not.toHaveBeenCalled();
+  });
 });

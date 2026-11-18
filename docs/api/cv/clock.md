@@ -359,10 +359,14 @@ The optional `stopOutput` prop provides a trigger pulse when the clock stops:
 - **Shared BPM** - All clocks share the same tempo
 - **Efficient resource usage** - Single worklet handles all clock timing
 
+**Lifecycle:** the first Clock to mount creates the shared transport. Later Clocks reuse that same instance, and the transport is only disposed once the last Clock unmounts (reference counting). Unmounting one Clock never stops the clock for the remaining ones, and a released transport is recreated on the next mount.
+
 **Implications:**
-- If you create multiple Clock components, changing the BPM on any one clock will affect all clocks in the same AudioContext
-- All clocks share the same start/stop state
-- This is by design to enable tight synchronization in modular patches
+- If you create multiple Clock components, changing the BPM on any one clock will affect all clocks in the same AudioContext (the last value set wins)
+- All clocks share the same start/stop state: `start()` on any Clock starts the shared clock and `stop()` on any Clock stops it, so every mounted Clock reports the same `isRunning`
+- Calling `stop()` twice, or on an already stopped clock, is a no-op
+- Tempo changes are applied at the current audio time, so the beat position stays continuous across a BPM change
+- An unmounted Clock stops receiving shared clock events and calling its handle methods afterwards is safe
 - Each Clock component still has its own independent outputs and can be routed differently
 
 ## Related

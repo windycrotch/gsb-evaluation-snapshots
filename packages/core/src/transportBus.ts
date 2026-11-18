@@ -1,7 +1,7 @@
 import { Transport, TransportEvent, TransportLike } from './transport';
 import { WorkletTransport, TransportTick } from './transportWorklet';
 
-export type TransportBusEvent = TransportEvent | 'tick';
+export type TransportBusEvent = TransportEvent | 'tick' | 'state';
 
 export interface TransportBusTick {
   time: number;
@@ -10,7 +10,14 @@ export interface TransportBusTick {
   running: boolean;
 }
 
-type TransportBusListener = (payload: TransportBusTick | TransportLike) => void;
+export interface TransportBusState {
+  bpm: number;
+  isRunning: boolean;
+}
+
+type TransportBusListener = (
+  payload: TransportBusTick | TransportBusState | TransportLike
+) => void;
 
 export class TransportBus {
   private readonly transport: TransportLike;
@@ -41,11 +48,23 @@ export class TransportBus {
     }
   }
 
+  /**
+   * Snapshot of the transport state every subscriber shares. Used both by
+   * `emitTick` and by the `state` event that keeps sibling Clocks in sync.
+   */
+  getState(): TransportBusState {
+    const transport = this.transport;
+    return {
+      bpm: 'bpm' in transport ? (transport as Transport).bpm : 120,
+      isRunning: transport.isPlaying,
+    };
+  }
+
   emitTick(time = this.transport.currentTime): void {
     const transport = this.transport;
     const beat = transport.getBeatAtTime(time);
-    const bpm = 'bpm' in transport ? (transport as Transport).bpm : 120;
-    this.emit('tick', { time, beat, bpm, running: transport.isPlaying });
+    const { bpm, isRunning } = this.getState();
+    this.emit('tick', { time, beat, bpm, running: isRunning });
   }
 
   dispose(): void {
@@ -63,10 +82,25 @@ export class TransportBus {
   private bindTransport(transport: TransportLike): void {
     if ('on' in transport) {
       const on = (transport as Transport).on.bind(transport);
-      const offStart = on('start', () => this.emit('start', transport));
-      const offStop = on('stop', () => this.emit('stop', transport));
-      const offTempo = on('tempo', () => this.emit('tempo', transport));
-      const offSeek = on('seek', () => this.emit('seek', transport));
+      // `state` is the aggregate view (tempo + running) sibling Clocks listen
+      // to, so they do not need to know which property changed.
+      const relayState = () => this.emit('state', this.getState());
+      const offStart = on('start', () => {
+        this.emit('start', transport);
+        relayState();
+      });
+      const offStop = on('stop', () => {
+        this.emit('stop', transport);
+        relayState();
+      });
+      const offTempo = on('tempo', () => {
+        this.emit('tempo', transport);
+        relayState();
+      });
+      const offSeek = on('seek', () => {
+        this.emit('seek', transport);
+        relayState();
+      });
       this.unsubscribeTransport = () => {
         offStart();
         offStop();
@@ -88,7 +122,10 @@ export class TransportBus {
     }
   }
 
-  private emit(event: TransportBusEvent, payload: TransportBusTick | TransportLike): void {
+  private emit(
+    event: TransportBusEvent,
+    payload: TransportBusTick | TransportBusState | TransportLike
+  ): void {
     const set = this.listeners.get(event);
     if (!set) {
       return;
