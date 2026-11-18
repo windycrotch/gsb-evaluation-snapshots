@@ -1,0 +1,15 @@
+node_modules/
+shots/
+
+.unattended
+
+.gpu
+.renderlock
+
+# transient frozen-source snapshot from tools/postpair.mjs
+pairsrc/
+index.pair.html
+.renderlock.d/
+
+# scratch: capture pairs, probe output, throwaway scripts
+tmp/

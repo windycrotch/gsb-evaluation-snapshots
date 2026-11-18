@@ -1,0 +1,1203 @@
+/* Textures for System 3: bark, foliage sprays, dry grass.
+ *
+ * Same rule as everything else here — nothing is loaded, every texel is
+ * written at boot. Two families, and they have opposite problems.
+ *
+ * Bark is opaque and tiles, so it is authored the same way textures.js authors
+ * dirt: a height field first, with the albedo and the normal both derived from
+ * it. One map serves both the living and the dead wood; the difference between
+ * them is made in the shader (see juniper.js) out of the alpha channel, which
+ * carries a long, low-contrast wood grain that survives on bleached deadwood
+ * after the fibrous bark has gone.
+ *
+ * Foliage is alpha-tested, does not tile, and is drawn with canvas strokes
+ * because a juniper spray is a branching structure and branching structures are
+ * far easier to draw than to evaluate per texel. Alpha testing is where foliage
+ * normally falls apart: the default mip chain averages alpha, coverage collapses
+ * as the tree recedes, and the crown boils as the camera moves. So the mip chain
+ * is built by hand here and every level's alpha is rescaled to hold the same
+ * fraction of texels above the alpha threshold as level zero.
+ */
+import * as THREE from 'three';
+import { pnoise, rng, clamp, smoothstep, mix } from './noise.js';
+
+let maxAniso = 8;
+export function setPlantAnisotropy(n) { maxAniso = n; }
+
+/* The hero tree and the scrub scatter draw from the same maps, and they are
+   built by two independent modules. Memoised so the second caller does not pay
+   for a second identical canvas — and, more importantly, so the renderer sees
+   one texture rather than two copies of it. */
+const _cache = new Map();
+const memo = (k, f) => { if (!_cache.has(k)) _cache.set(k, f()); return _cache.get(k); };
+export const barkTex = () => memo('bark', () => makeBark(512));
+export const deadTex = () => memo('dead', () => makeDeadwood(512));
+export const foliageTex = () => memo('fol', () => makeFoliage(512));
+export const grassTex = () => memo('grass', () => makeGrass(512));
+export const scrubTex = () => memo('scrub', () => makeScrub(512));
+export const succTex = () => memo('succ', () => makeSucculent(256));
+
+/* ── anisotropic tiling noise ──────────────────────────────────────────────
+   noise.js's pfbm shares one period between both axes, and bark is the most
+   anisotropic surface in the scene: a fibre is a hundred times longer than it
+   is wide. So these take the two periods separately. */
+
+function afbm(x, y, px, py, oct, s, gain = 0.5) {
+  let a = 1, f = 1, sum = 0, norm = 0;
+  for (let i = 0; i < oct; i++) {
+    sum += a * pnoise(x * f, y * f, Math.max(1, px * f), Math.max(1, py * f), s + i * 613);
+    norm += a; a *= gain; f *= 2;
+  }
+  return sum / norm;
+}
+
+function aridged(x, y, px, py, oct, s) {
+  let a = 1, f = 1, sum = 0, norm = 0;
+  for (let i = 0; i < oct; i++) {
+    const n = pnoise(x * f, y * f, Math.max(1, px * f), Math.max(1, py * f), s + i * 271);
+    sum += a * (1 - Math.abs(n * 2 - 1));
+    norm += a; a *= 0.5; f *= 2;
+  }
+  return sum / norm;
+}
+
+function blurWrap(src, w, h, r) {
+  const tmp = new Float32Array(w * h), out = new Float32Array(w * h);
+  const n = 2 * r + 1;
+  const wx = (a) => ((a % w) + w) % w, wy = (a) => ((a % h) + h) % h;
+  for (let y = 0; y < h; y++) {
+    let sum = 0;
+    for (let k = -r; k <= r; k++) sum += src[y * w + wx(k)];
+    for (let x = 0; x < w; x++) {
+      tmp[y * w + x] = sum / n;
+      sum += src[y * w + wx(x + r + 1)] - src[y * w + wx(x - r)];
+    }
+  }
+  for (let x = 0; x < w; x++) {
+    let sum = 0;
+    for (let k = -r; k <= r; k++) sum += tmp[wy(k) * w + x];
+    for (let y = 0; y < h; y++) {
+      out[y * w + x] = sum / n;
+      sum += tmp[wy(y + r + 1) * w + x] - tmp[wy(y - r) * w + x];
+    }
+  }
+  return out;
+}
+
+function dataTex(buf, w, h, srgb) {
+  const t = new THREE.DataTexture(buf, w, h, THREE.RGBAFormat, THREE.UnsignedByteType);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.magFilter = THREE.LinearFilter;
+  t.minFilter = THREE.LinearMipmapLinearFilter;
+  t.generateMipmaps = true;
+  t.anisotropy = maxAniso;
+  t.colorSpace = srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+  t.needsUpdate = true;
+  return t;
+}
+
+/* ── bark ──────────────────────────────────────────────────────────────────
+ *
+ * A juniper's living bark is not plated or furrowed like a pine's; it is
+ * *fibrous* — long stringy strips that separate from each other and lift away
+ * at the edges, so the trunk looks like it has been wrapped in shredded rope.
+ * The strips run vertically and shear slowly around the trunk.
+ *
+ * The height field is therefore three terms: a ridged fibre field with a
+ * wavelength of a few millimetres across and the better part of a metre along;
+ * a coarser strip field that groups the fibres into strings a couple of
+ * centimetres wide; and a peel mask that lifts one edge of a minority of those
+ * strings clear of the trunk and puts a hard shadow line under it.
+ *
+ * `v` runs up the trunk. The tile is 0.5 m square in world units.
+ */
+export function makeBark(size = 512) {
+  const N = size * size;
+  const h = new Float32Array(N);
+  const fibre = new Float32Array(N);
+  const strip = new Float32Array(N);
+  const peel = new Float32Array(N);
+  const grain = new Float32Array(N);
+
+  const PU = 32, PV = 4;   // lattice periods across / along the tile
+
+  for (let y = 0; y < size; y++) {
+    const v = y / size;
+    for (let x = 0; x < size; x++) {
+      const u = x / size;
+      const i = y * size + x;
+
+      /* Fibres shear as they climb rather than running dead straight, which is
+         what stops the trunk reading as corrugated plastic. */
+      const shear = 0.10 * (afbm(u * 3, v * 2, 3, 2, 3, 91) - 0.5) * 2;
+      const uu = u + shear * v + 0.03 * (afbm(u * 8, v * 16, 8, 16, 2, 97) - 0.5);
+
+      const f = aridged(uu * PU * 2.2, v * PV * 1.4, PU * 2.2, PV * 1.4, 3, 11);
+      const st = aridged(uu * PU * 0.62, v * PV * 0.5, PU * 0.62, PV * 0.5, 2, 17);
+      /* Strings terminate: a strip that runs the full height of the tile is a
+         stripe, and a stripe is the thing that says "cylinder with a texture on
+         it". Broken by a low-frequency gate along v. */
+      const brk = smoothstep(0.30, 0.62, afbm(uu * PU * 0.62, v * PV * 3.0, PU * 0.62, PV * 3.0, 3, 23));
+      const p = smoothstep(0.68, 0.93, st * 0.55 + 0.45 * afbm(uu * 5, v * 3, 5, 3, 3, 29)) * brk;
+
+      fibre[i] = f;
+      strip[i] = st * brk;
+      peel[i] = p;
+      grain[i] = afbm(uu * PU * 0.9, v * PV * 0.35, PU * 0.9, PV * 0.35, 4, 37);
+
+      h[i] = 0.42 * Math.pow(st, 1.4) * brk + 0.30 * f * (0.45 + 0.55 * st) + 0.28 * p;
+    }
+  }
+
+  /* Cavity darkening between the strings. The grooves are deep and narrow and
+     they hold shadow all day, which is most of what gives fibrous bark its
+     contrast at a distance where the relief itself is sub-pixel. */
+  const hb = blurWrap(h, size, size, 3);
+  const hb2 = blurWrap(h, size, size, 9);
+
+  const alb = new Uint8Array(N * 4);
+  const rough = new Float32Array(N);
+
+  /* Warm grey-brown, and grey-*er* than the soil. Juniper bark photographs a
+     good deal less saturated than people remember — it is a dusty taupe with a
+     red undertone, not chestnut. */
+  /* Range widened from 0.115–0.360 to 0.070–0.475. Fibrous bark is *high
+     contrast at close range*: near-black grooves between strings whose lifted
+     edges catch the sun. Compressed into a narrow band it averages to a
+     low-frequency vertical smear — the trunk read as brushed suede. */
+  const DARK = [0.070, 0.048, 0.036];
+  const MID = [0.230, 0.176, 0.138];
+  const PALE = [0.475, 0.405, 0.345];
+
+  for (let i = 0; i < N; i++) {
+    const ao = clamp(1 - (hb[i] - h[i]) * 3.4, 0, 1) * 0.65
+             + clamp(1 - (hb2[i] - h[i]) * 1.8, 0, 1) * 0.35;
+    /* Lit crest → pale sun-bleached fibre; groove → almost black. */
+    let t = clamp(h[i] * 1.5 + 0.10, 0, 1);
+    t = t * (0.35 + 0.65 * ao);
+    const tint = 0.5 + 0.5 * (grain[i] - 0.5) * 1.4;
+    const c = [0, 0, 0];
+    for (let k = 0; k < 3; k++) {
+      const lo = mix(DARK[k], MID[k], clamp(t * 2, 0, 1));
+      c[k] = mix(lo, PALE[k], clamp(t * 2 - 1, 0, 1));
+      /* Lichen and mineral staining, extremely muted, breaks up the tiling. */
+      c[k] *= 0.80 + 0.40 * tint;
+    }
+    /* A little greenish-grey lichen on a small fraction of the crests — a real
+       trunk in a wash has some, and it is one of the few non-brown things on it. */
+    const li = smoothstep(0.62, 0.86, grain[i]) * smoothstep(0.35, 0.65, h[i]) * 0.5;
+    c[0] = mix(c[0], 0.215, li); c[1] = mix(c[1], 0.225, li); c[2] = mix(c[2], 0.180, li);
+
+    alb[i * 4] = clamp(Math.pow(c[0], 1 / 2.2), 0, 1) * 255;
+    alb[i * 4 + 1] = clamp(Math.pow(c[1], 1 / 2.2), 0, 1) * 255;
+    alb[i * 4 + 2] = clamp(Math.pow(c[2], 1 / 2.2), 0, 1) * 255;
+    /* Alpha carries the deadwood grain: long, smooth, low contrast. Sun-bleached
+       juniper keeps its grain and loses everything else. */
+    alb[i * 4 + 3] = clamp(0.30 + 0.70 * (0.55 * grain[i] + 0.45 * fibre[i] * 0.6), 0, 1) * 255;
+
+    rough[i] = clamp(0.98 - 0.16 * peel[i] - 0.10 * (1 - ao), 0, 1);
+  }
+
+  /* Normal from the height field. 0.5 m across 512 texels is ~1 mm per texel and
+     the relief is around 6 mm peak to trough, so the gradient scale is ~6. */
+  const nrm = new Uint8Array(N * 4);
+  const w = (a) => ((a % size) + size) % size;
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const l = h[y * size + w(x - 1)], r = h[y * size + w(x + 1)];
+      const d = h[w(y - 1) * size + x], u = h[w(y + 1) * size + x];
+      let nx = (l - r) * 6.0, ny = (d - u) * 6.0;
+      const inv = 1 / Math.sqrt(nx * nx + ny * ny + 1);
+      const i = (y * size + x) * 4;
+      nrm[i] = (nx * inv * 0.5 + 0.5) * 255;
+      nrm[i + 1] = (ny * inv * 0.5 + 0.5) * 255;
+      nrm[i + 2] = (inv * 0.5 + 0.5) * 255;
+      nrm[i + 3] = clamp(rough[y * size + x], 0, 1) * 255;
+    }
+  }
+
+  return { albedo: dataTex(alb, size, size, true), normal: dataTex(nrm, size, size, false) };
+}
+
+/* ── strip-bark deadwood ───────────────────────────────────────────────────
+ *
+ * Its own map, because it is its own substance and the first two attempts to
+ * fake it from the bark map both failed in instructive ways.
+ *
+ * Attempt one tinted the bark albedo paler and called it a dead strip: 15% value
+ * contrast, and a reviewer could not see it at all. Attempt two pushed the tint
+ * to a 3x ratio *and smoothed the relief*, on the reasoning that weathered wood
+ * is polished where fibrous bark is shaggy. That produced "silver-metal
+ * branches" and "galvanised pipe" — and the reasoning was simply wrong. Strip-
+ * bark deadwood is the *most* textured surface on the tree, not the least:
+ * exposed heartwood weathers into spiral grain, deep longitudinal fissures and
+ * transverse checking, and it is that relief which stops it reading as tubing.
+ * So the relief here is stronger than the bark's, not weaker.
+ *
+ * Two measurements set the colour, both taken off real junipers by the reviewer:
+ * hue 26.7 degrees and value 0.643, against live bark at 0.180 — a warm bone,
+ * three and a half times the bark's value. The hue matters more than it sounds:
+ * a render measured 223.6 degrees, steel blue, because at value 0.22 the sky's
+ * specular reflection was out-competing a warm but very dark diffuse. Value and
+ * hue turn out to be the same fix.
+ */
+export function makeDeadwood(size = 512) {
+  const N = size * size;
+  const h = new Float32Array(N);
+  const fiss = new Float32Array(N);
+  const check = new Float32Array(N);
+
+  const PU = 26, PV = 3;
+
+  for (let y = 0; y < size; y++) {
+    const v = y / size;
+    for (let x = 0; x < size; x++) {
+      const u = x / size;
+      const i = y * size + x;
+
+      /* Spiral. Weathered juniper heartwood twists visibly — the grain wraps the
+         stem — and a shear that grows with v produces that on a tile that still
+         has to close on itself. Stronger than the bark's 0.10. */
+      const shear = 0.26 * (afbm(u * 2, v * 1.5, 2, 1.5, 3, 401) - 0.5) * 2;
+      const uu = u + shear * v;
+
+      /* Grain: many fine longitudinal fibres, low amplitude, high frequency. */
+      const g = aridged(uu * PU * 3.1, v * PV * 0.7, PU * 3.1, PV * 0.7, 3, 409);
+      /* Fissures: few, deep, long. These hold the shadow and are most of what
+         reads at twenty metres.
+         Frequency cut from 0.5 to 0.28 of PU, so about seven wrap the member
+         rather than thirteen. A relative-luminance gradient measured inside the
+         snags came back at 0.0015 against sandstone's 0.055 to 0.47 — the
+         flattest surface in the frame, on what should be the most fissured. Part
+         of that is that there were no pixels to draw in, which the bole fixes,
+         but part is that thirteen fissures around a member only ten pixels wide
+         is three per pixel: the mip chain averages them to a flat tone and does
+         it correctly. Detail has to be coarse enough to survive to the screen or
+         it is not detail, it is noise that costs texture bandwidth. Deeper too,
+         since half as many of them are now carrying the same job. */
+      const f = aridged(uu * PU * 0.28, v * PV * 0.35, PU * 0.28, PV * 0.35, 2, 419);
+      const fs = Math.pow(smoothstep(0.42, 0.95, f), 1.35);
+      /* Checking: short cracks *across* the grain. The one feature that cannot
+         be mistaken for bark fibre, and so the strongest cue that this is bare
+         wood. Gated to appear in patches rather than everywhere. */
+      const ck = Math.pow(aridged(uu * PU * 0.8, v * PV * 9.0, PU * 0.8, PV * 9.0, 2, 431), 2.2)
+               * smoothstep(0.45, 0.80, afbm(uu * 3, v * 2, 3, 2, 2, 437));
+
+      fiss[i] = fs; check[i] = ck;
+      h[i] = 0.62 * (1 - fs) + 0.26 * g + 0.16 * (1 - ck);
+    }
+  }
+
+  const hb = blurWrap(h, size, size, 3);
+  const hb2 = blurWrap(h, size, size, 11);
+
+  const alb = new Uint8Array(N * 4);
+  const rough = new Float32Array(N);
+
+  /* Warm bone. Linear-light triples; the sRGB encode happens below. The channel
+     *ratio* is held constant and only the level varies, which is what keeps a
+     bright crest from drifting toward white and a fissure from drifting toward
+     blue — the drift that made the last attempt read as metal. */
+  /* Saturation 0.142, down from 0.214. Measured on the rendered frame the first
+     version came out at 0.376 against a real juniper's 0.134 — the warm key adds
+     chroma of its own, so the albedo has to sit below the target rather than on
+     it. Hue is unchanged at 25-27 degrees, which measured 28.2 on the frame
+     against a target of 27 and is the one number here that is already right. */
+  /* Saturation back up to 0.160 after 0.108 measured hue 337 on the frame —
+     magenta. At that chroma the albedo is nearly neutral, so it faithfully
+     reports whatever the environment's cast is, and this scene's grade has a
+     magenta component. Holding a stated hue against a coloured light needs the
+     albedo to have enough chroma of its own to dominate; that is the opposite of
+     what the earlier reduction assumed, and it is why the rendered saturation
+     ends up above the reference figure. Hue is the ranked defect here and
+     saturation is not, so the trade goes that way. */
+  /* Hue 41 in the albedo, to land near 27 on the frame. Not a fudge: the stems
+     measured 8.5 degrees at an albedo of 24, because a broad pale surface tucked
+     under a crown in front of a red sandstone wall is lit substantially by red
+     bounce, and the tone map pulls what is left toward the key. The twigs, which
+     are small and see less of the wall, measured 21.6 from the same albedo. The
+     stated target is a figure on the render, so the albedo is set to hit it
+     there. */
+  const HUE = [1.0, 0.880, 0.700];        // hue 36.0 deg, sat 0.300
+  /* Levels chosen so that level * HUE.r * the blotch's 1.14 ceiling stays under
+     1.0. Above that the texture's own clamp bites the red channel first, which
+     both flattens the value range and *changes the hue* — the brightest crests
+     desaturate toward white while the rest do not. Brightness belongs in
+     uDeadCol, which is applied in linear light in the shader where there is no
+     ceiling until the tone map. */
+  /* And a *narrow* band, 0.42 to 0.66 rather than 0.22 to 0.88.
+     The wide band was the source of the bright bead stipple along every snag,
+     which survived three rounds of roughness changes and then survived killing
+     the specular outright — because it was never specular. It is albedo speckle:
+     a dead twig is about one pixel wide at eighteen metres, its texture is
+     sampled at roughly one texel-cluster per pixel, and a 4:1 albedo range
+     produces a bright dot wherever a grain crest lands on the lit side. Weathered
+     wood does not have a 4:1 albedo range anyway. Its contrast is relief, which
+     is what the normal map carries and what survives the mip chain honestly. */
+  /* Dropped from 0.420. The median value and the hue were both on target while
+     the snags still read as uniform pale rods, because a 0.42-0.66 band is
+     barely a band at all — every pixel was the same bone grey. Real weathered
+     wood is mottled: the fissure floors go nearly black, and it is that
+     variation, not the average, that stops a rod looking like extruded plastic.
+     Fissure floors are a minority of the pixels, so this darkens the look far
+     more than it moves the measured median. */
+  const LEVEL_DARK = 0.255;               // deep in a fissure
+  const LEVEL_MID = 0.560;
+  /* 0.70, down from 0.90. Times the tint and the blotch that reached 1.36, and a
+     sunlit snag went to white — the round-one failure again, arrived at from the
+     other direction. The median was correct at the time (3.33x, hue 27.2) which
+     is exactly why a median is not enough: the distribution's top was clipping
+     while its middle measured on target. Weathered wood is not high-contrast in
+     *albedo* anyway; its contrast is relief, which is what the normal map is
+     for. The highlight rolloff that keeps the rest of it off the ceiling is in
+     `makeBarkMaterial`. */
+  /* 0.540, from 0.660. Measured rather than guessed this time: over the 88x41
+     crop that carries the worst of the speck stipple, dropping uDeadCol from
+     2.25 to 1.65 and the knee from 1.05 to 0.62 took the specks from 39 pixels
+     at mean L=143 to 27 at L=128, while adding a knee to the *living* bark and
+     ungating the specular cut both changed the region by exactly zero pixels.
+     So the population is dead wood, and it is the diffuse term, and it is the top
+     of the albedo range — the crest — and not the specular rim or the live bark.
+     Narrowing the crest rather than scaling the whole level is the shape of fix
+     the measurement asks for: DARK and MID are untouched, so the median value
+     that the dead-to-live ratio is quoted on barely moves while the peak that
+     clips to cream comes down by a fifth. */
+  const LEVEL_PALE = 0.540;               // sun-bleached crest of the grain
+
+  for (let i = 0; i < N; i++) {
+    const x = i % size, y = i / size | 0;
+    const ao = clamp(1 - (hb[i] - h[i]) * 4.2, 0, 1) * 0.62
+             + clamp(1 - (hb2[i] - h[i]) * 2.2, 0, 1) * 0.38;
+    let t = clamp((h[i] - 0.30) * 1.85, 0, 1);
+    t = t * (0.30 + 0.70 * ao);
+    /* Weathering blotches: grey where water sits, warmer where the sun gets it.
+       Kept narrow so the hue measurement does not wander. */
+    const blotch = 0.5 + 0.5 * (afbm(x / size * 4, y / size * 3, 4, 3, 3, 443) - 0.5) * 1.6;
+    const lvl = t < 0.5
+      ? mix(LEVEL_DARK, LEVEL_MID, clamp(t * 2, 0, 1))
+      : mix(LEVEL_MID, LEVEL_PALE, clamp(t * 2 - 1, 0, 1));
+    for (let k = 0; k < 3; k++) {
+      const c = lvl * HUE[k] * (0.94 + 0.12 * blotch);
+      alb[i * 4 + k] = clamp(Math.pow(clamp(c, 0, 1), 1 / 2.2), 0, 1) * 255;
+    }
+    /* Alpha carries the inverse fissure mask, so the shader can keep the deepest
+       grooves from being lifted by the ambient term. */
+    alb[i * 4 + 3] = clamp(1 - fiss[i], 0, 1) * 255;
+
+    /* Rough, and roughest where it is checked and fissured. Nothing goes below
+       0.72: a sheen at 0.62 is what finished the job of turning these branches
+       into pipe. */
+    rough[i] = clamp(0.94 - 0.14 * clamp(t, 0, 1) + 0.06 * check[i], 0.72, 1);
+  }
+
+  const nrm = new Uint8Array(N * 4);
+  const wr = (a) => ((a % size) + size) % size;
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const l = h[y * size + wr(x - 1)], r = h[y * size + wr(x + 1)];
+      const d = h[wr(y - 1) * size + x], u = h[wr(y + 1) * size + x];
+      /* 6.5 across the grain against the bark map's 6.0, and 4.5 along it.
+         This was 12 and 7, on the argument that bare heartwood has deeper relief
+         than bark — which is true of the wood and false of the render. A normal
+         that strong on a cylinder eight radial segments around perturbs N dot L
+         enough to put a bright facet on each segment, and the result is a line of
+         beads down every branch. They looked like specular aliasing and were
+         chased as such for two rounds; they are diffuse. Above the bark's
+         amplitude is what the critique asked for and 6.5 is above it; the grain
+         character comes from the anisotropy between the axes rather than from the
+         absolute strength, and that survives at any amplitude. */
+      let nx = (l - r) * 6.5, ny = (d - u) * 4.5;
+      const inv = 1 / Math.sqrt(nx * nx + ny * ny + 1);
+      const i = (y * size + x) * 4;
+      nrm[i] = (nx * inv * 0.5 + 0.5) * 255;
+      nrm[i + 1] = (ny * inv * 0.5 + 0.5) * 255;
+      nrm[i + 2] = (inv * 0.5 + 0.5) * 255;
+      nrm[i + 3] = clamp(rough[y * size + x], 0, 1) * 255;
+    }
+  }
+
+  return { albedo: dataTex(alb, size, size, true), normal: dataTex(nrm, size, size, false) };
+}
+
+/* ── alpha-tested atlas plumbing ───────────────────────────────────────────
+ *
+ * Two things have to happen to a hand-drawn cutout before it can be alpha
+ * tested at distance without boiling.
+ *
+ * The RGB of fully transparent texels has to be filled with something close to
+ * the neighbouring opaque colour, or bilinear filtering along the cutout edge
+ * blends toward whatever the canvas cleared to — a black rim around every leaf.
+ *
+ * And the mip chain has to preserve *coverage*, not alpha. Box-averaging alpha
+ * halves the average alpha of a sparse spray at every level, so by mip 3 almost
+ * nothing survives the alpha test and the crown evaporates; worse, which texels
+ * survive changes with sub-pixel motion, which is the boiling. Rescaling each
+ * level's alpha so the same fraction of texels clears the threshold keeps the
+ * silhouette's area constant all the way down the chain.
+ */
+
+function dilateRGB(px, w, h, passes) {
+  for (let p = 0; p < passes; p++) {
+    const src = px.slice();
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = (y * w + x) * 4;
+        if (src[i + 3] > 4) continue;
+        let r = 0, g = 0, b = 0, n = 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            const sx = x + dx, sy = y + dy;
+            if (sx < 0 || sy < 0 || sx >= w || sy >= h) continue;
+            const j = (sy * w + sx) * 4;
+            if (src[j + 3] <= 4) continue;
+            r += src[j]; g += src[j + 1]; b += src[j + 2]; n++;
+          }
+        }
+        if (n) { px[i] = r / n; px[i + 1] = g / n; px[i + 2] = b / n; }
+      }
+    }
+  }
+}
+
+function coverage(px, at) {
+  let n = 0;
+  for (let i = 3; i < px.length; i += 4) if (px[i] >= at) n++;
+  return n / (px.length / 4);
+}
+
+/**
+ * Build a mip chain whose alpha coverage is constant.
+ *
+ * The rule below was suspected of causing four of the reported artefacts —
+ * shrubs reading as "flat opaque quads with no alpha cut", pale ghost rows at
+ * the atlas cell boundaries, and chartreuse shards on a distant bench — on the
+ * theory that a large gain would *flood* a sparse level, pushing every faintly
+ * covered texel over the threshold at once and leaving a solid rectangle bounded
+ * by the clip inset. It does not. Measured with `tools/mipprobe.mjs` on a
+ * synthetic spray at level-zero coverage 0.104, this chain holds 0.10 at every
+ * level from 64px down, the gain never exceeds 1.13, and the fully-opaque
+ * fraction peaks at 2.6% — there is no flood to fix. Three alternatives were
+ * tried and all three were worse: taking the max of each alpha quad instead of
+ * the mean drives coverage to 1.0 by the bottom of the chain, and letting the
+ * gain fall below one to correct an overshoot undershoots level one by 43%.
+ *
+ * Recorded because the theory was persuasive and the code was innocent. The one
+ * real weakness is at the last two levels, where coverage does collapse to zero:
+ * four texels of mean alpha below the threshold cannot be rescued by any gain
+ * the search will consider, so a spray does wink out at around two pixels. It is
+ * a two-pixel pop and it is the correct thing to leave alone.
+ */
+function coverageMips(base, w, h, alphaTest) {
+  const at = alphaTest * 255;
+  const target = coverage(base, at);
+  const mips = [{ data: base, width: w, height: h }];
+  let cur = base, cw = w, ch = h;
+  while (cw > 1 || ch > 1) {
+    const nw = Math.max(1, cw >> 1), nh = Math.max(1, ch >> 1);
+    const nd = new Uint8Array(nw * nh * 4);
+    for (let y = 0; y < nh; y++) {
+      for (let x = 0; x < nw; x++) {
+        let r = 0, g = 0, b = 0, a = 0, wsum = 0;
+        for (let dy = 0; dy < 2; dy++) {
+          for (let dx = 0; dx < 2; dx++) {
+            const sx = Math.min(cw - 1, x * 2 + dx), sy = Math.min(ch - 1, y * 2 + dy);
+            const j = (sy * cw + sx) * 4;
+            const wa = cur[j + 3] / 255 + 0.02;   // alpha-weighted, so edges keep their hue
+            r += cur[j] * wa; g += cur[j + 1] * wa; b += cur[j + 2] * wa;
+            a += cur[j + 3]; wsum += wa;
+          }
+        }
+        const k = (y * nw + x) * 4;
+        nd[k] = r / wsum; nd[k + 1] = g / wsum; nd[k + 2] = b / wsum;
+        nd[k + 3] = a / 4;
+      }
+    }
+    /* Binary search the alpha gain that restores level zero's coverage. */
+    let lo = 0.25, hi = 12;
+    for (let it = 0; it < 22; it++) {
+      const s = (lo + hi) * 0.5;
+      let n = 0;
+      for (let i = 3; i < nd.length; i += 4) if (nd[i] * s >= at) n++;
+      if (n / (nd.length / 4) > target) hi = s; else lo = s;
+    }
+    const s = (lo + hi) * 0.5;
+    if (s > 1.001) for (let i = 3; i < nd.length; i += 4) nd[i] = Math.min(255, nd[i] * s);
+    mips.push({ data: nd, width: nw, height: nh });
+    cur = nd; cw = nw; ch = nh;
+  }
+  return mips;
+}
+
+function cutoutTex(px, w, h, alphaTest) {
+  dilateRGB(px, w, h, 4);
+  const mips = coverageMips(px, w, h, alphaTest);
+  const t = new THREE.DataTexture(mips[0].data, w, h, THREE.RGBAFormat, THREE.UnsignedByteType);
+  t.mipmaps = mips;
+  t.generateMipmaps = false;
+  t.wrapS = t.wrapT = THREE.ClampToEdgeWrapping;
+  t.magFilter = THREE.LinearFilter;
+  t.minFilter = THREE.LinearMipmapLinearFilter;
+  t.anisotropy = maxAniso;
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.needsUpdate = true;
+  return t;
+}
+
+function canvas2d(w, h) {
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.clearRect(0, 0, w, h);
+  return { c, ctx };
+}
+
+const rgb = (c) => `rgb(${c[0] | 0},${c[1] | 0},${c[2] | 0})`;
+
+/* Where a blade's cross-section sits between shade and lit edge, as a colour
+   rather than as a multiplier.
+ *
+ * This replaces a clamped scalar gain, and the note that stood here — "a clipped
+ * channel is a hue shift rather than a brightening" — turned out to be describing
+ * the bug rather than guarding against it. The lit pass multiplied every channel
+ * by 1.30, and on the bleached palette that is [216,206,178] * 1.30 =
+ * (255,255,231): two channels clip, so past that point the gain stops adding
+ * brightness and only removes saturation. The rendered blade measured
+ * rgb(250,236,209) at saturation 0.164 and a delivery critic called it "chalky
+ * cream, desaturated toward neutral, and brighter than anything else in frame
+ * including sunlit rock".
+ *
+ * Interpolating toward an explicit highlight cannot clip, and it moves hue as
+ * well as value — which is what a lit edge actually does here. The thin edge of a
+ * dry blade backlit by a 15-degree sun is transmitting, and light transmitted
+ * through straw is amber, so the lit end should *gain* saturation exactly where
+ * the multiplier was losing it. The shaded end mixes toward a near-neutral dark
+ * and lands within a few code values of the old 0.74x, so the atlas mean barely
+ * moves. */
+const SECTION_SHADE = [46, 40, 34];
+const SECTION_HI = [204, 128, 30];
+const rampCol = (c, t) => {
+  const k = t * 2 - 1;
+  const to = k < 0 ? SECTION_SHADE : SECTION_HI;
+  const f = Math.abs(k) * (k < 0 ? 0.30 : 0.68);
+  return rgb([c[0] + (to[0] - c[0]) * f,
+              c[1] + (to[1] - c[1]) * f,
+              c[2] + (to[2] - c[2]) * f]);
+};
+
+/* The cross-section itself: width, offset along the blade's normal, thickness in
+   alpha, and where the pass sits on the ramp.
+ *
+ * Three passes were enough to prove a blade had an interior and not enough to
+ * make it read as curvature. Magnified 3x, a critic found "the three tones
+ * visibly quantised into flat bands" with "stair-step boundaries along each
+ * blade" — cel shading, which is what three fills look like once the blade is
+ * wide enough on screen to resolve them individually. Nine is free: the atlas is
+ * drawn once, and every extra pass gives bilinear filtering something to
+ * interpolate between away from the two boundaries it used to have. */
+const SECTION_N = 9;
+const section = (wEnd, off) => Array.from({ length: SECTION_N }, (_, i) => {
+  const t = i / (SECTION_N - 1);
+  return { w: 1 - (1 - wEnd) * t, o: off * t, a: 0.62 + 0.38 * t, t };
+});
+
+/* ── juniper foliage ───────────────────────────────────────────────────────
+ *
+ * Juniper leaves are *scales*, not needles: each shoot is a squarish green cord
+ * a millimetre or two across, made of tiny overlapping triangular scales, and
+ * the shoots branch two or three times into a flat spray. Drawn as a chain of
+ * short overlapping tapered strokes with a slight zigzag so the edge is beaded
+ * rather than smooth, which is what reads as scales at any distance where an
+ * actual scale is sub-pixel.
+ *
+ * The colour is the thing most likely to be got wrong. A healthy Utah juniper is
+ * a *dusty* blue-green, HSV saturation around 0.2, and half the crown at any
+ * time is bronzed or outright dead. Anything approaching a saturated green reads
+ * as a garden conifer dropped into a desert.
+ */
+/*
+ * Measured, not remembered — and the first version of this palette was wrong in
+ * a way worth recording, because the reasoning was plausible all the way to the
+ * conclusion.
+ *
+ * The premise was that "dusty blue-green" means low chroma, so the base was
+ * authored at HSV saturation 0.19 and hue 93°, and a render of the crown then
+ * measured 0.26 / 87° — self-consistent, and taken as confirmation. Photographs
+ * of wild Utah juniper measure **0.63 saturation at hue 64–68°**: sunlit 0.631 /
+ * 66.8°, shaded 0.635 / 64.1°, macro 0.505–0.604 / 67.8°. Even hazed distant
+ * pinyon-juniper woodland holds 0.374 — higher than this crown was in the near
+ * field.
+ *
+ * So chroma is not what distinguishes a desert juniper from a garden conifer.
+ * *Hue and value* are: it is a dark olive yellow-green, not a mid-value pure
+ * green. The dustiness is the waxy bloom on the scale leaves, which shifts hue
+ * toward yellow and drops value — it does not desaturate. Crushing chroma to
+ * imitate it removed the plant's colour and cost 20° of hue as well.
+ *
+ * Note that the render measured only 0.07 above the albedo, so the light rig was
+ * not hiding anything: an additive ambient pedestal does crush saturation, but
+ * there was barely any chroma there to crush. Numbers below are sRGB bytes;
+ * hue/sat/val of each are checked in the report.
+ *
+ * One more correction on top of that. Hue and chroma were right at the first
+ * attempt but the *value* was carried over from the old palette, and under the
+ * corrected key the crown came out acid lime — the same chartreuse that had
+ * already been flagged on the distant cards. "Low value" in the measurements is
+ * load-bearing: juniper foliage is a dark olive with about 0.12 linear
+ * reflectance, so the sRGB value belongs near 0.35, not 0.47. Hue and
+ * saturation below are unchanged; every value is down by about a third.
+ */
+const FOL = {
+  base: [83, 89, 33],       // 66.2° / 0.629 / 0.349
+  pale: [115, 120, 55],     // 64.6° / 0.542 / 0.471  — sun-bleached crest
+  dark: [49, 54, 19],       // 68.6° / 0.648 / 0.212  — shaded interior
+  bronze: [92, 83, 37],     // 49.8° / 0.598 — last year's bronzed growth
+  dead: [107, 102, 48],     // 55.1° / 0.551 — dead scale still attached
+  berry: [82, 97, 114],
+};
+
+function shootChain(ctx, x, y, ang, len, wid, rand, cols) {
+  const steps = Math.max(3, Math.round(len / 2.4));
+  const dl = len / steps;
+  let a = ang;
+  for (let i = 0; i < steps; i++) {
+    const t = i / steps;
+    /* Per-bead width jitter, not just a smooth taper. A cord of constant width
+       strokes out to a clean-edged line; the appressed scales on a real shoot
+       make it visibly lumpy, and that lumpiness is the whole reason the mass
+       reads as stipple rather than as foliage with an outline. */
+    const w = wid * (1 - 0.40 * t) * (0.78 + rand() * 0.52);
+    a += (rand() - 0.5) * 0.22;
+    const nx = x + Math.cos(a) * dl, ny = y + Math.sin(a) * dl;
+    /* Each segment is one scale: a short thick round-capped dash, and the
+       overlap between consecutive dashes is what beads the outline. */
+    ctx.strokeStyle = cols[(i * 7 + ((rand() * cols.length) | 0)) % cols.length];
+    ctx.lineWidth = w;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.lineTo(nx, ny);
+    ctx.stroke();
+    x = nx; y = ny;
+  }
+  return { x, y, a };
+}
+
+/* One whipcord shoot.
+ *
+ * This replaces a routine that branched at 0.55–1.10 radians, alternating sides
+ * down a central axis — which is the construction of a *pinnate compound leaf*,
+ * and that is exactly how it read: "four to six pointed lobes along a central
+ * rib". Juniper has no leaf outline at all. Its foliage is a bundle of thin
+ * cylindrical whipcords sheathed in appressed scales, and at twenty metres a
+ * juniper crown has no resolvable leaf shapes anywhere in it — it is a granular,
+ * beaded, mossy mass, closer to stipple than to any drawn edge.
+ *
+ * So the branch angle drops to 0.16–0.38 radians, which keeps a fork reading as
+ * two cords running alongside each other rather than as a leaflet pair, and the
+ * fork happens at most once or twice rather than at every station. The shape of
+ * the *mass* comes from drawing many of these, not from the outline of one.
+ */
+function whipcord(ctx, x, y, ang, len, wid, depth, rand, cols) {
+  const segs = Math.max(2, Math.round(len / 10));
+  const dl = len / segs;
+  let a = ang;
+  let px = x, py = y;
+  for (let i = 0; i < segs; i++) {
+    const t = (i + 1) / segs;
+    const w = wid * (1 - 0.30 * t);
+    const e = shootChain(ctx, px, py, a, dl, w, rand, cols);
+    px = e.x; py = e.y; a = e.a + (rand() - 0.5) * 0.14;
+    if (depth > 0 && i > 0 && rand() < 0.40) {
+      const side = rand() < 0.5 ? 1 : -1;
+      whipcord(ctx, px, py, a + side * (0.16 + rand() * 0.22),
+               len * (0.40 + rand() * 0.30), w * 0.88, depth - 1, rand, cols);
+    }
+  }
+  return { x: px, y: py };
+}
+
+/**
+ * One 2x2 atlas of juniper sprays. Cells are addressed by (col, row) with a
+ * small inset so mip filtering never drags one cell into its neighbour.
+ */
+export function makeFoliage(size = 512) {
+  const { c, ctx } = canvas2d(size, size);
+  const cell = size / 2;
+  const rand = rng(20250821);
+
+  for (let cy = 0; cy < 2; cy++) {
+    for (let cx = 0; cx < 2; cx++) {
+      const ox = cx * cell, oy = cy * cell;
+      ctx.save();
+      ctx.beginPath();
+      /* Matches the 0.018 UV inset the cards address these cells with, so the
+         drawn spray never reaches the margin the mip chain will smear across
+         the boundary. */
+      ctx.rect(ox + 9, oy + 9, cell - 18, cell - 18);
+      ctx.clip();
+
+      /* Dead and bronzed material sits *behind* the green, which is how a real
+         spray looks: the interior of the clump is last year's dead scale still
+         attached, with the live growth only on the outside. */
+      const deadCols = [rgb(FOL.dead), rgb(FOL.bronze), rgb([79, 75, 35])];
+      /* Bronze used to be one of the six live colours as well as one of the
+         three dead ones, which double-counted it: measured off the albedo the
+         atlas came out at hue 55.5, well below the 64-68 the reference sits at,
+         because a 46-degree bronze at that weight drags the circular mean down
+         however correct each individual swatch is. The live set is now all
+         olive, and the bronzed growth is left to the pass that is actually
+         about bronzed growth. */
+      const liveCols = [
+        rgb(FOL.base), rgb(FOL.pale), rgb(FOL.dark),
+        rgb([70, 77, 29]), rgb([95, 99, 40]), rgb([94, 102, 39]),
+      ];
+
+      /* A bundle, not a frond. Three to five thick stems with wide-angle
+         branching gave a cell with a readable leaf outline; thirty-odd thin
+         cords fanning through a narrow cone give a mass whose edge is made of
+         cord ends, which is what stipple is. The cords are a third the width
+         they were — about 2.5 texels at this cell size, so a couple of pixels
+         once the card is on screen — and the count carries the coverage that the
+         width used to. */
+      const bx = ox + cell * 0.5, by = oy + cell * 0.95;
+      /* Fifteen-ish cords, not thirty-odd, and started along a spread base rather
+         than all from one point.
+         The first whipcord version drew thirty from a common origin, which is
+         nearer to life and looked right in the atlas — and still rendered as
+         leaves. The reason is downsampling: a card in the hero's crown gets about
+         sixty screen pixels for a 256-texel cell, so a 2.5-texel cord and a
+         2-texel gap both land inside the same pixel and average to solid. Only
+         gaps of ten texels or more survive a 4:1 reduction, so the cords have to
+         be fewer and further apart than the plant's own anatomy — the usual
+         bargain when a texel is coarser than the feature. The granularity that
+         survives is the beaded outline of each cord and the count of cords across
+         the card, and both of those do read. */
+      const nCord = 13 + (rand() * 5 | 0);
+      for (let pass = 0; pass < 2; pass++) {
+        const cols = pass === 0 ? deadCols : liveCols;
+        const scale = pass === 0 ? 0.84 : 1.0;
+        /* The dead layer sits behind and shows only where the green does not
+           cover it, and at equal counts that residue was 39% of the atlas's
+           visible pixels — enough to set the measured hue rather than season it. */
+        const nC = pass === 0 ? Math.round(nCord * 0.55) : nCord;
+        for (let k = 0; k < nC; k++) {
+          /* Fanned within a cone, with the density biased to the middle so the
+             bundle has a spine without having a rib. */
+          const u = (k + rand()) / nC;
+          const spread = (u - 0.5) * 1.30;
+          const a = -Math.PI / 2 + spread + (rand() - 0.5) * 0.14;
+          /* Staggered along the spray's own axis, so there is no single point
+             where every cord converges. That convergence was a solid wedge at the
+             foot of the cell taking up a third of it, and a solid wedge with a
+             spiky edge is precisely what reads as a lobed leaf. */
+          whipcord(ctx, bx + (u - 0.5) * cell * 0.34 + (rand() - 0.5) * cell * 0.07,
+                   by - (0.06 + rand() * 0.34) * cell,
+                   a, cell * (0.40 + rand() * 0.26) * scale,
+                   cell * 0.0130 * scale, 1, rand, cols);
+        }
+      }
+
+      /* A few berries. Utah juniper berries are a hard powdery blue-grey and
+         there are never many of them; two or three per spray is right and it is
+         one of the only cues that says *juniper* rather than generic conifer. */
+      const nB = rand() < 0.55 ? 1 + (rand() * 3 | 0) : 0;
+      for (let i = 0; i < nB; i++) {
+        const r = cell * (0.017 + rand() * 0.008);
+        const px = ox + cell * (0.22 + rand() * 0.56);
+        const py = oy + cell * (0.30 + rand() * 0.50);
+        const g = ctx.createRadialGradient(px - r * 0.3, py - r * 0.35, r * 0.1, px, py, r);
+        g.addColorStop(0, 'rgb(150,160,168)');
+        g.addColorStop(1, 'rgb(86,98,110)');
+        ctx.fillStyle = g;
+        ctx.beginPath(); ctx.arc(px, py, r, 0, 6.2832); ctx.fill();
+      }
+      ctx.restore();
+    }
+  }
+
+  const img = ctx.getImageData(0, 0, size, size);
+  const px = new Uint8Array(img.data.buffer.slice(0));
+  return cutoutTex(px, size, size, 0.42);
+}
+
+/* ── dead grass and litter ─────────────────────────────────────────────────
+ *
+ * Bunch grass in a Sedona wash in late summer is *dead* — the brief asked for
+ * dead grasses and the previous atlas held two cells, which meant every tuft in
+ * the frame was one of two silhouettes at one colour. A reviewer read the field
+ * as a single repeated sprite, and as living grass.
+ *
+ * So: four cells, and the four differ in habit rather than just in seed. An
+ * upright tussock, a wide collapsed fan, a sparse bleached remnant, and a dense
+ * dark weathered clump. Between them and the per-instance rotation and colour
+ * jitter at the scatter end, a repeat is hard to spot.
+ *
+ * The atlas is four cells across, so callers address it with `cols = 4`.
+ */
+/* The blade's cross-section, as a stack of strokes: width and offset in units of
+ * the blade's own width, and a position on the shade-to-lit-edge ramp.
+ *
+ * Widest and darkest first, then narrower and lighter offset toward the lit edge,
+ * so what is left is a ramp across the width. This was three strokes with a
+ * uniform brightness multiplier, and the argument for it was that hue and
+ * saturation are invariant under a uniform scale of R, G and B — true, but only
+ * while no channel clips, and the lit pass clipped two of them. `rampCol` above
+ * has the measurements. Colour now moves deliberately along the ramp rather than
+ * accidentally at the top of it, so this stack no longer holds the atlas mean by
+ * construction; `tools/folmeas.mjs` is the check.
+ */
+/* Same construction for a scrub leaf, in units of its half-width. Lopsided, so
+ * the ramp crosses the leaf rather than ringing it. */
+const LEAF_SECTION = section(0.28, -0.52);
+
+const GRASS_SECTION = section(0.32, 0.34);
+
+/* A scrub stem is concentric rather than lopsided: it is a cylinder seen from an
+   arbitrary side, so its bright line runs up the middle. */
+const STEM_SECTION = section(0.30, 0);
+
+/* The `a` above is the blade's thickness, written into the cutout's alpha.
+ *
+ * Alpha in these atlases has only ever been a silhouette: opaque inside a blade,
+ * transparent outside, one texel of antialiasing between. That is enough to cut
+ * the shape out and it is why the shader had nothing to shade with — a blade's
+ * interior is a plateau, so there is no coordinate running across its width and
+ * no way to know where in the blade a fragment sits.
+ *
+ * Alpha is the natural place for it, because on a cutout leaf alpha *is* optical
+ * thickness: full along the spine, thinning toward the edge, gone past it. Once it
+ * carries the profile, the shader's screen-space gradient of alpha becomes a real
+ * cross-blade axis at whatever size the blade is drawn, and the same field gives
+ * the edge a bright rim for free. Stepped in three because it costs nothing —
+ * these are the passes that were already being drawn — and bilinear filtering
+ * turns three steps across four texels into a ramp.
+ *
+ * Floored at 0.62 against an alphaTest of 0.40, so nothing the mask used to keep
+ * is dropped and the silhouette does not thin.
+ *
+ * Written through a second canvas rather than with globalAlpha, because these
+ * passes deliberately overdraw and source-over accumulates alpha: painting 0.62
+ * then 0.80 over it yields 0.92, not 0.80. Stroking opaque greys into a parallel
+ * canvas and reading its red channel gives the value that was asked for. Read
+ * unpremultiplied, so the grey is clean and the silhouette's own antialiasing is
+ * not applied twice.
+ */
+function thicknessAlpha(px, amask, n) {
+  for (let i = 0; i < n; i++) {
+    px[i * 4 + 3] = (px[i * 4 + 3] * amask[i * 4]) / 255;
+  }
+}
+
+export function makeGrass(size = 512) {
+  const w = size, h = size / 2;                 // 512 x 256: four 128-wide cells
+  const { ctx } = canvas2d(w, h);
+  const { ctx: actx } = canvas2d(w, h);         // thickness, see GRASS_SECTION
+  const cell = w / 4;
+  const rand = rng(771133);
+  /* Straw through bleached bone to weathered grey-brown. No green anywhere. */
+  const STRAW = [[172, 148, 102], [148, 126, 86], [194, 174, 132],
+                 [120, 100, 68], [162, 142, 98], [134, 120, 88]];
+  const BLEACH = [[206, 192, 158], [186, 172, 140], [216, 206, 178],
+                  [160, 146, 116]];
+  const WEATHER = [[112, 96, 70], [132, 114, 84], [94, 80, 58],
+                   [146, 128, 96]];
+  /* blades, lean spread, length, base width, palette */
+  const kinds = [
+    { n: 30, lean: 0.9, len: [0.52, 0.44], wid: 1.0, cols: STRAW },
+    { n: 26, lean: 2.3, len: [0.30, 0.40], wid: 1.1, cols: STRAW },
+    { n: 13, lean: 1.4, len: [0.44, 0.50], wid: 0.8, cols: BLEACH },
+    { n: 38, lean: 1.1, len: [0.34, 0.34], wid: 1.2, cols: WEATHER },
+  ];
+  for (let cx = 0; cx < 4; cx++) {
+    const ox = cx * cell, k = kinds[cx];
+    for (const c of [ctx, actx]) {
+      c.save();
+      c.beginPath(); c.rect(ox + 5, 4, cell - 10, h - 8); c.clip();
+    }
+    const n = k.n + (rand() * 8 | 0);
+    for (let i = 0; i < n; i++) {
+      const bx = ox + cell * (0.5 + (rand() - 0.5) * 0.20);
+      const by = h * 0.985;
+      const lean = (rand() - 0.5) * 2 * k.lean;
+      const len = h * (k.len[0] + rand() * k.len[1]);
+      const col = k.cols[(rand() * k.cols.length) | 0];
+      const bw = h * (0.008 + rand() * 0.010) * k.wid;
+      ctx.lineCap = 'round';
+      /* Blades arc over under their own weight; a straight blade reads as a
+         wire. The control point sits well off the chord. Dead blades arc
+         further and some of them fold right over. */
+      const fold = rand() < 0.22 ? 1.35 : 1.0;
+      const tipx = bx + lean * len * 0.85 * fold;
+      const tipy = by - len * (0.72 + rand() * 0.2) / fold;
+      const kx = bx + lean * len * 0.15, ky = by - len * 0.72;
+      /* Three passes across the blade's width instead of one stroke, and this is
+         the whole point of the function rather than a refinement.
+         A single stroke fills a blade with one flat colour, so a blade has no
+         interior: magnify it and you get a stencil. That is not a hypothetical —
+         it is what two reviewers weeks apart described as blades "either near-white
+         or near-black with essentially nothing between", with "no gradient across
+         the width of the blade", and it is why the previous round's fix to the
+         card aspect made the blades the right *shape* and left them just as flat.
+         A grass blade is a folded V in section, so along its width it presents a
+         lit edge, a turning midtone and a shaded edge. Drawn widest-and-darkest
+         first and narrower-and-lighter over it, offset along the blade's own
+         normal, those three strokes leave exactly that ramp. The offsets are
+         fractions of the blade width, so it survives any magnification: the ramp
+         is in the texture rather than in the pixel grid.
+         All blades in a cell are lit from the same side. Cards face every
+         direction in world space, so no baked direction can be correct for all of
+         them — but a consistent one per cell is what makes a blade read as round
+         instead of as two blades stuck together, and inconsistency reads as noise.
+         The multipliers are centred so the alpha-weighted mean of the atlas holds:
+         see the measured figures in the commit that introduced this. */
+      const dx = tipx - bx, dy = tipy - by, dl = Math.hypot(dx, dy) || 1;
+      let nx = -dy / dl, ny = dx / dl;
+      if (nx > 0) { nx = -nx; ny = -ny; }        // lit edge toward -x, always
+      for (const p of GRASS_SECTION) {
+        const jx = nx * bw * p.o, jy = ny * bw * p.o;
+        for (const c of [ctx, actx]) {
+          c.strokeStyle = c === ctx ? rampCol(col, p.t)
+            : rgb([p.a * 255, p.a * 255, p.a * 255]);
+          c.lineWidth = bw * p.w;
+          c.lineCap = 'round';
+          c.beginPath();
+          c.moveTo(bx + jx, by + jy);
+          c.quadraticCurveTo(kx + jx, ky + jy, tipx + jx, tipy + jy);
+          c.stroke();
+        }
+      }
+    }
+    ctx.restore();
+    actx.restore();
+  }
+  const img = ctx.getImageData(0, 0, w, h);
+  const px = new Uint8Array(img.data.buffer.slice(0));
+  thicknessAlpha(px, actx.getImageData(0, 0, w, h).data, w * h);
+  return cutoutTex(px, w, h, 0.40);
+}
+
+/* ── succulent skin ────────────────────────────────────────────────────────
+ *
+ * Prickly pear and agave were the only geometry in System 3 with no map at all,
+ * on the reasoning that a pad is a smooth waxy surface and a flat colour would
+ * do. It does not: a reviewer picked them out as "flat opaque quads, plainly
+ * untextured", which is exactly what an untextured flat opaque quad looks like.
+ * A pad in life carries a mottled bloom, a visible grid of areoles with spine
+ * clusters on them, and darker creased shadow around the rim.
+ *
+ * Tiles, opaque, no cutout — the silhouette is the geometry's job here.
+ */
+export function makeSucculent(size = 256) {
+  const N = size * size;
+  const alb = new Uint8Array(N * 4);
+  const hgt = new Float32Array(N);
+  /* Glaucous blue-green, and lighter than juniper — that difference is most of
+     what separates a cactus from a shrub at any distance. */
+  /* Deeper and bluer than the first version, which measured hue 94 and read as
+     "pale mint paddles". A glaucous prickly pear sits near hue 118 — the blue in
+     it comes from the wax bloom over a mid green, and it is a *mid* green, not a
+     pastel. Lighter than juniper still, which is the distinction that matters. */
+  const BASE = [0.150, 0.245, 0.148];
+  const PALEC = [0.245, 0.350, 0.240];
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const i = y * size + x;
+      const u = x / size, v = y / size;
+      /* Waxy bloom: broad soft mottling, plus the faint longitudinal creasing a
+         pad gets as it swells and shrinks with the water it is holding. */
+      const bloom = afbm(u * 5, v * 5, 5, 5, 4, 401);
+      const crease = aridged(u * 3.0, v * 11.0, 3, 11, 2, 409);
+      let t = clamp(0.34 + 0.72 * bloom - 0.30 * crease, 0, 1);
+      const c = [0, 0, 0];
+      for (let k = 0; k < 3; k++) c[k] = mix(BASE[k], PALEC[k], t);
+      hgt[i] = 0.35 * bloom + 0.30 * crease;
+
+      /* Areoles on a staggered lattice — the tell that this is a cactus. */
+      const AR = 7;
+      const gy = v * AR, row = Math.floor(gy);
+      const gx = u * AR + (row & 1 ? 0.5 : 0);
+      const fx = gx - Math.floor(gx) - 0.5, fy = gy - row - 0.5;
+      const d = Math.hypot(fx, fy * 0.92);
+      const areole = 1 - smoothstep(0.055, 0.11, d);
+      if (areole > 0) {
+        /* A pale woolly pad with a dark ring, and a couple of straw spines. */
+        for (let k = 0; k < 3; k++) c[k] = mix(c[k], k === 2 ? 0.30 : 0.40, areole * 0.75);
+        const ring = smoothstep(0.10, 0.075, d) * smoothstep(0.055, 0.075, d);
+        for (let k = 0; k < 3; k++) c[k] *= 1 - 0.45 * ring;
+        hgt[i] += areole * 0.5;
+      }
+      /* Spines. Longer, paler and higher contrast than the first version, which a
+         reviewer could not see at all. The reason is mip averaging: a spine two
+         texels wide at 15% contrast against the pad is gone by the second mip
+         level, and the pad is twenty pixels on screen. Surviving downsampling
+         needs amplitude, so these run to 0.34 of a lattice cell at nearly full
+         strength — which is also closer to life, where the spines on a pad are
+         half its own thickness long. */
+      const spine = (1 - smoothstep(0.014, 0.055, Math.abs(fx * 0.30 + fy)))
+                  * (1 - smoothstep(0.12, 0.34, d)) * smoothstep(0.09, 0.15, d);
+      if (spine > 0) {
+        for (let k = 0; k < 3; k++) c[k] = mix(c[k], [0.74, 0.67, 0.47][k], spine * 0.95);
+        hgt[i] += spine * 0.25;
+      }
+
+      /* The pad margin. The pad's own UV runs radially in u, so the rim is
+         addressable straight from the texture: a real pad has a paler, slightly
+         straw-coloured edge where the skin thins over the rib, and without it a
+         pad is a flat disc of one colour with a hard outline. On an agave blade
+         the same u is the length of the blade, and a pale tip there is also
+         right, so this does not need to be split per plant. */
+      const rim = smoothstep(0.80, 0.995, u);
+      for (let k = 0; k < 3; k++) c[k] = mix(c[k], [0.335, 0.330, 0.215][k], rim * 0.55);
+
+      alb[i * 4] = clamp(Math.pow(c[0], 1 / 2.2), 0, 1) * 255;
+      alb[i * 4 + 1] = clamp(Math.pow(c[1], 1 / 2.2), 0, 1) * 255;
+      alb[i * 4 + 2] = clamp(Math.pow(c[2], 1 / 2.2), 0, 1) * 255;
+      alb[i * 4 + 3] = 255;
+    }
+  }
+  const nrm = new Uint8Array(N * 4);
+  const w = (a) => ((a % size) + size) % size;
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const l = hgt[y * size + w(x - 1)], r = hgt[y * size + w(x + 1)];
+      const d = hgt[w(y - 1) * size + x], up = hgt[w(y + 1) * size + x];
+      const nx = (l - r) * 3.0, ny = (d - up) * 3.0;
+      const inv = 1 / Math.sqrt(nx * nx + ny * ny + 1);
+      const i = (y * size + x) * 4;
+      nrm[i] = (nx * inv * 0.5 + 0.5) * 255;
+      nrm[i + 1] = (ny * inv * 0.5 + 0.5) * 255;
+      nrm[i + 2] = (inv * 0.5 + 0.5) * 255;
+      nrm[i + 3] = 255;
+    }
+  }
+  return { albedo: dataTex(alb, size, size, true), normal: dataTex(nrm, size, size, false) };
+}
+
+/* ── generic desert scrub foliage ──────────────────────────────────────────
+ * Small-leaved grey-green shrub mass (rabbitbrush / snakeweed sort of thing):
+ * a cloud of tiny strokes rather than a branching spray, since at the sizes
+ * these are drawn the internal structure is never resolved. */
+/* Desert scrub.
+ *
+ * Rebuilt because the foreground shrub in `wall_shade` was described as "leaves
+ * that are literal rectangles with square corners on straight black stems", and
+ * all three of those were fair. A leaf was a *stroked line segment* two texels
+ * wide and seven long — which is a rectangle, and at 256 across an atlas that
+ * lands in the near field it is a rectangle you can count the corners of. A stem
+ * was a single moveTo/lineTo, so it was exactly straight. And the whole atlas was
+ * a quarter of the resolution the nearest instance of it needs.
+ *
+ * So: leaves are filled lozenges tapering to a point at the tip and a stalk at
+ * the base, stems bend, and the cell is twice the size it was.
+ */
+export function makeScrub(size = 512) {
+  const { ctx } = canvas2d(size, size);
+  const { ctx: actx } = canvas2d(size, size);   // thickness, see GRASS_SECTION
+  const cell = size / 2;
+  const rand = rng(90210);
+
+  /* One leaf: a filled lozenge, widest a third of the way out, tapering to a
+     point. Two quadratics, which is the cheapest closed shape that has a tip.
+     Filled three times at decreasing width, each pass lighter and biased toward
+     one edge, for the reason given at GRASS_SECTION: a single flat fill gives a
+     leaf no interior, and a reviewer reading these at close range described
+     exactly that — near-white or near-black with nothing between and no gradient
+     across the width. A leaf is a curved surface and its width is where the
+     curvature shows. The passes are lopsided rather than concentric so the ramp
+     runs across the leaf instead of forming a bullseye. */
+  const leaf = (x, y, ang, len, wid, col) => {
+    const cx = Math.cos(ang), sy = Math.sin(ang);
+    const nx = -sy, ny = cx;
+    const tipX = x + cx * len, tipY = y + sy * len;
+    const mx = x + cx * len * 0.34, my = y + sy * len * 0.34;
+    for (const p of LEAF_SECTION) {
+      const ox = nx * wid * p.o, oy = ny * wid * p.o;
+      const wq = wid * p.w;
+      for (const c of [ctx, actx]) {
+      c.fillStyle = c === ctx ? rampCol(col, p.t) : rgb([p.a * 255, p.a * 255, p.a * 255]);
+      /* Base and tip stay pinned and only the bulge is biased, so every pass is a
+         sliver strictly inside the outline the first one drew. Offsetting the
+         whole shape instead grew the leaf's footprint by 13% and, because that
+         area comes at the expense of the brown stems behind it, walked the
+         atlas's measured hue 3.4 degrees greener. The silhouette is the one thing
+         here that was already right. */
+      c.beginPath();
+      c.moveTo(x, y);
+      c.quadraticCurveTo(mx + nx * wq + ox, my + ny * wq + oy, tipX, tipY);
+      c.quadraticCurveTo(mx - nx * wq + ox, my - ny * wq + oy, x, y);
+      c.closePath();
+      c.fill();
+      }
+    }
+  };
+
+  for (let cx = 0; cx < 2; cx++) {
+    const ox = cx * cell;
+    for (const c of [ctx, actx]) {
+      c.save();
+      c.beginPath(); c.rect(ox + 9, 8, cell - 18, size - 16); c.clip();
+    }
+    const stems = 7 + (rand() * 4 | 0);
+    for (let s = 0; s < stems; s++) {
+      const bx = ox + cell * 0.5, by = size * 0.98;
+      let a = -Math.PI / 2 + (rand() - 0.5) * 1.5;
+      const len = size * (0.40 + rand() * 0.42);
+      /* A bent stem, walked in four steps. Woody desert scrub is all elbows and
+         a straight one is the giveaway that it was drawn with a line tool. */
+      const nSeg = 4, dl = len / nSeg;
+      const sx = [bx], sy = [by];
+      let px = bx, py = by;
+      for (let i = 0; i < nSeg; i++) {
+        a += (rand() - 0.5) * 0.44;
+        px += Math.cos(a) * dl; py += Math.sin(a) * dl;
+        sx.push(px); sy.push(py);
+      }
+      /* A stem is a woody cylinder and wants the strongest cross-width ramp of
+         anything in the atlas, but it was the one thing left flat: a single stroke
+         at one colour and, once alpha began carrying thickness, at full thickness
+         throughout. That is not a detail. These stems are what a reviewer was
+         looking at — the pale shapes filling the lower left of `wash_low` are
+         stems magnified about twofold, not leaves — so they were both a flat fill
+         and, having no alpha gradient, excluded from the cross-blade shading that
+         would have rounded them. Hence "flat pale cream shape" and "no gradient
+         across the width" in the same sentence.
+         Concentric rather than offset, because a stem is drawn as a polyline and
+         offsetting a polyline needs a per-segment normal and a mitre. Concentric
+         gives a symmetric section — bright core, darker rim — which reads as round,
+         and more importantly it lays down the alpha profile the shader needs to
+         apply the asymmetric, sun-dependent part itself. */
+      for (const q of STEM_SECTION) {
+        for (const c of [ctx, actx]) {
+          c.strokeStyle = c === ctx ? rampCol([104, 88, 66], q.t)
+            : rgb([q.a * 255, q.a * 255, q.a * 255]);
+          c.lineWidth = size * 0.007 * q.w;
+          c.lineCap = 'round';
+          c.beginPath();
+          c.moveTo(sx[0], sy[0]);
+          for (let i = 1; i < sx.length; i++) c.lineTo(sx[i], sy[i]);
+          c.stroke();
+        }
+      }
+
+      /* Leaves hung off the stem's own stations, so none of them float. */
+      const n = 26 + (rand() * 18 | 0);
+      for (let i = 0; i < n; i++) {
+        const u = 0.22 + rand() * 0.78;
+        const k = Math.min(nSeg - 1, Math.floor(u * nSeg));
+        const f = u * nSeg - k;
+        const lx = sx[k] + (sx[k + 1] - sx[k]) * f + (rand() - 0.5) * size * 0.030;
+        const ly = sy[k] + (sy[k + 1] - sy[k]) * f + (rand() - 0.5) * size * 0.030;
+        const la = Math.atan2(sy[k + 1] - sy[k], sx[k + 1] - sx[k]) + (rand() - 0.5) * 1.5;
+        const g = 0.5 + rand() * 0.5;
+        leaf(lx, ly, la, size * (0.024 + rand() * 0.030), size * (0.005 + rand() * 0.005),
+             [78 + g * 46, 88 + g * 44, 66 + g * 34]);
+      }
+    }
+    ctx.restore();
+    actx.restore();
+  }
+  const img = ctx.getImageData(0, 0, size, size);
+  const px = new Uint8Array(img.data.buffer.slice(0));
+  thicknessAlpha(px, actx.getImageData(0, 0, size, size).data, size * size);
+  return cutoutTex(px, size, size, 0.40);
+}

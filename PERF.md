@@ -1,0 +1,2002 @@
+# Performance — System 7
+
+What the frame costs, where it goes, and what was done about it.
+
+This file exists because of one fact: **before this pass, nobody had ever measured
+this scene on a GPU.** Every capture in this project renders headless through
+SwiftShader, a CPU software rasteriser, deliberately, so that a render never takes
+the graphics card away from someone playing a game on this machine. That was the
+right call and it has not changed. Its cost is that every performance belief in
+the project was inference, and some of it was wrong.
+
+---
+
+## 1. What the reference projects do that this one did not
+
+### `jungle-trail` — measured from the first pass
+
+The important thing about `jungle-trail` is not any single optimisation. It is
+that **every system report in its build quoted a frame time in milliseconds,
+measured on the real RTX 4060**, and the quality ladder was authored against those
+numbers rather than against a guess.
+
+Its harness has two backends (`tools/harness.mjs`), and the GPU one is the
+*default*:
+
+```
+GPU_ARGS = [ '--use-angle=d3d11', '--enable-gpu-rasterization',
+             '--ignore-gpu-blocklist', '--enable-zero-copy' ]
+```
+
+with a comment that is the whole trick: *"Headless Chromium defaults to
+SwiftShader even when a GPU is present; each of these is needed to get it onto
+the real adapter."* It still pins Chromium to four of twelve logical cores at
+Idle priority — and notes that the GPU path is **cheaper** on the CPU than
+SwiftShader, not more expensive, because the work moves off the CPU entirely.
+
+Its `tools/perf.mjs` gets three things right that a naive timer gets wrong, and
+all three are documented in its source as mistakes already paid for:
+
+1. **Watching the framerate cannot work.** The loop is capped, so the browser
+   reports 60 for anything that fits in 16 ms. The loop is paused and frames are
+   driven by hand.
+2. **`glFinish()` in the page is a lie.** Chromium runs WebGL over a command
+   buffer into a separate GPU process; `finish()` returns when the queue has been
+   handed over, not when the hardware has drained it. It measures how fast
+   JavaScript can *submit* draw calls. The symptom was that *"adding
+   post-processing appeared to make the frame faster, and ultra came out quicker
+   than medium."* A one-pixel `readPixels` cannot return before the frame exists,
+   so it is a real fence and costs nothing beyond the wait.
+3. **Sequential A-then-B comparison charges the driver's clock ramp to whichever
+   ran first.** Blocks are interleaved and the median of seven is reported.
+
+It also learned to stop benchmarking at small sizes: *"at 640×360 a
+fragment-bound cost is measured over an eighth of the pixels it really covers,
+which flatters an expensive shader into looking free."*
+
+**Real numbers from that build, on this machine** — adapter string confirmed as
+`ANGLE (NVIDIA, NVIDIA GeForce RTX 4060 (0x00002808) Direct3D11 vs_5_0 ps_5_0,
+D3D11)`, at 1600×900, loop paused, `readPixels` fence, median of seven:
+
+| viewpoint | tier | frame ms | scene calls | frame calls | triangles |
+|---|---|---|---|---|---|
+| dense corridor t=0.34 | low | 5.82 | 480 | 978 | 6.6 M |
+| dense corridor t=0.34 | high | 8.06 | 490 | 1051 | 6.60 M |
+| dense corridor t=0.34 | ultra | 8.71 | 491 | 1071 | 6.60 M |
+| ruins clearing t=0.86 | high | 6.05 | 342 | 775 | 5.29 M |
+| falls t=0.96 | high | 6.07 | 223 | — | 2.63 M |
+
+Three conclusions that bear directly on this project:
+
+- **Geometry is not the cost.** 6.6 M triangles and a thousand draw calls
+  including the shadow pass cost 6–9 ms. This scene's 2.19 M triangles across
+  ~50 draw calls are a rounding error by comparison. The brief's suspicion was
+  right and this is the evidence for it.
+- **A ten-pass post-processing chain — half-res volumetric raymarching, SSAO,
+  bloom, defocus, grade — cost 0.1 to 1.0 ms total.** Full-screen passes at
+  1080p are simply not expensive on this card. Which means a *single* full-screen
+  pass cannot be the problem here either, unless it drags a large buffer behind
+  it. (It does. See §3.)
+- **The scene pass dominates, and it is fragment cost.** Its own measurements of
+  ablations — the ruins' entire 95 k triangles and 28 draw calls came in at
+  "−0.14 to +0.39 ms, inside the noise floor" — kept pointing at shading, never
+  at submission.
+
+And the honesty note worth copying verbatim: *"the fps column the tool prints is
+`1000 / frame ms` with the render loop paused — it is **headroom, not observed
+framerate**."*
+
+On **"optimised for every device"**: the actual answer is narrower and more useful
+than it sounds. `jungle-trail` did *not* build a mobile port — it concluded that
+*"6.6 million triangles, a thousand draw calls, massive plant counts, volumetric
+effects … would overwhelm any mobile GPU"* and shipped a **capability gate**
+(`src/mobile/`) instead: a screen explaining the requirement, with an "enter
+anyway" button, plus touch controls. What makes it run well *on every desktop* is
+the four-tier ladder plus device-pixel-ratio scaling, and nothing more exotic:
+
+```js
+const TIERS = {
+  low:    { dpr: 0.75, shadow: 1024, shadowDist: 45, aniso: 4  },
+  medium: { dpr: 1.0,  shadow: 1536, shadowDist: 60, aniso: 8  },
+  high:   { dpr: 1.0,  shadow: 2048, shadowDist: 80, aniso: 16 },
+  ultra:  { dpr: 1.25, shadow: 3072, shadowDist: 100, aniso: 16 },
+};
+```
+
+with each subsystem given a `setTier(name)` that spends the budget its own way —
+volumetric march steps 14/22/30, AO taps 8/12/14, mirror resolution 0.36/0.5,
+defocus taps 6/8/12/16, particle counts. Plus: boot on `high` and never `ultra`,
+because *"the first seconds of a load are the worst possible time to be measuring
+performance"*; adapt down only after 1.6 s of sustained bad frames, because
+*"reacting fast to frame time produces a renderer that oscillates between two
+tiers, which looks far worse than either"*; and a hard 60 fps cap, because *"an
+uncapped loop on an RTX-class card will happily render this at 300 fps and pull
+150 W to do it, for a scene that is a walking pace nature documentary."*
+
+Foliage specifics worth noting, since vegetation has just landed here:
+`alphaTest: 0.42` with `side: DoubleSide`, one `InstancedMesh` **per species per
+ground tile** so that a tile off screen is one frustum-culled draw call rather
+than a full instance buffer submitted anyway, a per-species `cull` distance and a
+two-level LOD, and a `LOD_DAMP` shader injection that sharpens alpha against the
+mip level so distant leaves dilate instead of eroding into holes.
+
+### `nightdrive` — the governor, and the part `jungle-trail` lacks
+
+`nightdrive` (`index.html`, ~line 5404 onward) has the piece worth porting
+directly: **resolution and quality are separate ladders, interleaved into one
+degradation order.**
+
+```js
+const RSCALE = [1.0, 0.86, 0.74, 0.62, 0.52];
+const PERF   = [ [0,0],[1,0],[1,1],[2,1],[2,2],[3,2],[3,3],[4,3] ];
+```
+
+*"Degradation order: shed pixels first because that is the least visible, then
+start shedding world. Interleaved so neither runs far ahead of the other."*
+
+Everything around it is a scar from something that went wrong, and each is worth
+having:
+
+- **Multi-step descent.** *"It stepped one notch at a time, so a machine running
+  at 12 fps needed the better part of half a minute to reach a setting it could
+  actually hold."* A machine at a fifth of target now drops three rungs at once.
+- **A floor that only lifts slowly.** `perfFloor` — a setting that has already
+  failed once is not tried again until after a long clean run, so the governor
+  settles instead of hunting.
+- **Climbing needs proof other than fps.** With a frame cap, a machine with
+  triple the power it needs still reads exactly 60. So the upward test is
+  "hitting the cap *and* a short CPU frame".
+- **Boot guess from the adapter string**, because *"adapting down works, but it
+  only works after the fact: an integrated laptop GPU opening on high spends its
+  first seconds at single-digit framerates, which is … the state most likely to
+  lose the context outright."* SwiftShader is explicitly detected and pinned.
+- **Tier changes are queued, not applied at once**, because a several-hundred-
+  millisecond re-mesh freeze *"lands on a machine that is already struggling, and
+  a long enough stall trips the display driver's watchdog — which is the 'it lags,
+  then goes black' the tier change was supposed to prevent."*
+- **The shadow filter is chosen once at boot and never changed**, because
+  swapping it recompiles every material and that stall costs more than it saves.
+- `#high/#medium/#low/#potato` pin a tier — which is what the harness comment in
+  this project's own `tools/harness.mjs` is referring to when it mentions
+  `#medium`. That comment describes `nightdrive`. **This project had no tier
+  system at all.**
+
+### What `sedona-sunset` had, before this pass
+
+Nothing of any of it:
+
+- `renderer.setPixelRatio(1)` and a fixed `setSize`. No render scale.
+- No quality tiers, no adaptation, no `setTier` on any system.
+- No frame cap. On a 200 Hz panel `requestAnimationFrame` fires every 5 ms.
+- No LOD or draw-distance control except the clast material's own pixel-radius
+  fade, which is a visual filter and not a budget.
+- No instrumentation beyond `renderer.info` counts in `__game.info()` — no frame
+  time, no GPU time, no per-pass cost, no on-screen readout.
+- Both particle clouds run with `frustumCulled = false`, so every one of 56 000
+  point sprites is vertex-shaded whether or not it is in front of the camera.
+
+The failure mode this produces on a 200 Hz display is specific and matches the
+complaint exactly. rAF fires every 5 ms. A frame that costs 11 ms misses every
+other vsync and presents at 100 fps; a frame that drifts around 10 ms alternates
+between 100 and 200. That reads as stutter even when the average is comfortable,
+and no amount of "the average is 120" makes it feel smooth. The scene did not
+need to be fast so much as it needed to be able to *choose* how fast to be.
+
+---
+
+## 2. Measuring it, without a GPU
+
+Two instruments, both new.
+
+### `tools/shadercost.mjs` — static fragment cost
+
+`tools/glslcheck.mjs` already parses the shader template literals to validate
+them. This walks the same literals and counts what sets the price of a pixel:
+texture fetches, how many are unconditional, loop trip counts multiplied out,
+derivative calls, and a crude ALU proxy. Helper functions are charged to their
+call sites and resolved transitively, so a triplanar sampler costs its three
+fetches at each of the four places it is called rather than once where it is
+declared.
+
+It is not a compiler and does not pretend to be — it cannot see dead-code
+elimination and has no idea what share of the screen each material covers. What
+it gives is a number that moves when the shader moves, which is what was missing.
+
+```
+node tools/shadercost.mjs src/*.js
+node tools/shadercost.mjs --detail src/terrain.js     # every fetch, with its gate
+```
+
+### `tools/bench.mjs` — real GPU frame time
+
+The one tool in this project that runs on the real adapter by default, and it
+does so through the switch `tools/harness.mjs` gained mid-pass (`RENDER_GPU=1` or
+a `.gpu` file in the root) rather than keeping a second copy of the launch flags —
+those flags are fiddly enough that a divergent copy would end up measuring a
+different browser than the one that draws the captures. The fence, the
+interleaving and the medians are `jungle-trail`'s.
+
+It does not take the render mutex. A GPU bench and a SwiftShader capture are not
+competing for the same device, and making a one-command benchmark queue behind a
+twenty-minute capture would mean nobody ever runs it — but it prints a warning if
+a capture is live, because the shared four-core budget will still show up in the
+figures. It reports, per viewpoint, the full frame time and the frame time with each
+major system ablated, then walks the tier ladder. It also reads the GPU's own
+answer through `EXT_disjoint_timer_query_webgl2` where the driver exposes it.
+
+**I have not run it.** It touches the GPU, and the standing instruction is that
+renders here go through SwiftShader so as not to interrupt whoever is at the
+keyboard. See §6 for the command.
+
+### `#perf` / F3 — live readout
+
+`src/perf.js` builds an overlay reporting tier, render scale, fps, CPU frame ms,
+GPU frame ms, draw calls, triangles, programs, textures, shadow map sizes,
+shimmer sample count and particle counts. F3 toggles it; `#perf` opens it at
+boot. This is the zero-tooling path: open the page, press F3, read the numbers.
+
+---
+
+## 3. Where the frame goes
+
+Measured statically; the confidence attached to each item is stated rather than
+implied.
+
+### The terrain fragment shader — the largest single cost, high confidence
+
+`tools/shadercost.mjs` on the pre-change source:
+
+```
+src/terrain.js      fetch  uncond   cond    loop   deriv     alu
+        SURFACE        37      23     14       8       4      43
+```
+
+**Twenty-three texture fetches that every ground pixel paid, whatever it was
+looking at.** Three of them were doing nothing at all on most of the screen:
+
+| block | fetches | dead where |
+|---|---|---|
+| rock triplanar (`uRockA`, `uRockM`, `uRockN` × 3 planes) | 9 | `rockW == 0` — the entire wash floor, every terrace, all the foreground of the low views |
+| grain-shadow march (`uDirtM`, 8 taps + base) | 9 | any slope past ~20°, and past the footprint where grains stop resolving — most of the ground in a long shot |
+| sand triple (`uSandA/N/M`) | 3 | outside a slack-water lobe, which is a few percent of the floor |
+
+The terrain is the largest thing on screen in five of the eight standard
+viewpoints. At 1080p, with the ground covering say 55 % of the frame, twenty-three
+fetches is on the order of 26 million texture reads per frame from that shader
+alone, most of them from 1024² maps with full mip chains. That is where the frame
+time was going.
+
+The previous builder left the note: *"if System 7 finds headroom is tight,
+branching the rock triplanar behind a `rockW` test is the obvious first cut."*
+Correct, and it was blocked on a real problem — see §4.
+
+### The heat-shimmer buffer — large, high confidence, and not visible from the code
+
+`src/atmosphere.js` draws the **entire scene** into its own render target so it
+can distort it:
+
+```js
+this.samples = 4;
+this.rt = new THREE.WebGLRenderTarget(w, h, {
+  type: THREE.HalfFloatType, depthBuffer: true, depthTexture: depth,
+  samples: this.samples,
+});
+```
+
+RGBA16F is 8 bytes a pixel. At 1920×1080, four samples:
+
+- colour: 1920 × 1080 × 8 × 4 = **66 MB**, written and then resolved every frame
+- depth: a 32-bit `DepthTexture` at 4 samples = **33 MB** more
+
+Around 100 MB of framebuffer traffic per frame, before a single texture is read.
+At 200 fps that is 20 GB/s of pure resolve bandwidth on a card with about 272
+GB/s to spend. This is not the *shader* being expensive — the distortion pass
+itself is four fetches — it is the buffer behind it.
+
+Compounding it: the canvas was created with `antialias: true`. While the shimmer
+pass owns the frame the canvas receives exactly one full-screen quad, so canvas
+multisampling could not affect a single pixel; it was buying an identical picture
+in exchange for a multisampled RGBA8 backbuffer resolved every frame.
+
+### Particles — moderate, medium confidence
+
+26 000 dust motes and 30 000 saltation grains, both `Points` with
+`frustumCulled = false`. Every vertex is shaded every frame regardless of where
+the camera is pointing, and the dust vertex shader evaluates a noise field and a
+shaft term per point. Fill is genuinely small — both clamp `gl_PointSize` to
+about a pixel and then attenuate alpha to compensate — so this is a vertex and
+blend-state cost rather than a fill cost. `jungle-trail` measured its own spray
+at effectively zero (5 620 sprites, 0.00–0.19 ms) which suggests the fill really
+is free; 56 000 with culling off is a different proposition and is worth the
+measurement.
+
+### Alpha-tested foliage — unquantified, and honestly reported as such
+
+`src/vegetation.js` and `src/juniper.js` use `alphaTest` 0.40–0.42 with
+`side: DoubleSide`. `DoubleSide` doubles the fragment work on every leaf card,
+and `alphaTest` writing depth from a discarding shader defeats early-Z for those
+draws. Against that: `jungle-trail` runs the same construction over a *far*
+denser canopy at 6.6 M triangles and lands at 8 ms, so the technique is clearly
+affordable on this card. **I did not touch it.** Systems 3 and 5 may be live in
+those files, the vegetation landed one pass ago, and I have no measurement
+saying it is a problem. `tools/bench.mjs` has a `-veg` ablation column for
+exactly this question.
+
+### Shadows — already well handled
+
+Two cascades, 4096 and 2048, and crucially `renderer.shadowMap.autoUpdate =
+false` with redraws driven by `syncShadow()` only when the quantised rig actually
+moves — so a standing player pays nothing and a walking one pays intermittently.
+The map sizes are now on the tier ladder, but nothing here needed fixing.
+
+### Geometry — not the problem
+
+2.19 M triangles, ~50 draw calls. `jungle-trail` does three times the triangles
+and twenty times the draw calls in 6–9 ms on this exact card. There is no case
+for LOD work here, and I did none.
+
+---
+
+## 4. What changed
+
+### `src/terrain.js` — branch the three dead blocks
+
+Unconditional fetches per ground pixel: **23 → 10**. Total work unchanged at 37;
+27 of them are now behind a gate that is closed on most of the screen.
+
+The reason this had not been done is genuine and is the interesting part.
+`rockW`, `sandW` and the slope/footprint product all vary per fragment, so a 2×2
+quad straddling a rock/floor boundary diverges — and an
+implicitly-differentiated texture fetch inside divergent control flow has **no
+defined derivative**, which is why the shader sampled everything unconditionally
+and said so in a comment.
+
+The fix is to stop differentiating implicitly. `dFdx(vWPos)` and `dFdy(vWPos)`
+are hoisted to the top of the shader, where every fragment in the quad reaches
+them whatever it later does, and the gated fetches become `texture2DGradEXT`
+with those gradients handed in. The gradient of a planar projection scaled by a
+constant is that constant times the gradient of the position, so one pair of
+vectors covers all three triplanar planes and all three maps.
+`texture2DGradEXT` is three's own alias for `textureGrad`, defined in the WebGL2
+prefix of every GLSL1 program it compiles, so this needs no extension handling.
+
+Two details worth recording:
+
+- The LOD *bias* the anisotropic sand and dirt samples carried (`texture2D(t, uv,
+  aniso)`) has no `textureGrad` equivalent, so it becomes a gradient scale:
+  `lod` is `log2` of the gradient, so multiplying the gradient by `exp2(bias)`
+  adds the bias. `aniso` is negative, so it sharpens exactly as before.
+- The pre-existing steep-reprojection branch already had the
+  undefined-derivative problem — six fetches inside `if (steep > 0.006)` — and is
+  converted at the same time. That is a correctness fix, not a performance one.
+
+**No output value changes.** Every gated block reduces to the identity the
+unbranched code computed at weight zero: `mix(a, b, 0.0) == a`.
+
+**Expected saving.** On a pixel of open wash floor the shader goes from 23
+unconditional fetches to 10, with the rake march opening only within about a
+dozen metres and the rock and sand blocks staying shut. Taking the terrain at
+half the frame, that is roughly a 25–35 % cut in the frame's total texture reads.
+I will not put a millisecond figure on it without §6.
+
+### `src/main.js` — `antialias: false`
+
+Provably identical output while the shimmer pass owns the frame, for one fewer
+full-frame multisample resolve. The only configuration where it matters is the
+bottom tier, which switches the shimmer off — and a tier that gives up the heat
+haze to hold 30 fps is not a tier that wants to pay for multisampling either.
+
+### `src/atmosphere.js` — `setShimmerSamples(n)`
+
+One additive method, committed on its own so System 5 sees it immediately. Lets
+the governor spend the 100 MB/frame identified in §3: four samples at the top
+tier, two at medium, none below. Halving the sample count halves both the colour
+and the depth traffic.
+
+### `src/perf.js` — the governor (new)
+
+`nightdrive`'s structure with `jungle-trail`'s hysteresis.
+
+```js
+QTIERS = [
+  { name:'high',   shadowFar:4096, shadowNear:2048, shimmer:true,  samples:4, dust:1.00, salt:1.00, softShadow:true  },
+  { name:'medium', shadowFar:3072, shadowNear:2048, shimmer:true,  samples:2, dust:0.70, salt:0.70, softShadow:true  },
+  { name:'low',    shadowFar:2048, shadowNear:1024, shimmer:true,  samples:0, dust:0.45, salt:0.40, softShadow:false },
+  { name:'potato', shadowFar:1024, shadowNear:1024, shimmer:false, samples:0, dust:0.25, salt:0.20, softShadow:false },
+];
+RSCALE = [1.0, 0.88, 0.78, 0.68, 0.58];
+LADDER = [[0,0],[1,0],[2,0],[2,1],[3,1],[3,2],[4,2],[4,3]];
+```
+
+**The top tier is byte-identical to what this scene has always been.** 4096 and
+2048 are the sizes `sky.js` already configures; shimmer on at four samples is the
+existing default; full particle counts. So `high` is not a new setting, it is the
+current one given a name.
+
+The ladder opens with **two pure resolution steps** before any quality is touched,
+which is a departure from `nightdrive`'s interleave and is deliberate: this frame
+is overwhelmingly fragment-bound — a twenty-fetch shader over most of the screen,
+a half-float MSAA buffer — where `nightdrive` was draw-call- and vertex-bound on
+integrated parts. Fewer fragments is the lever that actually works here, and on a
+200 Hz panel a slightly softer image is a far better trade than a dropped frame.
+
+Particle counts are spent through `geometry.setDrawRange`. The data is already
+resident, the particles are distributed by a hash over the index so any prefix is
+still an even scatter, and it costs one number — and because both clouds have
+frustum culling off, it is the only thing that reduces their vertex cost at all.
+
+The governor reaches everything it touches through an object it was handed or
+through the scene graph by name (`scene.getObjectByName('dust')`), so no other
+system's file has to know it exists. `src/main.js` gained an import, a
+constructor call, two lines in the frame loop and one API field.
+
+**The clause that protects every existing capture:** under a software rasteriser
+the governor pins the top tier and disables adaptation outright. Without it,
+SwiftShader — tens of seconds a frame — would walk the tier to the bottom within
+`shoot.mjs`'s four-second settle, and every measured gate in `CONTRACT.md` would
+be measured against a picture nobody with a GPU will ever see. `tools/harness.mjs`
+cannot be modified and passes no tier, so the default has to be the safe one.
+
+Frame cap is **off by default**. A 200 Hz gamer has not asked to be capped at 60.
+The adaptive target is instead the panel's own refresh period, measured from the
+loop's shortest observed interval, clamped to 144 — past which the frame is
+already smooth and what the setting buys is heat. `#fps=N` enables a hard cap for
+anyone who wants one.
+
+Descent takes up to three rungs at once when the machine is far from target,
+climbs one at a time, and `floorI` stops it returning to a rung that has already
+failed until after a long clean run.
+
+---
+
+## 5. Visual gates
+
+`CONTRACT.md`: rock `hf/lf` ≥ 0.55, rock hue ≈ +16.5°, rock saturation
+0.627/0.667.
+
+The terrain change is argued to be an identity transformation rather than a
+tuning, so the expectation is not "still passes" but "unchanged to the last
+digit". Measured with `tools/grad.mjs`, `tools/sat.mjs` and `tools/hue.mjs` on
+`wall_lit`, `wall_shade` and `wash_mid` — see §7 for the figures.
+
+Note that `hf/lf` and the hue/saturation gates are all measured on **rock
+regions**, and the rock material in those windows is `src/rock.js`, which I did
+not modify. The terrain shader contributes to the `wash_mid` floor window and to
+the wall *ramp* where `rockW > 0`, which is precisely the region where the gate is
+open and the code path is unchanged.
+
+---
+
+## 6. Benchmark this on the real GPU
+
+One command, about a minute, headless, still pinned to four of twelve cores at
+Idle priority:
+
+```
+cd c:\Code\sedona-sunset
+node tools/bench.mjs --w 2560 --h 1440
+```
+
+Use your real desktop resolution. Benchmarking a fragment-bound scene at a small
+size measures the expensive shader over a fraction of the pixels it really covers
+and flatters it into looking free — `jungle-trail` learned that one the hard way.
+Default is 1920×1080 if you leave the flags off.
+
+Send back **all** of the output. Specifically:
+
+1. **The adapter line.** It should name the RTX 4060 and Direct3D11. If it says
+   SwiftShader the GPU flags did not take, the numbers mean nothing, and that is
+   itself the thing to report.
+2. **`gpu timer query: available` or not.** Decides whether GPU time can be read
+   directly or only inferred from wall clock.
+3. **The ablation table** — `full`, `-shimmer`, `-particles`, `-shadow`, `-veg`,
+   `@0.7res` per viewpoint. This is the answer to "where is the frame time", and
+   every subsequent decision depends on it.
+4. **The tier ladder table** — whether `high → potato` actually buys what it
+   claims. If `medium` is not meaningfully cheaper than `high`, the ladder is
+   miscalibrated and I would rather know than guess.
+
+If it fails to launch or falls back to software, this also works and needs no
+tooling at all:
+
+```
+node tools/serve.mjs
+```
+
+then open the page, press **F3**, walk around for ten seconds, and send a
+screenshot or the text of the overlay. Add `#perf` to the URL to have it open at
+boot, and `#high`, `#medium`, `#low` or `#potato` to pin a tier and compare them
+by hand. (I have not run this either — it needs a browser window.)
+
+---
+
+## 7. Measurements after the change
+
+### The reference, from the last capture before this pass
+
+`shots/sys4b_*`, captured 11:04, which is System 4's lighting work and includes
+everything up to `c7d22c5` and none of this pass:
+
+```
+file                        region      grad     grad@4   hf/lf   L mean  L sd
+sys4b_wall_lit              midwall    0.0110   0.0190    0.58   0.159   0.030
+                            upper      0.0123   0.0216    0.57   0.148   0.040
+sys4b_wall_shade            face       0.0137   0.0228    0.60   0.134   0.037
+sys4b_wash_mid              wall       0.0067   0.0114    0.59   0.366   0.032
+                            floor      0.0134   0.0258    0.52   0.121   0.039
+
+sat   wall_lit rock lit 0.515   wall_shade rock 0.493
+hue   wall_lit 12.6°  midwall 13.3°   wall_shade 11.6°
+```
+
+Every rock region is at or above the 0.55 gate. Two things to flag that are not
+mine and that somebody should look at: **saturation is 0.515/0.493 against the
+0.627/0.667 recorded in `CONTRACT.md`, and hue is 12.6° against +16.5°.** Both
+drifted under the lighting and atmosphere work of the last few passes. The
+contract numbers are stale, not the code; I am recording it here because the
+gate as written now reads as failing and the cause is upstream of this pass.
+
+`shots/sys4b_*` is therefore the right comparison for my change — not the
+contract's absolute figures, which are measuring a different lighting rig.
+
+### What is established
+
+**The shaders compile and the scene renders.** `src/main.js` calls `renderOnce()`
+*before* it assigns `window.__game`, with the comment "compile everything before
+the harness starts timing". So a shader that failed to compile would throw there,
+`__game` would never appear, and the harness would time out waiting for it. Three
+separate runs got past that point and printed `boot`, which means every program
+in the scene — including the rewritten terrain fragment shader with its six
+`texture2DGradEXT` sites — compiled and drew a frame.
+
+The alias is confirmed present in the installed three (0.180.0):
+`#define texture2DGradEXT textureGrad` is unconditional in `prefixFragment` for
+every WebGL2 GLSL1 program, so this needs no extension handling. Macro names
+match whole identifiers, so the `#define texture2D texture` that precedes it in
+the same prefix does not interfere.
+
+**`tools/wallprobe.mjs`, 5.5 seconds, no browser:**
+
+```
+  mpp     grad     grad@4   hf/lf   L mean  note
+ 0.020  0.0073   0.0105    0.70   0.370   close face  (wall_shade)
+ 0.090  0.0057   0.0085    0.67   0.370   mid wall    (wall_lit)
+ 0.350  0.0056   0.0083    0.68   0.370   far plane   (sun_gap)
+```
+
+0.67–0.70 against a gate of 0.55, at every footprint. This is the rock map
+spectrum shaded through a real mip pyramid, and `hf/lf` is a property of those
+maps far more than of anything the scene does — which is exactly why the tool
+exists. `src/rock.js` is untouched by this pass, so this is the expected result
+and it confirms the rock pipeline is intact.
+
+**`tools/shadercost.mjs`, before and after:**
+
+```
+BEFORE  src/terrain.js  SURFACE    37 fetches, 23 unconditional
+AFTER   src/terrain.js  SURFACE    37 fetches, 10 unconditional
+```
+
+Same total work, thirteen fewer fetches on every pixel that is not looking at
+rock, sand, or ground close enough to resolve grain shadows.
+
+### What is not established, and why
+
+**I could not obtain a render.** Three capture attempts were made — 28, 26 and
+30+ minutes — and all three died after boot without producing a PNG or an error
+message. This is not the change: the same signature appeared on the first attempt,
+which predates the governor entirely, and `shots/sys2a.log` shows System 2's own
+capture running for an hour with no output either. Three other agents were
+capturing concurrently for the whole window, on a machine whose harness pins every
+render to four of twelve logical cores at Idle priority by design. Under three-way
+contention that is a little over one core each for a software rasteriser, and
+nothing completes.
+
+`s7c` (`wash_mid`, `wall_lit`) is running detached so that it survives, writing to
+`shots/s7c.log`. `wash_mid` is the right single view: its `wall` window is rock and
+its `floor` window is terrain, so one capture exercises both the untouched path and
+the changed one. When it lands:
+
+```
+node tools/grad.mjs shots/s7c_wash_mid.png shots/s7c_wall_lit.png
+node tools/sat.mjs  shots/s7c_wall_lit.png
+node tools/hue.mjs  shots/s7c_wall_lit.png
+```
+
+The prediction, and it is a strong one rather than a hope: **`wash_mid` floor
+`hf/lf` = 0.52 and `wall` = 0.59, unchanged from `sys4b` to the second decimal.**
+Every gated block reduces to the identity its unbranched form computed at weight
+zero, and each gate opens at a weight — 0.002 for rock, 0.0015 for sand — whose
+contribution is a fifth of one 8-bit level. If the floor figure moves at all, the
+argument in §4 is wrong and the change should come out.
+
+One confound to note: `05cf0a5` (System 5, shimmer cell scale and near-mote cap)
+landed between `sys4b` and `s7c`, and the shimmer is a screen-space warp of the
+whole frame, so a small movement in any window may be theirs rather than mine.
+
+---
+
+## 8. What could not be done without real-GPU numbers
+
+- **A millisecond figure for anything.** Every saving above is argued from a
+  static fetch count and a bandwidth calculation. The ratios should be right; the
+  absolute numbers are unknown, and the ablation table is what turns them real.
+- **Calibrating the tier ladder.** The tier deltas are reasoned, not measured. If
+  the frame turns out to be dominated by the shimmer buffer then `medium`'s drop
+  from four samples to two is most of the win and the shadow sizes are noise; if
+  it is dominated by terrain fragments then the render-scale rungs are doing all
+  the work and the quality rungs could be gentler. The ladder should be re-tuned
+  once there is a table.
+- **Whether the foliage is a problem.** `-veg` in the ablation table settles it.
+  If it costs more than a millisecond, the next moves are a per-tile
+  `InstancedMesh` split for real frustum culling, dropping `DoubleSide` in favour
+  of two-sided lighting in the shader, and `jungle-trail`'s mip-aware alpha
+  sharpening.
+- **`src/rock.js`, which is next.** It still has **15 unconditional fetches**. The
+  visible candidate is `rkN2 = domNormal(uRockN, pF, gN, sF)`, the fine-scale
+  normal, which is weighted by `grainF` and therefore free to gate at distance
+  the same way the terrain's rake march now is. I deliberately did not touch it:
+  the `hf/lf` gate lives precisely on those grain and grit layers, `rock.js` is
+  115 KB of tightly-measured shader owned by System 2, and doing it blind with no
+  frame time to justify the risk is the wrong order of operations.
+- **Whether 56 000 unculled point sprites matter.** `-particles` answers it. If
+  they do, the fix is `frustumCulled = true` with a bounding sphere, which is
+  free, rather than the draw-range trimming the tiers do now.
+
+---
+
+## 9. The frame was 160 shadow comparisons per ground pixel
+
+> **Frame-rate figures in §9 and §10 are superseded, but the 16.80 in them is vindicated.**
+> They are held-camera readings; the 16.80/15.7 ms family was taken on a genuinely idle
+> machine and is reproduced as **17.15 ms** the moment the card is idle again — see §16.1,
+> which closes that gap as foreign GPU load hidden by a mis-calibrated idle gate. The
+> delivery figures are **about 60 fps walking at native 2560×1440**, where the governor
+> settles, with 107 at 1997×1123 and a ladder floor of 176;
+> the one table to quote is "The delivery table" in `CONTRACT.md`. The *attributions* in §9 and
+> §10 — what fraction of the frame each term is — are within-session comparisons and are
+> unaffected.
+
+Written after the second pass, with the GPU numbers §6 asked for. The short
+version: the frame went **30.5 ms to 15.7 ms at 2560×1440 on the top tier**, ~~the
+governor's ladder now reaches 120 fps at rung 4 and 188 fps at its floor~~, and
+**none of it was where §3 said it would be.** Everything §3 predicted was
+reasoned from a static fetch count, and the static fetch count was measuring the
+wrong thing by a factor of ten.
+
+### 9.1 An object ablation cannot price a shader
+
+`tools/bench.mjs`'s table proved the frame fill-bound and could not say whose
+fill. Every ablation it has hides a *mesh*, and that is the wrong instrument
+twice over: hiding the terrain does not price the terrain shader, because
+whatever stands behind it has to be shaded instead, and the two largest fragment
+consumers in the frame — the ground and the sky dome — are exactly the two that
+cannot be hidden without changing which pixels exist.
+
+`tools/fillcost.mjs` ablates the *shader* and leaves the object. Each material's
+fragment program gets an early `gl_FragColor = <constant>; return;` spliced into
+the top of `main`, which the driver reduces to a write. Same geometry, same
+vertex program, same draw order, same overdraw, same shaded-pixel count — only
+the per-pixel work is gone.
+
+At 2560×1440, before any of this pass's changes:
+
+| view | full | −ground | −rock | −sky | −clasts | −veg | −particles | −allScene | −msaa | @0.7 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `wash_mid` | 30.66 | **6.46** | 29.17 | 30.60 | 30.24 | 29.83 | 30.57 | 4.24 | 23.37 | 19.76 |
+| `sun_gap` | 31.20 | **7.13** | 29.09 | 31.13 | 30.96 | 30.13 | 31.14 | 4.28 | 24.60 | 20.06 |
+| `wall_lit` | 19.00 | **5.98** | 17.24 | 19.03 | 18.81 | 18.39 | 19.00 | 4.02 | 16.00 | 11.47 |
+
+**The terrain fragment shader is 24.2 ms of a 30.7 ms frame** — 79% — against
+1.5 for all eighteen rock meshes, 0.8 for the vegetation and nothing measurable
+for the sky, the clasts or the particles. The multisampled half-float target is
+the only other item over a millisecond, at 7.3.
+
+Read `allScene` beside `@0.7`: with every scene material neutered the frame is
+4.2 ms, and fitting the resolution columns gives fixed 4.5 ms plus 21.4 ms of
+fill. That 4.5 is vertex processing, the resolve and the post chain, and it is
+the ceiling nothing in a fragment shader can go below.
+
+### 9.2 It was not the texture fetches, and it was never going to be
+
+`tools/terrcost.mjs` does the same thing one block at a time *inside* the
+terrain shader, by rewriting the assembled fragment source and re-timing. On the
+30.5 ms build, at `wash_mid`:
+
+| block | saving |
+|---|---|
+| the four footprint shadow taps | **18.45 ms** |
+| the centre shadow tap | 5.31 ms |
+| wall rock triplanar (9 fetches) | 1.11 |
+| every band-limited sine and its `fwidth` | 0.88 |
+| the second dirt tile (3 fetches) | 0.44 |
+| the raking grain march (9 fetches, 8 looped) | 0.40 |
+| steep reprojection (6 fetches) | 0.40 |
+| grit, sand, macro, crack, bedform, strat | 0.06 – 0.17 each |
+
+**Twenty-three of the twenty-four milliseconds are in five shadow lookups.** The
+forty-one texture fetches this project has been worrying about since the first
+perf note — the ones §3 branched, correctly, and §4 counted 23 → 10 of — are
+about two milliseconds between them, and the whole of §4's terrain work is worth
+less than a tenth of what one unexamined wrapper was costing.
+
+The arithmetic, once seen, is not close. `getShadow` under `PCFSoftShadowMap` is
+**sixteen** `texture2DCompare` calls, and under `PCFShadowMap` seventeen — the
+soft variant is not a cheaper filter, it is a bilinear-weighted one at the same
+tap count. `src/terrain.js` wraps every shadow lookup in a footprint filter that
+calls it five times. The scene has two shadow-casting directional lights. That
+is **160 shadow texture reads per ground fragment**, and the ground is most of
+most frames.
+
+### 9.3 The fix, and why it does not move a pixel
+
+The four offset taps exist to estimate the *mean* shadow coverage over a pixel's
+footprint, and the estimator was hugely oversampled: the offsets are 2.6 texels
+while `PCF_SOFT` already integrates a 4×4 neighbourhood, so five kernels
+covering roughly nine texels square were being sampled eighty times per light.
+
+Each offset becomes a **bilinear 4-tap** coverage lookup. It samples the same
+neighbourhood at a quarter of the cost and it stays *interpolated* rather than
+binary, which matters: a single hard `texture2DCompare` per offset would be
+cheaper again and is precisely the bimodal sample the wrapper was built to
+remove. The centre tap is left as the stock `getShadow`, so the penumbra sized
+from the sun's angular diameter is bit-identical.
+
+The block is also gated on its own weight. At `wide = 0` the offsets *and* the
+mix weight are both zero, so the four taps return `s` and are then discarded:
+skipping them is an exact identity, not an approximation of one. The branch is
+safe with implicit-LOD fetches inside it because a shadow map has no mip chain —
+three builds it `NearestFilter`, `generateMipmaps` off — so there is no
+derivative for divergent flow to leave undefined.
+
+Per light: 80 comparisons become 32. Measured, `wash_mid` **30.66 → 16.03 ms**,
+`sun_gap` 31.20 → 15.83, `wall_lit` 19.00 → 11.39.
+
+### 9.4 Verified as a pair, in one page load
+
+`CONTRACT.md`: *two captures are not a pair.* `tools/shadowpair.mjs` renders both
+halves from one page — one module set, one set of procedural textures, one sun —
+with a single substitution in the assembled fragment shader between them, so the
+control is the old estimator and nothing else differs. It reports the count of
+substitution sites it actually hit, because a change that did nothing and a
+change that was never applied look identical.
+
+All eight standard views, 1280×720, on the GPU:
+
+| | mean abs Δ | max Δ | px ≥ 4 cv | frame L before → after |
+|---|---|---|---|---|
+| `wash_low` | 0.25 cv | 131 | 1.74% | 77.74 → 77.66 |
+| `wash_mid` | 0.29 | 99 | 2.00% | 76.05 → 76.08 |
+| `ground` | 0.05 | 127 | 0.36% | 91.49 → 91.48 |
+| `wall_lit` | 0.29 | 119 | 1.79% | 55.22 → 55.23 |
+| `wall_shade` | 0.06 | 86 | 0.46% | 44.78 → 44.80 |
+| `bend` | 0.09 | 88 | 0.73% | 45.09 → 45.09 |
+| `juniper` | 0.35 | 130 | 2.67% | 68.38 → 68.26 |
+| `sun_gap` | 0.31 | 134 | 2.08% | 81.52 → 81.62 |
+
+The maxima are individual pixels on a cast-shadow edge changing side, which is
+what any change of shadow estimator does; the population statistic is a mean
+absolute difference of a third of a code value and a whole-frame luminance that
+moves by at most 0.12 of one.
+
+Every contracted figure holds. `grad` and `hf/lf` are identical in all twelve
+windows across the eight views, to the digit `grad.mjs` prints — the largest
+movement anywhere is the `juniper` wall window at 0.0289 → 0.0286, and that
+window has vegetation in it. Saturation and hue likewise: the biggest excursion
+in the set is `sun_gap` floor mid saturation 0.568 → 0.566, and lit rock in
+`wall_lit` reads 0.687 both sides at hue 14.6°. **The shadow gate is 0.211
+before and 0.211 after** — shaded 11.7 cv over sunlit 55.6 — which is the one
+number most at risk from touching a shadow filter and it does not move.
+`shadowpair.mjs` reports no page errors, so the frames contain the geometry they
+are supposed to.
+
+### 9.5 The ladder was being measured one lever at a time
+
+`perf.setTier` moves the quality tier and deliberately leaves the render scale at
+1.0. That is the right control for "what does a tier cost" and the wrong answer
+to "does the fallback reach the target", because the governor descends an
+*interleaved* ladder whose bottom step is potato **and** a 0.58 render scale. On
+a fill-bound frame those two differ by most of the frame. The recorded "the
+bottom rung of the governor is 55 fps" was potato at native resolution — a
+setting the governor never selects.
+
+`perf.js` now exposes `rungs` and `setRung`, and `bench.mjs` prints the rung
+table beside the tier table. With a table to read, the interleave stops being a
+reasoned guess. Per rung at `sun_gap`, 2560×1440:
+
+| | 1.00 | 0.88 | 0.78 | 0.68 | 0.58 |
+|---|---|---|---|---|---|
+| high | 15.73 | 13.27 | 11.46 | 9.88 | 8.51 |
+| medium | 13.33 | 11.28 | 9.78 | 8.46 | 7.31 |
+| low | 10.75 | 8.98 | 7.68 | 6.54 | 5.56 |
+| potato | 9.99 | 8.34 | 7.13 | 6.06 | 5.14 |
+
+Read down a column rather than along a row. Once the shadow filter stopped being
+three quarters of the frame, a tier step became worth about as much as a scale
+step and costs less picture than one. The order sheds one resolution step and
+then alternates, so the 8.33 ms budget is reached at **low / 0.78 — 1997×1123**
+where the old order reached it at medium / 0.68 — 1741×979. Same budget, 34%
+more pixels. The trade is MSAA for resolution and it is the right way round,
+because System 7's along-edge resolve runs at full strength on every rung
+precisely so the samples-0 rungs are not left bare.
+
+### 9.6 `bench.mjs`'s `-shadow` column was measuring nothing
+
+Recorded because it is the eleventh instrument failure on this project and it
+cost the diagnosis directly. `renderer.shadowMap.enabled` is folded into
+`USE_SHADOWMAP` when a program is compiled, and three does not relink on a
+runtime change. So flipping it stopped the shadow *maps* being redrawn — which
+was already free, since `shadowMap.autoUpdate` is false and a static camera
+redraws no cascade — while every lit fragment went on sampling them exactly as
+before. The column read 30.54 against a full frame of 30.49 and was written down
+as *"shadows, particles and the whole post chain are inside the noise"*, at a
+moment when the shadow lookups were 23 of those 30.49 ms.
+
+It now forces every material to relink, in the six warm-up frames rather than in
+the timed block, and reads 16.68 against 10.63.
+
+The general form is worth keeping: **a compile-time define toggled at runtime is
+an ablation that reports zero for something enormous.** Anything gated by a
+`#define` needs `material.needsUpdate` beside it, or the column is a no-op with
+a plausible number attached.
+
+### 9.7 Where the remaining time is, and what it would cost to take
+
+At the top tier, 2560×1440, after this pass:
+
+| | ms |
+|---|---|
+| whole frame, `wash_mid` | 16.0 |
+| terrain fragment shader | 9.1 |
+| — of which its centre shadow tap | 4.0 |
+| — of which the footprint taps | 0.6 |
+| — the rest of the material | ~4.5 |
+| the 4× half-float target | 3.9 |
+| rock | 1.8 |
+| vegetation | 1.0 |
+| the marched in-scatter | 0.8 |
+| fixed: vertex, resolve, post chain | ~4.5 |
+
+Three honest observations and no more work done on them:
+
+- **The centre shadow tap cannot be cut without changing the picture.** It is
+  sixteen comparisons across two lights and it carries the penumbra. Halving it
+  means `PCFShadowMap` — which is seventeen taps, so not a saving — or fewer
+  shadow-casting lights, which is System 4's light rig.
+- **The fixed 4.5 ms is now 28% of the frame**, where when the geometry ceiling
+  was declared the wrong axis it was 15%. That does not make the ceiling right —
+  shaving triangles to reach 3 M still buys nothing measurable — but it does mean
+  that the *next* axis after resolution is vertex cost, and 2.25 M of the 3.97 M
+  triangles are clast instances. It should be measured before it is touched.
+- **The 3.9 ms multisampled target is a top-tier feature and the ladder already
+  spends it.** Dropping it at `high` would be removing a feature to buy frame
+  time, which is the one thing this pass was told not to do.
+
+## 10. Re-benched on the shipping build, because the penumbra moved underneath it
+
+§9 was measured while five other systems were committing. Four changes have landed
+on or beside the shadow path since, and one of them lands on the exact term §9
+optimised: System 4's blocker-distance penumbra (`639309d`, `543ea94`), which
+replaces three's fixed kernel with a search-plus-disc filter sized from the sun's
+angular diameter. The others are System 1's grazing bound in `bumpFrom`
+(`af365e8`), System 2's settled rock, System 4's astern sky aperture (`4ac9877`),
+System 5/7's fill doorway and silhouette gate (`3f1003a`, `7868b5d`).
+
+The headline number in a delivery note has to come from the build that ships, so
+everything below was re-run on `fa8b9ec`.
+
+### 10.1 The penumbra was already in the tree, and the table reproduces
+
+Worth establishing first, because it changes what the re-bench is *for*.
+`639309d` landed 04:29 and `543ea94` at 04:46; §9's fix is `4d72ec6` at 04:56 and
+its bench ran 05:08–05:11. So §9's figures were **always** measured on the
+penumbra path — the re-bench is a confirmation, not a correction.
+
+It confirms. 2560×1440, median of 7 blocks of 30, loop paused:
+
+| | §9 (05:08) | HEAD (06:16) |
+|---|---|---|
+| `wash_mid` | 16.78 | **16.80** |
+| `wall_lit` | 12.24 | **12.23** |
+| `sun_gap` | 17.69 | **16.82** |
+| rung 0 — high / 1.00 | 16.95 | **16.91** |
+| rung 4 — low / 0.78 | 8.12 | **8.21** |
+| rung 7 — potato / 0.58 | 5.48 | **5.44** |
+
+Every rung within 0.1 ms except `sun_gap`, which came *down* 0.9. Nothing that
+landed in the last hour costs anything measurable, System 1's bound included.
+**The ladder needs no retune**: it was tuned against a penumbra-live table, and
+8.33 ms is still reached at rung 4.
+
+### 10.2 The reduction and the penumbra are complementary, and the trade is 18 ms
+
+The question worth asking was whether a wider, per-pixel kernel invalidates a
+four-tap approximation justified on a 4×4 neighbourhood. The justification does
+not survive; the reduction does, and it is worth three times more than when it
+was made.
+
+`tools/terrcost.mjs` gained a `footFull` row that puts the **old** estimator back
+— four full `getShadow` calls at the offsets — and so reports a negative saving.
+At `wash_mid`, against its own 17.07 ms full frame:
+
+| block | Δ ms |
+|---|---|
+| every shadow lookup this material makes | −4.30 |
+| — the centre tap alone (System 4's penumbra) | −3.80 |
+| — the four footprint taps (§9's reduction) | −0.58 |
+| **the four footprint taps as full `getShadow` again** | **+18.22** |
+
+So the old estimator would take `wash_mid` from 17.1 ms to **35.3** — worse than
+the 30.5 the project started at. §9 saved 14.6 ms when it landed; on the penumbra
+path the same edit is worth 18.2, because each restored offset would now be a
+12-tap blocker search plus a spiral rather than sixteen comparisons. **The
+penumbra is only affordable because the offsets were reduced first.** There is no
+conflict to arbitrate.
+
+The overlap argument in §9.3 is nevertheless retired, and `src/terrain.js` now
+says so beside the code. The five samples no longer cover one shared
+neighbourhood: the centre integrates up to 2 m of the coarse cascade where the
+offsets still sit at 2.6 texels. What holds instead is that they answer different
+questions — the centre resolves the **penumbra**, a property of the blocker; the
+four resolve the mean over the **screen footprint**, a property of range — and
+both are still answered.
+
+### 10.3 Re-verified as a pair, and it does not band
+
+`tools/shadowpair.mjs` re-run over all nine views. Its default view set was
+weighted to the far field first, because the taps are gated on `1 - gFoot` and a
+near framing can only ever report zero — a table of zeros from views where the
+block does not execute is not evidence about views where it does.
+
+| | mean abs Δ | max Δ | px ≥ 4 cv | p99.9 Δ | changed-px mean |
+|---|---|---|---|---|---|
+| `wash_low` | 0.247 cv | 131 | 1.74% | 33 | 7.6 |
+| `wash_mid` | 0.293 | 99 | 2.00% | 37 | 7.2 |
+| `ground` | 0.051 | 127 | 0.36% | 11 | 5.2 |
+| `wall_lit` | 0.292 | 119 | 1.80% | 39 | 8.2 |
+| `wall_shade` | 0.055 | 86 | 0.46% | 10 | 4.4 |
+| `bend` | 0.087 | 87 | 0.74% | 16 | 5.7 |
+| `juniper` | 0.350 | 130 | 2.67% | 29 | 7.5 |
+| `sun_gap` | 0.315 | 136 | 2.09% | 40 | 8.2 |
+| `shade_far` | 0.275 | 123 | 1.76% | 36 | 7.8 |
+
+The first eight rows reproduce §9.4 to the digit — 0.29/99/2.00% at `wash_mid`
+then and now — and `shade_far`, which did not exist then, joins the same family.
+
+**Banding was the specific risk and it is not there.** The instrument for it is
+`hf/lf`: a filter that has gone blotchy carries its gradient at four pixels
+rather than one, so the ratio falls. Across all twelve standard windows plus
+three placed by hand on `shade_far`'s soft terminator, `grad`, `grad@4` and
+`hf/lf` are identical to four digits. On the terminator crop itself — the widest
+penumbra in the capture set — `grad` 0.0323 → 0.0322, `grad@4` 0.0551 → 0.0547,
+`hf/lf` 0.59 both sides. The two 3× crops are visually indistinguishable.
+
+Colour holds exactly. **Lit rock reads 0.619 saturation at hue 14.6° on both
+sides**, which is the contract figure to three digits; `wash_mid` floor 21.8°
+both; `shade_far` shaded floor 4.0° and lit floor 21.1° both.
+
+And the run carries its own negative control: the floating-slab region on `wallL`
+is a **byte-identical** crop between the halves. That surface is `rock.js`'s, whose
+wrapper only catches the value, so a terrain-side filter cannot reach the defect
+System 4's penumbra was built to fix. The two changes do not touch the same pixels.
+
+### 10.4 What the penumbra costs, priced properly
+
+Not a proposal — System 4's penumbra fixes a named defect and is theirs. But a
+compile-time feature cannot be ablated at runtime (§9.6), so it needed a second
+page load to price at all: `bench.mjs` gained `--hash`, and `#hardshadow` selects
+three's fixed kernel at shader-build time.
+
+| | PCSS (ships) | `#hardshadow` | penumbra costs |
+|---|---|---|---|
+| `wash_mid` | 16.80 | 12.64 | **4.16 ms** |
+| `wall_lit` | 12.23 | 9.93 | 2.30 |
+| `sun_gap` | 16.82 | 12.15 | 4.67 |
+
+25% of the top-tier frame, and it is the single largest identified item in it.
+Stated as a ladder cost rather than a millisecond count: ~~**the penumbra moves the
+120 fps rung by one step.** With it, 8.33 ms is rung 4, low / 0.78 / 1997×1123;
+without it, rung 3, medium / 0.78 at the same resolution.~~ **The ladder step is the
+durable part of that; the rung labels are not — there is no 120 fps rung. No rung on
+this ladder reaches 120 fps with the camera moving** (delivery run: rung 4 is 63 fps
+moving, the floor is 89). Read it as: the penumbra costs **one rung**, wherever the
+governor happens to be sitting. So the price of a
+terminator that rises over 27 px instead of 3 is one quality tier at the settling
+point, at identical pixel count. That is the trade, and on a frame whose worst
+critique was a hard-edged parallelogram pasted on rock it looks like the right way
+round — but it is a picture decision, not a perf one.
+
+### 10.5 `tools/terrcost.mjs` printed `NO — CHECK` beside every correct number
+
+The twelfth instrument failure, and the mirror image of §9.6 — there a broken
+ablation reported a plausible number, here a working ablation reported a broken
+warning.
+
+`customProgramCacheKey` carries the ablation's name, which is what stops all
+fourteen variants sharing one compiled program. It also means each program is in
+three's cache from block 0 onward, so `onBeforeCompile` does not run again — and
+the flag was read once per block, so the *last* block's reading was kept: not
+compiled, therefore not substituted, therefore `NO — CHECK` printed beside a
+4.44 ms saving that was entirely real.
+
+It now records site counts for the life of the run rather than per block, and
+prints the count rather than a boolean, because *matched nothing* and *was never
+asked* are different failures and `false` conflates them. Every row reads `1`
+(and `footFull` reads `4`). The general form, beside §9.6's:
+
+> A cache key that makes an ablation measurable also makes the *evidence* that it
+> applied unobservable on every run after the first. Verify once and carry it;
+> do not re-read a compile-time flag per timing block.
+
+### 10.6 Where the frame is now, and the two things left in it
+
+At the top tier, 2560×1440, `wash_mid` at 16.8 ms:
+
+| | ms | whose |
+|---|---|---|
+| the blocker-search penumbra | 4.2 | System 4 — named-defect fix |
+| fixed: vertex, MSAA resolve, post chain | ~4.5 | — |
+| the 4× half-float target | ~3.9 | System 7, and the ladder spends it |
+| terrain, everything except its shadow taps | ~2.7 | 41 fetches, all of them |
+| rock, vegetation, marched in-scatter | ~2.9 | |
+| the four footprint shadow taps | 0.6 | this pass |
+
+Two observations, no work done on either:
+
+- **Fetch count is still not the axis, now less than ever.** System 1's liveness
+  map says the `rockW` branch is inert across the floor and terraces, and it
+  measures 1.01 ms where it *is* live; the always-live `steep` branch's six
+  fetches are 0.43. The whole of §9.2's "about two milliseconds" holds.
+- **The four `fwidth` calls in the bedform comb are measuring the wrong quantity**
+  and System 1 has written the correct footprint form beside them. Left alone on
+  purpose: the block prices at 0.05–0.08 ms, so there is no cost case, and it is
+  measured-good protected work whose replacement they deliberately reverted. It
+  should land as a correctness change with its own verification, not smuggled in
+  under a perf commit.
+
+## 11. The governor was the one system no instrument could see
+
+Everything in §§6–10 was measured with `tools/bench.mjs`, which pauses the render
+loop, holds the camera still, and drives `renderOnce` by hand through each rung.
+That is the right instrument for *pricing* a rung and the ladder in §10 is
+correctly tuned against it. It cannot answer three questions, and a real-browser
+playthrough answered all three unfavourably:
+
+1. which rung does the governor **choose**, with a live loop and a moving camera;
+2. how long does it take to get there from a cold load;
+3. once it has gone down, can it come **back up**.
+
+The reason none of that was visible here is structural and worth stating plainly.
+`src/perf.js` pins the top tier and switches adaptation off whenever
+`navigator.webdriver` is set — which is right, because a governor reacting to
+incidental timing is the last thing that should be live while two page loads are
+compared pixel for pixel. But every probe in `tools/` sets that flag. So the
+ladder had only ever been walked by hand, one rung at a time, by the tool that was
+measuring it. `#adapt` opts back in explicitly, `tools/govern.mjs` is the only
+thing that sets it, and captures are untouched.
+
+### 11.1 The frame cost did not move. Why two tools disagree about it is unexplained.
+
+**This section has now been wrong twice, in the same place, and both wrong versions
+are named here rather than tidied away.** It first said "the frame cost moved 39%
+under the measurement"; that was escalated as the most important open item in the
+project and reported to the user, and the bisect below disproves it. It then said
+the difference was the machine; the quiet-machine measurement further down
+disproves that too. What survives is the bisect and a gap nobody has explained.
+
+The pattern is worth more than either claim. Both wrong versions were plausible,
+both were arrived at honestly from real data, and both were killed by building an
+instrument that could distinguish rather than by arguing. That is the only method in
+this file that has a clean record tonight.
+
+`tools/bench.mjs` read `wash_mid` at **16.80 ms** at `fa8b9ec` around 05:00 and
+**24.48** at `2548d04` around 07:45. Two independent instruments agreed on the
+second figure, which is what made it look like a code regression: `govern.mjs
+--probe`, a different tool in a different page, read 23.34 at the same station and
+rung. Both instruments were right. The inference was not, and the error was
+assuming the only thing that had changed between two measurements two hours apart
+was the code.
+
+`tools/_regress.mjs` measures one cell — `wash_mid`, tier `high`, scale 1.0,
+2560×1440, paused loop, `readPixels` fence, median of five blocks of thirty, which
+is precisely bench.mjs's top-left number — from a detached worktree, so an old
+commit can be measured without checking anything out in the shared tree.
+Every source commit in the window, in order:
+
+| commit | | ms | calls | tris |
+|---|---|---|---|---|
+| `fa8b9ec` | the 16.80 baseline | **22.91** | 64 | 3.97 M |
+| `eaac382` | terrain, tap reduction comment | 22.62 | 64 | 3.97 M |
+| `ee49e63` | sky, comment fix | 22.65 | 64 | 3.97 M |
+| `2548d04` | **terrain occlusion tint + rake mip** | **22.67** | 64 | 3.97 M |
+| `25c93fb` | **rock occlusion tint + joints** | **22.85** | 64 | 3.97 M |
+| `0dbd81d` | terrain, geometric rake march | 22.54 | 64 | 3.97 M |
+| `9fa6819` | main, loading screen | 22.66 | 64 | 3.97 M |
+| `0609843` | rock, joints may only lighten | 23.20 | 64 | 3.97 M |
+| `ac39c5f` | rock, rim steps between beds | 23.05 | 64 | 3.96 M |
+| `39fe176` | terrain/textures, bed depth | 22.80 | 64 | 3.96 M |
+| `7727cc1` | rock, crest wavelength | 22.66 | 64 | 3.96 M |
+| `7caa9b7` | atmos, fill decomposition | 22.79 | 64 | 3.96 M |
+| `0e81b0c` | **vegetation, shrub transmission** | 22.68 | 70 | 4.00 M |
+| `7eef891` | textures, grain bed band weights | 23.14 | 70 | 4.00 M |
+| `af1abf0` | HEAD | 23.07 | 70 | 4.00 M |
+
+Flat. The whole spread is **0.83 ms across fourteen commits**, which is inside the
+block-to-block spread of a single run. And the endpoints interleaved, alternated
+so that machine drift cannot land on one of them:
+
+| | run 1 | run 2 | run 3 | mean |
+|---|---|---|---|---|
+| `fa8b9ec` | 22.91 | 22.60 | 22.40 | **22.64** |
+| `af1abf0` (HEAD) | 23.03 | 23.07 | 22.37 | **22.82** |
+
+**0.18 ms apart.** There is no regression in the code, and there never was.
+
+**The indirect-light fix costs nothing measurable.** `2548d04` reads 22.67 against
+`ee49e63`'s 22.65 immediately before it, and `25c93fb` reads 22.85 against
+`2548d04`'s 22.67 — both inside noise. So there is no trade to bring: the most
+valuable visual change of the night, which took all-channel black from 6% of the
+frame to 0.01% and gave the wall behind the floating slab tone, is free. A cubic
+per pixel on two heavy shaders is nothing next to twenty-odd dependent texture
+fetches; it was the right suspect on timing and the wrong one on arithmetic.
+Vegetation shows up in the counts — calls 64 → 70, triangles 3.96 M → 4.00 M — and
+not in the milliseconds, which is the same lesson §6 recorded about the triangle
+ceiling. Jointing likewise.
+
+**What actually changed is not known.** The first version of this paragraph said it
+was the machine, and that has since been tested and is wrong.
+
+The theory was reasonable. Sampled with nothing of this investigation running, the
+GPU sat at a **66% utilisation floor** from processes with nothing to do with the
+project — an animated Wallpaper Engine desktop, the vendor overlay, the editor, and
+fourteen `chrome`/`node` processes belonging to the other agents working in this
+repo — and the 16.80 was taken around 05:00 when fewer of those existed. 22.8/16.8
+is 1.36, which looked like the shape of a scene being given two thirds of a GPU.
+
+Then the machine was made quiet and the same cell was measured again, gated on a
+pre-launch load sample that had to report the card at its resting floor before the
+run was allowed to start:
+
+| `wash_mid`, rung 0, 2560×1440 | held | moving |
+|---|---|---|
+| foreign load 90–100% | 23.30 | 25.21 |
+| foreign load 63%, memory 12% | **23.06** | **26.81** |
+
+**Identical.** The foreign load was not costing six milliseconds, or anything
+measurable. So the gap between `bench.mjs`'s 16.80 and this tool's 23.06 on the
+same commit is **unexplained**, and it is recorded as unexplained rather than
+re-attributed, because the last two confident causal stories about this number —
+that it was the indirect-light fix, and that it was contention — were both
+reasonable and both failed the first test that could distinguish them.
+
+**What the bisect still says, unaffected.** Fourteen commits measured through one
+instrument, with the endpoints interleaved three times each and landing 0.18 ms
+apart, says the code did not change. That is a within-instrument comparison and
+nothing above touches it. The regression does not exist. What has collapsed is only
+the explanation for why two *different* instruments disagree.
+
+**Confounds already checked, so the next person does not redo them.** All four were
+candidates and all four are eliminated:
+
+- **Station.** `bench.mjs`'s `wash_mid` is `{ d: 46, yaw: 0, pitch: 0 }`. That is
+  the same station this tool measures, to the degree. Station choice is worth up to
+  9 ms across the walk, so this was the leading candidate and it is not the answer.
+- **Timing method.** Both take `performance.now()` around n `renderOnce` calls and
+  both fence with a one-pixel `readPixels`. Neither uses the GPU timer for the
+  figure it prints.
+- **Commit.** 16.80 and 22.91 are both `fa8b9ec`, the second from a detached
+  worktree with `node_modules` resolved from the main tree so the three version is
+  pinned.
+- **Machine state.** The table above.
+
+**One hypothesis, labelled as a hypothesis, with its test.** §13 of this file
+records a real warm-up defect found in `_regress.mjs`: a fixed sixty-frame warm-up
+produced a ladder with rung 1 slower than rung 0 and rung 4 faster moving than
+held, because a tier change alters the atmosphere's sample counts, which is a new
+shader variant and an ANGLE compile landing inside the timed blocks. **A fixed
+warm-up can read low as well as high** — if a rung's timed blocks catch the tail of
+a cheaper configuration mid-transition, the number comes out under the truth rather
+than over it. `bench.mjs` walks the ladder through `setTier()` with the same shape
+of warm-up. That is a mechanism which would produce exactly this disagreement in
+exactly this direction, and it is untested. The test is to give `bench.mjs` the
+warm-until-two-short-runs-agree loop and re-run `wash_mid` at rung 0 on a quiet
+machine; if 16.80 becomes 23, the tool was reading a transient.
+
+Two things follow that hold regardless of which way that test goes:
+
+- **`bench.mjs` should record the machine, not just the frame.** A tool that writes
+  a millisecond into a contract without GPU utilisation beside it produces figures
+  that cannot be compared with each other across a night, which is what happened.
+  `_regress.mjs` samples the frame's luminance for the white-desert trap and the
+  card's utilisation for this; the second is the cheaper of the two checks. Note
+  that `utilization.gpu` is the wrong field on its own — it reports the fraction of
+  sampled time in which *any* kernel was resident, so an animated wallpaper drawing
+  at 60 fps reads 65% while consuming almost nothing. This machine's resting floor
+  is gpu 63–66% at memory 12%; another agent's capture is gpu 88–100% at memory
+  16–19%; the game the user later started is gpu 100% at memory 34%. The memory
+  controller is what separates them.
+- **An unexplained six milliseconds recorded as unexplained is worth more than a
+  plausible attribution**, because the next person will actually look. Both of
+  tonight's plausible attributions cost hours and neither survived contact with an
+  instrument built to distinguish.
+### 11.2 A walking player pays a cascade redraw that no bench ever measured
+
+*(~~Absolute figures in this section are contended~~ — **withdrawn; foreign load was measured at
+0.24 ms, not 6. See §11.1.** Absolute figures here are held-camera readings from an instrument
+whose disagreement with `_regress.mjs` is unexplained, which is a different caveat and the one
+that applies. The `held` against `moving` difference is a within-session comparison and is
+unaffected either way, which is why it is the figure this section rests on.)*
+
+The two shadow cascades are redrawn only when the rig moves. `bench.mjs` holds the
+camera still, so it has never once paid for them. Measured at every rung, camera
+held against rig creeping 5 cm a frame, at `wash_low`:
+
+| rung | tier / scale | buffer | held | moving | Δ |
+|---|---|---|---|---|---|
+| 0 | high / 1.00 | 2560×1440 | 23.3 | 26.9 | +3.6 |
+| 4 | low / 0.78 | 1997×1123 | 13.8 | 16.7 | +2.9 |
+| 7 | potato / 0.58 | 1485×835 | 9.9 | 13.5 | +3.6 |
+| 8 | potato / 0.50 | 1280×720 | 9.2 | 12.7 | +3.5 |
+
+It is flat, at about **+3.4 ms**, and it does not shrink as the tier drops the map
+sizes from 4096/2048 to 1024/512 — which says it is the terrain and rock redraw
+rather than the depth fill. So the honest figure for a walking player is the
+`moving` column, and on this tree **no rung reaches 8.33 ms at any station with
+the camera moving.** The bottom rung is 11.4–12.7 ms, which is 79–88 fps.
+
+The stations matter as much as the rungs, and this is the second instrument gap.
+`bench.mjs` measures `wash_mid`, `wall_lit` and `sun_gap`, all at 46 m or beyond.
+None is where a player boots, and the spread between stations is larger than four
+rungs of the ladder: at rung 0, `ground` is 13.9 ms and `wash_mid` is 23.3. A
+ladder tuned on three framings from the middle of the range cannot say what the
+walk costs.
+
+One cell in that table is contaminated and is left in rather than smoothed: rung 5
+at `wash_mid` reads 21.66 held and 26.27 moving, against 16.48 at rung 3 and 10.78
+at rung 6 either side of it. A rung cannot cost more than two rungs above it; the
+block caught something else on the machine. Everything around it is monotone.
+
+### 11.3 The 45-second cold start was a units bug
+
+`main.js` computes `dt` as `Math.min(0.05, ...)`. The clamp is correct for `step()`
+— a physics integrator handed a one-second frame must not teleport the player —
+and the governor was accumulating its `clock` and decrementing its `hold` from the
+same clamped value. During the compile-heavy first frames a 170 ms frame therefore
+advanced the governor's clock by 50 ms, so `clock < 2.5` gated on fifty frames
+rather than on two and a half seconds, and every `hold` after it stretched the
+same way.
+
+Measured on `govern.mjs`, cold load, 2560×1440:
+
+| | before | after |
+|---|---|---|
+| first rung change | 8.5 s | **1.3 s** |
+| settled | 17.0 s | **2.5 s** |
+
+The playthrough saw forty seconds of it, which is this bug ~~on a machine that was
+also contended~~ — the contention half of that is withdrawn (§11.1: foreign load
+measured 0.24 ms), so the units bug accounts for it on its own. The governor now keeps its own clock in wall milliseconds and the
+loop's `dt` is used only for what `dt` is for. Note what this makes unnecessary:
+an optimistic start. The reason to start low and climb is to avoid a long
+sluggish opening, and the opening is now two and a half seconds — so starting low
+would cost a fast machine a climb it does not need, to fix something that is no
+longer there.
+
+### 11.4 The ratchet, and why widening the band was the wrong fix
+
+> **This section describes the constants that were removed.** For what the governor
+> targets now, how a climb is decided, what the price expiry and the probe do, and how
+> it behaves on a contended machine, see **§15**. The `t * 0.62` climb gate below no
+> longer exists.
+
+The old rule descended above `t * 1.15` and climbed below `t * 0.62` — 9.58 ms and
+5.17 ms against a 120 fps target. The measured cost of every rung below 4 sits
+*between* those, so the governor could descend and then never satisfy the
+condition to return. A background download degraded the picture for the rest of
+the session. The baseline trace has it exactly: it sat at rung 7 for 134 of 150
+seconds, and it stayed there through samples reading **4.68 and 4.77 ms** — under
+the 5.17 threshold — because `floorI` had been set to the rung it had just
+descended *to*, so a climb needed twelve seconds of sustained sub-5.17 before it
+would even lower the bound by one.
+
+Widening the gate is not the fix, because the gate asks the wrong question.
+`cost < t * 0.62` asks "is this rung very cheap". What decides a climb is "would
+the next rung up fit", and a rung step is worth 6% to 20% here — so a fixed 38%
+headroom requirement is between two and six times the size of the step it gates,
+and at the bottom of the ladder it is unsatisfiable by construction.
+
+So the governor remembers the price instead of guessing it:
+
+- `seen[i]` is what rung *i* has cost on this machine, blended at 0.25. A climb
+  needs the rung above to be known cheap enough (`< t * 1.02`) or not known at all.
+- `seen[i]` **expires after 8 s**, because what a rung costs depends on where the
+  player is standing and the player is walking. The first version had no expiry and
+  reproduced the ratchet in a new place: descending through rung 5 recorded its
+  price at the mouth of the wash, the walk reached the cheap far end where the
+  frame ran at a third of that, and the governor still would not climb past 6
+  because a fifty-second-old estimate said 5 would not fit.
+- A climb is a **probe**: short hold, 900 ms, and if it overruns it goes back
+  exactly where it came from and that rung gets a cooldown of 15 s, then 30, then
+  60. A cooldown expiring clears the remembered price, so nothing is ever closed
+  off permanently — a rung that keeps failing is retried rarely, not never.
+- The revert is a single step rather than the ratio-derived multi-step drop. A
+  probe fails on one reading and that reading is sometimes a viewpoint rather than
+  a rung: one probe failed as the walk entered the wash mouth, and the ratio would
+  have sent it three rungs *past* the floor it had just left.
+- The GPU timer is flushed on every rung change. It reports a median over 31
+  samples, so for the first thirty-one frames after a change it was a median of two
+  different settings — and a 900 ms probe cannot be judged on that. An empty median
+  now returns "no measurement" rather than falling through to `cpuMs`, which is
+  *submit* time and would read as enormous headroom one frame after a rung change.
+
+Verified by putting the ladder at the floor at t=30 s — the state a transient
+leaves behind, reached without a transient to confound the reading — and watching:
+
+| t/s | rung | what happened |
+|---|---|---|
+| 1.3 | 0 → 2 | cold start, first move |
+| 2.5 | 2 → 4 | settled |
+| 31.3 | 5 → 8 | pushed to the floor |
+| 59.3 | 8 → 7 | climb probe, held |
+| 63.3 | 7 → 6 | held |
+| 67.0 | 6 → 5 | back where it was, 37 s after the push |
+| 71.0 | 5 → 4 | |
+| 75.0 | 4 → 3 | |
+| 80.8 | 3 → 2 | |
+| 105.0 | 2 → 1 | settled |
+
+No oscillation anywhere in the trace, and every climb was a probe that held. Run
+at `#target=60` on purpose: with nothing on the current tree reaching 8.33 ms the
+governor correctly pins at the floor and there is no climb to observe, which would
+make a fixed ratchet indistinguishable from a broken one. *(That flag is now the
+default — §15. Needing it to see the ladder work at all was the first sign that 120 was
+the wrong target, and this trace is consequently the only existing measurement at the
+shipping one.)*
+
+The first version of the recovery test ground a second WebGL context to contend
+for the device. It worked far too well — the queued draws took four minutes to
+drain, the GPU timer went permanently disjoint, and the trace measured the
+injection. Recorded rather than quietly replaced, because "the instrument was the
+loudest thing in the room" is this project's most repeated failure.
+
+### 11.5 One more rung, and it buys a millisecond
+
+`RSCALE` gains 0.50, so the ladder has a rung 8 at potato / 1280×720. Said
+plainly: it is worth **0.6–0.8 ms**. When the ladder was tuned, halving the pixels
+took a third off the frame and resolution was by far the strongest lever
+available; it is not any more. `bench.mjs`'s `@0.7res` column takes `wash_mid`
+from 24.48 to 17.95, so 49% of the pixels save 27% of the frame, and the remaining
+17.95 is vertex work, the two cascades, the resolve and the post chain in an order
+nobody has yet attributed. The rung exists because a governor whose bottom step is
+over budget has nowhere to put a struggling machine, not because it closes the gap.
+
+### 11.6 The thirteen shader warnings are one loop
+
+`X3595: gradient instruction used in a loop with varying iteration`. Attributed by
+ablation rather than by matching line numbers, because the numbers in those
+messages are into ANGLE's generated HLSL and not into any file in `src/`:
+
+| boot | distinct warnings | X3595 |
+|---|---|---|
+| `#adapt` | 8 | **8** |
+| `#adapt&hardshadow` | 0 | **0** |
+
+Every one of them is `src/sky.js:734–739`, System 4's variable-width penumbra
+spiral:
+
+    int n = int( clamp( r / texelM * 1.2, 8.0, 28.0 ) );
+    for ( int i = 0; i < 28; i ++ ) {
+      if ( i >= n ) break;
+      vec2 o = sunSpiral( i, n, rot ) * r * uvPerM;
+      float d = unpackRGBAToDepth( texture2D( map, p.xy + o ) );
+
+`n` is per-pixel, so the trip count diverges across a quad, and `texture2D` needs
+derivatives to pick a mip level. The count varies with how many programs have
+compiled — the playthrough saw 13, a fresh boot here sees 8 — but it is one
+construct in one shared chunk, included by every program that receives a shadow.
+
+**The fix is one token and provably identical, and it is not mine to commit.** The
+shadow map is `NearestFilter` with `generateMipmaps` off, so there is no mip level
+to select and the derivative is computed and discarded:
+
+    float d = unpackRGBAToDepth( texture2DLodEXT( map, p.xy + o, 0.0 ) );
+
+`three.module.js:6454` defines `texture2DLodEXT` as `textureLod` in the GLSL3
+prelude, and `terrain.js` already relies on the sibling `texture2DGradEXT` define
+at 6457, so the mechanism is in use in this project today. Left to System 4
+because `src/sky.js` was dirty with their in-flight work throughout this pass, and
+staging a hunk into a file someone else is editing is how `sky.js` got destroyed
+once already.
+
+Two things this is *not*. It is not the bug class that produced the grazing
+lattice — that was a derivative whose **value** was unbounded; this is a
+derivative whose value is discarded. And it is not `fwidth` of a phase
+under-reporting, which is §10's note and still open. Nothing here is a correctness
+risk today: it is eight lines of console noise standing on a real one-token
+improvement.
+
+## 12. Pricing the suspects on today's scene instead of yesterday's build
+
+§11.1's bisect answers "did the frame move" and cannot answer "what does this term
+cost", because a checkout measures a whole build and the build kept changing:
+vegetation landed inside the window, which is visible in the counts as 64 draw
+calls becoming 70. So the terms were priced the way everything else in this file
+was priced — one page load, one build, one bit different — with the substitutions
+going in through `onBeforeCompile` and the active row folded into
+`customProgramCacheKey` so three relinks instead of returning the cached program.
+
+Two guards, both earned rather than precautionary.
+
+**Every row reports how many sites it hit, and zero prints `STALE PATTERN, not a
+free feature`.** This caught one immediately: an attempt to price System 4's
+`texture2DLodEXT` fix by putting `texture2D` back read 0 sites, because that code
+is in three's `shadowmap_pars_fragment` chunk and the chunk is still an
+unexpanded `#include` at `onBeforeCompile` time. Without the counter it would have
+printed +0.05 ms and read as a clean null on a term that was never touched — which
+is exactly how `-shadow` reported 0.05 ms for three quarters of the frame.
+
+**Every row is paired against a baseline measured immediately before it**, and the
+delta is against that baseline rather than against one measurement at the start of
+the run. The first attempt at this pass was unpaired and its closing `full again`
+row came back 3.6 ms above its opening `full` row while GPU utilisation swung
+between 58% and 100% inside the window. The effects here are two to six tenths of
+a millisecond. Unpaired, all of them are noise wearing a number.
+
+`eba1fc0`, served from a detached worktree so the two files that were mid-edit in
+the shared tree could not land inside a run. 2560×1440, `wash_mid`, top tier,
+median of four blocks of thirty, three independent runs:
+
+| removing | sites | ms saved | | |
+|---|---|---|---|---|
+| the Jimenez cubic | 3 | 0.22 | 0.22 | 0.41 |
+| `s4AoTint` | 3 | 0.45 | 0.48 | *(+10.18)* |
+| **both — `indirectDiffuse *= tAO`, the line as it stood** | 6 | **0.64** | **0.63** | **0.40** |
+| cliff jointing, all four `jointTrace` marches | 2 | 0.14 | 0.02 | 0.09 |
+
+**The indirect-light fix costs 0.6 ms of a 23 ms frame. Two and a half per cent.**
+There is no trade to bring and nothing to negotiate: the change that took
+all-channel black from 6% of the frame to 0.01% and gave the wall behind the
+floating slab tone is, for practical purposes, free. It was the right suspect on
+timing — it landed on the two heaviest fragment shaders in the hour the number
+moved — and the wrong one on arithmetic. A cubic and a normalised probe split are
+a few dozen ALU ops against twenty-odd dependent texture fetches; §7 already
+recorded that this shader's cost is fetches and shadow taps, and ALU does not
+register against them. Looking for a cheaper formulation of the curve would be
+optimising 2.5% of the frame, and there are two better milliseconds below.
+
+Three caveats, because each of these numbers has one:
+
+- **The `s4AoTint` +10.18 outlier is not a measurement of anything.** Removing an
+  expression cannot make a shader slower by 45%. It is the third row of a run in
+  which foreign GPU load moved between 59% and 100%, and it is reported rather
+  than dropped because the median of the row that matters — `ind.both`, three
+  paired measurements at 0.64, 0.63 and 0.40 — is the figure being quoted, and a
+  reader should be able to see how wide the tail on that instrument is.
+- **The jointing figure is a lower bound and station-specific.** `jointRes` gates
+  the marches on screen-space footprint, and at 46 m they are largely gated off,
+  so 0.1 ms is what jointing costs *where this was measured*. This is System 1's
+  branch-liveness lesson exactly: a gated branch measured outside its live region
+  reads free. It needs a close station before anyone calls it free everywhere.
+- **All of it was measured with the GPU 90-100% occupied by other work.** The
+  ratios are sound, being paired within a single load; the absolutes are a floor.
+
+## 13. The walking penalty was two things, and one of them is a free millisecond
+
+§11.2 measured a flat +3.4 ms that only a walking player pays and attributed it to
+the shadow cascade redraw. The attribution was three quarters right, and naming
+the whole of it after the larger half was the error. Suppressing only the two
+shadow passes while still paying everything `walkTo` does — height sampling,
+collision, the atmosphere and post walk clocks — splits it:
+
+| `wash_mid`, 2560×1440, top tier | ms |
+|---|---|
+| held | 22.55 |
+| moving | 25.77 |
+| of which everything walking does *except* the shadow passes | +0.79 |
+| of which the two cascade redraws | **+2.43** |
+
+And the redraw half was being paid about five times more often than it needed to
+be. `renderer.shadowMap.needsUpdate` is one flag for the whole pass, so raising it
+redraws both cascades — but the two are quantised to their own texel grids at very
+different pitches, so while walking the fine cascade moves on nearly every frame
+and the coarse cascade moves on roughly one frame in five. The coarse one was
+redrawn on all five, and it is the expensive one: 4096 against 2048, both passes
+walking the same ~2.1 M triangles of terrain and rock.
+
+three already gates each light on `shadow.autoUpdate === false &&
+shadow.needsUpdate === false`, so scheduling the two apart needed no patch of
+three's chunk — only that `syncShadow` raise each cascade's own flag when *that*
+cascade's quantised target moved, rather than raising one flag for both:
+
+| `wash_mid`, 2560×1440, top tier | before | after |
+|---|---|---|
+| held | 22.55 | 22.61 |
+| walk, excluding the shadow passes | +0.79 | +0.81 |
+| the two cascade redraws | +2.43 | **+1.43** |
+| moving | 25.77 | **24.85** |
+
+**A millisecond, and it costs no picture at all.** A cascade is skipped exactly on
+the frames where redrawing it would write the same texels, which is the argument
+the global flag was already making one level up — main.js has carried the note
+since the flag was introduced that the maps are a function of the *quantised*
+player position and are bit-identical between two frames that quantise the same.
+The harness's pixel-identical recapture is unaffected for the same reason.
+
+Two details that would have broken it and are handled:
+
+- A tier change resizes a map and disposes it, which is the one case where a
+  cascade must redraw without having moved. `perf.js` raises that light's own flag
+  there; without it the light whose map was just disposed would wait for the
+  player to cross a texel boundary before it had a map at all.
+- Four tools in `tools/` set `renderer.shadowMap.needsUpdate = true` directly to
+  force a redraw after changing a material, and none of them know cascades are
+  scheduled separately now. The public flag therefore still means "redraw
+  everything" — it forces both cascades through a property setter — while the
+  frame loop uses a private path that does not.
+
+**Weighed against the visual fixes: the cascade change buys 1.00 ms and the entire
+indirect-light fix costs 0.63.** Taking the free millisecond and keeping the
+picture leaves the frame 0.4 ms ahead of where it would be having given up the
+most valuable visual change of the night. That is the whole trade, and it is not
+close.
+
+Verified on the shared tree after landing, where the total walking penalty reads
++2.41 against +3.22 before the change — but with the split moved to +0.26 walk and
++2.15 redraw, because `path.js`, `rock.js`, `terrain.js` and `vegetation.js` were
+all dirty with other systems' work at that moment and both terms depend on them:
+vegetation adds casters to the shadow passes and `path.js` is inside `walkTo`. The
+total is the post-fix total; the two halves of it are a different scene's halves.
+Worth recording rather than smoothing, because it is the same hazard §12 avoided
+by ablating in one load — a two-term split measured across two builds attributes
+whatever moved in between to whichever term is being watched.
+
+There is more in the same direction for anyone continuing: the remaining +1.43 is
+the fine cascade redrawing on nearly every frame, and its grid is fine enough that
+coarsening it — or amortising the coarse cascade over a fixed cadence rather than
+a grid — would take more. Both cost picture, unlike this one, so both need a
+matched pair before they are proposed.
+
+## 14. The eight shader warnings are gone, confirmed with a control
+
+System 4 landed the one-token fix at `eba1fc0` — `texture2DLodEXT` in both tap
+loops of the penumbra filter — and could not verify it removed the warnings,
+because nothing in `tools/` surfaces shader warnings and the harness collects
+console errors only. `govern.mjs --warnonly` does, and now takes `--root` so it
+can serve a committed worktree rather than a tree with files mid-edit:
+
+| | distinct warnings | of which X3595 |
+|---|---|---|
+| `eba1fc0^` | 8 | 8 |
+| `eba1fc0` | **0** | **0** |
+
+The control is the point. A zero from a probe that has stopped working looks
+exactly like a zero from a fix that worked, and this file has already recorded two
+confident nulls from instruments that were not varying the thing they named. The
+parent commit still reports all eight through the same probe in the same minute,
+so the zero is the fix.
+
+It bought no measurable frame time. That is the expected result rather than a
+disappointing one: as noted when the warnings were attributed, this is a
+derivative whose value is *discarded* — the loop's iteration count varies within a
+quad, so the implicit gradient is undefined and was never used — not one whose
+value is unbounded. Asking for level zero stops the compiler computing something
+nobody read. It is not the bug class that produced the grazing lattice, and it was
+never going to be worth milliseconds.
+
+## 15. What the governor targets, and how it decides
+
+Nothing in either document said what the governor aims at. §11.4 quotes "9.58 ms and
+5.17 ms against a 120 fps target", which is a true statement about the *old ratchet's*
+constants, and the ratchet is gone. This is the current policy, with the reasoning,
+because a reader who knows why it remembers prices rather than guessing headroom can
+reason about it and one who only has the constants cannot.
+
+### The target: 16.67 ms, fixed — and it was 8.33 until the ladder was measured moving
+
+**60 fps.** `targetFps = #target=N` if given, else the loop cap from `#fps=N`, else 60;
+`target()` is `1000 / targetFps`. Every threshold below is a multiple of it, so changing
+the target moves the whole policy coherently — which is the point of writing them as
+ratios, and it is why this change is one token.
+
+**It was 120 for most of this project, and the reason it is not is the most consequential
+thing performance found today.** The 120 was defensible on its face: the panel is 200 Hz
+and its owner's reference for smooth is a AAA title at 200+. But no rung on this ladder
+reaches 8.33 ms with the camera moving — the floor, 1280×720, is 11.27 ms — so the
+descend rule fired at every rung, the climb gate was satisfiable nowhere, and the
+governor walked to the bottom of the ladder and stayed. **Aiming at 120 did not produce
+120. It produced 1280×720 upscaled to a 1440p display**, the softest picture this project
+can draw, on a machine that renders 1997×1123 comfortably. The entire cost of chasing an
+unreachable number was paid in image quality and none of it came back as frame rate.
+
+That is a general trap and worth naming as one: **an unreachable target in an adaptive
+system is not a stretch goal, it is an instruction to spend everything.** A governor that
+can only trade picture for frame time, told to hit a frame time it cannot hit, will
+correctly give away all of the picture. The failure is silent because every individual
+decision it makes is right.
+
+At 60 the descend gate is 19.17 ms, which mid-ladder rungs clear while moving, so there
+is somewhere to stand that is not the floor. The trade is the brief's own priority order —
+the picture is what this is for, 50-plus is smooth at walking pace, and 89 fps buys
+nothing on a 200 Hz panel if what is being shown at 89 is 720p. `#target=120` restores
+the old behaviour exactly for anyone who wants motion over image.
+
+It is a *fixed* number and not an inferred one, and that was a deliberate reversal.
+The first version tried to measure the panel's refresh period from the loop's shortest
+observed interval, on the reasonable theory that the refresh period is the deadline a
+frame actually misses. It fails in the worst possible direction: on a vsynced uncapped
+loop the shortest interval you can observe is the *scene's* frame time, not the
+panel's, so a machine running this at 40 fps measures 40, concludes 40 is the target,
+and never adapts. The governor switches itself off on exactly the hardware that needs
+it.
+
+Not 200, for the same reason it is not 120 and then some: shedding image quality to
+chase the last 140 Hz of a walking-pace landscape buys fan noise.
+
+### The signal: GPU time, and a refusal to guess when there is none
+
+`cost` is the GPU timer's median where `EXT_disjoint_timer_query_webgl2` is available,
+because that is the quantity every lever on the ladder actually moves. Where the
+extension is missing it falls back to CPU frame time, which is blunter and better than
+nothing.
+
+The third case has to be handled rather than coerced, and getting it wrong is a
+runaway. `gotoRung` flushes the timer, so for a moment after every rung change the
+median is empty. Treating an empty median as `cpuMs` hands the governor the *submit*
+time — a couple of milliseconds on a scene of sixty draws — one frame after a rung
+change, reads it as enormous headroom, and climbs again. That is a climb loop with no
+brakes, so `adapt()` returns instead: `if (!(cost > 0)) return;`.
+
+### Descending: above 19.17 ms, by one to three rungs
+
+`cost > target × 1.15` — **19.17 ms** at the shipping target. The step size is scaled
+to how far off the pace the machine is, `r = target / cost`: one rung if `r > 0.72`,
+two if `r > 0.45`, three otherwise. A machine running at a fifth of the target does
+not want one notch a second for half a minute, it wants to be somewhere playable now.
+
+After a descent it holds **700 ms** until the frame has been inside the band even
+once, and **2500 ms** thereafter. That `settled` flag is what makes a cold load reach
+a playable rung in a couple of seconds instead of seventeen; see §11.3 for the units
+bug that made it seventeen.
+
+### Climbing: it remembers what a rung cost instead of guessing headroom
+
+This is the part worth understanding, and the defect it replaced is the clearest
+statement of why.
+
+**The old rule asked the wrong question.** It descended above `target × 1.15` and
+climbed below `target × 0.62` — 9.58 ms and 5.17 ms at the 120 fps target of the day,
+which is where they were unsatisfiable and so is how they are quoted; the argument is
+about the ratio and holds at any target — and on this scene the measured
+cost of every rung below 4 sits *between* those two. So the governor could descend and
+then never satisfy the condition to come back: a transient stall was permanent until
+the page was reloaded, and the playthrough found it at the floor for 99 of 108 samples
+across nine minutes. `cost < target × 0.62` asks **"is the rung I am on very cheap"**.
+The question that decides a climb is **"would the next rung up fit"**. Those differ by
+the size of one rung step, which is 6% to 20% here — so demanding 38% headroom to gate
+a step worth 6–20% is between two and six times the size of the thing it is gating, and
+at the bottom of the ladder it is **unsatisfiable by construction**. Widening the band
+would have moved the number without fixing the question.
+
+So the governor keeps `seen[i]`, what rung *i* has actually cost on this machine,
+blended as an exponential average with weight 0.25 on each new reading. A climb needs
+all four of:
+
+| condition | value | why |
+|---|---|---|
+| `cost < target × 0.92` | **15.33 ms** | some headroom on the rung being stood on |
+| sustained for `CLIMB_HOLD` | **3000 ms** continuously | one cheap frame is a viewpoint, not a machine |
+| the rung above is not on cooldown | — | it failed recently; do not thrash it |
+| its price is unknown, or `< target × 1.02` | **17.00 ms** | "would the next rung up fit", asked directly |
+
+The wall-clock constants in that table — and the holds, the probe window and the
+cooldowns below — deliberately **do not** scale with the target. They are properties of
+a walking player and an ANGLE compile, not of a frame budget.
+
+"Unknown counts as eligible" is deliberate. A rung that has never been measured is
+worth one look, and the probe below is what makes looking cheap.
+
+### Why the remembered price expires after 8 seconds
+
+`SEEN_TTL` is **8000 ms**, and the rung currently being stood on is exempt because it
+is re-measured every frame anyway. The expiry exists because **what a rung costs
+depends on where the player is standing, and the player is walking.**
+
+This was measured, not assumed, and the measurement was of my own first version, which
+had no TTL and reproduced the ratchet in a new place: descending through rung 5
+recorded its price at the mouth of the wash, the walk then reached the cheap far end
+where the frame ran at a third of that, and the governor still would not climb past 6
+because a fifty-second-old estimate said 5 would not fit. A permanent memory of a
+position-dependent price is the same trap as an unsatisfiable threshold — a stale
+number is the reason both times.
+
+Note the deliberate asymmetry between the two memories. `cool` is a **penalty**: this
+rung was tried and could not hold the budget. `seen` is only an **estimate**, so it
+expires on its own shorter clock.
+
+### The probe and the backoff, which are what stop it being a ratchet
+
+A climb is not a decision, it is a **trial**. The governor moves up, records where it
+came from, and re-evaluates after **900 ms** — deliberately short, because a probe
+that does not fit has to be caught and undone in about a second or the cost of looking
+is a visible excursion rather than a blink. The trial window itself is `PROBE_MS`,
+**5000 ms**.
+
+If the probe fails, the rung being stood on is by definition the one that cannot hold
+the budget, so it is priced, put on a cooldown, and the governor returns to **exactly**
+the rung it came from. Not the one-to-three-step ratio descent above: a probe fails on
+a single reading, that reading is sometimes a viewpoint rather than a rung, and letting
+a spike compute a three-rung drop turns a failed look into a visible collapse. That is
+also measured — a probe from 8 to 7 failed on a spike as the walk entered the wash
+mouth, and the ratio would have sent it three rungs past the floor it had just left.
+
+Cooldowns are **15 s, then 30, then 60**, doubling per failure and capped. And the
+mechanism that makes this a governor rather than a ratchet: **when a cooldown expires
+it clears that rung's remembered price**, so the rung becomes probeable again. Nothing
+is ever closed off permanently. A rung that keeps failing is retried rarely enough to
+be invisible and often enough to recover, which is the whole requirement — someone
+whose machine stalls for ten seconds should not have a soft picture for the rest of
+their session.
+
+### Against the delivery ladder: the target is not reachable, so it sits on the floor
+
+A reader comparing 8.33 ms against the delivery table in `CONTRACT.md` — "The delivery
+table — 2560×1440, RTX 4060, machine gated quiet", the only one to quote — will notice
+immediately, so
+the document should say it rather than leave it to be inferred.
+
+**At the old 120 target the governor descended to the floor of the ladder and stayed
+there**, which is measured and is why §11.4's recovery trace had to be run at
+`#target=60` to have any climb to observe at all: with nothing on the tree reaching
+8.33 ms, a working governor and a broken one are indistinguishable, because both sit at
+the bottom. That is the finding that changed the default.
+
+**Where it settles at 60 has not been measured and is not stated here.** The machine
+belongs to its owner and they are using it; the confirming run is pending. What can be
+said offline is the arithmetic against the fenced moving ladder, which is a *prediction*
+and is labelled as one:
+
+| rung | buffer | fenced moving | against the new gates |
+|---|---|---|---|
+| 0–2 | 2560×1440 … 2253×1267 | 26.81 … 20.81 | over 19.17 — descend |
+| **3** | **1997×1123** medium | **19.13** | **hold**, by 0.04 ms |
+| **4** | **1997×1123** low | **15.85** | **hold** |
+| 5–8 | 1741×979 … 1280×720 | 13.88 … 11.27 | under 15.33 — climb-eligible |
+
+So the expectation is **rung 3 or rung 4, both of which render 1997×1123**, differing
+only in tier — which is a useful robustness property, because the resolution a player
+sees is the same either way and the prediction does not have to be exact to be right
+about the picture. Two reasons it is nevertheless only a prediction, and they point in
+opposite directions. Rung 3 clears the descend gate by **0.04 ms**, which is inside that
+rung's own measured spread of 0.03 — on a knife edge, so it may oscillate 3↔4 or sit at
+4. And the governor reads GPU median where this table is fenced wall time, several
+milliseconds higher (below), so the real settling point may be **above** rung 3 and
+sharper than predicted rather than softer.
+
+**And there is one existing trace at this target, which suggests the prediction above is
+too pessimistic.** §11.4's recovery test was run at `#target=60` — that is why it exists —
+and it climbed 8→7→6→5→4→3→2→1 and settled at **rung 1, 2253×1267**, with no oscillation.
+Holding rung 1 requires its GPU median to have been under 15.33 ms, against 24.02 in the
+fenced ladder. Three reasons not to quote it as the answer: it was taken under contention,
+it was a climb-from-the-floor recovery test rather than a natural settle from a cold load,
+and it predates the cascade-scheduling fix. But it is real, it is at the right target, and
+it points two rungs *above* the arithmetic.
+
+**All of this is deliberately written as expected-pending-confirmation, because the error
+it replaces was exactly the pattern of stating a settling rung that arithmetic implied and
+measurement contradicted.** The previous version of this section asserted 1997×1123 from a
+comparable calculation and was wrong for hours. The settling rung goes in this document
+when `tools/govern.mjs` has reported it on a quiet machine, and not before.
+
+**One caveat on comparing the target against the ladder at all, and it cuts in the
+user's favour.** They are not the same quantity. The governor's `cost` is the GPU
+timer's median — GPU execution alone. The delivery ladder is wall time across
+`renderOnce` with a one-pixel `readPixels` fence, which serialises CPU submit behind
+GPU execution and therefore reads roughly their *sum*, where a real loop overlaps them
+and pays about the larger. The rung-1 trace above is the measure of that gap: under
+15.33 ms of GPU median against 24.02 ms of fenced wall time for the same rung, which is
+most of a rung's worth of difference between the two instruments. So **the fenced ladder
+is a conservative floor on what a player sees, not an estimate of it**, and the README's
+numbers are quoted from it deliberately for that reason. What
+this project has never had is a quiet real-loop `fps` trace to put beside it; that is
+the one measurement left worth taking, and `tools/govern.mjs` already produces it.
+
+### On a contended machine, which is the case people will actually hit
+
+Someone with a game, a stream, a compile or a video call running does not get the table
+above, and the governor's behaviour in that case is the reason it exists at all.
+
+It will descend to the floor within a few seconds — the `settled` flag makes those
+first holds 700 ms rather than 2500, so the descent is fast — and it will stay there
+while the contention lasts, at whatever frame rate the leftover card allows. When the
+other work stops, the climb path is what recovers it: three seconds of continuous
+headroom, then a probe every rung, and cooldowns that clear their prices as they
+expire. **It climbs back on its own and the user should not need to reload.** That is
+the specific failure the ratchet caused and the specific thing the rewrite had to fix.
+
+What it will *not* do is hide contention. The governor can trade image quality for
+frame time and nothing else; if another process is taking two thirds of the card, the
+picture gets softer and stays smooth, and that is the whole of what it can offer.
+
+## 16. The delivery session: four measurements, and the last open number closes
+
+Taken as one session on a released machine, from a detached worktree at `d4dac2b` with
+`src/` verified byte-identical to the main tree by tree hash. Four things were outstanding.
+All four are answered, and one of them answers a question that had been recorded as
+unanswerable.
+
+### 16.1 The six unexplained milliseconds were contention, and my own idle gate hid it
+
+**This is the third and final version of this finding, and the first one that is tested
+rather than inferred.** §11.1 said the frame had regressed 39%; a bisect disproved it.
+§11.1 then said the difference was machine contention; a "quiet-gated" run disproved that,
+reading 23.06 ms quiet against 23.30 contended. The gap was then recorded as *unexplained*,
+which was the honest thing to do with what was known. It is now explained, and the reason
+the second version looked wrong is the interesting part.
+
+**The gate that declared the machine quiet was fitted to a contended machine.** It
+thresholded `utilization.memory ≤ 13%` and `utilization.gpu ≤ 78%`, and the justification
+written beside it was that "this box rests at gpu 63–66% / mem 12%". That sentence was
+composed from samples taken while fourteen agent browsers and an animated wallpaper were
+on the card. **It codified a contended state as the definition of rest.** So when the
+quiet/contended A/B came back identical, it was comparing contended against contended —
+both sides passed a gate that could not tell them apart.
+
+Measured this afternoon, same station, same method, same `wash_mid` rung-0 cell:
+
+| foreign load at boot | held ms | |
+|---|---|---|
+| sm clock 285–405 MHz, gpu 18%, mem 31% | **17.15** | actually idle |
+| sm clock 2835 MHz, gpu 34%, mem 10% | 22.05 | |
+| sm clock 2835 MHz, gpu 56%, mem 10% | 22.22 | |
+| gpu 63%, mem 12% (this morning's "quiet" delivery run) | 23.06 | the gate said QUIET |
+
+**And the code is not the variable, which was checked rather than assumed.** `2038823` —
+the exact commit of this morning's delivery run — and `d4dac2b` were measured minutes
+apart under the same load: **22.22 and 22.05 ms held**. Two trees a full afternoon of
+scene work apart, differing by 0.17 ms. So the bisect's conclusion stands and now extends
+across the whole day: **the frame never moved, and every apparent movement in it has been
+the machine.** 16.80 was a genuinely idle reading, 22–23 is what the same frame costs with
+a boosted card beside it, and 17.15 is 16.80 measured again on a genuinely idle machine.
+
+**The discriminator is the SM clock, and nothing else here works.** At rest this card sits
+at **285–405 MHz**; with any real render work on it, foreign or mine, it boosts to
+**2820–2840** and stays. `utilization.gpu` is unusable alone — it swung **2–77% inside
+twelve seconds** in one unchanging state. And `utilization.memory`, the field added this
+morning specifically to *improve* the gate, runs **inversely**: 30–38% at true idle,
+2–14% under a shader load, because an idle desktop's memory traffic is display scanout
+while a busy one's is arithmetic. Both fields the gate trusted are inverted or noise. The
+gate now keys on the clock, prints it, and names idle and boosted values beside it.
+
+**The reusable lesson, and it is worth more than the six milliseconds.** A threshold
+calibrated against an unverified "normal" inherits whatever was wrong with that normal and
+then launders it into every measurement it gates. This one was not too loose by accident —
+it was loose *because* it had been fitted to the thing it existed to exclude, which is why
+it survived a fourteen-commit bisect, an explicit quiet/contended A/B, and two written
+corrections. **Nothing downstream of a bad gate can detect a bad gate.** The only thing
+that caught it was going back to first principles on what "idle" looks like, with the
+machine actually idle for the first time all day.
+
+The named hypothesis in the record — that `bench.mjs`'s fixed-count warm-up could read low
+by catching a cheaper configuration mid-transition — is **disproven, or at least
+unnecessary**: 16.80 is reproduced by a completely different tool with an adaptive warm-up
+the moment the card is idle. Nothing is wrong with `bench.mjs` that this explains.
+
+### 16.2 The delivery ladder, on a machine idle by the corrected test
+
+Frame confirmed real before any timing was trusted: mean luminance **80.82**, clipped
+**0.32%**, "looks like the scene" — matching the morning's 80.8/0.32 despite an afternoon
+of far-field and dust-film work landing, which is itself a check. Pre-launch: **sm clock
+285–405 MHz, gpu 18% (6–37), mem 31%**, 37 samples. Two passes, lower kept per rung —
+contention is strictly additive, so of two readings the smaller is the better estimate of
+the scene. Monotone in both columns.
+
+| rung | tier | scale | buffer | held ms | held fps | **moving ms** | **moving fps** | spread |
+|---|---|---|---|---|---|---|---|---|
+| 0 | high | 1.00 | 2560×1440 | 17.15 | 58 | **18.07** | **55** | 0.91 |
+| 1 | high | 0.88 | 2253×1267 | 14.63 | 68 | **15.89** | **63** | 0.45 |
+| 2 | medium | 0.88 | 2253×1267 | 12.33 | 81 | **13.44** | **74** | 0.70 |
+| 3 | medium | 0.78 | 1997×1123 | 10.54 | 95 | **11.69** | **86** | 0.95 |
+| 4 | low | 0.78 | 1997×1123 | 8.36 | 120 | **9.34** | **107** | 0.93 |
+| 5 | low | 0.68 | 1741×979 | 7.10 | 141 | **8.14** | **123** | 0.23 |
+| 6 | potato | 0.68 | 1741×979 | 6.59 | 152 | **7.43** | **135** | 0.42 |
+| 7 | potato | 0.58 | 1485×835 | 5.55 | 180 | **6.47** | **155** | 1.99 |
+| 8 | potato | 0.50 | 1280×720 | 4.92 | 203 | **5.67** | **176** | 0.91 |
+
+**This supersedes the morning table in `CONTRACT.md` entirely**, and every rung is roughly
+26% faster for no reason other than that the card was free. The moving penalty also
+shrinks — 0.92 ms here against 3.75 in the morning — because a contended card amplifies
+extra work more than baseline work, so the cascade redraw looked worse than it is.
+
+Note what this does to the brief. **120 fps at 1440p is reachable moving**, at rung 4 and
+below — 1997×1123 upscaled, 107 fps. It is not reachable at *native* 2560×1440, where the
+honest figure is 55 fps fenced. The brief was never quite as far out of reach as the
+morning's numbers said.
+
+### 16.3 Where the governor settles: rung 0, and my prediction was wrong by four rungs
+
+§15 predicted rung 3 or 4 and flagged itself as likely pessimistic. It was pessimistic —
+by four rungs. **Measured twice, capped and uncapped: it settles at rung 0, high, scale
+1.00, native 2560×1440**, and stays there.
+
+The capped trace, 180 s of walking from a cold load: down to rung 4 by t=24 s during the
+cold-start descent, then climbing 4→3→2→1→0, reaching rung 0 at t=60 s and holding it for
+the remaining 120 s. **Time at each rung: rung 0 for 122.8 s of 180.** Rung-0 GPU readings
+across the walk ran 11.7–17.6 ms against a 16.67 ms target, median about 13.2.
+
+Uncapped it is slightly less settled and the difference is instructive: 43.8 s at rung 0,
+40.5 s at rung 1, 10.5 s at rung 2, ending at rung 0. Running flat out the GPU cost at the
+most expensive framings crosses the 19.17 ms descend gate, so it briefly takes a step
+down and climbs back — which is the governor doing exactly its job, and with no
+oscillation inside a rung.
+
+**So the target change was right, and for a better reason than the one it was made for.**
+It was made on contended numbers, where 120 drove the ladder to the floor. On true numbers
+120 would settle at rung 4 — 1997×1123 at 107 fps, which is a perfectly respectable
+outcome and not the pathology the change was justified by. But 60 settles at **native
+2560×1440 with no upscaling at all**, which for a walk whose entire point is the landscape
+is the better trade, and it is the one the brief's own priority order asks for. The
+pathology was an artifact; the choice survives it.
+
+### 16.4 The fenced ladder is systematically pessimistic, and the README moves up
+
+The check was to read a real loop rather than a fence. The `fps` column of an uncapped
+trace turned out to be useless — it swings **138 to 1053 fps**, because with vsync off the
+CPU loop spins ahead of a GPU that is the actual bottleneck, so frame-delta fps measures
+the spin and not the frame. The GPU timer is the trustworthy quantity and the comparison
+that matters is same rung, same station, same page:
+
+| | rung 0, at the walk's station |
+|---|---|
+| `renderOnce`, camera held — what `bench.mjs` measures | 10.65 ms |
+| `renderOnce`, rig moving — plus the cascade redraw | 17.90 ms |
+| **the governor's own GPU timer, a whole live frame** | **10.66 ms** |
+
+A complete live frame costs **7.2 ms less on the GPU than the fenced measurement of a
+smaller amount of work**. That is the fence: `readPixels` serialises CPU submit behind GPU
+execution, where a real loop overlaps them and pays about the larger. **So every fenced
+number in this project, including the delivery table above, is a conservative floor and
+not an estimate.**
+
+For the figure a player is quoted, the right measurement is the uncapped loop at the rung
+the governor actually chooses, across a real walk: **rung-0 GPU median 16.09 ms over 20
+samples, range 10.57–17.57 — about 62 fps at native 2560×1440.** Capped, the same station
+median was 13.2 ms, so 62 is the conservative of the two live figures. **The README is
+corrected upward from 37 to about 60, at native resolution rather than at 1280×720.**
+
+Revising a number up deserves the same scepticism as revising it down, so plainly: this
+is not the fenced table re-scaled by a ratio. It is a different instrument reading a
+different quantity — the GPU cost of a real frame in a real loop — at the rung the
+governor was measured selecting, and it is the quantity that limits what the player sees.
+The fenced table stays in the record beside it, unchanged, as the floor.
+
+### 16.5 The ladder reproduces, and the corrected gate immediately caught its own successor
+
+A second ladder was run behind the new clock gate to check the delivery table repeats. It does,
+and the way it does is a better result than a clean repeat would have been.
+
+| rung | delivery, clock ~350 | confirm, clock 970 | Δ held | confirm spread |
+|---|---|---|---|---|
+| 0 | 17.15 | 18.37 | +1.22 | 0.22 |
+| 2 | 12.33 | 13.17 | +0.84 | 4.84 |
+| 4 | 8.36 | 9.08 | +0.72 | 4.82 |
+| 6 | 6.59 | 7.11 | +0.52 | 4.10 |
+| 8 | 4.92 | 4.98 | +0.06 | 0.18 |
+
+Monotone, same shape, every rung **0.06–1.22 ms above** the delivery run — and the confirming run's
+pre-launch clock was **970 MHz against ~350**. The residual has the right sign, the right size, and
+scales with the rung's cost, which is what foreign load does and what a code difference would not.
+The per-rung spread tells the same story: 0.2–0.9 ms on the quiet run against **3.9–5.9** here, with
+pass 1 systematically cheaper than pass 0 as the load came and went underneath it.
+
+**So the gate I had just written to fix the old gate was also too loose, and it announced this
+itself.** 1200 MHz passed a card whose mean clock was 970 — which on a bimodal distribution is not
+"slightly busy" but *a quarter of the sampling window at full boost*. The mean of a bimodal quantity
+is a duty cycle wearing a megahertz costume, and thresholding it by eye reproduced the original
+mistake one order of magnitude smaller. It now reports the boosted **fraction** alongside the mean,
+because that is the number a reader can actually reason about, and the threshold is 600 MHz — about
+a 12% duty cycle.
+
+Recorded rather than quietly retuned, because the pattern is the finding: **both bad gates were
+produced by picking a threshold against a machine state nobody had characterised first**, and both
+were only caught by a measurement designed to be comparable across runs. The delivery table stands
+as the quiet one; this run is its reproduction and its error bar.
