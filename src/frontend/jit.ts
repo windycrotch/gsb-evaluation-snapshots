@@ -1064,34 +1064,46 @@ function splitGraphDataflow(backend: Backend, jaxpr: Jaxpr): Set<Var> {
     }
     if (depCounter.size > backend.maxArgs) {
       // We have too many dependencies, so we need to backtrack and mark one of
-      // the inputs as black. By heuristic, we'll mark the one with the most
-      // unique dependencies, then the one with the most dependencies. Inputs
-      // that are already black are skipped: marking them again changes
-      // nothing, so we would backtrack to the same state forever.
-      let maxUniqueDeps = -1;
+      // the inputs as black, materializing it into its own buffer.
+      //
+      // Only inputs that are not black yet are eligible. A black node is
+      // already materialized, so marking it again would not change its
+      // dependency set, and we would backtrack to the exact same state forever.
+      // In other words, the split point must always be a new materialization.
+      //
+      // By heuristic, we pick the input covering the most dependencies that no
+      // other input of this equation provides (i.e., the ones that would
+      // disappear from the kernel if it were materialized). Ties are broken by
+      // the total number of dependencies, which is a proxy for how much of the
+      // expression gets hoisted out of the kernel.
+      let bestUniqueDeps = -1;
+      let bestTotalDeps = -1;
       let assocInput = -1;
       for (let i = 0; i < eqn.inputs.length; i++) {
         const input = eqn.inputs[i];
+        if (!(input instanceof Var)) continue;
+        if (!varToDefn.has(input)) continue; // inBinders/consts cannot be split
+        if (blackNodes.has(input)) continue; // already materialized
+
+        let uniqueDeps = 0;
+        for (const dep of deps[i]) {
+          if (depCounter.get(dep) === 1) uniqueDeps++;
+        }
+        const totalDeps = deps[i].size;
         if (
-          input instanceof Var &&
-          varToDefn.has(input) &&
-          !blackNodes.has(input)
+          uniqueDeps > bestUniqueDeps ||
+          (uniqueDeps === bestUniqueDeps && totalDeps > bestTotalDeps)
         ) {
-          let uniqueDeps = 0;
-          for (const dep of deps[i]) {
-            if (depCounter.get(dep) === 1) uniqueDeps++;
-          }
-          if (
-            uniqueDeps > maxUniqueDeps ||
-            (uniqueDeps === maxUniqueDeps &&
-              deps[i].size > deps[assocInput].size)
-          ) {
-            maxUniqueDeps = uniqueDeps;
-            assocInput = i;
-          }
+          bestUniqueDeps = uniqueDeps;
+          bestTotalDeps = totalDeps;
+          assocInput = i;
         }
       }
       if (assocInput === -1) {
+        // Every candidate was already materialized (or is an input/constant).
+        // Backtracking further cannot reduce the dependency count, so fail
+        // loudly here instead of looping forever or emitting a kernel that
+        // exceeds the backend's buffer limit.
         throw new Error(
           `internal: maxArgs, no input found to mark as black in Jaxpr equation ${eqn}`,
         );
