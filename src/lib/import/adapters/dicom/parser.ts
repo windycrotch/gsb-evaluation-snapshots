@@ -27,6 +27,8 @@ import {
 } from './reader';
 
 const ENHANCED_DICOM_METADATA_READ_BYTES = 512 * 1024;
+const AXIAL_LABEL_PATTERN = /(^|[_\W])(tra|ax|axial)([_\W]|$)/i;
+const LOCALIZER_LABEL_PATTERN = /localizer/i;
 const AXIS_PERMUTATIONS: [AxisIndex, AxisIndex, AxisIndex][] = [
   [0, 1, 2],
   [0, 2, 1],
@@ -197,23 +199,36 @@ function resolveNativeAxis(axisMap: DicomSourceAxisMap): VolumeAxis {
   return VolumeAxis.Axial;
 }
 
-function buildEnhancedVolumeCandidate(
-  slice: DicomSliceEntry,
-): EnhancedVolumeCandidate | null {
+type EnhancedCandidateRejection = 'encoding' | 'singleFrame' | 'pixelPayload';
+
+function computeExpectedPixelBytes(slice: DicomSliceEntry): number {
   const frameCount = slice.header.numberOfFrames ?? 1;
-  const expectedBytes =
+  return (
     slice.header.rows *
     slice.header.columns *
     frameCount *
-    Math.max(1, Math.round(slice.header.bitsAllocated / 8));
+    Math.max(1, Math.round(slice.header.bitsAllocated / 8))
+  );
+}
 
-  if (
-    !isNativeLittleEndianDicom(slice.header) ||
-    frameCount <= 1 ||
-    slice.header.pixelDataLength !== expectedBytes
-  ) {
-    return null;
+function getEnhancedCandidateRejection(
+  slice: DicomSliceEntry,
+): EnhancedCandidateRejection | null {
+  const frameCount = slice.header.numberOfFrames ?? 1;
+  if (!isNativeLittleEndianDicom(slice.header)) return 'encoding';
+  if (frameCount <= 1) return 'singleFrame';
+  if (slice.header.pixelDataLength !== computeExpectedPixelBytes(slice)) {
+    return 'pixelPayload';
   }
+  return null;
+}
+
+function buildEnhancedVolumeCandidate(
+  slice: DicomSliceEntry,
+): EnhancedVolumeCandidate | null {
+  if (getEnhancedCandidateRejection(slice) != null) return null;
+
+  const frameCount = slice.header.numberOfFrames ?? 1;
 
   const id = getEntryPath(slice.entry);
   const sourceDimensions: Vec3 = [
@@ -253,6 +268,21 @@ function buildEnhancedVolumeCandidate(
   };
 }
 
+function compareEnhancedCandidates(
+  left: EnhancedVolumeCandidate,
+  right: EnhancedVolumeCandidate,
+): number {
+  const leftIsLocalizer = LOCALIZER_LABEL_PATTERN.test(left.label);
+  const rightIsLocalizer = LOCALIZER_LABEL_PATTERN.test(right.label);
+  if (leftIsLocalizer !== rightIsLocalizer) return leftIsLocalizer ? 1 : -1;
+
+  const leftIsAxial = AXIAL_LABEL_PATTERN.test(left.label);
+  const rightIsAxial = AXIAL_LABEL_PATTERN.test(right.label);
+  if (leftIsAxial !== rightIsAxial) return leftIsAxial ? -1 : 1;
+
+  return right.voxels - left.voxels;
+}
+
 function collectEnhancedVolumeCandidates(
   slices: DicomSliceEntry[],
 ): EnhancedVolumeCandidate[] {
@@ -261,13 +291,7 @@ function collectEnhancedVolumeCandidates(
     .filter(
       (candidate): candidate is EnhancedVolumeCandidate => candidate != null,
     )
-    .sort((left, right) => {
-      const leftIsLocalizer = /localizer/i.test(left.label);
-      const rightIsLocalizer = /localizer/i.test(right.label);
-      if (leftIsLocalizer !== rightIsLocalizer) return leftIsLocalizer ? 1 : -1;
-
-      return right.voxels - left.voxels;
-    });
+    .sort(compareEnhancedCandidates);
 }
 
 function selectEnhancedVolumeCandidate(
@@ -281,13 +305,7 @@ function selectEnhancedVolumeCandidate(
     if (preferred) return preferred;
   }
 
-  return (
-    candidates.find((candidate) =>
-      /(^|[_\W])(tra|ax|axial)([_\W]|$)/i.test(candidate.label),
-    ) ??
-    candidates[0] ??
-    null
-  );
+  return candidates[0] ?? null;
 }
 
 function buildSeriesChoices(
@@ -389,6 +407,79 @@ export async function parseDicomFolder(
     .filter((slice): slice is DicomSliceEntry => slice != null);
 
   const slices = selectLargestStack(parsedSlices);
+
+  if (slices.length >= 2) {
+    const sorted = sortDicomSlices(slices);
+    const first = sorted[0]?.header;
+    if (!first) {
+      throw makeError('E_DICOM_HEADER', 'missing DICOM header');
+    }
+
+    for (const slice of sorted) {
+      if (
+        slice.header.rows !== first.rows ||
+        slice.header.columns !== first.columns ||
+        slice.header.bitsAllocated !== first.bitsAllocated ||
+        slice.header.pixelRepresentation !== first.pixelRepresentation
+      ) {
+        throw makeError(
+          'E_DICOM_MISMATCH',
+          'inconsistent DICOM slice geometry or pixel format',
+        );
+      }
+    }
+
+    const sliceStep =
+      sorted.length > 1
+        ? Math.abs(sorted[1].sliceLocation - sorted[0].sliceLocation)
+        : first.pixelSpacing[0];
+    const width = first.columns;
+    const height = first.rows;
+    const depth = sorted.length;
+    const level = Math.round(first.windowCenter ?? 1600);
+    const window = Math.max(1, Math.round(first.windowWidth ?? 3200));
+
+    const meta: ParsedVolumeMeta = {
+      format: 'dicom',
+      formatLabel: inferOneVolumeScanId(source)
+        ? 'OneVolume CT (DICOM)'
+        : 'DICOM CT',
+      scanId: resolveScanId(source, {
+        studyDate: first.studyDate,
+        studyTime: first.studyTime,
+        studyId: first.studyId,
+      }),
+      dimensions: [width, height, depth],
+      spacing: [
+        first.pixelSpacing[1],
+        first.pixelSpacing[0],
+        sliceStep || 0.16,
+      ],
+      scalarRange: [
+        Math.round(level - window / 2),
+        Math.round(level + window / 2),
+      ],
+      initialWindowLevel: {
+        window,
+        level,
+      },
+      nativeValueScale: {
+        slope: first.rescaleSlope,
+        intercept: first.rescaleIntercept,
+      },
+      sliceCount: depth,
+      bytesPerVoxel: Math.max(1, Math.round(first.bitsAllocated / 8)),
+      headerFileName: getEntryPath(sorted[0].entry),
+      slicePrefix: getEntryPath(sorted[0].entry)
+        .split('/')
+        .slice(0, -1)
+        .join('/'),
+      sliceFiles: sorted.map((slice) => getEntryPath(slice.entry)),
+    };
+
+    return { meta };
+  }
+
   const enhancedCandidates = collectEnhancedVolumeCandidates(parsedSlices);
   const enhancedVolume = selectEnhancedVolumeCandidate(
     enhancedCandidates,
@@ -441,76 +532,19 @@ export async function parseDicomFolder(
     };
   }
 
-  if (slices.length < 2) {
+  if (
+    parsedSlices.some(
+      (slice) => getEnhancedCandidateRejection(slice) === 'pixelPayload',
+    )
+  ) {
     throw makeError(
-      'E_DICOM_UNSUPPORTED',
-      summarizeUnsupportedDicom(parsedEntries.map((entry) => entry.overview)),
+      'E_DICOM_PIXEL_DATA',
+      'enhanced multi-frame DICOM pixel data length does not match rows x columns x frames x bytes per voxel',
     );
   }
 
-  const sorted = sortDicomSlices(slices);
-  const first = sorted[0]?.header;
-  if (!first) {
-    throw makeError('E_DICOM_HEADER', 'missing DICOM header');
-  }
-
-  for (const slice of sorted) {
-    if (
-      slice.header.rows !== first.rows ||
-      slice.header.columns !== first.columns ||
-      slice.header.bitsAllocated !== first.bitsAllocated ||
-      slice.header.pixelRepresentation !== first.pixelRepresentation
-    ) {
-      throw makeError(
-        'E_DICOM_MISMATCH',
-        'inconsistent DICOM slice geometry or pixel format',
-      );
-    }
-  }
-
-  const sliceStep =
-    sorted.length > 1
-      ? Math.abs(sorted[1].sliceLocation - sorted[0].sliceLocation)
-      : first.pixelSpacing[0];
-  const width = first.columns;
-  const height = first.rows;
-  const depth = sorted.length;
-  const level = Math.round(first.windowCenter ?? 1600);
-  const window = Math.max(1, Math.round(first.windowWidth ?? 3200));
-
-  const meta: ParsedVolumeMeta = {
-    format: 'dicom',
-    formatLabel: inferOneVolumeScanId(source)
-      ? 'OneVolume CT (DICOM)'
-      : 'DICOM CT',
-    scanId: resolveScanId(source, {
-      studyDate: first.studyDate,
-      studyTime: first.studyTime,
-      studyId: first.studyId,
-    }),
-    dimensions: [width, height, depth],
-    spacing: [first.pixelSpacing[1], first.pixelSpacing[0], sliceStep || 0.16],
-    scalarRange: [
-      Math.round(level - window / 2),
-      Math.round(level + window / 2),
-    ],
-    initialWindowLevel: {
-      window,
-      level,
-    },
-    nativeValueScale: {
-      slope: first.rescaleSlope,
-      intercept: first.rescaleIntercept,
-    },
-    sliceCount: depth,
-    bytesPerVoxel: Math.max(1, Math.round(first.bitsAllocated / 8)),
-    headerFileName: getEntryPath(sorted[0].entry),
-    slicePrefix: getEntryPath(sorted[0].entry)
-      .split('/')
-      .slice(0, -1)
-      .join('/'),
-    sliceFiles: sorted.map((slice) => getEntryPath(slice.entry)),
-  };
-
-  return { meta };
+  throw makeError(
+    'E_DICOM_UNSUPPORTED',
+    summarizeUnsupportedDicom(parsedEntries.map((entry) => entry.overview)),
+  );
 }

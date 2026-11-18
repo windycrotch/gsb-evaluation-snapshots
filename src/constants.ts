@@ -21,6 +21,7 @@ export const IMPORT_ERROR_MESSAGE_KEYS: Readonly<Record<string, string>> = {
   SecurityError: 'errors.sourceAccessDenied',
   E_DIRECTORY_UPLOAD: 'errors.folderReadFailed',
   E_DICOM_UNSUPPORTED: 'errors.unsupportedDicomEncoding',
+  E_DICOM_PIXEL_DATA: 'errors.inconsistentDicomPixelData',
   E_DICOM_MISMATCH: 'errors.inconsistentDicomSeries',
   E_DICOM_COUNT: 'errors.invalidDicomSource',
   E_DICOM_HEADER: 'errors.invalidDicomSource',

@@ -164,6 +164,7 @@
     "sourceAccessDenied": "Access was not granted. Select the source again and allow the browser to read it.",
     "folderReadFailed": "The browser could not read every file in this folder. Select the study folder again, or open a compatible multi-frame DICOM file instead.",
     "unsupportedDicomEncoding": "This DICOM encoding is not supported. Choose an uncompressed enhanced multi-frame file or an uncompressed DICOM slice folder.",
+    "inconsistentDicomPixelData": "The enhanced DICOM pixel data does not match its declared dimensions and frame count. Select the original complete multi-frame export.",
     "inconsistentDicomSeries": "The DICOM slices do not form one consistent series. Select a folder containing slices from a single series.",
     "invalidDicomSource": "The selected DICOM source could not be read as a volume. Choose a complete slice folder or a compatible multi-frame file.",
     "incompleteScanSource": "The selected scan is incomplete or its slice files are inconsistent. Select the original complete study folder.",
