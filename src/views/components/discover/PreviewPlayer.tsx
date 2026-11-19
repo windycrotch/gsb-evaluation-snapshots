@@ -2,9 +2,10 @@ import { Player, type PlayerAPI, PlayerEvent, type SourceConfig } from 'bitmovin
 import { UIFactory } from 'bitmovin-player-ui';
 import 'bitmovin-player-ui/dist/css/bitmovinplayer-ui.css';
 import { type ReactNode, useEffect, useEffectEvent, useRef, useState } from 'react';
-import { type Film, type Preview, isBeforePreview, isPastPreview, previewRemaining } from '../../../discover/model.js';
+import { type Film, type Preview } from '../../../discover/model.js';
 import { ICON } from '../cover.js';
 import { Icon } from '../Icon.js';
+import { type PreviewAction, PreviewWindowController } from './previewWindow.js';
 import { PlayerLoading, PreviewErrorCard } from './shared.js';
 
 const LOAD_TIMEOUT_MS = 30_000; // how long a source may take to load before the stage reports a failure
@@ -26,26 +27,42 @@ const clock = (sec: number) => `${Math.floor(sec / 60)}:${String(Math.floor(sec 
 
 /**
  * Plays a preview window of a film: from `preview.startSec` for
- * `preview.durationSec`, then pauses and shows an end card. The window is
- * enforced client-side on the full film's stream, so a "trailer" needs no
- * separate encode. Any catalogue can offer previews this way. The player's
- * seek bar still spans the whole film: seeking past the window ends the
- * preview, and seeking back before it returns to the window's start.
+ * `preview.durationSec`, then pauses and shows an end card. The window comes
+ * from the server's screen data and is enforced client-side on the full film's
+ * stream, so a "trailer" needs no separate encode. The player's seek bar still
+ * spans the whole film: seeking past the window ends the preview, and seeking
+ * back before it returns to the window's start. The window rules live in
+ * PreviewWindowController; this component only wires them to the player.
  *
  * Mounts the Bitmovin Player into a ref'd node that React leaves alone, since
- * the player appends its own DOM. Overlays are siblings React controls. Mount
- * one instance per film (`key={film.id}`); the player is not reused across films.
+ * the player appends its own DOM. Overlays are siblings React controls. A film
+ * switch on this same component destroys the old player and resets every
+ * per-film marker — countdown, end card, error — so nothing carries over.
  */
 export function PreviewPlayer({ film, licenseKey, onEnded, onError, onReplay, handoff }: PreviewPlayerProps) {
   const mountRef = useRef<HTMLDivElement>(null);
   const playerRef = useRef<PlayerAPI | null>(null);
-  const endedRef = useRef(false); // the window has been reached; re-armed by replay
+  const controllerRef = useRef<PreviewWindowController | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [ended, setEnded] = useState(false);
   const [remaining, setRemaining] = useState(film.preview.durationSec);
 
   const { stream, startSec, durationSec } = film.preview;
+
+  // A different film (or window, or key) on this same component starts clean:
+  // the previous preview's countdown, end card and error must not leak into
+  // the next one. Reset during render, so not even one frame of the old card
+  // shows against the new film; the effect below then builds a fresh player.
+  const sessionKey = `${film.title}|${stream.type}|${stream.url}|${startSec}|${durationSec}|${licenseKey}`;
+  const [session, setSession] = useState(sessionKey);
+  if (session !== sessionKey) {
+    setSession(sessionKey);
+    setLoading(true);
+    setError(null);
+    setEnded(false);
+    setRemaining(durationSec);
+  }
 
   // Called from player events, which are wired once per film: these always see
   // the parent's latest callbacks without rebuilding the player.
@@ -57,11 +74,14 @@ export function PreviewPlayer({ film, licenseKey, onEnded, onError, onReplay, ha
     if (!node) {
       return;
     }
-    let cancelled = false;
-    let failed = false;
-    let reachedWindow = false; // positions reported before the start offset applies are not seeks
-    let seekingBack = false; // one seek back at a time, while old positions still arrive
-    const previewWindow = { startSec, durationSec };
+
+    // The window state machine for this film only; the next film gets a fresh
+    // one, so its ended latch and countdown can never be inherited.
+    const controller = new PreviewWindowController({ startSec, durationSec });
+    controllerRef.current = controller;
+
+    let active = true; // false once this film's player is torn down
+    let loadTimer: ReturnType<typeof setTimeout> | undefined;
 
     // One container per player, so teardown can detach this player's DOM alone.
     const container = document.createElement('div');
@@ -80,51 +100,67 @@ export function PreviewPlayer({ film, licenseKey, onEnded, onError, onReplay, ha
     playerRef.current = player;
     const uiManager = UIFactory.buildUI(player);
 
-    const fail = (detail: string) => {
-      if (cancelled || failed) {
+    // Releases everything this film's preview holds: the load timer, the UI,
+    // the player's DOM and the player itself (which also stops a load still in
+    // flight). Runs exactly once — on unmount, on a film switch, and on failure.
+    const teardown = () => {
+      if (!active) {
         return;
       }
-      failed = true;
-      void player.unload().catch(() => {}); // stop a load that is still in flight
-      setError(detail);
-      fireError();
+      active = false;
+      clearTimeout(loadTimer);
+      playerRef.current = null;
+      uiManager.release();
+      container.remove();
+      void player.destroy().catch(() => {});
     };
 
-    const finish = () => {
-      if (cancelled || failed || endedRef.current) {
+    // A load timeout or a player error: stop the countdown and the load, free
+    // the player and UI behind the card, and show the error card (which keeps
+    // the hand-off to the full film) instead of a player that never starts.
+    const fail = (detail: string) => {
+      if (!active) {
         return;
       }
-      endedRef.current = true;
-      player.pause();
-      setEnded(true);
-      setRemaining(0);
-      fireEnded();
+      setError(detail);
+      fireError();
+      teardown();
+    };
+
+    const apply = (action: PreviewAction) => {
+      switch (action.type) {
+        case 'seek-back':
+          player.seek(action.to);
+          break;
+        case 'tick':
+          setRemaining(action.remaining);
+          break;
+        case 'finish':
+          player.pause();
+          setEnded(true);
+          setRemaining(0);
+          fireEnded();
+          break;
+        case 'ignore':
+          break;
+      }
     };
 
     player.on(PlayerEvent.Ready, () => {
-      if (!cancelled) {
+      if (active) {
         setLoading(false);
       }
     });
     player.on(PlayerEvent.TimeChanged, e => {
-      if (cancelled || failed) {
-        return;
-      }
-      if (isBeforePreview(previewWindow, e.time)) {
-        if (reachedWindow && !seekingBack) {
-          seekingBack = true;
-          player.seek(startSec); // the user sought back before the window
-        }
-        return;
-      }
-      reachedWindow = true;
-      seekingBack = false;
-      setRemaining(previewRemaining(previewWindow, e.time));
-      if (isPastPreview(previewWindow, e.time)) {
-        finish();
+      if (active) {
+        apply(controller.onTimeChanged(e.time));
       }
     });
-    player.on(PlayerEvent.PlaybackFinished, finish);
+    player.on(PlayerEvent.PlaybackFinished, () => {
+      if (active) {
+        apply(controller.onPlaybackFinished());
+      }
+    });
     player.on(PlayerEvent.Error, e => fail(`Error ${e.code}: ${e.message ?? 'playback failed'}`));
 
     const source: SourceConfig = { title: film.title, options: { startOffset: startSec } };
@@ -134,7 +170,6 @@ export function PreviewPlayer({ film, licenseKey, onEnded, onError, onReplay, ha
       source.dash = stream.url;
     }
 
-    let loadTimer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<never>((_, rej) => {
       loadTimer = setTimeout(
         () => rej(new Error(`The preview did not load within ${LOAD_TIMEOUT_MS / 1000}s.`)),
@@ -143,7 +178,7 @@ export function PreviewPlayer({ film, licenseKey, onEnded, onError, onReplay, ha
     });
     Promise.race([player.load(source), timeout])
       .then(() => {
-        if (cancelled || failed) {
+        if (!active) {
           return;
         }
         // In a sandbox that blocks even muted autoplay the rejection is benign;
@@ -153,26 +188,20 @@ export function PreviewPlayer({ film, licenseKey, onEnded, onError, onReplay, ha
       .catch((e: unknown) => fail(e instanceof Error ? e.message : String(e)))
       .finally(() => clearTimeout(loadTimer));
 
-    return () => {
-      cancelled = true;
-      clearTimeout(loadTimer);
-      playerRef.current = null;
-      uiManager.release();
-      container.remove();
-      void player.destroy().catch(() => {});
-    };
+    return teardown;
   }, [film.title, stream.url, stream.type, startSec, durationSec, licenseKey]);
 
   const replay = () => {
     const player = playerRef.current;
-    if (!player) {
+    const controller = controllerRef.current;
+    if (!player || !controller) {
       return;
     }
-    endedRef.current = false; // re-arm the cut-off for the next pass
+    const seekTo = controller.replay(); // re-arm the cut-off and the countdown
     setEnded(false);
-    setRemaining(durationSec);
+    setRemaining(controller.remaining);
     onReplay?.();
-    player.seek(startSec);
+    player.seek(seekTo);
     player.play().catch(() => {});
   };
 
