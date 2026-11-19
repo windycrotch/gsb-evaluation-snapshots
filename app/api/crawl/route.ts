@@ -273,13 +273,29 @@ export async function POST(request: NextRequest) {
     });
 
     const seedPaginationState = new Map<string, PageLinksAccumulatedPage>();
-    const seedPageBatch = await getPageLinksBatch([seedTitle], undefined, {
-      paginationState: seedPaginationState,
-      signal: request.signal,
-      timeoutMs: 10_000,
-    });
-    const seedPage = seedPageBatch.pages[0];
-    if (!seedPage || seedPage.missing) {
+    let seedPageBatch: Awaited<ReturnType<typeof getPageLinksBatch>> | null = null;
+    let seedPrefetchFailed = false;
+    try {
+      seedPageBatch = await getPageLinksBatch([seedTitle], undefined, {
+        paginationState: seedPaginationState,
+        signal: request.signal,
+        timeoutMs: 10_000,
+      });
+    } catch (error) {
+      seedPrefetchFailed = true;
+      if (request.signal.aborted) {
+        // The client disconnected before the stream started. Nothing further can be delivered
+        // to that client, but keep the failure path uniform for any in-flight work consumers.
+        console.warn('Crawl seed prefetch aborted:', String(error));
+      } else {
+        // Upstream 429s after retries, timeouts, or other transport failures. A cold crawl
+        // cannot proceed without its seed; expansion requests still return an empty partial
+        // delta below instead of failing the whole merge.
+        console.warn('Crawl seed prefetch failed:', String(error));
+      }
+    }
+    const seedPage = seedPageBatch?.pages[0];
+    if (seedPageBatch && (!seedPage || seedPage.missing)) {
       const suggestions = await searchWikipedia(seedTitle)
         .then((results) => results.map((result) => result.title))
         .catch(() => []);
@@ -296,13 +312,14 @@ export async function POST(request: NextRequest) {
           sendStreamEvent(controller, 'progress', { progress: crawlProgress });
         }, 2000);
         try {
-          const { nodes: crawledNodes, edges: crawledEdges, seedId: crawledSeedId, partial, failedTitles } = await crawlWikipedia({
+          const { nodes: crawledNodes, edges: crawledEdges, seedId: crawledSeedId, partial, failedTitles, aborted } = await crawlWikipedia({
             seedTitle,
             depth: validatedDepth,
             maxNodes: validatedMaxNodes,
             knownIds,
             baseDepth: validatedBaseDepth,
-            seedPage: { pages: [seedPage], continueToken: seedPageBatch.continueToken },
+            seedUnavailable: seedPrefetchFailed,
+            seedPage: seedPageBatch ?? undefined,
             seedPaginationState,
             signal: request.signal,
             onProgress: (progress) => {
@@ -316,7 +333,10 @@ export async function POST(request: NextRequest) {
           });
 
           if (partial) {
-            sendStreamEvent(controller, 'warning', { failedTitles });
+            sendStreamEvent(controller, 'warning', {
+              failedTitles,
+              ...(aborted ? { reason: 'aborted' } : {}),
+            });
           }
 
           const { nodes: deltaNodes, edges: deltaEdges } = isExpand

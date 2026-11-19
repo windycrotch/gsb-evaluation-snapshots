@@ -74,6 +74,12 @@ export function findShortestPath(
 }
 
 export function analyzeGraph(graph: Graph, seedId: string): GraphAnalysisResult {
+  // PageRank cannot converge on an empty graph (e.g. a crawl aborted or rate-limited before any
+  // node accumulated). Return an empty analysis instead of failing the partial response.
+  if (graph.order === 0) {
+    return { nodes: [], communities: [] };
+  }
+
   // Calculate PageRank
   const pagerankScores = metrics.centrality.pagerank(graph);
   

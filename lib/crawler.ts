@@ -78,6 +78,12 @@ export interface CrawlOptions {
   seedPage?: PageLinksBatchResult;
   /** Accumulation state associated with a pre-fetched seed page. */
   seedPaginationState?: Map<string, PageLinksAccumulatedPage>;
+  /**
+   * The caller could not fetch the seed's links (upstream 429/failure/abort before the stream
+   * started). The seed is still reported as a failed title and any graph accumulated from
+   * other pre-fetched data is returned; no seed request is retried here.
+   */
+  seedUnavailable?: boolean;
   onProgress?: (progress: CrawlProgress) => void;
   onBatch?: (nodes: WikiNode[], edges: WikiEdge[]) => void;
   /** AbortSignal for cancellation */
@@ -90,6 +96,8 @@ export async function crawlWikipedia(options: CrawlOptions): Promise<{
   seedId: string;
   partial: boolean;
   failedTitles: string[];
+  /** True when the abort signal stopped the crawl early; the accumulated graph is still returned. */
+  aborted: boolean;
 }> {
   const {
     seedTitle,
@@ -99,11 +107,18 @@ export async function crawlWikipedia(options: CrawlOptions): Promise<{
     baseDepth = 0,
     seedPage,
     seedPaginationState,
+    seedUnavailable = false,
     onProgress,
     onBatch,
     signal,
   } = options;
   const requestBudget = getCrawlRequestBudget(maxNodes, depth);
+  // A client disconnect never discards work already fetched: the crawl stops requesting new
+  // upstream pages and returns everything accumulated so far as a partial delta.
+  let crawlAborted = signal?.aborted ?? false;
+  signal?.addEventListener('abort', () => {
+    crawlAborted = true;
+  });
   const progress: CrawlState = {
     nodes: [],
     nodeIds: new Set(),
@@ -132,8 +147,13 @@ export async function crawlWikipedia(options: CrawlOptions): Promise<{
   }
 
   if (!isJunkTitle(seedNormalized)) {
-    progress.queue.push({ title: seedNormalized, depth: 0 });
-    queuedTitles.add(seedNormalized);
+    if (seedUnavailable) {
+      // The caller already tried (and failed) to fetch the seed's links; do not retry it here.
+      progress.failedTitles.add(seedNormalized);
+    } else {
+      progress.queue.push({ title: seedNormalized, depth: 0 });
+      queuedTitles.add(seedNormalized);
+    }
   }
 
   let progressTarget = 1;
@@ -142,7 +162,7 @@ export async function crawlWikipedia(options: CrawlOptions): Promise<{
   let requestsUsed = 0;
   let budgetExhausted = false;
   const consumeRequestBudget = (): boolean => {
-    if (signal?.aborted) return false;
+    if (crawlAborted) return false;
     if (requestsUsed >= requestBudget) {
       budgetExhausted = true;
       return false;
@@ -155,6 +175,7 @@ export async function crawlWikipedia(options: CrawlOptions): Promise<{
 
   const rankLayer = async (layer: { title: string; depth: number }[]): Promise<typeof layer> => {
     if (layer.length <= 1) return layer;
+    if (crawlAborted) return layer;
     const pageViews = await getPageViews(layer.map((item) => item.title), {
       concurrency: crawlConcurrency,
       signal,
@@ -207,11 +228,15 @@ export async function crawlWikipedia(options: CrawlOptions): Promise<{
 
     const batchTitles = batch.map(({ title }) => title);
     const paginationSessionId = randomUUID();
-    const paginationState = batchTitles.includes(seedTitle) && seedPaginationState
+    // Every batch carries an explicit accumulation map so getPageLinksBatch never falls back to
+    // its module-global accumulator. The seed reuses the caller-provided map (which is itself
+    // request-scoped); all other batches get a fresh map, so concurrent crawls/expansions of the
+    // same seed cannot see each other's partially accumulated link pages.
+    const paginationState: Map<string, PageLinksAccumulatedPage> = batchTitles.includes(seedNormalized) && seedPaginationState
       ? seedPaginationState
       : new Map<string, PageLinksAccumulatedPage>();
     const fetchBatch = async (titles: string[], continueToken?: string) => {
-      if (signal?.aborted) return null;
+      if (crawlAborted) return null;
       if (!continueToken && seedPage && titles.includes(seedTitle)) {
         return seedPage;
       }
@@ -230,7 +255,7 @@ export async function crawlWikipedia(options: CrawlOptions): Promise<{
             timeoutMs: WIKIPEDIA_REQUEST_TIMEOUT_MS,
           });
         } catch {
-          if (signal?.aborted || requestsUsed >= requestBudget) {
+          if (crawlAborted || requestsUsed >= requestBudget) {
             break;
           }
 
@@ -240,7 +265,7 @@ export async function crawlWikipedia(options: CrawlOptions): Promise<{
         }
       }
 
-      if (signal?.aborted) {
+      if (crawlAborted) {
         for (const title of batchTitles) {
           progress.failedTitles.add(title);
         }
@@ -410,12 +435,14 @@ export async function crawlWikipedia(options: CrawlOptions): Promise<{
   };
 
   while (progress.queue.length > 0 && progress.nodes.length < maxNodes && requestsUsed < requestBudget) {
-    if (signal?.aborted) {
-      throw new Error('Crawl aborted');
+    if (crawlAborted) {
+      break;
     }
-    
+
     const layerDepth = progress.queue[0].depth;
-    const layer = await rankLayer(progress.queue.splice(0, progress.queue.length).filter((item) => item.depth === layerDepth));
+    const layer = crawlAborted
+      ? []
+      : await rankLayer(progress.queue.splice(0, progress.queue.length).filter((item) => item.depth === layerDepth));
     const remainingNodeBudget = maxNodes - progress.nodes.length;
     const layerQuota = depth >= 2 && layerDepth === 1
       ? Math.min(remainingNodeBudget, Math.ceil(maxNodes * 0.4))
@@ -429,8 +456,8 @@ export async function crawlWikipedia(options: CrawlOptions): Promise<{
     let nextBatchIndex = 0;
     const workers = Array.from({ length: Math.min(crawlConcurrency, batches.length) }, async () => {
       while (nextBatchIndex < batches.length && requestsUsed < requestBudget) {
-        if (signal?.aborted) {
-          throw new Error('Crawl aborted');
+        if (crawlAborted) {
+          return;
         }
         await processBatch(batches[nextBatchIndex++]);
       }
@@ -473,8 +500,9 @@ export async function crawlWikipedia(options: CrawlOptions): Promise<{
     nodes: progress.nodes,
     edges,
     seedId: resolvedSeedId,
-    partial: progress.failedTitles.size > 0 || budgetExhausted,
+    partial: crawlAborted || progress.failedTitles.size > 0 || budgetExhausted,
     failedTitles: [...progress.failedTitles],
+    aborted: crawlAborted,
   };
 }
 

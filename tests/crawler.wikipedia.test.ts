@@ -501,4 +501,211 @@ it('consumes request budget once per actual HTTP retry attempt', async () => {
       mock.restore();
     }
   });
+
+  it('returns everything accumulated so far as a partial result when aborted mid-crawl', async () => {
+    const mock = installMockMediaWiki({ mode: 'topical' });
+    const originalFetch = globalThis.fetch;
+    const controller = new AbortController();
+    let linkRequestsStarted = 0;
+    let linkRequestsAfterAbort = 0;
+    globalThis.fetch = (async (input, init) => {
+      const url = new URL(input.toString());
+      if (url.searchParams.get('prop') === 'links') {
+        linkRequestsStarted += 1;
+        if (controller.signal.aborted) linkRequestsAfterAbort += 1;
+        // Abort once the seed page has been downloaded and the next batch is starting.
+        if (linkRequestsStarted === 2) controller.abort();
+      }
+      return originalFetch(input, init);
+    }) as typeof fetch;
+
+    try {
+      const result = await crawlWikipedia({
+        seedTitle: 'Page 0',
+        depth: 2,
+        maxNodes: 100,
+        signal: controller.signal,
+      });
+
+      // The crawl resolves normally instead of throwing the abort.
+      expect(result.aborted).toBe(true);
+      expect(result.partial).toBe(true);
+      // Work completed before the abort is retained.
+      expect(result.nodes.length).toBeGreaterThan(0);
+      const nodeIds = new Set(result.nodes.map((node) => node.id));
+      const edgeKeys = new Set<string>();
+      for (const edge of result.edges) {
+        expect(edge.source).not.toBe(edge.target);
+        expect(nodeIds.has(edge.source)).toBe(true);
+        expect(nodeIds.has(edge.target)).toBe(true);
+        const key = `${edge.source}|${edge.target}`;
+        expect(edgeKeys.has(key)).toBe(false);
+        edgeKeys.add(key);
+      }
+
+      // Give any stragglers a chance to (incorrectly) fire.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(linkRequestsAfterAbort).toBe(0);
+      expect(linkRequestsStarted).toBeGreaterThanOrEqual(2);
+    } finally {
+      globalThis.fetch = originalFetch;
+      mock.restore();
+    }
+  });
+
+  it('does not start any upstream work when the signal is already aborted', async () => {
+    const mock = installMockMediaWiki();
+    const originalFetch = globalThis.fetch;
+    let linkRequests = 0;
+    globalThis.fetch = (async (input, init) => {
+      const url = new URL(input.toString());
+      if (url.searchParams.get('prop') === 'links') linkRequests += 1;
+      return originalFetch(input, init);
+    }) as typeof fetch;
+    const controller = new AbortController();
+    controller.abort();
+
+    try {
+      const result = await crawlWikipedia({
+        seedTitle: 'Page 0',
+        depth: 2,
+        maxNodes: 50,
+        signal: controller.signal,
+      });
+
+      expect(result.aborted).toBe(true);
+      expect(result.partial).toBe(true);
+      expect(linkRequests).toBe(0);
+    } finally {
+      globalThis.fetch = originalFetch;
+      mock.restore();
+    }
+  });
+
+  it('returns an empty partial delta (not a throw) when a failed seed leaves no graph at all', async () => {
+    const mock = installMockMediaWiki();
+
+    try {
+      const result = await crawlWikipedia({
+        seedTitle: 'Page 0',
+        depth: 1,
+        maxNodes: 50,
+        seedUnavailable: true,
+      });
+
+      expect(result.partial).toBe(true);
+      expect(result.aborted).toBe(false);
+      expect(result.failedTitles).toContain('Page 0');
+      expect(result.nodes).toEqual([]);
+      expect(result.edges).toEqual([]);
+    } finally {
+      mock.restore();
+    }
+  });
+
+  it('reports partial with failedTitles when the request budget is exhausted', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input) => {
+      const url = new URL(input.toString());
+      if (url.searchParams.get('prop') === 'links') {
+        const title = url.searchParams.get('titles')?.split('|')[0] ?? 'Page 0';
+        return Response.json({
+          query: {
+            pages: [{ pageid: 1, title, links: [{ title: 'Page 1' }] }],
+          },
+          // Never-ending pagination drains the whole request budget.
+          continue: { plcontinue: '1|0|500' },
+        });
+      }
+      return Response.json({ query: { pages: [] } });
+    }) as typeof fetch;
+
+    try {
+      const result = await crawlWikipedia({ seedTitle: 'Page 0', depth: 1, maxNodes: 500 });
+
+      expect(result.aborted).toBe(false);
+      expect(result.partial).toBe(true);
+      expect(result.nodes.length).toBeGreaterThan(0);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('keeps concurrent crawls of the same seed isolated, each returning its own delta', async () => {
+    const mock = installMockMediaWiki({ mode: 'topical' });
+
+    try {
+      const [resultA, resultB] = await Promise.all([
+        crawlWikipedia({
+          seedTitle: 'Page 0',
+          depth: 1,
+          maxNodes: 5,
+          knownIds: ['Page 0', 'Page 3'],
+          baseDepth: 1,
+        }),
+        crawlWikipedia({
+          seedTitle: 'Page 0',
+          depth: 1,
+          maxNodes: 5,
+          knownIds: ['Page 0', 'Page 4'],
+          baseDepth: 2,
+        }),
+      ]);
+
+      // Known nodes are never returned in the deltas.
+      expect(resultA.nodes.some((node) => node.id === 'Page 3')).toBe(false);
+      expect(resultB.nodes.some((node) => node.id === 'Page 4')).toBe(false);
+
+      // baseDepth offsets stay attached to their own crawl.
+      expect(resultA.nodes.every((node) => node.depth === 2)).toBe(true);
+      expect(resultB.nodes.every((node) => node.depth === 3)).toBe(true);
+
+      for (const result of [resultA, resultB]) {
+        const nodeIds = new Set(result.nodes.map((node) => node.id));
+        const knownEndpointIds = ['Page 0', 'Page 3', 'Page 4'];
+        const keys = new Set<string>();
+        for (const edge of result.edges) {
+          expect(edge.source).not.toBe(edge.target);
+          expect(nodeIds.has(edge.source) || edge.source === 'Page 0').toBe(true);
+          expect(nodeIds.has(edge.target) || knownEndpointIds.includes(edge.target)).toBe(true);
+          const key = `${edge.source}|${edge.target}`;
+          expect(keys.has(key)).toBe(false);
+          keys.add(key);
+        }
+      }
+    } finally {
+      mock.restore();
+    }
+  });
+
+  it('isolates pagination accumulation maps for the same page across concurrent callers', async () => {
+    const mock = installMockMediaWiki();
+    const stateA = new Map();
+    const stateB = new Map();
+
+    try {
+      const [firstA, firstB] = await Promise.all([
+        getPageLinksBatch(['Page 0'], undefined, { paginationState: stateA }),
+        getPageLinksBatch(['Page 0'], undefined, { paginationState: stateB }),
+      ]);
+
+      expect(firstA.continueToken).toBe('0|0|500');
+      expect(firstB.continueToken).toBe('0|0|500');
+
+      const [continuedA, continuedB] = await Promise.all([
+        getPageLinksBatch(['Page 0'], firstA.continueToken, { paginationState: stateA }),
+        getPageLinksBatch(['Page 0'], firstB.continueToken, { paginationState: stateB }),
+      ]);
+
+      // Each state accumulated its own full 650-link page independently.
+      expect(continuedA.pages[0]?.links).toHaveLength(150);
+      expect(continuedB.pages[0]?.links).toHaveLength(150);
+      expect(continuedA.pages[0]?.complete).toBe(true);
+      expect(continuedB.pages[0]?.complete).toBe(true);
+      expect(stateA.size).toBe(0);
+      expect(stateB.size).toBe(0);
+    } finally {
+      mock.restore();
+    }
+  });
 });
