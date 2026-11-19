@@ -1,23 +1,25 @@
 /**
  * Render-only shared utility-status overlay. Reads world.getPowerMap() + world.getWaterMap() +
  * world.getMap().getBuildings(); never mutates core. Draws AT MOST ONE badge per building,
- * glyph-switched by the missing utility with priority POWER > WATER (bolt = no power; drop =
- * powered but no water). One badge avoids the two-stacked-icon collision at cubeTopY - 6.
- * Recompute is owned by World.tick, CommandDispatcher.applyCommands, and the bulk-rebuild
- * drains (save/reset/regenerate).
+ * glyph-switched by the unified growth chain's first failing gate, priority
+ * ROAD > POWER > WATER (road bar = frontage road gone; bolt = no power; drop = powered but no
+ * water). Both the glyph picked here and the gate World.tick actually applies come from the same
+ * evaluateBuildingGrowth call shape, so the badge cannot disagree with the simulation. One badge
+ * avoids the two-stacked-icon collision at cubeTopY - 6.
  *
  * Empty zones (zoned, no building yet) get AT MOST ONE icon explaining why nothing is growing
- * there, priority ROAD > POWER (mirrors the building badge's one-icon rule). Road comes FIRST
+ * there, priority ROAD > POWER — spawn needs just those two locational gates. Road comes FIRST
  * because it is the more fundamental gate: power only ever reaches a cell orthogonally adjacent
  * to a road (see roadNetworkPropagation), so a roadless zone can never be powered AND can never
  * spawn (the spawn frontage gate). Conversely a powered empty zone is ALWAYS road-adjacent, so
  * "powered but roadless" cannot happen. Both gates follow lot COVERAGE via
- * classifyEmptyZoneSpawnBlock: it finds the frontage seed whose road-fronting lot (grown along
- * contiguous same-type empty cells) would cover this tile, and takes the road AND power verdicts on
- * that seed — because the spawner checks power on the seed and the lot then absorbs deeper cells.
- * So interior cells of a deep lot are NOT mislabeled (neither a road glyph nor a false bolt); a
- * road across unzoned land does not count (contiguity required); terrain is ignored (a slope-only
- * blocker is not road/power-fixable, so it stays unbadged). Thus:
+ * classifyEmptyZoneSpawnBlock (the empty-zone arm of the same chain): it finds the frontage seed
+ * whose road-fronting lot (grown along contiguous same-type empty cells) would cover this tile,
+ * and takes the road AND power verdicts on that seed — because the spawner checks power on the
+ * seed and the lot then absorbs deeper cells. So interior cells of a deep lot are NOT mislabeled
+ * (neither a road glyph nor a false bolt); a road across unzoned land does not count (contiguity
+ * required); terrain is ignored (a slope-only blocker is not road/power-fixable, so it stays
+ * unbadged). Thus:
  *   - no road-fronting lot reaches the tile → road glyph (build/extend a road; also unblocks power),
  *   - a lot reaches it but no covering frontage seed is powered → bolt (common early-game: zoned by
  *     a road, no power plant connected yet),
@@ -31,14 +33,12 @@
 
 import { Graphics, Container } from 'pixi.js';
 import type { World } from '@/game/core/World';
-import { isBuildingPowered } from '@/game/core/PowerMap';
-import { isBuildingWatered } from '@/game/core/WaterMap';
 import type { VisibleTileBounds } from '../viewportCulling';
 import { isBuildingVisible, iterateVisibleTiles } from '../viewportCulling';
 import type { VisualRegistry } from '../visuals/visualRegistry';
 import { tileToScreenWithHeight, ISO_CONFIG } from '../IsoTransform';
 import { isZoneType } from '@/game/core/Tile';
-import { classifyEmptyZoneSpawnBlock } from '@/game/core/zoneGrowth';
+import { classifyEmptyZoneSpawnBlock, evaluateBuildingGrowth } from '@/game/core/zoneGrowth';
 import type { Building } from '@/game/core/Building';
 import type { BuildingVisualInput } from '../visuals/TileVisual';
 
@@ -161,6 +161,19 @@ export class UtilityStatusOverlay {
     const wm = world.getWaterMap();
     const map = world.getMap();
     const terrain = world.getTerrain();
+    // Frozen snapshot bundle for the unified growth chain. Land value is handed threshold 0:
+    // this overlay renders only the utility/road glyphs, so the service-coverage and land-value
+    // rungs must never select a badge here. The chain's road > power > water ordering is what
+    // keeps the bolt/drop/road pick identical to World.tick's actual gating predicates.
+    const ruleCtx = {
+      power: pw,
+      water: wm,
+      police: world.getServiceCoverageMap(),
+      fire: world.getFireCoverageMap(),
+      hospital: world.getHospitalCoverageMap(),
+      school: world.getSchoolCoverageMap(),
+      landValue: { getValue: () => 0 },
+    };
 
     // Build the set of building ids that need an icon this frame.
     const needsIcon = new Set<number>();
@@ -170,11 +183,16 @@ export class UtilityStatusOverlay {
         continue;
       }
 
+      // Same predicates and priority (power > water; road handled by the road glyph) as the
+      // simulation's growth gates — evaluated through the one shared chain, never re-derived.
+      const verdict = evaluateBuildingGrowth(building, ruleCtx, 0, world);
       let kind: GlyphKind | null = null;
-      if (!isBuildingPowered(building, pw)) {
-        // Priority: missing power wins regardless of water status.
+      if (!verdict.hasRoad) {
+        kind = 'road';
+      } else if (!verdict.isPowered) {
+        // Missing power wins regardless of water status (chain order).
         kind = 'bolt';
-      } else if (!isBuildingWatered(building, wm)) {
+      } else if (!verdict.isWatered) {
         kind = 'drop';
       }
 

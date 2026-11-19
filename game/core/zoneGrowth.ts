@@ -4,6 +4,12 @@ import { TileType } from './Tile';
 import type { Frontage, Rect } from './buildingFootprint';
 import { lotBboxOf } from './buildingFootprint';
 import { MIN_STRUCTURE_DEPTH_CAP, LEVEL_THRESHOLDS, ZONE_MAX_LEVEL } from './growthConstants';
+import type { PowerMap } from './PowerMap';
+import type { WaterMap } from './WaterMap';
+import type { ServiceCoverageMap } from './ServiceCoverageMap';
+import type { FireCoverageMap } from './FireCoverageMap';
+import type { HospitalCoverageMap } from './HospitalCoverageMap';
+import type { SchoolCoverageMap } from './SchoolCoverageMap';
 
 export function depthAxisFromFrontage(frontage: Frontage): { dx: number; dy: number } {
   switch (frontage) {
@@ -109,64 +115,40 @@ export function greedyDepthLot(
 }
 
 /**
- * Classify why an empty zone tile is not spawning, for the player-facing empty-zone cue. Walks the
- * same road-fronting lot COVERAGE the spawner uses (contiguous same-type, EMPTY cells within
- * LOT_MAX_DEPTH; terrain ignored), looking for a frontage seed — a cell whose next cell is a road —
- * whose lot (footprint claimed whole at spawn) would cover `seed`. `isPowered(x,y)` is injected
- * (the overlay passes the PowerMap) and is consulted on the FRONTAGE SEED, not on `seed` itself:
- * World.tick checks power on the seed it spawns from (World.ts ~547), then the lot absorbs deeper
- * cells, so an interior cell needs no power of its own. Returns:
+ * Classify why an empty zone tile is not spawning, for the player-facing empty-zone cue.
+ *
+ * Thin adapter over the unified rule chain (`evaluateEmptyZoneSpawn` +
+ * `findCoveringFrontageSeeds`): this function no longer walks coverage itself, so the
+ * overlay cue and the spawner's actual lot reach are guaranteed to be the same code.
+ * The chain walks the same road-fronting lot COVERAGE the spawner uses (contiguous
+ * same-type, EMPTY cells within LOT_MAX_DEPTH; terrain ignored), looking for a frontage
+ * seed — a cell whose next cell is a road — whose lot (footprint claimed whole at
+ * spawn) would cover `seed`. `isPowered(x,y)` is injected (the overlay passes the
+ * PowerMap) and is consulted on the FRONTAGE SEED, not on `seed` itself: World.tick
+ * checks power on the seed it spawns from, then the lot absorbs deeper cells, so an
+ * interior cell needs no power of its own. Returns:
  *   'road'  — no road-fronting lot can reach the tile (build/extend a road),
  *   'power' — a lot reaches it but NO covering frontage seed is powered (connect power),
- *   null    — a powered frontage seed will spawn a covering lot (or only terrain/demand blocks it,
- *             which roads/power can't fix) → no cue.
- * Priority is road > power: a tile with no road access reports 'road' even when unpowered, since
- * power can't reach a cell with no adjacent road anyway.
+ *   null    — a powered frontage seed will spawn a covering lot (or only terrain/demand
+ *             blocks it, which roads/power can't fix) → no cue.
+ * Priority is road > power: the head of the shared chain (see GrowthBlockReason).
  *
- * Why coverage, not a per-tile test: a road-on-own-face test is too STRICT (interior cells of a
- * deep lot have no road/power on their own face yet are covered by the frontage seed), while a
- * road-within-4 test (pickSeedFrontage) is too LOOSE (it ignores zone-type contiguity, so a road
- * across unzoned land would falsely suppress the cue). Occupancy mirrors the spawn gate too: a
- * building anywhere in the run (including the frontage seed) breaks it, since greedyDepthLot stops
- * at occupied cells and World.tick spawns only from empty seeds.
+ * Why coverage, not a per-tile test: a road-on-own-face test is too STRICT (interior
+ * cells of a deep lot have no road/power on their own face yet are covered by the
+ * frontage seed), while a road-within-4 test (pickSeedFrontage) is too LOOSE (it
+ * ignores zone-type contiguity, so a road across unzoned land would falsely suppress
+ * the cue). Occupancy mirrors the spawn gate too: a building anywhere in the run
+ * (including the frontage seed) breaks it, since greedyDepthLot stops at occupied
+ * cells and World.tick spawns only from empty seeds.
  */
 export function classifyEmptyZoneSpawnBlock(
   seed: { x: number; y: number },
   world: World,
   isPowered: (x: number, y: number) => boolean,
 ): 'road' | 'power' | null {
-  const map = world.getMap();
-  const buildings = map.getBuildings();
-  const seedTile = map.getTile(seed.x, seed.y);
-  if (seedTile === null) return null;
-  const seedType = seedTile.type;
-  if (buildings.getBuildingAt(seed.x, seed.y) !== null) return null; // occupied — not an empty zone
-
-  let roadReachable = false;
-  // `seed` sits at depth `step` behind a frontage cell; the road is one cell beyond that cell.
-  for (const { dx, dy } of [
-    { dx: 0, dy: 1 }, { dx: 1, dy: 0 }, { dx: -1, dy: 0 }, { dx: 0, dy: -1 },
-  ]) {
-    for (let step = 0; step < LOT_MAX_DEPTH; step++) {
-      const cx = seed.x + dx * step;
-      const cy = seed.y + dy * step;
-      if (step > 0) {
-        const t = map.getTile(cx, cy);
-        if (t === null || t.type !== seedType) break; // contiguity broken before any road frontage
-        if (buildings.getBuildingAt(cx, cy) !== null) break; // an occupied cell blocks the lot
-      }
-      const road = map.getTile(cx + dx, cy + dy);
-      if (road !== null && road.type === TileType.ROAD) {
-        // (cx,cy) is a frontage seed whose lot covers `seed`. If it's powered, a building spawns
-        // there and covers `seed` → no cue. Otherwise this approach is power-blocked; another
-        // direction may still have a powered seed, so keep looking.
-        if (isPowered(cx, cy)) return null;
-        roadReachable = true;
-        break; // deeper cells are past the road; this direction's frontage seed is unpowered
-      }
-    }
-  }
-  return roadReachable ? 'power' : 'road';
+  // Delegates to the unified empty-zone chain; its verdict domain is already exactly
+  // 'road' | 'power' | null, so this stays a behavior-preserving adapter.
+  return evaluateEmptyZoneSpawn(seed, world, isPowered);
 }
 
 export function initialStructureRect(lot: Rect, frontage: Frontage): Rect {
@@ -396,4 +378,220 @@ export function maxSupportedLevel(landValue: number): number {
  */
 export function isUnderSupported(level: number, landValue: number): boolean {
   return level > maxSupportedLevel(landValue);
+}
+
+// ---------------------------------------------------------------------------
+// Unified growth-eligibility rule chain
+//
+// ONE explainable, replayable chain decides "may this lot keep growing?" for every
+// caller: World.tick's spawn / aging / level-up / structure-grow / density / merge
+// branches, the empty-zone spawn-block classifier, and the player-facing utility
+// overlay. The player-visible reason therefore cannot drift from the reason the
+// simulation actually applies.
+//
+// The chain orders the five locational gates as
+//   road > power > water > service > landValue
+// and `primaryBlock` reports the FIRST failing gate — the single badge/cue a player
+// sees. In particular power outranks water (when both fail, the cue is 'power'),
+// and road outranks every utility gate.
+//
+// Every predicate here is SIDE-EFFECT FREE: it reads only the world's already
+// recomputed snapshot maps (power, water, the four coverage maps, land value) and the
+// immutable map/building state, and never marks anything dirty or mutates a building.
+// Repeated calls with no intervening world mutation return bit-identical results.
+// Transient per-tick inputs that are not locational — demand, the upkeep-funding
+// freeze, age cooldowns — stay in World.tick on purpose: they are city-wide scalars
+// with no per-tile reason to display, so folding them in would give the overlay a
+// cue the map cannot render.
+// ---------------------------------------------------------------------------
+
+/**
+ * The five locational gates, in priority order. `'road'` is most fundamental —
+ * power, water and graded coverage all propagate through ROAD cells, so a lot
+ * whose frontage face lost its road cannot be powered or covered either.
+ */
+export type GrowthBlockReason = 'road' | 'power' | 'water' | 'service' | 'landValue';
+
+/**
+ * The verdict of one eligibility evaluation. Every gate gets its own boolean so a
+ * caller can apply just the gates it needs (spawn reads only road+power; the merge
+ * loop reads road+power+water; the level-up branch reads all five), while
+ * `primaryBlock` is the shared explainable reason for overlays and tests.
+ */
+export interface GrowthEligibility {
+  /** The building's stored frontage face still touches at least one road cell. */
+  hasRoad: boolean;
+  /** At least one footprint cell sits on a powered cell (binary field → footprint scan). */
+  isPowered: boolean;
+  /** At least one footprint cell sits on a watered cell (binary field → footprint scan). */
+  isWatered: boolean;
+  /** All four graded services (police, fire, hospital, school) cover the anchor. */
+  isServiceCovered: boolean;
+  /** Congested anchor land value clears the threshold the caller asked for. */
+  meetsLandValue: boolean;
+  /** True iff every gate passed. */
+  canGrow: boolean;
+  /** The first failing gate in road > power > water > service > landValue order; null when canGrow. */
+  primaryBlock: GrowthBlockReason | null;
+}
+
+/** Frozen snapshots World.tick resolves before the growth pass; the evaluator only reads them. */
+export interface GrowthRuleContext {
+  power: Pick<PowerMap, 'isPowered'>;
+  water: Pick<WaterMap, 'isWatered'>;
+  police: Pick<ServiceCoverageMap, 'getCoverage'>;
+  fire: Pick<FireCoverageMap, 'getCoverage'>;
+  hospital: Pick<HospitalCoverageMap, 'getCoverage'>;
+  school: Pick<SchoolCoverageMap, 'getCoverage'>;
+  /**
+   * Land-value surface to gate against. World.tick's growth branches pass the CONGESTED
+   * value (`LandValueMap.getValue`); callers that want the abandonment verdict pass the
+   * uncongested surface instead. The evaluator is a pure threshold lookup over whichever
+   * surface it is handed, exactly like maxSupportedLevel.
+   */
+  landValue: { getValue(x: number, y: number): number };
+}
+
+/** Raw coverage threshold shared by all four graded services (see ServiceCoverageMap). */
+const SERVICE_ANCHOR_THRESHOLD_RAW = Math.round(0.25 * 255);
+
+/** Pick the first failed gate in the fixed chain order; null when every gate passed. */
+export function primaryGrowthBlock(flags: {
+  hasRoad: boolean;
+  isPowered: boolean;
+  isWatered: boolean;
+  isServiceCovered: boolean;
+  meetsLandValue: boolean;
+}): GrowthBlockReason | null {
+  if (!flags.hasRoad) return 'road';
+  if (!flags.isPowered) return 'power';
+  if (!flags.isWatered) return 'water';
+  if (!flags.isServiceCovered) return 'service';
+  if (!flags.meetsLandValue) return 'landValue';
+  return null;
+}
+
+/**
+ * Evaluate the full locational rule chain for one EXISTING building against frozen
+ * snapshots. Pure: no world/building mutation, no dirty marks, deterministic for a
+ * given world state.
+ *
+ * Graded fields (the four services, land value) gate at the building's ANCHOR; binary
+ * fields (power, water) scan the whole FOOTPRINT — any one satisfied cell passes —
+ * matching the split documented in ServiceCoverageMap/PowerMap.
+ *
+ * @param landValueThreshold the LEVEL_THRESHOLDS entry for the next level; pass 0 when
+ *   the caller does not gate on land value (e.g. the utility-only overlay badge).
+ */
+export function evaluateBuildingGrowth(
+  building: Building,
+  ctx: GrowthRuleContext,
+  landValueThreshold: number,
+  world: World,
+): GrowthEligibility {
+  const hasRoad = hasFrontageRoadAccess(building, world);
+  let isPowered = false;
+  let isWatered = false;
+  for (const c of building.footprint) {
+    if (ctx.power.isPowered(c.x, c.y)) isPowered = true;
+    if (ctx.water.isWatered(c.x, c.y)) isWatered = true;
+  }
+  const { x: ax, y: ay } = building.anchor;
+  const isServiceCovered =
+    ctx.police.getCoverage(ax, ay) >= SERVICE_ANCHOR_THRESHOLD_RAW &&
+    ctx.fire.getCoverage(ax, ay) >= SERVICE_ANCHOR_THRESHOLD_RAW &&
+    ctx.hospital.getCoverage(ax, ay) >= SERVICE_ANCHOR_THRESHOLD_RAW &&
+    ctx.school.getCoverage(ax, ay) >= SERVICE_ANCHOR_THRESHOLD_RAW;
+  const meetsLandValue = ctx.landValue.getValue(ax, ay) >= landValueThreshold;
+
+  const primaryBlock = primaryGrowthBlock({
+    hasRoad, isPowered, isWatered, isServiceCovered, meetsLandValue,
+  });
+  return {
+    hasRoad,
+    isPowered,
+    isWatered,
+    isServiceCovered,
+    meetsLandValue,
+    canGrow: primaryBlock === null,
+    primaryBlock,
+  };
+}
+
+/**
+ * Directions walked by the empty-lot coverage scan. This is a COVERAGE walk, not the
+ * spawner's frontage tie-break, so the order carries no gameplay meaning — the
+ * frontage picker's S > E > W > N tie-break lives untouched in pickSeedFrontage.
+ */
+const LOT_SCAN_DIRECTIONS: ReadonlyArray<{ dx: number; dy: number }> = [
+  { dx: 0, dy: 1 }, { dx: 1, dy: 0 }, { dx: -1, dy: 0 }, { dx: 0, dy: -1 },
+];
+
+/**
+ * Find every frontage seed whose road-fronting lot COULD cover an empty zone cell
+ * `seed`, mirroring the lot reach the spawner uses (contiguous same-type EMPTY cells
+ * within LOT_MAX_DEPTH; terrain ignored). For each direction, `seed` sits at depth
+ * `step` behind a frontage cell whose next cell is a road. Returns one entry per
+ * direction whose frontage seed is reachable.
+ *
+ * This is the single coverage primitive shared by the spawner-aligned classifier and
+ * any future overlay: it encodes only geometry (road reach + zone contiguity +
+ * occupancy), leaving the utility verdict to the caller — the same split
+ * greedyDepthLot (geometry) and World.tick (utilities) use for actual spawns.
+ */
+export function findCoveringFrontageSeeds(
+  seed: { x: number; y: number },
+  world: World,
+): Array<{ x: number; y: number }> {
+  const map = world.getMap();
+  const buildings = map.getBuildings();
+  const seedTile = map.getTile(seed.x, seed.y);
+  if (seedTile === null) return [];
+  const seedType = seedTile.type;
+  if (buildings.getBuildingAt(seed.x, seed.y) !== null) return []; // occupied — not an empty zone
+
+  const frontageSeeds: Array<{ x: number; y: number }> = [];
+  for (const { dx, dy } of LOT_SCAN_DIRECTIONS) {
+    for (let step = 0; step < LOT_MAX_DEPTH; step++) {
+      const cx = seed.x + dx * step;
+      const cy = seed.y + dy * step;
+      if (step > 0) {
+        const t = map.getTile(cx, cy);
+        if (t === null || t.type !== seedType) break; // contiguity broken before any road frontage
+        if (buildings.getBuildingAt(cx, cy) !== null) break; // an occupied cell blocks the lot
+      }
+      const road = map.getTile(cx + dx, cy + dy);
+      if (road !== null && road.type === TileType.ROAD) {
+        // (cx,cy) is a frontage seed whose lot covers `seed`.
+        frontageSeeds.push({ x: cx, y: cy });
+        break; // deeper cells are past the road; this direction has exactly one frontage seed
+      }
+    }
+  }
+  return frontageSeeds;
+}
+
+/**
+ * Empty-zone variant of the chain: does any road-fronting lot covering this empty
+ * tile have a POWERED frontage seed? Spawn needs only road + power (water, services
+ * and land value gate later growth rungs, never the initial spawn), so the empty-tile
+ * verdict collapses the chain to two outcomes:
+ *   - no covering frontage seed exists at all              → 'road',
+ *   - one exists but none of the covering seeds is powered → 'power',
+ *   - a powered seed will spawn a covering lot              → null (no cue).
+ * The power predicate is injected so tests can exercise the chain without building a
+ * full utility network; production callers pass `world.getPowerMap().isPowered`.
+ * Priority is still road > power, the head of the shared chain.
+ */
+export function evaluateEmptyZoneSpawn(
+  seed: { x: number; y: number },
+  world: World,
+  isPowered: (x: number, y: number) => boolean,
+): 'road' | 'power' | null {
+  const frontageSeeds = findCoveringFrontageSeeds(seed, world);
+  if (frontageSeeds.length === 0) return 'road';
+  for (const fs of frontageSeeds) {
+    if (isPowered(fs.x, fs.y)) return null;
+  }
+  return 'power';
 }

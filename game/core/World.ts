@@ -11,12 +11,12 @@ import { Demand, DENSITY_DEMAND_BAR, GROWTH_DEMAND_THRESHOLD, MIGRATION_UNEMPLOY
 import type { DemandVector } from './Demand';
 import { Terrain, SEA_LEVEL, projectTileHeightsToVertexHeights } from './Terrain';
 import * as terrainGenerator from './terrainGenerator';
-import { PowerMap, isBuildingPowered } from './PowerMap';
-import { WaterMap, isBuildingWatered } from './WaterMap';
-import { ServiceCoverageMap, isAnchorCovered } from './ServiceCoverageMap';
-import { FireCoverageMap, isFireAnchorCovered } from './FireCoverageMap';
-import { HospitalCoverageMap, isHospitalAnchorCovered } from './HospitalCoverageMap';
-import { SchoolCoverageMap, isSchoolAnchorCovered } from './SchoolCoverageMap';
+import { PowerMap } from './PowerMap';
+import { WaterMap } from './WaterMap';
+import { ServiceCoverageMap } from './ServiceCoverageMap';
+import { FireCoverageMap } from './FireCoverageMap';
+import { HospitalCoverageMap } from './HospitalCoverageMap';
+import { SchoolCoverageMap } from './SchoolCoverageMap';
 import { TrafficMap } from './TrafficMap';
 import { LaborMarketMap } from './LaborMarketMap';
 import { StructureMap } from './StructureMap';
@@ -26,11 +26,13 @@ import {
   greedyDepthLot,
   initialStructureRect,
   footprintCells,
-  hasFrontageRoadAccess,
+  evaluateBuildingGrowth,
+  evaluateEmptyZoneSpawn,
   canExtendStructure,
   extendStructureToward,
   maxDensityForLot,
   isUnderSupported,
+  type GrowthRuleContext,
 } from './zoneGrowth';
 import { lotBboxOf } from './buildingFootprint';
 import { GROWTH_COOLDOWN_INTERVALS, stagger, LEVEL_THRESHOLDS, ZONE_MAX_LEVEL } from './growthConstants';
@@ -1179,6 +1181,22 @@ export class World {
       // and abandoning shrinks the tax base that pays upkeep — see its comment).
       const upkeepFunded = this.serviceFunding === FUNDING_FULL_PER_MILLE;
 
+      // The single frozen snapshot bundle every locational gate below reads through. All five
+      // maps were recomputed at the start of THIS tick (dirty or cadence), so the evaluator is
+      // a pure read over frozen state: calling it any number of times for the same building
+      // returns the identical verdict. This is the ONE chain the spawn-block classifier and the
+      // utility overlay also use — the player-facing reason and the simulated reason cannot
+      // diverge. Demand/funding/age are deliberately NOT in here (city-wide scalars, no tile cue).
+      const growthCtx: GrowthRuleContext = {
+        power: pw,
+        water: wm,
+        police: svc,
+        fire: fireSvc,
+        hospital: hospitalSvc,
+        school: schoolSvc,
+        landValue: lv,
+      };
+
       // Abandonment sweep: runs BEFORE demand/growth so the same-tick growth reads
       // demand that already excludes the just-derelict, and so a building that
       // recovers this tick is frozen from also growing this tick. `frozenThisTick`
@@ -1253,8 +1271,13 @@ export class World {
           // imbalance is inside the deadband and no in-migration is pulling; let zones sit
           // empty until pressure returns.
           if (demandVec[bType] <= GROWTH_DEMAND_THRESHOLD) continue;
-          // Spawn uses the seed tile directly — lot/footprint do not exist yet.
-          if (!pw.isPowered(x, y)) continue;
+          // Spawn's two locational gates (road reach + seed power) are the same chain the
+          // empty-zone cue runs: evaluateEmptyZoneSpawn reports 'road' / 'power' / null off the
+          // identical coverage walk and power predicate, so an empty tile that passes here is
+          // exactly one the overlay leaves unbadged. A null verdict means geometry+power are open;
+          // the strict flat-terrain/footprint validation in greedyDepthLot still runs below.
+          const spawnBlock = evaluateEmptyZoneSpawn({ x, y }, this, (px, py) => pw.isPowered(px, py));
+          if (spawnBlock !== null) continue;
           const frontage = pickSeedFrontage({ x, y }, this);
           if (frontage === null) continue;
           const lot = greedyDepthLot({ x, y }, frontage, tile.type, this);
@@ -1285,9 +1308,14 @@ export class World {
         if (processedBuildingIds.has(existing.id)) continue;
         processedBuildingIds.add(existing.id);
 
-        // Road-access gate: buildings that lose frontage road access do not age or grow.
-        if (!hasFrontageRoadAccess(existing, this)) continue;
-        if (!isBuildingPowered(existing, pw)) continue;
+        // Road + power gate through the unified chain: a building that loses its stored
+        // frontage road (or its power connection) stops aging and stops growing on the very
+        // next growth pass — no separate, drift-prone copy of these predicates lives here.
+        // Land value is handed threshold 0 so this utility/road verdict never reports
+        // 'landValue'/'service'/'water' as an aging blocker (those gate mutations below only).
+        const accessVerdict = evaluateBuildingGrowth(existing, growthCtx, 0, this);
+        if (!accessVerdict.hasRoad) continue;
+        if (!accessVerdict.isPowered) continue;
 
         // Age every building once per growth-opportunity (this tick).
         existing.age += 1;
@@ -1303,7 +1331,6 @@ export class World {
         // still does not age at all — those two gates are above and unchanged.
         if (frozenThisTick.has(existing.id)) continue;
 
-        const anchorLandValue = lv.getValue(existing.anchor.x, existing.anchor.y);
         const lot = lotBboxOf(existing.footprint);
 
         // Shared growth gate: upkeep funding, demand, land value threshold, age cooldown, water, and
@@ -1316,17 +1343,19 @@ export class World {
         // structure-grow dead code below (the trap this reorder exists to avoid).
         const threshold = LEVEL_THRESHOLDS[Math.min(existing.level + 1, ZONE_MAX_LEVEL)];
         const cooldown = GROWTH_COOLDOWN_INTERVALS + stagger(existing.id);
-        // Power gates spawn AND existing-building aging/growth (the isBuildingPowered check above
-        // runs before age++). Water gates the level-up / structure-grow / density / merge
-        // MUTATIONS — an unwatered but powered building still ages, it just can't grow
-        // (SimCity 2000/4 'city starts, density limited'). Police AND fire AND hospital AND school
-        // coverage gate this gated branch's mutations ONLY (the level-up bump AND the structure-grow
-        // below, at any level); not spawn, density, or merge.
-        // Graded fields (land value, coverage) gate at the ANCHOR; binary fields (power, water)
-        // scan the FOOTPRINT — any powered/watered cell satisfies the gate. This is the intended split.
-        // Upkeep funding is city-wide, not per-building: any upkeep left unpaid at the latest
-        // settlement freezes both mutations for every building (see `upkeepFunded`).
-        const growthGate = upkeepFunded && demandVec[existing.type] > GROWTH_DEMAND_THRESHOLD && anchorLandValue >= threshold && existing.age >= cooldown && isBuildingWatered(existing, wm) && isAnchorCovered(existing.anchor, svc) && isFireAnchorCovered(existing.anchor, fireSvc) && isHospitalAnchorCovered(existing.anchor, hospitalSvc) && isSchoolAnchorCovered(existing.anchor, schoolSvc);
+        // The five locational gates (road, power, water, four-service coverage, land value) come
+        // from the ONE unified chain, evaluated against this tick's frozen snapshots. Road and
+        // power already passed above (this building aged), so the chain's canGrow here reduces to
+        // water + service + land value — but re-running the whole chain keeps the verdict and the
+        // overlay's cue literally the same function call. The non-locational gates stay local:
+        // power gates spawn AND existing-building aging/growth (the isPowered check above runs
+        // before age++). Upkeep funding is city-wide, not per-building: any upkeep left unpaid at
+        // the latest settlement freezes both mutations for every building (see `upkeepFunded`).
+        const locationalGate = evaluateBuildingGrowth(existing, growthCtx, threshold, this);
+        const growthGate = upkeepFunded
+          && demandVec[existing.type] > GROWTH_DEMAND_THRESHOLD
+          && existing.age >= cooldown
+          && locationalGate.canGrow;
 
         if (canExtendStructure(existing.structureRect, lot, existing.frontage)) {
           // Branch B' — structure-grow, reachable at ANY level now, not just below max.
@@ -1391,17 +1420,21 @@ export class World {
           // still construct an over-cap building directly in memory, as it can construct any other
           // otherwise-unreachable state; this gate does not and cannot guard against that.
           // Density is a growth rung too, so it shares the upkeep-funding freeze (`upkeepFunded`).
+          // Its locational gates come from the SAME unified chain as level-up/structure-grow,
+          // evaluated at the max-level land-value threshold; the demand bar and cooldown are the
+          // density-rung-specific non-locational gates and stay inline.
+          const densityGate = evaluateBuildingGrowth(
+            existing,
+            growthCtx,
+            LEVEL_THRESHOLDS[ZONE_MAX_LEVEL],
+            this,
+          );
           if (
             upkeepFunded &&
             demandVec[existing.type] >= DENSITY_DEMAND_BAR[existing.type] &&
-            anchorLandValue >= LEVEL_THRESHOLDS[ZONE_MAX_LEVEL] &&
             existing.age >= DENSITY_COOLDOWN_INTERVALS &&
             existing.density < maxDensityForLot(lot, existing.frontage) &&
-            isBuildingWatered(existing, wm) &&
-            isAnchorCovered(existing.anchor, svc) &&
-            isFireAnchorCovered(existing.anchor, fireSvc) &&
-            isHospitalAnchorCovered(existing.anchor, hospitalSvc) &&
-            isSchoolAnchorCovered(existing.anchor, schoolSvc)
+            densityGate.canGrow
           ) {
             existing.density += 1 as 0 | 1 | 2;
             existing.age = 0;
@@ -1421,20 +1454,24 @@ export class World {
       if (upkeepFunded) {
         const candidates = [...buildings.iterBuildings()];
         const usedThisTick = new Set<number>();
+        // Merge needs only road + power + water (services and land value gate the earlier
+        // level-up/density rungs both partners already exhausted to be merge-eligible), so the
+        // unified chain is evaluated with a zero land-value threshold and only its first three
+        // flags are read — same predicates the overlay reports, no merge-local copies.
+        const mergeEligible = (b: typeof candidates[number]): boolean => {
+          const v = evaluateBuildingGrowth(b, growthCtx, 0, this);
+          return v.hasRoad && v.isPowered && v.isWatered;
+        };
         for (let i = 0; i < candidates.length; i++) {
           const a = candidates[i];
           if (usedThisTick.has(a.id)) continue;
           if (frozenThisTick.has(a.id)) continue; // derelict / just-re-occupied — no merge this tick
-          if (!hasFrontageRoadAccess(a, this)) continue;
-          if (!isBuildingPowered(a, pw)) continue;
-          if (!isBuildingWatered(a, wm)) continue;
+          if (!mergeEligible(a)) continue;
           for (let j = i + 1; j < candidates.length; j++) {
             const b = candidates[j];
             if (usedThisTick.has(b.id)) continue;
             if (frozenThisTick.has(b.id)) continue; // derelict / just-re-occupied — no merge this tick
-            if (!hasFrontageRoadAccess(b, this)) continue;
-            if (!isBuildingPowered(b, pw)) continue;
-            if (!isBuildingWatered(b, wm)) continue;
+            if (!mergeEligible(b)) continue;
             if (!canMerge(a, b, demandVec)) continue;
 
             const shape = mergedBuildingShape(a, b);
