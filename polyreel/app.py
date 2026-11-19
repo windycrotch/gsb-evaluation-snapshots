@@ -1,0 +1,1171 @@
+"""Main window: owns the tiles and wires layout, playlists, focus and perf."""
+
+from __future__ import annotations
+
+import os
+import sys
+import threading
+import time
+import traceback
+from datetime import date
+from dataclasses import dataclass, field
+
+from PySide6.QtCore import QRect, Qt, QTimer, Signal
+from PySide6.QtGui import QAction, QColor, QCursor, QKeySequence, QPalette, QShortcut
+from PySide6.QtWidgets import (QApplication, QFileDialog, QLabel, QMainWindow,
+                               QMenu, QMessageBox, QSystemTrayIcon, QToolTip, QWidget)
+
+from . import layout as L
+from .perf import IDLE, BenchmarkPlan, DropCurve, PerfMonitor, frames_lost
+from .playlist import PLAYABLE_EXTENSIONS, Item, Playlists, expand_paths
+from .profiler import PROFILER, log_folder, system_info
+from .probe import NOT_VIDEO, Prober
+from .scheduler import DEFAULT_ASPECT, plan
+from .settings import SOUND_MODES, BenchmarkResultsDialog, Settings, SettingsDialog
+from .tile import VideoTile, take_retiring
+from .ui import BAR_HEIGHT, CloseButton, Drawer, TileControls, TrafficLight, light_icon
+
+HOVER_ZONE = 24        # px from the bottom edge that reveals the drawer
+HIDE_DELAY_MS = 700
+SHUTDOWN_WAIT = 2.0    # seconds to wait for players to stop when closing
+START_PARALLEL = 4     # videos opening at once; the next starts when one is up
+START_GIVE_UP = 10.0   # ...or when one has been opening this long
+BENCH_LIMIT = 32       # most videos the benchmark tries at once
+BENCH_START_WAIT = 10  # seconds a benchmark round waits for its players to start
+BENCH_MEASURE = 4.0    # seconds a benchmark round is measured
+BENCH_EARLY = 1.5      # ...or this long, if it is clearly far over the limit
+BENCH_DRAIN_WAIT = 30  # seconds the benchmark waits for a round's players to stop
+KEYS_TEXT = "O  add files     Ctrl+O  add a folder     Ctrl+,  settings"
+EMPTY_TEXT = "Drop videos or folders here\n\n" + KEYS_TEXT
+FIRST_TEXT = ("Drop videos or folders here to begin the benchmark\n\n"
+              "Polyreel plays a few of them at once to measure how many\n"
+              "this computer can handle (about half a minute).\n\n" + KEYS_TEXT)
+
+
+@dataclass
+class BenchState:
+    plan: BenchmarkPlan
+    sources: list[Item]
+    tiles: list[VideoTile] = field(default_factory=list)
+    layout: L.Layout | None = None
+    t0: float = 0.0
+    wait_start: float = 0.0
+    draining: list[VideoTile] = field(default_factory=list)   # stopping, not yet stopped
+    finishing: bool = False
+    cancelled: bool = False
+    c0: dict = field(default_factory=dict)
+    timer: QTimer | None = None
+
+
+class Stage(QWidget):
+    """Black area the tiles live in."""
+
+    def __init__(self, window: "MainWindow") -> None:
+        super().__init__()
+        self.window_ = window
+        pal = self.palette()
+        pal.setColor(QPalette.Window, QColor("black"))
+        self.setPalette(pal)
+        self.setAutoFillBackground(True)
+
+    def resizeEvent(self, e) -> None:
+        self.window_.stage_resized()
+
+    def mouseDoubleClickEvent(self, e) -> None:
+        self.window_.double_clicked()
+
+    def contextMenuEvent(self, e) -> None:
+        self.window_.show_menu(e.globalPos(), None)
+
+
+class MainWindow(QMainWindow):
+    _planned = Signal(object)    # a plan worked out on a background thread
+
+    def __init__(self, paths: list[str], profile: bool = False) -> None:
+        super().__init__()
+        self._profile_forced = profile    # --profile: log this run whatever the setting
+        self.setWindowTitle("Polyreel")
+        self.resize(1280, 760)
+        self.setAcceptDrops(True)
+
+        self.settings = Settings.load()
+        self.pl = Playlists()
+        self.pl.subscribe(self._lists_changed)
+
+        self.stage = Stage(self)
+        self.setCentralWidget(self.stage)
+
+        self.tiles: dict[int, VideoTile] = {}   # item id -> tile
+        self.pool: list[VideoTile] = []         # idle tiles ready for reuse
+        self.all_tiles: list[VideoTile] = []
+        self.layout_: L.Layout | None = None
+        self.focus_tile: VideoTile | None = None
+        self.paused_all = False
+        self.bench: BenchState | None = None
+
+        self.message = QLabel(self.stage)
+        self.message.setAttribute(Qt.WA_DontCreateNativeAncestors)
+        self.message.setAttribute(Qt.WA_NativeWindow)
+        self.message.setAlignment(Qt.AlignCenter)
+        self.message.setStyleSheet("QLabel { background: #000; color: #8a8a90; font-size: 15px; padding: 18px; }")
+
+        self.drawer = Drawer(self.stage)
+        self.drawer.hide()
+        self.drawer.requeue.connect(self._requeue)
+        self.drawer.play_now.connect(self._play_now)
+        self.drawer.focus.connect(lambda i: self.tiles.get(i) and self.enter_focus(self.tiles[i]))
+        self.drawer.skip.connect(self._skip_id)
+        self.drawer.remove.connect(self._remove_ids)
+        self.drawer.reorder.connect(self.pl.move_queued)
+        self.drawer.add_files.connect(self.add_files_dialog)
+        self.drawer.add_folder.connect(self.add_folder_dialog)
+        self.drawer.open_settings.connect(self.open_settings)
+        self.drawer.toggle_pause.connect(self.toggle_pause)
+        self.drawer.layout_changed.connect(self._drawer_changed)
+
+        self.light = TrafficLight(self.stage)
+        self.close_btn = CloseButton(self.stage)
+        self.close_btn.hide()
+        self.close_btn.clicked.connect(self._close_clicked)
+        self._close_target: VideoTile | None = None
+        self.controls = TileControls(self.stage)
+        self.controls.hide()
+        self.controls.toggle_pause.connect(self._controls_pause)
+        self.controls.seek.connect(lambda s, exact: self._controls_target and self._controls_target.seek(s, exact))
+        self.controls.volume.connect(self._controls_volume)
+        self.controls.mute_toggled.connect(self._controls_mute)
+        self._controls_target: VideoTile | None = None
+        self.light.clicked.connect(self.open_settings)
+        self.perf = PerfMonitor(max_drop=self.settings.max_drop)
+        self._bench_pending = False   # start a benchmark once sample videos are read
+        self._results_open = False    # benchmark results on screen: the wall waits
+        self._last_double_click = 0.0
+        self._planning = False        # a plan is being worked out in the background
+        self._replan = False          # something changed meanwhile: plan again after it
+        self._planned.connect(self._apply_plan)
+        self._beat_timer = QTimer(self, interval=100)   # performance log: is the window responsive?
+        self._beat_timer.timeout.connect(PROFILER.beat)
+        self._to_load: list[tuple[VideoTile, Item]] = []   # placed, waiting to start
+        self._loading: list[VideoTile] = []                # opening, not yet playing
+        self._load_timer = QTimer(self, interval=50)
+        self._load_timer.timeout.connect(self._load_next)
+
+        self.tray: QSystemTrayIcon | None = None
+        self._setup_tray()
+
+        self.prober = Prober(self)
+        self.prober.probed.connect(self._probed)
+
+        self._skipped = 0
+        self._skipped_timer = QTimer(self, singleShot=True, interval=800)
+        self._skipped_timer.timeout.connect(self._report_skipped)
+        self._schedule_timer = QTimer(self, singleShot=True, interval=120)
+        self._schedule_timer.timeout.connect(self.schedule)
+        self._lists_timer = QTimer(self, singleShot=True, interval=150)
+        self._lists_timer.timeout.connect(self._refresh_lists)
+        self._hide_timer = QTimer(self, singleShot=True, interval=HIDE_DELAY_MS)
+        self._hide_timer.timeout.connect(self.drawer.hide)
+        self._cursor_timer = QTimer(self, interval=60)
+        self._cursor_timer.timeout.connect(self._cursor_tick)
+        self._cursor_timer.start()
+        self._perf_timer = QTimer(self, interval=1000)
+        self._perf_timer.timeout.connect(self._perf_tick)
+        self._perf_timer.start()
+        self._last_perf = time.monotonic()
+
+        self._shortcuts()
+        self._place_overlays()
+        self._update_message()
+        self._apply_profiling()
+        if paths:
+            QTimer.singleShot(0, lambda: self.add_paths(paths))
+
+    # ------------------------------------------------------------------ setup
+    def _shortcuts(self) -> None:
+        for keys, fn in ((("Space",), self.toggle_pause),
+                         (("F", "F11"), self.toggle_fullscreen),
+                         (("Escape",), self.escape),
+                         (("O",), self.add_files_dialog),
+                         (("Ctrl+O",), self.add_folder_dialog),
+                         (("Ctrl+,",), self.open_settings),
+                         (("N",), self.skip_under_cursor),
+                         (("M",), self.cycle_sound),
+                         (("Ctrl+Q",), self.close)):
+            for k in keys:
+                QShortcut(QKeySequence(k), self, activated=fn)
+
+    def _setup_tray(self) -> None:
+        if self.tray:
+            self.tray.setVisible(self.settings.tray_icon)
+            return
+        if not self.settings.tray_icon or not QSystemTrayIcon.isSystemTrayAvailable():
+            return
+        self.tray = QSystemTrayIcon(light_icon(IDLE), self)
+        menu = QMenu()
+        menu.addAction("Show / hide window", lambda: self.setVisible(not self.isVisible()))
+        menu.addAction("Pause / resume all", self.toggle_pause)
+        menu.addSeparator()
+        menu.addAction("Quit", self.close)
+        self._tray_menu = menu
+        self.tray.setContextMenu(menu)
+        self.tray.activated.connect(self._tray_activated)
+        self.tray.setToolTip("Polyreel")
+        self.tray.show()
+
+    def _tray_activated(self, reason) -> None:
+        if reason == QSystemTrayIcon.Trigger:
+            self.showNormal() if self.isMinimized() else None
+            self.show()
+            self.raise_()
+            self.activateWindow()
+
+    # ---------------------------------------------------------------- adding
+    def add_paths(self, paths: list[str]) -> None:
+        files = expand_paths(paths)
+        if not files:
+            return
+        items = self.pl.add(files, shuffle=self.settings.shuffle_on_add)
+        for it in items:
+            self.prober.submit(it.id, it.path)
+        if not self.settings.benchmark_asked:
+            self._bench_pending = True    # the first videos added begin the benchmark
+        self._update_message()
+
+    def add_files_dialog(self) -> None:
+        exts = " ".join(f"*{e}" for e in sorted(PLAYABLE_EXTENSIONS))
+        files, _ = QFileDialog.getOpenFileNames(self, "Add videos", "", f"Videos ({exts});;All files (*)")
+        self.add_paths(files)
+
+    def add_folder_dialog(self) -> None:
+        d = QFileDialog.getExistingDirectory(self, "Add a folder of videos")
+        if d:
+            self.add_paths([d])
+
+    def dragEnterEvent(self, e) -> None:
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
+
+    def dropEvent(self, e) -> None:
+        self.add_paths([u.toLocalFile() for u in e.mimeData().urls() if u.isLocalFile()])
+
+    def _report_skipped(self) -> None:
+        n, self._skipped = self._skipped, 0
+        if n:
+            QToolTip.showText(self.mapToGlobal(self.rect().center()),
+                              f"Skipped {n} file{'s' * (n != 1)} that "
+                              f"{'aren' if n != 1 else 'isn'}'t video (still images, audio, ...)",
+                              self, QRect(), 3000)
+
+    def _probed(self, item_id: int, aspect, duration, error) -> None:
+        it = self.pl.find(item_id)
+        if it is None:
+            return
+        it.aspect, it.duration, it.probed = aspect, duration, True
+        if error == NOT_VIDEO:
+            # Still images and the like are dropped quietly, with a short note.
+            self.pl.remove(it)
+            self._skipped += 1
+            self._skipped_timer.start()
+            self._update_message()
+            self.schedule_soon()
+            return
+        if error:
+            it.error = error
+            if it in self.pl.queued:
+                self.pl.queued.remove(it)
+                self.pl.played.append(it)
+        self.pl.touch()
+        self.schedule_soon()
+        self._maybe_start_pending_benchmark()
+
+    def _maybe_start_pending_benchmark(self) -> None:
+        """First videos: benchmark once enough of them have been read."""
+        if not self._bench_pending:
+            return
+        everything = self.pl.playing + self.pl.queued + self.pl.played
+        ready = [it for it in everything if it.probed and not it.error]
+        waiting = any(not it.probed for it in everything)
+        if len(ready) >= 4 or (ready and not waiting):
+            self.settings.benchmark_asked = True
+            self.settings.save()
+            QTimer.singleShot(0, self._start_pending_benchmark)
+        elif not ready and not waiting:
+            self._bench_pending = False    # nothing playable yet: wait for the next videos
+            self._update_message()
+            self.schedule_soon()
+
+    def _start_pending_benchmark(self) -> None:
+        if self._bench_pending:          # (still pending: not skipped meanwhile)
+            self._bench_pending = False  # the wall stays on hold until now
+            self.start_benchmark()
+
+    def _skip_pending_benchmark(self) -> None:
+        self._bench_pending = False
+        self.settings.benchmark_asked = True   # it can still be run from Settings
+        self.settings.save()
+        self._update_message()
+        self.schedule_soon()
+
+    # ------------------------------------------------------------- scheduling
+    def schedule_soon(self) -> None:
+        self._schedule_timer.start()
+
+    def full_size(self) -> tuple[int, int]:
+        return max(1, self.stage.width()), max(1, self.stage.height())
+
+    def stage_size(self) -> tuple[int, int]:
+        """The area videos may use: everything above the drawer when it is
+        docked open, otherwise the whole window."""
+        w, h = self.full_size()
+        if self.drawer.expanded:
+            h -= self.drawer.preferred_height(h)
+        return w, max(1, h)
+
+    def video_area(self) -> QRect:
+        return QRect(0, 0, *self.stage_size())
+
+    def schedule(self) -> None:
+        """Bump what no longer fits, start what does, and lay everything out.
+
+        Working out the plan can take a moment with a big wall, so it runs on
+        a background thread and is applied when ready (unless things changed
+        in the meantime, in which case it is worked out again)."""
+        if self.bench or self.focus_tile or self._results_open or self._bench_pending:
+            return
+        if self._planning:
+            self._replan = True
+            return
+        s = self.settings
+        w, h = self.stage_size()
+        args = (list(self.pl.playing), list(self.pl.queued), w, h, s.max_streams, s.min_area, s.lookahead)
+        kwargs = dict(prev=self.layout_, crop=s.crop)
+        inputs = self._plan_inputs()
+        self._planning, self._replan = True, False
+
+        def work() -> None:
+            t0 = time.monotonic()
+            try:
+                p = plan(*args, **kwargs)
+            except Exception:
+                traceback.print_exc()
+                PROFILER.log("plan", "failed: " + traceback.format_exc().strip().splitlines()[-1])
+                p = None
+            if p is not None:
+                PROFILER.log("plan", f"{time.monotonic() - t0:.2f}s for {len(args[0])} playing and "
+                                     f"{len(args[1])} queued: start {len(p.start)}, bump {len(p.demote)}"
+                                     f"{', more to come' if p.more else ''}")
+            self._planned.emit((p, inputs))
+        threading.Thread(target=work, daemon=True, name="plan").start()
+
+    def _plan_inputs(self) -> tuple:
+        """What a plan depends on, to tell whether it is still current."""
+        s = self.settings
+        return (tuple(it.id for it in self.pl.playing), tuple(it.id for it in self.pl.queued),
+                self.stage_size(), s.max_streams, s.min_area, s.lookahead, s.crop)
+
+    def _apply_plan(self, result: tuple) -> None:
+        p, inputs = result
+        self._planning = False
+        if p is None:
+            return
+        if (self._replan or inputs != self._plan_inputs()
+                or self.bench or self.focus_tile or self._results_open):
+            self._replan = False
+            PROFILER.log("plan", "out of date when ready; planning again")
+            self.schedule_soon()
+            return
+        s = self.settings
+        for it in p.demote:
+            tile = self.tiles.pop(it.id)
+            pos = tile.position()
+            self._release(tile)
+            self.pl.demote(it, pos)
+        for it in p.start:
+            self.pl.start(it)
+            tile = self._acquire()
+            self.tiles[it.id] = tile
+            tile.user_muted = s.sound == "silent"   # new videos start muted in silent mode
+            self._to_load.append((tile, it))
+        self._load_next()
+        self.layout_ = p.layout
+        self._apply_layout(animate=True)
+
+        # Endless playback: once nothing is left to start, replay what has played.
+        if (s.endless and self.pl.played
+                and not any(it.probed and not it.error for it in self.pl.queued)):
+            if self.pl.recycle_played():
+                self.schedule_soon()
+        if p.more:
+            self.schedule_soon()
+        self._update_message()
+
+    def _load_next(self) -> None:
+        """Start placed videos a few at a time.  Opening a file (and setting
+        up its decoder) takes a moment, and opening dozens at once makes
+        every one wait for the slowest, especially from a slow disk; this
+        way the first ones appear straight away and the rest follow."""
+        now = time.monotonic()
+        self._loading = [t for t in self._loading if t.item is not None and not t.is_playing
+                         and now - t.load_started < START_GIVE_UP]
+        if self.bench or self.focus_tile or self._results_open:
+            self._load_timer.start()
+            return
+        started = []
+        while self._to_load and len(self._loading) < START_PARALLEL:
+            tile, it = self._to_load.pop(0)
+            if self.tiles.get(it.id) is not tile:
+                continue                  # skipped or bumped before it started
+            tile.load(it, start=it.resume_pos, hwdec=self.settings.hwdec)
+            tile.set_paused(self.paused_all)
+            self._loading.append(tile)
+            started.append(tile)
+        if started:
+            PROFILER.log("wall", f"starting {len(started)} video(s) "
+                                 f"(players #{', #'.join(str(t.num) for t in started)}); "
+                                 f"{len(self._loading)} opening, {len(self._to_load)} waiting")
+        if self._to_load:
+            self._load_timer.start()
+        else:
+            self._load_timer.stop()
+
+    def _acquire(self) -> VideoTile:
+        if self.pool:
+            return self.pool.pop()
+        tile = VideoTile(self.stage, hwdec=self.settings.hwdec)
+        tile.double_clicked.connect(self._tile_double_clicked)
+        tile.right_clicked.connect(lambda t: self.show_menu(QCursor.pos(), t))
+        tile.finished.connect(self._tile_finished)
+        tile.failed.connect(self._tile_failed)
+        tile.shape_changed.connect(self._tile_shape)
+        self.all_tiles.append(tile)
+        return tile
+
+    def _release(self, tile: VideoTile) -> None:
+        tile.stop()
+        tile.set_muted(True)
+        self.pool.append(tile)
+
+    def _rect_for(self, r: L.Rect, sx: float = 1.0, sy: float = 1.0) -> QRect:
+        g = self.settings.gap / 2
+        x0, y0 = round(r.x * sx + g), round(r.y * sy + g)
+        x1, y1 = round((r.x + r.w) * sx - g), round((r.y + r.h) * sy - g)
+        return QRect(x0, y0, max(1, x1 - x0), max(1, y1 - y0))
+
+    def _apply_layout(self, animate: bool) -> None:
+        lay = self.layout_
+        if lay is None or not lay.rects:
+            self._place_overlays()
+            return
+        w, h = self.stage_size()
+        sx = w / lay.width if lay.width else 1.0
+        sy = h / lay.height if lay.height else 1.0
+        for item_id, r in lay.rects.items():
+            tile = self.tiles.get(item_id)
+            if tile is not None and tile is not self.focus_tile:
+                self._place_tile(tile, self._rect_for(r, sx, sy), animate)
+        self._place_overlays()
+
+    def _place_tile(self, tile: VideoTile, rect: QRect, animate: bool) -> None:
+        """Move a tile and zoom its video to fill the cell (within the crop limit)."""
+        aspect = tile.item.aspect if tile.item and tile.item.aspect else None
+        if aspect:
+            tile.set_zoom(L.zoom(rect.width() / max(1, rect.height()), aspect, self.settings.crop))
+        tile.move_to(rect, animate)
+
+    def stage_resized(self) -> None:
+        if self.focus_tile:
+            self.focus_tile.move_to(self.video_area(), False)
+        elif self.bench and self.bench.layout:
+            self._bench_layout()
+        else:
+            self._apply_layout(animate=False)   # stretch now, re-solve shortly
+            self.schedule_soon()
+        self._place_overlays()
+
+    # ------------------------------------------------------------- tile events
+    def _tile_finished(self, tile: VideoTile) -> None:
+        if self.bench or tile.item is None:
+            return
+        item = tile.item
+        if tile is self.focus_tile:
+            self.exit_focus(finished=True)
+            return
+        self.tiles.pop(item.id, None)
+        self._release(tile)
+        self.pl.finish(item)
+        self.schedule_soon()
+
+    def _tile_failed(self, tile: VideoTile, message: str) -> None:
+        if self.bench or tile.item is None:
+            return
+        item = tile.item
+        if tile is self.focus_tile:
+            self.focus_tile = None
+            self._resume_others()
+        self.tiles.pop(item.id, None)
+        self._release(tile)
+        self.pl.finish(item, error=message)
+        self.schedule_soon()
+
+    def _tile_shape(self, tile: VideoTile, aspect: float) -> None:
+        it = tile.item
+        if it is None or self.bench:
+            return
+        if not it.aspect or abs(aspect - it.aspect) / it.aspect > 0.02:
+            it.aspect = aspect
+            self.pl.touch()
+            self.schedule_soon()
+
+    # ------------------------------------------------------------------ focus
+    def enter_focus(self, tile: VideoTile) -> None:
+        if self.bench or self.focus_tile is tile:
+            return
+        if self.focus_tile is not None:
+            self.exit_focus(finished=False)
+        self.focus_tile = tile
+        for t in self.tiles.values():
+            if t is not tile:
+                t.set_paused(True)
+        tile.set_paused(False)
+        tile.raise_()
+        tile.set_zoom(1.0)   # show the whole picture when focused
+        tile.move_to(self.video_area(), animate=True)
+        self._place_overlays()
+        self._cursor_tick()
+
+    def exit_focus(self, finished: bool) -> None:
+        tile = self.focus_tile
+        if tile is None:
+            return
+        self.focus_tile = None
+        if finished:
+            item = tile.item
+            self.tiles.pop(item.id, None)
+            self._release(tile)
+            self.pl.finish(item)
+        self._resume_others()
+        self._apply_layout(animate=True)
+        self.schedule_soon()
+
+    def _resume_others(self) -> None:
+        for t in self.tiles.values():
+            t.set_paused(self.paused_all)
+
+    # -------------------------------------------------------------- commands
+    def toggle_pause(self) -> None:
+        if self.bench:
+            return
+        if self.focus_tile:
+            self.focus_tile.set_paused(not self.focus_tile.paused)
+            return
+        self.paused_all = not self.paused_all
+        for t in self.tiles.values():
+            t.set_paused(self.paused_all)
+
+    def _tile_double_clicked(self, _tile: VideoTile) -> None:
+        self.double_clicked()      # (a method, so Qt runs it on the window's thread)
+
+    def double_clicked(self) -> None:
+        """Double-click on a video or the background: fullscreen on or off.
+        One double-click can reach both a video's player and the window
+        behind it, so a second report right after the first is ignored."""
+        now = time.monotonic()
+        if now - self._last_double_click < 0.5:
+            return
+        self._last_double_click = now
+        self.toggle_fullscreen()
+
+    def toggle_fullscreen(self) -> None:
+        self.showNormal() if self.isFullScreen() else self.showFullScreen()
+
+    def escape(self) -> None:
+        if self.bench:
+            self._bench_finish(cancelled=True)
+        elif self._bench_pending:
+            self._skip_pending_benchmark()
+        elif self.focus_tile:
+            self.exit_focus(finished=False)
+        elif self.isFullScreen():
+            self.showNormal()
+
+    def tile_under_cursor(self) -> VideoTile | None:
+        if self.focus_tile:
+            return self.focus_tile
+        pos = self.stage.mapFromGlobal(QCursor.pos())
+        for t in self.tiles.values():
+            if t.isVisible() and t.geometry().contains(pos):
+                return t
+        return None
+
+    def skip_under_cursor(self) -> None:
+        t = self.tile_under_cursor()
+        if t and t.item:
+            self._skip_id(t.item.id)
+
+    def _skip_id(self, item_id: int) -> None:
+        tile = self.tiles.get(item_id)
+        if tile is None:
+            return
+        if tile is self.focus_tile:
+            self.exit_focus(finished=True)
+        else:
+            self._tile_finished(tile)
+
+    def _requeue(self, item_id: int, front: bool) -> None:
+        it = self.pl.find(item_id)
+        if it:
+            self.pl.requeue(it, front=front)
+            self.schedule_soon()
+
+    def _play_now(self, item_id: int) -> None:
+        it = self.pl.find(item_id)
+        if it and it in self.pl.queued:
+            self.pl.requeue(it, front=True)
+            self.schedule_soon()
+
+    def _remove_ids(self, ids: list[int]) -> None:
+        for i in ids:
+            it = self.pl.find(i)
+            if it:
+                self.pl.remove(it)
+        self._update_message()
+
+    def show_menu(self, global_pos, tile: VideoTile | None) -> None:
+        m = QMenu(self)
+        if tile is not None and tile.item is not None:
+            title = m.addAction(tile.item.name)
+            title.setEnabled(False)
+            if tile is self.focus_tile:
+                m.addAction("Back to the wall", lambda: self.exit_focus(False))
+            else:
+                m.addAction("Focus (fill window)", lambda: self.enter_focus(tile))
+            m.addAction("Skip", lambda: self._skip_id(tile.item.id))
+            m.addSeparator()
+        m.addAction("Add files…", self.add_files_dialog)
+        m.addAction("Add folder…", self.add_folder_dialog)
+        m.addAction("Pause / resume all", self.toggle_pause)
+        m.addAction("Fullscreen", self.toggle_fullscreen)
+        m.addAction("Settings…", self.open_settings)
+        m.addAction("Run benchmark", self.start_benchmark)
+        m.addSeparator()
+        m.addAction("Clear played and queued", self._clear)
+        m.exec(global_pos)
+
+    def _clear(self) -> None:
+        self.pl.clear()
+        self._update_message()
+
+    def open_settings(self) -> None:
+        if self.bench:
+            return
+        dlg = SettingsDialog(self.settings, self)
+        if dlg.exec():
+            old_sound = self.settings.sound
+            dlg.apply_to(self.settings)
+            self.perf.set_max_drop(self.settings.max_drop)
+            if self.settings.sound != old_sound:
+                self._set_sound_mode(self.settings.sound)
+            self.settings.save()
+            self._setup_tray()
+            self._place_overlays()
+            self._apply_profiling()
+            self.schedule_soon()
+            if dlg.benchmark_requested:
+                QTimer.singleShot(200, self.start_benchmark)
+
+    # ------------------------------------------------------- overlays & mouse
+    def _place_overlays(self) -> None:
+        w, h = self.full_size()
+        dh = self.drawer.preferred_height(h)
+        self.drawer.setGeometry(0, h - dh, w, dh)
+        lw, lh = self.light.width(), self.light.height()
+        corner = self.settings.light_corner
+        x = 10 if "left" in corner else w - lw - 10
+        y = 10 if "top" in corner else h - lh - 10 - (BAR_HEIGHT if self.drawer.isVisible() else 0)
+        self.light.move(x, y)
+        self.light.setVisible(self.settings.show_light)
+        if self.message.isVisible():
+            self.message.adjustSize()
+            self.message.move((w - self.message.width()) // 2, (h - self.message.height()) // 2)
+        for widget in (self.message, self.drawer, self.light):
+            if widget.isVisible():
+                widget.raise_()
+
+    def _drawer_changed(self) -> None:
+        """A list was opened or closed: dock or undock the drawer and let the
+        wall reflow into the space that is left."""
+        self._place_overlays()
+        if self.focus_tile:
+            self.focus_tile.move_to(self.video_area(), animate=True)
+        elif self.bench:
+            self._bench_layout()
+        else:
+            self._apply_layout(animate=True)
+            self.schedule_soon()
+
+    def _update_message(self) -> None:
+        if self.bench and self.bench.finishing:
+            text = "Finishing the benchmark…"
+        elif self.bench and self.bench.draining:
+            text = "Benchmarking: waiting for the last round's videos to stop…  (Esc to cancel)"
+        elif self.bench:
+            text = f"Benchmarking: {self.bench.plan.current} videos at once…  (Esc to cancel)"
+        elif self._bench_pending:
+            text = "Reading videos…  the benchmark starts in a moment  (Esc to skip it)"
+        elif not len(self.pl):
+            text = EMPTY_TEXT if self.settings.benchmark_asked else FIRST_TEXT
+        elif not self.pl.playing and any(not it.probed for it in self.pl.queued):
+            text = "Reading videos…"
+        elif not self.pl.playing and not self.pl.queued:
+            text = "All done.  Double-click an item in Played to watch it again, or add more videos."
+        else:
+            text = ""
+        self.message.setText(text)
+        self.message.setVisible(bool(text))
+        self._place_overlays()
+
+    def _cursor_tick(self) -> None:
+        pos = self.stage.mapFromGlobal(QCursor.pos())
+        inside = self.stage.rect().contains(pos) and self.isVisible()
+        near_bottom = inside and pos.y() >= self.stage.height() - HOVER_ZONE
+        over_drawer = self.drawer.isVisible() and self.drawer.geometry().contains(pos)
+        busy = QApplication.activePopupWidget() is not None or QApplication.activeModalWidget() is not None
+        if near_bottom or over_drawer or self.drawer.expanded or (busy and self.drawer.isVisible()):
+            self._hide_timer.stop()
+            if not self.drawer.isVisible():
+                self.drawer.show()
+                self._refresh_lists()
+                self._place_overlays()
+        elif self.drawer.isVisible() and not self._hide_timer.isActive():
+            self._hide_timer.start()
+
+        if self.bench:
+            self.close_btn.hide()
+            self.controls.hide()
+            return
+        hovered = self.tile_under_cursor() if inside and not over_drawer else None
+        if self.controls.busy:
+            hovered = self._controls_target   # keep them while dragging a slider
+        self._show_close(hovered)
+        self._show_controls(hovered)
+
+        self._apply_sound(hovered)
+
+    def _apply_sound(self, hovered: VideoTile | None) -> None:
+        """Each video's own mute button wins.  Beyond that, in "hover" mode
+        the video under the mouse (or the focused one) is heard, plus any
+        whose volume was changed by hand; in "all" and "silent" modes every
+        video not muted by hand is heard (the mode only decides whether new
+        videos start muted)."""
+        target = self.focus_tile or hovered
+        for t in self.tiles.values():
+            audible = not t.user_muted
+            if self.settings.sound == "hover":
+                audible = audible and (t is target or t.keep_sound)
+            t.set_muted(not audible)
+
+    def _set_sound_mode(self, mode: str) -> None:
+        """Switching modes resets every video to that mode's starting state."""
+        self.settings.sound = mode
+        for t in self.tiles.values():
+            t.user_muted = mode == "silent"
+            t.keep_sound = False
+        self._cursor_tick()
+
+    def cycle_sound(self) -> None:
+        modes = [k for k, _ in SOUND_MODES]
+        s = self.settings
+        self._set_sound_mode(modes[(modes.index(s.sound) + 1) % len(modes)] if s.sound in modes else modes[0])
+        s.save()
+        QToolTip.showText(self.mapToGlobal(self.rect().center()),
+                          "Sound: " + dict(SOUND_MODES)[s.sound], self, QRect(), 1500)
+        self._cursor_tick()
+
+    def _show_close(self, tile: VideoTile | None) -> None:
+        """Put the "X" in the top-right corner of the video under the mouse."""
+        btn = self.close_btn
+        if tile is None or tile.item is None:
+            if not btn.underMouse():
+                btn.hide()
+                self._close_target = None
+            return
+        g = self._video_rect(tile)
+        x, y = g.right() - btn.width() - 8, g.top() + 8
+        if self.light.isVisible() and self.light.geometry().intersects(
+                btn.geometry().translated(x - btn.x(), y - btn.y())):
+            y = self.light.geometry().bottom() + 6   # step below the traffic light
+        btn.move(x, y)
+        self._close_target = tile
+        if not btn.isVisible():
+            btn.show()
+        btn.raise_()
+
+    def _show_controls(self, tile: VideoTile | None) -> None:
+        """Seek bar and volume along the bottom of the video under the mouse."""
+        c = self.controls
+        if tile is None or tile.item is None:
+            if not c.underMouse() and not c.busy:
+                c.hide()
+                self._controls_target = None
+            return
+        g = self._video_rect(tile)
+        y = g.bottom() + 1 - c.height()
+        # Stay clear of the strip at the window's bottom edge that reveals the playlists.
+        if not self.drawer.expanded:
+            y = min(y, self.stage.height() - HOVER_ZONE - c.height())
+        c.setGeometry(g.x(), max(g.y(), y), g.width(), c.height())
+        self._controls_target = tile
+        tile.poll()                       # keep its seek bar current
+        c.update_state(tile.position(), tile.duration(), tile.paused, tile.volume, tile.user_muted)
+        if not c.isVisible():
+            c.show()
+        c.raise_()
+        self.close_btn.raise_()
+
+    def _controls_volume(self, volume: int) -> None:
+        tile = self._controls_target
+        if tile is not None:
+            tile.set_volume(volume)
+            tile.keep_sound = True        # adjusted by hand: keep hearing it
+            if volume > 0:
+                tile.user_muted = False   # turning a muted video up unmutes it
+
+    def _controls_mute(self) -> None:
+        tile = self._controls_target
+        if tile is not None:
+            tile.user_muted = not tile.user_muted
+            # Unmuting by hand also keeps it audible when not hovered.
+            tile.keep_sound = not tile.user_muted
+            if not tile.user_muted and tile.volume == 0:
+                tile.set_volume(100)
+
+    def _controls_pause(self) -> None:
+        tile = self._controls_target
+        if tile is not None:
+            tile.set_paused(not tile.paused)
+
+    @staticmethod
+    def _video_rect(tile: VideoTile) -> QRect:
+        """The part of a tile the picture covers: the fitted video, enlarged
+        by the tile's zoom and clipped to the tile."""
+        g = tile.geometry()
+        a = tile.item.aspect if tile.item and tile.item.aspect else g.width() / max(1, g.height())
+        if g.width() / max(1, g.height()) > a:
+            w, h = g.height() * a, g.height()
+        else:
+            w, h = g.width(), g.width() / a
+        w, h = w * tile.zoom, h * tile.zoom
+        r = QRect(round(g.center().x() - w / 2), round(g.center().y() - h / 2), round(w), round(h))
+        return r.intersected(g)
+
+    def _close_clicked(self) -> None:
+        tile = self._close_target
+        self.close_btn.hide()
+        self._close_target = None
+        if tile is not None and tile.item is not None:
+            self._skip_id(tile.item.id)
+
+    def _lists_changed(self) -> None:
+        if not self._lists_timer.isActive():
+            self._lists_timer.start()
+
+    def _refresh_lists(self) -> None:
+        self.drawer.refresh(self.pl.played, self.pl.playing, self.pl.queued)
+
+    # ---------------------------------------------------------- performance
+    def _perf_tick(self) -> None:
+        now = time.monotonic()
+        dt, self._last_perf = now - self._last_perf, now
+        if self.bench:
+            tiles = {id(t): t for t in self.bench.tiles}
+        else:
+            tiles = {i: t for i, t in self.tiles.items() if not t.paused}
+        samples = {}
+        for key, t in tiles.items():
+            t.poll()                      # the answer arrives in time for the next tick
+            s = t.sample()
+            if s is not None:
+                samples[key] = s
+        status = self.perf.update(samples, dt)
+        if status == IDLE:
+            tip = "No videos playing"
+        else:
+            label = {"green": "Smooth", "yellow": "Some frames dropped", "red": "Struggling"}[status]
+            tip = (f"{label}: {self.perf.streams} video{'s' * (self.perf.streams != 1)} playing, "
+                   f"{self.perf.ratio * 100:.1f}% of frames dropped "
+                   f"(acceptable: {self.settings.max_drop_pct:.1f}%)\n"
+                   f"Max simultaneous videos: {self.settings.max_streams} (click to change)")
+        self.light.set_status(status, tip, self.perf.ratio)
+        if PROFILER.enabled:
+            PROFILER.snapshot(players=len(self.all_tiles), spare=len(self.pool), wall=len(self.tiles),
+                              starting=len(self._to_load) + len(self._loading),
+                              bench=self.bench.plan.current if self.bench else "-",
+                              light=status, lost=f"{self.perf.ratio * 100:.1f}%", measured=self.perf.streams)
+        if self.tray:
+            if self.tray.property("status") != status:
+                self.tray.setIcon(light_icon(status))
+                self.tray.setProperty("status", status)
+            self.tray.setToolTip("Polyreel — " + tip.split("\n")[0])
+
+    # ------------------------------------------------------------- benchmark
+    def start_benchmark(self) -> None:
+        if self.bench:
+            return
+        PROFILER.log("bench", "starting")
+        everything = self.pl.playing + self.pl.queued + self.pl.played
+        sources = [it for it in everything if it.probed and not it.error][:4]
+        if not sources:
+            QMessageBox.information(self, "Benchmark", "Add some videos first; the benchmark plays your own files.")
+            return
+        if self.focus_tile:
+            self.exit_focus(finished=False)
+        for t in self.tiles.values():
+            t.set_paused(True)
+            t.hide()
+        self.bench = BenchState(plan=BenchmarkPlan(limit=BENCH_LIMIT, max_drop=self.settings.max_drop),
+                                sources=sources)
+        self.perf.reset()
+        self._bench_step()
+
+    def _bench_layout(self) -> None:
+        """Lay out the round's videos (including ones not started yet)."""
+        b = self.bench
+        w, h = self.stage_size()
+        items = [(i, b.sources[i % len(b.sources)].aspect or DEFAULT_ASPECT)
+                 for i in range(b.plan.current)]
+        # A quick layout: the benchmark only needs the videos on screen, and a
+        # longer search would hold up the window.
+        b.layout = L.solve(items, w, h, effort=0, crop=self.settings.crop)
+        for i, t in enumerate(b.tiles):
+            self._place_tile(t, self._rect_for(b.layout.rects[i]), animate=False)
+
+    def _bench_step(self) -> None:
+        # Start every round from scratch: players left over from an
+        # overloaded round are still behind and would skew the next one.
+        self._bench_drain(self._bench_start_round)
+
+    def _bench_drain(self, then) -> None:
+        """Stop the round's players, then call ``then`` once they really have
+        stopped: an overloaded player can take a while to get to it, and
+        until then it still loads the machine."""
+        b = self.bench
+        for tile in b.tiles:
+            self._release(tile)
+        b.draining, b.tiles = b.draining + b.tiles, []
+        b.wait_start = time.monotonic()
+        self._update_message()
+
+        def check() -> None:
+            waiting = [t for t in b.draining if not t.is_stopped]
+            took = time.monotonic() - b.wait_start
+            if waiting and took < BENCH_DRAIN_WAIT:
+                self._bench_after(100, check)
+                return
+            if b.draining:
+                PROFILER.log("bench", f"previous players stopped in {took:.2f}s"
+                                      + (f"; gave up on {len(waiting)}" if waiting else ""))
+            b.draining = []
+            then()
+        check()
+
+    def _bench_start_round(self) -> None:
+        b = self.bench
+        PROFILER.log("bench", f"round: {b.plan.current} videos")
+        self._trim_pool(b.plan.current)
+        self._update_message()
+        # Lay out before the new players start, while the machine is quiet.
+        self._bench_layout()
+        self._bench_add_tiles()
+
+    def _trim_pool(self, keep: int) -> None:
+        """Shut down spare players beyond ``keep`` (in the background)."""
+        while len(self.pool) > max(0, keep):
+            tile = self.pool.pop(0)
+            self.all_tiles.remove(tile)
+            tile.retire()
+
+    def _bench_add_tiles(self) -> None:
+        """Add the round's players a few at a time, letting the window
+        repaint and respond in between."""
+        b = self.bench
+        if b is None:
+            return
+        k = b.plan.current
+        for _ in range(min(4, k - len(b.tiles))):
+            i = len(b.tiles)
+            tile = self._acquire()
+            tile.load(b.sources[i % len(b.sources)], loop=True, hwdec=self.settings.hwdec)
+            tile.set_muted(True)
+            b.tiles.append(tile)
+            self._place_tile(tile, self._rect_for(b.layout.rects[i]), animate=False)
+        if len(b.tiles) < k:
+            self._bench_after(0, self._bench_add_tiles)
+            return
+        self._update_message()
+        b.wait_start = time.monotonic()
+        self._bench_wait_ready()
+
+    def _bench_wait_ready(self) -> None:
+        """Players start in the background and load their files when they
+        get to it; time them only once every one is playing."""
+        b = self.bench
+        for t in b.tiles:
+            t.poll()
+        playing = all(t.is_ready and t.sample() is not None for t in b.tiles)
+        if not playing and time.monotonic() - b.wait_start < BENCH_START_WAIT:
+            self._bench_after(100, self._bench_wait_ready)
+            return
+        PROFILER.log("bench", f"{sum(1 for t in b.tiles if t.sample() is not None)} of {len(b.tiles)} "
+                              f"playing after {time.monotonic() - b.wait_start:.2f}s")
+        # Warm up briefly. (Recovering from a failed round happened before
+        # these players started, while the last ones stopped.)
+        self._bench_after(2000, self._bench_measure_start)
+
+    def _bench_after(self, ms: int, fn) -> None:
+        b = self.bench
+        b.timer = QTimer(self, singleShot=True, interval=ms)
+        b.timer.timeout.connect(fn)
+        b.timer.start()
+
+    def _bench_counters(self) -> dict:
+        out = {}
+        for t in self.bench.tiles:
+            t.poll()
+            s = t.sample()
+            if s is not None:
+                out[id(t)] = s
+        return out
+
+    def _bench_measure_start(self) -> None:
+        self.bench.t0 = time.monotonic()
+        self.bench.c0 = self._bench_counters()
+        self._bench_after(500, self._bench_measure_check)
+
+    def _bench_measure_check(self) -> None:
+        b = self.bench
+        elapsed = time.monotonic() - b.t0
+        ratio = self._bench_ratio(self._bench_counters(), elapsed)
+        # A round far over the limit is clear early on; cutting it short
+        # spares a machine that is struggling to keep up (and its window).
+        clearly_over = elapsed >= BENCH_EARLY and ratio > max(0.3, 4 * b.plan.max_drop)
+        if elapsed < BENCH_MEASURE and not clearly_over:
+            self._bench_after(500, self._bench_measure_check)
+            return
+        PROFILER.log("bench", f"{b.plan.current} videos: {ratio * 100:.1f}% lost, measured over {elapsed:.1f}s"
+                              + (" (clearly over: cut short)" if clearly_over else ""))
+        b.plan.record(ratio)
+        if b.plan.done:
+            self._bench_finish()
+        else:
+            self._bench_step()
+
+    def _bench_ratio(self, c1: dict, elapsed: float) -> float:
+        """Share of frames lost since the round's measuring began."""
+        b = self.bench
+        dropped = expected = 0.0
+        stuck = len(b.tiles) - len(b.c0)     # never got going
+        for key, s0 in b.c0.items():
+            s1 = c1.get(key)
+            # Each player's counters are read at its own pace (a busy one
+            # answers late), so its frames are timed by when they were read.
+            change = frames_lost(s0, s1, tolerance=0.02) if s1 is not None and s1.at > s0.at else None
+            if change:
+                dropped += change[0]
+                expected += change[1]
+            else:
+                stuck += 1                   # too busy to even answer
+        # A player that couldn't play (or answer) counts as fully dropped.
+        expected += stuck * 30 * elapsed
+        dropped += stuck * 30 * elapsed
+        return dropped / expected if expected else 1.0
+
+    def _bench_finish(self, cancelled: bool = False) -> None:
+        b = self.bench
+        if b is None or b.finishing:
+            return
+        if b.timer:
+            b.timer.stop()
+        b.finishing, b.cancelled = True, cancelled
+        # Let the last round's players stop before anything else happens: on
+        # a machine they overloaded, the window can't respond until they do.
+        self._bench_drain(self._bench_done)
+
+    def _bench_done(self) -> None:
+        b = self.bench
+        self.bench = None
+        PROFILER.log("bench", "cancelled" if b.cancelled else f"done: {b.plan.results}")
+        self.perf.reset()
+        for t in self.tiles.values():
+            t.show()
+        self._apply_layout(animate=False)
+        self._update_message()
+        # The wall stays paused while the results are shown.
+        self._results_open = True
+        try:
+            self._bench_report(b)
+        finally:
+            self._results_open = False
+        # Only now let go of the spare players, so the dialog isn't held up.
+        self._trim_pool(self.settings.max_streams - len(self.tiles))
+        self._resume_others()
+        self.schedule_soon()
+
+    def _bench_report(self, b: BenchState) -> None:
+        if not b.cancelled and b.plan.results:
+            s = self.settings
+            # Keep the measurements: they link the two limits from now on.
+            curve = DropCurve(b.plan.results)
+            s.bench_curve, s.bench_date = curve.to_text(), date.today().isoformat()
+            s.save()
+            dlg = BenchmarkResultsDialog(curve, b.plan.results, s.max_drop_pct, s.bench_date, self)
+            PROFILER.log("bench", "showing the results")
+            accepted = dlg.exec()
+            PROFILER.log("bench", f"results closed: {'using' if accepted else 'kept'} "
+                                  f"max {dlg.limits.values[0]} videos at {dlg.limits.values[1]}%")
+            if accepted:
+                s.max_streams, s.max_drop_pct = dlg.limits.values
+                self.perf.set_max_drop(s.max_drop)
+                s.save()
+
+    # -------------------------------------------------------------- shutdown
+    def _apply_profiling(self) -> None:
+        """Start or stop the performance log to match the setting."""
+        want = self.settings.profile_log or self._profile_forced
+        if want and not PROFILER.enabled:
+            from dataclasses import asdict
+            from . import __version__
+            screen = self.screen()
+            header = {"polyreel": __version__, **system_info(),
+                      "screen": f"{screen.size().width()}x{screen.size().height()} "
+                                f"at {screen.devicePixelRatio():g}x" if screen else "?",
+                      "settings": asdict(self.settings)}
+            PROFILER.start(log_folder(), header)
+            self._beat_timer.start()
+        elif not want and PROFILER.enabled:
+            self._beat_timer.stop()
+            PROFILER.stop()
+
+    def closeEvent(self, e) -> None:
+        PROFILER.log("app", "closing")
+        self._beat_timer.stop()
+        PROFILER.quiet()               # the window is going: no freeze reports from here on
+        self._cursor_timer.stop()
+        self._perf_timer.stop()
+        # Disappear at once; shutting the players down can take a moment.
+        self.hide()
+        if self.tray:
+            self.tray.hide()
+        QApplication.processEvents()
+        self.prober.close()
+        # Stop every player at the same time rather than one after another
+        # (each can take a few tenths of a second to release its video
+        # output and audio device), and don't wait forever on a stuck one.
+        tiles = self.all_tiles + take_retiring()
+        threads = [threading.Thread(target=t.shutdown, daemon=True) for t in tiles]
+        for th in threads:
+            th.start()
+        deadline = time.monotonic() + SHUTDOWN_WAIT
+        for th in threads:
+            th.join(max(0.0, deadline - time.monotonic()))
+        PROFILER.stop()
+        super().closeEvent(e)
