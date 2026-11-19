@@ -1,0 +1,503 @@
+import '@/views/css/index.css';
+import type { PlayerAPI } from 'bitmovin-player';
+import { useEffect, useRef, useState } from 'react';
+import { useDisplayMode } from 'skybridge/web';
+import {
+  BRAND,
+  type Badge,
+  type Brand,
+  type BrowsePayload,
+  type PlayerPayload,
+  type Rail,
+  type Title,
+} from '../../catalog.js';
+import { useCallTool } from '../../helpers.js';
+import { useAutoHeight } from '../hooks.js';
+import type { CastState } from './BitmovinPlayer.js';
+import { BitmovinPlayerLazy } from './BitmovinPlayerLazy.js';
+import { ICON, coverArt } from './cover.js';
+import { Icon } from './Icon.js';
+
+type Payload = BrowsePayload | PlayerPayload;
+
+// ── small pieces ───────────────────────────────────────────────────────────
+function FooterNote({ brand }: { brand: Brand }) {
+  return (
+    <div className="footer-note">
+      <b>{brand.name}</b> — a streaming service inside the chat · video by <b>Bitmovin Player</b>
+    </div>
+  );
+}
+
+function Badges({ items }: { items: Badge[] }) {
+  return (
+    <span className="badges">
+      {items.map((b, i) => (
+        <span key={i} className="badge">
+          {b}
+        </span>
+      ))}
+    </span>
+  );
+}
+
+/** The live marker, which the delivery discriminant carries rather than a badge. */
+function LiveBadge() {
+  return <span className="badge live">LIVE</span>;
+}
+
+function LiveClock() {
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    const id = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  const p = (n: number) => String(n).padStart(2, '0');
+  return (
+    <span className="onair-time">
+      {p(now.getHours())}:{p(now.getMinutes())}:{p(now.getSeconds())}
+    </span>
+  );
+}
+
+function Topbar({ brand, prompt }: { brand: Brand; prompt?: string }) {
+  return (
+    <div className="topbar">
+      <div className="wordmark">
+        {brand.wordmark}
+        <span className="dot">.</span>
+      </div>
+      <div className="onair" aria-label="On air" title="Bitflix is broadcasting">
+        <span className="onair-dot" />
+        ON AIR
+        <LiveClock />
+      </div>
+      <div className="spacer" />
+      {prompt ? (
+        <div className="prompt-chip">
+          <span className="mic" />
+          {`“${prompt}”`}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function Card({ t, layout, onPlay }: { t: Title; layout: string; onPlay: (t: Title) => void }) {
+  return (
+    <div
+      className="card"
+      role="button"
+      tabIndex={0}
+      onClick={() => onPlay(t)}
+      onKeyDown={e => {
+        // Match a real button's key activation, which a button role does not grant:
+        // Enter fires on press, Space on release.
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          onPlay(t);
+        } else if (e.key === ' ') {
+          e.preventDefault(); // Suppress the view scroll
+        }
+      }}
+      onKeyUp={e => {
+        if (e.key === ' ') {
+          onPlay(t);
+        }
+      }}
+    >
+      <div className="art">
+        <div
+          className="cover-fill"
+          aria-hidden="true"
+          dangerouslySetInnerHTML={{ __html: coverArt(t.cover, t.title.charAt(0)) }}
+        />
+        <div className="play-overlay" aria-hidden="true">
+          <div className="disc" dangerouslySetInnerHTML={{ __html: ICON.play }} />
+        </div>
+        <div className="corner">
+          {t.delivery === 'live' ? <LiveBadge /> : t.badges.includes('NEW') ? <span className="badge">NEW</span> : null}
+        </div>
+      </div>
+      <div className="meta">
+        <div className="t">{t.title}</div>
+        <div className="k">{t.kicker}</div>
+        {layout === 'live' && (t.score || t.delivery === 'live') ? (
+          <div className="liverow">
+            {t.score ? <span className="score">{t.score}</span> : null}
+            {t.delivery === 'live' ? <span className="live-clock">{t.liveLabel}</span> : null}
+          </div>
+        ) : null}
+        {t.delivery === 'vod' && t.progressPct !== undefined ? (
+          <div className="progress">
+            <span style={{ width: `${t.progressPct}%` }} />
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function RailRow({ section, onPlay }: { section: Rail; onPlay: (t: Title) => void }) {
+  if (!section.items.length) {
+    return null;
+  }
+  return (
+    <div className={`rail layout-${section.layout || 'poster'} reveal`}>
+      <div className="rail-head">
+        <h3>{section.title}</h3>
+        {section.subtitle ? <span className="sub">{section.subtitle}</span> : null}
+      </div>
+      <div className="track">
+        {section.items.map(t => (
+          <Card key={t.id} t={t} layout={section.layout || 'poster'} onPlay={onPlay} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function Hero({ p, onPlay }: { p: BrowsePayload; onPlay: (t: Title) => void }) {
+  const t = p.sections.flatMap(s => s.items).find(x => x.id === p.featuredId) || p.sections[0]?.items[0];
+  if (!t) {
+    return null;
+  }
+  return (
+    // Clicking the frame is a pointer shortcut for the Play button inside it.
+    // A button role may not wrap real buttons, and keyboard and screen-reader
+    // users start the same playback from those buttons, so the frame stays
+    // non-interactive to assistive technology.
+    // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions
+    <div className="hero reveal" onClick={() => onPlay(t)}>
+      <div className="art">
+        <div
+          className="cover-fill"
+          aria-hidden="true"
+          dangerouslySetInnerHTML={{ __html: coverArt(t.cover, t.title.charAt(0), { hero: true }) }}
+        />
+      </div>
+      <div className="scrim" />
+      <div className="hero-inner">
+        <div className="kicker">{t.kicker}</div>
+        <div className="metarow" style={{ marginTop: 0, marginBottom: 14 }}>
+          {t.delivery === 'live' ? <LiveBadge /> : null}
+          <Badges items={t.badges} />
+          {t.score ? <span className="score">{t.score}</span> : null}
+          {t.delivery === 'live' ? <span className="live-clock">{t.liveLabel}</span> : null}
+        </div>
+        <h2>{t.title}</h2>
+        <p className="syn">{t.synopsis}</p>
+        <div className="hero-actions">
+          <button
+            className="btn btn-play"
+            onClick={e => {
+              e.stopPropagation();
+              onPlay(t);
+            }}
+          >
+            <Icon html={ICON.play} />
+            Play
+          </button>
+          <button
+            className="btn btn-ghost"
+            onClick={e => {
+              e.stopPropagation();
+              onPlay(t);
+            }}
+          >
+            <Icon html={ICON.info} />
+            More info
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── chips ───────────────────────────────────────────────────────────────────
+type ChipBase = { label: string; key: string };
+/**
+ * A nav chip and the tool call it makes, carrying only that tool's arguments.
+ */
+type ChipDef =
+  | (ChipBase & { tool: 'browse_catalog'; category?: string }) // no category means whole catalog
+  | (ChipBase & { tool: 'get_recommendations' | 'whats_live' });
+
+/**
+ * A chip scoped to one category, whose key is that category.
+ */
+const categoryChip = (label: string, category: string): ChipDef => ({
+  label,
+  key: category,
+  tool: 'browse_catalog',
+  category,
+});
+
+const CHIPS: ChipDef[] = [
+  { label: 'Home', key: 'home', tool: 'browse_catalog' },
+  { label: 'For You', key: 'foryou', tool: 'get_recommendations' },
+  { label: 'Live', key: 'live', tool: 'whats_live' },
+  categoryChip('Sports', 'sports'),
+  categoryChip('News', 'news'),
+  categoryChip('Films', 'films'),
+  categoryChip('Originals', 'originals'),
+];
+
+/**
+ * The chip to mark active, or none for a screen no chip leads to.
+ */
+function activeChipFor(p: BrowsePayload): string | undefined {
+  switch (p.screen) {
+    case 'home':
+      return 'home';
+    case 'recommendations':
+      return 'foryou';
+    case 'live':
+      return 'live';
+    case 'category':
+      return p.category;
+    case 'search':
+      return undefined;
+    default: {
+      // Adding a BrowseScreen without a case here fails to compile, naming it.
+      const unhandled: never = p;
+      return unhandled;
+    }
+  }
+}
+
+// ── views ───────────────────────────────────────────────────────────────────
+function BrowseView({
+  p,
+  onPlay,
+  onChip,
+  activeKey,
+}: {
+  p: BrowsePayload;
+  onPlay: (t: Title) => void;
+  onChip: (c: ChipDef) => void;
+  activeKey?: string;
+}) {
+  const rootRef = useRef<HTMLDivElement>(null);
+  useAutoHeight(rootRef);
+
+  return (
+    <div className="bitflix-root" ref={rootRef}>
+      <Topbar brand={p.brand} prompt={p.brand.tagline} />
+      <div className="chips">
+        {CHIPS.map(c => (
+          <button key={c.key} className={`chip ${c.key === activeKey ? 'is-active' : ''}`} onClick={() => onChip(c)}>
+            {c.label}
+          </button>
+        ))}
+      </div>
+      <div className="headline reveal">
+        <h1>{p.headline}</h1>
+        {p.subhead ? <p>{p.subhead}</p> : null}
+      </div>
+      <Hero p={p} onPlay={onPlay} />
+      {p.sections.map(s => (
+        <RailRow key={s.id} section={s} onPlay={onPlay} />
+      ))}
+      <FooterNote brand={p.brand} />
+      <div data-llm="" style={{ display: 'none' }}>
+        {`Bitflix is open on "${p.headline}". Rails: ${p.sections.map(s => s.title).join(', ')}. The user can play any title or ask for more.`}
+      </div>
+    </div>
+  );
+}
+
+function PlayerView({ p, onBack, onPlay }: { p: PlayerPayload; onBack: () => void; onPlay: (t: Title) => void }) {
+  const [displayMode, setDisplayMode] = useDisplayMode();
+  const playerRef = useRef<PlayerAPI | null>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const [cast, setCast] = useState<CastState>({ available: false, casting: false });
+  const t = p.title;
+  const isFs = displayMode === 'fullscreen';
+
+  useAutoHeight(rootRef);
+
+  // reset cast state when the title changes (player remounts)
+  useEffect(() => {
+    setCast({ available: false, casting: false });
+  }, [t.id]);
+
+  const castLabel = cast.casting
+    ? `Casting${cast.device ? ` · ${cast.device}` : ''}`
+    : cast.available
+      ? 'Cast to TV'
+      : 'Cast unavailable';
+  const onCastClick = () => {
+    const pl = playerRef.current;
+    if (!pl) {
+      return;
+    }
+    // Real Bitmovin Player Google Cast API — castVideo() opens the browser's
+    // native Cast device chooser; no fake device list.
+    try {
+      if (cast.casting) {
+        pl.castStop();
+      } else {
+        pl.castVideo();
+      }
+    } catch {
+      /* ignore */
+    }
+  };
+
+  return (
+    <div className="bitflix-root" ref={rootRef}>
+      <div className="player-view">
+        <Topbar brand={p.brand} />
+        <div className="player-shell">
+          <BitmovinPlayerLazy
+            title={t}
+            licenseKey={p.licenseKey}
+            onPlayerReady={pl => {
+              playerRef.current = pl;
+            }}
+            onCast={setCast}
+          />
+        </div>
+        <div className="player-bar">
+          <div className="titleblock">
+            <div className="kicker">{t.kicker}</div>
+            <h2>{t.title}</h2>
+            <div className="metarow">
+              {t.delivery === 'live' ? <LiveBadge /> : null}
+              <Badges items={t.badges} />
+              {t.score ? <span className="score">{t.score}</span> : null}
+              {t.delivery === 'vod' ? (
+                <>
+                  {t.rating ? <span className="small">{t.rating}</span> : null}
+                  {t.year ? (
+                    <>
+                      <span className="dotsep">·</span>
+                      <span className="small">{t.year}</span>
+                    </>
+                  ) : null}
+                  {t.durationMin ? (
+                    <>
+                      <span className="dotsep">·</span>
+                      <span className="small">{t.durationMin} min</span>
+                    </>
+                  ) : null}
+                </>
+              ) : null}
+            </div>
+            <p className="syn">{t.synopsis}</p>
+          </div>
+          <div className="controls">
+            <button className="iconbtn" onClick={onBack}>
+              <Icon html={ICON.back} />
+              Back
+            </button>
+            <button
+              className={`iconbtn ${cast.available || cast.casting ? 'accent' : ''}`}
+              disabled={!cast.available && !cast.casting}
+              title={
+                cast.available || cast.casting
+                  ? 'Google Cast'
+                  : 'No Google Cast receiver available in this host sandbox'
+              }
+              onClick={onCastClick}
+            >
+              <Icon html={ICON.cast} />
+              {castLabel}
+            </button>
+            <button className="iconbtn" onClick={() => setDisplayMode(isFs ? 'inline' : 'fullscreen')}>
+              <Icon html={ICON.tv} />
+              {isFs ? 'Exit' : 'Fullscreen'}
+            </button>
+          </div>
+        </div>
+        {p.upNext?.length ? (
+          <RailRow section={{ id: 'upnext', title: 'Up Next', layout: 'wide', items: p.upNext }} onPlay={onPlay} />
+        ) : null}
+        <FooterNote brand={p.brand} />
+      </div>
+      <div data-llm="" style={{ display: 'none' }}>
+        {`The user is watching "${t.title}" (${t.kicker}) in the Bitflix player${cast.casting ? `, cast via Google Cast to ${cast.device || 'a device'} (this device is now a remote)` : cast.available ? ' on this device (a Google Cast receiver is available)' : ' on this device (no Google Cast receiver available in this MCP host sandbox)'}.${t.score ? ` Score: ${t.score}.` : ''} Up next: ${p.upNext.map(u => u.title).join(', ')}.`}
+      </div>
+    </div>
+  );
+}
+
+// ── root ────────────────────────────────────────────────────────────────────
+function makePlayer(title: Title, browse: BrowsePayload | null, licenseKey: string, base?: Payload): PlayerPayload {
+  const all = browse ? browse.sections.flatMap(s => s.items) : base && base.view === 'player' ? base.upNext : [];
+  const upNext = all.filter(t => t.id !== title.id).slice(0, 4);
+  const brand = browse?.brand ?? base?.brand ?? BRAND;
+  return { view: 'player', brand, title, upNext, licenseKey };
+}
+
+export function BitflixApp({ payload }: { payload?: Payload }) {
+  const browseCall = useCallTool('browse_catalog');
+  const recCall = useCallTool('get_recommendations');
+  const liveCall = useCallTool('whats_live');
+
+  const [nav, setNav] = useState<Payload | null>(null);
+  const [localTitle, setLocalTitle] = useState<Title | null>(null);
+
+  // Reset interaction state when a new tool result arrives.
+  const payloadKey = payload ? (payload.view === 'browse' ? `b:${payload.headline}` : `p:${payload.title.id}`) : 'none';
+  useEffect(() => {
+    setNav(null);
+    setLocalTitle(null);
+  }, [payloadKey]);
+
+  const base: Payload | undefined = nav ?? payload;
+  const lastBrowseRef = useRef<BrowsePayload | null>(null);
+  if (base && base.view === 'browse') {
+    lastBrowseRef.current = base;
+  }
+  const licenseKey = (base?.licenseKey || lastBrowseRef.current?.licenseKey) ?? '';
+
+  const showResult = (r: Awaited<ReturnType<typeof browseCall.callToolAsync>>) => {
+    // An error result resolves with no payload to navigate to.
+    if (r.structuredContent) {
+      setNav(r.structuredContent);
+    }
+  };
+
+  const onChip = (c: ChipDef) => {
+    setLocalTitle(null);
+
+    const call =
+      c.tool === 'browse_catalog'
+        ? browseCall.callToolAsync(c.category ? { category: c.category } : {})
+        : c.tool === 'get_recommendations'
+          ? recCall.callToolAsync({})
+          : liveCall.callToolAsync({});
+    call.then(showResult).catch(() => {});
+  };
+
+  const play = (t: Title) => setLocalTitle(t);
+  const back = () => {
+    setLocalTitle(null);
+    if (lastBrowseRef.current) {
+      setNav(lastBrowseRef.current);
+    } else {
+      browseCall
+        .callToolAsync({})
+        .then(showResult)
+        .catch(() => {});
+    }
+  };
+
+  const displayed: Payload | undefined = localTitle
+    ? makePlayer(localTitle, lastBrowseRef.current, licenseKey, base)
+    : base;
+
+  if (!displayed) {
+    return (
+      <div className="bitflix-root">
+        <div className="empty">Loading Bitflix…</div>
+      </div>
+    );
+  }
+  if (displayed.view === 'player') {
+    return <PlayerView p={displayed} onBack={back} onPlay={play} />;
+  }
+  return <BrowseView p={displayed} onPlay={play} onChip={onChip} activeKey={activeChipFor(displayed)} />;
+}
