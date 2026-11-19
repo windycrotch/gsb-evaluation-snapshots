@@ -7,7 +7,9 @@ recording replaced meanwhile is `source-changed` (ADR 0029); amended (2026-10-08
 answered `429 Too Many Requests`, as rate-limited APIs answer, is asked for again as a 5xx is;
 amended (2026-10-08): so are the requests for the file's size, and a `501 Not Implemented` is
 not asked again; amended (2026-10-08): the look for the other lens's file is asked for again
-too, and fails as `source-unreadable` when its server keeps failing
+too, and fails as `source-unreadable` when its server keeps failing; amended (2026-11-20): a
+streamed range's body resumes are bounded in count and total time, and a failure before the
+answer spends no body resume (ADR 0048)
 
 ## Context
 
