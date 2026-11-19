@@ -142,6 +142,8 @@ class MainWindow(QMainWindow):
         self._last_double_click = 0.0
         self._planning = False        # a plan is being worked out in the background
         self._replan = False          # something changed meanwhile: plan again after it
+        self._plan_serial = 0        # bumped when in-flight plans must be dropped
+        self._closed = False         # the window is closing: never apply another plan
         self._planned.connect(self._apply_plan)
         self._beat_timer = QTimer(self, interval=100)   # performance log: is the window responsive?
         self._beat_timer.timeout.connect(PROFILER.beat)
@@ -259,23 +261,28 @@ class MainWindow(QMainWindow):
     def _probed(self, item_id: int, aspect, duration, error) -> None:
         it = self.pl.find(item_id)
         if it is None:
+            # Removed before the prober answered: the result belongs to no
+            # list anymore and must not bring the item back.
             return
-        it.aspect, it.duration, it.probed = aspect, duration, True
         if error == NOT_VIDEO:
             # Still images and the like are dropped quietly, with a short note.
-            self.pl.remove(it)
+            if not self.pl.remove(it):
+                return                  # gone meanwhile: nothing to do
             self._skipped += 1
             self._skipped_timer.start()
             self._update_message()
             self.schedule_soon()
             return
+        it.aspect, it.duration, it.probed = aspect, duration, True
         if error:
-            it.error = error
-            if it in self.pl.queued:
-                self.pl.queued.remove(it)
-                self.pl.played.append(it)
-        self.pl.touch()
-        self.schedule_soon()
+            # Only an item still waiting in the queue is moved to played.
+            # An item already playing, already played or removed is left
+            # where it is; a playing one reports its failure via its tile.
+            if it in self.pl.queued and self.pl.finish(it, error=error):
+                self.schedule_soon()
+        else:
+            self.pl.touch()
+            self.schedule_soon()
         self._maybe_start_pending_benchmark()
 
     def _maybe_start_pending_benchmark(self) -> None:
@@ -328,8 +335,12 @@ class MainWindow(QMainWindow):
         """Bump what no longer fits, start what does, and lay everything out.
 
         Working out the plan can take a moment with a big wall, so it runs on
-        a background thread and is applied when ready (unless things changed
-        in the meantime, in which case it is worked out again)."""
+        a background thread and is applied when ready.  At most one plan is in
+        flight at a time; changes while it runs set ``_replan`` and are merged
+        into a single follow-up rather than piling threads up.  The result is
+        applied only if the inputs it was computed from (the two lists by id,
+        their revision, the window size and every relevant setting) are still
+        current, and the wall still owns the screen."""
         if self.bench or self.focus_tile or self._results_open or self._bench_pending:
             return
         if self._planning:
@@ -340,6 +351,7 @@ class MainWindow(QMainWindow):
         args = (list(self.pl.playing), list(self.pl.queued), w, h, s.max_streams, s.min_area, s.lookahead)
         kwargs = dict(prev=self.layout_, crop=s.crop)
         inputs = self._plan_inputs()
+        serial = self._plan_serial
         self._planning, self._replan = True, False
 
         def work() -> None:
@@ -354,34 +366,63 @@ class MainWindow(QMainWindow):
                 PROFILER.log("plan", f"{time.monotonic() - t0:.2f}s for {len(args[0])} playing and "
                                      f"{len(args[1])} queued: start {len(p.start)}, bump {len(p.demote)}"
                                      f"{', more to come' if p.more else ''}")
-            self._planned.emit((p, inputs))
+            self._planned.emit((p, inputs, serial))
         threading.Thread(target=work, daemon=True, name="plan").start()
 
     def _plan_inputs(self) -> tuple:
-        """What a plan depends on, to tell whether it is still current."""
+        """What a plan depends on, to tell whether it is still current.
+
+        The playlist revision catches every change that leaves the same ids
+        in the same lists (an aspect ratio arriving, reordering, an item
+        finishing and another taking its place), which id tuples alone miss."""
         s = self.settings
         return (tuple(it.id for it in self.pl.playing), tuple(it.id for it in self.pl.queued),
-                self.stage_size(), s.max_streams, s.min_area, s.lookahead, s.crop)
+                self.pl.revision, self.stage_size(),
+                s.max_streams, s.min_area, s.lookahead, s.crop)
+
+    def _invalidate_plans(self) -> None:
+        """Make every plan still being worked out (or queued) unapplicable."""
+        self._plan_serial += 1
+        self._replan = False
+        self._schedule_timer.stop()
 
     def _apply_plan(self, result: tuple) -> None:
-        p, inputs = result
+        p, inputs, serial = result
         self._planning = False
+        if self._closed or serial != self._plan_serial:
+            PROFILER.log("plan", "out of date before delivery; discarded")
+            return
         if p is None:
+            if self._replan:
+                self._replan = False
+                self.schedule_soon()
             return
         if (self._replan or inputs != self._plan_inputs()
-                or self.bench or self.focus_tile or self._results_open):
+                or self.bench or self.focus_tile or self._results_open or self._bench_pending):
             self._replan = False
             PROFILER.log("plan", "out of date when ready; planning again")
             self.schedule_soon()
             return
         s = self.settings
         for it in p.demote:
-            tile = self.tiles.pop(it.id)
+            # Re-check membership: the item may have been skipped or removed
+            # while the plan thread was running.
+            if it not in self.pl.playing:
+                continue
+            tile = self.tiles.pop(it.id, None)
+            if tile is None:
+                # The plan thinks it plays but no tile exists; reconcile the
+                # list instead of leaving an entry the wall cannot show.
+                self.pl.finish(it, error="player missing")
+                continue
             pos = tile.position()
             self._release(tile)
             self.pl.demote(it, pos)
         for it in p.start:
-            self.pl.start(it)
+            # The playlist owns the truth: start() refuses items that left
+            # the queue, so a stale plan can never acquire a tile for them.
+            if not self.pl.start(it):
+                continue
             tile = self._acquire()
             self.tiles[it.id] = tile
             tile.user_muted = s.sound == "silent"   # new videos start muted in silent mode
@@ -405,7 +446,10 @@ class MainWindow(QMainWindow):
         every one wait for the slowest, especially from a slow disk; this
         way the first ones appear straight away and the rest follow."""
         now = time.monotonic()
-        self._loading = [t for t in self._loading if t.item is not None and not t.is_playing
+        # Keep only tiles that are still opening: ones already playing have
+        # freed a start slot, and a stuck one is given up on after a while.
+        self._loading = [t for t in self._loading
+                         if t.item is not None and not t.is_playing
                          and now - t.load_started < START_GIVE_UP]
         if self.bench or self.focus_tile or self._results_open:
             self._load_timer.start()
@@ -483,29 +527,46 @@ class MainWindow(QMainWindow):
         self._place_overlays()
 
     # ------------------------------------------------------------- tile events
-    def _tile_finished(self, tile: VideoTile) -> None:
+    def _tile_finished(self, tile: VideoTile, item: Item | None = None) -> None:
+        """A video ended (or was skipped): give its tile back to the pool,
+        put the item in played and schedule the wall again."""
         if self.bench or tile.item is None:
             return
-        item = tile.item
+        current = tile.item
+        if item is not None and item is not current:
+            # A late signal about a previous file: the tile has since been
+            # recycled for ``current`` and must not be touched.
+            return
         if tile is self.focus_tile:
             self.exit_focus(finished=True)
             return
-        self.tiles.pop(item.id, None)
+        self._finish_tile(tile, current)
+
+    def _finish_tile(self, tile: VideoTile, item: Item, error: str | None = None) -> None:
+        """Release the tile and move the item to played, keeping the two in
+        step so a tile is never recycled while the playlist still says the
+        item is playing (and vice versa)."""
+        if self.tiles.pop(item.id, None) is not tile:
+            # Another tile has taken over this id meanwhile; only the
+            # playlist transition is still safe to apply.
+            self.pl.finish(item, error=error)
+            self.schedule_soon()
+            return
         self._release(tile)
-        self.pl.finish(item)
+        self.pl.finish(item, error=error)
         self.schedule_soon()
 
-    def _tile_failed(self, tile: VideoTile, message: str) -> None:
+    def _tile_failed(self, tile: VideoTile, item: Item | None = None, message: str = "") -> None:
         if self.bench or tile.item is None:
             return
-        item = tile.item
+        current = tile.item
+        if item is not None and item is not current:
+            # Stale failure from a file the tile no longer holds.
+            return
         if tile is self.focus_tile:
             self.focus_tile = None
             self._resume_others()
-        self.tiles.pop(item.id, None)
-        self._release(tile)
-        self.pl.finish(item, error=message)
-        self.schedule_soon()
+        self._finish_tile(tile, current, error=message)
 
     def _tile_shape(self, tile: VideoTile, aspect: float) -> None:
         it = tile.item
@@ -604,12 +665,13 @@ class MainWindow(QMainWindow):
 
     def _skip_id(self, item_id: int) -> None:
         tile = self.tiles.get(item_id)
-        if tile is None:
+        if tile is None or tile.item is None:
             return
+        item = tile.item
         if tile is self.focus_tile:
             self.exit_focus(finished=True)
         else:
-            self._tile_finished(tile)
+            self._finish_tile(tile, item)
 
     def _requeue(self, item_id: int, front: bool) -> None:
         it = self.pl.find(item_id)
@@ -626,9 +688,18 @@ class MainWindow(QMainWindow):
     def _remove_ids(self, ids: list[int]) -> None:
         for i in ids:
             it = self.pl.find(i)
-            if it:
-                self.pl.remove(it)
+            if not it:
+                continue
+            tile = self.tiles.pop(i, None)
+            if tile is not None:
+                # A playing item: its tile has to go back to the pool in the
+                # same step, or the wall keeps an empty cell for it.
+                self._release(tile)
+            self.pl.remove(it)
+        # Drop placements that never started for items now gone.
+        self._to_load = [(t, it) for (t, it) in self._to_load if it.id in self.tiles]
         self._update_message()
+        self.schedule_soon()
 
     def show_menu(self, global_pos, tile: VideoTile | None) -> None:
         m = QMenu(self)
@@ -917,6 +988,9 @@ class MainWindow(QMainWindow):
         if not sources:
             QMessageBox.information(self, "Benchmark", "Add some videos first; the benchmark plays your own files.")
             return
+        # The benchmark owns the screen from here on: a plan still being
+        # worked out must not be applied over its tiles when it lands.
+        self._invalidate_plans()
         if self.focus_tile:
             self.exit_focus(finished=False)
         for t in self.tiles.values():
@@ -1147,6 +1221,10 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, e) -> None:
         PROFILER.log("app", "closing")
+        # Any plan still running on a background thread is dead to the UI now:
+        # its result must be discarded when the thread finishes.
+        self._closed = True
+        self._invalidate_plans()
         self._beat_timer.stop()
         PROFILER.quiet()               # the window is going: no freeze reports from here on
         self._cursor_timer.stop()

@@ -153,17 +153,44 @@ To start over as on a new computer, delete Polyreel's settings
 polyreel/
   layout.py     aspect-preserving packing (pure Python, unit tested)
   scheduler.py  which videos start / wait / get bumped (pure Python, unit tested)
-  playlist.py   played / playing / queued lists
+  playlist.py   played / playing / queued lists (pure Python, unit tested)
   perf.py       frame-drop monitor, traffic-light levels, benchmark plan
   profiler.py   optional performance log for troubleshooting
   tile.py       one libmpv player embedded in a native child window
   probe.py      background probing of each file's shape and length
   ui.py         playlist drawer, traffic light and close-button widgets
   app.py        main window tying it together
-tests/          pytest suite for the pure-Python parts
+tests/
+  test_core.py          pytest suite for the pure-Python parts
+  test_scheduling.py    wall/playlist coordination with fake tiles and probes
 ```
 
 Run the tests with `pip install pytest && python -m pytest`.
+
+### Testing without libmpv
+
+The whole suite runs without python-mpv/libmpv installed: `mpvlib` then exposes
+`mpv = None`, and `tests/test_scheduling.py` replaces the parts that would need
+a real player with lightweight fakes:
+
+- a `FakeTile` (a plain `QObject` with the same signals/methods as `VideoTile`,
+  no native window or decoder) stands in for players, and a `FakeProber`
+  stands in for the background prober — probe results are delivered by calling
+  `window._probed(...)` directly;
+- a `BlockPlanner` wraps the real pure-Python `scheduler.plan` behind a
+  `threading.Event`, so a layout can be held in flight while the test changes
+  the playlists, window size or settings, then released to verify the stale
+  result is discarded and exactly one recompute follows.
+
+These cover the normal start path, stale-plan discard (id and revision
+mismatch), single-flight schedule merging, failed/skipped/removed tile
+cleanup, late signals on recycled tiles, late probe results, and the
+close-window / start-benchmark fences. On a headless machine use the
+offscreen Qt platform:
+
+```
+QT_QPA_PLATFORM=offscreen python -m pytest
+```
 
 ## Notes
 

@@ -54,10 +54,12 @@ def _retire_loop() -> None:
 
 class VideoTile(QWidget):
     # Signals are emitted from mpv's event thread; Qt queues them to the GUI thread.
+    # The item is carried alongside the tile: a recycled tile may already be
+    # playing another file when a late signal about the previous one arrives.
     double_clicked = Signal(object)
     right_clicked = Signal(object)
-    finished = Signal(object)
-    failed = Signal(object, str)
+    finished = Signal(object, object)          # tile, item that reached its end
+    failed = Signal(object, object, str)       # tile, item that failed, message
     shape_changed = Signal(object, float)
     ready = Signal(object)          # the player has started
     retired = Signal(object)        # the player has been shut down
@@ -187,7 +189,7 @@ class VideoTile(QWidget):
                     kwargs["callback"](None, None)
             self._stops_done = self._stops_sent
             if self.item is not None:
-                self.failed.emit(self, "player could not start")
+                self.failed.emit(self, self.item, "player could not start")
         else:
             self._send_pending()
         self.ready.emit(self)
@@ -218,7 +220,7 @@ class VideoTile(QWidget):
             data = event.data
             if data is not None and data.reason == mpv.MpvEventEndFile.ERROR and self.item is not None:
                 self._active = False
-                self.failed.emit(self, "could not be played")
+                self.failed.emit(self, self.item, "could not be played")
 
     def _on_state(self, name, value) -> None:
         if value is not None:
@@ -227,7 +229,7 @@ class VideoTile(QWidget):
     def _on_eof(self, _name, value) -> None:
         if value and self._active and self.item is not None:
             self._active = False
-            self.finished.emit(self)
+            self.finished.emit(self, self.item)
 
     def _on_video_params(self, _name, params) -> None:
         if not params or not self._active:

@@ -77,12 +77,17 @@ class Playlists:
         self.playing: list[Item] = []
         self.queued: list[Item] = []
         self._listeners: list[Callable[[], None]] = []
+        # Bumped on every structural change (and on ``touch``); a background
+        # plan records the revision it was computed from, so stale results can
+        # be recognised even when the same ids are still in the same lists.
+        self.revision = 0
 
     # -- notifications ---------------------------------------------------
     def subscribe(self, fn: Callable[[], None]) -> None:
         self._listeners.append(fn)
 
     def _changed(self) -> None:
+        self.revision += 1
         for fn in self._listeners:
             fn()
 
@@ -112,27 +117,45 @@ class Playlists:
         self._changed()
         return items
 
-    def start(self, item: Item) -> None:
-        """Queued -> playing."""
+    def start(self, item: Item) -> bool:
+        """Queued -> playing.  Returns False (and changes nothing) if the
+        item is no longer in the queue: a plan or probe result that arrived
+        late must never revive an item that was removed or already played."""
+        if item not in self.queued:
+            return False
         self.queued.remove(item)
         self.playing.append(item)
         self._changed()
+        return True
 
-    def finish(self, item: Item, error: str | None = None) -> None:
-        """Playing -> played."""
-        if item in self.playing:
-            self.playing.remove(item)
+    def finish(self, item: Item, error: str | None = None) -> bool:
+        """Playing (or queued) -> played, keeping any earlier error message.
+
+        Idempotent: finishing an item already in played only refreshes its
+        error, and an item that was removed altogether is left alone.
+        Returns whether the item still belongs to the playlist."""
+        lst = self.list_of(item)
+        if lst is None:
+            return False
+        if lst is not self.played:
+            lst.remove(item)
+            self.played.append(item)
         item.error = error or item.error
         item.resume_pos = 0.0
-        self.played.append(item)
         self._changed()
+        return True
 
-    def demote(self, item: Item, position: float = 0.0) -> None:
-        """Playing -> front of the queue (it no longer fits on screen)."""
+    def demote(self, item: Item, position: float = 0.0) -> bool:
+        """Playing -> front of the queue (it no longer fits on screen).
+        No-op if the item is not currently playing (it may have finished or
+        been skipped while the plan was being worked out)."""
+        if item not in self.playing:
+            return False
         self.playing.remove(item)
         item.resume_pos = position
         self.queued.insert(0, item)
         self._changed()
+        return True
 
     def requeue(self, item: Item, front: bool = False) -> None:
         """Played (or queued) -> queue again."""
@@ -157,11 +180,19 @@ class Playlists:
         self.queued = new
         self._changed()
 
-    def remove(self, item: Item) -> None:
+    def remove(self, item: Item) -> bool:
+        """Take the item out of whichever list it is in.
+
+        A playing item may be removed only once its tile has been released by
+        the caller; this method does not touch players.  Returns False for an
+        item that was already removed, so late probe/plan results become
+        harmless no-ops."""
         lst = self.list_of(item)
-        if lst is not None and lst is not self.playing:
-            lst.remove(item)
-            self._changed()
+        if lst is None:
+            return False
+        lst.remove(item)
+        self._changed()
+        return True
 
     def recycle_played(self) -> bool:
         """Endless playback: move everything already played (in the order it
@@ -182,5 +213,9 @@ class Playlists:
         self._changed()
 
     def touch(self) -> None:
-        """Signal a change to item metadata (e.g. probing finished)."""
+        """Signal a change to item metadata (e.g. probing finished).
+
+        Bumps the revision as well: a plan computed before an aspect ratio was
+        reported must not be applied afterwards even if the list membership is
+        unchanged."""
         self._changed()

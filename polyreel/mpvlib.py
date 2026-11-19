@@ -29,5 +29,8 @@ try:
 except OSError as e:  # libmpv itself is missing
     mpv = None
     LOAD_ERROR = str(e)
+except ImportError as e:  # python-mpv not installed (e.g. headless test runs)
+    mpv = None
+    LOAD_ERROR = str(e)
 else:
     LOAD_ERROR = None
