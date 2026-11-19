@@ -17,6 +17,27 @@
 ## Current State
 Under intensive care right now, should reach a first usable state + some docs soonish
 
+## Tests
+
+The sound-track update lifecycle (validate-first switching, mute/unmute,
+deletion cleanup and rapid-update races) is implemented in the runtime-agnostic
+`imports/client/components/player/soundController.js` and is covered by a plain
+Node test suite that uses an injectable fake Tone scheduler — no browser, Meteor
+or audio device required:
+
+```
+npm test
+```
+
+The tests live in `tests/`:
+
+* `tests/soundController.test.js` — behaviour and call-ordering guarantees
+* `tests/fakeToneScheduler.js` — fake `Tone.Transport` recording every
+  scheduled/cleared event per sound, with generation-guarded `flush()`
+* `tests/helpers.js` — controllable evaluator (including deferred evaluations
+  for race scenarios) and test harness builders
+
+
 
 
 

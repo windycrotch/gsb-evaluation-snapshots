@@ -1,24 +1,26 @@
-import { each, filter } from 'lodash'
 import { prepareCode } from './prepareCode'
+import { validateEvalResult } from '../player/soundController'
 
 import Tone from 'tone';
 import teoria from 'teoria'
 
 export let evalCode = (code) => {
 
-  code = prepareCode(code)
+  let prepared = prepareCode(code)
+  if (prepared === undefined) {
+    return {
+      status: 'err',
+      body: 'EDITOR SYNTAX ERROR => the code could not be parsed (prepareCode failed)'
+    }
+  }
 
   try {
-    let result =  eval(`(function self(){${code}}())`);
-    let error = `EDITOR RESULT ERROR => the code should contain one c(code) var`
+    let result = eval(`(function self(){${prepared}}())`);
 
-    if(!result || typeof result !== 'object') return {status: 'err', body: error}
-    if(!result.c) return {status: 'err', body: error}
-    if(!result.e) return {status: 'err', body: error}
-    if(result.o && result.o.vars) {
-      let error = {status: 'err', body: 'EDITOR RESULT ERROR => each result.o.vars structure should be [NAMEVAR, VAR, MINVAL, MAXVAL]'}
-      if (filter(result.o.vars, v => v instanceof Array).length !== result.o.vars.length) return error
-    }
+    // Structural validation lives in the controller so the same rules apply to
+    // the production evaluator and to injected test evaluators.
+    let validation = validateEvalResult(result)
+    if (!validation.valid) return {status: 'err', body: validation.error}
 
     return {status: 'ok', body: result}
 

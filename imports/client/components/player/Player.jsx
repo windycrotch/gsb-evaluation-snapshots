@@ -47,8 +47,11 @@ export default class Player extends React.Component {
         updateSound(s)
       },
       updated: (s, p) => {
-        let result = updateSound(s)
-        result.status === 'err' ? this.setState({codeErrors: result.body}) : this.setState({codeErrors: false})
+        // updateSound is validate-first and async: the old source keeps
+        // playing until the new code has been evaluated successfully.
+        Promise.resolve(updateSound(s)).then(result => {
+          result.status === 'err' ? this.setState({codeErrors: result.body}) : this.setState({codeErrors: false})
+        })
       },
       deleted: s => {
         removeSound(s)

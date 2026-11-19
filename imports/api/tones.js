@@ -14,6 +14,15 @@ Meteor.methods({
     Tones.insert(tone);
   },
 
+  // One persisted record per sound track: re-evaluating code replaces the
+  // previous record instead of stacking duplicates.
+  'tones.upsert'(tone) {
+    Tones.upsert(
+      { soundId: tone.soundId },
+      { $set: tone }
+    );
+  },
+
   'tones.removeFromSoundId'(soundId) {
     Tones.remove({soundId: soundId});
   },

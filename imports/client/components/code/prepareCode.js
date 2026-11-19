@@ -3,7 +3,7 @@ import { intersection, filter } from 'lodash'
 
 export let prepareCode = (code) => {
   try {
-    result = esprima.parseModule(code)
+    let result = esprima.parseModule(code)
 
     // get all the vars declarations
     let variables = filter(result.body, e => e.type === "VariableDeclaration")
