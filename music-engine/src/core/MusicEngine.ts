@@ -50,15 +50,29 @@ export class MusicEngine {
   private styleRandom: SeededRandom | null = null;
   private seed: string;
   private generatedUntil = 0;
+  /**
+   * Explicit transition-lifecycle flag. While true, generate() produces no
+   * events and every incoming style/seed request is merged into pendingTarget
+   * instead of starting a second transition.
+   */
   private transitioning = false;
-  /** Latest style/seed request made while a transition was already in flight. */
+  /**
+   * The single converged "final intent": every request accepted while a
+   * transition was in flight, or while playback was paused/stopped, is merged
+   * here field-by-field (latest value per field wins). start()/resume() apply
+   * it so an interrupted switch is never silently lost.
+   */
   private pendingTarget: { styleId?: string; seed?: string } | null = null;
   /** Target of the transition currently in flight (kept for cancel/merge). */
   private transitionTarget: { styleId?: string; seed?: string } | null = null;
   private transitionTimer: ReturnType<typeof setTimeout> | null = null;
   private stopTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Delayed AudioContext.suspend() scheduled by pause(). */
+  private suspendTimer: ReturnType<typeof setTimeout> | null = null;
   private watchdog: ReturnType<typeof setInterval> | null = null;
   private watchdogMisses = 0;
+  /** Once dispose() runs, every pending timer callback must become a no-op. */
+  private disposed = false;
   private warnedInstruments = new Set<string>();
 
   private cfg: EngineConfig & {
@@ -184,6 +198,8 @@ export class MusicEngine {
         'audioUnlockFailed',
       );
     }
+    // A saved intent whose style is now unplayable must not block ▶:
+    // applyPendingTarget() reports it and keeps the current working style.
     this.applyPendingTarget();
 
     if (!this.instance) this.instantiateStyle();
@@ -198,14 +214,19 @@ export class MusicEngine {
 
   pause(): void {
     if (this.state.status !== 'playing') return;
+    // An in-flight transition is folded into the pending intent so resume()
+    // rebuilds the engine with the target the user actually asked for.
     this.cancelTransition(false);
     this.scheduler?.stop();
     this.stopWatchdog();
+    if (this.suspendTimer) clearTimeout(this.suspendTimer);
     const audio = this.audio;
     if (audio) {
       const now = audio.ctx.currentTime;
       audio.setFade(0, now + 0.01, 0.06);
-      setTimeout(() => {
+      this.suspendTimer = setTimeout(() => {
+        this.suspendTimer = null;
+        if (this.disposed) return;
         // If the user hit resume in the meantime, keep running.
         if (this.state.status === 'paused' && this.audio) void this.audio.suspend();
       }, 140);
@@ -215,6 +236,10 @@ export class MusicEngine {
 
   async resume(): Promise<void> {
     if (this.state.status !== 'paused') return;
+    if (this.suspendTimer) {
+      clearTimeout(this.suspendTimer);
+      this.suspendTimer = null;
+    }
     this.ensureAudio();
     unlockIosAudioOutput(this.audio!.ctx);
     const running = await this.audio!.resume();
@@ -250,6 +275,7 @@ export class MusicEngine {
     this.state.set('idle');
     this.stopTimer = setTimeout(() => {
       this.stopTimer = null;
+      if (this.disposed) return;
       const a = this.audio;
       if (!a) return;
       const t = a.ctx.currentTime;
@@ -284,6 +310,10 @@ export class MusicEngine {
     }
     this.seed = s;
     this.teardownInstance(); // fresh deterministic replay from t=0
+    // Converge with any interrupted transition: the newest explicit seed is
+    // the final intent start()/resume() must rebuild from (never a stale one
+    // left behind by stop()).
+    this.rememberIntent({ seed: s });
     if (this.state.status === 'paused') this.generatedUntil = this.pausedPosition();
     this.eventBus.emit('seed', { seed: s });
   }
@@ -292,6 +322,8 @@ export class MusicEngine {
     const plugin = this.validateStyle(styleId);
     if (this.state.status === 'playing') {
       if (this.transitioning) {
+        // Validate before merging so a broken target fails at request time
+        // (EngineError), never inside the boundary timer.
         this.queueTarget({ styleId });
         this.eventBus.emit('style-pending', { styleId });
         return;
@@ -302,6 +334,9 @@ export class MusicEngine {
     this.stylePlugin = plugin;
     this.params.init(plugin.id, plugin.parameters);
     this.teardownInstance();
+    // The newest explicit style converges with any switch whose boundary was
+    // interrupted, so start()/resume() never resurrects an outdated target.
+    this.rememberIntent({ styleId: plugin.id });
     if (this.state.status === 'paused') this.generatedUntil = this.pausedPosition();
     this.eventBus.emit('style', { styleId: plugin.id });
   }
@@ -483,10 +518,24 @@ export class MusicEngine {
   }
 
   async dispose(): Promise<void> {
+    // Flip first: every timer that is already queued (transition, stop
+    // wind-down, pause suspend, watchdog) becomes a no-op when it fires.
+    this.disposed = true;
     this.cancelTransition(true);
     this.stop();
-    if (this.transitionTimer) clearTimeout(this.transitionTimer);
-    if (this.stopTimer) clearTimeout(this.stopTimer);
+    if (this.transitionTimer) {
+      clearTimeout(this.transitionTimer);
+      this.transitionTimer = null;
+    }
+    if (this.stopTimer) {
+      clearTimeout(this.stopTimer);
+      this.stopTimer = null;
+    }
+    if (this.suspendTimer) {
+      clearTimeout(this.suspendTimer);
+      this.suspendTimer = null;
+    }
+    this.stopWatchdog();
     this.teardownInstance();
     this.instruments.disposeAll();
     this.fx.disposeAll();
@@ -525,7 +574,7 @@ export class MusicEngine {
   }
 
   private async watchdogTick(): Promise<void> {
-    if (this.state.status !== 'playing' || !this.audio) {
+    if (this.disposed || this.state.status !== 'playing' || !this.audio) {
       this.stopWatchdog();
       return;
     }
@@ -705,15 +754,26 @@ export class MusicEngine {
 
   // -------------------------------------------------------------------------
   // Graceful transitions (style switch / new seed while playing)
+  //
+  // The lifecycle has exactly three shapes and all three converge on the same
+  // pending intent:
+  //   1. transition reaches its boundary      → commitTransition()
+  //   2. another request arrives mid-flight   → merged into pendingTarget
+  //   3. pause()/stop() interrupts it         → cancelTransition() folds the
+  //      in-flight target into pendingTarget, applied on start()/resume()
   // -------------------------------------------------------------------------
 
   private beginTransition(target: { styleId?: string; seed?: string }): void {
     if (!this.audio || !this.transport.isActive) return;
+    // Fail fast at request time: a missing-dependency style must throw
+    // EngineError while the current style is still fully playable.
     if (target.styleId) this.validateStyle(target.styleId);
 
     const now = this.audio.ctx.currentTime;
     const pos = this.transport.positionAt(now);
     const boundaryRaw = this.instance?.nextBoundary?.(pos) ?? null;
+    // Musical boundary, clamped to 0.6–4 s ahead of the current position so
+    // the crossfade always lands promptly but never on a ringing note.
     const boundary = Math.min(Math.max(boundaryRaw ?? pos + 1.0, pos + 0.6), pos + 4.0);
     const audioBoundary = this.transport.audioTimeFor(boundary);
 
@@ -727,24 +787,49 @@ export class MusicEngine {
     const waitMs = Math.max(0, (audioBoundary - now) * 1000 - 25);
     this.transitionTimer = setTimeout(() => {
       this.transitionTimer = null;
-      const a = this.audio;
-      if (!a) {
-        this.transitioning = false;
-        this.transitionTarget = null;
-        return;
-      }
-      const n2 = a.ctx.currentTime;
-      // Anything requested while this transition was in flight lands here too,
-      // so a rapid style/seed change is never silently discarded.
-      const effective: { styleId?: string; seed?: string } = {
-        ...target,
-        ...(this.pendingTarget ?? {}),
-      };
-      this.pendingTarget = null;
+      if (this.disposed) return;
+      this.commitTransition();
+    }, waitMs);
+  }
+
+  /**
+   * Boundary callback. The *entire* merged target is validated before anything
+   * audible is torn down: on failure the engine keeps playing the old style
+   * and never gets stuck with `transitioning === true`.
+   */
+  private commitTransition(): void {
+    const audio = this.audio;
+    if (!audio) {
+      this.transitioning = false;
       this.transitionTarget = null;
+      return;
+    }
+    // Latest in-flight target plus every request merged in while waiting.
+    const effective: { styleId?: string; seed?: string } = {
+      ...(this.transitionTarget ?? {}),
+      ...(this.pendingTarget ?? {}),
+    };
+    const oldStyle = this.stylePlugin;
+    const oldSeed = this.seed;
+
+    try {
+      // Pre-validate the whole intent before touching the running engine.
+      if (effective.styleId) this.validateStyle(effective.styleId);
+    } catch (err) {
+      this.abortFailedTransition(err, effective);
+      return;
+    }
+
+    try {
+      const n2 = audio.ctx.currentTime;
+      // 1) silence everything that is still ringing …
       this.instruments.stopAll(n2 + 0.02, 0.05);
+      // 2) … drop every queued event …
       this.scheduler?.queue.clear();
+      // 3) … stop the old instance, reset FX, stop instruments again inside
+      //    teardown so no tail survives the swap …
       this.teardownInstance();
+      // 4) … adopt the target (style params first, then seed) …
       if (effective.styleId) {
         this.stylePlugin = this.validateStyle(effective.styleId);
         this.params.init(this.stylePlugin.id, this.stylePlugin.parameters);
@@ -754,29 +839,126 @@ export class MusicEngine {
         this.seed = effective.seed;
         this.eventBus.emit('seed', { seed: this.seed });
       }
+      // 5) … regenerate from the boundary position, never before/after it …
       this.generatedUntil = this.transport.isActive ? this.transport.positionAt(n2) : 0;
+      // 6) … and instantiate deterministically with the new seed.
       this.instantiateStyle();
-      a.setFade(1, n2 + 0.06, 1.1);
+      audio.setFade(1, n2 + 0.06, 1.1);
+      this.pendingTarget = null;
+      this.transitionTarget = null;
       this.transitioning = false;
       this.eventBus.emit('transition', { phase: 'end' });
       this.scheduler?.start();
       this.state.set('playing');
-    }, waitMs);
+      // Refill the cleared queue immediately so the new style is already
+      // sounding before the next scheduler wake-up.
+      this.generate();
+    } catch (err) {
+      // Defensive: a plugin throwing mid-swap must not strand the engine in
+      // the transitioning state. Rebuild what was playing before and carry on.
+      this.rollbackTransition(err, oldStyle, oldSeed);
+    }
+  }
+
+  /** A target failed validation: report it and keep the current style playing. */
+  private abortFailedTransition(err: unknown, effective: { styleId?: string; seed?: string }): void {
+    this.eventBus.emit('error', {
+      scope: 'transition',
+      code: err instanceof EngineError ? err.code : undefined,
+      params: err instanceof EngineError ? err.params : undefined,
+      message: String(err instanceof Error ? err.message : err),
+    });
+    // The bad field is dropped; any other valid field stays queued so it can
+    // still be applied on the next boundary / resume.
+    if (effective.styleId) {
+      this.pendingTarget =
+        effective.seed !== undefined ? { seed: effective.seed } : null;
+    }
+    this.transitionTarget = null;
+    this.transitioning = false;
+    const audio = this.audio;
+    if (audio) {
+      const n2 = audio.ctx.currentTime;
+      // Undo the fade-out started by beginTransition().
+      audio.setFade(1, n2 + 0.02, 0.3);
+      // The surviving pre-boundary events are stale and the kept instance's
+      // internal cursor has advanced past the old horizon. Drop the queue,
+      // rewind to the live position and rebuild the same style
+      // deterministically so it can refill the window from here.
+      this.scheduler?.queue.clear();
+      this.generatedUntil = this.transport.isActive ? this.transport.positionAt(n2) : 0;
+      this.teardownInstance();
+      this.instantiateStyle();
+    }
+    this.eventBus.emit('transition', { phase: 'end' });
+    this.scheduler?.start();
+    this.state.set('playing');
+    // Refill the drained queue immediately so the old style keeps sounding
+    // without waiting for the next scheduler tick.
+    this.generate();
+  }
+
+  /** Unexpected failure after teardown: restore the previous style/seed. */
+  private rollbackTransition(err: unknown, oldStyle: StylePlugin | null, oldSeed: string): void {
+    this.eventBus.emit('error', { scope: 'transition', message: String(err) });
+    this.scheduler?.queue.clear();
+    if (oldStyle && this.styles.get(oldStyle.id)) {
+      this.stylePlugin = oldStyle;
+      this.params.init(oldStyle.id, oldStyle.parameters);
+    }
+    this.seed = oldSeed;
+    const audio = this.audio;
+    this.generatedUntil =
+      audio && this.transport.isActive ? this.transport.positionAt(audio.ctx.currentTime) : 0;
+    this.instantiateStyle();
+    if (audio) audio.setFade(1, audio.ctx.currentTime + 0.02, 0.3);
+    this.transitionTarget = null;
+    this.transitioning = false;
+    this.eventBus.emit('transition', { phase: 'end' });
+    this.scheduler?.start();
+    this.state.set('playing');
+    // Refill the drained queue with the restored style's events.
+    this.generate();
+  }
+
+  /**
+   * Merge a request into the converged intent (latest value per field wins).
+   * Used for mid-transition requests and for direct changes while paused.
+   */
+  private rememberIntent(target: { styleId?: string; seed?: string }): void {
+    this.pendingTarget = { ...(this.pendingTarget ?? {}), ...target };
   }
 
   /** Remember a request made mid-transition (latest value per field wins). */
   private queueTarget(target: { styleId?: string; seed?: string }): void {
-    this.pendingTarget = { ...(this.pendingTarget ?? {}), ...target };
+    if (target.styleId) this.validateStyle(target.styleId);
+    this.rememberIntent(target);
   }
 
   /**
-   * Applies a request that was queued while a transition was in flight but
-   * never landed (pause/stop interrupted it). Called from start()/resume() so
-   * the intent survives instead of being thrown away.
+   * Applies the converged intent when playback (re)starts after a transition
+   * was interrupted by pause()/stop(). The whole target is validated *before*
+   * any state is mutated, so an unplayable style cannot destroy the engine
+   * that is still sitting on a working one.
    */
   private applyPendingTarget(): void {
     const target = this.pendingTarget;
     if (!target) return;
+    try {
+      if (target.styleId) this.validateStyle(target.styleId);
+    } catch (err) {
+      // Keep the current, known-playable style; surface the failure instead
+      // of tearing anything down or leaving a half-applied intent behind.
+      this.eventBus.emit('error', {
+        scope: 'transition',
+        code: err instanceof EngineError ? err.code : undefined,
+        params: err instanceof EngineError ? err.params : undefined,
+        message: String(err instanceof Error ? err.message : err),
+      });
+      this.pendingTarget =
+        target.styleId && target.seed !== undefined ? { seed: target.seed } : null;
+      return;
+    }
     this.pendingTarget = null;
     if (target.styleId) {
       this.stylePlugin = this.validateStyle(target.styleId);
@@ -796,9 +978,10 @@ export class MusicEngine {
     if (this.transitionTimer) clearTimeout(this.transitionTimer);
     this.transitionTimer = null;
     this.transitioning = false;
-    // Don't lose what the interrupted transition was heading towards.
+    // Don't lose what the interrupted transition was heading towards: fold it
+    // into the same converged intent the boundary commit would have used.
     if (this.transitionTarget) {
-      this.pendingTarget = { ...this.transitionTarget, ...(this.pendingTarget ?? {}) };
+      this.rememberIntent(this.transitionTarget);
       this.transitionTarget = null;
     }
     if (immediate && this.audio) {
