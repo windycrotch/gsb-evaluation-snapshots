@@ -92,6 +92,7 @@ dependencies = [
 name = "clawdio-bitcrusher"
 version = "0.1.0"
 dependencies = [
+ "clawdio-shared",
  "js-sys",
  "test-helpers",
  "wasm-bindgen",
@@ -101,6 +102,7 @@ dependencies = [
 name = "clawdio-moog"
 version = "0.1.0"
 dependencies = [
+ "clawdio-shared",
  "js-sys",
  "test-helpers",
  "wasm-bindgen",

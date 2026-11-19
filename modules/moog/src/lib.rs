@@ -1,4 +1,13 @@
+use shared::sanitize_f32;
 use wasm_bindgen::prelude::*;
+
+/// Legal range for the `cutoff` parameter (normalized frequency).
+pub const MIN_CUTOFF: f32 = 0.0;
+pub const MAX_CUTOFF: f32 = 1.0;
+
+/// Legal range for the `resonance` parameter.
+pub const MIN_RESONANCE: f32 = 0.0;
+pub const MAX_RESONANCE: f32 = 4.0;
 
 #[wasm_bindgen]
 pub struct MoogModule {
@@ -20,8 +29,9 @@ pub struct MoogModule {
 impl MoogModule {
     pub fn new(cutoff: f32, resonance: f32) -> MoogModule {
         MoogModule {
-            cutoff,
-            resonance,
+            cutoff: sanitize_f32(cutoff, MIN_CUTOFF, MAX_CUTOFF).unwrap_or(0.065),
+            resonance: sanitize_f32(resonance, MIN_RESONANCE, MAX_RESONANCE)
+                .unwrap_or(3.5),
             in1: 0.0,
             in2: 0.0,
             in3: 0.0,
@@ -30,6 +40,36 @@ impl MoogModule {
             out2: 0.0,
             out3: 0.0,
             out4: 0.0,
+        }
+    }
+
+    /// Update the cutoff at runtime.
+    ///
+    /// Returns `true` when the value was accepted (after clamping) and
+    /// `false` when it was rejected (NaN / infinity), leaving the module
+    /// untouched.
+    pub fn set_cutoff(&mut self, cutoff: f32) -> bool {
+        match sanitize_f32(cutoff, MIN_CUTOFF, MAX_CUTOFF) {
+            Some(sanitized) => {
+                self.cutoff = sanitized;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Update the resonance at runtime.
+    ///
+    /// Returns `true` when the value was accepted (after clamping) and
+    /// `false` when it was rejected (NaN / infinity), leaving the module
+    /// untouched.
+    pub fn set_resonance(&mut self, resonance: f32) -> bool {
+        match sanitize_f32(resonance, MIN_RESONANCE, MAX_RESONANCE) {
+            Some(sanitized) => {
+                self.resonance = sanitized;
+                true
+            }
+            None => false,
         }
     }
 
@@ -47,14 +87,14 @@ impl MoogModule {
         // Loop over samples and apply moog filter
         for sample in samples.iter_mut() {
             let mut base = *sample;
+
+            // A non-finite input must never propagate into the filter state.
+            if !base.is_finite() {
+                base = 0.0;
+            }
+
             base -= self.out4 * fb;
             base *= input_factor;
-
-            // Add stability check
-            // Was having an issue where it increments to infinity sometimes
-            // if !base.is_finite() {
-            //     base = 0.0;
-            // }
 
             // Pole 1
             self.out1 = base + 0.3 * self.in1 + (1.0 - f) * self.out1;
@@ -72,7 +112,10 @@ impl MoogModule {
             self.out4 = self.out3 + 0.3 * self.in4 + (1.0 - f) * self.out4;
             self.in4 = self.out3;
 
-            *sample = self.out4.clamp(-1.0, 1.0);
+            // Final safety net: the audio thread must never emit a
+            // non-finite sample, even if internal state drifted.
+            let output = self.out4.clamp(-1.0, 1.0);
+            *sample = if output.is_finite() { output } else { 0.0 };
         }
 
         samples
