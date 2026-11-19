@@ -275,6 +275,14 @@ car takes the flag, nobody goes off, lap times are plausible and consistent,
 the field finishes together, the ramp is actually jumped, attract mode is
 stable, and restarting reproduces the grid.
 
+It also pins down the settlement rules that a close race stresses: a crossing
+settles exactly one lap and one finish time even if it is re-entered in the
+same frame, a finished car shoved back over the line cannot score again or
+change its finish time or its classified distance, the opening crossing starts
+the clock rather than counting a lap, cars level on distance sort the same way
+whatever order the array is in, and a restart returns every car and every AI
+controller - including pooled instances - to the exact state of a first start.
+
 ### `npm run verify:pages` — deployment check
 
 Serves the build one directory down and loads it the way GitHub Pages serves a

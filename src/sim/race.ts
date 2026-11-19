@@ -92,6 +92,8 @@ export class RaceDirector {
   private noticeT = 0;
   private finishDelay = 0;
   private usedItemPrev = false;
+  /** Monotonic counter behind CarSim.finishRank. Reset with the race. */
+  private finishSeq = 0;
   private events: RaceEvents = {};
 
   /**
@@ -182,9 +184,32 @@ export class RaceDirector {
       sim.totalDist = s - L;
       sim.disabled = true;
       sim.idling = true;
-      sim.ai = new AIController(sim, { skill: 0.92 + i * 0.013, boldness: 0.92 + ((i * 7) % 5) * 0.035 });
+      this.attachAI(sim, i);
       this.cars.push(sim);
       if (isPlayer) this.player = sim;
+    }
+  }
+
+  /**
+   * Give a car its controller for this race.
+   *
+   * A factory that pools its cars (the CarFactory type allows it) hands back
+   * the same CarSim - and therefore the same AIController - every race. The
+   * pooled controller keeps its smoothed bias across the gap, so reusing the
+   * instance and resetting it is the only way a resting value from the last
+   * race cannot leak onto the new grid. Its per-race tuning is re-applied
+   * here so a reused slot still gets this season's skill for its grid row.
+   */
+  private attachAI(sim: CarSim, i: number): void {
+    const skill = 0.92 + i * 0.013;
+    const boldness = 0.92 + ((i * 7) % 5) * 0.035;
+    const existing = sim.ai as AIController | null;
+    if (existing instanceof AIController && existing.car === sim) {
+      existing.skill = skill;
+      existing.boldness = boldness;
+      existing.reset();
+    } else {
+      sim.ai = new AIController(sim, { skill, boldness });
     }
   }
 
@@ -202,23 +227,19 @@ export class RaceDirector {
     this.acc = 0;
     this.bestLap = null;
     this.finishDelay = 0;
+    this.finishSeq = 0;
+    this.standingsT = 0;
     this.wrongWayT = 0;
     this.noticeT = 0;
     this.usedItemPrev = false;
+    // A restart must leave the grid indistinguishable from a first start.
+    // Cars and their AI controllers are rebuilt by spawnRaceGrid, but reset
+    // them explicitly as well: the reset then does not depend on the factory
+    // handing back fresh objects, and it can never leave last race's shield,
+    // turbo, stun or smoothed catch-up bias sitting on the grid.
     for (const c of this.cars) {
-      c.lap = 0;
-      c.lapTimes = [];
-      c.cpIndex = 0;
-      c.finished = false;
-      c.boost = 0.62;
-      c.lapStart = 0;
-      c.item = null;
-      c.shieldT = 0;
-      c.turboT = 0;
-      c.stunT = 0;
-      c.wrongWayT = 0;
-      c.offRoadT = 0;
-      c.stuckTimer = 0;
+      c.resetRaceState();
+      (c.ai as AIController | null)?.reset();
     }
     this.recomputeOrder();
     this.events.onStateChange?.(this.state);
@@ -360,6 +381,8 @@ export class RaceDirector {
       this.items.useItem(this.player, this.cars);
     }
     this.usedItemPrev = useNow;
+    // A finished player keeps its slot empty; the flag ends item use for good.
+    if (this.player.finished) this.player.item = null;
 
     this.items.update(dt, this.cars, (car) => this.order.indexOf(car) + 1, true);
 
@@ -491,6 +514,25 @@ export class RaceDirector {
     }
   }
 
+  /**
+   * Progress, checkpoints, the lap line and the flag, for one car.
+   *
+   * The crossing rule is the only place a lap or a finish time is ever
+   * written, and it is deliberately idempotent:
+   *
+   *   - A crossing is detected by comparing the previous arc position with
+   *     the current one, so extra calls inside the same substep see
+   *     lastS === s and find nothing. Two cars crossing together cannot
+   *     overwrite each other's time either: each writes only its own fields.
+   *   - A lap is only credited once every checkpoint has been taken, and
+   *     scoring a lap resets the checkpoint cursor. A car shoved back over
+   *     the line and forward again therefore re-detects the crossing but
+   *     cannot re-credit anything: the very next crossing fails the "all
+   *     checkpoints" test.
+   *   - Once `finished` is set, progress stops being accumulated for it.
+   *     An already finished car can still be simulated and shoved around,
+   *     but it can never record a second lap or a second finish time.
+   */
   private raceLogic(c: CarSim): void {
     const track = this.env.track;
     const L = track.length;
@@ -500,61 +542,135 @@ export class RaceDirector {
     if (ds > L / 2) ds -= L;
     if (ds < -L / 2) ds += L;
     if (Math.abs(ds) > 200) ds = 0; // ignore projection teleports
-    c.totalDist += ds;
 
-    if (ds > 0 && !c.finished) {
-      const cps = track.checkpoints;
-      const next = cps[c.cpIndex % cps.length];
-      const nearSelf = track.nearestS(c.pos.x, c.pos.z);
-      const onCorridor = nearSelf.dist < nearSelf.frame.hw + 9;
-      let crossed: boolean;
-      if (c.lastS <= c.s) crossed = next > c.lastS && next <= c.s;
-      else crossed = next > c.lastS || next <= c.s; // wrapped the line
-
-      if (crossed && onCorridor) {
-        c.cpIndex++;
-        if (c === this.player) this.env.audio.checkpoint();
-      }
-
-      if (c.lastS > L * 0.75 && c.s < L * 0.25 && onCorridor) {
-        if (c.totalDist < L * 0.5) {
-          // Opening crossing. The grid sits just behind the line, so the very
-          // first pass STARTS lap 1: arm the checkpoints and sync the clock.
-          c.cpIndex = 1;
-          c.lapStart = this.clock;
-        } else if (c.cpIndex >= cps.length) {
-          c.lap++;
-          const lapT = this.clock - c.lapStart;
-          c.lapStart = this.clock;
-          c.lapTimes.push(lapT);
-          c.cpIndex = 1; // checkpoint 0 sits on the line, already passed
-          if (c === this.player) {
-            if (this.bestLap === null || lapT < this.bestLap) this.bestLap = lapT;
-            this.env.audio.checkpoint();
-          }
-          if (c.lap >= LAPS && !c.finished) {
-            c.finished = true;
-            c.finishTime = this.clock;
-            if (c === this.player) {
-              this.finishDelay = 2.6;
-              this.env.audio.finish();
-              this.events.onNotice?.('FINISH', 2200);
-            }
-          }
-        } else if (c === this.player && this.noticeT <= 0) {
-          this.events.onNotice?.('MISSED CHECKPOINT', 1500);
-          this.noticeT = 3;
-        }
-      }
+    // A finished car is no longer racing for position: totalDist is frozen at
+    // the flag so nothing that happens to it afterwards - contact, recovery,
+    // being shoved over the line - can move it in the standings.
+    if (!c.finished) {
+      c.totalDist += ds;
+      if (ds > 0) this.crossLine(c);
     }
     c.lastS = c.s;
 
     this.applyBoostPads(c);
   }
 
+  /**
+   * Checkpoint and lap settlement for one forward crossing.
+   *
+   * This is the single place a lap or a finish time is written, and it is
+   * idempotent by construction:
+   *
+   *   - Crossing *detection* is edge-triggered on lastS→s. Re-running the
+   *     same substep sees lastS === s and detects nothing, so a car crossing
+   *     twice in one frame scores once.
+   *   - A lap is only credited when every checkpoint has been taken. The
+   *     checkpoint cursor only advances on the edge that crosses each one, so
+   *     a shove back and forth over a checkpoint cannot take it twice, and
+   *     because scoring a lap resets the cursor to 1, a car shoved back over
+   *     the line and forward again re-detects the crossing but fails the "all
+   *     checkpoints" test. That is what makes the crossing idempotent.
+   *   - The flag is settled once. `finish()` is the only writer of
+   *     `finished`/`finishTime`, and raceLogic never calls this method for a
+   *     finished car at all.
+   */
+  private crossLine(c: CarSim): void {
+    const track = this.env.track;
+    const L = track.length;
+    const cps = track.checkpoints;
+    const nearSelf = track.nearestS(c.pos.x, c.pos.z);
+    // A car that has been knocked clean out of the corridor is not crossing
+    // the circuit's line, it is flying over the boulder field. It keeps its
+    // forward distance but earns no checkpoint and no lap.
+    const onCorridor = nearSelf.dist < nearSelf.frame.hw + 9;
+    if (!onCorridor) return;
+
+    const wrapped = c.lastS > L * 0.75 && c.s < L * 0.25;
+
+    // ---- the opening crossing -------------------------------------------
+    // The grid sits a few metres behind the line, so the very first pass
+    // STARTS lap 1: it arms the checkpoints and syncs the clock rather than
+    // scoring. Decided from the car's own state, not a flag, so a shove back
+    // and forth over the line cannot re-arm the race clock - the opening
+    // crossing leaves cpIndex at 1, which is enough to tell it apart from a
+    // car that has genuinely not started.
+    if (wrapped && c.lap === 0 && c.cpIndex === 0 && c.totalDist < L * 0.5) {
+      c.cpIndex = 1; // checkpoint 0 sits on the line, already passed
+      c.lapStart = this.clock;
+      return;
+    }
+
+    // ---- checkpoints, in order -----------------------------------------
+    // Only the next checkpoint can be settled. Because the cursor advances
+    // only on the edge that crosses it, a shove that oscillates back and
+    // forth over a checkpoint cannot take it twice.
+    const next = cps[c.cpIndex % cps.length];
+    const crossed = c.lastS <= c.s ? next > c.lastS && next <= c.s : next > c.lastS || next <= c.s;
+    if (crossed) {
+      c.cpIndex++;
+      if (c === this.player) this.env.audio.checkpoint();
+    }
+
+    // ---- the lap line ---------------------------------------------------
+    if (!wrapped) return;
+
+    // The lap only settles with a full set of checkpoints. Scoring a lap
+    // resets cpIndex to 1, so a car shoved back over the line and forward
+    // again cannot take a second lap on the same checkpoints - the very next
+    // crossing fails this test. This, rather than a distance comparison, is
+    // what makes the crossing idempotent, and it holds however the car's
+    // totalDist got where it is.
+    if (c.cpIndex < cps.length) {
+      // A car shoved back and forth over the line without driving the lap
+      // must not be nagged about it; only warn once it has genuinely
+      // covered the distance with checkpoints missing.
+      if (c === this.player && c.totalDist >= L * 0.5 && this.noticeT <= 0) {
+        this.events.onNotice?.('MISSED CHECKPOINT', 1500);
+        this.noticeT = 3;
+      }
+      return;
+    }
+
+    c.lap++;
+    const lapT = this.clock - c.lapStart;
+    c.lapStart = this.clock;
+    c.lapTimes.push(lapT);
+    c.cpIndex = 1; // checkpoint 0 sits on the line, already passed
+    if (c === this.player) {
+      if (this.bestLap === null || lapT < this.bestLap) this.bestLap = lapT;
+      this.env.audio.checkpoint();
+    }
+
+    if (c.lap >= LAPS) this.finish(c);
+  }
+
+  /** The one and only place a car is classified as finished. */
+  private finish(c: CarSim): void {
+    if (c.finished) return;
+    c.finished = true;
+    c.finishTime = this.clock;
+    c.finishRank = ++this.finishSeq;
+    // The flag is a classification event. Park the car's remaining race
+    // state here so no later shove can score or fire anything.
+    c.item = null;
+    c.turboT = 0;
+    c.shieldT = 0;
+    c.stunT = 0;
+    c.boosting = false;
+    c.turboing = false;
+    if (c === this.player) {
+      this.finishDelay = 2.6;
+      this.env.audio.finish();
+      this.events.onNotice?.('FINISH', 2200);
+    }
+  }
+
   private applyBoostPads(c: CarSim): void {
     const track = this.env.track;
     const L = track.length;
+    // A finished car is parked for classification purposes; picking up boost
+    // would keep handing it pace it can no longer race for.
+    if (c.finished) return;
     if (c.boost < 0.999) {
       for (const pad of track.chevrons) {
         let d = Math.abs(c.s - pad.s);
@@ -579,12 +695,33 @@ export class RaceDirector {
     }
   }
 
+  /**
+   * The standings, as a strict total order.
+   *
+   * Finished cars lead, ordered by the instant they settled the flag. Running
+   * cars follow, ordered by totalDist. Both comparisons need a final
+   * tie-break, because two cars really can be exactly level - a photo finish,
+   * or a test that parks two cars on the same spot - and a comparator that
+   * returns 0 for distinct cars leaves the result to the order the array
+   * happened to be in. `serial` is fixed at construction, so it is a property
+   * of the car rather than of the array, and it makes the comparator a strict,
+   * transitive total order that sorts the same field the same way every time.
+   *
+   *   - finished: settle order. Two cars can share a finishTime only if they
+   *     settle within the same substep, and the settle order is the order the
+   *     flag actually fell, so it is the honest tie-break.
+   *   - running: totalDist, then creation order.
+   */
   private recomputeOrder(): void {
     this.order = this.cars.slice().sort((a, b) => {
-      if (a.finished && b.finished) return a.finishTime - b.finishTime;
-      if (a.finished) return -1;
-      if (b.finished) return 1;
-      return b.totalDist - a.totalDist;
+      if (a.finished || b.finished) {
+        if (a.finished !== b.finished) return a.finished ? -1 : 1;
+        if (a.finishTime !== b.finishTime) return a.finishTime - b.finishTime;
+        if (a.finishRank !== b.finishRank) return a.finishRank - b.finishRank;
+        return a.serial - b.serial;
+      }
+      if (a.totalDist !== b.totalDist) return b.totalDist - a.totalDist;
+      return a.serial - b.serial;
     });
   }
 

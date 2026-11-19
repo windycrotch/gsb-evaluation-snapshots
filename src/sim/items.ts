@@ -192,13 +192,20 @@ export class ItemField {
   }
 
   giveRandomItem(car: CarSim, standingsPos: number): boolean {
-    if (car.item) return false;
+    // A car that has taken the flag races no more, so it neither collects a
+    // box nor carries an item into whatever it does afterwards.
+    if (car.finished || car.item) return false;
     car.item = this.rollItem(standingsPos);
     this.env.audio.itemPickup();
     return true;
   }
 
   useItem(car: CarSim, cars: CarSim[]): void {
+    if (car.finished) {
+      // Defensive: an item that somehow survived the flag is inert.
+      car.item = null;
+      return;
+    }
     const it = car.item;
     if (!it) return;
     car.item = null;
@@ -267,6 +274,9 @@ export class ItemField {
   }
 
   private hitCar(car: CarSim, heavy: boolean): boolean {
+    // The flag ends a car's race. It may still be shoved by contact physics,
+    // but no power-up can stun, shield-strip or otherwise affect it.
+    if (car.finished) return false;
     if (car.shieldT > 0) {
       car.shieldT = 0; // a shield absorbs exactly one hit
       this.spawnFx(car.pos.x, car.pos.y + 0.5, car.pos.z, 0x66ccff, false);
@@ -327,7 +337,7 @@ export class ItemField {
 
       if (!enabled) continue;
       for (const car of cars) {
-        if (car.item) continue;
+        if (car.item || car.finished) continue;
         const dx = car.pos.x - b.x;
         const dz = car.pos.z - b.z;
         if (dx * dx + dz * dz < 9 && Math.abs(car.pos.y - b.y) < 3.5) {
@@ -355,7 +365,9 @@ export class ItemField {
       }
       if (p.arm > 0) continue;
       for (const car of cars) {
-        if (car === p.owner) continue;
+        // A finished car must not soak up a hazard: it cannot be hurt by it,
+        // and consuming the peel would remove it from the race for everyone.
+        if (car === p.owner || car.finished) continue;
         // Swept test against the segment covered this frame: at 250 km/h a
         // point test tunnels straight through the hazard.
         const px = car.pos.x - car.vel.x * dt;
@@ -391,7 +403,7 @@ export class ItemField {
           let bestD = 260 * 260;
           const sp0 = Math.hypot(r.vx, r.vz) || 1;
           for (const car of cars) {
-            if (car === r.owner) continue;
+            if (car === r.owner || car.finished) continue;
             const dx = car.pos.x - r.x;
             const dz = car.pos.z - r.z;
             const d2 = dx * dx + dz * dz;
@@ -467,7 +479,9 @@ export class ItemField {
       let detonated = r.life <= 0 || r.y <= ground + 0.55;
       if (!detonated) {
         for (const car of cars) {
-          if (car === r.owner) continue;
+          // Same reasoning as the peels: a classified car cannot be hurt and
+          // must not absorb a rocket that is still chasing a live target.
+          if (car === r.owner || car.finished) continue;
           const dx = car.pos.x - r.x;
           const dz = car.pos.z - r.z;
           // Proximity fuse: skimming the bumper still sets it off.
@@ -516,6 +530,10 @@ export class ItemField {
   private updateAiUsage(dt: number, cars: CarSim[]): void {
     for (const car of cars) {
       if (!car.ai || !car.item || !this.allowAiUse(car)) continue;
+      if (car.finished) {
+        car.item = null;
+        continue;
+      }
       car.aiUseCd = Math.max(0, car.aiUseCd - dt);
       if (car.aiUseCd > 0) continue;
       const fwdX = Math.sin(car.yaw);

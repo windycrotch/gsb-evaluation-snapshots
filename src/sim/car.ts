@@ -32,9 +32,22 @@ export const DRAG = 0.0026; // per (m/s)^2 -> top speed around 88 m/s
 export const MAGLEV = 0.0042; // downforce accel per (m/s)^2
 export const AIR_MAGLEV_FADE = 8.0; // metres over which the field weakens
 export const TOP_SPEED = 170; // hard safety clamp, m/s
+/** Boost reservoir a car starts every race with. */
+export const START_BOOST = 0.62;
 
 const _n = new THREE.Vector3();
 const _fwd = new THREE.Vector3();
+
+/**
+ * Creation order, used as the final tie-break in the standings.
+ *
+ * Two cars can sit at exactly the same totalDist - a photo finish, or two cars
+ * sharing a grid slot in a test - and the sort must still be a strict, stable
+ * total order. Comparing against the order of the array being sorted is not
+ * enough: the same array can be passed in any order and the result would
+ * wobble. Creation order never does.
+ */
+let nextSerial = 0;
 
 export class CarSim {
   /**
@@ -42,6 +55,8 @@ export class CarSim {
    * with no scene at all - which is the point of keeping the rules here.
    */
   readonly mesh: THREE.Object3D | null;
+  /** Stable identity for standings tie-breaks. Never changes, never reused. */
+  readonly serial: number = nextSerial++;
   name: string;
   isPlayer: boolean;
   color: number;
@@ -54,7 +69,7 @@ export class CarSim {
   grounded = true;
   airTime = 0;
   /** 0..1 boost reservoir. */
-  boost = 0.62;
+  boost = START_BOOST;
   boosting = false;
   turboing = false;
 
@@ -96,6 +111,11 @@ export class CarSim {
   lapStart = 0;
   finished = false;
   finishTime = 0;
+  /**
+   * Finish order assigned the instant a car settles its final crossing.
+   * 0 = still running. Used only to break exact ties between finished cars.
+   */
+  finishRank = 0;
   /** lap * length + s; the single number the standings sort on. */
   totalDist = 0;
   padCooldown = -1;
@@ -149,14 +169,57 @@ export class CarSim {
     this.visualRoll = -Math.asin(clamp(nrm.x * fwdZ - nrm.z * fwdX, -0.7, 0.7));
   }
 
+  /**
+   * Put the car back into the exact state it had when it was first gridded.
+   *
+   * Every field the race itself writes - lap accounting, finish, power-ups,
+   * hazards, boost - is returned to its start value here, in one place, so a
+   * restart cannot leave last race's shield, turbo or stun on the grid. The
+   * pose (pos/vel/yaw) is the caller's business: a restart re-grids the car
+   * with placeAt, while resetToTrack deliberately keeps the car where it is.
+   */
+  resetRaceState(): void {
+    this.lap = 0;
+    this.cpIndex = 0;
+    this.lapTimes = [];
+    this.lapStart = 0;
+    this.finished = false;
+    this.finishTime = 0;
+    this.finishRank = 0;
+    this.boost = START_BOOST;
+    this.boosting = false;
+    this.turboing = false;
+    this.turboT = 0;
+    this.shieldT = 0;
+    this.stunT = 0;
+    this.stunSpin = 0;
+    this.item = null;
+    this.aiUseCd = 0;
+    this.padCooldown = -1;
+    this.stuckTimer = 0;
+    this.wrongWayT = 0;
+    this.offRoadT = 0;
+    this.impact = 0;
+    this.boostFlash = 0;
+    this.railScrape = 0;
+  }
+
   /** Put the car back on the racing line, a little behind where it was. */
   resetToTrack(env: SimEnv): void {
+    const L = env.track.length;
     const near = env.track.nearestS(this.pos.x, this.pos.z);
-    const back = (near.s - 6 + env.track.length) % env.track.length;
+    const back = (near.s - 6 + L) % L;
     const f = env.track.frameAt(back);
+    // placeAt resets totalDist to the raw arc position, which would throw
+    // away every lap already driven. Step the accumulated distance back by
+    // the same six metres the car was moved instead. Subtracting a fixed
+    // distance is also correct when the six metres cross the start line:
+    // `back` wraps to ~L, and rebasing from it would teleport the car forward
+    // almost a full lap - enough to score a lap it never drove.
+    const dist = this.totalDist - 6;
     this.placeAt(f, back, env.terrain);
     this.lastS = back;
-    this.totalDist = Math.floor(this.totalDist / env.track.length) * env.track.length + back;
+    this.totalDist = dist;
     this.boost = Math.max(this.boost, 0.3);
     this.stunT = 0;
     this.stuckTimer = 0;
@@ -169,6 +232,18 @@ export class CarSim {
     const { terrain, track } = env;
     let input: DriveInput = this.disabled ? NEUTRAL_INPUT : rawInput;
     this.braking = input.brake > 0 && this.speed > 2;
+
+    // A car that has taken the flag may still be simulated - contact and the
+    // recovery pass keep pushing it - but its race is over, so any power-up
+    // it was still carrying must go inert rather than keep firing.
+    if (this.finished) {
+      this.item = null;
+      this.turboT = 0;
+      this.shieldT = 0;
+      this.stunT = 0;
+      this.boosting = false;
+      this.turboing = false;
+    }
 
     this.turboT = Math.max(0, this.turboT - dt);
     this.shieldT = Math.max(0, this.shieldT - dt);

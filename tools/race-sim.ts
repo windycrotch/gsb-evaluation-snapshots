@@ -17,8 +17,11 @@ import { Track } from '../src/sim/track';
 import { Terrain } from '../src/sim/terrain';
 import { RaceDirector, LAPS, CAR_COUNT } from '../src/sim/race';
 import { AIController } from '../src/sim/ai';
+import type { CarSim } from '../src/sim/car';
+import { CarSim as CarSimCtor } from '../src/sim/car';
 import { RaceAudio } from '../src/audio/raceAudio';
 import { Dust } from '../src/render/dust';
+import type { Livery } from '../src/core/liveries';
 import type { SimEnv, ResultsData } from '../src/sim/types';
 
 const f = (v: number, d = 2): string => v.toFixed(d);
@@ -212,6 +215,224 @@ check('no missed-checkpoint spam', notices.filter((n) => n === 'MISSED CHECKPOIN
   check('restart produces the same grid', sameGrid, `${g2.length} cars re-grided`);
   for (let i = 0; i < 300; i++) director.update(DT);
   check('cars leave the grid', director.cars.every((c) => c.speed > 1), `min speed ${f(Math.min(...director.cars.map((c) => c.speed)), 1)} m/s`);
+}
+
+// ---- idempotent crossing: laps, finish time and order each settle once ----
+// The reported bug: two cars crossing together overwrote each other's time,
+// and a finished car shoved back over the line recorded another lap. These
+// checks drive the real per-car race logic (progress accumulation included),
+// with the clock advanced so a finish time is a meaningful number.
+{
+  const L = track.length;
+  // A fresh director per scenario keeps the world state (and the item field)
+  // out of the measurement.
+  const sandbox = (): { d: RaceDirector; c: CarSim } => {
+    const d = new RaceDirector({
+      scene: new THREE.Scene(),
+      camera: new THREE.PerspectiveCamera(60, 1.6, 0.5, 90000),
+      terrain, track, audio: new RaceAudio(), dust: new Dust(new THREE.Scene()),
+      autopilot: true, menu: null,
+    });
+    d.catchUp = false;
+    d.startRace();
+    // Skip the countdown so the race logic is live, and put the clock at a
+    // realistic race time so finish times are not all zero.
+    d.state = 'race';
+    d.clock = 240;
+    for (const c of d.cars) {
+      c.disabled = false;
+      c.idling = false;
+      // Park every other car far away: this test is about crossing, not
+      // about contact pushing the subject around.
+      c.pos.set(3200, 200, 3200);
+      c.vel.set(0, 0, 0);
+    }
+    d.player.ai = null;
+    return { d, c: d.player };
+  };
+  // Move the car from arc position `from` to `to` through one real raceLogic
+  // pass. This is the exact unit update() runs per car per substep, so it
+  // exercises the progress accumulation, not just the crossing branch.
+  const step = (d: RaceDirector, c: CarSim, from: number, to: number): void => {
+    c.lastS = from;
+    c.s = to;
+    const f = track.frameAt(to % L);
+    c.pos.set(f.x, terrain.sampleHeight(f.x, f.z) + 0.58, f.z);
+    d['raceLogic'](c);
+  };
+  // A car on its final lap, fully checkpointed, whose distance already covers
+  // this lap - so the next forward crossing is the finish, not a lap.
+  const armFinalLap = (d: RaceDirector, c: CarSim): void => {
+    c.lap = LAPS - 1;
+    c.cpIndex = track.checkpoints.length;
+    c.totalDist = (LAPS - 1) * L + L - 4;
+    c.lapStart = d.clock - 120;
+  };
+
+  // (a) re-entering the crossing in the same frame settles exactly one lap
+  {
+    const { d, c } = sandbox();
+    armFinalLap(d, c);
+    const laps0 = c.lapTimes.length;
+    // First pass crosses the line and finishes.
+    step(d, c, L - 4, 4);
+    const lapsAfter = c.lapTimes.length;
+    // Re-running the same substep (same s) must detect nothing.
+    step(d, c, 4, 4);
+    step(d, c, 4, 4);
+    check('a crossing settles exactly one lap', lapsAfter === laps0 + 1 && c.lapTimes.length === lapsAfter,
+          `${c.lapTimes.length - laps0} lap(s) from 1 crossing + 2 re-entries`);
+    check('the flag falls exactly once', c.finished && c.lap === LAPS, `lap ${c.lap}, finished ${c.finished}`);
+    check('finish time is the crossing instant', c.finished && c.finishTime > 0,
+          `${f(c.finishTime, 2)}s at race clock ${f(d.clock, 2)}s`);
+  }
+
+  // (b) a finished car shoved back and forth over the line neither scores a
+  //     fourth lap nor changes its finish time
+  {
+    const { d, c } = sandbox();
+    armFinalLap(d, c);
+    step(d, c, L - 4, 4);
+    const t0 = c.finishTime;
+    const laps0 = c.lapTimes.length;
+    const dist0 = c.totalDist;
+    for (let i = 0; i < 40; i++) {
+      step(d, c, 4, L - 4); // shoved backwards over the line
+      step(d, c, L - 4, 4); // and forwards again
+    }
+    check('a finished car cannot score another lap', c.lapTimes.length === laps0 && c.lap === LAPS,
+          `lap ${c.lap}, ${c.lapTimes.length} lap times`);
+    check('a finished car keeps its first finish time', c.finishTime === t0, `${f(c.finishTime, 3)}s vs ${f(t0, 3)}s`);
+    check('a finished car’s distance is frozen', c.totalDist === dist0, `${f(c.totalDist, 1)} vs ${f(dist0, 1)}`);
+  }
+
+  // (c) exact ties in totalDist resolve the same way every time, whatever
+  //     order the array is handed to the sort in
+  {
+    const { d } = sandbox();
+    for (const c of d.cars) {
+      c.finished = false;
+      c.totalDist = 3 * L; // all eight exactly level
+    }
+    const orders: string[] = [];
+    for (let k = 0; k < 6; k++) {
+      // Shuffle the underlying array differently each round.
+      d.cars.sort((a, b) => ((a.serial * (k + 1)) % 7) - ((b.serial * (k + 1)) % 7));
+      d['recomputeOrder']();
+      orders.push(d.order.map((x) => x.name).join(','));
+    }
+    const stable = orders.every((o) => o === orders[0]);
+    check('exact ties sort the same way every time', stable, stable ? orders[0] : orders.join(' | '));
+    const serialOrder = d.order.every((c, i) => i === 0 || d.order[i - 1].serial < c.serial);
+    check('exact ties fall back to creation order', serialOrder, 'serial ascending');
+  }
+
+  // (d) the opening crossing is not a lap, and re-crossing it does not score
+  {
+    const { d, c } = sandbox();
+    // Grid state: behind the line, no checkpoints taken, distance still small.
+    c.lap = 0;
+    c.cpIndex = 0;
+    c.totalDist = L - 8;
+    c.lapStart = 0;
+    step(d, c, L - 8, 4);
+    const lapAfterStart = c.lap;
+    const cpAfterStart = c.cpIndex;
+    check('the opening crossing starts the race, not a lap', lapAfterStart === 0 && cpAfterStart >= 1,
+          `lap ${lapAfterStart}, cpIndex ${cpAfterStart}`);
+    // Shove it back over the line and forward again without the checkpoints.
+    for (let i = 0; i < 30; i++) {
+      step(d, c, 4, L - 4);
+      step(d, c, L - 4, 4);
+    }
+    check('re-crossing the line cannot score a lap', c.lap === 0 && c.lapTimes.length === 0,
+          `lap ${c.lap}, ${c.lapTimes.length} lap times`);
+  }
+
+  // (e) two cars crossing on the same substep keep their own finish times
+  {
+    const { d } = sandbox();
+    const a = d.cars[0];
+    const b = d.cars[1];
+    armFinalLap(d, a);
+    armFinalLap(d, b);
+    step(d, a, L - 4, 4);
+    // One substep later, so the finish times differ by the clock's resolution.
+    d.clock += 1 / 120;
+    step(d, b, L - 4, 4);
+    check('simultaneous finishers each record their own time',
+          a.finished && b.finished && a.lapTimes.length === 1 && b.lapTimes.length === 1,
+          `A ${f(a.finishTime, 3)}s, B ${f(b.finishTime, 3)}s, both finished ${a.finished && b.finished}`);
+    d['recomputeOrder']();
+    const orderOk = d.order[0] === a || d.order[0] === b;
+    check('simultaneous finishers are ordered by settle order', orderOk, `${d.order[0].name} leads`);
+  }
+}
+
+// ---- restart leaves no trace of the previous race ------------------------
+// The CarFactory type lets a host pool its cars - and a host that does would
+// otherwise carry last race's AI state straight onto the new grid, because
+// spawnRaceGrid would hand back the same objects. This test uses exactly such
+// a pooling factory, so the guarantee has to come from the director's reset
+// rather than from fresh allocation.
+{
+  const dt = 1 / 60;
+  const pool = new Map<string, { car: CarSim; ai: AIController }>();
+  const poolingFactory = (livery: Livery, isPlayer: boolean, name: string): CarSim => {
+    let slot = pool.get(name);
+    if (!slot) {
+      const car = new CarSimCtor(null, { name, color: livery.color, isPlayer });
+      slot = { car, ai: new AIController(car, { skill: 0.92, boldness: 0.92 }) };
+      pool.set(name, slot);
+    }
+    slot.car.name = name;
+    slot.car.isPlayer = isPlayer;
+    slot.car.color = livery.color;
+    slot.car.ai = slot.ai;
+    return slot.car;
+  };
+  const d = new RaceDirector(
+    {
+      scene: new THREE.Scene(),
+      camera: new THREE.PerspectiveCamera(60, 1.6, 0.5, 90000),
+      terrain, track, audio: new RaceAudio(), dust: new Dust(new THREE.Scene()),
+      autopilot: true, menu: null,
+    },
+    {},
+    poolingFactory,
+  );
+  d.classifyOnPlayerFinish = false;
+  d.startRace();
+  // Run long enough that the catch-up bias has actually moved the rivals off
+  // its resting value, then dirty every other piece of per-race state.
+  for (let i = 0; i < 60 * 25; i++) d.update(dt);
+  for (const c of d.cars) {
+    c.shieldT = 3;
+    c.turboT = 2;
+    c.stunT = 1.5;
+    c.item = 'rocket';
+    c.boost = 0.1;
+    c.padCooldown = 12;
+  }
+  const aiBefore = d.cars.map((c) => c.ai as AIController);
+  const dirty = aiBefore.some((a) => Math.abs(a.debugBias() - 1) > 0.005);
+  d.startRace();
+  const ai = d.cars.map((c) => c.ai as AIController);
+  const reused = ai.every((a, i) => a === aiBefore[i]);
+  const clean = ai.every((a) => {
+    const s = a.debugState();
+    return s.bias === 1 && s.biasTarget === 1 && s.offset === 0 && s.targetOffset === 0 &&
+      s.offsetTimer === 0 && s.recoverTimer === 0 && s.passSide === 1;
+  });
+  const carsClean = d.cars.every(
+    (c) => c.shieldT === 0 && c.turboT === 0 && c.stunT === 0 && c.item === null && c.padCooldown === -1,
+  );
+  const boostClean = d.cars.every((c) => Math.abs(c.boost - 0.62) < 1e-9);
+  check('restart clears the smoothed catch-up bias', clean, clean ? 'bias 1, offset 0' : 'residual state on the grid');
+  check('restart clears shields, turbo, stun and items', carsClean, carsClean ? 'all clear' : 'residual effect on the grid');
+  check('restart restores the starting boost', boostClean, `boost ${d.cars[0].boost.toFixed(2)}`);
+  check('catch-up bias was genuinely dirty before restart', dirty, dirty ? 'rivals were off pace' : 'nothing to clear (inconclusive)');
+  check('pooled cars and AI are reused across a restart', reused, reused ? 'same instances, still clean' : 'pool was not exercised');
 }
 
 // ---- full-distance run: can EVERY car actually cover three laps? ---------

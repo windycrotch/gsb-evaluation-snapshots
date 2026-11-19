@@ -51,9 +51,51 @@ export class AIController {
     this.biasTarget = clamp(bias, 0.8, 1.06);
   }
 
+  /**
+   * Return every piece of state the controller has learned or smoothed to its
+   * value on a fresh grid.
+   *
+   * A restart has to undo more than the car's own fields. The catch-up bias is
+   * smoothed internally, so the value that was actually driving the car at the
+   * end of the previous race is not the target the director last set - it is
+   * somewhere below it. If only the target were reset, the first seconds of
+   * the new race would still be run at last race's pace. The overtaking side,
+   * the racing-line offset and the recovery timer carry the same hazard.
+   */
+  reset(): void {
+    this.bias = 1;
+    this.biasTarget = 1;
+    this.offset = 0;
+    this.targetOffset = 0;
+    this.offsetTimer = 0;
+    this.recoverTimer = 0;
+    this.passSide = 1;
+  }
+
   /** Diagnostics only. */
   debugBias(): number {
     return this.bias;
+  }
+
+  /** Diagnostics only: the raw state a restart has to clear. */
+  debugState(): {
+    bias: number;
+    biasTarget: number;
+    offset: number;
+    targetOffset: number;
+    offsetTimer: number;
+    recoverTimer: number;
+    passSide: number;
+  } {
+    return {
+      bias: this.bias,
+      biasTarget: this.biasTarget,
+      offset: this.offset,
+      targetOffset: this.targetOffset,
+      offsetTimer: this.offsetTimer,
+      recoverTimer: this.recoverTimer,
+      passSide: this.passSide,
+    };
   }
 
   computeInput(env: SimEnv, rivals: CarSim[]): DriveInput {
