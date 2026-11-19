@@ -2,8 +2,10 @@
 // there), so this layer lets pointer events through and only its panel on the right takes them.
 import { h, setText, setClass, setShown, setStyle, clamp01, numberWord, mixHex, actionsOf } from './dom.js';
 import { createChart } from './chart.js';
+import { readout, NO_MATCH } from '../game/brewlogic.js';
 
 const cap = (str) => (str ? str[0].toUpperCase() + str.slice(1) : str);
+const R3 = (v) => (Math.round(v * 1000) / 1000).toFixed(3);
 
 /** The word the Magistra would use for a heat band. */
 export function heatWord(band) {
@@ -65,6 +67,27 @@ export function createBrew(game, icons) {
     )
   );
 
+  // ---- the reading: mixture, fire against the band, the binding ---------------------------------
+  // One small table under the chart. It is filled from game.brew through the same rules module the
+  // cauldron uses, so the numbers a player reads are the numbers the pour obeys. The mixture takes
+  // the whole width; the rest share a second row, so it stays legible down to 900 x 600.
+  const rdMix = h('span', { class: 'tp-rd-num' });
+  const rdMatch = h('span', { class: 'tp-rd-name' });
+  const rdHeatState = h('span', { class: 'tp-rd-state' });
+  const rdHeat = h('span', { class: 'tp-rd-num' }, rdHeatState);
+  const rdBand = h('span', { class: 'tp-rd-sub' });
+  const rdBind = h('span', { class: 'tp-rd-num' });
+  const rdBindBar = h('i');
+  const cell = (label, cls, ...kids) => h('div', { class: 'tp-rd-cell' + (cls ? ' ' + cls : '') }, h('span', { class: 'tp-label', text: label }), ...kids);
+  const rd = h(
+    'div',
+    { class: 'tp-reading' },
+    cell('Mixture', 'is-wide', rdMix),
+    cell('Mark', '', rdMatch),
+    cell('Fire', '', rdHeat, rdBand),
+    cell('Binding', '', h('span', { class: 'tp-rd-line' }, h('span', { class: 'tp-rd-bar' }, rdBindBar), rdBind))
+  );
+
   // ---- the shelf ------------------------------------------------------------------------------
   const shelf = h('div', { class: 'tp-shelf' });
   const info = h('div', { class: 'tp-shelf-info' });
@@ -107,7 +130,7 @@ export function createBrew(game, icons) {
   const kLeave = keyBtn('Esc', 'Leave', { click: () => A.brewLeave() });
   const keys = h('div', { class: 'tp-keys' }, kBellows, kDamper, kBottle, kEmpty, kLeave);
 
-  const panel = h('div', { class: 'tp-brew-panel' }, head, chart.el, status, stages, gauge, shelf, info, keys);
+  const panel = h('div', { class: 'tp-brew-panel' }, head, chart.el, status, stages, gauge, rd, shelf, info, keys);
   const stir = h('div', { class: 'tp-brew-stir' });
   el.append(h('div', { class: 'tp-brew-veil' }), stir, panel);
 
@@ -163,7 +186,9 @@ export function createBrew(game, icons) {
     const opus = b.opus || null;
     const work = !!opus || primesIn;
 
-    // status
+    // status. The name shown is the readout's own: the potion a pour would give, whether or not
+    // the player has inked that region yet. "No match" is shown as plainly as a name.
+    const ro = readout(b);
     let name = '',
       sub = '',
       marks = 0,
@@ -183,32 +208,48 @@ export function createBrew(game, icons) {
       const have = b.contents.filter((x) => String(x).startsWith('prime:')).length;
       name = 'The Great Work';
       sub = have < 3 ? 'All three Primes must go into the pot.' : 'Begin with the embers almost out.';
-    } else if (b.ready) {
-      const p = D.POTIONS[b.ready.potion];
+    } else if (ro.bound) {
+      const p = D.POTIONS[ro.output];
       name = p ? p.full : '';
       marks = b.ready.stars;
       color = p ? p.color : '';
-      sub = cap(numberWord(b.ready.count)) + (b.ready.count === 1 ? ' phial.' : ' phials.') + ' Bottle it.';
-    } else if (b.region) {
-      const p = D.POTIONS[b.region.id];
-      const known = inked(b.region.id);
-      name = known ? p.name : 'Unwritten';
+      sub = cap(numberWord(ro.count)) + (ro.count === 1 ? ' phial.' : ' phials.') + ' Bottle it.';
+    } else if (ro.region) {
+      const p = D.POTIONS[ro.region];
+      name = p.name;
       marks = b.region.stars;
-      color = known ? p.color : '';
-      sub = b.fit < 0 ? 'The fire is too low.' : b.fit > 0 ? 'The fire is too high.' : b.progress > 0.01 ? 'It is binding. Keep stirring.' : 'Stir until it binds.';
+      color = p.color;
+      sub = ro.fit < 0 ? 'The fire is too low.' : ro.fit > 0 ? 'The fire is too high.' : ro.progress > 0.01 ? 'It is binding. Keep stirring.' : 'Stir until it binds.';
+      if (!inked(ro.region)) sub += ' Unwritten.';
     } else if (!n) {
+      name = '';
       sub = 'The pot is empty.';
     } else {
-      sub = 'It is nothing yet.';
+      name = NO_MATCH;
+      sub = 'It lies outside every region. No potion can be poured from it.';
     }
     if (b.hint && !(opus && opus.done)) sub = b.hint;
     setText(stName, name);
     setShown(stName, !!name);
+    // the name of a match carries its potion's colour; "No match" stays plain bone
+    setClass(stName, 'is-miss', n > 0 && !opus && !primesIn && !ro.region);
     setStyle(stName, 'color', color ? mixHex(color, '#ddd5c4', 0.45) : '');
     setShown(stMarks, marks > 0);
     for (let i = 0; i < 3; i++) setClass(markEls[i], 'is-on', i < marks);
     setText(stSub, sub);
-    setClass(status, 'is-ready', !!b.ready || !!(opus && opus.done));
+    setClass(status, 'is-ready', !!ro.bound || !!(opus && opus.done));
+
+    // the reading: the same numbers the pour obeys
+    setText(rdMix, ro.mix ? ro.mix.map(R3).join(' · ') : '—');
+    setText(rdMatch, opus ? 'the Work' : ro.matched ? ro.name : n ? NO_MATCH : '—');
+    setClass(rdMatch, 'is-miss', n > 0 && !opus && !ro.matched);
+    setText(rdHeat, ro.heat.toFixed(2));
+    setText(rdBand, ro.band ? ro.band[0].toFixed(2) + '–' + ro.band[1].toFixed(2) : '');
+    setClass(rdHeatState, 'is-in', ro.fit === 0);
+    setClass(rdHeatState, 'is-out', !!ro.band && ro.fit !== 0);
+    setText(rdHeatState, opus ? (ro.fit === 0 ? 'in band' : ro.fit < 0 ? 'too cold' : 'too hot') : !ro.band ? 'no band' : ro.fit === 0 ? 'in band' : ro.fit < 0 ? 'too cold' : 'too hot');
+    setText(rdBind, Math.round(ro.progress * 100) + '%');
+    setStyle(rdBindBar, 'transform', 'scaleX(' + clamp01(ro.progress).toFixed(3) + ')');
 
     // the four stages
     setShown(stages, work);
@@ -225,7 +266,7 @@ export function createBrew(game, icons) {
     const pct = (v) => (Math.round(clamp01(v) * 1000) / 10).toFixed(1) + '%';
     setStyle(heat, 'left', pct(b.heat));
     setStyle(fire, 'left', pct(b.fire));
-    const bd = b.band;
+    const bd = ro.band;
     setShown(band, !!bd);
     setShown(bandWord, !!bd);
     if (bd) {
@@ -234,10 +275,9 @@ export function createBrew(game, icons) {
       setStyle(bandWord, 'left', pct((bd[0] + bd[1]) / 2));
       setText(bandWord, heatWord(bd));
     }
-    const fit = bd ? (b.heat < bd[0] ? -1 : b.heat > bd[1] ? 1 : 0) : null;
-    setClass(gauge, 'is-in', fit === 0);
-    setClass(gauge, 'is-cold', fit === -1);
-    setClass(gauge, 'is-hot', fit === 1);
+    setClass(gauge, 'is-in', ro.fit === 0);
+    setClass(gauge, 'is-cold', ro.fit === -1);
+    setClass(gauge, 'is-hot', ro.fit === 1);
 
     // shelf
     let key = '';
@@ -272,16 +312,16 @@ export function createBrew(game, icons) {
       setText(infoText, !n && !opus && shelfItems.length ? 'Choose what goes into the pot.' : '');
     }
 
-    // keys
-    const canBottle = !!b.ready || !!(opus && opus.done);
+    // keys. Bottle is offered whenever the pot holds anything: a pour that cannot be made says why.
+    const canBottle = (n > 0 && !opus) || !!(opus && opus.done);
     if (kBottle.disabled === canBottle) kBottle.disabled = !canBottle;
-    setClass(kBottle, 'is-call', canBottle);
+    setClass(kBottle, 'is-call', !!ro.bound || !!(opus && opus.done));
     setText(kBottle.lastChild, opus && opus.done ? 'Take' : 'Bottle');
     const canEmpty = n > 0 && !(opus && opus.done);
     if (kEmpty.disabled === canEmpty) kEmpty.disabled = !canEmpty;
 
     // the line over the pot
-    const stirLine = b.ready || (opus && opus.done) ? '' : (b.region || opus) && fit === 0 && b.stir < 0.25 ? 'Circle the mouse over the pot to stir.' : '';
+    const stirLine = ro.bound || (opus && opus.done) ? '' : (ro.region || opus) && ro.fit === 0 && b.stir < 0.25 ? 'Circle the mouse over the pot to stir.' : '';
     setText(stir, stirLine);
     setClass(stir, 'is-on', !!stirLine);
   }

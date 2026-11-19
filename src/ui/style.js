@@ -237,7 +237,23 @@ export const CSS = /* css */ `
 .tp-stage.is-now { opacity: 1; }
 .tp-stage.is-now .tp-label { color: var(--tp-bone); }
 
-.tp-gauge { flex: none; position: relative; margin: calc(var(--u) * 3.6) 5% 0; }
+.tp-brew-name.is-miss { color: var(--tp-bone-2); font-style: italic; }
+
+/* the reading under the gauge: mixture on its own line; mark, fire against the band, binding below */
+.tp-reading { flex: none; display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1.3fr) minmax(0, 0.9fr); gap: 0.5em calc(var(--u) * 2.2); margin: calc(var(--u) * 4.4) 5% 0; padding-top: calc(var(--u) * 1.1); border-top: 1px solid var(--tp-line-2); }
+.tp-rd-cell { display: flex; flex-direction: column; gap: 0.14em; min-width: 0; overflow: hidden; }
+.tp-rd-cell.is-wide { grid-column: 1 / -1; }
+.tp-rd-cell > .tp-label { color: var(--tp-bone-3); white-space: nowrap; }
+.tp-rd-num { font-family: var(--tp-sans); font-size: var(--fs-small); font-variant-numeric: tabular-nums lining-nums; color: var(--tp-bone-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tp-rd-name { font-family: var(--tp-display); font-size: var(--fs-body); line-height: 1.1; color: var(--tp-bone); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tp-rd-name.is-miss { color: var(--tp-bone-2); font-style: italic; }
+.tp-rd-sub { font-family: var(--tp-sans); font-size: var(--fs-micro); font-variant-numeric: tabular-nums; color: var(--tp-bone-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tp-rd-state { font-family: var(--tp-sans); font-size: var(--fs-micro); letter-spacing: 0.08em; text-transform: uppercase; color: var(--tp-bone-3); margin-left: 0.4em; }
+.tp-rd-state.is-in { color: var(--tp-ember-hot); }
+.tp-rd-state.is-out { color: var(--tp-cold); }
+.tp-rd-line { display: flex; align-items: center; gap: 0.45em; min-height: calc(var(--fs-body) * 1.1); }
+.tp-rd-bar { flex: 1 1 auto; min-width: calc(var(--u) * 2); height: 2px; background: rgba(221, 213, 196, 0.16); }
+.tp-rd-bar i { width: 100%; height: 100%; background: var(--tp-ember-hot); transform-origin: left center; transform: scaleX(0); }
 .tp-gauge-rail { position: relative; height: calc(var(--u) * 2.4); }
 .tp-gauge-line { position: absolute; left: 0; right: 0; top: 50%; height: 1px; background: var(--tp-bone-3); }
 .tp-gauge-ticks i { position: absolute; top: calc(50% - var(--u) * 0.3); width: 1px; height: calc(var(--u) * 0.6); background: var(--tp-bone-3); }

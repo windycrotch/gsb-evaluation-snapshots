@@ -6,6 +6,7 @@
 // What the UI and the other systems read from here is docs/DESIGN.md section 5.
 import * as THREE from 'three';
 import * as data from './data.js';
+import * as brewlogic from './brewlogic.js';
 import { createState, createBrew, SAVE_VERSION, count, add } from './state.js';
 import { bus } from '../core/events.js';
 import { clamp, damp, lerp, smoothstep, easeInOutCubic } from '../core/math.js';
@@ -121,6 +122,7 @@ export class Game {
     this.canvas = canvas;
     this.opts = opts;
     this.data = data;
+    this.brewlogic = brewlogic;
     this.bus = bus;
     this.settings = loadSettings();
     if (opts.quality) this.settings.quality = opts.quality;

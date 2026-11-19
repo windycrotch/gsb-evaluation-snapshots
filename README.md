@@ -107,6 +107,27 @@ npm run build
 writes `dist/game.js` (one minified module) and stamps `index.html` with its hash. The page at
 the root of this repository is what GitHub Pages serves.
 
+### Checking the cauldron
+
+```bash
+npm run brew-check
+```
+
+runs the brew's whole chain headlessly — feeding the chart, the fire and the ladle, the pour and
+the emptying — against the same pure rules the game uses (`src/game/brewlogic.js`). It needs no
+browser and no graphics card, and it compares state and produce only, never a screenshot. It covers
+a normal hit that binds and bottles, stirring outside the temperature band (which makes no
+progress), a pour with no region (which fails and says why), and the pot reset by emptying.
+
+```bash
+npm run brew-chain
+```
+
+drives the same four cases through the real game on the real GPU (`tools/scenarios/brew-chain.mjs`),
+reading `game.brew` and `game.state.inv` and never a picture. It needs the Playwright Chromium that
+`tools/pw.mjs` describes. `npm run brew-look` is not a check: it takes three screenshots of the
+overlay for the eyes.
+
 ## Layout
 
 | Path | What |

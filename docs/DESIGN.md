@@ -18,7 +18,27 @@ each new verb opens new ground and new ingredients.
 Salt. Each ingredient sits somewhere in the triangle and pulls the mixture toward itself. Each of
 the seven potions owns a round region of the triangle and a heat band. Put the mark inside a region,
 bring the fire into the band, stir until it binds, bottle it. All numbers live in
-`src/game/data.js`.
+`src/game/data.js`; the rules that turn those numbers into a brew live in `src/game/brewlogic.js`.
+That module is pure (no three.js, no DOM, no audio), and the cauldron, the overlay's readout and the
+headless check all decide what the pot holds from it, so what is shown is what is poured.
+
+Feed. The pot holds a little of the balanced mixture at the centre (`POT_BASE` in data.js). Every
+measure thrown in pulls the mark toward that ingredient's corner, so the first measure moves it a
+long way and each further measure of the same herb moves it further still, less and less: repeats
+accumulate. A mixture may fall in no region; then it makes nothing.
+
+Fire. The bellows raise the fire and the damper lowers it. Neither hand leaves it to fall back by
+itself — the coals cool, they do not go out — and the pot's heat lags the fire, so it drifts down
+rather than snapping to nothing.
+
+Binding. Progress grows only while the pot's heat is inside the band of the region the mark lies in
+and the ladle is moving; leaving the band lets it decay slowly. When it completes the pot is bound.
+
+Pour. A pour succeeds only when something is bound and the mark still lies in that potion's region.
+Otherwise nothing is made and the refusal names the reason. A successful pour empties the pot: the
+contents, the fire, the heat and the stirring all go back to nothing.
+
+Empty. Emptying resets feeding, fire and stirring together.
 
 | Potion | Region | Heat | Verb |
 | --- | --- | --- | --- |
@@ -78,6 +98,7 @@ index.html              dev shell (import map)            MAIN
 src/main.js             boot                               MAIN
 src/core/               math, rng, noise, events           MAIN
 src/game/data.js        all static data and chart math     MAIN
+src/game/brewlogic.js   the rules of a brew, pure         MAIN
 src/game/state.js       save state + brew state shape      MAIN
 src/game/               gameplay                           MAIN
 src/gfx/                renderer, shaders, post, materials MAIN
@@ -153,6 +174,8 @@ The UI never touches three.js or game internals. It reads the objects below and 
 game.state      // src/game/state.js createState()
 game.brew       // src/game/state.js createBrew()
 game.data       // namespace import of src/game/data.js
+game.brewlogic  // namespace import of src/game/brewlogic.js: the pure rules and readout() the
+                // overlay shows, so the numbers on screen are the numbers a pour obeys
 game.bus        // src/core/events.js bus
 game.settings   // { quality:'low'|'medium'|'high'|'ultra', renderScale:0.5..1, fov:60..100,
                 //   sensitivity:0.2..3, invertY:bool, master:0..1, music:0..1, sfx:0..1,
@@ -200,7 +223,7 @@ Bus events the game emits:
 `quest {stage}` · `prime {id}` · `gloom:lift {region}` · `lantern {id}` ·
 `hurt {amount,hp}` · `heal {amount,hp}` · `death {}` · `respawn {}` · `lore {id}` (open this page for
 reading) · `save {}` · `brew:add {id}` · `brew:ready {potion,stars,count}` ·
-`brew:bottled {potion,count}` · `opus:stage {stage}` · `opus:done {}` · `ending {phase}` ·
+`brew:bottled {potion,count}` · `brew:empty {}` · `opus:stage {stage}` · `opus:done {}` · `ending {phase}` ·
 `settings {key,value}` · `loading {progress 0..1, label}`.
 
 Screens: loading, title (new game / continue / settings), HUD (crosshair, focus prompt, potion belt,

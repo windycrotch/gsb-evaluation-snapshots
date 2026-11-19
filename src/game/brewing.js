@@ -1,8 +1,9 @@
 // The cauldron: the rules of a brew (what the chart, the fire and the ladle decide) and the pot
 // itself seen from above — a dye field stirred on the GPU, coals, flame, steam, the bellows.
 import * as THREE from 'three';
-import { INGREDIENTS, POTIONS, OPUS, BREW, PRIME_ORDER, mixOf, regionAt, yieldFor, heatFit } from './data.js';
-import { add, count, hasAllPrimes } from './state.js';
+import { INGREDIENTS, POTIONS, OPUS, heatFit } from './data.js';
+import { hasAllPrimes } from './state.js';
+import { recompute, addToPot, applyHands, advanceBinding, bottlePot, emptyPot, clearPot } from './brewlogic.js';
 import { heatMaterial } from './fx.js';
 import { sharedUniforms } from '../gfx/shared.js';
 import { LAYER_MAIN_ONLY } from '../gfx/engine.js';
@@ -260,19 +261,10 @@ export class Brewing {
   }
 
   // ------------------------------------------------------------------------------ rules
+  // The rules themselves live in ./brewlogic.js, so the UI readout and the headless check use the
+  // very same functions. Here a rule's answer is turned into sound, light and bus events.
   _recompute() {
-    const b = this.game.brew;
-    const plain = b.contents.filter((c) => !c.startsWith('prime:'));
-    const m = mixOf(plain);
-    b.mix = m.bary;
-    if (b.opus) {
-      b.mix = OPUS.center.slice();
-      b.region = null;
-      b.band = OPUS.stages[Math.min(3, b.opus.stage)].heat;
-    } else {
-      b.region = regionAt(b.mix);
-      b.band = b.region ? POTIONS[b.region.id].heat : null;
-    }
+    recompute(this.game.brew);
   }
   _splat(color, strength = 1, radius = 0.16) {
     const a = Math.random() * 6.283,
@@ -285,44 +277,25 @@ export class Brewing {
     const g = this.game,
       st = g.state,
       b = g.brew;
-    if (!b.active) return;
-    if (b.ready) return this._refuse('Bottle what is bound first.');
-    if (b.opus) return this._refuse('The Work has begun. It wants nothing else.');
-    if (id.startsWith('prime:')) {
-      const pid = id.slice(6);
-      if (!st.inv.primes[pid] || st.inv.stone) return;
-      if (b.contents.includes(id)) return;
-      if (b.contents.some((c) => !c.startsWith('prime:'))) return this._refuse('Empty the pot first. The Work wants nothing else in it.');
-      b.contents.push(id);
-      g.audio.sfx('drop_in', { gain: 0.9, pitch: 0.7 });
-      this._splat(g.data.PRIME_ITEMS[pid].color, 1.2, 0.2);
-      g.particles.splash(this.surface.x, this.surface.y, this.surface.z, 0.5);
-      g.bus.emit('brew:add', { id });
-      if (PRIME_ORDER.every((p) => b.contents.includes('prime:' + p))) {
-        b.opus = { stage: 0, progress: 0, done: false };
-        b.progress = 0;
-        g.bus.emit('opus:stage', { stage: 0 });
-        g.audio.sfx('opus_stage');
-      }
-      this._recompute();
-      return;
+    const res = addToPot(b, st, id);
+    if (!res.ok) {
+      this._refuse(res.reason);
+      return res;
     }
-    const ing = INGREDIENTS[id];
-    if (!ing || count(st.inv.ingredients, id) <= 0) return;
-    if (b.contents.some((c) => c.startsWith('prime:'))) return this._refuse('The Primes are in the pot. Nothing else goes with them.');
-    if (b.contents.length >= BREW.capacity) return this._refuse('The pot is full.');
-    add(st.inv.ingredients, id, -1);
-    if (b.mix) b.trail.push(b.mix.slice());
-    if (b.trail.length > 12) b.trail.shift();
-    const was = b.region && b.region.id;
-    b.contents.push(id);
-    this._recompute();
-    if (!b.region || b.region.id !== was) b.progress = 0;
-    else b.progress *= 0.6;
-    g.audio.sfx('drop_in');
-    this._splat(ing.color, 1.1, 0.14 + ing.weight * 0.04);
-    g.particles.splash(this.surface.x + (Math.random() - 0.5) * 0.3, this.surface.y, this.surface.z + (Math.random() - 0.5) * 0.3, 0.45);
+    if (res.prime) {
+      g.audio.sfx('drop_in', { gain: 0.9, pitch: 0.7 });
+      this._splat(g.data.PRIME_ITEMS[res.prime].color, 1.2, 0.2);
+      g.particles.splash(this.surface.x, this.surface.y, this.surface.z, 0.5);
+      if (res.opusStarted) g.bus.emit('opus:stage', { stage: 0 });
+      if (res.opusStarted) g.audio.sfx('opus_stage');
+    } else {
+      const ing = res.ingredient;
+      g.audio.sfx('drop_in');
+      this._splat(ing.color, 1.1, 0.14 + ing.weight * 0.04);
+      g.particles.splash(this.surface.x + (Math.random() - 0.5) * 0.3, this.surface.y, this.surface.z + (Math.random() - 0.5) * 0.3, 0.45);
+    }
     g.bus.emit('brew:add', { id });
+    return res;
   }
   _refuse(line) {
     const g = this.game;
@@ -340,41 +313,35 @@ export class Brewing {
     const g = this.game,
       st = g.state,
       b = g.brew;
-    if (!b.ready) return;
-    const { potion, count: n } = b.ready;
-    const have = count(st.inv.potions, potion);
-    const got = Math.min(n, BREW.maxCarry - have);
-    if (got <= 0) return this._refuse('You cannot carry more ' + POTIONS[potion].name + '.');
-    add(st.inv.potions, potion, got, BREW.maxCarry);
-    st.stats.brewed += got;
-    if (!st.inv.selected) st.inv.selected = potion;
+    const res = bottlePot(b, st);
+    if (!res.ok) {
+      this._refuse(res.reason);
+      return res;
+    }
     g.audio.sfx('bottle_fill');
     g.after.push({ t: 0.5, fn: () => g.audio.sfx('cork') });
-    g.bus.emit('brew:bottled', { potion, count: got });
-    g.bus.emit('pickup', { kind: 'potion', id: potion, count: st.inv.potions[potion] });
-    g.toast('pickup', POTIONS[potion].full, '×' + got, { kind: 'potion', id: potion });
-    b.contents = [];
-    b.trail = [];
-    b.ready = null;
-    b.progress = 0;
-    this._recompute();
+    g.bus.emit('brew:bottled', { potion: res.potion, count: res.count });
+    g.bus.emit('pickup', { kind: 'potion', id: res.potion, count: res.total });
+    g.toast('pickup', POTIONS[res.potion].full, '×' + res.count, { kind: 'potion', id: res.potion });
     g.quests.check();
     g.save();
+    return res;
   }
   empty() {
     const g = this.game,
       b = g.brew;
-    if (b.opus && b.opus.done) return;
-    if (!b.contents.length) return;
-    b.contents = [];
-    b.trail = [];
-    b.ready = null;
-    b.progress = 0;
-    b.opus = null;
-    this._recompute();
+    const wasHot = b.heat > 0.3;
+    const res = emptyPot(b);
+    if (!res.ok) {
+      this._refuse(res.reason);
+      return res;
+    }
+    if (!res.had) return res;
     g.audio.sfx('splash', { gain: 0.6 });
-    if (b.heat > 0.3) g.audio.sfx('steam', { gain: 0.5 });
+    if (wasHot) g.audio.sfx('steam', { gain: 0.5 });
     this._splat('#05070a', 2.5, 0.6);
+    g.bus.emit('brew:empty', {});
+    return res;
   }
 
   enter() {
@@ -454,15 +421,13 @@ export class Brewing {
       if (this.autoStir) stirIn = Math.max(stirIn, this.autoStir);
       if (input.hit('Escape')) this.leave();
     }
-    b.stir = damp(b.stir, stirIn, stirIn > b.stir ? 5 : 2.2, dt);
     // screen angle runs clockwise, the pot is seen from the south: the ladle follows the hand
     this.spin = damp(this.spin, -this.dir * b.stir * 6.5, 6, dt);
     this.angle += this.spin * dt;
 
-    // --- fire and heat
+    // --- fire and heat: the bellows and the damper, then the fire falls back on its own
     const fire0 = b.fire;
-    b.fire = clamp(b.fire + (pump ? 0.55 : 0) * dt - (dampOn ? 0.5 : 0.045) * dt, 0, 1);
-    b.heat += (b.fire - b.heat) * (1 - Math.exp(-0.55 * dt));
+    applyHands(b, dt, { pump, damp: dampOn, stirIn });
     if (pump) {
       this._pumpT -= dt;
       if (this._pumpT <= 0) {
@@ -477,23 +442,16 @@ export class Brewing {
     this._hintHold = Math.max(0, (this._hintHold || 0) - dt);
     if (b.opus) this._opus(dt);
     else {
-      b.fit = b.band ? heatFit(b.heat, b.band) : null;
-      if (b.region && !b.ready && b.contents.length) {
-        if (b.fit === 0) {
-          if (b.stir > 0.08) b.progress += (dt / BREW.bindSeconds) * (0.3 + b.stir);
-        } else b.progress = Math.max(0, b.progress - dt * 0.07);
-        if (b.progress >= 1) {
-          b.progress = 1;
-          b.ready = { potion: b.region.id, stars: b.region.stars, count: yieldFor(b.region.stars) };
-          const first = !st.known.potions[b.region.id];
-          st.known.potions[b.region.id] = true;
-          st.known.charted[b.region.id] = true;
-          g.audio.sfx('brew_ready');
-          g.bus.emit('brew:ready', { ...b.ready });
-          if (first) g.bus.emit('discover', { kind: 'potion', id: b.region.id });
-          this._splat(POTIONS[b.region.id].color2, 1.4, 0.3);
-        }
-      } else if (!b.region) b.progress = Math.max(0, b.progress - dt * 0.3);
+      const bound = advanceBinding(b, dt);
+      if (bound) {
+        const first = !st.known.potions[bound.potion];
+        st.known.potions[bound.potion] = true;
+        st.known.charted[bound.potion] = true;
+        g.audio.sfx('brew_ready');
+        g.bus.emit('brew:ready', { ...bound });
+        if (first) g.bus.emit('discover', { kind: 'potion', id: bound.potion });
+        this._splat(POTIONS[bound.potion].color2, 1.4, 0.3);
+      }
       if (this._hintHold <= 0) b.hint = this._hint(b);
     }
 
@@ -594,7 +552,7 @@ export class Brewing {
   _hint(b) {
     if (b.ready) return 'It is bound. Bottle it.';
     if (!b.contents.length) return hasAllPrimes(this.game.state) && !this.game.state.inv.stone ? 'The three Primes are with you. Give them to the pot.' : 'Add what you have gathered.';
-    if (!b.region) return 'The mixture has no name yet. Add more, or empty the pot.';
+    if (!b.region) return 'The mixture lies in no region. Add more, or empty the pot.';
     if (b.fit < 0) return 'Too cold. Work the bellows.';
     if (b.fit > 0) return 'Too hot. Close the damper and wait.';
     if (b.stir < 0.08) return 'The fire is right. Circle the ladle to stir.';
@@ -743,7 +701,8 @@ export class Brewing {
   /** The pot as a fresh game finds it. */
   reset() {
     const b = this.game.brew;
-    Object.assign(b, { active: false, contents: [], mix: null, trail: [], fire: 0, heat: 0, region: null, band: null, fit: null, stir: 0, progress: 0, ready: null, opus: null, hint: '' });
+    clearPot(b);
+    b.active = false;
     this.k = 0;
     this.endT = 0;
     this._splats.length = 0;

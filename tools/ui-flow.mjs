@@ -453,7 +453,8 @@ async function walk() {
   await page.mouse.up();
   await frames();
   check('a hold let go off the button still ends', await calls(), 'brewDamp(true) brewDamp(false)');
-  check('Bottle waits until there is something to bottle', await state(() => document.querySelectorAll('.tp-keybtn')[2].disabled), true);
+  check('Bottle waits until there is something in the pot', await state(() => document.querySelectorAll('.tp-keybtn')[2].disabled), false);
+  check('and it is not offered as ready until the pot is bound', await has('.tp-keybtn:nth-child(3)', 'is-call'), false);
   await page.locator('.tp-keybtn').nth(3).click();
   await frames();
   check('Empty empties the pot', (await state(() => window.UIDEV.game.brew.contents.length)) + ' ' + (await calls()), '0 brewEmpty()');
@@ -465,6 +466,9 @@ async function walk() {
   check('the emptied pot takes things again', await calls(), 'brewAdd(cinderbloom)');
   await state(() => {
     const b = window.UIDEV.game.brew;
+    const m = window.UIDEV.mixOf(['cinderbloom']);
+    b.contents = ['cinderbloom', 'cinderbloom', 'cinderbloom'];
+    b.mix = m.bary;
     b.ready = { potion: 'ember', stars: 2, count: 3 };
     b.progress = 1;
   });
@@ -474,6 +478,7 @@ async function walk() {
   await page.locator('.tp-keybtn').nth(2).click();
   await frames();
   check('Bottle bottles', await calls(), 'brewBottle()');
+  check('and the pot is empty after the pour', (await state(() => window.UIDEV.game.brew.contents.length)) + ' ' + (await state(() => window.UIDEV.game.brew.heat)), '0 0');
   await page.locator('.tp-keybtn').nth(4).click();
   await frames();
   check('Leave leaves', (await mode()) + ' ' + (await calls()), 'play brewLeave()');

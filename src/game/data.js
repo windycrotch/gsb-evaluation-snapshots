@@ -275,6 +275,10 @@ export const BREW = {
   yield: [2, 3, 4], // bottles for one, two, three marks of purity
 };
 
+// The pot begins holding a little of the balanced mixture: the mark starts at the centre of the
+// triangle and the first measure of a herb pulls it toward that herb's corner.
+export const POT_BASE = 0.25;
+
 // ---------------------------------------------------------------------------------------------
 // Chart math.
 // ---------------------------------------------------------------------------------------------
@@ -291,12 +295,22 @@ export function baryDist(a, b) {
     dk = a[2] - b[2];
   return Math.sqrt(Math.max(0, -(ds * dm + dm * dk + dk * ds)));
 }
-/** Weighted mix of ingredient ids -> { bary:[s,m,k], total, count } (bary is null when empty). */
+/**
+ * Weighted mix of ingredient ids -> { bary:[s,m,k], total, count } (bary is null when empty).
+ *
+ * The pot starts out holding `POT_BASE` of the balanced mixture, at the centre of the triangle.
+ * Each measure thrown in is weighed into that mean, so it draws the mark from where it was toward
+ * the ingredient's own corner: the first measure moves it a long way, and every further measure of
+ * the same herb draws it further still, by a little less each time. Repeats therefore accumulate:
+ * three Cinderblooms sit closer to the sulfur corner than one, and the mark follows the pot as it
+ * is filled.
+ */
 export function mixOf(contents) {
-  let s = 0,
-    m = 0,
-    k = 0,
-    w = 0;
+  let s = POT_BASE / 3,
+    m = POT_BASE / 3,
+    k = POT_BASE / 3,
+    w = POT_BASE,
+    n = 0;
   for (const id of contents) {
     const ing = INGREDIENTS[id];
     if (!ing) continue;
@@ -304,9 +318,14 @@ export function mixOf(contents) {
     m += ing.bary[1] * ing.weight;
     k += ing.bary[2] * ing.weight;
     w += ing.weight;
+    n++;
   }
-  if (w <= 0) return { bary: null, total: 0, count: 0 };
-  return { bary: [s / w, m / w, k / w], total: w, count: contents.length };
+  if (n === 0) return { bary: null, total: 0, count: 0 };
+  return { bary: [s / w, m / w, k / w], total: w, count: n };
+}
+/** The mixture point if one more measure of `id` went into a pot holding `contents`. */
+export function mixAfter(contents, id) {
+  return mixOf([...contents, id]);
 }
 /** Which potion region contains this point? -> { id, dist, quality 0..1, stars 1..3 } or null. */
 export function regionAt(bary) {

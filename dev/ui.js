@@ -16,6 +16,7 @@ import * as D from '../src/game/data.js';
 import { createState, createBrew } from '../src/game/state.js';
 import { Emitter } from '../src/core/events.js';
 import { createUI } from '../src/ui/index.js';
+import { recompute, addToPot, applyHands, advanceBinding, bottlePot, emptyPot, clearPot } from '../src/game/brewlogic.js';
 
 const Q = new URLSearchParams(location.search);
 const SCENE = Q.get('scene') || 'title';
@@ -155,31 +156,10 @@ const toast = (kind, title, text, icon) => bus.emit('toast', { kind, title, text
 const pot = { pump: false, damp: false, stirTarget: 0, auto: false };
 
 function brewRecalc() {
-  const b = game.brew;
-  const primes = b.contents.filter((x) => x.startsWith('prime:'));
-  if (primes.length) {
-    b.mix = null;
-    b.region = null;
-    if (primes.length === 3 && !b.opus) {
-      b.opus = { stage: 0, progress: 0, done: false };
-      bus.emit('opus:stage', { stage: 0 });
-    }
-    b.band = b.opus ? D.OPUS.stages[b.opus.stage].heat : null;
-  } else {
-    const m = D.mixOf(b.contents);
-    b.mix = m.bary;
-    b.region = D.regionAt(m.bary);
-    b.band = b.region ? D.POTIONS[b.region.id].heat : null;
-  }
-  b.fit = b.band ? D.heatFit(b.heat, b.band) : null;
+  recompute(game.brew);
 }
 function brewClear() {
-  const b = game.brew;
-  b.contents = [];
-  b.trail = [];
-  b.mix = b.region = b.band = b.fit = b.ready = b.opus = null;
-  b.progress = 0;
-  b.hint = '';
+  clearPot(game.brew);
 }
 
 const actions = {
@@ -226,19 +206,10 @@ const actions = {
     const b = game.brew,
       st = game.state;
     if (b.ready || b.opus || b.contents.length >= D.BREW.capacity) return;
-    if (id.startsWith('prime:')) {
-      const p = id.slice(6);
-      if (!st.inv.primes[p] || b.contents.includes(id) || b.contents.some((x) => !x.startsWith('prime:'))) return;
-      b.contents.push(id);
-    } else {
-      if (!(st.inv.ingredients[id] > 0) || b.contents.some((x) => x.startsWith('prime:'))) return;
-      if (--st.inv.ingredients[id] <= 0) delete st.inv.ingredients[id];
-      if (b.mix) b.trail.push(b.mix.slice());
-      b.contents.push(id);
-    }
-    b.progress = 0;
-    brewRecalc();
+    const res = addToPot(b, st, id);
+    if (!res.ok) return;
     bus.emit('brew:add', { id });
+    if (res.opusStarted) bus.emit('opus:stage', { stage: 0 });
   },
   brewPump: (on) => (pot.pump = !!on),
   brewDamp: (on) => (pot.damp = !!on),
@@ -253,22 +224,15 @@ const actions = {
       brewClear();
       return;
     }
-    if (!b.ready) return;
-    const { potion, count } = b.ready;
-    const first = !st.known.potions[potion];
-    st.inv.potions[potion] = Math.min(D.BREW.maxCarry, (st.inv.potions[potion] || 0) + count);
-    st.known.potions[potion] = st.known.charted[potion] = true;
-    if (!st.inv.selected) st.inv.selected = potion;
-    st.stats.brewed++;
-    bus.emit('brew:bottled', { potion, count });
-    bus.emit('pickup', { kind: 'potion', id: potion, count });
-    if (first) bus.emit('discover', { kind: 'potion', id: potion });
-    else toast('pickup', D.POTIONS[potion].full, '×' + count, { kind: 'potion', id: potion });
-    brewClear();
+    const res = bottlePot(b, st);
+    if (!res.ok) return;
+    bus.emit('brew:bottled', { potion: res.potion, count: res.count });
+    bus.emit('pickup', { kind: 'potion', id: res.potion, count: res.total });
+    if (res.first) bus.emit('discover', { kind: 'potion', id: res.potion });
+    else toast('pickup', D.POTIONS[res.potion].full, '×' + res.count, { kind: 'potion', id: res.potion });
   },
   brewEmpty() {
-    if (game.brew.opus && game.brew.opus.done) return;
-    brewClear();
+    emptyPot(game.brew);
   },
   brewLeave() {
     game.brew.active = false;
@@ -331,15 +295,11 @@ function die() {
 
 function simBrew(dt) {
   const b = game.brew;
-  const fireTo = pot.pump ? 1 : 0;
-  const rate = pot.pump ? 0.5 : pot.damp ? 0.45 : 0.05;
-  b.fire += Math.sign(fireTo - b.fire) * Math.min(Math.abs(fireTo - b.fire), rate * dt);
-  b.heat += (b.fire - b.heat) * (1 - Math.exp(-dt * 1.3));
-  b.stir += ((pot.auto ? 0.85 : pot.stirTarget) - b.stir) * (1 - Math.exp(-dt * 4));
+  applyHands(b, dt, { pump: pot.pump, damp: pot.damp, stirIn: pot.auto ? 0.85 : pot.stirTarget });
   pot.stirTarget *= Math.exp(-dt * 2.5);
-  b.fit = b.band ? D.heatFit(b.heat, b.band) : null;
   if (b.opus && !b.opus.done) {
     const o = b.opus;
+    b.fit = b.band ? D.heatFit(b.heat, b.band) : null;
     if (b.fit === 0 && b.stir > 0.25) o.progress += dt / D.OPUS.stages[o.stage].seconds;
     else o.progress = Math.max(0, o.progress - dt * 0.03);
     if (o.progress >= 1) {
@@ -354,14 +314,8 @@ function simBrew(dt) {
         bus.emit('opus:stage', { stage: o.stage });
       }
     }
-  } else if (b.region && !b.ready) {
-    if (b.fit === 0 && b.stir > 0.25) b.progress += (dt / D.BREW.bindSeconds) * Math.min(1, b.stir * 1.3);
-    else b.progress = Math.max(0, b.progress - dt * 0.05);
-    if (b.progress >= 1) {
-      b.progress = 1;
-      b.ready = { potion: b.region.id, stars: b.region.stars, count: D.yieldFor(b.region.stars) };
-      bus.emit('brew:ready', b.ready);
-    }
+  } else if (advanceBinding(b, dt)) {
+    bus.emit('brew:ready', b.ready);
   }
 }
 
@@ -769,12 +723,11 @@ function brewSet(contents, o = {}) {
     brewRecalc();
   }
   Object.assign(b, o);
-  brewRecalc();
   if (o.opus) {
     b.opus = o.opus;
     b.band = D.OPUS.stages[Math.min(3, o.opus.stage)].heat;
   }
-  b.fit = b.band ? D.heatFit(b.heat, b.band) : null;
+  brewRecalc();
   game.state.mode = 'brew';
 }
 
@@ -1045,6 +998,9 @@ const UIDEV = (window.UIDEV = {
   game,
   ui: null,
   done: false,
+  data: D,
+  mixOf: D.mixOf,
+  brewlogic: { recompute, addToPot, applyHands, advanceBinding, bottlePot, emptyPot, clearPot },
   list: Object.keys(SCENES).map((name) => ({ name, small: !!SCENES[name].small, seek: SCENES[name].seek || 1500 })),
   /** Jump every CSS animation to `ms` and finish every transition: a settled frame, at once. */
   seek(ms) {
