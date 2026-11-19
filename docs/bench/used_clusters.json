@@ -1,0 +1,27 @@
+{
+ "2px": {
+  "usedTris": 1906833,
+  "usedMB": 45.5,
+  "trisMax": 2460671
+ },
+ "4px": {
+  "usedTris": 1309629,
+  "usedMB": 31.2,
+  "trisMax": 1511504
+ },
+ "8px": {
+  "usedTris": 939178,
+  "usedMB": 22.4,
+  "trisMax": 801702
+ },
+ "budget300k": {
+  "usedTris": 736873,
+  "usedMB": 17.6,
+  "trisMax": 300942
+ },
+ "budget1M": {
+  "usedTris": 1482147,
+  "usedMB": 35.3,
+  "trisMax": 1000947
+ }
+}
