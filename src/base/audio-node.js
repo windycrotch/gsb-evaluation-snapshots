@@ -52,10 +52,17 @@ export default class RAudioNode extends RComponent {
    * Connects the given AudioNode to this RAudioNode's destinations.
    * Abstracts away this operation as it's used in multiple lifecycle stages.
    *
+   * The node's existing connections are always torn down first, so calling
+   * this after a destination change cleanly replaces the old wiring instead
+   * of leaving stale connections behind. connectToParam and the channel
+   * props are re-applied through getConnectionArguments on every reconnect.
+   *
    * @param      {function} destinationFunction The function that will return the destinations
    * @param      {AudioNode}  webAudioNode  The web audio node
    */
   connectToAllDestinations(destinationFunction, webAudioNode) {
+    if (!webAudioNode) return;
+
     webAudioNode.disconnect();
 
     if (destinationFunction && !this.props.disconnected) {
@@ -78,6 +85,31 @@ export default class RAudioNode extends RComponent {
     }
   }
 
+  /**
+   * Asks every upstream parent to drop its connection to this node's
+   * underlying AudioNode. Used while unmounting, so parents never keep
+   * pointing at a node that is about to be destroyed.
+   *
+   * Parents are resolved through context.nodes; if a parent has already
+   * been unmounted and is no longer registered, it is safely skipped.
+   */
+  disconnectFromParents() {
+    if (typeof this.props.parent !== 'function') return;
+
+    const parents = this.props.parent();
+    if (!parents) return;
+
+    this.flattenPointers(parents).forEach(parent => {
+      if (!parent || typeof parent.disconnect !== 'function') return;
+
+      try {
+        parent.disconnect(this.node);
+      } catch (e) {
+        console.warn(e); // eslint-disable-line no-console
+      }
+    });
+  }
+
   componentWillMount() {
     super.componentWillMount();
   }
@@ -87,24 +119,47 @@ export default class RAudioNode extends RComponent {
   }
 
   componentWillUpdate(nextProps, nextState) {
-    // update the node's record in the node registry
+    // keep the node's record in the node registry keyed by the current
+    // identifier: move it under the new key and make sure no stale old key
+    // is left behind when the identifier prop changes
     if (this.props.identifier !== nextProps.identifier) {
-      this.context.nodes.delete(this.props.identifier);
+      if (this.context.nodes.get(this.props.identifier) === this.node) {
+        this.context.nodes.delete(this.props.identifier);
+      }
+
       this.context.nodes.set(nextProps.identifier, this.node);
     }
   }
 
   // we use DidUpdate to connect to new destinations,
-  // because WillUpdate might get called before the new destinations are ready
+  // because WillUpdate might get called before the new destinations are ready.
+  // connectToAllDestinations disconnects first and then reconnects, so the
+  // old destination wiring is cleaned up; the connectToParam/channel props
+  // are re-applied at the same time, so their updates take effect too.
   componentDidUpdate(prevProps, prevState) {
-    if (prevProps.destination !== this.props.destination) {
+    if (prevProps.destination !== this.props.destination ||
+        prevProps.connectToParam !== this.props.connectToParam ||
+        prevProps.connectFromChannel !== this.props.connectFromChannel ||
+        prevProps.connectToChannel !== this.props.connectToChannel ||
+        prevProps.disconnected !== this.props.disconnected) {
       this.connectToAllDestinations(this.props.destination, this.node);
     }
   }
 
   componentWillUnmount() {
-    this.node.disconnect();
-    this.context.nodes.delete(this.props.identifier);
+    // upstream parents must disconnect first, otherwise they keep pointing
+    // at an AudioNode that is about to be destroyed
+    this.disconnectFromParents();
+
+    if (this.node && typeof this.node.disconnect === 'function') {
+      this.node.disconnect();
+    }
+
+    // only remove the registry entry that still belongs to this node,
+    // so a later identifier can never delete someone else's record
+    if (this.context.nodes.get(this.props.identifier) === this.node) {
+      this.context.nodes.delete(this.props.identifier);
+    }
   }
 
   resolveTransitionProps(props, propName) {
