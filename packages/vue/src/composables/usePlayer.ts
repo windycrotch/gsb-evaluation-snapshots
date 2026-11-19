@@ -61,6 +61,9 @@ export function usePlayer(videoRef: Ref<HTMLVideoElement | null>) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let hlsInstance: any = null
   let lastSrc = ''
+  // Monotonic load sequence — only the most recent loadSource call may write state.
+  // Bumping it invalidates every in-flight async step and pending HLS callback.
+  let loadSeq = 0
 
   function clearVideo() {
     const video = videoRef.value
@@ -98,6 +101,10 @@ export function usePlayer(videoRef: Ref<HTMLVideoElement | null>) {
     const video = videoRef.value
     if (!video) return
 
+    // Invalidate any previous in-flight load before doing anything else
+    const seq = ++loadSeq
+    const isStale = () => seq !== loadSeq
+
     lastSrc = src
     destroyAdapters()
 
@@ -113,8 +120,22 @@ export function usePlayer(videoRef: Ref<HTMLVideoElement | null>) {
     const type = detectSourceType(src)
 
     if (type === 'hls') {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let hls: any = null
+      // Stale callbacks only clean up — they must never write state.
+      // If destroyAdapters() already ran, hlsInstance !== hls and this is a no-op.
+      const destroyIfOurs = () => {
+        if (hls && hlsInstance === hls) {
+          hlsInstance = null
+          hls.destroy()
+        }
+      }
       try {
         const { default: Hls } = await import('hls.js')
+
+        // A newer loadSource (or unmount) superseded this one while importing —
+        // nothing was created yet, just bail out without touching state
+        if (isStale()) return
 
         if (!Hls.isSupported()) {
           // Safari — native HLS support
@@ -122,9 +143,13 @@ export function usePlayer(videoRef: Ref<HTMLVideoElement | null>) {
           return
         }
 
-        const hls = new Hls({ enableWorker: true })
+        hls = new Hls({ enableWorker: true })
 
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
+          if (isStale()) {
+            destroyIfOurs()
+            return
+          }
           const seen = new Set<number>()
           state.availableQualities = (hls.levels as any[])
             .map((level, i) => ({
@@ -142,6 +167,10 @@ export function usePlayer(videoRef: Ref<HTMLVideoElement | null>) {
         })
 
         hls.on(Hls.Events.LEVEL_SWITCHED, (_, data) => {
+          if (isStale()) {
+            destroyIfOurs()
+            return
+          }
           // Only update displayed quality when ABR switches automatically
           if (state.currentQuality === 'auto') return
           const level = (hls.levels as any[])[data.level]
@@ -152,6 +181,10 @@ export function usePlayer(videoRef: Ref<HTMLVideoElement | null>) {
         })
 
         hls.on(Hls.Events.ERROR, (_, data) => {
+          if (isStale()) {
+            destroyIfOurs()
+            return
+          }
           if (!data.fatal) return
           const code = (data as any).response?.code ?? 0
           const isNotFound = code === 404
@@ -164,6 +197,7 @@ export function usePlayer(videoRef: Ref<HTMLVideoElement | null>) {
           }
           state.isLoading = false
           state.isBuffering = false
+          if (hlsInstance === hls) hlsInstance = null
           hls.destroy()
         })
 
@@ -171,10 +205,19 @@ export function usePlayer(videoRef: Ref<HTMLVideoElement | null>) {
         hls.attachMedia(video)
         hlsInstance = hls
       } catch {
+        // Initialization failed — clean up whatever was created, even if it was
+        // never registered as the active instance
+        if (hls) {
+          if (hlsInstance === hls) hlsInstance = null
+          hls.destroy()
+        }
+        // A superseded load must not surface an error
+        if (isStale()) return
         state.error = { code: 0, message: 'Failed to initialize HLS player.', type: 'source' }
         state.isLoading = false
       }
     } else {
+      if (isStale()) return
       nativeAdapter = createNativeAdapter(video)
       nativeAdapter.load(src)
     }
@@ -325,6 +368,8 @@ export function usePlayer(videoRef: Ref<HTMLVideoElement | null>) {
   })
 
   onUnmounted(() => {
+    // Invalidate in-flight loads so their continuations/callbacks become no-ops
+    loadSeq++
     destroyAdapters()
     document.removeEventListener('fullscreenchange', onFullscreenChange)
   })

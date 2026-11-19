@@ -101,12 +101,14 @@ onMounted(() => {
 
 // Apply the active (or default) track once canplay fires — at that point all browser
 // async track-mode resets from video.load() are guaranteed to have completed.
+// currentTrack is cleared on every source switch, so this applies the new source's
+// default track — or keeps subtitles off when the new source has none.
 watch(
   () => state.isLoading,
   (loading) => {
     if (loading) return
     const track = state.currentTrack ?? props.tracks?.find((t) => t.default) ?? null
-    if (track) controls.setTrack(track)
+    controls.setTrack(track)
   },
 )
 
@@ -115,6 +117,11 @@ onBeforeUnmount(() => videoRef.value?.removeEventListener('timeupdate', syncSubt
 watch(
   () => props.src,
   (src) => {
+    // Source switch: clear the previous source's subtitle state first so no
+    // stale cues can linger while the new source loads. The isLoading watcher
+    // applies the new source's default track once loading finishes.
+    controls.setTrack(null)
+    currentCues.value = []
     if (src) loadSource(src)
   },
 )
