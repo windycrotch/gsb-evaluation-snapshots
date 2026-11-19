@@ -42,6 +42,18 @@ describe('useAppStore', () => {
     expect(useAppStore.getState().isRecording).toBe(true)
   })
 
+  it('setRecording sets the recorder state explicitly, in both directions', () => {
+    /* The record button reflects what the recorder actually did rather than a
+       blind toggle, so a duplicate start cannot light it or an empty stop leave
+       it lit. */
+    useAppStore.getState().setRecording(true)
+    expect(useAppStore.getState().isRecording).toBe(true)
+    useAppStore.getState().setRecording(true)
+    expect(useAppStore.getState().isRecording).toBe(true)
+    useAppStore.getState().setRecording(false)
+    expect(useAppStore.getState().isRecording).toBe(false)
+  })
+
   it('setBpm updates bpm value', () => {
     useAppStore.getState().setBpm(140)
     expect(useAppStore.getState().bpm).toBe(140)

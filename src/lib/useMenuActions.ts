@@ -107,10 +107,21 @@ export function useMenuActions(): void {
         case 'export-audio': {
           const { exportLastTakeAsWav } = await import('./audio/recorder');
           const result = await exportLastTakeAsWav();
-          if (result === null) {
-            api.notify?.('Nothing to export', 'Record a take first — the transport bar has the record button.');
-          } else if ('error' in result) {
-            api.notify?.('Export failed', result.error);
+          switch (result.status) {
+            case 'no-take':
+              api.notify?.('Nothing to export', 'Record a take first — the transport bar has the record button.');
+              break;
+            case 'unavailable':
+              api.notify?.('Export unavailable', 'WAV export needs the desktop app.');
+              break;
+            case 'cancelled':
+              /* Save dialog dismissed by the user — deliberately silent. */
+              break;
+            case 'failed':
+              api.notify?.('Export failed', result.message);
+              break;
+            case 'saved':
+              break;
           }
           break;
         }

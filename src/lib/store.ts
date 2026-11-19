@@ -153,6 +153,7 @@ interface AppState {
   togglePlay: () => void
   stop: () => void
   toggleRecord: () => void
+  setRecording: (recording: boolean) => void
   setBpm: (bpm: number) => void
 
   /* Engine actions */
@@ -323,6 +324,10 @@ export const useAppStore = create<AppState>()((set, get) => ({
   stop: () => set({ isPlaying: false, isRecording: false }),
 
   toggleRecord: () => set((s) => ({ isRecording: !s.isRecording })),
+
+  /** Set recording state explicitly — the recorder, not a blind toggle, decides
+   *  what actually happened, so the button cannot drift out of sync with it. */
+  setRecording: (recording: boolean) => set({ isRecording: recording }),
 
   /** Set BPM, clamped to valid range */
   setBpm: (bpm: number) =>

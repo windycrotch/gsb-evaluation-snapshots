@@ -62,7 +62,7 @@ function TransportBar() {
   const togglePlay = useAppStore((s) => s.togglePlay)
   const stop = useAppStore((s) => s.stop)
   const setBpm = useAppStore((s) => s.setBpm)
-  const toggleRecord = useAppStore((s) => s.toggleRecord)
+  const setRecording = useAppStore((s) => s.setRecording)
 
   /* Graph toggle */
   const showGraph = useAppStore((s) => s.layout.showGraph)
@@ -127,9 +127,28 @@ function TransportBar() {
     }
   }
 
-  const handleStop = () => {
+  const handleStop = async () => {
     getOrchestrator().stop()
     stop()
+
+    /* Stop halts the take as well. Previously it only cleared the store flag,
+       leaving a MediaRecorder running invisibly — the take was never saved and
+       Export Audio could not see it. Stopping publishes it to the shared take
+       store, so Stop followed by Export works. */
+    const { getRecorder } = await import('../../lib/audio/recorder')
+    const recorder = getRecorder()
+    if (recorder.isRecording()) {
+      await recorder.stop()
+      setRecording(recorder.isRecording())
+    }
+  }
+
+  /* Stop is also the onClick handler; a rejection here would be an unhandled
+     one, and the recorder API is designed not to reject — guard anyway. */
+  const handleStopClick = () => {
+    void handleStop().catch((err: unknown) => {
+      console.error('[TransportBar] Stop failed:', err)
+    })
   }
 
   /* Record toggle — start/stop audio capture and download */
@@ -137,15 +156,24 @@ function TransportBar() {
     const { getRecorder } = await import('../../lib/audio/recorder')
     const recorder = getRecorder()
     if (recorder.isRecording()) {
-      try {
-        await recorder.stopAndDownload('live-music-coder')
-      } catch (err) {
-        console.error('[TransportBar] Recording stop failed:', err)
+      const result = await recorder.stopAndDownload('live-music-coder')
+      /* The store mirrors what the recorder actually did. A failed stop
+         (already stopped elsewhere, empty take) must not leave the button lit. */
+      setRecording(recorder.isRecording())
+      if (!result.ok && result.reason === 'empty') {
+        console.warn('[TransportBar] Recording produced no audio')
+      } else if (!result.ok && result.reason === 'recorder-error') {
+        console.error('[TransportBar] Recording stop failed:', result.message)
       }
-      toggleRecord()
     } else {
-      recorder.start()
-      toggleRecord()
+      const result = recorder.start()
+      /* A duplicate click lands on `already-recording`; the second call never
+         created a recorder, so the UI stays in step with the one that exists. */
+      setRecording(recorder.isRecording())
+      if (!result.ok && result.reason === 'unsupported') {
+        console.error('[TransportBar] Recording unavailable:', result.message)
+        electronAPI?.notify('Recording unavailable', result.message)
+      }
     }
   }
 
@@ -218,7 +246,7 @@ function TransportBar() {
           <Tooltip content={t('transport.stop')}>
             <Button
               variant="icon"
-              onClick={handleStop}
+              onClick={handleStopClick}
               aria-label={t('transport.stop')}
             >
               <Icon icon={Square} size={16} />
@@ -381,13 +409,25 @@ function TransportBar() {
                       void import('../../lib/audio/recorder')
                         .then(({ exportLastTakeAsWav }) => exportLastTakeAsWav())
                         .then((result) => {
-                          if (result === null) {
-                            electronAPI?.notify('Nothing to export', 'Record a take first, then export.')
-                          } else if ('error' in result) {
-                            electronAPI?.notify('Export failed', result.error)
+                          switch (result.status) {
+                            case 'no-take':
+                              electronAPI?.notify('Nothing to export', 'Record a take first, then export.')
+                              break
+                            case 'unavailable':
+                              electronAPI?.notify('Export unavailable', 'WAV export needs the desktop app.')
+                              break
+                            case 'cancelled':
+                              /* The user closed the save dialog on purpose —
+                                 no notification is the correct response. */
+                              break
+                            case 'failed':
+                              electronAPI?.notify('Export failed', result.message)
+                              break
+                            case 'saved':
+                              /* Success is its own feedback: the save dialog
+                                 closed and the file is on disk. */
+                              break
                           }
-                          /* Success is its own feedback: the save dialog closed
-                             and the file is on disk. A toast would be noise. */
                         })
                         .catch(() => {
                           electronAPI?.notify('Export failed', 'Could not decode the recording.')
