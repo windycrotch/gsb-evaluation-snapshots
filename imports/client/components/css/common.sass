@@ -1,0 +1,44 @@
+// =icon($url, $size)
+//   width: $size
+//   height: $size
+//   background-image: url($url)
+//   background-size: contain
+//   background-repeat: none
+
+// ****************************
+// VARIABLES
+// ****************************
+
+$font: monospace;
+$font-size-s: 9px;
+
+// ****************************
+// BASE
+// ****************************
+body {
+  font-family: monospace;
+  margin: 0;
+  padding: 0;
+}
+
+// ****************************
+// MIXINS
+// ****************************
+
+@mixin icon($url, $size) {
+  width: $size;
+  height: $size;
+  background-image: url($url);
+  background-size: contain;
+  background-repeat: none;
+}
+
+// ****************************
+// FONT
+// ****************************
+
+.input.text {
+  border: none;
+  padding: 10px;
+  background: rgba(0, 0, 0, 0.05);
+}
