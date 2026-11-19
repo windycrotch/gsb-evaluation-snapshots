@@ -11,8 +11,12 @@ import { ScottieS2LineDecoder, DecodedLine as ScottieS2DecodedLine } from './sco
 type DecodedLine = Robot36DecodedLine | Robot72DecodedLine | PD120DecodedLine | PD160DecodedLine | PD180DecodedLine | ScottieS1DecodedLine | ScottieS2DecodedLine;
 
 export enum DecoderState {
+  /** No session has been started yet, or a reset returned an inactive decoder to a clean state. */
   IDLE = 'IDLE',
+  /** A decoding session is active and audio samples are being consumed. */
   DECODING_IMAGE = 'DECODING_IMAGE',
+  /** The session was stopped; the decoded image is retained but no samples are consumed. */
+  STOPPED = 'STOPPED',
 }
 
 export interface DecoderStats {
@@ -107,19 +111,23 @@ export class SSTVDecoder {
   private absoluteSamplePosition: number = 0;
 
   /**
-   * Process audio samples
+   * Process audio samples.
+   *
+   * Samples are only consumed while a decoding session is active. After stop()
+   * or reset() the decoder ignores input entirely so a retained image cannot be
+   * modified and stale buffers are not advanced.
    */
   processSamples(samples: Float32Array): void {
-    // Calculate signal strength (RMS amplitude as percentage) - ALWAYS, even when not decoding
+    if (samples.length === 0 || this.state !== DecoderState.DECODING_IMAGE) {
+      return;
+    }
+
+    // Calculate signal strength (RMS amplitude as percentage)
     const rms = Math.sqrt(samples.reduce((sum, val) => sum + val * val, 0) / samples.length);
     // Convert RMS to percentage with more sensitive scaling for typical SSTV signals
     // SSTV signals are often quieter, so scale more aggressively
     const currentStrength = Math.min(100, rms * 500); // More sensitive scaling
     this.signalStrength = this.signalStrength * 0.8 + currentStrength * 0.2;
-
-    if (this.state !== DecoderState.DECODING_IMAGE) {
-      return;
-    }
 
     this.sampleCounter += samples.length;
 
@@ -203,18 +211,25 @@ export class SSTVDecoder {
     const totalSamples = hasNegativeTiming ? endOffset - beginOffset : lineLength;
     const extractStart = hasNegativeTiming ? (startPos + beginOffset + this.bufferSize) % this.bufferSize : startPos;
 
+    // Allow a small guard tail: the measured sync-to-sync distance can come out
+    // a few samples shorter than the nominal line length because pulse edges
+    // are detected with sample-level jitter. The guard keeps the line decoder's
+    // bounds check from discarding an otherwise complete line.
+    const GUARD_SAMPLES = 64;
+    const extractionLength = totalSamples + GUARD_SAMPLES;
+
     console.log(`🔍 Decoder timing: beginOffset=${beginOffset}, endOffset=${endOffset}, totalSamples=${totalSamples}`);
 
     // Extract DEMODULATED line samples into contiguous buffer
-    const lineSamples = new Float32Array(totalSamples);
-    for (let i = 0; i < totalSamples; i++) {
+    const lineSamples = new Float32Array(extractionLength);
+    for (let i = 0; i < extractionLength; i++) {
       const pos = (extractStart + i) % this.bufferSize;
       lineSamples[i] = this.demodulatedBuffer[pos]; // Use demodulated, not raw audio
     }
 
     // Check sample quality (demodulated values should be ~±300 range after compensation)
     const avgAmp = lineSamples.reduce((sum, val) => sum + Math.abs(val), 0) / lineSamples.length;
-    console.log(`📊 Demodulated line: avgAmp=${avgAmp.toFixed(1)}, min=${Math.min(...lineSamples).toFixed(1)}, max=${Math.max(...lineSamples).toFixed(1)}`);
+    console.log(`📊 Demodulated line: avgAmp=${avgAmp.toFixed(1)}`);
 
     // Decode the scan line (sync pulse is at -beginOffset for negative timing modes, 0 for others)
     const syncPulsePos = hasNegativeTiming ? -beginOffset : 0;
@@ -264,7 +279,9 @@ export class SSTVDecoder {
       mode: this.mode.name,
       currentLine: this.currentLine,
       totalLines: this.mode.height,
-      progress: (this.currentLine / this.mode.height) * 100,
+      progress: this.mode.height > 0
+        ? Math.min(100, (this.currentLine / this.mode.height) * 100)
+        : 0,
       frequency: Math.round(1900 + this.frequencyOffset), // Center frequency + offset
       signalStrength: Math.round(this.signalStrength),
       snr: null, // SNR will be calculated by the audio processor with AnalyserNode
@@ -282,7 +299,11 @@ export class SSTVDecoder {
   }
 
   /**
-   * Reset decoder
+   * Reset the decoder to a pristine, inactive state.
+   *
+   * Clears the decoded image, progress counters, sync state and *both* circular
+   * buffers (raw audio + demodulated). The decoder is left IDLE; call start()
+   * to begin a new session.
    */
   reset(): void {
     this.currentLine = 0;
@@ -293,13 +314,16 @@ export class SSTVDecoder {
     this.sampleCounter = 0;
     this.lastLogTime = 0;
     this.absoluteSamplePosition = 0;
+    this.signalStrength = 0;
 
     // Reset sync detector state
     this.syncDetector.reset();
     this.lineDecoder.reset();
 
-    // Clear audio buffer
+    // Clear BOTH circular buffers: leftover audio/demodulated samples would
+    // otherwise be read back as part of the first line of the next frame.
     this.audioBuffer.fill(0);
+    this.demodulatedBuffer.fill(0);
 
     // Clear image data to black
     for (let i = 0; i < this.imageData.length; i += 4) {
@@ -308,10 +332,15 @@ export class SSTVDecoder {
       this.imageData[i + 2] = 0;   // B
       this.imageData[i + 3] = 255; // A
     }
+
+    this.state = DecoderState.IDLE;
   }
 
   /**
-   * Start decoding
+   * Start a new decoding session.
+   *
+   * Always resets first so that a start() following stop() or a mode switch
+   * cannot inherit sync positions or buffered samples from the previous frame.
    */
   start(): void {
     this.reset();
@@ -320,9 +349,14 @@ export class SSTVDecoder {
   }
 
   /**
-   * Stop decoding
+   * Stop decoding.
+   *
+   * The decoded image is retained (so it can still be saved) but incoming
+   * samples are ignored until start() is called again.
    */
   stop(): void {
-    this.state = DecoderState.IDLE;
+    if (this.state === DecoderState.DECODING_IMAGE) {
+      this.state = DecoderState.STOPPED;
+    }
   }
 }

@@ -23,16 +23,16 @@ export default function SSTVDecoder({ selectedMode, onModeChange }: SSTVDecoderP
     startRecording,
     stopRecording,
     resetDecoder,
+    changeMode,
     getImageData,
     getDimensions,
     getAnalyser,
   } = useAudioProcessor(selectedMode);
 
   const handleModeChange = (newMode: SSTVMode) => {
-    // Stop recording if active
-    if (state.isRecording) {
-      stopRecording();
-    }
+    // The hook tears down any active session first, then restarts with the new
+    // mode; the prop change below keeps React state in sync.
+    changeMode(newMode);
     onModeChange(newMode);
   };
 
@@ -382,7 +382,7 @@ export default function SSTVDecoder({ selectedMode, onModeChange }: SSTVDecoderP
         cancelAnimationFrame(animationFrameRef.current);
       }
     };
-  }, [state.isRecording, state.stats?.currentLine, getImageData, getDimensions, drawSpectrum, drawSpectrogram, drawWaveform, getAnalyser]);
+  }, [selectedMode, state.isRecording, state.stats?.state, state.stats?.currentLine, getImageData, getDimensions, drawSpectrum, drawSpectrogram, drawWaveform, getAnalyser]);
 
   const handleStart = async () => {
     await startRecording();
@@ -394,13 +394,24 @@ export default function SSTVDecoder({ selectedMode, onModeChange }: SSTVDecoderP
 
   const handleReset = () => {
     resetDecoder();
-    // Clear waveform history
+    // Clear waveform history and any leftover visualization so the reset is
+    // visually unambiguous.
     waveformHistoryRef.current = [];
+    const visualizationCanvases = [spectrumCanvasRef, spectrogramCanvasRef, waveformCanvasRef];
+    for (const ref of visualizationCanvases) {
+      const canvas = ref.current;
+      const ctx = canvas?.getContext('2d');
+      if (canvas && ctx) {
+        ctx.fillStyle = 'rgb(10, 10, 10)';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+      }
+    }
   };
 
   const handleSaveImage = () => {
     const canvas = canvasRef.current;
     if (!canvas) return;
+    if (!state.stats || state.stats.currentLine === 0) return;
 
     // Create a download link
     canvas.toBlob((blob) => {
@@ -409,7 +420,7 @@ export default function SSTVDecoder({ selectedMode, onModeChange }: SSTVDecoderP
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
-      link.download = `sstv-decode-robot36-${timestamp}.png`;
+      link.download = `sstv-decode-${selectedMode.toLowerCase()}-${timestamp}.png`;
       link.href = url;
       link.click();
 
@@ -425,6 +436,8 @@ export default function SSTVDecoder({ selectedMode, onModeChange }: SSTVDecoderP
         return 'text-gray-400';
       case DecoderState.DECODING_IMAGE:
         return 'text-green-400';
+      case DecoderState.STOPPED:
+        return 'text-[#e3b341]';
       default:
         return 'text-gray-400';
     }
@@ -432,11 +445,12 @@ export default function SSTVDecoder({ selectedMode, onModeChange }: SSTVDecoderP
 
   return (
     <div className="space-y-4 sm:space-y-6">
-      {/* Settings Panel - floating cog icon */}
+      {/* Settings Panel - floating cog icon. Mode changes are allowed while
+          decoding: the hook tears down the old session first and starts a new
+          one with the selected mode. */}
       <SettingsPanel
         currentMode={selectedMode}
         onModeChange={handleModeChange}
-        disabled={state.isRecording}
       />
 
       {/* Controls */}

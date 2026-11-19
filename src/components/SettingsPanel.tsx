@@ -173,8 +173,9 @@ export default function SettingsPanel({ currentMode, onModeChange, disabled = fa
                   </svg>
                   <div className="text-sm text-[#8b949e]">
                     <p>
-                      <strong className="text-[#c9d1d9]">Note:</strong> Changing modes will reset the
-                      current decoding session. Make sure to save your image before switching.
+                      <strong className="text-[#c9d1d9]">Note:</strong> Changing modes ends the
+                      current decoding session and starts a new one with the selected mode. Save
+                      your image before switching if you want to keep it.
                     </p>
                   </div>
                 </div>

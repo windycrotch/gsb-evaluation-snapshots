@@ -112,6 +112,36 @@ npm start
 4. Watch the image decode in real-time
 5. Click "Save Image" to download the result
 
+### Session Lifecycle
+
+A decode session has an explicit lifecycle, shared between the audio hook
+(`useAudioProcessor`) and `SSTVDecoder`:
+
+```
+        start()                stop()
+IDLE ───────────▶ DECODING ───────────▶ STOPPED
+  ▲                   │                     │
+  └──── reset() ──────┴───── reset() ───────┘
+```
+
+| Action | Decoder (`decoder.ts`) | Hook (`useAudioProcessor.ts`) |
+|--------|------------------------|-------------------------------|
+| **Start** | `start()` resets state, clears both buffers, enters `DECODING_IMAGE` | Opens microphone + audio graph, creates a new decoder for the current mode |
+| **Decoding** | Consumes samples, detects sync, writes lines | Feeds samples from exactly one decoder; publishes stats |
+| **Stop** | `stop()` → `STOPPED`; image retained, samples ignored | Releases mic/audio nodes; keeps stats so the image can be saved |
+| **Reset** | `reset()` → `IDLE`; clears image, progress, sync state, **audio + demodulated buffers** | Calls `reset()`, then `start()` again if the session is active; clears UI stats |
+| **Mode switch** | Old decoder is `stop()`ped and discarded | Stops the old session first, then starts a new decoder for the new mode |
+
+Invariants enforced by the hook:
+
+- At most one decoder and one audio graph is live at any time.
+- Session tokens invalidate in-flight `getUserMedia()` calls, so a stop/reset/mode
+  change that races with startup cannot resurrect the old session.
+- Audio callbacks capture their decoder; a callback from a superseded session is
+  inert even if the browser delivers it late.
+- `reset()` clears *both* circular buffers: leftover raw audio or demodulated
+  samples would otherwise be read back as the first line of the next frame.
+
 ### Module Structure
 
 The codebase is organized into modular DSP components and decoder logic:
