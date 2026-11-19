@@ -1,0 +1,102 @@
+name: tests
+
+on:
+  push:
+    # main only: a pull request branch is covered by pull_request, and running on its pushes too ran every job twice
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  # ffmpeg-skill releases independently and often: run against its current main every day, so a release that breaks
+  # this skill shows up even when nothing here changed (there is no version window to hide behind, ADR-18)
+  schedule:
+    - cron: "17 6 * * *"
+
+concurrency:
+  # a newer commit on a pull request cancels the runs of the commit it replaces; every other run (main, tags,
+  # schedule, manual) has its own group and is never cancelled
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / py${{ matrix.python }} / ffmpeg-skill ${{ matrix.ffmpeg_skill_label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # every platform runs against ffmpeg-skill main (the newest release); one Linux job keeps the oldest commit
+        # this skill is verified against (ffmpeg-skill 0.12.5: --crf only, no --overwrite, a single _common.py), so
+        # both ends of the detected-capability range stay covered. ffmpeg-skill 3.0 requires Python 3.10+, so the
+        # Python 3.9 job runs the last 2.x (2.24.1, pinned by commit) and 3.0.0 has its own job (ADR-23)
+        include:
+          - {os: ubuntu-latest, python: "3.9", ffmpeg_skill_ref: a2c8433b2441b52b4fe16ce3525100d892ee047f, ffmpeg_skill_label: "2.24.1 (last 2.x, Python 3.9)"}
+          - {os: ubuntu-latest, python: "3.11", ffmpeg_skill_ref: 1dc2f52013956daa1d97fd9d9d53c79b9305bc43, ffmpeg_skill_label: "3.0.0"}
+          - {os: ubuntu-latest, python: "3.11", ffmpeg_skill_ref: main, ffmpeg_skill_label: main}
+          - {os: windows-latest, python: "3.11", ffmpeg_skill_ref: main, ffmpeg_skill_label: main}
+          - {os: macos-latest, python: "3.11", ffmpeg_skill_ref: main, ffmpeg_skill_label: main}
+          - {os: ubuntu-latest, python: "3.11", ffmpeg_skill_ref: 87c84f23b4546379795107a49524f4d9803c9cee, ffmpeg_skill_label: "0.12.5 (oldest verified)"}
+    # ubuntu-latest is Ubuntu 26.04, which has no Python 3.9 build; keep 3.9 on the newest image that does
+    runs-on: ${{ matrix.python == '3.9' && startsWith(matrix.os, 'ubuntu') && 'ubuntu-24.04' || matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install ffmpeg (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y ffmpeg fonts-dejavu-core fonts-noto-cjk
+
+      - name: Install ffmpeg (macOS)
+        # Homebrew's plain `ffmpeg` formula is a lean build without libfreetype/drawtext, and the runner may
+        # already have it on PATH. `ffmpeg-full` is Homebrew's complete build (drawtext, fontconfig); it is
+        # keg-only, so put its bin first on PATH and verify drawtext before any test runs.
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          brew install ffmpeg-full
+          FULL_BIN="$(brew --prefix ffmpeg-full)/bin"
+          "$FULL_BIN/ffmpeg" -version
+          "$FULL_BIN/ffmpeg" -hide_banner -filters 2>&1 | grep -q drawtext || { echo "::error::ffmpeg-full is missing the drawtext filter"; exit 1; }
+          echo "$FULL_BIN" >> "$GITHUB_PATH"
+
+      - name: Install ffmpeg (Windows)
+        if: runner.os == 'Windows'
+        run: choco install ffmpeg -y
+
+      - name: Clone ffmpeg-skill (${{ matrix.ffmpeg_skill_label }})
+        shell: bash
+        env:
+          FFMPEG_SKILL_REF: ${{ matrix.ffmpeg_skill_ref }}
+        run: |
+          if [ "$FFMPEG_SKILL_REF" = "main" ]; then
+            git clone --depth 1 https://github.com/kajisho5/ffmpeg-skill vendor/ffmpeg-skill
+          else
+            git clone https://github.com/kajisho5/ffmpeg-skill vendor/ffmpeg-skill
+            git -C vendor/ffmpeg-skill checkout "$FFMPEG_SKILL_REF"
+          fi
+          echo "ffmpeg-skill $(git -C vendor/ffmpeg-skill rev-parse HEAD) $(grep -m1 '"version"' vendor/ffmpeg-skill/package.json)"
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e . pytest pyflakes
+
+      - name: Lint
+        run: python -m pyflakes src tests
+
+      - name: Unit test
+        shell: bash
+        env:
+          MOTION_GRAPHICS_FFMPEG_SKILL_DIR: ${{ github.workspace }}/vendor/ffmpeg-skill
+        run: python -m pytest -q
+
+      - name: doctor --json
+        shell: bash
+        run: motion-graphics doctor --json --ffmpeg-skill vendor/ffmpeg-skill
+
+      - name: contract --json is valid JSON
+        shell: bash
+        run: motion-graphics skill --json | python -c "import json,sys; json.load(sys.stdin)"
