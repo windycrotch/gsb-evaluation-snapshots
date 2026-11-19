@@ -328,6 +328,104 @@ def test_merging_events():
     assert events[6]["value"] == 2
 
 
+def test_events_close_drops_pending_then_emits_close():
+    ee = EventEmitter()
+
+    seen = []
+
+    @ee.add_handler("*")
+    def handler(event):
+        seen.append(event["event_type"])
+
+    # These are pending, but must be dropped when closing.
+    ee.submit({"event_type": "resize", "width": 100})
+    ee.submit({"event_type": "resize", "width": 102})
+    ee.submit({"event_type": "key_down", "key": "a", "modifiers": ()})
+
+    ee.close()
+
+    # Only the close event is dispatched, as the very last event, and the
+    # handlers are released afterwards.
+    assert seen == ["close"]
+    assert ee._closed
+    assert len(ee._pending_events) == 0
+    assert len(ee._event_handlers) == 0
+
+    # Closing a second time has no effect.
+    ee.close()
+    assert seen == ["close"]
+
+
+def test_events_close_handler_sees_close_as_last_event():
+    ee = EventEmitter()
+
+    seen = []
+
+    def handler(event):
+        seen.append(event["event_type"])
+        # Submitting (and adding handlers) while closing must be ignored, not raise.
+        ee.submit({"event_type": "key_down", "key": "x", "modifiers": ()})
+        ee.add_handler(lambda e: None, "key_down")
+
+    ee.add_handler(handler, "*")
+    ee.submit({"event_type": "key_up", "key": "x", "modifiers": ()})
+
+    ee.close()
+    ee.flush()
+
+    assert seen == ["close"]
+    assert ee._event_handlers == {}
+
+
+def test_events_submit_after_close_is_ignored():
+    ee = EventEmitter()
+
+    seen = []
+
+    @ee.add_handler("*")
+    def handler(event):
+        seen.append(event["event_type"])
+
+    ee.close()
+    ee.submit({"event_type": "key_down", "key": "a", "modifiers": ()})
+    ee.flush()
+
+    assert seen == ["close"]
+    assert len(ee._pending_events) == 0
+
+
+def test_events_emit_after_close_is_ignored():
+    ee = EventEmitter()
+
+    seen = []
+
+    @ee.add_handler("key_down")
+    def handler(event):
+        seen.append(event["value"])
+
+    ee.close()
+    ee.emit({"event_type": "key_down", "value": 1})
+    ee.flush()
+
+    assert seen == []
+
+
+def test_events_reentrant_close():
+    ee = EventEmitter()
+
+    seen = []
+
+    def on_close(event):
+        seen.append("close")
+        ee.close()  # re-entrant, must be a no-op
+
+    ee.add_handler(on_close, "close")
+    ee.close()
+
+    assert seen == ["close"]
+    assert ee._closed
+
+
 def test_mini_benchmark():
     # Can be used to tweak internals of the EventEmitter and see the
     # effect on performance.

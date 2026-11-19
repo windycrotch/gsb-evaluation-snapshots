@@ -38,9 +38,11 @@ class EventEmitter:
         self._pending_events = deque()
         self._event_handlers = defaultdict(list)
         self._closed = False
+        self._closing = False
 
     def _release(self):
         self._closed = True
+        self._closing = False
         self._pending_events.clear()
         self._event_handlers.clear()
 
@@ -114,7 +116,7 @@ class EventEmitter:
             raise TypeError(
                 "Coroutines cannot be callbacks (anymore). Instead, you can use a regular callback that calls `loop.add_task(coro)`."
             )
-        if self._closed:
+        if self._closed or self._closing:
             return
         self.remove_handler(callback, *types)
         for type in types:
@@ -140,8 +142,12 @@ class EventEmitter:
         """Submit an event.
 
         Events are emitted later by the scheduler.
+
+        Events submitted after (or while) the emitter is closing are silently
+        ignored, so that code that keeps producing events during shutdown does
+        not raise.
         """
-        if self._closed:
+        if self._closed or self._closing:
             return
         event_type = event["event_type"]
         if event_type not in valid_event_types:
@@ -185,7 +191,12 @@ class EventEmitter:
 
         In most cases events should be submitted, so that they are flushed
         with the rest at a good time.
+
+        After the emitter is closed (i.e. once the close event has been
+        dispatched and the handlers released), this is a no-op.
         """
+        if self._closed:
+            return
         # Collect callbacks
         # Note that the 'anytype' (*) handlers are always fired later. Fixing it would require sorting here, which I don't want to do for performance.
         # A better solution is probably to simply add an entry for every type in add_handler, so self._event_handlers["*"] would not exist.
@@ -206,9 +217,29 @@ class EventEmitter:
         """Close the event handler.
 
         Drops all pending events, send the close event, and disables the emitter.
+        Calling this more than once is a no-op: pending events are only dropped
+        and the close event is only dispatched once.
         """
         # This is a little feature because detecting a widget from closing can be tricky.
-        if not self._closed:
+        if self._closed or self._closing:
+            return
+        # Mark as closing first: events that get submitted from here on (e.g.
+        # by event handlers, or by the GUI while closing) are ignored, rather
+        # than appended to a queue that will never be flushed.
+        self._closing = True
+        try:
+            # Drop pending events; they are no longer relevant. This must
+            # happen before dispatching the close event, so that the handlers
+            # see the close event as the very last event.
             self._pending_events.clear()
-            self.submit({"event_type": "close"})
-            self.flush()
+            # Dispatch the close event, so handlers can respond to it. Note
+            # that this also calls _release() when it completes. We emit it
+            # directly (rather than submit+flush) so that it is guaranteed to
+            # be the last event, even if handlers submit events of their own.
+            close_event = {"event_type": "close"}
+            close_event.setdefault("time_stamp", time.perf_counter())
+            self.emit(close_event)
+        finally:
+            # Make sure we're released, even if dispatching the close event
+            # failed in an unexpected way. This is idempotent.
+            self._release()

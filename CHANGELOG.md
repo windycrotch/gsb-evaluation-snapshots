@@ -13,6 +13,13 @@ Possible sections in each release:
 * Security: in case of vulnerabilities.
 
 
+## [Unreleased]
+
+### Fixed
+
+* Make canvas closing robust: `close()` is now idempotent (also when re-entered via the 'close' event), and closing stops drawing reliably. After closing, `submit_event()` and `request_draw()` no longer trigger a draw or restart the (just stopped) loop, and `DrawCancelled` / draw errors no longer leave the scheduler stuck "drawing". `EventEmitter.close()` now drops pending events before dispatching the (single) close event, after which the handlers are released, and events submitted while closing are silently ignored.
+
+
 ## [3.0.1](https://github.com/pygfx/rendercanvas/releases/tag/3.0.1) - 19-11-2026
 
 ### Fixed
