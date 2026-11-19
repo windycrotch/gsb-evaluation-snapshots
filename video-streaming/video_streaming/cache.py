@@ -20,6 +20,17 @@ class RedisCache:
             timeout = self.TIMEOUT_SECOND
         self.redis.set(key, value, ex=timeout)
 
+    def set_if_not_exists(self, key, value, timeout: int = None) -> bool:
+        """Atomically set the key only when it does not exist yet.
+
+        Returns True only for the single caller that actually wrote the
+        value, so concurrent callers can claim one-time work (for example
+        sending a revoke signal) exactly once.
+        """
+        if timeout is None:
+            timeout = self.TIMEOUT_SECOND
+        return bool(self.redis.set(key, value, ex=timeout, nx=True))
+
     def incr(self, key, amount: int = 1):
         self.redis.incr(key, amount=amount)
 

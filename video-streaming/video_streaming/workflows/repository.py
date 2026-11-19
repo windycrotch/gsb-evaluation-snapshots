@@ -570,6 +570,20 @@ class WorkflowRepository:
                     )
                 return existing.id, False
 
+    def get_job_owner_tenant_id(self, job_id):
+        """Return the owning tenant of a durable Job, or None.
+
+        None is returned both when the Job does not exist and when it is a
+        legacy unowned Job, so callers cannot distinguish the two cases.
+        """
+        with self._session() as session:
+            job = session.execute(
+                select(JobRecord).where(JobRecord.id == job_id)
+            ).scalar_one_or_none()
+            if job is None:
+                return None
+            return job.owner_tenant_id
+
     def authorize_job_access(self, job_id, principal, required_scope):
         """Authorize one durable Job without exposing cross-tenant existence."""
         from video_streaming.security import authorize_tenant_resource

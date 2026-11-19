@@ -2,11 +2,13 @@
 
 import math
 import re
-import resource
 
 
 def capture_child_cpu_seconds():
     """Snapshot process-child CPU time; Celery prefork workers isolate tasks."""
+    # Imported lazily: ``resource`` is only available on Unix workers, while
+    # this module is also imported by control-plane code on other platforms.
+    import resource
     usage = resource.getrusage(resource.RUSAGE_CHILDREN)
     return float(usage.ru_utime + usage.ru_stime)
 
