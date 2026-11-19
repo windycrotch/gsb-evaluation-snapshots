@@ -72,6 +72,51 @@ const {
   ratio: jobRatio = "h",
 } = job;
 
+// ---- 导出前检查:和编辑台检查器、lint:overlay CLI 同一套规则 ----
+// 必须排在一切副作用(建目录、抽帧、起浏览器)之前:被拦时进程直接退出,
+// 不留半成品文件,服务端的导出锁随进程退出释放,修完(或确认免检后)重试即可。
+// 时长用 job.videoDuration(编辑台导出时注入;CLI 手写的 job 也可以自己填),
+// 没给视频时长时 over-duration 不触发 —— 和检查器的行为一致。
+{
+  const rawDoc =
+    mode === "timeline"
+      ? doc
+      : { version: 1, cards: [{ id: "single", kind: effectId, start: 0, end: duration, params }] };
+  if (rawDoc?.cards?.length) {
+    const { parseOverlay } = await tsImport("../src/overlay/types.ts", {
+      parentURL: import.meta.url,
+      tsconfig: path.join(ROOT, "tsconfig.app.json"),
+    });
+    const { lintOverlay } = await tsImport("../src/overlay/lint.ts", {
+      parentURL: import.meta.url,
+      tsconfig: path.join(ROOT, "tsconfig.app.json"),
+    });
+    const { exportLintGate, loadExportLintConfig } = await import("./export-preflight.mjs");
+    // 先过一遍 parseOverlay:补默认参数、跳过认不出的卡 —— 和编辑台导入、lint:overlay
+    // 看到的是同一份文档,placeholder-text 这类「和组件默认值比对」的规则结论才一致。
+    const parsed = parseOverlay(rawDoc);
+    if (parsed.error || !parsed.doc) {
+      console.error(`【导出失败原因】编排解析失败:${parsed.error ?? "未知原因"}`);
+      process.exit(1);
+    }
+    if (parsed.dropped?.length) {
+      console.log(
+        `跳过了认不出的卡:${parsed.dropped.map((d) => `「${d.kind}」×${d.n}`).join("、")}(其余 ${parsed.doc.cards.length} 张照常导出)`,
+      );
+    }
+    const issues = lintOverlay(parsed.doc, loadExportLintConfig(ROOT), {
+      duration:
+        Number.isFinite(job.videoDuration) && job.videoDuration > 0 ? job.videoDuration : undefined,
+    });
+    const gate = exportLintGate(issues, { acknowledged: job.lintAck === true });
+    for (const line of gate.lines) console.log(line);
+    if (gate.blocked) {
+      console.error("【导出失败原因】导出前检查未通过(规则名和卡 id 见上方),本次未渲染任何帧。");
+      process.exit(1);
+    }
+  }
+}
+
 // 画幅:timeline 以编排里的 doc.ratio 为准,single 看 job.ratio
 const requestedRatio = mode === "timeline" ? doc?.ratio : jobRatio;
 const RATIO = requestedRatio === "v" || requestedRatio === "4:3" ? requestedRatio : "h";

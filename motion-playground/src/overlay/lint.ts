@@ -248,8 +248,10 @@ export function lintOverlay(
     for (let j = i + 1; j < loose.length; j++) {
       const a = loose[i];
       const b = loose[j];
+      // 任一张卡明示免检(整卡 lintOff:true 或单列这条规则),这对就不报 ——
+      // 只查「后进场那张」的话,先进场那张的整卡免检会被漏掉,等于免检卡仍被拦。
+      if (ruleOff(a, "stack-overlap") || ruleOff(b, "stack-overlap")) continue;
       const later = a.start <= b.start ? b : a;
-      if (ruleOff(later, "stack-overlap")) continue;
       const overlap = Math.min(a.end, b.end) - Math.max(a.start, b.start);
       if (overlap <= 0.5) continue;
       // 没有落位参数的卡是全屏/常驻层(chapter-bar 等),不参与叠卡检查
@@ -292,15 +294,17 @@ export function lintOverlay(
   return issues;
 }
 
-/** 从原始 JSON 文本一步到位:解析失败算 error,成功则继续 lint */
+/** 从原始 JSON 文本一步到位:解析失败算 error,成功则继续 lint。
+ *  被跳过的卡(dropped)原样带出:它们不在 doc.cards 里,不会参与上面的检查,
+ *  但调用方必须能把「少了哪些 kind、各几张」告诉用户,别让卡无声消失。 */
 export function lintOverlayText(
   text: string,
   config?: Partial<LintConfig> | null,
   opts?: { duration?: number },
-): { doc?: OverlayDoc; issues: LintIssue[] } {
-  const { doc, error } = parseOverlay(text);
+): { doc?: OverlayDoc; dropped?: { kind: string; n: number }[]; issues: LintIssue[] } {
+  const { doc, error, dropped } = parseOverlay(text);
   if (error || !doc) {
     return { issues: [{ level: "error", rule: "parse", message: error ?? "解析失败" }] };
   }
-  return { doc, issues: lintOverlay(doc, config, opts) };
+  return { doc, dropped, issues: lintOverlay(doc, config, opts) };
 }

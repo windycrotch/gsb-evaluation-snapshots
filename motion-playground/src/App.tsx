@@ -434,6 +434,10 @@ export default function App() {
   tabRef.current = tab;
   const durRef = useRef(0);
   durRef.current = duration;
+  // 视频本身的长度(没导入视频 = 0)。over-duration 检查要拿它当上限 ——
+  // 不能用 duration(它是 max(卡末, 视频长)),否则卡超过视频时上限被卡自己撑大,永远不报。
+  const videoDurRef = useRef(0);
+  videoDurRef.current = videoDur;
 
   // 全局快捷键(永远最高优先级;只在打字输入框里让位):
   // 空格 = 编辑台播放/暂停,效果库重放动画;← → = 快退/快进 0.5s,按住 Shift = 3s
@@ -536,7 +540,7 @@ export default function App() {
         rule: "unknown-kind",
         message: `跳过了 ${d.n} 张「${d.kind}」——  认不出这种卡,其余卡已正常导入。注意:再导出 JSON 时这几张不会带回去,原文件留好`,
       })),
-      ...lintOverlay(doc, LINT_CFG, { duration: durRef.current || undefined }),
+      ...lintOverlay(doc, LINT_CFG, { duration: videoDurRef.current || undefined }),
     ]);
     setLintCollapsed(false);
   };
@@ -560,7 +564,7 @@ export default function App() {
     };
     pushHistory(true);
     setOverlay(next);
-    setLintIssues(lintOverlay(next, LINT_CFG, { duration: durRef.current || undefined }));
+    setLintIssues(lintOverlay(next, LINT_CFG, { duration: videoDurRef.current || undefined }));
   };
 
   /** 检查面板「定位」:有卡选中那张卡并跳到进场时刻;只有时间点(空白段)就直接跳时间 */
@@ -608,7 +612,7 @@ export default function App() {
       setTab("edit");
       seek(0);
       setPlaying(false);
-      setLintIssues(lintOverlay(doc, LINT_CFG, { duration: durRef.current || undefined }));
+      setLintIssues(lintOverlay(doc, LINT_CFG, { duration: videoDurRef.current || undefined }));
       setLintCollapsed(false);
     } catch (e) {
       alert(`❌ 示例载入失败:${e}`);
@@ -1228,6 +1232,8 @@ export default function App() {
           scale={fxScale}
           speed={animSpeed}
           videoScale={videoScale}
+          lintConfig={LINT_CFG}
+          videoDuration={videoDur}
           onBusy={setExporting}
           onTimelineExport={recordTimelineExport}
           onConfigure={handleExport}

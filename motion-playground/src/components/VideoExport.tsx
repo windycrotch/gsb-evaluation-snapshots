@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { ExportOptions } from "./ExportOptions";
 import { exportProgressView, type ExportProgressState } from "../exportProgress";
 import { exportFailureMessage } from "../exportFailure";
+import { lintOverlay, type LintConfig, type LintIssue } from "../overlay/lint";
 import type { OverlayDoc } from "../overlay/types";
 import "./video-export.css";
 
@@ -19,6 +20,10 @@ type Job = {
   compatibilityMode: boolean;
   parallelFrames: boolean;
   exportMode: "stream" | "sequence";
+  /** 用户已在导出对话框确认「检查出的 error 免检,照常导出」 */
+  lintAck: boolean;
+  /** 视频时长(秒):over-duration 规则要用;没导入视频时不给,该规则不触发 */
+  videoDuration?: number;
 };
 type Result = {
   ok: boolean;
@@ -42,6 +47,10 @@ interface Props {
   scale: number;
   speed: number;
   videoScale: number;
+  /** 检查器阈值(和 lint:overlay CLI 同一份 lint-rules.*.json) */
+  lintConfig?: Partial<LintConfig>;
+  /** 当前视频时长(秒);0/缺省 = 没导入视频,over-duration 不触发 */
+  videoDuration?: number;
   onBusy: (busy: boolean) => void;
   onTimelineExport: () => void;
   onFps: (rate: number) => void;
@@ -214,10 +223,6 @@ export function VideoExport(props: Props) {
     setError("");
     setFolderBusy(true);
     try {
-      const folder = await request<{ ok: boolean; dir: string; error?: string }>("export-folder", {
-        dir: directory.trim(),
-      });
-      if (!folder.ok) throw Error(folder.error || "无法写入保存文件夹");
       const doc = props.library
         ? {
             ...(props.document ?? { version: 1 as const }),
@@ -231,6 +236,41 @@ export function VideoExport(props: Props) {
       const duration = props.library
         ? seconds
         : Math.min(86400, Math.max(...doc.cards.map((c) => c.end)) + 0.5);
+      // 导出前检查:和检查器浮窗、lint:overlay CLI 同一套规则、同一份阈值。
+      // 有 error 先拦下,列出规则名和卡 id,用户确认免检才继续(确认会随 job 带给导出进程,
+      // 进程那边还会再查一遍 —— 两处结论必须一致,否则界面放行了进程却拦,或反过来)。
+      // 只有 warn 不拦,但提示必须看得见。检查排在建输出文件夹之前:
+      // 被拦就是「什么都没开始」,没有半成品要收拾,改完直接重点「开始导出」。
+      const videoDuration = props.library
+        ? undefined
+        : props.videoDuration && props.videoDuration > 0
+          ? props.videoDuration
+          : undefined;
+      const lintIssues = lintOverlay(doc, props.lintConfig, { duration: videoDuration });
+      const lintErrors = lintIssues.filter((i) => i.level === "error");
+      const lintWarns = lintIssues.filter((i) => i.level === "warn");
+      const fmtIssue = (i: LintIssue) =>
+        `[${i.rule}] ${i.cardId ? `卡「${i.cardId}」` : i.at != null ? `${i.at.toFixed(1)}s` : "整份编排"} — ${i.message}`;
+      let lintAck = false;
+      if (lintErrors.length) {
+        const ok = confirm(
+          `❌ 导出前检查发现 ${lintErrors.length} 个必修问题:\n\n${lintErrors.map(fmtIssue).join("\n")}\n\n` +
+            "「确定」= 这些问题我确认免检,本次照常导出\n" +
+            "「取消」= 回去修改(也可以在检查面板里对单条规则点「忽略」)",
+        );
+        if (!ok) return;
+        lintAck = true;
+      } else if (lintWarns.length) {
+        const ok = confirm(
+          `⚠️ 导出前检查有 ${lintWarns.length} 个提醒:\n\n${lintWarns.map(fmtIssue).join("\n")}\n\n` +
+            "「确定」继续导出,「取消」回去修改",
+        );
+        if (!ok) return;
+      }
+      const folder = await request<{ ok: boolean; dir: string; error?: string }>("export-folder", {
+        dir: directory.trim(),
+      });
+      if (!folder.ok) throw Error(folder.error || "无法写入保存文件夹");
       const { reviewOrigin: _origin, ...renderDoc } = doc;
       const job: Job = {
         requestId: crypto.randomUUID(),
@@ -246,6 +286,8 @@ export function VideoExport(props: Props) {
         compatibilityMode: compat,
         parallelFrames: parallel,
         exportMode: streaming ? "stream" : "sequence",
+        lintAck,
+        videoDuration,
       };
       remember("overlayStudioExportDir", folder.dir);
       setDirectory(folder.dir);

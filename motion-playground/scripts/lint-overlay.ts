@@ -36,12 +36,18 @@ const config = {
 };
 
 const text = fs.readFileSync(path.resolve(file), "utf8");
-const { doc, issues } = lintOverlayText(text, config, { duration });
+const { doc, dropped, issues } = lintOverlayText(text, config, { duration });
 
 const errors = issues.filter((i) => i.level === "error");
 const warns = issues.filter((i) => i.level === "warn");
 
 console.log(`\n🔍 overlay 检查:${path.basename(file)}${doc ? ` · ${doc.cards.length} 张卡` : ""}`);
+// 认不出的卡已被跳过、不参与上面的检查,但必须明说少了什么 —— 其余卡照常用,不算问题
+if (dropped?.length) {
+  console.log(
+    `  ⏭️  跳过了认不出的卡:${dropped.map((d) => `「${d.kind}」×${d.n}`).join("、")}(其余 ${doc?.cards.length ?? 0} 张正常检查)`,
+  );
+}
 if (!issues.length) {
   console.log("✅ 没有发现问题\n");
 } else {
