@@ -1,6 +1,6 @@
-import gc
 import av
 import time
+import queue
 import threading
 import logging
 import tkinter as tk
@@ -16,10 +16,21 @@ class TkinterVideo(tk.Label):
         super(TkinterVideo, self).__init__(master, *args, **kwargs)
 
         self.path = ""
+
+        # guards every piece of state shared with the decode thread
+        self._lock = threading.RLock()
+
+        # Monotonically increasing generation counter. Every stop()/new decode
+        # thread bumps it; a decode thread may only touch shared state while
+        # its captured generation is current, and every event it queues is
+        # tagged with its generation so late events of a previous video are
+        # dropped instead of polluting the new one.
+        self._load_id = 0
         self._load_thread = None
 
         self._paused = True
         self._stop = True
+        self._ended = False  # set when the stream reached its natural end
 
         self.consistant_frame_rate = consistant_frame_rate # tries to keep the frame rate consistant by skipping over a few frames
 
@@ -32,15 +43,22 @@ class TkinterVideo(tk.Label):
 
         self._current_frame_size = (0, 0)
 
-        self._seek = False
-        self._seek_sec = 0
+        # pending seek target in seconds (None = no pending seek); consumed by
+        # the decode thread, applied even while paused
+        self._seek_requested = None
+
+        # The decode thread never touches tkinter directly (cross-thread Tcl
+        # calls are unsafe); it drops (load_id, kind, payload) items on this
+        # queue and the tk main thread drains it via _poll_events.
+        self._event_queue = queue.Queue()
+        self._poll_after_id = None
 
         self._video_info = {
             "duration": 0, # duration of the video
             "framerate": 0, # frame rate of the video
             "framesize": (0, 0) # tuple containing frame height and width of the video
 
-        }   
+        }
 
         self.set_scaled(scaled)
         self._keep_aspect_ratio = keep_aspect
@@ -49,7 +67,9 @@ class TkinterVideo(tk.Label):
 
         self.bind("<<Destroy>>", self.stop)
         self.bind("<<FrameGenerated>>", self._display_frame)
-    
+
+        self._poll_events()
+
     def keep_aspect(self, keep_aspect: bool):
         """ keeps the aspect ratio when resizing the image """
         self._keep_aspect_ratio = keep_aspect
@@ -74,7 +94,7 @@ class TkinterVideo(tk.Label):
 
             else:
                 proxy_img = self._current_img.copy().resize(self._current_frame_size)
-            
+
             self._current_imgtk = ImageTk.PhotoImage(proxy_img)
             self.config(image=self._current_imgtk)
 
@@ -82,7 +102,7 @@ class TkinterVideo(tk.Label):
     def set_scaled(self, scaled: bool, keep_aspect: bool = False):
         self.scaled = scaled
         self._keep_aspect_ratio = keep_aspect
-        
+
         if scaled:
             self.bind("<Configure>", self._resize_event)
 
@@ -92,161 +112,292 @@ class TkinterVideo(tk.Label):
 
 
     def _set_frame_size(self, event=None):
-        """ sets frame size to avoid unexpected resizing """
+        """ sets frame size to avoid unexpected resizing; runs on the tk main thread """
 
         self._video_info["framesize"] = (self._container.streams.video[0].width, self._container.streams.video[0].height)
 
         self.current_imgtk = ImageTk.PhotoImage(Image.new("RGBA", self._video_info["framesize"], (255, 0, 0, 0)))
         self.config(width=150, height=100, image=self.current_imgtk)
 
-    def _load(self, path):
-        """ load's file from a thread """
+    # ------------------------------------------------------------------
+    # event plumbing between decode thread and tk main thread
+    # ------------------------------------------------------------------
 
-        current_thread = threading.current_thread()
+    def _queue_event(self, load_id: int, sequence: str):
+        """ called from the decode thread to publish a virtual event """
+        self._event_queue.put((load_id, "event", sequence))
+
+    def _queue_call(self, load_id: int, func):
+        """ called from the decode thread to run `func` on the tk main thread """
+        self._event_queue.put((load_id, "call", func))
+
+    def _poll_events(self):
+        """ drains the event queue on the tk main thread and reschedules itself """
+        try:
+            while True:
+                load_id, kind, payload = self._event_queue.get_nowait()
+
+                if load_id != self._load_id:
+                    continue # stale generation: belongs to a previous video
+
+                if kind == "event":
+                    self.event_generate(payload)
+                else:
+                    payload()
+
+        except queue.Empty:
+            pass
+        except tk.TclError:
+            return # widget is being destroyed, stop polling
 
         try:
-            with av.open(path) as self._container:
+            self._poll_after_id = self.after(15, self._poll_events)
+        except tk.TclError:
+            pass # widget is being destroyed, stop polling
 
-                self._container.streams.video[0].thread_type = "AUTO"
-                
-                # self._container.fast_seek = True
-                # self._container.discard_corrupt = True
+    def _is_current(self, load_id: int) -> bool:
+        """ True while the decode thread of generation `load_id` still owns the player """
+        return self._load_id == load_id and not self._stop
 
-                stream = self._container.streams.video[0]
+    def _decode_and_present(self, frame_iter, stream, load_id: int) -> bool:
+        """ Decodes a single frame and publishes it.
+
+        Returns False when the decode thread must exit (stale generation or
+        natural end of stream). On natural end of stream ``_ended`` is set
+        and <<Ended>> is queued exactly once.
+        """
+
+        try:
+            frame = next(frame_iter)
+
+        except (StopIteration, av.error.EOFError):
+            with self._lock:
+                if not self._is_current(load_id):
+                    return False
+                self._ended = True
+                self._paused = True
+
+            self._queue_event(load_id, "<<Ended>>")
+            return False
+
+        with self._lock:
+            if not self._is_current(load_id):
+                return False
+
+            if frame.pts is not None:
+                self._time_stamp = float(frame.pts * stream.time_base)
+
+            width, height = self._current_frame_size
+            if width <= 0 or height <= 0:
+                width, height = frame.width, frame.height
+
+            elif self._keep_aspect_ratio:
+                im_ratio = frame.width / frame.height
+                dest_ratio = width / height
+                if im_ratio != dest_ratio:
+                    if im_ratio > dest_ratio:
+                        height = round(frame.height / frame.width * width)
+                    else:
+                        width = round(frame.width / frame.height * height)
+
+            self._current_img = frame.to_image(width=width, height=height, interpolation="FAST_BILINEAR")
+
+            self._frame_number += 1
+            frame_number = self._frame_number
+            framerate = self._video_info["framerate"]
+
+        self._queue_event(load_id, "<<FrameGenerated>>")
+
+        if framerate and frame_number % framerate == 0:
+            self._queue_event(load_id, "<<SecondChanged>>")
+
+        return True
+
+    def _load(self, path, load_id: int, notify_loaded: bool):
+        """ load's file from a thread """
+
+        container = None
+
+        try:
+            container = av.open(path)
+
+            stream = container.streams.video[0]
+            stream.thread_type = "AUTO"
+
+            # self._container.fast_seek = True
+            # self._container.discard_corrupt = True
+
+            with self._lock:
+                if not self._is_current(load_id):
+                    return
+
+                self._container = container
 
                 try:
-                    self._video_info["framerate"] = int(stream.average_rate)
+                    self._video_info["framerate"] = int(float(stream.average_rate))
 
                 except TypeError:
                     raise TypeError("Not a video file")
-                
+
                 try:
 
                     self._video_info["duration"] = float(stream.duration * stream.time_base)
-                    self.event_generate("<<Duration>>")  # duration has been found
+                    self._queue_event(load_id, "<<Duration>>")  # duration has been found
 
-                except (TypeError, tk.TclError):  # the video duration cannot be found, this can happen for mkv files
+                except TypeError:  # the video duration cannot be found, this can happen for mkv files
                     pass
 
                 self._frame_number = 0
+                self._time_stamp = 0
 
-                self._set_frame_size()
+                self._queue_call(load_id, self._set_frame_size)
 
                 self.stream_base = stream.time_base
 
+                if notify_loaded:
+                    self._queue_event(load_id, "<<Loaded>>") # generated when the video file is opened
+
+            framerate = self._video_info["framerate"]
+            time_in_frame = (1/framerate)*1000 if framerate else 0 # second it should play each frame
+
+            frame_iter = container.decode(video=0)
+
+            while True:
+                with self._lock:
+                    if not self._is_current(load_id):
+                        break
+
+                    seek_req = self._seek_requested
+                    self._seek_requested = None
+                    paused = self._paused
+
+                if seek_req is not None: # seek to specific second
+                    try:
+                        container.seek(int(seek_req*1000000), backward=True, any_frame=False) # the seek time is given in av.time_base, the multiplication is to correct the frame
+                        frame_iter = container.decode(video=0) # restart decoding from the new position
+                    except Exception:
+                        pass
+
+                    with self._lock:
+                        if not self._is_current(load_id):
+                            break
+                        self._frame_number = int(framerate * seek_req)
+                        self._time_stamp = seek_req
+
+                    # present a frame right away so the new position is visible
+                    # even when the player is paused
+                    if not self._decode_and_present(frame_iter, stream, load_id):
+                        break
+
+                    continue
+
+                if paused:
+                    time.sleep(0.001) # to allow other threads to function better when its paused
+                    continue
+
+                frame_start = time.time_ns() // 1_000_000  # time in milliseconds
+
+                if not self._decode_and_present(frame_iter, stream, load_id):
+                    break
+
+                if self.consistant_frame_rate:
+                    # sleep only the remainder of the frame budget; the time
+                    # spent decoding/presenting this frame counts towards it
+                    elapsed = time.time_ns() // 1_000_000 - frame_start
+                    time.sleep(max((time_in_frame - elapsed)/1000, 0))
+
+        finally:
+            if container is not None:
                 try:
-                    self.event_generate("<<Loaded>>") # generated when the video file is opened
-                
-                except tk.TclError:
+                    container.close()
+                except Exception:
                     pass
 
-                now = time.time_ns() // 1_000_000  # time in milliseconds
-                then = now
-
-                time_in_frame = (1/self._video_info["framerate"])*1000 # second it should play each frame
-
-
-                while self._load_thread == current_thread and not self._stop:
-                    if self._seek: # seek to specific second
-                        self._container.seek(self._seek_sec*1000000, backward=True, any_frame=False) # the seek time is given in av.time_base, the multiplication is to correct the frame
-                        self._seek = False
-                        self._frame_number = self._video_info["framerate"] * self._seek_sec
-
-                        self._seek_sec = 0
-
-                    if self._paused:
-                        time.sleep(0.0001) # to allow other threads to function better when its paused
-                        continue
-
-                    now = time.time_ns() // 1_000_000  # time in milliseconds
-                    delta = now - then  # time difference between current frame and previous frame
-                    then = now
-            
-                    # print("Frame: ", frame.time, frame.index, self._video_info["framerate"])
-                    try:
-                        frame = next(self._container.decode(video=0))
-
-                        self._time_stamp = float(frame.pts * stream.time_base)
-
-                        width = self._current_frame_size[0]
-                        height = self._current_frame_size[1]
-                        if self._keep_aspect_ratio:
-                            im_ratio = frame.width / frame.height
-                            dest_ratio = width / height
-                            if im_ratio != dest_ratio:
-                                if im_ratio > dest_ratio:
-                                    new_height = round(frame.height / frame.width * width)
-                                    height = new_height
-                                else:
-                                    new_width = round(frame.width / frame.height * height)
-                                    width = new_width
-
-                        self._current_img = frame.to_image(width=width, height=height, interpolation="FAST_BILINEAR")
-
-                        self._frame_number += 1
-                
-                        self.event_generate("<<FrameGenerated>>")
-
-                        if self._frame_number % self._video_info["framerate"] == 0:
-                            self.event_generate("<<SecondChanged>>")
-
-                        if self.consistant_frame_rate:
-                            time.sleep(max((time_in_frame - delta)/1000, 0))
-
-                        # time.sleep(abs((1 / self._video_info["framerate"]) - (delta / 1000)))
-
-                    except (StopIteration, av.error.EOFError, tk.TclError):
-                        break
-                    
-                self._container.close()
-
-            # print("Container: ", self._container.c)
-            if self._container:
-                self._container.close()
-                self._container = None
-            
-        finally:
-            self._cleanup()
-            gc.collect()
-
-    def _cleanup(self):
-        self._frame_number = 0
-        self._paused = True
-        self._stop = True
-        if self._load_thread:
-            self._load_thread = None
-        if self._container:
-            self._container.close()
-            self._container = None
-        try:
-            self.event_generate("<<Ended>>")
-        except tk.TclError:
-            pass
-
+            with self._lock:
+                # only the still-current thread may clear shared references;
+                # a stale thread must not touch the state of its successor
+                if self._load_id == load_id:
+                    self._container = None
+                    if self._load_thread is threading.current_thread():
+                        self._load_thread = None
 
     def load(self, path: str):
         """ loads the file from the given path """
         self.stop()
-        self.path = path
 
-    def stop(self):
-        """ stops reading the file """
-        self._paused = True
-        self._stop = True
-        self._cleanup()
+        with self._lock:
+            self.path = path
+
+    def stop(self, event=None):
+        """ stops reading the file and terminates the decode thread """
+        with self._lock:
+            self._paused = True
+            self._stop = True
+            self._ended = False
+            self._seek_requested = None
+            self._frame_number = 0
+            self._time_stamp = 0
+            self._load_id += 1 # invalidates the running decode thread and its queued events
+
+            thread = self._load_thread
+            self._load_thread = None
+
+        if event is not None and self._poll_after_id is not None:
+            # called from <<Destroy>>: cancel the event poll, the widget is gone
+            try:
+                self.after_cancel(self._poll_after_id)
+            except tk.TclError:
+                pass
+            self._poll_after_id = None
+
+        # wait for the old decode thread to die; it closes and releases its
+        # container in its own finally-block before join() returns. The decode
+        # thread never calls into tkinter, so joining cannot deadlock the UI.
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join()
+
+        with self._lock:
+            self._container = None
 
     def pause(self):
         """ pauses the video file """
-        self._paused = True
+        with self._lock:
+            self._paused = True
 
     def play(self):
-        """ plays the video file """
-        self._paused = False
-        self._stop = False
+        """ plays the video file; replays from the beginning after the video ended """
+        with self._lock:
+            self._paused = False
+            self._stop = False
 
-        if not self._load_thread:
-            # print("loading new thread...")
-            self._load_thread = threading.Thread(target=self._load,  args=(self.path, ), daemon=True)
+            old_thread = self._load_thread
+
+            if old_thread is not None and old_thread.is_alive() and not self._ended:
+                return # a running thread only needs the unpause above
+
+            if not self.path:
+                return
+
+            restart = self._ended # replay from the beginning after <<Ended>>
+            self._ended = False
+
+            if restart:
+                self._frame_number = 0
+                self._time_stamp = 0
+
+            self._load_id += 1
+            load_id = self._load_id
+
+        # an "alive" thread here is one that just reached the end of the
+        # stream and is about to exit; wait for it before starting the next one
+        if old_thread is not None and old_thread.is_alive() and old_thread is not threading.current_thread():
+            old_thread.join()
+
+        with self._lock:
+            if self._stop or self._load_id != load_id:
+                return # stop()/load() intervened while joining
+
+            self._load_thread = threading.Thread(target=self._load, args=(self.path, load_id, not restart), daemon=True)
             self._load_thread.start()
 
     def is_paused(self):
@@ -271,23 +422,32 @@ class TkinterVideo(tk.Label):
     def current_duration(self) -> float:
         """ returns current playing duration in sec """
         return self._time_stamp
-    
+
     def current_img(self) -> Image:
         """ returns current frame image """
         return self._current_img
-    
+
     def _display_frame(self, event):
         """ displays the frame on the label """
 
-        if self.current_imgtk.width() == self._current_img.width and self.current_imgtk.height() == self._current_img.height:
-            self.current_imgtk.paste(self._current_img)
+        img = self._current_img
+        if img is None or getattr(self, "current_imgtk", None) is None:
+            return
+
+        if self.current_imgtk.width() == img.width and self.current_imgtk.height() == img.height:
+            self.current_imgtk.paste(img)
         else:
-            self.current_imgtk = ImageTk.PhotoImage(self._current_img)
+            self.current_imgtk = ImageTk.PhotoImage(img)
         self.config(image=self.current_imgtk)
 
     def seek(self, sec: int):
-        """ seeks to specific time""" 
+        """ seeks to specific time, clamped to [0, duration] """
 
-        self._seek = True
-        self._seek_sec = sec            
-            
+        with self._lock:
+            duration = self._video_info.get("duration") or 0
+
+            sec = max(0, sec)
+            if duration > 0:
+                sec = min(sec, duration)
+
+            self._seek_requested = sec
