@@ -62,7 +62,10 @@ export class Gapless5 {
     singleMode: any;
     exclusive: any;
     queuedTrack: string | number;
+    queuedPath: any;
     fadingTrack: number;
+    fadingSource: Gapless5Source;
+    fadingTimer: any;
     volume: any;
     crossfade: any;
     crossfadeShape: any;
@@ -145,6 +148,55 @@ export class Gapless5 {
      * @param {object} analyser_node - webaudio api object which gives information on current track
      */
     onswitchtowebaudio: (analyser_node: object) => void;
+    /**
+     * Clears fade bookkeeping without stopping the source or reloading tracks.
+     * @returns {Gapless5Source | null} - the source that was fading, if any
+     */
+    clearFadingTrack: () => Gapless5Source | null;
+    /**
+     * @param {boolean} [stopSource] - true to stop the fading source immediately
+     * @param {boolean} [refreshLoading] - true to recompute the loadable set
+     */
+    endFadingTrack: (stopSource?: boolean, refreshLoading?: boolean) => void;
+    /**
+     * Starts fading out `source` over the configured crossfade duration.
+     * Any fade already in progress is ended first, so fades never stack.
+     * @param {Gapless5Source} source - source object that is fading out
+     */
+    startFadingTrack: (source: Gapless5Source) => void;
+    /**
+     * Re-anchors `fadingTrack` after the playlist was mutated, and drops the
+     * fade entirely if the fading source was removed.
+     * @returns {boolean} - true if the fade was dropped
+     */
+    refreshFadingTrack: () => boolean;
+    /**
+     * @returns {Gapless5Source | null}
+     */
+    getFadingSource: () => Gapless5Source | null;
+    clearQueuedTrack: () => boolean;
+    /**
+     * A queued target is stale when it no longer resolves to an existing track.
+     * Queues are tracked by path so removals preceding the target cannot make
+     * the queue point at a different track.
+     * @returns {boolean}
+     */
+    isQueueStale: () => boolean;
+    /**
+     * Clears the queue if its target was removed.
+     * @returns {boolean} - true if a stale queue was dropped
+     */
+    dropStaleQueue: () => boolean;
+    /**
+     * Resolves the queued track to a path when possible, so earlier removals
+     * cannot make a stored numeric index point at the wrong track.
+     * @returns {number | string | null}
+     */
+    queuedTarget: () => number | string | null;
+    /**
+     * @param {number | string} pointOrPath - playlist index or audio path to queue
+     */
+    setQueuedTrack: (pointOrPath: number | string) => void;
     /**
      * @param {boolean} [sourceIndex] - if true and shuffle is on, value will be different
      * @returns {number} - -1 if not found
@@ -275,16 +327,26 @@ export class Gapless5 {
     canShuffle: () => boolean;
     startingTrack: string | number;
 }
-export namespace LogLevel {
-    let Debug: number;
-    let Info: number;
-    let Warning: number;
-    let Error: number;
+export namespace Gapless5State {
     let None: number;
+    let Loading: number;
+    let Starting: number;
+    let Play: number;
+    let Stop: number;
+    let Error: number;
 }
-export namespace CrossfadeShape {
+export namespace LogLevel {
+    export let Debug: number;
+    export let Info: number;
+    export let Warning: number;
+    let Error_1: number;
+    export { Error_1 as Error };
     let None_1: number;
     export { None_1 as None };
+}
+export namespace CrossfadeShape {
+    let None_2: number;
+    export { None_2 as None };
     export let Linear: number;
     export let EqualPower: number;
 }
@@ -319,6 +381,15 @@ declare class Gapless5FileList {
         source: Gapless5Source;
     };
     getPlaylistIndex: (index: any) => any;
+    /**
+     * @param {Gapless5Source} source - source object to locate
+     * @returns {number | null} - index in play order, or null if the source is not in the list
+     */
+    playlistIndexOfSource: (source: Gapless5Source) => number | null;
+    /**
+     * @returns {number | null} - play-order index of the queued track, null if absent/removed
+     */
+    queuedTrackIndex: () => number | null;
     loadableTracks: () => Set<any>;
     updateLoading: () => void;
     add: (index: any, audioPath: any) => void;
@@ -332,6 +403,9 @@ declare class Gapless5Source {
     setCrossfade: (amountIn: any, amountOut: any, resetEndedCallback?: boolean) => void;
     calcFadeAmount: (percent: any) => number;
     getVolume: () => number;
+    beginFadeOut: (duration: any) => void;
+    endFadeOut: () => void;
+    isFadingOut: () => boolean;
     getState: () => number;
     unload: (isError: any) => void;
     stop: (resetPosition?: boolean) => void;

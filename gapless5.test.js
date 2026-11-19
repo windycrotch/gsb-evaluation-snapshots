@@ -27,7 +27,7 @@ window = {
   AudioContext     : jest.fn().mockImplementation(audioContextMockClass),
 };
 
-const { Gapless5, LogLevel } = require('./gapless5.js');
+const { Gapless5, Gapless5State, LogLevel } = require('./gapless5.js');
 
 /** test data **/
 
@@ -350,5 +350,290 @@ describe('Gapless-5 object with load limit', () => {
     expect(loadedTracks.size).toBe(2);
     player.removeAllTracks();
     expect(loadedTracks.size).toBe(0);
+  });
+
+  it('excludes deleted tracks and reloads around the new current track', () => {
+    const testTracks = [ 'track1.mp3', 'track2.mp3', 'track3.mp3', 'track4.mp3', 'track5.mp3' ];
+    const testPlayer = new Gapless5({
+      ...INIT_OPTIONS,
+      tracks: testTracks,
+      loadLimit: 3,
+    });
+    const loaded = new Set();
+    testPlayer.onloadstart = (audioPath) => loaded.add(audioPath);
+    testPlayer.onunload = (audioPath) => loaded.delete(audioPath);
+    testPlayer.playlist.sources.forEach((source) => {
+      source.load();
+    });
+    loaded.clear();
+    testPlayer.playlist.updateLoading();
+    expect(loaded.size).toBeLessThanOrEqual(3);
+
+    testPlayer.gotoTrack(2);
+    testPlayer.removeTrack(2);
+
+    // the loadable set must never reference a removed track
+    const loadable = [ ...testPlayer.playlist.loadableTracks() ];
+    expect(loadable.length).toBeLessThanOrEqual(3);
+    loadable.forEach((index) => {
+      expect(testPlayer.playlist.sources[index]).toBeDefined();
+      expect(index).toBeLessThan(testPlayer.totalTracks());
+    });
+    expect(loaded.size).toBeLessThanOrEqual(3);
+    // the new current track is prioritised for loading
+    expect(testPlayer.getTrack()).toBe('track4.mp3');
+    expect(loaded.has('track4.mp3')).toBe(true);
+  });
+});
+
+describe('Gapless-5 crossfade lifecycle', () => {
+  const makePlayer = (options = {}) => {
+    const testPlayer = new Gapless5({
+      ...INIT_OPTIONS,
+      tracks: [ 'track1.mp3', 'track2.mp3', 'track3.mp3' ],
+      crossfade: 100,
+      ...options,
+    });
+    return testPlayer;
+  };
+
+  // The mock window records timeouts instead of scheduling them, so tests
+  // can drive the crossfade completion deterministically.
+  const flushTimers = () => {
+    const pending = window.setTimeout.mock.calls.splice(0);
+    pending.forEach(([ callback ]) => callback());
+  };
+
+  beforeEach(() => {
+    window.setTimeout.mockClear();
+    window.clearTimeout.mockClear();
+  });
+
+  it('fades out the outgoing track and releases it after the crossfade', () => {
+    const testPlayer = makePlayer();
+    const [ first, second ] = testPlayer.playlist.sources;
+    first.inPlayState = () => true;
+
+    testPlayer.gotoTrack(1);
+
+    expect(testPlayer.getIndex()).toBe(1);
+    expect(testPlayer.fadingTrack).toBe(0);
+    expect(testPlayer.getFadingSource()).toBe(first);
+    expect(second.getState()).not.toBe(Gapless5State.None);
+
+    flushTimers();
+
+    // after the crossfade the old track is stopped and fully released
+    expect(testPlayer.fadingTrack).toBeNull();
+    expect(testPlayer.getFadingSource()).toBeNull();
+    expect(first.getState()).toBe(Gapless5State.Stop);
+    expect(first.getPosition()).toBe(0);
+    // and the new track is still the only playable one
+    expect(testPlayer.getTrack()).toBe('track2.mp3');
+  });
+
+  it('does not create a fading track when crossfade is disabled', () => {
+    const testPlayer = makePlayer({ crossfade: 0 });
+    const [ first ] = testPlayer.playlist.sources;
+    first.inPlayState = () => true;
+
+    testPlayer.gotoTrack(1);
+    expect(testPlayer.fadingTrack).toBeNull();
+    expect(testPlayer.getFadingSource()).toBeNull();
+  });
+
+  it('ending a fade immediately when another track change happens', () => {
+    const testPlayer = makePlayer();
+    const [ first, second, third ] = testPlayer.playlist.sources;
+    first.inPlayState = () => true;
+    testPlayer.gotoTrack(1);
+    expect(testPlayer.getFadingSource()).toBe(first);
+
+    // seed a playing state on the second track so the next jump also fades
+    second.inPlayState = () => true;
+    testPlayer.gotoTrack(2);
+
+    // only one fade may be active, and the previous source was released
+    expect(testPlayer.getFadingSource()).toBe(second);
+    expect(testPlayer.fadingTrack).toBe(1);
+    expect(first.getState()).toBe(Gapless5State.Stop);
+    flushTimers();
+    expect(second.getState()).toBe(Gapless5State.Stop);
+    expect(third).toBeTruthy();
+  });
+
+  it('stops the fade when playback is stopped mid-crossfade', () => {
+    const testPlayer = makePlayer();
+    const [ first ] = testPlayer.playlist.sources;
+    first.inPlayState = () => true;
+
+    testPlayer.gotoTrack(1);
+    expect(testPlayer.getFadingSource()).toBe(first);
+
+    testPlayer.stop();
+
+    expect(testPlayer.fadingTrack).toBeNull();
+    expect(testPlayer.getFadingSource()).toBeNull();
+    expect(first.getState()).toBe(Gapless5State.Stop);
+    expect(window.clearTimeout).toHaveBeenCalled();
+  });
+
+  it('clears a queued target that gets removed instead of jumping to the wrong track', () => {
+    const testPlayer = makePlayer();
+    testPlayer.queueTrack('track2.mp3');
+    expect(testPlayer.queuedTrack).toBe('track2.mp3');
+
+    testPlayer.removeTrack('track2.mp3');
+
+    expect(testPlayer.queuedTrack).toBeNull();
+    expect(testPlayer.queuedPath).toBeNull();
+    expect(testPlayer.getTracks()).toStrictEqual([ 'track1.mp3', 'track3.mp3' ]);
+  });
+
+  it('clears the queue after it has been played', () => {
+    const testPlayer = makePlayer();
+    testPlayer.queueTrack(2);
+    expect(testPlayer.queuedTrack).toBe(2);
+
+    testPlayer.onEndedCallback();
+
+    expect(testPlayer.getIndex()).toBe(2);
+    expect(testPlayer.getTrack()).toBe('track3.mp3');
+    expect(testPlayer.queuedTrack).toBeNull();
+    expect(testPlayer.queuedPath).toBeNull();
+  });
+
+  it('drops the queue when the whole playlist is cleared', () => {
+    const testPlayer = makePlayer();
+    testPlayer.queueTrack('track3.mp3');
+    expect(testPlayer.queuedTrack).toBe('track3.mp3');
+
+    testPlayer.removeAllTracks();
+
+    expect(testPlayer.queuedTrack).toBeNull();
+    expect(testPlayer.fadingTrack).toBeNull();
+    expect(testPlayer.getTracks()).toStrictEqual([]);
+  });
+
+  it('removing the fading track does not leave a dangling fade reference', () => {
+    const testPlayer = makePlayer();
+    const [ first ] = testPlayer.playlist.sources;
+    first.inPlayState = () => true;
+
+    testPlayer.gotoTrack(1);
+    expect(testPlayer.getFadingSource()).toBe(first);
+
+    testPlayer.removeTrack(0);
+
+    // the removed source is no longer tracked as fading
+    expect(testPlayer.getFadingSource()).toBeNull();
+    expect(testPlayer.fadingTrack).toBeNull();
+    expect(testPlayer.getTracks()).toStrictEqual([ 'track2.mp3', 'track3.mp3' ]);
+    expect(testPlayer.getIndex()).toBe(0);
+  });
+
+  it('re-anchors the fade index when an earlier track is removed', () => {
+    const testPlayer = makePlayer({ tracks: [ 'track1.mp3', 'track2.mp3', 'track3.mp3', 'track4.mp3' ] });
+    const sources = testPlayer.playlist.sources;
+    sources[0].inPlayState = () => true;
+    testPlayer.gotoTrack(1);
+
+    // make the new current track start playing, then jump on so that the
+    // previous current track (playlist index 1) becomes the fading one
+    sources[1].inPlayState = () => true;
+    testPlayer.gotoTrack(2);
+    const fadingSource = testPlayer.getFadingSource();
+    expect(fadingSource).toBe(sources[1]);
+    expect(testPlayer.fadingTrack).toBe(1);
+
+    // remove a track before both the current track and the fading track
+    testPlayer.removeTrack(0);
+
+    expect(testPlayer.getFadingSource()).toBe(fadingSource);
+    expect(testPlayer.fadingTrack).toBe(0);
+    expect(testPlayer.getIndex()).toBe(1);
+  });
+
+  it('removing the fading track then changing tracks leaves no dangling fade', () => {
+    const testPlayer = makePlayer({ tracks: [ 'track1.mp3', 'track2.mp3', 'track3.mp3', 'track4.mp3' ] });
+    const [ first ] = testPlayer.playlist.sources;
+    first.inPlayState = () => true;
+    testPlayer.gotoTrack(1);
+    expect(testPlayer.getFadingSource()).toBe(first);
+
+    testPlayer.removeTrack(0);
+    expect(testPlayer.getFadingSource()).toBeNull();
+
+    // an immediate track change must not resurrect or stack a fade
+    const newCurrent = testPlayer.currentSource();
+    newCurrent.inPlayState = () => true;
+    testPlayer.gotoTrack(testPlayer.getIndex() + 1);
+    const fading = testPlayer.getFadingSource();
+    expect(fading).not.toBe(first);
+    expect(fading).toBe(newCurrent);
+    expect(testPlayer.fadingTrack).not.toBeNull();
+    flushTimers();
+    expect(testPlayer.getFadingSource()).toBeNull();
+    expect(testPlayer.fadingTrack).toBeNull();
+  });
+
+  it('counts the fading track against the load limit', () => {
+    const testPlayer = makePlayer({
+      tracks: [ 'track1.mp3', 'track2.mp3', 'track3.mp3', 'track4.mp3', 'track5.mp3' ],
+      loadLimit: 2,
+    });
+    const sources = testPlayer.playlist.sources;
+    sources[0].inPlayState = () => true;
+
+    testPlayer.gotoTrack(1);
+    expect(testPlayer.getFadingSource()).toBe(sources[0]);
+
+    const loadable = [ ...testPlayer.playlist.loadableTracks() ];
+    expect(loadable.length).toBeLessThanOrEqual(2);
+    // both the new current track and the fading track keep a slot
+    expect(loadable).toContain(testPlayer.getIndex());
+    expect(loadable).toContain(testPlayer.fadingTrack);
+
+    flushTimers();
+
+    // once the fade ends the outgoing track's slot is released
+    const afterFade = [ ...testPlayer.playlist.loadableTracks() ];
+    expect(afterFade).not.toContain(0);
+    expect(afterFade.length).toBeLessThanOrEqual(2);
+  });
+
+  it('keeps the fade anchored when a track is inserted before it', () => {
+    const testPlayer = makePlayer();
+    const firstSource = testPlayer.playlist.sources[0];
+    firstSource.inPlayState = () => true;
+    testPlayer.gotoTrack(1);
+    expect(testPlayer.getFadingSource()).toBe(firstSource);
+    expect(testPlayer.fadingTrack).toBe(0);
+
+    testPlayer.insertTrack(0, 'new.mp3');
+
+    expect(testPlayer.getFadingSource()).toBe(firstSource);
+    expect(testPlayer.fadingTrack).toBe(1);
+    flushTimers();
+    expect(testPlayer.getFadingSource()).toBeNull();
+  });
+
+  it('keeping the loadable set valid when removing the current track under a load limit', () => {
+    const testPlayer = makePlayer({
+      tracks: [ 'track1.mp3', 'track2.mp3', 'track3.mp3', 'track4.mp3', 'track5.mp3' ],
+      loadLimit: 2,
+    });
+    testPlayer.gotoTrack(1);
+
+    testPlayer.removeTrack(1);
+
+    const loadable = [ ...testPlayer.playlist.loadableTracks() ];
+    expect(loadable.length).toBeLessThanOrEqual(2);
+    expect(loadable.length).toBeGreaterThan(0);
+    loadable.forEach((index) => {
+      expect(testPlayer.playlist.sources[index]).toBeDefined();
+    });
+    expect(loadable).toContain(testPlayer.getIndex());
+    expect(testPlayer.getTrack()).toBe('track3.mp3');
   });
 });

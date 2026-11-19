@@ -228,6 +228,7 @@ You can call these functions on `Gapless5` objects.
   - `indexOrPath` can be the numerical index, or audio path
 - **queueTrack(indexOrPath)**
   - similar to `gotoPath`, but waits for current track to finish first
+  - the queue is cleared once it plays, or if the queued track is removed
 - **removeTrack(indexOrPath)**
   - removes specified track from playlist
   - `indexOrPath` can be the numerical index, or audio path
