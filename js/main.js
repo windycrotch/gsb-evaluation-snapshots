@@ -1,9 +1,78 @@
 var audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 var analyser = audioCtx.createAnalyser();
-var source;
-var gui;
-var resizeVisualizer;
 var defaultSong = "https://firebasestorage.googleapis.com/v0/b/kantelabs-threejs.appspot.com/o/03%20-%20Smooth%20Operator.mp3?alt=media&token=27e95f4c-b4fb-4160-9bdc-02833cf65a84";
+
+// ---------------------------------------------------------------------------
+// Visualization lifecycle state.
+// Exactly one "set" of these may be alive at any moment. Every song switch —
+// library pick, file upload, or the default track — is a single transaction:
+// teardownVisualization() fully dismantles the previous set, then
+// buildVisualization() creates the new one. teardown is idempotent and
+// best-effort: even if one step fails, the rest still run, so two render
+// loops / two canvases can never coexist.
+// ---------------------------------------------------------------------------
+var mediaSource = null;         // MediaElementSource bound to the single <audio> element
+var mediaSourceElement = null;  // element the source was created for (createMediaElementSource may only run once per element)
+var renderer = null;            // active THREE.WebGLRenderer
+var controls = null;            // active THREE.OrbitControls
+var gui = null;                 // active dat.GUI panel
+var rafId = null;               // handle of the single animation-frame chain
+var resizeVisualizer = function () {}; // swapped in by buildVisualization, reset by teardown
+
+function teardownVisualization() {
+    // 1. Stop the render loop so nothing keeps drawing into a dead scene.
+    if (rafId !== null) {
+        cancelAnimationFrame(rafId);
+        rafId = null;
+    }
+    // 2. Detach the audio chain from the analyser (the source node itself is
+    //    reused across songs — there is only ever one).
+    if (mediaSource) {
+        try { mediaSource.disconnect(); } catch (e) { /* already disconnected */ }
+    }
+    // 3. Release camera controls (removes their DOM/event listeners).
+    if (controls) {
+        try { controls.dispose(); } catch (e) { /* older builds without dispose */ }
+        controls = null;
+    }
+    // 4. Destroy the dat.GUI panel.
+    if (gui) {
+        try { gui.destroy(); } catch (e) { /* already destroyed */ }
+        gui = null;
+    }
+    // 5. Dispose the renderer and remove its canvas from the DOM.
+    if (renderer) {
+        try { renderer.dispose(); } catch (e) { /* context already lost */ }
+        if (renderer.domElement && renderer.domElement.parentNode) {
+            renderer.domElement.parentNode.removeChild(renderer.domElement);
+        }
+        renderer = null;
+    }
+    // Defensive: if a previous teardown died midway, never leave a stray
+    // canvas behind — the page must contain at most one.
+    var strayCanvases = document.querySelectorAll('canvas');
+    for (var i = 0; i < strayCanvases.length; i++) {
+        var c = strayCanvases[i];
+        if (c.parentNode) c.parentNode.removeChild(c);
+    }
+    // 6. Until a new scene is built, resizing must not touch dead objects.
+    resizeVisualizer = function () {};
+}
+
+// Connect the (single) audio element to the analyser. Throws if
+// createMediaElementSource fails — callers treat that as a failed switch.
+function connectAudioSource(audioElement) {
+    if (mediaSourceElement !== audioElement) {
+        if (mediaSource) {
+            try { mediaSource.disconnect(); } catch (e) { /* ignore */ }
+            mediaSource = null;
+        }
+        mediaSource = audioCtx.createMediaElementSource(audioElement);
+        mediaSourceElement = audioElement;
+    }
+    mediaSource.connect(analyser);
+    analyser.connect(audioCtx.destination);
+}
 
 window.onload = function () {
     var fileUpload = document.querySelector('#audioFile'); //Grabs the file input and stores it in an variable
@@ -18,8 +87,14 @@ window.onload = function () {
     var settingsToggle = document.querySelector('#settings-toggle');
     var narrowLayout = window.matchMedia('(max-width: 700px)');
     var selectedSong;
-    var currentSongUrl = defaultSong;
     var searchQuery = '';
+    var lastObjectUrl = null;
+
+    // Track state. currentTrack is what the UI points at right now;
+    // lastGoodTrack is the last track whose audio actually loaded — the
+    // fallback we roll back to when a switch fails.
+    var currentTrack = null;   // {name, url, button}
+    var lastGoodTrack = null;
 
     function getSongFilename(url) {
         try {
@@ -112,9 +187,15 @@ window.onload = function () {
     var dbRoot = firebase.database().ref();
     var songsRef = dbRoot.child('songs');
     var audioDiv = document.querySelector('.audio-container');
-    var audioPlayer = new Audio(defaultSong)
+
+    // One <audio> element for the whole page lifetime. Switching songs only
+    // swaps its src, so there can never be more than one MediaElementSource
+    // and never a "destroyed player" the UI could still point at.
+    var audioPlayer = new Audio();
     audioPlayer.crossOrigin = "anonymous";
-    addAudioPlayer(audioPlayer);
+    audioPlayer.controls = true;
+    audioPlayer.preload = "auto";
+    audioDiv.appendChild(audioPlayer);
 
     unlockAudioContext(audioCtx);
 
@@ -123,28 +204,6 @@ window.onload = function () {
     } else {
         window.addEventListener('resize', () => resizeVisualizer());
     }
-
-    //Searches for and loads previous songs uploaded to firebase
-    songsRef.on('child_added', snapshot => {
-        const songUrl = snapshot.val();
-        const item = document.createElement('li');
-        const button = document.createElement('button');
-        item.dataset.searchText = (snapshot.key + '\n' + getSongFilename(songUrl)).toLowerCase();
-        item.hidden = !item.dataset.searchText.includes(searchQuery);
-        button.type = 'button';
-        button.textContent = button.title = snapshot.key;
-        button.addEventListener('click', () => {
-            audioPlayer.src = songUrl;
-            setCurrentTrack(snapshot.key, songUrl, button);
-            if (narrowLayout.matches) closeLibrary();
-        });
-        item.appendChild(button);
-        prevSongs.appendChild(item);
-        if (searchQuery) updateSearchResults();
-        if (songUrl === currentSongUrl && !selectedSong) {
-            selectSong(button);
-        }
-    });
 
     function updatePlayingIndicator() {
         if (!selectedSong) return;
@@ -164,18 +223,93 @@ window.onload = function () {
             selectedSong.removeAttribute('data-playing');
             selectedSong.removeAttribute('aria-description');
         }
-        selectedSong = button;
+        selectedSong = button || null;
         if (selectedSong) {
             selectedSong.setAttribute('aria-current', 'true');
             updatePlayingIndicator();
         }
     }
 
-    function setCurrentTrack(name, url, button) {
-        trackTitle.textContent = trackTitle.title = name;
-        currentSongUrl = url;
-        selectSong(button);
+    // Point title + library selection at a track. Pass button: null for
+    // tracks that have no library entry (uploads, the default song).
+    function applyTrackUI(track) {
+        trackTitle.textContent = trackTitle.title = track.name;
+        selectSong(track.button);
     }
+
+    // Roll back to the last track that loaded successfully: restore its src,
+    // its title/selection, and rebuild its visualization so the page is
+    // never left black or pointing at a failed player.
+    function rollbackTrack() {
+        var prev = lastGoodTrack;
+        teardownVisualization();
+        if (!prev) return;
+        applyTrackUI(prev);
+        currentTrack = prev;
+        try {
+            audioPlayer.src = prev.url;
+            buildVisualization(audioPlayer);
+        } catch (err) {
+            console.error('Could not restore previous track', err);
+        }
+    }
+
+    // The single rebuild transaction every entry point goes through.
+    function switchTrack(name, url, button) {
+        var track = { name: name, url: url, button: button || null };
+        applyTrackUI(track);
+        try { audioPlayer.pause(); } catch (e) { /* ignore */ }
+        try {
+            audioPlayer.src = url;
+            buildVisualization(audioPlayer);
+            currentTrack = track;
+        } catch (err) {
+            console.error('Failed to start visualization for "' + name + '"', err);
+            rollbackTrack();
+        }
+    }
+
+    audioPlayer.addEventListener('play', () => audioCtx.resume());
+    for (const event of ['playing', 'pause', 'ended', 'emptied', 'waiting', 'seeked', 'error']) {
+        audioPlayer.addEventListener(event, updatePlayingIndicator);
+    }
+    // A track counts as "good" once it can actually play.
+    audioPlayer.addEventListener('canplay', () => {
+        if (currentTrack) lastGoodTrack = currentTrack;
+    });
+    // Async load failure (bad upload, dead URL, ...): fall back to the last
+    // working track instead of leaving a broken player and a dead scene.
+    audioPlayer.addEventListener('error', () => {
+        if (!currentTrack || !lastGoodTrack) return;
+        if (currentTrack.url !== lastGoodTrack.url) rollbackTrack();
+    });
+
+    //Searches for and loads previous songs uploaded to firebase
+    songsRef.on('child_added', snapshot => {
+        const songUrl = snapshot.val();
+        const item = document.createElement('li');
+        const button = document.createElement('button');
+        item.dataset.searchText = (snapshot.key + '\n' + getSongFilename(songUrl)).toLowerCase();
+        item.hidden = !item.dataset.searchText.includes(searchQuery);
+        button.type = 'button';
+        button.textContent = button.title = snapshot.key;
+        button.addEventListener('click', () => {
+            switchTrack(snapshot.key, songUrl, button);
+            if (narrowLayout.matches) closeLibrary();
+        });
+        item.appendChild(button);
+        prevSongs.appendChild(item);
+        if (searchQuery) updateSearchResults();
+        // The library entry for the currently playing track arrived: bind the
+        // selection to it so rollback can restore the right button later.
+        if (currentTrack && songUrl === currentTrack.url) {
+            currentTrack.button = button;
+            if (lastGoodTrack && lastGoodTrack.url === songUrl) {
+                lastGoodTrack.button = button;
+            }
+            if (!selectedSong) selectSong(button);
+        }
+    });
 
     fileUpload.onchange = (event) => {
         var file = event.target.files[0];
@@ -194,32 +328,32 @@ window.onload = function () {
             .catch(err => console.log(err))
 
         //Creates a temporary url for the file that was uploaded so that it could be played the audio element
-        audioPlayer = new Audio(URL.createObjectURL(file));
-        audioPlayer.crossOrigin = "anonymous";
-        setCurrentTrack(songName, audioPlayer.src);
-        addAudioPlayer(audioPlayer);
-        if (narrowLayout.matches) closeLibrary();
-    }
-
-    function addAudioPlayer(audioPlayer) {
-        //Prevents local memory of audio files so you can create a new instance on upload
-        audioDiv.firstChild !== null ? (audioDiv.firstElementChild.remove(), (audioDiv.appendChild(audioPlayer))) : audioDiv.appendChild(audioPlayer);
-        audioPlayer.controls = true;
-        audioPlayer.addEventListener('play', () => audioCtx.resume());
-        for (const event of ['playing', 'pause', 'ended', 'emptied', 'waiting', 'seeked', 'error']) {
-            audioPlayer.addEventListener(event, updatePlayingIndicator);
+        var objectUrl = URL.createObjectURL(file);
+        // Release the previous blob URL — unless it belongs to the track we
+        // would roll back to on failure.
+        if (lastObjectUrl && !(lastGoodTrack && lastGoodTrack.url === lastObjectUrl)) {
+            URL.revokeObjectURL(lastObjectUrl);
         }
-
-        analyzeAudio(audioPlayer);
+        lastObjectUrl = objectUrl;
+        switchTrack(songName, objectUrl, null);
+        if (narrowLayout.matches) closeLibrary();
+        fileUpload.value = '';
     }
+
+    // Default track: same rebuild flow as every other entry point.
+    switchTrack(trackTitle.textContent.trim() || 'Smooth Operator', defaultSong, null);
 }
 
-function analyzeAudio(audioPlayer) {
-    // AnalyserNode is necessary to provide real-time frequency and time-domain analysis information. It is an AudioNode that passes the audio stream unchanged from the input to the output, but allows you to take the generated data, process it, and create audio visualizations.
-    source = audioCtx.createMediaElementSource(audioPlayer) // Uploaded audio becomes the source for the media stream
-    source.connect(analyser)
-    analyser.connect(audioCtx.destination)
+function buildVisualization(audioPlayer) {
+    // Guarantee a single live set even if the previous teardown was
+    // interrupted: always dismantle before building.
+    teardownVisualization();
 
+    // Audio chain: one element -> one MediaElementSource -> analyser -> out.
+    // Throws if the source cannot be created; caller rolls back.
+    connectAudioSource(audioPlayer);
+
+    // AnalyserNode is necessary to provide real-time frequency and time-domain analysis information. It is an AudioNode that passes the audio stream unchanged from the input to the output, but allows you to take the generated data, process it, and create audio visualizations.
     analyser.fftSize = 256; // 256 for analyser.getByteFrequencyData(dataArray) and 2048 for analyser.getByteTimeDomainData(dataArray)
     var bufferLength = analyser.frequencyBinCount;
     var dataArray = new Uint8Array(bufferLength)
@@ -230,16 +364,8 @@ function analyzeAudio(audioPlayer) {
     scene.background = new THREE.Color(0x000000);
     scene.fog = new THREE.FogExp2(0xcccccc, 0.002);
 
-    var renderer = new THREE.WebGLRenderer();
-    if (document.querySelector('canvas')) {
-        cancelAnimationFrame(animate);
-        scene.remove.apply(scene, scene.children);
-        document.querySelector('canvas').remove();
-        document.body.appendChild(renderer.domElement);
-
-    } else {
-        document.body.appendChild(renderer.domElement)
-    }
+    renderer = new THREE.WebGLRenderer();
+    document.body.appendChild(renderer.domElement);
 
     //Lighting Details
     var light = new THREE.AmbientLight(0x505050);
@@ -278,8 +404,7 @@ function analyzeAudio(audioPlayer) {
     resizeVisualizer();
 
     //Controls Details
-    var controls;
-    controls = new THREE.OrbitControls(camera, document.querySelector('canvas'));
+    controls = new THREE.OrbitControls(camera, renderer.domElement);
     controls.autoRotate = false;
 
     if (gui) gui.destroy();
@@ -348,7 +473,7 @@ function analyzeAudio(audioPlayer) {
     }
 
     function animate() {
-        requestAnimationFrame(animate) //better than set interval because it pauses when user leaves the page
+        rafId = requestAnimationFrame(animate) //better than set interval because it pauses when user leaves the page
         analyser.getByteFrequencyData(dataArray)
         controls.update();
 
@@ -369,7 +494,7 @@ function analyzeAudio(audioPlayer) {
         }
         renderer.render(scene, camera)
     }
-    animate() //gets called 60x per sec to render scene
+    rafId = requestAnimationFrame(animate) //single cancellable frame chain, torn down on the next switch
 }
 
 function unlockAudioContext(audioCtx) {
