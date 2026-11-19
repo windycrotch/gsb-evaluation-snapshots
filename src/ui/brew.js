@@ -107,6 +107,17 @@ export function createBrew(game, icons) {
   const kLeave = keyBtn('Esc', 'Leave', { click: () => A.brewLeave() });
   const keys = h('div', { class: 'tp-keys' }, kBellows, kDamper, kBottle, kEmpty, kLeave);
 
+  // A failed bottle (empty pot, unbound mixture, full belt) flashes the key red and shakes it;
+  // the same line is shown over the chart. The game emits brew:fail for every refused action.
+  let failT = 0;
+  game.bus.on('brew:fail', () => {
+    failT = 0.9;
+    kBottle.classList.remove('is-fail');
+    // re-trigger the CSS animation even when failures arrive back to back
+    void kBottle.offsetWidth;
+    kBottle.classList.add('is-fail');
+  });
+
   const panel = h('div', { class: 'tp-brew-panel' }, head, chart.el, status, stages, gauge, shelf, info, keys);
   const stir = h('div', { class: 'tp-brew-stir' });
   el.append(h('div', { class: 'tp-brew-veil' }), stir, panel);
@@ -154,6 +165,11 @@ export function createBrew(game, icons) {
     const st = game.state,
       b = game.brew;
     chart.draw(dt);
+
+    if (failT > 0) {
+      failT -= dt;
+      if (failT <= 0) kBottle.classList.remove('is-fail');
+    }
 
     // pips
     const n = b.contents.length;
@@ -272,12 +288,15 @@ export function createBrew(game, icons) {
       setText(infoText, !n && !opus && shelfItems.length ? 'Choose what goes into the pot.' : '');
     }
 
-    // keys
-    const canBottle = !!b.ready || !!(opus && opus.done);
+    // keys: bottling is a short, all-or-nothing action — while it runs the key shows its progress
+    // and refuses further presses, so a double click in one frame can never settle twice
+    const bottling = !!b.bottle;
+    const canBottle = (!!b.ready || !!(opus && opus.done)) && !bottling;
     if (kBottle.disabled === canBottle) kBottle.disabled = !canBottle;
     setClass(kBottle, 'is-call', canBottle);
-    setText(kBottle.lastChild, opus && opus.done ? 'Take' : 'Bottle');
-    const canEmpty = n > 0 && !(opus && opus.done);
+    setClass(kBottle, 'is-busy', bottling);
+    setText(kBottle.lastChild, bottling ? 'Bottling…' : opus && opus.done ? 'Take' : 'Bottle');
+    const canEmpty = n > 0 && !(opus && opus.done) && !bottling;
     if (kEmpty.disabled === canEmpty) kEmpty.disabled = !canEmpty;
 
     // the line over the pot

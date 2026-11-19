@@ -398,12 +398,9 @@ export function createChart(game, opts = {}) {
     // where would the hovered ingredient pull the mixture?
     let target = null;
     if (hover && !ready && D.INGREDIENTS[hover] && brew.contents.length < D.BREW.capacity) {
-      const cur = D.mixOf(brew.contents);
-      const ing = D.INGREDIENTS[hover];
-      if (cur.bary) {
-        const w = cur.total + ing.weight;
-        target = [0, 1, 2].map((i) => (cur.bary[i] * cur.total + ing.bary[i] * ing.weight) / w);
-      } else target = ing.bary.slice();
+      // the same ordered fold brew-logic uses, so the preview and the pot never disagree
+      const next = D.mixAfter(brew.contents, hover);
+      target = next.bary;
       const tr = D.regionAt(target);
       if (tr && tr.id !== litId && inked(tr.id)) region(c, tr.id, 2);
     }

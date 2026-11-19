@@ -1,5 +1,6 @@
-// The serialisable game state and the transient brew state. Pure data + tiny helpers.
+// The serialisable game state and the brew pot state. Pure data + tiny helpers.
 import { POTION_ORDER, BREW } from './data.js';
+import { createPotState } from './brew-logic.js';
 
 export const SAVE_VERSION = 1;
 
@@ -37,24 +38,13 @@ export function createState() {
   };
 }
 
-/** Transient state of the cauldron. Not saved: the pot is emptied when you walk away. */
+/**
+ * State of the cauldron — one re-entrant pot of work. Its canonical shape and every rule live in
+ * brew-logic.js (Node-testable); this thin wrapper keeps the name the rest of the game already
+ * uses. The pot IS saved: walking away and coming back restores heat, stirring credit and contents.
+ */
 export function createBrew() {
-  return {
-    active: false,
-    contents: [], // ingredient ids, or 'prime:salt' | 'prime:mercury' | 'prime:sulfur'
-    mix: null, // [s, m, k] or null when empty
-    trail: [], // earlier mix points, oldest first
-    fire: 0.0, // 0..1 how hard the fire burns (bellows)
-    heat: 0.0, // 0..1 temperature of the liquid (lags the fire)
-    region: null, // { id, dist, quality, stars } when the mix sits inside a potion region
-    band: null, // [lo, hi] heat band of that region (or of the current Opus stage)
-    fit: null, // -1 too cold, 0 right, +1 too hot, null when no region
-    stir: 0, // 0..1 smoothed stirring speed
-    progress: 0, // 0..1 binding progress
-    ready: null, // { potion, stars, count } once bound and waiting to be bottled
-    opus: null, // { stage: 0..3, progress: 0..1, done: false } during the Great Work
-    hint: '', // one short line for the UI
-  };
+  return createPotState();
 }
 
 export const count = (bag, id) => bag[id] || 0;

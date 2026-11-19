@@ -271,9 +271,19 @@ export const OPUS = {
 export const BREW = {
   capacity: 8, // ingredients per brew
   bindSeconds: 6, // stirring time, in band, to finish a potion
+  bindTurns: 3, // full circles of the ladle, in band, that bind a potion
+  bottleSeconds: 0.6, // the bottling action: begun, then committed after this long
   maxCarry: 9, // bottles of one kind
   yield: [2, 3, 4], // bottles for one, two, three marks of purity
 };
+
+/**
+ * How hard a fresh ingredient pulls the mixture toward itself. The first ingredient sets the
+ * point; every later one moves it a fixed fraction of the way to its own corner, so the ORDER in
+ * which materials enter the pot changes where the mixture ends up — adding the same ingredient
+ * twice keeps pulling the point toward its corner by the same rule each time.
+ */
+export const MIX_PULL = 0.45;
 
 // ---------------------------------------------------------------------------------------------
 // Chart math.
@@ -291,22 +301,34 @@ export function baryDist(a, b) {
     dk = a[2] - b[2];
   return Math.sqrt(Math.max(0, -(ds * dm + dm * dk + dk * ds)));
 }
-/** Weighted mix of ingredient ids -> { bary:[s,m,k], total, count } (bary is null when empty). */
+/**
+ * Ordered mix of ingredient ids -> { bary:[s,m,k], total, count } (bary is null when empty).
+ * The fold is order-dependent: the first ingredient sets the point, each later one pulls it
+ * MIX_PULL of the remaining way toward its own bary. [a, b] and [b, a] therefore end at different
+ * points, and a repeated ingredient keeps pulling by the same, checkable rule every time.
+ */
 export function mixOf(contents) {
-  let s = 0,
-    m = 0,
-    k = 0,
+  let bary = null,
     w = 0;
   for (const id of contents) {
     const ing = INGREDIENTS[id];
     if (!ing) continue;
-    s += ing.bary[0] * ing.weight;
-    m += ing.bary[1] * ing.weight;
-    k += ing.bary[2] * ing.weight;
+    if (!bary) bary = ing.bary.slice();
+    else for (let i = 0; i < 3; i++) bary[i] += (ing.bary[i] - bary[i]) * MIX_PULL;
     w += ing.weight;
   }
-  if (w <= 0) return { bary: null, total: 0, count: 0 };
-  return { bary: [s / w, m / w, k / w], total: w, count: contents.length };
+  if (!bary) return { bary: null, total: 0, count: 0 };
+  return { bary, total: w, count: contents.length };
+}
+/** Where the mixture would sit if `id` were added next, under the same ordered fold. */
+export function mixAfter(contents, id) {
+  const cur = mixOf(contents);
+  const ing = INGREDIENTS[id];
+  if (!ing) return cur;
+  if (!cur.bary) return { bary: ing.bary.slice(), total: ing.weight, count: 1 };
+  const bary = cur.bary.slice();
+  for (let i = 0; i < 3; i++) bary[i] += (ing.bary[i] - bary[i]) * MIX_PULL;
+  return { bary, total: cur.total + ing.weight, count: cur.count + 1 };
 }
 /** Which potion region contains this point? -> { id, dist, quality 0..1, stars 1..3 } or null. */
 export function regionAt(bary) {

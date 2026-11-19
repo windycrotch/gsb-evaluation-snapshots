@@ -278,6 +278,18 @@ export const CSS = /* css */ `
 .tp-keybtn:disabled { opacity: 0.32; }
 .tp-keybtn.is-call .tp-key { border-color: var(--tp-ember); color: var(--tp-ember-hot); }
 .tp-keybtn.is-call .tp-label { color: var(--tp-bone); }
+.tp-keybtn.is-busy .tp-key { border-color: var(--tp-bone-2); color: var(--tp-bone-2); }
+.tp-keybtn.is-busy .tp-label { color: var(--tp-bone-2); }
+@keyframes tp-key-fail {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-0.28em); }
+  40% { transform: translateX(0.26em); }
+  60% { transform: translateX(-0.18em); }
+  80% { transform: translateX(0.12em); }
+}
+.tp-keybtn.is-fail { animation: tp-key-fail 0.45s ease-out; }
+.tp-keybtn.is-fail .tp-key { border-color: #b8452f; color: #e07a5f; }
+.tp-keybtn.is-fail .tp-label { color: #e07a5f; }
 .tp-brew-stir { position: absolute; left: 29%; bottom: 9%; transform: translateX(-50%); font-family: var(--tp-display); font-style: italic; font-size: var(--fs-lead); text-shadow: var(--tp-shadow); white-space: nowrap; opacity: 0; transition: opacity 0.6s; }
 .tp-brew-stir.is-on { opacity: 0.92; }
 

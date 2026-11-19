@@ -7,7 +7,8 @@
   "description": "Tria Prima: a dark-fantasy alchemy adventure. First-person 3D, WebGL2, fully procedural.",
   "scripts": {
     "dev": "node tools/dev-server.mjs 8930",
-    "build": "node tools/build.mjs"
+    "build": "node tools/build.mjs",
+    "test": "node --test tests/*.test.mjs"
   },
   "dependencies": {
     "cannon-es": "0.20.0",

@@ -6,7 +6,7 @@
 // What the UI and the other systems read from here is docs/DESIGN.md section 5.
 import * as THREE from 'three';
 import * as data from './data.js';
-import { createState, createBrew, SAVE_VERSION, count, add } from './state.js';
+import { createState, createBrew, SAVE_VERSION, count } from './state.js';
 import { bus } from '../core/events.js';
 import { clamp, damp, lerp, smoothstep, easeInOutCubic } from '../core/math.js';
 import { Engine } from '../gfx/engine.js';
@@ -337,7 +337,7 @@ export class Game {
       },
       quitToTitle() {
         if (g.state.mode === 'title') return;
-        g._returnBrew();
+        g._parkBrew();
         g.save(true);
         g.input.releaseLock();
         g._toTitle(false);
@@ -436,17 +436,27 @@ export class Game {
     if (this._cut && this._cut.kind !== 'travel') return false;
     const p = this.player;
     Object.assign(st.player, { x: p.pos.x, y: p.pos.y, z: p.pos.z, yaw: p.heading, pitch: p.pitch });
-    const ok = store.set(SAVE_KEY, JSON.stringify({ v: SAVE_VERSION, at: Date.now(), tips: this.quests.save(), state: { ...st, mode: 'play' } }));
+    // A bottling caught mid-action cannot survive a reload: abandon it whole before writing, so
+    // the live pot and the saved pot agree and neither side has moved a phial.
+    this.brewing.cancelPotBottle();
+    // the pot is part of the world: heat, stirring bank and the materials in it survive a reload.
+    const ok = store.set(
+      SAVE_KEY,
+      JSON.stringify({ v: SAVE_VERSION, at: Date.now(), tips: this.quests.save(), brew: this.brewing.serialize(), state: { ...st, mode: 'play' } })
+    );
     this._saveT = 0;
     if (ok && !quiet) this.bus.emit('save');
     return ok;
   }
-  /** What is in the pot goes back in the satchel when the game is put away. */
-  _returnBrew() {
+  /**
+   * Park the pot when the game is put away. Leaving the bench no longer empties it: the work is
+   * serialised in save(). A bottling caught mid-action is abandoned whole so nothing is half-settled.
+   */
+  _parkBrew() {
     const b = this.brew;
-    if (b.ready) this.brewing.bottle();
-    else if (!b.opus) for (const id of b.contents) if (!id.startsWith('prime:')) add(this.state.inv.ingredients, id, 1, 99);
-    this.brewing.reset();
+    if (!b) return;
+    if (this.brewing && this.brewing.cancelPotBottle) this.brewing.cancelPotBottle();
+    b.active = false;
   }
 
   /** Put the world in the shape a state describes. */
@@ -457,7 +467,6 @@ export class Game {
     for (const k in st) delete st[k];
     Object.assign(st, fresh);
     st.mode = 'cutscene';
-    Object.assign(this.brew, createBrew());
     this.after.length = 0;
     this.reading = null;
     this.frost = 0;
@@ -476,7 +485,8 @@ export class Game {
     this.ents.reset();
     this.shades.reset();
     this.potions.reset();
-    this.brewing.reset();
+    // re-enter the saved pot (migrating older saves); a save without one starts from an empty pot
+    this.brewing.restore(save ? save.brew : null);
     this.quests.load(save ? save.tips : null);
     this.quests.reset();
   }

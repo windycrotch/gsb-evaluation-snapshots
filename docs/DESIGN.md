@@ -79,6 +79,7 @@ src/main.js             boot                               MAIN
 src/core/               math, rng, noise, events           MAIN
 src/game/data.js        all static data and chart math     MAIN
 src/game/state.js       save state + brew state shape      MAIN
+src/game/brew-logic.js  pure, Node-testable cauldron rules and the one shared pot state  MAIN
 src/game/               gameplay                           MAIN
 src/gfx/                renderer, shaders, post, materials MAIN
 src/world/              terrain, water, flora placement    MAIN
