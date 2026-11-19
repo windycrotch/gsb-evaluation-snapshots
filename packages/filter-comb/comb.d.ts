@@ -1,9 +1,16 @@
 type Buf = Float32Array | Float64Array
 
 export interface CombParams {
-  /** delay, samples, at least 1; required. Between two samples it reads between them; a new delay glides across the call */
+  /**
+   * Delay, milliseconds, converted to sample frames at `fs`. A whole number
+   * given with no `fs` is read as whole frames (the historical convention); a
+   * fractional delay reads between its two adjacent frames. Under one frame is
+   * an error. Non-finite or negative values throw.
+   */
   delay: number
-  /** feedforward/feedback gain, default 0.5 — a true null (feedforward) or infinite peak (feedback) only at |gain|=1 */
+  /** sample rate, Hz, default 44100; changing it on a reused params object restarts the delay glide */
+  fs?: number
+  /** feedforward/feedback gain, default 0.5; |gain| ≥ 1 is held just inside 1 so feedback stays bounded */
   gain?: number
   /** `'feedforward'` (FIR, dips): H(z) = 1 + gain·z⁻ᴰ. `'feedback'` (IIR, peaks): H(z) = 1 / (1 − gain·z⁻ᴰ). Default `'feedforward'` */
   type?: 'feedforward' | 'feedback'
@@ -12,8 +19,9 @@ export interface CombParams {
 
 /**
  * Comb filter — delayed copy of the signal added to itself, notches/peaks at harmonics of fs/delay. In-place; the ring
- * buffer persists on `params` across calls. A new delay is reached across the call from the last call's, the read no
- * faster than double speed and no slower than half; a delay longer than the ring holds makes a new one, empty.
+ * buffer persists on `params` across calls. The delay is given in milliseconds and converted at `fs`. A new delay is
+ * reached from the last call's, the read moving at most half a frame longer and a frame shorter per frame — never a
+ * jump; a delay longer than the ring holds makes a new one, empty.
  */
 declare function comb(data: Buf, params: CombParams): Buf
 export default comb

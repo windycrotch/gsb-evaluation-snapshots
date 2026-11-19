@@ -12,33 +12,74 @@
 import { lowpass } from '@audio/biquad'
 
 let TAU = 0.005 // parameter smoothing time constant, seconds
+let FADE = 0.02 // type-switch crossfade, seconds (the /audio processor fades over the same 20 ms)
 
 const PI2 = Math.PI * 2
+const TYPES = ['lowpass', 'highpass', 'bandpass']
 
 /**
  * @param {Float64Array} data - Input (modified in-place)
  * @param {object} params - { fc, Q, fs, type: 'lowpass'|'highpass'|'bandpass' }
  */
 export default function variableBandwidth (data, params) {
-	let fc = params.fc || 1000
-	let Q = params.Q || 0.707
-	let fs = params.fs || 44100
-	let type = params.type || 'lowpass'
+	if (!params || typeof params !== 'object') throw new TypeError('variableBandwidth: params object is required')
+	let fs = params.fs == null ? 44100 : params.fs
+	if (typeof fs !== 'number' || !Number.isFinite(fs) || fs <= 0) {
+		throw new RangeError(`variableBandwidth: fs must be a finite positive sample rate, got ${fs}`)
+	}
+	let fc = params.fc == null ? 1000 : params.fc
+	// a non-finite cutoff is no frequency: say so rather than feed NaN into the coefficients
+	if (typeof fc !== 'number' || !Number.isFinite(fc)) {
+		throw new TypeError(`variableBandwidth: fc must be a finite frequency, got ${fc}`)
+	}
+	let Q = params.Q == null ? 0.707 : params.Q
+	// a non-positive Q divides by zero in alpha = sin(w)/(2Q); hold it at a safe positive value, so no output is NaN
+	if (typeof Q !== 'number' || !Number.isFinite(Q) || Q <= 0) Q = 0.707
+	let type = params.type == null ? 'lowpass' : params.type
+	if (!TYPES.includes(type)) {
+		throw new TypeError(`variableBandwidth: type must be one of ${TYPES.join(', ')}, got ${type}`)
+	}
+	// the poles leave the unit circle past 0.49 of the rate: hold the target there from the first sample, never run an
+	// unstable section
+	fc = Math.min(fc, fs * 0.49)
 
-	// the smoothing starts where variableBlock holds fc (0.49 of the rate): from above it, it would run unstable sections
-	if (params._fcCur == null) { params._fcCur = Math.min(fc, fs * 0.49); params._qCur = Q }
-	if (!params._state) params._state = [0, 0]
-
+	// the section's two states and the smoothed fc and Q, kept from call to call; NaN fc and Q start at the held targets
+	if (!params._state || params._state.length !== 4) params._state = new Float64Array([0, 0, NaN, NaN])
 	let s = params._state
-	S[0] = s[0]; S[1] = s[1]; S[2] = params._fcCur; S[3] = params._qCur
-	SET[0] = fc; SET[1] = Q; SET[2] = fs
-	variableBlock(data, S, SET, SEC, type)
-	s[0] = S[0]; s[1] = S[1]; params._fcCur = S[2]; params._qCur = S[3]
+	if (s[2] !== s[2]) { s[2] = fc; s[3] = Q }
+
+	// a rate change invalidates every cached number: the smoothed trajectory and coefficients are of the old rate, so
+	// restart the smoothing at this rate's targets and drop any fade under way (its step was 1/(0.02·oldFs))
+	if (params._fs !== fs) {
+		params._fs = fs
+		s[2] = fc; s[3] = Q
+		params._type = undefined
+		if (params._fade) params._fade[0] = 1
+	}
+
+	// a new type fades over ~20 ms; a switch while a fade is under way restarts from the blend the output currently has
+	let fade = params._fade
+	if (params._type !== type) {
+		if (params._type !== undefined) {
+			let fromK = params._type === 'highpass' ? 1 : params._type === 'bandpass' ? 2 : 0
+			if (!fade) {
+				// a fresh fade begins from the type in force: its origin weights are that type alone, not the zeros a new
+				// Float64Array carries (a zero blend would fade in from silence)
+				fade = params._fade = Float64Array.of(1, 1 / (FADE * fs), fromK === 0 ? 1 : 0, fromK === 1 ? 1 : 0, fromK === 2 ? 1 : 0, 0)
+			}
+			fade[1] = 1 / (FADE * fs)
+			variableFade(fade, params._type)
+		}
+		params._type = type
+	}
+	if (fade && fade[0] >= 1) fade = undefined
+
+	let set = Float64Array.of(fc, Q, fs)
+	let c = params._section ??= lowpass(1000)
+	variableBlock(data, s, set, c, type, fade)
 
 	return data
 }
-
-const S = new Float64Array(4), SET = new Float64Array(3), SEC = lowpass(1000)   // a direct call's state, targets, section
 
 /**
  * One block in place, allocating nothing: `s` a Float64Array of the section's two states and the smoothed fc and Q

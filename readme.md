@@ -325,8 +325,11 @@ Adds a delayed copy of the signal to itself — notches and peaks at harmonics o
 ```js
 import { comb } from '@audio/filter'
 
-comb(buffer, { delay: 100, gain: 0.6, type: 'feedback' })
+// delay in milliseconds, converted to frames at fs; reuse the params object across blocks
+comb(buffer, { delay: 10, fs: 48000, gain: 0.6, type: 'feedback' })
 ```
+
+The delay is live: a fractional delay reads between its two adjacent frames, and a new delay glides from where the last call ended — the read moving at most half a frame longer and at most a frame shorter per frame, never an instant jump. The ring is made once for the longest delay and reused; only a delay past its capacity rebuilds it, empty. Feedback keeps the filter output in the line, feedforward the input. A delay under one frame or a non-finite parameter throws; nothing leaves NaN in the output.
 
 **Use when**: flanging, chorus (with modulated delay), Karplus-Strong string synthesis, room mode modeling
 
@@ -534,8 +537,8 @@ spectralTilt(buffer, { slope: +3, fs: 44100 })   // +3 dB/oct: pre-emphasis for 
 
 Lowpass with continuously variable bandwidth — smooth parameter automation without discontinuities.
 
-**Implementation**: `fc`/`Q` are exponentially smoothed toward their target values with a 5 ms time constant, and biquad coefficients are recomputed from the smoothed values every sample (not once per buffer)<br>
-**Property**: no discontinuity when $f_c$ or $Q$ change — a mid-buffer step change lands ~9x closer to the plain-lowpass baseline than an abrupt coefficient jump; once converged, steady-state output equals plain lowpass/highpass/bandpass
+**Implementation**: `fc`/`Q` are exponentially smoothed toward their target values with a 5 ms time constant, and biquad coefficients are recomputed from the smoothed values every sample (not once per buffer); a `type` change crossfades over ~20 ms, restarting mid-fade from the current blend<br>
+**Property**: no discontinuity when $f_c$, $Q$ or the type change — a mid-buffer step change lands ~9x closer to the plain-lowpass baseline than an abrupt coefficient jump; once converged, steady-state output equals plain lowpass/highpass/bandpass. `fc` is held at 0.49·`fs` from the first sample, non-finite `fc`/`fs` throws, and a non-positive `Q` is held at the default — the output is never NaN
 
 ```js
 import { variableBandwidth } from '@audio/filter'

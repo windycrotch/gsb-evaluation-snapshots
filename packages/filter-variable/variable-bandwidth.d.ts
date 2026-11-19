@@ -1,13 +1,13 @@
 type Buf = Float32Array | Float64Array
 
 export interface VariableBandwidthParams {
-  /** target cutoff/center frequency, Hz, default 1000; above 0.49·fs held there */
+  /** target cutoff/center frequency, Hz, default 1000; non-finite values throw; above 0.49·fs held there from the first sample */
   fc?: number
-  /** target quality factor, default 0.707 */
+  /** target quality factor, default 0.707; non-finite or non-positive Q is held at the default so the section stays finite */
   Q?: number
-  /** sample rate, Hz, default 44100 */
+  /** sample rate, Hz, default 44100; changing it on a reused params object restarts the smoothing and any type fade */
   fs?: number
-  /** biquad shape, default `'lowpass'` */
+  /** biquad shape, default `'lowpass'`; a change crossfades the output over ~20 ms, restarting mid-fade from the current blend */
   type?: 'lowpass' | 'highpass' | 'bandpass'
   [key: string]: unknown
 }
@@ -18,8 +18,9 @@ export interface VariableBandwidthParams {
  * biquad coefficients are recomputed from the smoothed values every sample (not once
  * per buffer), so a mid-buffer `fc`/`Q` change produces no discontinuity — unlike
  * `filter-biquad`'s `lowpass`/`highpass`/`bandpass`, which recompute once per call and
- * click on a coefficient jump. Once converged, steady-state output equals the plain
- * biquad shape. In-place; stateful — pass the same `params` object across calls.
+ * click on a coefficient jump. A `type` change crossfades over ~20 ms (a switch made while a fade is under way continues
+ * from the blend the output currently has); once the fade ends the steady-state output equals the plain biquad shape.
+ * In-place; stateful — pass the same `params` object across calls.
  */
 declare function variableBandwidth(data: Buf, params: VariableBandwidthParams): Buf
 export default variableBandwidth

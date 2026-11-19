@@ -16,23 +16,24 @@ Adds a delayed copy of the signal to itself — notches and peaks at harmonics o
 **Feedback**: $H(z) = \dfrac{1}{1 - g \cdot z^{-D}}$ — peaks at $f = \frac{k \cdot f_s}{D}$
 
 ```js
-comb(buffer, { delay: 100, gain: 0.6, type: 'feedback' })
+comb(buffer, { delay: 10, fs: 48000, gain: 0.6, type: 'feedback' })
 ```
 
 | Param | Default | |
 |---|---|---|
-| `delay` | — | required, delay length in samples (`D`) |
-| `gain` | `0.5` | feedforward/feedback coefficient `g` |
+| `delay` | — | required, delay in **milliseconds**, converted to sample frames at `fs` (a whole number given with no `fs` is read as whole frames) |
+| `fs` | `44100` | sample rate, Hz — changing it on a reused params object restarts the delay glide |
+| `gain` | `0.5` | feedforward/feedback coefficient `g`; `|gain| ≥ 1` is held just inside 1 so feedback stays bounded |
 | `type` | `'feedforward'` | `'feedforward'` (FIR, dips) or `'feedback'` (IIR, peaks) |
 
 Pass the same `params` object on every call — the ring buffer and write pointer persist across blocks:
 
 ```js
-let params = { delay: 100, gain: 0.6, type: 'feedback' }
+let params = { delay: 10, fs: 48000, gain: 0.6, type: 'feedback' }
 for (let buf of stream) comb(buf, params)
 ```
 
-The delay is live, read as @audio/effect's delay lines read theirs: a delay between two samples is read between them, and a new one glides across the call from where the last call ended, the read no faster than double speed and no slower than half. A delay longer than the ring holds makes a new ring, empty; the `/audio` processor makes its ring for the longest delay, 100 ms, so its delay moves without one. Its `gain` is smoothed (20 ms) and glided sample by sample: a host's ramp of it is one line, the same however the host cuts its calls (it hands each call the value at its first frame, so the line is played 32 frames late); held, it is the value itself. A new `type` still switches in one sample: feedforward keeps its input in the line and feedback its output, so a fade would need the feedback recursion running at all times.
+The delay is live, read as @audio/effect's delay lines read theirs: a delay between two samples is read between them (linear interpolation of the two adjacent frames), and a new one glides from where the last call ended — the read moving at most half a frame longer and at most a frame shorter per frame, never an instant jump. The ring is allocated once for the longest delay and shorter delays reuse it; only a delay longer than the ring holds makes a new one, empty. Its `gain` is smoothed (20 ms) and glided sample by sample in the `/audio` processor: a host's ramp of it is one line, the same however the host cuts its calls. A new `type` still switches in one sample: feedforward keeps its input in the line and feedback its output, so a fade would need the feedback recursion running at all times. A delay under one frame, a non-finite delay or an invalid `fs`/`type` throws; no call leaves NaN or Infinity in the output.
 
 **Use when:** flanging, chorus (with modulated delay), Karplus-Strong string synthesis, room mode modeling.
 

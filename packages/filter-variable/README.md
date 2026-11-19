@@ -36,9 +36,9 @@ for (let buf of stream) {
 }
 ```
 
-`fc` above 0.49 of the sample rate is held there, in the direct call and the `/audio` processor: past Nyquist the section's poles leave the unit circle, and every `/audio` processor of @audio/filter and @audio/eq keeps this one rule.
+`fc` above 0.49 of the sample rate is held there, from the first sample of the smoothing, in the direct call and the `/audio` processor: past Nyquist the section's poles leave the unit circle, and every `/audio` processor of @audio/filter and @audio/eq keeps this one rule.
 
-In the `/audio` processor a new `type` moves the output from the old type to the new over 20 ms: the three types share one denominator, so during the fade the section runs in direct form, each type's numerator on the same history, and the output is the two types' own renders crossfaded (switched in one sample, lowpass to highpass read ×1105 on a 220 Hz tone). Each frame's coefficients are computed in the kernel by `@audio/biquad`'s arithmetic, so a frame passes no number to a call and a type change allocates nothing.
+A new `type` moves the output from the old type to the new over 20 ms, in the direct call and the `/audio` processor: the three types share one denominator, so during the fade the section runs in direct form, each type's numerator on the same history, and the output is the two types' own renders crossfaded (switched in one sample, lowpass to highpass read ×1105 on a 220 Hz tone). A switch made while a fade is under way restarts it from the blend the output currently has — no jump — and once the fade ends the steady-state output is exactly what a direct call of that type gives. Changing `fs` on a reused params object restarts the smoothing (the cached trajectory and coefficients were of the old rate) and drops any fade under way. Non-finite `fc` or `fs` throws; a non-positive `Q` is held at the default and `fc` above 0.49 of the rate at that limit, so no call leaves NaN or Infinity in the output. Each frame's coefficients are computed in the kernel by `@audio/biquad`'s arithmetic, so a frame passes no number to a call and a type change allocates nothing.
 
 **Use when:** LFO-modulated filter cutoff, automated EQ sweeps, smooth filter animation.
 

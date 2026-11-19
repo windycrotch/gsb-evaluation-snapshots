@@ -46,12 +46,13 @@ export interface DcBlockerParams { R?: number; [key: string]: unknown } // R def
 export function dcBlocker(data: Buf, params?: DcBlockerParams): Buf
 
 export interface CombParams {
-  delay: number      // delay in samples
-  gain?: number      // feedback/feedforward gain (default 0.5)
+  delay: number      // delay in milliseconds (converted to frames at fs); a whole number with no fs is read as frames
+  fs?: number        // sample rate Hz (default 44100); changing it restarts the delay glide
+  gain?: number      // feedback/feedforward gain (default 0.5); |gain| ≥ 1 held just inside 1
   type?: 'feedforward' | 'feedback' // default 'feedforward'
   [key: string]: unknown
 }
-/** Comb filter (feedforward FIR or feedback IIR). Reallocates the delay line when params.delay changes on a reused params object. */
+/** Comb filter (feedforward FIR or feedback IIR). The ring persists on a reused params object and is rebuilt, empty, only when a delay exceeds its capacity; the read glides to a new delay at ≤0.5 frame/frame growth and ≤1 frame/frame shrink. */
 export function comb(data: Buf, params: CombParams): Buf
 
 export interface AllpassParams { a?: number; fc?: number; Q?: number; fs?: number; [key: string]: unknown }
