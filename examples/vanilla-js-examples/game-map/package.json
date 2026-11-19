@@ -1,0 +1,25 @@
+{
+    "name": "vanilla-js-game-map",
+    "private": true,
+    "version": "0.0.0",
+    "type": "module",
+    "scripts": {
+        "dev": "vite",
+        "build": "tsc && vite build",
+        "preview": "vite preview",
+        "typecheck": "tsc --noEmit",
+        "format": "oxfmt",
+        "format:check": "oxfmt --check"
+    },
+    "devDependencies": {
+        "typescript": "~5.9.3",
+        "vite": "^7.3.1"
+    },
+    "dependencies": {
+        "@canvas-tile-engine/core": "workspace:*",
+        "@canvas-tile-engine/renderer-canvas": "workspace:*",
+        "@faker-js/faker": "^10.6.0",
+        "@tailwindcss/vite": "^4.3.3",
+        "tailwindcss": "^4.3.3"
+    }
+}

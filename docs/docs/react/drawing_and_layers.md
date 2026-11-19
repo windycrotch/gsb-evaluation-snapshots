@@ -1,0 +1,738 @@
+---
+sidebar_position: 2
+---
+
+# Drawing & Layers
+
+The React package provides declarative draw components that automatically manage layer registration and rendering. All components use **world coordinates**, and the engine handles scaling and positioning.
+
+`Rect`, `Circle`, `Image`, `Text`, `Line`, and `Path` also accept a stable `ItemCollection` as their `items` prop. Its keyed updates repaint automatically without rerendering React or replacing the draw handle. See [Live Item Collections](../js/item_collections.md#react-and-react-native) for a complete example. Static components and Sprite keep their existing inputs.
+
+:::tip Type Safety
+All drawing types are exported from the package. See [Types Reference](/docs/introduction/types) for complete type definitions.
+
+```typescript
+import {
+    Rect,
+    Circle,
+    Text,
+    Path,
+    ImageItem,
+    Coords,
+} from "@canvas-tile-engine/react";
+```
+
+:::
+
+## Layer System
+
+Layers control the Z-order of your content. Lower numbers draw first (background), higher numbers draw last (foreground).
+
+| Layer | Typical Usage                  |
+| :---- | :----------------------------- |
+| `0`   | Background / Terrain           |
+| `1`   | Grid lines / Floor decorations |
+| `2`   | Objects / Units / Buildings    |
+| `3`   | UI Markers / Overlays          |
+
+## Shapes
+
+### `<Rect>` & `<Circle>`
+
+Draw basic geometric shapes. Pass a single object or an array for batch rendering.
+
+| Prop      | Type                           | Default      | Description                                                                                          |
+| :-------- | :----------------------------- | :----------- | :--------------------------------------------------------------------------------------------------- |
+| `items`   | `Rect \| Rect[]`               | **Required** | Shape definitions (for `<Rect>`).                                                                    |
+| `items`   | `Circle \| Circle[]`           | **Required** | Shape definitions (for `<Circle>`).                                                                  |
+| `layer`   | `number`                       | `1`          | Rendering layer.                                                                                     |
+| `styleOf` | `(item) => style \| undefined` | -            | Paint-time decoration for selection/hover; see [Styling by State](#styling-by-state-styleof). |
+| `visibleOf` | `(item) => boolean \| undefined` | -          | Per-item show/hide: `false` skips the item (not painted, not hit-testable); see [Visibility and Interactivity by State](#visibility-and-interactivity-by-state-visibleof--interactiveof). |
+| `interactiveOf` | `(item) => boolean \| undefined` | -      | Per-item hit-test opt-out: `false` keeps the item painted but transparent to hit queries.            |
+
+**Rect / Circle Properties:**
+
+| Property | Type                 | Default                            | Description                                                                                                                                         |
+| :------- | :------------------- | :--------------------------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `x`, `y` | `number`             | **Required**                       | World coordinates.                                                                                                                                  |
+| `size`   | `number`             | `1`                                | Size in grid units.                                                                                                                                 |
+| `sizePx` | `number`             | -                                  | Fixed size in screen pixels for both axes, independent of zoom (`Rect` and `Circle`; on a circle it is the diameter). Wins over `size`/`width`/`height`. Ignored by the `Static*` variants. |
+| `widthPx` | `number`            | -                                  | Fixed width in screen pixels (only for `Rect`). Wins over `sizePx` and `width`. Ignored by `StaticRect`.                                                             |
+| `heightPx` | `number`           | -                                  | Fixed height in screen pixels (only for `Rect`). Wins over `sizePx` and `height`. Ignored by `StaticRect`.                                                           |
+| `style`  | `object`             | `{}`                               | Styling options.                                                                                                                                    |
+| `origin` | `object`             | `{ mode: "cell", x: 0.5, y: 0.5 }` | Anchor point.                                                                                                                                       |
+| `width`  | `number`             | `size`                             | Width in world units (only for `Rect`). Combine with `height` for non-square rectangles: bars, cards, zone floors.                                  |
+| `height` | `number`             | `size`                             | Height in world units (only for `Rect`).                                                                                                            |
+| `rotate` | `number`             | `0`                                | Rotation angle in degrees (only for `Rect`).                                                                                                        |
+| `radius` | `number \| number[]` | -                                  | Border radius in world units (scales with zoom). Single value for all corners, or `[topLeft, topRight, bottomRight, bottomLeft]` (only for `Rect`). |
+| `data`   | `TData`              | -                                  | Arbitrary app data. Never read by the engine; returned on `hitTest` results as `hit.item.data` to identify what was hit.                            |
+
+**Style Options:**
+
+- `fillStyle`: Fill color (e.g., `"#ff0000"`, `"rgba(0,0,0,0.5)"`), or a gradient — see [Gradient Fills](#gradient-fills)
+- `strokeStyle`: Border color
+- `lineWidth`: Border width in world units; scales with zoom like the shape
+- `lineWidthPx`: Border width in screen pixels, independent of zoom; wins over `lineWidth`
+- `lineDash`: Border dash pattern in world units; dashes scale with zoom. Canvas2D `setLineDash` semantics; omit for a solid border
+- `lineDashPx`: Border dash pattern in screen pixels, independent of zoom; wins over `lineDash`
+
+```tsx
+<CanvasTileEngine
+    engine={engine}
+    config={config}
+    renderer={new RendererCanvas()}
+>
+    {/* Blue square */}
+    <CanvasTileEngine.Rect
+        items={{ x: 5, y: 5, size: 1, style: { fillStyle: "#0077be" } }}
+        layer={1}
+    />
+
+    {/* Rotated rectangle */}
+    <CanvasTileEngine.Rect
+        items={{
+            x: 8,
+            y: 5,
+            size: 1,
+            rotate: 45,
+            style: { fillStyle: "#ff6b6b" },
+        }}
+        layer={1}
+    />
+
+    {/* Rounded rectangle */}
+    <CanvasTileEngine.Rect
+        items={{
+            x: 10,
+            y: 5,
+            size: 1,
+            radius: 0.15,
+            style: { fillStyle: "#2ecc71" },
+        }}
+        layer={1}
+    />
+
+    {/* Non-square rectangle: a 4x2 zone floor */}
+    <CanvasTileEngine.Rect
+        items={{
+            x: 5,
+            y: 8,
+            width: 4,
+            height: 2,
+            style: { fillStyle: "rgba(34, 197, 94, 0.3)" },
+        }}
+        layer={1}
+    />
+
+    {/* Different corner radii */}
+    <CanvasTileEngine.Rect
+        items={{
+            x: 12,
+            y: 5,
+            size: 1,
+            radius: [0.2, 0, 0.2, 0],
+            style: { fillStyle: "#9b59b6" },
+        }}
+        layer={1}
+    />
+
+    {/* Red circle */}
+    <CanvasTileEngine.Circle
+        items={{ x: 6, y: 5, size: 0.8, style: { fillStyle: "#e63946" } }}
+        layer={2}
+    />
+
+    {/* Batch rendering */}
+    <CanvasTileEngine.Rect
+        items={[
+            { x: 10, y: 10, style: { fillStyle: "blue" } },
+            { x: 12, y: 10, style: { fillStyle: "green" } },
+            { x: 14, y: 10, style: { fillStyle: "red" } },
+        ]}
+        layer={1}
+    />
+</CanvasTileEngine>
+```
+
+### Gradient Fills
+
+`fillStyle` takes a linear gradient as well as a color string, on shapes (`Rect`, `Circle`) and on path fills.
+
+```ts
+const ramp = {
+    type: "linear",
+    from: { x: 0, y: 0 },
+    to: { x: 0, y: 1 },
+    stops: [
+        { offset: 0, color: "#f97316" },
+        { offset: 1, color: "#22d3ee" },
+    ],
+} as const;
+
+<CanvasTileEngine.Rect items={bars} layer={1} />;
+```
+
+| Field | Meaning |
+| :-- | :-- |
+| `from`, `to` | The axis the ramp runs along. |
+| `stops` | `{ offset, color }` pairs. Offsets are clamped to `0..1` and sorted; two stops at one offset make a hard break. An empty list paints nothing, a single stop paints flat. |
+| `units` | `"box"` (default) reads `from`/`to` as fractions of the item's own drawn box. `"world"` reads them as world coordinates. |
+
+Box units make one gradient object reusable: `{ from: { x: 0, y: 0 }, to: { x: 0, y: 1 } }` means "top to bottom" for every item that uses it, whatever its size, position or rotation — a rotated shape's ramp turns with the shape. World units place the axis in the scene instead, so neighbouring items each show their own slice of a single ramp, and it moves and scales with the camera.
+
+Strokes and text stay color strings. A stroke has no box to normalize an axis against, and "along the stroke" and "across the stroke" are equally fair readings of one axis, so the ambiguity is left out of the API rather than answered differently by each renderer.
+
+:::note
+The `Static*` components accept gradients too, but their cache is recorded at one scale, so a `"world"` axis is baked at the scale the cache was built with.
+:::
+
+## Lines & Paths
+
+### `<Line>`
+
+Draw straight lines between two points.
+
+| Prop      | Type                           | Default      | Description                                                                                                      |
+| :-------- | :----------------------------- | :----------- | :--------------------------------------------------------------------------------------------------------------- |
+| `items`   | `Line \| Line[]`               | **Required** | Line definitions.                                                                                                |
+| `style`   | `LineStyle`                    | -            | Default line style; an item's own `style` overrides it per item.                                                 |
+| `styleOf` | `(item) => style \| undefined` | -            | Per-item decoration overlaid on both (color/dash only); see [Styling by State](#styling-by-state-styleof). |
+| `visibleOf` | `(item) => boolean \| undefined` | -          | Per-item show/hide: `false` skips the item (not painted, not hit-testable).                                    |
+| `interactiveOf` | `(item) => boolean \| undefined` | -      | Per-item hit-test opt-out: `false` keeps the item painted but transparent to hit queries.                      |
+
+**Line Properties:** `{ from: { x, y }, to: { x, y }, style?: LineStyle, data?: TData }` — an item's `style` overrides the `style` prop unit pair by unit pair and, being registration-time, may change the stroke width (hit testing follows it).
+
+```tsx
+{
+    /* Single line */
+}
+<CanvasTileEngine.Line
+    items={{ from: { x: 0, y: 0 }, to: { x: 10, y: 10 } }}
+    style={{ strokeStyle: "#fb8500", lineWidthPx: 3 }}
+    layer={1}
+/>;
+
+{
+    /* Mixed styles in one batch: item style overrides the prop default */
+}
+<CanvasTileEngine.Line
+    items={[
+        { from: { x: 0, y: 0 }, to: { x: 5, y: 5 } },
+        { from: { x: 5, y: 0 }, to: { x: 0, y: 5 }, style: { strokeStyle: "#f59e0b", lineWidthPx: 4 } },
+    ]}
+    style={{ strokeStyle: "red", lineWidthPx: 2 }}
+    layer={1}
+/>;
+```
+
+### `<Path>`
+
+Draw free-form paths: open polylines, closed outlines, and filled shapes. Each `PathItem` owns its geometry and style.
+
+| Prop      | Type                           | Default      | Description                                                                                                             |
+| :-------- | :----------------------------- | :----------- | :---------------------------------------------------------------------------------------------------------------------- |
+| `items`   | `PathItem \| PathItem[]`       | **Required** | Path definitions.                                                                                                       |
+| `layer`   | `number`                       | `1`          | Rendering layer.                                                                                                        |
+| `styleOf` | `(item) => style \| undefined` | -            | Paint-time decoration (no stroke width / corner radius); see [Styling by State](#styling-by-state-styleof).      |
+| `visibleOf` | `(item) => boolean \| undefined` | -          | Per-item show/hide: `false` skips the item (not painted, not hit-testable).                                           |
+| `interactiveOf` | `(item) => boolean \| undefined` | -      | Per-item hit-test opt-out: `false` keeps the item painted but transparent to hit queries.                             |
+
+**`PathItem`:** `{ commands?, points?, closed?, fillRule?, style?, data? }` — `commands` is a Canvas2D-style command list (curves, arcs, multiple subpaths, holes); `points` is the polyline form. See the [core drawing docs](../js/drawing_and_layers.md#drawpath) for the full `PathCommand`, property, and `PathStyle` tables. Filled paths hit-test on their interior (holes excluded), unfilled ones on the stroke itself.
+
+```tsx
+{
+    /* Open route line */
+}
+<CanvasTileEngine.Path
+    items={{
+        points: [
+            { x: 0, y: 0 },
+            { x: 5, y: 0 },
+            { x: 5, y: 5 },
+        ],
+        style: { strokeStyle: "#219ebc", lineWidthPx: 2 },
+    }}
+    layer={1}
+/>;
+
+{
+    /* Filled zone with a rounded outline and hit-test data */
+}
+<CanvasTileEngine.Path
+    items={{
+        points: zoneOutline,
+        closed: true,
+        style: { fillStyle: "#22c55e55", strokeStyle: "#166534", lineWidthPx: 2, cornerRadius: 0.5 },
+        data: { id: "zone-a" },
+    }}
+    layer={1}
+/>;
+
+{
+    /* Multiple items, each with its own style */
+}
+<CanvasTileEngine.Path
+    items={[
+        { points: routeA, style: { strokeStyle: "#219ebc", lineWidthPx: 2 } },
+        { points: routeB, style: { strokeStyle: "green", lineWidthPx: 1 } },
+    ]}
+    layer={1}
+/>;
+```
+
+Keep `items` referentially stable (`useMemo`/state) — a new array identity re-registers the draw callback. Appearance-only changes (selection, hover) belong in `styleOf`, which never re-registers.
+
+### `<GridLines>`
+
+Draw grid lines at specified intervals.
+
+`cellSize` must be a positive finite number; fractional intervals are supported. Invalid values throw a `RangeError` when the grid draw is registered. This also applies to React Native.
+
+When you zoom out far enough that lines would be less than 2px apart on screen, the grid draws only every 2nd, 4th, 8th, ... line, so the line count stays bounded and the remaining lines still sit on multiples of `cellSize`.
+
+| Prop          | Type     | Default      | Description                            |
+| :------------ | :------- | :----------- | :------------------------------------- |
+| `cellSize`    | `number` | **Required** | Size of each grid cell in world units. |
+| `lineWidth`   | `number` | `1`          | Width of grid lines in pixels.         |
+| `strokeStyle` | `string` | `"black"`    | Color of the grid lines.               |
+| `layer`       | `number` | `0`          | Rendering layer.                       |
+
+```tsx
+{/* Basic grid */}
+<CanvasTileEngine.GridLines cellSize={1} />
+
+{/* Styled grid */}
+<CanvasTileEngine.GridLines
+    cellSize={5}
+    lineWidth={2}
+    strokeStyle="rgba(255, 255, 255, 0.3)"
+    layer={0}
+/>
+
+{/* Multiple grid scales */}
+<CanvasTileEngine.GridLines cellSize={1} lineWidth={0.5} strokeStyle="rgba(0,0,0,0.1)" layer={0} />
+<CanvasTileEngine.GridLines cellSize={5} lineWidth={1} strokeStyle="rgba(0,0,0,0.3)" layer={0} />
+<CanvasTileEngine.GridLines cellSize={50} lineWidth={2} strokeStyle="rgba(0,0,0,0.5)" layer={0} />
+```
+
+## Text & Images
+
+### `<Text>`
+
+Render text at world coordinates. Text size scales with zoom.
+
+| Prop      | Type                           | Default      | Description                                                                                          |
+| :-------- | :----------------------------- | :----------- | :--------------------------------------------------------------------------------------------------- |
+| `items`   | `Text \| Text[]`               | **Required** | Text definitions.                                                                                    |
+| `layer`   | `number`                       | `2`          | Rendering layer.                                                                                     |
+| `styleOf` | `(item) => style \| undefined` | -            | Paint-time decoration for selection/hover; see [Styling by State](#styling-by-state-styleof). |
+| `visibleOf` | `(item) => boolean \| undefined` | -          | Per-item show/hide: `false` skips the item for the frame (text never hit-tests, so there is no `interactiveOf`). |
+
+**Text Properties:**
+
+| Property | Type     | Default                            | Description                                                                   |
+| :------- | :------- | :--------------------------------- | :---------------------------------------------------------------------------- |
+| `x`, `y` | `number` | **Required**                       | World coordinates.                                                            |
+| `text`   | `string` | **Required**                       | The text content.                                                             |
+| `size`   | `number` | `1`                                | Font size in world units (scales with zoom). Ignored when `fontPx` is set.    |
+| `fontPx` | `number` | -                                  | Fixed font size in pixels, independent of zoom. Takes precedence over `size`. |
+| `style`  | `object` | -                                  | Font styling options.                                                         |
+| `rotate` | `number` | `0`                                | Rotation angle in degrees (clockwise).                                        |
+
+**Style Options:**
+
+- `fillStyle`: Text color (default: black, `"#000000"`, resolved separately for every item after `styleOf`)
+- `fontFamily`: Font family (default: `"sans-serif"`)
+- `fontWeight`: `"normal"`, `"bold"`, or `100`-`900` (default: the family's normal weight)
+- `textAlign`: `"left"`, `"center"`, `"right"`
+- `textBaseline`: `"top"`, `"middle"`, `"bottom"`
+
+```tsx
+{
+    /* Single text */
+}
+<CanvasTileEngine.Text
+    items={{
+        x: 5,
+        y: 5,
+        text: "Base Camp",
+        size: 1,
+        style: { fillStyle: "white", fontFamily: "Arial" },
+    }}
+    layer={3}
+/>;
+
+{
+    /* Rotated text (45 degrees) */
+}
+<CanvasTileEngine.Text
+    items={{
+        x: 8,
+        y: 5,
+        text: "Rotated",
+        size: 1,
+        rotate: 45,
+        style: { fillStyle: "yellow" },
+    }}
+    layer={3}
+/>;
+
+{
+    /* Fixed-size label: always 14px on screen, regardless of zoom */
+}
+<CanvasTileEngine.Text
+    items={{
+        x: 5,
+        y: 3,
+        text: "Ankara",
+        fontPx: 14,
+        style: { fillStyle: "white" },
+    }}
+    layer={3}
+/>;
+
+{
+    /* Multiple texts (batch rendering) */
+}
+<CanvasTileEngine.Text
+    items={[
+        { x: 0, y: 0, text: "A", size: 2, style: { fillStyle: "red" } },
+        { x: 1, y: 0, text: "B", size: 2, style: { fillStyle: "blue" } },
+        { x: 2, y: 0, text: "C", size: 2, style: { fillStyle: "green" } },
+    ]}
+    layer={3}
+/>;
+```
+
+:::tip Two sizing modes
+`size` works like other draw components - it's in world units, so `size: 1` text has a font em box of one tile and scales with zoom. Use `fontPx` instead for labels that must stay readable at any zoom level (map labels, names): the text keeps the same pixel size on screen no matter how far you zoom out.
+:::
+
+### `<Image>`
+
+Draw images scaled to world units.
+
+| Prop    | Type                       | Default      | Description        |
+| :------ | :------------------------- | :----------- | :----------------- |
+| `items` | `ImageItem \| ImageItem[]` | **Required** | Image definitions. |
+| `layer` | `number`                   | `1`          | Rendering layer.   |
+| `visibleOf` | `(item) => boolean \| undefined` | -    | Per-item show/hide: `false` skips the item (not painted, not hit-testable) — marker category filters without a new `items` array. |
+| `interactiveOf` | `(item) => boolean \| undefined` | - | Per-item hit-test opt-out: `false` keeps the item painted but transparent to hit queries. |
+
+There is no `styleOf` — images carry no `style`; appearance changes go through item fields like `opacity`, which renderers read live at paint time.
+
+**ImageItem Properties:**
+
+| Property  | Type               | Description                                                                                                        |
+| :-------- | :----------------- | :----------------------------------------------------------------------------------------------------------------- |
+| `img`     | `HTMLImageElement` | The loaded image object.                                                                                           |
+| `x`, `y`  | `number`           | World coordinates.                                                                                                 |
+| `size`    | `number`           | Size in grid units (maintains aspect ratio).                                                                       |
+| `sizePx`  | `number`           | Fixed size in screen pixels, independent of zoom — marker-style images. Wins over `size`. Ignored by `StaticImage`. |
+| `flipX`   | `boolean`          | Mirror horizontally (a true mirror — no rotation can produce it). Combines with `rotate` and `sprite`.              |
+| `flipY`   | `boolean`          | Mirror vertically.                                                                                                  |
+| `rotate`  | `number`           | Rotation angle in degrees (0 = no rotation, positive = clockwise).                                                 |
+| `sprite`  | `SpriteRect`       | Source rectangle in sheet pixels — draws a sub-region of `img`. For animation, use [`<Sprite>`](./spritesheet.md). |
+| `opacity` | `number`           | Opacity from 0 (transparent) to 1 (opaque). Default `1`. Ideal for ghost/preview placements.                       |
+| `data`    | `TData`            | Arbitrary app data. Never read by the engine; returned on `hitTest` results as `hit.item.data`.                    |
+
+```tsx
+function MapWithImages() {
+    const engine = useCanvasTileEngine();
+    const [treeImg, setTreeImg] = useState<HTMLImageElement | null>(null);
+
+    useEffect(() => {
+        if (engine.isReady && engine.images) {
+            engine.images.load("/assets/tree.png").then(setTreeImg);
+        }
+    }, [engine.isReady, engine.images]);
+
+    return (
+        <CanvasTileEngine
+            engine={engine}
+            config={config}
+            renderer={new RendererCanvas()}
+        >
+            {/* Single image */}
+            {treeImg && (
+                <CanvasTileEngine.Image
+                    items={{ x: 2, y: 3, size: 1.5, img: treeImg }}
+                    layer={2}
+                />
+            )}
+
+            {/* Multiple images (batch rendering) */}
+            {treeImg && (
+                <CanvasTileEngine.Image
+                    items={[
+                        { x: 5, y: 3, size: 1.5, img: treeImg },
+                        { x: 7, y: 3, size: 1.5, img: treeImg, rotate: 45 },
+                        { x: 9, y: 3, size: 2, img: treeImg },
+                    ]}
+                    layer={2}
+                />
+            )}
+        </CanvasTileEngine>
+    );
+}
+```
+
+### Clipping a Registration
+
+Every draw component takes a `clip` prop: a world rectangle the registration is confined to. Nothing it draws paints outside, and nothing outside it hit-tests.
+
+```tsx
+const plotArea = { minX: -0.5, maxX: 40, minY: -0.5, maxY: 20 };
+
+<CanvasTileEngine.Rect items={bars} layer={1} clip={plotArea} />
+<CanvasTileEngine.Line items={series} layer={1} clip={plotArea} />;
+```
+
+The `clip` prop is compared by value, so an inline object literal does not re-register the draw call on every render (unlike `items`, which is compared by reference).
+
+The rectangle is world (item) space — the same coordinates `fitBounds` and `hitTestRect` take — so it pans and zooms with the rest of the scene. That is what a chart's plot area wants: axes and labels drawn outside the clip stay put relative to the data, and panning cannot smear the series over them.
+
+| | |
+| :-- | :-- |
+| Applies to | Every draw kind, including grid lines, the `Static*` components and `DrawFunction`. |
+| Hit testing | Follows the clip. A point outside it cannot hit, and a marquee is narrowed to the overlap, so a selection half inside the clip cannot reach what is cut away. `padding` does not widen a clip — it grows an item's own tap target, and a target that is not drawn has nothing to grow. |
+| Shape | Axis-aligned rectangles only. An arbitrary shape would need the stencil buffer on WebGL, where path fills already live. |
+
+## Advanced
+
+### `<DrawFunction>`
+
+For maximum flexibility, use a custom draw function with direct rendering context access.
+
+| Prop       | Type                                       | Default      | Description      |
+| :--------- | :----------------------------------------- | :----------- | :--------------- |
+| `children` | `(ctx, coords, config, transform) => void` | **Required** | Draw function.   |
+| `layer`    | `number`                                   | `1`          | Rendering layer. |
+
+```tsx
+<CanvasTileEngine.DrawFunction layer={4}>
+    {(ctx, coords, config, transform) => {
+        // ctx = Rendering context (type depends on renderer)
+        // coords = Top-left world coordinate of the view
+        // config = Current engine configuration
+        // transform = { worldToScreen, screenToWorld } coordinate helpers
+
+        // Cast to the appropriate context type for your renderer
+        const context = ctx as CanvasRenderingContext2D;
+
+        // Draw at a world position without doing the pixel math yourself:
+        const p = transform.worldToScreen(5, 3); // pixel at the center of cell (5, 3)
+        context.fillStyle = "purple";
+        context.fillRect(p.x - 5, p.y - 5, 10, 10);
+    }}
+</CanvasTileEngine.DrawFunction>
+```
+
+:::tip Rule of thumb
+Everything you pass to `ctx` is pixels. `worldToScreen` is for drawing (world in, pixels out); `screenToWorld` is for querying (pixels in, world out — feed it to `Math.floor` or `hitTest`, never back into `ctx`).
+:::
+
+### `onDraw` Callback
+
+The `onDraw` prop runs after all layers are drawn but before debug overlays.
+
+```tsx
+<CanvasTileEngine
+    engine={engine}
+    config={config}
+    renderer={new RendererCanvas()}
+    onDraw={(ctx, coords, config, transform) => {
+        // Same signature as DrawFunction children:
+        // coords = top-left world coordinate, config = live engine config,
+        // transform = { worldToScreen, screenToWorld } helpers
+
+        // Cast to the appropriate context type for your renderer
+        const context = ctx as CanvasRenderingContext2D;
+
+        context.strokeStyle = "red";
+        context.lineWidth = 5;
+        context.strokeRect(0, 0, config.size.width, config.size.height);
+    }}
+>
+    {/* children */}
+</CanvasTileEngine>
+```
+
+## Static Caching (Pre-rendered Content)
+
+For large static datasets (e.g., mini-maps with 100k+ items), use static components that cache content to an offscreen canvas.
+
+### When to Use Static Caching
+
+| Scenario                       | Use Static? | Why                                      |
+| :----------------------------- | :---------- | :--------------------------------------- |
+| Mini-map with 100k items       | ✅ Yes      | All items visible, static content        |
+| Main map with 100k items       | ❌ No       | Only viewport visible, culling is enough |
+| Overview map (fixed zoom)      | ✅ Yes      | Static zoom, all items visible           |
+| Dynamic content (units moving) | ❌ No       | Content changes frequently               |
+
+### `<StaticRect>`
+
+Pre-renders rectangles to an offscreen canvas. Supports `rotate` and `radius` properties.
+
+| Prop       | Type           | Default      | Description            |
+| :--------- | :------------- | :----------- | :--------------------- |
+| `items`    | `DrawObject[]` | **Required** | Rectangle definitions. |
+| `cacheKey` | `string`       | **Required** | Unique cache key.      |
+| `layer`    | `number`       | `1`          | Rendering layer.       |
+
+```tsx
+const miniMapItems = useMemo(
+    () =>
+        items.map((item) => ({
+            x: item.x,
+            y: item.y,
+            size: 0.9,
+            style: { fillStyle: item.color },
+            rotate: item.rotation,
+            radius: 0.1,
+        })),
+    [items],
+);
+
+<CanvasTileEngine.StaticRect
+    items={miniMapItems}
+    cacheKey="minimap-items"
+    layer={1}
+/>;
+```
+
+### `<StaticCircle>`
+
+Pre-renders circles to an offscreen canvas.
+
+```tsx
+<CanvasTileEngine.StaticCircle
+    items={markers}
+    cacheKey="minimap-markers"
+    layer={2}
+/>
+```
+
+### `<StaticImage>`
+
+Pre-renders images to an offscreen canvas. Supports `rotate` property.
+
+```tsx
+<CanvasTileEngine.StaticImage
+    items={terrainTiles}
+    cacheKey="terrain-cache"
+    layer={0}
+/>
+```
+
+:::tip Automatic Cache Management
+Static components automatically:
+
+- Clear the cache when `cacheKey` changes
+- Clean up the cache on unmount
+- Rebuild when `items` change
+  :::
+
+:::warning Memory Usage
+Each static cache creates an offscreen canvas sized to fit all items. Use static caching only when the performance benefit justifies the memory cost.
+:::
+
+## Styling by State (`styleOf`)
+
+Selection, hover, and highlight state should not go through `items`. Deriving a styled copy of the array on every state change gives each change a new array identity, which re-registers the draw callback and rebuilds the spatial index — for items whose geometry never moved. At 50k+ items that is real per-click cost.
+
+The `styleOf` prop moves that styling to paint time. It runs per item on every frame; the returned fields overlay the item's own `style` (`undefined` leaves the item as-is):
+
+```tsx
+function SeatMap({ seats }) {
+    const engine = useCanvasTileEngine();
+    const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
+
+    // Geometry only — does not depend on selection, so it never re-registers.
+    const seatRects = useMemo(
+        () =>
+            seats.map((s) => ({
+                x: s.x,
+                y: s.y,
+                size: 0.9,
+                style: { fillStyle: "green" },
+                data: { id: s.id },
+            })),
+        [seats],
+    );
+
+    return (
+        <CanvasTileEngine
+            engine={engine}
+            config={config}
+            renderer={new RendererCanvas()}
+            onClick={(coords) => {
+                const hit = engine.hitTestFirst<{ id: string }>(coords.raw);
+                if (hit) setSelected((prev) => toggle(prev, hit.item.data.id));
+            }}
+        >
+            <CanvasTileEngine.GridLines cellSize={1} />
+            <CanvasTileEngine.Rect
+                items={seatRects}
+                layer={1}
+                styleOf={(seat) => (selected.has(seat.data.id) ? { fillStyle: "blue" } : undefined)}
+            />
+        </CanvasTileEngine>
+    );
+}
+```
+
+`styleOf` is read through a ref inside the component, so — unlike `items` — its identity may change on every render at no cost. An inline arrow is fine; no `useCallback` needed. When the closure captures new state (the updated `selected` set), the component just repaints.
+
+The two props now split cleanly:
+
+- `items` changed → geometry changed → re-register (keep it stable with `useMemo`/state).
+- `styleOf` changed → appearance changed → repaint only, zero rebuild.
+
+What a decoration may change differs by primitive. Each rule is right for its own hit-test geometry, but the differences are easy to miss if you assume "it's all `styleOf`, it all behaves the same":
+
+| Primitive     | May change                                       | May not change                                       | Per-item width/geometry instead |
+| :------------ | :----------------------------------------------- | :--------------------------------------------------- | :------------------------------ |
+| Rect / Circle | full style, `lineWidth`/`lineWidthPx` included   | -                                                    | already allowed here            |
+| Text          | full text style                                  | -                                                    | -                               |
+| Line          | `strokeStyle`, `lineDash`/`lineDashPx`           | `lineWidth`/`lineWidthPx`                            | re-register with the new width  |
+| Path          | `strokeStyle`, dash, `fillStyle` (see below)     | `lineWidth`/`lineWidthPx`, `cornerRadius`/`cornerRadiusPx` | re-register with the new values |
+
+Why the split: a rect/circle border never feeds hit-test geometry (the hit area is the box/disc), so decorating its width is safe. A line/path hit corridor derives from the stroke width — and a path outline from its corner radius — resolved at registration time, so a paint-time change would silently desync what you see from what you can click. Path quirk from the same family: decorating an unfilled path with `fillStyle` paints the fill, but hit testing stays on the stroke.
+
+Static components (`<StaticRect>` etc.) do not take `styleOf`: their cache replays a recorded image, so per-frame decoration cannot apply.
+
+## Visibility and Interactivity by State (`visibleOf` / `interactiveOf`)
+
+The same live-read model extends to visibility and hit testing. Both props are read through refs like `styleOf` — inline arrows are fine, identity changes never re-register:
+
+- `visibleOf`: return `false` to skip an item for the frame. It is neither painted nor hit-testable, and hit queries fall through to whatever is underneath. Use it for category filters and toggles instead of deriving a filtered `items` array (which would re-register and rebuild the spatial index).
+- `interactiveOf`: return `false` to keep an item painted but out of `hitTest`/`hitTestFirst`/`hitTestRect` — the per-item version of `hitTest={false}`, for decorative items mixed into an interactive set or disabled entries that should stop reacting without disappearing. Not on `<Text>` (text never hit-tests).
+
+```tsx
+const [hiddenCategories, setHiddenCategories] = useState<ReadonlySet<string>>(new Set());
+const [disabled, setDisabled] = useState<ReadonlySet<string>>(new Set());
+
+<CanvasTileEngine.Rect
+    items={markers}
+    layer={1}
+    visibleOf={(m) => !hiddenCategories.has(m.data.category)}
+    interactiveOf={(m) => !disabled.has(m.data.id)}
+    styleOf={(m) => (disabled.has(m.data.id) ? { fillStyle: "#9ca3af" } : undefined)}
+/>;
+```
+
+They compose with a simple rule: `visibleOf: false` wins — a hidden item never hit-tests, regardless of `interactiveOf`. Static components take neither prop, for the same reason they don't take `styleOf`.
+
+## Dynamic Content
+
+When geometry actually changes (items added, removed, or moved), React's declarative nature handles it: give `items` a new identity and the component re-registers the draw callback.
+
+:::tip Performance
+
+- Use `useMemo` for computed items arrays to avoid unnecessary re-renders
+- Route selection/hover styling through `styleOf` — and show/hide through `visibleOf` — not through derived `items` arrays
+- For truly static content, use `<StaticRect>`, `<StaticCircle>`, or `<StaticImage>`
+- The engine automatically batches renders when multiple components update in the same frame
+  :::

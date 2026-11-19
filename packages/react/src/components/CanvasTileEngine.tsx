@@ -1,0 +1,208 @@
+import { useEffect, useRef, useCallback, useMemo, useState } from "react";
+import { CanvasTileEngine as CanvasTileEngineCore } from "@canvas-tile-engine/core";
+import { EngineContext, type EngineContextValue } from "../context";
+import type { CanvasTileEngineProps } from "../types";
+
+// Import draw components for compound pattern
+import {
+    Rect,
+    Circle,
+    Image,
+    Sprite,
+    GridLines,
+    Line,
+    Text,
+    Path,
+    StaticRect,
+    StaticCircle,
+    StaticImage,
+    DrawFunction,
+} from "./draw";
+
+/**
+ * React component that renders a CanvasTileEngine.
+ * Supports both imperative API (via engine handle) and declarative API (via children).
+ *
+ * @example Declarative API with compound components
+ * ```tsx
+ * function App() {
+ *   const engine = useCanvasTileEngine();
+ *
+ *   return (
+ *     <CanvasTileEngine engine={engine} config={config} renderer={renderer}>
+ *       <CanvasTileEngine.GridLines cellSize={50} layer={0} />
+ *       <CanvasTileEngine.Image items={imageItems} layer={1} />
+ *       <CanvasTileEngine.Circle items={markers} layer={2} />
+ *     </CanvasTileEngine>
+ *   );
+ * }
+ * ```
+ *
+ * @example Imperative API
+ * ```tsx
+ * function App() {
+ *   const engine = useCanvasTileEngine();
+ *
+ *   // Keyed on engine.instance so it also re-runs on the new engine after a `key` remount.
+ *   // It can run twice as the engine attaches, so the draw must be idempotent: the id replaces.
+ *   useEffect(() => {
+ *     if (!engine.instance) return;
+ *     engine.drawGridLines(50, 1, "#ccc", 0, { id: "grid" });
+ *     engine.render();
+ *   }, [engine, engine.instance]);
+ *
+ *   return <CanvasTileEngine engine={engine} config={config} renderer={renderer} />;
+ * }
+ * ```
+ */
+function CanvasTileEngineBase({
+    engine,
+    renderer,
+    config,
+    center = { x: 0, y: 0 },
+    className,
+    style,
+    children,
+    onCoordsChange,
+    onClick,
+    onRightClick,
+    onHover,
+    onMouseDown,
+    onMouseUp,
+    onMouseLeave,
+    onDraw,
+    onResize,
+    onZoom,
+    onWheel,
+}: CanvasTileEngineProps) {
+    // Children mount gate. This must be component-local state, not
+    // `engine.isReady`: the handle outlives this component, so during a
+    // key-driven remount `isReady` still reflects the previous engine and
+    // children would mount in the first render — their draw effects then run
+    // before this component's mount effect creates the new engine (child
+    // effects fire first) and silently register nothing. Local state starts
+    // false on every mount, so children always mount after their own engine
+    // is attached.
+    const [ready, setReady] = useState(false);
+
+    // Stable callback refs
+    const callbacksRef = useRef({
+        onCoordsChange,
+        onClick,
+        onRightClick,
+        onHover,
+        onMouseDown,
+        onMouseUp,
+        onMouseLeave,
+        onDraw,
+        onResize,
+        onZoom,
+        onWheel,
+    });
+
+    // Update callback refs
+    useEffect(() => {
+        callbacksRef.current = {
+            onCoordsChange,
+            onClick,
+            onRightClick,
+            onHover,
+            onMouseDown,
+            onMouseUp,
+            onMouseLeave,
+            onDraw,
+            onResize,
+            onZoom,
+            onWheel,
+        };
+    });
+
+    // Share the core scheduler with collection updates so a child repaint and
+    // an imperative item change in the same frame produce only one render.
+    // The engine owns cancellation when this component unmounts.
+    const requestRender = useCallback(() => {
+        engine.requestRender();
+    }, [engine]);
+
+    // Context value
+    const contextValue = useMemo<EngineContextValue>(
+        () => ({
+            engine,
+            requestRender,
+        }),
+        [engine, requestRender],
+    );
+
+    // Initialize engine when component mounts
+    // Note: config and center are intentionally not in deps - we only want to create the engine once
+    // Callbacks are accessed via callbacksRef which is always up-to-date
+    useEffect(() => {
+        const container = engine._containerRef.current;
+
+        if (!container) {
+            return;
+        }
+
+        // Create engine instance
+        const instance = new CanvasTileEngineCore(container, config, renderer, center);
+
+        // Set up callbacks using stable refs
+        instance.onCoordsChange = (coords) => callbacksRef.current.onCoordsChange?.(coords);
+        instance.onClick = (...args) => callbacksRef.current.onClick?.(...args);
+        instance.onRightClick = (...args) => callbacksRef.current.onRightClick?.(...args);
+        instance.onHover = (...args) => callbacksRef.current.onHover?.(...args);
+        instance.onMouseDown = (...args) => callbacksRef.current.onMouseDown?.(...args);
+        instance.onMouseUp = (...args) => callbacksRef.current.onMouseUp?.(...args);
+        instance.onMouseLeave = (...args) => callbacksRef.current.onMouseLeave?.(...args);
+        instance.onDraw = (...args) => callbacksRef.current.onDraw?.(...args);
+        instance.onResize = () => callbacksRef.current.onResize?.();
+        instance.onZoom = (scale) => callbacksRef.current.onZoom?.(scale);
+        instance.onWheel = (...args) => callbacksRef.current.onWheel?.(...args);
+
+        // Attach to handle, then open the children gate
+        engine._setInstance(instance);
+        setReady(true);
+
+        // Initial render
+        instance.render();
+
+        // Cleanup on unmount
+        return () => {
+            instance.destroy();
+            engine._setInstance(null);
+        };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [engine]);
+
+    return (
+        <EngineContext.Provider value={contextValue}>
+            <div
+                ref={engine._containerRef}
+                className={className}
+                style={{
+                    ...style,
+                }}
+            >
+                <canvas />
+            </div>
+            {/* Render children only after this component's engine exists */}
+            {ready && children}
+        </EngineContext.Provider>
+    );
+}
+
+// Compound component pattern - attach draw components as static properties
+export const CanvasTileEngine = Object.assign(CanvasTileEngineBase, {
+    Rect,
+    Circle,
+    Image,
+    Sprite,
+    GridLines,
+    Line,
+    Text,
+    Path,
+    StaticRect,
+    StaticCircle,
+    StaticImage,
+    DrawFunction,
+});

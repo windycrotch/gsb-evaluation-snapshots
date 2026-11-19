@@ -1,0 +1,60 @@
+{
+    "$schema": "https://turborepo.dev/schema.json",
+    "futureFlags": {
+        "affectedUsingTaskInputs": true
+    },
+    "tasks": {
+        "build": {
+            "dependsOn": ["^build"],
+            "outputs": ["dist/**", "build/**"]
+        },
+        "typecheck": {
+            "dependsOn": ["^build"]
+        },
+        "@canvas-tile-engine/react#typecheck": {
+            "dependsOn": ["^build", "build"]
+        },
+        "@canvas-tile-engine/react-native#typecheck": {
+            "dependsOn": ["^build", "build"]
+        },
+        "test": {
+            "dependsOn": ["^build"]
+        },
+        "@canvas-tile-engine/renderer-server#test:package": {
+            "dependsOn": ["build"],
+            "cache": false
+        },
+        "test:platform-types": {
+            "dependsOn": [
+                "build",
+                "@canvas-tile-engine/renderer-server#build",
+                "@canvas-tile-engine/renderer-canvas#build",
+                "@canvas-tile-engine/renderer-webgl#build"
+            ],
+            "cache": false,
+            "passThroughEnv": ["CTE_TYPE_TEST_ARTIFACTS"]
+        },
+        "test:watch": {
+            "dependsOn": ["^build"],
+            "persistent": true,
+            "cache": false
+        },
+        "test:coverage": {
+            "dependsOn": ["^build"],
+            "outputs": ["coverage/**"]
+        },
+        "lint": {
+            "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/.oxlintrc.json"]
+        },
+        "format": {
+            "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/.oxfmtrc.json"]
+        },
+        "format:check": {
+            "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/.oxfmtrc.json"]
+        },
+        "dev": {
+            "persistent": true,
+            "cache": false
+        }
+    }
+}

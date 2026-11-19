@@ -1,0 +1,600 @@
+import {
+    AnimationController,
+    Config,
+    CoordinateTransformer,
+    Coords,
+    GestureProcessor,
+    ICamera,
+    IDrawAPI,
+    IImageLoader,
+    IRenderer,
+    NormalizedPointer,
+    onClickCallback,
+    onDrawCallback,
+    onHoverCallback,
+    onMouseDownCallback,
+    onMouseLeaveCallback,
+    onMouseUpCallback,
+    onRightClickCallback,
+    onWheelCallback,
+    onZoomCallback,
+    RendererDependencies,
+    ViewportState,
+    DrawTransform,
+} from "@canvas-tile-engine/core";
+import {
+    canvas2dClipAdapter,
+    CoordinateOverlayRenderer,
+    DebugOverlay,
+} from "@canvas-tile-engine/renderer-shared/canvas2d";
+import { DrawContext, Layer } from "@canvas-tile-engine/renderer-shared/scene";
+import {
+    EventBinder,
+    ImageLoader,
+    ResizeWatcher,
+    ResponsiveWatcher,
+    ReducedMotionWatcher,
+    A11yAttributes,
+    SizeController,
+    createKeyDownHandler,
+    initStyles,
+} from "@canvas-tile-engine/renderer-shared/dom";
+import { BrowserCanvasDraw, BrowserContext2D, createBrowserCanvasDraw } from "./modules/createCanvasDraw";
+
+// crossOrigin is spelled out below rather than imported from renderer-shared:
+// that package is private, so a type reference to it would land in the
+// published d.ts and resolve to nothing for consumers.
+export interface RendererCanvasOptions {
+    /**
+     * `crossOrigin` attribute used for images loaded through `engine.images`.
+     * Default `"anonymous"`.
+     *
+     * The attribute makes every image request a CORS request, so images served
+     * without an `Access-Control-Allow-Origin` header — a plain bucket, a CDN,
+     * a third-party tile server — fail to load entirely. Pass `null` to request
+     * them as ordinary images instead; they then load fine and merely taint the
+     * canvas, which this renderer never reads back from.
+     *
+     * Use `"use-credentials"` for CORS requests that must carry cookies.
+     */
+    crossOrigin?: "anonymous" | "use-credentials" | null;
+}
+
+export class RendererCanvas implements IRenderer {
+    /** Transform helpers handed to the onDraw hook. */
+    private drawTransform: DrawTransform = {
+        worldToScreen: (x, y) => this.transformer.worldToScreen(x, y),
+        screenToWorld: (x, y) => this.transformer.screenToWorld(x, y),
+    };
+    //
+    private canvasWrapper!: HTMLDivElement;
+    private canvas!: HTMLCanvasElement;
+    private canvasContext!: CanvasRenderingContext2D;
+    private camera!: ICamera;
+    private config!: Config;
+    private viewport!: ViewportState;
+    private layers!: Layer<DrawContext<BrowserContext2D>>;
+    private drawAPI!: BrowserCanvasDraw;
+    private transformer!: CoordinateTransformer;
+    private coordinateOverlayRenderer!: CoordinateOverlayRenderer<CanvasRenderingContext2D>;
+    private debugOverlay?: DebugOverlay<CanvasRenderingContext2D>;
+
+    // Event handling
+    private gestureProcessor!: GestureProcessor;
+    private eventBinder!: EventBinder;
+    private resizeWatcher?: ResizeWatcher;
+    private responsiveWatcher?: ResponsiveWatcher;
+    private reducedMotionWatcher?: ReducedMotionWatcher;
+    private a11yAttributes?: A11yAttributes;
+    private unsubscribeA11y?: () => void;
+    private eventsAttached = false;
+
+    // Size control
+    private sizeController!: SizeController;
+    private animationController!: AnimationController;
+
+    // Image loading
+    private imageLoader: ImageLoader;
+
+    /** Optional user-provided draw hook executed after engine layers. */
+    public onDraw?: onDrawCallback;
+
+    /** Optional callback fired when canvas is resized. */
+    public onResize?: () => void;
+
+    /**
+     * @param options See {@link RendererCanvasOptions}.
+     */
+    constructor(options: RendererCanvasOptions = {}) {
+        this.imageLoader = new ImageLoader({ crossOrigin: options.crossOrigin });
+    }
+
+    // ─── Callback Getters/Setters (proxy to GestureProcessor) ───
+
+    get onClick(): onClickCallback | undefined {
+        return this.gestureProcessor?.onClick;
+    }
+    set onClick(cb: onClickCallback | undefined) {
+        if (this.gestureProcessor) {
+            this.gestureProcessor.onClick = cb;
+        }
+    }
+
+    get onRightClick(): onRightClickCallback | undefined {
+        return this.gestureProcessor?.onRightClick;
+    }
+    set onRightClick(cb: onRightClickCallback | undefined) {
+        if (this.gestureProcessor) {
+            this.gestureProcessor.onRightClick = cb;
+        }
+    }
+
+    get onHover(): onHoverCallback | undefined {
+        return this.gestureProcessor?.onHover;
+    }
+    set onHover(cb: onHoverCallback | undefined) {
+        if (this.gestureProcessor) {
+            this.gestureProcessor.onHover = cb;
+        }
+    }
+
+    get onMouseDown(): onMouseDownCallback | undefined {
+        return this.gestureProcessor?.onMouseDown;
+    }
+    set onMouseDown(cb: onMouseDownCallback | undefined) {
+        if (this.gestureProcessor) {
+            this.gestureProcessor.onMouseDown = cb;
+        }
+    }
+
+    get onMouseUp(): onMouseUpCallback | undefined {
+        return this.gestureProcessor?.onMouseUp;
+    }
+    set onMouseUp(cb: onMouseUpCallback | undefined) {
+        if (this.gestureProcessor) {
+            this.gestureProcessor.onMouseUp = cb;
+        }
+    }
+
+    get onMouseLeave(): onMouseLeaveCallback | undefined {
+        return this.gestureProcessor?.onMouseLeave;
+    }
+    set onMouseLeave(cb: onMouseLeaveCallback | undefined) {
+        if (this.gestureProcessor) {
+            this.gestureProcessor.onMouseLeave = cb;
+        }
+    }
+
+    get onZoom(): onZoomCallback | undefined {
+        return this.gestureProcessor?.onZoom;
+    }
+    set onZoom(cb: onZoomCallback | undefined) {
+        if (this.gestureProcessor) {
+            this.gestureProcessor.onZoom = cb;
+        }
+    }
+
+    get onWheel(): onWheelCallback | undefined {
+        return this.gestureProcessor?.onWheel;
+    }
+    set onWheel(cb: onWheelCallback | undefined) {
+        if (this.gestureProcessor) {
+            this.gestureProcessor.onWheel = cb;
+        }
+    }
+
+    /** Callback fired when camera position changes (drag/zoom). */
+    public onCameraChange?: () => void;
+
+    init(deps: RendererDependencies) {
+        this.config = deps.config;
+        // Initialize canvas
+        this.canvasWrapper = deps.wrapper;
+        this.canvas = this.canvasWrapper.querySelector("canvas") as HTMLCanvasElement;
+        if (!this.canvas) {
+            throw new Error("Canvas element not found in wrapper");
+        }
+
+        initStyles(
+            this.canvasWrapper,
+            this.canvas,
+            this.config.get().responsive,
+            this.config.get().size.width,
+            this.config.get().size.height,
+        );
+
+        const canvasContext = this.canvas.getContext("2d");
+        if (!canvasContext) {
+            throw new Error("Failed to get 2D canvas context");
+        }
+        this.canvasContext = canvasContext;
+
+        this.transformer = deps.transformer;
+        this.viewport = deps.viewport;
+        this.camera = deps.camera;
+        this.layers = new Layer(canvas2dClipAdapter<BrowserContext2D>());
+        // Static caches render at the same DPR the visible canvas is backed at.
+        this.drawAPI = createBrowserCanvasDraw(this.layers, deps.transformer, deps.camera, () => this.viewport.dpr);
+
+        this.applyCanvasSize();
+
+        this.coordinateOverlayRenderer = new CoordinateOverlayRenderer(
+            this.canvasContext,
+            this.camera,
+            this.config,
+            this.viewport,
+        );
+
+        if (this.config.get().debug?.enabled) {
+            this.debugOverlay = new DebugOverlay(this.canvasContext, this.camera, this.config, this.viewport);
+            // Start FPS loop if fps hud is enabled
+            if (this.config.get().debug?.hud?.fps) {
+                this.debugOverlay.setFpsUpdateCallback(() => this.render());
+                this.debugOverlay.startFpsLoop();
+            }
+        }
+
+        // Initialize GestureProcessor
+        this.gestureProcessor = new GestureProcessor(
+            this.camera,
+            this.config,
+            this.transformer,
+            () => this.canvas.getBoundingClientRect(),
+            () => {
+                this.onCameraChange?.();
+            },
+        );
+
+        // Initialize EventBinder with normalized handlers
+        this.eventBinder = new EventBinder(
+            this.canvas,
+            {
+                click: this.handleClick,
+                contextmenu: this.handleContextMenu,
+                mousedown: this.handleMouseDown,
+                mousemove: this.handleMouseMove,
+                mouseup: this.handleMouseUp,
+                mouseleave: this.handleMouseLeave,
+                wheel: this.handleWheel,
+                touchstart: this.handleTouchStart,
+                touchmove: this.handleTouchMove,
+                touchend: this.handleTouchEnd,
+                cancel: this.handleCancel,
+                keydown: createKeyDownHandler(this.gestureProcessor),
+            },
+            // keydown binds to the wrapper: it is what carries tabindex, and a key
+            // event only fires on the focused element.
+            this.canvasWrapper,
+        );
+
+        // Initialize AnimationController and SizeController
+        this.animationController = new AnimationController(
+            this.camera,
+            this.viewport,
+            () => this.render(),
+            this.config,
+        );
+        this.sizeController = new SizeController(
+            this.canvasWrapper,
+            [this.canvas],
+            this.camera,
+            this.viewport,
+            this.config,
+            () => this.render(),
+        );
+    }
+
+    // ─── Event Setup ───
+
+    setupEvents(): void {
+        if (this.eventsAttached) {
+            return;
+        }
+        this.eventBinder.attach();
+        this.eventsAttached = true;
+
+        // Unconditional: reduced motion is an accessibility preference,
+        // not one of the opt-in eventHandlers.
+        this.reducedMotionWatcher = new ReducedMotionWatcher(this.config);
+        this.reducedMotionWatcher.start();
+
+        // The wrapper carries the accessible identity; the canvases are
+        // hidden from assistive technology. Re-applied on config change
+        // because these attributes are written once, unlike the config
+        // the draw pipeline re-reads every frame.
+        this.a11yAttributes = new A11yAttributes(this.canvasWrapper, [this.canvas]);
+        this.a11yAttributes.apply(this.config.get().accessibility);
+        this.unsubscribeA11y = this.config.onAccessibilityChange(() => {
+            this.a11yAttributes?.apply(this.config.get().accessibility);
+        });
+
+        // Setup responsive or resize watcher based on config
+        if (this.config.get().responsive) {
+            // Responsive mode - use ResponsiveWatcher
+            if (this.config.get().eventHandlers?.resize) {
+                console.warn(
+                    "Canvas Tile Engine: eventHandlers.resize is ignored when responsive mode is enabled. " +
+                        "Resizing is handled automatically.",
+                );
+            }
+            this.responsiveWatcher = new ResponsiveWatcher(
+                this.canvasWrapper,
+                [this.canvas],
+                this.camera,
+                this.viewport,
+                this.config,
+                () => this.render(),
+            );
+            this.responsiveWatcher.onResize = () => {
+                if (this.onResize) {
+                    this.onResize();
+                }
+            };
+            // preserve-viewport resizes change the camera scale; surface it
+            // through onZoom like every other engine-driven scale change
+            this.responsiveWatcher.onScaleChange = (scale) => {
+                this.onZoom?.(scale);
+            };
+            this.responsiveWatcher.start();
+        } else if (this.config.get().eventHandlers?.resize) {
+            // Non-responsive mode with resize enabled - use ResizeWatcher
+            this.resizeWatcher = new ResizeWatcher(
+                this.canvasWrapper,
+                [this.canvas],
+                this.viewport,
+                this.camera,
+                this.config,
+                () => this.render(),
+            );
+            this.resizeWatcher.onResize = () => {
+                if (this.onResize) {
+                    this.onResize();
+                }
+            };
+            this.resizeWatcher.start();
+        }
+    }
+
+    // ─── Normalize Helpers ───
+
+    private normalizePointer(e: MouseEvent | Touch): NormalizedPointer {
+        const rect = this.canvas.getBoundingClientRect();
+        return {
+            x: e.clientX - rect.left,
+            y: e.clientY - rect.top,
+            clientX: e.clientX,
+            clientY: e.clientY,
+        };
+    }
+
+    private normalizeTouches(touches: TouchList): NormalizedPointer[] {
+        return Array.from(touches).map((t) => this.normalizePointer(t));
+    }
+
+    // ─── Event Handlers (DOM → Normalize → GestureProcessor) ───
+
+    private handleClick = (e: MouseEvent): void => {
+        this.gestureProcessor.handleClick(this.normalizePointer(e));
+    };
+
+    private handleContextMenu = (e: MouseEvent): void => {
+        // Claim the event only when right-click handling is opted into;
+        // otherwise the browser context menu must keep working.
+        if (!this.config.get().eventHandlers.rightClick) {
+            return;
+        }
+        e.preventDefault();
+        this.gestureProcessor.handleRightClick(this.normalizePointer(e));
+    };
+
+    private handleMouseDown = (e: MouseEvent): void => {
+        // Primary button only: the right button belongs to the context-menu
+        // path (onRightClick) and the middle button to the browser
+        // (autoscroll) — neither should start a drag or fire onMouseDown.
+        if (e.button !== 0) {
+            return;
+        }
+        this.gestureProcessor.handlePointerDown(this.normalizePointer(e));
+    };
+
+    private handleMouseMove = (e: MouseEvent): boolean => {
+        if (e.currentTarget !== this.canvas && !this.gestureProcessor.dragging) {
+            return false;
+        }
+        this.gestureProcessor.handlePointerMove(this.normalizePointer(e));
+        return true;
+    };
+
+    private handleMouseUp = (e: MouseEvent): void => {
+        // Primary button only, so releasing a secondary button mid-drag
+        // does not end the primary-button drag or fire onMouseUp.
+        if (e.button !== 0) {
+            return;
+        }
+        this.gestureProcessor.handlePointerUp(this.normalizePointer(e));
+    };
+
+    private handleMouseLeave = (e: MouseEvent): void => {
+        this.gestureProcessor.handlePointerLeave(this.normalizePointer(e), true);
+    };
+
+    private handleCancel = (pointer?: MouseEvent | Touch): void => {
+        this.gestureProcessor.handleCancel(pointer ? this.normalizePointer(pointer) : undefined);
+    };
+
+    private handleWheel = (e: WheelEvent): void => {
+        // Without zoom opted in, the wheel must keep scrolling the page.
+        if (!this.config.get().eventHandlers.zoom) {
+            return;
+        }
+        e.preventDefault();
+        this.gestureProcessor.handleWheel(this.normalizePointer(e), e.deltaY);
+    };
+
+    // Touch events are claimed only while some touch-driven interaction is
+    // enabled (checked per event: setEventHandlers can toggle at runtime).
+    // While claimed, preventDefault stays unconditional: it stops page
+    // scrolling mid-gesture and suppresses the synthetic mouse events that
+    // would double-fire click/mouse callbacks. When nothing is enabled the
+    // events are left alone so the page scrolls, and taps still reach the
+    // mouse callbacks via the browser's synthetic mouse events.
+    private touchInteractionsEnabled(): boolean {
+        const eventHandlers = this.config.get().eventHandlers;
+        return Boolean(eventHandlers.click || eventHandlers.drag || eventHandlers.zoom || eventHandlers.hover);
+    }
+
+    private handleTouchStart = (e: TouchEvent): boolean => {
+        if (!this.touchInteractionsEnabled()) {
+            return false;
+        }
+        e.preventDefault();
+        this.gestureProcessor.handleTouchStart(this.normalizeTouches(e.targetTouches));
+        return true;
+    };
+
+    private handleTouchMove = (e: TouchEvent): void => {
+        if (!this.touchInteractionsEnabled()) {
+            return;
+        }
+        e.preventDefault();
+        this.gestureProcessor.handleTouchMove(this.normalizeTouches(e.targetTouches));
+    };
+
+    private handleTouchEnd = (e: TouchEvent): void => {
+        if (!this.touchInteractionsEnabled()) {
+            // Handlers may have been disabled mid-gesture: reset the
+            // processor's drag/pinch state (no changed pointer → no
+            // callbacks) without claiming the event.
+            this.gestureProcessor.handleTouchEnd(this.normalizeTouches(e.targetTouches));
+            return;
+        }
+        e.preventDefault();
+        const remaining = this.normalizeTouches(e.targetTouches);
+        const changed = e.changedTouches.length > 0 ? this.normalizePointer(e.changedTouches[0]) : undefined;
+        this.gestureProcessor.handleTouchEnd(remaining, changed);
+    };
+
+    getDrawAPI(): IDrawAPI {
+        return this.drawAPI;
+    }
+
+    getImageLoader(): IImageLoader<HTMLImageElement> {
+        return this.imageLoader;
+    }
+
+    render(): void {
+        const size = this.viewport.getSize();
+        const dpr = this.viewport.dpr;
+        const config = { ...this.config.get(), size: { ...size }, scale: this.camera.scale };
+        const topLeft: Coords = { x: this.camera.x, y: this.camera.y };
+
+        // Reset transform for HiDPI support (canvas.width/height changes reset transform)
+        this.canvasContext.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+        // Clear background
+        this.canvasContext.clearRect(0, 0, config.size.width, config.size.height);
+        this.canvasContext.fillStyle = config.backgroundColor;
+        this.canvasContext.fillRect(0, 0, config.size.width, config.size.height);
+
+        // Draw engine layers
+        this.layers.drawAll({
+            ctx: this.canvasContext,
+            camera: this.camera,
+            transformer: this.transformer,
+            config,
+            topLeft,
+        });
+
+        // User custom draw callback (optional)
+        this.onDraw?.(this.canvasContext, topLeft, config, this.drawTransform);
+
+        // Coordinate overlay
+        if (this.coordinateOverlayRenderer.shouldDraw(this.camera.scale)) {
+            this.coordinateOverlayRenderer.draw();
+        }
+
+        // Debug overlay
+        if (config.debug?.enabled && this.debugOverlay) {
+            if (config.debug?.hud?.fps) {
+                this.debugOverlay.setFpsUpdateCallback(() => this.render());
+                this.debugOverlay.startFpsLoop();
+            }
+            this.debugOverlay.draw();
+        }
+    }
+
+    resize(width: number, height: number): void {
+        const dpr = this.viewport.dpr;
+
+        this.viewport.setSize(width, height);
+
+        // Set actual canvas resolution (physical pixels)
+        this.canvas.width = width * dpr;
+        this.canvas.height = height * dpr;
+
+        // Set display size via CSS (logical pixels)
+        this.canvas.style.width = `${width}px`;
+        this.canvas.style.height = `${height}px`;
+
+        // Scale context to match DPR
+        this.canvasContext.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+
+    resizeWithAnimation(width: number, height: number, durationMs: number, onComplete?: () => void): void {
+        if (this.config.get().responsive) {
+            console.warn(
+                "Canvas Tile Engine: resizeWithAnimation() is disabled when responsive mode is enabled. " +
+                    "Canvas size is controlled by the wrapper element.",
+            );
+            return;
+        }
+        this.sizeController.resizeWithAnimation(width, height, durationMs, this.animationController, () => {
+            // Trigger onResize callback after programmatic resize completes
+            this.onResize?.();
+            onComplete?.();
+        });
+    }
+
+    destroy(): void {
+        // Detach events
+        if (this.eventsAttached) {
+            this.eventBinder.detach();
+            this.eventsAttached = false;
+        }
+        this.resizeWatcher?.stop();
+        this.resizeWatcher = undefined;
+        this.responsiveWatcher?.stop();
+        this.responsiveWatcher = undefined;
+        this.reducedMotionWatcher?.stop();
+        this.reducedMotionWatcher = undefined;
+        this.unsubscribeA11y?.();
+        this.unsubscribeA11y = undefined;
+        this.a11yAttributes?.destroy();
+        this.a11yAttributes = undefined;
+
+        // Cancel animations
+        this.animationController.cancelAll();
+
+        // Cleanup drawing
+        this.drawAPI.destroy();
+        this.layers.clear();
+        this.debugOverlay?.destroy();
+        this.imageLoader.clear();
+    }
+
+    private applyCanvasSize() {
+        const size = this.viewport.getSize();
+        const dpr = this.viewport.dpr;
+
+        // Set actual canvas resolution (physical pixels)
+        this.canvas.width = size.width * dpr;
+        this.canvas.height = size.height * dpr;
+
+        // Set display size via CSS (logical pixels)
+        this.canvas.style.width = `${size.width}px`;
+        this.canvas.style.height = `${size.height}px`;
+
+        // Scale context to match DPR
+        this.canvasContext.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+}

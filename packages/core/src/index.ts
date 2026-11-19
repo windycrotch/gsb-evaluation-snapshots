@@ -1,0 +1,62 @@
+export { CanvasTileEngine } from "./CanvasTileEngine";
+// Types export
+export type * from "./types";
+// Constants export
+export * from "./constants";
+// Utilities
+export { gridToSize } from "./utils/gridToSize";
+export { fitScale, type FitScaleOptions } from "./utils/fitScale";
+export { ConfigValidationError } from "./utils/validateConfig";
+export {
+    resolveLineWidthPx,
+    resolveLineDashPx,
+    resolveRadiusPx,
+    resolveCornerRadiusPx,
+    overlayLineStyle,
+    type OverlayableLineStyle,
+} from "./utils/strokeStyle";
+export { cornerArc } from "./utils/pathCorners";
+export { traceRoundedPath, traceCommands, type PathTraceTarget, type CommandTraceTarget } from "./utils/tracePath";
+export { roundedPolyline, roundedRing, ARC_SEGMENT_LENGTH } from "./utils/pathFlatten";
+export { resolveSizePx, resolveSizeWorld, resolveBoxPx, resolveBoxWorld, maxPxExtent } from "./utils/itemSize";
+export { isGradient, normalizeStops, gradientAxisPx, gradientT, paintKey } from "./utils/paint";
+export type { PaintBox } from "./utils/paint";
+export {
+    itemsBounds,
+    pathItemBounds,
+    type AnchoredItem,
+    type BoundedItem,
+    type EndpointItem,
+    type OutlineItem,
+} from "./utils/itemBounds";
+export { resolveOrigin, computeOriginOffset, type Origin, type RawOrigin } from "./utils/origin";
+export { flattenPathCommands, pathCommandsBounds, type Subpath } from "./utils/flattenPath";
+export type { CornerArc } from "./utils/pathCorners";
+// Additional core modules
+export { Config, normalizeConfig } from "./modules/Config";
+export { ViewportState } from "./modules/ViewportState";
+export { CoordinateTransformer } from "./modules/CoordinateTransformer";
+export { SpatialIndex, type SpatialIndexToken } from "./modules/SpatialIndex";
+export {
+    ItemCollection,
+    isItemCollection,
+    type ItemCollectionOptions,
+    type ItemCollectionChange,
+    type ReadonlyItemCollection,
+    type ItemKey,
+    type DrawItems,
+} from "./modules/ItemCollection";
+export type { HitResult, HitTestOptions, HitTestRectOptions, HitKind } from "./modules/HitTester";
+export { GestureProcessor } from "./modules/GestureProcessor";
+export type {
+    NormalizedPointer,
+    NormalizedPinch,
+    NormalizedKey,
+    ProcessedCoords,
+    CanvasBounds,
+} from "./modules/GestureProcessor";
+export { AnimationController } from "./modules/AnimationController";
+export { SpriteSheet } from "./modules/SpriteSheet";
+export type { SpriteSheetOptions } from "./modules/SpriteSheet";
+export { SpriteAnimator } from "./modules/SpriteAnimator";
+export type { SpriteAnimation } from "./modules/SpriteAnimator";

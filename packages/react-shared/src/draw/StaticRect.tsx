@@ -1,0 +1,80 @@
+import { useEffect, useRef, memo } from "react";
+import { useEngineContext } from "../EngineContext";
+import type { Bounds, Rect as RectType } from "@canvas-tile-engine/core";
+
+export interface StaticRectProps {
+    /**
+     * Items to draw. Compared by reference: a new array identity re-registers
+     * the draw callback (and rebuilds the spatial index for 500+ items), so
+     * keep it stable with useMemo/useState instead of an inline literal.
+     */
+    items: RectType[];
+    cacheKey: string;
+    layer?: number;
+    /**
+     * Set to `false` to keep these items out of hit testing — the
+     * `pointer-events: none` of the draw API, for decorative content like
+     * minimap tiles. Default `true`.
+     */
+    hitTest?: boolean;
+    /**
+     * Confine this registration to a world rectangle: nothing it draws paints
+     * outside it, and nothing outside it hit-tests. Compared by value, so an
+     * inline object literal does not re-register on every render.
+     */
+    clip?: Bounds;
+}
+
+/**
+ * Draws rectangles through the engine's `drawStaticRect` API: the renderer
+ * caches the items once (keyed by `cacheKey`) — e.g. an offscreen pre-render
+ * on Canvas2D, a recorded picture on Skia — and replays the cached result
+ * each frame. Prefer this over `Rect` for large item sets that don't change.
+ */
+export const StaticRect = memo(function StaticRect({ items, cacheKey, layer = 1, hitTest, clip }: StaticRectProps) {
+    const { engine, requestRender } = useEngineContext();
+
+    // Value-compared so an inline clip literal does not re-register the
+    // draw call on every render.
+    const clipKey = clip ? `${clip.minX},${clip.maxX},${clip.minY},${clip.maxY}` : "";
+    const prevCacheKeyRef = useRef<string>(cacheKey);
+    const prevItemsRef = useRef(items);
+
+    useEffect(() => {
+        if (items.length === 0) {
+            return;
+        }
+
+        // Clear previous cache if cacheKey changed
+        if (prevCacheKeyRef.current !== cacheKey) {
+            engine.clearStaticCache(prevCacheKeyRef.current);
+            prevCacheKeyRef.current = cacheKey;
+        } else if (prevItemsRef.current !== items) {
+            // Same key, new items: renderers rebuild only on a cache miss (or
+            // bounds/scale change), so the stale cache must be dropped here.
+            engine.clearStaticCache(cacheKey);
+        }
+        prevItemsRef.current = items;
+
+        const handle = engine.drawStaticRect(items, cacheKey, layer, { hitTest, clip });
+        requestRender();
+
+        return () => {
+            if (handle) {
+                engine.removeDrawHandle(handle);
+                // Repaint so the removed items disappear immediately; safe on
+                // full unmount too — the handle no-ops once the engine is gone.
+                requestRender();
+            }
+        };
+    }, [engine, items, cacheKey, layer, hitTest, requestRender, clipKey]);
+
+    // Cleanup cache on unmount
+    useEffect(() => {
+        return () => {
+            engine.clearStaticCache(cacheKey);
+        };
+    }, [engine, cacheKey]);
+
+    return null;
+});

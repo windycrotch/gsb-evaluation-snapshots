@@ -1,0 +1,264 @@
+# React Web Reference
+
+Package: `@canvas-tile-engine/react` (+ `@canvas-tile-engine/core` + a
+browser renderer). Two usage styles that freely mix: declarative compound
+components as children, and the imperative `EngineHandle` from the hook.
+
+```bash
+npm install @canvas-tile-engine/core @canvas-tile-engine/react @canvas-tile-engine/renderer-canvas
+```
+
+## Component and hook
+
+```tsx
+import { CanvasTileEngine, useCanvasTileEngine } from "@canvas-tile-engine/react";
+import { RendererCanvas } from "@canvas-tile-engine/renderer-canvas";
+
+function Map() {
+    const engine = useCanvasTileEngine(); // stable handle, safe before mount
+
+    return (
+        <CanvasTileEngine
+            engine={engine} // REQUIRED
+            renderer={new RendererCanvas()} // REQUIRED, read once on mount
+            config={config} // REQUIRED, read once on mount
+            center={{ x: 0, y: 0 }} // optional, read once on mount
+            className="map" // wrapper div class
+            style={{ borderRadius: 8 }} // wrapper div styles
+            onClick={(coords, mouse, client) => {}}
+            onRightClick={(coords, mouse, client) => {}}
+            onHover={(coords, mouse, client) => {}}
+            onMouseDown={(coords, mouse, client) => {}}
+            onMouseUp={(coords, mouse, client) => {}}
+            onMouseLeave={(coords, mouse, client) => {}}
+            onCoordsChange={(center) => {}}
+            onZoom={(scale) => {}}
+            onWheel={(coords, mouse, client, wheel) => {}}
+            onResize={() => {}}
+            onDraw={(ctx, coords, config, transform) => {}}
+        >
+            {/* declarative draw children */}
+        </CanvasTileEngine>
+    );
+}
+```
+
+### Lifecycle rules
+
+- `config`, `renderer`, and `center` are read ONCE when the engine mounts.
+  Later prop changes are ignored. To apply a whole new config or renderer,
+  remount with a `key`:
+
+```tsx
+<CanvasTileEngine key={rendererName} renderer={makeRenderer(rendererName)} ... />
+```
+
+- For dynamic changes use runtime APIs instead: `engine.setBounds`,
+  `engine.setEventHandlers`, `engine.setCenter`, `engine.goCenter`,
+  `engine.setScale`, `engine.goScale`, `engine.setScaleLimits` `engine.resize`.
+- Event callback props CAN change freely - they are kept fresh via refs
+  without re-creating the engine.
+- The engine is destroyed automatically on unmount.
+
+## The `EngineHandle`
+
+`useCanvasTileEngine()` returns a referentially stable handle exposing the
+full engine API. Before the component mounts every method is a safe no-op
+(draw methods return a dummy handle; getters return defaults), so no null
+checks are needed - but work done before mount is LOST, so gate imperative
+setup on `isReady`:
+
+```tsx
+const engine = useCanvasTileEngine();
+
+useEffect(() => {
+    if (!engine.isReady) return;
+    engine.drawGridLines(1);
+    engine.render();
+}, [engine.isReady]); // flips true after mount
+```
+
+If the component can remount with a `key` (renderer/config swap), depend on
+`engine.instance` instead of `engine.isReady`: during a remount `isReady`
+goes true -> false -> true within one effect flush, so effects keyed on it
+never re-fire, while `instance` changes identity with every new engine.
+Dropped draw calls (engine not mounted yet) log a `console.warn` in dev.
+
+With `responsive: "preserve-viewport"`, track scale via `onZoom` PLUS an
+initial read - the first responsive sizing runs inside the engine
+constructor, before callbacks attach, so `onZoom` cannot deliver it:
+
+```tsx
+const [scale, setScale] = useState(config.scale);
+useEffect(() => {
+    if (map.isReady) setScale(map.getScale()); // real mount-time scale
+}, [map, map.isReady]);
+// ...
+<CanvasTileEngine onZoom={setScale} ... />  // all later changes (gesture,
+                                            // programmatic, responsive resize)
+```
+
+Handle members beyond the core engine API (see
+[core-api.md](core-api.md) for the shared methods):
+
+| Member                   | Notes                                                        |
+| :----------------------- | :----------------------------------------------------------- |
+| `isReady: boolean`       | False until the engine mounts. Valid `useEffect` dependency. |
+| `instance`               | The raw `CanvasTileEngine` instance or `null`. Escape hatch. |
+| `images`                 | The image loader, `undefined` before mount.                  |
+| `loadImage(src, retry?)` | `Promise<HTMLImageElement>`; rejects if called before ready. |
+
+The same handle can drive multiple concerns (toolbar buttons calling
+`engine.zoomIn()`, effects calling `engine.goCenter(...)`) without prop
+drilling the instance around. One handle per `<CanvasTileEngine>`; create two
+handles for two canvases (e.g. main map + minimap).
+
+## Compound draw components (all render `null`; must be children of `<CanvasTileEngine>`)
+
+Common behavior: registers its draw call on mount / when props change,
+removes its handle on unmount, and batches repaints through a single
+`requestAnimationFrame`. `items` props are compared BY REFERENCE - a new
+array identity re-registers the callback and rebuilds the spatial index for
+500+ items. Keep items in `useMemo` or state, never inline literals. The
+`styleOf`/`visibleOf`/`interactiveOf` props are the exception: they are read
+through refs, so their identity may change every render at no cost (inline
+arrows are fine) and a change only repaints.
+
+| Component                         | Props (defaults)                                                                                                                      |
+| :-------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------ |
+| `<CanvasTileEngine.Rect>`         | `items: Rect \| Rect[]`, `layer = 1`, `styleOf?`, `visibleOf?`, `interactiveOf?`, `hitTest?`                                                      |
+| `<CanvasTileEngine.Circle>`       | `items: Circle \| Circle[]`, `layer = 1`, `styleOf?`, `visibleOf?`, `interactiveOf?`, `hitTest?`                                                  |
+| `<CanvasTileEngine.Image>`        | `items: ImageItem \| ImageItem[]`, `layer = 1`, `visibleOf?`, `interactiveOf?`, `hitTest?`                                                        |
+| `<CanvasTileEngine.Text>`         | `items: Text \| Text[]`, `layer = 2`, `styleOf?`, `visibleOf?`                                                                        |
+| `<CanvasTileEngine.Line>`         | `items: Line \| Line[]`, `style?: LineStyle`, `layer = 1`, `styleOf?`, `visibleOf?`, `interactiveOf?`, `hitTest?`                                 |
+| `<CanvasTileEngine.Path>`         | `items: PathItem \| PathItem[]`, `layer = 1`, `styleOf?`, `visibleOf?`, `interactiveOf?`, `hitTest?`                                              |
+| `<CanvasTileEngine.GridLines>`    | `cellSize: number`, `lineWidth = 1`, `strokeStyle = "black"`, `layer = 0`                                                             |
+| `<CanvasTileEngine.StaticRect>`   | `items: Rect[]`, `cacheKey: string`, `layer = 1`, `hitTest?`                                                                                      |
+| `<CanvasTileEngine.StaticCircle>` | `items: Circle[]`, `cacheKey: string`, `layer = 1`, `hitTest?`                                                                                    |
+| `<CanvasTileEngine.StaticImage>`  | `items: ImageItem[]`, `cacheKey: string`, `layer = 1`, `hitTest?`                                                                                 |
+| `<CanvasTileEngine.Sprite>`       | `items: ImageItem \| ImageItem[]`, `frames: SpriteRect[]`, `fps: number`, `loop = true`, `playing = true`, `layer = 1`, `onComplete?`, `hitTest?` |
+| `<CanvasTileEngine.DrawFunction>` | `children: (ctx, topLeft, config, transform) => void`, `layer = 1`                                                                    |
+
+Item shapes are identical to the core draw API: [drawing.md](drawing.md).
+Sprite semantics: [sprites.md](sprites.md). `hitTest={false}` keeps a
+component's items out of `hitTest`/`hitTestRect` queries (decorative floors,
+terrain, overlays) — the `pointer-events: none` of the draw components.
+
+All the types and helpers these components and handles use are re-exported from
+`@canvas-tile-engine/react` — import them from the binding instead of reaching
+into `@canvas-tile-engine/core`. That includes the draw-object types (`Rect`,
+`Circle`, `Text`, `Line`, `LineStyle`, `ImageItem`, `PathItem`, `PathStyle`,
+`PathCommand`, `Coords`), the imperative `DrawHandle`, every `on*Callback`
+type plus `WheelInfo`, and the `gridToSize` / `fitScale` / `pathCommandsBounds` helpers.
+
+Static components clear their cache automatically when `items` gets a new
+array identity (or when `cacheKey` changes) — no manual `clearStaticCache`
+call is needed, unlike the core API.
+
+```tsx
+<CanvasTileEngine.DrawFunction layer={5}>
+    {(ctx, topLeft, config, transform) => {
+        const c = ctx as CanvasRenderingContext2D;
+        // worldToScreen takes item-space coords (integers = cell centers)
+        const p = transform.worldToScreen(0, 0);
+        c.fillStyle = "rgba(255,255,255,0.6)";
+        c.fillRect(p.x - config.scale / 2, p.y - config.scale / 2, config.scale, config.scale);
+    }}
+</CanvasTileEngine.DrawFunction>
+```
+
+## Styling by state (`styleOf`)
+
+Selection/hover/highlight must NOT go through derived `items` arrays (the
+classic `useMemo(() => items.map(...), [items, selected])` re-registers and
+rebuilds the spatial index on every selection change). Pass `styleOf`
+instead - it runs per item at paint time and overlays the item's own style:
+
+```tsx
+const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
+
+<CanvasTileEngine.Rect
+    items={seatRects} // geometry only; stable, never re-registers
+    layer={1}
+    styleOf={(s) => (selected.has(s.data.id) ? { fillStyle: "blue" } : undefined)}
+/>;
+```
+
+Contract: `items` changed = geometry changed = re-register (memoize it);
+`styleOf` changed = appearance changed = repaint only. Identify items via
+`item.data`. Line/Path decorations exclude `lineWidth*` (Path also
+`cornerRadius*`) - hit-test geometry is registration-time. Statics take no
+`styleOf`.
+
+Same live-read model for visibility and hit testing: `visibleOf={(item) =>
+boolean | undefined}` (`false` = skip the item for the frame - not painted,
+not hit-testable; use for category filters instead of a filtered array) and
+`interactiveOf` (`false` = painted but transparent to hit queries, the
+per-item `hitTest={false}`; not on `<Text>`). Both exist on `<Image>` too
+(which has no `styleOf` - images carry no `style`). A `visibleOf`-hidden
+item never hit-tests, regardless of `interactiveOf`. Statics take neither
+prop.
+
+## Updating drawn data
+
+Declarative: put items in state; setting new state (new array reference)
+swaps the drawn content automatically.
+
+```tsx
+const [tiles, setTiles] = useState<Rect[]>([]);
+
+const paint: onClickCallback = (coords) =>
+    setTiles((prev) => [
+        ...prev,
+        {
+            x: coords.snapped.x,
+            y: coords.snapped.y,
+            size: 1,
+            style: { fillStyle: "#38bdf8" },
+        },
+    ]);
+
+<CanvasTileEngine engine={engine} config={config} renderer={renderer} onClick={paint}>
+    <CanvasTileEngine.Rect items={tiles} layer={1} />
+</CanvasTileEngine>;
+```
+
+For very hot updates (60fps animation over huge arrays), prefer the mutation
+pattern through the handle (`engine.drawRect` once + mutate + `engine.render()`)
+to avoid array recreation - see [drawing.md](drawing.md).
+
+## Loading images in React
+
+```tsx
+const [img, setImg] = useState<HTMLImageElement | null>(null);
+
+useEffect(() => {
+    if (!engine.isReady) return;
+    engine.loadImage("/assets/terrain.png").then(setImg);
+}, [engine.isReady]);
+
+const items = useMemo(() => (img ? [{ x: 0, y: 0, size: 2, img }] : []), [img]);
+// ...
+<CanvasTileEngine.Image items={items} layer={1} />;
+```
+
+## Pitfalls checklist
+
+- Inline `items={[...]}` literal: re-registers every render. Use
+  `useMemo`/state.
+- Selection/hover styling derived into `items` (`useMemo` keyed on the
+  selection): re-registers + index rebuild per click. Use `styleOf`.
+- Expecting `config`/`center`/`renderer` prop changes to apply: they will not;
+  remount with `key` or use runtime APIs.
+- Imperative drawing without gating on `engine.isReady`: drops the call
+  (warns in dev, silent in prod).
+- Effects keyed on `[engine.isReady]` around a `key` remount: the value
+  collapses back to `true` in the same flush, so the effect never re-fires.
+  Use `[engine.instance]` for remount-safe imperative setup.
+- Creating one handle for two `<CanvasTileEngine>` mounts: each canvas needs
+  its own `useCanvasTileEngine()`.
+- Forgetting `eventHandlers` in config: canvas renders but nothing responds.
+- Mixing declarative children and `clearAll()`/`clearLayer()` on the same
+  layers: the imperative clear removes the components' registered callbacks
+  and they will not re-register until their props change. Keep imperative
+  layer management on layers the components do not use.
