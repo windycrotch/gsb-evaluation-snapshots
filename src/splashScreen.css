@@ -42,15 +42,57 @@
 		padding: 10px 16px;
 		font: 16px var( --gsui-font-monospace );
 
-		[ data-loaded ] &:not( :hover ) {
+		[ data-loaded ] &:not( :hover ):not( :disabled ) {
 			animation: .5s splashScreen-textAnim linear infinite alternate;
 		}
 		&::before { content: "downloading..." }
 		[ data-loaded ] &::before { content: "[ click to start ]" }
-		[ data-starting ] &::before { content: "starting..." }
+		[ data-state="starting" ] &::before { content: "starting..." }
+		[ data-state="starting" ] &::after {
+			display: block;
+			margin-top: 6px;
+			font-size: 12px;
+			opacity: .75;
+			animation: none;
+		}
+		[ data-state="starting" ][ data-phase="resume" ]    &::after { content: "Resuming audio..." }
+		[ data-state="starting" ][ data-phase="samples" ]   &::after { content: "Loading sample library..." }
+		[ data-state="starting" ][ data-phase="wavetable" ] &::after { content: "Loading wavetables..." }
+		[ data-state="starting" ][ data-phase="init" ]      &::after { content: "Initializing GSDAW..." }
+		[ data-state="done" ] &::before { content: "started" }
+		[ data-state="error" ] &::before { content: "[ click to start ]" }
 	}
 	[ data-alert ] {
 		display: none;
+	}
+	[ data-error ] {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 6px;
+		max-width: 460px;
+		padding: 14px 18px;
+		font-family: var( --gsui-font-monospace );
+		text-align: center;
+		border: 1px solid #ffffff44;
+		border-radius: 8px;
+		background-color: #0008;
+
+		&[ hidden ] { display: none; }
+		p { margin: 0 }
+		[ data-error-phase ] { color: #ff8080 }
+		[ data-error-msg ] {
+			max-width: 420px;
+			font-size: 12px;
+			word-break: break-word;
+			opacity: .8;
+		}
+		[ data-retry ] {
+			margin-top: 8px;
+			padding: 6px 14px;
+			font: inherit;
+			cursor: pointer;
+		}
 	}
 }
 @keyframes splashScreen-textAnim {
