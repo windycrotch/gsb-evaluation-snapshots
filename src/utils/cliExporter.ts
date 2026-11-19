@@ -336,6 +336,10 @@ export function generateStandaloneHtml(project: Project): string {
     let voiceEnabled = true;
     let lastTimestamp = 0;
     let liveWordIdx = -1;
+    // Monotonic token for the active narration. Every scene switch, seek or
+    // restart opens a new session, so callbacks captured by an old utterance
+    // can never update the current scene's subtitles.
+    let speechSession = 0;
 
     const canvas = document.getElementById('playerCanvas');
     const ctx = canvas.getContext('2d');
@@ -383,8 +387,12 @@ export function generateStandaloneHtml(project: Project): string {
 
       // Render elements
       const elements = [...(scene.elements || [])].sort((a,b) => (a.order||0) - (b.order||0));
+      const sceneDur = scene.durationSeconds || 7;
       elements.forEach(el => {
-        const trigger = el.triggerTimeSec || 0;
+        // Clamp triggers into the scene so an element can never be stuck
+        // outside the timeline or fail to appear.
+        const rawTrigger = el.triggerTimeSec || 0;
+        const trigger = Math.min(Math.max(0, rawTrigger), sceneDur);
         if (time < trigger) return;
         const progress = Math.min(1, Math.max(0, (time - trigger) / 0.5));
 
@@ -461,21 +469,24 @@ export function generateStandaloneHtml(project: Project): string {
     function speakNarration(text) {
       if (!voiceEnabled || !window.speechSynthesis || !text) return;
       window.speechSynthesis.cancel();
+      const session = ++speechSession;
       const u = new SpeechSynthesisUtterance(text);
       u.rate = project.voiceRate || 1.0;
       u.pitch = project.voicePitch || 1.0;
       u.onboundary = (e) => {
+        if (session !== speechSession) return; // stale scene / seek
         if (e.name === 'word') {
           const before = text.slice(0, e.charIndex).trim();
           liveWordIdx = before ? before.split(/\\s+/).filter(Boolean).length : 0;
         }
       };
-      u.onend = () => { liveWordIdx = -1; };
-      u.onerror = () => { liveWordIdx = -1; };
+      u.onend = () => { if (session === speechSession) liveWordIdx = -1; };
+      u.onerror = () => { if (session === speechSession) liveWordIdx = -1; };
       window.speechSynthesis.speak(u);
     }
 
     function stopSpeaking() {
+      speechSession++; // invalidate every pending utterance callback
       if (window.speechSynthesis) window.speechSynthesis.cancel();
       liveWordIdx = -1;
     }
@@ -559,6 +570,15 @@ export function generateStandaloneHtml(project: Project): string {
 
     scrubber.addEventListener('input', (e) => {
       currentTime = parseFloat(e.target.value);
+      // Re-anchor narration to the new playhead so voice and subtitles cannot
+      // drift from the scrubber position. Stale callbacks are dropped via the
+      // session token inside stopSpeaking/speakNarration.
+      if (isPlaying) {
+        stopSpeaking();
+        speakNarration(getActiveScene().narration);
+      } else {
+        liveWordIdx = -1;
+      }
       curTimeLbl.textContent = currentTime.toFixed(1) + 's';
       renderScene(currentTime);
     });

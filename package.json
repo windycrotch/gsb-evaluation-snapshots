@@ -33,8 +33,10 @@
     "clean": "rm -rf dist",
     "dev": "tsx server.ts",
     "lint": "tsc --noEmit",
+    "typecheck:test": "tsc -p tsconfig.test.json",
     "preview": "vite preview",
-    "start": "tsx server.ts"
+    "start": "tsx server.ts",
+    "test": "tsx --test test/*.test.ts"
   },
   "dependencies": {
     "@google/genai": "^1.29.0",

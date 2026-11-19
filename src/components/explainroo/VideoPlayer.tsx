@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useState, useCallback } from 'react';
+import React, { useRef, useEffect, useState, useCallback, useMemo } from 'react';
 import {
   Play,
   Pause,
@@ -14,6 +14,8 @@ import {
 import { Scene, ThemeLook } from '../../types/explainroo';
 import { renderSceneToCanvas } from '../../utils/canvasRenderer';
 import { audioEngine } from '../../utils/audioEngine';
+import { PlaybackCoordinator, CoordinatorScene } from '../../utils/playbackCoordinator';
+import { effectiveTriggerTime, resolveSubtitleState, SubtitleState } from '../../utils/playbackSync';
 
 interface VideoPlayerProps {
   scene: Scene;
@@ -42,6 +44,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   onPrevScene,
   onNextScene,
   musicTrack,
+  autoDuck,
   voiceRate,
   voicePitch,
 }) => {
@@ -55,21 +58,155 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const [isMusicEnabled, setIsMusicEnabled] = useState<boolean>(true);
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
   const [isSubtitlesEnabled, setIsSubtitlesEnabled] = useState<boolean>(true);
-  const [liveWordIndex, setLiveWordIndex] = useState<number>(-1);
+  const [subtitle, setSubtitle] = useState<SubtitleState>({ wordIndex: -1, fromCallback: false });
 
-  // Subscribe to real-time word boundary notifications from AudioEngine
+  const duration = scene.durationSeconds || 7;
+  const isLastScene = currentSceneIndex >= totalScenes - 1;
+
+  // Keep latest props in refs so coordinator callbacks never go stale.
+  const nextSceneRef = useRef(onNextScene);
+  nextSceneRef.current = onNextScene;
+  const autoDuckRef = useRef(autoDuck);
+  autoDuckRef.current = autoDuck;
+  // When the coordinator auto-advances at a scene boundary, the parent swaps
+  // the scene and we must resume playback on the new scene rather than stop.
+  const pendingAutoAdvanceRef = useRef(false);
+
+  // The coordinator is created once and adapted to the singleton audioEngine.
+  const coordinatorRef = useRef<PlaybackCoordinator | null>(null);
+  if (!coordinatorRef.current) {
+    const coordinatorScene: CoordinatorScene = {
+      id: scene.id,
+      narration: scene.narration,
+      durationSeconds: duration,
+      customAudioUrl: scene.customAudioUrl,
+    };
+    coordinatorRef.current = new PlaybackCoordinator(coordinatorScene, {
+      audio: {
+        startTts: (text, onWord, onEnd, rate, pitch, offset, token) =>
+          audioEngine.speakNarration(
+            text,
+            (_w, _c, wordIdx) => onWord(wordIdx),
+            onEnd,
+            rate,
+            pitch,
+            { startOffsetSec: offset, sessionToken: token }
+          ),
+        startCustomAudio: (url, onEnd, token) => audioEngine.playCustomAudio(url, onEnd, token),
+        seekCustomAudio: (t) => audioEngine.seekCustomAudio(t),
+        pauseCustomAudio: () => audioEngine.pauseCustomAudio(),
+        resumeCustomAudio: () => audioEngine.resumeCustomAudio(),
+        stopVoice: () => audioEngine.stopSpeaking(),
+        setDucking: (active) => {
+          // Respect the project's auto-duck toggle: when disabled, narration
+          // never lowers the background music volume.
+          audioEngine.setDucking(active && autoDuckRef.current);
+        },
+      },
+      callbacks: {
+        onTime: (t) => setCurrentTime(t),
+        onSubtitle: (s) => setSubtitle(s),
+        onPlayingChange: (p) => setIsPlaying(p),
+        onRequestNextScene: () => {
+          pendingAutoAdvanceRef.current = true;
+          nextSceneRef.current();
+        },
+        onSceneEnd: () => {
+          // Final scene finished: restore music and leave the playhead at end.
+          audioEngine.setDucking(false);
+        },
+      },
+    }, isLastScene);
+  }
+  const coordinator = coordinatorRef.current;
+
+  // Push voice settings into the coordinator.
   useEffect(() => {
-    const unsub = audioEngine.addWordListener((_word, _charIdx, wordIdx) => {
-      setLiveWordIndex(wordIdx);
+    coordinator.setVoiceSettings(voiceRate, voicePitch);
+  }, [coordinator, voiceRate, voicePitch]);
+
+  useEffect(() => {
+    coordinator.setVoiceMuted(isVoiceMuted);
+  }, [coordinator, isVoiceMuted]);
+
+  useEffect(() => {
+    coordinator.setSpeed(playbackSpeed);
+  }, [coordinator, playbackSpeed]);
+
+  // Scene changes: reset the playhead and (re)start voice for the new scene.
+  // A fresh coordinator token inside setScene guarantees the old scene's
+  // word callbacks cannot affect the new scene's subtitles.
+  const lastSceneIdRef = useRef<string>(scene.id);
+  useEffect(() => {
+    if (lastSceneIdRef.current === scene.id) return;
+    lastSceneIdRef.current = scene.id;
+    const coordinatorScene: CoordinatorScene = {
+      id: scene.id,
+      narration: scene.narration,
+      durationSeconds: scene.durationSeconds || 7,
+      customAudioUrl: scene.customAudioUrl,
+    };
+    setCurrentTime(0);
+    setSubtitle({ wordIndex: -1, fromCallback: false });
+    // Resume playback automatically when this scene change was triggered by
+    // the coordinator reaching a scene boundary (not by a manual scene click).
+    const shouldPlay = pendingAutoAdvanceRef.current;
+    pendingAutoAdvanceRef.current = false;
+    coordinator.setScene(coordinatorScene, currentSceneIndex >= totalScenes - 1, shouldPlay);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scene.id, currentSceneIndex, totalScenes]);
+
+  // Keep last-scene flag current even if the scene list changes without an id change.
+  useEffect(() => {
+    coordinator.setLastScene(isLastScene);
+  }, [coordinator, isLastScene]);
+
+  // Voice source replacement (upload added/removed/changed) while playing,
+  // or narration edits while paused. The coordinator's internal scene is kept
+  // in sync; when playing, the previous source is stopped and the new one
+  // starts, so replaced audio can never overlap the old track.
+  const voiceSourceKey = `${scene.customAudioUrl || ''}::${scene.narration}::${scene.durationSeconds}`;
+  const prevVoiceSourceKeyRef = useRef(voiceSourceKey);
+  useEffect(() => {
+    if (prevVoiceSourceKeyRef.current === voiceSourceKey) return;
+    prevVoiceSourceKeyRef.current = voiceSourceKey;
+    // A scene switch is fully handled by the scene-change effect above; only
+    // react here to within-scene edits of the narration or audio source.
+    if (lastSceneIdRef.current !== scene.id) return;
+    coordinator.syncSceneData({
+      id: scene.id,
+      narration: scene.narration,
+      durationSeconds: scene.durationSeconds || 7,
+      customAudioUrl: scene.customAudioUrl,
     });
-    return () => unsub();
+    if (coordinator.isPlaying()) {
+      coordinator.updateVoiceSource();
+    }
+  }, [coordinator, voiceSourceKey, scene.id, scene.narration, scene.customAudioUrl, scene.durationSeconds]);
+
+  // Background music lifecycle: exactly one loop exists iff playback is
+  // active AND music is enabled. startMusic() itself tears down any prior
+  // scheduler, so this can never accumulate loops or volume ramps.
+  useEffect(() => {
+    if (isPlaying && isMusicEnabled) {
+      audioEngine.startMusic(musicTrack);
+    } else {
+      audioEngine.stopMusic();
+    }
+  }, [isPlaying, isMusicEnabled, musicTrack]);
+
+  // Stop everything on unmount.
+  useEffect(() => {
+    const c = coordinatorRef.current;
+    return () => {
+      c?.destroy();
+      audioEngine.stopMusic();
+    };
   }, []);
 
   // Dragging state for interactive canvas editing
   const [draggingElementId, setDraggingElementId] = useState<string | null>(null);
   const [dragOffset, setDragOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
-
-  const duration = scene.durationSeconds || 7;
 
   // Render canvas whenever state changes
   const redrawCanvas = useCallback(
@@ -93,119 +230,37 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     redrawCanvas(currentTime, selectedElementId);
   }, [redrawCanvas, currentTime, selectedElementId]);
 
-  // Reset playback time and live subtitle sync when scene changes
-  useEffect(() => {
-    setCurrentTime(0);
-    setLiveWordIndex(-1);
-  }, [scene.id]);
-
-  // Keep a ref to the latest time so the rAF loop does not need to call parent callbacks inside setState
-  const currentTimeRef = useRef<number>(0);
-  currentTimeRef.current = currentTime;
-
-  // Animation frame loop for smooth playback
-  useEffect(() => {
-    let animId: number;
-    let lastTimestamp: number | null = null;
-
-    if (isPlaying) {
-      if (isMusicEnabled) {
-        audioEngine.startMusic(musicTrack);
-      }
-
-      // Trigger voiceover (custom uploaded audio or Web Speech synthesis)
-      if (!isVoiceMuted) {
-        if (scene.customAudioUrl) {
-          audioEngine.playCustomAudio(scene.customAudioUrl);
-        } else if (scene.narration) {
-          audioEngine.speakNarration(
-            scene.narration,
-            (_word, _charIdx, wordIdx) => {
-              setLiveWordIndex(wordIdx);
-            },
-            () => {
-              setLiveWordIndex(-1);
-            },
-            voiceRate,
-            voicePitch
-          );
-        }
-      }
-
-      const loop = (timestamp: number) => {
-        if (!lastTimestamp) lastTimestamp = timestamp;
-        const delta = (timestamp - lastTimestamp) / 1000;
-        lastTimestamp = timestamp;
-
-        const nextTime = currentTimeRef.current + delta * playbackSpeed;
-
-        if (nextTime >= duration) {
-          if (currentSceneIndex < totalScenes - 1) {
-            setCurrentTime(0);
-            setLiveWordIndex(-1);
-            onNextScene();
-          } else {
-            setCurrentTime(duration);
-            setIsPlaying(false);
-            setLiveWordIndex(-1);
-            audioEngine.stopSpeaking();
-            return;
-          }
-        } else {
-          setCurrentTime(nextTime);
-        }
-
-        animId = requestAnimationFrame(loop);
-      };
-
-      animId = requestAnimationFrame(loop);
-    } else {
-      setLiveWordIndex(-1);
-      audioEngine.stopSpeaking();
-    }
-
-    return () => {
-      if (animId) cancelAnimationFrame(animId);
-      setLiveWordIndex(-1);
-      audioEngine.stopSpeaking();
-    };
-  }, [
-    isPlaying,
-    playbackSpeed,
-    duration,
-    currentSceneIndex,
-    totalScenes,
-    onNextScene,
-    isMusicEnabled,
-    musicTrack,
-    isVoiceMuted,
-    scene.narration,
-    voiceRate,
-    voicePitch,
-  ]);
-
   const togglePlay = () => {
-    if (currentTime >= duration) {
-      setCurrentTime(0);
-    }
-    setIsPlaying((prev) => !prev);
+    coordinator.togglePlay();
   };
 
   const handleRewind = () => {
-    setIsPlaying(false);
-    setCurrentTime(0);
-    setLiveWordIndex(-1);
-    audioEngine.stopSpeaking();
+    coordinator.rewind();
     audioEngine.playWhoosh();
   };
 
   const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
     const newTime = parseFloat(e.target.value);
-    setCurrentTime(newTime);
-    if (!isPlaying) {
-      setLiveWordIndex(-1);
-    }
+    coordinator.seek(newTime);
   };
+
+  // Compute the subtitle state with the same rule the coordinator uses.
+  // While paused, trust the word index the coordinator froze at pause time
+  // so the highlight holds on the current spoken word.
+  const subtitleState = useMemo(() => {
+    const words = scene.narration ? scene.narration.split(/\s+/).filter(Boolean) : [];
+    if (!isPlaying && subtitle.wordIndex >= 0 && subtitle.wordIndex < words.length) {
+      return { wordIndex: subtitle.wordIndex, fromCallback: false };
+    }
+    return resolveSubtitleState({
+      narration: scene.narration,
+      currentTime,
+      duration,
+      isPlaying,
+      callbackWordIndex: subtitle.wordIndex,
+      callbackValid: subtitle.fromCallback,
+    });
+  }, [scene.narration, currentTime, duration, isPlaying, subtitle]);
 
   // Canvas Mouse / Touch interactions for direct visual manipulation
   const getCanvasCoords = (clientX: number, clientY: number) => {
@@ -269,6 +324,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     }
   };
 
+  const words = scene.narration ? scene.narration.split(/\s+/).filter(Boolean) : [];
+  const activeWordIdx = subtitleState.wordIndex;
+
   return (
     <div
       ref={containerRef}
@@ -305,24 +363,15 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         </div>
 
         {/* Whisper-style Dynamic Captions: Pure Yellow Word Highlight */}
-        {isSubtitlesEnabled && scene.narration && (
+        {isSubtitlesEnabled && scene.narration && words.length > 0 && (
           <div className="absolute bottom-4 inset-x-0 flex justify-center pointer-events-none z-20 px-4">
             <div className="inline-flex items-center px-4 py-2 rounded-2xl bg-slate-950/90 backdrop-blur-md border border-slate-700/80 shadow-[0_4px_24px_rgba(0,0,0,0.7)] text-center max-w-[90%]">
               <p className="text-xs sm:text-sm font-semibold tracking-wide text-slate-300 flex flex-wrap justify-center items-center gap-1.5 leading-relaxed">
                 {(() => {
-                  const words = scene.narration.split(/\s+/).filter(Boolean);
-                  if (words.length === 0) return null;
-                  const progress = Math.min(0.999, Math.max(0, currentTime / Math.max(0.1, duration)));
-                  const computedFallbackIdx = Math.min(words.length - 1, Math.floor(progress * words.length));
-                  const activeIdx =
-                    isPlaying && liveWordIndex >= 0 && liveWordIndex < words.length
-                      ? liveWordIndex
-                      : computedFallbackIdx;
-
                   // Rolling window of up to 7 words centered around active word
                   const windowSize = Math.min(words.length, 7);
                   const half = Math.floor(windowSize / 2);
-                  let startIdx = Math.max(0, activeIdx - half);
+                  let startIdx = Math.max(0, activeWordIdx - half);
                   let endIdx = Math.min(words.length, startIdx + windowSize);
                   if (endIdx - startIdx < windowSize) {
                     startIdx = Math.max(0, endIdx - windowSize);
@@ -330,11 +379,12 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
                   return words.slice(startIdx, endIdx).map((w, sliceIdx) => {
                     const actualIdx = startIdx + sliceIdx;
-                    const isCurrent = actualIdx === activeIdx;
-                    const isPast = actualIdx < activeIdx;
+                    const isCurrent = actualIdx === activeWordIdx;
+                    const isPast = actualIdx < activeWordIdx;
                     return (
                       <span
                         key={actualIdx}
+                        data-word-idx={actualIdx}
                         className={`inline-block px-1.5 py-0.5 rounded transition-all duration-150 ${
                           isCurrent
                             ? 'bg-amber-400 text-slate-950 font-black scale-110 shadow-[0_0_16px_rgba(251,191,36,0.9)] ring-2 ring-amber-300'
@@ -368,21 +418,22 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               min={0}
               max={duration}
               step={0.05}
-              value={currentTime}
+              value={Math.min(currentTime, duration)}
               onChange={handleSeek}
               className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-amber-400 hover:accent-amber-300"
             />
 
-            {/* Word Anchors Tick Marks on Timeline */}
+            {/* Word Anchors Tick Marks on Timeline (clamped to scene bounds) */}
             <div className="absolute inset-x-0 -bottom-3 flex justify-between pointer-events-none px-1">
               {scene.elements.map((el) => {
-                const leftPercent = ((el.triggerTimeSec || 0) / duration) * 100;
+                const clampedTrigger = effectiveTriggerTime(el.triggerTimeSec, duration);
+                const leftPercent = (clampedTrigger / Math.max(0.1, duration)) * 100;
                 return (
                   <div
                     key={el.id}
                     style={{ left: `${leftPercent}%` }}
                     className="absolute -top-1 w-1.5 h-1.5 rounded-full bg-cyan-400"
-                    title={`"${el.label || el.type}" triggers at ${el.triggerTimeSec?.toFixed(1)}s`}
+                    title={`"${el.label || el.type}" triggers at ${clampedTrigger.toFixed(1)}s`}
                   />
                 );
               })}
@@ -401,14 +452,14 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               Cues:
             </span>
             {scene.elements.map((el) => {
-              const t = el.triggerTimeSec || 0;
+              const t = effectiveTriggerTime(el.triggerTimeSec, duration);
               const isPassed = currentTime >= t;
               const isSelected = selectedElementId === el.id;
               return (
                 <button
                   key={el.id}
                   onClick={() => {
-                    setCurrentTime(t);
+                    coordinator.seek(t);
                     onSelectElement(el.id);
                   }}
                   className={`px-2 py-0.5 rounded-md border flex items-center gap-1 shrink-0 transition-colors cursor-pointer text-[10px] ${
@@ -437,7 +488,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           {/* Left: Scene Jumpers & Play */}
           <div className="flex items-center gap-1.5 sm:gap-2">
             <button
-              onClick={onPrevScene}
+              onClick={() => {
+                pendingAutoAdvanceRef.current = false;
+                onPrevScene();
+              }}
               disabled={currentSceneIndex === 0}
               className="p-1.5 rounded-lg text-slate-400 hover:text-white disabled:opacity-40 hover:bg-slate-800 transition-colors cursor-pointer"
               title="Previous Scene"
@@ -454,7 +508,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             </button>
 
             <button
-              onClick={onNextScene}
+              onClick={() => {
+                pendingAutoAdvanceRef.current = false;
+                onNextScene();
+              }}
               disabled={currentSceneIndex >= totalScenes - 1}
               className="p-1.5 rounded-lg text-slate-400 hover:text-white disabled:opacity-40 hover:bg-slate-800 transition-colors cursor-pointer"
               title="Next Scene"
@@ -516,17 +573,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               {isVoiceMuted ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
             </button>
 
-            {/* Background Music Toggle */}
+            {/* Background Music Toggle: the lifecycle effect owns the single
+                music loop, so the button only flips the enabled flag. */}
             <button
-              onClick={() => {
-                if (isMusicEnabled) {
-                  audioEngine.stopMusic();
-                  setIsMusicEnabled(false);
-                } else {
-                  setIsMusicEnabled(true);
-                  if (isPlaying) audioEngine.startMusic(musicTrack);
-                }
-              }}
+              onClick={() => setIsMusicEnabled((enabled) => !enabled)}
               className={`p-1.5 rounded-lg border transition-colors cursor-pointer ${
                 isMusicEnabled
                   ? 'bg-amber-500/15 border-amber-500/30 text-amber-300'

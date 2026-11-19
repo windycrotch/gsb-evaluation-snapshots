@@ -1,5 +1,6 @@
 import rough from 'roughjs';
 import { VisualElement, Scene, ThemeLook, THEME_CONFIGS } from '../types/explainroo';
+import { effectiveTriggerTime } from './playbackSync';
 
 export interface RenderContext {
   canvas: HTMLCanvasElement;
@@ -55,8 +56,11 @@ export function renderSceneToCanvas({
   const sortedElements = [...scene.elements].sort((a, b) => (a.order || 0) - (b.order || 0));
 
   // 5. Render Each Element
+  const sceneDuration = scene.durationSeconds || 7;
   sortedElements.forEach((el) => {
-    const triggerTime = el.triggerTimeSec || 0;
+    // Clamp triggers to the scene bounds so an out-of-range element still
+    // appears (at scene start or the final frame) instead of never entering.
+    const triggerTime = effectiveTriggerTime(el.triggerTimeSec, sceneDuration);
     const duration = (el.durationMs || 500) / 1000;
 
     // Calculate entrance animation progress

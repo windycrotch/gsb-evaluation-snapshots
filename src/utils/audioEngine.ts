@@ -1,4 +1,13 @@
-// Audio Engine with real-time generative background music, Web Speech TTS, and auto-ducking
+// Audio Engine with real-time generative background music, Web Speech TTS, and auto-ducking.
+//
+// Synchronization contract:
+// - Every narration / custom-audio start belongs to a monotonic "session".
+//   Any callback (word boundary, fallback timer, end/error) captured by an
+//   older session is dropped, so speech from a previous scene or a replaced
+//   voice track can never touch the current subtitles.
+// - Ducking state is tracked explicitly. Starting / restarting the music
+//   loop always re-applies the current ducking state, and only a single
+//   music interval loop can ever exist at a time.
 
 export interface AudioPlaybackState {
   isPlaying: boolean;
@@ -9,12 +18,35 @@ export interface AudioPlaybackState {
 
 export type WordBoundaryListener = (word: string, charIndex: number, wordIndex: number) => void;
 
+export interface SpeakOptions {
+  rate?: number;
+  pitch?: number;
+  /**
+   * Playhead offset (seconds) at which the narration is being (re)started,
+   * e.g. after a seek or resume. Word events for words estimated to have
+   * already been spoken before the offset are suppressed.
+   */
+  startOffsetSec?: number;
+  /**
+   * Session token issued by the playback coordinator. The engine adopts it
+   * as its active session id so callback staleness checks use one token
+   * source of truth.
+   */
+  sessionToken?: number;
+}
+
+const MUSIC_BASE_GAIN = 0.25;
+const MUSIC_DUCK_GAIN = 0.08;
+// Estimated speaking rate used both for the no-boundary fallback timer and
+// for mapping word indexes to times when seeking.
+const WORDS_PER_SECOND_BASE = 2.6;
+
 class AudioEngine {
   private ctx: AudioContext | null = null;
   private musicGain: GainNode | null = null;
   private sfxGain: GainNode | null = null;
   private masterGain: GainNode | null = null;
-  private isMusicPlaying = false;
+  private musicPlaying = false;
   private musicInterval: number | null = null;
   private currentTrack = 'lofi';
   private speechUtterance: SpeechSynthesisUtterance | null = null;
@@ -24,12 +56,54 @@ class AudioEngine {
   private fallbackWordTimer: number | null = null;
   private hasReceivedNativeBoundary: boolean = false;
 
+  /** Monotonic id of the current voice/audio session. */
+  private activeSessionId = 0;
+  /** Explicit ducking state so music (re)starts inherit the right volume. */
+  private duckingActive = false;
+
   public getCurrentTrack(): string {
     return this.currentTrack;
   }
 
   public isSpeaking(): boolean {
-    return Boolean(this.speechUtterance);
+    return Boolean(this.speechUtterance) || Boolean(this.customAudio);
+  }
+
+  public isDucking(): boolean {
+    return this.duckingActive;
+  }
+
+  public isMusicPlaying(): boolean {
+    return this.musicPlaying;
+  }
+
+  /** Exposed for tests / diagnostics: number of active music scheduler loops. */
+  public getMusicLoopCount(): number {
+    return this.musicInterval !== null ? 1 : 0;
+  }
+
+  /**
+   * Begin a new voice/audio session and return its token. When an external
+   * token is supplied (e.g. from the PlaybackCoordinator) the engine adopts
+   * it; otherwise it advances its own monotonic counter.
+   */
+  public beginSession(externalToken?: number): number {
+    if (typeof externalToken === 'number' && Number.isFinite(externalToken)) {
+      // Never move backwards: take the max so a stale external token cannot
+      // resurrect an invalidated session.
+      this.activeSessionId = Math.max(this.activeSessionId + 1, externalToken);
+    } else {
+      this.activeSessionId += 1;
+    }
+    return this.activeSessionId;
+  }
+
+  public getActiveSessionId(): number {
+    return this.activeSessionId;
+  }
+
+  public isSessionActive(sessionId: number): boolean {
+    return sessionId === this.activeSessionId;
   }
 
   public addWordListener(listener: WordBoundaryListener): () => void {
@@ -37,7 +111,9 @@ class AudioEngine {
     if (this.currentWordIndex >= 0) {
       try {
         listener(this.currentSpokenWord, 0, this.currentWordIndex);
-      } catch {}
+      } catch {
+        // listener errors must not break playback
+      }
     }
     return () => {
       this.wordListeners.delete(listener);
@@ -70,7 +146,10 @@ class AudioEngine {
       this.masterGain.connect(this.ctx.destination);
 
       this.musicGain = this.ctx.createGain();
-      this.musicGain.gain.setValueAtTime(0.25, this.ctx.currentTime);
+      this.musicGain.gain.setValueAtTime(
+        this.duckingActive ? MUSIC_DUCK_GAIN : MUSIC_BASE_GAIN,
+        this.ctx.currentTime
+      );
       this.musicGain.connect(this.masterGain);
 
       this.sfxGain = this.ctx.createGain();
@@ -174,9 +253,10 @@ class AudioEngine {
 
   // Audio Ducking: lowers music when narrator is speaking
   public setDucking(active: boolean) {
+    this.duckingActive = active;
     if (!this.ctx || !this.musicGain) return;
     const t = this.ctx.currentTime;
-    const target = active ? 0.08 : 0.25;
+    const target = active ? MUSIC_DUCK_GAIN : MUSIC_BASE_GAIN;
     this.musicGain.gain.cancelScheduledValues(t);
     this.musicGain.gain.linearRampToValueAtTime(target, t + 0.25);
   }
@@ -184,15 +264,28 @@ class AudioEngine {
   // Generative Background Music Tracks
   public startMusic(track: string = 'lofi') {
     this.initContext();
+    // Always tear down any previous scheduler first so at most one music
+    // loop exists, even when startMusic is called repeatedly.
     this.stopMusic();
     this.currentTrack = track;
-    this.isMusicPlaying = true;
+    this.musicPlaying = true;
+
+    // Re-apply the current ducking state to the (possibly freshly created)
+    // gain node so toggling music off/on never accumulates volume changes.
+    if (this.ctx && this.musicGain) {
+      const t = this.ctx.currentTime;
+      this.musicGain.gain.cancelScheduledValues(t);
+      this.musicGain.gain.setValueAtTime(
+        this.duckingActive ? MUSIC_DUCK_GAIN : MUSIC_BASE_GAIN,
+        t
+      );
+    }
 
     // Generative chord progression based on track
     const chordProgressions: Record<string, number[][]> = {
       lofi: [
         [261.63, 329.63, 392.0, 493.88], // Cmaj7
-        [220.0, 261.63, 329.63, 392.0],  // Am7
+        [220.0, 261.63, 329.63, 392.0], // Am7
         [174.61, 220.0, 261.63, 329.63], // Fmaj7
         [196.0, 246.94, 293.66, 349.23], // G7
       ],
@@ -203,10 +296,10 @@ class AudioEngine {
         [123.47, 185.0, 246.94, 370.0], // B power
       ],
       acoustic: [
-        [261.63, 329.63, 392.0],        // C
-        [196.0, 246.94, 293.66],        // G
-        [220.0, 261.63, 329.63],        // Am
-        [174.61, 220.0, 261.63],        // F
+        [261.63, 329.63, 392.0], // C
+        [196.0, 246.94, 293.66], // G
+        [220.0, 261.63, 329.63], // Am
+        [174.61, 220.0, 261.63], // F
       ],
     };
 
@@ -214,7 +307,7 @@ class AudioEngine {
     let chordIdx = 0;
 
     const playChord = () => {
-      if (!this.isMusicPlaying || !this.ctx || !this.musicGain) return;
+      if (!this.musicPlaying || !this.ctx || !this.musicGain) return;
       const notes = chords[chordIdx % chords.length];
       chordIdx++;
 
@@ -247,10 +340,17 @@ class AudioEngine {
   }
 
   public stopMusic() {
-    this.isMusicPlaying = false;
-    if (this.musicInterval) {
+    this.musicPlaying = false;
+    if (this.musicInterval !== null) {
       clearInterval(this.musicInterval);
       this.musicInterval = null;
+    }
+  }
+
+  private clearFallbackTimer() {
+    if (this.fallbackWordTimer !== null) {
+      clearInterval(this.fallbackWordTimer);
+      this.fallbackWordTimer = null;
     }
   }
 
@@ -260,33 +360,49 @@ class AudioEngine {
     onWordSpoken?: (word: string, charIndex: number, wordIndex: number) => void,
     onEnd?: () => void,
     rate: number = 1.0,
-    pitch: number = 1.0
-  ) {
-    if (!('speechSynthesis' in window)) {
-      if (onEnd) onEnd();
-      return;
-    }
-
-    this.stopSpeaking();
+    pitch: number = 1.0,
+    options: SpeakOptions = {}
+  ): number {
+    // Tear down any prior voice source first (this invalidates its session),
+    // then open the new session, optionally adopting the coordinator's token.
+    this.stopVoiceOnly();
+    const sessionId = this.beginSession(options.sessionToken);
     this.setDucking(true);
 
-    if (!text || !text.trim()) {
+    if (!('speechSynthesis' in window)) {
+      this.setDucking(false);
       if (onEnd) onEnd();
-      return;
+      return sessionId;
+    }
+
+    if (!text || !text.trim()) {
+      this.setDucking(false);
+      if (onEnd) onEnd();
+      return sessionId;
     }
 
     const trimmedText = text.trim();
     const wordsList = trimmedText.split(/\s+/).filter(Boolean);
+    const startOffsetSec = Math.max(0, options.startOffsetSec || 0);
+    const clampedRate = Math.max(0.7, Math.min(1.5, rate));
+    const wordsPerSecond = WORDS_PER_SECOND_BASE * clampedRate;
 
     const utterance = new SpeechSynthesisUtterance(trimmedText);
-    utterance.rate = Math.max(0.7, Math.min(1.5, rate));
+    utterance.rate = clampedRate;
     utterance.pitch = Math.max(0.8, Math.min(1.3, pitch));
 
     // Try to pick a natural English voice
     const voices = window.speechSynthesis.getVoices();
-    const naturalVoice = voices.find(
-      (v) => (v.name.includes('Natural') || v.name.includes('Google') || v.name.includes('Siri') || v.name.includes('Samantha') || v.name.includes('Daniel')) && v.lang.startsWith('en')
-    ) || voices.find((v) => v.lang.startsWith('en'));
+    const naturalVoice =
+      voices.find(
+        (v) =>
+          (v.name.includes('Natural') ||
+            v.name.includes('Google') ||
+            v.name.includes('Siri') ||
+            v.name.includes('Samantha') ||
+            v.name.includes('Daniel')) &&
+          v.lang.startsWith('en')
+      ) || voices.find((v) => v.lang.startsWith('en'));
 
     if (naturalVoice) {
       utterance.voice = naturalVoice;
@@ -294,35 +410,40 @@ class AudioEngine {
 
     this.hasReceivedNativeBoundary = false;
 
+    // A word event belongs to the seek offset only once its estimated
+    // position is at/past the offset. Earlier events belong to words the
+    // playhead has already passed and must not move the highlight back.
+    const isWithinOffset = (wordIndex: number) => wordIndex / wordsPerSecond >= startOffsetSec - 0.05;
+
     // Fallback timer: in case SpeechSynthesis onboundary is not fired by the OS/voice
-    // Estimates speech progress (~2.6 words per second scaled by rate)
     let fallbackIdx = 0;
-    const intervalMs = Math.max(150, Math.round(1000 / (2.6 * utterance.rate)));
+    const intervalMs = Math.max(150, Math.round(1000 / wordsPerSecond));
     this.fallbackWordTimer = window.setInterval(() => {
+      if (sessionId !== this.activeSessionId) {
+        this.clearFallbackTimer();
+        return;
+      }
       if (this.hasReceivedNativeBoundary) {
-        if (this.fallbackWordTimer) {
-          clearInterval(this.fallbackWordTimer);
-          this.fallbackWordTimer = null;
-        }
+        this.clearFallbackTimer();
         return;
       }
       if (fallbackIdx < wordsList.length) {
-        const spokenWord = wordsList[fallbackIdx];
-        if (onWordSpoken) {
-          onWordSpoken(spokenWord, 0, fallbackIdx);
-        }
-        this.notifyWord(spokenWord, 0, fallbackIdx);
+        const wordIndex = fallbackIdx;
         fallbackIdx++;
+        if (!isWithinOffset(wordIndex)) return;
+        const spokenWord = wordsList[wordIndex];
+        if (onWordSpoken) {
+          onWordSpoken(spokenWord, 0, wordIndex);
+        }
+        this.notifyWord(spokenWord, 0, wordIndex);
       }
     }, intervalMs);
 
     utterance.onboundary = (event) => {
+      if (sessionId !== this.activeSessionId) return;
       if (event.name === 'word') {
         this.hasReceivedNativeBoundary = true;
-        if (this.fallbackWordTimer) {
-          clearInterval(this.fallbackWordTimer);
-          this.fallbackWordTimer = null;
-        }
+        this.clearFallbackTimer();
 
         const charIdx = event.charIndex;
         const slice = trimmedText.slice(charIdx);
@@ -338,6 +459,8 @@ class AudioEngine {
         const wordsBefore = textBefore.trim() ? textBefore.trim().split(/\s+/).filter(Boolean) : [];
         const wordIndex = wordsBefore.length;
 
+        if (!isWithinOffset(wordIndex)) return;
+
         if (onWordSpoken) {
           onWordSpoken(spokenWord, charIdx, wordIndex);
         }
@@ -346,10 +469,8 @@ class AudioEngine {
     };
 
     utterance.onend = () => {
-      if (this.fallbackWordTimer) {
-        clearInterval(this.fallbackWordTimer);
-        this.fallbackWordTimer = null;
-      }
+      if (sessionId !== this.activeSessionId) return;
+      this.clearFallbackTimer();
       this.setDucking(false);
       this.speechUtterance = null;
       this.notifyWord('', -1, -1);
@@ -357,10 +478,8 @@ class AudioEngine {
     };
 
     utterance.onerror = () => {
-      if (this.fallbackWordTimer) {
-        clearInterval(this.fallbackWordTimer);
-        this.fallbackWordTimer = null;
-      }
+      if (sessionId !== this.activeSessionId) return;
+      this.clearFallbackTimer();
       this.setDucking(false);
       this.speechUtterance = null;
       this.notifyWord('', -1, -1);
@@ -369,61 +488,132 @@ class AudioEngine {
 
     this.speechUtterance = utterance;
     window.speechSynthesis.speak(utterance);
+    return sessionId;
   }
 
   private customAudio: HTMLAudioElement | null = null;
 
-  public playCustomAudio(url: string, onEnd?: () => void) {
-    this.stopSpeaking();
+  public playCustomAudio(url: string, onEnd?: () => void, sessionToken?: number): number {
+    this.stopVoiceOnly();
+    const sessionId = this.beginSession(sessionToken);
     this.setDucking(true);
-    if (this.customAudio) {
-      this.customAudio.pause();
-      this.customAudio = null;
-    }
+
     const audio = new Audio(url);
+    this.customAudio = audio;
+
     audio.onended = () => {
+      if (sessionId !== this.activeSessionId) return;
       this.setDucking(false);
       this.customAudio = null;
       this.notifyWord('', -1, -1);
       if (onEnd) onEnd();
     };
     audio.onerror = () => {
+      if (sessionId !== this.activeSessionId) return;
       this.setDucking(false);
       this.customAudio = null;
       this.notifyWord('', -1, -1);
       if (onEnd) onEnd();
     };
-    this.customAudio = audio;
     audio.play().catch(() => {});
+    return sessionId;
+  }
+
+  /** Move a currently playing uploaded voice track to a new playhead time. */
+  public seekCustomAudio(timeSec: number) {
+    if (this.customAudio) {
+      const clamped = Math.max(0, timeSec);
+      try {
+        this.customAudio.currentTime = Number.isFinite(clamped)
+          ? Math.min(clamped, this.customAudio.duration || clamped)
+          : 0;
+      } catch {
+        // Some media do not support seeking before metadata loads
+      }
+    }
+  }
+
+  public pauseCustomAudio() {
+    if (this.customAudio) {
+      this.customAudio.pause();
+    }
+  }
+
+  public resumeCustomAudio() {
+    if (this.customAudio) {
+      this.customAudio.play().catch(() => {});
+    }
+  }
+
+  public hasCustomAudio(): boolean {
+    return this.customAudio !== null;
   }
 
   public stopCustomAudio() {
     if (this.customAudio) {
-      this.customAudio.pause();
-      this.customAudio.currentTime = 0;
+      const audio = this.customAudio;
       this.customAudio = null;
+      audio.onended = null;
+      audio.onerror = null;
+      audio.pause();
+      try {
+        audio.currentTime = 0;
+      } catch {
+        // ignore
+      }
     }
     this.setDucking(false);
     this.notifyWord('', -1, -1);
   }
 
-  public stopSpeaking() {
-    if (this.fallbackWordTimer) {
-      clearInterval(this.fallbackWordTimer);
-      this.fallbackWordTimer = null;
-    }
+  /** Stop voice sources without touching music playback. */
+  private stopVoiceOnly() {
+    this.clearFallbackTimer();
     if ('speechSynthesis' in window) {
       window.speechSynthesis.cancel();
     }
     this.speechUtterance = null;
+    if (this.customAudio) {
+      const audio = this.customAudio;
+      this.customAudio = null;
+      audio.onended = null;
+      audio.onerror = null;
+      audio.pause();
+      try {
+        audio.currentTime = 0;
+      } catch {
+        // ignore
+      }
+    }
+    // Invalidate every pending callback from the previous source.
+    this.activeSessionId += 1;
+  }
+
+  public stopSpeaking() {
+    this.clearFallbackTimer();
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+    }
+    this.speechUtterance = null;
+    if (this.customAudio) {
+      const audio = this.customAudio;
+      this.customAudio = null;
+      audio.onended = null;
+      audio.onerror = null;
+      audio.pause();
+      try {
+        audio.currentTime = 0;
+      } catch {
+        // ignore
+      }
+    }
+    this.activeSessionId += 1;
     this.notifyWord('', -1, -1);
-    this.stopCustomAudio();
     this.setDucking(false);
   }
 
   public stopAll() {
     this.stopSpeaking();
-    this.stopCustomAudio();
     this.stopMusic();
     this.notifyWord('', -1, -1);
   }
