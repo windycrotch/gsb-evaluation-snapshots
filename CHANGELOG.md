@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Opening a share link now restores the whole three-layer mix as one observable,
+  rollback-able transaction. The link is validated up front — an unknown song code, an
+  out-of-range volume/tempo or an unknown key is rejected before anything in the engine
+  changes — and the limiter worklet is rebuilt together with the master mix graph; if
+  that rebuild or any layer's stretch fails, all three layers return to their
+  pre-restore songs, gains, mutes, key and tempo and one error is shown, instead of a
+  half-loaded or silent "ready" mix. During a restore, picks, Random, clear, mute and
+  volume changes queue behind it and apply in order once it ends, so they can't rewrite
+  a layer mid-transaction; only a successful restore triggers a render. Pasting two
+  links in a row honours only the last (an identical in-flight link is coalesced, so a
+  background/foreground round trip never submits it twice), and a failed render is no
+  longer cached against a retry
 - Safari: changing a stem no longer leaves the old one playing in the background at its old tempo.
   The engine kept each fade-out's plan on Web Audio objects it didn't hold, which Safari can throw
   away; the next swap's fade-out then failed, the stop after it was skipped and the old stem looped

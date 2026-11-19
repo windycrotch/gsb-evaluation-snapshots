@@ -139,8 +139,28 @@ export async function loadManifest(url) {
 // chosen so a three-layer mix plays about as loud as it did through the old compressors.
 const LIMIT = { lookahead: 0.005, release: 0.12, ceiling: -1, drive: -2.5 };
 const limiterModule = new URL('./limiter-worklet.js', import.meta.url);
-const loadLimiter = (c) => (c.audioWorklet && window.AudioWorkletNode
-  ? c.audioWorklet.addModule(limiterModule) : Promise.reject(new Error('AudioWorklet is not supported')));
+
+// Controllable failure injection for the share-restore transaction and its tests.
+// Keys: 'limiter' (the worklet module refuses to load), 'stretch:<song>' or '*'
+// (a render/stretch rejects). Real installs never set these; the Node test harness does.
+export const testFaults = new Set();
+export function setTestFault(name, on = true) { on ? testFaults.add(name) : testFaults.delete(name); }
+export function clearTestFaults() { testFaults.clear(); }
+// Test-only interception points (always null in production builds).
+export const testHooks = { beforeRebuildGraph: null };
+export function setTestHook(name, fn) { testHooks[name] = fn ?? null; }
+
+const loadLimiter = (c) => new Promise((resolve, reject) => {
+  if (testFaults.has('limiter')) { reject(Object.assign(new Error('injected limiter worklet failure'), { code: 'limiter' })); return; }
+  if (!c.audioWorklet || !window.AudioWorkletNode) { reject(new Error('AudioWorklet is not supported')); return; }
+  c.audioWorklet.addModule(limiterModule).then(resolve, reject);
+});
+// Strict: the share-restore transaction must *know* when the limiter can't be built,
+// instead of the silent compressor fallback (buildMaster keeps the fallback for play()).
+async function loadLimiterStrict(c) {
+  await loadLimiter(c);
+  return buildLimiter(c);
+}
 function buildLimiter(c) {
   const lookahead = Math.round(LIMIT.lookahead * c.sampleRate);
   const input = c.createGain();
@@ -258,46 +278,67 @@ export function ensureCtx() {
   // A call, Siri or another app suspends (iOS: 'interrupts') the context; bring it back when we can.
   ctx.onstatechange = () => { if (ctx.state === 'running') watchClock(); wakeAudio(); };
   document.addEventListener('visibilitychange', wakeAudio);
-  master = ctx.createGain();
+  buildGraph(ctx, { strict: false });
+  return ctx;
+}
+
+// Builds the whole mix graph for context `c`: master chain, glue (compressor fallback
+// with the limiter upgrading in behind it), and every layer's fxIn/gain/analyser chain.
+// Strict mode is used by the share-restore transaction: the limiter worklet must load,
+// and a failure rejects instead of silently degrading to the compressor glue. The
+// transaction owns rollback, so nothing here swallows the error.
+async function buildGraph(c, { strict } = {}) {
+  master = c.createGain();
   master.gain.value = 0.9;
-  bus = ctx.createGain();
-  hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 10;
-  lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 22000;
+  bus = c.createGain();
+  hp = c.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 10;
+  lp = c.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 22000;
   // Low-pass and High-pass sweep in cents (detune), which is exponential in Hz but ramps in
   // straight lines, so it can be tracked like the gains (see rampTracked).
   Object.assign(fxLine, { hpDetune: tracked(hp.detune), hpQ: tracked(hp.Q), lpDetune: tracked(lp.detune), lpQ: tracked(lp.Q) });
-  fxDry = ctx.createGain(); fxLine.dry = tracked(fxDry.gain, 1);
-  wah = ctx.createBiquadFilter(); wah.type = 'bandpass'; wah.frequency.value = WAH.center; wah.Q.value = WAH.q;
-  wahWet = ctx.createGain(); wahWet.gain.value = 0; fxLine.wahWet = tracked(wahWet.gain, 0);
+  fxDry = c.createGain(); fxLine.dry = tracked(fxDry.gain, 1);
+  wah = c.createBiquadFilter(); wah.type = 'bandpass'; wah.frequency.value = WAH.center; wah.Q.value = WAH.q;
+  wahWet = c.createGain(); wahWet.gain.value = 0; fxLine.wahWet = tracked(wahWet.gain, 0);
   phaser = Array.from({ length: PHASER.stages }, () => {
-    const f = ctx.createBiquadFilter();
+    const f = c.createBiquadFilter();
     f.type = 'allpass'; f.frequency.value = PHASER.low; f.Q.value = PHASER.q;
     return f;
   });
-  phWet = ctx.createGain(); phWet.gain.value = 0; fxLine.phWet = tracked(phWet.gain, 0);
-  analyser = ctx.createAnalyser();
+  phWet = c.createGain(); phWet.gain.value = 0; fxLine.phWet = tracked(phWet.gain, 0);
+  analyser = c.createAnalyser();
   analyser.fftSize = 512;
   analyser.smoothingTimeConstant = 0.8;
-  mediaDest = ctx.createMediaStreamDestination();
-  glueIn = ctx.createGain();
-  const glueOut = ctx.createGain(), glue = buildGlue(ctx), fbLevel = ctx.createGain();
-  glueIn.connect(glue.input); glue.output.connect(fbLevel); fbLevel.connect(glueOut);
-  upgradeGlue(ctx, glue, fbLevel, glueOut);
+  mediaDest = c.createMediaStreamDestination();
+  glueIn = c.createGain();
+  const glueOut = c.createGain();
+
+  if (strict) {
+    // The limiter worklet and the master graph come up together: a failure here is a
+    // transaction failure the caller must roll back, never a silent fallback.
+    const lim = await loadLimiterStrict(c);
+    const level = c.createGain(); level.gain.value = 1;
+    glueIn.connect(lim.input); lim.output.connect(level); level.connect(glueOut);
+    limiterReady = Promise.resolve();
+  } else {
+    const glue = buildGlue(c), fbLevel = c.createGain();
+    glueIn.connect(glue.input); glue.output.connect(fbLevel); fbLevel.connect(glueOut);
+    upgradeGlue(c, glue, fbLevel, glueOut);
+  }
 
   bus.connect(hp); hp.connect(lp); lp.connect(fxDry); fxDry.connect(glueIn);
   lp.connect(wah); wah.connect(wahWet); wahWet.connect(glueIn);
   phaser.reduce((a, b) => { a.connect(b); return b; }, lp).connect(phWet); phWet.connect(glueIn);
   glueOut.connect(master);
   glueOut.connect(mediaDest); // recordings are taken before the volume slider, at the export's level
-  master.connect(analyser); analyser.connect(ctx.destination);
+  master.connect(analyser); analyser.connect(c.destination);
   // The kick's band, for the visuals only (see meters): the output in mono through a 40-120 Hz
   // band-pass into an analyser that leads nowhere, so nothing of it is heard.
-  const lowCut = ctx.createBiquadFilter(); lowCut.type = 'highpass'; lowCut.frequency.value = 40;
+  const lowCut = c.createBiquadFilter(); lowCut.type = 'highpass'; lowCut.frequency.value = 40;
   lowCut.channelCount = 1; lowCut.channelCountMode = 'explicit';
-  lowAnalyser = ctx.createAnalyser();
+  lowAnalyser = c.createAnalyser();
   lowAnalyser.fftSize = METER.lowWin;
   [0, 1].reduce((node) => {
-    const f = ctx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 120;
+    const f = c.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 120;
     node.connect(f);
     return f;
   }, lowCut).connect(lowAnalyser);
@@ -306,23 +347,64 @@ export function ensureCtx() {
   // Chromium stops running a node once all its inputs have ended, and automation timed in that
   // gap is lost (measured: an insert reopened just after its sources stopped, as on Stop during
   // Stutter, stayed shut and the next Play was silent). A constant zero keeps the inserts running.
-  const keepAlive = ctx.createConstantSource ? ctx.createConstantSource() : null;
+  const keepAlive = c.createConstantSource ? c.createConstantSource() : null;
   if (keepAlive) { keepAlive.offset.value = 0; keepAlive.start(); }
   for (const l of LAYERS) {
     const s = state.layers[l.id];
     // Every source of the layer (playing, fading out, or waiting for its bar line) goes through
     // fxIn, so Stutter and Tape stop can silence all of them at once.
-    s.fxIn = ctx.createGain();
+    s.fxIn = c.createGain();
     s.insert = tracked(s.fxIn.gain, 1);
     if (keepAlive) keepAlive.connect(s.fxIn);
-    s.gain = ctx.createGain();
+    s.gain = c.createGain();
     s.fxIn.connect(s.gain);
     s.gain.gain.value = s.muted ? 0 : s.volume;
-    s.analyser = ctx.createAnalyser();
+    s.analyser = c.createAnalyser();
     s.analyser.fftSize = METER.win;
     s.gain.connect(s.analyser);
     s.gain.connect(bus);
   }
+}
+
+// Rebuild the limiter worklet together with the main mix graph on a fresh context.
+// Strict mode (the share-restore transaction) rejects on any worklet/graph failure so
+// the restore can roll back instead of silently playing through the compressor glue.
+// The render/download caches survive: they key off song/tempo/key, not the context.
+export async function rebuildMixGraph({ strict = false } = {}) {
+  if (testHooks.beforeRebuildGraph) await testHooks.beforeRebuildGraph({ strict }); // test gate (null in production)
+  const old = ctx;
+  if (old) {
+    for (const l of LAYERS) stopSource(l.id); // nothing may keep ringing through the torn-down graph
+    state.playing = false;
+    try { old.close(); } catch (err) { console.warn('closing the old audio context failed', err); }
+    ctx = null;
+    limiterReady = null;
+  }
+  const c = ensureCtxLike();
+  try {
+    await buildGraph(c, { strict });
+  } catch (err) {
+    // The new graph (e.g. its limiter worklet) failed: don't leave `ctx` pointing at a
+    // half-built context. Close it and clear the reference, so the next ensureCtx() —
+    // including the rollback's re-selection — builds a complete, working graph.
+    try { await c.close(); } catch (_) { /* already gone */ }
+    if (ctx === c) ctx = null;
+    throw err;
+  }
+  return c;
+}
+
+// Creates the context exactly like ensureCtx would, without building a graph onto it
+// (rebuildMixGraph does that itself, strict).
+function ensureCtxLike() {
+  const AC = window.AudioContext || window.webkitAudioContext;
+  const latencyHint = handheld && !webkit ? 'playback' : 'interactive';
+  let refused = '';
+  try { ctx = new AC(nativeRate ? { latencyHint } : { sampleRate: STEM_RATE, latencyHint }); } catch (err) { refused = ` (${err && err.message})`; ctx = new AC(); }
+  if (!nativeRate && ctx.sampleRate !== STEM_RATE) console.warn(`44.1 kHz audio was refused${refused}; running at ${ctx.sampleRate} Hz, converting the loops to it`);
+  setLead();
+  watchClock();
+  ctx.onstatechange = () => { if (ctx.state === 'running') watchClock(); wakeAudio(); };
   return ctx;
 }
 
@@ -484,6 +566,12 @@ const MB = 1 << 20;
 export const CACHE_BUDGET = (deviceGB <= 2 ? 128 : deviceGB <= 4 || handheld ? 256 : 512) * MB;
 const originals = new Map(); // stem id -> { promise, listeners, ctl, settled, downloading, buf }
 const renders = new Map();   // render key -> { promise, bpm, buf }
+
+// Test-only: drop cached downloads and renders so a fault injected for a song can fail
+// a fresh render even though an earlier test rendered it successfully. Production code
+// keeps these caches for the whole session, by design.
+export function __resetCachesForTest() { originals.clear(); renders.clear(); }
+
 function lruGet(map, key) {
   const v = map.get(key);
   if (v !== undefined) { map.delete(key); map.set(key, v); }
@@ -547,6 +635,9 @@ const sleep = (ms, signal) => new Promise((resolve, reject) => {
   const t = setTimeout(resolve, ms);
   if (signal) signal.addEventListener('abort', () => { clearTimeout(t); reject(abortError()); }, { once: true });
 });
+// Timers/intervals must not keep a non-browser runtime (the Node test harness) alive;
+// unref() is harmless where it exists and absent in browsers.
+const keepLoose = (handle) => { if (handle && typeof handle.unref === 'function') handle.unref(); return handle; };
 
 const encodePath = (p) => encodeURI(p).replace(/#/g, '%23');
 
@@ -963,11 +1054,21 @@ function render(song, type, onProgress, at) {
     entry.promise = (async () => {
       const kept = await keptRender(info, type, key);
       if (kept) { if (onProgress) onProgress(1); entry.buf = kept; return kept; }
+      // Controllable stretch failure for the share-restore transaction tests (see testFaults).
+      if (testFaults.has('*') || testFaults.has(`stretch:${song}`)) {
+        throw Object.assign(new Error(`injected stretch failure for ${song}`), { code: 'stretch' });
+      }
       // Dropped from the queue: forgotten at once, so a new request for it starts afresh.
       entry.buf = await stretchStem(info, type, bpm, semis, { onProgress, wanted, urgent, dropped: forget });
       return entry.buf;
     })();
-    entry.promise.then(() => setTimeout(trimCaches), forget); // once the layer waiting for it holds it
+    // A fulfilled render is trimmed once its layer holds it; a rejected one is evicted at
+    // once so the rejected promise isn't cached and a retry (e.g. a re-pasted share link,
+    // or a rolled-back restore) starts a fresh render instead of re-receiving the failure.
+    entry.promise.then(
+      () => setTimeout(trimCaches),
+      (err) => { if (!isAbort(err)) forget(); },
+    );
     renders.set(key, entry);
   } else {
     if (onProgress) onProgress(1);
@@ -1124,12 +1225,12 @@ function setLead(step = 0) {
 function watchClock() {
   if (ctx.baseLatency > 0) return;
   let last = ctx.currentTime, wall = performance.now(), reads = 0;
-  const timer = setInterval(() => {
+  const timer = keepLoose(setInterval(() => {
     const t = ctx.currentTime, now = performance.now();
     if (now - wall < 12 && t > last && t - last < LEAD_MAX) setLead(t - last);
     last = t; wall = now;
     if (++reads > 300 || ctx.state !== 'running') clearInterval(timer);
-  }, 4);
+  }, 4));
 }
 // The earliest a source may still be started: one any closer to now may already be in the past for
 // the audio thread, which then starts it late, and it stays late (see startSource).
@@ -1195,7 +1296,7 @@ const live = new Set();
 function track(x) {
   live.add(x);
   x.src.onended = () => gone(x);
-  if (!checkTimer) checkTimer = setInterval(checkSources, CHECK_MS);
+  if (!checkTimer) checkTimer = keepLoose(setInterval(checkSources, CHECK_MS));
 }
 // Once a source has ended its nodes are let go of, and the cache counts its buffer again (a replaced
 // pick's render, say): kept until the layer's next stop, it held a render (20-25 MB) per layer that
@@ -1939,6 +2040,14 @@ export async function selectStem(layerId, song, opts = {}) {
     s.song = s.type = s.buffer = s.bufferKey = null;
     state.anchorOrder = state.anchorOrder.filter((x) => x !== layerId);
     if (!activeLayers().length) endJam();
+    // A share-restore transaction owns the failure: it rolls every layer back to the
+    // snapshot and shows one error, rather than leaving this layer half-loaded with a
+    // toast while the transaction's other picks keep going.
+    if (opts.transactional) {
+      settle(group, layerId);
+      changed();
+      throw Object.assign(err instanceof Error ? err : new Error(String(err)), { code: err.code || 'stretch' });
+    }
     status(loadError(song, err), 'error');
     // The average goes back to the stems that are left, unless the tempo was set by hand (or by a
     // share link) since. So it does on a locked page whose first picks set the tempo and haven't
@@ -2131,6 +2240,58 @@ export function setMuted(layerId, muted) {
   const s = state.layers[layerId];
   s.muted = muted;
   if (s.gain) s.gain.gain.setTargetAtTime(muted ? 0 : s.volume, ctx.currentTime, 0.015);
+  changed();
+}
+
+// ---------- mix transactions (share-link restore) ----------
+// The user-visible part of a mix, captured before a restore so a failed transaction can
+// put every layer back exactly as it was. Buffers/sources are deliberately excluded:
+// the snapshot is applied while stopped, and restoreSnapshot re-selects the songs so the
+// engine rebuilds their renders itself.
+const SNAP_FIELDS = ['song', 'type', 'volume', 'muted'];
+export function snapshotMix() {
+  return {
+    bpm: state.bpm,
+    tempoTouched: state.tempoTouched,
+    autoTempo: state.autoTempo,
+    keyLock: state.keyLock,
+    masterKey: state.masterKey,
+    anchorOrder: [...state.anchorOrder],
+    layers: Object.fromEntries(LAYERS.map((l) => [l.id, {
+      ...Object.fromEntries(SNAP_FIELDS.map((f) => [f, state.layers[l.id][f]])),
+    }])),
+  };
+}
+
+// Puts a snapshot back after a failed restore. Each layer that held a song is
+// re-selected through the normal pick path (so its render is rebuilt); cleared layers
+// are cleared; gains, mutes and the global settings return verbatim. Resolves once the
+// re-selections have settled, and rejects only if a rebuild itself fails — the caller
+// logs that, since the original transaction's error is what the user sees.
+export async function restoreMixSnapshot(snap) {
+  // A failed graph rebuild can have cleared the context; bring a complete one back
+  // (non-strict, so the compressor fallback stands in if the limiter still can't load)
+  // before any layer node or pick is touched.
+  ensureCtx();
+  state.bpm = snap.bpm;
+  state.tempoTouched = snap.tempoTouched;
+  state.autoTempo = snap.autoTempo;
+  state.keyLock = snap.keyLock;
+  state.masterKey = snap.masterKey;
+  state.anchorOrder = [...snap.anchorOrder];
+  const picks = [];
+  for (const l of LAYERS) {
+    const id = l.id, s = state.layers[id], want = snap.layers[id];
+    s.volume = want.volume;
+    s.muted = want.muted;
+    if (s.gain && ctx) s.gain.gain.setTargetAtTime(want.muted ? 0 : want.volume, ctx.currentTime, 0.015);
+    if (want.song && want.song !== s.song) {
+      picks.push(selectStem(id, want.song, { force: true, noAutoplay: true, keepTempo: true }));
+    } else if (!want.song && s.song) {
+      clearLayer(id);
+    }
+  }
+  await Promise.all(picks);
   changed();
 }
 

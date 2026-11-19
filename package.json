@@ -20,7 +20,8 @@
     "dev:live": "node tools/serve-live.mjs",
     "stems": "node tools/build-stems.mjs",
     "covers": "node tools/build-covers.mjs",
-    "deploy": "node tools/deploy.mjs"
+    "deploy": "node tools/deploy.mjs",
+    "test": "node --test --test-timeout=10000 test/share-restore.test.mjs test/engine.restore.test.mjs"
   },
   "devDependencies": {
     "wrangler": "^4.0.0"

@@ -489,6 +489,14 @@ body.jamming .jam-btn { background: transparent; border-color: transparent; }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
 .toast.error { border-color: var(--danger); background: rgba(70, 8, 20, 0.92); }
 
+/* While a share link is being restored as one transaction, the layer controls read as
+   busy: their actions still work, they just queue behind the restore (see share-restore.js). */
+body.restoring #layers,
+body.restoring #wheelWrap,
+body.restoring #randomBtn { opacity: 0.55; }
+body.restoring .layer-load { animation: restore-pulse 1s ease-in-out infinite; }
+@keyframes restore-pulse { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
+
 .help {
   margin: auto;
   width: min(760px, calc(100vw - calc(32 * var(--u))));

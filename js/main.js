@@ -4,6 +4,7 @@ import { ALBUMS, albumById, songsForAlbum, displayName, albumArtUnique, loadCove
 import { createWheel } from './wheel.js';
 import { createStage } from './stage.js';
 import { VERSION, VERSION_LABEL } from './version.js';
+import { createRestoreController, parseShareHash, SLOT_LETTERS } from './share-restore.js';
 
 const $ = (s, root = document) => root.querySelector(s);
 const layerDef = (id) => LAYERS.find((l) => l.id === id);
@@ -27,6 +28,42 @@ function toast(msg, kind = '') {
 }
 E.on('status', ({ msg, kind }) => toast(msg, kind));
 
+// ---------- share-restore transaction ----------
+// One observable, rollback-able transaction per share link. While it runs, every layer
+// mutation goes through `restore.mutate`, so picks / random / clear / mute / volume
+// queue behind the restore instead of racing it on the same layer's song and gain.
+// The limiter worklet is rebuilt with the master graph; a strict rebuild failure makes
+// the whole restore fail and roll back, never a silent compressor fallback.
+const restore = createRestoreController({
+  parse: (raw) => parseShareHash(raw, { manifest: E.MANIFEST, NOTE, BPM_MIN: E.BPM_MIN, BPM_MAX: E.BPM_MAX }),
+  snapshot: () => E.snapshotMix(),
+  restoreSnapshot: (snap) => E.restoreMixSnapshot(snap),
+  rebuildGraph: (opts) => E.rebuildMixGraph(opts),
+  selectStem: (id, song, opts) => E.selectStem(id, song, { ...opts, transactional: true }),
+  setVolume: (id, v) => E.setVolume(id, v),
+  setMuted: (id, m) => E.setMuted(id, m),
+  applyMixSettings: (desired) => {
+    if (desired.bpm !== undefined) { state.bpm = desired.bpm; state.tempoTouched = true; }
+    if (desired.keyLock !== undefined) state.keyLock = desired.keyLock;
+    if (desired.masterKey !== undefined) state.masterKey = NOTE_NAMES[NOTE[desired.masterKey]]; // Db, A# etc. -> picker spelling
+  },
+  afterCommit: (desired) => {
+    const firstId = desired.order.find((id) => state.layers[id].song);
+    if (firstId) {
+      const i = ui.albums.indexOf(E.MANIFEST[state.layers[firstId].song].album);
+      if (i >= 0) setAlbum(i);
+    }
+    render(); // exactly one render once the whole mix is in
+  },
+});
+restore.onPhase((phase) => {
+  document.body.classList.toggle('restoring', restore.isRestoring());
+  if (phase === 'start') toast('Loading shared mix…');
+});
+// A layer mutation from the UI: queued behind any in-flight restore, immediate otherwise.
+const uiMutate = (fn) => restore.mutate(fn);
+const restoring = () => restore.isRestoring();
+
 // ---------- wheel ----------
 const wheel = createWheel($('#wheel'), {
   onPick: pickSong,
@@ -42,7 +79,8 @@ const wheel = createWheel($('#wheel'), {
 
 function pickSong(song) {
   if (!E.stemTypeFor(ui.layer, song)) return; // an empty slot for this layer: nothing to pick
-  E.selectStem(ui.layer, song);
+  // Queued behind a share restore: it must not rewrite this layer's song mid-transaction.
+  uiMutate(() => E.selectStem(ui.layer, song));
 }
 
 // ---------- hub ----------
@@ -240,10 +278,16 @@ function buildLayers() {
   for (const li of list.children) {
     const id = li.dataset.layer;
     $('.layer-pick', li).onclick = () => setLayer(id, { jumpToAlbum: true });
-    $('.ibtn-mute', li).onclick = () => { E.ensureCtx(); E.setMuted(id, !state.layers[id].muted); scheduleHash(); };
-    $('.ibtn-clear', li).onclick = () => E.clearLayer(id);
+    $('.ibtn-mute', li).onclick = () => {
+      E.ensureCtx();
+      uiMutate(() => { E.setMuted(id, !state.layers[id].muted); scheduleHash(); });
+    };
+    $('.ibtn-clear', li).onclick = () => uiMutate(() => E.clearLayer(id));
     const vol = $('.layer-vol', li);
-    vol.addEventListener('input', () => { E.ensureCtx(); E.setVolume(id, gainOf(Number(vol.value))); paintRange(vol); scheduleHash(); });
+    vol.addEventListener('input', () => {
+      E.ensureCtx();
+      uiMutate(() => { E.setVolume(id, gainOf(Number(vol.value))); paintRange(vol); scheduleHash(); });
+    });
     paintRange(vol);
   }
 }
@@ -372,7 +416,7 @@ function buildControls() {
   paintRange(mv);
 
   $('#playBtn').onclick = () => E.togglePlay();
-  $('#randomBtn').onclick = () => E.randomize();
+  $('#randomBtn').onclick = () => uiMutate(() => E.randomize());
   $('#recBtn').onclick = () => E.toggleRecord(download);
   $('#exportBtn').onclick = async () => {
     const btn = $('#exportBtn');
@@ -738,9 +782,10 @@ function bindKeys() {
       ArrowLeft: () => wheel.move(-1), ArrowUp: () => wheel.move(-1),
       ArrowRight: () => wheel.move(1), ArrowDown: () => wheel.move(1),
       Enter: () => { if (!e.target.closest('button, a, .seg') && wheel.focused) wheel.pickFocused(); else return false; },
-      p: () => E.togglePlay(), r: () => E.randomize(),
-      m: () => state.layers[ui.layer].song && E.setMuted(ui.layer, !state.layers[ui.layer].muted),
-      Backspace: () => E.clearLayer(ui.layer), Delete: () => E.clearLayer(ui.layer),
+      p: () => E.togglePlay(),
+      r: () => uiMutate(() => E.randomize()),
+      m: () => state.layers[ui.layer].song && uiMutate(() => E.setMuted(ui.layer, !state.layers[ui.layer].muted)),
+      Backspace: () => uiMutate(() => E.clearLayer(ui.layer)), Delete: () => uiMutate(() => E.clearLayer(ui.layer)),
       '+': () => E.setBpm(state.bpm + 1), '=': () => E.setBpm(state.bpm + 1),
       '-': () => E.setBpm(state.bpm - 1), '_': () => E.setBpm(state.bpm - 1),
       '?': () => { exitJam(); $('#help').showModal(); }, h: () => { exitJam(); $('#help').showModal(); },
@@ -754,11 +799,10 @@ function bindKeys() {
 }
 
 // ---------- share links (compatible with the original app's format) ----------
-const SLOT_LETTERS = { g: 'groove', l: 'lead', t: 'texture' };
-let restoring = false, hashTimer;
+let hashTimer;
 function scheduleHash() { clearTimeout(hashTimer); hashTimer = setTimeout(updateHash, 300); }
 function updateHash() {
-  if (restoring) return;
+  if (restoring()) return;
   const p = new URLSearchParams();
   for (const [letter, id] of Object.entries(SLOT_LETTERS)) {
     const s = state.layers[id];
@@ -777,45 +821,21 @@ function updateHash() {
   if (location.hash.slice(1) !== str) history.replaceState(null, '', str ? '#' + str : location.pathname + location.search);
 }
 
+// Opens a share link as one transaction. Returns true when a mix was restored (so the
+// first-run help stays closed). All failure modes — unknown code, out-of-range volume,
+// a layer stretch, or the limiter/graph rebuild — come back here as one result: the
+// engine has already rolled the three layers back, and the user gets one error toast.
 async function restoreFromHash() {
   const raw = location.hash.slice(1);
   if (!raw) return false;
-  const p = new URLSearchParams(raw);
-  const codeToSong = new Map(Object.entries(E.MANIFEST).map(([song, info]) => [info.code, song])); // a Map: '#g=constructor' finds nothing
-  restoring = true;
-  try {
-    const bpm = Number(p.get('bpm'));
-    if (bpm >= E.BPM_MIN && bpm <= E.BPM_MAX) { state.bpm = Math.round(bpm); state.tempoTouched = true; }
-    if (p.get('lock') === '0') state.keyLock = false;
-    const key = p.get('key');
-    if (key && Object.hasOwn(NOTE, key)) state.masterKey = NOTE_NAMES[NOTE[key]]; // Db, A# etc. -> the picker's spelling
-    // Selection order matters: the first slot is the auto-key anchor.
-    const order = [...new Set((p.get('a') || 'glt').split('').map((ch) => SLOT_LETTERS[ch]).filter(Boolean).concat(Object.values(SLOT_LETTERS)))];
-    // Every layer's level first: the first pick below builds the audio graph from them. (Set
-    // inside that loop, only the first layer's volume and mute reached the sound.)
-    for (const [letter, id] of Object.entries(SLOT_LETTERS)) {
-      const vol = Number(p.get('v' + letter)); // the gain in percent
-      if (p.has('v' + letter) && vol >= 0 && vol <= 100) state.layers[id].volume = vol / 100;
-      if (p.get('m' + letter) === '1') state.layers[id].muted = true;
-    }
-    const loads = [];
-    for (const id of order) {
-      const letter = id[0];
-      const song = codeToSong.get(p.get(letter));
-      if (song) loads.push(E.selectStem(id, song, { noAutoplay: true, keepTempo: true }));
-    }
-    if (!loads.length) return false;
-    const first = state.layers[order.find((id) => state.layers[id].song)];
-    const i = ui.albums.indexOf(E.MANIFEST[first.song].album);
-    if (i >= 0) setAlbum(i);
-    toast('Loading shared mix…');
-    await Promise.all(loads);
-    if (!state.playing && !E.playPending()) toast('Shared mix ready — press Play');
-    return true;
-  } finally {
-    restoring = false;
-    render();
+  const result = await restore.requestRestore(raw);
+  if (result.superseded) return false; // a newer link replaced this one
+  if (!result.ok) {
+    toast(result.error && result.error.message ? result.error.message : 'Shared mix could not be restored', 'error');
+    return false;
   }
+  if (!state.playing && !E.playPending()) toast('Shared mix ready — press Play');
+  return true;
 }
 
 async function shareMix() {
@@ -869,12 +889,14 @@ async function boot() {
 
   const ram = ui.albums.indexOf('ram');
   setAlbum(ram >= 0 ? ram : 0);
-  // The app rewrites the hash with replaceState (no event), so this only fires when someone
-  // pastes another share link into the address bar, even while this one loads: load that mix.
-  addEventListener('hashchange', () => location.reload());
+  // The app rewrites its own hash with replaceState (no event), so this only fires when a
+  // new share link is pasted into the address bar. Restore it in place as a transaction:
+  // the controller coalesces a repeat of the running link and makes a newer one win, so a
+  // paste while the first restore is still loading never double-submits or reloads.
+  addEventListener('hashchange', () => { restoreFromHash().catch((err) => console.error('share restore failed', err)); });
   // A shared mix starts downloading before the stage is set up, and the stage's show (three.js
   // and the figures, ~650 KB) waits until the mix is in, so on a phone they don't split the line.
-  const restoring = restoreFromHash().catch((err) => { console.error('share restore failed', err); return false; });
+  const restorePromise = restoreFromHash().catch((err) => { console.error('share restore failed', err); return false; });
 
   const helpEl = $('#help');
   createStage($('#stage'), () => {
@@ -884,7 +906,7 @@ async function boot() {
     for (const l of LAYERS) { const s = state.layers[l.id]; active[l.id] = !!(s.song && s.source && !s.muted && state.playing); }
     const lead = LAYERS.map((l) => state.layers[l.id].song).find(Boolean); // the first filled layer sets the album
     return { meters: m, active, playing: state.playing, bpm: state.bpm, fx: ui.fx.amount, fxX: ui.fx.x, zone: ui.zone, open: ui.open, paused: helpEl.open, album: lead ? E.MANIFEST[lead].album : null };
-  }, restoring);
+  }, restorePromise);
   // The stage centres its pyramid over the open area between the side panels; when the panels
   // are stacked (phones, portrait), or leave only a sliver between them (phones on their side),
   // that's the whole width.
@@ -896,7 +918,7 @@ async function boot() {
   addEventListener('resize', measureZone);
   measureZone();
 
-  if (!await restoring) {
+  if (!await restorePromise) {
     let seen = false;
     try { seen = localStorage.getItem('dcr-seen-help') === '1'; localStorage.setItem('dcr-seen-help', '1'); } catch (_) { /* private mode */ }
     if (!seen) $('#help').showModal();
