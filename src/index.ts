@@ -560,6 +560,9 @@ const createViewer = async (options: CreateViewerOptions): Promise<ViewerHandle>
 console.log(`SuperSplat Viewer v${appVersion} | Engine v${engineVersion} (${engineRevision})`);
 
 export type { CaptureResult } from './capture';
+export { GsafPlayer, loadGsaf } from './gsaf/gsaf-player';
+export { GsafDecoder } from './gsaf/gsaf-worker';
+export type { GsafFrame, GsafFrameBuffers, GsafHeader } from './gsaf/gsaf-worker';
 export type { CreateViewerOptions, ViewerAssets, ViewerFlags } from './options';
 export type { CaptureOptions, QualityLevel, ViewerHandle, ViewerState, XrMode } from './types';
 export { createViewer };

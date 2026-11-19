@@ -21,7 +21,8 @@ describe('the /viewer entry', () => {
         // it emitted are real and nothing in the module reaches for the dom at load time.
         const mod = await import('../../dist/viewer.js');
 
-        assert.deepEqual(Object.keys(mod), ['createViewer']);
+        // the viewer itself, plus the gsaf player and decoder a host drives directly
+        assert.deepEqual(Object.keys(mod), ['GsafDecoder', 'GsafPlayer', 'createViewer', 'loadGsaf']);
         assert.equal(typeof mod.createViewer, 'function');
     });
 

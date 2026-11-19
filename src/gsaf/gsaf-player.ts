@@ -84,8 +84,8 @@ class GsafPlayer {
 
     private buffers: GsafFrameBuffers | null;
 
-    // seeks waiting for their frame
-    private waiters: { resolve: () => void; reject: (err: Error) => void }[] = [];
+    // the seek waiting for its frame; a newer seek supersedes it, so at most one is pending
+    private pending: { resolve: () => void; reject: (err: Error) => void } | null = null;
 
     // a decode that failed, after which the player shows its last frame and every seek fails
     private failure: Error | null = null;
@@ -129,30 +129,37 @@ class GsafPlayer {
     }
 
     /**
-     * Moves the playhead, wrapping it into the sequence.
+     * Moves the playhead, wrapping it into the sequence. Only the latest target is owed a
+     * frame: a seek still waiting when another arrives resolves as superseded, its frame never
+     * shown.
      *
      * @param time - The time in seconds.
-     * @returns Resolves once the frame at that time is on screen, or the player is destroyed;
-     * rejects once a decode has failed.
+     * @returns Resolves once the frame at that time is on screen, once a newer seek supersedes
+     * this one, or once the player is destroyed; rejects once a decode has failed.
      */
     seek(time: number) {
+        if (this.destroyed) return Promise.resolve();
         if (this.failure) return Promise.reject(this.failure);
         if (!this.animated) return Promise.resolve();
         // a time already in range is kept exactly, so it lands on the frame it names
         const wrapped = time % this.duration;
         this._time = wrapped < 0 ? wrapped + this.duration : wrapped;
-        const landed = new Promise<void>((resolve, reject) => this.waiters.push({ resolve, reject }));
+        // the seek this replaces never reached the screen, so it must not wait on as if it had
+        this.settle();
+        const landed = new Promise<void>((resolve, reject) => {
+            this.pending = { resolve, reject };
+        });
         this.pump();
         return landed;
     }
 
+    // settles the pending seek, if any: resolved once its frame shows, once a newer seek
+    // supersedes it or once the player is destroyed; rejected with the decode's failure
     private settle(err?: Error) {
-        const { waiters } = this;
-        this.waiters = [];
-        for (const waiter of waiters) {
-            if (err) waiter.reject(err);
-            else waiter.resolve();
-        }
+        const pending = this.pending;
+        this.pending = null;
+        if (err) pending?.reject(err);
+        else pending?.resolve();
     }
 
     // decode the frame due now, unless it is on screen or a decode is already in flight
@@ -168,7 +175,8 @@ class GsafPlayer {
         this.buffers = null;
         this.decoder.decode(due, buffers).then(
             (frame) => {
-                // the worker is terminated with the entity, so this only runs while alive
+                // a decode that outlives the player is dropped: nothing uploads or renders
+                if (this.destroyed) return;
                 uploadFrame(this.app, this.entity.gsplat.resource as GSplatContainer, frame);
                 // the engine re-copies a resource into its work buffer only when its allocation
                 // changes, and a frame keeps the container's, so ask for the copy
