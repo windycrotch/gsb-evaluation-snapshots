@@ -94,6 +94,7 @@ export class Coop {
     this.mode = 'team';            // 'team' (co-op against the waves) | 'versus' (PvP)
     this.clock = 0;                // seconds of my own game running (stops when my tab is in the background)
     this.seen = new Map();         // peer -> this.clock when their last message arrived
+    this.dropped = new Set();      // host: peers the match gave up on, whose connection is still to be released
     this.vs = new Versus(this);
     g.net.onMessage = (from, m) => this.onMessage(from, m);
     g.net.onPeer = (peer, state) => this.onPeer(peer, state);
@@ -183,6 +184,7 @@ export class Coop {
     this.slot = Math.max(0, players.findIndex(p => p.peer === myPeer));
     for (const p of players) this.seen.set(p.peer, this.clock);
     if (this.versus) this.vs.begin(players, vsInfo || {});
+    this.dropped.clear();
     this.g.launch(map, this.slot, players.length);
     if (this.versus) this.vs.spawnSlot(this.slot, players.length);
     if (this.isGuest) Wx.remoteBolts = true;
@@ -201,7 +203,9 @@ export class Coop {
   // leave the room (or the host closed it): back to a normal single-player game
   end() {
     this.role = null; this.started = false; this.lobby.clear(); this.lobbyFromHost = null; this.teamOver = null;
-    this.mode = 'team'; this.vs.over = null; this.rankFromHost = null; this.quick = false; this.isPublic = false;
+    this.mode = 'team'; this.vs.session.reset(); this.rankFromHost = null; this.quick = false; this.isPublic = false;
+    this.seen.clear();                       // no stale "last heard from" entries for the next room
+    this.dropped.clear();
     this.clearWorld();
     const W = this.g.waves;
     W.setTargets(null); W.playerCount = 1;
@@ -210,29 +214,62 @@ export class Coop {
     this.g.net.close();                  // role is already null, so the 'closed' events this fires are ignored
   }
 
+  // the host gave up on a player (backgrounded too long, or their connection dropped): free everything that
+  // kept them "in the room" — their plane, their lobby row, their quiet-time entry, and the connection itself.
+  releasePeer(peer) {
+    const r = this.remotes.get(peer);
+    const name = (r && r.name) || (this.lobby.get(peer) || {}).name || 'A teammate';
+    if (r) { r.remove(); this.remotes.delete(peer); }
+    this.lobby.delete(peer);
+    this.seen.delete(peer);
+    if (this.g.waves) this.g.waves.setTargets([this.g.plane, ...this.teammates()]);
+    if (this.isHost && this.role) {
+      this.g.net.broadcast({ t: 'left', peer, name }, true);
+      this.g.net.broadcast(this.lobbyMsg(), true);
+      if (!this.started) this.publish();
+    }
+    if (typeof this.g.net.drop === 'function') this.g.net.drop(peer);
+    if (this.onLobby) this.onLobby();
+    return name;
+  }
+
   onPeer(peer, state) {
     if (!this.role) return;
-    if (state === 'closed') {
+    if (state === 'closed' || state === 'failed') {
+      if (this.isGuest && peer === 'h') {
+        const r = this.remotes.get(peer);
+        this.lobby.delete(peer); this.seen.delete(peer); this.dropped.delete(peer);
+        if (r) { r.remove(); this.remotes.delete(peer); }
+        // versus: without the host there is no match. It ends here with the host marked as left (a rated match
+        // still counts) — and the final table stays on screen.
+        if (this.started && this.versus) {
+          if (!this.vs.over) { this.vs.playerLeft('h'); this.g.toast('The host left'); }
+          return;
+        }
+        this.g.toast('The host left the game'); this.g.leave(); return;
+      }
+      if (!this.isHost) return;                    // a guest's other guest links are the host's to manage
+      if (this.started && this.versus) {
+        // versus: the pilot is on the table as having left (last place), and releaseDropped frees the plane,
+        // lobby row and link. MatchSession.onPeerClosed is a no-op for a peer that already left, so the two close
+        // events one connection can produce release it only once.
+        this.vs.session.onPeerClosed(peer, state);
+        this.releaseDropped();
+        if (this.onLobby) this.onLobby();
+        return;
+      }
+      // team co-op (or the lobby): remove them here
       const r = this.remotes.get(peer);
       const name = (r && r.name) || (this.lobby.get(peer) || {}).name || 'A teammate';
       if (r) { r.remove(); this.remotes.delete(peer); }
       this.lobby.delete(peer);
-      if (this.isGuest && peer === 'h') {
-        // versus: the match ends here and the host counts as having left (a rated match still counts)
-        if (this.started && this.versus) {
-          if (!this.vs.over) { this.vs.playerLeft('h'); this.g.toast('The host left'); }
-          return;                                      // keep the final table on screen
-        }
-        this.g.toast('The host left the game'); this.g.leave(); return;
-      }
-      if (this.isHost) {
-        this.g.waves.setTargets([this.g.plane, ...this.teammates()]);
-        this.g.net.broadcast({ t: 'left', peer, name }, true);
-        this.g.net.broadcast(this.lobbyMsg(), true);
-        if (!this.started) this.publish();
-        if (this.started) this.checkTeamOver();
-        if (this.started && this.versus) this.vs.playerLeft(peer);
-      }
+      this.seen.delete(peer);
+      this.dropped.delete(peer);
+      this.g.waves.setTargets([this.g.plane, ...this.teammates()]);
+      this.g.net.broadcast({ t: 'left', peer, name }, true);
+      this.g.net.broadcast(this.lobbyMsg(), true);
+      if (!this.started) this.publish();
+      if (this.started) this.checkTeamOver();
       this.g.toast(`${name} left`);
       if (this.onLobby) this.onLobby();
     }
@@ -334,10 +371,18 @@ export class Coop {
 
   hostTick(dt) {
     this.tickClock(dt);
-    for (const r of this.remotes.values()) r.update(dt);
     // versus: a player whose game went quiet (tab in the background, phone locked) pauses the match for everyone
-    // (see Versus.setPaused); too long, and they count as having left
-    if (this.versus && this.started && !this.vs.over) this.checkQuiet(dt, [...this.remotes.keys()], p => this.dropAway(p));
+    // (MatchState.observe); too long, and they count as having left
+    if (this.versus && this.started && !this.vs.over) {
+      const quiet = new Map();
+      for (const peer of this.remotes.keys()) quiet.set(peer, this.clock - (this.seen.get(peer) ?? this.clock));
+      this.vs.observeQuiet(dt, quiet);
+      this.releaseDropped();
+    }
+    // a paused versus match freezes every model, on the host's screen too (snapshots keep flowing so a guest
+    // whose tab is hidden still sees the pause and can come back)
+    const frozen = this.versus && this.started && !!this.vs.paused;
+    if (!frozen) for (const r of this.remotes.values()) r.update(dt);
     this.snapT -= dt;
     if (this.snapT <= 0) {
       this.snapT = 1 / SNAP_HZ;
@@ -353,40 +398,18 @@ export class Coop {
     }
   }
 
-  // versus: is one of these players' games quiet? Then pause (the host also tells the guests), count their
-  // pause time, and give up on them after awayLimit seconds in one go or pauseBudget in total.
-  checkQuiet(dt, peers, giveUp) {
-    const V = CFG.versus, vs = this.vs;
-    let who = null, quiet = 0;
-    for (const peer of peers) {
-      const q = this.clock - (this.seen.get(peer) ?? this.clock);
-      if (q > V.quietAfter && q > quiet) { who = peer; quiet = q; }
+  // the host frees a pilot the match has given up on (away too long, over the pause budget, or a failed link).
+  // releaseDropped runs at the end of the frame: the queue is filled either by a leave event (versus.js onLeave)
+  // or by a failed/closed connection (onPeer -> MatchSession.onPeerClosed). A peer already off the table is skipped,
+  // so the two paths can never release the same connection twice.
+  releaseDropped() {
+    if (!this.dropped.size) return;
+    for (const peer of [...this.dropped]) {
+      this.dropped.delete(peer);
+      if (!this.remotes.has(peer) && !this.lobby.has(peer)) continue;
+      const name = this.releasePeer(peer);
+      this.g.toast(`${name} stopped responding`);
     }
-    const fromMe = !vs.paused || peers.includes(vs.paused.peer);   // a pause the host announced is the host's to lift
-    if (!who) {
-      if (vs.paused && fromMe) { vs.setPaused(null); if (this.isHost) this.g.net.broadcast({ t: 'vresume' }, true); }
-      return;
-    }
-    const used = (vs.pauseUsed.get(who) || 0) + dt;
-    vs.pauseUsed.set(who, used);
-    const left = Math.max(0, Math.min(V.awayLimit - quiet, V.pauseBudget - used));
-    const name = vs.name(who);
-    vs.setPaused({ peer: who, name, left });
-    if (this.isHost) {
-      this.pauseSendT = (this.pauseSendT || 0) - dt;
-      if (this.pauseSendT <= 0) { this.pauseSendT = 0.5; this.g.net.broadcast({ t: 'vpause', peer: who, name, left: Math.ceil(left) }, true); }
-    }
-    if (left <= 0) { vs.setPaused(null); if (this.isHost) this.g.net.broadcast({ t: 'vresume' }, true); giveUp(who); }
-  }
-
-  // host, versus: take a silent player out of the match (they are told first, then the connection is closed)
-  dropAway(peer) {
-    const r = this.remotes.get(peer);
-    this.vs.playerLeft(peer, 'away');
-    if (r) { r.remove(); this.remotes.delete(peer); }
-    this.g.toast(`${(r && r.name) || 'A player'} stopped responding`);
-    const net = this.g.net;
-    if (typeof net.drop === 'function') setTimeout(() => net.drop(peer), 1500);
   }
 
   // Everyone is down (host decides): team game over
@@ -419,18 +442,24 @@ export class Coop {
     this.tickClock(dt);
     // the host's game went quiet (its tab in the background): paused until it is back; too long = the host left
     if (this.versus && this.started && !this.vs.over) {
-      this.checkQuiet(dt, ['h'], () => { this.vs.playerLeft('h'); this.g.toast('The host did not come back'); });
+      const q = this.clock - (this.seen.get('h') ?? this.clock);
+      this.vs.observeQuiet(dt, new Map([['h', q]]));
     }
-    // ghosts glide toward their last reported spot
-    for (const e of this.ghosts.values()) {
-      e.target.addScaledVector(e.vel, dt);
-      e.pos.lerp(e.target, Math.min(1, 10 * dt));
-      e.quat.slerp(e.qTarget, Math.min(1, 10 * dt));
-      e.mesh.position.copy(e.pos); e.mesh.quaternion.copy(e.quat);
-      if (e.bubble) { e.bubble.visible = e.shielded; if (e.shielded) e.bubble.position.copy(e.pos); }
+    // a paused match freezes every model: only keep the "I am still running" state message going (below), so the
+    // others can see when I am back. Nothing glides, nothing rotates, nobody picks anything up.
+    const frozen = this.versus && !!this.vs.paused;
+    if (!frozen) {
+      // ghosts glide toward their last reported spot
+      for (const e of this.ghosts.values()) {
+        e.target.addScaledVector(e.vel, dt);
+        e.pos.lerp(e.target, Math.min(1, 10 * dt));
+        e.quat.slerp(e.qTarget, Math.min(1, 10 * dt));
+        e.mesh.position.copy(e.pos); e.mesh.quaternion.copy(e.quat);
+        if (e.bubble) { e.bubble.visible = e.shielded; if (e.shielded) e.bubble.position.copy(e.pos); }
+      }
+      for (const r of this.remotes.values()) r.update(dt);
+      for (const d of this.dropViews.values()) { d.mesh.position.copy(d.pos); d.mesh.rotation.y += 2.2 * dt; }
     }
-    for (const r of this.remotes.values()) r.update(dt);
-    for (const d of this.dropViews.values()) { d.mesh.position.copy(d.pos); d.mesh.rotation.y += 2.2 * dt; }
 
     // my new bullets go to the host (it decides what they hit)
     const fresh = this.versus ? [] : g.weapons.bullets.slice(shotsBefore);   // versus sends its own (versus.js)
@@ -438,7 +467,7 @@ export class Coop {
 
     // rams and drone blasts against my copy of the enemies: my damage, the host removes the enemy
     const p = g.plane;
-    if (p.alive) {
+    if (p.alive && !frozen) {
       if (p.ramCd > 0) p.ramCd -= dt;
       for (const e of this.ghosts.values()) {
         const rr = Math.max(e.blastRadius || 0, e.radius + p.P.radius);

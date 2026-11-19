@@ -321,6 +321,12 @@ js/save.js        save.txt + browser fallback
 js/powerups.js    power-up table, effects, shield/EMP visuals
 js/tutorial.js    flight training + hangar tips
 js/leaderboard.js online leaderboard client
+js/net.js         direct browser-to-browser connections (WebRTC fast + reliable channels)
+js/reliable.js    exactly-once handling for reliable events (so a resend is not counted twice)
+js/matchState.js  the online match state machine: live / paused / over, away and pause-budget rules, standings,
+                  result confirmation (no browser dependencies)
+js/matchSession.js the match protocol over the network: pause, leave, host-gone, final table, confirmation
+test/             headless acceptance tests: fake WebRTC connections and a fake clock (npm test)
 js/weather.js     weather: particles, fog, wind, lightning
 js/maps.js        today's map, random maps
 js/config.js      every tunable number in one place
@@ -385,7 +391,17 @@ If the host leaves, the game ends for everyone.
 - Hiding the game (switching tabs or apps, locking the phone) stops it, so the match **pauses for everyone** with a
   countdown: nobody moves, shoots or gets hit, and the clock stops. Back within **30 seconds** and it goes on (a phone
   that slipped out of your hand is fine); otherwise that pilot counts as having left. One pilot can pause for at most
-  60 seconds in total per match, so nobody can stall the game.
+  60 seconds in total per match (short breaks add up), so nobody can stall the game. Reaching either limit drops that
+  pilot to last place and frees their connection, so no half-there "ghost" stays on the table or keeps receiving
+  updates.
+- **If the host leaves**, the match ends for everyone with a clear reason on the results screen ("The host left, so
+  the match is over"); nobody is left flying in a dead room.
+- **Confirmed results.** When the match ends, only the pilots still in it send the final table. It counts when two of
+  them send the same table; one lone report stays **waiting**, and two different tables stay **pending** (nothing is
+  decided). The results screen says which it is. The rating server applies the same rule.
+- Everything that must not be lost (pause, resume, a kill, a leave, the final table) travels on the **reliable**
+  channel, and every such event carries an id so a resend is applied once — a duplicate "I went down" never costs a
+  second death.
 
 The host's browser runs the enemies (co-op) and keeps the score (versus), so the host should keep the game tab in
 front. Players connect directly to the host (WebRTC); the leaderboard server only passes the connection details.

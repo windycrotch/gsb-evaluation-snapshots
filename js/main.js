@@ -461,6 +461,7 @@ function coopLaunch(map, slot, n) {
     setTag(TOUCH ? '' : `VERSUS &nbsp;·&nbsp; FIRST TO ${V.killsToWin} &nbsp;·&nbsp; ESC TWICE: LEAVE`);
     if (touch) { const x = document.getElementById('tExit'); x.textContent = 'Leave'; x.style.display = ''; document.getElementById('tPause').style.display = 'none'; }
     vsBoardHtml = null;
+    vsConfirmHtml = null;
     hud.message(`VERSUS · ${n} PILOTS`, 3, `First to ${V.killsToWin} kills, or the most kills in ${Math.round(V.timeLimit / 60)} minutes. ` +
       (coop.vs.ranked ? 'Rated match (Elo).' : `Not rated: ${coop.vs.why}.`));
     return;
@@ -1011,10 +1012,10 @@ function update(dt) {
 
 // versus (host and guests alike): my plane, my shots, the other players; versus.js keeps the rules
 function updateVersus(dt) {
-  // paused (someone's game is in the background): nothing moves, but we keep talking so we know when they are back
+  // paused (someone's game is in the background): nothing moves, but we keep talking so we know when they are back.
+  // Not even effects move: a pause freezes the whole match, not just the planes.
   if (coop.vs.paused) {
     if (coop.isHost) coop.hostTick(dt); else coop.guestTick(dt, weapons.bullets.length);
-    if (!coop.vs.paused) return;
     updatePauseBox();
     return;
   }
@@ -1047,8 +1048,10 @@ function updatePauseBox() {
   const el = document.getElementById('vsPause');
   if (!p) { el.style.display = 'none'; return; }
   el.style.display = 'block';
-  const who = p.peer === coop.vs.me ? 'Your game' : `${escHtml(p.name)}'s game`;
-  el.innerHTML = `<b>PAUSED</b><div>${who} is in the background.</div><div>${Math.ceil(p.left)} s to come back, or it counts as leaving (a loss).</div>`;
+  const mine = p.peer === coop.vs.me;
+  const who = mine ? 'Your game' : `${escHtml(p.name)}'s game`;
+  el.innerHTML = `<b>PAUSED</b><div>${who} is in the background. Everyone is holding still.</div>` +
+    `<div>${Math.ceil(p.left)} s to come back, or it counts as leaving (a loss).</div>`;
 }
 
 // the small scoreboard at the top in versus: clock, then every pilot's kills / deaths
@@ -1085,10 +1088,15 @@ function onVersusOver(m) {
   $('overTitle').textContent = won ? 'VICTORY' : 'MATCH OVER';
   $('overTitle').style.color = won ? 'var(--gold)' : '';
   const quitters = m.rows.filter(r => r.left && r.peer !== me).map(r => r.name);
-  if (mine && mine.left) m = { ...m, reason: 'away' };           // I am the one who was taken out
-  const why = { kills: `${m.rows[0].name} reached ${CFG.versus.killsToWin} kills`, time: 'Time is up',
+  const reason = mine && mine.left ? 'away' : m.reason;
+  const why = {
+    kills: `${m.rows[0].name} reached ${CFG.versus.killsToWin} kills`,
+    time: 'Time is up',
     left: quitters.length ? `${quitters.join(' and ')} left the match (counts as a loss)` : 'Everyone else left',
-    away: `Your game was in the background for over ${CFG.versus.awayLimit} s: that counts as leaving (a loss)` }[m.reason] || '';
+    hostLeft: 'The host left, so the match is over',
+    away: `Your game was in the background for over ${CFG.versus.awayLimit} s: that counts as leaving (a loss)`,
+    budget: `You went over the ${CFG.versus.pauseBudget} s pause limit: that counts as leaving (a loss)`,
+  }[reason] || '';
   $('finalCause').textContent = why;
   $('vsTable').innerHTML = '<tr><th>#</th><th>Pilot</th><th>Kills</th><th>Deaths</th></tr>' + m.rows.map(r =>
     `<tr class="${r.peer === me ? 'me' : ''}"><td>${r.place}</td><td>${escHtml(r.name)}${r.left ? ' <span class="vsLeft">left</span>' : ''}</td><td>${r.kills}</td><td>${r.deaths}</td></tr>`).join('');
@@ -1106,8 +1114,32 @@ function onVersusOver(m) {
       else elo.textContent = 'Rating: waiting for another pilot\'s game to confirm the result (it counts once two agree)';
     });
   }
+  updateVsConfirm();
   $('vsWait').textContent = coop.isHost ? '' : 'Waiting for the host to start a rematch';
   overButtons();
+}
+
+// versus: did the pilots still in the match agree on the same final table? A result only counts when two agree.
+// Shown on the results screen so nobody mistakes "one pilot said I won" for "the match says I won".
+let vsConfirmHtml = null;
+function updateVsConfirm() {
+  const el = document.getElementById('vsConfirm');
+  if (!el) return;
+  const on = coop.active && coop.versus && coop.vs.over;
+  if (!on) {
+    if (vsConfirmHtml !== null) { el.style.display = 'none'; vsConfirmHtml = null; }
+    return;
+  }
+  const s = coop.vs.consensus.snapshot();
+  const html = s.status === 'agreed' ? `CONFIRMED · ${s.agree} pilots agreed on this table`
+    : s.status === 'disputed' ? 'PENDING · the pilots do not agree yet, so nothing is decided'
+    : `WAITING · ${s.reports} of ${s.need || 2} pilots have sent the final table`;
+  if (html !== vsConfirmHtml) {
+    el.style.display = 'block';
+    el.className = 'vsConfirm ' + s.status;
+    el.textContent = html;
+    vsConfirmHtml = html;
+  }
 }
 
 // co-op guest: my plane flies here; the enemies, drops and score come from the host
@@ -1205,16 +1237,17 @@ function loop(now) {
       }
     } else update(dt);
     const guest = coop.active && coop.isGuest, vs = coop.active && coop.versus;
+    const vsPaused = vs && !!coop.vs.paused;           // a paused versus match freezes even the explosions
     const foes = vs ? coop.teammates().filter(r => r.alive) : null;
     // versus: other players' missiles homing on me (not the AI Ladder's: its difficulty was tuned without a warning)
     const incoming = vs ? weapons.pvpMissiles.filter(m => m.mine && m.target === plane && m.owner !== 'ai') : debugIncoming;
-    if (!paused) {
+    if (!paused && !vsPaused) {
       effects.update(dt, weapons);
       watchDowns();
       if (incoming.length) Sound.warn(Math.min(...incoming.map(m => m.pos.distanceTo(plane.pos))));
     }
     const P = plane.P || {};
-    Sound.engine(!paused && plane.alive && !gameOver, plane.speed,
+    Sound.engine(!paused && !vsPaused && plane.alive && !gameOver, plane.speed,
       P.speedMax > P.speedMin ? (plane.speed - P.speedMin) / (P.speedMax - P.speedMin) * 2 - 1 : 0, P.jetShare || 0);
     hud.update(dt, {
       plane, enemies: vs ? foes : coop.active ? coop.enemyList() : waves.enemies, camera, target: missileTarget || target, leadPoint,
@@ -1224,6 +1257,7 @@ function loop(now) {
     });
     updateCoopDown();
     updateVsBoard();
+    updateVsConfirm();
     render(dt);
   }
   requestAnimationFrame(loop);

@@ -10,6 +10,7 @@
 // packet is simply replaced by the next one, and 'safe' (ordered, reliable) for events that must arrive.
 
 import { CFG } from './config.js';
+import { ReliableGuard } from './reliable.js';
 
 const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }];
 const POLL_MS = 900;
@@ -32,7 +33,9 @@ export class Net {
     this.me = null;              // { code, peer, key }
     this.links = new Map();      // peer -> { pc, fast, safe, open }
     this.onMessage = null;
-    this.onPeer = null;          // (peer, 'open' | 'closed')
+    this.onPeer = null;          // (peer, 'open' | 'closed' | 'failed')
+    // reliable events carry an id and are handled once, even if they are resent or relayed twice (js/reliable.js)
+    this.guard = new ReliableGuard();
     this.polling = false;
   }
 
@@ -52,6 +55,7 @@ export class Net {
   // assigned = a room the server already made for me (quick match): { code, peer: 'h', key }
   async host(assigned = null) {
     this.me = assigned || await this.call('/room/create', {});
+    this.guard.reset(`h@${this.me.code}:`);
     this.startPolling();
     return this.me.code;
   }
@@ -59,6 +63,7 @@ export class Net {
   // ---- guest: join a room, send an offer to the host, wait for the answer and the channels to open ----
   async join(code, timeoutMs = 20000, assigned = null) {
     this.me = assigned || await this.call('/room/join', { code });
+    this.guard.reset(`${this.me.peer}@${this.me.code}:`);
     const link = this.makeLink('h');
     link.fast = this.wire('h', link.pc.createDataChannel('fast', { ordered: false, maxRetransmits: 0 }));
     link.safe = this.wire('h', link.pc.createDataChannel('safe', { ordered: true }));
@@ -67,7 +72,12 @@ export class Net {
     await this.call('/room/send', { ...this.auth(), to: 'h', data: JSON.stringify(link.pc.localDescription) });
     this.startPolling();
     await new Promise((resolve, reject) => {
-      const t = setTimeout(() => reject(new Error('could not connect to the host')), timeoutMs);
+      const t = setTimeout(() => {
+        // the host never answered: free the half-open connection, and tell the caller it failed
+        this.drop('h', 'failed');
+        this.stopPolling();
+        reject(new Error('could not connect to the host'));
+      }, timeoutMs);
       link.onOpen = () => { clearTimeout(t); resolve(); };
     });
     this.polling = false;        // connected: no more mailbox checks
@@ -81,7 +91,7 @@ export class Net {
     const link = { pc, fast: null, safe: null, open: false };
     this.links.set(peer, link);
     pc.addEventListener('connectionstatechange', () => {
-      if (['failed', 'closed', 'disconnected'].includes(pc.connectionState)) this.drop(peer);
+      if (['failed', 'closed', 'disconnected'].includes(pc.connectionState)) this.drop(peer, pc.connectionState);
     });
     pc.addEventListener('datachannel', e => {
       if (e.channel.label === 'fast') link.fast = this.wire(peer, e.channel);
@@ -107,18 +117,23 @@ export class Net {
     ch.addEventListener('message', e => {
       let msg;
       try { msg = JSON.parse(e.data); } catch { return; }
-      if (this.onMessage) this.onMessage(peer, msg);
+      if (!this.onMessage) return;
+      // a reliable event that already arrived is dropped here, before any rule sees it twice
+      if (msg && msg.r === 1 && !this.guard.accept(msg, peer)) return;
+      this.onMessage(peer, msg);
     });
-    ch.addEventListener('close', () => this.drop(peer));
+    ch.addEventListener('close', () => this.drop(peer, 'closed'));
     return ch;
   }
 
-  drop(peer) {
+  // free everything a connection held. `state` ('closed' | 'failed' | 'disconnected') tells the upper layers why,
+  // so a failed direct connection (reconnect failed, network dropped) is reported instead of leaving a ghost peer.
+  drop(peer, state = 'closed') {
     const link = this.links.get(peer);
     if (!link) return;
     this.links.delete(peer);
     try { link.pc.close(); } catch {}
-    if (link.open && this.onPeer) this.onPeer(peer, 'closed');
+    if (link.open && this.onPeer) this.onPeer(peer, state === 'failed' || state === 'disconnected' ? 'failed' : 'closed');
   }
 
   startPolling() {
@@ -154,6 +169,7 @@ export class Net {
     if (!link || !link.open) return false;
     const ch = reliable ? link.safe : link.fast;
     if (ch.readyState !== 'open') return false;
+    if (reliable) { this.guard.stamp(msg); msg.r = 1; }
     ch.send(JSON.stringify(msg));
     return true;
   }
@@ -163,7 +179,8 @@ export class Net {
 
   close() {
     this.polling = false;
-    for (const p of [...this.links.keys()]) this.drop(p);
+    for (const p of [...this.links.keys()]) this.drop(p, 'closed');
+    this.guard.reset();
     this.me = null;
   }
 }

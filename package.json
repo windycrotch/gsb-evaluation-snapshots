@@ -1,0 +1,10 @@
+{
+  "name": "skybreak-protocol",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Browser game. This package.json exists only for the headless acceptance tests; the game itself has no build step and no dependencies.",
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  }
+}
