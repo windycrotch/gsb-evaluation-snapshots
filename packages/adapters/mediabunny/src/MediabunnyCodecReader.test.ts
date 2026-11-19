@@ -1,0 +1,184 @@
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+import { readSampleTable, type TrackColour, type VideoTrackCodec } from '@gyroview/core';
+import {
+  buildMp4File,
+  describeCodecReaderContract,
+  encodeBox,
+  InMemoryRandomAccessSource,
+  UNSPECIFIED_COLOUR,
+  videoSampleEntry,
+} from '@gyroview/core/testing';
+import { ALL_FORMATS, BufferSource, Input, type InputVideoTrack } from 'mediabunny';
+import { describe, expect, it } from 'vitest';
+
+import { codecStringOf, videoConfigurationOf } from './decoderConfigurations';
+import { MediabunnyCodecReader } from './MediabunnyCodecReader';
+import { trackColourOf } from './trackColour';
+
+const SYNTHETIC = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '../../../../test/fixtures/synthetic',
+);
+const FIXTURES = [
+  'dual-track-64px-10fps-3s.mp4',
+  'dual-track-aac-64px-10fps-3s.mp4',
+  'dual-track-aac-moov-at-end-64px-10fps-3s.mp4',
+  'hevc-b-frames-dual-track-64px-10fps-3s.mp4',
+  'hevc-main10-hlg-dual-track-64px-10fps-3s.mp4',
+  'late-start-64px-10fps-3s.mp4',
+];
+
+function fixtureBytes(name: string): Uint8Array {
+  return new Uint8Array(readFileSync(path.join(SYNTHETIC, name)));
+}
+
+/**
+ * A video track's codec as mediabunny tells it reading the whole file, samples and all.
+ */
+async function codecOf(track: InputVideoTrack, trackIndex: number): Promise<VideoTrackCodec> {
+  const config = await track.getDecoderConfig();
+  if (!config) throw new Error(`video track ${trackIndex} has no decoder configuration`);
+  const description = {
+    trackIndex,
+    codedWidth: await track.getCodedWidth(),
+    codedHeight: await track.getCodedHeight(),
+    codec: await codecStringOf(track, config),
+    colour: trackColourOf(config.colorSpace),
+  };
+  return {
+    trackId: track.id,
+    description,
+    configuration: videoConfigurationOf(config, description),
+  };
+}
+
+async function movieBytesOf(bytes: Uint8Array): Promise<Uint8Array> {
+  const { movieBytes } = await readSampleTable(new InMemoryRandomAccessSource(bytes));
+  return movieBytes;
+}
+
+/**
+ * The movie with the profile, tier and level of every HEVC configuration zeroed: the twelve bytes
+ * after the version byte that follows the box type, which the fixtures spell nowhere else.
+ */
+function withBlankHevcHeaders(movieBytes: Uint8Array): Uint8Array {
+  const blanked = Uint8Array.from(movieBytes);
+  const type = new TextEncoder().encode('hvcC');
+  for (let index = 0; index < blanked.length; index += 1) {
+    const isConfiguration = type.every((byte, offset) => blanked[index + offset] === byte);
+    if (isConfiguration) blanked.fill(0, index + 5, index + 17);
+  }
+  return blanked;
+}
+
+/**
+ * What ffmpeg's H.264 encoder writes without colour options: the range, nothing else.
+ */
+const LIMITED_RANGE_ONLY: TrackColour = { ...UNSPECIFIED_COLOUR, range: 'limited' };
+
+describeCodecReaderContract(async () => ({
+  reader: new MediabunnyCodecReader(),
+  movieBytes: await movieBytesOf(fixtureBytes('dual-track-aac-64px-10fps-3s.mp4')),
+  videoTrackIds: [1, 2],
+  videoColours: [LIMITED_RANGE_ONLY, LIMITED_RANGE_ONLY],
+  audioTrackIds: [3],
+  notMovie: Uint8Array.of(0, 0, 0, 8, 1, 2, 3, 4),
+}));
+
+describe('MediabunnyCodecReader', () => {
+  it.each(FIXTURES)(
+    'tells the video codecs of %s as mediabunny reading the whole file does',
+    async (name) => {
+      const bytes = fixtureBytes(name);
+      const codecs = await new MediabunnyCodecReader().read(await movieBytesOf(bytes));
+      const input = new Input({ formats: ALL_FORMATS, source: new BufferSource(bytes) });
+      try {
+        const tracks = await input.getVideoTracks();
+        const theirs = await Promise.all(tracks.map((track, index) => codecOf(track, index)));
+        expect(codecs.video).toEqual(theirs);
+      } finally {
+        input.dispose();
+      }
+    },
+  );
+
+  it('names an HEVC track after its sample entry, as ISO/IEC 14496-15 E.3 does', async () => {
+    const bytes = fixtureBytes('hevc-b-frames-dual-track-64px-10fps-3s.mp4');
+    const { video } = await new MediabunnyCodecReader().read(await movieBytesOf(bytes));
+    expect(video.map((codec) => codec.description.codec)).toEqual([
+      'hvc1.1.6.L30.90',
+      'hvc1.1.6.L30.90',
+    ]);
+  });
+
+  it("names an HEVC track by its SPS where its configuration's header is blank, as the Antigravity A1 leaves it", async () => {
+    const bytes = fixtureBytes('hevc-b-frames-dual-track-64px-10fps-3s.mp4');
+    const movieBytes = withBlankHevcHeaders(await movieBytesOf(bytes));
+    const { video } = await new MediabunnyCodecReader().read(movieBytes);
+    expect(video.map((codec) => codec.configuration.codec)).toEqual([
+      'hvc1.1.6.L30.90',
+      'hvc1.1.6.L30.90',
+    ]);
+  });
+
+  it("leaves an encrypted HEVC track mediabunny's codec string: its sample entry names the protection", async () => {
+    const encrypted = {
+      getCodec: (): Promise<'hevc'> => Promise.resolve('hevc'),
+      getInternalCodecId: (): Promise<string> => Promise.resolve('encv'),
+    };
+    const config = { codec: 'hvc1.1.6.L30.90', description: new Uint8Array(23) };
+    expect(await codecStringOf(encrypted, config)).toBe('hvc1.1.6.L30.90');
+  });
+
+  it("reads a 10-bit HLG track's colour from its SPS, as the X6's tracks carry no colr box", async () => {
+    const bytes = fixtureBytes('hevc-main10-hlg-dual-track-64px-10fps-3s.mp4');
+    const { video } = await new MediabunnyCodecReader().read(await movieBytesOf(bytes));
+    expect(video.map((codec) => codec.description.colour)).toEqual([
+      { primaries: 'bt2020', transfer: 'hlg', matrix: 'bt2020-ncl', range: 'limited' },
+      { primaries: 'bt2020', transfer: 'hlg', matrix: 'bt2020-ncl', range: 'limited' },
+    ]);
+  });
+
+  it('tells the sound codec as mediabunny reading the whole file does', async () => {
+    const bytes = fixtureBytes('dual-track-aac-64px-10fps-3s.mp4');
+    const codecs = await new MediabunnyCodecReader().read(await movieBytesOf(bytes));
+    const input = new Input({ formats: ALL_FORMATS, source: new BufferSource(bytes) });
+    try {
+      const [track] = await input.getAudioTracks();
+      const config = await track?.getDecoderConfig();
+      expect(codecs.audio.map((codec) => codec.configuration)).toEqual([
+        {
+          codec: config?.codec,
+          sampleRate: config?.sampleRate,
+          numberOfChannels: config?.numberOfChannels,
+          description: expect.any(Uint8Array) as Uint8Array,
+        },
+      ]);
+    } finally {
+      input.dispose();
+    }
+  });
+
+  it("refuses a video track whose sample entry carries no codec configuration as the file's failing", async () => {
+    const lens = {
+      trackId: 1,
+      handler: 'vide',
+      sampleEntry: videoSampleEntry({
+        type: 'avc1',
+        width: 64,
+        height: 64,
+        configuration: encodeBox('free', new Uint8Array()),
+      }),
+      timescale: 1000,
+      samples: [{ bytes: new Uint8Array(8), duration: 40, isSync: true }],
+    };
+    const movieBytes = await movieBytesOf(buildMp4File([lens]).bytes);
+    await expect(new MediabunnyCodecReader().read(movieBytes)).rejects.toMatchObject({
+      code: 'unsupported-container',
+      category: 'recording',
+    });
+  });
+});

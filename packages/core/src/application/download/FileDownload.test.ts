@@ -1,0 +1,517 @@
+import { describe, expect, it } from 'vitest';
+
+import { FileDownload, type CursorSample, type SampleCursor } from './FileDownload';
+import type { DownloadPolicy } from '../../domain/download/DownloadPolicy';
+import type { TrackSampleTable } from '../../domain/container/TrackSampleTable';
+import { GyroViewError } from '../../shared/errors/GyroViewError';
+import { seconds } from '../../shared/units/time';
+import {
+  cameraRecording,
+  type CameraLayout,
+  type CameraRecording,
+} from '../../testing/cameraRecording';
+import { describeMediaBufferContract } from '../../testing/MediaBuffer.contract';
+import { SimulatedLink } from '../../testing/SimulatedLink';
+import { settle } from '../../../test/support/settle';
+
+const FRAME_RATE = 60;
+const LAYOUT: CameraLayout = {
+  frames: 1200,
+  frameBytes: 2000,
+  soundBytes: 100,
+  frameRate: FRAME_RATE,
+  framesPerGop: 30,
+};
+const RECORDING: CameraRecording = cameraRecording(LAYOUT);
+const SLOT = RECORDING.slotBytes;
+const POLICY: DownloadPolicy = {
+  aheadSeconds: seconds(2),
+  aheadBytes: 100 * SLOT,
+  keepBehindBytes: 10 * SLOT,
+  keepBehindSeconds: seconds(2),
+  requestSize: 10 * SLOT,
+  requestsInFlight: 2,
+  bridgedGap: 2 ** 20,
+  refillBytes: 25 * SLOT,
+  replanBytes: 2 * SLOT,
+  resumeSeconds: seconds(1),
+};
+/**
+ * A tick is a frame's time: the link carries half again what playing takes, after two frames.
+ */
+const NETWORK = { bytesPerTick: Math.round(1.5 * SLOT), latencyTicks: 2 };
+/**
+ * A link far faster than playing takes, which fills the window at once and then waits on it.
+ */
+const FAST_NETWORK = { bytesPerTick: 10 * SLOT, latencyTicks: 2 };
+/**
+ * A server slow to answer, as Google Drive's API: half a second before each answer, and each
+ * answer sent at a little more than playing takes, on a link with room for three (ADR 0044).
+ */
+const SLOW_TO_ANSWER = {
+  bytesPerTick: 3 * SLOT,
+  latencyTicks: 30,
+  bytesPerTickPerRequest: Math.round(1.2 * SLOT),
+};
+/**
+ * The shape `downloadPolicyFor` gives a lone file from such a server: refill-sized ranges, three
+ * at once.
+ */
+const SLOW_SERVER_POLICY: DownloadPolicy = {
+  ...POLICY,
+  requestSize: POLICY.refillBytes,
+  requestsInFlight: 3,
+};
+const STALLED = Symbol('stalled');
+
+async function stalled(): Promise<typeof STALLED> {
+  await settle();
+  return STALLED;
+}
+
+interface Setup {
+  readonly link: SimulatedLink;
+  readonly download: FileDownload;
+}
+
+function setup(policy = POLICY, network = NETWORK): Setup {
+  const link = new SimulatedLink(new Uint8Array(RECORDING.fileSize), network);
+  return { link, download: new FileDownload({ table: RECORDING.table, stream: link, policy }) };
+}
+
+function tracks(): TrackSampleTable[] {
+  return [RECORDING.lens0, RECORDING.sound, RECORDING.lens1];
+}
+
+/**
+ * Readers taking their samples as playing would: every sample due by the playhead whose bytes
+ * have come, a read that waits left waiting until the next look.
+ */
+class Readers {
+  public handedOutBytes = 0;
+  private readonly waiting = new Map<SampleCursor, Promise<CursorSample | undefined>>();
+
+  public constructor(public readonly cursors: readonly SampleCursor[]) {}
+
+  /**
+   * Takes every sample due by `time`, the sound's `soundLead` further ahead, as an audio feeder
+   * that buffers ahead reads it.
+   */
+  public async takeDueBy(time: number, soundLead = 0): Promise<void> {
+    for (const cursor of this.cursors) {
+      const lead = cursor.track.kind === 'audio' ? soundLead : 0;
+      await this.takeFrom(cursor, time + lead);
+    }
+  }
+
+  private async takeFrom(cursor: SampleCursor, time: number): Promise<void> {
+    while (
+      cursor.position < cursor.track.sampleCount &&
+      cursor.track.timestampOf(cursor.position) <= time
+    ) {
+      const next = this.waiting.get(cursor) ?? cursor.nextSample();
+      const result = await Promise.race([next, stalled()]);
+      if (result === STALLED) {
+        this.waiting.set(cursor, next);
+        return;
+      }
+      this.waiting.delete(cursor);
+      if (!result) return;
+      this.handedOutBytes += result.bytes.byteLength;
+    }
+  }
+}
+
+function openReaders(download: FileDownload, frame: number): Readers {
+  return new Readers(tracks().map((track) => download.openCursor(track, frame)));
+}
+
+/**
+ * Plays from `startFrame` for `frames` ticks, the link carrying its bytes tick by tick.
+ */
+interface Playing extends Setup {
+  readonly readers: Readers;
+  /**
+   * How far ahead of the picture the sound is read.
+   */
+  readonly soundLead?: number;
+}
+
+async function play(context: Playing, startFrame: number, frames: number): Promise<void> {
+  for (let tick = 0; tick <= frames; tick += 1) {
+    context.link.advance();
+    await settle();
+    await context.readers.takeDueBy((startFrame + tick) / FRAME_RATE, context.soundLead);
+  }
+}
+
+/**
+ * Reads every sample up to `last`, as a decoder would, and the last one read.
+ */
+async function readUpTo(cursor: SampleCursor, last: number): Promise<CursorSample | undefined> {
+  let sample: CursorSample | undefined;
+  while (cursor.position <= last) sample = await cursor.nextSample();
+  return sample;
+}
+
+async function idle(link: SimulatedLink, ticks: number): Promise<void> {
+  for (let tick = 0; tick < ticks; tick += 1) {
+    link.advance();
+    await settle();
+  }
+}
+
+describeMediaBufferContract('file download', () => {
+  const context = setup();
+  context.download.openCursor(RECORDING.lens0, 0);
+  context.download.startReadingAhead();
+  return Promise.resolve({
+    buffer: context.download,
+    bringMore: async (): Promise<void> => {
+      await idle(context.link, 3);
+    },
+  });
+});
+
+describe('FileDownload', () => {
+  it("hands each reader its track's samples in order as their bytes come", async () => {
+    const context = setup();
+    const readers = openReaders(context.download, 0);
+    context.download.startReadingAhead();
+    await play({ ...context, readers }, 0, 30);
+    expect(readers.cursors.map((cursor) => cursor.position)).toEqual([31, 31, 31]);
+  });
+
+  it('before playing, reads only the frames the picture waits for', async () => {
+    const context = setup();
+    const readers = openReaders(context.download, 0);
+    await play({ ...context, readers }, 0, 3);
+    await idle(context.link, 200);
+    expect(context.link.deliveredBytes).toBeLessThanOrEqual(5 * SLOT);
+  });
+
+  it('while paused, reads ahead to its budget and then stops', async () => {
+    const context = setup();
+    const readers = openReaders(context.download, 0);
+    context.download.startReadingAhead();
+    await play({ ...context, readers }, 0, 1);
+    await idle(context.link, 400);
+    const requestsAtRest = context.link.requests.length;
+    await idle(context.link, 200);
+    expect(context.link.deliveredBytes).toBeGreaterThanOrEqual(
+      POLICY.aheadBytes - POLICY.refillBytes,
+    );
+    expect(context.link.deliveredBytes).toBeLessThanOrEqual(POLICY.aheadBytes + 2 * SLOT);
+    expect(context.link.requests).toHaveLength(requestsAtRest);
+  });
+
+  it('plans again as its readers move on through what has come once they have taken the replan bytes', async () => {
+    const context = setup({ ...POLICY, replanBytes: 40 * SLOT }, FAST_NETWORK);
+    const readers = openReaders(context.download, 0);
+    context.download.startReadingAhead();
+    await idle(context.link, 20);
+    const requestsAtRest = context.link.requests.length;
+    // More than a refill taken, fewer bytes than the replan: no plan yet, so no top-up.
+    await readers.takeDueBy(30 / FRAME_RATE);
+    await idle(context.link, 5);
+    expect(context.link.requests).toHaveLength(requestsAtRest);
+    await readers.takeDueBy(45 / FRAME_RATE);
+    await idle(context.link, 5);
+    expect(context.link.requests.length).toBeGreaterThan(requestsAtRest);
+  });
+
+  it('hands out every sample however far its readers move on unplanned: a reader that waits asks for a plan', async () => {
+    const context = setup({ ...POLICY, replanBytes: Number.MAX_SAFE_INTEGER });
+    const readers = openReaders(context.download, 0);
+    await play({ ...context, readers }, 0, 3);
+    context.download.startReadingAhead();
+    await play({ ...context, readers }, 3, 1300);
+    expect(readers.handedOutBytes).toBe(RECORDING.fileSize);
+  });
+
+  it('keeps up with playing from a server slow to answer, where two ranges of the usual size fall behind', async () => {
+    const frames = 400;
+    const handedOut = async (policy: DownloadPolicy): Promise<number> => {
+      const context = setup(policy, SLOW_TO_ANSWER);
+      const readers = openReaders(context.download, 0);
+      context.download.startReadingAhead();
+      await play({ ...context, readers }, 0, frames);
+      return readers.handedOutBytes;
+    };
+    const dueBytes = frames * SLOT;
+
+    expect(await handedOut(SLOW_SERVER_POLICY)).toBeGreaterThan(0.9 * dueBytes);
+    expect(await handedOut(POLICY)).toBeLessThan(0.6 * dueBytes);
+  }, 20_000);
+
+  it('fetches about each byte it hands out once, playing the recording through', async () => {
+    const context = setup();
+    const readers = openReaders(context.download, 0);
+    context.download.startReadingAhead();
+    await play({ ...context, readers }, 0, 1300);
+    expect(readers.handedOutBytes).toBe(RECORDING.fileSize);
+    expect(context.link.deliveredBytes / readers.handedOutBytes).toBeLessThanOrEqual(1.05);
+  });
+
+  it('on a seek, gives up what the old position still reads and asks for nothing below the new one', async () => {
+    const context = setup();
+    const before = openReaders(context.download, 0);
+    context.download.startReadingAhead();
+    await play({ ...context, readers: before }, 0, 60);
+    const requestsBefore = context.link.requests.length;
+    for (const cursor of before.cursors) cursor.close();
+    const after = openReaders(context.download, 600);
+    await settle();
+    const oldRequests = context.link.requests.slice(0, requestsBefore);
+    expect(oldRequests.every((request) => request.endedAt !== undefined)).toBe(true);
+    await play({ ...context, readers: after }, 600, 60);
+    const newRequests = context.link.requests.slice(requestsBefore);
+    expect(newRequests.every((request) => request.range.offset >= 600 * SLOT)).toBe(true);
+    expect(after.cursors.map((cursor) => cursor.position)).toEqual([661, 661, 661]);
+  });
+
+  it('wastes on a seek no more than what it read ahead and had coming', async () => {
+    const context = setup();
+    const before = openReaders(context.download, 0);
+    context.download.startReadingAhead();
+    await play({ ...context, readers: before }, 0, 120);
+    for (const cursor of before.cursors) cursor.close();
+    const deliveredAtSeek = context.link.deliveredBytes;
+    const after = openReaders(context.download, 900);
+    await play({ ...context, readers: after }, 900, 120);
+    const unused = deliveredAtSeek - before.handedOutBytes;
+    expect(unused).toBeLessThanOrEqual(
+      POLICY.aheadBytes + POLICY.requestsInFlight * POLICY.requestSize,
+    );
+    expect(
+      context.link.deliveredBytes - deliveredAtSeek - after.handedOutBytes,
+    ).toBeLessThanOrEqual(POLICY.aheadBytes + POLICY.requestsInFlight * POLICY.requestSize);
+  });
+
+  it('reads ahead as soon as playing starts, with no reader waiting', async () => {
+    const context = setup();
+    openReaders(context.download, 0);
+    await settle();
+    context.download.startReadingAhead();
+    await idle(context.link, 1);
+    expect(context.link.requests).not.toHaveLength(0);
+  });
+
+  it('reads ahead for a reader opened once playing, before it reads', async () => {
+    const context = setup();
+    context.download.startReadingAhead();
+    await settle();
+    openReaders(context.download, 0);
+    await idle(context.link, 1);
+    expect(context.link.requests).not.toHaveLength(0);
+  });
+
+  it('gives up what was coming for readers that closed', async () => {
+    const context = setup();
+    const readers = openReaders(context.download, 0);
+    context.download.startReadingAhead();
+    await idle(context.link, 3);
+    for (const cursor of readers.cursors) cursor.close();
+    await settle();
+    expect(context.link.requests.every((request) => request.endedAt !== undefined)).toBe(true);
+  });
+
+  it('lets go of what lies behind the stretch it keeps, so a seek back there reads it again', async () => {
+    const context = setup();
+    const before = openReaders(context.download, 0);
+    context.download.startReadingAhead();
+    await play({ ...context, readers: before }, 0, 300);
+    for (const cursor of before.cursors) cursor.close();
+    const requestsBefore = context.link.requests.length;
+    openReaders(context.download, 0);
+    await idle(context.link, 1);
+    expect(context.link.requests[requestsBefore]?.range.offset).toBe(0);
+  });
+
+  it('fails the reader waiting on a range that failed', async () => {
+    const context = setup();
+    const error = new GyroViewError('source-unreadable', 'the connection dropped');
+    context.link.failWhere((range) => range.end > 50 * SLOT, error);
+    const cursor = context.download.openCursor(RECORDING.lens0, 60);
+    const failed = expect(cursor.nextSample()).rejects.toBe(error);
+    await idle(context.link, 5);
+    await failed;
+  });
+
+  it('does not ask again for a range that failed, until a reader opens', async () => {
+    const context = setup();
+    const error = new GyroViewError('source-unreadable', 'the connection dropped');
+    context.link.failWhere((range) => range.end > 50 * SLOT, error);
+    const cursor = context.download.openCursor(RECORDING.lens0, 60);
+    const failed = expect(cursor.nextSample()).rejects.toBe(error);
+    await idle(context.link, 5);
+    await failed;
+    const requestsAfterFailing = context.link.requests.length;
+    await expect(cursor.nextSample()).rejects.toBe(error);
+    await idle(context.link, 5);
+    expect(context.link.requests).toHaveLength(requestsAfterFailing);
+    context.link.failWhere(() => false, error);
+    const again = context.download.openCursor(RECORDING.lens0, 60).nextSample();
+    await idle(context.link, 5);
+    await expect(again).resolves.toMatchObject({ sample: 60 });
+  });
+
+  it('asks once more, when a reader comes to it, for a range that failed while read ahead', async () => {
+    const context = setup(POLICY, FAST_NETWORK);
+    const error = new GyroViewError('source-unreadable', 'the connection dropped');
+    context.link.failWhere((range) => range.end > 50 * SLOT, error);
+    const cursor = context.download.openCursor(RECORDING.lens0, 0);
+    context.download.startReadingAhead();
+    await idle(context.link, 10);
+    const requestsWhileFailing = context.link.requests.length;
+    context.link.failWhere(() => false, error);
+    const reading = readUpTo(cursor, 60);
+    await idle(context.link, 10);
+    await expect(reading).resolves.toMatchObject({ sample: 60 });
+    expect(context.link.requests.length).toBeGreaterThan(requestsWhileFailing);
+  });
+
+  it('fails the reader when a range that failed while read ahead fails again once needed', async () => {
+    const context = setup(POLICY, FAST_NETWORK);
+    const error = new GyroViewError('source-unreadable', 'the connection dropped');
+    context.link.failWhere((range) => range.end > 50 * SLOT, error);
+    const cursor = context.download.openCursor(RECORDING.lens0, 0);
+    context.download.startReadingAhead();
+    await idle(context.link, 10);
+    const reading = expect(readUpTo(cursor, 60)).rejects.toBe(error);
+    await idle(context.link, 10);
+    await reading;
+  });
+
+  it('asks for what another reader waits on once a failed range makes room', async () => {
+    const context = setup({ ...POLICY, requestsInFlight: 1 });
+    const error = new GyroViewError('source-unreadable', 'the connection dropped');
+    context.link.failWhere((range) => range.offset < 100 * SLOT, error);
+    const failing = context.download.openCursor(RECORDING.lens0, 60);
+    const failed = expect(failing.nextSample()).rejects.toBe(error);
+    const waiting = context.download.openCursor(RECORDING.lens0, 600).nextSample();
+    await idle(context.link, 10);
+    await failed;
+    await expect(waiting).resolves.toMatchObject({ sample: 600 });
+  });
+
+  it('fails a reader with source-unreadable when the stream fails otherwise', async () => {
+    const context = setup();
+    const cause = new Error('socket hang up');
+    context.link.failWhere(() => true, cause);
+    const cursor = context.download.openCursor(RECORDING.lens0, 0);
+    const failed = expect(cursor.nextSample()).rejects.toMatchObject({
+      code: 'source-unreadable',
+      message: 'a range of the recording could not be read',
+      cause,
+    });
+    await idle(context.link, 5);
+    await failed;
+  });
+
+  it('refuses a track of another file', () => {
+    const other = cameraRecording({ ...LAYOUT, frames: 10 });
+    expect(() => setup().download.openCursor(other.lens0, 0)).toThrow(
+      'the track is not one of this file',
+    );
+  });
+
+  it('serves several readers of one track at once', async () => {
+    const context = setup();
+    const near = context.download.openCursor(RECORDING.lens0, 0);
+    const far = context.download.openCursor(RECORDING.lens0, 300);
+    const samples = Promise.all([near.nextSample(), far.nextSample()]);
+    await idle(context.link, 10);
+    const [first, second] = await samples;
+    expect([first?.sample, second?.sample]).toEqual([0, 300]);
+  });
+
+  it('once disposed, gives every range up and ends every reader', async () => {
+    const context = setup();
+    const cursor = context.download.openCursor(RECORDING.lens0, 0);
+    context.download.startReadingAhead();
+    const next = cursor.nextSample();
+    await idle(context.link, 1);
+    context.download.dispose();
+    await expect(next).resolves.toBeUndefined();
+    await idle(context.link, 5);
+    expect(context.link.requests.every((request) => request.endedAt !== undefined)).toBe(true);
+  });
+
+  it('once disposed, ends a reader opened after at once and reads nothing for it', async () => {
+    const context = setup();
+    context.download.startReadingAhead();
+    context.download.dispose();
+    const cursor = context.download.openCursor(RECORDING.lens0, 0);
+    await expect(cursor.nextSample()).resolves.toBeUndefined();
+    await idle(context.link, 5);
+    expect(context.link.requests).toHaveLength(0);
+  });
+
+  it('is ready to resume once the frames of the next seconds have come', async () => {
+    const context = setup();
+    openReaders(context.download, 0);
+    context.download.startReadingAhead();
+    await settle();
+    expect(context.download.isReadyToResumeAt(seconds(0))).toBe(false);
+    await idle(context.link, 200);
+    expect(context.download.isReadyToResumeAt(seconds(0))).toBe(true);
+  });
+
+  it('tells its listeners of every chunk that comes, until they stop listening', async () => {
+    const context = setup();
+    let progress = 0;
+    const stop = context.download.onProgress(() => {
+      progress += 1;
+    });
+    openReaders(context.download, 0);
+    context.download.startReadingAhead();
+    await idle(context.link, 5);
+    const heard = progress;
+    stop();
+    await idle(context.link, 5);
+    expect(heard).toBeGreaterThan(0);
+    expect(progress).toBe(heard);
+  });
+
+  it('becomes ready to resume when its budget binds, its picture readers stopped and no sound read', async () => {
+    const policy = { ...POLICY, resumeSeconds: seconds(1.5) };
+    const context = setup(policy);
+    for (const track of [RECORDING.lens0, RECORDING.lens1]) context.download.openCursor(track, 0);
+    context.download.startReadingAhead();
+    await idle(context.link, 400);
+    expect(context.download.isReadyToResumeAt(seconds(0))).toBe(true);
+  });
+
+  it('asks for ranges of about the request size while the sound reads far ahead', async () => {
+    const context = setup(POLICY, FAST_NETWORK);
+    const readers = openReaders(context.download, 0);
+    context.download.startReadingAhead();
+    await play({ ...context, readers, soundLead: 30 }, 0, 600);
+    const { requests } = context.link;
+    const averageBytes = context.link.deliveredBytes / requests.length;
+    expect(averageBytes).toBeGreaterThanOrEqual(POLICY.requestSize / 2);
+  });
+
+  it("before playing, reads the frames up to a seek's target in few ranges, not one a frame", async () => {
+    const context = setup();
+    const target = seconds(30 / FRAME_RATE);
+    const cursors = [RECORDING.lens0, RECORDING.lens1].map((track) =>
+      context.download.openCursor(track, 0, target),
+    );
+    await play({ ...context, readers: new Readers(cursors) }, 0, 30);
+    expect(cursors.map((cursor) => cursor.position)).toEqual([31, 31]);
+    expect(context.link.requests.length).toBeLessThanOrEqual(4);
+  });
+
+  it('fails every read when it cannot plan, rather than leave them waiting', async () => {
+    const context = setup({ ...POLICY, keepBehindBytes: NaN });
+    const failed = expect(
+      context.download.openCursor(RECORDING.lens0, 0).nextSample(),
+    ).rejects.toMatchObject({
+      code: 'invalid-byte-range',
+    });
+    await idle(context.link, 3);
+    await failed;
+  });
+});

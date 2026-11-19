@@ -1,0 +1,16 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2024", "ESNext.Array", "DOM", "DOM.Iterable"],
+    "types": ["node"],
+    "allowImportingTsExtensions": true
+  },
+  "include": [
+    "src/**/*.ts",
+    "dev/**/*.ts",
+    "vite.config.ts",
+    "vite.snippet.config.ts",
+    "vitest.config.ts",
+    "vitest.node.config.ts"
+  ]
+}

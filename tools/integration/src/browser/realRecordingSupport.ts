@@ -1,0 +1,150 @@
+import {
+  FramePairQueue,
+  hasErrorCode,
+  seconds,
+  type DecodePipeline,
+  type FramePair,
+} from '@gyroview/core';
+import {
+  browserPorts,
+  DECODE_PIPELINE_OPTIONS,
+  openRecording,
+  PAIR_QUEUE_CAPACITY,
+  type OpenedRecording,
+} from '@gyroview/player/composition';
+import { waitFor } from '@gyroview/player/testing';
+import { expect, type TestContext } from 'vitest';
+
+import { isServed, type SampleRecording } from './sampleUrls';
+
+const TIMESTAMP_DIGITS = 3;
+/**
+ * How long a test waits for decoded pairs before it gives up.
+ */
+export const DECODE_TIMEOUT_MS = 15_000;
+
+const ports = browserPorts();
+export const port = ports.decoderPort;
+
+/**
+ * A sample opened as the player opens it, or why this run cannot open it.
+ */
+export type Availability =
+  { readonly opened: OpenedRecording } | { readonly unavailableBecause: string };
+
+const NO_HEVC_DECODER = 'this browser build cannot decode the recording (no HEVC decoder)';
+
+/**
+ * Opens a sample through the player's own use case, which also proves the recording decodes
+ * here. A sample missing locally (as in CI) or a browser build without an HEVC decoder
+ * (Playwright's Chromium) makes it unavailable rather than failing.
+ */
+export async function availabilityOf(sample: SampleRecording): Promise<Availability> {
+  if (!(await isServed(sample.url))) {
+    return { unavailableBecause: `${sample.name} is not available locally` };
+  }
+  const source = { main: { url: sample.url }, second: undefined };
+  try {
+    return { opened: await openRecording(source, ports, new AbortController().signal) };
+  } catch (error) {
+    if (hasErrorCode(error, 'codec-unsupported')) return { unavailableBecause: NO_HEVC_DECODER };
+    throw error;
+  }
+}
+
+/**
+ * The opened sample, or the test skipped with the reason it is unavailable.
+ */
+export function openedOrSkip(context: TestContext, availability: Availability): OpenedRecording {
+  if ('unavailableBecause' in availability) context.skip(availability.unavailableBecause);
+  return availability.opened;
+}
+
+export async function openSample(
+  context: TestContext,
+  sample: SampleRecording,
+): Promise<OpenedRecording> {
+  return openedOrSkip(context, await availabilityOf(sample));
+}
+
+/**
+ * Takes the first `count` pairs the pipeline delivers from `from`, then aborts it and closes the
+ * pairs decoded beyond them.
+ */
+export async function takePairs(
+  pipeline: DecodePipeline<VideoFrame>,
+  from: number,
+  count: number,
+): Promise<FramePair<VideoFrame>[]> {
+  const queue = new FramePairQueue<VideoFrame>(PAIR_QUEUE_CAPACITY);
+  const run = pipeline.run(seconds(from), queue);
+  const taken: FramePair<VideoFrame>[] = [];
+  await waitFor(
+    () => {
+      takeQueued(queue, taken, count);
+      return taken.length >= count;
+    },
+    `${count} decoded pairs`,
+    DECODE_TIMEOUT_MS,
+  );
+  pipeline.abort();
+  await run;
+  queue.close();
+  return taken;
+}
+
+/**
+ * Moves every pair waiting in the queue to `taken`, in order, until it holds `count`: the
+ * decoders wait for room in the queue, so it is emptied at each look.
+ */
+function takeQueued(
+  queue: FramePairQueue<VideoFrame>,
+  taken: FramePair<VideoFrame>[],
+  count: number,
+): void {
+  let head = queue.peekTimestamp();
+  while (head !== undefined && taken.length < count) {
+    const pair = queue.takePairAt(head);
+    if (!pair) return;
+    taken.push(pair);
+    head = queue.peekTimestamp();
+  }
+}
+
+export function closeAll(pairs: readonly FramePair<VideoFrame>[]): void {
+  for (const pair of pairs) for (const frame of pair.frames) frame.close();
+}
+
+/**
+ * What the lockstep checks read of a decoded pair, kept after its frames are closed.
+ */
+export interface PairTiming {
+  readonly timestamp: number;
+  readonly frameTimestamps: readonly number[];
+  readonly codedWidths: readonly number[];
+}
+
+export function timingOf(pair: FramePair<VideoFrame>): PairTiming {
+  return {
+    timestamp: pair.timestamp,
+    frameTimestamps: pair.frames.map((frame) => frame.timestamp),
+    codedWidths: pair.frames.map((frame) => frame.handle.codedWidth),
+  };
+}
+
+/**
+ * Consecutive pairs of whole frames of the sample's size, each pair's frames at one time.
+ */
+export function expectLockstep(timings: readonly PairTiming[], sample: SampleRecording): void {
+  const frameDuration = 1 / sample.frameRate;
+  for (const [index, timing] of timings.entries()) {
+    expect(timing.codedWidths.length).toBeGreaterThan(0);
+    expect(timing.codedWidths.every((width) => width === sample.codedSize)).toBe(true);
+    const [first = 0, second = 0] = timing.frameTimestamps;
+    expect(Math.abs(first - second)).toBeLessThan(DECODE_PIPELINE_OPTIONS.pairTolerance);
+    const previous = timings[index - 1];
+    if (previous) {
+      expect(timing.timestamp - previous.timestamp).toBeCloseTo(frameDuration, TIMESTAMP_DIGITS);
+    }
+  }
+}

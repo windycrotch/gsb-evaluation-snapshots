@@ -1,0 +1,371 @@
+import {
+  aspectOfArea,
+  ensureIndexInRange,
+  ensureInvariant,
+  IDENTITY_MATRIX3,
+  MEI_TERM_CAPACITY,
+  planeHalfExtentOf,
+  ROW_CORRECTION_COUNT,
+  type LensProjectionParameters,
+  type LensStitch,
+  type MeiDistortion,
+  type Matrix3 as CoreMatrix3,
+  type Picture,
+  type ScreenRectangle,
+  type StitchingSetup,
+  type Vector3 as CoreVector3,
+} from '@gyroview/core';
+import { Matrix3, Vector2, Vector3, Vector4, type IUniform, type Texture } from 'three';
+
+import { toThreeMatrix } from './threeMatrix';
+import {
+  CONVERSION_DEFINES,
+  conversionUniforms,
+  type ConversionUniforms,
+} from './conversionUniforms';
+import {
+  SAMPLING_BILINEAR,
+  SAMPLING_SUPERSAMPLED,
+  SAMPLING_TRILINEAR,
+  type SamplingStrategy,
+} from './samplingStrategies';
+
+/**
+ * The shader draws at most this many lenses; the Insta360 X series has two.
+ */
+export const MAX_LENSES = 2;
+/**
+ * Decoded frames the shader samples, one sampler each (`uTexture0`, `uTexture1` in
+ * `lensTextures.glsl`).
+ */
+export const LENS_TEXTURES = 2;
+
+const LENS_MEI = 0;
+const LENS_RADIAL_POLYNOMIAL = 1;
+
+/**
+ * Preprocessor defines by name: an int as a number, a float as its GLSL literal (`glslFloat`).
+ */
+export type ShaderDefines = Readonly<Record<string, number | string>>;
+
+/**
+ * The constants the player's GLSL sources refer to, injected as preprocessor defines so that
+ * this file is their only home; the lab adds its own.
+ */
+export const SHADER_DEFINES: ShaderDefines = Object.fromEntries([
+  ['MAX_LENSES', MAX_LENSES],
+  ['LENS_MEI', LENS_MEI],
+  ['LENS_RADIAL_POLYNOMIAL', LENS_RADIAL_POLYNOMIAL],
+  ['MEI_RADIAL_TERMS', MEI_TERM_CAPACITY.radial],
+  ['MEI_TANGENTIAL_ORDERS', MEI_TERM_CAPACITY.tangential],
+  ['MEI_THIN_PRISM_ORDERS', MEI_TERM_CAPACITY.thinPrism],
+  ['ROW_CORRECTIONS', ROW_CORRECTION_COUNT],
+  ...CONVERSION_DEFINES,
+  ['SAMPLING_BILINEAR', SAMPLING_BILINEAR],
+  ['SAMPLING_TRILINEAR', SAMPLING_TRILINEAR],
+  ['SAMPLING_SUPERSAMPLED', SAMPLING_SUPERSAMPLED],
+]);
+
+/**
+ * Every uniform the player's programs declare, named exactly as in the GLSL chunks and shared by
+ * all programs as the same objects; with {@link ConversionUniforms}, the only place the
+ * TypeScript side spells the shared uniform names (the lab spells the ones only its programs add).
+ */
+export interface RendererUniforms extends ConversionUniforms {
+  readonly uLensCount: IUniform<number>;
+  readonly uViewRotation: IUniform<Matrix3>;
+  readonly uStabilization: IUniform<Matrix3>;
+  readonly uIsRowCorrected: IUniform<boolean>;
+  readonly uRowCorrection: IUniform<Matrix3[]>;
+  readonly uPlaneHalfExtent: IUniform<number>;
+  readonly uPictureAspect: IUniform<number>;
+  readonly uScreenArea: IUniform<Vector4[]>;
+  readonly uFeather: IUniform<Vector2>;
+  readonly uLensRotation: IUniform<Matrix3[]>;
+  readonly uLensKind: IUniform<number[]>;
+  readonly uLensPrincipalPoint: IUniform<Vector2[]>;
+  readonly uLensFocal: IUniform<Vector2[]>;
+  readonly uLensXi: IUniform<number[]>;
+  readonly uLensRadial: IUniform<number[]>;
+  readonly uLensTangential: IUniform<Vector2[]>;
+  readonly uLensThinPrism: IUniform<Vector2[]>;
+  readonly uLensPolynomial: IUniform<Vector4[]>;
+  readonly uLensHalfFov: IUniform<number[]>;
+  readonly uLensWindow: IUniform<Vector4[]>;
+  readonly uLensRegion: IUniform<Vector4[]>;
+  readonly uLensTexture: IUniform<number[]>;
+  readonly uLensGain: IUniform<Vector3[]>;
+  readonly uSampling: IUniform<number>;
+  readonly uTexture0: IUniform<Texture | null>;
+  readonly uTexture1: IUniform<Texture | null>;
+}
+
+export function createRendererUniforms(
+  setup: StitchingSetup,
+  textures: readonly Texture[],
+): RendererUniforms {
+  const lenses = padded(setup.lenses, 'a stitching setup has one or two lenses');
+  return {
+    ...viewUniforms(setup),
+    ...projectionUniforms(lenses),
+    ...samplingUniforms(lenses),
+    ...conversionUniforms(lenses),
+    uTexture0: { value: textures[0] ?? null },
+    uTexture1: { value: textures[1] ?? null },
+  };
+}
+
+function viewUniforms(
+  setup: StitchingSetup,
+): Pick<
+  RendererUniforms,
+  | 'uLensCount'
+  | 'uViewRotation'
+  | 'uStabilization'
+  | 'uIsRowCorrected'
+  | 'uRowCorrection'
+  | 'uPlaneHalfExtent'
+  | 'uPictureAspect'
+  | 'uScreenArea'
+  | 'uFeather'
+> {
+  return {
+    uLensCount: { value: setup.lenses.length },
+    uViewRotation: { value: new Matrix3() },
+    uStabilization: { value: new Matrix3() },
+    uIsRowCorrected: { value: false },
+    uRowCorrection: { value: Array.from({ length: ROW_CORRECTION_COUNT }, () => new Matrix3()) },
+    uPlaneHalfExtent: { value: 1 },
+    uPictureAspect: { value: 1 },
+    uScreenArea: { value: Array.from({ length: MAX_LENSES }, () => new Vector4(0, 0, 1, 1)) },
+    uFeather: { value: new Vector2(setup.feather.start, setup.feather.end) },
+  };
+}
+
+function projectionUniforms(
+  lenses: readonly LensStitch[],
+): Pick<
+  RendererUniforms,
+  | 'uLensRotation'
+  | 'uLensKind'
+  | 'uLensPrincipalPoint'
+  | 'uLensFocal'
+  | 'uLensXi'
+  | 'uLensRadial'
+  | 'uLensTangential'
+  | 'uLensThinPrism'
+  | 'uLensPolynomial'
+  | 'uLensHalfFov'
+> {
+  const slots = lenses.map((lens) => slotOf(lens.projection));
+  return {
+    uLensRotation: { value: lenses.map((lens) => toThreeMatrix(lens.rotation)) },
+    uLensKind: { value: slots.map((slot) => slot.kind) },
+    uLensPrincipalPoint: { value: lenses.map((lens) => toVector2(lens.projection.principalPoint)) },
+    uLensFocal: { value: slots.map((slot) => slot.focal) },
+    uLensXi: { value: slots.map((slot) => slot.xi) },
+    uLensRadial: { value: slots.flatMap((slot) => slot.radial) },
+    uLensTangential: { value: slots.flatMap((slot) => slot.tangential) },
+    uLensThinPrism: { value: slots.flatMap((slot) => slot.thinPrism) },
+    uLensPolynomial: { value: slots.map((slot) => slot.polynomial) },
+    uLensHalfFov: { value: lenses.map((lens) => lens.halfFieldOfView) },
+  };
+}
+
+/**
+ * One lens model's parameters as the shader's per-lens slots; the slots a model does not use
+ * stay zero. The Mei terms fill each family's room in order, the rest of it zero.
+ */
+interface ProjectionSlot {
+  readonly kind: number;
+  readonly focal: Vector2;
+  readonly xi: number;
+  readonly radial: readonly number[];
+  readonly tangential: readonly Vector2[];
+  readonly thinPrism: readonly Vector2[];
+  readonly polynomial: Vector4;
+}
+
+const NO_MEI_DISTORTION: MeiDistortion = { radial: [], tangential: [], thinPrism: [] };
+
+/**
+ * Exhaustive over the projection kinds: a new kind does not compile until it is packed.
+ */
+function slotOf(projection: LensProjectionParameters): ProjectionSlot {
+  switch (projection.kind) {
+    case 'mei': {
+      return {
+        kind: LENS_MEI,
+        focal: new Vector2(...projection.focal),
+        xi: projection.xi,
+        ...meiTermSlots(projection.distortion),
+        polynomial: new Vector4(),
+      };
+    }
+    case 'radial-polynomial': {
+      return {
+        kind: LENS_RADIAL_POLYNOMIAL,
+        focal: new Vector2(),
+        xi: 0,
+        ...meiTermSlots(NO_MEI_DISTORTION),
+        polynomial: new Vector4(...projection.coefficients),
+      };
+    }
+  }
+}
+
+function meiTermSlots(
+  distortion: MeiDistortion,
+): Pick<ProjectionSlot, 'radial' | 'tangential' | 'thinPrism'> {
+  return {
+    radial: fittedToCapacity(distortion.radial, MEI_TERM_CAPACITY.radial, () => 0),
+    tangential: fittedToCapacity(
+      distortion.tangential.map((pair) => new Vector2(pair.p1, pair.p2)),
+      MEI_TERM_CAPACITY.tangential,
+      () => new Vector2(),
+    ),
+    thinPrism: fittedToCapacity(
+      distortion.thinPrism.map((term) => new Vector2(term.x, term.y)),
+      MEI_TERM_CAPACITY.thinPrism,
+      () => new Vector2(),
+    ),
+  };
+}
+
+/**
+ * The terms in the room the shader holds for their family, the rest of it zero; more terms than
+ * it holds are a defect of the model that made them.
+ */
+function fittedToCapacity<Term>(
+  terms: readonly Term[],
+  capacity: number,
+  zero: () => Term,
+): Term[] {
+  ensureInvariant(
+    terms.length <= capacity,
+    `a Mei lens has ${terms.length} terms of a family the shader holds ${capacity} of`,
+  );
+  return Array.from({ length: capacity }, (_unused, index) => terms[index] ?? zero());
+}
+
+function samplingUniforms(
+  lenses: readonly LensStitch[],
+): Pick<
+  RendererUniforms,
+  'uLensWindow' | 'uLensRegion' | 'uLensTexture' | 'uLensGain' | 'uSampling'
+> {
+  return {
+    uLensWindow: {
+      value: lenses.map(
+        (lens) => new Vector4(lens.window.x, lens.window.y, lens.window.width, lens.window.height),
+      ),
+    },
+    uLensRegion: {
+      value: lenses.map(
+        (lens) => new Vector4(lens.region.x, lens.region.y, lens.region.width, lens.region.height),
+      ),
+    },
+    uLensTexture: { value: lenses.map((lens) => lens.frameSlot) },
+    uLensGain: { value: lenses.map(() => new Vector3(1, 1, 1)) },
+    uSampling: { value: SAMPLING_BILINEAR },
+  };
+}
+
+export function applyShaderSampling(uniforms: RendererUniforms, strategy: SamplingStrategy): void {
+  uniforms.uSampling.value = strategy.shaderSampling;
+}
+
+export function applyStabilization(uniforms: RendererUniforms, rotation: CoreMatrix3): void {
+  uniforms.uStabilization.value = toThreeMatrix(rotation);
+}
+
+/**
+ * Sets one lens's per-channel multiplier; a lens the setup does not have is a defect.
+ */
+export function applyLensGain(
+  uniforms: RendererUniforms,
+  lensIndex: number,
+  gain: CoreVector3,
+): void {
+  ensureIndexInRange(lensIndex, uniforms.uLensCount.value, 'lens');
+  uniforms.uLensGain.value[lensIndex]?.set(...gain);
+}
+
+/**
+ * Replaces one lens's body-to-lens rotation; a lens the setup does not have is a defect.
+ */
+export function applyLensPose(
+  uniforms: RendererUniforms,
+  lensIndex: number,
+  rotation: CoreMatrix3,
+): void {
+  ensureIndexInRange(lensIndex, uniforms.uLensCount.value, 'lens');
+  uniforms.uLensRotation.value[lensIndex]?.set(...rotation);
+}
+
+/**
+ * What one picture sets; a value a picture's program does not read stays neutral.
+ */
+interface PictureValues {
+  readonly rotation: CoreMatrix3;
+  readonly planeHalfExtent: number;
+  readonly pictureAspect: number;
+  readonly areas: readonly ScreenRectangle[];
+}
+
+const NEUTRAL = { rotation: IDENTITY_MATRIX3, planeHalfExtent: 1, pictureAspect: 1 };
+
+/**
+ * Sets the uniforms `picture` is drawn from, on a viewport `viewportAspect` wide per unit of
+ * height.
+ */
+export function applyPicture(
+  uniforms: RendererUniforms,
+  picture: Picture,
+  viewportAspect: number,
+): void {
+  const values = valuesOf(picture, viewportAspect);
+  uniforms.uViewRotation.value = toThreeMatrix(values.rotation);
+  uniforms.uPlaneHalfExtent.value = values.planeHalfExtent;
+  uniforms.uPictureAspect.value = values.pictureAspect;
+  uniforms.uScreenArea.value = padded(
+    values.areas,
+    'a picture fills one area per lens at most',
+  ).map((area) => toVector4(area));
+}
+
+function valuesOf(picture: Picture, viewportAspect: number): PictureValues {
+  switch (picture.kind) {
+    case 'rectilinear': {
+      return {
+        rotation: picture.rotation,
+        planeHalfExtent: planeHalfExtentOf(picture.fieldOfView),
+        pictureAspect: aspectOfArea(picture.area, viewportAspect),
+        areas: [picture.area],
+      };
+    }
+    case 'equirectangular': {
+      return { ...NEUTRAL, rotation: picture.rotation, areas: [picture.area] };
+    }
+    case 'lens-tiles': {
+      return { ...NEUTRAL, areas: picture.tiles };
+    }
+  }
+}
+
+function toVector4(area: ScreenRectangle): Vector4 {
+  return new Vector4(area.x, area.y, area.width, area.height);
+}
+
+function toVector2(point: { readonly x: number; readonly y: number }): Vector2 {
+  return new Vector2(point.x, point.y);
+}
+
+/**
+ * Uniform arrays have a fixed length; unused slots repeat the last entry and are never read.
+ */
+function padded<T>(entries: readonly T[], expectation: string): readonly T[] {
+  const last = entries.at(-1);
+  ensureInvariant(last !== undefined && entries.length <= MAX_LENSES, expectation);
+  return Array.from({ length: MAX_LENSES }, (_unused, index) => entries[index] ?? last);
+}

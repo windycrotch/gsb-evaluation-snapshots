@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# Actions are pinned to the commit of the release named beside each, so a moved tag cannot
+# change what runs; Dependabot proposes the updates (.github/dependabot.yml).
+jobs:
+  verify:
+    name: Typecheck, lint, format, dependency rules, tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Playwright's image holds the browsers and the system libraries they need, so the job reaches
+    # no Ubuntu package mirror, whose slow days held it past its timeout. The tag names the
+    # `playwright` version packages/adapters/webcodecs pins, and moves with it.
+    container:
+      image: mcr.microsoft.com/playwright:v1.63.0-noble@sha256:eff16c30e6f3f4af0a03fa4b706120d5e9b0891c344a27d64559aff5900a4a27
+      options: --ipc=host
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The container runs as root over a checkout the runner's user owns, which git refuses.
+      - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm lint
+      - run: pnpm format:check
+      - run: pnpm depcruise
+      - run: pnpm test
+      - run: pnpm build

@@ -1,0 +1,178 @@
+/**
+ * A recording that lives only on this machine, as `samples/catalogue.json` describes it. The file
+ * is git-ignored with the samples (ADR 0031): a recording shared privately never has its file
+ * name, serial or numbers in the repository, and the tests learn what they need of it here.
+ */
+export interface LocalSampleEntry {
+  readonly slug: string;
+  readonly name: string;
+  /**
+   * The folder under `samples/` holding the recording.
+   */
+  readonly folder: string;
+  readonly recording: string;
+  readonly frameRate: number;
+  readonly codedSize: number;
+  /**
+   * The moment the picture tests render, in the recording's seconds.
+   */
+  readonly renderMoment: number;
+  /**
+   * The moments the IMU frame ranking measures stillness at (ADR 0009); none for a camera that
+   * stood still, whose frame the levelling ranking reads instead.
+   */
+  readonly imuRankingTimes: readonly number[];
+  /**
+   * How the camera stood, by the name of the mounting the player reads from its gravity
+   * (ADR 0038).
+   */
+  readonly mounting?: string;
+  readonly studio?: LocalStudioClip;
+  /**
+   * The recording a clip trimmed in the Insta360 app was cut from, where this machine has it.
+   */
+  readonly trimmedFrom?: LocalTrimSource;
+  /**
+   * Words of the recording that must never enter the repository, such as its file name and
+   * serial number, which the privacy check looks for.
+   */
+  readonly privateTokens: readonly string[];
+}
+
+/**
+ * The recording's Studio export, whose frames are extracted beforehand as
+ * `studio-<slug>-<time>s.png` (see `measure/support/referenceFrames.ts`).
+ */
+export interface LocalStudioClip {
+  /**
+   * The recording's time at the export's first frame.
+   */
+  readonly start: number;
+  readonly frameTimes: readonly number[];
+  /**
+   * The frames the lens readings are scored on, the slowest measurement.
+   */
+  readonly comparedTimes: readonly number[];
+  /**
+   * The recording's time the seam's steadiness is measured from.
+   */
+  readonly steadinessStart: number;
+  /**
+   * For an HDR or log recording, the frames of Studio's SDR export of the same stitch, its LUT
+   * applied for a log one, extracted as `studio-<slug>-sdr-<time>s.rgb`: the reference of the
+   * player's colour (ADR 0033, ADR 0047).
+   */
+  readonly sdrFrameTimes?: readonly number[];
+}
+
+/**
+ * The original of a trimmed clip, and the frame of it the clip starts at, measured beforehand by
+ * matching the clip's frames against the original's rather than read from the trim record the
+ * timing is tested on.
+ */
+export interface LocalTrimSource {
+  /**
+   * The folder under `samples/` holding the original.
+   */
+  readonly folder: string;
+  readonly recording: string;
+  /**
+   * The original's frame, from its first encoded frame, that the clip's first frame shows.
+   */
+  readonly startFrame: number;
+}
+
+/**
+ * A local sample as the browser tests receive it: its entry, and the URL Vite serves the
+ * recording at.
+ */
+export type ServedLocalSample = LocalSampleEntry & { readonly url: string };
+
+type Fields = Readonly<Record<string, unknown>>;
+
+/**
+ * The catalogue's entries, checked field by field: the file is written by hand.
+ */
+export function parseLocalCatalogue(json: unknown): LocalSampleEntry[] {
+  const samples = objectOf(json, 'the catalogue')['samples'];
+  if (!Array.isArray(samples)) throw new TypeError('the catalogue has no list of samples');
+  return samples.map((sample: unknown, index) => entryOf(objectOf(sample, `sample ${index}`)));
+}
+
+function entryOf(fields: Fields): LocalSampleEntry {
+  const studio = fields['studio'];
+  const trimmedFrom = fields['trimmedFrom'];
+  return {
+    slug: stringOf(fields, 'slug'),
+    name: stringOf(fields, 'name'),
+    folder: stringOf(fields, 'folder'),
+    recording: stringOf(fields, 'recording'),
+    frameRate: numberOf(fields, 'frameRate'),
+    codedSize: numberOf(fields, 'codedSize'),
+    renderMoment: numberOf(fields, 'renderMoment'),
+    imuRankingTimes: numbersOf(fields, 'imuRankingTimes'),
+    ...(fields['mounting'] !== undefined && { mounting: stringOf(fields, 'mounting') }),
+    ...(studio !== undefined && { studio: studioOf(objectOf(studio, 'studio')) }),
+    ...(trimmedFrom !== undefined && {
+      trimmedFrom: trimSourceOf(objectOf(trimmedFrom, 'trimmedFrom')),
+    }),
+    privateTokens: stringsOf(fields, 'privateTokens'),
+  };
+}
+
+function studioOf(fields: Fields): LocalStudioClip {
+  return {
+    start: numberOf(fields, 'start'),
+    frameTimes: numbersOf(fields, 'frameTimes'),
+    comparedTimes: numbersOf(fields, 'comparedTimes'),
+    steadinessStart: numberOf(fields, 'steadinessStart'),
+    ...(fields['sdrFrameTimes'] !== undefined && {
+      sdrFrameTimes: numbersOf(fields, 'sdrFrameTimes'),
+    }),
+  };
+}
+
+function trimSourceOf(fields: Fields): LocalTrimSource {
+  return {
+    folder: stringOf(fields, 'folder'),
+    recording: stringOf(fields, 'recording'),
+    startFrame: numberOf(fields, 'startFrame'),
+  };
+}
+
+function objectOf(value: unknown, subject: string): Fields {
+  if (typeof value !== 'object' || value === null) throw new TypeError(`${subject} is no object`);
+  return value as Fields;
+}
+
+function stringOf(fields: Fields, name: string): string {
+  const value = fields[name];
+  if (typeof value !== 'string') throw new TypeError(`${name} is no string`);
+  return value;
+}
+
+function numberOf(fields: Fields, name: string): number {
+  const value = fields[name];
+  if (typeof value !== 'number') throw new TypeError(`${name} is no number`);
+  return value;
+}
+
+function numbersOf(fields: Fields, name: string): number[] {
+  return listOf(fields, name, (item): item is number => typeof item === 'number');
+}
+
+function stringsOf(fields: Fields, name: string): string[] {
+  return listOf(fields, name, (item): item is string => typeof item === 'string');
+}
+
+function listOf<Item>(
+  fields: Fields,
+  name: string,
+  isItem: (item: unknown) => item is Item,
+): Item[] {
+  const value = fields[name];
+  if (!Array.isArray(value) || !value.every(isItem)) {
+    throw new TypeError(`${name} is no list of the kind it needs`);
+  }
+  return value;
+}

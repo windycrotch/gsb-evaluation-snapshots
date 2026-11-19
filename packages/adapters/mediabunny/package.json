@@ -1,0 +1,26 @@
+{
+  "name": "@gyroview/adapter-mediabunny",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Codec reader and audio packager for GyroView core ports, built on mediabunny.",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.build.json && tsc -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@gyroview/core": "workspace:*",
+    "mediabunny": "^1.65.2"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.1",
+    "vitest": "4.1.12"
+  }
+}
