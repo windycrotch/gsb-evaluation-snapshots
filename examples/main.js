@@ -170,11 +170,14 @@ function select() {
     sel = { tris, clusters: drawn, ms: performance.now() - t0, visited: 0, threshold: ui.errorPx };
   }
 }
-// streaming: every asset reports the finest level the last selection wanted but did not have
-let streamPending = [];
+// streaming: every asset reports the finest level the last selection wanted but did not have.
+// updateStreaming also hands back the request already in flight, so track unique, un-settled promises.
+let streamPending = new Set();
 function pumpStreaming() {
   if (!STREAM) return;
-  streamPending.push(...updateStreaming(assets));
+  for (const p of updateStreaming(assets)) {
+    if (!streamPending.has(p)) { streamPending.add(p); p.then(() => streamPending.delete(p)); }
+  }
 }
 const residentMB = () => assets.reduce((x, a) => x + a.residentBytes, 0) / 1048576, fullMB = () => assets.reduce((x, a) => x + a.fullBytes, 0) / 1048576;
 // ---- occlusion (?occ=1): render into a target with a depth texture, reduce depth to a 64x36
@@ -361,7 +364,7 @@ window.demo.trace = async ({ frames = 300, mode = 'clod', count = 96, errorPx = 
   for (let i = 0; i < frames; i++) {
     setPose(...tourPose(i / (frames - 1)));
     const t0 = performance.now(); step(); gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px); ms.push(performance.now() - t0);
-    if (STREAM && streamPending.length) { await Promise.all(streamPending); streamPending = []; step(); }
+    if (STREAM && streamPending.size) { await Promise.all([...streamPending]); streamPending.clear(); step(); }
     for (const b of batches) { const u = b.asset._used || (b.asset._used = new Uint8Array(b.asset.meta.clusters)); for (let n = 0; n < b._multiDrawCount; n++) u[b.indirect[n * 2 + 1] & 0xffffff] = 1; }
     tris.push(Math.round(sel.tris)); eff.push(sel.threshold); selMs.push(sel.ms);
     if (i % 50 === 49) await sleep(5);

@@ -145,8 +145,10 @@ Fetches `<base>/<name>.json` and `<base>/<name>.bin` whole. The asset holds `met
 **`loadClodStream(base, name, { rootBytes = 96 * 1024, delayMs = 0 })`** → `Promise<asset>`
 Loads the hierarchy and the coarsest levels that fit in `rootBytes`, and fetches finer levels later with Range requests. Use with `updateStreaming`. Useful fields: `loadedLevel` (0 means everything is loaded), `residentBytes`, `fullBytes`. Streaming assets cannot be used with `DiscreteLodSet`.
 
+Streaming is single-flight and failure-safe. `asset.loadTo(level)` fetches a prefix of four byte ranges and resolves when the bytes are in memory; a second call while a request is running returns the same `Promise`. A response that is not `206`, a network error or a short body rejects the load but leaves `geometry`, `loadedLevel` and every batch exactly as they were, so the coarse cut keeps drawing; the selector asks again on the next frame and the next load retries from the same offset. The fetched prefix waits in `asset.pending` and is only swapped in by the next `ClodSelector.select()`, after that frame's draw lists were built, so no draw list ever points at a disposed buffer. `asset.loadError` holds the last failure.
+
 **`updateStreaming(assets)`** → `Promise[]`
-Call once per frame after `select()`. Starts a fetch for each streaming asset whose last selection wanted finer levels than it has.
+Call once per frame after `select()`. Starts a fetch for each streaming asset whose last selection wanted finer levels than it has (or returns the request already in flight) and returns the promises. Failures are recorded on `asset.loadError` and do not reject these promises, so a frame pump can await them unconditionally; call `asset.loadTo()` directly to see a rejection.
 
 **`loadClodMaterial(base, asset, params?)`** → `MeshStandardMaterial`
 Convenience: wires up the base colour, normal and occlusion/roughness/metal textures and the material factors that the preprocessor copied out of the GLB. `params` overrides anything.
@@ -157,6 +159,7 @@ A `THREE.Mesh` that draws all instances of one asset. `matrices` is an array of 
 **`new ClodSelector(batches)`**
 
 - `select(camera, viewportHeightPx, { errorPx, budget })` writes the draw list of every batch and returns `{ tris, clusters, visited, ms, threshold, occluded }`. `threshold` is the effective error in pixels, which in budget mode tells you how much quality the budget bought. The camera must be a `PerspectiveCamera`.
+- On a streaming asset, a group whose members are not resident yet is not refined: the selector keeps drawing the coarser product that is already in the cut, records the missing level in `asset.wantLevel` for `updateStreaming`, and never draws a cluster outside the resident prefix. Levels that are already resident are not requested again. The swap of a fetched prefix happens at the end of `select()`, so it applies to the next frame.
 - `frustumCull` (default `true`).
 - `hzb`: set to a depth snapshot `{ data, w, h, vp, near, far, px, py }` to occlusion-cull instances. `examples/main.js` shows how to produce one from a depth texture with an asynchronous readback.
 
@@ -234,7 +237,9 @@ If you can run native code, the C++ original is the better builder.
 npm test
 ```
 
-builds a procedural model into a temporary folder and runs the crack test on it. The demo page exposes `window.demo.bench()`, `trace()` and `capture()` for timing runs; with `?auto=<name>` it runs a whole suite and saves `out/bench/<name>.json`, which `node examples/bench-table.mjs` prints.
+builds a procedural model into a temporary folder and runs the crack test on it, then runs `test/stream.mjs`: a small model served through a controllable `fetch` stub (206, non-206, delayed and repeated calls) checks that a failed stream load keeps the coarse level drawable and retries, that repeated `loadTo` calls share one request, that geometry is swapped in only after a selection, and that selector triangle counts and levels match the brute-force cut.
+
+The demo page exposes `window.demo.bench()`, `trace()` and `capture()` for timing runs; with `?auto=<name>` it runs a whole suite and saves `out/bench/<name>.json`, which `node examples/bench-table.mjs` prints.
 
 ## Credits and sources
 

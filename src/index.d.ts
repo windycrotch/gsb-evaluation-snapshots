@@ -34,13 +34,33 @@ export interface ClodAsset {
   fullBytes: number;
   /** Streaming assets only. */
   stream?: true;
+  /**
+   * Streaming assets: fetch geometry down to `level`. Resolves once the bytes are in memory; the bigger
+   * geometry is swapped in by the next ClodSelector.select(). While one request is in flight, every call
+   * returns that same Promise. A rejected load leaves the current (coarser) geometry in place; call again
+   * to retry.
+   */
   loadTo?(level: number): Promise<void>;
   loading?: Promise<void> | null;
+  /** Streaming assets: the fetched prefix waiting for the next select() to swap it in. */
+  pending?: { level: number; bytes: number } | null;
+  /** Streaming assets: the finest level the last selection wanted but did not have; 255 = nothing. */
+  wantLevel?: number;
+  /** Streaming assets: the error of the last failed load, cleared by the next successful one. */
+  loadError?: Error | null;
+  /** Streaming assets: Range requests issued so far (four per level fetch). */
+  requests?: number;
   [key: string]: unknown;
 }
 
 export function loadClod(base: string, name: string): Promise<ClodAsset>;
 export function loadClodStream(base: string, name: string, options?: { rootBytes?: number; delayMs?: number } | number): Promise<ClodAsset>;
+/**
+ * Call once per frame after select(). Starts a fetch for each streaming asset whose last selection wanted
+ * a finer level than is loaded, and returns the pending promises (they resolve when bytes are fetched,
+ * before the swap; failures are recorded on `asset.loadError` rather than rejecting). Callers that want to
+ * see failures should use `asset.loadTo()` directly.
+ */
 export function updateStreaming(assets: ClodAsset[]): Promise<void>[];
 export function loadClodMaterial(base: string, asset: ClodAsset, params?: MeshStandardMaterialParameters): MeshStandardMaterial;
 

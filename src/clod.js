@@ -58,11 +58,21 @@ function finishHierarchy(a) {
   a.minMemberLevel = new Uint8Array(G).fill(255);
   for (let g = 0; g < G; g++) for (let k = a.memberOff[g]; k < a.memberOff[g + 1]; k++) { const l = a.clusterU[a.memberIds[k] * 4 + 3]; if (l < a.minMemberLevel[g]) a.minMemberLevel[g] = l; }
   a.loadedLevel = 0; a.wantLevel = 255; a.residentBytes = 0; a.fullBytes = 0; a.batches = [];
+  a.pending = null; a.loadError = null;
 }
 
 // Streaming loader. The hierarchy (errors, spheres, group membership) is always resident; geometry is
 // fetched as a growing prefix of the file with HTTP Range requests: "everything down to level L".
 // This is level granularity per asset, far coarser than Nanite's 128 KB pages of cluster groups.
+//
+// Failure and lifetime rules (they matter when the camera flies forward and levels change every frame):
+//  - a failed fetch leaves the committed prefix and its BufferGeometry untouched, so the coarse cut
+//    keeps drawing; the next selection records the missing level again and the next updateStreaming()
+//    retries from the same byte offset
+//  - one asset has at most one fetch in flight; every loadTo() during that time returns the same Promise
+//  - a successful fetch only becomes a `pending` prefix. It is swapped in by ClodSelector.select() after
+//    that frame's draw lists were built, so no draw list ever references a disposed buffer, and the old
+//    geometry is only disposed at the swap.
 // options: { rootBytes = 96 KB: geometry loaded up front, delayMs = 0: artificial latency per request, for testing }
 export async function loadClodStream(base, name, options = {}) {
   const { rootBytes = 96 * 1024, delayMs = 0 } = typeof options === 'number' ? { rootBytes: options } : options;
@@ -70,16 +80,21 @@ export async function loadClodStream(base, name, options = {}) {
   const meta = await (await get(base + '/' + name + '.json')).json();
   const url = base + '/' + name + '.bin';
   const T = { Float32Array, Int8Array, Uint32Array, Int32Array };
+  const a = { meta, name, stream: true, requests: 0 };
   const range = async (k, from, to) => { // elements [from, to) of section k
     const s = meta.sections[k], C = T[s.type], b = C.BYTES_PER_ELEMENT;
+    if (to <= from) return new C(0);
     if (delayMs) await new Promise((res) => setTimeout(res, delayMs));
+    a.requests++;
     const r = await get(url, { headers: { Range: 'bytes=' + (s.offset + from * b) + '-' + (s.offset + to * b - 1) } });
     if (r.status !== 206) throw new Error(url + ': the server ignored the HTTP Range request, which streaming needs');
-    return new C(await r.arrayBuffer());
+    const bytes = await r.arrayBuffer();
+    if (bytes.byteLength !== (to - from) * b) throw new Error(url + ': short Range response (' + bytes.byteLength + ' of ' + (to - from) * b + ' bytes)');
+    return new C(bytes);
   };
-  const a = { meta, name, stream: true };
   let hBytes = 0;
   for (const k of ['clusterF', 'clusterU', 'groupF', 'memberOff', 'memberIds']) { const s = meta.sections[k]; a[k] = await range(k, 0, s.bytes / T[s.type].BYTES_PER_ELEMENT); hBytes += s.bytes; }
+  a.requests = 0; // the hierarchy fetch is not counted; `requests` tracks geometry streaming only
   finishHierarchy(a);
   a.hierarchyBytes = hBytes;
   const LR = meta.levelRanges; // coarsest first
@@ -87,31 +102,59 @@ export async function loadClodStream(base, name, options = {}) {
   const c = new THREE.Vector3().fromArray(meta.bbMin).add(new THREE.Vector3().fromArray(meta.bbMax)).multiplyScalar(0.5);
   a.sphere = new THREE.Sphere(c, new THREE.Vector3().fromArray(meta.bbMax).sub(new THREE.Vector3().fromArray(meta.bbMin)).length() * 0.5);
   a.pos = new Float32Array(0); a.nrm = new Int8Array(0); a.uv = new Float32Array(0); a.idx = new Uint32Array(0);
-  let vEnd = 0, iEnd = 0;
+  let vEnd = 0, iEnd = 0; // committed prefix, in elements; a.pending is the fetched-but-not-yet-swapped one
   const grow = (old, add) => { const n = new old.constructor(old.length + add.length); n.set(old); n.set(add, old.length); return n; };
-  a.loading = null; a.requests = 0;
-  // fetch geometry down to `level` and swap in a bigger geometry
+  a.loading = null; a.pending = null; a.loadError = null;
+  const levelRange = (level) => LR.find((l) => l.level === level) || LR[LR.length - 1];
+  const available = () => (a.pending ? Math.min(a.loadedLevel, a.pending.level) : a.loadedLevel);
+  // fetch geometry down to `level`. Resolves when the bytes are in memory; the geometry swap happens in
+  // _commitStreaming(), called by ClodSelector after the next selection.
   a.loadTo = (level) => {
-    if (a.loading) return a.loading;
-    const r = LR.find((l) => l.level === level) || LR[LR.length - 1];
-    if (r.vertexEnd <= vEnd && r.indexEnd <= iEnd) { a.loadedLevel = Math.min(a.loadedLevel, r.level); return Promise.resolve(); }
-    a.loading = (async () => {
-      const [p, n, u, i] = await Promise.all([range('positions', vEnd * 3, r.vertexEnd * 3), range('normals', vEnd * 4, r.vertexEnd * 4), range('uvs', vEnd * 2, r.vertexEnd * 2), range('indices', iEnd, r.indexEnd)]);
-      a.requests += 4;
-      a.pos = grow(a.pos, p); a.nrm = grow(a.nrm, n); a.uv = grow(a.uv, u); a.idx = grow(a.idx, i);
-      vEnd = r.vertexEnd; iEnd = r.indexEnd;
-      const geo = new THREE.BufferGeometry();
-      geo.setAttribute('position', new THREE.BufferAttribute(a.pos, 3));
-      geo.setAttribute('normal', new THREE.BufferAttribute(a.nrm, 4, true));
-      geo.setAttribute('uv', new THREE.BufferAttribute(a.uv, 2));
-      geo.setIndex(new THREE.BufferAttribute(a.idx, 1));
-      geo.boundingSphere = a.sphere;
-      const old = a.geometry; a.geometry = geo;
-      for (const b of a.batches) b.geometry = geo;
-      if (old) old.dispose();
-      a.loadedLevel = r.level; a.residentBytes = r.bytes; a.loading = null;
+    const r = levelRange(level);
+    if (r.level >= available()) return Promise.resolve(); // this level (or finer) is already resident or pending
+    if (a.loading) return a.loading; // single flight per asset: repeated calls share this Promise
+    const base = a.pending || { pos: a.pos, nrm: a.nrm, uv: a.uv, idx: a.idx, vEnd, iEnd };
+    const p = (async () => {
+      try {
+        const [pos, nrm, uv, idx] = await Promise.all([
+          range('positions', base.vEnd * 3, r.vertexEnd * 3),
+          range('normals', base.vEnd * 4, r.vertexEnd * 4),
+          range('uvs', base.vEnd * 2, r.vertexEnd * 2),
+          range('indices', base.iEnd, r.indexEnd),
+        ]);
+        // build the grown prefix off to the side: the committed arrays and their geometry stay valid
+        a.pending = { level: r.level, bytes: r.bytes, vEnd: r.vertexEnd, iEnd: r.indexEnd, pos: grow(base.pos, pos), nrm: grow(base.nrm, nrm), uv: grow(base.uv, uv), idx: grow(base.idx, idx) };
+        a.loadError = null;
+      } catch (e) {
+        a.loadError = e; // nothing was committed; the next loadTo() retries from the same offsets
+        throw e;
+      } finally {
+        a.loading = null;
+      }
     })();
-    return a.loading;
+    a.loading = p;
+    return p;
+  };
+  // Swap a fetched prefix in. Only called once the draw lists that referenced the old buffers were rebuilt
+  // (end of ClodSelector.select) so the frames in between keep drawing the old geometry safely.
+  a._commitStreaming = () => {
+    const p = a.pending;
+    if (!p) return false;
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(p.pos, 3));
+    geo.setAttribute('normal', new THREE.BufferAttribute(p.nrm, 4, true));
+    geo.setAttribute('uv', new THREE.BufferAttribute(p.uv, 2));
+    geo.setIndex(new THREE.BufferAttribute(p.idx, 1));
+    geo.boundingSphere = a.sphere;
+    const old = a.geometry;
+    a.pos = p.pos; a.nrm = p.nrm; a.uv = p.uv; a.idx = p.idx;
+    vEnd = p.vEnd; iEnd = p.iEnd;
+    a.geometry = geo;
+    for (const b of a.batches) b.geometry = geo;
+    a.loadedLevel = p.level; a.residentBytes = p.bytes;
+    a.pending = null;
+    if (old) old.dispose();
+    return true;
   };
   // root "page": as many top levels as fit in rootBytes, but always every cluster of the virtual root group
   let rootLevel = LR[0].level;
@@ -119,19 +162,26 @@ export async function loadClodStream(base, name, options = {}) {
   rootLevel = Math.min(rootLevel, a.minMemberLevel[0]);
   a.loadedLevel = 255;
   await a.loadTo(rootLevel);
+  a._commitStreaming(); // nothing has been drawn yet, so the root page can go in immediately
   a.rootLevel = rootLevel;
   return a;
 }
 
 /**
  * Call once per frame after ClodSelector.select() for assets from loadClodStream: starts a fetch for
- * every asset whose last selection wanted finer levels than are loaded. Returns the pending promises.
+ * every asset whose last selection wanted finer levels than are loaded. Returns the pending promises,
+ * which callers may await; they resolve when the bytes are in memory, not when they are swapped in.
+ * A failed fetch is swallowed here and recorded on `asset.loadError` (the direct loadTo() promise still
+ * rejects), so a frame pump can await the array unconditionally; the next selection asks for that level
+ * again and the next call retries it from the same byte offset. While one request is in flight, further
+ * calls wait on it rather than starting another.
  */
 export function updateStreaming(assets) {
   const pending = [];
   for (const a of assets) {
     if (!a.stream) continue;
-    if (a.wantLevel < a.loadedLevel && !a.loading) pending.push(a.loadTo(a.wantLevel));
+    const p = a.wantLevel < a.loadedLevel ? a.loadTo(a.wantLevel) : a.loading;
+    if (p) pending.push(p.catch(() => {}));
     a.wantLevel = 255;
   }
   return pending;
@@ -296,6 +346,9 @@ export class ClodSelector {
     if (opts.budget > 0) this._selectBudget(opts.errorPx, opts.budget);
     else { for (const b of this.batches) this._selectThreshold(b, opts.errorPx); st.threshold = opts.errorPx; }
     for (const b of this.batches) { b._multiDrawCount = b._n; b._indirectTexture.needsUpdate = true; st.clusters += b._n; }
+    // A streaming asset only swaps in geometry fetched since the previous frame now, after this frame's
+    // draw lists were built from the geometry they still point at. The next selection can use the new level.
+    for (const b of this.batches) if (b.asset.stream && b.asset._commitStreaming) b.asset._commitStreaming();
     st.ms = performance.now() - t0;
     return st;
   }
@@ -321,8 +374,10 @@ export class ClodSelector {
             const d = Math.sqrt(dx * dx + dy * dy + dz * dz) - gF[o + 3];
             if (d <= 1e-6 || gF[o + 4] * K > t * d) { // source group still too coarse: refine
               if (minLv[s] < loaded) { // finer data not resident: draw this cluster as a leaf and ask for more
+                // keep drawing the coarsest still-valid product (c, below) and record the level that has to
+                // arrive; updateStreaming() turns this into one Range request and clears it afterwards
                 if (minLv[s] < want) want = minLv[s];
-                if (stamp[s] !== sid && !a.loading) {
+                if (stamp[s] !== sid && !a.loading) { // while a request is in flight, want is already known
                   stamp[s] = sid; let dp = 0; dstack[dp++] = s;
                   while (dp > 0) {
                     const dg = dstack[--dp];
@@ -332,7 +387,7 @@ export class ClodSelector {
                       if (!(d2 <= 1e-6 || gF[o2 + 4] * K > t * d2)) continue;
                       stamp[s2] = sid;
                       if (cull) { let vis = true; const x = gF[o2], y = gF[o2 + 1], z = gF[o2 + 2], r = gF[o2 + 3]; for (let q = po; q < po + 24; q += 4) if (pl[q] * x + pl[q + 1] * y + pl[q + 2] * z + pl[q + 3] < -r) { vis = false; break; } if (!vis) continue; }
-                      if (minLv[s2] < want) want = minLv[s2];
+                      if (minLv[s2] < want) want = minLv[s2]; // one request should cover the whole descent
                       dstack[dp++] = s2;
                     }
                   }
@@ -349,6 +404,8 @@ export class ClodSelector {
               }
             }
           }
+          const lv = cU[c * 4 + 3];
+          if (lv < loaded) { if (lv < want) want = lv; continue; } // never draw a cluster whose bytes are not resident
           if (cull) { const o = c * 4, x = cF[o], y = cF[o + 1], z = cF[o + 2], r = cF[o + 3]; let vis = true; for (let q = po; q < po + 24; q += 4) if (pl[q] * x + pl[q + 1] * y + pl[q + 2] * z + pl[q + 3] < -r) { vis = false; break; } if (!vis) continue; }
           if (n >= b.cap) b._alloc(b.cap * 2);
           b._multiDrawStarts[n] = cU[c * 4] * 4; b._multiDrawCounts[n] = cU[c * 4 + 1];
@@ -426,7 +483,12 @@ export class ClodSelector {
     while (this.hN > 0 && count < budget) {
       lastKey = this._pop(top);
       const b = this.batches[top[0]], a = b.asset, i = top[1], g = top[2];
-      if (a.minMemberLevel[g] < a.loadedLevel && a.minMemberLevel[g] < a.wantLevel) a.wantLevel = a.minMemberLevel[g]; // wanted but not resident
+      if (a.minMemberLevel[g] < a.loadedLevel) {
+        // wanted but not resident: keep the coarser product that is already in the cut and ask for the
+        // level; updateStreaming() fetches it and the next selection can refine this group for real
+        if (a.minMemberLevel[g] < a.wantLevel) a.wantLevel = a.minMemberLevel[g];
+        continue;
+      }
       // the clusters this group produced are all in the cut right now; they leave it
       let rem = 0;
       for (let k = a.productOff[g], e = a.productOff[g + 1]; k < e; k++) { const c = a.productIds[k]; if (this._vis(b, i, a.clusterF, c * 4)) rem += a.clusterU[c * 4 + 1]; }
