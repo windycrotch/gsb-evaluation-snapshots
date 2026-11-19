@@ -1,0 +1,44 @@
+{
+  "name": "@xip/editor",
+  "version": "0.1.0",
+  "description": "Visual scene editor UI for Xip games",
+  "main": "./dist/index.mjs",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsup"
+  },
+  "files": [
+    "dist"
+  ],
+  "dependencies": {
+    "@xip/context": "workspace:*",
+    "@xip/core": "workspace:*"
+  },
+  "peerDependencies": {
+    "react": "^18.0.0 || ^19.0.0",
+    "react-dom": "^18.0.0 || ^19.0.0"
+  },
+  "devDependencies": {
+    "tsup": "^8.0.0"
+  },
+  "keywords": [
+    "game-engine",
+    "react",
+    "editor",
+    "xip"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/1homsi/xip"
+  },
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.mts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs",
+      "default": "./dist/index.mjs"
+    }
+  }
+}

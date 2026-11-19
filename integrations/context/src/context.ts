@@ -1,0 +1,63 @@
+import { createContext } from 'react'
+import type { ECSWorld, EventBus, AssetManager, EntityId, System, EngineStats } from '@xip/core'
+import type { InputManager } from '@xip/input'
+import type { PhysicsSystem } from '@xip/physics'
+import type { GameLoop } from '@xip/core'
+import type { PostProcessStack, DynamicCanvasOptions, ManagedDynamicCanvas } from '@xip/renderer'
+import type { CaptureFrame } from './capture'
+
+export interface EngineState {
+  ecs: ECSWorld
+  input: InputManager
+  /** The active render system (WebGL2, or Canvas2D when the fallback is in use). */
+  activeRenderSystem?: System
+  /** Which backend `activeRenderSystem` is: 'webgl', or 'canvas2d' when WebGL2 is unavailable or forced off. */
+  renderBackend?: 'webgl' | 'canvas2d'
+  /** Attached on the first frame after a physics component is created; undefined before. */
+  physics?: PhysicsSystem
+  /** Current gravity, applied when physics attaches. */
+  gravity?: number
+  events: EventBus
+  assets: AssetManager
+  loop: GameLoop
+  canvas: HTMLCanvasElement
+  /** Maps string entity IDs (e.g. "player") to numeric ECS EntityIds */
+  entityIds: Map<string, EntityId>
+  /**
+   * Per-system timing in milliseconds from the last frame.
+   * Keys are system names (e.g. "ScriptSystem", "PhysicsSystem", "RenderSystem").
+   */
+  systemTimings: Map<string, number>
+  /** Post-processing effect stack applied after each frame. */
+  postProcessStack: PostProcessStack
+  /**
+   * Live engine stats for the last frame, mutated in place (no per-frame
+   * allocation). Copy with `copyEngineStats` if you need to keep a sample.
+   */
+  stats: EngineStats
+  /**
+   * Create a dynamic canvas by id at runtime (no React hook): resizable and
+   * disposable, so texture atlases can be created and grown. Wakes an on-demand
+   * loop whenever it changes. Draw with `handle.ctx`, call `handle.markDirty(rect?)`,
+   * show it with `dynamicSrc: handle.id` on a Sprite or a SpriteLayer atlas.
+   */
+  createDynamicCanvas?(options: DynamicCanvasOptions): ManagedDynamicCanvas
+  /** Returns the live {@link stats} object. */
+  getStats(): EngineStats
+  /**
+   * Ask the renderer to measure GPU frame time (`stats.gpuMs`, `stats.gpuMsAvg`).
+   * Reference counted and off by default (no cost until requested); call the
+   * returned function to release. `useEngineStats` and `<StatsOverlay>` do this for you.
+   */
+  requestGpuTiming?(): () => void
+  /**
+   * Render a frame now and read it back as an image (PNG blob by default;
+   * `bitmap`/`canvas` and a target size are options). Works with the browser
+   * clearing the WebGL drawing buffer between frames because the render and the
+   * copy happen in the same task. Excludes the debug overlay and any HTML.
+   */
+  captureFrame?: CaptureFrame
+}
+
+export const EngineContext = createContext<EngineState | null>(null)
+export const EntityContext = createContext<EntityId | null>(null)

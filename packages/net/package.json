@@ -1,0 +1,29 @@
+{
+  "name": "@xip/net",
+  "version": "0.0.6",
+  "description": "Multiplayer helpers for Xip",
+  "main": "./dist/index.mjs",
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts --external react --external xipjs --clean --outDir dist",
+    "typecheck": "tsc --noEmit"
+  },
+  "files": [
+    "dist"
+  ],
+  "peerDependencies": {
+    "react": "^18.0.0 || ^19.0.0"
+  },
+  "license": "MIT",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.mts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs",
+      "default": "./dist/index.mjs"
+    }
+  },
+  "dependencies": {
+    "@xip/core": "workspace:*"
+  }
+}

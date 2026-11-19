@@ -1,0 +1,190 @@
+# Xip
+
+**Build browser games with React.**
+
+```tsx
+<Game width={800} height={500} gravity={980}>
+  <World background="#1a1a2e">
+    <Camera2D followEntity="player" smoothing={0.85} />
+    <Player x={100} y={300} />
+    <Enemy x={500} y={300} />
+    <MovingPlatform x1={200} y1={350} x2={450} y2={350} duration={2.5} />
+  </World>
+</Game>
+```
+
+**[Documentation](https://xipjs.dev)** · **[Examples](https://github.com/1homsi/xip-examples)**
+
+---
+
+## Quick start
+
+```bash
+# npm
+npx create-xip-game my-game
+
+# pnpm
+pnpm create xip-game my-game
+
+# yarn
+yarn create xip-game my-game
+
+# bun
+bunx create-xip-game my-game
+```
+
+```bash
+cd my-game
+npm install
+npm run dev
+```
+
+Or add to an existing React project:
+
+```bash
+npm install xipjs react react-dom
+```
+
+---
+
+## Example
+
+```tsx
+import { Game, World, Entity, Transform, Sprite, RigidBody, BoxCollider, Script } from 'xipjs'
+import type { ECSWorld, EntityId, RigidBodyComponent, InputManager } from 'xipjs'
+
+function update(id: EntityId, world: ECSWorld, input: InputManager) {
+  const rb = world.getComponent<RigidBodyComponent>(id, 'RigidBody')!
+  if (input.isDown('ArrowLeft'))  rb.vx = -200
+  if (input.isDown('ArrowRight')) rb.vx =  200
+  if (input.isPressed('Space') && rb.onGround) rb.vy = -500
+}
+
+export default function MyGame() {
+  return (
+    <Game width={800} height={500} gravity={980}>
+      <World background="#1a1a2e">
+        <Entity id="player" tags={['player']}>
+          <Transform x={100} y={300} />
+          <Sprite width={32} height={48} color="#4fc3f7" />
+          <RigidBody />
+          <BoxCollider width={32} height={48} />
+          <Script update={update} />
+        </Entity>
+
+        <Entity tags={['ground']}>
+          <Transform x={400} y={480} />
+          <Sprite width={800} height={32} color="#37474f" />
+          <RigidBody isStatic />
+          <BoxCollider width={800} height={32} />
+        </Entity>
+      </World>
+    </Game>
+  )
+}
+```
+
+---
+
+## Examples
+
+18+ playable games in [**xip-examples**](https://github.com/1homsi/xip-examples):
+
+| | | | |
+|:---:|:---:|:---:|:---:|
+| [Platformer](https://github.com/1homsi/xip-examples/tree/main/platformer) | [Roguelike](https://github.com/1homsi/xip-examples/tree/main/roguelike) | [Tower Defense](https://github.com/1homsi/xip-examples/tree/main/tower-defense) | [Mario Clone](https://github.com/1homsi/xip-examples/tree/main/mario-clone) |
+
+Platformers, arcade, puzzles, top-down RPGs, strategy, multiplayer, and more — **[browse all examples](https://github.com/1homsi/xip-examples)**
+
+---
+
+## Why Xip
+
+Most browser game engines are imperative — you create objects, call methods, and manage loops manually. Xip flips that: your game is a React component tree. Mount a component → entity exists. Unmount it → entity is gone.
+
+- **Declarative** — describe your world, not your frame loop
+- **Composable** — `<Player />`, `<Enemy />`, `<MovingPlatform />` are just React components
+- **Lightweight** — purpose-built ECS, physics, renderer, and input; no heavy runtime deps
+- **TypeScript-first** — every API is fully typed
+- **Embeddable** — drop a game into any React app with one component
+- **Debug-ready** — `<Game debug>` shows collider wireframes, FPS, entity counts
+- **Time-travel DevTools** — `<Game devtools>` adds a frame scrubber and entity inspector
+- **Deterministic** — `<Game deterministic seed={n}>` for reproducible physics and replays
+- **WebGL2 renderer** — instanced GPU rendering out of the box, with an automatic Canvas2D fallback
+- **Multiplayer** — `@xip/net` provides Room, syncEntity, and ClientPrediction rollback
+
+---
+
+## What can I build?
+
+- **Platformers** — scrolling levels, jump mechanics, enemies, coins
+- **Top-down games** — dungeon crawlers, twin-stick shooters, RPG overworlds
+- **Arcade games** — breakout, flappy bird, shoot-em-ups, endless runners
+- **Roguelikes** — procedural rooms, turn-based or real-time combat
+- **Mini-games in web apps** — embed a playable game in a marketing page, onboarding flow, or dashboard
+- **Game jams** — fast to set up, familiar if you already know React
+
+---
+
+## vs other tools
+
+**vs Phaser** — Phaser is imperative: `this.physics.add.sprite()`, scene lifecycles, manual wiring. Xip is JSX — your game tree, React state, same composition model as your UI.
+
+**vs Three.js** — Three.js is a 3D rendering library with no physics, input, or entity system. Xip is a complete 2D game runtime with all of that included.
+
+**vs Unity WebGL** — Unity requires a separate build pipeline and ships a large runtime. Xip is an npm package — add it to any React app, ship with your normal build, loads instantly.
+
+---
+
+## Gamepad & lifecycle
+
+Gamepad buttons/sticks flow through the same string-key API as the keyboard — no special cases:
+
+```tsx
+function PlayerScript() {
+  return (
+    <Script update={(id, world, input, dt) => {
+      const t = world.getComponent(id, 'Transform')!
+      // Analog stick blended with keyboard arrows:
+      t.x += (input.isDown('ArrowRight') - input.isDown('ArrowLeft')
+        + input.gamepad!.getStick('left', 'x')) * 200 * dt
+      if (input.isPressed('gamepad:A')) jump()
+    }} />
+  )
+}
+```
+
+Or with named actions via `createInputMap` (`stick: 'leftx'` blends analog + keys automatically).
+The loop auto-pauses when the tab is hidden and resumes when it's visible again; listen via
+`engine.events.on('pause' | 'resume', ...)` to suspend audio/netcode yourself.
+
+## Packages
+
+| Package | Description |
+|---|---|
+| `xipjs` | Components and hooks — the main public API |
+| `@xip/core` | ECS, game loop, events, assets, tween, pathfinding, steering, deterministic RNG |
+| `@xip/input` | Keyboard, mouse, touch, gamepad (analog sticks, haptics), input contexts, player input, recording/playback |
+| `@xip/renderer` | Camera, sprites, animations, particles, trails, parallax |
+| `@xip/physics` | AABB collision, rigid bodies, kinematic mode, one-way platforms, fixed 60 Hz, spatial broadphase |
+| `@xip/audio` | Web Audio API — useSound, volume groups, fade, duck, crossfade |
+| `@xip/net` | Multiplayer — Room, syncEntity, useNetworkInput, ClientPrediction |
+| `create-xip-game` | CLI scaffolder |
+
+---
+
+## Local Development
+
+```bash
+git clone https://github.com/1homsi/xip
+cd xip
+pnpm install
+pnpm run typecheck
+pnpm test
+```
+
+---
+
+## License
+
+MIT — [1homsi](https://github.com/1homsi)

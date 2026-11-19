@@ -1,0 +1,11 @@
+packages:
+  - 'packages/*'
+  - 'packages/create-xip-game'
+  - 'integrations/*'
+overrides:
+  react: ^19.2.6
+  react-dom: ^19.2.6
+allowBuilds:
+  esbuild: true
+onlyBuiltDependencies:
+  - esbuild
