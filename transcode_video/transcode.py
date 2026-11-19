@@ -24,15 +24,27 @@
 import sys
 import json
 import argparse
-import numpy as np
-sys.path.append('../')
 from pathlib import Path
-import pycuda.driver as cuda
-import PyNvVideoCodec as nvc
-from common.nvc_utils import AppFrame
+
+# Make the repository root importable regardless of the current working
+# directory, so `common` is always found.
+sys.path.append(str(Path(__file__).resolve().parent.parent))
+
+from common.nvcodec_utils import (  # noqa: E402
+    merge_encoder_config,
+    validate_encoder_config,
+    nvVideoEncoder,
+)
+
+DEFAULT_FPS = 30
+FRAME_POOL_SIZE = 5
 
 
-def transcode(gpu_id, in_file_path, out_file_path, config_params):
+def transcode(gpu_id, in_file_path, out_file_path, config_params,
+              *, demuxer_factory=None, decoder_factory=None,
+              encoder_factory=None, container_factory=None,
+              packet_factory=None, frame_pool_factory=None,
+              frame_copier=None):
     """
                     This function demonstrates transcoding of an input video stream.
 
@@ -40,51 +52,120 @@ def transcode(gpu_id, in_file_path, out_file_path, config_params):
                         - gpu_id (int): Ordinal of GPU to use [Parameter not in use]
                         - in_file_path (str): Path to
                     file to be decoded
-                        - out_file_path (str): Path to output file into which raw frames are stored
-                        - config_params(key value pairs) : key value pairs providing fine-grained control on encoding
+                        - out_file_path (str): Path to output file into which the
+                    encoded stream is stored
+                        - config_params(key value pairs) : key value pairs providing
+                    fine-grained control on encoding. Must contain a valid "codec"
+                    and "preset" (see merge_encoder_config/validate_encoder_config);
+                    all remaining keys are forwarded to the encoder.
+                        - demuxer_factory / decoder_factory / encoder_factory /
+                    container_factory / packet_factory / frame_pool_factory /
+                    frame_copier: optional callables used to inject fakes in
+                    tests. When omitted, the real PyNvVideoCodec/pycuda
+                    implementations are used.
 
-                    Returns: - None.
+                    Returns: - Number of decoded frames that were encoded.
 
                     Example:
-                    >>> transcode(0, "path/to/input/video/file","path/to/output/elementary/bitstream")
+                    >>> transcode(0, "path/to/input/video/file",
+                    ...           "path/to/output/video/file",
+                    ...           {"codec": "h264", "preset": "P4"})
     """
-    nv_dmx = nvc.CreateDemuxer(filename=in_file_path)
-    nv_dec = nvc.CreateDecoder(gpuid=0,
-                               codec=nv_dmx.GetNvCodecId(),
-                               cudacontext=0,
-                               cudastream=0,
-                               usedevicememory=True)
-    
-    width = 0
-    height = 0
-    nv12_frame_size = 0
-    input_frame_list = 0
-    encoder_created = False
-    with open(out_file_path, "wb") as dec_file:
-        frame_cnt = 0
+    # Validate the fully merged configuration up front: an unsupported codec
+    # or preset must fail before the output file is ever opened, so a bad
+    # configuration never produces an empty output file.
+    config = dict(config_params) if config_params else {}
+    config.setdefault("preset", "P4")
+    config = validate_encoder_config(merge_encoder_config(config))
 
+    # The real hardware dependencies are imported lazily so this module stays
+    # importable on machines without a GPU (e.g. offline test hosts).
+    if (demuxer_factory is None or decoder_factory is None
+            or frame_pool_factory is None or frame_copier is None):
+        import pycuda.driver as cuda
+        import PyNvVideoCodec as nvc
+        from common.nvc_utils import AppFrame
+
+        if demuxer_factory is None:
+            demuxer_factory = lambda filename: nvc.CreateDemuxer(filename=filename)  # noqa: E731
+        if decoder_factory is None:
+            decoder_factory = lambda **kwargs: nvc.CreateDecoder(**kwargs)  # noqa: E731
+        if frame_pool_factory is None:
+            frame_pool_factory = lambda w, h, fmt, n: [  # noqa: E731
+                AppFrame(w, h, fmt) for _ in range(n)
+            ]
+        if frame_copier is None:
+            frame_copier = lambda dst, src, size: cuda.memcpy_dtod(dst, src, size)  # noqa: E731
+
+    nv_dmx = demuxer_factory(in_file_path)
+    nv_dec = decoder_factory(gpuid=gpu_id or 0,
+                             codec=nv_dmx.GetNvCodecId(),
+                             cudacontext=0,
+                             cudastream=0,
+                             usedevicememory=True)
+
+    fps = DEFAULT_FPS
+    get_fps = getattr(nv_dmx, "FrameRate", None)
+    if callable(get_fps):
+        try:
+            fps = get_fps() or DEFAULT_FPS
+        except Exception:
+            fps = DEFAULT_FPS
+
+    # A fresh encoder (with fresh timestamps) is created for every transcode
+    # call, so repeated transcoding of the same input in one process never
+    # reuses state from a previous run.
+    encoder = None
+    frame_cnt = 0
+    try:
         for packet in nv_dmx:
             for decoded_frame in nv_dec.Decode(packet):
-                if not encoder_created:
+                if encoder is None:
                     width = nv_dec.GetWidth()
                     height = nv_dec.GetHeight()
                     print("width=", width)
                     print("height=", height)
                     nv12_frame_size = nv_dec.GetFrameSize()
-                    input_frame_list = list([AppFrame(width, height, "NV12") for x in range(0, 5)])
-                    nvenc = nvc.CreateEncoder(width, height, "NV12", False, **config_params)
-                    encoder_created = True
-                frame_cnt = frame_cnt + 1
+                    frame_pool = frame_pool_factory(width, height, "NV12",
+                                                    FRAME_POOL_SIZE)
+                    encoder = nvVideoEncoder(
+                        gpu_id or 0,
+                        width,
+                        height,
+                        fps,
+                        out_file_path,
+                        cuda_ctx=None,
+                        cuda_stream=None,
+                        format="NV12",
+                        encoder_config=config,
+                        encoder_factory=encoder_factory,
+                        container_factory=container_factory,
+                        packet_factory=packet_factory,
+                    )
+                slot = frame_cnt % len(frame_pool)
                 luma_base_addr = decoded_frame.GetPtrToPlane(0)
-                cuda.memcpy_dtod(input_frame_list[frame_cnt % 5].gpuAlloc, luma_base_addr, nv12_frame_size)
-                bitstream = nvenc.Encode(input_frame_list[frame_cnt % 5])
-                bitstream = bytearray(bitstream)
-                dec_file.write(bitstream)
+                frame_copier(frame_pool[slot].gpuAlloc, luma_base_addr,
+                             nv12_frame_size)
+                encoder.encode_from_tensor(frame_pool[slot])
+                frame_cnt = frame_cnt + 1
 
-        bitstream = nvenc.EndEncode()
-        bitstream = bytearray(bitstream)
-        dec_file.write(bitstream)
-        print("frame count : ", frame_cnt)
+        if encoder is None:
+            raise RuntimeError(
+                "No frames were decoded from %r; nothing to transcode."
+                % (in_file_path,)
+            )
+        # Flush the encoder so the trailing frames are written to the same
+        # output stream before the container is closed.
+        encoder.flush()
+    except Exception:
+        # On any failure (decode, encode or mux), release the encoder and
+        # remove the half-written output, then re-raise the original error.
+        if encoder is not None:
+            encoder.abort()
+        raise
+
+    print("frame count : ", frame_cnt)
+    return frame_cnt
 
 
 if __name__ == "__main__":
@@ -105,12 +186,19 @@ if __name__ == "__main__":
         "-json", "--config_file", type=str, default='', help="path of json config file", )
 
     args = parser.parse_args()
-    config = {}
+    json_config = {}
     if len(args.config_file):
         with open(args.config_file) as jsonFile:
             json_content = jsonFile.read()
-        config = json.loads(json_content)
-    config = {"preset": args.preset.upper(), "codec": args.codec.lower()}
+        json_config = json.loads(json_content)
+
+    # Explicit command-line codec/preset win over the same-named JSON keys;
+    # every other JSON key (bitrate, tuning, ...) is preserved and forwarded
+    # to the encoder. Validation happens inside transcode(), before the
+    # output file is opened.
+    config = merge_encoder_config(json_config,
+                                  codec=args.codec,
+                                  preset=args.preset or None)
 
     transcode(args.gpu_id,
               args.in_file_path.as_posix(),

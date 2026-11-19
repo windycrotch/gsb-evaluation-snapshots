@@ -22,30 +22,113 @@ This file hosts various helpers for NV codecs exist.
 
 import os
 import sys
-import av
 import logging
 import glob
 import numpy as np
-import torch
-from . import nvcv
-import cvcuda
 from fractions import Fraction
 import itertools
-import PyNvVideoCodec as nvvc
-from nvidia import nvimgcodec
 
 from pathlib import Path
+
+# Heavy GPU/codec dependencies are imported defensively so that this module
+# stays importable on machines without them (e.g. CI hosts running offline
+# unit tests with injected fakes). The classes that need a missing dependency
+# fail at use time, not at import time.
+try:
+    import av
+except ImportError:
+    av = None
+try:
+    import torch
+except ImportError:
+    torch = None
+try:
+    import cvcuda
+    from . import nvcv
+except ImportError:
+    cvcuda = None
+    nvcv = None
+try:
+    import PyNvVideoCodec as nvvc
+except ImportError:
+    nvvc = None
+try:
+    from nvidia import nvimgcodec
+except ImportError:
+    nvimgcodec = None
 
 # Bring module folders from the samples directory into our path so that
 # we can import modules from it.
 sys.path.append('../')
 
-from common.batch import Batch  # noqa: E402
+try:
+    from common.batch import Batch  # noqa: E402
+except ImportError:
+    Batch = None
 
-pixel_format_to_cvcuda_code = {
-    nvvc.Pixel_Format.YUV444: cvcuda.ColorConversion.YUV2RGB,
-    nvvc.Pixel_Format.NV12: cvcuda.ColorConversion.YUV2RGB_NV12,
-}
+if nvvc is not None and cvcuda is not None:
+    pixel_format_to_cvcuda_code = {
+        nvvc.Pixel_Format.YUV444: cvcuda.ColorConversion.YUV2RGB,
+        nvvc.Pixel_Format.NV12: cvcuda.ColorConversion.YUV2RGB_NV12,
+    }
+else:
+    pixel_format_to_cvcuda_code = {}
+
+
+# Codecs and presets accepted by the encoder wrapper. Configuration is
+# normalized (codec lower-case, preset upper-case) before being validated
+# against these lists.
+SUPPORTED_CODECS = ("h264", "hevc", "av1")
+SUPPORTED_PRESETS = ("P1", "P2", "P3", "P4", "P5", "P6", "P7")
+
+
+def merge_encoder_config(json_config=None, codec=None, preset=None):
+    """
+    Merge encoder configuration coming from a JSON config file with
+    explicitly passed (e.g. command-line) codec/preset values.
+
+    Explicitly passed codec/preset values win over the same-named JSON keys;
+    every other JSON key (bitrate, tuning, ...) is preserved so it can be
+    forwarded to the encoder. The codec is normalized to lower case and the
+    preset to upper case.
+
+    :param json_config: dict loaded from the JSON config file (may be None).
+    :param codec: explicitly requested codec, or None to keep the JSON one.
+    :param preset: explicitly requested preset, or None to keep the JSON one.
+    :return: a new dict with the merged, normalized configuration.
+    """
+    merged = dict(json_config) if json_config else {}
+    if codec:
+        merged["codec"] = str(codec).lower()
+    elif merged.get("codec") is not None:
+        merged["codec"] = str(merged["codec"]).lower()
+    if preset:
+        merged["preset"] = str(preset).upper()
+    elif merged.get("preset") is not None:
+        merged["preset"] = str(merged["preset"]).upper()
+    return merged
+
+
+def validate_encoder_config(config):
+    """
+    Validate a merged encoder configuration. Raises ValueError on an
+    unsupported codec or preset. This must always happen before the output
+    file is opened so a bad configuration never leaves an empty output file
+    behind. Returns the validated config for convenience.
+    """
+    codec = config.get("codec")
+    if codec not in SUPPORTED_CODECS:
+        raise ValueError(
+            "Unsupported codec: %r. Supported codecs: %s"
+            % (codec, ", ".join(SUPPORTED_CODECS))
+        )
+    preset = config.get("preset")
+    if preset not in SUPPORTED_PRESETS:
+        raise ValueError(
+            "Unsupported preset: %r. Supported presets: %s"
+            % (preset, ", ".join(SUPPORTED_PRESETS))
+        )
+    return config
 
 
 class AppCAI:
@@ -338,6 +421,20 @@ class VideoBatchEncoder:
 # docs_tag: end_init_videobatchencoder_pyvideocodec
 
 # docs_tag: begin_imp_nvvideoencoder
+class _SimplePacket:
+    """
+    Minimal stand-in for av.packet.Packet, used when PyAV is not installed
+    (e.g. offline unit tests with an injected container factory).
+    """
+
+    def __init__(self, payload):
+        self.payload = bytes(payload)
+        self.pts = None
+        self.dts = None
+        self.stream = None
+        self.time_base = None
+
+
 class nvVideoEncoder:
     def __init__(
         self,
@@ -349,6 +446,12 @@ class nvVideoEncoder:
         cuda_ctx,
         cuda_stream,
         format,
+        codec=None,
+        preset=None,
+        encoder_config=None,
+        encoder_factory=None,
+        container_factory=None,
+        packet_factory=None,
     ):
         """
         Create instance of HW-accelerated video encoder.
@@ -360,6 +463,17 @@ class nvVideoEncoder:
         :param cuda_ctx: A cuda context object
         :param format: The format of the encoded video file.
                 (e.g. "NV12", "YUV444" see NvPyVideoEncoder docs for more info)
+        :param codec: explicitly requested codec; wins over encoder_config.
+        :param preset: explicitly requested preset; wins over encoder_config.
+        :param encoder_config: dict with fine-grained encoder options
+                (codec, preset, bitrate, tuning, ...). Merged with the
+                explicit codec/preset and validated before the output file
+                is opened.
+        :param encoder_factory: optional callable replacing
+                nvvc.CreateEncoder (used to inject fakes in tests).
+        :param container_factory: optional callable replacing
+                av.open(path, "w") (used to inject fakes in tests).
+        :param packet_factory: optional callable replacing av.packet.Packet.
         """
         self.device_id = device_id
         self.fps = round(Fraction(fps), 6)
@@ -367,11 +481,29 @@ class nvVideoEncoder:
         self.cuda_ctx = cuda_ctx
         self.cuda_stream = cuda_stream
 
+        # Merge and validate the encoder configuration *before* opening the
+        # output file, so an unsupported codec/preset fails early and never
+        # leaves an empty half-created output behind.
+        config = merge_encoder_config(encoder_config, codec=codec, preset=preset)
+        config.setdefault("codec", "h264")
+        config.setdefault("preset", "P4")
+        validate_encoder_config(config)
+        self.codec = config["codec"]
+
+        # All per-stream state lives on the instance, so two encoders (even
+        # in the same process) never share timestamps or encoder state.
         self.pts_time = 0
         self.delta_t = 1  # Increment the packets' timestamp by this much.
         self.encoded_frame = np.ndarray(shape=(0), dtype=np.uint8)
-        self.container = av.open(enc_file, "w")
-        self.avstream = self.container.add_stream("h264", rate=self.fps)
+        self._flushed = False
+        self._container_closed = False
+
+        open_container = (
+            container_factory if container_factory is not None
+            else (lambda path: av.open(path, "w"))
+        )
+        self.container = open_container(enc_file)
+        self.avstream = self.container.add_stream(self.codec, rate=self.fps)
 
         aligned_value = 0
         if width % 16 != 0:
@@ -388,14 +520,26 @@ class nvVideoEncoder:
 
         self.tmpTensor = None
 
-        config = {"preset":"P4", "codec":"h264","cudastream":cuda_stream.handle}
-        self.nvEnc = nvvc.CreateEncoder(
+        enc_config = dict(config)
+        if cuda_stream is not None and hasattr(cuda_stream, "handle"):
+            enc_config["cudastream"] = cuda_stream.handle
+        create_encoder = (
+            encoder_factory if encoder_factory is not None else nvvc.CreateEncoder
+        )
+        self.nvEnc = create_encoder(
             self.avstream.width,
             self.avstream.height,
             format,
             False,
-            **config
+            **enc_config
         )
+
+        if packet_factory is not None:
+            self._packet_factory = packet_factory
+        elif av is not None:
+            self._packet_factory = av.packet.Packet
+        else:
+            self._packet_factory = _SimplePacket
 
     def width(self):
         """
@@ -412,25 +556,25 @@ class nvVideoEncoder:
     # docs_tag: begin_imp_nvvideoencoder
 
     def encode_from_tensor(self, tensor):
+        try:
+            # Encode the frame takes tensor as input
+            self.encoded_frame = self.nvEnc.Encode(tensor)
 
-        # Encode the frame takes tensor as input
-        self.encoded_frame = self.nvEnc.Encode(tensor)
-
-        self.write_frame(
-            self.encoded_frame,
-            self.pts_time,
-            self.fps,
-            self.avstream,
-            self.container,
-        )
-        self.pts_time += self.delta_t
+            self._write_packet(self.encoded_frame)
+            self.pts_time += self.delta_t
+        except Exception:
+            # Never leave a half-written output behind: close the container,
+            # release the encoder and delete the partial file, then let the
+            # original error propagate.
+            self._abort()
+            raise
 
     # docs_tag: end_imp_nvvideoencoder
 
     # docs_tag: begin_writeframe_nvvideoencoder
     def write_frame(self, encoded_frame, pts_time, fps, stream, container):
         encoded_bytes = bytearray(encoded_frame)
-        pkt = av.packet.Packet(encoded_bytes)
+        pkt = self._packet_factory(encoded_bytes)
         pkt.pts = pts_time
         pkt.dts = pts_time
         pkt.stream = stream
@@ -439,18 +583,88 @@ class nvVideoEncoder:
 
     # docs_tag: end_writeframe_nvvideoencoder
 
+    def _write_packet(self, encoded_frame):
+        # An empty bitstream chunk means the encoder is buffering; there is
+        # nothing to mux for this frame yet.
+        if encoded_frame is None or len(encoded_frame) == 0:
+            return
+        self.write_frame(
+            encoded_frame,
+            self.pts_time,
+            self.fps,
+            self.avstream,
+            self.container,
+        )
+
+    @staticmethod
+    def _iter_bitstream_chunks(bitstream):
+        """
+        Normalize the value returned by EndEncode into an iterable of
+        non-empty bitstream chunks. EndEncode may return a single bytes-like
+        object or a sequence of them (one per trailing frame).
+        """
+        if bitstream is None:
+            return
+        if isinstance(bitstream, (bytes, bytearray, memoryview, np.ndarray)):
+            chunks = (bitstream,)
+        else:
+            chunks = tuple(bitstream)
+        for chunk in chunks:
+            if chunk is not None and len(chunk) > 0:
+                yield chunk
+
     def flush(self):
-        encoded_bytes = self.nvEnc.EndEncode()
-        if encoded_bytes:
-            self.write_frame(
-                encoded_bytes,
-                self.pts_time,
-                self.fps,
-                self.avstream,
-                self.container,
-            )
-        self.pts_time += self.delta_t
-        self.container.close()
+        # Flushing twice must not write the trailing frames twice.
+        if self._flushed:
+            return
+        self._flushed = True
+        try:
+            tail = self.nvEnc.EndEncode()
+            # Every trailing frame gets its own packet with its own
+            # monotonically increasing timestamp: none lost, none duplicated.
+            for chunk in self._iter_bitstream_chunks(tail):
+                self._write_packet(chunk)
+                self.pts_time += self.delta_t
+        except Exception:
+            self._abort()
+            raise
+        finally:
+            self._close_container()
+
+    def abort(self):
+        """
+        Abort this stream: close the container, release the encoder and
+        delete the half-written output file. Safe to call more than once.
+        """
+        self._abort()
+
+    def _abort(self):
+        self._close_container()
+        self._release_encoder()
+        try:
+            if os.path.exists(self.enc_file):
+                os.remove(self.enc_file)
+        except OSError:
+            pass
+
+    def _close_container(self):
+        container = getattr(self, "container", None)
+        if container is not None and not self._container_closed:
+            self._container_closed = True
+            try:
+                container.close()
+            except Exception:
+                pass
+
+    def _release_encoder(self):
+        encoder = getattr(self, "nvEnc", None)
+        self.nvEnc = None
+        close = getattr(encoder, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
 
 
 
