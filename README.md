@@ -703,6 +703,25 @@ const sky = new Atmosphere(canvas, { quality: 'balanced' });
 sky.quality = 'low';   // switch at run time; sky.quality reads it back
 ```
 
+A switch is one atomic picture change: `cloudScale` and `cumulonimbus`
+always flip together, so no frame can draw the new cloud resolution with the
+old tower (or the reverse). Where the new picture needs another shader
+variant — crossing the split threshold, or swapping the tower — the whole
+old picture keeps drawing until that variant has linked; `sky.settled` is
+`false` meanwhile and turns true again, with `onSettled(true)`, from the
+first frame drawn with the new one. Setting `cloudScale` or `cumulonimbus`
+on its own takes the same path, carrying the other setting of the picture
+currently in effect. `sky.quality` reads the preset the pair in effect
+names, or `undefined` once the two have been set to a pair no preset
+names. A variant the driver refuses does not hold the switch: the picture
+commits and simply draws without that feature.
+
+With `adaptiveResolution` on, the governor stays out of the switch: it
+holds the canvas size and ignores the old picture's GPU timings while the
+new one links, then starts measuring the new picture from warm-up. It only
+ever resizes from GPU time at the canvas's true pixels, and never past the
+`resolutionScale` ceiling.
+
 Either setting given as well wins for that setting
 (`{ quality: 'low', cumulonimbus: 'auto' }` keeps the volumetric tower).
 

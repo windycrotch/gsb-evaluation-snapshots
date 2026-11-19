@@ -69,6 +69,10 @@ export class ResolutionGovernor {
   private changedAt = -Infinity;
   private probeWait = PROBE_MS;
   private lastProbeAt = -Infinity;
+  // while a picture change is linking (a quality switch), the measurements
+  // coming in describe the picture being replaced: hold the scale and take
+  // none of them on
+  private holding = false;
   /** the current multiplier on the configured resolution, each way */
   scale: number;
 
@@ -80,6 +84,33 @@ export class ResolutionGovernor {
   }
 
   /**
+   * Hold the scale and stop taking measurements, across a picture change that
+   * has not taken effect yet (a quality preset whose shader variant is still
+   * linking). The frames measured meanwhile belong to the old picture, so
+   * acting on them would resize the canvas under the switch and have to be
+   * undone — the size jittering. The canvas keeps its true pixels, so this is
+   * not a resize and the expected pixel count is left alone.
+   */
+  hold(): void {
+    this.holding = true;
+    this.samples = [];
+    this.skip = WARMUP;
+  }
+
+  /**
+   * Resume after {@link hold}: the new picture is the one being drawn now, so
+   * the history starts over with its warm-up. Also used directly for a
+   * picture that committed without waiting, whose cost is not the old one's
+   * either. Neither path touches the scale or the expected pixels, so neither
+   * reads as a canvas resize.
+   */
+  resume(): void {
+    this.holding = false;
+    this.samples = [];
+    this.skip = WARMUP;
+  }
+
+  /**
    * Fold in new measurements and return the scale to draw at.
    *
    * @param times      GPU times of finished frames, with the pixels each drew
@@ -87,6 +118,9 @@ export class ResolutionGovernor {
    * @param now        a clock in ms (performance.now())
    */
   update(times: readonly GpuTime[], fullPixels: number, now: number): number {
+    // a picture change is in flight: keep the canvas exactly as it is and
+    // take on none of the old picture's measurements
+    if (this.holding) return this.scale;
     // the size this scale draws at; a new one (this governor's change, or the
     // canvas resized under it) starts the measurement over
     const expected = fullPixels * this.scale * this.scale;

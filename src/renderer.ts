@@ -200,6 +200,16 @@ export interface RendererOptions {
    */
   onLinked?: () => void;
   /**
+   * A picture requested through {@link AtmosphereRenderer.requestPicture}
+   * has committed: its variants finished linking (or were refused, which
+   * commits too) and from the next frame the cloud scale and cumulonimbus
+   * mode the request named are the ones drawn. Fires on the same turn as
+   * {@link RendererOptions.onLinked} when a link is what completed it. A
+   * request that needed no new variant commits inside `requestPicture` and
+   * does not fire this — the caller already knows.
+   */
+  onPictureCommitted?: () => void;
+  /**
    * Draw the clouds at this fraction of the frame's resolution, each way, and
    * lay them over a full-resolution sky. Defaults to 1: one pass, as always.
    *
@@ -378,9 +388,19 @@ export class AtmosphereRenderer {
   private probeSize: [number, number] = [0, 0];
   private probePixels: Uint8Array | null = null;
   // the cloud stack's own target, when cloudScale < 1 (see RendererOptions.cloudScale)
-  private cloudScaleWanted: number;
+  // scaleActive/cbMode are the picture the frames being drawn now use — the
+  // "active" one. A requestPicture() whose variants are still linking goes
+  // into `pending` instead, so until it commits every frame stays internally
+  // consistent at the old picture rather than mixing a new cloud scale with
+  // an old tower (or the other way round)
+  private scaleActive: number;
+  private pendingPicture: { cloudScale: number; cumulonimbus: CumulonimbusMode } | null = null;
   private raysWanted: number;
   private cbMode: CumulonimbusMode;
+  // the state and view the last prepare()/render() named: what a pending
+  // picture's variant needs are worked out from, without a frame asking first
+  private lastState: AtmosphereState | null = null;
+  private lastCamera: Camera | undefined;
   // under 'auto' inside the band, the second of the two variants a frame is
   // drawn with: kept from eviction as `wanted` is
   private wantedVol = -1;
@@ -443,7 +463,7 @@ export class AtmosphereRenderer {
   constructor(canvas: HTMLCanvasElement, options: RendererOptions = {}) {
     this.canvas = canvas;
     this.opts = options;
-    this.cloudScaleWanted = options.cloudScale ?? 1;
+    this.scaleActive = options.cloudScale ?? 1;
     this.raysWanted = options.rays ?? 0;
     this.cbMode = cbModeOf(options.cumulonimbus);
     this.split = options.cloudScale !== undefined;
@@ -496,6 +516,8 @@ export class AtmosphereRenderer {
   isSettled(s: AtmosphereState): boolean {
     if (!this.gl || this.lost || !this.ready) return false;
     if (this.fadeBegan > 0 && performance.now() - this.fadeBegan < FIRST_PAINT_FADE_MS) return false;
+    // a picture asked for but not yet committed is by definition not drawn
+    if (this.pendingPicture) return false;
     let linking = this.linkQueue.length > 0;
     if (!linking) for (const v of this.variants.values()) if (!v.linked && !v.failed) { linking = true; break; }
     if (!linking) return true;
@@ -517,16 +539,21 @@ export class AtmosphereRenderer {
 
   /**
    * The cloud stack's resolution relative to the frame, as in effect: what
-   * was asked for, or 1 where half-float targets are missing. Setting it
-   * takes effect on the next frame (once the split variant of the shader has
-   * linked, the first time it goes under 1) — but only on a renderer
-   * constructed with {@link RendererOptions.cloudScale} (any value, 1
-   * included). Without it this stays 1.
+   * the picture currently being drawn uses, or 1 where half-float targets
+   * are missing. A value whose variant is still linking — one crossing the
+   * split threshold, {@link requestPicture} — is not reported until it has
+   * committed, the old picture drawing meanwhile.
+   *
+   * Only changeable on a renderer constructed with
+   * {@link RendererOptions.cloudScale} (any value, 1 included). Without it
+   * this stays 1. For a change that must take effect together with the
+   * cumulonimbus mode, and go unsettled while its variant links, use
+   * {@link requestPicture} — the Atmosphere quality preset does.
    */
   get cloudScale(): number {
-    return !this.split || this.cloudSupport === false ? 1 : clampCloudScale(this.cloudScaleWanted);
+    return !this.split || this.cloudSupport === false ? 1 : clampCloudScale(this.scaleActive);
   }
-  set cloudScale(v: number) { this.cloudScaleWanted = v; }
+  set cloudScale(v: number) { this.requestPicture({ cloudScale: v }); }
 
   /**
    * Whether the sky cache is in effect: false without
@@ -550,11 +577,110 @@ export class AtmosphereRenderer {
 
   /**
    * How the cumulonimbus's towers are drawn — see
-   * {@link RendererOptions.cumulonimbus}. Setting it takes effect once the
-   * variant it needs has linked.
+   * {@link RendererOptions.cumulonimbus}. What the picture currently being
+   * drawn uses: a setting whose variant is still linking
+   * ({@link requestPicture}) is not reported until it has committed, the old
+   * mode drawing meanwhile. Setting it through this setter starts the variant
+   * it needs compiling, the old one drawing until it has linked.
    */
   get cumulonimbus(): CumulonimbusMode { return this.cbMode; }
-  set cumulonimbus(v: CumulonimbusMode) { this.cbMode = cbModeOf(v); }
+  set cumulonimbus(v: CumulonimbusMode) { this.requestPicture({ cumulonimbus: v }); }
+
+  /**
+   * Ask for a picture made of the given cloud scale and cumulonimbus mode,
+   * as one change — what an Atmosphere quality preset is. Both ride the same
+   * commit, so a frame can never draw one of them new and the other old.
+   *
+   * - when every variant the picture needs is already in hand (or it needs
+   *   none new), it commits at once and this returns `'ready'`: the next
+   *   frame is drawn entirely with it, no stand-in and no settled change
+   * - otherwise the request is held as `pending`, the needed variants start
+   *   linking, and this returns `'pending'`. Frames keep using the active
+   *   picture, unchanged, until every needed variant has linked (or been
+   *   refused, which commits too: that feature then draws without, as any
+   *   failed variant does), and only then do the scale and mode flip
+   *   together
+   *
+   * A second request while one is pending replaces it, and is again judged
+   * against the active picture, so chaining presets never leaves a picture
+   * waiting on a variant nobody wants any more.
+   */
+  requestPicture(p: { cloudScale?: number; cumulonimbus?: CumulonimbusMode }): 'ready' | 'pending' {
+    if (!this.gl || this.lost) return 'ready';
+    const want = {
+      cloudScale: p.cloudScale ?? this.pendingPicture?.cloudScale ?? this.scaleActive,
+      cumulonimbus: cbModeOf(p.cumulonimbus ?? this.pendingPicture?.cumulonimbus ?? this.cbMode),
+    };
+    if (want.cloudScale === this.scaleActive && want.cumulonimbus === this.cbMode) {
+      this.pendingPicture = null;
+      return 'ready';
+    }
+    this.pendingPicture = want;
+    this.ensurePending();
+    if (this.tryCommitPending()) return 'ready';
+    return 'pending';
+  }
+
+  /** start the variants a pending picture needs, its view's own first */
+  private ensurePending(): void {
+    const want = this.pendingPicture;
+    const gl = this.gl;
+    if (!want || !gl) return;
+    const keys = this.keysForPicture(want, this.lastState, this.lastCamera);
+    keys.forEach((key, i) => { if (i === 0) this.ensure(key); else this.ensureLater(key); });
+  }
+
+  /** the variant keys a picture (not necessarily the active one) draws with */
+  private keysForPicture(
+    p: { cloudScale: number; cumulonimbus: CumulonimbusMode },
+    s: AtmosphereState | null,
+    camera?: Camera,
+  ): number[] {
+    const prevScale = this.scaleActive, prevCb = this.cbMode;
+    this.scaleActive = p.cloudScale;
+    this.cbMode = p.cumulonimbus;
+    try {
+      const aspect = this.canvas.width / Math.max(1, this.canvas.height);
+      const ks = s ? this.keysFor(s, camera, aspect) : this.keysFor(null);
+      return ks.map((k) => k.key);
+    } finally {
+      this.scaleActive = prevScale;
+      this.cbMode = prevCb;
+    }
+  }
+
+  /**
+   * Commit a pending picture once nothing it needs is still linking. Returns
+   * true when it (or no pending request) is settled. A refused variant does
+   * not hold the commit: the frame goes without its feature, as elsewhere.
+   */
+  private tryCommitPending(): boolean {
+    const want = this.pendingPicture;
+    if (!want) return true;
+    if (!this.gl || this.lost) { this.pendingPicture = null; return true; }
+    const ready = (key: number): boolean => {
+      let v = this.variants.get(key);
+      if (v?.failed) return true;
+      if (!v) {
+        // only a renderer linking on the spot reaches here: every auto-mode
+        // key is either in hand or was queued by ensurePending(). Asking now
+        // links it immediately, so the picture can commit this very frame
+        if (this.parallel) return false;
+        const made = this.ensure(key);
+        if (!made) return false;
+        v = made;
+      }
+      if (v?.failed) return true;
+      if (!v?.linked || this.linkQueue.includes(key)) return false;
+      return true;
+    };
+    if (!this.keysForPicture(want, this.lastState, this.lastCamera).every(ready)) return false;
+    this.scaleActive = want.cloudScale;
+    this.cbMode = want.cumulonimbus;
+    this.pendingPicture = null;
+    this.opts.onPictureCommitted?.();
+    return true;
+  }
 
   private get usesSharedProgram(): boolean {
     return this.opts.variants === false || this.opts.variants === 'shared';
@@ -716,6 +842,10 @@ export class AtmosphereRenderer {
     // needs: compiling the bare one first would only delay the right one.
     // Under 'sync' the first render() compiles on the spot, so the renderer
     // is usable the moment the constructor returns, as before
+    // (a restore may still be holding a picture whose variants the new
+    // context has to link again: start them now, as prepare() would)
+    this.ensurePending();
+    this.tryCommitPending();
     if (!this.parallel) this.notifyReady(true);
     // A renderer driven directly may wait for onReady before its first
     // render(), and then nothing ever says which variant to compile. If a
@@ -743,6 +873,11 @@ export class AtmosphereRenderer {
    */
   prepare(s: AtmosphereState, camera?: Camera): void {
     if (!this.gl || this.lost) return;
+    this.lastState = s;
+    this.lastCamera = camera;
+    // a picture waiting on its variants needs them at least as much as the
+    // active one's: keep those links going on every prepare()
+    this.ensurePending();
     const keys = this.programsFor(s);
     if (camera) {
       const view = this.keysFor(s, camera, this.canvas.width / Math.max(1, this.canvas.height));
@@ -947,6 +1082,8 @@ export class AtmosphereRenderer {
           if (v && !v.linked && !v.failed) break;
         }
       }
+      // a link landing may have completed the picture that was waiting for it
+      this.tryCommitPending();
       if (finished && this.reported && this.gl) this.opts.onLinked?.();
     };
     // a turn of the event loop before the first ask, so the caller gets to
@@ -1597,6 +1734,9 @@ export class AtmosphereRenderer {
    */
   private passes(s: AtmosphereState, camera?: Camera, aspect = 1): { v: Variant; share: number }[] | null {
     if (!this.gl || this.lost) return null;
+    // sync mode links on the spot inside ensure(), so the pending picture's
+    // variants are in hand by now; under auto this is a no-op until they land
+    this.tryCommitPending();
     const ks = this.keysFor(s, camera, aspect);
     // (the parhelia are drawn on their own over the frame: see drawParhelia)
     if (ks.length === 1 && this.parheliaApart(s)) ks[0].key &= ~FEATURE.PARHELIA;
@@ -2069,5 +2209,7 @@ export class AtmosphereRenderer {
     this.noiseQ = null;
     this.turrets = null;
     this.morph = null;
+    this.pendingPicture = null;
+    this.lastState = null;
   }
 }

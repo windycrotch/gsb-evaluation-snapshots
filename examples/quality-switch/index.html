@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>atmosphere — atomic quality switch sample</title>
+<style>
+  body {
+    margin: 0; padding: 18px;
+    background: #111417; color: #c8d0d8;
+    font: 13px/1.6 system-ui, -apple-system, sans-serif;
+  }
+  h1 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
+  p.hint { color: #778; margin: 0 0 14px; max-width: 760px; }
+  #stage { position: relative; width: min(960px, 100%); }
+  canvas { display: block; width: 100%; aspect-ratio: 16 / 9; border-radius: 10px; background: #000; }
+  #panel {
+    display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0;
+  }
+  button {
+    background: #1b2230; color: #c8d0d8; border: 1px solid #2c3a4e;
+    border-radius: 8px; padding: 7px 13px; cursor: pointer; font: inherit;
+  }
+  button:hover { background: #243044; }
+  button.on { background: #35506e; color: #fff; border-color: #4a7099; }
+  #readout {
+    background: #0d1116; border: 1px solid #232a33; border-radius: 10px;
+    padding: 12px 14px; width: min(960px, 100%); box-sizing: border-box;
+  }
+  #readout table { border-collapse: collapse; width: 100%; }
+  #readout td { padding: 2px 10px 2px 0; vertical-align: top; }
+  #readout td:first-child { color: #778; width: 190px; white-space: nowrap; }
+  code { background: #1a212b; padding: 1px 5px; border-radius: 5px; }
+  #log {
+    margin-top: 10px; max-height: 210px; overflow: auto;
+    font-family: ui-monospace, monospace; font-size: 12px; color: #93a3b5;
+  }
+  #log .ok { color: #7fc98f; }
+  #log .wait { color: #e0b56d; }
+  #log .err { color: #e08585; }
+  .flag { color: #7fc98f; }
+  .flag.off { color: #e08585; }
+</style>
+</head>
+<body>
+  <h1>Atomic quality switch — local verification sample</h1>
+  <p class="hint">
+    One <code>quality</code> change is one picture change: <code>cloudScale</code> and
+    <code>cumulonimbus</code> flip together, only after every variant the new picture
+    needs has linked. While it links, <code>settled</code> is <code>false</code> and the
+    old picture keeps drawing; the adaptive-resolution governor holds the canvas size and
+    ignores the old picture's timings. Open DevTools to drive it from the console
+    (<code>window.sky</code>) and read the log.
+  </p>
+
+  <div id="stage"><canvas id="sky"></canvas></div>
+
+  <div id="panel">
+    <button data-quality="high">High</button>
+    <button data-quality="balanced">Balanced</button>
+    <button data-quality="low">Low</button>
+    <button id="custom">Custom pair (0.5 + auto → quality undefined)</button>
+    <button id="offscreen">Toggle offscreen</button>
+    <button id="dispose">Dispose</button>
+  </div>
+
+  <div id="readout">
+    <table>
+      <tr><td>quality (read back)</td><td id="r-quality"></td></tr>
+      <tr><td>cloudScale / cumulonimbus</td><td id="r-pic"></td></tr>
+      <tr><td>settled</td><td id="r-settled"></td></tr>
+      <tr><td>adaptive factor / canvas</td><td id="r-resolution"></td></tr>
+      <tr><td>onSettled events</td><td id="r-events"></td></tr>
+      <tr><td>whenSettled pending</td><td id="r-waiters"></td></tr>
+    </table>
+    <div id="log"></div>
+  </div>
+
+  <script type="module" src="./main.js"></script>
+</body>
+</html>

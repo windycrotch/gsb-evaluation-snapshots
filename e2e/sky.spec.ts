@@ -382,6 +382,90 @@ test.describe('settling', () => {
   });
 });
 
+test.describe('an atomic quality switch', () => {
+  // the renderer-side picture, straight from the page
+  const pic = (page: Page) => page.evaluate(() => ({
+    quality: window.sky.quality,
+    cloudScale: window.sky.cloudScale,
+    cumulonimbus: window.sky.cumulonimbus,
+    settled: window.sky.settled,
+    resolution: window.sky.resolution,
+    canvas: [document.querySelector('canvas')!.width, document.querySelector('canvas')!.height],
+  }));
+
+  test('flips cloud scale and tower mode together, once, through unsettled to settled', async ({ page }) => {
+    await open(page, 'no-preference');
+    await page.evaluate(() => {
+      window.sky = new window.Atmosphere(document.querySelector('canvas')!, {
+        time: 13, weather: 'summer', resolutionScale: 1, quality: 'high',
+      });
+    });
+    await page.waitForFunction(() => window.sky.settled, null, { timeout: 30_000 });
+    expect(await pic(page)).toMatchObject({ quality: 'high', cloudScale: 1, cumulonimbus: 'auto', settled: true });
+
+    await page.evaluate(() => { window.sky.quality = 'low'; });
+    // the switch may already have linked, but it can never report a half pair
+    const during = await pic(page);
+    expect(during.cloudScale === 0.5 ? during.cumulonimbus === '2d' : during.cumulonimbus === 'auto').toBe(true);
+
+    await page.waitForFunction(() => window.sky.settled && window.sky.quality === 'low', null, { timeout: 30_000 });
+    expect(await pic(page)).toMatchObject({ quality: 'low', cloudScale: 0.5, cumulonimbus: '2d', settled: true });
+  });
+
+  test('reads undefined for a pair no preset names, then the preset again', async ({ page }) => {
+    await open(page, 'no-preference');
+    await page.evaluate(() => {
+      window.sky = new window.Atmosphere(document.querySelector('canvas')!, {
+        time: 13, weather: 'summer', resolutionScale: 1, cloudScale: 1,
+      });
+    });
+    await page.waitForFunction(() => window.sky.ready, null, { timeout: 30_000 });
+    await page.evaluate(() => { window.sky.cloudScale = 0.5; });
+    await page.waitForFunction(() => window.sky.cloudScale === 0.5, null, { timeout: 30_000 });
+    expect(await page.evaluate(() => window.sky.quality)).toBeUndefined();
+    await page.evaluate(() => { window.sky.cumulonimbus = '2d'; });
+    await page.waitForFunction(() => window.sky.quality === 'low', null, { timeout: 30_000 });
+    expect(await page.evaluate(() => window.sky.quality)).toBe('low');
+  });
+
+  test('keeps the still frame correct under reduced motion after a switch', async ({ page }) => {
+    await open(page, 'reduce');
+    await page.evaluate(() => {
+      window.sky = new window.Atmosphere(document.querySelector('canvas')!, {
+        time: 13, weather: 'summer', resolutionScale: 1, quality: 'high',
+      });
+    });
+    await daylightOn(page, 'canvas');
+    const high = await settled(page, 'canvas');
+    await page.evaluate(() => { window.sky.quality = 'low'; });
+    // the new still frame must actually land, not leave the old picture up
+    await expect.poll(async () => apart(await picture(page, 'canvas'), high), { timeout: 30_000 }).toBeGreaterThan(1);
+    await page.waitForFunction(() => window.sky.settled && window.sky.quality === 'low', null, { timeout: 30_000 });
+    const low = await settled(page, 'canvas');
+    expect(isDaylight(low)).toBe(true);
+  });
+
+  test('with adaptive resolution, does not move the canvas because of the switch', async ({ page }) => {
+    await open(page, 'no-preference');
+    await page.evaluate(() => {
+      window.sky = new window.Atmosphere(document.querySelector('canvas')!, {
+        time: 13, weather: 'summer', resolutionScale: 1, quality: 'high',
+        adaptiveResolution: { budget: 1000 },
+      });
+    });
+    await page.waitForFunction(() => window.sky.settled, null, { timeout: 30_000 });
+    const before = await pic(page);
+    for (const q of ['balanced', 'low', 'high', 'low'] as const) {
+      await page.evaluate((id) => { window.sky.quality = id; }, q);
+      await page.waitForFunction((id) => window.sky.settled && window.sky.quality === id, q, { timeout: 30_000 });
+      const now = await pic(page);
+      // a huge budget means no reason to scale down; the switch never does either
+      expect(now.resolution).toBe(1);
+      expect(now.canvas).toEqual(before.canvas);
+    }
+  });
+});
+
 test.describe('render state reuse', () => {
   test('uploads no unchanged uniforms, and restores the frame after a light probe', async ({ page }) => {
     await open(page, 'no-preference');

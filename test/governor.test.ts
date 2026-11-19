@@ -92,4 +92,50 @@ describe('ResolutionGovernor', () => {
     // full-size frames still in flight after the drop must not push it down again
     expect(g.update(frames(12, 18, 1), FULL, 100)).toBe(s);
   });
+
+  it('holds the scale and takes no measurements across a picture change', () => {
+    const g = new ResolutionGovernor({ budget: 12.5 });
+    // a settled history that fits the budget, so the scale is at the ceiling
+    run(g, 9, 3);
+    expect(g.scale).toBe(1);
+    const held = g.scale;
+    g.hold();
+    // frames of the old picture, wildly over budget, while the new one links:
+    // holding means none of them can move the canvas
+    for (let t = 0; t < 60; t += 5) expect(g.update(frames(5, 100, g.scale), FULL, 10_000 + t)).toBe(held);
+    expect(g.scale).toBe(held);
+    // resume starts the history over: a warm-up batch at the same size decides nothing
+    g.resume();
+    expect(g.update(frames(3, 100, g.scale), FULL, 20_000)).toBe(held);
+  });
+
+  it('resumes into a fresh warm-up even without a preceding hold', () => {
+    const g = new ResolutionGovernor({ budget: 12.5 });
+    run(g, 9, 3);
+    expect(g.scale).toBe(1);
+    const held = g.scale;
+    // a picture that committed without waiting: its cost is new, so the first
+    // batch after resuming is warm-up and cannot act on the old history
+    g.resume();
+    expect(g.update(frames(3, 100, g.scale), FULL, 10_000)).toBe(held);
+  });
+
+  it('a resume with no preceding hold still leaves the expected pixels and scale alone', () => {
+    const g = new ResolutionGovernor({ budget: 12.5 });
+    run(g, 9, 3);
+    expect(g.scale).toBe(1);
+    const held = g.scale;
+    g.resume();
+    // a warm-up batch at the same pixels decides nothing — not treated as a resize
+    expect(g.update(frames(3, 100, g.scale), FULL, 10_000)).toBe(held);
+    // and ordinary adaptation still works once enough new frames are in
+    run(g, 100, 3, 20_000);
+    expect(g.scale).toBeLessThan(held);
+  });
+
+  it('never scales above its ceiling, whatever the headroom', () => {
+    const g = new ResolutionGovernor({ budget: 1000, max: 0.8 });
+    run(g, 0.1, 30);
+    expect(g.scale).toBe(0.8);
+  });
 });

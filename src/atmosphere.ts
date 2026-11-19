@@ -212,11 +212,15 @@ export class Atmosphere {
   // whether onSettled last said settled, and who is waiting for it to
   private settledSaid = false;
   private settledWaiters: ((settled: boolean) => void)[] = [];
+  // set once dispose() has run: renderer callbacks arriving after it must
+  // neither draw nor settle a sky that no longer exists
+  private disposed = false;
   // The shader compiles asynchronously, so the frames the caller asked for
   // before it was ready drew nothing. A running loop picks itself up on its
   // next tick; a still frame — reduced motion, or a jump() before start() —
   // has no next tick and has to be drawn here or never.
   private readonly onRendererReady = (available: boolean) => {
+    if (this.disposed) return;
     if (available) this.redrawStill();
     this.opts.onReady?.(available);
     if (available) this.checkSettled();
@@ -225,6 +229,18 @@ export class Atmosphere {
   // and a still frame drawn while the variant it needed was still linking went
   // without that variant's feature
   private readonly onVariantLinked = () => {
+    if (this.disposed) return;
+    this.redrawStill();
+    this.checkSettled();
+  };
+  // a picture a quality switch asked for has committed (its variants linked,
+  // or were refused): the governor's history belongs to the old picture, and
+  // a still frame has to be redrawn to show the new one
+  private readonly onPictureCommitted = () => {
+    if (this.disposed) return;
+    // the new picture is the one drawn now: let the governor measure it
+    // rather than the old one it held through the link
+    this.governor?.resume();
     this.redrawStill();
     this.checkSettled();
   };
@@ -265,6 +281,9 @@ export class Atmosphere {
       this.governor = new ResolutionGovernor({
         budget: o.budget ?? 0.75 * (1000 / Math.min(options.fps ?? 30, 60)),
         min: o.min,
+        // the ceiling is the configured resolution itself: the governor
+        // trades away pixels, it never adds them past resolutionScale
+        max: 1,
       });
     }
     const q = resolveQuality(options.quality, { cloudScale: options.cloudScale, cumulonimbus: options.cumulonimbus });
@@ -272,6 +291,7 @@ export class Atmosphere {
       colorSpace: options.colorSpace,
       onReady: this.onRendererReady,
       onLinked: this.onVariantLinked,
+      onPictureCommitted: this.onPictureCommitted,
       cloudScale: q.cloudScale,
       rays: options.rays === true ? 1 : options.rays === false ? 0 : options.rays,
       variants: options.variants,
@@ -391,12 +411,13 @@ export class Atmosphere {
   /**
    * The clouds' resolution relative to the frame, as in effect — see
    * {@link AtmosphereOptions.cloudScale}. 1 where the device cannot split
-   * the clouds out. Setting it applies from the next frame.
+   * the clouds out. Setting it applies from the next frame; where crossing
+   * the split threshold needs another shader variant, the current picture
+   * keeps drawing until that one has linked (see {@link settled}).
    */
   get cloudScale(): number { return this.renderer.cloudScale; }
   set cloudScale(v: number) {
-    this.renderer.cloudScale = v;
-    if (this.wantRunning && !this.raf) this.draw(performance.now());
+    this.applyPicture({ cloudScale: v });
   }
 
   /**
@@ -406,27 +427,58 @@ export class Atmosphere {
    */
   get cumulonimbus(): CumulonimbusMode { return this.renderer.cumulonimbus; }
   set cumulonimbus(v: CumulonimbusMode) {
-    this.renderer.cumulonimbus = v;
-    this.renderer.prepare(this.target, this.cam);
-    this.checkSettled();
-    if (this.wantRunning && !this.raf) this.draw(performance.now());
+    this.applyPicture({ cumulonimbus: v });
   }
 
   /**
    * The quality preset the settings in effect amount to — see
    * {@link AtmosphereOptions.quality} — or undefined when `cloudScale` and
-   * `cumulonimbus` have been set to a pair no preset names. Setting it sets
-   * both. The clouds' resolution only changes on an Atmosphere constructed
-   * with `quality` or `cloudScale` given (as {@link Atmosphere.cloudScale});
-   * without either, a preset still sets the towers.
+   * `cumulonimbus` have been set to a pair no preset names. While a switch
+   * is waiting on a variant this reads the *old* picture's preset, since
+   * that is the one still being drawn. Setting it sets both together, as a
+   * single atomic picture: no frame draws the new cloud resolution with the
+   * old tower, or vice versa. The clouds' resolution only changes on an
+   * Atmosphere constructed with `quality` or `cloudScale` given (as
+   * {@link Atmosphere.cloudScale}); without either, a preset still sets the
+   * towers.
    */
   get quality(): QualityPreset | undefined {
     return qualityOf({ cloudScale: this.cloudScale, cumulonimbus: this.cumulonimbus });
   }
   set quality(v: QualityPreset) {
-    const p = QUALITY_PRESETS[v];
-    this.renderer.cloudScale = p.cloudScale;
-    this.cumulonimbus = p.cumulonimbus;
+    this.applyPicture(QUALITY_PRESETS[v]);
+  }
+
+  /**
+   * Apply a cloud scale and a tower mode as one picture change.
+   *
+   * Both are handed to the renderer in a single request, which either draws
+   * the whole new picture from the next frame or keeps the whole old one
+   * until the variants the new one needs have linked — so the change is
+   * never visible half-applied. While those links are in flight the sky is
+   * unsettled; it settles again from the first frame drawn with the new
+   * picture, and {@link AtmosphereOptions.onSettled} fires then. The
+   * governor's timings describe the old picture until the new one commits,
+   * so its history is restarted on the commit rather than letting the two
+   * pictures' costs fight over one canvas size.
+   */
+  private applyPicture(p: { cloudScale?: number; cumulonimbus?: CumulonimbusMode }): void {
+    if (this.disposed) return;
+    const state = this.renderer.requestPicture(p);
+    this.renderer.prepare(this.target, this.cam);
+    if (state === 'pending') {
+      // the frames until the commit belong to the old picture: the governor
+      // holds the canvas and ignores them, resuming with a fresh history once
+      // the new one is actually drawn
+      this.governor?.hold();
+    } else {
+      // committed at once — including a request that cancelled a pending one,
+      // which makes the sky settled again: let the governor measure the
+      // picture now drawn and re-check the settled state
+      this.governor?.resume();
+    }
+    this.checkSettled();
+    if (this.wantRunning && !this.raf) this.draw(performance.now());
   }
 
   /**
@@ -632,6 +684,7 @@ export class Atmosphere {
   }
 
   private draw(t: number): void {
+    if (this.disposed) return;
     // jump() can be called before start(). Pin the reference time here
     if (!this.startedAt) { this.startedAt = t; this.last = t; }
     // (a draw on the clock, not on a tick, may be followed by a tick stamped earlier)
@@ -702,6 +755,7 @@ export class Atmosphere {
    *   its context.
    */
   dispose(options: { loseContext?: boolean } = {}): void {
+    this.disposed = true;
     this.stop();
     this.observer?.disconnect();
     this.observer = null;

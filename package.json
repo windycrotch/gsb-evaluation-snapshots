@@ -63,6 +63,7 @@
     "bench:render": "node scripts/bench-render.mjs",
     "build": "node scripts/build.mjs && tsc -p tsconfig.build.json",
     "build:site": "node scripts/build-site.mjs",
+    "sample:quality": "esbuild examples/quality-switch/main.ts --bundle --format=esm --outdir=examples/quality-switch --servedir=. --serve=8792",
     "prepack": "pnpm run build",
     "playground": "esbuild examples/playground/main.ts examples/controller/main.ts examples/bench/main.ts --bundle --format=esm --outdir=build --outbase=examples --watch --servedir=. --serve=8791"
   },
