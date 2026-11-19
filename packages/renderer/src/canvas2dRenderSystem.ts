@@ -288,6 +288,7 @@ export class Canvas2DRenderSystem implements System {
     this.dynamicCanvases.clear()
     this.spriteLayers.length = 0
     this.textLayers.length = 0
+    this.tileSorted.length = 0
   }
 
   // ── Frame ────────────────────────────────────────────────────────────────
@@ -670,6 +671,11 @@ export class Canvas2DRenderSystem implements System {
       stats.instances++
       return
     }
+
+    // A sprite bound to an unregistered (or zero-size) dynamic canvas draws
+    // nothing this frame — no colour-rect fallback. It reappears on the frame
+    // after the id is registered again.
+    if (sprite.dynamicSrc) return
 
     // No texture: a solid colour or a shape preset.
     const [cr, cg, cb, ca] = parseCSSColor(sprite.color)
