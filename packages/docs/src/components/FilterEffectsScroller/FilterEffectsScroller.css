@@ -1,0 +1,92 @@
+.FilterEffectsScroller_Container {
+  --count: 3;
+  position: relative;
+  height: calc(var(--count) * 100svh);
+  margin-top: -75svh;
+
+  /* border: 4px dashed blue; */
+}
+
+.FilterEffectsScroller_Content {
+  position: fixed;
+  inset: 0;
+
+  /* border: 4px dashed rgb(0, 174, 255); */
+}
+
+.FilterEffectsScroller_Box,
+.FilterEffectsScroller_Box .signal {
+  background: var(--colors-page-bg);
+  border-radius: 14px;
+}
+
+.FilterEffectsScroller_Box {
+  padding: 1rem;
+}
+
+.FilterEffectsScroller_Box .signal {
+  padding: 1rem;
+  margin-top: -3rem;
+  margin-bottom: 1rem;
+}
+
+.FilterEffectListItem_Container {
+  position: absolute;
+  inset: 0;
+
+  display: flex;
+  justify-content: center;
+}
+
+.SignalSVG {
+}
+
+.SignalSVG path {
+  stroke-dashoffset: var(--svg-path);
+}
+.SignalSVG.bitcrusher {
+  /* 0 - 1000 */
+  stroke-dasharray: 1000;
+}
+.SignalSVG.moog {
+  stroke-dasharray: 700;
+}
+.SignalSVG.pinknoise {
+  stroke-dasharray: 4000;
+}
+
+.FilterEffectsVisual_Container {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+}
+
+.FilterEffectsScroller_Gradient.top {
+  top: 0;
+
+  background: var(--gradient-transparent-to-black);
+}
+
+.FilterEffectsScroller_Gradient.bottom {
+  bottom: 0;
+}
+.FilterEffectsScroller_Gradient {
+  width: 100%;
+  min-height: 40vh;
+  position: fixed;
+  background: var(--gradient-black-to-transparent);
+  /* background-color: red; */
+}
+
+/* Hide animation for motion-sensitive users */
+@media (prefers-reduced-motion: reduce) {
+  .FilterEffectsVisual_Canvas {
+    opacity: 0;
+  }
+}
+
+@media screen and (max-width: 1200px) {
+  .SignalSVG {
+    width: 100%;
+  }
+}
