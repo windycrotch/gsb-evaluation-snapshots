@@ -328,6 +328,7 @@ export default Kapsule({
     postProcessingComposer: state => state.postProcessingComposer,
     controls: state => state.controls,
     _destructor: function(state) {
+      state.backgroundImageRequestId++; // invalidate any in-flight background image callbacks; their textures self-dispose
       emptyObject(state.scene);
       state.controls?.dispose();
       state.renderer?.dispose();
@@ -340,7 +341,8 @@ export default Kapsule({
     camera: new three.PerspectiveCamera(),
     timer: new three.Timer(),
     tweenGroup: new TweenGroup(),
-    lastRaycasterCheck: 0
+    lastRaycasterCheck: 0,
+    backgroundImageRequestId: 0
   }),
 
   init(domNode, state, {
@@ -536,14 +538,23 @@ export default Kapsule({
     }
 
     if (changedProps.hasOwnProperty('backgroundImageUrl')) {
+      const requestId = ++state.backgroundImageRequestId; // sequence each request; only the latest may apply
+
       if (!state.backgroundImageUrl) {
+        disposeSkysphereMaterial(state);
         state.skysphere.visible = false;
-        state.skysphere.material.map = null;
 
         !state.loadComplete && finishLoad();
       } else {
         new three.TextureLoader().load(state.backgroundImageUrl, texture => {
+          if (requestId !== state.backgroundImageRequestId) {
+            // stale callback: a newer request (or a clear) superseded this one; discard the texture
+            texture.dispose();
+            return;
+          }
+
           texture.colorSpace = three.SRGBColorSpace;
+          disposeSkysphereMaterial(state); // release the previous texture/material before swapping
           state.skysphere.material = new three.MeshBasicMaterial({ map: texture, side: three.BackSide });
           state.skysphere.visible = true;
 
@@ -571,6 +582,14 @@ export default Kapsule({
 
     function finishLoad() {
       state.loadComplete = state.scene.visible = true;
+    }
+
+    function disposeSkysphereMaterial(state) {
+      const material = state.skysphere.material;
+      if (material) {
+        material.map && material.map.dispose();
+        material.dispose && material.dispose();
+      }
     }
   }
 });
