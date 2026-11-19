@@ -104,6 +104,8 @@ import {
     NotifyWkA09SglTextureReady,
 } from '../../events/EventConstants';
 import { SplatMeshOptions, TransitionEffects } from './SplatMeshOptions';
+import { SplatFlowCoordinator, SplatFlowHost, ShDegreeArbiter, ShDegreePriority } from './SplatFlowCoordinator';
+import { pumpTextureLayers } from './SplatTexturePump';
 import {
     VarActiveFlagValue,
     VarBigSceneMode,
@@ -176,11 +178,63 @@ export function setupSplatMesh(events: Events) {
     let maxRenderCount: number = 0;
     let maxRadius: number = 0;
     let currentMaxRadius: number = 0;
-    const arySwitchProcess: any[] = [];
     let bucketBits: number = 0;
     let sortType: number = 0;
     const PalettesWidth = 960;
     let splatCacheManager: SplatGpuCache = null;
+
+    // ---- 首帧过渡 / 画质档位 / 显示模式切换的协调（统一收口，避免各自踩踏）----
+    const pendingTimers: Set<ReturnType<typeof setTimeout>> = new Set();
+    // 销毁通知订阅者：挂起的异步工作（如纹理上传等待 GPU 回传）据此立即退出
+    const abortListeners: Set<() => void> = new Set();
+    const onAbort = (fn: () => void): (() => void) => {
+        if (disposed) return (fn(), () => {});
+        abortListeners.add(fn);
+        return () => abortListeners.delete(fn);
+    };
+    const flowHost: SplatFlowHost = {
+        isDisposed: () => disposed,
+        setVisibleRadius: (value: number) => !disposed && fire(SplatUpdateCurrentVisibleRadius, value),
+        setLightRadius: (value: number) => !disposed && fire(SplatUpdateCurrentLightRadius, value),
+        setPointMode: (value?: boolean) => !disposed && fire(SplatUpdatePointMode, value),
+        setTransitionEffect: (value: number) => !disposed && fire(SplatUpdateTransitionEffect, value),
+        setPerformanceAct: (value: number) => !disposed && fire(SplatUpdatePerformanceAct, value),
+        applyQuality: () => applyQualityLevel(),
+        onTransitionDone: (showMark: boolean) => !disposed && fire(OnSmallSceneShowDone, showMark),
+        triggerSwitchDisplayMode: (showMark: boolean) => !disposed && fire(SplatMeshSwitchDisplayMode, showMark),
+        isPointcloudMode: () => !!fire(IsPointcloudMode),
+        isSmallSceneDataReady: () => !!fire(IsSmallSceneRenderDataReady),
+        runFrame: (fnRun: () => void, fnIsContinue: () => boolean, div: number = 0) => {
+            if (disposed) return;
+            fire(RunLoopByFrame, fnRun, fnIsContinue, div);
+        },
+        scheduleTimeout: (fn: () => void, ms: number): (() => void) => {
+            if (disposed) return () => {};
+            const timer = setTimeout(() => {
+                pendingTimers.delete(timer);
+                !disposed && fn();
+            }, ms);
+            pendingTimers.add(timer);
+            return () => {
+                pendingTimers.delete(timer);
+                clearTimeout(timer);
+            };
+        },
+        now: () => Date.now(),
+    };
+    const flow = new SplatFlowCoordinator(flowHost);
+    const shArbiter = new ShDegreeArbiter();
+
+    function clearPendingTimers() {
+        pendingTimers.forEach(timer => clearTimeout(timer));
+        pendingTimers.clear();
+    }
+
+    function notifyAbort() {
+        const listeners = Array.from(abortListeners);
+        abortListeners.clear();
+        listeners.forEach(fn => fn());
+    }
 
     let currentDisplayShDegree: number = 0;
     on(GetCurrentDisplayShDegree, () => currentDisplayShDegree);
@@ -340,24 +394,27 @@ export function setupSplatMesh(events: Events) {
         let isLastEmpty: boolean = false;
         let lastLayer = 0;
         on(SplatUpdateSglTexture, async (texture: SplatTexdata) => {
+            if (disposed || !dataTexture0) return; // 已销毁，不再触碰纹理
             if (isLastEmpty && !texture.renderSplatCount) return; // 小场景，不要重复提交空数据
             isLastEmpty = !texture.renderSplatCount;
 
             const dataArray = texture.texdata;
             const dataTexture = dataTexture0;
+            if (!dataArray || !dataTexture.image?.data) return;
             dataTexture.image.data.set(dataArray);
 
             const maxLayer = Math.min(Math.ceil((texture.visibleSplatCount * 32) / (texwidth * texheightary * 16)), texdepth);
-            for (let i = lastLayer; i < maxLayer; i++) {
-                // await sleep(Math.min(i, 20));
-                await sleep(10);
-                await new Promise<void>(resolve => {
-                    dataTexture.addLayerUpdate(i);
-                    dataTexture.onUpdate = () => resolve();
-                    dataTexture.needsUpdate = true;
-                });
-                lastLayer = i;
-            }
+            // 异步逐层上传：销毁/中止后立即停止，且不再触碰纹理
+            const { aborted } = await pumpTextureLayers({
+                texture: dataTexture,
+                fromLayer: lastLayer,
+                toLayer: maxLayer,
+                delayMs: 10,
+                isAborted: () => disposed,
+                onAbort,
+            });
+            if (aborted || disposed) return;
+            lastLayer = Math.max(lastLayer, maxLayer - 1);
 
             texture.textureReady = true;
             texture.textureReadyTime = Date.now();
@@ -367,20 +424,25 @@ export function setupSplatMesh(events: Events) {
         });
 
         on(SplatUpdateDblTexture, async (texture: SplatTexdata) => {
+            if (disposed || !dataTexture0 || !dataTexture1) return; // 已销毁，不再触碰纹理
             const dataArray = texture.texdata;
             texture.texdata = null;
+            if (!dataArray) return;
             const dataTexture = texture.index ? dataTexture1 : dataTexture0;
+            if (!dataTexture.image?.data) return (fire(NotifyWkA01BackSplatBuffer, dataArray), void 0);
             dataTexture.image.data.set(dataArray);
 
             const maxLayer = Math.ceil((texture.renderSplatCount * 32) / (texwidth * texheightary * 16));
-            for (let i = 0; i < maxLayer; i++) {
-                await sleep(1);
-                await new Promise<void>(resolve => {
-                    dataTexture.addLayerUpdate(i);
-                    dataTexture.onUpdate = () => resolve();
-                    dataTexture.needsUpdate = true;
-                });
-            }
+            // 异步逐层上传：销毁/中止后立即停止，且不再触碰纹理
+            const { aborted } = await pumpTextureLayers({
+                texture: dataTexture,
+                fromLayer: 0,
+                toLayer: maxLayer,
+                delayMs: 1,
+                isAborted: () => disposed,
+                onAbort,
+            });
+            if (aborted || disposed) return;
 
             fire(NotifyWkA09DblTextureReady, texture);
             fire(NotifyWkA01BackSplatBuffer, dataArray);
@@ -388,10 +450,12 @@ export function setupSplatMesh(events: Events) {
 
         let cacheDoing = false;
         on(SplatUploadTextureGpuCache, async (splatFile: SplatFile) => {
-            if (cacheDoing) return (await sleep(5)) && fire(SplatUploadTextureGpuCache, splatFile);
+            if (disposed || !splatCacheManager) return;
+            if (cacheDoing) return (await sleep(5)) && !disposed && fire(SplatUploadTextureGpuCache, splatFile);
             cacheDoing = true;
 
             await splatCacheManager.uploadSplatFile(splatFile);
+            if (disposed) return; // 上传期间已销毁
             splatFile.textureReady = true;
 
             fire(NotifyViewerNeedUpdate);
@@ -399,8 +463,9 @@ export function setupSplatMesh(events: Events) {
         });
 
         on(SplatUpdateSh12Texture, async (datas: Uint8Array[]) => {
-            if (fire(IsBigSceneMode) || !datas || !datas.length) return;
+            if (disposed || fire(IsBigSceneMode) || !datas || !datas.length) return;
             const dataArray = new Uint32Array(texwidth * (await fire(GetShTexheight, 1, texwidth)) * 4);
+            if (disposed) return;
             const ui8s = new Uint8Array(dataArray.buffer);
             for (let i = 0, offset = 0; i < datas.length; i++) {
                 ui8s.set(datas[i], offset);
@@ -416,8 +481,9 @@ export function setupSplatMesh(events: Events) {
         });
 
         on(SplatUpdateSh3Texture, async (datas: Uint8Array[]) => {
-            if (fire(IsBigSceneMode) || !datas || !datas.length) return;
+            if (disposed || fire(IsBigSceneMode) || !datas || !datas.length) return;
             const dataArray = new Uint32Array(texwidth * (await fire(GetShTexheight, 3, texwidth)) * 4);
+            if (disposed) return;
             const ui8s = new Uint8Array(dataArray.buffer);
             for (let i = 0, offset = 0; i < datas.length; i++) {
                 ui8s.set(datas[i], offset);
@@ -433,7 +499,7 @@ export function setupSplatMesh(events: Events) {
         });
 
         on(SplatUpdateShPalettesTexture, async (ui8s: Uint8Array) => {
-            if (!ui8s || !ui8s.length) return;
+            if (disposed || !ui8s || !ui8s.length) return;
 
             const height = 1024;
             const dataShPalettes = new Uint8Array(PalettesWidth * height * 4);
@@ -584,13 +650,18 @@ export function setupSplatMesh(events: Events) {
             material.uniforms[VarDebugEffect].value = value;
             material.uniformsNeedUpdate = true;
         });
-        on(SplatUpdateShDegree, async (value: number) => {
-            const modelShDegree: number = await fire(GetModelShDegree);
-            currentDisplayShDegree = Math.max(0, Math.min(value, modelShDegree));
-            material.uniforms[VarShDegree].value = currentDisplayShDegree;
-            material.uniformsNeedUpdate = true;
-            fire(Information, { shDegree: `${currentDisplayShDegree} / max ${modelShDegree}` });
-            fire(NotifyViewerNeedUpdate);
+        on(SplatUpdateShDegree, async (value: number, priority: ShDegreePriority = 1) => {
+            if (disposed) return;
+            // 异步夹取模型上限后可能乱序落盘，交给仲裁器保证最后一次显式写入生效，
+            // 且档位显式生效后不再被加载期推断值覆盖
+            await shArbiter.apply(value, priority, fire(GetModelShDegree), (degree: number, maxDegree: number) => {
+                if (disposed) return;
+                currentDisplayShDegree = degree;
+                material.uniforms[VarShDegree].value = currentDisplayShDegree;
+                material.uniformsNeedUpdate = true;
+                fire(Information, { shDegree: `${currentDisplayShDegree} / max ${maxDegree}` });
+                fire(NotifyViewerNeedUpdate);
+            });
         });
         on(SplatUpdateFlagValue, (fvHide: number = 0, fvShow: number = 0) => {
             material.uniforms[VarFlagValue].value = (fvHide << 16) | fvShow;
@@ -608,20 +679,23 @@ export function setupSplatMesh(events: Events) {
         on(
             OnSmallSceneShowDone,
             () => {
+                if (disposed) return;
                 console.info('OnSmallSceneShowDone, clear image.data');
-                dataTexture0.image.data = null;
-                dataTexture1.image.data = null;
-                dataTextureSh12.image.data = null;
-                dataTextureSh3.image.data = null;
-                dataTextureShPalettes.image.data = null;
+                dataTexture0 && (dataTexture0.image.data = null);
+                dataTexture1 && (dataTexture1.image.data = null);
+                dataTextureSh12 && (dataTextureSh12.image.data = null);
+                dataTextureSh3 && (dataTextureSh3.image.data = null);
+                dataTextureShPalettes && (dataTextureShPalettes.image.data = null);
             },
             true,
         );
         on(
             SplatMaterialDispose,
             () => {
+                shArbiter.invalidate();
                 material.dispose();
                 splatCacheManager?.dispose();
+                splatCacheManager = null;
                 dataTexture0?.dispose();
                 dataTexture1?.dispose();
                 dataTextureSh12?.dispose();
@@ -662,20 +736,27 @@ export function setupSplatMesh(events: Events) {
     window.addEventListener('resize', resize);
 
     on(SplatMeshDispose, () => {
+        if (disposed) return;
         disposed = true;
         window.removeEventListener('resize', resize);
+        // 终止一切过渡/切换流程，并清除已排队的延时任务与挂起的异步等待，销毁后不再安排新任务
+        flow.dispose();
+        clearPendingTimers();
+        notifyAbort();
         fire(SplatGeometryDispose);
         fire(SplatMaterialDispose);
     });
 
-    on(OnQualityLevelChanged, () => {
-        if (!fire(IsSplatMeshCreated)) return;
+    /** 按当前画质档位写入全部相关着色器参数（幂等，后写覆盖先写） */
+    function applyQualityLevel() {
+        if (disposed || !fire(IsSplatMeshCreated)) return;
 
         const opts: SplatMeshOptions = fire(GetOptions);
+        if (!opts) return;
         const meta: MetaData = (fire(GetSplatMesh) as SplatMesh)?.meta || {};
         const level: number = opts.qualityLevel || QualityLevels.Default5;
         const maxShDegrees = [0, 1, 2, 3, 3, 3, 3, 3, 3];
-        fire(SplatUpdateShDegree, maxShDegrees[level - 1]);
+        fire(SplatUpdateShDegree, maxShDegrees[level - 1], 1);
         if (isMobile) {
             const minPixs = [4, 3, 3, 2, 1, 1, 1, 1, 1];
             const maxPixs = [128, 128, 128, 256, 256, 256, 512, 512, 512];
@@ -696,96 +777,38 @@ export function setupSplatMesh(events: Events) {
             fire(SplatUpdateUseSimilarExp, level < QualityLevels.L2);
         }
         fire(WorkerUpdateParams);
+    }
+
+    on(OnQualityLevelChanged, () => {
+        if (disposed) return;
+        // 材质尚未创建时无参数可写，等创建后再初始化（与原有行为一致）
+        if (!fire(IsSplatMeshCreated)) return;
+        // 档位变化：安全终止进行中的过渡并收敛，再以新档位参数为准
+        flow.onQualityChanged();
     });
 
-    // 小场景圆圈扩大渐进渲染
-    on(SplatMeshCycleZoom, async () => {
-        if (fire(IsBigSceneMode)) return; // 大场景模式不支持
-
-        // 不需要这个特效时跳过
+    // 小场景圆圈扩大渐进渲染（首帧过渡）
+    on(SplatMeshCycleZoom, () => {
+        if (disposed) return;
         const opts: SplatMeshOptions = fire(GetOptions);
-        if (opts.disableTransitionEffectOnLoad) return fire(SplatUpdateCurrentVisibleRadius, 0);
-
-        let stepRate = 0.01;
-        let currentVisibleRadius = 0.01;
-
-        let stop = false;
-        let startTime: number = 0;
-        fire(SplatUpdateCurrentVisibleRadius, currentVisibleRadius);
-
-        fire(
-            RunLoopByFrame,
-            () => {
-                if (disposed) return;
-
-                currentVisibleRadius += (currentMaxRadius - currentVisibleRadius) * stepRate;
-                fire(SplatUpdateCurrentVisibleRadius, currentVisibleRadius);
-
-                let isDataAllReay = fire(IsSmallSceneRenderDataReady);
-                isDataAllReay && !startTime && (startTime = Date.now());
-                let visibleRate = currentVisibleRadius / maxRadius;
-                if (isDataAllReay && (visibleRate > 0.9 || Date.now() - startTime > 2500)) {
-                    fire(IsPointcloudMode) && fire(SplatMeshSwitchDisplayMode, true);
-                    fire(SplatUpdateCurrentVisibleRadius, 0);
-                    stop = true;
-                } else if (isDataAllReay && visibleRate > 0.7) {
-                    stepRate = Math.min(stepRate * 1.2, 0.3);
-                } else if (isDataAllReay && visibleRate > 0.5) {
-                    stepRate = Math.min(stepRate * 1.2, 0.2);
-                } else if (visibleRate > 0.4) {
-                    stepRate = Math.min(stepRate * 1.05, 0.1);
-                }
-            },
-            () => !disposed && !stop,
-            3,
-        );
+        flow.runFirstFrameTransition({
+            isBigSceneMode: !!fire(IsBigSceneMode), // 大场景模式不支持
+            disableTransitionEffectOnLoad: !!opts.disableTransitionEffectOnLoad, // 关闭特效时直接进入稳定态
+            maxRadius,
+            currentMaxRadius,
+        });
     });
 
     // 切换渲染模式（0:正常模式，1:点云模式），相互排挤，最后调用的优先响应
     on(SplatMeshSwitchDisplayMode, (showMark: boolean = false) => {
-        if (fire(IsBigSceneMode)) return; // 大场景模式下不响应光圈过渡效果
-
+        if (disposed) return;
         const opts: SplatMeshOptions = fire(GetOptions);
-        fire(SplatUpdateTransitionEffect, opts.transitionEffect); // 设定特效类型
-        if (opts.transitionEffect === TransitionEffects.ModelCenterCirccle) {
-            // 以模型中心过渡
-            while (arySwitchProcess.length) arySwitchProcess.pop().stop = true; // 已有的都停掉
-            const currentLightRadius = maxRadius * 0.001;
-            let switchProcess = { currentPointMode: opts.pointcloudMode, stepRate: 0.0015, currentLightRadius, stop: false };
-            arySwitchProcess.push(switchProcess);
-
-            fire(
-                RunLoopByFrame,
-                () => {
-                    if (disposed) return;
-                    switchProcess.currentLightRadius += maxRadius * switchProcess.stepRate; // 动态增量
-                    fire(SplatUpdateCurrentLightRadius, switchProcess.currentLightRadius);
-                    if (switchProcess.currentLightRadius > maxRadius) {
-                        fire(SplatUpdatePointMode, !switchProcess.currentPointMode); // 根据开始时的点云显示模式进行切换
-                        fire(SplatUpdateCurrentLightRadius, 0); // 光圈停止
-                        switchProcess.stop = true; // 主动完成
-                        arySwitchProcess.length === 1 && arySwitchProcess[0] === switchProcess && arySwitchProcess.pop();
-                        fire(OnSmallSceneShowDone, showMark);
-                    } else if (switchProcess.currentLightRadius / maxRadius < 0.4) {
-                        switchProcess.stepRate = Math.min(switchProcess.stepRate * 1.02, 0.03); // 前半圈提速并限速
-                    } else {
-                        switchProcess.stepRate *= 1.04; // 后半圈加速
-                    }
-                },
-                () => !disposed && !switchProcess.stop,
-            );
-        } else {
-            // 以屏幕中心过渡
-            fire(SplatUpdatePerformanceAct, performance.now());
-            fire(SplatUpdateCurrentLightRadius, 0.1);
-            setTimeout(() => {
-                if (!disposed) {
-                    fire(SplatUpdatePointMode); // 根据开始时的点云显示模式进行切换
-                    fire(SplatUpdateCurrentLightRadius, 0); // 停止过渡
-                    fire(OnSmallSceneShowDone, showMark);
-                }
-            }, 500);
-        }
+        flow.switchDisplayMode({
+            transitionEffect: opts.transitionEffect,
+            showMark,
+            maxRadius, // 大场景模式下不响应光圈过渡效果
+            isBigSceneMode: !!fire(IsBigSceneMode),
+        });
     });
 
     on(

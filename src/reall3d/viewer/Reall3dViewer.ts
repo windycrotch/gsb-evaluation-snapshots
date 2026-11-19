@@ -340,7 +340,7 @@ export class Reall3dViewer {
             (async () => {
                 let shDegree: number = await that.splatMesh.fire(GetModelShDegree);
                 if (p1) shDegree = that.splatMesh.fire(GetCurrentDisplayShDegree) + p1;
-                that.splatMesh.fire(SplatUpdateShDegree, shDegree);
+                that.splatMesh.fire(SplatUpdateShDegree, shDegree, 2); // 用户显式指定，优先级最高
             })();
         }
         if (n === 9) {

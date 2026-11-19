@@ -69,6 +69,20 @@ export function setupDataManager(events: Events) {
 
     let disposed: boolean;
     let texdataChangeLastTime: number = Date.now() * 2;
+    // 本模块安排的延时任务统一登记，销毁时一次性清除，避免销毁后仍残留定时器
+    const pendingTimers: Set<ReturnType<typeof setTimeout>> = new Set();
+    const scheduleTimeout = (fn: () => void, ms: number) => {
+        if (disposed) return;
+        const timer = setTimeout(() => {
+            pendingTimers.delete(timer);
+            !disposed && fn();
+        }, ms);
+        pendingTimers.add(timer);
+    };
+    const clearPendingTimers = () => {
+        pendingTimers.forEach(timer => clearTimeout(timer));
+        pendingTimers.clear();
+    };
 
     let fnResolveModelSplatCount: (value: unknown) => void;
     const promiseModelSplatCount: Promise<number> = new Promise(resolve => (fnResolveModelSplatCount = resolve));
@@ -207,7 +221,7 @@ export function setupDataManager(events: Events) {
             // 已下载完，通知一次进度条
             const downloadCount = Math.min(splatModel.fetchLimit, splatModel.downloadSplatCount);
             downloadCount && !splatModel.notifyFetchStopDone && (splatModel.notifyFetchStopDone = true) && fire(OnFetchStop, downloadCount);
-            setTimeout(() => !textWatermarkData && fire(SetGaussianText, splatModel?.meta?.watermark));
+            scheduleTimeout(() => !textWatermarkData && fire(SetGaussianText, splatModel?.meta?.watermark), 0);
         } else {
             // 没下载完，更新下载进度条
             fire(OnFetching, (100 * splatModel.downloadSize) / splatModel.fileSize);
@@ -223,10 +237,11 @@ export function setupDataManager(events: Events) {
 
         if (mergeRunning) return;
         mergeRunning = true;
-        setTimeout(async () => {
+        scheduleTimeout(async () => {
+            if (disposed) return;
             await mergeAndUploadSmallSceneData(downloadDone);
             mergeRunning = false;
-        });
+        }, 0);
     }
 
     async function mergeAndUploadSmallSceneData(downloadDone: boolean) {
@@ -331,19 +346,22 @@ export function setupDataManager(events: Events) {
             !palettesUpdated && fire(SplatUpdateSh3Texture, splatModel.sh3Data);
             const opts: SplatMeshOptions = fire(GetOptions);
             dataShDegree = splatModel.dataShDegree;
-            fire(SplatUpdateShDegree, opts.shDegree === undefined ? 3 : opts.shDegree);
+            // 优先级 0：加载期推断写入，不得覆盖已生效的画质档位/用户指定阶数
+            fire(SplatUpdateShDegree, opts.shDegree === undefined ? 3 : opts.shDegree, 0);
             Promise.resolve().then(() => {
+                if (disposed) return;
                 fire(GetSplatActivePoints); // 小场景下载完时主动触发一次坐标分块
-                opts.disableTransitionEffectOnLoad && setTimeout(() => fire(OnSmallSceneShowDone), 6000); // 禁止特效时延后触发显示完成后期处理
+                opts.disableTransitionEffectOnLoad && scheduleTimeout(() => fire(OnSmallSceneShowDone), 6000); // 禁止特效时延后触发显示完成后期处理
             });
 
             if (splatModel.meta.particleMode) {
                 // 粒子效果，先5秒加载过程，后5秒正常化过程
-                setTimeout(
+                scheduleTimeout(
                     () => {
+                        if (disposed) return;
                         fire(SplatUpdatePerformanceAct, performance.now() + 5000); // 后5秒正常化过程
                         fire(SplatUpdateParticleMode, 2); // 逐渐变化到正常
-                        setTimeout(() => !disposed && fire(OnSmallSceneShowDone, true), 6000); // 显示完成后期处理
+                        scheduleTimeout(() => fire(OnSmallSceneShowDone, true), 6000); // 显示完成后期处理
                     },
                     Math.max(5000 + performanceStart - performance.now(), 0), // 先5秒加载过程
                 );
@@ -404,12 +422,13 @@ export function setupDataManager(events: Events) {
             if (splatModel.modelSplatCount > 0) {
                 fnResolveModelSplatCount(splatModel.modelSplatCount);
                 if (!splatModel.meta.particleMode && splatModel.dataSplatCount) {
-                    setTimeout(() => fire(SplatMeshCycleZoom), 5);
+                    // 首帧过渡入口：必须经事件通道触发，由协调器统一调度
+                    scheduleTimeout(() => fire(SplatMeshCycleZoom), 5);
                 } else {
-                    setTimeout(fnCheckModelSplatCount, 10); // 没数据可以渲染，继续做以便触发过渡效果
+                    scheduleTimeout(fnCheckModelSplatCount, 10); // 没数据可以渲染，继续做以便触发过渡效果
                 }
             } else {
-                setTimeout(fnCheckModelSplatCount, 10);
+                scheduleTimeout(fnCheckModelSplatCount, 10);
             }
         };
         fnCheckModelSplatCount();
@@ -469,6 +488,7 @@ export function setupDataManager(events: Events) {
     function dispose() {
         if (disposed) return;
         disposed = true;
+        clearPendingTimers();
         splatModel?.abortController?.abort();
         splatModel = null;
         textWatermarkData = null;

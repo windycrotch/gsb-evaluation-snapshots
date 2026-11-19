@@ -83,7 +83,7 @@ export function setupWorkerFetch(events: Events) {
             if (warpModel.palettes && !palettesUpdated) {
                 lodModelShDegree = Math.max(lodModelShDegree, warpModel.dataShDegree);
                 fire(SplatUpdateShPalettesTexture, warpModel.palettes);
-                fire(SplatUpdateShDegree, warpModel.dataShDegree);
+                fire(SplatUpdateShDegree, warpModel.dataShDegree, 0); // 加载期推断写入，不覆盖已生效的档位
                 palettesUpdated = true;
             }
         } else {
