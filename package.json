@@ -6,7 +6,10 @@
   "scripts": {
     "dev": "vite --port 5188 --strictPort",
     "build": "vite build",
-    "preview": "vite preview --port 5189 --strictPort"
+    "preview": "vite preview --port 5189 --strictPort",
+    "test": "node tools/pipeline-selftest.mjs",
+    "test:pipeline": "node tools/pipeline-selftest.mjs",
+    "test:pipeline:live": "node tools/pipeline-live-check.mjs"
   },
   "dependencies": {
     "three": "^0.185.1"

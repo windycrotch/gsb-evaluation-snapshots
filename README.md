@@ -157,6 +157,8 @@ a real GPU spreads across hundreds of cores.
 - **`CAPTURE_PROTOCOL.md`** — the six conditions that make two frame measurements comparable.
 - **`POE2_RUBRIC.md`** — the numeric targets.
 - **`NEXT_ROUND_ITEM_1.md`** — the highest-value open defect, diagnosed down to the line of code.
+- **`PIPELINE_STATE.md`** — post-processing state contract (quality / AA / AO tiers), the
+  queryable runtime state, and the acceptance entries (`npm test`, `npm run test:pipeline:live`).
 
 ## Licence
 
