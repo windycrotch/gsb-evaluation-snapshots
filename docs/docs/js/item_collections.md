@@ -113,3 +113,21 @@ For large indexed collections, item changes update affected spatial entries inst
 Single objects and ordinary arrays keep their existing API. Static draw helpers and Sprite accept their existing inputs; they do not observe collections. Use `styleOf` for selection or hover decorations that do not change geometry. If the underlying pixels of an existing WebGL image source change, the existing `invalidateTexture` rule still applies.
 
 Custom renderers may keep their existing `IDrawAPI` implementation for single items and arrays. To accept collections, implement the optional `applyDrawChanges(handle, changes)` method: the engine updates the registration's stable item array first, then passes the ordered deltas so the renderer can refresh its caches. Release per-handle updater state when that handle is removed or its layer is cleared. A collection registration throws early if the renderer does not support this protocol.
+
+## Standalone Spatial Queries
+
+`LiveSpatialIndex` keeps a `SpatialIndex` synchronized with a collection outside the engine, for viewport culling or region queries against the latest geometry:
+
+```ts
+import { ItemCollection, LiveSpatialIndex } from "@canvas-tile-engine/core";
+
+const markers = new ItemCollection<Marker>(initialMarkers, { keyOf: (m) => m.id });
+const spatial = new LiveSpatialIndex(markers); // Indexes the current items.
+
+markers.update("shop", { x: 40, y: 12 }); // Old bounds stop hitting at once.
+const visible = spatial.query(viewMinX, viewMinY, viewMaxX, viewMaxY); // Draw order preserved.
+
+spatial.destroy(); // Idempotent; later collection edits no longer touch the index.
+```
+
+Every committed insert, update, and remove is mirrored synchronously; rejected mutations (duplicate keys, unknown keys, key changes) never reach the index. A `batch` refreshes the index once, when the outermost batch ends. Queries return items in the collection's draw order. Items need the `SpatialItem` shape: `x`, `y`, and an optional `size` (or per-axis `width`/`height`).

@@ -92,3 +92,25 @@ accept collections. Core updates the stable registration array first, then
 delivers deltas. Cache updater state must be released with its handle/layer.
 Without this method, single-item/array draws still work and a collection
 draw throws before replacing an existing registration id.
+
+## Standalone Spatial Queries (core >= 0.12)
+
+`LiveSpatialIndex` keeps a `SpatialIndex` synchronized with a collection
+outside the engine, for viewport culling or region queries against the
+latest geometry:
+
+```ts
+import { ItemCollection, LiveSpatialIndex } from "@canvas-tile-engine/core";
+
+const markers = new ItemCollection<Marker>(initial, { keyOf: (m) => m.id });
+const spatial = new LiveSpatialIndex(markers); // indexes the current items
+markers.update("shop", { x: 40, y: 12 }); // old bounds stop hitting at once
+const visible = spatial.query(minX, minY, maxX, maxY); // draw order preserved
+spatial.destroy(); // idempotent; later edits no longer touch the index
+```
+
+Items need the `SpatialItem` shape: `x`, `y`, optional `size` or per-axis
+`width`/`height`. Every committed insert/update/remove is mirrored
+synchronously; rejected mutations never reach the index. A `batch`
+refreshes the index once, when the outermost batch ends. `size` tracks the
+collection's size while attached.
