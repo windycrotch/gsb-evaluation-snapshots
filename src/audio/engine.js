@@ -33,11 +33,21 @@
 import { clamp, lerp, approach, smoothstep } from '../core/util.js';
 import { rng, rand } from '../core/rng.js';
 import { noiseSource, saturationCurve, harmonicWave } from './noise.js';
+import { OneShots } from './oneshot.js';
 
 const REV_MAX = 7400;            // matches car/physics.js, for rpm → Hz
 const REV_IDLE = 1050;
 const FIRINGS_PER_REV = 2;       // four cylinders, four stroke
 const TAU = 0.03;                // parameter smoothing, seconds
+
+/* The bark gate, and it is a gate rather than a level that happens to come
+   out small: whether a gearchange makes noise at all is decided by how hard
+   the engine is working, not by where the envelope's peak would have landed.
+   Load is the primary term — a closed throttle means no pressure in the
+   system and nothing to release, however high the revs are — and rpm
+   attenuates the gate at the bottom of the range, so a lugged shift just off
+   idle stays quiet too. Below the floor the shift is silent, full stop. */
+const BARK_GATE_MIN = 0.12;
 
 export class EngineVoice {
   constructor(ctx, dest, buffers, seed = 91) {
@@ -212,6 +222,15 @@ export class EngineVoice {
     this.shiftDir = 1;
     this.gear = null;
     this.crackle = 0;
+
+    /* The conductor's switches. `shiftsMuted` is set while the race is
+       decided: past the flag the engine still dips and bends with the gears —
+       that is the car, and it keeps sounding like one — but the exhaust event
+       is punctuation, and punctuation after the finish is the conductor's to
+       withhold. `oneShots` is every bark still in flight, so a reset can
+       release them instead of letting them play into the next race. */
+    this.shiftsMuted = false;
+    this.oneShots = new OneShots();
   }
 
   /**
@@ -229,7 +248,10 @@ export class EngineVoice {
     if (this.gear !== null && gear !== this.gear) {
       this.shift = 1;
       this.shiftDir = gear > this.gear ? 1 : -1;
-      this.bark(t, rpm, throttle, this.shiftDir);
+      /* The dip and the pitch bend always happen — they are what the CAR does
+         on a gearchange. The bark is an event, and events are the conductor's
+         to schedule: muted after the flag, gated on load and rpm always. */
+      if (!this.shiftsMuted) this.bark(t, rpm, throttle, this.shiftDir);
     }
     this.gear = gear;
     this.shift = approach(this.shift, 0, 11, dt);
@@ -331,9 +353,13 @@ export class EngineVoice {
     const ctx = this.ctx;
     const r = this.rand;
     const up = dir > 0;
-    /* A shift at idle off the throttle should be near silent. There is no
-       pressure in the system to release, and barking anyway is how a car ends
-       up sounding like it is fighting itself in the pit lane. */
+    /* The gate, decided before anything is scheduled: load first, rpm
+       second — see the constants at the top of the file. A shift at idle off
+       the throttle should be near silent. There is no pressure in the system
+       to release, and barking anyway is how a car ends up sounding like it is
+       fighting itself in the pit lane. */
+    const gate = this.load * lerp(0.55, 1, smoothstep(0.15, 0.5, rpm));
+    if (gate < BARK_GATE_MIN) return;
     const level = (0.14 + 0.62 * this.load + 0.26 * rpm) * lerp(0.3, 1, throttle);
     if (level < 0.03) return;
 
@@ -356,7 +382,7 @@ export class EngineVoice {
     g.connect(this.barkBand);
     src.start(t, r.f(0, this.buf.duration - dur * 1.5 - 0.01));
     src.stop(t + dur + 0.02);
-    src.onended = () => { src.disconnect(); g.disconnect(); };
+    this.oneShots.add(src, g);
 
     /* The band sweeps with the burst rather than sitting still: a fixed-band
        noise burst is a hi-hat, a sweeping one is gas moving through a pipe. */
@@ -367,7 +393,27 @@ export class EngineVoice {
       up ? f0 * 0.40 : f0 * 2.3, t + dur);
   }
 
+  /**
+   * Back to a fresh car. The smoothed state belongs to the race that just
+   * ended — carrying it across a reset is how a restart barks on its first
+   * frame (gear 5 remembered against gear 1) and idles brassy for half a
+   * second. Any bark still in flight belongs to the old race too.
+   */
+  reset(t) {
+    this.gear = null;
+    this.load = 0;
+    this.jitter = 0;
+    this.shift = 0;
+    this.crackle = 0;
+    this.shiftsMuted = false;
+    this.release(t);
+  }
+
+  /** Stop and disconnect every bark still in flight. */
+  release(t) { this.oneShots.release(t); }
+
   dispose() {
+    this.release();
     for (const s of this.sources) { try { s.stop(); } catch (_) {} }
     for (const n of this.nodes) n.disconnect();
     for (const s of this.sources) s.disconnect();

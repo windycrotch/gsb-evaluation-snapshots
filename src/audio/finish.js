@@ -27,6 +27,7 @@
  * something arriving.
  */
 import { clamp } from '../core/util.js';
+import { OneShots } from './oneshot.js';
 
 /* G4. Below the start lights on purpose — those live at 740 and 1110, up
    where an engine cannot reach, and this one has nothing to compete with. */
@@ -62,6 +63,10 @@ export class FinishTones {
   constructor(ctx, dest) {
     this.ctx = ctx;
     this.nodes = [];
+    /* The chord and the stamp are the longest one-shots in the game — nearly
+       two seconds — so they are the most likely to be in flight across a
+       reset. Tracked so the conductor can end them with the race. */
+    this.oneShots = new OneShots();
     const node = n => { this.nodes.push(n); return n; };
 
     this.out = node(ctx.createGain());
@@ -144,7 +149,7 @@ export class FinishTones {
     g.connect(this.out);
     osc.start(t);
     osc.stop(t + STAMP_DUR + 0.05);
-    osc.onended = () => { osc.disconnect(); g.disconnect(); };
+    this.oneShots.add(osc, g);
 
     this._voice('sine', TICK_HZ, TICK_LEVEL, 0, t, TICK_DUR, this.body);
   }
@@ -170,10 +175,14 @@ export class FinishTones {
     g.connect(dest);
     osc.start(t);
     osc.stop(t + dur + 0.05);
-    osc.onended = () => { osc.disconnect(); g.disconnect(); };
+    this.oneShots.add(osc, g);
   }
 
+  /** Stop and disconnect every voice still in flight. */
+  release(t) { this.oneShots.release(t); }
+
   dispose() {
+    this.release();
     for (const n of this.nodes) n.disconnect();
   }
 }

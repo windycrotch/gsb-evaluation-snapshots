@@ -21,6 +21,7 @@
  * the pattern impact.js already uses for the same reason.
  */
 import { clamp } from '../core/util.js';
+import { OneShots } from './oneshot.js';
 
 /* The count. A above the treble stave and a bit: high enough to clear the
    engine's formant, low enough not to be a smoke alarm. */
@@ -46,6 +47,9 @@ export class StartTones {
   constructor(ctx, dest) {
     this.ctx = ctx;
     this.nodes = [];
+    /* Every tone still sounding, so a reset can release it rather than
+       letting the old race's lights count down into the new one. */
+    this.oneShots = new OneShots();
     const node = n => { this.nodes.push(n); return n; };
 
     this.out = node(ctx.createGain());
@@ -115,14 +119,18 @@ export class StartTones {
       g.connect(this.cut);
       osc.start(t);
       osc.stop(t + dur + 0.05);
-      osc.onended = () => { osc.disconnect(); g.disconnect(); };
+      this.oneShots.add(osc, g);
     };
 
     voice('triangle', 1, 1, 0);
     voice('sine', 2, go ? 0.34 : 0.26, 4);
   }
 
+  /** Stop and disconnect every tone still in flight. */
+  release(t) { this.oneShots.release(t); }
+
   dispose() {
+    this.release();
     for (const n of this.nodes) n.disconnect();
   }
 }

@@ -39,6 +39,41 @@
  * when you do not, and the last known value is held rather than snapping back
  * to a default.
  *
+ * THE CONDUCTOR
+ *
+ * On top of the per-frame state struct, the engine carries two latched race
+ * states, and they are the whole of what "which sounds are allowed now"
+ * means. Both are set by the game and enforced here, in one place, so the
+ * engine voice, the rank punctuation, the finish tones and the gearchange
+ * cannot drift into disagreeing about what phase the race is in:
+ *
+ *   audio.setPaused(true/false)
+ *       The pause menu. Every sustained layer — engine, tyres, wind, surf,
+ *       the boost motor — is taken down smoothly through one fader on the
+ *       master chain and brought back to exactly its previous level on
+ *       resume. Nothing is suspended and nothing is rebuilt, so the graph
+ *       the player comes back to is the one they left.
+ *
+ *   audio.setFinished(true)
+ *       The flag. From the crossing, rank punctuation and the gearchange
+ *       bark are masked — the race is decided and its events stop arriving —
+ *       while the finish tones and the car itself carry on. The engine still
+ *       dips and bends with the gears; only the exhaust EVENT is withheld.
+ *
+ *   audio.resetRace()
+ *       Restart, respawn or back-to-the-grid. Every one-shot still in flight
+ *       — impacts, barks, start lights, the flag chord, rank notes — is
+ *       stopped and disconnected, the sidechain dip is cancelled, the boost
+ *       motor goes silent, the engine's smoothed state is forgotten, and both
+ *       latches above are cleared. Nothing is allocated and nothing is
+ *       rebuilt, so a hundred resets leave the graph exactly as one found it.
+ *
+ * The two latches are deliberately orthogonal mechanisms — one owns a fader,
+ * the other owns an event mask — so a pause and a finish arriving on the
+ * same frame compose rather than race: the state afterwards is (paused,
+ * finished) whichever order the calls landed in, and two runs of the same
+ * frame render to the same samples.
+ *
  * Two rules run through the implementation. Nothing is allocated per frame —
  * every source and filter is built once in start() and update() only writes
  * AudioParams, because churning nodes at 60 Hz is the standard way to make
@@ -58,6 +93,11 @@ import { FinishTones } from './finish.js';
 import { FeedbackVoices } from './feedback.js';
 
 const SEED = 4711;
+
+/* The pause fader's time constant. Three of these is ~95% of the way down —
+   a quarter of a second, fast enough that the menu never talks over the
+   engine, slow enough that neither end of the travel is a click. */
+const PAUSE_TAU = 0.08;
 
 export class Audio {
   /**
@@ -83,6 +123,11 @@ export class Audio {
     this._airborne = false;
     this._duck = 0;
     this._speed = 0;
+    /* The conductor's latches — see the header. Orthogonal on purpose: the
+       fader and the event mask never touch the same node, so they compose
+       in either order. */
+    this._paused = false;
+    this._finished = false;
     /* Defaults chosen so the game sounds like a coast road before anything is
        wired: a road forty metres above the water with the sea somewhere off to
        the left is the setting, and a state struct that omits the new fields
@@ -173,7 +218,20 @@ export class Audio {
     this.dcBlock.type = 'highpass';
     this.dcBlock.frequency.value = 24;
     this.dcBlock.Q.value = 0.6;
-    this.dcBlock.connect(this.master);
+
+    /* The pause fader. One gain the WHOLE mix passes through — continuous
+       layers and one-shots alike — placed after the dcBlock so both the
+       compressed bus and the reverb return (which joins at the dcBlock,
+       downstream of the compressor) are inside it. Ducking anywhere earlier
+       would leave the cliff tail ringing over the menu; ducking later than
+       this would put the fader behind the limiter, where it could no longer
+       promise the output stays bounded while it moves. */
+    this.pauseGain = ctx.createGain();
+    /* Built at the latch's value, not at 1: a pause latched before the
+       context existed (or across a rebuild) must not come up loud. */
+    this.pauseGain.gain.value = this._paused ? 0 : 1;
+    this.dcBlock.connect(this.pauseGain);
+    this.pauseGain.connect(this.master);
 
     /* Gentler and slower than it was, and the two changes are the same change.
      *
@@ -301,6 +359,9 @@ export class Audio {
     this.hits.connect(this.send);
 
     this.engine = new EngineVoice(ctx, this.bus, buffers, this.seed + 91);
+    /* The conductor's latch survives the graph being (re)built: a finish
+       that landed before the context existed still mutes the bark. */
+    this.engine.shiftsMuted = this._finished;
     this.surface = new SurfaceVoices(ctx, this.bus, buffers, this.seed + 404);
     this.impacts = new Impacts(ctx, this.hits, buffers, this.seed + 7331);
     this.ambience = new Ambience(ctx, this.amb, buffers, this.seed + 8123);
@@ -357,6 +418,104 @@ export class Audio {
   stop() {
     this.running = false;
     if (this.ctx && !this.offline) this.ctx.suspend().catch(() => {});
+  }
+
+  /* ---- the conductor ----------------------------------------------------
+   *
+   * The two latched race states and the reset, in one place. See the header
+   * for the contract; the mechanics are deliberately small. */
+
+  /**
+   * The pause menu. Every layer is taken down through the master-chain
+   * fader and brought back to exactly its previous level on resume — the
+   * fader's target is 0 or 1, never an accumulated nudge, so a hundred
+   * pauses converge to the same two levels as the first.
+   *
+   * Idempotent: a second setPaused(true) is a no-op, which is what makes
+   * the same-frame cases (pause racing a finish, pause racing a restart)
+   * deterministic — the state afterwards is the state, not the history.
+   */
+  setPaused(paused) {
+    const want = !!paused;
+    if (want === this._paused) return this._paused;
+    this._paused = want;
+    if (this.ctx && this.pauseGain) {
+      const t = this.offline ? this.now : this.ctx.currentTime;
+      const g = this.pauseGain.gain;
+      /* Hold whatever value the fader has reached, then travel from there:
+         pausing halfway through the resume ramp must not snap. */
+      if (g.cancelAndHoldAtTime) g.cancelAndHoldAtTime(t);
+      else { g.cancelScheduledValues(t); g.setValueAtTime(g.value, t); }
+      g.setTargetAtTime(want ? 0 : 1, t, PAUSE_TAU);
+    }
+    return this._paused;
+  }
+
+  /**
+   * The flag. From the crossing, rank punctuation and the gearchange bark
+   * are masked; the finish tones and the car itself are not. Latched, and
+   * cleared only by resetRace() — there is no "unfinish" mid-race.
+   */
+  setFinished(finished) {
+    const want = !!finished;
+    if (want === this._finished) return this._finished;
+    this._finished = want;
+    if (this.engine) this.engine.shiftsMuted = want;
+    return this._finished;
+  }
+
+  /** Where the conductor believes the race is, for the harness to assert on. */
+  conductor() {
+    return { paused: this._paused, finished: this._finished };
+  }
+
+  /**
+   * Back to the grid. Everything that belongs to the race that just ended
+   * is released or forgotten; everything that belongs to the graph stays
+   * exactly where it was. Allocates nothing, so repeated resets cannot
+   * stack nodes — the graph after a hundred of them is the graph after one.
+   */
+  resetRace() {
+    this._finished = false;
+    if (!this.ctx) return;
+    const t = this.offline ? this.now : this.ctx.currentTime;
+    /* One-shots first: a chord or an impact still in flight belongs to the
+       old race and must not sound into the new one. */
+    this.engine.reset(t);
+    this.impacts.release(t);
+    this.startTones.release(t);
+    this.finishTones.release(t);
+    this.feedback.reset(t);
+    /* The sidechain dip is scheduled automation, not state a release() can
+       reach: a duck scheduled against a hit that no longer exists would
+       otherwise hold the bus down into the next race. */
+    const d = this.duck.gain;
+    d.cancelScheduledValues(t);
+    d.setValueAtTime(1, t);
+    /* Re-assert the fader rather than force it: resetRace does not decide
+       the pause state — a restart out of the pause menu is unpaused by
+       closePause, and a mid-race respawn was never paused. Whatever the
+       latch says is what the fader says. */
+    const g = this.pauseGain.gain;
+    g.cancelScheduledValues(t);
+    g.setValueAtTime(this._paused ? 0 : 1, t);
+  }
+
+  /**
+   * Node bookkeeping, for the measurement harness: how many persistent
+   * nodes and sources the graph holds, and how many one-shots are in
+   * flight. The first number must not move across resets; the second must
+   * be zero after one.
+   */
+  nodeCount() {
+    let persistent = 0, oneShots = 0;
+    for (const v of [this.engine, this.surface, this.impacts, this.ambience,
+      this.startTones, this.finishTones, this.feedback]) {
+      if (!v) continue;
+      persistent += (v.nodes?.length || 0) + (v.sources?.length || 0);
+      oneShots += v.oneShots?.size || 0;
+    }
+    return { persistent, oneShots };
   }
 
   setMasterVolume(v) {
@@ -526,7 +685,11 @@ export class Audio {
 
   /** A settled change in the player's classification. */
   positionTone(direction = 'gained') {
-    if (!this.ctx || !this.feedback
+    /* Masked once the race is decided: a rank change computed against a
+       field the player is no longer racing is noise, and the flag is the
+       only punctuation the finish gets. The mask lives here and not at the
+       call site so the HUD and the audio cannot disagree about it. */
+    if (!this.ctx || !this.feedback || this._finished
       || (direction !== 'gained' && direction !== 'lost')) return;
     const t = this.offline ? this.now : Math.max(this.now, this.ctx.currentTime);
     /* Reward gets a little more room than information. Both are shallower
@@ -586,9 +749,13 @@ export class Audio {
     this.feedback.dispose();
     for (const n of [this.bus, this.amb, this.hits, this.duck, this.send, this.verb,
       this.wet, ...this.wetNet, ...this.wetThru, ...this.wetSwap,
-      this.comp, this.limiter, this.dcBlock, this.master]) n.disconnect();
+      this.comp, this.limiter, this.dcBlock, this.pauseGain, this.master]) n.disconnect();
     if (this._ownsContext && this.ctx.close) this.ctx.close().catch(() => {});
     this.ctx = null;
     this.running = false;
+    /* A rebuild starts the conductor fresh too — the latches describe a
+       race whose graph no longer exists. */
+    this._paused = false;
+    this._finished = false;
   }
 }

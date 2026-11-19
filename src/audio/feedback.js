@@ -15,6 +15,7 @@
  */
 import { clamp, approach } from '../core/util.js';
 import { harmonicWave, noiseSource } from './noise.js';
+import { OneShots } from './oneshot.js';
 
 const BOOST_SEC = 1.2;           // matches car/physics.js
 
@@ -25,6 +26,9 @@ export class FeedbackVoices {
     this.sources = [];
     this.buf = buffers.white;
     this.boost = 0;
+    /* The rank notes and ignition bursts still in flight, so a reset can
+       release them with the race they belonged to. */
+    this.oneShots = new OneShots();
     const node = n => { this.nodes.push(n); return n; };
 
     /* The pad's second engine ------------------------------------------ */
@@ -152,7 +156,7 @@ export class FeedbackVoices {
     this.kickBand.frequency.exponentialRampToValueAtTime(1900 + rev * 1100, t + 0.18);
     src.start(t, 0.37);
     src.stop(t + 0.21);
-    src.onended = () => { src.disconnect(); g.disconnect(); };
+    this.oneShots.add(src, g);
   }
 
   _tone(t, f0, f1, level, dur, type) {
@@ -169,10 +173,26 @@ export class FeedbackVoices {
     g.connect(this.positionOut);
     osc.start(t);
     osc.stop(t + dur + 0.03);
-    osc.onended = () => { osc.disconnect(); g.disconnect(); };
+    this.oneShots.add(osc, g);
   }
 
+  /**
+   * Back to dormant. The boost motor is continuous, so releasing one-shots
+   * is not enough — its gain and its smoothed level belong to the pad the
+   * old race drove over, and a new race must not hear it fade out.
+   */
+  reset(t) {
+    this.boost = 0;
+    this.boostOut.gain.cancelScheduledValues(t);
+    this.boostOut.gain.setValueAtTime(0, t);
+    this.release(t);
+  }
+
+  /** Stop and disconnect every event voice still in flight. */
+  release(t) { this.oneShots.release(t); }
+
   dispose() {
+    this.release();
     for (const s of this.sources) { try { s.stop(); } catch (_) {} }
     for (const n of this.nodes) n.disconnect();
     for (const s of this.sources) s.disconnect();

@@ -562,6 +562,12 @@ class Game {
     };
     addEventListener('pointerdown', wake, { once: true });
     addEventListener('keydown', wake, { once: true });
+    /* Leaving the page is the one exit that owns nothing else: the loop, the
+       HUD and the GL context all die with the document, but an AudioContext
+       is a system resource and can outlive the page that made it. Releasing
+       it here is what keeps a hard navigation — or a bfcache restore that
+       never comes — from leaking the whole graph. */
+    addEventListener('pagehide', () => this.audio.dispose());
 
     /* THE TOUCH CONTROLS, on exactly the terms the title screen is on.
      *
@@ -1284,6 +1290,13 @@ class Game {
       standings,
       lineS: this.track.finishS,
     });
+    /* The audio's race state follows the car's. From the crossing frame the
+       conductor masks rank punctuation and the gearchange bark and keeps
+       only the finish tones — see src/audio/index.js, "THE CONDUCTOR".
+       Idempotent, so stating it every frame is cheaper than tracking an
+       edge, and a pause opening on this same frame composes with it rather
+       than racing it: the fader and the mask are different nodes. */
+    if (p.finished) this.audio.setFinished(true);
     const endTone = this.ending.takeTone();
     if (endTone) this.audio.finishTone(endTone, this.ending.won);
 
@@ -1616,28 +1629,29 @@ class Game {
    * running on its own thread and will happily keep the engine droning over a
    * frozen picture.
    *
-   * `Audio.stop()` suspends the context, which is the correct instrument and
-   * not merely the cheap one. A suspended AudioContext does not advance
-   * `currentTime`, and every parameter in this engine is written against
-   * `ctx.currentTime` through setTargetAtTime — so nothing that was scheduled
-   * lands while the menu is up, no envelope runs to its end unheard, and on
-   * resume the graph picks up at exactly the phase it was suspended at rather
-   * than fast-forwarding through however long the player was reading a menu.
-   * That is the audio half of "no step of accumulated time dumped into the
-   * first frame", and like the simulation half it is structural.
+   * `Audio.setPaused(true)` ducks the whole mix through one fader rather
+   * than suspending the context. Suspend was the old instrument and it was
+   * the wrong one for what the pause menu is: a suspended context freezes
+   * `currentTime`, so the engine fell silent mid-sample with no fade at all,
+   * and the resume was a step back to full level. The fader takes every
+   * sustained layer down smoothly and brings it back to exactly its previous
+   * level, the graph keeps running underneath at gain zero, and because no
+   * game event fires while `stepPause` owns the frame, nothing new is
+   * scheduled into it either. See src/audio/index.js, "THE CONDUCTOR", for
+   * the state this shares with the finish and the reset.
    */
   openPause() {
     if (!this.pause.open()) return;
-    this.audio.stop();
+    this.audio.setPaused(true);
   }
 
   /** Go. */
   closePause() {
     this.pause.close();
-    /* Resume rather than rebuild: start() on an existing context only calls
-       resume(), so the graph, its buffers and its scheduled ramps are the
-       ones that were there. */
-    this.audio.start();
+    /* Back up through the same fader: the graph, its buffers and its
+       scheduled ramps are the ones that were there, and the level returns
+       to exactly what it was rather than to a re-struck envelope. */
+    this.audio.setPaused(false);
   }
 
   /**
@@ -1754,6 +1768,13 @@ class Game {
        afterwards, which is the only caller that wants one. */
     this.title.skip();
     this.pause.close();
+    /* The audio's half of the same list. A restart is a race, so the pause
+       duck comes off whatever menu path got here; and everything the old
+       race still had in flight — impacts, barks, the flag chord, rank notes
+       — is released rather than carried into the new one. Idempotent and
+       allocation-free, so the reset key can be leaned on. */
+    this.audio.setPaused(false);
+    this.audio.resetRace();
     this.resetSimClock();
     const p = this.player;
     p.placeAt(34, 0);

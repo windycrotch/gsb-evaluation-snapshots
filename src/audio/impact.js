@@ -15,6 +15,7 @@
  */
 import { clamp, lerp } from '../core/util.js';
 import { rng, rand } from '../core/rng.js';
+import { OneShots } from './oneshot.js';
 
 const MIN_GAP = 0.055;      // seconds between hits
 const BUDGET = 5;           // hits in flight before new ones are refused
@@ -29,6 +30,9 @@ export class Impacts {
     this.last = -1e9;
     this.charged = -1e9;
     this.budget = BUDGET;
+    /* Every burst and oscillator still sounding, so a reset can release them
+       rather than letting the old race's hits ring into the new one. */
+    this.oneShots = new OneShots();
     const node = (n) => { this.nodes.push(n); return n; };
 
     this.out = node(ctx.createGain());
@@ -114,7 +118,7 @@ export class Impacts {
       g.connect(dest);
       src.start(t, r.f(0, this.buf.duration - dur * rate - 0.01));
       src.stop(t + dur + 0.02);
-      src.onended = () => { src.disconnect(); g.disconnect(); };
+      this.oneShots.add(src, g);
     };
 
     const hard = lerp(0.35, 1, tone);
@@ -139,7 +143,7 @@ export class Impacts {
     og.connect(this.out);
     osc.start(t);
     osc.stop(t + 0.4);
-    osc.onended = () => { osc.disconnect(); og.disconnect(); };
+    this.oneShots.add(osc, og);
 
     /* Sub.
      *
@@ -170,7 +174,7 @@ export class Impacts {
       sg.connect(this.out);
       sub.start(t);
       sub.stop(t + 0.55);
-      sub.onended = () => { sub.disconnect(); sg.disconnect(); };
+      this.oneShots.add(sub, sg);
     }
 
     /* Suspension. Only on the dull hits, which is to say landings: springs
@@ -186,7 +190,16 @@ export class Impacts {
     }
   }
 
+  /** Stop and disconnect every hit still in flight, and refill the budget:
+      both belong to the race that just ended. */
+  release(t) {
+    this.oneShots.release(t);
+    this.budget = BUDGET;
+    this.last = -1e9;
+  }
+
   dispose() {
+    this.release();
     for (const n of this.nodes) n.disconnect();
   }
 }
