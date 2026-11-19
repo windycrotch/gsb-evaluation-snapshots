@@ -105,8 +105,12 @@ export class App {
 			if (index === -1) return; // projects not loaded in this tab load when selected
 			if (value === null) {
 				this.project_datas = this.project_datas.filter((p) => p.id !== key);
-				if (this.selected_project_id === key)
+				if (this.selected_project_id === key) {
+					// the active level belongs to the disappearing project, so cancel and clear it
+					// before reselecting; its completion callback can then no longer score anything
+					this.set_active_level_data(null);
 					this.select_project(this.project_datas[0]?.id ?? null);
+				}
 				return;
 			}
 			const parsed = parse_stored(ProjectData, value);
@@ -114,6 +118,10 @@ export class App {
 			const updated = this.project_datas.slice();
 			updated[index] = parsed;
 			this.project_datas = updated;
+			if (this.selected_project_id === key) {
+				// the other tab may have removed the selected realm or the active level
+				this.#sync_selection_to_project(parsed);
+			}
 		}
 	}
 
@@ -271,11 +279,12 @@ export class App {
 	 */
 	active_level_data: LevelData | null = $state.raw(null);
 
-	level: Level | null = $derived.by(() => {
-		return this.active_level_data
-			? new Level(this, this.active_level_data, this.get_audio_context, this.register_success)
-			: null;
-	});
+	/**
+	 * The mounted level for `active_level_data`.
+	 * Managed explicitly by `set_active_level_data` so replacing the data first cancels
+	 * the old level's playing prompt and pending feedback, and a disposed level is never reused.
+	 */
+	level: Level | null = $state.raw(null);
 
 	levels: Array<LevelData> | null = $derived(this.selected_realm_data?.levels ?? null);
 	editing_level: boolean = $state(false);
@@ -372,6 +381,7 @@ export class App {
 	select_project = (id: ProjectId | null): void => {
 		if (!id) {
 			this.selected_project_id = null;
+			this.selected_realm_id = null; // a realm without its project is a dangling reference
 			return;
 		}
 		const project_data = this.project_datas.find((d) => d.id === id) ?? this.load_project(id);
@@ -715,7 +725,10 @@ export class App {
 
 	register_success = (id: LevelId, mistakes: number): void => {
 		const project_data = this.selected_project_data;
-		if (!project_data) return;
+		// only score a level and project that still exist: the selected project may have been
+		// removed or rewritten in another tab, and an exited or switched-away level must stay unscored
+		if (!project_data || !this.project_has_level(project_data, id)) return;
+		if (this.active_level_data && this.active_level_data.id !== id) return;
 		this.update_project({
 			...project_data,
 			level_stats: add_mistakes_to_level_stats(project_data.level_stats, id, mistakes)
@@ -723,13 +736,46 @@ export class App {
 	};
 
 	/**
+	 * Whether a level with `id` exists in any of the project's realms.
+	 */
+	project_has_level(project_data: ProjectData, id: LevelId): boolean {
+		return project_data.realms.some((realm) => realm.levels.some((level) => level.id === id));
+	}
+
+	/**
+	 * Drops the active level and any selection that no longer points at `project_data`,
+	 * used when another tab rewrites or removes the selected project,
+	 * so this tab keeps no references to data that has disappeared.
+	 */
+	#sync_selection_to_project(project_data: ProjectData | null): void {
+		const active_level_gone =
+			this.active_level_data &&
+			!(project_data && this.project_has_level(project_data, this.active_level_data.id));
+		if (active_level_gone) {
+			this.set_active_level_data(null);
+		}
+		if (!project_data) {
+			this.selected_realm_id = null;
+			return;
+		}
+		if (!project_data.realms.some((realm) => realm.id === this.selected_realm_id)) {
+			this.selected_realm_id = project_data.realms[0]?.id ?? null;
+		}
+	}
+
+	/**
 	 * Sets the level data.
+	 * Cancels the current level's playing prompt and pending feedback before replacing it,
+	 * so its timers can never advance or score a level that's no longer active.
 	 */
 	set_active_level_data(value: LevelData | null): void {
 		if (this.active_level_data === value) {
 			return;
 		}
-		this.level?.dispose(); // TODO better way to do this? doing it in the `this.level` derived is hacky
+		this.level?.dispose();
+		this.level = value
+			? new Level(this, value, this.get_audio_context, this.register_success)
+			: null;
 		this.active_level_data = value;
 	}
 

@@ -278,8 +278,10 @@ export class Level {
 		}
 		const trial = this.trial;
 		if (!trial) return;
-		// a manual retry replaces the one scheduled by the failure, which would otherwise replay again
-		if (status === 'showing_failure_feedback') clearTimeout(this.feedback_timeout);
+		// a manual retry replaces any scheduled transition (the failure's replay, or the
+		// success feedback's next trial/completion), which would otherwise act on the replayed trial
+		clearTimeout(this.feedback_timeout);
+		this.feedback_timeout = undefined;
 		// TODO should this be "on enter presenting_prompt state" logic?
 		this.trial = {
 			...trial,
@@ -289,7 +291,8 @@ export class Level {
 	};
 
 	next_trial = (): void => {
-		if (this.status === 'complete') {
+		// only the initial start, a feedback transition, or a reset may advance to a new trial
+		if (this.error || (this.status !== 'initial' && this.status !== 'showing_success_feedback')) {
 			return;
 		}
 		const next_trial = create_next_trial(this.level_data, this.trial, this.random);
@@ -301,9 +304,12 @@ export class Level {
 	};
 
 	complete_level = (): void => {
-		if (this.status === 'complete') {
+		// a level that can't be played never scores, and a completed level never scores twice
+		if (this.error || this.status === 'complete') {
 			return;
 		}
+		// stop any prompt or pending transition so nothing acts on the completed level
+		this.cancel();
 		this.trial = null;
 		this.update_status('complete');
 	};

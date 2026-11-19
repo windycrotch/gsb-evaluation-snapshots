@@ -324,6 +324,151 @@ describe('Level', () => {
 		assert.deepEqual(successes, [['level', 0]]);
 	});
 
+	// regression: a stale feedback timer left armed by a manual retry could still fire later
+	test('a manual retry during success feedback cancels the pending completion', async () => {
+		const { level, successes } = create_level({ trial_count: 1 });
+		level.start();
+		await finish_prompt(level);
+		guess_all(level);
+		assert.strictEqual(level.status, 'showing_success_feedback');
+		assert.ok(level.feedback_timeout !== undefined);
+		level.retry_trial();
+		assert.strictEqual(level.feedback_timeout, undefined);
+		await finish_prompt(level);
+		// the old completion timer must not fire: still on the same replayed trial, not complete
+		await vi.advanceTimersByTimeAsync(DEFAULT_FEEDBACK_DURATION * 2);
+		assert.strictEqual(level.status, 'waiting_for_input');
+		assert.strictEqual(level.trial?.retry_count, 1);
+		assert.strictEqual(level.trials.length, 1);
+		assert.deepEqual(successes, []);
+	});
+
+	// regression: rapid retries during failure feedback could each bump the retry count
+	test('rapid retries during failure feedback only replay once', async () => {
+		const { level } = create_level();
+		level.start();
+		await finish_prompt(level);
+		level.guess(level.trial!.sequence[0]!);
+		level.guess(wrong_note(level, 1));
+		assert.strictEqual(level.status, 'showing_failure_feedback');
+		level.retry_trial();
+		level.retry_trial(); // presenting: no-op
+		level.retry_trial(); // presenting: no-op
+		assert.strictEqual(level.trial?.retry_count, 1);
+		await finish_prompt(level);
+		await vi.advanceTimersByTimeAsync(DEFAULT_FEEDBACK_DURATION * 2);
+		assert.strictEqual(level.trial?.retry_count, 1);
+		assert.strictEqual(level.status, 'waiting_for_input');
+	});
+
+	test('rapid retries while waiting only replay once', async () => {
+		const { level } = create_level();
+		level.start();
+		await finish_prompt(level);
+		level.retry_trial();
+		level.retry_trial(); // presenting: no-op
+		assert.strictEqual(level.trial?.retry_count, 1);
+		assert.strictEqual(level.trials.length, 1);
+		await finish_prompt(level);
+		assert.strictEqual(level.trial?.retry_count, 1);
+	});
+
+	test('retry is a no-op in the initial and complete statuses', () => {
+		const fresh = create_level();
+		fresh.level.retry_trial();
+		assert.strictEqual(fresh.level.trial, null);
+
+		const { level } = create_level();
+		level.win();
+		assert.strictEqual(level.status, 'complete');
+		level.retry_trial();
+		assert.strictEqual(level.status, 'complete');
+		assert.strictEqual(level.trial, null);
+	});
+
+	test('guess is a no-op during feedback and after completion', async () => {
+		const { level } = create_level({ trial_count: 1 });
+		level.start();
+		await finish_prompt(level);
+		guess_all(level);
+		assert.strictEqual(level.status, 'showing_success_feedback');
+		const feedback = level.feedback;
+		level.guess(level.trial?.sequence[0] ?? 60);
+		assert.strictEqual(level.feedback, feedback);
+		await vi.advanceTimersByTimeAsync(DEFAULT_FEEDBACK_DURATION);
+		assert.strictEqual(level.status, 'complete');
+		level.guess(60);
+		assert.strictEqual(level.status, 'complete');
+	});
+
+	test('reset during the prompt cancels the rest of the playback', async () => {
+		const { level, audio } = create_level({ sequence_length: 3 });
+		level.start();
+		// let the first note of the prompt play, then reset while the prompt is still presenting
+		await vi.advanceTimersByTimeAsync(DEFAULT_NOTE_DURATION);
+		assert.strictEqual(level.status, 'presenting_prompt');
+		const played_before_reset = audio.played.length;
+		assert.ok(played_before_reset < 3);
+		level.reset();
+		// far beyond both the cancelled prompt's remaining notes and the fresh 3-note prompt
+		await vi.advanceTimersByTimeAsync(DEFAULT_NOTE_DURATION * 6);
+		// the cancelled prompt's remaining notes never play; only the fresh prompt's notes are added
+		const added_after_reset = audio.played.slice(played_before_reset);
+		assert.deepEqual(added_after_reset, level.trial!.sequence);
+		assert.strictEqual(audio.played.length, played_before_reset + 3);
+		assert.strictEqual(level.trials.length, 1);
+		assert.strictEqual(level.trial?.index, 0);
+	});
+
+	test('dispose during failure feedback never runs the scheduled replay', async () => {
+		const { level, audio } = create_level({ sequence_length: 3 });
+		level.start();
+		await finish_prompt(level);
+		const { sequence } = level.trial!;
+		const played_at_failure = audio.played.length;
+		level.guess(level.trial!.sequence[0]!);
+		level.guess(wrong_note(level, 1));
+		assert.strictEqual(level.status, 'showing_failure_feedback');
+		level.dispose();
+		await vi.advanceTimersByTimeAsync(DEFAULT_FEEDBACK_DURATION * 2);
+		assert.strictEqual(level.trial?.retry_count, 0);
+		assert.strictEqual(level.feedback_timeout, undefined);
+		// the scheduled replay never runs: fewer notes than a full replayed prompt are added
+		assert.ok(audio.played.length - played_at_failure < sequence.length);
+	});
+
+	test('an unplayable level never starts or scores, even through the debug win', () => {
+		const { level, successes, audio } = create_level({
+			intervals: [24],
+			tonics: null,
+			min_note: 48,
+			max_note: 60
+		});
+		assert.ok(level.error);
+		level.start();
+		level.guess(60);
+		level.retry_trial();
+		level.win();
+		assert.strictEqual(level.status, 'initial');
+		assert.strictEqual(level.trial, null);
+		assert.strictEqual(level.trials.length, 0);
+		assert.deepEqual(successes, []);
+		assert.deepEqual(audio.played, []);
+	});
+
+	test('completing cancels any pending feedback timer', async () => {
+		const { level } = create_level();
+		level.start();
+		await finish_prompt(level);
+		guess_all(level);
+		assert.ok(level.feedback_timeout !== undefined);
+		level.win();
+		assert.strictEqual(level.feedback_timeout, undefined);
+		await vi.advanceTimersByTimeAsync(DEFAULT_FEEDBACK_DURATION * 2);
+		assert.strictEqual(level.status, 'complete');
+		assert.strictEqual(level.trial, null);
+	});
+
 	test('the debug guesses steer the outcome', async () => {
 		const { level } = create_level();
 		level.start();
