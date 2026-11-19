@@ -1,0 +1,242 @@
+'use client';
+
+/**
+ * Tile inspector panel — SimCity-style info window shown when the SELECT tool
+ * clicks a tile. Renders a one-shot snapshot captured at click time; it does
+ * not live-update. Hidden when `info` is null.
+ */
+
+import { TileType } from '@/game/core/Tile';
+import type { BuildingType } from '@/game/core/Building';
+import type { StructureType } from '@/game/core/StructureMap';
+import type { TileInfo } from '@/game/engine';
+import type { ScreenCoord } from '@/game/types/coordinates';
+
+// Cursor offset and panel extents used to keep the panel on-screen.
+const CURSOR_OFFSET = 14;
+// Applied as an explicit border-box `width` below, not just a minimum, so the element
+// can never outgrow what anchoredPosition reserves for it and clip at the viewport edge.
+const EST_WIDTH = 240;
+// Sized for the tallest panel this component renders — a zoned tile with a building,
+// whose Density row wraps to two lines at the pinned EST_WIDTH. Rounded up, because
+// under-estimating is the failure mode: the bottom-edge flip below trusts this number.
+const EST_HEIGHT = 420;
+
+/**
+ * Place the panel near the click, flipping to the opposite side of the cursor
+ * when it would overflow the viewport, and clamping to a small margin.
+ */
+function anchoredPosition(anchor: ScreenCoord): { left: number; top: number } {
+  const vw = typeof window !== 'undefined' ? window.innerWidth : EST_WIDTH;
+  const vh = typeof window !== 'undefined' ? window.innerHeight : EST_HEIGHT;
+  let left = anchor.x + CURSOR_OFFSET;
+  let top = anchor.y + CURSOR_OFFSET;
+  if (left + EST_WIDTH > vw) left = anchor.x - CURSOR_OFFSET - EST_WIDTH;
+  if (top + EST_HEIGHT > vh) top = anchor.y - CURSOR_OFFSET - EST_HEIGHT;
+  return { left: Math.max(8, left), top: Math.max(8, top) };
+}
+
+const TILE_TYPE_LABELS: Record<TileType, string> = {
+  [TileType.GRASS]: 'Grass',
+  [TileType.DIRT]: 'Dirt',
+  [TileType.ROAD]: 'Road',
+  [TileType.ZONE_RESIDENTIAL]: 'Residential Zone',
+  [TileType.ZONE_COMMERCIAL]: 'Commercial Zone',
+  [TileType.ZONE_INDUSTRIAL]: 'Industrial Zone',
+  [TileType.POWER_PLANT]: 'Power Plant',
+  [TileType.WATER_TOWER]: 'Water Tower',
+  [TileType.POLICE_STATION]: 'Police Station',
+  [TileType.FIRE_STATION]: 'Fire Station',
+  [TileType.HOSPITAL]: 'Hospital',
+  [TileType.SCHOOL]: 'School',
+  [TileType.PARK]: 'Park',
+};
+
+const STRUCTURE_TYPE_LABELS: Record<StructureType, string> = {
+  power_plant: 'Power Plant',
+  water_tower: 'Water Tower',
+  police_station: 'Police Station',
+  fire_station: 'Fire Station',
+  hospital: 'Hospital',
+  school: 'School',
+  park: 'Park',
+};
+
+const BUILDING_TYPE_LABELS: Record<BuildingType, string> = {
+  residential: 'Residential',
+  commercial: 'Commercial',
+  industrial: 'Industrial',
+};
+
+const DENSITY_LABELS: Record<0 | 1 | 2, string> = {
+  0: 'Low',
+  1: 'Medium',
+  2: 'High',
+};
+
+function Row({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div style={{ display: 'flex', justifyContent: 'space-between', gap: '16px' }}>
+      <span style={{ opacity: 0.7, flexShrink: 0 }}>{label}</span>
+      {/* minWidth 0 lets the value shrink past its automatic min-content floor and
+          wrap inside the panel's fixed width instead of widening it; textAlign keeps
+          a wrapped second line flush with the right-hand column. */}
+      <span style={{ minWidth: 0, textAlign: 'right' }}>{children}</span>
+    </div>
+  );
+}
+
+export function TileInfoPanel({
+  info,
+  anchor,
+  onClose,
+}: {
+  info: TileInfo | null;
+  anchor: ScreenCoord | null;
+  onClose: () => void;
+}) {
+  if (!info || !anchor) return null;
+
+  const { left, top } = anchoredPosition(anchor);
+
+  const isZone =
+    info.type === TileType.ZONE_RESIDENTIAL ||
+    info.type === TileType.ZONE_COMMERCIAL ||
+    info.type === TileType.ZONE_INDUSTRIAL;
+  // Round once so the branch and the displayed digits always agree — a sub-0.5%
+  // penalty must fall back to plain '0%', never a red '-0%'.
+  const congestionPercent = Math.round(info.congestionPenalty * 100);
+
+  return (
+    <div
+      style={{
+        position: 'fixed',
+        left: `${left}px`,
+        top: `${top}px`,
+        width: `${EST_WIDTH}px`,
+        // Never wider than the viewport minus anchoredPosition's 8px clamp on each
+        // side. When this bites, the panel is NARROWER than EST_WIDTH, which only
+        // makes the placement maths below more conservative — it can never clip.
+        maxWidth: 'calc(100vw - 16px)',
+        boxSizing: 'border-box',
+        padding: '12px 16px',
+        backgroundColor: 'rgba(0, 0, 0, 0.8)',
+        color: 'white',
+        fontFamily: 'monospace',
+        fontSize: '13px',
+        borderRadius: '6px',
+        userSelect: 'none',
+        // Above the Toolbar/HUD (zIndex 1000) so it's never painted over.
+        zIndex: 1001,
+      }}
+    >
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          marginBottom: '8px',
+        }}
+      >
+        <strong>
+          Tile ({info.x}, {info.y})
+        </strong>
+        <button
+          onClick={onClose}
+          aria-label="Close"
+          style={{
+            background: 'transparent',
+            border: 'none',
+            color: 'white',
+            cursor: 'pointer',
+            fontSize: '16px',
+            lineHeight: 1,
+            padding: 0,
+          }}
+        >
+          ×
+        </button>
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+        <Row label="Type">{TILE_TYPE_LABELS[info.type]}</Row>
+        {isZone && <Row label="Zone Level">{info.level}</Row>}
+        <Row label="Power">
+          <span style={{ color: info.powered ? '#4caf50' : '#ff6b6b' }}>
+            {info.powered ? 'Powered' : 'No Power'}
+          </span>
+        </Row>
+        <Row label="Water">
+          <span style={{ color: info.watered ? '#4caf50' : '#ff6b6b' }}>
+            {info.watered ? 'Watered' : 'No Water'}
+          </span>
+        </Row>
+        <Row label="Police">
+          <span style={{ color: info.isServiceSource || info.serviceCovered ? '#4caf50' : '#ff6b6b' }}>
+            {info.isServiceSource ? 'Police Station' : `${Math.round(info.coverage * 100)}%`}
+          </span>
+        </Row>
+        <Row label="Fire">
+          <span style={{ color: info.isFireSource || info.fireServiceCovered ? '#4caf50' : '#ff6b6b' }}>
+            {info.isFireSource ? 'Fire Station' : `${Math.round(info.fireCoverage * 100)}%`}
+          </span>
+        </Row>
+        <Row label="Hospital">
+          <span style={{ color: info.isHospitalSource || info.hospitalServiceCovered ? '#4caf50' : '#ff6b6b' }}>
+            {info.isHospitalSource ? 'Hospital' : `${Math.round(info.hospitalCoverage * 100)}%`}
+          </span>
+        </Row>
+        <Row label="School">
+          <span style={{ color: info.isSchoolSource || info.schoolServiceCovered ? '#4caf50' : '#ff6b6b' }}>
+            {info.isSchoolSource ? 'School' : `${Math.round(info.schoolCoverage * 100)}%`}
+          </span>
+        </Row>
+        {/* FLOOR, not round: every LEVEL_THRESHOLDS entry is a whole percent, so a
+            floored integer can never read as having cleared a threshold the stored
+            value sits below. Math.round rendered 0.84891 as "85%" — the level-5 bar —
+            and a player would wait forever for an upgrade that cannot fire.
+            On a building tile inspectTile sources this from the lot ANCHOR, the cell
+            the gates actually compare, so the digits and the gate agree on both axes. */}
+        <Row label="Land Value">{Math.floor(info.landValue * 100)}%</Row>
+        <Row label="Congestion Loss">
+          {congestionPercent > 0 ? (
+            <span style={{ color: '#ff6b6b' }}>-{congestionPercent}%</span>
+          ) : (
+            '0%'
+          )}
+        </Row>
+
+        {info.building && (
+          <>
+            <div style={{ marginTop: '6px', opacity: 0.7 }}>Building</div>
+            <Row label="Kind">{BUILDING_TYPE_LABELS[info.building.type]}</Row>
+            <Row label="Level">{info.building.level}</Row>
+            {/* Current tier AND the lot's ceiling, always — the ceiling is most actionable
+                BELOW it (a freshly merged 2-wide lot inherits Medium but can reach High).
+                At the cap the tier is not repeated ('High · max High' reads as noise);
+                'at max' says the same thing without the echo. */}
+            <Row label="Density">
+              {info.building.density === info.building.maxDensity
+                ? `${DENSITY_LABELS[info.building.density]} · at max (${info.building.lotWidth}-wide lot)`
+                : `${DENSITY_LABELS[info.building.density]} · max ${DENSITY_LABELS[info.building.maxDensity]} (${info.building.lotWidth}-wide lot)`}
+            </Row>
+            <Row label="Capacity">{info.building.capacity}</Row>
+            <Row label="Age">{info.building.age}</Row>
+            <Row label="Status">
+              <span style={{ color: info.building.abandoned ? '#ff6b6b' : '#4caf50' }}>
+                {info.building.abandoned ? 'Abandoned' : 'Active'}
+              </span>
+            </Row>
+          </>
+        )}
+
+        {info.structure && (
+          <>
+            <div style={{ marginTop: '6px', opacity: 0.7 }}>Structure</div>
+            <Row label="Kind">{STRUCTURE_TYPE_LABELS[info.structure.type]}</Row>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}

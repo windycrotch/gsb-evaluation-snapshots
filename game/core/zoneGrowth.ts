@@ -1,0 +1,399 @@
+import type { World } from './World';
+import type { Building } from './Building';
+import { TileType } from './Tile';
+import type { Frontage, Rect } from './buildingFootprint';
+import { lotBboxOf } from './buildingFootprint';
+import { MIN_STRUCTURE_DEPTH_CAP, LEVEL_THRESHOLDS, ZONE_MAX_LEVEL } from './growthConstants';
+
+export function depthAxisFromFrontage(frontage: Frontage): { dx: number; dy: number } {
+  switch (frontage) {
+    case 'N': return { dx: 0, dy: 1 };
+    case 'S': return { dx: 0, dy: -1 };
+    case 'W': return { dx: 1, dy: 0 };
+    case 'E': return { dx: -1, dy: 0 };
+  }
+}
+
+export function pickSeedFrontage(seed: { x: number; y: number }, world: World): Frontage | null {
+  const map = world.getMap();
+  // Check distances 1..4, tie-break order S > E > W > N at each distance.
+  const directions: Array<{ dir: Frontage; dx: number; dy: number }> = [
+    { dir: 'S', dx: 0, dy: 1 },
+    { dir: 'E', dx: 1, dy: 0 },
+    { dir: 'W', dx: -1, dy: 0 },
+    { dir: 'N', dx: 0, dy: -1 },
+  ];
+  for (let k = 1; k <= 4; k++) {
+    for (const { dir, dx, dy } of directions) {
+      const nx = seed.x + dx * k;
+      const ny = seed.y + dy * k;
+      const tile = map.getTile(nx, ny);
+      if (tile !== null && tile.type === TileType.ROAD) return dir;
+    }
+  }
+  return null;
+}
+
+export function countRoadsOnFace(rect: Rect, frontage: Frontage, world: World): number {
+  const map = world.getMap();
+  let count = 0;
+  switch (frontage) {
+    case 'N':
+      for (let x = rect.x; x < rect.x + rect.w; x++) {
+        const t = map.getTile(x, rect.y - 1);
+        if (t !== null && t.type === TileType.ROAD) count++;
+      }
+      break;
+    case 'S':
+      for (let x = rect.x; x < rect.x + rect.w; x++) {
+        const t = map.getTile(x, rect.y + rect.h);
+        if (t !== null && t.type === TileType.ROAD) count++;
+      }
+      break;
+    case 'W':
+      for (let y = rect.y; y < rect.y + rect.h; y++) {
+        const t = map.getTile(rect.x - 1, y);
+        if (t !== null && t.type === TileType.ROAD) count++;
+      }
+      break;
+    case 'E':
+      for (let y = rect.y; y < rect.y + rect.h; y++) {
+        const t = map.getTile(rect.x + rect.w, y);
+        if (t !== null && t.type === TileType.ROAD) count++;
+      }
+      break;
+  }
+  return count;
+}
+
+/**
+ * Max cells a greedy-depth lot spans (frontage seed + interior, measured along the depth axis).
+ * Shared with hasSpawnRoadAccess so the overlay's road cue uses the same reach the spawner does.
+ */
+const LOT_MAX_DEPTH = 4;
+
+export function greedyDepthLot(
+  seed: { x: number; y: number },
+  frontage: Frontage,
+  seedTileType: TileType,
+  world: World,
+): Rect | null {
+  const map = world.getMap();
+  const terrain = world.getTerrain();
+  const isWater = (x: number, y: number) => world.isWater(x, y);
+  const { dx, dy } = depthAxisFromFrontage(frontage);
+  const anchorHeight = terrain.getRenderHeight(seed.x, seed.y);
+
+  const cells: Array<{ x: number; y: number }> = [{ x: seed.x, y: seed.y }];
+
+  for (let step = 1; step < LOT_MAX_DEPTH; step++) {
+    const nx = seed.x + dx * step;
+    const ny = seed.y + dy * step;
+    const tile = map.getTile(nx, ny);
+    if (tile === null) break;
+    if (tile.type !== seedTileType) break;
+    if (map.getBuildings().getBuildingAt(nx, ny) !== null) break;
+    if (terrain.getRenderHeight(nx, ny) !== anchorHeight) break;
+    if (!terrain.isFlatTile(nx, ny, isWater)) break;
+    cells.push({ x: nx, y: ny });
+  }
+
+  const rect = lotBboxOf(cells);
+
+  if (!validateFootprintRect(rect, seedTileType, world)) return null;
+
+  // Chosen-frontage validation: the chosen frontage face must actually touch a road.
+  if (countRoadsOnFace(rect, frontage, world) === 0) return null;
+
+  return rect;
+}
+
+/**
+ * Classify why an empty zone tile is not spawning, for the player-facing empty-zone cue. Walks the
+ * same road-fronting lot COVERAGE the spawner uses (contiguous same-type, EMPTY cells within
+ * LOT_MAX_DEPTH; terrain ignored), looking for a frontage seed — a cell whose next cell is a road —
+ * whose lot (footprint claimed whole at spawn) would cover `seed`. `isPowered(x,y)` is injected
+ * (the overlay passes the PowerMap) and is consulted on the FRONTAGE SEED, not on `seed` itself:
+ * World.tick checks power on the seed it spawns from (World.ts ~547), then the lot absorbs deeper
+ * cells, so an interior cell needs no power of its own. Returns:
+ *   'road'  — no road-fronting lot can reach the tile (build/extend a road),
+ *   'power' — a lot reaches it but NO covering frontage seed is powered (connect power),
+ *   null    — a powered frontage seed will spawn a covering lot (or only terrain/demand blocks it,
+ *             which roads/power can't fix) → no cue.
+ * Priority is road > power: a tile with no road access reports 'road' even when unpowered, since
+ * power can't reach a cell with no adjacent road anyway.
+ *
+ * Why coverage, not a per-tile test: a road-on-own-face test is too STRICT (interior cells of a
+ * deep lot have no road/power on their own face yet are covered by the frontage seed), while a
+ * road-within-4 test (pickSeedFrontage) is too LOOSE (it ignores zone-type contiguity, so a road
+ * across unzoned land would falsely suppress the cue). Occupancy mirrors the spawn gate too: a
+ * building anywhere in the run (including the frontage seed) breaks it, since greedyDepthLot stops
+ * at occupied cells and World.tick spawns only from empty seeds.
+ */
+export function classifyEmptyZoneSpawnBlock(
+  seed: { x: number; y: number },
+  world: World,
+  isPowered: (x: number, y: number) => boolean,
+): 'road' | 'power' | null {
+  const map = world.getMap();
+  const buildings = map.getBuildings();
+  const seedTile = map.getTile(seed.x, seed.y);
+  if (seedTile === null) return null;
+  const seedType = seedTile.type;
+  if (buildings.getBuildingAt(seed.x, seed.y) !== null) return null; // occupied — not an empty zone
+
+  let roadReachable = false;
+  // `seed` sits at depth `step` behind a frontage cell; the road is one cell beyond that cell.
+  for (const { dx, dy } of [
+    { dx: 0, dy: 1 }, { dx: 1, dy: 0 }, { dx: -1, dy: 0 }, { dx: 0, dy: -1 },
+  ]) {
+    for (let step = 0; step < LOT_MAX_DEPTH; step++) {
+      const cx = seed.x + dx * step;
+      const cy = seed.y + dy * step;
+      if (step > 0) {
+        const t = map.getTile(cx, cy);
+        if (t === null || t.type !== seedType) break; // contiguity broken before any road frontage
+        if (buildings.getBuildingAt(cx, cy) !== null) break; // an occupied cell blocks the lot
+      }
+      const road = map.getTile(cx + dx, cy + dy);
+      if (road !== null && road.type === TileType.ROAD) {
+        // (cx,cy) is a frontage seed whose lot covers `seed`. If it's powered, a building spawns
+        // there and covers `seed` → no cue. Otherwise this approach is power-blocked; another
+        // direction may still have a powered seed, so keep looking.
+        if (isPowered(cx, cy)) return null;
+        roadReachable = true;
+        break; // deeper cells are past the road; this direction's frontage seed is unpowered
+      }
+    }
+  }
+  return roadReachable ? 'power' : 'road';
+}
+
+export function initialStructureRect(lot: Rect, frontage: Frontage): Rect {
+  switch (frontage) {
+    case 'N': return { x: lot.x, y: lot.y, w: lot.w, h: 1 };
+    case 'S': return { x: lot.x, y: lot.y + lot.h - 1, w: lot.w, h: 1 };
+    case 'W': return { x: lot.x, y: lot.y, w: 1, h: lot.h };
+    case 'E': return { x: lot.x + lot.w - 1, y: lot.y, w: 1, h: lot.h };
+  }
+}
+
+export function structureRectFillsLotDepth(sr: Rect, lot: Rect, frontage: Frontage): boolean {
+  if (frontage === 'N' || frontage === 'S') return sr.h === lot.h;
+  return sr.w === lot.w;
+}
+
+/**
+ * Depth of the structure along the lot's depth axis — the axis isStructureRectInLot does NOT
+ * pin (N/S pin sr.w to the lot width, so depth is sr.h; W/E pin sr.h, so depth is sr.w).
+ * Exported so mergePolicy's equal-depth gate reads the depth axis from the same place
+ * structureDepthCap and canExtendStructure do.
+ */
+export function structureDepth(sr: Rect, frontage: Frontage): number {
+  return (frontage === 'N' || frontage === 'S') ? sr.h : sr.w;
+}
+
+/**
+ * Width of the lot along its frontage axis (parallel to the road).
+ * Exported so inspectTile can report the same width measure maxDensityForLot
+ * and structureDepthCap gate on.
+ */
+export function lotWidthAlongFrontage(lot: Rect, frontage: Frontage): number {
+  return (frontage === 'N' || frontage === 'S') ? lot.w : lot.h;
+}
+
+// Cap structure depth at max(MIN_STRUCTURE_DEPTH_CAP, lot width). This keeps
+// narrow lots from growing into thin slabs while letting wider (merged) lots
+// progress toward a square footprint up to the lot's bounds.
+function structureDepthCap(lot: Rect, frontage: Frontage): number {
+  return Math.max(MIN_STRUCTURE_DEPTH_CAP, lotWidthAlongFrontage(lot, frontage));
+}
+
+/**
+ * Cap the density tier a lot can reach, keyed on the same frontage-axis
+ * width as `structureDepthCap` so both lot-size limits share one measure.
+ * A 1-wide (unmerged) lot stops at tier 1; only an assembled >=2-wide lot
+ * reaches tier 2 — land assembly, not waiting, unlocks the top tier.
+ */
+export function maxDensityForLot(lot: Rect, frontage: Frontage): 1 | 2 {
+  return lotWidthAlongFrontage(lot, frontage) >= 2 ? 2 : 1;
+}
+
+// A structure can grow further only when it has neither hit the depth cap
+// nor saturated the lot's depth.
+export function canExtendStructure(sr: Rect, lot: Rect, frontage: Frontage): boolean {
+  if (structureRectFillsLotDepth(sr, lot, frontage)) return false;
+  return structureDepth(sr, frontage) < structureDepthCap(lot, frontage);
+}
+
+export function extendStructureToward(structureRect: Rect, lot: Rect, frontage: Frontage): Rect | null {
+  if (!canExtendStructure(structureRect, lot, frontage)) return null;
+  const sr = structureRect;
+  switch (frontage) {
+    case 'N': return { x: sr.x, y: sr.y, w: sr.w, h: sr.h + 1 };
+    case 'S': return { x: sr.x, y: sr.y - 1, w: sr.w, h: sr.h + 1 };
+    case 'W': return { x: sr.x, y: sr.y, w: sr.w + 1, h: sr.h };
+    case 'E': return { x: sr.x - 1, y: sr.y, w: sr.w + 1, h: sr.h };
+  }
+}
+
+/**
+ * Count road-adjacent perimeter cells per side (N, S, E, W).
+ * "Road-adjacent" means the orthogonal neighbor outside the rect on that side
+ * is a ROAD tile. Out-of-bounds counts as not a road.
+ */
+function countRoadsByFace(rect: Rect, world: World): { N: number; S: number; E: number; W: number } {
+  const map = world.getMap();
+  let N = 0, S = 0, E = 0, W = 0;
+
+  // N side: row y = rect.y-1, x from rect.x to rect.x+w-1
+  for (let x = rect.x; x < rect.x + rect.w; x++) {
+    const t = map.getTile(x, rect.y - 1);
+    if (t !== null && t.type === TileType.ROAD) N++;
+  }
+
+  // S side: row y = rect.y+h, x from rect.x to rect.x+w-1
+  for (let x = rect.x; x < rect.x + rect.w; x++) {
+    const t = map.getTile(x, rect.y + rect.h);
+    if (t !== null && t.type === TileType.ROAD) S++;
+  }
+
+  // W side: col x = rect.x-1, y from rect.y to rect.y+h-1
+  for (let y = rect.y; y < rect.y + rect.h; y++) {
+    const t = map.getTile(rect.x - 1, y);
+    if (t !== null && t.type === TileType.ROAD) W++;
+  }
+
+  // E side: col x = rect.x+w, y from rect.y to rect.y+h-1
+  for (let y = rect.y; y < rect.y + rect.h; y++) {
+    const t = map.getTile(rect.x + rect.w, y);
+    if (t !== null && t.type === TileType.ROAD) E++;
+  }
+
+  return { N, S, E, W };
+}
+
+/**
+ * Returns the side with the most road-adjacent perimeter cells.
+ * Tie-break: S > E > W > N. Returns null when no perimeter cell touches a road.
+ */
+export function pickFrontage(rect: Rect, world: World): Frontage | null {
+  const counts = countRoadsByFace(rect, world);
+  const max = Math.max(counts.N, counts.S, counts.E, counts.W);
+  if (max === 0) return null;
+
+  // Tie-break order: S, E, W, N
+  if (counts.S === max) return 'S';
+  if (counts.E === max) return 'E';
+  if (counts.W === max) return 'W';
+  return 'N';
+}
+
+/**
+ * Returns true iff the rect is a valid footprint candidate:
+ * - w and h each in {1..4} (defense in depth)
+ * - every cell in-bounds
+ * - every cell's tile type matches seedTileType
+ * - every cell unowned (no building)
+ * - every cell is flat (terrain.isFlatTile)
+ * - every cell shares the same getRenderHeight as rect.x, rect.y
+ * - at least one road-adjacent perimeter cell (pickFrontage non-null)
+ */
+export function validateFootprintRect(
+  rect: Rect,
+  seedTileType: TileType,
+  world: World,
+): boolean {
+  if (rect.w < 1 || rect.w > 4 || rect.h < 1 || rect.h > 4) return false;
+
+  const map = world.getMap();
+  const terrain = world.getTerrain();
+  const isWater = (x: number, y: number) => world.isWater(x, y);
+
+  const anchorHeight = terrain.getRenderHeight(rect.x, rect.y);
+
+  for (let y = rect.y; y < rect.y + rect.h; y++) {
+    for (let x = rect.x; x < rect.x + rect.w; x++) {
+      const tile = map.getTile(x, y);
+      if (tile === null) return false;
+      if (tile.type !== seedTileType) return false;
+      if (map.getBuildings().getBuildingAt(x, y) !== null) return false;
+      if (!terrain.isFlatTile(x, y, isWater)) return false;
+      if (terrain.getRenderHeight(x, y) !== anchorHeight) return false;
+    }
+  }
+
+  return pickFrontage(rect, world) !== null;
+}
+
+/**
+ * Returns true iff the building's stored frontage face still touches a road.
+ * Use this for growth/merge gates — not the generic any-side check.
+ */
+export function hasFrontageRoadAccess(building: Building, world: World): boolean {
+  return countRoadsOnFace(lotBboxOf(building.footprint), building.frontage, world) > 0;
+}
+
+/**
+ * Convenience wrapper: returns true iff the building's footprint has at least
+ * one road-adjacent perimeter cell. Assumes a canonical footprint (Task 4 invariant).
+ */
+export function hasRoadAccess(building: Building, world: World): boolean {
+  let minX = building.footprint[0].x;
+  let minY = building.footprint[0].y;
+  let maxX = building.footprint[0].x;
+  let maxY = building.footprint[0].y;
+
+  for (const c of building.footprint) {
+    if (c.x < minX) minX = c.x;
+    if (c.x > maxX) maxX = c.x;
+    if (c.y < minY) minY = c.y;
+    if (c.y > maxY) maxY = c.y;
+  }
+
+  const rect: Rect = { x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1 };
+  return pickFrontage(rect, world) !== null;
+}
+
+/**
+ * Expand a rect to a cell list in row-major order (y-major, x-minor).
+ */
+export function footprintCells(rect: Rect): Array<{ x: number; y: number }> {
+  const cells: Array<{ x: number; y: number }> = [];
+  for (let y = rect.y; y < rect.y + rect.h; y++) {
+    for (let x = rect.x; x < rect.x + rect.w; x++) {
+      cells.push({ x, y });
+    }
+  }
+  return cells;
+}
+
+/**
+ * Returns the highest building level that the given land value can support.
+ * Mirrors the LEVEL_THRESHOLDS[level+1] gate in World.tick's level-up branch:
+ * a building may level up to L only when landValue >= LEVEL_THRESHOLDS[L].
+ * Floor is 1 — a building at level 1 is never considered over-supported regardless
+ * of land value (there is no "level 0" to fall back to for an existing building).
+ *
+ * The mirror is deliberately ONE-SIDED in its INPUT: World.tick's growth gates pass the
+ * congested land value, its abandonment sweep passes the uncongested one. Why, and what
+ * that buys, is documented once at the sweep in World.tick — do not restate it here. This
+ * function is a pure threshold lookup over whatever value it is handed.
+ */
+export function maxSupportedLevel(landValue: number): number {
+  for (let L = ZONE_MAX_LEVEL; L >= 1; L--) {
+    if (landValue >= LEVEL_THRESHOLDS[L]) return L;
+  }
+  return 1;
+}
+
+/**
+ * Returns true when a building's current level exceeds what the land value can
+ * support — the condition that triggers abandonment/dilapidation.
+ * Uses the same LEVEL_THRESHOLDS gate as World.tick's level-up branch; the sweep calls it
+ * with the congestion-free land value (see maxSupportedLevel).
+ * Level 1 is the floor: a level-1 building is never under-supported.
+ */
+export function isUnderSupported(level: number, landValue: number): boolean {
+  return level > maxSupportedLevel(landValue);
+}

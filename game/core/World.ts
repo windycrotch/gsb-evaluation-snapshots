@@ -1,0 +1,1473 @@
+/**
+ * Central world state container
+ * Holds all game state but doesn't manage rendering
+ */
+
+import { GameMap } from './Map';
+import { TileType, createTile, isZoneType } from './Tile';
+import type { BuildingType } from './Building';
+import { LandValueMap } from './LandValueMap';
+import { Demand, DENSITY_DEMAND_BAR, GROWTH_DEMAND_THRESHOLD, MIGRATION_UNEMPLOYMENT_CUTOFF, unemploymentRate } from './Demand';
+import type { DemandVector } from './Demand';
+import { Terrain, SEA_LEVEL, projectTileHeightsToVertexHeights } from './Terrain';
+import * as terrainGenerator from './terrainGenerator';
+import { PowerMap, isBuildingPowered } from './PowerMap';
+import { WaterMap, isBuildingWatered } from './WaterMap';
+import { ServiceCoverageMap, isAnchorCovered } from './ServiceCoverageMap';
+import { FireCoverageMap, isFireAnchorCovered } from './FireCoverageMap';
+import { HospitalCoverageMap, isHospitalAnchorCovered } from './HospitalCoverageMap';
+import { SchoolCoverageMap, isSchoolAnchorCovered } from './SchoolCoverageMap';
+import { TrafficMap } from './TrafficMap';
+import { LaborMarketMap } from './LaborMarketMap';
+import { StructureMap } from './StructureMap';
+import type { StructureType } from './StructureMap';
+import {
+  pickSeedFrontage,
+  greedyDepthLot,
+  initialStructureRect,
+  footprintCells,
+  hasFrontageRoadAccess,
+  canExtendStructure,
+  extendStructureToward,
+  maxDensityForLot,
+  isUnderSupported,
+} from './zoneGrowth';
+import { lotBboxOf } from './buildingFootprint';
+import { GROWTH_COOLDOWN_INTERVALS, stagger, LEVEL_THRESHOLDS, ZONE_MAX_LEVEL } from './growthConstants';
+import { canMerge, mergedBuildingShape } from './mergePolicy';
+import { buildingCapacity } from './buildingCapacity';
+import { FUNDING_FULL_PER_MILLE, fundingPerMille, isValidFundingPerMille } from './serviceFunding';
+export { GROWTH_COOLDOWN_INTERVALS, stagger, LEVEL_THRESHOLDS, ZONE_MAX_LEVEL, POPULATION_PER_LEVEL } from './growthConstants';
+
+export const DEFAULT_NEWCITY_SEED = terrainGenerator.DEFAULT_NEWCITY_SEED;
+
+/** Ticks between each zone growth step. tickCount is post-increment (≥1), so first growth fires at tick === ZONE_GROWTH_INTERVAL, not 0. */
+export const ZONE_GROWTH_INTERVAL = 8;
+/**
+ * Periodic force-recompute cadence for land value.
+ * Future-proof conservative cadence: today the dirty-mark covers every input
+ * that changes the influence map (roads/zones via CommandDispatcher). A periodic
+ * force-recompute is a defense-in-depth catch for any future influence input we
+ * forget to dirty-mark.
+ */
+export const LAND_VALUE_INTERVAL = 16;
+/**
+ * Defense-in-depth periodic force-recompute cadence for power, mirrors LAND_VALUE_INTERVAL.
+ */
+export const POWER_INTERVAL = 16;
+/**
+ * Defense-in-depth periodic force-recompute cadence for water, mirrors POWER_INTERVAL.
+ */
+export const WATER_INTERVAL = 16;
+/**
+ * Defense-in-depth periodic force-recompute cadence for service coverage, mirrors POWER_INTERVAL.
+ */
+export const SERVICE_INTERVAL = 16;
+/**
+ * Defense-in-depth periodic force-recompute cadence for traffic.
+ *
+ * MUST stay a multiple of LAND_VALUE_INTERVAL. Land value reads the traffic snapshot, and
+ * recomputeTraffic deliberately does NOT dirty land value (cascades fire on mark, never on
+ * recompute), so a cadence-forced congestion refresh only reaches land value on a tick where
+ * the land-value cadence also fires. At e.g. TRAFFIC_INTERVAL = 8 the refreshed congestion
+ * would sit unread for up to 8 ticks. This is the binding constraint — not SERVICE_INTERVAL,
+ * which traffic merely happens to equal. Enforced by the "traffic cadence constants" guard
+ * test in World.test.ts, so editing this value cannot silently break the rule.
+ */
+export const TRAFFIC_INTERVAL = 16;
+/**
+ * Minimum growth-opportunity count (age) before a building may gain density.
+ * Unit: growth opportunities (same as GROWTH_COOLDOWN_INTERVALS).
+ */
+export const DENSITY_COOLDOWN_INTERVALS = 24;
+/** Initial city treasury balance. */
+export const STARTING_FUNDS = 10000;
+/** Land-value contribution weight for city happiness (W_LAND + W_JOBS + W_BUDGET = 1.0). */
+export const HAPPINESS_W_LAND = 0.5;
+/**
+ * Employment contribution weight for city happiness. The term itself reads only the
+ * unemployment rate (`unemployed / workforce`), clamped against `MIGRATION_UNEMPLOYMENT_CUTOFF` —
+ * a job surplus (unfilled vacancies) is not citizen misery, so it no longer drags this term down.
+ * Mirrors Micropolis's `GetUnemployment()`, which likewise reads only worker surplus and returns
+ * 0 once jobs ≥ workers.
+ */
+export const HAPPINESS_W_JOBS = 0.3;
+/** Budget-health contribution weight for city happiness. See `budgetHealthScore` for the term itself. */
+export const HAPPINESS_W_BUDGET = 0.2;
+/**
+ * Congestion penalty weight for city happiness — SUBTRACTED from the three positive terms,
+ * mirroring the additive-park / subtractive-congestion asymmetry in LandValueMap.
+ * The three positive weights still sum to 1.0, so congestion-free cities keep their
+ * pre-feedback scores. 0.15 is deliberately modest: congestion already reaches happiness
+ * indirectly through residential land value (HAPPINESS_W_LAND × the land-value penalty), and
+ * this direct term is the city-wide signal on top of that, not a double-count amplifier.
+ */
+export const HAPPINESS_W_TRAFFIC = 0.15;
+/** Treasury-stock contribution weight inside `budgetHealthScore` (BUDGET_W_STOCK + BUDGET_W_FLOW = 1.0). */
+export const BUDGET_W_STOCK = 0.5;
+/** Monthly-net-flow contribution weight inside `budgetHealthScore` (BUDGET_W_STOCK + BUDGET_W_FLOW = 1.0). */
+export const BUDGET_W_FLOW = 0.5;
+/**
+ * Monthly net-flow deficit, in money units, at which `budgetHealthScore`'s flow term bottoms
+ * out at 0. A surplus of any size reads 1. 1000 is 10% of STARTING_FUNDS — ten months of
+ * runway from a fresh treasury, and exactly what a power plant + water tower + police + fire
+ * + hospital + school loadout (every structure type except the park: 200 + 160×5 = 1000) costs
+ * in upkeep with zero tax base.
+ */
+export const BUDGET_DEFICIT_SPAN = 1000;
+/** Initial/empty-city happiness value returned when no residential or jobs buildings exist. */
+export const EMPTY_CITY_HAPPINESS = 0.5;
+/** Tax revenue per population point per day. */
+export const TAX_PER_POP = 1;
+/** Cost to place one ROAD tile. */
+export const ROAD_COST = 10;
+/** Cost to place one zone (R/C/I) tile. */
+export const ZONE_COST = 5;
+/** Cost to bulldoze one tile. */
+export const BULLDOZE_COST = 2;
+/**
+ * Cost to place a power plant (2×2 footprint). 10% of STARTING_FUNDS by design.
+ */
+export const POWER_PLANT_COST = 1000;
+/**
+ * Cost to place a water tower (2×2). Slightly cheaper than POWER_PLANT_COST=1000
+ * so "place power + water before zoning" is affordable from STARTING_FUNDS=10000.
+ */
+export const WATER_TOWER_COST = 800;
+/**
+ * Cost to place a police station (2×2). Matches WATER_TOWER_COST=800 so "place
+ * power + water + police before zoning" stays affordable from STARTING_FUNDS=10000.
+ */
+export const POLICE_STATION_COST = 800;
+/**
+ * Cost to place a fire station (2×2). Matches POLICE_STATION_COST=800 so "place
+ * power + water + police + fire before zoning" stays affordable from STARTING_FUNDS=10000.
+ */
+export const FIRE_STATION_COST = 800;
+/**
+ * Cost to place a hospital (2×2). Mirrors FIRE_STATION_COST=800 / POLICE_STATION_COST=800 so
+ * "place power + water + police + fire + hospital before zoning" stays affordable from
+ * STARTING_FUNDS=10000. Tunable independently as balance requires.
+ */
+export const HOSPITAL_COST = 800;
+/**
+ * Cost to place a school (2×2). Mirrors HOSPITAL_COST=800 / FIRE_STATION_COST=800 so
+ * "place power + water + police + fire + hospital + school before zoning" stays affordable from
+ * STARTING_FUNDS=10000. Tunable independently as balance requires.
+ */
+export const SCHOOL_COST = 800;
+/** Cost to place a 1×1 park — cheaper than the 800 service blocks; a small amenity; tunable. */
+export const PARK_COST = 100;
+/**
+ * Monthly upkeep for a power plant: POWER_PLANT_COST=1000 / 5, SC2K's build-to-monthly-upkeep
+ * ratio for police/fire stations, reused here for every structure so upkeep is a running drag
+ * rather than a second up-front tax. A full one-of-each loadout (this constant plus
+ * WATER_TOWER_UPKEEP, POLICE_STATION_UPKEEP, FIRE_STATION_UPKEEP, HOSPITAL_UPKEEP,
+ * SCHOOL_UPKEEP, PARK_UPKEEP) runs 1020/month; at TAX_PER_POP × DAYS_PER_MONTH that breaks
+ * even at population 34 — comfortably inside the runway STARTING_FUNDS=10000 still leaves
+ * after the ~5100 the same loadout costs to place. This and every other *_UPKEEP constant below
+ * (plus ROAD_UPKEEP per road tile) must stay a whole integer: earn()/trySpend() silently ignore
+ * a non-integer amount. Below that break-even point, once the treasury is drained a month's tax
+ * income no longer covers the loadout's upkeep, and the resulting funding shortfall freezes
+ * structure-grow, level-up, density, and merge city-wide until a month settles fully paid again.
+ */
+export const POWER_PLANT_UPKEEP = 200;
+/** Monthly upkeep for a water tower: WATER_TOWER_COST=800 / 5. */
+export const WATER_TOWER_UPKEEP = 160;
+/** Monthly upkeep for a police station: POLICE_STATION_COST=800 / 5. */
+export const POLICE_STATION_UPKEEP = 160;
+/** Monthly upkeep for a fire station: FIRE_STATION_COST=800 / 5. */
+export const FIRE_STATION_UPKEEP = 160;
+/** Monthly upkeep for a hospital: HOSPITAL_COST=800 / 5. */
+export const HOSPITAL_UPKEEP = 160;
+/** Monthly upkeep for a school: SCHOOL_COST=800 / 5. */
+export const SCHOOL_UPKEEP = 160;
+/** Monthly upkeep for a park: PARK_COST=100 / 5. */
+export const PARK_UPKEEP = 20;
+/** Monthly upkeep per ROAD tile: ROAD_COST=10 / 5. */
+export const ROAD_UPKEEP = 2;
+
+/**
+ * Monthly upkeep for one structure, by type. Mirrors structureFootprintSize's exhaustive-switch
+ * shape (StructureMap.ts) so adding a StructureType forces an upkeep decision at compile time too.
+ */
+export function structureUpkeep(type: StructureType): number {
+  switch (type) {
+    case 'power_plant':
+      return POWER_PLANT_UPKEEP;
+    case 'water_tower':
+      return WATER_TOWER_UPKEEP;
+    case 'police_station':
+      return POLICE_STATION_UPKEEP;
+    case 'fire_station':
+      return FIRE_STATION_UPKEEP;
+    case 'hospital':
+      return HOSPITAL_UPKEEP;
+    case 'school':
+      return SCHOOL_UPKEEP;
+    case 'park':
+      return PARK_UPKEEP;
+  }
+}
+
+/** Days per calendar month. */
+export const DAYS_PER_MONTH = 30;
+/** Months per calendar year. */
+export const MONTHS_PER_YEAR = 12;
+
+/**
+ * Result returned by World.tick().
+ *
+ * Invariant: `changed === changedTiles.length` — always. `changed` is derived at
+ * construction as `changedTiles.length`; it is never independently assigned.
+ *
+ * Every state mutation (tile write, building create, building level-up, building
+ * density bump, abandonment-state flip) MUST push at least one entry into
+ * `changedTiles` so that save-scheduling and render-invalidation stay correct.
+ * `changed` is a count-only convenience; `changedTiles` is the canonical delta.
+ *
+ * Corollary: if `changedBuildingIds.length > 0` then `changedTiles.length > 0`.
+ * `changedBuildingIds` is an additional channel for building-keyed render lookup —
+ * it is NEVER the sole signal of change.
+ *
+ * Utilities (power, water), the four coverage maps, traffic (which force-refreshes the
+ * labor market inside `recomputeTraffic`), and land value are all recomputed — if dirty or
+ * on their periodic cadence — in that order, as frozen snapshots before the growth pass.
+ * The order matters: land value now reads traffic congestion, so traffic must resolve first.
+ * The growth pass reads but does not mutate any of those maps; the building changes it makes
+ * only call `markLaborDirty()` at the END of the tick, deferring re-resolution to the next tick.
+ */
+export interface WorldTickResult {
+  /** Canonical per-tile delta: one entry per tile mutated this tick (DIRT→GRASS heals + zone level-ups + density bumps + abandonment-state flips). */
+  changedTiles: ReadonlyArray<{ x: number; y: number }>;
+  /** Count-only convenience — always equals `changedTiles.length`. */
+  changed: number;
+  /** IDs of buildings created, levelled-up, density-bumped, or abandonment-flipped this tick (from the zone growth pass). */
+  changedBuildingIds: ReadonlyArray<number>;
+}
+
+export interface WorldDate {
+  year: number;
+  month: number;
+  day: number;
+}
+
+/** Clamp x to [0, 1]. Mirrors the Demand.ts idiom. */
+function clamp01(x: number): number {
+  return Math.max(0, Math.min(1, x));
+}
+
+/**
+ * Budget-health term for `recomputeHappiness`: a stock+flow blend so the score can move
+ * before the treasury actually drains, not just after. `money` is the treasury stock;
+ * `monthlyIncome - monthlyUpkeep` is the net flow the NEXT settlement will apply.
+ * Four states this distinguishes: surplus with a full reserve reads 1; a surplus but an
+ * already-drained treasury reads BUDGET_W_FLOW; a deficit with a still-full treasury falls
+ * from 1 toward BUDGET_W_STOCK; a deficit with a drained treasury falls toward 0, reaching
+ * it only once the deficit is BUDGET_DEFICIT_SPAN or worse — a shallower deficit on an empty
+ * treasury still scores the surviving part of the flow half.
+ */
+export function budgetHealthScore(money: number, monthlyIncome: number, monthlyUpkeep: number): number {
+  const stockScore = clamp01(money / STARTING_FUNDS);
+  const flowScore = clamp01(1 + (monthlyIncome - monthlyUpkeep) / BUDGET_DEFICIT_SPAN);
+  return clamp01(BUDGET_W_STOCK * stockScore + BUDGET_W_FLOW * flowScore);
+}
+
+export class World {
+  private map: GameMap;
+  private terrain!: Terrain;
+  private terrainRev: number = 0;
+  private tickCount: number = 0;
+  private money: number = STARTING_FUNDS;
+  /**
+   * Per-mille of last month's upkeep actually paid (FUNDING_FULL_PER_MILLE = paid in full).
+   * Persisted. Written only by the settlement in `tick()`, `reset()`, and the serialization
+   * setter below. Read by the growth pass as the freeze predicate (level-up, structure-grow,
+   * density, merge). Nothing derived caches this value, so no dirty mark accompanies a change.
+   */
+  private serviceFunding: number = FUNDING_FULL_PER_MILLE;
+  /** 0-based elapsed days; incremented once per tick() (1 tick = 1 day). */
+  private day: number = 0;
+  /** Lazily allocated on first getLandValue() call. */
+  private landValue: LandValueMap | null = null;
+  /** True when the influence map inputs have changed since last recompute. */
+  private landValueDirty: boolean = false;
+  /** Derived display-only KPI; dirty/lazy like land value. NOT persisted. Read only by the HUD/tests — never feeds growth/demand/level-up. */
+  private happiness: number = EMPTY_CITY_HAPPINESS;
+  private happinessDirty: boolean = false;
+  private demand: Demand | null = null;
+  private demandDirty: boolean = true;
+  private structures!: StructureMap;
+  private power: PowerMap | null = null;
+  private powerDirty: boolean = false;
+  private water: WaterMap | null = null;
+  private waterDirty: boolean = false;
+  private service: ServiceCoverageMap | null = null;
+  private serviceDirty: boolean = false;
+  private fire: FireCoverageMap | null = null;
+  private fireDirty: boolean = false;
+  private hospital: HospitalCoverageMap | null = null;
+  private hospitalDirty: boolean = false;
+  private school: SchoolCoverageMap | null = null;
+  private schoolDirty: boolean = false;
+  private traffic: TrafficMap | null = null;
+  private trafficDirty: boolean = false;
+  private labor: LaborMarketMap | null = null;
+  private laborDirty: boolean = false;
+
+  constructor(mapWidth: number, mapHeight: number, opts?: { regenerate?: boolean }) {
+    this.map = new GameMap(mapWidth, mapHeight);
+    this.structures = new StructureMap(this.map.getWidth(), this.map.getHeight());
+    // Step 1: install a flat terrain so the field is never null.
+    // installTerrain must come AFTER this.map is set so map.getWidth/Height() are available.
+    this.installTerrain(new Terrain(this.map.getWidth(), this.map.getHeight()));
+    // Step 2: if regenerate (default true), run procedural generation via reset().
+    const regenerate = opts?.regenerate ?? true;
+    if (regenerate) {
+      this.reset({ regenerate: true });
+    }
+  }
+
+  getMap(): GameMap {
+    return this.map;
+  }
+
+  getTerrain(): Terrain {
+    return this.terrain;
+  }
+
+  getTerrainRevision(): number {
+    return this.terrainRev;
+  }
+
+  /**
+   * Atomically swap in a new Terrain instance and wire the mutation callback.
+   *
+   * EXACT ordering — do NOT reorder these steps:
+   *   1. Dimension validation FIRST (throws before any state change on mismatch).
+   *   2. Clear the previous terrain's callback (if a previous terrain exists).
+   *   3. Assign the new terrain.
+   *   4. Wire the new terrain's onMutate callback to bump terrainRev.
+   *   5. Bump terrainRev once for the install itself.
+   *
+   * Callers: constructor (initial install), World.reset(), save deserialization.
+   */
+  installTerrain(t: Terrain): void {
+    // Step 1: validate dimensions BEFORE any state mutation.
+    if (t.getWidth() !== this.map.getWidth() || t.getHeight() !== this.map.getHeight()) {
+      throw new Error(
+        `installTerrain: dimension mismatch — terrain (${t.getWidth()}×${t.getHeight()}) does not match map (${this.map.getWidth()}×${this.map.getHeight()})`
+      );
+    }
+    // Step 2: clear the previous instance's callback (only if one exists — during the
+    // constructor's first call, this.terrain is undefined).
+    if (this.terrain !== undefined) {
+      this.terrain.setOnMutate(null);
+    }
+    // Step 3: assign.
+    this.terrain = t;
+    // Step 4: wire.
+    t.setOnMutate(() => { this.terrainRev++; });
+    // Step 5: bump for the install itself.
+    this.terrainRev++;
+  }
+
+  /**
+   * Water is derived: a cell is water iff in-bounds and any corner is at/below SEA_LEVEL.
+   * Out-of-bounds coordinates return false.
+   */
+  isWater(x: number, y: number): boolean {
+    if (this.map.getTile(x, y) === null) return false;
+    return this.terrain.getTileMinCornerHeight(x, y) <= SEA_LEVEL;
+  }
+
+  /**
+   * True iff the w×h footprint at (x,y) is buildable.
+   * Delegates to Terrain, injecting this.isWater as the water predicate.
+   */
+  canBuildAt(x: number, y: number, w: number, h: number): boolean {
+    return this.terrain.canBuildAt(x, y, w, h, (xx, yy) => this.isWater(xx, yy));
+  }
+
+  /**
+   * True iff a road can be placed at (x,y).
+   * Delegates to Terrain, injecting this.isWater as the water predicate.
+   */
+  canBuildRoadAt(x: number, y: number): boolean {
+    return this.terrain.canBuildRoadAt(x, y, (xx, yy) => this.isWater(xx, yy));
+  }
+
+  getTick(): number {
+    return this.tickCount;
+  }
+
+  getMoney(): number {
+    return this.money;
+  }
+
+  getServiceFundingPerMille(): number {
+    return this.serviceFunding;
+  }
+
+  /** 1-based calendar date derived from elapsed days; day index 0 ⇒ {year:1,month:1,day:1}. */
+  getDate(): WorldDate {
+    const daysPerYear = DAYS_PER_MONTH * MONTHS_PER_YEAR;
+    return {
+      year: Math.floor(this.day / daysPerYear) + 1,
+      month: Math.floor((this.day % daysPerYear) / DAYS_PER_MONTH) + 1,
+      day: (this.day % DAYS_PER_MONTH) + 1,
+    };
+  }
+
+  getElapsedDays(): number {
+    return this.day;
+  }
+
+  /**
+   * Restore elapsed days to a specific count. For serialization use only —
+   * do not call this in normal gameplay logic; tick() advances the calendar.
+   */
+  setElapsedDays(n: number): boolean {
+    // Deliberately the same whole-non-negative guard as money (isValidMoneyAmount).
+    if (!(Number.isInteger(n) && n >= 0)) return false;
+    // 1 tick = 1 day: set both so getTick()/getDate() stay consistent by construction.
+    this.day = n;
+    this.tickCount = n;
+    return true;
+  }
+
+  /** Money is always whole non-negative units; this guard enforces that invariant for all mutators. */
+  private isValidMoneyAmount(n: number): boolean {
+    return Number.isInteger(n) && n >= 0;
+  }
+
+  trySpend(amount: number): boolean {
+    if (!this.isValidMoneyAmount(amount) || this.money < amount) return false;
+    this.money -= amount;
+    this.markHappinessDirty();
+    return true;
+  }
+
+  earn(amount: number): void {
+    if (!this.isValidMoneyAmount(amount)) return;
+    this.money += amount;
+    this.markHappinessDirty();
+  }
+
+  /**
+   * Restore the treasury to a specific amount. For serialization use only —
+   * do not call this in normal gameplay logic; use trySpend/earn instead.
+   */
+  setMoney(amount: number): boolean {
+    if (!this.isValidMoneyAmount(amount)) return false;
+    this.money = amount;
+    this.markHappinessDirty();
+    return true;
+  }
+
+  /**
+   * Restore the service-funding ratio to a specific per-mille value. For serialization use
+   * only — do not call this in normal gameplay logic; the monthly settlement in tick() is
+   * the only gameplay writer.
+   */
+  setServiceFundingPerMille(n: number): boolean {
+    if (!isValidFundingPerMille(n)) return false;
+    this.serviceFunding = n;
+    return true;
+  }
+
+  /** Lazy-allocate and return the LandValueMap instance. */
+  getLandValue(): LandValueMap {
+    if (this.landValue === null) {
+      this.landValue = new LandValueMap(this.map.getWidth(), this.map.getHeight());
+    }
+    return this.landValue;
+  }
+
+  /** Recompute land value only if dirty; clears the flag. */
+  recomputeLandValueIfDirty(): void {
+    if (!this.landValueDirty) return;
+    this.recomputeLandValue();
+  }
+
+  /** Unconditional force-recompute; also clears the dirty flag. */
+  recomputeLandValue(): void {
+    // B2 — freshness drain: land value reads the four coverage maps AND traffic congestion,
+    // so drain every one of those inputs FIRST. This guarantees land value always reads
+    // FRESH inputs regardless of caller. getTrafficMap() is the traffic drain (it recomputes
+    // if dirty, which force-refreshes labor inside recomputeTraffic), so congestion is never
+    // a tick stale. The drain chain only points UPSTREAM (land value → traffic → labor);
+    // nothing in it reads or dirties land value, so there is no re-entrancy.
+    this.recomputeServiceIfDirty();
+    this.recomputeFireIfDirty();
+    this.recomputeHospitalIfDirty();
+    this.recomputeSchoolIfDirty();
+    const lv = this.getLandValue();
+    lv.recompute(this.map, this.structures, {
+      police: this.getServiceCoverageMap(),
+      fire: this.getFireCoverageMap(),
+      hospital: this.getHospitalCoverageMap(),
+      school: this.getSchoolCoverageMap(),
+    }, this.getTrafficMap());
+    this.landValueDirty = false;
+    // Happiness reads land value; refreshing land value invalidates the derived happiness cache.
+    this.happinessDirty = true;
+  }
+
+  /** Mark land value as needing recomputation on the next recomputeLandValueIfDirty() call. */
+  markLandValueDirty(): void {
+    this.dirtyLandValueAndHappiness();
+  }
+
+  /** ONE place the land-value→happiness cascade lives. Set both dirty flags together so no mutation can dirty land value without also dirtying happiness. */
+  private dirtyLandValueAndHappiness(): void {
+    this.landValueDirty = true;
+    this.happinessDirty = true;
+  }
+
+  private markHappinessDirty(): void {
+    this.happinessDirty = true;
+  }
+
+  getStructureMap(): StructureMap {
+    return this.structures;
+  }
+
+  /** Lazy-allocate and return the PowerMap instance. */
+  getPowerMap(): PowerMap {
+    if (this.power === null) this.power = new PowerMap(this.map.getWidth(), this.map.getHeight());
+    return this.power;
+  }
+
+  markPowerDirty(): void {
+    this.powerDirty = true;
+  }
+
+  /** Recompute power only if dirty; clears the flag. */
+  recomputePowerIfDirty(): void {
+    if (!this.powerDirty) return;
+    this.recomputePower();
+  }
+
+  /** Unconditional force-recompute; also clears the dirty flag. */
+  recomputePower(): void {
+    const pm = this.getPowerMap();
+    pm.recompute(this.map, this.structures);
+    this.powerDirty = false;
+  }
+
+  /** Lazy-allocate and return the WaterMap instance. */
+  getWaterMap(): WaterMap {
+    if (this.water === null) this.water = new WaterMap(this.map.getWidth(), this.map.getHeight());
+    return this.water;
+  }
+
+  markWaterDirty(): void {
+    this.waterDirty = true;
+  }
+
+  /** Recompute water only if dirty; clears the flag. */
+  recomputeWaterIfDirty(): void {
+    if (!this.waterDirty) return;
+    this.recomputeWater();
+  }
+
+  /** Unconditional force-recompute; also clears the dirty flag. */
+  recomputeWater(): void {
+    const wm = this.getWaterMap();
+    wm.recompute(this.map, this.structures);
+    this.waterDirty = false;
+  }
+
+  /** Lazy-allocate and return the ServiceCoverageMap instance. */
+  getServiceCoverageMap(): ServiceCoverageMap {
+    if (this.service === null) this.service = new ServiceCoverageMap(this.map.getWidth(), this.map.getHeight());
+    return this.service;
+  }
+
+  markServiceDirty(): void {
+    this.serviceDirty = true;
+    // B1 — dirty cascade: land value reads the four coverage maps, so any coverage
+    // change must also dirty land value and happiness. Route through the shared helper.
+    this.dirtyLandValueAndHappiness();
+  }
+
+  /** Recompute service coverage only if dirty; clears the flag. */
+  recomputeServiceIfDirty(): void {
+    if (!this.serviceDirty) return;
+    this.recomputeService();
+  }
+
+  /** Unconditional force-recompute; also clears the dirty flag. */
+  recomputeService(): void {
+    const svc = this.getServiceCoverageMap();
+    svc.recompute(this.map, this.structures);
+    this.serviceDirty = false;
+  }
+
+  /** Lazy-allocate and return the FireCoverageMap instance. */
+  getFireCoverageMap(): FireCoverageMap {
+    if (this.fire === null) this.fire = new FireCoverageMap(this.map.getWidth(), this.map.getHeight());
+    return this.fire;
+  }
+
+  markFireDirty(): void {
+    this.fireDirty = true;
+    this.dirtyLandValueAndHappiness(); // B1 cascade — see markServiceDirty.
+  }
+
+  /** Recompute fire coverage only if dirty; clears the flag. */
+  recomputeFireIfDirty(): void {
+    if (!this.fireDirty) return;
+    this.recomputeFire();
+  }
+
+  /** Unconditional force-recompute; also clears the dirty flag. */
+  recomputeFire(): void {
+    const fireSvc = this.getFireCoverageMap();
+    fireSvc.recompute(this.map, this.structures);
+    this.fireDirty = false;
+  }
+
+  /** Lazy-allocate and return the HospitalCoverageMap instance. */
+  getHospitalCoverageMap(): HospitalCoverageMap {
+    if (this.hospital === null) this.hospital = new HospitalCoverageMap(this.map.getWidth(), this.map.getHeight());
+    return this.hospital;
+  }
+
+  markHospitalDirty(): void {
+    this.hospitalDirty = true;
+    this.dirtyLandValueAndHappiness(); // B1 cascade — see markServiceDirty.
+  }
+
+  /** Recompute hospital coverage only if dirty; clears the flag. */
+  recomputeHospitalIfDirty(): void {
+    if (!this.hospitalDirty) return;
+    this.recomputeHospital();
+  }
+
+  /** Unconditional force-recompute; also clears the dirty flag. */
+  recomputeHospital(): void {
+    const hospitalSvc = this.getHospitalCoverageMap();
+    hospitalSvc.recompute(this.map, this.structures);
+    this.hospitalDirty = false;
+  }
+
+  /** Lazy-allocate and return the SchoolCoverageMap instance. */
+  getSchoolCoverageMap(): SchoolCoverageMap {
+    if (this.school === null) this.school = new SchoolCoverageMap(this.map.getWidth(), this.map.getHeight());
+    return this.school;
+  }
+
+  markSchoolDirty(): void {
+    this.schoolDirty = true;
+    this.dirtyLandValueAndHappiness(); // B1 cascade — see markServiceDirty.
+  }
+
+  /** Recompute school coverage only if dirty; clears the flag. */
+  recomputeSchoolIfDirty(): void {
+    if (!this.schoolDirty) return;
+    this.recomputeSchool();
+  }
+
+  /** Unconditional force-recompute; also clears the dirty flag. */
+  recomputeSchool(): void {
+    const schoolSvc = this.getSchoolCoverageMap();
+    schoolSvc.recompute(this.map, this.structures);
+    this.schoolDirty = false;
+  }
+
+  /**
+   * Lazy-allocate and return the TrafficMap instance, draining dirtiness before returning.
+   *
+   * NOTE: this getter DRAINS (calls recomputeTrafficIfDirty) — unlike the non-draining
+   * coverage getters (e.g. getFireCoverageMap). This is the stale-free read contract:
+   * callers always get a fresh snapshot without needing to manually recompute first.
+   */
+  getTrafficMap(): TrafficMap {
+    if (this.traffic === null) this.traffic = new TrafficMap(this.map.getWidth(), this.map.getHeight());
+    // Drain-on-read: coverage getters do NOT drain; traffic inverts this contract.
+    this.recomputeTrafficIfDirty();
+    return this.traffic;
+  }
+
+  /**
+   * Mark traffic as needing recomputation on the next recomputeTrafficIfDirty() or getTrafficMap() call.
+   *
+   * Traffic is a simulation INPUT: it feeds land value (the proximity-weighted congestion
+   * penalty) and happiness (the city-wide congestion index). Its dirtiness therefore cascades
+   * exactly like coverage dirtiness — see markServiceDirty. Cascading on MARK (never on
+   * recompute) is what keeps a drain-on-read frame — e.g. the data-view overlay calling
+   * getTrafficMap() between ticks — from silently clearing land value's need to refresh.
+   */
+  markTrafficDirty(): void {
+    this.trafficDirty = true;
+    this.dirtyLandValueAndHappiness();
+  }
+
+  /** Recompute traffic only if dirty; clears the flag. */
+  recomputeTrafficIfDirty(): void {
+    if (!this.trafficDirty) return;
+    this.recomputeTraffic();
+  }
+
+  /**
+   * Unconditional force-recompute; also clears the dirty flag.
+   *
+   * IMPORTANT: must NOT call getTrafficMap() — that drains (calls recomputeTrafficIfDirty →
+   * recomputeTraffic) and would cause infinite recursion. Allocate the field directly here.
+   */
+  recomputeTraffic(): void {
+    // Force-refresh labor FIRST (not the IfDirty variant): recompute always reflects
+    // current buildings, and the cadence force-recompute path must never feed stale or
+    // empty flows. recomputeLabor never calls back into traffic, so no cycle.
+    this.recomputeLabor();
+    // Allocate directly — never via getTrafficMap() to avoid re-entering recomputeTrafficIfDirty.
+    if (this.traffic === null) this.traffic = new TrafficMap(this.map.getWidth(), this.map.getHeight());
+    this.traffic.recompute(this.map, this.structures, this.getLaborMarket().getFlows());
+    this.trafficDirty = false;
+  }
+
+  /**
+   * Lazy-allocate and return the LaborMarketMap instance, draining dirtiness before returning.
+   *
+   * Mirrors getTrafficMap's drain-on-read contract: callers always get a fresh snapshot
+   * without needing to manually recompute first.
+   */
+  getLaborMarket(): LaborMarketMap {
+    if (this.labor === null) this.labor = new LaborMarketMap();
+    // Drain-on-read.
+    this.recomputeLaborIfDirty();
+    return this.labor;
+  }
+
+  /**
+   * Mark the labor market as needing recomputation on the next recomputeLaborIfDirty()
+   * or getLaborMarket() call. Cascades to traffic (traffic consumes labor flows — and
+   * traffic in turn cascades to land value and happiness) and to demand (demand is derived
+   * from the labor-market scalars).
+   */
+  markLaborDirty(): void {
+    this.laborDirty = true;
+    // Traffic consumes labor flows (recomputeTraffic calls getLaborMarket().getFlows()),
+    // so stale labor means stale traffic — cascade the invalidation down-dependency.
+    // Route through markTrafficDirty() rather than setting the flag: the onward
+    // traffic → land value → happiness cascade lives in ONE place.
+    this.markTrafficDirty();
+    // Demand is derived from the labor market — stale labor means stale demand.
+    this.markDemandDirty();
+  }
+
+  /** Recompute the labor market only if dirty; clears the flag. */
+  recomputeLaborIfDirty(): void {
+    if (!this.laborDirty) return;
+    this.recomputeLabor();
+  }
+
+  /**
+   * Unconditional force-recompute; also clears the dirty flag.
+   *
+   * IMPORTANT: must NOT call getLaborMarket() — that drains (calls recomputeLaborIfDirty →
+   * recomputeLabor) and would cause infinite recursion. Allocate the field directly here.
+   *
+   * Contract: this refreshes `this.labor` only — it deliberately does NOT mark happiness or
+   * demand dirty (cascades fire at MARK time only, from markLaborDirty, never from inside a
+   * recompute). Happiness reads labor as of this change, so calling this directly can leave
+   * an already-cached getHappiness()/getDemand() value stale against the new labor snapshot.
+   * Callers who need happiness/demand to follow must go through markLaborDirty() instead.
+   */
+  recomputeLabor(): void {
+    // Allocate directly — never via getLaborMarket() to avoid re-entering recomputeLaborIfDirty.
+    if (this.labor === null) this.labor = new LaborMarketMap();
+    this.labor.recompute(this.map, this.structures, this.map.getBuildings());
+    this.laborDirty = false;
+  }
+
+  /** Workers that found a job (drains labor on read). */
+  getEmployed(): number {
+    return this.getLaborMarket().getEmployed();
+  }
+
+  /** Workers with no job (drains labor on read). */
+  getUnemployed(): number {
+    return this.getLaborMarket().getUnemployed();
+  }
+
+  /** Total jobs that exist (drains labor on read). */
+  getJobsCapacity(): number {
+    return this.getLaborMarket().getJobsCapacity();
+  }
+
+  markDemandDirty(): void {
+    this.demandDirty = true;
+  }
+
+  getDemand(): DemandVector {
+    if (this.demand === null) {
+      this.demand = new Demand();
+    }
+    if (this.demandDirty) {
+      // Force-refresh labor before reading scalars — mirrors recomputeTraffic's force-refresh
+      // pattern; no cycle since recomputeLabor never calls getDemand.
+      this.recomputeLabor();
+      const labor = this.getLaborMarket();
+      this.demand.recompute(this.map.getBuildings(), {
+        employed: labor.getEmployed(),
+        unemployed: labor.getUnemployed(),
+        reachableUnfilledJobs: labor.getReachableUnfilledJobs(),
+        jobsCapacity: labor.getJobsCapacity(),
+      });
+      this.demandDirty = false;
+    }
+    return this.demand.get();
+  }
+
+  /** Count DIRT tiles currently on the map. */
+  countDirt(): number {
+    let count = 0;
+    for (const tile of this.map.iterateTiles()) {
+      if (tile.type === TileType.DIRT) count++;
+    }
+    return count;
+  }
+
+  /**
+   * City-wide happiness scalar in [0, 1]. Display-only KPI — never feeds growth/demand/level-up.
+   * Lazy: recomputes only when inputs (land value, money, buildings, structures, roads, traffic,
+   * labor) have changed since last read.
+   */
+  getHappiness(): number {
+    this.recomputeHappinessIfDirty();
+    return this.happiness;
+  }
+
+  private recomputeHappinessIfDirty(): void {
+    if (!this.happinessDirty) return;
+    this.recomputeHappiness();
+  }
+
+  private recomputeHappiness(): void {
+    // Drain land value FIRST so anchor reads are fresh — mirrors recomputeLandValue draining coverage.
+    this.recomputeLandValueIfDirty();
+
+    let jobsCapacitySum = 0;
+    let residentialCount = 0;
+    let residentialLandValueSum = 0;
+
+    for (const b of this.map.getBuildings().iterBuildings()) {
+      if (b.abandoned) continue;
+      if (b.type === 'residential') {
+        residentialCount++;
+        residentialLandValueSum += this.getLandValue().getValue(b.anchor.x, b.anchor.y);
+      } else {
+        jobsCapacitySum += buildingCapacity(b);
+      }
+    }
+
+    if (residentialCount === 0 && jobsCapacitySum === 0) {
+      this.happiness = EMPTY_CITY_HAPPINESS;
+      this.happinessDirty = false;
+      return;
+    }
+
+    const landScore = residentialCount > 0 ? clamp01(residentialLandValueSum / residentialCount) : 0;
+    // Labor drains on read; the land-value drain above already refreshed it (recomputeLandValue
+    // reads getTrafficMap(), which force-refreshes labor inside recomputeTraffic), so this is a
+    // plain read in practice — no recompute cycle.
+    // NOT a plain employment fraction — do not read this as employed/workforce. It is unemployment
+    // normalized against the migration-crisis cutoff and inverted: 1 at zero unemployment, but it
+    // already reaches 0 once unemployment hits MIGRATION_UNEMPLOYMENT_CUTOFF (20% — i.e. still 80%
+    // employed, the same point where Demand's in-migration term also stops), never at total
+    // unemployment. unemploymentRate() guards an empty workforce to a rate of 0, so a jobs-only
+    // city — nobody exists yet to be unemployed — reads full marks here, not zero.
+    const unemploymentCutoffScore = clamp01(1 - unemploymentRate(this.getEmployed(), this.getUnemployed()) / MIGRATION_UNEMPLOYMENT_CUTOFF);
+    const budgetHealth = budgetHealthScore(this.money, this.monthlyTaxIncome(), this.monthlyUpkeep());
+    // Traffic drains on read; the land-value drain above already refreshed it whenever traffic
+    // was dirty (markTrafficDirty dirties land value too), so this is a plain read in practice.
+    const congestionIndex = this.getTrafficMap().getCongestionIndex();
+
+    this.happiness = clamp01(HAPPINESS_W_LAND * landScore + HAPPINESS_W_JOBS * unemploymentCutoffScore + HAPPINESS_W_BUDGET * budgetHealth - HAPPINESS_W_TRAFFIC * congestionIndex);
+    this.happinessDirty = false;
+  }
+
+  /** Sum of buildingCapacity(building) across all non-abandoned buildings. Population now lives on buildings, not tiles. */
+  getPopulation(): number {
+    let sum = 0;
+    for (const building of this.map.getBuildings().iterBuildings()) {
+      if (building.abandoned) continue;
+      sum += buildingCapacity(building);
+    }
+    return sum;
+  }
+
+  /**
+   * Tax income for one settled month, at the current (pre-growth) population.
+   * Read by the settlement in tick(), by recomputeHappiness (the budgetHealth flow term),
+   * by tests, and by the HUD's projected net flow.
+   */
+  monthlyTaxIncome(): number {
+    return Math.floor(this.getPopulation() * TAX_PER_POP) * DAYS_PER_MONTH;
+  }
+
+  /**
+   * Upkeep for one settled month: every placed structure plus every ROAD tile.
+   * Read by the settlement in tick(), by recomputeHappiness (the budgetHealth flow term),
+   * by tests, and by the HUD's projected net flow.
+   */
+  monthlyUpkeep(): number {
+    let sum = 0;
+    for (const structure of this.structures.iterStructures()) {
+      sum += structureUpkeep(structure.type);
+    }
+    for (const tile of this.map.iterateTiles()) {
+      if (tile.type === TileType.ROAD) sum += ROAD_UPKEEP;
+    }
+    return sum;
+  }
+
+  /**
+   * Reset to a blank city: clear the map, the tick counter, the calendar, the treasury, and
+   * the service-funding ratio (restored to fully funded, so a fresh city never starts frozen).
+   * Also clears the StructureMap and zeroes the PowerMap backing array so subsequent
+   * `isPowered` reads start clean.
+   * installTerrain creates a fresh Terrain and bumps terrainRev — SelectionRenderer's
+   * lastRev will differ from the world rev on the next frame and forceRedraw() fires once.
+   *
+   * @param opts.regenerate - When true (default), runs procedural terrain generation.
+   *   Pass `{ regenerate: false }` to restore a flat all-MIN_LAND_ELEVATION terrain (used by
+   *   deserialization hydration paths so loaded terrain is not overwritten).
+   *   Water is derived from elevation — no flat canvas contains water by default.
+   *   Power and water maps are both cleared and their dirty flags reset.
+   * @param opts.seed - Seed for procedural generation (only used when regenerate is true).
+   *   Defaults to DEFAULT_NEWCITY_SEED.
+   */
+  reset(opts?: { regenerate?: boolean; seed?: number }): void {
+    const regenerate = opts?.regenerate ?? true;
+    const seed = opts?.seed ?? terrainGenerator.DEFAULT_NEWCITY_SEED;
+
+    this.demandDirty = true;
+    this.map.reset();
+    this.structures.clear();
+    if (this.power !== null) this.power.clear();
+    this.powerDirty = false;
+    if (this.water !== null) this.water.clear();
+    this.waterDirty = false;
+    if (this.service !== null) this.service.clear();
+    this.serviceDirty = false;
+    if (this.fire !== null) this.fire.clear();
+    this.fireDirty = false;
+    if (this.hospital !== null) this.hospital.clear();
+    this.hospitalDirty = false;
+    if (this.school !== null) this.school.clear();
+    this.schoolDirty = false;
+    if (this.traffic !== null) this.traffic.clear();
+    this.trafficDirty = false;
+    if (this.labor !== null) this.labor.clear();
+    this.laborDirty = false;
+    this.tickCount = 0;
+    this.day = 0;
+    this.money = STARTING_FUNDS;
+    this.serviceFunding = FUNDING_FULL_PER_MILLE;
+    this.landValueDirty = false;
+
+    if (!regenerate) {
+      // Flat default terrain — used by deserialization paths.
+      this.installTerrain(new Terrain(this.map.getWidth(), this.map.getHeight()));
+      this.recomputePowerIfDirty();
+      this.recomputeWaterIfDirty();
+      this.recomputeServiceIfDirty();
+      this.recomputeFireIfDirty();
+      this.recomputeHospitalIfDirty();
+      this.recomputeSchoolIfDirty();
+      // B1' — land value depends on coverage, which is now cleared/zero. Recompute
+      // last so the already-allocated LandValueMap drops any stale pre-reset values.
+      this.recomputeLandValue();
+      // Mark happiness dirty so the next read re-derives from the fresh reset state.
+      this.markHappinessDirty();
+      return;
+    }
+
+    // Procedural terrain generation.
+    const W = this.map.getWidth();
+    const H = this.map.getHeight();
+    const { elevations } = terrainGenerator.generateTerrain(W, H, seed);
+    const terrain = new Terrain(W, H);
+    const vertexHeights = projectTileHeightsToVertexHeights(elevations);
+    for (let vy = 0; vy <= H; vy++) {
+      for (let vx = 0; vx <= W; vx++) {
+        terrain.unsafeSetVertexHeight(vx, vy, vertexHeights[vy][vx]);
+      }
+    }
+    this.installTerrain(terrain);
+    this.recomputePowerIfDirty();
+    this.recomputeWaterIfDirty();
+    this.recomputeServiceIfDirty();
+    this.recomputeFireIfDirty();
+    this.recomputeHospitalIfDirty();
+    this.recomputeSchoolIfDirty();
+    // B1' — land value depends on coverage, which is now cleared/zero. Recompute
+    // last so the already-allocated LandValueMap drops any stale pre-reset values.
+    this.recomputeLandValue();
+    // Mark happiness dirty so the next read re-derives from the fresh reset state.
+    this.markHappinessDirty();
+  }
+
+  /**
+   * Re-run procedural terrain generation with the given seed, replacing the entire world state.
+   *
+   * @remarks This RESETS the entire world (map, buildings, treasury, calendar).
+   * @param seed - RNG seed; defaults to DEFAULT_NEWCITY_SEED.
+   */
+  regenerateTerrain(seed?: number): void {
+    this.reset({ regenerate: true, seed: seed ?? terrainGenerator.DEFAULT_NEWCITY_SEED });
+  }
+
+  /**
+   * Advance simulation by one tick.
+   * Rules:
+   *   1. tickCount is incremented first (post-increment means first growth fires at tick === ZONE_GROWTH_INTERVAL, not 0).
+   *   2. day is incremented too (1 tick = 1 day).
+   *   3. Derived fields are resolved BEFORE growth, each if dirty or on its cadence, in
+   *      dependency order: utilities (power, water) → coverage (police, fire, hospital,
+   *      school) → traffic (which force-refreshes the labor market inside recomputeTraffic)
+   *      → land value (which reads the traffic snapshot). Every one of them is then a frozen
+   *      read-only snapshot for the rest of the tick.
+   *   4. DIRT heals to GRASS; each heal contributes to `changed`.
+   *   5. Monthly settlement: on a month-boundary day (day % DAYS_PER_MONTH === 0), income then
+   *      upkeep are settled pre-growth (so a tick that is both a growth tick and a month
+   *      boundary settles on the pre-level-up population; that level-up is taxed next month),
+   *      through earn()/trySpend() so isValidMoneyAmount and markHappinessDirty() apply to both.
+   *      Upkeep the treasury cannot cover is forgone, not carried as debt — money never goes
+   *      negative. The settlement also records how much of that upkeep it actually paid as a
+   *      persisted per-mille ratio (`serviceFunding`, via `fundingPerMille`), which step 6
+   *      below reads as a hard freeze on structure-grow, level-up, density, and merge until a
+   *      month settles fully paid again.
+   *   6. Zone growth: gated on tickCount % ZONE_GROWTH_INTERVAL === 0.
+   *      Hard funding freeze: unless the latest settlement (this tick's, on a coincident tick)
+   *      paid upkeep in full, no building structure-grows, levels up, gains density, or
+   *      merges. Spawn is exempt — new buildings widen the tax base the city recovers
+   *      through — and aging and the abandonment sweep run as usual.
+   *      Growth reads `landValue` as a frozen snapshot recomputed at the start of this
+   *      tick (when dirty or on cadence). The growth pass mutates Building.level/density/age
+   *      but NOT `landValue` or any influence input. If a future rule mutates influence
+   *      inputs (roads/zones) MID-TICK, this invariant breaks — recompute or split into
+   *      two passes.
+   *   7. The traffic → land value → growth → buildings → labor → traffic loop is
+   *      therefore ACROSS ticks, never within one: the buildings growth changes only set dirty
+   *      flags (markLaborDirty at the end of this tick), which resolve at step 3 of the NEXT
+   *      tick. One-tick lag, bounded work per tick.
+   *      ABANDONMENT is deliberately OUTSIDE that loop: only growth decides on congestion and
+   *      on funding, and the sweep reads the uncongested land value and never the funding
+   *      ratio, so no edge runs from traffic or funding to the verdict. That acyclicity is the
+   *      property this design buys; the argument for it is at the sweep in the growth pass below.
+   */
+  tick(): WorldTickResult {
+    this.tickCount++;
+    this.day++; // 1 tick = 1 day
+    const changedTiles: { x: number; y: number }[] = [];
+    const changedBuildingIds: number[] = [];
+
+    // Power: recompute if dirty, or force on periodic cadence (defense-in-depth).
+    if (this.tickCount % POWER_INTERVAL === 0) {
+      this.recomputePower();
+    } else {
+      this.recomputePowerIfDirty();
+    }
+
+    // Water: recompute if dirty, or force on periodic cadence (defense-in-depth).
+    if (this.tickCount % WATER_INTERVAL === 0) {
+      this.recomputeWater();
+    } else {
+      this.recomputeWaterIfDirty();
+    }
+
+    // Service coverage: recompute if dirty, or force on periodic cadence (defense-in-depth).
+    if (this.tickCount % SERVICE_INTERVAL === 0) {
+      this.recomputeService();
+    } else {
+      this.recomputeServiceIfDirty();
+    }
+
+    // Fire coverage: recompute if dirty, or force on periodic cadence (defense-in-depth).
+    if (this.tickCount % SERVICE_INTERVAL === 0) {
+      this.recomputeFire();
+    } else {
+      this.recomputeFireIfDirty();
+    }
+
+    // Hospital coverage: recompute if dirty, or force on periodic cadence (defense-in-depth).
+    if (this.tickCount % SERVICE_INTERVAL === 0) {
+      this.recomputeHospital();
+    } else {
+      this.recomputeHospitalIfDirty();
+    }
+
+    // School coverage: recompute if dirty, or force on periodic cadence (defense-in-depth).
+    if (this.tickCount % SERVICE_INTERVAL === 0) {
+      this.recomputeSchool();
+    } else {
+      this.recomputeSchoolIfDirty();
+    }
+
+    // Traffic: recompute if dirty, or force on periodic cadence (defense-in-depth).
+    // Runs BEFORE land value, which reads the congestion snapshot produced here. The
+    // cadence-forced branch only reaches land value because TRAFFIC_INTERVAL is a multiple
+    // of LAND_VALUE_INTERVAL — see TRAFFIC_INTERVAL for why that must stay true.
+    // recomputeTraffic force-refreshes the labor market first, so labor resolves here too.
+    // No "traffic has never been allocated" skip: traffic is a simulation input now, so an
+    // unread map is no longer a reason to skip the cadence force-recompute.
+    if (this.tickCount % TRAFFIC_INTERVAL === 0) {
+      this.recomputeTraffic();
+    } else {
+      this.recomputeTrafficIfDirty();
+    }
+
+    // Land value: recompute if dirty, or force on periodic cadence (defense-in-depth).
+    if (this.tickCount % LAND_VALUE_INTERVAL === 0) {
+      this.recomputeLandValue();
+    } else {
+      this.recomputeLandValueIfDirty();
+    }
+
+    // Pass 1: DIRT→GRASS heal (unchanged behavior).
+    for (const tile of this.map.iterateTiles()) {
+      if (tile.type === TileType.DIRT) {
+        this.map.setTile(tile.x, tile.y, createTile(tile.x, tile.y, TileType.GRASS));
+        changedTiles.push({ x: tile.x, y: tile.y });
+      }
+    }
+
+    // Monthly settlement (no per-day bucket): on a month-boundary day, settle a whole month
+    // of income then upkeep at the pre-growth population/structures. Settled before zone
+    // growth so a coincident growth+boundary tick's level-up is taxed next month. Both go
+    // through earn()/trySpend() so isValidMoneyAmount and markHappinessDirty() apply the same
+    // way they do to player spending. Upkeep is clamped to the current balance first: the
+    // treasury floors at 0 rather than carrying debt, so unaffordable upkeep is forgone, not
+    // deferred — but the unpaid share is recorded as the per-mille funding ratio that the
+    // growth pass below reads as a hard freeze on level-up, structure-grow, density, and
+    // merge (not spawn, not the abandonment sweep). One uniform ratio covers all upkeep
+    // (structures and roads alike; no priority order). Settlement precedes the growth pass,
+    // so a tick that is both a growth tick and a month boundary is gated by this same
+    // month's payment. Intra-month population changes are not prorated — accepted MVP tolerance.
+    if (this.day % DAYS_PER_MONTH === 0) {
+      this.earn(this.monthlyTaxIncome());
+      const due = this.monthlyUpkeep();
+      const paid = Math.min(due, this.money);
+      this.trySpend(paid);
+      this.serviceFunding = fundingPerMille(paid, due);
+    }
+
+    // Pass 2: Zone growth — only on growth ticks.
+    if (this.tickCount % ZONE_GROWTH_INTERVAL === 0) {
+      // processedBuildingIds guards multi-tile footprints so each building is
+      // processed at most once per tick even if the loop visits multiple of its tiles.
+      const processedBuildingIds = new Set<number>();
+      const buildings = this.map.getBuildings();
+      const lv = this.getLandValue();
+      const pw = this.getPowerMap();
+      const wm = this.getWaterMap();
+      const svc = this.getServiceCoverageMap();
+      const fireSvc = this.getFireCoverageMap();
+      const hospitalSvc = this.getHospitalCoverageMap();
+      const schoolSvc = this.getSchoolCoverageMap();
+      // Read straight from the field the settlement above just wrote, so a tick that is both a
+      // month boundary and a growth tick is gated by THIS month's payment. A hard gate on every
+      // growth MUTATION below (structure-grow, level-up, density, merge) — never on spawn
+      // (Branch A widens the tax base, which is how an underfunded city recovers), never on
+      // `age += 1` (eligibility keeps accruing, as during dereliction), and never on the
+      // abandonment sweep below (its verdict must read only inputs `abandoned` cannot change,
+      // and abandoning shrinks the tax base that pays upkeep — see its comment).
+      const upkeepFunded = this.serviceFunding === FUNDING_FULL_PER_MILLE;
+
+      // Abandonment sweep: runs BEFORE demand/growth so the same-tick growth reads
+      // demand that already excludes the just-derelict, and so a building that
+      // recovers this tick is frozen from also growing this tick. `frozenThisTick`
+      // captures every building that is abandoned at sweep entry (so a re-occupied
+      // building — abandoned === false after the flip — is still skipped by the
+      // growth and merge loops, which a plain `abandoned` check would miss).
+      //
+      // The verdict reads the UNCONGESTED land value — NOT the congested `lv.getValue` every
+      // growth gate below reads. Congestion is the one land-value input that `abandoned`
+      // feeds back into: condemning a building deletes its commuters, which deletes their
+      // congestion, which CAN raise the very value that condemned it — only can, because the
+      // congestion score is max-wins over a radius (LandValueMap.ts), so one building's trips
+      // may move a given anchor by nothing at all. Whenever that raise does happen and is
+      // enough to cross back over the threshold, the verdict has removed its own cause and
+      // the building alternates derelict/occupied indefinitely — measured in a playtest as
+      // 67 flips in 134 consecutive samples, and reproduced in World.abandonment.test.ts;
+      // the TRAFFIC_CAPACITY JSDoc in trafficAssignment.ts records an earlier occurrence
+      // that was closed by retuning a scalar. The remaining inputs — road, diversity,
+      // service, park — are all things the flag cannot change, so reading only those makes
+      // the verdict unable to alter its own next input, whatever the margins happen to be.
+      // SERVICE FUNDING is the second input deliberately kept out of the verdict. The ratio is
+      // population-fed — the tax base decides how much of the upkeep gets paid — so condemning
+      // on it would run population → tax → ratio → verdict as a REINFORCING month-scale loop:
+      // each condemnation shrinks the tax base that pays next month's upkeep, deepening the
+      // shortfall that condemned it, where congestion's loop reverses itself. The sweep
+      // therefore reads neither `serviceFunding` nor any field derived from it (the land
+      // value's service term is station coverage, which funding does not touch).
+      // Congestion and funding both keep their bite by FREEZING growth — congestion at the
+      // congested `anchorLandValue` gates below, funding through `upkeepFunded` — and neither
+      // ever condemns.
+      const frozenThisTick = new Set<number>();
+      for (const b of buildings.iterBuildings()) {
+        // One read feeds BOTH directions, so abandon and recover can never disagree about
+        // the same anchor in the same tick.
+        const lvAt = lv.getUncongestedValue(b.anchor.x, b.anchor.y);
+        const under = isUnderSupported(b.level, lvAt);
+        if (b.abandoned) {
+          // Frozen regardless of whether it re-occupies this tick.
+          frozenThisTick.add(b.id);
+          if (!under) {
+            // Was abandoned, land value now supports the level → recover.
+            b.abandoned = false;
+            changedBuildingIds.push(b.id);
+            for (const cell of b.footprint) {
+              changedTiles.push({ x: cell.x, y: cell.y });
+            }
+          }
+        } else if (under) {
+          // Land value no longer supports the level → abandon.
+          b.abandoned = true;
+          frozenThisTick.add(b.id);
+          changedBuildingIds.push(b.id);
+          for (const cell of b.footprint) {
+            changedTiles.push({ x: cell.x, y: cell.y });
+          }
+        }
+      }
+
+      this.markDemandDirty();
+      const demandVec = this.getDemand();
+
+      for (const tile of this.map.iterateTiles()) {
+        if (!isZoneType(tile.type)) continue;
+        const { x, y } = tile;
+
+        const existing = buildings.getBuildingAt(x, y);
+
+        if (existing === null) {
+          // Branch A: spawn — frontage-first greedy-depth lot selection.
+          const bType = tile.type.replace('zone_', '') as BuildingType;
+          // No demand for this type → no spawn. At GROWTH_DEMAND_THRESHOLD the labor
+          // imbalance is inside the deadband and no in-migration is pulling; let zones sit
+          // empty until pressure returns.
+          if (demandVec[bType] <= GROWTH_DEMAND_THRESHOLD) continue;
+          // Spawn uses the seed tile directly — lot/footprint do not exist yet.
+          if (!pw.isPowered(x, y)) continue;
+          const frontage = pickSeedFrontage({ x, y }, this);
+          if (frontage === null) continue;
+          const lot = greedyDepthLot({ x, y }, frontage, tile.type, this);
+          if (lot === null) continue;
+          const structureRect = initialStructureRect(lot, frontage);
+          const created = buildings.addBuilding({
+            type: bType,
+            footprint: footprintCells(lot),
+            anchor: { x: lot.x, y: lot.y },
+            level: 1,
+            density: 0,
+            age: 0,
+            abandoned: false,
+            frontage,
+            structureRect,
+          });
+          if (created !== null) {
+            processedBuildingIds.add(created.id);
+            changedBuildingIds.push(created.id);
+            for (const cell of created.footprint) {
+              changedTiles.push({ x: cell.x, y: cell.y });
+            }
+          }
+          continue;
+        }
+
+        // Branch B: building exists — de-duplicate multi-tile footprints.
+        if (processedBuildingIds.has(existing.id)) continue;
+        processedBuildingIds.add(existing.id);
+
+        // Road-access gate: buildings that lose frontage road access do not age or grow.
+        if (!hasFrontageRoadAccess(existing, this)) continue;
+        if (!isBuildingPowered(existing, pw)) continue;
+
+        // Age every building once per growth-opportunity (this tick).
+        existing.age += 1;
+
+        // Abandonment freeze: a derelict (or just-re-occupied) building does not GROW this
+        // tick — this skip precedes every growth mutation below, and the merge loop skips
+        // the same set. `frozenThisTick` (not `existing.abandoned`) is required: a building
+        // re-occupied THIS tick is `abandoned === false` but must still be frozen.
+        // It sits AFTER the age++ deliberately: aging is eligibility, not growth. A derelict
+        // that kept its road and power keeps accruing that eligibility, so a building coming
+        // out of a long dereliction no longer has to re-earn its cooldown from zero before
+        // the growth and merge gates will consider it. A building with no road or no power
+        // still does not age at all — those two gates are above and unchanged.
+        if (frozenThisTick.has(existing.id)) continue;
+
+        const anchorLandValue = lv.getValue(existing.anchor.x, existing.anchor.y);
+        const lot = lotBboxOf(existing.footprint);
+
+        // Shared growth gate: upkeep funding, demand, land value threshold, age cooldown, water, and
+        // the four service-coverage anchors — feeds BOTH structure-grow and level-up below, at any level.
+        // At GROWTH_DEMAND_THRESHOLD there is no imbalance beyond the deadband and no
+        // in-migration for this type → no structure-grow, no level-up.
+        // The lookahead level is clamped to ZONE_MAX_LEVEL: LEVEL_THRESHOLDS only has indices
+        // 0..ZONE_MAX_LEVEL, so an unclamped `existing.level + 1` reads undefined at max level —
+        // `landValue >= undefined` is always false, which would silently make max-level
+        // structure-grow dead code below (the trap this reorder exists to avoid).
+        const threshold = LEVEL_THRESHOLDS[Math.min(existing.level + 1, ZONE_MAX_LEVEL)];
+        const cooldown = GROWTH_COOLDOWN_INTERVALS + stagger(existing.id);
+        // Power gates spawn AND existing-building aging/growth (the isBuildingPowered check above
+        // runs before age++). Water gates the level-up / structure-grow / density / merge
+        // MUTATIONS — an unwatered but powered building still ages, it just can't grow
+        // (SimCity 2000/4 'city starts, density limited'). Police AND fire AND hospital AND school
+        // coverage gate this gated branch's mutations ONLY (the level-up bump AND the structure-grow
+        // below, at any level); not spawn, density, or merge.
+        // Graded fields (land value, coverage) gate at the ANCHOR; binary fields (power, water)
+        // scan the FOOTPRINT — any powered/watered cell satisfies the gate. This is the intended split.
+        // Upkeep funding is city-wide, not per-building: any upkeep left unpaid at the latest
+        // settlement freezes both mutations for every building (see `upkeepFunded`).
+        const growthGate = upkeepFunded && demandVec[existing.type] > GROWTH_DEMAND_THRESHOLD && anchorLandValue >= threshold && existing.age >= cooldown && isBuildingWatered(existing, wm) && isAnchorCovered(existing.anchor, svc) && isFireAnchorCovered(existing.anchor, fireSvc) && isHospitalAnchorCovered(existing.anchor, hospitalSvc) && isSchoolAnchorCovered(existing.anchor, schoolSvc);
+
+        if (canExtendStructure(existing.structureRect, lot, existing.frontage)) {
+          // Branch B' — structure-grow, reachable at ANY level now, not just below max.
+          // Below max this already preceded level-up (bit-identical behaviour there). At max
+          // level this is the one new path: it makes a merged lot's raised depth cap
+          // (max(MIN_STRUCTURE_DEPTH_CAP, frontage-axis width)) reachable, which the old
+          // level-gated routing could never reach. The gain is keyed on that WIDTH, not on merge
+          // generation: a 2-wide lot's cap is still max(2, 2) = 2, so nothing to spend, while
+          // every lot 3 wide and up carries a cap above the floor. Now that the merge shape gate
+          // frees the width axis (widths run 1 → 2 → 3 → 4 rather than doubling), 3-wide is a
+          // reachable shape at all, so ODD runs — which used to strand their leftover — reach the
+          // headroom too, not just runs whose length is a power of two. Getting past width 2 still
+          // takes two merge generations, because greedyDepthLot walks only the depth axis and so
+          // every UNMERGED lot is exactly 1 wide: 1+1 → 2, then 2+1 → 3. And the headroom is only
+          // spendable on land deep enough to spend it — a structure already filling its lot's
+          // depth can never extend however high the cap goes.
+          if (growthGate) {
+            const grown = extendStructureToward(existing.structureRect, lot, existing.frontage);
+            if (grown !== null) {
+              existing.structureRect = grown;
+              existing.age = 0;
+              changedBuildingIds.push(existing.id);
+              for (const coord of existing.footprint) {
+                changedTiles.push({ x: coord.x, y: coord.y });
+              }
+            }
+          }
+        } else if (existing.level < ZONE_MAX_LEVEL) {
+          // Branch B — structure cannot grow further (lot filled or cap hit); level up.
+          if (growthGate) {
+            existing.level += 1;
+            existing.age = 0;
+            changedBuildingIds.push(existing.id);
+            for (const coord of existing.footprint) {
+              changedTiles.push({ x: coord.x, y: coord.y });
+            }
+          }
+        } else {
+          // Density-bump branch: building is at max level and its structure already fills its
+          // depth cap (the canExtendStructure check above was false); advance density tier.
+          // Gains the same four service-coverage anchors as growthGate above, PLUS the same
+          // congested land-value threshold. That check WAS dead code while the sweep read the
+          // same congested value against this same frozen snapshot — nothing below
+          // LEVEL_THRESHOLDS[ZONE_MAX_LEVEL] could survive the sweep to reach here. The sweep
+          // now reads the UNCONGESTED value, so a level-5 building whose anchor is suppressed
+          // purely by traffic survives the sweep and can reach this branch below the threshold.
+          // Two independent reasons it is gated. Freeze semantics: congestion freezes growth,
+          // and density is a growth rung, so it reads the congested value exactly like the
+          // level-up and structure-grow rungs above. And feedback: a bump here raises the
+          // building's worker or job capacity, which CAN deepen the congestion that suppressed
+          // the anchor in the first place — conditionally, since the added capacity only loads
+          // roads once it is actually filled. The freeze reason stands on its own and does not
+          // depend on whether that second loop closes in a given city.
+          // The tier ceiling is keyed on lot width along the frontage: a 1-wide (unmerged) lot
+          // stops at tier 1, only an assembled >=2-wide lot reaches tier 2 — assembling land, not
+          // waiting, unlocks the top tier. This gate blocks INCREASES only, but no SIMULATION path
+          // can ever exceed the cap: spawns start at density 0, this gate blocks every increase,
+          // and a merge output's cap is never below its inputs' (mergePolicy.test.ts). A save
+          // carrying an over-cap building (from before this cap existed) is rejected at load —
+          // both the envelope version (WORLD_SAVE_VERSION 19) and, independently, the per-building
+          // density-vs-lot-width check in mapSerialization.ts. The dev-only devApi seeding path can
+          // still construct an over-cap building directly in memory, as it can construct any other
+          // otherwise-unreachable state; this gate does not and cannot guard against that.
+          // Density is a growth rung too, so it shares the upkeep-funding freeze (`upkeepFunded`).
+          if (
+            upkeepFunded &&
+            demandVec[existing.type] >= DENSITY_DEMAND_BAR[existing.type] &&
+            anchorLandValue >= LEVEL_THRESHOLDS[ZONE_MAX_LEVEL] &&
+            existing.age >= DENSITY_COOLDOWN_INTERVALS &&
+            existing.density < maxDensityForLot(lot, existing.frontage) &&
+            isBuildingWatered(existing, wm) &&
+            isAnchorCovered(existing.anchor, svc) &&
+            isFireAnchorCovered(existing.anchor, fireSvc) &&
+            isHospitalAnchorCovered(existing.anchor, hospitalSvc) &&
+            isSchoolAnchorCovered(existing.anchor, schoolSvc)
+          ) {
+            existing.density += 1 as 0 | 1 | 2;
+            existing.age = 0;
+            changedBuildingIds.push(existing.id);
+            for (const coord of existing.footprint) {
+              changedTiles.push({ x: coord.x, y: coord.y });
+            }
+          }
+        }
+      }
+
+      // Branch B'' (merge): pairwise width-axis lot consolidation.
+      // Multiple disjoint pairs may merge in a single growth tick — `usedThisTick`
+      // ensures each building participates in at most one merge.
+      // A merge is densification — only an assembled lot reaches the top density tier
+      // (`maxDensityForLot`) — so it shares the upkeep-funding freeze with the other rungs.
+      if (upkeepFunded) {
+        const candidates = [...buildings.iterBuildings()];
+        const usedThisTick = new Set<number>();
+        for (let i = 0; i < candidates.length; i++) {
+          const a = candidates[i];
+          if (usedThisTick.has(a.id)) continue;
+          if (frozenThisTick.has(a.id)) continue; // derelict / just-re-occupied — no merge this tick
+          if (!hasFrontageRoadAccess(a, this)) continue;
+          if (!isBuildingPowered(a, pw)) continue;
+          if (!isBuildingWatered(a, wm)) continue;
+          for (let j = i + 1; j < candidates.length; j++) {
+            const b = candidates[j];
+            if (usedThisTick.has(b.id)) continue;
+            if (frozenThisTick.has(b.id)) continue; // derelict / just-re-occupied — no merge this tick
+            if (!hasFrontageRoadAccess(b, this)) continue;
+            if (!isBuildingPowered(b, pw)) continue;
+            if (!isBuildingWatered(b, wm)) continue;
+            if (!canMerge(a, b, demandVec)) continue;
+
+            const shape = mergedBuildingShape(a, b);
+            buildings.removeBuilding(a.id);
+            buildings.removeBuilding(b.id);
+            const merged = buildings.addBuilding(shape);
+            if (merged === null) {
+              throw new Error(
+                `merge invariant violated: addBuilding(merged) returned null for ` +
+                `a=${a.id} b=${b.id}`,
+              );
+            }
+
+            usedThisTick.add(a.id);
+            usedThisTick.add(b.id);
+            changedBuildingIds.push(a.id, b.id, merged.id);
+            for (const c of merged.footprint) changedTiles.push({ x: c.x, y: c.y });
+            break; // a is used; move to next i
+          }
+        }
+      }
+
+      if (changedBuildingIds.length > 0) {
+        // markLaborDirty cascades to trafficDirty and markDemandDirty — single call is sufficient.
+        this.markLaborDirty();
+      }
+    }
+
+    // Mark happiness dirty at the END of the tick — after tax settlement (money changed) and
+    // after growth/merge (building levels changed). Happiness is a display OUTPUT read lazily
+    // after the tick; land value is a growth INPUT recomputed fresh before the growth pass above.
+    this.markHappinessDirty();
+
+    return { changedTiles, changed: changedTiles.length, changedBuildingIds };
+  }
+}

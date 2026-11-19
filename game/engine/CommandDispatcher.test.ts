@@ -1,0 +1,1573 @@
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { executeClick, executeDrag, previewDrag, previewClick, applyCommands } from './CommandDispatcher';
+import { Tool } from '../tools/Tool';
+import { World } from '../core/World';
+import { POWER_PLANT_COST, WATER_TOWER_COST, BULLDOZE_COST, POLICE_STATION_COST, FIRE_STATION_COST, HOSPITAL_COST, SCHOOL_COST, PARK_COST, POWER_PLANT_UPKEEP, STARTING_FUNDS, TAX_PER_POP, DAYS_PER_MONTH, HAPPINESS_W_JOBS, HAPPINESS_W_BUDGET, BUDGET_W_STOCK, BUDGET_W_FLOW, BUDGET_DEFICIT_SPAN } from '../core/World';
+import { TileType, createTile } from '../core/Tile';
+import { MAX_ELEVATION, SEA_LEVEL } from '../core/Terrain';
+
+function makeWorld(size = 6): World {
+  return new World(size, size, { regenerate: false });
+}
+
+describe('CommandDispatcher tile tools', () => {
+  it('places roads on flat dry terrain and charges money', () => {
+    const world = makeWorld();
+    const before = world.getMoney();
+    const result = executeClick(Tool.ROAD, { x: 2, y: 2 }, world);
+    expect(result.changedTiles).toEqual([{ x: 2, y: 2 }]);
+    expect(world.getMap().getTile(2, 2)?.type).toBe(TileType.ROAD);
+    expect(world.getMoney()).toBeLessThan(before);
+  });
+
+  it('rejects building tools on any-corner water', () => {
+    const world = makeWorld();
+    world.getTerrain().unsafeSetVertexHeight(1, 1, SEA_LEVEL);
+    expect(executeClick(Tool.ROAD, { x: 1, y: 1 }, world).changedTiles).toEqual([]);
+    expect(executeClick(Tool.ZONE_RESIDENTIAL, { x: 1, y: 1 }, world).changedTiles).toEqual([]);
+  });
+
+  it('previewDrag returns ToolPreview struct for terrain tools without mutating', () => {
+    const world = makeWorld();
+    const preview = previewDrag(Tool.TERRAIN_UP, { x: 0, y: 0 }, { x: 1, y: 1 }, world);
+    expect(preview.pathTiles).toEqual([{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 0, y: 1 }, { x: 1, y: 1 }]);
+    expect(preview.rejected).toEqual([]);
+    expect(preview.allOrNothingBlocked).toBe(false);
+    expect(world.getTerrain().getVertexHeight(0, 0)).toBe(1);
+  });
+
+  it('previewDrag(ROAD) on a 3-tile path with one water tile flags allOrNothingBlocked and reports rejection without mutation', () => {
+    const world = makeWorld(8);
+    // Sink one corner of tile (1,0) to SEA_LEVEL so it becomes water; (0,0) and (2,0) remain dry.
+    world.getTerrain().unsafeSetVertexHeight(1, 0, SEA_LEVEL);
+    const heightBefore = world.getTerrain().getVertexHeight(1, 0);
+    const preview = previewDrag(Tool.ROAD, { x: 0, y: 0 }, { x: 2, y: 0 }, world);
+    expect(preview.pathTiles).toEqual([{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 2, y: 0 }]);
+    expect(preview.rejected).toContainEqual({ x: 1, y: 0 });
+    expect(preview.allOrNothingBlocked).toBe(true);
+    // No mutation: vertex height unchanged.
+    expect(world.getTerrain().getVertexHeight(1, 0)).toBe(heightBefore);
+  });
+
+  it('previewDrag(ZONE_RESIDENTIAL) on a 2x2 rect with one water tile reports rejection without all-or-nothing block', () => {
+    const world = makeWorld(8);
+    // Sink one corner of tile (1,1) to SEA_LEVEL → tile (1,1) is water, (0,0)/(1,0)/(0,1) remain dry.
+    world.getTerrain().unsafeSetVertexHeight(2, 2, SEA_LEVEL);
+    const heightBefore = world.getTerrain().getVertexHeight(2, 2);
+    const preview = previewDrag(Tool.ZONE_RESIDENTIAL, { x: 0, y: 0 }, { x: 1, y: 1 }, world);
+    expect(preview.pathTiles.length).toBe(4);
+    expect(preview.rejected).toContainEqual({ x: 1, y: 1 });
+    expect(preview.allOrNothingBlocked).toBe(false);
+    expect(world.getTerrain().getVertexHeight(2, 2)).toBe(heightBefore);
+  });
+
+  it('returns empty changedTiles when player cannot afford the command cost', () => {
+    // Drain the treasury so ROAD placement (ROAD_COST=10) fails.
+    const world = makeWorld();
+    world.trySpend(world.getMoney()); // drain to 0
+    const result = executeClick(Tool.ROAD, { x: 2, y: 2 }, world);
+    expect(result.changedTiles).toEqual([]);
+    expect(world.getMap().getTile(2, 2)?.type).not.toBe(TileType.ROAD);
+  });
+
+  it('executeDrag returns empty result when all drag tiles are out of bounds', () => {
+    const world = makeWorld(4);
+    // Drag to an entirely OOB tile coordinate; filter removes it, tiles=[].
+    const result = executeDrag(Tool.ROAD, { x: 10, y: 10 }, { x: 11, y: 10 }, world);
+    expect(result.changedTiles).toEqual([]);
+  });
+});
+
+describe('CommandDispatcher terrain vertex edits', () => {
+  it('TERRAIN_UP raises the clicked tile vertices and redraws touched tiles', () => {
+    const world = makeWorld();
+    const result = executeClick(Tool.TERRAIN_UP, { x: 2, y: 2 }, world);
+    expect(world.getTerrain().getTileCornerHeights(2, 2)).toEqual({
+      topH: 2,
+      rightH: 2,
+      bottomH: 2,
+      leftH: 2,
+    });
+    expect(result.changedTiles).toEqual(
+      expect.arrayContaining([
+        { x: 2, y: 2 },
+        { x: 1, y: 1 },
+        { x: 3, y: 3 },
+      ])
+    );
+  });
+
+  it('TERRAIN_DOWN converts touched DIRT tiles to GRASS when any corner reaches sea level', () => {
+    const world = makeWorld();
+    world.getMap().setTile(2, 2, createTile(2, 2, TileType.DIRT));
+    const result = executeClick(Tool.TERRAIN_DOWN, { x: 2, y: 2 }, world);
+    expect(world.getMap().getTile(2, 2)?.type).toBe(TileType.GRASS);
+    expect(world.isWater(2, 2)).toBe(true);
+    expect(result.changedTiles).toContainEqual({ x: 2, y: 2 });
+  });
+
+  it('partial apply skips invalid vertices and still applies later valid vertices in row-major order', () => {
+    const world = makeWorld();
+    for (let vy = 1; vy <= 4; vy++) {
+      for (let vx = 1; vx <= 4; vx++) {
+        world.getTerrain().unsafeSetVertexHeight(vx, vy, 5);
+      }
+    }
+    world.getTerrain().unsafeSetVertexHeight(2, 2, MAX_ELEVATION);
+    const result = executeClick(Tool.TERRAIN_UP, { x: 2, y: 2 }, world);
+    expect(world.getTerrain().getVertexHeight(2, 2)).toBe(MAX_ELEVATION);
+    expect(world.getTerrain().getVertexHeight(3, 2)).toBe(6);
+    expect(world.getTerrain().getVertexHeight(2, 3)).toBe(6);
+    expect(world.getTerrain().getVertexHeight(3, 3)).toBe(6);
+    expect(result.changedTiles.length).toBeGreaterThan(0);
+  });
+
+  it('drag edits the deduped vertex rectangle once per vertex', () => {
+    const world = makeWorld();
+    const result = executeDrag(Tool.TERRAIN_UP, { x: 0, y: 0 }, { x: 1, y: 0 }, world);
+    for (const [vx, vy] of [[0, 0], [1, 0], [2, 0], [0, 1], [1, 1], [2, 1]] as const) {
+      expect(world.getTerrain().getVertexHeight(vx, vy)).toBe(2);
+    }
+    expect(result.changedTiles).toContainEqual({ x: 0, y: 0 });
+    expect(result.changedTiles).toContainEqual({ x: 1, y: 0 });
+  });
+});
+
+describe('CommandDispatcher POWER_PLANT placement', () => {
+  function makeWorld8(): World {
+    return new World(8, 8, { regenerate: false });
+  }
+
+  it('places 4 POWER_PLANT tiles, registers structure, and deducts POWER_PLANT_COST', () => {
+    const world = makeWorld8();
+    const before = world.getMoney();
+    const result = executeClick(Tool.POWER_PLANT, { x: 2, y: 2 }, world);
+    // 4 tiles changed.
+    expect(result.changedTiles).toHaveLength(4);
+    expect(result.changedTiles).toContainEqual({ x: 2, y: 2 });
+    expect(result.changedTiles).toContainEqual({ x: 3, y: 2 });
+    expect(result.changedTiles).toContainEqual({ x: 2, y: 3 });
+    expect(result.changedTiles).toContainEqual({ x: 3, y: 3 });
+    // All 4 cells are POWER_PLANT.
+    for (let dy = 0; dy <= 1; dy++) {
+      for (let dx = 0; dx <= 1; dx++) {
+        expect(world.getMap().getTile(2 + dx, 2 + dy)?.type).toBe(TileType.POWER_PLANT);
+      }
+    }
+    // StructureMap registered.
+    expect(world.getStructureMap().getStructureAt(2, 2)).not.toBeNull();
+    expect(world.getStructureMap().getStructureAt(3, 3)).not.toBeNull();
+    // Cost deducted.
+    expect(world.getMoney()).toBe(before - POWER_PLANT_COST);
+  });
+
+  it('post-apply power recompute: a road connected to the plant is isPowered immediately (no tick)', () => {
+    const world = makeWorld8();
+    // Place the plant at (2,2).
+    executeClick(Tool.POWER_PLANT, { x: 2, y: 2 }, world);
+    // Place a road adjacent to the plant at (1,2) — orthogonally adjacent to plant cell (2,2).
+    executeClick(Tool.ROAD, { x: 1, y: 2 }, world);
+    // The road should be powered immediately without any tick.
+    expect(world.getPowerMap().isPowered(1, 2)).toBe(true);
+  });
+
+  it('insufficient funds → no tile writes, no structure, no cost deducted', () => {
+    const world = makeWorld8();
+    world.trySpend(world.getMoney()); // drain to 0
+    const before = world.getMoney();
+    const result = executeClick(Tool.POWER_PLANT, { x: 2, y: 2 }, world);
+    expect(result.changedTiles).toEqual([]);
+    expect(world.getMap().getTile(2, 2)?.type).toBe(TileType.GRASS);
+    expect(world.getStructureMap().getStructureAt(2, 2)).toBeNull();
+    expect(world.getMoney()).toBe(before);
+  });
+
+  it('drag from (5,5) to (10,10) behaves identically to click at (5,5)', () => {
+    const world = makeWorld8();
+    const before = world.getMoney();
+    // executeDrag collapses to [start] via pathForTool(POWER_PLANT).
+    const result = executeDrag(Tool.POWER_PLANT, { x: 5, y: 5 }, { x: 10, y: 10 }, world);
+    // (5,5) anchor — (6,6) is the SE corner; both must be in-bounds on 8×8.
+    expect(result.changedTiles).toHaveLength(4);
+    expect(world.getStructureMap().getStructureAt(5, 5)).not.toBeNull();
+    expect(world.getMoney()).toBe(before - POWER_PLANT_COST);
+  });
+
+  it('placing a road adjacent to an existing plant makes that road isPowered immediately (no tick)', () => {
+    const world = makeWorld8();
+    // Plant at (2,2)–(3,3).
+    executeClick(Tool.POWER_PLANT, { x: 2, y: 2 }, world);
+    // Road adjacent to plant: (4,2) is orthogonally adjacent to plant cell (3,2).
+    executeClick(Tool.ROAD, { x: 4, y: 2 }, world);
+    expect(world.getPowerMap().isPowered(4, 2)).toBe(true);
+  });
+});
+
+describe('CommandDispatcher POWER_PLANT removal (bulldoze)', () => {
+  function makeWorld8(): World {
+    return new World(8, 8, { regenerate: false });
+  }
+
+  function placePlant(world: World, ax: number, ay: number): void {
+    executeClick(Tool.POWER_PLANT, { x: ax, y: ay }, world);
+  }
+
+  it('bulldozing NW cell writes 4 DIRT, removes structure, deducts BULLDOZE_COST once', () => {
+    const world = makeWorld8();
+    placePlant(world, 2, 2);
+    const before = world.getMoney();
+    const result = executeClick(Tool.BULLDOZE, { x: 2, y: 2 }, world);
+    // 4 tiles should change to DIRT.
+    expect(result.changedTiles).toHaveLength(4);
+    for (let dy = 0; dy <= 1; dy++) {
+      for (let dx = 0; dx <= 1; dx++) {
+        expect(world.getMap().getTile(2 + dx, 2 + dy)?.type).toBe(TileType.DIRT);
+      }
+    }
+    // Structure removed.
+    expect(world.getStructureMap().getStructureAt(2, 2)).toBeNull();
+    expect(world.getStructureMap().getStructureAt(3, 3)).toBeNull();
+    // Cost deducted once.
+    expect(world.getMoney()).toBe(before - BULLDOZE_COST);
+  });
+
+  it('bulldozing SE cell behaves identically (whole-footprint atomicity)', () => {
+    const world = makeWorld8();
+    placePlant(world, 2, 2);
+    const before = world.getMoney();
+    const result = executeClick(Tool.BULLDOZE, { x: 3, y: 3 }, world);
+    expect(result.changedTiles).toHaveLength(4);
+    expect(world.getStructureMap().getStructureAt(2, 2)).toBeNull();
+    expect(world.getMoney()).toBe(before - BULLDOZE_COST);
+  });
+
+  it('bulldoze removal triggers post-apply recompute — powered road loses power immediately', () => {
+    const world = makeWorld8();
+    // Plant at (2,2). Road adjacent at (1,2).
+    placePlant(world, 2, 2);
+    executeClick(Tool.ROAD, { x: 1, y: 2 }, world);
+    expect(world.getPowerMap().isPowered(1, 2)).toBe(true);
+    // Remove the plant.
+    executeClick(Tool.BULLDOZE, { x: 2, y: 2 }, world);
+    expect(world.getPowerMap().isPowered(1, 2)).toBe(false);
+  });
+
+  it('drag-rect covering 3 plant cells + 1 grass → 4 DIRT, structure removed, BULLDOZE_COST once', () => {
+    const world = makeWorld8();
+    placePlant(world, 2, 2);
+    const before = world.getMoney();
+    const result = executeDrag(Tool.BULLDOZE, { x: 2, y: 2 }, { x: 3, y: 3 }, world);
+    // All 4 plant cells replaced with DIRT.
+    expect(result.changedTiles).toHaveLength(4);
+    for (let dy = 0; dy <= 1; dy++) {
+      for (let dx = 0; dx <= 1; dx++) {
+        expect(world.getMap().getTile(2 + dx, 2 + dy)?.type).toBe(TileType.DIRT);
+      }
+    }
+    expect(world.getStructureMap().getStructureAt(2, 2)).toBeNull();
+    // Cost charged once for one plant.
+    expect(world.getMoney()).toBe(before - BULLDOZE_COST);
+  });
+
+  it('drag-rect covering two adjacent plants → 8 DIRT, both structures removed, BULLDOZE_COST × 2', () => {
+    const world = makeWorld8();
+    placePlant(world, 0, 0);
+    placePlant(world, 0, 2);
+    const before = world.getMoney();
+    const result = executeDrag(Tool.BULLDOZE, { x: 0, y: 0 }, { x: 1, y: 3 }, world);
+    // 8 plant cells → 8 DIRT.
+    expect(result.changedTiles).toHaveLength(8);
+    expect(world.getStructureMap().getStructureAt(0, 0)).toBeNull();
+    expect(world.getStructureMap().getStructureAt(0, 2)).toBeNull();
+    expect(world.getMoney()).toBe(before - BULLDOZE_COST * 2);
+  });
+
+  it('bulldozing a road tile dirties power — orphan side loses power immediately (regression guard)', () => {
+    const world = makeWorld8();
+    // Plant at (0,0). Road chain: (2,0),(3,0),(4,0). Road at (2,0) bridges from plant.
+    placePlant(world, 0, 0);
+    executeClick(Tool.ROAD, { x: 2, y: 0 }, world);
+    executeClick(Tool.ROAD, { x: 3, y: 0 }, world);
+    executeClick(Tool.ROAD, { x: 4, y: 0 }, world);
+    // (2,0) is adjacent to plant cell (1,0), so the whole chain is powered.
+    expect(world.getPowerMap().isPowered(4, 0)).toBe(true);
+    // Bulldoze the bridge road at (2,0) — (3,0) and (4,0) lose power.
+    executeClick(Tool.BULLDOZE, { x: 2, y: 0 }, world);
+    expect(world.getPowerMap().isPowered(4, 0)).toBe(false);
+  });
+});
+
+describe('CommandDispatcher WATER_TOWER placement', () => {
+  function makeWorld8(): World {
+    return new World(8, 8, { regenerate: false });
+  }
+
+  it('places 1 WATER_TOWER tile, registers structure, and deducts WATER_TOWER_COST', () => {
+    const world = makeWorld8();
+    const before = world.getMoney();
+    const result = executeClick(Tool.WATER_TOWER, { x: 2, y: 2 }, world);
+    expect(result.changedTiles).toHaveLength(1);
+    expect(result.changedTiles).toContainEqual({ x: 2, y: 2 });
+    expect(world.getMap().getTile(2, 2)?.type).toBe(TileType.WATER_TOWER);
+    expect(world.getStructureMap().getStructureAt(2, 2)).not.toBeNull();
+    expect(world.getMoney()).toBe(before - WATER_TOWER_COST);
+  });
+
+  it('post-apply water recompute: a road connected to the tower is isWatered immediately (no tick)', () => {
+    const world = makeWorld8();
+    executeClick(Tool.WATER_TOWER, { x: 2, y: 2 }, world);
+    // Road adjacent to tower at (1,2) — orthogonally adjacent to tower cell (2,2).
+    executeClick(Tool.ROAD, { x: 1, y: 2 }, world);
+    expect(world.getWaterMap().isWatered(1, 2)).toBe(true);
+  });
+
+  it('insufficient funds → no tile writes, no structure, no cost deducted', () => {
+    const world = makeWorld8();
+    world.trySpend(world.getMoney()); // drain to 0
+    const before = world.getMoney();
+    const result = executeClick(Tool.WATER_TOWER, { x: 2, y: 2 }, world);
+    expect(result.changedTiles).toEqual([]);
+    expect(world.getMap().getTile(2, 2)?.type).toBe(TileType.GRASS);
+    expect(world.getStructureMap().getStructureAt(2, 2)).toBeNull();
+    expect(world.getMoney()).toBe(before);
+  });
+
+  it('drag from (5,5) to (10,10) behaves identically to click at (5,5)', () => {
+    const world = makeWorld8();
+    const before = world.getMoney();
+    const result = executeDrag(Tool.WATER_TOWER, { x: 5, y: 5 }, { x: 10, y: 10 }, world);
+    expect(result.changedTiles).toHaveLength(1);
+    expect(world.getStructureMap().getStructureAt(5, 5)).not.toBeNull();
+    expect(world.getMoney()).toBe(before - WATER_TOWER_COST);
+  });
+
+  it('placing a road adjacent to an existing tower makes that road isWatered immediately (no tick)', () => {
+    const world = makeWorld8();
+    executeClick(Tool.WATER_TOWER, { x: 2, y: 2 }, world);
+    // Road adjacent: (3,2) is orthogonally adjacent to tower cell (2,2).
+    executeClick(Tool.ROAD, { x: 3, y: 2 }, world);
+    expect(world.getWaterMap().isWatered(3, 2)).toBe(true);
+  });
+
+  it('INDEPENDENCE GUARD: placing a water tower does NOT change getPowerMap() — road adjacent only to tower is NOT isPowered', () => {
+    const world = makeWorld8();
+    executeClick(Tool.WATER_TOWER, { x: 2, y: 2 }, world);
+    executeClick(Tool.ROAD, { x: 1, y: 2 }, world);
+    // Road is watered (connected to tower via road network)
+    expect(world.getWaterMap().isWatered(1, 2)).toBe(true);
+    // But NOT powered — no power plant exists
+    expect(world.getPowerMap().isPowered(1, 2)).toBe(false);
+  });
+
+  it('INDEPENDENCE GUARD: placing a power plant does NOT change getWaterMap() — road adjacent only to plant is NOT isWatered', () => {
+    const world = makeWorld8();
+    executeClick(Tool.POWER_PLANT, { x: 2, y: 2 }, world);
+    executeClick(Tool.ROAD, { x: 1, y: 2 }, world);
+    expect(world.getPowerMap().isPowered(1, 2)).toBe(true);
+    // NOT watered — no water tower exists
+    expect(world.getWaterMap().isWatered(1, 2)).toBe(false);
+  });
+});
+
+describe('CommandDispatcher WATER_TOWER removal (bulldoze)', () => {
+  function makeWorld8(): World {
+    return new World(8, 8, { regenerate: false });
+  }
+
+  function placeTower(world: World, ax: number, ay: number): void {
+    executeClick(Tool.WATER_TOWER, { x: ax, y: ay }, world);
+  }
+
+  it('bulldozing the single cell writes 1 DIRT, removes structure, deducts BULLDOZE_COST once', () => {
+    const world = makeWorld8();
+    placeTower(world, 2, 2);
+    const before = world.getMoney();
+    const result = executeClick(Tool.BULLDOZE, { x: 2, y: 2 }, world);
+    expect(result.changedTiles).toHaveLength(1);
+    expect(world.getMap().getTile(2, 2)?.type).toBe(TileType.DIRT);
+    expect(world.getStructureMap().getStructureAt(2, 2)).toBeNull();
+    expect(world.getMoney()).toBe(before - BULLDOZE_COST);
+  });
+
+  it('bulldoze removal triggers post-apply recompute — watered road loses water immediately', () => {
+    const world = makeWorld8();
+    placeTower(world, 2, 2);
+    executeClick(Tool.ROAD, { x: 1, y: 2 }, world);
+    expect(world.getWaterMap().isWatered(1, 2)).toBe(true);
+    executeClick(Tool.BULLDOZE, { x: 2, y: 2 }, world);
+    expect(world.getWaterMap().isWatered(1, 2)).toBe(false);
+  });
+
+  it('SOURCE-SELECTION GUARD: bulldozing a tower does not deprive power from a road that was only connected to a plant', () => {
+    const world = makeWorld8();
+    // Plant at (4,0): cells (4,0),(5,0),(4,1),(5,1). Road at (3,0): adjacent to plant cell (4,0).
+    executeClick(Tool.POWER_PLANT, { x: 4, y: 0 }, world);
+    // Tower at (0,0): cells (0,0),(1,0),(0,1),(1,1). Road at (3,0) is NOT adjacent to tower.
+    placeTower(world, 0, 0);
+    executeClick(Tool.ROAD, { x: 3, y: 0 }, world);
+    expect(world.getPowerMap().isPowered(3, 0)).toBe(true);
+    // Bulldoze the tower — both maps are recomputed (shared exclusion-set coupling), but
+    // source-selection is independent: the tower was never a power source, so the road
+    // remains powered by the plant after both maps drain.
+    executeClick(Tool.BULLDOZE, { x: 0, y: 0 }, world);
+    expect(world.getPowerMap().isPowered(3, 0)).toBe(true);
+  });
+});
+
+describe('CommandDispatcher POLICE_STATION placement + service dirty-marking', () => {
+  function makeWorld8(): World {
+    return new World(8, 8, { regenerate: false });
+  }
+
+  it('places a 2×2 POLICE_STATION, registers structure, and deducts POLICE_STATION_COST', () => {
+    const world = makeWorld8();
+    const before = world.getMoney();
+    const result = executeClick(Tool.POLICE_STATION, { x: 2, y: 2 }, world);
+    expect(result.changedTiles).toHaveLength(4);
+    expect(world.getMap().getTile(2, 2)?.type).toBe(TileType.POLICE_STATION);
+    expect(world.getMap().getTile(3, 3)?.type).toBe(TileType.POLICE_STATION);
+    expect(world.getStructureMap().getStructureAt(2, 2)).not.toBeNull();
+    expect(world.getMoney()).toBe(before - POLICE_STATION_COST);
+  });
+
+  it('placing a police station marks service dirty: an adjacent road has non-zero coverage immediately (no tick)', () => {
+    const world = makeWorld8();
+    executeClick(Tool.POLICE_STATION, { x: 2, y: 2 }, world);
+    // Road at (1,2) is orthogonally adjacent to station footprint cell (2,2).
+    executeClick(Tool.ROAD, { x: 1, y: 2 }, world);
+    expect(world.getServiceCoverageMap().getCoverage(1, 2)).toBeGreaterThan(0);
+  });
+
+  it('placing AND removing a road marks service dirty: a previously-covered cell loses coverage', () => {
+    const world = makeWorld8();
+    executeClick(Tool.POLICE_STATION, { x: 2, y: 2 }, world);
+    // Station footprint is (2,2)..(3,3). Road (1,2) is adjacent to station cell (2,2) → seeded.
+    // Road (0,2) is NOT adjacent to any station cell — it is covered ONLY by reaching the
+    // station through (1,2).
+    executeClick(Tool.ROAD, { x: 1, y: 2 }, world);
+    executeClick(Tool.ROAD, { x: 0, y: 2 }, world);
+    expect(world.getServiceCoverageMap().getCoverage(0, 2)).toBeGreaterThan(0);
+    // Bulldoze the connecting road (1,2): (0,2) is now disconnected from the station.
+    executeClick(Tool.BULLDOZE, { x: 1, y: 2 }, world);
+    expect(world.getServiceCoverageMap().getCoverage(0, 2)).toBe(0);
+  });
+
+  it('bulldozing a police station removes coverage from a previously-covered road immediately', () => {
+    const world = makeWorld8();
+    executeClick(Tool.POLICE_STATION, { x: 2, y: 2 }, world);
+    executeClick(Tool.ROAD, { x: 1, y: 2 }, world);
+    expect(world.getServiceCoverageMap().getCoverage(1, 2)).toBeGreaterThan(0);
+    executeClick(Tool.BULLDOZE, { x: 2, y: 2 }, world);
+    expect(world.getServiceCoverageMap().getCoverage(1, 2)).toBe(0);
+  });
+});
+
+describe('previewClick POLICE_STATION', () => {
+  function makeWorld8(): World {
+    return new World(8, 8, { regenerate: false });
+  }
+
+  it('POLICE_STATION over a valid flat area → pathTiles has the 2×2 footprint, rejected empty', () => {
+    const world = makeWorld8();
+    const preview = previewClick(Tool.POLICE_STATION, { x: 2, y: 2 }, world);
+    expect(preview.pathTiles).toHaveLength(4);
+    expect(preview.pathTiles).toContainEqual({ x: 2, y: 2 });
+    expect(preview.pathTiles).toContainEqual({ x: 3, y: 3 });
+    expect(preview.rejected).toEqual([]);
+    expect(world.getMap().getTile(2, 2)?.type).toBe(TileType.GRASS);
+  });
+
+  it('POLICE_STATION on non-flat ground → whole 2×2 footprint is rejected', () => {
+    const world = makeWorld8();
+    world.getTerrain().unsafeSetVertexHeight(3, 3, 0); // SEA_LEVEL — makes the footprint non-flat
+    const preview = previewClick(Tool.POLICE_STATION, { x: 2, y: 2 }, world);
+    expect(preview.pathTiles).toHaveLength(4);
+    expect(preview.rejected).toHaveLength(4);
+  });
+});
+
+describe('CommandDispatcher FIRE_STATION placement + service dirty-marking', () => {
+  function makeWorld8(): World {
+    return new World(8, 8, { regenerate: false });
+  }
+
+  it('places a 2×2 FIRE_STATION, registers structure, and deducts FIRE_STATION_COST', () => {
+    const world = makeWorld8();
+    const before = world.getMoney();
+    const result = executeClick(Tool.FIRE_STATION, { x: 2, y: 2 }, world);
+    expect(result.changedTiles).toHaveLength(4);
+    expect(world.getMap().getTile(2, 2)?.type).toBe(TileType.FIRE_STATION);
+    expect(world.getMap().getTile(3, 3)?.type).toBe(TileType.FIRE_STATION);
+    expect(world.getStructureMap().getStructureAt(2, 2)).not.toBeNull();
+    expect(world.getMoney()).toBe(before - FIRE_STATION_COST);
+  });
+
+  it('placing a fire station marks fire dirty: an adjacent road has non-zero fire coverage immediately (no tick)', () => {
+    const world = makeWorld8();
+    executeClick(Tool.FIRE_STATION, { x: 2, y: 2 }, world);
+    // Road at (1,2) is orthogonally adjacent to station footprint cell (2,2).
+    executeClick(Tool.ROAD, { x: 1, y: 2 }, world);
+    expect(world.getFireCoverageMap().getCoverage(1, 2)).toBeGreaterThan(0);
+  });
+});
+
+describe('previewClick FIRE_STATION', () => {
+  function makeWorld8(): World {
+    return new World(8, 8, { regenerate: false });
+  }
+
+  it('FIRE_STATION over a valid flat area → pathTiles has the 2×2 footprint, rejected empty', () => {
+    const world = makeWorld8();
+    const preview = previewClick(Tool.FIRE_STATION, { x: 2, y: 2 }, world);
+    expect(preview.pathTiles).toHaveLength(4);
+    expect(preview.pathTiles).toContainEqual({ x: 2, y: 2 });
+    expect(preview.pathTiles).toContainEqual({ x: 3, y: 3 });
+    expect(preview.rejected).toEqual([]);
+    expect(world.getMap().getTile(2, 2)?.type).toBe(TileType.GRASS);
+  });
+
+  it('FIRE_STATION on non-flat ground → whole 2×2 footprint is rejected', () => {
+    const world = makeWorld8();
+    world.getTerrain().unsafeSetVertexHeight(3, 3, 0); // SEA_LEVEL — makes the footprint non-flat
+    const preview = previewClick(Tool.FIRE_STATION, { x: 2, y: 2 }, world);
+    expect(preview.pathTiles).toHaveLength(4);
+    expect(preview.rejected).toHaveLength(4);
+  });
+});
+
+describe('cross-source coverage isolation', () => {
+  function makeWorld8(): World {
+    return new World(8, 8, { regenerate: false });
+  }
+
+  it('placing a fire station via FIRE_STATION tool does NOT add police coverage on an adjacent road', () => {
+    const world = makeWorld8();
+    executeClick(Tool.FIRE_STATION, { x: 2, y: 2 }, world);
+    executeClick(Tool.ROAD, { x: 1, y: 2 }, world);
+    expect(world.getServiceCoverageMap().getCoverage(1, 2)).toBe(0);
+  });
+
+  it('placing a police station via POLICE_STATION tool does NOT add fire coverage on an adjacent road', () => {
+    const world = makeWorld8();
+    executeClick(Tool.POLICE_STATION, { x: 2, y: 2 }, world);
+    executeClick(Tool.ROAD, { x: 1, y: 2 }, world);
+    expect(world.getFireCoverageMap().getCoverage(1, 2)).toBe(0);
+  });
+
+  it('placing a hospital via HOSPITAL tool does NOT add police coverage on an adjacent road', () => {
+    const world = makeWorld8();
+    executeClick(Tool.HOSPITAL, { x: 2, y: 2 }, world);
+    executeClick(Tool.ROAD, { x: 1, y: 2 }, world);
+    expect(world.getServiceCoverageMap().getCoverage(1, 2)).toBe(0);
+  });
+
+  it('placing a hospital via HOSPITAL tool does NOT add fire coverage on an adjacent road', () => {
+    const world = makeWorld8();
+    executeClick(Tool.HOSPITAL, { x: 2, y: 2 }, world);
+    executeClick(Tool.ROAD, { x: 1, y: 2 }, world);
+    expect(world.getFireCoverageMap().getCoverage(1, 2)).toBe(0);
+  });
+
+  it('placing a police station via POLICE_STATION tool does NOT add hospital coverage on an adjacent road', () => {
+    const world = makeWorld8();
+    executeClick(Tool.POLICE_STATION, { x: 2, y: 2 }, world);
+    executeClick(Tool.ROAD, { x: 1, y: 2 }, world);
+    expect(world.getHospitalCoverageMap().getCoverage(1, 2)).toBe(0);
+  });
+
+  it('placing a fire station via FIRE_STATION tool does NOT add hospital coverage on an adjacent road', () => {
+    const world = makeWorld8();
+    executeClick(Tool.FIRE_STATION, { x: 2, y: 2 }, world);
+    executeClick(Tool.ROAD, { x: 1, y: 2 }, world);
+    expect(world.getHospitalCoverageMap().getCoverage(1, 2)).toBe(0);
+  });
+});
+
+describe('CommandDispatcher HOSPITAL placement + dirty-marking', () => {
+  function makeWorld8(): World {
+    return new World(8, 8, { regenerate: false });
+  }
+
+  it('places a 2×2 HOSPITAL, registers structure, and deducts HOSPITAL_COST', () => {
+    const world = makeWorld8();
+    const before = world.getMoney();
+    const result = executeClick(Tool.HOSPITAL, { x: 2, y: 2 }, world);
+    expect(result.changedTiles).toHaveLength(4);
+    expect(world.getMap().getTile(2, 2)?.type).toBe(TileType.HOSPITAL);
+    expect(world.getMap().getTile(3, 3)?.type).toBe(TileType.HOSPITAL);
+    expect(world.getStructureMap().getStructureAt(2, 2)).not.toBeNull();
+    expect(world.getMoney()).toBe(before - HOSPITAL_COST);
+  });
+
+  it('placing a hospital marks hospital dirty: an adjacent road has non-zero hospital coverage immediately (no tick)', () => {
+    const world = makeWorld8();
+    executeClick(Tool.HOSPITAL, { x: 2, y: 2 }, world);
+    // Road at (1,2) is orthogonally adjacent to hospital footprint cell (2,2).
+    executeClick(Tool.ROAD, { x: 1, y: 2 }, world);
+    expect(world.getHospitalCoverageMap().getCoverage(1, 2)).toBeGreaterThan(0);
+  });
+});
+
+describe('previewClick HOSPITAL', () => {
+  function makeWorld8(): World {
+    return new World(8, 8, { regenerate: false });
+  }
+
+  it('HOSPITAL over a valid flat area → pathTiles has the 2×2 footprint, rejected empty', () => {
+    const world = makeWorld8();
+    const preview = previewClick(Tool.HOSPITAL, { x: 2, y: 2 }, world);
+    expect(preview.pathTiles).toHaveLength(4);
+    expect(preview.pathTiles).toContainEqual({ x: 2, y: 2 });
+    expect(preview.pathTiles).toContainEqual({ x: 3, y: 3 });
+    expect(preview.rejected).toEqual([]);
+    expect(world.getMap().getTile(2, 2)?.type).toBe(TileType.GRASS);
+  });
+
+  it('HOSPITAL on non-flat ground → whole 2×2 footprint is rejected', () => {
+    const world = makeWorld8();
+    world.getTerrain().unsafeSetVertexHeight(3, 3, 0); // SEA_LEVEL — makes the footprint non-flat
+    const preview = previewClick(Tool.HOSPITAL, { x: 2, y: 2 }, world);
+    expect(preview.pathTiles).toHaveLength(4);
+    expect(preview.rejected).toHaveLength(4);
+  });
+});
+
+describe('previewClick WATER_TOWER', () => {
+  function makeWorld8(): World {
+    return new World(8, 8, { regenerate: false });
+  }
+
+  it('WATER_TOWER over a valid flat cell → pathTiles has 1 footprint cell, rejected empty', () => {
+    const world = makeWorld8();
+    const preview = previewClick(Tool.WATER_TOWER, { x: 2, y: 2 }, world);
+    expect(preview.pathTiles).toEqual([
+      { x: 2, y: 2 },
+    ]);
+    expect(preview.rejected).toEqual([]);
+    expect(world.getMap().getTile(2, 2)?.type).toBe(TileType.GRASS);
+  });
+
+  it('WATER_TOWER on non-flat ground → pathTiles has 1 cell AND rejected equals that 1 cell', () => {
+    const world = makeWorld8();
+    world.getTerrain().unsafeSetVertexHeight(3, 3, 0); // SEA_LEVEL — makes cell (2,2) non-flat
+    const preview = previewClick(Tool.WATER_TOWER, { x: 2, y: 2 }, world);
+    const expectedFootprint = [
+      { x: 2, y: 2 },
+    ];
+    expect(preview.pathTiles).toEqual(expectedFootprint);
+    expect(preview.rejected).toEqual(expectedFootprint);
+  });
+});
+
+describe('CommandDispatcher applyCommands invariant throws', () => {
+  it('place-structure throws when addStructure returns null (footprint already occupied)', () => {
+    // Place a plant via the normal tool path so the cells are occupied in StructureMap.
+    const world = new World(8, 8, { regenerate: false });
+    executeClick(Tool.POWER_PLANT, { x: 2, y: 2 }, world);
+    // Confirm the structure is registered.
+    expect(world.getStructureMap().getStructureAt(2, 2)).not.toBeNull();
+
+    // Craft a place-structure command that overlaps the existing plant.
+    // applyCommands will call addStructure on already-occupied cells → returns null → invariant throw.
+    const cmd = { kind: 'place-structure' as const, x: 2, y: 2, structureType: 'power_plant' as const };
+    expect(() => applyCommands([cmd], world)).toThrow(/invariant/i);
+  });
+
+  it('remove-structure throws when structureId does not exist in StructureMap', () => {
+    // World with no structures at all — id 999 will not be found.
+    const world = new World(8, 8, { regenerate: false });
+
+    const cmd = { kind: 'remove-structure' as const, structureId: 999 };
+    expect(() => applyCommands([cmd], world)).toThrow(/invariant/i);
+  });
+});
+
+describe('previewClick', () => {
+  function makeWorld8(): World {
+    return new World(8, 8, { regenerate: false });
+  }
+
+  it('POWER_PLANT over a valid flat 2×2 → pathTiles has 4 footprint cells, rejected empty', () => {
+    const world = makeWorld8();
+    // Default world is flat grass — the structure-placement classifier accepts anchor (2,2).
+    const preview = previewClick(Tool.POWER_PLANT, { x: 2, y: 2 }, world);
+    expect(preview.pathTiles).toEqual([
+      { x: 2, y: 2 },
+      { x: 3, y: 2 },
+      { x: 2, y: 3 },
+      { x: 3, y: 3 },
+    ]);
+    expect(preview.rejected).toEqual([]);
+    // No mutation: tile remains GRASS.
+    expect(world.getMap().getTile(2, 2)?.type).toBe(TileType.GRASS);
+  });
+
+  it('POWER_PLANT on non-flat ground (classifier rejects) → pathTiles has 4 cells AND rejected equals all 4', () => {
+    const world = makeWorld8();
+    // Sink one corner of the footprint below SEA_LEVEL so the slab is not flat+dry.
+    world.getTerrain().unsafeSetVertexHeight(3, 3, SEA_LEVEL);
+    const preview = previewClick(Tool.POWER_PLANT, { x: 2, y: 2 }, world);
+    const expectedFootprint = [
+      { x: 2, y: 2 },
+      { x: 3, y: 2 },
+      { x: 2, y: 3 },
+      { x: 3, y: 3 },
+    ];
+    expect(preview.pathTiles).toEqual(expectedFootprint);
+    expect(preview.rejected).toEqual(expectedFootprint);
+  });
+
+  it('ROAD over a buildable tile → pathTiles length 1, rejected empty', () => {
+    const world = makeWorld8();
+    const preview = previewClick(Tool.ROAD, { x: 3, y: 3 }, world);
+    expect(preview.pathTiles).toEqual([{ x: 3, y: 3 }]);
+    expect(preview.rejected).toEqual([]);
+  });
+
+  it('ROAD over water (classifier rejects) → pathTiles [tile], rejected [tile]', () => {
+    const world = makeWorld8();
+    // Sink one corner of tile (3,3) to SEA_LEVEL so canBuildRoadAt rejects.
+    world.getTerrain().unsafeSetVertexHeight(3, 3, SEA_LEVEL);
+    const preview = previewClick(Tool.ROAD, { x: 3, y: 3 }, world);
+    expect(preview.pathTiles).toEqual([{ x: 3, y: 3 }]);
+    expect(preview.rejected).toEqual([{ x: 3, y: 3 }]);
+  });
+
+  it('ROAD over an existing ROAD tile (classifier returns skip, not reject) → pathTiles [tile], rejected EMPTY', () => {
+    const world = makeWorld8();
+    // Pre-place a road so classifyRoadTile returns 'skip' (not 'reject').
+    executeClick(Tool.ROAD, { x: 3, y: 3 }, world);
+    expect(world.getMap().getTile(3, 3)?.type).toBe(TileType.ROAD);
+    const preview = previewClick(Tool.ROAD, { x: 3, y: 3 }, world);
+    expect(preview.pathTiles).toEqual([{ x: 3, y: 3 }]);
+    expect(preview.rejected).toEqual([]);
+  });
+
+  it('SELECT → empty preview', () => {
+    const world = makeWorld8();
+    const preview = previewClick(Tool.SELECT, { x: 3, y: 3 }, world);
+    expect(preview.pathTiles).toEqual([]);
+    expect(preview.rejected).toEqual([]);
+    expect(preview.allOrNothingBlocked).toBe(false);
+    expect(preview.affectedBuildingIds.size).toBe(0);
+  });
+
+  it('out-of-bounds tile → empty preview', () => {
+    const world = makeWorld8();
+    const preview = previewClick(Tool.ROAD, { x: 99, y: 99 }, world);
+    expect(preview.pathTiles).toEqual([]);
+    expect(preview.rejected).toEqual([]);
+    expect(preview.allOrNothingBlocked).toBe(false);
+    expect(preview.affectedBuildingIds.size).toBe(0);
+  });
+
+  it('BULLDOZE hovering a power-plant cell → pathTiles equals the full 4-cell structure footprint', () => {
+    const world = makeWorld8();
+    // Place a plant at anchor (2,2): footprint cells (2,2),(3,2),(2,3),(3,3).
+    executeClick(Tool.POWER_PLANT, { x: 2, y: 2 }, world);
+    const expectedFootprint = [
+      { x: 2, y: 2 },
+      { x: 3, y: 2 },
+      { x: 2, y: 3 },
+      { x: 3, y: 3 },
+    ];
+    // Hover over the SE cell — should expand to the full footprint via buildToolPreview.
+    const preview = previewClick(Tool.BULLDOZE, { x: 3, y: 3 }, world);
+    expect(preview.pathTiles).toEqual(expect.arrayContaining(expectedFootprint));
+    expect(preview.pathTiles).toHaveLength(4);
+    // No mutation: structure still present.
+    expect(world.getStructureMap().getStructureAt(2, 2)).not.toBeNull();
+  });
+
+  it('BULLDOZE over empty ground → pathTiles is [tile] (1 cell)', () => {
+    const world = makeWorld8();
+    const preview = previewClick(Tool.BULLDOZE, { x: 3, y: 3 }, world);
+    expect(preview.pathTiles).toEqual([{ x: 3, y: 3 }]);
+  });
+});
+
+describe('previewDrag BULLDOZE structure-footprint expansion', () => {
+  function makeWorld8(): World {
+    return new World(8, 8, { regenerate: false });
+  }
+
+  it('previewDrag BULLDOZE over a single plant cell → pathTiles equals the full 4-cell footprint', () => {
+    const world = makeWorld8();
+    executeClick(Tool.POWER_PLANT, { x: 2, y: 2 }, world);
+    // Drag from one plant cell to itself (mirrors onDragPreview(tile,tile) on pointerdown).
+    const preview = previewDrag(Tool.BULLDOZE, { x: 3, y: 3 }, { x: 3, y: 3 }, world);
+    const expected = [{ x: 2, y: 2 }, { x: 3, y: 2 }, { x: 2, y: 3 }, { x: 3, y: 3 }];
+    expect(preview.pathTiles).toHaveLength(4);
+    expect(preview.pathTiles).toEqual(expect.arrayContaining(expected));
+    // No mutation.
+    expect(world.getStructureMap().getStructureAt(2, 2)).not.toBeNull();
+  });
+
+  it('previewDrag BULLDOZE over empty ground → pathTiles is [tile]', () => {
+    const world = makeWorld8();
+    const preview = previewDrag(Tool.BULLDOZE, { x: 1, y: 1 }, { x: 1, y: 1 }, world);
+    expect(preview.pathTiles).toEqual([{ x: 1, y: 1 }]);
+  });
+});
+
+describe('CommandDispatcher fire coverage dirty-fanout (non-placement regression)', () => {
+  function makeWorld8(): World {
+    return new World(8, 8, { regenerate: false });
+  }
+
+  /**
+   * Seed a fire station directly via addStructure (no Tool.FIRE_STATION yet — Task 5).
+   * This mirrors what a hydrated save would produce. After seeding we MUST call
+   * markFireDirty + recomputeFire to establish a KNOWN-FRESH baseline, otherwise
+   * the FireCoverageMap is still all-zeros and assertions pass vacuously.
+   */
+  function seedFireStation(world: World, ax: number, ay: number): void {
+    const map = world.getMap();
+    // Write the four FIRE_STATION tiles so the map has the correct tile types.
+    for (let dy = 0; dy <= 1; dy++) {
+      for (let dx = 0; dx <= 1; dx++) {
+        map.setTile(ax + dx, ay + dy, { x: ax + dx, y: ay + dy, type: TileType.FIRE_STATION, level: 0 });
+      }
+    }
+    world.getStructureMap().addStructure({
+      type: 'fire_station',
+      anchor: { x: ax, y: ay },
+      footprint: [
+        { x: ax,     y: ay     },
+        { x: ax + 1, y: ay     },
+        { x: ax,     y: ay + 1 },
+        { x: ax + 1, y: ay + 1 },
+      ],
+    });
+    // Establish a KNOWN-FRESH fire map baseline before any assertions.
+    world.markFireDirty();
+    world.recomputeFire();
+  }
+
+  it('bulldozing a fire station drops coverage on a previously-covered road IMMEDIATELY (no tick)', () => {
+    const world = makeWorld8();
+    // Fire station at (2,2)–(3,3). Road at (1,2) adjacent to station cell (2,2).
+    seedFireStation(world, 2, 2);
+    executeClick(Tool.ROAD, { x: 1, y: 2 }, world);
+
+    // KNOWN-FRESH baseline: road (1,2) is covered by the fire station.
+    expect(world.getFireCoverageMap().getCoverage(1, 2)).toBeGreaterThan(0);
+
+    // Bulldoze the station — coverage should drop IMMEDIATELY (no tick needed).
+    executeClick(Tool.BULLDOZE, { x: 2, y: 2 }, world);
+    expect(world.getFireCoverageMap().getCoverage(1, 2)).toBe(0);
+  });
+
+  it('a road edit near the fire station updates fire coverage IMMEDIATELY (no tick)', () => {
+    const world = makeWorld8();
+    // Fire station at (2,2)–(3,3). Road at (1,2) bridges to (0,2).
+    seedFireStation(world, 2, 2);
+    executeClick(Tool.ROAD, { x: 1, y: 2 }, world);
+    // (0,2) is reachable from the station through (1,2).
+    executeClick(Tool.ROAD, { x: 0, y: 2 }, world);
+
+    // KNOWN-FRESH baseline: (0,2) has coverage through the road chain.
+    expect(world.getFireCoverageMap().getCoverage(0, 2)).toBeGreaterThan(0);
+
+    // Bulldoze the connecting road (1,2) — (0,2) loses coverage IMMEDIATELY.
+    executeClick(Tool.BULLDOZE, { x: 1, y: 2 }, world);
+    expect(world.getFireCoverageMap().getCoverage(0, 2)).toBe(0);
+  });
+});
+
+describe('CommandDispatcher hospital coverage dirty-fanout (non-placement regression)', () => {
+  function makeWorld8(): World {
+    return new World(8, 8, { regenerate: false });
+  }
+
+  /**
+   * Seed a hospital directly via addStructure (no Tool.HOSPITAL yet — Task 5).
+   * This mirrors what a hydrated save would produce. After seeding we MUST call
+   * markHospitalDirty + recomputeHospital to establish a KNOWN-FRESH baseline,
+   * otherwise the HospitalCoverageMap is still all-zeros and assertions pass vacuously.
+   */
+  function seedHospitalStation(world: World, ax: number, ay: number): void {
+    const map = world.getMap();
+    // Write the four HOSPITAL tiles so the map has the correct tile types.
+    for (let dy = 0; dy <= 1; dy++) {
+      for (let dx = 0; dx <= 1; dx++) {
+        map.setTile(ax + dx, ay + dy, { x: ax + dx, y: ay + dy, type: TileType.HOSPITAL, level: 0 });
+      }
+    }
+    world.getStructureMap().addStructure({
+      type: 'hospital',
+      anchor: { x: ax, y: ay },
+      footprint: [
+        { x: ax,     y: ay     },
+        { x: ax + 1, y: ay     },
+        { x: ax,     y: ay + 1 },
+        { x: ax + 1, y: ay + 1 },
+      ],
+    });
+    // Establish a KNOWN-FRESH hospital map baseline before any assertions.
+    world.markHospitalDirty();
+    world.recomputeHospital();
+  }
+
+  it('bulldozing a hospital drops coverage on a previously-covered road IMMEDIATELY (no tick)', () => {
+    const world = makeWorld8();
+    // Hospital at (2,2)–(3,3). Road at (1,2) adjacent to hospital cell (2,2).
+    seedHospitalStation(world, 2, 2);
+    executeClick(Tool.ROAD, { x: 1, y: 2 }, world);
+
+    // KNOWN-FRESH baseline: road (1,2) is covered by the hospital.
+    expect(world.getHospitalCoverageMap().getCoverage(1, 2)).toBeGreaterThan(0);
+
+    // Bulldoze the hospital — coverage should drop IMMEDIATELY (no tick needed).
+    executeClick(Tool.BULLDOZE, { x: 2, y: 2 }, world);
+    expect(world.getHospitalCoverageMap().getCoverage(1, 2)).toBe(0);
+  });
+
+  it('a road edit near the hospital updates hospital coverage IMMEDIATELY (no tick)', () => {
+    const world = makeWorld8();
+    // Hospital at (2,2)–(3,3). Road at (1,2) bridges to (0,2).
+    seedHospitalStation(world, 2, 2);
+    executeClick(Tool.ROAD, { x: 1, y: 2 }, world);
+    // (0,2) is reachable from the hospital through (1,2).
+    executeClick(Tool.ROAD, { x: 0, y: 2 }, world);
+
+    // KNOWN-FRESH baseline: (0,2) has coverage through the road chain.
+    expect(world.getHospitalCoverageMap().getCoverage(0, 2)).toBeGreaterThan(0);
+
+    // Bulldoze the connecting road (1,2) — (0,2) loses coverage IMMEDIATELY.
+    executeClick(Tool.BULLDOZE, { x: 1, y: 2 }, world);
+    expect(world.getHospitalCoverageMap().getCoverage(0, 2)).toBe(0);
+  });
+});
+
+describe('CommandDispatcher school coverage dirty-fanout (non-placement regression)', () => {
+  function makeWorld8(): World {
+    return new World(8, 8, { regenerate: false });
+  }
+
+  /**
+   * Seed a school directly via addStructure (no Tool.SCHOOL yet — Task 5).
+   * This mirrors what a hydrated save would produce. After seeding we MUST call
+   * markSchoolDirty + recomputeSchool to establish a KNOWN-FRESH baseline,
+   * otherwise the SchoolCoverageMap is still all-zeros and assertions pass vacuously.
+   */
+  function seedSchool(world: World, ax: number, ay: number): void {
+    const map = world.getMap();
+    // Write the four SCHOOL tiles so the map has the correct tile types.
+    for (let dy = 0; dy <= 1; dy++) {
+      for (let dx = 0; dx <= 1; dx++) {
+        map.setTile(ax + dx, ay + dy, { x: ax + dx, y: ay + dy, type: TileType.SCHOOL, level: 0 });
+      }
+    }
+    world.getStructureMap().addStructure({
+      type: 'school',
+      anchor: { x: ax, y: ay },
+      footprint: [
+        { x: ax,     y: ay     },
+        { x: ax + 1, y: ay     },
+        { x: ax,     y: ay + 1 },
+        { x: ax + 1, y: ay + 1 },
+      ],
+    });
+    // Establish a KNOWN-FRESH school map baseline before any assertions.
+    world.markSchoolDirty();
+    world.recomputeSchool();
+  }
+
+  it('bulldozing a school drops coverage on a previously-covered road IMMEDIATELY (no tick)', () => {
+    const world = makeWorld8();
+    // School at (2,2)–(3,3). Road at (1,2) adjacent to school cell (2,2).
+    seedSchool(world, 2, 2);
+    executeClick(Tool.ROAD, { x: 1, y: 2 }, world);
+
+    // KNOWN-FRESH baseline: road (1,2) is covered by the school.
+    expect(world.getSchoolCoverageMap().getCoverage(1, 2)).toBeGreaterThan(0);
+
+    // Bulldoze the school — coverage should drop IMMEDIATELY (no tick needed).
+    executeClick(Tool.BULLDOZE, { x: 2, y: 2 }, world);
+    expect(world.getSchoolCoverageMap().getCoverage(1, 2)).toBe(0);
+  });
+
+  it('a road edit near the school updates school coverage IMMEDIATELY (no tick)', () => {
+    const world = makeWorld8();
+    // School at (2,2)–(3,3). Road at (1,2) bridges to (0,2).
+    seedSchool(world, 2, 2);
+    executeClick(Tool.ROAD, { x: 1, y: 2 }, world);
+    // (0,2) is reachable from the school through (1,2).
+    executeClick(Tool.ROAD, { x: 0, y: 2 }, world);
+
+    // KNOWN-FRESH baseline: (0,2) has coverage through the road chain.
+    expect(world.getSchoolCoverageMap().getCoverage(0, 2)).toBeGreaterThan(0);
+
+    // Bulldoze the connecting road (1,2) — (0,2) loses coverage IMMEDIATELY.
+    executeClick(Tool.BULLDOZE, { x: 1, y: 2 }, world);
+    expect(world.getSchoolCoverageMap().getCoverage(0, 2)).toBe(0);
+  });
+});
+
+describe('CommandDispatcher PARK land-value dirty-fanout (non-placement regression)', () => {
+  function makeWorld10(): World {
+    return new World(10, 10, { regenerate: false });
+  }
+
+  /**
+   * Seed a park directly via addStructure (Tool.PARK does not exist until Task 4).
+   * Park is 1×1. After seeding we MUST call markLandValueDirty + recomputeLandValue
+   * to establish a KNOWN-FRESH baseline so assertions are not vacuously true.
+   */
+  function seedPark(world: World, ax: number, ay: number): void {
+    const map = world.getMap();
+    map.setTile(ax, ay, { x: ax, y: ay, type: TileType.PARK, level: 0 });
+    world.getStructureMap().addStructure({
+      type: 'park',
+      anchor: { x: ax, y: ay },
+      footprint: [{ x: ax, y: ay }],
+    });
+    // Establish a KNOWN-FRESH land-value baseline before any assertions.
+    world.markLandValueDirty();
+    world.recomputeLandValue();
+  }
+
+  it('test (a): bulldozing a park drops nearby land value (dispatcher marks dirty; test drains)', () => {
+    const world = makeWorld10();
+    // Road at (1,3) gives road-proximity score for nearby tiles.
+    executeClick(Tool.ROAD, { x: 1, y: 3 }, world);
+    // Zone tile at (3,3) is the measurement target.
+    executeClick(Tool.ZONE_RESIDENTIAL, { x: 3, y: 3 }, world);
+    // Park at (3,5): Chebyshev dist from (3,3) = 2, within PARK_RADIUS=4 → boosts land value.
+    seedPark(world, 3, 5);
+
+    // KNOWN-FRESH baseline: (3,3) should have a non-zero land value boosted by the park.
+    const boostedValue = world.getLandValue().getValue(3, 3);
+    expect(boostedValue).toBeGreaterThan(0);
+
+    // Bulldoze the park — dispatcher marks land value dirty (lazy; does NOT recompute).
+    executeClick(Tool.BULLDOZE, { x: 3, y: 5 }, world);
+
+    // Drain explicitly: test is responsible for draining the lazy dirty flag.
+    world.recomputeLandValueIfDirty();
+
+    // Land value at (3,3) must drop now that the park boost is gone.
+    const droppedValue = world.getLandValue().getValue(3, 3);
+    expect(droppedValue).toBeLessThan(boostedValue);
+  });
+
+  it('test (b): placing a park raises nearby land value (dispatcher marks dirty; test drains)', () => {
+    const world = makeWorld10();
+    // Road at (1,3) for road-proximity score.
+    executeClick(Tool.ROAD, { x: 1, y: 3 }, world);
+    // Zone tile at (3,3) is the measurement target.
+    executeClick(Tool.ZONE_RESIDENTIAL, { x: 3, y: 3 }, world);
+
+    // Park-free baseline: recompute to get the value without any park.
+    world.markLandValueDirty();
+    world.recomputeLandValue();
+    const baselineValue = world.getLandValue().getValue(3, 3);
+    expect(baselineValue).toBeGreaterThan(0);
+
+    // Place a park at (3,5) via applyCommands (Tool.PARK does not exist until Task 4).
+    // The dispatcher's place-structure arm sets landValueInvalidated when structureType==='park'.
+    applyCommands([{ kind: 'place-structure', x: 3, y: 5, structureType: 'park' }], world);
+
+    // Drain explicitly: test is responsible for draining the lazy dirty flag.
+    world.recomputeLandValueIfDirty();
+
+    // Land value at (3,3) must rise now that the park boost applies.
+    const boostedValue = world.getLandValue().getValue(3, 3);
+    expect(boostedValue).toBeGreaterThan(baselineValue);
+  });
+});
+
+describe('CommandDispatcher service-coverage land-value dirty-fanout', () => {
+  it('placing a hospital near a zone raises land value via the B1 coverage→land-value cascade', () => {
+    const world = new World(10, 10, { regenerate: false });
+    // Road column at x=2, rows y=2..6.
+    for (let y = 2; y <= 6; y++) executeClick(Tool.ROAD, { x: 2, y }, world);
+    // Measurement zone tile at (3,4): off-road dist 1 east of road (2,4).
+    executeClick(Tool.ZONE_RESIDENTIAL, { x: 3, y: 4 }, world);
+
+    // KNOWN-FRESH baseline: no coverage yet → serviceScore=0 at (3,4).
+    world.markLandValueDirty();
+    world.recomputeLandValue();
+    const baseline = world.getLandValue().getValue(3, 4);
+
+    // Place a hospital at (0,3): 2×2 footprint (0,3)(1,3)(0,4)(1,4). Cells (1,3)/(1,4) are
+    // adjacent to road (2,3)/(2,4) → coverage seeds the road and propagates to (3,4).
+    // Footprint does NOT overlap the road column (x=2) or the zone tile (3,4).
+    applyCommands([{ kind: 'place-structure', x: 0, y: 3, structureType: 'hospital' }], world);
+
+    // Drain the lazy dirty flag. markHospitalDirty cascaded into landValueDirty (B1).
+    world.recomputeLandValueIfDirty();
+
+    // Hospital-only coverage → serviceScore = (0+0+1+0)/4 = 0.25 → +0.50*0.25 = +0.125.
+    // Assert a STRICT increase (not an exact delta).
+    expect(world.getLandValue().getValue(3, 4)).toBeGreaterThan(baseline);
+  });
+});
+
+describe('CommandDispatcher TERRAIN_LEVEL', () => {
+  it('Test 9: TERRAIN_LEVEL drag with dry DIRT tile — level write crosses SEA_LEVEL and reconciles DIRT→GRASS', () => {
+    const world = new World(6, 6, { regenerate: false });
+
+    // Install a DIRT tile at (3,3).
+    world.getMap().setTile(3, 3, createTile(3, 3, TileType.DIRT));
+
+    // Set DIRT tile corners to 2 (dry: all corners > SEA_LEVEL=0).
+    world.getTerrain().unsafeSetVertexHeight(3, 3, 2);
+    world.getTerrain().unsafeSetVertexHeight(4, 3, 2);
+    world.getTerrain().unsafeSetVertexHeight(3, 4, 2);
+    world.getTerrain().unsafeSetVertexHeight(4, 4, 2);
+
+    // Set dragStart tile (0,0) corners to 0 — this is the level target.
+    world.getTerrain().unsafeSetVertexHeight(0, 0, 0);
+    world.getTerrain().unsafeSetVertexHeight(1, 0, 0);
+    world.getTerrain().unsafeSetVertexHeight(0, 1, 0);
+    world.getTerrain().unsafeSetVertexHeight(1, 1, 0);
+
+    // Pad rows 2–5, cols 2–5 to 0 (except the four DIRT corners already set to 2).
+    // This ensures canPlayerSetVertexHeight admits writing DIRT corners to 0: |2-0|=2 ≤3.
+    for (let vy = 2; vy <= 5; vy++) {
+      for (let vx = 2; vx <= 5; vx++) {
+        if ((vx === 3 || vx === 4) && (vy === 3 || vy === 4)) continue; // DIRT corners stay at 2
+        world.getTerrain().unsafeSetVertexHeight(vx, vy, 0);
+      }
+    }
+
+    // Pre-condition: DIRT tile is dry before the call.
+    expect(world.getMap().getTile(3, 3)?.type).toBe(TileType.DIRT);
+    expect(world.isWater(3, 3)).toBe(false);
+
+    // Execute TERRAIN_LEVEL drag from (0,0) to (4,4). dragStart=(0,0), target=0.
+    // All 25 tiles (0,0)–(4,4) are in the rect; DIRT is not structured, so its corners are collected.
+    // After writing DIRT corners to 0, min corner of (3,3) = 0 ≤ SEA_LEVEL → reconcile to GRASS.
+    const result = executeDrag(Tool.TERRAIN_LEVEL, { x: 0, y: 0 }, { x: 4, y: 4 }, world);
+
+    expect(world.getMap().getTile(3, 3)?.type).toBe(TileType.GRASS);
+    expect(world.isWater(3, 3)).toBe(true);
+    expect(result.changedTiles).toContainEqual({ x: 3, y: 3 });
+  });
+});
+
+describe('CommandDispatcher SCHOOL placement + dirty-marking', () => {
+  function makeWorld8(): World {
+    return new World(8, 8, { regenerate: false });
+  }
+
+  it('places a 2×2 SCHOOL, registers structure, and deducts SCHOOL_COST', () => {
+    const world = makeWorld8();
+    const before = world.getMoney();
+    const result = executeClick(Tool.SCHOOL, { x: 2, y: 2 }, world);
+    expect(result.changedTiles).toHaveLength(4);
+    expect(world.getMap().getTile(2, 2)?.type).toBe(TileType.SCHOOL);
+    expect(world.getMap().getTile(3, 3)?.type).toBe(TileType.SCHOOL);
+    expect(world.getStructureMap().getStructureAt(2, 2)).not.toBeNull();
+    expect(world.getMoney()).toBe(before - SCHOOL_COST);
+  });
+
+  it('placing a school marks school dirty: an adjacent road has non-zero school coverage immediately (no tick)', () => {
+    const world = makeWorld8();
+    executeClick(Tool.SCHOOL, { x: 2, y: 2 }, world);
+    // Road at (1,2) is orthogonally adjacent to school footprint cell (2,2).
+    executeClick(Tool.ROAD, { x: 1, y: 2 }, world);
+    expect(world.getSchoolCoverageMap().getCoverage(1, 2)).toBeGreaterThan(0);
+  });
+});
+
+describe('previewClick SCHOOL', () => {
+  function makeWorld8(): World {
+    return new World(8, 8, { regenerate: false });
+  }
+
+  it('SCHOOL over a valid flat area → pathTiles has the 2×2 footprint, rejected empty', () => {
+    const world = makeWorld8();
+    const preview = previewClick(Tool.SCHOOL, { x: 2, y: 2 }, world);
+    expect(preview.pathTiles).toHaveLength(4);
+    expect(preview.pathTiles).toContainEqual({ x: 2, y: 2 });
+    expect(preview.pathTiles).toContainEqual({ x: 3, y: 3 });
+    expect(preview.rejected).toEqual([]);
+    expect(world.getMap().getTile(2, 2)?.type).toBe(TileType.GRASS);
+  });
+
+  it('SCHOOL on non-flat ground → whole 2×2 footprint is rejected', () => {
+    const world = makeWorld8();
+    world.getTerrain().unsafeSetVertexHeight(3, 3, 0); // SEA_LEVEL — makes the footprint non-flat
+    const preview = previewClick(Tool.SCHOOL, { x: 2, y: 2 }, world);
+    expect(preview.pathTiles).toHaveLength(4);
+    expect(preview.rejected).toHaveLength(4);
+  });
+});
+
+describe('cross-source coverage isolation (school)', () => {
+  function makeWorld8(): World {
+    return new World(8, 8, { regenerate: false });
+  }
+
+  it('placing a school via SCHOOL tool does NOT add police coverage on an adjacent road', () => {
+    const world = makeWorld8();
+    executeClick(Tool.SCHOOL, { x: 2, y: 2 }, world);
+    executeClick(Tool.ROAD, { x: 1, y: 2 }, world);
+    expect(world.getServiceCoverageMap().getCoverage(1, 2)).toBe(0);
+  });
+
+  it('placing a school via SCHOOL tool does NOT add fire coverage on an adjacent road', () => {
+    const world = makeWorld8();
+    executeClick(Tool.SCHOOL, { x: 2, y: 2 }, world);
+    executeClick(Tool.ROAD, { x: 1, y: 2 }, world);
+    expect(world.getFireCoverageMap().getCoverage(1, 2)).toBe(0);
+  });
+
+  it('placing a school via SCHOOL tool does NOT add hospital coverage on an adjacent road', () => {
+    const world = makeWorld8();
+    executeClick(Tool.SCHOOL, { x: 2, y: 2 }, world);
+    executeClick(Tool.ROAD, { x: 1, y: 2 }, world);
+    expect(world.getHospitalCoverageMap().getCoverage(1, 2)).toBe(0);
+  });
+
+  it('placing a police station via POLICE_STATION tool does NOT add school coverage on an adjacent road', () => {
+    const world = makeWorld8();
+    executeClick(Tool.POLICE_STATION, { x: 2, y: 2 }, world);
+    executeClick(Tool.ROAD, { x: 1, y: 2 }, world);
+    expect(world.getSchoolCoverageMap().getCoverage(1, 2)).toBe(0);
+  });
+
+  it('placing a fire station via FIRE_STATION tool does NOT add school coverage on an adjacent road', () => {
+    const world = makeWorld8();
+    executeClick(Tool.FIRE_STATION, { x: 2, y: 2 }, world);
+    executeClick(Tool.ROAD, { x: 1, y: 2 }, world);
+    expect(world.getSchoolCoverageMap().getCoverage(1, 2)).toBe(0);
+  });
+
+  it('placing a hospital via HOSPITAL tool does NOT add school coverage on an adjacent road', () => {
+    const world = makeWorld8();
+    executeClick(Tool.HOSPITAL, { x: 2, y: 2 }, world);
+    executeClick(Tool.ROAD, { x: 1, y: 2 }, world);
+    expect(world.getSchoolCoverageMap().getCoverage(1, 2)).toBe(0);
+  });
+});
+
+describe('CommandDispatcher PARK placement + dirty-marking', () => {
+  function makeWorld8(): World {
+    return new World(8, 8, { regenerate: false });
+  }
+
+  it('places a 1×1 PARK, registers structure, and deducts PARK_COST', () => {
+    const world = makeWorld8();
+    const before = world.getMoney();
+    const result = executeClick(Tool.PARK, { x: 2, y: 2 }, world);
+    expect(result.changedTiles).toHaveLength(1);
+    expect(world.getMap().getTile(2, 2)?.type).toBe(TileType.PARK);
+    expect(world.getStructureMap().getStructureAt(2, 2)).not.toBeNull();
+    expect(world.getMoney()).toBe(before - PARK_COST);
+  });
+
+  it('placing a park near a zone raises land value after recomputeLandValueIfDirty (lazy model)', () => {
+    const world = makeWorld8();
+    // Place a zone tile adjacent to the park anchor.
+    executeClick(Tool.ZONE_RESIDENTIAL, { x: 1, y: 2 }, world);
+    executeClick(Tool.PARK, { x: 2, y: 2 }, world);
+    // Park placement marks land value dirty; drain via explicit recompute.
+    world.recomputeLandValueIfDirty();
+    // Land value near the park should be greater than the default of 0.
+    expect(world.getLandValue().getValue(1, 2)).toBeGreaterThan(0);
+  });
+
+  it('rejects placement on non-grass (road)', () => {
+    const world = makeWorld8();
+    world.getMap().setTile(2, 2, createTile(2, 2, TileType.ROAD));
+    const result = executeClick(Tool.PARK, { x: 2, y: 2 }, world);
+    expect(result.changedTiles).toHaveLength(0);
+    expect(world.getMap().getTile(2, 2)?.type).toBe(TileType.ROAD);
+  });
+});
+
+describe('CommandDispatcher — park placement (TileType + cost regression guard)', () => {
+  it('place-structure park writes TileType.PARK (not POWER_PLANT) and deducts exactly PARK_COST', () => {
+    // Flat world: all vertices at height 2 (above sea level, fully flat).
+    const world = new World(8, 8, { regenerate: false });
+    for (let vy = 0; vy <= 8; vy++) {
+      for (let vx = 0; vx <= 8; vx++) {
+        world.getTerrain().unsafeSetVertexHeight(vx, vy, 2);
+      }
+    }
+    const before = world.getMoney();
+    const result = applyCommands(
+      [{ kind: 'place-structure', x: 3, y: 3, structureType: 'park' }],
+      world,
+    );
+    // The 1×1 footprint cell must be PARK, never POWER_PLANT.
+    expect(world.getMap().getTile(3, 3)?.type).toBe(TileType.PARK);
+    // Exactly one changed tile.
+    expect(result.changedTiles).toContainEqual({ x: 3, y: 3 });
+    // Cost is exactly PARK_COST.
+    expect(world.getMoney()).toBe(before - PARK_COST);
+  });
+});
+
+// ---- Traffic dirty-marking tests ----
+
+describe('CommandDispatcher traffic dirty-marking — (a) ROAD edit changes observable congestion', () => {
+  /**
+   * Seed a minimal origin→destination traffic scenario. Buildings use frontage N
+   * so the access road is on row y=0.
+   *
+   * Layout (8×8 world, regenerate:false, all grass default):
+   *   Row 0: ROAD tiles at x=0..3 (connected chain)
+   *   (0,1): ZONE_RESIDENTIAL tile, building with frontage N (access via road at (0,0))
+   *   (3,2): ZONE_COMMERCIAL tile, building with frontage N (access via road at (3,0) through chain)
+   *
+   * Initial traffic: residential trips flow along the road chain → non-zero congestion on (1,0).
+   * After bulldozing road at (1,0): (2,0) and (3,0) are severed from (0,0), so the path is
+   * broken and congestion drops to 0 on (1,0).
+   */
+  it('bulldozing a road tile changes getCongestion on that tile (route severed)', () => {
+    const world = new World(8, 8, { regenerate: false });
+    const map = world.getMap();
+
+    // Place road chain at row 0, x=0..3.
+    for (let x = 0; x <= 3; x++) {
+      map.setTile(x, 0, createTile(x, 0, TileType.ROAD));
+    }
+    // Residential zone tile at (0,1).
+    map.setTile(0, 1, createTile(0, 1, TileType.ZONE_RESIDENTIAL));
+    // Commercial zone tile at (3,2).
+    map.setTile(3, 2, createTile(3, 2, TileType.ZONE_COMMERCIAL));
+
+    // Add a residential building at (0,1) with frontage N — access node on row 0 at x=0.
+    map.getBuildings().addBuilding({
+      type: 'residential',
+      footprint: [{ x: 0, y: 1 }],
+      anchor: { x: 0, y: 1 },
+      level: 4,
+      density: 1,
+      age: 0,
+      abandoned: false,
+      frontage: 'N',
+      structureRect: { x: 0, y: 1, w: 1, h: 1 },
+    });
+    // Add a commercial building at (3,2) with frontage N — access node on row 0..1 at x=3.
+    // Actually commercial at (3,2) with frontage N accesses road at (3,1), not row 0.
+    // Use (3,1) as ROAD so access node is there.
+    map.setTile(3, 1, createTile(3, 1, TileType.ROAD));
+    map.setTile(3, 2, createTile(3, 2, TileType.ZONE_COMMERCIAL));
+    map.getBuildings().addBuilding({
+      type: 'commercial',
+      footprint: [{ x: 3, y: 2 }],
+      anchor: { x: 3, y: 2 },
+      level: 2,
+      density: 1,
+      age: 0,
+      abandoned: false,
+      frontage: 'N',
+      structureRect: { x: 3, y: 2, w: 1, h: 1 },
+    });
+
+    // Drain traffic to get a baseline — getTrafficMap() drains on read.
+    world.markTrafficDirty();
+    const trafficBefore = world.getTrafficMap().getCongestion(1, 0);
+    // There is a valid route, so congestion should be non-zero.
+    expect(trafficBefore).toBeGreaterThan(0);
+
+    // Bulldoze the road at (1,0) — severs the chain so the residential building
+    // can no longer reach the commercial building.
+    executeClick(Tool.BULLDOZE, { x: 1, y: 0 }, world);
+
+    // getTrafficMap() drains the dirty flag set by the dispatcher.
+    const trafficAfter = world.getTrafficMap().getCongestion(1, 0);
+    expect(trafficAfter).toBe(0);
+  });
+});
+
+describe('CommandDispatcher traffic dirty-marking — (b) structure place/remove calls markTrafficDirty', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('placing a water tower calls markTrafficDirty', () => {
+    const world = new World(8, 8, { regenerate: false });
+    const spy = vi.spyOn(world, 'markTrafficDirty');
+    executeClick(Tool.WATER_TOWER, { x: 2, y: 2 }, world);
+    expect(spy).toHaveBeenCalled();
+  });
+
+  it('removing a structure via bulldoze calls markTrafficDirty', () => {
+    const world = new World(8, 8, { regenerate: false });
+    executeClick(Tool.WATER_TOWER, { x: 2, y: 2 }, world);
+    const spy = vi.spyOn(world, 'markTrafficDirty');
+    executeClick(Tool.BULLDOZE, { x: 2, y: 2 }, world);
+    expect(spy).toHaveBeenCalled();
+  });
+});
+
+describe('CommandDispatcher traffic dirty-marking — (c) zone-bulldoze removing a building', () => {
+  it('bulldozing a zone tile that holds a building changes congestion (OD set shrinks)', () => {
+    const world = new World(8, 8, { regenerate: false });
+    const map = world.getMap();
+
+    // Road chain at row 0, x=0..3.
+    for (let x = 0; x <= 3; x++) {
+      map.setTile(x, 0, createTile(x, 0, TileType.ROAD));
+    }
+    // Road connecting commercial access.
+    map.setTile(3, 1, createTile(3, 1, TileType.ROAD));
+
+    // Residential zone at (0,1) — building with level=4, frontage N.
+    map.setTile(0, 1, createTile(0, 1, TileType.ZONE_RESIDENTIAL));
+    map.getBuildings().addBuilding({
+      type: 'residential',
+      footprint: [{ x: 0, y: 1 }],
+      anchor: { x: 0, y: 1 },
+      level: 4,
+      density: 1,
+      age: 0,
+      abandoned: false,
+      frontage: 'N',
+      structureRect: { x: 0, y: 1, w: 1, h: 1 },
+    });
+
+    // Commercial zone at (3,2) — building with level=2, frontage N.
+    map.setTile(3, 2, createTile(3, 2, TileType.ZONE_COMMERCIAL));
+    map.getBuildings().addBuilding({
+      type: 'commercial',
+      footprint: [{ x: 3, y: 2 }],
+      anchor: { x: 3, y: 2 },
+      level: 2,
+      density: 1,
+      age: 0,
+      abandoned: false,
+      frontage: 'N',
+      structureRect: { x: 3, y: 2, w: 1, h: 1 },
+    });
+
+    // Drain to baseline.
+    world.markTrafficDirty();
+    const trafficBefore = world.getTrafficMap().getCongestion(1, 0);
+    expect(trafficBefore).toBeGreaterThan(0);
+
+    // Bulldoze the commercial zone tile at (3,2) — removes the building (the only destination),
+    // so no trips can be assigned and congestion drops to 0.
+    executeClick(Tool.BULLDOZE, { x: 3, y: 2 }, world);
+
+    // getTrafficMap() drains the dirty flag (set via the removedBuildingIds fold).
+    const trafficAfter = world.getTrafficMap().getCongestion(1, 0);
+    expect(trafficAfter).toBe(0);
+  });
+});
+
+describe('CommandDispatcher — removal-only batches are never blocked by cost', () => {
+  function makeWorld8(): World {
+    return new World(8, 8, { regenerate: false });
+  }
+
+  it('bulldozing a power plant at zero treasury still removes it: 4 changed tiles, structure gone, money stays 0', () => {
+    const world = makeWorld8();
+    executeClick(Tool.POWER_PLANT, { x: 2, y: 2 }, world);
+    world.trySpend(world.getMoney()); // drain to 0
+    const result = executeClick(Tool.BULLDOZE, { x: 2, y: 2 }, world);
+    expect(result.changedTiles).toHaveLength(4);
+    for (let dy = 0; dy <= 1; dy++) {
+      for (let dx = 0; dx <= 1; dx++) {
+        expect(world.getMap().getTile(2 + dx, 2 + dy)?.type).toBe(TileType.DIRT);
+      }
+    }
+    expect(world.getStructureMap().getStructureAt(2, 2)).toBeNull();
+    expect(world.getMoney()).toBe(0);
+  });
+
+  it('drag-bulldozing two zoned tiles at money=1 (< 2×BULLDOZE_COST) charges only min(total, money), landing money at exactly 0', () => {
+    const world = makeWorld8();
+    executeClick(Tool.ZONE_RESIDENTIAL, { x: 2, y: 2 }, world);
+    executeClick(Tool.ZONE_RESIDENTIAL, { x: 3, y: 2 }, world);
+    expect(world.setMoney(1)).toBe(true);
+    const result = executeDrag(Tool.BULLDOZE, { x: 2, y: 2 }, { x: 3, y: 2 }, world);
+    expect(result.changedTiles).toHaveLength(2);
+    expect(world.getMap().getTile(2, 2)?.type).toBe(TileType.DIRT);
+    expect(world.getMap().getTile(3, 2)?.type).toBe(TileType.DIRT);
+    expect(world.getMoney()).toBe(0);
+  });
+
+  it('drag-bulldozing two zoned tiles at an affordable balance still charges the full 2×BULLDOZE_COST (regression control)', () => {
+    const world = makeWorld8();
+    executeClick(Tool.ZONE_RESIDENTIAL, { x: 2, y: 2 }, world);
+    executeClick(Tool.ZONE_RESIDENTIAL, { x: 3, y: 2 }, world);
+    expect(world.setMoney(BULLDOZE_COST * 3)).toBe(true);
+    const result = executeDrag(Tool.BULLDOZE, { x: 2, y: 2 }, { x: 3, y: 2 }, world);
+    expect(result.changedTiles).toHaveLength(2);
+    expect(world.getMoney()).toBe(BULLDOZE_COST * 3 - BULLDOZE_COST * 2);
+  });
+
+  it('a hand-built mixed batch (remove-structure + a non-removal tile write) at zero treasury stays all-or-nothing (regression control)', () => {
+    const world = makeWorld8();
+    executeClick(Tool.POWER_PLANT, { x: 2, y: 2 }, world);
+    const structure = world.getStructureMap().getStructureAt(2, 2);
+    expect(structure).not.toBeNull();
+    const structureId = structure!.id;
+    world.trySpend(world.getMoney()); // drain to 0
+
+    const result = applyCommands(
+      [
+        { kind: 'remove-structure', structureId },
+        { kind: 'tile', x: 5, y: 5, tile: createTile(5, 5, TileType.ROAD) },
+      ],
+      world,
+    );
+
+    expect(result.changedTiles).toEqual([]);
+    expect(world.getStructureMap().getStructureAt(2, 2)).not.toBeNull();
+    expect(world.getMoney()).toBe(0);
+  });
+});
+
+describe('place-structure upkeep reaches happiness without a tick', () => {
+  it('placing a power plant lowers getHappiness() on the very next read', () => {
+    // What this pins is the END-TO-END contract — a placement's cost AND its new monthly upkeep
+    // both show in the very next getHappiness() read, with no tick() in between — not any single
+    // dirty path. Every structure type sets all seven invalidation flags in applyCommands, so the
+    // charge, the coverage cascade and the traffic cascade all fire on this placement; the test
+    // deliberately does not attribute the refresh to one of them.
+    //
+    // The expectations are closed-form because the fixture has NO residential building:
+    // recomputeHappiness scores landScore 0 when residentialCount === 0, so the
+    // coverage-to-land-value refresh this placement also triggers cannot move the result; the
+    // workforce is empty, so unemploymentRate()'s empty-workforce guard puts the employment term
+    // at 1; and with no commuters there are no flows, so congestion is 0. The budget term is the
+    // only input left that can move.
+    const world = makeWorld();
+    expect(world.getMap().getBuildings().addExistingBuilding({
+      id: 1, type: 'commercial',
+      footprint: [{ x: 0, y: 0 }], anchor: { x: 0, y: 0 },
+      level: 1, density: 0, age: 0, abandoned: false, frontage: 'S',
+      structureRect: { x: 0, y: 0, w: 1, h: 1 },
+    })).toBe(true);
+    expect(world.setMoney(STARTING_FUNDS)).toBe(true);
+
+    // The one commercial's capacity (1×1 structureRect × level 1 × 5) is the whole tax base —
+    // and the reason the empty-city happiness shortcut is not taken.
+    expect(world.getPopulation()).toBe(5);
+    const monthlyIncome = Math.floor(world.getPopulation() * TAX_PER_POP) * DAYS_PER_MONTH;
+
+    // Full treasury and zero upkeep (no structures, no roads) → both halves of the budget term
+    // sit at 1.
+    const h0 = world.getHappiness();
+    expect(h0).toBeCloseTo(HAPPINESS_W_JOBS + HAPPINESS_W_BUDGET, 8);
+
+    expect(executeClick(Tool.POWER_PLANT, { x: 2, y: 2 }, world).changedTiles).toHaveLength(4);
+    expect(world.getMoney()).toBe(STARTING_FUNDS - POWER_PLANT_COST);
+
+    // No tick() and no other mark between the two reads. The budget term is retyped by hand
+    // rather than read back from `budgetHealthScore` — calling the production function on both
+    // sides would make this a tautology that a formula dropping the upkeep argument entirely
+    // still satisfies. Neither half is clamped here: the stock half is 0.9 and the flow half
+    // 0.95, both interior.
+    //
+    // A deliberate LOCAL copy of the blend, whose canonical hand-derived helper is
+    // `blendBudgetHealth` in game/core/World.test.ts. No *.test.ts under game/ imports from
+    // another *.test.ts, and standing up cross-file test-helper infrastructure for this one
+    // call site is not worth it.
+    const h1 = world.getHappiness();
+    const expectedBudgetHealth =
+      BUDGET_W_STOCK * ((STARTING_FUNDS - POWER_PLANT_COST) / STARTING_FUNDS)
+      + BUDGET_W_FLOW * (1 + (monthlyIncome - POWER_PLANT_UPKEEP) / BUDGET_DEFICIT_SPAN);
+    expect(h1).toBeCloseTo(HAPPINESS_W_JOBS + HAPPINESS_W_BUDGET * expectedBudgetHealth, 8);
+    expect(h1).toBeLessThan(h0);
+  });
+});
