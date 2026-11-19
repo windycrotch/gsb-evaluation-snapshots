@@ -256,13 +256,26 @@ def _process_single_soundbite(
     nosubs_suffix = _NOSUBS_SUFFIX if not show_subtitles else ""
     enabled_formats = [fmt for fmt, cfg in formats_config.items() if cfg.get('enabled', True)]
 
-    if not force and enabled_formats:
-        expected_mp4s = [
-            os.path.join(sb_dir,
-                         f"ep{selected['number']}_sb{soundbite_num}{nosubs_suffix}_{fmt}.mp4")
-            for fmt in enabled_formats
-        ]
-        if all(os.path.exists(p) for p in expected_mp4s):
+    def _mp4_path(format_name):
+        return os.path.join(
+            sb_dir,
+            f"ep{selected['number']}_sb{soundbite_num}{nosubs_suffix}_{format_name}.mp4"
+        )
+
+    # Per-format completion tracking: a format counts as done only if its MP4
+    # exists on disk. Without --force, only missing/failed formats are rendered.
+    if force:
+        pending_formats = list(enabled_formats)
+    else:
+        pending_formats = [fmt for fmt in enabled_formats
+                           if not os.path.exists(_mp4_path(fmt))]
+        done_formats = [fmt for fmt in enabled_formats if fmt not in pending_formats]
+        if done_formats:
+            logger.info(
+                "Soundbite %d: format(s) already rendered, skipping re-encode: %s",
+                soundbite_num, ", ".join(done_formats)
+            )
+        if enabled_formats and not pending_formats:
             logger.info("Skipping soundbite %d — output already exists (use --force to overwrite).",
                         soundbite_num)
             return {fmt: formats_config[fmt].get('description', fmt) for fmt in enabled_formats}
@@ -328,38 +341,48 @@ def _process_single_soundbite(
         soundbite_title = soundbite.get('text') or soundbite.get('title')
 
         def _render_one_format(format_name):
-            output_path = os.path.join(
-                sb_dir,
-                f"ep{selected['number']}_sb{soundbite_num}{nosubs_suffix}_{format_name}.mp4"
-            )
+            output_path = _mp4_path(format_name)
             logger.info("Generating audiogram %s...", formats_info[format_name])
-            generate_audiogram(
-                segment_path,
-                output_path,
-                format_name,
-                logo_path,
-                podcast_info['title'],
-                selected['title'],
-                transcript_chunks,
-                float(soundbite['duration']),
-                formats_config,
-                colors,
-                show_subtitles,
-                header_title_source=header_title_source,
-                header_soundbite_title=soundbite_title,
-                fonts=fonts,
-                cta=cta,
-            )
+            try:
+                generate_audiogram(
+                    segment_path,
+                    output_path,
+                    format_name,
+                    logo_path,
+                    podcast_info['title'],
+                    selected['title'],
+                    transcript_chunks,
+                    float(soundbite['duration']),
+                    formats_config,
+                    colors,
+                    show_subtitles,
+                    header_title_source=header_title_source,
+                    header_soundbite_title=soundbite_title,
+                    fonts=fonts,
+                    cta=cta,
+                )
+            except Exception:
+                # A failed render must not leave a partial MP4 behind that a
+                # later run would mistake for a completed format.
+                try:
+                    if os.path.exists(output_path):
+                        os.remove(output_path)
+                        logger.info("Removed partial output after failed render: %s", output_path)
+                except OSError as cleanup_err:
+                    logger.warning("Could not remove partial output %s: %s",
+                                   output_path, cleanup_err)
+                raise
             logger.info("✓ %s: %s", format_name, output_path)
             return format_name, output_path
 
-        with ThreadPoolExecutor(max_workers=len(formats_info)) as executor:
-            futures = {executor.submit(_render_one_format, fmt): fmt for fmt in formats_info}
+        with ThreadPoolExecutor(max_workers=len(pending_formats)) as executor:
+            futures = {executor.submit(_render_one_format, fmt): fmt for fmt in pending_formats}
             for future in as_completed(futures):
                 try:
                     future.result()
                 except Exception as e:
-                    logger.error("Format %s rendering failed: %s", futures[future], e)
+                    logger.error("Soundbite %d: format '%s' rendering failed: %s",
+                                 soundbite_num, futures[future], e)
                     failed_formats.append(futures[future])
 
     logger.info("Generating caption file...")
