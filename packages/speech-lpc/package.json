@@ -1,0 +1,47 @@
+{
+  "name": "@audio/speech-lpc",
+  "version": "1.0.2",
+  "description": "Linear Predictive Coding analysis/synthesis",
+  "type": "module",
+  "sideEffects": false,
+  "main": "lpc.js",
+  "exports": {
+    ".": "./lpc.js",
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "prepublishOnly": "node ../../../compile/tools/tested.js"
+  },
+  "files": [
+    "lpc.js",
+    "lpc.d.ts"
+  ],
+  "dependencies": {
+    "@audio/lpc": "^1.0.0"
+  },
+  "keywords": [
+    "audio",
+    "dsp",
+    "speech",
+    "lpc"
+  ],
+  "license": "MIT",
+  "author": "Dmitry Iv. <dfcreative@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/audiojs/filter.git",
+    "directory": "packages/speech-lpc"
+  },
+  "homepage": "https://github.com/audiojs/filter/tree/main/packages/speech-lpc",
+  "bugs": {
+    "url": "https://github.com/audiojs/filter/issues"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "types": "lpc.d.ts",
+  "funding": "https://github.com/sponsors/audiojs"
+}
