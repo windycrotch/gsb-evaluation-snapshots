@@ -31,6 +31,13 @@ export interface VideoWriter<TFrame> {
   addFrame(frame: TFrame, timestampMicros: number, durationMicros: number): Promise<void> | void;
   /** Flushes the encoder and returns the finished file bytes. */
   finalize(): Promise<Uint8Array>;
+  /**
+   * Invalidates any partial output after a failure or cancellation. Called by
+   * the orchestrator before {@link VideoWriter.dispose} whenever the export did
+   * not complete, so a container that already holds one track (e.g. audio) is
+   * never finalised — or later mistaken — for a finished file.
+   */
+  abort?(): Promise<void> | void;
   /** Releases encoder/muxer resources on failure or cancellation. */
   dispose?(): Promise<void> | void;
 }

@@ -57,6 +57,7 @@ function fakeWriter(): VideoWriter<FakeFrame> & { frames: { frame: number; ts: n
       frames.push({ frame: f.frame, ts });
     }),
     finalize: vi.fn(async () => new Uint8Array([1, 2, 3])),
+    abort: vi.fn(),
     dispose: vi.fn(),
   };
 }
@@ -215,5 +216,97 @@ describe("runVideoExport", () => {
     expect(close).toHaveBeenCalledOnce();
     expect(source.dispose).toHaveBeenCalledOnce();
     expect(writer.dispose).toHaveBeenCalledOnce();
+  });
+
+  it("does not abort the writer when the export succeeds", async () => {
+    const writer = fakeWriter();
+    await runVideoExport({ plan: plan(2), frameSource: fakeSource(), videoWriter: writer });
+    expect(writer.abort).not.toHaveBeenCalled();
+    expect(writer.finalize).toHaveBeenCalledOnce();
+    expect(writer.dispose).toHaveBeenCalledOnce();
+  });
+
+  it("aborts the writer before disposing it when cancelled mid-export", async () => {
+    const controller = new AbortController();
+    const writer = fakeWriter();
+    const source: FrameSource<FakeFrame> = {
+      renderFrame: vi.fn(async (frame: number) => {
+        if (frame === 1) controller.abort();
+        return { frame, close: vi.fn() };
+      }),
+      dispose: vi.fn(),
+    };
+
+    await expect(
+      runVideoExport({
+        plan: plan(10),
+        frameSource: source,
+        videoWriter: writer,
+        signal: controller.signal,
+      }),
+    ).rejects.toBeInstanceOf(ExportCancelledError);
+
+    // The partial output is invalidated, never finalised…
+    expect(writer.abort).toHaveBeenCalledOnce();
+    expect(writer.finalize).not.toHaveBeenCalled();
+    // …and invalidation happens before teardown.
+    const abortOrder = (writer.abort as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0]!;
+    const disposeOrder = (writer.dispose as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0]!;
+    expect(abortOrder).toBeLessThan(disposeOrder);
+  });
+
+  it("aborts the writer when a frame fails to encode", async () => {
+    const writer = fakeWriter();
+    (writer.addFrame as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error("encoder blew up"),
+    );
+
+    await expect(
+      runVideoExport({ plan: plan(3), frameSource: fakeSource(), videoWriter: writer }),
+    ).rejects.toThrow("encoder blew up");
+    expect(writer.abort).toHaveBeenCalledOnce();
+    expect(writer.finalize).not.toHaveBeenCalled();
+    expect(writer.dispose).toHaveBeenCalledOnce();
+  });
+
+  it("never lets cleanup failures mask the original error", async () => {
+    const source: FrameSource<FakeFrame> = {
+      renderFrame: async (frame) => ({ frame, close: vi.fn() }),
+      dispose: vi.fn(() => {
+        throw new Error("source dispose failed");
+      }),
+    };
+    const writer: VideoWriter<FakeFrame> = {
+      addFrame: async () => {
+        throw new Error("encoder blew up");
+      },
+      finalize: async () => new Uint8Array(),
+      abort: vi.fn(() => {
+        throw new Error("abort failed");
+      }),
+      dispose: vi.fn(() => {
+        throw new Error("writer dispose failed");
+      }),
+    };
+
+    await expect(
+      runVideoExport({ plan: plan(3), frameSource: source, videoWriter: writer }),
+    ).rejects.toThrow("encoder blew up");
+    expect(writer.abort).toHaveBeenCalledOnce();
+    expect(writer.dispose).toHaveBeenCalledOnce();
+  });
+
+  it("does not let a dispose failure mask a successful result", async () => {
+    const writer = fakeWriter();
+    (writer.dispose as ReturnType<typeof vi.fn>).mockImplementation(() => {
+      throw new Error("dispose failed");
+    });
+
+    const bytes = await runVideoExport({
+      plan: plan(2),
+      frameSource: fakeSource(),
+      videoWriter: writer,
+    });
+    expect(bytes).toEqual(new Uint8Array([1, 2, 3]));
   });
 });

@@ -36,9 +36,11 @@ export interface RunVideoExportOptions<TFrame> {
 
 /**
  * Renders every frame in the plan and encodes it, returning the finished file
- * bytes. Throws {@link ExportCancelledError} if the signal aborts, and always
- * disposes the source and writer — including on error — so a failed or
- * cancelled export never leaks an encoder or a decoder.
+ * bytes. Throws {@link ExportCancelledError} if the signal aborts. Any failure
+ * or cancellation aborts the writer first — so partial output (e.g. a container
+ * holding only its audio track) is invalidated rather than finalised — and then
+ * disposes the source and writer, so a failed or cancelled export never leaks a
+ * frame, a decoder, or an encoder. Cleanup failures never mask the real outcome.
  */
 export async function runVideoExport<TFrame>(
   options: RunVideoExportOptions<TFrame>,
@@ -78,6 +80,11 @@ export async function runVideoExport<TFrame>(
 
     report("done", plan.totalFrames);
     return bytes;
+  } catch (error) {
+    // The export did not finish, so its partial output must never be treated as
+    // a product: give the writer the chance to invalidate it before teardown.
+    await safeAbort(videoWriter);
+    throw error;
   } finally {
     // Dispose in a fixed order regardless of how we got here.
     await safeDispose(frameSource);
@@ -101,5 +108,14 @@ async function safeDispose(target: { dispose?: () => Promise<void> | void }): Pr
   } catch {
     // A cleanup failure must not mask the real outcome (success or the original
     // error); the resources are being discarded regardless.
+  }
+}
+
+async function safeAbort(target: { abort?: () => Promise<void> | void }): Promise<void> {
+  try {
+    await target.abort?.();
+  } catch {
+    // Same rule as safeDispose: invalidating partial output is best-effort
+    // cleanup and must never replace the error that caused it.
   }
 }

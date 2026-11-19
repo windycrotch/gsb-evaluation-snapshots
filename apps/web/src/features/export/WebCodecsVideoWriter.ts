@@ -106,6 +106,15 @@ export class WebCodecsVideoWriter implements VideoWriter<VideoFrame> {
     return this.container.finalize();
   }
 
+  /**
+   * Invalidates the shared container so its partial contents — which may
+   * already include the whole audio track — can never be finalised into a
+   * file that looks like a finished export.
+   */
+  abort(): void {
+    this.container.discard();
+  }
+
   dispose(): void {
     if (this.encoder.state !== "closed") this.encoder.close();
   }

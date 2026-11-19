@@ -73,34 +73,53 @@ export async function exportProjectToBlob(
     : null;
 
   const container = MediaContainer.create(plan, videoConfig, audioConfig);
-  if (mixed && audioConfig) {
-    await encodeAudioBuffer(mixed, audioConfig, container);
-  }
-  throwIfCancelled();
-
   const cache = new MediaTextureCache(store);
-  const frameSource = await PixiExportFrameSource.create(
-    project,
-    store,
-    cache,
-    plan.resolution,
-    plan.frameRate,
-    plan.startFrame,
-    plan.endFrame,
-  );
-  const videoWriter = WebCodecsVideoWriter.create(plan, container, videoConfig);
+  try {
+    if (mixed && audioConfig) {
+      await encodeAudioBuffer(mixed, audioConfig, container);
+    }
+    throwIfCancelled();
 
-  const bytes = await runVideoExport({
-    plan,
-    frameSource,
-    videoWriter,
-    signal: options.signal,
-    onProgress: options.onProgress,
-  });
+    const frameSource = await PixiExportFrameSource.create(
+      project,
+      store,
+      cache,
+      plan.resolution,
+      plan.frameRate,
+      plan.startFrame,
+      plan.endFrame,
+    );
+    const videoWriter = WebCodecsVideoWriter.create(plan, container, videoConfig);
 
-  const mime = MIME_BY_FORMAT[plan.format] ?? "application/octet-stream";
-  const blob = new Blob([bytes as BlobPart], { type: mime });
-  return { blob, filename: `${sanitize(project.name)}.${plan.format}` };
+    // The orchestrator owns the frame loop from here: on cancel or error it
+    // aborts the writer (which discards this container) and disposes both ends.
+    const bytes = await runVideoExport({
+      plan,
+      frameSource,
+      videoWriter,
+      signal: options.signal,
+      onProgress: options.onProgress,
+    });
+
+    const mime = MIME_BY_FORMAT[plan.format] ?? "application/octet-stream";
+    const blob = new Blob([bytes as BlobPart], { type: mime });
+    return { blob, filename: `${sanitize(project.name)}.${plan.format}` };
+  } catch (error) {
+    // Belt and braces: the orchestrator already discards the container for
+    // failures inside the frame loop; this covers everything before it (audio
+    // encode, source/writer setup) so a container with only its audio track is
+    // never finalised into a "finished" file. Discard is idempotent.
+    container.discard();
+    throw error;
+  } finally {
+    // The cache exists only for this export; releasing it must not mask the
+    // export's own outcome.
+    try {
+      cache.destroy();
+    } catch {
+      // ignore cleanup failure
+    }
+  }
 }
 
 /** Makes a project name safe to use as a download filename. */

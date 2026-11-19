@@ -19,6 +19,13 @@ type Backing =
   { kind: "mp4"; muxer: Mp4Muxer<Mp4Target> } | { kind: "webm"; muxer: WebmMuxer<WebmTarget> };
 
 export class MediaContainer {
+  /**
+   * Set when the export failed or was cancelled partway. A discarded container
+   * can never be finalised, so a file missing its video track can't be handed
+   * to the user as a finished export.
+   */
+  private discarded = false;
+
   private constructor(private readonly backing: Backing) {}
 
   static create(
@@ -73,8 +80,20 @@ export class MediaContainer {
     this.backing.muxer.addAudioChunk(chunk, meta);
   }
 
+  /**
+   * Marks the container as failed. Idempotent; called when the export is
+   * cancelled or errors after some chunks (possibly the whole audio track)
+   * were already muxed, so the partial file is never emitted as a result.
+   */
+  discard(): void {
+    this.discarded = true;
+  }
+
   /** Finishes the file and returns its bytes. Call once, after all chunks. */
   finalize(): Uint8Array {
+    if (this.discarded) {
+      throw new Error("Export was cancelled or failed — the partial file has been discarded.");
+    }
     this.backing.muxer.finalize();
     return new Uint8Array(this.backing.muxer.target.buffer);
   }

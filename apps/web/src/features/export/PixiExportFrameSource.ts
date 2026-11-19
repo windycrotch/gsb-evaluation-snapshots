@@ -52,24 +52,37 @@ export class PixiExportFrameSource implements FrameSource<VideoFrame> {
     // Pixel ratio 1: the backing store is exactly the requested output size.
     await renderer.init(canvas, resolution.width, resolution.height, 1);
 
-    // Every timestamp the export will need, planned before decoding starts —
-    // the decoders require the whole ordered list to walk each stream once.
-    const schedule = planVideoDecodeSchedule(project, startFrame, endFrame);
-    const decoders = await ExactVideoDecoders.create(project, store, schedule);
+    let decoders: ExactVideoDecoders | null = null;
+    try {
+      // Every timestamp the export will need, planned before decoding starts —
+      // the decoders require the whole ordered list to walk each stream once.
+      const schedule = planVideoDecodeSchedule(project, startFrame, endFrame);
+      decoders = await ExactVideoDecoders.create(project, store, schedule);
 
-    // Give each exactly-decoded video a canvas-backed texture, so the renderer's
-    // ordinary `cache.peek` lookup finds decoded frames without knowing it.
-    for (const mediaId of schedule.keys()) {
-      if (!decoders.has(mediaId)) continue;
-      const dimensions = project.entities.media[mediaId]?.metadata.dimensions;
-      cache.registerDecodedVideo(
-        mediaId,
-        dimensions?.width ?? resolution.width,
-        dimensions?.height ?? resolution.height,
-      );
+      // Give each exactly-decoded video a canvas-backed texture, so the renderer's
+      // ordinary `cache.peek` lookup finds decoded frames without knowing it.
+      for (const mediaId of schedule.keys()) {
+        if (!decoders.has(mediaId)) continue;
+        const dimensions = project.entities.media[mediaId]?.metadata.dimensions;
+        cache.registerDecodedVideo(
+          mediaId,
+          dimensions?.width ?? resolution.width,
+          dimensions?.height ?? resolution.height,
+        );
+      }
+
+      return new PixiExportFrameSource(project, renderer, cache, resolution, frameRate, decoders);
+    } catch (error) {
+      // Setup failed partway: don't leak the decoder pool or the GL context,
+      // and don't let cleanup failure mask the original error.
+      try {
+        await decoders?.dispose();
+      } catch {
+        // ignore cleanup failure
+      }
+      renderer.destroy();
+      throw error;
     }
-
-    return new PixiExportFrameSource(project, renderer, cache, resolution, frameRate, decoders);
   }
 
   async renderFrame(frame: number): Promise<VideoFrame> {
