@@ -278,6 +278,10 @@ export function buildViewModel({ hearts: heartCount }: { hearts: number }) {
       swing = 0
       return true
     },
+    /** Drops a swing in flight before its blade lands: the player was struck down. */
+    cancel() {
+      swing = -1
+    },
     /**
      * bob: walk cycle phase, stride: 0..1 walk speed, turn: yaw speed in rad/s, rise: metres a second upward,
      * health: hearts left. Returns struck: true in the frame the blade of a swing lands.

@@ -42,6 +42,7 @@ One frame (`advance` in `main.ts`):
 step(dt) ──▶ mobs.update() ──▶ hearts their blows take ──▶ hurt()      (not within GRACE_SECONDS of the last blow)
          ──▶ hands.update() ─▶ struck: the blade lands ──▶ mobs.strike() ──▶ flash, knock back, flecks, death
          ──▶ MobEvent[] from both ──▶ audio.play()        (MOB_SOUNDS maps what a creature did to a sound)
+         ──▶ game.events ◀── the combat log: every swing, strike, blow, hurt, down and rise, in the same order
          ──▶ render()
 ```
 
@@ -107,6 +108,7 @@ The painter follows https://patch.gg/blendi/oil-paint (source: `~/Documents/GitH
   and pitch are in `audio.ts`. The gusts heard are the gusts seen: `gustAt` in `paint.ts` mirrors the shader.
 - **Game state** is in `player` (`main.ts`) and in each `Mob`. Events between them are return values:
   `mobs.update()` returns the damage dealt, `hands.update()` returns `struck`. `window.game.mobs.list` shows them.
+  `window.game.events` is the combat log: one entry per thing the fight does, in order — see "checking the fight".
 - Per-frame work is the player step, the creatures, the sparks and two render calls. `window.game.counts` shows the dab counts.
 
 ## hand sprites
@@ -144,3 +146,69 @@ game.manual = true; game.stick.y = -1; game.tick(1 / 24) // step frame by frame 
 ```
 
 Compare `snap` output with frames of the reference video side by side. Keep the palette measured, not guessed.
+
+## checking the fight
+
+`window.game` records the fight as it happens. `game.events` is the combat log: one entry per thing, in
+order — the player's `swing`, `strike` (with `hits`, how many creatures the blade reached), `playerHurt`
+(with `damage` and the `health` left), `down` and `rise`, and each creature's `alert`, `blow`, `hurt`,
+`death` and `idle` (with `x`, `z`, `voice`). A frame's sounds follow its entries one to one, so what is
+heard is what is logged; the hit sound plays exactly when a `strike` has `hits > 0`. `game.swing()` starts
+a swing, as the swing key does. Run these in the console of `pnpm dev`, each block after the one before.
+
+**A pack lands one blow, not three.** Put the player in the camp on the path and pull its goblins into reach:
+
+```js
+game.manual = true
+game.snap({ x: 1.5, z: -27, yaw: 0, pitch: -0.05 })
+const pack = game.mobs.list.filter((m) => m.stance !== 'dead')
+  .sort((a, b) => Math.hypot(a.x - 1.5, a.z + 27) - Math.hypot(b.x - 1.5, b.z + 27))
+pack.slice(0, 3).forEach((m, i) => { m.x = 1.5 + Math.cos(i * 2.1) * 1.2; m.z = -27 + Math.sin(i * 2.1) * 1.2 })
+game.events.length = 0
+for (let i = 0; i < 60; i++) game.tick(1 / 60)
+game.events.filter((e) => e.type === 'blow')       // three clubs come down, in the same frame or two
+game.events.filter((e) => e.type === 'playerHurt') // but only one entry, damage 1: the pack takes one heart
+```
+
+Blows that land in the same frame count as the hardest one, and for GRACE_SECONDS (0.8 s) after a blow no
+other lands: a second `playerHurt` shows only once the grace has passed. While a goblin is in `windup` its
+club is up; watch `pack[0].stance` walk `chase → windup → recover` as you tick.
+
+**The sword settles once, hit or miss.** Face one goblin from 1.5 m and swing:
+
+```js
+const m = pack[0]
+game.snap({ x: m.x, z: m.z + 1.5, yaw: 0, pitch: -0.05 })
+game.events.length = 0
+game.swing()
+for (let i = 0; i < 30; i++) game.tick(1 / 60)
+game.events // swing, strike {hits: 1}, hurt — in that order; m.health is one less, m.stance is 'reel'
+```
+
+One swing settles once: a second `game.swing()` while the blade is still out is refused and logs nothing.
+The struck goblin's windup is broken (`reel`), so its club never comes down. Swing twice more (30 ticks
+apart) and it dies: the log reads `hurt`, `hurt`, `death` in order, its stance stays `dead` while it lies,
+and no `blow` is logged from where it fell —
+`game.events.filter((e) => e.type === 'blow' && Math.hypot(e.x - m.x, e.z - m.z) < 1)` stays empty.
+From 10 m away (`game.snap({ x: m.x, z: m.z + 10, yaw: 0 })`) the same swing logs `strike {hits: 0}` and
+no `hurt`: a miss makes no hit sound.
+
+**Struck down, everything resets.** With the pack still around you, take the last heart:
+
+```js
+game.player.health = 1
+game.events.length = 0
+for (let i = 0; i < 600 && game.player.down < 0; i++) game.tick(1 / 60)
+game.swing()                       // refused while down: no swing entry, no sound
+for (let i = 0; i < 200; i++) game.tick(1 / 60)   // through the 2.8 s on the ground
+const log = game.events, down = log.findIndex((e) => e.type === 'down'), rise = log.findIndex((e) => e.type === 'rise')
+log.slice(down, rise).every((e) => e.type !== 'playerHurt' && e.type !== 'swing') // true: untouched while down
+game.player.health                 // 5, and the player is back at the forest (0, 14)
+game.mobs.list.every((m) => m.stance === 'roam' && m.health === m.kind.health &&
+  Math.hypot(m.x - m.home.x, m.z - m.home.z) < 1e-6) // true: every creature home and whole
+for (let i = 0; i < 120; i++) game.tick(1 / 60)
+game.mobs.list.some((m) => m.stance === 'chase' || m.stance === 'windup') // false: nothing still hunts the old spot
+```
+
+Between `down` and `rise` the log shows no `playerHurt` and no `swing`; after `rise` no creature is in
+`chase` or `windup`, so no club is still swinging at the spot where the player fell.

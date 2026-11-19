@@ -204,6 +204,25 @@ bakeShade({ renderer, scene: world.scene, center: new THREE.Vector3(0, 0, -75), 
 const camera = new THREE.PerspectiveCamera(70, 1, 0.25, 9000)
 camera.rotation.order = 'YXZ'
 
+// The combat log (`window.game.events`): one entry for everything the fight does, in the order it happens.
+// A frame's sounds follow its entries one to one, so what is heard is what is logged.
+type CombatEvent =
+  | { time: number; type: 'swing' }
+  | { time: number; type: 'strike'; hits: number }
+  | { time: number; type: MobEvent['type']; x: number; z: number; voice: number }
+  | { time: number; type: 'playerHurt'; damage: number; health: number }
+  | { time: number; type: 'down' }
+  | { time: number; type: 'rise' }
+type WithoutTime<T> = T extends unknown ? Omit<T, 'time'> : never
+type CombatNote = WithoutTime<CombatEvent>
+const COMBAT_LOG_MOST = 400
+const combatLog: CombatEvent[] = []
+let clock = 3
+const note = (event: CombatNote) => {
+  combatLog.push({ time: clock, ...event })
+  if (combatLog.length > COMBAT_LOG_MOST) combatLog.splice(0, combatLog.length - COMBAT_LOG_MOST)
+}
+
 const player = {
   ...world.start,
   vx: 0,
@@ -282,7 +301,9 @@ function look({ dx, dy, speed }: { dx: number; dy: number; speed: number }) {
 
 /** the sword is swung, if the player stands and it is not in a swing already */
 function swing() {
-  if (player.down < 0 && hands.swing()) audio.play({ sound: 'swing' })
+  if (player.down >= 0 || !hands.swing()) return
+  note({ type: 'swing' })
+  audio.play({ sound: 'swing' })
 }
 
 // a browser makes no sound before the player touches the page
@@ -367,17 +388,22 @@ function hurt(damage: number) {
   player.health = Math.max(0, player.health - damage)
   player.calm = 0
   player.blow = 1
+  note({ type: 'playerHurt', damage, health: player.health })
   audio.play({ sound: player.health > 0 ? 'hurt' : 'down' })
   if (player.health > 0) return
   player.down = 0
   player.grounded = true
   player.vx = player.vz = 0
+  // a swing in flight dies with the player: no strike lands from it while it lies
+  hands.cancel()
+  note({ type: 'down' })
 }
 
 /** the player starts again at the forest, whole, and so do the creatures */
 function rise() {
   Object.assign(player, world.start, { vx: 0, vz: 0, stride: 0, grounded: true, vy: 0, dip: 0, health: MAX_HEALTH, calm: 0, down: -1 })
   mobs.reset()
+  note({ type: 'rise' })
 }
 
 function step(dt: number) {
@@ -473,6 +499,7 @@ const handsUpdate = (dt: number, time: number) =>
   hands.update({ dt, time, bob: player.bob, stride: player.stride, turn: turnSpeed, rise: player.grounded ? 0 : player.vy, health: player.health })
 
 function advance(dt: number, time: number) {
+  clock = time
   step(dt)
   audio.update({ x: player.x, z: player.z, yaw: player.yaw, gust: gustAt({ x: player.x, z: player.z, time }) })
   const { damage, events } = mobs.update({ dt, time, prey: prey() })
@@ -480,10 +507,14 @@ function advance(dt: number, time: number) {
   const { struck } = handsUpdate(dt, time)
   if (struck && player.down < 0) {
     const cries = mobs.strike({ x: player.x, z: player.z, yaw: player.yaw, ...SWORD })
-    if (cries.some((cry) => cry.type === 'hurt' || cry.type === 'death')) audio.play({ sound: 'hit' })
+    // one swing settles once: the hit sound and the log count the creatures it reached
+    const hits = cries.filter((cry) => cry.type === 'hurt' || cry.type === 'death').length
+    note({ type: 'strike', hits })
+    if (hits > 0) audio.play({ sound: 'hit' })
     events.push(...cries)
   }
   for (const { type, x, z, voice } of events) {
+    note({ type, x, z, voice })
     audio.play({ sound: MOB_SOUNDS[type], rate: voice, at: { x, z }, delay: type === 'alert' ? Math.random() * ALERT_STAGGER_SECONDS : 0 })
   }
   const darkest = player.down < 0 ? 0 : THREE.MathUtils.smoothstep(player.down, 0.6, 2)
@@ -501,6 +532,10 @@ const debug = {
   hands,
   audio,
   finish: finish.material.uniforms,
+  /** the combat log: everything the fight did, in order (see "checking the fight" in AGENTS.md) */
+  events: combatLog,
+  /** starts a swing of the sword, as the swing key does */
+  swing,
   manual: false,
   time: 3,
   /** place the player, draw one frame, return it as a PNG data URL */

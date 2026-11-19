@@ -521,7 +521,8 @@ export function buildMobs({ scene, colliders, walkable }: { scene: THREE.Scene; 
   }
 
   const revive = (mob: Mob) => {
-    Object.assign(mob, mob.home, { health: mob.kind.health, goal: mob.home, rest: 0, pushX: 0, pushZ: 0, flash: 0 })
+    // home, whole and at rest: no chase, blow or knock-back is left over from the last round
+    Object.assign(mob, mob.home, { health: mob.kind.health, goal: mob.home, rest: 0, pushX: 0, pushZ: 0, pace: 0, flash: 0 })
     enter(mob, 'roam')
   }
 
