@@ -1,5 +1,6 @@
 export { Upscaler, type UpscalerOptions } from './Upscaler';
 export { UpscalerNotReadyError } from '@pmndrs/upscaler-core/initializationError';
+export { SplitFrameError } from '@pmndrs/upscaler-core/splitFrameError';
 export { MomentsPass, type MomentsPassConfig, type MomentsSpace } from './MomentsPass';
 export { UpscalePass, type UpscalePassConfig } from './UpscalePass';
 export { UpscalerNode, upscale, upscaleSpatial, upscaleScene, type UpscalerNodeOptions } from './UpscalerNode';

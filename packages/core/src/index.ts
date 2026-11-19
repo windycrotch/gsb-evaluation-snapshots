@@ -9,6 +9,7 @@ export {
     type TextureAllocator,
 } from './textures';
 export { UpscalerNotReadyError } from './initializationError';
+export { SplitFrameError } from './splitFrameError';
 export {
     DebugView,
     QualityMode,

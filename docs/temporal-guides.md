@@ -108,6 +108,26 @@ upscaler.dispatchUpscale({ color: beautyColor, deltaTime }, camera); // + reacti
 - A split frame is in flight between the two calls (`upscaler.guidesPending`). Inside it,
   `dispatch()` and a second `dispatchGuides()` throw; finish with `dispatchUpscale()`.
   `dispatchUpscale()` without a preceding `dispatchGuides()` throws too.
+- Ordering violations throw a **`SplitFrameError`** (`error.code === 'UPSCALER_SPLIT_FRAME'`,
+  exported from every entry), never a plain `Error`. The `reason` field names the broken
+  rule — `guides-already-pending`, `upscale-without-guides`, `dispatch-while-pending`,
+  `camera-mismatch`, or `reset-mismatch` — so callers can branch on it. The throw happens
+  before any constants upload or pass encoding, so the frame counter, history/depth indices
+  and `guidesPending` are unchanged: catch it, finish the pending frame correctly (or
+  reconfigure), and retry.
+- **The two stages are one frame and must describe one frame.** `dispatchUpscale()` receives
+  the same camera facts (`near`/`far`, projection type, reversed depth) as
+  `dispatchGuides()`; a difference throws `camera-mismatch` instead of rewriting the shared
+  constants buffer under a new depth convention. A `reset` flag may not appear only on the
+  late stage — pass it to both (or call `resetHistory()` before the next frame) — or
+  `reset-mismatch` throws. Color-dependent inputs (reactive mask, external exposure) are
+  still free to differ, since the late constants rewrite exists precisely for those.
+- **Abandoning a half frame.** `configure()` or `dispose()` between the two calls clears the
+  pending split: `guidesPending` becomes `false` and the snapshot is dropped, so the next
+  dispatch cannot mistake the abandoned frame for one still in flight. After `dispose()`,
+  every dispatch entry point reports the standard not-initialized error
+  (`UpscalerNotReadyError`) rather than touching released resources; re-`configure()` and
+  `await prepare()` to start over.
 - Frame-end bookkeeping (ping-pong flips, the history reset) happens once per frame: in
   `dispatch()`, in `dispatchUpscale()`, or, on the `guides` path, in `dispatchGuides()`.
 - `upscaler.gpuTimings` reports both submits together: the early stage's timings are held

@@ -14,3 +14,4 @@ export {
     type UpscalerConfig,
 } from './types';
 export { UpscalerNotReadyError } from '@pmndrs/upscaler-core/initializationError';
+export { SplitFrameError } from '@pmndrs/upscaler-core/splitFrameError';

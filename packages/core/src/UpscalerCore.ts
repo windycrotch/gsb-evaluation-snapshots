@@ -1,5 +1,6 @@
 import { ComputePass } from './internal/ComputePass';
 import { notReadyError } from './initializationError';
+import { SplitFrameError } from './splitFrameError';
 import { ConstantsBuffer } from './internal/ConstantsBuffer';
 import { GpuTimer } from './internal/GpuTimer';
 import { JitterSequence } from './math/jitter';
@@ -107,6 +108,26 @@ export type UpscalerCoreInternalOptions<THandle = GPUTexture> = UpscalerCoreOpti
     // frame, from the guides stage.
     _reprojectData?: () => Float32Array<ArrayBuffer>;
 };
+
+/**
+ * The frame identity shared by the two stages of a split frame. The late
+ * stage must present the same camera facts and reset intent as the early
+ * stage — otherwise rewriting the shared constants buffer mid-frame would
+ * change the depth convention or history reset the GPU work already
+ * encoded against the original values.
+ * @internal
+ */
+interface SplitFrameSnapshot {
+    /** `near`/`far` and the resolved projection kind/depth convention. */
+    camera: {
+        near: number;
+        far: number;
+        perspective: boolean;
+        reversedDepth: boolean;
+    };
+    /** The reset flag after the early stage applied its own `inputs.reset`. */
+    reset: boolean;
+}
 
 /**
  * The engine-agnostic FSR3-style upscaler: raw WGSL compute passes on a
@@ -259,9 +280,14 @@ export class UpscalerCore<THandle = GPUTexture> {
     // dispatches) and after the frame-end index flips.
     private _latestDepthWrite = 0;
     private _latestHistoryWrite = 0;
+    // The frame facts the two split stages must agree on. Captured by
+    // dispatchGuides() after every validation passes, so the pending frame's
+    // constants buffer is never rewritten under a different camera/reset.
+    private _stagedGuides: SplitFrameSnapshot | null = null;
     // A split frame is in flight: dispatchGuides() ran, dispatchUpscale()
-    // hasn't. Guards against double-encoding the guides stage.
-    private _guidesPending = false;
+    // hasn't. The snapshot is the frame identity the late stage must match;
+    // configure()/dispose() clear it to abandon the half frame.
+    private _pendingGuides: SplitFrameSnapshot | null = null;
 
     constructor(options: UpscalerCoreOptions<THandle>);
     constructor(options: UpscalerCoreInternalOptions<THandle>) {
@@ -611,7 +637,7 @@ export class UpscalerCore<THandle = GPUTexture> {
      * between finishing the split frame and the monolithic {@link dispatch}.
      */
     get guidesPending(): boolean {
-        return this._guidesPending;
+        return this._pendingGuides !== null;
     }
 
     /**
@@ -706,16 +732,20 @@ export class UpscalerCore<THandle = GPUTexture> {
     }
 
     private _stageFrame(inputs: DispatchInputs, camera: FrameCamera): void {
+        // Order guard first: interrupting a split frame must fail without any
+        // side effect (no readiness bookkeeping, no constants rewrite), so the
+        // in-flight half frame stays finishable.
+        if (this._pendingGuides) {
+            throw new SplitFrameError(
+                'dispatch-while-pending',
+                'a split frame is in flight — finish it with dispatchUpscale() ' +
+                    'instead of dispatch(), or clear it with configure()/dispose().',
+            );
+        }
         this._startDispatch();
         if (this._path === 'guides') {
             throw new Error(
                 "@pmndrs/upscaler: the 'guides' path has no upscale — drive it with dispatchGuides().",
-            );
-        }
-        if (this._guidesPending) {
-            throw new Error(
-                '@pmndrs/upscaler: a split frame is in flight — finish it with dispatchUpscale() ' +
-                    'instead of dispatch().',
             );
         }
         if (!this._output || !this._outputGPU) {
@@ -796,6 +826,15 @@ export class UpscalerCore<THandle = GPUTexture> {
     }
 
     private _stageGuides(inputs: GuideDispatchInputs, camera: FrameCamera): void {
+        // Pure ordering checks before any side effect: a rejected stage leaves
+        // frame counters, history indices and guidesPending untouched.
+        if (this._pendingGuides) {
+            throw new SplitFrameError(
+                'guides-already-pending',
+                'dispatchGuides() already ran this frame — finish the split frame with ' +
+                    'dispatchUpscale(), or clear it with configure()/dispose() before starting another.',
+            );
+        }
         this._startDispatch();
         if (this._path !== 'temporal' && this._path !== 'guides') {
             throw new Error(
@@ -805,23 +844,35 @@ export class UpscalerCore<THandle = GPUTexture> {
         if (!this._dilatedMotion) {
             throw new Error('@pmndrs/upscaler: configure() must run before dispatchGuides().');
         }
-        if (this._guidesPending) {
-            throw new Error(
-                '@pmndrs/upscaler: dispatchGuides() already ran this frame — finish with dispatchUpscale().',
-            );
-        }
+        // Resolve the camera identity up front so a malformed camera throws
+        // before anything is staged.
+        const perspective = isPerspective(camera);
         this._writeConstants(inputs, camera);
         this._constants.upload();
+        // Captured only after every validation and the upload succeed, so the
+        // snapshot can never describe a stage that did not encode.
+        this._stagedGuides = {
+            camera: {
+                near: camera.near,
+                far: camera.far,
+                perspective,
+                reversedDepth: camera.reversedDepth ?? false,
+            },
+            reset: this._pendingReset,
+        };
     }
 
     private _endGuides(): void {
         if (this._path === 'guides') {
-            // The frame ends here — there is no late stage.
+            // The frame ends here — there is no late stage. The staged
+            // snapshot is consumed rather than published.
+            this._stagedGuides = null;
             this._frameIndex++;
             this._pendingReset = false;
             this._depthIndex = 1 - this._depthIndex;
         } else {
-            this._guidesPending = true;
+            this._pendingGuides = this._stagedGuides;
+            this._stagedGuides = null;
         }
     }
 
@@ -860,30 +911,71 @@ export class UpscalerCore<THandle = GPUTexture> {
     }
 
     private _stageUpscale(inputs: DispatchInputs, camera: FrameCamera): void {
-        if (!this.isReady) throw new Error("@pmndrs/upscaler: await init() (or prepare()) before dispatchUpscale().");
+        if (!this.isReady) {
+            throw notReadyError(this, 'Upscaler', this._deviceLost ? 'device-lost' : 'preparing');
+        }
         if (this._path !== 'temporal') {
             throw new Error(
                 `@pmndrs/upscaler: dispatchUpscale() requires the temporal path (got '${this._path}').`,
             );
         }
-        if (!this._guidesPending) {
-            throw new Error(
-                '@pmndrs/upscaler: call dispatchGuides() first (or use the all-in-one dispatch()).',
+        if (!this._pendingGuides) {
+            throw new SplitFrameError(
+                'upscale-without-guides',
+                'call dispatchGuides() first (or use the all-in-one dispatch()).',
             );
         }
         if (!this._output || !this._outputGPU) {
             throw new Error('@pmndrs/upscaler: configure() must run before dispatchUpscale().');
         }
 
+        // The stages share one constants buffer, already uploaded by the
+        // guides stage with this frame's camera/reset. Refuse to rewrite it
+        // under different frame identity — a mismatch here would change depth
+        // conventions or silently reset history for the encoded early work.
+        // All checks run before _writeConstants, so a mismatch leaves the
+        // pending frame and every counter/index exactly as it was.
+        const expected = this._pendingGuides;
+        const perspective = isPerspective(camera);
+        const actualCamera = {
+            near: camera.near,
+            far: camera.far,
+            perspective,
+            reversedDepth: camera.reversedDepth ?? false,
+        };
+        if (
+            actualCamera.near !== expected.camera.near ||
+            actualCamera.far !== expected.camera.far ||
+            actualCamera.perspective !== expected.camera.perspective ||
+            actualCamera.reversedDepth !== expected.camera.reversedDepth
+        ) {
+            throw new SplitFrameError(
+                'camera-mismatch',
+                'dispatchUpscale() must receive the same camera facts as dispatchGuides() ' +
+                    `(guides: near=${expected.camera.near}, far=${expected.camera.far}, ` +
+                    `perspective=${expected.camera.perspective}, reversedDepth=${expected.camera.reversedDepth}; ` +
+                    `upscale: near=${actualCamera.near}, far=${actualCamera.far}, ` +
+                    `perspective=${actualCamera.perspective}, reversedDepth=${actualCamera.reversedDepth}).`,
+            );
+        }
+        const wantsReset = expected.reset || inputs.reset === true;
+        if (wantsReset !== expected.reset) {
+            throw new SplitFrameError(
+                'reset-mismatch',
+                'dispatchUpscale() cannot add a reset the guides stage did not encode — pass the same ' +
+                    '`reset` flag to both stages (or resetHistory() before the next frame).',
+            );
+        }
+
         // Rewritten (not reused) so color-dependent flags — reactive, external
-        // exposure — reflect this call's inputs. Jitter and reset state are
-        // unchanged since the guides stage, so the shared UBO stays coherent.
+        // exposure — reflect this call's inputs. Jitter, camera and reset state
+        // match the guides stage (verified above), so the shared UBO stays coherent.
         this._writeConstants(inputs, camera);
         this._constants.upload();
     }
 
     private _endUpscale(): void {
-        this._guidesPending = false;
+        this._pendingGuides = null;
         this._frameIndex++;
         this._pendingReset = false;
         this._historyIndex = 1 - this._historyIndex;
@@ -898,6 +990,10 @@ export class UpscalerCore<THandle = GPUTexture> {
         this._failures.clear();
         this._shadingActive = false;
         this._debugActive = false;
+        // Abandon any half frame so a later configure() cannot observe a
+        // pending split against a fresh resource generation.
+        this._pendingGuides = null;
+        this._stagedGuides = null;
         this._destroyTextures();
         this._constants?.dispose();
         this._reprojectBuffer?.destroy();
@@ -1602,7 +1698,10 @@ export class UpscalerCore<THandle = GPUTexture> {
             history: null,
         };
         this._guides = null;
-        this._guidesPending = false;
+        // Any split frame whose working set is being torn down is abandoned:
+        // a later dispatch must not believe half a frame is still in flight.
+        this._pendingGuides = null;
+        this._stagedGuides = null;
         this._history = null;
         this._locks = null;
         this._dilatedDepth = null;

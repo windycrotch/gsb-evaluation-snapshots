@@ -267,9 +267,12 @@ function frame(dt: number) {
   `transparent: true` and `blending: NoBlending`; an opaque material resolves alpha
   to 1. See [Alpha](inputs-and-contracts.md#alpha).
 - **Split frames and guides:** `dispatchGuides()` / `dispatchUpscale()` and
-  `path: 'guides'` are specified in [Temporal guides](temporal-guides.md).
+  `path: 'guides'` are specified in [Temporal guides](temporal-guides.md). Out-of-order
+  stages throw `SplitFrameError` (`code: 'UPSCALER_SPLIT_FRAME'`) without changing any
+  frame state; `configure()` / `dispose()` abandon a half frame cleanly.
 - **Teardown:** `dispose()` releases every GPU resource the upscaler allocated,
-  including the guide textures. It doesn't touch your inputs.
+  including the guide textures. It doesn't touch your inputs. After it, dispatches throw
+  `UpscalerNotReadyError` until you re-`configure()` and `await prepare()`.
 
 ## Runtime settings
 

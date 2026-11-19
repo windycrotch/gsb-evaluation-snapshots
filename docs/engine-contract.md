@@ -213,6 +213,17 @@ whatever samples the output.
   color. Effects that want the guides run in between. With the `encode` forms,
   submit the guides encoder before calling `encodeUpscale`, for the same
   constants-buffer reason.
+- **Split-frame ordering is a diagnosed contract.** Out-of-order stages (a second
+  `dispatchGuides`, `dispatchUpscale` without its guides, or the monolithic `dispatch`
+  mid-split) throw `SplitFrameError` (`code: 'UPSCALER_SPLIT_FRAME'`; reasons
+  `guides-already-pending` / `upscale-without-guides` / `dispatch-while-pending`). The
+  late stage must also present the same camera facts and `reset` intent as the early
+  stage — `camera-mismatch` / `reset-mismatch` otherwise — because the shared constants
+  buffer was already uploaded for the early work. Every such throw precedes the upload
+  and encoding, leaving the frame counter, history indices and `guidesPending`
+  untouched. `configure()` / `dispose()` while a split is pending abandon it cleanly;
+  after `dispose()` the dispatches report `UpscalerNotReadyError` until a fresh
+  `configure()` + `prepare()`.
 - **Engines with an open render pass.** The core encodes compute passes, so an
   engine that keeps a render pass open across its frame (Babylon, for one) must
   close it before handing over its encoder, or dispatch on its own encoder after
