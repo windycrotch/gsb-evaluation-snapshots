@@ -1,0 +1,158 @@
+[![CI](https://github.com/pygfx/rendercanvas/workflows/CI/badge.svg)](https://github.com/pygfx/rendercanvas/actions)
+[![Documentation Status](https://readthedocs.org/projects/rendercanvas/badge/?version=stable)](https://rendercanvas.readthedocs.io)
+[![PyPI version](https://badge.fury.io/py/rendercanvas.svg)](https://badge.fury.io/py/rendercanvas)
+[![EffVer Versioning](https://img.shields.io/badge/version_scheme-EffVer-0097a7)](https://jacobtomlinson.dev/effver)
+[![Zenodo badge](https://zenodo.org/badge/DOI/10.5281/zenodo.18922945.svg)](https://doi.org/10.5281/zenodo.18922945)
+
+
+<h1 align="center"><img src="https://github.com/user-attachments/assets/74ddfc1e-03ae-4965-afe9-8697ec4614b5" height="128"><br>rendercanvas</h1>
+
+One canvas API, multiple backends 🚀
+
+<div>
+  <img width=354 src='https://github.com/user-attachments/assets/42656d13-0d81-47dd-b9c7-d76da8cfa6c1' />
+  <img width=354 src='https://github.com/user-attachments/assets/af8eefe0-4485-4daf-9fbd-36710e44f07c' />
+</div>
+
+*This project is part of [pygfx.org](https://pygfx.org)*
+
+
+## Introduction
+
+See how the two windows above look the same? That's the idea; they also look the
+same to the code that renders to them. Yet, the GUI systems are very different
+(Qt vs glfw in this case). Now that's a powerful abstraction!
+
+
+
+## Purpose
+
+Providing a generic API for:
+
+* managing a canvas window ([`BaseRenderCanvas`](https://rendercanvas.readthedocs.io/stable/api.html)).
+* presenting rendered results with `wgpu` ([`WgpuContext`](https://rendercanvas.readthedocs.io/stable/contexts.html#rendercanvas.contexts.WgpuContext)).
+* presenting rendered results as a bitmap ([`BitmapContext`](https://rendercanvas.readthedocs.io/stable/contexts.html#rendercanvas.contexts.BitmapContext)).
+* working with events that have standardized behavior.
+
+The following backends are currently available:
+
+* `auto` - automatically selects an appropriate backend.
+* `glfw` - a native desktop window.
+* `offscreen` - for offscreen rendering.
+* `terminal` - to render in the terminal (e.g. over SSH).
+* `qt` (`pyside6` / `pyside2` / `pyqt6` / `pyqt5`) - to embed a render canvas in a qt GUI.
+* `wx` - to embed a render canvas in a wx GUI.
+* `anywidget` - for notebooks like Jupyter, VSCode, and Marimo.
+* `jupyter` - previous backend for notebooks that uses jupyter_rfb.
+* `http` - for server side rendering, display in a browser connected via the internet.
+* `pyodide` - to run in the browser with Pyodide or PyScript.
+
+In addition to the GUI libraries mentioned above, the following event loops are supported:
+
+  * `asyncio`
+  * `trio`
+  * `raw`
+
+
+## Installation
+
+```
+pip install rendercanvas
+```
+
+To have at least one backend, we recommend:
+```
+pip install rendercanvas glfw
+```
+
+## Usage
+
+Also see the [online documentation](https://rendercanvas.readthedocs.io) and the [examples](https://github.com/pygfx/rendercanvas/tree/main/examples).
+
+A minimal example that renders noise:
+```py
+import numpy as np
+from rendercanvas.auto import RenderCanvas, loop
+
+canvas = RenderCanvas(update_mode="continuous")
+context = canvas.get_bitmap_context()
+
+
+@canvas.request_draw
+def animate():
+    w, h = canvas.get_logical_size()
+    bitmap = np.random.uniform(0, 255, (h, w)).astype(np.uint8)
+    context.set_bitmap(bitmap)
+
+
+loop.run()
+```
+
+Run wgpu visualizations:
+```py
+from rendercanvas.auto import RenderCanvas, loop
+from rendercanvas.utils.cube import setup_drawing_sync
+
+
+canvas = RenderCanvas(
+    title="The wgpu cube example on $backend", update_mode="continuous"
+)
+draw_frame = setup_drawing_sync(canvas)
+canvas.request_draw(draw_frame)
+
+loop.run()
+````
+
+Embed in a Qt application:
+```py
+from PySide6 import QtWidgets
+from rendercanvas.qt import QRenderWidget
+
+
+class Main(QtWidgets.QWidget):
+    def __init__(self):
+        super().__init__()
+
+        splitter = QtWidgets.QSplitter()
+        self.canvas = QRenderWidget(splitter)
+        ...
+
+
+app = QtWidgets.QApplication([])
+main = Main()
+app.exec()
+```
+
+## Async or not async
+
+We support both; a render canvas can be used in a fully async setting using e.g. Asyncio or Trio, or in an event-driven framework like Qt.
+If you like callbacks, ``loop.call_later()`` always works. If you like async, use ``loop.add_task()``.
+See the [docs on async](https://rendercanvas.readthedocs.io/stable/start.html#async) for details.
+
+
+## License
+
+This code is distributed under the 2-clause BSD license.
+
+
+## Contributing
+
+See the [contribution guide](CONTRIBUTING.md).
+
+### Development install
+
+* Clone the repo.
+* Install `rendercanvas` and developer deps using `pip install -e .[dev]`.
+
+### Quick tips
+
+* Use `ruff format` to apply autoformatting.
+* Use `ruff check` to check for linting errors.
+* Use `pytest tests` to run the tests.
+* Use `pytest examples` to run a subset of the examples.
+* Use `pytest tests/test_backend_xx.py` to run backend-specific tests, e.g. for `glfw`, `qt`, `wx`.
+
+### Code of Conduct
+
+This repository follows the [PyGfx Code of Conduct](https://github.com/pygfx/pygfx/blob/main/CODE_OF_CONDUCT.md)
+

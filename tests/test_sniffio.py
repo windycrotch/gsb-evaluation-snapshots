@@ -1,0 +1,113 @@
+"""
+Test the behaviour of our asyncadapter w.r.t. sniffio.
+"""
+
+
+# ruff: noqa: N803
+
+import asyncio
+
+from testutils import run_tests
+from rendercanvas.base import BaseCanvasGroup, BaseRenderCanvas
+from rendercanvas.asyncio import loop as asyncio_loop
+
+from rendercanvas.asyncio import AsyncioLoop
+from rendercanvas.trio import TrioLoop
+from rendercanvas.raw import RawLoop
+
+import sniffio
+import pytest
+
+
+class CanvasGroup(BaseCanvasGroup):
+    pass
+
+
+class StubContext:
+    def _rc_present(self, force_sync=False):
+        return {"method": "skip"}
+
+    def _rc_close(self):
+        pass
+
+
+class RealRenderCanvas(BaseRenderCanvas):
+    _rc_canvas_group = CanvasGroup(asyncio_loop)
+
+    def __init__(self):
+        super().__init__()
+        self._count = 0
+        self._present_to_screen = False
+        self._canvas_context = StubContext()
+
+    def _rc_close(self):
+        self.submit_event({"event_type": "close"})
+
+
+def get_sniffio_name():
+    try:
+        return sniffio.current_async_library()
+    except sniffio.AsyncLibraryNotFoundError:
+        return None
+
+
+@pytest.mark.parametrize("SomeLoop", [RawLoop, AsyncioLoop, TrioLoop])
+def test_sniffio_on_loop(SomeLoop):
+    loop = SomeLoop()
+
+    RealRenderCanvas.select_loop(loop)
+
+    c = RealRenderCanvas()
+
+    names = []
+
+    @c.request_draw
+    def draw():
+        name = get_sniffio_name()
+        names.append(("draw", name))
+
+    @c.add_event_handler("*")
+    def on_event(event):
+        names.append((event["event_type"], get_sniffio_name()))
+
+    async def task():
+        names.append(("task", get_sniffio_name()))
+
+    loop.add_task(task)
+    loop.call_later(0.3, c.close)
+    # loop.call_later(1.3, loop.stop)  # failsafe
+
+    loop.run()
+
+    for key, val in names:
+        if key == "close":
+            continue
+        assert val == "rendercanvas.utils.asyncadapter"
+
+
+def test_asyncio():
+    # Just make sure that in a call_soon/call_later the get_running_loop stil works
+
+    loop = asyncio.new_event_loop()
+
+    running_loops = []
+
+    def set_current_loop(name):
+        running_loops.append((name, asyncio.get_running_loop()))
+
+    loop.call_soon(set_current_loop, "call_soon")
+    loop.call_later(0.1, set_current_loop, "call_soon")
+    loop.call_soon(loop.call_soon_threadsafe, set_current_loop, "call_soon_threadsafe")
+    loop.call_later(0.2, loop.stop)
+    loop.run_forever()
+
+    print(running_loops)
+    assert len(running_loops) == 3
+    for name, running_loop in running_loops:
+        assert running_loop is loop
+
+    loop.close()
+
+
+if __name__ == "__main__":
+    run_tests(globals())
