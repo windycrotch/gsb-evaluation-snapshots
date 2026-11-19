@@ -129,7 +129,7 @@ draw.sprite(glow, 0, 0, { origin: [0, 0], scaleX: 2, scaleY: 2, smooth: true });
 draw.disposeTarget(glow);                             // when you're done with it
 ```
 
-- `into()` nests, and restores the outer transform, clips, alpha and destination afterwards, even if `fn` throws. The **blend mode and an active `withShader` are not reset**: they apply inside the target and stay as `fn` left them (`begin()` resets both each frame).
+- `into()` nests, and restores the outer transform, clips, alpha and destination afterwards, even if `fn` throws. On WebGL2 the backend saves the destination it replaces (target, logical size and output height), so leaving an inner target rebinds the outer framebuffer and viewport, and the outer clips flip against the outer height again. The **blend mode and an active `withShader` are not reset**: they apply inside the target and stay as `fn` left them (`begin()` resets both each frame).
 - Drawing a target into itself, disposing it while you're drawing into it, or making it larger than the GPU's `MAX_TEXTURE_SIZE` throws. Sizes must be whole pixels.
 - Targets work on both backends. A real-GPU check confirms that drawing into a target and then drawing the target 1:1 gives the same pixels as drawing directly (`npm run test:browser`).
 - After a WebGL context loss, target contents are blank (GPU memory is gone). Check `draw.contextLost`, or redraw targets each frame.

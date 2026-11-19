@@ -382,6 +382,12 @@ export class WebGL2Backend implements Backend {
   protected outH = 1;
   private viewW = 1;
   private viewH = 1;
+  /**
+   * Destinations saved by `enterTarget`, innermost last: the target, its logical size and its output height.
+   * `exitTarget` pops one and makes it current again, so a target entered inside another leaves the outer's
+   * framebuffer, viewport, `u_view` and clip height as they were.
+   */
+  private readonly targetStack: { target: RenderTarget | null; width: number; height: number; outH: number }[] = [];
   /** True between webglcontextlost and webglcontextrestored: drawing is skipped. */
   protected lost = false;
   protected readonly onLost = (e: Event) => {
@@ -1174,6 +1180,8 @@ export class WebGL2Backend implements Backend {
     }
     this.textures.clear();
     this.targets.clear();
+    // A disposed backend binds nothing again, so destinations saved by an unfinished nest are dead too.
+    this.targetStack.length = 0;
     this.customs.clear();
     this.eachCustoms.clear();
     this.lastSrc = null;
@@ -1200,6 +1208,14 @@ export class WebGL2Backend implements Backend {
       return;
     }
     this.flush();
+    this.bindDestination(target);
+    this.viewW = width;
+    this.viewH = height;
+    if (clear !== null) this.clearTo(clear);
+  }
+
+  /** Rebind `target` (null: the canvas) with its viewport, and record its height for flipping clips. */
+  private bindDestination(target: RenderTarget | null): void {
     const gl = this.gl;
     if (target) {
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.targetStore(target).fbo);
@@ -1207,14 +1223,67 @@ export class WebGL2Backend implements Backend {
       this.outH = target.height;
     } else this.bindOutput();
     this.target = target;
+  }
+
+  /** Fill the bound destination with `clear` (0xRRGGBBAA), premultiplied like `begin()`. */
+  private clearTo(clear: number): void {
+    const gl = this.gl;
+    const a = (clear & 0xff) / 255;
+    gl.clearColor(((clear >>> 24) / 255) * a, (((clear >>> 16) & 0xff) / 255) * a, (((clear >>> 8) & 0xff) / 255) * a, a);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+  }
+
+  /**
+   * Enter `target` for `draw.into`, saving the destination it replaces so `exitTarget` can go back to it: the
+   * target itself, its logical size and its output height (which clips flip against). If the GPU refuses the
+   * target, its own error is rethrown and the saved destination stays current, so the caller's rollback has
+   * nothing to undo. On a lost context nothing is created or bound, but the destination still changes (and is
+   * saved) so Draw's view of it matches and `exitTarget` restores the outer one the same way.
+   */
+  enterTarget(target: RenderTarget, clear: number | null, width: number, height: number): void {
+    // Save first: everything below may throw, and the caller restores from Draw's own saved state either way.
+    this.targetStack.push({ target: this.target, width: this.viewW, height: this.viewH, outH: this.outH });
+    if (this.lost) {
+      // No GPU objects while the context is lost: no store, bind or clear. The destination still changes so Draw's
+      // state matches, and `exitTarget` restores the saved one the same way.
+      this.target = target;
+      this.viewW = width;
+      this.viewH = height;
+      return;
+    }
+    this.flush();
+    try {
+      this.bindDestination(target);
+    } catch (e) {
+      // The GPU refused the target (too large, incomplete framebuffer): keep the destination that was current.
+      this.targetStack.pop();
+      throw e;
+    }
     this.viewW = width;
     this.viewH = height;
-    if (clear !== null) {
-      // Premultiplied, like begin().
-      const a = (clear & 0xff) / 255;
-      gl.clearColor(((clear >>> 24) / 255) * a, (((clear >>> 16) & 0xff) / 255) * a, (((clear >>> 8) & 0xff) / 255) * a, a);
-      gl.clear(gl.COLOR_BUFFER_BIT);
+    if (clear !== null) this.clearTo(clear);
+  }
+
+  /** Return to the destination saved by `enterTarget`, rebinding its framebuffer, viewport and clip height. */
+  exitTarget(): void {
+    const outer = this.targetStack.pop();
+    if (!outer) return;
+    if (this.lost) {
+      // No GPU objects to bind; the saved destination is restored when the context comes back (begin() rebinds).
+      this.target = outer.target;
+      this.viewW = outer.width;
+      this.viewH = outer.height;
+      this.outH = outer.outH;
+      return;
     }
+    // Submit what's queued for the inner target first: it draws with the inner destination's logical size.
+    this.flush();
+    this.viewW = outer.width;
+    this.viewH = outer.height;
+    // Clip rects belong to the destination they were made for, so a clip set inside the inner target must not carry
+    // over as a scissor: Draw re-applies the outer clip's rect after this, flipped against the restored height.
+    this.bindDestination(outer.target);
+    this.outH = outer.outH;
   }
 
   disposeTarget(target: RenderTarget): void {

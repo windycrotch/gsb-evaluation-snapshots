@@ -137,6 +137,16 @@ export interface Backend {
    * size (`into`) or the canvas's logical size again (`mask`, whose targets match the canvas's backing pixels).
    */
   setTarget(target: RenderTarget | null, clear: number | null, width: number, height: number): void;
+  /**
+   * `setTarget(target, …)` while saving the destination it replaces: the target, its logical size and its height
+   * for flipping clips. `exitTarget()` returns to them, so a target entered inside another target leaves the outer
+   * one's framebuffer, viewport and clip height as they were. `into()` uses it; a backend without it falls back to
+   * `setTarget` both ways. A target the GPU refuses throws the same error, with the outer destination untouched.
+   * @internal
+   */
+  enterTarget?(target: RenderTarget, clear: number | null, width: number, height: number): void;
+  /** Return to the destination saved by `enterTarget`, rebinding its framebuffer and viewport. @internal */
+  exitTarget?(): void;
   /** Draw subsequent quads with a custom fragment effect (null: the default). */
   setShader(shader: Shader | null): void;
   /** Canvas 2D only: a CSS filter (`"none"` to clear) for subsequent draws. Its presence selects CSS filters in `filter()`. */

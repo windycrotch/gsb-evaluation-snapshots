@@ -489,6 +489,204 @@ describe("WebGL2Backend", () => {
       draw.end();
     });
 
+    it("nests: enterTarget/exitTarget save and restore the output height that clips flip against", () => {
+      const { gl, calls, created } = fakeGL();
+      const backend = new WebGL2Backend(gl);
+      const outer = new RenderTarget(40, 20);
+      const inner = new RenderTarget(10, 40);
+      // Both stores exist before the trace, so their creation's binds don't mix in.
+      backend.enterTarget(outer, null, 40, 20);
+      backend.exitTarget();
+      backend.enterTarget(inner, null, 10, 40);
+      backend.exitTarget();
+      calls.length = 0;
+      backend.enterTarget(outer, null, 40, 20);
+      backend.enterTarget(inner, null, 10, 40);
+      // Inside the 40-tall inner target a clip flips against 40: 40 - 0 - 5 = 35.
+      backend.setClip({ x: 0, y: 0, w: 10, h: 5 });
+      expect(calls.filter((c) => c.name === "scissor").at(-1)?.args).toEqual([0, 35, 10, 5]);
+      backend.exitTarget();
+      // Back on the 20-tall outer target the same clip flips against 20: 20 - 0 - 5 = 15.
+      backend.setClip({ x: 0, y: 0, w: 10, h: 5 });
+      expect(calls.filter((c) => c.name === "scissor").at(-1)?.args).toEqual([0, 15, 10, 5]);
+      const fbos = created.filter((o) => o.kind === "Framebuffer");
+      expect(calls.filter((c) => c.name === "bindFramebuffer").map((c) => c.args[1])).toEqual([fbos[0], fbos[1], fbos[0]]);
+    });
+
+    it("nests: entering a target inside another and leaving rebinds the outer framebuffer, viewport and u_view", () => {
+      const { gl, calls, created } = fakeGL();
+      const draw = new Draw(new WebGL2Backend(gl), false);
+      draw.begin("#000", 100, 50, 1);
+      const outer = draw.createTarget(40, 20);
+      const inner = draw.createTarget(10, 6);
+      // Both stores exist before the trace, so the creation's own binds don't mix in.
+      draw.into(outer, () => {});
+      draw.into(inner, () => {});
+      const fbos = created.filter((o) => o.kind === "Framebuffer");
+      draw.begin("#000", 100, 50, 1);
+      calls.length = 0;
+      draw.into(outer, () => {
+        draw.into(inner, () => draw.rect(0, 0, 1, 1, "#fff"));
+        draw.rect(0, 0, 1, 1, "#fff");
+      });
+      draw.rect(0, 0, 1, 1, "#fff");
+      draw.end();
+      // outer, inner, back to outer, then the canvas for the frame's own drawing.
+      const binds = calls.filter((c) => c.name === "bindFramebuffer").map((c) => c.args[1]);
+      expect(binds).toEqual([fbos[0], fbos[1], fbos[0], null]);
+      expect(calls.filter((c) => c.name === "viewport").map((c) => c.args)).toEqual([
+        [0, 0, 40, 20],
+        [0, 0, 10, 6],
+        [0, 0, 40, 20],
+        [0, 0, 100, 50],
+      ]);
+      // u_view follows the destination each batch draws into: 10×6 in the inner target, 40×20 for both batches
+      // after leaving it, then the canvas's 100×50 for the frame's own drawing.
+      expect(calls.filter((c) => c.name === "uniform2f").map((c) => c.args.slice(1))).toEqual([
+        [10, 6],
+        [40, 20],
+        [100, 50],
+      ]);
+    });
+
+    it("nests: leaving the inner target restores the outer clip flipped against the outer height, not the inner's", () => {
+      const { gl, calls } = fakeGL();
+      const draw = new Draw(new WebGL2Backend(gl), false);
+      draw.begin("#000", 100, 50, 1);
+      const outer = draw.createTarget(40, 20);
+      const inner = draw.createTarget(10, 40);
+      calls.length = 0;
+      draw.into(outer, () => {
+        draw.clip(0, 0, 10, 5, () => {
+          draw.into(inner, () => draw.clip(0, 0, 10, 5, () => draw.rect(0, 0, 1, 1, "#fff")));
+        });
+      });
+      // Inside the outer 20-tall target: 20 - 0 - 5 = 15. Inside the inner 40-tall target: 40 - 0 - 5 = 35.
+      // After leaving: the outer clip is back on, flipped against the outer's height again (15), never the inner's.
+      expect(calls.filter((c) => c.name === "scissor").map((c) => c.args)).toEqual([
+        [0, 15, 10, 5],
+        [0, 35, 10, 5],
+        [0, 15, 10, 5],
+      ]);
+      expect(draw.clips).toEqual([]);
+      draw.end();
+    });
+
+    it("nests: an inner target whose callback throws leaves the outer target, transform, alpha and clips as they were", () => {
+      const { gl, calls } = fakeGL();
+      const draw = new Draw(new WebGL2Backend(gl), false);
+      draw.begin("#000", 100, 50, 1);
+      const outer = draw.createTarget(40, 20);
+      const inner = draw.createTarget(10, 6);
+      draw.into(outer, () => {
+        draw.translate(3, 4);
+        draw.alpha = 0.25;
+        draw.clip(0, 0, 8, 4, () => {
+          const m = [...draw.m];
+          const clips = draw.clips.map((c) => ({ ...c }));
+          expect(() =>
+            draw.into(inner, () => {
+              throw new Error("boom");
+            }),
+          ).toThrow("boom");
+          expect(draw.target).toBe(outer);
+          expect(draw.m).toEqual(m);
+          expect(draw.alpha).toBe(0.25);
+          expect(draw.clips).toEqual(clips);
+          expect(draw.destW).toBe(40);
+          expect(draw.destH).toBe(20);
+          // Drawing after the throw lands in the outer target, at the outer's size and clip.
+          draw.rect(0, 0, 1, 1, "#fff");
+        });
+      });
+      expect(draw.target).toBeNull();
+      const outerBind = calls.filter((c) => c.name === "bindFramebuffer").at(-1);
+      expect(outerBind?.args[1]).toBeNull();
+      // The last draw's batch went to the outer framebuffer at 40×20 (u_view), not the inner's 10×6.
+      expect(calls.filter((c) => c.name === "uniform2f").map((c) => c.args.slice(1)).at(-1)).toEqual([40, 20]);
+      draw.end();
+    });
+
+    it("nests: a target the GPU refuses throws its own error and leaves the outer target bound and drawable", () => {
+      const { gl, calls, created } = fakeGL();
+      const draw = new Draw(new WebGL2Backend(gl), false);
+      draw.begin("#000", 100, 50, 1);
+      const outer = draw.createTarget(40, 20);
+      draw.into(outer, () => {});
+      draw.begin("#000", 100, 50, 1);
+      const outerFbo = created.filter((o) => o.kind === "Framebuffer")[0];
+      calls.length = 0;
+      draw.into(outer, () => {
+        draw.translate(2, 3);
+        draw.alpha = 0.4;
+        const m = [...draw.m];
+        draw.clip(0, 0, 6, 3, () => {
+          const clips = draw.clips.map((c) => ({ ...c }));
+          (gl as unknown as { checkFramebufferStatus: () => string }).checkFramebufferStatus = () => "FRAMEBUFFER_UNSUPPORTED";
+          expect(() => draw.into(draw.createTarget(10, 6), () => {})).toThrow(/could not be created/);
+          // State untouched, the outer framebuffer still bound, and the outer clip still flipping against its own
+          // height: clip(0, 0, 6, 3) under translate(2, 3) is at (2, 3), so 20 - 3 - 3 = 14, not the refused
+          // target's smaller height.
+          expect(draw.target).toBe(outer);
+          expect(draw.m).toEqual(m);
+          expect(draw.alpha).toBe(0.4);
+          expect(draw.clips).toEqual(clips);
+          expect(calls.filter((c) => c.name === "bindFramebuffer").at(-1)?.args[1]).toBe(outerFbo);
+          expect(calls.filter((c) => c.name === "scissor").at(-1)?.args).toEqual([2, 14, 6, 3]);
+          draw.rect(0, 0, 1, 1, "#fff");
+          expect(calls.filter((c) => c.name === "bindFramebuffer").at(-1)?.args[1]).toBe(outerFbo);
+          expect(calls.filter((c) => c.name === "viewport").at(-1)?.args).toEqual([0, 0, 40, 20]);
+        });
+        draw.rect(0, 0, 1, 1, "#f00");
+      });
+      expect(draw.target).toBeNull();
+      draw.end();
+    });
+
+    it("nests: entering a target while the context is lost creates no GPU objects, and restores to a fresh blank one", () => {
+      const { gl, calls, created, fire, count } = fakeGL();
+      const draw = new Draw(new WebGL2Backend(gl), false);
+      draw.begin("#000", 100, 50, 1);
+      const t = draw.createTarget(8, 8);
+      draw.into(t, () => {});
+      draw.end();
+      fire("webglcontextlost");
+      const fbosBefore = count("createFramebuffer");
+      const texturesBefore = count("createTexture");
+      draw.into(t, () => draw.rect(0, 0, 1, 1, "#fff"));
+      expect(count("createFramebuffer")).toBe(fbosBefore);
+      expect(count("createTexture")).toBe(texturesBefore);
+      expect(calls.some((c) => c.name === "framebufferTexture2D" && calls.indexOf(c) >= calls.length - 4)).toBe(false);
+      // The nest still unwinds: Draw is back on the canvas and its clip stack is intact.
+      expect(draw.target).toBeNull();
+      expect(draw.clips).toEqual([]);
+      fire("webglcontextrestored");
+      const from = created.length;
+      calls.length = 0;
+      draw.begin("#000", 100, 50, 1);
+      draw.into(t, () => {});
+      draw.end();
+      // A fresh framebuffer and texture, cleared transparent: the old ones died with the context and are not reused.
+      expect(calls.filter((c) => c.name === "createFramebuffer")).toHaveLength(1);
+      const clearColors = calls.filter((c) => c.name === "clearColor").map((c) => c.args);
+      expect(clearColors).toContainEqual([0, 0, 0, 0]);
+      expect(calls.some((c) => c.name === "clear")).toBe(true);
+      draw.dispose();
+      expect(created.slice(from).filter((o) => !o.deleted)).toEqual([]);
+    });
+
+    it("nests: dispose frees every framebuffer and texture made by nested targets", () => {
+      const { gl, created, listeners } = fakeGL();
+      const draw = new Draw(new WebGL2Backend(gl), false);
+      draw.begin("#000", 100, 50, 1);
+      const outer = draw.createTarget(16, 8);
+      const inner = draw.createTarget(8, 4);
+      draw.into(outer, () => draw.into(inner, () => draw.rect(0, 0, 1, 1, "#fff")));
+      draw.dispose();
+      expect(created.filter((o) => !o.deleted)).toEqual([]);
+      expect(listeners.size).toBe(0);
+    });
+
     it("frees framebuffers on disposeTarget and dispose, and recreates targets blank after context loss", () => {
       const { gl, created, fire, count } = fakeGL();
       const backend = new WebGL2Backend(gl);

@@ -635,7 +635,8 @@ export class Draw {
    * Run `fn` with drawing going into `target` instead of the canvas, then switch back. Inside, units are the
    * target's pixels from its top-left; the transform, clips and global alpha start fresh and are restored
    * afterwards. `clear` fills the target first (default transparent); pass `null` to draw over what's there,
-   * for trails and accumulation. Nests.
+   * for trails and accumulation. Nests: a target entered inside another leaves the outer one's framebuffer,
+   * viewport, logical size and clips as they were, whether `fn` returns or throws.
    *
    * ```ts
    * const glow = draw.createTarget(160, 90);
@@ -653,6 +654,10 @@ export class Draw {
     const outerClips = this.clips.splice(0);
     const depth = this.depth;
     this.push();
+    // Backends that keep a target stack save the destination (target, logical size, clip height) around the call,
+    // so the outer framebuffer, viewport and clip height come back on exit even when fn throws.
+    const nested = this.backend.enterTarget !== undefined && this.backend.exitTarget !== undefined;
+    let entered = false;
     // Everything from here is undone by the finally, so a target the backend refuses leaves no trace.
     try {
       if (outerClips.length) this.backend.setClip(null);
@@ -663,7 +668,11 @@ export class Draw {
       this.target = target;
       this.destW = target.width;
       this.destH = target.height;
-      this.backend.setTarget(target, clear === null ? null : toRGBA(clear), target.width, target.height);
+      const rgba = clear === null ? null : toRGBA(clear);
+      if (nested) {
+        this.backend.enterTarget?.(target, rgba, target.width, target.height);
+        entered = true;
+      } else this.backend.setTarget(target, rgba, target.width, target.height);
       fn();
     } finally {
       if (this.clips.length) {
@@ -673,9 +682,13 @@ export class Draw {
       this.target = outer;
       this.destW = outerW;
       this.destH = outerH;
-      this.backend.setTarget(outer, null, outerW, outerH);
+      // A target the backend refused never entered, so there is nothing to leave; it kept the outer bound.
+      if (nested) {
+        if (entered) this.backend.exitTarget?.();
+      } else this.backend.setTarget(outer, null, outerW, outerH);
       this.clips.push(...outerClips);
       const clip = outerClips.at(-1);
+      // Back on the outer destination: its clip flips against its own height again, not the inner target's.
       if (clip) this.backend.setClip(clip);
       // Unbalanced push() calls inside fn don't leak out.
       this.depth = depth + 1;

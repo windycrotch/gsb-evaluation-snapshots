@@ -159,6 +159,15 @@ class SharedBackend extends WebGL2Backend {
     super.setTarget(target, clear, width, height);
   }
 
+  override enterTarget(target: RenderTarget, clear: number | null, width: number, height: number): void {
+    if (!this.lost && this.hostScissor) {
+      // Submit what's queued for the host's framebuffer under its scissor, then draw the target unscissored.
+      this.flush();
+      this.gl.disable(this.gl.SCISSOR_TEST);
+    }
+    super.enterTarget(target, clear, width, height);
+  }
+
   override end(): void {
     this.flush();
     if (this.lost) return;
