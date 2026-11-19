@@ -154,14 +154,15 @@ export const reset = ( resetEventCounter = false ): void => {
 export const togglePlayback = ( setPlaying: boolean ): void => {
     playing = setPlaying;
     if ( playing ) {
-        // in case we were recording, unset the state to store the buffer
-        recordOutput = !recordOutput;
-        AudioService.toggleRecordingState();
+        // when output recording is armed, (re)start capturing into a fresh buffer
+        // (ignored while a previous recording is still being exported)
+        if ( recordOutput && recorder && !recorder.isExporting() ) {
+            recorder.record();
+        }
     } else {
         reset();
         if ( recordOutput && recorder ) {
-            recorder.stop();
-            recorder.export();
+            stopAndExportRecording();
         }
     }
 };
@@ -446,8 +447,17 @@ const AudioService =
         AudioService.cacheCustomTables( state.song.activeSong.instruments );
     },
     toggleRecordingState(): void {
+        // while a recording is being exported, ignore state toggles so we
+        // never create a second recorder or trigger a duplicate export
+        if ( recorder?.isExporting() ) {
+            return;
+        }
         recordOutput = !recordOutput;
-        if ( recordOutput && outputRecorderRef ) {
+        if ( recordOutput ) {
+            if ( !outputRecorderRef ) {
+                recordOutput = false; // recording not supported in this environment
+                return;
+            }
             if ( !recorder ) {
                 recorder = new ( outputRecorderRef )( compressor, {
                     callback : handleRecordingComplete
@@ -457,8 +467,7 @@ const AudioService =
                 recorder.record();
             }
         } else if ( recorder ) {
-            recorder.stop();
-            recorder.export();
+            stopAndExportRecording();
         }
     },
     cacheAllOscillators( instrumentIndex: number, instrument: Instrument ): void {
@@ -629,16 +638,32 @@ function createVoiceGainStructure( output: AudioNode ): InstrumentVoice {
     return { oscillatorNode, adsrNode };
 }
 
+function stopAndExportRecording(): void {
+    if ( !recorder || recorder.isExporting() ) {
+        return; // export already in flight, its completion handler will free the resources
+    }
+    recorder.stop();
+    if ( !recorder.export()) {
+        // nothing was recorded, free resources immediately instead of emitting an empty file
+        recorder.dispose();
+        recorder     = null;
+        recordOutput = false;
+    }
+}
+
 function handleRecordingComplete( blob: Blob ): void {
-    const blobUrl = blobToResource( blob );
-    saveAsFile( blobUrl, "efflux-output.wav" );
-    disposeResource( blobUrl );
+    if ( blob && blob.size > 0 ) {
+        const blobUrl = blobToResource( blob );
+        saveAsFile( blobUrl, "efflux-output.wav" );
+        disposeResource( blobUrl );
 
-    // free recorder resources
+        store.commit( "showNotification", { message: store.getters.t( "messages.recordingSaved" ) });
+    }
 
-    recorder.dispose();
-    recorder = null;
+    // free recorder resources and reset the recording state
+    // so a subsequent recording session can start cleanly
+
+    recorder?.dispose();
+    recorder     = null;
     recordOutput = false;
-
-    store.commit( "showNotification", { message: store.getters.t( "messages.recordingSaved" ) });
 }

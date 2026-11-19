@@ -14,15 +14,18 @@ interface RecorderRequest {
 let recLength = 0;
 let sampleRate: number;
 let recData: RecorderRequest;
+// whether "record" commands are accepted, is false after an export until
+// a new recording session is started through the "init" or "clear" commands
+let acceptingInput = true;
 const recBuffersL: Float32Array[] = [];
 const recBuffersR: Float32Array[] = [];
 
 self.addEventListener( "message", ( event: MessageEvent ): void => {
     recData = event.data as RecorderRequest;
 
-    switch ( recData.command ) {
+    switch ( recData?.command ) {
         default:
-            break;
+            break; // unknown commands are ignored
         case "init":
             init( recData.config );
             break;
@@ -37,6 +40,7 @@ self.addEventListener( "message", ( event: MessageEvent ): void => {
             break;
         case "clear":
             clear();
+            acceptingInput = true;
             break;
     }
 });
@@ -45,20 +49,37 @@ self.addEventListener( "message", ( event: MessageEvent ): void => {
 
 function init( config: { sampleRate: number } ): void {
     sampleRate = config.sampleRate;
+    clear();
+    acceptingInput = true;
 }
 
 function record( inputBuffer: Float32Array[] ): void {
+    // ignore chunks received after an export was requested (the buffers
+    // have been cleared and should not be polluted by late arrivals)
+    if ( !acceptingInput || !inputBuffer || !inputBuffer[ 0 ]) {
+        return;
+    }
     recBuffersL.push( inputBuffer[ 0 ]);
     recBuffersR.push( inputBuffer[ 1 ]);
     recLength += inputBuffer[ 0 ].length;
 }
 
 function exportWAV( type: string ): void {
+    // ignore subsequently received audio chunks until a new recording session starts
+    acceptingInput = false;
+
+    if ( recLength === 0 ) {
+        return; // nothing was recorded, don't emit an empty file
+    }
     const bufferL     = mergeBuffers( recBuffersL, recLength );
     const bufferR     = mergeBuffers( recBuffersR, recLength );
     const interleaved = interleave( bufferL, bufferR );
     const dataview    = encodeWAV( interleaved );
     const audioBlob   = new Blob([ dataview ], { type });
+
+    // free the recorded buffers so a repeated export cannot
+    // re-emit the same audio and memory is released
+    clear();
 
     self.postMessage( audioBlob );
 }
