@@ -1,0 +1,64 @@
+mixin footer-browser-status-element(icon, name)
+  .footer-browser-status
+    img(src=icon, alt='browser logo')
+    span= name
+
+.footer-container
+  if page != "browser-support"
+    .footer-browser-status-container
+      .footer-browser-status-text-container
+        .footer-browser-status-text-title
+          img(src='/img/question-circle.svg', alt='question icon')
+          h4 Browser Status
+        p.
+          Web Authentication is (partially) supported in most modern browsers.
+        a(href="/browser-support", style="margin-top: 1rem; text-align: center;").button-dark Test your browser
+        
+      .footer-browser-icons-container
+        +footer-browser-status-element('/img/firefox-logo.png', 'Firefox')
+        +footer-browser-status-element('/img/chrome-logo.png', 'Chrome')
+        +footer-browser-status-element('/img/edge-logo.png', 'Edge')
+  .footer-banner
+    img.footer-banner-logo(src="/img/auth0-logo.svg", alt="Auth0 logo")
+    //- p.footer-banner-text webauthn.me is brought to you by #[a(href="https://auth0.com/developers/") Auth0] #[br] Securely implement an authentication flow in less than 10 minutes.
+    p.footer-banner-text With Auth0 you can easily add WebAuthn as a second factor<br/> to add an extra layer of security for your users.
+
+    div.footer-banner-buttons
+      a(href="https://auth0.com/signup/?utm_source=webauthn.me&utm_medium=microsites&utm_campaign=devn_signup" class="button-orange", target="_blank", rel="noreferrer noopener") Try Auth0 for free
+
+  .footer-branding-container
+    .footer-branding-container-inner 
+      .footer-branding-left
+        a.footer-crafted-by-container(href='https://auth0.com/developers/')
+          span Crafted by
+          img.footer-branded-crafted-img(src='/img/auth0-logo.svg', alt='auth0 logo')
+        div.footer-privacy-container
+          a.footer-privacy-link(href='https://auth0.com/privacy/', target="_blank")
+            | Privacy
+          span.footer-privacy-separator •
+          a.footer-privacy-link(href='https://auth0.com/web-terms', target="_blank")
+            | Terms of Service
+          span.footer-privacy-separator •
+          button.as-anchor#open-ccpa
+                | Your Privacy Choices 
+          img.ccpa-toggle(src='https://cdn.auth0.com/website/footer/ccpa.svg' alt='Privacy choices')
+        #ccpa-modal
+          button#close-ccpa x
+          h3.title Your Privacy Choices
+          p.paragraph Depending on your state of residence, including if you are a California resident, you have the right to opt out of certain sharing of personal information with third-party ad partners. We may share personal information with third-party ad partners, such as through cookies or by providing lists of email addresses for potential customers, so that we can reach them across the web with relevant ads.
+          p.paragraph If you wish to opt out of this sharing of your personal data in connection with cookies, please update your 
+            button.settings(onClick="window.OneTrust.ToggleInfoDisplay()") cookie settings.
+          p.paragraph If you wish to opt out of email-based sharing, provide your email address at 
+            a.settings(href="https://www.okta.com/your-privacy-choices/", target="_blank") this link.
+        span.footer-copyright.
+          © #{new Date().getFullYear()} Okta, Inc. All Rights Reserved.
+      img(src='/img/webauthn-logo-no-text.svg', alt='webauthn logo')
+      .footer-branding-right
+        span Spread the word
+        a.footer-branding-twitter(href='https://twitter.com/home?status=Check%20out%20https%3A//webauthn.me%20and%20learn%20what%20Web%20Authentication%20is%20all%20about!', target="_blank")
+          img(src='/img/twitter-logo.svg', alt='twitter logo')
+        a.footer-branding-facebook(href="https://www.facebook.com/sharer/sharer.php?u=https%3A//webauthn.me", target="_blank")
+          img(src='/img/facebook-logo.svg', alt='facebook logo')
+    .footer-github
+      p Found a bug? 
+      a(href='https://github.com/auth0/webauthn.me/pulls', target='_blank') Send a Pull Request!

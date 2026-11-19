@@ -1,0 +1,69 @@
+{
+  "name": "webauthn-site-poc",
+  "version": "0.1.0",
+  "description": "Web Authentication website proof-of-concept",
+  "main": "src/debugger/index.js",
+  "scripts": {
+    "postinstall": "grunt build-prod",
+    "start": "node api/index.js",
+    "start:dev": "grunt",
+    "build": "NODE_ENV=production grunt build-prod",
+    "test": "grunt test"
+  },
+  "keywords": [
+    "webauthn",
+    "web",
+    "authentication"
+  ],
+  "author": "Auth0, Inc.",
+  "license": "MIT",
+  "devDependencies": {
+    "@babel/core": "^7.18.10",
+    "@babel/preset-env": "^7.18.10",
+    "@types/node": "^24.0.0",
+    "animejs": "^2.2.0",
+    "babel-loader": "^8.2.5",
+    "buffer": "^6.0.3",
+    "bulma": "^0.7.1",
+    "cbor": "^4.1.0",
+    "cose-to-jwk": "^1.1.0",
+    "crypto-browserify": "^3.12.1",
+    "esm": "^3.0.49",
+    "events": "^3.3.0",
+    "file-saver": "^1.3.8",
+    "grunt": "^1.5.3",
+    "grunt-cli": "^1.4.3",
+    "grunt-contrib-clean": "^1.1.0",
+    "grunt-contrib-copy": "^1.0.0",
+    "grunt-contrib-less": "^2.0.0",
+    "grunt-contrib-pug": "^3.0.0",
+    "grunt-contrib-watch": "^1.1.0",
+    "grunt-sitemap": "^2.0.1",
+    "grunt-webpack": "^4.0.3",
+    "jstransformer-markdown-it": "^3.0.0",
+    "jwk-to-pem": "^2.0.0",
+    "less": "^3.8.0",
+    "loglevel": "^1.6.1",
+    "node-forge": "^1.3.1",
+    "pkijs": "^2.1.63",
+    "process": "^0.11.10",
+    "pug": "^3.0.2",
+    "stream-browserify": "^3.0.0",
+    "terser-webpack-plugin": "^5.3.14",
+    "tippy.js": "^2.5.3",
+    "url": "^0.11.4",
+    "util": "^0.12.5",
+    "webpack": "^5.99.9",
+    "webpack-cli": "^5.1.4",
+    "webpack-merge": "^5.10.0"
+  },
+  "dependencies": {
+    "detect-browser": "^5.2.0",
+    "express": "^4.17.1",
+    "express-sslify": "^1.2.0"
+  },
+  "engines": {
+    "node": "24.x"
+  },
+  "heroku-run-build-script": true
+}

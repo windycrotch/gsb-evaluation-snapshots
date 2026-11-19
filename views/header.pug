@@ -1,0 +1,17 @@
+header.header
+  .header-container
+    .header-left
+      .header-crafted-by-container
+        a(href='https://auth0.com/developers/')
+          span Crafted by
+          img(src='/img/auth0-logo.svg' alt='Auth0 Logo')
+
+    .header-right
+      .header-nav-item(class=(page === "tutorial" ? "active" : undefined))
+        a(href='/') Tutorial
+      .header-nav-item(class=(page === "introduction" ? "active" : undefined))
+        a(href='/introduction') Info
+      .header-nav-item(class=(page === "debugger" ? "active" : undefined))
+        a(href='/debugger') debugger
+      .header-nav-item(class=(page === "passkeys" ? "active" : undefined))
+        a(href='/passkeys') passkeys

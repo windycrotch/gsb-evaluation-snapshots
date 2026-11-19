@@ -1,0 +1,147 @@
+- var page="tutorial";
+block variables
+
+doctype html
+html(lang='en')
+  head
+    block meta
+      title Web Authentication (WebAuthn) Credential and Login Demo
+      meta(charset='utf-8')
+      meta(http-equiv='X-UA-Compatible', content='IE=edge')
+      meta(name='viewport', content='width=device-width, initial-scale=1')
+      meta(name='author', content='auth0.com')
+      meta(name='description', content='Try the Web Authentication demo to register a credential and login with biometrics. WebAuthn spec enables public key-based credentials for securely authenticating users using hardware authenticators.')
+
+      meta(property="og:title" content="Web Authentication (WebAuthn) Credential and Login Demo")
+      meta(property="og:site_name" content="Web Authentication (WebAuthn) Credential and Login Demo")
+      meta(property="og:url" content="https://webauthn.me")
+      meta(property="og:image" content="https://cdn.auth0.com/blog/webauthn:card.png")
+      meta(property="og:description" content="Try the Web Authentication demo to register a credential and login with biometrics. WebAuthn spec enables public key-based credentials for securely authenticating users using hardware authenticators.")
+      meta(property="og:type" content="website")
+
+      meta(name="twitter:site" content="@auth0")
+      meta(name="twitter:creator" content="@auth0")
+      meta(name="twitter:title" content="Web Authentication (WebAuthn) Credential and Login Demo")
+      meta(name="twitter:url" content="https://webauthn.me")
+      meta(name="twitter:description" content="Try the Web Authentication demo to register a credential and login with biometrics. WebAuthn spec enables public key-based credentials for securely authenticating users using hardware authenticators.")
+      meta(name="twitter:card" content="summary_large_image")
+      meta(name="twitter:image" content="https://cdn.auth0.com/blog/webauthn:card.png")
+      meta(name="twitter:image:height" content="512")
+      meta(name="twitter:image:width" content="1024")
+    
+    link(rel="canonical" href="https://webauthn.me")  
+    link(href='https://fonts.googleapis.com/css?family=Roboto+Mono',
+         rel="stylesheet")
+    link(rel='stylesheet', href='/css/common.css', type='text/css', media='all')
+    link(rel='shortcut icon' href='https://cdn.auth0.com/website/webauthn/favicon.png')
+
+    block stylesheets
+    block prefetch
+    include prefetch.pug
+
+
+    // OneTrustScripts
+    if NODE_ENV === "production"
+      script(src="https://cdn.cookielaw.org/scripttemplates/otSDKStub.js", type="text/javascript", charset="UTF-8", data-domain-script="3cdc400f-b58d-4d3b-83fd-9f22770403da", id="consent-script")
+      script(src="js/ccpa-modal.js")
+      script(src="js/cookie-consent.js")
+
+    // Adobe Analytics script
+    if NODE_ENV == "production"
+      script(src="https://assets.adobedtm.com/6bb3f7663515/fea558f43eb7/launch-be034d63605e.min.js", type="text/javascript", charset="UTF-8", id="adobe-analytics-script")
+    else 
+      script(src="https://assets.adobedtm.com/6bb3f7663515/fea558f43eb7/launch-e7dc4271fcde-development.min.js", type="text/javascript", charset="UTF-8", id="adobe-analytics-script")
+
+    script(type="application/ld+json").
+      [{
+          "@context": "http://schema.org",
+          "@type": "WebPage",
+          "name": "Web Authentication (WebAuthn) Credential and Login Demo",
+          "description": "Try the Web Authentication demo to register a credential and login with biometrics. WebAuthn spec enables public key-based credentials for securely authenticating users using hardware authenticators.",
+          "url": "https://webauthn.me/",
+          "image": "https://webauthn.me/img/webauthn-logo.svg",
+          "publisher": {
+              "@type": "Organization",
+              "name": "Auth0",
+              "legalName": "Auth0 Inc.",
+              "url": "https://auth0.com/",
+              "logo": "https://cdn.auth0.com/website/assets/pages/press/img/resources/auth0-logo-main-6001cece68.svg",
+              "foundingDate": "2013",
+              "sameAs": [
+                  "https://twitter.com/auth0",
+                  "https://www.facebook.com/getauth0/",
+                  "https://www.linkedin.com/company/auth0"
+              ]
+          }
+        }, {
+          "@context": "https://schema.org/", 
+          "@type": "BreadcrumbList", 
+          "itemListElement": [{
+              "@type": "ListItem", 
+              "position": 1, 
+              "name": "WebAuthn.me",
+              "item": "https://webauthn.me/",
+              "description": "Web Authentication is a new standard enabling the creation and use of strong, attested, scoped, public key-based credentials by web applications, for the purpose of strongly authenticating users using hardware authenticators."
+          },{
+              "@type": "ListItem", 
+              "position": 2, 
+              "name": "WebAuthn debugger",
+              "item": "https://webauthn.me/debugger",
+              "description": "Quickly change a WebAuthn configuration parameter, and see the change take effect in our handy debugger."
+          }]
+      }, {
+          "@context": "https://schema.org/", 
+          "@type": "BreadcrumbList", 
+          "itemListElement": [{
+              "@type": "ListItem", 
+              "position": 1, 
+              "name": "WebAuthn.me",
+              "item": "https://webauthn.me/",
+              "description": "Web Authentication is a new standard enabling the creation and use of strong, attested, scoped, public key-based credentials by web applications, for the purpose of strongly authenticating users using hardware authenticators."
+          },{
+              "@type": "ListItem", 
+              "position": 2, 
+              "name": "Introduction",
+              "item": "https://webauthn.me/introduction",
+              "description": "Learn more about the WebAuthn spec, that enables public key-based credentials in the browser for securely authenticating users using hardware authenticators."
+          }]
+      }, {
+          "@context": "https://schema.org/", 
+          "@type": "BreadcrumbList", 
+          "itemListElement": [{
+              "@type": "ListItem", 
+              "position": 1, 
+              "name": "WebAuthn.me",
+              "item": "https://webauthn.me/",
+              "description": "Web Authentication is a new standard enabling the creation and use of strong, attested, scoped, public key-based credentials by web applications, for the purpose of strongly authenticating users using hardware authenticators."
+          },{
+              "@type": "ListItem", 
+              "position": 2, 
+              "name": "Introduction",
+              "item": "https://webauthn.me/browser-support",
+              "description": "An overview of all modern browser and their support for platform and roaming authenticators, using WebAuthn."
+          }]
+      }]
+    meta(name="google-site-verification" content="8PENs1ni2zY2-JstEN8PRrMO3N76CRf2r1yP1qMf14M")
+
+  body
+    // Google Tag Manager (noscript)
+    noscript
+      iframe(src="https://www.googletagmanager.com/ns.html?id=GTM-PJZ8DTR2" height="0" width="0" style="display:none;visibility:hidden")
+    // End Google Tag Manager (noscript)
+
+    include header.pug
+
+    block content
+
+    include footer.pug
+
+    block scripts
+
+    script.
+      function topBanner() {
+        event.preventDefault();
+        document.querySelector(".top-banner").classList.add('closed');
+        document.querySelector(".top-banner-spacer").classList.add('hide');
+        document.querySelector(".header").classList.remove("top-banner-open");
+      }

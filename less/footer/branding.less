@@ -1,0 +1,216 @@
+@import "../vars.less";
+
+.footer-branding-container {
+  color: white;
+  font-family: Helvetica, "fakt-web", Arial, sans-serif;
+  font-weight: @font-weight-light;
+  margin-bottom: 73px;
+
+  .footer-branding-container-inner {
+    display: flex;
+    flex-direction: column-reverse;
+    justify-content: center;
+    align-items: center;
+  }
+
+  .footer-branding-left,
+  .footer-branding-right {
+    display: flex;
+    width: 100%;
+  }
+
+  .footer-branding-left {
+    flex-direction: column;
+    text-align: center;
+    margin: 30px 0 0;
+
+    .footer-crafted-by-container {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-bottom: 16px;
+      color: white;
+
+      span {
+        display: inline-block;
+        margin: 3px 1ch 0 0;
+      }
+
+      .footer-branded-crafted-img {
+        height: 28px;
+      }
+
+      .auth0 {
+        margin-left: 1ch;
+        font-weight: bold;
+        color: @color-white;
+      }
+    }
+
+    .footer-privacy-container {
+      display: flex;
+      margin-bottom: 16px;
+      gap: 16px;
+      flex-wrap: wrap;
+      margin-bottom: 16px;
+    }
+
+    .footer-privacy-link {
+      color: @color-text-light-gray;
+      &:hover {
+        color: @color-white;
+      }
+    }
+
+    .footer-privacy-separator{
+      color: @color-text-light-gray;
+      padding: 0 8px;
+    }
+
+    .footer-copyright {
+      color: #696969;
+      letter-spacing: 0.5px;
+    }
+
+    .as-anchor {
+      color: @color-text-light-gray;
+      &:hover {
+        color: @color-white;
+      }
+      background: none;
+      padding: 0;
+      border: none;
+      cursor: pointer;
+    }
+
+    .ccpa-toggle {
+      max-width: 39px;
+      margin-left: 5px;
+      vertical-align: middle;
+      border: none;
+      display: inline;
+    }
+  }
+
+  .footer-branding-right {
+    justify-content: center;
+    align-items: center;
+    margin: 0 0 30px;
+
+    .footer-branding-twitter,
+    .footer-branding-facebook {
+      transition: background-color 0.3s ease-in-out;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      width: 40px;
+      height: 40px;
+      margin: 0 0 0 12px;
+      border-radius: 50%;
+
+      img {
+        height: 16px;
+      }
+    }
+
+    .footer-branding-twitter {
+      background-color: #1da1f2;
+
+      &:hover {
+        background-color: darken(#1da1f2, 10%);
+      }
+    }
+
+    .footer-branding-facebook {
+      background-color: #3b5998;
+
+      &:hover {
+        background-color: darken(#3b5998, 10%);
+      }
+    }
+
+    span {
+      color: white;
+    }
+  }
+
+  #ccpa-modal {
+    display: none;
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 90%;
+    height: auto;
+    background: white;
+    z-index: 10000;
+    color: black;
+    border-radius: 16px;
+    padding: 24px;
+    text-align: left;
+
+    .title {
+      color: black;
+      font-weight: 500;
+      line-height: 1.1;
+      margin: 20px 0 10px 0;
+      font-size: 24px;
+    }
+
+    .paragraph {
+      margin: 30px 0 30px 0;
+    }
+
+    #close-ccpa {
+      background: none;
+      border: none;
+      padding: 0;
+      position: absolute;
+      top: 20px;
+      right: 30px;
+      font-size: 24px;
+      line-height: 24px;
+    }
+
+    .settings {
+      color: #635dff;
+      appearance: none;
+      border: none;
+      background: none;
+      padding: 0;
+    }
+  }
+}
+
+@media (min-width: @breakpoint-width) {
+  .footer-branding-container {
+    .footer-branding-container-inner {
+      flex-direction: row;
+      justify-content: space-between;
+
+      .footer-branding-left,
+      .footer-branding-right {
+        width: 300px;
+      }
+
+      .footer-branding-left {
+        text-align: left;
+        margin: 0;
+
+        .footer-crafted-by-container {
+          justify-content: flex-start;
+        }
+      }
+
+      .footer-branding-left {
+        justify-content: flex-end;
+        margin: 0;
+      }
+    }
+
+    #ccpa-modal {
+      width: 50%;
+      max-width: 670px;
+    }
+  }
+}
