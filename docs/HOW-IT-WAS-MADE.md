@@ -71,6 +71,7 @@ worked, but cost too much frame rate in the browser and were left out.
 | `stunts/hires-capture.js` | records, each game frame, what the original renderer would draw |
 | `stunts/hires-view.js` | the HD redraw: models, shadows, interpolation, widescreen, clouds, tyre marks |
 | `stunts/main.js` | puts the layers together each frame; HUD; keys |
+| `stunts/widescreen/sides.js` | what the widescreen cockpit's sides may show, per car and race; checked without the game (`widescreen/test/`) |
 | `stunts/qol.js`, `setup.js` | ghost car, track sharing, settings, the welcome screen |
 | `stunts/tools/qa.mjs`, `gaps.py` | headless play-testing; geometry gap checking |
 | `desktop/` | the desktop app (Electron) |

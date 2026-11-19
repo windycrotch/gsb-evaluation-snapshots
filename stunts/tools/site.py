@@ -10,7 +10,7 @@
 # it in their browser (boot.js) with map.json, the names and places tools/mkmap.py takes from the Restunts disassembly.
 import json, os, shutil, subprocess, sys
 HERE = os.path.dirname(os.path.abspath(__file__)); SRC = os.path.dirname(HERE); ROOT = os.path.dirname(SRC); OUT = os.path.join(ROOT, 'dist')
-PAGE = ['index.html', 'main.js', 'boot.js', 'x86dec.js', 'exefile.js', 'translate.js', 'map.json', 'setup.js', 'qol.js', 'cpu.js', 'drv86.js', 'dos.js', 'worker.js', 'opl-worklet.js',
+PAGE = ['index.html', 'main.js', 'widescreen/sides.js', 'boot.js', 'x86dec.js', 'exefile.js', 'translate.js', 'map.json', 'setup.js', 'qol.js', 'cpu.js', 'drv86.js', 'dos.js', 'worker.js', 'opl-worklet.js',
         'hires-capture.js', 'hires-view.js', 'hires-grass.js', 'hires-ao.js', 'manifest.webmanifest']
 import json
 if not json.load(open(os.path.join(SRC, 'map.json'))).get('sum'):
@@ -27,6 +27,7 @@ STRIP = os.path.join(HERE, 'strip')
 if not os.path.isdir(os.path.join(STRIP, 'node_modules')): subprocess.run(['npm', 'install', '--no-audit', '--no-fund'], cwd=STRIP, check=True)
 for f in PAGE:
     dst = os.path.join(OUT, 'stunts', f)
+    os.makedirs(os.path.dirname(dst), exist_ok=True)   # (PAGE has a file in a subfolder: widescreen/sides.js)
     if f.endswith(('.js', '.html')):
         open(dst, 'w').write(open(os.path.join(SRC, f)).read().replace('__BUILD__', BUILD))
         subprocess.run(['node', os.path.join(STRIP, 'strip.mjs'), dst, dst] + (['--keep-strings'] if f == 'translate.js' else []), check=True)

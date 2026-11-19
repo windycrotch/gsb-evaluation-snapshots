@@ -140,28 +140,23 @@ const NOHUD = /[?&]nohud/.test(location.search);
 const DASHM = ((/[?&]dash=(\w+)/.exec(location.search) || [])[1] || 'curve');   // (the widescreen dashboard: curve, the default; ?dash=flat the old flat colours)
 // (?dash=curve: the dashboard carried out to the sides bending down: each column further out drawn lower, on a curve that
 // takes it off the bottom of the screen; above it the 3D view. Its pixels: the car's plain column (DASH_COLS), as tex)
-function drawCurve(dashRow, solidUp) {
+function drawCurve(dashRow, solidUp, raceSeq, racing) {
   // (drawn at SS times the game's resolution: the curve's edge smooth, not a staircase of the game's pixels)
   const SS = 4, cw = Math.max(320, Math.round(320 * (view.wide || 1))), m = (cw - 320) >> 1, W = cw * SS, H = 200 * SS;
   if (sidesCanvas.width !== W) { sidesCanvas.width = W; sidesCanvas.height = H; sidesCanvas.img = sidesG.createImageData(W, H); sidesCanvas.px = new Uint32Array(sidesCanvas.img.data.buffer); }
   const sp = sidesCanvas.px; sp.fill(0);
   const D = StuntsCode.DSEG << 4, G = StuntsCode.SYM.gameconfig, code = String.fromCharCode(...mem.subarray(D + G, D + G + 4));
-  const cols = DASH_COLS[code] || { l: 0, r: 318 }, K = StuntsHires.KEY;
+  const K = StuntsHires.KEY;
   // (the dashboard: the block of rows at the bottom, bending down off the screen; the roof strip at the top, if the car has
   // one, bending up off it the opposite way: both on the same gentle curve, so the cockpit wraps round the view)
-  let top = 200; while (top > 0 && dashRow[top - 1]) top--;
-  let roof = 0; while (roof < top && dashRow[roof]) roof++;
-  // (the two columns copied, remembered per car the first time they stand unchanged a second, outside a replay: whatever the
-  // game draws over the dash meanwhile (the replay panel, the gear change's pop-up) is never carried out to the sides)
-  const colOf = c => { const a = new Uint32Array(200); for (let y = 0; y < 200; y++) { const v = scr[y * 320 + c]; a[y] = v === K ? 0 : rgb[v]; } return a; };
-  const now = { code, top, roof, l0: colOf(cols.l), l1: colOf(cols.l + 1), r0: colOf(cols.r), r1: colOf(cols.r - 1), e0: colOf(0), e1: colOf(1), f0: colOf(319), f1: colOf(318) };
-  const D2 = (StuntsCode.DSEG << 4), replay = !!mem[D2 + StuntsCode.SYM.game_replay_mode];
-  const same = (p, q) => p && p.code === q.code && p.top === q.top && p.roof === q.roof && ['l0', 'l1', 'r0', 'r1', 'e0', 'e1', 'f0', 'f1'].every(k => p[k].every((v, i) => v === q[k][i]));
-  if (!replay) { drawCurve.run = same(drawCurve.last, now) ? (drawCurve.run || 0) + 1 : 0; drawCurve.last = now;
-    const keep = drawCurve.keep || (drawCurve.keep = {});
-    if (drawCurve.run >= 60 && !keep[code] && now.top < 190 && now.top > 60) keep[code] = now; }   // (only a real dash: the remembered setting turns it on before the game has drawn it, and "no dash" was learned)   // (the first steady view only, on the start line: never replaced, a pop-up held up as long can't creep in)
-  const C = drawCurve.keep && drawCurve.keep[code] || now;
-  top = C.top; roof = C.roof;
+  // The two columns copied, remembered per car while the picture stands still in a race under way — never in a replay,
+  // never while the race's clock is stopped (a menu or dialog over the paused race), and dropped when the car or the
+  // race changes (widescreen/sides.js) — so whatever the game draws over the dash meanwhile (the replay panel, the
+  // gear change's pop-up) is never carried out to the sides, and the sides are always this frame's, this car's
+  const now = StuntsSides.extract(scr, rgb, K, code, dashRow, DASH_COLS[code] || { l: 0, r: 318 });
+  const replay = !!mem[D + StuntsCode.SYM.game_replay_mode];
+  const C = StuntsSides.pick(cockpit, now, { race: raceSeq, racing: !!racing, replay });
+  const top = C.top, roof = C.roof;
   const A = (200 - top) * 0.35;   // (the drop at the window's edge: about a third of the dash's height)
   let waterC = 0; if (solidUp) for (let y = top - 1; y >= 0; y--) if (solidUp[y]) { waterC = rgb[scr[y * 320]]; break; }
   const put = (X, Y, c) => { sp[Y * W + X] = c; sp[Y * W + W - 1 - X] = c; };
@@ -176,8 +171,11 @@ function drawCurve(dashRow, solidUp) {
   }
   sidesG.putImageData(sidesCanvas.img, 0, 0);
 }
-const DASH_COLS = { ANSX: { l: 5, r: 243 }, AUDI: { l: 33, r: 317 }, COUN: { l: 46, r: 314 }, FGTO: { l: 10, r: 301 }, JAGU: { l: 68, r: 294 },
-  LANC: { l: 32, r: 269 }, LM02: { l: 7, r: 316 }, P962: { l: 1, r: 318 }, PC04: { l: 0, r: 244 }, PMIN: { l: 0, r: 310 }, VETT: { l: 42, r: 318 } };
+// the widescreen cockpit's memory and the cars' dash columns: widescreen/sides.js (loaded before main.js), one
+// source for the page and for the checks run without the game; missing, the curved dash is skipped and the rest runs
+const SIDES_OK = typeof StuntsSides !== 'undefined';
+const cockpit = SIDES_OK ? StuntsSides.createState() : null;
+const DASH_COLS = SIDES_OK ? StuntsSides.DASH_COLS : {};
 // H: HD mode or OG mode, the original's own pictures (the worker reads the shared flag; kept for next time)
 const ogFlag = new SharedArrayBuffer(32), ogI = new Int32Array(ogFlag);   // ([0] the look (OG), [1] > 0 while the game reads typed text: a high-score name, a save name;
 // [4]: the dashboard the Replay Menu left, [5..7]: its restart asked about first, see worker.js and qol.js)
@@ -590,16 +588,26 @@ function frame(t) {   // t: the display frame's time (steadier than reading the 
   // the race view goes past the 4:3 frame on the rows where the screen shows it edge to edge (not the
   // dashboard, D: the cockpit is only that wide); menus, dialogs, panels and the results keep to the frame,
   // from the moment they are on screen
-  // (the dashboard on or off (D) kept from race to race: saved when it changes in a race, put back as each race starts)
   if (view) { const a = (StuntsCode.DSEG << 4) + StuntsCode.SYM.dashb_toggle, inRace = !!((live || OG_MODE) && view.raceView);   // (OG mode: the 3D view is drawn hidden, not live, in a race too)
-    if (inRace && !frame.wasRace) { try { const v = localStorage.getItem('stunts-dash'); if (v != null) mem[a] = +v; } catch (_) {} }
+    const clock = mem[(StuntsCode.DSEG << 4) + StuntsCode.SYM.state + 320] | mem[(StuntsCode.DSEG << 4) + StuntsCode.SYM.state + 321] << 8, left = Atomics.load(ogI, 4);
+    // (the dashboard on or off (D) kept from race to race: saved when it changes in a race, put back as each race
+    // starts — but not over what the Replay Menu's Display Options left (left, below): that one wins)
+    if (inRace && !frame.wasRace && !left) { try { const v = localStorage.getItem('stunts-dash'); if (v != null) mem[a] = +v; } catch (_) {} }
     else if (inRace && frame.dashWas != null && mem[a] !== frame.dashWas) { try { localStorage.setItem('stunts-dash', String(mem[a])); } catch (_) {} }
     // (back from the Replay Menu, once the race's clock runs again: what its Display Options left, kept and saved)
-    const clock = mem[(StuntsCode.DSEG << 4) + StuntsCode.SYM.state + 320] | mem[(StuntsCode.DSEG << 4) + StuntsCode.SYM.state + 321] << 8, left = Atomics.load(ogI, 4);
     if (inRace && left && frame.clockWas != null && clock !== frame.clockWas) { Atomics.store(ogI, 4, 0); mem[a] = left - 1; try { localStorage.setItem('stunts-dash', String(mem[a])); } catch (_) {} }
+    // the race's clock: advancing, the race is under way (a menu or dialog over the paused race stops it, and the
+    // widescreen sides then learn nothing from its frames); gone back, a new race (or a rewind), and the cockpit
+    // remembered for the sides is not this one's (widescreen/sides.js)
+    if (inRace && frame.clockWas != null && clock !== frame.clockWas) frame.clockRunAt = t;
+    if (inRace && frame.clockLast != null && clock < frame.clockLast) frame.raceSeq = (frame.raceSeq || 0) + 1;
+    if (inRace) frame.clockLast = clock;
     frame.clockWas = inRace ? clock : null;
     frame.wasRace = inRace; frame.dashWas = inRace ? mem[a] : null; }
-  if (WIDE && view) {
+  // (the widescreen sides are their own layer, drawn from the same snapshot as the centre picture; anything
+  // throwing here must not take the frame with it: the sides go off, the original picture still shows, and
+  // the next frame is still scheduled)
+  if (WIDE && view) try {
     const dash = live && keyed && view.raceView && !og && !!mem[(StuntsCode.DSEG << 4) + StuntsCode.SYM.dashb_toggle];   // (keyed: only while the 3D view shows this very frame: leaving for a menu, the sides went with the picture, not a few frames later)
     const race = live && (view.raceView || view.previewView), side = (1 - 1 / (view.wide || 1)) / 2 * 100;
     const pts = [];
@@ -611,7 +619,7 @@ function frame(t) {   // t: the display frame's time (steadier than reading the 
     // edge (drowning's blue): left closed, and carried out to the sides as it is; the dash's own rows never count)
     const solidUp = new Uint8Array(200);
     if (DM === 'curve') { const D0 = StuntsCode.DSEG << 4, G0 = StuntsCode.SYM.gameconfig, code0 = String.fromCharCode(...mem.subarray(D0 + G0, D0 + G0 + 4));
-      const kt = drawCurve.keep && drawCurve.keep[code0] ? drawCurve.keep[code0].top : 0;
+      const kt = cockpit ? StuntsSides.learnedTop(cockpit, code0) : 0;
       for (let y = 0; y < kt; y++) { const o = y * 320, c = scr[o]; if (c === StuntsHires.KEY) continue; let ok = true;
         for (let x = 0; x < 6 && ok; x++) if (scr[o + x] !== c || scr[o + 314 + x] !== c) ok = false; solidUp[y] = ok ? 1 : 0; }
       // (water only when there's a lot of it: 15 rows or more of the one colour; a dash's own top line, solid edge to edge
@@ -641,9 +649,11 @@ function frame(t) {   // t: the display frame's time (steadier than reading the 
     let solidAny = false;
     if (!dash && !og && keyed && race && view.raceView) for (let y = 0; y < 200; y++) if (edge[y] !== 2 && solidRow(y)) { solidAny = true; break; }
     { const sh = (!dash || DM === 'hood') && !solidAny; if (sidesCanvas.hidden !== sh) sidesCanvas.hidden = sh; }
-    const curve = DM === 'curve';
+    const curve = DM === 'curve' && SIDES_OK;
     if (dash && DM !== 'hood' || solidAny) {
-      if (curve) { drawCurve(dashRow, solidUp); } else {
+      // (racing: the race view live with its clock running again — after the Replay Menu or a stall, the sides
+      // are worked out from the frame on screen, and nothing is learned until the clock has run a moment)
+      if (curve) { drawCurve(dashRow, solidUp, frame.raceSeq || 0, !!(live && view.raceView) && frame.clockRunAt != null && t - frame.clockRunAt < 500); } else {
       const cw = Math.max(320, Math.round(320 * (view.wide || 1))), m = (cw - 320) >> 1;
       if (sidesCanvas.width !== cw) { sidesCanvas.width = cw; sidesCanvas.height = 200; sidesCanvas.img = sidesG.createImageData(cw, 200); sidesCanvas.px = new Uint32Array(sidesCanvas.img.data.buffer); }
       const sp = sidesCanvas.px; sp.fill(0);
@@ -670,7 +680,7 @@ function frame(t) {   // t: the display frame's time (steadier than reading the 
       sidesG.putImageData(sidesCanvas.img, 0, 0);
       }
     }
-  }
+  } catch (e) { if (!frame.sidesFailed) { frame.sidesFailed = true; console.error(e); } sidesCanvas.hidden = true; }   // (the sides off on an error, never a stuck page)
   if (live) {
     // sky layer: the original skybox inside the 3D window, nothing elsewhere
     // (every see-through pixel shows what the original had there before it became see-through)
