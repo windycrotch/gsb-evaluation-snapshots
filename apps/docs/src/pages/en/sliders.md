@@ -14,6 +14,10 @@ npm i @react-av/core @radix-ui/react-slider @react-av/sliders
 
 Displays a progress bar for the media. Changing the value of the progress bar will seek the media to the new time.
 
+While the pointer drags the bar, the thumb follows the drag and media events leave it alone. The seek is applied once on release; the thumb holds the committed time until the media reports it, then follows playback again, so letting go never snaps back to the old time. Buffered ranges can advance during a drag without interrupting it. Switching the source (a new `src`, an `emptied` event, or a replaced media element) clears the old time, buffered ranges and hovered percentage.
+
+The bar is disabled until the media exposes a finite, positive duration. For live media with an unbounded duration it instead uses the media's seekable range, enabling as soon as that range first appears.
+
 Arrow keys seek one second by default. Set `keyboardStep` to change this increment independently of pointer precision, which defaults to `step={0.001}` seconds. Shift+Arrow and Page Up/Down move ten keyboard increments.
 
 Simply replace Radix UI's `Slider.Root` component with `ProgressBarRoot` and you're good to go.

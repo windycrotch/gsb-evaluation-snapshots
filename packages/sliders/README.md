@@ -15,7 +15,15 @@ pnpm i @react-av/core @radix-ui/react-slider @react-av/sliders
 See the [documentation](https://react-av.wykerd.dev) for more information.
 
 `ProgressBarRoot` disables seeking until the media exposes a finite, positive
-duration. Keep its track mounted while loading so the control retains its layout.
+duration, or — for live media with an unbounded duration — a non-empty seekable
+range. Keep its track mounted while loading so the control retains its layout.
+
+While the pointer drags the bar the thumb follows the drag, and media events do
+not move it. The seek is applied once, on release; the thumb keeps the committed
+time until the media reports it and then follows the media clock again. Buffered
+ranges can advance mid-drag without interrupting the gesture, and switching the
+source (`emptied`/`loadstart`, or a replaced media element) clears the old time,
+buffered ranges and hovered percentage.
 
 Arrow keys seek one second or adjust volume by five percentage points.
 `keyboardStep` customizes these increments independently of pointer precision.

@@ -84,6 +84,28 @@ function timeRangesCompare(a: TimeRanges, b: TimeRanges) {
     return true;
 }
 
+/**
+ * Media elements expose `TimeRanges` objects that are backed by live state, and
+ * some browsers hand out the same object on every read. Copy the ranges into a
+ * plain, immutable snapshot so that change detection and store snapshots stay
+ * stable until the media actually reports a different range.
+ */
+function snapshotTimeRanges(ranges: TimeRanges): TimeRanges {
+    const starts: number[] = [];
+    const ends: number[] = [];
+
+    for (let i = 0; i < ranges.length; i++) {
+        starts.push(ranges.start(i));
+        ends.push(ranges.end(i));
+    }
+
+    return {
+        length: starts.length,
+        start: (index: number) => starts[index] ?? 0,
+        end: (index: number) => ends[index] ?? 0,
+    };
+}
+
 function createMutedStore(mediaElement: StateStore<HTMLMediaElement | null>): StateStore<boolean> {
     const listeners = new Set<StoreListener>();
     let cleanup: StoreListenerUnsubscribe = () => {};
@@ -354,21 +376,51 @@ function createMediaBufferedStateStore(mediaElement: StateStore<HTMLMediaElement
     let lastRanges: TimeRanges | null = null;
     let cleanup: StoreListenerUnsubscribe = () => {};
 
+    function update() {
+        const element = mediaElement.getState();
+        if (!element) {
+            // The media element was removed: drop its ranges.
+            if (lastRanges === null) return;
+            lastRanges = null;
+            listeners.forEach((listener) => listener());
+            return;
+        }
+
+        const nextRanges = snapshotTimeRanges(element.buffered);
+        const next = nextRanges.length > 0 ? nextRanges : null;
+        if (lastRanges === null && next === null) return;
+        if (lastRanges && next && timeRangesCompare(next, lastRanges)) return;
+        lastRanges = next;
+        listeners.forEach((listener) => listener());
+    }
+
+    function clearRanges() {
+        // Never keep ranges from a previous source around.
+        if (lastRanges === null) return;
+        lastRanges = null;
+        listeners.forEach((listener) => listener());
+    }
+
     function detectChanges() {
         cleanup();
 
         const element = mediaElement.getState();
-        if (!element) return;
-        function handler () {
-            if (!element?.buffered) return;
-            if (lastRanges && timeRangesCompare(element.buffered, lastRanges)) return;
-            lastRanges = element?.buffered ?? null;
-            listeners.forEach((listener) => listener());
-        };
-        element.addEventListener('progress', handler);
-        
+        if (!element) {
+            clearRanges();
+            return;
+        }
+        element.addEventListener('progress', update);
+        element.addEventListener('loadedmetadata', update);
+        element.addEventListener('emptied', clearRanges);
+        element.addEventListener('loadstart', clearRanges);
+
+        update();
+
         cleanup = () => {
-            element.removeEventListener('progress', handler);
+            element.removeEventListener('progress', update);
+            element.removeEventListener('loadedmetadata', update);
+            element.removeEventListener('emptied', clearRanges);
+            element.removeEventListener('loadstart', clearRanges);
         };
     }
 
@@ -443,16 +495,29 @@ export function createMediaSeekableStore(mediaElement: StateStore<HTMLMediaEleme
     let lastRanges: TimeRanges | null = null;
     let cleanup: StoreListenerUnsubscribe = () => {};
 
+    function clearRanges() {
+        // Seekable ranges belong to the previous source; drop them on a source change.
+        if (lastRanges === null) return;
+        lastRanges = null;
+        listeners.forEach((listener) => listener());
+    }
+
     function detectChanges() {
         cleanup();
+        clearRanges();
 
         const element = mediaElement.getState();
         if (!element) return;
+        const media = element;
         function handler () {
-            if (!element?.seekable) return;
-            if (!lastRanges) return;
-            if (timeRangesCompare(element.seekable, lastRanges)) return;
-            lastRanges = element?.seekable ?? null;
+            const seekable = media.seekable;
+            if (!seekable) return;
+            const nextRanges = snapshotTimeRanges(seekable);
+            // Publish the first non-empty range set too, so components can enable seeking
+            // as soon as the media becomes seekable.
+            if (lastRanges && timeRangesCompare(nextRanges, lastRanges)) return;
+            if (!lastRanges && nextRanges.length === 0) return;
+            lastRanges = nextRanges;
             listeners.forEach((listener) => listener());
         };
         element.addEventListener('seeking', handler);
@@ -460,13 +525,25 @@ export function createMediaSeekableStore(mediaElement: StateStore<HTMLMediaEleme
         element.addEventListener('progress', handler);
         element.addEventListener('canplay', handler);
         element.addEventListener('canplaythrough', handler);
-        
+        element.addEventListener('loadedmetadata', handler);
+        element.addEventListener('durationchange', handler);
+        element.addEventListener('emptied', clearRanges);
+        element.addEventListener('loadstart', clearRanges);
+
+        // The element may already be seekable when it is registered (for example
+        // metadata loaded before the store was created), so publish right away.
+        handler();
+
         cleanup = () => {
             element.removeEventListener('seeking', handler);
             element.removeEventListener('seeked', handler);
             element.removeEventListener('progress', handler);
             element.removeEventListener('canplay', handler);
             element.removeEventListener('canplaythrough', handler);
+            element.removeEventListener('loadedmetadata', handler);
+            element.removeEventListener('durationchange', handler);
+            element.removeEventListener('emptied', clearRanges);
+            element.removeEventListener('loadstart', clearRanges);
         };
     }
 
@@ -691,23 +768,46 @@ function createMediaDurationStore(mediaElement: StateStore<HTMLMediaElement | nu
 function createMediaCurrentTimeStore(mediaElement: StateStore<HTMLMediaElement | null>): StateStore<number> {
     const listeners = new Set<StoreListener>();
     let currentTime = 0;
+    let currentElement: HTMLMediaElement | null = null;
     let cleanup: StoreListenerUnsubscribe = () => {};
 
-    function update() {
-        const nextTime = mediaElement.getState()?.currentTime ?? 0;
+    function publish(nextTime: number) {
         if (nextTime === currentTime) return;
         currentTime = nextTime;
         listeners.forEach(listener => listener());
     }
 
+    function update() {
+        const element = mediaElement.getState();
+        const nextTime = element?.currentTime ?? 0;
+        publish(Number.isFinite(nextTime) && !Number.isNaN(nextTime) ? nextTime : 0);
+    }
+
+    function reset() {
+        // A source change invalidates the previous source's playback position.
+        publish(0);
+    }
+
     function detectChanges() {
         cleanup();
-        update();
         const element = mediaElement.getState();
+        // A replaced (or removed) media element is a source change: never let the
+        // previous source's playback position leak into the new one.
+        if (element !== currentElement) {
+            currentElement = element;
+            publish(0);
+        }
         if (!element) return;
-        const events = ['timeupdate', 'seeking', 'seeked', 'loadedmetadata', 'emptied'];
+        const events = ['timeupdate', 'seeking', 'seeked', 'loadedmetadata'];
         events.forEach(event => element.addEventListener(event, update));
-        cleanup = () => events.forEach(event => element.removeEventListener(event, update));
+        element.addEventListener('emptied', reset);
+        element.addEventListener('loadstart', reset);
+        update();
+        cleanup = () => {
+            events.forEach(event => element.removeEventListener(event, update));
+            element.removeEventListener('emptied', reset);
+            element.removeEventListener('loadstart', reset);
+        };
     }
 
     mediaElement.subscribe(detectChanges);
@@ -721,8 +821,21 @@ function createMediaCurrentTimeStore(mediaElement: StateStore<HTMLMediaElement |
             const element = mediaElement.getState();
             if (!element) return;
             if (!Number.isFinite(time) || Number.isNaN(time)) return;
-            if (!Number.isFinite(element.duration) || Number.isNaN(element.duration)) return;
-            element.currentTime = Math.min(Math.max(time, 0), element.duration);
+
+            const duration = element.duration;
+            if (Number.isFinite(duration)) {
+                element.currentTime = Math.min(Math.max(time, 0), Math.max(duration, 0));
+            } else {
+                // Live or otherwise unbounded media: clamp to the seekable window
+                // instead, so seeking still works once a range is known.
+                const seekable = element.seekable;
+                if (!seekable || seekable.length === 0) return;
+                const start = seekable.start(0);
+                const end = seekable.end(seekable.length - 1);
+                if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return;
+                element.currentTime = Math.min(Math.max(time, start), end);
+            }
+
             update();
         },
         subscribe(callback) {
@@ -1018,6 +1131,14 @@ export function useMediaCurrentTimeFine() {
     const store = useMediaStore();
     const element = useMediaElement();
     const [currentTime, setCurrentTime] = useState(0);
+    const [sampledElement, setSampledElement] = useState(element);
+
+    if (sampledElement !== element) {
+        // Reset during render so that the first frame with a new element never
+        // shows the previous source's time, even before effects run.
+        setSampledElement(element);
+        setCurrentTime(0);
+    }
 
     useEffect(() => {
         if (!element) return;
@@ -1045,15 +1166,29 @@ export function useMediaCurrentTimeFine() {
             if (media.paused) updateTime();
         }
 
+        function handleSourceChange() {
+            // Drop the old source's time immediately rather than waiting for the
+            // next event; otherwise the bar shows the previous clip's position.
+            if (handle !== undefined) cancelAnimationFrame(handle);
+            handle = undefined;
+            setCurrentTime(0);
+            if (!media.paused && !media.ended)
+                handle = requestAnimationFrame(tick);
+        }
+
         const events = ['play', 'pause', 'ended'];
         events.forEach(event => media.addEventListener(event, handlePlaybackChange));
         const unsubscribe = store.currentTime.subscribe(handleTimeChange);
+        media.addEventListener('emptied', handleSourceChange);
+        media.addEventListener('loadstart', handleSourceChange);
         handlePlaybackChange();
 
         return () => {
             if (handle !== undefined) cancelAnimationFrame(handle);
             unsubscribe();
             events.forEach(event => media.removeEventListener(event, handlePlaybackChange));
+            media.removeEventListener('emptied', handleSourceChange);
+            media.removeEventListener('loadstart', handleSourceChange);
         }
     }, [element, store]);
 

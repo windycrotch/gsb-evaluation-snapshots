@@ -54,6 +54,8 @@ Get the ended state of the media element. This is the same as `HTMLMediaElement#
 
 Get the buffered time ranges of the media element. This is the same as `HTMLMediaElement#buffered` except that it is reactive. Returns a read only state.
 
+Ranges are published as a stable snapshot when buffering advances, and are cleared when the source changes or the media element is replaced.
+
 **Returns:** `TimeRanges | null`
 
 ## useMediaSeeking() 
@@ -65,6 +67,8 @@ Get the seeking state of the media element. This is the same as `HTMLMediaElemen
 ## useMediaSeekable()
 
 Get the seekable time ranges of the media element. This is the same as `HTMLMediaElement#seekable` except that it is reactive. Returns a read only state.
+
+The first non-empty range set is published as soon as the media becomes seekable, and the ranges are cleared when the source changes or the media element is replaced.
 
 **Returns:** `TimeRanges | null`
 
@@ -110,11 +114,15 @@ Get the duration of the media element. This is the same as `HTMLMediaElement#dur
 
 Control the current time of the media element. Returns the state and a setter function.
 
+Setting the time clamps to the media duration when it is finite, and to the seekable window for live media. The time resets to `0` when the media element changes or its source is emptied.
+
 **Returns:** `[number, (currentTime: number) => void]`
 
 ## useMediaCurrentTimeFine()
 
 Get the current time of the media element at a higher refresh rate. This uses `window.requestAnimationFrame` and should be used sparingly to prevent performance issues. Returns the state and a setter function.
+
+The time resets to `0` when the media element changes or its source is emptied, so a previous source's position never leaks into a new one.
 
 **Returns:** `[number, (currentTime: number) => void]`
 
