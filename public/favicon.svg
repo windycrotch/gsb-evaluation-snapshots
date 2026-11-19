@@ -1,0 +1,37 @@
+<!-- Live Music Coder — browser-tab mark. Art direction "SIGNAL ROOM".
+
+     Replaces a violet bolt (#863bff / #7e14ff / #47bfff) built from 15
+     stacked gaussian-blur ellipses. Two problems with that mark:
+     (1) it was the same stock violet as the dead token palette, so it
+     reintroduced the exact tell we removed, in the one place the brand is
+     always on screen; (2) feGaussianBlur at stdDeviation 4.6 to 7.7 on a
+     48px canvas is mush at 16px, which is the size a favicon is actually
+     rendered at.
+
+     This mark: a three-segment level meter. Zero filters, zero gradients,
+     four solid shapes. Same visual language as the in-app WaveformIcon
+     (Logo.tsx) reduced from four bars to three, which is the standard
+     responsive-logo move: four bars at 16px is 2px bars with 1px gaps and
+     they merge.
+
+     Ground is carbon rather than transparent so the mark holds on BOTH
+     light and dark browser chrome: on white the tile supplies contrast,
+     on near-black the amber bars carry it.
+
+     Colours are literal (a favicon cannot resolve CSS custom properties)
+     and mirror the design tokens:
+       #1b1815 = color-bg-alt · #ffa54b = color-primary
+       #ffc476 = color-primary-ink (peak segment, 10.96:1 on the tile)
+     NOTE: token names are written without their leading double hyphen
+     because XML forbids that sequence inside a comment. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48" role="img" aria-label="Live Music Coder">
+  <rect width="48" height="48" rx="11" fill="#1b1815"/>
+  <!-- Level meter, centre-aligned. Bars 7.5u wide with 5.25u gaps: at 16px
+       that is 2.5px bars separated by 1.75px, which stays legible.
+       rx is 2.4, deliberately NOT the full capsule (3.75): a fully-rounded
+       7.5u bar erodes to a blob at tab size. That was caught by rendering
+       a true 16px raster and looking at it, not by assuming it scales. -->
+  <rect x="7.25"  y="17" width="7.5" height="14" rx="2.4" fill="#ffa54b"/>
+  <rect x="20.25" y="9"  width="7.5" height="30" rx="2.4" fill="#ffc476"/>
+  <rect x="33.25" y="14" width="7.5" height="20" rx="2.4" fill="#ffa54b"/>
+</svg>

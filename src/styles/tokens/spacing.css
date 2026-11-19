@@ -1,0 +1,102 @@
+/* SPDX-License-Identifier: MIT
+   Copyright (c) 2026 Arnold Wender / Wender Media */
+
+/* ──────────────────────────────────────────────────────────
+   Spacing, radius, shadow, and transition tokens
+   8px base unit for spacing scale.
+   ────────────────────────────────────────────────────────── */
+:root {
+  /* --- Spacing (8px base) --- */
+  --space-0: 0;
+  --space-1: 0.125rem;   /* 2px */
+  --space-2: 0.25rem;    /* 4px */
+  --space-3: 0.375rem;   /* 6px */
+  --space-4: 0.5rem;     /* 8px */
+  --space-5: 0.625rem;   /* 10px */
+  --space-6: 0.75rem;    /* 12px */
+  --space-7: 0.875rem;   /* 14px */
+  --space-8: 1rem;       /* 16px */
+  --space-9: 1.25rem;    /* 20px */
+  --space-10: 1.5rem;    /* 24px */
+  --space-11: 1.75rem;   /* 28px */
+  --space-12: 2rem;      /* 32px */
+  --space-13: 2.5rem;    /* 40px */
+  --space-14: 3rem;      /* 48px */
+  --space-15: 4rem;      /* 64px */
+  --space-16: 5rem;      /* 80px */
+
+  /* --- Semantic aliases (map t-shirt sizes to numeric scale) ---
+     Added to fix 6 missing-token references across TutorialOverlay,
+     EngineNode, NotFound, ErrorBoundary. See .wm-electron-audit.md T1. */
+  --space-xs: var(--space-2);   /* 4px */
+  --space-sm: var(--space-4);   /* 8px */
+  --space-md: var(--space-8);   /* 16px */
+  --space-lg: var(--space-10);  /* 24px */
+  --space-xl: var(--space-12);  /* 32px */
+  --space-2xl: var(--space-14); /* 48px */
+  --space-3xl: var(--space-16); /* 80px */
+
+  /* --- Structural sizes ---
+     Extracted from the 164 raw 'NNNpx' string literals counted across
+     src/components + src/pages + src/layouts (docs/A11Y-AUDIT §P3).
+     These are the recurring magic numbers — chrome heights, content
+     measures and touch floors — that belong in one place. */
+  --size-nav: 4rem;                 /* 64px — SiteNav height            */
+  --size-activity-bar: 2.5rem;      /* 40px — ActivityBar rail width    */
+  --size-touch-min: 2.75rem;        /* 44px — WCAG 2.5.5 / Apple HIG    */
+  --size-touch: var(--size-touch-min);
+  --size-touch-comfortable: 3rem;   /* 48px — Material, mobile target   */
+
+  /* Content measures. Named by role, not by number, so a layout change
+     is one edit rather than a grep for '1200px'. */
+  --width-content-sm: 60rem;        /* 960px  — prose, docs, legal      */
+  --width-content-md: 75rem;        /* 1200px — listing grids           */
+  --width-content-lg: 80rem;        /* 1280px — landing, wide sections  */
+
+  /* --- Border radius ---
+     "SIGNAL ROOM" runs tight. Rack panels and console strips have
+     small, consistent radii; the softly-rounded-everything of a stock
+     dashboard is part of what this direction rejects. The scale was
+     halved (was 4 / 8 / 16px).
+
+     HONEST STATE OF --radius-full: the intent is that it means a
+     genuine circle (knob, LED, scrollbar thumb, toggle handle), and
+     Badge was moved off it. But ~27 call sites still use it for
+     capsule chips and tags. Sweeping those is a visual change across
+     9 files that was not in scope for this pass — it is a named
+     follow-up in
+     file can currently claim is enforced. */
+  --radius-sm: 0.125rem;  /* 2px — chips, inputs, tight controls */
+  --radius-md: 0.25rem;   /* 4px — buttons, cards                */
+  --radius-lg: 0.5rem;    /* 8px — dialogs, panels               */
+  --radius-full: 9999px;  /* circles — and, for now, legacy pills */
+
+  /* --- Shadows (darker for dark UI) --- */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 10px 15px rgba(0, 0, 0, 0.3);
+  /* Signal glow — the "this is live" lamp. Derived from the brand
+     wash token so it can never drift from --color-primary again
+     (it was still carrying rgba(168,85,247) — the old purple —
+     long after the accent was supposed to have changed). */
+  --shadow-glow-strudel: 0 0 12px var(--color-primary-wash);
+  --shadow-glow-signal: 0 0 10px var(--color-primary-wash-strong);
+  /* Virtual-keyboard keycap shadows — were raw rgba() at
+     VirtualKeyboard.tsx:311,312,351 (docs/A11Y-AUDIT §P3).
+     Values are the ones already in use, tokenised as-is: the keycap
+     bevel is what makes a key look pressable, and re-inventing it
+     would be a visual change nobody asked for. */
+  --shadow-key: 0 2px 4px rgba(0, 0, 0, 0.4);
+  --shadow-key-bevel: inset 0 -4px 0 rgba(0, 0, 0, 0.1);
+
+  /* --- Transitions --- */
+  --transition-fast: 150ms ease;
+  --transition-base: 300ms ease;
+  --transition-slow: 500ms ease;
+  /* Spring easing for interactive feedback (scale bounces) */
+  --transition-spring: 300ms cubic-bezier(0.34, 1.56, 0.64, 1);
+
+  /* --- Animation presets (compositor-only: transform + opacity) --- */
+  --animation-hover-scale: scale(1.03);
+  --animation-card-lift: translateY(-2px);
+}

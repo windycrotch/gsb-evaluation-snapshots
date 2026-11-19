@@ -1,0 +1,69 @@
+# Netlify build configuration for Vite SPA
+# ──────────────────────────────────────────────────────────────────────
+# Netlify builds `main` from GitHub on every push with the command below (checked 2026-10-04 in
+# the Netlify API: repository linked, builds not stopped, the published deploy came from git).
+# The note that stood here — continuous deployment disabled on 2026-04-13, production deployed by
+# hand — no longer held. `npm run build` runs scripts/verify-llms-txt.mjs first (prebuild).
+# ──────────────────────────────────────────────────────────────────────
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+[build.environment]
+  NPM_FLAGS = "--legacy-peer-deps"
+  NODE_VERSION = "22"
+
+# Security headers — CSP, clickjacking, MIME sniffing protection
+[[headers]]
+  for = "/*"
+  [headers.values]
+    # unsafe-eval: required by Strudel live-coding engine (new Function / eval) — accepted risk by design
+    # unsafe-inline (style-src): required by Tailwind CSS 4 utility classes + React style={{}} props — no nonce alternative
+    Content-Security-Policy = "default-src 'self'; script-src 'self' 'unsafe-eval' blob: data:; script-src-elem 'self' blob: data:; style-src 'self' 'unsafe-inline'; connect-src 'self' https://api.github.com https://raw.githubusercontent.com https://*.githubusercontent.com; img-src 'self' data: blob:; media-src 'self' blob: data:; font-src 'self' data:; worker-src 'self' blob: data:; frame-src 'none'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'; form-action 'self'"
+    X-Content-Type-Options = "nosniff"
+    X-Frame-Options = "DENY"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    Permissions-Policy = "camera=(), microphone=(), geolocation=()"
+    Strict-Transport-Security = "max-age=31536000; includeSubDomains; preload"
+
+# Canonical redirect for legacy /landing path
+[[redirects]]
+  from = "/landing"
+  to = "/"
+  status = 301
+  force = true
+
+# The Impressum lives on /legal. /impressum is the address people type and the one this repo's
+# README names, so it must not answer 404 (same site, same page — not a cross-domain redirect).
+[[redirects]]
+  from = "/impressum"
+  to = "/legal"
+  status = 301
+  force = true
+
+# First-party Dirt-Samples proxy pinned to an immutable commit SHA (DSGVO + supply-chain safety).
+# Browser fetches /dirt-samples/*.wav from live-music-coder.pro ('self'); Netlify Edge caches and
+# proxies upstream without exposing visitor IPs directly to GitHub/Fastly.
+[[redirects]]
+  from = "/dirt-samples/*"
+  to = "https://raw.githubusercontent.com/tidalcycles/Dirt-Samples/c74fc80f8db8038f6a33648ffef5ac00a07ad402/:splat"
+  status = 200
+  force = true
+
+# First-party General MIDI SoundFonts proxy pinned to an immutable commit SHA (MIT FluidR3_GM + DSGVO).
+# Browser fetches /soundfonts/*.js from live-music-coder.pro ('self'); Netlify Edge caches and proxies
+# upstream without sending visitor IPs to third-party GitHub Pages or loosening connect-src.
+[[redirects]]
+  from = "/soundfonts/*"
+  to = "https://raw.githubusercontent.com/felixroos/webaudiofontdata/23ca907d4370a04fd89ca483a92915e4d6159ab9/sound/:splat"
+  status = 200
+  force = true
+
+# 404 fallback — every valid route in public/sitemap.xml (including /docs/:sectionId,
+# /sessions/:slug, /blog/:slug, and /datenschutz) has its own prerendered HTML file in dist/,
+# and a real file wins over this non-forced rule. Unmatched paths serve dist/404.html with a
+# true HTTP 404 status (eliminating Soft-404 indexing) while still booting the React router.
+[[redirects]]
+  from = "/*"
+  to = "/404.html"
+  status = 404

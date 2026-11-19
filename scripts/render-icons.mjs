@@ -1,0 +1,106 @@
+/* SPDX-License-Identifier: MIT
+   Copyright (c) 2026 Arnold Wender / Wender Media
+   ──────────────────────────────────────────────────────────
+   Renders public/icon-192.png, public/icon-512.png and the desktop
+   bundle icon build/icon.png from public/icon-source.svg so no icon
+   can silently drift from the mark. Run after any change to the icon
+   source:
+
+       node scripts/render-icons.mjs
+
+   Playwright is resolved from a sibling repo rather than added as a
+   dependency — this is a one-off authoring tool, not part of the build,
+   and the app does not need a browser automation package in its tree.
+   If the path below no longer resolves, point PLAYWRIGHT_PATH at any
+   checkout that has playwright installed.
+   ────────────────────────────────────────────────────────── */
+
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import path from 'node:path'
+
+/* Playwright is not a dependency of this project — it is only needed to render
+   the icon set, which happens rarely and on one machine. Point PLAYWRIGHT_PATH at
+   an installation, or run `npx playwright install` first. There is deliberately
+   no fallback path: the one that used to be here was a private checkout on the
+   author machine, which is both useless to anyone else and a leak in a public
+   repository. */
+const PW = process.env.PLAYWRIGHT_PATH ?? 'playwright'
+const { chromium } = await import(PW)
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+const svg = readFileSync(path.join(root, 'public/icon-source.svg'), 'utf-8')
+
+const browser = await chromium.launch()
+for (const size of [192, 512]) {
+  const ctx = await browser.newContext({
+    viewport: { width: size, height: size },
+    deviceScaleFactor: 1,
+  })
+  const page = await ctx.newPage()
+  /* margin:0 and an exactly-sized SVG keep the raster edge-to-edge —
+     maskable icons must be full bleed or the OS crop eats the mark. */
+  await page.setContent(
+    `<body style="margin:0">${svg.replace(/width="\d+" height="\d+"/, `width="${size}" height="${size}"`)}</body>`
+  )
+  await page.screenshot({ path: path.join(root, `public/icon-${size}.png`), omitBackground: false })
+  console.log(`public/icon-${size}.png written`)
+  await ctx.close()
+}
+
+/* ── Desktop bundle icon ───────────────────────────────────
+   electron-builder turns build/icon.png into the .icns of the packaged
+   app. macOS does not mask an app icon, so the full-bleed square the
+   PWA needs would sit in the Dock as a hard-cornered tile among rounded
+   ones. Apple's grid for a 1024 px canvas is an 824 px tile with 100 px
+   of clear space on every side; 185 px corners approximate its curve.
+   The ground outside the tile stays transparent. */
+{
+  const CANVAS = 1024
+  const TILE = 824
+  const RADIUS = 185
+  const ctx = await browser.newContext({
+    viewport: { width: CANVAS, height: CANVAS },
+    deviceScaleFactor: 1,
+  })
+  const page = await ctx.newPage()
+  const tile = svg.replace(
+    /width="\d+" height="\d+"/,
+    `width="${TILE}" height="${TILE}" style="display:block"`
+  )
+  await page.setContent(
+    `<body style="margin:0;background:transparent">` +
+      `<div style="width:${TILE}px;height:${TILE}px;margin:${(CANVAS - TILE) / 2}px;` +
+      `border-radius:${RADIUS}px;overflow:hidden">${tile}</div></body>`
+  )
+  await page.screenshot({ path: path.join(root, 'build/icon.png'), omitBackground: true })
+  console.log('build/icon.png written')
+  await ctx.close()
+}
+
+/* ── Social preview ────────────────────────────────────────
+   og-image.png must be rendered with the real webfaces loaded, or the
+   single most-shared image of the product ships in the system font
+   while the site itself is set in IBM Plex. The @font-face rules below
+   point at the same woff2 files the app serves from public/fonts/. */
+{
+  const ogSvg = readFileSync(path.join(root, 'public/og-image.svg'), 'utf-8')
+  const fontDir = path.join(root, 'public/fonts')
+  const face = (family, weight, file) =>
+    `@font-face{font-family:'${family}';font-weight:${weight};font-style:normal;` +
+    `src:url('file://${path.join(fontDir, file)}') format('woff2');}`
+  const ctx = await browser.newContext({ viewport: { width: 1200, height: 630 }, deviceScaleFactor: 1 })
+  const page = await ctx.newPage()
+  await page.setContent(`<style>
+    ${face('IBM Plex Sans', 400, 'ibm-plex-sans-latin-400-normal.woff2')}
+    ${face('IBM Plex Sans', 700, 'ibm-plex-sans-latin-700-normal.woff2')}
+    ${face('IBM Plex Mono', 400, 'ibm-plex-mono-latin-400-normal.woff2')}
+  </style><body style="margin:0">${ogSvg}</body>`)
+  await page.evaluate(() => document.fonts.ready)
+  await page.waitForTimeout(300)
+  await page.screenshot({ path: path.join(root, 'public/og-image.png') })
+  console.log('public/og-image.png written')
+  await ctx.close()
+}
+
+await browser.close()
