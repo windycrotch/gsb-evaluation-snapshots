@@ -11,6 +11,19 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 - Unnecessary page reload bug fixed
 - `loadFromQuery` function modified
 - `README.md` updated
+## [1.5] - 2026-11-20
+### Added
+- `recent-store.js` shared module with source-based record identity
+- Local test suite under `tests/` (`node --test`)
+### Changed
+- Recent records are now deduplicated by video source (file name for local entries) instead of title
+- Progress updates, resume positioning and removal all target the same source-based record
+- Backup import rejects duplicate entries and truncates lists longer than 30 entries; failed imports leave the existing list untouched
+- Local file entries switch the form to local mode and prompt for reselection instead of failing silently on stale blob URLs
+- ObjectURLs are revoked only after the player detaches them and never while still referenced by the current playback
+- Service worker cache bumped to v1.5; old caches are deleted during activation
+- Offline navigation requests fall back to the cached homepage (network-first)
+- Pending service-worker update prompt is shown once and triggers a single page reload
 ## [1.4] - 2026-10-03
 ### Added
 - `KeyP` keyboard shortcut
@@ -146,7 +159,8 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 - Load subtitle from URL
 
 
-[Unreleased]: https://github.com/sepandhaghighi/neovid/compare/v1.4...main
+[Unreleased]: https://github.com/sepandhaghighi/neovid/compare/v1.5...main
+[1.5]: https://github.com/sepandhaghighi/neovid/compare/v1.4...v1.5
 [1.4]: https://github.com/sepandhaghighi/neovid/compare/v1.3...v1.4
 [1.3]: https://github.com/sepandhaghighi/neovid/compare/v1.2...v1.3
 [1.2]: https://github.com/sepandhaghighi/neovid/compare/v1.1...v1.2

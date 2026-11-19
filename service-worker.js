@@ -1,9 +1,10 @@
-const cacheName = "neovid-v1.4";
+const cacheName = "neovid-v1.5";
 const appShell = [
   "./",
   "index.html",
   "style.css",
   "script.js",
+  "recent-store.js",
   "site.webmanifest",
   "assets/apple-touch-icon.png",
   "assets/logo.png",
@@ -31,6 +32,7 @@ self.addEventListener("install", event => {
 
 
 self.addEventListener("activate", event => {
+  // Remove every cache created by an older service-worker version.
   event.waitUntil(
     caches.keys().then(keys =>
       Promise.all(
@@ -54,8 +56,16 @@ self.addEventListener("fetch", event => {
 
 
   if (request.mode === "navigate") {
+    // Network-first: serve the freshest homepage while online and fall
+    // back to the cached copy when the network is unavailable.
     event.respondWith(
-      caches.match("index.html")
+      fetch(request)
+        .then(response => {
+          const copy = response.clone();
+          caches.open(cacheName).then(cache => cache.put("index.html", copy));
+          return response;
+        })
+        .catch(() => caches.match("index.html"))
     );
     return;
   }

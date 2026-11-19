@@ -254,8 +254,11 @@ function truncateTitle(title, maxLength = CONFIG.LIMITS.TITLE_MAX_LENGTH) {
 }
 
 function playVideo(video, subtitle = "", title = null, videoType = "url", subtitleType = "url") {
-  revokeCurrentMedia();
+  // Detach the current sources from the player first so the old ObjectURLs
+  // are no longer referenced when they are revoked below.
   DOM.player.innerHTML = "";
+  DOM.player.removeAttribute("src");
+  revokeCurrentMedia(video, subtitle);
 
   const sourceElement = document.createElement("source");
   sourceElement.src = video;
@@ -285,29 +288,31 @@ function playVideo(video, subtitle = "", title = null, videoType = "url", subtit
 
 
 function saveRecent(title, video, videoType, subtitle="", subtitleType="url") {
-  let recent = getRecent();
-  let progress = 0;
-  const idx = recent.findIndex(item => item.title===title);
-  if(idx!==-1) {
-    progress = recent[idx].progress;
-  }
-
-  recent = recent.filter(item => !(item.title===title));
-
-  recent.unshift({title, video, videoType, subtitle, subtitleType, progress});
-  if(recent.length>CONFIG.LIMITS.RECENT_SIZE) recent = recent.slice(0,CONFIG.LIMITS.RECENT_SIZE);
+  // Identity is the video source (URL, or file name for local entries),
+  // so same-title/different-source records never overwrite each other.
+  const recent = RecentStore.upsertRecent(getRecent(), {
+    title,
+    video,
+    videoType,
+    subtitle,
+    subtitleType
+  });
 
   setRecent(recent);
   renderRecent();
 }
 
-function removeRecent(title) {
+function removeRecent(item) {
   showConfirm(CONFIG.MESSAGES.CONFIRM_REMOVE, {
     confirmText: "Remove"
   }).then((result) => {
       if (result.isConfirmed) {
-        let recent = getRecent();
-        recent = recent.filter(item => !(item.title===title));
+        const recent = RecentStore.removeRecentById(
+          getRecent(),
+          item.videoType,
+          item.video,
+          item.title
+        );
         setRecent(recent);
         renderRecent();
       }
@@ -328,7 +333,12 @@ function updateProgress() {
   if(!state.currentVideo || !DOM.player.duration) return;
   const percent = Math.min(100, Math.round((DOM.player.currentTime/DOM.player.duration)*100));
   let recent = getRecent();
-  const idx = recent.findIndex(item => item.video===state.currentVideo);
+  const idx = RecentStore.findRecordIndex(
+    recent,
+    state.currentVideoType,
+    state.currentVideo,
+    state.currentTitle
+  );
   if(idx!==-1) {
     recent[idx].progress = percent;
     setRecent(recent);
@@ -339,11 +349,16 @@ function updateProgress() {
 function loadPlayerTime() {
   if(!state.currentVideo || !DOM.player.duration) return;
   let recent = getRecent();
-  const idx = recent.findIndex(item => item.video===state.currentVideo);
+  const idx = RecentStore.findRecordIndex(
+    recent,
+    state.currentVideoType,
+    state.currentVideo,
+    state.currentTitle
+  );
   if(idx!==-1) {
     const currentTime = (recent[idx].progress / 100) * DOM.player.duration
     DOM.player.currentTime = currentTime;
-    
+
   }
 }
 
@@ -385,26 +400,39 @@ function createRecentItem(item, maxLimit) {
 
 function attachRecentEvents(item, spanTitle, spanRemove) {
   spanRemove.addEventListener("click", () => {
-    removeRecent(item.title);
+    removeRecent(item);
   });
 
   spanTitle.addEventListener("click", () => {
     let isDataLoaded = false;
     if(item.videoType==="url"){
+      DOM.videoLoadSelect.value = "url";
+      DOM.videoLoadSelect.dispatchEvent(new Event("change"));
       DOM.videoUrl.value = item.video;
       isDataLoaded = true;
     }
     else{
+      // Local ObjectURLs are session-scoped and cannot be reopened later.
+      // Switch the form to local mode and point the user at the file picker
+      // instead of silently loading a dead blob: URL.
+      DOM.videoLoadSelect.value = "local";
+      DOM.videoLoadSelect.dispatchEvent(new Event("change"));
       DOM.videoUrl.value = "";
+      DOM.videoFile.click();
       showAlert(CONFIG.MESSAGES.RESELECT_LOCAL_VIDEO, {icon: "info"});
     }
     if (item.subtitle) {
       if (item.subtitleType==="url") {
+        DOM.subtitleLoadSelect.value = "url";
+        DOM.subtitleLoadSelect.dispatchEvent(new Event("change"));
         DOM.subtitleUrl.value = item.subtitle;
-        isDataLoaded = true;   
+        isDataLoaded = true;
       }
       else{
+        DOM.subtitleLoadSelect.value = "local";
+        DOM.subtitleLoadSelect.dispatchEvent(new Event("change"));
         DOM.subtitleUrl.value = "";
+        DOM.subtitleFile.click();
         showAlert(CONFIG.MESSAGES.RESELECT_LOCAL_SUBTITLE, {icon: "info"});
       }
     }
@@ -468,15 +496,30 @@ function getFormData() {
   };
 }
 
-function revokeCurrentMedia() {
-  if (state.currentVideoType === "local" && state.currentVideo) {
+function revokeCurrentMedia(nextVideo = null, nextSubtitle = null) {
+  // Only revoke local blob: URLs, and never revoke an ObjectURL that the
+  // new playback is about to reference (e.g. replaying the same source).
+  if (
+    state.currentVideoType === "local" &&
+    state.currentVideo &&
+    state.currentVideo !== nextVideo
+  ) {
     URL.revokeObjectURL(state.currentVideo);
   }
 
-  if (state.currentSubtitleType === "local" && state.currentSubtitle) {
+  if (
+    state.currentSubtitleType === "local" &&
+    state.currentSubtitle &&
+    state.currentSubtitle !== nextSubtitle
+  ) {
     URL.revokeObjectURL(state.currentSubtitle);
   }
 }
+
+// Release any local ObjectURLs still held when the page goes away.
+window.addEventListener("pagehide", () => {
+  revokeCurrentMedia();
+});
 
 
 
@@ -594,21 +637,11 @@ DOM.recentFile.addEventListener("change", () => {
   reader.onload = () => {
     try {
       const parsed = JSON.parse(reader.result);
-      if (!Array.isArray(parsed)) throw new Error();
-      const isValid = parsed.every(item =>
-        item &&
-        typeof item === "object" &&
-        typeof item.title === "string" &&
-        typeof item.video === "string" &&
-        (item.videoType === "url" || item.videoType === "local") &&
-        (item.subtitle === "" || typeof item.subtitle === "string") &&
-        (item.subtitleType === "url" || item.subtitleType === "local") &&
-        typeof item.progress === "number" &&
-        item.progress >= 0 &&
-        item.progress <= 100
-      );
-      if (!isValid) throw new Error();
-      setRecent(parsed);
+      // Validation covers field types, duplicate identities and the
+      // 30-entry cap. On any failure the stored list is never touched.
+      const result = RecentStore.validateImportedData(parsed);
+      if (!result.ok) throw new Error(result.reason);
+      setRecent(result.data);
       renderRecent();
       showAlert(CONFIG.MESSAGES.IMPORT_SUCCESS, {icon: "success"});
     } catch {
@@ -622,21 +655,24 @@ window.addEventListener("resize", () => {
   renderRecent();
 });
 
-function showUpdateAlert(registration) {
-  if (!registration.waiting) return;
-  showConfirm(CONFIG.MESSAGES.UPDATE_AVAILABLE, {
-    icon: "info",
-    confirmText: "Reload"
-  }).then((result) => {
-    if (result.isConfirmed) {
-      registration.waiting.postMessage({ type: "SKIP_WAITING" });
-    }
-  });
-}
-
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", async () => {
     const reg = await navigator.serviceWorker.register("service-worker.js");
+
+    let updateAlertOpen = false;
+    function showUpdateAlert(registration) {
+      if (!registration.waiting || updateAlertOpen) return;
+      updateAlertOpen = true;
+      showConfirm(CONFIG.MESSAGES.UPDATE_AVAILABLE, {
+        icon: "info",
+        confirmText: "Reload"
+      }).then((result) => {
+        updateAlertOpen = false;
+        if (result.isConfirmed) {
+          registration.waiting.postMessage({ type: "SKIP_WAITING" });
+        }
+      });
+    }
 
     if (reg.waiting) {
       showUpdateAlert(reg);
@@ -651,16 +687,15 @@ if ("serviceWorker" in navigator) {
         }
       });
     });
+  });
 
-    if (navigator.serviceWorker.controller) {
-        let refreshing = false;
-        navigator.serviceWorker.addEventListener("controllerchange", () => {
-            if (!refreshing) {
-                refreshing = true;
-                window.location.reload();
-            }
-        });
-    }
+  // One reload per tab lifetime when the active controller is replaced,
+  // regardless of how many controllerchange events fire.
+  let refreshing = false;
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (refreshing) return;
+    refreshing = true;
+    window.location.reload();
   });
 }
 
@@ -720,11 +755,22 @@ DOM.resumeButton.addEventListener("click", () => {
   }
   const item = recent[0];
   if (item.videoType !== "url") {
+    // Stored local blob: URLs cannot be reopened; guide the user to
+    // reselect the file instead of submitting a dead source.
+    DOM.videoLoadSelect.value = "local";
+    DOM.videoLoadSelect.dispatchEvent(new Event("change"));
+    DOM.videoFile.click();
     showAlert(CONFIG.MESSAGES.RESELECT_LOCAL_VIDEO, {icon: "info"});
     return;
   }
+  DOM.videoLoadSelect.value = "url";
+  DOM.videoLoadSelect.dispatchEvent(new Event("change"));
   DOM.videoUrl.value = item.video;
-  DOM.subtitleUrl.value = item.subtitle || "";
+  if (item.subtitle && item.subtitleType === "url") {
+    DOM.subtitleLoadSelect.value = "url";
+    DOM.subtitleLoadSelect.dispatchEvent(new Event("change"));
+    DOM.subtitleUrl.value = item.subtitle;
+  }
   DOM.form.requestSubmit();
 });
 

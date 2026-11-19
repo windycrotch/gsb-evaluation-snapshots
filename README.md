@@ -93,6 +93,18 @@ Then open your browser and visit:
 http://localhost:5005
 ```
 
+### Tests
+
+The test suite runs on Node.js 18+ with no third-party dependencies:
+
+```console
+npm test
+```
+
+See [`tests/README.md`](tests/README.md) for the full list of scenarios
+(source switching, same-title/different-source records, backup import
+validation, offline navigation and cache upgrades).
+
 ## Dependencies
 
 - [SweetAlert2](https://sweetalert2.github.io/) v11.26.24
