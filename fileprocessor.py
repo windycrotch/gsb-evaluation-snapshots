@@ -14,6 +14,8 @@ import numpy as np
 import pygame
 import librosa
 
+from playback_clock import PlaybackClock
+
 AUDIO_EXTS = ('.mp3', '.wav', '.ogg', '.flac')
 
 
@@ -78,6 +80,11 @@ class FileProcessor:
         self.track_serial = 0            # +1 every time a track starts at 0:00
         self.beats_detected = 0
         self.beat_index = 0
+        # pause-aware audio position (drives the export timeline)
+        self._clock = PlaybackClock(lambda: pygame.mixer.music.get_pos())
+        # tracks whose analysis failed (consumed by the exporter for reports)
+        self._failed_paths = []
+        self._failed_lock = threading.Lock()
         # background pre-analysis of the next track (no gap between songs)
         self._cache = {}
         self._cache_lock = threading.Lock()
@@ -117,6 +124,7 @@ class FileProcessor:
         self.beats_detected = 0
         self.ended_all = False
         pygame.mixer.music.play()
+        self._clock.start()
         self.playback_state = 'playing'
         self.track_serial += 1
 
@@ -149,6 +157,7 @@ class FileProcessor:
         if self.loading:
             return False
         pygame.mixer.music.stop()
+        self._clock.stop()
         self.playback_state = 'stopped'
         self.playlist = list(paths)
         with self._cache_lock:
@@ -172,6 +181,7 @@ class FileProcessor:
             return False
         path = self.playlist[i]
         pygame.mixer.music.stop()
+        self._clock.stop()
         self.playback_state = 'stopped'
         self.index = i
         self.is_analyzed = False
@@ -192,6 +202,8 @@ class FileProcessor:
             except Exception as e:
                 self.error_msg = f"Fehler bei '{os.path.basename(path)}': {e}"
                 print(self.error_msg)
+                with self._failed_lock:
+                    self._failed_paths.append(path)
                 self.is_analyzed = False
                 self.loading = False
                 self.load_failed = True
@@ -219,7 +231,12 @@ class FileProcessor:
         self._play_from_start()
 
     def update(self):
-        """Call once per frame: handles track end -> next track."""
+        """Call once per frame: handles track end -> next track.
+
+        Only an actively playing track can end. A paused track reports
+        get_busy() == False on some backends, but its state is 'paused', so
+        it is never advanced here.
+        """
         if self.load_failed:
             self.load_failed = False
             if self.index + 1 < len(self.playlist):
@@ -240,6 +257,12 @@ class FileProcessor:
         msg, self.error_msg = self.error_msg, ""
         return msg
 
+    def pop_failed(self):
+        """Paths whose analysis failed since the last call."""
+        with self._failed_lock:
+            failed, self._failed_paths = self._failed_paths, []
+        return failed
+
     def playlist_info(self):
         return self.index + 1, len(self.playlist)
 
@@ -249,9 +272,11 @@ class FileProcessor:
             return
         if self.playback_state == 'playing':
             pygame.mixer.music.pause()
+            self._clock.pause()
             self.playback_state = 'paused'
         elif self.playback_state == 'paused':
             pygame.mixer.music.unpause()
+            self._clock.resume()
             self.playback_state = 'playing'
         elif self.playback_state == 'stopped':
             self._play_from_start()
@@ -261,14 +286,15 @@ class FileProcessor:
         if not self.is_analyzed:
             return
         pygame.mixer.music.stop()
+        self._clock.stop()
         self.playback_state = 'stopped'
 
     def get_position(self):
         """Seconds since the track started (pause not counted) or None."""
         if self.playback_state in ('playing', 'paused') and self.is_analyzed:
-            ms = pygame.mixer.music.get_pos()
-            if ms >= 0:
-                return min(ms / 1000.0, self.duration)
+            pos = self._clock.position()
+            if pos is not None:
+                return min(pos, self.duration)
         return None
 
     def get_all_audio_data(self):
@@ -277,7 +303,7 @@ class FileProcessor:
         if self.playback_state != 'playing' or self.duration == 0:
             return np.zeros(self.log_spectrogram.shape[0]), False, 0, 0
 
-        current_time = max(pygame.mixer.music.get_pos(), 0) / 1000.0
+        current_time = self.get_position() or 0.0
         frame_index = int(current_time * self.log_spectrogram.shape[1] / self.duration)
         frame_index = min(max(0, frame_index), self.log_spectrogram.shape[1] - 1)
 

@@ -94,10 +94,14 @@ Two input modes supported:
 
 * `R` starts the export **from the beginning of the current song** and records the playlist until the end. `E` (or `R` again) stops it early.
 * The exported video always shows only the visualization + title/artist (no UI), the REC indicator is for your eyes only.
-* Audio is the **original file(s)**, not a microphone recording. Video and audio stay in sync even if your PC renders below 60 FPS or you pause.
-* Every song becomes an MP4 **chapter** (visible in VLC, mpv, ...).
-* Result: `exports/visualizer_<timestamp>.mp4` (an `ffmpeg_*.log` is kept only if something fails).
-* While exporting, skip/load/fullscreen are disabled to keep the file consistent.
+* Audio is the **original file(s)**, not a microphone recording.
+* The video timeline is driven by the **audio playhead**: pausing produces no frames, resuming fills them in, and a slow renderer is compensated automatically. Video and audio stay in sync.
+* Every song becomes an MP4 **chapter**; a new song always starts its chapter at `0:00` of that song. If a song cannot be analysed or its file is unreadable, it is skipped: no chapter, no audio, and the export continues with the next song.
+* If no valid song was recorded, the export is aborted, all temp files are removed and the status says so. No half-finished mp4 is left behind.
+* Result: `exports/visualizer_<timestamp>.mp4` (an `ffmpeg_*.log` is kept only if something was skipped or failed).
+* While exporting, changing the source, skipping songs and fullscreen are disabled. A window resize stops the export safely.
+* Pressing `ESC` while an export is running waits for the finalization to complete before the app exits.
+* Tests run fully offline (synthetic WAVs + a fake FFmpeg): `python -m pytest tests -q`.
 
 
 </details>
@@ -138,7 +142,9 @@ The project is modular for better organization and maintainability:
 * [`mui.py`](mui.py) – UI-related logic: settings, menus, screenshot functionality via **`SettingsManager`**, **`UIManager`**, **`ScreenshotManager`**.
 * [`particle.py`](particle.py) – Defines the **`Particle`** class for the Beat Explosion mode.
 * [`detector.py`](detector.py) – Generates **`system_report.json`** with required FFmpeg/Audio paths -needed- based on OS (must run first for export to work).
-* [`exporter.py`](exporter.py) – **`ExportManager`**: records frames, concatenates the original audio of all played songs, writes chapters and muxes everything into one MP4 via FFmpeg.
+* [`exporter.py`](exporter.py) – **`ExportManager`**: records frames, concatenates the original audio of all recorded songs, writes chapters and muxes everything into one MP4 via FFmpeg.
+* [`playback_clock.py`](playback_clock.py) – pause-aware audio position (`PlaybackClock`) that drives the export timeline.
+* [`tests/`](tests/) – offline export tests (synthetic WAVs, fake FFmpeg, no sound card needed).
 * [`decoder.py`](decoder.py) – FFmpeg helpers (`merge_video_audio`, device list). Also usable standalone: `python decoder.py merge video.mp4 audio.mp3`.
 
 
