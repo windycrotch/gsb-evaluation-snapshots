@@ -16,6 +16,13 @@ export function usePreviewThumbnails(
   const [loaded, setLoaded] = useState<Loaded>();
 
   useEffect(() => {
+    // Drop the previous thumbnails as soon as the source changes: they must
+    // never be shown for another video, even while the next request is in
+    // flight. A failed load leaves the state empty, so nothing stale is
+    // shown either, and the same URL is fetched again the next time it is
+    // passed in (no failure is remembered).
+    setLoaded(undefined);
+
     if (typeof source !== 'string') {
       return;
     }
@@ -31,9 +38,16 @@ export function usePreviewThumbnails(
 
         return response.text();
       })
-      .then((text) =>
-        setLoaded({ source, thumbnails: parseThumbnailsVtt(text, vttUrl) })
-      )
+      .then((text) => {
+        // The request was cancelled (source changed or the component
+        // unmounted) after it had already resolved: its late result must
+        // not overwrite the state of the current source.
+        if (controller.signal.aborted) {
+          return;
+        }
+
+        setLoaded({ source, thumbnails: parseThumbnailsVtt(text, vttUrl) });
+      })
       .catch((error: Error) => {
         if (error.name !== 'AbortError') {
           console.warn(

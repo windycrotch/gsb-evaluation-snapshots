@@ -38,7 +38,12 @@ export const HoverTimeWithPreview: React.FC<Props> = ({
   const preloadedThumbnails = useRef<PreviewThumbnail[]>(undefined);
   const hoverTimeClassName = isThumbActive ? 'hover-time active' : 'hover-time';
 
-  /** Warm up every sprite sheet on the first hover so scrubbing does not flicker. */
+  /**
+   * Warm up every sprite sheet on the first hover so scrubbing does not
+   * flicker. Sheets are decoded one at a time in the background, so pointer
+   * events are never blocked by an undecoded image, and the chain stops as
+   * soon as the component unmounts or the thumbnails change.
+   */
   useEffect(() => {
     if (
       !isThumbActive ||
@@ -50,9 +55,44 @@ export const HoverTimeWithPreview: React.FC<Props> = ({
 
     preloadedThumbnails.current = previewThumbnails;
 
-    new Set(previewThumbnails.map(({ url }) => url)).forEach((url) => {
-      new Image().src = url;
-    });
+    let cancelled = false;
+    const pending = [...new Set(previewThumbnails.map(({ url }) => url))];
+
+    const preloadNext = (): void => {
+      if (cancelled) {
+        return;
+      }
+
+      const url = pending.shift();
+
+      if (url === undefined) {
+        return;
+      }
+
+      const image = new Image();
+      image.src = url;
+
+      const decoding =
+        typeof image.decode === 'function'
+          ? image.decode()
+          : Promise.resolve();
+
+      decoding
+        .catch(() => undefined)
+        .then(() => preloadNext());
+    };
+
+    preloadNext();
+
+    return () => {
+      cancelled = true;
+
+      // Interrupted before every sheet was preloaded: allow a later hover
+      // over the same thumbnails to warm up the rest.
+      if (pending.length > 0 && preloadedThumbnails.current === previewThumbnails) {
+        preloadedThumbnails.current = undefined;
+      }
+    };
   }, [isThumbActive, previewThumbnails]);
 
   const hoverTimePosition = getHoverTimePosition(
