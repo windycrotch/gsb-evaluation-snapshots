@@ -144,3 +144,28 @@
     padding: 0 70px;
   }
 }
+
+.output-error {
+  margin: 20px 0;
+  padding: 20px;
+  width: 100%;
+  box-sizing: border-box;
+
+  background-color: rgba(249, 1, 91, 0.2);
+  border: 1px solid @color-red;
+
+  color: @color-red;
+  font-size: 16px;
+  white-space: pre-wrap;
+  word-break: break-word;
+
+  &.hidden {
+    display: none;
+  }
+}
+
+.button[disabled] {
+  opacity: 0.5;
+  cursor: not-allowed;
+  pointer-events: none;
+}

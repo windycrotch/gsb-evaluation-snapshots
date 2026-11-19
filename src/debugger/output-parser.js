@@ -5,6 +5,62 @@ import { prettifyTransformations } from "./transformations.js";
 import cbor from "cbor";
 import log from "loglevel";
 
+/**
+ * Stable, recognizable error codes thrown while parsing credential data.
+ * The debugger layer maps these to user-readable messages via
+ * {@link toUserFacingMessage}.
+ */
+export const CredentialParseErrorCode = Object.freeze({
+    AUTHENTICATOR_DATA_TOO_SHORT: "AUTHENTICATOR_DATA_TOO_SHORT",
+    AUTHENTICATOR_DATA_TRUNCATED: "AUTHENTICATOR_DATA_TRUNCATED",
+    AUTHENTICATOR_DATA_TRAILING_BYTES: "AUTHENTICATOR_DATA_TRAILING_BYTES",
+    ATTESTATION_OBJECT_INVALID: "ATTESTATION_OBJECT_INVALID",
+    CLIENT_DATA_JSON_INVALID: "CLIENT_DATA_JSON_INVALID",
+    CREDENTIAL_MALFORMED: "CREDENTIAL_MALFORMED",
+});
+
+/**
+ * Error type that always carries a machine-readable `code` so callers can
+ * distinguish parsing failures (bad input data) from runtime failures
+ * (e.g. the user cancelling the navigator.credentials prompt).
+ */
+export class CredentialParseError extends Error {
+    constructor(code, message, cause) {
+        super(message);
+        this.name = "CredentialParseError";
+        this.code = code;
+        if (typeof cause !== "undefined") {
+            this.cause = cause;
+        }
+    }
+}
+
+/**
+ * Map any thrown value to a human-readable message. Recognized
+ * {@link CredentialParseError} instances get specific guidance, every other
+ * failure gets a generic message that still includes the underlying detail.
+ */
+export function toUserFacingMessage(error) {
+    const detail = error && error.message ? error.message : String(error);
+
+    switch (error && error.code) {
+        case CredentialParseErrorCode.AUTHENTICATOR_DATA_TOO_SHORT:
+            return `Invalid authenticator data: it is shorter than the required 37 bytes. ${detail}`;
+        case CredentialParseErrorCode.AUTHENTICATOR_DATA_TRUNCATED:
+            return `Invalid authenticator data: it is truncated and ends before all advertised fields were parsed. ${detail}`;
+        case CredentialParseErrorCode.AUTHENTICATOR_DATA_TRAILING_BYTES:
+            return `Invalid authenticator data: unexpected trailing bytes were found after the declared fields. ${detail}`;
+        case CredentialParseErrorCode.ATTESTATION_OBJECT_INVALID:
+            return `Invalid attestation object: it could not be decoded as CBOR (unknown attestation type?). ${detail}`;
+        case CredentialParseErrorCode.CLIENT_DATA_JSON_INVALID:
+            return `Invalid clientDataJSON: the payload is not valid JSON. ${detail}`;
+        case CredentialParseErrorCode.CREDENTIAL_MALFORMED:
+            return `The credential data is malformed and could not be parsed. ${detail}`;
+        default:
+            return detail;
+    }
+}
+
 export function parseAuthenticatorData(authData) {
     authData =
         authData instanceof ArrayBuffer ?
@@ -13,7 +69,8 @@ export function parseAuthenticatorData(authData) {
 
 
     if (authData.byteLength < 37) {
-        throw new Error(
+        throw new CredentialParseError(
+            CredentialParseErrorCode.AUTHENTICATOR_DATA_TOO_SHORT,
             `Authenticator data was ${authData.byteLength} bytes, expected at least 37 bytes`,
         );
     }
@@ -45,24 +102,58 @@ export function parseAuthenticatorData(authData) {
     if (result.flags.attestedCredentialData) {
         const atCredData = {};
         result.attestedCredentialData = atCredData;
-  
+
         atCredData.aaguid = authData.slice(pointer, (pointer += 16));
+
+        if (pointer + 2 > authData.byteLength) {
+            throw new CredentialParseError(
+                CredentialParseErrorCode.AUTHENTICATOR_DATA_TRUNCATED,
+                "Authenticator data is truncated before the credential ID length",
+            );
+        }
 
         const credIdLenBuf = authData.slice(pointer, (pointer += 2));
         const credIdLen = credIdLenBuf.readUInt16BE(0);
-  
+
+        if (pointer + credIdLen > authData.byteLength) {
+            throw new CredentialParseError(
+                CredentialParseErrorCode.AUTHENTICATOR_DATA_TRUNCATED,
+                `Authenticator data declares a ${credIdLen}-byte credential ID but only ${authData.byteLength - pointer} bytes remain`,
+            );
+        }
+
         atCredData.credentialId = authData.slice(pointer, (pointer += credIdLen));
-  
+
         // Decode the next CBOR item in the buffer, then re-encode it back to a Buffer
-        const firstDecoded = decodeCborFirst(authData.slice(pointer));
-        const firstEncoded = Buffer.from(cbor.encode(firstDecoded));
+        let firstDecoded;
+        let firstEncoded;
+        try {
+            firstDecoded = decodeCborFirst(authData.slice(pointer));
+            firstEncoded = Buffer.from(cbor.encode(firstDecoded));
+        } catch (e) {
+            throw new CredentialParseError(
+                CredentialParseErrorCode.AUTHENTICATOR_DATA_TRUNCATED,
+                "Authenticator data is truncated before a valid credential public key (COSE) was found",
+                e,
+            );
+        }
         atCredData.credentialPublicKey = firstEncoded;
         pointer += firstEncoded.byteLength;
     }
 
     if (result.flags.extensionDataIncluded) {
-        const firstDecoded = decodeCborFirst(authData.slice(pointer));
-        const firstEncoded = Buffer.from(cbor.encode(firstDecoded));
+        let firstDecoded;
+        let firstEncoded;
+        try {
+            firstDecoded = decodeCborFirst(authData.slice(pointer));
+            firstEncoded = Buffer.from(cbor.encode(firstDecoded));
+        } catch (e) {
+            throw new CredentialParseError(
+                CredentialParseErrorCode.AUTHENTICATOR_DATA_TRUNCATED,
+                "Authenticator data is truncated before the extension data was fully parsed",
+                e,
+            );
+        }
         const extensionsDataBuffer = firstEncoded;
         result.attestedExtensionData = cbor.decodeFirstSync(extensionsDataBuffer);
         pointer += firstEncoded.byteLength;
@@ -70,7 +161,10 @@ export function parseAuthenticatorData(authData) {
 
     // Pointer should be at the end of the authenticator data, otherwise too much data was sent
     if (authData.byteLength > pointer) {
-        throw new Error('Leftover bytes detected while parsing authenticator data');
+        throw new CredentialParseError(
+            CredentialParseErrorCode.AUTHENTICATOR_DATA_TRAILING_BYTES,
+            `Leftover bytes detected while parsing authenticator data (${authData.byteLength - pointer} byte(s) remaining)`,
+        );
     }
 
     return result;
@@ -82,25 +176,47 @@ export function parseAttestationObject(data) {
         Buffer.from(data) :
         Buffer.from(data.buffer, data.byteOffset, data.byteLength);
 
+    let decoded;
     try {
-        const decoded = cbor.decodeFirstSync(buffer);
-
-        if (decoded.authData) {
-            decoded.authData = parseAuthenticatorData(decoded.authData);
-        }
-
-        return decoded;
+        decoded = cbor.decodeFirstSync(buffer);
     } catch (e) {
-        const msg = "Failed to decode attestationObject, unknown attestation type? ";
-        log.error(msg, e);
-        return msg;
+        // Always throw a recognizable error instead of returning a string:
+        // callers rely on the structured result and would crash otherwise.
+        throw new CredentialParseError(
+            CredentialParseErrorCode.ATTESTATION_OBJECT_INVALID,
+            "Failed to decode attestationObject, unknown attestation type?",
+            e,
+        );
     }
+
+    if (!decoded || typeof decoded !== "object") {
+        throw new CredentialParseError(
+            CredentialParseErrorCode.ATTESTATION_OBJECT_INVALID,
+            "Decoded attestationObject did not contain a structured object",
+        );
+    }
+
+    if (decoded.authData) {
+        // parseAuthenticatorData throws CredentialParseError on bad input,
+        // let that propagate with its specific code.
+        decoded.authData = parseAuthenticatorData(decoded.authData);
+    }
+
+    return decoded;
 }
 
 export function parseClientDataJSON(data) {
     const decoder = new TextDecoder("utf-8");
     const decoded = decoder.decode(data);
-    return JSON.parse(decoded);
+    try {
+        return JSON.parse(decoded);
+    } catch (e) {
+        throw new CredentialParseError(
+            CredentialParseErrorCode.CLIENT_DATA_JSON_INVALID,
+            "clientDataJSON could not be parsed as JSON",
+            e,
+        );
+    }
 }
 
 export function parseCredentials(credentials) {
@@ -111,7 +227,18 @@ export function parseCredentials(credentials) {
         "attestationObject",
     ]);
 
-    transform(result, transformations);
+    try {
+        transform(result, transformations);
+    } catch (e) {
+        if (e instanceof CredentialParseError) {
+            throw e;
+        }
+        throw new CredentialParseError(
+            CredentialParseErrorCode.CREDENTIAL_MALFORMED,
+            "Credential could not be parsed",
+            e,
+        );
+    }
     return result;
 }
 

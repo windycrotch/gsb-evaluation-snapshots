@@ -201,18 +201,21 @@ export const output = {
     registration: {
         output: document.getElementById("debugger-register-output"),
         console: document.getElementById("debugger-register-output-console"),
+        error: document.getElementById("debugger-register-output-error"),
         rawId: document.getElementById("register-output-rawid"),
         publicKey: document.getElementById("register-output-public-key"),
     },
     authentication: {
         output: document.getElementById("debugger-authenticate-output"),
         console: document.getElementById("debugger-authenticate-output-console"),
+        error: document.getElementById("debugger-authenticate-output-error"),
         signature: document.getElementById("authenticate-output-signature"),
         challenge: document.getElementById("authenticate-output-challenge"),
     },
     cbor: {
         output: document.getElementById("debugger-cbor-output"),
         console: document.getElementById("debugger-cbor-output-console"),
+        error: document.getElementById("debugger-cbor-output-error"),
         rawId: document.getElementById("cbor-output-rawid"),
         publicKey: document.getElementById("cbor-output-public-key"),
     },

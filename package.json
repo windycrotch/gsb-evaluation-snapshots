@@ -8,7 +8,7 @@
     "start": "node api/index.js",
     "start:dev": "grunt",
     "build": "NODE_ENV=production grunt build-prod",
-    "test": "grunt test"
+    "test": "node --import ./tests/register-esm.mjs --test \"tests/**/*.test.mjs\""
   },
   "keywords": [
     "webauthn",

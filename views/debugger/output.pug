@@ -3,16 +3,18 @@
   .output-header
     h2 Output
     .output-download.hide-mobile
-      button#debugger-output-download-cbor.button.button-big Download (CBOR)
-      button#debugger-output-download-json.button.button-big Download (JSON)
+      button#debugger-output-download-cbor.button.button-big(disabled, title="Register or import a credential before downloading") Download (CBOR)
+      button#debugger-output-download-json.button.button-big(disabled, title="Register or import a credential before downloading") Download (JSON)
   
   .output-up-warning.warning.hidden
-      strong Warning: 
-      | Your authenticator device does not perform a 
-      strong test of user presence 
-      | as defined in the 
+      strong Warning:
+      | Your authenticator device does not perform a
+      strong test of user presence
+      | as defined in the
       a(href="https://www.w3.org/TR/webauthn/#test-of-user-presence" title="WebAuthn Specification") WebAuthn Specification.
-  
+
+  #debugger-register-output-error.output-error.hidden(role="alert")
+
   .output-container
     .output-columns
       div
@@ -22,7 +24,7 @@
         h4 credentialPublicKey
         .overflow-wrapper
           pre#register-output-public-key
-    
+
     #debugger-register-output-console.output-console
     
 .output-container.output-more-container

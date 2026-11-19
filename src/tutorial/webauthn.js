@@ -55,10 +55,9 @@ export function credentialsGetPublicKeyJWK(credentials) {
         throw new Error("No public-key");
     }
 
+    // parseAttestationObject throws a CredentialParseError on bad input;
+    // let it propagate so callers surface a recognizable failure.
     const parsed = parseAttestationObject(credentials.response.attestationObject);
-    if (typeof parsed === "string") {
-        throw new Error("Error parsing attestationObject: ", parsed);
-    }
 
     try {
         return coseToJwk(

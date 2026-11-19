@@ -8,7 +8,6 @@ import {
     x5cArrayToCertInfo,
     prettyStringify,
     cborEncoder,
-    getErrorMessage,
     getSelectValue,
     transform,
 } from "./utils.js";
@@ -16,12 +15,17 @@ import {
 import { prettifyTransformations, binToHex } from "./transformations.js";
 
 import {
-    parseCredentials,
     prettifyCredentials,
     prettyCredentialsWithHtml,
     orderCredentialsByType,
     getUserPresentStatus,
+    CredentialParseErrorCode,
 } from "./output-parser.js";
+
+import {
+    createCredentialStore,
+    CredentialSource,
+} from "./credential-store.js";
 
 import log from "loglevel";
 import cbor from "cbor";
@@ -30,8 +34,10 @@ import coseToJwk from "cose-to-jwk";
 import tippy from "tippy.js";
 import jkwToPem from "jwk-to-pem";
 
-let lastCredentials;
-let lastCredentialsParsed;
+// Single owner of the "most recent successfully parsed credential" state.
+// Registration, authentication and CBOR import all flow through this store
+// so failed parses/imports can never overwrite the last good result.
+const credentialStore = createCredentialStore();
 
 const pubKeyParams = [
     dom.createForm.pubKeyCredParams.algos[0].select,
@@ -88,7 +94,12 @@ window.outputButtonClick = function outputButtonClick(event) {
         return;
     }
 
-    const value = findKey(lastCredentialsParsed, key);
+    const parsed = credentialStore.getLastCredentialsParsed();
+    if (!parsed) {
+        log.warn("No parsed credential available for output action", key);
+        return;
+    }
+    const value = findKey(parsed, key);
     const text = event.target.firstChild.textContent.toLowerCase();
 
     if (text.includes("view")) {
@@ -254,64 +265,39 @@ function getCreateOptions() {
     };
 }
 
-function handleRegistrationCredentials(credentials) {
-    lastCredentials = deepClone(credentials);
-    lastCredentialsParsed = parseCredentials(credentials);
+// Output areas each entry renders into. All three entries share the exact
+// same "receive -> parse -> render" pipeline; only the target nodes differ.
+const outputTargets = {
+    [CredentialSource.REGISTRATION]: dom.output.registration,
+    [CredentialSource.AUTHENTICATION]: dom.output.authentication,
+    [CredentialSource.CBOR_IMPORT]: dom.output.cbor,
+};
 
-    const prettyCredentials = prettifyCredentials(
-        orderCredentialsByType(credentials)
-    );
-
-    const withHtml = prettyCredentialsWithHtml(prettyCredentials);
-
-    log.debug(prettyCredentials);
-    log.debug(withHtml);
-
-    dom.output.registration.console.innerHTML = withHtml;
-    dom.output.registration.rawId.innerHTML = binToHex(credentials.rawId);
-
-    if (lastCredentialsParsed.response.attestationObject &&
-        lastCredentialsParsed.response.attestationObject.authData.attestedCredentialData.credentialPublicKey) {
-        dom.output.registration.publicKey.innerHTML = prettyStringify(
-            coseToJwk(
-                lastCredentialsParsed.response.attestationObject.authData
-                .attestedCredentialData.credentialPublicKey,
-                2
-            )
-        ).replace(/[{\n][}\n]/g, "");
+function hideOutputError(target) {
+    if (target.error) {
+        target.error.classList.add("hidden");
+        target.error.textContent = "";
     }
 }
 
-function handleCBORCredentials(credentials) {
-    lastCredentials = deepClone(credentials);
-    lastCredentialsParsed = parseCredentials(credentials);
+function showOutputError(source, message) {
+    const target = outputTargets[source];
+    target.output.classList.remove("is-invisible");
 
-    const prettyCredentials = prettifyCredentials(
-        orderCredentialsByType(credentials)
-    );
-
-    const withHtml = prettyCredentialsWithHtml(prettyCredentials);
-
-    log.debug(prettyCredentials);
-    log.debug(withHtml);
-
-    dom.output.cbor.console.innerHTML = withHtml;
-    dom.output.cbor.rawId.innerHTML = binToHex(credentials.rawId);
-
-    if (lastCredentialsParsed.response.attestationObject) {
-        dom.output.cbor.publicKey.innerHTML = prettyStringify(
-            coseToJwk(
-                lastCredentialsParsed.response.attestationObject.authData
-                .attestedCredentialData.credentialPublicKey,
-                2
-            )
-        ).replace(/[{\n][}\n]/g, "");
+    if (target.error) {
+        // The previous successful render is left intact; the error is shown
+        // in a dedicated banner instead of replacing the parsed output.
+        target.error.textContent = message;
+        target.error.classList.remove("hidden");
+    } else {
+        target.console.textContent = message;
     }
 }
 
-function handleAuthenticationCredentials(credentials) {
-    lastCredentials = deepClone(credentials);
-    lastCredentialsParsed = parseCredentials(credentials);
+function renderCredentials(source, credentials, parsed) {
+    const target = outputTargets[source];
+    hideOutputError(target);
+    credentialStore.clearError();
 
     const prettyCredentials = prettifyCredentials(
         orderCredentialsByType(credentials)
@@ -322,22 +308,87 @@ function handleAuthenticationCredentials(credentials) {
     log.debug(prettyCredentials);
     log.debug(withHtml);
 
-    dom.output.authentication.console.innerHTML = withHtml;
+    target.console.innerHTML = withHtml;
+    target.output.classList.remove("is-invisible");
 
-    if (lastCredentialsParsed.response.signature) {
-        dom.output.authentication.signature.innerHTML = binToHex(
-            lastCredentialsParsed.response.signature
-        );
+    if (target.rawId) {
+        target.rawId.innerHTML = binToHex(credentials.rawId);
     }
 
-    if (lastCredentialsParsed.response.clientDataJSON.challenge) {
-        dom.output.authentication.challenge.innerHTML = binToHex(
-            lastCredentialsParsed.response.clientDataJSON.challenge
+    const attestation = parsed.response && parsed.response.attestationObject;
+    const credentialPublicKey =
+        attestation &&
+        attestation.authData &&
+        attestation.authData.attestedCredentialData &&
+        attestation.authData.attestedCredentialData.credentialPublicKey;
+
+    if (target.publicKey && credentialPublicKey) {
+        target.publicKey.innerHTML = prettyStringify(
+            coseToJwk(credentialPublicKey, 2)
+        ).replace(/[{\n][}\n]/g, "");
+    }
+
+    if (target.signature && parsed.response.signature) {
+        target.signature.innerHTML = binToHex(parsed.response.signature);
+    }
+
+    if (
+        target.challenge &&
+        parsed.response.clientDataJSON &&
+        parsed.response.clientDataJSON.challenge
+    ) {
+        target.challenge.innerHTML = binToHex(
+            parsed.response.clientDataJSON.challenge
         );
     }
+}
+
+/**
+ * The single entry point every credential source goes through. The store
+ * parses first and only mutates state on success, so:
+ *  - a failed parse keeps the previous result rendered and shows an error;
+ *  - stale (superseded) async results are dropped entirely.
+ */
+function receiveCredentials(source, credentials, token) {
+    const outcome = credentialStore.acceptCredentials(
+        source,
+        credentials,
+        token
+    );
+
+    if (outcome.status === "stale") {
+        log.debug("Dropped stale credential result", source, token);
+        return outcome;
+    }
+
+    if (outcome.status === "error") {
+        showOutputError(source, outcome.message);
+        return outcome;
+    }
+
+    renderCredentials(source, outcome.credentials, outcome.parsed);
+    updateDownloadButtons();
+    return outcome;
+}
+
+function syncAllowedRawIdsFromDom() {
+    credentialStore.syncAllowedRawIds(
+        allowedCredentials
+            .map((ac) => ac.id && ac.id.value)
+            .filter((value) => value)
+    );
 }
 
 function useLastRawId(rawId) {
+    // Rebuild the de-duplication set from what is currently in the DOM so a
+    // row the user manually removed is no longer considered present.
+    syncAllowedRawIdsFromDom();
+
+    if (!credentialStore.shouldAddAllowedRawId(rawId)) {
+        // Same rawId is already listed: never append a duplicate.
+        return;
+    }
+
     let last = allowedCredentials.length - 1;
     if (allowedCredentials[last].id.textContent.length !== 0) {
         addAllowedCredential();
@@ -350,23 +401,52 @@ function useLastRawId(rawId) {
 }
 
 async function register() {
+    // Each click gets a newer token; only the last initiated call may land.
+    const token = credentialStore.nextToken(CredentialSource.REGISTRATION);
     try {
         const options = getCreateOptions()
         console.log("navigator.credentials.create:", options);
         const credentials = await navigator.credentials.create(options);
-        handleRegistrationCredentials(credentials);
-        useLastRawId(binToHex(credentials.rawId));
-        dom.output.registration.output.classList.remove("is-invisible");
 
-        const userPresent = getUserPresentStatus(credentials);
-        if (!userPresent) {
-            dom.output.userPresenceWarning.classList.remove("hidden");
+        // The await may resolve after a newer click superseded this one.
+        if (!credentialStore.isCurrent(CredentialSource.REGISTRATION, token)) {
+            log.debug("Ignored superseded registration result", token);
+            return;
+        }
+
+        const outcome = receiveCredentials(
+            CredentialSource.REGISTRATION,
+            credentials,
+            token
+        );
+
+        if (outcome.status !== "ok") {
+            return;
+        }
+
+        useLastRawId(binToHex(credentials.rawId));
+
+        try {
+            const userPresent = getUserPresentStatus(credentials);
+            if (!userPresent) {
+                dom.output.userPresenceWarning.classList.remove("hidden");
+            }
+        } catch (e) {
+            log.debug("Could not determine user presence status", e);
         }
     } catch (e) {
+        // A rejected navigator call must not clobber a previously rendered
+        // credential: surface it in the error banner only.
         log.debug(e);
         console.error(e);
-        dom.output.registration.console.textContent = getErrorMessage(e);
-        dom.output.registration.output.classList.remove("is-invisible");
+        const outcome = credentialStore.reportFailure(
+            CredentialSource.REGISTRATION,
+            e,
+            token
+        );
+        if (outcome.status !== "stale") {
+            showOutputError(CredentialSource.REGISTRATION, outcome.message);
+        }
     }
 }
 
@@ -442,18 +522,34 @@ function getGetOptions() {
 }
 
 async function authenticate() {
+    const token = credentialStore.nextToken(CredentialSource.AUTHENTICATION);
     try {
         const options = getGetOptions()
         console.log("navigator.credentials.get:", options);
         const credentials = await navigator.credentials.get(options);
-        handleAuthenticationCredentials(credentials);
-        dom.output.authentication.output.classList.remove("is-invisible");
+
+        if (!credentialStore.isCurrent(CredentialSource.AUTHENTICATION, token)) {
+            log.debug("Ignored superseded authentication result", token);
+            return;
+        }
+
+        receiveCredentials(
+            CredentialSource.AUTHENTICATION,
+            credentials,
+            token
+        );
     } catch (e) {
         log.debug(e);
         console.error(e);
 
-        dom.output.authentication.console.textContent = getErrorMessage(e);
-        dom.output.authentication.output.classList.remove("is-invisible");
+        const outcome = credentialStore.reportFailure(
+            CredentialSource.AUTHENTICATION,
+            e,
+            token
+        );
+        if (outcome.status !== "stale") {
+            showOutputError(CredentialSource.AUTHENTICATION, outcome.message);
+        }
     }
 }
 
@@ -640,32 +736,101 @@ function uploadCBOR(event) {
         event.target.value = ''
         return
     }
+
+    // Every file selection supersedes the previous one: only the most recent
+    // selection is allowed to land, even if an earlier read is still pending.
+    const token = credentialStore.nextToken(CredentialSource.CBOR_IMPORT);
+
     const reader = new FileReader();
     reader.onload = () => {
+        if (!credentialStore.isCurrent(CredentialSource.CBOR_IMPORT, token)) {
+            log.debug("Ignored superseded CBOR import", token);
+            return;
+        }
+
+        let credentials;
         try {
             const buf = Buffer.from(reader.result);
-            const credentials = cbor.decodeFirstSync(buf);
-            handleCBORCredentials(credentials);
-            dom.output.cbor.output.classList.remove("is-invisible");
-        } catch(err) {
-            alert(`Invalid CBOR file: ${err.message}`)
-            event.target.value = ''
+            credentials = cbor.decodeFirstSync(buf);
+        } catch (err) {
+            // A file that cannot even be decoded must not touch stored state.
+            const wrapped = err instanceof Error ?
+                err :
+                new Error(String(err));
+            wrapped.code = CredentialParseErrorCode.CREDENTIAL_MALFORMED;
+            wrapped.message = `The selected file is not valid CBOR. ${wrapped.message}`;
+            const outcome = credentialStore.reportFailure(
+                CredentialSource.CBOR_IMPORT,
+                wrapped,
+                token
+            );
+            if (outcome.status !== "stale") {
+                showOutputError(CredentialSource.CBOR_IMPORT, outcome.message);
+            }
+            event.target.value = '';
+            return;
         }
+
+        // Parsing happens inside the store before any state is mutated, so a
+        // malformed payload keeps the previous successful result intact.
+        const outcome = receiveCredentials(
+            CredentialSource.CBOR_IMPORT,
+            credentials,
+            token
+        );
+
+        if (outcome.status === "error") {
+            event.target.value = '';
+        }
+    };
+    reader.onerror = () => {
+        if (!credentialStore.isCurrent(CredentialSource.CBOR_IMPORT, token)) {
+            return;
+        }
+        const outcome = credentialStore.reportFailure(
+            CredentialSource.CBOR_IMPORT,
+            reader.error || new Error("Failed to read the selected CBOR file"),
+            token
+        );
+        if (outcome.status !== "stale") {
+            showOutputError(CredentialSource.CBOR_IMPORT, outcome.message);
+        }
+        event.target.value = '';
     };
     reader.readAsArrayBuffer(file);
 }
 
 function cleanCredentialsObject(creds) {
     delete creds.getClientExtensionResults;
-    delete creds.response.getTransports;
-    delete creds.response.getAuthenticatorData;
-    delete creds.response.getPublicKey;
-    delete creds.response.getPublicKeyAlgorithm;
+    if (creds.response) {
+        delete creds.response.getTransports;
+        delete creds.response.getAuthenticatorData;
+        delete creds.response.getPublicKey;
+        delete creds.response.getPublicKeyAlgorithm;
+    }
     delete creds.toJSON;
 }
 
+function updateDownloadButtons() {
+    const enabled = credentialStore.hasCredentials();
+    for (const button of [
+        ...dom.output.downloadCBOR,
+        ...dom.output.downloadJSON,
+    ]) {
+        button.disabled = !enabled;
+        button.title = enabled ?
+            "" :
+            "Register or import a credential before downloading";
+    }
+}
+
 function downloadCBOR() {
-    const creds = deepClone(lastCredentials);
+    if (!credentialStore.hasCredentials()) {
+        alert("No credential available yet. Register or import a credential before downloading.");
+        return;
+    }
+    // Always derive downloads from the last successfully parsed credential.
+    const creds = credentialStore.getLastCredentials();
     cleanCredentialsObject(creds)
     const encoded = cborEncoder._encodeAll([creds]);
     log.debug(cbor.decodeFirstSync(encoded));
@@ -673,7 +838,11 @@ function downloadCBOR() {
 }
 
 function downloadJSON() {
-    const creds = deepClone(lastCredentials);
+    if (!credentialStore.hasCredentials()) {
+        alert("No credential available yet. Register or import a credential before downloading.");
+        return;
+    }
+    const creds = credentialStore.getLastCredentials();
     cleanCredentialsObject(creds)
 
     const transformations = deepClone(prettifyTransformations);
@@ -937,6 +1106,9 @@ function setupEvents() {
     dom.output.downloadJSON.forEach((button) =>
         button.addEventListener("click", downloadJSON)
     );
+
+    // Downloads are disabled until the first successful credential lands.
+    updateDownloadButtons();
 
     setupCheckboxes();
 }
