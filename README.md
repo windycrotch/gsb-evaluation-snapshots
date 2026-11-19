@@ -87,5 +87,13 @@ export default {
 
 [ ] Add more video transition effects (Fade, Wipe, etc.)
 
+## 🧪 Tests
+
+The playback-state core logic (segment timeline location, draw-loop scheduling) is covered by offline unit tests that require no network or video assets:
+
+```bash
+npm test
+```
+
 📄 License
 MIT License

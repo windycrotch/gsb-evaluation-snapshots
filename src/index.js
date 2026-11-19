@@ -22,11 +22,12 @@ const component = (options) => {
   instance.vm = instance.$mount();
   instance.dom = instance.vm.$el;
   document.body.appendChild(instance.dom);
-  instance.vm.init();
   instance.dom.style.zIndex = seed + 1001;
   seed = 2;
+  // 释放单例锁：组件销毁（beforeDestroy）时调用，使再次调用 $canvasVideoPlayer 能正常新建
   instance.vm.setFree = function () {
     seed = 1;
+    instance = null;
   };
   return instance.vm;
 };
