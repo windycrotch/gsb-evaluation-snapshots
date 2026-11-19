@@ -23,7 +23,8 @@ from .canonical import sha256_file, stable_hash
 from .colors import template_color
 from .errors import MotionGraphicsError
 from .fonts import ResolvedFont, resolve_font
-from .layerexport import ALPHA_CODECS, MANIFEST_NAME, alpha_step, layer_file_name, manifest_document, retag_for
+from .layerexport import ALPHA_CODECS, MANIFEST_NAME, alpha_step, layer_file_name, manifest_document, manifest_order, retag_for
+from .layerstage import LAYER_LOCK_NAME, LayerStaging, WorkspaceLock
 from .layers import has_alpha, layer_placements, place_args
 from .regions import element_boxes, overlaps, resolve_regions
 from .textfit import fit as fit_text
@@ -119,6 +120,19 @@ class Executor:
 
     # ---- public entry point
     def response(self, document: Any) -> Dict[str, Any]:
+        """Render the document. A layer export holds the workspace's export lock for the whole run (checks, renders and
+        commit), so two exports in one workspace can never stage into each other's directory or interleave manifests."""
+        doc, theme, kit_record, extra_warnings = self._prepare(document)
+        video_path = self.policy.resolve_input(doc.video_path, "video")
+        output_path = self.policy.resolve_write_path(doc.output_path, "output")
+        lock = self._acquire_layer_lock(doc) if doc.options.get("layer_export") is not None and not self.dry_run else None
+        try:
+            return self._render(doc, theme, kit_record, extra_warnings, video_path, output_path)
+        finally:
+            if lock is not None:
+                lock.release()
+
+    def _prepare(self, document: Any) -> Tuple[Any, Optional[Dict[str, Any]], Optional[Dict[str, Any]], List[str]]:
         doc = parse_request(document)
         theme: Optional[Dict[str, Any]] = None
         if doc.options.get("themes"):
@@ -138,8 +152,22 @@ class Executor:
             else:
                 doc = parse_request(document, None, kit_record["brand_kit"])
         extra_warnings = (warnings_for(theme) if theme else []) + (warnings_for_kit(kit_record) if kit_record else [])
-        video_path = self.policy.resolve_input(doc.video_path, "video")
-        output_path = self.policy.resolve_write_path(doc.output_path, "output")
+        return doc, theme, kit_record, extra_warnings
+
+    def _acquire_layer_lock(self, doc: Any) -> "WorkspaceLock":
+        """The workspace's export lock, taken before any check that touches the layer directory. A second export fails here,
+        before it renders anything, with a retryable OUTPUT_ERROR rather than staging beside the first one (ADR-35)."""
+        lock_path = self.policy.resolve_write_path(os.path.join(WORK_DIR_NAME, LAYER_LOCK_NAME), "layer export lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock = WorkspaceLock(lock_path)
+        if not lock.acquire():
+            raise MotionGraphicsError("OUTPUT_ERROR", f"another layer export is running in this workspace (lock {lock_path}): retry when it has finished",
+                                      {"reason": "layer_export_busy", "lock": str(lock_path), "directory": doc.options["layer_export"]["directory"]},
+                                      retryable=True)
+        return lock
+
+    def _render(self, doc: Any, theme: Optional[Dict[str, Any]], kit_record: Optional[Dict[str, Any]], extra_warnings: List[str],
+                video_path: Path, output_path: Path) -> Dict[str, Any]:
         if output_path == video_path:
             raise MotionGraphicsError("OUTPUT_ERROR", "document.output.path may not be the same file as document.video.path", {"reason": "output_is_input"})
         if output_path.exists() and not doc.overwrite:
@@ -147,6 +175,10 @@ class Executor:
 
         self._check_checkout(doc)
         layer_paths = self._layer_paths(doc, video_path, output_path)
+        if layer_paths is not None:
+            # ADR-35: a complete result is replaced only with options.layer_export.overwrite (its own consent, not the programme's);
+            # checked here, with the lock held and before anything renders, so a refused export leaves the previous result whole
+            self._check_layer_overwrite(layer_paths)
 
         source_meta = self.skill.probe(str(video_path), self.timeout)
         video = source_meta.get("video") or {}
@@ -358,13 +390,29 @@ class Executor:
 
         final_meta = self._probe_and_check(output_path, width, height, prev_duration)
         layer_result: Optional[Dict[str, Any]] = None
+        layer_staging: Optional[LayerStaging] = None
         if layer_paths is not None:
             assert work_dir is not None
-            layer_result = self._export_layers(doc, ordered, layer_paths, resolved_assets, resolved_fonts, fits, width, height, duration, fps,
-                                               work_dir, output_ext, crf, preset, platform, output_path, final_meta)
+            layer_result, layer_staging = self._export_layers(doc, ordered, layer_paths, resolved_assets, resolved_fonts, fits, width, height, duration, fps,
+                                                              work_dir, output_ext, crf, preset, platform, output_path, final_meta)
             warnings += [f"elements[{layer['id']}]: ffmpeg-skill/{layer['tool'].split('/')[-1]} did not report its transparent layer verified "
                          f"(alpha step: {(layer.get('alpha') or {}).get('reason') or ('ok' if (layer.get('alpha') or {}).get('ok') else 'missing')})"
                          for layer in layer_result["layers"] if layer["verified"] is not True]
+        try:
+            return self._response_document(doc, ordered, resolved_assets, resolved_fonts, results, any_reused, video_path, video_hash, width, height, duration,
+                                           document_id, output_path, final_meta, reserved, theme, kit_record, title_records, layer_result, warnings)
+        except BaseException:
+            # nothing in the response document can fail in a way that leaves the target half-committed, but an interrupt between the
+            # commit and building the response must still not leak this run's staging directory
+            if layer_staging is not None and not layer_staging.committed:
+                layer_staging.abort()
+            raise
+
+    def _response_document(self, doc: Any, ordered: Tuple[GraphicsElement, ...], resolved_assets: Dict[str, Dict[str, Any]],
+                           resolved_fonts: Dict[str, ResolvedFont], results: List[StageResult], any_reused: bool, video_path: Path,
+                           video_hash: str, width: int, height: int, duration: float, document_id: str, output_path: Path, final_meta: Dict[str, Any],
+                           reserved: Optional[Dict[str, Any]], theme: Optional[Dict[str, Any]], kit_record: Optional[Dict[str, Any]],
+                           title_records: Dict[str, Dict[str, Any]], layer_result: Optional[Dict[str, Any]], warnings: List[str]) -> Dict[str, Any]:
         return {
             "schema": RESPONSE_SCHEMA_ID, "skill": {"id": SKILL_ID, "version": VERSION}, "ok": True, "status": "ok", "dry_run": False,
             "output": {"path": str(output_path), "sha256": final_meta["sha256"], "size": final_meta["size"], "duration": final_meta["duration"],
@@ -659,10 +707,11 @@ class Executor:
             asset["dims"] = dims
         return element_boxes(el, width, height, dims if dims and all(dims) else None, fits.get(el.element_id))
 
-    # ---- layer export (ADR-30)
+    # ---- layer export (ADR-30, ADR-35)
     def _layer_paths(self, doc: Any, video_path: Path, output_path: Path) -> Optional[Dict[str, Any]]:
         """Where the layers and their manifest go, checked before anything renders: inside the workspace (PathPolicy), not the input or the
-        programme, and an existing file replaced only with document.output.overwrite. None when no layer export is asked for."""
+        programme. None when no layer export is asked for. An existing complete result is refused later, with the lock held
+        (`_check_layer_overwrite`): only then is the answer stable until the commit."""
         opts = doc.options.get("layer_export")
         if opts is None:
             return None
@@ -676,10 +725,24 @@ class Executor:
             if path in (video_path, output_path):
                 raise MotionGraphicsError("OUTPUT_ERROR", f"a layer export file would be {'document.video.path' if path == video_path else 'document.output.path'}: {path}",
                                           {"reason": "layer_is_input" if path == video_path else "layer_is_output", "path": str(path)})
-            if path.exists() and not doc.overwrite:
-                raise MotionGraphicsError("OUTPUT_ERROR", f"layer export file already exists (set document.output.overwrite to replace it): {path}",
-                                          {"reason": "exists", "path": str(path)})
         return {"directory": directory, "files": files, "manifest": manifest, "settings": dict(opts)}
+
+    @staticmethod
+    def _check_layer_overwrite(paths: Dict[str, Any]) -> None:
+        """A complete result already in the directory (a manifest, or any file the export would write) is replaced only with
+        options.layer_export.overwrite. Refused here -- before anything renders, with the lock held -- rather than half-replaced."""
+        if paths["settings"]["overwrite"]:
+            return
+        directory: Path = paths["directory"]
+        if not directory.exists():
+            return
+        existing = [paths["manifest"]] if paths["manifest"].exists() else []
+        existing += [p for p in paths["files"].values() if p.exists() and p not in existing]
+        if not existing:
+            return
+        raise MotionGraphicsError("OUTPUT_ERROR", f"the layer export directory already holds a result (set options.layer_export.overwrite to replace it): "
+                                  f"{existing[0]}", {"reason": "exists", "path": str(existing[0]), "directory": str(directory),
+                                                     "files": [p.name for p in existing]})
 
     @staticmethod
     def _canvas_parameters(width: int, height: int, duration: float, fps: float, color_tags: Optional[str]) -> Dict[str, Any]:
@@ -702,6 +765,7 @@ class Executor:
         source_video = source_video if source_video.get("bt2020_or_hdr") else {"color_space": "bt709"}
         settings = paths["settings"]
         return {"directory": str(paths["directory"]), "alpha_codec": settings["alpha_codec"], "alpha_mode": settings["alpha_mode"],
+                "overwrite": settings["overwrite"],
                 "manifest": {"path": str(paths["manifest"])},
                 "canvas": {"tool": "ffmpeg-skill/background", "retag": "ffmpeg-skill/color",
                            "parameters": self._canvas_parameters(width, height, duration, fps, retag_for(source_video))},
@@ -768,44 +832,60 @@ class Executor:
     def _export_layers(self, doc: Any, ordered: Tuple[GraphicsElement, ...], paths: Dict[str, Any], assets: Dict[str, Dict[str, Any]],
                        fonts_: Dict[str, ResolvedFont], fits: Dict[str, Dict[str, Any]], width: int, height: int, duration: float, fps: float,
                        work_dir: Path, output_ext: str, crf: int, preset: str, platform: Optional[str], output_path: Path,
-                       programme: Dict[str, Any]) -> Dict[str, Any]:
-        """Every element drawn alone on the transparent canvas, with the call that burned it into the programme (ADR-30), then the manifest."""
+                       programme: Dict[str, Any]) -> Tuple[Dict[str, Any], LayerStaging]:
+        """Every element drawn alone on the transparent canvas with the call that burned it into the programme (ADR-30), then committed
+        as one result (ADR-35).
+
+        Each layer is written into this run's staging directory, never into the target: the target keeps its previous complete result
+        (manifest included) until every element has succeeded. A failure -- of any element, the canvas, validation or the manifest write --
+        deletes the staging directory and raises; the previous result is left as it was. The caller holds the workspace's export lock, so
+        no other export can be staging in the same directory. The manifest's order is `ordered` (start, id), the order the elements were
+        rendered in, whatever order tool calls would finish in."""
         settings = paths["settings"]
         alpha = (settings["alpha_codec"], settings["alpha_mode"])
-        # a manifest from an earlier run (replacing it was consented to) goes first: if a layer fails below, no manifest is left describing
-        # files that have since been removed or rewritten
-        self._remove_partial(paths["manifest"])
-        canvas = self._canvas(work_dir, self._canvas_parameters(width, height, duration, fps, retag_for(programme.get("video") or {})))
-        paths["directory"].mkdir(parents=True, exist_ok=True)
-        layers: List[Dict[str, Any]] = []
-        for el in ordered:
-            target: Path = paths["files"][el.element_id]
-            self._remove_partial(target)  # replacing it was consented to (document.output.overwrite), checked before anything rendered
-            asset = assets.get(el.element_id)
-            if el.type == "shape":
-                clip = {"identity": self._shape_clip_identity(el, crf, preset), "parameters": self._shape_clip_parameters(el)}
-                asset = {"path": self._shape_clip(el, clip, work_dir, output_ext, crf, preset)["path"]}
-            tool, argv, cwd = self._argv(el, canvas["path"], str(target), asset, fonts_.get(el.element_id), crf, preset, None, platform,
-                                         fit=fits.get(el.element_id), alpha=alpha)
-            try:
+        staging = LayerStaging(paths["directory"])
+        try:
+            canvas = self._canvas(work_dir, self._canvas_parameters(width, height, duration, fps, retag_for(programme.get("video") or {})))
+            staging.prepare(MANIFEST_NAME)
+            rendered: List[Dict[str, Any]] = []
+            expected: Dict[str, Tuple[int, str]] = {}
+            for el in ordered:
+                target: Path = staging.path(paths["files"][el.element_id].name)
+                asset = assets.get(el.element_id)
+                if el.type == "shape":
+                    clip = {"identity": self._shape_clip_identity(el, crf, preset), "parameters": self._shape_clip_parameters(el)}
+                    asset = {"path": self._shape_clip(el, clip, work_dir, output_ext, crf, preset)["path"]}
+                tool, argv, cwd = self._argv(el, canvas["path"], str(target), asset, fonts_.get(el.element_id), crf, preset, None, platform,
+                                             fit=fits.get(el.element_id), alpha=alpha)
                 run = self.skill.run_tool(tool, argv, self.timeout, cwd)
                 meta = self._validate_layer_file(target, f"elements[{el.element_id}] ({el.type}) layer", width, height, duration)
-            except MotionGraphicsError:
-                self._remove_partial(target)
-                raise
-            data = run.data if isinstance(run.data, dict) else {}
-            layers.append(dict({"id": el.element_id, "type": el.type, "start": el.start, "end": el.end}, **self._layer_box(el, assets, fits, width, height),
-                               file=target.name, path=str(target), sha256=meta["sha256"], size=meta["size"], duration=meta["duration"],
-                               tool=f"ffmpeg-skill/{tool}", alpha_codec=data.get("alpha_codec"), alpha_mode=data.get("alpha_mode"),
-                               verified=data.get("verified") if isinstance(data.get("verified"), bool) else None, alpha=alpha_step(data),
-                               seconds=run.seconds, tool_commands_observed=run.commands))
-        prog = {"file": output_path.name, "sha256": programme["sha256"], "width": width, "height": height, "duration": programme["duration"], "fps": fmt_number(fps)}
-        doc_manifest = manifest_document(prog, settings, {k: v for k, v in canvas["record"]["parameters"].items()}, layers)
-        manifest_path: Path = paths["manifest"]
-        manifest_path.write_text(json.dumps(doc_manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        return {"directory": str(paths["directory"]), "manifest": {"path": str(manifest_path), "sha256": sha256_file(str(manifest_path))},
-                "alpha_codec": settings["alpha_codec"], "alpha_mode": settings["alpha_mode"], "canvas": canvas["record"], "layers": layers,
-                "verified": doc_manifest["verified"]}
+                data = run.data if isinstance(run.data, dict) else {}
+                expected[target.name] = (meta["size"], meta["sha256"])
+                rendered.append(dict({"id": el.element_id, "type": el.type, "start": el.start, "end": el.end}, **self._layer_box(el, assets, fits, width, height),
+                                     file=target.name, path=str(paths["files"][el.element_id]), sha256=meta["sha256"], size=meta["size"], duration=meta["duration"],
+                                     tool=f"ffmpeg-skill/{tool}", alpha_codec=data.get("alpha_codec"), alpha_mode=data.get("alpha_mode"),
+                                     verified=data.get("verified") if isinstance(data.get("verified"), bool) else None, alpha=alpha_step(data),
+                                     seconds=run.seconds, tool_commands_observed=run.commands))
+            # the manifest's order is the elements' (start, id), not the order the renders happened to finish in
+            layers = manifest_order(rendered)
+            prog = {"file": output_path.name, "sha256": programme["sha256"], "width": width, "height": height, "duration": programme["duration"], "fps": fmt_number(fps)}
+            doc_manifest = manifest_document(prog, settings, {k: v for k, v in canvas["record"]["parameters"].items()}, layers, overwrite=settings["overwrite"])
+            manifest_text = json.dumps(doc_manifest, indent=2, sort_keys=True) + "\n"
+            staging.write_manifest(manifest_text, MANIFEST_NAME)
+            manifest_sha = staging.commit([layer["file"] for layer in layers], MANIFEST_NAME, manifest_text, expected)
+        except MotionGraphicsError as e:
+            staging.abort()
+            # every layer export failure is safe to retry once the cause is fixed: the target still holds the previous complete
+            # result (or nothing), so the caller never has to guess what state the directory was left in. `rollback_ok` is only
+            # false when the rollback itself could not finish, in which case details.rollback_problems says what remains.
+            e.details.setdefault("layer_export_rolled_back", e.details.get("rollback_ok", True))
+            raise
+        except BaseException:
+            staging.abort()
+            raise
+        return ({"directory": str(paths["directory"]), "manifest": {"path": str(paths["manifest"]), "sha256": manifest_sha},
+                 "alpha_codec": settings["alpha_codec"], "alpha_mode": settings["alpha_mode"], "overwrite": settings["overwrite"],
+                 "canvas": canvas["record"], "layers": layers, "verified": doc_manifest["verified"]}, staging)
 
     @staticmethod
     def _theme_record(theme: Dict[str, Any]) -> Dict[str, Any]:

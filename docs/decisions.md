@@ -976,6 +976,9 @@ drawn at 4:4:4 against a transparent black and converted to 4:2:0 when composite
 needs, and their stack is the same picture. A `rendered_layer` still refuses a VP9 alpha WebM as its input (ADR-25); that is a separate
 question from writing vp9 layers here.
 
+*File handling.* Superseded by ADR-35: the layers are staged and committed as one result, the overwrite switch is
+`options.layer_export.overwrite`, and one export per workspace is enforced by a lock.
+
 **Consumers.** New top-level `layer_export` block, `response.conditional.layer_export`, `request.shape.options?.layer_export?`, the alpha
 flags in `ffmpeg_skill.flags_used` (graphics, overlay), `ffmpeg-skill/color` among `dependencies[0].tools` / `delegates_to`, and
 `execution.executables` naming background's second use and color.py --retag. No element type,
@@ -1105,3 +1108,67 @@ The release job now commits and tags locally, runs `tests/test_contract.py`, `te
 `.github/scripts/release_gate.py` lets a push release only when a pull request merged since the latest tag carries a release-level label or no label at all. The release-level labels are the ones `.github/release-drafter.yml`'s `version-resolver` maps to a bump. A pull request labelled only chore, ci, documentation, docs, test or similar releases nothing. This is imagemagick-skill's rule. release-drafter's `default` accepts only major, minor or patch, so the gate runs first, and the maintenance labels no longer map to a patch.
 
 A version bumped by hand in a pull request is released whatever its labels. The contract is unchanged.
+
+## ADR-35: the layer export has one lifecycle: staged, committed atomically, one manifest for the files that exist, one export per workspace
+
+2026-11-20. Supersedes ADR-30's file handling (the drawing, timing, colour tags and PSNR of ADR-30 are unchanged).
+
+**Context.** ADR-30 wrote each layer straight into the target directory and deleted an earlier manifest before the first
+layer was drawn. Every element renders independently, and a caller may render them in parallel; a failure part-way then left
+half-written layers in the target, with no manifest or with one from an earlier run describing other files. Two exports of the
+same workspace could stage into the same directory and interleave their files and manifests. Whether an existing file was
+replaced depended on `document.output.overwrite`, which is the programme's consent, not the layers'. A caller could not tell
+which files were the export's, which were trustworthy, or whether a retry was safe.
+
+**Decision.**
+
+- *One lifecycle.* Each run writes every layer and the manifest into a hidden staging directory inside the target
+  (`<directory>/.motion-graphics-layers-<token>.tmp/`; `layerstage.LayerStaging`). The target keeps its previous complete
+  result untouched while the run renders. When every element has succeeded, the run commits: the previous result's files (its
+  manifest, the files that manifest names, and any of the new names) move into a hidden backup, the staged layers move in,
+  each is checked against the size and sha256 recorded for it, and the staged manifest is renamed in **last** -- that rename
+  is the commit point. The backup is deleted only after the commit. Any failure before the commit deletes the staging
+  directory; the target is exactly the previous complete result (or empty). The failure is raised unchanged (a tool failure
+  stays `TOOL_ERROR`, retryable) with `details.layer_export_rolled_back: true`.
+- *Manifest = the files.* `manifest.json` lists exactly the files committed (`file`, `sha256`, `size` per layer), in `(start, id)`
+  order regardless of the order the renders finished in (`layerexport.manifest_order`), with the alpha check
+  (`verified`, `alpha`) and the `overwrite` flag of the run that wrote it. The response's `manifest.sha256` is the hash of
+  the committed file. A caller can hash each `file` and compare before it cuts with it.
+- *Overwrite is the export's own.* `options.layer_export.overwrite` (default false) replaces a complete result; it is separate
+  from `document.output.overwrite`. With it false, a manifest or any of the export's files already in the directory is refused
+  **before anything renders** (`OUTPUT_ERROR`, `details.reason: exists`, `details.files`), leaving the result whole. This is a
+  behaviour change from ADR-30, which reused `document.output.overwrite` and defaulted to replacing.
+- *One export per workspace.* The run takes a non-blocking exclusive lock on `<workspace>/.motion-graphics/layer-export.lock`
+  (`layerstage.WorkspaceLock`: `fcntl.flock` on POSIX, `msvcrt.locking` on Windows; an in-process registry so two threads
+  of one process conflict too) before the overwrite checks, and holds it until the commit has finished and the response is
+  built. A second export fails before rendering anything with `OUTPUT_ERROR`, `details.reason: layer_export_busy`,
+  `retryable: true` (wait for the first, or retry). The OS drops the lock when the holder exits, so a crashed run does not
+  leave the workspace locked.
+- *Crash recovery.* `layerstage.sweep()` runs at the start of an export, while the lock is held: a leftover staging
+  directory is deleted; a leftover backup (its journal names the new files and the old ones) is either discarded, when the
+  target already has a manifest (the commit point was reached), or -- when the target has none, meaning the crash fell inside
+  the commit -- the journal's new files are removed and the old ones moved back, leaving exactly the previous complete result.
+- *Fresh directory.* A failed first export removes the directory it created, so a failure leaves nothing behind.
+
+The rendering order is still `(start, id)` and each layer is still the burn's own call on the transparent canvas (ADR-30); the
+lifecycle is orthogonal to whether the renders run one at a time or concurrently.
+
+**Not here.** No export-level parallelism is added: element renders are sequential, and the manifest order is fixed so that
+making them concurrent later cannot change it. A succeeded commit whose manifest hash check fails (a file changed underneath
+the export between the move and the check) rolls back and is retryable; the manifest is verified again by the caller from its
+`sha256`, never trusted blindly.
+
+**Consumers.** `options.layer_export.overwrite?` joins the request shape; `response.layer_export.overwrite` and the manifest's
+`overwrite` join the response; `layer_export.files` / `layer_export.concurrency` state the lifecycle. No element type,
+parameter, `animations`, `provenance` or element-entry change; `response` was already a fatal drift key for the agent's pin
+(ADR-30), so nothing new breaks there.
+
+**Verified.** `tests/test_layer_export.py`: a successful export commits every layer and a manifest whose every file's size and
+sha256 match; a failed element rolls back and leaves the previous complete result byte-for-byte, with a retryable error; a
+first-export failure leaves no directory; a failed rerun is retried and succeeds whole; a manifest that does not match a
+written layer is refused and rolled back; the overwrite switch off refuses an existing result (and a manifest alone) before
+rendering; the lock refuses a second export (`layer_export_busy`) and two threads race for it (exactly one wins); two full
+`response()` runs race and the loser renders nothing and writes nothing, the winner's result is the one committed, and the
+loser's retry with the switch on replaces it; a crash mid-commit is recovered from the backup journal. The real-render test
+commits two runs (switch on), refuses a third (switch off) leaving the result byte-for-byte, fails one element with an
+injected tool error and checks the previous result survives, then retries and commits whole.

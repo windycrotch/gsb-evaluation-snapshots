@@ -120,6 +120,13 @@ type, a new top-level key), before merging.
   `background --transparent` and graphics / overlay `--keep-alpha`, and each element is drawn alone on a transparent canvas with the burn's
   own call. Older checkouts refuse the option up front. The programme itself stays opaque H.264; there is no "whole graphics track" layer
   (one per element, composited in render order, is what the manifest describes).
+- **The layer export is staged and committed as one result, one export per workspace** (ADR-35, `layerstage.py`): layers and the manifest
+  go into a hidden staging directory inside the target and are moved in only when every element has succeeded, the manifest renamed last
+  as the commit point, every committed file verified against the manifest's sha256; any failure deletes the staging and leaves the
+  previous complete result untouched. `options.layer_export.overwrite` (default false, separate from `document.output.overwrite`) is
+  needed to replace a complete result. A run holds `<workspace>/.motion-graphics/layer-export.lock` for its whole length: a second
+  concurrent export fails before rendering (`layer_export_busy`, retryable). `sweep()` recovers a crash mid-commit from the backup
+  journal. Do not write layer files directly to the target, and do not make the manifest order depend on completion order.
 - The pinned agent-side contract is `0.1.0`. A **new element type, a new top-level key (`platforms`, `constraints`), or a new `animation`
   string value is safe** (verified additive again for ADR-19). A **new parameter `type`** (anything other than `string`, `integer`,
   `number`, `boolean`, `color`, `position`, `font`, `path`) is **not** safe: it breaks `check_contract()` outright (ADR-11 explains the

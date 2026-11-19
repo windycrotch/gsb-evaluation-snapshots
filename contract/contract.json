@@ -1576,7 +1576,8 @@
     "shape": {
       "directory": "path inside the workspace (PathPolicy): the layer files and manifest.json are written there",
       "alpha_codec?": "png | prores4444 | qtrle | vp9 (default prores4444)",
-      "alpha_mode?": "straight | premultiplied (default straight)"
+      "alpha_mode?": "straight | premultiplied (default straight)",
+      "overwrite?": "boolean (default false): replace a complete result already in the directory; false refuses it (OUTPUT_ERROR, details.reason exists, before anything renders) instead of half-replacing it"
     },
     "containers": {
       "prores4444": ".mov",
@@ -1584,9 +1585,9 @@
       "png": ".mov",
       "vp9": ".webm"
     },
-    "files": "one per element, <element id><container>, plus manifest.json; an existing one is replaced only with document.output.overwrite (OUTPUT_ERROR, details.reason exists, before anything renders)",
+    "files": "one per element, <element id><container>, plus manifest.json. One lifecycle: every layer and the manifest are written into a hidden staging directory under the target first; once every element succeeded the previous complete result is moved aside, the staged files are moved in and the manifest is renamed into place last (the commit point). Any failure before the commit deletes the staging directory and leaves the previous complete result untouched. The manifest lists exactly the files committed, each with its sha256 and size, and every committed file is checked against it before the commit returns.",
     "timing": "every layer has the programme's size, frame rate and length and starts at 0 s; the element shows at its own start..end, as in the programme",
-    "how": "ffmpeg-skill/background --transparent makes one canvas (the source's size, rate and length) and ffmpeg-skill/color --retag gives it the programme's colour tags; each element is the same graphics / overlay call that burns it into the programme, on that canvas, with --keep-alpha --alpha-codec --alpha-mode (no audio), so every layer carries the programme's matrix, primaries and transfer tags",
+    "how": "ffmpeg-skill/background --transparent makes one canvas (the source's size, rate and length) and ffmpeg-skill/color --retag gives it the programme's colour tags; each element is the same graphics / overlay call that burns it into the programme, on that canvas, with --keep-alpha --alpha-codec --alpha-mode (no audio), so every layer carries the programme's matrix, primaries and transfer tags. Each element writes into the staging directory; the manifest's order is (start, id) whatever order the elements finished in",
     "requires": {
       "ffmpeg_skill_flags": {
         "background": [
@@ -1611,7 +1612,8 @@
       },
       "otherwise": "TOOL_ERROR before anything renders (details.reason ffmpeg_skill_lacks_flag, details.flags; or ffmpeg_skill_lacks_alpha_codec when the checkout does not offer the codec); doctor reports capability ffmpeg-skill-feature:layer_export"
     },
-    "result": "response.layer_export {directory, manifest {path, sha256}, alpha_codec, alpha_mode, canvas {tool, operation_id, status, output_hash, parameters, seconds}, layers [{id, type, start, end, box, box_precision, file, path, sha256, size, duration, tool, alpha_codec, alpha_mode, verified, alpha, seconds, tool_commands_observed}], verified}; plan: response.layer_export {directory, alpha_codec, alpha_mode, manifest, canvas, layers [{id, type, start, end, file, tool, box, box_precision}]}",
+    "concurrency": "one export per workspace at a time: the run holds a lock file in the workspace from before the overwrite checks until the commit has finished, so two concurrent exports never stage into each other's directory or interleave manifests. A second one fails before anything renders with OUTPUT_ERROR, details.reason layer_export_busy, retryable true (retry once the first has finished)",
+    "result": "response.layer_export {directory, manifest {path, sha256}, alpha_codec, alpha_mode, overwrite, canvas {tool, operation_id, status, output_hash, parameters, seconds}, layers [{id, type, start, end, box, box_precision, file, path, sha256, size, duration, tool, alpha_codec, alpha_mode, verified, alpha, seconds, tool_commands_observed}], verified}; plan: response.layer_export {directory, alpha_codec, alpha_mode, overwrite, manifest, canvas, layers [{id, type, start, end, file, tool, box, box_precision}]}",
     "verification": "ffmpeg-skill reads each layer's alpha back (its `alpha` step: an alpha plane is stored, and every frame's alpha is at or above the canvas's) and says `verified`; this skill also probes each layer (size, length). A layer that ffmpeg-skill does not report verified is a warning, and layer_export.verified is false",
     "box": "the element's box at rest, as reserved_regions computes it: exact for a shape and a sized image / video / layer, estimated for templates (box_precision says which); null when it could not be measured"
   },
@@ -1972,7 +1974,8 @@
         "layer_export?": {
           "directory": "layers",
           "alpha_codec?": "prores4444",
-          "alpha_mode?": "straight"
+          "alpha_mode?": "straight",
+          "overwrite?": false
         }
       },
       "elements[].style?": "a style_presets name",

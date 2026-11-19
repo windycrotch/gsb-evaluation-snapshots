@@ -1,6 +1,6 @@
 """Layer export (docs/decisions.md ADR-30): beside the burned programme, every element rendered alone on a transparent picture.
 
-    "options": {"layer_export": {"directory": "layers", "alpha_codec?": "prores4444", "alpha_mode?": "straight"}}
+    "options": {"layer_export": {"directory": "layers", "alpha_codec?": "prores4444", "alpha_mode?": "straight", "overwrite?": false}}
 
 One transparent canvas the size, rate and length of the source video is made once (ffmpeg-skill/background --transparent, then
 color --retag with the programme's colour tags, which every layer drawn on it keeps), and
@@ -9,6 +9,12 @@ template, text, position, margin, timing and fade, so a layer placed at 0 s over
 One file per element (`<element id>.<ext>`) and a `manifest.json` (element id, type, start, end, box, file, sha256, the alpha
 check) are written to the directory; ffmpeg-skill reads each layer's alpha back (its `alpha` verification step) and the result
 records it with `verified`.
+
+The directory changes only at one commit point (ADR-35, `layerstage.py`): every layer and the manifest are written into a
+hidden staging directory first, the previous complete result is moved aside, the staged files are moved in, and the manifest
+is written last (its rename is the commit). An element failing before that deletes the staging directory and leaves the
+previous complete result in place. `overwrite` is per export, default false: with a complete result already in the directory
+the export is refused rather than half-replaced.
 
 Pure here: parsing the request option, the file names and the manifest. The calls are made by the executor."""
 from __future__ import annotations
@@ -35,7 +41,7 @@ LAYER_EXPORT_FLAGS: Dict[str, tuple] = {"background": ("transparent", "fps", "al
 # ffmpeg-skill/color --retag gives the transparent canvas the programme's colour tags (a stream copy): graphics / overlay --keep-alpha
 # keep the tags of what they draw on, so every layer says the matrix it was drawn in. Without them a layer reads as "unknown", and a
 # compositor that negotiates colour (FFmpeg 7.1 and later) converts the picture under it from BT.709 to its guess.
-FIELDS = ("directory", "alpha_codec", "alpha_mode")
+FIELDS = ("directory", "alpha_codec", "alpha_mode", "overwrite")
 
 
 def retag_for(video: Dict[str, Any]) -> Optional[str]:
@@ -51,9 +57,9 @@ def retag_for(video: Dict[str, Any]) -> Optional[str]:
 
 
 def parse_layer_export(value: Any, element_ids: Sequence[str]) -> Dict[str, Any]:
-    """options.layer_export -> {directory, alpha_codec, alpha_mode}. Structural only (no file system: the executor resolves the
-    directory through PathPolicy). Element ids that differ only in letter case are refused: their layer files would be one file
-    on a case-insensitive file system (Windows, macOS)."""
+    """options.layer_export -> {directory, alpha_codec, alpha_mode, overwrite}. Structural only (no file system: the executor
+    resolves the directory through PathPolicy). Element ids that differ only in letter case are refused: their layer files would
+    be one file on a case-insensitive file system (Windows, macOS)."""
     where = "document.options.layer_export"
     if not isinstance(value, dict):
         raise MotionGraphicsError("INVALID_REQUEST", f"{where} must be an object", {"field": where})
@@ -69,6 +75,11 @@ def parse_layer_export(value: Any, element_ids: Sequence[str]) -> Dict[str, Any]
     mode = value.get("alpha_mode", DEFAULT_ALPHA_MODE)
     if mode not in ALPHA_MODES:
         raise MotionGraphicsError("INVALID_REQUEST", f"{where}.alpha_mode must be one of {list(ALPHA_MODES)}: {mode!r}", {"field": f"{where}.alpha_mode"})
+    # ADR-35: replacing a complete result in the directory is this export's own consent (default false), not
+    # document.output.overwrite's -- replacing the programme says nothing about replacing layers somebody may be cutting with.
+    overwrite = value.get("overwrite", False)
+    if not isinstance(overwrite, bool):
+        raise MotionGraphicsError("INVALID_REQUEST", f"{where}.overwrite must be a boolean", {"field": f"{where}.overwrite"})
     seen: Dict[str, str] = {}
     for eid in element_ids:
         key = eid.lower()
@@ -76,7 +87,7 @@ def parse_layer_export(value: Any, element_ids: Sequence[str]) -> Dict[str, Any]
             raise MotionGraphicsError("INVALID_REQUEST", f"{where}: element ids {seen[key]!r} and {eid!r} differ only in letter case, and their layer files "
                                       f"would be one file on a case-insensitive file system", {"field": where, "reason": "layer_name_collision", "ids": [seen[key], eid]})
         seen[key] = eid
-    return {"directory": directory, "alpha_codec": codec, "alpha_mode": mode}
+    return {"directory": directory, "alpha_codec": codec, "alpha_mode": mode, "overwrite": overwrite}
 
 
 def layer_file_name(element_id: str, alpha_codec: str) -> str:
@@ -93,10 +104,23 @@ def alpha_step(data: Any) -> Optional[Dict[str, Any]]:
     return None
 
 
-def manifest_document(programme: Dict[str, Any], settings: Dict[str, Any], canvas: Dict[str, Any], layers: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """The manifest written beside the layers. File names only (no absolute path), so the directory can be moved as a whole."""
+def manifest_order(layers: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The manifest's order: `(start, id)`, the render order and the order a compositor stacks the layers in. It is taken from
+    the elements, never from the order the renders finished in, so a parallel (or reordered) render still produces the same
+    manifest (ADR-35)."""
+    return sorted(layers, key=lambda layer: (layer["start"], layer["id"]))
+
+
+def manifest_document(programme: Dict[str, Any], settings: Dict[str, Any], canvas: Dict[str, Any], layers: List[Dict[str, Any]],
+                      overwrite: bool = False) -> Dict[str, Any]:
+    """The manifest written beside the layers. File names only (no absolute path), so the directory can be moved as a whole.
+
+    Every entry is one final file of this directory (`file`, `sha256`, `size`); `layers` is in render order `(start, id)`, which
+    is the order a compositor stacks them in, however the renders finished. `overwrite` says whether this run replaced a previous
+    complete result, so a caller can tell a first export from a re-export of the same directory."""
     return {"schema": LAYERS_MANIFEST_SCHEMA, "skill": SKILL_ID,
             "programme": programme, "alpha_codec": settings["alpha_codec"], "alpha_mode": settings["alpha_mode"],
+            "overwrite": bool(overwrite),
             "canvas": canvas,
             "composite": "each layer is the programme's full length from 0 s, at 0,0, the programme's size; laid over the clean video in this list's "
                          "order (the order the programme was rendered in) it gives the burned programme",
@@ -111,21 +135,30 @@ def contract_section() -> Dict[str, Any]:
         "request_field": "options.layer_export",
         "shape": {"directory": "path inside the workspace (PathPolicy): the layer files and manifest.json are written there",
                   "alpha_codec?": f"{' | '.join(sorted(ALPHA_CODECS))} (default {DEFAULT_ALPHA_CODEC})",
-                  "alpha_mode?": f"{' | '.join(ALPHA_MODES)} (default {DEFAULT_ALPHA_MODE})"},
+                  "alpha_mode?": f"{' | '.join(ALPHA_MODES)} (default {DEFAULT_ALPHA_MODE})",
+                  "overwrite?": "boolean (default false): replace a complete result already in the directory; false refuses it (OUTPUT_ERROR, "
+                                "details.reason exists, before anything renders) instead of half-replacing it"},
         "containers": dict(ALPHA_CODECS),
-        "files": "one per element, <element id><container>, plus manifest.json; an existing one is replaced only with document.output.overwrite "
-                 "(OUTPUT_ERROR, details.reason exists, before anything renders)",
+        "files": "one per element, <element id><container>, plus manifest.json. One lifecycle: every layer and the manifest are written into a hidden "
+                 "staging directory under the target first; once every element succeeded the previous complete result is moved aside, the staged "
+                 "files are moved in and the manifest is renamed into place last (the commit point). Any failure before the commit deletes the "
+                 "staging directory and leaves the previous complete result untouched. The manifest lists exactly the files committed, each with its "
+                 "sha256 and size, and every committed file is checked against it before the commit returns.",
         "timing": "every layer has the programme's size, frame rate and length and starts at 0 s; the element shows at its own start..end, as in the programme",
         "how": "ffmpeg-skill/background --transparent makes one canvas (the source's size, rate and length) and ffmpeg-skill/color --retag gives it the "
                "programme's colour tags; each element is the same graphics / overlay call that burns it into the programme, on that canvas, with "
-               "--keep-alpha --alpha-codec --alpha-mode (no audio), so every layer carries the programme's matrix, primaries and transfer tags",
+               "--keep-alpha --alpha-codec --alpha-mode (no audio), so every layer carries the programme's matrix, primaries and transfer tags. Each "
+               "element writes into the staging directory; the manifest's order is (start, id) whatever order the elements finished in",
         "requires": {"ffmpeg_skill_flags": {t: list(f) for t, f in LAYER_EXPORT_FLAGS.items()},
                      "otherwise": "TOOL_ERROR before anything renders (details.reason ffmpeg_skill_lacks_flag, details.flags; or ffmpeg_skill_lacks_alpha_codec "
                                   "when the checkout does not offer the codec); doctor reports capability ffmpeg-skill-feature:layer_export"},
-        "result": "response.layer_export {directory, manifest {path, sha256}, alpha_codec, alpha_mode, canvas {tool, operation_id, status, output_hash, "
+        "concurrency": "one export per workspace at a time: the run holds a lock file in the workspace from before the overwrite checks until the commit "
+                       "has finished, so two concurrent exports never stage into each other's directory or interleave manifests. A second one fails "
+                       "before anything renders with OUTPUT_ERROR, details.reason layer_export_busy, retryable true (retry once the first has finished)",
+        "result": "response.layer_export {directory, manifest {path, sha256}, alpha_codec, alpha_mode, overwrite, canvas {tool, operation_id, status, output_hash, "
                   "parameters, seconds}, layers [{id, type, start, end, box, box_precision, file, path, sha256, size, duration, tool, alpha_codec, "
                   "alpha_mode, verified, alpha, seconds, tool_commands_observed}], verified}; plan: response.layer_export {directory, alpha_codec, "
-                  "alpha_mode, manifest, canvas, layers [{id, type, start, end, file, tool, box, box_precision}]}",
+                  "alpha_mode, overwrite, manifest, canvas, layers [{id, type, start, end, file, tool, box, box_precision}]}",
         "verification": "ffmpeg-skill reads each layer's alpha back (its `alpha` step: an alpha plane is stored, and every frame's alpha is at or above the "
                         "canvas's) and says `verified`; this skill also probes each layer (size, length). A layer that ffmpeg-skill does not report "
                         "verified is a warning, and layer_export.verified is false",

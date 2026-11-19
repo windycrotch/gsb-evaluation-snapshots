@@ -59,6 +59,10 @@ motion-graphics run request.json --json --workspace .                 # 4. rende
    chain (source video, per-element asset/font identities, operation chain, output hash).
    With `options.layer_export` the run also writes each element alone on transparent (`response.layer_export`: one file per
    element and a manifest); check `layer_export.verified` (ffmpeg-skill read every layer's alpha back) before handing them on.
+   The directory is committed as one result: an element failing rolls the whole run back and leaves the previous complete result
+   in place (a retryable error), `options.layer_export.overwrite` (default false) is needed to replace a complete result, and a
+   second export of the same workspace while one runs fails with `layer_export_busy` (retryable) rather than interleaving. The
+   manifest names exactly the files committed, each with its `sha256`: check them before cutting.
 
 Full request/response shapes: `motion-graphics contract --json` (`request.shape`, `response.success.{run,plan,validate}`).
 

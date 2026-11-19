@@ -199,7 +199,7 @@ def skill_contract() -> Dict[str, Any]:
                                            "style?": "news", "reserved_regions?": {"end_screen?": {"duration?": 20}, "cards?": [{"time": 30}], "on_overlap?": "report"},
                                            "themes?": {"brand_a": "themes/brand_a.json"}, "theme?": "brand_a", "brand_kit?": {"primary?": "RRGGBB", "secondary?": "RRGGBB", "background?": "RRGGBB", "text?": "RRGGBB"},
                                            "kit?": "brand/kit.json",
-                                           "layer_export?": {"directory": "layers", "alpha_codec?": "prores4444", "alpha_mode?": "straight"}},
+                                           "layer_export?": {"directory": "layers", "alpha_codec?": "prores4444", "alpha_mode?": "straight", "overwrite?": False}},
                               "elements[].style?": "a style_presets name",
                               "elements[].fit?": {"width": 600, "max_lines?": 2, "min_scale?": 0.6, "profile?": "ja-kinsoku", "lang?": "ja"}}},
         "response": {"schema": f"{SKILL_ID}/response@{RESPONSE_SCHEMA_VERSION}",

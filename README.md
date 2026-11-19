@@ -272,21 +272,32 @@ the run report `title_json.<element id>` (the values used and where each came fr
 
 ## Layer export (each element alone on transparent)
 
-`options.layer_export: {"directory": "layers", "alpha_codec": "prores4444", "alpha_mode": "straight"}` also writes, beside the
-burned programme, every element drawn alone on a transparent picture: one file per element (`layers/<element id>.mov`, or
-`.webm` for `vp9`) and `layers/manifest.json` (element id, type, start, end, box, file, sha256, the alpha check). Each layer
+`options.layer_export: {"directory": "layers", "alpha_codec": "prores4444", "alpha_mode": "straight", "overwrite": false}` also
+writes, beside the burned programme, every element drawn alone on a transparent picture: one file per element (`layers/<element id>.mov`,
+or `.webm` for `vp9`) and `layers/manifest.json` (element id, type, start, end, box, file, sha256, the alpha check). Each layer
 has the programme's size, frame rate and length and starts at 0 s, so laid on an upper track over the clean video it rebuilds
 the programme; the graphics can then be swapped or rearranged in an NLE without rendering the whole programme again.
+
+The directory has one lifecycle: every layer and the manifest are written into a hidden staging directory inside it first, and
+only when every element has succeeded are the previous result's files set aside, the staged files moved in and the manifest
+renamed into place last -- the commit. An element failing part-way deletes the staging directory and leaves the previous
+complete result (its manifest included) exactly as it was, with a retryable error (`layer_export_rolled_back`). The manifest
+lists exactly the files that exist, each with its `sha256`, in `(start, id)` order however the renders finished, so a caller can
+check every file before cutting with it. `overwrite` (default false) is the export's own switch: with it off, a complete result
+already in the directory is refused before anything renders rather than half-replaced. One export runs per workspace at a time
+(a lock file in `.motion-graphics/`): a second concurrent export fails before rendering with `OUTPUT_ERROR`,
+`details.reason: layer_export_busy`, `retryable: true`.
 
 How: `ffmpeg-skill/background --transparent` makes one canvas the size, rate and length of the source, `ffmpeg-skill/color --retag`
 gives it the programme's colour tags (so every layer says BT.709 for an SDR programme, as the programme does), and each element is
 drawn on it by the same `graphics` / `overlay` call that burned it, with `--keep-alpha --alpha-codec --alpha-mode`.
 ffmpeg-skill reads each layer's alpha back (its `alpha` verification step), and the result records `alpha_codec`,
 `alpha_mode`, the `alpha` step and `verified` per layer (`response.layer_export`). `alpha_codec` is `prores4444` (default),
-`qtrle`, `png` or `vp9`. An existing layer file is replaced only with `document.output.overwrite`. A checkout without
-`--transparent` / `--keep-alpha` (ffmpeg-skill before 3.2.3) refuses the option before anything renders (`TOOL_ERROR`,
-`ffmpeg_skill_lacks_flag`), and `doctor` reports `ffmpeg-skill-feature:layer_export`. The test composites the layers over the
-clean video with `ffmpeg-skill/overlay` and checks the burned programme comes back at 30 dB PSNR or more. See ADR-30.
+`qtrle`, `png` or `vp9`. A checkout without `--transparent` / `--keep-alpha` (ffmpeg-skill before 3.2.3) refuses the option
+before anything renders (`TOOL_ERROR`, `ffmpeg_skill_lacks_flag`), and `doctor` reports `ffmpeg-skill-feature:layer_export`. The
+test composites the layers over the clean video with `ffmpeg-skill/overlay` and checks the burned programme comes back at 30 dB
+PSNR or more, and exercises the rollback, the overwrite refusal and the retry. See ADR-30 (the drawing) and ADR-35 (the
+lifecycle).
 
 ## Timeline validation
 
