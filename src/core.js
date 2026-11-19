@@ -193,3 +193,5 @@ export function updateTimers() {
   }
 }
 export function clearTimers() { timers.length = 0; }
+// Dev-only: number of scheduled gameplay-time callbacks still pending (used by the pause/respawn regression tests).
+export function timerCount() { return timers.length; }

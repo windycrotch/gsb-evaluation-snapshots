@@ -1,7 +1,7 @@
 // NOVA LANCER — boot, game state machine and the main loop.
 import * as THREE from 'three';
 import {
-  G, loadSettings, saveSettings, newRun, updateTimers, clearTimers, on, emit, clamp, lerp, damp,
+  G, loadSettings, saveSettings, newRun, updateTimers, clearTimers, timerCount, on, emit, clamp, lerp, damp,
   easeInOutCubic, easeOutCubic, rand, after, mulberry32,
 } from './core.js';
 import { initInput, updateInput, endInputFrame, Input } from './input.js';
@@ -27,6 +27,7 @@ import {
   updateResults, skipResults, resetHUDCache, setGameOverText, clearMarkers,
 } from './hud.js';
 import { AudioSys } from './audio.js';
+import { runPauseTests } from './devtests.js';
 
 // Resolve on the next animation frame, or after a short timeout when the tab is in the background.
 const nextFrame = () => new Promise(r => { let done = false; const f = () => { if (!done) { done = true; r(); } }; requestAnimationFrame(f); setTimeout(f, 60); });
@@ -96,10 +97,26 @@ async function boot() {
   wireEvents();
   enterTitle(true);
   requestAnimationFrame(loop);
-  if (__DEV__) Object.assign(window, {
+  if (__DEV__) {
+    Object.assign(window, {
     G, BOSS, WING, ship, emit, Input, POST, GFX, THREE,
     __jump: (d) => { G.run = G.run || newRun(); hideScreens(); setupStage(d, false); },
     __start: () => startMission(),
+    // Pause-chain regression helpers (manual vs system pause, focus loss and the death/respawn flow).
+    __pause: () => pause(),
+    __resume: () => resume(),
+    __autoPause: () => autoPause(),
+    __autoResume: () => autoResume(),
+    __blur: () => window.dispatchEvent(new Event('blur')),
+    __focus: () => window.dispatchEvent(new Event('focus')),
+    __hide: () => { Object.defineProperty(document, 'hidden', { configurable: true, get: () => true }); document.dispatchEvent(new Event('visibilitychange')); },
+    __show: () => { Object.defineProperty(document, 'hidden', { configurable: true, get: () => false }); document.dispatchEvent(new Event('visibilitychange')); },
+    __kill: () => ship.die(),
+    __deadT: () => S.deadT,
+    __pauseSource: () => pauseSource,
+    __timers: () => timerCount(),
+    __after: (sec, fn) => after(sec, fn),
+    __respawn: (fromMenu = true) => respawn(fromMenu),
     CAMP, progress,
     __step: (n = 1, dt = 1 / 60) => { for (let i = 0; i < n; i++) frame(dt); return { state: G.state, d: Math.round(G.rail.d), hits: G.run.hits, shield: G.run.shield }; },
     enemies, WSTATE, ebullets, explode,
@@ -163,10 +180,12 @@ async function boot() {
       for (const c of Object.keys(held)) set(c, false);
       return { d: Math.round(G.rail.d), hits: G.run.hits, shield: Math.round(G.run.shield), lives: G.run.lives, state: G.state, enemies: enemies.length };
     },
-  });
+    });
+    runPauseTests();
+  }
 }
 
-// Pause automatically when the page loses focus mid-mission.
+// Pause automatically when the page loses focus mid-mission, and resume once it is foreground again.
 // (Dev builds: `window.__manual = true` hands every frame to __step/__bot, for repeatable test runs.
 //  `?manual&seed=N` in the URL turns that on from the first frame and seeds Math.random before boot.)
 const manual = () => __DEV__ && window.__manual;
@@ -175,8 +194,16 @@ if (__DEV__) {
   if (q.has('manual')) window.__manual = true;
   if (q.has('seed')) { const r0 = mulberry32(+q.get('seed') || 1); window.__rc = 0; Math.random = () => { window.__rc++; return r0(); }; }
 }
-window.addEventListener('blur', () => { if (G.state === 'play' && !S.intro && !manual()) pause(); });
-document.addEventListener('visibilitychange', () => { if (document.hidden && G.state === 'play' && !S.intro && !manual()) pause(); });
+// Both window blur and tab hiding funnel through autoPause(); the pauseSource guard makes a rapid
+// blur + visibilitychange pair settle the pause exactly once. Focus/visibility returning unpause
+// only when the pause was ours — a player's manual pause is left strictly alone.
+window.addEventListener('blur', autoPause);
+window.addEventListener('focus', autoResume);
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) autoPause();
+  else if (!document.hasFocus?.()) { /* window still blurred; its focus event will resume us */ }
+  else autoResume();
+});
 
 // Unlock audio on any genuine user gesture. (Test runs stay silent: sound effects are throttled in real time.)
 for (const ev of ['keydown', 'pointerdown', 'touchstart', 'mousedown']) window.addEventListener(ev, () => { if (!manual()) AudioSys.init(); }, { passive: true });
@@ -230,7 +257,7 @@ function wireEvents() {
   on('dropItem', (kind, pos, s, u, v) => {
     spawnProp('item', G.rail.d + 90, { kind, u: clamp(u, -40, 40), v: clamp(v, 8, 50), hold: 7, ahead: 90 });
   });
-  on('playerDead', () => { S.deadT = 0; G.state = 'dead'; });
+  on('playerDead', () => { S.deadT = 0; S.deadHandled = false; G.state = 'dead'; });
   on('playerDamaged', () => { G.hitStop = 0.05; });
   on('bossStart', startBoss);
   on('bossHit', () => {});
@@ -277,9 +304,38 @@ function wireEvents() {
   MENU_CB.select = () => openSelectScreen();
   MENU_CB.chars = () => openChars((id) => { S.focus = id; }, () => { S.focus = null; closeScreens(); showTitleMenu('main', 'chars'); });
   MENU_CB.resume = () => resume();
-  MENU_CB.retry = () => { resume(); hideScreens(); respawn(true); };
-  MENU_CB.quit = () => { resume(); hideScreens(); enterTitle(false); };
-  MENU_CB.continue = () => { G.run.score = 0; G.run.lives = 3; G.run.continues++; G.run.hits = 0; hideScreens(); respawn(true); };
+  MENU_CB.retry = () => {
+    // Retrying from the pause menu settles the current death exactly once: if the player was dead,
+    // this retry IS the life loss, so the pending deadT callback must never fire a second time.
+    const wasDead = G.state === 'dead';
+    if (wasDead && !S.deadHandled) {
+      S.deadHandled = true;
+      G.run.deaths++;
+      if (G.run.lives > 0) G.run.lives--;
+    }
+    pauseSource = null;
+    G.paused = false;
+    AudioSys.setPaused(false);
+    Input.clearAll();
+    hideScreens();
+    clearTimers();          // banners/radio scheduled for the old attempt must not replay on the new one
+    respawn(true);
+  };
+  MENU_CB.quit = () => {
+    pauseSource = null;
+    G.paused = false;
+    AudioSys.setPaused(false);
+    Input.clearAll();
+    hideScreens();
+    enterTitle(false);
+  };
+  MENU_CB.continue = () => {
+    pauseSource = null;
+    G.paused = false;
+    AudioSys.setPaused(false);
+    Input.clearAll();
+    G.run.score = 0; G.run.lives = 3; G.run.continues++; G.run.hits = 0; hideScreens(); clearTimers(); respawn(true);
+  };
   MENU_CB.again = () => startMission();
   MENU_CB.next = () => afterResults();
   MENU_CB.toSelect = () => { hideScreens(); enterTitle(false); openSelectScreen(); };
@@ -291,7 +347,9 @@ function wireEvents() {
 function enterTitle(first) {
   G.state = 'title';
   G.paused = false;
+  pauseSource = null;
   G.slowMo = 1;
+  G.hitStop = 0;
   clearTimers();
   clearEnemies(); clearWeapons(); clearFX(); clearRadio(); clearMarkers();
   if (BOSS.inst.active) BOSS.inst.stop();
@@ -435,7 +493,9 @@ function setupStage(d, intro) {
   hideScreens(); closeScreens(); clearFlybys();
   G.state = 'play';
   G.paused = false;
+  pauseSource = null;
   G.slowMo = 1;
+  G.hitStop = 0;
   clearTimers();
   clearEnemies(); clearWeapons(); clearFX(); clearRadio(); clearMarkers();
   if (BOSS.inst.active) BOSS.inst.stop();
@@ -459,6 +519,8 @@ function setupStage(d, intro) {
   POST.letterbox = intro ? 1 : 0;
   S.intro = intro ? { t: 0 } : null;
   S.bossCine = null;
+  S.deadT = 0;
+  S.deadHandled = false;
   if (d < CUR.bossAt) AudioSys.playMusic(CUR.music, { fade: 0.4 });
   else AudioSys.stopMusic(0.5);
   fadeTo(0, 0.8);
@@ -480,9 +542,17 @@ function respawn(fromMenu) {
   fadeTo(1, fromMenu ? 0.35 : 0.6, () => setupStage(d, false));
 }
 
+// Pause ownership: null while running, otherwise the single source that owns the current pause.
+//   'user'   — the player pressed Esc / used the pause button (only the player may clear it)
+//   'system' — auto-pause from a window blur / hidden tab (only autoResume() may clear it)
+// A second trigger while already paused is a no-op, so repeated blur/visibilitychange/Esc in one
+// frame (or across several hidden frames) can never stack or double-count a pause.
+let pauseSource = null;
+
 function pause() {
   if (G.state !== 'play' && G.state !== 'dead') return;
   if (G.paused) return;
+  pauseSource = 'user';
   G.paused = true;
   showScreen('pause');
   AudioSys.sfx('pause');
@@ -490,10 +560,29 @@ function pause() {
 }
 function resume() {
   if (!G.paused) return;
+  pauseSource = null;
   G.paused = false;
   hideScreens();
   AudioSys.setPaused(false);
   Input.clearAll();
+}
+
+// System-initiated pause (tab/window lost focus). Does nothing if the player already paused manually.
+// Dev test pages set window.__allowAutoPause so synthetic blur events are honoured inside ?manual runs.
+function autoPause() {
+  if (G.state !== 'play' && G.state !== 'dead') return;
+  if (G.paused || pauseSource) return;
+  if (S.intro || (manual() && !window.__allowAutoPause)) return;
+  pauseSource = 'system';
+  G.paused = true;
+  showScreen('pause');
+  AudioSys.setPaused(true);
+  Input.clearAll();
+}
+// Clears a system pause only; a manual pause survives focus changes entirely.
+function autoResume() {
+  if (pauseSource !== 'system') return;
+  resume();
 }
 
 function gameOver() {
@@ -719,7 +808,7 @@ function frame(rdt) {
 
   // time scaling (pause, hit-stop, slow motion)
   let ts = G.paused ? 0 : 1;
-  if (G.hitStop > 0) { G.hitStop -= rdt; ts *= 0.15; }
+  if (G.hitStop > 0) { if (!G.paused) G.hitStop -= rdt; ts *= 0.15; }
   ts *= G.slowMo;
   const dt = rdt * ts;
   G.dt = dt;
@@ -751,7 +840,9 @@ function frame(rdt) {
   POST.ca = damp(POST.ca, 0.0012, 3, rdt);
   if (ship) POST.radial = damp(POST.radial, G.state === 'play' ? ship.boostAmt * 0.9 : 0, 6, rdt);
   updateSunFlare(rdt);
-  renderFrame(rdt);
+  // Dev regression pages (e.g. ?pausetest) run thousands of frames synchronously; the GPU draw is
+  // irrelevant to what they assert, so skipping it keeps the suite fast and renderer-independent.
+  if (!(__DEV__ && window.__noRender)) renderFrame(rdt);
   endInputFrame();
 }
 
@@ -795,7 +886,8 @@ function attract(rdt) {
 
 function updatePlay(dt, rdt) {
   const run = G.run;
-  // pause toggle
+  // pause toggle. A confirm/back press while a system (blur) pause owns the screen first claims
+  // ownership for the player, so the later focus event can no longer dismiss it on its own.
   if (Input.pressed('pause')) {
     if (G.paused) { if (!menuBack()) resume(); }
     else pause();
@@ -825,9 +917,10 @@ function updatePlay(dt, rdt) {
   }
   // boss HP
   if (BOSS.inst.active) setBossHP(BOSS.inst.hp / BOSS.inst.maxHp);
-  // death flow
+  // death flow — advances on gameplay time, so a pause/blur freezes it and resume continues from
+  // the same point instead of restarting the 2s count or jumping straight to the life loss.
   if (G.state === 'dead') {
-    S.deadT += rdt;
+    S.deadT += dt;
     if (S.deadT > 2.0 && !S.deadHandled) {
       S.deadHandled = true;
       run.deaths++;

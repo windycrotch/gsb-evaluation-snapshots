@@ -77,8 +77,12 @@ export function initInput(canvasEl) {
     held.delete(e.code);
   });
   window.addEventListener('blur', () => {
+    // Drop every trace of physical input: held keys and the unprocessed down/up edges, so a key
+    // pressed the instant the window lost focus can't trigger a menu action or movement on return.
     for (const c of held) justUp.add(c);
     held.clear();
+    justDown.clear();
+    anyPress = false;
   });
   const target = canvasEl || window;
   target.addEventListener('mousedown', e => {
