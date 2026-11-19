@@ -6,7 +6,7 @@ import { TProgram, buildProgram } from "./program";
 import { checkPorts, programSignals } from "./ports";
 import { compileBlock, paramDefaults, templates } from "$library/blockCompiler";
 import { computed, effect, untracked } from "@preact/signals-react";
-import { Routing, bridgePairs } from "./routing";
+import { Routing, TPair, bridgePairs } from "./routing";
 import { connect } from "@vicimpa/react-decorators";
 import { group, icon } from "../_groups";
 import { prop, reactive } from "@vicimpa/decorators";
@@ -288,6 +288,34 @@ export default class Group extends BaseNode implements IBlock {
     if (current && current.key === key && current.signals.every((signal, i) => signal === signals[i])) {
       this.compileError = '';
       return;
+    }
+
+    // Горячая замена внутри того же AudioWorkletNode: топология не поменялась,
+    // процессор сам проверит новую фабрику и перенесёт состояние (Memory, фазы LFO, Counter).
+    // При отказе текущая программа продолжает звучать, причина показывается на лице блока.
+    if (current?.swap) {
+      const swapResult = await current.swap(result);
+
+      if (version !== this.#compileVersion || !this.compiled || !this.mounted)
+        return;
+
+      if (swapResult.ok) {
+        current.key = key;
+        current.signals = signals;
+        current.passthrough = result.passthrough.map(([a, b]): TPair<AudioNode> => [this.outerGain(a), this.outerGain(b)]);
+        this.program = current;
+        this.compileError = '';
+        return;
+      }
+
+      if (swapResult.error !== 'Block topology changed') {
+        // Фабрика не прошла проверку в процессоре: он продолжает играть старую версию,
+        // мы её не трогаем и только делаем отказ видимым — без тихого обрыва звука.
+        this.compileError = swapResult.error ?? 'Compiled block rejected the new version';
+        return;
+      }
+
+      // Иначе разошлась топология — ниже строим новый AudioWorkletNode.
     }
 
     try {

@@ -254,9 +254,13 @@ describe('generated code', () => {
 });
 
 describe('expression processor', () => {
+  type Reply = { ok: boolean; id?: number; error?: string; stopped?: boolean; };
   type Processor = {
     port: { onmessage: ((event: { data: unknown; }) => void) | null; postMessage(data: unknown): void; };
     process(inputs: unknown[], outputs: Float32Array[][], parameters: Record<string, Float32Array>): boolean;
+    kernel: unknown;
+    y1: number;
+    running: boolean;
   };
 
   const load = (src: string, currentFrame = 0, sampleRate = 48000) => {
@@ -264,9 +268,10 @@ describe('expression processor', () => {
     if (!result.ok) throw result.error;
 
     const registered: Record<string, new (options?: unknown) => Processor> = {};
+    const replies: Reply[] = [];
 
     class AudioWorkletProcessor {
-      port = { onmessage: null, postMessage: () => { } };
+      port = { onmessage: null, postMessage(data: unknown) { replies.push(data as Reply); } };
     }
 
     run(
@@ -278,16 +283,20 @@ describe('expression processor', () => {
 
     expect(Object.keys(registered)).toEqual(['ExpressionTest']);
     const processor = new registered.ExpressionTest();
+    replies.length = 0;
     processor.port.onmessage!({ data: { kernel: result.kernel } });
-    return processor;
+    return { processor, replies };
   };
 
   const params = (values: Partial<Record<typeof PROCESSOR_INPUTS[number], Float32Array>> = {}) => (
     Object.fromEntries(PROCESSOR_INPUTS.map(key => [key, values[key] ?? new Float32Array([0])]))
   );
 
+  // Ядро из текста формулы, чтобы слать его сообщением, как делает нода Expression
+  const kernelMsg = (src: string, id?: number) => ({ kernel: (compile(src) as { kernel: string; }).kernel, id });
+
   it('feeds back the previous sample through y1 across blocks', () => {
-    const processor = load('y1 + 1');
+    const { processor } = load('y1 + 1');
     const out = [new Float32Array(4), new Float32Array(4)];
 
     expect(processor.process([], [out], params())).toBe(true);
@@ -299,7 +308,7 @@ describe('expression processor', () => {
   });
 
   it('reads a-rate and k-rate params and the clock', () => {
-    const processor = load('a + b * 1000 + t * sr', 100, 1000);
+    const { processor } = load('a + b * 1000 + t * sr', 100, 1000);
     const out = [new Float32Array(3)];
 
     processor.process([], [out], params({ a: new Float32Array([1, 2, 3]), b: new Float32Array([5]) }));
@@ -307,28 +316,141 @@ describe('expression processor', () => {
   });
 
   it('replaces NaN and Infinity with 0', () => {
-    const processor = load('a / 0 + sqrt(-1)');
+    const { processor } = load('a / 0 + sqrt(-1)');
     const out = [new Float32Array(2)];
 
     processor.process([], [out], params());
     expect([...out[0]]).toEqual([0, 0]);
   });
 
-  it('stops on the stop message', () => {
-    const processor = load('1');
+  it('stops on the stop message, frees state and returns false', () => {
+    const { processor, replies } = load('1');
+
     processor.port.onmessage!({ data: STOP_MESSAGE });
 
+    expect(processor.running).toBe(false);
+    expect(processor.kernel).toBeNull();
+    expect(processor.y1).toBe(0);
+    expect(replies).toContainEqual(expect.objectContaining({ ok: true, stopped: true }));
     expect(processor.process([], [[new Float32Array(2)]], params())).toBe(false);
   });
 
   it('swaps the kernel in place and keeps y1', () => {
-    const processor = load('y1 + 1');
+    const { processor, replies } = load('y1 + 1');
     const out = [new Float32Array(2)];
 
     processor.process([], [out], params());
-    processor.port.onmessage!({ data: { kernel: (compile('y1 * 10') as { kernel: string; }).kernel } });
+    processor.port.onmessage!({ data: kernelMsg('y1 * 10', 1) });
+    expect(replies).toContainEqual({ ok: true, id: 1 });
     processor.process([], [out], params());
     expect([...out[0]]).toEqual([20, 200]);
+  });
+
+  it('keeps the clock continuous across a kernel swap', () => {
+    // Часы процессора — это currentFrame/sampleRate, они живут вне ядра, поэтому
+    // замена ядра не может их сбросить. Проверяем, что новое ядро видит тот же t
+    // и продолжает накопленный y1, а не стартует с нуля.
+    const { processor } = load('y1 + 1', 0, 48000);
+    const out = [new Float32Array(2)];
+
+    // Старое ядро: y[n] = y[n-1] + 1 → 1, 2; y1 после блока = 2
+    processor.process([], [out], params());
+    expect([...out[0]]).toEqual([1, 2]);
+
+    // Новое ядро опирается и на часы (t = currentFrame/sr), и на продолженный y1
+    processor.port.onmessage!({ data: kernelMsg('t + y1') });
+
+    // currentFrame в тесте фиксирован на 0 → t = 0; на входе y1 = 2
+    // (y1 хранит сырое значение до подмены NaN — так устроен процессор)
+    processor.process([], [out], params());
+    expect([...out[0]]).toEqual([2, Math.fround(1 / 48000 + 2)]);
+
+    // Ещё одна замена: t считается из тех же часов, разрыва нет
+    processor.port.onmessage!({ data: kernelMsg('t') });
+    processor.process([], [out], params());
+    expect([...out[0]]).toEqual([0, Math.fround(1 / 48000)]);
+  });
+
+  it('rejects a kernel that fails to build and keeps the old one audible', () => {
+    const { processor, replies } = load('y1 + 1');
+    const out = [new Float32Array(3)];
+
+    processor.process([], [out], params());
+    expect([...out[0]]).toEqual([1, 2, 3]);
+
+    // Синтаксически битое ядро: new Function бросит при сборке
+    processor.port.onmessage!({ data: { kernel: 'function (', id: 7 } });
+
+    const reply = replies.find(r => r.id === 7);
+    expect(reply).toMatchObject({ ok: false, id: 7 });
+    expect(reply?.error).toEqual(expect.any(String));
+
+    // Старое ядро на месте и продолжает считать с того же y1
+    processor.process([], [out], params());
+    expect([...out[0]]).toEqual([4, 5, 6]);
+  });
+
+  it('rejects a kernel that throws on the smoke probe without going silent', () => {
+    const { processor, replies } = load('y1 + 1');
+    const out = [new Float32Array(2)];
+
+    processor.process([], [out], params());
+
+    // Собирается, но бросает при вызове (обращение к запрещённому идентификатору невозможно
+    // из codegen, поэтому имитируем рантайм-сбой ядром, которое всегда кидает)
+    const throwingKernel = '(function () { return function () { throw new Error("boom"); }; })()';
+    processor.port.onmessage!({ data: { kernel: throwingKernel, id: 9 } });
+
+    expect(replies.find(r => r.id === 9)).toMatchObject({ ok: false, id: 9 });
+    processor.process([], [out], params());
+    expect([...out[0]]).toEqual([3, 4]);
+  });
+
+  it('rejects a kernel that returns a non-number without replacing the old one', () => {
+    const { processor, replies } = load('1');
+    const out = [new Float32Array(1)];
+
+    processor.process([], [out], params());
+
+    const nonNumeric = '(function () { return function () { return "x"; }; })()';
+    processor.port.onmessage!({ data: { kernel: nonNumeric, id: 3 } });
+
+    expect(replies.find(r => r.id === 3)).toMatchObject({ ok: false, id: 3 });
+    processor.process([], [out], params());
+    expect([...out[0]]).toEqual([1]);
+  });
+
+  it('takes the last kernel of a rapid sequence and reports each result', () => {
+    const { processor, replies } = load('1');
+    const out = [new Float32Array(1)];
+    replies.length = 0;
+
+    processor.port.onmessage!({ data: kernelMsg('2', 1) });
+    processor.port.onmessage!({ data: { kernel: 'function (', id: 2 } });
+    processor.port.onmessage!({ data: kernelMsg('a + 5', 3) });
+
+    expect(replies.map(r => r.id)).toEqual([1, 2, 3]);
+    expect(replies.map(r => r.ok)).toEqual([true, false, true]);
+
+    // a = 0 по умолчанию → играет последнее принятое ядро 0 + 5
+    processor.process([], [out], params({ a: new Float32Array([0]) }));
+    expect([...out[0]]).toEqual([5]);
+
+    processor.process([], [out], params({ a: new Float32Array([3]) }));
+    expect([...out[0]]).toEqual([8]);
+  });
+
+  it('refuses every swap after stop and reports the refusal', () => {
+    const { processor, replies } = load('1');
+
+    processor.port.onmessage!({ data: STOP_MESSAGE });
+    replies.length = 0;
+
+    processor.port.onmessage!({ data: kernelMsg('2', 11) });
+
+    expect(processor.kernel).toBeNull();
+    expect(replies).toContainEqual(expect.objectContaining({ ok: false, id: 11, stopped: true }));
+    expect(processor.process([], [[new Float32Array(1)]], params())).toBe(false);
   });
 
   it('rejects unsafe processor names', () => {

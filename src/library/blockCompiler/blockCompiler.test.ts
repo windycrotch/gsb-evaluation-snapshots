@@ -1,4 +1,4 @@
-import { TCompiled, TGraph, TLink, blockProcessorSource, compileBlock, paramDefaults, templates } from ".";
+import { TCompiled, TGraph, TLink, blockProcessorSource, compileBlock, paramDefaults, paramName, templates } from ".";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAdsrState, modulation } from "$library/modulation";
 
@@ -454,24 +454,53 @@ describe('block compiler: templates', () => {
 });
 
 describe('block processor', () => {
+  type Reply = {
+    ok: boolean;
+    id?: number;
+    error?: string;
+    stopped?: boolean;
+    state?: 'reset' | 'continued';
+    kept?: string;
+    phase?: string;
+  };
+
   type Processor = {
-    port: { onmessage: ((event: { data: unknown; }) => void) | null; };
+    port: { onmessage: ((event: { data: unknown; }) => void) | null; postMessage(data: unknown): void; };
     process(inputs: Float32Array[][], outputs: Float32Array[][], parameters: Record<string, Float32Array>): boolean;
+    run: unknown;
+    state: Record<string, number> | null;
+    running: boolean;
   };
 
   const load = (result: TCompiled) => {
     const registered: Record<string, { new(): Processor; parameterDescriptors: { name: string; }[]; }> = {};
+    const replies: Reply[] = [];
 
-    new Function(...hidden, 'registerProcessor', 'AudioWorkletProcessor', 'sampleRate', 'currentFrame', blockProcessorSource('BlockTest', result))(
+    new Function(...hidden, 'registerProcessor', 'AudioWorkletProcessor', 'sampleRate', 'currentFrame', 'Function', blockProcessorSource('BlockTest', result))(
       ...hidden.map(() => undefined),
       (name: string, ctor: never) => registered[name] = ctor,
-      class { port = { onmessage: null }; },
+      class { port = { onmessage: null, postMessage(data: unknown) { replies.push(data as Reply); } }; },
       SR,
-      0
+      0,
+      Function
     );
 
-    return registered.BlockTest;
+    const processor = new registered.BlockTest();
+    replies.length = 0;
+    return { Processor: registered.BlockTest, processor, replies };
   };
+
+  const sourceOf = (g: TGraph) => compiled(g).source;
+
+  // Полный набор параметров процессора: сгенерированный цикл читает длину каждого ps[k],
+  // поэтому даже неиспользуемые в проверке параметры должны существовать.
+  // Значения по умолчанию берём из конфигов, как это делает buildProgram в реальном приложении.
+  const paramsFor = (g: TGraph, result: TCompiled, n = 1, values: Record<number, number> = {}) => (
+    Object.fromEntries(result.params.map((_, k) => {
+      const defaults = paramDefaults(g, result.params);
+      return [paramName(k), new Float32Array(n).fill(k in values ? values[k] : defaults[k])];
+    }))
+  );
 
   it('maps slots to inputs and outputs and params to k0…', () => {
     const result = compiled(graph(
@@ -482,11 +511,10 @@ describe('block processor', () => {
         [[3, 2], [4, 0]],
       ]
     ));
-    const Processor = load(result);
+    const { processor } = load(result);
 
-    expect(Processor.parameterDescriptors.map(p => p.name)).toEqual(['k0', 'k1', 'k2']);
+    expect((processor.constructor as unknown as { parameterDescriptors: { name: string; }[]; }).parameterDescriptors.map(p => p.name)).toEqual(['k0', 'k1', 'k2']);
 
-    const processor = new Processor();
     const y = [new Float32Array(3), new Float32Array(3)];
     const z = [new Float32Array(3)];
 
@@ -502,18 +530,206 @@ describe('block processor', () => {
   });
 
   it('reads silence from an unconnected input', () => {
-    const Processor = load(compiled(graph([IN(), MATH('plus', { _b: 1 }), OUT()], [[[0, 0], [1, 0]], [[1, 2], [2, 0]]])));
+    const { processor } = load(compiled(graph([IN(), MATH('plus', { _b: 1 }), OUT()], [[[0, 0], [1, 0]], [[1, 2], [2, 0]]])));
     const out = [new Float32Array(2)];
 
-    new Processor().process([[]], [out], { k0: new Float32Array([1]) });
+    processor.process([[]], [out], { k0: new Float32Array([1]) });
     expect([...out[0]]).toEqual([1, 1]);
   });
 
-  it('stops on the stop message', () => {
-    const processor = new (load(compiled(graph([OUT()], []))))();
+  it('stops on the stop message, frees state and returns false', () => {
+    const g = graph([MATH('plus', { _a: 1, _b: 2 }), OUT()], [[[0, 2], [1, 0]]]);
+    const result = compiled(g);
+    const { processor, replies } = load(result);
+
+    expect(processor.state).not.toBeNull();
 
     processor.port.onmessage!({ data: STOP_MESSAGE });
-    expect(processor.process([], [[new Float32Array(1)]], {})).toBe(false);
+
+    expect(processor.running).toBe(false);
+    expect(processor.run).toBeNull();
+    expect(processor.state).toBeNull();
+    expect(replies).toContainEqual(expect.objectContaining({ ok: true, stopped: true }));
+    expect(processor.process([], [[new Float32Array(1)]], paramsFor(g, result))).toBe(false);
+  });
+
+  it('refuses every version swap after stop', () => {
+    const { processor, replies } = load(compiled(graph([OUT()], [])));
+
+    processor.port.onmessage!({ data: STOP_MESSAGE });
+    replies.length = 0;
+
+    const good = sourceOf(graph([MATH('plus', { _a: 1 }), OUT()], [[[0, 2], [1, 0]]]));
+    processor.port.onmessage!({ data: { source: good, id: 4 } });
+
+    expect(processor.run).toBeNull();
+    expect(replies).toContainEqual(expect.objectContaining({ ok: false, id: 4, stopped: true }));
+  });
+
+  it('swaps to a validated version and keeps producing audio across the swap', () => {
+    const g1 = graph([MATH('plus', { _a: 1, _b: 2 }), OUT()], [[[0, 2], [1, 0]]]);
+    const v1 = compiled(g1);
+    const { processor, replies } = load(v1);
+    const out = [new Float32Array(2)];
+
+    processor.process([], [out], paramsFor(g1, v1, 2));
+    expect([...out[0]]).toEqual([3, 3]);
+
+    // Новая версия: plus(a, b) с живыми параметрами a=4, b=5 → 9
+    const g2 = graph([MATH('plus', { _a: 4, _b: 5 }), OUT()], [[[0, 2], [1, 0]]]);
+    const v2 = compiled(g2);
+    processor.port.onmessage!({ data: { source: v2.source, id: 1 } });
+
+    expect(replies).toContainEqual(expect.objectContaining({ ok: true, id: 1 }));
+
+    processor.process([], [out], paramsFor(g2, v2, 2, { 0: 4, 1: 5 }));
+    expect([...out[0]]).toEqual([9, 9]);
+  });
+
+  it('keeps the previous version running when the new source fails to build', () => {
+    const g1 = graph([MATH('plus', { _a: 1, _b: 2 }), OUT()], [[[0, 2], [1, 0]]]);
+    const v1 = compiled(g1);
+    const { processor, replies } = load(v1);
+    const out = [new Float32Array(2)];
+
+    processor.process([], [out], paramsFor(g1, v1, 2));
+
+    processor.port.onmessage!({ data: { source: 'function (', id: 2 } });
+
+    const reply = replies.find(r => r.id === 2);
+    expect(reply).toMatchObject({ ok: false, id: 2, kept: 'previous' });
+    expect(reply?.error).toEqual(expect.any(String));
+
+    // Старая версия всё ещё играет 3
+    processor.process([], [out], paramsFor(g1, v1, 2));
+    expect([...out[0]]).toEqual([3, 3]);
+  });
+
+  it('keeps the previous version when a candidate throws while building', () => {
+    const g1 = graph([MATH('plus', { _a: 7 }), OUT()], [[[0, 2], [1, 0]]]);
+    const v1 = compiled(g1);
+    const { processor, replies } = load(v1);
+    const out = [new Float32Array(1)];
+
+    // Исходник собирается, но фабрика бросает при вызове
+    const throwing = '(function () { return function () { throw new Error("factory boom"); }; })()';
+    processor.port.onmessage!({ data: { source: throwing, id: 5 } });
+
+    expect(replies.find(r => r.id === 5)).toMatchObject({ ok: false, id: 5, kept: 'previous' });
+    processor.process([], [out], paramsFor(g1, v1, 1, { 0: 7, 1: 0 }));
+    expect([...out[0]]).toEqual([7]);
+  });
+
+  it('takes the last valid version of a rapid sequence and answers every request', () => {
+    const g1 = graph([MATH('plus', { _a: 1 }), OUT()], [[[0, 2], [1, 0]]]);
+    const v1 = compiled(g1);
+    const { processor, replies } = load(v1);
+    const out = [new Float32Array(1)];
+
+    const goodA = sourceOf(graph([MATH('plus', { _a: 2 }), OUT()], [[[0, 2], [1, 0]]]));
+    const gB = graph([MATH('times', { _a: 3, _b: 4 }), OUT()], [[[0, 2], [1, 0]]]);
+    const goodB = compiled(gB);
+
+    processor.port.onmessage!({ data: { source: goodA, id: 1 } });
+    processor.port.onmessage!({ data: { source: 'function (', id: 2 } });
+    processor.port.onmessage!({ data: { source: goodB.source, id: 3 } });
+
+    expect(replies.map(r => r.id)).toEqual([1, 2, 3]);
+    expect(replies.map(r => r.ok)).toEqual([true, false, true]);
+
+    // Последняя принятая версия: times(3, 4) = 12
+    processor.process([], [out], paramsFor(gB, goodB, 1, { 0: 3, 1: 4 }));
+    expect([...out[0]]).toEqual([12]);
+  });
+
+  it('continues Memory state across a version swap', () => {
+    // Memory(value ← plus(memory, 1), write=1) — счётчик сэмплов, состояние в s.d<node>
+    const counterGraph = (): TGraph => graph(
+      [['Memory', { _value: 0, _write: 1 }], MATH('plus', { _b: 1 }), OUT()],
+      [
+        [[0, 2], [1, 0]],
+        [[1, mathOut('plus')], [0, 0]],
+        [[0, 2], [2, 0]],
+      ]
+    );
+
+    const g = counterGraph();
+    const v1 = compiled(g);
+    const { processor, replies } = load(v1);
+    const out = [new Float32Array(4)];
+
+    processor.process([], [out], paramsFor(g, v1, 4));
+    expect([...out[0]]).toEqual([1, 2, 3, 4]);
+
+    // Новая версия той же структуры (перекомпиляция): счёт должен продолжиться с 4
+    const v2 = compiled(counterGraph());
+    expect(v2.source).toBe(v1.source);
+
+    processor.port.onmessage!({ data: { source: v2.source, id: 1 } });
+    expect(replies.find(r => r.id === 1)).toMatchObject({ ok: true, state: 'continued' });
+
+    processor.process([], [out], paramsFor(g, v2, 4));
+    expect([...out[0]]).toEqual([5, 6, 7, 8]);
+  });
+
+  it('resets state explicitly when asked', () => {
+    const g = graph(
+      [['Memory', { _value: 0, _write: 1 }], MATH('plus', { _b: 1 }), OUT()],
+      [
+        [[0, 2], [1, 0]],
+        [[1, mathOut('plus')], [0, 0]],
+        [[0, 2], [2, 0]],
+      ]
+    );
+
+    const v1 = compiled(g);
+    const { processor, replies } = load(v1);
+    const out = [new Float32Array(4)];
+
+    processor.process([], [out], paramsFor(g, v1, 4));
+    expect([...out[0]]).toEqual([1, 2, 3, 4]);
+
+    processor.port.onmessage!({ data: { source: compiled(g).source, id: 1, reset: true } });
+    expect(replies.find(r => r.id === 1)).toMatchObject({ ok: true, state: 'reset' });
+
+    processor.process([], [out], paramsFor(g, v1, 4));
+    expect([...out[0]]).toEqual([1, 2, 3, 4]);
+  });
+
+  it('carries LFO phase across a block boundary and a version swap', () => {
+    const g = graph(
+      [['LFO', { _shape: 'triangle', _rate: 1000, _depth: 0.5, _offset: 0.25, _phase: 0.1, _sync: 0 }], OUT()],
+      [[[0, 5], [1, 0]]]
+    );
+
+    const v1 = compiled(g);
+    const { processor, replies } = load(v1);
+    const out = [new Float32Array(64)];
+
+    processor.process([], [out], paramsFor(g, v1, 64, { 0: 1000 }));
+    const first = [...out[0]];
+
+    // Эталон фазы после 64 сэмплов
+    var phase = 0;
+    for (let i = 0; i < 64; i++)
+      phase = modulation.wrap(phase + 1000 / SR);
+
+    // Перекомпиляция с продолжением состояния
+    processor.port.onmessage!({ data: { source: compiled(g).source, id: 1 } });
+    expect(replies.find(r => r.id === 1)?.state).toBe('continued');
+
+    processor.process([], [out], paramsFor(g, v1, 64, { 0: 1000 }));
+
+    // Следующие 64 сэмпла должны совпасть с эталоном, продолжающим фазу, а не с нуля
+    var expectedPhase = phase;
+    const expected = Array.from({ length: 64 }, () => {
+      const y = F(F(0.25) + F(0.5) * modulation.lfoShape('triangle', expectedPhase + F(0.1), 0));
+      expectedPhase = modulation.wrap(expectedPhase + 1000 / SR);
+      return y;
+    });
+
+    expect([...out[0]]).toEqual(expected);
+    expect([...out[0]]).not.toEqual(first);
   });
 
   it('rejects unsafe processor names', () => {

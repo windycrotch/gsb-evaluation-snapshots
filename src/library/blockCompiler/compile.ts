@@ -271,10 +271,13 @@ export const compileBlock = (graph: TGraph): TCompileResult => {
     '(function () {',
     '"use strict";',
     ...prelude,
-    'return function (sr) {',
+    // Второй аргумент — состояние прежней версии (Memory, фазы LFO, Counter, y1).
+    // Передали объект — берём его ключи, продолжая работу; не передали — стартуем с исходного.
+    'return function (sr, carried) {',
     `const s = { ${state.join(', ')} };`,
+    'if (carried && typeof carried === "object") for (const key in s) if (key in carried) s[key] = carried[key];',
     'let Z = new Float32Array(128);',
-    'return function (ins, outs, ps, n, frame) {',
+    'function run(ins, outs, ps, n, frame) {',
     'if (Z.length < n) Z = new Float32Array(n);',
     ...inputs.map((_, k) => `const x${k} = ins[${k}] || Z;`),
     ...outputs.map((_, k) => `const o${k} = outs[${k}];`),
@@ -283,7 +286,10 @@ export const compileBlock = (graph: TGraph): TCompileResult => {
     ...(features.has('time') ? ['const t = (frame + i) / sr;'] : []),
     ...body,
     '}',
-    '};',
+    '}',
+    // Состояние версии открыто процессору: run.state — тот самый объект, что видит цикл.
+    'run.state = s;',
+    'return run;',
     '};',
     '})()',
   ].join('\n');
