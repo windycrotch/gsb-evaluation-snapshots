@@ -270,3 +270,195 @@ test('a page cannot ask the server to give up its port', async (t) => {
     await new Promise(r => setTimeout(r, 200));
     assert.equal(envelope(await wss.call('ping')).data, 'editor', 'yield from a page with an Origin is ignored');
 });
+
+const PORT5 = 52996;
+
+// an editor that registers but never answers any request
+const silentEditor = (port: number, methods: string[] = ['ping'], received?: { id: number; name: string }[]) => new Promise<WebSocket>((resolve) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}`);
+    ws.on('open', () => {
+        ws.send(JSON.stringify({ register: 'editor', protocolVersion: 1, methods }));
+        resolve(ws);
+    });
+    ws.on('message', (raw) => {
+        const msg = JSON.parse(raw.toString());
+        if (msg.name && received) {
+            received.push({ id: msg.id, name: msg.name });
+        }
+    });
+});
+
+test('pending requests fail fast when the editor connection is replaced', async (t) => {
+    const wss = new WSS(PORT5);
+    await listening(PORT5);
+    t.after(() => wss.close());
+
+    const silent = await silentEditor(PORT5);
+    await wss.waitForEditor(0, 2000);
+    t.after(() => silent.close());
+
+    // several concurrent requests pile up on the old connection
+    const started = Date.now();
+    const pending = [wss.call('ping'), wss.call('ping'), wss.call('ping')];
+
+    // a reloaded editor page connects and registers, taking the slot
+    const gen = wss.editorGeneration;
+    const reloaded = await peer(PORT5, 'reloaded');
+    await wss.waitForEditor(gen, 2000);
+    t.after(() => reloaded.close());
+
+    for (const p of pending) {
+        const res = envelope(await p);
+        assert.equal(res.meta.status, 'error');
+        assert.match(res.meta.message, /connection was replaced/);
+    }
+    assert.ok(Date.now() - started < 5000, 'replaced requests must not run into the 60s default timeout');
+
+    // the new connection serves requests normally
+    assert.equal(envelope(await wss.call('ping')).data, 'reloaded');
+});
+
+test('a closed editor socket fails its pending requests immediately', async (t) => {
+    const wss = new WSS(PORT5 - 1);
+    await listening(PORT5 - 1);
+    t.after(() => wss.close());
+
+    const silent = await silentEditor(PORT5 - 1);
+    await wss.waitForEditor(0, 2000);
+
+    const started = Date.now();
+    const pending = wss.call('ping');
+    silent.close();
+    const res = envelope(await pending);
+    assert.equal(res.meta.status, 'error');
+    assert.match(res.meta.message, /connection was replaced/);
+    assert.ok(Date.now() - started < 5000, 'a closed socket must fail its requests now, not at the 60s timeout');
+
+    // and the next call reports the missing editor instead of hanging
+    const res2 = envelope(await wss.call('ping'));
+    assert.match(res2.meta.message, /Editor not connected/);
+});
+
+test('answers on a new connection never claim requests from the old one', async (t) => {
+    const wss = new WSS(PORT5 - 2);
+    await listening(PORT5 - 2);
+    t.after(() => wss.close());
+
+    const received: { id: number; name: string }[] = [];
+    const silent = await silentEditor(PORT5 - 2, ['ping', 'scene:load'], received);
+    await wss.waitForEditor(0, 2000);
+    t.after(() => silent.close());
+
+    const pending = wss.call('scene:load', 7);
+    for (let i = 0; i < 40 && !received.some(m => m.name === 'scene:load'); i++) {
+        await new Promise(r => setTimeout(r, 25));
+    }
+    const oldId = received.find(m => m.name === 'scene:load')!.id;
+
+    // the editor reloads: a new connection takes the slot and the old request fails
+    const gen = wss.editorGeneration;
+    const reloaded = await peer(PORT5 - 2, 'new');
+    await wss.waitForEditor(gen, 2000);
+    t.after(() => reloaded.close());
+
+    // the new connection forges an answer carrying the OLD request id
+    reloaded.send(JSON.stringify({ id: oldId, res: { data: 'forged' } }));
+
+    const res = envelope(await pending);
+    assert.equal(res.meta.status, 'error');
+    assert.match(res.meta.message, /connection was replaced/);
+    assert.notEqual(res.data, 'forged', 'a same-id answer on the new connection must not claim the old request');
+
+    // fresh requests on the new connection are unaffected
+    assert.equal(envelope(await wss.call('ping')).data, 'new');
+});
+
+test('detaching the runtime fails in-flight runtime calls immediately', async (t) => {
+    const wss = new WSS(PORT5 - 3);
+    await listening(PORT5 - 3);
+    t.after(() => wss.close());
+
+    // an editor that relays for a launch page; answers edit-time pings, never runtime frames
+    const editor = await new Promise<WebSocket>((resolve) => {
+        const ws = new WebSocket(`ws://127.0.0.1:${PORT5 - 3}`);
+        ws.on('open', () => {
+            ws.send(JSON.stringify({ register: 'editor', protocolVersion: 1, methods: ['ping'] }));
+            ws.send(JSON.stringify({ runtime: { protocolVersion: 1, methods: ['runtime:capture'] } }));
+            resolve(ws);
+        });
+        ws.on('message', (raw) => {
+            const msg = JSON.parse(raw.toString());
+            if (msg.name === 'ping') {
+                ws.send(JSON.stringify({ id: msg.id, res: { data: 'pong' } }));
+            }
+        });
+    });
+    t.after(() => editor.close());
+    assert.equal(await wss.waitForRuntime(2000), true);
+
+    const started = Date.now();
+    const pending = wss.call('runtime:capture');
+
+    // the launch window closes: the relay is withdrawn mid-flight
+    editor.send(JSON.stringify({ runtime: null }));
+    const res = envelope(await pending);
+    assert.equal(res.meta.status, 'error');
+    assert.match(res.meta.message, /Call launch_start first/);
+    assert.doesNotMatch(res.meta.message, /Apps on device/, 'a detached runtime must not blame browser permissions');
+    assert.ok(Date.now() - started < 5000, 'an in-flight runtime call must fail at detach, not at the 60s timeout');
+
+    // later runtime calls say the same, and edit-time calls still work
+    assert.match(envelope(await wss.call('runtime:capture')).meta.message, /Call launch_start first/);
+    assert.equal(envelope(await wss.call('ping')).data, 'pong');
+});
+
+test('editor disconnect clears the runtime and editor capabilities', async (t) => {
+    const wss = new WSS(PORT5 - 6);
+    await listening(PORT5 - 6);
+    t.after(() => wss.close());
+
+    const editor = await new Promise<WebSocket>((resolve) => {
+        const ws = new WebSocket(`ws://127.0.0.1:${PORT5 - 6}`);
+        ws.on('open', () => {
+            ws.send(JSON.stringify({ register: 'editor', protocolVersion: 1, methods: ['ping'] }));
+            ws.send(JSON.stringify({ runtime: { protocolVersion: 1, methods: ['runtime:capture'] } }));
+            resolve(ws);
+        });
+    });
+    assert.equal(await wss.waitForRuntime(2000), true);
+
+    editor.close();
+    for (let i = 0; i < 40 && wss.hasRuntime(); i++) {
+        await new Promise(r => setTimeout(r, 25));
+    }
+    assert.equal(wss.hasRuntime(), false, 'editor disconnect must clear the relayed runtime');
+
+    const runtime = envelope(await wss.call('runtime:capture'));
+    assert.match(runtime.meta.message, /Call launch_start first/);
+    assert.doesNotMatch(runtime.meta.message, /Apps on device/);
+
+    const ping = envelope(await wss.call('ping'));
+    assert.match(ping.meta.message, /Editor not connected/);
+});
+
+test('a local process without an Origin can claim the port', async (t) => {
+    const wss = new WSS(PORT5 - 7);
+    await listening(PORT5 - 7);
+    const editor = await peer(PORT5 - 7, 'editor', 'https://playcanvas.com');
+    await wss.waitForEditor(0, 2000);
+    t.after(() => {
+        editor.close();
+        wss.close();
+    });
+
+    const dropped = new Promise<void>((resolve) => editor.on('close', () => resolve()));
+
+    // the takeover handshake: a no-Origin local process asks us to yield
+    const handshake = new WebSocket(`ws://127.0.0.1:${PORT5 - 7}`);
+    handshake.on('open', () => handshake.send(JSON.stringify({ yield: true })));
+    await dropped;
+
+    const res = envelope(await wss.call('ping'));
+    assert.equal(res.meta.status, 'error');
+    assert.match(res.meta.message, /standby/, 'after yielding, the instance stands by instead of serving calls');
+});

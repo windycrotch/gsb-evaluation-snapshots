@@ -35,6 +35,10 @@ const LAUNCH_HINT = 'If it never connects, allow popups for the editor origin so
 // the blank /editor page only handles project tools
 const NO_PROJECT_HINT = 'No project is open in the Editor. Call list_projects or create_project, then open_project, and retry.';
 
+// runtime tools need the relayed launch page; without one the fix is to launch
+// it, never a browser permission — the editor relays, so no LNA hint here
+const noRuntimeError = () => new Error(`No running instance connected. Call launch_start first; the editor relays to the launched page automatically. ${LAUNCH_HINT}`);
+
 /**
  * Metadata attached to every tool response. `status`/`message` describe the
  * outcome; the pagination fields describe a list slice. Everything lives under
@@ -73,6 +77,17 @@ type RawResult = {
     meta?: Record<string, unknown>;
 };
 
+/**
+ * Rejection for requests cancelled because their editor connection went away
+ * before answering (page reload, a newer connection registering, port handoff
+ * or shutdown). Tools that trigger a reload on purpose use this to tell "the
+ * reload started" apart from a real failure.
+ */
+class ConnectionReplacedError extends Error {
+}
+
+const isConnectionReplaced = (err: unknown): err is ConnectionReplacedError => err instanceof ConnectionReplacedError;
+
 // project is null when the editor is on the blank /editor page (no project open)
 type Capabilities = { protocolVersion?: number; methods?: Set<string>; project?: number | null };
 
@@ -87,8 +102,16 @@ class WSS {
     // the launch page the editor relays for; set by its announce frame, null when it detaches
     private _runtime: Capabilities | undefined;
 
-    // keyed by request id; only the socket the request went to may answer it
-    private _callbacks = new Map<number, { socket: WebSocket; cb: (res: RawResult) => void }>();
+    // keyed by request id; only the socket the request went to may answer it.
+    // `fail` rejects the request and clears its timeout, so a gone connection
+    // fails its callers fast instead of letting them hit the default timeout.
+    private _callbacks = new Map<number, {
+        socket: WebSocket;
+        name: string;
+        timer: ReturnType<typeof setTimeout>;
+        cb: (res: RawResult) => void;
+        fail: (err: Error) => void;
+    }>();
 
     private _id = 0;
 
@@ -185,6 +208,12 @@ class WSS {
                         return;
                     }
                     if (msg.register === 'editor') {
+                        if (this._editor && this._editor !== ws) {
+                            // a reloaded/reconnected editor page took the slot:
+                            // anything still outstanding on the old connection
+                            // can never be answered now
+                            this._failPendingFor(this._editor, 'a new editor connection registered');
+                        }
                         this._editor = ws;
                         this._editorCaps = {
                             protocolVersion: Number.isInteger(msg.protocolVersion) ? msg.protocolVersion : undefined,
@@ -203,6 +232,11 @@ class WSS {
                             protocolVersion: Number.isInteger(msg.runtime.protocolVersion) ? msg.runtime.protocolVersion : undefined,
                             methods: Array.isArray(msg.runtime.methods) ? new Set(msg.runtime.methods.filter((name: unknown) => typeof name === 'string')) : undefined
                         } : undefined;
+                        if (!msg.runtime) {
+                            // the relay is gone, so in-flight runtime calls can
+                            // never be answered — fail them now
+                            this._failPendingRuntime();
+                        }
                         console.error(`[WSS] Runtime relay ${msg.runtime ? 'attached' : 'detached'}`);
                         return;
                     }
@@ -217,6 +251,9 @@ class WSS {
                 }
             });
             ws.on('close', () => {
+                // a closed socket can never answer; fail its pending requests
+                // now instead of letting them run into the default timeout
+                this._failPendingFor(ws, 'the socket closed');
                 if (this._editor === ws) {
                     this._editor = undefined;
                     this._editorCaps = undefined;
@@ -240,6 +277,52 @@ class WSS {
                 } catch { /* already closing */ }
             });
         });
+    }
+
+    /**
+     * Fail every request still waiting on `socket`. A replaced or closed
+     * connection can never answer, so its requests must not linger until the
+     * default timeout — and they must be gone before a newer connection could
+     * (wrongly) answer the same request ids.
+     *
+     * @param socket - The connection that went away.
+     * @param reason - Why it went away, for the error message.
+     */
+    private _failPendingFor(socket: WebSocket, reason: string) {
+        for (const [id, pending] of this._callbacks) {
+            if (pending.socket !== socket) {
+                continue;
+            }
+            this._callbacks.delete(id);
+            pending.fail(new ConnectionReplacedError(`The editor connection was replaced before it answered '${pending.name}' (${reason}); the request was cancelled, not completed. Retry it against the new connection.`));
+        }
+    }
+
+    /**
+     * Fail every pending runtime:* request. Once the relayed launch page is
+     * gone those calls can never be answered; the caller should hear "launch
+     * first" immediately, not after the default timeout.
+     */
+    private _failPendingRuntime() {
+        for (const [id, pending] of this._callbacks) {
+            if (!pending.name.startsWith('runtime:')) {
+                continue;
+            }
+            this._callbacks.delete(id);
+            pending.fail(noRuntimeError());
+        }
+    }
+
+    /**
+     * Fail every pending request regardless of socket (handoff or shutdown).
+     *
+     * @param reason - Why all connections are going away, for the error message.
+     */
+    private _failAll(reason: string) {
+        for (const [id, pending] of this._callbacks) {
+            this._callbacks.delete(id);
+            pending.fail(new ConnectionReplacedError(`The editor connection was replaced before it answered '${pending.name}' (${reason}); the request was cancelled, not completed. Retry it against the new connection.`));
+        }
     }
 
     private _startPing() {
@@ -274,6 +357,7 @@ class WSS {
             clearInterval(this._pingInterval);
             this._pingInterval = null;
         }
+        this._failAll('the port was handed off to a newer MCP server instance');
 
         // drop the editor so it reconnects to the new owner
         try {
@@ -368,7 +452,7 @@ class WSS {
         return new Promise<RawResult>((resolve, reject) => {
             const id = this._id++;
             if (isRuntime && !this.hasRuntime()) {
-                reject(new Error(`No running instance connected. Call launch_start first; the editor relays to the launched page automatically. ${LAUNCH_HINT}`));
+                reject(noRuntimeError());
                 return;
             }
             if (!socket) {
@@ -406,9 +490,15 @@ class WSS {
             }, DEFAULT_TIMEOUT);
             this._callbacks.set(id, {
                 socket,
+                name,
+                timer,
                 cb: (res: RawResult) => {
                     clearTimeout(timer);
                     resolve(res);
+                },
+                fail: (err: Error) => {
+                    clearTimeout(timer);
+                    reject(err);
                 }
             });
             try {
@@ -542,6 +632,7 @@ class WSS {
             this._bindTimer = null;
         }
         this._listening = false;
+        this._failAll('the MCP server is shutting down');
         this._editor?.close(1000, 'FORCE');
         this._editor = undefined;
         this._editorCaps = undefined;
@@ -551,4 +642,4 @@ class WSS {
     }
 }
 
-export { WSS, LAUNCH_HINT };
+export { WSS, LAUNCH_HINT, ConnectionReplacedError, isConnectionReplaced };
