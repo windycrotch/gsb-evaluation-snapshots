@@ -37,7 +37,7 @@ from .util import (
 )
 from .widgets import ControlBar, Logo, Osd, SeekBar, SeekBubble, TitleBar, VolumeBar
 
-IPC_NAME = "samovar-lite-%d" % os.getuid()
+IPC_NAME = "samovar-lite-%d" % getattr(os, "getuid", lambda: os.getpid())()
 MOD_MASK = (Qt.ShiftModifier | Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier | Qt.KeypadModifier).value
 KEYPAD = Qt.KeypadModifier.value
 SHIFT = Qt.ShiftModifier.value
@@ -86,6 +86,11 @@ VIDEO_CODECS = {
     "msmpeg4v3": "DIV3",
 }
 AUDIO_CODECS = {"eac3": "E-AC3", "truehd": "TrueHD", "vorbis": "Vorbis", "opus": "Opus"}
+
+# Consecutive files that may fail to open before automatic advancement gives up.
+MAX_LOAD_FAILURES = 3
+# Delay before the automatic jump to the next file after a load failure.
+ERROR_ADVANCE_MS = 1200
 
 
 def canonical_key(event) -> int:
@@ -241,7 +246,7 @@ class VideoArea(QWidget):
 class Player(QWidget):
     screenshotDone = Signal(str, bool, str)
 
-    def __init__(self, settings: Settings, silent: bool = False, verbose: bool = False):
+    def __init__(self, settings: Settings, silent: bool = False, verbose: bool = False, engine_factory=None):
         super().__init__()
         self.settings = settings
         self.setWindowFlags(
@@ -256,6 +261,16 @@ class Player(QWidget):
 
         self.state: dict = {"idle-active": True}
         self.current_path: str | None = None
+        # Identity of the in-flight open: every loadfile gets a new token so stale callbacks from a
+        # previous file can be told apart from the current one.
+        self._load_token = 0
+        # Token of the load whose end-file reply is still expected (None once it has been answered).
+        self._end_token = None
+        self._loading = False
+        # External subtitle files (sub-add) that belong to the currently open file.
+        self._file_subs: list[str] = []
+        # Subtitles selected together with the next open; applied only once that file has loaded.
+        self._pending_subs: list[str] = []
         self.playlist_visible = bool(settings["playlist_visible"])
         self.info_visible = False
         self.aspect_name = "Default"
@@ -266,7 +281,6 @@ class Player(QWidget):
         self._file_ready = False
         self._gl_ready = False
         self._pending_open: list = []
-        self._pending_subs: list[str] = []
         self._autofit_pending = False
         self._resumed_at = None
         self._last_pos = 0.0
@@ -282,10 +296,13 @@ class Player(QWidget):
         self._sub_margin = None
         self._menu = None
         self._panel = None
+        self._error_stopped = False
+        self._settings_written = False
         self._wayland = QGuiApplication.platformName().startswith("wayland")
         self.inhibitor = Inhibitor()
 
-        self.engine = Engine(settings, silent=silent, verbose=verbose, parent=self)
+        factory = engine_factory or (lambda s: Engine(s, silent=silent, verbose=verbose, parent=self))
+        self.engine = factory(settings)
         self.engine.prop.connect(self._on_prop)
         self.engine.event.connect(self._on_event)
 
@@ -609,22 +626,34 @@ class Player(QWidget):
     # mpv property and event handlers
     # ============================================================================================
     def _on_prop(self, name, value):
+        # During shutdown the engine is being torn down; its widgets are gone and must not be touched.
+        if self._closing:
+            return
         self.state[name] = value
         handler = self._prop_handlers.get(name)
         if handler is not None:
             handler(value)
 
     def _on_event(self, name, data):
+        if self._closing:
+            return
         if name == "file-loaded":
+            # A loadfile for another file may already have replaced this one; ignore the stale reply.
+            if not self._loading:
+                return
+            self._loading = False
             self._file_ready = True
             self._fail_count = 0
             self.aspect_name = "Default"
             path = self.current_path
             if path:
                 self.settings.add_recent(path)
-            for sub in self._pending_subs:
+            # Only subtitles that still belong to this load are applied; anything bound to a
+            # previous file was cleared before this load started.
+            subs, self._pending_subs = self._pending_subs, []
+            self._file_subs = list(subs)
+            for sub in subs:
                 self.engine.cmd("sub-add", sub, "select")
-            self._pending_subs = []
             self._update_title()
             self._update_logo()
             if self._resumed_at:
@@ -632,13 +661,51 @@ class Player(QWidget):
             elif path:
                 self.osd(title_of(path))
         elif name == "end-file" and data.get("reason") == "error":
-            self._file_ready = False
-            self._fail_count += 1
-            self.osd("Cannot open: %s" % title_of(self.current_path or ""), 3500, error=True)
-            if self._fail_count < 3 and self.playlist.count() > 1:
-                row = self.playlist.step(1, "off", False)
-                if row >= 0:
-                    QTimer.singleShot(1200, lambda: self.play_row(row))
+            self._on_load_error(data)
+
+    def _on_load_error(self, data):
+        # Match the failure to the open it belongs to: an end-file from an earlier, superseded
+        # loadfile (or a duplicate error reply) must not poison the file currently being opened.
+        token = data.get("samovar_load_token")
+        if token is None or token != self._end_token:
+            return
+        self._end_token = None
+        self._loading = False
+        failed_path = self.current_path
+        self._file_ready = False
+        self._fail_count += 1
+        failed_name = title_of(failed_path or "")
+        # A failed file keeps nothing: its pending subtitles are dropped and no resume position
+        # is recorded, so neither can be carried into the next file.
+        self._pending_subs = []
+        self._file_subs = []
+        self._resumed_at = None
+        self._last_pos = 0.0
+        self.seek.reset()
+        self.ctrl.time.set_times(0, 0)
+        if failed_path:
+            self.settings.set_position(failed_path, None)
+        self.osd("Cannot open: %s" % failed_name, 3500, error=True)
+        if self._fail_count >= MAX_LOAD_FAILURES or self.playlist.count() <= 1:
+            self._error_stopped = True
+            self.osd(
+                "Playback stopped after %d failed file%s" % (self._fail_count, "" if self._fail_count == 1 else "s"),
+                5000,
+                error=True,
+            )
+            self.video_area.osd.set_center("Playback stopped")
+            return
+        advance_token = self._load_token
+        row = self.playlist.step(1, "off", False)
+        if row < 0:
+            return
+        QTimer.singleShot(ERROR_ADVANCE_MS, lambda: self._advance_after_error(row, advance_token))
+
+    def _advance_after_error(self, row: int, token: int):
+        # The failure chain may have been superseded by a manual open or by shutdown.
+        if self._closing or token != self._load_token or row >= self.playlist.count():
+            return
+        self.play_row(row, remember=False, failure=True)
 
     def _p_time(self, value):
         if value is None or not self._file_ready:
@@ -680,7 +747,10 @@ class Player(QWidget):
             self._last_pos = 0.0
             self.seek.reset()
             self.ctrl.time.set_times(0, 0)
-            self.video_area.osd.set_center("")
+            if not self._error_stopped:
+                self.video_area.osd.set_center("")
+        else:
+            self._error_stopped = False
         self._update_logo()
         self._update_badges()
         self._update_title()
@@ -821,7 +891,14 @@ class Player(QWidget):
     def _autosave(self):
         if self.is_playing():
             self._remember_position()
-            self.settings.save()
+            self._save_settings()
+
+    def _save_settings(self):
+        # Repeated closes (Ctrl+Q, window-manager close) write the settings file at most once.
+        if self._settings_written:
+            return
+        self._settings_written = True
+        self.settings.save()
 
     # ============================================================================================
     # opening media
@@ -861,8 +938,7 @@ class Player(QWidget):
         if append:
             first = self.playlist.add(media)
             if not self.has_file():
-                self._pending_subs = subs
-                self.play_row(first)
+                self.play_row(first, subs=subs)
             else:
                 self.osd("Added %d file%s to the playlist" % (len(media), "" if len(media) == 1 else "s"))
             return
@@ -872,43 +948,70 @@ class Player(QWidget):
         else:
             group, row = media, 0
         self.playlist.set_items(group)
-        self._pending_subs = subs
-        self.play_row(row)
+        self.play_row(row, subs=subs)
 
-    def play_row(self, row: int, remember: bool = True):
+    def _clear_file_subs(self):
+        """Detach every subtitle bound to the outgoing file before a new one is loaded."""
+        self._file_subs = []
+        self._pending_subs = []
+        # "all" drops external sub-add tracks; secondary-sid belongs to the outgoing file's
+        # embedded tracks, which disappear with it anyway, but resetting it makes that explicit.
+        self.engine.cmd("sub-remove", "all")
+        self.engine.set("secondary-sid", "no")
+
+    def play_row(self, row: int, remember: bool = True, failure: bool = False, subs: list[str] | None = None):
         path = self.playlist.path(row)
         if not path:
             return
+        # 1) Settle the outgoing file's resume position while its state is still current.
         if remember:
             self._remember_position()
+        # 2) Clear the subtitles that belonged to that file.
+        self._clear_file_subs()
+        # 3) Only now load the new file.
         self.playlist.set_current(row)
         self.current_path = path
+        self._load_token += 1
+        self._end_token = self._load_token
+        self._loading = True
+        self._error_stopped = False
+        if not failure:
+            # Automatic failure advances keep the streak; manual opens start a fresh count.
+            self._fail_count = 0
         self._file_ready = False
         self._last_pos = 0.0
         self._autofit_pending = True
         self.seek.reset()
         self.ctrl.time.set_times(0, 0)
-        start = self.settings.get_position(path) if self.settings["resume"] else None
-        self._resumed_at = start
+        # Subtitles chosen together with this open are applied only after it actually loads.
+        self._pending_subs = list(subs or [])
+        # The resume point is read now but only used once the file confirms it loaded.
+        self._resumed_at = self.settings.get_position(path) if self.settings["resume"] else None
         self.engine.set("pause", False)
-        self.engine.load(path, start)
+        self.engine.load(path, self._resumed_at)
         self._update_title()
 
     def add_subtitles(self, paths: list[str]):
-        if not self.has_file():
+        if not self.has_file() or not self.current_path:
             return
         for path in paths:
             self.engine.cmd("sub-add", path, "select")
+            if path not in self._file_subs:
+                self._file_subs.append(path)
         self.engine.set("sub-visibility", True)
         self.settings["last_sub_dir"] = os.path.dirname(paths[-1])
         self.osd("Subtitle: %s" % title_of(paths[-1]), 2500)
 
     def stop(self, remember: bool = True):
+        if self._closing:
+            return
         if remember:
             self._remember_position()
         self._file_ready = False
+        self._loading = False
+        self._end_token = None
         self.engine.cmd("stop")
-        self.settings.save()
+        self._save_settings()
 
     def prev_file(self):
         self._step_file(-1)
@@ -1761,26 +1864,38 @@ class Player(QWidget):
     # shutdown
     # ============================================================================================
     def closeEvent(self, event):
+        # Duplicate close requests (repeated Ctrl+Q / window-manager close) run cleanup only once.
         if self._closing:
             event.accept()
             return
         self._closing = True
+        # A switch still in flight must not let the new file overwrite the saved position:
+        # settle only the file whose state is still the active one, and mark the load dead so
+        # its late file-loaded/end-file callbacks are ignored.
+        self._loading = False
+        self._end_token = None
         self._remember_position()
         if not (self.isFullScreen() or self.isMaximized()):
             self.settings["window_w"], self.settings["window_h"] = self.width(), self.height()
         self.settings["first_run"] = False
-        self.settings.save()
+        # 1) Stop every timer first, so no timer callback can touch the engine or widgets below.
         for timer in (self._save_timer, self._info_timer, self._cursor_timer):
             timer.stop()
+        self._save_settings()
         self.inhibitor.set(False)
         if self._panel is not None:
             self._panel.close()
         self.playlist.shutdown()
-        # Order matters: no more paints, free mpv's GL objects while the context is alive, then
-        # stop the core. The window is only hidden afterwards.
-        self.engine.prop.disconnect(self._on_prop)
-        self.engine.event.disconnect(self._on_event)
+        # 2) Release mpv's GL objects while the OpenGL context is still alive.
         self.video_area.video.shutdown()
+        # 3) Disconnect engine signals: any property/event arriving after this is dropped by the
+        #    _closing guard as well, so released controls are never touched again.
+        try:
+            self.engine.prop.disconnect(self._on_prop)
+            self.engine.event.disconnect(self._on_event)
+        except (RuntimeError, TypeError):
+            pass
+        # 4) Only then stop the engine core.
         self.engine.shutdown()
         event.accept()
         QTimer.singleShot(0, QApplication.instance().quit)
