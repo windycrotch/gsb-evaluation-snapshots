@@ -347,6 +347,13 @@ export const styles: string = `
     animation: sp-progress-shimmer 1.35s ease-in-out infinite;
   }
 
+  /* A terminal failure keeps the determinate loading surface but stops the
+     "still working" shimmer so it does not imply retries are ongoing. */
+  .sp-player.is-loading.is-load-failed .sp-progress-surface::after {
+    animation: none;
+    opacity: 0.55;
+  }
+
   .sp-player.is-loading.has-loaded-once .sp-progress-surface {
     opacity: 0.48;
   }

@@ -141,6 +141,21 @@ npm run dev
 
 The dev playground lives in `dev/` and imports `src/simple-player.ts` directly. Use it when changing the player itself.
 
+A focused playhead-coherence playground is available at `dev/playhead-demo.html` (serve it with `npm run dev`, then open `/playhead-demo.html`). Its buttons drive source switching, drag-to-seek, pause/resume and a failing source that exhausts the retry budget, while the on-page log shows the rendered time, fill percentage and attempt counter.
+
+### Tests
+
+The browser behavior is covered by Vitest + jsdom (no browser required):
+
+```bash
+npm test          # single run
+npm run test:watch
+npm run typecheck
+```
+
+- `test/player-helpers.test.ts` — unit tests for the `ProgressClock` (anchor/freeze/resume/seek-lock/reload-hold/source-reset) and the `MediaLoadSession` attempt cap and epoch tokens.
+- `test/simple-player.test.ts` — integration tests for the custom element across source switches, scrub commit while buffering, pause/resume without backwards jumps, and capped failure retries.
+
 The hosted demo is separate from the package source. It has its own consumer install in `site/`, then imports the locally built package artifact so deploys always match the current checkout:
 
 ```bash

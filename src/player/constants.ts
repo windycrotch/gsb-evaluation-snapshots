@@ -1,6 +1,9 @@
 export const DEFAULT_ASPECT_RATIO = '16 / 9';
 export const DEFAULT_PRELOAD_MARGIN = '360px 0px';
 
+export const VIDEO_RETRY_DELAY_MS = 2000;
+export const MAX_VIDEO_LOAD_ATTEMPTS = 3;
+
 export const OBSERVED_ATTRIBUTES = [
   'src',
   'aspect-ratio',

@@ -3,6 +3,7 @@ package-lock.json
 *.log
 .DS_Store
 
+dist/
 dist/assets/
 dist/index.html
 site-dist/

@@ -66,3 +66,72 @@ export function isAudioAvailabilityPending(video: HTMLVideoElement): boolean {
   if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return true;
   return video.currentTime <= 0.25;
 }
+
+/**
+ * Tracks load attempts for one source lifecycle and hands out epoch tokens.
+ *
+ * Every hydration attempt (initial load, retry, or fresh `src`) gets a new
+ * epoch. Async first-frame callbacks, retry timers and `error` events capture
+ * the epoch they were scheduled with and bail out when it no longer matches,
+ * so an old source can never mutate the state of a newer one.
+ */
+export class MediaLoadSession {
+  readonly #maxAttempts: number;
+  #attempts = 0;
+  #epoch = 0;
+  #failed = false;
+
+  constructor(maxAttempts = 3) {
+    this.#maxAttempts = maxAttempts;
+  }
+
+  /**
+   * Begin a brand new source lifecycle: attempts and failure state reset and
+   * the epoch advances so callbacks scheduled against the old source die.
+   * No attempt is counted here — the first hydration calls beginAttempt().
+   */
+  beginSource(): number {
+    this.#attempts = 0;
+    this.#failed = false;
+    this.#epoch += 1;
+    return this.#epoch;
+  }
+
+  /** Record one concrete hydration (initial load or a retry). */
+  beginAttempt(): number {
+    this.#attempts += 1;
+    this.#epoch += 1;
+    this.#failed = false;
+    return this.#epoch;
+  }
+
+  /** A retry may still be scheduled within the attempt cap. */
+  canRetry(): boolean {
+    return this.#attempts < this.#maxAttempts && !this.#failed;
+  }
+
+  /** All retries are exhausted: the current source has failed terminally. */
+  markFailed(): void {
+    this.#failed = true;
+  }
+
+  get attempts(): number {
+    return this.#attempts;
+  }
+
+  get maxAttempts(): number {
+    return this.#maxAttempts;
+  }
+
+  get epoch(): number {
+    return this.#epoch;
+  }
+
+  get hasFailed(): boolean {
+    return this.#failed;
+  }
+
+  isCurrent(epoch: number): boolean {
+    return epoch === this.#epoch;
+  }
+}

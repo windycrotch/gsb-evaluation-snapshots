@@ -1,4 +1,10 @@
-import { DEFAULT_ASPECT_RATIO, DEFAULT_PRELOAD_MARGIN, OBSERVED_ATTRIBUTES } from './constants';
+import {
+  DEFAULT_ASPECT_RATIO,
+  DEFAULT_PRELOAD_MARGIN,
+  MAX_VIDEO_LOAD_ATTEMPTS,
+  OBSERVED_ATTRIBUTES,
+  VIDEO_RETRY_DELAY_MS,
+} from './constants';
 import {
   canRequestPlayerFullscreen,
   exitFullscreen,
@@ -7,8 +13,8 @@ import {
   requestPlayerFullscreen,
   requestVideoFullscreen,
 } from './fullscreen';
-import { detectAudioAvailability, formatVideoTime, isAudioAvailabilityPending } from './media';
-import { getProgressMetrics, getProgressPercentFromClientX, getProgressXFromPercent } from './progress';
+import { detectAudioAvailability, formatVideoTime, isAudioAvailabilityPending, MediaLoadSession } from './media';
+import { getProgressMetrics, getProgressPercentFromClientX, getProgressXFromPercent, ProgressClock } from './progress';
 import { template } from './template';
 import type { Cleanup, PlaybackState } from './types';
 
@@ -59,7 +65,8 @@ export class SimplePlayer extends HTMLElement {
   #scrubLongPressTimer = 0;
   #activeScrubPointerId: number | null = null;
   #optimisticPlaybackState: PlaybackState = null;
-  #videoLoadAttempt = 0;
+  #loadSession = new MediaLoadSession(MAX_VIDEO_LOAD_ATTEMPTS);
+  #activeLoadEpoch = 0;
   #videoRetryTimer = 0;
   #controlsHideTimer = 0;
   #loadingStateTimer = 0;
@@ -78,13 +85,10 @@ export class SimplePlayer extends HTMLElement {
   #firstFrameRequestToken = 0;
   #firstFrameFallbackTimer = 0;
   #hasInitialProgressSettled = false;
-  #initialProgressEstimateUnlockAt = 0;
   #isPlaybackBuffering = true;
-  #visualProgressTime = 0;
-  #visualProgressUpdatedAt = performance.now();
-  #lastRenderedProgressTime = 0;
-  #pausedVisualProgressTime: number | null = null;
-  #pauseFrozenProgressPercent: number | null = null;
+  // Before the first source's metadata arrives the player has no playhead;
+  // the clock starts in awaiting-source state so progress renders an exact 0.
+  #progressClock = new ProgressClock(undefined, true);
   #hasControlsCollision = false;
   #isProgressHoverPreviewing = false;
   #hasAudioTrack = false;
@@ -119,9 +123,6 @@ export class SimplePlayer extends HTMLElement {
   readonly #pointerControlsIdleDelay = 1600;
   readonly #loadingStateDelay = 140;
   readonly #initialProgressSettleDelay = 380;
-  readonly #initialProgressEstimateHold = 650;
-  readonly #videoRetryDelay = 2000;
-  readonly #maxVideoLoadAttempts = 3;
   readonly #bufferedAheadTarget = 10;
   readonly #bufferedRangeFuzz = 0.18;
   readonly #controlsCollisionEnterMargin = 8;
@@ -149,6 +150,16 @@ export class SimplePlayer extends HTMLElement {
 
   set src(value: string) {
     this.#setStringAttribute('src', value);
+  }
+
+  /** Number of hydration attempts made for the currently active source. */
+  get videoLoadAttempt(): number {
+    return this.#loadSession.attempts;
+  }
+
+  /** True once the current source has exhausted every retry attempt. */
+  get hasVideoLoadFailed(): boolean {
+    return this.#loadSession.hasFailed;
   }
 
   get aspectRatio() {
@@ -1126,7 +1137,6 @@ export class SimplePlayer extends HTMLElement {
     }
 
     this.#hasInitialProgressSettled = true;
-    this.#initialProgressEstimateUnlockAt = performance.now() + this.#initialProgressEstimateHold;
     if (!this.#isScrubPreviewLocked()) this.#syncVisualProgressClock();
     this.#updateProgress();
     this.#player.classList.remove('is-progress-settling');
@@ -1149,14 +1159,14 @@ export class SimplePlayer extends HTMLElement {
 
     this.#clearVideoRetryTimer();
     this.#clearFirstFrameFallbackTimer();
-    this.#videoLoadAttempt += 1;
+    this.#activeLoadEpoch = this.#loadSession.beginAttempt();
     this.#videoSourceLoaded = true;
     this.#hasDecodedFirstFrame = false;
     this.#hasPresentedFirstFrame = false;
     this.#firstFrameRequestPending = false;
     this.#firstFramePresentationPending = false;
     this.#firstFrameRequestToken += 1;
-    this.#player.classList.remove('has-visible-frame');
+    this.#player.classList.remove('has-visible-frame', 'is-load-failed');
     this.#syncAutoplayState();
     this.#video.src = source;
     this.#video.preload = 'auto';
@@ -1273,10 +1283,14 @@ export class SimplePlayer extends HTMLElement {
   }
 
   #retryVideoLoad() {
-    if (this.#videoLoadAttempt >= this.#maxVideoLoadAttempts || this.#videoRetryTimer) return;
+    if (!this.#loadSession.canRetry() || this.#videoRetryTimer) return;
 
+    const retryEpoch = this.#loadSession.epoch;
     this.#videoRetryTimer = window.setTimeout(() => {
       this.#videoRetryTimer = 0;
+      // A source switch (or another retry) invalidates this scheduled reload.
+      if (!this.#loadSession.isCurrent(retryEpoch)) return;
+
       this.#clearFirstFrameFallbackTimer();
       this.#videoSourceLoaded = false;
       this.#hasDecodedFirstFrame = false;
@@ -1284,16 +1298,20 @@ export class SimplePlayer extends HTMLElement {
       this.#firstFrameRequestPending = false;
       this.#firstFramePresentationPending = false;
       this.#firstFrameRequestToken += 1;
-      this.#player.classList.remove('has-visible-frame');
+      this.#player.classList.remove('has-visible-frame', 'is-load-failed');
 
-      if (!this.#player.classList.contains('has-loaded-once')) {
-        this.#setProgressVisual(0);
+      // Keep the playhead at the last rendered moment while the new attempt
+      // loads instead of snapping it back to 0.
+      if (this.#player.classList.contains('has-loaded-once')) {
+        this.#progressClock.holdForReload(this.#progressClock.lastRenderedTime);
+      } else {
+        this.#progressClock.holdForReload(0);
       }
 
       this.#video.removeAttribute('src');
       this.#video.load();
       void this.#hydrateVideoSource();
-    }, this.#videoRetryDelay);
+    }, VIDEO_RETRY_DELAY_MS);
   }
 
   #clearCommittedScrubPreview() {
@@ -1301,13 +1319,18 @@ export class SimplePlayer extends HTMLElement {
 
     this.#isCommittedScrubPending = false;
     this.#committedScrubWasPlaying = false;
-    this.#syncVisualProgressClock();
+    // Keep the committed target as the anchor. While buffering, media
+    // currentTime can still report the pre-seek position; anchoring there
+    // would make the playhead jump backward before catching up again.
+    this.#progressClock.unlockSeek(this.#scrubTargetTime);
     this.#updateProgress();
     return true;
   }
 
   #commitVideoReady() {
     this.#clearVideoRetryTimer();
+    this.#progressClock.releaseHold();
+    this.#player.classList.remove('is-load-failed');
     const isFirstReady = !this.#player.classList.contains('has-loaded-once');
 
     if (isFirstReady) this.#queueInitialProgressSettle();
@@ -1331,8 +1354,12 @@ export class SimplePlayer extends HTMLElement {
 
     this.#firstFrameRequestPending = true;
     const requestToken = this.#firstFrameRequestToken;
+    const loadEpoch = this.#activeLoadEpoch;
     const confirmFirstFrame = () => {
       if (requestToken !== this.#firstFrameRequestToken) return;
+      // First-frame callbacks scheduled by an old source must never touch
+      // the new source's readiness state.
+      if (!this.#loadSession.isCurrent(loadEpoch)) return;
 
       this.#clearFirstFrameFallbackTimer();
       this.#firstFrameRequestPending = false;
@@ -1403,30 +1430,29 @@ export class SimplePlayer extends HTMLElement {
   }
 
   #syncVisualProgressClock(time = this.#video.currentTime) {
-    this.#visualProgressTime = Number.isFinite(time) ? Math.max(0, time) : 0;
-    this.#visualProgressUpdatedAt = performance.now();
+    this.#progressClock.anchor(time);
   }
 
   #clearPausedVisualProgress() {
-    this.#pausedVisualProgressTime = null;
-    this.#pauseFrozenProgressPercent = null;
+    this.#progressClock.unfreeze();
   }
 
   #holdPausedVisualProgress() {
     if (!Number.isFinite(this.#video.duration) || this.#video.duration <= 0) {
-      this.#pausedVisualProgressTime = null;
+      this.#progressClock.unfreeze();
       return;
     }
 
     const currentTime = Number.isFinite(this.#video.currentTime) ? Math.max(0, this.#video.currentTime) : 0;
-    const renderedTime = Number.isFinite(this.#lastRenderedProgressTime) ? this.#lastRenderedProgressTime : currentTime;
-    this.#pausedVisualProgressTime = Math.min(this.#video.duration, Math.max(currentTime, renderedTime));
-    this.#syncVisualProgressClock(this.#pausedVisualProgressTime);
+    const renderedTime = Number.isFinite(this.#progressClock.lastRenderedTime)
+      ? this.#progressClock.lastRenderedTime
+      : currentTime;
+    const heldTime = Math.min(this.#video.duration, Math.max(currentTime, renderedTime));
+    this.#progressClock.freeze(heldTime);
   }
 
   #freezeRenderedProgressForPause() {
     if (!Number.isFinite(this.#video.duration) || this.#video.duration <= 0) {
-      this.#pauseFrozenProgressPercent = null;
       this.#holdPausedVisualProgress();
       return;
     }
@@ -1437,46 +1463,26 @@ export class SimplePlayer extends HTMLElement {
     const visualTime = this.#getVisualProgressTime();
     const progressFromTime = Math.min(1, Math.max(0, visualTime / this.#video.duration));
     const frozenProgress = Math.max(progressFromFill ?? 0, progressFromTime);
+    const frozenTime = frozenProgress * this.#video.duration;
 
-    this.#pauseFrozenProgressPercent = frozenProgress;
-    this.#pausedVisualProgressTime = frozenProgress * this.#video.duration;
-    this.#syncVisualProgressClock(this.#pausedVisualProgressTime);
+    this.#progressClock.freeze(frozenTime, frozenProgress);
     this.#setProgressVisual(frozenProgress);
-    this.#progressTrack.setAttribute('aria-valuenow', `${this.#pausedVisualProgressTime}`);
+    this.#progressTrack.setAttribute('aria-valuenow', `${frozenTime}`);
     this.#progressTrack.setAttribute(
       'aria-valuetext',
-      `${formatVideoTime(this.#pausedVisualProgressTime)} of ${formatVideoTime(this.#video.duration)}`,
+      `${formatVideoTime(frozenTime)} of ${formatVideoTime(this.#video.duration)}`,
     );
   }
 
   #getVisualProgressTime() {
-    if (!Number.isFinite(this.#video.duration) || this.#video.duration <= 0) return this.#video.currentTime || 0;
-    if (this.#isScrubPreviewLocked()) return this.#scrubTargetTime;
-    if (this.#pausedVisualProgressTime !== null) return this.#pausedVisualProgressTime;
-    if (!this.#isVideoAdvancing()) return this.#video.currentTime || 0;
-
-    if (this.#isPlaybackBuffering || !this.#hasInitialProgressSettled || performance.now() < this.#initialProgressEstimateUnlockAt) {
-      this.#syncVisualProgressClock();
-      return this.#video.currentTime || 0;
-    }
-
-    if (this.#player.classList.contains('is-loading') && this.#video.readyState < HTMLMediaElement.HAVE_FUTURE_DATA) {
-      this.#syncVisualProgressClock();
-      return this.#video.currentTime || 0;
-    }
-
-    const elapsed = (performance.now() - this.#visualProgressUpdatedAt) / 1000;
-    const estimatedTime = this.#visualProgressTime + elapsed;
-    const visualTime = this.#video.loop
-      ? estimatedTime % this.#video.duration
-      : Math.min(estimatedTime, this.#video.duration);
-
-    if (!this.#video.loop && this.#video.currentTime - visualTime > 0.45) {
-      this.#syncVisualProgressClock();
-      return this.#video.currentTime;
-    }
-
-    return visualTime;
+    return this.#progressClock.getVisualTime({
+      currentTime: this.#video.currentTime,
+      duration: this.#video.duration,
+      loop: this.#video.loop,
+      advancing: this.#isVideoAdvancing(),
+      buffering: this.#isPlaybackBuffering,
+      initialSettled: this.#hasInitialProgressSettled,
+    });
   }
 
   #setProgressVisual(percent: number) {
@@ -1565,10 +1571,11 @@ export class SimplePlayer extends HTMLElement {
 
   #updateProgress(time = this.#getVisualProgressTime()) {
     const hasDuration = Number.isFinite(this.#video.duration) && this.#video.duration > 0;
-    if (hasDuration && this.#pauseFrozenProgressPercent !== null) {
-      const frozenTime = this.#pauseFrozenProgressPercent * this.#video.duration;
-      this.#lastRenderedProgressTime = frozenTime;
-      this.#setProgressVisual(this.#pauseFrozenProgressPercent);
+    const frozenPercent = this.#progressClock.frozenPercent;
+    if (hasDuration && frozenPercent !== null) {
+      const frozenTime = frozenPercent * this.#video.duration;
+      this.#progressClock.markRendered(frozenTime);
+      this.#setProgressVisual(frozenPercent);
       this.#progressTrack.setAttribute('aria-valuemin', '0');
       this.#progressTrack.setAttribute('aria-valuemax', `${this.#video.duration}`);
       this.#progressTrack.setAttribute('aria-valuenow', `${frozenTime}`);
@@ -1582,7 +1589,7 @@ export class SimplePlayer extends HTMLElement {
 
     const renderedTime = hasDuration ? Math.min(this.#video.duration, Math.max(0, time)) : time;
     const progressValue = hasDuration ? renderedTime / this.#video.duration : 0;
-    this.#lastRenderedProgressTime = Number.isFinite(renderedTime) ? Math.max(0, renderedTime) : 0;
+    this.#progressClock.markRendered(renderedTime);
     this.#setProgressVisual(progressValue);
     this.#progressTrack.setAttribute('aria-valuemin', '0');
     this.#progressTrack.setAttribute('aria-valuemax', hasDuration ? `${this.#video.duration}` : '0');
@@ -1661,7 +1668,10 @@ export class SimplePlayer extends HTMLElement {
 
   #startProgressLoop() {
     this.#stopProgressLoop();
-    this.#syncVisualProgressClock();
+    // Do NOT re-anchor the clock here: the anchor is owned by the most recent
+    // play/resume/seek transition. Re-anchoring to media currentTime on loop
+    // start would erase the monotonic resume anchor and let the playhead jump
+    // backwards when the media clock lags the last rendered frame.
 
     const tick = () => {
       this.#updateProgress(this.#getVisualProgressTime());
@@ -1922,7 +1932,9 @@ export class SimplePlayer extends HTMLElement {
     this.#scrubTargetTime = this.#previewSeekFromClientX(this.#scrubStartX, true);
     if (this.#scrubWasPlaying) this.#video.pause();
     this.#video.currentTime = this.#scrubTargetTime;
-    this.#syncVisualProgressClock(this.#scrubTargetTime);
+    // While dragging, the clock is locked to the scrub target: the wall-clock
+    // based progress estimate and timeupdate-driven renders stay suspended.
+    this.#progressClock.lockSeek(this.#scrubTargetTime);
     this.#updateProgress(this.#scrubTargetTime);
     this.#stopProgressLoop();
     this.#syncVideoState();
@@ -1956,7 +1968,12 @@ export class SimplePlayer extends HTMLElement {
       this.#isCommittedScrubPending = true;
       this.#committedScrubWasPlaying = this.#scrubWasPlaying;
       this.#video.currentTime = this.#scrubTargetTime;
-      this.#syncVisualProgressClock(this.#scrubTargetTime);
+      // Re-lock on the released target so the playhead sits on the target
+      // immediately and stays there until the media catches up.
+      this.#progressClock.lockSeek(this.#scrubTargetTime);
+    } else {
+      // A release without a commit (e.g. a tap) ends the pointer-down lock.
+      this.#progressClock.unlockSeek(this.#scrubTargetTime);
     }
 
     this.#updateProgress(this.#scrubTargetTime);
@@ -1981,6 +1998,7 @@ export class SimplePlayer extends HTMLElement {
     this.#player.classList.remove('is-scrubbing');
     this.#clearControlsCollision();
     this.#releaseScrubPointer(pointerId);
+    this.#progressClock.unlockSeek();
     this.#syncVisualProgressClock();
     this.#updateProgress();
 
@@ -2652,6 +2670,7 @@ export class SimplePlayer extends HTMLElement {
     this.#finishInitialProgressSettle();
     this.#isCommittedScrubPending = false;
     this.#committedScrubWasPlaying = false;
+    this.#progressClock.unlockSeek();
     this.#setScrubReturnMarker(this.#getVisualProgressTime());
     this.#isTrackingScrub = true;
     this.#activeScrubPointerId = event.pointerId;
@@ -2659,6 +2678,11 @@ export class SimplePlayer extends HTMLElement {
     this.#scrubWasPlaying = !this.#video.paused && !this.#video.ended;
     this.#progressTrack.setPointerCapture(event.pointerId);
     this.#scrubTargetTime = this.#previewSeekFromClientX(event.clientX, false);
+    // Take the clock lock for the whole pointer interaction immediately:
+    // until release, no timeupdate/rAF render may move the playhead off the
+    // position being previewed or dragged.
+    this.#progressClock.lockSeek(this.#scrubTargetTime);
+    this.#updateProgress(this.#scrubTargetTime);
     this.#clearScrubLongPressTimer();
     this.#scrubLongPressTimer = window.setTimeout(this.#enterScrubMode, this.#scrubLongPressDelay);
   };
@@ -2687,7 +2711,8 @@ export class SimplePlayer extends HTMLElement {
               : baseTime + (event.key === 'ArrowRight' ? smallStep : -smallStep);
 
     this.#video.currentTime = Math.min(this.#video.duration, Math.max(0, nextTime));
-    this.#syncVisualProgressClock(this.#video.currentTime);
+    this.#isCommittedScrubPending = false;
+    this.#progressClock.unlockSeek(nextTime);
     this.#updateProgress(this.#video.currentTime);
   };
 
@@ -2709,6 +2734,7 @@ export class SimplePlayer extends HTMLElement {
 
     if (!this.#isScrubbing) return;
     this.#scrubTargetTime = this.#previewSeekFromClientX(event.clientX);
+    this.#progressClock.updateLockedSeek(this.#scrubTargetTime);
   };
 
   #handleProgressPointerUp = (event: Event) => {
@@ -2768,8 +2794,11 @@ export class SimplePlayer extends HTMLElement {
   #handleVideoPlay = () => {
     this.#claimMediaSession();
     this.#optimisticPlaybackState = null;
-    this.#clearPausedVisualProgress();
-    if (!this.#isScrubPreviewLocked()) this.#syncVisualProgressClock();
+    if (!this.#isScrubPreviewLocked()) {
+      // Anchor at max(frozen, current): resume from the frozen render point
+      // rather than a media clock that may still lag behind it.
+      this.#progressClock.resume(this.#video.currentTime);
+    }
     this.#syncVideoState();
     this.#syncMediaSessionPlaybackState();
   };
@@ -2800,6 +2829,7 @@ export class SimplePlayer extends HTMLElement {
 
   #handleVideoLoadedMetadata = () => {
     this.#clearPausedVisualProgress();
+    this.#progressClock.endAwaitingSource();
     this.#syncAudioControlState();
     if (!this.#isScrubPreviewLocked()) this.#syncVisualProgressClock();
     this.#syncVideoLoading();
@@ -2830,6 +2860,10 @@ export class SimplePlayer extends HTMLElement {
   };
 
   #handleVideoError = () => {
+    // Ignore error events that no longer belong to the active load attempt
+    // (e.g. an event queued by the previous source right after an src switch).
+    if (!this.#videoSourceLoaded) return;
+
     this.#optimisticPlaybackState = null;
     this.#hasDecodedFirstFrame = false;
     this.#hasPresentedFirstFrame = false;
@@ -2839,11 +2873,37 @@ export class SimplePlayer extends HTMLElement {
     this.#player.classList.remove('has-visible-frame');
     this.#setVideoLoading(true, true);
     this.#syncVideoState();
-    this.#retryVideoLoad();
+
+    if (this.#loadSession.canRetry()) {
+      this.#retryVideoLoad();
+      return;
+    }
+
+    // Retry budget exhausted: stop scheduling attempts and surface a
+    // terminal, testable failure state instead of retrying forever.
+    this.#loadSession.markFailed();
+    this.#progressClock.releaseHold();
+    this.#player.classList.add('is-load-failed');
+    this.#setVideoLoading(true, true);
   };
 
   #handleVideoTimeUpdate = () => {
     this.#syncAudioControlState();
+    // Keep the estimate anchored to the latest media position while normal
+    // playback runs. Latch states (scrub lock, pause freeze, retry hold,
+    // awaiting source) take precedence inside the clock, and the monotonic
+    // anchor ignores stale lagging timeupdate values so the playhead can
+    // never jump backwards.
+    if (
+      !this.#isScrubPreviewLocked() &&
+      !this.#progressClock.isFrozen &&
+      !this.#progressClock.isAwaitingSource
+    ) {
+      this.#progressClock.anchorIfAdvanced(this.#video.currentTime);
+    }
+    // Render from the clock rather than the raw media time: after a resume
+    // the media clock can still lag the frozen render point, and the clock
+    // guarantees the playhead never moves backwards.
     this.#updateProgress();
   };
 
@@ -2860,35 +2920,83 @@ export class SimplePlayer extends HTMLElement {
 
   #resetSource() {
     if (!this.#video) return;
+
+    // --- Tear down every piece of state the old source could still touch ---
     this.#observer?.disconnect();
     this.#observer = null;
     this.#clearVideoRetryTimer();
+    this.#clearLoadingStateTimer();
     this.#clearInitialProgressSettleTimer();
+    this.#clearFirstFrameFallbackTimer();
+    this.#clearScrubLongPressTimer();
+
+    // A new load lifecycle: retry counter resets and pending epochs die.
+    this.#activeLoadEpoch = this.#loadSession.beginSource();
+    this.#firstFrameRequestToken += 1;
     this.#videoSourceLoaded = false;
-    this.#videoLoadAttempt = 0;
     this.#hasDecodedFirstFrame = false;
     this.#hasPresentedFirstFrame = false;
     this.#firstFrameRequestPending = false;
     this.#firstFramePresentationPending = false;
-    this.#firstFrameRequestToken += 1;
+
+    // Playhead returns to the new source's initial 0:00 state.
     this.#hasInitialProgressSettled = false;
-    this.#lastRenderedProgressTime = 0;
+    this.#isPlaybackBuffering = true;
+    this.#progressClock.reset();
+
+    // Scrub interaction must not survive a source switch either.
+    this.#stopProgressLoop();
+    this.#isTrackingScrub = false;
+    this.#isScrubbing = false;
+    this.#isCommittedScrubPending = false;
+    this.#committedScrubWasPlaying = false;
+    this.#scrubWasPlaying = false;
+    this.#scrubTargetTime = 0;
+    this.#scrubReturnTime = 0;
+    this.#scrubReturnPercent = 0;
+    this.#hasScrubReturnMarker = false;
+    this.#activeScrubPointerId = null;
+    this.#isProgressHoverPreviewing = false;
+    this.#clearControlsCollision();
     this.#clearPausedVisualProgress();
+    this.#optimisticPlaybackState = null;
+
+    // Audio availability is source-specific.
     this.#hasAudioTrack = false;
     this.#hasCheckedAudioTrack = false;
     this.#syncOptionalControls();
     this.#clearVolumeInteractionState();
-    this.#isCommittedScrubPending = false;
-    this.#committedScrubWasPlaying = false;
-    this.#optimisticPlaybackState = null;
-    this.#player.classList.remove('has-loaded-once', 'has-visible-frame', 'is-progress-settling');
+
+    this.#player.classList.remove(
+      'has-loaded-once',
+      'has-visible-frame',
+      'is-progress-settling',
+      'is-load-failed',
+      'is-scrubbing',
+      'is-progress-hovering',
+      'has-return-marker',
+    );
+    this.#player.style.setProperty('--sp-hover-fill-inset', '100%');
+    this.#player.style.setProperty('--sp-return-marker-left', '0px');
+    this.#player.style.setProperty('--sp-return-marker-hole-left', '-9999px');
+    this.#player.style.setProperty('--sp-return-marker-base-opacity', '1');
+
     this.#video.dataset.src = this.src;
     this.#video.pause();
     this.#video.removeAttribute('src');
     this.#video.preload = 'none';
     this.#syncAutoplayState();
     this.#video.load();
+
+    // Force both time surfaces and the progress fill back to 0:00 so no old
+    // source text remains while the new source is still loading.
+    this.#scrubTimeText.textContent = formatVideoTime(0);
+    this.#trayTimeText.textContent = this.#formatTimeForDisplay(0);
+    this.#syncTrayTimeWidth();
     this.#setProgressVisual(0);
+    this.#progressTrack.setAttribute('aria-valuenow', '0');
+    this.#progressTrack.setAttribute('aria-valuetext', 'Loading video');
+
     this.#syncAudioControlState();
     this.#syncVideoLoading();
     this.#syncVideoState();

@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SimplePlayer — playhead coherence demo</title>
+    <link rel="stylesheet" href="./demo-styles.css" />
+  </head>
+  <body>
+    <main class="page">
+      <header class="header">
+        <h1>Playhead coherence scenarios</h1>
+        <p>
+          Watch the progress fill and the time text. They must always point at
+          the same moment and never carry state from a previous source.
+        </p>
+      </header>
+
+      <section class="card">
+        <simple-player
+          id="player"
+          controls
+          show-time
+          src="https://samplelib.com/mp4/sample-10s.mp4"></simple-player>
+
+        <div class="actions">
+          <button type="button" data-action="source-a">Source A (10s clip)</button>
+          <button type="button" data-action="source-b">Source B (5s clip)</button>
+          <button type="button" data-action="source-broken">Broken source (retries)</button>
+          <button type="button" data-action="source-recover">Recover from broken</button>
+        </div>
+
+        <ol class="steps">
+          <li>
+            <strong>Switch source:</strong> click Source B mid-playback. The fill
+            and time text snap to <code>0:00</code> immediately; no old position
+            or first frame remains while the new source loads.
+          </li>
+          <li>
+            <strong>Scrub and commit:</strong> drag the progress bar and release
+            on a new position. The fill/time jump to the target on release and
+            stay there even while the video briefly buffers — they never bounce
+            back to the old value first.
+          </li>
+          <li>
+            <strong>Pause / resume:</strong> pause, wait, then resume. The
+            playhead freezes exactly where it was and continues from that point
+            without stepping backwards.
+          </li>
+          <li>
+            <strong>Failure retry:</strong> click Broken source. The player
+            retries up to three times (two seconds apart) while the playhead
+            stays in a defined state, then stops instead of retrying forever.
+            Click Recover to load a working source again.
+          </li>
+        </ol>
+
+        <pre id="log" class="log" aria-live="polite"></pre>
+      </section>
+    </main>
+
+    <script type="module" src="./demo-main.ts"></script>
+  </body>
+</html>
