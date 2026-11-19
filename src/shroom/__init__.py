@@ -13,6 +13,9 @@ from shroom.acoustics.processors import (
     ASMEncoder,
     BSMEncoder,
     ProcessorChain,
+    ChainFailure,
+    ChainKernelBuildError,
+    ChainSamplingRateError,
 )
 from shroom.acoustics.hrtf_processing import magls_hrtf
 from shroom.acoustics.spherical_array import SphericalArray
@@ -37,6 +40,9 @@ __all__ = [
     "ASMEncoder",
     "BSMEncoder",
     "ProcessorChain",
+    "ChainFailure",
+    "ChainKernelBuildError",
+    "ChainSamplingRateError",
     "SphericalArray",
     "ASM",
     "BSM",

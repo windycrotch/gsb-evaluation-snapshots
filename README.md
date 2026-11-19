@@ -131,6 +131,14 @@ chain = ProcessorChain([
 
 # 2. Process Ambisonics through the Chain
 binaural_output = chain.process(room.compute_amb())
+
+# The folded filter is cached per input contract (shape, sampling rate,
+# time/frequency domain, SH/space domain + grid). Feeding a signal with a different
+# contract rebuilds it automatically; different contracts stay cached side by side.
+# If a rebuild fails, the previous filter stays usable and the reason is queryable:
+#   chain.failure  -> ChainFailure(processor_index, processor, exception)
+# A processor whose fs changes after construction is rejected with
+# ChainSamplingRateError naming the offending stage.
 ```
 
 ### Spectrally-Equalized ASM (SE-ASM)

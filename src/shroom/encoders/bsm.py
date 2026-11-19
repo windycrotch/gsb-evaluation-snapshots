@@ -196,7 +196,9 @@ class BSM:
         """
         Encode microphone signals to binaural audio using the BSM filters.
 
-        Uses time-domain convolution so the input can have any length.
+        Uses time-domain convolution so the input can have any length.  The output
+        is cut to one sample per input sample (the filter tail is discarded); use
+        :meth:`process_untruncated` to keep the full linear-convolution tail.
 
         Parameters
         ----------
@@ -207,6 +209,30 @@ class BSM:
         -------
         SpatialSignal
             Binaural audio (2 channels: L/R), shape (2, 1, T), is_time=True, is_space=False.
+        """
+        T = mic_signals.data.shape[-1]
+        binaural = self.process_untruncated(mic_signals)
+        return SpatialSignal(
+            data=binaural.data[:, :, :T],
+            fs=binaural.fs,
+            is_time=True,
+            is_space=False,
+        )
+
+    def process_untruncated(self, mic_signals: SpatialSignal) -> SpatialSignal:
+        """
+        Encode microphone signals, keeping the full linear-convolution tail.
+
+        Parameters
+        ----------
+        mic_signals : SpatialSignal
+            Microphone signals, shape (M, 1, T), is_time=True.
+
+        Returns
+        -------
+        SpatialSignal
+            Binaural audio, shape (2, 1, T + F - 1), is_time=True, is_space=False,
+            where F is the beamformer filter length.
         """
         if not mic_signals.is_time:
             raise ValueError("BSM.process expects time-domain input.")
@@ -228,10 +254,10 @@ class BSM:
         filters = np.stack([cl_time.T, cr_time.T], axis=0)          # (2, M, F)
         out     = convolve_and_sum(x, filters, "time", "time")       # (1, 2, T+F-1)
 
-        y_L = out[0, 0, :T]
-        y_R = out[0, 1, :T]
+        y_L = out[0, 0, :]
+        y_R = out[0, 1, :]
 
-        binaural = np.stack([y_L, y_R], axis=0)[:, np.newaxis, :]  # (2, 1, T)
+        binaural = np.stack([y_L, y_R], axis=0)[:, np.newaxis, :]  # (2, 1, T+F-1)
 
         return SpatialSignal(
             data=binaural,
