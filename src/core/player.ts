@@ -17,6 +17,9 @@ class TransportPlayer implements Player {
   private audibleFrom: ClockSeconds = -Infinity;
   private retimed: Playback | null = null;
   private scrub: number | null = null;
+  private lifted = false;
+  private preLiftLoop: Section | null = null;
+  private preLiftWait: ClockSeconds | null = null;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private listeners = new Set<() => void>();
 
@@ -57,6 +60,7 @@ class TransportPlayer implements Player {
     const now = this.output.now();
     const position = this.here(now);
     const next = transition(playState, event, { position, loop, loopMode });
+    if (next.state !== "waiting" && event.type !== "loop-change") this.preLiftWait = null;
     this.reanchor(next.position ?? (next.state === "playing" ? position : this.position()), now);
     const waitingUntil = next.state === "waiting" ? this.anchor.time + loopDelay(loopMode) : null;
     this.state = { ...this.state, playState: next.state, waitingUntil };
@@ -78,6 +82,13 @@ class TransportPlayer implements Player {
     const position = this.scrub;
     if (position === null) return;
     this.scrub = null;
+    if (this.lifted) {
+      // The committed loop is not active until the drag commits: the drop keeps
+      // its exact position instead of snapping to the resting loop start.
+      this.reanchor(position);
+      this.render();
+      return;
+    }
     this.dispatch({ type: "move", position });
   }
 
@@ -88,10 +99,11 @@ class TransportPlayer implements Player {
   }
 
   setLoop(loop: Section | null) {
-    const next = loop ?? { start: 0, end: this.duration };
-    if (next.start === this.state.loop.start && next.end === this.state.loop.end) return;
-    this.state = { ...this.state, loop: next };
-    this.dispatch({ type: "loop-change" });
+    if (loop === null) {
+      this.beginLoopDrag();
+      return;
+    }
+    this.commitLoop(loop);
   }
 
   setLoopMode(loopMode: LoopMode) {
@@ -110,6 +122,47 @@ class TransportPlayer implements Player {
     clearTimeout(this.timer);
     this.listeners.clear();
     this.output.render({ ...this.playback, mode: "silent" });
+  }
+
+  // A loop-handle drag lifts the loop for its whole duration: the resting loop
+  // stays out of force until the pointer comes up, and a pending loop delay is
+  // parked instead of being swallowed or firing at the old boundary.
+  private beginLoopDrag() {
+    if (this.lifted) return;
+    this.lifted = true;
+    this.preLiftLoop = this.state.loop;
+    if (this.state.playState === "waiting" && this.state.waitingUntil !== null) {
+      this.preLiftWait = this.state.waitingUntil;
+      this.state = { ...this.state, waitingUntil: null };
+    }
+    this.state = { ...this.state, loop: { start: 0, end: this.duration } };
+    this.render();
+  }
+
+  private commitLoop(next: Section) {
+    if (!this.lifted) {
+      // Direct setLoop (e.g. tests/shortcuts) keeps the original single-step semantics.
+      if (next.start === this.state.loop.start && next.end === this.state.loop.end) return;
+      this.state = { ...this.state, loop: next };
+      this.dispatch({ type: "loop-change" });
+      return;
+    }
+    const restored = this.preLiftLoop;
+    this.lifted = false;
+    this.preLiftLoop = null;
+    const unchanged = restored !== null && restored.start === next.start && restored.end === next.end;
+    const parked = this.preLiftWait;
+    this.preLiftWait = null;
+    this.state = { ...this.state, loop: next };
+    if (parked !== null && unchanged) {
+      // A no-op drag releases an intact wait: resume the same countdown rather
+      // than restarting it or dropping it on the floor.
+      const waitingUntil = Math.max(parked, this.output.now());
+      this.state = { ...this.state, playState: "waiting", waitingUntil };
+      this.render();
+      return;
+    }
+    this.dispatch({ type: "loop-change" });
   }
 
   private renderedPosition() {
@@ -137,14 +190,15 @@ class TransportPlayer implements Player {
     const { playState, loop, speed } = this.state;
     const { loopMode } = this;
     const previous = this.playback;
-    const mode: PlaybackMode = this.scrub !== null ? "scrubbing" : playState === "playing" ? "playing" : playState === "frozen" ? "frozen" : "silent";
+    const mode: PlaybackMode =
+      this.scrub !== null ? "scrubbing" : playState === "playing" ? "playing" : playState === "frozen" ? "frozen" : "silent";
     this.playback = {
       mode,
       anchorPosition: this.scrub ?? this.anchor.position,
       anchorTime: this.anchor.time,
       rate: speed,
       loop,
-      loopWraps: loopMode.type === "automatic" && loopDelay(loopMode) === 0,
+      loopWraps: !this.lifted && loopMode.type === "automatic" && loopDelay(loopMode) === 0,
     };
     const seamless = !!previous && continues(previous, this.playback);
     if (!seamless) this.audibleFrom = this.anchor.time;
@@ -156,6 +210,7 @@ class TransportPlayer implements Player {
 
   private schedule() {
     clearTimeout(this.timer);
+    if (this.lifted) return;
     const { mode, anchorPosition, anchorTime, rate, loop, loopWraps } = this.playback;
     const { playState, waitingUntil } = this.state;
     let due: number;
