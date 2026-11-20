@@ -1,0 +1,42 @@
+[0.0s] loaded crate/model.glb: 1032196 verts, 1849433 tris
+[4.1s] DAG: 29474 clusters, 2154 groups, 14 levels, coarsest cut 122 tris, simplify 1.0s
+[5.2s] discrete LOD 0.25: 462357 tris (collapse), abs error 2.61e-4
+[5.7s] discrete LOD 0.0625: 115589 tris (collapse), abs error 1.51e-3
+[5.9s] discrete LOD 0.015625: 28897 tris (collapse), abs error 1.13e-2
+[6.0s] discrete LOD 0.004: 6823 tris (sloppy), abs error 3.25e-2
+[7.1s] wrote crate.bin 84.4 MB (clusters idx 42.4 MB, meshopt-coded estimate 31.5 MB)
+[0.1s] loaded generator/model.glb: 1058238 verts, 1867147 tris
+[6.5s] DAG: 29838 clusters, 2186 groups, 13 levels, coarsest cut 42 tris, simplify 1.8s
+[11.5s] discrete LOD 0.25: 466786 tris (collapse), abs error 2.87e-4
+[12.7s] discrete LOD 0.0625: 116693 tris (collapse), abs error 1.94e-3
+[13.8s] discrete LOD 0.015625: 28008 tris (sloppy), abs error 1.76e-2
+[14.4s] discrete LOD 0.004: 6614 tris (sloppy), abs error 4.87e-2
+[17.2s] wrote generator.bin 85.4 MB (clusters idx 42.9 MB, meshopt-coded estimate 33.2 MB)
+[0.1s] loaded tyres/model.glb: 1018176 verts, 1953665 tris
+[5.1s] DAG: 31062 clusters, 2269 groups, 15 levels, coarsest cut 102 tris, simplify 1.0s
+[7.0s] discrete LOD 0.25: 488415 tris (collapse), abs error 4.31e-4
+[7.6s] discrete LOD 0.0625: 122097 tris (collapse), abs error 2.40e-3
+[7.8s] discrete LOD 0.015625: 30519 tris (collapse), abs error 9.94e-3
+[8.0s] discrete LOD 0.004: 7577 tris (sloppy), abs error 3.13e-2
+[10.2s] wrote tyres.bin 85.0 MB (clusters idx 44.7 MB, meshopt-coded estimate 34.0 MB)
+[0.1s] loaded sofa/model.glb: 1000115 verts, 1921937 tris
+[4.6s] DAG: 30557 clusters, 2227 groups, 15 levels, coarsest cut 80 tris, simplify 1.0s
+[5.8s] discrete LOD 0.25: 480483 tris (collapse), abs error 1.30e-4
+[6.2s] discrete LOD 0.0625: 120116 tris (collapse), abs error 6.91e-4
+[6.4s] discrete LOD 0.015625: 30030 tris (collapse), abs error 2.88e-3
+[6.4s] discrete LOD 0.004: 7686 tris (collapse), abs error 1.25e-2
+[7.5s] wrote sofa.bin 83.9 MB (clusters idx 44.0 MB, meshopt-coded estimate 32.0 MB)
+[0.1s] loaded barrier/model.glb: 1002409 verts, 1970372 tris
+[4.1s] DAG: 31292 clusters, 2264 groups, 14 levels, coarsest cut 110 tris, simplify 1.0s
+[5.3s] discrete LOD 0.25: 492592 tris (collapse), abs error 4.48e-5
+[5.7s] discrete LOD 0.0625: 123148 tris (collapse), abs error 1.74e-4
+[5.8s] discrete LOD 0.015625: 30786 tris (collapse), abs error 7.08e-4
+[5.9s] discrete LOD 0.004: 7880 tris (collapse), abs error 2.85e-3
+[7.0s] wrote barrier.bin 84.9 MB (clusters idx 45.1 MB, meshopt-coded estimate 31.6 MB)
+[0.1s] loaded hoist/model.glb: 1040900 verts, 1962899 tris
+[4.3s] DAG: 31221 clusters, 2318 groups, 15 levels, coarsest cut 72 tris, simplify 1.0s
+[5.4s] discrete LOD 0.25: 490724 tris (collapse), abs error 1.94e-4
+[5.9s] discrete LOD 0.0625: 122680 tris (collapse), abs error 9.88e-4
+[6.0s] discrete LOD 0.015625: 30666 tris (collapse), abs error 5.27e-3
+[6.1s] discrete LOD 0.004: 7553 tris (sloppy), abs error 2.47e-2
+[7.2s] wrote hoist.bin 86.5 MB (clusters idx 44.9 MB, meshopt-coded estimate 33.9 MB)

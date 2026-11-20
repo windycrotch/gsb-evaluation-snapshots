@@ -1,0 +1,18 @@
+{
+ "name": "igpu_mem3",
+ "gpu": "ANGLE (AMD, Vulkan 1.4.315 (AMD Radeon(TM) Graphics (0x000013C0)), AMD proprietary driver)",
+ "res": "1920x1080",
+ "multiDraw": true,
+ "when": "2026-11-12T05:55:59.868Z",
+ "bench": [],
+ "trace": [],
+ "error": "Error: WebGL context lost during quick clod n=96\n    at Object.bench (http://localhost:5290/src/main.js?t=1794462584593:204:37)\n    at async http://localhost:5290/src/main.js?t=1794462584593:255:58",
+ "contextLost": "loading… @631ms restored@1639ms",
+ "assets": [
+  "crate",
+  "tyres",
+  "sofa"
+ ],
+ "data": "/data",
+ "mat": "standard"
+}
