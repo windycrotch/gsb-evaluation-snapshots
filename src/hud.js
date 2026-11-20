@@ -47,7 +47,7 @@ export function showScreen(name) {
   if (menu) menu.focus(0);
   activeMenu = menu || null;
 }
-export function hideScreens() { for (const s of SCREENS) EL[s].classList.remove('on'); activeMenu = null; }
+export function hideScreens() { for (const s of SCREENS) EL[s].classList.remove('on'); activeMenu = null; menuStack.length = 0; }
 export function hudVisible(on) { EL.hud.classList.toggle('on', on); if (!on) { ctx.clearRect(0, 0, EL.hudc.width, EL.hudc.height); } EL.touch.classList.toggle('on', on && Input.touchEnabled); }
 
 // ============================================================ Menus
@@ -59,6 +59,9 @@ export class Menu {
       it.addEventListener('mouseenter', () => this.focusItem(it, true));
       it.addEventListener('click', (e) => {
         if (it.tagName === 'LABEL') return;
+        // Hidden items (res-next in a select run, つづきから with no save …) must not act through the
+        // keyboard-focused item when they're clicked.
+        if (it.hidden || it.offsetParent === null) return;
         e.preventDefault(); this.focusItem(it); AudioSys.init(); this.activate();
       });
       const input = it.querySelector('input');
@@ -137,6 +140,7 @@ function initMenus() {
   });
   MENUS.pause = new Menu(EL.pause, (act) => {
     AudioSys.sfx('uiSelect');
+    if (!G.paused) return;   // the pause screen is gone; ignore a stray click from an older frame
     if (act === 'resume') MENU_CB.resume?.();
     else if (act === 'retry') MENU_CB.retry?.();
     else if (act === 'controls') openSub('controls', 'pause');
@@ -150,6 +154,7 @@ function initMenus() {
   });
   MENUS.results = new Menu(EL.results, (act) => {
     AudioSys.sfx('uiSelect');
+    if (G.state !== 'results') return;   // a late click on a panel that has already been closed must not act
     if (act === 'next') MENU_CB.next?.();
     else if (act === 'again') MENU_CB.again?.();
     else if (act === 'select') MENU_CB.toSelect?.();
@@ -265,7 +270,11 @@ export function radio(who, text, opts = {}) {
   if (msg.prio >= 2) { radioQ.length = 0; if (rcur) rcur.t = 1e9; }
   if (msg.prio >= 1) radioQ.unshift(msg); else radioQ.push(msg);
 }
-export function clearRadio() { radioQ.length = 0; rcur = null; EL.radio.classList.remove('on'); }
+export function clearRadio() {
+  radioQ.length = 0; rcur = null;
+  EL.radio.classList.remove('on');
+  EL.rtext.textContent = ''; EL.rname.innerHTML = ''; EL.rface.innerHTML = ''; EL.rface.classList.remove('static');
+}
 
 function startRadio(m) {
   const C = CHARACTERS[m.who] || { name: m.who.toUpperCase(), role: '', color: '#fff' };
@@ -331,7 +340,7 @@ export function tip(html, dur = 5, touchHtml) {
   showTip(html, dur);
 }
 function showTip(html, dur) { EL.tip.innerHTML = html; EL.tip.classList.add('on'); tipT = dur; }
-export function clearTip() { EL.tip.classList.remove('on'); tipT = 0; tipWait = null; }
+export function clearTip() { EL.tip.classList.remove('on'); EL.tip.innerHTML = ''; tipT = 0; tipWait = null; }
 let bannerT = 0;
 export function banner(small, big, sub = '', dur = 3.2, cls = '') {
   const b = EL.banner;
@@ -344,7 +353,15 @@ export function banner(small, big, sub = '', dur = 3.2, cls = '') {
   b.classList.add('on');
   bannerT = dur;
 }
-export function hideBanner() { EL.banner.classList.remove('on'); bannerT = 0; }
+export function hideBanner() {
+  const b = EL.banner;
+  b.classList.remove('on');
+  b.className = '';
+  b.querySelector('.b-small').textContent = '';
+  b.querySelector('.b-big').textContent = '';
+  b.querySelector('.b-sub').textContent = '';
+  bannerT = 0;
+}
 export function warning(on) { EL.warning.classList.toggle('on', on); }
 let bossOn = false, bossFrac = 1;
 export function bossBar(on, info) {
@@ -352,6 +369,14 @@ export function bossBar(on, info) {
   if (info) { EL.bossen.textContent = info.en; EL.bossja.textContent = info.bar; }
   EL.boss.classList.toggle('on', on);
 }
+// Clear the gauge itself as well (a new mission must not inherit the last boss's depleted bar).
+export function resetBossGauge() {
+  bossOn = false; bossFrac = 1;
+  EL.boss.classList.remove('on');
+  EL.bossfill.style.transform = 'scaleX(1)';
+  EL.bossghost.style.transform = 'scaleX(1)';
+}
+
 export function setBossHP(f) {
   if (Math.abs(f - bossFrac) > 0.0005) {
     bossFrac = f;
@@ -363,6 +388,7 @@ export function setBossHP(f) {
 // ============================================================ Floating texts
 const floats = [];
 export function popText(pos, text, color = '#b4ff6a', size = 18) { floats.push({ pos: pos.clone(), text, color, size, t: 0 }); }
+export function clearFloats() { floats.length = 0; }
 
 // ============================================================ Per-frame HUD
 let lastHits = -1, lastScore = -1, lastBombs = -1, lastLives = -1, lastGold = -1, lastLaser = -1, lastShield = -1, lastMax = -1;
@@ -380,7 +406,7 @@ export function updateHUD(dt, rdt) {
   if (tipT > 0) { tipT -= rdt; if (tipT <= 0) EL.tip.classList.remove('on'); }
   if (bannerT > 0) { bannerT -= rdt; if (bannerT <= 0) EL.banner.classList.remove('on'); }
   else if (tipWait && (tipWait.gap -= rdt) <= 0) { showTip(tipWait.html, tipWait.dur); tipWait = null; }
-  if (!run || !EL.hud.classList.contains('on')) return;
+  if (!run || !EL.hud.classList.contains('on')) { clearCanvas(); return; }
   // gauges
   const sh = Math.round(run.shield * 10) / 10;
   if (sh !== lastShield || run.maxShield !== lastMax) {
@@ -413,6 +439,8 @@ export function updateHUD(dt, rdt) {
 }
 
 export function resetHUDCache() { lastHits = lastScore = lastBombs = lastLives = lastGold = lastLaser = lastShield = lastMax = -1; }
+
+function clearCanvas() { ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, cw, ch); }
 
 const pA = { x: 0, y: 0, z: 0 }, pB = { x: 0, y: 0, z: 0 }, pL = { x: 0, y: 0, z: 0 };
 function drawCanvas(dt, rdt) {
@@ -529,6 +557,7 @@ function bracket(x, y, r, l) {
 // ============================================================ Results
 let resAnim = null;
 export function showResults(data) {
+  hideBanner(); clearTip(); clearRadio(); clearFloats();
   showScreen('results');
   if (data.sub) EL.ressub.textContent = data.sub;
   // story: next / title — mission select: retry / select / title

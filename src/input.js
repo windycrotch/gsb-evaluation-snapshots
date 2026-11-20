@@ -57,6 +57,17 @@ export const Input = {
     else { if (held.has(code)) justUp.add(code); held.delete(code); }
   },
   clearAll() { held.clear(); justDown.clear(); justUp.clear(); touchX = touchY = 0; },
+  // Drop this frame's action edges without forgetting which keys are physically held: used when a menu closes
+  // so the key that dismissed it (Space is also "fire") cannot bleed into the next gameplay frame. Physical
+  // holds are re-read by the next updateInput, so a key the player is still holding keeps working.
+  consumeAll() {
+    touchX = touchY = 0;
+    Input.x = 0; Input.y = 0;
+    for (const a in actionHeld) { actionHeld[a] = actionPrevHeld[a] = actionPressed[a] = actionReleased[a] = actionDouble[a] = false; }
+    for (const a in menuRepeat) menuRepeat[a] = false;
+    justDown.clear(); justUp.clear();
+    anyPress = false;
+  },
 };
 
 function isTypingTarget(t) {

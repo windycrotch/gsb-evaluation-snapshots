@@ -24,7 +24,7 @@ import {
 import {
   initHUD, showScreen, hideScreens, hudVisible, updateHUD, radio, clearRadio, tip, clearTip, banner, hideBanner, warning, bossBar,
   setBossHP, popText, MENU_CB, titlePressed, titleReset, updateMenus, menuBack, refreshTitle, showTitleMenu, setLoading, showResults,
-  updateResults, skipResults, resetHUDCache, setGameOverText, clearMarkers,
+  updateResults, skipResults, resetHUDCache, setGameOverText, clearMarkers, clearFloats, resetBossGauge,
 } from './hud.js';
 import { AudioSys } from './audio.js';
 
@@ -46,6 +46,29 @@ function useStage(def) {
 }
 
 // ============================================================ Boot
+
+// Wipe everything a mission leaves behind: actors, scheduled callbacks, radio, banners, the boss bar and the
+// effects layer. Called whenever a run starts, restarts or ends, so nothing from the last attempt can leak into
+// the next one (mission-start callbacks are queued *after* this, so they survive).
+function clearMissionState() {
+  clearTimers();
+  clearEnemies(); clearWeapons(); clearFX(); clearFlybys();
+  clearRadio(); clearTip(); hideBanner(); clearMarkers(); clearFloats();
+  warning(false); resetBossGauge();
+  if (BOSS.inst.active) BOSS.inst.stop();
+  if (G.warnLoop) { G.warnLoop.stop(0.2); G.warnLoop = null; }
+  G.warnLoop = null;
+  if (S.engine) { S.engine.stop(0.4); S.engine = null; }
+  S.deadT = 0; S.deadHandled = false;
+  S.intro = null; S.bossCine = null;
+  S.clearDone = false;
+  S.respawning = false;
+  S.runFinished = false;
+  S.transition = false;
+  CAM.override = null;
+  G.hitStop = 0;
+}
+
 async function boot() {
   G.settings = loadSettings();
   const app = document.getElementById('app');
@@ -100,6 +123,8 @@ async function boot() {
     G, BOSS, WING, ship, emit, Input, POST, GFX, THREE,
     __jump: (d) => { G.run = G.run || newRun(); hideScreens(); setupStage(d, false); },
     __start: () => startMission(),
+    __pause: () => pause(),
+    __resume: () => resume(),
     CAMP, progress,
     __step: (n = 1, dt = 1 / 60) => { for (let i = 0; i < n; i++) frame(dt); return { state: G.state, d: Math.round(G.rail.d), hits: G.run.hits, shield: G.run.shield }; },
     enemies, WSTATE, ebullets, explode,
@@ -175,9 +200,8 @@ if (__DEV__) {
   if (q.has('manual')) window.__manual = true;
   if (q.has('seed')) { const r0 = mulberry32(+q.get('seed') || 1); window.__rc = 0; Math.random = () => { window.__rc++; return r0(); }; }
 }
-window.addEventListener('blur', () => { if (G.state === 'play' && !S.intro && !manual()) pause(); });
-document.addEventListener('visibilitychange', () => { if (document.hidden && G.state === 'play' && !S.intro && !manual()) pause(); });
-
+window.addEventListener('blur', () => { if ((G.state === 'play' || G.state === 'dead') && !S.intro && !manual()) pause(); });
+document.addEventListener('visibilitychange', () => { if (document.hidden && (G.state === 'play' || G.state === 'dead') && !S.intro && !manual()) pause(); });
 // Unlock audio on any genuine user gesture. (Test runs stay silent: sound effects are throttled in real time.)
 for (const ev of ['keydown', 'pointerdown', 'touchstart', 'mousedown']) window.addEventListener(ev, () => { if (!manual()) AudioSys.init(); }, { passive: true });
 
@@ -230,7 +254,7 @@ function wireEvents() {
   on('dropItem', (kind, pos, s, u, v) => {
     spawnProp('item', G.rail.d + 90, { kind, u: clamp(u, -40, 40), v: clamp(v, 8, 50), hold: 7, ahead: 90 });
   });
-  on('playerDead', () => { S.deadT = 0; G.state = 'dead'; });
+  on('playerDead', () => { if (G.state !== 'play') return; S.deadT = 0; G.state = 'dead'; });
   on('playerDamaged', () => { G.hitStop = 0.05; });
   on('bossStart', startBoss);
   on('bossHit', () => {});
@@ -277,12 +301,18 @@ function wireEvents() {
   MENU_CB.select = () => openSelectScreen();
   MENU_CB.chars = () => openChars((id) => { S.focus = id; }, () => { S.focus = null; closeScreens(); showTitleMenu('main', 'chars'); });
   MENU_CB.resume = () => resume();
-  MENU_CB.retry = () => { resume(); hideScreens(); respawn(true); };
-  MENU_CB.quit = () => { resume(); hideScreens(); enterTitle(false); };
-  MENU_CB.continue = () => { G.run.score = 0; G.run.lives = 3; G.run.continues++; G.run.hits = 0; hideScreens(); respawn(true); };
-  MENU_CB.again = () => startMission();
-  MENU_CB.next = () => afterResults();
-  MENU_CB.toSelect = () => { hideScreens(); enterTitle(false); openSelectScreen(); };
+  MENU_CB.retry = () => retryMission();
+  MENU_CB.quit = () => quitMission();
+  MENU_CB.continue = () => {
+    if (!goLatched || G.state !== 'gameover') return;   // one continue per game over
+    goLatched = false;
+    G.run.score = 0; G.run.lives = 3; G.run.continues++; G.run.hits = 0;
+    hideScreens();
+    respawn(true);
+  };
+  MENU_CB.again = () => { if (G.state === 'results') startMission(); };
+  MENU_CB.next = () => { if (G.state === 'results') afterResults(); };
+  MENU_CB.toSelect = () => { if (G.state !== 'results') return; hideScreens(); enterTitle(false); openSelectScreen(); };
   MENU_CB.pause = () => pause();
   MENU_CB.quality = (q) => applyQuality(q);
 }
@@ -292,11 +322,15 @@ function enterTitle(first) {
   G.state = 'title';
   G.paused = false;
   G.slowMo = 1;
-  clearTimers();
-  clearEnemies(); clearWeapons(); clearFX(); clearRadio(); clearMarkers();
-  if (BOSS.inst.active) BOSS.inst.stop();
-  bossBar(false); warning(false); hideBanner();
-  if (G.warnLoop) { G.warnLoop.stop(0.2); G.warnLoop = null; }
+  G.hitStop = 0;
+  S.deadT = 0; S.deadHandled = false;
+  S.respawning = false;
+  // A fade queued by the previous run (a respawn, a clear-to-results) must not call back into the title;
+  // drop it and the darkness it had already built up.
+  if (S.fade) { S.fade = null; POST.fade = 0; }
+  S.transition = false;
+  menuLatched = false; goLatched = false;
+  clearMissionState();
   hudVisible(false);
   G.run = newRun(G.settings.difficulty);
   if (CUR !== STAGES[0]) useStage(STAGES[0]);
@@ -410,6 +444,7 @@ function startMission() {
   if (S.transition) return;
   S.transition = true;
   hideScreens(); closeScreens();
+  menuLatched = false;
   fadeTo(1, 0.6, () => {
     S.transition = false;
     const def = MISSIONS[CAMP.stage].def;
@@ -432,15 +467,13 @@ function warmStage() {
 
 // Prepare the world for play starting at distance d
 function setupStage(d, intro) {
-  hideScreens(); closeScreens(); clearFlybys();
+  hideScreens(); closeScreens();
   G.state = 'play';
   G.paused = false;
   G.slowMo = 1;
-  clearTimers();
-  clearEnemies(); clearWeapons(); clearFX(); clearRadio(); clearMarkers();
-  if (BOSS.inst.active) BOSS.inst.stop();
-  bossBar(false); warning(false); hideBanner(); clearTip();
-  if (G.warnLoop) { G.warnLoop.stop(0.2); G.warnLoop = null; }
+  S.respawning = false;
+  S.runFinished = false;
+  clearMissionState();
   G.rail.d = d;
   G.rail.speed = 100;
   resetTerrain();
@@ -453,12 +486,10 @@ function setupStage(d, intro) {
   resetWingmen(true);
   CUR.onSetup?.(d, G.run);
   resetCamera(ship);
-  CAM.override = null;
   resetHUDCache();
   hudVisible(true);
   POST.letterbox = intro ? 1 : 0;
   S.intro = intro ? { t: 0 } : null;
-  S.bossCine = null;
   if (d < CUR.bossAt) AudioSys.playMusic(CUR.music, { fade: 0.4 });
   else AudioSys.stopMusic(0.5);
   fadeTo(0, 0.8);
@@ -471,19 +502,54 @@ function setupStage(d, intro) {
 }
 
 function respawn(fromMenu) {
-  const cp = G.run.checkpoint;
-  const d = cp === 0 ? 0 : Math.max(0, cp - 150);
   const run = G.run;
+  const cp = run.checkpoint;
+  const d = cp === 0 ? 0 : Math.max(0, cp - 150);
   run.shield = run.maxShield = Math.max(100, run.maxShield === 140 ? 140 : 100);
   run.laser = Math.max(0, run.laser - 1);
   run.bombs = Math.max(run.bombs, 3);
+  // Respawn starts from a clean slate: the death wait, delayed banners/radio and the old boss bar are dropped
+  // now rather than after the fade, so the fade-out can't overlap a leftover callback, and the death countdown
+  // cannot fire a second respawn while the screen fades.
+  clearMissionState();
+  S.deadT = 0;
+  S.deadHandled = true;
+  S.respawning = true;
+  hideScreens();
+  G.paused = false;
+  AudioSys.setPaused(false);
   fadeTo(1, fromMenu ? 0.35 : 0.6, () => setupStage(d, false));
+}
+
+// ------------------------------------------------------------ Mission lifecycle
+// Pause-menu / results-menu actions can be clicked several times between two frames (fast double clicks, or a
+// click landing as a pause/death transition fires). Each action runs once while its screen is up: the latch is
+// released only when the state has actually moved on, or a fresh pause / game over re-arms it. A retry that is
+// already fading out ignores further commands until the new run has started.
+let menuLatched = false, goLatched = false;
+const fromPausedMenu = () => menuLatched && !S.respawning && (G.state === 'play' || G.state === 'dead');
+function retryMission() {
+  if (!fromPausedMenu()) return;
+  menuLatched = false;
+  resume();
+  respawn(true);
+}
+function quitMission() {
+  const fromPause = fromPausedMenu();
+  const fromGameover = goLatched && G.state === 'gameover';
+  const fromResults = G.state === 'results';
+  if (!fromPause && !fromGameover && !fromResults) return;
+  menuLatched = false; goLatched = false;
+  if (fromPause) resume();
+  enterTitle(false);
 }
 
 function pause() {
   if (G.state !== 'play' && G.state !== 'dead') return;
-  if (G.paused) return;
+  if (G.paused || S.respawning) return;   // a retry fade owns the transition; don't pause inside it
   G.paused = true;
+  G.hitStop = 0;                          // resume must not open on a slow-motion stub of the old hit
+  menuLatched = true;
   showScreen('pause');
   AudioSys.sfx('pause');
   AudioSys.setPaused(true);
@@ -493,13 +559,18 @@ function resume() {
   G.paused = false;
   hideScreens();
   AudioSys.setPaused(false);
-  Input.clearAll();
+  // The key that dismissed the menu (Space doubles as fire) must not act on the first gameplay frame.
+  Input.consumeAll();
 }
 
 function gameOver() {
   G.state = 'gameover';
+  G.paused = false;
+  AudioSys.setPaused(false);
   AudioSys.playMusic('gameover', { fade: 0.3 });
   hudVisible(false);
+  clearRadio(); hideBanner();
+  goLatched = true;
   setGameOverText(G.run.hits > 0 ? `撃墜数 ${G.run.hits}　スコア ${G.run.score.toLocaleString()}` : 'ランサー隊、撃墜……');
   S.goT = 0; S.goShown = false;
 }
@@ -519,9 +590,17 @@ function startBoss() {
 }
 
 function startClear() {
+  // A boss that died while the player was going down still wins the mission; a repeated "defeated" after the
+  // clear has begun must not open a second results screen.
+  if (G.state !== 'play' && G.state !== 'dead') return;
   G.state = 'clear';
   S.t = 0;
   S.clearDone = false;
+  S.deadT = 0;
+  S.deadHandled = true;
+  S.respawning = false;
+  menuLatched = false; goLatched = false;
+  clearRadio(); hideBanner(); clearTip(); warning(false); resetBossGauge();
   ship.controllable = false;
   ship.autoPilot = { u: 0, v: 34 };
   resetCharge();
@@ -539,6 +618,8 @@ function startClear() {
 }
 
 function finishRun() {
+  if (G.state !== 'clear' || S.runFinished) return;   // one results screen per clear
+  S.runFinished = true;
   const run = G.run;
   run.time = G.time - run.startTime;
   const acc = run.shots ? Math.round(run.shotsHit / run.shots * 100) : 0;
@@ -574,6 +655,8 @@ function finishRun() {
   }
   const meta = `命中率 <b>${acc}%</b>　リング <b>${run.rings}</b>　タイム <b>${mm}:${String(ss).padStart(2, '0')}</b><br>${CUR.resultNote?.(run) ?? ''}${isBest ? '　<b>NEW RECORD!</b>' : ''}${storyLine}`;
   G.state = 'results';
+  G.paused = false;
+  AudioSys.setPaused(false);
   hudVisible(false);
   showResults({ rows, total, rank, medal, meta, sub: CUR.resultSub, mode: CAMP.mode });
 }
@@ -717,9 +800,10 @@ function frame(rdt) {
   updateInput(rdt);
   beginFXFrame();
 
-  // time scaling (pause, hit-stop, slow motion)
+  // time scaling (pause, hit-stop, slow motion). A paused mission freezes gameplay time completely: the
+  // level distance, mission timer, death countdown and every `after()` callback only advance on dt.
   let ts = G.paused ? 0 : 1;
-  if (G.hitStop > 0) { G.hitStop -= rdt; ts *= 0.15; }
+  if (G.hitStop > 0) { G.hitStop -= rdt; if (ts > 0) ts *= 0.15; }
   ts *= G.slowMo;
   const dt = rdt * ts;
   G.dt = dt;
@@ -795,12 +879,13 @@ function attract(rdt) {
 
 function updatePlay(dt, rdt) {
   const run = G.run;
-  // pause toggle
+  // pause toggle (one press opens or closes the menu; a held key does not toggle it every frame)
   if (Input.pressed('pause')) {
     if (G.paused) { if (!menuBack()) resume(); }
     else pause();
   } else if (G.paused) {
-    if (Input.pressed('back') && !Input.pressed('pause')) { if (!menuBack()) resume(); }
+    // Esc as "back": close a settings/controls sub-panel first, otherwise resume
+    if (Input.pressed('back')) { if (!menuBack()) resume(); }
     else updateMenus();
   }
   if (G.paused) { renderPausedHUD(rdt); return; }
@@ -825,9 +910,9 @@ function updatePlay(dt, rdt) {
   }
   // boss HP
   if (BOSS.inst.active) setBossHP(BOSS.inst.hp / BOSS.inst.maxHp);
-  // death flow
+  // death flow: the wait runs in gameplay time, so a pause freezes it at the point it was paused
   if (G.state === 'dead') {
-    S.deadT += rdt;
+    S.deadT += dt;
     if (S.deadT > 2.0 && !S.deadHandled) {
       S.deadHandled = true;
       run.deaths++;
