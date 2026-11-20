@@ -1,0 +1,9 @@
+{
+  "name": "glmc",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A Minecraft recreation in JavaScript using WebGL",
+  "scripts": {
+    "test": "node test/chunk-loading.test.js && node test/chunk-tasks.test.js && node test/chunk-stress.test.js"
+  }
+}

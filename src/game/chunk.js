@@ -2,6 +2,9 @@
  * A column of blocks LENGTH by WIDTH wide and HEIGHT tall. Blocks are stored
  * as one byte ids, and the mesh only lives on the GPU.
  */
+
+const MAX_MESH_RETRY_FRAMES = 64; // longest wait between retries of a mesh that failed
+
 class Chunk {
   /**
    * Create a chunk from generated blocks
@@ -22,6 +25,9 @@ class Chunk {
     this.translucentMesh = null; // {buffer, faces} of translucent blocks, drawn after every solid mesh
     this.complete = false;
     this.calculating = false;
+    this.unloaded = false; // set when the chunk was dropped, so late results are ignored
+    this.meshFailures = 0; // mesh builds that errored, so they are spaced out when retried
+    this.meshRetryFrame = 0; // loader frame before which no new mesh is requested
     this._meshVersion = 0; // bumped so meshes started earlier are ignored when they finish
   }
 
@@ -77,31 +83,82 @@ class Chunk {
   }
 
   /**
-   * Upload built meshes to the GPU, unless the chunk changed or was freed
-   * since the meshes were started
+   * Upload built meshes to the GPU, unless the chunk changed, was freed or
+   * was unloaded since the meshes were started
    * @param {number} version Version from startMesh
    * @param {{solid: Object, translucent: Object}} mesh Meshes from buildChunkMesh
+   * @param {number} frame Loader frame the upload happens on, for spacing out retries
    */
-  setMesh(version, mesh) {
-    if (version !== this._meshVersion) return;
+  setMesh(version, mesh, frame = 0) {
+    if (this.unloaded || version !== this._meshVersion) return;
 
-    this.solidMesh = this._uploadMesh(this.solidMesh, mesh.solid);
-    this.translucentMesh = this._uploadMesh(this.translucentMesh, mesh.translucent);
+    try {
+      this.solidMesh = this._uploadMesh(this.solidMesh, mesh.solid);
+      this.translucentMesh = this._uploadMesh(this.translucentMesh, mesh.translucent);
+    } catch (error) {
+      // The GPU couldn't take the mesh, so let the chunk be meshed again
+      // instead of leaving it marked as calculating
+      console.error(`Uploading the mesh of chunk ${this.x},${this.z} failed, will retry`, error);
+      this.meshFailed(version, frame);
+      return;
+    }
+
     this.calculating = false;
     this.complete = true;
+    this.meshFailures = 0;
+    this.meshRetryFrame = 0;
+  }
+
+  /**
+   * Give up on a mesh that failed to build, so the chunk can be requested
+   * again instead of staying marked as calculating forever. Retries are
+   * spaced further apart each time, so a chunk that always fails doesn't
+   * take a worker every frame.
+   * @param {number} version Version from startMesh
+   * @param {number} frame Loader frame the failure was seen on
+   */
+  meshFailed(version, frame) {
+    if (this.unloaded || version !== this._meshVersion) return;
+
+    this.calculating = false;
+    this.complete = false;
+    this.meshFailures++;
+    const wait = Math.min(2 ** (this.meshFailures - 1), MAX_MESH_RETRY_FRAMES);
+    this.meshRetryFrame = frame + wait;
+  }
+
+  /**
+   * Check whether the chunk's mesh may be requested again now
+   * @param {number} frame Current loader frame
+   * @returns {boolean} Whether a failed mesh has waited long enough to retry
+   */
+  canRetryMesh(frame) {
+    return this.meshRetryFrame <= frame;
   }
 
   /**
    * Rebuild the mesh on the main thread right away, for changes the player
-   * should see immediately
+   * should see immediately. A failure is logged and leaves the chunk ready to
+   * be meshed again on the next loader frame instead of stuck in progress.
    */
   buildMeshNow() {
     const version = this.startMesh();
-    this.setMesh(version, buildChunkMesh(createMeshArea(this), this.X, this.Z));
+
+    try {
+      this.setMesh(version, buildChunkMesh(createMeshArea(this), this.X, this.Z));
+    } catch (error) {
+      console.error(`Meshing chunk ${this.x},${this.z} failed`, error);
+
+      // A player edit shouldn't wait out a backoff: leave the chunk retryable now
+      this.meshFailed(version, 0);
+      this.meshRetryFrame = 0;
+    }
   }
 
   /**
-   * Free the chunk's mesh, keeping its blocks
+   * Free the chunk's mesh, keeping its blocks. Any mesh still being built is
+   * ignored when it arrives, and a later request starts over without waiting
+   * out an old retry delay.
    */
   freeMesh() {
     this._meshVersion++;
@@ -109,12 +166,24 @@ class Chunk {
     this.translucentMesh = this._uploadMesh(this.translucentMesh, null);
     this.complete = false;
     this.calculating = false;
+    this.meshFailures = 0;
+    this.meshRetryFrame = 0;
   }
 
   /**
-   * Free everything the chunk holds on the GPU before it is dropped
+   * Check whether the chunk holds a mesh on the GPU
+   * @returns {boolean} Whether there is anything to free or draw
+   */
+  hasMesh() {
+    return this.solidMesh != null || this.translucentMesh != null;
+  }
+
+  /**
+   * Free everything the chunk holds on the GPU before it is dropped, and
+   * make sure results still on the way are not uploaded to it
    */
   unload() {
+    this.unloaded = true;
     this.freeMesh();
   }
 
@@ -131,7 +200,15 @@ class Chunk {
     }
 
     const buffer = current?.buffer ?? new Buffer();
-    buffer.upload(gl, data.vertices, data.indices);
+
+    try {
+      buffer.upload(gl, data.vertices, data.indices);
+    } catch (error) {
+      // A newly created buffer that never received data would otherwise leak
+      if (current == null) buffer.destroy(gl);
+      throw error;
+    }
+
     return { buffer: buffer, faces: data.indices.length / 6 };
   }
 

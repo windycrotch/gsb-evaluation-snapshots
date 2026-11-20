@@ -15,16 +15,18 @@ const UNLOAD_MARGIN = 3; // chunks past the render distance keep their blocks th
 const GENERATE_OFFSETS = createChunkOffsets(2); // chunks that must be generated before meshing one
 const WORKER_SCRIPT = 'src/workers/chunk-worker.js';
 const MAX_WORKERS = 8;
+const MAX_GENERATE_RETRY_FRAMES = 64; // longest wait between retries of a chunk whose generation failed
 
 const frameBudget = new FrameBudget();
 let chunkWorkers = null; // created on first use
 let pendingChunks = new Set(); // keys of chunks being generated
-let failedChunks = new Set(); // keys of chunks whose generation failed, so it isn't retried every frame
+let failedChunks = new Map(); // key -> {attempts, retryFrame}: generation failures, with a backoff so they aren't retried every frame
 let finishedTasks = []; // results waiting for main thread time
 let loaderEpoch = 0; // bumped when the world is cleared, so results for the old world are dropped
 let chunkOffsets = []; // [dx, dz] around the player's chunk, nearest first
 let chunkOffsetsRadius = -1;
 let lastUnloadCenter = null; // chunk key of the player's chunk at the last unload pass
+let loaderFrame = 0; // frames the loader has run, used to space out retries
 
 /**
  * Load, generate and mesh the chunks around the player. Workers do the heavy
@@ -33,6 +35,7 @@ let lastUnloadCenter = null; // chunk key of the player's chunk at the last unlo
 function generateRadius() {
   const workers = getChunkWorkers();
   frameBudget.startFrame();
+  loaderFrame++;
 
   const cx = floor(player.x / LENGTH);
   const cz = floor(player.z / WIDTH);
@@ -82,7 +85,8 @@ function advanceChunk(x, z) {
   }
 
   // Meshes need to know which blocks are see-through, which comes from the atlas
-  if (hasBlockLayers() && getChunkWorkers().hasCapacity() && frameBudget.canRun('request-mesh'))
+  if (hasBlockLayers() && getChunkWorkers().hasCapacity() && chunk.canRetryMesh(loaderFrame) &&
+    frameBudget.canRun('request-mesh'))
     frameBudget.run('request-mesh', () => requestMesh(chunk));
 }
 
@@ -94,7 +98,12 @@ function advanceChunk(x, z) {
 function requestGeneration(x, z) {
   const key = getChunkKey(x, z);
   const workers = getChunkWorkers();
-  if (pendingChunks.has(key) || failedChunks.has(key) || !workers.hasCapacity()) return;
+  if (pendingChunks.has(key) || !workers.hasCapacity()) return;
+
+  // A chunk that failed is retried, but not every frame, so a broken chunk
+  // can't monopolize the workers while the rest of the world keeps loading
+  const failure = failedChunks.get(key);
+  if (failure && loaderFrame < failure.retryFrame) return;
 
   const epoch = loaderEpoch;
   pendingChunks.add(key);
@@ -134,17 +143,23 @@ function requestMesh(chunk) {
  * @param {number} r Render distance in chunks
  */
 function finishTasks(cx, cz, r) {
+  // Results for a world that has since been cleared must not touch this one,
+  // and dropping them first keeps them from blocking newer results
+  if (finishedTasks.some(task => task.epoch !== loaderEpoch))
+    finishedTasks = finishedTasks.filter(task => task.epoch === loaderEpoch);
+
   while (finishedTasks.length > 0 && frameBudget.canRun(finishedTasks[0].name)) {
     const task = finishedTasks.shift();
-    if (task.epoch !== loaderEpoch) continue;
 
     if (task.name === 'adopt') {
       frameBudget.run('adopt', () => adoptChunk(task, cx, cz, r));
     } else if (task.error) {
-      // Leave the chunk marked as meshing so it isn't retried every frame
-      console.error(`Meshing chunk ${task.chunk.x},${task.chunk.z} failed`, task.error);
+      // The chunk can be requested again, after a wait, instead of staying
+      // marked as meshing forever
+      console.error(`Meshing chunk ${task.chunk.x},${task.chunk.z} failed, will retry`, task.error);
+      frameBudget.run('upload', () => task.chunk.meshFailed(task.version, loaderFrame));
     } else {
-      frameBudget.run('upload', () => task.chunk.setMesh(task.version, task.result));
+      frameBudget.run('upload', () => task.chunk.setMesh(task.version, task.result, loaderFrame));
     }
   }
 }
@@ -161,13 +176,22 @@ function adoptChunk(task, cx, cz, r) {
   pendingChunks.delete(key);
 
   if (task.error) {
-    failedChunks.add(key);
-    console.error(`Generating chunk ${key} failed`, task.error);
+    // Retry later, spacing attempts further apart each time
+    const attempts = (failedChunks.get(key)?.attempts ?? 0) + 1;
+    const wait = Math.min(2 ** (attempts - 1), MAX_GENERATE_RETRY_FRAMES);
+    failedChunks.set(key, { attempts: attempts, retryFrame: loaderFrame + wait });
+    console.error(`Generating chunk ${key} failed, will retry`, task.error);
     return;
   }
 
+  failedChunks.delete(key);
+
   // The player may have moved on while the chunk was generated
   if (Math.max(Math.abs(task.x - cx), Math.abs(task.z - cz)) > r + UNLOAD_MARGIN) return;
+
+  // A chunk that arrived for this world is not replaced by a second copy of
+  // itself, which would leak the buffers the first copy holds
+  if (getLoadedChunk(task.x, task.z)) return;
 
   const generated = task.result;
   remapGeneratedChunk(generated, Uint8Array.from(generated.palette, getBlockTypeId));
@@ -207,6 +231,7 @@ function resetChunkLoader() {
   pendingChunks.clear();
   failedChunks.clear();
   finishedTasks = [];
+  loaderFrame = 0;
   loaderEpoch++;
 }
 /**
@@ -256,13 +281,23 @@ function unloadFarChunks(cx, cz, r) {
 
       if (distance > r + UNLOAD_MARGIN) {
         chunk.unload();
+        failedChunks.delete(getChunkKey(chunk.x, chunk.z));
         delete row[z];
-      } else if (distance > r + MESH_KEEP_MARGIN && (chunk.complete || chunk.calculating)) {
+      } else if (distance > r + MESH_KEEP_MARGIN && (chunk.complete || chunk.calculating || chunk.hasMesh())) {
+        // Free the GPU buffers even if a mesh is still being built, which is
+        // then dropped when it arrives
         chunk.freeMesh();
       }
     }
 
     if (Object.keys(row).length === 0) delete Chunks[x];
+  }
+
+  // Failures of chunks that were never adopted leave no chunk to free, so
+  // forget them once they are out of range too
+  for (const key of failedChunks.keys()) {
+    const [x, z] = key.split(',').map(Number);
+    if (Math.max(Math.abs(x - cx), Math.abs(z - cz)) > r + UNLOAD_MARGIN) failedChunks.delete(key);
   }
 }
 
