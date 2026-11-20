@@ -108,6 +108,13 @@ upscaler.dispatchUpscale({ color: beautyColor, deltaTime }, camera); // + reacti
 - A split frame is in flight between the two calls (`upscaler.guidesPending`). Inside it,
   `dispatch()` and a second `dispatchGuides()` throw; finish with `dispatchUpscale()`.
   `dispatchUpscale()` without a preceding `dispatchGuides()` throws too.
+- If the late stage will never come — the color render threw, the page hid, a resize
+  preempted the frame — `upscaler.abortFrame()` abandons the split frame: the next
+  `dispatchGuides()`/`dispatch()` starts a fresh frame instead of throwing forever, and
+  temporal history is reset so nothing the abandoned frame staged (its jitter phase, its
+  guides products) leaks into the new accumulation. `abortFrame()` is a no-op when no
+  split frame is in flight, and `configure()` mid-frame abandons it the same way (the
+  old guides products die with the old texture set).
 - Frame-end bookkeeping (ping-pong flips, the history reset) happens once per frame: in
   `dispatch()`, in `dispatchUpscale()`, or, on the `guides` path, in `dispatchGuides()`.
 - `upscaler.gpuTimings` reports both submits together: the early stage's timings are held

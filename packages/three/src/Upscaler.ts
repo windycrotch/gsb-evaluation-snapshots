@@ -425,6 +425,20 @@ export class Upscaler {
         this._core.dispatchUpscale(this._resolveInputs(inputs), this._frameInfo(camera));
     }
 
+    /**
+     * Abandons a split frame whose late stage will never come (the color
+     * render failed, the page hid, a resize preempted it): clears the
+     * in-flight state so the next {@link dispatchGuides}/{@link dispatch}
+     * starts a fresh frame, resets temporal history so nothing the abandoned
+     * frame staged leaks into it, and removes this frame's jitter from the
+     * camera as {@link endFrame} would. No-op when no split frame is in
+     * flight. {@link configure} abandons an in-flight frame the same way.
+     */
+    abortFrame(): void {
+        this._core?.abortFrame();
+        this._restoreView();
+    }
+
     /** Releases all GPU resources. */
     dispose(): void {
         this._core?.dispose();

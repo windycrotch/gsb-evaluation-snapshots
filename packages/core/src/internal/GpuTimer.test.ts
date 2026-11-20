@@ -166,6 +166,42 @@ describe('GpuTimer', () => {
         expect([...timer.timings.keys()].sort()).toEqual(['rcas', 'reconstruct']);
     });
 
+    it('never publishes an abandoned split frame whose index was retired', async () => {
+        const { device } = mockDevice();
+        const timer = new GpuTimer(device);
+        await timer.ready;
+
+        submit(timer, 0, ['reconstruct', 'accumulate']);
+        await timer.drain();
+        // Frame 1's early submit lands, then the frame is abandoned — the
+        // core's abortFrame() retires the index, so the next frame is 2.
+        submit(timer, 1, ['depthClip'], false);
+        await timer.drain();
+        submit(timer, 2, ['reconstruct'], false);
+        submit(timer, 2, ['accumulate']);
+        await timer.drain();
+        // The abandoned frame's pass never merges into frame 2's readout.
+        expect([...timer.timings.keys()].sort()).toEqual(['accumulate', 'reconstruct']);
+    });
+
+    it('frees the readback slot of an abandoned split frame', async () => {
+        const { device } = mockDevice();
+        const timer = new GpuTimer(device);
+        await timer.ready;
+
+        // Abandon more early submits than there are slots (8): if an
+        // abandoned frame held its slot, the pool would run dry here.
+        for (let frame = 0; frame < 12; frame++) {
+            submit(timer, frame, ['reconstruct'], false);
+            await timer.drain();
+        }
+        // A fresh frame still gets a slot with timestamp writes attached.
+        timer.beginFrame(12);
+        expect(timer.passDescriptor('reconstruct')).toBeDefined();
+        timer.readback(false);
+        await timer.drain();
+    });
+
     it('drops a label once a later frame no longer runs that pass', async () => {
         const { device } = mockDevice();
         const timer = new GpuTimer(device);

@@ -458,6 +458,10 @@ export class UpscalerCore<THandle = GPUTexture> {
     configure(config: UpscalerConfig): void {
         this._ensureResources();
 
+        // Reconfiguring mid-split-frame abandons it: its guides products die
+        // with the old texture set below, so the frame can never be finished.
+        this.abortFrame();
+
         // A new pass graph: samples still in flight from the old one must not
         // land in gpuTimings after it.
         this._timer?.reset();
@@ -609,6 +613,7 @@ export class UpscalerCore<THandle = GPUTexture> {
      * True while a split frame is in flight — {@link dispatchGuides} has run
      * this frame and {@link dispatchUpscale} hasn't yet. Lets a driver decide
      * between finishing the split frame and the monolithic {@link dispatch}.
+     * If the late stage will never come, {@link abortFrame} clears this.
      */
     get guidesPending(): boolean {
         return this._guidesPending;
@@ -653,6 +658,31 @@ export class UpscalerCore<THandle = GPUTexture> {
     resetHistory(): void {
         this._pendingReset = true;
         this._jitter.reset();
+    }
+
+    /**
+     * Abandons a split frame whose late stage will never come — the color
+     * render failed, the page hid, or a resize preempted it. Clears the
+     * in-flight state so the next {@link dispatchGuides}/{@link dispatch}
+     * starts a fresh frame instead of throwing "split frame in flight"
+     * forever, and resets temporal history so nothing the abandoned frame
+     * staged (its jitter phase, its guides products) can leak into the new
+     * frame's accumulation. No-op when no split frame is in flight —
+     * including on the `guides` path, where {@link dispatchGuides} ends the
+     * frame itself. {@link configure} abandons an in-flight frame the same
+     * way.
+     */
+    abortFrame(): void {
+        if (!this._guidesPending) return;
+        this._guidesPending = false;
+        // Never reuse the abandoned frame's index: a GPU-timer sample from
+        // its early submit can still be in flight keyed on it, and the next
+        // frame's timings must not merge with it.
+        this._frameIndex++;
+        // The abandoned frame advanced the jitter but never committed, so
+        // history's previous-jitter tracking is desynced — start clean
+        // rather than reproject against it.
+        this.resetHistory();
     }
 
     //* Frame Lifecycle
@@ -763,8 +793,9 @@ export class UpscalerCore<THandle = GPUTexture> {
      * final beauty color exists can consume them.
      *
      * On the `temporal` path this starts a split frame: render/composite the
-     * final color afterwards, then finish with {@link dispatchUpscale}. On
-     * the `guides` path this is the whole frame. Queue ordering makes the
+     * final color afterwards, then finish with {@link dispatchUpscale} — or
+     * abandon it with {@link abortFrame} when the late stage will never come.
+     * On the `guides` path this is the whole frame. Queue ordering makes the
      * outputs visible to any work submitted afterwards — no explicit sync.
      * @param inputs - Depth + velocity (+ optional reset/deltaTime)
      * @param camera - This frame's camera facts

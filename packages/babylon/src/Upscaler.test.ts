@@ -115,4 +115,14 @@ describe('Babylon Upscaler', () => {
             expect.objectContaining({ near: 0.1, far: 100, perspective: true, reversedDepth: false }),
         );
     });
+
+    it('aborts a split frame through the core and ends the jitter window', () => {
+        const { upscaler, core, jitter } = upscalerWithCore([]);
+        const abortFrame = vi.fn();
+        Object.assign(core, { abortFrame });
+        upscaler.beginFrame();
+        upscaler.abortFrame();
+        expect(abortFrame).toHaveBeenCalledOnce();
+        expect(jitter).toMatchObject({ x: 0, y: 0 });
+    });
 });

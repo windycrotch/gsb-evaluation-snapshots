@@ -68,6 +68,16 @@ describe('pixi Upscaler', () => {
         expect(log).toEqual(['finishRenderPass', 'encode']);
         expect(core.encode.mock.calls[0][0]).toBe(renderer.encoder.commandEncoder);
     });
+
+    it('forwards abortFrame to the core and tolerates a missing one', () => {
+        const { upscaler, core } = upscalerWithCore([]);
+        const abortFrame = vi.fn();
+        Object.assign(core, { abortFrame });
+        upscaler.abortFrame();
+        expect(abortFrame).toHaveBeenCalledOnce();
+        Object.assign(upscaler as unknown as object, { _core: null });
+        expect(() => upscaler.abortFrame()).not.toThrow();
+    });
 });
 
 describe('pixi texture allocator', () => {

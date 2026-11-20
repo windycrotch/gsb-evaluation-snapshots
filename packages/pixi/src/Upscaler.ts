@@ -293,6 +293,15 @@ export class Upscaler {
         this._readyCore().dispatchUpscale(this._resolveInputs(inputs), camera);
     }
 
+    /**
+     * Abandons a split frame whose late stage will never come (the core's
+     * `abortFrame`): the next `dispatchGuides`/`dispatch` starts a fresh
+     * frame with reset history. No-op when no split frame is in flight.
+     */
+    abortFrame(): void {
+        this._core?.abortFrame();
+    }
+
     /** Releases the GPU resources. */
     dispose(): void {
         this._core?.dispose();

@@ -325,6 +325,17 @@ export class Upscaler {
         core.dispatchUpscale(resolved, frame);
     }
 
+    /**
+     * Abandons a split frame whose late stage will never come (see the core's
+     * `abortFrame`): the next `dispatchGuides`/`dispatch` starts a fresh
+     * frame with reset history. Also ends the jitter window, like
+     * {@link endFrame}. No-op when no split frame is in flight.
+     */
+    abortFrame(): void {
+        this._core?.abortFrame();
+        this._setMaterialJitter(null);
+    }
+
     /** Releases the GPU resources and removes the jitter plugin from the scene's materials. */
     dispose(): void {
         this._core?.dispose();
