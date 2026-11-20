@@ -690,18 +690,41 @@ var CompositeCurve = makeClass(Curve2D, {
             onCurveChange,
             onArrayChange,
             curve_add,
-            curve_del;
+            curve_del,
+            invalidate;
 
         if (!(self instanceof CompositeCurve)) return new CompositeCurve(curves);
         if (null == curves) curves = [];
         Object2D.call(self);
 
+        // drop every derived cache, so the next read is recomputed from the
+        // current child curves (in-place edits, array changes, matrix changes)
+        invalidate = function invalidate() {
+            _points = null;
+            __curves = null;
+            _length = null;
+            _bbox = null;
+            _hull = null;
+        };
         curve_add = function(c) {
-            if (c instanceof Curve2D) c.onChange(onCurveChange);
+            if (c instanceof Curve2D)
+            {
+                // register the callback only once, even if the same curve
+                // appears multiple times in the array
+                if (!c.$cb || (-1 === c.$cb.indexOf(onCurveChange))) c.onChange(onCurveChange);
+            }
             return c;
         };
         curve_del = function(c) {
-            if (c instanceof Curve2D) c.onChange(onCurveChange, false);
+            if (c instanceof Curve2D)
+            {
+                // detach only when no other occurrence of this curve is left,
+                // otherwise the remaining duplicate would stop notifying
+                if (!is_array(_curves) || (-1 === _curves.indexOf(c)))
+                {
+                    c.onChange(onCurveChange, false);
+                }
+            }
             return c;
         };
         onCurveChange = function onCurveChange(curve) {
@@ -723,15 +746,31 @@ var CompositeCurve = makeClass(Curve2D, {
             }
         };
         onArrayChange.id = self.id;
+        // keep the exact callbacks reachable from the prototype dispose method,
+        // unbinding must use the same function that was registered (not the id)
+        def(self, '_onCurveChange', {
+            get: function() {
+                return onCurveChange;
+            },
+            enumerable: false,
+            configurable: true
+        });
+        def(self, '_curveDel', {
+            get: function() {
+                return curve_del;
+            },
+            enumerable: false,
+            configurable: true
+        });
 
         def(self, 'points', {
             get: function() {
                 if (null == _points)
                 {
-                    _points = _curves.reduce(function(points, curve) {
+                    _points = is_array(_curves) ? _curves.reduce(function(points, curve) {
                         points.push.apply(points, curve.points);
                         return points;
-                    }, []);
+                    }, []) : [];
                 }
                 return _points;
             },
@@ -776,7 +815,7 @@ var CompositeCurve = makeClass(Curve2D, {
                     else if (null == curves)
                     {
                         _curves = null;
-                        __curves = null;
+                        invalidate();
                     }
                 }
             },
@@ -788,7 +827,7 @@ var CompositeCurve = makeClass(Curve2D, {
                 if (null == __curves)
                 {
                     var matrix = self.matrix;
-                    __curves = self.curves.map(function(curve) {return curve.transform(matrix, true);});
+                    __curves = is_array(_curves) ? _curves.map(function(curve) {return curve.transform(matrix, true);}) : [];
                 }
                 return __curves;
             },
@@ -856,13 +895,9 @@ var CompositeCurve = makeClass(Curve2D, {
         self.isChanged = function(isChanged) {
             if (true === isChanged)
             {
-                _points = null;
-                __curves = null;
-                _length = null;
-                _bbox = null;
-                _hull = null;
+                invalidate();
             }
-            else if (false === isChanged)
+            else if ((false === isChanged) && is_array(_curves))
             {
                 _curves.forEach(function(c) {c.isChanged(false);});
             }
@@ -872,16 +907,14 @@ var CompositeCurve = makeClass(Curve2D, {
     },
     name: 'CompositeCurve',
     dispose: function() {
-        var self = this;
-        if (self.curves)
+        var self = this, curves = self.curves;
+        if (is_array(curves))
         {
-            unobserveArray(self.curves, function(c) {
-                if (c instanceof Curve2D) c.onChange(self.id, false);
-                return c;
-            });
+            // unbind with the exact callbacks used at registration time
+            unobserveArray(curves, self._curveDel);
             self.curves = null;
-            self.points = null;
         }
+        self.points = null;
         Object2D.prototype.dispose.call(self);
     },
     clone: function() {

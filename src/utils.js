@@ -1522,18 +1522,63 @@ function observeArray(array, onAdd, onDel, equals)
     if (is_function(array.onChange)) return array;
 
     var notify = function(changed) {
-        array.$cb.forEach(function(cb) {cb(changed);});
+        if (array.$cb) array.$cb.forEach(function(cb) {cb(changed);});
     };
 
     var doNotifyItems = true;
 
     equals = equals || equal;
 
+    // turn intercepted accessor items back into plain data properties,
+    // so that native structural array methods can operate on them safely
+    var unwrapItems = function() {
+        for (var i=0,n=array.length; i<n; ++i)
+        {
+            var key = Str(i), desc = Object.getOwnPropertyDescriptor(array, key);
+            if (desc && (desc.get || desc.set))
+            {
+                var value = array[i];
+                delete array[key];
+                def(array, key, {value:value, writable:true, enumerable:true, configurable:true});
+            }
+        }
+    };
+
+    var itemInterceptor = function(index) {
+        var key = Str(index), val = array[index];
+        def(array, key, {
+            get: function() {
+                return val;
+            },
+            set: function(value) {
+                var old = val;
+                if (onAdd) value = onAdd(value);
+                var doNotify = !equals(old, value);
+                // update the slot before unbinding, so the removal callback
+                // observes the new contents of the array
+                val = value;
+                if (onDel && old !== value) onDel(old);
+                if (doNotify && doNotifyItems)
+                {
+                    notify({target:array, method:'set', added:{from:index, to:index}});
+                }
+            },
+            enumerable: true,
+            configurable: true
+        });
+    };
+    var wrapItems = function(start, stop) {
+        for (var index=start; index<stop; ++index)
+        {
+            itemInterceptor(index);
+        }
+    };
+
     var methodInterceptor = function() {
         var interceptor = function(method) {
             return function() {
-                var args = arguments, result = null,
-                    index = 0, deleted = null,
+                var cargs = Array.prototype.slice.call(arguments),
+                    result = null, deleted = null, startIndex = 0,
                     initialLength = array.length,
                     finalLength = 0;
 
@@ -1541,42 +1586,60 @@ function observeArray(array, onAdd, onDel, equals)
                 {
                     if ('push' === method || 'unshift' === method)
                     {
-                        args = Array.prototype.map.apply(args, onAdd);
+                        cargs = cargs.map(onAdd);
                     }
-                    if ('splice' === method && 2 < args.length)
+                    else if ('splice' === method && 2 < cargs.length)
                     {
-                        args = Array.prototype.slice.call(args, 0, 2).concat(Array.prototype.slice.call(args, 2).map(onAdd));
+                        cargs = cargs.slice(0, 2).concat(cargs.slice(2).map(onAdd));
                     }
                 }
 
                 if ('shift' === method || 'unshift' === method || 'splice' === method)
                 {
-                    // avoid superfluous notifications
+                    // avoid superfluous per-item notifications for structural changes
                     doNotifyItems = false;
                 }
-                result = Array.prototype[method].apply(array, args);
-                if ('splice' === method && result.length)
+                // shift/unshift/splice move existing items across indices, which
+                // would re-enter the item accessors mid-operation; unwrap first so
+                // the native method sees plain data. push/pop only touch the array
+                // boundary (a fresh index / a configurable delete), so they can keep
+                // the accessors and stay O(1).
+                var rewrapAll = ('shift' === method || 'unshift' === method || 'splice' === method);
+                if (rewrapAll) unwrapItems();
+                try
                 {
-                    deleted = result;
+                    result = Array.prototype[method].apply(array, cargs);
                 }
-                else if (0 < initialLength && 'pop' === method || 'shift' === method)
+                finally
+                {
+                    // restore the invariants even if the native call throws
+                    finalLength = array.length;
+                    if (rewrapAll)
+                    {
+                        wrapItems(0, finalLength);
+                    }
+                    else if ('push' === method && finalLength > initialLength)
+                    {
+                        wrapItems(initialLength, finalLength);
+                    }
+                    // structural changes are done, per-item notifications resume
+                    doNotifyItems = true;
+                }
+
+                if ('splice' === method)
+                {
+                    deleted = result && result.length ? Array.prototype.slice.call(result) : null;
+                    // resolve the start index against the pre-splice length, as Array#splice does
+                    startIndex = Num(cargs[0]);
+                    startIndex = 0 > startIndex ? stdMath.max(0, initialLength + startIndex) : stdMath.min(startIndex, initialLength);
+                }
+                else if (0 < initialLength && ('pop' === method || 'shift' === method))
                 {
                     deleted = [result];
                 }
                 if (deleted && onDel)
                 {
                     deleted.forEach(onDel);
-                }
-                if ('unshift' === method || 'splice' === method)
-                {
-                    // restore notifications
-                    doNotifyItems = true;
-                }
-
-                finalLength = array.length;
-                if (('push' === method || 'unshift' === method || 'splice' === method) && (finalLength > initialLength))
-                {
-                    itemInterceptor(initialLength, finalLength);
                 }
 
                 if ('push' === method)
@@ -1587,9 +1650,9 @@ function observeArray(array, onAdd, onDel, equals)
                 {
                     notify({target:array, method:method, added:{from:0, to:finalLength-initialLength-1}});
                 }
-                else if ('splice' === method && 2 < args.length)
+                else if ('splice' === method && 2 < cargs.length)
                 {
-                    notify({target:array, method:method, added:{from:args[0], to:args[0]+args.length-3}, deleted:deleted});
+                    notify({target:array, method:method, added:{from:startIndex, to:startIndex+cargs.length-3}, deleted:deleted});
                 }
                 else
                 {
@@ -1602,32 +1665,6 @@ function observeArray(array, onAdd, onDel, equals)
         ['push', 'pop', 'shift', 'unshift', 'splice'].forEach(function(method) {
             array[method] = interceptor(method);
         });
-    };
-
-    var itemInterceptor = function(start, stop) {
-        var interceptor = function(index) {
-            var key = Str(index), val = array[index];
-            def(array, key, {
-                get: function() {
-                    return val;
-                },
-                set: function(value) {
-                    if (onAdd) value = onAdd(value);
-                    var doNotify = !equals(val, value);
-                    if (onDel) onDel(val);
-                    val = value;
-                    if (doNotify && doNotifyItems)
-                    {
-                        notify({target:array, method:'set', added:{from:index, to:index}});
-                    }
-                },
-                enumerable: true
-            });
-        };
-        for (var index=start; index<stop; ++index)
-        {
-            interceptor(index);
-        }
     };
 
     array.$cb = [];
@@ -1643,7 +1680,7 @@ function observeArray(array, onAdd, onDel, equals)
             else
             {
                 index = array.$cb.indexOf(cb);
-                if (-1 !== index) array.$cb.push(cb);
+                if (-1 === index) array.$cb.push(cb);
             }
         }
     };
@@ -1655,7 +1692,7 @@ function observeArray(array, onAdd, onDel, equals)
         }
     }
     methodInterceptor();
-    itemInterceptor(0, array.length);
+    wrapItems(0, array.length);
 
     return array;
 }
@@ -1670,9 +1707,24 @@ function unobserveArray(array, onDel)
         array[method] = Array.prototype[method];
     });
 
-    var values = onDel ? array.map(onDel) : array.slice();
+    var values = array.slice();
+
+    // drop the item accessors (they are configurable) and clear the array first,
+    // so that removal callbacks observe an array which no longer contains the
+    // removed items (important for duplicate items)
+    for (var i=0,n=array.length; i<n; ++i)
+    {
+        delete array[i];
+    }
     array.length = 0;
-    array.push.apply(array, values);
+
+    if (onDel) values.forEach(onDel);
+
+    // restore the plain (unobserved) items so external references stay valid
+    for (i=0,n=values.length; i<n; ++i)
+    {
+        array[i] = values[i];
+    }
 
     return array;
 }
