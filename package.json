@@ -1,0 +1,73 @@
+{
+	"name": "react-offscreen-webgl",
+	"version": "0.0.2-alpha",
+	"description": "Render WebGL shaders in React using OffscreenCanvas and a Web Worker",
+	"exports": {
+		"types": "./dist/src/index.d.ts",
+		"import": "./dist/index.es.js",
+		"require": "./dist/index.cjs.js"
+	},
+	"types": "./dist/src/index.d.ts",
+	"type": "module",
+	"files": [
+		"dist",
+		"README.md",
+		"CONTRIBUTING.md"
+	],
+	"scripts": {
+		"build": "tsc && vite build",
+		"dev": "cd tests/vite && npm run dev",
+		"format": "prettier --write .",
+		"format:check": "prettier --check .",
+		"test": "vitest run",
+		"test:types": "tsc -p tests/types/tsconfig.json",
+		"test:attest": "vitest run --config vitest.attest.config.ts",
+		"bench:types": "node --import tsx tests/type-performance/uniforms.bench.ts --benchErrorOnThresholdExceeded --benchPercentThreshold 20",
+		"test:unit": "vitest run --project unit",
+		"test:browser": "vitest run --project browser",
+		"test:browser:headed": "HEADED=true vitest --project browser",
+		"prepare": "husky"
+	},
+	"keywords": [
+		"react",
+		"webgl",
+		"offscreen-canvas",
+		"web-worker",
+		"shader",
+		"glsl"
+	],
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/tomaspietravallo/react-offscreen-webgl.git"
+	},
+	"author": "Tomás Pietravallo",
+	"license": "MIT",
+	"peerDependencies": {
+		"react": ">=17"
+	},
+	"devDependencies": {
+		"@ark/attest": "0.58.0",
+		"@semantic-release/github": "12.0.11",
+		"@types/react": "^19.1.8",
+		"@types/react-dom": "19.3.0",
+		"@vitest/browser": "^3.0.0",
+		"conventional-changelog-conventionalcommits": "10.4.1",
+		"husky": "^9.1.7",
+		"lint-staged": "^16.1.2",
+		"playwright": "1.65.1",
+		"prettier": "^3.6.2",
+		"react": "^19.1.0",
+		"react-dom": "19.3.1",
+		"semantic-release": "26.0.1",
+		"tsx": "4.23.15",
+		"typescript": "^5.8.3",
+		"vite": "^7.0.0",
+		"vite-plugin-dts": "^4.5.4",
+		"vitest": "^3.0.0"
+	},
+	"lint-staged": {
+		"*.{js,jsx,ts,tsx,json,css,md}": [
+			"prettier --write"
+		]
+	}
+}
