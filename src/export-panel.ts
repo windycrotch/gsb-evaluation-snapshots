@@ -1,4 +1,3 @@
-import type { EventHandle } from '@playcanvas/observer';
 import { Button, Panel, Container } from '@playcanvas/pcui';
 import type { PanelArgs } from '@playcanvas/pcui';
 import type { Texture, WebglGraphicsDevice } from 'playcanvas';
@@ -13,8 +12,23 @@ import { WebpExporter } from './webp-exporter';
 
 type Exporter = {
     run(words: Uint32Array, width: number, height: number): Promise<Uint8Array> | Uint8Array;
-    extension: string;
+    readonly extension: string;
 };
+
+type ExportPanelOptions = {
+    pngExporter?: Exporter;
+    webpExporter?: Exporter;
+    hdrExporter?: Exporter;
+};
+
+type ExportTarget = {
+    exporter: Exporter;
+    button: Button;
+    label: string;
+    supports: (texture: Texture | null) => boolean;
+};
+
+const FACE_NAMES = ['posx', 'negx', 'posy', 'negy', 'posz', 'negz'];
 
 const readPixels = (texture: Texture, face: number | null): Uint32Array => {
     const rt = new RenderTarget({ colorBuffer: texture, depth: false, face: face ?? undefined });
@@ -31,10 +45,16 @@ const readPixels = (texture: Texture, face: number | null): Uint32Array => {
     return new Uint32Array(data.buffer);
 };
 
+// build a standalone blob so the encoder's backing buffer can be reused
+const toBlob = (data: Uint8Array): Blob => {
+    const bytes = new Uint8Array(data.byteLength);
+    bytes.set(data);
+    return new Blob([bytes.buffer], { type: 'octet/stream' });
+};
+
 // download the data uri
 const download = (filename: string, data: Uint8Array): void => {
-    const blob = new Blob([data.buffer as ArrayBuffer], { type: 'octet/stream' });
-    const url = window.URL.createObjectURL(blob);
+    const url = window.URL.createObjectURL(toBlob(data));
 
     const lnk = document.createElement('a');
     lnk.download = filename;
@@ -45,8 +65,23 @@ const download = (filename: string, data: Uint8Array): void => {
     window.URL.revokeObjectURL(url);
 };
 
+// a texture can disappear while an export is in flight: its document can be
+// removed from the manager or its asset unloaded (which destroys the texture)
+const isTextureAlive = (textureDoc: TextureDoc, texture: Texture): boolean => {
+    const asset = textureDoc.asset;
+    return !!asset && asset.loaded === true && asset.resource === texture && !!texture.device;
+};
+
 class TextureExportPanel extends Panel {
-    constructor(textureManager: TextureManager, args: PanelArgs = {}) {
+    readonly pngExporter: Exporter;
+    readonly webpExporter: Exporter;
+    readonly hdrExporter: Exporter;
+
+    private readonly textureManager: TextureManager;
+    private readonly targets: ExportTarget[];
+    private readonly busyExporters = new Set<Exporter>();
+
+    constructor(textureManager: TextureManager, args: PanelArgs = {}, options: ExportPanelOptions = {}) {
         Object.assign(args, {
             id: 'texture-export-pane',
             headerText: 'Export',
@@ -56,9 +91,10 @@ class TextureExportPanel extends Panel {
 
         super(args);
 
-        const pngExporter = new PngExporter();
-        const webpExporter = new WebpExporter();
-        const hdrExporter = new HdrExporter();
+        this.textureManager = textureManager;
+        this.pngExporter = options.pngExporter ?? new PngExporter();
+        this.webpExporter = options.webpExporter ?? new WebpExporter();
+        this.hdrExporter = options.hdrExporter ?? new HdrExporter();
 
         // png export
         const exportToPng = new Button({
@@ -103,92 +139,137 @@ class TextureExportPanel extends Panel {
         this.append(exportToWebpContainer);
         this.append(exportToHdrContainer);
 
-        const doExport = async (exporter: Exporter, texture: TextureDoc): Promise<void> => {
-            const t = texture.resource!;
+        this.targets = [
+            {
+                exporter: this.pngExporter,
+                button: exportToPng,
+                label: 'EXPORT TO PNG',
+                supports: (texture) => !!texture
+            },
+            {
+                exporter: this.webpExporter,
+                button: exportToWebp,
+                label: 'EXPORT TO WEBP',
+                supports: (texture) => !!texture
+            },
+            {
+                exporter: this.hdrExporter,
+                button: exportToHdr,
+                label: 'EXPORT TO HDR',
+                supports: (texture) => texture?.encoding === 'rgbe'
+            }
+        ];
 
-            this.enabled = false;
+        // handlers are registered once and always resolve the selection at
+        // click time, so rebinding on selection changes can never re-target an
+        // export that is already running
+        this.targets.forEach((target) => {
+            target.button.on('click', () => {
+                void this.startExport(target);
+            });
+        });
 
-            try {
-                if (t.cubemap) {
-                    const faceNames = ['posx', 'negx', 'posy', 'negy', 'posz', 'negz'];
-                    for (let face = 0; face < 6; ++face) {
-                        download(
-                            `${removeExtension(texture.filename)}_${faceNames[face]}.${exporter.extension}`,
-                            await exporter.run(readPixels(t, face), t.width, t.height)
-                        );
-                    }
-                } else {
-                    download(
-                        `${removeExtension(texture.filename)}.${exporter.extension}`,
-                        await exporter.run(readPixels(t, null), t.width, t.height)
-                    );
-                }
-            } finally {
-                this.enabled = true;
+        textureManager.on('textureDocSelected', () => this.updateButtonStates());
+        textureManager.on('textureDocRemoved', () => this.updateButtonStates());
+
+        this.updateButtonStates();
+    }
+
+    private updateButtonStates(): void {
+        const texture = this.textureManager.selectedTextureDoc?.resource ?? null;
+
+        this.enabled = !!texture;
+
+        this.targets.forEach((target) => {
+            const busy = this.busyExporters.has(target.exporter);
+            target.button.enabled = !busy && target.supports(texture);
+        });
+    }
+
+    private setButtonBusy(target: ExportTarget, busy: boolean): void {
+        if (busy) {
+            target.button.dom.classList.add('busy-anim');
+            target.button.text = 'BUSY...';
+            target.button.enabled = false;
+        } else {
+            target.button.dom.classList.remove('busy-anim');
+            target.button.text = target.label;
+        }
+    }
+
+    private async startExport(target: ExportTarget): Promise<void> {
+        const textureDoc = this.textureManager.selectedTextureDoc;
+        const texture = textureDoc?.resource ?? null;
+
+        // ignore clicks while this exporter is already running
+        if (!textureDoc || !texture || this.busyExporters.has(target.exporter)) {
+            return;
+        }
+
+        // snapshot everything about the source texture at click time so later
+        // selection changes cannot re-target this export
+        const filename = textureDoc.filename;
+        const cubemap = texture.cubemap;
+        const width = texture.width;
+        const height = texture.height;
+
+        this.busyExporters.add(target.exporter);
+        this.setButtonBusy(target, true);
+
+        try {
+            await this.runExport(target.exporter, textureDoc, texture, filename, cubemap, width, height);
+        } catch (err) {
+            console.error(`export to ${target.exporter.extension} failed`, err);
+        } finally {
+            this.busyExporters.delete(target.exporter);
+            this.setButtonBusy(target, false);
+            this.updateButtonStates();
+        }
+    }
+
+    private async runExport(
+        exporter: Exporter,
+        textureDoc: TextureDoc,
+        texture: Texture,
+        filename: string,
+        cubemap: boolean,
+        width: number,
+        height: number
+    ): Promise<void> {
+        const ensureAlive = () => {
+            if (!isTextureAlive(textureDoc, texture)) {
+                throw new Error(`texture "${filename}" was removed or unloaded during export`);
             }
         };
 
-        const events: EventHandle[] = [];
-        textureManager.on('textureDocSelected', (texture: TextureDoc) => {
-            // unregister preview events
-            events.forEach((ev) => ev.unbind());
-            events.length = 0;
+        ensureAlive();
 
-            // register new events
-            events.push(
-                exportToPng.on('click', async () => {
-                    exportToPng.dom.classList.add('busy-anim');
-                    exportToPng.text = 'BUSY...';
-                    try {
-                        await doExport(pngExporter, texture);
-                    } catch (err) {
-                        console.error(err);
-                    } finally {
-                        exportToPng.dom.classList.remove('busy-anim');
-                        exportToPng.text = 'EXPORT TO PNG';
-                    }
-                })
-            );
+        // encode every face first and only then download, so a failure part way
+        // through never leaves a partial set of files behind
+        const files: { filename: string; data: Uint8Array }[] = [];
 
-            events.push(
-                exportToWebp.on('click', async () => {
-                    exportToWebp.dom.classList.add('busy-anim');
-                    exportToWebp.text = 'BUSY...';
-                    try {
-                        await doExport(webpExporter, texture);
-                    } catch (err) {
-                        console.error(err);
-                    } finally {
-                        exportToWebp.dom.classList.remove('busy-anim');
-                        exportToWebp.text = 'EXPORT TO WEBP';
-                    }
-                })
-            );
+        if (cubemap) {
+            for (let face = 0; face < FACE_NAMES.length; ++face) {
+                ensureAlive();
+                const encoded = await exporter.run(readPixels(texture, face), width, height);
+                files.push({
+                    filename: `${removeExtension(filename)}_${FACE_NAMES[face]}.${exporter.extension}`,
+                    data: encoded
+                });
+            }
+        } else {
+            const encoded = await exporter.run(readPixels(texture, null), width, height);
+            files.push({
+                filename: `${removeExtension(filename)}.${exporter.extension}`,
+                data: encoded
+            });
+        }
 
-            events.push(
-                exportToHdr.on('click', async () => {
-                    exportToHdr.dom.classList.add('busy-anim');
-                    exportToHdr.text = 'BUSY...';
-                    try {
-                        await doExport(hdrExporter, texture);
-                    } catch (err) {
-                        console.error(err);
-                    } finally {
-                        exportToHdr.dom.classList.remove('busy-anim');
-                        exportToHdr.text = 'EXPORT TO HDR';
-                    }
-                })
-            );
-
-            exportToPng.enabled = !!texture.resource;
-            exportToWebp.enabled = !!texture.resource;
-            exportToHdr.enabled = texture.resource?.encoding === 'rgbe';
-
-            this.enabled = !!texture.resource;
-        });
-
-        this.enabled = false;
+        // reject rather than download pixels for a texture that is gone
+        ensureAlive();
+        files.forEach((file) => download(file.filename, file.data));
     }
 }
 
 export { TextureExportPanel };
+export type { ExportPanelOptions, Exporter };

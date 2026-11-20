@@ -47,6 +47,11 @@
         "fmt:fix": "prettier --write .",
         "lint": "eslint src",
         "lint:fix": "eslint src --fix",
-        "serve": "serve dist"
+        "serve": "serve dist",
+        "test:fixtures": "node test/make-fixtures.mjs",
+        "test:build": "rollup -c rollup.test.config.mjs",
+        "test:browser": "npm run test:fixtures && npm run build && npm run test:build && node test/run-browser-tests.mjs && node test/run-app-smoke.mjs",
+        "test": "npm run test:browser",
+        "test:smoke": "npm run test:fixtures && node test/run-app-smoke.mjs"
     }
 }

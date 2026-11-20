@@ -1,0 +1,37 @@
+<!doctype html>
+<html>
+    <head>
+        <title>Texture Tool :: Export Tests</title>
+        <meta charset="utf-8" />
+        <base href="./" />
+        <!-- the tool's stylesheet provides the disabled/busy classes the export buttons rely on -->
+        <link rel="stylesheet" type="text/css" href="../dist/style.css" />
+        <style>
+            body {
+                margin: 0;
+                background: #2c393c;
+                color: #eee;
+                font-family: monospace;
+                font-size: 12px;
+            }
+
+            #report {
+                padding: 16px;
+                white-space: pre-wrap;
+            }
+
+            .pass {
+                color: #7fdc7f;
+            }
+
+            .fail {
+                color: #ff6b6b;
+            }
+        </style>
+    </head>
+
+    <body>
+        <div id="report">running...</div>
+        <script type="module" src="../test-dist/browser-tests.js"></script>
+    </body>
+</html>

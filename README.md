@@ -83,6 +83,46 @@ Run:
 
 Open a browser and navigate to http://localhost:3000.
 
+## Browser export tests
+
+The export chain (pixel readback → encode → download) is covered by a browser
+test suite that runs against a real build in headless Chrome/Edge. It generates
+its own 2x2 PNG fixtures (`test/fixtures`), so no external assets are required.
+
+```
+npm test
+```
+
+This generates fixtures, builds the app and the test bundle, then runs:
+
+- `test/browser-tests.js` — loads the real export panel and PNG/WebP
+  exporters into a page and verifies:
+    - a normal export downloads a file named after the selected texture (PNG
+      and WebP);
+    - switching the selected texture mid-export does not retarget, un-busy or
+      re-enable the in-flight export;
+    - repeated clicks while busy are ignored and produce a single export;
+    - the PNG and WebP exporters reject a second concurrent run with an error
+      (both promises settle) and accept work afterwards;
+    - an encoding failure restores the button text/busy style and allows a
+      retry;
+    - the PNG worker rejects on worker/encode errors and recovers by
+      replacing the worker;
+    - a failed or half-initialized WebP wasm module is never cached and is
+      retried by the next export;
+    - removing or unloading a texture mid-export ends the export with an
+      error instead of downloading pixels;
+    - cubemap faces are encoded before any file is downloaded, so a failure
+      never leaves a partial set;
+    - each format exporter can run independently.
+- `test/run-app-smoke.mjs` — loads the built app with `?load=<fixture>` and
+  verifies the real UI still exports the URL-loaded texture.
+
+Both runners look for Chrome/Edge (or Chromium) and exit non-zero if any
+assertion fails. Set `CHROME_PATH` (or pass `--browser <path>` to
+`run-browser-tests.mjs`) to use a specific binary; set `DEBUG_TEST=1` to print
+the browser's console output on failure.
+
 ## Library integration testing
 
 The Texture Tool is built on the following open source libraries:

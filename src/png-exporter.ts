@@ -8,12 +8,14 @@ type LodePng = {
 };
 
 type WorkerRequest = {
+    id: number;
     words: Uint32Array;
     width: number;
     height: number;
 };
 
 type WorkerResponse = {
+    id: number;
     error?: string;
     result?: Uint8Array;
 };
@@ -27,15 +29,30 @@ type WorkerScope = {
 
 function PngExportWorker(href: string): void {
     const scope = self as unknown as WorkerScope;
+
+    let lodepngPromise: Promise<LodePng> | null = null;
+
+    // initialize lazily so that a failed attempt can be retried by a later
+    // message instead of wedging the worker forever
     const initLodepng = (): Promise<LodePng> => {
-        return new Promise((resolve) => {
-            scope.importScripts(`${href}lib/lodepng/lodepng.js`);
-            resolve(
-                scope.lodepng({
-                    locateFile: () => `${href}lib/lodepng/lodepng.wasm`
-                })
-            );
-        });
+        if (!lodepngPromise) {
+            const promise = new Promise<LodePng>((resolve) => {
+                scope.importScripts(`${href}lib/lodepng/lodepng.js`);
+                resolve(
+                    scope.lodepng({
+                        locateFile: () => `${href}lib/lodepng/lodepng.wasm`
+                    })
+                );
+            });
+            // clear the cache on failure so the next request retries the load
+            promise.catch(() => {
+                if (lodepngPromise === promise) {
+                    lodepngPromise = null;
+                }
+            });
+            lodepngPromise = promise;
+        }
+        return lodepngPromise;
     };
 
     const compress = (lodepng: LodePng, words: Uint32Array, width: number, height: number): Uint8Array => {
@@ -43,56 +60,53 @@ function PngExportWorker(href: string): void {
         const resultSizePtr = lodepng._malloc(4);
         const imageData = lodepng._malloc(width * height * 4);
 
-        // copy pixels into wasm memory
-        for (let i = 0; i < width * height; ++i) {
-            lodepng.HEAPU32[imageData / 4 + i] = words[i];
-        }
-
-        // invoke compress
-        lodepng._lodepng_encode32(resultDataPtrPtr, resultSizePtr, imageData, width, height);
-
-        // read results
-        const u32 = lodepng.HEAPU32;
-        const result = lodepng.HEAPU8.slice(
-            u32[resultDataPtrPtr / 4],
-            u32[resultDataPtrPtr / 4] + u32[resultSizePtr / 4]
-        );
-
-        lodepng._free(resultDataPtrPtr);
-        lodepng._free(resultSizePtr);
-        lodepng._free(imageData);
-
-        return result;
-    };
-
-    const main = async (): Promise<void> => {
-        let lodepng: LodePng;
         try {
-            lodepng = await initLodepng();
-        } catch (err) {
-            // report init failure on the first request so the caller's promise rejects
-            scope.onmessage = () => {
-                scope.postMessage({ error: `failed to initialize lodepng: ${err}` });
-            };
-            return;
-        }
-
-        scope.onmessage = (message) => {
-            const data = message.data;
-
-            try {
-                // compress
-                const result = compress(lodepng, data.words, data.width, data.height);
-
-                // return
-                scope.postMessage({ result: result }, [result.buffer]);
-            } catch (err) {
-                scope.postMessage({ error: `${err}` });
+            if (!resultDataPtrPtr || !resultSizePtr || !imageData) {
+                throw new Error('failed to allocate lodepng output buffers');
             }
-        };
+
+            // copy pixels into wasm memory
+            for (let i = 0; i < width * height; ++i) {
+                lodepng.HEAPU32[imageData / 4 + i] = words[i];
+            }
+
+            // invoke compress
+            lodepng._lodepng_encode32(resultDataPtrPtr, resultSizePtr, imageData, width, height);
+
+            // read results
+            const u32 = lodepng.HEAPU32;
+            const resultPtr = u32[resultDataPtrPtr / 4];
+            const resultSize = u32[resultSizePtr / 4];
+
+            if (!resultPtr || !resultSize) {
+                throw new Error('lodepng failed to encode image');
+            }
+
+            return lodepng.HEAPU8.slice(resultPtr, resultPtr + resultSize);
+        } finally {
+            if (resultDataPtrPtr) {
+                lodepng._free(resultDataPtrPtr);
+            }
+            if (resultSizePtr) {
+                lodepng._free(resultSizePtr);
+            }
+            if (imageData) {
+                lodepng._free(imageData);
+            }
+        }
     };
 
-    main();
+    scope.onmessage = async (message: MessageEvent<WorkerRequest>) => {
+        const data = message.data;
+
+        try {
+            const lodepng = await initLodepng();
+            const result = compress(lodepng, data.words, data.width, data.height);
+            scope.postMessage({ id: data.id, result: result }, [result.buffer]);
+        } catch (err) {
+            scope.postMessage({ id: data.id, error: `${err}` });
+        }
+    };
 }
 
 type PendingExport = {
@@ -100,39 +114,32 @@ type PendingExport = {
     reject: (reason?: unknown) => void;
 };
 
+type PngExporterOptions = {
+    // allows tests (or embedders) to supply a worker with different assets
+    createWorker?: () => Worker;
+};
+
 class PngExporter {
-    worker: Worker;
+    worker: Worker | null = null;
     pending: PendingExport | null = null;
 
-    constructor() {
-        this.worker = PngExporter.createWorker();
+    private readonly workerFactory: () => Worker;
+    private pendingId = 0;
 
-        this.worker.addEventListener('message', (message: MessageEvent<WorkerResponse>) => {
-            const pending = this.pending;
-            if (!pending) {
-                return;
-            }
-            this.pending = null;
-
-            if (message.data.error) {
-                pending.reject(new Error(message.data.error));
-            } else {
-                pending.resolve(message.data.result!);
-            }
-        });
-
-        this.worker.addEventListener('error', (e: ErrorEvent) => {
-            const pending = this.pending;
-            if (pending) {
-                this.pending = null;
-                pending.reject(new Error(e.message || 'PNG export worker error'));
-            }
-        });
+    constructor(options: PngExporterOptions = {}) {
+        this.workerFactory = options.createWorker ?? PngExporter.createWorker;
+        // create eagerly, but do not let a creation failure disable the exporter:
+        // the next export will try again
+        try {
+            this.ensureWorker();
+        } catch (err) {
+            console.error('failed to create PNG export worker', err);
+        }
     }
 
-    static createWorker(): Worker {
+    static createWorker(hrefOverride?: string): Worker {
         // pass the page directory as a quoted string literal, without the query or hash
-        const href = JSON.stringify(`${window.location.origin}${window.location.pathname}`);
+        const href = JSON.stringify(hrefOverride ?? `${window.location.origin}${window.location.pathname}`);
         const workerBlob = new Blob([`(${PngExportWorker.toString()})(${href})\n\n`], {
             type: 'application/javascript'
         });
@@ -142,17 +149,107 @@ class PngExporter {
         return worker;
     }
 
+    private ensureWorker(): Worker {
+        if (!this.worker) {
+            const worker = this.workerFactory();
+            this.worker = worker;
+            this.bindWorker(worker);
+        }
+        return this.worker;
+    }
+
+    private bindWorker(worker: Worker): void {
+        worker.addEventListener('message', (message: MessageEvent<WorkerResponse>) => {
+            const pending = this.pending;
+            // ignore replies for requests that have already been settled
+            if (!pending || message.data.id !== this.pendingId) {
+                return;
+            }
+
+            this.pending = null;
+
+            if (message.data.error) {
+                pending.reject(new Error(message.data.error));
+                // a failed encode can leave the wasm heap in an aborted state,
+                // so start from a clean worker for the next export
+                this.resetWorker(worker);
+            } else {
+                pending.resolve(message.data.result!);
+            }
+        });
+
+        worker.addEventListener('error', (e: ErrorEvent) => {
+            this.rejectPending(e.message || 'PNG export worker error');
+            // the worker may be wedged after an uncaught error: replace it so a
+            // subsequent export gets a clean instance
+            this.resetWorker(worker);
+        });
+
+        worker.addEventListener('messageerror', () => {
+            this.rejectPending('PNG export worker message error');
+            this.resetWorker(worker);
+        });
+    }
+
+    private rejectPending(reason: unknown): void {
+        const pending = this.pending;
+        this.pending = null;
+        if (pending) {
+            pending.reject(reason instanceof Error ? reason : new Error(`${reason}`));
+        }
+    }
+
+    private resetWorker(worker: Worker | null): void {
+        // ignore events from a worker that has already been superseded
+        if (worker !== this.worker) {
+            return;
+        }
+
+        this.worker = null;
+        // a replacement is only created when the next export needs it, so a
+        // failure here cannot leave the exporter permanently broken
+        try {
+            this.ensureWorker();
+        } catch (err) {
+            console.error('failed to recreate PNG export worker', err);
+        }
+        worker?.terminate();
+    }
+
     run(words: Uint32Array, width: number, height: number): Promise<Uint8Array> {
         return new Promise<Uint8Array>((resolve, reject) => {
+            // one request at a time: reject clearly instead of silently
+            // orphaning the previous promise
+            if (this.pending) {
+                reject(new Error('PNG export already in progress'));
+                return;
+            }
+
+            let worker: Worker;
+            try {
+                worker = this.ensureWorker();
+            } catch (err) {
+                reject(err instanceof Error ? err : new Error(`${err}`));
+                return;
+            }
+
+            const id = ++this.pendingId;
             this.pending = { resolve, reject };
-            this.worker.postMessage(
-                {
-                    words: words,
-                    width: width,
-                    height: height
-                },
-                [words.buffer]
-            );
+
+            try {
+                worker.postMessage(
+                    {
+                        id: id,
+                        words: words,
+                        width: width,
+                        height: height
+                    },
+                    [words.buffer]
+                );
+            } catch (err) {
+                this.pending = null;
+                reject(err instanceof Error ? err : new Error(`${err}`));
+            }
         });
     }
 

@@ -1,2 +1,4 @@
 package-lock.json
 static/lib
+test-dist
+test/fixtures
