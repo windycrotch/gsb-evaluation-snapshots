@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { DifferenceOps } from '../operations/DifferenceOps.js';
+import { dispatchRepairNotice } from '../geometry/ManifoldRepair.js';
 
 // idle → pick_first → pick_second → confirm → running → idle
 export class DifferenceTool {
@@ -155,6 +156,7 @@ export class DifferenceTool {
       if (computed) {
         this.clearPicks();
         this.ops.commit(primary, secondary, computed);
+        dispatchRepairNotice(this.signals, computed.repairReports);
       }
     } catch (err) {
       console.error('DifferenceTool failed:', err);

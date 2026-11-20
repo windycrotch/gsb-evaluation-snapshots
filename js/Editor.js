@@ -36,6 +36,7 @@ import { NameManager } from './utils/NameManager.js';
 import { SeamUtils } from './utils/SeamUtils.js';
 import { SharpUtils } from './utils/SharpUtils.js';
 import { ToolInputDisplay } from './ui/ToolInputDisplay.js';
+import { RepairNotice } from './ui/RepairNotice.js';
 import { loadProject } from '/supabase/services/ProjectService.js';
 import { ShortcutLabel } from './core/ShortcutLabel.js';
 import { UVResizer } from './ui/UVResizer.js';
@@ -134,6 +135,8 @@ export default class Editor {
       onToolStarted: new Signal(),
       onToolEnded: new Signal(),
       onToolUpdated: new Signal(),
+
+      repairNotice: new Signal(),
 
       vertexPositionsUpdated: new Signal(),
       refreshEditHelpers: new Signal(),
@@ -238,6 +241,7 @@ export default class Editor {
     this.sceneManager.sceneEditorHelpers.add(this.sceneManager.gridHelper);
 
     this.toolInputDisplay = new ToolInputDisplay(this);
+    this.repairNotice = new RepairNotice(this);
     this.toolbar = new Toolbar(this);
     this.menubar = new Menubar(this);
     this.sidebar = new Sidebar(this);

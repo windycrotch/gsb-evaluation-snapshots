@@ -71,7 +71,9 @@ function defineBooleanSpec({ command, summary, operandDescription, emptyMessage,
       AXES_NOTE +
       summary +
       "The target's mesh is replaced by the result; it keeps its uuid and transform. The operand and any " +
-      'children it has are deleted. Both must be closed, watertight meshes. One operand per call; chain calls ' +
+      'children it has are deleted. Both must be closed, watertight meshes; if a mesh is not manifold, an ' +
+      'automatic repair (welding, degenerate removal, hole filling) is attempted first and reported in the ' +
+      "'repairs' field. One operand per call; chain calls " +
       'to combine more. Undoable as a single step.',
     mutates: true,
     params: {
@@ -112,8 +114,9 @@ function defineBooleanSpec({ command, summary, operandDescription, emptyMessage,
 
       const beforeMeshData = structuredClone(primary.userData.meshData);
       let resultMeshData;
+      let repairReports = [];
       try {
-        resultMeshData = await compute(primary, secondary);
+        ({ meshData: resultMeshData, repairReports } = await compute(primary, secondary));
       } catch (error) {
         throw new Error(
           `${command}: the boolean failed (${error?.message ?? error}). Both meshes must be closed, ` +
@@ -148,6 +151,10 @@ function defineBooleanSpec({ command, summary, operandDescription, emptyMessage,
         },
         operand: { ...summarize(secondary), stats: operandStats },
         removedUuids: removed.map((entry) => entry.uuid),
+        repairs: repairReports.map(({ object, report }) => ({
+          ...summarize(object),
+          ...report,
+        })),
       };
     },
   };

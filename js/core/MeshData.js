@@ -288,4 +288,63 @@ export class MeshData {
     this.nextEdgeId = Math.max(this.nextEdgeId, maxKey(this.edges) + 1);
     this.nextFaceId = Math.max(this.nextFaceId, maxKey(this.faces) + 1);
   }
+
+  /**
+   * Re-assign face ids in one pass after bulk construction (repair, boolean
+   * results). Each face keeps its source id when that id is still free; every
+   * other face gets a fresh id above every source id, so ids are unique and
+   * never reused. Vertex/edge membership sets and the id counters are rebuilt
+   * to match, keeping the mesh and any render buffer derived from it
+   * consistent.
+   *
+   * @param {Face[]} orderedFaces - every face of this mesh, each exactly once
+   * @param {(number|null)[]} srcIds - source id per face; null/negative = no source id
+   */
+  finalizeFaceIds(orderedFaces, srcIds) {
+    let maxSrcId = -1;
+    for (const id of srcIds) {
+      if (Number.isInteger(id) && id > maxSrcId) maxSrcId = id;
+    }
+
+    const usedIds = new Set();
+    let nextFreshId = maxSrcId + 1;
+    const newIds = new Map();
+
+    for (let i = 0; i < orderedFaces.length; i++) {
+      const srcId = srcIds[i];
+      let id;
+
+      if (Number.isInteger(srcId) && srcId >= 0 && !usedIds.has(srcId)) {
+        id = srcId;
+      } else {
+        while (usedIds.has(nextFreshId)) nextFreshId++;
+        id = nextFreshId++;
+      }
+
+      usedIds.add(id);
+      newIds.set(orderedFaces[i], id);
+    }
+
+    for (const vertex of this.vertices.values()) vertex.faceIds.clear();
+    for (const edge of this.edges.values()) edge.faceIds.clear();
+
+    this.faces = new Map();
+    this.faceKeyMap = new Map();
+
+    for (const face of orderedFaces) {
+      const id = newIds.get(face);
+      face.id = id;
+      this.faces.set(id, face);
+      this.faceKeyMap.set(this._getFaceKey(face.vertexIds), face);
+
+      for (const vId of face.vertexIds) {
+        this.vertices.get(vId)?.faceIds.add(id);
+      }
+      for (const eId of face.edgeIds) {
+        this.edges.get(eId)?.faceIds.add(id);
+      }
+    }
+
+    this.syncIdCounters();
+  }
 }

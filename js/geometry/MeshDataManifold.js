@@ -19,6 +19,7 @@ export async function toManifold(object, idOffset = 0) {
 
   let manifold;
   let faceIdMap;
+  let repairReport = null;
 
   try {
     const result = createManifoldFromMeshData(wasm, originalData, object.matrixWorld, idOffset);
@@ -31,10 +32,19 @@ export async function toManifold(object, idOffset = 0) {
 
   } catch (err) {
     const repairedData = repairMeshData(originalData);
+    repairReport = repairedData.repairReport || null;
+
     const result = createManifoldFromMeshData(wasm, repairedData, object.matrixWorld, idOffset);
-    
+
     manifold = result.manifold;
     faceIdMap = result.faceIdMap;
+
+    const status = manifold.status();
+    if (status !== 'NoError') {
+      // Never run the boolean on a known-bad mesh; the caller leaves the scene untouched.
+      manifold.delete?.();
+      throw new Error(`Mesh repair could not make the mesh manifold (status: ${status})`);
+    }
 
     // Update the map to flag repaired faces
     for (const [faceId, face] of repairedData.faces) {
@@ -44,7 +54,7 @@ export async function toManifold(object, idOffset = 0) {
     }
   }
 
-  return { manifold, faceIdMap };
+  return { manifold, faceIdMap, repairReport };
 }
 
 function createManifoldFromMeshData(wasm, meshData, matrixWorld, idOffset) {
@@ -91,11 +101,56 @@ function createManifoldFromMeshData(wasm, meshData, matrixWorld, idOffset) {
   return { manifold: new wasm.Manifold(mesh), faceIdMap };
 }
 
+/**
+ * Run a manifold boolean ('add' | 'subtract' | 'intersect') between two scene
+ * objects and return { meshData, repairReports }.
+ *
+ * The primary is converted first because repair can add faces: the secondary's
+ * id offset is derived from the highest id the primary actually uses, so the
+ * two id spaces can never collide. Throws if either mesh can't be made
+ * manifold — the scene is never touched on the failure path.
+ */
+export async function computeBoolean(primary, secondary, op) {
+  await getManifoldWasm();
+
+  let manifoldA = null;
+  let manifoldB = null;
+  let result = null;
+
+  try {
+    const conversionA = await toManifold(primary, 0);
+    manifoldA = conversionA.manifold;
+
+    let maxIdA = -1;
+    for (const id of conversionA.faceIdMap.keys()) {
+      if (id > maxIdA) maxIdA = id;
+    }
+
+    const conversionB = await toManifold(secondary, maxIdA + 1);
+    manifoldB = conversionB.manifold;
+
+    result = manifoldA[op](manifoldB);
+    const meshData = fromManifoldResult(
+      result.getMesh(), conversionA.faceIdMap, conversionB.faceIdMap, primary
+    );
+
+    const repairReports = [];
+    if (conversionA.repairReport) repairReports.push({ object: primary, report: conversionA.repairReport });
+    if (conversionB.repairReport) repairReports.push({ object: secondary, report: conversionB.repairReport });
+
+    return { meshData, repairReports };
+  } finally {
+    // Manifold objects live in WASM memory and aren't garbage collected.
+    result?.delete?.();
+    manifoldA?.delete?.();
+    manifoldB?.delete?.();
+  }
+}
+
 export function fromManifoldResult(resultMesh, faceIdMapA, faceIdMapB, primaryObject) {
   const { vertProperties, triVerts, faceID } = resultMesh;
   const numTris = triVerts.length / 3;
 
-  const allFaceIdMap = new Map([...faceIdMapA, ...faceIdMapB]);
   const invWorld = primaryObject.matrixWorld.clone().invert();
   const meshData = new MeshData();
 
@@ -130,13 +185,31 @@ export function fromManifoldResult(resultMesh, faceIdMapA, faceIdMapB, primaryOb
     });
   }
 
+  // Faces are created with throwaway auto ids first, then re-assigned in one
+  // final pass: faces traceable to the primary object (including its repair
+  // fills) keep their source id, everything else gets a fresh id above every
+  // source id. Ids stay unique and are never reused across booleans, so the
+  // render buffer and face selection always line up.
+  const orderedFaces = [];
+  const srcIds = [];
+  const seenFaces = new Set();
+
+  function emitFace(faceVerts, srcId) {
+    const face = meshData.addFace(faceVerts);
+    if (seenFaces.has(face)) return;
+    seenFaces.add(face);
+    orderedFaces.push(face);
+    srcIds.push(srcId);
+  }
+
   for (const [id, tris] of groups) {
-    const originalFace = allFaceIdMap.get(id);
+    const fromPrimary = faceIdMapA.has(id);
+    const source = fromPrimary ? faceIdMapA.get(id) : faceIdMapB.get(id);
+    const srcId = fromPrimary ? id : null;
 
-    if (originalFace === 'repair') { continue; }
-
-    if (originalFace) {
-      // Known faceID
+    if (source !== undefined) {
+      // Known faceID: an original face or a repair fill ('repair'). Repair
+      // fills are real surface and must survive into the result.
       const loops = getBoundaryLoops(tris);
 
       if (loops.length === 1) {
@@ -145,7 +218,7 @@ export function fromManifoldResult(resultMesh, faceIdMapA, faceIdMapB, primaryOb
         const unique = new Set(faceVerts.map(v => v.id));
 
         if (unique.size === faceVerts.length) {
-          meshData.addFace(faceVerts);
+          emitFace(faceVerts, srcId);
           continue;
         }
       } else if (loops.length > 1) {
@@ -155,7 +228,7 @@ export function fromManifoldResult(resultMesh, faceIdMapA, faceIdMapB, primaryOb
             const faceVerts = loop.map(idx => getVertex(idx));
             const unique = new Set(faceVerts.map(v => v.id));
             if (unique.size === faceVerts.length) {
-              meshData.addFace(faceVerts);
+              emitFace(faceVerts, srcId);
             }
           }
           continue;
@@ -165,22 +238,23 @@ export function fromManifoldResult(resultMesh, faceIdMapA, faceIdMapB, primaryOb
         const stitched = stitchLoops(loops, vertProperties);
         if (stitched && stitched.length >= 3) {
           const faceVerts = stitched.map(idx => getVertex(idx));
-          meshData.addFace(faceVerts);
+          emitFace(faceVerts, srcId);
           continue;
         }
       }
     }
 
-    // Unknown faceID
+    // Unknown faceID, or loop reconstruction failed: emit raw triangles
     for (const { a, b, c } of tris) {
       const va = getVertex(a);
       const vb = getVertex(b);
       const vc = getVertex(c);
       if (va === vb || vb === vc || va === vc) continue;
-      meshData.addFace([va, vb, vc]);
+      emitFace([va, vb, vc], srcId);
     }
   }
 
+  meshData.finalizeFaceIds(orderedFaces, srcIds);
   return meshData;
 }
 

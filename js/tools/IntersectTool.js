@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { IntersectOps } from '../operations/IntersectOps.js';
+import { dispatchRepairNotice } from '../geometry/ManifoldRepair.js';
 
 // idle → pick_first → pick_second → confirm → running → idle
 export class IntersectTool {
@@ -157,6 +158,7 @@ export class IntersectTool {
       if (computed) {
         this.clearPicks();
         this.ops.commit(primary, secondary, computed);
+        dispatchRepairNotice(this.signals, computed.repairReports);
       }
     } catch (err) {
       console.error('IntersectTool failed:', err);

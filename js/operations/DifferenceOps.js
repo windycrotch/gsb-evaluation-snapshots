@@ -1,4 +1,4 @@
-import { getManifoldWasm, toManifold, fromManifoldResult } from '../geometry/MeshDataManifold.js';
+import { computeBoolean } from '../geometry/MeshDataManifold.js';
 import { RemoveObjectCommand } from '../commands/RemoveObjectCommand.js';
 import { DifferenceCommand } from '../commands/DifferenceCommand.js';
 import { SequentialMultiCommand } from '../commands/SequentialMultiCommand.js';
@@ -28,9 +28,9 @@ export class DifferenceOps {
 
     // Clone before any await so the undo state is the mesh as it was when the user confirmed
     const beforeMeshData = structuredClone(primary.userData.meshData);
-    const resultMeshData = await DifferenceOps.computeDifference(primary, secondary);
+    const { meshData: resultMeshData, repairReports } = await DifferenceOps.computeDifference(primary, secondary);
 
-    return { beforeMeshData, resultMeshData };
+    return { beforeMeshData, resultMeshData, repairReports };
   }
 
   // Step 2 (sync): apply a computed result as one undoable step.
@@ -48,29 +48,9 @@ export class DifferenceOps {
       && primary !== secondary;
   }
 
-  // Returns the MeshData for primary − secondary, keeping face ids traceable to both inputs.
+  // Returns { meshData, repairReports } for primary − secondary, keeping face ids traceable to the inputs.
   static async computeDifference(primary, secondary) {
-    const meshData = primary.userData.meshData;
-    const idOffsetB = meshData.nextFaceId + meshData.vertices.size;
-
-    await getManifoldWasm();
-
-    const [
-      { manifold: manifoldA, faceIdMap: faceIdMapA },
-      { manifold: manifoldB, faceIdMap: faceIdMapB },
-    ] = await Promise.all([
-      toManifold(primary, 0),
-      toManifold(secondary, idOffsetB),
-    ]);
-
-    let result = null;
-    try {
-      result = manifoldA.subtract(manifoldB);
-      return fromManifoldResult(result.getMesh(), faceIdMapA, faceIdMapB, primary);
-    } finally {
-      // Manifold objects live in WASM memory and aren't garbage collected.
-      result?.delete?.();
-    }
+    return computeBoolean(primary, secondary, 'subtract');
   }
 
   static createCommand(editor, primary, secondary, beforeMeshData, resultMeshData) {

@@ -65,36 +65,72 @@ export function repairMeshData(meshData, options = {}) {
   faces = faces.map(f => ({ id: f.id, vids: f.vids.map(i => compact.get(i)) }));
 
   const result = new MeshData();
-  const vertObjs = finalVerts.map(v => 
+  const vertObjs = finalVerts.map(v =>
     result.addVertex(new THREE.Vector3(v.x, v.y, v.z))
   );
-  for (const f of faces) result.addFace(f.vids.map(i => vertObjs[i]));
 
-  // Determine safe IDs for brand new "repair" faces to avoid collisions
-  let maxOriginalId = -1;
+  // Add every face once, then re-assign ids in a single final pass: faces that
+  // existed before the repair keep their original id, brand new repair faces
+  // (hole fills, id -1) get fresh ids above every original id. Re-assigning
+  // while auto ids are still being handed out can drop faces and desync the
+  // id counter, so it all happens in finalizeFaceIds.
+  const orderedFaces = [];
+  const srcIds = [];
+  const seenFaces = new Set();
+
   for (const f of faces) {
-    if (f.id !== -1 && f.id > maxOriginalId) maxOriginalId = f.id;
+    const face = result.addFace(f.vids.map(i => vertObjs[i]));
+    if (seenFaces.has(face)) continue;
+    seenFaces.add(face);
+    orderedFaces.push(face);
+    srcIds.push(Number.isInteger(f.id) ? f.id : -1);
   }
 
-  let nextRepairId = maxOriginalId + 1;
+  result.finalizeFaceIds(orderedFaces, srcIds);
 
-  for (const f of faces) {
-    const newFace = result.addFace(f.vids.map(i => vertObjs[i]));
-    
-    result.faces.delete(newFace.id);
-    
-    if (f.id !== -1 && f.id !== undefined) {
-      newFace.id = f.id;
-    } else {
-      newFace.id = nextRepairId++;
-      newFace.isRepairFace = true;
-    }
-    
-    result.faces.set(newFace.id, newFace);
+  // Flag the faces the repair created so the boolean pipeline can recognize them
+  for (let i = 0; i < orderedFaces.length; i++) {
+    if (srcIds[i] < 0) orderedFaces[i].isRepairFace = true;
   }
 
   result.repairReport = report;
   return result;
+}
+
+// One-line, user-facing summary of what a repair changed ('' if nothing changed).
+export function summarizeRepairReport(report) {
+  if (!report) return '';
+
+  const parts = [];
+  if (report.filledHoles) parts.push(`${report.filledHoles} hole${report.filledHoles === 1 ? '' : 's'} filled`);
+  if (report.weldedVerts) parts.push(`${report.weldedVerts} vertices welded`);
+  if (report.removedFaces) parts.push(`${report.removedFaces} degenerate/duplicate faces removed`);
+  if (report.splitVerts) parts.push(`${report.splitVerts} non-manifold vertices split`);
+  if (report.flippedFaces) parts.push(`${report.flippedFaces} faces re-oriented`);
+  if (report.skippedHoles) parts.push(`${report.skippedHoles} hole${report.skippedHoles === 1 ? '' : 's'} skipped (too large)`);
+
+  return parts.join(', ');
+}
+
+// Notice shown after a boolean that needed a repair. Null if nothing was repaired.
+export function formatRepairNotice(repairReports) {
+  if (!repairReports || repairReports.length === 0) return null;
+
+  const parts = [];
+  for (const { object, report } of repairReports) {
+    const summary = summarizeRepairReport(report);
+    if (!summary) continue;
+    parts.push(`${object?.name || 'object'}: ${summary}`);
+  }
+
+  if (parts.length === 0) return null;
+  return `Mesh repaired before boolean (${parts.join('; ')}). Undo restores the previous mesh.`;
+}
+
+// Dispatch the repair notice signal if any operand was repaired. No-op otherwise.
+export function dispatchRepairNotice(signals, repairReports) {
+  const text = formatRepairNotice(repairReports);
+  if (text) signals?.repairNotice?.dispatch(text);
 }
 
 function weldVertices(verts, epsilon) {
