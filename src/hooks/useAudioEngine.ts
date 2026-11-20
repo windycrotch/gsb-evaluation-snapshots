@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { Graph, ModuleParams } from '../types/graph';
-import type { ScopeDataMessage, SetParamMessage, WorkletMessage } from '../types/messages';
+import type { Graph } from '../types/graph';
+import type { ScopeDataMessage, WorkletMessage } from '../types/messages';
 import { toEngineGraph } from '../model/graph';
+import { EngineSync } from './engineSync';
 
 export type StatusType = 'info' | 'success' | 'error';
 
@@ -10,11 +11,16 @@ export type EngineStatus = { message: string; type: StatusType };
 /**
  * Drives the AudioWorklet. The engine rebuilds its module graph whenever the
  * audio-relevant part of the patch changes; moving nodes around the canvas
- * never touches it.
+ * never touches it. All protocol bookkeeping (graph versions, parameter
+ * diffing, ack/error reconciliation, session reset) lives in EngineSync.
  */
 export function useAudioEngine(graph: Graph) {
   const audioContext = useRef<AudioContext | null>(null);
   const modularNode = useRef<AudioWorkletNode | null>(null);
+  const syncRef = useRef<EngineSync | null>(null);
+  if (syncRef.current === null) {
+    syncRef.current = new EngineSync();
+  }
   const [isRunning, setIsRunning] = useState(false);
   const [status, setStatus] = useState<EngineStatus>({
     message: 'Ready. Press play to start audio.',
@@ -25,52 +31,17 @@ export function useAudioEngine(graph: Graph) {
   const engineGraph = useMemo(() => toEngineGraph(graph), [graph]);
   const latestGraph = useRef(engineGraph);
   latestGraph.current = engineGraph;
-  // Params the engine currently holds, per module id. Used to diff parameter
-  // edits into cheap setParam messages instead of a full graph rebuild.
-  const sentParams = useRef<Map<string, ModuleParams | undefined>>(new Map());
 
-  const postGraph = useCallback(() => {
-    const node = modularNode.current;
-    if (!node) return;
-    node.port.postMessage({ type: 'loadGraph', graph: latestGraph.current });
-    sentParams.current = new Map(latestGraph.current.modules.map((m) => [m.id, m.params]));
-  }, []);
-
-  // Anything the worklet has to rebuild for: the set of modules and the cables.
-  const structureKey = useMemo(
-    () =>
-      JSON.stringify({
-        modules: engineGraph.modules.map(({ id, kind }) => ({ id, kind })),
-        connections: engineGraph.connections,
-      }),
-    [engineGraph]
-  );
-  const lastStructureKey = useRef(structureKey);
-
+  // Stream structural rebuilds and parameter deltas into the running engine.
+  // EngineSync decides which is which and guarantees ordering/versioning.
   useEffect(() => {
-    const node = modularNode.current;
-    if (!node) return;
-
-    if (structureKey !== lastStructureKey.current) {
-      lastStructureKey.current = structureKey;
-      postGraph();
-      return;
-    }
-
-    for (const module of engineGraph.modules) {
-      const previous = sentParams.current.get(module.id);
-      if (previous === module.params) continue;
-      for (const [param, value] of Object.entries(module.params ?? {})) {
-        if (value === undefined) continue;
-        if ((previous as Record<string, unknown> | undefined)?.[param] === value) continue;
-        const message: SetParamMessage = { type: 'setParam', id: module.id, param, value };
-        node.port.postMessage(message);
-      }
-      sentParams.current.set(module.id, module.params);
-    }
-  }, [engineGraph, structureKey, postGraph]);
+    const sync = syncRef.current;
+    if (!sync || !modularNode.current) return;
+    sync.sync(engineGraph);
+  }, [engineGraph]);
 
   const start = useCallback(async () => {
+    const sync = syncRef.current!;
     try {
       setStatus({ message: 'Initializing audio context...', type: 'info' });
 
@@ -97,8 +68,14 @@ export function useAudioEngine(graph: Graph) {
 
       node.port.onmessage = (e: MessageEvent<WorkletMessage>) => {
         if (e.data.type === 'graphLoaded') {
+          // Rebuild the parameter baseline from the graph the engine
+          // actually committed, then replay any edits made mid-rebuild.
+          sync.handleGraphLoaded(e.data.version);
           setStatus({ message: 'Audio running.', type: 'success' });
         } else if (e.data.type === 'error') {
+          // The engine rejected the graph and kept the previous one
+          // sounding; roll our baseline back in lockstep and surface it.
+          sync.handleGraphError(e.data.version);
           setStatus({ message: `Error: ${e.data.message}`, type: 'error' });
         } else if (e.data.type === 'scopeData') {
           const data = e.data as ScopeDataMessage;
@@ -114,10 +91,13 @@ export function useAudioEngine(graph: Graph) {
 
       node.connect(ctx.destination);
       modularNode.current = node;
+      // Fresh processor instance: no version, cache or pending load from a
+      // previous session may carry over.
+      sync.reset();
+      sync.attach(node.port);
 
       setStatus({ message: 'Loading graph...', type: 'info' });
-      lastStructureKey.current = structureKey;
-      postGraph();
+      sync.sync(latestGraph.current);
 
       if (ctx.state !== 'running') {
         await ctx.resume();
@@ -128,15 +108,18 @@ export function useAudioEngine(graph: Graph) {
       const message = err instanceof Error ? err.message : 'Unknown error';
       setStatus({ message: `Error: ${message}`, type: 'error' });
     }
-  }, [postGraph, structureKey]);
+  }, []);
 
   const stop = useCallback(() => {
+    const sync = syncRef.current!;
     if (modularNode.current) {
       modularNode.current.port.onmessage = null;
       modularNode.current.disconnect();
       modularNode.current = null;
     }
     void audioContext.current?.suspend();
+    // Drop all synchronization state: the next start() is a clean session.
+    sync.reset();
     setScopeData({});
     setIsRunning(false);
     setStatus({ message: 'Audio stopped.', type: 'info' });
@@ -150,5 +133,9 @@ export function useAudioEngine(graph: Graph) {
     }
   }, [isRunning, start, stop]);
 
-  return { isRunning, status, setStatus, scopeData, start, stop, toggle, reload: postGraph };
+  const reload = useCallback(() => {
+    syncRef.current?.reload(latestGraph.current);
+  }, []);
+
+  return { isRunning, status, setStatus, scopeData, start, stop, toggle, reload };
 }

@@ -17,6 +17,11 @@ export class ModularProcessor extends AudioWorkletProcessor {
   private outputModule: OutputModule | null;
   private scopeTick: number;
   private readonly scopeStride: number;
+  /**
+   * Version of the graph currently making sound. Starts at 0 with no graph
+   * loaded; only a fully successful loadGraph commits a new version.
+   */
+  private currentVersion: number;
 
   constructor() {
     super();
@@ -25,44 +30,79 @@ export class ModularProcessor extends AudioWorkletProcessor {
     this.outputModule = null;
     this.scopeTick = 0;
     this.scopeStride = 12;
+    this.currentVersion = 0;
 
     this.port.onmessage = (e) => this.handleMsg(e.data as WorkletMessage);
   }
 
+  /** Version of the graph the processor is currently sounding. */
+  get loadedVersion(): number {
+    return this.currentVersion;
+  }
+
+  /** Number of live modules in the currently committed graph. */
+  get moduleCount(): number {
+    return this.modules.size;
+  }
+
   handleMsg(msg: WorkletMessage): void {
     if (msg.type === 'setParam') {
+      // Version guard: an edit produced against a graph the engine has moved
+      // past (or one it never accepted) must never land on a same-named
+      // module of the current graph. Missing modules are dropped silently as
+      // well, so edits to a deleted module cannot revive state.
+      if (msg.version !== this.currentVersion) return;
       this.modules.get(msg.id)?.setParam(msg.param, msg.value);
       return;
     }
     if (msg.type === 'loadGraph') {
+      // Build the whole new graph off to the side first. Only swap it in once
+      // every module and connection is valid: a rejected graph leaves the
+      // previous one (its oscillator phases and delay tails) untouched and
+      // the processor keeps sounding instead of going silent.
       try {
-        this.loadGraph(msg.graph);
-        this.port.postMessage({ type: 'graphLoaded', success: true });
+        const built = this.buildGraph(msg.graph);
+        this.modules = built.modules;
+        this.sortedModules = built.sortedModules;
+        this.outputModule = built.outputModule;
+        this.currentVersion = msg.version;
+        this.port.postMessage({ type: 'graphLoaded', success: true, version: msg.version });
       } catch (err) {
         this.port.postMessage({
           type: 'error',
           message: err instanceof Error ? err.message : 'Unknown error',
+          version: msg.version,
         });
       }
     }
   }
 
-  loadGraph(graph: Graph): void {
-    this.modules.clear();
-    this.sortedModules = [];
-    this.outputModule = null;
+  /**
+   * Constructs a complete, valid module graph without touching the currently
+   * running one. Throws on any unknown module kind or invalid connection, so
+   * the caller can discard the partial result and keep sounding the old graph.
+   */
+  buildGraph(graph: Graph): {
+    modules: Map<string, Module>;
+    sortedModules: Module[];
+    outputModule: OutputModule | null;
+  } {
+    const modules = new Map<string, Module>();
+    let outputModule: OutputModule | null = null;
 
     for (const modDef of graph.modules) {
+      if (modules.has(modDef.id)) {
+        throw new Error(`Duplicate module id: ${modDef.id}`);
+      }
       const module = this.createModule(modDef);
-      this.modules.set(modDef.id, module);
-
+      modules.set(modDef.id, module);
       if (modDef.kind === 'OUTPUT') {
-        this.outputModule = module as OutputModule;
+        outputModule = module as OutputModule;
       }
     }
 
-    const connections = graph.connections || [];
-    this.rebuild(connections);
+    const sortedModules = this.rebuild(modules, graph.connections || []);
+    return { modules, sortedModules, outputModule };
   }
 
   createModule(def: ModuleDefinition): Module {
@@ -89,12 +129,12 @@ export class ModularProcessor extends AudioWorkletProcessor {
     return new ModuleClass(def.id, def.kind, def.params || {});
   }
 
-  rebuild(connections: Connection[]): void {
+  rebuild(modules: Map<string, Module>, connections: Connection[]): Module[] {
     const inDegree = new Map<string, number>();
     const adjacency = new Map<string, string[]>();
 
     // Initialize all modules
-    for (const [id, module] of this.modules) {
+    for (const [id, module] of modules) {
       inDegree.set(id, 0);
       adjacency.set(id, []);
 
@@ -116,11 +156,23 @@ export class ModularProcessor extends AudioWorkletProcessor {
 
     // Process connections
     for (const conn of connections) {
-      const fromModule = this.modules.get(conn.from.id);
-      const toModule = this.modules.get(conn.to.id);
+      const fromModule = modules.get(conn.from.id);
+      const toModule = modules.get(conn.to.id);
 
       if (!fromModule || !toModule) {
         throw new Error(`Invalid connection: ${conn.from.id} -> ${conn.to.id}`);
+      }
+      // A dangling port would silently produce zeros or read undefined
+      // buffers; reject it up front while the old graph is still live.
+      if (!this.getOutputPorts(fromModule.kind).includes(conn.from.port)) {
+        throw new Error(
+          `Invalid connection: module ${conn.from.id} has no output port ${conn.from.port}`
+        );
+      }
+      if (!this.getInputPorts(toModule.kind).includes(conn.to.port)) {
+        throw new Error(
+          `Invalid connection: module ${conn.to.id} has no input port ${conn.to.port}`
+        );
       }
 
       // Track dependency for topological sort
@@ -165,14 +217,14 @@ export class ModularProcessor extends AudioWorkletProcessor {
     // Any modules not in sorted are part of cycles - process them after sorted ones
     // Feedback connections naturally have a 1-block delay (~2.7ms at 48kHz)
     const unsorted: string[] = [];
-    for (const [id] of this.modules) {
+    for (const [id] of modules) {
       if (!sorted.includes(id)) {
         unsorted.push(id);
       }
     }
 
     // Store sorted module references (acyclic first, then cycles)
-    this.sortedModules = [...sorted, ...unsorted].map((id) => this.modules.get(id)!);
+    return [...sorted, ...unsorted].map((id) => modules.get(id)!);
   }
 
   getInputPorts(kind: string): string[] {
