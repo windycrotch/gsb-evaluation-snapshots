@@ -1,11 +1,11 @@
 # GSB Evaluation Snapshots
 
-This public repository consolidates 277 GSB evaluation records migrated from `469877839`.
+This public repository consolidates 341 GSB evaluation records.
 
 Each record has baseline and artifact branches under `gsb/`.
 
-`manifest.json` and `tasks.ndjson` map UIDs, record IDs, commit hashes and branch names.
+`manifest.json` and `tasks.ndjson` map UIDs, task IDs, commit hashes and branch names.
 
-Addendum audit: 35 missing git-address-404 records, no artifact-only secret findings.
+Completed batch 20261120: 64 records. Artifact-only safety scan clean.
 
-Updated: 2026-11-19T02:46:59.322Z
+Updated: 2026-11-20T02:13:45.049Z
