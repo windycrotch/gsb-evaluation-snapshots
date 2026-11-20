@@ -34,7 +34,7 @@
                   d="M79,62 C83,57.3333333 85,52.6666667 85,48 C85,43.3333333 83,38.6666667 79,34 L49,3"
                 ></path>
                 <path
-                  d="M95,69 C101.666667,61.6666667 105,54.3333333 105,47 C105,39.6666667 101.666667,32.3333333 95,25 L75.5,6 L49,33"
+                  d="M95,69 C101.666667,61.6666667 105,54.3333333 105,47 C105,39.6666667 101.6666667,32.3333333 95,25 L75.5,6 L49,33"
                 ></path>
               </svg>
             </div>
@@ -53,7 +53,7 @@
       <span></span>
       <span></span>
     </div>
-    <section v-show="paused" class="playContainer" @click="changeVideoState">
+    <section v-show="paused" class="playContainer" @click.prevent="changeVideoState">
       <li class="playBtn">
         <a href="#" title="start">Start</a>
       </li>
@@ -61,218 +61,203 @@
   </div>
 </template>
 
-<script setup>
+<script>
 export default {
+  name: 'CanvasVideoPlayer',
   data() {
     return {
       list: [],
       playerlist: [],
-      // new add ===
+      // 当前片段索引（一次会话内与 videoObj / 绘制循环始终指向同一段）
       playIndex: 0,
-      RAFCancelReq: null,
       logo: '',
       videoList: [],
-      // 当前播放对象
-      videoObj: {},
+      // 当前播放的视频对象
+      videoObj: null,
+      // 预加载视频对象
+      preloadVideoObj: null,
       // 是否暂停
       paused: true,
-      // 总时长
+      // 全部片段累计总时长
       totalTime: 0,
-      // 当前播放时长
+      // 累计已播放时长（进度条显示值）
       playedTime: 0,
-      // 缓存进度条时间
-      cacheCurrentTime: 0,
+      // 是否已播放到结尾
       endFlag: false,
-      // 动态增减
-      activeLength: 0,
-      // 时间段节点记录,进度条快速定位
+      // 各片段累计结束时间节点，用于进度条快速定位
       skipDict: [],
       // 是否展示进度条
       showDom: false,
-      // 是否已经绑定事件
+      // 是否正在拖动进度条
       drag: 0,
+      // 拖动松手后浏览器会补发一次 click，用该标记吞掉，避免同一次操作跳转两次
+      justDragged: false,
+      // ===== 会话级运行时状态（不参与视图渲染）=====
+      // 当前绘制循环的 requestAnimationFrame 句柄
+      rafId: null,
+      // 绘制循环是否运行中（同一时刻只允许一个绘制循环）
+      drawRunning: false,
+      // 片段会话代号：每次切换片段自增，旧片段残留的异步事件回调据此失效
+      sessionGen: 0,
+      // 同一结束窗口内只允许推进一次索引
+      isSwitching: false,
+      // 播放器是否已销毁（销毁后所有异步回调直接退场）
+      destroyed: false,
+      // document / DOM 级监听整个会话只绑定一次
+      listenersBound: false,
+      // 当前片段在累计时间轴上的起点时间
+      segmentStart: 0,
     }
   },
   beforeDestroy() {
-    this.setFree()
-    console.log('desotory')
-    document.removeEventListener('keydown', this.keydown)
-    document.removeEventListener('mousemove', this.mousemove)
-    document.removeEventListener('mouseup', this.mouseup)
-    document.querySelector('#AutoCanvasId').removeEventListener('click', this.changeVideoState)
+    this.teardown()
   },
   mounted() {
-    let _self = this
-    this.init()
-    _self.playerlist = _self.list.map((item) => {
+    this.playerlist = this.list.map((item) => {
       return {
         start: parseFloat(item.playPoint.start),
         end: parseFloat(item.playPoint.end),
       }
     })
-    _self.videoList = _self.list
-    _self.comTotalTime()
-    document.addEventListener('keydown', _self.keydown)
-    _self.$nextTick(() => {
-      _self.gotoPlay()
+    this.videoList = this.list
+    this.comTotalTime()
+    this.playedTime = 0
+    this.bindGlobalListeners()
+    this.$nextTick(() => {
+      this.gotoPlay()
     })
   },
-
   methods: {
-    initDrop2() {
-      let _self = this
-      _self.drag = 0
-      let dropBtn = document.querySelector('#circle')
-      //进度按钮被点击
-      dropBtn.addEventListener('mousedown', function() {
-        _self.drag = 1
-        if (_self.videoObj && _self.videoObj.played) {
-          _self.videoObj.pause()
-          _self.paused = true
-        }
-      })
-      //页面被释放
-      document.addEventListener('mouseup', _self.mouseup)
-      // //拖动事件
-      document.addEventListener('mousemove', _self.mouseover)
-      // AutoCanvasId
-      document.querySelector('#AutoCanvasId').addEventListener('click', _self.changeVideoState)
+    // 外部入口（index.js 也会调用），仅做进度复位
+    init() {
+      this.playedTime = 0
     },
-    setValue(touch) {
-      let rate
-      let _self = this
-      let dropBtn = document.querySelector('#circle')
-      let progress = document.querySelector('.bar')
-      let oLeft = touch.offsetX //滑块最左端到父元素最左端的距离
-      //拖动边界检测
-      if (oLeft < 0) {
-        oLeft = 0
-      } else if (oLeft > progress.offsetWidth) {
-        oLeft = progress.offsetWidth
+    // 计算总时长与各片段累计时间节点
+    comTotalTime() {
+      let totalTime = 0
+      this.skipDict = this.playerlist.map((item) => {
+        totalTime += item.end - item.start
+        return totalTime
+      })
+      this.totalTime = totalTime
+    },
+    // 整个播放会话只绑定一次全局监听，引用固定，销毁时可精确移除
+    bindGlobalListeners() {
+      if (this.listenersBound) return
+      this.listenersBound = true
+      document.addEventListener('keydown', this.keydown)
+      document.addEventListener('mousemove', this.mousemove)
+      document.addEventListener('mouseup', this.mouseup)
+      this.$nextTick(() => {
+        if (this.destroyed) return
+        const circle = document.querySelector('#circle')
+        if (circle) circle.addEventListener('mousedown', this.onCircleMouseDown)
+      })
+    },
+    onCircleMouseDown() {
+      this.drag = 1
+      this.justDragged = false
+      if (this.videoObj && !this.videoObj.paused) {
+        this.videoObj.pause()
+        this.paused = true
       }
-      let dropBtnWidth = dropBtn.offsetWidth / 2
-      let durationWidth = oLeft - dropBtnWidth
-      if (durationWidth < 1) {
-        durationWidth = 0
+    },
+    mousemove(e) {
+      if (this.drag === 1) {
+        this.setValue(e)
       }
-      //拖动实时改变进度条
-      rate = (oLeft / progress.offsetWidth) * _self.totalTime
-      _self.playedTime = rate
     },
     mouseup() {
-      let _self = this
-      if (_self.drag === 1) {
+      if (this.drag === 1) {
+        // 松手后浏览器会在进度条上补发一次 click，标记后由 skipLine 吞掉
+        this.justDragged = true
         this.skipProgress()
       }
       this.drag = 0
     },
-    mouseover(e) {
-      let _self = this
-      if (_self.drag === 1) {
-        _self.setValue(e)
-      }
+    // 拖动过程中实时刷新进度条时间（不改播放状态，松手时才跳转）
+    setValue(touch) {
+      const bar = document.querySelector('.bar')
+      if (!bar || !this.totalTime) return
+      const rect = bar.getBoundingClientRect()
+      let oLeft = touch.clientX - rect.left
+      oLeft = Math.max(0, Math.min(oLeft, rect.width))
+      this.playedTime = (oLeft / rect.width) * this.totalTime
     },
-    // 快进跳转
-    skipProgress() {
-      let _self = this
-      let curIndex = 0
-      _self.skipDict.some((item, index) => {
-        if (_self.playedTime < item) {
-          curIndex = index
-          return true
-        }
-      })
-      _self.endFlag = false
-      _self.playIndex = curIndex
-      let shortSliceTime = 0
-      if (_self.playIndex == 0) {
-        shortSliceTime = _self.playedTime
-      } else {
-        shortSliceTime = _self.playedTime - _self.skipDict[curIndex - 1 > 0 ? curIndex - 1 : 0]
-      }
-      // console.log("重要：", _self.playedTime, shortSliceTime);
-      _self.VideoPlay(shortSliceTime)
-    },
-    // 点击快进跳转
+    // 点击进度条跳转
     skipLine(e) {
-      let _self = this
-      let barBox = document.getElementById('progressBar')
-      let rate = (e.offsetX / barBox.clientWidth) * _self.totalTime
-      _self.playedTime = rate
-      _self.skipProgress()
-    },
-    init() {
-      this.RAF()
-      this.playedTime = 0
-    },
-    resetVideo() {
-      if (this.videoObj && !this.videoObj.paused) {
-        this.videoObj.pause()
-        this.paused = true
-        this.playIndex = 0
+      // 拖动松手补发的 click：跳过，同一次拖动只做一次跳转
+      if (this.justDragged) {
+        this.justDragged = false
+        return
       }
+      const bar = document.querySelector('.bar')
+      if (!bar || !this.totalTime) return
+      const rect = bar.getBoundingClientRect()
+      let oLeft = e.clientX - rect.left
+      oLeft = Math.max(0, Math.min(oLeft, rect.width))
+      this.playedTime = (oLeft / rect.width) * this.totalTime
+      this.skipProgress()
     },
-    RAF(cb) {
-      return window.requestAnimationFrame(() => {
-        window.setTimeout(cb, 1000 / 60)
-      })
-    },
-    // 计算总时长
-    comTotalTime() {
-      let _self = this
-      let totalTime = 0
-      _self.skipDict = []
-      this.playerlist.map((item) => {
-        let temp = item.end - item.start
-        totalTime += temp
-        _self.skipDict.push(totalTime)
-      })
-      this.totalTime = totalTime
-    },
-    close() {
-      let _self = this
-      try {
-        if (typeof _self.onClose === 'function') {
-          _self.onClose(_self)
+    // 拖动松手 / 点击后的统一跳转：累计时间 -> 正确片段 + 片段内偏移
+    skipProgress() {
+      if (this.destroyed || !this.videoList.length || !this.totalTime) return
+      const target = Math.max(0, Math.min(this.playedTime, this.totalTime))
+      // 落在总时长末尾：进入结束态，不允许越界索引
+      if (target >= this.totalTime - 0.001) {
+        this.enterEndState()
+        return
+      }
+      // 找到 target 所在片段：第一个累计节点大于 target 的片段
+      let curIndex = this.skipDict.length - 1
+      for (let i = 0; i < this.skipDict.length; i++) {
+        if (target < this.skipDict[i]) {
+          curIndex = i
+          break
         }
-        setTimeout(() => {
-          _self.$destroy(true)
-          _self.$el.parentNode.removeChild(_self.$el)
-        }, 200)
-      } catch (e) {
-        console.log(e)
       }
+      const segStart = curIndex === 0 ? 0 : this.skipDict[curIndex - 1]
+      const segDuration = this.playerlist[curIndex].end - this.playerlist[curIndex].start
+      // 偏移钳制：不允许负偏移，也不允许超出本片段时长
+      let offset = Math.max(0, Math.min(target - segStart, segDuration - 0.001))
+      this.playedTime = segStart + offset
+      this.endFlag = false
+      this.isSwitching = false
+      this.playIndex = curIndex
+      this.VideoPlay(offset)
     },
     keydown(e) {
-      let _self = this
       if (e.keyCode === 27) {
-        // esc关闭消息
-        _self.close()
+        // Esc 关闭
+        this.close()
       }
     },
-    // add 播放器核心方法
-    async gotoPlay() {
-      let _self = this
-      _self.playIndex = 0
-      _self.paused = false
-      _self.endFlag = false
-      _self.VideoPlay()
+    // 从第一段重新开始一次播放
+    gotoPlay() {
+      if (this.destroyed || !this.videoList.length) return
+      this.playIndex = 0
+      this.playedTime = 0
+      this.paused = false
+      this.endFlag = false
+      this.isSwitching = false
+      this.VideoPlay(0)
     },
     // 截获当前视频播放器
     updateCurrentVideo(videoObj) {
       this.videoObj = videoObj
     },
-    // 播放 || 暂停
+    // 播放 || 暂停：单次点击只切换一次状态
     changeVideoState() {
-      if (this.endFlag || (this.videoObj && this.videoObj.paused)) {
-        if (this.playIndex == this.playerlist.length) {
-          this.playedTime = 0
-          this.gotoPlay()
-          return
-        }
+      if (this.destroyed || this.isSwitching) return
+      if (this.endFlag || !this.videoObj) {
+        // 结束态点击：从第一段重新播放
+        this.gotoPlay()
+        return
+      }
+      if (this.videoObj.paused) {
         this.videoObj.play()
         this.paused = false
-      } else if (this.videoObj && !this.videoObj.paused) {
+      } else {
         this.videoObj.pause()
         this.paused = true
       }
@@ -283,134 +268,192 @@ export default {
         this.videoObj.muted = !this.videoObj.muted
       }
     },
-    // 核心启动逻辑
-    async VideoPlay(shortSliceTime = 0) {
-      let _self = this
-      if (_self.playIndex + 1 > _self.videoList.length) {
-        return
-      }
-      // console.log("_self.playIndex: " + _self.playIndex);
-      // 准备工作start
-      let elDom = document.querySelector('#VideoDom')
-      let canvasDom = document.querySelector('#canvasDom')
-      // 一、解析当前视频的各个参数 视频信息：1.当前播放路径、2.播放开始时间、3.播放结束时间、4.下部视频下标
-      let currentVideo = _self.videoList[_self.playIndex]
-      let currentUrl = currentVideo.url
-      let currentStartTime = parseFloat(currentVideo.playPoint.start) + shortSliceTime
-      let currentEndTime = parseFloat(currentVideo.playPoint.end)
-      // logo信息
-      let currentLogoInfo = {
-        logo: _self.logo,
+    // 核心启动逻辑：加载并播放 playIndex 指向的片段，shortSliceTime 为片段内偏移
+    VideoPlay(shortSliceTime = 0) {
+      if (this.destroyed) return
+      if (this.playIndex < 0 || this.playIndex >= this.videoList.length) return
+      // 新片段会话：代号自增，上一片段残留的 timeupdate / onseeked / 绘制循环全部失效
+      const gen = ++this.sessionGen
+      this.isSwitching = false
+      // 停掉上一片段的绘制循环，保证同一时刻只有一个绘制循环
+      this.stopDrawLoop()
+
+      const elDom = document.querySelector('#VideoDom')
+      const canvasDom = document.querySelector('#canvasDom')
+
+      // 一、解析当前片段参数
+      const currentVideo = this.videoList[this.playIndex]
+      const currentUrl = currentVideo.url
+      const baseStartTime = parseFloat(currentVideo.playPoint.start)
+      const currentStartTime = baseStartTime + shortSliceTime
+      const currentEndTime = parseFloat(currentVideo.playPoint.end)
+      const currentLogoInfo = {
+        logo: this.logo,
         position: currentVideo.logoPosition,
         videoWidth: currentVideo.width,
       }
-      let nextIndex = _self.playIndex + 1
-      // 当前视频 配置end
+      // 当前片段在累计时间轴上的起点，与 playIndex 同步写入
+      this.segmentStart = this.playIndex === 0 ? 0 : this.skipDict[this.playIndex - 1]
 
-      // 二、是否有下一视频
-      if (!_self.videoList[nextIndex]) {
-        // 如果没有  则重置为零
-        nextIndex = 0
+      // 二、下一片段（用于预加载），没有下一 片段时记为 -1
+      const nextIndex = this.playIndex + 1 < this.videoList.length ? this.playIndex + 1 : -1
+
+      // 三、复用或创建视频 / canvas 对象（固定角色，源被替换；旧对象先停止再复用）
+      const videoObj = this.createVideo(elDom, 'AutoVideoId', false)
+      const nextVideoObj = this.createVideo(elDom, 'preLoadVideoId', true)
+      const CanvasEle = this.createCanvas(canvasDom, 'AutoCanvasId')
+      const context = CanvasEle.getContext('2d')
+
+      // 清掉两个视频元素上一次会话残留的事件与播放状态
+      this.clearVideoHandlers(videoObj)
+      this.clearVideoHandlers(nextVideoObj)
+      try {
+        nextVideoObj.pause()
+      } catch (e) {
+        /* noop */
       }
-      // 如果有  则配置下一视频的基本信息 视频信息：1.当前播放路径、2.播放开始时间
-      let nextVideo = _self.videoList[nextIndex]
-      let nextVideoUrl = nextVideo.url
-      let nextStartTime = parseFloat(nextVideo.playPoint.start)
-      //下一视频 配置end
 
-      //创建
-      // 创建两部视频的Dom节点
-      let videoObj = await _self.createVideo(elDom, 'AutoVideoId')
-      let nextVideoObj = await _self.createVideo(elDom, 'preLoadVideoId', true)
-      // 创建canvas的Dom节点
-      let CanvasEle = await _self.createCanvas(canvasDom, 'AutoCanvasId') //document.getElementById('AutoCanvasId')
-      let context = CanvasEle.getContext('2d')
-
+      this.updateCurrentVideo(videoObj)
       videoObj.src = currentUrl
-      // 更新视频对象
-      _self.updateCurrentVideo(videoObj)
-      //视频源改变时，指定开始播放时间
-      videoObj.ondurationchange = function() {
-        // console.log("ondurationchange");
+
+      // 视频源改变时，定位到片段起点（含跳转偏移）
+      videoObj.ondurationchange = () => {
+        if (gen !== this.sessionGen || this.destroyed) return
         videoObj.currentTime = currentStartTime
-        _self.cacheCurrentTime = currentStartTime
       }
-      //重新定位播放位置
-      videoObj.onseeked = function() {
-        // console.log("onseeked");
-        _self.paused = false
-        _self.videoObj.volume = 1
-        let playPromise = _self.videoObj.play()
-
-        if (playPromise !== undefined) {
-          playPromise
-            .then(() => {
-              _self.initDrop2()
-              _self.videoObj.play()
-            })
-            .catch((error) => {
-              console.log('sorry! 视频初始化失败', error)
-            })
+      // 重新定位完成后继续播放
+      videoObj.onseeked = () => {
+        if (gen !== this.sessionGen || this.destroyed) return
+        videoObj.volume = 1
+        const playPromise = videoObj.play()
+        if (playPromise && typeof playPromise.catch === 'function') {
+          playPromise.catch((error) => {
+            console.log('sorry! 视频初始化失败', error)
+          })
         }
       }
-      //播放位置改变
-      videoObj.ontimeupdate = function() {
-        let updateTime = videoObj.currentTime - _self.cacheCurrentTime
-        if (updateTime >= 0 && _self.playedTime <= _self.totalTime) {
-          _self.playedTime = _self.playedTime + updateTime
-          _self.cacheCurrentTime = videoObj.currentTime
+      // 播放位置改变：累计进度直接由视频原始时间推导，显示与实际视频时间一致
+      videoObj.ontimeupdate = () => {
+        if (gen !== this.sessionGen || this.destroyed) return
+        if (videoObj.seeking) return
+        // 累计进度直接由视频原始时间推导；钳制在本片段起点与总时长之间
+        const rawProgress = this.segmentStart + (videoObj.currentTime - baseStartTime)
+        this.playedTime = Math.max(this.segmentStart, Math.min(this.totalTime, rawProgress))
+        if (videoObj.currentTime >= currentEndTime) {
+          // 自然结束：playNext 内部有开关保护，同一结束窗口不会重复跳段
+          this.playNext()
         }
-        if (videoObj.currentTime > currentEndTime) {
-          _self.playNext(videoObj)
+      }
+      videoObj.onplay = () => {
+        if (gen !== this.sessionGen || this.destroyed) return
+        this.paused = false
+        // 画布尺寸跟随当前片段配置
+        CanvasEle.width = videoObj.videoWidth || currentVideo.width
+        CanvasEle.height = videoObj.videoHeight || currentVideo.height
+        // logo 跟随当前片段配置
+        this.createAndPutLogo(canvasDom, 'logoId', currentLogoInfo)
+        this.showDom = true
+        this.startDrawLoop(gen, videoObj, context, CanvasEle, currentStartTime, currentEndTime)
+      }
+      // 视频原生结束事件同样走带保护的推进逻辑
+      videoObj.onended = () => {
+        if (gen !== this.sessionGen || this.destroyed) return
+        this.playNext()
+      }
+
+      // 四、预加载下一 片段：复用预加载对象并替换其源；没有下一 片段则释放
+      this.preloadVideoObj = nextVideoObj
+      if (nextIndex >= 0) {
+        const nextVideo = this.videoList[nextIndex]
+        nextVideoObj.src = nextVideo.url
+        nextVideoObj.ondurationchange = () => {
+          if (this.destroyed) return
+          try {
+            nextVideoObj.currentTime = parseFloat(nextVideo.playPoint.start)
+          } catch (e) {
+            /* noop */
+          }
         }
-      }
-
-      //开始播放
-      videoObj.onplay = function() {
-        // console.log("onplay");
-        // console.log("开始播放：", _self.videoObj.paused);
-        CanvasEle.width = videoObj.width
-        CanvasEle.height = videoObj.height
-        _self.RAFCancelReq = _self.RAF(drawData)
-        // 创建logo
-        _self.createAndPutLogo(canvasDom, 'logoId', currentLogoInfo)
-        // 展示进度条
-        _self.showDom = true
-      }
-
-      //预加载视频
-      nextVideoObj.src = nextVideoUrl
-      //视频源改变时，指定开始播放时间
-      nextVideoObj.ondurationchange = function() {
-        // console.log("ondurationchange");
-        nextVideoObj.currentTime = nextStartTime
-      }
-
-      //取消轮询
-      let cancelAnimationFrame = function(flag) {
-        window.cancelAnimationFrame(flag)
-      }
-
-      function drawData() {
-        if (
-          videoObj.ended ||
-          videoObj.paused ||
-          videoObj.currentTime < currentStartTime ||
-          videoObj.currentTime >= currentEndTime
-        ) {
-          // console.log("videoObj.paused", videoObj.paused);
-          cancelAnimationFrame(_self.RAFCancelReq)
-          videoObj.pause()
-          return
-        }
-        context.drawImage(videoObj, 0, 0, videoObj.width, videoObj.height)
-        _self.RAF(drawData)
+      } else {
+        this.clearVideoHandlers(nextVideoObj)
+        nextVideoObj.removeAttribute('src')
+        nextVideoObj.load()
       }
     },
-    // 创建并摆放logo
+    // 启动当前片段唯一的绘制循环
+    startDrawLoop(gen, videoObj, context, CanvasEle, currentStartTime, currentEndTime) {
+      this.stopDrawLoop()
+      this.drawRunning = true
+      const drawData = () => {
+        // 会话已切换 / 播放器已销毁 / 循环被主动停止：立即退场，不再安排下一帧
+        if (!this.drawRunning || this.destroyed || gen !== this.sessionGen) {
+          return
+        }
+        if (videoObj.paused) {
+          this.drawRunning = false
+          this.rafId = null
+          return
+        }
+        if (videoObj.ended || videoObj.currentTime >= currentEndTime) {
+          this.drawRunning = false
+          this.rafId = null
+          this.playNext()
+          return
+        }
+        if (videoObj.currentTime < currentStartTime) {
+          // seek 过程中保持循环存活但不绘制，等待新画面
+          this.rafId = window.requestAnimationFrame(drawData)
+          return
+        }
+        context.drawImage(videoObj, 0, 0, CanvasEle.width, CanvasEle.height)
+        this.rafId = window.requestAnimationFrame(drawData)
+      }
+      this.rafId = window.requestAnimationFrame(drawData)
+    },
+    stopDrawLoop() {
+      this.drawRunning = false
+      if (this.rafId !== null) {
+        window.cancelAnimationFrame(this.rafId)
+        this.rafId = null
+      }
+    },
+    // 播放下一段：同一结束窗口只推进一次索引，重复触发不会跳过片段
+    playNext() {
+      if (this.destroyed || this.isSwitching) return
+      if (this.playIndex >= this.videoList.length - 1) {
+        this.enterEndState()
+        return
+      }
+      this.isSwitching = true
+      try {
+        if (this.videoObj) this.videoObj.pause()
+      } catch (e) {
+        /* noop */
+      }
+      this.playIndex += 1
+      this.VideoPlay(0)
+    },
+    // 进入结束态：停循环、停视频、索引停在末尾（点击后可从第一段重播）
+    enterEndState() {
+      this.stopDrawLoop()
+      this.isSwitching = false
+      this.endFlag = true
+      this.paused = true
+      this.playIndex = this.videoList.length
+      this.playedTime = this.totalTime
+      if (this.videoObj) {
+        try {
+          this.videoObj.pause()
+        } catch (e) {
+          /* noop */
+        }
+      }
+    },
+    // 创建并摆放 logo（每次切换片段时按新配置重排位置）
     createAndPutLogo(parentDom, domId, logoInfo) {
       this.$nextTick(() => {
-        let canvasDom = document.querySelector('#AutoCanvasId')
+        if (this.destroyed) return
+        const canvasDom = document.querySelector('#AutoCanvasId')
         parentDom = parentDom || document.body
         let obj = document.getElementById(domId)
         if (!obj) {
@@ -418,33 +461,35 @@ export default {
           obj.id = domId
           parentDom.appendChild(obj)
         }
-        obj.style = {}
-        obj.style.display = 'none'
-        obj.style.width = `${(canvasDom.width * 150) / 1080}px`
+        // 先清空上一片段残留的方位样式，避免两个方向的定位同时生效
         obj.style.position = 'absolute'
+        obj.style.display = 'none'
+        obj.style.left = ''
+        obj.style.right = ''
+        obj.style.top = ''
+        obj.style.bottom = ''
+        obj.style.width = `${(canvasDom.width * 150) / 1080}px`
         obj.style[logoInfo.position.x] = `${(canvasDom.width / 1080) * 60}px`
         obj.style[logoInfo.position.y] = `${(canvasDom.width / 1080) * 60}px`
         obj.src = logoInfo.logo
         this.$nextTick(() => {
-          obj.style.display = 'block'
-        }, 10000)
+          if (!this.destroyed) obj.style.display = 'block'
+        })
       })
     },
-    //根据父容器大小设置视频尺寸
+    // 根据父容器大小设置视频尺寸
     setVideoStyle(vObj) {
       let parentWidth = vObj.parentNode.getBoundingClientRect().width
       let parentHeight = vObj.parentNode.getBoundingClientRect().height
-      //根据父容器宽高计算 视频缩放比例
+      // 根据父容器宽高计算 视频缩放比例
       let scaleVal = Math.max(vObj.videoWidth / parentWidth, vObj.videoHeight / parentHeight)
       let scaleWidth = vObj.videoWidth / scaleVal
       let scaleHeight = vObj.videoHeight / scaleVal
       vObj.width = scaleWidth
       vObj.height = scaleHeight
     },
-
-    //创建视频对象
+    // 创建视频对象（同 id 对象已存在时直接复用）
     createVideo(parentDom, domId, isMuted = false) {
-      let _self = this
       if (!domId) {
         console.warn('缺少命名ID')
         return
@@ -456,7 +501,7 @@ export default {
         obj.id = domId
         parentDom.appendChild(obj)
         let videoSize = parseInt(document.getElementsByTagName('video').length)
-        //设置视频属性
+        // 设置视频属性
         obj.preload = 'auto'
         obj.style = 'background:#000000;display:none;position:absolute;left:100%;top:0;'
         obj.autoplay = ''
@@ -464,15 +509,14 @@ export default {
         obj.controls = true
         obj.muted = isMuted
         obj.volume = 0.1
-        //视频加载meta信息后，把自身尺寸修改了
-        obj.onloadedmetadata = function() {
-          // console.log('onloadedmetadata')
-          _self.setVideoStyle(obj)
+        // 视频加载 meta 信息后，把自身尺寸修改了
+        obj.onloadedmetadata = () => {
+          this.setVideoStyle(obj)
         }
       }
       return obj
     },
-    //创建 Canvas对象
+    // 创建 Canvas 对象（同 id 对象已存在时直接复用；画布点击监听只绑一次）
     createCanvas(parentDom, domId) {
       if (!domId) {
         console.warn('缺少命名ID')
@@ -484,34 +528,82 @@ export default {
         Obj = document.createElement('Canvas')
         Obj.id = domId
         parentDom.appendChild(Obj)
+        Obj.addEventListener('click', this.changeVideoState)
       }
       return Obj
     },
-
-    // 播放下一曲
-    playNext(curVideo) {
-      let _self = this
-      curVideo.pause()
-      _self.playIndex++
-      if (_self.playIndex > _self.list.length - 1) {
-        _self.paused = true
-        _self.endFlag = true
+    clearVideoHandlers(v) {
+      if (!v) return
+      v.ondurationchange = null
+      v.onseeked = null
+      v.ontimeupdate = null
+      v.onplay = null
+      v.onended = null
+      v.onseeking = null
+      v.onpause = null
+    },
+    releaseVideo(v) {
+      if (!v) return
+      this.clearVideoHandlers(v)
+      try {
+        v.pause()
+        v.removeAttribute('src')
+        v.load()
+      } catch (e) {
+        /* noop */
       }
-      _self.VideoPlay()
+    },
+    // 会话结束时的彻底释放：动画帧、定时器、键盘鼠标监听、画布点击监听、视频资源
+    teardown() {
+      if (this.destroyed) return
+      this.destroyed = true
+      this.stopDrawLoop()
+      document.removeEventListener('keydown', this.keydown)
+      document.removeEventListener('mousemove', this.mousemove)
+      document.removeEventListener('mouseup', this.mouseup)
+      const circle = document.querySelector('#circle')
+      if (circle) circle.removeEventListener('mousedown', this.onCircleMouseDown)
+      const canvas = document.querySelector('#AutoCanvasId')
+      if (canvas) canvas.removeEventListener('click', this.changeVideoState)
+      this.releaseVideo(document.getElementById('AutoVideoId'))
+      this.releaseVideo(document.getElementById('preLoadVideoId'))
+      this.videoObj = null
+      this.preloadVideoObj = null
+      // 通知入口（index.js）释放单例占位，允许再次打开
+      if (typeof this.setFree === 'function') {
+        this.setFree()
+      }
+    },
+    close() {
+      // 幂等：Esc 与关闭按钮同时触发、或重复点击只执行一次
+      if (this.destroyed) return
+      try {
+        if (typeof this.onClose === 'function') {
+          this.onClose(this)
+        }
+      } catch (e) {
+        console.log(e)
+      }
+      try {
+        this.$destroy()
+        if (this.$el && this.$el.parentNode) {
+          this.$el.parentNode.removeChild(this.$el)
+        }
+      } catch (e) {
+        console.log(e)
+      }
     },
     sToHs(s) {
-      //计算分钟
-      //算法：将秒数除以60，然后下舍入，既得到分钟数
+      // 计算分钟
       s = parseFloat(s).toFixed(0)
       var h
       h = Math.floor(s / 60)
-      //计算秒
-      //算法：取得秒%60的余数，既得到秒数
+      // 计算秒
       s = s % 60
-      //将变量转换为字符串
+      // 将变量转换为字符串
       h += ''
       s += ''
-      //如果只有一位数，前面增加一个0
+      // 如果只有一位数，前面增加一个0
       h = h.length == 1 ? '0' + h : h
       s = s.length == 1 ? '0' + s : s
       return h + ':' + s
