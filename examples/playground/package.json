@@ -1,0 +1,30 @@
+{
+  "name": "@moeru/three-mmd-playground",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build": "tsc && vite build",
+    "dev": "vite",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@moeru/three-mmd": "workspace:^",
+    "@moeru/three-mmd-physics-ammo": "workspace:^",
+    "@moeru/three-mmd-physics-springbone": "workspace:^",
+    "@moeru/three-mmd-r3f": "workspace:^",
+    "@react-three/drei": "catalog:r3f",
+    "@react-three/fiber": "catalog:r3f",
+    "foxact": "catalog:",
+    "lamina": "catalog:",
+    "leva": "catalog:r3f",
+    "react": "catalog:r3f",
+    "react-dom": "catalog:r3f",
+    "three": "catalog:",
+    "three-stdlib": "catalog:"
+  },
+  "devDependencies": {
+    "@types/react": "catalog:r3f",
+    "@types/react-dom": "catalog:r3f",
+    "@types/three": "catalog:"
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "name": "@moeru/three-mmd-physics-springbone",
+  "type": "module",
+  "version": "0.2.0-beta.2",
+  "description": "Use MMD on Three.js",
+  "author": "Moeru AI",
+  "license": "MIT",
+  "homepage": "https://github.com/moeru-ai/three-mmd",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/moeru-ai/three-mmd.git",
+    "directory": "packages/three-mmd-physics-springbone"
+  },
+  "bugs": "https://github.com/moeru-ai/three-mmd/issues",
+  "keywords": [
+    "threejs",
+    "three",
+    "mmd"
+  ],
+  "exports": "./src/index.ts",
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "exports": {
+      ".": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "./package.json": "./package.json"
+    },
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts"
+  },
+  "scripts": {
+    "build": "pkgroll"
+  },
+  "peerDependencies": {
+    "@moeru/three-mmd": "workspace:^",
+    "@types/three": ">=0.184.0",
+    "three": ">=0.184.0"
+  },
+  "dependencies": {
+    "@pixiv/three-vrm-springbone": "catalog:"
+  },
+  "devDependencies": {
+    "@moeru/three-mmd": "workspace:^",
+    "@types/three": "catalog:",
+    "three": "catalog:"
+  }
+}

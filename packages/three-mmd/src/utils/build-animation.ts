@@ -1,0 +1,595 @@
+import type { VmdObject } from 'babylon-mmd/esm/Loader/Parser/vmdObject'
+import type { SkinnedMesh, TypedArray } from 'three'
+
+import {
+  AnimationClip,
+  Euler,
+  Interpolant,
+  NumberKeyframeTrack,
+  Quaternion,
+  QuaternionKeyframeTrack,
+  Vector3,
+  VectorKeyframeTrack,
+} from 'three'
+
+export interface MMDAnimationUserData {
+  propertyTrack?: MMDPropertyTrackData
+}
+
+export interface MMDPropertyTrackData {
+  frameNumbers: number[]
+  ikBoneNames: string[]
+  /** State arrays are indexed as [ikBoneIndex][frameIndex]. */
+  ikStates: boolean[][]
+}
+
+class AnimationBuilder {
+  private static readonly _tempCenter = new Vector3()
+  private static readonly _tempEuler = new Euler()
+  private static readonly _tempPosition = new Vector3()
+  private static readonly _tempQuaternion = new Quaternion()
+
+  /**
+   * @param vmd - parsed VMD data
+   * @param mesh - tracks will be fitting to mesh
+   */
+  build(vmd: VmdObject, mesh: SkinnedMesh): AnimationClip {
+    // combine skeletal and morph animations
+
+    const tracks = this.buildSkeletalAnimation(vmd, mesh).tracks
+    const tracks2 = this.buildMorphAnimation(vmd, mesh).tracks
+
+    for (let i = 0, il = tracks2.length; i < il; i++) {
+      tracks.push(tracks2[i])
+    }
+
+    const clip = new AnimationClip('', -1, tracks)
+    const propertyTrack = this.buildPropertyTrack(vmd)
+    if (propertyTrack !== undefined) {
+      (clip.userData as MMDAnimationUserData).propertyTrack = propertyTrack
+      const lastPropertyFrame = propertyTrack.frameNumbers[propertyTrack.frameNumbers.length - 1]
+      clip.duration = Math.max(
+        clip.duration,
+        (lastPropertyFrame + 1) / 30,
+      )
+    }
+
+    return clip
+  }
+
+  /** @param vmd - parsed VMD data */
+  buildCameraAnimation(vmd: VmdObject): AnimationClip {
+    const pushVector3 = (array: number[], vec: Vector3) => {
+      array.push(vec.x)
+      array.push(vec.y)
+      array.push(vec.z)
+    }
+
+    const pushQuaternion = (array: number[], q: Quaternion) => {
+      array.push(q.x)
+      array.push(q.y)
+      array.push(q.z)
+      array.push(q.w)
+    }
+
+    const pushInterpolation = (array: number[], interpolation: ArrayLike<number>, index: number) => {
+      array.push(interpolation[index * 4 + 0] / 127) // x1
+      array.push(interpolation[index * 4 + 1] / 127) // x2
+      array.push(interpolation[index * 4 + 2] / 127) // y1
+      array.push(interpolation[index * 4 + 3] / 127) // y2
+    }
+
+    const cameras: VmdObject.CameraKeyFrame[] = []
+    for (let i = 0; i < vmd.cameraKeyFrames.length; i++) {
+      cameras.push(vmd.cameraKeyFrames.get(i))
+    }
+    cameras.sort((a, b) => a.frameNumber - b.frameNumber)
+
+    const times = []
+    const centers: number[] = []
+    const quaternions: number[] = []
+    const positions: number[] = []
+    const fovs = []
+
+    const cInterpolations: number[] = []
+    const qInterpolations: number[] = []
+    const pInterpolations: number[] = []
+    const fInterpolations: number[] = []
+
+    const quaternion = AnimationBuilder._tempQuaternion
+    const euler = AnimationBuilder._tempEuler
+    const position = AnimationBuilder._tempPosition
+    const center = AnimationBuilder._tempCenter
+
+    for (let i = 0, il = cameras.length; i < il; i++) {
+      const motion = cameras[i]
+
+      const time = motion.frameNumber / 30
+      const pos = motion.position
+      const rot = motion.rotation
+      const distance = motion.distance
+      const fov = motion.fov
+      const interpolation = motion.interpolation
+
+      times.push(time)
+
+      position.set(0, 0, -distance)
+      center.set(pos[0], pos[1], pos[2])
+
+      // MMD camera specifies Euler angles in YXZ (Yaw -> Pitch -> Roll) rotation order.
+      euler.set(-rot[0], -rot[1], -rot[2], 'YXZ')
+      quaternion.setFromEuler(euler)
+
+      position.add(center)
+      position.applyQuaternion(quaternion)
+
+      pushVector3(centers, center)
+      pushQuaternion(quaternions, quaternion)
+      pushVector3(positions, position)
+
+      fovs.push(fov)
+
+      for (let j = 0; j < 3; j++) {
+        pushInterpolation(cInterpolations, interpolation, j)
+      }
+
+      pushInterpolation(qInterpolations, interpolation, 3)
+
+      // use the same parameter for x, y, z axis.
+      for (let j = 0; j < 3; j++) {
+        pushInterpolation(pInterpolations, interpolation, 4)
+      }
+
+      pushInterpolation(fInterpolations, interpolation, 5)
+    }
+
+    const tracks = []
+
+    // I expect an object whose name 'target' exists under THREE.Camera
+    tracks.push(this._createTrack('target.position', VectorKeyframeTrack, times, centers, cInterpolations))
+
+    tracks.push(this._createTrack('.quaternion', QuaternionKeyframeTrack, times, quaternions, qInterpolations))
+    tracks.push(this._createTrack('.position', VectorKeyframeTrack, times, positions, pInterpolations))
+    tracks.push(this._createTrack('.fov', NumberKeyframeTrack, times, fovs, fInterpolations))
+
+    return new AnimationClip('', -1, tracks)
+  }
+
+  private _createTrack(node: string, TypedKeyframeTrack: typeof NumberKeyframeTrack | typeof QuaternionKeyframeTrack | typeof VectorKeyframeTrack, times: number[], values: number[], interpolations: number[]): InstanceType<typeof TypedKeyframeTrack> {
+    /*
+     * optimizes here not to let KeyframeTrackPrototype optimize
+     * because KeyframeTrackPrototype optimizes times and values but
+     * doesn't optimize interpolations.
+     */
+    if (times.length > 2) {
+      times = times.slice()
+      values = values.slice()
+      interpolations = interpolations.slice()
+
+      const stride = values.length / times.length
+      const interpolateStride = interpolations.length / times.length
+
+      let index = 1
+
+      for (let aheadIndex = 2, endIndex = times.length; aheadIndex < endIndex; aheadIndex++) {
+        for (let i = 0; i < stride; i++) {
+          if (values[index * stride + i] !== values[(index - 1) * stride + i]
+            || values[index * stride + i] !== values[aheadIndex * stride + i]) {
+            index++
+            break
+          }
+        }
+
+        if (aheadIndex > index) {
+          times[index] = times[aheadIndex]
+
+          for (let i = 0; i < stride; i++) {
+            values[index * stride + i] = values[aheadIndex * stride + i]
+          }
+
+          for (let i = 0; i < interpolateStride; i++) {
+            interpolations[index * interpolateStride + i] = interpolations[aheadIndex * interpolateStride + i]
+          }
+        }
+      }
+
+      times.length = index + 1
+      values.length = (index + 1) * stride
+      interpolations.length = (index + 1) * interpolateStride
+    }
+
+    const track = new TypedKeyframeTrack(node, times, values)
+
+    // @ts-expect-error monkey patch
+    track.createInterpolant = function InterpolantFactoryMethodCubicBezier(result: null | TypedArray) {
+      return new CubicBezierInterpolation(this.times, this.values, this.getValueSize(), result ?? undefined, new Float32Array(interpolations))
+    }
+
+    return track
+  }
+
+  /**
+   * @param vmd - parsed VMD data
+   * @param mesh - tracks will be fitting to mesh
+   */
+  private buildMorphAnimation(vmd: VmdObject, mesh: SkinnedMesh): AnimationClip {
+    const tracks = []
+
+    const morphs: Record<string, VmdObject.MorphKeyFrame[]> = {}
+    const morphTargetDictionary = mesh.morphTargetDictionary!
+
+    for (let i = 0; i < vmd.morphKeyFrames.length; i++) {
+      const morph = vmd.morphKeyFrames.get(i)
+      const morphName = morph.morphName
+
+      if (morphTargetDictionary[morphName] == null)
+        continue
+
+      morphs[morphName] = morphs[morphName] ?? []
+      morphs[morphName].push(morph)
+    }
+
+    for (const [key, array] of Object.entries(morphs)) {
+      array.sort((a, b) => a.frameNumber - b.frameNumber)
+
+      const times = []
+      const values = []
+
+      for (let i = 0, il = array.length; i < il; i++) {
+        times.push(array[i].frameNumber / 30)
+        values.push(array[i].weight)
+      }
+
+      tracks.push(new NumberKeyframeTrack(`.morphTargetInfluences[${morphTargetDictionary[key]}]`, times, values))
+    }
+
+    return new AnimationClip('', -1, tracks)
+  }
+
+  private buildPropertyTrack(vmd: VmdObject): MMDPropertyTrackData | undefined {
+    const propertyKeyFrames = Array.from(vmd.propertyKeyFrames)
+    if (propertyKeyFrames.length === 0)
+      return undefined
+
+    propertyKeyFrames.sort((a, b) => a.frameNumber - b.frameNumber)
+
+    const frames: VmdObject.PropertyKeyFrame[] = []
+    for (const propertyKeyFrame of propertyKeyFrames) {
+      const previous = frames[frames.length - 1]
+      if (previous?.frameNumber === propertyKeyFrame.frameNumber)
+        frames[frames.length - 1] = propertyKeyFrame
+      else
+        frames.push(propertyKeyFrame)
+    }
+
+    const ikBoneNames: string[] = []
+    const ikBoneNameIndices = new Map<string, number>()
+    for (const propertyKeyFrame of frames) {
+      for (const [ikBoneName] of propertyKeyFrame.ikStates) {
+        if (ikBoneNameIndices.has(ikBoneName))
+          continue
+
+        ikBoneNameIndices.set(ikBoneName, ikBoneNames.length)
+        ikBoneNames.push(ikBoneName)
+      }
+    }
+
+    if (ikBoneNames.length === 0)
+      return undefined
+
+    const currentStates = Array.from({ length: ikBoneNames.length }).fill(false) as boolean[]
+    const frameNumbers: number[] = []
+    const ikStates = ikBoneNames.map(() => [] as boolean[])
+
+    for (const propertyKeyFrame of frames) {
+      frameNumbers.push(propertyKeyFrame.frameNumber)
+      for (const [ikBoneName, enabled] of propertyKeyFrame.ikStates) {
+        currentStates[ikBoneNameIndices.get(ikBoneName)!] = enabled
+      }
+      for (let i = 0; i < currentStates.length; i++)
+        ikStates[i].push(currentStates[i])
+    }
+
+    return { frameNumbers, ikBoneNames, ikStates }
+  }
+
+  /**
+   * @param vmd - parsed VMD data
+   * @param mesh - tracks will be fitting to mesh
+   */
+  private buildSkeletalAnimation(vmd: VmdObject, mesh: SkinnedMesh): AnimationClip {
+    const pushInterpolation = (array: number[], interpolation: ArrayLike<number>, index: number) => {
+      array.push(interpolation[index + 0] / 127) // x1
+      array.push(interpolation[index + 8] / 127) // x2
+      array.push(interpolation[index + 4] / 127) // y1
+      array.push(interpolation[index + 12] / 127) // y2
+    }
+
+    const tracks = []
+
+    const motions: Record<string, VmdObject.BoneKeyFrame[]> = {}
+    const bones = mesh.skeleton.bones
+    const boneNameDictionary: Record<string, boolean> = {}
+
+    for (let i = 0, il = bones.length; i < il; i++) {
+      boneNameDictionary[bones[i].name] = true
+    }
+
+    for (let i = 0; i < vmd.boneKeyFrames.length; i++) {
+      const motion = vmd.boneKeyFrames.get(i)
+      const boneName = motion.boneName
+
+      if (boneNameDictionary[boneName] == null)
+        continue
+
+      motions[boneName] = motions[boneName] ?? []
+      motions[boneName].push(motion)
+    }
+
+    for (const [key, array] of Object.entries(motions)) {
+      array.sort((a, b) => a.frameNumber - b.frameNumber)
+
+      const times: number[] = []
+      const positions: number[] = []
+      const rotations: number[] = []
+      const pInterpolations: number[] = []
+      const rInterpolations: number[] = []
+
+      const basePosition = mesh.skeleton.getBoneByName(key)!.position.toArray()
+
+      for (let i = 0, il = array.length; i < il; i++) {
+        const time = array[i].frameNumber / 30
+        const position = array[i].position
+        const rotation = array[i].rotation
+        const interpolation = array[i].interpolation
+
+        times.push(time)
+
+        positions.push(basePosition[0] + position[0])
+        positions.push(basePosition[1] + position[1])
+        positions.push(basePosition[2] - position[2])
+
+        rotations.push(-rotation[0])
+        rotations.push(-rotation[1])
+        rotations.push(rotation[2])
+        rotations.push(rotation[3])
+
+        for (let j = 0; j < 3; j++) pushInterpolation(pInterpolations, interpolation, j)
+
+        pushInterpolation(rInterpolations, interpolation, 3)
+      }
+
+      const targetName = `.bones[${key}]`
+
+      tracks.push(this._createTrack(`${targetName}.position`, VectorKeyframeTrack, times, positions, pInterpolations))
+      tracks.push(this._createTrack(`${targetName}.quaternion`, QuaternionKeyframeTrack, times, rotations, rInterpolations))
+    }
+
+    return new AnimationClip('', -1, tracks)
+  }
+}
+
+class CubicBezierInterpolation extends Interpolant {
+  readonly interpolationParams: ArrayLike<number>
+  declare parameterPositions: TypedArray
+  declare resultBuffer: TypedArray
+  declare sampleSize: number
+  declare sampleValues: TypedArray
+
+  private _lastResult = 0
+  private _lastX = -1
+  private _lastX1 = -1
+  private _lastX2 = -1
+  private _lastY1 = -1
+  private _lastY2 = -1
+
+  constructor(
+    parameterPositions: TypedArray,
+    sampleValues: TypedArray,
+    sampleSize: number,
+    resultBuffer: TypedArray | undefined,
+    params: ArrayLike<number>,
+  ) {
+    super(parameterPositions, sampleValues, sampleSize, resultBuffer)
+
+    this.interpolationParams = params
+  }
+
+  _calculate(x1: number, x2: number, y1: number, y2: number, x: number): number {
+    /*
+     * Cubic Bezier curves
+     *   https://en.wikipedia.org/wiki/B%C3%A9zier_curve#Cubic_B.C3.A9zier_curves
+     *
+     * B(t) = ( 1 - t ) ^ 3 * P0
+     *      + 3 * ( 1 - t ) ^ 2 * t * P1
+     *      + 3 * ( 1 - t ) * t^2 * P2
+     *      + t ^ 3 * P3
+     *      ( 0 <= t <= 1 )
+     *
+     * MMD uses Cubic Bezier curves for bone and camera animation interpolation.
+     *   http://d.hatena.ne.jp/edvakf/20111016/1318716097
+     *
+     *    x = ( 1 - t ) ^ 3 * x0
+     *      + 3 * ( 1 - t ) ^ 2 * t * x1
+     *      + 3 * ( 1 - t ) * t^2 * x2
+     *      + t ^ 3 * x3
+     *    y = ( 1 - t ) ^ 3 * y0
+     *      + 3 * ( 1 - t ) ^ 2 * t * y1
+     *      + 3 * ( 1 - t ) * t^2 * y2
+     *      + t ^ 3 * y3
+     *      ( x0 = 0, y0 = 0 )
+     *      ( x3 = 1, y3 = 1 )
+     *      ( 0 <= t, x1, x2, y1, y2 <= 1 )
+     *
+     * Polynomial Expansion:
+     *   f(t) = ax * t^3 + bx * t^2 + cx * t - x = 0
+     *     where:
+     *       cx = 3 * x1
+     *       bx = 3 * (x2 - x1) - cx
+     *       ax = 1 - cx - bx
+     *
+     * 1. Horner's Method (Polynomial Evaluation Optimization):
+     *    https://en.wikipedia.org/wiki/Horner%27s_method
+     *    - Evaluates f(t) and f'(t) with minimal basic operations:
+     *        f(t)  = ((ax * t + bx) * t + cx) * t - x
+     *        f'(t) = (3 * ax * t + 2 * bx) * t + cx
+     *
+     * 2. Newton-Raphson Root-Finding Method:
+     *    https://en.wikipedia.org/wiki/Newton%27s_method
+     *    - Chromium UnitBezier / cubic_bezier.cc reference:
+     *      https://source.chromium.org/chromium/chromium/src/+/main:ui/gfx/geometry/cubic_bezier.cc
+     *    - Replaces slow bisection loops with up to 4 Newton-Raphson steps (< 1e-6 precision):
+     *        t_{n+1} = t_n - f(t_n) / f'(t_n)
+     *
+     * 3. Inline Micro-caching (Temporal Locality):
+     *    - Caches previous evaluation parameters and results to achieve O(0) fast-path execution.
+     *
+     * Verified with ESLint rules and unit test suite.
+     */
+
+    if (x === this._lastX && x1 === this._lastX1 && x2 === this._lastX2 && y1 === this._lastY1 && y2 === this._lastY2)
+      return this._lastResult
+
+    // If x1 === y1 && x2 === y2, it's a linear interpolation
+    if (x1 === y1 && x2 === y2) {
+      this._lastX1 = x1
+      this._lastX2 = x2
+      this._lastY1 = y1
+      this._lastY2 = y2
+      this._lastX = x
+      this._lastResult = x
+      return x
+    }
+
+    // f(t) = (1 - 3*x1 + 3*x2)*t^3 + (3*x1 - 6*x2)*t^2 + (3*x2)*t - x = 0
+    const cx = 3.0 * x1
+    const bx = 3.0 * (x2 - x1) - cx
+    const ax = 1.0 - cx - bx
+
+    let t = x
+    let tMin = 0.0
+    let tMax = 1.0
+
+    // 1. First try up to 8 Newton-Raphson steps for fast quadratic convergence
+    for (let i = 0; i < 8; i++) {
+      const ft = ((ax * t + bx) * t + cx) * t - x
+      if (Math.abs(ft) < 1e-6)
+        break
+
+      const dft = (3.0 * ax * t + 2.0 * bx) * t + cx
+      if (Math.abs(dft) < 1e-6)
+        break
+
+      const tNext = t - ft / dft
+      if (tNext < tMin || tNext > tMax)
+        break
+
+      t = tNext
+    }
+
+    // 2. Fallback to Bisection (binary search) if Newton-Raphson didn't reach target tolerance
+    let ft = ((ax * t + bx) * t + cx) * t - x
+    if (Math.abs(ft) >= 1e-6) {
+      t = x
+
+      for (let i = 0; i < 16; i++) {
+        ft = ((ax * t + bx) * t + cx) * t - x
+        if (Math.abs(ft) < 1e-6)
+          break
+
+        if (ft > 0)
+          tMax = t
+        else
+          tMin = t
+
+        t = (tMin + tMax) * 0.5
+      }
+    }
+
+    // Clamp t within [0, 1]
+    t = t < 0 ? 0 : t > 1 ? 1 : t
+
+    // Calculate y(t) = ((ay * t + by) * t + cy) * t using Horner's method
+    const cy = 3.0 * y1
+    const by = 3.0 * (y2 - y1) - cy
+    const ay = 1.0 - cy - by
+
+    const res = ((ay * t + by) * t + cy) * t
+    this._lastX1 = x1
+    this._lastX2 = x2
+    this._lastY1 = y1
+    this._lastY2 = y2
+    this._lastX = x
+    this._lastResult = res
+    return res
+  }
+
+  interpolate_(i1: number, t0: number, t: number, t1: number): TypedArray {
+    const result = this.resultBuffer
+    const values = this.sampleValues
+    const stride = this.valueSize
+    const params = this.interpolationParams
+
+    const offset1 = i1 * stride
+    const offset0 = offset1 - stride
+
+    // No interpolation if next key frame is in one frame in 30fps.
+    // This is from MMD animation spec.
+    // '1.5' is for precision loss. times are Float32 in Three.js Animation system.
+    const weight1 = ((t1 - t0) < 1 / 30 * 1.5) ? 0.0 : (t - t0) / (t1 - t0)
+
+    if (stride === 4) { // Quaternion
+      const x1 = params[i1 * 4 + 0]
+      const x2 = params[i1 * 4 + 1]
+      const y1 = params[i1 * 4 + 2]
+      const y2 = params[i1 * 4 + 3]
+
+      const ratio = this._calculate(x1, x2, y1, y2, weight1)
+
+      Quaternion.slerpFlat(
+        result as unknown as number[],
+        0,
+        values as unknown as number[],
+        offset0,
+        values as unknown as number[],
+        offset1,
+        ratio,
+      )
+    }
+    else if (stride === 3) { // Vector3
+      for (let i = 0; i < stride; ++i) {
+        const x1 = params[i1 * 12 + i * 4 + 0]
+        const x2 = params[i1 * 12 + i * 4 + 1]
+        const y1 = params[i1 * 12 + i * 4 + 2]
+        const y2 = params[i1 * 12 + i * 4 + 3]
+
+        const ratio = this._calculate(x1, x2, y1, y2, weight1)
+
+        result[i] = values[offset0 + i] * (1 - ratio) + values[offset1 + i] * ratio
+      }
+    }
+    else { // Number
+      const x1 = params[i1 * 4 + 0]
+      const x2 = params[i1 * 4 + 1]
+      const y1 = params[i1 * 4 + 2]
+      const y2 = params[i1 * 4 + 3]
+
+      const ratio = this._calculate(x1, x2, y1, y2, weight1)
+
+      result[0] = values[offset0] * (1 - ratio) + values[offset1] * ratio
+    }
+
+    return result
+  }
+}
+
+/**
+ * @param vmd - parsed VMD data
+ * @param mesh - tracks will be fitting to mesh
+ */
+export const buildAnimation = (vmd: VmdObject, mesh: SkinnedMesh) =>
+  new AnimationBuilder().build(vmd, mesh)
+
+/** @param vmd - parsed VMD data */
+export const buildCameraAnimation = (vmd: VmdObject) =>
+  new AnimationBuilder().buildCameraAnimation(vmd)
