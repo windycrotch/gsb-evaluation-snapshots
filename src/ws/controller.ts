@@ -29,10 +29,10 @@ import {
   parseStageParams,
   stageAllowedOnElement,
   stageToStromProps,
-  mergeIntoStore,
   allStoredStages,
   liveStromPropsFromStore,
 } from '../lib/audio-processing.js';
+import { applyAudioProcSet } from '../services/audio-proc-apply.js';
 import {
   mirrorToMainForPersistedReturns,
   returnSendMatrix,
@@ -1249,6 +1249,22 @@ export async function reinitConnectedControllers(productionId: string): Promise<
           broadcast(productionId, { type: 'AUDIO_STATE', elementId: 'main', property: 'mute', value: mainMuted });
         }
         broadcast(productionId, { type: 'GRP_STATE_RESET' });
+        // Re-apply persisted audio processing live keys to the new flow (mirrors
+        // the first-connect path, issue #527). The flow generator already seeded
+        // them — and the construction-time ch{N}_hpf_enabled — at build time;
+        // this re-asserts the live keys on the running pipeline.
+        const procLiveProps = liveStromPropsFromStore(doc.audioProcessing);
+        if (Object.keys(procLiveProps).length > 0) {
+          await strom.flows.updateBlockProperties(flowId, audioBlockId, { properties: procLiveProps })
+            .catch((err) => console.warn('[controller] reinit audio-processing re-apply error:', err));
+        }
+      }
+
+      // Replay the persisted audio processing state to every socket that stayed
+      // open across the reactivation — they never re-run the connect handler, so
+      // without this their processing strips keep the torn-down flow's values.
+      for (const { elementId, stage, params } of allStoredStages(doc.audioProcessing)) {
+        broadcast(productionId, { type: 'AUDIO_PROC_STATE', elementId, stage, params });
       }
 
       // Restart the meter relay against the NEW flow. Deactivate force-stopped
@@ -2714,62 +2730,52 @@ export async function handleMessage(
       }
       const procParams: StageParams = parsed.params;
 
-      // 3. Persist on the production doc so it survives deactivate/reactivate and
-      //    is re-applied through the flow generator (including the
-      //    construction-time ch{N}_hpf_enabled). Best-effort; 409-safe.
-      const nextStore = mergeIntoStore(doc.audioProcessing, msg.elementId, msg.stage, procParams);
-      updateProductionDoc(productionId, { audioProcessing: nextStore })
-        .catch((err) => console.warn('[controller] AUDIO_PROC_SET persist error:', err));
-
-      // 4. Optimistic broadcast for UI responsiveness; the debounced Strom write
-      //    re-broadcasts with applied:true. Mirrors the fader/aux paths.
-      broadcast(productionId, { type: 'AUDIO_PROC_STATE', elementId: msg.elementId, stage: msg.stage, params: procParams });
-
-      const { live } = stageToStromProps(msg.elementId, msg.stage, procParams);
-      // Only construction-time keys changed (e.g. HPF on/off), or the production
-      // is not active: the persisted value applies on next activation.
-      if (Object.keys(live).length === 0 || !doc.stromFlowId) {
-        if (cmdId) sendAck(ws, productionId, cmdId, 'executed');
-        break;
+      // 3. Resolve the mixer block when a live write is needed (cached on ctx).
+      const { live: procLive } = stageToStromProps(msg.elementId, msg.stage, procParams);
+      const needsLiveWrite = Object.keys(procLive).length > 0 && !!doc.stromFlowId;
+      if (needsLiveWrite && !ctx.audioBlockId) {
+        try {
+          const strom = await makeStromClient();
+          const { flow } = await strom.flows.get(doc.stromFlowId!);
+          const audioBlock = (flow.blocks ?? []).find((b) => b.block_definition_id === 'builtin.mixer');
+          if (audioBlock) ctx.audioBlockId = audioBlock.id;
+        } catch (err) {
+          const errText = `Audio processing: ${stromErrorMessage(err)}`;
+          if (cmdId) sendNack(ws, productionId, cmdId, errText);
+          else ws.send(JSON.stringify({ type: 'ERROR', error: errText }));
+          break;
+        }
       }
-      // Resolve the audio mixer block id (cached on ctx for later messages).
-      if (!ctx.audioBlockId) {
-        const strom = await makeStromClient();
-        const { flow } = await strom.flows.get(doc.stromFlowId);
-        const audioBlock = (flow.blocks ?? []).find((b) => b.block_definition_id === 'builtin.mixer');
-        if (audioBlock) ctx.audioBlockId = audioBlock.id;
-      }
-      if (!ctx.audioBlockId) {
+      if (needsLiveWrite && !ctx.audioBlockId) {
         const errText = 'Audio processing: mixer block not found';
         if (cmdId) sendNack(ws, productionId, cmdId, errText);
         else ws.send(JSON.stringify({ type: 'ERROR', error: errText }));
         break;
       }
-      // Debounce per element:stage — one Strom block-properties PATCH per window,
-      // so a knob drag that outruns the 20 msg/s cap still lands its final value.
-      const procFlowId = doc.stromFlowId;
-      const procBlockId = ctx.audioBlockId;
-      const procElementId = msg.elementId;
-      const procStage = msg.stage;
-      const procCmdId = cmdId;
-      const procDebounceKey = `${productionId}:proc:${msg.elementId}:${msg.stage}`;
-      const prevProc = pendingVolume.get(procDebounceKey);
-      if (prevProc) clearTimeout(prevProc);
-      pendingVolume.set(procDebounceKey, setTimeout(async () => {
-        pendingVolume.delete(procDebounceKey);
-        try {
-          const s = await makeStromClient();
-          await s.flows.updateBlockProperties(procFlowId, procBlockId, { properties: live });
-          // The write reached Strom (applied:true) — tell every operator.
-          broadcast(productionId, { type: 'AUDIO_PROC_STATE', elementId: procElementId, stage: procStage, params: procParams, applied: true });
-          if (procCmdId) sendAck(ws, productionId, procCmdId, 'executed');
-        } catch (err) {
-          console.warn('[controller] AUDIO_PROC_SET Strom error:', err);
-          const errText = `Audio processing: ${stromErrorMessage(err)}`;
-          if (procCmdId) sendNack(ws, productionId, procCmdId, errText);
-          else ws.send(JSON.stringify({ type: 'ERROR', error: errText }));
-        }
-      }, 150));
+
+      // 4. Apply to Strom first, then persist — serialized per production via
+      //    applyAudioProcSet (services/audio-proc-apply.ts), so an interleaved
+      //    second set can never be clobbered by the first, and a value Strom
+      //    refused or never saw is never saved. The broadcast therefore only
+      //    ever reports the value that actually took effect (applied:true when
+      //    Strom confirmed it), and the connect/reactivation replay — built
+      //    from the same store — reflects the true effective state.
+      try {
+        const { applied } = await applyAudioProcSet(productionId, msg.elementId, msg.stage, procParams, {
+          stromFlowId: doc.stromFlowId,
+          audioBlockId: ctx.audioBlockId,
+        });
+        broadcast(productionId, {
+          type: 'AUDIO_PROC_STATE', elementId: msg.elementId, stage: msg.stage, params: procParams,
+          ...(applied ? { applied: true } : {}),
+        });
+        if (cmdId) sendAck(ws, productionId, cmdId, 'executed');
+      } catch (err) {
+        console.warn('[controller] AUDIO_PROC_SET error:', err);
+        const errText = `Audio processing: ${stromErrorMessage(err)}`;
+        if (cmdId) sendNack(ws, productionId, cmdId, errText);
+        else ws.send(JSON.stringify({ type: 'ERROR', error: errText }));
+      }
       break;
     }
     case 'AFV_SET': {

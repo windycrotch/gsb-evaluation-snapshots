@@ -36,6 +36,9 @@ vi.mock('../services/tally.service.js', async (importOriginal) => {
 const FLOW_ID = 'flow-proc-rest';
 const AUDIO_BLOCK = 'b-audio-mixer-proc';
 const patches: Array<{ path: string; body: Record<string, unknown> }> = [];
+// Keys the throwaway Strom refuses on the next PATCHes (simulates Strom
+// rejecting a live write, e.g. while briefly unreachable/misconfigured).
+let rejectKeys: Record<string, string> = {};
 
 const stromServer: Server = createServer((req, res) => {
   const chunks: Buffer[] = [];
@@ -53,7 +56,14 @@ const stromServer: Server = createServer((req, res) => {
     }
     if (req.method === 'PATCH') {
       patches.push({ path: url, body: body ?? {} });
-      res.end(JSON.stringify({ properties: (body as { properties?: unknown })?.properties ?? {}, rejected: {} }));
+      const written = (body as { properties?: Record<string, unknown> })?.properties ?? {};
+      const rejected: Record<string, string> = {};
+      const properties: Record<string, unknown> = {};
+      for (const [key, value] of Object.entries(written)) {
+        if (rejectKeys[key]) rejected[key] = rejectKeys[key];
+        else properties[key] = value;
+      }
+      res.end(JSON.stringify({ properties, rejected }));
       return;
     }
     res.end(JSON.stringify({ success: true }));
@@ -90,6 +100,7 @@ function makeDoc(overrides: Record<string, unknown> = {}) {
 describe('REST audio processing routes (#527)', () => {
   beforeEach(() => {
     patches.length = 0;
+    rejectKeys = {};
     mockProductionGet.mockReset();
     mockProductionGet.mockResolvedValue(makeDoc());
     mockInsert.mockClear();
@@ -144,7 +155,7 @@ describe('REST audio processing routes (#527)', () => {
     await app.close();
   });
 
-  it('PATCH rejects an out-of-range value with 400 and writes nothing to Strom', async () => {
+  it('PATCH rejects an out-of-range value with 400 and writes nothing to Strom or the doc', async () => {
     const app = Fastify();
     await app.register(audioRoutes);
     const res = await app.inject({
@@ -154,7 +165,66 @@ describe('REST audio processing routes (#527)', () => {
     });
     expect(res.statusCode).toBe(400);
     expect(patches).toHaveLength(0);
+    expect(mockInsert).not.toHaveBeenCalled();
     expect(broadcastMock).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it('PATCH rejects unknown params with 400 and leaves the stored state untouched', async () => {
+    const app = Fastify();
+    await app.register(audioRoutes);
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/productions/${PROD}/audio/ch1/processing`,
+      payload: { stage: 'comp', params: { threshold: -24, bogus: 1 } },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(patches).toHaveLength(0);
+    expect(mockInsert).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it('PATCH when Strom refuses the live write returns 422 and persists NOTHING', async () => {
+    rejectKeys = { ch1_comp_threshold: 'out of range for element' };
+    const app = Fastify();
+    await app.register(audioRoutes);
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/productions/${PROD}/audio/ch1/processing`,
+      payload: { stage: 'comp', params: { threshold: -24 } },
+    });
+    expect(res.statusCode).toBe(422);
+    // The write reached Strom but was refused — the unapplied value must not be
+    // saved, and no client may be told it took effect.
+    expect(patches).toHaveLength(1);
+    expect(mockInsert).not.toHaveBeenCalled();
+    expect(broadcastMock).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it('PATCH after a Strom refusal recovers: the next accepted write is what gets stored', async () => {
+    const app = Fastify();
+    await app.register(audioRoutes);
+    rejectKeys = { ch1_gain: 'temporarily not live' };
+    const failed = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/productions/${PROD}/audio/ch1/processing`,
+      payload: { stage: 'gain', params: { gain: 6 } },
+    });
+    expect(failed.statusCode).toBe(422);
+    expect(mockInsert).not.toHaveBeenCalled();
+
+    rejectKeys = {};
+    const ok = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/productions/${PROD}/audio/ch1/processing`,
+      payload: { stage: 'gain', params: { gain: -3 } },
+    });
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json()).toMatchObject({ applied: true });
+    // Only the value Strom actually accepted was persisted.
+    const lastInsert = mockInsert.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expect(lastInsert['audioProcessing']).toEqual({ ch1: { gain: { gain: -3 } } });
     await app.close();
   });
 

@@ -3473,10 +3473,14 @@ paths:
       description: >
         Sets one processing stage for the element. `params` is partial (move one
         knob) and validated against the Strom ranges — an out-of-range value is
-        rejected with 400 and nothing reaches Strom (no silent clamp). The
-        setting is persisted on the production and re-applied on activation; it is
-        applied live to the running pipeline and broadcast to controller WS
-        clients as `AUDIO_PROC_STATE`. Stage/element rules: `limiter` and the main
+        rejected with 400 and nothing reaches Strom (no silent clamp). The live
+        write is applied to the running pipeline FIRST and persisted on the
+        production only once Strom accepted it (a refused write returns 422 and
+        saves nothing), so the connect/reactivation replay always reflects the
+        true effective state; the change is broadcast to controller WS clients as
+        `AUDIO_PROC_STATE`. Writes are serialized per production together with
+        the WS `AUDIO_PROC_SET` path, so interleaved writes land in order and the
+        last one wins. Stage/element rules: `limiter` and the main
         `comp`/`eq` are main-only; `gain`/`hpf`/`gate` are channel-only. The HPF
         on/off flag (`hpf.enabled`) is a construction-time Strom property — it is
         persisted but only takes effect on the next activation (the HPF cutoff

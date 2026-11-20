@@ -184,6 +184,43 @@ describe('reinitConnectedControllers', () => {
     }
   });
 
+  it('restores persisted audio processing on the new flow and replays it to the stayed-open socket', async () => {
+    productionDocs.set(PROD, {
+      ...activeDoc(),
+      audioProcessing: {
+        ch1: { gain: { gain: 6 }, hpf: { enabled: true, freq: 120 } },
+        main: { limiter: { enabled: true, threshold: -6 } },
+      },
+    });
+    const sock = makeSocket();
+    subscribe(PROD, sock as never);
+    try {
+      await reinitConnectedControllers(PROD);
+
+      // After the init PATCH, the persisted LIVE processing keys are re-applied
+      // to the new flow — but NOT the construction-time ch1_hpf_enabled (that
+      // one is seeded by the flow generator at build time and Strom would
+      // refuse it on a running pipeline).
+      expect(propertyPatches).toHaveLength(2);
+      expect(propertyPatches[1]).toEqual({
+        ch1_gain: 6,
+        ch1_hpf_freq: 120,
+        main_limiter_enabled: true,
+        main_limiter_threshold: -6,
+      });
+
+      // Every stored stage is replayed to the socket that stayed open across
+      // the reactivation, default-completed — including the construction-time
+      // HPF on/off, so the strip shows the value that takes effect on this flow.
+      const proc = sock.sent.filter((m) => m.type === 'AUDIO_PROC_STATE');
+      expect(proc).toContainEqual(expect.objectContaining({ elementId: 'ch1', stage: 'gain', params: { gain: 6 } }));
+      expect(proc).toContainEqual(expect.objectContaining({ elementId: 'ch1', stage: 'hpf', params: { enabled: true, freq: 120 } }));
+      expect(proc).toContainEqual(expect.objectContaining({ elementId: 'main', stage: 'limiter', params: { enabled: true, threshold: -6 } }));
+    } finally {
+      unsubscribe(PROD, sock as never);
+    }
+  });
+
   it('is a no-op when no controller is connected', async () => {
     await reinitConnectedControllers(PROD);
     expect(propertyPatches).toHaveLength(0);
