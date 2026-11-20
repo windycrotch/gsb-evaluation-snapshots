@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2024", "ESNext.Array", "DOM", "DOM.Iterable"],
+    "types": ["node"],
+    "allowImportingTsExtensions": true
+  },
+  "include": [
+    "src/**/*.ts",
+    "browserProject.ts",
+    "vitest.config.ts",
+    "vitest.browser.config.ts",
+    "vitest.measure.config.ts"
+  ]
+}

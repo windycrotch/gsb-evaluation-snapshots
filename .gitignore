@@ -1,0 +1,43 @@
+# Local sample recordings (symlinks to large files outside the repo), as a folder or as a link
+/samples
+
+# Personal notes and editor-assistant settings, not part of the project
+CLAUDE.md
+CLAUDE.local.md
+PLAN.md
+.claude/
+
+# Raw Insta360 media must never be committed
+*.insv
+*.insp
+*.lrv
+# The only exceptions: two tiny, MIT-licensed, video-stripped trailer fixtures
+!test/fixtures/thirdparty/insta360py/sample.insv
+!test/fixtures/thirdparty/insta360py/x5_indexed.insv
+
+# Dependencies and build output
+node_modules/
+dist/
+# The root LICENSE, copied in when the npm package is packed, and the packed tarball
+apps/library/LICENSE
+*.tgz
+.vite/
+*.tsbuildinfo
+
+# Test artifacts
+.artifacts/
+coverage/
+test-results/
+playwright-report/
+.stryker-tmp/
+.vitest-attachments/
+__screenshots__/
+
+# Environment and editor
+.env
+.env.*
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.log

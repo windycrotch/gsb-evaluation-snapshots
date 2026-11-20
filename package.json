@@ -1,0 +1,47 @@
+{
+  "name": "gyroview-workspace",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Browser player for raw Insta360 .insv recordings",
+  "license": "MIT",
+  "packageManager": "pnpm@11.7.0",
+  "engines": {
+    "node": "^22.22.1 || ^24 || ^26"
+  },
+  "scripts": {
+    "prepare": "husky",
+    "typecheck": "pnpm -r --parallel run typecheck",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "depcruise": "depcruise packages tools apps --config .dependency-cruiser.cjs",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:core": "vitest run --project core",
+    "test:coverage": "vitest run --coverage",
+    "build": "pnpm --filter @gyroview/embed --filter @bubo-squared/gyroview build",
+    "privacy:check": "node tools/integration/src/checkPrivateSamples.ts",
+    "verify": "pnpm privacy:check && pnpm typecheck && pnpm lint && pnpm format:check && pnpm depcruise && pnpm test && pnpm build",
+    "inspect": "pnpm --filter @gyroview/insv-inspect exec tsx src/main.ts",
+    "fixtures:build": "pnpm --filter @gyroview/fixtures build",
+    "measure": "pnpm --filter @gyroview/integration measure"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.1",
+    "@vitest/coverage-istanbul": "4.1.12",
+    "dependency-cruiser": "18.3.1",
+    "eslint": "10.10.0",
+    "eslint-config-prettier": "10.1.8",
+    "eslint-plugin-es-x": "10.0.1",
+    "eslint-plugin-unicorn": "75.0.0",
+    "husky": "9.1.7",
+    "lint-staged": "17.5.1",
+    "prettier": "3.9.8",
+    "prettier-plugin-glsl": "^0.3.1",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.70.0",
+    "vitest": "4.1.12"
+  },
+  "type": "module"
+}

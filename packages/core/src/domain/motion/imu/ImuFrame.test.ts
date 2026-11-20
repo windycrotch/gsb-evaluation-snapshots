@@ -1,0 +1,107 @@
+import { describe, expect, it } from 'vitest';
+
+import {
+  A1_IMU_FRAME,
+  ALIGNED_IMU_FRAME,
+  assumedImuFrame,
+  imuFrameFor,
+  ONE_R_IMU_FRAME,
+  ONE_RS_IMU_FRAME,
+  toBodyFrame,
+  X3_IMU_FRAME,
+  X4_AIR_IMU_FRAME,
+  X5_IMU_FRAME,
+  X6_IMU_FRAME,
+} from './ImuFrame';
+import type { Vector3 } from '../../../shared/math/Vector3';
+import { captureError } from '../../../../test/support/errors';
+
+/**
+ * Mean accelerometer readings (specific force, g) measured on the X5 recordings over one second.
+ */
+const OFFICE_ON_TABLE_UPRIGHT: Vector3 = [-0.068, 0.018, -0.999];
+const SAILING_ON_A_POLE: Vector3 = [-0.955, -0.036, 0.294];
+/**
+ * An invented reading of a drone standing level (ADR 0031): the specific force along IMU y.
+ */
+const DRONE_STANDING_LEVEL: Vector3 = [0.05, 0.99, -0.1];
+/**
+ * An invented reading of a ONE RS standing upright on a tripod (ADR 0031): the specific force
+ * along IMU minus x.
+ */
+const ONE_RS_ON_A_TRIPOD: Vector3 = [-0.99, 0.03, 0.06];
+
+function expectVector(actual: Vector3, expected: Vector3, digits: number): void {
+  for (const [index, value] of expected.entries()) {
+    expect(actual[index]).toBeCloseTo(value, digits);
+  }
+}
+
+describe('ImuFrame', () => {
+  it('maps the X5 accelerometer at rest on a table to an upward specific force along body -y', () => {
+    expectVector(toBodyFrame(X5_IMU_FRAME, OFFICE_ON_TABLE_UPRIGHT), [-0.068, -0.999, -0.018], 3);
+  });
+
+  it('maps the X5 accelerometer on a pole to an upward specific force left of lens 0, along body -x', () => {
+    const up = toBodyFrame(X5_IMU_FRAME, SAILING_ON_A_POLE);
+    expect(up[0]).toBeLessThan(-0.9);
+  });
+
+  it("maps the A1's specific force standing level onto its lens axis, lens 0 facing up", () => {
+    expectVector(toBodyFrame(A1_IMU_FRAME, DRONE_STANDING_LEVEL), [0.1, -0.05, 0.99], 9);
+  });
+
+  it("maps the ONE RS's specific force upright on a tripod to body -y, though its frame is unverified", () => {
+    expectVector(toBodyFrame(ONE_RS_IMU_FRAME, ONE_RS_ON_A_TRIPOD), [-0.03, -0.99, 0.06], 9);
+    expect(imuFrameFor({ model: 'Insta360 OneRS' })).toBe(ONE_RS_IMU_FRAME);
+    expect(ONE_RS_IMU_FRAME.isVerified).toBe(false);
+  });
+
+  it('builds a proper rotation from signed axes', () => {
+    const frame = assumedImuFrame('test', ['y', 'z', 'x']);
+    expectVector(toBodyFrame(frame, [1, 2, 3]), [2, 3, 1], 9);
+    expect(frame.toBody).toEqual([0, 1, 0, 0, 0, 1, 1, 0, 0]);
+  });
+
+  it('refuses a repeated axis and a reflection', () => {
+    expect(captureError(() => assumedImuFrame('singular', ['x', 'x', 'z']))).toMatchObject({
+      code: 'invariant-violation',
+    });
+    expect(captureError(() => assumedImuFrame('mirror', ['x', 'y', '-z']))).toMatchObject({
+      code: 'invariant-violation',
+    });
+    expect(assumedImuFrame('turned', ['-x', 'z', 'y']).toBody).toEqual([
+      -1, 0, 0, 0, 0, 1, 0, 1, 0,
+    ]);
+    expect(X5_IMU_FRAME.toBody).toEqual([1, 0, 0, 0, 0, 1, 0, -1, 0]);
+  });
+
+  it("picks a camera's measured frame by its model, the unverified default otherwise", () => {
+    expect(imuFrameFor({ model: 'Insta360 X4 Air' })).toBe(X4_AIR_IMU_FRAME);
+    expect(imuFrameFor({ model: 'Insta360 X5' })).toBe(X5_IMU_FRAME);
+    expect(imuFrameFor({ model: 'Insta360 X6' })).toBe(X6_IMU_FRAME);
+    expect(imuFrameFor({ model: 'Antigravity A1' })).toBe(A1_IMU_FRAME);
+    expect(A1_IMU_FRAME).toMatchObject({ toBody: [0, 0, -1, -1, 0, 0, 0, 1, 0], isVerified: true });
+    expect(X4_AIR_IMU_FRAME).toMatchObject({ toBody: X5_IMU_FRAME.toBody, isVerified: true });
+    expect(X6_IMU_FRAME).toMatchObject({ toBody: X5_IMU_FRAME.toBody, isVerified: true });
+    expect(imuFrameFor({ model: 'Insta360 X3' })).toBe(X3_IMU_FRAME);
+    expect(X3_IMU_FRAME).toMatchObject({ toBody: X5_IMU_FRAME.toBody, isVerified: true });
+    expect(imuFrameFor({ model: 'Insta360 OneR' })).toBe(ONE_R_IMU_FRAME);
+    expect(ONE_R_IMU_FRAME).toMatchObject({
+      toBody: [1, 0, 0, 0, 0, -1, 0, 1, 0],
+      isVerified: true,
+    });
+    expect(imuFrameFor({ model: 'Insta360 ONE X2' })).toBe(ALIGNED_IMU_FRAME);
+    expect(imuFrameFor({ model: undefined }).isVerified).toBe(false);
+  });
+
+  it('keeps models whose names extend one another apart, each unmeasured until ranked', () => {
+    expect(imuFrameFor({ model: 'Insta360 X4' })).toBe(ALIGNED_IMU_FRAME);
+    expect(imuFrameFor({ model: 'Insta360 X5 Air' })).toBe(ALIGNED_IMU_FRAME);
+    expect(imuFrameFor({ model: 'Not an Insta360 X5' })).toBe(ALIGNED_IMU_FRAME);
+  });
+
+  it('reads the model without the whitespace around it', () => {
+    expect(imuFrameFor({ model: ' Insta360 X5 ' })).toBe(X5_IMU_FRAME);
+  });
+});
