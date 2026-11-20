@@ -1,0 +1,1035 @@
+# General features
+import bpy
+from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty, StringProperty
+
+# FFmpeg system access
+from shutil import which
+
+# Local imports
+from . import utility_panel
+from .render_0_start import render_kit_start
+from .render_1_frame import render_kit_frame_pre, render_kit_frame_post
+from .render_2_end import render_kit_end
+from . import render_autosave
+from . import render_batch
+from . import render_display
+from . import render_node
+from . import render_proxy
+from . import render_region
+from . import render_screenshot
+from . import render_sync
+from . import render_variables
+
+
+
+###########################################################################
+# Global user preferences and UI rendering class
+
+class RenderKitPreferences(bpy.types.AddonPreferences):
+	bl_idname = __package__
+	
+	########## Render Region, Proxy, Batch ##########
+	
+	# Render region
+	region_enable: BoolProperty(
+		name='Render Region',
+		description='Adds numerical render region controls to the Properties > Output > Format panel',
+		default=True)
+	
+	# Render settings synchronisation
+	sync_enable: BoolProperty(
+		name='Render Settings Sync',
+		description='Adds a panel to the Properties > Scene section for copying render and output settings from the current scene to other scenes',
+		default=True)
+	
+	# Batch rendering
+	batch_enable: BoolProperty(
+		name='Render Batch',
+		description='Adds batch rendering panel to the Properties > Output section, the specified 3D View category, and rendering menu',
+		default=True)
+	
+	def update_batch_category(self, context):
+		utility_panel.register_panels(render_batch.panels)
+	
+	batch_category: StringProperty(
+		name="3D View",
+		description="Choose a 3D view tab category for the batch render panel to be placed in, or leave empty to hide the panel",
+		default="Launch",
+		update=update_batch_category)
+		# Consider adding search_options=(list of currently available tabs) for easier operation
+	
+	# Render node
+	rendernode_enable: BoolProperty(
+		name='Render Node',
+		description='Adds node baking to the Node Properties panel of the material editor',
+		default=True)
+	
+	def update_rendernode_category(self, context):
+		utility_panel.register_panels(render_node.panels)
+	
+	rendernode_category: StringProperty(
+		name="Node Editor",
+		description="Choose a node editor tab category for the render node panel to be placed in, or leave empty to hide the panel",
+		default="Node",
+		update=update_rendernode_category)
+		# Consider adding search_options=(list of currently available tabs) for easier operation
+	
+	# Render screenshot
+	renderscreenshot_enable: BoolProperty(
+		name='Render Screenshot',
+		description='Adds high-resolution node tree screenshot export to the node editor sidebar',
+		default=True)
+	
+	def update_renderscreenshot_category(self, context):
+		utility_panel.register_panels(render_screenshot.panels)
+	
+	renderscreenshot_category: StringProperty(
+		name="Node Editor",
+		description="Choose a node editor tab category for the render screenshot panel to be placed in, or leave empty to hide the panel",
+		default="Node",
+		update=update_renderscreenshot_category)
+	
+	# Render node settings (auto process output images)
+	magick_location: StringProperty(
+		name="ImageMagick location",
+		description="System location where the the ImageMagick command line interface is installed",
+		default="/opt/local/bin/magick",
+		maxlen=4096,
+		update=lambda self, context: self.check_magick_location())
+	magick_location_previous: StringProperty(default="")
+	magick_exists: BoolProperty(
+		name="ImageMagick exists",
+		description='Stores the existence of ImageMagick at the defined system location',
+		default=False)
+	
+	# Validate the ImageMagick location string on value change and plugin registration
+	def check_magick_location(self):
+		# Ensure it points at ImageMagick
+		if not self.magick_location.endswith('magick'):
+			self.magick_location = self.magick_location + 'magick'
+		# Test if it's a valid path and replace with valid path if such exists
+		if self.magick_location != self.magick_location_previous:
+			if which(self.magick_location) is None:
+				if which("magick") is None:
+					self.magick_exists = False
+				else:
+					self.magick_location = which("magick")
+					self.magick_exists = True
+			else:
+				self.magick_exists = True
+			self.magick_location_previous = self.magick_location
+	
+	# Proxy render
+	proxy_enable: BoolProperty(
+		name='Render Proxy',
+		description='Adds a proxy rendering option to the rendering menu',
+		default=True)
+	
+	# Proxy render engine overrides
+	proxy_renderEngine: EnumProperty(
+		name='Render Engine',
+		description='Render engine to use for proxy renders',
+		items=[
+			('BLENDER_WORKBENCH', 'Workbench', 'Use the Workbench render engine for proxy animations'),
+			('BLENDER_EEVEE', 'Eevee', 'Use the Eevee render engine for proxy animations'),
+			],
+		default='BLENDER_WORKBENCH')
+	proxy_renderSamples: IntProperty(
+		name="Render Samples",
+		description="Render engine to use for proxy renders",
+		default=16)
+	proxy_format: EnumProperty(
+		name='File Format',
+		description='Image format used for the proxy render files',
+		items=[
+			('SCENE', 'Project Setting', 'Same format as set in output panel'),
+			('PNG', 'PNG', 'Save as png'),
+			('JPEG', 'JPEG', 'Save as jpeg'),
+			('OPEN_EXR_MULTILAYER', 'OpenEXR MultiLayer', 'Save as multilayer exr'),
+			],
+		default='JPEG')
+	proxy_resolutionMultiplier: IntProperty(
+		name="Resolution Multiplier",
+		description="Render engine to use for proxy renders",
+		default=100)
+	proxy_compositing: EnumProperty(
+		name='Node Compositing',
+		description='Image format used for the proxy render files',
+		items=[
+			('SCENE', 'Project Setting', 'Same setting as the project'),
+			('ON', 'Node Compositing On', 'Force node compositing on when rendering proxies'),
+			('OFF', 'Node Compositing Off', 'Force node compositing off when rendering proxies'),
+			],
+		default='OFF')
+	
+	########## Render Variables and Autosave ##########
+	
+	# Render variables
+	render_variable_enable: BoolProperty(
+		name='Render Variables',
+		description='Implements dynamic keywords in the Output directory and Compositing tab "File Output" nodes',
+		default=True)
+	
+	def update_variable_category(self, context):
+		utility_panel.register_panels(render_variables.panels)
+	
+	variable_category: StringProperty(
+		name="3D View",
+		description="Choose a 3D view tab category for the render values panel to be placed in, or leave empty to hide the panel",
+		default="Launch",
+		update=update_variable_category)
+		# Consider adding search_options=(list of currently available tabs) for easier operation
+	
+	# Autosave videos
+	ffmpeg_processing: BoolProperty(
+		name='Autosave Videos',
+		description='Enables FFmpeg image sequence compilation options in the Output panel',
+		default=True)
+	ffmpeg_location: StringProperty(
+		name="FFmpeg location",
+		description="System location where the the FFmpeg command line interface is installed",
+		default="/opt/local/bin/ffmpeg",
+		maxlen=4096,
+		update=lambda self, context: self.check_ffmpeg_location())
+	ffmpeg_location_previous: StringProperty(default="")
+	ffmpeg_exists: BoolProperty(
+		name="FFmpeg exists",
+		description='Stores the existence of FFmpeg at the defined system location',
+		default=False)
+	
+	# Validate the ffmpeg location string on value change and plugin registration
+	def check_ffmpeg_location(self):
+		# Ensure it points at ffmpeg
+		if not self.ffmpeg_location.endswith('ffmpeg'):
+			self.ffmpeg_location = self.ffmpeg_location + 'ffmpeg'
+		# Test if it's a valid path and replace with valid path if such exists
+		if self.ffmpeg_location != self.ffmpeg_location_previous:
+			if which(self.ffmpeg_location) is None:
+				if which("ffmpeg") is None:
+					self.ffmpeg_exists = False
+				else:
+					self.ffmpeg_location = which("ffmpeg")
+					self.ffmpeg_exists = True
+			else:
+				self.ffmpeg_exists = True
+			self.ffmpeg_location_previous = self.ffmpeg_location
+	
+	# Autosave images
+	enable_autosave_render: BoolProperty(
+		name="Autosave Images",
+		description="Automatically saves numbered or dated images in a directory alongside the project file or in a custom location",
+		default=True)
+	
+	# Override individual project autosave location and file name settings
+	override_autosave_render: BoolProperty(
+		name="Global Override",
+		description="Show available global override values, replacing local project settings",
+		default=False)
+	file_location_global: StringProperty(
+		name="Global File Location",
+		description="Leave a single forward slash to auto generate folders alongside project files",
+		subtype="DIR_PATH",
+		options={'OUTPUT_PATH','PATH_SUPPORTS_BLEND_RELATIVE','SUPPORTS_TEMPLATES'},
+		default="/",
+		maxlen=4096)
+	file_name_type_global: EnumProperty(
+		name='Global File Name',
+		description='Autosaves files with the project name and serial number, project name and date, or custom naming pattern',
+		items=[
+			('SERIAL', 'Project Name + Serial Number', 'Save files with a sequential serial number'),
+			('DATE', 'Project Name + Date & Time', 'Save files with the local date and time'),
+			('RENDER', 'Project Name + Render Engine + Render Time', 'Save files with the render engine and render time'),
+			('CUSTOM', 'Custom String', 'Save files with a custom string format'),
+			],
+		default='SERIAL')
+	file_name_custom_global: StringProperty(
+		name="Global Custom String",
+		description="Format a custom string using the variables listed below",
+		subtype="FILE_NAME",
+		options={'SUPPORTS_TEMPLATES'},
+		default="{{project}}-{{serial}}",
+		maxlen=4096)
+	file_serial_global: IntProperty(
+		name="Global Serial Number",
+		description="Current serial number, automatically increments with every render (must be manually updated when installing a plugin update)")
+	file_format_global: EnumProperty(
+		name='Global File Format',
+		description='Image format used for the automatically saved render files',
+		items=[
+			('SCENE', 'Project Setting', 'Same format as set in output panel'),
+			('PNG', 'PNG', 'Save as png'),
+			('JPEG', 'JPEG', 'Save as jpeg'),
+			('OPEN_EXR', 'OpenEXR', 'Save as exr'),
+			],
+		default='PNG')
+	
+	
+	
+	########## Render Time Tracking ##########
+	
+	show_estimated_render_time: BoolProperty(
+		name="Show Estimated Render Time",
+		description='Adds estimated remaining render time display to the image editor menu bar while rendering',
+		default=True)
+	show_total_render_time: BoolProperty(
+		name="Show Project Render Time",
+		description='Displays the total time spent rendering a project in the output panel',
+		default=True)
+	external_log_file: BoolProperty(
+		name="Save External Render Time Log",
+		description='Saves the total time spent rendering to an external log file',
+		default=True)
+	external_log_name: StringProperty(
+		name="File Name",
+		description="Log file name; use {{project}} for per-project tracking, remove it for per-directory tracking",
+		default="RenderKit-TotalTime.txt",
+			# Alt: {{project}}-TotalRenderTime.txt
+		maxlen=4096)
+	
+	
+	
+	########## Render Completed Notifications ##########
+	
+	minimum_time: IntProperty(
+		name="Minimum Render Time",
+		description="Minimum rendering time required before notifications will be enabled, in seconds",
+		default=300)
+	
+	# Pushover app notifications
+	pushover_enable: BoolProperty(
+		name='Pushover Notification',
+		description='Enable Pushover mobile device push notifications (requires non-subscription app and user account https://pushover.net/)',
+		default=False)
+	pushover_key: StringProperty(
+		name="Pushover User Key",
+		description="Pushover user key, available after setting up a user account",
+		default="EnterUserKeyHere",
+		maxlen=64)
+	pushover_app: StringProperty(
+		name="Pushover App Token",
+		description="Pushover application token, available after setting up a custom application",
+		default="EnterAppTokenHere",
+		maxlen=64)
+	pushover_subject: StringProperty(
+		name="Pushover Title",
+		description="Notification title that will be sent to Pushover devices",
+		default="{{project}} rendering completed",
+		maxlen=1024)
+	pushover_message: StringProperty(
+		name="Pushover Message",
+		description="Notification message that will be sent to Pushover devices",
+		default="{{project}} rendering completed in {{rH}}:{{rM}}:{{rS}} on {{host}}",
+		maxlen=4096)
+	
+	# MacOS Siri text-to-speech announcement
+	voice_enable: BoolProperty(
+		name='Siri Announcement',
+		description='Enable MacOS Siri text-to-speech announcements',
+		default=False)
+	voice_exists: BoolProperty(
+		name="MacOS Say exists",
+		description='Stores the existence of MacOS Say',
+		default=False)
+	voice_message: StringProperty(
+		name="Siri Message",
+		description="Message that Siri will read out loud",
+		default="{{project}} rendering completed in {{rH}} hours, {{rM}} minutes, and {{rS}} seconds",
+		maxlen=2048)
+	
+	# Validate MacOS Say location on plugin registration
+	def check_voice_location(self):
+		self.voice_exists = False if which('say') is None else True
+		
+	
+	
+	############################## Preferences UI ##############################
+	
+	# User Interface
+	def draw(self, context):
+		settings = context.scene.render_kit_settings
+		
+		layout = self.layout
+		
+		########## GENERAL: Render Region, Render Batch, Render Proxy, Render Node ##########
+		
+		layout.label(text="General", icon="PREFERENCES") # TOOL_SETTINGS SETTINGS PREFERENCES
+		grid0 = layout.grid_flow(row_major=True, columns=2, even_columns=True, even_rows=False, align=False)
+		
+		grid0.prop(self, "sync_enable")
+		grid0.separator()
+		grid0.prop(self, "region_enable")
+		grid0.separator()
+		grid0.prop(self, "batch_enable")
+		input = grid0.row()
+		if not self.batch_enable:
+			input.active = False
+			input.enabled = False
+		input.prop(self, "batch_category", text="", icon="VIEW3D")
+		
+		# Render Screenshot settings
+		grid0.prop(self, "renderscreenshot_enable")
+		input = grid0.row()
+		if not self.renderscreenshot_enable:
+			input.active = False
+			input.enabled = False
+		input.prop(self, "renderscreenshot_category", text="", icon="NODETREE")
+		
+		# Render Node settings
+		grid0.prop(self, "rendernode_enable")
+		input = grid0.row()
+		if not self.rendernode_enable:
+			input.active = False
+			input.enabled = False
+		input.prop(self, "rendernode_category", text="", icon="NODETREE")
+		
+		# Render Node ImageMagick settings
+		grid0.separator()
+		input = grid0.grid_flow(row_major=True, columns=2, even_columns=True, even_rows=False, align=False)
+		if not self.rendernode_enable:
+			input.active = False
+			input.enabled = False
+		input.prop(self, "magick_location", text="")
+		# Location exists success/fail
+		if self.magick_exists:
+			input.label(text="✔︎ installed")
+		else:
+			input.label(text="✘ missing")
+		
+		# Proxy settings
+		grid0.prop(self, "proxy_enable")
+		if self.proxy_enable:
+			grid0.prop(self, "proxy_renderEngine", text="")
+			if self.proxy_renderEngine == "BLENDER_EEVEE":
+				grid0.prop(self, "proxy_renderSamples")
+			else:
+				grid0.prop(context.scene.display, "render_aa", text="")
+			grid0.prop(self, "proxy_compositing", text="")
+			grid0.prop(self, "proxy_resolutionMultiplier")
+			grid0.prop(self, "proxy_format", text="")
+		else:
+			grid0.separator()
+		
+		
+		
+		########## SAVING: Output Variables, Autosave Videos, Autosave Images ##########
+		
+		layout.separator(factor = 2.0)
+		layout.label(text="Saving", icon="FILE_FOLDER") # CURRENT_FILE FILE_CACHE FILE_FOLDER FILEBROWSER
+		grid1 = layout.grid_flow(row_major=True, columns=2, even_columns=True, even_rows=False, align=False)
+		
+		grid1.prop(self, "render_variable_enable")
+		input = grid1.row()
+		if not self.render_variable_enable:
+			input.active = False
+			input.enabled = False
+		input.prop(self, "variable_category", text="", icon="VIEW3D")
+		
+		# Autosave Videos
+		grid1.prop(self, "ffmpeg_processing")
+		input = grid1.grid_flow(row_major=True, columns=2, even_columns=True, even_rows=False, align=False)
+		if not self.ffmpeg_processing:
+			input.active = False
+			input.enabled = False
+		input.prop(self, "ffmpeg_location", text="")
+		# Location exists success/fail
+		if self.ffmpeg_exists:
+			input.label(text="✔︎ installed")
+		else:
+			input.label(text="✘ missing")
+		
+		# Autosave Images
+		grid1.prop(self, "enable_autosave_render")
+		input = grid1.row()
+		if not self.enable_autosave_render:
+			input.active = False
+			input.enabled = False
+		input.prop(self, "override_autosave_render")
+		
+		# Global Override
+		if self.enable_autosave_render and self.override_autosave_render:
+			# Layout within single parent grid space
+			grid1.separator()
+			subgrid = grid1.column()
+			
+			# File location
+			input = subgrid.column(align=True)
+			input.prop(self, "file_location_global", text='')
+			# Display global serial number if used
+			if '{serial}' in self.file_location_global:
+				input.prop(self, "file_serial_global")
+			
+			# File name
+			input = subgrid.column(align=True)
+			input.prop(self, "file_name_type_global", text='', icon='FILE_TEXT')
+			if (self.file_name_type_global == 'CUSTOM'):
+				input.prop(self, "file_name_custom_global", text='')
+				if self.file_name_type_global == 'CUSTOM' and '{serial}' in self.file_name_custom_global:
+					input.prop(self, "file_serial_global")
+			
+			# File format
+			input = subgrid.column()
+			input.prop(self, "file_format_global", text='', icon='FILE_IMAGE')
+			if self.file_format_global == 'SCENE' and context.scene.render.image_settings.file_format == 'OPEN_EXR_MULTILAYER':
+				error = input.box()
+				error.label(text="Python API can only save single layer EXR files")
+				error.label(text="Report: https://developer.blender.org/T71087")
+		
+		
+		
+		########## TIME: Render Time Data ##########
+		
+		layout.separator(factor = 2.0)
+		layout.label(text="Time", icon="TIME") # TIME MOD_TIME SORTTIME PREVIEW_RANGE
+		grid2 = layout.grid_flow(row_major=True, columns=2, even_columns=True, even_rows=False, align=False)
+		
+		# Render time preferences
+		grid2.prop(self, "show_estimated_render_time")
+		grid2.separator()
+		
+		grid2.prop(self, "show_total_render_time")
+		input = grid2.column()
+		if not self.show_total_render_time:
+			input.active = False
+			input.enabled = False
+		input.prop(settings, 'total_render_time')
+		
+		grid2.prop(self, "external_log_file")
+		input = grid2.column()
+		if not self.external_log_file:
+			input.active = False
+			input.enabled = False
+		input.prop(self, "external_log_name", text='')
+		
+		
+		
+		########## ALERTS: Render Completed Notifications ##########
+		
+		layout.separator(factor = 2.0)
+		layout.label(text="Alerts", icon="ERROR") # ERROR RECOVER_LAST
+		grid3 = layout.grid_flow(row_major=True, columns=1, even_columns=True, even_rows=False, align=False)
+		
+		# Minimum render time before notifications are enabled
+		row1 = grid3.grid_flow(row_major=True, columns=2, even_columns=True, even_rows=False, align=False)
+		row1.label(text="Render Completed Notifications")
+		row1.prop(self, "minimum_time", icon="TIME")
+		
+		# Pushover notifications
+		grid3.prop(self, "pushover_enable")
+		if self.pushover_enable:
+			# Subgrid Layout
+			margin = grid3.row()
+			margin.separator(factor=2.0)
+			subgrid = margin.column()
+			margin.separator(factor=2.0)
+			
+			# Security Warning
+			box = subgrid.box()
+			warning = box.column(align=True)
+			warning.label(text="WARNING:")
+			warning.label(text="Blender does not encrypt settings and stores credentials as plain text,")
+			warning.label(text="API keys entered here are NOT SECURED in the file system")
+			
+			# Account
+			settings1 = subgrid.column(align=True)
+			settings1.label(text="Account")
+			row = settings1.grid_flow(row_major=True, columns=2, even_columns=True, even_rows=False, align=True)
+			row.prop(self, "pushover_key", text="", icon="USER")
+			row.prop(self, "pushover_app", text="", icon="MODIFIER_DATA")
+			
+			if self.pushover_enable and (len(self.pushover_key) != 30 or len(self.pushover_app) != 30):
+				warning = settings1.box()
+				warning.label(text='Please enter 30-character API strings for both user key and app token', icon="ERROR")
+			
+			# Message
+			subgrid.separator(factor=0.5)
+			settings2 = subgrid.column(align=True)
+			settings2.label(text="Message")
+			settings2.prop(self, "pushover_subject", text="", icon="FILE_TEXT")
+			settings2.prop(self, "pushover_message", text="", icon="ALIGN_JUSTIFY")
+			
+			# Spacing
+			subgrid.separator(factor = 2.0)
+		
+		# Apple MacOS Siri text-to-speech announcement
+		if self.voice_exists:
+			grid3.prop(self, "voice_enable")
+			if self.voice_enable:
+				# Subgrid Layout
+				margin = grid3.row()
+				margin.separator(factor=2.0)
+				subgrid = margin.column()
+				margin.separator(factor=2.0)
+				
+				# Message
+				subgrid.prop(self, "voice_message", text='', icon="PLAY_SOUND")
+
+
+
+###########################################################################
+# Local project settings
+
+class RenderKitSettings(bpy.types.PropertyGroup):
+	# Render settings synchronisation
+	sync_render: BoolProperty(
+		name="Render Properties",
+		description="Sync render engine, sampling, film, colour management, and performance settings",
+		default=True)
+	sync_output: BoolProperty(
+		name="Output Properties",
+		description="Sync resolution, pixel aspect, frame rate, output path, and file format settings (frame range and current frame are never copied)",
+		default=True)
+	sync_renderkit: BoolProperty(
+		name="Render Kit Properties",
+		description="Sync Render Kit's own settings: autosave image naming/format, autosave video (ProRes/MP4/Custom) encoding, general batch options, and render node bake settings (serial counters, render times, and content-specific targets like batch selections and node UV map/socket are never copied)",
+		default=True)
+	sync_target: BoolProperty(
+		name="Sync Target",
+		description="Include this scene as a target when syncing settings from another scene",
+		default=False)
+	
+	# Variables for autosave images
+	file_location: StringProperty(
+		name="File Location",
+		description="Leave a single forward slash to auto generate folders alongside project files",
+		subtype="DIR_PATH",
+		options={'OUTPUT_PATH','PATH_SUPPORTS_BLEND_RELATIVE','SUPPORTS_TEMPLATES'},
+		default="/",
+		maxlen=4096)
+	file_name_type: EnumProperty(
+		name='File Name',
+		description='Autosaves files with the project name and serial number, project name and date, or custom naming pattern',
+		items=[
+			('SERIAL', 'Project Name + Serial Number', 'Save files with a sequential serial number'),
+			('DATE', 'Project Name + Date & Time', 'Save files with the local date and time'),
+			('RENDER', 'Project Name + Render Engine + Render Time', 'Save files with the render engine and render time'),
+			('CUSTOM', 'Custom String', 'Save files with a custom string format'),
+			],
+		default='SERIAL')
+	file_name_custom: StringProperty(
+		name="Custom String",
+		description="Format a custom string using the variables listed below",
+		subtype="FILE_NAME",
+		options={'SUPPORTS_TEMPLATES'},
+		default="{{project}}-{{serial}}-{{engine}}-{{duration}}",
+		maxlen=4096)
+	file_serial: IntProperty(
+		name="Serial Number",
+		description="Current serial number, automatically increments with every render")
+	file_format: EnumProperty(
+		name='File Format',
+		description='Image format used for the automatically saved render files',
+		items=[
+			('SCENE', 'Project Setting', 'Same format as set in output panel'),
+			('PNG', 'PNG', 'Save as png'),
+			('JPEG', 'JPEG', 'Save as jpeg'),
+			('OPEN_EXR', 'OpenEXR', 'Save as exr'),
+			],
+		default='JPEG')
+	
+	# Render total storage
+	total_render_time: FloatProperty(
+		name="Total Render Time",
+		description="Stores the total time spent rendering in seconds",
+		default=0)
+	
+	# Variables for output file path processing
+	output_file_path: StringProperty(
+		name="Original Render Path",
+		description="Stores the original render path as a string to allow for successful restoration after rendering completes",
+		default="")
+	output_file_nodes: StringProperty(
+		name="Original Node Path",
+		description="Stores the original node path as a string to allow for successful restoration after rendering completes",
+		default="")
+	output_file_serial: IntProperty(
+		name="Serial Number",
+		description="Current serial number, automatically increments with every render")
+	
+	# FFmpeg image sequence compilation
+	autosave_video_render_path: StringProperty(
+		name="Output Path",
+		description="Track the output path during rendering in order to support multi-segment timelines",
+		default="")
+	autosave_video_prores_path: StringProperty(
+		name="ProRes Path",
+		description="Track the output path during rendering in order to support multi-segment timelines",
+		default="")
+	autosave_video_mp4_path: StringProperty(
+		name="MP4 Path",
+		description="Track the output path during rendering in order to support multi-segment timelines",
+		default="")
+	autosave_video_custom_path: StringProperty(
+		name="Custom Path",
+		description="Track the output path during rendering in order to support multi-segment timelines",
+		default="")
+	autosave_video_still_path: StringProperty(
+		name="Single Frame Path",
+		description="Track the output path during rendering in order to support multi-segment timelines",
+		default="")
+	
+	# ProRes
+	autosave_video_prores: BoolProperty(
+		name="Enable ProRes Output",
+		description="Automatically compiles completed image sequences into a ProRes compressed .mov file",
+		default=False)
+	autosave_video_prores_quality: EnumProperty(
+		name='ProRes Quality',
+		description='Video codec used',
+		items=[
+			('0', 'Proxy', 'ProResProxy'),
+			('1', 'LT', 'ProResLT'),
+			('2', '422', 'ProRes422'),
+			('3', 'HQ', 'ProRes422HQ'),
+			],
+		default='3')
+	autosave_video_prores_location: StringProperty(
+		name="Custom File Location",
+		description="Set ProRes file output location and name, use single forward slash to save alongside image sequence",
+		subtype="FILE_PATH",
+		options={'OUTPUT_PATH','PATH_SUPPORTS_BLEND_RELATIVE','SUPPORTS_TEMPLATES'},
+		default="//../Renders/{{project}}",
+		maxlen=4096)
+	
+	# MP4
+	autosave_video_mp4: BoolProperty(
+		name="Enable MP4 Output",
+		description="Automatically compiles completed image sequences into an H.264 compressed .mp4 file",
+		default=False)
+	autosave_video_mp4_quality: IntProperty(
+		name="Compression Level",
+		description="CRF value where 0 is uncompressed and 51 is the lowest quality possible; 23 is the FFmpeg default but 18 produces better results (closer to visually lossless)",
+		default=18,
+		step=2,
+		soft_min=2,
+		soft_max=48,
+		min=0,
+		max=51)
+	autosave_video_mp4_location: StringProperty(
+		name="Custom File Location",
+		description="Set MP4 file output location and name, use single forward slash to save alongside image sequence",
+		subtype="FILE_PATH",
+		options={'OUTPUT_PATH','PATH_SUPPORTS_BLEND_RELATIVE','SUPPORTS_TEMPLATES'},
+		default="//../Previews/{{project}}",
+		maxlen=4096)
+	
+	# Custom
+	autosave_video_custom: BoolProperty(
+		name="Enable Custom Output",
+		description="Automatically compiles completed image sequences using a custom FFmpeg string",
+		default=False)
+	autosave_video_custom_command: StringProperty(
+		name="Custom FFmpeg Command",
+		description="Custom FFmpeg command line string; {{input}} {{fps}} {{output}} variables must be included, but the command path is automatically prepended",
+		default='{{fps}} {{input}} -c:v qtrle -pix_fmt argb {{output}}_alpha.mov',
+			#{{fps}} {{input}} -vf scale=-2:1080 -c:v libx264 -preset medium -crf 18 -pix_fmt yuv420p -movflags +rtphint+faststart {{output}}_1080p.mp4
+			#{{fps}} {{input}} -c:v hevc_videotoolbox -pix_fmt bgra -b:v 1M -alpha_quality 1 -allow_sw 1 -vtag hvc1 {{output}}_alpha.mov
+			#{{fps}} {{input}} -c:v hevc_videotoolbox -require_sw 1 -allow_sw 1 -alpha_quality 1.0 -vtag hvc1 {{output}}_alpha.mov
+			#{{fps}} {{input}} -pix_fmt yuva420p {{output}}_alpha.webm
+			#{{fps}} {{input}} -c:v libvpx -pix_fmt yuva420p -crf 16 -b:v 1M -auto-alt-ref 0 {{output}}_alpha.webm
+			#{{fps}} {{input}} -c:v qtrle -pix_fmt argb {{output}}_alpha.mov
+		maxlen=4096)
+	autosave_video_custom_location: StringProperty(
+		name="Custom File Location",
+		description="Set custom command file output location and name, use single forward slash to save alongside image sequence",
+		subtype="FILE_PATH",
+		options={'OUTPUT_PATH','PATH_SUPPORTS_BLEND_RELATIVE','SUPPORTS_TEMPLATES'},
+		default="//../Outputs/{{project}}",
+		maxlen=4096)
+	
+	# Single Frame
+	autosave_video_still: BoolProperty(
+		name="Enable Single Frame Output",
+		description="When a rendered sequence only contains a single frame, copy the source image instead of encoding a one-frame video",
+		default=False)
+	autosave_video_still_location: StringProperty(
+		name="Custom File Location",
+		description="Set single frame file output location and name, using a single forward slash to save the image alongside the image sequence makes no sense, don't do that here",
+		subtype="FILE_PATH",
+		options={'OUTPUT_PATH','PATH_SUPPORTS_BLEND_RELATIVE','SUPPORTS_TEMPLATES'},
+		default="//../Renders/{{project}}",
+		maxlen=4096)
+	
+	# Batch rendering options
+	batch_active: BoolProperty(
+		name="Batch Rendering Active",
+		description="Tracks status of batch rendering",
+		default=False)
+	batch_type: EnumProperty(
+		name='Batch Type',
+		description='Choose the batch rendering system',
+		items=[
+			('cams', 'Cameras', 'Batch render all specified cameras'),
+			('cols', 'Collections', 'Batch render all specified collections'),
+			('itms', 'Items', 'Batch render all specified items'),
+			(None),
+			('imgs', 'Images', 'Batch render using images from specified folder'),
+			],
+		default='itms')
+	batch_range: EnumProperty(
+		name='Range',
+		description='Batch render single frame or full timeline sequence',
+		items=[
+			('img', 'Image', 'Batch render a single frame for each element'),
+			('anim', 'Animation', 'Batch render the timeline range for each element')
+			],
+		default='img')
+	
+	# Batch cameras
+	# Uses the active camera for output variables
+	
+	# Batch collections
+	batch_collection_name: StringProperty(
+		name="Collection Name",
+		description="Name of the collection currently being rendered (bypasses view_layer settings that aren't updated during processing)",
+		default="")
+	
+	# Batch items
+	# Uses the active item for output variables
+	
+	# Batch images
+	batch_images_location: StringProperty(
+		name="Source Folder",
+		description="Source folder of images to be used in batch rendering",
+		subtype="DIR_PATH",
+		options={'OUTPUT_PATH','PATH_SUPPORTS_BLEND_RELATIVE','SUPPORTS_TEMPLATES'},
+		default="",
+		maxlen=4096)
+	batch_images_material: StringProperty(
+		name="Target Material",
+		description='Target material for batch rendering images',
+		default='',
+		maxlen=4096)
+	batch_images_node: StringProperty(
+		name="Target Node",
+		description='Target node for batch rendering images',
+		default='',
+		maxlen=4096)
+	
+	# Batch index
+	batch_index: IntProperty(
+		name="Batch Index (set during rendering)",
+		description="Dynamically populated during batch rendering with the current camera, collection, item, or image index integer starting with 0",
+		default=0,
+		step=1)
+	batch_factor: FloatProperty(
+		name="Batch Factor (set during rendering)",
+		description="Dynamically populated during batch rendering with the current position (0-1) within the batch",
+		default=0.25,
+		min=0,
+		max=1,
+		subtype="FACTOR")
+	batch_random: FloatProperty(
+		name="Batch Random (set during rendering)",
+		description="Dynamically populated during batch rendering with a random value (0-1) from the current factor hash",
+		default=0.75,
+		min=0,
+		max=1,
+		subtype="FACTOR")
+	
+	# Render node
+	node_uvmap: StringProperty(
+		name="Map",
+		default="UVMap")
+	node_output: StringProperty(
+		name="Socket",
+		default="Color")
+	node_filepath: StringProperty(
+		name="File Path",
+		subtype="DIR_PATH",
+		options={'OUTPUT_PATH','PATH_SUPPORTS_BLEND_RELATIVE','SUPPORTS_TEMPLATES'},
+		default="//{{project}}",
+		maxlen=4096)
+	node_filename: StringProperty(
+		name="File Name",
+		subtype="FILE_NAME",
+		options={'SUPPORTS_TEMPLATES'},
+		default="{{item}}-{{material}}-{{node}}-{{socket}}",
+		maxlen=4096)
+	node_overwrite: BoolProperty(
+		name="Allow Overwrite",
+		description="Files with the same name in the same location will be overwritten",
+		default=False)
+	node_colorspace: EnumProperty(
+		name="UV Islands",
+		items=[	('AUTO', "Auto", "Choose color space based on file format"),
+				('sRGB', "sRGB", "Force sRBG color space"),
+				('Non-Color', "Linear", "Force linear color space") ],
+		default='AUTO')
+		# ('ACES2065-1', 'ACEScg', 'AgX Base Display P3', 'AgX Base Rec.1886', 'AgX Base Rec.2020', 'AgX Base sRGB', 'AgX Log', 'Display P3', 'Filmic Log', 'Filmic sRGB', 'Khronos PBR Neutral sRGB', 'Linear CIE-XYZ D65', 'Linear CIE-XYZ E', 'Linear DCI-P3 D65', 'Linear FilmLight E-Gamut', 'Linear Rec.2020', 'Linear Rec.709', 'Non-Color', 'Rec.1886', 'Rec.2020', 'sRGB')
+	node_postprocess: EnumProperty(
+		name="Post Processing",
+		items=[	('NONE', "None", "Leave alpha unchanged"),
+				('BLEND', "Blend Fill", "Extend UV edges with blending using ImageMagick"),
+				('MIP', "Mip Flood", "Extend UV edges with mip flooding using ImageMagick") ],
+		default='NONE')
+	node_format: EnumProperty(
+		name="File Format",
+		items=[	('OPEN_EXR', "EXR", ""),
+				('PNG', "PNG", ""),
+				('TIFF', "TIF", "") ],
+		default='PNG')
+	node_render_device: EnumProperty(
+		name="Render Device",
+		items=[	('CPU', "CPU", ""),
+				('GPU', "GPU", "") ],
+		default='GPU')
+	node_resolution_x: IntProperty(
+		name="Resolution X",
+		default=4096)
+	node_resolution_y: IntProperty(
+		name="Resolution Y",
+		default=4096)
+	node_samples: IntProperty(
+		name="Samples",
+		default=16)
+	node_margin: IntProperty(
+		name="Margin",
+		default=0)
+	
+	# Render screenshot
+	screenshot_filepath: StringProperty(
+		name="File Path",
+		subtype="DIR_PATH",
+		options={'OUTPUT_PATH','PATH_SUPPORTS_BLEND_RELATIVE','SUPPORTS_TEMPLATES'},
+		default="//{{project}}/{{project}}-{{item}}",
+		maxlen=4096)
+	screenshot_overwrite: BoolProperty(
+		name="Allow Overwrite",
+		description="Files with the same name in the same location will be overwritten",
+		default=False)
+	screenshot_format: EnumProperty(
+		name="File Format",
+		items=[	('PNG', "PNG", ""),
+				('JPEG', "JPEG", ""),
+				('TIFF', "TIF", "") ],
+		default='PNG')
+	screenshot_quality: IntProperty(
+		name="Quality",
+		description="Compression quality for PNG and JPEG output",
+		default=90,
+		min=0,
+		max=100,
+		subtype="PERCENTAGE")
+	screenshot_padding: IntProperty(
+		name="Padding",
+		description="Additional space captured beyond the node bounding area, in output pixels",
+		default=128,
+		min=0,
+		max=1024)
+	screenshot_scale: FloatProperty(
+		name="Scale",
+		description="Resolution multiplier relative to the node editor's native size (2.0 = double resolution)",
+		default=1.0,
+		min=0.25,
+		max=2.0,
+		subtype="FACTOR")
+
+
+
+
+
+###########################################################################
+# Addon registration functions
+# •Define classes being registered
+# •Registration function
+# •Unregistration function
+
+classes = (RenderKitPreferences, RenderKitSettings)
+
+
+
+def register():
+	# Register classes
+	for cls in classes:
+		bpy.utils.register_class(cls)
+	
+	# Add extension settings reference
+	bpy.types.Scene.render_kit_settings = bpy.props.PointerProperty(type=RenderKitSettings)
+	
+	# Update command line tool locations
+	bpy.context.preferences.addons[__package__].preferences.check_magick_location()
+	bpy.context.preferences.addons[__package__].preferences.check_ffmpeg_location()
+	bpy.context.preferences.addons[__package__].preferences.check_voice_location()
+	
+	# Attach render event handlers
+	bpy.app.handlers.render_init.append(render_kit_start)
+	bpy.app.handlers.render_pre.append(render_kit_frame_pre)
+	bpy.app.handlers.render_post.append(render_kit_frame_post)
+	bpy.app.handlers.render_cancel.append(render_kit_end)
+	bpy.app.handlers.render_complete.append(render_kit_end)
+	
+	########## Render Autosave ##########
+	render_autosave.register()
+	
+	########## Render Batch ##########
+	render_batch.register()
+	
+	########## Render Proxy ##########
+	render_proxy.register()
+	
+	########## Render Region ##########
+	render_region.register()
+	
+	########## Render settings synchronisation ##########
+	render_sync.register()
+	
+	########## Render Display ##########
+	render_display.register()
+	
+	########## Render Node ##########
+	render_node.register()
+	
+	########## Render Screenshot ##########
+	render_screenshot.register()
+	
+	########## Render Variables ##########
+	render_variables.register()
+
+
+
+def unregister():
+	########## Render Variables ##########
+	render_variables.unregister()
+	
+	########## Render Screenshot ##########
+	render_screenshot.unregister()
+	
+	########## Render Node ##########
+	render_node.unregister()
+	
+	########## Render Display ##########
+	render_display.unregister()
+	
+	########## Render Batch ##########
+	render_batch.unregister()
+	
+	########## Render settings synchronisation ##########
+	render_sync.unregister()
+	
+	########## Render Region ##########
+	render_region.unregister()
+	
+	########## Render Proxy ##########
+	render_proxy.unregister()
+	
+	########## Render Autosave ##########
+	render_autosave.unregister()
+	
+	# Remove render event handlers
+	bpy.app.handlers.render_init.remove(render_kit_start)
+	bpy.app.handlers.render_pre.remove(render_kit_frame_pre)
+	bpy.app.handlers.render_post.remove(render_kit_frame_post)
+	bpy.app.handlers.render_cancel.remove(render_kit_end)
+	bpy.app.handlers.render_complete.remove(render_kit_end)
+	
+	# Remove extension settings reference
+	del bpy.types.Scene.render_kit_settings
+	
+	# Deregister classes
+	for cls in reversed(classes):
+		bpy.utils.unregister_class(cls)
+
+
+
+if __package__ == "__main__":
+	register()

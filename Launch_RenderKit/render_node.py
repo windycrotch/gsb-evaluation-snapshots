@@ -1,0 +1,460 @@
+import bpy
+import os
+import time
+
+# Internal imports
+from .render_variables import replaceVariables, renderkit_variable_ui
+from .utility_filecheck import checkExistingAndIncrement
+from .utility_notifications import render_notifications
+from .utility_time import secondsToReadable
+from . import utility_data
+from . import utility_panel
+
+# ImageMagick processing
+import subprocess
+
+# Object types that may contain or generate mesh content (directly or via Geometry Nodes modifiers)
+RENDER_NODE_ITEM_TYPES = {'MESH', 'CURVE', 'SURFACE', 'META', 'FONT', 'CURVES', 'POINTCLOUD', 'VOLUME'}
+
+
+class RENDERKIT_OT_render_node(bpy.types.Operator):
+	bl_idname = "node.render_node"
+	bl_label = "Render Node"
+	bl_options = {'REGISTER', 'UNDO'}
+	
+	def invoke(self, context, event):
+			return context.window_manager.invoke_props_dialog(self)
+	
+	def draw(self, context):
+		try:
+			layout = self.layout
+			layout.label(text="Blender will be unresponsive while rendering")
+		except Exception as exc:
+			print(str(exc) + ' | Error in Render Kit — Render Node confirmation header')
+	
+	def execute(self, context):
+		prefs = context.preferences.addons[__package__].preferences
+		settings = context.scene.render_kit_settings
+		scene = context.scene
+		
+		# Reset serial tracking
+		utility_data.render_set_serial(False)
+		
+		# Check for active item that may have mesh content
+		obj = context.active_object
+		if not obj or obj.type not in RENDER_NODE_ITEM_TYPES or obj.hide_select or obj.hide_get() or obj.hide_viewport or obj.hide_render:
+			self.report({'ERROR'}, "Render Kit — Render Node no active compatible object selected or is hidden")
+			return {'CANCELLED'}
+		
+		# Ensure the active object is selected in layout
+		obj.select_set(True)
+		
+		# Check for active node
+		source_node = context.active_node
+		if not source_node:
+			self.report({'ERROR'}, "Render Kit — Render Node no active node selected")
+			return {'CANCELLED'}
+		
+		# Check if the selected output exists
+		if settings.node_output not in [output.name for output in source_node.outputs]:
+			self.report({'ERROR'}, f"Render Kit — Render Node output '{settings.node_output}' not found")
+			return {'CANCELLED'}
+		
+		# Check for selected UV map
+		# Non-mesh items have no UV layers on their base data (the map may come from Geometry Nodes), so the name is passed to the bake directly
+		uv_layers = getattr(obj.data, 'uv_layers', None)
+		uvmap = uv_layers.get(settings.node_uvmap) if uv_layers is not None else None
+		if uv_layers is not None and not uvmap:
+			self.report({'ERROR'}, f"Render Kit — Render Node UV map '{settings.node_uvmap}' not found")
+			return {'CANCELLED'}
+		
+		# Push undo state (because attempting to manually restore everything was way too frustrating)
+		bpy.ops.ed.undo_push()
+		
+		# Get active scene
+		scene = context.scene
+		
+		# Get the file path and do the initial variable replacement
+		# Because mesh and texture data are generally organised in different locations, Delivery Kit location wasn't added here
+		file_path = os.path.join(settings.node_filepath, settings.node_filename) + '.' + settings.node_format.replace("OPEN_EXR", "EXR").lower()
+		file_path = replaceVariables(scene, file_path) # Must be completed before the active nodes change
+		
+		# Get the output socket by name
+		original_node_output = {output.name: output for output in source_node.outputs}
+		output_socket = original_node_output[settings.node_output]
+		
+		# Set active output type
+		output_type = 'COMBINED' if output_socket.type == 'SHADER' else ('NORMAL' if output_socket.type == 'VECTOR' and output_socket.name == 'Normal' else 'EMIT')
+		
+		# Set active UV map
+		if uvmap:
+			uv_layers.active = uvmap
+		
+		# The bake operator only accepts mesh objects as the active item
+		# Curves, text, etc. are baked through a temporary mesh object built from their evaluated geometry (including Geometry Nodes output)
+		bake_obj = None
+		original_selection = []
+		original_active = context.view_layer.objects.active
+		if obj.type != 'MESH':
+			mesh = bpy.data.meshes.new_from_object(obj.evaluated_get(context.evaluated_depsgraph_get()))
+			if mesh is None or len(mesh.polygons) == 0:
+				if mesh is not None:
+					bpy.data.meshes.remove(mesh)
+				self.report({'ERROR'}, "Render Kit — Render Node item does not generate any mesh faces to bake")
+				return {'CANCELLED'}
+			if not mesh.uv_layers.get(settings.node_uvmap):
+				bpy.data.meshes.remove(mesh)
+				self.report({'ERROR'}, f"Render Kit — Render Node UV map '{settings.node_uvmap}' not found in the generated mesh")
+				return {'CANCELLED'}
+			mesh.uv_layers.active = mesh.uv_layers[settings.node_uvmap]
+
+			# Use the active material in every slot, matching the material that holds the temporary bake nodes
+			active_material = obj.active_material
+			if len(mesh.materials) == 0:
+				mesh.materials.append(active_material)
+			else:
+				for index in range(len(mesh.materials)):
+					mesh.materials[index] = active_material
+
+			bake_obj = bpy.data.objects.new("RenderKit_RenderNodeTemp", mesh)
+			bake_obj.matrix_world = obj.matrix_world
+			scene.collection.objects.link(bake_obj)
+			context.view_layer.update()
+
+			# Isolate the temporary object as the only selected and active item
+			original_selection = [item for item in context.view_layer.objects if item.select_get()]
+			for item in original_selection:
+				item.select_set(False)
+			bake_obj.select_set(True)
+			context.view_layer.objects.active = bake_obj
+
+		def cleanup_bake_object():
+			if bake_obj is not None:
+				bake_mesh = bake_obj.data
+				bpy.data.objects.remove(bake_obj)
+				bpy.data.meshes.remove(bake_mesh)
+				for item in original_selection:
+					item.select_set(True)
+				context.view_layer.objects.active = original_active
+
+		# Create render image
+		bpy.ops.image.new(
+			name='RenderKit_RenderNodeImage',
+			width=settings.node_resolution_x,
+			height=settings.node_resolution_y,
+			color=(0.0, 0.0, 0.0, 0.0),
+			alpha=True,
+			generated_type='BLANK',
+			float=True,
+			use_stereo_3d=False,
+			tiled=False)
+		image = bpy.data.images["RenderKit_RenderNodeImage"]
+		if settings.node_format != 'OPEN_EXR':
+			image.use_half_precision = True
+		
+		# Get active node tree
+		node_tree = obj.active_material.node_tree
+		
+		# Create temporary output, and image nodes for rendering
+		output_node = node_tree.nodes.new(type='ShaderNodeOutputMaterial')
+		output_node.select = True
+		node_tree.nodes.active = output_node
+		
+		image_node = node_tree.nodes.new(type='ShaderNodeTexImage')
+		image_node.image = image
+		image_node.select = True
+		node_tree.nodes.active = image_node
+		
+		# Connect source node output socket to output node input socket, with intermediary nodes as needed
+		emission_node = False
+		diffuse_node = False
+		if output_socket:
+			# For further development of custom types, use these lines in the Blender Console:
+			# C.active_object.active_material.node_tree.nodes.active.outputs[0].name
+			# C.active_object.active_material.node_tree.nodes.active.outputs[0].type
+			if output_type == 'EMIT':
+				emission_node = node_tree.nodes.new(type='ShaderNodeEmission')
+				node_tree.links.new(output_socket, emission_node.inputs[0])
+				node_tree.links.new(emission_node.outputs[0], output_node.inputs[0])
+			if output_type == 'NORMAL':
+				diffuse_node = node_tree.nodes.new(type='ShaderNodeBsdfDiffuse')
+				node_tree.links.new(output_socket, diffuse_node.inputs[2])
+				node_tree.links.new(diffuse_node.outputs[0], output_node.inputs[0])
+			else:
+				node_tree.links.new(output_socket, output_node.inputs[0])
+		else:
+			cleanup_bake_object()
+			self.report({'ERROR'}, "Render Kit — Render Node could not find the selected output socket")
+			return {'CANCELLED'}
+		
+		# Store original settings
+		# TODO: remove this block if we undo to remove elements
+		original_engine = scene.render.engine
+		original_film = scene.render.film_transparent
+		original_device = scene.cycles.device
+		original_samples = scene.cycles.samples
+		original_bake = scene.cycles.bake_type
+		original_space = scene.render.bake.normal_space
+		original_view = scene.render.bake.view_from
+		original_target = scene.render.bake.target
+		original_margin = scene.render.bake.margin
+		original_clear = scene.render.bake.use_clear
+		original_selectedtoactive = scene.render.bake.use_selected_to_active
+		original_splitmaterials = scene.render.bake.use_split_materials
+		
+		# Set bake settings
+		scene.render.engine = 'CYCLES'
+		scene.render.film_transparent = True
+		scene.cycles.device = 'GPU' if settings.node_render_device == 'GPU' else 'CPU'
+		scene.cycles.samples = settings.node_samples
+		scene.cycles.bake_type = output_type
+		scene.render.bake.normal_space = 'TANGENT'
+		scene.render.bake.view_from = 'ABOVE_SURFACE'
+		scene.render.bake.target = 'IMAGE_TEXTURES'
+		scene.render.bake.margin = settings.node_margin
+		scene.render.bake.use_clear = False
+		scene.render.bake.use_selected_to_active = False
+		scene.render.bake.use_split_materials = False
+		
+		# Set color space override
+		if settings.node_colorspace != 'AUTO':
+			image.colorspace_settings.name = settings.node_colorspace
+		elif output_type == 'NORMAL' or source_node.label.lower() == 'normal' or source_node.label.lower() == 'orm':
+			image.colorspace_settings.name = 'Non-Color'
+		
+		# Start render time
+#		settings.start_time = str(time.time())
+		utility_data.render_set_start_time(time.time())
+		
+		# Render to image
+		try:
+			bpy.ops.object.bake(
+				type=output_type,
+				uv_layer=settings.node_uvmap,
+			)
+		finally:
+			cleanup_bake_object()
+		
+		# Check for serial number usage in the file path
+#		settings.serial_used = True if '{serial}' in file_path else False
+		if '{serial}' in file_path:
+			utility_data.render_set_serial(True)
+		
+		# Calculate render
+#		render_time = round(time.time() - float(settings.start_time), 2)
+		render_time = round(time.time() - utility_data.render_get_start_time(), 2)
+		
+		# Replace variables (part two, this time with all of the custom elements)
+		file_path = replaceVariables(scene, file_path, render_time=render_time, socket=settings.node_output)
+		
+		# Increment the output serial number if it was used in the output path
+		if utility_data.render_get_serial():
+			settings.output_file_serial += 1
+#			settings.serial_used = False
+			utility_data.render_set_serial(False)
+		
+		# Check for existing directory and files
+		file_path = checkExistingAndIncrement(file_path, overwrite=settings.node_overwrite)
+		
+		# Save texture file
+		image.filepath_raw = file_path
+		image.file_format = settings.node_format
+		image.save()
+		
+		# Process output file with ImageMagick (mip flooding)
+		if settings.node_postprocess != "NONE" and prefs.magick_exists:
+			absolute_path = bpy.path.abspath(file_path)
+			blend = settings.node_postprocess == "BLEND"
+			# Pyramid scaling reference: https://imagemagick.org/Usage/canvas/#sparse-color
+			# Mip flooding reference: https://www.artstation.com/blogs/secarri/XOBq/the-god-of-war-texture-optimization-algorithm-mip-flooding
+			magick_command = [prefs.magick_location, absolute_path, '-channel', 'alpha', '-threshold', '99%', '+channel']
+			# Repeated pyramid-scaling group (threshold differs between blend and flood modes)
+			magick_command += ['(', '+clone', '-filter', 'Gaussian', '-resize', '50%', '-channel', 'alpha', '-threshold', '1%' if blend else '12.5%', '+channel', ')'] * 10
+			magick_command += ['-layers', 'RemoveDups', '-filter', 'Gaussian' if blend else 'Point']
+			magick_command += ['-resize', str(settings.node_resolution_x) + 'x' + str(settings.node_resolution_y) + '!', '-reverse']
+			if blend:
+				magick_command += ['-channel', 'alpha', '-gamma', '4', '+channel']
+			magick_command += ['-background', 'None', '-flatten', '-alpha', 'off', absolute_path]
+
+			# Print command to the terminal
+			print(f'ImageMagick command: {magick_command}')
+			
+			# Run ImageMagick command in a new process
+			try:
+				subprocess.Popen(magick_command)
+			except Exception as exc:
+				print(str(exc) + " | Error in Render Kit: failed to process ImageMagick command")
+		
+		# Calculate render + processing time
+		# When enabled, the reported time below and the saved time above will differ
+#		render_time = round(time.time() - float(settings.start_time), 2)
+		render_time = round(time.time() - utility_data.render_get_start_time(), 2)
+		
+		# Remove temporary nodes and image data
+		# TODO: remove this block if we undo to remove elements
+		if emission_node: node_tree.nodes.remove(emission_node)
+		if diffuse_node: node_tree.nodes.remove(diffuse_node)
+		node_tree.nodes.remove(output_node)
+		node_tree.nodes.remove(image_node)
+		bpy.data.images.remove(image)
+		
+		# Restore original settings
+		# TODO: remove this block if we undo to remove elements
+		scene.render.engine = original_engine
+		scene.render.film_transparent = original_film
+		scene.cycles.device = original_device
+		scene.cycles.samples = original_samples
+		scene.cycles.bake_type = original_bake
+		scene.render.bake.normal_space = original_space
+		scene.render.bake.view_from = original_view
+		scene.render.bake.target = original_target
+		scene.render.bake.margin = original_margin
+		scene.render.bake.use_clear = original_clear
+		scene.render.bake.use_selected_to_active = original_selectedtoactive
+		scene.render.bake.use_split_materials = original_splitmaterials
+		
+		# Reselect original active node
+		source_node.select = True
+		node_tree.nodes.active = source_node
+		
+		# Provide success feedback
+		self.report({'INFO'}, f"Node render saved to {file_path}")
+		self.show_completion_popup(context, file_path, render_time)
+		render_notifications(scene, render_time)
+		
+		return {'FINISHED'}
+	
+	def show_completion_popup(self, context, filepath, render_time):
+		def draw(self, context):
+			self.layout.label(text=filepath)
+		context.window_manager.popup_menu(draw, title="Render Node Completed " + secondsToReadable(render_time), icon='NODE_TEXTURE') # NODE NODE_SEL NODETREE NODE_TEXTURE SHADING_RENDERED SHADING_TEXTURE
+
+
+
+###########################################################################
+# UI rendering classes
+
+class RENDERKIT_PT_render_node(bpy.types.Panel):
+	bl_label = "Render Node"
+	bl_space_type = 'NODE_EDITOR'
+	bl_region_type = 'UI'
+	bl_category = 'Node'
+	bl_order = 40
+	bl_options = {'DEFAULT_CLOSED'}
+	category_preference = "rendernode_category"
+	
+	@classmethod
+	def poll(cls, context):
+		prefs = context.preferences.addons[__package__].preferences
+#		obj = context.active_object
+		return (prefs.rendernode_enable and context.space_data.tree_type == 'ShaderNodeTree' and context.object is not None and context.object.active_material is not None and context.active_object and context.active_object.type in RENDER_NODE_ITEM_TYPES and context.active_node)
+	
+	def draw(self, context):
+		settings = context.scene.render_kit_settings
+		layout = self.layout
+		
+		# Primary settings
+		if hasattr(context.active_object.data, 'uv_layers'):
+			layout.prop_search(settings, "node_uvmap", context.active_object.data, "uv_layers")
+		else:
+			layout.prop(settings, "node_uvmap")
+		layout.prop_search(settings, "node_output", context.active_node, "outputs")
+		
+		# Render node button
+		button = layout.row()
+		obj = context.active_object
+		obj_valid = True if obj else False
+		if obj_valid:
+			if obj.type not in RENDER_NODE_ITEM_TYPES:
+				obj_valid = False
+			if obj.hide_select:
+				obj_valid = False
+			if obj.hide_get():
+				obj_valid = False
+			if obj.hide_viewport:
+				obj_valid = False
+			if obj.hide_render:
+				obj_valid = False
+		if settings.node_output not in [output.name for output in context.active_node.outputs] or not obj_valid or (hasattr(obj.data, 'uv_layers') and not obj.data.uv_layers.get(settings.node_uvmap)):
+			button.active = False
+			button.enabled = False
+		button.operator(RENDERKIT_OT_render_node.bl_idname)
+		
+		# Additional settings
+		header, panel = layout.panel("render_node_subpanel", default_closed=True)
+		header.label(text="Settings")
+		if panel:
+			# Variable list UI
+			filepath = settings.node_filepath + settings.node_filename
+			renderkit_variable_ui(panel, context, paths=filepath, postrender=False, noderender=True, autoclose=True)
+			
+			# Output filepath
+			panel.prop(settings, "node_filepath", text='')
+			panel.prop(settings, "node_filename", text='')
+#			grid = panel.grid_flow(row_major=True, columns=3, even_columns=True, even_rows=True, align=False)
+			# Row 1
+#			grid.label(text='Formatting', icon='IMAGE_PLANE') # FILE_IMAGE IMAGE_PLANE FILE CURRENT_FILE
+#			grid.separator()
+#			grid.separator()
+			panel.prop(settings, "node_overwrite")
+			# Row 2
+			row = panel.row()
+			row.prop(settings, "node_format", expand=True)
+			# Row 3
+			row = panel.row()
+			row.prop(settings, "node_colorspace", expand=True)
+			
+			
+			
+			# RENDERING
+			panel.separator(factor=2.0)
+			panel.label(text='Rendering', icon='NODE_TEXTURE') # IMAGE TEXTURE NODE_TEXTURE
+			row = panel.row()
+			row.prop(settings, "node_render_device", expand=True)
+			grid = panel.grid_flow(row_major=True, columns=2, even_columns=True, even_rows=True, align=True)
+			grid.prop(settings, "node_resolution_x", text='X')
+			grid.prop(settings, "node_resolution_y", text='Y')
+			grid.prop(settings, "node_samples")
+			grid.prop(settings, "node_margin")
+			
+			
+			
+			# POST PROCESSING
+			panel.separator(factor=2.0)
+			panel.label(text='Post Processing', icon='IMAGE') # IMAGE NODE_COMPOSITING
+			row = panel.row()
+			row.prop(settings, "node_postprocess", expand=True)
+
+
+
+# Class Registration
+
+#def menu_func(self, context):
+#	self.layout.operator(RENDERKIT_OT_render_node.bl_idname)
+
+classes = [RENDERKIT_OT_render_node]
+
+# Registered from the tab category set in the extension preferences
+panels = [RENDERKIT_PT_render_node]
+
+def register():
+	# Register classes
+	for cls in classes:
+		bpy.utils.register_class(cls)
+	
+	# Register panels
+	utility_panel.register_panels(panels)
+#	bpy.types.NODE_MT_context_menu.append(menu_func)
+
+def unregister():
+	# Deregister panels
+	utility_panel.unregister_panels(panels)
+	
+	# Deregister classes
+	for cls in reversed(classes):
+		bpy.utils.unregister_class(cls)
+#	bpy.types.NODE_MT_context_menu.remove(menu_func)
+
+if __name__ == "__main__":
+	register()
+	

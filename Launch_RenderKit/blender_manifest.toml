@@ -1,0 +1,36 @@
+schema_version = "1.0.0"
+
+id = "Launch_Render_Kit"
+name = "Launch Render Kit"
+version = "0.3.5"
+tagline = "Render variables, autosave, video, batch, proxy, region tools"
+maintainer = "John Einselen <jeinselen@gmail.com>"
+website = "https://github.com/jeinselen/Blender-RenderKit"
+type = "add-on"
+
+# https://docs.blender.org/manual/en/dev/advanced/extensions/tags.html
+tags = ["Camera", "Compositing", "Material", "Pipeline", "Render", "Scene"]
+
+blender_version_min = "4.5.0"
+#blender_version_max = "5.9.9"
+
+# https://docs.blender.org/manual/en/dev/advanced/extensions/licenses.html
+license = ["SPDX:GPL-3.0-or-later"]
+
+## Optional: add-ons can list which resources they will require:
+## * files (for access of any filesystem operations)
+## * network (for internet access)
+## * clipboard (to read and/or write the system clipboard)
+## * camera (to capture photos and videos)
+## * microphone (to capture audio)
+##
+## If using network, remember to also check `bpy.app.online_access`
+## https://docs.blender.org/manual/en/dev/advanced/extensions/addons.html#internet-access
+##
+## For each permission it is important to also specify the reason why it is required.
+## Keep this a single short sentence without a period (.) at the end.
+## For longer explanations use the documentation or detail page.
+[permissions]
+network = "Sending Pushover notifications when renders complete"
+files = "Saving videos, incremental images, and render time logs"
+clipboard = "Copy and paste output variables"
