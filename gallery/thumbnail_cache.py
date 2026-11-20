@@ -1,0 +1,142 @@
+import os, time, weakref
+from PySide6.QtCore import Qt, Slot, Signal, SignalInstance, QThreadPool, QObject, QRunnable
+from PySide6.QtGui import QPixmap, QImage
+from lib.filelist import DataKeys
+from lib import imagerw, videorw
+from config import Config
+from .gallery_model import GalleryModel
+
+
+class ThumbnailRequest:
+    __slots__ = ('time', '__weakref__')
+
+    def __init__(self):
+        self.time = 0
+
+
+class ThumbnailCache(QObject):
+    THUMBNAIL_SIZE = 300
+    REQUEST_TIMEOUT = 1_000_000_000
+
+    _instance = None
+
+    done = Signal(object, str, object, object, object)
+
+    def __new__(cls, *args, **kwargs):
+        if cls._instance is None:
+            cls._instance = super(ThumbnailCache, cls).__new__(cls)
+        return cls._instance
+
+    def __init__(self):
+        if getattr(self, '_singleton_initialized', False):
+            return
+
+        super().__init__()
+        self._singleton_initialized = True
+
+        self._active = True
+
+        self.threadpool = QThreadPool()
+        self.threadpool.setMaxThreadCount(Config.galleryThumbnailThreads)
+
+        self.done.connect(self._onThumbnailLoaded, Qt.ConnectionType.QueuedConnection)
+
+    def shutdown(self):
+        self._active = False
+        self.done.disconnect()
+        self.threadpool.clear()
+
+
+    def updateThumbnail(self, model: GalleryModel, file: str):
+        if not self._active:
+            return
+
+        # Throttle requests to prevent unnecessary I/O and congestion of thread pool.
+        request: ThumbnailRequest | None = model.filelist.getData(file, DataKeys.ThumbnailRequestTime)
+        now = time.monotonic_ns()
+        if request is None:
+            request = ThumbnailRequest()
+        elif request.time + self.REQUEST_TIMEOUT > now:
+            return
+
+        request.time = now
+        model.filelist.setData(file, DataKeys.ThumbnailRequestTime, request, False)
+
+        task = ThumbnailTask(self.done, model, file, request)
+        self.threadpool.start(task)
+
+
+    @Slot(object, str, object, object, object)
+    def _onThumbnailLoaded(self, model: GalleryModel, file: str, img: QImage, imgSize: tuple[int, int], icons: dict):
+        pixmap = QPixmap.fromImage(img)
+
+        filelist = model.filelist
+        filelist.setData(file, DataKeys.Thumbnail, pixmap, False)
+        filelist.setData(file, DataKeys.ImageSize, imgSize, False)
+        filelist.removeData(file, DataKeys.ThumbnailRequestTime, False)
+
+        for key, state in icons.items():
+            if state:
+                filelist.setData(file, key, state)
+
+        model.onThumbnailLoaded(file)
+
+
+
+class ThumbnailTask(QRunnable):
+    ICON_KEYS = (DataKeys.CaptionState, DataKeys.MaskState)
+
+    def __init__(self, doneSignal: SignalInstance, model: GalleryModel, file: str, request: ThumbnailRequest):
+        super().__init__()
+        self.setAutoDelete(True)
+        self.done = doneSignal
+
+        self.model = weakref.ref(model)
+        self.request = weakref.ref(request)
+        self.file = file
+
+        self.icons = { k: model.filelist.getData(file, k) for k in self.ICON_KEYS }
+
+    @Slot()
+    def run(self):
+        if self.request() is None:
+            return
+
+        model = self.model()
+        if model is None:
+            return
+
+        # QPixmap is not threadsafe, loading as QImage instead
+        try:
+            if videorw.isVideoFile(self.file):
+                img, (w, h) = videorw.thumbnailVideoQImage(self.file, ThumbnailCache.THUMBNAIL_SIZE, 2)
+            else:
+                img, (w, h) = imagerw.thumbnailQImage(self.file, ThumbnailCache.THUMBNAIL_SIZE)
+        except Exception as ex:
+            print(f"Couldn't load thumbnail: {ex} ({type(ex).__name__})")
+            img = QImage()
+            w = h = -1
+
+        self.checkIcons()
+        self.done.emit(model, self.file, img, (w, h), self.icons)
+
+    def checkIcons(self):
+        filenameNoExt = os.path.splitext(self.file)[0]
+
+        if self.icons[DataKeys.CaptionState] is None:
+            captionFile = filenameNoExt + ".txt"
+            jsonFile    = filenameNoExt + ".json"
+            if self._fileExists(captionFile) or self._fileExists(jsonFile):
+                self.icons[DataKeys.CaptionState] = DataKeys.IconStates.Exists
+
+        if self.icons[DataKeys.MaskState] is None:
+            maskFile = f"{filenameNoExt}{Config.maskSuffix}.png"
+            if os.path.exists(maskFile):
+                self.icons[DataKeys.MaskState] = DataKeys.IconStates.Exists
+
+    @staticmethod
+    def _fileExists(path: str) -> bool:
+        try:
+            return os.path.getsize(path) > 0
+        except FileNotFoundError:
+            return False

@@ -1,0 +1,557 @@
+from __future__ import annotations
+import sys, struct, msgpack, copy, traceback
+from typing import Any, Callable
+from collections import defaultdict
+from PySide6.QtCore import Qt, Slot, Signal, QObject, QThread, QProcess, QProcessEnvironment, QByteArray, QMutex, QMutexLocker
+from host.protocol import Protocol, Service
+from host.host_window import LOCAL_NAME
+from lib import threadlib
+from config import Config
+from .prompt_struct import Conversation, PromptUtil
+
+
+class ProcFuture(threadlib.Future[dict | None]): pass
+
+
+class InferenceException(Exception):
+    def __init__(self, hostName: str, message: str, errorType: str = None):
+        self.hostName = hostName
+        self.message = message
+        self.errorType = errorType
+
+        host = f" ({hostName})" if hostName else ""
+        errorType = f" ({errorType})" if errorType else ""
+        msg = f"Error during inference{host}: {message}{errorType}"
+        super().__init__(msg)
+
+
+class AwaitableFunc:
+    def __init__(self, func: Callable, *args):
+        self.func = func
+        self.args = args
+        self.future = ProcFuture()
+
+    def __call__(self):
+        try:
+            self.func(*self.args)
+            self.future.setResult(None)
+        except Exception as ex:
+            self.future.setException(ex)
+
+    def awaitExec(self):
+        self.future.result()
+
+
+
+class InferenceProcConfig:
+    def __init__(self, hostName: str, cfgRemote: dict | None = None):
+        self.hostName = hostName
+
+        cfgLocal = Config.inferHosts.get(LOCAL_NAME, {})
+        self.localBasePath: str = cfgLocal.get("model_base_path", "")
+        self.remoteBasePath: str = ""
+
+        if not cfgRemote:
+            self.remote = False
+            self.hostServiceId = Service.ID.INFERENCE
+            self.executable = sys.executable
+            self.arguments = ["-u", "main_inference.py"] # Unbuffered pipes
+        else:
+            self.remote = True
+            self.hostServiceId = Service.ID.HOST
+            self.remoteBasePath = cfgRemote.get("model_base_path", "")
+
+            import shlex
+            cmd = shlex.split(cfgRemote.get("cmd", ""))
+            self.executable: str = cmd[0]
+            self.arguments: list[str] = cmd[1:]
+
+        self.localBasePath = self.localBasePath.replace("\\", "/").rstrip("/")
+        self.remoteBasePath = self.remoteBasePath.replace("\\", "/").rstrip("/")
+
+    def translateConfig(self, config: dict[str, Any], keys: list[str]) -> dict:
+        if self.remote and self.localBasePath and self.remoteBasePath:
+            config = copy.deepcopy(config)
+            self._translateModelPaths(config, keys)
+        return config
+
+    def _translateModelPaths(self, config: dict[str, Any], keys: list[str]):
+        modelPath: str = None
+        for key in keys:
+            if modelPath := config.get(key):
+                modelPath = modelPath.replace("\\", "/")
+                modelPath = modelPath.removeprefix(self.localBasePath).lstrip("/")
+                config[key] = f"{self.remoteBasePath}/{modelPath}"
+
+
+
+class InferenceProcess(QObject):
+    queueStart = Signal()
+    queueWrite = Signal(int, dict, object)
+    processReady = Signal(object, bool)
+    processEnded = Signal(object)
+    processStartFailed = Signal(object)
+    execAwaitable = Signal(object)
+
+    def __init__(self, config: InferenceProcConfig):
+        super().__init__()
+
+        self._thread = QThread()
+        self._thread.setObjectName("inference-process")
+        self._thread.start()
+        self.moveToThread(self._thread)
+
+        self.procCfg = config
+        self.proc: QProcess = None
+        self._ready: bool | None = None
+
+        self.currentConfigs: dict[str, dict] = defaultdict(dict)
+
+        # Mutex protects proc and config
+        self._mutex = QMutex()
+
+        self._readBuffer: QByteArray = None
+        self._readReq = 0
+        self._readLength = 0
+
+        self._futures: dict[int, ProcFuture] = dict()
+        self._nextReqId = 1  # reqId 0 for messages with no associated Future
+
+        self.queueStart.connect(self._startProcess, Qt.ConnectionType.QueuedConnection)
+        self.queueWrite.connect(self._writeMessage, Qt.ConnectionType.QueuedConnection)
+        self.execAwaitable.connect(lambda func: func(), Qt.ConnectionType.QueuedConnection)
+
+        self.record = False
+        self.recordedFutures: list[ProcFuture] = list()
+
+
+    @property
+    def ready(self) -> bool:
+        return bool(self._ready)
+
+    def awaitTask(self, func: Callable, *args):
+        task = AwaitableFunc(func, *args)
+        self.execAwaitable.emit(task)
+        task.awaitExec()
+
+
+    def __enter__(self):
+        self.record = True
+        return self
+
+    def __exit__(self, excType, excVal, excTraceback):
+        self.record = False
+        return False
+
+    def getRecordedFutures(self) -> list[ProcFuture]:
+        futures = self.recordedFutures
+        self.recordedFutures = list()
+        return futures
+
+
+    def start(self, wait=True):
+        if wait:
+            self.awaitTask(self._startProcess)
+        else:
+            self.queueStart.emit()
+
+    @Slot()
+    def _startProcess(self):
+        with QMutexLocker(self._mutex):
+            if self.proc:
+                if self._ready is not None:
+                    self.processReady.emit(self, self._ready)
+                return
+
+            env = QProcessEnvironment.systemEnvironment()
+            env.insert("NO_ALBUMENTATIONS_UPDATE", "1")
+            env.insert("YOLO_OFFLINE", "True")
+
+            # Workaround for loading llama-cpp-python on Windows
+            env.insert("KMP_DUPLICATE_LIB_OK", "TRUE")
+
+            self.proc = QProcess(self)
+            self.proc.setProgram(self.procCfg.executable)
+            self.proc.setArguments(self.procCfg.arguments)
+
+            self.proc.setProcessEnvironment(env)
+            self.proc.setProcessChannelMode(QProcess.ProcessChannelMode.SeparateChannels)
+            self.proc.setReadChannel(QProcess.ProcessChannel.StandardOutput)
+            self.proc.readyReadStandardOutput.connect(self._onReadyRead)
+            self.proc.readyReadStandardError.connect(self._onReadyReadError)
+            self.proc.finished.connect(self._onProcessEnded)
+            self.proc.start()
+
+            future = ProcFuture()
+            future.setCallback(self._onProcessStarted)
+            self.queueWrite.emit(self.procCfg.hostServiceId, {"cmd": "echo"}, future)
+
+            if not self.proc.waitForStarted():
+                print(f"WARNING: Inference process ({self.procCfg.hostName}) failed to start (wrong command?)")
+                self._ready = False
+                self.processReady.emit(self, False)
+                self.processStartFailed.emit(self)
+
+
+    def stop(self, wait=False):
+        with QMutexLocker(self._mutex):
+            self.currentConfigs.clear()
+
+            if self.proc:
+                self.queueWrite.emit(self.procCfg.hostServiceId, {"cmd": "quit"}, None)
+            else:
+                wait = False
+
+        if wait:
+            self.awaitTask(lambda: self.proc.waitForFinished())
+
+    def kill(self):
+        try:
+            with QMutexLocker(self._mutex):
+                if self.proc:
+                    self.proc.kill()
+        except:
+            traceback.print_exc()
+
+    def shutdown(self):
+        self._thread.quit()
+        self._thread.wait()
+
+
+    def setupCaption(self, config: dict):
+        config = self.procCfg.translateConfig(config, ["model_path", "proj_path"])
+        self._setup(config, "setup_caption", "LLM")
+
+    def setupTag(self, config: dict):
+        config = self.procCfg.translateConfig(config, ["model_path", "csv_path"])
+        self._setup(config, "setup_tag", "tag")
+
+    def setupLLM(self, config: dict):
+        config = self.procCfg.translateConfig(config, ["model_path"])
+        self._setup(config, "setup_llm", "LLM")
+
+    def setupEmbedding(self, config: dict):
+        config = self.procCfg.translateConfig(config, ["model_path", "text_model_path", "vision_model_path"])
+        self._setup(config, "setup_embed", "embed")
+
+    def setupVae(self, config: dict):
+        config = self.procCfg.translateConfig(config, ["model_path"])
+        self._setup(config, "setup_vae", "VAE")
+
+    def setupMasking(self, config: dict):
+        config = self.procCfg.translateConfig(config, ["model_path"])
+        self._query({
+            "cmd": "setup_masking",
+            "config": config
+        })
+
+    def setupUpscale(self, config: dict):
+        config = self.procCfg.translateConfig(config, ["model_path"])
+        self._query({
+            "cmd": "setup_upscale",
+            "config": config
+        })
+
+
+    def _setup(self, config: dict, cmd: str, configKey: str):
+        msg = {
+            "cmd": cmd,
+            "config": config
+        }
+
+        try:
+            self._updateBackend(config, configKey)
+            future = ProcFuture()
+            self.queueWrite.emit(Service.ID.INFERENCE, msg, future)
+
+            if self.record:
+                self.recordedFutures.append(future)
+                return
+
+            future.result()
+        except:
+            self.stop()
+            raise
+
+    def _updateBackend(self, config: dict, configKey: str) -> None:
+        currentConfig: dict = self.currentConfigs[configKey]
+        diff = ( True for k, v in currentConfig.items() if config.get(k) != v )
+        if any(diff):
+            self.stop(wait=True)
+            self.start(wait=True)
+
+        # Remove sampling settings so they are not included in the check above
+        currentConfig = copy.deepcopy(config)
+        if Config.INFER_PRESET_SAMPLECFG_KEY in currentConfig:
+            del currentConfig[Config.INFER_PRESET_SAMPLECFG_KEY]
+        self.currentConfigs[configKey] = currentConfig
+
+
+    def clearImageCache(self):
+        self.queueWrite.emit(Service.ID.HOST, {
+            "cmd": "cache_clear"
+        }, None)
+
+    def cacheImage(self, imgPath: str, imgData: bytes, totalSize: int):
+        self.queueWrite.emit(Service.ID.HOST, {
+            "cmd": "cache_img",
+            "img": imgPath,
+            "img_data": imgData,
+            "size": totalSize
+        }, None)
+
+    def uncacheImage(self, imgPath: str):
+        self.queueWrite.emit(Service.ID.HOST, {
+            "cmd": "uncache_img",
+            "img": imgPath
+        }, None)
+
+
+    def caption(self, imgPath, prompts: list[Conversation], sysPrompt: str = None) -> dict[str, str]:
+        return self._queryKey("captions", {
+            "cmd": "caption",
+            "img": imgPath,
+            "prompts": PromptUtil.toTuples(prompts),
+            "sysPrompt": sysPrompt
+        })
+
+    def tag(self, imgPath) -> str:
+        return self._queryKey("tags", {
+            "cmd": "tag",
+            "img": imgPath
+        })
+
+    def answer(self, prompts: list[Conversation], sysPrompt: str = None) -> dict[str, str]:
+        return self._queryKey("answers", {
+            "cmd": "answer",
+            "prompts": PromptUtil.toTuples(prompts),
+            "sysPrompt": sysPrompt
+        })
+
+    def mask(self, config: dict, classes: list[str], imgPath: str) -> bytes:
+        config = self.procCfg.translateConfig(config, ["model_path"])
+        return self._queryKey("mask", {
+            "cmd": "mask",
+            "config": config,
+            "classes": classes,
+            "img": imgPath
+        })
+
+    def maskBoxes(self, config: dict, classes: list[str], imgPath: str) -> list[dict]:
+        config = self.procCfg.translateConfig(config, ["model_path"])
+        return self._queryKey("boxes", {
+            "cmd": "mask_boxes",
+            "config": config,
+            "classes": classes,
+            "img": imgPath
+        })
+
+    def getDetectClasses(self, config: dict) -> list[str]:
+        config = self.procCfg.translateConfig(config, ["model_path"])
+        return self._queryKey("classes", {
+            "cmd": "get_detect_classes",
+            "config": config
+        })
+
+    def upscaleImageFile(self, config: dict, imgPath: str) -> tuple[int, int, bytes]:
+        config = self.procCfg.translateConfig(config, ["model_path"])
+        answer = self._query({
+            "cmd": "imgfile_upscale",
+            "config": config,
+            "img": imgPath
+        })
+        return (answer["w"], answer["h"], answer["img"]) if answer else (0, 0, b"")
+
+    def upscaleImage(self, config: dict, imgData: bytes, w: int, h: int) -> tuple[int, int, bytes]:
+        # TODO: Compress images for remote hosts
+        config = self.procCfg.translateConfig(config, ["model_path"])
+        answer = self._query({
+            "cmd": "img_upscale",
+            "config": config,
+            "img_data": imgData,
+            "w": w,
+            "h": h
+        })
+        return (answer["w"], answer["h"], answer["img"]) if answer else (0, 0, b"")
+
+    def vaeRoundtrip(self, imgPath: str) -> tuple[int, int, bytes]:
+        answer = self._query({
+            "cmd": "vae_roundtrip",
+            "img": imgPath
+        })
+        return (answer["w"], answer["h"], answer["img"]) if answer else (0, 0, b"")
+
+    def countTokensWithBorders(self, config: dict, text: str) -> tuple[int, list[int]]:
+        answer = self._query({
+            "cmd": "token_count_borders",
+            "config": config,
+            "text": text
+        })
+        return answer["count"], answer["borders"]
+
+
+    def embedText(self, text: str) -> bytes:
+        return self._queryKey("embedding", {
+            "cmd": "embed_text",
+            "text": text
+        })
+
+    def embedImage(self, imgPath: str) -> bytes:
+        return self._queryKey("embedding", {
+            "cmd": "embed_img",
+            "img": imgPath
+        })
+
+    def embedImageBatch(self, imgPaths: list[str]) -> list[bytes]:
+        return self._queryKey("embeddings", {
+            "cmd": "embed_img_batch",
+            "imgs": imgPaths
+        })
+
+    def embeddingSimilarity(self, config: dict, imgPath: str, texts: list[str]) -> list[float]:
+        return self._queryKey("scores", {
+            "cmd": "embed_similarity",
+            "config": config,
+            "img": imgPath,
+            "texts": texts
+        })
+
+
+    def _query(self, msg: dict, serviceId=Service.ID.INFERENCE) -> dict[str, Any]:
+        future = ProcFuture()
+        self.queueWrite.emit(serviceId, msg, future)
+
+        if self.record:
+            self.recordedFutures.append(future)
+            return dict()
+
+        return future.result()
+
+    def _queryKey(self, returnKey: str, msg: dict) -> Any:
+        return self._query(msg).get(returnKey)
+
+
+    def _onProcessStarted(self, future: ProcFuture):
+        try:
+            future.result()
+            state = True
+        except:
+            state = False
+
+        with QMutexLocker(self._mutex):
+            self._ready = state
+            self.processReady.emit(self, state)
+
+    @Slot(int, QProcess.ExitStatus)
+    def _onProcessEnded(self, exitCode: int, exitStatus: QProcess.ExitStatus):
+        print(f"Inference process '{self.procCfg.hostName}' ended. Exit code: {exitCode}, {exitStatus}")
+
+        exception = InferenceException(self.procCfg.hostName, f"Process terminated")
+        for future in self._futures.values():
+            future.setException(exception)
+        self._futures = dict()
+
+        self.processEnded.emit(self)
+
+        with QMutexLocker(self._mutex):
+            try:
+                # Buffers still intact
+                self.proc.readAllStandardOutput()
+                self._onReadyReadError()
+            except:
+                pass
+            finally:
+                self.proc = None
+                self._ready = False
+
+
+    @Slot(int, dict, ProcFuture)
+    def _writeMessage(self, serviceId: int, msg: dict, future: ProcFuture | None):
+        reqId = self._nextReqId
+        self._nextReqId += 1
+
+        try:
+            data: bytes = msgpack.packb(msg)
+            header = struct.pack("!HII", serviceId, len(data), reqId)
+            self.proc.write(header)
+            self.proc.write(data)
+            self.proc.waitForBytesWritten(0) # Flush
+
+            if future:
+                self._futures[reqId] = future
+        except Exception as ex:
+            if future:
+                future.setException(ex)
+            else:
+                raise
+
+
+    @Slot()
+    def _onReadyRead(self):
+        while self.proc.bytesAvailable() > Protocol.HEADER_LENGTH:
+            reqId, msg = self._readMessage()
+            if reqId <= 0:
+                continue
+
+            if future := self._futures.pop(reqId, None):
+                if not msg:
+                    future.setException(InferenceException(self.procCfg.hostName, "Unknown error"))
+                elif error := msg.get("error"):
+                    future.setException(InferenceException(self.procCfg.hostName, error, msg.get("error_type", "Unknown Error Type")))
+                else:
+                    future.setResult(msg)
+            else:
+                content = (msg.get("cmd") or msg.get("error_type")) if msg else "Unknown"
+                print(f"[{self.procCfg.hostName}] WARNING: Message from inference process has no Future (Received: {content})")
+
+
+    def _readMessage(self) -> tuple[int, dict | None]:
+        # Handling of incomplete messages could also utilize QIODevice transactions
+        try:
+            # Start reading
+            if self._readLength == 0:
+                headerBuffer = self.proc.read(Protocol.HEADER_LENGTH)
+                srv, length, reqId = struct.unpack("!HII", headerBuffer.data())
+
+                if srv > Service.ID.INFERENCE and length > 0xFFFF:
+                    line = self.proc.readLine(16384)
+                    line = str(headerBuffer, "utf-8", "replace") + str(line, "utf-8", "replace")
+                    print(f"[{self.procCfg.hostName}] WARNING: Message looks like log output: '{line.strip()}'")
+                    return 0, None
+
+                buffer = self.proc.read(length)
+
+                if buffer.length() < length:
+                    self._readBuffer = buffer
+                    self._readReq = reqId
+                    self._readLength = length
+                    return 0, None
+
+            # Continue reading
+            else:
+                buffer = self.proc.read(self._readLength - self._readBuffer.length())
+                self._readBuffer.append(buffer)
+
+                if self._readBuffer.length() < self._readLength:
+                    return 0, None
+
+                buffer = self._readBuffer
+                reqId = self._readReq
+
+                self._readBuffer = None
+                self._readReq = 0
+                self._readLength = 0
+
+            return reqId, msgpack.unpackb(buffer.data())
+        except:
+            traceback.print_exc()
+            return 0, None
+
+
+    @Slot()
+    def _onReadyReadError(self):
+        data = self.proc.readAllStandardError()
+        if text := str(data, "utf-8", "replace").rstrip():
+            prefix = f"[{self.procCfg.hostName}] "
+            text = text.replace("\n", "\n" + prefix)
+            print(prefix + text)  # Print all lines in a single call to reduce interleaving

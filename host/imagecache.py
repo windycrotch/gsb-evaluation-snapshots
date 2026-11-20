@@ -1,0 +1,144 @@
+from __future__ import annotations
+import base64
+from typing import Callable, Iterable
+from io import BytesIO
+from lib import imagerw, videorw
+
+
+class ImageFile:
+    def __init__(self, file: str, data: bytearray | None = None):
+        self.file = file
+        self.data = data
+        self.size = 0
+        self._callbacks: list[Callable[[ImageFile], None]] | None = None
+
+
+    @staticmethod
+    def fromMsg(msg: dict):
+        file = msg["img"]
+        if data := msg.get("img_data"):
+            imgFile = ImageFile(file, data)
+            imgFile.size = len(data)
+            return imgFile
+
+        return ImageFile(file)
+
+
+    def addData(self, data: bytes, totalSize: int):
+        if self.data is None:
+            self.data = bytearray(totalSize)
+
+        end = self.size + len(data)
+        if end > len(self.data):
+            raise OverflowError("ImageCache size mismatch")
+
+        self.data[self.size:end] = data
+        self.size = end
+
+        if end >= len(self.data):
+            self._notifyComplete()
+
+
+    def isComplete(self) -> bool:
+        return (self.data is not None) and self.size >= len(self.data)
+
+    def addCompleteCallback(self, callback: Callable[[ImageFile], None]):
+        if self._callbacks is None:
+            self._callbacks = list()
+        self._callbacks.append(callback)
+
+    def _notifyComplete(self):
+        if not self._callbacks:
+            return
+        for cb in self._callbacks:
+            cb(self)
+        self._callbacks = None
+
+
+    def openCvMat(self, rgb=False, forceRGB=False, allowGreyscale=True, allowAlpha=True):
+        if self.data:
+            return imagerw.decodeMatBGR(self.data, rgb, forceRGB, allowGreyscale, allowAlpha)
+        return imagerw.loadMatBGR(self.file, rgb, forceRGB, allowGreyscale, allowAlpha)
+
+    def openPIL(self, forceRGB=False, allowGreyscale=True, allowAlpha=True):
+        source = BytesIO(self.data) if self.data else self.file
+        return imagerw.loadImagePIL(source, forceRGB, allowGreyscale, allowAlpha)
+
+
+    def _normalizeEncoding(self) -> tuple[bytes, str]:
+        # Always load image with PIL to convert format, apply sRGB color profile and exif rotation.
+        img = self.openPIL()
+        buffer = BytesIO()
+
+        if img.mode.upper().endswith("A"):
+            img.save(buffer, format='PNG', optimize=False, compress_level=0)
+            mimetype = "image/png"
+        else:
+            img.save(buffer, format='JPEG', optimize=False, quality=95)
+            mimetype = "image/jpeg"
+
+        return buffer.getvalue(), mimetype
+
+    def getEncodedBytes(self) -> bytes:
+        imgBytes, mimetype = self._normalizeEncoding()
+        return imgBytes
+
+    def getURI(self) -> str:
+        # URI could be f"file://{self.file}", but always load image with PIL to convert format
+        imgBytes, mimetype = self._normalizeEncoding()
+        base64Data = base64.b64encode(imgBytes).decode('utf-8')
+        return "".join(("data:", mimetype, ";base64,", base64Data))
+
+
+    def isVideo(self) -> bool:
+        return videorw.isVideoFile(self.file)
+
+    def getVideoFrames(self, sampleFps: float, maxFrames: int = 32):
+        source = BytesIO(self.data) if self.data else self.file
+        return videorw.extractFramesPIL(source, sampleFps, maxFrames)
+
+    def getVideoFramesCvMat(self, sampleFps: float, maxFrames: int, converterFactory: videorw.ConverterFactory):
+        source = BytesIO(self.data) if self.data else self.file
+        return videorw.extractFramesMat(source, sampleFps, maxFrames, converterFactory)
+
+
+    def getVideoFramesEncodedBytes(self, sampleFps: float, maxFrames: int = 32) -> Iterable[bytes]:
+        frames, metadata = self.getVideoFrames(sampleFps, maxFrames)
+        for frame in frames:
+            buffer = BytesIO()
+            frame.save(buffer, format='JPEG', optimize=False, quality=95)
+            yield buffer.getvalue()
+
+    def getVideoFramesURI(self, sampleFps: float, maxFrames: int = 32) -> list[str]:
+        uris = []
+        for frameBytes in self.getVideoFramesEncodedBytes(sampleFps, maxFrames):
+            base64Data = base64.b64encode(frameBytes).decode('utf-8')
+            uris.append("data:image/jpeg;base64," + base64Data)
+        return uris
+
+
+
+class ImageCache:
+    def __init__(self):
+        self.images: dict[str, ImageFile] = dict()
+        self.totalSize = 0
+
+    def recvImageData(self, file: str, data: bytes, totalSize: int):
+        imgFile = self.getImage(file)
+        imgFile.addData(data, totalSize)
+        self.totalSize += len(data)
+
+    def getImage(self, file: str) -> ImageFile:
+        imgFile = self.images.get(file)
+        if not imgFile:
+            self.images[file] = imgFile = ImageFile(file)
+        return imgFile
+
+    def releaseImage(self, file: str):
+        if imgFile := self.images.pop(file, None):
+            assert imgFile.data is not None
+            self.totalSize -= imgFile.size
+
+    def clear(self):
+        self.images.clear()
+        self.totalSize = 0

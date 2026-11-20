@@ -1,0 +1,18 @@
+# Image
+opencv-python-headless
+pillow
+pillow-jxl-plugin
+numpy
+
+# Video
+av
+
+# Inter-process communication
+msgpack
+
+# Misc
+typing-extensions
+tqdm
+
+# Setup
+wheel

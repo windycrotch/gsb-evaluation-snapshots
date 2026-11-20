@@ -1,0 +1,399 @@
+from typing import NamedTuple
+from typing_extensions import override
+from PySide6 import QtGui
+from PySide6.QtCore import Qt, Slot, Signal, QSignalBlocker, QTimer
+from PySide6.QtWidgets import QPlainTextEdit, QTextEdit, QFrame
+from lib import colorlib, qtlib, util
+from ui.autocomplete import TextEditCompleter, AutoCompleteSource
+
+
+class OccurrenceHighlightState(NamedTuple):
+    text: str
+    format: QtGui.QTextCharFormat
+
+
+class NavigationTextEdit(QPlainTextEdit):
+    WORD_SPLIT_TRANS = str.maketrans(",.:;-\t", "      ")
+
+    OCCURRENCE_FORMAT_WORD: QtGui.QTextCharFormat = None
+    OCCURRENCE_FORMAT_SEL: QtGui.QTextCharFormat  = None
+
+    def __init__(self, separator: str, autoCompleteSources: list[AutoCompleteSource] = []):
+        super().__init__()
+        self._sep = separator
+
+        self.completer = TextEditCompleter(self, autoCompleteSources, separator) if autoCompleteSources else None
+
+        if NavigationTextEdit.OCCURRENCE_FORMAT_WORD is None:
+            self._initFormat()
+
+        self.textChanged.connect(self._resetOccurrenceHighlight)
+        self.selectionChanged.connect(self._highlightOccurrences)
+        self.cursorPositionChanged.connect(self._highlightOccurrences)
+
+        self._highlightState = OccurrenceHighlightState("", self.OCCURRENCE_FORMAT_WORD)
+
+    def _initFormat(self):
+        palette = self.palette()
+        color = palette.color(palette.ColorRole.Highlight).toHsv()
+        h, s, v = color.hueF(), color.saturationF(), color.valueF()
+        color.setHsvF(h, s*0.8, v)
+        color.setAlphaF(0.33)
+
+        NavigationTextEdit.OCCURRENCE_FORMAT_SEL = QtGui.QTextCharFormat()
+        NavigationTextEdit.OCCURRENCE_FORMAT_SEL.setBackground(color)
+
+        color.setHsvF(h, s*0.5, v)
+        color.setAlphaF(0.2)
+        NavigationTextEdit.OCCURRENCE_FORMAT_WORD = QtGui.QTextCharFormat()
+        NavigationTextEdit.OCCURRENCE_FORMAT_WORD.setBackground(color)
+
+
+    @Slot()
+    def _resetOccurrenceHighlight(self):
+        self._highlightState = OccurrenceHighlightState("", self.OCCURRENCE_FORMAT_WORD)
+
+    @Slot()
+    def _highlightOccurrences(self):
+        if text := self.textCursor().selectedText():
+            format = self.OCCURRENCE_FORMAT_SEL
+        else:
+            text = self.getSelectedWord()
+            format = self.OCCURRENCE_FORMAT_WORD
+
+        state = OccurrenceHighlightState(text, format)
+        if state == self._highlightState:
+            return
+        self._highlightState = state
+
+        # U+2029 is Qt's paragraph separator
+        if len(text) < 2 or "\u2029" in text:
+            self.setExtraSelections([])
+            return
+
+        doc = self.document()
+        cursor = QtGui.QTextCursor(doc)
+
+        selections: list[QTextEdit.ExtraSelection] = []
+        while not (cursor := doc.find(text, cursor)).isNull():
+            sel = QTextEdit.ExtraSelection()
+            sel.cursor = cursor
+            sel.format = format
+            selections.append(sel)
+
+        if len(selections) < 2:
+            selections.clear()
+
+        self.setExtraSelections(selections)
+
+
+    def getCaption(self) -> str:
+        return self.toPlainText()
+
+    def setCaption(self, text: str):
+        cursor = self.textCursor()
+        qtlib.setTextPreserveUndo(cursor, text)
+
+
+    @property
+    def separator(self) -> str:
+        return self._sep
+
+    @separator.setter
+    def separator(self, separator: str):
+        self._sep = separator
+        if self.completer:
+            self.completer.separator = separator
+
+
+    def rstripCaption(self) -> str:
+        "Strips comma and space characters from the end and sets the stripped text as new caption. Returns the stripped text."
+
+        # Strip trailing separators that were added with autocomplete. Only strip space and comma.
+        # Keep other separators (e.g. points) that end sentences.
+        # Keep newlines/empty lines that are intentionally used as caption dropout in txt files.
+        text = self.getCaption()
+        textStrip = text.rstrip(", ")
+        if len(textStrip) < len(text):
+            self.setCaption(textStrip)
+
+        return textStrip
+
+
+    def appendToCaption(self, text: str):
+        caption = self.toPlainText()
+        if caption:
+            caption += self._sep
+        caption += text
+
+        self.setCaption(caption)
+
+    def removeCaption(self, index: int):
+        text = self.toPlainText()
+        sepStrip = self._sep.strip()
+        captions = (c.strip() for i, c in enumerate(text.split(sepStrip)) if i != index)
+        self.setCaption( self._sep.join(captions) )
+
+
+    def getSelectedCaption(self) -> str:
+        text = self.toPlainText()
+        cursorPos = self.textCursor().position()
+        return self.getCaptionAtCharPos(text, self._sep, cursorPos)[0]
+
+    def getSelectedCaptionIndex(self) -> int:
+        text = self.toPlainText()
+        cursorPos = self.textCursor().position()
+        return self.getCaptionAtCharPos(text, self._sep, cursorPos)[1]
+
+    @staticmethod
+    def getCaptionAtCharPos(text: str, separator: str, charPos: int) -> tuple[str, int]:
+        sepStrip = separator.strip()
+        accumulatedLength = 0
+        for i, caption in enumerate(text.split(sepStrip)):
+            accumulatedLength += len(caption) + len(sepStrip)
+            if charPos < accumulatedLength:
+                return caption.strip(), i
+
+        return "", -1
+
+    def getSelectedWord(self) -> str:
+        cursor = self.textCursor()
+        pos = cursor.positionInBlock()
+        text = cursor.block().text().translate(self.WORD_SPLIT_TRANS)
+
+        accumulatedLength = 0
+        for word in text.split(" "):
+            accumulatedLength += len(word) + 1
+            if pos < accumulatedLength:
+                return word
+
+        return ""
+
+
+    def selectCaption(self, index: int):
+        self.setFocus()
+        text = self.toPlainText()
+        sepStrip, sepSpaceL, sepSpaceR = util.stripCountPadding(self._sep)
+
+        splitCaptions = text.split(sepStrip)
+        if index < 0 or index >= len(splitCaptions):
+            return
+
+        caption = splitCaptions[index]
+        capStrip, capSpaceL, capSpaceR = util.stripCountPadding(caption)
+        offsetL = min(capSpaceL, sepSpaceR) if index > 0 else 0
+        offsetR = min(capSpaceR, sepSpaceL) if index < len(splitCaptions)-1 else 0
+
+        start = end = sum( len(splitCaptions[i])+len(sepStrip) for i in range(index) )
+        start += offsetL
+        end   += len(caption) - offsetR
+
+        cursor = self.textCursor()
+        cursor.setPosition(end, QtGui.QTextCursor.MoveMode.MoveAnchor)
+        cursor.setPosition(start, QtGui.QTextCursor.MoveMode.KeepAnchor)
+        self.setTextCursor(cursor)
+
+    def moveCaptionSelection(self, offset: int, offsetLine: int):
+        cursor = self.textCursor()
+        if offsetLine != 0:
+            moveLineDir = QtGui.QTextCursor.MoveOperation.Up if offsetLine < 0 else QtGui.QTextCursor.MoveOperation.Down
+            cursor.movePosition(moveLineDir, QtGui.QTextCursor.MoveMode.MoveAnchor)
+
+        index = self.getCaptionAtCharPos(self.toPlainText(), self._sep, cursor.position())[1]
+        index = max(0, index+offset)
+        self.selectCaption(index)
+
+    def removeSelectedCaption(self):
+        cursor = self.textCursor()
+        index = self.getCaptionAtCharPos(self.toPlainText(), self._sep, cursor.position())[1]
+        self.removeCaption(index)
+
+        # Set cursor to start of next caption
+        self.selectCaption(index)
+        cursor = self.textCursor()
+        cursor.setPosition(cursor.selectionStart())
+        self.setTextCursor(cursor)
+
+
+    @override
+    def keyPressEvent(self, event: QtGui.QKeyEvent):
+        if event.modifiers() & Qt.KeyboardModifier.AltModifier:
+            move = None
+            match event.key():
+                case Qt.Key.Key_Alt:    move = (0, 0)
+                case Qt.Key.Key_Left:   move = (-1, 0)
+                case Qt.Key.Key_Right:  move = (1, 0)
+                case Qt.Key.Key_Up:     move = (0, -1)
+                case Qt.Key.Key_Down:   move = (0, 1)
+
+                case Qt.Key.Key_Delete:
+                    self.removeSelectedCaption()
+                    move = (0, 0)
+
+            if move is not None:
+                event.accept()
+                self.moveCaptionSelection(move[0], move[1])
+
+                if self.completer and sum(move):
+                    self.completer.hide()
+                return
+
+        if self.completer:
+            self.completer.handleKeyPress(event, super().keyPressEvent)
+        else:
+            super().keyPressEvent(event)
+
+    @override
+    def dropEvent(self, event: QtGui.QDropEvent):
+        with QSignalBlocker(self):
+            super().dropEvent(event)
+
+        # Don't remove buttons from CaptionControlGroup
+        event.setDropAction(Qt.DropAction.CopyAction)
+
+        # Postpone updates when dropping so they don't interfere with ongoing drag operations in ReorderWidget.
+        # But don't postpone normal updates to prevent flickering.
+        QTimer.singleShot(0, self.textChanged.emit)
+
+
+
+class CaptionTextEdit(NavigationTextEdit):
+    LINE_COLOR = "#B0FF1616"
+    LINE_WIDTH = 2.0
+
+    captionReplaced = Signal()
+    focusChanged = Signal()
+
+    def __init__(self, context: 'CaptionContext', autoCompleteSources: list[AutoCompleteSource] = []):
+        super().__init__(context.settings.separator, autoCompleteSources)
+        from .caption_context import CaptionContext
+        self.ctx: CaptionContext = context
+        self.ctx.separatorChanged.connect(self._onSeparatorChanged)
+
+        self._verticalLinePos: list[int] | None = None
+        self._penLine = QtGui.QPen(self.LINE_COLOR)
+        self._penLine.setWidthF(self.LINE_WIDTH)
+
+        # When a character is removed by typing, it will repaint this widget with the shorter text before new line indexes arrive.
+        # Clear the lines because their indexes could be out of bounds.
+        self.textChanged.connect(self._clearVerticalLines)
+
+
+    @override
+    def setCaption(self, text: str):
+        self.captionReplaced.emit()
+        self._verticalLinePos = None
+        super().setCaption(text)
+
+
+    @override
+    @Slot(str)
+    def appendToCaption(self, text: str):
+        super().appendToCaption(text)
+        self.ctx.needsRulesApplied.emit()
+
+    def toggleCaption(self, caption: str, removeWords: set[str] | None):
+        caption = caption.strip()
+        captions = []
+        removed = False
+
+        text = self.toPlainText()
+        if text:
+            for current in text.split(self._sep.strip()):
+                current = current.strip()
+                if caption == current:
+                    removed = True
+                    continue
+
+                elif removeWords:
+                    currentWords = current.split(" ")
+                    currentMatchSplit = self.ctx.highlight.matchNode.split(currentWords)
+                    if caption in currentMatchSplit:
+                        current = " ".join(word for word in currentWords if (word not in removeWords))
+                        removed = True
+
+                captions.append(current)
+
+        if not removed:
+            captions.append(caption)
+
+        self.setCaption( self._sep.join(captions) )
+        self.ctx.needsRulesApplied.emit()
+
+
+    @Slot(str)
+    def _onSeparatorChanged(self, separator: str):
+        self.separator = separator  # Set via property
+
+
+    @override
+    def focusInEvent(self, event: QtGui.QFocusEvent):
+        super().focusInEvent(event)
+        self.focusChanged.emit()
+
+    @override
+    def focusOutEvent(self, event: QtGui.QFocusEvent):
+        super().focusOutEvent(event)
+        self.focusChanged.emit()
+
+
+    def setVerticalLines(self, linePos: list[int] | None):
+        self._verticalLinePos = linePos
+        self.viewport().update()
+
+    @Slot()
+    def _clearVerticalLines(self):
+        self._verticalLinePos = None
+
+
+    @override
+    def paintEvent(self, e: QtGui.QPaintEvent):
+        if self._verticalLinePos:
+            painter = QtGui.QPainter(self.viewport())
+            painter.setPen(self._penLine)
+            cursor = self.textCursor()
+
+            for pos in self._verticalLinePos:
+                cursor.setPosition(pos)
+                rect = self.cursorRect(cursor)
+                x  = rect.x() + 1
+                y0 = rect.y() + 2
+                y1 = rect.y() + rect.height() - 2
+                painter.drawLine(x, y0, x, y1)
+
+        # Call parent method last: Text cursor must be drawn on top of lines.
+        super().paintEvent(e)
+
+
+
+class BorderlessNavigationTextEdit(NavigationTextEdit):
+    PALETTE_ORIG:   QtGui.QPalette = None
+    PALETTE_ACTIVE: QtGui.QPalette = None
+
+    def __init__(self, separator: str, autoCompleteSources: list[AutoCompleteSource] = []):
+        super().__init__(separator, autoCompleteSources)
+        self.setFrameStyle(QFrame.Shape.NoFrame)
+
+        if not BorderlessNavigationTextEdit.PALETTE_ORIG:
+            self._initPalettes()
+
+    def _initPalettes(self):
+        BorderlessNavigationTextEdit.PALETTE_ORIG = self.palette()
+
+        palette = self.palette()
+        bgColor = palette.color(QtGui.QPalette.ColorRole.Base).toHsv()
+        h, s, v = bgColor.hueF(), bgColor.saturationF(), bgColor.valueF()
+
+        if v < 0.1:
+            v += 0.04
+        elif v < 0.15:
+            v *= 0.5
+        else:
+            v *= 0.87 if colorlib.DARK_THEME else 0.92
+
+        bgColor.setHsvF(h, s, v)
+        palette.setColor(QtGui.QPalette.ColorRole.Base, bgColor)
+        BorderlessNavigationTextEdit.PALETTE_ACTIVE = palette
+
+    def setActivePalette(self, active: bool):
+        self.setPalette(self.PALETTE_ACTIVE if active else self.PALETTE_ORIG)

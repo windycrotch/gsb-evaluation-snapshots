@@ -1,0 +1,33 @@
+# Inference
+transformers<5.0
+diffusers
+accelerate
+
+# Quantization
+bitsandbytes
+
+# llama-cpp-python
+diskcache
+
+# onnxruntime
+# The version of onnxruntime/onnxruntime-gpu is selected in main_setup.py
+# and depends on user input.
+flatbuffers
+
+# InternVL2
+sentencepiece
+
+# YOLO
+ultralytics
+onnx
+
+# BriaAI RMBG
+kornia
+
+# InSPyReNet rembg
+# Breaks setup on Python 3.14
+transparent-background; python_version < "3.14"
+
+# Image Upscaling
+spandrel
+spandrel_extra_arches

@@ -1,0 +1,478 @@
+import locale, os
+from typing_extensions import override
+from PySide6 import QtWidgets, QtGui
+from PySide6.QtCore import Qt, Slot, QSignalBlocker, QTimer
+from lib import colorlib, qtlib
+from lib.captionfile import FileTypeSelector
+from ui.tab import ImgTab
+from ui.autocomplete import AutoCompleteSource, getAutoCompleteSource
+from config import Config
+from .gallery_caption import GalleryCaption
+from .gallery_model import GalleryModel, HeaderItem
+from .gallery_view import GalleryView
+from .gallery_sort import GallerySortControl
+
+
+class Gallery(QtWidgets.QWidget):
+    THUMBNAIL_SIZE_STEP = 50
+
+    def __init__(self, tab: ImgTab):
+        super().__init__()
+        self.tab = tab
+
+        self._switchingMode = False
+
+        # Initialize grid after delay: Wait for the window width to calculate column count
+        self._initTimer = QTimer(singleShot=True, interval=1)
+        self._initTimer.timeout.connect(self._initGrid)
+
+        self._gridUpdateTimer = QTimer(singleShot=True, interval=100)
+        self._gridUpdateTimer.timeout.connect(self.updateGrid)
+
+        self.captionSrc = FileTypeSelector()
+        self.galleryCaption = GalleryCaption(self.captionSrc)
+
+        self.galleryModel: GalleryModel = GalleryModel(tab.filelist, self.galleryCaption)
+        self.galleryView: GalleryView = GalleryView(tab, self.galleryCaption, Config.galleryThumbnailSize)
+        self.galleryView.verticalScrollBar().setStyleSheet(colorlib.scrollbarStyle())
+        self.galleryView.verticalScrollBar().valueChanged.connect(self.updateComboboxFolder)
+        self.galleryView.setModel(self.galleryModel)
+
+        self.sortControl = GallerySortControl(self.tab)
+        self.sortControl.sortDone.connect(self.galleryModel.updateGrid)
+        self.galleryView.sortByImages.connect(self.sortControl.updateSortByImage)
+
+        layout = QtWidgets.QVBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addLayout(self._buildTopRow())
+        layout.addWidget(self.galleryView)
+        layout.addWidget(self.sortControl)
+        self.setLayout(layout)
+
+        self._buildStatusBar()
+
+
+    @override
+    def deleteLater(self):
+        self.galleryView.deleteLater()
+        self.galleryModel.deleteLater()
+        super().deleteLater()
+
+
+    @Slot()
+    def _initGrid(self):
+        self._initTimer.timeout.disconnect()
+        self._initTimer.deleteLater()
+        self._initTimer = None
+
+        self.galleryView.setViewMode(self.cboViewMode.currentData())
+
+        # Register model before self: Build grid before jumping to selected file
+        filelist = self.tab.filelist
+        filelist.addListener(self.galleryModel)
+        filelist.addDataListener(self.galleryModel)
+        filelist.addSelectionListener(self.galleryModel)
+
+        filelist.addListener(self)
+        filelist.addSelectionListener(self)
+
+        self.galleryModel.headersUpdated.connect(self.onHeadersUpdated)
+        self.galleryModel.reloadImages()
+
+        self.ensureVisible(filelist.currentFile)
+
+
+    def _buildTopRow(self):
+        layout = QtWidgets.QHBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self.cboFolders = qtlib.MenuComboBox("Folders", menuClass=ClickableSubMenu)
+        self.cboFolders.setMinimumWidth(100)
+        self.cboFolders.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Preferred)
+        self.cboFolders.currentIndexChanged.connect(self.onFolderSelected)
+        qtlib.setMonospace(self.cboFolders)
+        layout.addWidget(self.cboFolders, 1)
+
+        layout.addSpacing(6)
+
+        self.chkCaptions = QtWidgets.QCheckBox("Captions:")
+        self.chkCaptions.toggled.connect(self.onCaptionsToggled)
+        layout.addWidget(self.chkCaptions)
+
+        self.captionSrc.setEnabled(False)
+        self.captionSrc.fileTypeUpdated.connect(self.onCaptionSourceChanged)
+        layout.addLayout(self.captionSrc)
+
+        layout.addSpacing(2)
+
+        self.chkFilterCaptions = QtWidgets.QCheckBox("Filter")
+        self.chkFilterCaptions.setToolTip("Show only tags from visible groups and apply rules from Caption Window")
+        self.chkFilterCaptions.setEnabled(False)
+        self.chkFilterCaptions.toggled.connect(self.onCaptionFilterToggled)
+        layout.addWidget(self.chkFilterCaptions)
+
+        self.btnReloadCaptions = qtlib.SaveButton("↻")
+        self.btnReloadCaptions.setToolTip("Reload Captions")
+        self.btnReloadCaptions.setEnabled(False)
+        self.btnReloadCaptions.setFixedWidth(30)
+        self.btnReloadCaptions.clicked.connect(lambda: self.reloadCaptions(clearDocs=True))
+        layout.addWidget(self.btnReloadCaptions)
+
+        return layout
+
+
+    def _buildStatusBar(self):
+        self.statusBar = QtWidgets.QStatusBar()
+
+        self.chkFollowSelection = QtWidgets.QCheckBox("Follow Selection")
+        self.chkFollowSelection.setChecked(True)
+        self.chkFollowSelection.toggled.connect(self.onFollowSelectionToggled)
+        self.statusBar.addPermanentWidget(self.chkFollowSelection)
+
+        self.statusBar.addPermanentWidget(self._buildThumbnailSize())
+        self.statusBar.addPermanentWidget(self.sortControl.btnSort)
+
+        self.cboViewMode = QtWidgets.QComboBox()
+        self.cboViewMode.addItem("▦ Grid View", GalleryView.VIEW_MODE_GRID)
+        self.cboViewMode.addItem("▤ List View", GalleryView.VIEW_MODE_LIST)
+        self.cboViewMode.currentIndexChanged.connect(self.onViewModeChanged)
+        self.statusBar.addPermanentWidget(self.cboViewMode)
+
+    def _buildThumbnailSize(self):
+        layout = QtWidgets.QHBoxLayout()
+        layout.setContentsMargins(6, 0, 6, 0)
+        layout.addWidget(QtWidgets.QLabel("Thumbnail Size:"))
+
+        self.slideThumbnailSize = QtWidgets.QSlider(Qt.Orientation.Horizontal)
+        self.slideThumbnailSize.setRange(100, 400)
+        self.slideThumbnailSize.setTickPosition(QtWidgets.QSlider.TickPosition.TicksAbove)
+        self.slideThumbnailSize.setTickInterval(self.THUMBNAIL_SIZE_STEP * 2)
+        self.slideThumbnailSize.setSingleStep(self.THUMBNAIL_SIZE_STEP)
+        self.slideThumbnailSize.setPageStep(self.THUMBNAIL_SIZE_STEP)
+        self.slideThumbnailSize.setTracking(False) # TODO: Still snap to steps
+        self.slideThumbnailSize.setFixedWidth(120)
+        self.slideThumbnailSize.setValue(Config.galleryThumbnailSize)
+        self.slideThumbnailSize.valueChanged.connect(self.onThumbnailSizeChanged)
+        layout.addWidget(self.slideThumbnailSize)
+
+        self.lblThumbnailSize = QtWidgets.QLabel(str(Config.galleryThumbnailSize))
+        self.lblThumbnailSize.setFixedWidth(30)
+        layout.addWidget(self.lblThumbnailSize)
+
+        widget = QtWidgets.QWidget()
+        widget.setLayout(layout)
+        widget.setSizePolicy(QtWidgets.QSizePolicy.Policy.Maximum, QtWidgets.QSizePolicy.Policy.Maximum)
+        return widget
+
+
+    @Slot(bool)
+    def onCaptionsToggled(self, state: bool):
+        self.galleryCaption.captionsEnabled = state
+
+        self.captionSrc.setEnabled(state)
+        self.btnReloadCaptions.setEnabled(state)
+        self.chkFilterCaptions.setEnabled(state and self.isGridView)
+
+        if state:
+            self.btnReloadCaptions.setChanged(True)
+        elif not self._switchingMode:
+            self.reloadCaptions(clearDocs=True)
+
+    @Slot(bool)
+    def onCaptionFilterToggled(self, state: bool):
+        if self.isGridView:
+            self.reloadCaptions(clearDocs=False)
+
+    @Slot()
+    def onCaptionSourceChanged(self):
+        self.btnReloadCaptions.setChanged(True)
+
+    def reloadCaptions(self, clearDocs: bool, modelReset: bool = True):
+        self._updateCaptionContext()
+        self.btnReloadCaptions.setChanged(False)
+        self.galleryModel.resetCaptions(clearDocs=clearDocs, modelReset=modelReset)
+
+    def _updateCaptionContext(self):
+        cap = self.galleryCaption
+        cap.filterNode     = None
+        cap.rulesProcessor = None
+        cap.autoCompleteSources = []
+
+        if captionWin := self.tab.getWindowContent("caption"):
+            from caption.caption_context import CaptionContext
+            captionCtx: CaptionContext = captionWin.ctx
+            cap.captionHighlight = captionCtx.highlight
+            cap.separator        = captionCtx.settings.separator
+
+            cap.autoCompleteSources = captionCtx.getAutoCompleteSources()
+
+            if self.chkFilterCaptions.isChecked():
+                cap.filterNode      = captionCtx.groups.getGalleryFilterNode()
+                cap.rulesProcessor  = captionCtx.rulesProcessor()
+
+        elif not self.isGridView:
+            cap.autoCompleteSources.append(getAutoCompleteSource(AutoCompleteSource.Type.Csv))
+
+    def onCaptionFilterUpdated(self):
+        'Called from Caption Window'
+        if self.chkCaptions.isChecked():
+            self.reloadCaptions(clearDocs=False)
+
+
+    @property
+    def isGridView(self) -> bool:
+        return self.cboViewMode.currentData() == GalleryView.VIEW_MODE_GRID
+
+    @Slot(int)
+    def onViewModeChanged(self, index: int):
+        mode = self.cboViewMode.itemData(index)
+        if mode == GalleryView.VIEW_MODE_LIST:
+            self.chkFilterCaptions.setChecked(False)
+            self.chkFilterCaptions.setEnabled(False)
+
+            self.chkCaptions.setChecked(True)
+            self.chkCaptions.setEnabled(False)
+        else:
+            try:
+                self._switchingMode = True
+                self.chkCaptions.setChecked(False)
+                self.chkCaptions.setEnabled(True)
+            finally:
+                self._switchingMode = False
+
+        self.reloadCaptions(clearDocs=True, modelReset=False)
+        self.galleryView.setViewMode(mode)
+        self.ensureVisible(self.tab.filelist.currentFile)
+
+
+    @Slot(bool)
+    def onFollowSelectionToggled(self, state: bool):
+        if state:
+            self.ensureVisible(self.tab.filelist.currentFile)
+
+    @Slot(int)
+    def onThumbnailSizeChanged(self, size: int):
+        size = round(size / self.THUMBNAIL_SIZE_STEP) * self.THUMBNAIL_SIZE_STEP
+        with QSignalBlocker(self.slideThumbnailSize):
+            self.slideThumbnailSize.setValue(size)
+
+        Config.galleryThumbnailSize = size
+        self.lblThumbnailSize.setText(f"{size}")
+        self.galleryView.setItemWidth(size)
+        self.ensureVisible(self.tab.filelist.currentFile)
+
+    @Slot()
+    def updateStatusBar(self):
+        filelist = self.tab.filelist
+
+        numFiles   = filelist.getNumFiles()
+        numFolders = self.cboFolders.count()
+        strFiles   = "File" if numFiles == 1 else "Files"
+        strFolders = "Folder" if numFolders == 1 else "Folders"
+        text = locale.format_string("%d %s in %d %s", (numFiles, strFiles, numFolders, strFolders), grouping=True)
+
+        msgs = list[str]()
+        if numSelectedFiles := len(filelist.selectedFiles):
+            msgs.append(f"{numSelectedFiles} Selected")
+        if self.galleryModel.numHighlighted:
+            msgs.append(f"{self.galleryModel.numHighlighted} Highlighted")
+        if filelist.isLoading():
+            msgs.append("Loading")
+
+        if msgs:
+            msgs = ", ".join(msgs)
+            text += f"  ({msgs})"
+
+        self.statusBar.showMessage(text)
+
+
+    @override
+    def resizeEvent(self, event: QtGui.QResizeEvent):
+        if self._initTimer:
+            self._initTimer.start()
+        else:
+            self.galleryView.setResizing(True)
+            self._gridUpdateTimer.start()
+
+        event.accept()
+
+    @Slot()
+    def updateGrid(self):
+        self.galleryView.setResizing(False)
+
+
+    @Slot(list)
+    def onHeadersUpdated(self, headers: list[HeaderItem]):
+        filelist = self.tab.filelist
+        subfolderThreshold = 2 if len(headers) > 30 else 10
+
+        root = MenuFolder()
+        for header in headers:
+            path = filelist.removeCommonRoot(header.path)
+            root.addFolder(path, header.row)
+
+        with QSignalBlocker(self.cboFolders):
+            self.cboFolders.clear()
+            root.buildMenu(self.cboFolders, subfolderThreshold)
+
+        self.updateComboboxFolder()
+        self.updateStatusBar()
+        self.galleryView.setFocus()
+
+        self.sortControl.setSortAvailable(not filelist.isLoading())
+
+
+    @Slot(int)
+    def onFolderSelected(self, index: int):
+        row = self.cboFolders.itemData(index)
+        if row is not None:
+            self.galleryView.scrollToRow(row)
+
+    @Slot()
+    def updateComboboxFolder(self):
+        row = self.galleryView.rowAt(0)
+        index = self.galleryModel.headerIndexForRow(row)
+
+        with QSignalBlocker(self.cboFolders):
+            self.cboFolders.setCurrentIndex(index)
+
+    @Slot(str, bool)
+    def ensureVisible(self, file: str, delay: bool = False):
+        if delay:
+            QTimer.singleShot(400, lambda: self.ensureVisible(file, False))
+            return
+
+        if self.chkFollowSelection.isChecked():
+            self.galleryView.scrollToFile(file)
+
+
+    def onFileChanged(self, currentFile: str):
+        self.ensureVisible(currentFile)
+
+    def onFileListChanged(self, currentFile: str):
+        self.ensureVisible(currentFile)
+
+    def onFileSelectionChanged(self, selectedFiles: set[str]):
+        self.updateStatusBar()
+
+
+    def highlightFiles(self, files: list[str], tag: str, color: str | None):
+        # NOTE: Repaint of changed cells happens on next update cycle, so this works. But when implementing new state updates,
+        #       they might need to happen before calling 'galleryModel.highlightFiles()', because it emits 'dataChanged' signals synchronously.
+        if self.galleryModel.highlightFiles(files):
+            delegate = self.galleryView.delegate
+            delegate.highlightState.update(tag, color, delegate.thumbnailWidth())
+            self.updateStatusBar()
+
+
+
+class MenuFolder:
+    def __init__(self, name: str = ""):
+        self.name = name
+        self.path = ""
+        self.row = -1
+        self.subfolders = dict[str, MenuFolder]()
+
+    def addFolder(self, path: str, row: int):
+        folder = self
+        for part in path.split(os.sep):
+            subfolder = folder.subfolders.get(part)
+            if subfolder is None:
+                folder.subfolders[part] = subfolder = MenuFolder(part)
+            folder = subfolder
+
+        folder.path = path
+        folder.row = row
+
+
+    def buildMenu(self, cbo: qtlib.MenuComboBox, subfolderThreshold: int):
+        for subfolder in self.subfolders.values():
+            subfolder._buildMenu(cbo, subfolderThreshold, cbo.menu, "")
+
+    def _buildMenu(self, cbo: qtlib.MenuComboBox, subfolderThreshold: int, menu: QtWidgets.QMenu, prefix: str):
+        # Accumulate prefix text on each level. Reset when adding a submenu.
+        prefix = f"{prefix}{os.sep}{self.name}" if prefix else self.name
+
+        if len(self.subfolders) >= subfolderThreshold:
+            menu = cbo.addSubmenu(prefix, menu)
+            prefix = ""
+
+        if self.row >= 0:
+            actionText = prefix or "."
+            cbo.addSubmenuItem(menu, self.path, "", self.row, actionText)
+
+        for subfolder in self.subfolders.values():
+            subfolder._buildMenu(cbo, subfolderThreshold, menu, prefix)
+
+
+
+class ClickableSubMenu(QtWidgets.QMenu):
+    """
+    Clicking on a submenu will trigger the first non-menu child action.
+    The top menu itself needs to be a ClickableSubMenu to correctly handle mouse events,
+    as open submenus would otherwise grab mouse events.
+    """
+
+    def __init__(self, title: str, parent=None):
+        super().__init__(title, parent)
+        qtlib.setMonospace(self)
+        self.setStyleSheet("QMenu {menu-scrollable: 1}")
+
+    @override
+    def keyPressEvent(self, event: QtGui.QKeyEvent):
+        if event.key() == Qt.Key.Key_Return and self._subactionTrigger(self.activeAction()):
+            event.accept()
+            return
+
+        super().keyPressEvent(event)
+
+    @override
+    def mousePressEvent(self, event: QtGui.QMouseEvent):
+        if self._subactionTrigger( self.actionAt(event.pos()) ):
+            event.accept()
+            return
+
+        super().mousePressEvent(event)
+
+    @override
+    def wheelEvent(self, event: QtGui.QWheelEvent):
+        containsMouse = self.rect().contains( self.mapFromGlobal(event.globalPosition().toPoint()) )
+        if not containsMouse and (parent := self.parent()) and isinstance(parent, ClickableSubMenu):
+            parent.wheelEvent(event)
+        else:
+            # Close submenu so a parent can handle scrolling
+            action = self.activeAction()
+            if action and (menu := action.menu()) and isinstance(menu, ClickableSubMenu):
+                menu.close()
+
+            super().wheelEvent(event)
+
+
+    def _subactionTrigger(self, action: QtGui.QAction):
+        if action and (menu := action.menu()):
+            if act := self._getFirstSubAction(menu):
+                act.trigger()
+                self._closeTopMenu()
+
+            return True
+
+        return False
+
+    @classmethod
+    def _getFirstSubAction(cls, menu: QtWidgets.QMenu):
+        for act in menu.actions():
+            if act.isSeparator() or not act.isEnabled():
+                continue
+            if submenu := act.menu():
+                if subact := cls._getFirstSubAction(submenu):
+                    return subact
+            else:
+                return act
+        return None
+
+    def _closeTopMenu(self):
+        current = self
+        while (parent := current.parent()) and isinstance(parent, ClickableSubMenu):
+            current = parent
+        current.close()

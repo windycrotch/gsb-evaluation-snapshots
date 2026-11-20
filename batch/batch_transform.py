@@ -1,0 +1,257 @@
+from typing import Callable
+from PySide6 import QtWidgets
+from PySide6.QtCore import Qt, Slot
+from config import Config
+from infer.backend_config import BackendsLLM
+from infer.inference_proc import InferenceProcess
+from infer.inference_settings import InferencePresetWidget, RemoteInferenceConfig
+from infer.prompt import PromptWidget
+from infer.prompt_struct import Conversation, PromptUtil
+from lib import colorlib, qtlib
+from lib.captionfile import CaptionFile, FileTypeSelector
+from lib.template_parser import TemplateVariableParser
+from lib.cascade import CascadeUpdate
+from ui.tab import ImgTab
+from .batch_task import BatchInferenceTask, BatchTaskHandler
+from .batch_log import BatchLog
+
+
+TRANSFORM_OVERWRITE_MODE_ALL     = "all"
+TRANSFORM_OVERWRITE_MODE_MISSING = "missing"
+
+
+class BatchTransform(QtWidgets.QWidget):
+    def __init__(self, tab: ImgTab, logWidget: BatchLog, bars):
+        super().__init__()
+        self.tab = tab
+        self.logWidget = logWidget
+        self.taskHandler = BatchTaskHandler("Transform", bars, tab.filelist, self.getConfirmOps, self.createTask)
+
+        self.inferSettings = InferencePresetWidget("inferLLMPresets", BackendsLLM)
+
+        layout = QtWidgets.QVBoxLayout()
+        layout.addWidget(self._buildLLMSettings())
+        layout.addLayout(self.taskHandler.startButtonLayout)
+        self.setLayout(layout)
+
+
+    def _buildLLMSettings(self):
+        layout = QtWidgets.QGridLayout()
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        layout.setColumnMinimumWidth(0, Config.batchWinLegendWidth)
+        layout.setColumnStretch(4, 1)
+
+        row = 0
+        self.promptWidget = PromptWidget("promptLLMPresets", "promptLLMDefault", self.tab.templateAutoCompleteSources)
+        qtlib.setTextEditHeight(self.promptWidget.txtSystemPrompt, 5, "min")
+        qtlib.setTextEditHeight(self.promptWidget.txtPrompts, 5, "min")
+        qtlib.setTextEditHeight(self.promptWidget.txtPreview, 5, "min")
+        self.promptWidget.connectDefaultPreviewUpdate()
+        self.promptWidget.refreshPreviewClicked.connect(self.refreshPreview)
+        layout.addWidget(self.promptWidget, row, 0, 1, 5)
+        layout.setRowStretch(row, 1)
+
+        row += 1
+        self.chkStripAround = QtWidgets.QCheckBox("Surrounding whitespace")
+        self.chkStripAround.setChecked(True)
+        self.chkStripAround.checkStateChanged.connect(self._updateParser)
+
+        self.chkStripMulti = QtWidgets.QCheckBox("Repeating whitespace")
+        self.chkStripMulti.setChecked(False)
+        self.chkStripMulti.checkStateChanged.connect(self._updateParser)
+
+        layout.addWidget(QtWidgets.QLabel("Strip:"), row, 0)
+        layout.addWidget(self.chkStripAround, row, 1)
+        layout.addWidget(self.chkStripMulti, row, 2)
+
+        row += 1
+        self.destSelector = FileTypeSelector(defaultValue="refined")
+        self.destSelector.setFixedType(FileTypeSelector.TYPE_CAPTIONS)
+        layout.addWidget(QtWidgets.QLabel("Default storage key:"), row, 0)
+        layout.addLayout(self.destSelector, row, 1)
+
+        self.cboOverwriteMode = QtWidgets.QComboBox()
+        self.cboOverwriteMode.addItem("Overwrite all keys", TRANSFORM_OVERWRITE_MODE_ALL)
+        self.cboOverwriteMode.addItem("Only write missing keys", TRANSFORM_OVERWRITE_MODE_MISSING)
+        layout.addWidget(self.cboOverwriteMode, row, 2)
+
+        self.chkStorePrompts = QtWidgets.QCheckBox("Store Prompts")
+        layout.addWidget(self.chkStorePrompts, row, 3)
+
+        self.chkCascade = QtWidgets.QCheckBox("Cascade Updates")
+        self.chkCascade.setChecked(True)
+        layout.addWidget(self.chkCascade, row, 4)
+
+        row += 1
+        self.spinRounds = QtWidgets.QSpinBox()
+        self.spinRounds.setRange(1, 100)
+        self.spinRounds.setValue(1)
+        layout.addWidget(QtWidgets.QLabel("Rounds:"), row, 0)
+        layout.addWidget(self.spinRounds, row, 1)
+
+        row += 1
+        layout.addWidget(self.inferSettings, row, 0, 1, 5)
+
+        groupBox = QtWidgets.QGroupBox("Transform Captions with LLM")
+        groupBox.setLayout(layout)
+        return groupBox
+
+
+    def onFileChanged(self, currentFile):
+        self.promptWidget.parser.setup(currentFile)
+        self._updateParser()
+
+    @Slot()
+    def refreshPreview(self):
+        self.onFileChanged(self.tab.filelist.getCurrentFile())
+
+    @Slot()
+    def _updateParser(self):
+        self.promptWidget.parser.stripAround = self.chkStripAround.isChecked()
+        self.promptWidget.parser.stripMultiWhitespace = self.chkStripMulti.isChecked()
+        self.promptWidget.updatePreview()
+
+
+    def getConfirmOps(self) -> tuple[list[str], bool]:
+        ops = [f"Use '{self.inferSettings.getSelectedPresetName()}' to transform Captions"]
+
+        targetName = self.destSelector.name.strip()
+        targetKey = f"captions.{targetName}"
+        targetText = f"Write the Captions to .json files [{targetKey}]"
+        if self.cboOverwriteMode.currentData() == TRANSFORM_OVERWRITE_MODE_MISSING:
+            targetText += " if the key doesn't exist"
+        else:
+            targetText = colorlib.htmlRed(targetText + " and overwrite the content!")
+        ops.append(targetText)
+
+        if self.chkStorePrompts.isChecked():
+            ops.append(f"Store the prompt in [prompts.{targetName}]")
+
+        if self.spinRounds.value() > 1:
+            ops.append(f"Do {self.spinRounds.value()} rounds of transformations")
+
+        if self.chkCascade.isChecked():
+            ops.append(colorlib.htmlRed(f'Cascade and update all content that depends on written caption keys!'))
+
+
+        return ops, True
+
+
+    def createTask(self, files: list[str]) -> BatchInferenceTask:
+        storeName = self.destSelector.name.strip()
+        rounds = self.spinRounds.value()
+        prompts = self.promptWidget.getParsedPrompts(storeName, rounds)
+
+        log = self.logWidget.addEntry("Transform", BatchLog.GROUP_CAPTION)
+        configs = self.inferSettings.getRemoteInferenceConfig()
+        task = BatchTransformTask(log, files, configs)
+        task.prompts = prompts
+        task.systemPrompt = self.promptWidget.systemPrompt.strip()
+
+        task.overwriteMode   = self.cboOverwriteMode.currentData()
+        task.storePrompts    = self.chkStorePrompts.isChecked()
+        task.cascadeEnabled  = self.chkCascade.isChecked()
+        task.stripAround     = self.chkStripAround.isChecked()
+        task.stripMulti      = self.chkStripMulti.isChecked()
+        return task
+
+
+
+class BatchTransformTask(BatchInferenceTask):
+    def __init__(self, log, files, configs: RemoteInferenceConfig):
+        super().__init__("transform", log, files)
+        self.prompts: list[Conversation]        = None
+        self.systemPrompt: str                  = None
+        self.configs                            = configs
+
+        self.overwriteMode: str                 = TRANSFORM_OVERWRITE_MODE_ALL
+        self.storePrompts: bool                 = False
+        self.stripAround: bool                  = True
+        self.stripMulti: bool                   = False
+
+        self.varParser: TemplateVariableParser  = None
+        self.writeKeys: set[str]                = None
+
+        self.cascadeEnabled: bool               = False
+        self.cascade = CascadeUpdate()
+        self.cascade.enableCache()
+
+
+    def runPrepare(self, proc: InferenceProcess):
+        self.signals.progressMessage.emit("Loading LLM ...")
+        proc.setupLLM(self.configs.getHostConfig(proc.procCfg.hostName))
+
+        self.writeKeys = set(info.name for info in PromptUtil.filter(self.prompts, lambda info: not info.hidden))
+
+        self.varParser = TemplateVariableParser()
+        self.varParser.stripAround = self.stripAround
+        self.varParser.stripMultiWhitespace = self.stripMulti
+
+
+    def runCheckFile(self, imgFile: str, proc: InferenceProcess) -> Callable | None:
+        captionFile = CaptionFile(imgFile)
+        if not captionFile.loadFromJson():
+            self.log(f"WARNING: Couldn't read captions from {captionFile.jsonPath}")
+            return None
+
+        if not self.check(captionFile):
+            return None
+
+        prompts = PromptUtil.parsePrompts(self.varParser, imgFile, captionFile, self.prompts)
+        def queue():
+            proc.answer(prompts, self.systemPrompt)
+        return queue
+
+    def check(self, captionFile: CaptionFile) -> set:
+        writeKeys = set(self.writeKeys)
+        if self.overwriteMode == TRANSFORM_OVERWRITE_MODE_MISSING:
+            writeKeys.difference_update(captionFile.captions.keys())
+        return writeKeys
+
+
+    def runProcessFile(self, imgFile: str, results: list) -> str | None:
+        if not results:
+            return None
+
+        captionFile = CaptionFile(imgFile)
+        if not captionFile.loadFromJson():
+            self.log(f"WARNING: Couldn't read captions from {captionFile.jsonPath}")
+            return None
+
+        writeKeys = self.check(captionFile)
+        if not writeKeys:
+            return None
+
+        answers = results[0].get("answers")
+        if self.storeAnswers(imgFile, captionFile, writeKeys, answers):
+            captionFile.saveToJson()
+            return captionFile.jsonPath
+        return None
+
+
+    def storeAnswers(self, imgFile: str, captionFile: CaptionFile, writeKeys: set, answers: dict[str, str]) -> bool:
+        if not answers:
+            self.log(f"WARNING: No captions returned for {imgFile}, skipping")
+            return False
+
+        prompts = PromptUtil.parsePrompts(self.varParser, imgFile, captionFile, self.prompts)
+
+        changed = False
+        for name, caption in answers.items():
+            if not caption:
+                self.log(f"WARNING: Generated caption '{name}' is empty for {imgFile}, skipping key")
+                continue
+            if name not in writeKeys:
+                continue
+
+            captionFile.addCaption(name, caption)
+            changed = True
+
+            if self.cascadeEnabled:
+                self.cascade.saveCascade(imgFile, captionFile, FileTypeSelector.TYPE_CAPTIONS, name)
+
+            if self.storePrompts:
+                if info := PromptUtil.firstMatch(prompts, lambda info: info.name == name):
+                    captionFile.addPrompt(name, info.promptWithPrefill)
+
+        return changed
