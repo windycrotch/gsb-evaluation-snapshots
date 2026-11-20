@@ -47,9 +47,20 @@ export interface HttpResourceOptions extends HttpRequestOptions, RetryOptions {
  * The server must answer `Range` requests with 206 and, for cross-origin use, send CORS headers
  * that expose `Content-Range`; both are hard requirements of playing a remote recording and are
  * reported with distinct error codes.
+ *
+ * An answer of another version than the first one's seals the resource: the answer in hand and
+ * every request still running end at once, and from then on neither a range read nor a size
+ * lookup returns anything, however often asked, until the caller reloads it. The old and the new
+ * recording's bytes must never be put together.
  */
 export class HttpResource {
-  private readonly options: HttpRequestOptions;
+  private readonly baseOptions: HttpRequestOptions;
+  /**
+   * The load signal the host gave at construction, if any: it ends every generation beside the
+   * generation's own signal.
+   */
+  private readonly hostSignal: AbortSignal | undefined;
+  private options: HttpRequestOptions;
   private readonly retryDelaysMs: readonly number[];
   private sizePromise: Promise<number> | undefined;
   /**
@@ -60,6 +71,16 @@ export class HttpResource {
   private version: RecordingVersion | undefined;
   private readonly now: () => number;
   private shortestAnswerMs: number | undefined;
+  /**
+   * Ends every request of the current generation. A replacement aborts the generation and seals
+   * the resource; a reload opens a new one.
+   */
+  private loadEnded = new AbortController();
+  /**
+   * The URL's recording was replaced while it played. While set, the resource answers no read and
+   * no size lookup, each with `source-changed`, until it is reloaded.
+   */
+  private changed = false;
 
   /**
    * `signal` ends every request made for the resource, with the host's own `requestInit` signal.
@@ -69,7 +90,9 @@ export class HttpResource {
     options: HttpResourceOptions = {},
     signal?: AbortSignal,
   ) {
-    this.options = signal ? withAbortSignal(options, signal) : options;
+    this.baseOptions = options;
+    this.hostSignal = signal;
+    this.options = this.buildOptions();
     this.retryDelaysMs = options.retryDelaysMs ?? DEFAULT_RETRY_DELAYS_MS;
     this.now = options.now ?? ((): number => performance.now());
   }
@@ -87,11 +110,39 @@ export class HttpResource {
   }
 
   /**
+   * Whether an answer has shown the recording at the URL replaced while it played. A sealed
+   * resource serves no bytes and no size until `reload`.
+   */
+  public hasSourceChanged(): boolean {
+    return this.changed;
+  }
+
+  /**
+   * Opens a new generation after a replacement: the sealing and every learned answer are
+   * forgotten, the requests of the old generation, waits included, are ended, and the first
+   * answer to come fixes the version afresh. Nothing but an explicit reload unseals the resource.
+   */
+  public reload(): void {
+    this.changed = false;
+    this.version = undefined;
+    this.sizePromise = undefined;
+    this.hasReadRange = false;
+    this.shortestAnswerMs = undefined;
+    const ended = this.loadEnded;
+    this.loadEnded = new AbortController();
+    this.options = this.buildOptions();
+    ended.abort();
+  }
+
+  /**
    * One HEAD request (or a one-byte range where HEAD is refused or gives no length), each asked
    * for again as a range is while it fails on the way (ADR 0019); cached for the lifetime of the
-   * resource once it succeeded; a failed lookup is retried on the next call.
+   * generation once it succeeded; a failed lookup is retried on the next call. A resource sealed
+   * by a replacement answers none of this: the cached length is the old recording's and must not
+   * plan a single range of the new one.
    */
   public size(): Promise<number> {
+    if (this.changed) return Promise.reject(this.changedError());
     this.sizePromise ??= this.rememberSize();
     return this.sizePromise;
   }
@@ -108,10 +159,19 @@ export class HttpResource {
    * Runs `attempt`, and after a short wait again, a few times, while it fails on the way: one
    * dropped connection must not end a long playback, nor a server's 5xx or its 429 asking the
    * player to slow down. What asking again cannot change (an abort, any other refusal, a server
-   * ignoring ranges, CORS) fails at once.
+   * ignoring ranges, CORS) fails at once. A replacement found meanwhile fails every attempt and
+   * every wait at once with `source-changed`: it is not a failure on the way, and is never retried.
    */
-  public askingAgain<T>(attempt: () => Promise<T>): Promise<T> {
-    return askingAgain(attempt, this.retryDelaysMs, this.options.requestInit?.signal);
+  public async askingAgain<T>(attempt: () => Promise<T>): Promise<T> {
+    try {
+      return await askingAgain(
+        () => this.attemptUnlessChanged(attempt),
+        this.retryDelaysMs,
+        this.options.requestInit?.signal,
+      );
+    } catch (error) {
+      throw this.afterChange(error);
+    }
   }
 
   /**
@@ -119,11 +179,12 @@ export class HttpResource {
    * amounts to. `signal` ends this request alone.
    */
   public async rangeAnswer(range: ByteRange, signal?: AbortSignal): Promise<Response> {
+    this.ensureReadable();
     const options = signal ? withAbortSignal(this.options, signal) : this.options;
     const response = await this.requestRange(range, options);
     if (response.status !== HTTP_PARTIAL_CONTENT) {
       discardBody(response);
-      throw this.refusalOf(response.status);
+      throw this.afterChange(this.refusalOf(response.status));
     }
     this.hasReadRange = true;
     this.ensureUnchanged(response);
@@ -132,17 +193,16 @@ export class HttpResource {
 
   /**
    * Every answer is of the version the first one told of: bytes of a recording replaced while it
-   * plays must not be put together with the old ones'.
+   * plays must not be put together with the old ones'. Finding another version seals the resource
+   * and ends its whole generation.
    */
   private ensureUnchanged(response: Response): void {
     const seen = versionOf(response);
     this.version ??= seen;
     if (isSameVersion(this.version, seen)) return;
     discardBody(response);
-    throw new GyroViewError(
-      'source-changed',
-      `${this.url} was replaced while it played; load it again`,
-    );
+    this.seal();
+    throw this.changedError();
   }
 
   /**
@@ -159,7 +219,9 @@ export class HttpResource {
           : httpRequest(this.url, { method: 'GET', headers }, options),
       );
     } catch (error) {
-      throw this.hasReadRange ? this.passingOnceAnswered(error) : passingIfUnreachable(error);
+      throw this.afterChange(
+        this.hasReadRange ? this.passingOnceAnswered(error) : passingIfUnreachable(error),
+      );
     }
   }
 
@@ -188,7 +250,7 @@ export class HttpResource {
       return await this.fetchSize();
     } catch (error) {
       this.sizePromise = undefined;
-      throw error;
+      throw this.afterChange(error);
     }
   }
 
@@ -270,12 +332,19 @@ export class HttpResource {
    * the first thing read, and a moment's 503 or a phone changing cells must not fail the
    * recording.
    */
-  private sizeAnswer(method: HttpMethod, headers?: Record<string, string>): Promise<Response> {
-    return answerAskedAgain(
-      () => this.request(method, headers),
-      this.retryDelaysMs,
-      this.options.requestInit?.signal,
-    );
+  private async sizeAnswer(
+    method: HttpMethod,
+    headers?: Record<string, string>,
+  ): Promise<Response> {
+    try {
+      return await answerAskedAgain(
+        () => this.request(method, headers),
+        this.retryDelaysMs,
+        this.options.requestInit?.signal,
+      );
+    } catch (error) {
+      throw this.afterChange(error);
+    }
   }
 
   private request(method: HttpMethod, headers?: Record<string, string>): Promise<Response> {
@@ -295,5 +364,63 @@ export class HttpResource {
     const waitMs = this.now() - askedAt;
     this.shortestAnswerMs = Math.min(waitMs, this.shortestAnswerMs ?? waitMs);
     return response;
+  }
+
+  /**
+   * The settings every request of this generation carries: the generation's own end signal and
+   * the host's signals, so aborting the generation reaches every request and every wait at once.
+   * Each combined controller takes its listeners along when it aborts, so a generation leaves
+   * none on a long-lived host signal.
+   */
+  private buildOptions(): HttpRequestOptions {
+    const signalled = withAbortSignal(this.baseOptions, this.loadEnded.signal);
+    return this.hostSignal ? withAbortSignal(signalled, this.hostSignal) : signalled;
+  }
+
+  /**
+   * An attempt made only while the resource is still of its first version. A sealed resource
+   * fails it at once, without a request, so asking again can neither fetch bytes nor spend waits
+   * on a recording that was replaced.
+   */
+  private async attemptUnlessChanged<T>(attempt: () => Promise<T>): Promise<T> {
+    this.ensureReadable();
+    try {
+      return await attempt();
+    } catch (error) {
+      throw this.afterChange(error);
+    }
+  }
+
+  private ensureReadable(): void {
+    if (this.changed) throw this.changedError();
+  }
+
+  /**
+   * While the resource is sealed, whatever a request reports of its end names the replacement:
+   * the generation's own abort, a body broken off by it, a refusal an answer came back with.
+   * Before a replacement, every error passes on unchanged, an abort among them.
+   */
+  private afterChange(error: unknown): unknown {
+    if (!this.changed) return error;
+    return hasErrorCode(error, 'source-changed') ? error : this.changedError(error);
+  }
+
+  /**
+   * Seals the resource and ends every request and wait of the generation in flight, so no old
+   * byte and no old length can be answered any more.
+   */
+  private seal(): void {
+    if (this.changed) return;
+    this.changed = true;
+    this.sizePromise = undefined;
+    this.loadEnded.abort(this.changedError());
+  }
+
+  private changedError(cause?: unknown): GyroViewError {
+    return new GyroViewError(
+      'source-changed',
+      `${this.url} was replaced while it played; load it again`,
+      cause === undefined ? undefined : { cause },
+    );
   }
 }

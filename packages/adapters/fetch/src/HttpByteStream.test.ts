@@ -77,6 +77,24 @@ describeByteStreamContract('over HTTP', async (bytes) => {
   return streamOf(server.url);
 });
 
+/**
+ * Replaces the server's recording once the first byte range has been answered, so its version is
+ * the one the stream fixed on: the resume that follows reads from the new recording.
+ */
+function replacedAfterFirstRange(
+  server: TestServer,
+  validators: Parameters<TestServer['replace']>[1],
+): typeof fetch {
+  return async (input, init) => {
+    const response = await fetch(input, init);
+    if (init?.method === 'GET' && response.status === 206) {
+      const ranges = server.requests.filter((request) => request.method === 'GET').length;
+      if (ranges === 1) server.replace(new Uint8Array(100), validators);
+    }
+    return response;
+  };
+}
+
 describe('HttpByteStream', () => {
   it('hands each chunk on as it comes, before the range has all come', async () => {
     const server = await serve(BODY, SLOW);
@@ -204,5 +222,143 @@ describe('HttpByteStream', () => {
     await expect(bytesOf(stream, ByteRange.of(10, 10))).rejects.toMatchObject({
       code: 'source-changed',
     });
+  });
+
+  it('reports source-changed, not source-unreadable, when a resume after a break meets the replacement', async () => {
+    const server = await serve(BODY, {
+      breaksOffRanges: 1,
+      validators: { etag: '"v1"' },
+    });
+    const fetching = replacedAfterFirstRange(server, { etag: '"v2"' });
+    const stream = streamOf(server.url, { fetch: fetching, retryDelaysMs: NO_WAIT });
+
+    await expect(bytesOf(stream, ByteRange.of(0, 100))).rejects.toMatchObject({
+      code: 'source-changed',
+      message: `${server.url} was replaced while it played; load it again`,
+    });
+    // The first range broke off, its resume alone met the replacement: no retry on source-changed.
+    expect(rangesAskedOf(server)).toEqual(['bytes=0-99', 'bytes=50-99']);
+  });
+
+  it('reports source-changed when a resume after a stall meets the replacement, without retrying', async () => {
+    const server = await serve(BODY, {
+      stallsRanges: 1,
+      validators: { etag: '"v1"' },
+    });
+    const fetching = replacedAfterFirstRange(server, { etag: '"v2"' });
+    const stream = streamOf(
+      server.url,
+      { fetch: fetching, retryDelaysMs: NO_WAIT },
+      { stallTimeoutMs: 100 },
+    );
+
+    await expect(bytesOf(stream, ByteRange.of(0, 100))).rejects.toMatchObject({
+      code: 'source-changed',
+    });
+    expect(rangesAskedOf(server)).toEqual(['bytes=0-99', 'bytes=50-99']);
+  });
+
+  it('answers neither a byte nor the old size once sealed, until the resource is reloaded', async () => {
+    const server = await serve(BODY, {
+      validators: { lastModified: 'Wed, 30 Sep 2026 10:00:00 GMT' },
+    });
+    const resource = new HttpResource(server.url);
+    const stream = new HttpByteStream(resource);
+    await expect(resource.size()).resolves.toBe(BODY.byteLength);
+    await bytesOf(stream, ByteRange.of(0, 10));
+    const requestsAtChange = server.requests.length;
+    server.replace(
+      Uint8Array.from({ length: 250 }, () => 1),
+      {
+        lastModified: 'Thu, 01 Oct 2026 10:00:00 GMT',
+      },
+    );
+
+    await expect(bytesOf(stream, ByteRange.of(10, 10))).rejects.toMatchObject({
+      code: 'source-changed',
+    });
+    await expect(resource.size()).rejects.toMatchObject({ code: 'source-changed' });
+    await expect(bytesOf(stream, ByteRange.of(20, 10))).rejects.toMatchObject({
+      code: 'source-changed',
+    });
+    expect(server.requests.length).toBe(requestsAtChange + 1);
+
+    resource.reload();
+    await expect(resource.size()).resolves.toBe(250);
+    await expect(bytesOf(stream, ByteRange.of(0, 10))).resolves.toEqual(
+      Array.from({ length: 10 }, () => 1),
+    );
+  });
+
+  it('resumes a range that broke off when only the network blinked and the version held', async () => {
+    const server = await serve(BODY, {
+      breaksOffRanges: 1,
+      validators: { etag: '"v1"' },
+    });
+    const stream = streamOf(server.url, { retryDelaysMs: NO_WAIT });
+
+    await expect(bytesOf(stream, ByteRange.of(0, 100))).resolves.toEqual([...BODY]);
+    expect(rangesAskedOf(server)).toEqual(['bytes=0-99', 'bytes=50-99']);
+  });
+
+  it('resumes a stalled range once the network carries bytes again, the version held', async () => {
+    const server = await serve(BODY, {
+      stallsRanges: 1,
+      validators: { etag: '"v1"' },
+    });
+    const stream = streamOf(server.url, { retryDelaysMs: NO_WAIT }, { stallTimeoutMs: 100 });
+
+    await expect(bytesOf(stream, ByteRange.of(0, 100))).resolves.toEqual([...BODY]);
+    expect(rangesAskedOf(server)).toEqual(['bytes=0-99', 'bytes=50-99']);
+  });
+
+  it('aborts the in-flight request and starts nothing new when a read is given up after a break', async () => {
+    const server = await serve(BODY, {
+      breaksOffRanges: 1,
+      validators: { etag: '"v1"' },
+    });
+    // The resume after the break is answered but its body is held open, so the read is still in
+    // flight when it is given up; the stream's abort closes the held body.
+    let ranges = 0;
+    const holdingResume: typeof fetch = async (input, init) => {
+      if (init?.method === 'GET') ranges += 1;
+      const response = await fetch(input, init);
+      if (init?.method !== 'GET') return response;
+      if (ranges !== 2) return response;
+      const signal = init.signal;
+      const held = new ReadableStream<Uint8Array>({
+        start(controller): void {
+          signal?.addEventListener(
+            'abort',
+            () => {
+              controller.error(signal.reason);
+            },
+            { once: true },
+          );
+        },
+      });
+      return new Response(held, {
+        status: 206,
+        headers: { 'Content-Range': 'bytes 50-99/100' },
+      });
+    };
+    const stream = streamOf(server.url, { fetch: holdingResume, retryDelaysMs: NO_WAIT });
+    const chunks = stream.stream(ByteRange.of(0, 100))[Symbol.asyncIterator]();
+    await chunks.next();
+    // The first body broke off after half its bytes; the next read asks for the rest and waits.
+    const readingOn = chunks.next();
+    await expect.poll(() => rangesAskedOf(server)).toEqual(['bytes=0-99', 'bytes=50-99']);
+    const requestsOnReturn = server.requests.length;
+
+    // Giving up aborts the request for the rest and starts nothing afterwards.
+    await expect(chunks.return?.()).resolves.toMatchObject({ done: true });
+    await expect(readingOn).resolves.toMatchObject({ done: true });
+    await new Promise((resolve) => {
+      setTimeout(resolve, 50);
+    });
+    // No third request follows the aborted resume, and the aborted signal ended the held body.
+    expect(rangesAskedOf(server)).toEqual(['bytes=0-99', 'bytes=50-99']);
+    expect(server.requests.length).toBe(requestsOnReturn);
+    await expect(chunks.next()).resolves.toMatchObject({ done: true });
   });
 });
