@@ -113,13 +113,16 @@ export interface TranscodeInput {
   inputArgs?: string[];
   /** Fails when ffmpeg has produced nothing by then (a live input that never starts). */
   firstBytesMs?: number;
+  /** Aborted when the listener goes away: ffmpeg is killed and a piped upstream released. */
+  signal?: AbortSignal;
 }
 
 /**
  * Transcodes `input` (a file, an address ffmpeg reads itself, or a stream piped to it)
  * on the fly. Resolves once ffmpeg has produced its first bytes, so a failing encoder
  * becomes an error response rather than an empty 200. The process is killed via `kill`
- * (e.g. when the client disconnects).
+ * (e.g. when the client disconnects), and also automatically when `signal` aborts —
+ * including while the first bytes are still being awaited, when nothing else could kill it.
  */
 export async function transcode(
   ffmpeg: string,
@@ -165,6 +168,13 @@ export async function transcode(
     console.warn(`ffmpeg: ${d.toString().trim()}`);
   });
   const kill = () => proc.kill("SIGKILL");
+  // The listener going away reaps the process at once, however far startup has got.
+  const onAbort = () => kill();
+  if (opts.signal) {
+    if (opts.signal.aborted) kill();
+    else opts.signal.addEventListener("abort", onAbort, { once: true });
+    proc.once("close", () => opts.signal?.removeEventListener("abort", onAbort));
+  }
   await new Promise<void>((resolve, reject) => {
     let timer: NodeJS.Timeout | undefined;
     const cleanup = () => {

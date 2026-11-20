@@ -15,9 +15,10 @@ import type { Db } from "../db.ts";
 import type { Fetch } from "../history/scrobbler.ts";
 import { HttpError, notFound } from "../http/contract.ts";
 import { transcode, TranscodeError } from "../stream/stream.ts";
-import { connect, liveAudio, StationUnavailable } from "./live.ts";
+import { connect, liveAudio, StationUnavailable, type LiveRetry } from "./live.ts";
 import { fetchFollowing, Refused } from "./net.ts";
 import { DirectoryUnavailable, RadioDirectory, type StationQuery, type StationRecord } from "./directory.ts";
+import { StationSession } from "./session.ts";
 
 const LOGO_MAX_BYTES = 2 << 20;
 /** Logos are kept at this size and scaled down from it. */
@@ -87,19 +88,31 @@ export class Radio {
   readonly #logoFailed = new Map<string, number>();
   readonly #logoLoading = new Map<string, Promise<string | null>>();
   readonly #ffmpeg: string;
-  /** Per station being listened to: how many streams, and the song it last said was playing. */
-  readonly #live = new Map<string, { listeners: number; title: string | null }>();
+  /**
+   * Per station being listened to: its shared, recyclable connection/title state. The
+   * object outlives short gaps between listeners (so it can be reattached to) and is
+   * removed only once its last connection's stream has fully closed.
+   */
+  readonly #live = new Map<string, StationSession>();
   readonly #clicked = new Map<string, number>();
+  readonly #liveRetry: LiveRetry;
 
   constructor(
     db: Db,
-    opts: { userAgent: string; dataDir: string; ffmpeg: string; fetch?: Fetch | undefined },
+    opts: {
+      userAgent: string;
+      dataDir: string;
+      ffmpeg: string;
+      fetch?: Fetch | undefined;
+      liveRetry?: LiveRetry;
+    },
   ) {
     this.#db = db;
     this.#ffmpeg = opts.ffmpeg;
     this.#userAgent = opts.userAgent;
     this.#fetch = opts.fetch ?? ((url, init) => fetch(url, init));
     this.#logoDir = join(opts.dataDir, "radio-logos");
+    this.#liveRetry = opts.liveRetry ?? {};
     this.directory = new RadioDirectory({ userAgent: opts.userAgent, fetch: opts.fetch });
   }
 
@@ -243,6 +256,11 @@ export class Radio {
   /**
    * A station's live audio for the caller, until `signal` aborts (the player goes away).
    * Resolves once the audio is coming, so a station that's down is an error response.
+   *
+   * Each caller keeps its own connection and upstream, but shares the station's
+   * {@link StationSession}: the title and listener count are aggregated, the title is
+   * forgotten only when the last caller leaves, and this connection's teardown (its
+   * ffmpeg process and upstream stream) always runs exactly once.
    */
   async stream(
     userId: string,
@@ -269,19 +287,34 @@ export class Radio {
     };
     const upstream = await connect(this.#fetch, station.streamUrl, opts).catch(failed);
 
-    const live = this.#live.get(station.id) ?? { listeners: 0, title: null };
-    live.listeners++;
-    this.#live.set(station.id, live);
+    const session = this.#live.get(station.id) ?? new StationSession();
+    this.#live.set(station.id, session);
+    const connectionId = session.attach();
     let ended = false;
+    let killTranscoder: (() => void) | null = null;
+    // Drops the registry entry once this station has no attached listener left. Guarded
+    // by identity so a session created for a later listener is never removed by an old
+    // connection whose output stream is still closing.
+    const reapIfEmpty = () => {
+      if (session.listenerCount === 0 && this.#live.get(station.id) === session) {
+        this.#live.delete(station.id);
+      }
+    };
     const end = () => {
       if (ended) return;
       ended = true;
-      if (--live.listeners === 0) this.#live.delete(station.id);
+      // Reap this connection's own process and upstream, whatever stage startup reached.
+      killTranscoder?.();
+      // Detach at once: the count drops and, on the last listener, the title is cleared
+      // synchronously before any new listener can read or attach to it.
+      session.detach(connectionId);
+      reapIfEmpty();
     };
+    // A detached (gone or superseded) connection can no longer move the shared title.
+    const onTitle = (title: string | null) => session.setTitle(connectionId, title);
+    // The player going away tears this connection down at once; the stream's own close
+    // handles the station giving up. `end` is idempotent, so both can fire.
     signal.addEventListener("abort", end, { once: true });
-    const onTitle = (title: string | null) => {
-      live.title = title;
-    };
 
     try {
       let result: { stream: Readable; mime: string };
@@ -291,24 +324,28 @@ export class Radio {
           () => connect(this.#fetch, station.streamUrl, opts),
           signal,
           onTitle,
+          this.#liveRetry,
         );
         if (upstream.codec && query.direct.includes(upstream.codec)) {
           result = { stream: audio, mime: upstream.mime };
         } else {
           const t = await transcode(this.#ffmpeg, audio, query.format, query.bitrate, undefined, {
             firstBytesMs: FIRST_AUDIO_MS,
+            signal,
           });
-          signal.addEventListener("abort", t.kill, { once: true });
+          killTranscoder = t.kill;
           result = { stream: t.stream, mime: t.mime };
         }
       } else {
         const t = await transcode(this.#ffmpeg, upstream.url, query.format, query.bitrate, undefined, {
           inputArgs: [...FFMPEG_LIVE_INPUT, "-user_agent", this.#userAgent],
           firstBytesMs: FIRST_AUDIO_MS,
+          signal,
         });
-        signal.addEventListener("abort", t.kill, { once: true });
+        killTranscoder = t.kill;
         result = { stream: t.stream, mime: t.mime };
       }
+      // The stream ending on its own (the station gave up) tears the connection down too.
       result.stream.once("close", end);
       this.#click(userId, station);
       return result;

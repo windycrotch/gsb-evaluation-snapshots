@@ -186,6 +186,13 @@ const RECONNECTS = 5;
 /** Data that counts as the stream working again (resets the reconnect count). */
 const HEALTHY_BYTES = 256 << 10;
 
+export interface LiveRetry {
+  /** Times in a row a dropped stream is reconnected, before giving up. */
+  maxReconnects?: number;
+  /** The first wait between attempts; each one doubles (exponential backoff). */
+  baseDelayMs?: number;
+}
+
 /**
  * The audio of a fetched stream as one endless stream: when the station drops the
  * connection, it's reconnected (a few times, waiting longer each time) and the audio
@@ -196,7 +203,10 @@ export function liveAudio(
   reconnect: () => Promise<Upstream>,
   signal: AbortSignal,
   onTitle: (title: string | null) => void,
+  retry: LiveRetry = {},
 ): Readable {
+  const maxReconnects = retry.maxReconnects ?? RECONNECTS;
+  const baseDelayMs = retry.baseDelayMs ?? 1000;
   async function* audio(): AsyncGenerator<Uint8Array> {
     let current: Upstream | null = first;
     let failures = 0;
@@ -215,8 +225,8 @@ export function liveAudio(
           // Dropped: reconnected below.
         }
       }
-      if (signal.aborted || ++failures > RECONNECTS) return;
-      await new Promise((r) => setTimeout(r, 1000 * 2 ** (failures - 1)));
+      if (signal.aborted || ++failures > maxReconnects) return;
+      await new Promise((r) => setTimeout(r, baseDelayMs * 2 ** (failures - 1)));
       if (signal.aborted) return;
       current = await reconnect().catch(() => null);
       // Reconnected to something that isn't this kind of stream any more: stop rather than mix.

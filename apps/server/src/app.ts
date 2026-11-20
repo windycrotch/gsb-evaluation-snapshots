@@ -42,7 +42,15 @@ import {
 
 export const SERVER_VERSION = "0.7.0";
 
-export async function buildApp(config: Config, opts: { logger?: boolean; fetch?: Fetch } = {}) {
+export async function buildApp(
+  config: Config,
+  opts: {
+    logger?: boolean;
+    fetch?: Fetch;
+    /** Test only: speed up a live stream's reconnect backoff. */
+    liveRetry?: { maxReconnects?: number; baseDelayMs?: number };
+  } = {},
+) {
   mkdirSync(config.dataDir, { recursive: true });
   const db = openDb(join(config.dataDir, "library.db"));
   const artwork = new ArtworkStore(db, config.dataDir);
@@ -95,6 +103,7 @@ export async function buildApp(config: Config, opts: { logger?: boolean; fetch?:
     dataDir: config.dataDir,
     ffmpeg: config.ffmpeg,
     fetch: opts.fetch,
+    liveRetry: opts.liveRetry,
   });
   /**
    * Where a track's audio comes from when not this computer's file: a server's track, or
