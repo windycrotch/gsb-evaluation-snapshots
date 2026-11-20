@@ -34,10 +34,19 @@ export async function loadSog(model: SplatModel) {
 
             const datas = new Uint8Array(contentLength);
             while (true) {
+                if (model.isCancelled()) {
+                    model.status = ModelStatus.FetchAborted;
+                    return;
+                }
                 let { done, value } = await reader.read();
                 if (done) break;
                 datas.set(value, model.downloadSize);
                 model.downloadSize += value.length;
+            }
+
+            if (model.isCancelled()) {
+                model.status = ModelStatus.FetchAborted;
+                return;
             }
 
             const mapFile: Map<string, Uint8Array> = unzipToMap(datas);
@@ -119,11 +128,13 @@ export async function loadSog(model: SplatModel) {
             model.status === ModelStatus.Fetching && (model.status = ModelStatus.FetchFailed);
         }
     } finally {
-        model.status === ModelStatus.Fetching && (model.status = ModelStatus.FetchDone);
+        model.status === ModelStatus.Fetching && (model.status = model.isCancelled() ? ModelStatus.FetchAborted : ModelStatus.FetchDone);
     }
 }
 
 async function parseSog(model: SplatModel, mapFile: Map<string, Uint8Array>, meta: any) {
+    if (model.isCancelled()) return;
+
     const sogVersion = meta.version || 1;
     const isV1 = !meta.version || meta.version === 1;
     const cntSplat: number = isV1 ? meta.means.shape[0] : meta.count;
@@ -170,7 +181,9 @@ async function parseSog(model: SplatModel, mapFile: Map<string, Uint8Array>, met
 
     const fnParser = sogVersion === 1 ? parseSogV1 : sogVersion === 2 ? parseSogV2 : parseSogV3;
     while (limitCnt > model.dataSplatCount) {
+        if (model.isCancelled()) return;
         const data: Uint8Array = await fnParser(model.dataSplatCount);
+        if (model.isCancelled()) return;
         model.splatData.set(data.subarray(0), model.dataSplatCount * 32);
         updateModelMinMax(model, data);
         model.dataSplatCount += data.byteLength / 32;
@@ -290,6 +303,8 @@ async function parseSog(model: SplatModel, mapFile: Map<string, Uint8Array>, met
     }
 
     function updateModelMinMax(model: SplatModel, data: Uint8Array) {
+        if (model.isCancelled()) return;
+
         // 计算当前半径，增量数据中继续计算即可
         const dataCnt = data.byteLength / 32;
         const f32s: Float32Array = new Float32Array(data.buffer);

@@ -121,6 +121,8 @@ export const WkUrl = `$${n++}`;
 
 /** 传SplatTiles */
 export const WkA10SplatTilesReady = `$${n++}`;
+/** 场景元数据加载失败 */
+export const WkA10LoadFailed = `$${n++}`;
 /** 通知下载 */
 export const WkA10Download = `$${n++}`;
 /** 通知信息 */

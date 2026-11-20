@@ -464,6 +464,16 @@ export const RotateAt = i++;
 export const RotateLeft = i++;
 /** 视线轴右旋 */
 export const RotateRight = i++;
+/** 丢弃当前模型与加载状态，等待下一次加载（会话被取消或加载失败时使用） */
+export const ResetLoadedModel = i++;
+/** 清除进度条与加载中状态等临时界面状态（会话被取消或加载失败时使用） */
+export const ResetLoadingState = i++;
+/** 重置/清空已经上传的渲染数据（会话被取消或加载失败时使用） */
+export const SplatResetRenderData = i++;
+/** 大场景元数据加载失败 */
+export const OnSceneLoadFailed = i++;
+/** 大场景场景树是否加载失败 */
+export const IsSplatTilesLoadFailed = i++;
 
 /** 帧率循环调用 */
 export const RunLoopByFrame = i++;

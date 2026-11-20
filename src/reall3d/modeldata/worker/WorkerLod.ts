@@ -18,6 +18,7 @@ import {
     WkDownloadData,
     WkFileKey,
     WkA10SplatTilesReady,
+    WkA10LoadFailed,
     WkViewProjection,
     WkXyz,
     WkJson,
@@ -172,7 +173,7 @@ function findReplaceableSplatFile(): SplatFile {
 }
 
 async function mergeLod(viewProjMatrix: Matrix4, cameraPosition: Vector3) {
-    if (disposed || mergeDoing) return;
+    if (disposed || mergeDoing || !sceneMeta || !splatTiles) return; // 场景树尚未就绪或已加载失败
     mergeDoing = true;
 
     checkDownload();
@@ -249,6 +250,7 @@ function setDownloadDataMemCache(): boolean {
 }
 
 async function mergeLodGpuCache(viewProjMatrix: Matrix4, cameraPosition: Vector3) {
+    if (!splatTiles) return;
     const derty1 = calcAllWkA10TargetLayer(); // 占坑可能出现脏数据
     const derty2 = setDownloadDataGpuCache(); // 填坑可能出现脏数据
     const derty = derty1 || derty2;
@@ -458,6 +460,7 @@ async function mergeLodGpuCache(viewProjMatrix: Matrix4, cameraPosition: Vector3
 }
 
 async function mergeLodMemoryCache(viewProjMatrix: Matrix4, cameraPosition: Vector3) {
+    if (!splatTiles) return;
     const derty = setDownloadDataMemCache();
     if (!splatTiles.topLodReady) return;
 
@@ -784,7 +787,12 @@ function fnCalcRequireLodLevel(leafNode: SplatTileNode, cameraPosition: Vector3)
 async function onWkA01Init(wkJson: string) {
     sceneMeta = JSON.parse(wkJson);
     maxMemCacheFileCount = (isMobile ? sceneMeta.mobileLodCacheFileCount : sceneMeta.pcLodCacheFileCount) || DefaultLodCacheFileCount;
-    sceneMeta.url.endsWith('.lod.json') ? await downloadAndParseLodJson(sceneMeta.url) : await downloadAndParseLodMetaJson(sceneMeta.url);
+    const ok = sceneMeta.url.endsWith('.lod.json') ? await downloadAndParseLodJson(sceneMeta.url) : await downloadAndParseLodMetaJson(sceneMeta.url);
+    if (!ok || !splatTiles) {
+        // 场景元数据或场景树加载失败：通知主线程，避免流程一直悬挂在等待状态
+        postLoadFailed();
+        return;
+    }
     if (!sceneMeta.useGpuCache) {
         isFullCache = maxMemCacheFileCount >= splatTiles.lodTargetsFileCount;
     }
@@ -799,15 +807,21 @@ async function downloadAndParseLodMetaJson(lodMetaJsonUrl: string) {
         const res = await fetch(lodMetaJsonUrl, { mode: 'cors', credentials: 'omit', cache: 'reload' });
         if (res.status === 200) {
             lodMeta = await res.json();
+            if (!lodMeta?.tree?.bound) {
+                console.error('lod scene file is invalid');
+                return false;
+            }
             // 通知更新包围盒
             const mins = lodMeta.tree.bound.min;
             const maxs = lodMeta.tree.bound.max;
             postWkA10BoundBox([mins[0], mins[1], mins[2], maxs[0], maxs[1], maxs[2]]);
         } else {
-            return console.error('lod scene file fetch failed, status:', res.status);
+            console.error('lod scene file fetch failed, status:', res.status);
+            return false;
         }
     } catch (e) {
-        return console.error('lod scene file fetch failed', e.message);
+        console.error('lod scene file fetch failed', e.message);
+        return false;
     }
 
     const files = {};
@@ -881,6 +895,7 @@ async function downloadAndParseLodMetaJson(lodMetaJsonUrl: string) {
     }
 
     postSplatTilesReady();
+    return true;
 }
 
 function defaultLodTargets(): number[] {
@@ -906,6 +921,10 @@ async function downloadAndParseLodJson(lodJsonUrl: string) {
         const res = await fetch(lodJsonUrl, { mode: 'cors', credentials: 'omit', cache: 'reload' });
         if (res.status === 200) {
             let lodJson = await res.json();
+            if (!lodJson?.tree?.bound) {
+                console.error('lod scene file is invalid');
+                return false;
+            }
 
             const mins = lodJson.tree.bound?.min;
             const maxs = lodJson.tree.bound?.max;
@@ -945,13 +964,16 @@ async function downloadAndParseLodJson(lodJsonUrl: string) {
                 splatTiles.files['environment'] = file;
             }
         } else {
-            return console.error('lod scene file fetch failed, status:', res.status);
+            console.error('lod scene file fetch failed, status:', res.status);
+            return false;
         }
     } catch (e) {
-        return console.error('lod scene file fetch failed', e.message);
+        console.error('lod scene file fetch failed', e.message);
+        return false;
     }
 
     postSplatTilesReady();
+    return true;
 }
 
 function traveSplatTree(splatNode: SplatTileNode, fnCall: (node: SplatTileNode) => any) {
@@ -1102,6 +1124,10 @@ function postDownloadSplatFile(splatFile: SplatFile) {
 
 function postSplatTilesReady() {
     worker.postMessage({ [WkA10SplatTilesReady]: true, [WkJson]: JSON.stringify(splatTiles) });
+}
+
+function postLoadFailed() {
+    worker.postMessage({ [WkA10LoadFailed]: true });
 }
 
 function postInformation(obj: any) {

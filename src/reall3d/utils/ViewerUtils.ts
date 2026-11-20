@@ -8,6 +8,7 @@ import { QualityLevels, SortTypes } from './GlobalConstants';
 import { MetaData } from '../modeldata/MetaData';
 import { getUrl } from './CommonUtils';
 import { SplatTiles } from '../modeldata/SplatTiles';
+import { LoadSession } from '../modeldata/LoadSession';
 
 export function initSplatMeshOptions(options: SplatMeshOptions): SplatMeshOptions {
     const opts: SplatMeshOptions = { ...options };
@@ -135,7 +136,7 @@ export function copyGsViewerOptions(gsViewerOptions: Reall3dViewerOptions): Spla
 }
 
 // 大场景默认配置，并非推荐配置，仅方便直接查看用
-export async function genDefaultSceneMeta(lodUrl: string): Promise<MetaData> {
+export async function genDefaultSceneMeta(lodUrl: string, session?: LoadSession): Promise<MetaData> {
     const name = 'default settings';
     const version = '1.0';
     const autoRotate = false;
@@ -144,7 +145,7 @@ export async function genDefaultSceneMeta(lodUrl: string): Promise<MetaData> {
     let meta: MetaData = { name, version, autoRotate, pointcloudMode, url };
     let lod = {} as SplatTiles;
     try {
-        const res = await fetch(lodUrl, { mode: 'cors', credentials: 'omit', cache: 'reload' });
+        const res = await fetch(lodUrl, { mode: 'cors', credentials: 'omit', cache: 'reload', signal: session?.signal });
         if (res.status === 200) {
             lod = await res.json();
         } else {
@@ -155,6 +156,7 @@ export async function genDefaultSceneMeta(lodUrl: string): Promise<MetaData> {
         console.error('scene file fetch failed', e.message);
         return meta;
     }
+    if (session && !session.isActive()) return meta;
 
     const targets = [];
     const distances = [];

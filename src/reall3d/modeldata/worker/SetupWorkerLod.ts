@@ -38,6 +38,8 @@ import {
     OnStartLodShown,
     GetSortType,
     WorkerUpdateParams,
+    IsSplatTilesLoadFailed,
+    OnSceneLoadFailed,
 } from '../../events/EventConstants';
 import {
     WkA10Information,
@@ -49,6 +51,7 @@ import {
     WkDownloadData,
     WkFileKey,
     WkA10SplatTilesReady,
+    WkA10LoadFailed,
     WkXyz,
     WkJson,
     WkXyzIndex,
@@ -98,7 +101,9 @@ export function setupWorkerLod(events: Events) {
     const recycleMap = new Map<string, SplatFile>();
 
     let fnResolveSplatTiles: Function;
-    const primoseSplatTiles = new Promise(res => (fnResolveSplatTiles = res));
+    let primoseSplatTiles = new Promise(res => (fnResolveSplatTiles = res));
+    // 场景树加载失败时置位，等待方据此中止后续流程
+    let splatTilesLoadFailed = false;
 
     let fnResolveTextureSize: Function;
     const texSizeReady = new Promise(res => (fnResolveTextureSize = res));
@@ -112,6 +117,8 @@ export function setupWorkerLod(events: Events) {
     on(NotifyWkA01BackXyzIndex, (xyzIndex: Uint32Array) => postWkA01BackXyzIndex(xyzIndex));
     on(NotifyWkA01BackSplatBuffer, (dataArray: Uint32Array) => postWkA01BackSplatBuffer(dataArray));
     on(NotifyWkA01CalcTargetLayer, (fileKey: string): Promise<number> => {
+        // 场景树加载失败后不再占坑，直接返回无效层级，避免流程悬挂
+        if (splatTilesLoadFailed || !splatTiles) return Promise.resolve(-1);
         const p = new Promise<number>(resolve => mapCalcLayer.set(fileKey, resolve));
         postWkA01CalcTargetLayer(fileKey);
         return p;
@@ -122,10 +129,13 @@ export function setupWorkerLod(events: Events) {
         return splatTiles;
     });
 
+    on(IsSplatTilesLoadFailed, () => splatTilesLoadFailed);
+
     on(GetLodActiveXyz, () => lodActiveXyz);
 
     on(GetLodDataInfo, async (): Promise<any> => {
         await fire(GetSplatTiles);
+        if (!splatTiles) return { totalCount: 0, lodTargetsTotalCount: 0, lodTargetsFileCount: 0, maxFileSplatCount: 0 };
         const lodTargetsTotalCount = splatTiles.lodTargetsTotalCount;
         const lodTargetsFileCount = splatTiles.lodTargetsFileCount;
         const maxFileSplatCount = splatTiles.maxFileSplatCount;
@@ -159,8 +169,17 @@ export function setupWorkerLod(events: Events) {
 
     function onWkA10SplatTilesReady(wkJson: string) {
         splatTiles = JSON.parse(wkJson);
-        fnResolveSplatTiles();
+        fnResolveSplatTiles(splatTiles);
         (async () => !lodActiveXyzBuffer && (lodActiveXyzBuffer = new Float32Array((await fire(GetMaxRenderCount)) * 3)))();
+    }
+
+    function onWkA10LoadFailed() {
+        // 场景树加载失败：唤醒等待方并广播失败事件，避免加载流程悬挂
+        splatTilesLoadFailed = true;
+        fnResolveSplatTiles(null);
+        fire(OnSceneLoadFailed);
+        // 同时通知查看器（加载状态、进度条与模型状态的清理由查看器负责）
+        (fire(GetOptions) as SplatMeshOptions).viewerEvents?.fire(OnSceneLoadFailed);
     }
 
     function onWkA10Download(fileKey: string) {
@@ -424,6 +443,9 @@ export function setupWorkerLod(events: Events) {
         if (data[WkA10SplatTilesReady]) {
             // 就绪
             onWkA10SplatTilesReady(data[WkJson]);
+        } else if (data[WkA10LoadFailed]) {
+            // 场景树加载失败
+            onWkA10LoadFailed();
         } else if (data[WkA10Download]) {
             // 安排下载
             onWkA10Download(data[WkFileKey]);

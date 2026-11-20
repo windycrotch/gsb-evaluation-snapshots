@@ -31,6 +31,7 @@ import {
     GetCamera,
 } from '../events/EventConstants';
 import { loadFile } from '../modeldata/loaders/FileLoader';
+import { LoadSession } from '../modeldata/LoadSession';
 import { PLYLoader } from 'three/examples/jsm/Addons.js';
 import { Points, PointsMaterial, WebGLRenderer, WebGLRenderTarget } from 'three';
 
@@ -83,29 +84,35 @@ export function setupViewerUtils(events: Events) {
 
     window.addEventListener('beforeunload', () => fire(ViewerDispose));
 
-    on(OnLoadAndRenderObj, async (url: string) => {
+    on(OnLoadAndRenderObj, async (url: string, session?: LoadSession) => {
         fire(Information, { scene: `small (obj)` });
-        const datas = await loadFile(url, events);
-        if (datas) {
-            const url = URL.createObjectURL(new Blob([datas as Uint8Array<ArrayBuffer>], { type: 'application/octet-stream' }));
-            new OBJLoader().load(url, object => fire(GetScene).add(object));
-            fire(ViewerNeedUpdate, true);
-            fire(Flying, true);
+        const datas = await loadFile(url, events, session);
+        if (datas && (!session || session.isActive())) {
+            const blobUrl = session ? session.trackBlob(new Blob([datas as Uint8Array<ArrayBuffer>], { type: 'application/octet-stream' })) : URL.createObjectURL(new Blob([datas as Uint8Array<ArrayBuffer>], { type: 'application/octet-stream' }));
+            new OBJLoader().load(blobUrl, object => {
+                if (session && !session.isActive()) return;
+                fire(GetScene).add(object);
+                fire(ViewerNeedUpdate, true);
+                fire(Flying, true);
+                session ? session.releaseObjectUrl(blobUrl) : URL.revokeObjectURL(blobUrl);
+            });
         }
         fire(OnFetchStop, 0);
     });
 
-    on(OnLoadAndRenderPointCloudPly, async (url: string) => {
+    on(OnLoadAndRenderPointCloudPly, async (url: string, session?: LoadSession) => {
         fire(Information, { scene: `small (ply)` });
-        const datas = await loadFile(url, events);
-        if (datas) {
-            const url = URL.createObjectURL(new Blob([datas as Uint8Array<ArrayBuffer>], { type: 'application/octet-stream' }));
-            new PLYLoader().load(url, geometry => {
+        const datas = await loadFile(url, events, session);
+        if (datas && (!session || session.isActive())) {
+            const blobUrl = session ? session.trackBlob(new Blob([datas as Uint8Array<ArrayBuffer>], { type: 'application/octet-stream' })) : URL.createObjectURL(new Blob([datas as Uint8Array<ArrayBuffer>], { type: 'application/octet-stream' }));
+            new PLYLoader().load(blobUrl, geometry => {
+                if (session && !session.isActive()) return;
                 const material = new PointsMaterial({ size: 0.05, vertexColors: true });
                 const pointCloud = new Points(geometry, material);
                 fire(GetScene).add(pointCloud);
 
                 fire(ViewerNeedUpdate);
+                session ? session.releaseObjectUrl(blobUrl) : URL.revokeObjectURL(blobUrl);
             });
         }
 

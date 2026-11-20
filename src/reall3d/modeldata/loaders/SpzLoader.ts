@@ -30,10 +30,19 @@ export async function loadSpz(model: SplatModel) {
 
         const datas = new Uint8Array(contentLength);
         while (true) {
+            if (model.isCancelled()) {
+                model.status = ModelStatus.FetchAborted;
+                return;
+            }
             let { done, value } = await reader.read();
             if (done) break;
             datas.set(value, model.downloadSize);
             model.downloadSize += value.length;
+        }
+
+        if (model.isCancelled()) {
+            model.status = ModelStatus.FetchAborted;
+            return;
         }
 
         let header = tryParseSpzHeaderV4(datas);
@@ -71,7 +80,7 @@ export async function loadSpz(model: SplatModel) {
             model.status === ModelStatus.Fetching && (model.status = ModelStatus.FetchFailed);
         }
     } finally {
-        model.status === ModelStatus.Fetching && (model.status = ModelStatus.FetchDone);
+        model.status === ModelStatus.Fetching && (model.status = model.isCancelled() ? ModelStatus.FetchAborted : ModelStatus.FetchDone);
     }
 
     async function parseSpzAndSetSplatData(header: SpzHeader, model: SplatModel, value: Uint8Array) {
@@ -91,6 +100,7 @@ export async function loadSpz(model: SplatModel) {
         const limitCnt = Math.min(header.numPoints, model.fetchLimit);
         const count = Math.ceil(limitCnt / MaxProcessCnt);
         for (let i = 0; i < count; i++) {
+            if (model.isCancelled()) return;
             let splatCnt = i < count - 1 ? MaxProcessCnt : limitCnt - i * MaxProcessCnt;
             if (model.dataSplatCount + splatCnt > model.fetchLimit) {
                 splatCnt = model.fetchLimit - model.dataSplatCount;
@@ -282,6 +292,7 @@ export async function loadSpz(model: SplatModel) {
         const limitCnt = Math.min(header.numPoints, model.fetchLimit);
         const count = Math.ceil(limitCnt / MaxProcessCnt);
         for (let i = 0; i < count; i++) {
+            if (model.isCancelled()) return;
             let splatCnt = i < count - 1 ? MaxProcessCnt : limitCnt - i * MaxProcessCnt;
             if (model.dataSplatCount + splatCnt > model.fetchLimit) {
                 splatCnt = model.fetchLimit - model.dataSplatCount;
@@ -431,6 +442,8 @@ export async function loadSpz(model: SplatModel) {
     }
 
     function setBlockSplatData(header: SpzHeader, model: SplatModel, data: Uint8Array) {
+        if (model.isCancelled()) return;
+
         let dataCnt = data.byteLength / 32;
         const maxSplatDataCnt = Math.min(model.fetchLimit, header.numPoints);
         if (model.dataSplatCount + dataCnt > maxSplatDataCnt) {

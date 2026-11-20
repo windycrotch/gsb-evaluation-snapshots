@@ -38,6 +38,7 @@ import {
     ComputeTextureWidthHeightDepth,
     IsBigSceneMode,
     HttpQueryGaussianText,
+    ResetLoadingState,
 } from '../events/EventConstants';
 import { isMobile, QualityLevels, ViewerVersion } from '../utils/GlobalConstants';
 import { globalEv } from '../events/GlobalEV';
@@ -222,6 +223,33 @@ export function setupCommonUtils(events: Events) {
     on(IsFetching, () => loading);
     on(OnTextureReadySplatCount, (renderCount: number) => {
         textureReadySplatCount = renderCount;
+    });
+
+    // 加载被取消或失败后，清除残留的进度条、加载标志与统计信息，使查看器可以接受下一次加载
+    on(ResetLoadingState, () => {
+        loading = false;
+        renderSplatCount = 0;
+        textureReadySplatCount = 0;
+        (async () => {
+            const wrap: HTMLElement = document.querySelector('#gsviewer #progressBarWrap');
+            wrap && (wrap.style.display = 'none');
+            const dom: HTMLElement = document.querySelector('#gsviewer #progressBar');
+            dom && (dom.style.width = '0%');
+        })();
+        (async () => document.querySelector('#gsviewer .logo')?.classList.remove('loading'))();
+        // 清空上一次加载残留的统计信息，避免旧模型的数据留在界面上
+        (async () => {
+            setInfo('renderSplatCount', '-');
+            setInfo('visibleSplatCount', '-');
+            setInfo('modelSplatCount', '-');
+            setInfo('scene', '');
+            setInfo('cuts', '');
+            setInfo('shDegree', '-');
+        })();
+        // @ts-ignore
+        parent?.onProgress && parent.onProgress(0, '0%');
+        // @ts-ignore
+        window.onProgress && window.onProgress(0, '0%');
     });
     on(IsSmallSceneRenderDataReady, () => {
         return !loading && renderSplatCount && textureReadySplatCount >= renderSplatCount;

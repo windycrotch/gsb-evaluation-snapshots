@@ -19,8 +19,7 @@ export async function loadSplat(model: SplatModel) {
             model.status === ModelStatus.Fetching && (model.status = ModelStatus.FetchFailed);
             return;
         }
-        const reader = req.body.getReader();
-        const contentLength = parseInt(req.headers.get('content-length') || '0');
+        const reader = req.body.getReader();        const contentLength = parseInt(req.headers.get('content-length') || '0');
         model.rowLength = 32;
         model.fileSize = contentLength;
         const maxVertexCount = (contentLength / model.rowLength) | 0;
@@ -40,6 +39,10 @@ export async function loadSplat(model: SplatModel) {
         let perByteLen: number = 0;
 
         while (true) {
+            if (model.isCancelled()) {
+                model.status = ModelStatus.FetchAborted;
+                break;
+            }
             let { done, value } = await reader.read();
             if (done) break;
 
@@ -68,7 +71,7 @@ export async function loadSplat(model: SplatModel) {
             model.status === ModelStatus.Fetching && (model.status = ModelStatus.FetchFailed);
         }
     } finally {
-        model.status === ModelStatus.Fetching && (model.status = ModelStatus.FetchDone);
+        model.status === ModelStatus.Fetching && (model.status = model.isCancelled() ? ModelStatus.FetchAborted : ModelStatus.FetchDone);
     }
 
     async function parseSplatAndSetSplatData(model: SplatModel, perByteLen: number, perValue: Uint8Array, newValue: Uint8Array): Promise<number> {
@@ -91,8 +94,14 @@ export async function loadSplat(model: SplatModel) {
             }
 
             const fnParseSplat = async () => {
+                if (model.isCancelled()) {
+                    // 会话已作废，停止后续解析写入
+                    resolve(0);
+                    return;
+                }
                 if (cntSplat > MaxProcessCnt) {
                     const data: Uint8Array = await parseSplatToTexdata(value, MaxProcessCnt);
+                    if (model.isCancelled()) return resolve(0);
                     setSplatData(model, data);
                     model.downloadSplatCount += MaxProcessCnt;
                     bytesRead += MaxProcessCnt * model.rowLength;
@@ -103,6 +112,7 @@ export async function loadSplat(model: SplatModel) {
                     setTimeout(fnParseSplat);
                 } else {
                     const data: Uint8Array = await parseSplatToTexdata(value, cntSplat);
+                    if (model.isCancelled()) return resolve(0);
                     setSplatData(model, data);
                     model.downloadSplatCount += cntSplat;
                     bytesRead += cntSplat * model.rowLength;
@@ -118,6 +128,8 @@ export async function loadSplat(model: SplatModel) {
 }
 
 function setSplatData(model: SplatModel, data: Uint8Array) {
+    if (model.isCancelled()) return;
+
     let dataCnt = data.byteLength / 32;
     const maxSplatDataCnt = Math.min(model.fetchLimit, model.modelSplatCount);
     if (model.dataSplatCount + dataCnt > maxSplatDataCnt) {

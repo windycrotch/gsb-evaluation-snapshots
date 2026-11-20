@@ -76,6 +76,8 @@ import {
     OnLoadAndRenderPointCloudPly,
     SetViewerApi,
     GetOrignMetaString,
+    ResetLoadingState,
+    OnSceneLoadFailed,
 } from '../events/EventConstants';
 import { SplatMesh } from '../meshs/splatmesh/SplatMesh';
 import { ModelOptions } from '../modeldata/ModelOptions';
@@ -92,6 +94,7 @@ import { loadFile } from '../modeldata/loaders/FileLoader';
 import { MinimapOptions } from '../scene/SetupMinimap';
 import { setupAllEventsVerwer } from '../scene/SetupAllEvents';
 import { CameraControls } from '../scene/SetupCameraControls';
+import { LoadSession } from '../modeldata/LoadSession';
 
 /**
  * Built-in Gaussian Splatting model viewer
@@ -101,6 +104,12 @@ export class Reall3dViewer {
     private splatMesh: SplatMesh;
     private events: Events;
     private metaMatrix: Matrix4;
+
+    /** 当前加载会话（本地拖拽等），同一时刻至多一个有效 */
+    private loadSession: LoadSession = null;
+    private loadSessionSeq: number = 0;
+    /** 拖拽监听器只需绑定一次，reset 后仍可继续接受拖拽 */
+    private dropLocalFileEnabled: boolean = false;
 
     public needUpdate: boolean = true;
 
@@ -234,6 +243,18 @@ export class Reall3dViewer {
         );
 
         on(ViewerDispose, () => that.dispose());
+        on(
+            OnSceneLoadFailed,
+            () => {
+                // 场景元数据/场景树加载失败：结束本次会话并清理状态，保证下一次拖拽仍可用
+                if (!that.loadSession) return;
+                const failed = that.loadSession;
+                that.loadSession = null;
+                failed.cancel();
+                that.resetLoadState();
+            },
+            true,
+        );
         on(PrintInfo, () => console.info(JSON.stringify(fire(GetSplatMesh).meta || {}, null, 2)));
 
         let watermark: string = '';
@@ -249,8 +270,14 @@ export class Reall3dViewer {
 
     /**
      * 允许拖拽本地文件进行渲染（支持模型文件、*.meta.json文件、*.scene.json文件）
+     *
+     * 每次拖拽是一次可取消的加载会话：新的拖拽会先作废旧会话（中断下载、清理临时对象 URL），
+     * 旧会话迟到的回调不再改动模型状态、水印或统计信息。
      */
     private enableDropLocalFile(): void {
+        if (this.dropLocalFileEnabled) return;
+        this.dropLocalFileEnabled = true;
+
         const that = this;
         document.addEventListener('dragover', function (e) {
             e.preventDefault();
@@ -259,6 +286,7 @@ export class Reall3dViewer {
         document.addEventListener('drop', async function (e) {
             e.preventDefault();
             e.stopPropagation();
+            if (that.disposed) return;
             globalEv.fire(StopBgAudio);
             let file = e.dataTransfer.files[0];
             if (!file) return;
@@ -288,7 +316,7 @@ export class Reall3dViewer {
                 return console.error('unsupported format:', file.name);
             }
 
-            const url = URL.createObjectURL(file);
+            // 开始新会话：先作废旧会话并重建渲染器，保证旧会话的下载与解析写入立刻停止
             const opts: Reall3dViewerOptions = that.events.fire(GetOptions);
             opts.bigSceneMode = false;
             opts.debugMode = true;
@@ -303,15 +331,96 @@ export class Reall3dViewer {
             opts.shDegree = 3;
             opts.sortType = 1;
             opts.fov = 45;
-            that.reset(opts);
-            if (isSceneJson) {
-                await that.addScene(url);
-            } else {
-                await that.addModel({ url, format });
-                that.events.fire(FocusAabbCenter);
+            that.reset(opts); // 内部会作废上一次的加载会话
+            if (that.disposed) return;
+            const session = that.beginLoadSession();
+            const url = session.trackFile(file);
+            try {
+                if (isSceneJson) {
+                    const sceneMeta = await that.parseSceneJsonFile(url, session);
+                    if (sceneMeta) await that.addScene(sceneMeta, session);
+                    else that.abortLoadSession(session);
+                } else {
+                    await that.addModel({ url, format, session });
+                    if (session.isActive() && !that.disposed) that.events.fire(FocusAabbCenter);
+                }
+            } catch (e) {
+                console.error('drop local file failed', e);
+                that.abortLoadSession(session);
+            } finally {
+                // 会话结束（成功或被新会话取代）时释放本次的临时对象 URL
+                session.releaseObjectUrl(url);
             }
-            URL.revokeObjectURL(url);
         });
+    }
+
+    /**
+     * 读取本地拖入的 *.scene.json 场景文件。
+     * blob url 不以 .scene.json 结尾，无法走 addScene 的 URL 判断，故在此单独读取解析，
+     * 场景文件内的相对地址以当前页面地址为基准解析。
+     */
+    private async parseSceneJsonFile(url: string, session: LoadSession): Promise<MetaData> {
+        try {
+            const res = await fetch(url, { mode: 'cors', credentials: 'omit', cache: 'reload', signal: session?.signal });
+            if (res.status !== 200) {
+                console.error('scene file fetch failed, status:', res.status);
+                return null;
+            }
+            const meta: MetaData = await res.json();
+            return session && !session.isActive() ? null : meta;
+        } catch (e) {
+            console.error('scene file fetch failed', e.message);
+            return null;
+        }
+    }
+
+    /**
+     * 清除上一次加载残留的进度、统计与已上传数据，使查看器回到“尚未加载任何模型”的可用状态。
+     */
+    private resetLoadState(): void {
+        if (this.disposed) return;
+        this.events?.tryFire(ResetLoadingState);
+        this.splatMesh?.reset();
+    }
+
+    /**
+     * 开始一次新的加载会话，作废上一次会话（中断下载、清理临时对象 URL、清空残留的加载状态）。
+     */
+    private beginLoadSession(): LoadSession {
+        const that = this;
+        // 作废旧会话
+        that.cancelLoadSession();
+
+        const session = new LoadSession(++that.loadSessionSeq);
+        that.loadSession = session;
+        session.signal.addEventListener(
+            'abort',
+            () => {
+                if (that.loadSession !== session) return;
+                that.loadSession = null;
+                that.resetLoadState();
+            },
+            { once: true },
+        );
+        return session;
+    }
+
+    /** 取消当前会话（若存在）。 */
+    private cancelLoadSession(cleanState: boolean = true): void {
+        const session = this.loadSession;
+        this.loadSession = null;
+        if (!session) return;
+        session.cancel();
+        // 取消后清理残留的进度和模型状态（迟到的会话回调已被会话标记屏蔽）
+        cleanState && this.resetLoadState();
+    }
+
+    /** 加载失败或中途取消：结束当前会话并清理状态。 */
+    private abortLoadSession(session: LoadSession): void {
+        if (session !== this.loadSession) return;
+        this.loadSession = null;
+        session.cancel();
+        this.resetLoadState();
     }
 
     /**
@@ -422,12 +531,16 @@ export class Reall3dViewer {
 
     /**
      * 重置
+     * @param opts 新的配置项
+     * @param keepSession 内部重入时（例如拖入场景文件）保留正在进行的加载会话
      */
-    public reset(opts: Reall3dViewerOptions = {}): void {
+    public reset(opts: Reall3dViewerOptions = {}, keepSession: LoadSession = null): void {
         const that = this;
-        that.dispose();
+        that.dispose(keepSession);
         that.disposed = false;
         that.init(initGsViewerOptions(opts));
+        // 重建后重新关联仍在进行的加载会话，保证其取消时仍能清理本次加载状态
+        keepSession && (that.loadSession = keepSession);
     }
 
     /**
@@ -442,18 +555,25 @@ export class Reall3dViewer {
 
     /**
      * 添加大场景
-     * @param sceneUrl 场景地址
+     * @param sceneUrl 场景地址，或已经解析好的场景元数据
+     * @param session 可选的加载会话，取消后本次加载立即停止且不再写入查看器状态
      */
-    public async addScene(sceneUrl: string) {
+    public async addScene(sceneUrl: string | MetaData, session?: LoadSession) {
         const that = this;
         if (that.disposed) return;
-        const on = (key: number, fn?: Function, multiFn?: boolean): Function | Function[] => this.events.on(key, fn, multiFn);
-        const fire = (key: number, ...args: any): any => that.events.fire(key, ...args);
+        // 捕获当前事件系统：即使加载期间查看器被 reset，迟到的回调也不会写入新的查看器状态
+        const events: Events = that.events;
+        let on = (key: number, fn?: Function, multiFn?: boolean): Function | Function[] => events.on(key, fn, multiFn);
+        let fire = (key: number, ...args: any): any => events.fire(key, ...args);
+        const isSessionActive = () => !that.disposed && (session ? session.isActive() : that.events === events);
 
         let meta: MetaData = {};
-        if (sceneUrl.endsWith('.scene.json')) {
+        if (!isString(sceneUrl)) {
+            // 本地拖入的场景文件已由调用方解析完成（blob url 无法以 .scene.json 结尾，故在此区分）
+            meta = sceneUrl as MetaData;
+        } else if ((sceneUrl as string).endsWith('.scene.json')) {
             try {
-                const res = await fetch(sceneUrl, { mode: 'cors', credentials: 'omit', cache: 'reload' });
+                const res = await fetch(sceneUrl as string, { mode: 'cors', credentials: 'omit', cache: 'reload', signal: session?.signal });
                 if (res.status === 200) {
                     meta = await res.json();
                 } else {
@@ -463,8 +583,9 @@ export class Reall3dViewer {
                 return console.error('scene file fetch failed', e.message);
             }
         } else {
-            meta = await genDefaultSceneMeta(sceneUrl);
+            meta = await genDefaultSceneMeta(sceneUrl as string, session);
         }
+        if (!isSessionActive()) return; // 会话已作废，不再写入任何状态
         const orignMetaString = JSON.stringify(meta);
 
         if (!meta.url) return console.error('missing lod meta url');
@@ -480,10 +601,20 @@ export class Reall3dViewer {
         opts.sortType = meta.sortType || SortTypes.Radial2;
         opts.viewMode = meta.viewMode;
         meta.background && (opts.background = meta.background);
-        that.reset({ ...opts });
+        // 内部 reset 会重建事件系统，作废检查需要在 reset 之前完成
+        if (!isSessionActive()) return;
+        that.reset({ ...opts }, session);
+        if (!isSessionActive()) return;
+
+        // reset 重建了事件系统，后续必须使用新的事件对象，否则元数据与回调都写在已废弃的对象上
+        const sceneEvents: Events = that.events;
+        on = (key: number, fn?: Function, multiFn?: boolean): Function | Function[] => sceneEvents.on(key, fn, multiFn);
+        fire = (key: number, ...args: any): any => sceneEvents.fire(key, ...args);
 
         on(GetOrignMetaString, () => orignMetaString);
-        const baseUrl = getUrl(sceneUrl, location.href);
+        // 场景文件内的相对地址以场景地址为基准；直接传入已解析的元数据时，以当前页面地址为基准
+        const sceneBase = isString(sceneUrl) ? (sceneUrl as string) : location.href;
+        const baseUrl = getUrl(sceneBase, location.href);
 
         meta.player?.url && (meta.player.url = getUrl(meta.player.url, baseUrl));
         meta.player?.trigerRunMp3 && (meta.player.trigerRunMp3 = getUrl(meta.player.trigerRunMp3, baseUrl));
@@ -492,11 +623,12 @@ export class Reall3dViewer {
         meta.audioMask && (meta.audioMask.audioUrl = getUrl(meta.audioMask.audioUrl, baseUrl));
         meta.audioMask?.audioUrl && fire(LoadCircularAudioMask, meta.audioMask);
         meta.url = getUrl(meta.url, baseUrl);
-        meta.bgAudio && (meta.bgAudio = getUrl(meta.bgAudio, getUrl(sceneUrl, location.href)));
-        meta.audio?.mp3 && (meta.audio.mp3 = getUrl(meta.audio.mp3, getUrl(sceneUrl, location.href)));
+        meta.bgAudio && (meta.bgAudio = getUrl(meta.bgAudio, baseUrl));
+        meta.audio?.mp3 && (meta.audio.mp3 = getUrl(meta.audio.mp3, baseUrl));
 
         on(GetMeta, () => meta);
         fire(OnMetaDataLoaded);
+        if (!isSessionActive()) return;
         setupPlayer(that.events);
 
         meta.bgAudio && globalEv.fire(PlaytBgAudio, meta.bgAudio, true);
@@ -511,10 +643,11 @@ export class Reall3dViewer {
         fire(OnSetFlyTargets, meta.flyTargets || []);
         fire(OnSetFlyDuration, meta.flyDuration);
         fire(OnInitMarks, meta);
-
         // 加载模型
-        that.splatMesh.addModel({ url: meta.url, baseUrl }, meta);
+        const modelBaseUrl = sceneUrl && isString(sceneUrl) ? getUrl(sceneUrl as string, location.href) : '';
+        that.splatMesh.addModel({ url: meta.url, baseUrl: modelBaseUrl, session }, meta);
         await fire(OnSetWaterMark, meta.watermark || meta.name);
+        if (!isSessionActive()) return;
         fire(GetControls).updateRotateAxis();
 
         ((isMobile && meta.mobileEnableJoystick) || (!isMobile && meta.pcEnableJoystick)) && fire(ShowJoystick);
@@ -527,10 +660,17 @@ export class Reall3dViewer {
     public async addModel(urlOpts: string | ModelOptions): Promise<void> {
         const that = this;
         if (that.disposed) return;
-        const on = (key: number | string, fn?: Function, multiFn?: boolean): Function | Function[] => this.events.on(key, fn, multiFn);
-        const fire = (key: number, ...args: any): any => that.events.fire(key, ...args);
+        // 捕获当前事件系统：即使加载期间查看器被 reset（事件系统被重建），迟到的回调也只会写入已废弃的旧事件对象
+        const events: Events = that.events;
+        const on = (key: number | string, fn?: Function, multiFn?: boolean): Function | Function[] => events.on(key, fn, multiFn);
+        const fire = (key: number, ...args: any): any => events.fire(key, ...args);
 
         // 参数整理
+        const session: LoadSession = isString(urlOpts) ? null : (urlOpts as ModelOptions).session;
+        // 捕获当前事件系统与网格：即使加载期间查看器被 reset，迟到的回调也只会写入已废弃的旧对象
+        const splatMesh: SplatMesh = that.splatMesh;
+        // 会话状态检查：会话取消或查看器重置后，任何迟到的回调都不得改动当前模型状态
+        const isSessionActive = () => !that.disposed && that.events === events && that.splatMesh === splatMesh && (!session || session.isActive());
         let isMetaUrl = false;
         let metaUrl = '';
         let modelOpts: ModelOptions = { url: '' };
@@ -556,7 +696,7 @@ export class Reall3dViewer {
         if (!modelOpts.url.startsWith('blob:')) {
             try {
                 metaUrl = metaUrl || modelOpts.url.substring(0, modelOpts.url.lastIndexOf('.')) + '.meta.json'; // xxx/abc.spx => xxx/abc.meta.json
-                const res = await fetch(metaUrl, { mode: 'cors', credentials: 'omit', cache: 'reload' });
+                const res = await fetch(metaUrl, { mode: 'cors', credentials: 'omit', cache: 'reload', signal: session?.signal });
                 if (res.status === 200) {
                     meta = await res.json();
                 } else {
@@ -566,13 +706,14 @@ export class Reall3dViewer {
                 console.warn('meta file fetch failed', e.message, modelOpts.url);
             }
         }
+        if (!isSessionActive()) return; // 会话已作废，不再写入任何状态
         const orignMetaString = JSON.stringify(meta);
         on(GetOrignMetaString, () => orignMetaString);
 
         // 检查整理
         meta.showWatermark = !!meta.showWatermark; // 是否显示水印文字
         meta.disableTransitionEffectOnLoad && that.options({ disableTransitionEffectOnLoad: true, pointcloudMode: false });
-        meta.disableTransitionEffectOnLoad && that.splatMesh.options({ pointcloudMode: false } as any);
+        meta.disableTransitionEffectOnLoad && splatMesh.options({ pointcloudMode: false } as any);
 
         meta.url && (meta.url = getUrl(meta.url, metaUrl));
         meta.url = meta.url || modelOpts.url;
@@ -606,12 +747,13 @@ export class Reall3dViewer {
         meta.audioMask && (meta.audioMask.audioUrl = getUrl(meta.audioMask.audioUrl, getUrl(metaUrl, location.href)));
         meta.audioMask?.audioUrl && fire(LoadCircularAudioMask, meta.audioMask);
         meta.disableTransitionEffectOnLoad && that.options({ disableTransitionEffectOnLoad: true, pointcloudMode: false });
-        meta.disableTransitionEffectOnLoad && that.splatMesh.options({ pointcloudMode: false } as any);
+        meta.disableTransitionEffectOnLoad && splatMesh.options({ pointcloudMode: false } as any);
         meta.bgAudio && (meta.bgAudio = getUrl(meta.bgAudio, getUrl(metaUrl, location.href)));
         meta.audio?.mp3 && (meta.audio.mp3 = getUrl(meta.audio.mp3, getUrl(metaUrl, location.href)));
 
         on(GetMeta, () => meta);
         fire(OnMetaDataLoaded);
+        if (!isSessionActive()) return;
         setupPlayer(that.events);
         fire(OnSetFlyDuration, meta.flyDuration);
 
@@ -621,11 +763,15 @@ export class Reall3dViewer {
 
         // 按元数据调整更新相机、标注等信息
         fire(LoadSmallSceneMetaData, meta);
-        this.options({ qualityLevel: meta.qualityLevel, sortType: meta.sortType, background: meta.background }); // 允许根据具体模型特点在meta中定义渲染质量级别，均衡质量性能资源
+        that.options({ qualityLevel: meta.qualityLevel, sortType: meta.sortType, background: meta.background }); // 允许根据具体模型特点在meta中定义渲染质量级别，均衡质量性能资源
+
+        // 模型本体交由会话持有，取消会话时中断其下载与解析
+        modelOpts.session = session || modelOpts.session;
 
         // 加载模型
         if (modelOpts.format === 'glb') {
-            const fileBytes: Uint8Array = await loadFile(modelOpts.url, that.events);
+            const fileBytes: Uint8Array = await loadFile(modelOpts.url, that.events, session);
+            if (!fileBytes || !isSessionActive()) return;
             fire(OnFetchStop, 100);
             const ui32s = new Uint32Array(fileBytes.slice(0, 32).buffer);
             const jsonLength4 = Math.floor((ui32s[3] + 3) / 4) * 4;
@@ -639,19 +785,19 @@ export class Reall3dViewer {
                     .subarray(buffersOffset, buffersOffset + oJson.buffers[0].byteLength)
                     .subarray(oJson.bufferViews[0].byteOffset || 0, oJson.bufferViews[0].byteLength);
                 const glburl = modelOpts.url;
-                modelOpts.url = URL.createObjectURL(new Blob([spzBytes as Uint8Array<ArrayBuffer>], { type: 'application/octet-stream' }));
+                modelOpts.url = session ? session.trackBlob(new Blob([spzBytes as Uint8Array<ArrayBuffer>], { type: 'application/octet-stream' })) : URL.createObjectURL(new Blob([spzBytes as Uint8Array<ArrayBuffer>], { type: 'application/octet-stream' }));
                 modelOpts.format = 'spz';
 
                 globalEv.on('Information-ver', () => `glb-spz`);
 
-                this.splatMesh.addModel(modelOpts, meta);
+                splatMesh.addModel(modelOpts, meta);
                 await fire(OnSetWaterMark, meta.watermark || meta.name);
-                URL.revokeObjectURL(modelOpts.url);
+                session ? session.releaseObjectUrl(modelOpts.url) : URL.revokeObjectURL(modelOpts.url);
                 modelOpts.url = glburl;
             } else if (/KHR_gaussian_splatting/.test(sJson)) {
                 const splatBytes = glbKhrGs2Splat(fileBytes);
                 const glburl = modelOpts.url;
-                modelOpts.url = URL.createObjectURL(new Blob([splatBytes as Uint8Array<ArrayBuffer>], { type: 'application/octet-stream' }));
+                modelOpts.url = session ? session.trackBlob(new Blob([splatBytes as Uint8Array<ArrayBuffer>], { type: 'application/octet-stream' })) : URL.createObjectURL(new Blob([splatBytes as Uint8Array<ArrayBuffer>], { type: 'application/octet-stream' }));
                 modelOpts.format = 'splat';
 
                 const ratio = '　' + computeCompressionRatio(splatBytes.byteLength / 32, fileBytes.byteLength);
@@ -660,9 +806,9 @@ export class Reall3dViewer {
                 globalEv.on('Information-ratio', () => ratio);
                 globalEv.on('Information-size', () => size);
 
-                this.splatMesh.addModel(modelOpts, meta);
+                splatMesh.addModel(modelOpts, meta);
                 await fire(OnSetWaterMark, meta.watermark || meta.name);
-                URL.revokeObjectURL(modelOpts.url);
+                session ? session.releaseObjectUrl(modelOpts.url) : URL.revokeObjectURL(modelOpts.url);
                 modelOpts.url = glburl;
             } else if (/com_github_gotoeasy_gsbox_webp_rgb_ply/.test(sJson)) {
                 const oJson = JSON.parse(sJson);
@@ -672,25 +818,28 @@ export class Reall3dViewer {
                     .subarray(oJson.bufferViews[0].byteOffset || 0, oJson.bufferViews[0].byteLength);
 
                 const { count, plyBytes, xyzs, minY, maxY } = await parseRgbPly(dataBytes);
+                if (!isSessionActive()) return;
                 on('GetRgbPlyXyzs', () => xyzs);
                 on('GetRgbPlyMinY', () => minY);
                 on('GetRgbPlyMaxY', () => maxY);
-                const urlBlob = URL.createObjectURL(new Blob([plyBytes as Uint8Array<ArrayBuffer>], { type: 'application/octet-stream' }));
+                const urlBlob = session ? session.trackBlob(new Blob([plyBytes as Uint8Array<ArrayBuffer>], { type: 'application/octet-stream' })) : URL.createObjectURL(new Blob([plyBytes as Uint8Array<ArrayBuffer>], { type: 'application/octet-stream' }));
                 modelOpts.format = 'ply';
 
-                await fire(OnLoadAndRenderPointCloudPly, urlBlob);
+                await fire(OnLoadAndRenderPointCloudPly, urlBlob, session);
+                if (!isSessionActive()) return;
                 fire(Information, { renderSplatCount: count, visibleSplatCount: count, modelSplatCount: count, scene: 'small (glb-ply)' });
-                URL.revokeObjectURL(urlBlob);
+                session ? session.releaseObjectUrl(urlBlob) : URL.revokeObjectURL(urlBlob);
             } else {
-                const urlBlob = URL.createObjectURL(new Blob([fileBytes as Uint8Array<ArrayBuffer>], { type: 'application/octet-stream' }));
-                await this.loadGlb(urlBlob, meta);
-                URL.revokeObjectURL(urlBlob);
+                const urlBlob = session ? session.trackBlob(new Blob([fileBytes as Uint8Array<ArrayBuffer>], { type: 'application/octet-stream' })) : URL.createObjectURL(new Blob([fileBytes as Uint8Array<ArrayBuffer>], { type: 'application/octet-stream' }));
+                await this.loadGlb(urlBlob, meta, session);
+                session ? session.releaseObjectUrl(urlBlob) : URL.revokeObjectURL(urlBlob);
             }
         } else if (modelOpts.format === 'obj') {
-            this.options({ autoRotate: false });
-            await fire(OnLoadAndRenderObj, modelOpts.url);
+            that.options({ autoRotate: false });
+            await fire(OnLoadAndRenderObj, modelOpts.url, session);
         } else if (modelOpts.format === 'ply' && modelOpts.url.startsWith('blob:')) {
-            const fileBytes: Uint8Array = await loadFile(modelOpts.url, that.events);
+            const fileBytes: Uint8Array = await loadFile(modelOpts.url, that.events, session);
+            if (!fileBytes || !isSessionActive()) return;
             fire(OnFetchStop, 100);
 
             let header = new TextDecoder().decode(fileBytes.slice(0, 1024 * 2));
@@ -702,21 +851,22 @@ export class Reall3dViewer {
             }
             header = header.substring(0, header_end_index);
             if (isPointCloudPly(header)) {
-                await fire(OnLoadAndRenderPointCloudPly, modelOpts.url);
+                await fire(OnLoadAndRenderPointCloudPly, modelOpts.url, session);
             } else {
-                this.splatMesh.addModel(modelOpts, meta);
+                splatMesh.addModel(modelOpts, meta);
                 await fire(OnSetWaterMark, meta.watermark || meta.name);
             }
         } else {
-            this.splatMesh.addModel(modelOpts, meta);
+            splatMesh.addModel(modelOpts, meta);
             await fire(OnSetWaterMark, meta.watermark || meta.name);
         }
 
+        if (!isSessionActive()) return;
         isMobile && fire(GetControls)._dollyOut?.(0.7); // 手机适当缩小
         ((isMobile && meta.mobileEnableJoystick) || (!isMobile && meta.pcEnableJoystick)) && fire(ShowJoystick);
     }
 
-    private async loadGlb(urlBlob: string, meta: MetaData) {
+    private async loadGlb(urlBlob: string, meta: MetaData, session?: LoadSession) {
         const fire = (key: number, ...args: any): any => this.events.fire(key, ...args);
 
         const loader = new GLTFLoader();
@@ -727,6 +877,7 @@ export class Reall3dViewer {
         loader.load(
             urlBlob,
             gltf => {
+                if (session && !session.isActive()) return; // 会话已作废，迟到的回调不再改动场景
                 const model = gltf.scene;
 
                 // 对 MeshStandardMaterial 的极端参数进行修复，改为非金属，保证漫反射
@@ -748,11 +899,19 @@ export class Reall3dViewer {
 
     /**
      * 销毁渲染器不再使用
+     * @param keepSession 内部重入时保留正在进行的加载会话（不要中断它）
      */
-    public dispose(): void {
+    public dispose(keepSession: LoadSession = null): void {
         const that = this;
         if (that.disposed) return;
         that.disposed = true;
+        // 作废当前加载会话：中断下载、停止后续解析写入、释放临时对象 URL
+        if (keepSession) {
+            // 保留该会话，仅解除引用，会话仍由调用方持有
+            that.loadSession === keepSession && (that.loadSession = null);
+        } else {
+            that.cancelLoadSession(false);
+        }
         const fire = (key: number, ...args: any): any => that.events.fire(key, ...args);
 
         const renderer: WebGLRenderer = fire(GetRenderer);

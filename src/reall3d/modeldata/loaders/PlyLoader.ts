@@ -35,6 +35,10 @@ export async function loadPly(model: SplatModel) {
         let header: any;
 
         while (true) {
+            if (model.isCancelled()) {
+                model.status = ModelStatus.FetchAborted;
+                break;
+            }
             let { done, value } = await reader.read();
             if (done) break;
 
@@ -95,7 +99,7 @@ export async function loadPly(model: SplatModel) {
             model.status === ModelStatus.Fetching && (model.status = ModelStatus.FetchFailed);
         }
     } finally {
-        model.status === ModelStatus.Fetching && (model.status = ModelStatus.FetchDone);
+        model.status === ModelStatus.Fetching && (model.status = model.isCancelled() ? ModelStatus.FetchAborted : ModelStatus.FetchDone);
     }
 
     async function parsePlyAndSetSplatData(header: any, model: SplatModel, perByteLen: number, perValue: Uint8Array, newValue: Uint8Array): Promise<number> {
@@ -118,8 +122,13 @@ export async function loadPly(model: SplatModel) {
             }
 
             const fnParsePly = async () => {
+                if (model.isCancelled()) {
+                    resolve(0);
+                    return;
+                }
                 if (cntSplat > MaxProcessCnt) {
                     const data: Uint8Array = await parsePlyToTexdata(header, value, MaxProcessCnt);
+                    if (model.isCancelled()) return resolve(0);
                     setSplatData(model, data);
                     model.downloadSplatCount += MaxProcessCnt;
                     cntSplat -= MaxProcessCnt;
@@ -127,6 +136,7 @@ export async function loadPly(model: SplatModel) {
                     setTimeout(fnParsePly);
                 } else {
                     const data: Uint8Array = await parsePlyToTexdata(header, value, cntSplat);
+                    if (model.isCancelled()) return resolve(0);
                     setSplatData(model, data);
                     model.downloadSplatCount += cntSplat;
                     resolve(leave);
@@ -296,6 +306,8 @@ export async function loadPly(model: SplatModel) {
 }
 
 function setSplatData(model: SplatModel, data: Uint8Array) {
+    if (model.isCancelled()) return;
+
     let dataCnt = data.byteLength / 32;
     const maxSplatDataCnt = Math.min(model.fetchLimit, model.modelSplatCount);
     if (model.dataSplatCount + dataCnt > maxSplatDataCnt) {

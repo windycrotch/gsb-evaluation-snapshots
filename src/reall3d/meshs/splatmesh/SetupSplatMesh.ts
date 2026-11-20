@@ -102,6 +102,7 @@ import {
     NotifyWkA01BackSplatBuffer,
     NotifyWkA09DblTextureReady,
     NotifyWkA09SglTextureReady,
+    SplatResetRenderData,
 } from '../../events/EventConstants';
 import { SplatMeshOptions, TransitionEffects } from './SplatMeshOptions';
 import {
@@ -860,5 +861,27 @@ export function setupSplatMesh(events: Events) {
             maxRadius = dataMaxRadius;
         }
         fire(SplatUpdateSglTexture, texture);
+    });
+
+    // 取消/失败后清空已上传的渲染数据，保证下一个模型从干净状态开始，不会叠加两次数据
+    on(SplatResetRenderData, () => {
+        if (disposed) return;
+
+        maxRadius = 0;
+        currentMaxRadius = 0;
+        bucketBits = 0;
+        sortType = 0;
+        currentDisplayShDegree = 0;
+
+        while (arySwitchProcess.length) arySwitchProcess.pop().stop = true;
+
+        fire(SplatUpdateSplatIndex, new Uint32Array(0), 0, 0, 0, 0);
+        fire(SplatUpdateCurrentVisibleRadius, 0);
+        fire(SplatUpdateCurrentLightRadius, 0);
+        fire(SplatUpdateMaxRadius, 0);
+        fire(SplatUpdateTopY, 0);
+        fire(SplatUpdateParticleMode, 0);
+        fire(SplatUpdateShDegree, 0);
+        fire(SplatUpdateMinAlpha, 0);
     });
 }

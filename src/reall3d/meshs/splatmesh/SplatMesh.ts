@@ -47,6 +47,8 @@ import {
     GetMeta,
     LodDownloadManagerDispose,
     OnStartLodShown,
+    ResetLoadedModel,
+    SplatResetRenderData,
 } from '../../events/EventConstants';
 import { SplatMeshOptions } from './SplatMeshOptions';
 import { ModelOptions } from '../../modeldata/ModelOptions';
@@ -85,7 +87,8 @@ export class SplatMesh extends Mesh {
         const opts: SplatMeshOptions = initSplatMeshOptions(options); // 默认参数校验设定
         const camera = (opts.camera || opts.controls?.object) as PerspectiveCamera;
         on(GetOptions, () => opts);
-        on(GetMeta, () => that.meta);
+        // 未加载模型时返回空对象，避免各处读取元数据字段时报错（加载失败/取消后仍需可继续使用）
+        on(GetMeta, () => that.meta || {});
         on(GetCanvas, () => opts.renderer.domElement);
         on(GetCamera, () => camera);
         on(GetCameraFov, () => camera.fov);
@@ -122,7 +125,7 @@ export class SplatMesh extends Mesh {
 
         (async () => {
             that.copy(await events.fire(CreateSplatMesh));
-            that.meta.transform && that.applyMatrix4(new Matrix4().fromArray(that.meta.transform));
+            that.meta?.transform && that.applyMatrix4(new Matrix4().fromArray(that.meta.transform));
             that.frustumCulled = false;
             that.onBeforeRender = () => {
                 fire(NotifyWkA09Sort);
@@ -231,6 +234,20 @@ export class SplatMesh extends Mesh {
         const that = this;
         if (that.disposed) return;
         return that.events.fire(key, ...args);
+    }
+
+    /**
+     * 丢弃当前模型数据，清空已上传的渲染数据，回到“尚未加载任何模型”的状态。
+     * 与 dispose 不同，事件绑定与 WebGL 资源得以保留，可以继续加载下一个模型。
+     */
+    public reset(): void {
+        const that = this;
+        if (that.disposed) return;
+
+        that.meta = null;
+        that.events.fire(ResetLoadedModel);
+        that.events.fire(SplatResetRenderData);
+        that.events.fire(NotifyViewerNeedUpdate);
     }
 
     /**

@@ -5,6 +5,7 @@ import { Matrix4, Vector3 } from 'three';
 import { ModelOptions } from './ModelOptions';
 import { SplatTiles } from './SplatTiles';
 import { MetaData } from './MetaData';
+import { LoadSession } from './LoadSession';
 
 /**
  * SPX file header information
@@ -123,12 +124,18 @@ export class SplatModel {
 
     public isPointCloudPly?: boolean;
 
+    /** Load session that owns this model, null when not bound to a cancellable session */
+    public session: LoadSession;
+    /** Set once the owning session was cancelled: no further parsing or state writes may happen */
+    public cancelled: boolean = false;
+
     constructor(opts: ModelOptions, meta: MetaData = {}) {
         this.opts = { ...opts };
         const that = this;
 
         that.meta = meta;
         that.metaMatrix = meta.transform ? new Matrix4().fromArray(meta.transform) : null;
+        that.session = opts.session || null;
 
         if (!opts.format) {
             if (opts.url?.endsWith('.spx')) {
@@ -139,7 +146,7 @@ export class SplatModel {
                 that.opts.format = 'ply';
             } else if (opts.url?.endsWith('.spz')) {
                 that.opts.format = 'spz';
-            } else if (opts.url?.endsWith('.zip') || opts.url?.endsWith('.sog') || opts.url?.endsWith('meta.json')) {
+            } else if (opts.url?.endsWith('.zip') || opts.url?.endsWith('.sog') || opts.url?.endsWith('/meta.json') || opts.url?.endsWith('meta.json')) {
                 that.opts.format = 'sog';
             } else if (opts.url?.endsWith('.glb')) {
                 that.opts.format = 'glb';
@@ -147,7 +154,24 @@ export class SplatModel {
                 console.error('unknown format!');
             }
         }
-        that.abortController = new AbortController(); // TODO
+        that.abortController = new AbortController();
+
+        if (that.session) {
+            // 会话取消时立即中断本模型的下载，并置为不可再写入状态（迟到的解析结果一律丢弃）
+            const cancel = () => that.cancel();
+            that.session.isActive() ? that.session.signal.addEventListener('abort', cancel, { once: true }) : cancel();
+        }
+    }
+
+    /** Whether the model belongs to a session that has been cancelled. */
+    public isCancelled(): boolean {
+        return this.cancelled || (!!this.session && !this.session.isActive());
+    }
+
+    /** Mark this model as belonging to a cancelled session and abort its download. */
+    public cancel(): void {
+        this.cancelled = true;
+        this.abortController?.abort();
     }
 }
 

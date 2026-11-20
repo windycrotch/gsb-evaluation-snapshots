@@ -1,6 +1,8 @@
 // ==============================================
 // Copyright (c) 2025 reall3d.com, MIT license
 // ==============================================
+import { LoadSession } from './LoadSession';
+
 /**
  * Gaussian Model Options
  */
@@ -24,4 +26,9 @@ export interface ModelOptions {
      * Whether to force re-download
      */
     fetchReload?: boolean;
+
+    /**
+     * Load session that owns this model. Cancelling the session aborts the download and stops parsing.
+     */
+    session?: LoadSession;
 }

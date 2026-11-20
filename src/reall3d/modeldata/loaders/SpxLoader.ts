@@ -46,6 +46,10 @@ export async function loadSpx(model: SplatModel) {
         let compressType: number = 0; // 0:gzip, 1:xz
 
         while (true) {
+            if (model.isCancelled()) {
+                model.status = ModelStatus.FetchAborted;
+                break;
+            }
             let { done, value } = await reader.read();
             if (done) break;
 
@@ -250,11 +254,13 @@ export async function loadSpx(model: SplatModel) {
             model.abortController.abort();
         }
     } finally {
-        model.status === ModelStatus.Fetching && (model.status = ModelStatus.FetchDone);
+        model.status === ModelStatus.Fetching && (model.status = model.isCancelled() ? ModelStatus.FetchAborted : ModelStatus.FetchDone);
     }
 }
 
 function setBlockSplatData(model: SplatModel, data: Uint8Array) {
+    if (model.isCancelled()) return;
+
     let dataCnt = data.byteLength / 32;
     const stepCnt = 4096;
     const maxSplatDataCnt = Math.min(model.fetchLimit, model.modelSplatCount);
