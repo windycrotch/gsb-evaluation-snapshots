@@ -8,14 +8,16 @@
     "build": "vite build",
     "deploy": "vite build && wrangler deploy",
     "deploy-your-own": "bash scripts/deploy-your-own.sh",
-    "render-docs": "bash scripts/render-docs.sh"
+    "render-docs": "bash scripts/render-docs.sh",
+    "test": "node --test --test-concurrency=1 test/*.test.mjs"
   },
   "dependencies": {
     "three": "^0.187.0"
   },
   "devDependencies": {
     "vite": "^8.3.7",
-    "wrangler": "^4.159.0"
+    "wrangler": "^4.159.0",
+    "ws": "^8.21.0"
   },
   "license": "MIT"
 }

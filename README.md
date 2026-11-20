@@ -67,9 +67,12 @@ index.html          HUD: room box, radio, chat, entry screen (glass over the sce
 src/
   main.js           scene, lights, water, asset loading and code-generated fallbacks,
                     collision, chat bubbles, name tags, multiplayer client
+  net.js            the room WebSocket: 2 s reconnect, one connection per tab
+  room.js           who else is in the room (a new snapshot replaces the roster)
   radio.js          YouTube player synced by the clock or by the room's radio command
 public/assets/      Twinleaf FBX model, textures and male/female trainer sheets
 worker/index.js     Worker (static assets + /ws routing) and the Room Durable Object
+test/               local WebSocket tests (wrangler dev, no YouTube or Cloudflare account)
 scripts/            deploy-your-own, README image rendering
 docs/               PRD, spec, ADRs, README images and real gameplay screenshot
 ```

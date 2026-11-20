@@ -1,6 +1,8 @@
 import * as THREE from "three";
 import { FBXLoader } from "three/examples/jsm/loaders/FBXLoader.js";
 import { connectRadioToServer, receiveCommand } from "./radio.js";
+import { createRoomSocket } from "./net.js";
+import { createRoomView } from "./room.js";
 
 // ---- Asset config (change here to use other files) ----
 const TOWN = {
@@ -757,8 +759,8 @@ function applyGender(gender) {
     sprite.customDistanceMaterial,
   ].forEach((m) => (m.needsUpdate = true));
   old.dispose();
-  if (typeof ws !== "undefined" && ws?.readyState === 1)
-    ws.send(JSON.stringify({ t: "gender", gender: GENDER }));
+  if (typeof ws !== "undefined" && ws?.connected)
+    ws.send({ t: "gender", gender: GENDER });
 }
 window.applyGender = applyGender; // used by the start screen
 
@@ -1077,8 +1079,7 @@ function changeName(newName) {
   try {
     localStorage.setItem("name", NAME);
   } catch {}
-  if (MULTIPLAYER && ws?.readyState === 1)
-    ws.send(JSON.stringify({ t: "name", name: NAME }));
+  if (MULTIPLAYER && ws?.connected) ws.send({ t: "name", name: NAME });
 }
 // the enter/pause screen has its own name field: fill it in and apply it on enter
 window.applyName = changeName;
@@ -1109,6 +1110,19 @@ elName.addEventListener("click", () => {
   inp.addEventListener("blur", () => inp.isConnected && close(true));
 });
 const others = new Map(); // id -> { mesh, tex, cfg, target, dir, step, name }
+// The room's player list lives in room.js; this only builds/removes the characters.
+const roomView = createRoomView({
+  onAdd: createOther,
+  onRemove: removeOther,
+  onUpdate: (p) => {
+    const o = others.get(p.id);
+    if (!o) return;
+    if (typeof p.name === "string") o.name = p.name;
+    if (Number.isFinite(p.x) && Number.isFinite(p.z)) o.target.set(p.x, 0, p.z);
+    if (p.dir) o.dir = p.dir;
+    if (Number.isFinite(p.step)) o.step = p.step;
+  },
+});
 let myId = null;
 let ws = null;
 
@@ -1185,54 +1199,89 @@ function removeOther(id) {
 }
 function updateCount() {
   const el = document.querySelector("#place small");
-  if (el)
-    el.textContent = `room ${ROOM} · ${others.size + 1} trainer${others.size ? "s" : ""}`;
+  if (!el) return;
+  // me (once I'm in the room) plus everyone drawn
+  const count = others.size + (myId ? 1 : 0);
+  el.textContent = `room ${ROOM} · ${count} trainer${count === 1 ? "" : "s"}`;
+}
+
+// A per-tab id: the same tab reconnecting after a drop keeps it (the server uses it
+// to replace its own old connection), while another tab of the same person gets a
+// different one and counts as a separate trainer.
+function tabClientId() {
+  const fresh = () => Math.random().toString(36).slice(2, 12) + Date.now().toString(36);
+  try {
+    let id = sessionStorage.getItem("lobby-client-id");
+    if (!id) sessionStorage.setItem("lobby-client-id", (id = fresh()));
+    return id;
+  } catch {
+    return fresh();
+  }
+}
+
+// Messages from a socket that was closed or replaced never reach the game
+// (src/net.js drops them), so there is no "which connection is this" check here.
+function onMessage(m) {
+  if (!m || typeof m !== "object") return;
+  if (m.t === "you") {
+    // a reconnect gets a new id: the old self is dropped right away, and the
+    // `state` that follows is the full room (never including us)
+    if (myId && myId !== m.id) roomView.remove(myId);
+    myId = m.id;
+    updateCount();
+  } else if (m.t === "state") {
+    // a full snapshot: drops anyone who left while we were disconnected
+    roomView.sync((m.players || []).filter((p) => p && p.id !== myId));
+  } else if (m.t === "joined") {
+    if (m.player && m.player.id !== myId) roomView.add(m.player);
+  } else if (m.t === "left") {
+    if (m.id !== myId) roomView.remove(m.id);
+  } else if (m.t === "chat") {
+    receiveChat(m.id, m.name, m.text);
+  } else if (m.t === "radio") {
+    receiveCommand(m.command);
+  } else if (m.t === "error") {
+    addToHistory("system", m.msg);
+  } else if (m.t === "name") {
+    roomView.update({ id: m.id, name: m.name });
+  } else if (m.t === "gender") {
+    // recreate the character with the other gender's look, keeping the position
+    const o = others.get(m.id);
+    if (o) {
+      const p = {
+        id: m.id,
+        x: o.mesh.position.x,
+        z: o.mesh.position.z,
+        dir: o.dir,
+        step: o.step,
+        name: o.name,
+        gender: m.gender,
+      };
+      roomView.remove(m.id);
+      roomView.add(p);
+    }
+  } else if (m.t === "pos") {
+    if (m.id === myId) return;
+    roomView.update(m);
+  }
 }
 
 function connect() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  ws = new WebSocket(`${proto}://${location.host}/ws/${ROOM}`);
-  ws.onopen = () =>
-    ws.send(JSON.stringify({ t: "hello", name: NAME, gender: GENDER }));
-  ws.onmessage = (ev) => {
-    const m = JSON.parse(ev.data);
-    if (m.t === "you") myId = m.id;
-    else if (m.t === "state") m.players.forEach(createOther);
-    else if (m.t === "joined") createOther(m.player);
-    else if (m.t === "left") removeOther(m.id);
-    else if (m.t === "chat") receiveChat(m.id, m.name, m.text);
-    else if (m.t === "radio") receiveCommand(m.command);
-    else if (m.t === "error") addToHistory("system", m.msg);
-    else if (m.t === "name") {
-      const o = others.get(m.id);
-      if (o) o.name = m.name;
-    } else if (m.t === "gender") {
-      // recreate the character with the other gender's look, keeping the position
-      const o = others.get(m.id);
-      if (o) {
-        const p = {
-          id: m.id,
-          x: o.target.x,
-          z: o.target.z,
-          dir: o.dir,
-          step: o.step,
-          name: o.name,
-          gender: m.gender,
-        };
-        removeOther(m.id);
-        createOther(p);
-      }
-    } else if (m.t === "pos") {
-      const o = others.get(m.id) || createOther(m);
-      o.target.set(m.x, 0, m.z);
-      o.dir = m.dir;
-      o.step = m.step;
-    }
-  };
-  ws.onclose = () => {
-    [...others.keys()].forEach(removeOther);
-    setTimeout(connect, 2000); // reconnect
-  };
+  ws = createRoomSocket({
+    url: `${proto}://${location.host}/ws/${ROOM}`,
+    clientId: tabClientId(),
+    onOpen: () => ws.send({ t: "hello", name: NAME, gender: GENDER }),
+    onMessage: (data) => {
+      let m;
+      try { m = JSON.parse(data); } catch { return; }
+      onMessage(m);
+    },
+    onClose: () => roomView.clear(), // no ghosts while we're away
+    onReplaced: () =>
+      addToHistory("system", "this tab was replaced by another connection"),
+  });
+  ws.connect();
 }
 const MULTIPLAYER = true;
 if (MULTIPLAYER) {
@@ -1241,19 +1290,19 @@ if (MULTIPLAYER) {
   connectRadioToServer((idx) => {
     let password = "";
     try { password = localStorage.getItem("admin-password") || ""; } catch {}
-    if (ws?.readyState === 1) ws.send(JSON.stringify({ t: "radio", idx, password }));
+    ws?.send({ t: "radio", idx, password });
   });
 }
 
 let lastSend = 0,
   lastState = "";
 function sendPosition(now, step) {
-  if (!ws || ws.readyState !== 1 || now - lastSend < 66) return; // ~15x/s
+  if (!ws?.connected || now - lastSend < 66) return; // ~15x/s
   const state = `${pos.x.toFixed(2)},${pos.z.toFixed(2)},${dir},${step}`;
   if (state === lastState) return;
   lastSend = now;
   lastState = state;
-  ws.send(JSON.stringify({ t: "pos", x: pos.x, z: pos.z, dir, step }));
+  ws.send({ t: "pos", x: pos.x, z: pos.z, dir, step });
 }
 
 function updateOthers(dt) {
@@ -1377,8 +1426,7 @@ document.querySelector("#chat form").addEventListener("submit", (e) => {
   // desktop: leave the box so the arrows walk again; phone: keep the keyboard up to keep talking
   if (!MOBILE) elInput.blur();
   if (!text) return;
-  if (MULTIPLAYER && ws?.readyState === 1)
-    ws.send(JSON.stringify({ t: "chat", text }));
+  if (MULTIPLAYER && ws?.connected) ws.send({ t: "chat", text });
   else receiveChat("me", NAME, text); // offline: show only to me
 });
 // Enter opens the chat; Esc leaves it

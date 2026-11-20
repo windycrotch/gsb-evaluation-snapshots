@@ -11,12 +11,17 @@
 - Anti-flood per IP: at most 3 connections, chat budget shared across tabs, admin locked for 15 min after 5 wrong passwords (counted per IP, survives reconnects).
 - Browser icon: the town's lamp post (`public/favicon.svg`).
 - Progressive mute for chat spam (rate exceeded, or the same text 4+ times in a row): warning, then 15 s, 1 min, 5 min, 30 min.
+- `npm test`: local WebSocket tests (workerd through `wrangler dev`, no YouTube or Cloudflare account) for reconnecting, replacement at the per-IP limit, the shared chat budget, a mute surviving a reconnect and ending, concurrent wrong passwords and a lock that expires.
 
 ### Changed
 - Room limit raised from 40 to 100 players.
 - A single room, `lobby`: `?room=` is gone and the server refuses other room names, so nobody can open extra rooms to run up the bill.
 
 ### Fixed
+- A reconnect no longer bounces off "too many connections": a new connection from an IP already at its 3-connection limit now closes that IP's oldest connection (announced as `left`, closed with 4001) and takes its seat. The per-tab client id means a reconnecting tab replaces its own old socket, so no duplicate or ghost trainer appears.
+- Chat mutes and the admin password lock are kept per IP in storage, not in memory: they survive a reconnect and the object's restart. Wrong passwords are counted in one storage transaction per try, so concurrent attempts can't lose a count or slip past a lock; a lock that has ended starts again from zero.
+- Replaced or closed connections now take their rate buckets with them; the persisted mute/lock stay with the IP.
+- After a reconnect the client drops the roster and rebuilds it from the server's `state` snapshot, so players who left while it was away don't linger, and it stays listening to the new socket only.
 - Chat history scrolls to older messages; new messages only pull you down if you were already at the bottom.
 - Long words without spaces now wrap in the chat bubble and history.
 

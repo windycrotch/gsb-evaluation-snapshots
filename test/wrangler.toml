@@ -1,0 +1,13 @@
+# Config used only by the local WebSocket tests (test/ws.test.js).
+# No assets binding: the tests speak the /ws protocol and never load the site.
+# The limits are shortened per test run with `--var` (see test/ws.test.js).
+name = "lofi-lobby-test"
+main = "../worker/index.js"
+compatibility_date = "2025-06-01"
+
+[durable_objects]
+bindings = [{ name = "ROOM", class_name = "Room" }]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Room"]

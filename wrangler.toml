@@ -21,3 +21,7 @@ renamed_classes = [{ from = "Sala", to = "Room" }]
 
 # ALLOWED_ORIGINS (optional): extra origins allowed on the WebSocket, comma-separated.
 # ADMIN_PASSWORD: secret -> `npx wrangler secret put ADMIN_PASSWORD` (never here)
+#
+# Tests shorten the limits through `--var` (see test/ws.test.js); unset, the
+# defaults in worker/index.js apply: MAX_PER_IP, ADMIN_ATTEMPTS, ADMIN_LOCK_MS,
+# MUTE_STEPS_MS (comma-separated ladder), MAX_PLAYERS.

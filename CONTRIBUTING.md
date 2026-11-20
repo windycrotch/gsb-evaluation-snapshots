@@ -10,6 +10,7 @@ printf 'ADMIN_PASSWORD=%s\nALLOWED_ORIGINS=http://localhost:5173\n' "$(openssl r
 npm run dev:server    # Worker + Durable Object on :8787
 npm run dev           # site on http://localhost:5173 (proxies /ws to :8787)
 npm run build         # production build in dist/
+npm test              # local WebSocket tests (starts wrangler dev; no accounts or secrets)
 ```
 
 To deploy your own: `npm run deploy-your-own` ([README](README.md#deploy-your-own)).
