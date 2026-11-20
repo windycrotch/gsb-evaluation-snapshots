@@ -139,6 +139,10 @@
 
     ![Screenshot-Batch](images/Screenshot-Batch.png)
 
+  - Recoverable per-item execution: a failed item is rolled back on its own and the remaining items still render; when the batch ends — success, failure, or cancellation — the active camera, resolution, collection/object visibility and selection, image-node texture, and batch variables are all restored to their pre-batch values. Files from successful renders are never deleted.
+
+  - The panel reports the succeeded, failed, and remaining counts from the last run, with each failed item labelled by its object category (Camera, Collection, Item, or Image). Starting a second batch while one is running is blocked, and deleting the target image node mid-batch fails only that item instead of crashing the rest.
+
 - ### Render Node
 
   - One-click baking of material nodes to texture files
@@ -206,3 +210,15 @@ These latter two methods will not connect to the centralised repository here on 
 ## Notes:
 
 Software is provided as-is with no warranty or provision of suitability. These are internal tools and are shared because we want to support an open community. Bug reports are welcomed, but we cannot commit to fixing or adding features. Not all features may be actively maintained, as they're updated on an as-needed basis.
+
+
+
+## Development:
+
+The batch renderer's recovery logic lives in `Launch_RenderKit/batch_engine.py`, which is pure Python with no `bpy` dependency. Automated tests run locally without Blender or rendering, using in-memory fakes of the Blender data model:
+
+```bash
+python -I tests/run_batch_tests.py
+```
+
+The suite covers full success, single-item failure with continuation, user cancellation, and repeated-trigger re-entrancy, plus collection/item/image rollback (including a target node deleted mid-batch) and assertions that every scene value and the manually entered batch variables match their pre-batch state after each run.

@@ -825,6 +825,31 @@ class RenderKitSettings(bpy.types.PropertyGroup):
 		min=0,
 		max=1,
 		subtype="FACTOR")
+
+	# Batch run reports (populated after each completed batch, used by the panel)
+	# These never participate in scene sync or render handlers, they only store
+	# the outcome of the most recent batch for user-facing feedback.
+	batch_report_total: IntProperty(
+		name="Last Batch Total",
+		description="Number of items in the most recently run batch",
+		default=0)
+	batch_report_success: IntProperty(
+		name="Last Batch Successes",
+		description="Number of items rendered successfully in the most recent batch",
+		default=0)
+	batch_report_failed: IntProperty(
+		name="Last Batch Failures",
+		description="Number of items that failed in the most recent batch",
+		default=0)
+	batch_report_cancelled: BoolProperty(
+		name="Last Batch Cancelled",
+		description="Whether the most recent batch was stopped by user cancellation",
+		default=False)
+	batch_report_failures: StringProperty(
+		name="Last Batch Failure Details",
+		description="JSON list of failed item categories, labels, and error messages",
+		default="[]",
+		maxlen=16384)
 	
 	# Render node
 	node_uvmap: StringProperty(
