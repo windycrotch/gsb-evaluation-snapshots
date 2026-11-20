@@ -1,0 +1,34 @@
+{
+  // Change this to match your project
+  "include": ["**/*"],
+  // Keeps the test harness and the scaffolding templates (tasks/, which import
+  // app-side paths that do not exist in core) out of the type check and
+  // declaration generation, so generate-types emits the flat types/ layout
+  // package.json publishes. types/ is the output, so it must not be an input.
+  "exclude": ["node_modules", "tests", "tasks", "vitest.config.ts", "types"],
+  "compilerOptions": {
+    // Tells TypeScript to read JS files, as
+    // normally they are ignored as source files
+    "allowJs": false,
+    "strict": false,
+    // Generate d.ts files
+    "declaration": true,
+    // This compiler run should
+    // only output d.ts files
+    "emitDeclarationOnly": true,
+    // Types should go into this directory.
+    // Removing this would place the .d.ts files
+    // next to the .js files
+    "lib": ["es2021", "dom"],
+    "target": "es2021",
+    "outDir": "types",
+    // Pins the flat layout: src/Graphics.ts emits types/Graphics.d.ts.
+    "rootDir": "./src",
+    "noImplicitAny": true,
+    "module": "esnext",
+    // Resolves package.json "exports", so three/webgpu and three/tsl find
+    // their @types/three declarations without path mappings.
+    "moduleResolution": "bundler",
+    "types": ["three"]
+  }
+}

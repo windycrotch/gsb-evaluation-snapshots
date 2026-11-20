@@ -1,0 +1,72 @@
+import { CameraManager } from '../CameraManager';
+import { Graphics } from '../Graphics';
+import { SceneManager } from '../SceneManager';
+import { BaseRender } from '../render_mode/BaseRender';
+
+class VRRender extends BaseRender
+{
+  constructor()
+  {
+    super();
+  }
+
+  render()
+  {
+    // Graphics.clear(undefined, CameraManager.current, true, true);
+
+    if (SceneManager.current.on_pre_render)
+    {
+      SceneManager.current.on_pre_render();
+    }
+
+    if (SceneManager.current.render)
+    {
+      SceneManager.current.render();
+    }
+    else
+    {
+      Graphics.render(SceneManager.current, CameraManager.current, Graphics._renderer.getRenderTarget());
+    }
+
+    this.render_spectator_camera();
+
+    if (SceneManager.current.on_post_render)
+    {
+      SceneManager.current.on_post_render();
+    }
+  }
+
+  render_spectator_camera()
+  {
+    const spectator_camera = CameraManager.spectator;
+
+    if (spectator_camera && Graphics._renderer.xr.isPresenting)
+    {
+      // XRManager types isPresenting as readonly, but it is a plain field that three's
+      // own examples flip to render the spectator view without WebXR.
+      const xr = Graphics._renderer.xr as typeof Graphics._renderer.xr & { isPresenting: boolean };
+      const xrCam = xr.getCamera();
+
+      spectator_camera.projectionMatrix.copy(CameraManager.current.projectionMatrix);
+
+      spectator_camera.position.copy(xrCam.position);
+      spectator_camera.quaternion.copy(xrCam.quaternion);
+
+      // we'll restore this later
+      const currentRenderTarget = Graphics._renderer.getRenderTarget();
+
+      // turn off the WebXR rendering
+      xr.isPresenting = false;
+
+      // render to the canvas on our main display
+      Graphics._renderer.setRenderTarget(null);
+      Graphics._renderer.render(SceneManager.current, spectator_camera);
+
+      // reset back to enable WebXR
+      Graphics._renderer.setRenderTarget(currentRenderTarget);
+      xr.isPresenting = true;
+    }
+  }
+}
+
+export { VRRender };

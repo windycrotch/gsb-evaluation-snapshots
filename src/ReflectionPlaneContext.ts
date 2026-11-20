@@ -1,0 +1,22 @@
+import type { BufferGeometry } from 'three';
+import { Vector3 } from 'three';
+
+class ReflectionPlaneContext
+{
+  target_geometry: BufferGeometry;
+  target_position: Vector3;
+
+  init()
+  {
+    this.target_geometry = undefined;
+    this.target_position = new Vector3();
+  }
+
+  set_target_geometry(geometry: BufferGeometry)
+  {
+    this.target_geometry = geometry;
+  }
+}
+
+const reflection_plane_context = new ReflectionPlaneContext();
+export { reflection_plane_context as ReflectionPlaneContext };

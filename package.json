@@ -1,0 +1,75 @@
+{
+  "name": "ohzi-core",
+  "version": "15.2.1",
+  "description": "OHZI Interactive Core Library",
+  "type": "module",
+  "source": "src/index.ts",
+  "module": "build/index.mjs",
+  "types": "types/index.d.ts",
+  "sideEffects": false,
+  "files": [
+    "build",
+    "LICENSE",
+    "src",
+    "types",
+    "package.json"
+  ],
+  "scripts": {
+    "preinstall": "yarn config-hooks",
+    "start": "rollup -w -c",
+    "config-hooks": "git config core.hooksPath git_hooks",
+    "build": "rollup -c",
+    "create-tag": "node tasks/app/create_tag.mjs",
+    "fix-syntax": "npx eslint src --fix || echo 'Done.'",
+    "test": "vitest run",
+    "test-watch": "vitest",
+    "generate-types": "node -e \"require('fs').rmSync('types', { recursive: true, force: true })\" && tsc",
+    "upload": "yarn build && yarn generate-types && npm publish && yarn create-tag",
+    "create-view": "node ./tasks/create_view/create_view.mjs",
+    "create-scene": "node ./tasks/create_scene/create_scene.mjs",
+    "import-model": "node ./tasks/import_model/import_model.mjs",
+    "create-component": "node ./tasks/create_component/create_component.mjs",
+    "create-modal": "node ./tasks/create_modal/create_modal.mjs",
+    "create-transition": "node ./tasks/create_transition/create_transition.mjs",
+    "test-unit": "vitest run --project unit",
+    "test-browser": "vitest run --project browser"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/ohzinteractive/core.git"
+  },
+  "keywords": [
+    "ohzi",
+    "core"
+  ],
+  "author": "OHZI Interactive Studio",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/ohzinteractive/core/issues"
+  },
+  "homepage": "https://github.com/ohzinteractive/core",
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/"
+  },
+  "dependencies": {
+    "three": "0.186.0"
+  },
+  "devDependencies": {
+    "@rollup/plugin-typescript": "^12.3.0",
+    "@types/node": "^25.0.3",
+    "@types/three": "0.186.0",
+    "@typescript-eslint/eslint-plugin": "^8.18.2",
+    "@typescript-eslint/parser": "^8.18.2",
+    "@vitest/browser-playwright": "4.1.11",
+    "eslint": "^8.57.0",
+    "eslint-config-prettier": "^10.1.8",
+    "playwright": "^1.63.0",
+    "rollup": "^2.44.0",
+    "rollup-plugin-sourcemaps": "^0.6.3",
+    "rollup-plugin-terser": "^7.0.2",
+    "tslib": "^2.8.1",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.18.2",
+    "vitest": "^4.1.11"
+  }
+}

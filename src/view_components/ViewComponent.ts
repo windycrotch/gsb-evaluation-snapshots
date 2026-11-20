@@ -1,0 +1,68 @@
+import { ViewComponentManager } from './ViewComponentManager';
+
+export class ViewComponent
+{
+  container: HTMLElement;
+  hidden: boolean;
+  name: string;
+  
+  constructor({
+    name,
+    container
+  }: { name: string; container: HTMLElement })
+  {
+    this.name = name;
+    this.container = container;
+    this.hidden = true;
+
+    ViewComponentManager.register_component(this);
+  }
+
+  start()
+  {
+  }
+
+  on_enter()
+  {
+    this.container.classList.remove('hidden');
+    ViewComponentManager.enable_component(this);
+
+    this.hidden = false;
+  }
+
+  update(current_state_data: any)
+  {
+  }
+
+  on_exit()
+  {
+    this.container.classList.add('hidden');
+    ViewComponentManager.disable_component(this);
+
+    this.hidden = true;
+  }
+
+  set_opacity(current_state_data: any)
+  {
+    this.container.style.opacity = current_state_data[`${this.name}_opacity`];
+    this.toggle_hidden();
+  }
+
+  toggle_hidden()
+  {
+    if (Number(this.container.style.opacity) > 0.001)
+    {
+      if (this.hidden)
+      {
+        this.on_enter();
+      }
+    }
+    else
+    {
+      if (!this.hidden)
+      {
+        this.on_exit();
+      }
+    }
+  }
+}

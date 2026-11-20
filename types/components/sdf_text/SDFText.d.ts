@@ -1,0 +1,32 @@
+import { Color, Matrix4, Quaternion, Vector2, Vector3 } from 'three';
+declare class SDFText {
+    __opacity: number;
+    __text: string;
+    color: Color;
+    color_is_dirty: boolean;
+    glyph_is_dirty: boolean;
+    glyph_layout: any;
+    glyphs: any[];
+    matrix: Matrix4;
+    matrix_is_dirty: boolean;
+    pivot_point: Vector2;
+    position: Vector3;
+    quaternion: Quaternion;
+    scale: Vector3;
+    constructor(glyph_layout: any, text?: string);
+    set text(value: string);
+    get text(): string;
+    update_matrix(): void;
+    clear_glyph_dirty(): void;
+    clear_color_dirty(): void;
+    set_rotation(orientation?: number, tilt?: number): void;
+    set_position(pos: Vector3): void;
+    set_size(size: number): void;
+    set_color(col: Color): void;
+    set_pivot(pivot: Vector2): void;
+    set opacity(op: number);
+    get opacity(): number;
+    update_glyphs(): void;
+    __generate_glyphs(text: string): void;
+}
+export { SDFText };

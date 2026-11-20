@@ -1,0 +1,98 @@
+import { CommonScene } from './common/CommonScene';
+
+import { Settings } from '../Settings';
+import { Sections } from '../views/Sections';
+
+import { template_high_objects } from '../../data/assets/template/high/template_high_objects';
+import { template_high_sounds } from '../../data/assets/template/high/template_high_sounds';
+import { template_high_textures } from '../../data/assets/template/high/template_high_textures';
+import { template_objects } from '../../data/assets/template/template_objects';
+import { template_sounds } from '../../data/assets/template/template_sounds';
+import { template_textures } from '../../data/assets/template/template_textures';
+
+import { CameraController, CameraManager, Debug, Grid, OScreen, PerspectiveCamera } from 'ohzi-core';
+import { Color } from 'three';
+import { SimpleCameraState } from '../camera_controller/states/SimpleCameraState';
+import { Input } from '../components/Input';
+// __OBJECT_IMPORTS__
+
+export class TemplateScene extends CommonScene
+{
+  camera: PerspectiveCamera;
+  camera_controller: CameraController;
+  // __OBJECT_FIELDS__
+
+  constructor()
+  {
+    super({
+      name: Sections.TEMPLATE
+    });
+  }
+
+  init()
+  {
+    super.init();
+
+    this.camera_controller = new CameraController(Input);
+
+    this.init_camera();
+    this.setup_camera();
+
+    this.set_assets(template_objects, template_textures, template_sounds);
+
+    if (Settings.debug_mode)
+    {
+      this.add(Debug.draw_axis());
+      this.add(new Grid());
+    }
+  }
+
+  update()
+  {
+    super.update();
+
+    this.camera_controller.update();
+  }
+
+  on_assets_ready()
+  {
+    this.set_high_assets(template_high_objects, template_high_textures, template_high_sounds);
+
+    super.on_assets_ready();
+
+    // __OBJECTS__
+  }
+
+  on_high_quality_assets_ready()
+  {
+    super.on_high_quality_assets_ready();
+
+    // __HIGH_OBJECTS__
+  }
+
+  init_camera()
+  {
+    this.camera = new PerspectiveCamera(60, OScreen.aspect_ratio, 0.1, 200);
+    this.camera.updateProjectionMatrix();
+    this.camera.position.z = 10;
+
+    this.camera.clear_color.copy(new Color('#181818'));
+    this.camera.clear_alpha = 1;
+  }
+
+  setup_camera()
+  {
+    CameraManager.current = this.camera;
+
+    this.camera_controller.set_camera(this.camera);
+    // this.camera_controller.set_idle();
+    this.camera_controller.set_state(new SimpleCameraState(Input));
+
+    this.camera_controller.min_zoom = 1;
+    this.camera_controller.max_zoom = 40;
+    this.camera_controller.reference_zoom = 10;
+
+    this.camera_controller.reference_position.set(0, 0, 0);
+    this.camera_controller.set_rotation(0, 0);
+  }
+}
