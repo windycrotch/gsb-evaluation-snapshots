@@ -237,6 +237,42 @@ describe('WebGLManager (browser)', () => {
 		expect(fragResult.data).toBeNull();
 	});
 
+	// ── Remote shader fetch failures ───────────────────────────────────────
+
+	it('setRemoteVertexShader returns err when the fetch fails', async () => {
+		const result = WebGLManager.fromHTMLCanvasElement(canvas);
+		expect(result.error).toBeNull();
+		manager = result.data!;
+
+		const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('network down'));
+		try {
+			const remote = await manager.setRemoteVertexShader('/__test/missing-vertex.glsl');
+			expect(remote.error).not.toBeNull();
+			expect(remote.data).toBeNull();
+			expect(remote.error!.message).toContain('vertex shader');
+		} finally {
+			fetchSpy.mockRestore();
+		}
+	});
+
+	it('setRemoteFragmentShaders returns err on a 404 and keeps the manager usable', async () => {
+		manager = buildManager(SOLID_RED_FS);
+		const fetchSpy = vi
+			.spyOn(globalThis, 'fetch')
+			.mockResolvedValue(new Response('not found', { status: 404, statusText: 'Not Found' }));
+		try {
+			const remote = await manager.setRemoteFragmentShaders('/__test/missing-fragment.glsl');
+			expect(remote.error).not.toBeNull();
+			expect(remote.error!.message).toContain('fragment shader');
+		} finally {
+			fetchSpy.mockRestore();
+		}
+
+		// A fetch failure must not leave the manager in a broken state.
+		expect(manager.paintCanvas().error).toBeNull();
+		expect(readPixel(manager.getGLContext(), 1, 1)).toEqual([255, 0, 0, 255]);
+	});
+
 	// ── checkWebGLVitals ────────────────────────────────────────────────────
 
 	it('checkWebGLVitals returns ok after a successful render', () => {

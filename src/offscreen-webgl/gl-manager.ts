@@ -38,6 +38,7 @@ export class WebGLManager {
 
 	private usesPingPongGroups: boolean = false;
 	private programLinked: boolean = false;
+	private destroyed: boolean = false;
 
 	public constructor(
 		canvas: HTMLCanvasElement,
@@ -86,6 +87,10 @@ export class WebGLManager {
 	}
 
 	public destroy(): Result<WebGLManager> {
+		// Idempotent: a second destroy (repeated unmount, worker-side cleanup race) is a
+		// safe no-op rather than touching a released context.
+		if (this.destroyed) return ok(this);
+		this.destroyed = true;
 		this.frameTask?.cancel();
 		this.frameTask = null;
 		try {

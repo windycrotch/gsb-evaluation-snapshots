@@ -56,6 +56,20 @@ export function useOffscreenWebGL(canvas: HTMLCanvasElement | null, options: Use
 		}));
 	}, []);
 
+	// Releases everything this instance owns. Idempotent: safe to run from the effect
+	// cleanup, an init failure, or both — repeated calls and unmounts before `ready`
+	// never throw and never touch another instance's resources (each instance owns a
+	// distinct proxy id and worker manager).
+	const cleanup = useCallback(() => {
+		observerRef.current?.disconnect();
+		observerRef.current = null;
+		const proxy = proxyRef.current;
+		if (proxy) {
+			proxy.destroy();
+			proxyRef.current = null;
+		}
+	}, []);
+
 	// Initialize WebGL
 	useEffect(() => {
 		if (!canvas || proxyRef.current) return;
@@ -64,8 +78,11 @@ export function useOffscreenWebGL(canvas: HTMLCanvasElement | null, options: Use
 
 		let cancelled = false;
 		const initializeWebGL = async () => {
+			let proxy: WebGLManagerProxyType | null = null;
 			try {
-				let size: [number, number] = [canvas.width, canvas.height];
+				// Pixel size follows the canvas's own CSS box multiplied by the device
+				// pixel ratio; falls back to its attribute size when it has no layout yet.
+				let size: [number, number] = [Math.max(1, canvas.width), Math.max(1, canvas.height)];
 				if (!disableResizeObserver) {
 					const rect = canvas.getBoundingClientRect();
 					if (rect.width > 0 && rect.height > 0) {
@@ -76,7 +93,7 @@ export function useOffscreenWebGL(canvas: HTMLCanvasElement | null, options: Use
 					}
 				}
 				sizeRef.current = size;
-				const proxy = new WebGLManagerProxy(canvas) as any as WebGLManagerProxyType;
+				proxy = new WebGLManagerProxy(canvas) as any as WebGLManagerProxyType;
 				proxyRef.current = proxy;
 
 				if (options.vertexShaderURL) {
@@ -132,20 +149,23 @@ export function useOffscreenWebGL(canvas: HTMLCanvasElement | null, options: Use
 					proxy,
 				}));
 			} catch (error) {
-				if (!cancelled) setError(error as Error);
+				if (cancelled) return;
+				// Release the partially initialized worker manager so a failed canvas
+				// leaves no resources behind, then surface a recoverable error state.
+				cleanup();
+				setError(error as Error);
 			}
 		};
 
 		initializeWebGL();
 
 		return () => {
+			// Late init results after this point are ignored via `cancelled`; cleanup
+			// destroys the manager whether or not initialization has finished.
 			cancelled = true;
-			if (proxyRef.current) {
-				proxyRef.current.destroy();
-				proxyRef.current = null;
-			}
+			cleanup();
 		};
-	}, [canvas]);
+	}, [canvas, cleanup]);
 
 	useEffect(() => {
 		if (!state.isReady || !proxyRef.current) return;
@@ -199,7 +219,11 @@ export function useOffscreenWebGL(canvas: HTMLCanvasElement | null, options: Use
 				if (sizeRef.current[0] === pixelWidth && sizeRef.current[1] === pixelHeight) return;
 				sizeRef.current = [pixelWidth, pixelHeight];
 				proxy.updateUniform('u_resolution', [pixelWidth, pixelHeight]);
-				proxy.resizeAsync(pixelWidth, pixelHeight).catch(setError);
+				proxy.resizeAsync(pixelWidth, pixelHeight).catch((error) => {
+					// Ignore rejections that arrive after an unmount/error cleanup; the proxy
+					// is already gone and React state updates would warn on a dead component.
+					if (proxyRef.current === proxy) setError(error as Error);
+				});
 			});
 
 			observer.observe(canvas);
@@ -212,7 +236,7 @@ export function useOffscreenWebGL(canvas: HTMLCanvasElement | null, options: Use
 		} catch (error) {
 			setError(error as Error);
 		}
-	}, [canvas, disableResizeObserver, state.isReady]);
+	}, [canvas, disableResizeObserver, state.isReady, setError]);
 
 	return state;
 }

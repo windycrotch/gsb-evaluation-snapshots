@@ -14,7 +14,6 @@ export type WebGLManagerProxyType = WebGLManagerProxyClass & MappedManagerFuncti
 
 class WebGLManagerProxyClass {
 	private static worker: Worker | null = null;
-	private static workerFailure: Error | null = null;
 	private static canvasIds = new WeakMap<HTMLCanvasElement, string>();
 	private static releasedCanvases = new FinalizationRegistry<string>((canvasId) => {
 		WebGLManagerProxyClass.worker?.postMessage({ type: WorkerMessageType.RELEASE, canvasId } satisfies WorkerMessages);
@@ -22,6 +21,7 @@ class WebGLManagerProxyClass {
 	private static queuedMessages: WorkerMessages[] = [];
 	private static pendingResponses: Record<string, { resolve: (value: any) => void; reject: (error: Error) => void }> = {};
 	private readonly PROXY_ID = `WebGLManagerProxy-${uuidv4()}`;
+	private destroyed = false;
 
 	private static readonly _managerPrototype = Object.getOwnPropertyNames(WebGLManager.prototype).reduce(
 		(acc, prop) => {
@@ -39,8 +39,10 @@ class WebGLManagerProxyClass {
 			WebGLManagerProxyClass.worker = new WebWorker();
 			WebGLManagerProxyClass.worker.onmessage = WebGLManagerProxyClass.handleMessage;
 			WebGLManagerProxyClass.worker.onerror = (event) => {
+				// A worker-level crash only rejects the requests that were in flight; the
+				// worker itself stays alive and later canvases must keep working, so the
+				// failure is never latched globally.
 				const error = new Error(event.message || 'WebGL worker failed');
-				WebGLManagerProxyClass.workerFailure = error;
 				for (const pending of Object.values(WebGLManagerProxyClass.pendingResponses)) pending.reject(error);
 				WebGLManagerProxyClass.pendingResponses = {};
 			};
@@ -132,6 +134,8 @@ class WebGLManagerProxyClass {
 	}
 
 	public callMethod<ManagerMethod extends keyof WebGLManager>(method: ManagerMethod, ...args: any[]): void {
+		if (this.destroyed) return;
+		if (method === 'destroy') this.destroyed = true;
 		WebGLManagerProxyClass.enqueue({
 			type: WorkerMessageType.CALL_METHOD,
 			proxyId: this.PROXY_ID,
@@ -144,6 +148,7 @@ class WebGLManagerProxyClass {
 		method: ManagerMethod,
 		...args: any[]
 	): Promise<ReturnType<WebGLManager[ManagerMethod] extends (...args: any) => any ? WebGLManager[ManagerMethod] : never>> {
+		if (method === 'destroy') this.destroyed = true;
 		const id = uuidv4();
 		return this.request(id, {
 			type: WorkerMessageType.CALL_METHOD,
@@ -156,6 +161,7 @@ class WebGLManagerProxyClass {
 	}
 
 	public runOnContext(key: string, fn: RunOnWorkerContextFn, onEachFrame: boolean = false) {
+		if (this.destroyed) return;
 		WebGLManagerProxyClass.enqueue({
 			type: WorkerMessageType.EVAL_FN,
 			fn: fn.toString(),
@@ -182,7 +188,6 @@ class WebGLManagerProxyClass {
 		return new Promise<T>((resolve, reject) => {
 			WebGLManagerProxyClass.pendingResponses[id] = { resolve, reject };
 			try {
-				if (WebGLManagerProxyClass.workerFailure) throw WebGLManagerProxyClass.workerFailure;
 				if (!WebGLManagerProxyClass.worker) throw new Error('WebGL worker is unavailable');
 				WebGLManagerProxyClass.flush();
 				WebGLManagerProxyClass.worker.postMessage(message);
