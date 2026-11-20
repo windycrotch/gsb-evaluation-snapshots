@@ -1,0 +1,11 @@
+node_modules
+.DS_Store
+build
+.idea
+docs
+test/unit/coverage
+.vscode
+output
+dist
+test-output.xml
+.DS_Store
