@@ -125,6 +125,14 @@ await rigger.init();
 #### `AutoRigger.rig(mesh: THREE.Mesh): Promise<THREE.SkinnedMesh>`
 Analyzes the input static mesh, predicts joint locations, constructs a skeleton, and calculates procedural skin weights. Returns an IK-ready `SkinnedMesh`.
 
+Each call is an independent session. Starting a new rig supersedes any in-flight one: the older promise rejects with `RigSessionCancelledError` and its result is never applied. On failure (`ERROR` reply, missing/broken buffers, or missing skeleton data) the engine rolls back to the pre-rig state — `activeSkeleton` is unchanged, no `SkinnedMesh` is produced, and the session's skin buffers are released.
+
+#### `AutoRigger.cancelRig(): void`
+Cancels the in-flight rig session. Its promise rejects with `RigSessionCancelledError` and no request is left pending.
+
+#### `AutoRigger.init(): Promise<void>`
+Boots the worker. If initialization fails the engine stays uninitialized (`rig()` throws a clear error) and calling `init()` again retries with a fresh worker.
+
 #### `AutoRigger.setIKTarget(target: IKTarget): void`
 Assigns a 3D target for a specific joint to pull towards.
 ```typescript

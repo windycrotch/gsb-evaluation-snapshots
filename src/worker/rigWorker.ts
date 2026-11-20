@@ -258,11 +258,11 @@ function calculateBoneWeights(
 }
 
 self.onmessage = async (e: MessageEvent) => {
-  const { type, payload, msgId } = e.data;
+  const { type, payload, msgId, sessionId } = e.data ?? {};
 
   try {
     if (type === 'INIT') {
-      const { modelPath } = payload;
+      const { modelPath } = payload ?? {};
       try {
         ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/';
         session = await ort.InferenceSession.create(modelPath, {
@@ -273,27 +273,111 @@ self.onmessage = async (e: MessageEvent) => {
         session = null;
       }
       (self as any).postMessage({ type: 'INIT_DONE', msgId });
-    } 
+    }
     else if (type === 'RIG') {
-      const { mode, posBuffer, indicesBuffer, weightsBuffer, falloff } = payload;
-      const positions = new Float32Array(posBuffer);
-      const skinIndices = new Uint16Array(indicesBuffer);
-      const skinWeights = new Float32Array(weightsBuffer);
+      if (sessionId === undefined || sessionId === null) {
+        throw new Error('RIG request is missing its session id.');
+      }
+
+      const { mode, posBuffer, indicesBuffer, weightsBuffer, falloff } = payload ?? {};
+
+      if (!posBuffer) {
+        throw new Error('RIG request is missing its position buffer.');
+      }
+
+      const positions = toFloat32View(posBuffer);
+      const skinIndices = toUint16View(indicesBuffer);
+      const skinWeights = toFloat32View(weightsBuffer);
+
+      if (!positions || positions.length === 0) {
+        throw new Error('RIG request has an empty or invalid position buffer.');
+      }
+      if (!skinIndices || !skinWeights) {
+        throw new Error('RIG request is missing its skin index/weight buffers.');
+      }
+      if (skinIndices.length < (positions.length / 3) * 4) {
+        throw new Error('Skin index buffer is too small for the supplied mesh.');
+      }
+      if (skinWeights.length < (positions.length / 3) * 4) {
+        throw new Error('Skin weight buffer is too small for the supplied mesh.');
+      }
 
       const rig = await detectJoints(positions);
-      calculateBoneWeights(positions, rig, falloff, skinIndices, skinWeights);
+      calculateBoneWeights(positions, rig, falloff ?? 2.0, skinIndices, skinWeights);
+      normalizeWeights(skinWeights, positions.length / 3);
 
       if (mode === 'TRANSFERABLE') {
         (self as any).postMessage({
           type: 'RIG_DONE',
-          payload: { rig, indicesBuffer, weightsBuffer },
-          msgId
+          payload: { rig, indicesBuffer, weightsBuffer, sessionId },
+          msgId,
+          sessionId
         }, [indicesBuffer, weightsBuffer]);
       } else {
-        (self as any).postMessage({ type: 'RIG_DONE', payload: { rig }, msgId });
+        (self as any).postMessage({
+          type: 'RIG_DONE',
+          payload: { rig, sessionId },
+          msgId,
+          sessionId
+        });
       }
     }
   } catch (err: any) {
-    (self as any).postMessage({ type: 'ERROR', payload: err.message, msgId });
+    (self as any).postMessage({
+      type: 'ERROR',
+      payload: err?.message ?? String(err),
+      msgId,
+      sessionId
+    });
   }
 };
+
+function toFloat32View(buffer: any): Float32Array | null {
+  if (!buffer) return null;
+  try {
+    if (buffer instanceof Float32Array) return buffer;
+    if (isBufferLike(buffer)) return new Float32Array(buffer as any);
+  } catch {
+    /* detached buffer */
+  }
+  return null;
+}
+
+function toUint16View(buffer: any): Uint16Array | null {
+  if (!buffer) return null;
+  try {
+    if (buffer instanceof Uint16Array) return buffer;
+    if (isBufferLike(buffer)) return new Uint16Array(buffer as any);
+  } catch {
+    /* detached buffer */
+  }
+  return null;
+}
+
+function isBufferLike(value: any): boolean {
+  if (value instanceof ArrayBuffer) return true;
+  if (typeof SharedArrayBuffer !== 'undefined' && value instanceof SharedArrayBuffer) return true;
+  return ArrayBuffer.isView(value);
+}
+
+function normalizeWeights(weights: Float32Array, vertexCount: number): void {
+  for (let i = 0; i < vertexCount; i++) {
+    const offset = i * 4;
+    let sum = 0;
+    for (let k = 0; k < 4; k++) sum += weights[offset + k];
+
+    if (!Number.isFinite(sum) || sum <= 0) {
+      weights[offset] = 1;
+      weights[offset + 1] = 0;
+      weights[offset + 2] = 0;
+      weights[offset + 3] = 0;
+      continue;
+    }
+
+    if (Math.abs(sum - 1) <= 1e-6) continue;
+
+    for (let k = 0; k < 4; k++) {
+      weights[offset + k] = weights[offset + k] / sum;
+    }
+  }
+}
