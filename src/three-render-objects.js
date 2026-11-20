@@ -328,6 +328,7 @@ export default Kapsule({
     postProcessingComposer: state => state.postProcessingComposer,
     controls: state => state.controls,
     _destructor: function(state) {
+      state.backgroundImageLoadId++; // invalidate any in-flight background image loads so late callbacks can't touch released objects or fire events
       emptyObject(state.scene);
       state.controls?.dispose();
       state.renderer?.dispose();
@@ -340,7 +341,8 @@ export default Kapsule({
     camera: new three.PerspectiveCamera(),
     timer: new three.Timer(),
     tweenGroup: new TweenGroup(),
-    lastRaycasterCheck: 0
+    lastRaycasterCheck: 0,
+    backgroundImageLoadId: 0 // session token; bumped on every backgroundImageUrl change (incl. null) and on destroy to invalidate in-flight texture loads
   }),
 
   init(domNode, state, {
@@ -536,19 +538,32 @@ export default Kapsule({
     }
 
     if (changedProps.hasOwnProperty('backgroundImageUrl')) {
+      // Start a new load session: any previously in-flight texture load is now stale
+      // and must not touch the skysphere, fire callbacks or release the first frame.
+      const loadId = ++state.backgroundImageLoadId;
+
       if (!state.backgroundImageUrl) {
+        // switching back to a solid color: hide the sky and clear the old texture immediately
+        disposeSkyMaterial(state);
         state.skysphere.visible = false;
-        state.skysphere.material.map = null;
 
         !state.loadComplete && finishLoad();
       } else {
         new three.TextureLoader().load(state.backgroundImageUrl, texture => {
+          if (loadId !== state.backgroundImageLoadId) {
+            texture.dispose(); // stale session (URL changed, reset to null, or instance destroyed); drop the texture
+            return;
+          }
+
           texture.colorSpace = three.SRGBColorSpace;
+          disposeSkyMaterial(state);
           state.skysphere.material = new three.MeshBasicMaterial({ map: texture, side: three.BackSide });
           state.skysphere.visible = true;
 
           // triggered when background image finishes loading (asynchronously to allow 1 frame to load texture)
-          state.onBackgroundImageLoaded && setTimeout(state.onBackgroundImageLoaded);
+          state.onBackgroundImageLoaded && setTimeout(() => {
+            loadId === state.backgroundImageLoadId && state.onBackgroundImageLoaded();
+          });
 
           !state.loadComplete && finishLoad();
         });
@@ -571,6 +586,15 @@ export default Kapsule({
 
     function finishLoad() {
       state.loadComplete = state.scene.visible = true;
+    }
+
+    function disposeSkyMaterial(state) {
+      const mat = state.skysphere.material;
+      if (mat) {
+        mat.map && mat.map.dispose(); // release the texture
+        mat.dispose && mat.dispose();
+      }
+      state.skysphere.material = new three.MeshBasicMaterial(); // fresh texture-less material
     }
   }
 });
