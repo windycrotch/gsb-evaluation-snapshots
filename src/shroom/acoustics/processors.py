@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import List, Union
+import threading
 import numpy as np
 from shroom.acoustics.spatial_signal import SpatialSignal
 from shroom.encoders.asm import ASM
@@ -67,18 +68,20 @@ class ProcessorChain(AbstractProcessor):
         self._validate_inputs(processors)
         self.processors = processors
 
-        self.unified_kernel = None
-        if hasattr(processors[-1], "_output_format"):
-            self._output_format = processors[-1]._output_format
-            processors[-1]._output_format = "SpatialSignal"
-        else:
-            self._output_format = "SpatialSignal"
+        # Capture the last processor's output configuration so the chain can
+        # reproduce it on its own output. The processor itself is NOT mutated
+        # here; it is only temporarily reconfigured while the unified kernel
+        # is being built (and always restored afterwards, even on failure).
+        last = processors[-1]
+        self._output_format = getattr(last, "_output_format", "SpatialSignal")
+        self._enforce_real_values = getattr(last, "_enforce_real_values", False)
 
-        if hasattr(processors[-1], "_enforce_real_values"):
-            self._enforce_real_values = processors[-1]._enforce_real_values
-            processors[-1]._enforce_real_values = False
-        else:
-            self._enforce_real_values = False
+        # Kernel cache, bound to the input it was built from.
+        # Holds a (input_signature, unified_kernel) tuple; storing the pair as
+        # a single object makes publication atomic, so concurrent readers never
+        # observe a kernel together with a stale/mismatched signature.
+        self._kernel_cache = None
+        self._kernel_lock = threading.Lock()
 
     @property
     def fs(self) -> int:
@@ -99,15 +102,59 @@ class ProcessorChain(AbstractProcessor):
                 )
             fs_current = processor.fs
 
+    @property
+    def unified_kernel(self) -> Union[SpatialSignal, None]:
+        """The cached unified kernel, or None if not built yet."""
+        cached = self._kernel_cache
+        return cached[1] if cached is not None else None
+
+    @staticmethod
+    def _input_signature(signal: SpatialSignal) -> tuple:
+        """
+        Signature of the input the unified kernel is valid for.
+        Any change in shape, sampling rate, time/frequency domain, space/SH
+        domain, or dtype requires rebuilding the kernel.
+        """
+        return (
+            signal.data.shape,
+            signal.fs,
+            signal.is_time,
+            signal.is_space,
+            signal.data.dtype.str,
+        )
+
+    def _get_unified_kernel(self, signal: SpatialSignal) -> SpatialSignal:
+        """
+        Return the unified kernel valid for ``signal``, building it if needed.
+
+        Thread-safe: concurrent first calls build the kernel exactly once per
+        input signature, and a kernel is only published fully built. If the
+        build raises, the cache is left untouched (previous valid entry or
+        None), so the chain stays in a clean, re-callable state.
+        """
+        signature = self._input_signature(signal)
+        cached = self._kernel_cache
+        if cached is not None and cached[0] == signature:
+            return cached[1]
+
+        with self._kernel_lock:
+            # Re-check under the lock: another thread may have built it.
+            cached = self._kernel_cache
+            if cached is not None and cached[0] == signature:
+                return cached[1]
+            kernel = self.calculate_unified_kernel(signal)
+            # Publish only after the kernel is fully built.
+            self._kernel_cache = (signature, kernel)
+            return kernel
+
     def process(self, signal: SpatialSignal) -> Union[SpatialSignal, np.ndarray]:
         """Execute the chain."""
-        if self.unified_kernel is None:
-            self.unified_kernel = self.calculate_unified_kernel(signal)
+        unified_kernel = self._get_unified_kernel(signal)
 
         # Apply kernel directly without SH-order truncation.
         # convolve_sh would truncate to min(kernel.sh_order, signal.sh_order), which
         # breaks chains where the signal is mic data (sh_order=0 due to shape[1]=1).
-        sig1 = self.unified_kernel.data if self.unified_kernel.is_time else np.fft.ifft(self.unified_kernel.data, axis=-1)
+        sig1 = unified_kernel.data if unified_kernel.is_time else np.fft.ifft(unified_kernel.data, axis=-1)
         sig2 = signal.data if signal.is_time else np.fft.ifft(signal.data, axis=-1)
         # convolve_and_sum sums over axis 1 (ch). Kernel has N_in on axis 1.
         # Mic-format signals have N_in on axis 0 → transpose to (1, N_in, T).
@@ -122,10 +169,10 @@ class ProcessorChain(AbstractProcessor):
             return data[:, 0, :].T
         result = SpatialSignal(
             data=data,
-            fs=self.unified_kernel.fs,
-            is_time=self.unified_kernel.is_time,
-            is_space=self.unified_kernel.is_space,
-            grid=self.unified_kernel.grid,
+            fs=unified_kernel.fs,
+            is_time=unified_kernel.is_time,
+            is_space=unified_kernel.is_space,
+            grid=unified_kernel.grid,
         )
         return result
 
@@ -139,28 +186,46 @@ class ProcessorChain(AbstractProcessor):
                 f"ProcessorChain expects input signal to be of shape (1, ?, ?) or (?, 1, ?) , and is of shape ({signal.data.shape})"
             )
 
-        for c1 in range(C1):
-            for c2 in range(C2):
-                impulse = np.zeros((C1, C2, 1), dtype=signal.data.dtype)
-                impulse[c1, c2, 0] = 1.0
-                res = SpatialSignal(
-                    data=impulse,
-                    fs=signal.fs,
-                    is_time=signal.is_time,
-                    is_space=signal.is_space,
-                    grid=signal.grid,
-                )
-                for processor in self.processors:
-                    res = processor.process(res)
-                kernels.append(res.data)
-        kernels = stack_kernels_dynamically(kernels)
-        return SpatialSignal(
-            data=kernels,
-            fs=signal.fs,
-            is_time=signal.is_time,
-            is_space=signal.is_space,
-            grid=signal.grid,
-        )
+        # Temporarily reconfigure the last processor so it returns an
+        # intermediate SpatialSignal (not the end-user format) and does not
+        # discard imaginary parts mid-chain. Always restore the original
+        # configuration, even if a processor raises, so neither the chain nor
+        # the processor is left in a half-configured state.
+        last = self.processors[-1]
+        restore = []
+        if hasattr(last, "_output_format"):
+            restore.append(("_output_format", last._output_format))
+            last._output_format = "SpatialSignal"
+        if hasattr(last, "_enforce_real_values"):
+            restore.append(("_enforce_real_values", last._enforce_real_values))
+            last._enforce_real_values = False
+
+        try:
+            for c1 in range(C1):
+                for c2 in range(C2):
+                    impulse = np.zeros((C1, C2, 1), dtype=signal.data.dtype)
+                    impulse[c1, c2, 0] = 1.0
+                    res = SpatialSignal(
+                        data=impulse,
+                        fs=signal.fs,
+                        is_time=signal.is_time,
+                        is_space=signal.is_space,
+                        grid=signal.grid,
+                    )
+                    for processor in self.processors:
+                        res = processor.process(res)
+                    kernels.append(res.data)
+            kernels = stack_kernels_dynamically(kernels)
+            return SpatialSignal(
+                data=kernels,
+                fs=signal.fs,
+                is_time=signal.is_time,
+                is_space=signal.is_space,
+                grid=signal.grid,
+            )
+        finally:
+            for attr, value in restore:
+                setattr(last, attr, value)
 
 
 class BinauralDecoder(AbstractProcessor):
