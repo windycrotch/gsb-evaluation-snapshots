@@ -4,6 +4,7 @@
  */
 import { engine, type LoadedStem } from './audio/engine'
 import { analyzeBpm, computeHiPeaks, computePeaks, type WaveformPeaks } from './audio/analysis'
+import { LoadSession, type DeckIntent } from './audio/loadSession'
 import {
   emptyDeck,
   emptySections,
@@ -418,93 +419,105 @@ export async function addRecordingToLibrary(filePath: string): Promise<void> {
 // ---------- Deck loading ----------
 
 /**
- * A key/scale change during an asynchronous deck load wins over the detected
- * track key. The flag is controller-only because it describes user intent,
- * not persistent deck state.
+ * Build the per-deck adapter the cancelable load session drives. Each adapter
+ * closes over its deck index and routes every state write through the store,
+ * so a session can only ever affect the deck it was created for.
  */
-const autotuneKeyWasSetManually = [false, false]
-
-/** Load a track to a deck; stems are used automatically whenever they exist. */
-export async function loadTrackToDeck(deckIndex: number, trackId: string): Promise<void> {
-  const track = useStore.getState().library.find((t) => t.id === trackId)
-  if (!track) return
-  const withStems = track.stems !== null
+function sessionDeps(deckIndex: number) {
   const deck = engine.decks[deckIndex]
-  const { pitchRange, reverb, sectionPhrase, sectionLoop } = useStore.getState().decks[deckIndex]
-  autotuneKeyWasSetManually[deckIndex] = false
-  const resetDeck = emptyDeck()
-  deck.setAutotune(resetDeck.autotune)
-  updateDeck(deckIndex, {
-    ...resetDeck,
-    pitchRange,
-    reverb,
-    sectionPhrase,
-    sectionLoop,
-    loading: true,
-    trackId,
-    title: track.name
-  })
-  try {
-    let stems: LoadedStem[]
-    if (withStems && track.stems) {
-      const entries = (['vocals', 'drums', 'bass', 'other', 'instrumental'] as const)
-        .filter((k) => track.stems![k])
-        .map((k) => ({ name: k, path: track.stems![k]! }))
-      stems = await Promise.all(
-        entries.map(async ({ name, path }) => {
-          const data = await window.stemdeck.readFile(path)
-          return { name: name[0].toUpperCase() + name.slice(1), buffer: await engine.decode(data) }
-        })
-      )
-    } else {
-      const data = await window.stemdeck.readFile(track.path)
-      stems = [{ name: 'Mix', buffer: await engine.decode(data) }]
-    }
-    deckHiPeaks[deckIndex] = computeHiPeaks(stems.map((s) => s.buffer))
-    deck.load(stems)
-    deckPeaks[deckIndex] = trackPeaks.get(trackId) ?? null
-    deck.setTempo(1)
-    deck.setPitch(0)
-    deck.setKeylock(false)
-    updateDeck(deckIndex, {
-      loading: false,
-      duration: deck.duration,
-      baseBpm: track.bpm,
-      firstBeat: track.firstBeat,
-      usingStems: withStems && stems.length > 1,
-      stems: stems.map((s) => ({ name: s.name, active: true, volume: 1 }))
-    })
-    if (
-      !autotuneKeyWasSetManually[deckIndex] &&
-      track.musicalKey !== null &&
-      track.musicalScale !== null
-    ) {
-      // Snap to the pentatonic form of the detected mode. Its notes are a
-      // subset of the parent scale, so nothing lands out of key, but dropping
-      // two notes forces the larger jumps that make the effect audible — the
-      // full 7-note scale barely moves an already-tuned vocal.
-      const detectedKey = {
-        key: track.musicalKey,
-        scale: (track.musicalScale === 'minor'
-          ? 'minorPentatonic'
-          : 'majorPentatonic') as AutotuneState['scale']
+  return {
+    getTrack: (trackId: string) =>
+      useStore.getState().library.find((t) => t.id === trackId),
+    async resolveStems(track: TrackInfo): Promise<LoadedStem[]> {
+      // Both paths — separated stems and the plain full mix — go through the
+      // same session, so neither can win a race against the other.
+      if (track.stems) {
+        const entries = (['vocals', 'drums', 'bass', 'other', 'instrumental'] as const)
+          .filter((k) => track.stems![k])
+          .map((k) => ({ name: k, path: track.stems![k]! }))
+        return Promise.all(
+          entries.map(async ({ name, path }) => {
+            const data = await window.stemdeck.readFile(path)
+            return {
+              name: name[0].toUpperCase() + name.slice(1),
+              buffer: await engine.decode(data)
+            }
+          })
+        )
       }
-      deck.setAutotune(detectedKey)
-      const current = useStore.getState().decks[deckIndex].autotune
-      updateDeck(deckIndex, { autotune: { ...current, ...detectedKey } })
-    }
-  } catch (err) {
-    deckHiPeaks[deckIndex] = null
-    deckPeaks[deckIndex] = null
-    updateDeck(deckIndex, { ...emptyDeck() })
-    showToast(`Failed to load track: ${(err as Error).message}`)
+      const data = await window.stemdeck.readFile(track.path)
+      return [{ name: 'Mix', buffer: await engine.decode(data) }]
+    },
+    computeHiPeaks: (buffers: AudioBuffer[]) => computeHiPeaks(buffers),
+    getTrackPeaks: (trackId: string) => trackPeaks.get(trackId) ?? null,
+    deck: {
+      load: (stems: LoadedStem[]) => deck.load(stems),
+      unload: () => deck.unload(),
+      setTempo: (rate: number) => deck.setTempo(rate),
+      setPitch: (semitones: number) => deck.setPitch(semitones),
+      setKeylock: (enabled: boolean) => deck.setKeylock(enabled),
+      setAutotune: (settings: Partial<AutotuneState>) => deck.setAutotune(settings),
+      get duration() {
+        return deck.duration
+      }
+    },
+    resetDeck: () => emptyDeck(),
+    preserved: () => {
+      const { pitchRange, reverb, sectionPhrase, sectionLoop } =
+        useStore.getState().decks[deckIndex]
+      return { pitchRange, reverb, sectionPhrase, sectionLoop }
+    },
+    commitState: (patch: Partial<DeckState>): DeckState => {
+      updateDeck(deckIndex, patch)
+      return useStore.getState().decks[deckIndex]
+    },
+    setHiPeaks: (peaks: WaveformPeaks | null) => {
+      deckHiPeaks[deckIndex] = peaks
+    },
+    setPeaks: (peaks: WaveformPeaks | null) => {
+      deckPeaks[deckIndex] = peaks
+    },
+    onLoadError: (message: string) => showToast(message)
   }
+}
+
+/**
+ * Load a track to a deck as a cancelable session. Starting a second load on
+ * the same deck invalidates the first: every continuation of the old session
+ * sees it is no longer current and writes nothing, so its late title,
+ * waveform, duration, key and audio can never overwrite the newer song. A
+ * failed or superseded load leaves a fully reset, retryable deck.
+ */
+export async function loadTrackToDeck(deckIndex: number, trackId: string): Promise<void> {
+  const deps = sessionDeps(deckIndex)
+  if (!deps.getTrack(trackId)) return
+  // begin() synchronously resets store and engine state and invalidates any
+  // previously live session on this deck.
+  const session = LoadSession.begin(deckIndex, trackId, deps)
+  await session.run(deps)
+}
+
+/**
+ * While a load owns the deck, engine-mutating intents are captured on the
+ * live session instead of touching the outgoing song's audio graph. The
+ * store is updated either way so the UI reflects the user's choice
+ * immediately; the session replays the intent onto the new graph on commit.
+ * Returns true when the intent was deferred.
+ */
+function deferDuringLoad(deckIndex: number, intent: DeckIntent): boolean {
+  const session = LoadSession.current(deckIndex)
+  if (!session) return false
+  session.intents.push(intent)
+  return true
 }
 
 /** Nudge a deck's position by real-time seconds (used by beatmatch view dragging). */
 export function nudgePosition(deckIndex: number, realSeconds: number): void {
   const state = useStore.getState().decks[deckIndex]
-  if (!state.trackId) return
+  // The engine's read head belongs to the outgoing song while a load is in
+  // flight; nudging it would move the wrong song. The winning session starts
+  // from position 0 anyway.
+  if (!state.trackId || state.loading) return
   engine.decks[deckIndex].jumpBy(realSeconds * state.tempo)
 }
 
@@ -526,7 +539,7 @@ export function togglePlay(deckIndex: number): void {
 /** CDJ-style: playing -> jump back to cue and stop; paused -> set cue here. */
 export function cuePress(deckIndex: number): void {
   const state = useStore.getState().decks[deckIndex]
-  if (!state.trackId) return
+  if (!state.trackId || state.loading) return
   const deck = engine.decks[deckIndex]
   if (state.playing) {
     deck.pause()
@@ -538,12 +551,15 @@ export function cuePress(deckIndex: number): void {
 }
 
 export function seek(deckIndex: number, seconds: number): void {
+  // A seek during a load would move the outgoing song's read head; the new
+  // track starts from 0 regardless, so there is nothing meaningful to seek.
+  if (useStore.getState().decks[deckIndex].loading) return
   engine.decks[deckIndex].seek(Math.max(0, seconds))
 }
 
 export function hotCuePress(deckIndex: number, slot: number, clear: boolean): void {
   const state = useStore.getState().decks[deckIndex]
-  if (!state.trackId) return
+  if (!state.trackId || state.loading) return
   const deck = engine.decks[deckIndex]
   const cues = [...state.hotCues]
   if (clear) {
@@ -564,11 +580,15 @@ export function hotCuePress(deckIndex: number, slot: number, clear: boolean): vo
 // ---------- Tempo / pitch / sync ----------
 
 export function setTempo(deckIndex: number, rate: number): void {
+  // During a load the engine still plays the outgoing song: record the intent
+  // and let the winning session replay it onto the freshly built read heads.
+  if (deferDuringLoad(deckIndex, { kind: 'tempo', rate })) return
   engine.decks[deckIndex].setTempo(rate)
   updateDeck(deckIndex, { tempo: rate })
 }
 
 export function setPitch(deckIndex: number, semitones: number): void {
+  if (deferDuringLoad(deckIndex, { kind: 'pitch', semitones })) return
   engine.decks[deckIndex].setPitch(semitones)
   updateDeck(deckIndex, { pitch: semitones })
 }
@@ -576,6 +596,12 @@ export function setPitch(deckIndex: number, semitones: number): void {
 export function toggleKeylock(deckIndex: number): void {
   const state = useStore.getState().decks[deckIndex]
   const next = !state.keylock
+  if (deferDuringLoad(deckIndex, { kind: 'keylock', enabled: next, pitchReset: !next })) {
+    // The store still tracks the choice now; the engine (and its stretch
+    // pipelines) is realigned when the winning load commits.
+    updateDeck(deckIndex, next ? { keylock: next } : { keylock: next, pitch: 0 })
+    return
+  }
   engine.decks[deckIndex].setKeylock(next)
   if (!next) {
     engine.decks[deckIndex].setPitch(0)
@@ -593,7 +619,8 @@ export function cyclePitchRange(deckIndex: number): void {
   const idx = PITCH_RANGES.indexOf(state.pitchRange)
   const next = PITCH_RANGES[(idx + 1) % PITCH_RANGES.length]
   const clamped = Math.min(1 + next, Math.max(1 - next, state.tempo))
-  if (clamped !== state.tempo) engine.decks[deckIndex].setTempo(clamped)
+  // Routes through setTempo so a range change mid-load is captured as an intent.
+  if (clamped !== state.tempo) setTempo(deckIndex, clamped)
   updateDeck(deckIndex, { pitchRange: next, tempo: clamped })
 }
 
@@ -605,6 +632,9 @@ export function setReverb(deckIndex: number, amount: number): void {
 /** Momentary pitch bend for beat alignment; call with 0 to release. */
 export function pitchBend(deckIndex: number, amount: number): void {
   const state = useStore.getState().decks[deckIndex]
+  // No store write (the bend is momentary); while loading it would move the
+  // outgoing song's read head, so it is captured and replayed like any tempo.
+  if (deferDuringLoad(deckIndex, { kind: 'tempo', rate: state.tempo * (1 + amount) })) return
   engine.decks[deckIndex].setTempo(state.tempo * (1 + amount))
 }
 
@@ -640,6 +670,10 @@ export function sync(deckIndex: number): void {
 // ---------- Loops ----------
 
 export function applyLoop(deckIndex: number, active: boolean, start: number, end: number): void {
+  // Loops are read-head state of the song currently in the worklet; a load
+  // replaces that read head wholesale, so loop edits during a load would bind
+  // to the outgoing song. The new track starts with no loop.
+  if (useStore.getState().decks[deckIndex].loading) return
   engine.decks[deckIndex].setLoop(active, start, end)
   updateDeck(deckIndex, { loop: { active, start, end } })
 }
@@ -738,7 +772,7 @@ export function beatLoop(deckIndex: number, beats: number): void {
 /** Jump backward/forward by musical bars (4 beats each) at the track's own timeline. */
 export function jumpBars(deckIndex: number, bars: number): void {
   const state = useStore.getState().decks[deckIndex]
-  if (!state.trackId) return
+  if (!state.trackId || state.loading) return
   if (!state.baseBpm) {
     showToast('Bar jumps need a detected BPM')
     return
@@ -764,8 +798,18 @@ export function setAutotune(deckIndex: number, patch: Partial<AutotuneState>): v
     showToast('Autotune unavailable — the pitch engine failed to load')
     return
   }
+  const session = LoadSession.current(deckIndex)
   if (patch.key !== undefined || patch.scale !== undefined) {
-    autotuneKeyWasSetManually[deckIndex] = true
+    // A manual key/scale choice is bound to the song the session will load, and
+    // suppresses the detected-key commit for that song only.
+    if (session) session.manualKey = true
+  }
+  if (session) {
+    // The engine graph still carries the previous song's vocal route; defer the
+    // whole patch (including any vocalRoute rebuild) to the winning commit.
+    session.intents.push({ kind: 'autotune', patch })
+    updateDeck(deckIndex, { autotune: { ...current, ...patch } })
+    return
   }
   engine.decks[deckIndex].setAutotune(patch)
   updateDeck(deckIndex, { autotune: { ...current, ...patch } })
