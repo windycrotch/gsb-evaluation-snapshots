@@ -22,8 +22,9 @@
     "lint": "oxlint .",
     "lint:fix": "oxlint --fix .",
     "typecheck": "bun check",
+    "test": "bun test",
     "warden": "warden",
-    "all": "bun run format:check && bun run lint && bun run typecheck && bun run warden",
+    "all": "bun run format:check && bun run lint && bun run typecheck && bun run test && bun run warden",
     "tsup": "tsup --tsconfig tsup.tsconfig.json",
     "pub": "bun run tsup && npm publish",
     "prepare": "husky"
@@ -32,6 +33,7 @@
     "@react-three/drei": "10.7.7",
     "@react-three/fiber": "9.4.2",
     "@tailwindcss/postcss": "^4.3.0",
+    "@types/bun": "^1.4.5",
     "@types/node": "25.7.0",
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",
