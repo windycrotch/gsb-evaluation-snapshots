@@ -3,10 +3,9 @@ import { Editor, NodeProject, TExportPurpose, TNodeProjectProps, blurMap, focusM
 import { IBlock, TSlot, openBlocks, slotId } from "./state";
 import { Row, TextInput } from "../lib/Row";
 import { TProgram, buildProgram } from "./program";
-import { checkPorts, programSignals } from "./ports";
-import { compileBlock, paramDefaults, templates } from "$library/blockCompiler";
+import { COMPILE_DEBOUNCE_MS, CompileController, trackStructure } from "./compileController";
 import { computed, effect, untracked } from "@preact/signals-react";
-import { Routing, bridgePairs } from "./routing";
+import { Routing } from "./routing";
 import { connect } from "@vicimpa/react-decorators";
 import { group, icon } from "../_groups";
 import { prop, reactive } from "@vicimpa/decorators";
@@ -114,9 +113,25 @@ export default class Group extends BaseNode implements IBlock {
   });
   container = dom('div', { className: s.blockEditor });
 
-  #compileTimer: ReturnType<typeof setTimeout> | undefined;
-  #compileVersion = 0;
-  #portRetries = 0;
+  // Вся машина переключения Compiled: версии, таймеры, реестры, обработка ошибок и teardown
+  #compiler = new CompileController({
+    outerGain: id => this.outerGain(id),
+    innerGain: id => this.innerGain(id),
+    routing: this.routing,
+    getSlots: () => this.slots,
+    getNodes: () => this.inner?.store.map(item => item.ref.current!) ?? [],
+    serialize: nodes => this.inner!.serialize(nodes),
+    isReady: () => ({
+      ok: this.mounted && !!this.inner && !this.pending && !this.loading
+        && !this.inner.store.some(item => !item.ref.current),
+      broken: !!this.broken,
+    }),
+    buildProgram: options => buildProgram({ ...options, outer: id => this.outerGain(id) }),
+    onProgram: program => { this.program = program; },
+    onError: reason => { this.compileError = reason; },
+    schedule: (fn, ms) => setTimeout(fn, ms),
+    clear: handle => clearTimeout(handle),
+  });
 
   #gain(map: Map<string, GainNode>, id: string) {
     var gain = map.get(id);
@@ -191,7 +206,7 @@ export default class Group extends BaseNode implements IBlock {
         this.reload();
 
       if (this.compiled)
-        this.scheduleCompile();
+        this.#compiler.scheduleCompile();
     }
   }
 
@@ -242,105 +257,6 @@ export default class Group extends BaseNode implements IBlock {
     return [...this.ports].find(port => port.props.value === gain);
   }
 
-  scheduleCompile(delay = 250) {
-    clearTimeout(this.#compileTimer);
-    this.#compileTimer = setTimeout(() => this.recompile(), delay);
-  }
-
-  // Собирает граф блока в один процессор. Пока сборка не готова или не удалась, блок звучит как обычно.
-  async recompile() {
-    const version = ++this.#compileVersion;
-    const { inner } = this;
-
-    if (!this.compiled || !this.mounted)
-      return this.setProgram(null);
-
-    if (this.broken)
-      return this.failCompile('Block graph failed to load');
-
-    // Граф ещё грузится: попробуем позже
-    if (!inner || this.pending || this.loading || inner.store.some(item => !item.ref.current))
-      return this.scheduleCompile();
-
-    const nodes = inner.store.map(item => item.ref.current!);
-    const { data } = inner.serialize(nodes);
-    const result = compileBlock(data);
-
-    if (!result.ok)
-      return this.failCompile(result.reason);
-
-    const mismatch = checkPorts(nodes, data);
-
-    // Порты могли ещё не перемонтироваться (например, после смены операции Math): ждём немного
-    if (mismatch && this.#portRetries++ < 3)
-      return this.scheduleCompile(500);
-
-    if (mismatch)
-      return this.failCompile(mismatch);
-
-    this.#portRetries = 0;
-
-    const key = JSON.stringify([result.source, result.inputs, result.outputs, result.passthrough]);
-    const signals = programSignals(nodes, result);
-    const current = this.program;
-
-    // Поменялись только значения или позиции — программа та же
-    if (current && current.key === key && current.signals.every((signal, i) => signal === signals[i])) {
-      this.compileError = '';
-      return;
-    }
-
-    try {
-      const program = await buildProgram({
-        key,
-        result,
-        signals,
-        defaults: paramDefaults(data, result.params),
-        outer: id => this.outerGain(id),
-        onError: () => {
-          if (this.program === program)
-            this.failCompile('Compiled block stopped with an error');
-        },
-      });
-
-      if (version !== this.#compileVersion || !this.compiled || !this.mounted) {
-        program.stop();
-        return;
-      }
-
-      this.compileError = '';
-      this.setProgram(program);
-    } catch (error) {
-      console.error(error);
-
-      if (version === this.#compileVersion)
-        this.failCompile('Cannot load the compiled block');
-    }
-  }
-
-  failCompile(reason: string) {
-    this.compileError = reason;
-    this.setProgram(null);
-  }
-
-  // Новая программа уже подключена: переключаем мосты, потом снимаем старую
-  setProgram(program: TProgram | null) {
-    const old = this.program;
-
-    if (old === program)
-      return;
-
-    this.program = program;
-    old?.stop();
-  }
-
-  stopCompiled() {
-    this.#compileVersion++;
-    clearTimeout(this.#compileTimer);
-    this.compileError = '';
-    this.setProgram(null);
-  }
-
   // Читает всё, от чего зависит сгенерированный код: ноды, провода, слоты и структурные поля
   #trackStructure() {
     const { inner } = this;
@@ -352,20 +268,13 @@ export default class Group extends BaseNode implements IBlock {
 
     inner.lines?.connects;
 
-    for (const item of inner.store) {
-      const node = item.ref.current;
-      const type = node && inner.find(node)?.name;
+    const nodes = inner.store.flatMap(item => item.ref.current ?? []);
 
-      if (!node || !type || !Object.hasOwn(templates, type))
-        continue;
-
-      for (const key of templates[type].structural) {
-        const value: unknown = (node as unknown as Record<string, unknown>)[key];
-
-        if (value && typeof value === 'object' && 'value' in value)
-          value.value;
-      }
-    }
+    trackStructure(
+      nodes,
+      node => inner.find(node)?.name,
+      (node, key) => (node as unknown as Record<string, unknown>)[key],
+    );
   }
 
   open() {
@@ -409,28 +318,23 @@ export default class Group extends BaseNode implements IBlock {
       }),
       // Мосты слотов, а при скомпилированном блоке — только прямые «вход → выход»
       effect(() => {
-        const { program } = this;
-
-        this.routing.set(program ? program.passthrough : bridgePairs(
-          this.slots,
-          id => this.outerGain(id),
-          id => this.innerGain(id)
-        ));
+        this.program;
+        this.slots;
+        untracked(() => this.#compiler.syncRouting());
       }),
       effect(() => {
         if (!this.compiled) {
-          untracked(() => this.stopCompiled());
+          untracked(() => this.#compiler.stop());
           return;
         }
 
         this.#trackStructure();
-        this.#portRetries = 0;
-        untracked(() => this.scheduleCompile());
+        untracked(() => this.#compiler.scheduleCompile(COMPILE_DEBOUNCE_MS, true));
       }),
       () => {
         this.mounted = false;
-        this.stopCompiled();
-        this.routing.clear();
+        // Полный teardown: программа, таймеры, маршруты и gain-узлы — ничего не остаётся в графе
+        this.#compiler.dispose();
         this.close();
         this.container.remove();
         this.outers.forEach(gain => gain.disconnect());
