@@ -25,6 +25,7 @@ class ScaleTool(ViewTool):
     def __init__(self, tab):
         super().__init__(tab)
         self._lastExportedFile = ""
+        self._activeVideoSession: videorw.VideoExportSession | None = None
         self._toolbar = ScaleToolBar(self)
         self._menu = ScaleContextMenu(self)
 
@@ -98,15 +99,31 @@ class ScaleTool(ViewTool):
         targetFps = self._toolbar.exportWidget.getFps()
         Config.exportVideoFps = targetFps
 
-        proc = videorw.VideoExportProcess(self.tab, currentFile, srcSize, 0, srcFps, destFile, None, targetSize, rot, -1, targetFps)
+        # The manager cancels/reaps any previous session for this destination first,
+        # so its late done/fail signals can never overwrite the state of this new session.
+        proc = videorw.VideoExportSession(self.tab, currentFile, srcSize, 0, srcFps, destFile, None, targetSize, rot, -1, targetFps, owner=self)
         proc.done.connect(self.onExportDone, Qt.ConnectionType.QueuedConnection)
         proc.progress.connect(self.onExportProgress, Qt.ConnectionType.QueuedConnection)
         proc.fail.connect(self.onExportFailed, Qt.ConnectionType.QueuedConnection)
-        proc.start()
+        videorw.VIDEO_EXPORT_MANAGER.startExport(proc)
+        self._activeVideoSession = proc
+        self._toolbar.setVideoExporting(True)
+
+    def cancelVideoExport(self):
+        '''Cancel the currently running video export, if any.'''
+        session = self._activeVideoSession
+        if session is not None and not session.finishedCleanup:
+            videorw.VIDEO_EXPORT_MANAGER.cancelExport(session.destFile)
 
 
     @Slot(str, str)
-    def onExportDone(self, file: str, path: str):
+    def onExportDone(self, file: str, path: str, session=None):
+        # Ignore late signals from a session that was superseded or replaced.
+        if session is not None and session is not self._activeVideoSession:
+            return
+        self._activeVideoSession = None
+        self._toolbar.setVideoExporting(False)
+
         fileType = "video" if videorw.isVideoFile(path) else "image"
 
         message = f"Exported scaled {fileType} to: {path}"
@@ -118,11 +135,17 @@ class ScaleTool(ViewTool):
         self._lastExportedFile = path
 
     @Slot(str)
-    def onExportProgress(self, message: str):
+    def onExportProgress(self, message: str, session=None):
+        if session is not None and session is not self._activeVideoSession:
+            return
         self.tab.statusBar().showMessage(message)
 
     @Slot(str)
-    def onExportFailed(self, msg: str):
+    def onExportFailed(self, msg: str, session=None):
+        if session is not None and session is not self._activeVideoSession:
+            return
+        self._activeVideoSession = None
+        self._toolbar.setVideoExporting(False)
         self.tab.statusBar().showColoredMessage(f"Export failed: {msg}", False, 0)
 
 
@@ -190,6 +213,12 @@ class ScaleToolBar(QtWidgets.QToolBar):
         btnExport.clicked.connect(self.scaleTool.export)
         layout.addWidget(btnExport)
 
+        self.btnCancelExport = QtWidgets.QPushButton("Cancel Export")
+        self.btnCancelExport.setToolTip("Cancel the running video export and remove its incomplete output")
+        self.btnCancelExport.clicked.connect(self.scaleTool.cancelVideoExport)
+        self.btnCancelExport.hide()
+        layout.addWidget(self.btnCancelExport)
+
         btnOpenLast = QtWidgets.QPushButton("Open Last File")
         btnOpenLast.clicked.connect(scaleTool.openLastExportedFile)
         layout.addWidget(btnOpenLast)
@@ -199,6 +228,10 @@ class ScaleToolBar(QtWidgets.QToolBar):
         self.addWidget(widget)
 
         self.setMaximumWidth(180)
+
+    def setVideoExporting(self, exporting: bool):
+        '''Toggle the cancel button while a video export session is active.'''
+        self.btnCancelExport.setVisible(exporting)
 
     def initScaleMode(self):
         if not self.selectedScaleMode:

@@ -200,6 +200,13 @@ class ImgTab(QtWidgets.QMainWindow):
         return []
 
     def onTabClosed(self):
+        # Synchronously reap video exports owned by this tab's tools so no ffmpeg
+        # process or partial output outlives the UI that started them.
+        from lib.videorw import VIDEO_EXPORT_MANAGER
+        for tool in self.tools.values():
+            if hasattr(tool, "cancelVideoExport"):
+                VIDEO_EXPORT_MANAGER.reapExportsOwnedBy(tool)
+
         self.imgview.tool.onDisabled(self.imgview)
         self.active = False
         self.filelist.reset()

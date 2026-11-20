@@ -271,6 +271,10 @@ class MainWindow(QtWidgets.QMainWindow):
             tab.active = False
             tab.imgview.image.deleteLater()  # Stop video thread
 
+        # Reap any running ffmpeg export sessions so no partial output survives shutdown.
+        from lib.videorw import VIDEO_EXPORT_MANAGER
+        VIDEO_EXPORT_MANAGER.cancelAll()
+
         QThreadPool.globalInstance().clear()
 
         from gallery.thumbnail_cache import ThumbnailCache

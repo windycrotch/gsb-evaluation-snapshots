@@ -501,9 +501,9 @@ except ImportError:
 
 # ========== Qt ==========
 try:
-    from PySide6.QtCore import Signal, Slot, QRectF, QSize, QProcess
+    from PySide6.QtCore import Signal, Slot, QRectF, QSize, QProcess, QObject
     from PySide6.QtGui import QImage, QPolygonF, QTransform
-    import math, time
+    import math, time, os, uuid
     from lib import qtlib
 
     def thumbnailVideoQImage(path: str, maxWidth: int, tiling: int) -> tuple[QImage, tuple[int, int]]:
@@ -511,23 +511,41 @@ try:
         return qtlib.numpyToQImage(mat, fromRGB=True), size
 
 
-    class VideoExportProcess(QProcess):
+    class VideoExportSession(QProcess):
+        '''
+        One cancellable, retryable ffmpeg export of a single destination file.
+
+        Invariants:
+        - ffmpeg always writes to a unique temporary output, never directly to destFile.
+        - destFile is created (by atomic rename) only when ffmpeg exits with code 0.
+        - Every terminal signal is emitted at most once; late signals after cancel are ignored.
+        - The session removes its temporary output on every non-success outcome.
+        '''
         OVERWRITE_FLAG = '-y'  # '-n'
 
-        done     = Signal(str, str) # srcFile, destFile
-        progress = Signal(str)      # msg
-        fail     = Signal(str)      # msg
+        done     = Signal(str, str, object) # srcFile, destFile, session
+        progress = Signal(str, object)      # msg, session
+        fail     = Signal(str, object)      # msg, session
 
         def __init__(
             self, parent,
             srcFile: str, srcSize: QSize, srcPosMs: int, srcFps: float,
             destFile: str, poly: QPolygonF | None, targetSize: QSize, rotation: float,
-            numFrames: int, targetFps: float, speed: float = 1.0
+            numFrames: int, targetFps: float, speed: float = 1.0, owner: object | None = None
         ):
             super().__init__(parent)
-            self.srcFile  = srcFile
-            self.destFile = destFile
-            self.tStart   = 0
+            self.sessionId = uuid.uuid4().hex
+            self.srcFile   = srcFile
+            self.destFile  = os.path.abspath(destFile)
+            # The tool instance that started the session; used to find and cancel sessions on tab close.
+            self.owner     = owner
+            self.tStart    = 0
+            self.cancelled = False
+            self.finishedCleanup = False
+
+            # Unique per-session output so concurrent/retried sessions can never share a partial file.
+            base, ext = os.path.splitext(self.destFile)
+            self.tempFile = f"{base}.export-{self.sessionId}{ext}"
 
             videoFilters = self._getVideoFilters(srcSize, poly, targetSize, rotation, speed, srcFps, targetFps)
             audioFilters = None
@@ -558,7 +576,7 @@ try:
                 '-c:a', 'aac', '-b:a', '192k',
                 '-refs', refFrames, '-g', str(keyframeInterval),
                 '-pix_fmt', 'yuv420p', '-avoid_negative_ts', 'make_zero',
-                destFile
+                self.tempFile
             ]
 
             #print(f"ffmpeg args: {args}")
@@ -638,37 +656,216 @@ try:
             return size
 
 
+        def cancel(self):
+            '''Request termination. A terminated session never promotes its output.'''
+            if self.cancelled or self.finishedCleanup:
+                return
+            self.cancelled = True
+            print(f"Cancelling video export: {self.destFile}")
+            self.progress.emit("Cancelling export...", self)
+
+            if self.state() != QProcess.ProcessState.NotRunning:
+                # kill() is forceful on every platform (TerminateProcess on Windows, SIGKILL on Unix).
+                # terminate() cannot reach console processes on Windows and ffmpeg ignores it there;
+                # the partial output is discarded on cancel anyway, so graceful shutdown has no benefit.
+                self.kill()
+
+        def _removeTempFile(self):
+            '''Best-effort removal of the unfinished temporary output.'''
+            try:
+                if os.path.exists(self.tempFile):
+                    os.remove(self.tempFile)
+            except OSError as ex:
+                print(f"Failed to remove incomplete export {self.tempFile}: {ex}")
+
+        def _promoteOutput(self) -> bool:
+            '''Atomically replace destFile with the completed temporary output.'''
+            try:
+                os.replace(self.tempFile, self.destFile)
+                return True
+            except OSError as ex:
+                print(f"Failed to finalize export {self.destFile}: {ex}")
+                self._removeTempFile()
+                return False
+
         @Slot()
         def _onProcessStarted(self):
             self.tStart = time.monotonic_ns()
-            self.progress.emit("Saving video...")
+            self.progress.emit("Saving video...", self)
 
         @Slot(int, QProcess.ExitStatus)
         def _onProcessEnded(self, exitCode: int, exitStatus: QProcess.ExitStatus):
-            t = (time.monotonic_ns() - self.tStart) / 1_000_000_000
-
-            if exitCode == 0:
+            # errorOccurred(FailedToStart) can also be queued; the guard in _finish makes this idempotent.
+            if self.cancelled:
+                self._finish(failMsg="Export cancelled")
+            elif exitCode == 0 and exitStatus == QProcess.ExitStatus.NormalExit:
+                t = (time.monotonic_ns() - self.tStart) / 1_000_000_000
                 print(f"Video export took {t:.3f} s")
-                self.done.emit(self.srcFile, self.destFile)
+                if self._promoteOutput():
+                    self._finish()
+                else:
+                    self._finish(failMsg="Export completed but the output could not be saved")
             else:
-                msg = f"ffmpeg call failed with exit code {exitCode}, {exitStatus}"
-                print(f"Video export failed: {msg}")
-                self.fail.emit(msg)
-
-            self.readAllStandardOutput()
-            self.readAllStandardError()
-            self.deleteLater()
+                self._finish(failMsg=f"ffmpeg call failed with exit code {exitCode}, {exitStatus}")
 
         @Slot()
         def _onProcessError(self, error: QProcess.ProcessError):
-            msg = f"ffmpeg error ({error.name})"
-            print(f"Video export failed: {msg}")
-            self.fail.emit(msg)
+            # FailedToStart (e.g. ffmpeg missing) arrives without a following finished() signal.
+            # Crashes also produce this, in which case finished() is usually emitted afterwards too.
+            if error == QProcess.ProcessError.FailedToStart:
+                self._finish(failMsg=f"ffmpeg could not be started ({error.name}). Is ffmpeg installed and on PATH?")
+            elif self.cancelled:
+                self._finish(failMsg="Export cancelled")
+            else:
+                self._finish(failMsg=f"ffmpeg error ({error.name})")
+
+        def _finish(self, failMsg: str | None = None):
+            '''Single terminal path: cleans up partial output and emits done or fail exactly once.'''
+            if self.finishedCleanup:
+                return
+            self.finishedCleanup = True
 
             self.readAllStandardOutput()
             self.readAllStandardError()
+
+            if failMsg is not None:
+                print(f"Video export failed: {failMsg}")
+                self._removeTempFile()
+                self.fail.emit(failMsg, self)
+            else:
+                self.done.emit(self.srcFile, self.destFile, self)
+
             self.deleteLater()
 
+
+    class VideoExportManager(QObject):
+        '''
+        Process-wide registry that serializes export sessions per destination file.
+
+        Guarantees:
+        - At most one active session writes to a given destination path at any time.
+        - Starting a new session for a path first cancels and reaps the old one, then removes
+          any leftover partial output, so the new session starts from a clean destination.
+        - Sessions ending after they were superseded cannot touch UI state or new files:
+          tools receive every signal together with the emitting session and filter by identity.
+        '''
+        def __init__(self, parent: QObject | None = None):
+            super().__init__(parent)
+            self._sessions: dict[str, VideoExportSession] = dict()
+
+        def isExporting(self, destFile: str) -> bool:
+            '''Whether an active session currently owns the given destination path.'''
+            return os.path.abspath(destFile) in self._sessions
+
+        def activeDestFiles(self) -> list[str]:
+            '''Snapshot of destination paths with an active session.'''
+            return list(self._sessions.keys())
+
+        def startExport(self, session: VideoExportSession) -> VideoExportSession:
+            '''
+            Register and start a session for its destination, replacing any previous session.
+            The previous session is cancelled, reaped synchronously, and its partial output removed
+            before the new session is started.
+            '''
+            destFile = session.destFile
+            self._retireSession(destFile)
+
+            # Clean anything a crashed/killed previous process could have left behind.
+            self._removeLeftoverOutputs(destFile)
+
+            self._sessions[destFile] = session
+            session.done.connect(self._onSessionDone)
+            session.fail.connect(self._onSessionFail)
+            session.start()
+            return session
+
+        def cancelExport(self, destFile: str) -> bool:
+            '''Cancel the active session for a destination, if any. Returns whether one was found.'''
+            session = self._sessions.get(os.path.abspath(destFile))
+            if session is None:
+                return False
+            session.cancel()
+            return True
+
+        def cancelExportsOwnedBy(self, owner: object):
+            '''Cancel every active session started by the given owner (e.g. a tool whose tab is closing).'''
+            for session in list(self._sessions.values()):
+                if session.owner is owner:
+                    session.cancel()
+
+        def reapExportsOwnedBy(self, owner: object):
+            '''
+            Synchronously cancel and reap every session of an owner that is being destroyed.
+            The matching destinations are retired through the same path as a superseding export,
+            so no ffmpeg process outlives the UI that started it.
+            '''
+            owned = [dest for dest, session in self._sessions.items() if session.owner is owner]
+            for dest in owned:
+                self._retireSession(dest)
+
+        def _retireSession(self, destFile: str):
+            '''
+            Synchronously cancel an active session and reap its process before the caller continues.
+
+            kill() + waitForFinished() is fully synchronous, so the old ffmpeg is guaranteed to have
+            exited (and its partial output can be removed) by the time a replacement session starts.
+            The session is finalized here as well; the later queued finished()/errorOccurred() slot is
+            a no-op because _finish() is idempotent.
+            '''
+            old = self._sessions.pop(destFile, None)
+            if old is None or old.finishedCleanup:
+                return
+
+            old.cancel()
+            old.waitForFinished(5000)
+            # Finalize immediately even if the terminal Qt signal is still queued behind us.
+            if not old.finishedCleanup:
+                old._finish(failMsg="Export cancelled")
+
+        @staticmethod
+        def _removeLeftoverOutputs(destFile: str):
+            '''
+            Remove per-session temporary files (".export-*") left next to a destination by a
+            process that was killed or crashed before its own cleanup ran. The destination itself is
+            never touched here: an earlier successful file at this path must survive a failed retry.
+            '''
+            base, ext = os.path.splitext(destFile)
+            folder = os.path.dirname(base) or "."
+            prefix = os.path.basename(base) + ".export-"
+
+            try:
+                names = os.listdir(folder)
+            except OSError:
+                names = []
+
+            for name in names:
+                if name.startswith(prefix) and name.endswith(ext):
+                    try:
+                        os.remove(os.path.join(folder, name))
+                    except OSError as ex:
+                        print(f"Failed to remove leftover export {name}: {ex}")
+
+        @Slot(str, str, object)
+        def _onSessionDone(self, srcFile: str, destFile: str, session: VideoExportSession):
+            self._deregisterIfCurrent(destFile, session)
+
+        @Slot(str, object)
+        def _onSessionFail(self, msg: str, session: VideoExportSession):
+            self._deregisterIfCurrent(session.destFile, session)
+
+        def _deregisterIfCurrent(self, destFile: str, session: VideoExportSession):
+            # A superseded session's late terminal signal must not remove the new owner's entry.
+            if self._sessions.get(destFile) is session:
+                del self._sessions[destFile]
+
+        def cancelAll(self):
+            '''Cancel every active session, reaping each process. Used on application shutdown.'''
+            for destFile in list(self._sessions.keys()):
+                self._retireSession(destFile)
+
+
+    # Single process-wide manager: one owner per destination across all tabs and tools.
+    VIDEO_EXPORT_MANAGER = VideoExportManager()
 
 except ImportError:
     pass

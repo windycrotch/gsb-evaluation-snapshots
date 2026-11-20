@@ -65,6 +65,7 @@ class CropTool(ViewTool):
         self._selectionFixed = False
 
         self._lastExportedFile = ""
+        self._activeVideoSession: videorw.VideoExportSession | None = None
 
         from .crop_toolbar import CropToolBar
         self._toolbar = CropToolBar(self)
@@ -307,15 +308,34 @@ class CropTool(ViewTool):
         if self._toolbar.changeSpeed:
             speed = item.player.playbackRate()
 
-        proc = videorw.VideoExportProcess(self.tab, currentFile, srcSize, srcPos, srcFps, destFile, poly, targetSize, rot, numFrames, targetFps, speed)
+        # The manager cancels/reaps any previous session for this destination first,
+        # so its late done/fail signals can never overwrite the state of this new session.
+        proc = videorw.VideoExportSession(
+            self.tab, currentFile, srcSize, srcPos, srcFps, destFile, poly,
+            targetSize, rot, numFrames, targetFps, speed, owner=self
+        )
         proc.done.connect(self.onExportDone, Qt.ConnectionType.QueuedConnection)
         proc.progress.connect(self.onExportProgress, Qt.ConnectionType.QueuedConnection)
         proc.fail.connect(self.onExportFailed, Qt.ConnectionType.QueuedConnection)
-        proc.start()
+        videorw.VIDEO_EXPORT_MANAGER.startExport(proc)
+        self._activeVideoSession = proc
+        self._toolbar.setVideoExporting(True)
+
+    def cancelVideoExport(self):
+        '''Cancel the currently running video export, if any.'''
+        session = self._activeVideoSession
+        if session is not None and not session.finishedCleanup:
+            videorw.VIDEO_EXPORT_MANAGER.cancelExport(session.destFile)
 
 
     @Slot()
-    def onExportDone(self, file, path):
+    def onExportDone(self, file, path, session=None):
+        # Ignore late signals from a session that was superseded or replaced.
+        if session is not None and session is not self._activeVideoSession:
+            return
+        self._activeVideoSession = None
+        self._toolbar.setVideoExporting(False)
+
         fileType = "video" if videorw.isVideoFile(path) else "image"
 
         message = f"Exported cropped {fileType} to: {path}"
@@ -327,11 +347,17 @@ class CropTool(ViewTool):
         self._lastExportedFile = path
 
     @Slot()
-    def onExportProgress(self, message: str):
+    def onExportProgress(self, message: str, session=None):
+        if session is not None and session is not self._activeVideoSession:
+            return
         self.tab.statusBar().showMessage(message)
 
     @Slot()
-    def onExportFailed(self, msg: str):
+    def onExportFailed(self, msg: str, session=None):
+        if session is not None and session is not self._activeVideoSession:
+            return
+        self._activeVideoSession = None
+        self._toolbar.setVideoExporting(False)
         self.tab.statusBar().showColoredMessage(f"Export failed: {msg}", False, 0)
 
 

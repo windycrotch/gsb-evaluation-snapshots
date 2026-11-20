@@ -32,6 +32,12 @@ class CropToolBar(QtWidgets.QToolBar):
         layout.addWidget(self._buildRotation())
         layout.addWidget(self.exportWidget)
 
+        self.btnCancelExport = QtWidgets.QPushButton("Cancel Export")
+        self.btnCancelExport.setToolTip("Cancel the running video export and remove its incomplete output")
+        self.btnCancelExport.clicked.connect(self._cropTool.cancelVideoExport)
+        self.btnCancelExport.hide()
+        layout.addWidget(self.btnCancelExport)
+
         btnOpenLast = QtWidgets.QPushButton("Open Last File")
         btnOpenLast.clicked.connect(cropTool.openLastExportedFile)
         layout.addWidget(btnOpenLast)
@@ -41,6 +47,10 @@ class CropToolBar(QtWidgets.QToolBar):
         self.addWidget(widget)
 
         self.setMaximumWidth(180)
+
+    def setVideoExporting(self, exporting: bool):
+        '''Toggle the cancel button while a video export session is active.'''
+        self.btnCancelExport.setVisible(exporting)
 
     def initPreset(self):
         # Initialize preset when tool is first enabled because some functions need ImgView

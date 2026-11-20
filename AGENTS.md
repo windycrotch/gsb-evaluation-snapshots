@@ -137,7 +137,10 @@ prompts, cascade templates and export paths).
 - `imagerw.py` — image loading (PIL always, Qt optionally), sRGB normalization, EXIF orientation, the
   image extension set.
 - `videorw.py` — video metadata, keyframes, frame extraction (PyAV with OpenCV/ffprobe fallbacks),
-  thumbnails, and `VideoExportProcess` (the ffmpeg `QProcess`). Image export never handles video.
+  thumbnails, and the ffmpeg export layer: `VideoExportSession` (a cancellable `QProcess` that writes a
+  per-session temporary file and atomically renames it only on success) plus `VideoExportManager` /
+  `VIDEO_EXPORT_MANAGER`, which serialize sessions per destination, cancel and reap superseded sessions,
+  and discard their late signals. Image export never handles video.
 - `csv.py` — `CsvLoader` / `ColumnNameCsvLoader` ABCs for header-based CSV loading (tag implications,
   autocomplete sources).
 - `threadlib.py` — `Future[T]`, a minimal condition-based future used by the inference proc layer.
