@@ -384,32 +384,76 @@ export class WebGL2Backend implements Backend {
   private viewH = 1;
   /** True between webglcontextlost and webglcontextrestored: drawing is skipped. */
   protected lost = false;
+  /** Set by dispose(): a later webglcontextrestored event must not rebuild GPU objects on the dead renderer. */
+  private disposed = false;
   protected readonly onLost = (e: Event) => {
     // preventDefault tells the browser we will handle restoration.
     e.preventDefault();
     this.lost = true;
-    this.armed = false;
+    // Every GPU object is now dead: drop all bookkeeping that names one, so no frame (including one still in
+    // flight) can treat an old texture handle or a pre-loss target binding as a valid cache. Nothing touches GL.
+    this.dropGpuCaches();
+    this.resetFrameState();
+    this.target = null;
+    if (this.shapes) {
+      this.shapes.count = 0;
+      this.shapes.icount = 0;
+    }
+    this.submitted = 0;
   };
   protected readonly onRestored = () => {
+    // A renderer disposed while lost stays dead: its listeners were removed, but a SharedBackend can also
+    // drive restoration explicitly at its next begin().
+    if (this.disposed) return;
     // Every GPU object died with the context. Sources are still in memory, so textures re-upload lazily.
     // Render targets come back blank. Custom shaders recompile on next use.
     const shader = this.shader;
+    this.dropGpuCaches();
+    this.resetFrameState();
+    this.target = null;
+    this.viewW = 1;
+    this.viewH = 1;
+    this.submitted = 0;
+    if (this.shapes) {
+      this.shapes.count = 0;
+      this.shapes.icount = 0;
+    }
+    this.setup();
+    this.lost = false;
+    if (shader) this.setShader(shader);
+  };
+
+  /** Forget every map that names a GPU object (textures, targets, programs, layer buffers): they died with the context. */
+  private dropGpuCaches(): void {
     this.customs.clear();
     this.eachCustoms.clear();
     this.layers = new WeakMap();
     this.textures.clear();
     this.targets.clear();
-    this.target = null;
+  }
+
+  /**
+   * Clear every piece of per-frame batch bookkeeping (but keep the GPU objects themselves). Used at a loss,
+   * at a restore, and inside the lost-context flush path, so the first real frame after a restore starts with
+   * the batch count, texture units and armed sprite state all at zero.
+   */
+  private resetFrameState(): void {
     this.lastSrc = null;
     this.last = undefined;
     this.count = 0;
     this.unitCount = 0;
+    this.lastUnit = 0;
+    this.lastSmooth = false;
+    for (let i = 0; i < UNITS; i++) {
+      this.units[i] = null;
+      this.unitInfo[i] = undefined;
+      this.unitSrc[i] = null;
+      this.unitSmooth[i] = false;
+    }
     this.sprites = false;
     this.armed = false;
-    this.setup();
-    this.lost = false;
-    if (shader) this.setShader(shader);
-  };
+    this.bver = -1;
+  }
   private readonly units: (WebGLTexture | null)[] = new Array(UNITS).fill(null);
   private readonly unitSmooth: boolean[] = new Array(UNITS).fill(false);
   private unitCount = 0;
@@ -498,6 +542,8 @@ export class WebGL2Backend implements Backend {
 
     gl.enable(gl.BLEND);
     this.applyBlend();
+    // A scissor enabled when the context was lost must not carry into the new context's first frame.
+    gl.disable(gl.SCISSOR_TEST);
     const pixel = new Uint8Array([255, 255, 255, 255]);
     const whiteTex = gl.createTexture();
     if (!whiteTex) throw new Error("WebGL2: could not create texture");
@@ -603,6 +649,7 @@ export class WebGL2Backend implements Backend {
   }
 
   sprite(ver: number, m: Matrix, fr: Frame, x: number, y: number, o: SpriteDrawOptions, color: number, smooth: boolean): void {
+    if (this.lost) return;
     const origin = o.origin;
     const ox = origin ? origin[0] : 0.5;
     const oy = origin ? origin[1] : 0.5;
@@ -1100,7 +1147,8 @@ export class WebGL2Backend implements Backend {
 
   end(): void {
     this.flush();
-    this.gl.disable(this.gl.SCISSOR_TEST);
+    // While lost every GL call is a no-op on the dead context; the state is rebuilt clean at restore.
+    if (!this.lost) this.gl.disable(this.gl.SCISSOR_TEST);
   }
 
   resize(): void {
@@ -1108,6 +1156,8 @@ export class WebGL2Backend implements Backend {
   }
 
   lend(key: TextureSource, tex: WebGLTexture, w: number, h: number): void {
+    // A handle handed over while lost belongs to the dead context: never cache it as valid.
+    if (this.lost || this.disposed) return;
     const cached = this.textures.get(key);
     if (cached?.tex === tex && cached.iw === 1 / w && cached.ih === 1 / h) return;
     this.textures.set(key, { tex, iw: 1 / w, ih: 1 / h, v0: 0, borrowed: true });
@@ -1115,6 +1165,8 @@ export class WebGL2Backend implements Backend {
   }
 
   update(dst: TextureSource, x: number, y: number, from: HTMLCanvasElement | OffscreenCanvas, w: number, h: number): void {
+    // While lost there is no live texture to patch; its first use after restore uploads the whole image.
+    if (this.lost || this.disposed) return;
     // Not uploaded yet: its first use uploads the whole image, which already has this region.
     const cached = this.textures.get(dst);
     // A borrowed texture's contents are the host's to update.
@@ -1135,14 +1187,20 @@ export class WebGL2Backend implements Backend {
     if (src instanceof RenderTarget) return;
     const cached = this.textures.get(src);
     if (!cached) return;
-    this.flush();
-    if (!cached.borrowed) this.gl.deleteTexture(cached.tex);
+    // The cache itself is dropped wholesale at a loss, so a dead-context delete would only touch a dead handle.
+    if (!this.lost && !this.disposed) {
+      this.flush();
+      if (!cached.borrowed) this.gl.deleteTexture(cached.tex);
+    }
     this.textures.delete(src);
     if (this.lastSrc === src) this.lastSrc = null;
   }
 
   /** Release every GPU object this backend created, so renderers can be created and destroyed repeatedly. */
   dispose(): void {
+    // Idempotent: a second dispose() (including disposeTarget/restore ordering after a loss) deletes nothing twice.
+    if (this.disposed) return;
+    this.disposed = true;
     const gl = this.gl;
     gl.canvas.removeEventListener("webglcontextlost", this.onLost);
     gl.canvas.removeEventListener("webglcontextrestored", this.onRestored);
@@ -1218,6 +1276,7 @@ export class WebGL2Backend implements Backend {
   }
 
   disposeTarget(target: RenderTarget): void {
+    if (this.disposed) return;
     if (target === this.target) throw new Error("spryte: can't dispose a render target while drawing into it");
     const store = this.targets.get(target);
     if (!store) return;
@@ -1464,10 +1523,7 @@ export class WebGL2Backend implements Backend {
   protected flush(): void {
     this.flushShapes();
     if (this.lost || this.count === 0) {
-      this.count = 0;
-      this.unitCount = 0;
-      this.armed = false;
-      this.sprites = false;
+      this.resetFrameState();
       return;
     }
     const gl = this.gl;

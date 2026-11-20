@@ -70,7 +70,9 @@ class SharedBackend extends WebGL2Backend {
   // Passive listeners: the host owns the events (its preventDefault lets the browser restore) and its own
   // rebuild. spryte only notes them, since a loss and restore can both happen between two frames.
   private readonly noteLost = () => {
-    this.lost = true;
+    // Reuse the owned backend's loss bookkeeping (drop dead GPU handles, reset the batch) without claiming the
+    // event: pass a stand-in whose preventDefault is a no-op, since the host's own listener decides restoration.
+    this.onLost({ preventDefault() {} } as Event);
   };
   private readonly noteRestored = () => {
     this.restored = true;
@@ -102,7 +104,9 @@ class SharedBackend extends WebGL2Backend {
   override begin(clear: number | null, width: number, height: number): void {
     const gl = this.gl;
     if (gl.isContextLost()) {
-      this.lost = true;
+      // The event may not have run yet (passive listeners can be missed): run the same loss bookkeeping once,
+      // so dead GPU handles are dropped even when the loss is first noticed here. onLost() flips `lost`.
+      if (!this.lost) this.noteLost();
       return;
     }
     if (this.lost || this.restored) {

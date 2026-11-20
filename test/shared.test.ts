@@ -161,9 +161,21 @@ describe("createSharedRenderer", () => {
     const { gl, named, state } = hostGL();
     const shared = createSharedRenderer(gl);
     const programs = named("createProgram").length;
+    // Populate a target store before the loss, so we can prove its dead handles are dropped.
+    const t = new RenderTarget(8, 8);
+    shared.draw.begin(null, 100, 50, 1);
+    shared.draw.into(t, () => {});
+    const backend = shared.draw.backend as unknown as {
+      targets: Map<RenderTarget, unknown>;
+      textures: Map<RenderTarget, unknown>;
+    };
+    expect(backend.targets.has(t)).toBe(true);
     state.lost = true;
     shared.draw.begin(null, 100, 50, 1);
     expect(shared.draw.contextLost).toBe(true);
+    // The loss was discovered at begin() with no event, yet the GPU caches were still dropped.
+    expect(backend.targets.has(t)).toBe(false);
+    expect(backend.textures.has(t)).toBe(false);
     shared.draw.sprite(image, 10, 10);
     shared.draw.end();
     expect(named("drawArraysInstanced")).toHaveLength(0);
@@ -194,5 +206,109 @@ describe("createSharedRenderer", () => {
     expect(named("drawArraysInstanced")).toHaveLength(1);
     expect(named("drawArraysInstanced")[0]?.args).toEqual(["TRIANGLE_STRIP", 0, 4, 2]);
     void M;
+  });
+
+  describe("context loss lifecycle", () => {
+    const fire = (listeners: Map<string, unknown>, name: string) =>
+      (listeners.get(name) as (e: object) => void)({ preventDefault: () => {} });
+
+    it("drops every GPU-handle cache at the loss, so dead textures and targets are never reused", () => {
+      const { gl, listeners } = hostGL();
+      const shared = createSharedRenderer(gl);
+      const backend = shared.draw.backend as unknown as {
+        textures: Map<TextureSource, unknown>;
+        targets: Map<RenderTarget, unknown>;
+        target: RenderTarget | null;
+      };
+      const t = new RenderTarget(8, 8);
+      shared.draw.begin(null, 100, 50, 1);
+      shared.draw.into(t, () => {});
+      expect(backend.targets.has(t)).toBe(true);
+      expect(backend.textures.has(t)).toBe(true);
+      fire(listeners, "webglcontextlost");
+      expect(shared.draw.contextLost).toBe(true);
+      expect(backend.targets.has(t)).toBe(false);
+      expect(backend.textures.has(t)).toBe(false);
+      expect(backend.target).toBeNull();
+      shared.draw.dispose();
+    });
+
+    it("rebuilds render targets lazily after restore with the right size and bottom-up sampling", () => {
+      const { gl, named, listeners, calls } = hostGL();
+      const shared = createSharedRenderer(gl);
+      const t = new RenderTarget(40, 20);
+      shared.draw.begin(null, 100, 50, 1);
+      shared.draw.into(t, () => {});
+      const backend = shared.draw.backend as unknown as {
+        targets: Map<RenderTarget, { fbo: object; cached: { iw: number; ih: number; v0: number } }>;
+      };
+      const oldFbo = backend.targets.get(t)?.fbo;
+      fire(listeners, "webglcontextlost");
+      fire(listeners, "webglcontextrestored");
+      // The rebuild happens inside the host's slot at the next begin().
+      shared.draw.begin(null, 100, 50, 1);
+      expect(shared.draw.contextLost).toBe(false);
+      shared.draw.into(t, () => {});
+      const store = backend.targets.get(t);
+      expect(store).toBeDefined();
+      expect(store?.fbo).not.toBe(oldFbo);
+      expect(calls.find((c) => c.name === "viewport" && (c.args as unknown[]).join() === "0,0,40,20")).toBeDefined();
+      expect([store?.cached.iw, store?.cached.ih, store?.cached.v0].map(Math.fround)).toEqual(
+        [0.025, -0.05, 1].map(Math.fround),
+      );
+      expect(() => shared.draw.sprite(t, 0, 0)).not.toThrow();
+      shared.draw.end();
+      expect(named("drawArraysInstanced").length).toBeGreaterThan(0);
+      shared.draw.dispose();
+    });
+
+    it("a target disposed while lost is neither revived nor double-freed at restore", () => {
+      const { gl, listeners } = hostGL();
+      const shared = createSharedRenderer(gl);
+      const keep = new RenderTarget(8, 8);
+      const gone = new RenderTarget(8, 8);
+      shared.draw.begin(null, 100, 50, 1);
+      shared.draw.into(keep, () => {});
+      shared.draw.into(gone, () => {});
+      const backend = shared.draw.backend as unknown as {
+        targets: Map<RenderTarget, unknown>;
+        textures: Map<RenderTarget, unknown>;
+      };
+      fire(listeners, "webglcontextlost");
+      expect(() => shared.draw.disposeTarget(gone)).not.toThrow();
+      fire(listeners, "webglcontextrestored");
+      shared.draw.begin(null, 100, 50, 1);
+      expect(backend.targets.has(gone)).toBe(false);
+      expect(backend.textures.has(gone)).toBe(false);
+      expect(() => shared.draw.into(keep, () => {})).not.toThrow();
+      shared.draw.end();
+      shared.draw.dispose();
+    });
+
+    it("reuploads only the textures each restored frame actually draws, not every cached one", () => {
+      const { gl, named, listeners } = hostGL();
+      const shared = createSharedRenderer(gl);
+      const a = { width: 16, height: 16 } as unknown as TextureSource;
+      const b = { width: 32, height: 32 } as unknown as TextureSource;
+      shared.draw.begin(null, 100, 50, 1);
+      shared.draw.sprite(a, 0, 0);
+      shared.draw.sprite(b, 0, 0);
+      shared.draw.end();
+      fire(listeners, "webglcontextlost");
+      fire(listeners, "webglcontextrestored");
+      // The restore's setup (white texture) happens inside this begin; snapshot only after it.
+      shared.draw.begin(null, 100, 50, 1);
+      const before = named("texImage2D").length;
+      shared.draw.sprite(a, 0, 0); // only a is needed this frame
+      shared.draw.end();
+      const firstFrameUploads = named("texImage2D").length - before;
+      shared.draw.begin(null, 100, 50, 1);
+      shared.draw.sprite(a, 0, 0);
+      shared.draw.end();
+      // The restored frame uploads just the one source it draws; the next frame uploads nothing (cache holds).
+      expect(firstFrameUploads).toBe(1);
+      expect(named("texImage2D").length - before).toBe(1);
+      shared.draw.dispose();
+    });
   });
 });

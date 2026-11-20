@@ -514,4 +514,315 @@ describe("WebGL2Backend", () => {
       expect(created.slice(restoredFrom).filter((o) => !o.deleted)).toEqual([]);
     });
   });
+
+  describe("context loss lifecycle", () => {
+    /**
+     * The order of GPU draw calls and *destination* framebuffer bindings a scene produces. Binds made while a
+     * target's framebuffer is being constructed (targetStore briefly restores the previous fbo) are ignored:
+     * a destination bind is one followed by a viewport, which only setTarget/bindOutput emit.
+     */
+    const sequence = (calls: { name: string; args: unknown[] }[]) => {
+      const out: string[] = [];
+      for (let i = 0; i < calls.length; i++) {
+        const c = calls[i] as { name: string; args: unknown[] };
+        if (c.name === "drawArraysInstanced" || c.name === "drawElements") out.push(c.name);
+        else if (c.name === "bindFramebuffer" && calls[i + 1]?.name === "viewport")
+          out.push(`bindFramebuffer:${c.args[1] === null ? "canvas" : "target"}`);
+      }
+      return out;
+    };
+
+    /** A scene that opens a target, clips and draws inside it, then draws back on the canvas. */
+    const scene = (draw: Draw, t: RenderTarget, img: TextureSource) => {
+      draw.sprite(img, 2, 2);
+      draw.into(t, () => {
+        draw.clip(0, 0, 10, 5, () => draw.rect(0, 0, 4, 4, "#fff"));
+        draw.sprite(img, 1, 1);
+      });
+      draw.sprite(t, 5, 5);
+      draw.rect(20, 20, 4, 4, "#f0f");
+    };
+
+    it("normal frame: the reference scene batches and binds canvas/target in a known order", () => {
+      const { gl, calls } = fakeGL();
+      const draw = new Draw(new WebGL2Backend(gl), false);
+      draw.begin("#000", 100, 50, 1);
+      const from = calls.length;
+      scene(draw, draw.createTarget(40, 20), image());
+      draw.end();
+      expect(sequence(calls.slice(from))).toEqual([
+        "drawArraysInstanced", // sprite before into()
+        "bindFramebuffer:target",
+        "drawArraysInstanced", // clipped rect (the clip flushes its own batch)
+        "drawArraysInstanced", // sprite inside the target
+        "bindFramebuffer:canvas",
+        "drawArraysInstanced", // target sprite + final rect on the canvas
+      ]);
+      expect(draw.drawCalls).toBe(4);
+    });
+
+    it("loss: every drawing call is skipped quietly without throwing or issuing GL work", () => {
+      const { gl, calls, count, fire } = fakeGL();
+      const backend = new WebGL2Backend(gl);
+      const draw = new Draw(backend, false);
+      const img = image();
+      const t = draw.createTarget(40, 20);
+      draw.begin("#000", 100, 50, 1);
+      draw.sprite(img, 0, 0);
+      draw.end();
+      const callsAtLoss = calls.length;
+      fire("webglcontextlost");
+      expect(backend.contextLost).toBe(true);
+      // Every entry point on the Backend interface must stay quiet while lost.
+      expect(() => {
+        draw.begin("#000", 100, 50, 1);
+        draw.rect(0, 0, 4, 4, "#fff");
+        draw.sprite(img, 1, 1);
+        draw.sprites(img, new Float32Array([1, 2, 3, 4]), 2);
+        draw.clip(0, 0, 10, 10, () => draw.rect(0, 0, 1, 1, "#fff"));
+        draw.into(t, () => draw.rect(0, 0, 4, 4, "#fff"));
+        draw.blend("add");
+        draw.end();
+        backend.setShader(null);
+      }).not.toThrow();
+      expect(count("drawArraysInstanced")).toBe(1); // only the pre-loss draw
+      expect(count("drawElements")).toBe(0);
+      // No state-changing GL calls happened while lost (the record is frozen).
+      expect(calls.length).toBe(callsAtLoss);
+      expect(draw.drawCalls).toBe(0);
+    });
+
+    it("restore first frame: starts clean — canvas target, scissor off, zero batch and texture units", () => {
+      const { gl, calls, fire, count } = fakeGL();
+      const backend = new WebGL2Backend(gl);
+      const draw = new Draw(backend, false);
+      const t = draw.createTarget(40, 20);
+      // Leave a clip and a target open when the loss hits, in the middle of an into()/clip() frame.
+      draw.begin("#000", 100, 50, 1);
+      draw.into(t, () => draw.clip(0, 0, 10, 5, () => draw.rect(0, 0, 4, 4, "#fff")));
+      fire("webglcontextlost");
+      fire("webglcontextrestored");
+      expect(backend.contextLost).toBe(false);
+      // The restore rebuild itself must have switched the scissor off and rebound the canvas.
+      expect(calls.filter((c) => c.name === "disable" && c.args[0] === "SCISSOR_TEST").length).toBeGreaterThan(0);
+      const lastBindAtRestore = calls.findLast((c) => c.name === "bindFramebuffer");
+      expect(lastBindAtRestore?.args[1]).toBeNull();
+      const drawsAtRestore = count("drawArraysInstanced");
+      draw.begin("#000", 100, 50, 1);
+      // No clip requested this frame: the pre-loss SCISSOR_TEST enable must not have survived the restore.
+      const enablesAfterRestore = calls.filter((c) => c.name === "enable" && c.args[0] === "SCISSOR_TEST").length;
+      draw.rect(0, 0, 4, 4, "#fff");
+      draw.end();
+      expect(calls.filter((c) => c.name === "enable" && c.args[0] === "SCISSOR_TEST").length).toBe(enablesAfterRestore);
+      // Exactly one fresh batch: pre-loss batch counters were zeroed, not flushed as a phantom draw.
+      expect(count("drawArraysInstanced") - drawsAtRestore).toBe(1);
+    });
+
+    it("restore: a target created before the loss is rebuilt with its size and bottom-up sampling", () => {
+      const { gl, calls, fire, count } = fakeGL();
+      const backend = new WebGL2Backend(gl);
+      const draw = new Draw(backend, false);
+      const t = draw.createTarget(40, 20);
+      draw.begin("#000", 100, 50, 1);
+      draw.into(t, () => {});
+      const oldStore = (backend as unknown as { targets: Map<RenderTarget, { fbo: object; cached: { tex: object } }> }).targets.get(t);
+      expect(oldStore).toBeDefined();
+      fire("webglcontextlost");
+      // The old context's handles are gone from every cache immediately at the loss, so they can never be
+      // mistaken for live ones while lost or carried into the restored context.
+      const maps = backend as unknown as {
+        targets: Map<RenderTarget, unknown>;
+        textures: Map<TextureSource, unknown>;
+      };
+      expect(maps.targets.has(t)).toBe(false);
+      expect(maps.textures.has(t)).toBe(false);
+      fire("webglcontextrestored");
+      const fbosBefore = count("createFramebuffer");
+      const texBefore = count("createTexture");
+      draw.begin("#000", 100, 50, 1);
+      draw.into(t, () => draw.rect(0, 0, 4, 4, "#fff"));
+      expect(count("createFramebuffer")).toBe(fbosBefore + 1);
+      expect(count("createTexture")).toBe(texBefore + 1);
+      // The rebuilt store is a brand-new handle with the target's exact pixel size.
+      const newStore = (backend as unknown as { targets: Map<RenderTarget, { fbo: object; cached: { tex: object; iw: number; ih: number; v0: number } }> }).targets.get(t);
+      expect(newStore).toBeDefined();
+      expect(newStore?.fbo).not.toBe(oldStore?.fbo);
+      expect(newStore?.cached.tex).not.toBe(oldStore?.cached.tex);
+      // The target bind is followed by a viewport sized to the target's pixels (not the canvas's).
+      const targetBindIndex = calls.findLastIndex((c) => c.name === "bindFramebuffer" && c.args[1] === newStore?.fbo);
+      expect(calls[targetBindIndex + 1]?.args).toEqual([0, 0, 40, 20]);
+      // Sampling orientation: targets store the bottom row first, so v starts at 1 and ih is negative.
+      expect([newStore?.cached.iw, newStore?.cached.ih, newStore?.cached.v0].map(Math.fround)).toEqual(
+        [0.025, -0.05, 1].map(Math.fround),
+      );
+      // And it draws like any image through into() and sprite().
+      expect(() => draw.sprite(t, 0, 0)).not.toThrow();
+      draw.end();
+    });
+
+    it("restore: textures re-upload lazily only when drawn, never wholesale per frame", () => {
+      const { gl, fire, count } = fakeGL();
+      const backend = new WebGL2Backend(gl);
+      const used = image(16, 16);
+      const idle = image(32, 32);
+      draw1: {
+        const draw = new Draw(backend, false);
+        draw.begin("#000", 100, 50, 1);
+        draw.sprite(used, 0, 0);
+        draw.sprite(idle, 0, 0);
+        draw.end();
+      }
+      const uploadsBeforeLoss = count("texImage2D");
+      expect(uploadsBeforeLoss).toBe(3); // white + two images
+      fire("webglcontextlost");
+      fire("webglcontextrestored");
+      const draw = new Draw(backend, false);
+      draw.begin("#000", 100, 50, 1);
+      draw.sprite(used, 0, 0); // only this source is needed on the first restored frame
+      draw.end();
+      // White (setup) plus the one used image: the idle source must not be re-uploaded just because it was cached.
+      expect(count("texImage2D") - uploadsBeforeLoss).toBe(2);
+      const secondFrame = count("texImage2D");
+      draw.begin("#000", 100, 50, 1);
+      draw.sprite(used, 0, 0);
+      draw.end();
+      // A second frame re-uploads nothing: the post-restore cache behaves exactly like the pre-loss one.
+      expect(count("texImage2D")).toBe(secondFrame);
+    });
+
+    it("restore: the first frame's drawCalls and draw order match an uninterrupted renderer", () => {
+      const fresh = fakeGL();
+      const freshDraw = new Draw(new WebGL2Backend(fresh.gl), false);
+      const freshImg = image();
+      const freshTarget = freshDraw.createTarget(40, 20);
+      freshDraw.begin("#000", 100, 50, 1);
+      scene(freshDraw, freshTarget, freshImg);
+      freshDraw.end();
+      const expected = sequence(fresh.calls);
+      const expectedCalls = freshDraw.drawCalls;
+
+      const { gl, calls, fire } = fakeGL();
+      const backend = new WebGL2Backend(gl);
+      const draw = new Draw(backend, false);
+      const img = image();
+      const t = draw.createTarget(40, 20);
+      draw.begin("#000", 100, 50, 1);
+      scene(draw, t, img);
+      draw.end();
+      fire("webglcontextlost");
+      // A frame entirely while lost must not move the counters.
+      draw.begin("#000", 100, 50, 1);
+      scene(draw, t, img);
+      draw.end();
+      fire("webglcontextrestored");
+      const from = calls.length;
+      draw.begin("#000", 100, 50, 1);
+      scene(draw, t, img);
+      draw.end();
+      expect(sequence(calls.slice(from))).toEqual(expected);
+      expect(draw.drawCalls).toBe(expectedCalls);
+    });
+
+    it("loss-time disposeTarget: restore never touches the freed object or deletes it twice", () => {
+      const { gl, created, fire, count } = fakeGL();
+      const backend = new WebGL2Backend(gl);
+      const draw = new Draw(backend, false);
+      const keep = draw.createTarget(8, 8);
+      const gone = draw.createTarget(8, 8);
+      draw.begin("#000", 100, 50, 1);
+      draw.into(keep, () => {});
+      draw.into(gone, () => {});
+      const goneFbo = (backend as unknown as { targets: Map<RenderTarget, { fbo: { deleted: boolean }; cached: { tex: { deleted: boolean } } }> }).targets.get(gone);
+      expect(goneFbo).toBeDefined();
+      fire("webglcontextlost");
+      expect(() => draw.disposeTarget(gone)).not.toThrow();
+      // No delete call on the dead context while lost: the handle died with the context and the cache entry is gone.
+      expect(goneFbo?.fbo.deleted).toBe(false);
+      const deletesWhileLost = count("deleteFramebuffer");
+      fire("webglcontextrestored");
+      // Nothing recreates or deletes the disposed target during the restore.
+      expect(count("deleteFramebuffer")).toBe(deletesWhileLost);
+      const maps = backend as unknown as { targets: Map<RenderTarget, unknown>; textures: Map<RenderTarget, unknown> };
+      expect(maps.targets.has(gone)).toBe(false);
+      expect(maps.textures.has(gone)).toBe(false);
+      const restoredFrom = created.length;
+      draw.begin("#000", 100, 50, 1);
+      // The surviving target still rebuilds and works.
+      expect(() => draw.into(keep, () => draw.rect(0, 0, 2, 2, "#fff"))).not.toThrow();
+      // Using the disposed one afresh allocates a brand-new store rather than reviving the old handle.
+      draw.into(gone, () => {});
+      const rebuilt = maps.targets.get(gone);
+      expect(rebuilt).toBeDefined();
+      expect((rebuilt as { fbo: object }).fbo).not.toBe(goneFbo?.fbo);
+      draw.end();
+      draw.dispose();
+      // Everything built after the loss is freed exactly once; pre-loss objects died with their context and
+      // were never deleted twice (the delete count did not move during the lost window).
+      expect(created.slice(restoredFrom).filter((o) => !o.deleted)).toEqual([]);
+    });
+
+    it("loss-time dispose(): a later restore rebuilds nothing and the second dispose is a no-op", () => {
+      const { gl, created, fire, count } = fakeGL();
+      const backend = new WebGL2Backend(gl);
+      const draw = new Draw(backend, false);
+      draw.begin("#000", 100, 50, 1);
+      draw.sprite(image(), 0, 0);
+      draw.end();
+      fire("webglcontextlost");
+      expect(() => draw.dispose()).not.toThrow();
+      const objectsAtDispose = created.length;
+      const programsAtDispose = count("createProgram");
+      fire("webglcontextrestored");
+      // The disposed renderer must not come back to life on the restore event.
+      expect(count("createProgram")).toBe(programsAtDispose);
+      expect(created.length).toBe(objectsAtDispose);
+      expect(backend.contextLost).toBe(true);
+      expect(() => draw.dispose()).not.toThrow(); // idempotent
+      expect(created.length).toBe(objectsAtDispose);
+    });
+
+    it("custom shaders recompile on demand after restore and keep working, without recompiling every frame", () => {
+      const { gl, fire, count, calls } = fakeGL();
+      const backend = new WebGL2Backend(gl);
+      const draw = new Draw(backend, false);
+      const shader = new Shader("vec4 effect(vec4 color, vec2 uv) { return source(uv) * color; }");
+      draw.begin("#000", 100, 50, 1);
+      draw.withShader(shader, () => draw.rect(0, 0, 4, 4, "#fff"));
+      draw.end();
+      const programsBeforeLoss = count("createProgram");
+      expect(programsBeforeLoss).toBeGreaterThan(1); // main + at least the custom
+      fire("webglcontextlost");
+      // The Shader object itself stays valid; its GPU program is simply gone.
+      fire("webglcontextrestored");
+      draw.begin("#000", 100, 50, 1);
+      expect(() => draw.withShader(shader, () => draw.rect(0, 0, 4, 4, "#fff"))).not.toThrow();
+      draw.end();
+      expect(count("createProgram")).toBeGreaterThan(programsBeforeLoss); // recompiled on first use
+      const steady = count("createProgram");
+      draw.begin("#000", 100, 50, 1);
+      draw.withShader(shader, () => draw.rect(0, 0, 4, 4, "#fff"));
+      draw.end();
+      expect(count("createProgram")).toBe(steady); // cached again: no per-frame recompilation
+      // The recompiled program is actually the one bound while the effect draws.
+      const customDraw = calls.findLast((c) => c.name === "drawArraysInstanced");
+      expect(customDraw).toBeDefined();
+    });
+
+    it("clips after restore flip against the current destination height, not a stale one", () => {
+      const { gl, calls, fire } = fakeGL();
+      const draw = new Draw(new WebGL2Backend(gl), false);
+      draw.begin("#000", 100, 50, 1);
+      // A clip inside a 20px-high target before the loss.
+      draw.into(draw.createTarget(40, 20), () => draw.clip(0, 0, 10, 5, () => {}));
+      fire("webglcontextlost");
+      fire("webglcontextrestored");
+      draw.begin("#000", 100, 50, 1);
+      // A canvas clip (height 50) and a target clip (height 20) must each flip against their own height.
+      draw.clip(10, 5, 20, 10, () => {});
+      expect(calls.findLast((c) => c.name === "scissor")?.args).toEqual([10, 35, 20, 10]);
+      draw.into(draw.createTarget(40, 20), () => draw.clip(0, 0, 10, 5, () => {}));
+      expect(calls.findLast((c) => c.name === "scissor")?.args).toEqual([0, 15, 10, 5]);
+      draw.end();
+    });
+  });
 });

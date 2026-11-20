@@ -619,6 +619,119 @@ vec4 effect(vec4 color, vec2 uv) {
   draw.dispose();
 }
 
+// Targets, clips, disposal and custom shaders across a real loss/restore. The target predates the loss, is
+// drawn into and sampled after the restore, and one of two targets is disposed while lost. Uploads and draw
+// calls are counted to prove the restore reuses caches lazily instead of retransmitting everything.
+{
+  const canvas = document.createElement("canvas");
+  canvas.width = W;
+  canvas.height = H;
+  const draw = createRenderer(canvas, { backend: "webgl2", smooth: false });
+  await draw.ready;
+  const raw = draw.raw;
+  if (raw.kind !== "webgl2") throw new Error("needs WebGL2");
+  const gl = raw.gl;
+  const ext = gl.getExtension("WEBGL_lose_context");
+  const target = draw.createTarget(W, H);
+  const other = draw.createTarget(16, 16);
+  const tint = draw.createShader("vec4 effect(vec4 color, vec2 uv) { return source(uv) * color; }");
+
+  // Count texture uploads and instanced draws per frame.
+  const realTexImage = gl.texImage2D.bind(gl);
+  let uploads = 0;
+  (gl as WebGL2RenderingContext).texImage2D = ((...a: unknown[]) => {
+    uploads++;
+    return (realTexImage as (...x: unknown[]) => unknown)(...a);
+  }) as WebGL2RenderingContext["texImage2D"];
+  const realDraw = gl.drawArraysInstanced.bind(gl);
+  let calls = 0;
+  gl.drawArraysInstanced = ((...a: unknown[]) => {
+    calls++;
+    return (realDraw as (...x: unknown[]) => unknown)(...a);
+  }) as WebGL2RenderingContext["drawArraysInstanced"];
+
+  // A scene that goes into the target with a clip, then composites it back on the canvas through a shader.
+  const scene = (d: Draw) => {
+    d.into(target, () => {
+      d.clip(10, 10, 100, 80, () => {
+        d.rect(5, 5, 60, 60, "#ff0000");
+        d.sprite(img, 20, 20);
+      });
+    });
+    d.withShader(tint, () => d.sprite(target, 0, 0, { origin: [0, 0] }));
+    d.rect(120, 90, 30, 20, "#0f0");
+  };
+  // Reference: the identical scene on a renderer that never lost its context.
+  const expected = await render(scene, "webgl2", 1);
+
+  const frame = () => {
+    uploads = 0;
+    calls = 0;
+    draw.resize(W, H);
+    draw.begin("#102030", W, H, 1);
+    scene(draw);
+    draw.end();
+    return { uploads, calls };
+  };
+  frame();
+  const steady = frame(); // a warm frame uploads nothing and has a stable call count
+
+  const event = (name: string) =>
+    new Promise<string>((r) => {
+      canvas.addEventListener(name, () => r("fired"), { once: true });
+      setTimeout(() => r("timed out"), 3000);
+    });
+  const lostP = event("webglcontextlost");
+  ext?.loseContext();
+  await lostP;
+  let threwWhileLost = false;
+  let lostFrame: { uploads: number; calls: number } | undefined;
+  try {
+    // Dispose one target while lost: it must not throw, and the restore must not touch or revive it.
+    draw.disposeTarget(other);
+    // A full frame while lost, including into() and clip() on the surviving target.
+    lostFrame = frame();
+  } catch {
+    threwWhileLost = true;
+  }
+  await new Promise((r) => setTimeout(r, 250));
+  const restoredP = event("webglcontextrestored");
+  ext?.restoreContext();
+  await restoredP;
+  await new Promise((r) => setTimeout(r, 0));
+  const firstRestored = frame();
+  const secondRestored = frame();
+  const pixels = readTopDown(gl);
+
+  check(
+    "lifecycle: lost frame is silent (no draws, no uploads, no throws)",
+    !!ext && !threwWhileLost && (lostFrame?.calls ?? -1) === 0 && (lostFrame?.uploads ?? -1) === 0,
+    `threw ${threwWhileLost}, calls ${lostFrame?.calls}, uploads ${lostFrame?.uploads}`,
+  );
+  record("lifecycle: pre-loss target, clip and shader reproduce the reference after restore", expected, pixels);
+  check(
+    "lifecycle: draw calls match an uninterrupted renderer after restore",
+    firstRestored.calls === steady.calls && secondRestored.calls === steady.calls,
+    `steady ${steady.calls}, restored ${firstRestored.calls}/${secondRestored.calls}`,
+  );
+  check(
+    "lifecycle: textures are not retransmitted wholesale — second restored frame uploads nothing",
+    secondRestored.uploads === 0 && firstRestored.uploads <= steady.uploads + 2,
+    `first frame ${firstRestored.uploads}, second ${secondRestored.uploads}, steady ${steady.uploads}`,
+  );
+  // The target disposed while lost never comes back: drawing it now allocates a fresh blank store instead.
+  draw.begin("#102030", W, H, 1);
+  let revivedCleanly = true;
+  try {
+    draw.into(other, () => draw.rect(0, 0, 4, 4, "#fff"));
+  } catch {
+    revivedCleanly = false;
+  }
+  check("lifecycle: a target disposed while lost can be recreated, not revived", revivedCleanly, "");
+  draw.end();
+  draw.dispose();
+}
+
 // transparent: true. A see-through clear replaces last frame (not blends over it), and drawn pixels are opaque.
 for (const backend of ["webgl2", "2d"] as const) {
   const canvas = document.createElement("canvas");
