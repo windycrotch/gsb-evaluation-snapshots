@@ -75,15 +75,18 @@ async function readOwnSkin(src) {
   finally { clearTimeout(timer); if (reader) void reader.cancel().catch(() => {}); abort.abort(); }
 }
 
+// Returns false when the address cannot be navigated to, so a caller can put
+// the page back in an operable state instead of leaving a loading screen up.
 export function navigateDoor(href) {
   let target;
-  try { target = new URL(href); } catch { return; }
-  if (!['http:', 'https:'].includes(target.protocol) || target.username || target.password) return;
+  try { target = new URL(href); } catch { return false; }
+  if (!['http:', 'https:'].includes(target.protocol) || target.username || target.password) return false;
   // A fresh HTTPS -> localhost visit also needs an origin referrer. Only
   // loopback development addresses get this policy, never general HTTP.
   const loopback = target.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(target.hostname);
   const a = Object.assign(document.createElement('a'), { href: target.href, referrerPolicy: loopback ? 'origin' : 'strict-origin-when-cross-origin' });
   document.body.append(a); a.click(); a.remove();
+  return true;
 }
 
 export function createTravelSession(ownSkin = '', defaultSkin = '', ownTitle = '') {

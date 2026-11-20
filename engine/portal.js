@@ -9,15 +9,15 @@ import * as L from '@world/layout.js';
 import { config } from './config.js';
 import { t, onLang } from './lang.js';
 import { createGate } from './world/gate.js';
-import { showLoading, finishLoading } from './ui/loading.js';
+import { showLoading } from './ui/loading.js';
 import { traveller } from './traveller.js';
-import { worldURL, worldKey, navigateDoor, sourceLabel } from './door-protocol.js';
+import { worldURL, worldKey, sourceLabel } from './door-protocol.js';
 import { createDoorControls } from './door-controls.js';
 import { DEFAULT_WORLDS } from './worlds-default.js';
 import { createDirectory } from './door-directory.js';
+import { isTravelling } from './travel.js';
 
-let travelling = false, journey = 0, cameFrom = null, cameFromName = '';
-export const isTravelling = () => travelling;
+let cameFrom = null, cameFromName = '';
 
 const easeInOut = p => (p < .5 ? 2 * p * p : 1 - (-2 * p + 2) ** 2 / 2);
 
@@ -71,7 +71,7 @@ export function createPortal({ stage, world, onOpen }) {
     get busy() { return busy; },
     get front() { return { ...ahead(1.5), heading: yaw }; },
     pick(ray) { return ray.intersectBox(bounds, hit) ? hit.distanceTo(ray.origin) : null; },
-    enter() { if (!travelling && !busy) onOpen?.(); },
+    enter() { if (!isTravelling() && !busy) onOpen?.(); },
     // Close enough, in front, and on foot: walk in. Otherwise just go.
     canWalkIn(player) {
       const { along, across } = local(player.pos);
@@ -79,16 +79,21 @@ export function createPortal({ stage, world, onOpen }) {
     },
     // Up to the light (from right in front of it, straight in), the portal
     // charges, then into it; then `gone`.
+    // Returns false when the light cannot take the player (not on foot), so
+    // the caller can go straight to the loading screen instead.
     leave(destination, player, gone) {
-      if (busy) return;
+      if (busy) return false;
       busy = true; load(destination.preview);
       const step = () => {
         chargeTo = 1;
         later(0.55, () => { if (!player.walkThrough([ahead(-0.2)], gone)) gone(); });
       };
       const { along, across } = local(player.pos);
-      if (along < 1.7 && Math.abs(across) < gate.width / 2) step();
-      else if (!player.walkThrough([ahead(1.5)], step, [at.x, at.z])) step();
+      if (along < 1.7 && Math.abs(across) < gate.width / 2) { step(); return true; }
+      if (player.walkThrough([ahead(1.5)], step, [at.x, at.z])) return true;
+      busy = false; chargeTo = 0;
+      gate.setPreview(null); picture?.dispose(); picture = null; showTo = 0;
+      return false;
     },
     // Arriving through a portal: stand in its light, fully open. The returned
     // function walks out once the world is showing, and the light settles.
@@ -118,7 +123,7 @@ export function createPortal({ stage, world, onOpen }) {
         close = 1 - THREE.MathUtils.smoothstep(Math.hypot(along, across), 2, 9);
         // Walking into the light opens the list, once, until you step back out.
         const inside = player.mode === 'ground' && !player.island && Math.abs(along) < gate.depth + 0.47 && Math.abs(across) < gate.width / 2;
-        if (inside && armed && !busy && !travelling) { armed = false; onOpen?.(); }
+        if (inside && armed && !busy && !isTravelling()) { armed = false; onOpen?.(); }
         else if (!inside && (Math.abs(along) > 1.2 || Math.abs(across) > gate.width / 2 + 0.4)) armed = true;
       }
       near += (close - near) * Math.min(1, dt * 3);
@@ -178,28 +183,13 @@ function directoryWorlds(shared, fallback = true) {
 }
 
 // ---------- Leaving ----------
-// A link with its own referrer policy, so a page that sends none (some blogs
-// do) still tells the next world where the visitor came from.
-function leaveFor(href) { navigateDoor(href); }
-
-// To a world that speaks the door protocol (homecraft: true), the link says
-// where the visitor came from (?from=) and carries their character after #.
-// Any other site gets a plain link.
-export async function visitWorld(next) {
-  const url = worldUrl(next?.url);
-  if (travelling || !url || isCurrentWorld(url.href)) return false;
-  travelling = true;
-  const ticket = ++journey;
-  showLoading(t(`正在前往 ${next.name || url.hostname}…`, `Loading ${next.name || url.hostname}…`), .08, next.preview);
-  const href = await traveller.link(next);
-  // Paint the real startup screen before navigating, without an artificial
-  // progress animation. The destination updates it at its actual boot stages.
-  await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-  if (ticket !== journey) return false;
-  history.replaceState({ ...history.state, homecraftPortal: true }, '', location.href);
-  try { sessionStorage.setItem(storageKey('departed'), '1'); } catch {}
-  leaveFor(href);
-  return true;
+// Choosing a world hands the journey to main.js's travel lifecycle, which
+// owns the loading screen, the cancellation rules and the navigation link.
+// `onLeave(world)` returns false when a journey is already running.
+let onLeave = null;
+export const setLeaveHandler = handler => { onLeave = handler; };
+export function visitWorld(next) {
+  return onLeave ? onLeave(next) : false;
 }
 
 let controls = null;
@@ -210,7 +200,7 @@ function mountReturn() {
   controls = createDoorControls({
     parent: document.getElementById('hud'), openId: 'portalButton', backId: 'portalReturn',
     onOpen: () => window.__home?.openPortal(),
-    onReturn: cameFrom ? () => { void visitWorld({ url: cameFrom, name, homecraft: true }); } : null,
+    onReturn: cameFrom ? () => { onLeave?.({ url: cameFrom, name, homecraft: true }); } : null,
   });
   const label = () => controls.label(t('传送门', 'Portal'), t(`返回 ${name}`, `Back to ${name}`), cameFrom || '');
   label(); onLang(label);
@@ -233,13 +223,3 @@ export function arrival() {
   return how;
 }
 
-// A restored page keeps its departing progress bar and JS state. Reset both
-// (main.js puts the player back outside the door).
-addEventListener('pageshow', event => {
-  if (!event.persisted) return;
-  travelling = false;
-  const ticket = ++journey;
-  try { sessionStorage.removeItem(storageKey('departed')); } catch {}
-  showLoading(t('正在返回世界…', 'Loading the world…'), 1);
-  requestAnimationFrame(() => requestAnimationFrame(() => { if (ticket === journey) finishLoading(); }));
-});

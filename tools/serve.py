@@ -67,9 +67,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             outputfile.write(chunk)
             self.left -= len(chunk)
 
+class Server(http.server.ThreadingHTTPServer):
+    # A page load opens dozens of module connections at once; the default
+    # backlog of 5 drops the rest on Windows, so a browser (or a headless
+    # check that fetches every module) sees ECONNREFUSED.
+    request_queue_size = 128
+    daemon_threads = True
+
 host = '0.0.0.0' if lan else '127.0.0.1'
 try:
-    server = http.server.ThreadingHTTPServer((host, chosen), functools.partial(Handler, directory=str(root)))
+    server = Server((host, chosen), functools.partial(Handler, directory=str(root)))
 except OSError:
     raise SystemExit(f'Port {chosen} is already in use.')
 port = server.server_address[1]

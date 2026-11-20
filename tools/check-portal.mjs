@@ -7,12 +7,14 @@
 import { chromium } from 'playwright';
 import assert from 'node:assert/strict';
 import { mkdirSync, readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 const remembered = () => { try { return readFileSync(new URL('./.serve-url', import.meta.url), 'utf8').trim(); } catch { return ''; } };
 const base = (process.argv[2] || remembered()).replace(/\/$/, '');
 if (!base) { console.log('Nothing is being served. Run python3 tools/serve.py first, or pass the address.'); process.exit(1); }
 const out = new URL('./.check/portal/', import.meta.url);
 mkdirSync(out, { recursive: true });
+const shot = name => fileURLToPath(new URL(name, out));
 const args = process.platform === 'darwin' ? ['--use-angle=metal', '--enable-gpu', '--ignore-gpu-blocklist'] : ['--use-angle=swiftshader', '--enable-unsafe-swiftshader'];
 const browser = await chromium.launch({ ...(process.platform === 'darwin' ? { channel: 'chrome' } : {}), args });
 const views = [
@@ -54,13 +56,14 @@ try {
       if (directoryDown) return route.fulfill({ status: 503, body: 'unavailable', headers: { 'cache-control': 'no-store' } });
       await route.fulfill({ json: directory, headers: { 'access-control-allow-origin': '*', 'cache-control': 'no-store' } });
     });
-    // Pause just before leaving, so the departing page can be inspected.
-    await context.route('**/engine/portal.js', async route => {
-      const url = new URL(route.request().url()); url.pathname = url.pathname.replace(/^\/visit/, '');
-      const response = await route.fetch({ url: url.href });
-      const body = (await response.text()).replace('  leaveFor(href);',
-        '  if (window.__holdWorldNavigation) await new Promise(resolve => { window.__releaseWorldNavigation = resolve; });\n  leaveFor(href);');
-      await route.fulfill({ response, body });
+    // The engine navigates with a real anchor click. Hold that click so the
+    // departing page can be inspected, then release it.
+    await page.addInitScript(() => {
+      const click = HTMLElement.prototype.click;
+      HTMLElement.prototype.click = function () {
+        if (!window.__holdWorldNavigation || !(this instanceof HTMLAnchorElement)) return click.call(this);
+        window.__releaseWorldNavigation = () => { window.__releaseWorldNavigation = null; click.call(this); };
+      };
     });
     const ready = async () => {
       await page.waitForFunction(() => window.__home?.player, null, { timeout: 60000 });
@@ -79,7 +82,7 @@ try {
     await page.evaluate(() => {
       const h = __home; h.setTimeMode('day'); const f = h.portal.front; h.player.teleport(f.x + Math.sin(f.heading) * 3, f.z + Math.cos(f.heading) * 3); h.rig.set(f.heading + .05, .35, 9); h.rig.recenter(h.player);
     });
-    await page.screenshot({ path: new URL(`${name}-door.png`, out).pathname });
+    await page.screenshot({ path: shot(`${name}-door.png`) });
     // Click the real 3D portal, rather than calling a synthetic DOM control.
     const point = await page.evaluate(() => __home.project(__home.portal.root.position.x, 1.2, __home.portal.root.position.z + .1));
     if (view.hasTouch) await page.touchscreen.tap(point.x, point.y); else await page.mouse.click(point.x, point.y);
@@ -93,7 +96,7 @@ try {
     assert.equal(await page.locator('.world-footer a').getAttribute('href'), 'https://example.com/join');
     assert.equal(await page.locator('#loading').count(), 0, 'Opening the list started a journey');
     const before = await page.evaluate(() => __home.player.pos.toArray());
-    await page.screenshot({ path: new URL(`${name}-list.png`, out).pathname });
+    await page.screenshot({ path: shot(`${name}-list.png`) });
     await page.keyboard.press('Escape');
     await page.waitForFunction(() => !document.querySelector('#panel').open);
     assert.deepEqual(await page.evaluate(() => __home.player.pos.toArray()), before);
@@ -108,11 +111,11 @@ try {
     if (name !== 'reduced') {
       assert(await page.evaluate(() => __home.portal.busy), 'Did not walk into the portal');
       await page.waitForTimeout(900);
-      await page.screenshot({ path: new URL(`${name}-departure.png`, out).pathname });
+      await page.screenshot({ path: shot(`${name}-departure.png`) });
     }
     await page.locator('#loading .bar[role="progressbar"]').waitFor({ state: 'visible', timeout: 10000 });
     await page.waitForFunction(() => document.querySelector('#loading .loading-label')?.textContent.includes('Neighbour'));
-    await page.screenshot({ path: new URL(`${name}-loading.png`, out).pathname });
+    await page.screenshot({ path: shot(`${name}-loading.png`) });
     await page.waitForFunction(() => typeof window.__releaseWorldNavigation === 'function');
     await page.evaluate(() => window.__releaseWorldNavigation());
 
@@ -123,7 +126,7 @@ try {
     if (name !== 'reduced') {
       await page.evaluate(() => __home.setTimeMode('day'));
       await page.waitForFunction(() => !document.querySelector('#loading'));
-      await page.screenshot({ path: new URL(`${name}-arrival.png`, out).pathname });
+      await page.screenshot({ path: shot(`${name}-arrival.png`) });
     }
     await ready();
     const arrived = new URL(page.url());

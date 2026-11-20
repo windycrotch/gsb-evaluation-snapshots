@@ -25,7 +25,8 @@ import { createPhone } from './ui/phone.js';
 import { createWorkbench } from './ui/workbench.js';
 import { createMailboxForm } from './ui/mailbox.js';
 import { createFlightPad } from './ui/flightpad.js';
-import { createPortal, arrival, visitWorld, isTravelling, placePortalControls } from './portal.js';
+import { createPortal, arrival, setLeaveHandler, placePortalControls } from './portal.js';
+import { createTravelLifecycle, isTravelling, isLeaving } from './travel.js';
 import { wornSkin } from './traveller.js';
 import { createWorldList } from './ui/worlds.js';
 import { createPhotoStudio } from './ui/photo.js';
@@ -216,7 +217,7 @@ async function boot() {
   // Without a weather city there is no data source to credit.
   if (!config.weather) weatherMenu?.querySelector('a[href*="open-meteo"]')?.closest('p')?.remove();
   function toggleWeatherMenu(open = weatherMenu?.hidden, restoreFocus = false) {
-    if (!weatherMenu) return;
+    if (!weatherMenu || (open && isLeaving())) return;
     weatherMenu.hidden = !open;
     $('#moodButton').setAttribute('aria-expanded', String(open));
     if (open) weatherMenu.querySelector('[data-weather][aria-checked="true"]')?.focus({ preventScroll: true });
@@ -282,14 +283,14 @@ async function boot() {
   const workbench = createWorkbench(panel);
   // A note sent from the mailbox's page raises the flag on the mailbox itself.
   const mailboxForm = createMailboxForm({ onSent: () => mailbox.raiseFlag() });
-  const worldList = createWorldList({ onChoose(world) { closePage(); depart(world); } });
-  // Standing at the portal, on foot: walk into it, seen from behind. From
-  // anywhere else (the Dock, first person, flying), straight to loading.
-  function depart(world) {
-    if (!portal?.canWalkIn(player) || rig.firstPerson || reducedMotion) { void visitWorld(world); return; }
-    rig.set(portal.front.heading + 0.3, 0.2, 6.5);
-    portal.leave(world, player, async () => { if (!await visitWorld(world)) portal.reset(); });
-  }
+  // Leaving and returning is one lifecycle (travel.js), created once the
+  // input layer exists (it closes overlays and clears held keys). It closes
+  // whatever is open before a journey starts and puts the player back beside
+  // the portal (or at spawn) if the journey is cancelled, so the world is
+  // always operable again.
+  let travel = null;
+  const depart = world => (travel ? travel.depart(world) : false);
+  const worldList = createWorldList({ onChoose(world) { depart(world); } });
   // Every <article class="page" data-station> in index.html is a page, except
   // the contact list (the phone reads that). A page whose id is also one of
   // the world's STATIONS opens with F there; any page can sit in the Dock.
@@ -308,6 +309,7 @@ async function boot() {
   panel.querySelector('header .close').before(popOut);
   let openStation = null;
   function openPage(id) {
+    if (isLeaving()) return;
     if (id === 'portal') { openPortal(); return; }
     if (!publicStations.some(s => s.id === id)) return;
     const page = pageEl(id);
@@ -350,7 +352,7 @@ async function boot() {
     markSlot(id);
   }
   function openPortal() {
-    if (isTravelling() || portal?.busy) return;
+    if (isLeaving() || portal?.busy) return;
     togglePhone(false); toggleWeatherMenu(false); minimap.toggleBig(false); rig.skipIntro();
     openStation = 'portal'; panel.dataset.station = 'portal'; panel.dataset.kind = '';
     $('#panelTitle').textContent = t('传送门', 'Portal');
@@ -459,6 +461,7 @@ async function boot() {
   // Dock content appears on this click; the background moves to its station
   // immediately, including the correct floor height and camera position.
   function go(id) {
+    if (isLeaving()) return;
     if (id === 'portal') { openPortal(); return; }
     const s = STATIONS.find(s => s.id === id);
     if (!s) { rig.skipIntro(); openPage(id); tooltip.hidden = true; return; }
@@ -695,6 +698,7 @@ async function boot() {
   const viewButton = $('#viewButton'), crosshair = $('#crosshair');
   viewButton.querySelector('span').style.backgroundImage = `url(${icon('eye').url})`;
   function toggleView() {
+    if (isLeaving()) return;
     rig.skipIntro();
     rig.setFirstPerson(!rig.firstPerson, player.heading);
     sound.play('click');
@@ -724,7 +728,7 @@ async function boot() {
     flyButton.setAttribute('aria-pressed', String(player.swimming ? player.diving : player.flying));
   }
   syncFlyButton();
-  function toggleFly() { rig.skipIntro(); player.toggleFly(); closePage(); syncFlyButton(); }
+  function toggleFly() { if (isLeaving()) return; rig.skipIntro(); player.toggleFly(); closePage(); syncFlyButton(); }
   flyButton.addEventListener('click', () => {
     rig.skipIntro(); closePage();
     if (player.swimming) player.toggleDive(); else player.toggleFly();
@@ -759,6 +763,9 @@ async function boot() {
     if (s) dockButton(() => nameOf(s), s.icon || s.id, () => go(s.id)).dataset.station = s.id;
   }
   function togglePhone(on = !phone.up) {
+    // While leaving, the next thing on screen is the loading screen: nothing
+    // may open over the walk or the journey. Closing still works.
+    if (on && isLeaving()) return;
     if (on === phone.up) return;
     phone.toggle(on);
     if (on) { rig.skipIntro(); closePage(); }
@@ -786,8 +793,8 @@ async function boot() {
 
   // ---------- Input ----------
   const input = createInput(stage.renderer.domElement, {
-    blocked: () => minimap.isBigOpen() || panel.open || weatherMenuOpen() || isTravelling() || !!portal?.busy || photoStudio.isOpen(),
-    shortcutsBlocked: () => minimap.isBigOpen() || weatherMenuOpen() || isTravelling() || !!portal?.busy || photoStudio.isOpen(),
+    blocked: () => minimap.isBigOpen() || panel.open || weatherMenuOpen() || isLeaving() || !!portal?.busy || photoStudio.isOpen(),
+    shortcutsBlocked: () => minimap.isBigOpen() || weatherMenuOpen() || isLeaving() || !!portal?.busy || photoStudio.isOpen(),
     escape: () => { if (photoStudio.isOpen()) photoStudio.close(); else if (weatherMenuOpen()) toggleWeatherMenu(false, true); else if (minimap.isBigOpen()) minimap.toggleBig(false); else if (panel.open) closePage(); else if (phone.up) { if (!phone.back()) togglePhone(false); } else toggleWeb(false); },
     interact: () => {
       const s = nearestTarget();
@@ -800,12 +807,12 @@ async function boot() {
       }
     },
     view: toggleView,
-    photo: () => (photoStudio.isOpen() ? photoStudio.close() : photoStudio.open()),
-    jump: () => { rig.skipIntro(); player.jump(); },
+    photo: () => { if (isLeaving()) return; photoStudio.isOpen() ? photoStudio.close() : photoStudio.open(); },
+    jump: () => { if (isLeaving()) return; rig.skipIntro(); player.jump(); },
     toggleFly,
     phone: () => togglePhone(),
-    map: () => minimap.toggleBig(),
-    slot: n => hotbar.children[n - 1]?.click(),
+    map: () => { if (!isLeaving()) minimap.toggleBig(); },
+    slot: n => { if (!isLeaving()) hotbar.children[n - 1]?.click(); },
     orbit: (dx, dy) => { rig.skipIntro(); rig.orbit(dx, dy); },
     zoom: f => rig.zoom(f),
     tap,
@@ -813,6 +820,27 @@ async function boot() {
     anyKey: () => rig.skipIntro(),
     pad: () => flightPad?.state,
   });
+
+  // ---------- Travel ----------
+  // One lifecycle for leaving and returning: the same rules for the portal,
+  // the Dock, a page, the Return control and a restored page. The list, the
+  // portal and the Return control all call `depart`, defined early; the
+  // lifecycle itself is created here, once the input layer exists.
+  travel = createTravelLifecycle({
+    portal, player, rig, stage, reducedMotion,
+    spawn: { x: L.SPAWN.x, z: L.SPAWN.z, heading: L.SPAWN.heading },
+    closeOverlays() {
+      closePage();
+      if (phone.up) togglePhone(false);
+      toggleWeatherMenu(false);
+      minimap.toggleBig(false);
+      if (photoStudio.isOpen()) photoStudio.close();
+      worldList.destroy();
+      input.clear();
+      player.cancel();
+    },
+  });
+  setLeaveHandler(depart);
 
   // ---------- Loop ----------
   // Compile all display materials and the initial shadow map while the loading
@@ -859,39 +887,13 @@ async function boot() {
   extras.warmup?.(false);
   progress(1);
   await nextFrame();
-  // Outside the portal, facing away from it, the light at rest behind.
-  function settlePortalArrival() {
-    const f = portal?.front;
-    if (f) {
-      portal.reset();
-      player.teleport(f.x, f.z, { look: [f.x + Math.sin(f.heading) * 6, f.z + Math.cos(f.heading) * 6] });
-      // A side view keeps the portal out of the arrival camera's way.
-      rig.set(f.heading + Math.PI * .52, .38, stage.camera.aspect < .8 ? 8.5 : 8);
-    }
-    rig.recenter(player);
-  }
   // Every visit opens on the whole island; any key, click or drag cuts it
   // short. Reduced motion goes straight in. Through another world's portal,
   // the player stands in this portal's light and walks out once the world
   // shows; Back or Forward to here, or a world without one, settles outside it
-  // (or at spawn).
-  const walkOut = arrivedBy === 'door' && !reducedMotion ? portal?.arrive(player) : null;
-  if (walkOut) {
-    // Seen from the front, coming out of the light.
-    rig.set(portal.front.heading + 0.45, 0.2, stage.camera.aspect < .8 ? 8 : 7);
-    rig.recenter(player);
-    stage.render();
-  } else if (arrivedBy) {
-    settlePortalArrival();
-    stage.render();
-  } else if (!reducedMotion) rig.startIntro(player);
-  finishLoading();
-  walkOut?.();
-
-  addEventListener('pageshow', event => {
-    if (!event.persisted) return;
-    settlePortalArrival();
-  });
+  // (or at spawn). The travel lifecycle owns all three arrivals, so the same
+  // rules apply to a restored page.
+  travel.arrive(arrivedBy);
 
   let last = performance.now();
   // ---------- Budget ----------
@@ -924,6 +926,8 @@ async function boot() {
     requestAnimationFrame(loop);
     if (document.hidden) { last = now; return; }
     const elapsed = (now - last) / 1000;
+    // A journey walking into the light keeps its own frames (the avatar, the
+    // camera, the gate); only the loading screen pauses the world.
     const paused = minimap.isBigOpen() || panel.open || weatherMenuOpen() || isTravelling() || photoStudio.isOpen();
     if (paused && !wasPaused) { player.cancel(); input.clear(); }
     wasPaused = paused;
@@ -933,7 +937,11 @@ async function boot() {
     if (minute !== timeMinute) { timeMinute = minute; if (timeMode === 'auto') applyWeather(); if (phone.up) phone.tick(); }
     const dt = Math.min(elapsed, 0.05);
 
-    const move = paused || rig.introActive || portal?.busy ? { x: 0, z: 0, run: false, up: false, down: false } : input.read();
+    // Leaving on foot keeps the world running (the walk into the light is
+    // its own scene) but takes the controls away, so nothing can cancel the
+    // route mid-way.
+    const move = paused || rig.introActive || portal?.busy || isLeaving()
+      ? { x: 0, z: 0, run: false, up: false, down: false } : input.read();
     const fp = rig.firstPerson && !rig.introActive;
     player.update(dt, move, rig.yaw, fp);
     portal?.update(dt, player);
@@ -1012,7 +1020,7 @@ async function boot() {
   addEventListener('resize', () => stage.resize());
   // Handy when poking at it from the console.
   window.__home = {
-    stage, world, player, avatar, rig, nav, pets, cat, dog, extras, portal, worn, atmosphere, weatherFx, pool, weather, config, stats, setWeatherMode, getWeatherMode: () => weatherMode, setTimeMode, getTimeMode: () => timeMode, navigate, openPage, openPortal, go, setMood, photo: photoStudio,
+    stage, world, player, avatar, rig, nav, pets, cat, dog, extras, portal, travel, worn, atmosphere, weatherFx, pool, weather, config, stats, setWeatherMode, getWeatherMode: () => weatherMode, setTimeMode, getTimeMode: () => timeMode, navigate, openPage, openPortal, go, setMood, photo: photoStudio,
     teleport(x, z) { player.teleport(x, z); rig.recenter(player); },
     project(x, y, z) {
       const v = new THREE.Vector3(x, y, z).project(stage.camera);

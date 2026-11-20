@@ -47,6 +47,8 @@ The import map in `index.html` defines module paths: `@world/` maps to `world/`,
 python3 tools/serve.py          # Start local preview; use python on Windows
 npm run check:site              # Check site metadata, skin, and engine diffs — no dependencies or running server needed
 npm install && npm run check    # Install dependencies and run site + browser checks
+npm run check:portal            # Portal journeys between the two local fixture worlds
+npm run check:travel            # Leave/return lifecycle: page, flight, first person, cancel, history, spawn
 ```
 
 - The preview server automatically picks a free port, opens the browser, and prints the address in the terminal. Responses have caching disabled — just refresh after changes. `npm run check` connects to this address.

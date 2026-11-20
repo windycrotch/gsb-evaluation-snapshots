@@ -48,6 +48,7 @@ async function main() {
     }
     if (!ready) throw Error('Preview server did not start');
     run('node', ['tools/check-portal.mjs', 'http://127.0.0.1:4173']);
+    run('node', ['tools/check-travel.mjs', 'http://127.0.0.1:4173']);
     run('node', ['tools/check-mailbox-ui.cjs', 'http://127.0.0.1:4173']);
     run('node', ['tools/check-listing.mjs', '--url', 'http://127.0.0.1:4173/']);
   } finally { server.kill(); }
