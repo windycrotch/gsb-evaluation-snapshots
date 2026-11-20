@@ -39,7 +39,7 @@ export function repairMeshData(meshData, options = {}) {
 
   // Degenerate / duplicate faces
   const beforeDedup = faces.length;
-  faces = removeDegenerateFaces(faces);
+  faces = removeDegenerateFaces(faces, verts, opts.weldEpsilon);
   faces = removeDuplicateFaces(faces);
   report.removedFaces += beforeDedup - faces.length;
 
@@ -65,33 +65,69 @@ export function repairMeshData(meshData, options = {}) {
   faces = faces.map(f => ({ id: f.id, vids: f.vids.map(i => compact.get(i)) }));
 
   const result = new MeshData();
-  const vertObjs = finalVerts.map(v => 
+  const vertObjs = finalVerts.map(v =>
     result.addVertex(new THREE.Vector3(v.x, v.y, v.z))
   );
-  for (const f of faces) result.addFace(f.vids.map(i => vertObjs[i]));
 
-  // Determine safe IDs for brand new "repair" faces to avoid collisions
-  let maxOriginalId = -1;
-  for (const f of faces) {
-    if (f.id !== -1 && f.id > maxOriginalId) maxOriginalId = f.id;
+  // Repair (hole-fill) faces get fresh ids that cannot collide with any id the
+  // input mesh ever used, so they can never be mistaken for an original face.
+  let maxOriginalFaceId = -1;
+  for (const id of meshData.faces.keys()) {
+    if (id > maxOriginalFaceId) maxOriginalFaceId = id;
   }
+  let nextRepairId = maxOriginalFaceId + 1;
 
-  let nextRepairId = maxOriginalId + 1;
+  const addedFaces = [];
+  const keptSources = [];
+  const seenFaces = new Set();
 
   for (const f of faces) {
-    const newFace = result.addFace(f.vids.map(i => vertObjs[i]));
-    
-    result.faces.delete(newFace.id);
-    
-    if (f.id !== -1 && f.id !== undefined) {
-      newFace.id = f.id;
-    } else {
-      newFace.id = nextRepairId++;
-      newFace.isRepairFace = true;
+    const face = result.addFace(f.vids.map(i => vertObjs[i]));
+    if (seenFaces.has(face)) {
+      // MeshData.addFace dedups by vertex set; drop the collapsed duplicate.
+      report.removedFaces++;
+      report.warnings.push('Dropped a face that collapsed onto an identical vertex set during rebuild');
+      continue;
     }
-    
-    result.faces.set(newFace.id, newFace);
+    seenFaces.add(face);
+    addedFaces.push(face);
+    keptSources.push(f);
   }
+
+  // Reassign stable ids: surviving original faces keep their original id,
+  // repair faces get a fresh id and are flagged. Done in two phases — detach
+  // every auto-assigned id first, then link the stable ids — so a new id can
+  // never collide with a not-yet-reassigned old id in the association sets.
+  result.faces.clear();
+
+  for (const face of addedFaces) {
+    for (const edgeId of face.edgeIds) {
+      result.edges.get(edgeId)?.faceIds.delete(face.id);
+    }
+    for (const vId of face.vertexIds) {
+      result.vertices.get(vId)?.faceIds.delete(face.id);
+    }
+  }
+
+  for (let i = 0; i < addedFaces.length; i++) {
+    const face = addedFaces[i];
+    const src = keptSources[i];
+    const isRepair = src.id === -1 || src.id === undefined;
+
+    face.id = isRepair ? nextRepairId++ : src.id;
+    if (isRepair) face.isRepairFace = true;
+
+    for (const edgeId of face.edgeIds) {
+      result.edges.get(edgeId)?.faceIds.add(face.id);
+    }
+    for (const vId of face.vertexIds) {
+      result.vertices.get(vId)?.faceIds.add(face.id);
+    }
+    result.faces.set(face.id, face);
+  }
+
+  // Keep the id counters ahead of every id in use.
+  result.syncIdCounters();
 
   result.repairReport = report;
   return result;
@@ -142,10 +178,26 @@ function weldVertices(verts, epsilon) {
   return remap;
 }
 
-function removeDegenerateFaces(faces) {
+function removeDegenerateFaces(faces, verts, weldEpsilon = 1e-6) {
+  // Faces whose (doubled) area is below the weld tolerance squared are
+  // collapsed slivers and count as degenerate too.
+  const minNormalSq = (weldEpsilon * weldEpsilon) ** 2;
+
   return faces.filter(f => {
     if (f.vids.length < 3) return false;
-    return new Set(f.vids).size === f.vids.length;
+    if (new Set(f.vids).size !== f.vids.length) return false;
+
+    let nx = 0, ny = 0, nz = 0;
+    const n = f.vids.length;
+    for (let i = 0; i < n; i++) {
+      const a = verts[f.vids[i]];
+      const b = verts[f.vids[(i + 1) % n]];
+      nx += (a.y - b.y) * (a.z + b.z);
+      ny += (a.z - b.z) * (a.x + b.x);
+      nz += (a.x - b.x) * (a.y + b.y);
+    }
+
+    return nx * nx + ny * ny + nz * nz > minNormalSq;
   });
 }
 

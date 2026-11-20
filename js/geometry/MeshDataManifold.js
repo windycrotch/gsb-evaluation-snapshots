@@ -17,34 +17,40 @@ export async function toManifold(object, idOffset = 0) {
   const wasm = await getManifoldWasm();
   const originalData = object.userData.meshData;
 
-  let manifold;
-  let faceIdMap;
-
+  // Fast path: try the mesh as-is first.
   try {
     const result = createManifoldFromMeshData(wasm, originalData, object.matrixWorld, idOffset);
-    manifold = result.manifold;
-    faceIdMap = result.faceIdMap;
-
-    if (manifold.status() !== 'NoError') {
-      throw new Error("Manifold status is not NoError");
+    if (result.manifold.status() === 'NoError') {
+      return { ...result, nextFaceId: idOffset + maxUsedFaceIdPlusOne(originalData) };
     }
-
+    result.manifold.delete?.();
   } catch (err) {
-    const repairedData = repairMeshData(originalData);
-    const result = createManifoldFromMeshData(wasm, repairedData, object.matrixWorld, idOffset);
-    
-    manifold = result.manifold;
-    faceIdMap = result.faceIdMap;
+    // Fall through: repair the mesh and retry once.
+  }
 
-    // Update the map to flag repaired faces
-    for (const [faceId, face] of repairedData.faces) {
-      if (!originalData.faces.has(faceId)) {
-        faceIdMap.set(faceId + idOffset, 'repair');
-      }
+  const repairedData = repairMeshData(originalData);
+  const result = createManifoldFromMeshData(wasm, repairedData, object.matrixWorld, idOffset);
+
+  const status = result.manifold.status();
+  if (status !== 'NoError') {
+    result.manifold.delete?.();
+    throw new Error(`Mesh repair could not make the mesh manifold (status: ${status})`);
+  }
+
+  // Flag hole-fill faces so they are excluded from result face restoration.
+  for (const [faceId, face] of repairedData.faces) {
+    if (face.isRepairFace) {
+      result.faceIdMap.set(faceId + idOffset, 'repair');
     }
   }
 
-  return { manifold, faceIdMap };
+  return { ...result, nextFaceId: idOffset + repairedData.nextFaceId };
+}
+
+function maxUsedFaceIdPlusOne(meshData) {
+  let max = -1;
+  for (const id of meshData.faces.keys()) if (id > max) max = id;
+  return Math.max(max + 1, meshData.nextFaceId ?? 0);
 }
 
 function createManifoldFromMeshData(wasm, meshData, matrixWorld, idOffset) {

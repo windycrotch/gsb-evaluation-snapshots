@@ -50,26 +50,26 @@ export class UnionOps {
 
   // Returns the MeshData for primary ∪ secondary, keeping face ids traceable to both inputs.
   static async computeUnion(primary, secondary) {
-    const meshData = primary.userData.meshData;
-    const idOffsetB = meshData.nextFaceId + meshData.vertices.size;
-
     await getManifoldWasm();
 
-    const [
-      { manifold: manifoldA, faceIdMap: faceIdMapA },
-      { manifold: manifoldB, faceIdMap: faceIdMapB },
-    ] = await Promise.all([
-      toManifold(primary, 0),
-      toManifold(secondary, idOffsetB),
-    ]);
+    // Secondary's id offset is derived from the ids actually used by primary
+    // (including any repair faces added when primary had to be fixed).
+    const a = await toManifold(primary, 0);
+    const b = await toManifold(secondary, a.nextFaceId);
 
     let result = null;
     try {
-      result = manifoldA.add(manifoldB);
-      return fromManifoldResult(result.getMesh(), faceIdMapA, faceIdMapB, primary);
+      result = a.manifold.add(b.manifold);
+      const status = result.status();
+      if (status !== 'NoError') {
+        throw new Error(`Boolean union failed (status: ${status})`);
+      }
+      return fromManifoldResult(result.getMesh(), a.faceIdMap, b.faceIdMap, primary);
     } finally {
       // Manifold objects live in WASM memory and aren't garbage collected.
       result?.delete?.();
+      a.manifold.delete?.();
+      b.manifold.delete?.();
     }
   }
 
