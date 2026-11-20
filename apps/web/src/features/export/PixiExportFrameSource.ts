@@ -1,6 +1,6 @@
 "use client";
 
-import type { FrameSource } from "@cutaway/export-engine";
+import { ExportCancelledError, type FrameSource } from "@cutaway/export-engine";
 import type { MediaBlobStore } from "@cutaway/media-engine";
 import { planVideoDecodeSchedule, resolveScene, type Scene } from "@cutaway/render-engine";
 import type { ProjectDocument, Size } from "@cutaway/types";
@@ -24,8 +24,16 @@ import { ExactVideoDecoders } from "./ExactVideoDecoders";
  * timeline position is precisely the frame the timeline asked for. Media the
  * decoder can't open falls back to element seeking, which is approximate but
  * keeps the export working.
+ *
+ * The source owns the texture cache it is given: a source is per-export (the
+ * cache holds GPU textures and object URLs for exactly this run), so disposing
+ * it releases the cache too. Creation is transactional — if any step throws, the
+ * renderer, decoders and cache are torn down before the error propagates, so a
+ * failed setup leaks nothing.
  */
 export class PixiExportFrameSource implements FrameSource<VideoFrame> {
+  private disposed = false;
+
   private constructor(
     private readonly project: ProjectDocument,
     private readonly renderer: PixiSceneRenderer,
@@ -33,6 +41,7 @@ export class PixiExportFrameSource implements FrameSource<VideoFrame> {
     private readonly resolution: Size,
     private readonly frameRate: number,
     private readonly decoders: ExactVideoDecoders,
+    private readonly signal: AbortSignal | undefined,
   ) {}
 
   static async create(
@@ -43,38 +52,64 @@ export class PixiExportFrameSource implements FrameSource<VideoFrame> {
     frameRate: number,
     startFrame: number,
     endFrame: number,
+    signal?: AbortSignal,
   ): Promise<PixiExportFrameSource> {
     const canvas = document.createElement("canvas");
     canvas.width = resolution.width;
     canvas.height = resolution.height;
 
     const renderer = new PixiSceneRenderer(cache);
-    // Pixel ratio 1: the backing store is exactly the requested output size.
-    await renderer.init(canvas, resolution.width, resolution.height, 1);
+    let decoders: ExactVideoDecoders | undefined;
+    try {
+      // Pixel ratio 1: the backing store is exactly the requested output size.
+      await renderer.init(canvas, resolution.width, resolution.height, 1);
+      throwIfAborted(signal);
 
-    // Every timestamp the export will need, planned before decoding starts —
-    // the decoders require the whole ordered list to walk each stream once.
-    const schedule = planVideoDecodeSchedule(project, startFrame, endFrame);
-    const decoders = await ExactVideoDecoders.create(project, store, schedule);
+      // Every timestamp the export will need, planned before decoding starts —
+      // the decoders require the whole ordered list to walk each stream once.
+      const schedule = planVideoDecodeSchedule(project, startFrame, endFrame);
+      decoders = await ExactVideoDecoders.create(project, store, schedule, signal);
+      throwIfAborted(signal);
 
-    // Give each exactly-decoded video a canvas-backed texture, so the renderer's
-    // ordinary `cache.peek` lookup finds decoded frames without knowing it.
-    for (const mediaId of schedule.keys()) {
-      if (!decoders.has(mediaId)) continue;
-      const dimensions = project.entities.media[mediaId]?.metadata.dimensions;
-      cache.registerDecodedVideo(
-        mediaId,
-        dimensions?.width ?? resolution.width,
-        dimensions?.height ?? resolution.height,
+      // Give each exactly-decoded video a canvas-backed texture, so the renderer's
+      // ordinary `cache.peek` lookup finds decoded frames without knowing it.
+      for (const mediaId of schedule.keys()) {
+        if (!decoders.has(mediaId)) continue;
+        const dimensions = project.entities.media[mediaId]?.metadata.dimensions;
+        cache.registerDecodedVideo(
+          mediaId,
+          dimensions?.width ?? resolution.width,
+          dimensions?.height ?? resolution.height,
+        );
+      }
+
+      return new PixiExportFrameSource(
+        project,
+        renderer,
+        cache,
+        resolution,
+        frameRate,
+        decoders,
+        signal,
       );
+    } catch (error) {
+      // Setup failed (or was cancelled) part-way: undo everything allocated so
+      // the caller never receives a half-built source to dispose.
+      await decoders?.dispose().catch(() => {});
+      renderer.destroy();
+      cache.destroy();
+      throw error;
     }
-
-    return new PixiExportFrameSource(project, renderer, cache, resolution, frameRate, decoders);
   }
 
   async renderFrame(frame: number): Promise<VideoFrame> {
+    throwIfAborted(this.signal);
+
     const scene = resolveScene(this.project, frame);
     await this.prepareMedia(scene);
+    // A cancel that arrived during decoding stops here, before a frame is
+    // captured for an encoder that will never be used.
+    throwIfAborted(this.signal);
 
     // displayWidth === project width ⇒ scale 1, i.e. a full-resolution draw.
     this.renderer.render(scene, this.project.entities.media, this.resolution.width, false);
@@ -84,9 +119,19 @@ export class PixiExportFrameSource implements FrameSource<VideoFrame> {
     return this.renderer.captureFrame(timestamp, duration);
   }
 
+  /**
+   * Releases the decoders, the renderer and the texture cache. Idempotent: the
+   * pipeline may call it again after the run loop already did.
+   */
   async dispose(): Promise<void> {
+    if (this.disposed) return;
+    this.disposed = true;
+
+    // Reverse of acquisition: stop decoding, then tear down the GPU renderer,
+    // then the textures/object URLs it was drawing with.
     await this.decoders.dispose();
     this.renderer.destroy();
+    this.cache.destroy();
   }
 
   /**
@@ -157,4 +202,8 @@ export class PixiExportFrameSource implements FrameSource<VideoFrame> {
       source?.update?.();
     });
   }
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw new ExportCancelledError();
 }

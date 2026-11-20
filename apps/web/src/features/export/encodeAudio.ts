@@ -1,5 +1,6 @@
 "use client";
 
+import { ExportCancelledError } from "@cutaway/export-engine";
 import type { MediaContainer } from "./MediaContainer";
 import type { ResolvedAudioConfig } from "./capabilities";
 
@@ -13,13 +14,21 @@ const CHUNK_FRAMES = 4_096;
  * index-derived timestamps, so audio timing can't drift over a long export —
  * the same discipline the video side uses. Encoder errors surface synchronously
  * on the next chunk or after flush.
+ *
+ * Audible output is produced only on success. On cancellation the loop stops at
+ * the next chunk boundary, no further chunks are muxed, the encoder is closed
+ * without flushing, and {@link ExportCancelledError} is thrown — so a cancelled
+ * export never leaves stray audio in the shared container. An encoder error
+ * recorded *before* the abort wins over the cancel, mirroring the video path.
  */
 export async function encodeAudioBuffer(
   buffer: AudioBuffer,
   config: ResolvedAudioConfig,
   container: MediaContainer,
+  signal?: AbortSignal,
 ): Promise<void> {
   if (typeof globalThis.AudioEncoder === "undefined") return;
+  throwIfAborted(signal);
 
   let failure: Error | null = null;
   const encoder = new AudioEncoder({
@@ -34,45 +43,69 @@ export async function encodeAudioBuffer(
       failure ??= asError(error);
     },
   });
-  encoder.configure(config.encoderConfig);
 
-  const { numberOfChannels, sampleRate, length } = buffer;
+  try {
+    encoder.configure(config.encoderConfig);
 
-  for (let offset = 0; offset < length; offset += CHUNK_FRAMES) {
-    if (failure) break;
+    const { numberOfChannels, sampleRate, length } = buffer;
 
-    const frames = Math.min(CHUNK_FRAMES, length - offset);
-    // Planar layout: all of channel 0, then all of channel 1, …
-    const planar = new Float32Array(frames * numberOfChannels);
-    for (let channel = 0; channel < numberOfChannels; channel++) {
-      buffer.copyFromChannel(
-        planar.subarray(channel * frames, (channel + 1) * frames),
-        channel,
-        offset,
-      );
+    for (let offset = 0; offset < length; offset += CHUNK_FRAMES) {
+      // Sample the abort *before* building the next chunk: nothing may be
+      // appended to the container once the user has cancelled.
+      if (signal?.aborted) {
+        if (failure) throw failure;
+        throw new ExportCancelledError();
+      }
+      if (failure) break;
+
+      const frames = Math.min(CHUNK_FRAMES, length - offset);
+      // Planar layout: all of channel 0, then all of channel 1, …
+      const planar = new Float32Array(frames * numberOfChannels);
+      for (let channel = 0; channel < numberOfChannels; channel++) {
+        buffer.copyFromChannel(
+          planar.subarray(channel * frames, (channel + 1) * frames),
+          channel,
+          offset,
+        );
+      }
+
+      const data = new AudioData({
+        format: "f32-planar",
+        sampleRate,
+        numberOfFrames: frames,
+        numberOfChannels,
+        timestamp: Math.round((offset / sampleRate) * 1_000_000),
+        data: planar,
+      });
+      try {
+        encoder.encode(data);
+      } finally {
+        data.close();
+      }
+
+      // Yield periodically so a large mix doesn't block the main thread outright.
+      if (offset % (CHUNK_FRAMES * 32) === 0) await Promise.resolve();
     }
 
-    const data = new AudioData({
-      format: "f32-planar",
-      sampleRate,
-      numberOfFrames: frames,
-      numberOfChannels,
-      timestamp: Math.round((offset / sampleRate) * 1_000_000),
-      data: planar,
-    });
+    if (failure) throw failure;
+    throwIfAborted(signal);
+
+    // Only flush when the export is still live: flushing after a cancel would
+    // emit the audio chunks the user asked us to stop producing.
+    await encoder.flush();
+    if (failure) throw failure;
+    throwIfAborted(signal);
+  } finally {
     try {
-      encoder.encode(data);
-    } finally {
-      data.close();
+      if (encoder.state !== "closed") encoder.close();
+    } catch {
+      // Already errored/closed by the browser; nothing left to release.
     }
-
-    // Yield periodically so a large mix doesn't block the main thread outright.
-    if (offset % (CHUNK_FRAMES * 32) === 0) await Promise.resolve();
   }
+}
 
-  if (!failure) await encoder.flush();
-  if (encoder.state !== "closed") encoder.close();
-  if (failure) throw failure;
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw new ExportCancelledError();
 }
 
 function asError(error: unknown): Error {

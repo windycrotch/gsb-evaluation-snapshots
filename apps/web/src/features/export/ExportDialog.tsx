@@ -35,7 +35,7 @@ export function ExportDialog({ onClose }: { onClose: () => void }) {
   const inPoint = useEditorStore((s) => s.inPoint);
   const outPoint = useEditorStore((s) => s.outPoint);
 
-  const { isExporting, progress, error, done, start, cancel } = useExport();
+  const { isExporting, progress, error, cancelled, done, start, cancel } = useExport();
 
   const [format, setFormat] = useState<ExportFormat>(stored.format === "webm" ? "webm" : "mp4");
   const [height, setHeight] = useState<number>(projectRes.height);
@@ -194,6 +194,9 @@ export function ExportDialog({ onClose }: { onClose: () => void }) {
             ))}
 
             {error && <p className="text-danger text-2xs">Export failed: {error}</p>}
+            {cancelled && !error && (
+              <p className="text-2xs text-text-tertiary">Export cancelled — no file was saved.</p>
+            )}
             {done && <p className="text-2xs text-accent">Exported — check your downloads.</p>}
 
             <Button

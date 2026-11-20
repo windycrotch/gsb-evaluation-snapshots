@@ -1,6 +1,6 @@
 "use client";
 
-import type { ExportPlan } from "@cutaway/export-engine";
+import { ExportCancelledError, type ExportPlan } from "@cutaway/export-engine";
 import { resolveAudioTimeline, type ResolvedAudioClip } from "@cutaway/render-engine";
 import type { MediaBlobStore } from "@cutaway/media-engine";
 import type { ProjectDocument } from "@cutaway/types";
@@ -13,13 +13,21 @@ import type { ProjectDocument } from "@cutaway/types";
  * its output time, and summed by an OfflineAudioContext — the browser's own
  * mixer, which also resamples every source to the output rate for free. Returns
  * null when there is nothing audible, so the caller exports video-only.
+ *
+ * Cancellation is observed before decoding, between clips, and around the
+ * offline render. An `OfflineAudioContext` render itself cannot be interrupted,
+ * but it is bounded and cheap relative to a frame loop; the abort is still
+ * honoured as soon as it finishes so a cancelled export never proceeds to the
+ * encoder.
  */
 export async function mixProjectAudio(
   project: ProjectDocument,
   store: MediaBlobStore,
   plan: ExportPlan,
+  signal?: AbortSignal,
 ): Promise<AudioBuffer | null> {
   if (typeof globalThis.OfflineAudioContext === "undefined") return null;
+  throwIfAborted(signal);
 
   const clips = resolveAudioTimeline(project, plan.startFrame, plan.endFrame);
   if (clips.length === 0) return null;
@@ -33,11 +41,12 @@ export async function mixProjectAudio(
   let scheduled = 0;
   await Promise.all(
     clips.map(async (clip) => {
+      if (signal?.aborted) return;
       const asset = project.entities.media[clip.mediaId];
       if (!asset || asset.source.type !== "indexeddb") return;
 
       const blob = await store.get(asset.source.key);
-      if (!blob) return;
+      if (!blob || signal?.aborted) return;
 
       let buffer: AudioBuffer;
       try {
@@ -47,13 +56,20 @@ export async function mixProjectAudio(
         return; // A file that won't decode is skipped, not fatal to the export.
       }
 
+      // Different clips decode concurrently; re-check before wiring this one in,
+      // so an abort mid-mix does not add work to a render we will discard.
+      if (signal?.aborted) return;
       scheduleClip(ctx, buffer, clip);
       scheduled += 1;
     }),
   );
 
+  throwIfAborted(signal);
   if (scheduled === 0) return null;
-  return ctx.startRendering();
+
+  const mixed = await ctx.startRendering();
+  throwIfAborted(signal);
+  return mixed;
 }
 
 /** Wires one clip into the offline graph: source → gain (with fades) → output. */
@@ -94,6 +110,10 @@ function scheduleClip(
   // the consumed span scales with playbackRate to yield `durationSeconds` of
   // output.
   source.start(start, clip.sourceInSeconds, clip.durationSeconds * clip.speed);
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw new ExportCancelledError();
 }
 
 /** Keeps the sample rate within the range OfflineAudioContext accepts. */

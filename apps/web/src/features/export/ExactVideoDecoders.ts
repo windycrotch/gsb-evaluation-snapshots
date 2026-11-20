@@ -41,21 +41,38 @@ export class ExactVideoDecoders {
     project: ProjectDocument,
     store: MediaBlobStore,
     schedule: VideoDecodeSchedule,
+    signal?: AbortSignal,
   ): Promise<ExactVideoDecoders> {
     const tracks = new Map<Id, DecoderTrack>();
 
-    await Promise.all(
-      [...schedule].map(async ([mediaId, timestamps]) => {
-        const asset = project.entities.media[mediaId];
-        if (!asset || asset.source.type !== "indexeddb") return;
+    try {
+      await Promise.all(
+        [...schedule].map(async ([mediaId, timestamps]) => {
+          if (signal?.aborted) return;
+          const asset = project.entities.media[mediaId];
+          if (!asset || asset.source.type !== "indexeddb") return;
 
-        const blob = await store.get(asset.source.key);
-        if (!blob) return;
+          const blob = await store.get(asset.source.key);
+          if (!blob || signal?.aborted) return;
 
-        const track = await DecoderTrack.open(blob, timestamps);
-        if (track) tracks.set(mediaId, track);
-      }),
-    );
+          const track = await DecoderTrack.open(blob, timestamps);
+          // A cancel that landed while this stream was opening closes it at once
+          // instead of leaking it into a result nobody will dispose.
+          if (track && signal?.aborted) {
+            await track.dispose();
+            return;
+          }
+          if (track) tracks.set(mediaId, track);
+        }),
+      );
+    } catch (error) {
+      // Opening several streams is all-or-nothing: a failure while any are open
+      // must close them before the error propagates, or the caller (which never
+      // receives the object) has no handle to clean up with.
+      await Promise.all([...tracks.values()].map((track) => track.dispose().catch(() => {})));
+      tracks.clear();
+      throw error;
+    }
 
     return new ExactVideoDecoders(tracks);
   }
@@ -76,8 +93,9 @@ export class ExactVideoDecoders {
   }
 
   async dispose(): Promise<void> {
-    await Promise.all([...this.tracks.values()].map((track) => track.dispose()));
+    const tracks = [...this.tracks.values()];
     this.tracks.clear();
+    await Promise.all(tracks.map((track) => track.dispose()));
   }
 }
 
@@ -136,8 +154,15 @@ class DecoderTrack {
   }
 
   async dispose(): Promise<void> {
-    await this.iterator?.return(undefined);
+    const iterator = this.iterator;
     this.iterator = null;
-    await this.input.dispose();
+    // Release the decoder first (cancelling the async walk), then the demuxer.
+    // `input.dispose` still runs if closing the iterator throws, so a decoder
+    // that already errored (a normal cancel path) cannot leak the demuxer.
+    try {
+      await iterator?.return(undefined);
+    } finally {
+      await this.input.dispose();
+    }
   }
 }

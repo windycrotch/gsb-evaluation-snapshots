@@ -228,6 +228,30 @@ preview frame for frame.
   keeps them in lockstep. Decoded frames reach the compositor through a
   canvas-backed texture in `MediaTextureCache`, so the renderer is unchanged.
   Media the decoder can't open falls back to element seeking.
+- **One lifecycle, three outcomes.** `runExportPipeline` owns the whole chain
+  (audio mix → audio encode → frame loop → finalize) so every stage shares one
+  cancellation rule and one teardown. It settles in exactly three ways: success
+  returns the container bytes; cancellation throws `ExportCancelledError` and
+  produces no file; an encoder/container failure throws that error. Teardown
+  order is fixed — frame source, video writer, shared muxer container — and each
+  disposal is idempotent, so a caller cleaning up again is harmless.
+- **Cancel vs. encoder error is decided by observation order.** WebCodecs
+  reports fatal errors asynchronously, so a cancel and a failure can race.
+  `ExportCancellation` samples the writer's pending error at the instant the
+  abort fires: an error already pending wins and surfaces as the failure; a
+  cancel observed first makes a later encoder error surface as the cancellation.
+  Once aborted, no further frames are appended, the container is never finalized,
+  and any frame in flight is still released.
+- **Each export is isolated.** `exportProjectToBlob` builds its own container,
+  encoder, frame source and texture cache per call, so a second export started
+  right after a cancelled or failed one cannot inherit stale state. The UI drives
+  runs through `ExportSession`, which aborts a superseded run _before_ starting
+  the next and drops progress/settlement from stale runs — a late event from the
+  first export never lands in the second's progress bar.
+- **Output naming is pure and sanitised.** `exportMimeType` / `exportFilename`
+  (in the engine) map a container to its MIME type and turn the project name into
+  a safe download filename, stripping path separators and leading dots so a name
+  like `"../secrets"` cannot escape the download directory.
 
 ## Transitions
 

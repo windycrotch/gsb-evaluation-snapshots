@@ -9,8 +9,14 @@
  * export loop unit-testable with plain fakes.
  */
 
+/** Anything that can release its resources. Disposal must be idempotent. */
+export interface DisposableResource {
+  /** Releases resources. Safe to call more than once. */
+  dispose?(): Promise<void> | void;
+}
+
 /** Produces the composited frame for a given timeline frame number. */
-export interface FrameSource<TFrame> {
+export interface FrameSource<TFrame> extends DisposableResource {
   /**
    * Renders `frame` (a timeline frame index) and returns it as `TFrame`.
    * Ownership passes to the caller, which is responsible for releasing it after
@@ -22,7 +28,7 @@ export interface FrameSource<TFrame> {
 }
 
 /** Consumes rendered frames and produces the final container bytes. */
-export interface VideoWriter<TFrame> {
+export interface VideoWriter<TFrame> extends DisposableResource {
   /**
    * Encodes one frame at the given presentation timestamp. Both times are in
    * microseconds. The writer does not take permanent ownership — the caller
@@ -33,6 +39,16 @@ export interface VideoWriter<TFrame> {
   finalize(): Promise<Uint8Array>;
   /** Releases encoder/muxer resources on failure or cancellation. */
   dispose?(): Promise<void> | void;
+  /**
+   * Returns the fatal encoder error, if one has been recorded, without throwing.
+   *
+   * A WebCodecs encoder reports failures asynchronously through its `error`
+   * callback, which can land between the loop's own awaits. The orchestrator
+   * samples this the moment an abort fires so an encoder error that was already
+   * pending wins over the cancellation, while one that arrives afterwards
+   * cannot retroactively relabel a cancel as a failure.
+   */
+  pendingError?(): Error | null;
 }
 
 /** How the caller releases a frame once the writer has consumed it. */
