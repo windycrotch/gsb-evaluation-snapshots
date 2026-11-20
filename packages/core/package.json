@@ -1,0 +1,39 @@
+{
+  "name": "@react-av/core",
+  "private": false,
+  "version": "0.0.5",
+  "description": "Fully-featured, headless, hooks-based, and declarative media player framework for React.",
+  "main": "dist/cjs/index.js",
+  "module": "dist/esm/index.js",
+  "files": [
+    "dist/cjs",
+    "dist/esm",
+    "src"
+  ],
+  "scripts": {
+    "build:cjs": "tsc --outDir dist/cjs --module commonjs",
+    "build:esm": "tsc --outDir dist/esm --module esnext",
+    "build": "pnpm build:cjs && pnpm build:esm",
+    "dev": "tsc --watch"
+  },
+  "keywords": [],
+  "author": "Daniel Wykerd <daniel@wykerd.dev>",
+  "license": "MIT",
+  "repository": {
+    "directory": "packages/core",
+    "type": "git",
+    "url": "https://github.com/Wykerd/react-av.git"
+  },
+  "devDependencies": {
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "tslib": "^2.8.1",
+    "typescript": "^7.0.2"
+  },
+  "peerDependencies": {
+    "react": "^18.3.1 || ^19.0.0",
+    "react-dom": "^18.3.1 || ^19.0.0"
+  }
+}

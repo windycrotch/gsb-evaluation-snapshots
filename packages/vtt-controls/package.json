@@ -1,0 +1,43 @@
+{
+  "name": "@react-av/vtt-controls",
+  "version": "0.0.10",
+  "private": false,
+  "description": "WebVTT controls for use with React AV.",
+  "main": "dist/cjs/index.js",
+  "module": "dist/esm/index.js",
+  "files": [
+    "dist/cjs",
+    "dist/esm",
+    "src"
+  ],
+  "scripts": {
+    "build:cjs": "tsc --outDir dist/cjs --module commonjs",
+    "build:esm": "tsc --outDir dist/esm --module esnext",
+    "build": "pnpm build:cjs && pnpm build:esm",
+    "dev": "tsc --watch"
+  },
+  "devDependencies": {
+    "@react-av/core": "workspace:^",
+    "@react-av/vtt": "workspace:^",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "tslib": "^2.8.1",
+    "typescript": "^7.0.2"
+  },
+  "peerDependencies": {
+    "@react-av/core": "workspace:^",
+    "@react-av/vtt": "workspace:^",
+    "react": "^18.3.1 || ^19.0.0",
+    "react-dom": "^18.3.1 || ^19.0.0"
+  },
+  "keywords": [],
+  "author": "Daniel Wykerd <daniel@wykerd.dev>",
+  "license": "MIT",
+  "repository": {
+    "directory": "packages/vtt-controls",
+    "type": "git",
+    "url": "https://github.com/Wykerd/react-av.git"
+  }
+}
