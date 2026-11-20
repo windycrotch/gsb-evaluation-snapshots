@@ -1,0 +1,109 @@
+name: ci
+
+on:
+  # Re-verify after merge — keeps `main` green even if someone bypassed
+  # the PR gate.
+  push:
+    branches: [main]
+  # PR gate: every PR targeting main runs the full suite before merge.
+  pull_request:
+    branches: [main]
+
+# Cancel in-flight runs on the same branch when a new commit arrives.
+# Saves CI minutes on rapid-fire pushes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-typecheck:
+    runs-on: ubuntu-latest
+    # Backstop so a wedged step can't pin the runner until GitHub's ~6h
+    # default. Generous vs. the ~1-2min this job actually takes.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      # pnpm version is read from `packageManager` in root package.json.
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      # Build before typecheck — typecheck resolves cross-package
+      # type imports via each package's `types` field which points to
+      # `dist/index.d.ts`. Without dist, sync-broadcast can't see
+      # core's types and TS falls back to `any`.
+      - run: pnpm build
+      - run: pnpm typecheck
+
+  test-unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      # pnpm version is read from `packageManager` in root package.json.
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # React's unit test imports from `@canvas-harness/core` via the
+      # workspace dep; vitest resolves through the `main`/`module`
+      # field which points to `dist/index.js`. Without dist, the
+      # import fails. Build first.
+      - run: pnpm build
+      - run: pnpm test
+
+  test-browser:
+    # Pinned: Playwright 1.60 can't install chromium deps on ubuntu-latest
+    # (now 26.04). Unpin once Playwright supports it. Tracked in #49.
+    runs-on: ubuntu-24.04
+    # Higher cap: a hung Playwright/chromium page is the most likely
+    # thing to wedge, and the chromium download adds cold-start time.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      # pnpm version is read from `packageManager` in root package.json.
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # Browser tests import from @canvas-harness/core via the
+      # workspace dep; need dist to exist.
+      - run: pnpm build
+      # Chromium download is ~10-15s on a cold runner; subsequent runs
+      # hit the Playwright apt-cache layer.
+      # `pnpm exec` from root only sees root's .bin — playwright is a
+      # devDependency of `core`/`react`, so scope via filter.
+      - run: pnpm -F @canvas-harness/react exec playwright install --with-deps chromium
+      - run: pnpm test:browser
+
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      # pnpm version is read from `packageManager` in root package.json.
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Verify dist outputs exist
+        run: |
+          test -f packages/core/dist/index.js
+          test -f packages/core/dist/index.cjs
+          test -f packages/core/dist/index.d.ts
+          test -f packages/react/dist/index.js
+          test -f packages/react/dist/index.cjs
+          test -f packages/react/dist/index.d.ts
+          test -f packages/sync-broadcast/dist/index.js
+          test -f packages/sync-broadcast/dist/index.cjs
+          test -f packages/sync-broadcast/dist/index.d.ts

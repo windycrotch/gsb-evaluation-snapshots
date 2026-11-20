@@ -1,0 +1,147 @@
+name: release
+
+# Manual trigger only — click "Run workflow" in the Actions tab.
+# Picks a `version-type` (or explicit version), runs the full CI suite,
+# bumps every publishable package to the same version, publishes to
+# npm via trusted publishing (OIDC — no token), commits the bump,
+# tags it, and opens a GitHub release with auto-generated notes.
+on:
+  workflow_dispatch:
+    inputs:
+      version-type:
+        description: "Bump kind (ignored when 'version' is set)."
+        type: choice
+        required: true
+        default: patch
+        options:
+          - patch
+          - minor
+          - major
+      version:
+        description: "Explicit version like 1.2.3. Overrides version-type."
+        type: string
+        required: false
+        default: ""
+      dry-run:
+        description: "Run everything except npm publish + git push."
+        type: boolean
+        required: false
+        default: false
+
+# `id-token: write` lets the runner mint an OIDC token. npm's trusted
+# publishing verifies that token against the registered publisher
+# (this repo + workflow filename) — no NPM_TOKEN required.
+# `contents: write` is needed for the version-bump commit + tag.
+permissions:
+  contents: write
+  id-token: write
+
+# Only one release at a time across the whole repo.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    # Pinned: runs the Playwright browser suite, which can't install chromium
+    # deps on ubuntu-latest (now 26.04) with Playwright 1.60. Tracked in #49.
+    runs-on: ubuntu-24.04
+    # Full suite + browser tests + rebuild + npm publish in one job.
+    # Backstop against a wedged test/publish holding the runner open.
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Full history so release notes can `git log` since last tag.
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # pnpm version is read from `packageManager` in root package.json.
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Node 24 ships npm 11.x natively, which has built-in OIDC
+          # trusted-publishing support. pnpm 9.x delegates the actual
+          # publish upload to npm CLI, so npm needs to be the version
+          # that knows about OIDC. Node 22 LTS ships npm 10.x (no OIDC);
+          # Node 24 LTS (active since 2025-10) ships npm 11.x (OIDC).
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # Safety net: if main is broken, we don't want to ship it.
+      # Build first so workspace deps' `dist/` exist when typecheck
+      # tries to resolve cross-package type imports (e.g. sync-broadcast
+      # importing from @canvas-harness/core).
+      - name: Verify the build is green
+        run: |
+          pnpm lint
+          pnpm build
+          pnpm typecheck
+          pnpm test
+
+      - name: Browser tests
+        run: |
+          # `pnpm exec` from root only sees root's .bin — playwright is
+          # a devDependency of `core`/`react`, so scope via filter.
+          pnpm -F @canvas-harness/react exec playwright install --with-deps chromium
+          pnpm test:browser
+
+      - name: Bump versions
+        id: bump
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            NEXT=$(node scripts/bump-version.mjs "${{ inputs.version }}")
+          else
+            NEXT=$(node scripts/bump-version.mjs "${{ inputs.version-type }}")
+          fi
+          echo "version=$NEXT" >> "$GITHUB_OUTPUT"
+          echo "Resolved next version: $NEXT"
+
+      # Rebuild AFTER the version bump so each package's dist has the
+      # right version baked into any compile-time constants and so the
+      # cross-package `workspace:*` refs resolve to the new version on
+      # publish.
+      - name: Rebuild with new version
+        run: pnpm build
+
+      - name: Publish to npm (trusted publishing / OIDC)
+        if: ${{ !inputs.dry-run }}
+        run: |
+          # No NODE_AUTH_TOKEN — npm CLI authenticates via the OIDC
+          # token GitHub Actions exposes through ACTIONS_ID_TOKEN_REQUEST_*
+          # env vars (auto-set when id-token: write is granted).
+          # pnpm publish replaces `workspace:*` in the published
+          # package.json with the resolved version automatically.
+          # --no-git-checks: we'll commit the version bump after the
+          # publish step succeeds.
+          pnpm -r --filter "./packages/*" publish --access public --no-git-checks
+
+      - name: Dry-run summary
+        if: ${{ inputs.dry-run }}
+        run: |
+          echo "Dry run — skipping publish, commit, tag, release."
+          echo "Would have published @canvas-harness/{core,react,sync-broadcast}@${{ steps.bump.outputs.version }}"
+
+      - name: Commit + tag
+        if: ${{ !inputs.dry-run }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add packages/*/package.json
+          git commit -m "release: v${{ steps.bump.outputs.version }}"
+          git tag "v${{ steps.bump.outputs.version }}"
+          git push origin HEAD:main
+          git push origin "v${{ steps.bump.outputs.version }}"
+
+      - name: GitHub release
+        if: ${{ !inputs.dry-run }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "v${{ steps.bump.outputs.version }}"
+          name: "v${{ steps.bump.outputs.version }}"
+          # Auto-generate notes from commits since the previous tag.
+          generate_release_notes: true

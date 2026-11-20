@@ -1,0 +1,209 @@
+/**
+ * useArrowTool — Arrow-tool gesture for edge creation.
+ *
+ * Flow per ARCHITECTURE.md §6.3:
+ *   pointerdown over node  → start edge with source attached at the
+ *                             clamped boundary point on that node
+ *   pointerdown empty      → start edge with free-floating source
+ *   pointermove            → target follows pointer; if over a candidate
+ *                             node, snap target to that node's boundary
+ *   pointerup              → commit (target = node attachment OR worldPoint)
+ *
+ * The renderer paints the draft edge from interaction.draftEdge while in
+ * mode 'creating-edge'.
+ */
+import {
+  type CanvasStore,
+  type EdgeEnd,
+  type NodeId,
+  type Vec2,
+  asEdgeId,
+  hitTestPoint,
+  projectToNodeBoundary,
+  screenToWorld,
+  worldToNodeLocal,
+} from '@canvas-harness/core'
+import { useEffect, useRef } from 'react'
+
+const CLICK_MAX_PIXELS = 4
+
+/**
+ * Defaults applied to every edge the arrow tool creates. Lets a
+ * consumer (e.g. a style-memory hook) inject the user's last-used
+ * pathStyle / arrowheads / style without forcing every edge through
+ * a custom factory.
+ *
+ * `style` and `data` accept either a plain object reused for every
+ * edge, or a factory invoked once at gesture commit. The factory
+ * form matters when the stamp depends on dynamic state at creation
+ * time — current theme, current scope, sticky style memory,
+ * `createdAt` timestamps — because stamping these inside the same
+ * `addEdge` op makes single-Cmd+Z undo the create cleanly. The
+ * alternative (subscribing to `'change'` and calling `updateEdge`
+ * synchronously) pushes a second batch onto the undo stack, so the
+ * user would have to undo twice.
+ */
+export type ArrowToolDefaults = {
+  pathStyle?: import('@canvas-harness/core').PathStyle
+  style?:
+    | import('@canvas-harness/core').EdgeStyle
+    | (() => import('@canvas-harness/core').EdgeStyle | undefined)
+  /**
+   * Initial `data` payload on every arrow-drawn edge. Use the factory
+   * form for fields that depend on dynamic state (theme, scope,
+   * timestamp) — see the type-level doc above for why this matters
+   * for clean undo semantics.
+   */
+  data?: Record<string, unknown> | (() => Record<string, unknown> | undefined)
+}
+
+export const useArrowTool = (
+  ref: React.RefObject<HTMLElement | null>,
+  store: CanvasStore,
+  enabled: boolean,
+  defaults?: ArrowToolDefaults,
+): void => {
+  // Refs so the create handler always reads the latest defaults
+  // without forcing the listener effect to re-mount on every change.
+  const defaultsRef = useRef(defaults)
+  defaultsRef.current = defaults
+
+  useEffect(() => {
+    if (!enabled) return
+    const el = ref.current
+    if (!el) return
+
+    let pointerDownAt: { x: number; y: number } | null = null
+    let active = false
+    let sourceEnd: EdgeEnd | null = null
+
+    const screenFromEvent = (e: PointerEvent): Vec2 => {
+      const rect = el.getBoundingClientRect()
+      return { x: e.clientX - rect.left, y: e.clientY - rect.top }
+    }
+    const worldFromEvent = (e: PointerEvent): Vec2 =>
+      screenToWorld(screenFromEvent(e), store.getCamera())
+
+    /**
+     * If the world point lies over a node, returns an attached EdgeEnd
+     * with localOffset clamped/projected to that node's boundary.
+     * Otherwise returns a free-floating worldPoint end.
+     */
+    const endFromWorldPoint = (world: Vec2): { end: EdgeEnd; nodeId: NodeId | null } => {
+      const hit = hitTestPoint(store, world, store.getCamera().z)
+      if (hit && hit.kind === 'body') {
+        const node = store.getNode(hit.nodeId)!
+        const localOffset = projectToNodeBoundary(world, node)
+        return { end: { nodeId: node.id, localOffset }, nodeId: node.id }
+      }
+      return { end: { worldPoint: world }, nodeId: null }
+    }
+
+    /** End that just follows the pointer; if over a node, attach via clamped local. */
+    const followingEnd = (world: Vec2): { end: EdgeEnd; nodeId: NodeId | null } => {
+      const hit = hitTestPoint(store, world, store.getCamera().z)
+      if (hit && hit.kind === 'body') {
+        const node = store.getNode(hit.nodeId)!
+        // For follow-the-pointer, snap to the actual pointer position
+        // projected to the node boundary (not "nearest edge").
+        const local = worldToNodeLocal(world, node)
+        const clamped = {
+          x: Math.max(0, Math.min(node.w, local.x)),
+          y: Math.max(0, Math.min(node.h, local.y)),
+        }
+        return { end: { nodeId: node.id, localOffset: clamped }, nodeId: node.id }
+      }
+      return { end: { worldPoint: world }, nodeId: null }
+    }
+
+    const onPointerDown = (e: PointerEvent) => {
+      if (e.button !== 0) return
+      // Edit mode: don't preventDefault on a pointerdown that targets
+      // the textarea, otherwise the click→caret default is cancelled.
+      if (store.getInteractionState().mode === 'editing') return
+      pointerDownAt = screenFromEvent(e)
+      const world = worldFromEvent(e)
+      const { end } = endFromWorldPoint(world)
+      sourceEnd = end
+      el.setPointerCapture(e.pointerId)
+      e.preventDefault()
+    }
+
+    const onPointerMove = (e: PointerEvent) => {
+      if (!pointerDownAt || !sourceEnd) return
+      const screen = screenFromEvent(e)
+      const dx = screen.x - pointerDownAt.x
+      const dy = screen.y - pointerDownAt.y
+      // Only start showing the draft once the user moves past the click threshold.
+      if (!active && Math.abs(dx) < CLICK_MAX_PIXELS && Math.abs(dy) < CLICK_MAX_PIXELS) return
+      active = true
+      const world = worldFromEvent(e)
+      const { end: target, nodeId: snapTargetNodeId } = followingEnd(world)
+      store.setInteractionState({
+        mode: 'creating-edge',
+        draftEdge: {
+          source: sourceEnd,
+          target,
+          reconnectingId: null,
+          snapTargetNodeId,
+        },
+      })
+    }
+
+    const onPointerUp = (e: PointerEvent) => {
+      if (!pointerDownAt) return
+      if (el.hasPointerCapture(e.pointerId)) el.releasePointerCapture(e.pointerId)
+      const wasActive = active
+
+      // The factories below are consumer code (createdAt, theme reads,
+      // etc.) — if one of them throws, the cleanup still has to run or
+      // the canvas is stuck in `creating-edge` mode with a draft edge
+      // on screen. try/finally guarantees the state machine resets.
+      try {
+        if (wasActive && sourceEnd) {
+          const world = worldFromEvent(e)
+          const { end: target } = endFromWorldPoint(world)
+          const d = defaultsRef.current
+          // Resolve factories at commit time so closures see the current
+          // theme / scope / timestamp. Spread the resolved values into
+          // the same `addEdge` op — one batch, one Cmd+Z to undo.
+          const resolvedStyle = typeof d?.style === 'function' ? d.style() : d?.style
+          const resolvedData = typeof d?.data === 'function' ? d.data() : d?.data
+          store.addEdge({
+            id: asEdgeId(store.generateId()),
+            source: sourceEnd,
+            target,
+            pathStyle: d?.pathStyle ?? 'bezier',
+            groups: [],
+            ...(resolvedStyle ? { style: resolvedStyle } : {}),
+            ...(resolvedData ? { data: resolvedData } : {}),
+          })
+        }
+      } finally {
+        store.resetInteractionState()
+        pointerDownAt = null
+        active = false
+        sourceEnd = null
+      }
+    }
+
+    const onPointerCancel = (e: PointerEvent) => {
+      if (el.hasPointerCapture(e.pointerId)) el.releasePointerCapture(e.pointerId)
+      store.resetInteractionState()
+      pointerDownAt = null
+      active = false
+      sourceEnd = null
+    }
+
+    el.addEventListener('pointerdown', onPointerDown)
+    el.addEventListener('pointermove', onPointerMove)
+    el.addEventListener('pointerup', onPointerUp)
+    el.addEventListener('pointercancel', onPointerCancel)
+    return () => {
+      el.removeEventListener('pointerdown', onPointerDown)
+      el.removeEventListener('pointermove', onPointerMove)
+      el.removeEventListener('pointerup', onPointerUp)
+      el.removeEventListener('pointercancel', onPointerCancel)
+    }
+  }, [ref, store, enabled])
+}

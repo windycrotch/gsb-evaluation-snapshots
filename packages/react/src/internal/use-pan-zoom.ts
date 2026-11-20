@@ -1,0 +1,461 @@
+import {
+  type CanvasStore,
+  clampZoom,
+  createPalmRejectionState,
+  notePenActive,
+  notePenInactive,
+  panByScreen,
+  shouldRejectTouch,
+  zoomAtScreenPoint,
+} from '@canvas-harness/core'
+import { useEffect, useRef } from 'react'
+
+/**
+ * Minimal shape of WebKit's non-standard `GestureEvent` (Safari /
+ * WKWebView), which isn't in the standard DOM lib types. `scale` is
+ * cumulative since the `gesturestart` that opened the gesture (where it
+ * is `1.0`), NOT a per-event delta.
+ */
+interface GestureLikeEvent extends Event {
+  readonly scale: number
+  readonly clientX: number
+  readonly clientY: number
+}
+
+/**
+ * Wires up wheel zoom, middle-button / spacebar pan, and (phase 11)
+ * touch pinch-zoom + two-finger pan + pointer-type write-through.
+ *
+ * When the active tool is `'pan'` (the Hand tool), any left-button
+ * drag pans the camera — equivalent to space-hold + left-drag. The
+ * space-hold modifier still works regardless of active tool, so a
+ * user can quickly pan mid-edit without switching tools.
+ *
+ * Pointermove fires faster than the display refreshes (often 120-240Hz).
+ * Calling `store.setCamera` on every event saturates the main thread at
+ * large scene sizes. Instead we accumulate pending deltas and flush
+ * once per rAF, so the store sees at most one camera update per frame
+ * regardless of input rate.
+ *
+ * Phase 11 additions:
+ *   - Two simultaneous `pointerType: 'touch'` pointers → pinch zoom +
+ *     two-finger pan (no wheel involved).
+ *   - Pen pressure / pointerType written to `interaction.pointer` so
+ *     consumers can read via `useCursor()`.
+ *   - Palm rejection: touch events ignored while pen is active or for
+ *     PALM_REJECTION_GRACE_MS after pen-up.
+ */
+export const usePanZoom = (
+  ref: React.RefObject<HTMLElement | null>,
+  store: CanvasStore,
+  /** Active canvas tool. When `'pan'`, left-button drag pans the camera. */
+  tool?: string,
+): void => {
+  // `tool` is read inside pointer handlers; ref-bind so changes don't
+  // tear down + re-mount the whole gesture effect (which would lose
+  // in-flight pan state on tool switch — not a real-world risk, but
+  // the ref-bind also keeps listeners stable).
+  const toolRef = useRef<string | undefined>(tool)
+  toolRef.current = tool
+
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return
+
+    let panning = false
+    let panActivatedBySpace = false
+    let lastX = 0
+    let lastY = 0
+
+    // Per-frame buffers — flushed in flushPending via rAF.
+    let pendingDx = 0
+    let pendingDy = 0
+    let pendingZoomFactor = 1
+    let pendingZoomAnchor: { x: number; y: number } | null = null
+    let scheduled = false
+    let rafId = 0
+
+    // Mode-propagation: the canvas wraps every gesture in a `panning`
+    // closure flag but never reflected it into the store's interaction
+    // mode — which meant `isMoving` stayed false during pan/zoom and
+    // none of the motion-LOD optimisations (rough auto-disable, text
+    // bitmap downscale, layered fast-path) ever fired.
+    //
+    // Pointer-driven gestures have explicit start/end events. Wheel
+    // events don't — so we keep a deadline and poll it from rAF.
+    // (Original implementation used setTimeout per wheel event; on
+    // Chrome that's ~5-10µs per clearTimeout+setTimeout pair from
+    // timer-heap bookkeeping, which at 120Hz trackpad scroll added
+    // ~1ms/frame measurable cost. rAF-poll runs at display rate
+    // regardless of input rate — same correctness, ~zero overhead.)
+    const MOTION_RESET_MS = 400
+    let motionEndDeadline = 0
+    let motionEndPolling = false
+    const setMotion = (mode: 'panning' | 'zooming' | null): void => {
+      const current = store.getInteractionState().mode
+      if (mode === null) {
+        if (current === 'panning' || current === 'zooming') {
+          store.setInteractionState({ mode: 'idle' })
+        }
+        return
+      }
+      // Don't overwrite editing or any other deliberate mode.
+      if (current !== 'idle' && current !== 'panning' && current !== 'zooming') return
+      if (current !== mode) store.setInteractionState({ mode })
+    }
+    const pollMotionEnd = (): void => {
+      if (performance.now() >= motionEndDeadline) {
+        motionEndPolling = false
+        setMotion(null)
+        return
+      }
+      requestAnimationFrame(pollMotionEnd)
+    }
+    const pulseMotion = (mode: 'panning' | 'zooming'): void => {
+      motionEndDeadline = performance.now() + MOTION_RESET_MS
+      // Only fire `setMotion` (which can emit an interaction event)
+      // when the mode actually needs to change. Guards inside
+      // `setMotion` already do this, but checking here saves the
+      // function call entirely for the 99% of wheel events where
+      // we're already in the target mode.
+      const current = store.getInteractionState().mode
+      if (current !== mode) setMotion(mode)
+      if (!motionEndPolling) {
+        motionEndPolling = true
+        requestAnimationFrame(pollMotionEnd)
+      }
+    }
+
+    // Active touch pointers for pinch + two-finger pan. Keyed by
+    // pointerId. Only `pointerType: 'touch'` participates here.
+    type ActiveTouch = { id: number; x: number; y: number }
+    const activeTouches = new Map<number, ActiveTouch>()
+    let lastPinchDistance = 0
+    let lastPinchMidpoint: { x: number; y: number } | null = null
+
+    const palm = createPalmRejectionState()
+
+    const flushPending = (): void => {
+      scheduled = false
+      rafId = 0
+      // Apply zoom first; pan applies on top of the new camera so order is intuitive.
+      if (pendingZoomFactor !== 1 && pendingZoomAnchor) {
+        // Clamp the accumulated factor so a stream of wheel events
+        // queued in one frame can't teleport the user past a 2x /
+        // 0.5x jump. Excess folds back into `pendingZoomFactor` and
+        // applies on the next frame, turning a fast scroll into a
+        // smooth multi-frame zoom instead of one visual jump.
+        const MAX_PER_FRAME = 2
+        const MIN_PER_FRAME = 0.5
+        let appliedFactor = pendingZoomFactor
+        let drained = true
+        if (appliedFactor > MAX_PER_FRAME) {
+          appliedFactor = MAX_PER_FRAME
+          pendingZoomFactor = pendingZoomFactor / MAX_PER_FRAME
+          drained = false
+        } else if (appliedFactor < MIN_PER_FRAME) {
+          appliedFactor = MIN_PER_FRAME
+          pendingZoomFactor = pendingZoomFactor / MIN_PER_FRAME
+          drained = false
+        } else {
+          pendingZoomFactor = 1
+        }
+        const camera = store.getCamera()
+        store.setCamera(
+          zoomAtScreenPoint(camera, clampZoom(camera.z * appliedFactor), pendingZoomAnchor),
+        )
+        // Keep the anchor alive across frames until the residual
+        // factor has drained — otherwise the leftover zoom on the
+        // next frame would have no pivot point.
+        if (drained) pendingZoomAnchor = null
+        else schedule()
+      }
+      if (pendingDx !== 0 || pendingDy !== 0) {
+        const camera = store.getCamera()
+        store.setCamera(panByScreen(camera, { x: pendingDx, y: pendingDy }))
+        pendingDx = 0
+        pendingDy = 0
+      }
+    }
+
+    const schedule = (): void => {
+      if (scheduled) return
+      scheduled = true
+      rafId = requestAnimationFrame(flushPending)
+    }
+
+    // Accumulate a zoom factor at a screen anchor. Shared by the wheel,
+    // touch-pinch and WebKit gesture paths so the finite/positive guard
+    // and the accumulate contract live in exactly one place. Callers own
+    // their own pulseMotion + schedule (they differ: the wheel path also
+    // pans and schedules once at the end; the touch path drives its own
+    // motion mode via pointer up/down).
+    const queueZoom = (factor: number, anchor: { x: number; y: number }): void => {
+      if (!Number.isFinite(factor) || factor <= 0) return
+      pendingZoomFactor *= factor
+      pendingZoomAnchor = anchor
+    }
+
+    const isEditing = (): boolean => store.getInteractionState().mode === 'editing'
+
+    const screenFromClient = (clientX: number, clientY: number): { x: number; y: number } => {
+      const rect = el.getBoundingClientRect()
+      return { x: clientX - rect.left, y: clientY - rect.top }
+    }
+
+    const updatePointerInfo = (e: PointerEvent): void => {
+      // Write pointer info to the store so `useCursor()` reads include
+      // pointerType + pressure. Cheap — InteractionState is one atom.
+      const { x: sx, y: sy } = screenFromClient(e.clientX, e.clientY)
+      const camera = store.getCamera()
+      store.setInteractionState({
+        pointer: {
+          worldX: sx / camera.z + camera.x,
+          worldY: sy / camera.z + camera.y,
+          screenX: sx,
+          screenY: sy,
+          pointerType: e.pointerType as 'mouse' | 'touch' | 'pen',
+          pressure: e.pointerType === 'pen' ? e.pressure : undefined,
+        },
+      })
+    }
+
+    const onWheel = (e: WheelEvent) => {
+      // Lock camera while editing — textarea overlay is positioned at a
+      // fixed screen rect; letting the camera move would desync it.
+      if (isEditing()) return
+      e.preventDefault()
+      if (e.ctrlKey || e.metaKey) {
+        // Mouse wheel vs trackpad pinch heuristic. A notched mouse
+        // wheel sends `|deltaY| ≥ 100` per click (OS-normalized);
+        // trackpad pinch sends a stream of small (1-20) values.
+        // Mouse: discrete 10% step per notch — predictable, lots of
+        // gradations (100→90→81→73→66…), lands near any value.
+        // Trackpad: continuous exponential — feels like pinch.
+        // Without this split, one mouse notch was `exp(-1) ≈ 0.37` —
+        // a 63% drop in a single click.
+        const factor =
+          Math.abs(e.deltaY) >= 100 ? (e.deltaY > 0 ? 1 / 1.1 : 1.1) : Math.exp(-e.deltaY * 0.01)
+        queueZoom(factor, screenFromClient(e.clientX, e.clientY))
+        pulseMotion('zooming')
+      } else {
+        pendingDx += -e.deltaX
+        pendingDy += -e.deltaY
+        pulseMotion('panning')
+      }
+      schedule()
+    }
+
+    const resetPinchTracking = (): void => {
+      lastPinchDistance = 0
+      lastPinchMidpoint = null
+    }
+
+    const recomputePinchSeed = (): void => {
+      // Recompute the seed (distance + midpoint) from the current two
+      // touches. Called when entering pinch mode and whenever one of the
+      // two touches changes identity (e.g. a third lifted, leaving two).
+      const pts = [...activeTouches.values()]
+      if (pts.length !== 2) {
+        resetPinchTracking()
+        return
+      }
+      const [a, b] = pts
+      lastPinchDistance = Math.hypot(a!.x - b!.x, a!.y - b!.y)
+      lastPinchMidpoint = { x: (a!.x + b!.x) / 2, y: (a!.y + b!.y) / 2 }
+    }
+
+    const onPointerDown = (e: PointerEvent) => {
+      if (isEditing()) return
+
+      if (e.pointerType === 'pen') {
+        notePenActive(palm)
+      } else if (e.pointerType === 'touch' && shouldRejectTouch(palm, Date.now())) {
+        return
+      }
+
+      // Track touch pointers for pinch.
+      if (e.pointerType === 'touch') {
+        const pt = screenFromClient(e.clientX, e.clientY)
+        activeTouches.set(e.pointerId, { id: e.pointerId, x: pt.x, y: pt.y })
+        if (activeTouches.size === 2) {
+          recomputePinchSeed()
+          el.setPointerCapture(e.pointerId)
+          setMotion('zooming')
+          e.preventDefault()
+        }
+        return
+      }
+
+      // middle button = pan; or left button while space held; or
+      // left button while Hand (`pan`) tool is active.
+      const handToolActive = toolRef.current === 'pan'
+      if (e.button === 1 || (e.button === 0 && (panActivatedBySpace || handToolActive))) {
+        panning = true
+        lastX = e.clientX
+        lastY = e.clientY
+        el.setPointerCapture(e.pointerId)
+        setMotion('panning')
+        e.preventDefault()
+      }
+    }
+
+    const onPointerMove = (e: PointerEvent) => {
+      updatePointerInfo(e)
+
+      // Pinch path — two touches active.
+      if (e.pointerType === 'touch' && activeTouches.has(e.pointerId)) {
+        const pt = screenFromClient(e.clientX, e.clientY)
+        activeTouches.set(e.pointerId, { id: e.pointerId, x: pt.x, y: pt.y })
+        if (activeTouches.size === 2 && lastPinchMidpoint && lastPinchDistance > 0) {
+          const pts = [...activeTouches.values()]
+          const [a, b] = pts
+          const dist = Math.hypot(a!.x - b!.x, a!.y - b!.y)
+          const mid = { x: (a!.x + b!.x) / 2, y: (a!.y + b!.y) / 2 }
+          queueZoom(dist / lastPinchDistance, mid)
+          pendingDx += mid.x - lastPinchMidpoint.x
+          pendingDy += mid.y - lastPinchMidpoint.y
+          lastPinchDistance = dist
+          lastPinchMidpoint = mid
+          schedule()
+        }
+        return
+      }
+
+      if (!panning) return
+      const dx = e.clientX - lastX
+      const dy = e.clientY - lastY
+      lastX = e.clientX
+      lastY = e.clientY
+      pendingDx += dx
+      pendingDy += dy
+      schedule()
+    }
+
+    const onPointerUp = (e: PointerEvent) => {
+      if (e.pointerType === 'pen') notePenInactive(palm, Date.now())
+
+      if (e.pointerType === 'touch' && activeTouches.has(e.pointerId)) {
+        activeTouches.delete(e.pointerId)
+        if (el.hasPointerCapture(e.pointerId)) el.releasePointerCapture(e.pointerId)
+        // Dropped from 2 → 1: leave pinch mode but keep the remaining
+        // touch as a no-op (the gesture hook handles single-touch).
+        // Reseed in case three touches collapsed to two.
+        if (activeTouches.size === 2) recomputePinchSeed()
+        else {
+          resetPinchTracking()
+          setMotion(null)
+        }
+        return
+      }
+
+      if (!panning) return
+      panning = false
+      if (el.hasPointerCapture(e.pointerId)) el.releasePointerCapture(e.pointerId)
+      setMotion(null)
+    }
+
+    const onPointerCancel = (e: PointerEvent) => {
+      // Browser canceled the gesture (e.g. user pulled-to-refresh). Clean up.
+      if (e.pointerType === 'touch') {
+        activeTouches.delete(e.pointerId)
+        if (activeTouches.size < 2) {
+          resetPinchTracking()
+          setMotion(null)
+        }
+      }
+      if (panning) {
+        panning = false
+        setMotion(null)
+      }
+      if (e.pointerType === 'pen') notePenInactive(palm, Date.now())
+    }
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.code === 'Space') panActivatedBySpace = true
+    }
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.code === 'Space') panActivatedBySpace = false
+    }
+
+    // WebKit (Safari / WKWebView) encodes a trackpad pinch as
+    // `gesturestart`/`gesturechange`/`gestureend` (GestureEvent, with a
+    // cumulative `scale`) and — unlike Chromium — does NOT also emit a
+    // `ctrlKey` wheel, so the wheel branch above never sees the pinch on
+    // WebKit. Translate `scale` into the same accumulate-and-flush zoom
+    // the wheel path uses, anchored at the gesture point. All three stay
+    // `preventDefault()`'d to suppress WebKit's native page-magnification.
+    // These events never fire on Chromium/Firefox, so this is inert there.
+    //
+    // `gestureSeeded` tracks whether the current gesture has a valid
+    // base `scale` yet. It is NOT used to gate the wheel path (no engine
+    // emits both gesture events and a ctrlKey wheel for one pinch), only
+    // to keep the cumulative-scale base fresh across a start we may have
+    // missed or bailed on.
+    let gestureBaseScale = 1
+    let gestureSeeded = false
+    const onGestureStart = (e: Event) => {
+      e.preventDefault()
+      if (isEditing()) return
+      // WebKit resets `scale` to 1.0 at each gesturestart.
+      gestureBaseScale = (e as GestureLikeEvent).scale
+      gestureSeeded = true
+    }
+    const onGestureChange = (e: Event) => {
+      e.preventDefault()
+      if (isEditing()) return
+      // On touchscreen WebKit (iOS / iPadOS) a pinch fires BOTH gesture*
+      // events AND touch pointers; the pointer pinch path already owns
+      // that case, so defer to it here to avoid applying zoom twice.
+      // A trackpad pinch (desktop Safari / WKWebView) has no active
+      // touches, so this path still runs there.
+      if (activeTouches.size >= 2) return
+      const ge = e as GestureLikeEvent
+      if (!gestureSeeded) {
+        // No fresh gesturestart (missed, or bailed while editing). Seed
+        // the base from this event and wait for the next tick to derive
+        // a factor, so a stale base can't cause a spurious zoom jump.
+        gestureBaseScale = ge.scale
+        gestureSeeded = true
+        return
+      }
+      // `scale` is cumulative since gesturestart — convert to a per-event
+      // factor. Applying `scale` raw each tick double-applies and
+      // over-zooms.
+      const factor = ge.scale / gestureBaseScale
+      gestureBaseScale = ge.scale
+      queueZoom(factor, screenFromClient(ge.clientX, ge.clientY))
+      pulseMotion('zooming')
+      schedule()
+    }
+    const onGestureEnd = (e: Event) => {
+      e.preventDefault()
+      gestureSeeded = false
+    }
+    el.addEventListener('wheel', onWheel, { passive: false })
+    el.addEventListener('pointerdown', onPointerDown)
+    el.addEventListener('pointermove', onPointerMove)
+    el.addEventListener('pointerup', onPointerUp)
+    el.addEventListener('pointercancel', onPointerCancel)
+    el.addEventListener('gesturestart', onGestureStart)
+    el.addEventListener('gesturechange', onGestureChange)
+    el.addEventListener('gestureend', onGestureEnd)
+    window.addEventListener('keydown', onKeyDown)
+    window.addEventListener('keyup', onKeyUp)
+    return () => {
+      el.removeEventListener('wheel', onWheel)
+      el.removeEventListener('pointerdown', onPointerDown)
+      el.removeEventListener('pointermove', onPointerMove)
+      el.removeEventListener('pointerup', onPointerUp)
+      el.removeEventListener('pointercancel', onPointerCancel)
+      el.removeEventListener('gesturestart', onGestureStart)
+      el.removeEventListener('gesturechange', onGestureChange)
+      el.removeEventListener('gestureend', onGestureEnd)
+      window.removeEventListener('keydown', onKeyDown)
+      window.removeEventListener('keyup', onKeyUp)
+      // motion-end rAF poll exits on its own when motionEndPolling
+      // becomes false; no explicit cancel needed.
+      if (rafId !== 0) cancelAnimationFrame(rafId)
+    }
+  }, [ref, store])
+}

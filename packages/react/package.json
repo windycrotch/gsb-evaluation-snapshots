@@ -1,0 +1,71 @@
+{
+  "name": "@canvas-harness/react",
+  "version": "0.2.1",
+  "description": "React bindings for canvas-harness — <Canvas> component, data + interaction + presence + history hooks.",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "keywords": [
+    "canvas",
+    "react",
+    "graph",
+    "node-graph",
+    "diagram",
+    "whiteboard",
+    "flowchart",
+    "canvas-harness",
+    "react-flow-alternative"
+  ],
+  "author": "Le Ha Quang <winlp4ever@gmail.com>",
+  "license": "MIT",
+  "homepage": "https://github.com/winlp4ever/canvas-harness#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/winlp4ever/canvas-harness.git",
+    "directory": "packages/react"
+  },
+  "bugs": {
+    "url": "https://github.com/winlp4ever/canvas-harness/issues"
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run",
+    "test:browser": "vitest run -c vitest.browser.config.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@canvas-harness/core": "workspace:*"
+  },
+  "peerDependencies": {
+    "react": ">=18",
+    "react-dom": ">=18"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitest/browser": "^3.0.0",
+    "playwright": "^1.49.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "tsup": "^8.3.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}

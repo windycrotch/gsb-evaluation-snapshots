@@ -1,0 +1,67 @@
+{
+  "name": "@canvas-harness/core",
+  "version": "0.2.1",
+  "description": "Canvas-rendered node-graph library — framework-agnostic core. Store, renderer, edges, hit-testing, ops, history.",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "keywords": [
+    "canvas",
+    "graph",
+    "node-graph",
+    "diagram",
+    "whiteboard",
+    "flowchart",
+    "mindmap",
+    "react-flow-alternative",
+    "excalidraw-alternative",
+    "rough.js",
+    "perfect-freehand"
+  ],
+  "author": "Le Ha Quang <winlp4ever@gmail.com>",
+  "license": "MIT",
+  "homepage": "https://github.com/winlp4ever/canvas-harness#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/winlp4ever/canvas-harness.git",
+    "directory": "packages/core"
+  },
+  "bugs": {
+    "url": "https://github.com/winlp4ever/canvas-harness/issues"
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run",
+    "test:browser": "vitest run -c vitest.browser.config.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "perfect-freehand": "^1.2.3",
+    "roughjs": "^4.6.6",
+    "signia": "^0.1.5"
+  },
+  "devDependencies": {
+    "@vitest/browser": "^3.0.0",
+    "playwright": "^1.49.0",
+    "tsup": "^8.3.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}
