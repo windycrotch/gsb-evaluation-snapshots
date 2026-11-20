@@ -4,6 +4,12 @@
 // other world's portal, still the character they set out as. Only choosing
 // a world navigates. The link format is a contract between sites that never
 // update together: read docs/protocol.md before changing it.
+//
+// One journey has one deterministic lifecycle (engine/journey.js): from the
+// moment any entry path claims the in-flight slot until navigation completes
+// or the world is restored after a failure / BFCache return, every further
+// attempt is ignored rather than queued, and stale callbacks from an older
+// epoch can never touch the reset gate.
 import * as THREE from 'three';
 import * as L from '@world/layout.js';
 import { config } from './config.js';
@@ -15,11 +21,50 @@ import { worldURL, worldKey, navigateDoor, sourceLabel } from './door-protocol.j
 import { createDoorControls } from './door-controls.js';
 import { DEFAULT_WORLDS } from './worlds-default.js';
 import { createDirectory } from './door-directory.js';
+import { createJourney } from './journey-run.js';
 
-let travelling = false, journey = 0, cameFrom = null, cameFromName = '';
-export const isTravelling = () => travelling;
+let cameFrom = null, cameFromName = '';
 
 const easeInOut = p => (p < .5 ? 2 * p * p : 1 - (-2 * p + 2) ** 2 / 2);
+const storageKey = name => `homecraft-${name}:${worldKey(location.href)}`;
+const setDeparted = () => { try { sessionStorage.setItem(storageKey('departed'), '1'); } catch {} };
+const clearDeparted = () => { try { sessionStorage.removeItem(storageKey('departed')); } catch {} };
+const markHistory = () => { try { history.replaceState({ ...history.state, homecraftPortal: true }, '', location.href); } catch {} };
+const clearHistory = () => {
+  try {
+    if (!history.state?.homecraftPortal) return;
+    const state = { ...history.state }; delete state.homecraftPortal;
+    history.replaceState(state, '', location.href);
+  } catch {}
+};
+
+// main.js registers how to put the game back together (gate, player, input,
+// camera) after a failed navigation or a BFCache restore. It is the only
+// place that knows about the renderer.
+let restoreGame = null;
+export const onJourneyRestore = fn => { restoreGame = fn; };
+
+// The single shared in-flight state for every entry path.
+const journey = createJourney({
+  t,
+  returnLabel: () => t('正在返回世界…', 'Loading the world…'),
+  showLoading,
+  finishLoading,
+  makeLink: next => traveller.link(next),
+  navigate: navigateDoor,
+  markDeparted: setDeparted,
+  clearDeparted,
+  markHistory,
+  clearHistory,
+  onRestore: reason => restoreGame?.(reason),
+});
+export const isTravelling = () => journey.isActive();
+// Claim the shared in-flight slot. Returns the journey ticket, or null when
+// a journey is already running: the caller must ignore the attempt.
+export const beginTravel = () => journey.begin();
+
+// Debug/test surface for the lifecycle; nothing in the app UI depends on it.
+try { window.__homecraftJourney = { isTravelling, begin: beginTravel, disableFailureWatch: () => journey.disableFailureWatch() }; } catch {}
 
 // PORTAL { x, z, yaw } in layout.js places the portal; yaw 0 faces south (+z).
 export function createPortal({ stage, world, onOpen }) {
@@ -71,14 +116,15 @@ export function createPortal({ stage, world, onOpen }) {
     get busy() { return busy; },
     get front() { return { ...ahead(1.5), heading: yaw }; },
     pick(ray) { return ray.intersectBox(bounds, hit) ? hit.distanceTo(ray.origin) : null; },
-    enter() { if (!travelling && !busy) onOpen?.(); },
+    enter() { if (!journey.isActive() && !busy) onOpen?.(); },
     // Close enough, in front, and on foot: walk in. Otherwise just go.
     canWalkIn(player) {
       const { along, across } = local(player.pos);
       return player.mode === 'ground' && !player.island && along > 0.3 && along < 4.5 && Math.abs(across) < 3;
     },
     // Up to the light (from right in front of it, straight in), the portal
-    // charges, then into it; then `gone`.
+    // charges, then into it; then `gone`. The journey slot must already be
+    // claimed by the caller via beginTravel(), so this never runs twice.
     leave(destination, player, gone) {
       if (busy) return;
       busy = true; load(destination.preview);
@@ -103,7 +149,8 @@ export function createPortal({ stage, world, onOpen }) {
         if (!player.walkThrough([out], done, lookOut())) { player.teleport(out.x, out.z, { look: lookOut() }); done(); }
       });
     },
-    // Back from the browser's page cache: standing outside, the light at rest.
+    // Back from the browser's page cache, or after a failed departure:
+    // standing outside, the light at rest, every timed step cancelled.
     reset() {
       charge = chargeTo = 0; show = showTo = 0; busy = false; armed = false; timers.length = 0;
       gate.setPreview(null); picture?.dispose(); picture = null;
@@ -118,7 +165,7 @@ export function createPortal({ stage, world, onOpen }) {
         close = 1 - THREE.MathUtils.smoothstep(Math.hypot(along, across), 2, 9);
         // Walking into the light opens the list, once, until you step back out.
         const inside = player.mode === 'ground' && !player.island && Math.abs(along) < gate.depth + 0.47 && Math.abs(across) < gate.width / 2;
-        if (inside && armed && !busy && !travelling) { armed = false; onOpen?.(); }
+        if (inside && armed && !busy && !journey.isActive()) { armed = false; onOpen?.(); }
         else if (!inside && (Math.abs(along) > 1.2 || Math.abs(across) > gate.width / 2 + 0.4)) armed = true;
       }
       near += (close - near) * Math.min(1, dt * 3);
@@ -131,7 +178,6 @@ export function createPortal({ stage, world, onOpen }) {
 const sources = (Array.isArray(config.portal.directory) ? config.portal.directory : []).filter(Boolean);
 const directory = createDirectory(sources);
 const worldUrl = worldURL, key = worldKey;
-const storageKey = name => `homecraft-${name}:${key(location.href)}`;
 export const isCurrentWorld = url => key(url) === key(location.href);
 // A name or line in one language, or { zh, en } for both. Plain text, trimmed.
 const words = (value, max) => {
@@ -178,28 +224,33 @@ function directoryWorlds(shared, fallback = true) {
 }
 
 // ---------- Leaving ----------
-// A link with its own referrer policy, so a page that sends none (some blogs
-// do) still tells the next world where the visitor came from.
-function leaveFor(href) { navigateDoor(href); }
-
 // To a world that speaks the door protocol (homecraft: true), the link says
 // where the visitor came from (?from=) and carries their character after #.
-// Any other site gets a plain link.
+// Any other site gets a plain link. The journey slot is claimed by the
+// caller through beginTravel(); this function only runs the claimed journey.
+// It still claims a slot itself when called directly (the Return chip), so
+// all three entry paths share the exact same in-flight state.
 export async function visitWorld(next) {
   const url = worldUrl(next?.url);
-  if (travelling || !url || isCurrentWorld(url.href)) return false;
-  travelling = true;
-  const ticket = ++journey;
-  showLoading(t(`正在前往 ${next.name || url.hostname}…`, `Loading ${next.name || url.hostname}…`), .08, next.preview);
-  const href = await traveller.link(next);
-  // Paint the real startup screen before navigating, without an artificial
-  // progress animation. The destination updates it at its actual boot stages.
-  await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-  if (ticket !== journey) return false;
-  history.replaceState({ ...history.state, homecraftPortal: true }, '', location.href);
-  try { sessionStorage.setItem(storageKey('departed'), '1'); } catch {}
-  leaveFor(href);
-  return true;
+  if (!url || isCurrentWorld(url.href)) return false;
+  const ticket = journey.begin();
+  if (ticket == null) return false;
+  const name = next.name || url.hostname;
+  const label = t(`正在前往 ${name}…`, `Loading ${name}…`);
+  return journey.run(ticket, { label, preview: next.preview, next });
+}
+
+// Run a journey whose slot was already claimed by beginTravel() — the
+// walk-in path needs the slot held across the gate animation. An invalid or
+// current-world destination, or a stale ticket, ends the claimed journey as
+// a failure so the gate and player are restored instead of staying busy.
+export async function runClaimedTravel(ticket, next) {
+  const url = worldUrl(next?.url);
+  if (!journey.isCurrent(ticket)) return false;
+  if (!url || isCurrentWorld(url.href)) { journey.fail(ticket); return false; }
+  const name = next.name || url.hostname;
+  const label = t(`正在前往 ${name}…`, `Loading ${name}…`);
+  return journey.run(ticket, { label, preview: next.preview, next });
 }
 
 let controls = null;
@@ -232,14 +283,3 @@ export function arrival() {
   if (how) showLoading(t('正在进入世界…', 'Loading the world…'));
   return how;
 }
-
-// A restored page keeps its departing progress bar and JS state. Reset both
-// (main.js puts the player back outside the door).
-addEventListener('pageshow', event => {
-  if (!event.persisted) return;
-  travelling = false;
-  const ticket = ++journey;
-  try { sessionStorage.removeItem(storageKey('departed')); } catch {}
-  showLoading(t('正在返回世界…', 'Loading the world…'), 1);
-  requestAnimationFrame(() => requestAnimationFrame(() => { if (ticket === journey) finishLoading(); }));
-});

@@ -25,7 +25,7 @@ import { createPhone } from './ui/phone.js';
 import { createWorkbench } from './ui/workbench.js';
 import { createMailboxForm } from './ui/mailbox.js';
 import { createFlightPad } from './ui/flightpad.js';
-import { createPortal, arrival, visitWorld, isTravelling, placePortalControls } from './portal.js';
+import { createPortal, arrival, runClaimedTravel, beginTravel, isTravelling, onJourneyRestore, placePortalControls } from './portal.js';
 import { wornSkin } from './traveller.js';
 import { createWorldList } from './ui/worlds.js';
 import { createPhotoStudio } from './ui/photo.js';
@@ -283,12 +283,17 @@ async function boot() {
   // A note sent from the mailbox's page raises the flag on the mailbox itself.
   const mailboxForm = createMailboxForm({ onSent: () => mailbox.raiseFlag() });
   const worldList = createWorldList({ onChoose(world) { closePage(); depart(world); } });
-  // Standing at the portal, on foot: walk into it, seen from behind. From
-  // anywhere else (the Dock, first person, flying), straight to loading.
+  // Every entry path claims the same in-flight slot before anything moves.
+  // A null ticket means a journey is already running: the attempt is ignored,
+  // never queued. Standing at the portal, on foot, walks into the light (seen
+  // from behind); anywhere else (the Dock, first person, flying, or reduced
+  // motion) goes straight to the loading screen.
   function depart(world) {
-    if (!portal?.canWalkIn(player) || rig.firstPerson || reducedMotion) { void visitWorld(world); return; }
+    const ticket = beginTravel();
+    if (ticket == null) return;
+    if (!portal?.canWalkIn(player) || rig.firstPerson || reducedMotion) { void runClaimedTravel(ticket, world); return; }
     rig.set(portal.front.heading + 0.3, 0.2, 6.5);
-    portal.leave(world, player, async () => { if (!await visitWorld(world)) portal.reset(); });
+    portal.leave(world, player, () => { void runClaimedTravel(ticket, world); });
   }
   // Every <article class="page" data-station> in index.html is a page, except
   // the contact list (the phone reads that). A page whose id is also one of
@@ -870,6 +875,25 @@ async function boot() {
     }
     rig.recenter(player);
   }
+  // The single recovery path shared by a BFCache return and a failed
+  // departure. The journey epoch has already been invalidated in portal.js,
+  // so no walk-through timer or departure callback from the old journey can
+  // advance anything after this runs. The gate, the player's queued path and
+  // the input set are all reset, and the player is settled back outside the
+  // door (a failed walk-in always ended at the gate; a direct jump never
+  // moved them, so returning them to the door front is the known safe spot).
+  onJourneyRestore(() => {
+    const f = portal?.front;
+    portal?.reset();
+    player.cancel();
+    input.clear();
+    document.body.classList.remove('reading');
+    if (f) {
+      player.teleport(f.x, f.z, { look: [f.x + Math.sin(f.heading) * 6, f.z + Math.cos(f.heading) * 6] });
+      rig.set(f.heading + Math.PI * .52, .38, stage.camera.aspect < .8 ? 8.5 : 8);
+    }
+    rig.recenter(player);
+  });
   // Every visit opens on the whole island; any key, click or drag cuts it
   // short. Reduced motion goes straight in. Through another world's portal,
   // the player stands in this portal's light and walks out once the world
@@ -887,11 +911,6 @@ async function boot() {
   } else if (!reducedMotion) rig.startIntro(player);
   finishLoading();
   walkOut?.();
-
-  addEventListener('pageshow', event => {
-    if (!event.persisted) return;
-    settlePortalArrival();
-  });
 
   let last = performance.now();
   // ---------- Budget ----------

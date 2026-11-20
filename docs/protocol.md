@@ -65,6 +65,15 @@ https://their-address/?from=<the world you left>#homecraft=1&skin=<character>
 
 For other websites, use an ordinary link without protocol parameters.
 
+### Journey lifecycle
+
+A departure is a single-flight lifecycle shared by every entry path — choosing a world in the panel, walking into the gate, or following a direct link. From the moment a journey starts until navigation completes or the world is restored, every further attempt is ignored rather than queued or allowed to start a second navigation.
+
+- Claim the in-flight state before any walk-in animation or network work begins. Repeated clicks, `Esc`, and browser Back/Forward during the journey cannot start another one.
+- If the navigation does not replace the document (a blocked or dropped link), reset the gate, the player's queued movement and the input state, dismiss the loading screen, and clear the departure markers so the visitor can choose another world.
+- A restored page from the back/forward cache (`pageshow` with `persisted`) is mutually exclusive with the in-flight journey: it ends the current lifecycle and settles the player outside the gate. Callbacks from the previous lifecycle carry an epoch ticket and must no-op once that epoch is invalidated, so a restored gate cannot be advanced by an old callback.
+- The loading screen and its progress prompts remain the responsibility of the shared loading module; the lifecycle only shows and dismisses them.
+
 ## 3. Arriving
 
 - Arrival requires both the version marker and a valid HTTP(S) `from` whose origin matches the browser's referrer origin. HTTPS returning to local HTTP loses the referrer; that return is allowed only if the current tab remembers having departed for that world. Any other arrival without an origin uses the site owner's character. Origin checking only filters out bad links — a same-origin page can still forge the parameters, so it does not authenticate identity.
