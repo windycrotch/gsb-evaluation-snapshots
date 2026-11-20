@@ -1,9 +1,87 @@
 var audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 var analyser = audioCtx.createAnalyser();
-var source;
+analyser.fftSize = 256; // 256 for analyser.getByteFrequencyData(dataArray) and 2048 for analyser.getByteTimeDomainData(dataArray)
+analyser.connect(audioCtx.destination); // single shared output chain, connected exactly once
 var gui;
-var resizeVisualizer;
+var resizeVisualizer = function () {};
 var defaultSong = "https://firebasestorage.googleapis.com/v0/b/kantelabs-threejs.appspot.com/o/03%20-%20Smooth%20Operator.mp3?alt=media&token=27e95f4c-b4fb-4160-9bdc-02833cf65a84";
+
+// ---------------------------------------------------------------------------
+// Track-switching lifecycle state.
+// activeSession describes the one and only live track: its <audio> element,
+// its MediaElementSource node, its renderer/canvas and its animation frame.
+// Every switch tears the previous session down before building the next one,
+// so there is never more than one analysis chain, one canvas or one rAF loop.
+// ---------------------------------------------------------------------------
+var activeSession = null;
+var switchToken = 0; // monotonic token: only the latest selection may take effect
+
+function disposeSceneGraph(scene) {
+    scene.traverse(function (obj) {
+        if (obj.geometry) obj.geometry.dispose();
+        if (obj.material) {
+            var materials = Array.isArray(obj.material) ? obj.material : [obj.material];
+            materials.forEach(function (m) { m.dispose(); });
+        }
+    });
+}
+
+// Stop rendering + silence + detach everything belonging to a session.
+// keepPlayer: leave the <audio> element in the DOM (used on load failure so
+// the user keeps a working player and can pick another track).
+function teardownSession(session, keepPlayer) {
+    if (!session) return;
+
+    // 1. Stop the animation loop (id + stale-loop guard in animate()).
+    if (session.rafId) cancelAnimationFrame(session.rafId);
+    session.rafId = 0;
+    session.tornDown = true;
+
+    // 2. Disconnect the old analysis node from the analyser/speakers.
+    if (session.source) {
+        try { session.source.disconnect(); } catch (e) { /* already disconnected */ }
+        session.source = null;
+    }
+
+    // 3. Silence and remove the old audio element so it cannot keep playing.
+    if (session.audioPlayer && !keepPlayer) {
+        session.audioPlayer.pause();
+        session.audioPlayer.removeAttribute('src');
+        session.audioPlayer.load(); // abort any in-flight fetch/decode
+        if (session.audioPlayer.parentNode) {
+            session.audioPlayer.parentNode.removeChild(session.audioPlayer);
+        }
+    }
+
+    // 4. Release the temporary object URL, if any.
+    if (session.objectUrl && !keepPlayer) {
+        URL.revokeObjectURL(session.objectUrl);
+        session.objectUrl = null;
+    }
+
+    // 5. Truly remove the old canvas and free its GL resources.
+    if (session.renderer) {
+        if (session.controls && typeof session.controls.dispose === 'function') {
+            session.controls.dispose();
+        }
+        if (session.scene) disposeSceneGraph(session.scene);
+        session.renderer.dispose();
+        if (session.renderer.domElement.parentNode) {
+            session.renderer.domElement.parentNode.removeChild(session.renderer.domElement);
+        }
+        session.renderer = null;
+        session.scene = null;
+    }
+
+    resizeVisualizer = function () {};
+}
+
+function teardownActiveSession() {
+    if (!activeSession) return;
+    var session = activeSession;
+    activeSession = null;
+    teardownSession(session, false);
+}
 
 window.onload = function () {
     var fileUpload = document.querySelector('#audioFile'); //Grabs the file input and stores it in an variable
@@ -112,9 +190,6 @@ window.onload = function () {
     var dbRoot = firebase.database().ref();
     var songsRef = dbRoot.child('songs');
     var audioDiv = document.querySelector('.audio-container');
-    var audioPlayer = new Audio(defaultSong)
-    audioPlayer.crossOrigin = "anonymous";
-    addAudioPlayer(audioPlayer);
 
     unlockAudioContext(audioCtx);
 
@@ -122,6 +197,65 @@ window.onload = function () {
         new ResizeObserver(() => resizeVisualizer()).observe(document.body);
     } else {
         window.addEventListener('resize', () => resizeVisualizer());
+    }
+
+    // -----------------------------------------------------------------------
+    // The single entry point for every track change (library pick, upload,
+    // initial load). Tears down the previous session completely, then builds
+    // exactly one new analysis chain for the new track. Rapid consecutive
+    // switches are serialized by the switch token: only the latest selection
+    // survives, earlier ones leave no animation frames or audio nodes behind.
+    // -----------------------------------------------------------------------
+    function startTrack(name, url, button, objectUrl) {
+        var token = ++switchToken;
+
+        // Wipe the previous track: rAF loop, source node, <audio>, canvas.
+        teardownActiveSession();
+        audioDiv.replaceChildren();
+
+        // Fresh <audio> element per track (a MediaElementSource can only be
+        // created once per element, so reusing elements is not an option).
+        var player = new Audio();
+        player.crossOrigin = "anonymous";
+        player.controls = true;
+        player.src = url;
+        audioDiv.appendChild(player);
+
+        var session = {
+            token: token,
+            audioPlayer: player,
+            objectUrl: objectUrl || null,
+            source: null,
+            renderer: null,
+            scene: null,
+            controls: null,
+            rafId: 0,
+            tornDown: false
+        };
+        activeSession = session;
+
+        player.addEventListener('play', () => audioCtx.resume());
+        for (const event of ['playing', 'pause', 'ended', 'emptied', 'waiting', 'seeked', 'error']) {
+            player.addEventListener(event, updatePlayingIndicator);
+        }
+        player.addEventListener('error', () => {
+            // A stale session's error must not touch the current track.
+            if (session !== activeSession || session.tornDown) return;
+            // Load failed: tear down the half-built analysis/visual chain but
+            // keep the player element so the UI stays operable and the user
+            // can simply pick another track.
+            teardownSession(session, true);
+        });
+
+        // Sync title / selection / controls with the new track.
+        setCurrentTrack(name, url, button);
+
+        try {
+            analyzeAudio(session);
+        } catch (err) {
+            console.error('Failed to start visualizer for', name, err);
+            if (session === activeSession) teardownSession(session, true);
+        }
     }
 
     //Searches for and loads previous songs uploaded to firebase
@@ -134,8 +268,7 @@ window.onload = function () {
         button.type = 'button';
         button.textContent = button.title = snapshot.key;
         button.addEventListener('click', () => {
-            audioPlayer.src = songUrl;
-            setCurrentTrack(snapshot.key, songUrl, button);
+            startTrack(snapshot.key, songUrl, button);
             if (narrowLayout.matches) closeLibrary();
         });
         item.appendChild(button);
@@ -148,8 +281,9 @@ window.onload = function () {
 
     function updatePlayingIndicator() {
         if (!selectedSong) return;
-        const playing = !audioPlayer.paused && !audioPlayer.ended && !audioPlayer.error &&
-            audioPlayer.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA;
+        var player = activeSession && activeSession.audioPlayer;
+        const playing = !!player && !player.paused && !player.ended && !player.error &&
+            player.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA;
         selectedSong.toggleAttribute('data-playing', playing);
         if (playing) {
             selectedSong.setAttribute('aria-description', 'Playing');
@@ -179,6 +313,8 @@ window.onload = function () {
 
     fileUpload.onchange = (event) => {
         var file = event.target.files[0];
+        // Allow picking the same file again later (re-select must re-trigger).
+        event.target.value = '';
         if (!file) return;
         var songName = file.name;
 
@@ -194,33 +330,23 @@ window.onload = function () {
             .catch(err => console.log(err))
 
         //Creates a temporary url for the file that was uploaded so that it could be played the audio element
-        audioPlayer = new Audio(URL.createObjectURL(file));
-        audioPlayer.crossOrigin = "anonymous";
-        setCurrentTrack(songName, audioPlayer.src);
-        addAudioPlayer(audioPlayer);
+        var objectUrl = URL.createObjectURL(file);
+        startTrack(songName, objectUrl, null, objectUrl);
         if (narrowLayout.matches) closeLibrary();
     }
 
-    function addAudioPlayer(audioPlayer) {
-        //Prevents local memory of audio files so you can create a new instance on upload
-        audioDiv.firstChild !== null ? (audioDiv.firstElementChild.remove(), (audioDiv.appendChild(audioPlayer))) : audioDiv.appendChild(audioPlayer);
-        audioPlayer.controls = true;
-        audioPlayer.addEventListener('play', () => audioCtx.resume());
-        for (const event of ['playing', 'pause', 'ended', 'emptied', 'waiting', 'seeked', 'error']) {
-            audioPlayer.addEventListener(event, updatePlayingIndicator);
-        }
-
-        analyzeAudio(audioPlayer);
-    }
+    // Initial track.
+    startTrack('Smooth Operator', defaultSong, null);
 }
 
-function analyzeAudio(audioPlayer) {
+function analyzeAudio(session) {
     // AnalyserNode is necessary to provide real-time frequency and time-domain analysis information. It is an AudioNode that passes the audio stream unchanged from the input to the output, but allows you to take the generated data, process it, and create audio visualizations.
-    source = audioCtx.createMediaElementSource(audioPlayer) // Uploaded audio becomes the source for the media stream
-    source.connect(analyser)
-    analyser.connect(audioCtx.destination)
 
-    analyser.fftSize = 256; // 256 for analyser.getByteFrequencyData(dataArray) and 2048 for analyser.getByteTimeDomainData(dataArray)
+    // Exactly one source -> analyser -> destination chain per track.
+    var source = audioCtx.createMediaElementSource(session.audioPlayer);
+    source.connect(analyser);
+    session.source = source;
+
     var bufferLength = analyser.frequencyBinCount;
     var dataArray = new Uint8Array(bufferLength)
     console.log(bufferLength)
@@ -229,17 +355,15 @@ function analyzeAudio(audioPlayer) {
     var scene = new THREE.Scene(); //new scene instance
     scene.background = new THREE.Color(0x000000);
     scene.fog = new THREE.FogExp2(0xcccccc, 0.002);
+    session.scene = scene;
 
     var renderer = new THREE.WebGLRenderer();
-    if (document.querySelector('canvas')) {
-        cancelAnimationFrame(animate);
-        scene.remove.apply(scene, scene.children);
-        document.querySelector('canvas').remove();
-        document.body.appendChild(renderer.domElement);
-
-    } else {
-        document.body.appendChild(renderer.domElement)
-    }
+    session.renderer = renderer;
+    // Defensive: the old canvas was already removed by teardownSession; make
+    // sure no stray canvas can survive before attaching the new one.
+    var strayCanvas = document.querySelector('canvas');
+    if (strayCanvas) strayCanvas.remove();
+    document.body.appendChild(renderer.domElement);
 
     //Lighting Details
     var light = new THREE.AmbientLight(0x505050);
@@ -269,6 +393,7 @@ function analyzeAudio(audioPlayer) {
     camera.lookAt(scene.position);
 
     resizeVisualizer = function () {
+        if (session !== activeSession || !session.renderer) return;
         var width = document.body.clientWidth;
         var height = document.body.clientHeight;
         camera.aspect = width / height;
@@ -279,8 +404,9 @@ function analyzeAudio(audioPlayer) {
 
     //Controls Details
     var controls;
-    controls = new THREE.OrbitControls(camera, document.querySelector('canvas'));
+    controls = new THREE.OrbitControls(camera, renderer.domElement);
     controls.autoRotate = false;
+    session.controls = controls;
 
     if (gui) gui.destroy();
     gui = new dat.GUI({ autoPlace: false, width: 262 });
@@ -348,7 +474,10 @@ function analyzeAudio(audioPlayer) {
     }
 
     function animate() {
-        requestAnimationFrame(animate) //better than set interval because it pauses when user leaves the page
+        // Stale-loop guard: a superseded session never renders again, even if
+        // its cancelAnimationFrame raced with an already-queued callback.
+        if (session !== activeSession || session.tornDown || !session.renderer) return;
+        session.rafId = requestAnimationFrame(animate) //better than set interval because it pauses when user leaves the page
         analyser.getByteFrequencyData(dataArray)
         controls.update();
 
