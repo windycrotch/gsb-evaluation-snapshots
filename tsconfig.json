@@ -1,0 +1,45 @@
+{
+  "extends": "./tsconfig.base.json",
+  // Ensure no CJS fallback
+  "compilerOptions": {
+    "module": "nodenext",
+    "moduleResolution": "nodenext"
+  },
+  "compileOnSave": false,
+  "files": [],
+  "references": [
+    {
+      "path": "./packages/media-playback-controls"
+    },
+    {
+      "path": "./packages/media-loader"
+    },
+    {
+      "path": "./packages/media-player"
+    },
+    {
+      "path": "./packages/media-core"
+    },
+    {
+      "path": "./packages/media-parser-cdg"
+    },
+    {
+      "path": "./apps/demo"
+    },
+    {
+      "path": "./apps/framework-demo"
+    },
+    {
+      "path": "./apps/storybook-react"
+    },
+    {
+      "path": "./apps/storybook-hub"
+    },
+    {
+      "path": "./apps/storybook-web"
+    },
+    {
+      "path": "./packages/logger"
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "name": "storybook-hub",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "application",
+  "sourceRoot": "apps/storybook-hub",
+  "tags": ["type:docs", "runtime:composed"],
+  "targets": {
+    "dev": {
+      "executor": "nx:run-commands",
+      "options": {
+        "cwd": "apps/storybook-hub",
+        "command": "storybook dev -p 4400 --config-dir .storybook --disable-telemetry"
+      }
+    },
+    "build": {
+      "executor": "nx:run-commands",
+      "options": {
+        "cwd": "apps/storybook-hub",
+        "command": "STORYBOOK_BUILD=true storybook build --config-dir .storybook --output-dir .dist --disable-telemetry"
+      }
+    },
+    "site": {
+      "executor": "nx:run-commands",
+      "options": {
+        "commands": [
+          "pnpm nx run storybook-web:build",
+          "pnpm nx run storybook-react:build",
+          "STORYBOOK_BUILD=true storybook build --config-dir apps/storybook-hub/.storybook --output-dir apps/storybook-hub/.dist --disable-telemetry",
+          "pnpm exec node scripts/ci/assemble-storybook-site.mjs"
+        ],
+        "parallel": false
+      }
+    }
+  }
+}
