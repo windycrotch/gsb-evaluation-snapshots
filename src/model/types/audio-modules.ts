@@ -26,6 +26,8 @@ export type FilterModule = {
     lfoAmp: GainNode;
     lfoEnabled: boolean;
     filterEnabled: boolean;
+    // runtime (non persisted) type of the LFO, can be altered by module parameter automation
+    lfoType?: OscillatorType | "off";
 };
 
 export type EqModule = {

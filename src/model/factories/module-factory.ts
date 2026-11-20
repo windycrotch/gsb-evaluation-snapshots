@@ -198,6 +198,9 @@ const ModuleFactory = {
         filter.lfo.frequency.value    = props.speed;
         filter.lfoAmp.gain.value      = props.depth / 100 * props.frequency;
 
+        // note: the runtime LFO type is applied whenever defined, so that
+        // automation-altered LFO types are restored to the model value on reset
+        filter.lfoType       = props.lfoType;
         if ( filterEnabled ) {
             filter.lfo.type = props.lfoType as OscillatorType;
         }

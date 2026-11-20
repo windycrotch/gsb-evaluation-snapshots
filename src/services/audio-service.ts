@@ -27,13 +27,13 @@ import OscillatorTypes from "@/definitions/oscillator-types";
 import ModuleFactory from "@/model/factories/module-factory";
 import { ACTION_NOTE_ON } from "@/model/types/audio-event";
 import { applyRouting } from "./audio/module-router";
-import { applyModuleParamChange, getCurrentValueForParam } from "./audio/module-automation";
+import { applyModuleParamChange, getCurrentValueForParam, cancelScheduledModuleAutomation } from "./audio/module-automation";
 import type { ExternalEventCallback } from "./audio/module-automation";
 import type OutputRecorder from "./audio/output-recorder";
 import type WaveTables from "./audio/wave-tables";
 import { getFrequency } from "./audio/pitch";
 import { processVoiceLists } from "./audio/audio-util";
-import ADSR from "./audio/adsr-module";
+import ADSR, { getReleaseTime } from "./audio/adsr-module";
 import type { EffluxAudioEvent } from "@/model/types/audio-event";
 import type { EventVoice, EventVoiceList } from "@/model/types/event-voice";
 import type { Instrument, InstrumentOscillator, OscillatorProp } from "@/model/types/instrument";
@@ -66,11 +66,17 @@ let masterBus: AudioNode;
 let eq: BiquadFilterNode;
 let compressor: DynamicsCompressorNode;
 let playing = false;
-let recordOutput = false;
+let recordOutput = false; // whether an output recording session is active (armed, recording or exporting)
 let outputRecorderRef: typeof OutputRecorder;
 let recorder: OutputRecorder;
+let recorderState: "idle" | "recording" | "exporting" = "idle";
+let exportWatchdog: ReturnType<typeof setTimeout> | undefined;
 let instrumentModulesList: InstrumentModules[]; // holds all modules for each instantiated instrument
 let playingEventVoices: Record<number, EventVoiceList>[]; // [instrumentIndex][eventId][eventVoiceIndex]
+let activeSong: EffluxSong | undefined; // reference to the song whose model values are currently applied to the modules
+// instrument indices whose module parameters were altered by module parameter automation
+// during playback. These are restored to the song model values when playback stops.
+const instrumentsTouchedByAutomation = new Set<number>();
 let pool: {
     NOISE: AudioBuffer,
     CUSTOM: CustomWaveTableList[],
@@ -81,7 +87,20 @@ let pool: {
 };
 let UNIQUE_EVENT_ID = 0;
 
+// statistics describing voice pool usage, mainly useful for diagnostics (and tests)
+
+let voiceOverflowCount = 0; // amount of voices that had to be created beyond the pooled amount
+const voicePoolExhaustionNotified = new Set<string>(); // instrumentIndex:oscillatorIndex combinations that were reported
+
 const POOL_GAIN_NODES = false; // engine stability test
+
+// safety margin (in seconds) applied to the teardown of a released voice. This ensures
+// the release envelope is rendered in full before the voice nodes are disconnected.
+const VOICE_TEARDOWN_MARGIN = 0.01;
+
+// maximum amount of time (in milliseconds) to wait for a recording export to complete
+// before the recording state is reset (allowing a new recording to be started)
+const EXPORT_TIMEOUT_MS = 30_000;
 
 /**
  * Prepares the environment to create pools for oscillators, wave tables and instruments.
@@ -93,6 +112,9 @@ export const prepareEnvironment = ( audioContextInstance: BaseAudioContext,
     audioContext  = audioContextInstance;
     eventCallback = optExternalEventCallback;
     setupRouting();
+
+    // reset the recording state, a new environment means a new recorder will be created on demand
+    disposeRecorder();
 
     // initialize the WaveTable / AudioBuffer pool
 
@@ -130,6 +152,10 @@ export const prepareEnvironment = ( audioContextInstance: BaseAudioContext,
     for ( let i = 0; i < Config.INSTRUMENT_AMOUNT; ++i ) {
         playingEventVoices[ i ] = {} as Record<number, EventVoiceList>;
     }
+    activeSong = undefined;
+    voiceOverflowCount = 0;
+    voicePoolExhaustionNotified.clear();
+    instrumentsTouchedByAutomation.clear();
     createModules();
     AudioService.initialized = true;
 };
@@ -137,32 +163,90 @@ export const prepareEnvironment = ( audioContextInstance: BaseAudioContext,
 /**
  * halts all playing audio, flushes events and
  * resets unique event id counter when requested (e.g. when loading new song)
+ *
+ * All voices that are still sounding will have their release envelope applied
+ * (if this hadn't happened yet) so their tail is rendered before the voice is
+ * returned to the instruments voice pool. This method is safe to invoke
+ * repeatedly: already released / returned voices are ignored.
  */
 export const reset = ( resetEventCounter = false ): void => {
+    if ( !instrumentModulesList ) {
+        // environment not prepared, nothing to reset
+        if ( resetEventCounter ) {
+            UNIQUE_EVENT_ID = 0;
+        }
+        return;
+    }
+    const now = audioContext ? audioContext.currentTime : 0;
+
     playingEventVoices.forEach(( eventList, instrumentIndex ) => {
+        const modules = instrumentModulesList[ instrumentIndex ];
         processVoiceLists( Object.values( eventList ) as EventVoiceList[], ( voice: EventVoice, oscillatorIndex: number ) => {
-            returnVoiceNodesToPoolOnPlaybackEnd( instrumentModulesList[ instrumentIndex ], oscillatorIndex, voice, instrumentIndex );
-            stopOscillation( voice.generator, audioContext.currentTime );
+            // voices that were already released keep their scheduled teardown,
+            // voices that are still sounding are released now. The voice capacity is
+            // returned to the pool immediately so a subsequent playback can use it,
+            // while the release tail continues to sound on its own (detached) nodes.
+            releaseEventVoice( modules, oscillatorIndex, voice, instrumentIndex, now, true );
+            // voices already in their release phase (released by a preceding noteOff) also
+            // have their capacity returned right away so the pool is fully restored on stop
+            returnVoiceCapacityToPool( modules, oscillatorIndex, voice );
         });
         playingEventVoices[ instrumentIndex ] = {};
     });
+
+    // automation can have altered the audio module parameters during playback,
+    // restore these to the values defined by the song model
+    restoreModelParameters();
+
     if ( resetEventCounter ) {
         UNIQUE_EVENT_ID = 0;
     }
 };
 
+/**
+ * apply the current song models instrument module values onto the audio
+ * processing chain (used to undo changes made by module parameter automation)
+ */
+export const restoreModelParameters = (): void => {
+    if ( !instrumentModulesList || !activeSong ) {
+        instrumentsTouchedByAutomation.clear();
+        return;
+    }
+    instrumentsTouchedByAutomation.forEach( instrumentIndex => {
+        const instrument = activeSong!.instruments[ instrumentIndex ];
+        const modules    = instrumentModulesList[ instrumentIndex ];
+        if ( !instrument || !modules ) {
+            return;
+        }
+        // discard any (glide) values scheduled by module parameter automation before
+        // reapplying the song model values (only automation-touched instruments are
+        // affected so UI-set values of other instruments are left untouched)
+        cancelScheduledModuleAutomation( modules );
+
+        ModuleFactory.applyConfiguration( "filter",    modules, instrument.filter,    masterBus );
+        ModuleFactory.applyConfiguration( "delay",     modules, instrument.delay,     masterBus );
+        ModuleFactory.applyConfiguration( "eq",        modules, instrument.eq,        masterBus );
+        ModuleFactory.applyConfiguration( "overdrive", modules, instrument.overdrive, masterBus );
+        if ( modules.panner ) {
+            const panning = instrument.panning ? parseFloat( instrument.panning.toString() ) : 0;
+            modules.panner.pan.value = panning;
+        }
+        modules.output.gain.value = getInstrumentOutputGain( activeSong!, instrument );
+    });
+    instrumentsTouchedByAutomation.clear();
+};
+
 export const togglePlayback = ( setPlaying: boolean ): void => {
     playing = setPlaying;
     if ( playing ) {
-        // in case we were recording, unset the state to store the buffer
-        recordOutput = !recordOutput;
-        AudioService.toggleRecordingState();
+        // when a recording session was armed, start capturing. An export that is still
+        // in flight belongs to the previous session and is not affected by the restart.
+        startRecordingIfArmed();
     } else {
         reset();
-        if ( recordOutput && recorder ) {
-            recorder.stop();
-            recorder.export();
-        }
+        // when a recording session is recording, stopping the playback finalizes
+        // the recording and starts its export (an export already in flight is left alone)
+        stopAndExportRecording();
     }
 };
 
@@ -189,13 +273,17 @@ export const cacheCustomTables = ( instruments: Instrument[]): void => {
  */
 export const applyModules = ( song: EffluxSong, connectAnalysers = false ): void => {
     useAnalysers = connectAnalysers;
+    if ( !song || !instrumentModulesList ) {
+        return;
+    }
+    // cache a reference so automation changes can be reverted on stop (see reset())
+    activeSong = song;
+
     // first check if one of the channels is configured to operate solo
-    const hasSoloChannel = song.instruments.find( instrument => !!instrument.solo );
     song.instruments.forEach(( instrument, instrumentIndex ) => {
         const instrumentModules = instrumentModulesList[ instrumentIndex ];
-        const { muted, solo } = instrument;
 
-        instrumentModules.output.gain.value = muted || ( hasSoloChannel && !solo ) ? 0 : instrument.volume;
+        instrumentModules.output.gain.value = getInstrumentOutputGain( song, instrument );
 
         if ( instrumentModules.panner ) {
             const panning = instrument.panning ? parseFloat( instrument.panning.toString() ) : 0;
@@ -251,11 +339,7 @@ export const noteOn = ( event: EffluxAudioEvent, instrument: Instrument,
             oscillator = instrument.oscillators[ oscillatorIndex ];
 
             // retrieve from pool the envelope gain structure for the oscillator voice
-            const oscillatorNodes = retrieveAvailableVoiceNodesFromPool( modules, oscillatorIndex );
-            if ( oscillatorNodes === null ) {
-                console.info(`no more nodes in the pool for oscillator ${oscillatorIndex} of instrument ${instrument.index}`);
-                return;
-            }
+            const { nodes: oscillatorNodes, fromPool } = retrieveAvailableVoiceNodesFromPool( modules, oscillatorIndex );
             const { oscillatorNode, adsrNode } = oscillatorNodes;
             let generatorNode;
 
@@ -277,7 +361,9 @@ export const noteOn = ( event: EffluxAudioEvent, instrument: Instrument,
                             table = pool.CUSTOM[ instrument.index ][ oscillatorIndex ];
                         }
                         if ( !table ) {
-                            return; // no table ? that's a bit of a problem. what did you break!?
+                            // no table ? that's a bit of a problem. what did you break!? return the unused nodes
+                            returnUnusedVoiceNodesToPool( modules, oscillatorIndex, oscillatorNodes, fromPool );
+                            return;
                         }
                         generatorNode.setPeriodicWave( table );
                     }
@@ -288,7 +374,7 @@ export const noteOn = ( event: EffluxAudioEvent, instrument: Instrument,
                 case OscillatorTypes.SAMPLE:
                     const cacheEntry: SampleCacheEntry = sampleCache.get( oscillator.sample );
                     if ( !cacheEntry ) {
-                        return returnUnusedVoiceNodesToPool( modules, oscillatorIndex, oscillatorNodes );
+                        return returnUnusedVoiceNodesToPool( modules, oscillatorIndex, oscillatorNodes, fromPool );
                     }
                     const { sample } = cacheEntry;
                     generatorNode = audioContext.createBufferSource();
@@ -297,7 +383,7 @@ export const noteOn = ( event: EffluxAudioEvent, instrument: Instrument,
                     if ( sample.type === PlaybackType.SLICED ) {
                         const sliceIndex = getSliceIndexForNote( event, sample );
                         if ( cacheEntry.slices[ sliceIndex ] === undefined ) {
-                            return returnUnusedVoiceNodesToPool( modules, oscillatorIndex, oscillatorNodes );
+                            return returnUnusedVoiceNodesToPool( modules, oscillatorIndex, oscillatorNodes, fromPool );
                         }
                         generatorNode.buffer = cacheEntry.slices[ sliceIndex ];
                     } else {
@@ -339,21 +425,29 @@ export const noteOn = ( event: EffluxAudioEvent, instrument: Instrument,
                 vo: oscillatorVO,
                 gain: oscillatorNode,
                 outputNode: adsrNode,
-                gliding: false
+                gliding: false,
+                eventId: event.id,
+                released: false,
+                returned: false,
+                fromPool
             });
 
             // start playback and attach listener to track playback end
             // (we attach the listener directly instead of inside the noteOff-handler as very short, non-looped
             // AudioBufferSources can finish their playback before the sequencer can request the noteOff)
 
+            attachVoiceTeardown( modules, oscillatorIndex, voices[ oscillatorIndex ], instrument.index, event.id );
             startOscillation( generatorNode, startTimeInSeconds );
-            returnVoiceNodesToPoolOnPlaybackEnd( modules, oscillatorIndex, voices[ oscillatorIndex ], instrument.index, event.id );
         });
         playingEventVoices[ instrument.index ][ event.id ] = voices;
     }
     // module parameter change specified ? process it.
 
     if ( event.mp ) {
+        // track which instruments receive automation so their module values can be
+        // restored to the song model values when playback stops
+        instrumentsTouchedByAutomation.add( instrument.index );
+
         applyModuleParamChange(
             audioContext,
             event,
@@ -376,22 +470,20 @@ export const noteOn = ( event: EffluxAudioEvent, instrument: Instrument,
  */
 export const noteOff = ( event: EffluxAudioEvent, startTimeInSeconds = audioContext.currentTime ): void => {
     const eventId   = event.id, instrumentIndex = event.instrument;
-    const voiceList = playingEventVoices[ instrumentIndex ][ eventId ];
+    const voiceList = playingEventVoices[ instrumentIndex ]?.[ eventId ];
 
     if ( !voiceList ) {
         return; // event has no reference to playing nodes
     }
     // console.info(`NOTE OFF for ${event.id} ( ${event.note}${event.octave} @ ${startTimeInSeconds}s`);
 
-    voiceList.forEach(( voice /*, oscillatorIndex */ ) => {
+    const modules = instrumentModulesList[ instrumentIndex ];
+
+    voiceList.forEach(( voice, oscillatorIndex ) => {
         if ( !voice ) {
             return;
         }
-        // apply release envelopes
-        ADSR.applyAmpRelease  ( voice.vo, voice.outputNode, startTimeInSeconds );
-        ADSR.applyPitchRelease( voice.vo, voice.generator,  startTimeInSeconds );
-
-        stopOscillation( voice.generator, startTimeInSeconds + voice.vo.adsr.release );
+        releaseEventVoice( modules, oscillatorIndex, voice, instrumentIndex, startTimeInSeconds );
     });
 };
 
@@ -402,19 +494,102 @@ export const getAudioContext = (): BaseAudioContext => audioContext;
 
 export const isRecording = (): boolean => recordOutput;
 
+export const getRecordingState = (): "idle" | "recording" | "exporting" => recorderState;
+
+/**
+ * retrieve the amount of voices currently playing back per instrument/oscillator,
+ * as well as the amount of voices available in each instruments voice pool.
+ *
+ * This is mainly intended for diagnostics and automated tests (e.g. verifying that
+ * all voices are returned to the pool once playback stops).
+ */
+export const getVoicePoolStats = (): { instrumentIndex: number, oscillatorIndex: number, available: number, playing: number }[] => {
+    const stats: { instrumentIndex: number, oscillatorIndex: number, available: number, playing: number }[] = [];
+    if ( !instrumentModulesList ) {
+        return stats;
+    }
+    const playingPerInstrument: number[][] = instrumentModulesList.map(() => new Array( Config.OSCILLATOR_AMOUNT ).fill( 0 ));
+
+    playingEventVoices.forEach(( eventList, instrumentIndex ) => {
+        processVoiceLists( Object.values( eventList ) as EventVoiceList[], ( _voice: EventVoice, oscillatorIndex: number ) => {
+            if ( playingPerInstrument[ instrumentIndex ]) {
+                ++playingPerInstrument[ instrumentIndex ][ oscillatorIndex ];
+            }
+        });
+    });
+
+    instrumentModulesList.forEach(( modules, instrumentIndex ) => {
+        modules.voices.forEach(( voiceList, oscillatorIndex ) => {
+            stats.push({
+                instrumentIndex,
+                oscillatorIndex,
+                available: voiceList.length,
+                playing: playingPerInstrument[ instrumentIndex ]?.[ oscillatorIndex ] ?? 0
+            });
+        });
+    });
+    return stats;
+};
+
+/**
+ * retrieve the amount of voices that had to be synthesized beyond the (pooled) capacity
+ * since the environment was prepared. A value above zero indicates voice pool exhaustion occurred.
+ */
+export const getVoiceOverflowCount = (): number => voiceOverflowCount;
+
+/**
+ * retrieve the events currently playing back per instrument (indexed by event id).
+ * This exposes the node references of each voice, mainly intended for diagnostics and tests.
+ */
+export const getPlayingEventVoices = (): Record<number, EventVoiceList>[] => playingEventVoices;
+
 let useAnalysers = false;
 export const connectAnalysers = (): boolean => useAnalysers;
 
 export const getCurrentModuleParamValue = ( instrument: Instrument, param: ModuleParamDef ): number => getCurrentValueForParam( instrumentModulesList[ instrument.index ], instrument, param );
 
+/**
+ * retrieve a reference to the audio processing modules of given instrument (mainly for diagnostics)
+ */
+export const getInstrumentModules = ( instrumentIndex: number ): InstrumentModules | undefined => instrumentModulesList?.[ instrumentIndex ];
+
+/**
+ * assign the store instance used to publish notifications. The application assigns this
+ * through init(), this method additionally allows services that do not use the Vuex store
+ * (e.g. the Tiny player, or automated tests) to receive notifications.
+ */
+export const setStore = ( storeReference: Store<EffluxState> ): void => {
+    store = storeReference;
+    state = storeReference?.state;
+};
+
+/**
+ * override the output recorder class (e.g. for environments that supply a custom recorder).
+ * note: an active recorder session is released when the reference changes.
+ */
+export const setOutputRecorderClass = ( recorderReference: typeof OutputRecorder | undefined ): void => {
+    disposeRecorder();
+    outputRecorderRef = recorderReference;
+};
+
 const AudioService =
 {
     initialized: false,
+    prepareEnvironment,
     reset,
+    restoreModelParameters,
+    togglePlayback,
     cacheCustomTables,
     applyModules,
     getAudioContext,
+    getInstrumentModules,
     isRecording,
+    getRecordingState,
+    getVoicePoolStats,
+    getVoiceOverflowCount,
+    getPlayingEventVoices,
+    setStore,
+    configureOutputRecorder: setOutputRecorderClass,
     noteOn,
     noteOff,
 
@@ -446,20 +621,29 @@ const AudioService =
         AudioService.cacheCustomTables( state.song.activeSong.instruments );
     },
     toggleRecordingState(): void {
-        recordOutput = !recordOutput;
-        if ( recordOutput && outputRecorderRef ) {
-            if ( !recorder ) {
-                recorder = new ( outputRecorderRef )( compressor, {
-                    callback : handleRecordingComplete
-                });
+        if ( recordOutput ) {
+            // a recording session is active (armed, recording or exporting). When an export is
+            // already in flight, stopping is a no-op (the completion handler releases resources).
+            if ( recorderState !== "exporting" ) {
+                stopAndExportRecording();
             }
-            if ( playing ) {
-                recorder.record();
-            }
-        } else if ( recorder ) {
-            recorder.stop();
-            recorder.export();
+            return;
         }
+        recordOutput = true;
+
+        if ( !outputRecorderRef ) {
+            return; // environment does not support output recording
+        }
+        if ( !recorder ) {
+            recorder = new ( outputRecorderRef )( compressor, {
+                callback : handleRecordingComplete
+            });
+            recorderState = "idle";
+        }
+        if ( playing ) {
+            startRecording();
+        }
+        // when not playing, the recording is "armed": it will start on the next playback
     },
     cacheAllOscillators( instrumentIndex: number, instrument: Instrument ): void {
         instrument.oscillators.forEach(( oscillator, oscillatorIndex ) => {
@@ -513,6 +697,14 @@ export const applyModule = ( type: string, instrumentIndex: number, props: any )
 
 /* internal methods */
 
+/**
+ * retrieve the output gain for given instrument, based on its mute/solo state and volume
+ */
+function getInstrumentOutputGain( song: EffluxSong, instrument: Instrument ): number {
+    const hasSoloChannel = song.instruments.some( candidate => !!candidate.solo );
+    return instrument.muted || ( hasSoloChannel && !instrument.solo ) ? 0 : instrument.volume;
+}
+
 function setupRouting(): void {
     masterBus  = createGainNode( audioContext );
     eq         = audioContext.createBiquadFilter();
@@ -555,61 +747,207 @@ function createModules(): void {
     }
 }
 
-function retrieveAvailableVoiceNodesFromPool( instrumentModules: InstrumentModules, oscillatorIndex: number ): InstrumentVoice {
+/**
+ * retrieve an available gain structure from the pool. When the pool is exhausted an additional
+ * gain structure is synthesized (see reportVoicePoolExhaustion). fromPool indicates whether the
+ * structure originated from the pool (and should be returned to it once playback has ended).
+ */
+function retrieveAvailableVoiceNodesFromPool( instrumentModules: InstrumentModules, oscillatorIndex: number ): { nodes: InstrumentVoice, fromPool: boolean } {
     const availableVoices: InstrumentVoiceList = instrumentModules.voices[ oscillatorIndex ];
     if ( availableVoices.length ) {
-        return availableVoices.shift();
+        return { nodes: availableVoices.shift(), fromPool: true };
     }
-    return null;
+    // the pool is exhausted (this happens when many voices are simultaneously in their release phase,
+    // e.g. long release envelopes with rapidly retriggered notes). We must not silently drop the note:
+    // synthesize an additional voice so playback continues, and report the degradation.
+    reportVoicePoolExhaustion( instrumentModules, oscillatorIndex );
+    return { nodes: createVoiceGainStructure( instrumentModules.output ), fromPool: false };
 }
 
-function returnUnusedVoiceNodesToPool( instrumentModules: InstrumentModules, oscillatorIndex: number, voice: InstrumentVoice ): void {
-    instrumentModules.voices[ oscillatorIndex ].push( voice );
+/**
+ * report that a voice pool ran out of available voices. The degradation is observable
+ * through the console, a UI notification (only once per oscillator) and getVoicePoolStats()
+ */
+function reportVoicePoolExhaustion( instrumentModules: InstrumentModules, oscillatorIndex: number ): void {
+    ++voiceOverflowCount;
+
+    const instrumentIndex = instrumentModulesList.indexOf( instrumentModules );
+    const key = `${instrumentIndex}:${oscillatorIndex}`;
+
+    if ( voicePoolExhaustionNotified.has( key )) {
+        return;
+    }
+    voicePoolExhaustionNotified.add( key );
+
+    console.warn(
+        `voice pool exhausted for oscillator ${oscillatorIndex} of instrument ${instrumentIndex}, ` +
+        `synthesizing additional voices (voices in release phase will be returned to the pool once finished)`
+    );
+    try {
+        store?.commit?.( "showNotification", {
+            message: store.getters?.t
+                ? store.getters.t( "messages.voicePoolExhausted", { instrument: instrumentIndex + 1 })
+                : `Instrument ${instrumentIndex + 1} ran out of voices, extra voices were allocated to keep notes sounding`
+        });
+    } catch {
+        // notifications are best-effort (e.g. when running headless)
+    }
 }
 
-function returnVoiceNodesToPoolOnPlaybackEnd( instrumentModules: InstrumentModules, oscillatorIndex: number,
+function returnUnusedVoiceNodesToPool( instrumentModules: InstrumentModules, oscillatorIndex: number,
+    voice: InstrumentVoice, fromPool = true ): void {
+    // only pooled structures are returned, synthesized overflow structures are discarded
+    if ( fromPool ) {
+        instrumentModules.voices[ oscillatorIndex ].push( voice );
+    }
+}
+
+/**
+ * attach a listener to the voice's generator node that disposes the voice
+ * once the generator has finished playback.
+ *
+ * The listener is attached at noteOn time (instead of inside noteOff) as very short, non-looped
+ * AudioBufferSources can finish their playback before the sequencer can request the noteOff.
+ */
+function attachVoiceTeardown( instrumentModules: InstrumentModules, oscillatorIndex: number,
     eventVoice: EventVoice, instrumentIndex: number, eventId: number = -1 ): void {
     eventVoice.generator.onended = (): void => {
-        // OscillatorNodes will automatically disconnect() after stopping
-        // except for PWM which has a custom implementation
+        disposeVoice( instrumentModules, oscillatorIndex, eventVoice, instrumentIndex, eventId );
+    };
+}
+
+/**
+ * apply the release envelope onto given voice and schedule the generator to stop
+ * after the release has completed. Invoking this repeatedly for the same voice is a no-op.
+ *
+ * @param returnImmediately when true, the voice capacity is returned to the instruments pool
+ *        without waiting for the release tail to finish (used when playback is halted so that
+ *        a subsequent playback can acquire the voice again right away). The release tail
+ *        continues to sound on the detached nodes.
+ */
+function releaseEventVoice( instrumentModules: InstrumentModules, oscillatorIndex: number,
+    eventVoice: EventVoice, instrumentIndex: number, startTimeInSeconds: number, returnImmediately = false ): void {
+    if ( !eventVoice || eventVoice.released ) {
+        return;
+    }
+    eventVoice.released = true;
+
+    // apply release envelopes
+    ADSR.applyAmpRelease  ( eventVoice.vo, eventVoice.outputNode, startTimeInSeconds );
+    ADSR.applyPitchRelease( eventVoice.vo, eventVoice.generator,  startTimeInSeconds );
+
+    const releaseTime = getReleaseTime( eventVoice.vo );
+
+    stopOscillation( eventVoice.generator, startTimeInSeconds + releaseTime + VOICE_TEARDOWN_MARGIN );
+
+    if ( returnImmediately ) {
+        // release the capacity back into the pool right away (idempotent)
+        returnVoiceCapacityToPool( instrumentModules, oscillatorIndex, eventVoice );
+    }
+
+    // onended will fire when the generator stops, disposing the voice nodes.
+    // In case the environment does not invoke onended (or the generator had already ended
+    // prior to this release being applied) schedule a timed fallback so the nodes are never leaked.
+    scheduleVoiceDisposalFallback( instrumentModules, oscillatorIndex, eventVoice, instrumentIndex,
+        startTimeInSeconds, releaseTime + VOICE_TEARDOWN_MARGIN );
+}
+
+function scheduleVoiceDisposalFallback( instrumentModules: InstrumentModules, oscillatorIndex: number,
+    eventVoice: EventVoice, instrumentIndex: number, startTimeInSeconds: number, delayInSeconds: number ): void {
+    if ( typeof window === "undefined" || typeof window.setTimeout !== "function" ) {
+        return;
+    }
+    // note: disposal is idempotent, whichever of the generators onended-handler or this
+    // fallback fires first disposes the nodes, the other one becomes a no-op
+    const delayInMs = Math.max( 0, ( startTimeInSeconds + delayInSeconds - audioContext.currentTime ) * 1000 ) + 20;
+    eventVoice.teardownTimer = setTimeout(() => {
+        disposeVoice( instrumentModules, oscillatorIndex, eventVoice, instrumentIndex, eventVoice.eventId ?? -1 );
+    }, delayInMs );
+}
+
+/**
+ * return the capacity of given voice to the instrument's voice pool (if it originated from the pool).
+ * Invoking this repeatedly is a no-op.
+ *
+ * note: when pooling of gain nodes is disabled (the stable engine configuration), the previously
+ * used nodes are discarded and a fresh gain structure takes their place in the pool, so all
+ * scheduled parameter changes from the previous voice are discarded.
+ */
+function returnVoiceCapacityToPool( instrumentModules: InstrumentModules, oscillatorIndex: number, eventVoice: EventVoice ): void {
+    if ( !eventVoice || eventVoice.returned || eventVoice.fromPool === false ) {
+        return;
+    }
+    if ( POOL_GAIN_NODES ) {
+        return; // the actual nodes are returned upon disposal (see disposeVoice)
+    }
+    eventVoice.returned = true;
+    instrumentModules.voices[ oscillatorIndex ].push( createVoiceGainStructure( instrumentModules.output ));
+}
+
+/**
+ * disconnect the nodes of given voice. Invoking this repeatedly is a no-op.
+ */
+function disposeVoice( instrumentModules: InstrumentModules, oscillatorIndex: number,
+    eventVoice: EventVoice, instrumentIndex: number, eventId: number = -1 ): void {
+    if ( !eventVoice || eventVoice.disposed ) {
+        return;
+    }
+    eventVoice.disposed = true;
+
+    // the voice has finished sounding, its capacity can return to the pool (no-op if it
+    // was already returned when playback was halted)
+    returnVoiceCapacityToPool( instrumentModules, oscillatorIndex, eventVoice );
+
+    if ( eventVoice.teardownTimer ) {
+        clearTimeout( eventVoice.teardownTimer );
+        eventVoice.teardownTimer = undefined;
+    }
+
+    // OscillatorNodes will automatically disconnect() after stopping
+    // except for PWM which has a custom implementation
+    try {
         eventVoice.generator.disconnect();
+    } catch {
+        // generator may have already disconnected itself
+    }
 
-        // delete the associated event from the playback list
-        // we delay this until the voices have actually halted playback
-        // as otherwise the voices aren't always returned to the pool on Safari/iOS
+    // delete the associated event from the playback list, but only when the slot
+    // still references this voice (a retrigger may have claimed the slot in the meantime).
+    // we delay this until the voices have actually halted playback as otherwise the
+    // voices aren't always returned to the pool on Safari/iOS
 
-        if ( eventId !== -1 ) {
-            const voiceList = playingEventVoices[ instrumentIndex ][ eventId ];
-            if ( voiceList ) {
-                voiceList[ oscillatorIndex ] = undefined;
-                if ( voiceList.filter( Boolean ).length === 0 ) {
-                    delete playingEventVoices[ instrumentIndex ][ eventId ];
-                }
+    if ( eventId !== -1 && playingEventVoices[ instrumentIndex ]) {
+        const voiceList = playingEventVoices[ instrumentIndex ][ eventId ];
+        if ( voiceList && voiceList[ oscillatorIndex ] === eventVoice ) {
+            voiceList[ oscillatorIndex ] = undefined;
+            if ( voiceList.filter( Boolean ).length === 0 ) {
+                delete playingEventVoices[ instrumentIndex ][ eventId ];
             }
         }
+    }
 
-        eventVoice.gain.gain.cancelScheduledValues( 0 );
-        eventVoice.outputNode.gain.cancelScheduledValues( 0 );
+    eventVoice.gain.gain.cancelScheduledValues( 0 );
+    eventVoice.outputNode.gain.cancelScheduledValues( 0 );
 
-        if ( POOL_GAIN_NODES ) {
-            // return the gain nodes for the instrument voice back to the pool
+    if ( POOL_GAIN_NODES ) {
+        // return the gain nodes for the instrument voice back to the pool
+        if ( eventVoice.fromPool !== false && !eventVoice.returned ) {
+            eventVoice.returned = true;
             instrumentModules.voices[ oscillatorIndex ].push({
                 oscillatorNode: eventVoice.gain,
                 adsrNode: eventVoice.outputNode
             });
             return;
         }
+    }
 
-        // pooling of gain nodes disabled. Technically this increases work for the garbage collector, but this
-        // brings the benefit of a more stable engine as it ensures all scheduled parameters are discarded, providing
-        // a clean reset for the next use (otherwise over time / under CPU stress ADSR changes would not restore properly)
-        // this can be tested by looping a 16th note hi-hat noise (w/ slight release) pattern for a while
-        
-        eventVoice.gain.disconnect();
-        eventVoice.outputNode.disconnect();
+    // pooling of gain nodes disabled. Technically this increases work for the garbage collector, but this
+    // brings the benefit of a more stable engine as it ensures all scheduled parameters are discarded, providing
+    // a clean reset for the next use (otherwise over time / under CPU stress ADSR changes would not restore properly)
+    // this can be tested by looping a 16th note hi-hat noise (w/ slight release) pattern for a while
 
-        instrumentModules.voices[ oscillatorIndex ].push( createVoiceGainStructure( instrumentModules.output ));
-    };
+    eventVoice.gain.disconnect();
+    eventVoice.outputNode.disconnect();
 }
 
 /**
@@ -622,23 +960,160 @@ function createTableFromCustomGraph( instrumentIndex: number, oscillatorIndex: n
 function createVoiceGainStructure( output: AudioNode ): InstrumentVoice {
     const oscillatorNode = createGainNode( audioContext );
     const adsrNode = createGainNode( audioContext );
-    
+
     oscillatorNode.connect( adsrNode );
     adsrNode.connect( output );
 
     return { oscillatorNode, adsrNode };
 }
 
+/**
+ * start capturing audio into the recorder (the recorder must have been created)
+ */
+function startRecording(): void {
+    if ( !recorder || recorderState === "recording" ) {
+        return;
+    }
+    recorderState = "recording";
+    recorder.record();
+}
+
+/**
+ * when a recording session was armed while playback was halted, start it now
+ */
+function startRecordingIfArmed(): void {
+    if ( !recordOutput || !recorder || recorderState !== "idle" ) {
+        return;
+    }
+    startRecording();
+}
+
+/**
+ * stop the active recording session and export the captured audio.
+ * Safe to invoke repeatedly: when no recording is active this is a no-op and
+ * when an export is in progress the request is ignored (preventing duplicate exports).
+ */
+function stopAndExportRecording(): void {
+    if ( !recordOutput ) {
+        return;
+    }
+    if ( !recorder ) {
+        recordOutput = false;
+        recorderState = "idle";
+        return;
+    }
+    if ( recorderState === "exporting" ) {
+        return; // an export is already in flight, the completion handler will release resources
+    }
+    if ( recorderState === "idle" ) {
+        // recording was only armed (playback never started), cancel and release resources
+        disposeRecorder();
+        return;
+    }
+    recorderState = "exporting";
+
+    // the export is processed asynchronously by the recorder worker. When the worker fails to
+    // report back, the recording state would remain "stuck" in exporting (blocking future
+    // recordings). The watchdog ensures a new session can always be started.
+    armExportWatchdog();
+
+    try {
+        recorder.stop();
+        recorder.export();
+    } catch ( e ) {
+        // exporting failed: reset recording state so a next recording session can start anew
+        handleRecordingError( e );
+    }
+}
+
+/**
+ * (re)arm the timer that resets a stuck export. Completion clears the timer.
+ */
+function armExportWatchdog(): void {
+    clearExportWatchdog();
+    if ( typeof setTimeout !== "function" ) {
+        return;
+    }
+    exportWatchdog = setTimeout(() => {
+        exportWatchdog = undefined;
+        if ( recorderState === "exporting" ) {
+            handleRecordingError( new Error( "recording export timed out" ));
+        }
+    }, EXPORT_TIMEOUT_MS );
+}
+
+function clearExportWatchdog(): void {
+    if ( exportWatchdog ) {
+        clearTimeout( exportWatchdog );
+        exportWatchdog = undefined;
+    }
+}
+
+/**
+ * release the recorder resources and reset the recording state
+ */
+function disposeRecorder(): void {
+    clearExportWatchdog();
+    if ( recorder ) {
+        try {
+            recorder.dispose();
+        } catch {
+            // recorder resources may have been released already
+        }
+    }
+    recorder = null;
+    recorderState = "idle";
+    recordOutput = false;
+}
+
+/**
+ * reset the recording state after a failure so a next recording session can be started
+ */
+function handleRecordingError( error?: unknown ): void {
+    if ( error ) {
+        console.error( "output recording failed", error );
+    }
+    disposeRecorder();
+    try {
+        store?.commit?.( "showNotification", {
+            message: store.getters?.t ? store.getters.t( "messages.recordingFailed" ) : "Output recording failed, please try again"
+        });
+    } catch {
+        // notifications are best-effort
+    }
+}
+
 function handleRecordingComplete( blob: Blob ): void {
-    const blobUrl = blobToResource( blob );
-    saveAsFile( blobUrl, "efflux-output.wav" );
-    disposeResource( blobUrl );
-
-    // free recorder resources
-
-    recorder.dispose();
+    // guard against duplicate completion events (e.g. from a repeated stop request)
+    if ( recorderState !== "exporting" ) {
+        return;
+    }
+    clearExportWatchdog();
+    // release the recorder resources only once, regardless of how often completion fires
+    const activeRecorder = recorder;
+    recorderState = "idle";
     recorder = null;
     recordOutput = false;
 
-    store.commit( "showNotification", { message: store.getters.t( "messages.recordingSaved" ) });
+    try {
+        if ( blob && blob.size > 0 ) {
+            const blobUrl = blobToResource( blob );
+            saveAsFile( blobUrl, "efflux-output.wav" );
+            disposeResource( blobUrl );
+            store?.commit?.( "showNotification", {
+                message: store.getters?.t ? store.getters.t( "messages.recordingSaved" ) : "Recording saved"
+            });
+        } else {
+            handleRecordingError( new Error( "recorder produced an empty recording" ));
+        }
+    } catch ( e ) {
+        console.error( "could not save recorded output", e );
+    } finally {
+        // free recorder resources exactly once
+        try {
+            activeRecorder?.dispose();
+        } catch {
+            // already released
+        }
+    }
 }

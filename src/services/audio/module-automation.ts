@@ -51,7 +51,7 @@ export type ExternalEventCallback = ( props: ExternalEventCallbackProps ) => voi
  * apply a module parameter change defined inside an audioEvent during playback
  */
 export const applyModuleParamChange = ( audioContext: BaseAudioContext, audioEvent: EffluxAudioEvent,
-    modules: InstrumentModules, instrument: Instrument, voiceLists: EventVoiceList[],
+    modules: InstrumentModules, _instrument: Instrument, voiceLists: EventVoiceList[],
     startTimeInSeconds: number, output: AudioNode, optEventCallback?: ExternalEventCallback ) => {
     const { value, module } = audioEvent.mp;
 
@@ -106,7 +106,10 @@ export const applyModuleParamChange = ( audioContext: BaseAudioContext, audioEve
             break;
 
         case FILTER_LFO_ENABLED:
-            instrument.filter.lfoType = rangeToIndex( filterTypes, value ) as OscillatorType;
+            // the automation changes the runtime type of the LFO for the active note only,
+            // it must not rewrite the song model (stopping playback restores the model values)
+            modules.filter.lfoType = rangeToIndex( filterTypes, value ) as OscillatorType;
+            modules.filter.lfo.type = modules.filter.lfoType;
             applyRouting( modules, output );
             break;
 
@@ -139,9 +142,38 @@ export const applyModuleParamChange = ( audioContext: BaseAudioContext, audioEve
 };
 
 /**
+ * cancel any scheduled (automation) changes on the AudioParams of the instruments
+ * effect modules, restoring the values previously assigned through their properties.
+ *
+ * This is used when playback stops, so that module parameter automation does not
+ * leave the engine in the state of the last scheduled automation value.
+ */
+export const cancelScheduledModuleAutomation = ( modules: InstrumentModules ): void => {
+    if ( !modules ) {
+        return;
+    }
+    const { eq, filter, panner } = modules;
+
+    if ( panner?.pan ) {
+        panner.pan.cancelScheduledValues( 0 );
+    }
+    if ( eq ) {
+        eq.lowGain.gain.cancelScheduledValues( 0 );
+        eq.midGain.gain.cancelScheduledValues( 0 );
+        eq.highGain.gain.cancelScheduledValues( 0 );
+    }
+    if ( filter ) {
+        filter.filter.frequency.cancelScheduledValues( 0 );
+        filter.filter.Q.cancelScheduledValues( 0 );
+        filter.lfo.frequency.cancelScheduledValues( 0 );
+        filter.lfoAmp.gain.cancelScheduledValues( 0 );
+    }
+};
+
+/**
  * Retrieve the current value for givin param from the instruments current state
  */
-export const getCurrentValueForParam = ( modules: InstrumentModules, instrument: Instrument, param: ModuleParamDef ): number => {
+export const getCurrentValueForParam = ( modules: InstrumentModules, _instrument: Instrument, param: ModuleParamDef ): number => {
     if ( NON_PERSISTED_PARAMS.has( param )) {
         return NON_PERSISTED_PARAMS.get( param );
     }
@@ -193,7 +225,8 @@ export const getCurrentValueForParam = ( modules: InstrumentModules, instrument:
         case FILTER_ENABLED:
             return filter.filterEnabled ? 100 : 0;
         case FILTER_LFO_ENABLED:
-            return instrument.filter.lfoType === "off" ? 0 : 100;
+            // the LFO type is a runtime value (automation does not persist it into the song model)
+            return ( filter.lfoType ?? filter.lfo.type ) === "off" ? 0 : 100;
         case FILTER_FREQ:
             value = filter.filter.frequency.value / Config.MAX_FILTER_FREQ;
             break;

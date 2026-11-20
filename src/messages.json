@@ -25,6 +25,8 @@
     "messages": {
       "songSaved": "Song '{name}' saved",
       "recordingSaved": "Recording saved to your download folder",
+      "recordingFailed": "Output recording failed, please try again",
+      "voicePoolExhausted": "Instrument {instrument} ran out of voices, extra voices were allocated to keep notes sounding",
       "fileSavedInDropbox": "\"{file}\" saved in Dropbox",
       "instrumentImported": "Instrument loaded successfully"
     },

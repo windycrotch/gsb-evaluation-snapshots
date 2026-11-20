@@ -29,8 +29,30 @@ let PITCH: InstrumentPitchEnvelopes & { org?: number };
 let envelope, attack, release, attackEnd, decayEnd, step;
 const MAX_PITCH_ENVELOPE_VALUE = 24; // max value we expect for the pitch envelope's range
 
+/**
+ * retrieve the release time, in seconds, that will be applied to the
+ * amplitude envelope of given oscillator.
+ *
+ * This is the same value the AudioService uses to determine when a voice
+ * has finished sounding (and can be returned to its instruments voice pool).
+ * Some waveforms have a minimum release to prevent audio clicks/pops.
+ */
+export const getReleaseTime = ( oscillator: InstrumentOscillator ): number => {
+    ADSR = oscillator.adsr;
+
+    switch ( oscillator.waveform ) {
+        default:
+            return ADSR.release;
+
+        case OscillatorTypes.SINE:
+        case OscillatorTypes.TRIANGLE:
+            return ( ADSR.release === 0 ) ? 0.002 : ADSR.release;
+    }
+};
+
 export default
 {
+    getReleaseTime,
     /**
      * apply attack, decay and sustain amplitude envelopes to given gain Node
      */
@@ -63,21 +85,8 @@ export default
      * apply release amplitude envelope to given gain Node
      */
     applyAmpRelease( oscillator: InstrumentOscillator, output: GainNode, startTimeInSeconds: number ): void {
-        ADSR = oscillator.adsr;
+        release = getReleaseTime( oscillator );
 
-        switch ( oscillator.waveform ) {
-            default:
-                release = ADSR.release;
-                break;
-
-            // these pop! give them some subtle fade curves
-            // if no custom attack has been defined
-
-            case OscillatorTypes.SINE:
-            case OscillatorTypes.TRIANGLE:
-                release = ( ADSR.release === 0 ) ? 0.002 : ADSR.release;
-                break;
-        }
         envelope = output.gain;
 
         envelope.cancelScheduledValues  ( startTimeInSeconds );

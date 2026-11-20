@@ -164,4 +164,26 @@ describe( "ADSR", () => {
             expect(output.gain.linearRampToValueAtTime).toHaveBeenCalledWith(1.0, expectedTime);
         });
     });
+
+    // release time retrieval (used to determine when a voice has finished sounding)
+
+    it( "should return the configured release time for the oscillator", () => {
+        const oscillator = createOscillator({
+            adsr: { attack: 0, decay: 0, sustain: 1, release: 1.25 }
+        });
+        expect( ADSR.getReleaseTime( oscillator )).toEqual( 1.25 );
+    });
+
+    it( "should return a minimum release time for waveforms that would otherwise pop", () => {
+        const oscillator = createOscillator({
+            adsr: { attack: 0, decay: 0, sustain: 1, release: 0 }
+        });
+        [ OscillatorTypes.SINE, OscillatorTypes.TRIANGLE ].forEach( waveform => {
+            oscillator.waveform = waveform;
+            expect( ADSR.getReleaseTime( oscillator )).toBeGreaterThan( 0 );
+        });
+        // other waveforms can have an instant release
+        oscillator.waveform = OscillatorTypes.SAW;
+        expect( ADSR.getReleaseTime( oscillator )).toEqual( 0 );
+    });
 });

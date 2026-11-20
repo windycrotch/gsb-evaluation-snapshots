@@ -34,7 +34,22 @@ export type EventVoice = {
     outputNode: GainNode;
     frequency: number;
     vo: InstrumentOscillator,
-    gliding: false
+    gliding: false,
+    // playback lifecycle bookkeeping, set by the AudioService:
+
+    // identifier of the EffluxAudioEvent this voice is playing back for
+    eventId?: number,
+    // whether the release envelope has been applied (prevents double releases)
+    released?: boolean,
+    // whether the voice capacity has been returned to the instruments pool
+    returned?: boolean,
+    // whether the voice's nodes have been disconnected (prevents double disposal)
+    disposed?: boolean,
+    // whether the voice gain structure originated from the pool (and should be returned to it)
+    fromPool?: boolean,
+    // handle to the safety-net timer that disposes the voice if the generator
+    // does not report its end (cleared when the voice is disposed)
+    teardownTimer?: ReturnType<typeof setTimeout>
 };
 
 /**
