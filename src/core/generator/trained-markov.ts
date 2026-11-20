@@ -9,6 +9,28 @@ export type PitchClassEncoder = (pitchClass: string) => string
 // the tonic-relative symbols work in every key without rebuilding.
 const trainedTableCache = new Map<string, MarkovTable>()
 
+/**
+ * Stable cache identity for an artifact's transition counts. The context count
+ * alone is not unique: two artifacts with the same id/hash/count-of-contexts
+ * but different successor buckets would otherwise share a cached table and
+ * silently reuse the previous model's statistics. Including every context and
+ * its ordered successor signature makes the key track the actual table data.
+ */
+export function trainedArtifactCacheKey(artifact: TrainedMarkovArtifact): string {
+  const contexts = Object.keys(artifact.counts).sort()
+  const signature = contexts
+    .map((context) => {
+      const bucket = artifact.counts[context]
+      const successors = Object.keys(bucket)
+        .sort()
+        .map((symbol) => `${symbol}:${bucket[symbol]}`)
+        .join(',')
+      return `${context}>{${successors}}`
+    })
+    .join('|')
+  return `${artifact.id}|${artifact.configHash}|${contexts.length}|${signature}`
+}
+
 export function trainedCountsToMarkovTable(counts: Record<string, Record<string, number>>): MarkovTable {
   const table: MarkovTable = new Map()
   for (const context of Object.keys(counts).sort()) {
@@ -18,7 +40,7 @@ export function trainedCountsToMarkovTable(counts: Record<string, Record<string,
 }
 
 export function getTrainedMarkovTable(artifact: TrainedMarkovArtifact): MarkovTable {
-  const cacheKey = `${artifact.id}|${artifact.configHash}|${Object.keys(artifact.counts).length}`
+  const cacheKey = trainedArtifactCacheKey(artifact)
   let table = trainedTableCache.get(cacheKey)
   if (!table) {
     table = trainedCountsToMarkovTable(artifact.counts)

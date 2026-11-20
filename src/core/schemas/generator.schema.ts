@@ -39,8 +39,17 @@ export type ArpOctaveMode = z.infer<typeof ArpOctaveModeEnum>
 export const ArpPitchSourceEnum = z.enum(['pitch-classes', 'chord-voicing'])
 export type ArpPitchSource = z.infer<typeof ArpPitchSourceEnum>
 
+/**
+ * Explicit offline-model selection for melody generation. 'auto' keeps the
+ * historical role pairing (bass presets use the bass table), while a pinned
+ * role always loads that table and 'synthetic' uses the built-in scale model.
+ */
+export const MelodyModelChoiceEnum = z.enum(['auto', 'melody', 'bass', 'synthetic'])
+export type MelodyModelChoice = z.infer<typeof MelodyModelChoiceEnum>
+
 export const GeneratorParamsSchema = z
   .object({
+    melodyModel: MelodyModelChoiceEnum.default(DEFAULT_GENERATOR_PARAMS.melodyModel),
     minOctave: z.number().int().min(1).max(7).default(DEFAULT_GENERATOR_PARAMS.minOctave),
     maxOctave: z.number().int().min(1).max(7).default(DEFAULT_GENERATOR_PARAMS.maxOctave),
     motif: MotifPatternEnum.default(DEFAULT_GENERATOR_PARAMS.motif),

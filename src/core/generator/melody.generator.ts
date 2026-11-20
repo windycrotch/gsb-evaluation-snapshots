@@ -12,7 +12,8 @@ import { getPentatonicEquivalent, midiToPitch, pitchToMidi, snapPitchToScale } f
 import { getActiveChordNotes } from './chord.lookup'
 import { buildCandidatePool, evaluateAndPickCandidate, type CandidateNote, type HeuristicContext } from './heuristics'
 import { buildMarkovTable, generateScaleTrainingSequences, type MarkovTable } from './markov.engine'
-import { getTrainedMarkovTable, makeTonicRelativeEncoder, type PitchClassEncoder } from './trained-markov'
+import { makeTonicRelativeEncoder, type PitchClassEncoder } from './trained-markov'
+import { resolveTrainedTable } from './melody-model'
 import { applyCallAndResponse } from './call-response'
 import { planContourFrames } from './contour-plan'
 import { applyMotifStructure } from './motifs'
@@ -34,8 +35,12 @@ export interface MelodyGeneratorOptions {
   rng?: () => number
   rangeStartStep?: number
   rangeEndStep?: number
-  /** Offline-trained model data (already loaded and validated by the caller).
-   * When present it replaces the synthetic scale model as the Markov prior. */
+  /**
+   * Offline-trained model data (already loaded and validated by the caller).
+   * When present it is the ONLY Markov prior used for pitch selection. When
+   * omitted/null the built-in synthetic scale model is used — callers decide
+   * explicitly, the engine never substitutes one for the other mid-run.
+   */
   trainedModel?: TrainedMarkovArtifact | null
 }
 
@@ -101,16 +106,26 @@ export function generateMelody(options: MelodyGeneratorOptions): AppNote[] {
 
   const effectiveScale = generator.pentatonicMode ? getPentatonicEquivalent(project.scale) : project.scale
 
-  // 2. Resolve the Markov prior: the offline-trained artifact wins when the
-  // caller supplied one; otherwise the synthetic scale model is the fallback.
+  // 2. Resolve the Markov prior. The two sources are mutually exclusive:
+  // an offline-trained artifact is used verbatim (an unusable table is a hard
+  // error, never a silent swap), and only an explicit null/omission selects
+  // the built-in synthetic scale model.
   const markovOrder = generator.markovOrder ?? 2
   const trainedModel = options.trainedModel ?? null
-  const markovTable = trainedModel
-    ? getTrainedMarkovTable(trainedModel)
-    : getOrBuildMarkovTable(project.key, effectiveScale, markovOrder)
-  // Trained symbols are tonic-relative chroma offsets, so lookups project the
-  // spelled pitch classes of pool/history into that rotation-invariant space.
-  const markovSymbolEncoder: PitchClassEncoder | undefined = trainedModel ? makeTonicRelativeEncoder(rootPc) : undefined
+  let markovTable: MarkovTable
+  let markovSymbolEncoder: PitchClassEncoder | undefined
+  if (trainedModel) {
+    const trainedTable = resolveTrainedTable(trainedModel)
+    if (!trainedTable) {
+      throw new Error(`Trained model '${trainedModel.id}' has no usable transition table`)
+    }
+    markovTable = trainedTable
+    // Trained symbols are tonic-relative chroma offsets, so lookups project the
+    // spelled pitch classes of pool/history into that rotation-invariant space.
+    markovSymbolEncoder = makeTonicRelativeEncoder(rootPc)
+  } else {
+    markovTable = getOrBuildMarkovTable(project.key, effectiveScale, markovOrder)
+  }
 
   // 3. Sequential pitch selection via Candidate Pool & Heuristics Softmax
   const rawNotes: AppNote[] = []

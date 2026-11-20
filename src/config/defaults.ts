@@ -78,9 +78,18 @@ export const APP_METADATA = {
 } as const
 
 /**
+ * Explicit melody model choices.
+ * - 'auto': role derived from the active rhythm preset (bass presets -> bass table, everything else -> melody table)
+ * - 'melody' / 'bass': pinned offline-trained Markov table
+ * - 'synthetic': built-in scale-derived Markov table (no offline artifact involved)
+ */
+export const DEFAULT_MELODY_MODEL_CHOICE = 'auto' as const
+
+/**
  * Standard generator parameters used when resetting or initializing the generator.
  */
 export const DEFAULT_GENERATOR_PARAMS = {
+  melodyModel: DEFAULT_MELODY_MODEL_CHOICE,
   minOctave: 4,
   maxOctave: 4,
   motif: 'FREE',

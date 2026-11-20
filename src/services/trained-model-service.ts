@@ -46,20 +46,27 @@ let indexPromise: Promise<TrainedModelIndex | null> | null = null
 const artifactCache = new Map<string, Promise<TrainedMarkovArtifact | null>>()
 
 export function loadTrainedModelIndex(): Promise<TrainedModelIndex | null> {
-  if (!indexPromise) {
-    indexPromise = (async () => {
-      const loader = getLoader('index.json')
-      if (!loader) return null
-      try {
-        const raw = await loader()
-        const parsed = TrainedModelIndexSchema.safeParse(unwrapModule(raw))
-        return parsed.success ? parsed.data : null
-      } catch {
-        return null
-      }
-    })()
-  }
-  return indexPromise
+  if (indexPromise) return indexPromise
+  // A failed/null index load is evicted on settle, otherwise a transient
+  // failure would permanently strand every later generation in error state.
+  const pending = (async () => {
+    const loader = getLoader('index.json')
+    if (!loader) return null
+    try {
+      const raw = await loader()
+      const parsed = TrainedModelIndexSchema.safeParse(unwrapModule(raw))
+      return parsed.success ? parsed.data : null
+    } catch {
+      return null
+    }
+  })()
+  indexPromise = pending
+  void pending.then((index) => {
+    if (!index && indexPromise === pending) {
+      indexPromise = null
+    }
+  })
+  return pending
 }
 
 export async function loadTrainedModel(role: TrainedRole = 'melody'): Promise<TrainedMarkovArtifact | null> {
@@ -70,28 +77,62 @@ export async function loadTrainedModel(role: TrainedRole = 'melody'): Promise<Tr
   return loadTrainedArtifact(entry)
 }
 
+/**
+ * Loads the artifact for an explicit model id taken from the model index.
+ * Returns null when the id is unknown, the role does not match the index
+ * entry, or the artifact fails to load/validate — callers must treat null as
+ * a hard failure rather than substituting another table.
+ */
+export async function loadTrainedModelById(modelId: string, role: TrainedRole): Promise<TrainedMarkovArtifact | null> {
+  const index = await loadTrainedModelIndex()
+  if (!index) return null
+  const entry = index.models.find((candidate) => candidate.id === modelId)
+  if (!entry || entry.role !== role) return null
+  return loadTrainedArtifact(entry)
+}
+
+/**
+ * Loads the first indexed entry for a role. Unlike loadTrainedModel this does
+ * not apply style/richness selection; the melody panel pins concrete roles.
+ */
+export async function loadTrainedModelForRole(role: TrainedRole): Promise<TrainedMarkovArtifact | null> {
+  const index = await loadTrainedModelIndex()
+  if (!index) return null
+  const entry = index.models.find((candidate) => candidate.role === role)
+  if (!entry) return null
+  return loadTrainedArtifact(entry)
+}
+
 function loadTrainedArtifact(entry: TrainedModelIndexEntry): Promise<TrainedMarkovArtifact | null> {
   const cacheKey = `${entry.file}@${entry.id}`
-  let pending = artifactCache.get(cacheKey)
-  if (!pending) {
-    pending = (async () => {
-      const loader = getLoader(entry.file)
-      if (!loader) return null
-      try {
-        const raw = await loader()
-        const parsed = TrainedMarkovArtifactSchema.safeParse(unwrapModule(raw))
-        if (!parsed.success) return null
-        const artifact = parsed.data
-        if (artifact.id !== entry.id || artifact.role !== entry.role || artifact.style !== entry.style) {
-          return null
-        }
-        return artifact
-      } catch {
+  const cached = artifactCache.get(cacheKey)
+  if (cached) return cached
+  // Failures must not poison the cache: a rejected or null resolution is
+  // evicted immediately so the next generation retries the loader instead of
+  // replaying a stale failure. The service's contract resolves failures to
+  // null; the composable layer distinguishes load failures from empty tables.
+  const pending = (async (): Promise<TrainedMarkovArtifact | null> => {
+    const loader = getLoader(entry.file)
+    if (!loader) return null
+    try {
+      const raw = await loader()
+      const parsed = TrainedMarkovArtifactSchema.safeParse(unwrapModule(raw))
+      if (!parsed.success) return null
+      const artifact = parsed.data
+      if (artifact.id !== entry.id || artifact.role !== entry.role || artifact.style !== entry.style) {
         return null
       }
-    })()
-    artifactCache.set(cacheKey, pending)
-  }
+      return artifact
+    } catch {
+      return null
+    }
+  })()
+  artifactCache.set(cacheKey, pending)
+  void pending.then((artifact) => {
+    if (!artifact && artifactCache.get(cacheKey) === pending) {
+      artifactCache.delete(cacheKey)
+    }
+  })
   return pending
 }
 

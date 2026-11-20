@@ -22,6 +22,7 @@
     <!-- Panel Content: Modular Collapsible Rack Stack -->
     <div class="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-2">
       <RhythmModule class="shrink-0" />
+      <ModelModule class="shrink-0" />
       <MotifModule class="shrink-0" />
       <ContourModule class="shrink-0" />
       <VariationModule class="shrink-0" />
@@ -35,6 +36,7 @@
   import { ChevronsDownUp, ChevronsUpDown, Sparkles } from '@lucide/vue'
   import DawIconButton from '@/components/common/DawIconButton.vue'
   import ContourModule from '@/components/generator/melody/ContourModule.vue'
+  import ModelModule from '@/components/generator/melody/ModelModule.vue'
   import MotifModule from '@/components/generator/melody/MotifModule.vue'
   import RhythmModule from '@/components/generator/melody/RhythmModule.vue'
   import VariationModule from '@/components/generator/melody/VariationModule.vue'

@@ -49,7 +49,7 @@ export type {
 
 export const UI_PREFERENCES_VERSION = 2
 
-export const GENERATOR_PANEL_MODULE_KEYS = ['rhythm', 'motif', 'contour', 'variation', 'takes'] as const
+export const GENERATOR_PANEL_MODULE_KEYS = ['rhythm', 'model', 'motif', 'contour', 'variation', 'takes'] as const
 
 export const EXPRESSION_PANEL_MODULE_KEYS = ['pitch', 'harmony', 'feel', 'analysis'] as const
 
@@ -193,6 +193,7 @@ export const MIN_ROLL_VIEWPORT_HEIGHT = DEFAULT_UI_DIMENSIONS.minRollViewportHei
 
 export const DEFAULT_MODULE_LAYOUT: Readonly<Record<ModuleKey, boolean>> = {
   rhythm: true,
+  model: true,
   motif: false,
   contour: false,
   variation: false,

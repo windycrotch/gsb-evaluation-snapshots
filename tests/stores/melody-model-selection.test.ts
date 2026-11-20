@@ -21,7 +21,10 @@ function musicalNotes(notes: AppNote[]) {
   return notes.map(({ id: _id, ...note }) => note)
 }
 
-function expectedNotes(model: TrainedMarkovArtifact, generator: GeneratorParams = useMelodyStore().generatorParams) {
+function expectedNotes(
+  model: TrainedMarkovArtifact | null,
+  generator: GeneratorParams = useMelodyStore().generatorParams
+) {
   const project = useProjectStore()
   return musicalNotes(
     generateMelody({
@@ -67,24 +70,68 @@ describe('melody generation model selection', () => {
     if (!bass || !melody) throw new Error('Shipped bass and melody models must be available')
     bassModel = bass
     melodyModel = melody
+    vi.spyOn(modelService, 'loadTrainedModelForRole').mockImplementation(async (role) =>
+      role === 'bass' ? bassModel : melodyModel
+    )
   })
 
   afterEach(() => vi.restoreAllMocks())
 
-  it.each([
-    ['ebm-machine-pulse', 'bass'],
-    ['arpeggio-flow', 'melody'],
-    ['tresillo', 'melody']
-  ] as const)('generates %s pitches with the %s model', async (presetId, role) => {
+  it('auto mode pairs bass presets with the bass table and other presets with the melody table', async () => {
     const store = useMelodyStore()
-    store.setRhythmPreset(presetId)
-    const expected = expectedNotes(role === 'bass' ? bassModel : melodyModel)
-    const other = expectedNotes(role === 'bass' ? melodyModel : bassModel)
-    expect(expected).not.toEqual(other)
+    expect(store.generatorParams.melodyModel).toBe('auto')
+
+    store.setRhythmPreset('ebm-machine-pulse')
+    const expectedBass = expectedNotes(bassModel)
+    expect(expectedBass).not.toEqual(expectedNotes(melodyModel))
+
+    await store.generate()
+    expect(musicalNotes(store.notes)).toEqual(expectedBass)
+    expect(useTakesStore().takes.at(-1)?.context.modelId).toBe(bassModel.id)
+
+    store.setRhythmPreset('arpeggio-flow')
+    await store.generate()
+    expect(musicalNotes(store.notes)).toEqual(expectedNotes(melodyModel))
+    // The locked seed dedupes takes, so the latest take remains the bass one;
+    // the committed notes themselves are the melody-model output.
+    expect(useTakesStore().takes).toHaveLength(1)
+  })
+
+  it('a pinned melody model overrides a bass preset entirely', async () => {
+    const store = useMelodyStore()
+    store.setRhythmPreset('ebm-machine-pulse')
+    store.setMelodyModel('melody')
+    const expected = expectedNotes(melodyModel)
 
     await store.generate()
 
     expect(musicalNotes(store.notes)).toEqual(expected)
+    expect(modelService.loadTrainedModelForRole).toHaveBeenCalledWith('melody')
+  })
+
+  it('a pinned bass model overrides a melody preset entirely', async () => {
+    const store = useMelodyStore()
+    store.setRhythmPreset('arpeggio-flow')
+    store.setMelodyModel('bass')
+    const expected = expectedNotes(bassModel)
+
+    await store.generate()
+
+    expect(musicalNotes(store.notes)).toEqual(expected)
+    expect(modelService.loadTrainedModelForRole).toHaveBeenCalledWith('bass')
+  })
+
+  it('synthetic mode reproduces the built-in scale model without loading an artifact', async () => {
+    const store = useMelodyStore()
+    store.setRhythmPreset('arpeggio-flow')
+    store.setMelodyModel('synthetic')
+    const expected = expectedNotes(null)
+
+    await store.generate()
+
+    expect(musicalNotes(store.notes)).toEqual(expected)
+    expect(modelService.loadTrainedModelForRole).not.toHaveBeenCalled()
+    expect(useTakesStore().takes[0].context.modelId).toBe('synthetic:scale')
   })
 
   it('uses the model for the randomized preset rather than the previously selected preset', async () => {
@@ -100,7 +147,7 @@ describe('melody generation model selection', () => {
     expect(musicalNotes(store.notes)).toEqual(expected)
   })
 
-  it.each(['custom', 'euclidean'] as const)('ignores a saved bass preset in %s mode', async (mode) => {
+  it.each(['custom', 'euclidean'] as const)('ignores a saved bass preset in %s mode under auto', async (mode) => {
     const store = useMelodyStore()
     store.setRhythmPreset('ebm-machine-pulse')
     useRhythmStore().insert(0, 4, 92)
@@ -114,14 +161,17 @@ describe('melody generation model selection', () => {
     expect(musicalNotes(store.notes)).toEqual(expected)
   })
 
-  it('keeps a pending bass request and its Take consistent when settings change during loading', async () => {
+  it('keeps a pending request and its Take consistent when settings change during loading', async () => {
+    vi.restoreAllMocks()
     const store = useMelodyStore()
     const project = useProjectStore()
     store.setRhythmPreset('ebm-machine-pulse')
     const generator = { ...store.generatorParams }
     const expected = expectedNotes(bassModel)
     let resolveModel!: (model: TrainedMarkovArtifact) => void
-    vi.spyOn(modelService, 'loadTrainedModel').mockReturnValueOnce(
+    const realIndex = await modelService.loadTrainedModelIndex()
+    vi.spyOn(modelService, 'loadTrainedModelIndex').mockResolvedValue(realIndex)
+    vi.spyOn(modelService, 'loadTrainedModelForRole').mockReturnValue(
       new Promise((resolve) => {
         resolveModel = resolve
       })

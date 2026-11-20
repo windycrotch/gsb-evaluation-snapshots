@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   loadTrainedModel,
+  loadTrainedModelById,
+  loadTrainedModelForRole,
   loadTrainedModelIndex,
   resetTrainedModelCache,
   setTrainedModelLoadersForTesting
@@ -139,6 +141,62 @@ describe('trained-model-service', () => {
     expect(await loadTrainedModel('bass')).toBeNull()
   })
 
+  it('evicts a failed artifact load so a later retry re-invokes the loader', async () => {
+    const artifactLoader = vi.fn().mockRejectedValueOnce(new Error('disk read failed')).mockResolvedValueOnce(ARTIFACT)
+
+    setTrainedModelLoadersForTesting({
+      'index.json': async () => makeIndex(),
+      'melodymate-markov-melody-default.json': artifactLoader
+    })
+
+    expect(await loadTrainedModel('melody')).toBeNull()
+    const retried = await loadTrainedModel('melody')
+    expect(retried?.id).toBe('melody:default')
+    expect(artifactLoader).toHaveBeenCalledTimes(2)
+  })
+
+  it('evicts a null validation result and retries the loader on the next request', async () => {
+    const broken = { ...ARTIFACT, counts: { '': { '13': 1 } } }
+    const artifactLoader = vi.fn().mockResolvedValueOnce(broken).mockResolvedValueOnce(ARTIFACT)
+
+    setTrainedModelLoadersForTesting({
+      'index.json': async () => makeIndex(),
+      'melodymate-markov-melody-default.json': artifactLoader
+    })
+
+    expect(await loadTrainedModel('melody')).toBeNull()
+    expect((await loadTrainedModel('melody'))?.id).toBe('melody:default')
+    expect(artifactLoader).toHaveBeenCalledTimes(2)
+  })
+
+  it('retries the index loader after a null index instead of caching the failure', async () => {
+    const indexLoader = vi.fn().mockResolvedValueOnce({ kind: 'invalid-schema' }).mockResolvedValueOnce(makeIndex())
+    const artifactLoader = vi.fn().mockResolvedValue(ARTIFACT)
+
+    setTrainedModelLoadersForTesting({
+      'index.json': indexLoader,
+      'melodymate-markov-melody-default.json': artifactLoader
+    })
+
+    expect(await loadTrainedModelIndex()).toBeNull()
+    expect((await loadTrainedModel('melody'))?.id).toBe('melody:default')
+    expect(indexLoader).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps a successful artifact cached across calls', async () => {
+    const indexLoader = vi.fn(async () => makeIndex())
+    const artifactLoader = vi.fn(async () => ARTIFACT)
+
+    setTrainedModelLoadersForTesting({
+      'index.json': indexLoader,
+      'melodymate-markov-melody-default.json': artifactLoader
+    })
+
+    await loadTrainedModel('melody')
+    await loadTrainedModel('melody')
+    expect(artifactLoader).toHaveBeenCalledTimes(1)
+  })
+
   it('loads each role from its own indexed artifact', async () => {
     const arp = { ...ARTIFACT, id: 'arp:default', role: 'arp' }
     const bass = { ...ARTIFACT, id: 'bass:default', role: 'bass' }
@@ -184,5 +242,26 @@ describe('trained-model-service', () => {
     expect((await loadTrainedModel('arp'))?.id).toBe(arp.id)
     expect((await loadTrainedModel('bass'))?.id).toBe(bass.id)
     expect((await loadTrainedModel('melody'))?.id).toBe(ARTIFACT.id)
+  })
+
+  it('loadTrainedModelForRole resolves the first indexed entry for a role', async () => {
+    setTrainedModelLoadersForTesting({
+      'index.json': async () => makeIndex(),
+      'melodymate-markov-melody-default.json': async () => ARTIFACT
+    })
+
+    expect((await loadTrainedModelForRole('melody'))?.id).toBe('melody:default')
+    expect(await loadTrainedModelForRole('bass')).toBeNull()
+  })
+
+  it('loadTrainedModelById rejects unknown ids and role mismatches without substituting another table', async () => {
+    setTrainedModelLoadersForTesting({
+      'index.json': async () => makeIndex(),
+      'melodymate-markov-melody-default.json': async () => ARTIFACT
+    })
+
+    expect((await loadTrainedModelById('melody:default', 'melody'))?.id).toBe('melody:default')
+    expect(await loadTrainedModelById('melody:default', 'bass')).toBeNull()
+    expect(await loadTrainedModelById('does:not-exist', 'melody')).toBeNull()
   })
 })

@@ -22,6 +22,7 @@ import {
   transposeNotesPitch
 } from '../core/pianoroll/note-editing'
 import { useMelodyGeneration } from '../composables/useMelodyGeneration'
+import { useMelodyModel } from '../composables/useMelodyModel'
 import { useArpGeneration } from '../composables/useArpGeneration'
 import { useArpAudition } from '../composables/useArpAudition'
 import { useMelodyHistory } from '../composables/useMelodyHistory'
@@ -265,6 +266,10 @@ export const useMelodyStore = defineStore('melody', () => {
     setGeneratorParams({ rhythmPresetId: id })
   }
 
+  function setMelodyModel(melodyModelChoice: GeneratorParams['melodyModel']): void {
+    setGeneratorParams({ melodyModel: melodyModelChoice })
+  }
+
   function toggleRandomRhythmPreset(): void {
     setGeneratorParams({
       randomRhythmPreset: !generatorParams.value.randomRhythmPreset
@@ -428,7 +433,14 @@ export const useMelodyStore = defineStore('melody', () => {
     }
   }
 
-  const { generate } = useMelodyGeneration(generatorParams, isGenerating, setRhythmPreset, replaceNotesInScope)
+  const melodyModel = useMelodyModel(computed(() => generatorParams.value.melodyModel))
+  const { generate } = useMelodyGeneration(
+    generatorParams,
+    isGenerating,
+    setRhythmPreset,
+    replaceNotesInScope,
+    melodyModel
+  )
   const arp = useArpGeneration(generatorParams, isGenerating, setGeneratorParams, replaceNotesInScope, () =>
     arpAudition.stopArpAudition()
   )
@@ -450,6 +462,12 @@ export const useMelodyStore = defineStore('melody', () => {
     canUndo,
     canRedo,
     generate,
+    setMelodyModel,
+    melodyModelStatus: melodyModel.modelStatus,
+    melodyModelStatusMessage: melodyModel.modelStatusMessage,
+    activeMelodyModelId: melodyModel.activeModelId,
+    hasMelodyModelError: melodyModel.hasModelError,
+    isMelodyModelLoading: melodyModel.isModelLoading,
     ...arp,
     ...arpAudition,
     addNote,

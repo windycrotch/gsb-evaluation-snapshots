@@ -11,7 +11,10 @@ export const TakeContextSchema = z.object({
   bpm: z.number().min(40).max(280),
   bars: z.number().int().min(PROJECT_BAR_BOUNDS.min).max(PROJECT_BAR_BOUNDS.max),
   rangeStartStep: z.number().min(0).optional(),
-  rangeEndStep: z.number().positive().optional()
+  rangeEndStep: z.number().positive().optional(),
+  // Identity of the Markov model that produced the take: an offline artifact
+  // id or 'synthetic:scale'. Optional for backward-compatible take history.
+  modelId: z.string().min(1).optional()
 })
 
 export const TakeSnapshotSchema = z.object({

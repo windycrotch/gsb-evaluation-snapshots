@@ -271,26 +271,36 @@ describe('useMelodyStore', () => {
     }
   })
 
-  it('preserves a locked seed when generation is blocked or fails', async () => {
+  it('preserves a locked seed when generation is blocked or the model fails to load', async () => {
     const takes = useTakesStore()
     takes.currentSeed = 321
     takes.setSeedLocked(true)
     const randomSeed = vi.spyOn(seedHelpers, 'randomSeed')
-    const loadModel = vi.spyOn(trainedModelService, 'loadTrainedModel')
+    const loadModel = vi.spyOn(trainedModelService, 'loadTrainedModelForRole')
     try {
       const melody = useMelodyStore()
+      const before = [...melody.notes]
       melody.setRhythmMode('custom')
       await melody.generate()
       expect(takes.currentSeed).toBe(321)
 
+      // A rejected load surfaces as a visible failure, never as a throw to the
+      // caller and never as a synthetic-model substitution.
       melody.setRhythmMode('preset')
       loadModel.mockRejectedValueOnce(new Error('model unavailable'))
-      await expect(melody.generate()).rejects.toThrow('model unavailable')
+      await melody.generate()
+      expect(melody.hasMelodyModelError).toBe(true)
+      expect(melody.notes).toEqual(before)
+      expect(takes.takes).toEqual([])
       expect(takes.currentSeed).toBe(321)
 
+      // A null (empty/missing) load is treated the same way: no notes, no take.
       loadModel.mockResolvedValueOnce(null)
       await melody.generate()
-      expect(takes.takes[0].seed).toBe(321)
+      expect(melody.hasMelodyModelError).toBe(true)
+      expect(melody.notes).toEqual(before)
+      expect(takes.takes).toEqual([])
+      expect(takes.currentSeed).toBe(321)
       expect(randomSeed).not.toHaveBeenCalled()
     } finally {
       randomSeed.mockRestore()

@@ -30,7 +30,7 @@ export type StudioDock = 'chord' | 'rhythm' | 'arp' | 'sound' | null
 export type SoundDockView = 'sound' | 'midi'
 export type HistoryContext = 'piano' | 'chord' | 'rhythm'
 
-export type GeneratorModuleKey = 'rhythm' | 'motif' | 'contour' | 'variation' | 'takes'
+export type GeneratorModuleKey = 'rhythm' | 'model' | 'motif' | 'contour' | 'variation' | 'takes'
 export type ExpressionModuleKey = 'pitch' | 'harmony' | 'feel' | 'analysis'
 export type ModuleKey = GeneratorModuleKey | ExpressionModuleKey
 export type ModuleOpenStates = Record<string, boolean>
