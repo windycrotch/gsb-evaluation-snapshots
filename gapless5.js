@@ -45,6 +45,9 @@ function Gapless5Source(parentPlayer, parentLog, inAudioPath) {
   this.trackName = inAudioPath.replace(/^.*[\\/]/, '').split('.')[0];
   const player = parentPlayer;
   const log = parentLog;
+  // back-reference to the owning player (also used by test harnesses that
+  // stub source loading without a real audio backend)
+  this.player = parentPlayer;
 
   // HTML5 Audio
   let audio = null;
@@ -757,50 +760,100 @@ function Gapless5FileList(parentPlayer, parentLog, inShuffle, inLoadLimit = -1, 
   this.getPlaylistIndex = (index) => this.shuffleMode ? this.shuffledIndices.indexOf(index) : index;
 
   // inclusive start, exclusive end
-  const generateIntRange = (first, last) => Array.from({ length: (1 + last - first) }, (_v, k) => k + first);
+  const generateIntRange = (first, last) => Array.from({ length: (last - first) }, (_v, k) => k + first);
 
   // returns set of actual indices (not shuffled)
   this.loadableTracks = () => {
     if (this.loadLimit === -1) {
       return new Set(generateIntRange(0, this.sources.length));
     }
-    // loadable tracks are a range where size=loadLimit, centered around current track
-    const startTrack = Math.round(Math.max(0, this.trackNumber - ((this.loadLimit - 1) / 2)));
-    const endTrack = Math.round(Math.min(this.sources.length, this.trackNumber + (this.loadLimit / 2)));
+    // loadable tracks form a window of exactly min(loadLimit, length)
+    // slots, centered on the current track and clamped to the list bounds.
+    // The window must always cover the current track (even after rapid
+    // navigation) and must never exceed the configured quota.
+    const windowSize = Math.min(this.loadLimit, this.sources.length);
+    let startTrack = Math.floor(this.trackNumber - ((windowSize - 1) / 2));
+    startTrack = Math.max(0, Math.min(startTrack, this.sources.length - windowSize));
+    const endTrack = startTrack + windowSize;
     const loadableIndices = new Set(generateIntRange(startTrack, endTrack));
     if (player.queuedTrack !== null) {
-      loadableIndices.add(this.indexFromTrack(player.queuedTrack));
+      const queuedIndex = this.indexFromTrack(player.queuedTrack);
+      if (queuedIndex >= 0 && queuedIndex < this.sources.length) {
+        loadableIndices.add(queuedIndex);
+      }
     }
-    if (player.fadingTrack !== null) {
-      loadableIndices.add(this.indexFromTrack(player.fadingTrack));
-    }
+    // NOTE: the fading-out track is intentionally excluded here.  It lives
+    // outside the load quota for its whole lifetime (see finalizeFadingTrack
+    // and updateLoading), so it neither takes a slot nor gets resurrected by
+    // a later load reconciliation.
     log.debug(`Loadable indices: ${JSON.stringify([ ...loadableIndices ])}`);
     return loadableIndices;
   };
 
   this.updateLoading = () => {
+    if (this.sources.length === 0) {
+      return;
+    }
     const loadableSet = this.loadableTracks();
 
-    // make sure to load current track before surrounding tracks
-    const curSourceIndex = this.getPlaylistIndex(this.trackNumber);
-    const curSource = this.sources[curSourceIndex];
-    if (loadableSet.has(curSourceIndex) && (curSource.getState() === Gapless5State.None)) {
-      log.debug(`Loading track ${curSourceIndex}: ${curSource.audioPath}`);
-      curSource.load();
-    } else {
-      for (const [ index, source ] of this.sources.entries()) {
-        const playlistIndex = this.getPlaylistIndex(index);
-        const shouldLoad = loadableSet.has(playlistIndex);
-        const hasLoaded = source.getState() !== Gapless5State.None;
-        if (shouldLoad !== hasLoaded) {
-          if (shouldLoad) {
-            log.debug(`Loading track ${playlistIndex}: ${source.audioPath}`);
-            source.load();
-          } else {
-            source.unload();
-            log.debug(`Unloaded track ${playlistIndex}: ${source.audioPath}`);
-          }
+    // The fading-out track lives outside the quota window.  It must not be
+    // loaded here, and it must not be unloaded either until its fade timer
+    // finalizes it (otherwise later reconciliations would resurrect it).
+    const fadingSource = player.getFadingSource ? player.getFadingSource() : null;
+    const curPlaylistIndex = this.getPlaylistIndex(this.trackNumber);
+    const curSource = this.currentSource();
+
+    // Index (in play order) of the queued track, if still valid.  A track
+    // that becomes current or queued is allowed to recover from a previous
+    // fade-release.
+    let queuedPlaylistIndex = -1;
+    if (player.queuedTrack !== null) {
+      const queuedReal = this.indexFromTrack(player.queuedTrack);
+      if (queuedReal >= 0 && queuedReal < this.sources.length) {
+        queuedPlaylistIndex = this.getPlaylistIndex(queuedReal);
+      }
+    }
+
+    const reconcileSource = (index, source) => {
+      if (source === fadingSource) {
+        return; // managed exclusively by the crossfade lifecycle
+      }
+      const playlistIndex = this.getPlaylistIndex(index);
+      const shouldLoad = loadableSet.has(playlistIndex);
+      const hasLoaded = source.getState() !== Gapless5State.None;
+      if (shouldLoad === hasLoaded) {
+        return;
+      }
+      if (shouldLoad) {
+        // A track released by a finished crossfade stays unloaded unless it
+        // is now the current or the queued track (no resurrection).
+        const isFadeReleased = player.isFadeReleased && player.isFadeReleased(source);
+        const isRevivable = playlistIndex === curPlaylistIndex ||
+          playlistIndex === queuedPlaylistIndex;
+        if (isFadeReleased && !isRevivable) {
+          return;
         }
+        if (isRevivable && player.clearFadeReleased) {
+          player.clearFadeReleased(source);
+        }
+        log.debug(`Loading track ${playlistIndex}: ${source.audioPath}`);
+        source.load();
+      } else {
+        source.unload();
+        log.debug(`Unloaded track ${playlistIndex}: ${source.audioPath}`);
+      }
+    };
+
+    // Reconcile every source in a single pass so rapid navigation cannot
+    // leave skipped intermediate tracks occupying slots.  The current track
+    // is reconciled first to guarantee the quota window always covers it.
+    if (curSource) {
+      const curRealIndex = this.sources.indexOf(curSource);
+      reconcileSource(curRealIndex, curSource);
+    }
+    for (const [ index, source ] of this.sources.entries()) {
+      if (source !== curSource) {
+        reconcileSource(index, source);
       }
     }
   };
@@ -947,6 +1000,15 @@ function Gapless5(options = {}, deprecated = {}) { // eslint-disable-line no-unu
   this.exclusive = options.exclusive || false;
   this.queuedTrack = null;
   this.fadingTrack = null;
+  // direct reference + timer for the crossfade lifecycle (see beginFade())
+  let fadingSourceRef = null;
+  let fadeTimer = null;
+  // sources released by a finished crossfade.  They stay unloaded and must
+  // not be resurrected by load reconciliation until they become the current
+  // or queued track again.
+  const fadeReleasedSources = new Set();
+  this.isFadeReleased = (source) => fadeReleasedSources.has(source);
+  this.clearFadeReleased = (source) => fadeReleasedSources.delete(source);
   this.volume = options.volume !== undefined ? options.volume : 1.0;
   this.crossfade = options.crossfade || 0;
   this.crossfadeShape = options.crossfadeShape || CrossfadeShape.None;
@@ -1281,17 +1343,7 @@ function Gapless5(options = {}, deprecated = {}) { // eslint-disable-line no-unu
             this.prev(null, false);
           }
         } else {
-          const tryStopFadingTrack = () => {
-            const fadingSource = getFadingSource();
-            if (fadingSource) {
-              fadingSource.stop(true);
-            }
-            this.fadingTrack = null;
-          };
-          this.fadingTrack = this.getIndex();
-          window.setTimeout(() => {
-            tryStopFadingTrack();
-          }, this.crossfade);
+          beginFade();
           this.next(null, true, true);
         }
       } else {
@@ -1380,12 +1432,29 @@ function Gapless5(options = {}, deprecated = {}) { // eslint-disable-line no-unu
     }
     const deletedPath = curSource.audioPath;
     let wasPlaying = false;
-
-    if (curSource.state === Gapless5State.Loading) {
-      curSource.unload();
-    } else if (curSource.inPlayState(true)) {
+    if (curSource.inPlayState(true)) {
       wasPlaying = true;
-      curSource.stop();
+    }
+
+    // If the removed track is the one currently fading out, its lifecycle
+    // owner goes away with it — finalize the fade so nothing references it.
+    let alreadyUnloaded = false;
+    if (fadingSourceRef === curSource) {
+      finalizeFadingTrack();
+      // finalizeFadingTrack() already unloaded the source and fired onunload
+      alreadyUnloaded = curSource.getState() === Gapless5State.None;
+    }
+
+    // A queued track that gets removed must release its extra quota slot.
+    if (this.queuedTrack !== null && this.playlist.indexFromTrack(this.queuedTrack) === point) {
+      this.queuedTrack = null;
+    }
+
+    // Fully release the removed source (also stops playback and fires
+    // onunload) before it is spliced out of the playlist.
+    this.clearFadeReleased(curSource);
+    if (!alreadyUnloaded) {
+      curSource.unload();
     }
 
     this.playlist.remove(point);
@@ -1403,11 +1472,14 @@ function Gapless5(options = {}, deprecated = {}) { // eslint-disable-line no-unu
       if (removedCurrentAtTail) {
         if (this.loop) {
           this.playlist.trackNumber = 0;
-          this.playlist.updateLoading();
         } else {
           shouldResume = false;
         }
       }
+
+      // Make sure the new current track belongs to the loadable set and is
+      // actually loaded before we try to resume it.
+      this.playlist.updateLoading();
 
       const newSource = this.currentSource();
       this.onnext(deletedPath, newSource ? newSource.audioPath : '');
@@ -1429,6 +1501,9 @@ function Gapless5(options = {}, deprecated = {}) { // eslint-disable-line no-unu
   };
 
   this.removeAllTracks = (flushPlaylist = true) => {
+    finalizeFadingTrack();
+    fadeReleasedSources.clear();
+    this.queuedTrack = null;
     this.playlist.removeAllTracks(flushPlaylist);
     this.uiDirty = true;
   };
@@ -1499,6 +1574,12 @@ function Gapless5(options = {}, deprecated = {}) { // eslint-disable-line no-unu
       log.error(`Cannot queue missing track: ${pointOrPath}`);
     } else {
       this.queuedTrack = pointOrPath;
+      // queuing a previously fade-released track makes it loadable again
+      const { source: queuedSource } =
+        this.playlist.getSourceIndexed(this.playlist.indexFromTrack(pointOrPath));
+      if (queuedSource) {
+        this.clearFadeReleased(queuedSource);
+      }
       this.playlist.updateLoading();
     }
   };
@@ -1513,6 +1594,15 @@ function Gapless5(options = {}, deprecated = {}) { // eslint-disable-line no-unu
     if (!isValidIndex(this.playlist.indexFromTrack(pointOrPath))) {
       log.error(`Cannot go to missing track: ${pointOrPath}`);
     } else {
+      if (!crossfadeEnabled) {
+        // A manual/non-crossfade navigation ends any outstanding fade.
+        // Otherwise the old track would keep sounding and its stale index
+        // could later resolve to the wrong source after playlist mutations.
+        finalizeFadingTrack();
+      }
+      // a manual navigation supersedes any queued track; without this the
+      // queued path would keep a slot in the load window forever
+      this.queuedTrack = null;
       const newIndex = this.playlist.gotoTrack(pointOrPath, forcePlay, allowOverride, crossfadeEnabled);
       enableButton('prev', this.loop || (!this.singleMode && newIndex > 0));
       enableButton('next', this.loop || (!this.singleMode && newIndex < this.totalTracks() - 1));
@@ -1712,13 +1802,55 @@ function Gapless5(options = {}, deprecated = {}) { // eslint-disable-line no-unu
     }
   };
 
-  const getFadingSource = () => {
-    if (this.fadingTrack !== null) {
-      const { source: fadingSource } = this.playlist.getSourceIndexed(this.fadingTrack);
-      return fadingSource;
+  // Returns the source currently fading out, or null.  We hold a direct
+  // reference rather than re-indexing into the playlist, because track
+  // removals mid-fade would make a stored index point at the wrong source.
+  this.getFadingSource = () => fadingSourceRef;
+
+  // Stop and fully release the fading-out track.  Idempotent: safe to call
+  // when no fade is active, and safe for the fade timer to fire after the
+  // track was already finalized by navigation/removal.
+  const finalizeFadingTrack = () => {
+    const fadingSource = fadingSourceRef;
+    if (fadeTimer !== null) {
+      window.clearTimeout(fadeTimer);
+      fadeTimer = null;
     }
-    return null;
+    this.fadingTrack = null;
+    fadingSourceRef = null;
+    if (fadingSource) {
+      // stop + release: unload() also stops playback and fires onunload.
+      // Mark it so later load reconciliations don't resurrect it while it
+      // merely happens to sit inside the quota window.
+      fadeReleasedSources.add(fadingSource);
+      fadingSource.unload();
+    }
+    this.playlist.updateLoading();
   };
+  this.finalizeFadingTrack = finalizeFadingTrack;
+
+  // Move the current track into the fading-out state and schedule its
+  // release.  Any previously fading track is finalized first (it never gets
+  // resurrected or re-counted into the load quota).
+  const beginFade = () => {
+    if (fadingSourceRef) {
+      finalizeFadingTrack();
+    }
+    const source = this.currentSource();
+    if (!source) {
+      return;
+    }
+    fadingSourceRef = source;
+    this.fadingTrack = this.getIndex();
+    fadeTimer = window.setTimeout(() => {
+      // Only finalize if this timer still owns the fade.  A newer fade or a
+      // manual finalization will have already cleared the timer.
+      if (fadingSourceRef === source) {
+        finalizeFadingTrack();
+      }
+    }, this.crossfade);
+  };
+  this.beginFade = beginFade;
 
   const prevTick = {
     time: -1,
@@ -1733,7 +1865,7 @@ function Gapless5(options = {}, deprecated = {}) { // eslint-disable-line no-unu
       this.avgTickMS = (this.avgTickMS * 0.9) + (elapsedMS * 0.1);
     }
     prevTick.time = curTime;
-    const fadingSource = getFadingSource();
+    const fadingSource = this.getFadingSource();
     if (fadingSource) {
       fadingSource.tick(false);
     }
