@@ -55,6 +55,7 @@ class Scheduler:
         self._draw_requested = True  # Start with a draw in ondemand mode
         self._ready_for_present = None
         self._just_cancelled_a_frame = False
+        self._closed = False
         self.set_update_mode(update_mode, min_fps=min_fps, max_fps=max_fps)
 
         # Keep track of fps
@@ -76,6 +77,9 @@ class Scheduler:
             return canvas
 
     def set_update_mode(self, update_mode, *, min_fps=None, max_fps=None):
+        # A closed scheduler does not accept changes (it must not become active again).
+        if self._closed:
+            return
         update_mode = str(update_mode)
         if update_mode not in UpdateMode:
             raise ValueError(
@@ -95,6 +99,8 @@ class Scheduler:
             self._max_fps = max(1, float(max_fps))
 
     def set_enabled(self, enabled: bool):
+        if self._closed:
+            return
         enabled = bool(enabled)
         if enabled != self._enabled:
             self._enabled = enabled
@@ -104,7 +110,25 @@ class Scheduler:
     def request_draw(self):
         """Request a new draw to be done. Only affects the 'ondemand' mode."""
         # Just set the flag
-        self._draw_requested = True
+        if not self._closed:
+            self._draw_requested = True
+
+    def close(self):
+        """Stop this scheduler because its canvas is closed.
+
+        Closing is final: no more draws are scheduled, and a task that is
+        waiting for a draw or presentation to finish is released, so that it
+        can notice that the canvas is gone and stop. This can be called more
+        than once.
+        """
+        self._closed = True
+        self._enabled = False
+        self._draw_requested = False
+        self._just_cancelled_a_frame = False
+        # Release a pending wait, so the scheduler task can continue and break.
+        if self._ready_for_present is not None:
+            self._ready_for_present.set()
+            self._ready_for_present = None
 
     async def __scheduler_task(self):
         """The coro that represents the scheduling loop for a canvas."""

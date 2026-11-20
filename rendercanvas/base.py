@@ -364,6 +364,9 @@ class BaseRenderCanvas:
         # Not strictly necessary for normal use-cases, but this allows
         # the ._event to be an implementation detail to subclasses, and it
         # allows users to e.g. emulate events in tests.
+        # Closing a canvas is final: no events can be queued after that.
+        if self.__is_closed:
+            return
         return self._events.submit(event)
 
     add_event_handler.__doc__ = EventEmitter.add_handler.__doc__
@@ -373,6 +376,9 @@ class BaseRenderCanvas:
     # %% Scheduling and drawing
 
     def __maybe_emit_resize_event(self):
+        # A closed canvas does not emit events anymore.
+        if self.__is_closed:
+            return
         if self._size_info["changed"]:
             self._size_info["changed"] = False
             # Keep context up-to-date
@@ -398,12 +404,22 @@ class BaseRenderCanvas:
         Called from the scheduler.
         """
 
+        # Closing is final: no events are polled or dispatched anymore.
+        # This also covers a backend that keeps calling in after the canvas closed.
+        if self.__is_closed:
+            return
+
         # We don't want this to be called too often, because we want the
         # accumulative events to accumulate. Once per draw, and at max_fps
         # when there are no draws (in ondemand and manual mode).
 
         # Get events from the GUI into our event mechanism.
         self._rc_gui_poll()
+
+        # Polling the GUI may have closed the canvas (e.g. the user clicked the
+        # close button). In that case, stop right here.
+        if self.__is_closed:
+            return
 
         # If the canvas changed size, send event
         self.__maybe_emit_resize_event()
@@ -473,6 +489,9 @@ class BaseRenderCanvas:
                 function. If not given or None, the last set draw function is used.
 
         """
+        # Closing is final: a closed canvas does not accept new draws.
+        if self.__is_closed:
+            return
         if draw_function is not None:
             self._draw_frame = draw_function
         if self.__scheduler is not None:
@@ -489,13 +508,18 @@ class BaseRenderCanvas:
         this, consider using a timer. Nevertheless, sometimes you just want to force
         a draw right now.
         """
+        # Closing is final, so drawing a closed canvas is a no-op.
+        if self.__is_closed:
+            return
         if self.__is_drawing:
             raise RuntimeError("Cannot force a draw while drawing.")
         if self._present_to_screen:
             self._rc_force_paint()  # -> _time_to_paint() -> _draw_and_present()
         else:
             self._draw_and_present(force_sync=True)
-            self._rc_force_paint()  # May or may not work
+            # The draw may have closed the canvas; do not touch the backend then.
+            if not self.__is_closed:
+                self._rc_force_paint()  # May or may not work
 
     def _time_to_draw(self):
         """It's time to draw!
@@ -514,6 +538,13 @@ class BaseRenderCanvas:
 
             _draw_and_present() ->  ...  ->   finish_present()  ->  _rc_request_paint()
         """
+
+        # Closing is final. The backend may still call in after closure (e.g. a
+        # paint callback that was already scheduled), but we do nothing.
+        if self.__is_closed:
+            if self.__scheduler is not None:
+                self.__scheduler.on_cancel_draw()
+            return
 
         # This is an good time to process events, it's the moment that's closest to the actual draw
         # as possible, but it's not in the native's paint-event (which is a bad moment to process events).
@@ -542,6 +573,11 @@ class BaseRenderCanvas:
 
         Errors are logged to the "rendercanvas" logger.
         """
+        # A closed canvas must not paint, and must not touch its closed context.
+        if self.__is_closed:
+            if self.__scheduler is not None:
+                self.__scheduler.on_cancel_draw()
+            return
         if self._present_to_screen:
             self._draw_and_present(force_sync=True)
 
@@ -551,14 +587,21 @@ class BaseRenderCanvas:
         # Re-entrant drawing is problematic. Let's actively prevent it.
         if self.__is_drawing:
             return
+        # A closed canvas does not draw. Note that this is not necessarily
+        # preceded by a scheduler draw-request (e.g. force_draw on a closed canvas).
+        if self.__is_closed:
+            if self.__scheduler is not None:
+                self.__scheduler.on_cancel_draw()
+            return
         self.__is_drawing = True
 
         # Note that this method is responsible for notifying the scheduler for the draw getting canceled or done.
         # In other words, an early return should always be proceeded with a call to scheduler.on_cancel_draw(),
         # otherwise the drawing gets stuck. (The re-entrant logic is the one exception.)
 
+        scheduler = self.__scheduler  # May be None
+        draw_done = False
         try:
-            scheduler = self.__scheduler  # May be None
             context = self._canvas_context  # May be None
 
             # Let scheduler know that the draw is about to take place, resets the draw_requested flag.
@@ -576,8 +619,6 @@ class BaseRenderCanvas:
                 or self._draw_frame is None
                 or self.__is_closed
             ):
-                if scheduler is not None:
-                    scheduler.on_cancel_draw()
                 return
 
             # Make sure that the user-code is up-to-date with the current size before it draws.
@@ -586,6 +627,11 @@ class BaseRenderCanvas:
             # Emit before-draw
             self._events.emit({"event_type": "before_draw"})
 
+            # The draw function may have closed the canvas. In that case, stop
+            # here; below we may present, which must not happen for a closed canvas.
+            if self.__is_closed:
+                return
+
             # Perform the user-defined drawing code. When this errors,
             # we should report the error and then continue, otherwise we crash.
             with log_exception("Draw error"):
@@ -593,12 +639,19 @@ class BaseRenderCanvas:
                     self._draw_frame()
                 except Exception as err:
                     if type(err).__name__ == "DrawCancelled":
-                        if scheduler is not None:
-                            scheduler.on_cancel_draw()
                         return
                     raise
 
-            # Perform the presentation process. Might be async
+            # Drawing (or an event handler) may have closed the canvas. The
+            # context is gone now, so we must not present.
+            if self.__is_closed:
+                return
+
+            # Perform the presentation process. Might be async.
+            # Note that once ``_rc_present()`` returns, notifying the scheduler
+            # is the responsibility of _finish_present() (possibly async). If it
+            # raises, we keep that responsibility and notify the scheduler in
+            # the finally-block below.
             with log_exception("Present init error"):
                 # Note: if vsync is used, this call may wait a little (happens down at the level of the driver or OS)
 
@@ -607,23 +660,37 @@ class BaseRenderCanvas:
                         result = context._rc_present(force_sync=True)
                         assert result["method"] != "async"
                         self._finish_present(result)
+                        draw_done = True
                     else:
                         result = context._rc_present()
                         if result["method"] == "async":
                             result["awaitable"].then(self._finish_present)
                         else:
                             self._finish_present(result)
+                        draw_done = True
                 except Exception as err:
                     if type(err).__name__ == "DrawCancelled":
-                        if scheduler is not None:
-                            scheduler.on_cancel_draw()
                         return
                     raise
+
         finally:
             self.__is_drawing = False
+            # Always notify the scheduler when we don't get to a regular
+            # _finish_present(), otherwise the scheduler would keep waiting
+            # for a frame that will never come, and stay "drawing" forever.
+            if scheduler is not None and not draw_done:
+                scheduler.on_cancel_draw()
 
     def _finish_present(self, result):
         """Wrap up the presentation process."""
+
+        # A closed canvas has no context anymore. This can happen when the
+        # present process is asynchronous and completes after the canvas closed.
+        # Do not present, and do not request a repaint.
+        if self.__is_closed:
+            if self.__scheduler is not None:
+                self.__scheduler.on_cancel_draw()
+            return
 
         with log_exception("Present finish error"):
             method = result.pop("method", "unknown")
@@ -635,8 +702,17 @@ class BaseRenderCanvas:
                 # Pass the result to the literal present method
                 func = getattr(self, f"_rc_present_{method}")
                 func(**result)
-                # Now the backend must repaint to show the new image
-                self._rc_request_paint()
+                # Now the backend must repaint to show the new image.
+                # The present may have closed the canvas, in which case we
+                # should not ask the backend for a repaint.
+                if not self.__is_closed:
+                    self._rc_request_paint()
+
+        # A present that closed the canvas must not notify the (closed) scheduler.
+        if self.__is_closed:
+            if self.__scheduler is not None:
+                self.__scheduler.on_cancel_draw()
+            return
 
         # Notify the scheduler
         if self.__scheduler is not None:
@@ -685,15 +761,40 @@ class BaseRenderCanvas:
     def close(self) -> None:
         """Close the canvas."""
         # Note that this function may be called multiple times, and may even be re-entered.
+        # Closing is final: the first call does all the work, any further call
+        # is a no-op that never raises (not even when the first call errored).
         if self.__is_closed:
             return
         self.__is_closed = True
         errors = []
+
+        # Stop the scheduler first, so that it does not start new draws. Any
+        # task that is waiting for a draw or present to finish is released, so
+        # it can notice the closed canvas and stop.
+        if self.__scheduler is not None:
+            try:
+                self.__scheduler.close()
+            except Exception as err:
+                errors.append(err)
+
+        # Drop pending events and event handlers, and stop dispatching. Do this
+        # before the rest of the cleanup, so that events that were already
+        # submitted cannot be dispatched or replayed after the canvas closed.
+        try:
+            self._events.close()
+        except Exception as err:
+            errors.append(err)
+
+        # A pending size-change must not result in a resize event or a draw
+        # after closing. Keep the size values themselves, they remain readable.
+        self._size_info["changed"] = False
+
         # Unregister
         loop = None
         if self._rc_canvas_group is not None:
             loop = self._rc_canvas_group.get_loop()
             self._rc_canvas_group._unregister_canvas(self)
+
         # Close the native canvas
         try:
             self._rc_close()
@@ -701,15 +802,18 @@ class BaseRenderCanvas:
             errors.append(err)
         # Clear the draw-function, to avoid it holding onto e.g. wgpu objects.
         self._draw_frame = None  # type: ignore
-        # Clear the canvas context too.
-        try:
-            if self._canvas_context is not None:
-                self._canvas_context._rc_close()  # type: ignore
-        except Exception as err:
-            errors.append(err)
+
+        # Clear the canvas context too. Clear our reference *before* closing it,
+        # so that it can never be used again, even when _rc_close() raises.
+        # This also means that a present that is still in flight sees no context.
+        context = self._canvas_context
         self._canvas_context = None
-        # Close the event at least after get_closed() would return True
-        self._events.close()
+        if context is not None:
+            try:
+                context._rc_close()  # type: ignore
+            except Exception as err:
+                errors.append(err)
+
         # Stop the loop if this was the last canvas. It's important to do now,
         # because the native loop may stop right after, giving us no flow to properly close.
         if loop is not None:

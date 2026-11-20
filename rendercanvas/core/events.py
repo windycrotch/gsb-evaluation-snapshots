@@ -38,6 +38,7 @@ class EventEmitter:
         self._pending_events = deque()
         self._event_handlers = defaultdict(list)
         self._closed = False
+        self._closing = False
 
     def _release(self):
         self._closed = True
@@ -173,11 +174,11 @@ class EventEmitter:
 
         This should generally be left to the scheduler.
         """
-        while True:
-            try:
-                event = self._pending_events.popleft()
-            except IndexError:
-                break
+        # Stop dispatching as soon as the emitter is closed (which can happen
+        # from within an event handler). Any events that are still pending at
+        # that point are dropped; closing is a terminal state.
+        while self._pending_events and not self._closed:
+            event = self._pending_events.popleft()
             self.emit(event)
 
     def emit(self, event):
@@ -186,14 +187,20 @@ class EventEmitter:
         In most cases events should be submitted, so that they are flushed
         with the rest at a good time.
         """
+        # A closed emitter does not dispatch events anymore.
+        if self._closed:
+            return
         # Collect callbacks
         # Note that the 'anytype' (*) handlers are always fired later. Fixing it would require sorting here, which I don't want to do for performance.
         # A better solution is probably to simply add an entry for every type in add_handler, so self._event_handlers["*"] would not exist.
         # For now leaving this 'bug' for what it is, maybe fix when we refactor events.
         event_type = event.get("event_type")
         callbacks = self._event_handlers[event_type] + self._event_handlers["*"]
-        # Dispatch
+        # Dispatch. Note that a callback can close the emitter (e.g. by closing
+        # its canvas); in that case the remaining callbacks are not called.
         for _order, callback in callbacks:
+            if self._closed:
+                break
             if event.get("stop_propagation", False):
                 break
             with log_exception(f"Error during handling {event_type} event"):
@@ -208,7 +215,14 @@ class EventEmitter:
         Drops all pending events, send the close event, and disables the emitter.
         """
         # This is a little feature because detecting a widget from closing can be tricky.
-        if not self._closed:
+        # Note that the close event may be handled by code that (indirectly) calls
+        # close() again; the _closing flag makes that a no-op instead of recursing.
+        if self._closed or self._closing:
+            return
+        self._closing = True
+        try:
             self._pending_events.clear()
             self.submit({"event_type": "close"})
             self.flush()
+        finally:
+            self._closing = False
