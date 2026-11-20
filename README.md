@@ -56,20 +56,23 @@ quick, it is that the pack disappears over the horizon and there is nothing
 left to race. Slowing every rival does not stop you losing to a banana, and it
 is a decision you have to make before you have driven once.
 
-So rivals adjust their pace from their gap to you instead — leaders ease off
-slightly, cars behind press on. Invisible, no menu, helps a beginner without
-punishing an expert.
+So rivals adjust their pace from their gap to you instead — the cars ahead of
+you ease off slightly, so the pack never disappears over the horizon. Invisible,
+no menu, helps a beginner without punishing an expert.
 
 Measured by the race verifier, player driving at 88% of normal pace:
 
 | | worst gap to the leader |
 | --- | --- |
-| catch-up off | 2011 m |
-| catch-up on | **692 m** |
+| catch-up off | 1676 m |
+| catch-up on | **439 m** |
 
-The easing is deliberately stronger (16%) than the pushing (5%), and only ever
-applies to cars *ahead* of you — so a car in front can still win, and a player
-doing well gets no help at all.
+The easing is deliberately gentle (up to 16%) and only ever applies to cars
+*ahead* of you — so a car in front can still win, a car level with or behind you
+gets no change at all, and a player doing well gets no help. The effect is
+released the moment it stops making sense: when the player finishes, retires or
+is reset, every rival's bias converges back to neutral instead of freezing at
+its last gap.
 
 ## Credits
 
@@ -247,16 +250,17 @@ than crawling at one frame per second.
 
 ## Verification
 
-This project ships with three verification layers. All of them run the *real*
+This project ships with four verification layers. All of them run the *real*
 shipped code, not a re-implementation.
 
 ```bash
-npm run typecheck      # tsc --noEmit, strict
-npm run verify         # circuit geometry
-npm run verify:race    # headless full-race simulation
-npm run verify:pages   # boots the build from a GitHub Pages style subpath
-npm run verify:mobile  # emulated phone: multi-touch, menus, touch targets
-npm run playtest       # real browser, real Chrome (after npm run build)
+npm run typecheck         # tsc --noEmit, strict
+npm run verify            # circuit geometry
+npm run verify:race       # headless full-race simulation
+npm run verify:lifecycle  # finish / classification / restart edge cases
+npm run verify:pages      # boots the build from a GitHub Pages style subpath
+npm run verify:mobile     # emulated phone: multi-touch, menus, touch targets
+npm run playtest          # real browser, real Chrome (after npm run build)
 ```
 
 ### `npm run verify` — circuit geometry
@@ -274,6 +278,31 @@ power-up field, and asserts that a full three-lap race is completable: every
 car takes the flag, nobody goes off, lap times are plausible and consistent,
 the field finishes together, the ramp is actually jumped, attract mode is
 stable, and restarting reproduces the grid.
+
+### `npm run verify:lifecycle` — finish, classification and restart
+
+The full-race verifier proves a race can be completed; this one proves the
+seams between races and the order at the flag are sound. It stages the cases
+that are hardest to reach by playing normally and asserts the invariants
+directly, again driving the real `RaceDirector`, `CarSim` and `AIController`:
+
+- **one finish per car** — a three-lap race gives every car exactly one finish
+  time and three lap times, and a second crossing after the flag cannot rewrite
+  it;
+- **same-frame and same-substep finishes** — four cars crossing inside one
+  render frame, and two crossing inside one 1/120 s physics substep (identical
+  race clock), still get distinct ranks ordered by their interpolated position
+  within the substep; the classifier is proven to be a strict total order with
+  no tie for any pair;
+- **restart hygiene** — finish flags, finish times, laps, lap times,
+  checkpoints, retired flags, held items, best lap and the AI's smoothed
+  catch-up bias are all cleared, and the grid is reproduced exactly;
+- **idempotent restart** — restarting twice leaves byte-identical car state, and
+  a restarted race tracks a freshly constructed one to 1e-9 for 20 s;
+- **catch-up convergence** — the bias engages only on cars ahead of the player,
+  converges to neutral when the player retires, is pinned neutral and then
+  re-converges over a player reset, and a finished car receives a neutral
+  target and decays to it.
 
 ### `npm run verify:pages` — deployment check
 
@@ -329,6 +358,10 @@ the reason the harness exists.
 | Open-ended ramp profile | **160% gradient** — a cliff across the road | Geometry verifier, after the ramp was reshaped |
 | Missing favicon | Two 404s in the console | Browser playtest console check |
 | `file://` harness | Playtest reported a black screen for five minutes; the module had never loaded, because Chrome blocks ES modules over `file://` | Boot probe printing `loader=False, NOCTIS=False` |
+| Restart inherited the old pace | A pooled car kept last race's smoothed catch-up bias, so a new race set off at the previous one's pace | `verify:lifecycle`: `restart neutralises catch-up bias` |
+| Same-frame finish collapsed into a tie | Classification sorted only on `finishTime`, so cars crossing inside one frame shared a clock and their order was arbitrary | `verify:lifecycle`: same-frame and same-substep cases |
+| A finished car still steered the field | A parked finisher kept receiving a catch-up target from its stale gap | `verify:lifecycle`: `a finished car gets a neutral bias target` |
+| A reset poisoned the bias | `resetPlayer` teleported the reference without releasing the bias, so rivals chased an artefact gap | `verify:lifecycle`: `player reset holds the field neutral` |
 
 Two more were *checks* that were wrong rather than the game: a curvature
 formula that was off by a factor of 20, and a "trench" metric that was really

@@ -177,6 +177,14 @@ async function boot(): Promise<void> {
       chase.snap(director.player, terrain);
       menu.showScreen('none');
     },
+    onRetire: () => {
+      // Retiring resumes the simulation first (the pause menu is up when this
+      // fires), then withdraws the player. The director brings the flag down
+      // itself after its short settle delay, so the menu must NOT open the
+      // results screen here - onResults will.
+      director.resume();
+      director.retirePlayer();
+    },
     onQuitToMenu: () => {
       director.quitToMenu();
       menu.updateHud({ visible: false });

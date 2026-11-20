@@ -51,9 +51,34 @@ export class AIController {
     this.biasTarget = clamp(bias, 0.8, 1.06);
   }
 
+  /**
+   * Return the driver to a fresh-race baseline.
+   *
+   * The catch-up bias is smoothed towards its target over ~2 s, which is the
+   * right feel mid-race but exactly wrong across a restart: a pooled car that
+   * still held last race's 0.84 would set off at the old pace and take a lap
+   * to recover. This snaps every controller-owned bit of state back to neutral
+   * so a new race starts from the same place whether the car was allocated
+   * fresh or recycled.
+   */
+  resetForRace(): void {
+    this.bias = 1;
+    this.biasTarget = 1;
+    this.offset = 0;
+    this.targetOffset = 0;
+    this.offsetTimer = 0;
+    this.recoverTimer = 0;
+    this.passSide = 0;
+  }
+
   /** Diagnostics only. */
   debugBias(): number {
     return this.bias;
+  }
+
+  /** Diagnostics only: where the bias is heading right now. */
+  debugBiasTarget(): number {
+    return this.biasTarget;
   }
 
   computeInput(env: SimEnv, rivals: CarSim[]): DriveInput {

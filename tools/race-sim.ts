@@ -256,6 +256,12 @@ check('no missed-checkpoint spam', notices.filter((n) => n === 'MISSED CHECKPOIN
     });
     d.catchUp = catchUp;
     d.classifyOnPlayerFinish = false;
+    // Neutralise power-ups for this trial. Rockets, bananas and stuns are
+    // random, and a single stun costs more than the whole catch-up effect, so
+    // leaving them in measures luck rather than the system under test. Clearing
+    // the field every frame also removes rockets already in flight, which
+    // dropping the held item alone would not.
+    d.items.setAiUsePolicy(() => false);
     d.startRace();
     // A "beginner" is modelled honestly: the same driver logic, driven worse.
     const pa = d.player.ai as AIController;
@@ -265,9 +271,7 @@ check('no missed-checkpoint spam', notices.filter((n) => n === 'MISSED CHECKPOIN
     // 700 s, not 400: a car at 88% pace needs ~400 s just for three laps, so a
     // shorter budget measures the clock rather than the catch-up.
     for (let i = 0; i < 60 * 700; i++) {
-      // Neutralise power-ups for this trial. Rockets, bananas and stuns are
-      // random, and a single stun can cost more than the whole catch-up
-      // effect, which makes the measurement useless.
+      d.items.reset();
       for (const c of d.cars) c.item = null;
       d.update(1 / 60);
       let lead = -Infinity;
@@ -301,8 +305,10 @@ check('no missed-checkpoint spam', notices.filter((n) => n === 'MISSED CHECKPOIN
     });
     d.catchUp = true;
     d.classifyOnPlayerFinish = false;
+    d.items.setAiUsePolicy(() => false);
     d.startRace();
     for (let i = 0; i < 60 * 600; i++) {
+      d.items.reset();
       for (const c of d.cars) c.item = null;
       d.update(1 / 60);
       if (d.cars.every((c) => c.finished)) break;

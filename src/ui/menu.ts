@@ -47,6 +47,7 @@ export interface MenuHooks {
   onStartRace?(): void;
   onResume?(): void;
   onRestart?(): void;
+  onRetire?(): void;
   onQuitToMenu?(): void;
   onSettingChanged?(s: Settings): void;
   getSettings?(): Settings;
@@ -246,6 +247,16 @@ export function createMenu(hooks: MenuHooks = {}): Menu {
           ro: () => ({ v: fmtTime(lastHud.clock), l: 'RACE TIME' }),
         },
         { label: 'RESTART RACE', action: () => fire('onRestart'), ro: () => ({ v: pad2(lastHud.lapsTotal || 3), l: 'LAPS' }) },
+        {
+          label: 'RETIRE',
+          // Withdraw from the race and go straight to the results board, with
+          // the player classified last. Only meaningful while actually racing.
+          action: () => {
+            fire('onRetire');
+            showScreen('none');
+          },
+          ro: () => ({ v: pad2(lastHud.position || 0), l: 'POSITION' }),
+        },
         { label: 'CONTROLS', action: () => openScreen('controls', 'pause'), ro: () => ({ v: '07', l: 'MAPPED INPUTS' }) },
         { label: 'SETTINGS', action: () => openScreen('settings', 'pause'), ro: () => ({ v: settings.quality, l: 'RENDER QUALITY' }) },
         { label: 'QUIT TO MENU', action: quitToMenu, ro: () => ({ v: 'MENU', l: 'EXIT RACE' }) },

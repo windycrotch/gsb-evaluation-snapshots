@@ -32,6 +32,13 @@ export const DRAG = 0.0026; // per (m/s)^2 -> top speed around 88 m/s
 export const MAGLEV = 0.0042; // downforce accel per (m/s)^2
 export const AIR_MAGLEV_FADE = 8.0; // metres over which the field weakens
 export const TOP_SPEED = 170; // hard safety clamp, m/s
+/**
+ * Seconds the catch-up bias is held at neutral after a car is teleported back
+ * to the racing line. A reset is a jump in arc progress, so the gap it
+ * produces is an artefact rather than racing; the director's smoothing needs a
+ * moment to settle before it starts tracking the new, real gap again.
+ */
+export const CATCHUP_SETTLE = 1.6;
 
 const _n = new THREE.Vector3();
 const _fwd = new THREE.Vector3();
@@ -95,7 +102,27 @@ export class CarSim {
   lapTimes: number[] = [];
   lapStart = 0;
   finished = false;
+  /** Simulated race time at the only lap crossing that can finish the car. */
   finishTime = 0;
+  /**
+   * Fraction (0..1) of the finishing physics substep that had elapsed when the
+   * line was crossed; lower means it crossed earlier. Several cars can cross
+   * inside one substep, where the race clock is identical, so this is what
+   * makes their order deterministic and faithful instead of a coin flip on
+   * array position.
+   */
+  finishCrossFrac = 0;
+  /**
+   * Monotonic sequence assigned by the director the moment the flag is taken.
+   * The last tie-break before the grid slot: if two cars cross with an
+   * identical interpolated timestamp they genuinely crossed together, and the
+   * order in which the director saw them is still a stable total order.
+   */
+  finishOrder = 0;
+  /** Grid slot, assigned by the director. The final deterministic tie-break. */
+  gridIndex = 0;
+  /** Withdrawn from the race: classified behind everyone still running. */
+  retired = false;
   /** lap * length + s; the single number the standings sort on. */
   totalDist = 0;
   padCooldown = -1;
@@ -103,6 +130,13 @@ export class CarSim {
   wrongWayT = 0;
   offRoadT = 0;
   aiUseCd = 0;
+  /**
+   * Seconds during which the race director must hold this car's catch-up bias
+   * at neutral. Set whenever the car is teleported back to the racing line: a
+   * reset is a discontinuity in arc progress, so letting it instantly reshuffle
+   * everybody's pace would make the bias chase the teleport instead of the race.
+   */
+  catchUpHoldT = 0;
 
   private railTouchT = 0;
   private wallHitT = 0;
@@ -162,7 +196,50 @@ export class CarSim {
     this.stuckTimer = 0;
     this.wrongWayT = 0;
     this.offRoadT = 0;
+    this.catchUpHoldT = CATCHUP_SETTLE;
     this.vel.multiplyScalar(0.2);
+  }
+
+  /**
+   * Wipe every piece of per-race bookkeeping so this car can start a new race
+   * exactly like a newly built one.
+   *
+   * Called after the car has been re-seated on the grid (placeAt sets s and
+   * totalDist). Kept here, next to the fields it clears, so adding a new piece
+   * of race state has an obvious single place to be reset rather than being
+   * remembered at each of the director's two entry points.
+   */
+  resetRaceState(): void {
+    this.lap = 0;
+    this.cpIndex = 0;
+    this.lapTimes = [];
+    this.lapStart = 0;
+    this.finished = false;
+    this.finishTime = 0;
+    this.finishCrossFrac = 0;
+    this.finishOrder = 0;
+    this.retired = false;
+    this.padCooldown = -1;
+    this.stuckTimer = 0;
+    this.wrongWayT = 0;
+    this.offRoadT = 0;
+    this.catchUpHoldT = 0;
+    // Transient effects and power-ups do not survive a restart either.
+    this.item = null;
+    this.shieldT = 0;
+    this.turboT = 0;
+    this.stunT = 0;
+    this.stunSpin = 0;
+    this.boost = 0.62;
+    this.aiUseCd = 0;
+    // Visual/contact scratch, so a fresh race does not open mid-impact.
+    this.impact = 0;
+    this.boostFlash = 0;
+    this.railScrape = 0;
+    this.slip = 0;
+    this.offroad = 0;
+    this.braking = false;
+    this.wrongWayT = 0;
   }
 
   step(rawInput: DriveInput, dt: number, env: SimEnv): void {
