@@ -20,8 +20,8 @@ pub struct MoogModule {
 impl MoogModule {
     pub fn new(cutoff: f32, resonance: f32) -> MoogModule {
         MoogModule {
-            cutoff,
-            resonance,
+            cutoff: MoogModule::sanitize_cutoff(cutoff),
+            resonance: MoogModule::sanitize_resonance(resonance),
             in1: 0.0,
             in2: 0.0,
             in3: 0.0,
@@ -46,15 +46,13 @@ impl MoogModule {
 
         // Loop over samples and apply moog filter
         for sample in samples.iter_mut() {
-            let mut base = *sample;
+            // A NaN/Inf input would be multiplied into the feedback path and
+            // poison all four pole states permanently; sanitize per sample.
+            let input = if sample.is_finite() { *sample } else { 0.0 };
+
+            let mut base = input;
             base -= self.out4 * fb;
             base *= input_factor;
-
-            // Add stability check
-            // Was having an issue where it increments to infinity sometimes
-            // if !base.is_finite() {
-            //     base = 0.0;
-            // }
 
             // Pole 1
             self.out1 = base + 0.3 * self.in1 + (1.0 - f) * self.out1;
@@ -72,9 +70,54 @@ impl MoogModule {
             self.out4 = self.out3 + 0.3 * self.in4 + (1.0 - f) * self.out4;
             self.in4 = self.out3;
 
+            // Defense in depth: if any pole ever became non-finite
+            // (e.g. extreme parameter ramp), reset the ladder instead of
+            // emitting NaN/Inf and locking the node into a broken state.
+            if !self.out1.is_finite()
+                || !self.out2.is_finite()
+                || !self.out3.is_finite()
+                || !self.out4.is_finite()
+            {
+                self.in1 = 0.0;
+                self.in2 = 0.0;
+                self.in3 = 0.0;
+                self.in4 = 0.0;
+                self.out1 = 0.0;
+                self.out2 = 0.0;
+                self.out3 = 0.0;
+                self.out4 = 0.0;
+            }
+
             *sample = self.out4.clamp(-1.0, 1.0);
         }
 
         samples
+    }
+
+    /// In-place parameter update. The four-pole state (in1..out4) is kept so
+    /// parameter changes cross-fade through the existing signal instead of
+    /// resetting the filter, which would cause an audible click.
+    pub fn set_cutoff(&mut self, cutoff: f32) {
+        self.cutoff = MoogModule::sanitize_cutoff(cutoff);
+    }
+
+    pub fn set_resonance(&mut self, resonance: f32) {
+        self.resonance = MoogModule::sanitize_resonance(resonance);
+    }
+
+    fn sanitize_cutoff(cutoff: f32) -> f32 {
+        if cutoff.is_finite() {
+            cutoff.clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    }
+
+    fn sanitize_resonance(resonance: f32) -> f32 {
+        if resonance.is_finite() {
+            resonance.clamp(0.0, 10.0)
+        } else {
+            0.0
+        }
     }
 }

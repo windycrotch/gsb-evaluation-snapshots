@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["vite/client", "vitest/globals", "node"],
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"],
+      "clawdio-bitcrusher": ["../../modules/bitcrusher/pkg/clawdio_bitcrusher.d.ts"],
+      "clawdio-moog": ["../../modules/moog/pkg/clawdio_moog.d.ts"],
+      "clawdio-pink-noise": ["../../modules/pink-noise/pkg/clawdio_pink_noise.d.ts"]
+    }
+  },
+  "include": ["src/**/__tests__", "src/workers/workers.d.ts"],
+  "exclude": []
+}
