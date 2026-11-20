@@ -60,7 +60,8 @@ lib/
   music/scale-pages.ts  # formulas, 12-key spellings and related scales for /scales/[scale]
   audio/note.ts         # Hz <-> note math, standard-tuning reference
   audio/yin.ts          # YIN pitch detector
-  audio/use-tuner.ts    # React hook for the tuner
+  audio/tuner-session.ts # generation-tokened mic session: start/stop/dispose lifecycle
+  audio/use-tuner.ts    # React hook binding the tuner session to state
   audio/use-metronome.ts # React hook for the metronome + tap-tempo helper
 public/
   tuner-audio-processor.js  # AudioWorklet for the tuner mic pump

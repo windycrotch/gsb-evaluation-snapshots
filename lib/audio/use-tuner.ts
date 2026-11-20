@@ -2,95 +2,69 @@
 
 import { useEffect, useRef, useState } from "react";
 import { detectPitch } from "./yin";
-import { hzToNote, type NoteReading } from "./note";
+import { hzToNote } from "./note";
+import {
+  createTunerSession,
+  TUNER_WORKLET_URL,
+  type TunerAudioContext,
+  type TunerMediaStream,
+  type TunerReading,
+  type TunerSession,
+  type TunerState,
+  type TunerWorkletNode,
+} from "./tuner-session";
 
-export type TunerState = "idle" | "running";
+export type { TunerReading, TunerState };
 
-export interface TunerReading extends NoteReading {
-  /** Median of the recent detections, smoothed to reduce jitter. */
-  smoothedHz: number;
-}
-
-const HISTORY_SIZE = 5;
+// React bindings over the framework-independent session lifecycle. The session
+// owns the generation token, so rapid start/stop clicks and a slow permission
+// prompt cannot leak an old microphone stream or write a stale reading.
 
 export function useTuner() {
   const [state, setState] = useState<TunerState>("idle");
   const [reading, setReading] = useState<TunerReading | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const audioCtxRef = useRef<AudioContext | null>(null);
-  const mediaStreamRef = useRef<MediaStream | null>(null);
-  const workletRef = useRef<AudioWorkletNode | null>(null);
-  const historyRef = useRef<number[]>([]);
+  const sessionRef = useRef<TunerSession | null>(null);
+  if (sessionRef.current === null) {
+    sessionRef.current = createTunerSession({
+      getUserMedia: () =>
+        navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: false,
+            autoGainControl: false,
+            noiseSuppression: false,
+          },
+        }) as Promise<TunerMediaStream>,
+      createAudioContext: () => new AudioContext() as unknown as TunerAudioContext,
+      loadWorkletModule: (context) =>
+        (context as unknown as AudioContext).audioWorklet.addModule(TUNER_WORKLET_URL),
+      createWorkletNode: (context) =>
+        new AudioWorkletNode(
+          context as unknown as AudioContext,
+          "tuner-audio-processor",
+        ) as unknown as TunerWorkletNode,
+      detectPitch: (samples, options) => detectPitch(samples, options),
+      hzToNote,
+      onStateChange: setState,
+      onReadingChange: setReading,
+      onErrorChange: setError,
+    });
+  }
 
+  // Unmount releases the microphone, the context and the worklet node so no
+  // timer or audio node survives leaving the page.
   useEffect(() => {
     return () => {
-      stop();
+      sessionRef.current?.dispose();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function start() {
-    setError(null);
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: false,
-          autoGainControl: false,
-          noiseSuppression: false,
-        },
-      });
-      mediaStreamRef.current = stream;
-
-      const ctx = new AudioContext();
-      audioCtxRef.current = ctx;
-      await ctx.audioWorklet.addModule("/tuner-audio-processor.js");
-
-      const src = ctx.createMediaStreamSource(stream);
-      const node = new AudioWorkletNode(ctx, "tuner-audio-processor");
-      workletRef.current = node;
-      src.connect(node);
-      const muted = ctx.createGain();
-      muted.gain.value = 0;
-      node.connect(muted).connect(ctx.destination);
-
-      node.port.onmessage = (ev: MessageEvent<{ samples: Float32Array }>) => {
-        const hz = detectPitch(ev.data.samples, { sampleRate: ctx.sampleRate });
-        if (hz === null) return;
-        const hist = historyRef.current;
-        hist.push(hz);
-        if (hist.length > HISTORY_SIZE) hist.shift();
-        const sorted = [...hist].sort((a, b) => a - b);
-        const median = sorted[Math.floor(sorted.length / 2)];
-        const note = hzToNote(median);
-        setReading({ ...note, smoothedHz: median });
-      };
-
-      setState("running");
-    } catch (e) {
-      const message =
-        e instanceof Error ? e.message : "Couldn't access the microphone.";
-      setError(message);
-      stop();
-    }
-  }
-
-  function stop() {
-    try {
-      workletRef.current?.disconnect();
-      workletRef.current?.port.close();
-    } catch {
-      /* ignore */
-    }
-    workletRef.current = null;
-    audioCtxRef.current?.close().catch(() => {});
-    audioCtxRef.current = null;
-    mediaStreamRef.current?.getTracks().forEach((t) => t.stop());
-    mediaStreamRef.current = null;
-    historyRef.current = [];
-    setReading(null);
-    setState("idle");
-  }
-
-  return { state, reading, error, start, stop };
+  return {
+    state,
+    reading,
+    error,
+    start: () => sessionRef.current!.start(),
+    stop: () => sessionRef.current!.stop(),
+  };
 }

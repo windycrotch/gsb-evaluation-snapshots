@@ -24,7 +24,7 @@ test("sitemap dates include route and shared-layout changes", async () => {
     "https://guitarchords.info/": "2026-11-15",
     "https://guitarchords.info/chords": "2026-11-15",
     "https://guitarchords.info/scales": "2026-11-15",
-    "https://guitarchords.info/tuner": "2026-11-15",
+    "https://guitarchords.info/tuner": "2026-11-21",
     "https://guitarchords.info/metronome": "2026-11-15",
     "https://guitarchords.info/notes": "2026-11-15",
     "https://guitarchords.info/ai-instructions": "2026-10-12",

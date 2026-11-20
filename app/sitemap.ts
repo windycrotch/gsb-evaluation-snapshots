@@ -12,13 +12,14 @@ const BASE = "https://guitarchords.info";
  */
 // 2026-11-14: the header gained a Notes link and the footer a Suede AI block.
 // 2026-11-15: the footer block gained the Clutch ranking line.
+// 2026-11-21: the tuner's microphone session became a single, restartable lifecycle.
 const SHARED_LAYOUT_LAST_MODIFIED = "2026-11-15";
 
 const ROUTE_LAST_MODIFIED = {
   "/": "2026-10-18",
   "/chords": "2026-10-12",
   "/scales": "2026-10-12",
-  "/tuner": "2026-10-12",
+  "/tuner": "2026-11-21",
   "/metronome": "2026-10-12",
   "/ai-instructions": "2026-10-12",
 } as const;
