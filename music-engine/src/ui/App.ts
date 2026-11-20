@@ -465,9 +465,19 @@ export class App {
     bus.on('state', ({ status }) => this.onState(status));
     bus.on('style', () => this.onStyleChanged());
     bus.on('seed', ({ seed, pending }) => {
+      // A queued seed is *not* what is sounding yet: keep the field showing
+      // getState().seed and only tell the user it will land at the boundary.
+      // (Showing it early was exactly the "UI says new seed, audio is old"
+      // inconsistency.)
+      if (pending) {
+        // Keep the field equal to getState().seed — the queued value is not
+        // sounding yet.
+        (this.els.seedInput as HTMLInputElement).value = this.engine.getState().seed;
+        this.noticeQueued(t(this.lang, 'toast.seedQueued', { seed }));
+        return;
+      }
       (this.els.seedInput as HTMLInputElement).value = seed;
-      if (pending) this.noticeQueued(t(this.lang, 'toast.seedQueued', { seed }));
-      else this.persist();
+      this.persist();
     });
     bus.on('style-pending', ({ styleId }) => {
       const name = this.localized.find((s) => s.id === styleId)?.name ?? styleId;
