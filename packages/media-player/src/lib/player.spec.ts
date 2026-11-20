@@ -1689,4 +1689,415 @@ describe('player', () => {
 
     player.dispose();
   });
+
+  describe('load session isolation', () => {
+    /**
+     * Builds a loader whose single `load` promise is controlled per call so a
+     * test can resolve overlapping loads out of order.
+     */
+    const createDeferredLoader = (): {
+      loader: loaderModule.CdgLoader;
+      deferreds: Array<{
+        resolve: (track: loaderModule.LoadedTrack) => void;
+        reject: (error: unknown) => void;
+      }>;
+    } => {
+      const deferreds: Array<{
+        resolve: (track: loaderModule.LoadedTrack) => void;
+        reject: (error: unknown) => void;
+      }> = [];
+      const load = vi.fn(
+        () =>
+          new Promise<loaderModule.LoadedTrack>((resolve, reject) => {
+            deferreds.push({ resolve, reject });
+          }),
+      );
+
+      return {
+        loader: {
+          load,
+          probe: vi.fn(),
+          cancel: vi.fn(),
+          dispose: vi.fn(),
+        } as unknown as loaderModule.CdgLoader,
+        deferreds,
+      };
+    };
+
+    const createTrack = ({
+      trackId,
+      hasGraphics = true,
+      cdgByteLength = 24,
+    }: {
+      trackId: string;
+      hasGraphics?: boolean;
+      cdgByteLength?: number;
+    }): loaderModule.LoadedTrack => ({
+      trackId,
+      sourceSummary: `${trackId}.zip`,
+      audioBuffer: new ArrayBuffer(8),
+      mediaKind: 'audio',
+      mediaMimeType: 'audio/mpeg',
+      audioMimeType: 'audio/mpeg',
+      hasGraphics,
+      cdgBytes: hasGraphics ? new Uint8Array(cdgByteLength) : null,
+      metadata: { title: trackId, artist: 'Artist', album: 'Album' },
+      warnings: [],
+    });
+
+    const createHarness = ({
+      loader,
+    }: {
+      loader: loaderModule.CdgLoader;
+    }): {
+      player: CdgPlayer;
+      canvas: HTMLCanvasElement;
+      audio: HTMLAudioElement;
+    } => {
+      const canvas = document.createElement('canvas');
+      const audio = document.createElement('audio');
+      vi.spyOn(audio, 'load').mockImplementation(() => {
+        return;
+      });
+
+      const player = createPlayer({
+        options: {
+          canvas,
+          audio,
+          loader,
+          loadTransport: 'main-thread',
+        },
+      });
+
+      return { player, canvas, audio };
+    };
+
+    it('keeps state and trackId from the newer load when the first settles last', async () => {
+      const { loader, deferreds } = createDeferredLoader();
+      vi.spyOn(URL, 'createObjectURL')
+        .mockReturnValueOnce('blob:first')
+        .mockReturnValueOnce('blob:second');
+      const revokeSpy = vi
+        .spyOn(URL, 'revokeObjectURL')
+        .mockImplementation(() => {
+          return;
+        });
+
+      const { player } = createHarness({ loader });
+      const corePlayer = player['cdgPlayer'];
+
+      const firstLoad = player.load({
+        input: { kind: 'arrayBuffer', arrayBuffer: new ArrayBuffer(24) },
+      });
+      const secondLoad = player.load({
+        input: { kind: 'arrayBuffer', arrayBuffer: new ArrayBuffer(24) },
+      });
+
+      // Resolve the second (newest) load first, then the superseded first one.
+      // The two tracks carry distinguishable CDG packet counts (24 vs 48 bytes)
+      // so we can prove the canvas was fed by the newest session only.
+      deferreds[1]?.resolve(
+        createTrack({ trackId: 'newer-track', cdgByteLength: 48 }),
+      );
+      await secondLoad;
+      deferreds[0]?.resolve(
+        createTrack({ trackId: 'older-track', cdgByteLength: 24 }),
+      );
+      await expect(firstLoad).rejects.toThrow(/superseded/i);
+
+      expect(player.getState().status).toBe('ready');
+      expect(player.getState().trackId).toBe('newer-track');
+      // The stale session never created a URL, so only the newest URL existed.
+      expect(URL.createObjectURL).toHaveBeenCalledTimes(1);
+      expect(revokeSpy).not.toHaveBeenCalledWith('blob:second');
+      // The newest session's parsed packets remain committed to the canvas.
+      expect(corePlayer.instructions).toHaveLength(2);
+
+      player.dispose();
+    });
+
+    it('keeps the player ready when the first load fails but the second succeeds', async () => {
+      const { loader, deferreds } = createDeferredLoader();
+      vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:second');
+      vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {
+        return;
+      });
+
+      const { player } = createHarness({ loader });
+      const errorListener = vi.fn();
+      player.addEventListener('error', errorListener);
+
+      const firstLoad = player.load({
+        input: { kind: 'arrayBuffer', arrayBuffer: new ArrayBuffer(24) },
+      });
+      const secondLoad = player.load({
+        input: { kind: 'arrayBuffer', arrayBuffer: new ArrayBuffer(24) },
+      });
+
+      deferreds[1]?.resolve(createTrack({ trackId: 'winner-track' }));
+      await secondLoad;
+      deferreds[0]?.reject(new Error('first load failed'));
+      await expect(firstLoad).rejects.toThrow('first load failed');
+
+      expect(player.getState().status).toBe('ready');
+      expect(player.getState().trackId).toBe('winner-track');
+      expect(errorListener).not.toHaveBeenCalled();
+
+      player.dispose();
+    });
+
+    it('enters error and revokes its object URL when the newest load fails while binding media', async () => {
+      const { loader, deferreds } = createDeferredLoader();
+      const revokeSpy = vi
+        .spyOn(URL, 'revokeObjectURL')
+        .mockImplementation(() => {
+          return;
+        });
+      vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:failure');
+
+      // Build the harness manually so media `load()` can throw during bind.
+      const canvas = document.createElement('canvas');
+      const audio = document.createElement('audio');
+      vi.spyOn(audio, 'load').mockImplementation(() => {
+        throw new Error('media bind failed');
+      });
+      const player = createPlayer({
+        options: {
+          canvas,
+          audio,
+          loader,
+          loadTransport: 'main-thread',
+        },
+      });
+      const errorListener = vi.fn();
+      player.addEventListener('error', errorListener);
+
+      const firstLoad = player.load({
+        input: { kind: 'arrayBuffer', arrayBuffer: new ArrayBuffer(24) },
+      });
+      const secondLoad = player.load({
+        input: { kind: 'arrayBuffer', arrayBuffer: new ArrayBuffer(24) },
+      });
+
+      // First session resolves successfully but is already superseded; it must
+      // not bind media, so only the second session reaches `audio.load()`.
+      deferreds[0]?.resolve(createTrack({ trackId: 'stale-track' }));
+      await expect(firstLoad).rejects.toThrow(/superseded/i);
+      expect(errorListener).not.toHaveBeenCalled();
+
+      deferreds[1]?.resolve(createTrack({ trackId: 'newest-track' }));
+      await expect(secondLoad).rejects.toThrow('media bind failed');
+
+      expect(player.getState().status).toBe('error');
+      expect(errorListener).toHaveBeenCalledOnce();
+      expect(URL.createObjectURL).toHaveBeenCalledWith(expect.any(Blob));
+      expect(revokeSpy).toHaveBeenCalledWith('blob:failure');
+
+      player.dispose();
+    });
+
+    it('releases CDG data it loaded when the newest session fails', async () => {
+      const { loader, deferreds } = createDeferredLoader();
+      vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:cdg');
+      const revokeSpy = vi
+        .spyOn(URL, 'revokeObjectURL')
+        .mockImplementation(() => {
+          return;
+        });
+
+      const canvas = document.createElement('canvas');
+      const audio = document.createElement('audio');
+      vi.spyOn(audio, 'load').mockImplementation(() => {
+        throw new Error('media bind failed after CDG parse');
+      });
+      const player = createPlayer({
+        options: {
+          canvas,
+          audio,
+          loader,
+          loadTransport: 'main-thread',
+        },
+      });
+      const errorListener = vi.fn();
+      player.addEventListener('error', errorListener);
+
+      const loadPromise = player.load({
+        input: { kind: 'arrayBuffer', arrayBuffer: new ArrayBuffer(24) },
+      });
+      deferreds[0]?.resolve(
+        createTrack({ trackId: 'cdg-failure-track', hasGraphics: true }),
+      );
+      await expect(loadPromise).rejects.toThrow(
+        'media bind failed after CDG parse',
+      );
+
+      expect(player.getState().status).toBe('error');
+      expect(errorListener).toHaveBeenCalledOnce();
+      expect(player['cdgPlayer'].instructions).toHaveLength(0);
+      expect(revokeSpy).toHaveBeenCalledWith('blob:cdg');
+
+      player.dispose();
+    });
+
+    it('detaches the media listeners it bound when the newest session fails', async () => {
+      const { loader, deferreds } = createDeferredLoader();
+      vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:listener-failure');
+      vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {
+        return;
+      });
+
+      const canvas = document.createElement('canvas');
+      const audio = document.createElement('audio');
+      const video = document.createElement('video');
+      vi.spyOn(audio, 'load').mockImplementation(() => {
+        return;
+      });
+      // Video triggers the metadata wait path; force an error on video load so
+      // the session fails only after it has bound the video listeners.
+      let readyStateValue = 0;
+      Object.defineProperty(video, 'readyState', {
+        configurable: true,
+        get: () => readyStateValue,
+      });
+      vi.spyOn(video, 'canPlayType').mockReturnValue('probably');
+      vi.spyOn(video, 'load').mockImplementation(() => {
+        queueMicrotask(() => {
+          readyStateValue = HTMLMediaElement.HAVE_METADATA;
+          video.dispatchEvent(new Event('error'));
+        });
+      });
+
+      const player = createPlayer({
+        options: {
+          canvas,
+          audio,
+          video,
+          loader,
+          loadTransport: 'main-thread',
+        },
+      });
+      const errorListener = vi.fn();
+      player.addEventListener('error', errorListener);
+
+      // Spy on the video element's add/remove to prove bind/unbind symmetry.
+      const addSpy = vi.spyOn(video, 'addEventListener');
+      const removeSpy = vi.spyOn(video, 'removeEventListener');
+
+      const loadPromise = player.load({
+        input: { kind: 'arrayBuffer', arrayBuffer: new ArrayBuffer(24) },
+      });
+      deferreds[0]?.resolve({
+        ...createTrack({ trackId: 'video-bound', hasGraphics: false }),
+        mediaKind: 'video',
+        mediaMimeType: 'video/mp4',
+        audioMimeType: 'video/mp4',
+      });
+      await expect(loadPromise).rejects.toThrow(
+        'Unable to read video metadata in this browser.',
+      );
+
+      expect(player.getState().status).toBe('error');
+      expect(errorListener).toHaveBeenCalledOnce();
+      expect(addSpy).toHaveBeenCalledWith('timeupdate', expect.any(Function));
+      expect(removeSpy).toHaveBeenCalledWith(
+        'timeupdate',
+        expect.any(Function),
+      );
+
+      player.dispose();
+    });
+
+    it('has no side effects from a late session after dispose', async () => {
+      const { loader, deferreds } = createDeferredLoader();
+      const createObjectUrlSpy = vi
+        .spyOn(URL, 'createObjectURL')
+        .mockReturnValue('blob:late');
+      vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {
+        return;
+      });
+
+      const { player } = createHarness({ loader });
+      let stateChangeCount = 0;
+      player.addEventListener('statechange', () => {
+        stateChangeCount += 1;
+      });
+
+      const loadPromise = player.load({
+        input: { kind: 'arrayBuffer', arrayBuffer: new ArrayBuffer(24) },
+      });
+
+      player.dispose();
+      const stateAtDispose = player.getState();
+      const changesAtDispose = stateChangeCount;
+
+      // The loader resolves after dispose; the session must be discarded.
+      deferreds[0]?.resolve(createTrack({ trackId: 'late-track' }));
+      await expect(loadPromise).rejects.toThrow();
+
+      expect(createObjectUrlSpy).not.toHaveBeenCalled();
+      expect(player.getState().status).toBe(stateAtDispose.status);
+      expect(player.getState().trackId).toBe(stateAtDispose.trackId);
+      expect(stateChangeCount).toBe(changesAtDispose);
+    });
+
+    it('discards a session that was mid video-wait when dispose is called', async () => {
+      const { loader, deferreds } = createDeferredLoader();
+      vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:mid-flight');
+      const revokeSpy = vi
+        .spyOn(URL, 'revokeObjectURL')
+        .mockImplementation(() => {
+          return;
+        });
+
+      const canvas = document.createElement('canvas');
+      const audio = document.createElement('audio');
+      const video = document.createElement('video');
+      vi.spyOn(audio, 'load').mockImplementation(() => {
+        return;
+      });
+      vi.spyOn(video, 'canPlayType').mockReturnValue('probably');
+      Object.defineProperty(video, 'readyState', {
+        configurable: true,
+        get: () => 0, // force the metadata wait to suspend
+      });
+      vi.spyOn(video, 'load').mockImplementation(() => {
+        return;
+      });
+
+      const player = createPlayer({
+        options: {
+          canvas,
+          audio,
+          video,
+          loader,
+          loadTransport: 'main-thread',
+        },
+      });
+      const errorListener = vi.fn();
+      player.addEventListener('error', errorListener);
+
+      const loadPromise = player.load({
+        input: { kind: 'arrayBuffer', arrayBuffer: new ArrayBuffer(24) },
+      });
+      deferreds[0]?.resolve({
+        ...createTrack({ trackId: 'video-mid-flight', hasGraphics: false }),
+        mediaKind: 'video',
+        mediaMimeType: 'video/mp4',
+        audioMimeType: 'video/mp4',
+      });
+
+      // Let the session reach the pending metadata wait and create its URL.
+      await Promise.resolve();
+      await Promise.resolve();
+
+      player.dispose();
+      const stateAtDispose = player.getState();
+      await expect(loadPromise).rejects.toThrow();
+
+      expect(player.getState().status).toBe(stateAtDispose.status);
+      expect(player.getState().trackId).toBe(stateAtDispose.trackId);
+      expect(errorListener).not.toHaveBeenCalled();
+      expect(revokeSpy).toHaveBeenCalledWith('blob:mid-flight');
+    });
+  });
 });
