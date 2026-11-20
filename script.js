@@ -66,6 +66,9 @@ const DOM = {
   resetWatchTimeButton: document.getElementById("reset-watch-time-button"),
 }
 
+// All recent-list / player identity logic lives in the DOM-free core.
+const core = NeovidCore.createNeovidCore({ storage: localStorage });
+
 function createTag(className, icon) {
   const tag = document.createElement("span");
   tag.className = className;
@@ -103,19 +106,15 @@ function showPrompt(title, defaultValue = "", options = {}) {
 }
 
 function getRecent() {
-  return JSON.parse(localStorage.getItem(CONFIG.STORAGE_KEYS.RECENT) || "[]");
-}
-
-function setRecent(data) {
-  localStorage.setItem(CONFIG.STORAGE_KEYS.RECENT, JSON.stringify(data));
+  return core.getEntries();
 }
 
 function getWatchTime() {
-  return parseInt(localStorage.getItem(CONFIG.STORAGE_KEYS.WATCH_TIME) || "0", 10);
+  return core.readWatchTime();
 }
 
 function setWatchTime(value) {
-  localStorage.setItem(CONFIG.STORAGE_KEYS.WATCH_TIME, value);
+  core.writeWatchTime(value);
 }
 
 function getVolume() {
@@ -153,7 +152,12 @@ function restoreAudioSettings() {
   DOM.player.muted = getMuted();
 }
 
+// Playback UI state. `currentEntryId` is the shared identity between the
+// player and the list; `playbackToken` identifies this specific playback so
+// late events from a previous video are rejected.
 const state = {
+  currentEntryId: null,
+  playbackToken: 0,
   currentVideo: null,
   currentVideoType: "url",
   currentSubtitle: "",
@@ -203,24 +207,33 @@ function updateResumeButton() {
 }
 
 function updateWatchTime() {
+  // Ignore events emitted by the previous video after a switch.
+  if (!core.isMediaCurrent(state.playbackToken)) {
+    state.videoLastTime = null;
+    return;
+  }
   const videoCurrentTime = DOM.player.currentTime;
   if (state.videoLastTime !== null) {
     const diff = videoCurrentTime - state.videoLastTime;
-    if (diff > 0 && diff < 5) {
-      state.accumulatedWatchTime += diff;
-      while (state.accumulatedWatchTime >= 1) {
-        state.totalWatchTime += 1;
-        state.accumulatedWatchTime -= 1;
-        setWatchTime(state.totalWatchTime);
-        DOM.watchTime.textContent = formatTime(state.totalWatchTime);
-        
-      }
+    const next = core.accumulateWatchTime(
+      { total: state.totalWatchTime, accumulated: state.accumulatedWatchTime },
+      diff
+    );
+    if (next.total !== state.totalWatchTime) {
+      state.totalWatchTime = next.total;
+      setWatchTime(state.totalWatchTime);
+      DOM.watchTime.textContent = formatTime(state.totalWatchTime);
     }
+    state.accumulatedWatchTime = next.accumulated;
   }
   state.videoLastTime = videoCurrentTime;
 }
 
 function handleSkipButton() {
+  if (!core.isMediaCurrent(state.playbackToken)) {
+    DOM.skipButton.style.display = "none";
+    return;
+  }
   if (DOM.player.duration && DOM.player.currentTime) {
     const remaining = DOM.player.duration - DOM.player.currentTime;
     if (DOM.player.duration > 3 * CONFIG.LIMITS.SKIP_THRESHOLD && remaining <= CONFIG.LIMITS.SKIP_THRESHOLD && !DOM.player.ended) {
@@ -228,7 +241,7 @@ function handleSkipButton() {
     } else {
       DOM.skipButton.style.display = "none";
     }
-  }   
+  }
 }
 
 function getProgressBackground(progress) {
@@ -272,43 +285,47 @@ function playVideo(video, subtitle = "", title = null, videoType = "url", subtit
     DOM.player.textTracks[0].mode = "showing";
   }
 
+  // Bind the player to a list entry and open a new playback generation
+  // BEFORE loading the media, so no event from the old video can pass.
+  const resolvedTitle = title || (videoType === "url" ? video.split("/").pop() : title);
+  const { entry, token } = core.startPlayback({
+    title: resolvedTitle,
+    video,
+    videoType,
+    subtitle,
+    subtitleType,
+  });
+  state.currentEntryId = entry.id;
+  state.playbackToken = token;
+  state.videoLastTime = null;
+
   DOM.player.load();
   DOM.player.play().catch(() => {});
 
   state.currentVideo = video;
   state.currentVideoType = videoType;
-  state.currentTitle = title || (videoType==="url"? video.split("/").pop(): title);
+  state.currentTitle = resolvedTitle;
   state.currentSubtitle = subtitle;
   state.currentSubtitleType = subtitleType;
   updateDownloadButtons();
-}
-
-
-function saveRecent(title, video, videoType, subtitle="", subtitleType="url") {
-  let recent = getRecent();
-  let progress = 0;
-  const idx = recent.findIndex(item => item.title===title);
-  if(idx!==-1) {
-    progress = recent[idx].progress;
-  }
-
-  recent = recent.filter(item => !(item.title===title));
-
-  recent.unshift({title, video, videoType, subtitle, subtitleType, progress});
-  if(recent.length>CONFIG.LIMITS.RECENT_SIZE) recent = recent.slice(0,CONFIG.LIMITS.RECENT_SIZE);
-
-  setRecent(recent);
   renderRecent();
+  return entry;
 }
 
-function removeRecent(title) {
+// "Watch later" only updates the list; it does not start a playback.
+function saveRecent(title, video, videoType, subtitle = "", subtitleType = "url") {
+  return core.upsertEntry({ title, video, videoType, subtitle, subtitleType });
+}
+
+function removeRecent(entryId) {
   showConfirm(CONFIG.MESSAGES.CONFIRM_REMOVE, {
     confirmText: "Remove"
   }).then((result) => {
       if (result.isConfirmed) {
-        let recent = getRecent();
-        recent = recent.filter(item => !(item.title===title));
-        setRecent(recent);
+        core.removeEntry(entryId);
+        // If the playing entry was removed, reflect the detached identity.
+        state.currentEntryId = core.getCurrentEntryId();
+        state.playbackToken = core.getPlaybackToken();
         renderRecent();
       }
     });
@@ -318,39 +335,37 @@ function removeAllVideos() {
   showConfirm(CONFIG.MESSAGES.CONFIRM_REMOVE_ALL)
   .then(result => {
     if (result.isConfirmed) {
-      setRecent([]);
+      core.removeAllEntries();
+      state.currentEntryId = core.getCurrentEntryId();
+      state.playbackToken = core.getPlaybackToken();
       renderRecent();
     }
   });
 }
 
 function updateProgress() {
-  if(!state.currentVideo || !DOM.player.duration) return;
-  const percent = Math.min(100, Math.round((DOM.player.currentTime/DOM.player.duration)*100));
-  let recent = getRecent();
-  const idx = recent.findIndex(item => item.video===state.currentVideo);
-  if(idx!==-1) {
-    recent[idx].progress = percent;
-    setRecent(recent);
+  if (!state.currentEntryId || !DOM.player.duration) return;
+  // Reject late timeupdate events from a video that is no longer current.
+  if (!core.isMediaCurrent(state.playbackToken)) return;
+  const percent = Math.min(100, Math.round((DOM.player.currentTime / DOM.player.duration) * 100));
+  const written = core.recordProgress(state.currentEntryId, percent, state.playbackToken);
+  if (written) {
     renderRecent();
   }
 }
 
 function loadPlayerTime() {
-  if(!state.currentVideo || !DOM.player.duration) return;
-  let recent = getRecent();
-  const idx = recent.findIndex(item => item.video===state.currentVideo);
-  if(idx!==-1) {
-    const currentTime = (recent[idx].progress / 100) * DOM.player.duration
-    DOM.player.currentTime = currentTime;
-    
-  }
+  if (!state.currentEntryId || !DOM.player.duration) return;
+  if (!core.isMediaCurrent(state.playbackToken)) return;
+  const currentTime = core.getResumePosition(state.currentEntryId, DOM.player.duration);
+  DOM.player.currentTime = currentTime;
 }
 
 function createRecentItem(item, maxLimit) {
   const li = document.createElement("li");
   const spanTitle = document.createElement("span");
   const spanRemove = document.createElement("span");
+  li.dataset.entryId = item.id;
   li.style.background = getProgressBackground(item.progress);
   spanTitle.textContent = truncateTitle(item.title, maxLimit);
   spanTitle.className = "recent-title";
@@ -372,7 +387,7 @@ function createRecentItem(item, maxLimit) {
   spanProgress.className="recent-progress";
   spanProgress.textContent = `${item.progress||0}%`;
 
-  if(item.progress>=CONFIG.LIMITS.COMPLETED_PERCENT) {
+  if(core.isCompleted(item)) {
     spanProgress.innerHTML = '<i class="fa-solid fa-check"></i>';
   }
 
@@ -385,7 +400,7 @@ function createRecentItem(item, maxLimit) {
 
 function attachRecentEvents(item, spanTitle, spanRemove) {
   spanRemove.addEventListener("click", () => {
-    removeRecent(item.title);
+    removeRecent(item.id);
   });
 
   spanTitle.addEventListener("click", () => {
@@ -401,7 +416,7 @@ function attachRecentEvents(item, spanTitle, spanRemove) {
     if (item.subtitle) {
       if (item.subtitleType==="url") {
         DOM.subtitleUrl.value = item.subtitle;
-        isDataLoaded = true;   
+        isDataLoaded = true;
       }
       else{
         DOM.subtitleUrl.value = "";
@@ -497,8 +512,8 @@ DOM.form.addEventListener("submit", function(e) {
   e.preventDefault();
   const data = getFormData();
   if (!data) return;
+  // playVideo creates/refreshes the entry and binds the player to its id.
   playVideo(data.videoSrc, data.subtitleSrc, data.videoTitle, data.videoType, data.subtitleType);
-  saveRecent(data.videoTitle, data.videoSrc, data.videoType, data.subtitleSrc, data.subtitleType);
 });
 
 DOM.watchLaterButton.addEventListener("click", () => {
@@ -511,7 +526,13 @@ DOM.watchLaterButton.addEventListener("click", () => {
     data.subtitleSrc,
     data.subtitleType
   );
+  renderRecent();
   showAlert(CONFIG.MESSAGES.WATCH_LATER_ADDED, {icon: "success"});
+});
+
+DOM.player.addEventListener("loadstart", () => {
+  // The media now loading belongs to the latest playback generation.
+  core.markMediaReady(state.playbackToken);
 });
 
 DOM.player.addEventListener("timeupdate", () => {
@@ -540,8 +561,8 @@ DOM.skipButton.addEventListener("click", () => {
   DOM.skipButton.style.display = "none";
 });
 DOM.exportButton.addEventListener("click", () => {
-  const data = getRecent();
-  if (!data) {
+  const data = core.exportEntries();
+  if (!data.length) {
     showAlert(CONFIG.MESSAGES.EXPORT_EMPTY, {icon: "info"});
     return;
   }
@@ -558,7 +579,7 @@ DOM.exportButton.addEventListener("click", () => {
     let fileName = (result.value || CONFIG.FILES.EXPORT_DEFAULT_NAME)
     .trim()
     .replaceAll(" ", "-");
-  
+
   if (!fileName) {
     fileName = CONFIG.FILES.EXPORT_DEFAULT_NAME;
   }
@@ -585,33 +606,24 @@ DOM.importButton.addEventListener("click", () => {
   else {
     DOM.recentFile.click();
   }
-  
+
 });
 DOM.recentFile.addEventListener("change", () => {
   const file = DOM.recentFile.files[0];
   if (!file) return;
   const reader = new FileReader();
   reader.onload = () => {
-    try {
-      const parsed = JSON.parse(reader.result);
-      if (!Array.isArray(parsed)) throw new Error();
-      const isValid = parsed.every(item =>
-        item &&
-        typeof item === "object" &&
-        typeof item.title === "string" &&
-        typeof item.video === "string" &&
-        (item.videoType === "url" || item.videoType === "local") &&
-        (item.subtitle === "" || typeof item.subtitle === "string") &&
-        (item.subtitleType === "url" || item.subtitleType === "local") &&
-        typeof item.progress === "number" &&
-        item.progress >= 0 &&
-        item.progress <= 100
-      );
-      if (!isValid) throw new Error();
-      setRecent(parsed);
+    // The core validates the whole payload first and only writes storage on
+    // full success, so an invalid file leaves the existing list untouched.
+    const result = core.importFromText(reader.result);
+    if (result.ok) {
+      // The imported list replaced the old one: the running player (if any)
+      // is now detached, so its timeupdate events cannot touch old entries.
+      state.currentEntryId = core.getCurrentEntryId();
+      state.playbackToken = core.getPlaybackToken();
       renderRecent();
       showAlert(CONFIG.MESSAGES.IMPORT_SUCCESS, {icon: "success"});
-    } catch {
+    } else {
       showAlert(CONFIG.MESSAGES.IMPORT_ERROR, {icon: "error"});
     }
     DOM.recentFile.value = "";
@@ -767,7 +779,7 @@ document.addEventListener("keydown", (event) => {
           DOM.player.currentTime + 10
         );
       break;
-    
+
     case "ArrowUp":
       event.preventDefault();
       DOM.player.muted = false;
@@ -779,11 +791,11 @@ document.addEventListener("keydown", (event) => {
       DOM.player.muted = false;
       DOM.player.volume = Math.max(0, DOM.player.volume - CONFIG.LIMITS.VOLUME_STEP);
       break;
-    
+
     case "KeyM":
       DOM.player.muted = !DOM.player.muted;
       break;
-    
+
     case "KeyF":
       if (!document.fullscreenElement) {
         DOM.player.requestFullscreen?.();
@@ -791,7 +803,7 @@ document.addEventListener("keydown", (event) => {
         document.exitFullscreen?.();
       }
       break;
-    
+
     case "KeyP":
       if (document.pictureInPictureEnabled && !DOM.player.disablePictureInPicture) {
         if (document.pictureInPictureElement) {

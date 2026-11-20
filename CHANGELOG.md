@@ -11,6 +11,16 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 - Unnecessary page reload bug fixed
 - `loadFromQuery` function modified
 - `README.md` updated
+## [1.5] - 2026-11-21
+### Added
+- Stable `id` on every recent-list entry and an explicit shared "current playing entry" identity between the player and the list
+- Per-playback token so late `timeupdate` events from a previous video cannot overwrite the new video's progress
+- DOM-free `core.js` state module and automated Node test suite (`node --test tests/core.test.js`, no dependencies)
+### Changed
+- Progress writes, completion mark (>= 97%) and resume position are keyed by entry id instead of title / video URL lookups
+- Import validates the whole payload before any write (full rollback on invalid JSON, non-array or illegal fields), truncates to the first 30 entries, and detaches the running player so progress is never written to replaced entries
+- Deleting the currently playing entry keeps playback going but stops all further progress writes; replaying the same video starts a fresh entry at 0
+- `service-worker.js` modified
 ## [1.4] - 2026-10-03
 ### Added
 - `KeyP` keyboard shortcut
@@ -146,7 +156,8 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 - Load subtitle from URL
 
 
-[Unreleased]: https://github.com/sepandhaghighi/neovid/compare/v1.4...main
+[Unreleased]: https://github.com/sepandhaghighi/neovid/compare/v1.5...main
+[1.5]: https://github.com/sepandhaghighi/neovid/compare/v1.4...v1.5
 [1.4]: https://github.com/sepandhaghighi/neovid/compare/v1.3...v1.4
 [1.3]: https://github.com/sepandhaghighi/neovid/compare/v1.2...v1.3
 [1.2]: https://github.com/sepandhaghighi/neovid/compare/v1.1...v1.2

@@ -93,6 +93,48 @@ Then open your browser and visit:
 http://localhost:5005
 ```
 
+## Automated Tests
+
+The list/player state logic lives in the DOM-free [`core.js`](core.js) module and is covered by an automated test suite using the [Node.js built-in test runner](https://nodejs.org/api/test.html) — **no `npm install` or third-party dependency is required** (Node.js 18+).
+
+Run the suite from the project root with either:
+
+```console
+npm test
+```
+
+or directly:
+
+```console
+node --test tests/core.test.js tests/dom.integration.test.js
+```
+
+There are two suites:
+
+- `tests/core.test.js` — unit tests for the DOM-free state module (entry identity, playback tokens, import validation/rollback, completion threshold, legacy migration).
+- `tests/dom.integration.test.js` — loads the real `script.js` inside a sandbox with lightweight DOM/localStorage/`<video>` stubs and drives the same events the browser fires, verifying the page wiring end to end.
+
+Both suites cover the four key scenarios plus supporting guarantees:
+
+| Scenario | What is verified |
+| -------- | ---------------- |
+| Normal import | Imported list, progress percentages, completion mark (≥ 97%) and resume position all come from the backup; files with more than 30 entries keep the first 30 in export order; importing while a video plays detaches the player so no late event writes to replaced entries |
+| Invalid import rollback | Invalid JSON, non-array payloads and illegal fields (out-of-range `progress`, bad `videoType`/`subtitleType`, wrong field types) show an error and leave the existing list byte-for-byte unchanged — no partial writes |
+| Delete current entry | Playback continues but progress writes stop immediately; replaying the same video creates a brand new entry starting at 0% |
+| Rapid video switching | Late `timeupdate` events carrying an old playback token (or arriving before the new media's `loadstart`) are rejected, so the old video can never overwrite the new video's progress |
+
+### Manual verification in the browser
+
+With the local server running (`ghps`, then `http://localhost:5005`):
+
+1. **Import** — play a video to build a list, use **Export**, edit the JSON (or craft an invalid one), then **Import**:
+   - Valid file: the list, progress bars, ✓ completion marks and **Resume Last** immediately reflect the imported data.
+   - Invalid file (broken JSON / `progress: 150` / `videoType: "disk"`): an error alert appears and the original list is untouched.
+   - Start a video playing, then import a backup: the player keeps playing, but the imported list never receives progress from the old video.
+2. **Delete current** — while a video plays, remove its entry via the trash icon. The video keeps playing; reopen DevTools → Application → Local Storage and confirm `recentVideos` no longer changes as it plays. Play the same URL again: it appears as a new entry at `0%`.
+3. **Fast switching** — start video A, then immediately start video B (and C). Only the currently loaded video's entry accumulates progress; A and B keep their earlier values.
+4. **Export** — after the steps above, **Export** again and confirm the downloaded JSON exactly matches the visible list (order, ids, progress).
+
 ## Dependencies
 
 - [SweetAlert2](https://sweetalert2.github.io/) v11.26.24
