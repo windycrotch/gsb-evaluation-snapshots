@@ -73,6 +73,8 @@ import type { AppBase, CameraComponent, GraphicsDevice, Layer } from 'playcanvas
 import { captureCameraSnapshot, createPickCameraSnapshot } from '../picker';
 import type { PickCameraSnapshot } from '../picker';
 
+import { FrameHistory } from './frame-history';
+import type { FrameSignature } from './frame-history';
 import { EngineResidentSetProvider } from './resident-set';
 import type { EngineManager, ResidentSet } from './resident-set';
 import { argsWGSL, setArgsWGSL } from './shaders/args';
@@ -521,12 +523,14 @@ class SplatView {
 
     taaWrite = 0;
 
-    // whether the history holds the previous on-screen frame at the current size
-    taaHistoryValid = false;
-
     taaWidth = 0;
 
     taaHeight = 0;
+
+    // the single source of truth for whether this view's remembered frame may be reused: the
+    // temporal colour history and its matrices (history.historyValid) and the previous depth,
+    // occlusion grid and projector matrices (history.depthValid). frame-history.ts
+    readonly history = new FrameHistory();
 
     // the previous taa frame's matrices as the pass reads them, and this frame's, copied over at
     // the start of the next frame: the material holds the data arrays by reference and uploads
@@ -545,9 +549,6 @@ class SplatView {
     // the view's world transform, for the accumulation's reprojection
     readonly cameraWorld = new Mat4();
 
-    // frames since the view or the scene last changed, for converging at rest
-    restFrames = 0;
-
     // the occlusion grid: farthest depth per 8 px block (level 1), then per 32 px block (level 2)
     occGrid: StorageBuffer;
 
@@ -557,10 +558,8 @@ class SplatView {
 
     readonly reduceL2: Compute;
 
-    // the previous frame the grid and the reprojection describe; valid only when that frame
-    // rendered to the same target at the same size from the same world state
-    prevValid = false;
-
+    // the previous frame's matrices and layout the grid and the reprojection read; trust in them
+    // is held solely by history.depthValid (frame-history.ts)
     readonly prevViewProjection = new Mat4();
 
     readonly prevView = new Mat4();
@@ -578,13 +577,7 @@ class SplatView {
 
     prevFlip = 1;
 
-    prevWidth = 0;
-
-    prevHeight = 0;
-
     prevVersion = -1;
-
-    prevOrtho = false;
 
     // this frame's projection, and the splats it projected
     readonly shaderProjection = new Mat4();
@@ -727,8 +720,9 @@ class SplatView {
         for (const texture of this.taaInfo) texture.resize(4, 4);
         this.taaWidth = 0;
         this.taaHeight = 0;
-        this.taaHistoryValid = false;
-        this.restFrames = 0;
+        // the old format's textures are gone: the next frame's signature change also reports the
+        // format, but invalidate explicitly so no path can read them first
+        this.history.invalidate('history-format');
     }
 
     // render through a warp's table from now on, or unwarped (null)
@@ -745,9 +739,7 @@ class SplatView {
         this.warpWidth = map ? map.width : 0;
         this.warpHeight = map ? map.height : 0;
         // a history or a previous frame laid out otherwise would be read in the wrong places
-        this.taaHistoryValid = false;
-        this.restFrames = 0;
-        this.prevValid = false;
+        this.history.invalidate('warp');
     }
 
     get gpuBytes() {
@@ -876,12 +868,10 @@ class StochasticSplatRenderer {
 
     private reduceFormats: BindGroupFormat[] = [];
 
-    // the allocations resident when the previous frame drew, and whether any of them has gone
-    // since: only a removed splat can make the previous depth wrong (it may have hidden what is
-    // now behind it), so arrivals leave the cull on while a scene streams in
+    // the allocations resident when the previous frame drew. A missing id means a splat was
+    // removed: only that can make the previous depth wrong (it may have hidden what is now behind
+    // it), so arrivals leave the cull on while a scene streams in
     private residentAllocIds = new Set<number>();
-
-    private nodesRemoved = false;
 
     /** Whether the last frame ran the occlusion cull, for the debug panel and the harness. */
     culling = false;
@@ -1026,6 +1016,20 @@ class StochasticSplatRenderer {
      * history, so the harness can photograph converged and moving frames. Off by default.
      */
     allowQueryTaa = false;
+
+    /**
+     * Each view's current trust in its remembered frame (frame-history.ts): `historyValid` whether
+     * the temporal accumulation may reproject its previous colour and matrices, `depthValid`
+     * whether the occlusion cull and a shared stereo projection may reuse its previous depth, and
+     * `restFrames` how long the view has rested. One entry per view (the camera, then each eye).
+     */
+    get frameTrust(): { historyValid: boolean; depthValid: boolean; restFrames: number }[] {
+        return this.views.map((view) => ({
+            historyValid: view.history.historyValid,
+            depthValid: view.history.depthValid,
+            restFrames: view.history.restFrames
+        }));
+    }
 
     // compose
     private composeMesh: Mesh;
@@ -1477,10 +1481,7 @@ class StochasticSplatRenderer {
      * harness compares builds image for image).
      */
     resetHistory() {
-        for (const view of this.views) {
-            view.taaHistoryValid = false;
-            view.restFrames = 0;
-        }
+        for (const view of this.views) view.history.invalidate('reset');
         this.frameIndex = 0;
     }
 
@@ -1585,16 +1586,20 @@ class StochasticSplatRenderer {
         const { device, camera } = this;
         const cam = camera.camera;
 
-        this.nodesRemoved = false;
+        let nodesRemoved = false;
         if (changed || this.set !== set) {
             const ids = new Set(set.nodes.map((node) => node.allocId));
             for (const id of this.residentAllocIds) {
                 if (!ids.has(id)) {
-                    this.nodesRemoved = true;
+                    nodesRemoved = true;
                     break;
                 }
             }
             this.residentAllocIds = ids;
+            // A removed splat may have hidden what is now behind it, so the previous depth can no
+            // longer cull for any view. Arrivals are not reported: they never make a depth wrong,
+            // so streaming content in keeps the cull on. The colour history itself survives.
+            if (nodesRemoved) for (const view of this.views) view.history.noteNodesRemoved();
             this.source.update(set, manager);
             this.rebuildChunkTable(set);
             this.activeSplats = set.activeSplats;
@@ -1622,6 +1627,11 @@ class StochasticSplatRenderer {
         const eyes = this.stereoViews();
         if (this.stereo !== !!eyes) {
             this.stereo = !!eyes;
+            // A session starting or ending changes what every view is: the flat camera's matrices
+            // must never serve an eye, nor an eye's the flat camera, so each surviving view's
+            // remembered colour, depth and matrices are rebuilt before anything can read them
+            // (the signature's stereo flag in frameView is the per-frame backstop).
+            for (const view of this.views) view.history.invalidate('stereo');
             // the stereo switches come and go with the session
             this.setVariant(this.variantText);
         }
@@ -1666,11 +1676,10 @@ class StochasticSplatRenderer {
         this.frameSeed = taaOn ? this.frameIndex++ >>> 0 : this.userSeed;
         this.taaActive = taaOn;
 
-        // The occlusion cull reads the depth texture as the previous frame left it, so it needs
-        // that frame to have drawn to this target at this size (a resize loses the texture, a
-        // capture draws elsewhere), with no splat removed since (its depth would hide what is
-        // now behind it; arrivals are safe) and the same projection type. A capture frame is
-        // never culled and never becomes the previous frame.
+        // The occlusion cull reads the depth texture as the previous frame left it. Whether that
+        // frame drew to this target at this size, from the same projection and world state, is
+        // decided per view by FrameHistory.depthValid (frameView's canCull): a resize, a capture,
+        // a projection or stereo change, or a removed splat drop it, while arrivals do not.
         // a new world state can change what is occluded: try the test again
         if (first.prevVersion !== set.version) {
             this.cullSuspendedFrames = 0;
@@ -1777,16 +1786,11 @@ class StochasticSplatRenderer {
         return { width, height, warped };
     }
 
-    // whether the view's occlusion grid can come from its previous frame (see frame())
-    private canCull(view: SplatView, width: number, height: number, isOrtho: boolean, isQuery: boolean) {
-        return (
-            (!isQuery || this.allowQueryCull) &&
-            view.prevValid &&
-            view.prevWidth === width &&
-            view.prevHeight === height &&
-            !this.nodesRemoved &&
-            view.prevOrtho === isOrtho
-        );
+    // whether the view's occlusion grid can come from its previous frame. All the layout and
+    // world-state conditions live in FrameHistory.depthValid (size, target, projection, warp,
+    // stereo and node removal decided in beginFrame); this only adds the query policy
+    private canCull(view: SplatView, isQuery: boolean) {
+        return (!isQuery || this.allowQueryCull) && view.history.depthValid;
     }
 
     // The warp a view renders through this frame (variant warp), as the key of its table and the
@@ -1906,37 +1910,51 @@ class StochasticSplatRenderer {
         const half = taaHistory === 'half' || (taaHistory === 'auto' && eye);
         if (view.taaHalf !== half) view.setTaaHalf(half);
 
+        // The frame lifecycle's trust decision, taken before any previous-frame texture or matrix
+        // is bound. Every view runs it, a shared projection's follow eye included: it still draws
+        // and accumulates its own history, so its trust and resting frames must advance even though
+        // the lead owns the projection. The signature is everything that must match the remembered
+        // frame for its samples to be reprojected into this one. Query frames carry no target key:
+        // they are handled by the query outcome, and an allowQueryTaa capture at the history's size
+        // keeps the layout
+        const targetKey =
+            !isQuery && camera.renderTarget ? `rt:${camera.renderTarget.name ?? camera.renderTarget.id}` : null;
+        const signature: FrameSignature = {
+            width,
+            height,
+            targetKey,
+            historyHalf: half,
+            orthographic: isOrtho,
+            warpKey: view.warpKey,
+            stereo: eye
+        };
+        const historyReadable = view.history.beginFrame(
+            signature,
+            { accumulate: taaOn, moved, sceneChanged: changed, query: isQuery },
+            this.variant.taaMax
+        );
+        if (view.history.frameWanted) this.frameWanted = true;
+
         if (taaOn) {
             if (view.taaWidth !== width || view.taaHeight !== height) {
                 this.resizeHistory(view, width, height);
                 view.taaWidth = width;
                 view.taaHeight = height;
-                view.taaHistoryValid = false;
-                view.restFrames = 0;
             }
-            if (moved || changed) view.restFrames = 0;
-            else view.restFrames++;
-            if (view.restFrames < this.variant.taaMax + 2) this.frameWanted = true;
-        } else {
-            // a capture at another size does not accumulate; the next on-screen frame starts over
-            view.taaHistoryValid = false;
-            view.restFrames = 0;
+        } else if (this.variant.taa === 'off' && view.taaWidth !== 0) {
             // switched off: the history goes back to its placeholder size until it is wanted
-            if (this.variant.taa === 'off' && view.taaWidth !== 0) {
-                this.resizeHistory(view, 4, 4);
-                view.taaWidth = 0;
-                view.taaHeight = 0;
-            }
+            this.resizeHistory(view, 4, 4);
+            view.taaWidth = 0;
+            view.taaHeight = 0;
         }
 
+        // A shared projection culls only against both eyes' previous frames. The follow eye does
+        // not project, so it only contributes its depth trust; the lead checks it through eye1
         const cullMode = this.variant.cull;
-        // a shared projection culls only against both eyes' previous frames
         const culling =
-            frame.cullWanted &&
-            this.canCull(view, width, height, isOrtho, isQuery) &&
-            (!eye1 || this.canCull(eye1.view, width, height, isOrtho, isQuery));
+            projects && frame.cullWanted && this.canCull(view, isQuery) && (!eye1 || this.canCull(eye1.view, isQuery));
         if (index === 0) this.culling = culling;
-        if (culling && projects) {
+        if (culling) {
             this.reduceDepth(view, width, height);
             if (eye1) this.reduceDepth(eye1.view, width, height);
         }
@@ -2161,9 +2179,9 @@ class StochasticSplatRenderer {
             // so the new content shows within taaMoveMax frames rather than 1 / taaMax a frame
             bind(taa, 'taaParams', [
                 moved || changed ? this.variant.taaMoveMax : this.variant.taaMax,
-                view.taaHistoryValid ? 1 : 0,
+                historyReadable ? 1 : 0,
                 moved ? 1 : 0,
-                view.restFrames
+                view.history.restFrames
             ]);
             bind(taa, 'taaViewport', [width, height, 1 / width, 1 / height]);
             bind(taa, 'taaControl', [
@@ -2184,7 +2202,6 @@ class StochasticSplatRenderer {
             view.taaLastViewProjection.copy(view.viewProjection);
             view.taaLastView.copy(viewMatrix);
             view.taaLastModel.copy(set.files[0]?.modelMatrix ?? Mat4.IDENTITY);
-            view.taaHistoryValid = true;
             view.taaWrite ^= 1;
         }
 
@@ -2226,10 +2243,13 @@ class StochasticSplatRenderer {
                 });
         }
 
-        // this frame becomes the previous one, unless it is a capture
+        // this frame becomes the previous one, unless it is a capture. FrameHistory records the
+        // trust the next frame may start from; a query frame draws elsewhere and is never recorded.
+        // Every view records its own matrices, a shared projection's follow eye included: its TAA
+        // resolve reprojects through them even though the lead owns the projection
+        view.history.endFrame({ accumulate: taaOn, moved, sceneChanged: changed, query: isQuery });
         if (isQuery) {
             // the capture drew elsewhere; the on-screen depth texture is no longer this frame's
-            view.prevValid = false;
             return;
         }
         if (!eye) {
@@ -2250,11 +2270,7 @@ class StochasticSplatRenderer {
         view.prevViewport = [width, height];
         view.prevFocal = focal;
         view.prevFlip = view.target.flipY ? -1 : 1;
-        view.prevWidth = width;
-        view.prevHeight = height;
         view.prevVersion = set.version;
-        view.prevOrtho = isOrtho;
-        view.prevValid = true;
     }
 
     private resizeHistory(view: SplatView, width: number, height: number) {
