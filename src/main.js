@@ -1836,8 +1836,15 @@ class Game {
   respawn() {
     this.resetSimClock();
     const p = this.player;
+    /* Keep part of the pace, on the same terms recover() does: a reset that
+       leaves the car at a standstill on a live stage is a second punishment
+       after the one that made the player reach for R. placeAt clears the
+       whole airborne/suspension/launch state; only the forward speed is
+       worth carrying across, capped so a reset out of a 190 km/h flight does
+       not arrive back on the road still doing it. */
+    const keep = clamp(p.speed * 0.45, 0, 16);
     p.placeAt(Math.max(6, p.s - 12), 0);
-    p.vertVel = 0; p.height = 0;
+    p.vx = keep;
     this.effects.reset();
     this.hud.clearFeedback();
   }
