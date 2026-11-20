@@ -467,7 +467,8 @@ class HotVisualizer:
             self.screen.blit(txt, (self.screen_width // 2 - 45, y))
             y += 38
         elif ex.is_finalizing:
-            txt = self.font.render("Export wird fertiggestellt ...", True, (255, 200, 80))
+            label = ex.status or "Export wird fertiggestellt ..."
+            txt = self.font.render(label, True, (255, 200, 80))
             self.screen.blit(txt, (self.screen_width // 2 - txt.get_width() // 2, y))
             y += 38
         if self.notice and time.time() < self.notice_until:
@@ -525,6 +526,10 @@ class HotVisualizer:
     def start_export(self):
         fp = self.file_processor
         ex = self.export_manager
+        if ex.is_finalizing:
+            # A finalizer still owns the temp files of the previous export.
+            self.notify(ex.status or "Export wird noch fertiggestellt – bitte warten.", 8)
+            return
         if self.audio_mode != "file" or not fp.is_analyzed or fp.loading:
             self.notify("Export nur im File-Modus mit geladenem Track (A drücken).")
             return
@@ -545,9 +550,9 @@ class HotVisualizer:
         ex, fp = self.export_manager, self.file_processor
         if not ex.is_recording:
             return
-        if self.screen.get_size() != ex.size:
-            self.notify("Fenstergröße geändert - Export gestoppt")
-            self.stop_export()
+        w, h = self.screen.get_size()
+        if ex.stop_for_resize(w, h):
+            self.notify(ex.status, 8)
             return
         n = ex.frames_due(fp.get_position())
         if n > 0:
@@ -578,11 +583,12 @@ class HotVisualizer:
         while running:
             menu_open = self.ui.show_settings or self.ui.show_device_menu
             recording = ex.is_recording
+            export_busy = recording or ex.is_finalizing
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     running = False
                 elif event.type == pygame.DROPFILE:
-                    if not recording:
+                    if not export_busy:
                         self.load_paths([event.file], append=bool(fp.playlist) and self.audio_mode == "file")
                 elif event.type == pygame.KEYDOWN:
                     key = event.key
@@ -594,8 +600,16 @@ class HotVisualizer:
                     elif key == pygame.K_d: self.ui.show_device_menu = not self.ui.show_device_menu; self.ui.show_settings = False
                     elif key == pygame.K_r:
                         if recording: self.stop_export()
+                        elif ex.is_finalizing:
+                            # a finalizer still owns the temp files -> refuse clearly
+                            self.notify(ex.status or "Export wird noch fertiggestellt – bitte warten.", 8)
                         else: self.start_export()
-                    elif key == pygame.K_e: self.stop_export()
+                        recording = ex.is_recording
+                        export_busy = recording or ex.is_finalizing
+                    elif key == pygame.K_e:
+                        self.stop_export()
+                        recording = ex.is_recording
+                        export_busy = recording or ex.is_finalizing
                     elif key == pygame.K_SPACE and not menu_open: self.mode = (self.mode + 1) % len(self.mode_names)
                     elif key == pygame.K_c and not menu_open: self.color_palette_index = (self.color_palette_index + 1) % len(self.palettes)
                     elif key == pygame.K_h: self.clean_mode = not self.clean_mode
@@ -603,7 +617,7 @@ class HotVisualizer:
                         self.auto_chapter = not self.auto_chapter
                         self.notify("Kapitel-Look: " + ("an (jeder Song bekommt einen neuen Look)" if self.auto_chapter else "aus"))
                     elif key == pygame.K_f:
-                        if recording: self.notify("Vollbild-Wechsel während des Exports nicht möglich.")
+                        if export_busy: self.notify("Vollbild-Wechsel während des Exports nicht möglich.")
                         else:
                             fullscreen = not fullscreen
                             self.screen = pygame.display.set_mode((0, 0) if fullscreen else (1200, 800), pygame.FULLSCREEN if fullscreen else 0)
@@ -618,14 +632,14 @@ class HotVisualizer:
                     elif key == pygame.K_i: self.settings.show_fps = not self.settings.show_fps
                     elif key == pygame.K_o: self.settings.show_audio_info = not self.settings.show_audio_info
                     elif key == pygame.K_l:
-                        if recording: self.notify("Während des Exports nicht möglich (E = Export stoppen).")
+                        if export_busy: self.notify("Während des Exports nicht möglich (E = Export stoppen).")
                         elif self.audio_mode != "live":
                             fp.stop()
                             self.audio_mode = "live"
                             self.audio_processor.start_stream()
                             print("Switched to Live Mode.")
                     elif key == pygame.K_a:
-                        if recording: self.notify("Während des Exports nicht möglich (E = Export stoppen).")
+                        if export_busy: self.notify("Während des Exports nicht möglich (E = Export stoppen).")
                         elif not fp.loading:
                             files = self.ask_files()
                             if files:
@@ -635,10 +649,10 @@ class HotVisualizer:
                         fp.stop()
                         self.stop_export()
                     elif key == pygame.K_n and self.audio_mode == "file":
-                        if recording: self.notify("Überspringen während des Exports nicht möglich.")
+                        if export_busy: self.notify("Überspringen während des Exports nicht möglich.")
                         elif not fp.next_track(): self.notify("Das war der letzte Titel.")
                     elif key == pygame.K_b and self.audio_mode == "file":
-                        if recording: self.notify("Zurückspringen während des Exports nicht möglich.")
+                        if export_busy: self.notify("Zurückspringen während des Exports nicht möglich.")
                         else: fp.prev_track()
                     elif self.ui.show_device_menu:
                         if key == pygame.K_UP: self.ui.selected_menu_item = max(0, self.ui.selected_menu_item - 1)
@@ -669,7 +683,11 @@ class HotVisualizer:
                     self._seen_serial = fp.track_serial
                     if ex.is_recording and fp.is_analyzed:
                         label = f"{fp.artist} - {fp.title}" if fp.artist else fp.title
-                        ex.begin_track(fp.file_path, fp.duration, label)
+                        pos = fp.get_position()
+                        # only a start at 0:00 becomes a chapter; pause/resume or
+                        # restarting the same entry is rejected inside begin_track
+                        ex.begin_track(fp.file_path, fp.duration, label,
+                                       index=fp.index, started_at=pos or 0.0)
                 if ex.is_recording and fp.ended_all:
                     self.stop_export(natural_end=True)
 

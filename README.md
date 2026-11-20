@@ -95,9 +95,11 @@ Two input modes supported:
 * `R` starts the export **from the beginning of the current song** and records the playlist until the end. `E` (or `R` again) stops it early.
 * The exported video always shows only the visualization + title/artist (no UI), the REC indicator is for your eyes only.
 * Audio is the **original file(s)**, not a microphone recording. Video and audio stay in sync even if your PC renders below 60 FPS or you pause.
-* Every song becomes an MP4 **chapter** (visible in VLC, mpv, ...).
-* Result: `exports/visualizer_<timestamp>.mp4` (an `ffmpeg_*.log` is kept only if something fails).
-* While exporting, skip/load/fullscreen are disabled to keep the file consistent.
+* Every song becomes an MP4 **chapter** (visible in VLC, mpv, ...). A chapter is registered once per song and only when that song actually starts at 0:00 — pausing/resuming or restarting the same song does not create a second chapter.
+* Stopping early ends the video at the stop position (not at the song's end); letting the whole playlist play out fills the video up to the end of the last song.
+* Result: `exports/visualizer_<timestamp>.mp4`. On success the temp video, chapter metadata and log are removed. If FFmpeg fails during the merge, the temp video, metadata and `ffmpeg_*.log` are kept so the cause can be inspected; the UI shows the failure reason.
+* Pressing `R` while the export is still being finalized is refused with a visible message (the temp files of the running export are never touched). A finished export can be started again normally.
+* While exporting, skip/load/fullscreen are disabled to keep the file consistent; natural track transitions still work. A window-size change stops the export through the same finalize path.
 
 
 </details>
@@ -139,6 +141,7 @@ The project is modular for better organization and maintainability:
 * [`particle.py`](particle.py) – Defines the **`Particle`** class for the Beat Explosion mode.
 * [`detector.py`](detector.py) – Generates **`system_report.json`** with required FFmpeg/Audio paths -needed- based on OS (must run first for export to work).
 * [`exporter.py`](exporter.py) – **`ExportManager`**: records frames, concatenates the original audio of all played songs, writes chapters and muxes everything into one MP4 via FFmpeg.
+  Offline tests (fake FFmpeg, no audio device needed): `python -m unittest discover -s tests -v`.
 * [`decoder.py`](decoder.py) – FFmpeg helpers (`merge_video_audio`, device list). Also usable standalone: `python decoder.py merge video.mp4 audio.mp3`.
 
 
