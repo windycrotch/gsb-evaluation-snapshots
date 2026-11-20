@@ -14,10 +14,12 @@ declare class CommandDispatcher {
     handlers: Record<string, Registration>;
     queue: QueuedCommand[];
     private reply;
+    private seen_ids;
     constructor(reply: (reply: Reply) => void);
     register(cmd: string, timing: HandlerTiming, handler: CommandHandler): void;
     handle(command: Command): void;
     drain(): void;
+    fail_pending(code: string, message: string): void;
     private run;
     private to_error;
     private describe;

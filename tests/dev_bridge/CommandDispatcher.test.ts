@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { CommandDispatcher } from '../../src/dev_bridge/CommandDispatcher';
+import { SceneEditor } from '../../src/dev_bridge/SceneEditor';
 
 describe('CommandDispatcher', () =>
 {
@@ -123,5 +124,132 @@ describe('CommandDispatcher', () =>
     dispatcher.handle({ id: 'c1', cmd: 'status' });
 
     await vi.waitFor(() => expect(reply).toHaveBeenCalledWith({ id: 'c1', ok: true, result: 0 }));
+  });
+
+  it('runs commands that arrive during drain on the next round, not the current one', async () =>
+  {
+    const reply = vi.fn();
+    const dispatcher = new CommandDispatcher(reply);
+    const seen: string[] = [];
+
+    dispatcher.register('step', 'frame_end', (args) =>
+    {
+      seen.push(args.label as string);
+
+      if (args.label === 'a')
+      {
+        dispatcher.handle({ id: 'c2', cmd: 'step', args: { label: 'b' } });
+      }
+
+      return args.label;
+    });
+
+    dispatcher.handle({ id: 'c1', cmd: 'step', args: { label: 'a' } });
+    dispatcher.drain();
+
+    await vi.waitFor(() => expect(reply).toHaveBeenCalledTimes(1));
+    expect(seen).toEqual(['a']);
+
+    dispatcher.drain();
+
+    await vi.waitFor(() => expect(reply).toHaveBeenCalledTimes(2));
+    expect(seen).toEqual(['a', 'b']);
+  });
+
+  it('rejects a repeated id with duplicate_command and runs the handler only once', async () =>
+  {
+    const reply = vi.fn();
+    const dispatcher = new CommandDispatcher(reply);
+    const handler = vi.fn(() => 'png');
+
+    dispatcher.register('capture', 'frame_end', handler);
+    dispatcher.handle({ id: 'c1', cmd: 'capture', args: {} });
+    dispatcher.handle({ id: 'c1', cmd: 'capture', args: {} });
+
+    await vi.waitFor(() => expect(reply).toHaveBeenCalledTimes(1));
+    expect(reply).toHaveBeenCalledWith({
+      id: 'c1',
+      ok: false,
+      error: { code: 'duplicate_command', message: "Command id 'c1' was already received." }
+    });
+
+    dispatcher.drain();
+
+    await vi.waitFor(() => expect(reply).toHaveBeenCalledTimes(2));
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(reply).toHaveBeenCalledWith({ id: 'c1', ok: true, result: 'png' });
+  });
+
+  it('rejects a repeated id of an immediate command without running it twice', async () =>
+  {
+    const reply = vi.fn();
+    const dispatcher = new CommandDispatcher(reply);
+    const handler = vi.fn(() => 'ok');
+
+    dispatcher.register('status', 'immediate', handler);
+    dispatcher.handle({ id: 'c1', cmd: 'status', args: {} });
+    dispatcher.handle({ id: 'c1', cmd: 'status', args: {} });
+
+    await vi.waitFor(() => expect(reply).toHaveBeenCalledTimes(2));
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(reply).toHaveBeenCalledWith({ id: 'c1', ok: true, result: 'ok' });
+    // The duplicate is rejected synchronously, before the async success reply.
+    expect(reply.mock.calls[0][0]).toMatchObject({ id: 'c1', ok: false, error: { code: 'duplicate_command' } });
+  });
+
+  it('fails queued commands with the given code and never runs them', async () =>
+  {
+    const reply = vi.fn();
+    const dispatcher = new CommandDispatcher(reply);
+    const handler = vi.fn(() => 'png');
+
+    dispatcher.register('capture', 'frame_end', handler);
+    dispatcher.handle({ id: 'c1', cmd: 'capture', args: {} });
+    dispatcher.handle({ id: 'c2', cmd: 'capture', args: {} });
+
+    dispatcher.fail_pending('connection_closed', 'closed');
+
+    expect(reply).toHaveBeenCalledTimes(2);
+    expect(reply).toHaveBeenCalledWith({ id: 'c1', ok: false, error: { code: 'connection_closed', message: 'closed' } });
+    expect(reply).toHaveBeenCalledWith({ id: 'c2', ok: false, error: { code: 'connection_closed', message: 'closed' } });
+
+    reply.mockClear();
+    dispatcher.drain();
+
+    expect(handler).not.toHaveBeenCalled();
+    expect(reply).not.toHaveBeenCalled();
+  });
+
+  it('forgets seen ids on fail_pending so a new connection can reuse them', async () =>
+  {
+    const reply = vi.fn();
+    const dispatcher = new CommandDispatcher(reply);
+
+    dispatcher.register('capture', 'frame_end', () => 'png');
+    dispatcher.handle({ id: 'c1', cmd: 'capture', args: {} });
+    dispatcher.fail_pending('connection_closed', 'closed');
+
+    dispatcher.handle({ id: 'c1', cmd: 'capture', args: {} });
+    dispatcher.drain();
+
+    await vi.waitFor(() => expect(reply).toHaveBeenCalledWith({ id: 'c1', ok: true, result: 'png' }));
+  });
+
+  it('passes a handler error code through the queue instead of succeeding silently', async () =>
+  {
+    const reply = vi.fn();
+    const dispatcher = new CommandDispatcher(reply);
+    const editor = new SceneEditor();
+    const root = { uuid: 'root', name: 'root', children: [] };
+
+    dispatcher.register('set_object', 'frame_end', (args) => editor.set(root, args, args));
+
+    dispatcher.handle({ id: 'c1', cmd: 'set_object', args: { position: [1, 2, 3] } });
+    dispatcher.handle({ id: 'c2', cmd: 'set_object', args: { name: 'ghost', position: [1, 2, 3] } });
+    dispatcher.drain();
+
+    await vi.waitFor(() => expect(reply).toHaveBeenCalledTimes(2));
+    expect(reply.mock.calls[0][0]).toMatchObject({ id: 'c1', ok: false, error: { code: 'not_found' } });
+    expect(reply.mock.calls[1][0]).toMatchObject({ id: 'c2', ok: false, error: { code: 'not_found' } });
   });
 });

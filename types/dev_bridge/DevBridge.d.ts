@@ -21,6 +21,7 @@ declare class DevBridge {
     private parse_frame;
     private as_text;
     private send_reply;
+    private fail_pending;
     private schedule_retry;
 }
 export { DevBridge };

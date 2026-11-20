@@ -23,12 +23,14 @@ class CommandDispatcher
   queue: QueuedCommand[];
 
   private reply: (reply: Reply) => void;
+  private seen_ids: Set<string>;
 
   constructor(reply: (reply: Reply) => void)
   {
     this.reply = reply;
     this.handlers = {};
     this.queue = [];
+    this.seen_ids = new Set();
   }
 
   register(cmd: string, timing: HandlerTiming, handler: CommandHandler)
@@ -38,6 +40,21 @@ class CommandDispatcher
 
   handle(command: Command)
   {
+    // One id runs once per connection: a retransmitted command must not
+    // mutate the scene a second time.
+    if (this.seen_ids.has(command.id))
+    {
+      this.reply({
+        id: command.id,
+        ok: false,
+        error: { code: 'duplicate_command', message: `Command id '${command.id}' was already received.` }
+      });
+
+      return;
+    }
+
+    this.seen_ids.add(command.id);
+
     const registration = this.handlers[command.cmd];
     const args = command.args === undefined ? {} : command.args;
 
@@ -62,7 +79,9 @@ class CommandDispatcher
   }
 
   // Called from MainApplication.on_frame_end() so rendering and mutation
-  // never happen part-way through a frame.
+  // never happen part-way through a frame. The queue is swapped out before
+  // anything runs, so a command arriving while this drains waits for the
+  // next frame instead of inserting into the current round.
   drain()
   {
     const queued = this.queue;
@@ -71,6 +90,23 @@ class CommandDispatcher
     for (const command of queued)
     {
       this.run(command.id, command.args, command.handler);
+    }
+  }
+
+  // DevBridge calls this when the connection closes or the bridge is
+  // disposed. Queued commands belong to the dead connection: they fail
+  // loudly here instead of hanging forever, and never run against the stale
+  // scene a later connection would see. The next connection starts with an
+  // empty queue and no remembered ids.
+  fail_pending(code: string, message: string)
+  {
+    const queued = this.queue;
+    this.queue = [];
+    this.seen_ids.clear();
+
+    for (const command of queued)
+    {
+      this.reply({ id: command.id, ok: false, error: { code, message } });
     }
   }
 

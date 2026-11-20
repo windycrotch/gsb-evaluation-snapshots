@@ -53,6 +53,10 @@ class DevBridge
     this.disposed = true;
     window.clearTimeout(this.retry_timer);
 
+    // Fail the queued commands before closing, while the failure replies
+    // can still reach the caller on the open socket.
+    this.fail_pending();
+
     if (this.socket !== null)
     {
       this.socket.onclose = null;
@@ -91,6 +95,9 @@ class DevBridge
         this.socket = null;
       }
 
+      // The socket is already closed, so these replies only resolve the
+      // pending commands; they cannot reach the caller over the wire.
+      this.fail_pending();
       this.schedule_retry();
     };
 
@@ -178,6 +185,11 @@ class DevBridge
     }
 
     this.socket.send(JSON.stringify(reply));
+  }
+
+  private fail_pending()
+  {
+    this.dispatcher.fail_pending('connection_closed', 'The dev bridge connection closed before this command ran.');
   }
 
   private schedule_retry()

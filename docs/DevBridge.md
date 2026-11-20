@@ -43,6 +43,7 @@ ohzi-mcp server                          browser
 'welcome' / 'refused' ──►  console.info / console.warn
 { id, cmd, args } ──►  look up cmd
                          ├─ unknown ─────► reply unknown_command
+                         ├─ known id ────► reply duplicate_command
                          ├─ 'immediate' ─► run handler(args) now
                          └─ 'frame_end' ─► queue
                                              │
@@ -50,7 +51,9 @@ ohzi-mcp server                          browser
                                              └─► bridge.on_frame_end() runs the queue
       ◄── { id, ok: true, result }  or  { id, ok: false, error: { code, message } }
 
-socket closed ──► reconnect every 2 s until dispose()
+socket closed ──► queued commands fail with connection_closed, then
+                  reconnect every 2 s until dispose(); the new connection
+                  starts with an empty queue
 ```
 
 ---
@@ -76,6 +79,9 @@ The constructor takes no parameters. Nothing connects until `init()`.
 
 - Register anything that changes what renders (transforms, camera, render mode, captures) as `frame_end`, so it never lands between `update()` and the render. Reads, and handlers that wait on real time like input, can be `immediate`.
 - A handler that throws or rejects replies with its error's `code`, or `handler_failed` when it has none. Replies are dropped while the socket is not open, and frames without a string `id` and `cmd` are ignored.
+- The `frame_end` queue belongs to the connection that filled it. When the socket closes or the bridge is disposed, every queued command fails with `connection_closed` instead of hanging, and a reconnected socket starts with an empty queue — a stale command never runs against the new scene state. `dispose()` fails the queue before closing, so those replies still reach the caller.
+- A command `id` runs at most once per connection: a retransmitted command is answered with `duplicate_command` and its handler does not run again. Ids are forgotten when the connection drops, so a new connection may reuse them.
+- Queued commands run in arrival order, and a command that arrives while the queue drains waits for the next frame rather than joining the current round.
 - A closed socket, including a server that is not running yet, retries every 2 seconds, silently. `PROTOCOL_VERSION` in `dev_bridge/protocol.ts` must match `mcp/src/protocol.ts`; otherwise the server answers `refused` and the bridge logs a warning.
 
 ---

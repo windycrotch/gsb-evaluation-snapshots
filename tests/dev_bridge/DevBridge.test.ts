@@ -179,6 +179,27 @@ describe('DevBridge commands', () =>
     await vi.waitFor(() => expect(latest().sent.length).toBe(2));
     expect(JSON.parse(latest().sent[1]).result).toBe('png');
   });
+
+  it('replies duplicate_command to a repeated id and runs the handler once', async () =>
+  {
+    const bridge = new DevBridge();
+    bridge.init({ port: 7317, app_info: () => app_info });
+    const handler = vi.fn(() => 'png');
+    bridge.register('capture', 'frame_end', handler);
+
+    latest().open_it();
+    latest().receive({ id: 'c1', cmd: 'capture', args: {} });
+    latest().receive({ id: 'c1', cmd: 'capture', args: {} });
+
+    await vi.waitFor(() => expect(latest().sent.length).toBe(2));
+    expect(JSON.parse(latest().sent[1])).toMatchObject({ id: 'c1', ok: false, error: { code: 'duplicate_command' } });
+
+    bridge.on_frame_end();
+
+    await vi.waitFor(() => expect(latest().sent.length).toBe(3));
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(latest().sent[2])).toEqual({ id: 'c1', ok: true, result: 'png' });
+  });
 });
 
 describe('DevBridge reconnection', () =>
@@ -217,5 +238,79 @@ describe('DevBridge reconnection', () =>
     vi.advanceTimersByTime(10000);
 
     expect(FakeSocket.instances.length).toBe(1);
+  });
+});
+
+describe('DevBridge queue lifecycle', () =>
+{
+  it('rejects queued frame_end commands with connection_closed on dispose', async () =>
+  {
+    const bridge = new DevBridge();
+    bridge.init({ port: 7317, app_info: () => app_info });
+    const handler = vi.fn(() => 'png');
+    bridge.register('capture', 'frame_end', handler);
+
+    latest().open_it();
+    latest().receive({ id: 'c1', cmd: 'capture', args: {} });
+
+    bridge.dispose();
+
+    expect(latest().sent.length).toBe(2);
+    expect(JSON.parse(latest().sent[1])).toMatchObject({
+      id: 'c1',
+      ok: false,
+      error: { code: 'connection_closed' }
+    });
+
+    bridge.on_frame_end();
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('never runs commands queued on a connection that dropped', async () =>
+  {
+    const bridge = new DevBridge();
+    bridge.init({ port: 7317, app_info: () => app_info });
+    const handler = vi.fn(() => 'png');
+    bridge.register('capture', 'frame_end', handler);
+
+    latest().open_it();
+    latest().receive({ id: 'c1', cmd: 'capture', args: {} });
+
+    latest().close();
+    bridge.on_frame_end();
+
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('starts the queue empty after a reconnect', async () =>
+  {
+    const bridge = new DevBridge();
+    bridge.init({ port: 7317, app_info: () => app_info });
+    const handler = vi.fn(() => 'png');
+    bridge.register('capture', 'frame_end', handler);
+
+    latest().open_it();
+    latest().receive({ id: 'c1', cmd: 'capture', args: {} });
+    latest().close();
+
+    vi.advanceTimersByTime(2000);
+    expect(FakeSocket.instances.length).toBe(2);
+
+    latest().open_it();
+    bridge.on_frame_end();
+
+    // Only the hello of the new connection was sent: the stale command did
+    // not run, and no reply for it reached the new socket.
+    expect(handler).not.toHaveBeenCalled();
+    expect(latest().sent.length).toBe(1);
+    expect(JSON.parse(latest().sent[0]).event).toBe('hello');
+
+    // The reused id is accepted again on the new connection.
+    latest().receive({ id: 'c1', cmd: 'capture', args: {} });
+    bridge.on_frame_end();
+
+    await vi.waitFor(() => expect(latest().sent.length).toBe(2));
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(latest().sent[1])).toEqual({ id: 'c1', ok: true, result: 'png' });
   });
 });
