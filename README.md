@@ -14,6 +14,21 @@ Install dependencies and start dev server:
 npm i && npm run dev
 ```
 
+### Testing
+
+Unit tests run offline under Node and need no browser or audio device:
+
+```
+npm test          # vitest run, all unit suites
+npm test -- tests/core        # just the transport/player suites
+npm test -- tests/audio       # engine, freeze worklet and integration suites
+```
+
+The audio suites install small fake Web Audio globals (`tests/audio/fakes.ts`)
+and load the real freeze worklet with a stubbed `AudioWorkletProcessor`, so the
+DSP and the engine's node/message bookkeeping are exercised for real. Playwright
+tests (`npm run e2e`) need a local Chrome and are not part of `npm test`.
+
 ### Contribution
 
 If you'd like see or work on a new feature, send me a message at rwq (at) cornell (dot) edu.

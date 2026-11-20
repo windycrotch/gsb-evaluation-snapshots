@@ -26,26 +26,43 @@ class FreezeProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
     this.port.onmessage = ({ data }: MessageEvent<FreezeMessage>) => {
-      if (data.type === "load") this.channels = data.channels;
-      else if (data.type === "active") this.active = data.active;
-      else {
+      if (data.type === "load") {
+        this.channels = data.channels;
+        this.rebuild();
+      } else if (data.type === "active") {
+        this.active = data.active;
+        if (this.active && this.voices.length === 0) this.rebuild();
+      } else {
         this.target = data.position * sampleRate;
-        if (data.jump) this.reset();
+        if (data.jump || this.voices.length === 0) this.reset();
       }
     };
   }
 
+  private rebuild() {
+    this.voices = [];
+    this.frames = [];
+    this.next = [];
+    this.read = 0;
+    this.hop = 0;
+    if (this.channels.length === 0) return;
+    this.reset();
+  }
+
   private reset() {
+    const count = this.channels.length;
+    if (count === 0) return;
     this.voices = this.channels.map(() => createFreezeVocoder(WINDOW, SPREAD_SECONDS * sampleRate));
-    this.hop = this.voices[0]?.hop ?? 0;
+    this.hop = this.voices[0].hop;
     this.position = this.target;
     this.frames = this.voices.map((v, c) => Float32Array.from(v.frame(this.channels[c], this.position)));
+    this.next = this.voices.map((v) => new Float32Array(v.hop));
     this.read = 0;
   }
 
   process(_inputs: Float32Array[][], outputs: Float32Array[][]) {
     const out = outputs[0];
-    if (!this.active || this.voices.length === 0) return true;
+    if (!this.active || this.voices.length === 0 || this.hop <= 0) return true;
     const block = out[0].length;
     const glide = 1 - Math.exp(-block / (GLIDE_SECONDS * sampleRate));
     this.position += (this.target - this.position) * glide;

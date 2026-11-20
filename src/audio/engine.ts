@@ -28,6 +28,7 @@ class WebAudioEngine implements AudioEngine {
   private tone: OscillatorNode | null = null;
   private last: Playback | null = null;
   private idle: ReturnType<typeof setTimeout> | undefined;
+  private disposed = false;
 
   constructor(ctx: AudioContext, buffer: AudioBuffer) {
     this.ctx = ctx;
@@ -54,6 +55,7 @@ class WebAudioEngine implements AudioEngine {
   latency = () => STRETCH_LATENCY + outputDelay(this.ctx);
 
   render(p: Playback) {
+    if (this.disposed) return;
     const prev = this.last;
     this.last = p;
     if (p.mode !== "silent") void this.ctx.resume();
@@ -84,7 +86,8 @@ class WebAudioEngine implements AudioEngine {
     return {
       binHz: this.ctx.sampleRate / ANALYSER_SIZE,
       read: () => {
-        analyser.getFloatFrequencyData(data);
+        if (this.disposed) data.fill(-Infinity);
+        else analyser.getFloatFrequencyData(data);
         return data;
       },
       close: () => this.limiter.disconnect(analyser),
@@ -92,16 +95,16 @@ class WebAudioEngine implements AudioEngine {
   }
 
   setPitch(semitones: Semitones) {
-    this.stretch.pitchSemitones.value = semitones;
+    if (!this.disposed) this.stretch.pitchSemitones.value = semitones;
   }
 
   setVolume(gain: LinearGain) {
-    this.gain.gain.value = gain;
+    if (!this.disposed) this.gain.gain.value = gain;
   }
 
   playTone(frequency: Hertz | null) {
-    this.tone?.stop();
-    this.tone = null;
+    if (this.disposed) return;
+    this.stopTone();
     if (frequency === null) return;
     void this.ctx.resume();
     const level = this.ctx.createGain();
@@ -113,9 +116,14 @@ class WebAudioEngine implements AudioEngine {
   }
 
   dispose() {
-    this.stopSource();
-    this.playTone(null);
+    if (this.disposed) return;
+    this.disposed = true;
+    this.last = null;
     clearTimeout(this.idle);
+    this.idle = undefined;
+    this.stopSource();
+    this.stopTone();
+    this.silenceFreeze();
     this.post({ type: "active", active: false });
     for (const node of [this.freeze, this.freezeGain, this.stretch, this.gain, this.limiter]) node.disconnect();
   }
@@ -134,9 +142,27 @@ class WebAudioEngine implements AudioEngine {
   }
 
   private stopSource() {
-    this.source?.stop();
-    this.source?.disconnect();
+    const source = this.source;
     this.source = null;
+    if (!source) return;
+    try {
+      source.stop();
+    } catch {
+      // already stopped or never started
+    }
+    source.disconnect();
+  }
+
+  private stopTone() {
+    const tone = this.tone;
+    this.tone = null;
+    if (!tone) return;
+    try {
+      tone.stop();
+    } catch {
+      // already stopped
+    }
+    tone.disconnect();
   }
 
   private fadeFreeze(on: boolean) {
@@ -146,11 +172,27 @@ class WebAudioEngine implements AudioEngine {
     g.setValueAtTime(g.value, now);
     g.linearRampToValueAtTime(on ? 1 : 0, now + FADE);
     clearTimeout(this.idle);
+    this.idle = undefined;
     if (on) this.post({ type: "active", active: true });
-    else this.idle = setTimeout(() => this.post({ type: "active", active: false }), FADE * 2000);
+    else
+      this.idle = setTimeout(() => {
+        this.idle = undefined;
+        if (!this.disposed) this.post({ type: "active", active: false });
+      }, FADE * 2000);
+  }
+
+  private silenceFreeze() {
+    const now = this.ctx.currentTime;
+    const g = this.freezeGain.gain;
+    g.cancelScheduledValues(now);
+    g.setValueAtTime(0, now);
   }
 
   private post(message: FreezeMessage, transfer: Transferable[] = []) {
-    this.freeze.port.postMessage(message, transfer);
+    try {
+      this.freeze.port.postMessage(message, transfer);
+    } catch {
+      // the worklet is gone (disposed); nothing left to notify
+    }
   }
 }
