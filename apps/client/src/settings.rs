@@ -1,0 +1,123 @@
+//! Per-device client settings, stored in `$XDG_CONFIG_HOME/hyperplayer/settings.json`.
+//!
+//! Library state (queue, playlists) lives on the server; only what belongs to
+//! this machine is kept here, including the id the server knows the device by.
+
+use std::{
+    fs,
+    path::PathBuf,
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Settings {
+    /// Identifies this device's play queue on the server.
+    pub device_id: String,
+    /// Where the music comes from: `local` (this computer's, through the library engine the
+    /// player runs), `server`, or empty until chosen (a server, if one was signed in to).
+    pub mode: String,
+    /// Server URL and account last signed in to (the token itself is in the keyring).
+    pub server: String,
+    pub username: String,
+    /// The folder the standalone library started with, chosen at its first start (empty:
+    /// the usual Music folder, as before the choice existed).
+    pub music_folder: String,
+    /// The admin chose not to register an everyday user from this device.
+    pub onboarding_skipped: bool,
+    pub volume: f32,
+    /// `auto`, `original` or `data-saver`.
+    pub quality: String,
+    /// Let the desktop draw the title bar instead of our own (applies at the next start).
+    pub system_title_bar: bool,
+    /// The language to show, as a code (`en`, `it`); empty follows the system's.
+    pub language: String,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            device_id: new_device_id(),
+            mode: String::new(),
+            server: String::new(),
+            username: String::new(),
+            music_folder: String::new(),
+            onboarding_skipped: false,
+            volume: 0.8,
+            quality: "auto".into(),
+            system_title_bar: false,
+            language: String::new(),
+        }
+    }
+}
+
+fn new_device_id() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let mixed = nanos ^ ((std::process::id() as u128) << 64);
+    format!("dev-{:024x}", mixed & ((1u128 << 96) - 1))
+}
+
+fn path() -> Option<PathBuf> {
+    Some(crate::dirs::config_dir()?.join("settings.json"))
+}
+
+impl Settings {
+    /// The music on this computer, through the player's own library engine.
+    pub fn is_local(&self) -> bool {
+        self.mode == "local"
+    }
+
+    /// Loads settings, creating (and saving) a device id on first run.
+    pub fn load() -> Self {
+        let loaded = path()
+            .and_then(|p| fs::read_to_string(p).ok())
+            .and_then(|s| serde_json::from_str::<Settings>(&s).ok());
+        match loaded {
+            Some(s) if !s.device_id.is_empty() => s,
+            _ => {
+                let s = Settings::default();
+                s.save();
+                s
+            }
+        }
+    }
+
+    pub fn save(&self) {
+        let Some(p) = path() else { return };
+        if let Some(dir) = p.parent() {
+            let _ = fs::create_dir_all(dir);
+        }
+        if let Ok(json) = serde_json::to_string_pretty(self)
+            && let Err(e) = fs::write(&p, json)
+        {
+            eprintln!("saving {}: {e}", p.display());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn device_ids_match_the_server_pattern() {
+        let id = new_device_id();
+        assert!(id.len() >= 8 && id.len() <= 64);
+        assert!(
+            id.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            "{id}"
+        );
+    }
+
+    #[test]
+    fn missing_fields_fall_back_to_defaults() {
+        let s: Settings = serde_json::from_str(r#"{"deviceId":"dev-1234abcd"}"#).unwrap();
+        assert_eq!(s.device_id, "dev-1234abcd");
+        assert_eq!(s.quality, "auto");
+    }
+}

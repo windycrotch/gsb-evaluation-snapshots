@@ -1,0 +1,22 @@
+[package]
+name = "hyperplayer-service"
+version = "0.7.0"
+edition = "2024"
+description = "Runs the HyperPlayer server as a Windows service"
+license = "GPL-3.0-or-later"
+publish = false
+
+[[bin]]
+name = "hyperplayer-service"
+path = "src/main.rs"
+
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.8"
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_NetworkManagement_WNet",
+  "Win32_System_SystemInformation",
+] }
+
+[build-dependencies]
+embed-resource = "3"
