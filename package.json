@@ -1,0 +1,80 @@
+{
+  "name": "tslfx",
+  "version": "0.6.0",
+  "license": "MIT",
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "scripts": {
+    "dev": "portless tslfx next dev",
+    "build": "next build",
+    "start": "serve out",
+    "format": "bun fmt",
+    "format:check": "bun fmt --check",
+    "lint": "oxlint .",
+    "lint:fix": "oxlint --fix .",
+    "typecheck": "bun check",
+    "warden": "warden",
+    "all": "bun run format:check && bun run lint && bun run typecheck && bun run warden",
+    "tsup": "tsup --tsconfig tsup.tsconfig.json",
+    "pub": "bun run tsup && npm publish",
+    "prepare": "husky"
+  },
+  "devDependencies": {
+    "@react-three/drei": "10.7.7",
+    "@react-three/fiber": "9.4.2",
+    "@tailwindcss/postcss": "^4.3.0",
+    "@types/node": "25.7.0",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@types/three": "0.182.0",
+    "@verekia/warden": "0.0.6",
+    "babel-plugin-react-compiler": "1.0.0",
+    "husky": "9.1.7",
+    "leva": "0.10.1",
+    "next": "16.4.6",
+    "oxlint": "1.63.0",
+    "portless": "0.13.0",
+    "postcss": "8.5.14",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "serve": "14.2.5",
+    "tailwindcss": "4.3.0",
+    "three": "0.182.0",
+    "tsup": "8.5.1",
+    "typescript": "6.0.3",
+    "zustand": "5.0.9"
+  },
+  "peerDependencies": {
+    "three": ">=0.182.0"
+  },
+  "overrides": {
+    "three": "0.182.0"
+  },
+  "engines": {
+    "bun": "1.4.4"
+  },
+  "packageManager": "bun@1.4.4",
+  "patchedDependencies": {
+    "three@0.182.0": "patches/three@0.182.0.patch"
+  },
+  "tsup": {
+    "entry": [
+      "src/shaders/index.ts"
+    ],
+    "clean": true,
+    "format": [
+      "cjs",
+      "esm"
+    ],
+    "dts": true
+  }
+}
