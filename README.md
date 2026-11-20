@@ -984,16 +984,25 @@ sky.set({ ground: 'sea' });            // the sea's variant: sky.settled is fals
 if (await sky.whenSettled()) bake();   // true once it has linked and been drawn
 ```
 
-`settled` goes false on a `set()` or `jump()` that needs a variant not yet
+`settled` goes false the moment a `set()` or `jump()` needs a variant not yet
 linked, and true again once it has linked and a frame has been drawn with it
-(with no loop running — a still frame, `autoStart: false` — as soon as it
-links). `onSettled` fires on each turn to true; a `set()` that needs nothing new
-fires nothing. Where the sky can never draw — no WebGL, or a shader that would
-not compile — `onSettled(false)` fires along with `onReady(false)`, and
-`whenSettled()` resolves `false`, as it does for a sky disposed while waiting.
+(with no loop running — a still frame, `autoStart: false` — as soon as it links
+and a still frame has been redrawn with it). `onSettled` fires once on each turn
+to true; a `set()` that needs nothing new fires nothing. The three ways a sky is
+driven agree on this: a running loop's `set()` (said from the first frame with
+the variant in it), a still frame under `autoStart: false` driven only by
+`jump()` (redrawn at the same moment when the variant lands), and reduced
+motion's single frame. A resize clears the canvas, so a still frame is redrawn at
+the same moment — and if a variant was still linking then, the redraw that lands
+with it is the last thing on the canvas. Where the sky can never draw — no WebGL,
+a shader that would not compile, or a variant the driver refuses — `onSettled(false)`
+fires once and `whenSettled()` resolves `false`; so it does for a sky disposed
+before or while a caller is waiting. No waiter is left hanging.
 It costs a frame nothing to speak of: a look over the variants in hand. Driving
 `AtmosphereRenderer` yourself, `renderer.isSettled(state)` answers the same
-after `renderer.prepare(state)`; under `compile: 'sync'` it is always true.
+after `renderer.prepare(state)`; under `compile: 'sync'` it is always true, and
+`renderer.variantRefused(state)` says whether a variant the state needs is one
+the driver refused.
 Give `prepare` the camera as well (`renderer.prepare(state, camera)`) and it
 starts the program a frame of that view asks for ahead of the whole sky's.
 

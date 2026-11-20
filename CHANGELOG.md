@@ -1,5 +1,43 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **The sky's ready lifecycle is consistent across all three ways it is driven** —
+  a running loop's `set()`, a still frame under `autoStart: false` driven only by
+  `jump()`, and reduced motion's single frame. A `set()` or `jump()` that needs a
+  new shader variant turns `settled` false at once; it turns true again only once
+  that variant has linked *and* a frame has been drawn with it (with no loop, once
+  the still frame has been redrawn with it, at the same moment). Each settle is
+  said once; a `set()` needing no new variant says nothing.
+- **No waiter is left hanging.** A variant that links between frames just as the
+  loop is stopped (`stop()`, or a still frame replacing the loop) is drawn for the
+  waiters and said from that frame, rather than waiting for a tick that never
+  comes. A canvas the loop leaves out of view when the variant lands is drawn for
+  its waiters at once too. A variant the driver *refuses* ends every waiter with
+  `false` and fires `onSettled(false)` once — where before `isSettled` counted a
+  refused variant as done, so the sky reported itself settled without the feature.
+  A `whenSettled()` asked after a `dispose()`, or a link landing after one, now
+  answers `false` at once instead of hanging.
+- **A still frame with no loop takes a `set()` to the canvas.** Under
+  `autoStart: false` with only `jump()` called, a `set()` cut the transition but
+  drew nothing, so the canvas showed the old sky until something else redrew it.
+  It is now drawn at once (and redrawn when a variant it needs links).
+- A link that lands while a frame is being drawn no longer redraws a still frame
+  from inside the draw: that frame's own look over the variants settles it.
+
+### Added
+
+- `AtmosphereRenderer.variantRefused(state)` — whether a variant the state needs
+  is one the driver refused, so no frame of it will carry that feature. `Atmosphere`
+  uses it to end `whenSettled()` waiters with `false` rather than reporting a
+  refused feature as settled.
+- Tests for the three entry points, the resize-while-linking and adaptive-resolution
+  paths, and the failure / interleaving / cleanup paths (refused variant, dispose
+  while linking, two `set()`s racing, a canvas coming back into view). No fixed
+  delays: every step is driven by a link or a frame tick.
+
 ## 0.15.0 — 2026-11-20
 
 - Added optional world-space scenery: a lighthouse with a rotating beacon, two independently placed lights with water reflections, and two cloud banks with fixed centers.

@@ -380,6 +380,54 @@ test.describe('settling', () => {
     });
     expect(r).toEqual({ ready: [false], said: [false], settled: false, when: false });
   });
+
+  test('a still frame that needed a new variant is redrawn with it, and settles once', async ({ page }) => {
+    await open(page, 'no-preference');
+    const said = () => page.evaluate(() => (window as unknown as { said: boolean[] }).said);
+    await page.evaluate(() => {
+      const w = window as unknown as { said: boolean[]; sky: Atmosphere };
+      w.said = [];
+      w.sky = new window.Atmosphere(document.querySelector('canvas')!, {
+        time: 14, weather: 'clear', resolutionScale: 1, autoStart: false, onSettled: (ok) => w.said.push(ok),
+      });
+      w.sky.jump();
+    });
+    // the jump's variant lands and the still frame is drawn with it
+    await expect.poll(() => page.evaluate(() => window.sky.settled), { timeout: 30_000 }).toBe(true);
+    expect(await said()).toEqual([true]);
+    await daylightOn(page, 'canvas');
+
+    // a set() that needs the sea's variant: unsettled at once, then one settle
+    expect(await page.evaluate(() => { window.sky.set({ ground: 'sea' }); return window.sky.settled; })).toBe(false);
+    await expect.poll(() => page.evaluate(() => window.sky.whenSettled())).toBe(true);
+    expect(await said()).toEqual([true, true]);
+    await daylightOn(page, 'canvas');
+
+    // and one that needs nothing new says nothing
+    expect(await page.evaluate(() => { window.sky.set({ time: 14.5 }); return window.sky.settled; })).toBe(true);
+    await page.waitForTimeout(500);
+    expect(await said()).toEqual([true, true]);
+  });
+
+  test('a resize while a variant links leaves the new variant on the canvas', async ({ page }) => {
+    await open(page, 'no-preference');
+    await page.evaluate(() => {
+      window.sky = new window.Atmosphere(document.querySelector('canvas')!, {
+        time: 14, weather: 'clear', resolutionScale: 1, autoStart: false,
+      });
+      window.sky.jump();
+    });
+    await expect.poll(() => page.evaluate(() => window.sky.settled), { timeout: 30_000 }).toBe(true);
+    const was = await picture(page, 'canvas');
+    // the sea brings a variant of its own; the size changes out from under it
+    await page.evaluate(() => {
+      window.sky.set({ ground: 'sea' });
+      document.querySelector('canvas')!.style.width = '420px';
+    });
+    await expect.poll(() => page.evaluate(() => window.sky.whenSettled()), { timeout: 30_000 }).toBe(true);
+    await expect.poll(async () => apart(await picture(page, 'canvas'), was)).toBeGreaterThan(2);
+    await daylightOn(page, 'canvas');
+  });
 });
 
 test.describe('render state reuse', () => {

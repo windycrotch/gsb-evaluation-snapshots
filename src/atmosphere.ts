@@ -78,8 +78,11 @@ export interface AtmosphereOptions extends Conditions {
    * first frame drawn with the new variant; with none (a still frame,
    * `autoStart: false`), as soon as it links.
    *
-   * `false`, once, alongside `onReady(false)`: the sky will never draw. A
-   * `set()` that needs no new variant fires nothing.
+   * `false`, once, when the sky will never deliver a settled frame: along
+   * with `onReady(false)` where there is no WebGL or the shader cannot be
+   * compiled, or later where a variant the state needs is refused by the
+   * driver (the frames go without its feature from then on). A `set()` that
+   * needs no new variant fires nothing, and each settle is said once.
    */
   onSettled?: (available: boolean) => void;
   /**
@@ -213,20 +216,42 @@ export class Atmosphere {
   // whether onSettled last said settled, and who is waiting for it to
   private settledSaid = false;
   private settledWaiters: ((settled: boolean) => void)[] = [];
+  // a sky that will never settle again: no WebGL, a base shader refused, or
+  // a dispose(). Kept apart from `settledSaid` so a whenSettled() asked
+  // afterwards answers false at once rather than waiting for nothing
+  private dead = false;
+  // a variant the target needs that the driver refused: no frame of it will
+  // ever carry that feature, so the sky does not settle for that target. Not
+  // sticky — a later target that needs only variants in hand settles again
+  private failed = false;
+  // true while a frame is being drawn: a link (or a failure) reported from
+  // inside the draw is that frame's own, and its look over the variants
+  // afterwards settles it, rather than a redraw drawn from inside a draw
+  private drawing = false;
+  // the still frame on show went without something its variants could draw
+  // (drawn before the shader was ready, or while a needed variant linked), so
+  // a link, or coming ready, has to draw it again — a still frame already
+  // drawn with everything is left as it is
+  private stillStale = false;
   // The shader compiles asynchronously, so the frames the caller asked for
   // before it was ready drew nothing. A running loop picks itself up on its
   // next tick; a still frame — reduced motion, or a jump() before start() —
   // has no next tick and has to be drawn here or never.
   private readonly onRendererReady = (available: boolean) => {
-    if (available) this.redrawStill();
+    if (available) this.redrawStillIfStale();
     this.opts.onReady?.(available);
     if (available) this.checkSettled();
     else this.unsettle();
   };
-  // and a still frame drawn while the variant it needed was still linking went
-  // without that variant's feature
+  // a variant has landed. A still frame that went without its feature is
+  // drawn again first — that draw, at the same moment, ends in the look over
+  // the variants that settles the sky. With a loop running the next tick
+  // draws it, and settles from the frame. A link that lands inside a frame
+  // being drawn (compile on the spot) is that frame's own, and its look over
+  // the variants settles the sky — no redraw, which would be re-entrant
   private readonly onVariantLinked = () => {
-    this.redrawStill();
+    if (this.drawing) { this.checkSettled(true); return; }
+    this.redrawStillIfStale();
     this.checkSettled();
   };
   private readonly onMotionChange = () => {
@@ -329,16 +354,24 @@ export class Atmosphere {
    * true when the sky is drawn by its own shader variants: every one the
    * target state needs has linked, so the next frame — or a cubemap baked
    * from this sky — carries all of its features rather than a stand-in's.
-   * Goes false on a `set()` that needs a new variant, and true again once it
-   * has linked and been drawn. Always false where {@link available} is.
-   * {@link AtmosphereOptions.onSettled} fires as it turns true.
+   * Goes false the moment a `set()` or `jump()` needs a variant that is not
+   * linked, and true again once that variant has linked and a frame has been
+   * drawn with it (with no loop to draw it, once a still frame has been
+   * redrawn with it). Always false where {@link available} is, after a
+   * {@link dispose}, and while a variant the target needs is one the driver
+   * refused. {@link AtmosphereOptions.onSettled} fires as it turns true.
    */
-  get settled(): boolean { return this.settledSaid && this.renderer.isSettled(this.target); }
+  get settled(): boolean {
+    if (this.dead || this.failed) return false;
+    return this.settledSaid && this.renderer.isSettled(this.target);
+  }
 
   /**
    * Resolves once the sky is {@link settled} — at once if it is now — with
    * `true`; or with `false` if it never will be: WebGL is unavailable, the
-   * shader failed to compile, or the Atmosphere was disposed first.
+   * shader failed to compile, a variant the state needs was refused by the
+   * driver, or the Atmosphere was disposed (before or while waiting). It is
+   * never left hanging.
    *
    * ```ts
    * sky.set({ weather: 'storm' });
@@ -347,21 +380,44 @@ export class Atmosphere {
    */
   whenSettled(): Promise<boolean> {
     if (this.settled) return Promise.resolve(true);
-    if (!this.available) return Promise.resolve(false);
+    if (this.dead || this.failed || !this.available) return Promise.resolve(false);
     return new Promise((resolve) => this.settledWaiters.push(resolve));
   }
 
   /**
    * See whether the sky has settled or come unsettled, and tell whoever is
-   * waiting when it settles. A link that lands with the loop running is
-   * only on the canvas at the next tick, so it is said then, from the
-   * frame; one with no loop to draw it is said now
+   * waiting when it settles.
+   *
+   * A link that lands with the loop running is only on the canvas at the next
+   * tick, so it is said from that frame — `fromFrame`, once a frame has
+   * actually been drawn with it. A link that lands with no loop to draw it (a
+   * still frame) is said once the still frame has been redrawn with it. While
+   * either a tick is still to come or a still frame is on show, nothing is
+   * said from outside a draw, so a settle is never reported of a frame that
+   * has not been drawn.
+   *
+   * A variant the target needs that the driver refused ends the wait with
+   * `false`, once, rather than leaving it for a settle that will never come
+   * (a later target that needs only variants in hand settles again).
    */
-  private checkSettled(fromFrame = false): void {
+  private checkSettled(fromFrame = false, framePending = !!this.raf): void {
     // (onReady can fire inside the renderer's constructor, before it is ours)
-    if (!this.renderer) return;
+    if (!this.renderer || this.dead) return;
+    // (a renderer that does not model failure has none: see isSettled's docs)
+    const refused = this.renderer.variantRefused?.(this.target) ?? false;
+    if (refused) {
+      this.settledSaid = false;
+      if (!this.failed) {
+        this.failed = true;
+        this.opts.onSettled?.(false);
+        this.resolveSettled(false);
+      }
+      return;
+    }
+    this.failed = false;
     const now = this.renderer.isSettled(this.target);
-    if (now === this.settledSaid || (now && !fromFrame && this.raf)) return;
+    if (now === this.settledSaid) return;
+    if (now && !fromFrame && (framePending || this.wantStill)) return;
     this.settledSaid = now;
     if (!now) return;
     this.opts.onSettled?.(true);
@@ -370,7 +426,10 @@ export class Atmosphere {
 
   /** the sky will never settle: say so, once, and let go of the waiters */
   private unsettle(): void {
+    if (this.dead) return;
+    this.dead = true;
     this.settledSaid = false;
+    this.failed = false;
     this.opts.onSettled?.(false);
     this.resolveSettled(false);
   }
@@ -533,9 +592,13 @@ export class Atmosphere {
    */
   set(c: Conditions): void {
     this.applyConditions(c);
-    // with the loop stopped by reduced motion, a transition would never be
-    // drawn — apply the new target to the still frame directly
-    if (this.wantRunning && !this.raf && this.reducedMotion) {
+    // A still frame has no loop to carry the change to the canvas: under
+    // reduced motion the transition would never be drawn, so it is applied
+    // as a cut — and with the loop simply stopped (autoStart: false, jump()
+    // then set()), a still frame that would otherwise show the old sky until
+    // something else redraws it. Either way, draw it now (a variant it needs
+    // still linking redraws it again when that lands).
+    if (!this.raf && (this.wantStill || (this.wantRunning && this.reducedMotion))) {
       this.animator.jump(this.target);
       this.draw(performance.now());
     }
@@ -552,10 +615,18 @@ export class Atmosphere {
   /**
    * Draw the still frame on show over again, if one is: the same moment, so a
    * redraw moves nothing. With the loop running its next tick will do.
+   * Returns whether a frame was drawn.
    */
-  private redrawStill(): void {
-    if (this.raf || !this.wantStill) return;
+  private redrawStill(): boolean {
+    if (this.raf || !this.wantStill) return false;
     this.draw(this.startedAt ? this.last : performance.now());
+    return true;
+  }
+
+  /** as {@link redrawStill}, but only if the still frame went without something its variants could draw */
+  private redrawStillIfStale(): boolean {
+    if (!this.stillStale) return false;
+    return this.redrawStill();
   }
 
   private applyConditions(c: Conditions): void {
@@ -607,6 +678,20 @@ export class Atmosphere {
     this.wantRunning = false;
     this.wantStill = false;
     this.stopLoop();
+    // The tick that was to draw a just-linked variant will not come, so no
+    // waiter may be left hanging on it: draw the frame that tick would have
+    // drawn and say the settle from it. A stop() is a one-off, not a loop, so
+    // this happens even for a canvas the loop was leaving out of view.
+    if (this.settledWaiters.length && this.renderer.isSettled(this.target)) {
+      this.draw(this.startedAt ? this.last : performance.now());
+      this.checkSettled(true);
+      // (nothing drawable after all: say what is true of the variants, since
+      // no frame is coming now)
+      if (this.settledWaiters.length) {
+        this.settledSaid = true;
+        this.resolveSettled(true);
+      }
+    }
   }
 
   private startLoop(): void {
@@ -634,7 +719,7 @@ export class Atmosphere {
     this.raf = 0;
   }
 
-  private draw(t: number): void {
+  private draw(t: number, force = false): void {
     // jump() can be called before start(). Pin the reference time here
     if (!this.startedAt) { this.startedAt = t; this.last = t; }
     // (a draw on the clock, not on a tick, may be followed by a tick stamped earlier)
@@ -649,7 +734,7 @@ export class Atmosphere {
     // Out of view, only a running loop's frames go undrawn: a still frame has no
     // next tick to come back on. (A canvas outside the document never intersects
     // anything, and whoever made it means to read it)
-    if (this.raf && !this.inView && this.canvas.isConnected) { this.checkSettled(true); return; }
+    if (!force && this.raf && !this.inView && this.canvas.isConnected) { this.settleOffscreen(); return; }
     // Resizing clears the drawing buffer. Apply the previous frames' GPU
     // measurements before drawing so the new buffer is filled before paint.
     if (this.governor) {
@@ -662,15 +747,36 @@ export class Atmosphere {
         if (this.governor.update(times, w * h, t) !== before) this.applySize();
       }
     }
-    this.renderer.render(
-      (t - this.startedAt) / 1000,
-      this.animator.current,
-      this.cam,
-      this.animator.wind,
-      this.animator.evolution,
-    );
+    this.drawing = true;
+    try {
+      this.renderer.render(
+        (t - this.startedAt) / 1000,
+        this.animator.current,
+        this.cam,
+        this.animator.wind,
+        this.animator.evolution,
+      );
+    } finally {
+      this.drawing = false;
+    }
+    // A still frame drawn before everything it needs is in went without it:
+    // a link or the shader coming ready redraws it. A loop redraws on its own
+    // next tick, so this only matters with no loop to do it
+    if (!this.raf && this.wantStill) this.stillStale = !this.renderer.isSettled(this.target);
     // (a look over the variants in hand while nothing is linking)
     this.checkSettled(true);
+  }
+
+  /**
+   * A frame the loop left undrawn (the canvas is out of view). Nothing is
+   * said settled of a frame that was not drawn — but a waiter is owed a
+   * frame, not a tick that may never come while the canvas stays away: one
+   * frame is drawn for it, here, at this moment, and the settle said from
+   * that. (No waiter: nothing is drawn, and the sky waits for the way back.)
+   */
+  private settleOffscreen(): void {
+    if (!this.settledWaiters.length || !this.renderer.isSettled(this.target)) return;
+    this.draw(this.last, true);
   }
 
   /**
@@ -705,15 +811,23 @@ export class Atmosphere {
    *   its context.
    */
   dispose(options: { loseContext?: boolean } = {}): void {
-    this.stop();
+    // (not stop(): a stop() draws the frame a loop owed its waiters, and a
+    // sky being disposed has none to owe — theirs end with false)
+    this.wantRunning = false;
+    this.wantStill = false;
+    this.stopLoop();
     this.observer?.disconnect();
     this.observer = null;
     this.viewObserver?.disconnect();
     this.viewObserver = null;
     this.motionQuery?.removeEventListener('change', this.onMotionChange);
     this.motionQuery = null;
-    this.renderer.dispose(options);
+    this.dead = true;
     this.settledSaid = false;
+    this.failed = false;
+    // nothing will ever settle now: whoever is waiting hears so, and anyone
+    // asking later is told at once
     this.resolveSettled(false);
+    this.renderer.dispose(options);
   }
 }

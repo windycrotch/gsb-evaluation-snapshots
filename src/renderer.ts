@@ -490,9 +490,10 @@ export class AtmosphereRenderer {
    * Cheap enough for every frame: with nothing linking it is a look over the
    * variants in hand, and the state's own keys are only worked out while
    * something is. A variant the driver refused counts as done (the frame goes
-   * without its feature for good), and so does one never asked for. Always
-   * true while {@link ready} under `compile: 'sync'`, where nothing is ever
-   * left linking.
+   * without its feature for good), and so does one never asked for — the sky
+   * draws, just without that feature. A caller that treats a missing feature
+   * as a failure asks {@link variantRefused} as well. Always true while
+   * {@link ready} under `compile: 'sync'`, where nothing is ever left linking.
    */
   isSettled(s: AtmosphereState): boolean {
     if (!this.gl || this.lost || !this.ready) return false;
@@ -505,6 +506,30 @@ export class AtmosphereRenderer {
       if ((v && !v.linked && !v.failed) || this.linkQueue.includes(k)) return false;
     }
     return true;
+  }
+
+  /**
+   * true when a variant this state needs is one the driver refused — so no
+   * frame of this state will ever carry that feature. Call `prepare(s)` first
+   * for what it does not already know about. A state that needs nothing
+   * refused answers false, even after an earlier one was: the sky draws it
+   * whole. (The bare program failing outright is not this: {@link available}
+   * goes false for that, and onReady(false) says so.)
+   *
+   * Cheap enough for every frame: no variant has been refused unless one in
+   * hand says so, and only then are the state's own keys worked out.
+   */
+  variantRefused(s: AtmosphereState): boolean {
+    if (!this.gl || this.lost) return false;
+    let refused = false;
+    for (const v of this.variants.values()) {
+      if (v.failed && v.key !== 0) { refused = true; break; }
+    }
+    if (!refused) return false;
+    for (const k of this.programsFor(s)) {
+      if (k !== 0 && this.variants.get(k)?.failed) return true;
+    }
+    return false;
   }
 
   /**

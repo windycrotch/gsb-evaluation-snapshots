@@ -877,15 +877,21 @@ if (await sky.whenSettled()) bake();   // リンクして描かれたら true
 
 `settled` は、まだリンクしていない変種を要する `set()` や `jump()` で false になり、
 その変種がリンクしてそれで1フレーム描かれると true に戻ります（ループが回っていない
-とき — 静止画や `autoStart: false` — はリンクした時点で）。`onSettled` は true に
-戻るたびに呼ばれ、新しい変種を要しない `set()` では何も起きません。空がけっして
-描けない場合 — WebGL がない、シェーダーがコンパイルできない — は `onReady(false)` と
-一緒に `onSettled(false)` が呼ばれ、`whenSettled()` は `false` で解決します（待って
-いる間に dispose された場合も同じ）。フレームごとのコストは手元の変種を見渡すだけで、
-ほぼありません。`AtmosphereRenderer` を自分で回す場合は、`renderer.prepare(state)` の
-あとに `renderer.isSettled(state)` で同じことがわかります。`compile: 'sync'` では
-常に true です。`prepare` にカメラも渡すと（`renderer.prepare(state, camera)`）、
-その視野のフレームが使うプログラムを、全天用より先にコンパイルし始めます。
+とき — 静止画や `autoStart: false` — はリンクし、静止画がその変種で描き直された時点で）。
+`onSettled` は true に戻るたびに一度だけ呼ばれ、新しい変種を要しない `set()` では何も
+起きません。空を動かす三つの入口 — 実行ループの `set()`、`autoStart: false` で `jump()`
+だけを呼ぶ静止画、システムの「視差効果を減らす」での単一フレーム — はこのライフサイクル
+を同じように守ります。サイズ変更は描画バッファを消すので、静止画は同じ時刻のまま描き
+直し、変種がまだリンク中だったなら、リンクして描き直されたフレームが最後にキャンバスへ
+載ります。空がけっして描けない場合 — WebGL がない、シェーダーがコンパイルできない、ドラ
+イバが変種を拒否した — は `onSettled(false)` が一度だけ呼ばれ、`whenSettled()` は `false`
+で解決します（待っている間に dispose された場合も同じ）。待たせたままにはなりません。
+フレームごとのコストは手元の変種を見渡すだけで、ほぼありません。`AtmosphereRenderer` を
+自分で回す場合は、`renderer.prepare(state)` のあとに `renderer.isSettled(state)` で同じ
+ことがわかります。`compile: 'sync'` では常に true です。`renderer.variantRefused(state)`
+は、その状態が要る変種をドライバが拒否したかを答えます。`prepare` にカメラも渡すと
+（`renderer.prepare(state, camera)`）、その視野のフレームが使うプログラムを、全天用より
+先にコンパイルし始めます。
 
 ## 多言語対応
 
