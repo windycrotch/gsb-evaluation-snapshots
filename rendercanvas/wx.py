@@ -1,0 +1,618 @@
+"""
+Support for rendering in a wxPython window. Provides a widget that
+can be used as a standalone window or in a larger GUI.
+"""
+
+__all__ = [
+    "RenderCanvas",
+    "RenderWidget",
+    "WxLoop",
+    "WxRenderCanvas",
+    "WxRenderWidget",
+    "loop",
+]
+
+import ctypes
+import sys
+import time
+from typing import Optional
+
+import wx
+
+from .base import (
+    BaseCanvasGroup,
+    BaseLoop,
+    BaseRenderCanvas,
+    WrapperRenderCanvas,
+)
+from .core.coreutils import (
+    get_alt_wayland_display,
+    get_alt_x11_display,
+    logger,
+    weakbind,
+)
+
+BUTTON_MAP = {
+    wx.MOUSE_BTN_LEFT: 1,
+    wx.MOUSE_BTN_RIGHT: 2,
+    wx.MOUSE_BTN_MIDDLE: 3,
+    wx.MOUSE_BTN_AUX1: 4,
+    wx.MOUSE_BTN_AUX2: 5,
+    # wxPython doesn't have exact equivalents for TaskButton, ExtraButton4, and ExtraButton5
+}
+
+MOUSE_EVENT_MAP = {
+    "pointer_down": [
+        wx.wxEVT_LEFT_DOWN,
+        wx.wxEVT_MIDDLE_DOWN,
+        wx.wxEVT_RIGHT_DOWN,
+        wx.wxEVT_AUX1_DOWN,
+        wx.wxEVT_AUX2_DOWN,
+    ],
+    "pointer_up": [
+        wx.wxEVT_LEFT_UP,
+        wx.wxEVT_MIDDLE_UP,
+        wx.wxEVT_RIGHT_UP,
+        wx.wxEVT_AUX1_UP,
+        wx.wxEVT_AUX2_UP,
+    ],
+    "double_click": [
+        wx.wxEVT_LEFT_DCLICK,
+        wx.wxEVT_MIDDLE_DCLICK,
+        wx.wxEVT_RIGHT_DCLICK,
+        wx.wxEVT_AUX1_DCLICK,
+        wx.wxEVT_AUX2_DCLICK,
+    ],
+    "wheel": [wx.wxEVT_MOUSEWHEEL],
+}
+
+# reverse the mouse event map (from one-to-many to many-to-one)
+MOUSE_EVENT_MAP_REVERSED = {
+    value: key for key, values in MOUSE_EVENT_MAP.items() for value in values
+}
+
+MODIFIERS_MAP = {
+    wx.MOD_SHIFT: "Shift",
+    wx.MOD_CONTROL: "Control",
+    wx.MOD_ALT: "Alt",
+    wx.MOD_META: "Meta",
+}
+
+KEY_MAP = {
+    wx.WXK_DOWN: "ArrowDown",
+    wx.WXK_UP: "ArrowUp",
+    wx.WXK_LEFT: "ArrowLeft",
+    wx.WXK_RIGHT: "ArrowRight",
+    wx.WXK_BACK: "Backspace",
+    wx.WXK_CAPITAL: "CapsLock",
+    wx.WXK_DELETE: "Delete",
+    wx.WXK_END: "End",
+    wx.WXK_RETURN: "Enter",
+    wx.WXK_ESCAPE: "Escape",
+    wx.WXK_F1: "F1",
+    wx.WXK_F2: "F2",
+    wx.WXK_F3: "F3",
+    wx.WXK_F4: "F4",
+    wx.WXK_F5: "F5",
+    wx.WXK_F6: "F6",
+    wx.WXK_F7: "F7",
+    wx.WXK_F8: "F8",
+    wx.WXK_F9: "F9",
+    wx.WXK_F10: "F10",
+    wx.WXK_F11: "F11",
+    wx.WXK_F12: "F12",
+    wx.WXK_HOME: "Home",
+    wx.WXK_INSERT: "Insert",
+    wx.WXK_ALT: "Alt",
+    wx.WXK_CONTROL: "Control",
+    wx.WXK_SHIFT: "Shift",
+    wx.WXK_COMMAND: "Meta",  # wx.WXK_COMMAND is used for Meta (Command key on macOS)
+    wx.WXK_NUMLOCK: "NumLock",
+    wx.WXK_PAGEDOWN: "PageDown",
+    wx.WXK_PAGEUP: "PageUp",
+    wx.WXK_PAUSE: "Pause",
+    wx.WXK_SCROLL: "ScrollLock",
+    wx.WXK_TAB: "Tab",
+}
+
+CURSOR_MAP = {
+    "default": None,
+    "text": wx.CURSOR_IBEAM,
+    "crosshair": wx.CURSOR_CROSS,
+    "pointer": wx.CURSOR_HAND,
+    "ew-resize": wx.CURSOR_SIZEWE,
+    "ns-resize": wx.CURSOR_SIZENS,
+    "nesw-resize": wx.CURSOR_SIZENESW,
+    "nwse-resize": wx.CURSOR_SIZENWSE,
+    "not-allowed": wx.CURSOR_NO_ENTRY,
+    "none": wx.CURSOR_BLANK,
+}
+
+
+def enable_hidpi():
+    """Enable high-res displays."""
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:
+        pass  # fail on non-windows
+
+
+enable_hidpi()
+
+
+class TimerWithCallback(wx.Timer):
+    def __init__(self, callback):
+        super().__init__()
+        self._callback = callback
+
+    def Notify(self, *args):  # noqa: N802
+        try:
+            self._callback()
+        except RuntimeError:
+            pass  # wrapped C/C++ object of type WxRenderWidget has been deleted
+
+
+class WxLoop(BaseLoop):
+    _app = None
+    _use_call_later_via_thread = True
+
+    def _rc_init(self):
+        if self._app is None:
+            self._app = wx.App.GetInstance()
+            if self._app is None:
+                self._app = wx.App()
+                wx.App.SetInstance(self._app)
+
+    def _rc_run(self):
+        self._rc_init()
+
+        # If no canvases, we only do a flush
+        if not self.get_canvases():
+            self.process_wx_events()
+            self.stop()
+            self._app = None
+            return
+
+        self._app.MainLoop()
+        self._app = None
+
+    async def _rc_run_async(self):
+        raise NotImplementedError()
+
+    def _rc_stop(self):
+        if self._app is not None:
+            try:
+                self._app.ExitMainLoop()
+            except RuntimeError:
+                pass  # wrapped C/C++ object of type App has been deleted
+
+    def _rc_call_soon(self, callback):
+        wx.CallAfter(callback)
+
+    def _rc_call_soon_threadsafe(self, callback):
+        wx.CallAfter(callback)
+
+    def _rc_call_later(self, delay, callback):
+        if self._use_call_later_via_thread:
+            # The default accurate method based on threading.
+            super()._rc_call_later(delay, callback)
+        else:
+            # wx's own approach (which is not accurate on Windows)
+            wx.CallLater(int(max(delay * 1000, 1)), callback)
+
+    def process_wx_events(self):
+        if self._app:
+            # Not SafeYield, becaus then events would not get processed
+            # We have to be careful not to re-enter!
+            self._app.Yield()
+
+
+loop = WxLoop()
+
+
+class WxCanvasGroup(BaseCanvasGroup):
+    pass
+
+
+class WxRenderWidget(BaseRenderCanvas, wx.Window):
+    """A wx Window representing a render canvas that can be embedded in a wx application."""
+
+    _rc_canvas_group = WxCanvasGroup(loop)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self._last_image = None
+        self._pointer_inside = None
+        self._is_pointer_inside_according_to_wx = False
+
+        # We keep a timer to prevent draws during a resize. This prevents
+        # issues with mismatching present sizes during resizing (on Linux).
+        self._resize_timer = TimerWithCallback(weakbind(self._on_resize_done))
+        self._draw_lock = False
+
+        self.Bind(wx.EVT_PAINT, weakbind(self.on_paint))
+        self.Bind(wx.EVT_ERASE_BACKGROUND, lambda x: None)
+        self.Bind(wx.EVT_SIZE, weakbind(self._on_resize))
+
+        self.Bind(wx.EVT_KEY_DOWN, weakbind(self._on_key_down))
+        self.Bind(wx.EVT_KEY_UP, weakbind(self._on_key_up))
+
+        self.Bind(wx.EVT_MOUSE_EVENTS, weakbind(self._on_mouse_events))
+        self.Bind(wx.EVT_MOTION, weakbind(self._on_mouse_move))
+        self.Bind(wx.EVT_ENTER_WINDOW, weakbind(self._on_window_enter))
+        self.Bind(wx.EVT_LEAVE_WINDOW, weakbind(self._on_window_enter))
+        self.Bind(wx.EVT_SET_FOCUS, weakbind(self._on_focus))
+        self.Bind(wx.EVT_KILL_FOCUS, weakbind(self._on_focus))
+        self.Bind(wx.EVT_WINDOW_DESTROY, weakbind(self._on_close))
+
+        self.Show()
+        self._final_canvas_init()
+
+    def _on_resize_done(self, *args):
+        self._draw_lock = False
+        self.request_draw()
+
+    def on_paint(self, event):
+        dc = wx.PaintDC(self)
+        if not self._draw_lock:
+            self._time_to_paint()
+        if self._last_image is not None:
+            # Paint the image using nearest neighbor interpolation.
+            gc = wx.GraphicsContext.Create(dc)
+            gc.SetInterpolationQuality(wx.INTERPOLATION_NONE)
+            lw, lh = self._size_info["logical_size"]
+            gc.DrawBitmap(self._last_image, 0, 0, lw, lh)
+        else:
+            event.Skip()
+        del dc
+
+    def Refresh(self):  # noqa: N802
+        # Bypass wx mechanics and request a draw, which will eventually call the native Refresh()
+        self.request_draw()
+
+    def _get_surface_ids(self):
+        if sys.platform.startswith("win") or sys.platform.startswith("darwin"):
+            return {
+                "window": int(self.GetHandle()),
+            }
+        elif sys.platform.startswith("linux"):
+            if False:
+                # We fall back to XWayland, see coreutils.py
+                return {
+                    "platform": "wayland",
+                    "window": int(self.GetHandle()),
+                    "display": int(get_alt_wayland_display()),
+                }
+            else:
+                return {
+                    "platform": "x11",
+                    "window": int(self.GetHandle()),
+                    "display": int(get_alt_x11_display()),
+                }
+        else:
+            logger.warning(f"Cannot get wx surface info on {sys.platform}.")
+            return None
+
+    # %% Methods to implement RenderCanvas
+
+    def _rc_gui_poll(self):
+        if isinstance(self._rc_canvas_group.get_loop(), WxLoop):
+            pass  # all is well
+        else:
+            loop.process_wx_events()
+
+    def _rc_get_present_info(self, present_methods):
+        # Select method
+        the_method = present_methods[0]
+        if "bitmap" in present_methods:
+            # Default to 'bitmap', also see note in qt.py
+            the_method = "bitmap"
+
+        # Apply
+        if the_method == "screen":
+            # On wx it can take a little while for the handle to be available,
+            # causing GetHandle() to be initially 0, so getting a surface will fail.
+            etime = time.perf_counter() + 1
+            while self.GetHandle() == 0 and time.perf_counter() < etime:
+                loop.process_wx_events()
+            surface_ids = self._get_surface_ids()
+            if surface_ids:
+                return {"method": "screen", **surface_ids}
+            elif "bitmap" in present_methods:
+                return {
+                    "method": "bitmap",
+                    "formats": ["rgba-u8"],
+                }
+            else:
+                return None
+        elif the_method == "bitmap":
+            return {
+                "method": "bitmap",
+                "formats": ["rgba-u8"],
+            }
+        else:
+            return None  # raises error
+
+    def _rc_request_draw(self):
+        self._time_to_draw()
+
+    def _rc_request_paint(self):
+        if self._draw_lock:
+            return
+        try:
+            wx.Window.Refresh(self)
+        except Exception:
+            pass  # avoid errors when window no longer lives
+
+    def _rc_force_paint(self):
+        wx.Window.Refresh(self)
+        self.Update()
+        if sys.platform == "darwin":
+            wx.Yield()
+
+    def _rc_present_bitmap(self, *, data, format, **kwargs):
+        # todo: we can easily support more formats here
+        assert format == "rgba-u8"
+        width, height = data.shape[1], data.shape[0]
+        self._last_image = wx.Bitmap.FromBufferRGBA(width, height, data)
+
+    def _rc_set_logical_size(self, width, height):
+        width, height = int(width), int(height)
+        parent = self.Parent
+        if isinstance(parent, WxRenderFrame):
+            parent.SetClientSize(width, height)
+        elif parent is not None:
+            self.SetSize(width, height)
+        else:
+            # The widget has no parent, likely because its going to inserted in a GUI later.
+            # This method is likely called from _final_canvas_init and if we call self.SetSize() it will likely error/segfault.
+            # See https://github.com/pygfx/rendercanvas/issues/91
+            pass
+
+    def _rc_close(self):
+        try:
+            parent = self.Parent
+        except RuntimeError:
+            return  # native C++ object is already deleted
+        self._resize_timer.Stop()
+        if isinstance(parent, WxRenderFrame):
+            parent.Destroy()
+        else:
+            self.Destroy()
+        # wx needs some loop iters to close a canvas, so if this is the last canvas, poll it for a short while.
+        if not self._rc_canvas_group.get_canvases():
+            end_time = time.perf_counter() + 0.1
+            while time.perf_counter() < end_time:
+                wx.Yield()
+
+    def _rc_set_title(self, title):
+        # Set title only on frame
+        parent = self.Parent
+        if isinstance(parent, WxRenderFrame):
+            parent.SetTitle(title)
+
+    def _rc_set_cursor(self, cursor):
+        cursor_flag = CURSOR_MAP.get(cursor)
+        if cursor_flag is None:
+            self.SetCursor(wx.NullCursor)  # System default
+        else:
+            cursor_object = wx.Cursor(cursor_flag)
+            self.SetCursor(cursor_object)
+
+    # %% Turn wx events into rendercanvas events
+
+    def _on_resize(self, event: wx.SizeEvent):
+        self._draw_lock = True
+        self._resize_timer.Start(100, wx.TIMER_ONE_SHOT)
+
+        lsize = float(self.Size[0]), float(self.Size[1])
+        # Note: this is not hidpi-ready (at least on win10)
+        # Observations:
+        # * On Win10 this always returns 1 - so hidpi is effectively broken
+        ratio = self.GetContentScaleFactor()
+        # We use the same logic as for Qt to derive the physical size.
+        pwidth = round(lsize[0] * ratio + 0.01)
+        pheight = round(lsize[1] * ratio + 0.01)
+        self._size_info.set_physical_size(pwidth, pheight, ratio)
+
+    def _on_key_down(self, event: wx.KeyEvent):
+        char_str = self._get_char_from_event(event)
+        self._key_event("key_down", event, char_str)
+
+        if char_str is not None:
+            self._char_input_event(char_str)
+
+    def _on_key_up(self, event: wx.KeyEvent):
+        char_str = self._get_char_from_event(event)
+        self._key_event("key_up", event, char_str)
+
+    def _key_event(self, event_type: str, event: wx.KeyEvent, char_str: Optional[str]):
+        modifiers = tuple(
+            MODIFIERS_MAP[mod]
+            for mod in MODIFIERS_MAP.keys()
+            if mod & event.GetModifiers()
+        )
+
+        ev = {
+            "event_type": event_type,
+            "key": KEY_MAP.get(event.GetKeyCode(), char_str),
+            "modifiers": modifiers,
+        }
+
+        if not event.IsAutoRepeat():
+            self.submit_event(ev)
+
+    def _char_input_event(self, char_str: Optional[str]):
+        if char_str is None:
+            return
+
+        ev = {
+            "event_type": "char",
+            "data": char_str,
+            "char_str": char_str,  # compat, remove few months from nov '25
+            "modifiers": None,
+        }
+        self.submit_event(ev)
+
+    @staticmethod
+    def _get_char_from_event(event: wx.KeyEvent) -> Optional[str]:
+        keycode = event.GetKeyCode()
+        modifiers = event.GetModifiers()
+
+        # Check if keycode corresponds to a printable ASCII character
+        if 32 <= keycode <= 126:
+            char = chr(keycode)
+            if not modifiers & wx.MOD_SHIFT:
+                char = char.lower()
+            return char
+
+        # Check for special keys (e.g., Enter, Tab)
+        if keycode == wx.WXK_RETURN:
+            return "\n"
+        if keycode == wx.WXK_TAB:
+            return "\t"
+
+        # Handle non-ASCII characters and others
+        uni_char = event.GetUnicodeKey()
+        if uni_char != wx.WXK_NONE:
+            return chr(uni_char)
+
+        return None
+
+    def _mouse_event(self, event_type: str, event: wx.MouseEvent, touches: bool = True):
+        button = BUTTON_MAP.get(event.GetButton(), 0)
+        buttons = (button,)  # in wx only one button is pressed per event
+
+        modifiers = tuple(
+            MODIFIERS_MAP[mod]
+            for mod in MODIFIERS_MAP.keys()
+            if mod & event.GetModifiers()
+        )
+
+        ev = {
+            "event_type": event_type,
+            "x": event.GetX(),
+            "y": event.GetY(),
+            "button": button,
+            "buttons": buttons,
+            "modifiers": modifiers,
+        }
+
+        if touches:
+            ev.update(
+                {
+                    "ntouches": 0,
+                    "touches": {},  # TODO: Wx touch events
+                }
+            )
+
+        if event_type == "wheel":
+            axis = event.GetWheelAxis()
+            rotation = event.GetWheelRotation()
+
+            # This is a little magic... it aims to match the scroll speed the Qt
+            # backend in a cross-platform way... It looks like just using the
+            # rotation produces a similar scroll experience, except it's rather
+            # slow/sluggish on MacOS for some reason, so we use a multiplier to
+            # correct that. Note that the non-linear scrolling on MacOS means
+            # that the exact gain does not even matter so much ...
+            gain = 2 if sys.platform == "darwin" else 1
+
+            dx = 0
+            dy = 0
+
+            if axis == wx.MOUSE_WHEEL_HORIZONTAL:
+                dx = gain * rotation
+            elif axis == wx.MOUSE_WHEEL_VERTICAL:
+                dy = gain * rotation
+
+            ev.update({"dx": -dx, "dy": -dy})
+
+        self.submit_event(ev)
+
+    def _on_mouse_events(self, event: wx.MouseEvent):
+        event_type = event.GetEventType()
+
+        event_type_name = MOUSE_EVENT_MAP_REVERSED.get(event_type, None)
+        if event_type_name is None:
+            return
+
+        self._mouse_event(event_type_name, event)
+
+    def _on_mouse_move(self, event: wx.MouseEvent):
+        # On MacOS this event does not happen unless a button is pressed (i.e. dragging)
+        self._mouse_event("pointer_move", event)
+
+    def _on_window_enter(self, event: wx.MouseEvent):
+        if event.GetEventType() == wx.wxEVT_ENTER_WINDOW:
+            pointer_inside = True
+            ev = {"event_type": "pointer_enter"}
+        else:  # event.GetEventType() == wx.wxEVT_LEAVE_WINDOW
+            pointer_inside = False
+            ev = {"event_type": "pointer_leave"}
+
+        # Track the state of wx
+        self._is_pointer_inside_according_to_wx = pointer_inside
+
+        # Update our state only if we have focus
+        if self.HasFocus() and pointer_inside != self._pointer_inside:
+            self._pointer_inside = pointer_inside
+            self.submit_event(ev)
+
+    def _on_focus(self, event: wx.FocusEvent):
+        if event.GetEventType() == wx.wxEVT_SET_FOCUS:
+            if self._is_pointer_inside_according_to_wx:
+                if not self._pointer_inside:
+                    ev = {"event_type": "pointer_enter"}
+                    self._pointer_inside = True
+                    self.submit_event(ev)
+        else:  # event.GetEventType() == wx.wxEVT_KILL_FOCUS
+            if self._pointer_inside:
+                ev = {"event_type": "pointer_leave"}
+                self._pointer_inside = False
+                self.submit_event(ev)
+
+    def _on_close(self, _event):
+        self.close()
+
+
+class WxRenderFrame(wx.Frame):
+    """Stub class to identify that the frame is from rendercanvas."""
+
+    pass
+
+
+class WxRenderCanvas(WrapperRenderCanvas):
+    """A toplevel canvas (wrapping a wx.Frame that contains a WxRenderWidget)."""
+
+    # Most of this is proxying stuff to the inner widget.
+
+    def __init__(self, parent=None, **kwargs):
+        # Any kwargs that we want to pass to *this* class, must be explicitly
+        # specified in the signature. The rest goes to the subwidget.
+
+        # There needs to be an application before any widget is created.
+        loop._rc_init()
+
+        self._frame = WxRenderFrame(parent)
+        self._subwidget = WxRenderWidget(parent=self._frame, **kwargs)
+
+        self._frame.Bind(wx.EVT_CLOSE, weakbind(self._on_close))
+        self._frame.Show()
+
+        self._final_canvas_init()
+
+    def _on_close(self, _event):
+        self.close()
+
+    @property
+    def frame(self):
+        """The wx.Frame object that this class wraps."""
+        return self._frame
+
+
+# Make available under a name that is the same for all gui backends
+RenderWidget = WxRenderWidget
+RenderCanvas = WxRenderCanvas
