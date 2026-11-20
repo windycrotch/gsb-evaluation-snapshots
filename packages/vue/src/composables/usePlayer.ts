@@ -1,4 +1,4 @@
-import { onMounted, onUnmounted, reactive, readonly } from 'vue'
+import type { PlayerError, PlayerState, Track } from '@vue-player/core'
 import type { Ref } from 'vue'
 import {
   createNativeAdapter,
@@ -7,7 +7,7 @@ import {
   exitFullscreen,
   getFullscreenElement,
 } from '@vue-player/core'
-import type { PlayerState, PlayerError, Track } from '@vue-player/core'
+import { onMounted, onUnmounted, reactive, readonly } from 'vue'
 
 export interface PlayerControls {
   play: () => Promise<void>
@@ -28,6 +28,14 @@ const ERROR_MESSAGES: Record<number, string> = {
   2: 'Network error — could not load the video.',
   3: 'The video format is not supported by your browser.',
   4: 'Video not found or format not supported.',
+}
+
+// Cache the dynamic import so rapid consecutive loadSource calls share a
+// single module fetch instead of racing several identical imports.
+let hlsModulePromise: Promise<typeof import('hls.js')> | null = null
+function importHls() {
+  hlsModulePromise ??= import('hls.js')
+  return hlsModulePromise
 }
 
 function makeDefaultState(): PlayerState {
@@ -58,9 +66,13 @@ export function usePlayer(videoRef: Ref<HTMLVideoElement | null>) {
   const state = reactive<PlayerState>(makeDefaultState())
 
   let nativeAdapter: ReturnType<typeof createNativeAdapter> | null = null
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let hlsInstance: any = null
   let lastSrc = ''
+  // Each loadSource/retry starts a new session. Async continuations and HLS
+  // event handlers capture the session id at creation and bail out when it no
+  // longer matches, so late callbacks from a destroyed session can never
+  // write stale quality levels or errors into the current state.
+  let sessionId = 0
 
   function clearVideo() {
     const video = videoRef.value
@@ -71,6 +83,10 @@ export function usePlayer(videoRef: Ref<HTMLVideoElement | null>) {
   }
 
   function destroyAdapters() {
+    // Invalidate the previous session — any of its pending async work
+    // (dynamic import, manifest parse, ABR switch, error callback) becomes
+    // a no-op from this point on.
+    sessionId++
     nativeAdapter?.destroy()
     nativeAdapter = null
     hlsInstance?.destroy()
@@ -100,21 +116,31 @@ export function usePlayer(videoRef: Ref<HTMLVideoElement | null>) {
 
     lastSrc = src
     destroyAdapters()
+    // Session for this load — captured after destroyAdapters() bumped the id.
+    const session = sessionId
 
     state.error = null
     state.isLoading = true
+    state.isBuffering = false
     state.currentTime = 0
     state.duration = 0
     state.buffered = 0
     state.isLive = false
     state.availableQualities = []
     state.currentQuality = 'auto'
+    // Subtitle selection belongs to the previous source — clear it now; the
+    // new source's default track is re-applied once loading finishes.
+    state.currentTrack = null
 
     const type = detectSourceType(src)
 
     if (type === 'hls') {
       try {
-        const { default: Hls } = await import('hls.js')
+        const { default: Hls } = await importHls()
+
+        // A newer loadSource/retry (or unmount) invalidated this session
+        // while hls.js was loading — don't create an instance for it.
+        if (session !== sessionId) return
 
         if (!Hls.isSupported()) {
           // Safari — native HLS support
@@ -123,8 +149,12 @@ export function usePlayer(videoRef: Ref<HTMLVideoElement | null>) {
         }
 
         const hls = new Hls({ enableWorker: true })
+        hlsInstance = hls
+        // True only while this exact instance belongs to the live session.
+        const isCurrent = () => session === sessionId && hlsInstance === hls
 
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
+          if (!isCurrent()) return
           const seen = new Set<number>()
           state.availableQualities = (hls.levels as any[])
             .map((level, i) => ({
@@ -141,17 +171,8 @@ export function usePlayer(videoRef: Ref<HTMLVideoElement | null>) {
           state.currentQuality = 'auto'
         })
 
-        hls.on(Hls.Events.LEVEL_SWITCHED, (_, data) => {
-          // Only update displayed quality when ABR switches automatically
-          if (state.currentQuality === 'auto') return
-          const level = (hls.levels as any[])[data.level]
-          if (level && level.height !== state.currentQuality) {
-            // nextLevel has fully applied — confirm it
-            state.currentQuality = level.height
-          }
-        })
-
         hls.on(Hls.Events.ERROR, (_, data) => {
+          if (!isCurrent()) return
           if (!data.fatal) return
           const code = (data as any).response?.code ?? 0
           const isNotFound = code === 404
@@ -165,12 +186,13 @@ export function usePlayer(videoRef: Ref<HTMLVideoElement | null>) {
           state.isLoading = false
           state.isBuffering = false
           hls.destroy()
+          if (hlsInstance === hls) hlsInstance = null
         })
 
         hls.loadSource(src)
         hls.attachMedia(video)
-        hlsInstance = hls
       } catch {
+        if (session !== sessionId) return
         state.error = { code: 0, message: 'Failed to initialize HLS player.', type: 'source' }
         state.isLoading = false
       }
@@ -285,6 +307,9 @@ export function usePlayer(videoRef: Ref<HTMLVideoElement | null>) {
         // nextLevel switches at the next segment boundary — no buffer flush, no freeze
         if (idx !== -1) hlsInstance.nextLevel = idx
       }
+      // The displayed quality is only ever changed here (and reset by a new
+      // session's manifest) — LEVEL_SWITCHED is intentionally not subscribed,
+      // so a manual pick is never overwritten by automatic ABR switches.
       state.currentQuality = value
     },
     setTrack(track) {
