@@ -40,14 +40,12 @@ export class CanvasGradient {
 
     // console.log(`t = ${t.toFixed(3)} tt = ${rt.toFixed(3)} color ${rgba_start}, ${rgba_end} -> ${final_color.map(v => v.toFixed(2))}`)
 
-    // convert back to bytes, force alpha to 100%
+    // convert back to bytes, keeping the interpolated alpha (transparent stops stay transparent)
     const RGBAToInt = (rgba: number[]) => {
       const fc = rgba.map((c) => c * 255);
-      return fromBytesBigEndian(fc[0], fc[1], fc[2], 0xff);
+      return fromBytesBigEndian(fc[0], fc[1], fc[2], fc[3]);
     };
     return RGBAToInt(final_color);
-    // const fc = final_color.map(c => c*255)
-    // return fromBytesBigEndian(fc[0],fc[1],fc[2],0xff)
   }
 }
 

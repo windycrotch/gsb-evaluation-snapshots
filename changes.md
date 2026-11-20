@@ -1,3 +1,13 @@
+## 2026-11-21
+
+**Gradient color stops keep their alpha**: `CanvasGradient._lerpStops()` interpolated all four channels but then forced the alpha byte to `0xff`, so any stop with a transparent or translucent color painted fully opaque. The interpolated alpha is now used, so gradients with transparent stops fade out (linear, radial and conic). Six previously failing gradient WPTs now pass (`2d.gradient.interpolate.alpha`, `2d.gradient.interpolate.coloralpha`, four radial-cone/touch tests); `test/wpt/baseline.json` updated to 739 passing files.
+
+**`getContext()` returns null for unsupported context types**: `Bitmap.getContext()` used to throw `TypeError` for anything but `"2d"`. It now matches `HTMLCanvasElement`: a missing argument is a `TypeError` (WebIDL), any other unsupported type returns `null` (case-sensitive). The WPT runner's `OffscreenCanvas` shim overrides `getContext` to throw `TypeError` for non-`"2d"` types, matching the `OffscreenCanvasRenderingContextType` enum conversion in the spec, so the WPT baseline is unaffected.
+
+**WPT runner Windows fixes**: the runner now imports the esbuild bundle via `pathToFileURL` and keys per-file results with forward slashes, so `npm run wpt` and its baseline comparison work on Windows.
+
+Tests: new gradient-alpha cases in `test/gradientfill.test.ts`; clip-bounded unbounded compositing across `fillRect`/`stroke`/`drawImage` and composite-operation switching in `test/composite.test.ts`; gradient/globalAlpha/composite-operation save-restore and reset/resize recovery in `test/state.test.ts`. Verified with `npm run vitest` (338 passing), `npm run type-check`, and `npm run wpt -- --check` (no regressions).
+
 ## 2026-11-16
 
 **Pass canvas conformance requirements WPTs**: `arcTo()` is now a documented no-op that accepts its required arguments and returns `undefined`. Added required-argument validation for the Canvas methods covered by the WPT missing-arguments test, including gradient creation and `addColorStop()`.

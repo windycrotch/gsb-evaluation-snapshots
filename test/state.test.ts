@@ -142,6 +142,74 @@ describe("canvas state", () => {
     ctx.fill();
     expect(ctx.path.length).toBe(0);
   });
+
+  it("save/restore round-trips a gradient fillStyle", () => {
+    ctx.clearRect(0, 0, 100, 50);
+    const grad = ctx.createLinearGradient(0, 0, 100, 0);
+    grad.addColorStop(0, "#ff0000");
+    grad.addColorStop(1, "#0000ff");
+    ctx.fillStyle = grad;
+    ctx.save();
+    ctx.fillStyle = "#00ff00";
+    ctx.restore();
+    expect(ctx.fillStyle).toBe(grad);
+    ctx.fillRect(0, 0, 100, 50);
+    expect(image.getPixelRGBA_separate(0, 25)).toEqual(new Uint8Array([255, 0, 0, 255]));
+  });
+
+  it("save/restore restores the composite operation used for drawing", () => {
+    ctx.clearRect(0, 0, 100, 50);
+    ctx.fillStyle = "#ff0000";
+    ctx.fillRect(0, 0, 100, 50);
+    ctx.save();
+    ctx.globalCompositeOperation = "copy";
+    ctx.restore();
+    // if the copy operation had leaked past restore, this fill would clear
+    // the pixels outside the rect instead of leaving them red
+    ctx.fillStyle = "#00ff00";
+    ctx.fillRect(0, 0, 50, 50);
+    expect(image.getPixelRGBA_separate(25, 25)).toEqual(new Uint8Array([0, 255, 0, 255]));
+    expect(image.getPixelRGBA_separate(75, 25)).toEqual(new Uint8Array([255, 0, 0, 255]));
+  });
+
+  it("save/restore restores globalAlpha used for drawing", () => {
+    ctx.clearRect(0, 0, 100, 50);
+    ctx.globalAlpha = 0.5;
+    ctx.save();
+    ctx.globalAlpha = 1;
+    ctx.restore();
+    ctx.fillStyle = "#ff0000";
+    ctx.fillRect(0, 0, 100, 50);
+    expect(image.getPixelRGBA_separate(50, 25)[3]).toBe(128);
+  });
+
+  it("reset() restores source-over and the default fill style", () => {
+    const grad = ctx.createLinearGradient(0, 0, 100, 0);
+    grad.addColorStop(0, "#ff0000");
+    grad.addColorStop(1, "#0000ff");
+    ctx.fillStyle = grad;
+    ctx.globalCompositeOperation = "copy";
+    ctx.reset();
+    expect(ctx.globalCompositeOperation).toBe("source-over");
+    expect(ctx.fillStyle).toBe("#000000");
+    // the bitmap is cleared and a default black fill composites as source-over
+    expect(image.getPixelRGBA_separate(50, 25)).toEqual(new Uint8Array([0, 0, 0, 0]));
+    ctx.fillRect(0, 0, 50, 50);
+    expect(image.getPixelRGBA_separate(25, 25)).toEqual(new Uint8Array([0, 0, 0, 255]));
+    expect(image.getPixelRGBA_separate(75, 25)).toEqual(new Uint8Array([0, 0, 0, 0]));
+  });
+
+  it("resizing the bitmap resets the composite operation and fill style", () => {
+    const grad = ctx.createLinearGradient(0, 0, 100, 0);
+    grad.addColorStop(0, "#ff0000");
+    grad.addColorStop(1, "#0000ff");
+    ctx.fillStyle = grad;
+    ctx.globalCompositeOperation = "copy";
+    image.width = 30;
+    expect(ctx.globalCompositeOperation).toBe("source-over");
+    expect(ctx.fillStyle).toBe("#000000");
+    expect(image.getPixelRGBA_separate(5, 5)).toEqual(new Uint8Array([0, 0, 0, 0]));
+  });
 });
 
 describe("globalAlpha", () => {

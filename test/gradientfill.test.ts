@@ -120,3 +120,59 @@ describe("drawing gradients", () => {
   });
   it("is drawing a conical gradient with one color", async () => {});
 });
+
+describe("gradient alpha", () => {
+  const px = (img, x: number, y: number) => Array.from(img.getPixelRGBA_separate(x, y));
+
+  it("interpolates the alpha of color stops", () => {
+    const image = pureimage.make(10, 10);
+    const c = image.getContext("2d");
+    c.clearRect(0, 0, 10, 10);
+    const grad = c.createLinearGradient(0, 0, 10, 0);
+    grad.addColorStop(0, "rgba(255, 0, 0, 1)");
+    grad.addColorStop(1, "rgba(0, 0, 255, 0)");
+    c.fillStyle = grad;
+    c.fillRect(0, 0, 10, 10);
+    // opaque end stays opaque
+    expect(px(image, 0, 5)).toEqual([255, 0, 0, 255]);
+    // the middle is half transparent, not fully opaque
+    const mid = px(image, 5, 5);
+    expect(mid[3]).toBeGreaterThan(120);
+    expect(mid[3]).toBeLessThan(135);
+    // near the transparent stop the alpha fades towards 0
+    const end = px(image, 9, 5);
+    expect(end[3]).toBeGreaterThan(20);
+    expect(end[3]).toBeLessThan(30);
+  });
+
+  it("keeps stop alpha in radial gradients", () => {
+    const image = pureimage.make(20, 20);
+    const c = image.getContext("2d");
+    c.clearRect(0, 0, 20, 20);
+    const grad = c.createRadialGradient(10, 10, 0, 10, 10, 10);
+    grad.addColorStop(0, "rgba(255, 0, 0, 1)");
+    grad.addColorStop(1, "rgba(255, 0, 0, 0)");
+    c.fillStyle = grad;
+    c.fillRect(0, 0, 20, 20);
+    expect(px(image, 10, 10)[3]).toBe(255);
+    expect(px(image, 19, 10)[3]).toBeLessThan(30);
+  });
+
+  it("transparent parts of a gradient leave the backdrop visible", () => {
+    const image = pureimage.make(10, 10);
+    const c = image.getContext("2d");
+    c.clearRect(0, 0, 10, 10);
+    c.fillStyle = "#0000ff";
+    c.fillRect(0, 0, 10, 10);
+    const grad = c.createLinearGradient(0, 0, 10, 0);
+    grad.addColorStop(0, "rgba(255, 0, 0, 1)");
+    grad.addColorStop(1, "rgba(255, 0, 0, 0)");
+    c.fillStyle = grad;
+    c.fillRect(0, 0, 10, 10);
+    expect(px(image, 0, 5)).toEqual([255, 0, 0, 255]);
+    const end = px(image, 9, 5);
+    expect(end[0]).toBeLessThan(30); // a little red
+    expect(end[2]).toBeGreaterThan(225); // mostly the blue backdrop
+    expect(end[3]).toBe(255);
+  });
+});

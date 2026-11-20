@@ -18,7 +18,7 @@ import fs from "node:fs";
 import path from "node:path";
 import vm from "node:vm";
 import { Readable } from "node:stream";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, "../..");
@@ -58,7 +58,7 @@ await build({
   external: ["pngjs", "opentype.js", "jpeg-js"],
   logLevel: "error",
 });
-const PImage = await import(bundle);
+const PImage = await import(pathToFileURL(bundle).href);
 
 // ---------- testharness shim ----------
 const LEGACY_DOM_ERRORS = {
@@ -127,6 +127,14 @@ class OffscreenCanvas extends PImage.Bitmap {
     super(width, height);
     // Canvas surfaces begin transparent even though a bare Bitmap stays opaque black.
     this.data.fill(0);
+  }
+
+  // OffscreenCanvas.getContext takes a WebIDL enum (OffscreenCanvasRenderingContextType),
+  // so unrecognized context types fail conversion with a TypeError — unlike
+  // HTMLCanvasElement.getContext (and plain Bitmap.getContext), which return null.
+  getContext(type, ...rest) {
+    if (type !== "2d") throw new TypeError(`'${type}' is not a valid OffscreenCanvas context type`);
+    return super.getContext(type, ...rest);
   }
 
   get [Symbol.toStringTag]() {
@@ -419,9 +427,11 @@ function walk(dir) {
 // clears pixel storage on resize, so running it can exhaust the host's memory.
 // It is intentionally excluded from the baseline for the same reason.
 const resourceExhaustionTests = new Set(["canvas-host/2d.canvas.host.size.large"]);
+// test names use forward slashes on every platform, matching baseline.json
+const relName = (file) =>
+  path.relative(offscreenDir, file).replace(/\.worker\.js$/, "").split(path.sep).join("/");
 const files = walk(offscreenDir).filter((f) => {
-  const rel = path.relative(offscreenDir, f).replace(/\.worker\.js$/, "");
-  return !resourceExhaustionTests.has(rel) && (!filter || f.includes(filter));
+  return !resourceExhaustionTests.has(relName(f)) && (!filter || f.includes(filter));
 });
 console.log(`skipping ${resourceExhaustionTests.size} resource-exhaustion WPT file(s)`);
 console.log(`running ${files.length} WPT canvas test files from ${offscreenDir}`);
@@ -429,7 +439,7 @@ console.log(`running ${files.length} WPT canvas test files from ${offscreenDir}`
 const results = {}; // relative name -> {status, message}
 const t0 = Date.now();
 for (let i = 0; i < files.length; i++) {
-  const rel = path.relative(offscreenDir, files[i]).replace(/\.worker\.js$/, "");
+  const rel = relName(files[i]);
   const { subtests } = await runFile(files[i]);
   restoreContextPrototype();
   restoreFontRegistry();

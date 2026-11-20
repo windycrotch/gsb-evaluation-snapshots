@@ -142,6 +142,86 @@ describe("Porter-Duff operators", () => {
     expect(px(image, 2, 2)).toEqual([0, 0, 255, 255]);
     expect(px(image, 10, 10)).toEqual([0, 0, 0, 0]);
   });
+
+  it("unbounded operators respect the clip when stroking", () => {
+    const { image, ctx } = setup();
+    ctx.fillStyle = "#f00";
+    ctx.fillRect(0, 0, 20, 20);
+    ctx.beginPath();
+    ctx.rect(0, 0, 10, 20);
+    ctx.clip();
+    ctx.globalCompositeOperation = "copy";
+    ctx.strokeStyle = "#0f0";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(2, 2);
+    ctx.lineTo(2, 18);
+    ctx.stroke();
+    expect(px(image, 2, 10)).toEqual([0, 255, 0, 255]); // stroked, inside clip
+    expect(px(image, 8, 10)).toEqual([0, 0, 0, 0]); // inside clip, outside shape
+    expect(px(image, 15, 10)).toEqual([255, 0, 0, 255]); // outside clip: untouched
+  });
+
+  it("unbounded operators respect the clip in drawImage", () => {
+    const src = pureimage.make(4, 4);
+    const sctx = src.getContext("2d");
+    sctx.fillStyle = "#00f";
+    sctx.fillRect(0, 0, 4, 4);
+
+    const { image, ctx } = setup();
+    ctx.fillStyle = "#f00";
+    ctx.fillRect(0, 0, 20, 20);
+    ctx.beginPath();
+    ctx.rect(0, 0, 10, 20);
+    ctx.clip();
+    ctx.globalCompositeOperation = "copy";
+    ctx.drawImage(src, 2, 2);
+    expect(px(image, 3, 3)).toEqual([0, 0, 255, 255]); // image, inside clip
+    expect(px(image, 8, 10)).toEqual([0, 0, 0, 0]); // inside clip, outside image
+    expect(px(image, 15, 10)).toEqual([255, 0, 0, 255]); // outside clip: untouched
+  });
+
+  it("destination-in clears only inside the clip", () => {
+    const { image, ctx } = setup();
+    ctx.fillStyle = "#f00";
+    ctx.fillRect(0, 0, 20, 20);
+    ctx.beginPath();
+    ctx.rect(0, 0, 10, 20);
+    ctx.clip();
+    ctx.globalCompositeOperation = "destination-in";
+    ctx.fillStyle = "#0f0";
+    ctx.fillRect(2, 2, 4, 4);
+    expect(px(image, 3, 3)).toEqual([255, 0, 0, 255]); // shape keeps destination
+    expect(px(image, 8, 10)).toEqual([0, 0, 0, 0]); // inside clip, outside shape
+    expect(px(image, 15, 10)).toEqual([255, 0, 0, 255]); // outside clip: untouched
+  });
+
+  it("switching operations between draws matches drawing each on its own canvas", () => {
+    // one canvas: copy, then source-over
+    const { image: switched, ctx } = setup();
+    ctx.globalCompositeOperation = "copy";
+    ctx.fillStyle = "#0f0";
+    ctx.fillRect(0, 0, 10, 10);
+    ctx.globalCompositeOperation = "source-over";
+    ctx.fillStyle = "rgba(0, 0, 255, 0.5)";
+    ctx.fillRect(0, 0, 5, 10);
+
+    // reference canvases: one draw each, no switching
+    const { image: copied, ctx: c1 } = setup();
+    c1.globalCompositeOperation = "copy";
+    c1.fillStyle = "#0f0";
+    c1.fillRect(0, 0, 10, 10);
+
+    const { image: overed, ctx: c2 } = setup();
+    c2.fillStyle = "#0f0";
+    c2.fillRect(0, 0, 10, 10);
+    c2.fillStyle = "rgba(0, 0, 255, 0.5)";
+    c2.fillRect(0, 0, 5, 10);
+
+    // the earlier copy must not leak into the later source-over draw
+    expect(px(switched, 7, 5)).toEqual(px(copied, 7, 5));
+    expect(px(switched, 2, 5)).toEqual(px(overed, 2, 5));
+  });
 });
 
 describe("blend modes", () => {
