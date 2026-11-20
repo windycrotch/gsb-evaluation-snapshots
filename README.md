@@ -15,5 +15,18 @@ Follow us on [Bluesky 🦋](https://bsky.app/profile/gridsound.com) or
 [Facebook](https://facebook.com/gridsound) to have the latest news related to
 the product.
 
+###### startup flow
+
+The splash screen ([src/splashScreen.html](src/splashScreen.html) and
+[src/run.js](src/run.js)) resumes the audio context, loads the samples library
+and the wavetables list, then creates the DAW. A failure switches the button to
+a retryable failure state; retries resume from the failed step, and the audio
+context resume / DAW creation each succeed at most once. The acceptance checks
+for that flow are dependency-free:
+
+```sh
+node --test tests/startup.test.js
+```
+
 ###### screenshot of the version 1.54.4
 ![screenshot](https://gridsound.com/assets/screenshots/daw-1.54.4.jpg)
