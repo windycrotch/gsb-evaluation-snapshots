@@ -31,7 +31,7 @@ It does not, and the measurements in [docs/REPORT.md](docs/REPORT.md) are blunt 
 - **One material and one UV set per asset.** The preprocessor keeps position, normal and `TEXCOORD_0`, and the textures of the first material it meets. No tangents, vertex colours or second UV set.
 - **No geomorphing.** Clusters swap instantly. At 1 to 2 px this was not visible in captured frames; at high thresholds or tight budgets it is.
 - **The coarsest levels look bad.** When edge collapse gets stuck on UV seams the builder falls back to vertex clustering, which smears textures and merges thin parts. Expect this from about 8 to 10 px of effective error.
-- **Streaming is coarse.** It loads whole levels per asset and never evicts. Nanite streams 128 KB pages of cluster groups.
+- **Streaming is coarse.** It loads whole levels per asset (with eviction), not pages of cluster groups. Nanite streams 128 KB pages.
 - **Occlusion culling is partial.** Whole instances only, against depth that is a frame or more old, with no second pass, so newly revealed objects appear late.
 - **Shadows redraw the camera's cut.** Triangle cost doubles and objects outside the view cast no shadow.
 - **Raycasting and collision need their own mesh.** `Mesh.raycast` on a batch would see every level at once.
@@ -143,10 +143,12 @@ Controls: drag to look, WASD and Q/E to fly, shift to go faster. The panel switc
 Fetches `<base>/<name>.json` and `<base>/<name>.bin` whole. The asset holds `meta` (the JSON), `geometry` (a `BufferGeometry` with every level in it; do not draw it directly), `sphere` (bounding sphere in model space) and the hierarchy arrays.
 
 **`loadClodStream(base, name, { rootBytes = 96 * 1024, delayMs = 0 })`** → `Promise<asset>`
-Loads the hierarchy and the coarsest levels that fit in `rootBytes`, and fetches finer levels later with Range requests. Use with `updateStreaming`. Useful fields: `loadedLevel` (0 means everything is loaded), `residentBytes`, `fullBytes`. Streaming assets cannot be used with `DiscreteLodSet`.
+Loads the hierarchy and the coarsest levels that fit in `rootBytes`, and fetches finer levels later with Range requests. Use with `updateStreaming`. Useful fields: `loadedLevel` (0 means everything is loaded), `targetLevel` (where it is heading), `residentBytes`, `fullBytes`, `requests` (Range requests issued), `lastError` (the last failure, or `null`). `loadTo(level)` forces a level and resolves `true` when the asset reached it, `false` on failure or when a newer target superseded it. Streaming assets cannot be used with `DiscreteLodSet`.
+
+An asset has at most one request in flight, and the four Range requests of a level go out one after another. Results that arrive after the camera moved are not installed over the newer target: a prefix that is still coarser than what is wanted is kept, a finer one is dropped. A failed request leaves the resident levels untouched, records `lastError` and retries on the next `updateStreaming()`; other assets keep loading regardless. Levels finer than the current cut are released when the camera pulls back — the buffers shrink, `residentBytes` drops and every `ClodBatch` gets the smaller `geometry` — and are fetched again if the camera returns.
 
 **`updateStreaming(assets)`** → `Promise[]`
-Call once per frame after `select()`. Starts a fetch for each streaming asset whose last selection wanted finer levels than it has.
+Call once per frame after `select()`. Drives each streaming asset towards the levels its last selection needed, releases levels the cut no longer uses, and retries assets whose last request failed. The promises resolve to a boolean and never reject, so `Promise.all` is safe with a mix of failing and healthy assets.
 
 **`loadClodMaterial(base, asset, params?)`** → `MeshStandardMaterial`
 Convenience: wires up the base colour, normal and occlusion/roughness/metal textures and the material factors that the preprocessor copied out of the GLB. `params` overrides anything.
@@ -211,7 +213,7 @@ The hierarchy and the selection rule are the ones Karis, Stubbe and Wihlidal des
 | Rasterisation | Compute-shader rasteriser for small triangles, hardware for large | Hardware only |
 | Shading | Visibility buffer, deferred materials | Forward, stock three.js materials |
 | Occlusion culling | Two-pass hierarchical Z per cluster | One pass, whole instances, stale depth |
-| Streaming | 128 KB pages of cluster groups, with eviction | Whole levels per asset, no eviction |
+| Streaming | 128 KB pages of cluster groups, with eviction | Whole levels per asset, with eviction on zoom-out |
 | Compression | Quantised, entropy-coded, about 14 bits per triangle on disk | None |
 | Shadows | Virtual shadow maps with their own cuts | Stock shadow maps reusing the camera's cut |
 | Triangle budget across the scene | No, it chases pixel error | Yes, because here triangles are not cheap |

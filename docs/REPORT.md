@@ -191,7 +191,7 @@ The realistic path is WebGL2 with `WEBGL_multi_draw`. A software rasteriser for 
 
 ## What does not work
 
-- **Memory and download.** 67 MB per prop when fully loaded. Two props run on the integrated GPU; three and four lost the WebGL context during the first benchmark frames (measured; I did not isolate whether buffers or textures tip it over). The streaming added later loads whole levels per prop and never evicts, so one close-up still pulls in tens of megabytes.
+- **Memory and download.** 67 MB per prop when fully loaded. Two props run on the integrated GPU; three and four lost the WebGL context during the first benchmark frames (measured; I did not isolate whether buffers or textures tip it over). The streaming added later loads whole levels per prop, so one close-up still pulls in tens of megabytes; levels the current cut no longer uses are released when the camera pulls back, but the granularity is a whole level, not a cluster group.
 - **Skinned meshes.** Not supported. Skin weights would have to go through the simplifier and cluster bounds would have to follow bones. Not attempted.
 - **Transparency.** Not supported. Clusters are drawn in selection order with no back-to-front sorting. Alpha-tested materials should work but were not tried.
 - **Shadows.** Stock shadow maps do work (checked visually with a directional light). The shadow pass redraws the camera's cut, so it doubles the triangle cost and props outside the camera frustum cast no shadow.

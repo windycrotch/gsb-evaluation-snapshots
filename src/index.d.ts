@@ -24,24 +24,39 @@ export interface ClodMeta {
 export interface ClodAsset {
   name: string;
   meta: ClodMeta;
-  /** Every level in one geometry. Draw it through ClodBatch, not directly. */
+  /** Every level in one geometry (streaming assets: the levels currently resident). Draw it through ClodBatch, not directly. */
   geometry: BufferGeometry;
   /** Bounding sphere in model space. */
   sphere: Sphere;
-  /** 0 when all geometry is loaded; larger while a streaming asset is partial. */
+  /** Coarsest level that is resident: 0 when all geometry is loaded, larger while a streaming asset is partial. */
   loadedLevel: number;
+  /** Bytes of geometry currently held; shrinks again when detail is released. */
   residentBytes: number;
+  /** Bytes of the whole level prefix (all detail). */
   fullBytes: number;
   /** Streaming assets only. */
   stream?: true;
-  loadTo?(level: number): Promise<void>;
-  loading?: Promise<void> | null;
+  /** Coarsest level loaded up front by `rootBytes`. */
+  rootLevel?: number;
+  /** Level the asset is heading for (>= loadedLevel while loading, < loadedLevel after a zoom-out). */
+  targetLevel?: number;
+  /** Last request failure, or null. A failed asset retries on the next updateStreaming(). */
+  lastError?: Error | null;
+  /** The in-flight load operation, or null. There is at most one per asset. */
+  loading?: Promise<boolean> | null;
+  /** Number of HTTP Range requests issued so far (including retries). */
+  requests?: number;
+  /** Streaming: fetch geometry down to `level` and release anything finer. Resolves true when the
+   *  asset is at that level, false when it is not (failure or a newer target). */
+  loadTo?(level: number): Promise<boolean>;
   [key: string]: unknown;
 }
 
 export function loadClod(base: string, name: string): Promise<ClodAsset>;
 export function loadClodStream(base: string, name: string, options?: { rootBytes?: number; delayMs?: number } | number): Promise<ClodAsset>;
-export function updateStreaming(assets: ClodAsset[]): Promise<void>[];
+/** Starts/continues loads for assets whose last selection needed levels they do not have, and releases
+ *  levels the cut no longer uses. The returned promises never reject; check `asset.lastError`. */
+export function updateStreaming(assets: ClodAsset[]): Promise<boolean>[];
 export function loadClodMaterial(base: string, asset: ClodAsset, params?: MeshStandardMaterialParameters): MeshStandardMaterial;
 
 export class ClodBatch extends Mesh {

@@ -57,12 +57,23 @@ function finishHierarchy(a) {
   // a group can be refined only when ALL its member clusters are resident (Nanite: the group is the streaming unit)
   a.minMemberLevel = new Uint8Array(G).fill(255);
   for (let g = 0; g < G; g++) for (let k = a.memberOff[g]; k < a.memberOff[g + 1]; k++) { const l = a.clusterU[a.memberIds[k] * 4 + 3]; if (l < a.minMemberLevel[g]) a.minMemberLevel[g] = l; }
-  a.loadedLevel = 0; a.wantLevel = 255; a.residentBytes = 0; a.fullBytes = 0; a.batches = [];
+  a.loadedLevel = 0; a.wantLevel = 255; a.cutLevel = 255; a.selFrame = -1; a.residentBytes = 0; a.fullBytes = 0; a.batches = [];
 }
 
 // Streaming loader. The hierarchy (errors, spheres, group membership) is always resident; geometry is
 // fetched as a growing prefix of the file with HTTP Range requests: "everything down to level L".
 // This is level granularity per asset, far coarser than Nanite's 128 KB pages of cluster groups.
+//
+// The state machine keeps these rules, which is what makes repeated camera moves safe:
+//  - at most one load operation per asset is in flight, and the four Range requests of a level are
+//    issued one after another, so there is never more than one HTTP request per asset at a time;
+//  - when the wanted level changes while a request runs, the late result is not installed over the
+//    newer target: a result that is still a coarser prefix of the target is kept, a finer one is
+//    dropped, and a coarser target releases the detail immediately instead of waiting for it;
+//  - a failed request leaves the resident prefix untouched and clears the in-flight state, so the
+//    next updateStreaming() tries again for the same asset (and other assets were never blocked);
+//  - levels finer than what the current cut uses are released again (buffers shrink and batches get
+//    the smaller geometry), and can be fetched again when the camera comes back.
 // options: { rootBytes = 96 KB: geometry loaded up front, delayMs = 0: artificial latency per request, for testing }
 export async function loadClodStream(base, name, options = {}) {
   const { rootBytes = 96 * 1024, delayMs = 0 } = typeof options === 'number' ? { rootBytes: options } : options;
@@ -70,69 +81,164 @@ export async function loadClodStream(base, name, options = {}) {
   const meta = await (await get(base + '/' + name + '.json')).json();
   const url = base + '/' + name + '.bin';
   const T = { Float32Array, Int8Array, Uint32Array, Int32Array };
-  const range = async (k, from, to) => { // elements [from, to) of section k
-    const s = meta.sections[k], C = T[s.type], b = C.BYTES_PER_ELEMENT;
-    if (delayMs) await new Promise((res) => setTimeout(res, delayMs));
-    const r = await get(url, { headers: { Range: 'bytes=' + (s.offset + from * b) + '-' + (s.offset + to * b - 1) } });
-    if (r.status !== 206) throw new Error(url + ': the server ignored the HTTP Range request, which streaming needs');
-    return new C(await r.arrayBuffer());
-  };
   const a = { meta, name, stream: true };
   let hBytes = 0;
-  for (const k of ['clusterF', 'clusterU', 'groupF', 'memberOff', 'memberIds']) { const s = meta.sections[k]; a[k] = await range(k, 0, s.bytes / T[s.type].BYTES_PER_ELEMENT); hBytes += s.bytes; }
+  for (const k of ['clusterF', 'clusterU', 'groupF', 'memberOff', 'memberIds']) {
+    const s = meta.sections[k], C = T[s.type], b = C.BYTES_PER_ELEMENT;
+    const r = await get(url, { headers: { Range: 'bytes=' + s.offset + '-' + (s.offset + s.bytes - 1) } });
+    if (r.status !== 206) throw new Error(url + ': the server ignored the HTTP Range request, which streaming needs');
+    a[k] = new C(await r.arrayBuffer()); hBytes += s.bytes;
+  }
   finishHierarchy(a);
   a.hierarchyBytes = hBytes;
-  const LR = meta.levelRanges; // coarsest first
+  const LR = meta.levelRanges; // coarsest first: LR[0] is the root level, the last entry is everything
   a.fullBytes = LR[LR.length - 1].bytes;
   const c = new THREE.Vector3().fromArray(meta.bbMin).add(new THREE.Vector3().fromArray(meta.bbMax)).multiplyScalar(0.5);
   a.sphere = new THREE.Sphere(c, new THREE.Vector3().fromArray(meta.bbMax).sub(new THREE.Vector3().fromArray(meta.bbMin)).length() * 0.5);
   a.pos = new Float32Array(0); a.nrm = new Int8Array(0); a.uv = new Float32Array(0); a.idx = new Uint32Array(0);
-  let vEnd = 0, iEnd = 0;
-  const grow = (old, add) => { const n = new old.constructor(old.length + add.length); n.set(old); n.set(add, old.length); return n; };
-  a.loading = null; a.requests = 0;
-  // fetch geometry down to `level` and swap in a bigger geometry
-  a.loadTo = (level) => {
-    if (a.loading) return a.loading;
-    const r = LR.find((l) => l.level === level) || LR[LR.length - 1];
-    if (r.vertexEnd <= vEnd && r.indexEnd <= iEnd) { a.loadedLevel = Math.min(a.loadedLevel, r.level); return Promise.resolve(); }
-    a.loading = (async () => {
-      const [p, n, u, i] = await Promise.all([range('positions', vEnd * 3, r.vertexEnd * 3), range('normals', vEnd * 4, r.vertexEnd * 4), range('uvs', vEnd * 2, r.vertexEnd * 2), range('indices', iEnd, r.indexEnd)]);
-      a.requests += 4;
-      a.pos = grow(a.pos, p); a.nrm = grow(a.nrm, n); a.uv = grow(a.uv, u); a.idx = grow(a.idx, i);
-      vEnd = r.vertexEnd; iEnd = r.indexEnd;
-      const geo = new THREE.BufferGeometry();
-      geo.setAttribute('position', new THREE.BufferAttribute(a.pos, 3));
-      geo.setAttribute('normal', new THREE.BufferAttribute(a.nrm, 4, true));
-      geo.setAttribute('uv', new THREE.BufferAttribute(a.uv, 2));
-      geo.setIndex(new THREE.BufferAttribute(a.idx, 1));
-      geo.boundingSphere = a.sphere;
-      const old = a.geometry; a.geometry = geo;
-      for (const b of a.batches) b.geometry = geo;
-      if (old) old.dispose();
-      a.loadedLevel = r.level; a.residentBytes = r.bytes; a.loading = null;
-    })();
-    return a.loading;
-  };
+  a.loadedLevel = 255; a.targetLevel = 255; a.residentBytes = 0; a.requests = 0;
+  a.lastError = null; a.loading = null;
+  a.wantLevel = 255; a.cutLevel = 255; a.selFrame = -1; a._seenFrame = -1;
+  let vEnd = 0, iEnd = 0; // resident prefix length, in elements
+  a._vEnd = 0; a._iEnd = 0;
+
   // root "page": as many top levels as fit in rootBytes, but always every cluster of the virtual root group
   let rootLevel = LR[0].level;
   for (const l of LR) if (l.bytes <= rootBytes) rootLevel = l.level;
   rootLevel = Math.min(rootLevel, a.minMemberLevel[0]);
-  a.loadedLevel = 255;
-  await a.loadTo(rootLevel);
   a.rootLevel = rootLevel;
+
+  // levelRanges entry that is resident for "everything down to `level`": the coarsest entry whose level
+  // is still <= `level`, clamped to never be finer than the root page
+  const entryFor = (level) => {
+    const t = Math.min(level, a.rootLevel);
+    for (const l of LR) if (l.level <= t) return l;
+    return LR[LR.length - 1];
+  };
+  const grow = (old, add) => { const n = new old.constructor(old.length + add.length); n.set(old); n.set(add, old.length); return n; };
+  const publish = () => {
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(a.pos, 3));
+    geo.setAttribute('normal', new THREE.BufferAttribute(a.nrm, 4, true));
+    geo.setAttribute('uv', new THREE.BufferAttribute(a.uv, 2));
+    geo.setIndex(new THREE.BufferAttribute(a.idx, 1));
+    geo.boundingSphere = a.sphere;
+    const old = a.geometry; a.geometry = geo;
+    for (const b of a.batches) b.geometry = geo;
+    if (old) old.dispose();
+  };
+  const apply = (e, p, n, u, i) => {
+    a.pos = grow(a.pos, p); a.nrm = grow(a.nrm, n); a.uv = grow(a.uv, u); a.idx = grow(a.idx, i);
+    vEnd = a._vEnd = e.vertexEnd; iEnd = a._iEnd = e.indexEnd;
+    publish();
+    a.loadedLevel = e.level; a.residentBytes = e.bytes; a.lastError = null;
+  };
+  const evict = (e) => { // shrink to the prefix of a coarser entry (never called with a finer one)
+    a.pos = a.pos.slice(0, e.vertexEnd * 3); a.nrm = a.nrm.slice(0, e.vertexEnd * 4); a.uv = a.uv.slice(0, e.vertexEnd * 2); a.idx = a.idx.slice(0, e.indexEnd);
+    vEnd = a._vEnd = e.vertexEnd; iEnd = a._iEnd = e.indexEnd;
+    publish();
+    a.loadedLevel = e.level; a.residentBytes = e.bytes;
+  };
+  const fetchRange = async (k, from, to) => { // elements [from, to) of section k
+    const s = meta.sections[k], C = T[s.type], b = C.BYTES_PER_ELEMENT;
+    if (delayMs) await new Promise((res) => setTimeout(res, delayMs));
+    if (to <= from) return new C(0);
+    const init = { headers: { Range: 'bytes=' + (s.offset + from * b) + '-' + (s.offset + to * b - 1) } };
+    a.requests++;
+    const r = await get(url, init);
+    if (r.status !== 206) throw new Error(url + ': the server ignored the HTTP Range request, which streaming needs');
+    return new C(await r.arrayBuffer());
+  };
+
+  // One load operation per asset. Calls made while it runs join it; the loop re-reads the target
+  // after every level, so a camera change mid-flight is picked up before the next request goes out.
+  let busy = false, current = null;
+  const pump = () => {
+    if (busy) return current;
+    busy = true;
+    const p = (async () => {
+      try {
+        for (;;) {
+          const e = entryFor(a.targetLevel);
+          if (e.level > a.loadedLevel) { evict(e); return true; } // coarser target: release detail now
+          if (e.level === a.loadedLevel) return true;             // already at (or finer than) target
+          const fromV = vEnd, fromI = iEnd;
+          // a finer target does not invalidate this (coarser) prefix; a coarser one does, and so does
+          // an eviction that moved the resident prefix while the request was running
+          const stale = () => fromV !== vEnd || entryFor(a.targetLevel).level > e.level;
+          const p = await fetchRange('positions', fromV * 3, e.vertexEnd * 3);
+          if (stale()) continue;
+          const n = await fetchRange('normals', fromV * 4, e.vertexEnd * 4);
+          if (stale()) continue;
+          const u = await fetchRange('uvs', fromV * 2, e.vertexEnd * 2);
+          if (stale()) continue;
+          const i = await fetchRange('indices', fromI, e.indexEnd);
+          if (stale()) continue;
+          apply(e, p, n, u, i);
+          // loop again: the target may have become finer while the requests ran
+        }
+      } catch (err) {
+        a.lastError = err || new Error(String(err)); // resident prefix untouched; retry next update
+        return false;
+      } finally {
+        busy = false; a.loading = null;
+      }
+    })();
+    current = p;
+    a.loading = busy ? p : null; // the body can finish without awaiting (already at the target)
+    return p;
+  };
+  const setTarget = (level) => {
+    level = Number(level);
+    if (!(level >= 0) || level > 255) return;
+    const t = entryFor(level);
+    if (t.level === a.targetLevel) return;
+    a.targetLevel = t.level;
+    // zoom-out is synchronous: the finer prefix is released in the frame that stopped using it, not
+    // when the in-flight (now useless) request comes back
+    if (t.level > a.loadedLevel) evict(t);
+  };
+  a._setTarget = setTarget;
+  a._pump = pump;
+  /** Fetch geometry down to `level` (and release anything finer). Resolves true when the asset is
+   *  at the level, false when it is not (failed or superseded); inspect `lastError` for failures. */
+  a.loadTo = (level) => { setTarget(level); return pump(); };
+  a.frameLevel = (want, cut) => { // levels the last selection needed: `want` (refinement) and the cut
+    let t = 255;
+    if (want !== 255) t = want;
+    if (cut !== 255 && cut < t) t = cut;
+    // nothing drawn and nothing wanted (the asset was culled this frame) says nothing about how much
+    // detail it needs, so keep what is resident instead of dropping it and fetching it again
+    if (t === 255) return;
+    setTarget(t);
+  };
+
+  a.targetLevel = rootLevel;
+  const ok = await pump();
+  if (!ok || a.loadedLevel !== rootLevel) throw a.lastError || new Error(`${name}: the root level failed to load`);
   return a;
 }
 
 /**
- * Call once per frame after ClodSelector.select() for assets from loadClodStream: starts a fetch for
- * every asset whose last selection wanted finer levels than are loaded. Returns the pending promises.
+ * Call once per frame after ClodSelector.select() for assets from loadClodStream: drives each asset
+ * towards the levels its last selection needed, releases levels the cut no longer uses, and retries
+ * assets whose last request failed. Returns the pending promises. They never reject, so one failing
+ * asset cannot stop the others; each asset recovers on its own and reports `lastError`.
  */
 export function updateStreaming(assets) {
   const pending = [];
   for (const a of assets) {
-    if (!a.stream) continue;
-    if (a.wantLevel < a.loadedLevel && !a.loading) pending.push(a.loadTo(a.wantLevel));
-    a.wantLevel = 255;
+    if (!a || !a.stream) continue;
+    const selected = a.selFrame !== a._seenFrame; // a selection happened since the last pump
+    if (selected) {
+      a._seenFrame = a.selFrame;
+      a.frameLevel(a.wantLevel, a.cutLevel);
+      a.wantLevel = 255; a.cutLevel = 255;
+    }
+    // join a running operation so the caller can await it; otherwise start one only for an asset the
+    // last selection actually asked for (a culled asset must not retry into the void every frame)
+    if (a.loading) pending.push(a._pump());
+    else if (selected && a.targetLevel !== a.loadedLevel) pending.push(a._pump());
   }
   return pending;
 }
@@ -293,6 +399,11 @@ export class ClodSelector {
     this.stats.occluded = occ;
     this.frame++;
     const st = this.stats; st.tris = 0; st.clusters = 0; st.visited = 0;
+    // streaming bookkeeping: this selection tells updateStreaming which levels each asset needs.
+    // wantLevel (set by refinement below) accumulates the finest level asked for; cutLevel is the
+    // finest level the emitted cut actually draws, so anything finer can be released. Both accumulate
+    // over several select() calls (e.g. a shadow pass) until updateStreaming consumes them.
+    for (const b of this.batches) { const a = b.asset; if (a.stream) a.selFrame = this.frame; }
     if (opts.budget > 0) this._selectBudget(opts.errorPx, opts.budget);
     else { for (const b of this.batches) this._selectThreshold(b, opts.errorPx); st.threshold = opts.errorPx; }
     for (const b of this.batches) { b._multiDrawCount = b._n; b._indirectTexture.needsUpdate = true; st.clusters += b._n; }
@@ -303,6 +414,7 @@ export class ClodSelector {
   _selectThreshold(b, t) {
     const a = b.asset, gF = a.groupF, cF = a.clusterF, cU = a.clusterU, mOff = a.memberOff, mIds = a.memberIds;
     const minLv = a.minMemberLevel, loaded = a.loadedLevel; let want = a.wantLevel;
+    let cut = 255;
     const dstack = this._dstack || (this._dstack = new Int32Array(8192));
     const K = this.K, cull = this.frustumCull, stamp = b.stamp, stack = this._stack || (this._stack = new Int32Array(8192));
     let n = b._n, tris = 0, visited = 0;
@@ -322,7 +434,7 @@ export class ClodSelector {
             if (d <= 1e-6 || gF[o + 4] * K > t * d) { // source group still too coarse: refine
               if (minLv[s] < loaded) { // finer data not resident: draw this cluster as a leaf and ask for more
                 if (minLv[s] < want) want = minLv[s];
-                if (stamp[s] !== sid && !a.loading) {
+                if (stamp[s] !== sid) {
                   stamp[s] = sid; let dp = 0; dstack[dp++] = s;
                   while (dp > 0) {
                     const dg = dstack[--dp];
@@ -354,10 +466,12 @@ export class ClodSelector {
           b._multiDrawStarts[n] = cU[c * 4] * 4; b._multiDrawCounts[n] = cU[c * 4 + 1];
           b.indirect[n * 2] = i; b.indirect[n * 2 + 1] = c | (cU[c * 4 + 3] << 24); n++;
           tris += cU[c * 4 + 1];
+          if (cU[c * 4 + 3] < cut) cut = cU[c * 4 + 3];
         }
       }
     }
     b._n = n; this.stats.tris += tris / 3; this.stats.visited += visited; a.wantLevel = want;
+    if (cut < a.cutLevel) a.cutLevel = cut;
   }
 
   // ---- budget mode: refine the globally worst group first until the triangle budget is spent
@@ -449,6 +563,7 @@ export class ClodSelector {
         b._multiDrawStarts[n] = cU[c * 4] * 4; b._multiDrawCounts[n] = cU[c * 4 + 1];
         b.indirect[n * 2] = i; b.indirect[n * 2 + 1] = c | (cU[c * 4 + 3] << 24); b._n = n + 1;
         tris += cU[c * 4 + 1];
+        if (cU[c * 4 + 3] < a.cutLevel) a.cutLevel = cU[c * 4 + 3];
       }
     }
     this.stats.tris = tris / 3;
