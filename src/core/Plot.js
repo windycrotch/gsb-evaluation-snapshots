@@ -511,6 +511,20 @@ export class Plot extends GlBase {
     return { transforms: [], colorbars: [], ...this.currentConfig, axes }
   }
 
+  // Release every GPU resource a built layer set owns. Buffer props are destroyed
+  // directly; data columns that manage their own textures (tile layers) expose
+  // dispose(), which must run first so any in-flight async work stops touching the GPU.
+  _releaseLayerResources(layers) {
+    for (const layer of layers) {
+      for (const col of layer._dataColumns ?? []) {
+        if (typeof col.dispose === 'function') col.dispose()
+      }
+      for (const buf of Object.values(layer._bufferProps ?? {})) {
+        if (buf && typeof buf.destroy === 'function') buf.destroy()
+      }
+    }
+  }
+
   async _initialize() {
     const epoch = ++this._initEpoch
     const { layers = [], colorbars = [], transforms = [], interactions = {} } = this.currentConfig
@@ -522,12 +536,8 @@ export class Plot extends GlBase {
       }
     }
 
-    // Destroy GPU buffers owned by the previous layer set before rebuilding.
-    for (const layer of this.layers) {
-      for (const buf of Object.values(layer._bufferProps ?? {})) {
-        if (buf && typeof buf.destroy === 'function') buf.destroy()
-      }
-    }
+    // Release GPU resources owned by the previous layer set before rebuilding.
+    this._releaseLayerResources(this.layers)
 
     this.layers = []
     this._dataTransformNodes = []
@@ -1099,6 +1109,9 @@ export class Plot extends GlBase {
   destroy() {
     getMasterCanvas().unregister(this)
     globalResourceRegistry.releaseOwner(this)
+
+    this._releaseLayerResources(this.layers)
+    this.layers = []
 
     for (const float of this._floats.values()) {
       float.destroy()

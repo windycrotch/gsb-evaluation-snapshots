@@ -518,11 +518,12 @@ function buildTileMesh(tileBbox, tileCrs, plotCrs, N) {
 // refresh(plot) calls syncFn so the tile manager updates tile coverage each frame.
 
 class TilePositionColumn extends ColumnData {
-  constructor(vertexCount, texFns, syncFn) {
+  constructor(vertexCount, texFns, syncFn, disposeFn = null) {
     super()
     this._vertexCount = vertexCount
     this._texFns = texFns   // live fn[] managed by TileManager; starts as [() => null]
     this._syncFn = syncFn
+    this._disposeFn = disposeFn
   }
 
   get length()  { return this._vertexCount }
@@ -542,15 +543,57 @@ class TilePositionColumn extends ColumnData {
     this._syncFn(plot)
     return false
   }
+
+  // Called by Plot when the layer set is torn down (update() or destroy()).
+  // Lets the tile manager cancel pending work and release its GPU resources.
+  dispose() {
+    if (this._disposeFn) this._disposeFn()
+  }
+}
+
+// ─── Default tile loaders ─────────────────────────────────────────────────────
+
+function defaultLoadImage(url) {
+  return new Promise((resolve, reject) => {
+    const img = new Image()
+    img.crossOrigin = 'anonymous'
+    img.onload = () => resolve(img)
+    img.onerror = () => reject(new Error(`Failed to load tile: ${url}`))
+    img.src = url
+  })
 }
 
 // ─── TileManager ──────────────────────────────────────────────────────────────
+//
+// Lifecycle rules:
+//  • A tile key is loaded at most once while its first request is in flight; a
+//    second sync that needs it before completion reuses the pending entry.
+//  • Only tiles that are both needed by the current view and fully loaded are
+//    handed to the renderer. Tiles from a previous view / zoom level are kept in
+//    the cache but never drawn.
+//  • A failed load releases its cache entry so a later view that needs the key
+//    starts a fresh request. Within one unchanged view the key is not retried in
+//    a loop (no load storm on a broken server).
+//  • Eviction releases the image and position textures, but never a tile that is
+//    still referenced by the current draw list (a needed, loaded tile).
+//  • destroy() marks the manager dead; in-flight callbacks then bail out before
+//    creating any texture and never schedule another render.
 
 const MAX_TILE_CACHE = 50
 const DOMAIN_CHANGE_THRESHOLD = 0.02  // 2% change triggers tile sync
 
-class TileManager {
-  constructor({ regl, source, tileCrs, plotCrs, tessellation, xTexFns, yTexFns, imageTexFns, onLoad }) {
+export class TileManager {
+  constructor({
+    regl, source, tileCrs, plotCrs, tessellation,
+    xTexFns, yTexFns, imageTexFns, onLoad,
+    // Injectable hooks — tests pass fakes so no network / GPU is touched.
+    loadImage = defaultLoadImage,
+    fetchTileData = fetchCogData,
+    createTexture = null,
+    uploadPositions = null,
+    buildMesh = buildTileMesh,
+    maxCacheSize = MAX_TILE_CACHE,
+  }) {
     this.regl = regl
     this.source = source
     this.tileCrs = tileCrs
@@ -561,13 +604,25 @@ class TileManager {
     this._imageTexFns = imageTexFns
     this.onLoad = onLoad
 
-    this.tiles = new Map()
-    this.accessOrder = []
+    this._loadImage       = loadImage
+    this._fetchTileData   = fetchTileData
+    this._createTexture   = createTexture ?? ((opts) => this.regl.texture(opts))
+    this._uploadPositions = uploadPositions ?? ((arr) => uploadToTexture(this.regl, arr))
+    this._buildMesh       = buildMesh
+    this._maxCacheSize    = maxCacheSize
+
+    this.tiles = new Map()          // key → { status: 'loading' | 'loaded', imgTex, xTex, yTex, ... }
+    this.accessOrder = []           // LRU order of keys that were loaded
     this._neededKeys = new Set()
+
+    this._failedKeys = new Map()    // key → sync generation in which it failed
+    this._syncGeneration = 0
 
     this._lastXDomain = null
     this._lastYDomain = null
     this._lastViewport = null
+
+    this._destroyed = false
 
     const fromCode = parseCrsCode(plotCrs)
     const toCode = parseCrsCode(tileCrs)
@@ -575,6 +630,8 @@ class TileManager {
       ? (pt) => pt
       : proj4(`EPSG:${fromCode}`, `EPSG:${toCode}`).forward
   }
+
+  get destroyed() { return this._destroyed }
 
   _domainChanged(xDomain, yDomain, viewport) {
     if (!this._lastXDomain || !this._lastYDomain) return true
@@ -691,8 +748,13 @@ class TileManager {
   }
 
   syncTiles(xDomain, yDomain, viewport) {
+    if (this._destroyed) return
     if (!this._domainChanged(xDomain, yDomain, viewport)) return
 
+    // Each accepted view change opens a new generation: a key that failed under the
+    // previous view is retried now, but a key that keeps failing for the view on screen
+    // is not re-requested every frame (no load storm against a broken server).
+    this._syncGeneration++
     this._lastXDomain = xDomain.slice()
     this._lastYDomain = yDomain.slice()
     this._lastViewport = viewport ? { width: viewport.width, height: viewport.height } : null
@@ -700,69 +762,142 @@ class TileManager {
     const needed = this._computeNeededTiles(xDomain, yDomain, viewport)
     this._neededKeys = new Set(needed.map(t => t.key))
 
-    for (const tileSpec of needed) {
-      if (!this.tiles.has(tileSpec.key)) {
-        this._loadTile(tileSpec)
-      }
+    for (const key of [...this._failedKeys.keys()]) {
+      if (!this._neededKeys.has(key)) this._failedKeys.delete(key)
     }
+
+    for (const tileSpec of needed) {
+      if (this._destroyed) return
+      // Loaded or already in flight — never start a second request for the same key.
+      if (this.tiles.has(tileSpec.key)) continue
+      if (this._failedKeys.get(tileSpec.key) === this._syncGeneration) continue
+      this._loadTile(tileSpec)
+    }
+
+    this._rebuildArrays()
+    this._evictUnneeded()
+  }
+
+  _releaseTile(tile) {
+    if (!tile) return
+    if (tile.imgTex) { tile.imgTex.destroy(); tile.imgTex = null }
+    if (tile.xTex)   { tile.xTex.destroy();   tile.xTex = null }
+    if (tile.yTex)   { tile.yTex.destroy();   tile.yTex = null }
+    tile.status = 'released'
   }
 
   _evictTile(key) {
     const tile = this.tiles.get(key)
-    if (!tile) return
-    if (tile.imgTex) tile.imgTex.destroy()
-    if (tile.xTex) tile.xTex.destroy()
-    if (tile.yTex) tile.yTex.destroy()
+    if (!tile) return false
+    // Never release (or cancel) a tile the current view has asked for: a loaded one is
+    // still referenced by the draw list, and a loading one would be re-requested at once.
+    if (this._neededKeys.has(key)) return false
+    // Never cancel an in-flight request either: dropping it would let a later need of
+    // the same key start a second load (and a second texture) for the one in flight.
+    if (tile.status === 'loading') return false
+    this._releaseTile(tile)
     this.tiles.delete(key)
     const i = this.accessOrder.indexOf(key)
     if (i >= 0) this.accessOrder.splice(i, 1)
+    return true
+  }
+
+  _evictUnneeded() {
+    if (this._destroyed) return
+    const isSingleTileSource = this.source.type === 'wms' ||
+                               this.source.type === 'cog' ||
+                               this.source.type === 'cogTiles'
+    if (isSingleTileSource) {
+      // These sources produce a new key for every viewport: anything not needed now
+      // is stale and must be released immediately.
+      for (const key of [...this.tiles.keys()]) {
+        if (!this._neededKeys.has(key)) this._evictTile(key)
+      }
+      return
+    }
+    if (this.tiles.size <= this._maxCacheSize) return
+    for (const key of [...this.accessOrder]) {
+      if (this.tiles.size <= this._maxCacheSize) break
+      this._evictTile(key)
+    }
+  }
+
+  _touch(key) {
+    const i = this.accessOrder.indexOf(key)
+    if (i >= 0) this.accessOrder.splice(i, 1)
+    this.accessOrder.push(key)
   }
 
   _rebuildArrays() {
-    const loaded = [...this.tiles.values()].filter(t => t.status === 'loaded')
+    // Draw only tiles that belong to the current view and finished loading. A tile
+    // from a previous view or zoom level stays in the cache but is never drawn.
+    const loaded = []
+    for (const [key, tile] of this.tiles) {
+      if (tile.status !== 'loaded') continue
+      if (!this._neededKeys.has(key)) continue
+      loaded.push(tile)
+    }
+
     this._xTexFns.length = 0
     this._yTexFns.length = 0
     this._imageTexFns.length = 0
-    // Always keep at least one entry so isTiledTexClosure detection stays true.
+
     if (loaded.length === 0) {
+      // Always keep at least one entry so isTiledTexClosure detection stays true;
+      // the null-skip in the render loop then draws nothing.
       this._xTexFns.push(() => null)
       this._yTexFns.push(() => null)
       this._imageTexFns.push(() => null)
       return
     }
+
     for (const tile of loaded) {
-      this._xTexFns.push(() => tile.xTex)
-      this._yTexFns.push(() => tile.yTex)
-      this._imageTexFns.push(() => tile.imgTex)
+      // Each closure re-reads the tile on every draw, so a tile released later yields
+      // null and the render loop skips it instead of sampling a destroyed texture.
+      this._xTexFns.push(() => (tile.status === 'loaded' ? tile.xTex : null))
+      this._yTexFns.push(() => (tile.status === 'loaded' ? tile.yTex : null))
+      this._imageTexFns.push(() => (tile.status === 'loaded' ? tile.imgTex : null))
     }
   }
 
-  async _loadTile(tileSpec) {
-    this.tiles.set(tileSpec.key, { status: 'loading' })
-    this.accessOrder.push(tileSpec.key)
+  _isCurrentLoad(key, entry) {
+    return !this._destroyed && this.tiles.get(key) === entry
+  }
 
+  _loadTile(tileSpec) {
+    if (this._destroyed) return
+    const entry = { status: 'loading', key: tileSpec.key }
+    this.tiles.set(tileSpec.key, entry)
+    this._touch(tileSpec.key)
+    this._loadTileAsync(tileSpec, entry)
+  }
+
+  async _loadTileAsync(tileSpec, entry) {
+    const key = tileSpec.key
+    let imgTex = null
     try {
-      let imgTex
+      let textureOptions
       if (tileSpec.type === 'cog' || tileSpec.type === 'cogTiles') {
         const cogSource = tileSpec.type === 'cogTiles' ? { ...this.source, url: tileSpec.url } : this.source
-        const result = await fetchCogData(cogSource, tileSpec.bbox, tileSpec.width, tileSpec.height)
-        if (!this.tiles.has(tileSpec.key)) return
-        if (!result) throw new Error(`COG fetch returned no data for tile ${tileSpec.key}`)
+        const result = await this._fetchTileData(cogSource, tileSpec.bbox, tileSpec.width, tileSpec.height)
+        // Layer destroyed (or tile evicted) while the fetch was in flight: release nothing
+        // that was never created, and do not touch the GPU.
+        if (!this._isCurrentLoad(key, entry)) return
+        if (!result) throw new Error(`COG fetch returned no data for tile ${key}`)
         const format = result.bands >= 4 ? 'rgba' : 'rgb'
-        imgTex = this.regl.texture({ data: result.data, width: result.width, height: result.height, format, type: 'uint8', flipY: false, min: 'linear', mag: 'linear' })
+        textureOptions = { data: result.data, width: result.width, height: result.height, format, type: 'uint8', flipY: false, min: 'linear', mag: 'linear' }
       } else {
-        const img = new Image()
-        img.crossOrigin = 'anonymous'
-        await new Promise((resolve, reject) => {
-          img.onload = resolve
-          img.onerror = () => reject(new Error(`Failed to load tile: ${tileSpec.url}`))
-          img.src = tileSpec.url
-        })
-        if (!this.tiles.has(tileSpec.key)) return
-        imgTex = this.regl.texture({ data: img, flipY: false, min: 'linear', mag: 'linear' })
+        const img = await this._loadImage(tileSpec.url)
+        if (!this._isCurrentLoad(key, entry)) return
+        textureOptions = { data: img, flipY: false, min: 'linear', mag: 'linear' }
       }
 
-      const mesh = buildTileMesh(tileSpec.bbox, this.tileCrs, this.plotCrs, this.tessellation)
+      // The layer may have been destroyed while awaiting; creating a GPU texture then
+      // would both leak it and schedule a render for a layer that no longer exists.
+      if (!this._isCurrentLoad(key, entry)) return
+      imgTex = this._createTexture(textureOptions)
+
+      const mesh = this._buildMesh(tileSpec.bbox, this.tileCrs, this.plotCrs, this.tessellation)
 
       // De-interleave xy positions into separate packed float textures
       const n = mesh.vertexCount
@@ -772,38 +907,58 @@ class TileManager {
         xArr[i] = mesh.positions[i * 2]
         yArr[i] = mesh.positions[i * 2 + 1]
       }
-      const xTex = uploadToTexture(this.regl, xArr)
-      const yTex = uploadToTexture(this.regl, yArr)
+      const xTex = this._uploadPositions(xArr)
+      const yTex = this._uploadPositions(yArr)
 
-      this.tiles.set(tileSpec.key, { status: 'loaded', imgTex, xTex, yTex })
-
-      const neededKeys = this._neededKeys
-      if (this.source.type === 'wms' || this.source.type === 'cog') {
-        for (const key of [...this.tiles.keys()]) {
-          if (key !== tileSpec.key && !neededKeys.has(key)) this._evictTile(key)
-        }
-      } else if (this.tiles.size > MAX_TILE_CACHE) {
-        for (const key of this.accessOrder) {
-          if (key !== tileSpec.key && !neededKeys.has(key) && this.tiles.has(key)) {
-            this._evictTile(key)
-            if (this.tiles.size <= MAX_TILE_CACHE) break
-          }
-        }
+      // Destroy may have raced the texture creation above — clean up and stop.
+      if (!this._isCurrentLoad(key, entry)) {
+        if (imgTex) imgTex.destroy()
+        if (xTex) xTex.destroy()
+        if (yTex) yTex.destroy()
+        return
       }
 
+      entry.status = 'loaded'
+      entry.imgTex = imgTex
+      entry.xTex = xTex
+      entry.yTex = yTex
+
       this._rebuildArrays()
-      this.onLoad()
+      this._evictUnneeded()
+      if (!this._destroyed && this.onLoad) this.onLoad()
     } catch (err) {
-      this.tiles.delete(tileSpec.key)
-      const i = this.accessOrder.indexOf(tileSpec.key)
-      if (i >= 0) this.accessOrder.splice(i, 1)
-      console.warn(`[TileLayer] ${err.message}`)
+      if (imgTex) imgTex.destroy()
+      // Do not leave the key stuck in 'loading': drop the entry so a later view can
+      // request it again, and remember the generation so this view does not loop.
+      if (this.tiles.get(key) === entry) {
+        this.tiles.delete(key)
+        const i = this.accessOrder.indexOf(key)
+        if (i >= 0) this.accessOrder.splice(i, 1)
+        this._rebuildArrays()
+      }
+      if (!this._destroyed) {
+        this._failedKeys.set(key, this._syncGeneration)
+        console.warn(`[TileLayer] ${err.message}`)
+      }
     }
   }
 
   destroy() {
+    if (this._destroyed) return
+    this._destroyed = true
     for (const key of [...this.tiles.keys()]) {
-      this._evictTile(key)
+      const tile = this.tiles.get(key)
+      this._releaseTile(tile)
+      this.tiles.delete(key)
+    }
+    this.accessOrder.length = 0
+    this._neededKeys.clear()
+    this._failedKeys.clear()
+
+    // Reset the live fn[] arrays so no closure can hand a destroyed texture to a draw.
+    for (const arr of [this._xTexFns, this._yTexFns, this._imageTexFns]) {
+      arr.length = 0
+      arr.push(() => null)
     }
   }
 }
@@ -902,10 +1057,11 @@ class TileLayerType extends LayerType {
     const imageTexFns = [() => null]
 
     const tileManagerRef = { manager: null }
+    let disposed = false
 
     // syncFn is called by TilePositionColumn.refresh() on every render frame.
     const syncFn = (renderPlot) => {
-      if (!tileManagerRef.manager) return
+      if (disposed || !tileManagerRef.manager) return
       const xScale = renderPlot.axisRegistry.getScale(xAxis)
       const yScale = renderPlot.axisRegistry.getScale(yAxis)
       if (!xScale || !yScale) return
@@ -916,20 +1072,31 @@ class TileLayerType extends LayerType {
       )
     }
 
-    const xCol = new TilePositionColumn(vertexCount, xTexFns, syncFn)
-    const yCol = new TilePositionColumn(vertexCount, yTexFns, syncFn)
+    // Called by Plot when this layer set is torn down (update() or destroy()).
+    // Kills the manager so in-flight loads cannot create textures, and idempotent
+    // because both the x and y columns call it.
+    const disposeFn = () => {
+      if (disposed) return
+      disposed = true
+      tileManagerRef.manager?.destroy()
+      tileManagerRef.manager = null
+    }
+
+    const xCol = new TilePositionColumn(vertexCount, xTexFns, syncFn, disposeFn)
+    const yCol = new TilePositionColumn(vertexCount, yTexFns, syncFn, disposeFn)
 
     // Async CRS init — create TileManager once proj4 defs are loaded.
     Promise.all([
       ensureCrsDefined(effectiveTileCrs),
       ensureCrsDefined(effectivePlotCrs),
     ]).then(() => {
+      if (disposed) return
       try {
         tileManagerRef.manager = new TileManager({
           regl, source,
           tileCrs: effectiveTileCrs, plotCrs: effectivePlotCrs, tessellation: N,
           xTexFns, yTexFns, imageTexFns,
-          onLoad: () => plot.scheduleRender(),
+          onLoad: () => { if (!disposed) plot.scheduleRender() },
         })
         plot.scheduleRender()
       } catch (_) {
