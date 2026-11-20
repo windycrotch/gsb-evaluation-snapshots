@@ -62,6 +62,31 @@ Tiers 2.5 / 2.7 are gated on `mode === 'zooming'` (`:964`). So a zoom gesture is
 scaled-blits during the drag, then exactly one `full` re-render when it settles** (crisp), not N full
 repaints.
 
+### Reuse preconditions (observable correctness across a whole gesture)
+
+A reuse tier (1 / 2 / 2.5 / 2.7) is only entered when **all** of these hold; otherwise `paintStatic`
+falls through to tier 3 (`full`), which always leaves a complete, freshly-rasterized cache — never a
+half-populated one:
+
+- **`cacheStale === false`** — the content is current. A committed document edit (node add / remove /
+  restyle, i.e. a `'change'` event) sets it, so an edit made mid-zoom is reflected on the very next
+  present. `renderFullCache` clears it.
+- **`cacheGeometryMatchesSurface()`** — the offscreen cache backing store is still dimensioned for the
+  *current* viewport size **and DPR**. A mid-gesture resize / DPR change physically reallocates the
+  on-screen surface and the cache, so old-size / old-DPR pixels can never be blitted into the new
+  backing store. The check is structural (actual surface dimensions), not just flag ordering, and
+  `paintStatic` self-heals by marking the cache stale when it fails.
+- **Tier 2.7 only: `cacheReuseLayout(...).valid`** — the scale-blit destination still lies inside the
+  cache. Combined zoom-out + pan can push it off-canvas; an invalid layout refuses the hybrid and the
+  frame is fully re-rendered instead of leaving the perimeter blank.
+
+When the gesture ends and `interaction.mode` returns to `idle`, the interaction transition marks the
+cache stale, so the first idle frame is a tier-3 full render at the current camera — the crisp
+settling frame after the transiently-blurred scaled blits. The cache's reference camera
+(`cacheCamX/Y/Z`) is rewritten atomically by every tier that moves pixels (`renderFullCache`,
+`extendCache`, `extendCacheScaled`), so under rapid zoom/pan alternation the recorded reference camera
+always matches the actual blit and offsets cannot accumulate.
+
 ## 5. The cache math
 
 `scene-cache-math.ts` keeps the tier math pure (unit-testable, no canvas refs):

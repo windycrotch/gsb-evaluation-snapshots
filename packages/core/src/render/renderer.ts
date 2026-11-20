@@ -291,6 +291,32 @@ export const createRenderer = (opts: RendererOptions): Renderer => {
     return cacheSurface
   }
 
+  /**
+   * Structural guard: true only when the existing cache backing store is
+   * still dimensioned for the CURRENT viewport size and DPR.
+   *
+   * `cacheStale` already tracks content/flag-level invalidation, but a
+   * viewport resize / DPR change physically reallocates the on-screen
+   * surface and (lazily) the cache. This guard makes the "never blit
+   * old-size / old-DPR pixels into a new backing store" guarantee
+   * independent of flag ordering: if the cache geometry doesn't match
+   * the live surface, every reuse tier is refused and `paintStatic`
+   * falls through to a full re-render, regardless of `cacheStale`.
+   */
+  const cacheGeometryMatchesSurface = (): boolean => {
+    if (!cacheSurface) return false
+    const dpr = staticSurface.dpr
+    const cssW = staticSurface.cssWidth + 2 * SCENE_CACHE_MARGIN_PX
+    const cssH = staticSurface.cssHeight + 2 * SCENE_CACHE_MARGIN_PX
+    return (
+      cacheSurface.dpr === dpr &&
+      cacheSurface.cssWidth === cssW &&
+      cacheSurface.cssHeight === cssH &&
+      cacheSurface.canvas.width === Math.max(1, Math.round(cssW * dpr)) &&
+      cacheSurface.canvas.height === Math.max(1, Math.round(cssH * dpr))
+    )
+  }
+
   // Sorted-by-(z, id) caches of ALL scene nodes / edges. Rebuilt
   // lazily on first access and invalidated on every `'change'` op.
   // Lets `visibleNodes` / `visibleEdges` skip per-frame Array.sort —
@@ -1044,6 +1070,12 @@ export const createRenderer = (opts: RendererOptions): Renderer => {
    */
   const paintStatic = (): void => {
     const camera = store.getCamera()
+    // Self-heal: if the cache was reallocated for a different viewport
+    // size / DPR (or doesn't exist yet), its pixels cannot be presented
+    // onto the current surface. Mark it stale so every reuse gate below
+    // refuses and we fall through to a complete re-render — never a
+    // half-populated cache built from old-size pixels.
+    if (!cacheGeometryMatchesSurface()) cacheStale = true
     if (!cacheStale && camera.z === cacheCamZ) {
       if (viewportFitsInCache(camera)) {
         presentStatic(camera)
@@ -1063,9 +1095,12 @@ export const createRenderer = (opts: RendererOptions): Renderer => {
     // user is actively zooming; 2.5 when the existing cache fully
     // covers the new viewport (zoom-in or mild zoom-out within margin),
     // 2.7 when zoom-out exposes uncached perimeter but the existing
-    // center pixels are still usable via scale-blit.
+    // center pixels are still usable via scale-blit. The geometry match
+    // is re-checked so a mid-gesture resize / DPR change can never
+    // scale-blit an old-size cache into the new backing store.
     if (
       !cacheStale &&
+      cacheGeometryMatchesSurface() &&
       camera.z !== cacheCamZ &&
       store.getInteractionState().mode === 'zooming' &&
       cacheSurface
@@ -1083,6 +1118,9 @@ export const createRenderer = (opts: RendererOptions): Renderer => {
       }
       if (zoomExtendRatioInBounds(cacheCam.camZ, view.camZ, SCALED_EXTEND_MIN_RATIO)) {
         const layout = cacheReuseLayout(cacheCam, view)
+        // An unusable reuse layout (dest pushed off-cache by combined
+        // zoom-out + pan) must fall through to the full re-render below
+        // — never paint only the center and leave the perimeter blank.
         if (layout.valid) {
           extendCacheScaled(camera, layout)
           presentStatic(camera)
