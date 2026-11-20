@@ -183,6 +183,10 @@ Pass the VTT URL, the slider loads it once and preloads the sprite sheets on the
 
 The VTT file and images must be reachable from the page (same origin or CORS enabled for the VTT file).
 
+Switching the source is safe: the previous request is aborted and a late response from an old source can never overwrite the new one. While the new source loads, the tooltip never shows frames from the previous source. A failed load keeps an observable error state (reported through the `usePreviewThumbnails` hook as `status: 'error'`); on hover the slider then falls back to `getPreviewScreenUrl` when it is provided, and otherwise shows only the time label. Replacing a URL with a parsed array or clearing the prop immediately discards in-flight requests and any previous failure. Sprite sheets are preloaded only for the currently effective thumbnail set, once per set.
+
+The same logic is available standalone via the exported `usePreviewThumbnails(source)` hook, which returns `{ thumbnails, status, source, error }` with `status` being `'loading'`, `'loaded'` or `'error'`.
+
 ### Generating thumbnails
 
 The package includes a CLI that generates sprite sheets and the VTT file. It requires [ffmpeg](https://ffmpeg.org/) (`ffmpeg` and `ffprobe` in `PATH`):

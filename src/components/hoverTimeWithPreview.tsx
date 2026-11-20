@@ -5,6 +5,10 @@ import { findThumbnail } from '../utils/findThumbnail';
 import { PreviewThumbnail } from '../utils/parseThumbnailsVtt';
 import { PreviewImage } from './previewImage';
 
+/** 1x1 transparent GIF: replacing the src aborts any in-flight sprite download. */
+const BLANK_IMAGE =
+  'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+
 interface Props {
   max: number;
   hoverTimeValue: number;
@@ -35,8 +39,28 @@ export const HoverTimeWithPreview: React.FC<Props> = ({
   previewThumbnails,
 }) => {
   const hoverTimeElement = useRef<HTMLDivElement>(null);
-  const preloadedThumbnails = useRef<PreviewThumbnail[]>(undefined);
+  const preloadedThumbnails = useRef<PreviewThumbnail[] | undefined>(
+    undefined
+  );
+  const preloadedImages = useRef<HTMLImageElement[]>([]);
   const hoverTimeClassName = isThumbActive ? 'hover-time active' : 'hover-time';
+
+  /**
+   * Only the currently effective set is ever warmed: when the set changes
+   * (source switch / clear / failure), drop every image created for the old
+   * set and abort its in-flight downloads.
+   */
+  useEffect(() => {
+    return () => {
+      preloadedImages.current.forEach((image) => {
+        image.onload = null;
+        image.onerror = null;
+        image.src = BLANK_IMAGE;
+      });
+      preloadedImages.current = [];
+      preloadedThumbnails.current = undefined;
+    };
+  }, [previewThumbnails]);
 
   /** Warm up every sprite sheet on the first hover so scrubbing does not flicker. */
   useEffect(() => {
@@ -50,9 +74,14 @@ export const HoverTimeWithPreview: React.FC<Props> = ({
 
     preloadedThumbnails.current = previewThumbnails;
 
-    new Set(previewThumbnails.map(({ url }) => url)).forEach((url) => {
-      new Image().src = url;
-    });
+    preloadedImages.current = Array.from(
+      new Set(previewThumbnails.map(({ url }) => url)),
+      (url) => {
+        const image = new Image();
+        image.src = url;
+        return image;
+      }
+    );
   }, [isThumbActive, previewThumbnails]);
 
   const hoverTimePosition = getHoverTimePosition(

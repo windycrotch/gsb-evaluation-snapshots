@@ -12,6 +12,11 @@ import { PreviewThumbnail } from './utils/parseThumbnailsVtt';
 
 export type { PreviewThumbnail } from './utils/parseThumbnailsVtt';
 export { parseThumbnailsVtt } from './utils/parseThumbnailsVtt';
+export type {
+  PreviewThumbnailsStatus,
+  PreviewThumbnailsResult,
+} from './hooks/usePreviewThumbnails';
+export { usePreviewThumbnails } from './hooks/usePreviewThumbnails';
 
 export interface TimeCode {
   fromMs: number;
@@ -62,7 +67,7 @@ export const VideoSeekSlider: React.FC<Props> = ({
   const [isSeeking, setIsSeeking] = useState(false);
   const [trackWidth, setTrackWidth] = useState(0);
   const trackElement = useRef<HTMLDivElement>(null);
-  const thumbnails = usePreviewThumbnails(previewThumbnails);
+  const { thumbnails } = usePreviewThumbnails(previewThumbnails);
 
   useIsomorphicLayoutEffect(() => {
     const track = trackElement.current;
