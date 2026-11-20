@@ -409,3 +409,61 @@ python tools/check_ace_mission.py --selftest   # 36/36
   顶点重采样回自己的高度图中位 0.01 m（粗）/ 0.00 m（细）；区内线密度 14.43 km/km² vs 区外 3.32（4.3 倍）。
   详见 `warthunder-maps/docs/METHOD-VALIDATION.md` §8。
 - 未做：`?local=1` 纯前端路径没有地形层，因此这条改动只影响连服务器的工具页；本局 `air_skyscraper_city` 本身就是老格式关卡（无细层）。
+
+---
+
+## 变更记录 · 2026-11-21 · 解析会话隔离（换文件 / 失败重试 / 取消）
+
+**问题**：解析进行中再拖入第二个文件、或解析失败后重试时，页面会停在旧进度、旧数据上，
+报错后仍显示上一次的播放内容，用户无法判断画面属于哪一次解析。
+
+**改动（4 个文件 + 3 个自检）**
+
+- `web/index.html`：上传页改为**会话驱动**。`beginSession()` 作废旧会话、`clearScene()`、
+  清进度/错误；`token` 单调递增，所有异步续体先判 `isCurrent(token)`；进度回调按
+  `sessionId` 过滤；失败会话的迟到成功回调不 `mount`；`mount` 期间被替换则立即卸载。
+  拖拽不再因 "解析中" 被忽略（旧会话直接取消）。
+- `web/wrpl-parse.js`：新增 `ParseSession`（`createSession` / `cancel` / `onCancel` /
+  `shouldAbort`）；`parse()` 透传 `sessionId`，取消后以 `code:'cancelled'` 拒绝；
+  `parseInWorker` 按 `sessionId` 丢弃迟到消息、按 `seq` 去重与按序拼接、`done` 只处理一次，
+  结束/取消时 `terminate()` 并释放 `store`/`pendingParts`；`parseMain` 的入口、
+  `locatePacketStream` 之后与每个 `sleep0(opts)` 让出点做取消检查。
+- `web/wrpl-worker.js`：每条 `progress/part/done/error` 带 `sessionId`；`part/done` 带单调 `seq`；
+  新增 `{cmd:'cancel'}`，取消后**零发送**（含已在跑的解析结果），分片发送循环每片前再检查一次。
+- `three3d/scene.js` / `scene3d3-loader.js` / `mission.js`：新增 `ACEScene.clear()` 与
+  `ACEUI.unmount()`，换会话时释放场景几何/材质/贴图/标签层，清 `ACE_ATTITUDE` / `ACE_LANDMASK`、
+  控制条与角落读数。`NV` 版本戳 59 → 60。
+
+**验证（`node`，无浏览器，已进 CI）**
+
+```
+node tools/check-parse-session.mjs        # 6 项：协议级（正常/换文件/失败重试/迟到/乱序重复/Worker 取消/主线程取消）
+node tools/check-parse-session-e2e.mjs    # 4 项：真实解析器 + 合成 .wrpl（全流程/中途取消/两会话独立/取消后再解析）
+node tools/check-upload-session.mjs       # 5 项：页面级（正常/换文件/失败重试/取消迟到/非法文件）
+```
+
+结果：三套脚本全部通过（`all ok`）。CI 的 `JavaScript syntax` 步骤同时覆盖 `wrpl-worker.js`、
+`mission.js`、`scene3d3-loader.js`（`three3d/scene.js` 以 ES module 语法校验）。
+
+**本轮文件指纹**（供按 sha 对齐"这一版验过"）：
+
+| 文件 | 字节 | sha256[0:16] |
+|---|---|---|
+| `web/wrpl-parse.js` | 201515 | `0deb5e65db28b403` |
+| `web/wrpl-worker.js` | 9532 | `45b1a833787f6f39` |
+| `web/index.html` | 34645 | `c12dd1f6fdeff456` |
+| `three3d/scene.js` | 87303 | `76fcae8cdc00a9a6` |
+| `mission.js` | 58883 | `e500e35ce9a8b12e` |
+
+**如实说明**：
+
+1. 仓库里没有真实 `.wrpl` 夹具，`check-parse-session-e2e.mjs` 用的是现场合成的
+   最小容器（空包流），只验证会话边界与生命周期，不验证解码正确性；解码正确性仍由
+   `docs/WRPL-JS.md` 记录的对照结果负责。
+2. 浏览器内的真实拖拽（含真实 Worker 线程）**没有**在无头浏览器里重跑。本机装了
+   Chrome/Edge 与 Playwright，但 `--remote-debugging-pipe` 被环境拒绝
+   （`DevTools remote debugging requires a non-default data directory` 后进程即退出），
+   拿不到可用的自动化通道。页面级行为用 `tools/check-upload-session.mjs` 的 DOM 桩覆盖；
+   真实 Worker 线程的取消/终止由 `tools/check-parse-session.mjs` 的假 Worker + 协议状态机覆盖。
+3. `three3d/scene.js` 的 `clear()` 只清了画布、**保留 renderer 复用**（同一 canvas 上
+   重建 WebGL 上下文既慢又可能失败）；`NV` 版本戳已 59 → 60。

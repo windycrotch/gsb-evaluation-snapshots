@@ -30,6 +30,12 @@ jobs:
       - name: Trail window math
         run: node tools/check-trail-window.mjs
 
+      - name: Parse session isolation
+        run: |
+          node tools/check-parse-session.mjs
+          node tools/check-parse-session-e2e.mjs
+          node tools/check-upload-session.mjs
+
       - name: Demo data parses
         run: |
           python - <<'PY'

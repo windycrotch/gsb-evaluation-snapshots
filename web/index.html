@@ -143,7 +143,48 @@
   var errHint = document.getElementById('err-hint');
   var retry = document.getElementById('err-retry');
   var again = document.getElementById('upload-again');
-  var busy = false;
+
+  /* ---- 解析会话 ----
+   * 每次拖入/选择文件都开一个新会话：新的清空上一次的进度与错误提示，
+   * 旧会话立刻取消（worker 停发、主线程丢弃迟到消息），
+   * 页面上的进度/结果只认**当前会话**。 */
+  var sessionSeq = 0;
+  var SESSION = null;        // 当前会话 { id, token, session, cancelled, busy }
+  var MOUNTED = false;       // 场景里是否已经挂着某次成功会话的数据
+  var UI_TOKEN = 0;          // 只有当前 token 的异步步骤才允许改页面
+
+  function newToken() { return ++UI_TOKEN; }
+  function isCurrent(tok) { return tok === UI_TOKEN && SESSION && !SESSION.cancelled; }
+
+  /** 彻底结束当前会话：取消解析、断开 Worker、作废所有迟到回调。
+   *  页面上的进度与错误提示由调用方随后清（`resetProgress` / `reset` / `fail`）。 */
+  function endSession() {
+    var s = SESSION;
+    SESSION = null;
+    newToken();
+    if (!s) { return; }
+    s.cancelled = true;
+    try { if (s.session && s.session.cancel) s.session.cancel(); } catch (e) {}
+    try { if (s.reader && s.reader.readyState === 1) s.reader.abort(); } catch (e2) {}
+    s.reader = null;
+    s.mounted = false;
+  }
+
+  function clearError() {
+    errTitle.textContent = '解析失败';
+    errDetail.textContent = '';
+    errHint.textContent = '';
+  }
+
+  /** 清空进度到"刚开始解析"的干净状态（新会话开始时调用）。 */
+  function resetProgress(msg) {
+    setState('is-busy');
+    setIcon('…');
+    setStage(msg || '读取文件', 0);
+    setBar(0);
+    note.textContent = msg || '读取文件…';
+    clearError();
+  }
 
   /* 解析阶段 → 用户可读的阶段名（数值由 WRPLParse 的进度回调给） */
   var STAGES = {
@@ -160,7 +201,8 @@
     pctEl.textContent = Math.round(pct) + '%';
   }
 
-  /** 错误态：标题一行 + 明细一行（原因 + 建议动作）+ 重新选择文件。 */
+  /** 错误态：标题一行 + 明细一行（原因 + 建议动作）+ 重新选择文件。
+   *  只由**当前会话**调用（旧会话的错误在调用点按 token 丢弃）。 */
   function fail(title, detail, hint) {
     setState('is-error');
     setIcon('\u2715');
@@ -168,7 +210,9 @@
     errDetail.textContent = detail;
     errHint.textContent = hint || '';
     setBar(0);
-    busy = false;
+    /* 错误态的百分比一律显示 0：不能让用户看到"失败但停在 30%"这种自相矛盾的画面 */
+    pctEl.textContent = '0%';
+    if (SESSION) SESSION.busy = false;
   }
 
   /** 不支持的回放格式：用户口径（不提"文件损坏"）。 */
@@ -178,7 +222,10 @@
          tech ? ('技术细节：' + tech) : '');
   }
 
+  /* 进度只认当前会话：旧会话（已取消/已被替换）的进度消息一律丢弃。 */
   WRPLParse.progress(function (p) {
+    if (!SESSION || SESSION.cancelled) return;
+    if (p.sessionId != null && String(p.sessionId) !== SESSION.id) return;
     var name = STAGES[p.phase] || p.phase;
     setStage(name, p.pct);
     setBar(p.pct);
@@ -293,7 +340,7 @@
     });
   }
 
-  function loadTerrainIfAny(mission) {
+  function loadTerrainIfAny(mission, isAlive) {
     /* 每次换回放都清掉上一张图的掩膜，避免串图 */
     try { window.ACE_LANDMASK = null; } catch (e0) {}
     var lvl = mission && mission.meta && mission.meta.replayHeader && mission.meta.replayHeader.level;
@@ -439,6 +486,9 @@
       .then(function (lj) {
         if (!lj) { return; }
         _terrainHit.mask = true;
+        /* 会话守卫：这份素材属于已取消/已被替换的会话，就不能再挂到全局
+         * （否则新会话的 init 会读到上一张图的掩膜）。 */
+        if (typeof isAlive === 'function' && !isAlive()) { return; }
         window.ACE_LANDMASK = lj;
         if (mission.meta && mission.meta.limits) {
           mission.meta.limits.push('地形：陆地掩膜来自服务器静态素材（' + map +
@@ -498,61 +548,112 @@
     } catch (e) { return Promise.resolve(); }
   }
 
+  /** 丢弃当前场景：新会话开始时先清空上一次的画面与数据。
+   *  解析失败时场景保持"干净的空场"，绝不把失败会话的部分数据挂上去。 */
+  function clearScene() {
+    try {
+      if (window.ACEUI && typeof window.ACEUI.unmount === 'function') window.ACEUI.unmount();
+    } catch (e) { /* 卸载失败也要继续清全局挂载点 */ }
+    try { window.ACE_ATTITUDE = null; } catch (e2) {}
+    try { window.ACE_LANDMASK = null; } catch (e3) {}
+    MOUNTED = false;
+  }
+
+  /** 开一个新解析会话。替换时旧会话立即取消（worker 停发、迟到消息被丢弃）。 */
+  function beginSession() {
+    endSession();
+    var tok = newToken();
+    var id = 'ui-' + (++sessionSeq) + '-' + Date.now().toString(36);
+    var session = (window.WRPLParse && typeof window.WRPLParse.createSession === 'function')
+      ? window.WRPLParse.createSession(id) : null;
+    SESSION = { id: id, token: tok, session: session, cancelled: false,
+                busy: true, mounted: false, reader: null };
+    return SESSION;
+  }
+
   function start(file) {
-    if (busy) return;
     if (!file) return;
     if (!/\.(wrpl|bin)$/i.test(file.name || '')) {
+      /* 文件类型不对也按"一次新会话"处理：旧的解析作废、场景清空，再报可读错误。 */
+      beginSession();
+      clearScene();
       fail('无法读取这个文件', '请选择 War Thunder 的 .wrpl 回放文件（文件名：' +
         (file.name || '未知') + '）。', '');
       return;
     }
-    busy = true;
-    setState('is-busy');
-    setIcon('\u2026');
-    setStage('读取文件', 0);
-    setBar(0);
-    note.textContent = '读取文件…';
+    /* 每次拖入都是独立会话：清进度、清错误、清场景，旧会话作废。 */
+    var S = beginSession();
+    var tok = S.token, sid = S.id;
+    clearScene();
+    resetProgress('读取文件…');
     var t0 = performance.now();
     var fr = new FileReader();
+    S.reader = fr;
     fr.onerror = function () {
+      if (!isCurrent(tok)) return;        // 旧会话的失败不再改页面
       fail('无法读取这个文件', '浏览器没能读完这个文件，请确认文件仍在原位置、且没有被其它程序占用。', '');
     };
     fr.onload = function () {
+      if (!isCurrent(tok)) return;        // 已经在读下一个文件了：这次读到的数据直接丢
       var buf = fr.result;
+      S.reader = null;
       setStage('解压包流', 1);
       setBar(1);
       note.textContent = '开始解析（' + (buf.byteLength / 1048576).toFixed(2) + ' MB）…';
-      WRPLParse.parse(buf, { fileName: file.name }).then(async function (mission) {
-        var dt = ((performance.now() - t0) / 1000).toFixed(2);
-        try { await loadTerrainIfAny(mission); } catch (e) { /* 地形拿不到不影响播放 */ }
-        try { await loadAirfieldsCatalogueIfAny(mission); } catch (e) { /* 目录拿不到不影响播放 */ }
-        try { await loadTablesIfAny(mission); } catch (e2) { /* 表拿不到就用内嵌兜底 */ }
-        if (!(window.ACEUI && typeof window.ACEUI.mount === 'function')) {
-          fail('解析失败', '页面缺少 ACEUI.mount（mission.js 没加载成功），解析已完成但无法渲染。', '');
-          return;
-        }
-        var ok = window.ACEUI.mount(mission);
-        if (!ok) {
-          fail('解析失败', 'ACEUI.mount 拒绝了这份数据（结构不符）。', '');
-          return;
-        }
-        setState('is-done');
-        setIcon('\u2713');
-        setStage('完成', 100);
-        setBar(100);
-        note.textContent = '完成：' + summarize(mission) + '（' + dt + ' s）';
-        again.className = 'on';
-        window.__WRPL_LAST = mission;      // 便于自验/排查
-        setTimeout(function () { box.className = 'is-done hidden'; }, 600);
-      }).catch(function (ex) {
-        if (ex && ex.code === 'unsupported-format') {
-          failUnsupported(ex.tech || '');
-        } else {
-          fail('解析失败', String(ex && ex.message ? ex.message : ex),
-               ex && ex.tech ? ('技术细节：' + ex.tech) : '');
-        }
-        if (window.console) console.error(ex);
-      });
+      WRPLParse.parse(buf, { fileName: file.name, session: S.session, sessionId: sid })
+        .then(async function (mission) {
+          /* 会话已被替换/取消：本次结果不许进场景、也不许改进度。 */
+          if (!isCurrent(tok)) return;
+          var dt = ((performance.now() - t0) / 1000).toFixed(2);
+          /* 素材/数据表是异步的：每步之后都再确认一次会话仍然有效。 */
+          try { await loadTerrainIfAny(mission, function () { return isCurrent(tok); }); } catch (e) { /* 地形拿不到不影响播放 */ }
+          if (!isCurrent(tok)) return;
+          try { await loadAirfieldsCatalogueIfAny(mission); } catch (e) { /* 目录拿不到不影响播放 */ }
+          if (!isCurrent(tok)) return;
+          try { await loadTablesIfAny(mission); } catch (e2) { /* 表拿不到就用内嵌兜底 */ }
+          if (!isCurrent(tok)) return;
+          if (!(window.ACEUI && typeof window.ACEUI.mount === 'function')) {
+            fail('解析失败', '页面缺少 ACEUI.mount（mission.js 没加载成功），解析已完成但无法渲染。', '');
+            return;
+          }
+          var ok = window.ACEUI.mount(mission);
+          if (!isCurrent(tok)) {
+            /* mount 期间换了文件：把刚挂上的旧数据立刻卸掉，别让新会话的解析过程中
+             * 屏幕上还摆着上一次的画面。 */
+            try { window.ACEUI.unmount(); } catch (e3) {}
+            return;
+          }
+          if (!ok) {
+            clearScene();
+            fail('解析失败', 'ACEUI.mount 拒绝了这份数据（结构不符）。', '');
+            return;
+          }
+          S.mounted = true;
+          MOUNTED = true;
+          S.busy = false;
+          setState('is-done');
+          setIcon('\u2713');
+          setStage('完成', 100);
+          setBar(100);
+          note.textContent = '完成：' + summarize(mission) + '（' + dt + ' s）';
+          again.className = 'on';
+          window.__WRPL_LAST = mission;      // 便于自验/排查
+          setTimeout(function () {
+            if (isCurrent(tok)) box.className = 'is-done hidden';
+          }, 600);
+        })
+        .catch(function (ex) {
+          /* 取消的会话（被新文件替换）不显示错误 —— 用户已经开始了另一次解析。 */
+          if (!isCurrent(tok) || (ex && ex.code === 'cancelled')) return;
+          clearScene();                     // 失败会话的部分数据不得挂进场景
+          if (ex && ex.code === 'unsupported-format') {
+            failUnsupported(ex.tech || '');
+          } else {
+            fail('解析失败', String(ex && ex.message ? ex.message : ex),
+                 ex && ex.tech ? ('技术细节：' + ex.tech) : '');
+          }
+          if (window.console) console.error(ex);
+        });
     };
     fr.readAsArrayBuffer(file);
   }
@@ -560,6 +661,7 @@
   drop.addEventListener('click', function () { input.click(); });
   input.addEventListener('change', function () {
     if (input.files && input.files.length) start(input.files[0]);
+    input.value = '';                     // 允许重复选择同一个文件
   });
   ['dragenter', 'dragover'].forEach(function (ev) {
     window.addEventListener(ev, function (e) {
@@ -575,23 +677,35 @@
   });
   window.addEventListener('drop', function (e) {
     e.preventDefault();
-    if (busy) return;
     var dt = e.dataTransfer;
+    /* 解析进行中再拖入也要开新会话（旧会话取消），所以这里不再拦 busy。 */
     if (dt && dt.files && dt.files.length) start(dt.files[0]);
   });
+
+  /** 回到"等待文件"的干净状态（错误态的重试、或换一个回放的入口）。 */
   function reset() {
+    endSession();
     setState('is-idle');
     setIcon('\u25c6');
     setStage('等待文件', 0);
     setBar(0);
     note.textContent = '等待回放文件…';
-    errTitle.textContent = '解析失败';
-    errDetail.textContent = '';
+    clearError();
     input.value = '';
-    busy = false;
   }
   retry.addEventListener('click', function () { reset(); input.click(); });
-  again.addEventListener('click', function () { reset(); again.className = ''; });
+  again.addEventListener('click', function () {
+    reset();
+    again.className = '';
+    /* 换文件时先把旧画面撤掉：用户点"换一个回放"就不该再看到上一局 */
+    clearScene();
+  });
+  /* 供验收/排查：当前会话标识（页面每次拖入都会变）。 */
+  window.__WRPL_SESSION = function () {
+    return SESSION ? { id: SESSION.id, busy: SESSION.busy,
+                       cancelled: SESSION.cancelled, mounted: SESSION.mounted,
+                       mountedScene: MOUNTED } : null;
+  };
 })();
 </script>
 </body>

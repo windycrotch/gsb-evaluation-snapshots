@@ -821,13 +821,18 @@ function prepUnits(M) {
 function init(canvas, M, opts) {
   if (!canvas) { throw new Error('init: 缺少 canvas'); }
   state.canvas = canvas;
-  /* preserveDrawingBuffer: 让 WebGL 画布在合成后仍可被 drawImage 读回。
-     * 宣传片（promo）要把这块画布 drawImage 到 2D 主画布上，默认 false 时缓冲可能已被清空
-     * （表现为偶发黑块 / 帧间抖动）。对产品页只多一点点显存开销。 */
-  const renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true, alpha: false, preserveDrawingBuffer: true });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-  renderer.setClearColor(0x05080d, 1);
-  state.renderer = renderer;
+  /* 换回放时 clear() 会保留渲染器（同一个 canvas 上重建 WebGL 上下文既慢又可能失败），
+   * 这里复用；画布尺寸在 resize() 里会重新贴合。 */
+  let renderer = state.renderer;
+  if (!renderer) {
+    /* preserveDrawingBuffer: 让 WebGL 画布在合成后仍可被 drawImage 读回。
+       * 宣传片（promo）要把这块画布 drawImage 到 2D 主画布上，默认 false 时缓冲可能已被清空
+       * （表现为偶发黑块 / 帧间抖动）。对产品页只多一点点显存开销。 */
+    renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true, alpha: false, preserveDrawingBuffer: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.setClearColor(0x05080d, 1);
+    state.renderer = renderer;
+  }
 
   const scene = new THREE.Scene();
   state.scene = scene;
@@ -1840,8 +1845,72 @@ function render(st) {
   state.stats.tris = state.renderer.info.render.triangles;
 }
 
+/* ------------------------------------------------------------- 卸载
+ * 换回放/开始新会话时先清场：场景对象（几何、材质、贴图、标签层）全部释放，
+ * 画布回到黑底。旧数据不允许再以任何形式留在场景里（用户要能确定眼前画面属于哪一次解析）。 */
+function disposeMaterial(m) {
+  if (!m) { return; }
+  try {
+    const keys = ['map', 'alphaMap', 'emissiveMap', 'normalMap'];
+    for (const k of keys) { if (m[k] && m[k].dispose) { m[k].dispose(); } }
+    if (m.dispose) { m.dispose(); }
+  } catch (e) { /* 单个材质释放失败不影响清场 */ }
+}
+
+function clear() {
+  state.ready = false;
+  try {
+    if (state.labelBox && state.labelBox.parentNode) {
+      state.labelBox.parentNode.removeChild(state.labelBox);
+    }
+  } catch (e) {}
+  state.labelBox = null;
+  state.labels = [];
+  const sc = state.scene;
+  if (sc) {
+    try {
+      sc.traverse((o) => {
+        if (o.geometry && o.geometry.dispose) { o.geometry.dispose(); }
+        if (Array.isArray(o.material)) { o.material.forEach(disposeMaterial); }
+        else if (o.material) { disposeMaterial(o.material); }
+      });
+    } catch (e) {}
+    try {
+      while (sc.children.length) { sc.remove(sc.children[0]); }
+    } catch (e) {}
+  }
+  if (state.controls) { try { state.controls.dispose(); } catch (e) {} }
+  /* 相机状态复位放到这里：init() 里那段复位是给「同页重 init」用的，clear() 之后同样要清干净 */
+  try {
+    CAMS.oSinit = false; CAMS.init = false; CAMS.hold = false; CAMS.cut = false;
+    CAMS.cutAt = null; CAMS.spin = null; CAMS.over = null; CAMS.wasNull = false;
+    CAMS.gapDone = {};
+  } catch (e) {}
+  if (state.renderer) {
+    /* 只清画布，**不 dispose 渲染器**：同一个页面里再 init 时复用它（见 init）。
+     * dispose 掉再在同一张 canvas 上新建 WebGLRenderer 会留下一个失去宿主的上下文，
+     * 复用才是稳的做法；资源占用也更低。 */
+    try {
+      state.renderer.setClearColor(0x05080d, 1);
+      state.renderer.clear();
+    } catch (e) {}
+  }
+  /* 状态复位：新的 init 会从零重建，不会继承上一份回放的任何缓存。
+   * renderer / canvas 保留（init 会复用）。 */
+  state.scene = null; state.camera = null;
+  state.controls = null; state.meta = null; state.units = []; state.own = null;
+  state.kills = []; state.runways = []; state.ground = []; state.shots = [];
+  state.drops = null; state.missiles = null; state.airfields = null;
+  state._kills = null; state._gClusterOf = null;
+  state.landFill = null; state.terrainInfo = null; state.bounds = null;
+  state.ownGaps = []; state.t = 0; state._lastNow = 0; state._dt = 0;
+  state._landFrac = 0;
+  state.stats = { units: 0, calls: 0, fps: 0, tris: 0 };
+}
+
 const API = {
   init: init, render: render, setCamera: setCamera, setOption: setOption,
+  clear: clear,
   getReady: () => state.ready,
   getStats: () => Object.assign({}, state.stats, { t: state.t, ready: state.ready, camMode: state.camMode })
 };

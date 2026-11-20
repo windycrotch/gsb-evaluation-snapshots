@@ -194,6 +194,47 @@ unitsWithIdentity 236, unitsVehicleFromPackets 0, killsWithWeapon 30, killsWithW
 没有复制上述项目的代码。
 ---
 
+## 解析会话：换文件/失败重试/取消（2026-11-21）
+
+**问题（用户反馈）**：解析进行中再拖入第二个文件、或解析失败后重试时，页面会停在旧进度、
+旧数据上，甚至报错后仍显示上一次的播放内容 —— 用户无法判断眼前画面属于哪一次解析。
+
+**改法：每次拖入 = 一个独立解析会话**，贯穿 页面 → 主线程协议 → Worker → 渲染层。
+
+| 层 | 会话机制 |
+|---|---|
+| 页面（`web/index.html`） | 每次 `start(file)` 调 `beginSession()`：作废旧会话、`clearScene()`、清进度与错误、`token++`。所有异步续体先判 `isCurrent(token)`，不是当前会话就什么都不做。 |
+| 主线程协议（`wrpl-parse.js`） | `WRPLParse.createSession(id)` → `ParseSession`（`id` / `cancel()` / `onCancel()` / `shouldAbort()`）。`parse(buf, { session, sessionId })` 把 `sessionId` 随每条进度下发；取消后 Promise 以 `code:'cancelled'` 拒绝。 |
+| Worker（`wrpl-worker.js`） | 每条 `progress/part/done/error` 带 `sessionId`，`part/done` 另带单调 `seq`。收到 `{cmd:'cancel'}` 后**该会话零发送**（含已经在跑的解析结果）。`parseMain` 的每个让出点检查 `shouldAbort()`。 |
+| 主线程收消息 | `part/done` 按 `sessionId` 过滤，迟到的一律丢弃；`part` 按 `seq` 去重、按序拼接（乱序先入 `pendingParts`，前一片到齐再推进）；`done` 只处理一次；结束/取消时 `terminate()` 并释放 `store` 与 `pendingParts`。 |
+| 渲染层 | `ACEScene.clear()` 释放场景几何/材质/贴图/标签层；`ACEUI.unmount()` 清数据引用、控制条、角落读数、`ACE_ATTITUDE`、`ACE_LANDMASK`。新会话开始前必须先卸载旧场景。 |
+
+**语义约定**
+
+* **进度**：只认当前 `SESSION.id` 的进度消息，新会话开始时进度条归零、错误框清空。
+* **错误**：只有当前会话的失败才渲染（标题 + 可读明细 + 技术细节 + 重新选择文件）；
+  被取消/被替换的会话即使之后抛错也不显示。失败会话已收到的分片（`store`）直接丢弃，
+  绝不 `mount`。
+* **完成**：同一会话内 `done` 只 resolve 一次；`mount` 前后各判一次 `isCurrent(token)`，
+  `mount` 期间被替换则立即把刚挂上的数据再卸载。
+* **取消**：主线程先给 Worker 发 `{cmd:'cancel'}`，再 `terminate()`；主线程路径在
+  入口、`locatePacketStream` 之后、以及每个 `sleep0(opts)` 让出点抛 `cancelled` 停下。
+* **资源**：Worker 结束（完成/失败/取消）后主线程 `terminate()`，worker isolate 与其中间
+  数组一起回收；主线程那份 `store` / `pendingParts` 置空。
+
+**验证**（`node`，无需浏览器，已进 CI）
+
+| 脚本 | 覆盖 |
+|---|---|
+| `tools/check-parse-session.mjs` | 协议级：正常解析、中途换文件、失败重试、取消后迟到消息、乱序/重复分片、Worker 侧取消后零发送、主线程路径取消 |
+| `tools/check-parse-session-e2e.mjs` | 真实解析器 + 合成 `.wrpl`：全流程、中途取消、两会话独立、取消后再解析 |
+| `tools/check-upload-session.mjs` | 页面级（最小 DOM 桩）：正常、中途换文件、失败重试、取消/迟到消息、非法文件 |
+
+**保留的诚实口径**：`meta.limits` 仍写明解析路径（Worker/主线程/回退）；取消的会话不产出
+任何 mission，也不会发布 `ACE_ATTITUDE`。
+
+---
+
 ## Worker 路径：2 s 超时与就绪握手（2026-10-19）
 
 **现象**：默认路径端到端 **3.7 s**（主线程路径 1.65 s）；强制 Worker 路径（`force: "worker"`）直接失败。

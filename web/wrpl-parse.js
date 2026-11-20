@@ -258,15 +258,45 @@
     _stats.u8 = new Uint8Array(_stats.buf);
   }
 
-  function sleep0() { return new Promise(function (r) { setTimeout(r, 0); }); }
+  /** 让出一帧。传了 opts（parseMain 的 opts）时顺带做取消检查：
+   *  取消了就抛 code='cancelled' 的错误 —— 解析循环在下一个让出点停下。 */
+  function sleep0(opts) {
+    return new Promise(function (resolve, reject) {
+      setTimeout(function () {
+        if (opts && typeof opts.shouldAbort === 'function' && opts.shouldAbort()) {
+          reject(cancelledError());
+        } else {
+          resolve();
+        }
+      }, 0);
+    });
+  }
+
+  function cancelledError() {
+    var e = new Error('解析已取消');
+    e.code = 'cancelled';
+    e.cancelled = true;
+    return e;
+  }
 
   /* ------------------------------------------------------------ 进度 */
 
   var _progressCb = null;
   function progress(cb) { _progressCb = (typeof cb === 'function') ? cb : null; }
-  function emit(phase, pct, note) {
-    if (_progressCb) { try { _progressCb({ phase: phase, pct: pct, note: note || '' }); } catch (e) {} }
+  /** 进度消息带上 sessionId：页面上可能已有新会话在跑，旧会话的进度必须能被识别后丢弃。 */
+  function emit(phase, pct, note, sessionId) {
+    if (_progressCb) {
+      try {
+        _progressCb({ phase: phase, pct: pct, note: note || '',
+                      sessionId: sessionId == null ? null : String(sessionId) });
+      } catch (e) {}
+    }
   }
+
+  /* 解析会话：每次调用 parse() 一个。旧的解析被替换时取消它，
+   * 它的进度/分片/完成消息都不能再影响页面。 */
+  var _sessionSeq = 0;
+  function newSessionId() { return 'wrpl-' + (++_sessionSeq) + '-' + Date.now().toString(36); }
 
   /* ------------------------------------------------------------ 位读器
    * 位序：字节内**从最高位开始**（MSB-first，与 Dagor / wrpl-inspector 一致）。
@@ -441,7 +471,7 @@
   }
 
   /** 解压包流。本局为单个 zstd 帧；zstd 走 vendored 的 fzstd。 */
-  async function decompressStream(d, info) {
+  async function decompressStream(d, info, opts) {
     if (info.compression === 'zstd') {
       var fz = global.fzstd || (global.self && global.self.fzstd);
       if (!fz || typeof fz.decompress !== 'function') {
@@ -452,8 +482,9 @@
       var raw = d.subarray(info.zstdFrameOffset, info.resultsOffset || d.length);
       var t0 = Date.now();
       var out = fz.decompress(raw);
-      emit('zstd', 12, '解压 ' + raw.length + ' B → ' + out.length + ' B（' + (Date.now() - t0) + ' ms）');
-      await sleep0();
+      emit('zstd', 12, '解压 ' + raw.length + ' B → ' + out.length + ' B（' + (Date.now() - t0) + ' ms）',
+           opts && opts.sessionId);
+      await sleep0(opts);
       return out;
     }
     if (info.compression === 'zlib') {
@@ -3007,21 +3038,136 @@
              __attitude: store.__attitude };
   }
 
-  function parseInWorker(arrayBuffer, opts, pathNote) {
+  /**
+   * 解析会话：一次 drag&drop / 一次 parse() 一个。
+   * - `cancel()` 立刻停止本条会话（worker 侧停发、主线程丢迟到消息），
+   *   并让 parse() 返回的 Promise 以 code='cancelled' 拒绝；
+   * - `id` 用于给每条消息打会话标识，页面据此丢弃旧会话的进度/分片/完成消息。
+   */
+  function ParseSession(requestedId) {
+    this.id = requestedId != null && String(requestedId) !== ''
+      ? String(requestedId) : newSessionId();
+    this.cancelled = false;
+    this._hooks = [];
+  }
+  ParseSession.prototype.onCancel = function (fn) {
+    if (typeof fn !== 'function') { return; }
+    if (this.cancelled) { try { fn(); } catch (e) {} return; }
+    this._hooks.push(fn);
+  };
+  ParseSession.prototype.cancel = function () {
+    if (this.cancelled) { return false; }
+    this.cancelled = true;
+    var hooks = this._hooks;
+    this._hooks = [];
+    for (var i = 0; i < hooks.length; i++) {
+      try { hooks[i](); } catch (e) {}
+    }
+    return true;
+  };
+  ParseSession.prototype.shouldAbort = function () { return this.cancelled === true; };
+  /** 会话结束（完成/失败）时摘掉取消回调：回调闭包持有 worker/缓冲区引用，不摘就留到下一次替换。 */
+  ParseSession.prototype.detach = function () { this._hooks = []; };
+
+  /**
+   * Worker 路径。会话约束：
+   *  - 只接受**本会话**（sessionId 相符）的消息，别的会话一律丢弃；
+   *  - 分片按 seq 去重、按 seq 顺序拼接（迟到/乱序/重复的到达都不重复拼）；
+   *  - 完成消息只处理一次；
+   *  - 取消时给 worker 发 cancel 并 terminate，缓冲区与已收分片一并释放。
+   */
+  function parseInWorker(arrayBuffer, opts, pathNote, sess) {
     return new Promise(function (resolve, reject) {
       var worker = null, done = false, store = recvPartStore();
       var debugObj = (opts.debug && typeof opts.debug === 'object') ? opts.debug : null;
+      var sid = sess ? sess.id : (opts.sessionId != null ? String(opts.sessionId) : null);
+      resetWorkerHeapPeak();   // 新会话：不继承上一份回放的堆峰值观测值
+      /* 分片序号：worker 给自己的每条 part/done 编单调号。主线程按 seq 拼接，
+       * 重复的丢、乱序的先存到 pendingParts，前一片到齐时再按序应用。 */
+      var nextSeq = 1, pendingParts = Object.create(null);
 
       function cleanup() {
         if (worker) {
           try { worker.onmessage = null; worker.onerror = null; worker.terminate(); } catch (e) {}
           worker = null;
         }
+        /* 摘掉会话上的取消回调（它闭包持有 worker/缓冲区分片），
+         * 否则会话对象活多久这些引用就留多久。 */
+        if (sess) { try { sess.detach(); } catch (e) {} }
+        /* 释放已收分片：会话结束后它们不该再被主线程持有 */
+        pendingParts = null;
+        store = null;
       }
-      function fail(err) { if (done) return; done = true; cleanup(); reject(err); }
+      function fail(err) {
+        if (done) return;
+        done = true;
+        cleanup();
+        reject(err);
+      }
+
+      /* ---- 分片应用（按 key 合并） ---- */
+      function applyPart(m) {
+        if (!store) { return; }
+        /* own 是分 4 片发的（t0/hz/n、x/y/z、ias/tas/mach/hdg、其余通道），
+         * 必须**合并**而不是覆盖 —— 覆盖会只剩最后一片，本机静默消失。 */
+        if (m.key === 'own') store.own = Object.assign(store.own || {}, m.data);
+        else if (m.key === 'units') store.units = store.units.concat(m.data);
+        else if (m.key === '__attitude') {
+          /* 横滚序列按 uid 分片发（可能上百 KB/片），这里按 uid 合并 */
+          var att = store.__attitude || (store.__attitude = { units: {} });
+          if (m.data.note) att.note = m.data.note;
+          if (m.data.secPerTick != null) att.secPerTick = m.data.secPerTick;
+          if (m.data.tick0 != null) att.tick0 = m.data.tick0;
+          if (m.data.dt != null) att.dt = m.data.dt;
+          Object.keys(m.data.units || {}).forEach(function (k) { att.units[k] = m.data.units[k]; });
+        }
+        else store[m.key] = m.data;
+      }
+      function drainPending() {
+        while (pendingParts && pendingParts[nextSeq]) {
+          var m = pendingParts[nextSeq];
+          delete pendingParts[nextSeq];
+          applyPart(m);
+          nextSeq++;
+        }
+      }
+      function onPart(m) {
+        if (!store) { return; }
+        if (m.seq == null) { applyPart(m); return; }   // 无 seq（老 worker）：按到达顺序
+        var q = m.seq | 0;
+        if (q < nextSeq) { return; }                   // 重复到达：丢弃，不重复拼接
+        if (q === nextSeq) { applyPart(m); nextSeq++; drainPending(); return; }
+        if (pendingParts[q]) { return; }               // 重复的乱序分片：丢弃
+        pendingParts[q] = m;
+      }
+      /** 完成前把还压着的乱序分片按 seq 升序补上（正常路径下这里是空的）。 */
+      function flushPending() {
+        if (!pendingParts) { return; }
+        var keys = Object.keys(pendingParts).map(Number).sort(function (a, b) { return a - b; });
+        for (var i = 0; i < keys.length; i++) {
+          var m = pendingParts[keys[i]];
+          delete pendingParts[keys[i]];
+          applyPart(m);
+        }
+      }
 
       var wurl = workerScriptURL();
-      var _t0 = Date.now(), _tReady = 0, _tSent = 0, _timing = null;
+      var _t0 = Date.now(), _tReady = 0, _tSent = 0;
+
+      if (sess) {
+        sess.onCancel(function () {
+          /* 取消：先让 worker 别发了（它会在下一个让出点停下，期间的消息全静默），
+           * 再 terminate 回收 isolate 与其中间数组；主线程这边也不再收任何消息。 */
+          if (worker) {
+            try { worker.postMessage({ cmd: 'cancel', sessionId: sid }); } catch (e) {}
+          }
+          fail(cancelledError());
+        });
+        /* 取消可能发生在建 Worker 之前（onCancel 会同步回调）：已取消就不建、
+         * 也不留一个没人管的 worker。 */
+        if (done) { return; }
+      }
+
       try {
         worker = new Worker(wurl);
       } catch (e) {
@@ -3058,12 +3204,16 @@
 
       worker.onmessage = function (ev) {
         var m = ev.data || {};
+        /* 迟到消息按会话标识丢弃：不是本会话的一概不认（完成/分片/进度都一样）。 */
+        if (sid && m.sessionId != null && String(m.sessionId) !== sid) { return; }
+        if (done) { return; }
         if (m.type === 'ready') {
           clearTimeout(readyTimer);
           _tReady = Date.now();
           // 转交所有权：主线程这份 ArrayBuffer 立刻 detached，主线程堆不背它
           try {
-            worker.postMessage({ cmd: 'parse', buf: arrayBuffer, fileName: opts.fileName,
+            worker.postMessage({ cmd: 'parse', sessionId: sid, buf: arrayBuffer,
+                                 fileName: opts.fileName,
                                  yieldEvery: opts.yieldEvery,
                                  wantDebug: !!debugObj }, [arrayBuffer]);
             _tSent = Date.now();
@@ -3074,38 +3224,26 @@
           return;
         }
         if (m.type === 'progress') {
-          emit(m.phase, m.pct, m.note);
+          emit(m.phase, m.pct, m.note, sid);
           if (typeof m.workerHeapMB === 'number') _workerHeapPeakMB = m.workerHeapMB;
           return;
         }
-        if (m.type === 'part') {
-          /* own 是分 4 片发的（t0/hz/n、x/y/z、ias/tas/mach/hdg、其余通道），
-           * 必须**合并**而不是覆盖 —— 覆盖会只剩最后一片，本机静默消失。 */
-          if (m.key === 'own') store.own = Object.assign(store.own || {}, m.data);
-          else if (m.key === 'units') store.units = store.units.concat(m.data);
-          else if (m.key === '__attitude') {
-            /* 横滚序列按 uid 分片发（可能上百 KB/片），这里按 uid 合并 */
-            var att = store.__attitude || (store.__attitude = { units: {} });
-            if (m.data.note) att.note = m.data.note;
-            if (m.data.secPerTick != null) att.secPerTick = m.data.secPerTick;
-            if (m.data.tick0 != null) att.tick0 = m.data.tick0;
-            if (m.data.dt != null) att.dt = m.data.dt;
-            Object.keys(m.data.units || {}).forEach(function (k) { att.units[k] = m.data.units[k]; });
-          }
-          else store[m.key] = m.data;
-          return;
-        }
+        if (m.type === 'part') { onPart(m); return; }
         if (m.type === 'debug') {
           if (debugObj) Object.keys(m.data || {}).forEach(function (k) { debugObj[k] = m.data[k]; });
           return;
         }
-        if (m.type === 'timing') { _timing = m; return; }
         if (m.type === 'done') {
-          if (done) return;
+          /* 同一会话内完成消息只处理一次 */
+          if (done) { return; }
           done = true;
+          flushPending();
           if (typeof m.workerHeapPeakMB === 'number') _workerHeapPeakMB = m.workerHeapPeakMB;
           var mission = assembleMission(store);
           cleanup();                     // terminate()：worker isolate 连同其中间数组一起回收
+          if (!mission.meta || typeof mission.meta !== 'object') { mission.meta = {}; }
+          if (!Array.isArray(mission.meta.limits)) { mission.meta.limits = []; }
+          if (!Array.isArray(mission.meta.provenance)) { mission.meta.provenance = []; }
           mission.meta.limits.push(pathNote);
           mission.meta.provenance.push('解析路径：Web Worker（wrpl-worker.js，主线程只收分片结果）');
           if (_workerHeapPeakMB !== null) {
@@ -3135,20 +3273,29 @@
     });
   }
 
+  /* 每次 Worker 会话开跑时清零：这是上一份回放的观测值，不该带到新会话的 meta 里。 */
+  function resetWorkerHeapPeak() { _workerHeapPeakMB = null; }
   var _workerHeapPeakMB = null;
 
   /**
    * 主线程解析（回退路径）。
    * @param {ArrayBuffer|Uint8Array} arrayBuffer
-   * @param {object} [opts] fileName / yieldEvery / debug / force
+   * @param {object} [opts] fileName / yieldEvery / debug / force / sessionId / shouldAbort
    */
   async function parseMain(arrayBuffer, opts) {
     initStats();
     opts = opts || {};
     var yieldEvery = opts.yieldEvery || 400;
     var t_start = Date.now();
+    var sid = opts.sessionId;
+    /* 取消检查点：每个让出点都问一次。取消后立刻抛 code='cancelled'，
+     * 不再继续解、也不再发任何进度。 */
+    function checkAbort() {
+      if (typeof opts.shouldAbort === 'function' && opts.shouldAbort()) throw cancelledError();
+    }
     var d = arrayBuffer instanceof Uint8Array ? arrayBuffer : new Uint8Array(arrayBuffer);
-    emit('container', 1, '读取容器头');
+    checkAbort();                             // 入口先看一眼：已取消的会话不必再解
+    emit('container', 1, '读取容器头', sid);
 
     // 容器层先判「是不是本工具支持的回放」：不支持就抛带 code 的错误，
     // 由页面渲染成专门的错误态（旧版本回放的容器/压缩方式与当前版本不同）。
@@ -3160,8 +3307,9 @@
       throw unsupportedFormat('文件头 magic 是 0x' + hdr.magic.toString(16) + '（期望 0x1000ace5）');
     }
     var info = locatePacketStream(d, hdr);
-    var payload = await decompressStream(d, info);
-    emit('packets', 16, '切分包帧');
+    checkAbort();
+    var payload = await decompressStream(d, info, opts);
+    emit('packets', 16, '切分包帧', sid);
 
     var pk = parsePackets(payload);
     var census = {}, mpiSigs = {};
@@ -3175,10 +3323,10 @@
         mpiSigs[sig] = (mpiSigs[sig] || 0) + 1;
       }
     });
-    await sleep0();
+    await sleep0(opts);
 
     // ---- FlightModel：实体三维航迹（顺带收集 EulerBytes 里的 bank，供三条飘带用）
-    emit('fm', 20, '解 ptype=2 FlightModel');
+    emit('fm', 20, '解 ptype=2 FlightModel', sid);
     var rows = [], i, t0 = Date.now();
     var eulerByUid = {};                   // uid -> {ticks:[], banks:[度]}
     for (i = 0; i < pk.length; i++) {
@@ -3205,8 +3353,8 @@
         }
       }
       if ((i % yieldEvery) === 0) {
-        emit('fm', 20 + 20 * i / pk.length, 'FM 包 ' + i + '/' + pk.length);
-        await sleep0();
+        emit('fm', 20 + 20 * i / pk.length, 'FM 包 ' + i + '/' + pk.length, sid);
+        await sleep0(opts);
       }
     }
     rows.sort(function (a, b) {
@@ -3248,8 +3396,8 @@
         segStats.segments++;
       });
     });
-    emit('fm', 40, '航迹 ' + tracksUnits.length + ' 段（' + (Date.now() - t0) + ' ms）');
-    await sleep0();
+    emit('fm', 40, '航迹 ' + tracksUnits.length + ' 段（' + (Date.now() - t0) + ' ms）', sid);
+    await sleep0(opts);
 
     // ---- 本机属性表（0xD04A ReplayCockpitParams）
     var propsSamples = [];
@@ -3266,12 +3414,12 @@
         o += 6;
       }
       if (Object.keys(props).length) propsSamples.push({ ms: p2.ms, props: props });
-      if ((i % yieldEvery) === 0) await sleep0();
+      if ((i % yieldEvery) === 0) await sleep0(opts);
     }
     propsSamples.sort(function (a, b) { return a.ms - b.ms; });
     var ownProps = buildOwnProps(propsSamples);
-    emit('props', 46, '本机属性表 ' + propsSamples.length + ' 行');
-    await sleep0();
+    emit('props', 46, '本机属性表 ' + propsSamples.length + ' 行', sid);
+    await sleep0(opts);
 
     // ---- 击杀 / 伤害包
     var kills = [], criticals = [], severes = [], failures = [];
@@ -3331,14 +3479,14 @@
         arec.lastSec = rnd(p3.ms / 1000.0, 3);
         if (arec.firstTicksRaw.length < 6) arec.firstTicksRaw.push(p3.ms * TICK_PER_MS);
       }
-      if ((i % yieldEvery) === 0) await sleep0();
+      if ((i % yieldEvery) === 0) await sleep0(opts);
     }
     kills.sort(function (a, b) { return a.tickRaw - b.tickRaw; });
-    emit('kills', 52, '击杀包 ' + kills.length + ' / 致命伤 ' + criticals.length + ' / 重伤 ' + severes.length);
-    await sleep0();
+    emit('kills', 52, '击杀包 ' + kills.length + ' / 致命伤 ' + criticals.length + ' / 重伤 ' + severes.length, sid);
+    await sleep0(opts);
 
     // ---- ECS：实体构造 → 地面点 / 机场结构 / 弹药发射点
-    emit('ecs', 56, '解 ptype=6 ECS');
+    emit('ecs', 56, '解 ptype=6 ECS', sid);
     var ecs = new EcsParser();
     var ctrlCensus = {};
     for (i = 0; i < pk.length; i++) {
@@ -3348,9 +3496,9 @@
       if (!pl4.length) continue;
       var c = ecs.parsePacket(pl4, p4.ms * TICK_PER_MS);
       ctrlCensus[c] = (ctrlCensus[c] || 0) + 1;
-      if ((i % yieldEvery) === 0) { emit('ecs', 56 + 12 * i / pk.length, 'ECS 包 ' + i); await sleep0(); }
+      if ((i % yieldEvery) === 0) { emit('ecs', 56 + 12 * i / pk.length, 'ECS 包 ' + i, sid); await sleep0(opts); }
     }
-    await sleep0();
+    await sleep0(opts);
 
     var eidDeath = {};
     ecs.destructions.forEach(function (d) {
@@ -3423,21 +3571,21 @@
     var markers = extractRunwayMarkers(payload, pk);
     var runwayData = buildRunwayData(airfieldStructs, markers);
     emit('ecs', 70, '地面点 ' + groundRows.length + ' / 跑道 ' + runwayData.runways.length +
-                    ' / 机场 ' + runwayData.airfields.length + ' / 弹药 ' + launchRows.length);
-    await sleep0();
+                    ' / 机场 ' + runwayData.airfields.length + ' / 弹药 ' + launchRows.length, sid);
+    await sleep0(opts);
 
     // ---- 地面同步位置（ptype=4 MPI 0xF073/0xF074）→ 绑定到 ECS 构造点
     var groundSync = parseGroundSync(payload, pk);
     var groundBind = bindGroundTracks(groundRows, groundSync);
     var weaponPos = parseWeaponSync(payload, pk);
     emit('ecs', 73, '弹药同步 ' + weaponPos.stats.rockets + ' 个导弹实体 / ' +
-                    weaponPos.stats.bombs + ' 个炸弹实体（' + weaponPos.stats.errors + ' 包失败）');
+                    weaponPos.stats.bombs + ' 个炸弹实体（' + weaponPos.stats.errors + ' 包失败）', sid);
     emit('ecs', 72, '地面同步 ' + groundSync.stats.uids + ' uid / ' +
-                    groundSync.stats.samples + ' 采样 → 绑定 ' + groundBind.matched + ' 个 ECS 点');
-    await sleep0();
+                    groundSync.stats.samples + ' 采样 → 绑定 ' + groundBind.matched + ' 个 ECS 点', sid);
+    await sleep0(opts);
 
     // ---- 结算 BLK（玩家表 / 作者 / squadId）
-    emit('blk', 74, '解析结算 BLK');
+    emit('blk', 74, '解析结算 BLK', sid);
     var results = {}, blkMeta = null;
     if (info.resultsOffset) {
       var blk = parseFatBlk(d.subarray(info.resultsOffset));
@@ -3446,7 +3594,7 @@
     }
     var players = mergePlayers(results);
     var playerVeh = playerVehicles(results);
-    await sleep0();
+    await sleep0(opts);
 
     // ---- 本机 uid：用本机高度剖面与各航迹做相关（纯回放判据）
     var playerName = results.author || '';
@@ -3465,15 +3613,15 @@
     var ownPick = pickOwnUnit(trackUnits, authorVeh, ownProps, axisProbe, uidMapProbe());
     function uidMapProbe() { return {}; }
     var ownUid = ownPick.uid;
-    emit('own', 78, '本机 uid=' + ownUid + '（' + ownPick.how + '）');
-    await sleep0();
+    emit('own', 78, '本机 uid=' + ownUid + '（' + ownPick.how + '）', sid);
+    await sleep0(opts);
 
     // ---- 玩家槽位（ptype=4 MPI 0xF02D）→ 玩家名字/队伍/氏族
     var slotData = parseSlotPlayers(payload, pk);
     if (opts.debug) opts.debug.slotStats = slotData.stats;
     emit('slot', 76, '玩家槽位 ' + slotData.stats.players + ' 人 / ' +
-                     slotData.stats.messages + ' 条消息');
-    await sleep0();
+                     slotData.stats.messages + ' 条消息', sid);
+    await sleep0(opts);
 
     // ---- uid_map（ECS → 载具/玩家/阵营）
     var um = buildUidMap(ecs, players, results, ownUid, slotData.players);
@@ -3526,8 +3674,8 @@
       if (sideFin.side[k] === 'ally' || sideFin.side[k] === 'enemy') sideFinalMap[k] = sideFin.side[k];
     });
     emit('side', 82, '阵营：ally ' + Object.keys(sideFinalMap).filter(function (k) { return sideFinalMap[k] === 'ally'; }).length +
-                     ' / enemy ' + Object.keys(sideFinalMap).filter(function (k) { return sideFinalMap[k] === 'enemy'; }).length);
-    await sleep0();
+                     ' / enemy ' + Object.keys(sideFinalMap).filter(function (k) { return sideFinalMap[k] === 'enemy'; }).length, sid);
+    await sleep0(opts);
 
     // ---- 时间轴
     var endMarkerMs = null;
@@ -3627,8 +3775,8 @@
       });
       if (opts.debug) opts.debug.airDeathPatched = patched;
     })();
-    emit('units', 88, '空中航迹 ' + units.length + ' 条');
-    await sleep0();
+    emit('units', 88, '空中航迹 ' + units.length + ' 条', sid);
+    await sleep0(opts);
 
     // ---- 本机 10 Hz
     var ownSegs = ownPick2.segments || [];
@@ -3889,7 +4037,7 @@
                     missiles: missiles,
                     runways: runways, airfields: airfields, terrain: null, names: {},
                     __attitude: attitude };
-    emit('done', 100, '完成（' + ((Date.now() - t_start) / 1000).toFixed(2) + ' s）');
+    emit('done', 100, '完成（' + ((Date.now() - t_start) / 1000).toFixed(2) + ' s）', sid);
     return mission;
   }
 
@@ -3910,25 +4058,45 @@
    * 对外入口（接口不变）：优先走 Web Worker，把解析挪出主线程；
    * Worker 不可用或建不起来时**自动退回主线程**，结果一致、只是主线程会卡。
    * opts.force = 'main' | 'worker' 可强制某条路径（用于对拍/性能测量）。
+   *
+   * 会话（新增）：`opts.session` 传一个 ParseSession；`opts.sessionId` 只给标识。
+   * 每次调用都对应一个独立会话：
+   *   - 进度回调与结果的 `meta.sessionId` 都带这个标识，页面据此丢弃旧会话的消息；
+   *   - `session.cancel()` 后本次 parse() 以 code='cancelled' 拒绝，
+   *     Worker 被 terminate、已收分片释放，主线程路径在下个让出点停下；
+   *   - 取消后不再发布 ACE_ATTITUDE（场景不应拿到被取消会话的数据）。
    */
   async function parse(arrayBuffer, opts) {
     opts = opts || {};
     var force = opts.force || null;
+    var sess = (opts.session && typeof opts.session.cancel === 'function')
+      ? opts.session : new ParseSession(opts.sessionId);
+    var sid = sess.id;
+    /* 会话字段透传给内部两条路径：shouldAbort 供取消检查，sessionId 供进度打标。 */
+    var inner = Object.assign({}, opts, {
+      sessionId: sid,
+      shouldAbort: function () { return sess.cancelled === true; }
+    });
     global.ACE_ATTITUDE = null;                 // 每次解析从空开始（不累计）
+    if (sess.cancelled) { throw cancelledError(); }
     // 已经在 Worker 里（wrpl-worker.js）就不要再套一层：直接主线程路径跑完再回传结果
     var insideWorker = (typeof importScripts === 'function') || (typeof document === 'undefined');
     if (force !== 'main' && !insideWorker && workerSupported()) {
       try {
-        var mW = await parseInWorker(arrayBuffer, opts,
-          '解析路径：Web Worker（' + (force === 'worker' ? '强制' : '自动') + '；主线程只收结果）');
+        var mW = await parseInWorker(arrayBuffer, inner,
+          '解析路径：Web Worker（' + (force === 'worker' ? '强制' : '自动') + '；主线程只收结果）', sess);
+        if (sess.cancelled) { throw cancelledError(); }   // 取消与完成同时到达：取消优先
         publishAttitude(mW);
         return mW;
       } catch (e) {
+        if (e && e.code === 'cancelled') { throw e; }
         if (e && (e.code === 'worker-unavailable') && force !== 'worker' &&
             !(arrayBuffer instanceof Uint8Array) && arrayBuffer.byteLength) {
           // 只有在「建不起来」时才回退；Worker 里真正的解析错误原样抛出（避免解析两遍）
-          if (opts.debug) opts.debug.workerFallback = String(e && e.message || e);
-          var m2 = await parseMain(arrayBuffer, opts);
+          if (inner.debug) inner.debug.workerFallback = String(e && e.message || e);
+          if (sess.cancelled) { throw cancelledError(); }
+          var m2 = await parseMain(arrayBuffer, inner);
+          if (sess.cancelled) { throw cancelledError(); }
           m2.meta.limits.push('解析路径：主线程回退（Worker 不可用：' + (e && e.message || e) + '）');
           m2.meta.provenance.push('解析路径：主线程回退（Worker 不可用）');
           publishAttitude(m2);
@@ -3938,7 +4106,8 @@
       }
     }
     if (opts.debug) opts.debug.workerFallback = force === 'main' ? 'force=main' : 'not supported';
-    var mMain = await parseMain(arrayBuffer, opts);
+    var mMain = await parseMain(arrayBuffer, inner);
+    if (sess.cancelled) { throw cancelledError(); }
     /* 两条路径的 meta 结构保持一致：主线程路径没有 worker 堆峰值，显式给 null */
     if (mMain && mMain.meta && !('__workerHeapPeakMB' in mMain.meta)) {
       mMain.meta.__workerHeapPeakMB = null;
@@ -4087,6 +4256,9 @@
   global.WRPLParse = {
     parse: parse,
     progress: progress,
+    /* 会话工具：页面可为每次拖入建一个 ParseSession，替换时 cancel() 旧的。 */
+    createSession: function (id) { return new ParseSession(id); },
+    ParseSession: ParseSession,
     version: '1.0.0-browser',
     _internal: { parsePackets: parsePackets, parseFm: parseFm, readVlqSize: readVlqSize,
                  initStats: initStats, parseMain: parseMain, buildAttitude: buildAttitude,

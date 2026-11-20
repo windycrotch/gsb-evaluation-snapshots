@@ -1307,6 +1307,39 @@
     return true;
   }
 
+  // ---------- 卸载（换回放/新解析会话时先清场） ----------
+  // 取消挂载：场景清空、数据引用断开、数据条与控制条清空。
+  // 之后要么 mount() 新数据，要么停在「没有数据」的干净页面上 —— 旧回放的
+  // 画面/读数/告警都不许留到下一次解析。
+  function unmount() {
+    try {
+      if (SCENE && typeof SCENE.clear === 'function') SCENE.clear();
+    } catch (e) { /* 清场失败不阻断，下面照样断引用 */ }
+    SCENE = null;
+    sceneBroken = false;
+    sceneInitError = null;
+    window.ACE_MISSION = null;
+    DATA = null; META = {};
+    T0 = 0; DUR = 0; OWN = null; UNITS = []; EVENTS = []; KILLS = []; NAMES = {};
+    RANKED = []; SQUAD_MEMBER_KEYS = []; SQUAD_ALL_KEYS = []; squadKeys = [];
+    met = 0; playing = false; acc = 0; lastTs = 0; dragging = false;
+    lastOwnRef = { x: 0, y: 0, has: false };
+    WARN = WARN.filter(function (w) { return w.indexOf('localStorage') >= 0; });
+    // 飘带/地形是跨模块的全局挂载点，一并清掉，避免下一份数据读到上一份
+    try { window.ACE_ATTITUDE = null; } catch (e2) {}
+    try { window.ACE_LANDMASK = null; } catch (e3) {}
+    try {
+      if (controlsEl) controlsEl.innerHTML = '';
+      if (helpEl) helpEl.innerHTML = '';
+      ct = {};                       /* 控制条节点已随 innerHTML 一起没了，引用必须断开 */
+    } catch (e4) {}
+    buildCorner();
+    if (controlsEl) buildControls();  /* 重建一块"无数据"的控制条，而不是留一块空白 */
+    updateCorner(buildState());
+    updateControls(buildState());
+    return true;
+  }
+
   // ---------- 启动 ----------
   function boot() {
     if (!stageEl || !canvasEl || !cornerEl || !controlsEl || !helpEl) {
@@ -1360,6 +1393,7 @@
     squadSourceLine: squadSourceLine,
     sourceLine: sourceLine,
     mount: mount,
+    unmount: unmount,
 
     get options() {
       return {
