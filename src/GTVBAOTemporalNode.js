@@ -89,6 +89,10 @@ class GTVBAOTemporalNode extends GTVBAONodeBase {
 		this._fragmentContext = null;
 		this._fragmentInputs = null;
 		this._logarithmicDepthBuffer = false;
+		this._disposed = false;
+	}
+	get isDisposed() {
+		return this._disposed;
 	}
 	getTextureNode() {
 		return this._textureNode;
@@ -98,6 +102,7 @@ class GTVBAOTemporalNode extends GTVBAONodeBase {
 		this._historyValid.value = 0;
 	}
 	updateBefore( frame ) {
+		if ( this._disposed ) return;
 		const { renderer } = frame;
 		const map = this.textureNode.value;
 		const width = Math.max( 1, map.image.width );
@@ -128,11 +133,14 @@ class GTVBAOTemporalNode extends GTVBAONodeBase {
 		this._historyValid.value = 1;
 	}
 	dispose() {
+		if ( this._disposed ) return;
+		this._disposed = true;
 		this._resolveRenderTarget.dispose();
 		this._historyRenderTarget.dispose();
 		this._material.dispose();
 	}
 	setup( builder ) {
+		if ( this._disposed ) return this._textureNode.r;
 		this._fragmentContext = builder.getSharedContext();
 		this._logarithmicDepthBuffer = builder.renderer.logarithmicDepthBuffer === true && ! this.aoNode._isOrthographicCamera;
 		this._refreshMaterialFragmentNode();

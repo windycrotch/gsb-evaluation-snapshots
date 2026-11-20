@@ -28,6 +28,7 @@ export default class GTVBAODenoiseNode extends Node<"float"> {
   index: UniformNode<"float", number>;
 
   getTextureNode(): SampleableTextureNode;
+  readonly isDisposed: boolean;
 
   constructor(
     textureNode: SampleableTextureNode,

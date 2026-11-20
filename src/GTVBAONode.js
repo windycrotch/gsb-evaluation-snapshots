@@ -62,8 +62,10 @@ class GTVBAONode extends GTVBAONodeBase {
 				shouldNotify: ( previousValue, nextValue ) => isGtvbaoDebugEnabled( previousValue ) !== isGtvbaoDebugEnabled( nextValue ) || getGtvbaoDebugVariantKey( previousValue ) !== getGtvbaoDebugVariantKey( nextValue )
 			}
 		);
-		this.useTemporalFiltering = options.useTemporalFiltering ?? true;
-		this.resolutionScale = options.resolutionScale ?? 1;
+		// Backing fields for the session accessors below; assigned directly so
+		// construction never fires a variant notification.
+		this._useTemporalFiltering = options.useTemporalFiltering ?? true;
+		this._resolutionScale = options.resolutionScale ?? 1;
 		// Consumers built through createDepthAwareAo upsample the reduced-resolution
 		// AO by depth; the uniform gates it per frame, since it needs the linear-depth
 		// MIPs and does nothing useful at full resolution.
@@ -82,6 +84,7 @@ class GTVBAONode extends GTVBAONodeBase {
 		this._variantBatchDepth = 0;
 		this._batchedVariantNotify = false;
 		this._batchedVariantRebuild = false;
+		this._disposed = false;
 		this._resolution = uniform( new Vector2() );
 		this._halfProjScale = uniform( 1 );
 		this._temporalDirection = uniform( 0 );
@@ -111,6 +114,32 @@ class GTVBAONode extends GTVBAONodeBase {
 		this._textureNode = passTexture( this, this._getActiveRenderTarget().texture );
 		this._lastSize = { aoWidth: 0, aoHeight: 0, projectionScale: - 1, targetIsDebug: null };
 	}
+	get isDisposed() {
+		return this._disposed;
+	}
+	// Session properties: not shader variants, but changing them swaps which
+	// textures the pipeline reads (AO resolution, temporal jitter), so they
+	// notify without rebuilding the material. A preset batch defers that
+	// notification to the end of the session, letting consumers reset temporal
+	// history exactly once per preset instead of converging from stale state.
+	get resolutionScale() {
+		return this._resolutionScale;
+	}
+	set resolutionScale( value ) {
+		const nextValue = Number( value );
+		if ( ! Number.isFinite( nextValue ) || nextValue <= 0 || nextValue === this._resolutionScale ) return;
+		this._resolutionScale = nextValue;
+		this._markVariantDirty( false );
+	}
+	get useTemporalFiltering() {
+		return this._useTemporalFiltering;
+	}
+	set useTemporalFiltering( value ) {
+		const nextValue = value === true;
+		if ( nextValue === this._useTemporalFiltering ) return;
+		this._useTemporalFiltering = nextValue;
+		this._markVariantDirty( false );
+	}
 	setVariantChangeCallback( callback ) {
 		this._onVariantChange = callback;
 	}
@@ -129,6 +158,9 @@ class GTVBAONode extends GTVBAONodeBase {
 		}
 	}
 	_markVariantDirty( rebuildMaterial = true ) {
+		// A disposed node must not rebuild materials or notify consumers: its
+		// render targets, depth textures and materials are already released.
+		if ( this._disposed ) return;
 		// Publish the selected format before consumers rebuild: r186 infers float
 		// for RedFormat and vec4 for RGBAFormat when compiling texture samples.
 		this._textureNode.value = this._getActiveRenderTarget().texture;
@@ -204,6 +236,7 @@ class GTVBAONode extends GTVBAONodeBase {
 		return this.useDepthAwareUpsample && this.useDepthMips.value && this.resolutionScale < 1;
 	}
 	setSize( width, height ) {
+		if ( this._disposed ) return;
 		const renderTarget = this._getActiveRenderTarget();
 		const targetIsDebug = renderTarget === this._debugRenderTarget;
 		const aoWidth = Math.max( 1, Math.round( width * this.resolutionScale ) );
@@ -229,6 +262,7 @@ class GTVBAONode extends GTVBAONodeBase {
 		this._halfProjScale.value = aoHeight * projectionScale * 0.25;
 	}
 	updateBefore( frame ) {
+		if ( this._disposed ) return;
 		const { renderer } = frame;
 		_rendererState = RendererUtils.resetRendererState( renderer, _rendererState );
 		const size = renderer.getDrawingBufferSize( _size );
@@ -258,6 +292,7 @@ class GTVBAONode extends GTVBAONodeBase {
 		RendererUtils.restoreRendererState( renderer, _rendererState );
 	}
 	setup( builder ) {
+		if ( this._disposed ) return this._textureNode;
 		this._logarithmicDepthBuffer = builder.renderer.logarithmicDepthBuffer === true && ! this._isOrthographicCamera;
 		this._depthPrefilter.setLogarithmicDepthBuffer( this._logarithmicDepthBuffer );
 		this._fragmentContext = builder.getSharedContext();
@@ -265,6 +300,9 @@ class GTVBAONode extends GTVBAONodeBase {
 		return this._textureNode;
 	}
 	dispose() {
+		if ( this._disposed ) return;
+		this._disposed = true;
+		this._onVariantChange = null;
 		this._depthPrefilter.dispose();
 		this._aoRenderTarget.dispose();
 		this._debugRenderTarget.dispose();

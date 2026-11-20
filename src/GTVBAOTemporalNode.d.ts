@@ -22,6 +22,7 @@ export default class GTVBAOTemporalNode extends Node<"float"> {
     options?: GTVBAOTemporalOptions
   );
   getTextureNode(): TextureNode;
+  readonly isDisposed: boolean;
   reset(): void;
   dispose(): void;
 }

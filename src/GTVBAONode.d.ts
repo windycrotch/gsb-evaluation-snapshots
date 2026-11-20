@@ -63,6 +63,7 @@ export default class GTVBAONode extends Node<"vec4"> {
   useDepthAwareUpsample: boolean;
   upsampleJitter: number;
   normalEncoding: GTVBAONormalEncoding;
+  readonly isDisposed: boolean;
 
   constructor(
     depthNode: Node,

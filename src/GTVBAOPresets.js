@@ -113,16 +113,51 @@ export const GTVBAO_PRESET_NAMES = Object.keys( GTVBAO_PRESETS );
 
 export const DEFAULT_GTVBAO_PRESET = 'Balanced';
 
+const PRESET_NUMBER_FIELDS = [ 'resolutionScale', 'sliceCount', 'stepCount', 'radius', 'thickness', 'aoIntensity', 'expFactor', 'linearThicknessScale', 'maxThickness', 'denoiseRadius' ];
+const PRESET_BOOLEAN_FIELDS = [ 'useScreenSpaceSampling', 'useLinearThickness', 'usePerspectiveCorrectSlice', 'useDepthMips', 'temporal', 'denoise', 'accumulate' ];
+
+// Every field a preset application touches is validated up front, so a
+// malformed preset fails before any node state changes instead of leaving a
+// half-initialized pipeline behind.
+const validateGtvbaoPreset = ( preset, label ) => {
+	for ( const field of PRESET_NUMBER_FIELDS ) {
+		if ( typeof preset[ field ] !== 'number' || ! Number.isFinite( preset[ field ] ) ) {
+			throw new Error( `Invalid GTVBAO preset "${ label }": "${ field }" must be a finite number.` );
+		}
+	}
+	if ( preset.resolutionScale <= 0 ) {
+		throw new Error( `Invalid GTVBAO preset "${ label }": "resolutionScale" must be greater than 0.` );
+	}
+	for ( const field of PRESET_BOOLEAN_FIELDS ) {
+		if ( typeof preset[ field ] !== 'boolean' ) {
+			throw new Error( `Invalid GTVBAO preset "${ label }": "${ field }" must be a boolean.` );
+		}
+	}
+	if ( typeof preset.sectorMeasure !== 'string' ) {
+		throw new Error( `Invalid GTVBAO preset "${ label }": "sectorMeasure" must be a string.` );
+	}
+};
+
 /**
  * Applies a preset (by name or as an object) to a GTVBAONode, and to a
- * GTVBAODenoiseNode when one is given. The shader variant is rebuilt at most
- * once. The caller still decides which texture the lit pass reads according to
+ * GTVBAODenoiseNode when one is given. The application is one convergent
+ * session: the preset is validated before anything changes, then every field —
+ * including the temporal-jitter toggle and the denoiser — is set inside a
+ * single variant batch, so the shader variant is rebuilt at most once and
+ * consumers are notified only after the full new configuration is in place.
+ * The next frame then renders the new preset in full (AO resolution, depth
+ * MIPs, depth-aware upsample and jitter all switch in the same update) instead
+ * of converging from the previous one. An unknown name, a malformed preset or
+ * a disposed AO node throws and leaves the previous, working state untouched.
+ * The caller still decides which texture the lit pass reads according to
  * `preset.denoise` and `preset.accumulate`: raw AO, accumulated AO, or either
  * after denoising.
  */
 export function applyGtvbaoPreset( gtvbaoNode, preset, denoiseNode = null ) {
 	const resolved = typeof preset === 'string' ? GTVBAO_PRESETS[ preset ] : preset;
-	if ( resolved === undefined ) throw new Error( `Unknown GTVBAO preset: ${ preset }` );
+	if ( resolved === undefined || resolved === null ) throw new Error( `Unknown GTVBAO preset: ${ preset }` );
+	validateGtvbaoPreset( resolved, typeof preset === 'string' ? preset : 'custom' );
+	if ( gtvbaoNode.isDisposed === true ) throw new Error( 'Cannot apply a GTVBAO preset to a disposed GTVBAONode.' );
 	gtvbaoNode.batchVariantChanges( () => {
 		gtvbaoNode.resolutionScale = resolved.resolutionScale;
 		gtvbaoNode.sliceCount.value = resolved.sliceCount;
@@ -138,11 +173,11 @@ export function applyGtvbaoPreset( gtvbaoNode, preset, denoiseNode = null ) {
 		gtvbaoNode.sectorMeasure.value = resolved.sectorMeasure;
 		gtvbaoNode.usePerspectiveCorrectSlice.value = resolved.usePerspectiveCorrectSlice;
 		gtvbaoNode.useDepthMips.value = resolved.useDepthMips;
+		gtvbaoNode.useTemporalFiltering = resolved.temporal;
+		if ( denoiseNode !== null ) {
+			denoiseNode.radius.value = resolved.denoiseRadius;
+			denoiseNode.useTemporalDenoiseRotation = resolved.temporal && resolved.denoise;
+		}
 	} );
-	gtvbaoNode.useTemporalFiltering = resolved.temporal;
-	if ( denoiseNode !== null ) {
-		denoiseNode.radius.value = resolved.denoiseRadius;
-		denoiseNode.useTemporalDenoiseRotation = resolved.temporal && resolved.denoise;
-	}
 	return resolved;
 }

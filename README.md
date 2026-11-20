@@ -125,9 +125,14 @@ pipeline.outputNode = scenePass;
 | `No Temporal High` | 1 | 3 × 12 | no | no | yes |
 
 `applyGtvbaoPreset(aoNode, presetOrName, denoiseNode?)` applies settings and returns the resolved
-preset. It does not wire the render graph: temporal presets need TRAA or another temporal resolve;
-accumulating presets expect `gtvbaoTemporal` between the AO and its consumer, as in the quick start;
-denoising presets need the denoiser's output connected as above.
+preset. One application is a convergent session: the preset is validated before anything changes
+(unknown names and malformed presets throw and leave the previous state working), then every field —
+including the temporal-jitter toggle and the denoiser — is set inside a single variant batch, so the
+next frame already renders the new tier (AO resolution, depth MIPs, depth-aware upsample and jitter
+switch together) and listeners are notified once, at the end. Re-switching before a frame settles
+resolves to the last requested preset. It does not wire the render graph: temporal presets need TRAA
+or another temporal resolve; accumulating presets expect `gtvbaoTemporal` between the AO and its
+consumer, as in the quick start; denoising presets need the denoiser's output connected as above.
 `DEFAULT_GTVBAO_PRESET` is `"Balanced"`; available names and settings are in
 `GTVBAO_PRESET_NAMES` and `GTVBAO_PRESETS`.
 
@@ -141,11 +146,13 @@ Logarithmic depth buffers are supported. `options` accepts initial values for th
 
 Defaults here are constructor defaults, before applying a preset. Set `plain` properties directly
 and `uniform` / `variant` properties through `.value`. Variant changes can rebuild the shader;
-`batchVariantChanges(fn)` groups them into one rebuild. Set `normalEncoding` at construction.
+`batchVariantChanges(fn)` groups them into one rebuild. `session` properties are set directly like
+plain ones, but notify the variant-change callback (without a shader rebuild) so temporal history
+resets with the new configuration. Set `normalEncoding` at construction.
 
 | Property | Kind | Default | Description |
 | --- | --- | --- | --- |
-| `resolutionScale` | plain | `1` | AO resolution relative to the drawing buffer. |
+| `resolutionScale` | session | `1` | AO resolution relative to the drawing buffer. |
 | `sliceCount` | variant | `2` | Slices per pixel (1–8). |
 | `stepCount` | variant | `8` | Steps per direction (1–32); up to `sliceCount × stepCount × 2` samples per pixel. |
 | `radius` | uniform | `3` | Sampling radius control; screen-relative by default, world-space when `useScreenSpaceSampling` is false. |
@@ -161,7 +168,7 @@ and `uniform` / `variant` properties through `.value`. Variant changes can rebui
 | `useDepthMips` | variant | `true` | Sample the linear-depth MIP chain instead of scene depth. |
 | `useDepthAwareUpsample` | plain | `true` | Enable depth-aware upsampling when `resolutionScale < 1` and depth MIPs are enabled. |
 | `upsampleJitter` | plain | `0` | Width in AO texels of a per-pixel, per-frame jitter of the depth-aware upsample; see below. |
-| `useTemporalFiltering` | plain | `true` | Rotate samples each frame; requires a temporal resolve. |
+| `useTemporalFiltering` | session | `true` | Rotate samples each frame; requires a temporal resolve. |
 | `normalEncoding` | plain | `"view"` | Raw view-space normals, or `"directionToColor"` for normals packed into `[0,1]`. |
 | `debugMode` | variant | `0` | Select a view from `GTVBAO_DEBUG_MODE_OPTIONS`. |
 
@@ -175,7 +182,7 @@ and `uniform` / `variant` properties through `.value`. Variant changes can rebui
 | `setVariantChangeCallback(fn)` | Register the pipeline update callback shown above. |
 | `batchVariantChanges(fn)` | Apply multiple variant changes with one rebuild. |
 | `setSize(width, height)` | Called automatically with the drawing buffer size. |
-| `dispose()` | Release the node's render targets, materials and depth prefilter. |
+| `dispose()` | Release the node's render targets, materials and depth prefilter. Afterwards `isDisposed` is `true` and further updates, resizes and preset applications are inert (the latter throw). |
 
 Both camera types use the same API, including denoising, depth MIPs and depth-aware
 upsampling. Pass the same camera used to render the depth/normal buffers. After

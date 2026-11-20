@@ -89,11 +89,16 @@ class GTVBAODenoiseNode extends GTVBAONodeBase {
 		this._fragmentInputs = null;
 		this._logarithmicDepthBuffer = false;
 		this._fragmentLinearDepthNode = null;
+		this._disposed = false;
+	}
+	get isDisposed() {
+		return this._disposed;
 	}
 	get normalEncoding() {
 		return this._normalEncoding;
 	}
 	updateBefore( frame ) {
+		if ( this._disposed ) return;
 		this._updateDenoiseRotationIndex( frame.frameId ?? 0 );
 		// Rebuild when the AO source or its useDepthMips variant changes.
 		if ( this._fragmentContext !== null && this._fragmentLinearDepthNode !== this._getLinearDepthNode() ) this._refreshMaterialFragmentNode();
@@ -115,6 +120,8 @@ class GTVBAODenoiseNode extends GTVBAONodeBase {
 		RendererUtils.restoreRendererState( renderer, _rendererState );
 	}
 	dispose() {
+		if ( this._disposed ) return;
+		this._disposed = true;
 		this._defaultNoiseTexture?.dispose();
 		this._denoiseRenderTarget.dispose();
 		this._material.dispose();
@@ -135,6 +142,7 @@ class GTVBAODenoiseNode extends GTVBAONodeBase {
 		return this._textureNode;
 	}
 	setup( builder ) {
+		if ( this._disposed ) return this._textureNode.r;
 		this._fragmentContext = builder.getSharedContext();
 		this._logarithmicDepthBuffer = builder.renderer.logarithmicDepthBuffer === true && ! this._isOrthographicCamera;
 		this._refreshMaterialFragmentNode();
@@ -146,6 +154,8 @@ class GTVBAODenoiseNode extends GTVBAONodeBase {
 			: null;
 	}
 	_refreshMaterialFragmentNode() {
+		// Disposed nodes must not regenerate the noise texture or the material.
+		if ( this._disposed ) return;
 		const noiseNode = this._getNoiseNode();
 		const linearDepthNode = this._getLinearDepthNode();
 		const inputs = [
