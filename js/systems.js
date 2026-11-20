@@ -25,6 +25,7 @@ export const FAILURES = {
   vacuum: { name: 'Vacuum pump failure', mtbf: 500 },
   alternator: { name: 'Alternator failure', mtbf: 900 },
   pitot: { name: 'Pitot blockage', mtbf: 4000 },
+  pitotHeat: { name: 'Pitot heat failure', mtbf: 5000 },
   static: { name: 'Static port blockage', mtbf: 8000 },
   flaps: { name: 'Flap motor failure', mtbf: 3000 },
   trim: { name: 'Trim runaway', mtbf: 12000 },
@@ -47,13 +48,21 @@ export class Systems {
     this.trapPitot = null; this.trapStatic = null;
     this.oilLeft = 1; this.seized = false; this.badMag = Math.random() < 0.5 ? 1 : 2;
     this.variation = 0;
+    // The pitot-static system as an air-data source. `pitotBlocked`: anything sealing the
+    // ram inlet (ice or an injected fault). `pitotTrust`: 0..1, how far the indicated
+    // airspeed can be believed; `pitotIas`: the last reading worth believing. The stall
+    // warning and anything else that needs a real airspeed degrade to the last good value.
+    this.pitotBlocked = false; this.pitotTrust = 1; this.pitotIas = null;
+    this.pitotState = 'clean'; this.pitotBlockT = 0; this.pitotClearT = 0; this.pitotThaw = 0;
     this.events = [];
-    this.ind = { ias: 0, altInd: 0, vsInd: 0, pitch: 0, roll: 0, heading: 0, compass: 0, turnRate: 0, slip: 0, suction: 0, volts: 28, amps: 0, oilP: 0, fuelL: 0, fuelR: 0, tcFlag: false, lowVolts: false, lowVac: false };
-    Object.assign(fm.fx, { ice: 0, power: 1, cut: false, rough: 0, starter: true, flapPower: true, flapFrozen: false, trimOffset: 0 });
+    this.ind = { ias: 0, altInd: 0, vsInd: 0, pitch: 0, roll: 0, heading: 0, compass: 0, turnRate: 0, slip: 0, suction: 0, volts: 28, amps: 0, oilP: 0, fuelL: 0, fuelR: 0, tcFlag: false, lowVolts: false, lowVac: false,
+      pitotBlocked: false, pitotTrust: 1, pitotStale: false, pitotState: 'clean', pitotIce: 0 };
+    Object.assign(fm.fx, { ice: 0, power: 1, cut: false, rough: 0, starter: true, flapPower: true, flapFrozen: false, trimOffset: 0, airdataTrust: 1, airdataIas: null });
   }
 
   fail(name) { if (FAILURES[name] && !this.failed[name]) { this.failed[name] = true; this.events.push(name); } }
-  repair() { this.failed = {}; this.oilLeft = 1; this.seized = false; this.fm.fx.trimOffset = 0; this.trapPitot = this.trapStatic = null; }
+  repair() { this.failed = {}; this.oilLeft = 1; this.seized = false; this.fm.fx.trimOffset = 0; this.trapPitot = this.trapStatic = null;
+    this.pitotBlocked = false; this.pitotBlockT = 0; this.pitotClearT = 0; this.pitotState = 'clean'; this.pitotTrust = 1; this.pitotIas = null; this.pitotThaw = 0; }
   // align the heading gyro with the compass, as a pilot does every quarter of an hour
   syncHeading() { this.hdgErr = wrap(this.compass - (this.fm.out.heading - this.variation)); }
 
@@ -86,11 +95,24 @@ export class Systems {
     else this.ice = Math.max(0, this.ice - dt * (wx.oat > 1 ? 0.004 * (wx.oat + 2) : 0.0004));             // melts in warm air, sublimates slowly in cold
     fx.ice = this.ice;
 
-    // ---- pitot: ices faster than the wing unless heated
-    if (wet > 0.05 && band > 0 && !(sw.pitotHeat && this.powered)) this.pitotIce = Math.min(1.2, this.pitotIce + wet * band * dt / 60);
-    else this.pitotIce = Math.max(0, this.pitotIce - dt * (sw.pitotHeat && this.powered ? 0.05 : wx.oat > 1 ? 0.02 : 0));
-    const pitotBlocked = F.pitot || this.pitotIce >= 1;
-    if (pitotBlocked && !this.trapPitot) this.trapPitot = o.staticP + o.dynP;       // ram inlet and drain both sealed: the pressure is trapped
+    // ---- pitot: ices faster than the wing unless heated. Heat only works while the
+    // heater element has power: a dead heater (or a flat battery) leaves the probe to ice.
+    const heatOn = sw.pitotHeat && this.powered && !F.pitotHeat;
+    if (wet > 0.05 && band > 0 && !heatOn) this.pitotIce = Math.min(1.2, this.pitotIce + wet * band * dt / 60);
+    else this.pitotIce = Math.max(0, this.pitotIce - dt * (heatOn ? 0.05 : wx.oat > 1 ? 0.02 : 0));
+    // Any seal on the ram inlet blocks it: ice that has built past the probe, or an
+    // injected blockage. Heat with power behind it thaws either, slowly for a solid
+    // blockage; heat with no power does nothing.
+    if (heatOn && F.pitot) {
+      this.pitotThaw = (this.pitotThaw || 0) + dt;
+      if (this.pitotThaw > 20) { F.pitot = false; this.failed.pitot = false; this.pitotThaw = 0; }   // the 'pitotClear' event is raised below
+    } else if (!F.pitot) this.pitotThaw = 0;
+    const iceSeal = this.pitotIce >= 1;
+    const pitotBlocked = !!F.pitot || iceSeal;
+    if (pitotBlocked && !this.pitotBlocked) this.events.push('pitotBlocked');
+    if (!pitotBlocked && this.pitotBlocked) this.events.push('pitotClear');
+    this.pitotBlocked = pitotBlocked;
+    if (pitotBlocked && this.trapPitot === null) this.trapPitot = o.staticP + o.dynP;       // ram inlet and drain both sealed: the pressure is trapped
     if (!pitotBlocked) this.trapPitot = null;
     if (F.static && !this.trapStatic) this.trapStatic = { p: o.staticP, alt: o.altInd };
     if (!F.static) this.trapStatic = null;
@@ -189,6 +211,38 @@ export class Systems {
     const staticP = this.trapStatic ? this.trapStatic.p : o.staticP;
     const total = this.trapPitot !== null ? this.trapPitot : o.staticP + o.dynP;
     ind.ias = Math.sqrt(2 * Math.max(0, total - staticP) / 1.225);
+    // ---- air-data trust: a blocked pitot makes the needle a liar, so downstream
+    // consumers (the stall warning above all) must not steer by it. The probe walks a
+    // small state machine and no transition can be skipped:
+    //   clean      inlet open, the needle is the airflow
+    //   blocked    ice or an injected blockage sealing the inlet: hold the last good value
+    //   recovering inlet open again, but the reading has not settled: ice may still be
+    //              shedding and the pressure lags. Heat with power behind it clears this in
+    //              a couple of seconds; warm air with no heat takes much longer
+    if (pitotBlocked) {
+      this.pitotState = 'blocked';
+      this.pitotBlockT += dt; this.pitotClearT = 0;
+      this.pitotTrust = Math.max(0, 1 - this.pitotBlockT / 0.6);   // a few frame-times to stop believing the needle
+    } else {
+      this.pitotBlockT = 0;
+      if (this.pitotState === 'blocked') { this.pitotState = 'recovering'; this.pitotClearT = 0; }
+      if (this.pitotState === 'recovering') {
+        this.pitotClearT += dt;
+        const warm = heatOn || (wx.oat || 0) > 2;
+        const settle = heatOn ? 0.6 : warm ? 2.5 : 6.0;
+        const span = heatOn ? 1.5 : 4.0;
+        this.pitotTrust = clamp((this.pitotClearT - settle) / span, 0, 1);
+        if (this.pitotTrust >= 1) { this.pitotState = 'clean'; }   // believing the needle again: drop the held value below
+      } else this.pitotTrust = 1;
+    }
+    // the last believable indicated airspeed: held while blocked, so the warning does not
+    // chase a needle that is climbing like an altimeter
+    if (this.pitotState === 'clean') this.pitotIas = null;      // the needle is believed again: stop holding the old value
+    else if (this.pitotTrust > 0.35) this.pitotIas = ind.ias;
+    const heldIas = this.pitotIas !== null ? this.pitotIas : ind.ias;
+    ind.iasTrust = this.pitotTrust; ind.iasHeld = heldIas;
+    ind.pitotBlocked = pitotBlocked; ind.pitotTrust = this.pitotTrust; ind.pitotStale = pitotBlocked && this.pitotIas !== null;
+    ind.pitotState = this.pitotState; ind.pitotIce = this.pitotIce;
     ind.altInd = this.trapStatic ? this.trapStatic.alt : o.altInd;
     ind.vsInd = this.trapStatic ? 0 : o.vsInd;
     ind.pitch = o.pitch + this.attErr[0]; ind.roll = o.roll + this.attErr[1];
@@ -200,5 +254,10 @@ export class Systems {
     ind.fuelL = this.powered ? T[0] : 0; ind.fuelR = this.powered ? T[1] : 0;
     ind.lowVolts = sw.master && this.volts < 25.5; ind.lowVac = this.suction < 3.5; ind.lowOil = !!eng && o.firing && ind.oilP < 20;
     ind.ice = this.ice; ind.avionics = this.powered && sw.avionics;
+    // The flight model's warning and anything else that needs an airspeed of record
+    // reads the same field the panel and the horn do: trust in the pitot, and the last
+    // reading worth holding while that trust is gone.
+    fx.airdataTrust = this.pitotTrust;
+    fx.airdataIas = this.pitotTrust >= 0.99 ? null : heldIas;
   }
 }

@@ -483,6 +483,8 @@ function updateHud(dt) {
   if (S.def.prop && S.def.prop.governor) bits.push(`Prop ${Math.round(c.prop * 100)}`);
   if (!S.def.engine) bits.push(`Airbrake ${Math.round(c.spoiler * 100)}`);
   if (systems.sw.pitotHeat) bits.push('Pitot heat');
+  if (ind.pitotBlocked) bits.push('<i>Pitot blocked</i>');
+  else if (ind.pitotTrust < 0.99) bits.push('<i>Air data unreliable</i>');
   if (systems.ice > 0.04) bits.push(`<i>Ice ${Math.round(systems.ice * 100)}</i>`);
   if (S.def.engine && !o.firing) bits.push('<i>Engine off</i>');
   $('hState').innerHTML = bits.join(' · ');
@@ -541,7 +543,11 @@ function frame(now) {
       oat: o.oat, lwc: clouds.liquidAt(fm.pos[1], fm.pos[0], o.alt), precip: o.alt < S.weather.clouds.low.top ? S.weather.precip : 0,
       humidity: THREE.MathUtils.clamp(1 - (S.weather.tempC - S.weather.dewC) / 18, 0.2, 1), lat: S.airport.lat, variation: nav.out.variation || 0,
     });
-    for (const ev of systems.events.splice(0)) if (ev === 'seized') toast('Engine seized', '', 3);   // never leave the pilot staring at a broken state
+    for (const ev of systems.events.splice(0)) {
+      if (ev === 'seized') toast('Engine seized', '', 3);                     // never leave the pilot staring at a broken state
+      else if (ev === 'pitotBlocked') toast('Pitot blocked', 'Airspeed unreliable — pitot heat', 2.6);
+      else if (ev === 'pitotClear') toast('Airspeed restored', '', 1.8);
+    }
     if (fm.crashed && !wasCrashed) { ap.on = false; toast(fm.crashed, 'R to restart', 1e6); sound.touch(1); }
     if (fm.touchdowns !== S.lastTouch) {
       S.lastTouch = fm.touchdowns;

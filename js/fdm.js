@@ -246,9 +246,16 @@ export class FlightModel {
     this.gearPos = 1;                           // retractable gear: 1 down, 0 up
     // What the aircraft's systems and the weather are doing to the airframe (see js/systems.js).
     // ice: 0 clean .. 1 severe. power: fraction of engine output available. cut: no combustion.
+    // airdataTrust/airdataIas: how far the pitot-static system can be believed, and the last
+    // indicated airspeed worth believing (systems writes these; the stall warning reads them).
     // Rigging: the bent rudder tab and aileron rig a factory sets so the aircraft flies hands-off in cruise.
     this.rig = { roll: 0, yaw: 0 };
-    this.fx = { ice: 0, power: 1, cut: false, rough: 0, starter: true, flapPower: true, flapFrozen: false, trimOffset: 0 };
+    this.fx = { ice: 0, power: 1, cut: false, rough: 0, starter: true, flapPower: true, flapFrozen: false, trimOffset: 0,
+      airdataTrust: 1, airdataIas: null };
+    // The stall warning is a physical member with memory: once the flow lets go, the
+    // horn stays on until the wing has actually reattached, not merely until the
+    // vane's angle of attack falls back.
+    this.stallWarnState = { level: 0, latched: false, releaseT: 0 };
     this.els = buildTail(def);
     this.body = def.body.stations.map(([x, len, depth, width]) => ({ x, side: len * depth, plan: len * width }));
     this.contacts = def.gear.contacts;
@@ -280,7 +287,7 @@ export class FlightModel {
       roll: 0, pitch: 0, heading: 0, track: 0,
       alpha: 0, beta: 0, gLoad: 1, slip: 0, turnRate: 0,
       rpm: 0, thrust: 0, power: 0, fuelFlow: 0, egt: 20, oilT: 20, oilP: 0, map: 0,
-      stallWarn: 0, stalled: 0, onGround: false, wheelSpeed: 0, groundLoad: 0,
+      stallWarn: 0, stalled: 0, warnLevel: 0, warnLatched: false, airdataTrust: 1, airdataStale: false, onGround: false, wheelSpeed: 0, groundLoad: 0,
       flapPos: 0, flapMoving: false, firing: false, vi: 0,
       touchdownVs: 0, scrape: 0, mass: 0, rho: 1.225, oat: 15,
     };
@@ -312,6 +319,7 @@ export class FlightModel {
     this.ctl.trim = onGround ? 0.06 : 0.0;
     this.crashed = null;
     this.inflow.fill(0); this.wing.gamma.fill(0); this.wing.Aimg.fill(0); this.wing.hasImage = false; this._tick = 0;
+    this.stallWarnState.level = 0; this.stallWarnState.latched = false; this.stallWarnState.releaseT = 0;
     for (const el of this.els) el.wake[0] = el.wake[1] = el.wake[2] = 0;
     this.egt = running ? 600 : this.out.oat; this.oilT = running ? 80 : this.out.oat; this.cht = running ? 150 : this.out.oat;
     this.vsiLag = 0;
@@ -781,7 +789,56 @@ export class FlightModel {
     o.egt = this.egt; o.oilT = this.oilT; o.cht = this.cht;
     o.oilP = clamp(this.rpm / 1000, 0, 1) * (75 - 0.12 * Math.max(0, this.oilT - 80)) * (0.55 + 0.45 * clamp(this.rpm / 2400, 0, 1)) / 0.775 * 0.775;
     o.map = (atm.p / 3386.39) * (0.36 + 0.61 * (1 - Math.pow(1 - c.throttle, 1.6))) * (1 - 0.00003 * Math.max(0, this.rpm - 1000) * (1 - c.throttle));
-    o.stallWarn = !onGround && o.ias > 12 ? smooth(0.80, 0.86, warnMax) : 0;
+    // ---------------- stall warning
+    // A real vane lives in one spot, so a wing that is separating elsewhere and a wing
+    // covered in ice both change when the horn should sound. Build the warning from three
+    // things: the vane's own proximity to its stall, how much of the wing has actually let
+    // go, and the margin over the 1-g stall speed. The horn latches on when the flow
+    // breaks and only clears after the separation has genuinely retreated and stayed away,
+    // so it cannot chatter as the angle of attack wobbles across the threshold.
+    const WW = this.wing;
+    // area-weighted separation, weighted toward the outer wing where the ailerons live
+    let sepW = 0, wSum = 0;
+    for (let i = 0; i < WW.n; i++) { const aw = WW.S[i] * (1 + 0.8 * Math.abs(WW.y[i]) / (this.b / 2)); sepW += (1 - WW.f[i]) * aw; wSum += aw; }
+    const sepFrac = wSum > 0 ? sepW / wSum : 0;
+    const vaneMarg = clamp((warnMax - 0.70) / 0.22, 0, 1);            // 0 well below the vane's stall, 1 at it
+    const sepWarn = smooth(0.02, 0.18, sepFrac);                       // how much of the wing has let go
+    // The airspeed part of the warning comes from the pitot-static system, not from the
+    // model's own truth. When that system cannot be believed, the last reading worth
+    // believing is used instead, so a needle climbing like an altimeter cannot talk the
+    // horn down (or up) while the wing really is separating.
+    const adTrust = clamp(fx.airdataTrust !== null && fx.airdataTrust !== undefined ? fx.airdataTrust : 1, 0, 1);
+    const heldIas = fx.airdataIas !== null && fx.airdataIas !== undefined ? fx.airdataIas : o.ias;
+    const sensorIas = adTrust * o.ias + (1 - adTrust) * heldIas;      // true airflow, or the last value worth believing
+    const vsEst = Math.sqrt(2 * mass * G / Math.max(1e-3, rho * this.S * SEC.clmax[0] * (1 - 0.27 * ice)));
+    const speedDeficit = clamp((1.06 * vsEst - sensorIas) / (0.10 * vsEst), 0, 1);
+    const core = 0.55 * vaneMarg + 0.75 * sepWarn;                     // the wing's own evidence of a stall
+    const iceAmp = 1 + 0.35 * clamp(ice, 0, 1);                        // ice makes every sign of a stall louder
+    // Airspeed is only a supporting cue: it amplifies a wing that is already letting go,
+    // and is ignored entirely while the wing is clean and attached (a zoom is not a stall).
+    let want = clamp(core * iceAmp + 0.42 * speedDeficit * smooth(0.04, 0.34, core), 0, 1);
+    const ws = this.stallWarnState;
+    const airborne = !onGround && V > 8;
+    if (airborne && want > 0.20) {
+      ws.level = Math.max(ws.level, want);
+      if (want > 0.34 || sepFrac > 0.05 || vaneMarg > 0.55) ws.latched = true;
+    } else if (ws.latched) {
+      // latched: wait for the separation to retreat to a quiet fraction, and stay there
+      if (sepFrac < 0.022 && vaneMarg < 0.35) { ws.releaseT += dt; if (ws.releaseT > 0.55) { ws.latched = false; ws.releaseT = 0; } }
+      else ws.releaseT = 0;
+      ws.level = Math.max(want, 0.45);
+    } else {
+      ws.level = Math.max(0, ws.level - dt * 2.2);                    // decays quickly once the wing is flying again
+      if (ws.level < 0.02) ws.level = 0;
+    }
+    if (!airborne) { ws.level = 0; ws.latched = false; ws.releaseT = 0; }
+    o.warnLevel = ws.level;
+    o.warnLatched = ws.latched;
+    o.airdataTrust = adTrust;
+    o.airdataStale = adTrust < 0.5;
+    // The horn is only heard when there is a usable airspeed to say the aircraft is
+    // flying: a flat airspeed indicator on the ground is silence, as on a real panel.
+    o.stallWarn = o.ias > 12 ? ws.level : 0;
     o.stalled = sepS / this.S;       // fraction of the wing area that has let go
     o.onGround = onGround; o.wheelSpeed = onGround ? wheelSpeed : 0; o.groundLoad = groundLoad; o.scrape = scrape;
     o.flapPos = this.flapPos; o.flapMoving = this.flapPos !== fp0;

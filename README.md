@@ -55,6 +55,10 @@ and propeller. Nothing is a lookup table of how the aircraft should behave.
   aircraft are directionally unstable on the ground because the geometry is.
 - Each aircraft is rigged like a real one: the rudder tab and aileron rig it
   needs to fly hands-off in cruise are found by flying it.
+- The stall warning is a member with memory: the vane's angle of attack, the
+  area actually separated (weighted outboard) and the ice load decide when it
+  sounds; it latches through a break and releases only once the separation has
+  retreated. See **Systems** for how it degrades with the pitot.
 
 About 60 microseconds a step in JavaScript: a quarter of a millisecond a frame.
 
@@ -95,6 +99,19 @@ the truth, not the truth.
   cloud field that is drawn) below freezing: less maximum lift, more drag,
   more weight, a rougher propeller. The pitot ices faster unless heated, and
   a blocked airspeed indicator then behaves like an altimeter.
+- The pitot-static system is an air-data source with states of its own —
+  clean, blocked (ice or an injected blockage), recovering — and never lets a
+  reading it cannot believe steer the stall warning. While blocked the last
+  good indicated airspeed is held; heat with power behind it thaws an iced or
+  injected blockage and returns the probe to clean; heat without power, or a
+  failed heater, does not.
+- The stall warning combines the vane's own angle of attack with the area of
+  wing that has actually separated and the ice load — not one measuring point
+  alone. It latches on when the flow breaks and only clears after the
+  separation has genuinely retreated, so it does not chatter on the threshold.
+  Everything downstream reads the same `fm.out.stallWarn`: the panel, the HUD
+  and the reed horn. The air-data trust is published in the same output
+  (`airdataTrust`, `airdataStale`).
 - Attitude and heading gyros are spun by an engine-driven vacuum pump. Lose
   it and the attitude indicator leans over slowly with no flag. The heading
   gyro drifts (bearing friction, and the Earth turning under it) and has to
@@ -104,9 +121,14 @@ the truth, not the truth.
   acceleration errors are not coded: they fall out.
 - Alternator, battery and loads; two fuel tanks and a selector; two magnetos;
   carburettor ice on carburetted engines; oil loss ending in a seized engine.
-- Ten failures, injected from the Faults list or at random.
+- Eleven failures, injected from the Faults list or at random.
 
 `node test/systems.mjs` checks these against what pilots are taught to expect.
+`node test/warning.mjs` drives the warning and the pitot state machine through
+the `FlightModel` and `Systems` interfaces in Node: clean flight must stay
+quiet, ice must bring the horn earlier, a stall must latch and release with a
+lag, a blocked pitot must not make the horn chase a false airspeed, heat must
+restore trust, and repeated freeze/melt must return to the clean baseline.
 
 **Terrain** (`js/terrain.js`). A quadtree of web-mercator tiles around the
 aircraft: real elevation (Terrarium tiles, SRTM-class) under satellite

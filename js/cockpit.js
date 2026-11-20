@@ -523,16 +523,17 @@ class Annunciator {
     this.tex = new THREE.CanvasTexture(this.canvas); this.tex.colorSpace = THREE.SRGBColorSpace; this.tex.anisotropy = 8;
     this.last = '';
   }
-  draw(ind) {
-    const items = [['VOLTS', ind && ind.lowVolts, '#e0362c'], ['VAC', ind && ind.lowVac, '#f0a23a'], ['OIL PRESS', ind && ind.lowOil, '#e0362c'], ['LOW FUEL', ind && (ind.fuelL < 9 || ind.fuelR < 9) && ind.avionics, '#f0a23a'], ['TURN', ind && ind.tcFlag, '#f0a23a']];
+  draw(ind, o) {
+    // the stall light reads the same field the horn does: fm.out.stallWarn
+    const items = [['VOLTS', ind && ind.lowVolts, '#e0362c'], ['VAC', ind && ind.lowVac, '#f0a23a'], ['OIL PRESS', ind && ind.lowOil, '#e0362c'], ['LOW FUEL', ind && (ind.fuelL < 9 || ind.fuelR < 9) && ind.avionics, '#f0a23a'], ['TURN', ind && ind.tcFlag, '#f0a23a'], ['PITOT', ind && ind.pitotBlocked, '#e0362c'], ['STALL', o && o.stallWarn > 0.3, '#e0362c']];
     const key = items.map((i) => (i[1] ? 1 : 0)).join('');
     if (key === this.last) return; this.last = key;
     const x = this.x; x.fillStyle = '#101112'; x.fillRect(0, 0, 512, 48);
-    x.textAlign = 'center'; x.textBaseline = 'middle'; x.font = `700 19px ${FONT}`;
+    x.textAlign = 'center'; x.textBaseline = 'middle'; x.font = `700 15px ${FONT}`;
     items.forEach(([name, on, col], i) => {
-      const px = 8 + i * 100;
-      x.fillStyle = on ? col : '#1c1d1f'; x.fillRect(px, 6, 94, 36);
-      x.fillStyle = on ? '#0a0a0b' : '#2c2d30'; x.fillText(name, px + 47, 25);
+      const px = 3 + i * 72;
+      x.fillStyle = on ? col : '#1c1d1f'; x.fillRect(px, 6, 70, 36);
+      x.fillStyle = on ? '#0a0a0b' : '#2c2d30'; x.fillText(name, px + 35, 25);
     });
     this.tex.needsUpdate = true;
   }
@@ -698,7 +699,7 @@ export function buildCockpit(def = null) {
       g.att.draw(ind);
       if (phase) { g.asi.draw(ind); g.alt.draw(ind, fm.kollsman); g.hdg.draw(ind, d.ap ? d.apHdg * Math.PI / 180 : null); g.tach.draw(o); g.vor.draw(d.nav); compass.draw(d.ind ? d.ind.compass : o.heading); }
       else {
-        g.tc.draw(ind); g.vsi.draw(ind); g.adf.draw(d.nav); annun.draw(d.ind);
+        g.tc.draw(ind); g.vsi.draw(ind); g.adf.draw(d.nav); annun.draw(ind, o);
         const kgToGal = 1 / 0.72 / 3.785;
         if (d.ind) g.fuel.draw(d.ind.fuelL * kgToGal, d.ind.fuelR * kgToGal); else g.fuel.draw(fm.fuel * kgToGal / 2, fm.fuel * kgToGal / 2);
         g.oil.draw(o.oilT * 9 / 5 + 32, d.ind ? d.ind.oilP : o.oilP);
