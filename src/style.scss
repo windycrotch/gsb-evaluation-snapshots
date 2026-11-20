@@ -81,6 +81,13 @@ body {
     width: 90%;
 }
 
+.reproject-error-label {
+    color: #ff5555;
+    margin: 3px 10px;
+    white-space: normal;
+    word-break: break-word;
+}
+
 .texture-list-item {
     flex-direction: row;
     flex-grow: 0;
