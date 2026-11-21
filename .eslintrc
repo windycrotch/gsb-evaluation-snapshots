@@ -1,0 +1,54 @@
+{
+  "env": {
+    "browser": true,
+    "es2021": true,
+    "es6": true
+  },
+  "plugins": ["prettier", "eslint-plugin-import"],
+  "extends": [
+    "taro/react",
+    "airbnb",
+    "eslint:recommended",
+    "plugin:prettier/recommended",
+    "plugin:import/recommended",
+    "plugin:@typescript-eslint/recommended"
+  ],
+  "settings": {
+    "import/resolver": {
+      "node": {
+        "extensions": [".js", ".jsx", ".ts", ".tsx", ".json"]
+      }
+    }
+  },
+  "parser": "@typescript-eslint/parser",
+  "rules": {
+    "prettier/prettier": "error",
+    "react/jsx-uses-react": "off",
+    "react/react-in-jsx-scope": "off",
+    "react-hooks/rules-of-hooks": "error",
+    "react-hooks/exhaustive-deps": "warn",
+    "comma-dangle": 0,
+    "no-param-reassign": "off",
+    "react/jsx-filename-extension": "off",
+    "react/jsx-one-expression-per-line": "off",
+    "eslint-plugin-import/export": "off",
+    "import/extensions": "off",
+    "react/jsx-props-no-spreading": "off",
+    "react/require-default-props": "off",
+    "react/no-array-index-key": "off",
+    "no-plusplus": "off",
+    "default-case": "off",
+    "max-classes-per-file": "off",
+    "no-restricted-syntax": "off",
+    "@typescript-eslint/no-explicit-any": "off",
+    "no-underscore-dangle": "off",
+    "import/no-unresolved": [
+      2,
+      {
+        "ignore": ["^@/"] // @ 是设置的路径别名
+      }
+    ],
+    "no-useless-return": "off",
+    "no-console": "off"
+  }
+}

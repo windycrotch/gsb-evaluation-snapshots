@@ -1,0 +1,20 @@
+.Text {
+  position: relative;
+  &Vertical {
+    writing-mode: vertical-lr; /*垂直展示*/
+    writing-mode: tb-lr; /*兼容IE*/
+  }
+  &NoWrap {
+    text-align: center;
+    white-space: nowrap;
+    text-wrap: nowrap;
+    width: 100%;
+  }
+}
+.Flex {
+  &Center {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+  }
+}

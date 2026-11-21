@@ -1,0 +1,37 @@
+.Space {
+  --gap-horizontal: 0px;
+  width: 100%;
+  min-width: 0;
+
+  &Title {
+    color: #888;
+    margin-top: 8px;
+  }
+}
+.HScroll {
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: nowrap;
+  > div[class='adm-space-item'] {
+    display: inline-block;
+    white-space: normal;
+  }
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+.Flex {
+  &Center {
+    justify-content: center;
+    align-items: center;
+  }
+  &Between {
+    justify-content: space-between;
+    align-items: center;
+  }
+  &One {
+    > div[class='adm-space-item'] {
+      flex: 1;
+    }
+  }
+}

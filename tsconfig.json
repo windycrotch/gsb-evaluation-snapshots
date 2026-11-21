@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "target": "es2019",
+    "module": "esnext",
+    "removeComments": false,
+    "preserveConstEnums": true,
+    "moduleResolution": "bundler",
+    "experimentalDecorators": true,
+    "strict": true,
+    "allowSyntheticDefaultImports": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "sourceMap": true,
+    "rootDir": ".",
+    "jsx": "react-jsx",
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "typeRoots": ["node_modules/@types"],
+    "paths": {
+      "@/*": ["./src/*"]
+    }
+  },
+  "include": ["./src", "./types"],
+  "exclude": ["node_modules"]
+}

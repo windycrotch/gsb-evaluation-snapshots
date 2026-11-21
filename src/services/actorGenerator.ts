@@ -1,0 +1,696 @@
+import useStorageStore from '@/services/storage';
+import { ActorDataConfig, CWType, DanfangPoolByGrade } from '@/types';
+import { GongFaPinJie, GongFaType } from '@/types/gongfa';
+import { UUID } from '@/utils';
+import {
+  ACTOR_POOL_CONFIG,
+  clGrades,
+  clNameParts,
+  createRng,
+  createSeedRegistry,
+  dfGrades,
+  dyGradeMultipliers,
+  dyNameParts,
+  dyRarityLevels,
+  dyRarityMultipliers,
+  DY_EFFECT_SCALE,
+  FANGSHI_CONFIG,
+  flattenMaterialPool,
+  MaterialPoolByGrade,
+  MATERIAL_BASE_LIST,
+  MaterialRegistryItem,
+  REALM_ORDER
+} from '@/assets/const';
+
+export interface ActorGenProgress {
+  visible: boolean;
+  phase: '材料' | '丹方' | '功法';
+  done: number;
+  total: number;
+  name: string;
+}
+
+export type ActorGenResult =
+  | { ok: true; actor: ActorDataConfig; keys: string[] }
+  | { ok: false; message: string };
+
+const buildName = (parts: readonly (readonly string[])[], rng: () => number) =>
+  parts.map((p) => p[Math.floor(rng() * p.length)]).join('');
+
+const yieldToMain = () =>
+  new Promise<void>((resolve) => {
+    setTimeout(resolve, 0);
+  });
+
+const getErrorMessage = (e: unknown, fallback: string) =>
+  e instanceof Error && e.message ? e.message : fallback;
+
+const storageSet = async (key: string, data: unknown) => {
+  const { set } = useStorageStore.getState();
+  await set(key, data);
+};
+
+const storageRemove = async (key: string) => {
+  const { remove } = useStorageStore.getState();
+  await remove(key);
+};
+
+const rollbackStoredKeys = async (keys: string[]) => {
+  if (!keys.length) return;
+  await Promise.allSettled(keys.map((k) => storageRemove(k)));
+};
+
+export const pickRarity = (p: number) => {
+  if (p < 0.5) return dyRarityLevels[0];
+  if (p < 0.75) return dyRarityLevels[1];
+  if (p < 0.9) return dyRarityLevels[2];
+  if (p < 0.97) return dyRarityLevels[3];
+  return dyRarityLevels[4];
+};
+
+const getGradeIndex = (grade: string, grades: readonly string[]) => {
+  const idx = grades.indexOf(grade);
+  return idx === -1 ? 0 : idx;
+};
+
+export const getYaoyuanTotalSlots = (lv: number) =>
+  Math.min(100, 2 + Math.max(0, lv - 1));
+
+export const createDefaultYaoyuanPlots = (
+  totalSlots: number,
+  unlockedCount = 2
+) =>
+  Array.from({ length: totalSlots }, (_, index) => ({
+    id: index + 1,
+    lv: 1,
+    unlocked: index < unlockedCount,
+    seed: null
+  }));
+
+export const createInitialSeeds = (
+  registry: ReturnType<typeof createSeedRegistry>
+) => registry.slice(0, 2).map((item) => ({ ...item, num: 1 }));
+
+const dfNameSuffixPool = [
+  '玄',
+  '灵',
+  '真',
+  '太',
+  '元',
+  '清',
+  '虚',
+  '明',
+  '化',
+  '归',
+  '无',
+  '极',
+  '道'
+] as const;
+
+const gongfaGrades = [
+  GongFaPinJie.一品,
+  GongFaPinJie.二品,
+  GongFaPinJie.三品,
+  GongFaPinJie.四品,
+  GongFaPinJie.五品,
+  GongFaPinJie.六品,
+  GongFaPinJie.七品,
+  GongFaPinJie.八品
+] as const;
+const gongfaNameParts = [
+  ['玄', '灵', '太', '清', '青', '赤', '苍', '紫', '金', '幽'],
+  ['元', '真', '阳', '阴', '雷', '火', '风', '冰', '星', '月'],
+  ['诀', '功', '经', '法', '录', '典', '术']
+] as const;
+const gongfaAttrKeys = ['gongji', 'fangyu', 'qixue', 'sudu', 'fashu'] as const;
+
+interface GeneratePoolCtx {
+  seed: string;
+  rng: () => number;
+  emit: (done: number, total: number, name: string) => void;
+  storedKeys: string[];
+}
+
+const generateMaterialPool = async (
+  ctx: GeneratePoolCtx
+): Promise<{
+  pool: MaterialPoolByGrade;
+  flat: MaterialRegistryItem[];
+  storageKeysByGrade: Record<string, string>;
+}> => {
+  const { seed, rng, emit, storedKeys } = ctx;
+  const { countPerGrade } = ACTOR_POOL_CONFIG;
+  const total = clGrades.length * countPerGrade;
+  emit(0, total, '');
+
+  const pool: MaterialPoolByGrade = clGrades.reduce((acc, grade) => {
+    acc[grade] = [];
+    return acc;
+  }, {} as MaterialPoolByGrade);
+  const storageKeysByGrade: Record<string, string> = {};
+  const used = new Set<string>();
+  let done = 0;
+
+  for (const item of MATERIAL_BASE_LIST) {
+    used.add(item.name);
+    pool[item.itype].push(item);
+    done += 1;
+    emit(done, total, item.name);
+  }
+
+  const fillGrade = async (gradeIdx: number): Promise<void> => {
+    if (gradeIdx >= clGrades.length) return;
+    const grade = clGrades[gradeIdx];
+    const existing = pool[grade]?.length ?? 0;
+    const need = Math.max(0, countPerGrade - existing);
+
+    const fillChunk = async (remaining: number): Promise<void> => {
+      if (remaining <= 0) return;
+      const chunkSize = Math.min(25, remaining);
+      let lastName = '';
+      for (let i = 0; i < chunkSize; i += 1) {
+        let name = buildName(clNameParts, rng);
+        let guard = 0;
+        while (used.has(name) && guard < 5) {
+          name = buildName(clNameParts, rng);
+          guard += 1;
+        }
+        if (used.has(name)) {
+          const baseName = name;
+          let candidate = baseName;
+          let suffixGuard = 0;
+          while (used.has(candidate) && suffixGuard < 16) {
+            const suffix =
+              dfNameSuffixPool[Math.floor(rng() * dfNameSuffixPool.length)] ||
+              dfNameSuffixPool[0];
+            candidate = `${baseName}${suffix}`;
+            suffixGuard += 1;
+          }
+          if (used.has(candidate)) {
+            let candidate2 = candidate;
+            let suffixGuard2 = 0;
+            while (used.has(candidate2) && suffixGuard2 < 24) {
+              const s1 =
+                dfNameSuffixPool[Math.floor(rng() * dfNameSuffixPool.length)] ||
+                dfNameSuffixPool[0];
+              const s2 =
+                dfNameSuffixPool[Math.floor(rng() * dfNameSuffixPool.length)] ||
+                dfNameSuffixPool[0];
+              candidate2 = `${baseName}${s1}${s2}`;
+              suffixGuard2 += 1;
+            }
+            candidate = candidate2;
+          }
+          name = candidate;
+        }
+        used.add(name);
+        pool[grade].push({ name, itype: grade });
+        done += 1;
+        lastName = name;
+      }
+      emit(done, total, lastName);
+      await yieldToMain();
+      await fillChunk(remaining - chunkSize);
+    };
+
+    await fillChunk(need);
+
+    const storageKey = `actor:${seed}:materialPoolByGrade:${grade}`;
+    try {
+      await storageSet(
+        storageKey,
+        pool[grade].map((m) => m.name)
+      );
+    } catch (e: unknown) {
+      await rollbackStoredKeys(storedKeys);
+      throw new Error(
+        getErrorMessage(e, '存档空间不足，无法保存材料数据，请清理存档后重试')
+      );
+    }
+    storedKeys.push(storageKey);
+    storageKeysByGrade[grade] = storageKey;
+
+    await fillGrade(gradeIdx + 1);
+  };
+
+  await fillGrade(0);
+
+  const flat = clGrades.flatMap((g) => pool[g] ?? []);
+  return { pool, flat, storageKeysByGrade };
+};
+
+const generateDanfangPool = async (
+  ctx: GeneratePoolCtx & { materialFlat: MaterialRegistryItem[] }
+): Promise<{
+  pool: DanfangPoolByGrade;
+  storageKeysByGrade: Record<string, string>;
+}> => {
+  const { seed, rng, emit, storedKeys, materialFlat } = ctx;
+  const { countPerGrade } = ACTOR_POOL_CONFIG;
+  const total = dfGrades.length * countPerGrade;
+  emit(0, total, '');
+  const dfNameParts = dyNameParts.slice(0, 2);
+
+  const pool: DanfangPoolByGrade = dfGrades.reduce((acc, grade) => {
+    acc[grade] = [];
+    return acc;
+  }, {} as DanfangPoolByGrade);
+  const storageKeysByGrade: Record<string, string> = {};
+  const usageCounts = new Map<string, number>();
+  const usedDanfangName = new Set<string>();
+  let done = 0;
+
+  const fillGrade = async (gradeIdx: number): Promise<void> => {
+    if (gradeIdx >= dfGrades.length) return;
+    const grade = dfGrades[gradeIdx];
+    const dfGradeIndex = getGradeIndex(grade, dfGrades);
+    const allowedMaterials = materialFlat.filter(
+      (m) => getGradeIndex(m.itype, clGrades) <= dfGradeIndex
+    );
+    const pickSource = allowedMaterials.length
+      ? allowedMaterials
+      : materialFlat;
+
+    const fillChunk = async (start: number): Promise<void> => {
+      if (start >= countPerGrade) return;
+      const chunkSize = Math.min(10, countPerGrade - start);
+      let lastName = '';
+      for (let offset = 0; offset < chunkSize; offset += 1) {
+        const i = start + offset;
+        let baseName = buildName(dfNameParts, rng);
+        let guard = 0;
+        while (usedDanfangName.has(baseName) && guard < 20) {
+          baseName = buildName(dfNameParts, rng);
+          guard += 1;
+        }
+        if (usedDanfangName.has(baseName)) {
+          let candidate = baseName;
+          let suffixGuard = 0;
+          while (usedDanfangName.has(candidate) && suffixGuard < 8) {
+            const suffix =
+              dfNameSuffixPool[Math.floor(rng() * dfNameSuffixPool.length)] ||
+              dfNameSuffixPool[0];
+            candidate = `${baseName}${suffix}`;
+            suffixGuard += 1;
+          }
+          baseName = candidate;
+        }
+        usedDanfangName.add(baseName);
+
+        const isShen = rng() < 0.5;
+        const scale =
+          DY_EFFECT_SCALE[grade as keyof typeof DY_EFFECT_SCALE] ??
+          DY_EFFECT_SCALE[dfGrades[0] as keyof typeof DY_EFFECT_SCALE];
+        const valRange = isShen ? scale.shenshi : scale.xiuwei;
+        const baseVal =
+          valRange[0] === valRange[1]
+            ? valRange[0]
+            : Math.floor(rng() * (valRange[1] - valRange[0] + 1)) + valRange[0];
+        const safeBaseVal = Math.max(
+          1,
+          Number.isFinite(baseVal) ? baseVal : valRange[0]
+        );
+        const attr: Record<string, number> = isShen
+          ? { shenshi: safeBaseVal }
+          : { xiuwei: safeBaseVal };
+        const priceRange = scale.price;
+        const t =
+          valRange[1] === valRange[0]
+            ? 0
+            : (safeBaseVal - valRange[0]) / (valRange[1] - valRange[0]);
+        const priceBase = Math.round(
+          priceRange[0] + t * (priceRange[1] - priceRange[0])
+        );
+        const rarity = pickRarity(rng());
+        const gradeMul =
+          (dyGradeMultipliers as unknown as Record<string, number>)[grade] ?? 1;
+        const rarityMul =
+          (dyRarityMultipliers as unknown as Record<string, number>)[rarity] ??
+          1;
+        const safePriceBase = Math.max(
+          1,
+          Number.isFinite(priceBase) ? priceBase : priceRange[0]
+        );
+        const baseLs = Math.max(
+          1,
+          Math.round(safePriceBase * gradeMul * rarityMul)
+        );
+
+        const pickCount = Math.min(
+          pickSource.length,
+          Math.max(2, 2 + Math.floor(dfGradeIndex / 2) + (rng() < 0.5 ? 0 : 1))
+        );
+
+        const picked: { name: string; itype: string }[] = [];
+        const mutablePool = [...pickSource];
+        for (let j = 0; j < pickCount && mutablePool.length; j += 1) {
+          const safeMutable = mutablePool.filter(
+            (v) => !!v && typeof v.name === 'string'
+          );
+          if (!safeMutable.length) break;
+          let minUsage = Infinity;
+          for (const item of safeMutable) {
+            const usedCount = usageCounts.get(item.name) ?? 0;
+            if (usedCount < minUsage) minUsage = usedCount;
+          }
+          const candidates = safeMutable.filter(
+            (item) => (usageCounts.get(item.name) ?? 0) <= minUsage + 1
+          );
+          const targetPool = candidates.length ? candidates : safeMutable;
+          const idx = Math.floor(rng() * targetPool.length);
+          const pickedItem = targetPool[idx];
+          if (pickedItem) {
+            const removeIndex = mutablePool.findIndex(
+              (x) => x.name === pickedItem.name
+            );
+            if (removeIndex >= 0) mutablePool.splice(removeIndex, 1);
+            picked.push(pickedItem);
+            usageCounts.set(
+              pickedItem.name,
+              (usageCounts.get(pickedItem.name) ?? 0) + 1
+            );
+          }
+        }
+
+        const cl = picked.map((m): [string, number] => {
+          const clGradeIndex = getGradeIndex(m.itype, clGrades);
+          const minNum = 1 + Math.max(0, dfGradeIndex - clGradeIndex);
+          const maxNum =
+            3 + dfGradeIndex + Math.max(0, dfGradeIndex - clGradeIndex);
+          const baseNum =
+            maxNum === minNum
+              ? minNum
+              : Math.floor(rng() * (maxNum - minNum + 1)) + minNum;
+          const numScale = 0.85 + rng() * 0.5;
+          return [m.name, Math.max(1, Math.round(baseNum * numScale))];
+        });
+
+        const time: [number, number, number] = [
+          Math.max(0, Math.floor(dfGradeIndex / 3)),
+          Math.min(12, dfGradeIndex * 2),
+          Math.floor(rng() * (11 + dfGradeIndex * 3)) + 5
+        ];
+
+        const id = `r-${seed}-${grade}-${i}`;
+        const danfangItem = {
+          id,
+          name: `${baseName}丹方`,
+          type: 5,
+          isPile: true,
+          itype: grade,
+          desc: isShen ? '恢复神识的丹药' : '增加修为的丹药',
+          attr,
+          cl,
+          time,
+          baseLs,
+          ls: Math.max(1, Math.round(baseLs * FANGSHI_CONFIG.dfPriceScale))
+        };
+
+        pool[grade].push(danfangItem);
+        done += 1;
+        lastName = danfangItem.name;
+      }
+
+      emit(done, total, lastName);
+      await yieldToMain();
+      await fillChunk(start + chunkSize);
+    };
+
+    await fillChunk(0);
+
+    const storageKey = `actor:${seed}:danfangPoolByGrade:${grade}`;
+    try {
+      await storageSet(storageKey, pool[grade]);
+    } catch (e: unknown) {
+      await rollbackStoredKeys(storedKeys);
+      throw new Error(
+        getErrorMessage(e, '存档空间不足，无法保存丹方数据，请清理存档后重试')
+      );
+    }
+    storedKeys.push(storageKey);
+    storageKeysByGrade[grade] = storageKey;
+
+    await fillGrade(gradeIdx + 1);
+  };
+
+  await fillGrade(0);
+
+  return { pool, storageKeysByGrade };
+};
+
+const generateGongfaPool = async (
+  ctx: GeneratePoolCtx & { linggen: string }
+): Promise<{
+  pool: Record<(typeof gongfaGrades)[number], GongFaType[]>;
+  storageKeysByGrade: Record<string, string>;
+  starterGongfa: GongFaType | undefined;
+}> => {
+  const { seed, rng, emit, storedKeys, linggen } = ctx;
+  const { gongfaCountPerGrade } = ACTOR_POOL_CONFIG;
+  const total = gongfaGrades.length * gongfaCountPerGrade;
+  emit(0, total, '');
+
+  const pool = gongfaGrades.reduce(
+    (acc, grade) => {
+      acc[grade] = [];
+      return acc;
+    },
+    {} as Record<(typeof gongfaGrades)[number], GongFaType[]>
+  );
+  const storageKeysByGrade: Record<string, string> = {};
+  const usedGongfaNames = new Set<string>();
+  let done = 0;
+
+  const nextName = () => {
+    let name = buildName(gongfaNameParts, rng);
+    let guard = 0;
+    while (usedGongfaNames.has(name) && guard < 8) {
+      name = buildName(gongfaNameParts, rng);
+      guard += 1;
+    }
+    if (usedGongfaNames.has(name)) {
+      let candidate = name;
+      let suffixGuard = 0;
+      while (usedGongfaNames.has(candidate) && suffixGuard < 12) {
+        const suffix =
+          dfNameSuffixPool[Math.floor(rng() * dfNameSuffixPool.length)] ||
+          dfNameSuffixPool[0];
+        candidate = `${name}${suffix}`;
+        suffixGuard += 1;
+      }
+      name = candidate;
+    }
+    usedGongfaNames.add(name);
+    return name;
+  };
+
+  const fillGrade = async (gradeIndex: number): Promise<void> => {
+    if (gradeIndex >= gongfaGrades.length) return;
+    const grade = gongfaGrades[gradeIndex];
+    const limit =
+      REALM_ORDER[Math.min(gradeIndex, REALM_ORDER.length - 1)] ||
+      REALM_ORDER[0];
+    const maxExp = 800 + gradeIndex * 200;
+    const xl = `${Math.max(1, Math.round(3 + gradeIndex * 2))}%`;
+
+    const fillChunk = async (remaining: number): Promise<void> => {
+      if (remaining <= 0) return;
+      const chunkSize = Math.min(6, remaining);
+      let lastName = '';
+      for (let i = 0; i < chunkSize; i += 1) {
+        const name = nextName();
+        const mainKey =
+          gongfaAttrKeys[Math.floor(rng() * gongfaAttrKeys.length)] ||
+          gongfaAttrKeys[0];
+        const baseMin = 6 + gradeIndex * 4;
+        const baseMax = 12 + gradeIndex * 6;
+        const mainVal =
+          baseMax <= baseMin
+            ? baseMin
+            : Math.round(baseMin + rng() * (baseMax - baseMin));
+        const attr: Record<string, number> = {
+          [mainKey]: Math.max(1, mainVal)
+        };
+        if (rng() < 0.4) {
+          const secondKey =
+            gongfaAttrKeys[Math.floor(rng() * gongfaAttrKeys.length)] ||
+            gongfaAttrKeys[0];
+          if (!attr[secondKey]) {
+            const secondVal = Math.max(
+              1,
+              Math.round(mainVal * (0.35 + rng() * 0.3))
+            );
+            attr[secondKey] = secondVal;
+          }
+        }
+        pool[grade].push({
+          id: UUID(),
+          name,
+          pj: grade,
+          lv: 0,
+          exp: 0,
+          max_exp: maxExp,
+          lg: `${linggen}灵根`,
+          limit,
+          xl,
+          attr
+        });
+        done += 1;
+        lastName = name;
+      }
+      emit(done, total, lastName);
+      await yieldToMain();
+      await fillChunk(remaining - chunkSize);
+    };
+
+    await fillChunk(gongfaCountPerGrade);
+    await fillGrade(gradeIndex + 1);
+  };
+
+  await fillGrade(0);
+
+  const keyEntries = Object.keys(pool).map((grade) => ({
+    grade: grade as keyof typeof pool,
+    storageKey: `actor:${seed}:gongfaPoolByGrade:${grade}`
+  }));
+  try {
+    await Promise.all(
+      keyEntries.map(({ grade, storageKey }) =>
+        storageSet(storageKey, pool[grade])
+      )
+    );
+  } catch (e: unknown) {
+    await rollbackStoredKeys([
+      ...storedKeys,
+      ...keyEntries.map((item) => item.storageKey)
+    ]);
+    throw new Error(
+      getErrorMessage(e, '存档空间不足，无法保存功法数据，请清理存档后重试')
+    );
+  }
+  keyEntries.forEach(({ grade, storageKey }) => {
+    storedKeys.push(storageKey);
+    storageKeysByGrade[grade] = storageKey;
+  });
+
+  const starterGrade = gongfaGrades[0];
+  const starterPool = pool[starterGrade] || [];
+  const starterIndex = starterPool.length
+    ? Math.floor(rng() * starterPool.length)
+    : -1;
+  const starter = starterIndex >= 0 ? starterPool[starterIndex] : undefined;
+  const starterGongfa = starter
+    ? {
+        ...starter,
+        id: UUID(),
+        attr: { ...starter.attr }
+      }
+    : undefined;
+
+  return { pool, storageKeysByGrade, starterGongfa };
+};
+
+export async function generateActorData(
+  actor: ActorDataConfig,
+  onProgress?: (progress: ActorGenProgress) => void
+): Promise<ActorGenResult> {
+  const seed = actor.uuid;
+  const storedKeys: string[] = [];
+  const materialRng = createRng(`${seed}:material`);
+  const danfangRng = createRng(`${seed}:danfang`);
+  const gongfaRng = createRng(`${seed}:gongfa`);
+
+  const emit = (
+    phase: '材料' | '丹方' | '功法',
+    done: number,
+    total: number,
+    name: string
+  ) => {
+    onProgress?.({ visible: true, phase, done, total, name });
+  };
+
+  try {
+    const {
+      pool: materialPoolByGrade,
+      flat: materialFlat,
+      storageKeysByGrade: materialPoolStorageKeysByGrade
+    } = await generateMaterialPool({
+      seed,
+      rng: materialRng,
+      emit: (done, total, name) => emit('材料', done, total, name),
+      storedKeys
+    });
+
+    const {
+      pool: danfangPoolByGrade,
+      storageKeysByGrade: danfangPoolStorageKeysByGrade
+    } = await generateDanfangPool({
+      seed,
+      rng: danfangRng,
+      emit: (done, total, name) => emit('丹方', done, total, name),
+      storedKeys,
+      materialFlat
+    });
+
+    const {
+      pool: gongfaPoolByGrade,
+      storageKeysByGrade: gongfaPoolStorageKeysByGrade,
+      starterGongfa
+    } = await generateGongfaPool({
+      seed,
+      rng: gongfaRng,
+      emit: (done, total, name) => emit('功法', done, total, name),
+      storedKeys,
+      linggen: actor.linggen
+    });
+
+    const materialRegistry = materialFlat.length
+      ? materialFlat
+      : flattenMaterialPool(materialPoolByGrade);
+    const seedRegistry = createSeedRegistry(materialRegistry);
+    const seedRegistryStorageKey = `actor:${seed}:seedRegistry`;
+    try {
+      await storageSet(seedRegistryStorageKey, seedRegistry);
+    } catch (e: unknown) {
+      await rollbackStoredKeys(storedKeys);
+      throw new Error(
+        getErrorMessage(e, '存档空间不足，无法保存种子数据，请清理存档后重试')
+      );
+    }
+    storedKeys.push(seedRegistryStorageKey);
+    const yaoyuan = {
+      lv: 1,
+      plots: createDefaultYaoyuanPlots(getYaoyuanTotalSlots(1)),
+      seeds: createInitialSeeds(seedRegistry)
+    };
+
+    const nextActor: ActorDataConfig = {
+      ...actor,
+      materialRegistry,
+      seedRegistry,
+      seedRegistryStorageKey,
+      yaoyuan,
+      materialPoolByGrade,
+      danfangPoolByGrade,
+      materialPoolStorageKeysByGrade,
+      danfangPoolStorageKeysByGrade,
+      gongfaPoolByGrade,
+      gongfaPoolStorageKeysByGrade,
+      gongfa: {
+        ls: starterGongfa ? [starterGongfa] : actor.gongfa.ls,
+        current: null
+      },
+      cw: {
+        ...actor.cw,
+        qt: [
+          ...actor.cw.qt,
+          { name: '灵石', type: CWType.QT, isPile: true, num: 3000 }
+        ]
+      }
+    };
+
+    return { ok: true, actor: nextActor, keys: storedKeys };
+  } catch (e: unknown) {
+    return { ok: false, message: getErrorMessage(e, '创建角色失败') };
+  }
+}

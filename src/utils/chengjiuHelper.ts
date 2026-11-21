@@ -1,0 +1,167 @@
+import cloneDeep from 'lodash-es/cloneDeep';
+import type { ActorDataConfig, YaoyuanPlot } from '@/types';
+import type { AchievementItem, AchievementData } from '@/types/chengjiu';
+import { updateAchievementProgress, checkCondition } from './chengjiu';
+
+interface ActorCtx {
+  get(key: string): any;
+  set(key: string, v: unknown): void;
+  actor?: Partial<ActorDataConfig>;
+}
+
+/**
+ * 检查并更新成就进度
+ * @param get - 获取角色数据的函数
+ * @param set - 设置角色数据的函数
+ * @param actor - 角色数据
+ */
+export const checkAchievements = (
+  get: ActorCtx['get'],
+  set: ActorCtx['set'],
+  actor?: ActorCtx['actor']
+) => {
+  const chengjiu = get('chengjiu');
+  if (!chengjiu) return;
+
+  const progress = {
+    battleCount: get('battleCount') || 0,
+    winStreak: get('winStreak') || 0,
+    gongfaCount: get('gongfa.ls')?.length || 0,
+    fabaoCount: Object.values(get('fabao') || {}).filter(Boolean).length,
+    danfangCount: get('danfang')?.length || 0,
+    qiandaoStreak: get('qiandao.streak') || 0,
+    shilianCount: get('battleCount') || 0,
+    shilianPlaceCount: (get('shilianPlaces') as string[])?.length || 0,
+    lunhuiCount: get('lunhuiCount') || 0,
+    lingshouLv: get('lingShou')?.lv || 0,
+    yaoyuanPlots: ((get('yaoyuan')?.plots || []) as YaoyuanPlot[]).filter(
+      (p) => p.unlocked
+    ).length,
+    daolvCount: get('dongfu')?.daolv ? 1 : 0,
+    danweiTitleIndex: get('liandan')?.danyun || 0
+  };
+
+  const updated = updateAchievementProgress(chengjiu, actor, progress);
+  set('chengjiu', updated);
+};
+
+/**
+ * 检查收集相关成就
+ * @param get - 获取角色数据的函数
+ * @param set - 设置角色数据的函数
+ * @param actor - 角色数据
+ */
+export const checkCollectionAchievements = (
+  get: ActorCtx['get'],
+  set: ActorCtx['set'],
+  actor?: ActorCtx['actor']
+) => {
+  const chengjiu = get('chengjiu');
+  if (!chengjiu) return;
+
+  const progress = {
+    gongfaCount: get('gongfa.ls')?.length || 0,
+    fabaoCount: Object.values(get('fabao') || {}).filter(Boolean).length,
+    danfangCount: get('danfang')?.length || 0
+  };
+
+  const updated = updateAchievementProgress(chengjiu, actor, progress);
+  set('chengjiu', updated);
+};
+
+/**
+ * 检查签到成就
+ * @param get - 获取角色数据的函数
+ * @param set - 设置角色数据的函数
+ */
+export const checkQiandaoAchievements = (
+  get: ActorCtx['get'],
+  set: ActorCtx['set']
+) => {
+  const chengjiu = get('chengjiu');
+  if (!chengjiu) return;
+
+  const progress = {
+    qiandaoStreak: get('qiandao.streak') || 0
+  };
+
+  const updated = cloneDeep(chengjiu) as AchievementData;
+  Object.values(updated.achievements).forEach(
+    (achievement: AchievementItem) => {
+      if (achievement.condition.field === 'qiandaoStreak') {
+        const isCompleted = checkCondition(
+          achievement.condition,
+          null,
+          progress
+        );
+        if (
+          isCompleted &&
+          achievement.status !== 'completed' &&
+          achievement.status !== 'claimed'
+        ) {
+          achievement.status = 'completed';
+          achievement.completedAt = Date.now();
+        }
+        achievement.progress = progress.qiandaoStreak;
+      }
+    }
+  );
+  set('chengjiu', updated);
+};
+
+export const checkShilianAchievements = (
+  get: ActorCtx['get'],
+  set: ActorCtx['set'],
+  actor?: ActorCtx['actor'],
+  dfName?: string
+) => {
+  const chengjiu = get('chengjiu');
+  if (!chengjiu) return;
+
+  const currentPlaces = (get('shilianPlaces') as string[]) || [];
+  let places = currentPlaces;
+  if (dfName && !currentPlaces.includes(dfName)) {
+    places = [...currentPlaces, dfName];
+    set('shilianPlaces', places);
+  }
+
+  const progress = {
+    shilianCount: get('battleCount') || 0,
+    shilianPlaceCount: places.length
+  };
+
+  const updated = updateAchievementProgress(chengjiu, actor, progress);
+  set('chengjiu', updated);
+};
+
+export const checkLunhuiAchievements = (
+  get: ActorCtx['get'],
+  set: ActorCtx['set'],
+  actor?: ActorCtx['actor']
+) => {
+  const chengjiu = get('chengjiu');
+  if (!chengjiu) return;
+
+  const progress = {
+    lunhuiCount: get('lunhuiCount') || 0
+  };
+
+  const updated = updateAchievementProgress(chengjiu, actor, progress);
+  set('chengjiu', updated);
+};
+
+export const checkLingShouAchievements = (
+  get: ActorCtx['get'],
+  set: ActorCtx['set'],
+  actor?: ActorCtx['actor']
+) => {
+  const chengjiu = get('chengjiu');
+  if (!chengjiu) return;
+
+  const progress = {
+    lingshouLv: get('lingShou')?.lv || 0
+  };
+
+  const updated = updateAchievementProgress(chengjiu, actor, progress);
+  set('chengjiu', updated);
+};
