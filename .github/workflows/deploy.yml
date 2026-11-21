@@ -1,0 +1,113 @@
+name: Deploy
+
+# The homelab has no way in: no open ports, no forwarded DNS, nothing listening on the internet. So the
+# machine fetches the work rather than being pushed to. A self-hosted runner lives beside the stack, picks
+# jobs up from GitHub, builds, and copies the result into the directory Caddy already serves.
+#
+# Setting the runner up is in deploy/gh-runner/README.md. It is the same shape as the other runners on that
+# machine, down to the label.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# One deploy at a time, and never cancel one halfway through swapping the site over.
+concurrency:
+  group: deploy-main
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, scale-miniatures]
+    # Where the compose stack lives on that machine, bind-mounted into the runner at the same path.
+    env:
+      STACK: /mnt/data/bigstorage/scale-miniatures
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # The runner image ships node 10 and no npm at all, so bring our own.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      # The game's files are not in the repository and never will be, so the suites that need them skip.
+      # What is left still compiles the whole engine and checks every decoder, which is the point.
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Put the site in place
+        run: |
+          set -euo pipefail
+          test -d "$STACK" || { echo "no stack at $STACK: is the runner's mount right?"; exit 1; }
+
+          # Write INTO the directory, never replace it. `dist/` is bind-mounted into the web container, and
+          # a bind mount follows the inode: renaming the directory away and putting a new one in its place
+          # leaves the container pointing at something that has just been deleted, and every request 404s
+          # while the deploy reports success. Swapping is tidier on paper and takes the site down.
+          rsync -a --delete dist/ "$STACK/dist/"
+
+          # The poll service and the two config files. MicroMac/ is deliberately untouched: it is not in
+          # this repository, it lives only on that machine, and a deploy must never stand on it.
+          #
+          # Node reads poll.mjs once, when it starts. Copying a new one in changes nothing at all until the
+          # process goes round again, so the deploy would report success while the site kept serving the old
+          # poll. Tell the next step whether there is anything to restart for.
+          pollbefore=$(find "$STACK/server" -type f -exec sha256sum {} + 2>/dev/null | sort | sha256sum || true)
+          rsync -a --delete server/ "$STACK/server/"
+          pollafter=$(find "$STACK/server" -type f -exec sha256sum {} + | sort | sha256sum)
+          [ "$pollbefore" = "$pollafter" ] && echo "POLL_CHANGED=0" >> "$GITHUB_ENV" || echo "POLL_CHANGED=1" >> "$GITHUB_ENV"
+
+          # A single-file bind mount follows the inode, so replacing the Caddyfile leaves the running
+          # container holding the old one and a reload changes nothing at all, silently. Write in place,
+          # and tell the next step whether it has to recreate the container to pick the new inode up.
+          before=$(sha256sum "$STACK/Caddyfile" 2>/dev/null | cut -d' ' -f1 || true)
+          cat deploy/Caddyfile > "$STACK/Caddyfile"
+          cat docker-compose.yml > "$STACK/docker-compose.yml"
+          after=$(sha256sum "$STACK/Caddyfile" | cut -d' ' -f1)
+          [ "$before" = "$after" ] && echo "CADDY_CHANGED=0" >> "$GITHUB_ENV" || echo "CADDY_CHANGED=1" >> "$GITHUB_ENV"
+
+          # This job runs as root in a container. Without this, everything it writes becomes root-owned and
+          # the next person to deploy by hand from a laptop is locked out of their own directory.
+          chown -R 1000:1000 "$STACK/dist" "$STACK/server" "$STACK/Caddyfile" "$STACK/docker-compose.yml"
+
+      - name: Bring the stack up to date
+        working-directory: /mnt/data/bigstorage/scale-miniatures
+        run: |
+          set -euo pipefail
+          # No --remove-orphans: it once decided this job's own runner was an orphan and killed it.
+          docker compose up -d
+          if [ "${POLL_CHANGED:-0}" = "1" ]; then
+            # A restart is enough: the directory is mounted, so the new file is found by name on the way up.
+            # Both services read their file once at startup, so both have to go round.
+            docker compose restart poll relay
+          fi
+          if [ "${CADDY_CHANGED:-0}" = "1" ]; then
+            # Recreate, not reload: see the note in the previous step about the mount.
+            docker compose up -d --force-recreate web
+            sleep 2
+          fi
+          # Validates the config and keeps the running one if it is bad, so a typo cannot take the site down.
+          docker exec scale-miniatures-web caddy reload --config /etc/caddy/Caddyfile
+
+      - name: Check it is actually answering
+        run: |
+          set -euo pipefail
+          # /online is the clean URL the page is linked as: if the Caddy rewrite is wrong it answers 404,
+          # and that is worth failing the deploy over rather than finding out from a visitor.
+          for path in / /online /manifest.json /api/poll /api/relay; do
+            code=$(docker exec scale-miniatures-web wget -qO- -S "http://localhost$path" 2>&1 >/dev/null \
+              | grep -oE 'HTTP/1.1 [0-9]+' | head -1 | grep -oE '[0-9]+$')
+            echo "  $path -> $code"
+            [ "$code" = "200" ] || { echo "deployed, but $path answers $code"; exit 1; }
+          done
