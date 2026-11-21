@@ -1,0 +1,33 @@
+<!doctype html>
+<html>
+
+<head>
+    <meta name="viewport" content="width=device-width,initial-scale=1.0">
+    <title>RenderCanvas PyScript example</title>
+    <script type="module" src="https://pyscript.net/releases/2025.11.1/core.js"></script>
+</head>
+
+<body>
+    <p>
+        This example demonstrates using PyScript. It needs to be loaded through
+        a web-server for it to access the Python file.
+    </p>
+    <p>
+        This uses the latest release from rendercanvas. To run this with the
+        development version of rendercanvas, run the
+        <i>serve_browser_examples.py</i> script and select the example from
+        there.
+    </p>
+
+    <div id="canvas" class='renderview-wrapper is-resizable' style="width: 640px; height: 480px;">
+        <p
+            style='width:100%; height:100%; background:#aaa; display: flex; justify-content: center; align-items: center; font-size:150%'>
+            Loading ...
+        </p>
+    </div>
+    <br>
+    <script type="py" src="drag.py" config='{"packages": ["numpy", "rendercanvas"]}'>
+    </script>
+</body>
+
+</html>

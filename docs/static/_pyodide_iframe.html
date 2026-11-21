@@ -1,0 +1,42 @@
+<!doctype html>
+<html>
+
+<head>
+    <meta name="viewport" content="width=device-width,initial-scale=1.0">
+    <title>Rendercanvas example.py in Pyodide</title>
+    <script src="https://cdn.jsdelivr.net/pyodide/v314.0.7/full/pyodide.js"></script>
+</head>
+
+<body>
+
+    <div id="canvas" class='renderview-wrapper is-resizable has-titlebar'
+        style="width:calc(100% - 20px); height: 450px;">
+        <p id="loader"
+            style='width:100%; height:100%; background:#ddd; display: flex; justify-content: center; align-items: center; font-size:150%'>
+            Loading ...
+        </p>
+    </div>
+
+    <script type="text/javascript">
+        async function main() {
+            try {
+                let example_name = document.location.hash.slice(1);
+                pythonCode = await (await fetch(example_name)).text();
+                let pyodide = await loadPyodide();
+                await pyodide.loadPackage("micropip");
+                const micropip = pyodide.pyimport("micropip");
+                await micropip.install('numpy');
+                // The below loads rendercanvas from pypi. But we will replace it with the name of the wheel,
+                // so that it's loaded from the docs (in _static).
+                await micropip.install("rendercanvas");
+                // Run the Python code async because some calls are async it seems.
+                pyodide.runPythonAsync(pythonCode);
+            } catch (err) {
+                document.getElementById('loader').innerHTML = "Failed to load: " + err;
+            }
+        }
+        main();
+    </script>
+</body>
+
+</html>

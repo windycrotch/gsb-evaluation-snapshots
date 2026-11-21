@@ -1,0 +1,357 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+
+  # Tests for code integrity and code formatting
+  lint:
+    name: Py Linting
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+    steps:
+    - uses: actions/checkout@v7
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: 3.14
+    - name: Install dependencies
+      run: |
+          python -m pip install --upgrade pip
+          pip install ruff
+    - name: Ruff lint
+      run: |
+          ruff check --output-format=github .
+    - name: Ruff format
+      run: |
+          ruff format --check .
+
+  jslint:
+    name: JS Linting
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+    steps:
+    - uses: actions/checkout@v7
+    - uses: actions/setup-node@v6
+    - name: Install JS dependencies
+      run: npm install -g standard
+    - name: Lint JS files
+      run: standard rendercanvas
+
+  # Test that make sure the docs build without errors or warnings
+  docs:
+    name: Docs
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+    steps:
+    - uses: actions/checkout@v7
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: 3.14
+    - name: Install dev dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -U -e .[docs]
+    - name: Check stub.py doc comments
+      run: |
+          python docs/update_stub.py
+    - name: Build docs
+      run: |
+        cd docs
+        make html SPHINXOPTS="-W --keep-going"
+
+  # Test majority of code for a variety of Python versions and os's
+  test-unit:
+    name: 'Test py ${{ matrix.pyversion }} on ${{ matrix.os }}'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            pyversion: '3.10'
+          - os: ubuntu-latest
+            pyversion: '3.11'
+          - os: ubuntu-latest
+            pyversion: '3.12'
+          - os: ubuntu-latest
+            pyversion: '3.13'
+          - os: ubuntu-latest
+            pyversion: '3.14'
+          # platforms
+          - os: windows-latest
+            pyversion: '3.14'
+          - os: macos-latest
+            pyversion: '3.14'
+    steps:
+    - uses: actions/checkout@v7
+    - name: Set up Python ${{ matrix.pyversion }}
+      uses: actions/setup-python@v6
+      with:
+        python-version: ${{ matrix.pyversion }}
+    - name: Install package and dev dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install .[tests]
+        rm -r rendercanvas
+    - name: Unit tests
+      run: |
+        pytest -v tests
+
+  # Test that wgpu is indeed optional
+  test-without-wgpu:
+    name: 'Test Python ${{ matrix.pyversion }} without wgpu'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            pyversion: '3.13'
+    steps:
+    - uses: actions/checkout@v7
+    - name: Set up Python ${{ matrix.pyversion }}
+      uses: actions/setup-python@v6
+      with:
+        python-version: ${{ matrix.pyversion }}
+    - name: Install package and dev dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install .[tests]
+        pip uninstall -y wgpu
+        rm -r rendercanvas
+    - name: Unit tests
+      run: |
+        python -c "
+        try:
+            import wgpu
+            raise RuntimeError('wgpu could be imported, but this is the no-wgpu test build')
+        except ImportError:
+            print('wgpu is (intentionally) not available')
+        "
+        pytest -v tests
+
+  # Test for specific backends. Ran separately, since GUI frameworks don't like to be loaded in the same process.
+  test-backends:
+    name: 'Test backend ${{ matrix.backendname }} on ${{ matrix.os }}'
+    runs-on:  ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Loops
+          - backendname: 'raw'
+            deps: ''
+            os: windows-latest
+          - backendname: 'asyncio'
+            deps: ''
+            os: windows-latest
+          - backendname: 'trio'
+            deps: 'trio'
+            os: windows-latest
+          # GUI
+          - backendname: 'glfw'
+            deps: 'glfw'
+            os: windows-latest
+          - backendname: 'pyside6'
+            deps: 'PySide6'
+            testname: 'qt'
+            os: windows-latest
+          - backendname: 'pyside6'
+            deps: 'PySide6'
+            testname: 'qt'
+            os: macos-latest
+          - backendname: 'pyqt6'
+            deps: 'PyQt6'
+            testname: 'qt'
+            os: windows-latest
+          - backendname: 'pyqt5'
+            deps: 'PyQt5'
+            testname: 'qt'
+            os: windows-latest
+          - backendname: 'wx'
+            deps: 'wxPython'
+            os: windows-latest
+          # Other
+          - backendname: 'terminal'
+            deps: 'blessed'
+            os: windows-latest
+          - backendname: 'offscreen'
+            os: windows-latest
+    steps:
+    - uses: actions/checkout@v7
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: '3.14'
+    - name: Install xvfb and Vulkan drivers
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        sudo apt update -y -qq
+        sudo apt install -y xvfb
+        sudo apt install --no-install-recommends -y libegl1-mesa-dev libgl1-mesa-dri libxcb-xfixes0-dev mesa-vulkan-drivers
+    - name: Install package and dev dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install .[tests] ${{ matrix.deps }}
+        rm -r rendercanvas
+    - name: Test import
+      run: |
+        python -c 'import rendercanvas.${{ matrix.backendname }}'
+    - name: Test backend canvas
+      run: |
+        pytest -v tests/test_backend_${{ matrix.testname || matrix.backendname }}.py
+
+  # Test the qt backend on Linux, on Wayland and on X11. On Wayland, Qt presents to
+  # a native Wayland surface, but only if the Qt lib can provide its wl_display.
+  # Qt libs that cannot are put on XWayland, which is a different code path.
+  test-qt-linux:
+    name: 'Test qt on Linux (${{ matrix.case }})'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # A Wayland session, with a Qt that can provide its wl_display.
+          - case: 'wayland'
+            pyversion: '3.14'
+            qtdep: 'PySide6'
+            expect: 'wayland'
+          # A Wayland session, with a Qt that cannot (< 6.10): must use XWayland.
+          - case: 'wayland-old-qt'
+            pyversion: '3.12'
+            qtdep: 'PySide6==6.9.*'
+            expect: 'xcb'
+          # A system that only has x11.
+          - case: 'x11'
+            pyversion: '3.14'
+            qtdep: 'PySide6'
+            expect: 'xcb'
+    steps:
+    - uses: actions/checkout@v7
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: ${{ matrix.pyversion }}
+    - name: Install display servers and Vulkan drivers
+      run: |
+        sudo apt update -y -qq
+        sudo apt install --no-install-recommends -y libegl1-mesa-dev libgl1-mesa-dri libxcb-xfixes0-dev mesa-vulkan-drivers
+        sudo apt install --no-install-recommends -y weston xwayland xvfb
+        # Qt's xcb platform plugin needs these (the native wayland plugin does not).
+        sudo apt install --no-install-recommends -y libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxkbcommon-x11-0
+    - name: Install package and dev dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install .[tests]
+        pip install '${{ matrix.qtdep }}'
+        rm -r rendercanvas
+    - name: Test backend canvas
+      run: |
+        export XDG_RUNTIME_DIR=/tmp/xdg-runtime-dir
+        mkdir -p $XDG_RUNTIME_DIR && chmod 700 $XDG_RUNTIME_DIR
+        if [ "${{ matrix.case }}" = "x11" ]; then
+          # An X11-only system.
+          export XDG_SESSION_TYPE=x11
+          Xvfb :99 -screen 0 800x600x24 &
+          for i in $(seq 1 40); do [ -S /tmp/.X11-unix/X99 ] && break; sleep 0.5; done
+          export DISPLAY=:99
+        else
+          # A Wayland session. Enable XWayland too, so the wayland-old-qt case
+          # (whose Qt cannot present to a native Wayland surface) can fall back to it.
+          # The X11 socket dir normally already exists (mode 1777); ensure it does.
+          mkdir -p /tmp/.X11-unix
+          weston --backend=headless-backend.so --socket=wayland-ci --no-config --xwayland &
+          for i in $(seq 1 40); do [ -S $XDG_RUNTIME_DIR/wayland-ci ] && break; sleep 0.5; done
+          export WAYLAND_DISPLAY=wayland-ci
+          export XDG_SESSION_TYPE=wayland
+          if [ "${{ matrix.expect }}" = "xcb" ]; then
+            # Wait for XWayland's X server and adopt its display.
+            for i in $(seq 1 40); do sock=$(ls /tmp/.X11-unix/X* 2>/dev/null | head -1); [ -n "$sock" ] && break; sleep 0.5; done
+            export DISPLAY=":${sock##*X}"
+          fi
+        fi
+        # Check that Qt uses the expected platform, otherwise this job tests nothing.
+        python -c "
+        from PySide6 import QtWidgets
+        import rendercanvas.qt
+        app = QtWidgets.QApplication([])
+        expect = '${{ matrix.expect }}'
+        assert app.platformName() == expect, f'expected {expect}, got {app.platformName()}'
+        print('Qt runs on', expect)
+        "
+        pytest -v tests/test_backend_qt.py
+
+  # Test that the examples run without error, and screenshots match
+  test-examples:
+    name: Test examples on ${{ matrix.pyversion }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            pyversion: '3.12'
+          - os: ubuntu-latest
+            pyversion: '3.14'
+    steps:
+    - uses: actions/checkout@v7
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: ${{ matrix.pyversion }}
+    - name: Install llvmpipe and lavapipe for offscreen canvas
+      run: |
+        sudo apt update -y -qq
+        sudo apt install --no-install-recommends -y libegl1-mesa-dev libgl1-mesa-dri libxcb-xfixes0-dev mesa-vulkan-drivers
+    - name: Install dev dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e .[examples]
+    - name: Show wgpu backend
+      run: |
+        python -c "from examples.tests.test_examples import adapter_summary; print(adapter_summary)"
+    - name: Test examples
+      env:
+        PYGFX_EXPECT_LAVAPIPE: true
+      run: |
+        pytest -v examples
+    - uses: actions/upload-artifact@v4
+      if: ${{ failure() }}
+      with:
+        name: screenshots{{ matrix.pyversion }}
+        path: examples/screenshots
+
+  # Test that rendercanvas works with pyinstaller
+  test-pyinstaller:
+    name: Test pyinstaller
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: 3.14
+    - name: Install package and dev dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -U .
+        pip install pytest pyinstaller psutil glfw
+    - name: Unit tests
+      run: |
+        pushd $HOME
+        pytest -v --pyargs rendercanvas.__pyinstaller
