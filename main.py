@@ -538,8 +538,12 @@ class HotVisualizer:
         self.notify("Export läuft: ab jetzt wird die Playlist bis zum Ende aufgenommen (E/R = stoppen)")
 
     def stop_export(self, natural_end=False):
-        if self.export_manager.is_recording:
-            self.export_manager.stop(natural_end)
+        ex = self.export_manager
+        if ex.is_recording:
+            # capture the position BEFORE playback is stopped, so the video
+            # can be topped up to the exact stop moment
+            pos = self.file_processor.get_position()
+            ex.stop(natural_end=natural_end, track_pos=pos)
 
     def grab_export_frame(self):
         ex, fp = self.export_manager, self.file_processor
@@ -549,7 +553,10 @@ class HotVisualizer:
             self.notify("Fenstergröße geändert - Export gestoppt")
             self.stop_export()
             return
-        n = ex.frames_due(fp.get_position())
+        # paused -> the video timeline must not advance; on resume the frames
+        # up to the then-current audio position are filled in again
+        pos = fp.get_position() if fp.playback_state == "playing" else None
+        n = ex.frames_due(pos)
         if n > 0:
             grab = getattr(pygame.image, 'tobytes', None) or pygame.image.tostring
             ex.write(grab(self.screen, 'RGB'), n)
@@ -632,8 +639,8 @@ class HotVisualizer:
                                 self.load_paths(files, append=shift and self.audio_mode == "file")
                     elif key == pygame.K_p and self.audio_mode == "file": fp.toggle_play_pause()
                     elif key == pygame.K_k and self.audio_mode == "file":
+                        self.stop_export()   # before fp.stop(), so the stop position is still known
                         fp.stop()
-                        self.stop_export()
                     elif key == pygame.K_n and self.audio_mode == "file":
                         if recording: self.notify("Überspringen während des Exports nicht möglich.")
                         elif not fp.next_track(): self.notify("Das war der letzte Titel.")
@@ -669,7 +676,8 @@ class HotVisualizer:
                     self._seen_serial = fp.track_serial
                     if ex.is_recording and fp.is_analyzed:
                         label = f"{fp.artist} - {fp.title}" if fp.artist else fp.title
-                        ex.begin_track(fp.file_path, fp.duration, label)
+                        # token = this exact 0:00 start -> one chapter per song
+                        ex.begin_track(fp.file_path, fp.duration, label, token=fp.track_serial)
                 if ex.is_recording and fp.ended_all:
                     self.stop_export(natural_end=True)
 
@@ -695,7 +703,7 @@ class HotVisualizer:
 
         # ---- shutdown: finish a running export first, so no file is lost
         if ex.is_recording:
-            ex.stop()
+            self.stop_export()
         ex.wait()
         self.audio_processor.stop()
         fp.stop()
