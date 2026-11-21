@@ -14,6 +14,7 @@ import {
   boundsIntersect, boundsContain,
 } from './geometry.js'
 import { strokeOutline, inkOptions } from './freehand.js'
+import { AssetCache } from './assets.js'
 
 export const NOTE_W = 200
 const NOTE_PAD = 20
@@ -200,18 +201,16 @@ function geoLabelLayout(shape) {
 
 // ---- image assets ----------------------------------------------------------
 
-const imgCache = new Map() // assetId -> { img, ready }
-export function assetImage(store, assetId, onReady) {
-  let e = imgCache.get(assetId)
-  if (e) return e.ready ? e.img : null
-  const asset = store.asset(assetId)
-  if (!asset) return null
-  const img = new Image()
-  e = { img, ready: false }
-  imgCache.set(assetId, e)
-  img.onload = () => { e.ready = true; onReady && onReady() }
-  img.src = asset.src
-  return null
+// Fallback for callers using drawShape() directly without an editor-owned
+// cache. Editors pass their own AssetCache (released on destroy) through opts.
+const sharedAssets = new AssetCache()
+
+// Resolve the decoded image for an image shape. Returns the HTMLImageElement
+// once ready, null while a load is in flight (or after a failure — the next
+// call retries). The load is deduplicated and shared across canvas instances
+// by the AssetCache/registry behind it.
+export function assetImage(store, assetId, onReady, assets = sharedAssets) {
+  return assets.get(store, assetId, onReady)
 }
 
 // ---- rendering -------------------------------------------------------------
@@ -343,7 +342,7 @@ function inkReach(size) {
 
 // Draw one shape. ctx is already in PAGE space (camera applied by caller);
 // this applies the shape's own translate/rotate.
-// opts: { theme, store, zoom, onAssetLoad, ghost }
+// opts: { theme, store, zoom, onAssetLoad, ghost, assets }
 export function drawShape(ctx, shape, opts) {
   const { theme } = opts
   const p = shape.props
@@ -484,7 +483,7 @@ export function drawShape(ctx, shape, opts) {
       break
     }
     case 'image': {
-      const img = assetImage(opts.store, p.assetId, opts.onAssetLoad)
+      const img = assetImage(opts.store, p.assetId, opts.onAssetLoad, opts.assets)
       if (img) {
         ctx.beginPath()
         ctx.roundRect(0, 0, p.w, p.h, 4)

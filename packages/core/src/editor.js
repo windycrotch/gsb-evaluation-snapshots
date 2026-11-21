@@ -4,6 +4,7 @@
 // Dependency-free ESM: runs in any modern browser as-is, no build step.
 
 import { Store, newId } from './store.js'
+import { AssetCache } from './assets.js'
 import { themeOf, SIZES, FONT_SIZES, FONTS, GEO_IDS, COLOR_IDS, GRID_IDS, GRID_STEP, GRID_BAND, GRID_MAJOR } from './palette.js'
 import {
   localBounds, pageBounds, toLocal, drawShape, hitShape, marqueeHits,
@@ -65,6 +66,9 @@ export class Editor {
     this._pointers = new Map()
     this._ptrType = new Map() // pointerId -> pointerType, for pen-mode gating
     this._destroyed = false
+    // this canvas's exclusive image-asset cache; the decoded images
+    // themselves live in a shared registry behind it (see assets.js)
+    this.assets = new AssetCache()
 
     // DOM
     container.classList.add('qd-root')
@@ -1621,7 +1625,7 @@ export class Editor {
     ctx.setTransform(k, 0, 0, k, -b.x * k, -b.y * k)
     // make sure every image asset is decoded before the snap
     await this._decodeAssets(shapes)
-    for (const s of shapes) drawShape(ctx, s, { theme: this.theme, store: this.store, zoom: k })
+    for (const s of shapes) drawShape(ctx, s, { theme: this.theme, store: this.store, zoom: k, assets: this.assets })
     return new Promise((resolve) => canvas.toBlob((blob) => resolve(blob), 'image/png'))
   }
   async _decodeAssets(shapes) {
@@ -1678,6 +1682,7 @@ export class Editor {
         // screen; capture/export have no DOM, so they keep the canvas text
         hideText: hideEditing && this.editing?.id === s.id ? this.editing.field : null,
         onAssetLoad: () => this.requestRender(),
+        assets: this.assets,
       })
     }
     ctx.setTransform(1, 0, 0, 1, 0, 0)
@@ -1998,6 +2003,10 @@ export class Editor {
 
   destroy() {
     this._destroyed = true
+    // release this canvas's asset holdings: shared decoded images survive
+    // until the last referring canvas is destroyed, and late load callbacks
+    // stop here — the cache is dead and will never repaint again
+    this.assets.release()
     this._commitText()
     this._themeFade?.remove()
     this._themeFade = null

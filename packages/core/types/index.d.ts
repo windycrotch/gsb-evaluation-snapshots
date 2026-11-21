@@ -145,10 +145,29 @@ export function pageBounds(shape: ShapeRecord): Bounds
 export function drawShape(
   ctx: CanvasRenderingContext2D,
   shape: ShapeRecord,
-  opts: { theme: Theme; store: Store; zoom?: number; ghost?: boolean; onAssetLoad?: () => void }
+  opts: {
+    theme: Theme
+    store: Store
+    zoom?: number
+    ghost?: boolean
+    onAssetLoad?: () => void
+    /** Editor-owned asset cache; a module-level shared one is used when omitted. */
+    assets?: AssetCache
+  }
 ): void
 /** Point hit-test in page space. */
 export function hitShape(shape: ShapeRecord, px: number, py: number, tol: number, store: Store): boolean
+
+/**
+ * Per-canvas image-asset cache. Each Editor owns one and releases it on
+ * destroy; decoded images are shared across editors behind it (one load per
+ * assetId) and freed only when the last referring cache is released.
+ */
+export class AssetCache {
+  get alive(): boolean
+  get(store: Store, assetId: string, onReady?: () => void): HTMLImageElement | null
+  release(): void
+}
 
 /** The ink's stroke options (perfect-freehand's). */
 export interface StrokeOptions {
