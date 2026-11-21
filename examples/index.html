@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>three-nanite demo</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  html,body{margin:0;height:100%;background:#111;color:#ddd;font:12px/1.45 ui-monospace,Consolas,monospace;overflow:hidden}
+  #wrap{position:absolute;inset:0;display:flex;align-items:center;justify-content:center}
+  canvas{max-width:100%;max-height:100%;display:block}
+  #ui{position:absolute;left:8px;top:8px;background:rgba(0,0,0,.72);padding:8px 10px;border-radius:6px;width:300px}
+  #ui label{display:flex;justify-content:space-between;gap:8px;margin:3px 0;align-items:center}
+  #ui input[type=range]{width:150px}
+  #stats{white-space:pre;margin-top:6px;border-top:1px solid #444;padding-top:6px;color:#9f9}
+  #msg{position:absolute;right:8px;bottom:8px;background:rgba(0,0,0,.6);padding:4px 8px;border-radius:4px}
+  select,button{font:inherit;background:#222;color:#ddd;border:1px solid #555;border-radius:3px}
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="c"></canvas></div>
+<div id="ui">
+  <label>mode <select id="mode"><option value="clod">cluster LOD (DAG)</option><option value="lod">discrete LODs (instanced)</option><option value="full">full meshes (instanced)</option></select></label>
+  <label>instances <select id="count"><option>1</option><option>6</option><option>24</option><option selected>96</option><option>384</option><option>1536</option></select></label>
+  <label>error threshold <span id="errV"></span><input id="err" type="range" min="-2" max="5" step="0.05" value="0"></label>
+  <label>triangle budget <span id="budV"></span><input id="bud" type="range" min="0" max="100" step="1" value="0"></label>
+  <label>colour <select id="dbg"><option value="0">textured</option><option value="1">clusters</option><option value="2">DAG level</option></select></label>
+  <label>freeze cut <input id="freeze" type="checkbox"></label>
+  <label>frustum culling <input id="cull" type="checkbox" checked></label>
+  <label>shadows <input id="shadow" type="checkbox"></label>
+  <label><button id="tour">play tour</button><span>WASD/QE + drag, shift = fast</span></label>
+  <div id="stats"></div>
+</div>
+<div id="msg">loading…</div>
+<script type="module" src="./main.js"></script>
+</body>
+</html>
