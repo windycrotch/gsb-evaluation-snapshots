@@ -1,4 +1,4 @@
-import type { Crop, Shape } from "./crop";
+import { MIN_CROP, type Crop, type Shape } from "./crop";
 import { keepEdgeFades, type SplittableClip } from "./split";
 
 export type Layout = "whole" | "speaker" | "split";
@@ -22,6 +22,10 @@ export function validCrop(c: any): c is Crop {
 export function focusCrop(region: Crop, shape: Shape, ratio: number): Crop {
   const aspect = ratio * shape.height / shape.width;
   let h = Math.max(region.height * 1.25, region.width * 1.25 / aspect), w = h * aspect;
+  // The edit service refuses a crop side below MIN_CROP, so a subject small
+  // enough to frame tighter than that still gets a crop it accepts. Growing
+  // about the subject keeps it enclosed; the fit below never lets it spill.
+  const floor = Math.max(1, MIN_CROP / w, MIN_CROP / h); w *= floor; h *= floor;
   const scale = Math.min(1, 1 / w, 1 / h); w *= scale; h *= scale;
   return { x: clamp(region.x + region.width / 2 - w / 2, 0, 1-w),
     y: clamp(region.y + region.height / 2 - h / 2, 0, 1-h), width: w, height: h };
@@ -73,11 +77,17 @@ export function framedPieces<T extends SplittableClip & { crop?: Crop; split?: S
   }
   cuts.push(frames);
   const pieces: T[] = [];
+  // With no cut to make, the piece is the clip itself: keep its exact length
+  // rather than rounding it to whole frames, so framing a clip whose shots
+  // cover it whole never nudges the cut's timing. Its frames are the same
+  // either way (round(d·fps)).
+  const uncut = cuts.length === 2;
   for (let i=0;i<cuts.length-1;i++) {
     const a=cuts[i], b=cuts[i+1];
     const middle=start+(a+b)/2/fps;
     const shot=shots.find(s=>middle>=s.from && middle<s.to);
-    const piece:T = {...clip,id:pieces.length ? id() : clip.id,trimStart:start+a/fps,duration:Math.max(.05,(b-a)/fps),fit:"contain"};
+    const length = uncut ? duration : Math.max(.05,(b-a)/fps);
+    const piece:T = {...clip,id:pieces.length ? id() : clip.id,trimStart:start+a/fps,duration:length,fit:"contain"};
     delete piece.trimEnd; delete piece.crop; delete piece.anchor; delete piece.split;
     if(shot?.layout === "speaker" && validCrop(shot.top)){piece.crop=shot.top;piece.fit="cover";}
     if(shot?.layout === "split" && validCrop(shot.top) && validCrop(shot.bottom)) piece.split={top:shot.top,bottom:shot.bottom};

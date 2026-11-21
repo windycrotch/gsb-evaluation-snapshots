@@ -84,15 +84,55 @@ export interface CaptionLine {
   text: string;
 }
 
+/**
+ * Two clips play one unbroken stretch of one source: each starts where the
+ * last ended, in the cut and in the source. A reframe's pieces always land on
+ * whole output frames of the timeline and exact source times, so both are
+ * compared to floating-point noise and nothing more: a window a person moved
+ * by even a frame is a different stretch, and its words are left to play on
+ * their own rather than folded into a neighbour's.
+ */
+const CONTIGUOUS = 1e-6;
+function contiguous(a: PlacedClip, b: PlacedClip): boolean {
+  return (
+    a.src === b.src &&
+    Math.abs(a.start + a.dur - b.start) <= CONTIGUOUS &&
+    Math.abs(a.trimStart + a.dur - b.trimStart) <= CONTIGUOUS
+  );
+}
+
+/**
+ * Over a clip that was split into pieces (a reframe's per-shot segments, a
+ * cut with the scissors) the same source runs on across the cut: one speech
+ * cue can straddle two pieces. Chunking each piece on its own cut that cue
+ * twice, so a group that crosses the boundary was shown twice (clamped to
+ * the end of one and the start of the next) or, when both halves fall under
+ * the minimum, lost from both — a half line at every composition switch.
+ * Pieces that play one continuous stretch are therefore joined back into the
+ * run they are, and captioned once.
+ */
+export function captionRuns(clips: PlacedClip[]): PlacedClip[] {
+  const runs: PlacedClip[] = [];
+  for (const clip of clips) {
+    const last = runs[runs.length - 1];
+    if (last && contiguous(last, clip)) {
+      last.dur += clip.dur;
+    } else {
+      runs.push({ ...clip });
+    }
+  }
+  return runs;
+}
+
 /** Every caption on the finished video: each clip's cues, cut to its window, moved to its place. */
 export function captionTimeline(clips: PlacedClip[], cuesBySrc: Map<string, Cue[]>, maxChars: number): CaptionLine[] {
   const out: CaptionLine[] = [];
-  for (const clip of clips) {
-    const cues = cuesBySrc.get(clip.src);
-    if (!cues || cues.length === 0 || clip.dur <= 0) continue;
-    const window = { start: clip.trimStart, end: clip.trimStart + clip.dur };
+  for (const run of captionRuns(clips)) {
+    const cues = cuesBySrc.get(run.src);
+    if (!cues || cues.length === 0 || run.dur <= 0) continue;
+    const window = { start: run.trimStart, end: run.trimStart + run.dur };
     for (const chunk of captionChunks(cues, window, maxChars)) {
-      out.push({ from: clip.start + chunk.from, to: clip.start + chunk.to, text: chunk.text });
+      out.push({ from: run.start + chunk.from, to: run.start + chunk.to, text: chunk.text });
     }
   }
   return out;
