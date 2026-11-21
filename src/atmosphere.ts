@@ -213,11 +213,15 @@ export class Atmosphere {
   // whether onSettled last said settled, and who is waiting for it to
   private settledSaid = false;
   private settledWaiters: ((settled: boolean) => void)[] = [];
+  // dispose() cuts every tie to the renderer: no late onReady/onLinked may
+  // draw or say anything afterwards
+  private disposed = false;
   // The shader compiles asynchronously, so the frames the caller asked for
   // before it was ready drew nothing. A running loop picks itself up on its
   // next tick; a still frame — reduced motion, or a jump() before start() —
   // has no next tick and has to be drawn here or never.
   private readonly onRendererReady = (available: boolean) => {
+    if (this.disposed) return;
     if (available) this.redrawStill();
     this.opts.onReady?.(available);
     if (available) this.checkSettled();
@@ -226,6 +230,7 @@ export class Atmosphere {
   // and a still frame drawn while the variant it needed was still linking went
   // without that variant's feature
   private readonly onVariantLinked = () => {
+    if (this.disposed) return;
     this.redrawStill();
     this.checkSettled();
   };
@@ -302,8 +307,14 @@ export class Atmosphere {
         const back = inView && !this.inView;
         this.inView = inView;
         // not left to the next tick, up to a frame interval off: what it left
-        // with is a moment long gone, and a new size has cleared the canvas of it
-        if (back && this.raf) this.draw(performance.now());
+        // with is a moment long gone, and a new size has cleared the canvas of
+        // it. A still frame that went undrawn while away (a variant that
+        // linked, a resize) is made up now too — and says its settled from
+        // this frame, as one drawn in view would
+        if (back) {
+          if (this.raf) this.draw(performance.now());
+          else this.redrawStill();
+        }
         // (a little ahead of the edge, for a slow scroll to bring in this moment's sky)
       }, { rootMargin: '64px' });
       this.viewObserver.observe(canvas);
@@ -315,6 +326,14 @@ export class Atmosphere {
 
   /** true when the environment asks for reduced motion (and the option honors it) */
   get reducedMotion(): boolean { return this.motionQuery?.matches ?? false; }
+
+  /**
+   * true while the canvas is connected but out of view, so frames are paused:
+   * nothing is drawn to it until it comes back. A canvas outside the document
+   * never intersects anything, and whoever made it means to read it — it is
+   * always drawn.
+   */
+  private get paused(): boolean { return !this.inView && this.canvas.isConnected; }
 
   /** false in environments where WebGL isn't available, or once the shader has failed to compile */
   get available(): boolean { return this.renderer.available; }
@@ -347,7 +366,7 @@ export class Atmosphere {
    */
   whenSettled(): Promise<boolean> {
     if (this.settled) return Promise.resolve(true);
-    if (!this.available) return Promise.resolve(false);
+    if (this.disposed || !this.available) return Promise.resolve(false);
     return new Promise((resolve) => this.settledWaiters.push(resolve));
   }
 
@@ -355,13 +374,16 @@ export class Atmosphere {
    * See whether the sky has settled or come unsettled, and tell whoever is
    * waiting when it settles. A link that lands with the loop running is
    * only on the canvas at the next tick, so it is said then, from the
-   * frame; one with no loop to draw it is said now
+   * frame; one with no loop to draw it is said now — unless the still frame
+   * it must first redraw is waiting out an offscreen pause, in which case
+   * the make-up frame on the way back says it
    */
   private checkSettled(fromFrame = false): void {
     // (onReady can fire inside the renderer's constructor, before it is ours)
-    if (!this.renderer) return;
+    if (!this.renderer || this.disposed) return;
     const now = this.renderer.isSettled(this.target);
-    if (now === this.settledSaid || (now && !fromFrame && this.raf)) return;
+    const deferred = this.raf || (this.wantStill && this.paused);
+    if (now === this.settledSaid || (now && !fromFrame && deferred)) return;
     this.settledSaid = now;
     if (!now) return;
     this.opts.onSettled?.(true);
@@ -534,10 +556,11 @@ export class Atmosphere {
   set(c: Conditions): void {
     this.applyConditions(c);
     // with the loop stopped by reduced motion, a transition would never be
-    // drawn — apply the new target to the still frame directly
+    // drawn — apply the new target to the still frame directly. Out of view
+    // the cut waits, and is made up on the way back
     if (this.wantRunning && !this.raf && this.reducedMotion) {
       this.animator.jump(this.target);
-      this.draw(performance.now());
+      if (!this.paused) this.draw(performance.now());
     }
   }
 
@@ -551,10 +574,11 @@ export class Atmosphere {
 
   /**
    * Draw the still frame on show over again, if one is: the same moment, so a
-   * redraw moves nothing. With the loop running its next tick will do.
+   * redraw moves nothing. With the loop running its next tick will do, and
+   * out of view the frame is made up on the way back instead.
    */
   private redrawStill(): void {
-    if (this.raf || !this.wantStill) return;
+    if (this.raf || !this.wantStill || this.paused) return;
     this.draw(this.startedAt ? this.last : performance.now());
   }
 
@@ -635,6 +659,7 @@ export class Atmosphere {
   }
 
   private draw(t: number): void {
+    if (this.disposed) return;
     // jump() can be called before start(). Pin the reference time here
     if (!this.startedAt) { this.startedAt = t; this.last = t; }
     // (a draw on the clock, not on a tick, may be followed by a tick stamped earlier)
@@ -648,8 +673,10 @@ export class Atmosphere {
     if (this.opts.lightProbe) this.maybeProbe(t);
     // Out of view, only a running loop's frames go undrawn: a still frame has no
     // next tick to come back on. (A canvas outside the document never intersects
-    // anything, and whoever made it means to read it)
-    if (this.raf && !this.inView && this.canvas.isConnected) { this.checkSettled(true); return; }
+    // anything, and whoever made it means to read it.) Nothing is said here:
+    // settled is the make-up frame's to say on the way back, drawn with the
+    // variant that linked meanwhile — the same moment it would be said in view
+    if (this.raf && this.paused) return;
     // Resizing clears the drawing buffer. Apply the previous frames' GPU
     // measurements before drawing so the new buffer is filled before paint.
     if (this.governor) {
@@ -705,6 +732,7 @@ export class Atmosphere {
    *   its context.
    */
   dispose(options: { loseContext?: boolean } = {}): void {
+    this.disposed = true;
     this.stop();
     this.observer?.disconnect();
     this.observer = null;

@@ -365,4 +365,149 @@ describe('settling', () => {
     sky.dispose();
     await expect(waiting).resolves.toBe(false);
   });
+
+  it('says false only once, however often set() is asked after the failure', async () => {
+    const onSettled = vi.fn();
+    const { sky, renderer } = mount({ fps: 60, onSettled });
+    const waiting = sky.whenSettled();
+    renderer.available = false;
+    renderer.opts.onReady?.(false);
+    sky.set({ weather: 'rain' });
+    sky.set({ weather: 'rain' });
+    sky.set({ time: 12 });
+    expect(onSettled).toHaveBeenCalledExactlyOnceWith(false);
+    await expect(waiting).resolves.toBe(false);
+    await expect(sky.whenSettled()).resolves.toBe(false);
+  });
+
+  it('says nothing more after dispose: no redraw, no onSettled, waiters go false', async () => {
+    const onSettled = vi.fn();
+    const { sky, renderer } = mount({ autoStart: false, onSettled });
+    sky.jump();
+    expect(renderer.render).toHaveBeenCalledTimes(1);
+    const waiting = sky.whenSettled();
+    sky.dispose();
+    await expect(waiting).resolves.toBe(false);
+    await expect(sky.whenSettled()).resolves.toBe(false);
+    // a link landing after dispose, and even a stray jump(), draw and say nothing
+    renderer.opts.onReady?.(true);
+    renderer.opts.onLinked?.();
+    sky.jump({ weather: 'rain' });
+    expect(renderer.render).toHaveBeenCalledTimes(1);
+    expect(onSettled).not.toHaveBeenCalled();
+  });
+
+  it('redraws a jump()ed still frame with the new variant before settling', () => {
+    const onSettled = vi.fn(() => expect(renderer.render).toHaveBeenCalledTimes(2));
+    const { sky, renderer } = mount({ autoStart: false, onSettled });
+    needsNew(renderer);
+    sky.jump({ weather: 'rain' });
+    expect(renderer.render).toHaveBeenCalledTimes(1);
+    expect(sky.settled).toBe(false);
+    link(renderer);
+    expect(renderer.render).toHaveBeenCalledTimes(2);
+    expect(onSettled).toHaveBeenCalledExactlyOnceWith(true);
+    expect(sky.settled).toBe(true);
+  });
+
+  it('stays settled through a set() of the target it already has', () => {
+    const onSettled = vi.fn();
+    const { sky, renderer } = mount({ fps: 60, onSettled });
+    link(renderer);
+    frame();
+    expect(onSettled).toHaveBeenCalledExactlyOnceWith(true);
+    sky.set({ time: 15 });
+    sky.set({ time: 15 });
+    frame();
+    expect(sky.settled).toBe(true);
+    expect(onSettled).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('a variant linking while out of view', () => {
+  let tick: (t: number) => void;
+  let seen: ((entries: { isIntersecting: boolean }[]) => void) | null;
+  const inDocument = () => ({ ...sized(640, 360), isConnected: true }) as HTMLCanvasElement;
+  const view = (isIntersecting: boolean) => seen?.([{ isIntersecting }]);
+  let now = 0;
+  const frame = () => tick((now += 100));
+
+  const needsNew = (renderer: InstanceType<typeof FakeRenderer>) =>
+    renderer.prepare.mockImplementation(() => { renderer.linked = false; });
+  const link = (renderer: InstanceType<typeof FakeRenderer>) => { renderer.linked = true; renderer.opts.onLinked?.(); };
+
+  beforeEach(() => {
+    seen = null;
+    now = 0;
+    vi.stubGlobal('requestAnimationFrame', (f: (t: number) => void) => { tick = f; return 1; });
+    vi.stubGlobal('IntersectionObserver', class {
+      constructor(f: typeof seen) { seen = f; }
+      observe() {}
+      disconnect() {}
+    });
+  });
+
+  it('is not drawn while away, and the loop says settled from the make-up frame on return', () => {
+    const onSettled = vi.fn();
+    const { sky, renderer } = mount({ fps: 60, onSettled }, inDocument());
+    link(renderer);
+    frame();
+    expect(onSettled).toHaveBeenCalledExactlyOnceWith(true);
+
+    view(false);
+    needsNew(renderer);
+    sky.set({ weather: 'rain' });
+    expect(sky.settled).toBe(false);
+    const waiting = sky.whenSettled();
+    link(renderer);                    // the variant lands while the canvas is away
+    frame();
+    frame();
+    expect(renderer.render).toHaveBeenCalledTimes(1);   // nothing drawn, nothing said
+    expect(onSettled).toHaveBeenCalledTimes(1);
+    expect(sky.settled).toBe(false);
+
+    view(true);                        // back: the missed frame is made up at once
+    expect(renderer.render).toHaveBeenCalledTimes(2);
+    expect(onSettled).toHaveBeenCalledTimes(2);
+    expect(onSettled).toHaveBeenLastCalledWith(true);
+    expect(sky.settled).toBe(true);
+    return expect(waiting).resolves.toBe(true);
+  });
+
+  it('does not redraw a still frame while away, and settles after the make-up frame', () => {
+    reduceMotion(true);
+    const onSettled = vi.fn(() => expect(renderer.render).toHaveBeenCalledTimes(2));
+    const { sky, renderer } = mount({ onSettled }, inDocument());
+    expect(renderer.render).toHaveBeenCalledTimes(1);   // the one still frame
+
+    view(false);
+    needsNew(renderer);
+    sky.set({ weather: 'rain' });
+    expect(renderer.render).toHaveBeenCalledTimes(1);   // the link's redraw waits
+    link(renderer);
+    expect(renderer.render).toHaveBeenCalledTimes(1);
+    expect(onSettled).not.toHaveBeenCalled();
+    expect(sky.settled).toBe(false);
+
+    view(true);                        // back: redrawn with the new variant, then settled
+    expect(renderer.render).toHaveBeenCalledTimes(2);
+    expect(onSettled).toHaveBeenCalledExactlyOnceWith(true);
+    expect(sky.settled).toBe(true);
+  });
+
+  it('makes up a jump()ed still frame whose shader came ready while away', () => {
+    const onSettled = vi.fn();
+    const { sky, renderer } = mount({ autoStart: false, onSettled }, inDocument());
+    sky.jump();
+    expect(renderer.render).toHaveBeenCalledTimes(1);
+    view(false);
+    renderer.linked = true;
+    renderer.ready = true;
+    renderer.opts.onReady?.(true);     // ready while away: no redraw, no settle
+    expect(renderer.render).toHaveBeenCalledTimes(1);
+    expect(onSettled).not.toHaveBeenCalled();
+    view(true);
+    expect(renderer.render).toHaveBeenCalledTimes(2);
+    expect(onSettled).toHaveBeenCalledExactlyOnceWith(true);
+  });
 });
