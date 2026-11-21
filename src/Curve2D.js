@@ -716,10 +716,14 @@ var CompositeCurve = makeClass(Curve2D, {
         };
         onCurveChange.id = self.id;
         onArrayChange = function onArrayChange(changed) {
-            //if (!self.isChanged())
+            // array add/remove/replace invalidates all derived data
+            if (is_array(_curves))
             {
-                self.isChanged(true);
-                self.triggerChange();
+                //if (!self.isChanged())
+                {
+                    self.isChanged(true);
+                    self.triggerChange();
+                }
             }
         };
         onArrayChange.id = self.id;
@@ -728,7 +732,7 @@ var CompositeCurve = makeClass(Curve2D, {
             get: function() {
                 if (null == _points)
                 {
-                    _points = _curves.reduce(function(points, curve) {
+                    _points = !is_array(_curves) ? [] : _curves.reduce(function(points, curve) {
                         points.push.apply(points, curve.points);
                         return points;
                     }, []);
@@ -788,7 +792,7 @@ var CompositeCurve = makeClass(Curve2D, {
                 if (null == __curves)
                 {
                     var matrix = self.matrix;
-                    __curves = self.curves.map(function(curve) {return curve.transform(matrix, true);});
+                    __curves = !is_array(_curves) ? [] : _curves.map(function(curve) {return curve.transform(matrix, true);});
                 }
                 return __curves;
             },
@@ -853,6 +857,8 @@ var CompositeCurve = makeClass(Curve2D, {
             enumerable: false,
             configurable: false
         });
+        // invalidate every cached derived value (points, transformed copies,
+        // length, bounding box, convex hull) so the next read recomputes
         self.isChanged = function(isChanged) {
             if (true === isChanged)
             {
@@ -864,7 +870,18 @@ var CompositeCurve = makeClass(Curve2D, {
             }
             else if (false === isChanged)
             {
-                _curves.forEach(function(c) {c.isChanged(false);});
+                // clear child change flags too, so a following render does not
+                // mistake children for dirty. Clear BOTH the original curves
+                // and the transformed copies we may have cached (they are
+                // distinct objects when this composite has a matrix).
+                if (is_array(_curves))
+                {
+                    _curves.forEach(function(c) {if (is_function(c.isChanged)) c.isChanged(false);});
+                }
+                if (is_array(__curves))
+                {
+                    __curves.forEach(function(c) {if (is_function(c.isChanged)) c.isChanged(false);});
+                }
             }
             return Object2D.prototype.isChanged.apply(self, arguments);
         };
@@ -873,23 +890,25 @@ var CompositeCurve = makeClass(Curve2D, {
     name: 'CompositeCurve',
     dispose: function() {
         var self = this;
-        if (self.curves)
+        // detach from child curves and the observed array first, so no
+        // further child/array changes reach this (disposed) composite
+        if (is_array(self.curves))
         {
             unobserveArray(self.curves, function(c) {
                 if (c instanceof Curve2D) c.onChange(self.id, false);
                 return c;
             });
-            self.curves = null;
-            self.points = null;
         }
+        self.curves = null;
+        self.points = null;
         Object2D.prototype.dispose.call(self);
     },
     clone: function() {
-        return new CompositeCurve(this.curves.map(function(curve) {return curve.clone();}));
+        return new CompositeCurve((this.curves || []).map(function(curve) {return curve.clone();}));
     },
     transform: function(matrix, withSelfMatrix) {
         var curves = true === withSelfMatrix ? this._curves : this.curves;
-        return new CompositeCurve(curves.map(object_transform(matrix, withSelfMatrix)));
+        return new CompositeCurve((curves || []).map(object_transform(matrix, withSelfMatrix)));
     },
     isConnected: function() {
         var c = this.curves, c1, c2, p1, p2, n = c.length-1, i;

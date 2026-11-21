@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html><head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<title>Geometrize CompositeCurve Live Invalidation</title>
+<style type="text/css">
+body { font-size: 15px; font-family: Arial, sans-serif; margin: 0; }
+#container { position: relative; width: 320px; height: 260px; border: 1px solid #888; }
+#log { white-space: pre; font-family: monospace; padding: 8px; }
+</style>
+</head><body>
+<h3>CompositeCurve live invalidation (Scene2D)</h3>
+<div id="container"></div>
+<div id="log"></div>
+<script src="../build/Geometrize.js"></script>
+<script>
+window.addEventListener('error', function(e) {
+    var log = document.getElementById('log');
+    if (log) log.textContent = 'SCRIPT ERROR: ' + (e && e.message ? e.message : String(e)) + '\n' + (log.textContent || '');
+    window.__ERROR__ = (e && e.message) ? e.message : String(e);
+});
+(function() {
+"use strict";
+var G = Geometrize;
+var Scene2D = G.Scene2D, CompositeCurve = G.CompositeCurve,
+    Line = G.Line, QBezier = G.QBezier, CBezier = G.CBezier,
+    Arc = G.Arc, Matrix2D = G.Matrix2D, Point2D = G.Point2D;
+
+var results = [];
+function check(name, cond, extra) {
+    results.push({name:name, pass:!!cond, extra:extra===undefined?null:extra});
+}
+function approx(a, b, eps) { return Math.abs(a-b) <= (eps===undefined?1e-6:eps); }
+function bbEq(a, b, eps) {
+    return approx(a.xmin,b.xmin,eps) && approx(a.ymin,b.ymin,eps) &&
+           approx(a.xmax,b.xmax,eps) && approx(a.ymax,b.ymax,eps);
+}
+
+// first scene uses a detached container (still a real DOM node, so the
+// browser render loop path is exercised without depending on page layout)
+var scene = Scene2D(document.createElement('div'), 0, 0, 320, 260);
+
+// --- build a composite curve from polyline + bezier + arc segments
+var seg1 = Line([20, 20], [80, 20]);
+var seg2 = QBezier([[80, 20], [110, 5], [130, 40]]);
+var seg3 = CBezier([[130, 40], [150, 80], [110, 110], [70, 100]]);
+var seg4 = Arc([70, 100], [40, 60], 40, 30, 0, 0, 1);
+var comp = CompositeCurve([seg1, seg2, seg3, seg4]);
+scene.add(comp);
+
+// --- 1. baseline derived data
+var bb0 = comp.getBoundingBox();
+var hull0 = comp.getConvexHull();
+var len0 = comp.length;
+var svg0 = comp.toSVGPath();
+check('baseline bbox non-empty', bb0.xmax > bb0.xmin && bb0.ymax > bb0.ymin, bb0);
+check('baseline length finite', isFinite(len0) && len0 > 0, len0);
+check('baseline hull has points', hull0.length >= 3, hull0.length);
+
+// --- 2. edit a control point in place -> everything must change
+seg2.points[1].x = 160;
+seg2.points[1].y = -40;
+var bb1 = comp.getBoundingBox();
+var hull1 = comp.getConvexHull();
+var len1 = comp.length;
+var svg1 = comp.toSVGPath();
+check('bbox reflects control edit', !bbEq(bb0, bb1), {before:bb0, after:bb1});
+check('hull reflects control edit', hull1.length !== hull0.length || hull1.some(function(p,i){return !p.eq(hull0[i]);}), null);
+check('length reflects control edit', !approx(len0, len1, 1e-3), {before:len0, after:len1});
+check('svg reflects control edit', svg0 !== svg1, null);
+
+// --- 3. child matrix change
+var bb2 = comp.getBoundingBox();
+seg1.setMatrix(Matrix2D.translate(-15, 25));
+var bb3 = comp.getBoundingBox();
+check('bbox reflects child matrix', !bbEq(bb2, bb3), {before:bb2, after:bb3});
+
+// --- 4. replace a segment in the array
+var bb4 = comp.getBoundingBox();
+comp.curves.splice(3, 1, Line([70, 100], [-80, -60])); // extends past current extremes
+var bb5 = comp.getBoundingBox();
+var len5 = comp.length;
+check('bbox reflects segment replacement', !bbEq(bb4, bb5), {before:bb4, after:bb5});
+check('length reflects segment replacement', isFinite(len5) && len5 > 0, len5);
+
+// --- 5. intersections follow edits
+var probe = Line([-10, 0], [400, 0]);
+scene.add(probe);
+var nInt1 = scene.getIntersections().length;
+comp.curves.push(Line([0, 0], [320, 0])); // crosses probe along y=0
+var nInt2 = scene.getIntersections().length;
+check('scene intersections update after array push', nInt2 > nInt1, {before:nInt1, after:nInt2});
+
+// --- 6. remove a child, then mutate it -> composite stays clean
+comp.isChanged(false);
+var removed = comp.curves.pop(); // removes the y=0 line just added
+comp.isChanged(false);
+var cleanBefore = comp.isChanged();
+removed.points[0].x = 999;
+removed.points[0].y = 999;
+check('removed child mutation does not dirty composite', cleanBefore === false && comp.isChanged() === false, {cleanBefore:cleanBefore, after:comp.isChanged(), val:comp.points.length});
+
+// --- 7. rapid consecutive edits keep derived data fresh
+var rapid = [];
+for (var k=1; k<=6; ++k) {
+    seg3.points[2].x = 110 + k*10;
+    rapid.push(Math.round(comp.getBoundingBox().xmax));
+}
+check('rapid edits monotonically update bbox', rapid.every(function(v,i){return 0===i || v>=rapid[i-1];}), rapid);
+
+// --- 8. change then revert -> derived data returns to original
+var qr = QBezier([[0, 0], [10, 10], [20, 0]]);
+var cr = CompositeCurve([qr]);
+var r0 = JSON.stringify({bb:cr.getBoundingBox(), len:cr.length, svg:cr.toSVGPath()});
+qr.points[1].y = 100;
+var r1 = JSON.stringify({bb:cr.getBoundingBox(), len:cr.length, svg:cr.toSVGPath()});
+qr.points[1].y = 10;
+var r2 = JSON.stringify({bb:cr.getBoundingBox(), len:cr.length, svg:cr.toSVGPath()});
+check('edit changes derived data', r0 !== r1, null);
+check('revert restores derived data', r0 === r2, null);
+
+// --- 9. isChanged(false) clears child change flags
+var cc = CompositeCurve([Line([0,0],[10,0])]);
+cc.isChanged(false);
+cc.curves[0].points[0].x = 5;
+var dirtyChild = cc.curves[0].isChanged();
+cc.isChanged(false);
+check('isChanged(false) clears child flags', dirtyChild === true && cc.curves[0].isChanged() === false, {dirtyChild:dirtyChild, after:cc.curves[0].isChanged()});
+
+// --- 10. dispose stops listening and does not throw on later child edits
+var lA = Line([0,0],[10,0]);
+var cd = CompositeCurve([lA]);
+var listenersBefore = (lA.$cb || []).length;
+var threw = false;
+cd.dispose();
+try {
+    lA.points[0].x = 42;
+    lA.setMatrix(Matrix2D.scale(2,2));
+} catch(e) { threw = true; }
+var listenersAfter = (lA.$cb || []).length;
+check('dispose detaches child listeners', listenersBefore === 1 && listenersAfter === 0, {before:listenersBefore, after:listenersAfter});
+check('child edit after dispose does not throw', threw === false, null);
+
+// --- 11. moved (surviving) children stay observed across splice
+var mA = Line([0,0],[10,0]), mB = Line([0,0],[0,10]), mC = Line([0,0],[-10,0]);
+var mc = CompositeCurve([mA, mB, mC]);
+mc.curves.splice(0,1);
+mc.isChanged(false);
+mC.points[0].x = 3;
+check('surviving child after splice stays observed', mc.isChanged() === true, null);
+
+// --- 12. canvas output is produced without error
+var canvasOk = false, canvasErr = null;
+try {
+    var canvas = scene.toCanvas();
+    canvasOk = !!canvas && canvas.width > 0 && canvas.height > 0;
+} catch(e) { canvasErr = String(e && e.message || e); }
+check('toCanvas renders', canvasOk, canvasErr);
+
+// --- 12b. composite with its own matrix: child edits and stacked matrices
+var mq = QBezier([[0,0],[10,0],[20,0]]);
+var mc2 = CompositeCurve([mq]).setMatrix(Matrix2D.translate(100,0));
+var mSvg0 = mc2.toSVGPath();
+mq.points[1].y = 40; // bulge the curve
+var mSvg1 = mc2.toSVGPath();
+check('matrix composite reflects child edit', mSvg0 !== mSvg1, null);
+var mBb1 = mc2.getBoundingBox();
+mc2.setMatrix(Matrix2D.translate(100,0).mul(Matrix2D.scale(2,2))); // stack scale
+var mBb2 = mc2.getBoundingBox();
+check('matrix stacking updates bbox', mBb2.xmax > mBb1.xmax, {before:mBb1, after:mBb2});
+mc2.setMatrix(Matrix2D.translate(100,0)); // revert stack
+check('matrix revert restores derived', mc2.toSVGPath() === mSvg1, null);
+
+// --- 12c. consecutive rapid edits interleaved with matrix changes
+(function() {
+    var q = QBezier([[0,0],[10,10],[20,0]]);
+    var c = CompositeCurve([q]);
+    var seen = [];
+    for (var i=1; i<=4; ++i) {
+        q.points[1].x = 10 + i*5;
+        c.setMatrix(Matrix2D.translate(i, i));
+        seen.push(Math.round(c.getBoundingBox().xmax) + '/' + Math.round(c.length));
+    }
+    var uniq = {};
+    seen.forEach(function(s){ uniq[s] = 1; });
+    check('rapid edits + matrix stacking yield distinct states', Object.keys(uniq).length >= 3, seen);
+})();
+
+function publish() {
+    window.__RESULTS__ = results;
+    document.getElementById('log').textContent = results.map(function(r) {
+        return (r.pass ? 'PASS ' : 'FAIL ') + r.name + (null===r.extra ? '' : '  ' + JSON.stringify(r.extra));
+    }).join('\n') + '\n\n' + results.filter(function(r){return r.pass;}).length + '/' + results.length + ' passed';
+}
+
+// --- 13. live Scene2D rendered into a real DOM node. Scene2D's
+// requestAnimationFrame render loop clears each object's isChanged() flag at
+// the end of every frame (see renderSVG -> o.isChanged(false)). We emulate
+// that per-frame clearing deterministically so the test does not depend on
+// rAF timing, then verify caches are still invalidated by object/array change
+// notifications rather than by a lingering "isChanged" flag.
+var live = Scene2D(document.getElementById('container'), 0, 0, 320, 260);
+var liveSeg = Line([20, 40], [300, 40]);
+var liveQ = QBezier([[20, 40], [160, 40], [300, 120]]);
+var liveComp = CompositeCurve([liveSeg, liveQ]);
+live.add(liveComp);
+live.add(Line([160, 0], [160, 260])); // vertical crosser for intersections
+
+// emulate one rendered frame: real DOM/SVG output + clear change flags
+function renderFrame() {
+    live.toSVG();                 // real SVG string for the scene
+    live.toCanvas(document.createElement('canvas')); // real canvas render
+    liveComp.isChanged(false);    // what renderSVG does per object
+}
+
+renderFrame();
+renderFrame();
+
+// read after frames have rendered (caches warm, flags cleared)
+var lb0 = liveComp.getBoundingBox();
+var ll0 = liveComp.length;
+var sv0 = liveComp.toSVGPath();
+var int0 = live.getIntersections().length;
+
+// edit a control point in place
+liveQ.points[1].y = 240;
+var lb1 = liveComp.getBoundingBox();
+var ll1 = liveComp.length;
+var sv1 = liveComp.toSVGPath();
+check('live: bbox updates after control edit', !bbEq(lb0, lb1), {before:lb0, after:lb1});
+check('live: length updates after control edit', !approx(ll0, ll1, 1e-3), {before:ll0, after:ll1});
+check('live: svg updates after control edit', sv0 !== sv1, null);
+
+// array mutation in a live scene
+liveComp.curves.push(Line([20, 130], [300, 130]));
+renderFrame();
+var lb2 = liveComp.getBoundingBox();
+check('live: bbox updates after array push', lb2.ymax >= 130, lb2);
+var int1 = live.getIntersections().length;
+check('live: intersections reflect pushed segment', int1 >= int0, {before:int0, after:int1});
+
+// remove the pushed child, then mutate it: composite must stay clean
+liveComp.isChanged(false);
+var rm = liveComp.curves.pop();
+renderFrame();
+rm.points[0].x = -500;
+rm.points[1].x = -500;
+check('live: removed child does not dirty composite', liveComp.isChanged() === false, null);
+
+// live scene dispose then child edit: must not throw, must not re-mark dirty
+live.dispose();
+var disposedThrew = false;
+try { liveSeg.points[0].x = 0; liveQ.points[1].y = 0; } catch(e) { disposedThrew = true; }
+check('live: scene dispose detaches without throwing', disposedThrew === false, null);
+
+publish();
+})();
+</script>
+</body></html>

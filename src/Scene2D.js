@@ -26,6 +26,7 @@ var Scene2D = makeClass(null, {
             objects = null,
             intersections = null,
             isChanged = true,
+            onObjectChange,
             renderSVG, renderCanvas, raf;
 
         if (!(self instanceof Scene2D)) return new Scene2D(dom, x0, y0, x1, y1);
@@ -36,6 +37,15 @@ var Scene2D = makeClass(null, {
         y1 = Num(y1);
         objects = [];
         svgEl = {};
+
+        // object edits must invalidate the (separately cached) intersection
+        // set even when the render-dirty flag has already been cleared by the
+        // requestAnimationFrame render loop
+        onObjectChange = function onObjectChange() {
+            intersections = null;
+            isChanged = true;
+        };
+        onObjectChange.id = 'Scene2D';
 
         def(self, 'x0', {
             get: function() {
@@ -92,7 +102,9 @@ var Scene2D = makeClass(null, {
                 {
                     svgEl[o.id] = null;
                     objects.push(o);
+                    o.onChange(onObjectChange);
                     isChanged = true;
+                    intersections = null;
                 }
             }
             return self;
@@ -104,14 +116,16 @@ var Scene2D = makeClass(null, {
                 el = svgEl[o.id];
                 if (isBrowser && el && el.parentNode) el.parentNode.removeChild(el);
                 delete svgEl[o.id];
+                o.onChange(onObjectChange, false);
                 objects.splice(index, 1);
                 isChanged = true;
+                intersections = null;
             }
             return self;
         };
         self.getIntersections = function() {
             if (!objects || !objects.length) return [];
-            if (isChanged || !intersections)
+            if (!intersections)
             {
                 intersections = [];
                 for (var k,i,j=0,n=objects.length; j<n; ++j)
@@ -132,6 +146,13 @@ var Scene2D = makeClass(null, {
         self.dispose = function() {
             if (isBrowser && svg && svg.parentNode) svg.parentNode.removeChild(svg);
             if (isBrowser) window.cancelAnimationFrame(raf);
+            if (objects)
+            {
+                objects.forEach(function(o) {
+                    if (o instanceof Object2D) o.onChange(onObjectChange, false);
+                });
+            }
+            intersections = null;
             svg = null;
             svgEl = null;
             objects = null;

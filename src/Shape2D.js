@@ -38,7 +38,7 @@ var Shape2D = makeClass(Object2D, {
             return o;
         };
         onObjectChange = function onObjectChange(obj) {
-            if (is_array(_object) && (-1 !== _objects.indexOf(obj)))
+            if (is_array(_objects) && (-1 !== _objects.indexOf(obj)))
             {
                 //if (!self.isChanged())
                 {
