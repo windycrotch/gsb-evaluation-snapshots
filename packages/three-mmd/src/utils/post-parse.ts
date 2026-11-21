@@ -1,0 +1,88 @@
+/**
+ * Post-PMX parse normalization: flip Z to right-handed coords once so downstream builders
+ * (geometry/bones/morphs/rigid bodies) don't need scattered Z flips.
+ */
+import { PmxObject } from 'babylon-mmd/esm/Loader/Parser/pmxObject'
+
+// Default post PMX parsing process: Z-flip
+export const postParseProcessing = (pmx: PmxObject): PmxObject => {
+  // Normalize to Three.js right-handed coordinates early.
+  // Downstream builders (geometry/bones/morphs/rigid bodies) should not re-flip Z to avoid double transforms.
+
+  // Vertices: position and normal
+  pmx.vertices.forEach((v) => {
+    v.position[2] = -v.position[2]
+    v.normal[2] = -v.normal[2]
+
+    if (v.weightType !== PmxObject.Vertex.BoneWeightType.Sdef)
+      return
+
+    const sdef = (v.boneWeight as PmxObject.Vertex.BoneWeight<PmxObject.Vertex.BoneWeightType.Sdef>).boneWeights
+    sdef.c[2] = -sdef.c[2]
+    sdef.r0[2] = -sdef.r0[2]
+    sdef.r1[2] = -sdef.r1[2]
+  })
+
+  // Face winding (after Z flip)
+  for (let i = 0; i < pmx.indices.length; i += 3) {
+    const tmp = pmx.indices[i + 1]
+    pmx.indices[i + 1] = pmx.indices[i + 2]
+    pmx.indices[i + 2] = tmp
+  }
+
+  // Bones: position, fixed axis and IK angle limitations
+  pmx.bones.forEach((bone) => {
+    bone.position[2] = -bone.position[2]
+
+    // The fixed axis is a rotation axis, which a Z mirror negates in X and Y.
+    if (bone.axisLimit !== undefined) {
+      bone.axisLimit[0] = -bone.axisLimit[0]
+      bone.axisLimit[1] = -bone.axisLimit[1]
+    }
+
+    for (const link of bone.ik?.links ?? []) {
+      const limitation = link.limitation
+      if (limitation === undefined)
+        continue
+
+      const minimum = limitation.minimumAngle
+      const maximum = limitation.maximumAngle
+      const minimumX = minimum[0]
+      const minimumY = minimum[1]
+      const maximumX = maximum[0]
+      const maximumY = maximum[1]
+
+      minimum[0] = -maximumX
+      minimum[1] = -maximumY
+      maximum[0] = -minimumX
+      maximum[1] = -minimumY
+    }
+  })
+
+  // Morphs: vertex morph deltas
+  pmx.morphs.forEach((morph) => {
+    if (morph.type !== PmxObject.Morph.Type.VertexMorph)
+      return
+
+    for (let i = 0; i < morph.positions.length; i += 3)
+      morph.positions[i + 2] = -morph.positions[i + 2]
+  })
+
+  // Rigid bodies: shape offsets
+  pmx.rigidBodies?.forEach((body) => {
+    body.shapePosition[2] = -body.shapePosition[2]
+    // R_R = M R_L M^{-1} where M = diag(1, 1, -1)
+    // (rx, ry, rz) => (-rx, -ry, rz)
+    body.shapeRotation[0] = -body.shapeRotation[0]
+    body.shapeRotation[1] = -body.shapeRotation[1]
+  })
+
+  // Constraints/Joints: position + rotation
+  pmx.joints?.forEach((joint) => {
+    joint.position[2] = -joint.position[2]
+    joint.rotation[0] = -joint.rotation[0]
+    joint.rotation[1] = -joint.rotation[1]
+  })
+
+  return pmx
+}

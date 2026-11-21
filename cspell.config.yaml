@@ -1,0 +1,57 @@
+version: "0.2"
+ignorePaths: []
+dictionaryDefinitions: []
+dictionaries: []
+words:
+  - AIRI
+  - ammojs
+  - antfu
+  - Blinn
+  - BPPV
+  - BRDF
+  - bumpp
+  - CCDIK
+  - Clearcoat
+  - Crypton
+  - dimforge
+  - drei
+  - envmap
+  - esbuild
+  - Eulers
+  - generouted
+  - glsl
+  - gltf
+  - gradientmap
+  - Hatsune
+  - HDRI
+  - irradiances
+  - Kagamine
+  - kwaa
+  - masknet
+  - matcap
+  - Metcap
+  - Miku
+  - MMDIK
+  - moeru
+  - noname
+  - Phong
+  - pixiv
+  - pkgroll
+  - PVRTC
+  - rotq
+  - sdef
+  - slerp
+  - sonarjs
+  - Takahiro
+  - takahirox
+  - threejs
+  - Toon
+  - tsdown
+  - vite
+  - vitejs
+  - vitest
+  - vmds
+  - Vocaloid
+  - vpds
+ignoreWords: []
+import: []
