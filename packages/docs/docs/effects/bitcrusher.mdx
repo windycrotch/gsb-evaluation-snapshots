@@ -1,0 +1,146 @@
+---
+title: "Bitcrusher"
+---
+
+# Bitcrusher
+
+The Bitcrusher takes the audio signal and reduces the resolution, making it sound "crunchy" or pixelated like a retro game console sound board.
+
+## Visualization
+
+export const graph = [{ type: "osc" }, { type: "bitcrusher" }];
+
+<AudioGraph graph={graph} />
+
+## Quick Start
+
+<Tabs>
+<TabItem value="js" label="JavaScript">
+
+```ts
+import { createBitcrusherNode } from "clawdio";
+
+const context = new AudioContext();
+const oscillatorNode = context.createOscillator();
+oscillatorNode.start();
+
+const createBitcrusherWorklet = async (id: string) => {
+  // highlight-start
+  // Create the node using our helper function
+  const bitcrusher = await createBitcrusherNode(context, 4, 0.1);
+  // highlight-end
+
+  // Connect the node
+  oscillatorNode.connect(bitcrusher.node);
+  bitcrusher.node.connect(context.destination);
+};
+
+await createBitcrusherWorklet();
+```
+
+</TabItem>
+<TabItem value="react" label="React">
+
+```tsx
+import { useCallback, useEffect, useRef } from "react";
+import useAudioStore from "@/store/audio";
+import { createBitcrusherNode } from "clawdio";
+import type { BitcrusherNode } from "clawdio";
+
+type Props = {
+  bits?: number;
+  normfreq?: number;
+};
+
+const Bitcrusher = ({ bits = 4, normfreq = 0.1 }: Props) => {
+  const nodeRef = useRef<BitcrusherNode | null>(null);
+  const { audioCtx, addAudioNode, removeAudioNode } = useAudioStore();
+
+  const createNode = useCallback(async () => {
+    nodeRef.current = await createBitcrusherNode(audioCtx, 4, 0.1);
+
+    addAudioNode("bitcrusher", nodeRef.current.node);
+  }, [addAudioNode, audioCtx]);
+
+  useEffect(() => {
+    if (!audioCtx || nodeRef.current) return;
+    createNode();
+
+    return () => {
+      if (nodeRef.current) removeAudioNode("bitcrusher");
+      nodeRef.current?.node.disconnect();
+    };
+  }, [audioCtx, createNode, removeAudioNode]);
+
+  useEffect(() => {
+    nodeRef.current?.setBits(bits);
+  }, [bits]);
+
+  useEffect(() => {
+    nodeRef.current?.setNormfreq(normfreq);
+  }, [normfreq]);
+
+  return <></>;
+};
+
+export default Bitcrusher;
+```
+
+</TabItem>
+
+</Tabs>
+
+## Controls
+
+export const items = [
+  {
+    prop: "Bits",
+    type: "number",
+    default: "4",
+    description: "The resolution of the audio",
+  },
+  {
+    prop: "Norm Freq",
+    type: "number",
+    default: "0.1",
+    description:
+      "0 to 1. The amount of bitcrushing, lower number means stronger effect.",
+  },
+];
+
+<PropsTable items={items} />
+
+### Bits
+
+```tsx
+const bitcrusher = await createBitcrusherNode(context, 4, 0.1);
+const bitcrusherNode = bitcrusher.node;
+
+const setBits = (newBits: number) => {
+  bitcrusherNode.port.postMessage({ type: "set-bits", data: newBits });
+};
+
+// Set the bits inside worklet anytime you need
+setBits(4);
+```
+
+### Norm Freq
+
+```tsx
+const bitcrusher = await createBitcrusherNode(context, 4, 0.1);
+const bitcrusherNode = bitcrusher.node;
+
+const setNormfreq = (newFreq: number) => {
+  if (!nodeRef) return;
+  nodeRef.port.postMessage({ type: "set-normfreq", data: newFreq });
+};
+
+// Set the norm freq inside worklet anytime you need
+setNormfreq(1);
+```
+
+## Video Example
+
+import videoUrl from "@site/static/video/effects/bitcrusher.mp4";
+
+<Video src={videoUrl} />
