@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DSP Playground - Online DSP Node Editor & Audio Effects Designer</title>
+
+    <meta name="description" content="DSP Playground is a browser-based DSP node editor for designing audio effects, reverbs, and synths. Build real-time signal processing graphs with an intuitive node graph interface using the Web Audio API.">
+
+    <meta name="keywords" content="DSP Playground, online DSP editor, DSP node editor, digital signal processing, audio effects designer, reverb designer, web audio, browser DSP, audio node graph, modular audio, audio synthesis, signal processing tool">
+
+    <meta property="og:title" content="DSP Playground - Online DSP Node Editor & Audio Effects Designer">
+    <meta property="og:description" content="Design and experiment with DSP algorithms, audio effects, and synths in your browser using a visual DSP node graph interface.">
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://thehugh100.github.io/dsp-playground/">
+    <meta property="og:image" content="https://thehugh100.github.io/dsp-playground/og-image.jpg">
+
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="DSP Playground - Online DSP Node Editor & Audio Effects Designer">
+    <meta name="twitter:description" content="Visual DSP playground for building real-time audio effects and synths in your browser.">
+    <meta name="twitter:image" content="https://thehugh100.github.io/dsp-playground/og-image.jpg">
+    <link rel="stylesheet" href="css/styles.css">
+    <link rel="icon" type="image/svg+xml" href="favicon.svg">
+</head>
+
+<body>
+
+    <div id="toolbar">
+        <div class="node-group">
+            <button onclick="app.addNode('audio-source')">Audio Source</button>
+            <button onclick="app.addNode('gain')">Gain</button>
+            <button onclick="app.addNode('mixer')">Mixer</button>
+            <button onclick="app.addNode('wetdry')">Wet/Dry</button>
+            <button onclick="app.addNode('panner')">Panner</button>
+            <button onclick="app.addNode('delay')">Delay</button>
+            <button onclick="app.addNode('comb')">Comb (FB)</button>
+            <button onclick="app.addNode('allpass-delay')">Allpass (Delay)</button>
+            <button onclick="app.addNode('allpass')">Allpass (Biquad)</button>
+            <button onclick="app.addNode('diffuser')">Diffuser</button>
+            <button onclick="app.addNode('fdn-scalable')">FDN (Feedback delay network)</button>
+            <button onclick="app.addNode('lpf')">LPF</button>
+            <button onclick="app.addNode('hpf')">HPF</button>
+            <button onclick="app.addNode('bpf')">Band Pass</button>
+            <button onclick="app.addNode('notch')">Notch</button>
+            <button onclick="app.addNode('ringmod')">Ring Mod</button>
+            <button onclick="app.addNode('pitch-shifter')">Pitch Shifter</button>
+            <button onclick="app.addNode('mono')">Mono</button>
+            <button onclick="app.addNode('distortion')">Distortion</button>
+            <button onclick="app.addNode('adder')">Adder</button>
+            <button onclick="app.addNode('multiply')">Multiply</button>
+            <button onclick="app.addNode('inverter')">Inverter</button>
+            <button onclick="app.addNode('abs')">Absolute</button>
+            <button onclick="app.addNode('value')">Value</button>
+            <button onclick="app.addNode('samplehold')">Sample &amp; Hold</button>
+            <button onclick="app.addNode('lfo')">LFO</button>
+            <button onclick="app.addNode('chaos')">Chaos</button>
+            <button onclick="app.addNode('envelope-follower')">Envelope Follower</button>
+            <button onclick="app.addNode('synth')">Synth</button>
+        </div>
+        <div class="action-group">
+            <select id="preset-select" onchange="app.loadPreset(this.value); this.value='';">
+                <option value="" disabled selected>Presets</option>
+                <option value="shroeder-topology">Schroeder Topology</option>
+                <option value="quadraverb-topology">Quadraverb Topology</option>
+                <option value="ping-pong-delay">Ping Pong Delay</option>
+                <option value="phaser">Phaser</option>
+                <option value="flanger">Flanger</option>
+                <option value="stereo-chorus">Stereo Chorus</option>
+            </select>
+            <button onclick="app.saveGraph()">Save</button>
+            <button onclick="document.getElementById('json-input').click()">Load</button>
+            <button onclick="app.reset()">Clear</button>
+            <button id="btn-toggle-delay-units">Delay Units: ms</button>
+        </div>
+    </div>
+
+    <!-- Hidden Inputs for File Loading -->
+    <input type="file" id="json-input" accept=".json" onchange="app.loadGraph(this)" style="display:none">
+    <input type="file" id="audio-input" accept="audio/*" style="display:none">
+
+    <div id="canvas-container">
+        <canvas id="nodeCanvas"></canvas>
+    </div>
+
+    <div id="overlay">
+        Controls:
+        Click = select • Shift+Click = multi-select • Delete = delete
+        |
+        Cables:
+        Double-click = delete • Right-click = mode (Override / Add / Multiply)
+        |
+        Signals:
+        Red = audio in • Yellow = mod in • Green = mixed out
+        |
+        Flow:
+        Audio Source → nodes → Stereo Output
+    </div>
+
+    <script type="module">
+        import { App } from './js/app.js';
+        window.app = new App();
+    </script>
+</body>
+
+</html>
