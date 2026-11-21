@@ -2,7 +2,7 @@ import {prepareBountyRound} from './bountyRounds';
 import {rayActorHit,hitRegionDamage,actorHitHeight} from './hitRegions';
 import type {HitRegion} from './types';
 import {playerMovementSpeed,WALK_SPEED} from './playerMovement';
-import {objectiveInteraction,objectiveReachable,insideBombSite,PLANT_SECONDS,BOMB_SECONDS,DEFUSE_SECONDS,KIT_DEFUSE_SECONDS,RESCUE_ROUND_SECONDS,DEMOLITION_ROUND_SECONDS} from './objectiveInteraction';
+import {objectiveInteraction,objectiveReachable,defuseReachable,insideBombSite,PLANT_SECONDS,BOMB_SECONDS,DEFUSE_SECONDS,KIT_DEFUSE_SECONDS,RESCUE_ROUND_SECONDS,DEMOLITION_ROUND_SECONDS} from './objectiveInteraction';
 import {modeForMap,restrictedWeapon,isTeamDeathmatch,hasRespawns,hasUnlimitedReserve,allowsPickups,allowsWeapon,areEnemies,RACE_LADDER,RACE_KILLS_PER_STAGE,createDefense,defenseWave,DEFENSE_WAVE_SECONDS,type PlayableMode,type DefenseUpgrade} from './offlineModes';
 import {AimAssist} from './aimAssist';
 import {DEFAULT_BOT_COUNTS,MAX_TEAM_SIZE,validBotCounts} from './botRoster';
@@ -75,7 +75,7 @@ export class Simulation {
  private makeActors(defense=false):Actor[]{const teammates=defense?2:this.teammateBots,enemies=defense?10:this.enemyBots;return Array.from({length:1+teammates+enemies},(_,id)=>{const blueCount=1+teammates,team=id<blueCount?'blue':'red',faction=id<blueCount?'ct':'t',slot=team==='blue'?id:id-blueCount;const p=(team==='blue'?BLUE_SPAWNS:RED_SPAWNS)[slot];const weapon='rifle';const actor={id,name:id===0?'你':`${team==='blue'?'队友':'对手'} ${team==='blue'?slot:slot+1}`,team,faction,player:id===0,x:p.x,z:p.z,y:p.y??0,groundY:p.y??0,yaw:p.yaw??(team==='blue'?0:Math.PI),pitch:0,health:100,armor:0,money:STARTING_MONEY,crouched:false,moving:false,weapon,inventory:['rifle','pistol','knife'],guns:Object.fromEntries(WEAPON_KINDS.map(kind=>[kind,this.gun(kind)])) as Record<WeaponKind,Gun>,grenades:0,throwTime:-10,kills:0,deaths:0,shotTime:-10,hurtTime:-10,spread:0,hasBomb:false,defuseKit:false} as Actor;return actor;});}
  refreshMap(){if(this.state.phase!=='menu')return;this.state.mode=modeForMap(this.preferredMode);this.state.rescue=undefined;this.state.roundReason=undefined;this.state.sites=[];this.state.actors=this.makeActors();this.state.player=this.state.actors[0];this.state.spectating=null;this.state.grenades=[];this.state.pickups=allowsPickups(this.state.mode)?createMapPickups():[];for(const a of this.state.actors)this.equipRestricted(a);this.teamReports.clear();}
  start(mode:GameMode=modeForMap(this.state.mode)){this.supplyAt=20;this.state.mode=mode;this.state.race=undefined;this.state.defense=undefined;this.state.sites=this.state.mode==='demolition'?(getActiveMap().bombSites??OBJECTIVE_SITES):[];this.state.blueScore=0;this.state.redScore=0;this.state.round=1;this.state.totalKills=0;this.state.totalDeaths=0;this.state.feed=[];this.state.time=0;this.events=[];this.resetRound();}
- resetRound(allBots=false){this.queuedStab=null;this.interactionActors.clear();this.hostageActors.clear();this.state.roundReason=undefined;this.touchAssist.reset();this.meleePending.clear();this.pickupInteractHeld=false;this.nextPickupId=1000;this.teamReports.clear();this.footTimer=0;this.botFootTimers.forEach((_,id)=>{this.botFootTimers[id]=.07+id*.063;});const s=this.state;const previous=s.actors;const stats=s.actors.map(a=>({kills:a.kills,deaths:a.deaths,money:a.money}));s.actors=this.makeActors(s.mode==='defense');s.grenades=[];s.pickups=createMapPickups();s.actors.forEach((a,i)=>{if(s.round>1)Object.assign(a,stats[i]);resetEconomy(a,a.money);a.spawnedAt=s.time;a.respawnAt=0;a.spawnProtectionUntil=0;});const carrier=s.actors.find(a=>a.faction==='t');if(carrier&&s.mode==='demolition')carrier.hasBomb=true;s.player=s.actors[0];s.spectating=null;s.phase='playing';s.roundTime=isTeamDeathmatch(s.mode)?0:s.mode==='hostageRescue'?RESCUE_ROUND_SECONDS:s.mode==='demolition'?DEMOLITION_ROUND_SECONDS:105;s.paused=false;s.winner=null;s.hitMarker=0;s.bomb={status:'carried',carrierId:carrier?.id??3,x:0,z:0,site:null,y:0,timer:BOMB_SECONDS,progress:0,defuserId:null,planterId:null,plantProgress:0,plantSite:null};s.rescue=s.mode==='hostageRescue'?{hostages:(getActiveMap().hostageSpawns??[]).map(h=>({...h})),zones:(getActiveMap().rescueZones??[]).map(z=>({...z})),rescued:0,total:getActiveMap().hostageSpawns?.length??0}:undefined;this.brains=s.actors.map(a=>this.newBrain(a));this.events.push({type:'round'});this.setupOfflineMode(previous,allBots);for(const a of s.actors)resetWeaponSwitch(a);}
+ resetRound(allBots=false){this.queuedStab=null;this.interactionActors.clear();this.hostageActors.clear();this.state.roundReason=undefined;this.touchAssist.reset();this.meleePending.clear();this.pickupInteractHeld=false;this.nextPickupId=1000;this.teamReports.clear();this.footTimer=0;this.botFootTimers.forEach((_,id)=>{this.botFootTimers[id]=.07+id*.063;});const s=this.state;const previous=s.actors;const stats=s.actors.map(a=>({kills:a.kills,deaths:a.deaths,money:a.money}));s.actors=this.makeActors(s.mode==='defense');s.grenades=[];s.pickups=createMapPickups();s.actors.forEach((a,i)=>{if(s.round>1)Object.assign(a,stats[i]);resetEconomy(a,a.money);a.spawnedAt=s.time;a.respawnAt=0;a.spawnProtectionUntil=0;});const carrier=s.actors.find(a=>a.faction==='t');if(carrier&&s.mode==='demolition')carrier.hasBomb=true;s.player=s.actors[0];s.spectating=null;s.phase='playing';s.roundTime=isTeamDeathmatch(s.mode)?0:s.mode==='hostageRescue'?RESCUE_ROUND_SECONDS:s.mode==='demolition'?DEMOLITION_ROUND_SECONDS:105;s.paused=false;s.winner=null;s.hitMarker=0;s.bomb={status:'carried',carrierId:carrier?.id??3,x:0,z:0,site:null,y:0,timer:BOMB_SECONDS,progress:0,defuserId:null,planterId:null,plantProgress:0,plantSite:null,defuseSeconds:null,assignedDefuserId:null,defuseAssignAt:-1};s.rescue=s.mode==='hostageRescue'?{hostages:(getActiveMap().hostageSpawns??[]).map(h=>({...h})),zones:(getActiveMap().rescueZones??[]).map(z=>({...z})),rescued:0,total:getActiveMap().hostageSpawns?.length??0}:undefined;this.brains=s.actors.map(a=>this.newBrain(a));this.events.push({type:'round'});this.setupOfflineMode(previous,allBots);for(const a of s.actors)resetWeaponSwitch(a);}
  private setupOfflineMode(previous:readonly Actor[],allBots=false){
   const s=this.state;
   if(s.mode==='bounty'){
@@ -192,8 +192,12 @@ export class Simulation {
   if(s.mode==='demolition'){
    if(s.bomb.status==='exploded'){this.finishRound('red','C4 成功引爆');return;}
    if(s.bomb.status==='defused'){this.finishRound('blue','C4 已成功拆除');return;}
-   // Once planted, only the bomb outcome resolves the round, even if T die.
-   if(s.bomb.status==='planted')return;
+   // Once planted, the bomb outcome resolves the round even if every T dies,
+   // but a dead CT team can never defuse: the terrorists win immediately.
+   if(s.bomb.status==='planted'){
+    if(!blue.length){this.finishRound('red','炸弹已安放，反恐精英全员阵亡');return;}
+    return;
+   }
    if(!red.length){this.finishRound('blue','恐怖分子全部被消灭');return;}
    if(!blue.length){this.finishRound('red','反恐精英全部被消灭');return;}
    if(s.roundTime<=0)this.finishRound('blue','时间耗尽，恐怖分子未能安放炸弹');
@@ -279,6 +283,9 @@ export class Simulation {
   }
   this.interactionActors.add(a.id);return true;
  }
+ /** One objective interaction step may never cover the whole duration, so a
+  * progress bar cannot jump from 0 to 1 inside a single frame at any frame rate. */
+ private static readonly MAX_OBJECTIVE_STEP=.1;
  private updateBomb(dt:number){
   const s=this.state,b=s.bomb;if(s.mode!=='demolition')return;
   if(b.status==='carried'){
@@ -286,11 +293,14 @@ export class Simulation {
    if(carrier){b.x=carrier.x;b.y=actorBaseY(carrier);b.z=carrier.z;}
    if(!carrier||carrier.health<=0){if(carrier)carrier.hasBomb=false;b.status='dropped';b.carrierId=null;b.plantProgress=0;b.planterId=null;this.events.push({type:'bombDrop',actorId:carrier?.id,x:b.x,y:b.y,z:b.z});}
    else {
-    const site=this.nearestSite(carrier),eligible=this.interactionActors.has(carrier.id)&&site&&!carrier.moving&&!isAirborne(carrier)&&s.time-carrier.shotTime>dt*.9;
+    const site=this.nearestSite(carrier),eligible=this.interactionActors.has(carrier.id)&&!!site&&!carrier.moving&&!isAirborne(carrier)&&s.time-carrier.shotTime>dt*.9;
     if(eligible){
-     if(b.planterId!==carrier.id||b.plantSite!==site.id){b.planterId=carrier.id;b.plantSite=site.id;b.plantProgress=0;this.events.push({type:'plantStart',actorId:carrier.id,site:site.id});}
-     b.plantProgress=Math.min(1,(b.plantProgress??0)+Math.min(dt,Math.max(0,s.roundTime+dt))/PLANT_SECONDS);
-     if(b.plantProgress>=1-1e-8){carrier.hasBomb=false;b.status='planted';b.carrierId=null;b.site=site.id;b.timer=BOMB_SECONDS;b.progress=0;b.defuserId=null;b.planterId=null;b.plantProgress=0;s.phase='planted';this.events.push({type:'plantComplete',actorId:carrier.id,x:b.x,y:b.y,z:b.z,site:site.id});return;}
+     if(b.planterId!==carrier.id||b.plantSite!==site!.id){b.planterId=carrier.id;b.plantSite=site!.id;b.plantProgress=0;this.events.push({type:'plantStart',actorId:carrier.id,site:site!.id});}
+     // Clamp both to the round deadline (no plant may complete at/after time-out)
+     // and to the per-frame cap (the first frame of a fresh attempt stays < 1).
+     const step=Math.min(dt,Math.max(0,s.roundTime+dt),Simulation.MAX_OBJECTIVE_STEP*PLANT_SECONDS)/PLANT_SECONDS;
+     b.plantProgress=Math.min(1,(b.plantProgress??0)+step);
+     if(b.plantProgress>=1-1e-8){carrier.hasBomb=false;b.status='planted';b.carrierId=null;b.site=site!.id;b.timer=BOMB_SECONDS;b.progress=0;b.defuserId=null;b.defuseSeconds=null;b.assignedDefuserId=null;b.defuseAssignAt=-1;b.planterId=null;b.plantProgress=0;s.phase='planted';this.events.push({type:'plantComplete',actorId:carrier.id,x:b.x,y:b.y,z:b.z,site:site!.id});return;}
     }else {b.planterId=null;b.plantProgress=0;b.plantSite=null;}
    }
   }
@@ -299,21 +309,45 @@ export class Simulation {
    if(pickup){pickup.hasBomb=true;b.status='carried';b.carrierId=pickup.id;this.events.push({type:'bombPickup',actorId:pickup.id,x:b.x,y:b.y,z:b.z});}
   }
   if(b.status!=='planted')return;
+  this.assignBotDefuser(dt);
   const candidates=s.actors.filter(a=>a.faction==='ct'&&a.health>0&&this.interactionActors.has(a.id)&&!a.moving&&!isAirborne(a)&&s.time-a.shotTime>dt*.9&&objectiveReachable(a,b,2.4));
   const defuser=candidates.find(a=>a.id===b.defuserId)??candidates[0];
-  if(!defuser){b.defuserId=null;b.progress=0;}
+  if(!defuser){b.defuserId=null;b.progress=0;b.defuseSeconds=null;}
   else{
-   if(b.defuserId!==defuser.id){b.defuserId=defuser.id;b.progress=0;this.events.push({type:'defuseStart',actorId:defuser.id,x:b.x,y:b.y,z:b.z});}
-   const seconds=defuser.defuseKit?KIT_DEFUSE_SECONDS:DEFUSE_SECONDS,remaining=(1-b.progress)*seconds;
-   if(remaining<=dt+1e-8&&remaining<b.timer-1e-8){b.progress=1;b.status='defused';b.defuserId=null;this.events.push({type:'defuseComplete',actorId:defuser.id,site:b.site??undefined});return;}
-   b.progress=Math.min(1,b.progress+Math.min(dt,b.timer)/seconds);
+   const seconds=defuser.defuseKit?KIT_DEFUSE_SECONDS:DEFUSE_SECONDS;
+   if(b.defuserId!==defuser.id){b.defuserId=defuser.id;b.progress=0;b.defuseSeconds=seconds;this.events.push({type:'defuseStart',actorId:defuser.id,x:b.x,y:b.y,z:b.z});}
+   // A kit is fixed gear for the whole round; if it ever changes mid-attempt the
+   // old fraction no longer means the same amount of work, so restart cleanly.
+   else if(b.defuseSeconds!==null&&b.defuseSeconds!==undefined&&b.defuseSeconds!==seconds){b.progress=0;b.defuseSeconds=seconds;this.events.push({type:'defuseStart',actorId:defuser.id,x:b.x,y:b.y,z:b.z});}
+   else b.defuseSeconds=seconds;
+   const required=(1-b.progress)*b.defuseSeconds;
+   // Detonation owns an exact tie; defuse only wins when it finishes strictly first.
+   if(b.progress>0&&required<=dt+1e-8&&required<b.timer-1e-8){b.progress=1;b.status='defused';b.defuserId=null;b.assignedDefuserId=null;this.events.push({type:'defuseComplete',actorId:defuser.id,site:b.site??undefined});return;}
+   // Never accumulate past the moment of explosion, and a fresh attempt cannot
+   // finish within one frame regardless of the incoming delta time.
+   const step=Math.min(dt,b.timer,Simulation.MAX_OBJECTIVE_STEP*b.defuseSeconds)/b.defuseSeconds;
+   b.progress=Math.min(1,b.progress+step);
   }
   const before=b.timer;b.timer=b.timer-dt<=1e-8?0:b.timer-dt;
   if(Math.ceil(b.timer)!==Math.ceil(before))this.events.push({type:'bombTick',x:b.x,y:(b.y??0)+.12,z:b.z});
   if(b.timer<=0){
-   b.status='exploded';b.defuserId=null;const origin={x:b.x,y:(b.y??0)+.12,z:b.z};this.events.push({type:'bombExplode',...origin,site:b.site??undefined});
+   b.status='exploded';b.defuserId=null;b.assignedDefuserId=null;const origin={x:b.x,y:(b.y??0)+.12,z:b.z};this.events.push({type:'bombExplode',...origin,site:b.site??undefined});
    for(const target of s.actors){if(target.health<=0)continue;const blast=sampleBombBlast(origin,target);if(blast.damage>0)this.damage(target,target,blast.damage,false,undefined,origin,'bomb');}
   }
+ }
+ /** Keep one reachable bot assigned to the planted bomb. The assignment sticks
+  * while its holder is alive and can still reach the bomb; it is re-elected when
+  * the holder dies or becomes unreachable, or on a slow periodic sweep. */
+ private assignBotDefuser(dt:number){
+  const s=this.state,b=s.bomb;
+  const bots=s.actors.filter(a=>a.faction==='ct'&&a.health>0&&!a.player);
+  const incumbent=b.assignedDefuserId!==null&&b.assignedDefuserId!==undefined?s.actors.find(a=>a.id===b.assignedDefuserId&&a.health>0&&!a.player):null;
+  // A reachable incumbent keeps the role; full re-elections run at most every 0.2 s.
+  if(incumbent&&defuseReachable(incumbent,b))return;
+  if(b.assignedDefuserId!==null&&b.assignedDefuserId!==undefined&&s.time-(b.defuseAssignAt??-1)<.2)return;
+  const nearest=bots.filter(a=>defuseReachable(a,b))
+   .sort((p,q)=>Math.hypot(p.x-b.x,p.z-b.z)-Math.hypot(q.x-b.x,q.z-b.z)||p.id-q.id)[0]??null;
+  b.assignedDefuserId=nearest?nearest.id:null;b.defuseAssignAt=s.time;
  }
  private updateRescue(dt:number){
   const s=this.state,rescue=s.rescue,geometry=getActiveMap().geometry;if(s.mode!=='hostageRescue'||!rescue||!geometry)return;
@@ -469,6 +503,9 @@ export class Simulation {
    // A smoothed route can cross a low doorway before its next standing node.
    if(geometry.needsCrouch(a.x+dx*probe,a.z+dz*probe,actorBaseY(a)))a.crouched=true;
   }
+  // Kick-start a braked bot: thinkBot clears motion.speed every frame, so
+  // without this a fresh objective with a real path could never leave idle.
+  if(b.motion.speed<.05&&Math.hypot(dx,dz)>.3)b.motion.speed=.6;
   const move=advanceBotMotion(b.motion,dx,dz,dt,a.crouched?Math.min(speed,1.65):speed);
   // A rounded corner must still fit the body. Follow the proven path if it does not.
   const n=Math.hypot(move.x,move.z),probe=n>0?Math.max(n,.65)/n:0;
@@ -566,7 +603,10 @@ export class Simulation {
    objective.point=point;
   }
   // 即使最后一名敌人已倒下，也要继续完成拆弹。
-  if(objective.role==='defuse'&&objectiveReachable(a,s.bomb,2.4)){
+  if(objective.role==='defuse'){
+   // The assigned defuser must actually walk to the bomb first; without this
+   // branch it fell through to patrol logic and the defuse never started.
+   if(!objectiveReachable(a,s.bomb,2.4)){this.botMove(a,b,objective.point,dt,3.4);return;}
    this.interact(a);a.crouched=true;return;
   }
   if(objective.role==='plant'&&this.nearestSite(a)){this.interact(a);return;}
@@ -600,11 +640,11 @@ export class Simulation {
    const nearby=nearestPickup(s,a);
    if(nearby&&takePickup(s,a,nearby,this.events))return;
    const supply=s.pickups.filter(p=>p.ammo+p.reserve>0).sort((p,q)=>Math.hypot(p.x-a.x,p.z-a.z)-Math.hypot(q.x-a.x,q.z-a.z))[0];
-   this.botMove(a,b,baseAlarm||recall||['escort','rescue','plant','defuse','recover'].includes(objective.role)?objective.point:visible??b.memory??supply??objective.point,dt,3.9);return;
+   this.botMove(a,b,baseAlarm||recall||['escort','rescue','plant','recover'].includes(objective.role)?objective.point:visible??b.memory??supply??objective.point,dt,3.9);return;
   }
   const threatened=visible??(baseAlarm?null:b.memory);
   const tacticalAllies=s.mode==='armsRace'?[]:s.actors;
-  const urgent=objective.role==='defuse'&&s.bomb.timer<14||objective.role==='escort'||recall;
+  const urgent=objective.role==='escort'||recall;
   const allyReloading=s.mode!=='armsRace'&&!!threatened&&s.actors.some(f=>f!==a&&f.team===a.team&&f.health>0&&Math.hypot(f.x-a.x,f.z-a.z)<12&&Math.abs((f.y??0)-(a.y??0))<2&&f.guns[f.weapon].reloadLeft>0);
   const wantsReload=!visible&&gun.reloadLeft===0&&gun.reserve>0&&gun.ammo<Math.max(2,Math.ceil(WEAPONS[a.weapon].magazine*.28))&&!(gun.ammo>=3&&allyReloading);
   b.exposedFor=visible&&!b.cover?b.exposedFor+dt:Math.max(0,b.exposedFor-dt*2);
@@ -688,7 +728,7 @@ export class Simulation {
   }else{
    if(s.time-b.seenAt>1)b.target=-1;a.pitch*=Math.max(0,1-dt*5);
    if(b.attacker&&b.attacker.turnUntil>s.time)a.yaw=turnBot(a.yaw,Math.atan2(-(b.attacker.x-a.x),-(b.attacker.z-a.z)),dt,5.5);
-   const mission=objective.role==='escort'||objective.role==='rescue'||objective.role==='defuse'||objective.role==='plant'||objective.role==='recover'||recall||baseAlarm||!!defense&&a.team==='red';
+   const mission=objective.role==='escort'||objective.role==='rescue'||objective.role==='plant'||objective.role==='recover'||recall||baseAlarm||!!defense&&a.team==='red';
    const remembered=b.memory&&inDefenseRange(b.memory)?b.memory:null;
    const goal=mission?objective.point:remembered??objective.point;
    const guardWalk=!defense&&!mission&&objective.role==='guard'&&!b.memory&&Math.hypot(a.x-goal.x,a.z-goal.z)<2.2&&Math.abs(actorBaseY(a)-(goal.y??actorBaseY(a)))<.6;

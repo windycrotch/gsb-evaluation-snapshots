@@ -1,5 +1,5 @@
 import type {Actor,GameSnapshot,ObjectiveSite} from './types';
-import {wallDistance} from './collision';
+import {wallDistance,findPath} from './collision';
 export const PLANT_SECONDS=3,BOMB_SECONDS=40,DEFUSE_SECONDS=10,KIT_DEFUSE_SECONDS=5;
 export const RESCUE_ROUND_SECONDS=180,DEMOLITION_ROUND_SECONDS=120;
 type Point={x:number;y?:number;z:number};
@@ -7,6 +7,16 @@ export function objectiveReachable(a:Point,b:Point,radius:number,height=1.5):boo
  const dx=b.x-a.x,dz=b.z-a.z,dy=(b.y??0)-(a.y??0),distance=Math.hypot(dx,dz);
  if(distance>radius||Math.abs(dy)>height)return false;
  const n=Math.hypot(dx,dz,dy);return n<.01||wallDistance(a.x,(a.y??0)+.8,a.z,dx/n,dy/n,dz/n)>=n-.05;
+}
+/** A living CT that can actually walk to the bomb: line of sight while close,
+ * a real navigation path otherwise. Used so a bot is never assigned through a wall. */
+export function defuseReachable(a:Actor,b:Point):boolean{
+ if(a.health<=0||a.faction!=='ct')return false;
+ const dy=(b.y??0)-(a.y??0);
+ if(Math.abs(dy)>1.5)return false;
+ const distance=Math.hypot(b.x-a.x,b.z-a.z);
+ if(distance<=2.4)return objectiveReachable(a,b,2.4);
+ return findPath(a.x,a.z,b.x,b.z,a.y,b.y).length>0;
 }
 export function insideBombSite(a:Point,site:ObjectiveSite):boolean{
  const b=site.bounds;

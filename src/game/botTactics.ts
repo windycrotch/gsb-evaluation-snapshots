@@ -1,5 +1,6 @@
 import {blocked,wallDistance,findPath,walkSegmentClear} from './collision';
 import {MAP_BOXES,getActiveMap,mapRevision} from './map';
+import {defuseReachable} from './objectiveInteraction';
 import type {Actor,GameSnapshot} from './types';
 export type TacticalPoint={x:number;z:number;y?:number};
 type Point=TacticalPoint;
@@ -220,8 +221,13 @@ export function botObjective(actor:Actor,state:GameSnapshot,includePlayer=false,
  if(bomb.status==='planted'){
   if(actor.faction==='ct'){
    const candidates=allies.filter(a=>includePlayer||!a.player||a.id===bomb.defuserId);
-   const defuser=candidates.find(a=>a.id===bomb.defuserId)??candidates.sort((a,b)=>
-    (Math.hypot(a.x-bomb.x,a.z-bomb.z)-(a.defuseKit?3:0))-(Math.hypot(b.x-bomb.x,b.z-bomb.z)-(b.defuseKit?3:0))||a.id-b.id)[0];
+   // The simulation keeps one reachable bot permanently assigned until it dies
+   // or loses the route; fall back to the nearest reachable bot for isolated
+   // tactic queries that bypass the full simulation tick.
+   const assigned=bomb.assignedDefuserId!==null&&bomb.assignedDefuserId!==undefined?candidates.find(a=>a.id===bomb.assignedDefuserId):undefined;
+   const defuser=assigned??candidates.find(a=>a.id===bomb.defuserId)??candidates
+    .filter(a=>a.player||defuseReachable(a,bomb))
+    .sort((a,b)=>Math.hypot(a.x-bomb.x,a.z-bomb.z)-Math.hypot(b.x-bomb.x,b.z-bomb.z)||a.id-b.id)[0];
    if(defuser?.id===actor.id)return {point:bomb,role:'defuse'};
   }
   // 炸弹位置由规则公开；警戒点分散，避免所有人挤到炸弹上。
