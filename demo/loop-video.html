@@ -1,0 +1,229 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Longpipe — pipeline (looped video → captureStream → Pipeline)</title>
+    <style>
+      body { margin: 0; background: #111; color: #ddd; font-family: system-ui, sans-serif; }
+      a { color: #6cf; }
+      .topbar { padding: 8px 16px; }
+      h2 { padding: 0 16px; margin: 0 0 8px; }
+      #status { padding: 8px 16px; font-family: ui-monospace, monospace; font-size: 12px; color: #6cf; }
+      .info { padding: 4px 16px; font-family: ui-monospace, monospace; font-size: 12px; color: #aaa; word-break: break-all; }
+      .info span { color: #fff; }
+      .row { display: flex; gap: 16px; padding: 16px; align-items: flex-start; flex-wrap: wrap; }
+      .panel { display: flex; flex-direction: column; gap: 8px; }
+      video { display: block; border: 1px solid #333; background: #222; width: 480px; height: 270px; }
+      .label { font-size: 12px; color: #888; }
+      .controls { padding: 0 16px 16px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+      label { font-size: 13px; }
+      button { background: #333; color: #ddd; border: 1px solid #555; padding: 6px 12px; cursor: pointer; }
+      button:hover { background: #444; }
+      input[type=color], select { background: #222; color: #ddd; border: 1px solid #555; padding: 4px; }
+    </style>
+  </head>
+  <body>
+    <div class="topbar"><a href="/">← demos</a></div>
+    <h2>Pipeline: looped video → captureStream → Pipeline → &lt;video&gt;</h2>
+    <div id="status">loading…</div>
+    <div class="info">UA: <span id="ua">–</span></div>
+    <pre id="stats" class="info" style="white-space: pre; padding-top: 8px;">stats: (waiting for first frame)</pre>
+    <div class="row">
+      <div class="panel">
+        <span class="label">input: looped video file (source for captureStream)</span>
+        <video id="inputVideo" muted playsinline loop></video>
+      </div>
+      <div class="panel">
+        <span class="label">output: pipeline.stream</span>
+        <video id="outputVideo" autoplay muted playsinline></video>
+      </div>
+    </div>
+    <div class="controls">
+      <label>background:
+        <select id="bgMode">
+          <option value="image" selected>image (demo.jpg)</option>
+          <option value="video">video (hero-small.mp4)</option>
+          <option value="blur">blur</option>
+          <option value="solid">solid color</option>
+        </select>
+      </label>
+      <label id="bgColorLabel" style="display:none">color:
+        <input type="color" id="bgColor" value="#00b050" />
+      </label>
+      <label id="bgSigmaLabel" style="display:none">sigma:
+        <input type="range" id="bgSigma" min="1" max="20" step="0.5" value="8" />
+        <span id="bgSigmaVal">8</span>
+      </label>
+      <button id="toggleEnabled">Disable effect</button>
+    </div>
+
+    <script type="module">
+      import { Pipeline } from '~/pipeline'
+      import { PRESETS } from '~/pipeline/presets'   // tier-name → ManualPreset (for ?preset=medium etc.)
+
+      const $status = document.getElementById('status')
+      const $ua     = document.getElementById('ua')
+      const $input  = document.getElementById('inputVideo')
+      const $output = document.getElementById('outputVideo')
+      const $bgMode = document.getElementById('bgMode')
+      const $bgColor = document.getElementById('bgColor')
+      const $bgColorLabel = document.getElementById('bgColorLabel')
+      const $bgSigma = document.getElementById('bgSigma')
+      const $bgSigmaVal = document.getElementById('bgSigmaVal')
+      const $bgSigmaLabel = document.getElementById('bgSigmaLabel')
+      const $toggle = document.getElementById('toggleEnabled')
+      const $stats  = document.getElementById('stats')
+
+      $ua.textContent = navigator.userAgent
+
+      function setStatus(s, ok = true) {
+        $status.textContent = s
+        $status.style.color = ok ? '#6cf' : '#f66'
+        console.log('[loop-video]', s)
+      }
+
+      function parseHex(hex) {
+        return [
+          parseInt(hex.slice(1, 3), 16) / 255,
+          parseInt(hex.slice(3, 5), 16) / 255,
+          parseInt(hex.slice(5, 7), 16) / 255,
+        ]
+      }
+
+      const VIDEO_BG_URL = 'https://katana.video/files/hero-small.mp4'
+
+      function currentBgConfig() {
+        const mode = $bgMode.value
+        if (mode === 'blur')  return { blur: { sigma: parseFloat($bgSigma.value) } }
+        if (mode === 'solid') return { color: parseHex($bgColor.value) }
+        if (mode === 'video') return { video: VIDEO_BG_URL }
+        return null   // image — handled async
+      }
+
+      async function loadBgImage() {
+        const blob   = await fetch('/demo.jpg').then(r => r.blob())
+        const bitmap = await createImageBitmap(blob)
+        return { image: bitmap }
+      }
+
+      async function run() {
+        // 1. Wire the input video (looped file). Wait until the element
+        //    has at least one frame's worth of data so captureStream emits.
+        $input.src = '/loop_video.mp4'
+        await new Promise((resolve, reject) => {
+          $input.addEventListener('loadeddata', resolve, { once: true })
+          $input.addEventListener('error',     () => reject(new Error('input video failed to load')), { once: true })
+        })
+        await $input.play().catch(err => console.warn('inputVideo.play() rejected:', err))
+
+        // 2. Get a MediaStream from the looped video. Chrome/Firefox/Edge
+        //    support HTMLMediaElement.captureStream(); Safari doesn't, so
+        //    fall back to drawing the video into a canvas and using its
+        //    captureStream (universally supported).
+        const inputStream = typeof $input.captureStream === 'function'
+          ? $input.captureStream()
+          : (() => {
+              const c = document.createElement('canvas')
+              c.width  = $input.videoWidth
+              c.height = $input.videoHeight
+              const cctx = c.getContext('2d')
+              const tick = () => {
+                cctx.drawImage($input, 0, 0)
+                $input.requestVideoFrameCallback(tick)
+              }
+              $input.requestVideoFrameCallback(tick)
+              return c.captureStream()
+            })()
+
+        // Resolve initial background config — image mode needs an async
+        // bitmap fetch before construction.
+        const initialBgConfig = $bgMode.value === 'image'
+          ? await loadBgImage()
+          : (currentBgConfig() ?? { blur: { sigma: 8 } })
+
+        setStatus('constructing pipeline (autotune + weights fetched from default CDN by SDK)…')
+        // ?preset=<tier> picks a specific tier (medium/small/large/xs/xl); a quality
+        // name (fast/balanced/quality) or 'auto' passes through. Weights load from the
+        // SDK's default CDN (flow-bundled .bins).
+        const params = new URLSearchParams(location.search)
+        const presetParam = params.get('preset') || 'auto'
+        const pipelineOpts = {
+          background: initialBgConfig,
+          preset:     PRESETS.find(p => p.model === presetParam) || presetParam,
+          audio:      'drop',
+        }
+        const pipeline = new Pipeline(inputStream, pipelineOpts)
+
+        // 3. Hook output stream BEFORE awaiting ready — pipeline.stream is
+        //    available synchronously; output element starts blank and the
+        //    captured frames begin flowing once the worker emits 'ready'.
+        $output.srcObject = pipeline.stream
+
+        setStatus('init dispatched, waiting for first frame…')
+        try {
+          await pipeline.ready
+          setStatus('ready — frames flowing')
+        } catch (err) {
+          setStatus('init failed: ' + (err.message || err), false)
+          return
+        }
+
+        // Poll stats every 500ms; getStats() is a single postMessage round-trip
+        // and the worker just reads pre-tracked counters, so it's cheap.
+        setInterval(async () => {
+          try {
+            const s = await pipeline.getStats()
+            $stats.textContent =
+              `preset:    ${s.preset}  (skipFrames=${s.skipFrames})\n` +
+              `transport: ${s.inputPath} → ${s.outputPath}\n` +
+              `enabled:   ${s.enabled}\n` +
+              `fps:       ${s.fps}     (process() / sec)\n` +
+              `modelFps:  ${s.modelFps}     (network runs / sec)\n` +
+              `modelMs:   ${s.modelMs.toFixed(2)} ms (median)\n` +
+              `displayMs: ${s.displayMs.toFixed(2)} ms (median; compositor + display input)\n` +
+              `skipped:   ${s.skipped}    (cumulative skipped-model frames)`
+          } catch (err) {
+            $stats.textContent = 'stats error: ' + (err.message || err)
+          }
+        }, 500)
+
+        // 4. UI wiring.
+        let enabled = true
+
+        console.log('[loop-video]', inputStream)
+        $toggle.addEventListener('click', () => {
+          enabled = !enabled
+
+          console.log(`Enabled ${enabled}`)
+          pipeline.setEnabled(enabled)
+          $toggle.textContent = enabled ? 'Disable effect' : 'Enable effect'
+        })
+
+        $bgMode.addEventListener('change', async () => {
+          const mode = $bgMode.value
+          $bgColorLabel.style.display = mode === 'solid' ? '' : 'none'
+          $bgSigmaLabel.style.display = mode === 'blur'  ? '' : 'none'
+          if (mode === 'image') {
+            pipeline.setBackground(await loadBgImage())
+          } else {
+            pipeline.setBackground(currentBgConfig())
+          }
+        })
+
+        $bgColor.addEventListener('input', () => {
+          if ($bgMode.value === 'solid') pipeline.setBackground(currentBgConfig())
+        })
+
+        $bgSigma.addEventListener('input', () => {
+          $bgSigmaVal.textContent = $bgSigma.value
+          if ($bgMode.value === 'blur') pipeline.setBackground(currentBgConfig())
+        })
+      }
+
+      run().catch(err => {
+        console.error(err)
+        setStatus('error: ' + (err.message || err), false)
+      })
+    </script>
+  </body>
+</html>

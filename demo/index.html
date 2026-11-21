@@ -1,0 +1,59 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Longpipe demos</title>
+    <style>
+      body { margin: 0; background: #111; color: #ddd; font-family: system-ui, sans-serif; padding: 32px; max-width: 720px; }
+      h1 { margin: 0 0 8px; }
+      .sub { color: #888; margin: 0 0 24px; font-size: 14px; }
+      ul { list-style: none; padding: 0; margin: 0; }
+      li { margin: 16px 0; padding: 16px; border: 1px solid #333; border-radius: 6px; }
+      a { color: #6cf; text-decoration: none; font-size: 18px; font-weight: 600; }
+      a:hover { text-decoration: underline; }
+      .desc { display: block; color: #aaa; font-size: 14px; margin-top: 6px; line-height: 1.5; }
+    </style>
+  </head>
+  <body>
+    <h1>Longpipe demos</h1>
+    <p class="sub">Pick one. Each is an isolated page so you can link/share/test individually.</p>
+    <ul>
+      <li>
+        <a href="/try.html">Try Longpipe (website-style demo)</a>
+        <span class="desc">Local mirror of the website's <code>/demo</code> page. Source toggle (sample video / webcam), all background modes (image, blur, color, video, none), preset picker. Imports from <code>~/pipeline</code> so it tracks local SDK changes.</span>
+      </li>
+      <li>
+        <a href="/denoise.html">Audio denoise (mic → pipeline → playback)</a>
+        <span class="desc">Audio-denoise subsystem (separate AudioWorklet). Mic + cam → <code>EffectsPipeline</code> with <code>audio: {denoise}</code> → playback. Model picker (dfn/dfnint8/rnnoise/auto), wet/dry toggle, β + GRU-leak sliders, per-hop stats. Weights served locally from <code>/weights/</code>. <strong>Use headphones.</strong></span>
+      </li>
+      <li>
+        <a href="/face.html">Face-heatmap probe</a>
+        <span class="desc">The face keypoint head in isolation: 5 heatmaps at base/4|8 painted over the source, windowed soft-argmax keypoints (toggle hard argmax to see the jitter it prevents), landmark-crop box preview, live jitter meter. Tier/backend/precision/source pickers.</span>
+      </li>
+      <li>
+        <a href="/landmarks.html">Landmark probe (GPU-resident)</a>
+        <span class="desc">The full landmark chain with zero per-frame readback: matting taps → heatmaps → soft-argmax box (compute) → 256² crop → LandmarkNet → 478 vertex-pulled dots. The stats line is an optional 16-byte readback every 30 frames.</span>
+      </li>
+      <li>
+        <a href="/ar.html">Face AR PoC — sunglasses (scratch)</a>
+        <span class="desc">Throwaway test of whether the landmarks can carry AR geometry. Dummy procedural sunglasses posed by a scaled-orthographic fit of the canonical face model against our 2D landmarks — the model stays 2D, the depth is a fixed known face. CPU-side; AᵀA is constant so the per-frame cost is a reduction plus a 4×4 solve.</span>
+      </li>
+      <li>
+        <a href="/reframe.html">Auto-reframe v0 (scratch)</a>
+        <span class="desc">Throwaway pad for the reframe rule, CPU-side so it can be dialled in with sliders: frame centre as the base, subject "gravity" pulling the crop centre, aspect-preserving shrink, must stay inside the frame AND contain the subject (which is what makes a corner head a no-op). auto = deadband tracking; manual = solve once on a button, Meet-style.</span>
+      </li>
+      <li>
+        <a href="/touchup.html">Face touch-up probe</a>
+        <span class="desc">The complete touch-up flow standalone: landmark chain → UV unwrap → freq-sep/bilateral smoothing → weight-mask composite. Compare toggle, strength/amount/detail/box-scale sliders.</span>
+      </li>
+      <li>
+        <a href="/matting.html">Matting (static image)</a>
+        <span class="desc">End-to-end matting on a still image. Pick backend (WebGPU/WebGL), precision (fp32/fp16), upscaler, and background mode.</span>
+      </li>
+      <li>
+        <a href="/loop-video.html">Pipeline: looped video → Pipeline → video element</a>
+        <span class="desc">Full SDK end-to-end. Looped video file feeds <code>captureStream()</code> as the input MediaStream; the output MediaStream drives a second video element. Real-world device test target.</span>
+      </li>
+    </ul>
+  </body>
+</html>

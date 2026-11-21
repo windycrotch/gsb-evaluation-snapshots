@@ -1,0 +1,49 @@
+// AudioWorklet port protocol. The denoise worklet is driven over its node's
+// MessagePort (not the video WorkerController) — it's a tiny, fire-and-forget
+// surface, so a plain discriminated union beats the UUID req/res machinery.
+
+import type { DenoiseModel } from './kernels'
+
+// Main thread → processor.
+export type ToWorklet =
+  | { type: 'config'; postFilterBeta?: number; gruLeak?: number }
+  | { type: 'enabled'; value: boolean }   // false = dry passthrough (cheap A/B / bypass)
+
+// Processor → main thread.
+export type FromWorklet =
+  | { type: 'ready' }
+  | { type: 'stats'; stats: AudioStats }
+  // fatal = the kernel can't run at all (wasm compile/instantiate failed);
+  // the processor passes input through and main drops it from the graph.
+  | { type: 'error'; message: string; fatal?: boolean }
+
+// Per-hop telemetry, surfaced via EffectsPipeline.getAudioStats().
+export interface AudioStats {
+  model:       DenoiseModel
+  // Per-hop compute time vs the render-quantum deadline (~2.67 ms). Available
+  // only where the worklet scope exposes performance.now() (recent Chrome).
+  p50Ms:       number | null
+  p95Ms:       number | null
+  // End-to-end buffered latency added by the 128⇄480 ring (ms).
+  latencyMs:   number
+  // Whether the kernel is actively processing (false during passthrough/bypass).
+  active:      boolean
+  // Resolved AudioContext sample rate; ≠ 48000 means the resampler is engaged.
+  sampleRate:  number
+}
+
+// Constructed once on the main thread, passed into the processor via
+// processorOptions (structured-cloned). The wasm Module + weights are compiled/
+// fetched on the main thread because the worklet scope can't fetch.
+export interface ProcessorInit {
+  model:           DenoiseModel
+  // Raw wasm bytes (not a compiled Module) — ArrayBuffers structured-clone into
+  // the AudioWorklet reliably; a WebAssembly.Module does not always. Compiled in
+  // the processor (sync compile is fine off the main thread).
+  wasmBytes:       ArrayBuffer
+  weights:         ArrayBuffer | null
+  enabled:         boolean
+  postFilterBeta?: number
+  gruLeak?:        number
+  debug?:          boolean   // console.warn (once) if the guard ever catches a non-finite sample
+}

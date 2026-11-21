@@ -1,0 +1,86 @@
+{
+  "name": "longpipe",
+  "version": "0.0.23",
+  "description": "Open-source WebGPU/WebGL2 video effects SDK — virtual backgrounds, background blur, portrait matting in real time in the browser.",
+  "type": "module",
+  "sideEffects": false,
+  "license": "MIT",
+  "author": "Sam Bhattacharyya",
+  "homepage": "https://longpipe.dev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sb2702/longpipe.git"
+  },
+  "bugs": {
+    "url": "https://github.com/sb2702/longpipe/issues"
+  },
+  "keywords": [
+    "webgpu",
+    "webgl",
+    "virtual-background",
+    "background-blur",
+    "background-removal",
+    "portrait-matting",
+    "video-effects",
+    "webrtc",
+    "real-time",
+    "ml"
+  ],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./model": {
+      "types": "./dist/model.d.ts",
+      "import": "./dist/model.js",
+      "require": "./dist/model.cjs"
+    },
+    "./audio": {
+      "types": "./dist/audio.d.ts",
+      "import": "./dist/audio.js",
+      "require": "./dist/audio.cjs"
+    }
+  },
+  "scripts": {
+    "build": "tsup src/index.ts src/model.ts src/audio.ts --format esm,cjs --dts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "dev": "vite --config demo/vite.config.ts",
+    "prepublishOnly": "npm run build",
+    "example": "vite --config examples/vanilla-webrtc/vite.config.js",
+    "example:lan": "vite --config examples/vanilla-webrtc/vite.config.js --mode lan",
+    "e2e:assets": "node tests/e2e/fetch_assets.mjs",
+    "test:e2e": "playwright test -c tests/e2e/playwright.config.mjs",
+    "example:tunnel": "vite --config examples/vanilla-webrtc/vite.config.js --mode tunnel",
+    "test:e2e:livekit": "playwright test -c tests/e2e-livekit/playwright.config.mjs",
+    "example:livekit": "vite --config examples/livekit/vite.config.js"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.59.1",
+    "@types/node": "^22.0.0",
+    "@vitejs/plugin-basic-ssl": "^2.3.0",
+    "@vitest/browser": "^3.0.0",
+    "@webgpu/types": "^0.1.69",
+    "esbuild": "^0.27.7",
+    "playwright": "^1.44.0",
+    "tsup": "^8.1.0",
+    "typescript": "^5.5.0",
+    "vite": "^7.3.2",
+    "vitest": "^3.0.0"
+  },
+  "workspaces": [
+    "packages/*",
+    "examples/livekit"
+  ]
+}
