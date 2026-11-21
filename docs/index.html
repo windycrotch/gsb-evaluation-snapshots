@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="description" content="把带时间码的字幕交给 AI 编排，从 20 张免费动效卡里挑选。用本地编辑台微调，导出透明 MOV 或 WebM，直接叠到原片上。">
+  <title>Overlay Studio · 免费动效编辑台</title>
+  <link rel="alternate" hreflang="zh-CN" href="./index.html">
+  <link rel="alternate" hreflang="en" href="./en.html">
+  <link rel="stylesheet" href="./site.css">
+  <script src="./site.js" defer></script>
+</head>
+<body>
+  <a class="skip" href="#content">跳到正文</a>
+  <header class="site-header">
+    <div class="wrap header-inner">
+      <a class="brand" href="./index.html"><span class="mark" aria-hidden="true"></span>Overlay Studio</a>
+      <nav class="primary-nav" aria-label="主导航">
+        <a href="./index.html#install">快速开始</a>
+        <a href="./releases.html">版本发布</a>
+        <a href="https://github.com/jeszhou/overlay-studio">GitHub</a>
+      </nav>
+      <nav class="languages" aria-label="语言">
+        <a lang="zh-CN" hreflang="zh-CN" href="./index.html" aria-current="page">简体中文</a>
+        <a lang="en" hreflang="en" href="./en.html">English</a>
+      </nav>
+    </div>
+  </header>
+  <main class="wrap" id="content" tabindex="-1">
+    <section class="hero" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <p class="edition">免费版 · 源码公开</p>
+        <h1 id="hero-title">给口播视频，<br>加上透明动效。</h1>
+        <p class="lede">把带时间码的字幕交给 AI 编排，从 20 张免费动效卡里挑选。用本地编辑台微调，导出透明 MOV 或 WebM，直接叠到原片上。</p>
+        <div class="actions">
+          <a class="button primary" href="#install">开始安装</a>
+          <a class="button secondary" href="./releases.html">版本与下载</a>
+        </div>
+      </div>
+      <img class="hero-art" src="./hero.webp" width="1672" height="941" fetchpriority="high" alt="带透明棋盘格、图表与字幕块的多层图形悬于动效时间轴上">
+    </section>
+
+    <section class="section" id="install" aria-labelledby="install-title">
+      <h2 id="install-title">快速开始</h2>
+      <p class="intro">让 AI 帮你检查环境并启动应用，或跟着系统对应的步骤手动安装。</p>
+      <div class="install-grid">
+        <article class="panel ai-panel">
+          <h3>让 AI 帮你安装</h3>
+          <p>在能操作本机终端的 AI 工具里打开整个仓库根目录。还没下载时，打开准备存放项目的目录，再发送这段指令。</p>
+          <pre id="install-prompt"><code>请在这台电脑上安装并启动 Overlay Studio 免费版。优先使用当前目录已有的源码。
+如果还没下载，请从 https://github.com/jeszhou/overlay-studio 获取源码并放进新目录。
+检查 Node.js（至少 22.12）、npm、FFmpeg 和 ffprobe；缺什么就用本机适用的官方安装方式。
+进入 motion-playground，按 package-lock.json 执行 npm ci，然后运行 npm run dev。
+确认 http://localhost:5177 能打开并保持服务运行。告诉我装在哪、怎么重启，以及如何点「示例」导出透明 MOV。</code></pre>
+          <div class="copy-row">
+            <button type="button" data-copy="install-prompt" data-copied="已复制" data-failed="请选中上方指令并手动复制。" hidden>复制安装指令</button>
+            <span class="copy-status" role="status"></span>
+          </div>
+        </article>
+        <article class="panel">
+          <h3>手动安装</h3>
+          <p>在 GitHub Releases 的 Assets 下下载 Source code (zip) 并解压，也可以用 Git 克隆。安装 Node.js 22.12 或更高版本。导出还需要 FFmpeg 和 ffprobe。</p>
+          <p class="text-links"><a href="https://github.com/jeszhou/overlay-studio/releases/latest">下载源码 ZIP</a><a href="https://nodejs.org/">下载 Node.js</a></p>
+          <details>
+            <summary>Windows</summary>
+            <p>在 PowerShell 安装 FFmpeg 后重开终端。打开源码里的 motion-playground，双击 start-overlay-studio.bat 即可安装并启动。</p>
+            <pre><code>winget install --id Gyan.FFmpeg -e</code></pre>
+          </details>
+          <details>
+            <summary>macOS</summary>
+            <p>使用 Homebrew 安装 FFmpeg，再进入源码里的 motion-playground。</p>
+            <pre><code>brew install ffmpeg
+npm ci
+npm run dev</code></pre>
+          </details>
+          <p class="text-links"><a href="https://github.com/jeszhou/overlay-studio/blob/main/安装指南.md">完整安装指南</a></p>
+        </article>
+      </div>
+      <div class="run-callout">
+        <div><h3>打开编辑台</h3><p>保持终端运行。在浏览器打开 localhost:5177，点击「示例」，播放内置编排，再点「导出透明 MOV」。</p></div>
+        <a class="button secondary" href="http://localhost:5177/">localhost:5177</a>
+      </div>
+    </section>
+
+    <section class="section workflow" aria-labelledby="workflow-title">
+      <h2 id="workflow-title">用自己的字幕做动效</h2>
+      <ol class="steps">
+        <li><h3>导出 SRT</h3><p>在剪辑软件导出带时间码的字幕。</p></li>
+        <li><h3>让 AI 编排</h3><p>把整个仓库和 SRT 交给 AI，使用内置 overlay-fx-generator Skill 生成编排 JSON。</p></li>
+        <li><h3>编辑并导出</h3><p>导入 JSON 和视频，调整卡片。导出透明 MOV 或 WebM，叠到原片上。</p></li>
+      </ol>
+    </section>
+  </main>
+  <footer class="site-footer">
+    <div class="wrap footer-inner">
+      <span>Overlay Studio · 一页枝鸥</span>
+      <nav aria-label="项目链接">
+        <a href="./versions.html">版本比较</a>
+        <a href="https://www.overlaystudio.cn/purchase/#checkout">购买 Pro</a>
+        <a href="https://github.com/jeszhou/overlay-studio/blob/main/LICENSE">许可</a>
+      </nav>
+    </div>
+  </footer>
+</body>
+</html>
