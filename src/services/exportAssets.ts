@@ -27,7 +27,12 @@ export async function packageExportAssets(snapshot: StoredScene, zip: JSZip): Pr
       throw new Error(`Could not decode export asset "${hint}": ${error instanceof Error ? error.message : String(error)}`);
     }
     if (!response.ok) throw new Error(`Could not decode export asset "${hint}" (HTTP ${response.status}).`);
-    const data = await response.arrayBuffer();
+    let data: ArrayBuffer;
+    try {
+      data = await response.arrayBuffer();
+    } catch (error) {
+      throw new Error(`Could not decode export asset "${hint}": ${error instanceof Error ? error.message : String(error)}`);
+    }
     const mime = response.headers.get('content-type')?.split(';')[0].toLowerCase() ?? '';
     let name = hint.replace(/[^\w.-]+/g, '-').replace(/^\.+/, '').replace(/-+$/g, '') || 'asset';
     if (!/\.[a-z0-9]{1,10}$/i.test(name)) name += `.${extensions[mime] ?? fallbackExtension}`;

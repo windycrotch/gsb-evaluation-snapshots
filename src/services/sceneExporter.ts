@@ -86,7 +86,12 @@ export const exportScene = async (snapshot: StoredScene, format: ExportFormat = 
       ['NOTO-SANS-LICENSE.txt', notoLicense]
     ]) sceneZip.file(`vendor/${name}`, source);
     for (const [name, url] of [['noto-latin.woff', latinFontUrl], ['noto-latin-ext.woff', extendedFontUrl]]) {
-      const response = await fetch(url);
+      let response: Response;
+      try {
+        response = await fetch(url);
+      } catch (error) {
+        throw new Error(`Could not load bundled font: ${name}: ${error instanceof Error ? error.message : String(error)}`);
+      }
       if (!response.ok) throw new Error(`Could not load bundled font: ${name} (HTTP ${response.status})`);
       sceneZip.file(`vendor/${name}`, await response.arrayBuffer());
     }
