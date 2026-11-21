@@ -1,0 +1,222 @@
+import React, { useEffect, useRef, ReactNode, useImperativeHandle } from 'react';
+import { useAudioContext } from '../../context/AudioContext';
+import { ModStreamRef } from '../../types/ModStream';
+import { useControlledState } from '../../hooks/useControlledState';
+
+export interface RingModulatorHandle {
+  getState: () => {
+    frequency: number;
+    wet: number;
+    enabled: boolean;
+  };
+}
+
+export interface RingModulatorRenderProps {
+  frequency: number;
+  setFrequency: (value: number) => void;
+  wet: number;
+  setWet: (value: number) => void;
+  enabled: boolean;
+  setEnabled: (value: boolean) => void;
+  isActive: boolean;
+}
+
+export interface RingModulatorProps {
+  input: ModStreamRef;
+  output: ModStreamRef;
+  label?: string;
+  frequency?: number;
+  onFrequencyChange?: (value: number) => void;
+  wet?: number;
+  onWetChange?: (value: number) => void;
+  enabled?: boolean;
+  onEnabledChange?: (enabled: boolean) => void;
+  children?: (props: RingModulatorRenderProps) => ReactNode;
+}
+
+export const RingModulator = React.forwardRef<RingModulatorHandle, RingModulatorProps>(({
+  input,
+  output,
+  label = 'ringmod',
+  frequency: controlledFrequency,
+  onFrequencyChange,
+  wet: controlledWet,
+  onWetChange,
+  enabled: controlledEnabled,
+  onEnabledChange,
+  children,
+}, ref) => {
+  const audioContext = useAudioContext();
+  const [frequency, setFrequency] = useControlledState(controlledFrequency, 440, onFrequencyChange);
+  const [wet, setWet] = useControlledState(controlledWet, 0.5, onWetChange);
+  const [enabled, setEnabled] = useControlledState(controlledEnabled, true, onEnabledChange);
+
+  const dryGainRef = useRef<GainNode | null>(null);
+  const wetGainRef = useRef<GainNode | null>(null);
+  const carrierRef = useRef<OscillatorNode | null>(null);
+  const modulatorGainRef = useRef<GainNode | null>(null);
+  const outputGainRef = useRef<GainNode | null>(null);
+  const bypassConnectionRef = useRef<boolean>(false);
+
+  // Create ring modulator nodes once
+  useEffect(() => {
+    if (!audioContext) return;
+
+    // Create dry/wet paths
+    const dryGain = audioContext.createGain();
+    const wetGain = audioContext.createGain();
+    dryGainRef.current = dryGain;
+    wetGainRef.current = wetGain;
+
+    // Create carrier oscillator
+    const carrier = audioContext.createOscillator();
+    carrier.type = 'sine';
+    carrier.frequency.value = frequency;
+    carrierRef.current = carrier;
+
+    // Create gain node for modulation
+    // In ring modulation, we multiply the input signal by the carrier
+    // Web Audio doesn't have a direct multiply node, so we use GainNode
+    // and modulate its gain parameter with the carrier
+    const modulatorGain = audioContext.createGain();
+    modulatorGain.gain.value = 0; // Will be modulated by carrier
+    modulatorGainRef.current = modulatorGain;
+
+    // Create output gain
+    const outputGain = audioContext.createGain();
+    outputGain.gain.value = 1.0;
+    outputGainRef.current = outputGain;
+
+    // Connect carrier to modulate the gain
+    carrier.connect(modulatorGain.gain);
+
+    // Connect wet path through modulator
+    wetGain.connect(modulatorGain);
+    modulatorGain.connect(outputGain);
+
+    // Connect dry path
+    dryGain.connect(outputGain);
+
+    // Start carrier
+    carrier.start(0);
+
+    // Set initial wet/dry mix
+    const wetAmount = wet;
+    const dryAmount = 1 - wet;
+    wetGain.gain.value = wetAmount;
+    dryGain.gain.value = dryAmount;
+
+    // Set output ref
+    output.current = {
+      audioNode: dryGain,
+      gain: outputGain,
+      context: audioContext,
+      metadata: {
+        label,
+        sourceType: 'processor',
+      },
+    };
+
+    // Cleanup
+    return () => {
+      carrier.stop();
+      carrier.disconnect();
+      dryGain.disconnect();
+      wetGain.disconnect();
+      modulatorGain.disconnect();
+      outputGain.disconnect();
+      output.current = null;
+      dryGainRef.current = null;
+      wetGainRef.current = null;
+      carrierRef.current = null;
+      modulatorGainRef.current = null;
+      outputGainRef.current = null;
+    };
+  }, [audioContext, label]);
+
+  // Handle input connection and bypass routing
+  useEffect(() => {
+    if (!input.current || !dryGainRef.current || !wetGainRef.current || !outputGainRef.current) return;
+
+    const inputGain = input.current.gain;
+    const dryGain = dryGainRef.current;
+    const wetGain = wetGainRef.current;
+    const outputGain = outputGainRef.current;
+
+    if (enabled) {
+      // Normal mode: input → dry + wet → output
+      if (bypassConnectionRef.current) {
+        try {
+          inputGain.disconnect(outputGain);
+        } catch (e) {
+          // Already disconnected
+        }
+        bypassConnectionRef.current = false;
+      }
+      inputGain.connect(dryGain);
+      inputGain.connect(wetGain);
+    } else {
+      // Bypass mode: input → output (skip ring modulation)
+      try {
+        inputGain.disconnect(dryGain);
+        inputGain.disconnect(wetGain);
+      } catch (e) {
+        // Already disconnected
+      }
+      inputGain.connect(outputGain);
+      bypassConnectionRef.current = true;
+    }
+
+    return () => {
+      try {
+        if (bypassConnectionRef.current) {
+          inputGain.disconnect(outputGain);
+        } else {
+          inputGain.disconnect(dryGain);
+          inputGain.disconnect(wetGain);
+        }
+      } catch (e) {
+        // Already disconnected
+      }
+    };
+  }, [input.current?.audioNode ? String(input.current.audioNode) : 'null', enabled]);
+
+  // Update carrier frequency
+  useEffect(() => {
+    if (carrierRef.current) {
+      carrierRef.current.frequency.value = frequency;
+    }
+  }, [frequency]);
+
+  // Update wet/dry mix
+  useEffect(() => {
+    if (wetGainRef.current && dryGainRef.current) {
+      const wetAmount = wet;
+      const dryAmount = 1 - wet;
+      wetGainRef.current.gain.value = wetAmount;
+      dryGainRef.current.gain.value = dryAmount;
+    }
+  }, [wet]);
+
+  // Expose imperative handle
+  useImperativeHandle(ref, () => ({
+    getState: () => ({ frequency, wet, enabled }),
+  }), [frequency, wet, enabled]);
+
+  // Render children with state
+  if (children) {
+    return <>{children({
+      frequency,
+      setFrequency,
+      wet,
+      setWet,
+      enabled,
+      setEnabled,
+      isActive: !!output.current,
+    })}</>;
+  }
+
+  return null;
+});
+
+RingModulator.displayName = 'RingModulator';

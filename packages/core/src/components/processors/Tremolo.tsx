@@ -1,0 +1,201 @@
+import React, { useEffect, useRef, ReactNode, useImperativeHandle } from 'react';
+import { useAudioContext } from '../../context/AudioContext';
+import { ModStreamRef } from '../../types/ModStream';
+import { useControlledState } from '../../hooks/useControlledState';
+
+export interface TremoloHandle {
+  getState: () => {
+    rate: number;
+    depth: number;
+    enabled: boolean;
+  };
+}
+
+export interface TremoloRenderProps {
+  rate: number;
+  setRate: (value: number) => void;
+  depth: number;
+  setDepth: (value: number) => void;
+  enabled: boolean;
+  setEnabled: (value: boolean) => void;
+  isActive: boolean;
+}
+
+export interface TremoloProps {
+  input: ModStreamRef;
+  output: ModStreamRef;
+  label?: string;
+  rate?: number;
+  onRateChange?: (rate: number) => void;
+  depth?: number;
+  onDepthChange?: (depth: number) => void;
+  enabled?: boolean;
+  onEnabledChange?: (enabled: boolean) => void;
+  children?: (props: TremoloRenderProps) => ReactNode;
+}
+
+export const Tremolo = React.forwardRef<TremoloHandle, TremoloProps>(({
+  input,
+  output,
+  label = 'tremolo',
+  rate: controlledRate,
+  onRateChange,
+  depth: controlledDepth,
+  onDepthChange,
+  enabled: controlledEnabled,
+  onEnabledChange,
+  children,
+}, ref) => {
+  const audioContext = useAudioContext();
+  const [rate, setRate] = useControlledState(controlledRate, 5, onRateChange);
+  const [depth, setDepth] = useControlledState(controlledDepth, 0.5, onDepthChange);
+  const [enabled, setEnabled] = useControlledState(controlledEnabled, true, onEnabledChange);
+
+  const gainNodeRef = useRef<GainNode | null>(null);
+  const lfoRef = useRef<OscillatorNode | null>(null);
+  const lfoGainRef = useRef<GainNode | null>(null);
+  const outputGainRef = useRef<GainNode | null>(null);
+  const bypassConnectionRef = useRef<boolean>(false);
+
+  // Create tremolo nodes once
+  useEffect(() => {
+    if (!audioContext) return;
+
+    // Create main gain node for amplitude modulation
+    const gainNode = audioContext.createGain();
+    gainNode.gain.value = 1.0;
+    gainNodeRef.current = gainNode;
+
+    // Create LFO for amplitude modulation
+    const lfo = audioContext.createOscillator();
+    lfo.type = 'sine';
+    lfo.frequency.value = rate;
+    lfoRef.current = lfo;
+
+    // LFO gain controls modulation depth
+    // We want to modulate around 1.0, so we offset the LFO
+    const lfoGain = audioContext.createGain();
+    lfoGain.gain.value = depth;
+    lfoGainRef.current = lfoGain;
+
+    // Create output gain
+    const outputGain = audioContext.createGain();
+    outputGain.gain.value = 1.0;
+    outputGainRef.current = outputGain;
+
+    // Connect LFO to gain modulation
+    // LFO output is -1 to 1, we scale it and offset it to modulate gain
+    lfo.connect(lfoGain);
+    lfoGain.connect(gainNode.gain);
+
+    // Connect signal path
+    gainNode.connect(outputGain);
+
+    // Start LFO
+    lfo.start(0);
+
+    // Set output ref
+    output.current = {
+      audioNode: gainNode,
+      gain: outputGain,
+      context: audioContext,
+      metadata: {
+        label,
+        sourceType: 'processor',
+      },
+    };
+
+    // Cleanup
+    return () => {
+      lfo.stop();
+      lfo.disconnect();
+      lfoGain.disconnect();
+      gainNode.disconnect();
+      outputGain.disconnect();
+      output.current = null;
+      gainNodeRef.current = null;
+      lfoRef.current = null;
+      lfoGainRef.current = null;
+      outputGainRef.current = null;
+    };
+  }, [audioContext, label]);
+
+  // Handle input connection and bypass routing
+  useEffect(() => {
+    if (!input.current || !gainNodeRef.current || !outputGainRef.current) return;
+
+    const inputGain = input.current.gain;
+    const gainNode = gainNodeRef.current;
+    const outputGain = outputGainRef.current;
+
+    if (enabled) {
+      // Normal mode: input → tremolo → output
+      if (bypassConnectionRef.current) {
+        try {
+          inputGain.disconnect(outputGain);
+        } catch (e) {
+          // Already disconnected
+        }
+        bypassConnectionRef.current = false;
+      }
+      inputGain.connect(gainNode);
+    } else {
+      // Bypass mode: input → output (skip tremolo)
+      try {
+        inputGain.disconnect(gainNode);
+      } catch (e) {
+        // Already disconnected
+      }
+      inputGain.connect(outputGain);
+      bypassConnectionRef.current = true;
+    }
+
+    return () => {
+      try {
+        if (bypassConnectionRef.current) {
+          inputGain.disconnect(outputGain);
+        } else {
+          inputGain.disconnect(gainNode);
+        }
+      } catch (e) {
+        // Already disconnected
+      }
+    };
+  }, [input.current?.audioNode ? String(input.current.audioNode) : 'null', enabled]);
+
+  // Update LFO rate
+  useEffect(() => {
+    if (lfoRef.current) {
+      lfoRef.current.frequency.value = rate;
+    }
+  }, [rate]);
+
+  // Update modulation depth
+  useEffect(() => {
+    if (lfoGainRef.current) {
+      lfoGainRef.current.gain.value = depth;
+    }
+  }, [depth]);
+
+  // Expose imperative handle
+  useImperativeHandle(ref, () => ({
+    getState: () => ({ rate, depth, enabled }),
+  }), [rate, depth, enabled]);
+
+  // Render children with state
+  if (children) {
+    return <>{children({
+      rate,
+      setRate,
+      depth,
+      setDepth,
+      enabled,
+      setEnabled,
+      isActive: !!output.current,
+    })}</>;
+  }
+
+  return null;
+});
+
+Tremolo.displayName = 'Tremolo';
