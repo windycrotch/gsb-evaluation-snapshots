@@ -106,12 +106,22 @@ export class AdlMidiCore {
             throw new Error('AdlMidiCore not initialized - use AdlMidiCore.create()');
         }
 
-        this._sampleRate = sampleRate;
-        this._player = this._module._adl_init(sampleRate);
+        // Release any previous player/buffer so repeated init() calls never
+        // leak WASM resources and the final state always corresponds to the
+        // last init() call.
+        this.close();
 
-        if (!this._player) {
+        const player = this._module._adl_init(sampleRate);
+
+        if (!player) {
+            // Stay in the closed (uninitialized) state so a failed init
+            // doesn't leave stale fields behind; the caller may retry.
+            this._player = null;
             throw new Error('Failed to initialize ADL MIDI player');
         }
+
+        this._player = player;
+        this._sampleRate = sampleRate;
 
         if (this._defaultEmulator !== undefined) {
             this._module._adl_switchEmulator(this._player, this._defaultEmulator);
@@ -122,13 +132,20 @@ export class AdlMidiCore {
 
     /**
      * Close the synthesizer and free resources.
+     *
+     * Safe to call multiple times and safe to call before init(). After
+     * close(), synthesis/playback calls throw "not initialized" errors
+     * until init() is called again.
      */
     close() {
         if (this._audioBufferPtr) {
             this._module._free(this._audioBufferPtr);
-            this._audioBufferPtr = null;
-            this._audioBuffer = null;
         }
+        // Clear buffer fields unconditionally so no stale pointer or
+        // array survives close(), even if a previous allocation failed
+        // partway through.
+        this._audioBufferPtr = null;
+        this._audioBuffer = null;
 
         if (this._player) {
             this._module._adl_close(this._player);
@@ -673,28 +690,12 @@ export class AdlMidiCore {
         this._ensurePlayer();
 
         const samples = frames * 2; // Stereo
-        const bytes = samples * 2;  // Int16
-
-        // Allocate/reuse buffer
-        if (!this._audioBufferPtr || !this._audioBuffer || this._audioBuffer.length < samples) {
-            if (this._audioBufferPtr) {
-                this._module._free(this._audioBufferPtr);
-            }
-            this._audioBufferPtr = this._module._malloc(bytes);
-            this._audioBuffer = new Float32Array(samples);
-        }
+        this._ensureAudioBuffer(samples);
 
         // Generate audio (Int16 output)
-        this._module._adl_generate(this._player, samples, this._audioBufferPtr);
+        const written = this._module._adl_generate(this._player, samples, this._audioBufferPtr);
 
-        // Convert Int16 to Float32
-        const heap16 = this._module.HEAP16;
-        const offset = /** @type {number} */ (this._audioBufferPtr) >> 1; // Byte offset to Int16 offset
-        for (let i = 0; i < samples; i++) {
-            /** @type {Float32Array} */ (this._audioBuffer)[i] = heap16[offset + i] / 32768;
-        }
-
-        return /** @type {Float32Array} */ (this._audioBuffer).slice(0, samples);
+        return this._readAudioBuffer(samples, written);
     }
 
     // =========================================================================
@@ -784,25 +785,11 @@ export class AdlMidiCore {
         this._ensurePlayer();
 
         const samples = frames * 2;
-        const bytes = samples * 2;
+        this._ensureAudioBuffer(samples);
 
-        if (!this._audioBufferPtr || !this._audioBuffer || this._audioBuffer.length < samples) {
-            if (this._audioBufferPtr) {
-                this._module._free(this._audioBufferPtr);
-            }
-            this._audioBufferPtr = this._module._malloc(bytes);
-            this._audioBuffer = new Float32Array(samples);
-        }
+        const written = this._module._adl_play(this._player, samples, this._audioBufferPtr);
 
-        this._module._adl_play(this._player, samples, this._audioBufferPtr);
-
-        const heap16 = this._module.HEAP16;
-        const offset = /** @type {number} */ (this._audioBufferPtr) >> 1;
-        for (let i = 0; i < samples; i++) {
-            /** @type {Float32Array} */ (this._audioBuffer)[i] = heap16[offset + i] / 32768;
-        }
-
-        return /** @type {Float32Array} */ (this._audioBuffer).slice(0, samples);
+        return this._readAudioBuffer(samples, written);
     }
 
     /**
@@ -1280,6 +1267,68 @@ export class AdlMidiCore {
         if (!this._player) {
             throw new Error('Synthesizer not initialized - call init() first');
         }
+    }
+
+    /**
+     * Ensure the shared WASM audio buffer holds at least `samples` Int16
+     * values, growing it if needed.
+     *
+     * If the old buffer was freed but the new allocation fails, the
+     * instance is left in a clean, retryable state: both buffer fields
+     * are null (no dangling pointer) and the next call re-attempts the
+     * allocation from scratch.
+     *
+     * @private
+     * @param {number} samples - Number of stereo-interleaved samples needed
+     */
+    _ensureAudioBuffer(samples) {
+        if (this._audioBufferPtr && this._audioBuffer && this._audioBuffer.length >= samples) {
+            return;
+        }
+
+        // Free the old buffer and clear the fields BEFORE allocating, so a
+        // failed allocation can never leave a dangling pointer behind.
+        if (this._audioBufferPtr) {
+            this._module._free(this._audioBufferPtr);
+        }
+        this._audioBufferPtr = null;
+        this._audioBuffer = null;
+
+        const bytes = samples * 2; // Int16
+        const ptr = this._module._malloc(bytes);
+        if (!ptr) {
+            throw new Error(`Failed to allocate ${bytes} bytes for audio buffer`);
+        }
+
+        this._audioBufferPtr = ptr;
+        this._audioBuffer = new Float32Array(samples);
+    }
+
+    /**
+     * Convert the Int16 samples written into the WASM buffer to Float32
+     * and return a fresh array of exactly `samples` entries. Any tail the
+     * synthesizer did not write this call is zeroed so stale data from a
+     * previous, larger generate()/play() call can never leak through.
+     *
+     * @private
+     * @param {number} samples - Number of samples requested
+     * @param {number} written - Number of samples actually written by WASM
+     * @returns {Float32Array}
+     */
+    _readAudioBuffer(samples, written) {
+        const heap16 = this._module.HEAP16;
+        const offset = /** @type {number} */ (this._audioBufferPtr) >> 1; // Byte offset to Int16 offset
+        const buffer = /** @type {Float32Array} */ (this._audioBuffer);
+        const valid = Math.max(0, Math.min(written, samples));
+
+        for (let i = 0; i < valid; i++) {
+            buffer[i] = heap16[offset + i] / 32768;
+        }
+        for (let i = valid; i < samples; i++) {
+            buffer[i] = 0;
+        }
+
+        return buffer.slice(0, samples);
     }
 }
 
