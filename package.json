@@ -1,0 +1,64 @@
+{
+  "name": "@interactive-video-labs/core",
+  "version": "0.2.0",
+  "description": "Framework-agnostic interactive video engine core",
+  "main": "dist/index.cjs",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run",
+    "clean": "rimraf dist",
+    "serve": "http-server .",
+    "lint": "eslint . --ext .ts",
+    "format": "prettier --write .",
+    "prepare": "pnpm lint --fix && pnpm format && pnpm build "
+  },
+  "keywords": [
+    "interactive-video",
+    "video-engine",
+    "typescript",
+    "framework-agnostic",
+    "education",
+    "state-machine"
+  ],
+  "author": "Taj",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/interactive-video-labs/interactive-video-core.git"
+  },
+  "homepage": "https://github.com/interactive-video-labs/interactive-video-core#readme",
+  "bugs": {
+    "url": "https://github.com/interactive-video-labs/interactive-video-core/issues"
+  },
+  "packageManager": "pnpm@12.21.0",
+  "devDependencies": {
+    "@eslint/eslintrc": "^3.3.7",
+    "@eslint/js": "^10.0.1",
+    "@typescript-eslint/eslint-plugin": "^8.73.0",
+    "@typescript-eslint/parser": "^8.73.0",
+    "@vitest/coverage-v8": "^5.1.0",
+    "eslint": "^10.15.0",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-prettier": "^5.5.7",
+    "http-server": "^14.1.1",
+    "jsdom": "^31.0.1",
+    "prettier": "^3.10.1",
+    "rimraf": "^6.1.4",
+    "tsup": "^9.0.0",
+    "typescript": "^5.9.3",
+    "vitest": "^5.1.0"
+  }
+}
