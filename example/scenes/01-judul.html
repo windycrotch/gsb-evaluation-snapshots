@@ -1,0 +1,26 @@
+<!doctype html><html><head><meta charset="utf-8"><title>01 judul</title></head><body style="margin:0"><canvas id="c"></canvas>
+<script src="lib.js"></script>
+<script>
+// Title on cream. The orange dot grows until it fills the frame, which is where scene 2 starts.
+const WIPE = 2.2;
+scene(3, t => {
+  ctx.fillStyle = CREAM; ctx.fillRect(0, 0, W, H);
+  const push = 1 + 0.03 * t / 3;                             // slow push in, so nothing is ever still
+  ctx.translate(W / 2, H / 2); ctx.scale(push, push); ctx.translate(-W / 2, -H / 2);
+
+  ctx.textBaseline = 'alphabetic'; ctx.font = `700 220px ${FONT}`;
+  const word = 'motlab', width = ctx.measureText(word).width; let x = (W - width) / 2;
+  for (const [i, ch] of [...word].entries()) {               // letters rise and fade in one after another
+    const p = ease(prog(t, 0.2 + i * 0.07, 0.9 + i * 0.07));
+    ctx.globalAlpha = p; ctx.fillStyle = INK; ctx.fillText(ch, x, 560 + (1 - p) * 40);
+    x += ctx.measureText(ch).width;
+  }
+  const p = ease(prog(t, 0.9, 1.6));
+  ctx.globalAlpha = p; ctx.font = `400 46px ${FONT}`; ctx.textAlign = 'center';
+  ctx.fillText('video dari kode, dirender di Chrome', W / 2, 660 + (1 - p) * 20); ctx.textAlign = 'left';
+
+  const grow = prog(t, WIPE, 3), r = 22 * ease(prog(t, 0.6, 1.1)) + 2300 * grow * grow;
+  ctx.globalAlpha = 1; ctx.fillStyle = ORANGE;
+  ctx.beginPath(); ctx.arc((W + width) / 2 + 44, 540, r, 0, Math.PI * 2); ctx.fill();
+});
+</script></body></html>

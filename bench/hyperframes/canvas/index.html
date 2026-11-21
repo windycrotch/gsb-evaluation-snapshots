@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en"><head><meta charset="UTF-8" /><meta name="viewport" content="width=1920, height=1080" />
+<script src="gsap.min.js"></script><script src="shared.js"></script>
+<style>* { margin: 0; padding: 0; box-sizing: border-box; } html, body { width: 1920px; height: 1080px; overflow: hidden; background: #000; }</style>
+</head><body>
+<div id="root" data-composition-id="main" data-start="0" data-duration="10" data-width="1920" data-height="1080">
+  <canvas id="c" class="clip" width="1920" height="1080" data-start="0" data-duration="10" data-track-index="0"></canvas>
+</div>
+<script>
+  // The same scene drawn on a canvas with the code motlab uses.
+  const ctx = document.getElementById('c').getContext('2d');
+  const tl = gsap.timeline({ paused: true });
+  tl.to({}, { duration: 10, ease: 'none', onUpdate: () => BENCH.drawCanvas(ctx, tl.time()) }, 0);
+  window.__timelines["main"] = tl;
+  tl.seek(0); BENCH.drawCanvas(ctx, 0);
+</script>
+</body></html>

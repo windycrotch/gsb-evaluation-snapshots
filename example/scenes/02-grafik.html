@@ -1,0 +1,23 @@
+<!doctype html><html><head><meta charset="utf-8"><title>02 grafik</title></head><body style="margin:0"><canvas id="c"></canvas>
+<script src="lib.js"></script>
+<script>
+// Bars on orange. The last bar turns dark and grows until it fills the frame, which is where scene 3 starts.
+const BARS = [0.35, 0.5, 0.42, 0.68, 0.9], WIPE = 2.7;
+scene(3.5, t => {
+  ctx.fillStyle = ORANGE; ctx.fillRect(0, 0, W, H);
+  const head = ease(prog(t, 0.1, 0.8));
+  ctx.globalAlpha = head * (1 - prog(t, WIPE, WIPE + 0.3)); ctx.fillStyle = '#fff'; ctx.textAlign = 'center';
+  ctx.font = `700 84px ${FONT}`; ctx.fillText('Satu folder, satu perintah', W / 2, 230 + (1 - head) * 30); ctx.textAlign = 'left';
+
+  const bw = 150, gap = 70, x0 = (W - (BARS.length * bw + (BARS.length - 1) * gap)) / 2, base = 900;
+  for (const [i, v] of BARS.entries()) {
+    const h = 560 * v * ease(prog(t, 0.5 + i * 0.12, 1.4 + i * 0.12)), last = i === BARS.length - 1, g = last ? prog(t, WIPE, 3.5) : 0;
+    const k = g * g, x = x0 + i * (bw + gap);
+    ctx.globalAlpha = last ? 1 : 1 - prog(t, WIPE, WIPE + 0.3);
+    ctx.fillStyle = last && t > WIPE - 0.3 ? `rgb(${[255, 255, 255].map(c => Math.round(c + (22 - c) * prog(t, WIPE - 0.3, WIPE))).join(',')})` : '#fff';
+    ctx.beginPath();   // the last bar spreads to every edge of the frame
+    ctx.roundRect(x - x * k, base - h - (base - h) * k, bw + (W - bw) * k, h + (H - h) * k, 18 * (1 - k));
+    ctx.fill();
+  }
+});
+</script></body></html>

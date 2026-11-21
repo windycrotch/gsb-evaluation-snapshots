@@ -1,0 +1,11 @@
+hyperframes/*/shared.js
+hyperframes/*/gsap.min.js
+results.json
+results-4k.json
+ref/
+ref-*/
+.hyperframes/
+results-cpu.json
+results-cpu-4k.json
+results-igpu.json
+results-igpu-4k.json

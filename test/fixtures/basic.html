@@ -1,0 +1,15 @@
+<!doctype html><html><head><meta charset="utf-8"><title>fixture</title></head><body style="margin:0"><canvas id="c"></canvas>
+<script>
+// Smallest page that follows the contract: canvas #c, renderAt(t), TOTAL, ready, EVENTS, ?t=, ?scale=.
+// Two flat fields of known colour let the tests check that encoding does not shift colour.
+const q = new URLSearchParams(location.search), SCALE = parseFloat(q.get('scale') || '1'), W = 640 * SCALE, H = 360 * SCALE;
+const cv = document.getElementById('c'); cv.width = W; cv.height = H; const ctx = cv.getContext('2d');
+function render(t) {
+  ctx.fillStyle = '#30E2A8'; ctx.fillRect(0, 0, W / 2, H);
+  ctx.fillStyle = '#F5D04E'; ctx.fillRect(W / 2, 0, W / 2, H);
+  ctx.fillStyle = '#111'; ctx.fillRect(W * 0.6 + t * W * 0.2, H * 0.4, W * 0.1, H * 0.2);
+}
+window.TOTAL = 1; window.EVENTS = [{ name: 'hit', t: 0.5 }];
+window.renderAt = async t => { await null; render(t); };   // async on purpose: the contract allows it
+window.ready = Promise.resolve().then(() => { render(parseFloat(q.get('t') || '0')); return true; });
+</script></body></html>

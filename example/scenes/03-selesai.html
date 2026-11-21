@@ -1,0 +1,27 @@
+<!doctype html><html><head><meta charset="utf-8"><title>03 selesai</title></head><body style="margin:0"><canvas id="c"></canvas>
+<script src="lib.js"></script>
+<script>
+// Dark end card: a ring draws itself, then the tick, then the line of text.
+scene(2.5, t => {
+  ctx.fillStyle = INK; ctx.fillRect(0, 0, W, H);
+  const push = 1 + 0.04 * t / 2.5;
+  ctx.translate(W / 2, H / 2); ctx.scale(push, push); ctx.translate(-W / 2, -H / 2);
+
+  ctx.lineWidth = 16; ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.strokeStyle = ORANGE;
+  const ring = ease(prog(t, 0.2, 1.1));
+  ctx.beginPath(); ctx.arc(W / 2, 440, 120, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * ring); ctx.stroke();
+
+  const tick = ease(prog(t, 0.9, 1.4)), pts = [[W / 2 - 52, 444], [W / 2 - 12, 484], [W / 2 + 58, 400]];
+  if (tick > 0) {   // two segments, drawn in order
+    const a = Math.min(1, tick * 2), b = Math.max(0, tick * 2 - 1);
+    ctx.strokeStyle = CREAM; ctx.beginPath(); ctx.moveTo(...pts[0]);
+    ctx.lineTo(pts[0][0] + (pts[1][0] - pts[0][0]) * a, pts[0][1] + (pts[1][1] - pts[0][1]) * a);
+    if (b > 0) ctx.lineTo(pts[1][0] + (pts[2][0] - pts[1][0]) * b, pts[1][1] + (pts[2][1] - pts[1][1]) * b);
+    ctx.stroke();
+  }
+
+  const p = ease(prog(t, 1.1, 1.8));
+  ctx.globalAlpha = p; ctx.fillStyle = CREAM; ctx.textAlign = 'center'; ctx.font = `700 72px ${FONT}`;
+  ctx.fillText('Selesai. MP4 siap.', W / 2, 720 + (1 - p) * 24); ctx.textAlign = 'left';
+});
+</script></body></html>
