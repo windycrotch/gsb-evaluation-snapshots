@@ -1,0 +1,191 @@
+GAME ENGINE EDITOR LICENSE
+English
+
+1. Parties and scope
+
+"Rights Holder" means PROMETECH A.Ş.; "Program" means the code and other
+components of Game Engine Editor that the Rights Holder owns or is authorized
+to license; and "User" means a person or organization using the Program.
+
+Third-party libraries, models, images, fonts and other assets included in the
+Program and examples are subject to their own licenses. This license does not
+grant rights over third-party property or change third-party terms. The User
+is responsible for complying with those terms and required notices.
+
+2. Noncommercial use
+
+The Rights Holder grants the User a nonexclusive, nontransferable license to
+obtain, install, run and modify the Program for the User's own noncommercial
+use, free of charge.
+
+Noncommercial use is use whose primary purpose is not to obtain a direct or
+indirect commercial benefit or monetary compensation. Personal use,
+education and research are included to the extent they meet this condition.
+The fact that a use is free of charge does not by itself make it
+noncommercial. If in doubt, the User should seek written guidance from the
+Rights Holder.
+
+Publication, redistribution, transfer or sublicensing of the Program or a
+modified version requires prior written permission, except for the output
+permission below and mandatory statutory rights.
+
+3. Noncommercial games and website outputs
+
+The User may share and publish games and websites they create for
+noncommercial purposes. This permission includes presenting with the output
+only those parts of the Program's runtime included in and needed to run that
+output. It does not permit distribution of the editor, source code or runtime
+as an independent tool or library.
+
+The User must separately obtain the necessary rights for their own content
+and third-party assets. Outputs must include the notice "Designed with
+PROMETECH A.Ş." in an appropriate place, such as the about information or
+documentation; third-party notices must also be retained.
+
+4. Commercial use
+
+Commercial use of the Program or outputs containing the Program's runtime
+requires a prior written commercial license agreement with the Rights Holder.
+This license alone does not grant permission for commercial use.
+
+The proposed royalty is 0.5% of gross sales revenue from products or services
+containing the licensed technology. Whether refunds, sales taxes and other
+adjustments are included or excluded, the scope of revenue, payment currency
+and other calculation details must be clearly defined in the commercial
+agreement. These details are not final without a separate agreement.
+
+Unless the commercial agreement provides otherwise, monthly royalty reports
+are to be submitted and payment made within 30 days after the report.
+Recordkeeping, audit and tax terms are to be specified in the commercial
+agreement.
+
+5. Statutory rights
+
+Nothing in this license is intended to remove copyright exceptions, statutory
+rights concerning use and interoperability of computer programs, consumer
+rights or other mandatory rights that applicable law does not permit to be
+restricted by contract. The scope and application of those rights depend on
+the circumstances and applicable law.
+
+6. Warranty, liability and termination
+
+To the extent permitted by law, the Program is provided "as is", without any
+express or implied warranty, and the Rights Holder is not liable for damages
+arising from its use. This provision does not limit warranties, liability or
+consumer rights that cannot be waived under applicable law.
+
+In the event of a breach of license terms, the Rights Holder may provide
+written notice and 30 days to cure the breach, subject to applicable law and
+any commercial agreement; if the breach is not cured, the Rights Holder may
+terminate the license. Urgent remedies permitted by law and mandatory rights
+are reserved.
+
+7. Governing law and disputes
+
+The law of Türkiye applies, subject to conflict-of-laws rules and mandatory
+provisions applicable in relevant countries. Subject to mandatory rules on
+jurisdiction and competence and non-waivable consumer rights, the competent
+courts and enforcement offices in Istanbul have jurisdiction over disputes.
+The parties may separately agree to arbitration after a dispute arises.
+
+8. Contact
+
+Commercial licensing and permission requests: info@prometech.net.tr
+Web: https://prometech.net.tr/
+
+
+GAME ENGINE EDITOR LİSANSI
+Türkçe
+
+1. Taraflar ve kapsam
+
+"Hak Sahibi" PROMETECH A.Ş.'yi; "Program", Game Engine Editor'ın Hak
+Sahibi'nin hak sahibi olduğu veya lisans vermeye yetkili olduğu kodunu ve
+diğer bileşenlerini; "Kullanıcı" ise Programı kullanan kişi veya kuruluşu
+ifade eder.
+
+Programın ve örneklerin içerdiği üçüncü taraf kütüphaneler, modeller,
+görseller, yazı tipleri ve diğer varlıklar kendi lisanslarına tabidir. Bu
+lisans, üçüncü tarafların hakları üzerinde lisans vermez veya onların
+koşullarını değiştirmez. Kullanıcı bu koşullara ve gerekli bildirimlere
+uymaktan sorumludur.
+
+2. Ticari olmayan kullanım
+
+Hak Sahibi, Kullanıcıya Programı ticari olmayan amaçlarla ücretsiz olarak
+edinme, kurma, çalıştırma ve kendi kullanımı için değiştirme konusunda
+münhasır olmayan, devredilemeyen bir lisans verir.
+
+Ticari olmayan kullanım, esas amacı doğrudan veya dolaylı ticari menfaat ya da
+parasal karşılık elde etmek olmayan kullanımdır. Kişisel kullanım, eğitim ve
+araştırma bu koşulu sağladıkları ölçüde dahildir. Bir kullanımın ücretsiz
+olması tek başına ticari olmadığı anlamına gelmez. Tereddüt halinde Hak
+Sahibi'nden yazılı görüş alınmalıdır.
+
+Programın kendisinin veya değiştirilmiş sürümünün yayımlanması, yeniden
+dağıtılması, başkasına devredilmesi ya da alt lisanslanması, aşağıdaki
+çıktı izni ve emredici kanuni haklar dışında önceden yazılı izin gerektirir.
+
+3. Ticari olmayan oyun ve web çıktıları
+
+Kullanıcı, oluşturduğu oyunları ve web sitelerini ticari olmayan amaçlarla
+paylaşabilir ve yayımlayabilir. Bu izin, yalnızca söz konusu çıktıyı
+çalıştırmak için çıktıya dahil edilen Program çalışma zamanı parçalarının
+çıktıyla birlikte sunulmasını kapsar. Editörün, kaynak kodunun veya çalışma
+zamanının bağımsız bir araç ya da kütüphane olarak dağıtılmasına izin vermez.
+
+Kullanıcı, kendi içeriği ve üçüncü taraf varlıklar için gerekli hakları ayrıca
+edinmelidir. Çıktılarda uygun bir yerde, örneğin hakkındaki bilgilerde veya
+belgelerde, "Designed with PROMETECH A.Ş." ibaresine yer verilmelidir; üçüncü
+taraf bildirimleri ayrıca korunmalıdır.
+
+4. Ticari kullanım
+
+Programın veya Program çalışma zamanı içeren çıktıların ticari kullanımı,
+Hak Sahibi ile önceden yapılmış yazılı bir ticari lisans sözleşmesi
+gerektirir. Bu lisans tek başına ticari kullanım izni vermez.
+
+Önerilen royalty oranı, lisanslı teknolojiyi içeren ürün veya hizmetlerden
+elde edilen brüt satış gelirinin %0,5'idir (binde beş). İadelerin, satış
+vergilerinin ve diğer düzeltmelerin hesaplamaya dahil edilmesi veya
+çıkarılması, gelir kapsamı, ödeme para birimi ve diğer hesaplama ayrıntıları
+ticari sözleşmede açıkça belirlenmelidir. Ayrı sözleşme yapılmadan bu
+ayrıntılar kesinleşmiş sayılmaz.
+
+Ticari sözleşmede farklı bir düzenleme öngörülmedikçe aylık royalty raporu
+sunulur ve ödeme raporu izleyen 30 gün içinde yapılır. Kayıt, denetim ve
+vergiye ilişkin koşullar ticari sözleşmede belirlenir.
+
+5. Kanuni haklar
+
+Bu lisanstaki hiçbir hüküm, uygulanabilir hukukun sözleşmeyle
+sınırlandırılmasına izin vermediği telif hakkı istisnalarını, bilgisayar
+programlarına ilişkin kanuni kullanım ve birlikte çalışabilirlik haklarını,
+tüketici haklarını veya diğer emredici hakları ortadan kaldırmayı amaçlamaz.
+İlgili hakkın kapsamı ve uygulanması somut olaya ve yetkili hukuka bağlıdır.
+
+6. Garanti, sorumluluk ve sona erme
+
+Kanunun izin verdiği ölçüde Program herhangi bir açık veya zımni garanti
+verilmeksizin "olduğu gibi" sunulur ve Hak Sahibi kullanımdan doğan
+zararlardan sorumlu değildir. Bu hüküm, uygulanabilir hukuk uyarınca
+feragat edilemeyen garanti, sorumluluk veya tüketici haklarını sınırlamaz.
+
+Lisans şartlarının ihlali halinde Hak Sahibi, uygulanabilir hukuk ve varsa
+ticari sözleşme saklı kalmak üzere, yazılı bildirimde bulunup ihlalin
+giderilmesi için 30 gün süre verebilir; ihlal giderilmezse lisansı
+sonlandırabilir. Kanunen izin verilen acil tedbirler ve zorunlu haklar
+saklıdır.
+
+7. Uygulanacak hukuk ve uyuşmazlıklar
+
+Türkiye hukuku esas alınır; kanunlar ihtilafı kuralları ve ilgili ülkelerde
+uygulanması zorunlu hükümler saklıdır. Uyuşmazlıklarda, emredici yetki ve
+görev kuralları ile tüketicinin vazgeçilemeyen hakları saklı kalmak üzere
+İstanbul'daki görevli mahkemeler ve icra daireleri yetkili olacaktır.
+Taraflar uyuşmazlık doğduktan sonra ayrıca tahkimi kararlaştırabilir.
+
+8. İletişim
+
+Ticari lisans ve izin talepleri: info@prometech.net.tr
+Web: https://prometech.net.tr/
