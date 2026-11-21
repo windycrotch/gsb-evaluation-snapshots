@@ -26,6 +26,20 @@ export class ProceduralIK {
   }
 
   /**
+   * Removes all IK target effectors.
+   */
+  public clearTargets(): void {
+    this.targets.clear();
+  }
+
+  /**
+   * Number of currently registered IK targets.
+   */
+  public get targetCount(): number {
+    return this.targets.size;
+  }
+
+  /**
    * Updates the skeleton hierarchy to satisfy IK constraints.
    * Implementation of Cyclic Coordinate Descent (CCDIK).
    */
