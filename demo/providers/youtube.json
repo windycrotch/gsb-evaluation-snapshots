@@ -1,0 +1,19 @@
+{
+    "title": "YouTube Test Playlist",
+    "titleSecondary": "Various YouTube Test Streams",
+
+    "media": [
+        {
+            "title": "VisionPlayer Trailer",
+            "titleSecondary": "... again xD this time from YouTube!",
+            "src":  "youtube:TPCd7Z-hrHY",
+            "poster": "https://img.youtube.com/vi/TPCd7Z-hrHY/maxresdefault.jpg"
+        },
+        {
+            "title": "Live 4k Video from Earth",
+            "titleSecondary": "Youtube Live Demo",
+            "src": "https://www.youtube.com/watch?v=fO9e9jnhYK8",
+            "poster": "https://img.youtube.com/vi/fO9e9jnhYK8/maxresdefault.jpg"
+        }
+    ]
+}

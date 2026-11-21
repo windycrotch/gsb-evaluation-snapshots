@@ -1,0 +1,169 @@
+{
+    "fr": {
+        "commands": {
+            "OK": "OK",
+            "cancel": "Annuler",
+            "reset": "Réinitialiser",
+            "play": "Lecture",
+            "pause": "Pause"
+        },
+        "misc": {
+            "audiovideo": "Audio & Vidéo",
+            "audio": "Audio",
+            "auto": "Auto",
+            "chapter": "Chapitre",
+            "isLive": "En direct",
+            "error": "Erreur",
+            "fullscreen": "Plein écran",
+            "language": "Langue",
+            "languagesub": "Langue & Sous-titres",
+            "loop": "Boucle",
+            "playbackrate": "Vitesse de lecture",
+            "on": "Activé",
+            "off": "Désactivé",
+            "quality": "Qualité",
+            "scrubber": "Barre de progression",
+            "settings": "Paramètres",
+            "subtitles": "Sous-titres",
+            "unavailable": "Indisponible",
+            "unknownLang": "Inconnu",
+            "time": "Temps",
+            "video": "Vidéo",
+            "volume": "Volume",
+            "volumeSlider": "Contrôle du volume",
+            "uiScale": "Mise à l’échelle UI"
+        },
+        "time": {
+            "hour": "Heure",
+            "hour_plural": "Heures",
+            "minute": "Minute",
+            "minute_plural": "Minutes",
+            "second": "Seconde",
+            "second_plural": "Secondes"
+        },
+        "errors": {
+            "data": {
+                "header": "Erreur dans les données média",
+                "unknown": "Une erreur est survenue lors du traitement des données du lecteur",
+                "CONFIG_LOAD_ERROR": "Le fichier de configuration n’a pas pu être chargé (le média est peut‑être lisible).",
+                "DATA_ERR_MEDIA_DATA_DENIED": "Les données média n’ont pas pu être chargées.",
+                "DATA_ERR_MEDIA_NOT_FOUND": "Aucune donnée média trouvée.",
+                "DATA_ERR_STREAM_NOT_FOUND": "Aucun flux spécifié dans les données média.",
+                "DATA_ERR_STREAM_NOT_PLAYABLE": "Aucun flux lisible trouvé, le format est probablement incompatible avec ce lecteur.",
+                "DATA_ERR_INVALID_PLAYLIST_ITEM": "Un ou plusieurs éléments de la playlist n’ont pas pu être chargés et ont été ignorés.",
+                "DATA_ERR_INVALID_INDEX": "Index de playlist invalide."
+            },
+            "media": {
+                "header": "Erreur de lecture",
+                "aborted": "La lecture a été interrompue.",
+                "alternateStreamHint": "Essayez de choisir une qualité ou une langue différente.",
+                "decodingError": "Impossible de lire le fichier média sélectionné, il est peut‑être corrompu.",
+                "fileWithError": "Fichier :",
+                "networkFailed": "Impossible de lire le fichier à cause d’une erreur réseau.",
+                "notFound": "Le fichier média sélectionné est introuvable.",
+                "unknown": "Une erreur inconnue s’est produite",
+                "unsupported": "Le fichier média sélectionné n’est pas compatible.",
+                "drmError": "Un problème est survenu avec la protection anticopie (DRM) de ce média.",
+                "serverError": "Le serveur est injoignable.",
+                "accessError": "Impossible d’accéder au média."
+            },
+            "library": {
+                "scriptLoaderErrorTitle": "Erreur de chargement",
+                "scriptLoaderErrorMessage": "${libraryName} n'a pas pu être chargé. Veuillez vérifier votre connexion et réessayer."
+            },
+            "consent": {
+                "header": "Consentement requis",
+                "denied": "${name} n'a pas été chargé car le consentement n'a pas été donné."
+            },
+            "supportMessage": ""
+        },
+        "airplay": {
+            "airplay": "AirPlay",
+            "available": "Utiliser AirPlay",
+            "unavailable": "AirPlay indisponible"
+        },
+        "audioControls": {
+            "freqBand": "Bande de fréquence"
+        },
+        "chapter": {
+            "next": "Chapitre suivant",
+            "prev": "Chapitre précédent"
+        },
+        "chromecast": {
+            "chromecast": "Chromecast",
+            "available": "Utiliser Chromecast",
+            "unavailable": "Chromecast indisponible",
+            "connected": "Connecté à ",
+            "device": "appareil distant",
+            "choose": "Choisir un appareil…",
+            "cancel": "Arrêter la diffusion",
+            "pause": "Mettre en pause la diffusion",
+            "play": "Reprendre la diffusion",
+            "isPaused": "La diffusion est en pause",
+            "isPlaying": "La diffusion est active",
+            "isBuffering": "Mise en mémoire tampon…",
+            "castError": "Impossible de se connecter à l’appareil"
+        },
+        "consent": {
+            "heading": "Consentement requis",
+            "message": "Cette vidéo est fournie par ${name} et nécessite votre consentement avant de pouvoir être chargée.",
+            "purposes": "Elle est utilisée pour ${purposes}.",
+            "purpose": {
+                "playback": "la lecture",
+                "cookies": "les cookies",
+                "advertising": "la publicité"
+            },
+            "listSep": ", ",
+            "listAnd": " et ",
+            "thirdCountry": "Cela peut inclure un transfert vers ${country}.",
+            "country": {
+                "US": "les États-Unis"
+            },
+            "privacy": "Confidentialité ${name}",
+            "agree": "Accepter",
+            "decline": "Refuser",
+            "settings": "Consentement enregistré",
+            "revoke": "Tout révoquer",
+            "revokeHint": "Vous pouvez réinitialiser ce consentement dans le panneau des paramètres."
+        },
+        "file": {
+            "select": "Sélectionner un fichier",
+            "drop": "Déposez le fichier ici",
+            "unsupported": "Format de fichier non pris en charge"
+        },
+        "pip": {
+            "title": "Image dans l’image",
+            "placeholder": "Aucune vidéo à afficher",
+            "cancel": "Fermer le PiP",
+            "iFrameNotEnabled": "Le mode Image dans l’image est bloqué par le navigateur.",
+            "enableIframe": "Votre navigateur exige une interaction directe avec la vidéo avant de lancer l’Image dans l’image. Cliquez une fois sur la zone vidéo, puis réessayez."
+        },
+        "playlist": {
+            "playlist": "Liste de lecture",
+            "open": "Ouvrir la liste",
+            "prev": "Titre précédent",
+            "next": "Titre suivant",
+            "loop": "Boucler la liste",
+            "shuffle": "Lecture aléatoire",
+            "continuous": "Lecture continue"
+        },
+        "subtitles": {
+            "fontSize": "Taille de police",
+            "fontSize_big": "Grande police",
+            "fontSize_medium": "Police moyenne",
+            "fontSize_small": "Petite police",
+            "header": "Sous-titres"
+        },
+        "videoControls": {
+            "brightness": "Luminosité",
+            "contrast": "Contraste",
+            "saturate": "Saturation",
+            "sharpen": "Netteté",
+            "hue": "Teinte"
+        },
+        "visualizerAmbient": {
+            "header": "Éclairage d’ambiance",
+            "slider": "Ajuster l’intensité"
+        }
+    }
+}
