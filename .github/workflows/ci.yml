@@ -1,0 +1,34 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - run: npm ci
+      # The gamepad test imports the engine's real input transport, and the engine
+      # source is private (minigame-labs/migo-engine). Check out only that
+      # directory with a read-only deploy key and point the test at it through
+      # MIGO_RUNTIME_DIR: no credential reaches the test itself, and a fork's pull
+      # request, which gets no secrets, fails here instead of skipping the check.
+      - name: Check out the engine's input transport
+        uses: actions/checkout@v4
+        with:
+          repository: minigame-labs/migo-engine
+          ssh-key: ${{ secrets.MIGO_ENGINE_DEPLOY_KEY }}
+          persist-credentials: false
+          path: .engine-source
+          sparse-checkout: engine/crates/runtime-v8/src
+      - run: npm test
+        env:
+          MIGO_RUNTIME_DIR: ${{ github.workspace }}/.engine-source
