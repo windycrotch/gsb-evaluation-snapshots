@@ -1,0 +1,133 @@
+# Copyright (c) 2010-2024, Lawrence Livermore National Security, LLC. Produced
+# at the Lawrence Livermore National Laboratory. All Rights reserved. See files
+# LICENSE and NOTICE for details. LLNL-CODE-443271.
+#
+# This file is part of the GLVis visualization tool and library. For more
+# information and source code availability see https://glvis.org.
+#
+# GLVis is free software; you can redistribute it and/or modify it under the
+# terms of the BSD-3 license. We welcome feedback and contributions, see file
+# CONTRIBUTING.md for details.
+
+# This script builds glvis-js using a specified ref for mfem, glvis, and
+# emscripten version. The output is uploaded as an artifact. If `make-branch`
+# is set to true, a new branch will be created with the updated code.
+
+name: Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      mfem-ref:
+        type: string
+        default: 'master'
+      glvis-ref:
+        type: string
+        default: 'master'
+      emscripten-version:
+        type: string
+        # We use 3.1.51 because later versions give compiler errors
+        # (possibly related to https://github.com/emscripten-core/emscripten/issues/21128)
+        default: '3.1.51'
+      make-branch:
+        type: boolean
+        default: false
+
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    env:
+      mfem-ref: ${{ github.event_name == 'pull_request' && 'master' || inputs.mfem-ref }}
+      glvis-ref: ${{ github.event_name == 'pull_request' && 'master' || inputs.glvis-ref }}
+      emscripten-version: ${{ github.event_name == 'pull_request' && '3.1.51' || inputs.emscripten-version }}
+
+    name: >-
+        build glvis-js |
+        mfem=${{ github.event_name == 'pull_request' && 'master' || inputs.mfem-ref }} |
+        glvis=${{ github.event_name == 'pull_request' && 'master' || inputs.glvis-ref }} |
+        emcc=${{ github.event_name == 'pull_request' && '3.1.51' || inputs.emscripten-version }}
+
+    steps:
+    # ---------------------------------------------------------------------------------
+    # Install glvis-js and dependencies
+    # ---------------------------------------------------------------------------------
+    - name: Install glvis dependencies
+      run: |
+        sudo apt-get update && sudo apt-get install \
+        libfontconfig1-dev libfreetype-dev libsdl2-dev \
+        libglew-dev libglm-dev libpng-dev git-lfs
+
+    - name: Checkout glvis-js
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        fetch-tags: true
+        submodules: recursive
+        path: glvis-js
+        lfs: true
+
+    - name: Checkout emscripten
+      uses: actions/checkout@v4
+      with:
+        repository: emscripten-core/emsdk
+        path: emsdk
+
+    - name: Install emscripten
+      run: |
+        cd emsdk
+        ./emsdk install ${{ env.emscripten-version }}
+        ./emsdk activate ${{ env.emscripten-version }}
+        echo "${GITHUB_WORKSPACE}/emsdk" >> $GITHUB_PATH
+        echo "${GITHUB_WORKSPACE}/emsdk/upstream/emscripten" >> $GITHUB_PATH
+
+    - name: Checkout mfem
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        fetch-tags: true
+        repository: mfem/mfem
+        ref: ${{ env.mfem-ref }}
+        path: mfem
+
+    - name: Checkout glvis
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        fetch-tags: true
+        repository: glvis/glvis
+        ref: ${{ env.glvis-ref }}
+        path: glvis
+
+    - name: Install glvis-js (also installs mfem + glvis)
+      run: |
+        cd glvis-js
+        make install -j 4
+
+    # ---------------------------------------------------------------------------------
+    # Generate an artifact
+    # ---------------------------------------------------------------------------------
+    - name: Print artifact info
+      run: |
+        cat glvis-js/src/versions.js
+        sha256sum glvis-js/src/*
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+          name: glvis-js
+          path: glvis-js/src
+          retention-days: 14
+
+    - name: Push changes to a new branch
+      if: ${{ github.event_name == 'workflow_dispatch' && inputs.make-branch }}
+      run: |
+        cd glvis-js
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git switch -c "ci-build-${{ github.run_id }}"
+        git add .
+        git commit -m "Updating glvis-js build"
+        git push --set-upstream origin "ci-build-${{ github.run_id }}"
