@@ -1,0 +1,51 @@
+@import "tailwindcss";
+
+@theme {
+  /* Darkroom palette */
+  --color-black: #000000;
+  --color-white: #ffffff;
+  --color-red: #e30613;
+
+  /* Surfaces */
+  --color-panel: rgba(10, 10, 10, 0.72);
+  --color-border: rgba(255, 255, 255, 0.14);
+
+  /* Type (next/font vars from lib/styles/fonts.ts, with fallbacks) */
+  --font-display: var(--next-font-display), "Arial Narrow", Arial, sans-serif;
+  --font-mono:
+    var(--next-font-mono), ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+
+/* Default theme tokens (dark) */
+:root {
+  --primary: var(--color-black);
+  --secondary: var(--color-white);
+  --contrast: var(--color-red);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+body {
+  background: var(--primary);
+  color: var(--secondary);
+  font-family: var(--font-mono);
+  -webkit-font-smoothing: antialiased;
+  overscroll-behavior: none;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
