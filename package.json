@@ -1,0 +1,71 @@
+{
+  "name": "bone-2d",
+  "private": true,
+  "version": "0.92.0",
+  "description": "Open-source browser-based 2D skeletal animation editor with Spine 4.3 compatible export",
+  "license": "MIT",
+  "keywords": [
+    "2d",
+    "animation",
+    "skeletal-animation",
+    "spine",
+    "editor",
+    "webgl",
+    "gamedev"
+  ],
+  "homepage": "https://iamgatz.github.io/Bone-2D/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/iamgatz/Bone-2D.git"
+  },
+  "bugs": {
+    "url": "https://github.com/iamgatz/Bone-2D/issues"
+  },
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "preview": "vite preview",
+    "cli": "vite build --ssr cli/bone2d.ts --outDir dist-cli --emptyOutDir --logLevel error && node dist-cli/bone2d.js",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "knip": "knip",
+    "check": "npm run typecheck && npm run lint && npm run format:check && npm test",
+    "e2e": "playwright test"
+  },
+  "dependencies": {
+    "@fontsource-variable/inter": "^5.3.0",
+    "ag-psd": "^34.2.1",
+    "delaunator": "^5.1.0",
+    "immer": "^11.2.10",
+    "lucide-react": "^1.73.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.14.0",
+    "@eslint/js": "^9.39.5",
+    "@esotericsoftware/spine-core": "^4.3.13",
+    "@playwright/test": "^1.65.1",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.3.0",
+    "eslint": "^9.39.5",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-import-resolver-typescript": "^4.4.5",
+    "eslint-plugin-import-x": "^4.18.1",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "globals": "^17.14.0",
+    "knip": "^6.46.1",
+    "prettier": "^3.10.1",
+    "typescript": "~6.0.3",
+    "typescript-eslint": "^8.73.0",
+    "vite": "^8.3.8",
+    "vitest": "^5.1.0"
+  }
+}

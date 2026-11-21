@@ -1,0 +1,1291 @@
+{
+ "skeleton": {
+  "hash": "legacy42",
+  "spine": "4.2.43",
+  "x": -400,
+  "y": -300,
+  "width": 900,
+  "height": 600,
+  "images": "./images/",
+  "audio": ""
+ },
+ "bones": [
+  {
+   "name": "root"
+  },
+  {
+   "name": "torso",
+   "parent": "root",
+   "length": 60,
+   "x": 0,
+   "y": 100,
+   "rotation": 90
+  },
+  {
+   "name": "head",
+   "parent": "torso",
+   "length": 30,
+   "x": 60
+  },
+  {
+   "name": "armU",
+   "parent": "torso",
+   "length": 50,
+   "x": 50,
+   "y": 20,
+   "rotation": -20
+  },
+  {
+   "name": "armL",
+   "parent": "armU",
+   "length": 45,
+   "x": 50,
+   "rotation": 15
+  },
+  {
+   "name": "hand",
+   "parent": "armL",
+   "length": 20,
+   "x": 45
+  },
+  {
+   "name": "ikTarget",
+   "parent": "root",
+   "x": 150,
+   "y": 170
+  },
+  {
+   "name": "legU",
+   "parent": "root",
+   "length": 60,
+   "x": -20,
+   "y": 100,
+   "rotation": -90
+  },
+  {
+   "name": "legL",
+   "parent": "legU",
+   "length": 60,
+   "x": 60,
+   "rotation": 10
+  },
+  {
+   "name": "footTarget",
+   "parent": "root",
+   "x": -40,
+   "y": 10
+  },
+  {
+   "name": "dNoScale",
+   "parent": "torso",
+   "length": 30,
+   "x": 30,
+   "y": 30,
+   "rotation": 15,
+   "scaleX": 1.3,
+   "scaleY": 0.8,
+   "shearX": 10,
+   "inherit": "noScale"
+  },
+  {
+   "name": "dNoScaleChild",
+   "parent": "dNoScale",
+   "length": 20,
+   "x": 30,
+   "rotation": 30
+  },
+  {
+   "name": "dOnlyTrans",
+   "parent": "torso",
+   "length": 30,
+   "x": 30,
+   "y": -30,
+   "rotation": 25,
+   "scaleX": 0.9,
+   "scaleY": 1.2,
+   "inherit": "onlyTranslation"
+  },
+  {
+   "name": "dNoRot",
+   "parent": "torso",
+   "length": 30,
+   "x": 10,
+   "y": 40,
+   "rotation": -20,
+   "scaleX": 1.1,
+   "scaleY": 1.4,
+   "shearY": 12,
+   "inherit": "noRotationOrReflection"
+  },
+  {
+   "name": "dNoScaleRefl",
+   "parent": "torso",
+   "length": 30,
+   "x": 10,
+   "y": -40,
+   "rotation": 40,
+   "scaleX": 0.7,
+   "scaleY": 1.1,
+   "inherit": "noScaleOrReflection"
+  },
+  {
+   "name": "tcSrc",
+   "parent": "root",
+   "length": 30,
+   "x": 220,
+   "y": -100,
+   "rotation": 30,
+   "scaleX": 1.3,
+   "scaleY": 0.8,
+   "shearY": 15
+  },
+  {
+   "name": "tcA1",
+   "parent": "root",
+   "length": 20,
+   "x": -200
+  },
+  {
+   "name": "tcA2",
+   "parent": "tcA1",
+   "length": 20,
+   "x": 20
+  },
+  {
+   "name": "tcB",
+   "parent": "root",
+   "length": 20,
+   "x": -200,
+   "y": 60,
+   "rotation": 20,
+   "scaleX": 1.1
+  },
+  {
+   "name": "grp",
+   "parent": "root",
+   "x": 300,
+   "y": 50,
+   "rotation": 10,
+   "scaleX": 1.2,
+   "scaleY": 0.9
+  },
+  {
+   "name": "srcL",
+   "parent": "root",
+   "length": 25,
+   "x": 300,
+   "y": -150,
+   "rotation": 45,
+   "scaleX": 1.6,
+   "scaleY": 0.7,
+   "shearY": -8
+  },
+  {
+   "name": "tcC",
+   "parent": "grp",
+   "length": 20,
+   "x": 30,
+   "y": 10,
+   "rotation": 15,
+   "scaleX": 0.8,
+   "shearY": 5
+  },
+  {
+   "name": "tcD",
+   "parent": "grp",
+   "length": 20,
+   "x": 30,
+   "y": -30,
+   "rotation": -10,
+   "scaleX": 1.4
+  },
+  {
+   "name": "pathHolder",
+   "parent": "root",
+   "length": 10,
+   "x": -300,
+   "y": -100,
+   "rotation": 15,
+   "scaleX": 1.2,
+   "scaleY": 0.9
+  },
+  {
+   "name": "p1",
+   "parent": "root",
+   "length": 30,
+   "x": -300,
+   "y": -200
+  },
+  {
+   "name": "p2",
+   "parent": "p1",
+   "length": 30,
+   "x": 30
+  },
+  {
+   "name": "p3",
+   "parent": "p2",
+   "length": 30,
+   "x": 30
+  },
+  {
+   "name": "q1",
+   "parent": "root",
+   "length": 30,
+   "x": -100,
+   "y": -250
+  },
+  {
+   "name": "q2",
+   "parent": "q1",
+   "length": 30,
+   "x": 30
+  },
+  {
+   "name": "skinBone",
+   "parent": "torso",
+   "length": 20,
+   "x": 20,
+   "y": 60,
+   "skin": true
+  }
+ ],
+ "slots": [
+  {
+   "name": "body",
+   "bone": "torso",
+   "color": "ffffffff",
+   "attachment": "body"
+  },
+  {
+   "name": "head",
+   "bone": "head",
+   "color": "ffe0e0ff",
+   "dark": "102030",
+   "attachment": "body"
+  },
+  {
+   "name": "armMesh",
+   "bone": "armU",
+   "attachment": "armMesh"
+  },
+  {
+   "name": "tailMesh",
+   "bone": "dNoScale",
+   "attachment": "tailMesh"
+  },
+  {
+   "name": "pathSlot",
+   "bone": "pathHolder",
+   "attachment": "rope"
+  },
+  {
+   "name": "pathSlot2",
+   "bone": "root",
+   "attachment": "rope2"
+  },
+  {
+   "name": "extra",
+   "bone": "skinBone"
+  }
+ ],
+ "ik": [
+  {
+   "name": "arm ik",
+   "order": 0,
+   "bones": [
+    "armU",
+    "armL"
+   ],
+   "target": "ikTarget",
+   "mix": 0.8,
+   "softness": 10,
+   "bendPositive": false
+  },
+  {
+   "name": "leg ik",
+   "order": 1,
+   "bones": [
+    "legU",
+    "legL"
+   ],
+   "target": "footTarget",
+   "compress": true,
+   "stretch": true,
+   "uniform": true
+  },
+  {
+   "name": "hand ik",
+   "order": 2,
+   "skin": true,
+   "bones": [
+    "hand"
+   ],
+   "target": "ikTarget",
+   "mix": 0.5
+  }
+ ],
+ "transform": [
+  {
+   "name": "tcA",
+   "order": 3,
+   "bones": [
+    "tcA1",
+    "tcA2"
+   ],
+   "target": "tcSrc",
+   "rotation": 10,
+   "x": 5,
+   "y": -5,
+   "scaleX": 0.1,
+   "scaleY": 0.2,
+   "shearY": 5,
+   "mixRotate": 0.7,
+   "mixX": 0.8,
+   "mixY": 0.6,
+   "mixScaleX": 0.5,
+   "mixScaleY": 0.4,
+   "mixShearY": 0.3
+  },
+  {
+   "name": "tcB",
+   "order": 4,
+   "bones": [
+    "tcB"
+   ],
+   "target": "tcSrc",
+   "relative": true,
+   "rotation": 15,
+   "x": 10,
+   "y": 5,
+   "scaleX": -0.1,
+   "scaleY": 0.1,
+   "shearY": 8,
+   "mixRotate": 0.9,
+   "mixX": 0.5,
+   "mixScaleX": 0.6,
+   "mixShearY": 0.5
+  },
+  {
+   "name": "tcC",
+   "order": 5,
+   "bones": [
+    "tcC"
+   ],
+   "target": "srcL",
+   "local": true,
+   "rotation": 5,
+   "x": 3,
+   "y": -4,
+   "shearY": 2,
+   "mixRotate": 0.6,
+   "mixX": 0.7,
+   "mixY": 0.8,
+   "mixScaleX": 0,
+   "mixScaleY": 0,
+   "mixShearY": 0.4
+  },
+  {
+   "name": "tcD",
+   "order": 6,
+   "bones": [
+    "tcD"
+   ],
+   "target": "srcL",
+   "local": true,
+   "relative": true,
+   "rotation": 5,
+   "x": 3,
+   "y": -4,
+   "scaleX": 0.1,
+   "scaleY": -0.2,
+   "shearY": 2,
+   "mixRotate": 0.6,
+   "mixX": 0.7,
+   "mixScaleX": 0.5,
+   "mixShearY": 0.4
+  }
+ ],
+ "path": [
+  {
+   "name": "path tangent",
+   "order": 7,
+   "bones": [
+    "p1",
+    "p2",
+    "p3"
+   ],
+   "target": "pathSlot",
+   "position": 0.1,
+   "mixRotate": 0.9,
+   "mixX": 0.8
+  },
+  {
+   "name": "path chain",
+   "order": 8,
+   "bones": [
+    "q1",
+    "q2"
+   ],
+   "target": "pathSlot",
+   "positionMode": "fixed",
+   "spacingMode": "fixed",
+   "rotateMode": "chain",
+   "position": 20,
+   "spacing": 40,
+   "rotation": 20
+  },
+  {
+   "name": "path scale",
+   "order": 9,
+   "skin": false,
+   "bones": [
+    "tcA1"
+   ],
+   "target": "pathSlot2",
+   "rotateMode": "chainScale",
+   "spacingMode": "percent",
+   "spacing": 0.2
+  }
+ ],
+ "skins": [
+  {
+   "name": "default",
+   "attachments": {
+    "body": {
+     "body": {
+      "type": "region",
+      "name": "body",
+      "path": "body",
+      "x": 0,
+      "y": 0,
+      "width": 60,
+      "height": 80
+     }
+    },
+    "head": {
+     "body": {
+      "type": "region",
+      "name": "body",
+      "path": "body",
+      "x": 0,
+      "y": 0,
+      "width": 40,
+      "height": 40
+     }
+    },
+    "armMesh": {
+     "armMesh": {
+      "type": "mesh",
+      "path": "mesh",
+      "uvs": [
+       0,
+       1,
+       1,
+       1,
+       1,
+       0,
+       0,
+       0
+      ],
+      "triangles": [
+       1,
+       2,
+       3,
+       1,
+       3,
+       0
+      ],
+      "vertices": [
+       2,
+       3,
+       10,
+       10,
+       0.6,
+       4,
+       -40,
+       10,
+       0.4,
+       2,
+       3,
+       10,
+       -10,
+       0.5,
+       4,
+       -40,
+       -10,
+       0.5,
+       1,
+       4,
+       30,
+       -10,
+       1,
+       2,
+       3,
+       60,
+       10,
+       0.3,
+       4,
+       10,
+       10,
+       0.7
+      ],
+      "hull": 4,
+      "width": 40,
+      "height": 40
+     }
+    },
+    "tailMesh": {
+     "tailMesh": {
+      "type": "mesh",
+      "path": "mesh",
+      "uvs": [
+       0,
+       1,
+       1,
+       1,
+       1,
+       0,
+       0,
+       0
+      ],
+      "triangles": [
+       1,
+       2,
+       3,
+       1,
+       3,
+       0
+      ],
+      "vertices": [
+       -20,
+       -20,
+       20,
+       -20,
+       20,
+       20,
+       -20,
+       20
+      ],
+      "hull": 4,
+      "width": 40,
+      "height": 40
+     }
+    },
+    "pathSlot": {
+     "rope": {
+      "type": "path",
+      "vertexCount": 9,
+      "vertices": [
+       -80,
+       40,
+       -40,
+       40,
+       0,
+       40,
+       40,
+       80,
+       100,
+       90,
+       160,
+       100,
+       200,
+       20,
+       260,
+       0,
+       300,
+       0
+      ],
+      "lengths": [
+       150,
+       320
+      ],
+      "color": "ff7f00ff"
+     }
+    },
+    "pathSlot2": {
+     "rope2": {
+      "type": "path",
+      "closed": true,
+      "vertexCount": 12,
+      "vertices": [
+       0,
+       0,
+       40,
+       0,
+       80,
+       0,
+       100,
+       40,
+       120,
+       80,
+       100,
+       120,
+       80,
+       150,
+       40,
+       150,
+       0,
+       150,
+       -20,
+       110,
+       -20,
+       60,
+       -20,
+       20
+      ],
+      "lengths": [
+       120,
+       250,
+       380,
+       500
+      ],
+      "color": "00ff7fff"
+     }
+    }
+   }
+  },
+  {
+   "name": "alt",
+   "bones": [
+    "skinBone"
+   ],
+   "ik": [
+    "hand ik"
+   ],
+   "attachments": {
+    "extra": {
+     "stripe": {
+      "type": "region",
+      "name": "stripe",
+      "path": "stripe",
+      "x": 0,
+      "y": 0,
+      "width": 20,
+      "height": 60
+     }
+    },
+    "body": {
+     "body": {
+      "type": "region",
+      "name": "stripe",
+      "path": "stripe",
+      "x": 0,
+      "y": 0,
+      "width": 50,
+      "height": 90
+     }
+    }
+   }
+  }
+ ],
+ "events": {
+  "footstep": {
+   "int": 1,
+   "float": 0.5,
+   "string": "step"
+  }
+ },
+ "animations": {
+  "idle": {
+   "slots": {
+    "body": {
+     "rgba": [
+      {
+       "time": 0,
+       "color": "ffffffff"
+      },
+      {
+       "time": 0.6,
+       "color": "ff8040c0",
+       "curve": [
+        0.3,
+        0,
+        0.7,
+        1
+       ]
+      },
+      {
+       "time": 1.2,
+       "color": "ffffffff"
+      }
+     ]
+    },
+    "head": {
+     "rgba2": [
+      {
+       "time": 0,
+       "light": "ffe0e0ff",
+       "dark": "102030"
+      },
+      {
+       "time": 1.2,
+       "light": "80ffe0ff",
+       "dark": "ff2040",
+       "curve": "stepped"
+      }
+     ]
+    },
+    "tailMesh": {
+     "attachment": [
+      {
+       "time": 0,
+       "name": "tailMesh"
+      },
+      {
+       "time": 0.9,
+       "name": null
+      },
+      {
+       "time": 1.1,
+       "name": "tailMesh"
+      }
+     ]
+    }
+   },
+   "bones": {
+    "torso": {
+     "rotate": [
+      {
+       "time": 0,
+       "value": 0,
+       "curve": [
+        0.25,
+        0,
+        0.75,
+        1
+       ]
+      },
+      {
+       "time": 0.6,
+       "value": 8
+      },
+      {
+       "time": 1.2,
+       "value": 0
+      }
+     ],
+     "translate": [
+      {
+       "time": 0,
+       "x": 0,
+       "y": 0
+      },
+      {
+       "time": 0.6,
+       "x": 4,
+       "y": -6
+      },
+      {
+       "time": 1.2
+      }
+     ]
+    },
+    "head": {
+     "translatex": [
+      {
+       "time": 0,
+       "value": 0
+      },
+      {
+       "time": 0.6,
+       "value": 5
+      },
+      {
+       "time": 1.2,
+       "value": 0
+      }
+     ],
+     "scaley": [
+      {
+       "time": 0,
+       "value": 1
+      },
+      {
+       "time": 0.6,
+       "value": 1.15
+      },
+      {
+       "time": 1.2,
+       "value": 1
+      }
+     ]
+    },
+    "armU": {
+     "shear": [
+      {
+       "time": 0,
+       "x": 0,
+       "y": 0
+      },
+      {
+       "time": 1.2,
+       "x": 8,
+       "y": 4
+      }
+     ],
+     "rotate": [
+      {
+       "time": 0,
+       "value": 0
+      },
+      {
+       "time": 1.2,
+       "value": -15
+      }
+     ]
+    },
+    "ikTarget": {
+     "translate": [
+      {
+       "time": 0,
+       "x": 0,
+       "y": 0
+      },
+      {
+       "time": 0.6,
+       "x": -40,
+       "y": 30,
+       "curve": [
+        0.4,
+        0,
+        0.6,
+        1
+       ]
+      },
+      {
+       "time": 1.2,
+       "x": 0,
+       "y": 0
+      }
+     ]
+    },
+    "footTarget": {
+     "translate": [
+      {
+       "time": 0,
+       "x": 0,
+       "y": 0
+      },
+      {
+       "time": 1.2,
+       "x": 60,
+       "y": 40
+      }
+     ]
+    },
+    "tcSrc": {
+     "rotate": [
+      {
+       "time": 0,
+       "value": 0
+      },
+      {
+       "time": 1.2,
+       "value": 50
+      }
+     ],
+     "translate": [
+      {
+       "time": 0,
+       "x": 0,
+       "y": 0
+      },
+      {
+       "time": 1.2,
+       "x": 20,
+       "y": -30
+      }
+     ],
+     "scale": [
+      {
+       "time": 0,
+       "x": 1,
+       "y": 1
+      },
+      {
+       "time": 1.2,
+       "x": 1.2,
+       "y": 0.9
+      }
+     ],
+     "shear": [
+      {
+       "time": 0,
+       "y": 0
+      },
+      {
+       "time": 1.2,
+       "y": 10
+      }
+     ]
+    },
+    "srcL": {
+     "rotate": [
+      {
+       "time": 0,
+       "value": 0
+      },
+      {
+       "time": 1.2,
+       "value": 35
+      }
+     ],
+     "translate": [
+      {
+       "time": 0,
+       "x": 0,
+       "y": 0
+      },
+      {
+       "time": 1.2,
+       "x": 10,
+       "y": 25
+      }
+     ],
+     "scale": [
+      {
+       "time": 0,
+       "x": 1,
+       "y": 1
+      },
+      {
+       "time": 1.2,
+       "x": 1.3,
+       "y": 0.8
+      }
+     ],
+     "shear": [
+      {
+       "time": 0,
+       "x": 0,
+       "y": 0
+      },
+      {
+       "time": 1.2,
+       "x": 0,
+       "y": 12
+      }
+     ]
+    },
+    "grp": {
+     "rotate": [
+      {
+       "time": 0,
+       "value": 0
+      },
+      {
+       "time": 1.2,
+       "value": -20
+      }
+     ]
+    },
+    "pathHolder": {
+     "rotate": [
+      {
+       "time": 0,
+       "value": 0
+      },
+      {
+       "time": 1.2,
+       "value": 25
+      }
+     ]
+    },
+    "dNoScale": {
+     "rotate": [
+      {
+       "time": 0,
+       "value": 0
+      },
+      {
+       "time": 1.2,
+       "value": 20
+      }
+     ]
+    }
+   },
+   "ik": {
+    "arm ik": [
+     {
+      "time": 0,
+      "mix": 0.8,
+      "softness": 10,
+      "bendPositive": false
+     },
+     {
+      "time": 0.6,
+      "mix": 0.3,
+      "softness": 0,
+      "bendPositive": true,
+      "curve": [
+       0.3,
+       0,
+       0.7,
+       1
+      ]
+     },
+     {
+      "time": 1.2,
+      "mix": 1,
+      "softness": 20,
+      "bendPositive": false
+     }
+    ],
+    "leg ik": [
+     {
+      "time": 0,
+      "mix": 1,
+      "compress": true,
+      "stretch": true
+     },
+     {
+      "time": 1.2,
+      "mix": 0.5,
+      "compress": false,
+      "stretch": true
+     }
+    ]
+   },
+   "transform": {
+    "tcA": [
+     {
+      "time": 0,
+      "mixRotate": 0.7,
+      "mixX": 0.8,
+      "mixY": 0.6,
+      "mixScaleX": 0.5,
+      "mixScaleY": 0.4,
+      "mixShearY": 0.3
+     },
+     {
+      "time": 1.2,
+      "mixRotate": 0.2,
+      "mixX": 1,
+      "mixY": 1,
+      "mixScaleX": 0.9,
+      "mixScaleY": 0.9,
+      "mixShearY": 1
+     }
+    ],
+    "tcB": [
+     {
+      "time": 0,
+      "mixRotate": 0.9,
+      "mixX": 0.5,
+      "mixScaleX": 0.6,
+      "mixShearY": 0.5
+     },
+     {
+      "time": 1.2,
+      "mixRotate": 0.4,
+      "mixX": 0.9,
+      "mixScaleX": 0.2,
+      "mixShearY": 0.9
+     }
+    ],
+    "tcD": [
+     {
+      "time": 0,
+      "mixRotate": 0.6,
+      "mixX": 0.7,
+      "mixScaleX": 0.5,
+      "mixShearY": 0.4
+     },
+     {
+      "time": 1.2,
+      "mixRotate": 1,
+      "mixX": 0.2,
+      "mixScaleX": 1,
+      "mixShearY": 1
+     }
+    ]
+   },
+   "path": {
+    "path tangent": {
+     "position": [
+      {
+       "time": 0,
+       "value": 0.1
+      },
+      {
+       "time": 1.2,
+       "value": 0.7
+      }
+     ],
+     "spacing": [
+      {
+       "time": 0,
+       "value": 0
+      },
+      {
+       "time": 1.2,
+       "value": 12
+      }
+     ],
+     "mix": [
+      {
+       "time": 0,
+       "mixRotate": 0.9,
+       "mixX": 0.8
+      },
+      {
+       "time": 1.2,
+       "mixRotate": 0.4,
+       "mixX": 1
+      }
+     ]
+    },
+    "path chain": {
+     "position": [
+      {
+       "time": 0,
+       "value": 20
+      },
+      {
+       "time": 1.2,
+       "value": 120
+      }
+     ],
+     "spacing": [
+      {
+       "time": 0,
+       "value": 40
+      },
+      {
+       "time": 1.2,
+       "value": 55
+      }
+     ]
+    },
+    "path scale": {
+     "position": [
+      {
+       "time": 0,
+       "value": 0
+      },
+      {
+       "time": 1.2,
+       "value": 0.3
+      }
+     ]
+    }
+   },
+   "attachments": {
+    "default": {
+     "tailMesh": {
+      "tailMesh": {
+       "deform": [
+        {
+         "time": 0
+        },
+        {
+         "time": 0.5,
+         "vertices": [
+          3,
+          -2,
+          0,
+          5,
+          -4,
+          4,
+          6,
+          0
+         ],
+         "curve": [
+          0.3,
+          0,
+          0.7,
+          1
+         ]
+        },
+        {
+         "time": 1.2,
+         "offset": 2,
+         "vertices": [
+          -6,
+          1,
+          2,
+          2
+         ]
+        }
+       ]
+      }
+     },
+     "armMesh": {
+      "armMesh": {
+       "deform": [
+        {
+         "time": 0
+        },
+        {
+         "time": 0.8,
+         "vertices": [
+          1,
+          2,
+          3,
+          4,
+          0,
+          0,
+          5,
+          6,
+          7,
+          8,
+          1,
+          1,
+          2,
+          2,
+          0,
+          0,
+          3,
+          4,
+          5,
+          6
+         ]
+        }
+       ]
+      }
+     }
+    }
+   },
+   "drawOrder": [
+    {
+     "time": 0.4,
+     "offsets": [
+      {
+       "slot": "body",
+       "offset": 2
+      }
+     ]
+    },
+    {
+     "time": 0.9
+    }
+   ],
+   "events": [
+    {
+     "time": 0.3,
+     "name": "footstep"
+    },
+    {
+     "time": 0.9,
+     "name": "footstep",
+     "int": 3,
+     "float": 1.5,
+     "string": "late"
+    }
+   ]
+  },
+  "still": {
+   "bones": {
+    "torso": {
+     "rotate": [
+      {
+       "time": 0,
+       "value": 12
+      }
+     ]
+    }
+   }
+  }
+ }
+}

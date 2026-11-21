@@ -1,0 +1,181 @@
+/*
+ * Design tokens of Bone 2D.
+ *
+ * Every colour, size, type step, layer and duration of the interface is named here; app.css and the components use the names,
+ * and the canvas code (viewport overlay, dopesheet, graph editor) reads the same values through src/editor/ui/tokens.ts,
+ * so a change here reaches the whole editor. tests/tokens.test.ts holds the rules: contrast pairs (WCAG AA), every var() is
+ * defined, no hex colour outside this file.
+ */
+:root {
+  /* ------------------------------------------------------------ surfaces, darkest to lightest */
+  --bg: #0d0f13; /* the window */
+  --sunken: #0f1217; /* inputs, toggles, switch tracks: things that are set into a panel */
+  --sunken-2: #10131a; /* cards inside a panel, the canvases of the timeline */
+  --viewport: #13161c;
+  --panel: #14171d;
+  --panel-2: #191d25; /* menus, dialogs */
+  --panel-3: #212632; /* buttons, chips */
+  --panel-4: #2a3040; /* a button under the pointer */
+  --glass: rgba(20, 23, 29, 0.92); /* floating tool bars over the viewport */
+  --scrim: rgba(6, 8, 11, 0.6); /* behind a dialog */
+  --checker: #1a1e27; /* the checkerboard behind transparent images */
+
+  /* ------------------------------------------------------------ lines and states */
+  --border: #262b36;
+  --border-strong: #343b4a;
+  --hover: rgba(255, 255, 255, 0.035);
+  --press: rgba(255, 255, 255, 0.07);
+  --scroll-thumb: #2e3441;
+  --scroll-thumb-hover: #3b4352;
+
+  /* ------------------------------------------------------------ text (AA on every panel surface: see tests/tokens.test.ts) */
+  --text: #e6e9ef;
+  --text-dim: #aab1be;
+  --muted: #8a93a4;
+
+  /* ------------------------------------------------------------ brand and mode colours */
+  --accent: #31d0aa; /* Setup mode, selection, focus */
+  --accent-ink: #05211b; /* text on --accent */
+  --accent-soft: rgba(49, 208, 170, 0.14);
+  --accent-line: rgba(49, 208, 170, 0.45);
+  --accent-glow: #bff5e8; /* the outline of a selected key */
+  --hover-accent: #9fe9d6; /* a hovered bone */
+  --animate: #ff9f43; /* Animate mode, the playhead, keys */
+  --animate-ink: #2a1600; /* text on --animate */
+  --animate-soft: rgba(255, 159, 67, 0.14);
+  --animate-line: rgba(255, 159, 67, 0.5);
+  --danger: #ff6b6b;
+  --danger-soft: rgba(255, 107, 107, 0.16);
+  --danger-line: rgba(255, 107, 107, 0.45);
+  --danger-ink: #ffd0d0; /* text on a red-tinted surface */
+
+  /* ------------------------------------------------------------ the kinds of things in a rig (icons, chips, viewport gizmos) */
+  --kind-ik: #ff7a59;
+  --kind-transform: #b38cff;
+  --kind-slider: #4cc9f0;
+  --kind-path: #ff7f00;
+  --kind-physics: #4cc9a8;
+  --kind-clipping: #ce3a3a;
+  --kind-boundingbox: #61f000;
+  --axis-x: #ff6464;
+  --axis-y: #6ee18c;
+  --gizmo-rotate: #ffc85a;
+  --gizmo-scale: #78aaff;
+  --gizmo-shear: #c98bff;
+  --handle-hover: #ffffff; /* a vertex or a path node under the pointer */
+  --vertex-deformed: #ff9f43; /* a mesh vertex the current pose has moved (Deform tool) */
+  --mesh-edge: #ff9f43; /* a manual mesh edge (Ctrl+drag between two vertices) */
+  --mesh-hull: #4fd8e8; /* the outline edges of a mesh in the mesh tool */
+  --handle-tangent: #ffd479; /* the handles of a path node */
+  --handle-outline: rgba(8, 10, 14, 0.95);
+  --curve-1: #ff6b6b; /* the channels of the graph editor: x / r, y / g, z / b, w / a */
+  --curve-2: #6ee18c;
+  --curve-3: #6aa8ff;
+  --curve-4: #c9ccd6;
+
+  /* ------------------------------------------------------------ the keys of the dopesheet, by what they animate */
+  --key-bone: #c9d4e6;
+  --key-slot: #d9c7f0;
+  --key-ik: #ffb08f;
+  --key-deform: #9fd6ff;
+  --key-order: #e6dd9f;
+  --key-event: #ffd0e6;
+  /* the colours a timeline marker can have (a position in the palette is saved, not the colour) */
+  --marker-1: #ff6b6b;
+  --marker-2: #ffb454;
+  --marker-3: #f2e45c;
+  --marker-4: #5fd39a;
+  --marker-5: #5ab6ff;
+  --marker-6: #c792ff;
+  --key-outline: rgba(10, 12, 16, 0.9);
+
+  /* ------------------------------------------------------------ timeline and graph canvases */
+  --tl-ruler: #12151b;
+  --tl-grid: rgba(255, 255, 255, 0.05);
+  --tl-grid-frame: rgba(255, 255, 255, 0.025);
+  --tl-row-group: rgba(255, 255, 255, 0.045);
+  --tl-row-alt: rgba(255, 255, 255, 0.018);
+  --tl-row-selected: rgba(49, 208, 170, 0.09);
+  --tl-tick: rgba(255, 255, 255, 0.2);
+  --tl-tick-strong: rgba(255, 255, 255, 0.34);
+  --tl-label: #8a93a4;
+  --tl-label-strong: #cfd6e3;
+  --tl-after-end: rgba(0, 0, 0, 0.35);
+
+  /* ------------------------------------------------------------ spacing (a 2 px step on a 4 px grid) */
+  --sp-1: 2px;
+  --sp-2: 4px;
+  --sp-3: 6px;
+  --sp-4: 8px;
+  --sp-5: 10px;
+  --sp-6: 12px;
+  --sp-7: 16px;
+  --sp-8: 24px;
+
+  /* ------------------------------------------------------------ shape */
+  --radius-xs: 4px; /* key caps, small inputs inside a control */
+  --radius-sm: 5px; /* buttons, fields */
+  --radius: 8px; /* cards, thumbnails */
+  --radius-lg: 12px; /* menus, dialogs, floating tool bars */
+  --radius-pill: 999px;
+
+  /* ------------------------------------------------------------ sizes of the parts */
+  --h-topbar: 46px;
+  --h-panel-head: 34px;
+  --h-row: 25px; /* tree rows */
+  --h-control: 26px; /* fields, selects, swatches */
+  --h-button: 28px;
+  --h-tl-bar: 40px;
+  --h-tl-ruler: 28px;
+  --h-tl-row: 24px;
+  --w-tl-labels: 232px;
+  --w-label: 90px; /* the label column of an inspector row */
+  --w-key: 24px; /* the key button column of an inspector row */
+  --icon-sm: 14px;
+  --icon-md: 17px;
+
+  /* ------------------------------------------------------------ type */
+  --font: 'Inter Variable', Inter, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --mono: ui-monospace, 'JetBrains Mono', 'Cascadia Code', Consolas, monospace;
+  --fs-2xs: 8.5px; /* hotkey letters on tool buttons */
+  --fs-xs: 10px;
+  --fs-sm: 11px;
+  --fs-md: 12.5px; /* the base size */
+  --fs-lg: 14px;
+  --fs-xl: 16px;
+  --fw-semibold: 600;
+  --fw-heading: 650;
+  --fw-bold: 700;
+  --lh: 1.35;
+  --lh-text: 1.55;
+
+  /* ------------------------------------------------------------ layers */
+  --z-empty: 2;
+  --z-border: 3;
+  --z-hud: 4;
+  --z-split: 5;
+  --z-float: 20; /* floating tool windows: above the viewport and its HUD, below menus and dialogs */
+  --z-menu: 50;
+  --z-dialog: 100;
+  --z-toast: 200;
+  --z-tooltip: 300;
+
+  /* ------------------------------------------------------------ depth and motion */
+  --shadow: 0 8px 30px rgba(0, 0, 0, 0.45), 0 1px 0 rgba(255, 255, 255, 0.03) inset;
+  --shadow-sm: 0 4px 14px rgba(0, 0, 0, 0.4);
+  --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
+  --dur-fast: 0.08s;
+  --dur: 0.12s;
+  --dur-slow: 0.18s;
+  --ease: ease-out;
+
+  color-scheme: dark;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-fast: 0.01ms;
+    --dur: 0.01ms;
+    --dur-slow: 0.01ms;
+  }
+}

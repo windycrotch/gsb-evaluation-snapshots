@@ -1,0 +1,7 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "entry": ["src/player/main.ts", "cli/bone2d.ts", "tests/**/*.test.ts", "e2e/**/*.spec.ts"],
+  "project": ["src/**/*.{ts,tsx}", "cli/**/*.ts", "tests/**/*.ts", "e2e/**/*.ts"],
+  "ignore": ["src/i18n/jsx-runtime.ts", "src/i18n/jsx-dev-runtime.ts"],
+  "ignoreUnresolved": ["@/i18n"]
+}

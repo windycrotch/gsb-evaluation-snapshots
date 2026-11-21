@@ -1,0 +1,18 @@
+node_modules
+dist
+*.log
+.DS_Store
+Thumbs.db
+*.tsbuildinfo
+coverage
+.env
+.env.*
+.vite
+dist-cli
+
+# launch kit (video, post drafts): local only
+docs/promo
+
+# Playwright output
+test-results
+playwright-report
