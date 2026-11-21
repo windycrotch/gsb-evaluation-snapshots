@@ -1,0 +1,62 @@
+// Autocorrelation and a simple pitch detector.
+
+import {
+  assertNonNegative,
+  assertPositive,
+  assertInteger,
+  assertFiniteSamples,
+  assertInRange,
+} from './validation.js';
+
+export function autocorrelation(samples: ArrayLike<number>): Float32Array {
+  assertFiniteSamples(samples);
+  if (samples.length > 8192)
+    throw new RangeError('Direct autocorrelation supports at most 8192 samples');
+  if (samples.length === 0) return new Float32Array(0);
+  const N = samples.length;
+  const out = new Float32Array(N);
+  let energy = 0;
+  for (let i = 0; i < N; i++) energy += (samples[i] ?? 0) * (samples[i] ?? 0);
+  if (energy === 0) return out;
+  for (let lag = 0; lag < N; lag++) {
+    let s = 0;
+    for (let i = 0; i < N - lag; i++) s += (samples[i] ?? 0) * (samples[i + lag] ?? 0);
+    out[lag] = s / energy;
+  }
+  return out;
+}
+
+export function estimatePitch(
+  samples: ArrayLike<number>,
+  sampleRate: number,
+  options: { minLag?: number; maxLag?: number } = {},
+): { period: number; frequency: number; confidence: number } {
+  assertInRange(sampleRate, 1, 192000, 'sampleRate');
+  assertFiniteSamples(samples);
+  if (samples.length < 3) return { period: 0, frequency: 0, confidence: 0 };
+  const minLag = options.minLag ?? 2;
+  const maxLag = options.maxLag ?? Math.floor(samples.length / 2);
+  assertInteger(minLag, 'minLag');
+  assertInteger(maxLag, 'maxLag');
+  assertInRange(minLag, 1, samples.length - 1, 'minLag');
+  assertInRange(maxLag, 1, samples.length - 1, 'maxLag');
+  assertNonNegative(minLag, 'minLag');
+  assertPositive(maxLag, 'maxLag');
+  if (minLag >= maxLag) {
+    return { period: 0, frequency: 0, confidence: 0 };
+  }
+  const mean = Array.from(samples).reduce((sum, value) => sum + value, 0) / samples.length;
+  const ac = autocorrelation(Float32Array.from(samples, (value) => value - mean));
+  let bestLag = 0;
+  let bestVal = -Infinity;
+  for (let lag = minLag; lag <= maxLag; lag++) {
+    const v = ac[lag] ?? 0;
+    if (v > 0 && v > (ac[lag - 1] ?? 0) && v >= (ac[lag + 1] ?? 0) && v > bestVal) {
+      bestVal = v;
+      bestLag = lag;
+    }
+  }
+  const confidence = Number.isFinite(bestVal) ? Math.max(0, bestVal) : 0;
+  if (bestLag === 0) return { period: 0, frequency: 0, confidence };
+  return { period: bestLag, frequency: sampleRate / bestLag, confidence };
+}
