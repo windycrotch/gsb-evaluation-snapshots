@@ -1,0 +1,23 @@
+{
+	"compileOnSave": false,
+	"compilerOptions": {
+		"allowJs": false,
+		"allowSyntheticDefaultImports": true,
+		"jsx": "react",
+		"outDir": "dist",
+		"rootDir": "src",
+		"target": "es6",
+		"module": "esnext",
+		"moduleResolution": "bundler",
+		"lib": ["es2018", "dom"],
+		"noImplicitAny": false,
+		"noUnusedLocals": true,
+		"noUnusedParameters": true,
+		"removeComments": false,
+		"preserveConstEnums": true,
+		"sourceMap": false,
+		"strict": true,
+		"skipLibCheck": true
+	},
+	"include": ["./src/*"]
+}

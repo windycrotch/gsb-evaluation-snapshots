@@ -1,0 +1,84 @@
+{
+	"name": "@kinescope/react-kinescope-player",
+	"version": "0.6.0",
+	"description": "React.js wrapper for Kinescope player",
+	"scripts": {
+		"prettier": "npx prettier --parser typescript --write \"{src,test}/**/*.{tsx,ts}\"",
+		"dev": "npx microbundle watch --jsx React.createElement --compress false",
+		"build": "npx microbundle --name=KinescopePlayer --globals react=React --jsx React.createElement --compress false --no-sourcemap",
+		"test": "vitest run",
+		"test:watch": "vitest",
+		"typecheck": "tsc --noEmit -p . && tsc -p tsconfig.test.json",
+		"release": "commit-and-tag-version"
+	},
+	"keywords": [
+		"React",
+		"Kinescope",
+		"Player",
+		"component"
+	],
+	"bugs": {
+		"url": "https://github.com/kinescope/react-kinescope-player/issues"
+	},
+	"homepage": "https://github.com/kinescope/react-kinescope-player#readme",
+	"author": "Vadim Burlakov <vadim@kinescope.io>",
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/kinescope/react-kinescope-player.git"
+	},
+	"publishConfig": {
+		"access": "public"
+	},
+	"exports": {
+		".": {
+			"types": "./dist/player.d.ts",
+			"import": "./dist/player.module.js",
+			"require": "./dist/player.js",
+			"default": "./dist/player.module.js"
+		}
+	},
+	"main": "dist/player.js",
+	"module": "dist/player.module.js",
+	"jsnext:main": "dist/player.module.js",
+	"unpkg": "dist/player.umd.js",
+	"umd:main": "dist/player.umd.js",
+	"types": "dist/player.d.ts",
+	"typings": "dist/player.d.ts",
+	"source": "src/player.tsx",
+	"files": [
+		"dist"
+	],
+	"dependencies": {
+		"@kinescope/player-iframe-api-loader": "^0.9.0"
+	},
+	"peerDependencies": {
+		"react": "^16.0.0 || ^17.0.0 || ^18.0.0 || ^19.0.0",
+		"react-dom": "^16.0.0 || ^17.0.0 || ^18.0.0 || ^19.0.0"
+	},
+	"devDependencies": {
+		"@testing-library/dom": "^10.4.2",
+		"@testing-library/react": "^16.3.3",
+		"@types/react": "^18.3.31",
+		"@types/react-dom": "^18.3.7",
+		"commit-and-tag-version": "^13.3.0",
+		"jsdom": "^31.0.1",
+		"microbundle": "^0.15.1",
+		"prettier": "^3.10.1",
+		"react": "^18.3.1",
+		"react-dom": "^18.3.1",
+		"react-fast-compare": "^3.2.3",
+		"typescript": "^6.0.3",
+		"vitest": "^5.1.1"
+	},
+	"commit-and-tag-version": {
+		"skip": {
+			"tag": true
+		},
+		"releaseCommitMessageFormat": "chore: release {{currentTag}}"
+	},
+	"overrides": {
+		"rollup-plugin-typescript2": "^0.37.0",
+		"serialize-javascript": "^7.1.4"
+	}
+}
