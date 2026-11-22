@@ -559,7 +559,8 @@ def tiled_hires_sample(latent_input, patched_model, config, positive_conditionin
         positive_conditioning, negative_conditioning: Conditioning tensors
         hires_steps: Number of sampling steps
         hires_denoise: Denoise strength
-        tile_width, tile_height: Tile size in pixels (will be converted to latent space /8)
+        tile_width, tile_height: Tile size in pixels (converted to latent space with the
+            model's real latent ratio — 8 for SD/SDXL/Flux.1, 16 for the Flux.2 family)
         mask_blur: Gaussian blur radius for tile seam blending (pixels)
         tile_padding: Extra context padding around each tile (pixels)
         force_uniform: If True, force all tiles to be the same size (may crop edges)
@@ -635,15 +636,24 @@ def tiled_hires_sample(latent_input, patched_model, config, positive_conditionin
 
             print(f"[GridTester] 🔍   Tile {tile_idx}/{total_tiles}: latent region [{y_start}:{y_end}, {x_start}:{x_end}]")
 
-            # Run KSampler on this tile
-            tile_result, _ = generate_image(
-                patched_model, config.get("seed", 0), hires_steps, config.get("cfg", 7),
-                config.get("sampler", "euler"), config.get("scheduler", "normal"),
-                positive_conditioning, negative_conditioning,
-                {"samples": tile_latent}, hires_denoise,
-                width=(x_end - x_start) * 8, height=(y_end - y_start) * 8,
-                region_frame=(y_start / lat_h, x_start / lat_w, y_end / lat_h, x_end / lat_w)
-            )
+            # Run KSampler on this tile. A tile failure fails THIS image as a
+            # unit (the caller skips its manifest entry; completed images are
+            # unaffected). Interrupts propagate untouched — never swallowed as
+            # an ordinary tile failure.
+            try:
+                tile_result, _ = generate_image(
+                    patched_model, config.get("seed", 0), hires_steps, config.get("cfg", 7),
+                    config.get("sampler", "euler"), config.get("scheduler", "normal"),
+                    positive_conditioning, negative_conditioning,
+                    {"samples": tile_latent}, hires_denoise,
+                    width=(x_end - x_start) * ratio, height=(y_end - y_start) * ratio,
+                    region_frame=(y_start / lat_h, x_start / lat_w, y_end / lat_h, x_end / lat_w)
+                )
+            except Exception as e:
+                if type(e).__name__ == "InterruptProcessingException":
+                    raise
+                print(f"[GridTester] ❌ Tile {tile_idx}/{total_tiles} sampling failed: {e}")
+                raise
 
             tile_out = tile_result["samples"]
             tile_h = y_end - y_start
@@ -1128,31 +1138,47 @@ def flush_batch_with_vae(pending_batch, vae, img_dir, existing_data, session_nam
     ext = "jpg" if fmt in ("jpg", "jpeg") else fmt
 
     for latent_samples, meta in pending_batch:
-        # Decode latent to image
-        metrics_sink = {}
-        image = decode_latent_with_vae(vae, latent_samples, metrics_sink=metrics_sink)
+        # Decode + save each image in isolation: one bad latent must not take
+        # down the rest of the batch, and a failed image must never leave a
+        # manifest entry pointing at a file that does not exist.
+        filepath = None
+        try:
+            # Decode latent to image
+            metrics_sink = {}
+            image = decode_latent_with_vae(vae, latent_samples, metrics_sink=metrics_sink)
 
-        # Generate ID using same format as remote_vae
-        ts = int(time.time() * 100000) + random.randint(0, 1000)
-        meta["id"] = ts
+            # Generate ID using same format as remote_vae
+            ts = int(time.time() * 100000) + random.randint(0, 1000)
+            meta["id"] = ts
 
-        # Generate filename with the chosen extension
-        filename = f"img_{meta['id']}.{ext}"
+            # Generate filename with the chosen extension
+            filename = f"img_{meta['id']}.{ext}"
 
-        # Save image in chosen format
-        filepath = os.path.join(img_dir, filename)
-        if fmt == "png":
-            image.save(filepath, format="PNG")
-        elif fmt in ("jpg", "jpeg"):
-            image.save(filepath, format="JPEG", quality=95)
-        else:
-            image.save(filepath, quality=80)
-        comfy_nodes_workflow.stamp_file(filepath, meta)
-        
+            # Save image in chosen format
+            filepath = os.path.join(img_dir, filename)
+            if fmt == "png":
+                image.save(filepath, format="PNG")
+            elif fmt in ("jpg", "jpeg"):
+                image.save(filepath, format="JPEG", quality=95)
+            else:
+                image.save(filepath, quality=80)
+            comfy_nodes_workflow.stamp_file(filepath, meta)
+        except Exception as e:
+            if type(e).__name__ == "InterruptProcessingException":
+                raise  # user interrupt: never treat as an ordinary save failure
+            # Remove a partially written file so disk never holds a truncated image
+            if filepath and os.path.exists(filepath):
+                try:
+                    os.remove(filepath)
+                except OSError:
+                    pass
+            print(f"[GridTester] ⚠️ Failed to decode/save image (skipped, no manifest entry written): {e}")
+            continue
+
         # Normalize denoise to int if it's 1.0 (like remote_vae)
         if meta.get("denoise") == 1.0:
             meta["denoise"] = 1
-        
+
         # Update meta with file path and rejected flag
         meta.update({
             "file": f"/view?filename={filename}&type=output&subfolder=benchmarks/{session_name}/images",
@@ -1163,48 +1189,20 @@ def flush_batch_with_vae(pending_batch, vae, img_dir, existing_data, session_nam
         if metrics_sink:
             meta["metrics"] = metrics_sink
         image_metrics.attach_adapters(meta, image)
-        
+
         # Update manifest - insert at beginning (like remote_vae)
         existing_data["items"].insert(0, meta)
-        
-        # Sync with disk manifest to preserve tags (like remote_vae) - only if manifest_path provided
-        if manifest_path and os.path.exists(manifest_path):
-            try:
-                with open(manifest_path, "r") as f:
-                    disk_manifest = json.load(f)
 
-                # Pairwise-review votes live on disk (disk wins), never drop them on this save
-                from .manifest_utils import preserve_disk_comparisons
-                preserve_disk_comparisons(disk_manifest, existing_data)
-                
-                # Create a lookup map for items currently in memory
-                memory_items_map = {
-                    i.get("id"): i 
-                    for i in existing_data.get("items", []) 
-                    if "id" in i
-                }
-
-                # Check every item on disk. If it exists in memory, copy the tags over.
-                for disk_item in disk_manifest.get("items", []):
-                    d_id = disk_item.get("id")
-                    if d_id and d_id in memory_items_map:
-                        local_item = memory_items_map[d_id]
-                        
-                        # PRESERVE TAGS: Copy these keys from disk to memory
-                        if "favorited" in disk_item:
-                            local_item["favorited"] = disk_item["favorited"]
-                        if "rejected" in disk_item:
-                            local_item["rejected"] = disk_item["rejected"]
-                        if "metrics" in disk_item and "metrics" not in local_item:
-                            local_item["metrics"] = disk_item["metrics"]  # computed later for an existing session
-
-            except Exception as e:
-                print(f"[GridTester] ⚠️ Error syncing with disk manifest: {e}")
-
-        # Save manifest to disk (like remote_vae) - only if manifest_path provided
+        # Merge with the disk manifest and save (like remote_vae) - only if manifest_path provided.
+        # The merge keeps entries written by concurrent sessions/runs, preserves user tags
+        # (favorited/rejected/note/metrics) from disk, keeps item ids unique, and drops
+        # entries whose image file is gone — so the manifest always matches the files on disk.
         if manifest_path:
-            with open(manifest_path, "w") as f:
-                json.dump(existing_data, f, indent=4)
+            try:
+                from .manifest_utils import save_manifest_merged
+                save_manifest_merged(manifest_path, existing_data, session_name=session_name)
+            except Exception as e:
+                print(f"[GridTester] ⚠️ Error saving merged manifest: {e}")
         
         # Send update to dashboard (like remote_vae) - only if unique_id provided
         if unique_id:

@@ -245,6 +245,139 @@ def save_manifest(manifest_path, manifest_data):
         print(f"[GridTester] 💾 Manifest saved: {manifest_path}")
 
 
+# ---------------------------------------------------------------------------
+# Merged save for per-image save entry points (flush_batch_with_vae)
+# ---------------------------------------------------------------------------
+
+def _expected_subfolder(session_name):
+    """The /view URL subfolder of images that belong to this session."""
+    return f"benchmarks/{session_name}/images" if session_name else None
+
+
+def _item_file_missing(manifest_path, item, session_name=None):
+    """
+    True when the item's image provably belongs to this session's images dir but is
+    gone from disk. Only items whose /view URL carries this session's exact subfolder
+    are checked (scanned/external items live elsewhere and are left alone). Items
+    without a usable file reference return False (unverifiable, kept).
+    """
+    url = str(item.get("file", "")) if isinstance(item, dict) else ""
+    if not url:
+        return False
+    expected = _expected_subfolder(session_name)
+    if expected is not None:
+        m = re.search(r"[?&]subfolder=([^&]+)", url)
+        if not m or m.group(1) != expected:
+            return False
+    path = _item_file_path(manifest_path, item)
+    if path is None:
+        return False
+    return not os.path.isfile(path)
+
+
+def merge_manifest_with_disk(manifest_path, existing_data, session_name=None):
+    """
+    Merge the on-disk manifest into ``existing_data`` (in place) before a save.
+
+    - Disk items missing from memory are KEPT (a concurrent writer's entries —
+      another run/session sharing the manifest, the remote VAE worker, the
+      dashboard — must survive this save).
+    - For ids present in both, user-owned fields on disk win: favorited,
+      rejected, note, and metrics (only when the memory copy has none).
+    - Item ids stay unique: the first occurrence (memory order, newest first)
+      wins; disk-only items follow in disk order.
+    - Entries whose image file belongs to this session's images dir but no
+      longer exists on disk are dropped, so a failed/interrupted run never
+      leaves entries pointing at files that do not exist.
+
+    Returns (disk_items_kept, stale_pruned) counts. On an unreadable disk
+    manifest the memory copy is left untouched and (0, 0) is returned.
+    """
+    try:
+        with open(manifest_path, "r") as f:
+            disk_manifest = json.load(f)
+    except FileNotFoundError:
+        disk_manifest = None
+    except Exception as e:
+        print(f"[GridTester] ⚠️ Could not read manifest for merge ({e}); saving memory copy")
+        return (0, 0)
+    if not isinstance(disk_manifest, dict):
+        return (0, 0)
+
+    # Votes are owned by the compare routes: the disk copy always wins
+    preserve_disk_comparisons(disk_manifest, existing_data)
+
+    items = existing_data.setdefault("items", [])
+
+    # Dedupe memory items by id (first occurrence wins) and index them
+    seen = set()
+    memory_items = []
+    for it in items:
+        iid = it.get("id") if isinstance(it, dict) else None
+        if iid is not None:
+            if iid in seen:
+                continue
+            seen.add(iid)
+        memory_items.append(it)
+    by_id = {
+        it.get("id"): it for it in memory_items
+        if isinstance(it, dict) and it.get("id") is not None
+    }
+
+    kept = 0
+    disk_only = []
+    for d in disk_manifest.get("items", []):
+        if not isinstance(d, dict):
+            continue
+        did = d.get("id")
+        local = by_id.get(did) if did is not None else None
+        if local is not None:
+            # PRESERVE USER TAGS: copy these keys from disk to memory
+            if "favorited" in d:
+                local["favorited"] = d["favorited"]
+            if "rejected" in d:
+                local["rejected"] = d["rejected"]
+            if d.get("note"):
+                local["note"] = d["note"]
+            # Per-image metrics computed for an existing session live only on disk
+            if "metrics" in d and "metrics" not in local:
+                local["metrics"] = d["metrics"]
+        else:
+            disk_only.append(d)
+            kept += 1
+
+    merged = memory_items + disk_only
+
+    # Drop entries whose image file is gone (failed run leftovers, user-deleted files)
+    pruned = 0
+    final = []
+    for it in merged:
+        if _item_file_missing(manifest_path, it, session_name):
+            pruned += 1
+            continue
+        final.append(it)
+
+    existing_data["items"] = final
+    if kept or pruned:
+        print(f"[GridTester] 🔄 Manifest merge: kept {kept} disk-only item(s), pruned {pruned} stale entrie(s)")
+    return (kept, pruned)
+
+
+def save_manifest_merged(manifest_path, existing_data, session_name=None):
+    """
+    Locked merge-with-disk + atomic write. The save entry point for per-image
+    saves (flush_batch_with_vae): every image saved to disk is followed by a
+    manifest write that preserves concurrent writers' entries and user tags,
+    keeps item ids unique, and never leaves entries pointing at missing files.
+    """
+    with _manifest_lock:
+        merge_manifest_with_disk(manifest_path, existing_data, session_name=session_name)
+        directory = os.path.dirname(os.path.abspath(manifest_path))
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        _atomic_write_json(manifest_path, existing_data)
+
+
 def load_existing_manifest(manifest_path):
     """
     Load existing manifest data from disk.
