@@ -62,7 +62,8 @@ export const VideoSeekSlider: React.FC<Props> = ({
   const [isSeeking, setIsSeeking] = useState(false);
   const [trackWidth, setTrackWidth] = useState(0);
   const trackElement = useRef<HTMLDivElement>(null);
-  const thumbnails = usePreviewThumbnails(previewThumbnails);
+  const isThumbActive = seekHoverPosition > 0 || isSeeking;
+  const thumbnailsState = usePreviewThumbnails(previewThumbnails, isThumbActive);
 
   useIsomorphicLayoutEffect(() => {
     const track = trackElement.current;
@@ -85,9 +86,7 @@ export const VideoSeekSlider: React.FC<Props> = ({
     return () => observer.disconnect();
   }, []);
 
-  const isThumbActive = seekHoverPosition > 0 || isSeeking;
   const hoverTimeValue = positionToMs(max, seekHoverPosition, trackWidth);
-
   const label = isThumbActive
     ? findTimeCode(timeCodes, hoverTimeValue, max)?.description || ''
     : '';
@@ -209,7 +208,8 @@ export const VideoSeekSlider: React.FC<Props> = ({
           seekHoverPosition={seekHoverPosition}
           trackWidth={trackWidth}
           getPreviewScreenUrl={getPreviewScreenUrl}
-          previewThumbnails={thumbnails}
+          previewThumbnails={thumbnailsState.thumbnails}
+          previewStatus={thumbnailsState.status}
           minutesPrefix={minutesPrefix}
           secondsPrefix={secondsPrefix}
         />

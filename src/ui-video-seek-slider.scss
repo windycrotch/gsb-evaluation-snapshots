@@ -186,6 +186,22 @@ $seek-hover: rgba(#fff, 0.5);
       &.sprite {
         overflow: hidden;
       }
+
+      &.preview-status {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 13px;
+        line-height: 16px;
+        color: #999;
+        text-shadow: none;
+        padding: 0 10px;
+        box-sizing: border-box;
+
+        &.error {
+          color: #e08c8c;
+        }
+      }
     }
 
     .preview-sprite {

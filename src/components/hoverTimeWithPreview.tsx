@@ -3,6 +3,7 @@ import { getHoverTimePosition } from '../utils/getHoverTimePosition';
 import { timeToTimeString } from '../utils/timeToTimeString';
 import { findThumbnail } from '../utils/findThumbnail';
 import { PreviewThumbnail } from '../utils/parseThumbnailsVtt';
+import { PreviewThumbnailsStatus } from '../hooks/usePreviewThumbnails';
 import { PreviewImage } from './previewImage';
 
 interface Props {
@@ -18,6 +19,7 @@ interface Props {
   minutesPrefix?: string;
   getPreviewScreenUrl?: (hoverTimeValue: number) => string;
   previewThumbnails?: PreviewThumbnail[];
+  previewStatus?: PreviewThumbnailsStatus;
 }
 
 export const HoverTimeWithPreview: React.FC<Props> = ({
@@ -33,6 +35,7 @@ export const HoverTimeWithPreview: React.FC<Props> = ({
   secondsPrefix,
   getPreviewScreenUrl,
   previewThumbnails,
+  previewStatus = 'ready',
 }) => {
   const hoverTimeElement = useRef<HTMLDivElement>(null);
   const preloadedThumbnails = useRef<PreviewThumbnail[]>(undefined);
@@ -73,7 +76,7 @@ export const HoverTimeWithPreview: React.FC<Props> = ({
   const thumbnail =
     previewThumbnails && findThumbnail(previewThumbnails, hoverTimeValue);
   const previewUrl =
-    !thumbnail && getPreviewScreenUrl && isThumbActive
+    !thumbnail && previewStatus === 'ready' && getPreviewScreenUrl && isThumbActive
       ? getPreviewScreenUrl(hoverTimeValue)
       : undefined;
 
@@ -87,6 +90,22 @@ export const HoverTimeWithPreview: React.FC<Props> = ({
       {isThumbActive && thumbnail && <PreviewImage thumbnail={thumbnail} />}
       {previewUrl !== undefined && (
         <PreviewImage thumbnail={{ fromMs: 0, toMs: 0, url: previewUrl }} />
+      )}
+      {isThumbActive && !thumbnail && previewStatus === 'loading' && (
+        <div
+          className="preview-screen preview-status"
+          data-testid="preview-loading"
+        >
+          Loading preview…
+        </div>
+      )}
+      {isThumbActive && !thumbnail && previewStatus === 'error' && (
+        <div
+          className="preview-screen preview-status error"
+          data-testid="preview-error"
+        >
+          Preview failed to load
+        </div>
       )}
       {label && <div>{label}</div>}
       {hoverTimeString}
