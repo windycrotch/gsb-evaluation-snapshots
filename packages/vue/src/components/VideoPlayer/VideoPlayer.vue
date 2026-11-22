@@ -1,20 +1,23 @@
 <script setup lang="ts">
+import type { Chapter, Track, VideoSource } from '@vue-player/core'
+import { isPiPSupported } from '@vue-player/core'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import type { Chapter, ThumbnailCue, Track, VideoSource } from '@vue-player/core'
-import { isPiPSupported, parseThumbnailVtt } from '@vue-player/core'
 import { usePlayer } from '../../composables/usePlayer'
-import IcoPlay from '../icons/IcoPlay.vue'
-import IcoPause from '../icons/IcoPause.vue'
-import VpPlayButton from '../controls/VpPlayButton.vue'
-import VpTimeline from '../controls/VpTimeline.vue'
-import VpTimeDisplay from '../controls/VpTimeDisplay.vue'
-import VpVolumeControl from '../controls/VpVolumeControl.vue'
-import VpSubtitlesButton from '../controls/VpSubtitlesButton.vue'
-import VpPiPButton from '../controls/VpPiPButton.vue'
+import { createSubtitleSession } from '../../composables/useSubtitleSession'
+import { createThumbnailSession } from '../../composables/useThumbnailSession'
+import { useTimeout } from '../../composables/useTimeout'
 import VpFullscreenButton from '../controls/VpFullscreenButton.vue'
+import VpPiPButton from '../controls/VpPiPButton.vue'
+import VpPlayButton from '../controls/VpPlayButton.vue'
 import VpSettingsButton from '../controls/VpSettingsButton.vue'
-import VpLoadingOverlay from '../overlays/VpLoadingOverlay.vue'
+import VpSubtitlesButton from '../controls/VpSubtitlesButton.vue'
+import VpTimeDisplay from '../controls/VpTimeDisplay.vue'
+import VpTimeline from '../controls/VpTimeline.vue'
+import VpVolumeControl from '../controls/VpVolumeControl.vue'
+import IcoPause from '../icons/IcoPause.vue'
+import IcoPlay from '../icons/IcoPlay.vue'
 import VpErrorOverlay from '../overlays/VpErrorOverlay.vue'
+import VpLoadingOverlay from '../overlays/VpLoadingOverlay.vue'
 
 interface Props {
   src?: string
@@ -67,12 +70,20 @@ const pipSupported = ref(false)
 // Poster is visible until playback starts for the first time
 const showPoster = computed(() => !!props.poster && !state.isPlaying && state.currentTime === 0)
 
+// ─── Subtitle sessions ───
+// Each source switch is a fresh session: old selections are invalidated on
+// load start, the default track is re-established once the new source is
+// playable, and an explicit user "Off" is sticky within the session.
+const subtitleSession = createSubtitleSession((track) => controls.setTrack(track))
+// Top-level binding so the template auto-unwraps the ref.
+const selectedSubtitleTrack = subtitleSession.selectedTrack
+
 // ─── Custom subtitle rendering ───
 const currentCues = ref<string[]>([])
 
 function syncSubtitles() {
   const video = videoRef.value
-  const track = state.currentTrack
+  const track = selectedSubtitleTrack.value
   if (!video || !track) {
     currentCues.value = []
     return
@@ -94,19 +105,21 @@ function syncSubtitles() {
 
 onMounted(() => {
   pipSupported.value = isPiPSupported()
-  if (props.src) loadSource(props.src)
+  if (props.src) {
+    subtitleSession.startSession(props.tracks)
+    loadSource(props.src)
+  }
   videoRef.value?.addEventListener('timeupdate', syncSubtitles)
   if (props.autoplay && props.muted) scheduleHide()
 })
 
-// Apply the active (or default) track once canplay fires — at that point all browser
-// async track-mode resets from video.load() are guaranteed to have completed.
+// Re-establish subtitles only once the *current* source becomes playable.
+// An error leaves subtitles off rather than applying a track to a dead source.
 watch(
   () => state.isLoading,
   (loading) => {
-    if (loading) return
-    const track = state.currentTrack ?? props.tracks?.find((t) => t.default) ?? null
-    if (track) controls.setTrack(track)
+    if (loading || state.error) return
+    subtitleSession.onLoadComplete(props.tracks)
   },
 )
 
@@ -115,7 +128,11 @@ onBeforeUnmount(() => videoRef.value?.removeEventListener('timeupdate', syncSubt
 watch(
   () => props.src,
   (src) => {
-    if (src) loadSource(src)
+    if (!src) return
+    // Begin a complete new session before loading: the old source's subtitle
+    // selection, thumbnails and loading state must not survive the switch.
+    subtitleSession.startSession(props.tracks)
+    loadSource(src)
   },
 )
 
@@ -156,25 +173,25 @@ watch(
   },
 )
 
-// ─── Thumbnails ───
-const thumbnailCues = ref<ThumbnailCue[]>([])
+// ─── Thumbnails (session-guarded: late/stale responses can never apply) ───
+const thumbnailSession = createThumbnailSession()
+const thumbnailCues = thumbnailSession.cues
 
 watch(
   () => props.thumbnails,
-  async (url) => {
-    thumbnailCues.value = url ? await parseThumbnailVtt(url) : []
-  },
+  (url) => thumbnailSession.load(url),
   { immediate: true },
 )
 
 // ─── Controls visibility ───
 const controlsVisible = ref(true)
 const isSeeking = ref(false)
+const { set: setTimer, clear: clearTimer } = useTimeout()
 let hideTimer: ReturnType<typeof setTimeout> | null = null
 
 function scheduleHide() {
-  if (hideTimer) clearTimeout(hideTimer)
-  hideTimer = setTimeout(() => {
+  clearTimer(hideTimer)
+  hideTimer = setTimer(() => {
     if (state.isPlaying && !showPoster.value) controlsVisible.value = false
   }, 3000)
 }
@@ -187,7 +204,7 @@ function showControls() {
 function onSeekStart() {
   isSeeking.value = true
   controlsVisible.value = true
-  if (hideTimer) clearTimeout(hideTimer)
+  clearTimer(hideTimer)
 }
 
 function onSeekEnd() {
@@ -206,10 +223,10 @@ const flashKey = ref(0)
 let flashTimer: ReturnType<typeof setTimeout> | null = null
 
 function triggerFlash(icon: 'play' | 'pause') {
-  if (flashTimer) clearTimeout(flashTimer)
+  clearTimer(flashTimer)
   flashIcon.value = icon
   flashKey.value++ // remount → restart CSS animation
-  flashTimer = setTimeout(() => {
+  flashTimer = setTimer(() => {
     flashIcon.value = null
   }, 700)
 }
@@ -379,8 +396,8 @@ function onTouchStart(e: TouchEvent) {
           <VpSubtitlesButton
             v-if="tracks && tracks.length > 0"
             :tracks="tracks"
-            :current-track="state.currentTrack"
-            @set-track="controls.setTrack"
+            :current-track="selectedSubtitleTrack"
+            @set-track="subtitleSession.selectTrack"
           />
 
           <VpPiPButton
