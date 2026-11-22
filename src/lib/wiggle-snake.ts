@@ -24,6 +24,8 @@ export const MIN_BOOST_MASS = 15;
 export const SEGMENT_SPACING = 6;
 export const BASE_SPEED = 190;
 export const BOOST_SPEED = 380;
+/** Seconds a gobbled bot waits before slipping back into the arena. */
+export const RESPAWN_DELAY = 2;
 
 export const radiusFor = (mass: number) => Math.min(40, 10 + Math.sqrt(mass) * 0.9);
 export const segmentsFor = (mass: number) => Math.min(500, Math.round(10 + mass * 0.35));

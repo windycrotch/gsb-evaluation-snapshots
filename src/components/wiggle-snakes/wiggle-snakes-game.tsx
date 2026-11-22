@@ -11,8 +11,8 @@ import {
 
 import { trackEvent } from '@/lib/analytics';
 import { playGobble, playMunch, playOops, playSuper, unlockWiggleAudio } from '@/lib/wiggle-audio';
+import { activateSuper, settleEnding, superState } from '@/lib/wiggle-rules';
 import { loadBest, loadSkin, recordBest, saveSkin } from '@/lib/wiggle-skins';
-import { activateSuper, superState } from '@/lib/wiggle-rules';
 import {
   spawnPlayer,
   standings,
@@ -27,10 +27,12 @@ import { useArena } from './use-arena';
 
 type Phase = 'menu' | 'play' | 'over';
 type Hud = { board: Standing[]; player?: Standing; total: number } & ReturnType<typeof superState>;
+type Toast = { id: number; text: string };
 
 const GAME = { game: 'wiggle-snakes' };
 const noSubscribe = () => () => {};
 const isTouch = () => window.matchMedia('(pointer: coarse)').matches;
+const IDLE_INPUT = { angle: 0, boosting: false, steerId: null };
 
 function readHud(world: World): Hud {
   const board = standings(world);
@@ -54,31 +56,61 @@ export function WiggleSnakesGame() {
   const best = newBest ?? savedBest;
   const [hud, setHud] = useState<Hud | null>(null);
   const [ending, setEnding] = useState<Ending | null>(null);
-  const [toast, setToast] = useState<{ id: number; text: string } | null>(null);
+  const [toast, setToast] = useState<Toast | null>(null);
   const touch = useSyncExternalStore(noSubscribe, isTouch, () => false);
+  /** The round on screen. Any event tagged with another round is stale and gets dropped. */
+  const liveRound = useRef(-1);
+  /** The loop and the key handler read this synchronously; effects must not lag a frame. */
+  const phaseRef = useRef<Phase>('menu');
 
-  const onEvent = useCallback((event: WorldEvent) => {
-    if (event.type === 'munch') {
-      if (event.snake.isPlayer) playMunch();
-      return;
-    }
-    if (event.eater.isPlayer) {
-      playGobble();
-      setToast({ id: event.victim.id, text: `You gobbled ${event.victim.name}! 😋` });
-    }
-    if (event.victim.isPlayer) {
-      playOops();
-      const length = Math.round(event.victim.mass);
-      const record = length > loadBest();
-      const topLength = recordBest(length);
-      setBest(topLength);
-      setEnding({ by: event.eater.name, length, best: topLength, record });
-      setPhase('over');
-      trackEvent('game_over', { ...GAME, length: String(length) });
-    }
+  const setPhaseNow = useCallback((next: Phase) => {
+    phaseRef.current = next;
+    setPhase(next);
   }, []);
 
-  const { worldRef, inputRef } = useArena(canvasRef, { onHud: (w) => setHud(readHud(w)), onEvent });
+  const showEnding = useCallback(
+    (world: World) => {
+      // one shot per round: several contacts in one frame still settle the score exactly once
+      const settled = settleEnding(world);
+      if (!settled) return false;
+      const record = settled.length > loadBest();
+      const topLength = recordBest(settled.length);
+      setBest(topLength);
+      setEnding({ by: settled.by, length: settled.length, best: topLength, record });
+      setHud(null);
+      setToast(null);
+      setPhaseNow('over');
+      trackEvent('game_over', { ...GAME, length: String(settled.length) });
+      return true;
+    },
+    [setPhaseNow]
+  );
+
+  const onEvent = useCallback(
+    (event: WorldEvent, world: World) => {
+      // a gobble queued by the previous round must never surface in the new one
+      if (world.round !== liveRound.current) return;
+      if (phaseRef.current !== 'play') return;
+      if (event.type === 'munch') {
+        if (event.snake.isPlayer) playMunch();
+        return;
+      }
+      if (event.eater.isPlayer) {
+        playGobble();
+        setToast({ id: event.victim.id, text: `You gobbled ${event.victim.name}! 😋` });
+      }
+      // the sound belongs to the single settlement, not to every contact of the same death
+      if (event.victim.isPlayer && showEnding(world)) playOops();
+    },
+    [showEnding]
+  );
+
+  const { worldRef, inputRef } = useArena(canvasRef, {
+    onHud: (world) => {
+      if (phaseRef.current === 'play') setHud(readHud(world));
+    },
+    onEvent,
+  });
 
   useEffect(() => {
     if (!toast) return;
@@ -88,19 +120,43 @@ export function WiggleSnakesGame() {
 
   const start = () => {
     const world = worldRef.current;
+    // the canvas loop has not mounted yet (or is being replaced): nothing to start on
     if (!world) return;
     unlockWiggleAudio();
+    // spawnPlayer resets the round first, so a fast double-tap of Play cannot leave two
+    // player snakes, an old gobble event, a stuck super charge or a queued respawn behind
     const player = spawnPlayer(world, skin);
+    liveRound.current = world.round;
+    // steer the new snake from its own heading, with no boost held over from the last round
     inputRef.current = { angle: player.angle, boosting: false, steerId: null };
     setHud(readHud(world));
     setEnding(null);
-    setPhase('play');
+    setToast(null);
+    setPhaseNow('play');
     trackEvent('game_start', GAME);
+  };
+
+  /** "pick another snake": the finished round must not keep ticking behind the menu. */
+  const backToMenu = () => {
+    const world = worldRef.current;
+    if (world) {
+      world.snakes = world.snakes.filter((s) => !s.isPlayer);
+      world.player = null;
+      world.events = [];
+      world.ending = null;
+    }
+    liveRound.current = -1;
+    inputRef.current = { ...IDLE_INPUT };
+    setHud(null);
+    setToast(null);
+    setEnding(null);
+    setPhaseNow('menu');
   };
 
   const pressSuper = useCallback(() => {
     const world = worldRef.current;
-    if (!world || !activateSuper(world)) return;
+    // while charging, activateSuper refuses; repeated taps never stack extra seconds
+    if (!world || phaseRef.current !== 'play' || !activateSuper(world)) return;
     playSuper();
     setHud(readHud(world));
     trackEvent('super_power', GAME);
@@ -199,7 +255,7 @@ export function WiggleSnakesGame() {
         />
       )}
       {phase === 'over' && ending && (
-        <GameOverPanel ending={ending} onPlay={start} onMenu={() => setPhase('menu')} />
+        <GameOverPanel ending={ending} onPlay={start} onMenu={backToMenu} />
       )}
     </div>
   );

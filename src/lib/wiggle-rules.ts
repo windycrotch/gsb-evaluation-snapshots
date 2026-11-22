@@ -1,10 +1,9 @@
 import { pelletAt } from './wiggle-food';
-import { radiusFor, SEGMENT_SPACING, type Snake, type Vec } from './wiggle-snake';
-import type { World } from './wiggle-world';
+import { radiusFor, RESPAWN_DELAY, SEGMENT_SPACING, type Snake, type Vec } from './wiggle-snake';
+import type { RoundEnding, World } from './wiggle-world';
 
 export const SUPER_DURATION = 7;
 export const SUPER_RECHARGE = 12;
-const RESPAWN_DELAY = 2;
 
 export const isSuper = (world: World, snake: Snake) =>
   snake.isPlayer && world.time < world.superUntil;
@@ -28,6 +27,19 @@ export function activateSuper(world: World) {
   return true;
 }
 
+/**
+ * Hand the current round's ending to the caller exactly once.
+ *
+ * A frame can contain several contact checks against the same player; each one may push a
+ * gobble event. The round number makes the ending a one-shot token: the second caller gets
+ * `null`, so the length and the best score can never be written twice.
+ */
+export function settleEnding(world: World): RoundEnding | null {
+  if (!world.ending || world.settledRound === world.round) return null;
+  world.settledRound = world.round;
+  return world.ending;
+}
+
 /** Alisa's rule: when two snakes touch, the smaller one is gobbled - unless super is on. */
 export function loserOf(world: World, a: Snake, b: Snake) {
   if (isSuper(world, a)) return b;
@@ -48,18 +60,30 @@ export function headTouches(head: Vec, headRadius: number, other: Snake) {
 }
 
 export function resolveContacts(world: World) {
-  for (const a of world.snakes) {
-    for (const b of world.snakes) {
-      if (a === b || !a.alive || !b.alive) continue;
+  const { snakes } = world;
+  for (let i = 0; i < snakes.length; i++) {
+    const a = snakes[i];
+    if (!a.alive) continue;
+    for (let j = 0; j < snakes.length; j++) {
+      if (i === j) continue;
+      const b = snakes[j];
+      if (!b.alive) continue;
       if (!headTouches(a.body[0], radiusFor(a.mass), b)) continue;
       const loser = loserOf(world, a, b);
       gobble(world, loser === a ? b : a, loser);
+      // `a` may have just been eaten by `b`; nothing else can touch it this frame
+      if (!a.alive) break;
     }
   }
 }
 
-/** The gobbled snake bursts into big glowing dots along its whole body. */
+/**
+ * The gobbled snake bursts into big glowing dots along its whole body.
+ * Returns false when the victim was already swallowed, which keeps a frame with several
+ * contact checks against the same snake from double-counting it.
+ */
 export function gobble(world: World, eater: Snake, victim: Snake) {
+  if (!victim.alive) return false;
   const { rand } = world;
   victim.alive = false;
   const r = radiusFor(victim.mass);
@@ -69,6 +93,12 @@ export function gobble(world: World, eater: Snake, victim: Snake) {
     const p = victim.body[Math.floor((k * victim.body.length) / count)];
     world.foods.push(pelletAt(rand, p.x + (rand() - 0.5) * r, p.y + (rand() - 0.5) * r, value));
   }
+  if (victim.isPlayer) {
+    // written once: later gobble events for the same round cannot move the score
+    world.ending ??= { by: eater.name, length: Math.round(victim.mass) };
+  } else {
+    world.respawnAt.push(world.time + RESPAWN_DELAY);
+  }
   world.events.push({ type: 'gobble', eater, victim });
-  if (!victim.isPlayer) world.respawnAt.push(world.time + RESPAWN_DELAY);
+  return true;
 }

@@ -9,7 +9,10 @@ import { createWorld, stepWorld, type World, type WorldEvent } from '@/lib/wiggl
 import { createAssets, drawFrame, type Camera, type Screen } from './render';
 
 export type ArenaInput = { angle: number; boosting: boolean; steerId: number | null };
-type Callbacks = { onHud: (world: World) => void; onEvent: (event: WorldEvent) => void };
+type Callbacks = {
+  onHud: (world: World) => void;
+  onEvent: (event: WorldEvent, world: World) => void;
+};
 
 const HUD_EVERY_MS = 200;
 
@@ -50,7 +53,8 @@ export function useArena(canvasRef: RefObject<HTMLCanvasElement | null>, callbac
     let hudAt = 0;
     let raf = 0;
     const frame = (now: number) => {
-      const dt = Math.min(0.05, (now - last) / 1000);
+      // the world runs on the real clock, so super and recharge end when they really do
+      const dt = Math.max(0, (now - last) / 1000);
       last = now;
       const { player } = world;
       if (player?.alive) {
@@ -58,7 +62,7 @@ export function useArena(canvasRef: RefObject<HTMLCanvasElement | null>, callbac
         player.boosting = inputRef.current.boosting;
       }
       stepWorld(world, dt);
-      for (const event of world.events) callbacksRef.current.onEvent(event);
+      for (const event of world.events) callbacksRef.current.onEvent(event, world);
       world.events.length = 0;
       followCamera(cam, world, screen, dt);
       drawFrame(ctx, world, cam, screen, assets);
@@ -72,6 +76,8 @@ export function useArena(canvasRef: RefObject<HTMLCanvasElement | null>, callbac
     return () => {
       cancelAnimationFrame(raf);
       observer.disconnect();
+      // a re-mounted loop must not leave a stale world behind for the start button to find
+      if (worldRef.current === world) worldRef.current = null;
     };
   }, [canvasRef]);
 

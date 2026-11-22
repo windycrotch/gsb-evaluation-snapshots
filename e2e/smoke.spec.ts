@@ -77,6 +77,27 @@ test('wiggle snakes starts and the super button fires', async ({ page }) => {
   await expect(page.getByText('SUPER!')).toBeHidden();
 });
 
+test('wiggle snakes: tapping Play twice at once starts a single clean round', async ({ page }) => {
+  await page.goto('/wiggle-snakes');
+  // Two clicks in the same task, so both land before React re-renders the panel away.
+  await expect(async () => {
+    await page.getByRole('button', { name: 'Play', exact: true }).evaluate((el) => {
+      (el as HTMLButtonElement).click();
+      (el as HTMLButtonElement).click();
+    });
+    await expect(page.getByRole('button', { name: 'Super power' })).toBeVisible({ timeout: 1000 });
+  }).toPass({ timeout: 15_000 });
+  // One player plus fourteen bots. A second player snake would push this to sixteen, so
+  // sampling the badge catches the leak without depending on which bots happen to be alive.
+  for (let i = 0; i < 5; i++) {
+    const badge = await page.getByText(/^length · #/).textContent();
+    expect(Number(badge?.match(/of (\d+)/)?.[1])).toBeLessThanOrEqual(15);
+    await page.waitForTimeout(150);
+  }
+  await expect(page.getByText('SUPER!')).toBeVisible();
+  await expect(page.getByText(/Oh no!/)).toHaveCount(0);
+});
+
 test('secret pet land: knock on the present three times to find the kitten', async ({ page }) => {
   await page.goto('/secret-pet-land');
   const present = page.getByRole('button', { name: 'Present' });
