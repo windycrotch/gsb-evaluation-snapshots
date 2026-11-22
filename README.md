@@ -140,11 +140,13 @@ src/audio.js     WebAudio 全合成音效（打击/格挡/KO锣声/必杀呼啸�
 |----------|------|
 | `?fight=a,b&mode=ai` | 指定角色直接开局（id：xiaoniu/jinbao/dazhuang/zongniu/shetou/yunque/wolf） |
 | `&stage=night\|forest\|sunset` | 固定舞台 |
+| `&rt=8` | 覆盖单回合秒数（联机断线/重赛自动化验证用，最小 3 秒） |
 | `&demo=showcase` / `&demo=ai` | 招式演示 / 双 AI 对打 |
 | `&spOnly=1&full=1` | 循环演示必杀技 |
 | `&freeze=秒` | 推进到指定时刻定格 |
 | `&cycle=N` | 每 9 秒完整重建一局（资源释放压测） |
 | `&select=1&mode=ai&autopick=我,AI` | 自动化选人流程测试 |
+| `?lan=1&pick=N&auto=1` | 自动匹配联机（首窗为主机）、自动确认 N 号角色、自动驾驶出招（双窗口断线/重赛验证见 `tests/README.md`） |
 
 </details>
 

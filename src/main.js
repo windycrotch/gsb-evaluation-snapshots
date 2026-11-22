@@ -72,9 +72,16 @@ class Game {
     this._stageParam = null;
     this.netRole = null;           // 'host' | 'guest'
     this.remoteInput = {};         // 主机收到的客机输入
+    this._prevRemote = {};
     this._netLatest = null;        // 客机最新快照
     this._pendingNetEvts = [];     // 主机待下发的事件
     this._isNet = false;
+    this._netToken = 0;            // 会话代号：每次建立/销毁会话 +1，用于屏蔽旧会话迟到回调
+    this._netPanelToken = 0;       // 联机面板代号：取消/重开面板时使进行中的异步连接作废
+    this._netSeq = 0;              // 最近一次已处理的 start/rematch 序列号（幂等去重）
+    this._netStarting = false;     // 主机开局命令去抖（同一次选人只广播一次 start）
+    this._matchGen = 0;            // 对局代号：每次 startMatch 递增，用于丢弃上一局的迟到快照
+    this._roundTimeOverride = null;   // 测试参数 &rt=N：覆盖单回合秒数
     this._justSnap = { p1: emptyInput(), p2: emptyInput() };   // 待消费按键事件（跨帧保留直到消费）
 
     this._bindMenus();
@@ -149,20 +156,25 @@ class Game {
     $('btn-lan').onclick = () => { this._click(); this.openNetPanel(); };
     $('btn-select-back').onclick = () => {
       this._click();
-      if (this._isNet) this.net?.send({ type: 'cmd', cmd: 'menu' });
-      this.exitToTitle();
+      if (this._isNet) this._netLeaveToTitle();
+      else this.exitToTitle();
     };
     $('btn-rematch').onclick = () => {
       this._click();
-      if (this._isNet) { this.net?.send({ type: 'cmd', cmd: 'rematch' }); return; }   // 双方都会收到回声并各自重开
+      if (this._isNet) {
+        // 主机权威：任一方点击都由主机广播同一序列号的 rematch（见 onStart / _beginRematch）
+        this.net?.send({ type: 'cmd', cmd: this.netRole === 'host' ? 'rematch' : 'rematch-req' });
+        if (this.netRole === 'host') this._beginRematch();
+        return;
+      }
       this.ui.hide('screen-result');
       this.score = [0, 0]; this.round = 1;
       this.startMatch(this.picks[0], this.picks[1]);
     };
     $('btn-to-menu').onclick = () => {
       this._click();
-      if (this._isNet) this.net?.send({ type: 'cmd', cmd: 'menu' });
-      this.exitToTitle();
+      if (this._isNet) this._netLeaveToTitle();
+      else this.exitToTitle();
     };
   }
 
@@ -172,31 +184,84 @@ class Game {
   openNetPanel() {
     const panel = $('net-panel'), status = $('net-status');
     panel.classList.remove('hidden');
+    const panelToken = ++this._netPanelToken;   // 面板代号：取消/重开会让进行中的异步连接自动作废
     status.textContent = '正在连接服务器…';
-    $('btn-net-cancel').onclick = () => { this.net?.destroy(); this.net = null; panel.classList.add('hidden'); };
+    $('btn-net-cancel').onclick = () => {
+      this._shutdownNet();
+      panel.classList.add('hidden');
+      this._netPanelToken++;
+    };
 
     import('./net.js').then(async ({ NetSession }) => {
+      if (panelToken !== this._netPanelToken) return;   // 模块加载期间面板已被取消或重开
+      // 重进面板建立全新会话：先销毁任何残留连接与定时器，绝不复用
+      this._shutdownNet();
+      const session = new NetSession(this._netHandlers());
+      const token = this._netToken;
+      this.net = session;
       try {
-        this.net?.destroy();
-        this.net = new NetSession(this._netHandlers());
-        await this.net.connect();
+        await session.connect();
+        if (token !== this._netToken || !this.net || panelToken !== this._netPanelToken) return;
         status.textContent = '已连接，正在匹配对手…';
-        this.net.send({ type: 'join' });
+        session.send({ type: 'join' });
       } catch (e) {
+        if (token !== this._netToken) return;
         status.textContent = e.message + '（请确认已在项目目录运行 node server.js）';
       }
     });
   }
 
+  /**
+   * 拆除当前联机会话（幂等）：停本地上行/下行循环、清待转发事件与远端输入、
+   * 销毁 WebSocket 并复位全部联机状态。token 递增使旧会话的迟到回调全部失效。
+   */
+  _shutdownNet() {
+    this._netToken++;
+    this.net?.destroy();
+    this.net = null;
+    this.netRole = null;
+    this._isNet = false;
+    this._netStarting = false;
+    this._netSeq = 0;
+    this._pendingNetEvts = [];
+    this.remoteInput = {};
+    this._prevRemote = {};
+    this._netLatest = null;
+    this._apInp = null;
+    this._apAI = null;
+    this.aiP1 = null;
+    this.mode = 'local';
+  }
+
+  /** 联机中主动回标题：先通知服务端关房（对手收到 peer-left），再本地拆除 */
+  _netLeaveToTitle() {
+    const session = this.net;
+    try { session?.leave(); } catch { /* ignore */ }   // leave 内部幂等并关闭连接
+    this._shutdownNet();
+    this.exitToTitle();
+  }
+
+  /** 对手离开 / 连接关闭 / 房间被服务端回收：停一切收发，回标题并给出可见提示 */
+  _netHandleClose(peerLeft) {
+    const wasInGame = this.phase !== 'title';
+    this._shutdownNet();
+    this.exitToTitle();
+    if (wasInGame) this.ui.announce(peerLeft ? '对手已离开' : '与服务器断开', { dur: 1.8, size: 'clamp(28px,5vw,50px)' });
+  }
+
   _netHandlers() {
+    const token = this._netToken;
+    const alive = () => this.net && this._netToken === token;
     return {
       onRole: (role) => {
+        if (!alive()) return;
         this.netRole = role;
         $('net-status').textContent = role === 'host'
           ? '房间已创建，等待对手加入…（把局域网地址发给朋友）'
           : '已找到房间，正在握手…';
       },
       onMatched: () => {
+        if (!alive() || this.phase !== 'title') return;
         $('net-panel').classList.add('hidden');
         this.mode = this.netRole === 'host' ? 'net-host' : 'net-guest';
         SFX.confirm();
@@ -204,6 +269,7 @@ class Game {
         // 测试参数：自动确认选人
         if (this.__autoPick != null) {
           setTimeout(() => {
+            if (!alive() || this.phase !== 'select') return;
             const slot = this._localSlot();
             const idx = Number(this.__autoPick);
             this.selectCursor[slot] = idx;
@@ -217,6 +283,7 @@ class Game {
       },
       // 远端光标镜像
       onPick: (from, idx) => {
+        if (!alive() || this.phase !== 'select') return;
         const slot = from === 'host' ? 0 : 1;
         if (!this.selectDone[slot]) this.selectCursor[slot] = idx;
         else this.picks[slot] = idx;
@@ -224,6 +291,7 @@ class Game {
       },
       // 远端确认
       onReady: (from, idx) => {
+        if (!alive() || this.phase !== 'select') return;
         const slot = from === 'host' ? 0 : 1;
         this.selectCursor[slot] = idx;
         this.picks[slot] = idx;
@@ -232,26 +300,40 @@ class Game {
         this._refreshSelectVisual();
         this._netMaybeStartMatch();
       },
-      // 主机广播：开始比赛 / 重赛
+      // 主机广播：开始比赛 / 重赛（序列号 seq 保证幂等，重复或交叉到达只生效一次）
       onStart: (msg) => {
+        if (!alive()) return;
         if (msg.cmd === 'start') {
+          // 客机在未收到主机开局前不会自行进入对战；主机自己发的 start 由 _netMaybeStartMatch 本地执行
+          if (this.netRole !== 'guest' || this.phase === 'fight') return;
+          if (msg.seq != null && msg.seq <= this._netSeq) return;
+          if (msg.seq != null) this._netSeq = msg.seq;
           this.picks = [msg.c1, msg.c2];
           this.startMatch(msg.c1, msg.c2);
         } else if (msg.cmd === 'rematch') {
+          if (msg.seq != null && msg.seq <= this._netSeq) return;   // 重复/迟到的 rematch 丢弃
+          if (msg.seq != null) this._netSeq = msg.seq;
+          // 主机权威：允许结算页，或客机结算快照尚未到达的 fight 末尾（消除两端切换窗口的竞态）
+          if (this.phase !== 'result' && this.phase !== 'fight') return;
           this.ui.hide('screen-result');
           this.score = [0, 0]; this.round = 1;
           this.startMatch(this.picks[0], this.picks[1]);
+        } else if (msg.cmd === 'rematch-req') {
+          // 客机的重赛请求：仅主机处理，由主机统一广播 rematch（客机不自行开局）
+          if (this.netRole === 'host' && this.phase === 'result') this._beginRematch();
         } else if (msg.cmd === 'menu') {
-          this.exitToTitle();
+          if (this.phase !== 'title') this._netHandleClose(true);
         }
       },
-      onState: (snap) => this._applyNetState(snap),
-      onInput: (keys) => { this.remoteInput = keys || {}; },
+      onState: (snap) => { if (alive()) this._applyNetState(snap); },
+      onInput: (keys) => { if (alive()) this.remoteInput = keys || {}; },
       onClose: (peerLeft) => {
-        const wasInGame = this.phase !== 'title';
-        this.exitToTitle();
-        this.net?.destroy(); this.net = null; this.netRole = null; this._isNet = false;
-        if (wasInGame) this.ui.announce(peerLeft ? '对手已离开' : '与服务器断开', { dur: 1.8, size: 'clamp(28px,5vw,50px)' });
+        if (!alive()) return;   // 主动拆除/旧会话的关闭事件忽略
+        this._netHandleClose(peerLeft);
+      },
+      onError: (reason) => {
+        // 房间已被删除后的迟到消息被服务端拒绝：等价于本会话已失效
+        if (reason === 'room-closed' && alive()) this._netHandleClose(true);
       },
     };
   }
@@ -259,12 +341,25 @@ class Game {
   /** 联机选人时的本地输入聚合（两套键位都作用于自己的光标） */
   _localSlot() { return this.mode === 'net-host' ? 0 : 1; }
 
+  /** 仅主机：双方确认后广播一次带序列号的 start，并本地开局（幂等） */
   _netMaybeStartMatch() {
-    if (this.phase !== 'select' || this.mode !== 'net-host') return;
+    if (this.phase !== 'select' || this.mode !== 'net-host' || this._netStarting) return;
     if (this.selectDone[0] && this.selectDone[1]) {
-      this.net?.send({ type: 'cmd', cmd: 'start', c1: this.picks[0], c2: this.picks[1] });
+      this._netStarting = true;
+      const seq = ++this._netSeq;
+      this.net?.send({ type: 'cmd', cmd: 'start', seq, c1: this.picks[0], c2: this.picks[1] });
       this.startMatch(this.picks[0], this.picks[1]);
     }
+  }
+
+  /** 仅主机：从结算页开始重赛 —— 广播带新序列号的 rematch，两端各自只重开一次 */
+  _beginRematch() {
+    if (this.netRole !== 'host' || this.phase !== 'result') return;
+    const seq = ++this._netSeq;
+    this.net?.send({ type: 'cmd', cmd: 'rematch', seq });
+    this.ui.hide('screen-result');
+    this.score = [0, 0]; this.round = 1;
+    this.startMatch(this.picks[0], this.picks[1]);
   }
 
   exitToTitle() {
@@ -281,6 +376,8 @@ class Game {
     this.fx.clear();
     this.net?.stopLoops();
     this._pendingNetEvts = [];
+    this.remoteInput = {};
+    this._prevRemote = {};
   }
 
   // ================= 选人 =================
@@ -290,6 +387,7 @@ class Game {
     this.selectDone = [false, false];
     this._selHold = [{ dir: 0, t: 0 }, { dir: 0, t: 0 }];   // 按住状态差分的记忆
     this._isNet = this.mode === 'net-host' || this.mode === 'net-guest';
+    this._netStarting = false;   // 新选人周期允许一次开局广播
     this.ui.showOnly(['screen-select']);
     $('select-sub').textContent = this.mode === 'ai'
       ? '第一步：选你的角色（A/D 或 ←/→ 移动，空格 / 小键盘1 / 数字1 确认）'
@@ -396,8 +494,7 @@ class Game {
           this.net?.send({ type: 'ready', char: this.picks[slot] });
           this._netMaybeStartMatch();
         } else if (edge(slot, both.cancel, 'x')) {
-          this.net?.send({ type: 'cmd', cmd: 'menu' });
-          this.exitToTitle();
+          this._netLeaveToTitle();
         }
       }
       return;
@@ -460,6 +557,7 @@ class Game {
   // ================= 比赛 =================
   startMatch(pick1, pick2) {
     this._teardownFighters();
+    this._matchGen++;   // 新对局：上一局残留的迟到快照将被客机丢弃
     // 舞台轮换（可用 &stage=night|forest|sunset 固定）
     const order = ['sunset', 'night', 'forest'];
     const stageId = this._stageParam || order[(this._stageSeq++) % order.length];
@@ -526,7 +624,7 @@ class Game {
       f.meter = Math.min(f.meter, 100);   // 能量跨回合保留
       f.renderX = null;
     }
-    this.timer = GAME.roundTime;
+    this.timer = this._roundTimeOverride ?? GAME.roundTime;
     this.subPhase = 'intro'; this.subT = 0;
     this.world.timeScale = 1;
     this.world.hitstop = 0;
@@ -796,6 +894,7 @@ class Game {
     if (!this.fighters.length) return null;
     const [a, b] = this.fighters;
     return {
+      gen: this._matchGen,
       phase: this.phase, sub: this.subPhase,
       t: +this.timer.toFixed(2), round: this.round,
       score: [...this.score],
@@ -809,6 +908,8 @@ class Game {
   /** 客机：应用主机快照 */
   _applyNetState(snap) {
     if (!this.fighters.length || !snap || !snap.f) return;
+    // 丢弃上一局/旧房间的迟到快照（断线后、重赛切换瞬间都可能到达）
+    if (snap.gen != null && snap.gen !== this._matchGen) return;
     this._netLatest = snap;
     for (let i = 0; i < 2; i++) this.fighters[i].applySnapshot(snap.f[i]);
     this.timer = snap.t; this.round = snap.round; this.score = snap.score;
@@ -1006,6 +1107,7 @@ window.addEventListener('DOMContentLoaded', () => {
   window.__AUTO_PILOT = q.get('auto') === '1';
   game._stageParam = q.get('stage');
   game._cycleLeft = Number(q.get('cycle')) || 0;
+  game._roundTimeOverride = q.get('rt') != null ? Math.max(3, Number(q.get('rt'))) : null;
   if (q.get('fight')) {
     const [a, b] = q.get('fight').split(',');
     game.mode = q.get('mode') === 'ai' ? 'ai' : 'local';

@@ -2,6 +2,12 @@
  * 牛来格斗 - LAN 服务器
  * 职责：静态文件服务 + WebSocket 房间配对 + 消息中继
  * 启动：node server.js  （默认端口 3000，可用 PORT=xx 覆盖）
+ *
+ * 房间生命周期（断线与并发安全）：
+ *  - 每个连接最多绑定一个房间；同一连接重复 join 幂等（返回既有角色，不新建房间）
+ *  - 任一方断开/主动离开 → 房间立即删除，存活方收到 peer-left
+ *  - 房间删除后到达的迟到消息一律拒绝（回复 error/room-closed），绝不再被当作有效对局转发
+ *  - 已离开的连接发来的 input/state/cmd 等均无效
  */
 import http from 'node:http';
 import fs from 'node:fs';
@@ -58,14 +64,28 @@ const server = http.createServer((req, res) => {
 
 // ---------- 房间配对与中继 ----------
 const wss = new WebSocketServer({ server });
-/** room = { id, host: ws, guest: ws } */
+/** room = { id, host: ws, guest: ws|null, closed: boolean } */
 const rooms = new Map();
 let roomSeq = 0;
 
 function send(ws, msg) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(msg)); }
 function broadcast(room, msg) { send(room.host, msg); send(room.guest, msg); }
 
+/** 把连接从其房间解绑；若它是房间成员则关闭整个房间并通知存活方。幂等。 */
+function detachSocket(ws) {
+  const room = ws.__room;
+  if (!room || room.closed) { ws.__room = null; return; }
+  room.closed = true;
+  rooms.delete(room.id);
+  const peer = ws === room.host ? room.guest : room.host;
+  send(peer, { type: 'peer-left' });
+  if (room.host) room.host.__room = null;
+  if (room.guest) room.guest.__room = null;
+}
+
 wss.on('connection', (ws) => {
+  ws.__room = null;
+
   ws.on('message', (raw) => {
     let msg;
     try { msg = JSON.parse(raw.toString()); } catch { return; }
@@ -73,53 +93,78 @@ wss.on('connection', (ws) => {
 
     switch (msg.type) {
       case 'join': {
-        // 加入等待中的房间，否则新建
+        // 幂等：同一连接重复加入 → 直接返回既有角色，绝不创建第二个房间
+        if (room && rooms.get(room.id) === room && !room.closed) {
+          const role = ws === room.host ? 'host' : 'guest';
+          send(ws, { type: 'role', role, room: room.id });
+          if (room.guest) send(ws, { type: 'matched', room: room.id });
+          break;
+        }
+        // 加入等待中的房间（房主必须是另一条连接），否则新建
         let target = null;
-        for (const r of rooms.values()) if (!r.guest && r.host !== ws) { target = r; break; }
+        for (const r of rooms.values()) {
+          if (!r.closed && !r.guest && r.host && r.host !== ws) { target = r; break; }
+        }
         if (!target) {
           const id = `R${++roomSeq}`;
-          target = { id, host: ws, guest: null };
+          target = { id, host: ws, guest: null, closed: false };
           rooms.set(id, target);
+          ws.__room = target;
           send(ws, { type: 'role', role: 'host', room: id });
         } else {
           target.guest = ws;
+          ws.__room = target;
           send(ws, { type: 'role', role: 'guest', room: target.id });
           send(target.host, { type: 'matched', room: target.id });
           send(ws, { type: 'matched', room: target.id });
         }
-        ws.__room = target;
         break;
       }
+      case 'leave':
+        detachSocket(ws);
+        break;
       case 'pick':   // 光标移动 {char}
-        if (room) broadcast(room, { type: 'pick', from: ws === room.host ? 'host' : 'guest', char: msg.char });
+        if (room && rooms.get(room.id) === room && !room.closed) {
+          broadcast(room, { type: 'pick', from: ws === room.host ? 'host' : 'guest', char: msg.char });
+        } else send(ws, { type: 'error', reason: 'room-closed' });
         break;
       case 'ready':  // 确认出场
-        if (room) broadcast(room, { type: 'ready', from: ws === room.host ? 'host' : 'guest', char: msg.char });
+        if (room && rooms.get(room.id) === room && !room.closed) {
+          broadcast(room, { type: 'ready', from: ws === room.host ? 'host' : 'guest', char: msg.char });
+        } else send(ws, { type: 'error', reason: 'room-closed' });
         break;
-      case 'input':  // 客户端 → 主机：输入状态
-        if (room && ws === room.guest) send(room.host, { type: 'input', keys: msg.keys });
-        break;
-      case 'state':  // 主机 → 客户端：权威状态快照
-        if (room && ws === room.host) send(room.guest, { type: 'state', ...msg.data });
-        break;
-      case 'cmd':    // 双向命令（开始/重赛等）—— 透传全部字段
-        if (room) {
-          const to = ws === room.host ? room.guest : room.host;
-          const { type: _t, ...rest } = msg;
-          send(to, { type: 'cmd', ...rest });
+      case 'input':  // 客户端 → 主机：输入状态（仅客机有效，且对手仍在）
+        if (room && rooms.get(room.id) === room && !room.closed && ws === room.guest && room.host) {
+          send(room.host, { type: 'input', keys: msg.keys });
+        } else if (ws.__room === null) {
+          send(ws, { type: 'error', reason: 'room-closed' });
         }
+        break;
+      case 'state': {  // 主机 → 客户端：权威状态快照（仅主机有效，且客机仍在）
+        if (room && rooms.get(room.id) === room && !room.closed && ws === room.host && room.guest) {
+          // 客户端实际发送的是扁平结构 {type:'state', ...快照}；兼容旧版 {type:'state', data:{...}}
+          const snap = msg.data ?? (() => { const { type: _t, ...rest } = msg; return rest; })();
+          send(room.guest, { type: 'state', ...snap });
+        } else if (ws.__room === null) {
+          send(ws, { type: 'error', reason: 'room-closed' });
+        }
+        break;
+      }
+      case 'cmd':    // 双向命令（开始/重赛/回菜单等）—— 透传全部字段
+        if (room && rooms.get(room.id) === room && !room.closed) {
+          const to = ws === room.host ? room.guest : room.host;
+          if (to) {
+            const { type: _t, ...rest } = msg;
+            send(to, { type: 'cmd', ...rest });
+          }
+        } else send(ws, { type: 'error', reason: 'room-closed' });
         break;
       case 'ping': send(ws, { type: 'pong' }); break;
     }
   });
 
-  ws.on('close', () => {
-    const room = ws.__room;
-    if (!room) return;
-    const peer = ws === room.host ? room.guest : room.host;
-    send(peer, { type: 'peer-left' });
-    rooms.delete(room.id);
-  });
+  ws.on('close', () => detachSocket(ws));
+  ws.on('error', () => detachSocket(ws));
 });
 
 server.listen(PORT, () => {
