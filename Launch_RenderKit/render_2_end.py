@@ -20,20 +20,34 @@ from . import utility_data
 
 @persistent
 def render_kit_end(scene):
+	# Render completed normally
 	# Isolate handler faults from the render loop
 	try:
-		_render_kit_end(scene)
+		_render_kit_end(scene, completed=True)
 	except Exception:
 		import traceback
-		print("[RenderKit] error in render_complete/render_cancel handler:")
+		print("[RenderKit] error in render_complete handler:")
 		traceback.print_exc()
 
-def _render_kit_end(scene):
+@persistent
+def render_kit_cancel(scene):
+	# Render was cancelled by the user or aborted
+	try:
+		_render_kit_end(scene, completed=False)
+	except Exception:
+		import traceback
+		print("[RenderKit] error in render_cancel handler:")
+		traceback.print_exc()
+
+def _render_kit_end(scene, completed=True):
 	# Use preferences cached at render_init to avoid bpy.context access mid-render
 	prefs = utility_data.get_prefs()
 	if prefs is None:
 		prefs = bpy.context.preferences.addons[__package__].preferences
 	settings = scene.render_kit_settings
+
+	# Record whether this render ended in cancellation so the batch loop can react
+	utility_data.render_set_cancelled(not completed)
 	
 	# Reset sequence tracking and start frame
 #	settings.sequence_active = False
@@ -103,25 +117,28 @@ def _render_kit_end(scene):
 			settings.output_file_nodes = ""
 	
 	# Features that require the project to be saved
-	if bpy.data.filepath:
+	# Skipped on cancellation: a cancelled render has no finished image to save
+	if completed and bpy.data.filepath:
 		# Save external log file
 		if prefs.external_log_file:
 			save_log(render_time)
-		
+
 		# Autosave rendered image
 		if prefs.enable_autosave_render:
 			save_image(scene=scene, render_time=render_time)
-	
+
 	# Render complete notifications
-	if prefs.pushover_enable or prefs.voice_enable:
+	if completed and (prefs.pushover_enable or prefs.voice_enable):
 		render_notifications(scene, render_time)
-	
-	# Increment the output serial number if it was used in any output path
+
+	# Increment the output serial number only when a render fully completes.
+	# A cancelled or failed render must not consume a serial number, so retries
+	# produce the same numbering as the original successful run would have.
 	# This must be done after all other steps are completed
-	if utility_data.render_get_serial():
+	if completed and utility_data.render_get_serial():
 		settings.output_file_serial += 1
 #		settings.serial_used = False
-		utility_data.render_set_serial(False)
+	utility_data.render_set_serial(False)
 	
 	# Reset all render state values
 	utility_data.render_set_end()

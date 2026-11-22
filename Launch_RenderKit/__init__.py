@@ -9,7 +9,7 @@ from shutil import which
 from . import utility_panel
 from .render_0_start import render_kit_start
 from .render_1_frame import render_kit_frame_pre, render_kit_frame_post
-from .render_2_end import render_kit_end
+from .render_2_end import render_kit_end, render_kit_cancel
 from . import render_autosave
 from . import render_batch
 from . import render_display
@@ -955,7 +955,7 @@ def register():
 	bpy.app.handlers.render_init.append(render_kit_start)
 	bpy.app.handlers.render_pre.append(render_kit_frame_pre)
 	bpy.app.handlers.render_post.append(render_kit_frame_post)
-	bpy.app.handlers.render_cancel.append(render_kit_end)
+	bpy.app.handlers.render_cancel.append(render_kit_cancel)
 	bpy.app.handlers.render_complete.append(render_kit_end)
 	
 	########## Render Autosave ##########
@@ -1019,7 +1019,7 @@ def unregister():
 	bpy.app.handlers.render_init.remove(render_kit_start)
 	bpy.app.handlers.render_pre.remove(render_kit_frame_pre)
 	bpy.app.handlers.render_post.remove(render_kit_frame_post)
-	bpy.app.handlers.render_cancel.remove(render_kit_end)
+	bpy.app.handlers.render_cancel.remove(render_kit_cancel)
 	bpy.app.handlers.render_complete.remove(render_kit_end)
 	
 	# Remove extension settings reference

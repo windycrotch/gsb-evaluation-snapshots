@@ -7,7 +7,15 @@ _state = {
 	"serial_used": False,
 	"sequence_active": False,
 	"estimated_time": -1.0,
+	# Set True by the render_cancel handler wrapper for the current render invocation,
+	# reset to False whenever a new render starts (render_set_start)
+	"render_cancelled": False,
 }
+
+# Batch-level cancellation latch. The render_cancel handler sets this True while a
+# batch session is active; the batch loop reads (and clears) it after each target so
+# that a user pressing Escape stops the whole batch rather than just one render.
+_batch_cancel = False
 
 # Cached addon preferences reference, captured once at render_init and used during the
 # render loop. Reading bpy.context inside render_pre/render_post handlers every frame is a
@@ -26,6 +34,7 @@ def render_set_start(start_time: float):
 		_state["serial_used"] = False
 		_state["sequence_active"] = False
 		_state["estimated_time"] = -1.0
+		_state["render_cancelled"] = False
 
 def render_set_end():
 	global _prefs
@@ -100,3 +109,28 @@ def render_get_sequence():
 def render_get_estimate():
 	with _lock:
 		return _state["estimated_time"]
+
+##################################################
+# Render cancellation tracking
+
+def render_set_cancelled(cancelled: bool):
+	with _lock:
+		_state["render_cancelled"] = bool(cancelled)
+
+def render_get_cancelled():
+	with _lock:
+		return _state["render_cancelled"]
+
+##################################################
+# Batch cancellation latch
+# Independent of the per-render flag so it survives the render_set_start() reset
+# triggered by the next target's render_init handler.
+
+def batch_set_cancel_requested(requested: bool):
+	global _batch_cancel
+	with _lock:
+		_batch_cancel = bool(requested)
+
+def batch_get_cancel_requested():
+	with _lock:
+		return _batch_cancel
