@@ -1754,6 +1754,12 @@ class Game {
        afterwards, which is the only caller that wants one. */
     this.title.skip();
     this.pause.close();
+    /* Cut the old race's one-shots at the boundary. The audio graph itself
+       survives the restart, so without this a bark or boost ignition fired on
+       the last frame would keep running into the new grid's engine and the
+       car would sound like two cars. The sustained boost motor is parked at
+       silence too, because the physics' boostTimer is about to be zeroed. */
+    this.audio?.raceReset();
     this.resetSimClock();
     const p = this.player;
     p.placeAt(34, 0);

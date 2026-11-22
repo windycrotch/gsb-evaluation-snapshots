@@ -15,6 +15,7 @@
  */
 import { clamp, approach } from '../core/util.js';
 import { harmonicWave, noiseSource } from './noise.js';
+import { OneShots } from './oneshots.js';
 
 const BOOST_SEC = 1.2;           // matches car/physics.js
 
@@ -25,6 +26,12 @@ export class FeedbackVoices {
     this.sources = [];
     this.buf = buffers.white;
     this.boost = 0;
+    /* Ignition bursts and rank notes are the only things here that allocate,
+       and they have to be stoppable as a group on a restart or a dispose —
+       the same contract engine.js's barks keep, via the same registry. */
+    this.shots = new OneShots();
+    this.disposed = false;
+    this._lastT = 0;
     const node = n => { this.nodes.push(n); return n; };
 
     /* The pad's second engine ------------------------------------------ */
@@ -93,6 +100,8 @@ export class FeedbackVoices {
    * @param {number} t audio-context time
    */
   update(dt, rpm, boostTimer, t) {
+    if (this.disposed) return;
+    this._lastT = t;
     const raw = clamp((boostTimer || 0) / BOOST_SEC, 0, 1);
     this.boost = approach(this.boost, raw, raw > this.boost ? 24 : 7, dt);
     const b = this.boost;
@@ -119,6 +128,7 @@ export class FeedbackVoices {
    * high signal pitches.
    */
   position(t, direction) {
+    if (this.disposed) return;
     if (direction === 'gained') {
       this._tone(t, 494, 554, 0.16, 0.22, 'triangle');
       this._tone(t + 0.072, 622, 698, 0.18, 0.30, 'triangle');
@@ -133,6 +143,7 @@ export class FeedbackVoices {
 
   /** The brief attack that says the pad fired before the motor carries on. */
   boostStart(t, rpm = 0.5) {
+    if (this.disposed) return;
     const rev = clamp(rpm, 0, 1);
     const f0 = 210 + rev * 230;
     this._tone(t, f0, f0 * 1.82, 0.14, 0.24, 'triangle');
@@ -152,10 +163,13 @@ export class FeedbackVoices {
     this.kickBand.frequency.exponentialRampToValueAtTime(1900 + rev * 1100, t + 0.18);
     src.start(t, 0.37);
     src.stop(t + 0.21);
-    src.onended = () => { src.disconnect(); g.disconnect(); };
+    /* Registry, not a private onended: this ignition must die with a restart
+       or a dispose even if its 0.2 s envelope has not run out. */
+    this.shots.add(src, [g]);
   }
 
   _tone(t, f0, f1, level, dur, type) {
+    if (this.disposed) return;
     const osc = this.ctx.createOscillator();
     osc.type = type;
     osc.frequency.setValueAtTime(Math.max(20, f0), t);
@@ -169,12 +183,33 @@ export class FeedbackVoices {
     g.connect(this.positionOut);
     osc.start(t);
     osc.stop(t + dur + 0.03);
-    osc.onended = () => { osc.disconnect(); g.disconnect(); };
+    this.shots.add(osc, [g]);
+  }
+
+  /**
+   * Stop every ignition and rank note still in flight without disturbing the
+   * continuous motor, and park that motor at silence immediately. A restart
+   * must not inherit the old race's pad: the physics' boostTimer is reset to
+   * zero, so holding the motor's last level for a frame would be a sound with
+   * no force behind it.
+   */
+  cutTransients() {
+    if (this.disposed) return;
+    this.shots.cut();
+    this.boost = 0;
+    const t = this._lastT || (this.ctx.currentTime || 0);
+    this.boostOut.gain.cancelScheduledValues(t);
+    this.boostOut.gain.setTargetAtTime(0, t, 0.005);
   }
 
   dispose() {
+    if (this.disposed) return;
+    this.disposed = true;
+    /* One-shots first, same order as EngineVoice: no transient may keep
+       sounding while the permanent graph underneath it comes apart. */
+    this.shots.dispose();
     for (const s of this.sources) { try { s.stop(); } catch (_) {} }
     for (const n of this.nodes) n.disconnect();
-    for (const s of this.sources) s.disconnect();
+    for (const s of this.sources) { try { s.disconnect(); } catch (_) {} }
   }
 }

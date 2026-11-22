@@ -544,6 +544,25 @@ export class Audio {
   }
 
   /**
+   * Race boundary: cut every one-shot still in flight from the old race and
+   * park the sustained voices at silence.
+   *
+   * The Audio object and its graph deliberately survive a restart — rebuilding
+   * the whole engine on the results card would be a glitch and a waste — but
+   * the scheduled transients do not. A bark or pad ignition fired on the last
+   * frame of the old race runs into the same permanent nodes the new race's
+   * engine is already using, which is exactly how one car ends up sounding like
+   * two. Both voices keep the same cut contract, so neither can swallow the
+   * other's teardown: the engine kills its barks, the feedback voice kills its
+   * ignitions and notes and silences the boost motor.
+   */
+  raceReset() {
+    if (!this.ctx) return;
+    this.engine?.cutTransients();
+    this.feedback?.cutTransients();
+  }
+
+  /**
    * The output gain of each layer, keyed by name.
    *
    * Not for the game. The offline harness solos one layer at a time to measure
@@ -577,6 +596,9 @@ export class Audio {
 
   dispose() {
     if (!this.ctx) return;
+    /* The voices' own dispose() contracts stop every source — permanent and
+       one-shot alike — and disconnect every node, so nothing scheduled before
+       this call can sound afterwards or leave a connection behind. */
     this.engine.dispose();
     this.surface.dispose();
     this.impacts.dispose();
@@ -586,8 +608,13 @@ export class Audio {
     this.feedback.dispose();
     for (const n of [this.bus, this.amb, this.hits, this.duck, this.send, this.verb,
       this.wet, ...this.wetNet, ...this.wetThru, ...this.wetSwap,
-      this.comp, this.limiter, this.dcBlock, this.master]) n.disconnect();
+      this.comp, this.limiter, this.dcBlock, this.master]) {
+      try { n.disconnect(); } catch (_) {}
+    }
     if (this._ownsContext && this.ctx.close) this.ctx.close().catch(() => {});
+    /* Null first, so a frame racing teardown sees no context and every entry
+       point (update, impact, the tones, raceReset) becomes a no-op rather than
+       touching a torn-down graph. */
     this.ctx = null;
     this.running = false;
   }

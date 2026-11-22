@@ -33,11 +33,15 @@
 import { clamp, lerp, approach, smoothstep } from '../core/util.js';
 import { rng, rand } from '../core/rng.js';
 import { noiseSource, saturationCurve, harmonicWave } from './noise.js';
+import { OneShots } from './oneshots.js';
 
 const REV_MAX = 7400;            // matches car/physics.js, for rpm → Hz
 const REV_IDLE = 1050;
 const FIRINGS_PER_REV = 2;       // four cylinders, four stroke
 const TAU = 0.03;                // parameter smoothing, seconds
+/* At or under this with the throttle shut there is no pressure in the system
+   to release, so a gearchange has nothing to bark — see bark(). */
+const IDLE_RPM = REV_IDLE / REV_MAX;
 
 export class EngineVoice {
   constructor(ctx, dest, buffers, seed = 91) {
@@ -45,6 +49,12 @@ export class EngineVoice {
     this.rand = rand(rng(seed));
     this.nodes = [];
     this.sources = [];
+    /* The barks are short-lived where everything else here is permanent, so
+       they get their own registry rather than joining `sources`. It owns the
+       stop-and-disconnect contract that lets a restart or a dispose silence a
+       bark still inside its envelope — see oneshots.js. */
+    this.shots = new OneShots();
+    this.disposed = false;
 
     const node = (n) => { this.nodes.push(n); return n; };
 
@@ -223,6 +233,11 @@ export class EngineVoice {
    * @param {number} t when, on the engine's clock
    */
   update(dt, rpm, throttle, brake, gear, t) {
+    /* A torn-down voice is silent forever. Without this guard a frame queued
+       against an engine whose graph was already disconnected would schedule
+       parameter events into the void — and any gear edge inside it would
+       attempt to build a brand-new bark on a dead voice. */
+    if (this.disposed) return;
     const ctx = this.ctx;
     const r = this.rand;
 
@@ -328,14 +343,21 @@ export class EngineVoice {
    * @param {number} dir +1 up, -1 down
    */
   bark(t, rpm, throttle, dir) {
+    if (this.disposed) return;
     const ctx = this.ctx;
     const r = this.rand;
     const up = dir > 0;
-    /* A shift at idle off the throttle should be near silent. There is no
+    /* A shift at idle off the throttle must stay near silent. There is no
        pressure in the system to release, and barking anyway is how a car ends
-       up sounding like it is fighting itself in the pit lane. */
+       up sounding like it is fighting itself in the pit lane. The level gate
+       below says the same thing for a quiet loaded engine; this says it
+       explicitly for the idle case rather than trusting a tuned threshold, so
+       a rebalance of the level formula cannot switch the pit-lane noise back
+       on. No source is allocated on the silent path — the silence must not
+       depend on an envelope happening to close. */
+    const idleSilent = rpm <= IDLE_RPM * 1.05 && throttle <= 0.02 && this.load <= 0.02;
     const level = (0.14 + 0.62 * this.load + 0.26 * rpm) * lerp(0.3, 1, throttle);
-    if (level < 0.03) return;
+    if (idleSilent || level < 0.03) return;
 
     const dur = up ? 0.085 : 0.16;
     const src = ctx.createBufferSource();
@@ -354,9 +376,13 @@ export class EngineVoice {
     g.gain.exponentialRampToValueAtTime(0.0006, t + dur);
     src.connect(g);
     g.connect(this.barkBand);
-    src.start(t, r.f(0, this.buf.duration - dur * 1.5 - 0.01));
+    src.start(t, r.f(0, Math.max(0, this.buf.duration - dur * 1.5 - 0.01)));
     src.stop(t + dur + 0.02);
-    src.onended = () => { src.disconnect(); g.disconnect(); };
+    /* Registered rather than handed a private onended: the registry reaps the
+       source and gain when the envelope ends, and stop()s both out of hand on
+       a restart or a dispose, so a bark can never outlive the race it belongs
+       to. */
+    this.shots.add(src, [g]);
 
     /* The band sweeps with the burst rather than sitting still: a fixed-band
        noise burst is a hi-hat, a sweeping one is gas moving through a pipe. */
@@ -367,9 +393,28 @@ export class EngineVoice {
       up ? f0 * 0.40 : f0 * 2.3, t + dur);
   }
 
+  /**
+   * Kill every bark still inside its envelope without touching the running
+   * engine. The restart path calls this so a one-shot fired on the last frame
+   * of the old race cannot sound through the grid of the new one. The gear
+   * latch resets too, so the first frame of the new race cannot read as a
+   * gearchange against the old race's gear.
+   */
+  cutTransients() {
+    if (this.disposed) return;
+    this.shots.cut();
+    this.gear = null;
+    this.shift = 0;
+  }
+
   dispose() {
+    if (this.disposed) return;
+    this.disposed = true;
+    /* Barks first: stopping their sources makes the permanent nodes safe to
+       disconnect underneath them. */
+    this.shots.dispose();
     for (const s of this.sources) { try { s.stop(); } catch (_) {} }
     for (const n of this.nodes) n.disconnect();
-    for (const s of this.sources) s.disconnect();
+    for (const s of this.sources) { try { s.disconnect(); } catch (_) {} }
   }
 }
