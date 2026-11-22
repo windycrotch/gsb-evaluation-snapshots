@@ -77,6 +77,26 @@ class Settings:
         for k, v in asdict(self).items():
             qs.setValue(k, v)
 
+    def apply_benchmark(self, curve: DropCurve, max_streams: int,
+                        max_drop_pct: float, bench_date: str | None = None) -> None:
+        """Apply a benchmark's outcome as one paired, all-or-nothing update:
+        the measured curve and the two linked limits (max simultaneous videos
+        and acceptable dropped frames) always take effect together, never just
+        one of them. A failure halfway leaves the settings at their old values."""
+        new_curve = curve.to_text()
+        new_date = bench_date if bench_date is not None else self.bench_date
+        # Coerce every new value first; a bad input raises here, before any
+        # attribute is touched, so the settings can never be left half-updated.
+        values = {
+            "bench_curve": str(new_curve),
+            "bench_date": str(new_date),
+            "max_streams": int(max_streams),
+            "max_drop_pct": float(max_drop_pct),
+        }
+        # Commit only once all four values are known to be valid.
+        for name, value in values.items():
+            setattr(self, name, value)
+
 
 SOUND_MODES = [("hover", "Video under the mouse"),
                ("all", "All videos at once"),

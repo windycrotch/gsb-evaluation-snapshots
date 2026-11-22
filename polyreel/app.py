@@ -35,6 +35,10 @@ BENCH_START_WAIT = 10  # seconds a benchmark round waits for its players to star
 BENCH_MEASURE = 4.0    # seconds a benchmark round is measured
 BENCH_EARLY = 1.5      # ...or this long, if it is clearly far over the limit
 BENCH_DRAIN_WAIT = 30  # seconds the benchmark waits for a round's players to stop
+BENCH_WARMUP_MS = 2000     # brief warm-up before a round is measured
+BENCH_POLL_MS = 500        # how often a round's drop ratio is checked while measuring
+BENCH_STEP_MS = 100        # pacing of the benchmark's own short timers
+BENCH_ADD_BATCH = 4        # round players started per event-loop turn
 KEYS_TEXT = "O  add files     Ctrl+O  add a folder     Ctrl+,  settings"
 EMPTY_TEXT = "Drop videos or folders here\n\n" + KEYS_TEXT
 FIRST_TEXT = ("Drop videos or folders here to begin the benchmark\n\n"
@@ -43,9 +47,27 @@ FIRST_TEXT = ("Drop videos or folders here to begin the benchmark\n\n"
 
 
 @dataclass
+class BenchTiming:
+    """The benchmark's timings, gathered so a run can be driven deterministically
+    (tests shrink them; production uses the module-level defaults)."""
+    start_wait: float = BENCH_START_WAIT
+    measure: float = BENCH_MEASURE
+    early: float = BENCH_EARLY
+    drain_wait: float = BENCH_DRAIN_WAIT
+    warmup_ms: int = BENCH_WARMUP_MS
+    poll_ms: int = BENCH_POLL_MS
+    step_ms: int = BENCH_STEP_MS
+    add_batch: int = BENCH_ADD_BATCH
+
+
+@dataclass
 class BenchState:
     plan: BenchmarkPlan
     sources: list[Item]
+    # A snapshot of the settings the run was started with: changes made while
+    # the benchmark runs must not affect a round already in progress.
+    hwdec: str
+    crop: float
     tiles: list[VideoTile] = field(default_factory=list)
     layout: L.Layout | None = None
     t0: float = 0.0
@@ -54,7 +76,10 @@ class BenchState:
     finishing: bool = False
     cancelled: bool = False
     c0: dict = field(default_factory=dict)
-    timer: QTimer | None = None
+    timers: list[QTimer] = field(default_factory=list)
+    # The wall as it was before the run, so cancelling restores exactly it.
+    wall_paused: dict[VideoTile, bool] = field(default_factory=dict)
+    wall_hidden: list[VideoTile] = field(default_factory=list)
 
 
 class Stage(QWidget):
@@ -102,6 +127,14 @@ class MainWindow(QMainWindow):
         self.focus_tile: VideoTile | None = None
         self.paused_all = False
         self.bench: BenchState | None = None
+        self._closing = False        # the window is shutting down: no new rounds
+        self.bench_timing = BenchTiming()
+        # Files added while a benchmark runs; they reach the library only once
+        # the run is over, so a round never sees a queue changing underneath it.
+        self._deferred_paths: list[str] = []
+        # Seams for a controllable, hardware-free driver (tests replace these).
+        self.tile_factory = None     # callable(stage, hwdec) -> a tile
+        self.prober_factory = Prober
 
         self.message = QLabel(self.stage)
         self.message.setAttribute(Qt.WA_DontCreateNativeAncestors)
@@ -153,7 +186,7 @@ class MainWindow(QMainWindow):
         self.tray: QSystemTrayIcon | None = None
         self._setup_tray()
 
-        self.prober = Prober(self)
+        self.prober = self.prober_factory(self)
         self.prober.probed.connect(self._probed)
 
         self._skipped = 0
@@ -223,6 +256,13 @@ class MainWindow(QMainWindow):
     def add_paths(self, paths: list[str]) -> None:
         files = expand_paths(paths)
         if not files:
+            return
+        if self.bench:
+            # The benchmark owns the library for the duration of a run: keep
+            # new files aside and merge them in when the run is over, so they
+            # cannot perturb the round in progress or start a second run.
+            self._deferred_paths.extend(files)
+            PROFILER.log("bench", f"deferring {len(files)} added file(s) until the run ends")
             return
         items = self.pl.add(files, shuffle=self.settings.shuffle_on_add)
         for it in items:
@@ -431,7 +471,10 @@ class MainWindow(QMainWindow):
     def _acquire(self) -> VideoTile:
         if self.pool:
             return self.pool.pop()
-        tile = VideoTile(self.stage, hwdec=self.settings.hwdec)
+        if self.tile_factory is not None:
+            tile = self.tile_factory(self.stage, self.settings.hwdec)
+        else:
+            tile = VideoTile(self.stage, hwdec=self.settings.hwdec)
         tile.double_clicked.connect(self._tile_double_clicked)
         tile.right_clicked.connect(lambda t: self.show_menu(QCursor.pos(), t))
         tile.finished.connect(self._tile_finished)
@@ -656,7 +699,7 @@ class MainWindow(QMainWindow):
         self._update_message()
 
     def open_settings(self) -> None:
-        if self.bench:
+        if self.bench or self._closing:
             return
         dlg = SettingsDialog(self.settings, self)
         if dlg.exec():
@@ -909,7 +952,7 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------- benchmark
     def start_benchmark(self) -> None:
-        if self.bench:
+        if self.bench or self._closing:
             return
         PROFILER.log("bench", "starting")
         everything = self.pl.playing + self.pl.queued + self.pl.played
@@ -919,11 +962,20 @@ class MainWindow(QMainWindow):
             return
         if self.focus_tile:
             self.exit_focus(finished=False)
+        # Snapshot the wall exactly as it is, so the wall can be rebuilt to the
+        # same state (per-video pause, hidden videos) when the run ends.
+        wall_paused, wall_hidden = {}, []
         for t in self.tiles.values():
+            wall_paused[t] = t.paused
+            if not t.isVisible():
+                wall_hidden.append(t)
             t.set_paused(True)
             t.hide()
+        # Snapshot the settings the run depends on: changes made meanwhile must
+        # not reach a round that is already running.
         self.bench = BenchState(plan=BenchmarkPlan(limit=BENCH_LIMIT, max_drop=self.settings.max_drop),
-                                sources=sources)
+                                sources=sources, hwdec=self.settings.hwdec, crop=self.settings.crop,
+                                wall_paused=wall_paused, wall_hidden=wall_hidden)
         self.perf.reset()
         self._bench_step()
 
@@ -935,7 +987,7 @@ class MainWindow(QMainWindow):
                  for i in range(b.plan.current)]
         # A quick layout: the benchmark only needs the videos on screen, and a
         # longer search would hold up the window.
-        b.layout = L.solve(items, w, h, effort=0, crop=self.settings.crop)
+        b.layout = L.solve(items, w, h, effort=0, crop=b.crop)
         for i, t in enumerate(b.tiles):
             self._place_tile(t, self._rect_for(b.layout.rects[i]), animate=False)
 
@@ -949,6 +1001,10 @@ class MainWindow(QMainWindow):
         stopped: an overloaded player can take a while to get to it, and
         until then it still loads the machine."""
         b = self.bench
+        if b is None:
+            return
+        # Re-entry is harmless: _bench_finish() is idempotent, and a drain
+        # already in flight simply re-stops the (now empty) round tile list.
         for tile in b.tiles:
             self._release(tile)
         b.draining, b.tiles = b.draining + b.tiles, []
@@ -956,20 +1012,36 @@ class MainWindow(QMainWindow):
         self._update_message()
 
         def check() -> None:
+            if self.bench is not b:
+                return                        # the run ended (e.g. window closed)
             waiting = [t for t in b.draining if not t.is_stopped]
             took = time.monotonic() - b.wait_start
-            if waiting and took < BENCH_DRAIN_WAIT:
-                self._bench_after(100, check)
+            if waiting and took < self.bench_timing.drain_wait:
+                self._bench_after(self.bench_timing.step_ms, check, allow_finishing=True)
                 return
             if b.draining:
                 PROFILER.log("bench", f"previous players stopped in {took:.2f}s"
                                       + (f"; gave up on {len(waiting)}" if waiting else ""))
+            # Players that never answered the stop must not rejoin the pool:
+            # a still-running leftover would be reused by the next round and
+            # skew its measurements. Shut them down for good instead.
+            for tile in waiting:
+                if tile in self.pool:
+                    self.pool.remove(tile)
+                if tile in self.all_tiles:
+                    self.all_tiles.remove(tile)
+                tile.retire()
             b.draining = []
-            then()
+            if not b.finishing:
+                then()
+            else:
+                self._bench_done()
         check()
 
     def _bench_start_round(self) -> None:
         b = self.bench
+        if b is None or b.finishing:
+            return
         PROFILER.log("bench", f"round: {b.plan.current} videos")
         self._trim_pool(b.plan.current)
         self._update_message()
@@ -988,13 +1060,15 @@ class MainWindow(QMainWindow):
         """Add the round's players a few at a time, letting the window
         repaint and respond in between."""
         b = self.bench
-        if b is None:
+        if b is None or b.finishing:
             return
         k = b.plan.current
-        for _ in range(min(4, k - len(b.tiles))):
+        for _ in range(min(self.bench_timing.add_batch, k - len(b.tiles))):
             i = len(b.tiles)
             tile = self._acquire()
-            tile.load(b.sources[i % len(b.sources)], loop=True, hwdec=self.settings.hwdec)
+            # Each round's tiles belong to this round alone: they come straight
+            # from a stopped pool (or are fresh), never from another round.
+            tile.load(b.sources[i % len(b.sources)], loop=True, hwdec=b.hwdec)
             tile.set_muted(True)
             b.tiles.append(tile)
             self._place_tile(tile, self._rect_for(b.layout.rects[i]), animate=False)
@@ -1009,23 +1083,51 @@ class MainWindow(QMainWindow):
         """Players start in the background and load their files when they
         get to it; time them only once every one is playing."""
         b = self.bench
+        if b is None or b.finishing:
+            return
         for t in b.tiles:
             t.poll()
         playing = all(t.is_ready and t.sample() is not None for t in b.tiles)
-        if not playing and time.monotonic() - b.wait_start < BENCH_START_WAIT:
-            self._bench_after(100, self._bench_wait_ready)
+        if not playing and time.monotonic() - b.wait_start < self.bench_timing.start_wait:
+            self._bench_after(self.bench_timing.step_ms, self._bench_wait_ready)
             return
         PROFILER.log("bench", f"{sum(1 for t in b.tiles if t.sample() is not None)} of {len(b.tiles)} "
                               f"playing after {time.monotonic() - b.wait_start:.2f}s")
         # Warm up briefly. (Recovering from a failed round happened before
         # these players started, while the last ones stopped.)
-        self._bench_after(2000, self._bench_measure_start)
+        self._bench_after(self.bench_timing.warmup_ms, self._bench_measure_start)
 
-    def _bench_after(self, ms: int, fn) -> None:
+    def _bench_after(self, ms: int, fn, allow_finishing: bool = False) -> None:
+        """Schedule a benchmark step. Every timer belongs to the run and is
+        tracked, so cancelling (or closing the window mid-run) can stop them
+        all: a timer left over from an old round must never fire into a new
+        one. Callbacks also re-check that the run is still the live one.
+
+        The drain that finishes a cancelled/completed run keeps running while
+        ``finishing`` is set (``allow_finishing``); every other step is frozen
+        once the run is finishing."""
         b = self.bench
-        b.timer = QTimer(self, singleShot=True, interval=ms)
-        b.timer.timeout.connect(fn)
-        b.timer.start()
+        if b is None:
+            return
+        timer = QTimer(self, singleShot=True, interval=ms)
+        b.timers.append(timer)
+
+        def guarded() -> None:
+            if timer in b.timers:
+                b.timers.remove(timer)
+            if self.bench is not b:
+                return
+            if b.finishing and not allow_finishing:
+                return
+            fn()
+
+        timer.timeout.connect(guarded)
+        timer.start()
+
+    def _stop_bench_timers(self, b: BenchState) -> None:
+        for timer in b.timers:
+            timer.stop()
+        b.timers.clear()
 
     def _bench_counters(self) -> dict:
         out = {}
@@ -1037,19 +1139,26 @@ class MainWindow(QMainWindow):
         return out
 
     def _bench_measure_start(self) -> None:
-        self.bench.t0 = time.monotonic()
-        self.bench.c0 = self._bench_counters()
-        self._bench_after(500, self._bench_measure_check)
+        b = self.bench
+        if b is None or b.finishing:
+            return
+        b.t0 = time.monotonic()
+        b.c0 = self._bench_counters()
+        self._bench_after(self.bench_timing.poll_ms, self._bench_measure_check)
 
     def _bench_measure_check(self) -> None:
         b = self.bench
+        if b is None or b.finishing:
+            # A late measurement answer after the run was cancelled/completed
+            # must not record another result or start a stray finish/drain.
+            return
         elapsed = time.monotonic() - b.t0
         ratio = self._bench_ratio(self._bench_counters(), elapsed)
         # A round far over the limit is clear early on; cutting it short
         # spares a machine that is struggling to keep up (and its window).
-        clearly_over = elapsed >= BENCH_EARLY and ratio > max(0.3, 4 * b.plan.max_drop)
-        if elapsed < BENCH_MEASURE and not clearly_over:
-            self._bench_after(500, self._bench_measure_check)
+        clearly_over = elapsed >= self.bench_timing.early and ratio > max(0.3, 4 * b.plan.max_drop)
+        if elapsed < self.bench_timing.measure and not clearly_over:
+            self._bench_after(self.bench_timing.poll_ms, self._bench_measure_check)
             return
         PROFILER.log("bench", f"{b.plan.current} videos: {ratio * 100:.1f}% lost, measured over {elapsed:.1f}s"
                               + (" (clearly over: cut short)" if clearly_over else ""))
@@ -1080,24 +1189,61 @@ class MainWindow(QMainWindow):
         return dropped / expected if expected else 1.0
 
     def _bench_finish(self, cancelled: bool = False) -> None:
+        """Idempotent: the first call (a completed run or an Esc cancel) wins;
+        a cancel landing while the run is already finishing cannot start a
+        second drain or a stray new round."""
         b = self.bench
         if b is None or b.finishing:
             return
-        if b.timer:
-            b.timer.stop()
+        self._stop_bench_timers(b)
         b.finishing, b.cancelled = True, cancelled
+        self._update_message()
         # Let the last round's players stop before anything else happens: on
         # a machine they overloaded, the window can't respond until they do.
         self._bench_drain(self._bench_done)
 
+    def _bench_abort_for_close(self) -> None:
+        """The window is closing while a benchmark runs: stop everything and
+        make sure no callback (drain, measurement, results dialog) outlives
+        the run. Tiles themselves are shut down by closeEvent."""
+        b = self.bench
+        if b is None:
+            return
+        self._closing = True
+        self._stop_bench_timers(b)
+        b.finishing, b.cancelled = True, True
+        # Stop the round outright and make sure none of its players survives
+        # the close: closeEvent also shuts them down, but the benchmark must
+        # not rely on a later drain callback (which will never run) to do it.
+        for tile in list(b.tiles) + list(b.draining):
+            try:
+                tile.stop()
+                tile.shutdown()
+            except Exception:
+                pass
+        self._deferred_paths.clear()
+        self.bench = None
+
     def _bench_done(self) -> None:
         b = self.bench
-        self.bench = None
+        if b is None:
+            return                      # already torn down (e.g. window closed)
+        self.bench = None               # from here on, no benchmark callback is live
         PROFILER.log("bench", "cancelled" if b.cancelled else f"done: {b.plan.results}")
         self.perf.reset()
+        # Rebuild the wall exactly as it was before the run: every hidden
+        # video becomes visible again and each player gets its own pause
+        # state back (not just the global one).
         for t in self.tiles.values():
             t.show()
+        for t, was_paused in b.wall_paused.items():
+            t.set_paused(was_paused)
         self._apply_layout(animate=False)
+        # Layout shows tiles to place them; re-hide the ones that were hidden
+        # before the run, before anything (e.g. the results dialog) appears.
+        for t in b.wall_hidden:
+            if t in self.tiles.values():
+                t.hide()
         self._update_message()
         # The wall stays paused while the results are shown.
         self._results_open = True
@@ -1107,13 +1253,19 @@ class MainWindow(QMainWindow):
             self._results_open = False
         # Only now let go of the spare players, so the dialog isn't held up.
         self._trim_pool(self.settings.max_streams - len(self.tiles))
-        self._resume_others()
         self.schedule_soon()
+        # Files added during the run join the library now that it is over;
+        # they never touched the round that was measuring.
+        deferred, self._deferred_paths = self._deferred_paths, []
+        if deferred:
+            self.add_paths(deferred)
 
     def _bench_report(self, b: BenchState) -> None:
         if not b.cancelled and b.plan.results:
             s = self.settings
             # Keep the measurements: they link the two limits from now on.
+            # This is saved on its own; the two limits are only changed below,
+            # and always as one pair.
             curve = DropCurve(b.plan.results)
             s.bench_curve, s.bench_date = curve.to_text(), date.today().isoformat()
             s.save()
@@ -1123,9 +1275,9 @@ class MainWindow(QMainWindow):
             PROFILER.log("bench", f"results closed: {'using' if accepted else 'kept'} "
                                   f"max {dlg.limits.values[0]} videos at {dlg.limits.values[1]}%")
             if accepted:
-                s.max_streams, s.max_drop_pct = dlg.limits.values
+                # One paired, all-or-nothing update of the two linked limits.
+                s.apply_benchmark(curve, *dlg.limits.values)
                 self.perf.set_max_drop(s.max_drop)
-                s.save()
 
     # -------------------------------------------------------------- shutdown
     def _apply_profiling(self) -> None:
@@ -1147,10 +1299,15 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, e) -> None:
         PROFILER.log("app", "closing")
+        self._closing = True
         self._beat_timer.stop()
         PROFILER.quiet()               # the window is going: no freeze reports from here on
         self._cursor_timer.stop()
         self._perf_timer.stop()
+        # A benchmark still running must be torn down before the window goes:
+        # otherwise its drain/measurement timers could fire mid-shutdown or
+        # pop the results dialog over a dying window.
+        self._bench_abort_for_close()
         # Disappear at once; shutting the players down can take a moment.
         self.hide()
         if self.tray:
