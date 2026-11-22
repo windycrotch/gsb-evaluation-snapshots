@@ -71,8 +71,14 @@ export class PlayerController implements MovementContext {
 
   /** True while standing on a surf-steep slope (airborne rules, no friction). */
   surfing = false;
-  /** True from the moment surfing starts until the next real ground landing. */
+  /**
+   * Flight-scoped surf mark: true from the first ramp touch of the current
+   * flight until that flight ends (real landing, ladder/ground takeoff, or
+   * respawn). See MovementContext for the full lifecycle contract.
+   */
   surfedSinceGrounded = false;
+  /** Landing-scoped: did the most recent real landing come off a surf flight? */
+  landingFromSurf = false;
 
   // Interpolation snapshots (position + eye height per tick).
   prevPos: Vec3;
@@ -273,7 +279,12 @@ export class PlayerController implements MovementContext {
     this.stamina = 0;
     this.groundTicksSinceLanding = 0;
     this.hasJumpedBefore = false;
+    // Full flight-state reset: no flight is in progress and no landing from a
+    // previous life may leak a surf exemption or a perfect-bhop carry into the
+    // first jump after respawn (input.reset routes through here too).
+    this.surfing = false;
     this.surfedSinceGrounded = false;
+    this.landingFromSurf = false;
     set(this.landingVelocity, 0, 0, 0);
     this.lastHopQuality = null;
   }

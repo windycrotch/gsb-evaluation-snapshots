@@ -35,17 +35,19 @@ export function airMove(ctx: MovementContext, dt: number): void {
 
   if (ctx.surfing) {
     // Surfing lets you build as much speed as you want, full stop — and
-    // that stays true for the rest of this flight even after you leave the
-    // ramp, until you actually touch ground again (see Jump.ts, which
-    // clears this the moment a fresh jump launches).
+    // that stays true for the rest of THIS flight even after you leave the
+    // ramp, until the segment actually ends: a real ground landing
+    // (CategorizePosition clears it), any takeoff (checkJump / ladder
+    // jump-off, which always open a fresh flight), or respawn/reset.
     ctx.surfedSinceGrounded = true;
   }
 
   // Real bhop-assist servers cap air speed itself around perf.maxAirSpeed,
   // not just what a perfect-bhop carry restores at takeoff (Jump.ts) —
   // otherwise air-strafe gain between hops pushes the observed peak well
-  // past the intended ceiling. Surfing (and anything carried from it) is
-  // exempt — it's a different physics path and is supposed to exceed this.
+  // past the intended ceiling. Surfing (and anything carried from it within
+  // the same flight) is exempt — it's a different physics path and is
+  // supposed to exceed this.
   if (ctx.settings.perf.enabled && !ctx.surfing && !ctx.surfedSinceGrounded) {
     const speed = length2D(ctx.velocity);
     const capped = applyAirSpeedCeiling(speed, ctx.settings.perf.maxAirSpeed, AIR_SPEED_CEILING_SOFTNESS);

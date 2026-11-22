@@ -78,6 +78,11 @@ export function ladderMove(ctx: MovementContext, dt: number, ladder: LadderVolum
       scale(ctx.velocity, n, LADDER_JUMP_OFF_SPEED);
       ctx.ladderCooldown = LADDER_REGRIP_COOLDOWN;
       ctx.onLadder = null;
+      // A ladder jump-off is a takeoff: it begins a brand-new flight, so no
+      // surf mark carried from before the ladder may exempt it from the perf
+      // air-speed ceiling (same contract as checkJump's takeoff clearing).
+      ctx.surfedSinceGrounded = false;
+      ctx.landingFromSurf = false;
       return false;
     }
     // Within the grace period jump is simply ignored: velocity carries over.

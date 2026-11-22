@@ -43,7 +43,7 @@ export function checkJump(ctx: MovementContext, dt: number): void {
     const isPerfectBhop =
       !ctx.settings.autobhop &&
       ctx.hasJumpedBefore &&
-      !ctx.surfedSinceGrounded &&
+      !ctx.landingFromSurf &&
       ctx.groundTicksSinceLanding === 0;
     if (isPerfectBhop) {
       ctx.velocity.x = ctx.landingVelocity.x;
@@ -73,7 +73,10 @@ export function checkJump(ctx: MovementContext, dt: number): void {
   }
   ctx.onGround = false;
   ctx.hasJumpedBefore = true;
-  // Starting a brand-new flight either way — any surf touch from before
-  // this takeoff is no longer relevant to whatever happens next.
+  // This takeoff opens a brand-new flight segment: any surf touch from the
+  // previous flight (and its landing record) is no longer relevant to whatever
+  // happens next. Both flags stay false until this flight itself touches a
+  // ramp — so a normal hop is never granted a carried-over ceiling exemption.
   ctx.surfedSinceGrounded = false;
+  ctx.landingFromSurf = false;
 }

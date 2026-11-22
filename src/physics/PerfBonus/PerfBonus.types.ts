@@ -31,9 +31,15 @@
  * `maxAirSpeed` (unless surfing, a different physics path via ramp
  * geometry). So whenever `enabled`, AirMove.ts squeezes air speed itself
  * through a diminishing-returns curve every airborne tick — not just at the
- * carry — approaching `maxAirSpeed` but never quite reaching it. Surfing
- * (and the flight right after leaving a ramp) is exempt from this squeeze
- * entirely.
+ * carry — approaching `maxAirSpeed` but never quite reaching it.
+ *
+ * Surfing is exempt from this squeeze for the whole flight segment that
+ * touched the ramp. Two distinct marks keep that lifecycle honest (see
+ * MovementContext): `surfedSinceGrounded` is the flight-scoped exemption,
+ * armed by the first ramp touch and closed by a real ground landing or any
+ * takeoff (a jump, including a ladder jump-off); `landingFromSurf` is the
+ * landing-scoped record that keeps a surf landing out of the perfect-bhop
+ * carry above. Both return to their initial state on respawn / input reset.
  */
 export interface PerfSettings {
   enabled: boolean;

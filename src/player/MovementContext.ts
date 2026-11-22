@@ -61,8 +61,22 @@ export interface MovementContext {
   onLadder: LadderVolume | null;
   /** True while standing on a surf-steep slope (airborne rules, no friction). */
   surfing: boolean;
-  /** True from the moment surfing starts until the next real ground landing. */
+  /**
+   * Flight-scoped: true from the first surf touch during the CURRENT flight
+   * segment until that segment ends. A flight starts at every takeoff — a real
+   * jump (checkJump, manual or autobhop) or a ladder jump-off — and ends only
+   * on a real ground landing (categorizePosition), respawn, or input reset.
+   * It is therefore false for the whole of any flight that never touched a
+   * ramp, including a flight started by walking off a ledge.
+   */
   surfedSinceGrounded: boolean;
+  /**
+   * Landing-scoped: true exactly when the most recent real landing ended a
+   * flight that had touched a surf ramp. Read solely by the perfect-bhop gate
+   * (Jump.ts) — surf speed can never be "cashed in" as a perfect carry. Cleared
+   * on every takeoff, respawn, and reset, and overwritten at every landing.
+   */
+  landingFromSurf: boolean;
 
   /** Position snapshot from the start of this tick, for blocked-move detection. */
   prevPos: Vec3;

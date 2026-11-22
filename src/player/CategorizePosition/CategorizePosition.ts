@@ -100,6 +100,13 @@ export function categorizePosition(ctx: MovementContext): void {
   ctx.onGround = true;
   if (!wasOnGround) {
     ctx.groundTicksSinceLanding = 0;
+    // A real touchdown ends the flight segment. Remember for the perfect-bhop
+    // gate whether THIS flight touched a ramp (that fact must survive the
+    // landing until the next takeoff), then close the flight-scoped mark so
+    // the air-speed ceiling is active again on the very next flight, however
+    // it begins — a fresh jump or simply walking off a ledge.
+    ctx.landingFromSurf = ctx.surfedSinceGrounded;
+    ctx.surfedSinceGrounded = false;
     // Only y gets clipped by the floor plane's normal this tick — x/z still
     // hold the actual speed the player landed with. Snapshot it now, before
     // walkMove's friction gets a chance to bleed it, so a perfect rejump
