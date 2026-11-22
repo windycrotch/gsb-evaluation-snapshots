@@ -770,8 +770,14 @@ export class Renderer {
     // resolves the tree generically; tier_config (model-as-code) decides the
     // structure / placement, NOT the .bin. Cast: the resolved shape is the
     // union of base ModelWeights + wrapper + optional gru.
+    //
+    // Parse + build the ENTIRE new chain into locals first, and only commit
+    // renderer state once every construction step succeeded. A truncated /
+    // wrong-shaped buffer therefore throws out of setPreset with the old
+    // preset, old network and old skip cadence fully intact — getStats()
+    // keeps reporting the tier that is actually rendering, which is the
+    // contract the adaptive controller relies on after a failed swap.
     const w = loadWeightsFromBinary(weightsBuf) as any
-    this.lastWeightsBuf = weightsBuf
 
     // x_hr at canvas res — authoritative from tier_config, not preset.resolution
     // (the wrapper down-path strides this to base res internally). Oriented like
@@ -784,18 +790,13 @@ export class Renderer {
       this.backend, networkInput.output, w.base, w.wrapper, cfg.wrapper, cfg.base,
     )
 
-    this.renderOp.attachNetwork(tier, networkInput, {
-      upscaler:   'bilinear',
-      background: this.translateBackgroundFor('main', this.currentBackground),
-    })
-
     // Optical-flow temporal: wired iff the .bin carries a `flow` blob. The flow net
     // rides the tier's cached encoder taps; warps run at canvas res (network output).
     // The net predicts BACKWARD flow (frame-b→frame-a), so the warp gathers at
     // p + flow: flowScale = +(canvasW/baseW) (base→canvas magnitude rescale, no
     // negation). The stabilizer gates each fresh alpha against the warp-aligned
     // previous, on the last-available flow.
-    this.flow = null
+    let flow: Renderer['flow'] = null
     if (w.flow) {
       const b = baseRes, c = canvasRes
       const everyFrame = preset.skipFrames === 0
@@ -824,12 +825,26 @@ export class Renderer {
       const alphaHeld = everyFrame ? null : zeros(c.h, c.w)
       const predWarp  = alphaHeld ? this.backend.ops.Warp(alphaHeld, up.output, { flowScale }) : null
 
-      this.flow = { tier, everyFrame, warm: false, networkInput, curBaseDown, frameAHeld, net, up,
-                    predBuf, stabPrev, refWarp, stab, alphaHeld, predWarp }
+      flow = { tier, everyFrame, warm: false, networkInput, curBaseDown, frameAHeld, net, up,
+               predBuf, stabPrev, refWarp, stab, alphaHeld, predWarp }
     }
 
+    // ── Commit point: everything above succeeded; swap live state now. ──
+    // attachNetwork rewires RenderOp onto the new tier (synchronous — no
+    // throw path past this point that would leave a half-attached chain).
+    this.renderOp.attachNetwork(tier, networkInput, {
+      upscaler:   'bilinear',
+      background: this.translateBackgroundFor('main', this.currentBackground),
+    })
+
+    this.flow            = flow
+    this.lastWeightsBuf  = weightsBuf
     this.preset          = preset
     this.mediapipe       = null
+    // The new tier's skip cadence starts clean: the counter resets so the
+    // first frame after a swap always runs the model (warm alpha for the
+    // compositor), and no skip count / counter residue from the old tier
+    // can leak into the new one.
     this.skipCounter     = 0
     this.tier            = tier
     this.tierInput       = networkInput

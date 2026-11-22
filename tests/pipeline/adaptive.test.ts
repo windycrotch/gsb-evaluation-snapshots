@@ -11,6 +11,9 @@ const stats = (fps: number, modelMs = 20): RendererStats => ({
 })
 
 // Drive the controller with a fake clock: one tick every 2 s for `seconds`.
+// The first low-fps poll (t=2 s) opens the overshoot window, which matures
+// on the t=8 s poll; cooldown (10 s from each swap's start) plus a fresh
+// 5 s window then space the next swap at 24 s.
 async function run(inputFps: number | null, renderedFps: number, seconds = 30) {
   const swaps: string[] = []
   const t0 = 1_000_000
@@ -26,21 +29,41 @@ async function run(inputFps: number | null, renderedFps: number, seconds = 30) {
   return swaps
 }
 
+// Short run that ends before a cooldown-spaced second swap can happen.
+async function runFirstSwap(inputFps: number | null, renderedFps: number) {
+  const swaps: string[] = []
+  const t0 = 1_000_000
+  const c = new AdaptiveController({
+    backendKind:  'webgpu',
+    initialModel: 'medium',
+    getInputFps:  () => inputFps,
+    fetchWeights: async () => new ArrayBuffer(8),
+    getStats:     async () => stats(renderedFps),
+    swapPreset:   async (p) => { swaps.push(typeof p === 'string' ? p : p.model) },
+  }, t0)
+  // 14 s: first swap lands at 8 s, the cooldown-spaced second at 24 s.
+  for (let t = 0; t <= 14_000; t += 2000) await c.tick(t0 + t)
+  return swaps
+}
+
 describe('AdaptiveController target = min(measured input fps, 30)', () => {
   it('a 15 fps camera rendering 15 fps is on target: no downgrade', async () => {
     expect(await run(15, 15)).toEqual([])
   })
 
-  it('a 30 fps camera rendering 15 fps is overloaded: downgrades', async () => {
-    expect(await run(30, 15)).toEqual(['small'])
+  it('a 30 fps camera rendering 15 fps is overloaded: downgrades, and cooldown spaces the next swap', async () => {
+    expect(await runFirstSwap(30, 15)).toEqual(['small'])
+    // Over a full 30 s the sustained overload downgrades again — but never
+    // twice in one cooldown window (first at 8 s, second at 24 s).
+    expect(await run(30, 15)).toEqual(['small', 'xs'])
   })
 
   it('unknown input rate falls back to the 30 fps assumption (0.0.18 behaviour)', async () => {
-    expect(await run(null, 15)).toEqual(['small'])
+    expect(await runFirstSwap(null, 15)).toEqual(['small'])
   })
 
   it('a 15 fps camera rendering 8 fps (below 2/3 of target) still downgrades', async () => {
-    expect(await run(15, 8)).toEqual(['small'])
+    expect(await runFirstSwap(15, 8)).toEqual(['small'])
   })
 
   it('targetFps is capped at 30 and clamped for near-zero rates', () => {
