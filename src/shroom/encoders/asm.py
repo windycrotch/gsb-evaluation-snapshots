@@ -1,6 +1,7 @@
 from shroom.acoustics.spatial_signal import SpatialSignal
 from shroom.utils.math_utils import tikhonov
 import numpy as np
+import threading
 from shroom.utils.dsp_utils import convolve_and_sum
 
 _EPS = 1e-12
@@ -166,35 +167,67 @@ class ASM:
         self.spectrally_equalized = spectrally_equalized
 
         self._cnm = None
+        # Guards the lazy coefficient build so concurrent first access builds
+        # the coefficients exactly once and never publishes a half-built value.
+        self._lock = threading.RLock()
+
+    def config_signature(self) -> tuple:
+        """Hashable snapshot of every setting that affects the ASM filters."""
+        return (
+            type(self).__name__,
+            self.sh_order,
+            self.fs,
+            self.duration,
+            self.spectrally_equalized,
+            id(self.array),
+            getattr(self.array, "mutation_version", None),
+            self.array.data.shape,
+            str(self.array.data.dtype),
+            None if self._cnm is None else id(self._cnm),
+        )
 
     @property
     def cnm(self) -> SpatialSignal:
-        """Lazy-loaded ASM coefficients."""
-        if self._cnm is None:
-            self._cnm = self.calculate()
-        return self._cnm
+        """Lazy-loaded ASM coefficients.
+
+        The first access (re)builds the coefficients under a lock: a failed
+        build leaves ``_cnm`` untouched (``None``), so the next access retries
+        cleanly instead of reusing a partial result.
+        """
+        with self._lock:
+            if self._cnm is None:
+                self._cnm = self._compute_coefficients()
+            return self._cnm
 
     def calculate(self) -> SpatialSignal:
         """
-        Calculate the ASM coefficients (filters).
+        Force (re)calculation of the ASM coefficients (filters).
 
         Returns SE-ASM coefficients when ``spectrally_equalized`` is True.
+        The new coefficients are published atomically: they replace the cached
+        value only after the full calculation succeeded, so an exception never
+        leaves a half-built filter set behind.
 
         Returns
         -------
         SpatialSignal
             The calculated coefficients in Frequency Domain.
         """
+        with self._lock:
+            self._cnm = self._compute_coefficients()
+            return self._cnm
+
+    def _compute_coefficients(self) -> SpatialSignal:
+        """Build the coefficients into local objects and publish nothing on failure."""
         sm = self.array.data
         Y = self.array.grid.Y(N_sp=self.sh_order)
         if self.spectrally_equalized:
             asm_coefficients = calculate_se_asm_coefficients(sm, Y)
         else:
             asm_coefficients = calculate_asm_coefficients(sm, Y)
-        self._cnm = SpatialSignal(
+        return SpatialSignal(
             data=asm_coefficients, fs=self.fs, is_time=False, is_space=False
         )
-        return self._cnm
 
     def encode_amb(self, mics_signals: np.ndarray) -> SpatialSignal:
         """

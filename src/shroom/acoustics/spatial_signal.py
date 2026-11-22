@@ -52,8 +52,17 @@ class SpatialSignal:
             getattr(self.grid, "orientation", None) if self.grid is not None else None
         )
 
+        # Bumped on every in-place mutation so cached downstream kernels can
+        # detect that this signal's contents changed.
+        self._mutation_version = 0
+
         self._history = []
         self._log_change_to_history("init")
+
+    @property
+    def mutation_version(self) -> int:
+        """Monotonic counter incremented on every in-place mutation of this signal."""
+        return self._mutation_version
 
     def _validate_inputs(self, data, fs, grid, is_time, is_space):
         assert isinstance(data, np.ndarray), "data must be np.ndarray"
@@ -136,6 +145,7 @@ class SpatialSignal:
         # Copy internal state that isn't in init
         new_sig._orientation = copy.deepcopy(self._orientation)
         new_sig._history = copy.deepcopy(self._history)
+        new_sig._mutation_version = self._mutation_version
 
         return new_sig
 
@@ -164,6 +174,7 @@ class SpatialSignal:
 
         padding = np.zeros((*self.data.shape[:2], n_zero_pad))
         self.data = np.concatenate((self.data, padding), axis=-1)
+        self._mutation_version += 1
         self._log_change_to_history('zero_pad')
 
     def resample(self, desired_fs: Union[float, np.float32]):
@@ -195,6 +206,7 @@ class SpatialSignal:
         old_fs = self.fs
         self.fs = desired_fs
 
+        self._mutation_version += 1
         self._log_change_to_history(
             "resample", {"old_fs": old_fs, "new_fs": desired_fs}
         )
@@ -255,6 +267,7 @@ class SpatialSignal:
         else:
             self.data = np.fft.fft(self.data, axis=2, n=nfft)
             self._is_time = False
+            self._mutation_version += 1
             self._log_change_to_history("toFreq", {"nfft": nfft})
             return
 
@@ -266,6 +279,7 @@ class SpatialSignal:
         else:
             self.data = np.fft.ifft(self.data, axis=2)
             self._is_time = True
+            self._mutation_version += 1
             self._log_change_to_history("toTime")
             return
 
@@ -286,6 +300,7 @@ class SpatialSignal:
             self.data = np.matmul(pinvY, self.data)
             self._is_space = False
             self.grid = None
+            self._mutation_version += 1
             self._log_change_to_history("toSH", {"N_sp": N_sp})
             return
 
@@ -307,6 +322,7 @@ class SpatialSignal:
             Y = self.grid.Y(int(np.sqrt(self.data.shape[1]) - 1))
             self.data = np.matmul(Y, self.data)
             self._is_space = True
+            self._mutation_version += 1
             self._log_change_to_history(
                 "toSpace",
                 {
@@ -337,6 +353,7 @@ class SpatialSignal:
         if self._orientation is not None:
             self._orientation = rot.apply(self._orientation)
 
+        self._mutation_version += 1
         self._log_change_to_history(
             "rotate_space_domain", {"rot": rot.as_euler("zyx", degrees=True)}
         )
@@ -378,6 +395,7 @@ class SpatialSignal:
         # Orientation is usually a vector in space
         self._orientation = rot.apply(self._orientation)
 
+        self._mutation_version += 1
         self._log_change_to_history(
             "rotate_sh_domain", {"rot": rot.as_euler("zyx", degrees=True)}
         )

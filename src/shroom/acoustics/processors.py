@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import List, Union
+import threading
 import numpy as np
 from shroom.acoustics.spatial_signal import SpatialSignal
 from shroom.encoders.asm import ASM
@@ -33,6 +34,28 @@ def stack_kernels_dynamically(kernel_list):
     return result
 
 
+def _signal_signature(signal) -> tuple:
+    """
+    Hashable fingerprint of a SpatialSignal-like object.
+
+    Captures identity, in-place mutation count, contents shape/dtype and the
+    current domain, so that a cached kernel is invalidated when the signal is
+    replaced, mutated in place, or converted between domains.
+    """
+    if signal is None:
+        return (None,)
+    return (
+        type(signal).__name__,
+        id(signal),
+        getattr(signal, "mutation_version", None),
+        tuple(signal.data.shape),
+        str(signal.data.dtype),
+        bool(getattr(signal, "is_time", True)),
+        bool(getattr(signal, "is_space", False)),
+        None if signal.grid is None else signal.grid.n_points,
+    )
+
+
 class AbstractProcessor(ABC):
     """Abstract base class for audio processors."""
 
@@ -44,15 +67,58 @@ class AbstractProcessor(ABC):
         """Must be implemented by the subclass to handle audio processing."""
         pass
 
+    def config_signature(self) -> tuple:
+        """
+        Hashable snapshot of the processor's key configuration.
+
+        Two processors with equal signatures are guaranteed to produce equal
+        outputs for equal inputs. ``ProcessorChain`` uses this to detect
+        upstream configuration changes (sampling rate, SH order, array geometry
+        or encoder type) and to rebuild its unified kernel accordingly.
+        """
+        kernel = self.kernel
+        if hasattr(kernel, "config_signature"):
+            # Encoder objects (ASM / BSM) carry their own fingerprint.
+            kernel_sig = ("encoder", kernel.config_signature())
+        else:
+            kernel_sig = ("signal", _signal_signature(kernel))
+        return (
+            type(self).__name__,
+            self.fs,
+            getattr(self, "sh_order", None),
+            kernel_sig,
+        )
+
     @property
     def fs(self):
         return self.kernel.fs
+
+
+# Upper bound on coordination rounds when waiters race against concurrent
+# configuration changes. Each round either reuses a kernel, joins a build, or
+# starts one; normal operation converges in a single round.
+_MAX_BUILD_ROUNDS = 100
 
 
 class ProcessorChain(AbstractProcessor):
     """
     Chains multiple processors together.
     The output of one processor is fed as input to the next.
+
+    The chain collapses into a single unified kernel on the first
+    :meth:`process` call. The cached kernel is rebuilt automatically whenever:
+
+    * the input layout changes (a kernel built for a different signal shape
+      would be invalid), or
+    * the key configuration of any processor changes (sampling rate, SH order,
+      array geometry, or encoder type), detected via
+      :meth:`AbstractProcessor.config_signature`.
+
+    All cache management is guarded by a lock. Concurrent first calls build the
+    unified kernel exactly once: threads arriving while a build is in progress
+    join that same build. A failed build publishes no partial kernel — every
+    waiting thread receives the same exception, the chain is left in a clean
+    state, and the next call retries from scratch.
     """
 
     def __init__(self, processors: List[AbstractProcessor]):
@@ -67,7 +133,14 @@ class ProcessorChain(AbstractProcessor):
         self._validate_inputs(processors)
         self.processors = processors
 
+        # Serializes kernel build/publish coordination across threads.
+        self._lock = threading.RLock()
         self.unified_kernel = None
+        # Build key (chain config + input layout) the cached kernel is valid for.
+        self._build_signature = None
+        # In-progress build joined by concurrent callers, or None when idle.
+        self._in_progress = None
+
         if hasattr(processors[-1], "_output_format"):
             self._output_format = processors[-1]._output_format
             processors[-1]._output_format = "SpatialSignal"
@@ -80,9 +153,40 @@ class ProcessorChain(AbstractProcessor):
         else:
             self._enforce_real_values = False
 
+    def _prepare_last_processor(self):
+        """
+        Normalize the terminal processor for unified-kernel construction.
+
+        The kernel must carry full complex precision; the chain takes the real
+        part itself once, at the very end of :meth:`process`. This is applied
+        in ``__init__`` for the original terminal processor and re-applied
+        before every build so that a processor swapped in after construction
+        behaves exactly as it would in a freshly built chain (bit-identical
+        results), instead of silently truncating each impulse to real values.
+
+        The chain-level flags are captured only from a still-pristine
+        processor. An already-normalized processor (its flag already flipped
+        to the chain-internal default) is left untouched so the captured
+        original value is never overwritten.
+        """
+        last = self.processors[-1]
+        if hasattr(last, "_output_format") and last._output_format != "SpatialSignal":
+            self._output_format = last._output_format
+            last._output_format = "SpatialSignal"
+        if (
+            hasattr(last, "_enforce_real_values")
+            and last._enforce_real_values is not False
+        ):
+            self._enforce_real_values = last._enforce_real_values
+            last._enforce_real_values = False
+
     @property
     def fs(self) -> int:
         return self.processors[0].fs
+
+    def config_signature(self) -> tuple:
+        """Fingerprint of the whole chain: changes when any processor's config does."""
+        return tuple(p.config_signature() for p in self.processors)
 
     def _validate_inputs(self, processors):
         if not processors:
@@ -99,15 +203,31 @@ class ProcessorChain(AbstractProcessor):
                 )
             fs_current = processor.fs
 
+    def _input_signature(self, signal: SpatialSignal) -> tuple:
+        """
+        Full build key: chain configuration plus the input layout the kernel
+        must support. The kernel maps input channels/grid points one-to-one,
+        so only the non-time axes participate: signals of any time length with
+        the same channel/grid layout reuse one kernel.
+        """
+        return (
+            self.config_signature(),
+            tuple(signal.data.shape[:2]),
+            str(signal.data.dtype),
+            bool(signal.is_time),
+            bool(signal.is_space),
+            signal.fs,
+            None if signal.grid is None else signal.grid.n_points,
+        )
+
     def process(self, signal: SpatialSignal) -> Union[SpatialSignal, np.ndarray]:
-        """Execute the chain."""
-        if self.unified_kernel is None:
-            self.unified_kernel = self.calculate_unified_kernel(signal)
+        """Execute the chain, building or reusing the unified kernel as needed."""
+        kernel = self._get_or_build_kernel(signal)
 
         # Apply kernel directly without SH-order truncation.
         # convolve_sh would truncate to min(kernel.sh_order, signal.sh_order), which
         # breaks chains where the signal is mic data (sh_order=0 due to shape[1]=1).
-        sig1 = self.unified_kernel.data if self.unified_kernel.is_time else np.fft.ifft(self.unified_kernel.data, axis=-1)
+        sig1 = kernel.data if kernel.is_time else np.fft.ifft(kernel.data, axis=-1)
         sig2 = signal.data if signal.is_time else np.fft.ifft(signal.data, axis=-1)
         # convolve_and_sum sums over axis 1 (ch). Kernel has N_in on axis 1.
         # Mic-format signals have N_in on axis 0 → transpose to (1, N_in, T).
@@ -122,12 +242,106 @@ class ProcessorChain(AbstractProcessor):
             return data[:, 0, :].T
         result = SpatialSignal(
             data=data,
-            fs=self.unified_kernel.fs,
-            is_time=self.unified_kernel.is_time,
-            is_space=self.unified_kernel.is_space,
-            grid=self.unified_kernel.grid,
+            fs=kernel.fs,
+            is_time=kernel.is_time,
+            is_space=kernel.is_space,
+            grid=kernel.grid,
         )
         return result
+
+    def _get_or_build_kernel(self, signal: SpatialSignal) -> SpatialSignal:
+        """
+        Return a kernel valid for ``signal``, building (or rebuilding) it once.
+
+        Thread-safety contract:
+
+        * a complete kernel is published to ``unified_kernel`` only after the
+          full build succeeds — no thread can ever observe a half-built kernel;
+        * concurrent callers with the same build key join one build; on
+          failure every waiter raises the same exception instance;
+        * a failed build clears all cached state, so the following call retries
+          and can succeed.
+
+        The loop also covers the rare case where a thread waits on a build that
+        served a different build key: it simply re-evaluates and either reuses
+        the cached kernel, joins another build, or starts its own.
+        """
+        signature = self._input_signature(signal)
+
+        for _ in range(_MAX_BUILD_ROUNDS):
+            with self._lock:
+                # Fast path: a kernel already valid for this configuration.
+                if (
+                    self.unified_kernel is not None
+                    and self._build_signature == signature
+                ):
+                    return self.unified_kernel
+
+                if self._in_progress is None:
+                    # Become the builder for a new build attempt.
+                    build = {
+                        "signature": signature,
+                        "condition": threading.Condition(self._lock),
+                        "done": False,
+                        "error": None,
+                    }
+                    self._in_progress = build
+                    is_builder = True
+                else:
+                    build = self._in_progress
+                    is_builder = False
+
+            if not is_builder:
+                # Join the in-progress build (releases the lock while waiting).
+                with self._lock:
+                    self._await_build(build)
+                    if build["error"] is not None:
+                        # Every waiter of this build sees the same exception.
+                        raise build["error"]
+                # Build finished for (possibly) another key; loop to re-evaluate.
+                continue
+
+            # Builder path: build outside the chain lock so the underlying
+            # processors' own locks are not nested inside it.
+            try:
+                # Re-normalize in case the terminal processor was replaced
+                # after construction.
+                self._prepare_last_processor()
+                kernel = self.calculate_unified_kernel(signal)
+            except BaseException as exc:
+                with self._lock:
+                    build["error"] = exc
+                    build["done"] = True
+                    # Clean state: no partial kernel is ever published.
+                    self.unified_kernel = None
+                    self._build_signature = None
+                    self._in_progress = None
+                    build["condition"].notify_all()
+                raise
+
+            with self._lock:
+                # Publish atomically; only a fully built kernel is visible.
+                self.unified_kernel = kernel
+                self._build_signature = signature
+                build["done"] = True
+                self._in_progress = None
+                build["condition"].notify_all()
+                return kernel
+
+        # pragma: no cover - defensive, requires pathological contention.
+        raise RuntimeError(
+            "ProcessorChain kernel coordination did not converge; retry process()."
+        )
+
+    def _await_build(self, build: dict):
+        """Block on an in-progress build. Called with ``self._lock`` held.
+
+        Isolated as a method so subscripts/tests can observe joiners without
+        altering the coordination logic.
+        """
+        condition = build["condition"]
+        while not build["done"]:
+            condition.wait()
 
     def calculate_unified_kernel(self, signal) -> SpatialSignal:
         """Calculate unified kernel from signal."""
@@ -206,6 +420,14 @@ class BinauralDecoder(AbstractProcessor):
             raise ValueError(
                 f"output_format must be 'numpy.ndarray' or 'SpatialSignal' and is ({output_format})"
             )
+
+    def config_signature(self) -> tuple:
+        return (
+            "BinauralDecoder",
+            self._fs,
+            self.sh_order,
+            _signal_signature(self.kernel),
+        )
 
     def process(self, amb_signal: SpatialSignal) -> SpatialSignal:
         """
@@ -287,6 +509,16 @@ class ArrayDecoder(AbstractProcessor):
                     f"array.sh_order ({array.sh_order}) must be >= sh_order ({sh_order})."
                 )
 
+    def config_signature(self) -> tuple:
+        # The array signal fingerprint tracks geometry (mic/source grids and
+        # their point counts), SH order, fs and any in-place mutation.
+        return (
+            "ArrayDecoder",
+            self.kernel.fs,
+            self.sh_order,
+            _signal_signature(self.kernel),
+        )
+
     def process(self, amb_signal: SpatialSignal) -> SpatialSignal:
         """
         Simulate microphone signals.
@@ -345,9 +577,15 @@ class ASMEncoder(AbstractProcessor):
             Configured ASM instance.
         """
         self.kernel = asm_instance
-        # Ensure ASM is calculated
-        if self.kernel._cnm is None:
-            self.kernel.calculate()
+        # Ensure ASM coefficients are available. Accessing the lazy property
+        # builds them atomically: a failure leaves _cnm as None, so the next
+        # access retries instead of reusing a half-built coefficient set.
+        _ = asm_instance.cnm
+
+    def config_signature(self) -> tuple:
+        # The ASM object's fingerprint covers sh order, fs, array geometry and
+        # the (plain vs. spectrally-equalized) encoder type.
+        return ("ASMEncoder", self.kernel.config_signature())
 
     def process(self, microphone_signal: SpatialSignal) -> SpatialSignal:
         """
@@ -395,6 +633,11 @@ class BSMEncoder(AbstractProcessor):
     @property
     def fs(self):
         return self.kernel.fs
+
+    def config_signature(self) -> tuple:
+        # Distinguishes a BSM encoder from any other encoder type and tracks
+        # the BSM's own configuration (array, HRTF, regularization, MagLS).
+        return ("BSMEncoder", self.kernel.config_signature())
 
     def process(self, microphone_signal: SpatialSignal) -> SpatialSignal:
         """

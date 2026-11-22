@@ -1,3 +1,5 @@
+import threading
+
 import numpy as np
 from shroom.acoustics.spatial_signal import SpatialSignal
 from shroom.utils.math_utils import magls, tikhonov
@@ -162,20 +164,41 @@ class BSM:
 
         self._cl = None
         self._cr = None
+        # Guards the lazy coefficient build: one build at a time, and a failed
+        # build never publishes a partial (cl, cr) pair.
+        self._lock = threading.RLock()
+
+    def config_signature(self) -> tuple:
+        """Hashable snapshot of every setting that affects the BSM filters."""
+        return (
+            type(self).__name__,
+            self.use_magls,
+            self.magls_cutoff_frequency,
+            self.fs,
+            self.duration,
+            self.lam,
+            self.beta,
+            id(self.array),
+            getattr(self.array, "mutation_version", None),
+            id(self.hrtf),
+            getattr(self.hrtf, "mutation_version", None),
+        )
 
     @property
     def cl(self) -> np.ndarray:
         """Left ear beamformer weights, shape (F, M). Computed lazily."""
-        if self._cl is None:
-            self._cl, self._cr = self._calculate_coefficients()
-        return self._cl
+        with self._lock:
+            if self._cl is None:
+                self._cl, self._cr = self._calculate_coefficients()
+            return self._cl
 
     @property
     def cr(self) -> np.ndarray:
         """Right ear beamformer weights, shape (F, M). Computed lazily."""
-        if self._cr is None:
-            self._cl, self._cr = self._calculate_coefficients()
-        return self._cr
+        with self._lock:
+            if self._cr is None:
+                self._cl, self._cr = self._calculate_coefficients()
+            return self._cr
 
     def get_coefficients(self):
         """Return (cl, cr) beamformer weights, each shape (F, M)."""
