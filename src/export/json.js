@@ -149,10 +149,19 @@ class VexelJSONExport {
         }
 
         if (data.viewport && options.restoreViewport !== false) {
-            vexel.viewport.x = data.viewport.x || 0;
-            vexel.viewport.y = data.viewport.y || 0;
-            vexel.viewport.zoom = data.viewport.zoom || 1;
-            vexel.viewport.rotation = data.viewport.rotation || 0;
+            if (typeof vexel.setViewport === 'function') {
+                vexel.setViewport({
+                    x: data.viewport.x || 0,
+                    y: data.viewport.y || 0,
+                    zoom: data.viewport.zoom || 1,
+                    rotation: data.viewport.rotation || 0
+                });
+            } else {
+                vexel.viewport.x = data.viewport.x || 0;
+                vexel.viewport.y = data.viewport.y || 0;
+                vexel.viewport.zoom = data.viewport.zoom || 1;
+                vexel.viewport.rotation = data.viewport.rotation || 0;
+            }
         }
 
         const shapeMap = new Map();

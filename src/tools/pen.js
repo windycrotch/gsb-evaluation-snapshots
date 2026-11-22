@@ -49,10 +49,8 @@ class VexelPenTool {
 
     _getCanvasPoint(e) {
         const rect = this.vexel.container.getBoundingClientRect();
-        return {
-            x: (e.clientX - rect.left - this.vexel.viewport.x) / this.vexel.viewport.zoom,
-            y: (e.clientY - rect.top - this.vexel.viewport.y) / this.vexel.viewport.zoom
-        };
+        // Convert through the same snapshot math as hit testing and drawing.
+        return this.vexel.screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
     }
 
     _onPointerDown(e) {
@@ -172,7 +170,7 @@ class VexelPenTool {
         });
 
         this.vexel.shapes.push(path);
-        this.vexel.dirty = true;
+        this.vexel.requestRender();
 
         this.points = [];
         this.previewPath = null;
@@ -354,7 +352,7 @@ class VexelPencilTool {
         });
 
         this.vexel.shapes.push(path);
-        this.vexel.dirty = true;
+        this.vexel.requestRender();
 
         this.points = [];
         this.currentPath = null;
@@ -474,13 +472,12 @@ class VexelBrushTool {
     _renderStroke() {
         if (this.points.length < 2) return;
 
-        this.vexel.renderer.clear();
-        this.vexel.renderer.renderAll();
+        const snapshot = this.vexel.renderNow();
+        if (!snapshot) return;
 
         const ctx = this.vexel.ctx;
         ctx.save();
-        ctx.translate(this.vexel.viewport.x, this.vexel.viewport.y);
-        ctx.scale(this.vexel.viewport.zoom, this.vexel.viewport.zoom);
+        snapshot.applyWorld(ctx);
 
         ctx.strokeStyle = this.strokeColor;
         ctx.lineCap = 'round';
@@ -522,7 +519,7 @@ class VexelBrushTool {
         });
 
         this.vexel.shapes.push(path);
-        this.vexel.dirty = true;
+        this.vexel.requestRender();
 
         this.points = [];
         this.drawing = false;

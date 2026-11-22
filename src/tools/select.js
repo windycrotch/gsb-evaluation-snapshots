@@ -1,4 +1,9 @@
 // src/tools/select.js
+//
+// Selection tool. Hit testing, resizing and rotation all convert through the
+// current viewport snapshot, and drawing is delegated to VexelOverlay so the
+// frame, handles and marquee are always derived from the same snapshot as the
+// shapes.
 
 class VexelSelectTool {
     constructor(vexel) {
@@ -7,172 +12,211 @@ class VexelSelectTool {
         this.dragging = false;
         this.resizing = false;
         this.rotating = false;
-        this.marquee = false;
+        this.marqueeActive = false;
         this.marqueeStart = null;
         this.marqueeEnd = null;
         this.dragStart = null;
-        this.dragOffset = { x: 0, y: 0 };
+        this.dragOffset = new Map();
         this.resizeHandle = null;
         this.resizeStartBounds = null;
         this.resizeStartPoint = null;
-        this.rotateStart = null;
         this.rotateCenter = null;
         this.rotateStartAngle = 0;
         this.rotateStartRotation = 0;
-        this.handleSize = 8;
-        this.handles = [];
+        this.handleHitRadius = 9;
         this.hoveredHandle = null;
-        this.hitTolerance = 5;
+        this._bound = {};
     }
 
     activate() {
+        if (this.active) return;
         this.active = true;
-        this._bindEvents();
+
+        this._bound.down = this._handleMouseDown.bind(this);
+        this._bound.move = this._handleMouseMove.bind(this);
+        this._bound.up = this._handleMouseUp.bind(this);
+        this._bound.key = this._handleKeyDown.bind(this);
+
+        this.vexel.container.addEventListener('mousedown', this._bound.down);
+        window.addEventListener('mousemove', this._bound.move);
+        window.addEventListener('mouseup', this._bound.up);
+        window.addEventListener('keydown', this._bound.key);
     }
 
     deactivate() {
+        if (!this.active) return;
         this.active = false;
-        this._unbindEvents();
-        this.vexel.deselectAll();
+
+        this.vexel.container.removeEventListener('mousedown', this._bound.down);
+        window.removeEventListener('mousemove', this._bound.move);
+        window.removeEventListener('mouseup', this._bound.up);
+        window.removeEventListener('keydown', this._bound.key);
+
+        this._bound = {};
+        this.resetInteraction();
     }
 
-    _bindEvents() {
-        this._onMouseDown = this._handleMouseDown.bind(this);
-        this._onMouseMove = this._handleMouseMove.bind(this);
-        this._onMouseUp = this._handleMouseUp.bind(this);
-        this._onKeyDown = this._handleKeyDown.bind(this);
-
-        this.vexel.container.addEventListener('mousedown', this._onMouseDown);
-        window.addEventListener('mousemove', this._onMouseMove);
-        window.addEventListener('mouseup', this._onMouseUp);
-        window.addEventListener('keydown', this._onKeyDown);
+    resetInteraction() {
+        this.dragging = false;
+        this.resizing = false;
+        this.rotating = false;
+        this.marqueeActive = false;
+        this.marqueeStart = null;
+        this.marqueeEnd = null;
+        this.dragStart = null;
+        this.dragOffset = new Map();
+        this.resizeHandle = null;
+        this.resizeStartBounds = null;
+        this.resizeStartPoint = null;
+        this.rotateCenter = null;
+        this.hoveredHandle = null;
     }
 
-    _unbindEvents() {
-        this.vexel.container.removeEventListener('mousedown', this._onMouseDown);
-        window.removeEventListener('mousemove', this._onMouseMove);
-        window.removeEventListener('mouseup', this._onMouseUp);
-        window.removeEventListener('keydown', this._onKeyDown);
+    _snapshot() {
+        return this.vexel.getViewportSnapshot();
     }
 
-    _getCanvasPoint(e) {
+    _toWorld(e) {
         const rect = this.vexel.container.getBoundingClientRect();
-        return {
-            x: (e.clientX - rect.left - this.vexel.viewport.x) / this.vexel.viewport.zoom,
-            y: (e.clientY - rect.top - this.vexel.viewport.y) / this.vexel.viewport.zoom
-        };
+        return this._snapshot().screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
+    }
+
+    _selectionBounds() {
+        if (typeof VexelOverlay !== 'undefined') {
+            return VexelOverlay.getSelectionBounds(this.vexel.selectedShapes);
+        }
+        return null;
+    }
+
+    _handleAt(point) {
+        if (this.vexel.selectedShapes.length !== 1) return null;
+        const bounds = this._selectionBounds();
+        if (!bounds) return null;
+
+        // Compare in screen space so the hit radius is DPR/zoom independent.
+        const snapshot = this._snapshot();
+        const target = snapshot.worldToScreen(point.x, point.y);
+        const radius = this.handleHitRadius;
+
+        let best = null;
+        let bestDistance = Infinity;
+
+        for (const handle of VexelOverlay.getHandlePoints(bounds)) {
+            const screen = snapshot.worldToScreen(handle.x, handle.y);
+            const distance = Math.hypot(screen.x - target.x, screen.y - target.y);
+            if (distance <= radius && distance < bestDistance) {
+                best = handle.name;
+                bestDistance = distance;
+            }
+        }
+
+        return best;
+    }
+
+    _rotationHandleHit(point) {
+        if (this.vexel.selectedShapes.length !== 1) return false;
+        const bounds = this._selectionBounds();
+        if (!bounds) return false;
+
+        const snapshot = this._snapshot();
+        const handle = VexelOverlay.getRotationHandlePoint(bounds, snapshot);
+        const target = snapshot.worldToScreen(point.x, point.y);
+        const screen = snapshot.worldToScreen(handle.x, handle.y);
+        return Math.hypot(screen.x - target.x, screen.y - target.y) <= this.handleHitRadius + 2;
     }
 
     _handleMouseDown(e) {
         if (!this.active || e.button !== 0) return;
 
-        const point = this._getCanvasPoint(e);
+        const point = this._toWorld(e);
 
-        if (e.shiftKey) {
-            this.marquee = true;
-            this.marqueeStart = point;
-            this.marqueeEnd = point;
+        const handle = this._handleAt(point);
+        if (handle) {
+            this._startResize(handle, point);
+            e.preventDefault();
             return;
         }
 
-        if (this.hoveredHandle && this.vexel.selectedShapes.length === 1) {
-            this._startResize(this.hoveredHandle, point);
-            return;
-        }
-
-        if (this.vexel.selectedShapes.length === 1 && this._isNearRotationHandle(point)) {
+        if (this._rotationHandleHit(point)) {
             this._startRotate(point);
+            e.preventDefault();
             return;
         }
 
-        const hitShape = this._hitTest(point);
+        const hit = this.vexel._hitTest(point.x, point.y);
 
-        if (hitShape) {
-            if (!this.vexel.selectedShapes.includes(hitShape)) {
-                if (!e.metaKey && !e.ctrlKey) {
-                    this.vexel.deselectAll();
+        if (hit) {
+            if (e.shiftKey) {
+                if (this.vexel.selectedShapes.includes(hit)) {
+                    this.vexel.deselect(hit);
+                    return;
                 }
-                this.vexel.select(hitShape);
+                this.vexel.select(hit);
+            } else if (!this.vexel.selectedShapes.includes(hit)) {
+                this.vexel.deselectAll();
+                this.vexel.select(hit);
             }
             this._startDrag(point);
         } else {
-            if (!e.metaKey && !e.ctrlKey) {
-                this.vexel.deselectAll();
-            }
-            this.marquee = true;
+            if (!e.shiftKey) this.vexel.deselectAll();
+            this.marqueeActive = true;
             this.marqueeStart = point;
             this.marqueeEnd = point;
+            this.vexel._marquee = { active: true, start: point, end: point };
+            this.vexel.requestRender();
         }
     }
 
     _handleMouseMove(e) {
-        const point = this._getCanvasPoint(e);
+        if (!this.active) return;
+
+        const point = this._toWorld(e);
 
         if (this.dragging) {
             const dx = point.x - this.dragStart.x;
             const dy = point.y - this.dragStart.y;
-
             for (const shape of this.vexel.selectedShapes) {
-                if (!shape.locked) {
-                    shape.x = this.dragOffset[shape.id].x + dx;
-                    shape.y = this.dragOffset[shape.id].y + dy;
-
-                    if (this.vexel.snapEnabled) {
-                        shape.x = Math.round(shape.x / this.vexel.snapSize) * this.vexel.snapSize;
-                        shape.y = Math.round(shape.y / this.vexel.snapSize) * this.vexel.snapSize;
-                    }
+                const offset = this.dragOffset.get(shape.id);
+                if (!offset || shape.locked) continue;
+                if (typeof shape.translate === 'function') {
+                    const current = shape.getRenderBounds ? shape.getRenderBounds() : shape.getBounds();
+                    shape.translate(offset.x + dx - current.x, offset.y + dy - current.y);
                 }
             }
-            this.vexel.dirty = true;
+            this.vexel.requestRender();
             return;
         }
 
-        if (this.resizing && this.vexel.selectedShapes.length === 1) {
+        if (this.resizing) {
             this._updateResize(point);
             return;
         }
 
-        if (this.rotating && this.vexel.selectedShapes.length === 1) {
+        if (this.rotating) {
             this._updateRotate(point);
             return;
         }
 
-        if (this.marquee) {
+        if (this.marqueeActive) {
             this.marqueeEnd = point;
-            this.vexel.dirty = true;
+            this.vexel._marquee = { active: true, start: this.marqueeStart, end: point };
+            this.vexel.requestRender();
             return;
         }
 
-        this._updateHoveredHandle(point);
-        this._updateCursor(point);
+        this.hoveredHandle = this._handleAt(point);
     }
 
-    _handleMouseUp(e) {
-        if (this.marquee) {
+    _handleMouseUp() {
+        if (!this.active) return;
+
+        if (this.marqueeActive) {
             this._finishMarquee();
-            this.marquee = false;
-            this.marqueeStart = null;
-            this.marqueeEnd = null;
         }
 
-        if (this.dragging) {
-            this._finishDrag();
-        }
-
-        if (this.resizing) {
-            this._finishResize();
-        }
-
-        if (this.rotating) {
-            this._finishRotate();
-        }
-
-        this.dragging = false;
-        this.resizing = false;
-        this.rotating = false;
-        this.dragStart = null;
-        this.resizeHandle = null;
-        this.rotateStart = null;
+        this.resetInteraction();
+        this.vexel._marquee = { active: false, start: null, end: null };
+        this.vexel.requestRender();
     }
 
     _handleKeyDown(e) {
@@ -188,12 +232,6 @@ class VexelSelectTool {
             case 'Escape':
                 this.vexel.deselectAll();
                 break;
-            case 'a':
-                if (e.metaKey || e.ctrlKey) {
-                    e.preventDefault();
-                    this.vexel.selectAll();
-                }
-                break;
             case 'ArrowLeft':
                 this._nudge(-step, 0);
                 break;
@@ -206,322 +244,188 @@ class VexelSelectTool {
             case 'ArrowDown':
                 this._nudge(0, step);
                 break;
-            case 'd':
-                if (e.metaKey || e.ctrlKey) {
-                    e.preventDefault();
-                    this._duplicate();
-                }
+            default:
                 break;
         }
     }
 
     _nudge(dx, dy) {
         for (const shape of this.vexel.selectedShapes) {
-            if (!shape.locked) {
-                shape.x += dx;
-                shape.y += dy;
-            }
+            if (shape.locked) continue;
+            if (typeof shape.translate === 'function') shape.translate(dx, dy);
         }
-        this.vexel.dirty = true;
-    }
-
-    _duplicate() {
-        const newShapes = [];
-        for (const shape of this.vexel.selectedShapes) {
-            const cloned = shape.clone();
-            cloned.x += 20;
-            cloned.y += 20;
-            cloned.id = cloned._generateId();
-            this.vexel.shapes.push(cloned);
-            newShapes.push(cloned);
-        }
-        this.vexel.deselectAll();
-        for (const shape of newShapes) {
-            this.vexel.select(shape);
-        }
-        this.vexel.dirty = true;
-    }
-
-    _hitTest(point) {
-        for (let i = this.vexel.shapes.length - 1; i >= 0; i--) {
-            const shape = this.vexel.shapes[i];
-            if (shape.visible !== false && !shape.locked && shape.containsPoint(point.x, point.y)) {
-                return shape;
-            }
-        }
-        return null;
+        this.vexel.requestRender();
     }
 
     _startDrag(point) {
         this.dragging = true;
         this.dragStart = point;
-        this.dragOffset = {};
-
+        this.dragOffset = new Map();
         for (const shape of this.vexel.selectedShapes) {
-            this.dragOffset[shape.id] = { x: shape.x, y: shape.y };
+            const bounds = shape.getRenderBounds ? shape.getRenderBounds() : shape.getBounds();
+            this.dragOffset.set(shape.id, { x: bounds.x, y: bounds.y });
         }
-    }
-
-    _finishDrag() {
-        this.dragging = false;
-        this.dragStart = null;
-        this.dragOffset = {};
     }
 
     _startResize(handle, point) {
         const shape = this.vexel.selectedShapes[0];
         this.resizing = true;
         this.resizeHandle = handle;
-        this.resizeStartBounds = shape.getBounds();
+        this.resizeStartBounds = this._selectionBounds();
         this.resizeStartPoint = point;
+        this._resizeShape = shape;
     }
 
     _updateResize(point) {
-        const shape = this.vexel.selectedShapes[0];
+        const shape = this._resizeShape;
         const bounds = this.resizeStartBounds;
+        if (!shape || !bounds) return;
+
         const dx = point.x - this.resizeStartPoint.x;
         const dy = point.y - this.resizeStartPoint.y;
 
+        let x = bounds.x;
+        let y = bounds.y;
+        let width = bounds.width;
+        let height = bounds.height;
+
         switch (this.resizeHandle) {
             case 'nw':
-                shape.x = bounds.x + dx;
-                shape.y = bounds.y + dy;
-                shape.width = bounds.width - dx;
-                shape.height = bounds.height - dy;
+                x = bounds.x + dx;
+                y = bounds.y + dy;
+                width = bounds.width - dx;
+                height = bounds.height - dy;
                 break;
             case 'ne':
-                shape.y = bounds.y + dy;
-                shape.width = bounds.width + dx;
-                shape.height = bounds.height - dy;
+                y = bounds.y + dy;
+                width = bounds.width + dx;
+                height = bounds.height - dy;
                 break;
             case 'sw':
-                shape.x = bounds.x + dx;
-                shape.width = bounds.width - dx;
-                shape.height = bounds.height + dy;
+                x = bounds.x + dx;
+                width = bounds.width - dx;
+                height = bounds.height + dy;
                 break;
             case 'se':
-                shape.width = bounds.width + dx;
-                shape.height = bounds.height + dy;
+                width = bounds.width + dx;
+                height = bounds.height + dy;
                 break;
             case 'n':
-                shape.y = bounds.y + dy;
-                shape.height = bounds.height - dy;
+                y = bounds.y + dy;
+                height = bounds.height - dy;
                 break;
             case 's':
-                shape.height = bounds.height + dy;
+                height = bounds.height + dy;
                 break;
             case 'w':
-                shape.x = bounds.x + dx;
-                shape.width = bounds.width - dx;
+                x = bounds.x + dx;
+                width = bounds.width - dx;
                 break;
             case 'e':
-                shape.width = bounds.width + dx;
+                width = bounds.width + dx;
+                break;
+            default:
                 break;
         }
 
-        if (shape.width < 1) shape.width = 1;
-        if (shape.height < 1) shape.height = 1;
+        width = Math.max(1, width);
+        height = Math.max(1, height);
 
-        this.vexel.dirty = true;
-    }
+        if (typeof shape.resizeTo === 'function') {
+            shape.resizeTo({ x, y, width, height });
+        } else {
+            if (Number.isFinite(shape.x)) shape.x = x;
+            if (Number.isFinite(shape.y)) shape.y = y;
+            if (Number.isFinite(shape.width)) shape.width = width;
+            if (Number.isFinite(shape.height)) shape.height = height;
+            if (Number.isFinite(shape.radiusX)) {
+                shape.radiusX = width / 2;
+                shape.radiusY = height / 2;
+                shape.x = x + width / 2;
+                shape.y = y + height / 2;
+            }
+        }
 
-    _finishResize() {
-        this.resizing = false;
-        this.resizeHandle = null;
-        this.resizeStartBounds = null;
-        this.resizeStartPoint = null;
+        this.vexel.requestRender();
     }
 
     _startRotate(point) {
-        const shape = this.vexel.selectedShapes[0];
-        const bounds = shape.getBounds();
+        const bounds = this._selectionBounds();
+        if (!bounds) return;
+
         this.rotating = true;
         this.rotateCenter = {
             x: bounds.x + bounds.width / 2,
             y: bounds.y + bounds.height / 2
         };
-        this.rotateStart = point;
         this.rotateStartAngle = Math.atan2(
             point.y - this.rotateCenter.y,
             point.x - this.rotateCenter.x
         );
-        this.rotateStartRotation = shape.rotation;
+        this.rotateStartRotation = this.vexel.selectedShapes[0].rotation || 0;
     }
 
     _updateRotate(point) {
         const shape = this.vexel.selectedShapes[0];
+        if (!shape) return;
+
         const angle = Math.atan2(
             point.y - this.rotateCenter.y,
             point.x - this.rotateCenter.x
         );
-        let rotation = (angle - this.rotateStartAngle) * (180 / Math.PI);
-        rotation = this.rotateStartRotation + rotation;
+        let rotation = this.rotateStartRotation + (angle - this.rotateStartAngle) * (180 / Math.PI);
 
         if (this.vexel.snapEnabled) {
             rotation = Math.round(rotation / 15) * 15;
         }
 
-        shape.rotation = rotation % 360;
-        this.vexel.dirty = true;
-    }
-
-    _finishRotate() {
-        this.rotating = false;
-        this.rotateStart = null;
-        this.rotateCenter = null;
-    }
-
-    _isNearRotationHandle(point) {
-        if (this.vexel.selectedShapes.length !== 1) return false;
-        const shape = this.vexel.selectedShapes[0];
-        const bounds = shape.getBounds();
-        const cx = bounds.x + bounds.width / 2;
-        const cy = bounds.y - 30;
-        const dist = Math.sqrt((point.x - cx) ** 2 + (point.y - cy) ** 2);
-        return dist < 15;
-    }
-
-    _updateHoveredHandle(point) {
-        if (this.vexel.selectedShapes.length !== 1) {
-            this.hoveredHandle = null;
-            return;
-        }
-
-        const shape = this.vexel.selectedShapes[0];
-        const bounds = shape.getBounds();
-        const handles = {
-            nw: { x: bounds.x, y: bounds.y },
-            ne: { x: bounds.x + bounds.width, y: bounds.y },
-            sw: { x: bounds.x, y: bounds.y + bounds.height },
-            se: { x: bounds.x + bounds.width, y: bounds.y + bounds.height },
-            n: { x: bounds.x + bounds.width / 2, y: bounds.y },
-            s: { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height },
-            w: { x: bounds.x, y: bounds.y + bounds.height / 2 },
-            e: { x: bounds.x + bounds.width, y: bounds.y + bounds.height / 2 }
-        };
-
-        this.hoveredHandle = null;
-        for (const [key, pos] of Object.entries(handles)) {
-            const dist = Math.sqrt((point.x - pos.x) ** 2 + (point.y - pos.y) ** 2);
-            if (dist < this.handleSize + this.hitTolerance) {
-                this.hoveredHandle = key;
-                return;
-            }
-        }
-    }
-
-    _updateCursor(point) {
-        if (this.hoveredHandle) {
-            const cursors = {
-                nw: 'nwse-resize',
-                se: 'nwse-resize',
-                ne: 'nesw-resize',
-                sw: 'nesw-resize',
-                n: 'ns-resize',
-                s: 'ns-resize',
-                w: 'ew-resize',
-                e: 'ew-resize'
-            };
-            this.vexel.container.style.cursor = cursors[this.hoveredHandle] || 'default';
-            return;
-        }
-
-        if (this.vexel.selectedShapes.length === 1 && this._isNearRotationHandle(point)) {
-            this.vexel.container.style.cursor = 'grab';
-            return;
-        }
-
-        const hitShape = this._hitTest(point);
-        this.vexel.container.style.cursor = hitShape ? 'move' : 'default';
+        shape.rotation = ((rotation % 360) + 360) % 360;
+        this.vexel.requestRender();
     }
 
     _finishMarquee() {
-        if (!this.marqueeStart || !this.marqueeEnd) return;
+        const start = this.marqueeStart;
+        const end = this.marqueeEnd;
+        if (!start || !end) return;
 
-        const x1 = Math.min(this.marqueeStart.x, this.marqueeEnd.x);
-        const y1 = Math.min(this.marqueeStart.y, this.marqueeEnd.y);
-        const x2 = Math.max(this.marqueeStart.x, this.marqueeEnd.x);
-        const y2 = Math.max(this.marqueeStart.y, this.marqueeEnd.y);
+        const marquee = {
+            x: Math.min(start.x, end.x),
+            y: Math.min(start.y, end.y),
+            width: Math.abs(end.x - start.x),
+            height: Math.abs(end.y - start.y)
+        };
+
+        if (marquee.width < 0.5 && marquee.height < 0.5) return;
 
         const selected = [];
         for (const shape of this.vexel.shapes) {
-            if (shape.visible !== false && !shape.locked) {
-                const bounds = shape.getBounds();
-                if (
-                    bounds.x + bounds.width >= x1 &&
-                    bounds.x <= x2 &&
-                    bounds.y + bounds.height >= y1 &&
-                    bounds.y <= y2
-                ) {
-                    selected.push(shape);
-                }
+            if (shape.visible === false || shape.locked) continue;
+            const bounds = shape.getRenderBounds ? shape.getRenderBounds() : shape.getBounds();
+            if (
+                bounds.x + bounds.width >= marquee.x &&
+                bounds.x <= marquee.x + marquee.width &&
+                bounds.y + bounds.height >= marquee.y &&
+                bounds.y <= marquee.y + marquee.height
+            ) {
+                selected.push(shape);
             }
         }
 
         this.vexel.deselectAll();
-        for (const shape of selected) {
-            this.vexel.select(shape);
+        for (const shape of selected) this.vexel.select(shape);
+    }
+
+    /** Draw into the overlay using the frame's snapshot. */
+    draw(ctx, snapshot) {
+        if (!ctx || !snapshot) return;
+        if (this.marqueeActive && this.marqueeStart && this.marqueeEnd) {
+            VexelOverlay.drawMarquee(ctx, snapshot, this.marqueeStart, this.marqueeEnd);
         }
     }
 
-    drawMarquee(ctx) {
-        if (!this.marquee || !this.marqueeStart || !this.marqueeEnd) return;
-
-        const x = Math.min(this.marqueeStart.x, this.marqueeEnd.x);
-        const y = Math.min(this.marqueeStart.y, this.marqueeEnd.y);
-        const w = Math.abs(this.marqueeEnd.x - this.marqueeStart.x);
-        const h = Math.abs(this.marqueeEnd.y - this.marqueeStart.y);
-
-        ctx.save();
-        ctx.translate(this.vexel.viewport.x, this.vexel.viewport.y);
-        ctx.scale(this.vexel.viewport.zoom, this.vexel.viewport.zoom);
-
-        ctx.fillStyle = 'rgba(74, 144, 217, 0.1)';
-        ctx.fillRect(x, y, w, h);
-        ctx.strokeStyle = '#4A90D9';
-        ctx.lineWidth = 1 / this.vexel.viewport.zoom;
-        ctx.setLineDash([4, 4]);
-        ctx.strokeRect(x, y, w, h);
-        ctx.setLineDash([]);
-
-        ctx.restore();
-    }
-
-    drawRotationHandle(ctx) {
-        if (this.vexel.selectedShapes.length !== 1) return;
-
-        const shape = this.vexel.selectedShapes[0];
-        const bounds = shape.getBounds();
-        const cx = bounds.x + bounds.width / 2;
-        const cy = bounds.y - 30;
-
-        ctx.save();
-        ctx.translate(this.vexel.viewport.x, this.vexel.viewport.y);
-        ctx.scale(this.vexel.viewport.zoom, this.vexel.viewport.zoom);
-
-        ctx.strokeStyle = '#4A90D9';
-        ctx.lineWidth = 1.5 / this.vexel.viewport.zoom;
-        ctx.setLineDash([2, 2]);
-        ctx.beginPath();
-        ctx.moveTo(bounds.x + bounds.width / 2, bounds.y);
-        ctx.lineTo(cx, cy);
-        ctx.stroke();
-        ctx.setLineDash([]);
-
-        ctx.fillStyle = '#ffffff';
-        ctx.strokeStyle = '#4A90D9';
-        ctx.lineWidth = 1.5 / this.vexel.viewport.zoom;
-        ctx.beginPath();
-        ctx.arc(cx, cy, 6 / this.vexel.viewport.zoom, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.stroke();
-
-        ctx.fillStyle = '#4A90D9';
-        ctx.beginPath();
-        ctx.arc(cx, cy, 2 / this.vexel.viewport.zoom, 0, Math.PI * 2);
-        ctx.fill();
-
-        ctx.restore();
+    destroy() {
+        this.deactivate();
+        this.vexel = null;
     }
 }
 

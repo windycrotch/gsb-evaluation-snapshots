@@ -14,9 +14,11 @@ class VexelWebGLRenderer {
 
     init() {
         const canvas = document.createElement('canvas');
-        canvas.width = this.vexel.width;
-        canvas.height = this.vexel.height;
+        const ratio = this.vexel.pixelRatio || 1;
+        canvas.width = Math.max(1, Math.round(this.vexel.width * ratio));
+        canvas.height = Math.max(1, Math.round(this.vexel.height * ratio));
         canvas.style.cssText = this.vexel.canvas.style.cssText;
+        canvas.className = 'vexel-main-webgl';
 
         this.gl = canvas.getContext('webgl2', {
             alpha: true,
@@ -40,7 +42,7 @@ class VexelWebGLRenderer {
             return false;
         }
 
-        this.vexel.canvas.parentNode.replaceChild(canvas, this.vexel.canvas);
+        if (this.vexel.canvas.parentNode) this.vexel.canvas.parentNode.replaceChild(canvas, this.vexel.canvas);
         this.vexel.canvas = canvas;
         this.vexel.ctx = this.gl;
 
@@ -152,11 +154,17 @@ class VexelWebGLRenderer {
         gl.clearColor(0, 0, 0, 0);
     }
 
-    begin() {
+    begin(snapshot) {
         const gl = this.gl;
         this.drawCalls = 0;
+        this._frameSnapshot = snapshot || null;
 
-        gl.viewport(0, 0, this.vexel.width * this.vexel.pixelRatio || 1, this.vexel.height * this.vexel.pixelRatio || 1);
+        const ratio = snapshot ? snapshot.pixelRatio : (this.vexel.pixelRatio || 1);
+        const cssWidth = snapshot ? snapshot.width : this.vexel.width;
+        const cssHeight = snapshot ? snapshot.height : this.vexel.height;
+
+        gl.viewport(0, 0, Math.round(cssWidth * ratio), Math.round(cssHeight * ratio));
+        gl.clearColor(0, 0, 0, 0);
         gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
         const program = this.programs.main;
@@ -173,9 +181,10 @@ class VexelWebGLRenderer {
     }
 
     _getViewMatrix() {
-        const vp = this.vexel.viewport;
-        const w = this.vexel.width;
-        const h = this.vexel.height;
+        const snapshot = this._frameSnapshot;
+        const vp = snapshot || this.vexel.viewport;
+        const w = snapshot ? snapshot.width : this.vexel.width;
+        const h = snapshot ? snapshot.height : this.vexel.height;
 
         const a = 2 / w;
         const b = 2 / h;

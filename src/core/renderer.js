@@ -8,102 +8,87 @@ class VexelRenderer {
         this.antialias = true;
         this.fps = 0;
         this.frameCount = 0;
-        this.lastFPSTime = performance.now();
+        this.lastFPSTime = typeof performance !== 'undefined' ? performance.now() : 0;
         this.dirty = true;
         this.dirtyRegions = [];
         this.useDirtyRegions = false;
         this.maxDirtyRegions = 10;
-        this.webglRenderer = null;
+        this.lastSnapshot = null;
         this.renderingEnabled = true;
         this.stats = {
             drawCalls: 0,
             shapesRendered: 0,
             framesRendered: 0,
-            lastFrameTime: 0
+            lastFrameTime: 0,
+            lastSequence: -1
         };
     }
 
-    setBackend(backend) {
-        const backends = ['canvas2d', 'webgl', 'webgl2'];
-        if (!backends.includes(backend)) {
-            console.warn(`Backend "${backend}" not supported. Using canvas2d.`);
-            backend = 'canvas2d';
+    /**
+     * Render one complete frame — scene and selection overlay — from a single
+     * immutable viewport snapshot. Both canvases are cleared and drawn using
+     * the exact same pan/zoom/rotation/DPR values, so they cannot disagree.
+     */
+    renderFrame(snapshot) {
+        if (!snapshot) {
+            snapshot = VexelViewportSnapshot.capture(this.vexel);
         }
-
-        if (backend === 'webgl' || backend === 'webgl2') {
-            if (this.webglRenderer) {
-                this.backend = backend;
-                return;
-            }
-            const initialized = this._initWebGL(backend);
-            if (!initialized) {
-                console.warn('WebGL initialization failed. Using canvas2d.');
-                this.backend = 'canvas2d';
-                return;
-            }
-        }
-
-        this.backend = backend;
-        this.dirty = true;
-    }
-
-    _initWebGL(backend) {
-        if (typeof window === 'undefined') return false;
-        if (this.webglRenderer) return true;
-
-        const VexelWebGLRenderer = window.VexelWebGLRenderer;
-        if (!VexelWebGLRenderer) return false;
-
-        this.webglRenderer = new VexelWebGLRenderer(this.vexel);
-        const ok = this.webglRenderer.init();
-        if (ok) {
-            this.backend = backend;
-        }
-        return ok;
-    }
-
-    render() {
         if (!this.renderingEnabled) return;
 
-        const startTime = performance.now();
+        const startTime = typeof performance !== 'undefined' ? performance.now() : 0;
 
         this.frameCount++;
-        const now = performance.now();
+        this.lastSnapshot = snapshot;
+        this.pixelRatio = snapshot.pixelRatio;
+
+        if (this.backend === 'webgl' || this.backend === 'webgl2') {
+            this._renderWebGL(snapshot);
+        } else {
+            this._renderCanvas2D(snapshot);
+        }
+
+        const now = typeof performance !== 'undefined' ? performance.now() : 0;
+        this.stats.framesRendered++;
+        this.stats.lastSequence = snapshot.sequence;
+        this.stats.lastFrameTime = now - startTime;
         if (now - this.lastFPSTime >= 1000) {
             this.fps = this.frameCount;
             this.frameCount = 0;
             this.lastFPSTime = now;
         }
 
-        if (this.backend === 'webgl' || this.backend === 'webgl2') {
-            this._renderWebGL();
-        } else {
-            this._renderCanvas2D();
-        }
-
-        this.stats.framesRendered++;
-        this.stats.lastFrameTime = performance.now() - startTime;
         this.dirty = false;
         this.dirtyRegions = [];
     }
 
-    _renderCanvas2D() {
+    /**
+     * Backwards-compatible entry point. Captures a snapshot and renders a full
+     * frame; callers that already have a snapshot should use renderFrame().
+     */
+    render() {
+        this.renderFrame(VexelViewportSnapshot.capture(this.vexel));
+    }
+
+    _renderCanvas2D(snapshot) {
         const ctx = this.vexel.ctx;
         const overlayCtx = this.vexel.overlayCtx;
-        const w = this.vexel.width;
-        const h = this.vexel.height;
+        if (!ctx) return;
 
-        ctx.clearRect(0, 0, w, h);
-        overlayCtx.clearRect(0, 0, w, h);
+        // Clear both surfaces in device pixels, then restore the DPR transform.
+        snapshot.clearSurface(ctx, this.vexel.canvas);
+        if (overlayCtx) snapshot.clearSurface(overlayCtx, this.vexel.overlayCanvas);
 
-        if (this.vexel.canvas && this.vexel.canvas.gridVisible) {
-            this.vexel.canvas.drawGrid(ctx);
+        if (this.vexel.canvasManager && this.vexel.canvasManager.gridVisible) {
+            VexelOverlay.drawGrid(ctx, snapshot, {
+                size: this.vexel.canvasManager.gridSize,
+                color: this.vexel.canvasManager.gridColor
+            });
+        } else if (this.vexel.gridEnabled) {
+            VexelOverlay.drawGrid(ctx, snapshot, { size: this.vexel.snapSize });
         }
 
         ctx.save();
-        ctx.translate(this.vexel.viewport.x, this.vexel.viewport.y);
-        ctx.scale(this.vexel.viewport.zoom, this.vexel.viewport.zoom);
-        ctx.rotate(this.vexel.viewport.rotation);
+        snapshot.applyWorld(ctx);
 
         if (this.antialias) {
             ctx.imageSmoothingEnabled = true;
@@ -112,8 +97,9 @@ class VexelRenderer {
 
         let shapesRendered = 0;
 
-        if (this.vexel.layers && this.vexel.layers.layers && this.vexel.layers.layers.length > 0) {
-            for (const layer of this.vexel.layers.getVisibleLayers()) {
+        const layers = this.vexel.layers;
+        if (layers && layers.layers && layers.layers.length > 0) {
+            for (const layer of layers.getVisibleLayers()) {
                 layer.draw(ctx);
                 shapesRendered += layer.getShapeCount();
             }
@@ -128,46 +114,53 @@ class VexelRenderer {
 
         ctx.restore();
 
-        if (this.vexel.canvas && this.vexel.canvas.guidesVisible) {
-            this.vexel.canvas.drawGuides(ctx);
+        const manager = this.vexel.canvasManager;
+        if (manager && manager.guidesVisible && manager.guides.length) {
+            VexelOverlay.drawGuides(ctx, snapshot, manager.guides);
+        }
+        if (manager && manager.rulersVisible && typeof manager.drawRulers === 'function') {
+            manager.drawRulers(ctx, snapshot);
         }
 
-        if (this.vexel.canvas && this.vexel.canvas.rulersVisible) {
-            this.vexel.canvas.drawRulers(ctx);
+        if (overlayCtx) {
+            this._renderOverlay(overlayCtx, snapshot);
         }
-
-        this._renderOverlay(overlayCtx);
 
         this.stats.shapesRendered = shapesRendered;
         this.stats.drawCalls = shapesRendered;
     }
 
-    _renderWebGL() {
+    _renderWebGL(snapshot) {
         if (!this.webglRenderer) return;
 
-        this.webglRenderer.begin();
+        const viewport = this.webglRenderer.vexel ? this.webglRenderer.vexel : this.vexel;
+        this.webglRenderer.begin(snapshot);
 
-        const visibleShapes = this.vexel.canvas
-            ? this.vexel.canvas.getVisibleShapes(this.vexel.shapes)
+        const visibleShapes = this.vexel.canvasManager
+            ? this.vexel.canvasManager.getVisibleShapes(this.vexel.shapes)
             : this.vexel.shapes.filter(s => s.visible !== false);
 
         for (const shape of visibleShapes) {
-            this._renderShapeWebGL(shape);
+            this._renderShapeWebGL(shape, viewport);
         }
 
         this.webglRenderer.end();
         this.stats.shapesRendered = visibleShapes.length;
         this.stats.drawCalls = this.webglRenderer.drawCalls;
+
+        if (this.vexel.overlayCtx) {
+            this._renderOverlay(this.vexel.overlayCtx, snapshot);
+        }
     }
 
-    _renderShapeWebGL(shape) {
+    _renderShapeWebGL(shape, viewport) {
         if (!this.webglRenderer) return;
 
         switch (shape.type) {
             case 'rectangle': {
                 let color = 0xFF5722FF;
-                if (shape.fill && shape.fill !== 'transparent') {
-                    const parsed = VexelColor ? VexelColor.parse(shape.fill) : null;
+                if (shape.fill && shape.fill !== 'transparent' && typeof VexelColor !== 'undefined') {
+                    const parsed = VexelColor.parse(shape.fill);
                     if (parsed) {
                         const a = Math.round((shape.opacity || 1) * 255);
                         color = (a << 24) | (parsed.b << 16) | (parsed.g << 8) | parsed.r;
@@ -183,8 +176,8 @@ class VexelRenderer {
             }
             case 'ellipse': {
                 let color = 0xFF5722FF;
-                if (shape.fill && shape.fill !== 'transparent') {
-                    const parsed = VexelColor ? VexelColor.parse(shape.fill) : null;
+                if (shape.fill && shape.fill !== 'transparent' && typeof VexelColor !== 'undefined') {
+                    const parsed = VexelColor.parse(shape.fill);
                     if (parsed) {
                         const a = Math.round((shape.opacity || 1) * 255);
                         color = (a << 24) | (parsed.b << 16) | (parsed.g << 8) | parsed.r;
@@ -199,8 +192,8 @@ class VexelRenderer {
             }
             case 'line': {
                 let color = 0x000000FF;
-                if (shape.stroke && shape.stroke !== 'none') {
-                    const parsed = VexelColor ? VexelColor.parse(shape.stroke) : null;
+                if (shape.stroke && shape.stroke !== 'none' && typeof VexelColor !== 'undefined') {
+                    const parsed = VexelColor.parse(shape.stroke);
                     if (parsed) {
                         const a = Math.round((shape.opacity || 1) * 255);
                         color = (a << 24) | (parsed.b << 16) | (parsed.g << 8) | parsed.r;
@@ -214,75 +207,51 @@ class VexelRenderer {
                 );
                 break;
             }
-            default: {
+            default:
                 break;
-            }
         }
     }
 
-    _renderOverlay(ctx) {
+    /**
+     * Selection overlay. The passed context has already been cleared and reset
+     * to the DPR transform by renderFrame; VexelOverlay applies the snapshot's
+     * world transform itself.
+     */
+    _renderOverlay(ctx, snapshot) {
         const selected = this.vexel.selectedShapes;
-        if (selected.length === 0) return;
 
-        ctx.save();
-        ctx.translate(this.vexel.viewport.x, this.vexel.viewport.y);
-        ctx.scale(this.vexel.viewport.zoom, this.vexel.viewport.zoom);
+        if (selected.length > 0) {
+            VexelOverlay.drawSelection(ctx, snapshot, selected);
 
-        for (const shape of selected) {
-            const bounds = shape.getBounds();
-            const z = this.vexel.viewport.zoom;
-            const handleSize = 7 / z;
-
-            ctx.strokeStyle = '#4A90D9';
-            ctx.lineWidth = 1.5 / z;
-            ctx.setLineDash([6 / z, 3 / z]);
-            ctx.strokeRect(
-                bounds.x - 2 / z,
-                bounds.y - 2 / z,
-                bounds.width + 4 / z,
-                bounds.height + 4 / z
-            );
-            ctx.setLineDash([]);
-
-            const handles = [
-                { x: bounds.x, y: bounds.y },
-                { x: bounds.x + bounds.width, y: bounds.y },
-                { x: bounds.x, y: bounds.y + bounds.height },
-                { x: bounds.x + bounds.width, y: bounds.y + bounds.height },
-                { x: bounds.x + bounds.width / 2, y: bounds.y },
-                { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height },
-                { x: bounds.x, y: bounds.y + bounds.height / 2 },
-                { x: bounds.x + bounds.width, y: bounds.y + bounds.height / 2 }
-            ];
-
-            for (const h of handles) {
-                ctx.fillStyle = '#ffffff';
-                ctx.strokeStyle = '#4A90D9';
-                ctx.lineWidth = 1.5 / z;
-                ctx.fillRect(
-                    h.x - handleSize / 2,
-                    h.y - handleSize / 2,
-                    handleSize,
-                    handleSize
-                );
-                ctx.strokeRect(
-                    h.x - handleSize / 2,
-                    h.y - handleSize / 2,
-                    handleSize,
-                    handleSize
-                );
+            if (selected.length === 1) {
+                const bounds = VexelOverlay.getShapeBounds(selected[0]);
+                VexelOverlay.drawRotationHandle(ctx, snapshot, bounds);
             }
         }
 
-        ctx.restore();
-
-        if (this.vexel.selectTool && this.vexel.selectTool.marquee) {
-            this.vexel.selectTool.drawMarquee(ctx);
+        // A live marquee is part of the frame too and must use the same
+        // snapshot as everything else.
+        const marquee = this.vexel._marquee;
+        if (marquee && marquee.active && marquee.start && marquee.end) {
+            VexelOverlay.drawMarquee(ctx, snapshot, marquee.start, marquee.end);
         }
 
-        if (this.vexel.selectTool && selected.length === 1) {
-            this.vexel.selectTool.drawRotationHandle(ctx);
+        const selectTool = this.vexel.selectTool;
+        if (selectTool && selectTool.marqueeActive && selectTool.marqueeStart && selectTool.marqueeEnd) {
+            VexelOverlay.drawMarquee(ctx, snapshot, selectTool.marqueeStart, selectTool.marqueeEnd);
         }
+    }
+
+    /** Legacy: clear both surfaces without drawing. */
+    clear() {
+        const snapshot = VexelViewportSnapshot.capture(this.vexel);
+        if (this.vexel.ctx) snapshot.clearSurface(this.vexel.ctx, this.vexel.canvas);
+        if (this.vexel.overlayCtx) snapshot.clearSurface(this.vexel.overlayCtx, this.vexel.overlayCanvas);
+    }
+
+    /** Legacy: force an immediate full frame. */
+    renderAll() {
+        this.renderFrame(VexelViewportSnapshot.capture(this.vexel));
     }
 
     setAntialias(enabled) {
@@ -309,6 +278,32 @@ class VexelRenderer {
         this.dirtyRegions = [];
     }
 
+    setBackend(backend) {
+        const backends = ['canvas2d', 'webgl', 'webgl2'];
+        if (!backends.includes(backend)) {
+            console.warn(`Backend "${backend}" not supported. Using canvas2d.`);
+            return;
+        }
+
+        if (backend === 'webgl' || backend === 'webgl2') {
+            if (!this.webglRenderer) {
+                const VexelWebGLRenderer = typeof window !== 'undefined' ? window.VexelWebGLRenderer : null;
+                if (!VexelWebGLRenderer) {
+                    console.warn('WebGL renderer unavailable. Using canvas2d.');
+                    return;
+                }
+                this.webglRenderer = new VexelWebGLRenderer(this.vexel);
+                if (!this.webglRenderer.init()) {
+                    this.webglRenderer = null;
+                    return;
+                }
+            }
+        }
+
+        this.backend = backend;
+        this.dirty = true;
+    }
+
     getFPS() {
         return this.fps;
     }
@@ -323,15 +318,16 @@ class VexelRenderer {
             dirty: this.dirty,
             totalShapes: this.vexel.shapes.length,
             selectedShapes: this.vexel.selectedShapes.length,
-            viewportZoom: this.vexel.viewport.zoom,
-            webgl: this.webglRenderer ? this.webglRenderer.getStats() : null
+            viewportZoom: this.lastSnapshot ? this.lastSnapshot.zoom : this.vexel.viewport.zoom,
+            webgl: this.webglRenderer && this.webglRenderer.getStats ? this.webglRenderer.getStats() : null
         };
     }
 
     takeScreenshot(scale = 1, format = 'image/png') {
         return new Promise((resolve) => {
-            const w = Math.round(this.vexel.width * scale);
-            const h = Math.round(this.vexel.height * scale);
+            const snapshot = this.lastSnapshot || VexelViewportSnapshot.capture(this.vexel);
+            const w = Math.round(snapshot.width * scale);
+            const h = Math.round(snapshot.height * scale);
 
             const canvas = document.createElement('canvas');
             canvas.width = w;
@@ -343,10 +339,7 @@ class VexelRenderer {
 
             ctx.save();
             ctx.scale(scale, scale);
-
-            ctx.translate(this.vexel.viewport.x, this.vexel.viewport.y);
-            ctx.scale(this.vexel.viewport.zoom, this.vexel.viewport.zoom);
-            ctx.rotate(this.vexel.viewport.rotation);
+            snapshot.applyWorld(ctx);
 
             for (const shape of this.vexel.shapes) {
                 if (shape.visible !== false) {
@@ -370,7 +363,7 @@ class VexelRenderer {
 
     destroy() {
         if (this.webglRenderer) {
-            this.webglRenderer.destroy();
+            if (this.webglRenderer.destroy) this.webglRenderer.destroy();
             this.webglRenderer = null;
         }
     }

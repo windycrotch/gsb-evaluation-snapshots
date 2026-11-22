@@ -1,4 +1,12 @@
 // src/core/events.js
+//
+// Event entry point.
+//
+// All pointer coordinate conversions and every viewport mutation go through
+// the engine: `screenToWorld` on a viewport snapshot, and `setViewport` for
+// atomic pan/zoom commits. This module therefore cannot introduce a frame that
+// mixes an old zoom with a new pan. Listeners are tracked so detach() really
+// removes all of them.
 
 class VexelEventSystem {
     constructor(vexel) {
@@ -21,6 +29,7 @@ class VexelEventSystem {
         this.shortcuts = {};
         this.shortcutEnabled = true;
         this._boundHandlers = {};
+        this._attached = [];
         this._setupHandlers();
     }
 
@@ -39,51 +48,48 @@ class VexelEventSystem {
         this._boundHandlers.onBlur = this._onBlur.bind(this);
     }
 
+    _listen(target, type, handler, options) {
+        if (!target) return;
+        target.addEventListener(type, handler, options);
+        this._attached.push({ target, type, handler, options });
+    }
+
     attach() {
+        if (this._attached.length > 0) return;
+
         const container = this.vexel.container;
         const windowTarget = window;
 
-        container.addEventListener('mousedown', this._boundHandlers.onMouseDown);
-        windowTarget.addEventListener('mousemove', this._boundHandlers.onMouseMove);
-        windowTarget.addEventListener('mouseup', this._boundHandlers.onMouseUp);
-        container.addEventListener('wheel', this._boundHandlers.onWheel, { passive: false });
-        windowTarget.addEventListener('keydown', this._boundHandlers.onKeyDown);
-        windowTarget.addEventListener('keyup', this._boundHandlers.onKeyUp);
-        container.addEventListener('touchstart', this._boundHandlers.onTouchStart, { passive: false });
-        container.addEventListener('touchmove', this._boundHandlers.onTouchMove, { passive: false });
-        container.addEventListener('touchend', this._boundHandlers.onTouchEnd);
-        container.addEventListener('contextmenu', this._boundHandlers.onContextMenu);
-        windowTarget.addEventListener('resize', this._boundHandlers.onResize);
-        windowTarget.addEventListener('blur', this._boundHandlers.onBlur);
+        this._listen(container, 'mousedown', this._boundHandlers.onMouseDown);
+        this._listen(windowTarget, 'mousemove', this._boundHandlers.onMouseMove);
+        this._listen(windowTarget, 'mouseup', this._boundHandlers.onMouseUp);
+        this._listen(container, 'wheel', this._boundHandlers.onWheel, { passive: false });
+        this._listen(windowTarget, 'keydown', this._boundHandlers.onKeyDown);
+        this._listen(windowTarget, 'keyup', this._boundHandlers.onKeyUp);
+        this._listen(container, 'touchstart', this._boundHandlers.onTouchStart, { passive: false });
+        this._listen(container, 'touchmove', this._boundHandlers.onTouchMove, { passive: false });
+        this._listen(container, 'touchend', this._boundHandlers.onTouchEnd);
+        this._listen(container, 'contextmenu', this._boundHandlers.onContextMenu);
+        this._listen(windowTarget, 'resize', this._boundHandlers.onResize);
+        this._listen(windowTarget, 'blur', this._boundHandlers.onBlur);
     }
 
     detach() {
-        const container = this.vexel.container;
-        const windowTarget = window;
-
-        container.removeEventListener('mousedown', this._boundHandlers.onMouseDown);
-        windowTarget.removeEventListener('mousemove', this._boundHandlers.onMouseMove);
-        windowTarget.removeEventListener('mouseup', this._boundHandlers.onMouseUp);
-        container.removeEventListener('wheel', this._boundHandlers.onWheel);
-        windowTarget.removeEventListener('keydown', this._boundHandlers.onKeyDown);
-        windowTarget.removeEventListener('keyup', this._boundHandlers.onKeyUp);
-        container.removeEventListener('touchstart', this._boundHandlers.onTouchStart);
-        container.removeEventListener('touchmove', this._boundHandlers.onTouchMove);
-        container.removeEventListener('touchend', this._boundHandlers.onTouchEnd);
-        container.removeEventListener('contextmenu', this._boundHandlers.onContextMenu);
-        windowTarget.removeEventListener('resize', this._boundHandlers.onResize);
-        windowTarget.removeEventListener('blur', this._boundHandlers.onBlur);
+        for (const entry of this._attached) {
+            entry.target.removeEventListener(entry.type, entry.handler, entry.options);
+        }
+        this._attached = [];
+        this.pointerDown = false;
+        this.pointerDragging = false;
+        this.dragStart = null;
+        this.activeTouches.clear();
     }
 
     _getCanvasPoint(e) {
         const rect = this.vexel.container.getBoundingClientRect();
         const clientX = e.touches ? e.touches[0].clientX : e.clientX;
         const clientY = e.touches ? e.touches[0].clientY : e.clientY;
-
-        return {
-            x: (clientX - rect.left - this.vexel.viewport.x) / this.vexel.viewport.zoom,
-            y: (clientY - rect.top - this.vexel.viewport.y) / this.vexel.viewport.zoom
-        };
+        return this.vexel.screenToWorld(clientX - rect.left, clientY - rect.top);
     }
 
     _onMouseDown(e) {
@@ -98,10 +104,7 @@ class VexelEventSystem {
             this.pointerPosition.y - this.lastClickPosition.y
         );
 
-        if (
-            now - this.lastClickTime < this.doubleClickThreshold &&
-            dist < this.doubleClickDistance
-        ) {
+        if (now - this.lastClickTime < this.doubleClickThreshold && dist < this.doubleClickDistance) {
             this._emit('dblclick', {
                 x: this.pointerPosition.x,
                 y: this.pointerPosition.y,
@@ -144,7 +147,7 @@ class VexelEventSystem {
             }
         }
 
-        if (this.pointerDragging) {
+        if (this.pointerDragging && this.dragStart) {
             this._emit('drag', {
                 x: this.pointerPosition.x,
                 y: this.pointerPosition.y,
@@ -162,7 +165,7 @@ class VexelEventSystem {
     }
 
     _onMouseUp(e) {
-        if (this.pointerDragging) {
+        if (this.pointerDragging && this.dragStart) {
             this._emit('dragend', {
                 x: this.pointerPosition.x,
                 y: this.pointerPosition.y,
@@ -170,7 +173,7 @@ class VexelEventSystem {
                 dy: this.pointerPosition.y - this.dragStart.y,
                 originalEvent: e
             });
-        } else if (this.pointerDown) {
+        } else if (this.pointerDown && this.dragStart) {
             this._emit('click', {
                 x: this.dragStart.x,
                 y: this.dragStart.y,
@@ -198,20 +201,13 @@ class VexelEventSystem {
         const mouseY = e.clientY - rect.top;
 
         if (e.ctrlKey || e.metaKey) {
-            const delta = e.deltaY > 0 ? 0.9 : 1.1;
-            const newZoom = Math.max(0.001, Math.min(100, this.vexel.viewport.zoom * delta));
-
-            this.vexel.viewport.x = mouseX - (mouseX - this.vexel.viewport.x) * (newZoom / this.vexel.viewport.zoom);
-            this.vexel.viewport.y = mouseY - (mouseY - this.vexel.viewport.y) * (newZoom / this.vexel.viewport.zoom);
-            this.vexel.viewport.zoom = newZoom;
+            const factor = Math.exp(-e.deltaY * 0.0015);
+            this.vexel.zoomAt(factor, mouseX, mouseY);
         } else if (e.shiftKey) {
-            this.vexel.viewport.x -= e.deltaY;
+            this.vexel.panBy(-e.deltaY, 0);
         } else {
-            this.vexel.viewport.x -= e.deltaX;
-            this.vexel.viewport.y -= e.deltaY;
+            this.vexel.panBy(-e.deltaX, -e.deltaY);
         }
-
-        this.vexel.dirty = true;
 
         this._emit('wheel', {
             deltaX: e.deltaX,
@@ -261,12 +257,11 @@ class VexelEventSystem {
 
         if (this.activeTouches.size === 1) {
             const touch = e.touches[0];
-            const fakeEvent = {
+            this._onMouseDown({
                 clientX: touch.clientX,
                 clientY: touch.clientY,
                 button: 0
-            };
-            this._onMouseDown(fakeEvent);
+            });
         } else if (this.activeTouches.size === 2) {
             const touches = [...this.activeTouches.values()];
             this.pinchStartDistance = Math.hypot(
@@ -276,10 +271,9 @@ class VexelEventSystem {
             this.pinchStartZoom = this.vexel.viewport.zoom;
 
             const rect = this.vexel.container.getBoundingClientRect();
-            this.pinchCenter = {
-                x: ((touches[0].clientX + touches[1].clientX) / 2 - rect.left - this.vexel.viewport.x) / this.vexel.viewport.zoom,
-                y: ((touches[0].clientY + touches[1].clientY) / 2 - rect.top - this.vexel.viewport.y) / this.vexel.viewport.zoom
-            };
+            const centerX = (touches[0].clientX + touches[1].clientX) / 2;
+            const centerY = (touches[0].clientY + touches[1].clientY) / 2;
+            this.pinchCenter = this.vexel.screenToWorld(centerX - rect.left, centerY - rect.top);
         }
 
         this._emit('touchstart', {
@@ -293,36 +287,46 @@ class VexelEventSystem {
 
         if (this.activeTouches.size === 1) {
             const touch = e.touches[0];
-            const fakeEvent = {
+            this._onMouseMove({
                 clientX: touch.clientX,
                 clientY: touch.clientY
-            };
-            this._onMouseMove(fakeEvent);
-        } else if (this.activeTouches.size === 2) {
+            });
+            return;
+        }
+
+        if (this.activeTouches.size === 2) {
             const touches = [...this.activeTouches.values()];
             const currentDistance = Math.hypot(
                 touches[0].clientX - touches[1].clientX,
                 touches[0].clientY - touches[1].clientY
             );
 
-            const scale = currentDistance / this.pinchStartDistance;
-            const newZoom = this.pinchStartZoom * scale;
+            if (this.pinchStartDistance > 0) {
+                const scale = currentDistance / this.pinchStartDistance;
+                const targetZoom = this.pinchStartZoom * scale;
 
-            const rect = this.vexel.container.getBoundingClientRect();
-            const cx = (touches[0].clientX + touches[1].clientX) / 2;
-            const cy = (touches[0].clientY + touches[1].clientY) / 2;
+                const rect = this.vexel.container.getBoundingClientRect();
+                const centerX = (touches[0].clientX + touches[1].clientX) / 2 - rect.left;
+                const centerY = (touches[0].clientY + touches[1].clientY) / 2 - rect.top;
 
-            this.vexel.viewport.zoom = Math.max(0.001, Math.min(100, newZoom));
-            this.vexel.viewport.x = cx - rect.left - this.pinchCenter.x * this.vexel.viewport.zoom;
-            this.vexel.viewport.y = cy - rect.top - this.pinchCenter.y * this.vexel.viewport.zoom;
-            this.vexel.dirty = true;
+                const zoom = Math.max(
+                    this.vexel.minZoom,
+                    Math.min(this.vexel.maxZoom, targetZoom)
+                );
 
-            this._emit('pinch', {
-                scale,
-                zoom: this.vexel.viewport.zoom,
-                center: this.pinchCenter,
-                originalEvent: e
-            });
+                this.vexel.setViewport({
+                    zoom,
+                    x: centerX - this.pinchCenter.x * zoom,
+                    y: centerY - this.pinchCenter.y * zoom
+                });
+
+                this._emit('pinch', {
+                    scale,
+                    zoom,
+                    center: this.pinchCenter,
+                    originalEvent: e
+                });
+            }
         }
 
         this._emit('touchmove', {
@@ -366,6 +370,7 @@ class VexelEventSystem {
     _onBlur() {
         this.pointerDown = false;
         this.pointerDragging = false;
+        this.dragStart = null;
         this.activeTouches.clear();
 
         this._emit('blur', {});
@@ -377,7 +382,7 @@ class VexelEventSystem {
         if (e.shiftKey) parts.push('shift');
         if (e.altKey) parts.push('alt');
 
-        let key = e.key.toLowerCase();
+        let key = String(e.key || '').toLowerCase();
         if (key === ' ') key = 'space';
         if (key === 'arrowleft') key = 'left';
         if (key === 'arrowright') key = 'right';
@@ -436,13 +441,13 @@ class VexelEventSystem {
 
     _emit(event, data) {
         if (this.listeners[event]) {
-            for (const callback of this.listeners[event]) {
+            for (const callback of [...this.listeners[event]]) {
                 callback(data);
             }
         }
 
         if (this.listeners['*']) {
-            for (const callback of this.listeners['*']) {
+            for (const callback of [...this.listeners['*']]) {
                 callback(event, data);
             }
         }

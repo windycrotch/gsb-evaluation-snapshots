@@ -763,7 +763,7 @@
 <!-- Dependencies -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/javascript/javascript.min.js"></script>
-<script src="https://cdn.jsdelivr.net/gh/spideythedev/vexel@main/dist/vexel.js"></script>
+<script src="src/vexel.bundle.js"></script>
 
 <script>
 (() => {
@@ -974,8 +974,10 @@ console.log('Shapes:', vex.shapes.length);
   function updateStatus() {
     if (!vex) return;
 
-    elements.shapes.textContent =
-      `${vex.shapes.length} shapes`;
+    const selection = vex.selectedShapes.length;
+    elements.shapes.textContent = selection > 0
+      ? `${vex.shapes.length} shapes · ${selection} selected`
+      : `${vex.shapes.length} shapes`;
 
     elements.zoom.textContent =
       `${Math.round(vex.viewport.zoom * 100)}%`;
@@ -1028,11 +1030,24 @@ console.log('Shapes:', vex.shapes.length);
     vex = new Vexel({
       container: elements.output,
 
+      // The output panel is a flex container that changes size with the
+      // window, so the engine must track its box instead of a fixed size.
+      responsive: true,
+
       width: Math.max(elements.output.clientWidth, 300),
       height: Math.max(elements.output.clientHeight, 200),
 
       grid: false
     });
+
+    // Expose the live engine for debugging and automated acceptance runs.
+    window.vex = vex;
+    window.vexel = vex;
+
+    // Keep the status bar in step with zoom/pan changes coming from the
+    // engine itself (wheel, Alt-drag, ResizeObserver, DPR changes).
+    vex.on('viewportchange', updateStatus);
+    vex.on('selectionchange', updateStatus);
   }
 
   /* Execute */
@@ -1101,14 +1116,9 @@ console.log('Shapes:', vex.shapes.length);
   function resizeEngine() {
     if (!vex) return;
 
-    const width = elements.output.clientWidth;
-    const height = elements.output.clientHeight;
-
-    if (!width || !height) return;
-
-    vex.resize(width, height);
-    vex.dirty = true;
-
+    // Let the engine measure the panel itself: this keeps the canvas CSS box,
+    // the device-pixel backing store and the DPR identical for both layers.
+    vex.resizeToContainer();
     updateStatus();
   }
 
