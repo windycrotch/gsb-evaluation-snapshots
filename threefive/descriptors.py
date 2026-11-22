@@ -6,7 +6,7 @@ from .bitn import Bitn
 from .base import SCTE35Base
 from .segmentation import table20, table22, dvb_table2
 from .upids import upid_map
-from .stuff import red, clean, k_by_v, pif
+from .stuff import red, clean, k_by_v, pif, SCTE35ParseError
 from .xml import Node
 
 
@@ -353,6 +353,12 @@ class SegmentationDescriptor(SpliceDescriptor):
             self.segmentation_duration = self.as_90k(segmentation_duration_ticks)
         self.segmentation_upid_type = bitbin.int(8)
         self.segmentation_upid_length = bitbin.int(8)
+        remaining = bitbin.idx >> 3
+        if self.segmentation_upid_length > remaining:
+            raise SCTE35ParseError(
+                f"segmentation_upid_length {self.segmentation_upid_length} "
+                f"runs past the {remaining} descriptor bytes remaining"
+            )
         the_upid = self._mk_the_upid(bitbin)
         self.segmentation_upid_type_name, self.segmentation_upid = the_upid.decode()
         self.segmentation_type_id = bitbin.int(8)
@@ -481,6 +487,11 @@ class SegmentationDescriptor(SpliceDescriptor):
         }
         sd_attrs = self._xml_sub_segs(sd_attrs)
         sd = Node("SegmentationDescriptor", attrs=sd_attrs, ns=ns)
+        # A cancel descriptor carries no delivery restrictions, UPID,
+        # duration or segmentation fields, so return the bare node
+        # instead of fabricating or crashing over them.
+        if self.segmentation_event_cancel_indicator:
+            return sd
         sd = self._xml_delivery_node(sd, ns)
         comment = f"{upid_map[self.segmentation_upid_type][0]}"
         the_upid = self._mk_the_upid()

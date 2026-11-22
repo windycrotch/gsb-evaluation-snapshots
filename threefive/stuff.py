@@ -20,6 +20,14 @@ ERR = (
     KeyError,
 )
 
+
+class SCTE35ParseError(ValueError):
+    """
+    SCTE35ParseError is raised when a SCTE-35 message
+    is truncated or declares a section/command/descriptor
+    length that runs past the bytes actually present.
+    """
+
 BLUE = "\033[7m"  # \033[44m"
 RED = "\033[107m\033[41m"
 RESET = " \033[0m"

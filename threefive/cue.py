@@ -11,7 +11,7 @@ from .crc import crc32
 from .descriptors import splice_descriptor, descriptor_map, SpliceDescriptor
 from .section import SpliceInfoSection
 from .segmentation import table22
-from .stuff import clean, red, isjson, isxml, pif,  ERR
+from .stuff import clean, red, isjson, isxml, pif,  ERR, SCTE35ParseError
 from .xml2scte35 import xml2cue
 from .xml import Node
 
@@ -77,9 +77,19 @@ class Cue(SCTE35Base):
         then call Cue._descriptor_loop
         """
         while bites:
+            if len(bites) < TWO:
+                raise SCTE35ParseError(
+                    "truncated SCTE-35 section: "
+                    "descriptor_loop_length bytes are missing"
+                )
             dll = (bites[ZERO] << EIGHT) | bites[ONE]
             self.info_section.descriptor_loop_length = dll
             bites = bites[TWO:]
+            if dll > len(bites):
+                raise SCTE35ParseError(
+                    f"descriptor_loop_length {dll} exceeds the "
+                    f"{len(bites)} bytes remaining in this section"
+                )
             self._descriptor_loop(bites[:dll])
             return bites[dll:]
         return False
@@ -105,6 +115,11 @@ class Cue(SCTE35Base):
             red(f"Splice Command type {sct} not recognized")
             return False
         iscl = self.info_section.splice_command_length
+        if iscl > len(bites):
+            raise SCTE35ParseError(
+                f"splice_command_length {iscl} exceeds the "
+                f"{len(bites)} bytes remaining in this section"
+            )
         cmd_bites = bites[:iscl]
         self.command = command_map[sct](cmd_bites)
         self.command.command_length = iscl
@@ -123,30 +138,64 @@ class Cue(SCTE35Base):
             return True
         return False
 
+    def check_crc(self):
+        """
+        check_crc recomputes the CRC32 over self.bites
+        (excluding the trailing four CRC bytes) and compares
+        it against the CRC stored in the section.
+        Returns True when they match.
+        """
+        if not self.bites or len(self.bites) <= FOUR:
+            return False
+        stored = int.from_bytes(self.bites[MINUSONE * FOUR :], byteorder="big")
+        return crc32(self.bites[: MINUSONE * FOUR]) == stored
+
     def decode(self):
         """
         Cue.decode() parses for SCTE35 data
 
         * decode doesn't need to be called directly
 
+        returns True when a complete section was parsed,
+        raises SCTE35ParseError when the section is
+        truncated or has out-of-bounds lengths.
         """
         bites = self.bites
         self.descriptors = []
         while bites:
             bites = self.decode_info_section(bites)
+            if bites is False:
+                raise SCTE35ParseError("truncated SCTE-35 splice info section")
             bites = self._decode_splice_command(bites)
+            if bites is False:
+                raise SCTE35ParseError("truncated SCTE-35 splice command")
             bites = self._decode_descriptors(bites)
-            return self._decode_crc(bites)
+            if bites is False:
+                raise SCTE35ParseError("truncated SCTE-35 descriptor loop")
+            self._decode_crc(bites)
+            return True
         return False
 
     def _descriptor_loop(self, loop_bites):
         """
-        Cue._descriptor_loop parses all splice descriptors
+        Cue._descriptor_loop parses all splice descriptors.
+        Each descriptor's declared descriptor_length must fit
+        inside the descriptor loop, otherwise SCTE35ParseError
+        is raised instead of silently dropping data.
         """
         tag_n_len = TWO
-        while len(loop_bites) > tag_n_len:
+        while loop_bites:
+            if len(loop_bites) < tag_n_len:
+                raise SCTE35ParseError(
+                    "truncated splice descriptor: tag and length bytes are missing"
+                )
             dlen = loop_bites[1]
             sd_size = tag_n_len + dlen  # spliced.descriptor_length
+            if sd_size > len(loop_bites):
+                raise SCTE35ParseError(
+                    f"splice descriptor_length {dlen} runs past the "
+                    f"{len(loop_bites)} bytes of the descriptor loop"
+                )
             spliced = splice_descriptor(loop_bites[:sd_size])
             loop_bites = loop_bites[sd_size:]
             del spliced.bites

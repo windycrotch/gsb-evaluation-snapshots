@@ -4,11 +4,13 @@ Mpeg-TS Stream parsing class
 """
 
 import sys
+from collections import deque
+from hashlib import blake2b
 from .cue import Cue
 from .new_reader import reader
 from .packetdata import PacketData
 from .streamtypes import streamtype_map
-from .stuff import ERR, print2
+from .stuff import ERR, print2, red, SCTE35ParseError
 
 
 def show_cue(cue):
@@ -134,6 +136,12 @@ class Stream(Based):
     PACKET_SIZE = 188
     SYNC_BYTE = 0x47
     MIN_PMT_COUNT = 16
+    # SCTE-35 splice_info_section: section_length is 12 bits and
+    # covers everything after the section_length field (max 4093).
+    MAX_SECTION_LENGTH = 4093
+    # how many recently delivered section hashes to remember for
+    # duplicate suppression.
+    DEDUP_SIZE = 128
     # tids
     PMT_TID = b"\x02"
     SCTE35_TID = b"\xfc"
@@ -170,6 +178,10 @@ class Stream(Based):
         self.pmt_pkt = None
         self.pat_pkt = None
         self.shush = False
+        # bounded set of hashes of already delivered SCTE-35
+        # sections, used to drop duplicate messages.
+        self._cue_hashes = set()
+        self._cue_hash_order = deque(maxlen=self.DEDUP_SIZE)
 
     @staticmethod
     def as_90k(ticks):
@@ -362,19 +374,15 @@ class Stream(Based):
         Stream.decode reads self.tsdata to find SCTE35 packets.
         func can be set to a custom function that accepts
         a scte35.Cue instance as it's only argument.
-        The method is written this way for speed.
+
+        decode, decode_next and decoderator all parse packets
+        through Stream.parse and share the same cross-packet
+        reassembly, error skipping and duplicate suppression.
         """
-        while pkt := self._tsdata.read(self.PACKET_SIZE):
-            pid = self._parse_pid(pkt[1], pkt[2])
-            if pid in self.pids.pcr:
-                if pkt[1] & 0x40:
-                    self._parse_pts(pkt, pid)
-            if pid in self.pids.tables:
-                self._parse_tables(pkt, pid)
-            if pid in self.pids.scte35 or pid in self.pids.maybe_scte35:
-                cue = self._parse_scte35(pkt, pid)
-                if cue:
-                    func(cue)
+        for pkt in self.iter_pkts():
+            cue = self.parse(pkt)
+            if cue:
+                func(cue)
         return False
 
     def decode_next(self):
@@ -612,11 +620,27 @@ class Stream(Based):
         return self.parse(pkt)
 
     def _chk_partial(self, pay, pid, sep):
+        """
+        _chk_partial joins payload bytes that belong to a section
+        split across multiple TS packets.
+
+        A new section start (payload_unit_start_indicator, signaled
+        by the separator being present) discards any previously
+        buffered, never-completed section for this pid. Without this,
+        a lost continuation packet would corrupt every following
+        message on the pid.
+        """
         if pid in self.maps.partial:
-            pay2 = self.maps.partial.pop(pid) + pay
-        else:
-            pay2 = pay
-        return self._split_by_idx(pay2, sep)
+            if sep in pay:
+                # a fresh section starts; the old one never completed.
+                self.maps.partial.pop(pid)
+                red(
+                    f"Skipping incomplete SCTE-35 message on pid {pid}: "
+                    "a new section started before it was reassembled"
+                )
+            else:
+                pay = self.maps.partial.pop(pid) + pay
+        return self._split_by_idx(pay, sep)
 
     def _same_as_last(self, pay, pid):
         last = False
@@ -625,19 +649,69 @@ class Stream(Based):
         self.maps.last[pid] = pay
         return last == pay
 
+    def _drop_partial(self, pid, reason):
+        """
+        _drop_partial discards a half-reassembled section and
+        records why, so one bad message can't stall the pid.
+        """
+        self.maps.partial.pop(pid, None)
+        red(f"Skipping SCTE-35 message on pid {pid}: {reason}")
+        return False
+
     def _section_incomplete(self, pay, pid, seclen):
+        """
+        _section_incomplete buffers a section whose bytes have not
+        all arrived yet. Returns True while waiting for more packets.
+        Invalid lengths are rejected instead of being buffered.
+        """
         # + 3 for the bytes before section starts
-        if len(pay) > (seclen + 3):
-            return False
+        if seclen > self.MAX_SECTION_LENGTH:
+            return self._drop_partial(
+                pid, f"section_length {seclen} exceeds maximum"
+            )
         if (seclen + 3) > len(pay):
+            if len(pay) > self.MAX_SECTION_LENGTH + 3:
+                return self._drop_partial(
+                    pid,
+                    f"section_length {seclen} not satisfied by "
+                    f"{len(pay) - 3} buffered bytes",
+                )
             self.maps.partial[pid] = pay
             return True
+        return False
+
+    def _is_duplicate(self, pay):
+        """
+        _is_duplicate tracks hashes of fully reassembled SCTE-35
+        sections. A section whose bytes were already delivered is
+        reported as a duplicate and emitted only once.
+
+        A 64 bit blake2b digest (deterministic across runs) is used
+        rather than the on-wire CRC, which is only 24 bits here and
+        collides far too often for dedup.
+        """
+        cue_hash = int.from_bytes(
+            blake2b(bytes(pay), digest_size=8).digest(), byteorder="big"
+        )
+        if cue_hash in self._cue_hashes:
+            return True
+        if len(self._cue_hash_order) == self.DEDUP_SIZE:
+            self._cue_hashes.discard(self._cue_hash_order[0])
+        self._cue_hash_order.append(cue_hash)
+        self._cue_hashes.add(cue_hash)
         return False
 
     def _parse_cue(self, pay, pid):
         packet_data = None
         packet_data = self._mk_packet_data(pid)
-        cue = Cue(pay, packet_data)
+        try:
+            cue = Cue(pay, packet_data)
+        except SCTE35ParseError as err:
+            red(f"Skipping malformed SCTE-35 message on pid {pid}: {err}")
+            return False
+        except ERR as err:
+            red(f"Skipping unparseable SCTE-35 message on pid {pid}: {err}")
+            return False
         if cue:
             return cue
         return False
@@ -694,9 +768,15 @@ class Stream(Based):
 
     def _parse_scte35(self, pkt, pid):
         """
-        parse a threefive cue from one or more packets
+        parse a threefive cue from one or more packets.
+
+        Sections split across several 188 byte packets are
+        reassembled here. A section that never completes, or
+        one whose lengths run past its bytes, is skipped without
+        raising, and the same reassembled message is only
+        delivered once.
         """
-        if self.the_scte35_pids:  
+        if self.the_scte35_pids:
             if pid not in self.the_scte35_pids:
                 return False
         if pid in self.pids.id3:
@@ -705,11 +785,21 @@ class Stream(Based):
             pay = self._mk_scte35_payload(pkt, pid)
         if not pay:
             return False
+        if len(pay) < 3:
+            return self._drop_partial(pid, "section header is truncated")
         seclen = self._parse_length(pay[1], pay[2])
+        if seclen < 1:
+            return self._drop_partial(pid, f"invalid section_length {seclen}")
         if self._section_incomplete(pay, pid, seclen):
             return False
         pay = pay[: seclen + 3]
+        if self._is_duplicate(pay):
+            red(f"Skipping duplicate SCTE-35 message on pid {pid}")
+            return False
         cue = self._parse_cue(pay, pid)
+        if not cue:
+            # parsing failed; make sure no stale partial survives
+            self.maps.partial.pop(pid, None)
         return cue
 
     def _mk_pinfo(self, service_id, pn, sn):
