@@ -136,6 +136,56 @@ synth.noteOn(0, 60, 100);
 // You can also decode instrument data from a bank
 const decoded = decodeInstrument(bytes);
 ```
+
+### Atomic Channel Programming
+
+Direct `rawOPL3()` writes are applied one register at a time, so an invalid
+parameter or a mid-sequence failure can leave a channel half-programmed
+(dumb notes, leftover noise, cross-channel bleed). The `opl3-channel` module
+wraps a channel programming request in an all-or-nothing transaction:
+
+```javascript
+import { AdlMidiCore } from 'libadlmidi-js/core';
+import { createRawOPL3Writer, programChannel } from 'libadlmidi-js/opl3-channel';
+import { channelMask } from 'libadlmidi-js/opl3';
+
+const synth = await AdlMidiCore.create({ corePath: './libadlmidi.nuked.core.js' });
+synth.init(44100);
+synth.reserveChipChannels(0, channelMask(0)); // keep the MIDI allocator away
+
+// One writer per chip; serializes transactions and tracks register state.
+const writer = createRawOPL3Writer(synth, 0);
+
+const result = await programChannel(writer, {
+    instrument,   // 2-op ADL instrument
+    channel: 0,   // 0-17
+    fnum: 512,    // optional: 0-1023
+    block: 4,     // optional: 0-7 (required together with fnum)
+    keyOn: true,  // optional: set the key-on bit on the B0 write
+});
+
+if (!result.ok) {
+    // 'rejected'      -> validation failed before any write (chip untouched)
+    // 'commit_failed' -> a write threw; pre-call state was rolled back
+    // 'rollback_failed' -> rollback also failed; details in result.rollbackErrors
+    console.error(result.code, result.error);
+}
+```
+
+Guarantees:
+
+- **Validate before write**: channel (0-17), fnum (0-1023), block (0-7) and
+  every register address (0x000-0x1FF) are checked and all bytes encoded
+  before the chip is touched, so a rejected request leaves no trace.
+- **Atomic commit with rollback**: if the underlying writer throws mid-batch,
+  the registers already written are restored from a pre-commit snapshot;
+  rollback failures are reported per register, never swallowed.
+- **Concurrency isolation**: requests through one writer execute serially via
+  an internal mutex, so interleaved programming of different channels can
+  never split or overwrite each other's register sets.
+- **Idempotent replay**: replaying the identical request performs zero
+  physical writes once the shadow state matches.
+
 ## Profiles
 
 | Profile | Emulator(s) | Usage |

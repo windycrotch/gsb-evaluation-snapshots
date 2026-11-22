@@ -22,6 +22,10 @@
       "types": "./dist/utils/opl3.d.ts",
       "import": "./src/utils/opl3.js"
     },
+    "./opl3-channel": {
+      "types": "./dist/utils/opl3-channel.d.ts",
+      "import": "./src/utils/opl3-channel.js"
+    },
     "./nuked": {
       "types": "./dist/profiles/nuked.d.ts",
       "import": "./src/profiles/nuked.js"
