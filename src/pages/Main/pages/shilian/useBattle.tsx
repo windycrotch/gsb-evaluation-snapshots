@@ -77,9 +77,11 @@ export function useBattle(
     setCombatTimer,
     setGuajiTimer,
     setAutoBattleTimer,
+    setManagedTimeout,
     clearCombatTimer,
     clearGuajiTimer,
-    clearAutoBattleTimer
+    clearAutoBattleTimer,
+    clearManagedTimeouts
   } = useBattleTimer();
   const [guajiStats, setGuajiStats] = useState<{
     totalRounds: number;
@@ -197,6 +199,24 @@ export function useBattle(
       df: df.name
     };
   }, [df.jingjie, df.name, get, set]);
+
+  const MAX_LOG_SIZE = 100;
+  const MAX_HISTORY_SIZE = 50;
+
+  /**
+   * 战斗会话生命周期
+   *
+   * sessionIdRef：当前战斗会话标识。每次“探索”生成新妖兽时 +1，
+   * 0 表示尚未探索。所有定时回调（回合推进、自动开战、挂机调度、
+   * 延迟清理实例）都必须携带会话标识并在执行前校验，过期会话的
+   * 回调不得再修改气血、日志、奖励或妖兽实例。
+   *
+   * sessionEndedRef：当前会话是否已结算（胜利/失败/遁逃）。
+   * 胜利结算与失败结算通过它保证同一会话只执行一次。
+   */
+  const sessionIdRef = useRef(0);
+  const sessionEndedRef = useRef(true);
+  const [battleSessionId, setBattleSessionId] = useState(0);
   const [YaoShouInstance, setYaoShouInstance] = useState<YaoShouZDType | null>(
     null
   );
@@ -209,13 +229,9 @@ export function useBattle(
     end: true,
     can: false
   });
-  const MAX_LOG_SIZE = 100;
-  const MAX_HISTORY_SIZE = 50;
-  const endRef = useRef(HuiheState.end);
   const guajiLockRef = useRef(false);
   const [sessionLoot, setSessionLoot] = useState<Record<string, number>>({});
   useEffect(() => () => setSessionLoot({}), []);
-  const fightSeqRef = useRef(0);
   const [yaoshouMaxQixue, setYaoshouMaxQixue] = useState(0);
   const [actorDamage, setActorDamage] = useState<{
     value: number;
@@ -232,16 +248,30 @@ export function useBattle(
   useEffect(() => {
     isGuajiRef.current = isGuaji;
   }, [isGuaji]);
-  const guardClear = useCallback(
-    (seq: number, fn: () => void, delay = 1200) => {
-      setTimeout(() => {
-        if (fightSeqRef.current === seq) {
-          fn();
-        }
-      }, delay);
-    },
+
+  const isCurrentSession = useCallback(
+    (sessionId: number) =>
+      sessionId !== 0 && sessionIdRef.current === sessionId,
     []
   );
+  const isSessionLive = useCallback(
+    (sessionId: number) =>
+      isCurrentSession(sessionId) && !sessionEndedRef.current,
+    [isCurrentSession]
+  );
+
+  /** 会话级延迟任务：过期会话的回调一律不执行，会话切换时整体作废 */
+  const sessionTimeout = useCallback(
+    (sessionId: number, fn: () => void, delay: number) => {
+      const cancel = setManagedTimeout(() => {
+        if (!isCurrentSession(sessionId)) return;
+        fn();
+      }, delay);
+      return cancel;
+    },
+    [setManagedTimeout, isCurrentSession]
+  );
+
   const pushLog = useCallback((text: ReactNode) => {
     setHuiheState((v) => ({
       ...v,
@@ -251,9 +281,18 @@ export function useBattle(
   const endHuiheState = useCallback(() => {
     setHuiheState((v) => ({ ...v, can: false, end: true, target: 0 }));
   }, []);
+
   const endBattle = useCallback(
-    (result: 'win' | 'lose', rounds: number, ys: YaoShouZDType | null) => {
+    (
+      sessionId: number,
+      result: 'win' | 'lose',
+      rounds: number,
+      ys: YaoShouZDType | null
+    ) => {
+      if (!isCurrentSession(sessionId) || sessionEndedRef.current) return;
+      sessionEndedRef.current = true;
       clearCombatTimer();
+      clearAutoBattleTimer();
       endHuiheState();
       if (isGuajiRef.current) {
         setGuajiStats((s) => ({
@@ -272,14 +311,26 @@ export function useBattle(
         }));
         currentGuajiFightRoundsRef.current = 0;
       }
-      guardClear(fightSeqRef.current, () => {
-        setYaoShouInstance(null);
-        setYaoshouMaxQixue(0);
-      });
+      // 延迟清理妖兽实例；若期间开启了新会话，回调因会话标识不匹配自动作废
+      sessionTimeout(
+        sessionId,
+        () => {
+          setYaoShouInstance(null);
+          setYaoshouMaxQixue(0);
+        },
+        1200
+      );
       setActorInstance(null);
     },
-    [endHuiheState, guardClear, clearCombatTimer]
+    [
+      isCurrentSession,
+      clearCombatTimer,
+      clearAutoBattleTimer,
+      endHuiheState,
+      sessionTimeout
+    ]
   );
+
   const syncBattleAchievements = useCallback(
     (winStreak: number) => {
       const currentAchievementData = get('chengjiu') || {
@@ -300,8 +351,11 @@ export function useBattle(
     },
     [get, set]
   );
+
   const applyWinReward = useCallback(
-    (ys: YaoShouZDType) => {
+    (sessionId: number, ys: YaoShouZDType) => {
+      // 同一会话胜利只结算一次：会话失效或已结算直接拦截
+      if (!isSessionLive(sessionId)) return;
       const clData = {
         name: ys.cl,
         isPile: true,
@@ -421,7 +475,6 @@ export function useBattle(
         ...prev,
         [clData.name]: (prev[clData.name] || 0) + clData.num!
       }));
-      endBattle('win', currentGuajiFightRoundsRef.current, ys);
       const newWinStreak = (get('winStreak') || 0) + 1;
       syncBattleAchievements(newWinStreak);
       checkShilianAchievements(
@@ -434,9 +487,20 @@ export function useBattle(
         lv: get('lv'),
         jingjie: get('jingjie')
       });
+      // 战利品与成就计数全部在同一会话内只发一次后，再做会话收尾
+      endBattle(sessionId, 'win', currentGuajiFightRoundsRef.current, ys);
     },
-    [get, set, pushLog, endBattle, syncBattleAchievements, df.name]
+    [
+      isSessionLive,
+      get,
+      set,
+      pushLog,
+      syncBattleAchievements,
+      endBattle,
+      df.name
+    ]
   );
+
   const zhandouLogic = useCallback(
     (zd1: YaoShouZDType | ActorZDType, zd2: YaoShouZDType | ActorZDType) => {
       const { isCrit, damage, fashuBonus, defender } = calcZhanDouHit(zd1, zd2);
@@ -508,55 +572,69 @@ export function useBattle(
     [pushLog]
   );
 
-  const zhandou = useCallback(() => {
-    if (ActorInstance && YaoShouInstance) {
-      if (ActorInstance.qixue <= 0) {
-        pushLog(<>势尽力竭，你踉跄后退终究倒下。眼前一黑，此战以败收场…</>);
-        endBattle('lose', currentGuajiFightRoundsRef.current, YaoShouInstance);
-        syncBattleAchievements(0);
-        return;
+  const zhandou = useCallback(
+    (sessionId: number) => {
+      // 过期会话或已结算的会话，回合回调不得再触碰任何战斗状态
+      if (!isSessionLive(sessionId)) return;
+      const actor = ActorInstance;
+      const ys = YaoShouInstance;
+      if (actor && ys) {
+        if (actor.qixue <= 0) {
+          pushLog(<>势尽力竭，你踉跄后退终究倒下。眼前一黑，此战以败收场…</>);
+          syncBattleAchievements(0);
+          endBattle(sessionId, 'lose', currentGuajiFightRoundsRef.current, ys);
+          return;
+        }
+        if (ys.qixue <= 0) {
+          applyWinReward(sessionId, ys);
+          return;
+        }
+        if (!HuiheState.target) {
+          const nextYs = zhandouLogic(actor, ys);
+          setYaoShouInstance(nextYs as YaoShouZDType);
+          setHuiheState((v) => ({ ...v, target: 1, huihe: v.huihe + 1 }));
+        } else {
+          const nextActor = zhandouLogic(ys, actor);
+          setActorInstance(nextActor as ActorZDType);
+          setHuiheState((v) => ({ ...v, target: 0, huihe: v.huihe + 1 }));
+        }
+        if (isGuajiRef.current) {
+          currentGuajiFightRoundsRef.current += 1;
+        }
       }
-      if (YaoShouInstance.qixue <= 0) {
-        applyWinReward(YaoShouInstance);
-        return;
-      }
-      if (!HuiheState.target) {
-        const ys = zhandouLogic(ActorInstance, YaoShouInstance);
-        setYaoShouInstance(ys as YaoShouZDType);
-        setHuiheState((v) => ({ ...v, target: 1, huihe: v.huihe + 1 }));
-      } else {
-        const ac = zhandouLogic(YaoShouInstance, ActorInstance);
-        setActorInstance(ac as ActorZDType);
-        setHuiheState((v) => ({ ...v, target: 0, huihe: v.huihe + 1 }));
-      }
-      if (isGuajiRef.current) {
-        currentGuajiFightRoundsRef.current += 1;
-      }
-    }
-  }, [
-    ActorInstance,
-    HuiheState.target,
-    YaoShouInstance,
-    pushLog,
-    endBattle,
-    zhandouLogic,
-    syncBattleAchievements,
-    applyWinReward
-  ]);
+    },
+    [
+      isSessionLive,
+      ActorInstance,
+      YaoShouInstance,
+      HuiheState.target,
+      pushLog,
+      endBattle,
+      zhandouLogic,
+      syncBattleAchievements,
+      applyWinReward
+    ]
+  );
 
   const handleSearchYaoShou = useCallback(() => {
     if (get('shenshi') <= 0) {
       JXToast('你没有足够的精神！').show();
       return;
     }
-    if (!HuiheState.end) {
+    if (!sessionEndedRef.current) {
       JXToast('请先解决当前的妖兽！').show();
       return;
     }
 
-    const newYaoShou = genYaoShou();
+    // 新会话：作废上一场遗留的延迟回调与自动开战定时器
+    clearManagedTimeouts();
+    clearAutoBattleTimer();
+    const newSessionId = sessionIdRef.current + 1;
+    sessionIdRef.current = newSessionId;
+    sessionEndedRef.current = false;
+    setBattleSessionId(newSessionId);
 
-    fightSeqRef.current += 1;
+    const newYaoShou = genYaoShou();
     setYaoShouInstance(newYaoShou);
     setYaoshouMaxQixue(newYaoShou.qixue);
     const ls = get('lingShou');
@@ -574,37 +652,45 @@ export function useBattle(
       fashu: total.fashu
     });
 
-    setHuiheState((prev) => ({
-      ...prev,
+    currentGuajiFightRoundsRef.current = 0;
+    setHuiheState({
+      guaji: isGuajiRef.current,
+      huihe: 0,
       can: false,
+      target: 0,
       logs: [{ text: `你发现了${newYaoShou.name}，它似乎也发现了你` }],
       end: false
-    }));
+    });
     set('shenshi', get('shenshi') - 1);
-  }, [HuiheState.end, genYaoShou, get, set]);
+  }, [genYaoShou, get, set, clearManagedTimeouts, clearAutoBattleTimer]);
 
+  const startBattle = useCallback(
+    (sessionId: number) => {
+      if (!isSessionLive(sessionId)) return;
+      if (!ActorInstance || !YaoShouInstance) {
+        JXToast('请先探索妖兽！').show();
+        return;
+      }
+      if (!HuiheState.can) {
+        const first =
+          (ActorInstance?.sudu || 0) >= (YaoShouInstance?.sudu || 0) ? 0 : 1;
+        setHuiheState((v) => ({ ...v, can: true, target: first }));
+        zhandou(sessionId);
+      } else {
+        JXToast('战斗进行中，请稍候！').show();
+      }
+    },
+    [ActorInstance, YaoShouInstance, HuiheState.can, zhandou, isSessionLive]
+  );
+  // UI 入口不接受参数，避免 DOM 事件对象被当成会话标识
   const handleStartZD = useCallback(() => {
-    if (!ActorInstance || !YaoShouInstance) {
-      JXToast('请先探索妖兽！').show();
-      return;
-    }
-    if (!HuiheState.can) {
-      const first =
-        (ActorInstance?.sudu || 0) >= (YaoShouInstance?.sudu || 0) ? 0 : 1;
-      setHuiheState({
-        ...HuiheState,
-        can: true,
-        target: first
-      });
-      zhandou();
-    } else {
-      JXToast('战斗进行中，请稍候！').show();
-    }
-  }, [ActorInstance, YaoShouInstance, HuiheState, zhandou]);
+    startBattle(sessionIdRef.current);
+  }, [startBattle]);
 
   const handleEscape = useCallback(() => {
-    const noBattle = HuiheState.end || (!ActorInstance && !YaoShouInstance);
-    if (noBattle) {
+    const sessionId = sessionIdRef.current;
+    // 未在进行中的会话不允许遁逃；已结算（含胜利结算瞬间）的回调直接拦截
+    if (!isSessionLive(sessionId)) {
       JXToast('当前未与妖兽交手，无需遁逃').show();
       return;
     }
@@ -613,7 +699,10 @@ export function useBattle(
       JXToast('神识不足，无法遁逃').show();
       return;
     }
+    // 先标记会话结束，后续任何延迟的胜利/失败回调都会被拦截，不会再发战利品
+    sessionEndedRef.current = true;
     clearCombatTimer();
+    clearAutoBattleTimer();
     const baseCost = Math.max(
       2,
       Math.min(10, Math.round(((YaoShouInstance?.xw || 0) as number) / 150))
@@ -633,8 +722,10 @@ export function useBattle(
       </>
     );
     endHuiheState();
-    guardClear(
-      fightSeqRef.current,
+    currentGuajiFightRoundsRef.current = 0;
+    // 遁逃不发战利品、不计挂机胜负；清理双方实例，会话失效后回调自动作废
+    sessionTimeout(
+      sessionId,
       () => {
         setYaoShouInstance(null);
         setYaoshouMaxQixue(0);
@@ -646,15 +737,15 @@ export function useBattle(
       setGuaji(false);
     }
   }, [
-    ActorInstance,
-    HuiheState.end,
     YaoShouInstance,
     get,
     set,
-    guardClear,
+    isSessionLive,
+    clearCombatTimer,
+    clearAutoBattleTimer,
     pushLog,
     endHuiheState,
-    clearCombatTimer
+    sessionTimeout
   ]);
 
   const handleSearchYaoShouRef = useRef(handleSearchYaoShou);
@@ -666,11 +757,13 @@ export function useBattle(
     getRef.current = get;
   }, [get]);
 
+  // 回合推进：interval 回调在触发时读取当前会话标识，
+  // 保证同一次“开战→推进”批次内拿到的是探索时写入的新会话；
+  // 会话切换后旧 interval 会被清理，过期回调即使残留也会被会话守卫拦截
   useEffect(() => {
-    clearCombatTimer();
     if (HuiheState.can && ActorInstance && YaoShouInstance) {
       setCombatTimer(() => {
-        zhandou();
+        zhandou(sessionIdRef.current);
       }, 800);
     }
     return clearCombatTimer;
@@ -684,10 +777,6 @@ export function useBattle(
   ]);
 
   useEffect(() => {
-    endRef.current = HuiheState.end;
-  }, [HuiheState.end]);
-
-  useEffect(() => {
     if (!ActorInstance) {
       setActorDamage(null);
     }
@@ -696,6 +785,7 @@ export function useBattle(
     }
   }, [ActorInstance, YaoShouInstance]);
 
+  // 挂机调度：只在没有进行中的会话时探索；神识为 0 时先让当前战斗正常收尾
   useEffect(() => {
     if (!isGuaji) {
       clearGuajiTimer();
@@ -703,7 +793,8 @@ export function useBattle(
     }
     const run = () => {
       if (guajiLockRef.current) return;
-      if (!endRef.current) return;
+      // 仍有未结束的战斗：等待其正常结算，不能中途丢弃实例
+      if (!sessionEndedRef.current) return;
       const shen = getRef.current('shenshi');
       if (shen <= 0) {
         setGuaji(false);
@@ -711,17 +802,18 @@ export function useBattle(
         return;
       }
       guajiLockRef.current = true;
-      endRef.current = false;
       handleSearchYaoShouRef.current();
-      setTimeout(() => {
+      // 挂机锁释放只复位一个 ref，使用受托管 timeout 保证卸载后不触发即可
+      setManagedTimeout(() => {
         guajiLockRef.current = false;
       }, 300);
     };
     run();
     setGuajiTimer(run, 1500);
     return clearGuajiTimer;
-  }, [isGuaji, clearGuajiTimer, setGuajiTimer]);
+  }, [isGuaji, clearGuajiTimer, setGuajiTimer, setManagedTimeout]);
 
+  // 自动开战：回调携带会话标识，过期会话不再自动开战
   useEffect(() => {
     if (
       isGuaji &&
@@ -731,7 +823,7 @@ export function useBattle(
       YaoShouInstance
     ) {
       setAutoBattleTimer(() => {
-        handleStartZD();
+        startBattle(sessionIdRef.current);
       }, 800);
     }
     return clearAutoBattleTimer;
@@ -741,7 +833,7 @@ export function useBattle(
     HuiheState.end,
     ActorInstance,
     YaoShouInstance,
-    handleStartZD,
+    startBattle,
     setAutoBattleTimer,
     clearAutoBattleTimer
   ]);
@@ -750,6 +842,7 @@ export function useBattle(
     isGuaji,
     setGuaji,
     guajiStats,
+    battleSessionId,
     YaoShouInstance,
     ActorInstance,
     HuiheState,
