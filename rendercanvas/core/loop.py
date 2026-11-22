@@ -167,7 +167,15 @@ class BaseLoop:
         )
 
     def _loop_start_detection_callback(self):
-        if self.__state != LoopState.off:
+        # This callback is queued during (re-)initialization. It detects that
+        # the backend's native loop has started without going through run()
+        # (state 'ready' -> 'active'). Only act on a 'ready' loop:
+        # * 'running' is set by run() itself, so no detection is needed there.
+        # * 'interactive' is marked from _rc_init().
+        # * 'off' means the loop was stopped (possibly after this callback was
+        #   already queued). Flipping it back to 'active' here would resurrect
+        #   a stopped loop, so a stale callback must leave the 'off' state alone.
+        if self.__state == LoopState.ready:
             self.__start()
 
     def add_task(
@@ -316,7 +324,11 @@ class BaseLoop:
         try:
             self._rc_run()
         finally:
-            # Mark state as not 'running', but also not to 'off', that happens elsewhere.
+            # Mark state as not 'running'. If the backend stopped itself (or
+            # was stopped from a callback) while inside _rc_run(), the state is
+            # already 'off'; leave it as such instead of resurrecting the loop
+            # into 'active'. Otherwise the loop merely paused while its native
+            # event loop keeps running, which is the 'active' state.
             if self.__state == LoopState.running:
                 self.__state = LoopState.active
             if need_unregister:

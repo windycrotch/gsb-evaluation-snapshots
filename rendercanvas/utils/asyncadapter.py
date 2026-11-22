@@ -40,11 +40,14 @@ class Event:
 
     def __init__(self):
         self._is_set = False
+        self._is_closed = False
         self._tasks = []
 
     def __repr__(self):
-        set = "set" if self._is_set else "unset"
-        return f"<{self.__module__}.{self.__class__.__name__} object ({set}) at {hex(id(self))}>"
+        state = "set" if self._is_set else "unset"
+        if self._is_closed:
+            state += "-closed"
+        return f"<{self.__module__}.{self.__class__.__name__} object ({state}) at {hex(id(self))}>"
 
     async def wait(self):
         if self._is_set:
@@ -56,13 +59,39 @@ class Event:
         yield {"wait_method": "event", "event": self}
 
     def _add_task(self, task):
+        # A task that is already done (e.g. cancelled when its loop stopped)
+        # must never be re-attached. Reviving it on a later set() would
+        # schedule a dead task's step-callback in a fresh loop iteration,
+        # producing ghost callbacks and duplicated work.
+        if task.coro is None or task.cancelled:
+            return
         self._tasks.append(task)
 
     def set(self):
         self._is_set = True
-        for task in self._tasks:
-            task.call_step_later(0)
+        tasks = self._tasks
         self._tasks = []
+        for task in tasks:
+            # Skip tasks that were cancelled or closed while waiting.
+            if task.coro is None or task.cancelled:
+                continue
+            task.call_step_later(0)
+
+    def close(self):
+        """Wake up every task currently waiting, without marking the event set.
+
+        Used to release waiters when the thing they are waiting for can no
+        longer happen (e.g. a canvas is closing). Unlike ``set()``, a later
+        ``wait()`` on a closed event still suspends, so this cannot be confused
+        with a successful completion.
+        """
+        self._is_closed = True
+        tasks = self._tasks
+        self._tasks = []
+        for task in tasks:
+            if task.coro is None or task.cancelled:
+                continue
+            task.call_step_later(0)
 
 
 class CancelledError(BaseException):
@@ -101,6 +130,11 @@ class Task:
         self._done_callbacks.clear()
 
     def call_step_later(self, delay):
+        # Once the task is closed it must not schedule any further callbacks.
+        # This prevents a stopped task from leaving ghost callbacks that could
+        # fire after the loop is stopped and restarted.
+        if self.coro is None:
+            return
         self._call_later(delay, self._step_cb)
 
     def cancel(self):

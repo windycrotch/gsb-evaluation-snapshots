@@ -67,6 +67,62 @@ def test_event():
     assert 0.09 < sleep_time2 < 0.20
 
 
+def test_event_close_releases_waiter_without_setting():
+    # Event.close() must wake a waiting task but must not mark the event set.
+    from rendercanvas.offscreen import StubLoop
+
+    loop = StubLoop()
+    event = asyncadapter.Event()
+    woke = []
+
+    async def waiter():
+        await event.wait()
+        woke.append(event._is_set)
+
+    task = asyncadapter.Task(
+        loop._unchecked_call_later_for_tasks, waiter(), "waiter"
+    )
+    loop.run()  # task parks on the event
+    assert task.coro is not None  # still suspended
+
+    event.close()
+    loop.run()  # the closed event releases the task
+
+    assert task.coro is None  # task completed
+    assert woke == [False]  # it was a cancellation, not a successful set
+    assert "closed" in repr(event)
+
+
+def test_closed_task_is_not_resurrected_by_event_set():
+    # A task cancelled while waiting must never be revived by a later set(),
+    # which would schedule a ghost callback (the double-fps / zombie mechanism).
+    from rendercanvas.offscreen import StubLoop
+
+    loop = StubLoop()
+    event = asyncadapter.Event()
+
+    async def waiter():
+        await event.wait()
+
+    task = asyncadapter.Task(
+        loop._unchecked_call_later_for_tasks, waiter(), "waiter"
+    )
+    loop.run()  # parks on the event
+    assert task.coro is not None
+
+    # Simulate the loop stopping: cancel the task and run one step to close it.
+    task.cancel()
+    task.step()
+    assert task.coro is None
+    pending_before = len(loop._callbacks)
+
+    # A (stale) completion signal must not re-schedule the dead task.
+    event.set()
+    assert len(loop._callbacks) == pending_before
+
+
 if __name__ == "__main__":
     test_sleep()
     test_event()
+    test_event_close_releases_waiter_without_setting()
+    test_closed_task_is_not_resurrected_by_event_set()

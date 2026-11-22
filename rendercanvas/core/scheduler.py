@@ -75,6 +75,18 @@ class Scheduler:
         else:
             return canvas
 
+    def _cancel_pending_frame(self):
+        """Release a frame that the scheduler is (or may be) waiting for.
+
+        Safe to call when no frame is in flight. Used when the canvas closes
+        or its loop stops, so the scheduler task cannot be left awaiting an
+        event that will never be set.
+        """
+        if self._ready_for_present is not None:
+            # Wake any waiting task without marking the frame as presented.
+            self._ready_for_present.close()
+            self._ready_for_present = None
+
     def set_update_mode(self, update_mode, *, min_fps=None, max_fps=None):
         update_mode = str(update_mode)
         if update_mode not in UpdateMode:
@@ -116,6 +128,12 @@ class Scheduler:
         await sleep(0.02)
 
         while True:
+            # If the canvas is closed (or gone), stop ticking. Checking before
+            # the sleep ensures a task whose canvas closed while it was waiting
+            # on an event exits promptly instead of sleeping on a dead canvas.
+            if self.get_canvas() is None:
+                break
+
             # Determine delay
             if self._just_cancelled_a_frame:
                 self._just_cancelled_a_frame = False
@@ -200,6 +218,10 @@ class Scheduler:
                 del canvas
                 if self._ready_for_present:
                     await self._ready_for_present.wait()
+                # The wait may have ended via a cancellation (the event was
+                # closed because the canvas closed or the loop stopped). The
+                # liveness check at the top of the next iteration ends the
+                # task in that case; otherwise we simply continue ticking.
             else:
                 # If we have a non-drawing tick, at least process events.
                 canvas._process_events()
@@ -213,17 +235,16 @@ class Scheduler:
     def on_cancel_draw(self):
         if self._ready_for_present is not None:
             self._just_cancelled_a_frame = True  # wait longer for next frame
-            self._ready_for_present.set()
-            self._ready_for_present = None
+            self._cancel_pending_frame()
 
     def on_about_to_draw(self):
         self._draw_requested = False
 
     def on_draw_done(self):
-        # Keep ticking
-        if self._ready_for_present is not None:
-            self._ready_for_present.set()
-            self._ready_for_present = None
+        # The frame completed normally; release any pending wait. (May already
+        # have been released by a concurrent cancellation, in which case this
+        # is a no-op.)
+        self._cancel_pending_frame()
 
         # Update stats
         count, last_time = self._draw_stats

@@ -13,6 +13,18 @@ Possible sections in each release:
 * Security: in case of vulnerabilities.
 
 
+## Unreleased
+
+### Fixed
+
+* Make closing a canvas, requesting a draw after closing, and stopping/restarting the loop consistent across the scheduler, canvas base class, event emitter and stub loop:
+  * Calling `close()` inside a draw callback now terminates the frame before presentation and gives the scheduler an explicit cancellation signal instead of leaving it waiting.
+  * `request_draw()` / `force_draw()` / offscreen `draw()` on a closed canvas are now silent no-ops (no extra frame, no exception); repeated `close()` stays idempotent.
+  * After closing, no further events are delivered and `add_event_handler()` is silently ignored.
+  * Stopping the loop and recreating a canvas then running again no longer resurrects old tasks or doubles the frame rate.
+  * Calling `loop.stop()` while a frame is in flight now cancels the current frame cleanly without dangling waits.
+
+
 ## [3.0.1](https://github.com/pygfx/rendercanvas/releases/tag/3.0.1) - 19-11-2026
 
 ### Fixed

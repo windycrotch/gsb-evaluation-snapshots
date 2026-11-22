@@ -119,6 +119,10 @@ class OffscreenRenderCanvas(BaseRenderCanvas):
 
         The image is returned as a contiguous NxMx4 numpy array.
         """
+        # A closed canvas cannot produce a new frame. force_draw() is itself a
+        # silent no-op on a closed canvas, but keep the last image semantics intact.
+        if self.get_closed():
+            return self._last_image
         self.force_draw()
         return self._last_image
 
@@ -171,6 +175,17 @@ class StubLoop(BaseLoop):
         # and it will stay active until it's explicitly stopped.
         self._process_tasks()
         self._process_tasks()  # twice to resolve one-step indirection of thread-call-later
+
+        # If the loop is fully quiescent (no canvases left to drive and no
+        # pending callbacks), bring it to its off-state instead of lingering in
+        # 'active'. A later run() on an empty loop then stays 'off' (matching
+        # the other loop backends), and a stop that happened while processing a
+        # callback is not undone by the surrounding run(). Pending callbacks are
+        # deliberately preserved: the offscreen loop is re-enterable, so
+        # call_later() tasks must survive between run() calls. Use the internal
+        # teardown because the public stop() is a no-op once already 'off'.
+        if not self.get_canvases() and not self._callbacks:
+            self._BaseLoop__stop()
 
     def _rc_stop(self):
         self._callbacks.clear()
