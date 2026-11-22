@@ -1,5 +1,5 @@
 import { SSTV_MODES, SSTVMode, SAMPLE_RATE } from './constants';
-import { SyncDetector, SyncPulseWidth } from './sync-detector';
+import { SyncDetector, SyncPulseWidth, SyncPulseDetection } from './sync-detector';
 import { Robot36LineDecoder, DecodedLine as Robot36DecodedLine } from './robot36-line-decoder';
 import { Robot72LineDecoder, DecodedLine as Robot72DecodedLine } from './robot72-line-decoder';
 import { PD120LineDecoder, DecodedLine as PD120DecodedLine } from './pd120-line-decoder';
@@ -10,14 +10,86 @@ import { ScottieS2LineDecoder, DecodedLine as ScottieS2DecodedLine } from './sco
 
 type DecodedLine = Robot36DecodedLine | Robot72DecodedLine | PD120DecodedLine | PD160DecodedLine | PD180DecodedLine | ScottieS1DecodedLine | ScottieS2DecodedLine;
 
+/**
+ * Structural interface for the sync detector used by the decoder.
+ * Exposed so tests can substitute a deterministic detector.
+ */
+export interface SyncDetectorLike {
+  process(samples: Float32Array, demodulated: Float32Array): SyncPulseDetection;
+  reset(): void;
+}
+
+/**
+ * Structural interface for a mode-specific line decoder.
+ * Exposed so tests can substitute a deterministic line decoder.
+ */
+export interface LineDecoderLike {
+  decodeScanLine(
+    scanLineBuffer: Float32Array,
+    syncPulseIndex: number,
+    frequencyOffset: number
+  ): DecodedLine | null;
+  reset(): void;
+  getBeginSamples?(): number;
+  getEndSamples?(): number;
+}
+
+/**
+ * Optional seams used by tests to drive the decoder without a real SSTV signal.
+ */
+export interface DecoderDeps {
+  createSyncDetector?: (sampleRate: number) => SyncDetectorLike;
+  createLineDecoder?: (sampleRate: number, mode: keyof typeof SSTV_MODES) => LineDecoderLike;
+}
+
+export function createLineDecoderForMode(
+  modeName: keyof typeof SSTV_MODES,
+  sampleRate: number
+): Robot36LineDecoder | Robot72LineDecoder | PD120LineDecoder | PD160LineDecoder | PD180LineDecoder | ScottieS1LineDecoder | ScottieS2LineDecoder {
+  switch (modeName) {
+    case 'ROBOT36':
+      return new Robot36LineDecoder(sampleRate);
+    case 'ROBOT72':
+      return new Robot72LineDecoder(sampleRate);
+    case 'SCOTTIE_S1':
+      return new ScottieS1LineDecoder(sampleRate);
+    case 'SCOTTIE_S2':
+      return new ScottieS2LineDecoder(sampleRate);
+    case 'PD120':
+      return new PD120LineDecoder(sampleRate);
+    case 'PD160':
+      return new PD160LineDecoder(sampleRate);
+    case 'PD180':
+      return new PD180LineDecoder(sampleRate);
+    default:
+      // Default to PD120 for unknown modes
+      return new PD120LineDecoder(sampleRate);
+  }
+}
+
 export enum DecoderState {
   IDLE = 'IDLE',
   DECODING_IMAGE = 'DECODING_IMAGE',
 }
 
+/**
+ * Global monotonic counter for decoding sessions. Session ids are unique across
+ * decoder instances, so a restart (which builds a new decoder) is always
+ * distinguishable from the session it replaced.
+ */
+let nextSessionId = 0;
+
+export function allocateSessionId(): number {
+  nextSessionId += 1;
+  return nextSessionId;
+}
+
 export interface DecoderStats {
   state: DecoderState;
   mode: string | null;
+  modeKey: keyof typeof SSTV_MODES;
+  sessionId: number;
+  width: number;
   currentLine: number;
   totalLines: number;
   progress: number;
@@ -45,8 +117,8 @@ export class SSTVDecoder {
   private bufferSize: number;
 
   // Sync detection
-  private syncDetector: SyncDetector;
-  private lineDecoder: Robot36LineDecoder | Robot72LineDecoder | PD120LineDecoder | PD160LineDecoder | PD180LineDecoder | ScottieS1LineDecoder | ScottieS2LineDecoder;
+  private syncDetector: SyncDetectorLike;
+  private lineDecoder: LineDecoderLike;
 
   // Line boundaries detected by sync pulses
   private lastSyncPos: number = -1;
@@ -58,21 +130,25 @@ export class SSTVDecoder {
   // Signal strength tracking
   private signalStrength: number = 0;
 
-  constructor(sampleRate: number = SAMPLE_RATE, modeName: keyof typeof SSTV_MODES = 'ROBOT36') {
+  // Session identity: assigned a globally-unique id every time a fresh
+  // decoding session begins (start / restart / mode change / reset). Used to
+  // reject work belonging to a previous session and to key UI/render state.
+  private sessionId: number = 0;
+
+  private readonly deps: DecoderDeps;
+
+  constructor(
+    sampleRate: number = SAMPLE_RATE,
+    modeName: keyof typeof SSTV_MODES = 'ROBOT36',
+    deps: DecoderDeps = {}
+  ) {
     this.sampleRate = sampleRate;
     this.modeName = modeName;
     this.mode = SSTV_MODES[modeName];
+    this.deps = deps;
 
     // Initialize image data based on mode dimensions
-    this.imageData = new Uint8ClampedArray(this.mode.width * this.mode.height * 4);
-
-    // Initialize with black
-    for (let i = 0; i < this.imageData.length; i += 4) {
-      this.imageData[i] = 0;       // R
-      this.imageData[i + 1] = 0;   // G
-      this.imageData[i + 2] = 0;   // B
-      this.imageData[i + 3] = 255; // A
-    }
+    this.imageData = this.createBlankImage();
 
     // Buffer size: 7 seconds (max line ~752ms for PD180 + safety margin)
     this.bufferSize = Math.floor(sampleRate * 7);
@@ -80,25 +156,32 @@ export class SSTVDecoder {
     this.demodulatedBuffer = new Float32Array(this.bufferSize);
 
     // Create sync detector and mode-specific line decoder
-    this.syncDetector = new SyncDetector(sampleRate);
-    if (modeName === 'ROBOT36') {
-      this.lineDecoder = new Robot36LineDecoder(sampleRate);
-    } else if (modeName === 'ROBOT72') {
-      this.lineDecoder = new Robot72LineDecoder(sampleRate);
-    } else if (modeName === 'SCOTTIE_S1') {
-      this.lineDecoder = new ScottieS1LineDecoder(sampleRate);
-    } else if (modeName === 'SCOTTIE_S2') {
-      this.lineDecoder = new ScottieS2LineDecoder(sampleRate);
-    } else if (modeName === 'PD120') {
-      this.lineDecoder = new PD120LineDecoder(sampleRate);
-    } else if (modeName === 'PD160') {
-      this.lineDecoder = new PD160LineDecoder(sampleRate);
-    } else if (modeName === 'PD180') {
-      this.lineDecoder = new PD180LineDecoder(sampleRate);
-    } else {
-      // Default to PD120 for unknown modes
-      this.lineDecoder = new PD120LineDecoder(sampleRate);
+    this.syncDetector = this.createSyncDetector();
+    this.lineDecoder = this.createLineDecoder();
+  }
+
+  private createSyncDetector(): SyncDetectorLike {
+    return this.deps.createSyncDetector
+      ? this.deps.createSyncDetector(this.sampleRate)
+      : new SyncDetector(this.sampleRate);
+  }
+
+  private createLineDecoder(): LineDecoderLike {
+    return this.deps.createLineDecoder
+      ? this.deps.createLineDecoder(this.sampleRate, this.modeName)
+      : createLineDecoderForMode(this.modeName, this.sampleRate);
+  }
+
+  /** Allocate a fully black image buffer sized for the current mode. */
+  private createBlankImage(): Uint8ClampedArray {
+    const image = new Uint8ClampedArray(this.mode.width * this.mode.height * 4);
+    for (let i = 0; i < image.length; i += 4) {
+      image[i] = 0;       // R
+      image[i + 1] = 0;   // G
+      image[i + 2] = 0;   // B
+      image[i + 3] = 255; // A
     }
+    return image;
   }
 
   // Sample counter for periodic logging
@@ -221,14 +304,14 @@ export class SSTVDecoder {
     const line = this.lineDecoder.decodeScanLine(lineSamples, syncPulsePos, this.frequencyOffset);
 
     // Copy decoded pixels to image data
-    if (line && line.height > 0) {
+    if (line && line.height > 0 && this.currentLine < this.mode.height) {
       // height=0 for even lines (Robot36 stores data), height=1 for PD120, height=2 for Robot36 odd lines (outputs 2 lines)
       const pixelsPerLine = line.width;
       const numLines = line.height;
 
       for (let lineIdx = 0; lineIdx < numLines; lineIdx++) {
         const targetLine = this.currentLine + lineIdx;
-        if (targetLine >= this.mode.height) continue;
+        if (targetLine < 0 || targetLine >= this.mode.height) continue;
 
         for (let x = 0; x < pixelsPerLine && x < this.mode.width; x++) {
           const srcIdx = (lineIdx * pixelsPerLine + x) * 4;
@@ -241,7 +324,8 @@ export class SSTVDecoder {
         }
       }
 
-      this.currentLine += numLines;
+      // Line count never rolls back within a session and never exceeds the mode height.
+      this.currentLine = Math.min(this.mode.height, this.currentLine + numLines);
       console.log(`Decoded ${numLines} line(s), now at line ${this.currentLine}/${this.mode.height}`);
     } else if (line && line.height === 0) {
       console.log(`Stored even line for interlacing (Robot36)`);
@@ -262,9 +346,12 @@ export class SSTVDecoder {
     return {
       state: this.state,
       mode: this.mode.name,
+      modeKey: this.modeName,
+      sessionId: this.sessionId,
+      width: this.mode.width,
       currentLine: this.currentLine,
       totalLines: this.mode.height,
-      progress: (this.currentLine / this.mode.height) * 100,
+      progress: Math.min(100, (this.currentLine / this.mode.height) * 100),
       frequency: Math.round(1900 + this.frequencyOffset), // Center frequency + offset
       signalStrength: Math.round(this.signalStrength),
       snr: null, // SNR will be calculated by the audio processor with AnalyserNode
@@ -281,10 +368,74 @@ export class SSTVDecoder {
     };
   }
 
+  /** Current session identifier. Changes on every start/restart/mode switch. */
+  getSessionId(): number {
+    return this.sessionId;
+  }
+
+  /** Current mode key. */
+  getModeKey(): keyof typeof SSTV_MODES {
+    return this.modeName;
+  }
+
+  isDecoding(): boolean {
+    return this.state === DecoderState.DECODING_IMAGE;
+  }
+
   /**
-   * Reset decoder
+   * Switch mode, ending the current session and rebuilding the decoder
+   * (image buffer, sync detector and line decoder) for the new mode.
+   * Decoding continues automatically if a session was active.
+   *
+   * Returns true if the mode actually changed.
+   */
+  setMode(modeName: keyof typeof SSTV_MODES): boolean {
+    if (!(modeName in SSTV_MODES)) {
+      return false;
+    }
+    if (modeName === this.modeName) {
+      return false;
+    }
+
+    const wasDecoding = this.isDecoding();
+
+    // End the current session before building the new one.
+    this.modeName = modeName;
+    this.mode = SSTV_MODES[modeName];
+
+    // Rebuild per-session state: image buffer, sync detector, line decoder.
+    this.imageData = this.createBlankImage();
+    this.syncDetector = this.createSyncDetector();
+    this.lineDecoder = this.createLineDecoder();
+
+    this.beginSession();
+
+    if (wasDecoding) {
+      this.state = DecoderState.DECODING_IMAGE;
+    }
+    return true;
+  }
+
+  /**
+   * Reset the decoder. Clears the image and all statistics and starts a fresh
+   * session. If the decoder was actively decoding it keeps decoding (a reset
+   * must not silence the audio pipeline).
    */
   reset(): void {
+    const wasDecoding = this.isDecoding();
+
+    this.beginSession();
+
+    // If we were decoding, continue decoding in the fresh session.
+    this.state = wasDecoding ? DecoderState.DECODING_IMAGE : DecoderState.IDLE;
+  }
+
+  /**
+   * Clear all per-session state and bump the session id. Does not touch `state`.
+   */
+  private beginSession(): void {
+    this.sessionId = allocateSessionId();
+
     this.currentLine = 0;
     this.bufferWritePos = 0;
     this.lastSyncPos = -1;
@@ -293,36 +444,41 @@ export class SSTVDecoder {
     this.sampleCounter = 0;
     this.lastLogTime = 0;
     this.absoluteSamplePosition = 0;
+    this.signalStrength = 0;
 
     // Reset sync detector state
     this.syncDetector.reset();
     this.lineDecoder.reset();
 
-    // Clear audio buffer
+    // Clear audio buffers
     this.audioBuffer.fill(0);
+    this.demodulatedBuffer.fill(0);
 
     // Clear image data to black
-    for (let i = 0; i < this.imageData.length; i += 4) {
-      this.imageData[i] = 0;       // R
-      this.imageData[i + 1] = 0;   // G
-      this.imageData[i + 2] = 0;   // B
-      this.imageData[i + 3] = 255; // A
+    this.imageData.fill(0);
+    for (let i = 3; i < this.imageData.length; i += 4) {
+      this.imageData[i] = 255; // A
     }
   }
 
   /**
-   * Start decoding
+   * Start decoding. Always begins a fresh session: no sync position,
+   * frequency offset or line count is carried over from a previous run.
    */
   start(): void {
-    this.reset();
+    this.beginSession();
     this.state = DecoderState.DECODING_IMAGE;
-    console.log('Starting SSTV decode with sync detection');
+    console.log(`Starting SSTV decode session #${this.sessionId} with ${this.mode.name}`);
   }
 
   /**
-   * Stop decoding
+   * Stop decoding. The decoded image is retained so it can still be saved,
+   * but the session ends: the next start() begins from scratch.
    */
   stop(): void {
     this.state = DecoderState.IDLE;
+    // Drop the sync anchor so a subsequent run can never continue from it.
+    this.lastSyncPos = -1;
+    this.lastSyncWidth = null;
   }
 }

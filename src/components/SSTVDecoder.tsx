@@ -23,17 +23,21 @@ export default function SSTVDecoder({ selectedMode, onModeChange }: SSTVDecoderP
     startRecording,
     stopRecording,
     resetDecoder,
+    changeMode,
     getImageData,
     getDimensions,
+    buildFilename,
     getAnalyser,
   } = useAudioProcessor(selectedMode);
 
   const handleModeChange = (newMode: SSTVMode) => {
-    // Stop recording if active
-    if (state.isRecording) {
-      stopRecording();
-    }
+    if (newMode === selectedMode) return;
+    // End the current session and rebuild the decoder for the new mode in
+    // place: the audio pipeline keeps running, but the image buffer, line
+    // counter, sync state and frequency calibration restart for the new mode.
+    changeMode(newMode);
     onModeChange(newMode);
+    waveformHistoryRef.current = [];
   };
 
   // Draw spectrum visualization with frequency axis
@@ -288,15 +292,23 @@ export default function SSTVDecoder({ selectedMode, onModeChange }: SSTVDecoderP
     ctx.fillText('now', canvas.width - 20, plotHeight + 18);
   }, [getAnalyser]);
 
-  // Update canvas with decoded image
+  // Dimensions are read every render so the canvas element's width/height
+  // attributes follow the active mode. When they change the render effect
+  // restarts with a matching offscreen buffer.
+  const dimensions = getDimensions();
+  const sessionId = state.stats?.sessionId ?? 0;
+
+  // Update canvas with decoded image.
+  // The loop is restarted whenever the mode (dimensions), session or recording
+  // state changes. Because the offscreen buffer is recreated at the new size
+  // and the decoder's image buffer starts black for a new session, no pixels
+  // from the previous mode/session can survive into the new canvas.
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
-
-    const dimensions = getDimensions();
 
     // Create an offscreen canvas that matches SSTV dimensions
     const offscreenCanvas = document.createElement('canvas');
@@ -310,31 +322,18 @@ export default function SSTVDecoder({ selectedMode, onModeChange }: SSTVDecoderP
     ctx.imageSmoothingEnabled = false;
     offscreenCtx.imageSmoothingEnabled = false;
 
-    // Clear both canvases initially
+    // Clear both canvases so a mode/session change never shows old pixels
     ctx.fillStyle = 'black';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     offscreenCtx.fillStyle = 'black';
     offscreenCtx.fillRect(0, 0, offscreenCanvas.width, offscreenCanvas.height);
 
-    let lastRenderedLine = -1;
-
     const updateCanvas = () => {
       const imageData = getImageData();
-      const currentLine = state.stats?.currentLine ?? 0;
 
-      // Always update to see the progressive image (even when paused)
-      if (imageData && offscreenCtx) {
-        // Debug: Check if we have any non-black pixels
-        if (state.isRecording && currentLine > lastRenderedLine && currentLine % 10 === 0) {
-          let nonBlackPixels = 0;
-          for (let i = 0; i < imageData.length; i += 4) {
-            if (imageData[i] > 0 || imageData[i+1] > 0 || imageData[i+2] > 0) {
-              nonBlackPixels++;
-            }
-          }
-          console.log(`Line ${currentLine}: ${nonBlackPixels} non-black pixels in imageData`);
-        }
-
+      // Always repaint the image (progressive or paused). The whole decoder
+      // buffer is written at once, so there is nothing to accumulate.
+      if (imageData && imageData.length === dimensions.width * dimensions.height * 4) {
         // Create ImageData from a copy of the decoder's buffer
         const imgData = new ImageData(
           new Uint8ClampedArray(imageData),
@@ -345,10 +344,9 @@ export default function SSTVDecoder({ selectedMode, onModeChange }: SSTVDecoderP
         // Put the complete image data on the offscreen canvas
         offscreenCtx.putImageData(imgData, 0, 0);
 
-        // Draw to main canvas without clearing (preserve all previous lines)
+        // Draw the complete image to the main canvas (full overwrite, so a
+        // reset to black clears any previously drawn lines).
         ctx.drawImage(offscreenCanvas, 0, 0, canvas.width, canvas.height);
-
-        lastRenderedLine = currentLine;
       }
 
       // Draw spectrum, spectrogram, and waveform only when recording
@@ -380,9 +378,19 @@ export default function SSTVDecoder({ selectedMode, onModeChange }: SSTVDecoderP
     return () => {
       if (animationFrameRef.current) {
         cancelAnimationFrame(animationFrameRef.current);
+        animationFrameRef.current = null;
       }
     };
-  }, [state.isRecording, state.stats?.currentLine, getImageData, getDimensions, drawSpectrum, drawSpectrogram, drawWaveform, getAnalyser]);
+  }, [
+    dimensions.width,
+    dimensions.height,
+    sessionId,
+    state.isRecording,
+    drawSpectrum,
+    drawSpectrogram,
+    drawWaveform,
+    getImageData,
+  ]);
 
   const handleStart = async () => {
     await startRecording();
@@ -402,14 +410,16 @@ export default function SSTVDecoder({ selectedMode, onModeChange }: SSTVDecoderP
     const canvas = canvasRef.current;
     if (!canvas) return;
 
+    // Filename reflects the decoder's current mode and session, not a fixed mode.
+    const filename = buildFilename();
+
     // Create a download link
     canvas.toBlob((blob) => {
       if (!blob) return;
 
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
-      link.download = `sstv-decode-robot36-${timestamp}.png`;
+      link.download = filename;
       link.href = url;
       link.click();
 
@@ -432,11 +442,11 @@ export default function SSTVDecoder({ selectedMode, onModeChange }: SSTVDecoderP
 
   return (
     <div className="space-y-4 sm:space-y-6">
-      {/* Settings Panel - floating cog icon */}
+      {/* Settings Panel - floating cog icon. Mode switching is allowed while
+          decoding: it ends the current session and rebuilds for the new mode. */}
       <SettingsPanel
         currentMode={selectedMode}
         onModeChange={handleModeChange}
-        disabled={state.isRecording}
       />
 
       {/* Controls */}
@@ -550,13 +560,13 @@ export default function SSTVDecoder({ selectedMode, onModeChange }: SSTVDecoderP
           <div className="flex items-center justify-between mb-2 sm:mb-3">
             <h2 className="text-lg sm:text-xl font-semibold">Decoded Image</h2>
             <span className="text-xs sm:text-sm text-[#8b949e] font-mono">
-              {getDimensions().width}×{getDimensions().height}
+              {dimensions.width}×{dimensions.height}
             </span>
           </div>
           <canvas
             ref={canvasRef}
-            width={getDimensions().width}
-            height={getDimensions().height}
+            width={dimensions.width}
+            height={dimensions.height}
             className="w-full border border-[#30363d] rounded bg-[#0d1117] touch-manipulation"
           />
         </div>
