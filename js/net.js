@@ -51,6 +51,7 @@ export class Net {
   // ---- host: create a room and keep answering guests' offers ----
   // assigned = a room the server already made for me (quick match): { code, peer: 'h', key }
   async host(assigned = null) {
+    for (const p of [...this.links.keys()]) this.drop(p);      // a new room never keeps old connections
     this.me = assigned || await this.call('/room/create', {});
     this.startPolling();
     return this.me.code;
@@ -58,7 +59,24 @@ export class Net {
 
   // ---- guest: join a room, send an offer to the host, wait for the answer and the channels to open ----
   async join(code, timeoutMs = 20000, assigned = null) {
+    for (const p of [...this.links.keys()]) this.drop(p);
     this.me = assigned || await this.call('/room/join', { code });
+    await this.offerToHost(timeoutMs, 'could not connect to the host');
+    return this.me.peer;
+  }
+
+  // ---- guest: the link to the host died (a network dip, the laptop lid closed). Build a new one with the
+  // same seat in the room (same peer id and key), so the host sees the same player coming back, not a new one.
+  async reconnect(timeoutMs = 20000) {
+    if (!this.me || this.isHost) throw new Error('nothing to reconnect to');
+    const old = this.links.get('h');
+    if (old) { this.links.delete('h'); try { old.pc.close(); } catch {} }   // silent: the app already knows it died
+    await this.offerToHost(timeoutMs, 'could not reconnect to the host');
+    return this.me.peer;
+  }
+
+  // shared by join and reconnect: offer my channels to the host through the mailbox and wait for them to open
+  async offerToHost(timeoutMs, failText) {
     const link = this.makeLink('h');
     link.fast = this.wire('h', link.pc.createDataChannel('fast', { ordered: false, maxRetransmits: 0 }));
     link.safe = this.wire('h', link.pc.createDataChannel('safe', { ordered: true }));
@@ -67,11 +85,10 @@ export class Net {
     await this.call('/room/send', { ...this.auth(), to: 'h', data: JSON.stringify(link.pc.localDescription) });
     this.startPolling();
     await new Promise((resolve, reject) => {
-      const t = setTimeout(() => reject(new Error('could not connect to the host')), timeoutMs);
+      const t = setTimeout(() => { this.drop('h'); reject(new Error(failText)); }, timeoutMs);
       link.onOpen = () => { clearTimeout(t); resolve(); };
     });
     this.polling = false;        // connected: no more mailbox checks
-    return this.me.peer;
   }
 
   auth() { return { code: this.me.code, peer: this.me.peer, key: this.me.key }; }
@@ -105,11 +122,15 @@ export class Net {
     // on the answering side a channel can already be open when it is handed over
     if (ch.readyState === 'open') setTimeout(() => this.checkOpen(peer), 0);
     ch.addEventListener('message', e => {
+      // a channel of an older, replaced connection (a reconnect before this one fully died): its backlog must
+      // not be delivered, or minutes-old state would overwrite the snapshot the new connection just brought
+      const link = this.links.get(peer);
+      if (!link || (link.fast !== ch && link.safe !== ch)) return;
       let msg;
       try { msg = JSON.parse(e.data); } catch { return; }
       if (this.onMessage) this.onMessage(peer, msg);
     });
-    ch.addEventListener('close', () => this.drop(peer));
+    ch.addEventListener('close', () => { if (this.links.get(peer) && (this.links.get(peer).fast === ch || this.links.get(peer).safe === ch)) this.drop(peer); });
     return ch;
   }
 
@@ -138,6 +159,7 @@ export class Net {
 
   async onSignal(from, desc) {
     if (desc.type === 'offer' && this.isHost) {
+      if (this.links.has(from)) this.drop(from);     // a reconnect: the old link is dead, make room for the new one
       const link = this.makeLink(from);
       await link.pc.setRemoteDescription(desc);
       await link.pc.setLocalDescription(await link.pc.createAnswer());

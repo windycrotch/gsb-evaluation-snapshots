@@ -237,7 +237,7 @@ export class Versus {
     const k = killer && killer !== victim ? this.row(killer) : null;
     if (k) k.kills++;
     const feed = k ? `${k.name} shot down ${v.name}` : `${v.name} ${cause === 'TERRAIN' || cause === 'TREE' ? 'crashed' : 'went down'}`;
-    const msg = { t: 'vscore', rows: this.rows.map(r => ({ ...r })), tl: r1(this.timeLeft), f: feed, v: victim, k: k ? k.peer : null };
+    const msg = this.c.stamp({ t: 'vscore', rows: this.rows.map(r => ({ ...r })), tl: r1(this.timeLeft), f: feed, v: victim, k: k ? k.peer : null });
     this.c.net.broadcast(msg, true);
     this.applyScore(msg);
     if (k && k.kills >= V.killsToWin) this.finish('kills');
@@ -255,10 +255,32 @@ export class Versus {
     }
   }
 
+  // Rejoin after a disconnect: the host's snapshot of the match I am still seated in. It replaces my whole
+  // picture of the table at once (members, score, clock, pause), so nothing I cached while offline can win
+  // over it — and anything older that arrives later is dropped by the sequence check in coop.js.
+  snapshot() {
+    return { rows: this.rows.map(r => ({ ...r })), tl: r1(this.timeLeft), paused: this.paused ? { ...this.paused } : null,
+      match: this.match, ranked: this.ranked, why: this.why, over: this.over ? { ...this.over, rows: this.over.rows.map(r => ({ ...r })) } : null };
+  }
+  applySnap(m) {
+    this.rows = m.rows.map(r => ({ ...r }));
+    if (typeof m.tl === 'number') this.timeLeft = m.tl;
+    this.match = m.match || this.match;
+    this.ranked = !!m.ranked;
+    this.why = m.why || '';
+    this.setPaused(m.paused || null);
+    if (m.over) { this.applyOver(m.over); return; }
+    // I was already taken out while I was gone: the match is over for me
+    const mine = this.row(this.me);
+    if (mine && mine.left && !this.over && !this.c.isHost) {
+      this.applyOver({ t: 'vover', rows: standings(this.rows.map(x => ({ ...x }))), match: this.match, ranked: this.ranked, why: this.why, reason: 'away' });
+    }
+  }
+
   // host: the match is over (someone reached the kill count, the clock ran out, or everyone else left)
   finish(reason) {
     if (this.over) return;
-    const m = { t: 'vover', rows: standings(this.rows.map(r => ({ ...r }))), match: this.match, ranked: this.ranked, why: this.why, reason };
+    const m = this.c.stamp({ t: 'vover', rows: standings(this.rows.map(r => ({ ...r }))), match: this.match, ranked: this.ranked, why: this.why, reason });
     this.c.net.broadcast(m, true);
     this.applyOver(m);
   }
@@ -285,7 +307,7 @@ export class Versus {
     const stayed = this.rows.filter(x => !x.left);
     if (this.c.isHost) {
       const f = why === 'away' ? `${r.name} stopped responding (counts as a loss)` : `${r.name} left (counts as a loss)`;
-      const msg = { t: 'vscore', rows: this.rows.map(x => ({ ...x })), tl: r1(this.timeLeft), f, v: null, k: null };
+      const msg = this.c.stamp({ t: 'vscore', rows: this.rows.map(x => ({ ...x })), tl: r1(this.timeLeft), f, v: null, k: null });
       this.c.net.broadcast(msg, true);
       this.applyScore(msg);
       if (stayed.length <= 1) this.finish('left');

@@ -324,9 +324,20 @@ js/leaderboard.js online leaderboard client
 js/weather.js     weather: particles, fog, wind, lightning
 js/maps.js        today's map, random maps
 js/config.js      every tunable number in one place
+test/             headless tests for the multiplayer session lifecycle (node --test, three.js stubbed)
 ```
 
 No dependencies besides [three.js](https://threejs.org), loaded from a CDN. No build step.
+
+### Tests
+
+```bash
+node --test --import ./test/register.mjs "test/*.test.mjs"
+```
+
+covers the multiplayer session lifecycle end to end: a normal match, the pause when a tab goes to the background and
+the resume, a dropped connection and the rejoin-with-snapshot, the forfeit when the countdown runs out, the host
+leaving, and two players reconnecting at once while old packets arrive late.
 
 ## Credits
 
@@ -386,6 +397,10 @@ If the host leaves, the game ends for everyone.
   countdown: nobody moves, shoots or gets hit, and the clock stops. Back within **30 seconds** and it goes on (a phone
   that slipped out of your hand is fine); otherwise that pilot counts as having left. One pilot can pause for at most
   60 seconds in total per match, so nobody can stall the game.
+- Losing the **connection** pauses the match the same way. The disconnected game retries on its own; back within the
+  30 seconds it rejoins with the same seat and gets a snapshot of the members, the score and the pause — never a new
+  slot, never scored twice. Only when the countdown runs out does the pilot count as having left. If it is the host
+  who is gone for good, everyone gets a clear end signal and the match table is settled with the host last.
 
 The host's browser runs the enemies (co-op) and keeps the score (versus), so the host should keep the game tab in
 front. Players connect directly to the host (WebRTC); the leaderboard server only passes the connection details.

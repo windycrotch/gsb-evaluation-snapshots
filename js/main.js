@@ -1041,10 +1041,15 @@ function updateVersus(dt) {
   diag.t += dt;
 }
 
-// versus: "PAUSED · X's game is in the background · 23 s to come back"
+// versus: "PAUSED · X's game is in the background · 23 s to come back" (or "CONNECTION LOST · reconnecting")
 function updatePauseBox() {
-  const p = coop.active && coop.versus ? coop.vs.paused : null;
   const el = document.getElementById('vsPause');
+  if (coop.active && coop.versus && coop.reconnecting) {
+    el.style.display = 'block';
+    el.innerHTML = `<b>CONNECTION LOST</b><div>Reconnecting to the host…</div><div>Back within ${CFG.versus.awayLimit} s and the match goes on.</div>`;
+    return;
+  }
+  const p = coop.active && coop.versus ? coop.vs.paused : null;
   if (!p) { el.style.display = 'none'; return; }
   el.style.display = 'block';
   const who = p.peer === coop.vs.me ? 'Your game' : `${escHtml(p.name)}'s game`;

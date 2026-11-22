@@ -94,6 +94,11 @@ export class Coop {
     this.mode = 'team';            // 'team' (co-op against the waves) | 'versus' (PvP)
     this.clock = 0;                // seconds of my own game running (stops when my tab is in the background)
     this.seen = new Map();         // peer -> this.clock when their last message arrived
+    this.away = new Map();         // host: peer -> this.clock when their connection dropped (they may still come back)
+    this.seq = 0;                  // host: every state message carries this, so a guest can tell newer from older
+    this.lastSeq = -1;             // guest: the newest host message I applied (older ones are dropped)
+    this.reconnecting = false;     // guest: my link to the host died and I am getting a new one
+    this.reconnectGen = 0;         // bumped to cancel a reconnect in flight (left the room, host gone for good)
     this.vs = new Versus(this);
     g.net.onMessage = (from, m) => this.onMessage(from, m);
     g.net.onPeer = (peer, state) => this.onPeer(peer, state);
@@ -106,6 +111,10 @@ export class Coop {
   get isGuest() { return this.role === 'guest'; }
   players() { return 1 + this.remotes.size; }
   teammates() { return [...this.remotes.values()]; }
+
+  // host: stamp a state message with the next sequence number. Guests apply host state only in order, so a
+  // message that was queued while a player was offline can never overwrite a newer snapshot after a reconnect.
+  stamp(m) { m.seq = ++this.seq; return m; }
 
   // ---------------- lobby ----------------
   // opts: { isPublic (listed for anyone to join), assigned (a room the server made: quick match), quick }
@@ -167,6 +176,9 @@ export class Coop {
   begin(map, players, mode = this.mode, vsInfo = null) {
     this.mode = mode === 'versus' ? 'versus' : 'team';
     this.clearWorld();
+    this.away.clear();
+    this.reconnecting = false;
+    this.reconnectGen++;
     const myPeer = this.isHost ? 'h' : this.g.net.me.peer;
     for (const p of players) if (p.peer !== myPeer) this.remotes.set(p.peer, new RemotePlane(this.g.scene, p.peer, p.name, p.parts));
     this.started = true;
@@ -200,6 +212,16 @@ export class Coop {
 
   // leave the room (or the host closed it): back to a normal single-player game
   end() {
+    this.away.clear();
+    this.reconnecting = false;
+    this.reconnectGen++;
+    // say goodbye before closing: the others get a clear end signal right away instead of waiting for a dead
+    // connection to time out. The close is delayed a moment so the goodbye actually goes out.
+    const net = this.g.net, me = net.me;
+    if (this.role && me && net.openPeers().length) {
+      net.broadcast({ t: 'bye' }, true);
+      setTimeout(() => { if (net.me === me) net.close(); }, 400);
+    } else net.close();
     this.role = null; this.started = false; this.lobby.clear(); this.lobbyFromHost = null; this.teamOver = null;
     this.mode = 'team'; this.vs.over = null; this.rankFromHost = null; this.quick = false; this.isPublic = false;
     this.clearWorld();
@@ -207,53 +229,162 @@ export class Coop {
     W.setTargets(null); W.playerCount = 1;
     this.g.weapons.onEnemyFire = null;
     this.g.Weather.onBolt = null; this.g.Weather.remoteBolts = false;
-    this.g.net.close();                  // role is already null, so the 'closed' events this fires are ignored
   }
 
   onPeer(peer, state) {
-    if (!this.role) return;
-    if (state === 'closed') {
-      const r = this.remotes.get(peer);
-      const name = (r && r.name) || (this.lobby.get(peer) || {}).name || 'A teammate';
-      if (r) { r.remove(); this.remotes.delete(peer); }
-      this.lobby.delete(peer);
-      if (this.isGuest && peer === 'h') {
-        // versus: the match ends here and the host counts as having left (a rated match still counts)
-        if (this.started && this.versus) {
-          if (!this.vs.over) { this.vs.playerLeft('h'); this.g.toast('The host left'); }
-          return;                                      // keep the final table on screen
-        }
-        this.g.toast('The host left the game'); this.g.leave(); return;
+    if (!this.role || state !== 'closed') return;
+    // versus, host: a dropped connection is not a player leaving — the game pauses (see checkQuiet) and their
+    // seat is kept for awayLimit seconds, so a network dip doesn't cost them the match
+    if (this.isHost && this.started && this.versus && !this.vs.over) {
+      const row = this.vs.row(peer);
+      if (row && !row.left) {
+        this.away.set(peer, this.clock);
+        this.seen.set(peer, this.clock - CFG.versus.quietAfter);   // the pause starts now, not after quietAfter
+        this.g.net.startPolling();          // back to the mailbox: their reconnect offer arrives there
+        this.g.toast(`${row.name} lost the connection — waiting for them to come back`);
+        if (this.onLobby) this.onLobby();
+        return;
       }
-      if (this.isHost) {
-        this.g.waves.setTargets([this.g.plane, ...this.teammates()]);
-        this.g.net.broadcast({ t: 'left', peer, name }, true);
-        this.g.net.broadcast(this.lobbyMsg(), true);
-        if (!this.started) this.publish();
-        if (this.started) this.checkTeamOver();
-        if (this.started && this.versus) this.vs.playerLeft(peer);
-      }
-      this.g.toast(`${name} left`);
-      if (this.onLobby) this.onLobby();
     }
+    // versus, guest: the link to the host died. Try to get it back before calling the match over.
+    if (this.isGuest && peer === 'h' && this.started && this.versus && !this.vs.over) {
+      this.beginReconnect();
+      return;
+    }
+    this.removePeer(peer);
+  }
+
+  // a player is gone for good (they said goodbye, or the reconnect window ran out): take them out of the room
+  removePeer(peer, saidBye = false) {
+    if (!this.role) return;
+    const r = this.remotes.get(peer);
+    const name = (r && r.name) || (this.lobby.get(peer) || {}).name || 'A teammate';
+    if (r) { r.remove(); this.remotes.delete(peer); }
+    this.lobby.delete(peer);
+    this.away.delete(peer);
+    if (this.isHost && !this.away.size) this.g.net.stopPolling();
+    if (this.isGuest && peer === 'h') {
+      this.reconnecting = false;                     // the host is gone for good: stop trying to come back
+      this.reconnectGen++;
+      // versus: the match ends here and the host counts as having left (a rated match still counts)
+      if (this.started && this.versus) {
+        if (!this.vs.over) { this.vs.playerLeft('h'); this.g.toast(saidBye ? 'The host ended the match' : 'The host left'); }
+        else if (saidBye) { this.g.toast('The host closed the room'); this.g.leave(); }
+        return;                                      // keep the final table on screen
+      }
+      this.g.toast(saidBye ? 'The host ended the game' : 'The host left the game'); this.g.leave(); return;
+    }
+    if (this.isHost) {
+      this.g.waves.setTargets([this.g.plane, ...this.teammates()]);
+      this.g.net.broadcast({ t: 'left', peer, name }, true);
+      this.g.net.broadcast(this.lobbyMsg(), true);
+      if (!this.started) this.publish();
+      if (this.started) this.checkTeamOver();
+      if (this.started && this.versus) this.vs.playerLeft(peer);
+    }
+    this.g.toast(`${name} left`);
+    if (this.onLobby) this.onLobby();
+  }
+
+  // ---------------- reconnect (versus) ----------------
+  // guest: my link to the host died. Retry with the same seat (net.reconnect keeps my peer id) until the pause
+  // the others see runs out; on success ask for a snapshot and carry on, on failure the host counts as gone.
+  async beginReconnect() {
+    if (this.reconnecting) return;
+    this.reconnecting = true;
+    const gen = ++this.reconnectGen;
+    this.g.toast('Connection lost — reconnecting…');
+    const V = CFG.versus;
+    const until = Date.now() + V.awayLimit * 1000;
+    for (;;) {
+      if (this.reconnectGen !== gen || !this.isGuest) return;   // left the room meanwhile
+      try {
+        await this.g.net.reconnect(Math.min(15000, Math.max(3000, until - Date.now())));
+        if (this.reconnectGen !== gen || !this.isGuest) return;
+        this.g.net.send('h', { t: 'hello', re: true, name: this.me.name, parts: this.me.parts, lbId: this.me.lbId, rankOk: this.me.rankOk }, true);
+        return;                                                  // the host answers with vsnap (see applyVsnap)
+      } catch {
+        if (Date.now() >= until) break;
+        await new Promise(res => setTimeout(res, V.reconnectEvery * 1000));
+      }
+    }
+    if (this.reconnectGen !== gen || !this.isGuest) return;
+    this.reconnecting = false;
+    if (this.started && this.versus && !this.vs.over) { this.vs.playerLeft('h'); this.g.toast('The host did not come back'); }
+  }
+
+  // host: the snapshot a rejoining player gets — everyone in the match, the score, the clock, the pause
+  vsnap() {
+    const players = [{ peer: 'h', name: this.me.name, parts: this.me.parts, lbId: this.me.lbId },
+      ...[...this.lobby].map(([peer, p]) => ({ peer, name: p.name, parts: p.parts, lbId: p.lbId }))];
+    return this.stamp({ t: 'vsnap', players, ...this.vs.snapshot() });
+  }
+
+  // guest: the host's snapshot after my reconnect. It replaces what I remember of the match wholesale.
+  applyVsnap(m) {
+    if (!this.isGuest || !this.versus || !Array.isArray(m.players) || !Array.isArray(m.rows)) return;
+    this.reconnecting = false;
+    const mine = this.g.net.me && this.g.net.me.peer;
+    const peers = new Set();
+    for (const p of m.players) {
+      if (p.peer === mine) continue;
+      peers.add(p.peer);
+      if (!this.remotes.has(p.peer)) this.remotes.set(p.peer, new RemotePlane(this.g.scene, p.peer, p.name, p.parts));
+      this.seen.set(p.peer, this.clock);
+    }
+    for (const [peer, r] of [...this.remotes]) {           // someone left for good while I was gone
+      if (!peers.has(peer)) { r.remove(); this.remotes.delete(peer); }
+    }
+    this.vs.applySnap(m);
+    this.g.toast('Back in the match');
   }
 
   // ---------------- messages ----------------
   onMessage(from, m) {
     const g = this.g;
+    if (!this.role) return;                            // the room is over; its goodbye may still be in flight
+    // guest: the host's state messages are numbered. Anything older than what I already applied (a packet
+    // queued while I was offline, an out-of-order snapshot) must not overwrite the newer picture.
+    if (this.isGuest && typeof m.seq === 'number') {
+      if (m.seq <= this.lastSeq) return;
+      this.lastSeq = m.seq;
+    }
     // alive = their game loop is running: only the regular state updates count (a hidden tab still answers
     // messages, so a reply is no sign that the game there is running)
     if (m.t === 'st' || m.t === 'snap') this.seen.set(from, this.clock);
     switch (m.t) {
       // ----- to the host -----
-      case 'hello':
+      case 'hello': {
         if (!this.isHost) return;
-        this.lobby.set(from, { name: String(m.name || 'Pilot').slice(0, 30), parts: Array.isArray(m.parts) ? m.parts.slice(0, 300) : [],
+        const name = String(m.name || 'Pilot').slice(0, 30);
+        // a player whose connection dropped is back with the same seat: not a new player, no new row, no new
+        // plane — they get a snapshot of the match they never left
+        if (m.re && this.started && this.versus) {
+          const row = this.vs.row(from);
+          if (row && row.left) { g.net.send(from, this.vsnap(), true); return; }   // already out: just the final state
+          if (row) {
+            this.away.delete(from);
+            if (!this.away.size) g.net.stopPolling();
+            this.seen.set(from, this.clock);
+            if (!this.remotes.has(from)) this.remotes.set(from, new RemotePlane(g.scene, from, name, Array.isArray(m.parts) ? m.parts.slice(0, 300) : []));
+            g.net.send(from, this.vsnap(), true);
+            g.toast(`${row.name} is back`);
+            if (this.onLobby) this.onLobby();
+            return;
+          }
+        }
+        this.lobby.set(from, { name, parts: Array.isArray(m.parts) ? m.parts.slice(0, 300) : [],
           lbId: Number.isInteger(m.lbId) ? m.lbId : null, rankOk: m.rankOk === true });
         g.net.broadcast(this.lobbyMsg(), true);
         this.publish();
         if (this.onLobby) this.onLobby();
         return;
+      }
+      case 'bye': {                                    // an explicit goodbye: not a drop, no reconnect window
+        if (this.isGuest && from !== 'h') return;
+        this.removePeer(from, true);
+        return;
+      }
       case 'st': { const r = this.remotes.get(from); if (r) r.apply(m.s); return; }
       case 'sh':
         if (this.isHost) for (const b of m.b || []) g.weapons.addRemoteBullet(b[0], b[1], b[2]);
@@ -291,6 +422,7 @@ export class Coop {
         return;
       case 'start': this.begin(m.map, m.players, m.mode, m.vs); return;
       case 'snap': this.applySnap(m); return;
+      case 'vsnap': this.applyVsnap(m); return;
       case 'es': g.weapons.fireEnemy(new THREE.Vector3(...m.p), new THREE.Vector3(...m.d), m.s, m.g); return;
       case 'bolt': g.Weather.addBolt(new THREE.Vector3(...m.p), m.a); return;
       case 'msg': g.hud.message(m.text, m.secs || 2, m.sub || ''); return;
@@ -342,14 +474,14 @@ export class Coop {
     if (this.snapT <= 0) {
       this.snapT = 1 / SNAP_HZ;
       const g = this.g;
-      g.net.broadcast({
+      g.net.broadcast(this.stamp({
         t: 'snap', w: g.waves.wave, sc: g.score(), tl: this.versus ? r1(this.vs.timeLeft) : undefined,
         en: g.waves.enemies.filter(e => e.alive).map(e => [e.id, e.type, r1(e.pos.x), r1(e.pos.y), r1(e.pos.z),
           r3(e.quat.x), r3(e.quat.y), r3(e.quat.z), r3(e.quat.w), r1(e.vel.x), r1(e.vel.y), r1(e.vel.z),
           Math.round(e.hp), Math.round(e.maxHp), e.shielded ? 1 : 0, e.canAttack ? 1 : 0]),
         dr: g.drops.list.map(d => [d.id, d.type, r1(d.pos.x), r1(d.pos.y), r1(d.pos.z)]),
         pl: [['h', ...planeState(g.plane)], ...this.teammates().map(r => [r.peer, ...planeState(r)])],
-      });
+      }));
     }
   }
 
@@ -364,7 +496,7 @@ export class Coop {
     }
     const fromMe = !vs.paused || peers.includes(vs.paused.peer);   // a pause the host announced is the host's to lift
     if (!who) {
-      if (vs.paused && fromMe) { vs.setPaused(null); if (this.isHost) this.g.net.broadcast({ t: 'vresume' }, true); }
+      if (vs.paused && fromMe) { vs.setPaused(null); if (this.isHost) this.g.net.broadcast(this.stamp({ t: 'vresume' }), true); }
       return;
     }
     const used = (vs.pauseUsed.get(who) || 0) + dt;
@@ -374,16 +506,20 @@ export class Coop {
     vs.setPaused({ peer: who, name, left });
     if (this.isHost) {
       this.pauseSendT = (this.pauseSendT || 0) - dt;
-      if (this.pauseSendT <= 0) { this.pauseSendT = 0.5; this.g.net.broadcast({ t: 'vpause', peer: who, name, left: Math.ceil(left) }, true); }
+      if (this.pauseSendT <= 0) { this.pauseSendT = 0.5; this.g.net.broadcast(this.stamp({ t: 'vpause', peer: who, name, left: Math.ceil(left) }), true); }
     }
-    if (left <= 0) { vs.setPaused(null); if (this.isHost) this.g.net.broadcast({ t: 'vresume' }, true); giveUp(who); }
+    if (left <= 0) { vs.setPaused(null); if (this.isHost) this.g.net.broadcast(this.stamp({ t: 'vresume' }), true); giveUp(who); }
   }
 
   // host, versus: take a silent player out of the match (they are told first, then the connection is closed)
   dropAway(peer) {
     const r = this.remotes.get(peer);
+    this.away.delete(peer);
+    if (!this.away.size) this.g.net.stopPolling();
     this.vs.playerLeft(peer, 'away');
     if (r) { r.remove(); this.remotes.delete(peer); }
+    this.lobby.delete(peer);                          // the seat is free; the row on the score table stays, marked left
+    this.g.net.broadcast({ t: 'left', peer, name: (r && r.name) || 'A player' }, true);   // guests remove the plane too
     this.g.toast(`${(r && r.name) || 'A player'} stopped responding`);
     const net = this.g.net;
     if (typeof net.drop === 'function') setTimeout(() => net.drop(peer), 1500);
@@ -470,6 +606,7 @@ export class Coop {
 
   applySnap(m) {
     const g = this.g;
+    this.reconnecting = false;                       // the host's snapshots are arriving again: the link is back
     this.score = m.sc; this.wave = m.w;
     if (this.versus && typeof m.tl === 'number') this.vs.timeLeft = m.tl;
     // enemies

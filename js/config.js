@@ -5,7 +5,7 @@ export const CFG = {
 
   // Build id: the self-check in index.html compares against this. A mismatch means the browser is running stale cached JS.
   // Whenever the code changes, bump this AND __EXPECT_BUILD in index.html.
-  build: '2026-11-16b',
+  build: '2026-11-22a',
 
 
   // ---------- Online leaderboard ----------
@@ -257,6 +257,10 @@ export const CFG = {
     quietAfter: 2,
     awayLimit: 30,
     pauseBudget: 60,
+    // A dropped connection (not just a hidden tab) pauses the match the same way, and the disconnected game
+    // retries the connection every reconnectEvery seconds. Back within awayLimit = rejoin with a snapshot of
+    // the members, the score and the pause state; later = left (a loss), same as a hidden tab that stayed hidden.
+    reconnectEvery: 4,
     dropEvery: 12,         // a power-up appears near the fight every 12 s (at most maxDrops at a time)
     maxDrops: 3,
     dropWeights: { heal: 4, missile: 2, shield: 2, rapid: 2, double: 2, afterburner: 1 },
