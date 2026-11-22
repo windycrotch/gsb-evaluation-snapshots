@@ -210,6 +210,21 @@ backends bind to the real types. Because the frame source is
 `resolveScene` → the same Pixi compositor as preview, the file matches the
 preview frame for frame.
 
+- **One frame enumeration, not three counts.** `planExport` produces
+  `plan.frameRange` — the exact list of timeline frames the loop renders — plus
+  `plan.transitionTails`, the windows in which an outgoing clip keeps drawing
+  past its own end. The render loop iterates `frameRange`, the progress
+  denominator is its length, and the decode schedule is built from the same
+  list, so a transition tail can never be rendered without being counted (or
+  counted without being rendered). No layer recomputes a frame count of its own.
+- **Cancellation is observed between render and encode too.** The signal is
+  checked at the top of each frame *and* after `renderFrame` resolves; a frame
+  that finishes rendering after the abort is released and never reaches the
+  writer or the completed counter, so progress cannot overshoot. Encoder errors
+  release the in-flight frame via the writer's `finally`, and the `finally`
+  around the whole run disposes source and writer while letting the original
+  error (not a cleanup exception) propagate.
+
 - **WebCodecs, muxed with `mp4-muxer` / `webm-muxer`** (both MIT, in-browser, no
   paid API). `VideoEncoder` runs in `realtime` latency mode (no B-frames, so
   decode order == presentation order); audio is mixed offline through an
@@ -223,9 +238,13 @@ preview frame for frame.
   every frame re-decoded from a keyframe. The efficient decode path needs all the
   wanted timestamps up front (it only emits a frame once it knows the next one, so
   a lazy feed deadlocks), so `planVideoDecodeSchedule` walks the export's frame
-  range first and records, per video, the source timestamps in request order.
+  list first and records, per video, the source timestamps in request order.
+  The plan-based overload takes `plan.frameRange` directly, so the schedule
+  covers exactly the frames the loop renders — transition tails included.
   Both the schedule and the render loop derive from `resolveScene`, which is what
-  keeps them in lockstep. Decoded frames reach the compositor through a
+  keeps them in lockstep: one media used by two clips at once (as happens on
+  every tail frame) yields one entry per clip request, never a merged entry.
+  Decoded frames reach the compositor through a
   canvas-backed texture in `MediaTextureCache`, so the renderer is unchanged.
   Media the decoder can't open falls back to element seeking.
 

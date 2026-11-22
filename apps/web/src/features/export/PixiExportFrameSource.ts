@@ -1,6 +1,6 @@
 "use client";
 
-import type { FrameSource } from "@cutaway/export-engine";
+import type { ExportPlan, FrameSource } from "@cutaway/export-engine";
 import type { MediaBlobStore } from "@cutaway/media-engine";
 import { planVideoDecodeSchedule, resolveScene, type Scene } from "@cutaway/render-engine";
 import type { ProjectDocument, Size } from "@cutaway/types";
@@ -39,11 +39,9 @@ export class PixiExportFrameSource implements FrameSource<VideoFrame> {
     project: ProjectDocument,
     store: MediaBlobStore,
     cache: MediaTextureCache,
-    resolution: Size,
-    frameRate: number,
-    startFrame: number,
-    endFrame: number,
+    plan: ExportPlan,
   ): Promise<PixiExportFrameSource> {
+    const { resolution, frameRate } = plan;
     const canvas = document.createElement("canvas");
     canvas.width = resolution.width;
     canvas.height = resolution.height;
@@ -53,8 +51,11 @@ export class PixiExportFrameSource implements FrameSource<VideoFrame> {
     await renderer.init(canvas, resolution.width, resolution.height, 1);
 
     // Every timestamp the export will need, planned before decoding starts —
-    // the decoders require the whole ordered list to walk each stream once.
-    const schedule = planVideoDecodeSchedule(project, startFrame, endFrame);
+    // the decoders require the whole ordered list to walk each stream once. The
+    // frame enumeration is the plan's own, so the schedule covers exactly the
+    // frames the render loop walks (transition tails included), one request per
+    // frame rather than a separately counted range.
+    const schedule = planVideoDecodeSchedule(project, plan);
     const decoders = await ExactVideoDecoders.create(project, store, schedule);
 
     // Give each exactly-decoded video a canvas-backed texture, so the renderer's

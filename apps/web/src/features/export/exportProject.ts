@@ -79,15 +79,7 @@ export async function exportProjectToBlob(
   throwIfCancelled();
 
   const cache = new MediaTextureCache(store);
-  const frameSource = await PixiExportFrameSource.create(
-    project,
-    store,
-    cache,
-    plan.resolution,
-    plan.frameRate,
-    plan.startFrame,
-    plan.endFrame,
-  );
+  const frameSource = await PixiExportFrameSource.create(project, store, cache, plan);
   const videoWriter = WebCodecsVideoWriter.create(plan, container, videoConfig);
 
   const bytes = await runVideoExport({

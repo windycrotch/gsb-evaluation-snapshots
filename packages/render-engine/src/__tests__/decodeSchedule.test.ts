@@ -154,4 +154,104 @@ describe("planVideoDecodeSchedule", () => {
   it("is empty for a range with no video", () => {
     expect(planVideoDecodeSchedule(createProject(), 0, 10).size).toBe(0);
   });
+
+  /**
+   * Two adjacent clips with a crossfade: the outgoing clip keeps drawing across
+   * its tail `[cut, cut + tail)`, so each tail frame produces two video requests
+   * (one per clip), mirroring what `resolveScene` hands the render loop.
+   */
+  function crossfadeProject(
+    cut: number,
+    tail: number,
+    total: number,
+    sameMedia = false,
+  ): ProjectDocument {
+    const track = createTrack({ kind: "video", index: 0 });
+    const outgoing = createClip({
+      id: "out",
+      trackId: track.id,
+      startFrame: 0,
+      durationFrames: cut,
+      content: videoContent("mA"),
+    });
+    const incoming = {
+      ...createClip({
+        id: "in",
+        trackId: track.id,
+        startFrame: cut,
+        durationFrames: total - cut,
+        content: videoContent(sameMedia ? "mA" : "mB"),
+      }),
+      transitionIn: { kind: "crossfade" as const, durationFrames: tail },
+    };
+    return projectWith([track], [outgoing, incoming]);
+  }
+
+  it("schedules the outgoing clip's tail frames past its own end", () => {
+    const project = crossfadeProject(10, 4, 20);
+    const schedule = planVideoDecodeSchedule(project, 0, 20);
+
+    // mA plays frames 0..13 (its 10 own frames plus tail frames 10..13), mB
+    // plays its 10 frames 10..19.
+    expect(schedule.get("mA")).toHaveLength(14);
+    expect(schedule.get("mB")).toHaveLength(10);
+    expect([...schedule.keys()].sort()).toEqual(["mA", "mB"]);
+  });
+
+  it("schedules one request per clip when the same media is shared across a tail", () => {
+    // Both clips use mA: during the four tail frames the media is needed twice
+    // per frame — collapsing them would leave the puller one frame short.
+    const project = crossfadeProject(10, 4, 20, true);
+    const schedule = planVideoDecodeSchedule(project, 0, 20);
+
+    // 14 outgoing requests + 10 incoming requests, all against the same media.
+    expect(schedule.size).toBe(1);
+    expect(schedule.get("mA")).toHaveLength(24);
+  });
+
+  it("matches resolveScene request-for-request across a transition tail", () => {
+    const project = crossfadeProject(10, 4, 20);
+    const expected: { mediaId: string; time: number }[] = [];
+    for (let frame = 0; frame < 20; frame += 1) {
+      for (const node of resolveScene(project, frame).nodes) {
+        if (node.content.kind === "media" && node.content.mediaKind === "video") {
+          expected.push({
+            mediaId: node.content.mediaId,
+            time: Math.max(0, node.content.sourceTimeSeconds),
+          });
+        }
+      }
+    }
+
+    const flattened = [...planVideoDecodeSchedule(project, 0, 20)].flatMap(([mediaId, times]) =>
+      times.map((time) => ({ mediaId, time })),
+    );
+    // Same multiset of (media, time) requests — the schedule never invents or
+    // drops a request relative to what the loop will actually make.
+    expect(flattened.sort(compareRequests)).toEqual(expected.sort(compareRequests));
+  });
+
+  it("accepts a plan-shaped frame enumeration and schedules exactly those frames", () => {
+    const project = crossfadeProject(10, 4, 20);
+    const frameRange = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
+
+    const fromPlan = planVideoDecodeSchedule(project, { frameRange });
+    const fromRange = planVideoDecodeSchedule(project, 0, 14);
+    expect(fromPlan).toEqual(fromRange);
+  });
+
+  it("covers a sub-range that ends mid-tail without over- or under-scheduling", () => {
+    const project = crossfadeProject(10, 4, 20);
+    // [8, 12): plain frames 8,9 and tail frames 10,11.
+    const schedule = planVideoDecodeSchedule(project, 8, 12);
+    expect(schedule.get("mA")).toHaveLength(4); // 8,9 plus two tail requests
+    expect(schedule.get("mB")).toHaveLength(2); // 10,11
+  });
 });
+
+function compareRequests(
+  a: { mediaId: string; time: number },
+  b: { mediaId: string; time: number },
+): number {
+  return a.mediaId.localeCompare(b.mediaId) || a.time - b.time;
+}
