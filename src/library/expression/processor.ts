@@ -27,6 +27,10 @@ registerProcessor(${JSON.stringify(name)}, class extends AudioWorkletProcessor {
   constructor(options) {
     super(options);
     this.port.onmessage = (event) => {
+      // Остановленный процессор ни на что не отвечает: его нода уже ушла
+      if (!this.running)
+        return;
+
       const data = event.data;
 
       if (data === ${JSON.stringify(STOP_MESSAGE)}) {

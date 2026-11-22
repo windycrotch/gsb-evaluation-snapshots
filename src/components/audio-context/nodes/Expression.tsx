@@ -1,4 +1,4 @@
-import { MAX_LENGTH, PROCESSOR_INPUTS, STOP_MESSAGE, compile, processorSource } from "$library/expression";
+import { ExpressionRuntime, MAX_LENGTH, PROCESSOR_INPUTS, STOP_MESSAGE, compile, processorSource } from "$library/expression";
 import { ReadonlySignal, Signal, computed, effect, signal, useSignalEffect } from "@preact/signals-react";
 import { group, icon } from "../_groups";
 import { prop, reactive } from "@vicimpa/decorators";
@@ -77,7 +77,6 @@ const ExpressionField = ({ text, draft, invalid, onCommit }: TExpressionFieldPro
 @reactive()
 export default class extends BaseNode {
   #out = new GainNode(ctx);
-  #version = 0;
 
   @store _a = new SignalNode(220, { default: 220 });
   @store _b = new SignalNode(0.5, { default: 0.5 });
@@ -110,85 +109,45 @@ export default class extends BaseNode {
     this._error.value && <div className={s.expressionError}>{this._error.value}</div>
   ));
 
-  // Ядро, которое должно играть; уходит в процессор, как только тот загрузится
-  #kernel: string | null = null;
-  #node: AudioWorkletNode | null = null;
-  #sent = 0;
-
-  #send() {
-    if (!this.#node || this.#kernel === null)
-      return;
-
-    this.#node.port.postMessage({ kernel: this.#kernel, id: ++this.#sent });
-  }
-
-  async #start(version: number) {
-    try {
-      const name = await processor();
-
-      if (version !== this.#version)
-        return;
-
-      const node = new AudioWorkletNode(ctx, name, {
-        numberOfInputs: 0,
-        numberOfOutputs: 1,
-        outputChannelCount: [1],
-      });
-
-      const unwire = dispose(
-        ...PROCESSOR_INPUTS.map(key => pipe(this[`_${key}`], node.parameters.get(key)!)),
-        pipe(node, this.#out),
-      );
-
-      node.port.onmessage = ({ data }) => {
-        // Ответ на устаревшее ядро не интересен
-        if (data?.id !== this.#sent)
-          return;
-
-        if (!data.ok) console.error(data.error);
-        this._loadError.value = data.ok ? '' : 'Failed to load the compiled expression';
-      };
-
-      this.#node = node;
-      this.#stopNode = () => {
-        node.port.onmessage = null;
-        unwire();
-        node.port.postMessage(STOP_MESSAGE);
-      };
-
-      this.#send();
-    } catch (error) {
-      if (version !== this.#version)
-        return;
-
-      console.error(error);
-      this._loadError.value = 'Failed to load the expression processor';
-    }
-  }
-
-  #stopNode: (() => void) | null = null;
-
   _connect = () => {
-    const version = ++this.#version;
-    this.#start(version);
+    // Рантайм следит, чтобы играла последняя рабочая формула: ждёт готовности
+    // процессора, переживает сломанные формулы и поднимает процессор после сбоя
+    const runtime = new ExpressionRuntime(
+      async () => {
+        const name = await processor();
+
+        const node = new AudioWorkletNode(ctx, name, {
+          numberOfInputs: 0,
+          numberOfOutputs: 1,
+          outputChannelCount: [1],
+        });
+
+        const unwire = dispose(
+          ...PROCESSOR_INPUTS.map(key => pipe(this[`_${key}`], node.parameters.get(key)!)),
+          pipe(node, this.#out),
+        );
+
+        return {
+          post: message => node.port.postMessage(message),
+          listen: handler => {
+            node.port.onmessage = handler && (event => handler(event.data));
+          },
+          stop: () => {
+            node.port.onmessage = null;
+            unwire();
+            node.port.postMessage(STOP_MESSAGE);
+          },
+        };
+      },
+      message => this._loadError.value = message,
+    );
 
     return dispose(
       effect(() => {
-        const result = this._compiled.value;
-
         // С ошибкой разбора продолжает играть последняя рабочая формула
-        if (!result.ok)
-          return;
-
-        this.#kernel = result.kernel;
-        this.#send();
+        runtime.submit(this._compiled.value);
       }),
-      () => {
-        this.#version++;
-        this.#stopNode?.();
-        this.#stopNode = null;
-        this.#node = null;
-      },
+      () => runtime.dispose(),
     );
   };
 

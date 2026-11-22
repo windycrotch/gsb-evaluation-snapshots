@@ -38,6 +38,8 @@ export type TTemplate = {
   structural: string[];
   // Особые ноды: вход и выход блока
   role?: 'input' | 'output';
+  // Проверка конфига до генерации кода, даже для ноды вне тракта: строка — причина отказа
+  validate?(config: TConfig): string | null;
   emit?(ctx: TEmitContext): TEmitted | string;
 };
 
@@ -71,6 +73,14 @@ export const mathOperation = (config: TConfig) => {
 const simple = (inputs: string[]): TTemplate['ports'] => () => ({ inputs, outputs: 1 });
 
 const passthrough: TTemplate['emit'] = ({ inputs }) => ({ code: [], out: inputs[0] });
+
+// Формула Expression из конфига — только через парсер и генератор library/expression
+const expressionResult = (config: TConfig, variables = new Map(expressionScope.variables)) => {
+  const source = configValue(config, 'expression');
+  return compile(typeof source === 'string' ? source : '', {
+    scope: { ...expressionScope, variables },
+  });
+};
 
 export const templates: Record<string, TTemplate> = {
   GroupInput: {
@@ -109,8 +119,12 @@ export const templates: Record<string, TTemplate> = {
   Expression: {
     structural: ['expression'],
     ports: simple(['_a', '_b', '_c', '_d']),
+    validate(config) {
+      // Любая сломанная формула роняет компиляцию всего блока с читаемой причиной
+      const result = expressionResult(config);
+      return result.ok ? null : `Expression: ${result.error}`;
+    },
     emit({ inputs, config, state, local, use }) {
-      const source = configValue(config, 'expression');
       const names = ['a', 'b', 'c', 'd'];
       const y1 = state('y1', '0');
       const variables = new Map(expressionScope.variables);
@@ -118,10 +132,7 @@ export const templates: Record<string, TTemplate> = {
       names.forEach((name, i) => variables.set(name, inputs[i]));
       variables.set('y1', y1);
 
-      // Формула проходит только через парсер и генератор library/expression
-      const result = compile(typeof source === 'string' ? source : '', {
-        scope: { ...expressionScope, variables },
-      });
+      const result = expressionResult(config, variables);
 
       if (!result.ok)
         return `Expression: ${result.error}`;

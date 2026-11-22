@@ -295,6 +295,42 @@ describe('block compiler: Expression', () => {
     expect(result).toEqual({ ok: false, reason: expect.stringMatching(/^Expression: /) });
   });
 
+  it('fails the whole block with a readable reason when any Expression formula is broken', () => {
+    // Обе ноды в тракте: вторая сломана — процессор для блока не собирается вовсе
+    const result = compileBlock(graph(
+      [EXPR('sin(a)'), EXPR('constructor'), OUT()],
+      [[[0, 4], [2, 0]], [[1, 4], [2, 0]]]
+    ));
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+
+    expect(result.reason).toMatch(/^Expression: /);
+    expect(result.reason).toContain('constructor');
+  });
+
+  it('fails even when the broken Expression does not reach an output', () => {
+    // Нода вне тракта всё равно роняет компиляцию: иначе блок молча играл бы не то
+    const result = compileBlock(graph(
+      [EXPR('a + 1', { _a: 1 }), EXPR('sin('), OUT()],
+      [[[0, 4], [2, 0]]]
+    ));
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+
+    expect(result.reason).toMatch(/^Expression: /);
+  });
+
+  it('compiles again after the formula is fixed and restores output', () => {
+    const broken = compileBlock(graph([EXPR('sin('), OUT()], [[[0, 4], [1, 0]]]));
+    expect(broken.ok).toBe(false);
+
+    // Та же топология с исправленной формулой — перекомпиляция успешна
+    const { run } = runner(graph([EXPR('a + 1', { _a: 1 }), OUT()], [[[0, 4], [1, 0]]]));
+    expect(run(3)).toEqual([[2, 2, 2]]);
+  });
+
   it.each([
     'constructor',
     'a.constructor',
@@ -514,6 +550,23 @@ describe('block processor', () => {
 
     processor.port.onmessage!({ data: STOP_MESSAGE });
     expect(processor.process([], [[new Float32Array(1)]], {})).toBe(false);
+  });
+
+  it('produces no samples after the stop message', () => {
+    const Processor = load(compiled(graph([MATH('plus', { _a: 1, _b: 2 }), OUT()], [[[0, 2], [1, 0]]])));
+    const processor = new Processor();
+    const params = { k0: new Float32Array([1]), k1: new Float32Array([2]) };
+    const out = [new Float32Array(2)];
+
+    expect(processor.process([], [out], params)).toBe(true);
+    expect([...out[0]]).toEqual([3, 3]);
+
+    processor.port.onmessage!({ data: STOP_MESSAGE });
+
+    // Ни одного сэмпла после остановки: выход не тронут
+    out[0].fill(9);
+    expect(processor.process([], [out], params)).toBe(false);
+    expect([...out[0]]).toEqual([9, 9]);
   });
 
   it('rejects unsafe processor names', () => {

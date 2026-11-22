@@ -67,6 +67,12 @@ export const compileBlock = (graph: TGraph): TCompileResult => {
     if (!template)
       return fail(`${typeof type === 'string' ? type : 'Node'} is not compilable`);
 
+    // Конфиг проверяется у каждой ноды, даже у той, что не достаёт до выхода
+    const invalid = template.validate?.(configs[i]);
+
+    if (typeof invalid === 'string')
+      return fail(invalid);
+
     const result = template.ports(configs[i]);
 
     if (typeof result === 'string')

@@ -8,6 +8,7 @@ export * from "./tokenizer";
 export * from "./parser";
 export * from "./codegen";
 export * from "./processor";
+export * from "./runtime";
 
 export type CompileResult =
   | { ok: true; ast: ExprNode; code: string; kernel: string; }

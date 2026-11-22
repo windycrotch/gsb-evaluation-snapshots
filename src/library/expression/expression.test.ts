@@ -335,3 +335,83 @@ describe('expression processor', () => {
     expect(() => processorSource('a"); alert(1); ("')).toThrow();
   });
 });
+
+describe('expression processor: failure and recovery', () => {
+  type Processor = {
+    port: { onmessage: ((event: { data: unknown; }) => void) | null; };
+    process(inputs: unknown[], outputs: Float32Array[][], parameters: Record<string, Float32Array>): boolean;
+  };
+
+  // Процессор с записью ответов, которые он шлёт обратно в ноду
+  const setup = () => {
+    const registered: Record<string, new (options?: unknown) => Processor> = {};
+    const replies: { ok: boolean; id?: number; }[] = [];
+
+    class AudioWorkletProcessor {
+      port = { onmessage: null, postMessage: (data: { ok: boolean; id?: number; }) => { replies.push(data); } };
+    }
+
+    run(
+      `(() => { ${processorSource('ExpressionTest')} })()`,
+      ['registerProcessor', 'AudioWorkletProcessor', 'sampleRate', 'currentFrame', 'Function'],
+      [(name: string, ctor: never) => registered[name] = ctor, AudioWorkletProcessor, 48000, 0, Function]
+    );
+
+    return { processor: new registered.ExpressionTest(), replies };
+  };
+
+  const send = (processor: Processor, src: string, id: number) => {
+    const result = compile(src);
+    if (!result.ok) throw result.error;
+    processor.port.onmessage!({ data: { kernel: result.kernel, id } });
+  };
+
+  const params = () => Object.fromEntries(PROCESSOR_INPUTS.map(key => [key, new Float32Array([0])]));
+
+  it('keeps playing the previous kernel when a broken kernel arrives', () => {
+    const { processor, replies } = setup();
+    send(processor, 'y1 + 1', 1);
+    expect(replies).toEqual([{ ok: true, id: 1 }]);
+
+    // Ядро, которое не собирается в функцию: процессор отвечает ошибкой…
+    processor.port.onmessage!({ data: { kernel: 'this is not (a kernel', id: 2 } });
+    expect(replies[1].ok).toBe(false);
+    expect(replies[1].id).toBe(2);
+
+    // …и продолжает играть прошлую формулу, а не тишину
+    const out = [new Float32Array(3)];
+    expect(processor.process([], [out], params())).toBe(true);
+    expect([...out[0]]).toEqual([1, 2, 3]);
+  });
+
+  it('recovers when a valid kernel arrives after a broken one', () => {
+    const { processor, replies } = setup();
+    send(processor, 'y1 + 1', 1);
+
+    const out = [new Float32Array(2)];
+    processor.process([], [out], params());
+    expect([...out[0]]).toEqual([1, 2]);
+
+    processor.port.onmessage!({ data: { kernel: '(((', id: 2 } });
+    expect(replies.at(-1)!.ok).toBe(false);
+
+    send(processor, 'y1 + 10', 3);
+    expect(replies.at(-1)).toEqual({ ok: true, id: 3 });
+
+    // y1 пережил сломанное ядро: 2 + 10, 12 + 10
+    processor.process([], [out], params());
+    expect([...out[0]]).toEqual([12, 22]);
+  });
+
+  it('ignores kernel messages after the stop message', () => {
+    const { processor, replies } = setup();
+    send(processor, '1', 1);
+
+    processor.port.onmessage!({ data: STOP_MESSAGE });
+    send(processor, '2', 2);
+
+    // Ни ответа, ни сэмплов: процессор остановлен
+    expect(replies).toHaveLength(1);
+    expect(processor.process([], [[new Float32Array(2)]], params())).toBe(false);
+  });
+});
