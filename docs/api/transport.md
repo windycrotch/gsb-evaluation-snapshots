@@ -15,6 +15,7 @@ The Transport system consists of several components:
 | `TransportBus` | Event bus for syncing components to transport |
 | `Scheduler` | Lookahead scheduler for jitter-free event scheduling |
 | `PhaseSequencer` | Utility for step sequencer patterns |
+| `acquireSharedTransport` / `releaseSharedTransport` | Reference-counted registry for the per-`AudioContext` shared transport |
 
 ## TransportProvider
 
@@ -319,6 +320,40 @@ bus.on('stop', () => console.log('Stopped'));
 // Clean up
 bus.dispose();
 ```
+
+## Shared Transport Registry
+
+Modules that all need the same clock (for example multiple `Clock` components) acquire a
+reference-counted shared transport instead of creating their own:
+
+```tsx
+import { acquireSharedTransport, releaseSharedTransport } from '@mode-7/mod';
+
+const lease = await acquireSharedTransport(audioContext);
+lease.bus.on('tick', (tick) => console.log(tick.beat));
+lease.transport.start();
+
+// Give the reference back when the module unmounts.
+releaseSharedTransport(audioContext, lease);
+// or, equivalently: lease.release();
+```
+
+Guarantees:
+
+- **Single instance per `AudioContext`** — concurrent `acquireSharedTransport` calls share one
+  load; only one worklet node is created and every caller receives the same `transport`/`bus`.
+- **Failures are not cached** — if the worklet fails to load, the acquisition rejects and a later
+  call retries and can succeed.
+- **Reference counted** — the instance is disposed only when the last reference is released.
+  Releasing a lease twice is a no-op, and a release from a previous generation cannot touch a
+  rebuilt instance.
+- **Clean rebuild** — acquiring after the count hit zero creates a fresh transport; listeners,
+  tick subscriptions and audio nodes from the disposed instance are detached and silent.
+
+Prefer releasing through the lease returned by `acquireSharedTransport`. Calling
+`releaseSharedTransport(audioContext)` without a lease releases the oldest outstanding
+acquisition, which is convenient for cleanup paths that only kept the context.
+
 
 ## Complete Example with TransportProvider
 

@@ -17,13 +17,22 @@ export class TransportBus {
   private listeners = new Map<TransportBusEvent, Set<TransportBusListener>>();
   private unsubscribeTransport: (() => void) | null = null;
   private unsubscribeTick: (() => void) | null = null;
+  private disposed = false;
 
   constructor(transport: TransportLike) {
     this.transport = transport;
     this.bindTransport(transport);
   }
 
+  get isDisposed(): boolean {
+    return this.disposed;
+  }
+
   on(event: TransportBusEvent, listener: TransportBusListener): () => void {
+    if (this.disposed) {
+      // A disposed bus is inert: subscribing after teardown must never fire.
+      return () => {};
+    }
     const set = this.listeners.get(event) ?? new Set();
     set.add(listener);
     this.listeners.set(event, set);
@@ -42,6 +51,9 @@ export class TransportBus {
   }
 
   emitTick(time = this.transport.currentTime): void {
+    if (this.disposed) {
+      return;
+    }
     const transport = this.transport;
     const beat = transport.getBeatAtTime(time);
     const bpm = 'bpm' in transport ? (transport as Transport).bpm : 120;
@@ -49,6 +61,10 @@ export class TransportBus {
   }
 
   dispose(): void {
+    if (this.disposed) {
+      return;
+    }
+    this.disposed = true;
     if (this.unsubscribeTransport) {
       this.unsubscribeTransport();
       this.unsubscribeTransport = null;
@@ -89,10 +105,21 @@ export class TransportBus {
   }
 
   private emit(event: TransportBusEvent, payload: TransportBusTick | TransportLike): void {
+    if (this.disposed) {
+      return;
+    }
     const set = this.listeners.get(event);
     if (!set) {
       return;
     }
-    set.forEach((listener) => listener(payload));
+    // Iterate over a snapshot: listeners may unsubscribe during dispatch.
+    Array.from(set).forEach((listener) => {
+      if (this.disposed) {
+        return;
+      }
+      if (this.listeners.get(event)?.has(listener)) {
+        listener(payload);
+      }
+    });
   }
 }

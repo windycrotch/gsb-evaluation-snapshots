@@ -61,6 +61,7 @@ export class WorkletTransport implements TransportLike {
   private listeners = new Set<TickListener>();
   private eventListeners = new Map<TransportEvent, Set<WorkletTransportListener>>();
   private tickIntervalSec: number;
+  private disposed = false;
 
   private constructor(context: AudioContext, options: WorkletTransportOptions) {
     this.context = context;
@@ -102,8 +103,12 @@ export class WorkletTransport implements TransportLike {
     return instance;
   }
 
+  get isDisposed(): boolean {
+    return this.disposed;
+  }
+
   getNode(): AudioWorkletNode | null {
-    return this.node;
+    return this.disposed ? null : this.node;
   }
 
   get currentTime(): number {
@@ -119,11 +124,17 @@ export class WorkletTransport implements TransportLike {
   }
 
   onTick(listener: TickListener): () => void {
+    if (this.disposed) {
+      return () => {};
+    }
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   }
 
   on(event: TransportEvent, listener: WorkletTransportListener): () => void {
+    if (this.disposed) {
+      return () => {};
+    }
     const set = this.eventListeners.get(event) ?? new Set();
     set.add(listener);
     this.eventListeners.set(event, set);
@@ -184,12 +195,17 @@ export class WorkletTransport implements TransportLike {
   }
 
   dispose(): void {
-    if (!this.node) {
+    if (this.disposed) {
       return;
     }
-    this.node.port.onmessage = null;
-    this.node.disconnect();
-    this.node = null;
+    this.disposed = true;
+    // Detach the message handler first so no in-flight tick can reach listeners
+    // after teardown, then tear down the audio graph.
+    if (this.node) {
+      this.node.port.onmessage = null;
+      this.node.disconnect();
+      this.node = null;
+    }
     if (this.keepAliveGain) {
       this.keepAliveGain.disconnect();
       this.keepAliveGain = null;
@@ -199,17 +215,20 @@ export class WorkletTransport implements TransportLike {
   }
 
   private post(message: WorkletCommand): void {
-    if (!this.node) {
+    if (this.disposed || !this.node) {
       return;
     }
     this.node.port.postMessage(message);
   }
 
   private emit(event: TransportEvent): void {
+    if (this.disposed) {
+      return;
+    }
     const set = this.eventListeners.get(event);
     if (!set) {
       return;
     }
-    set.forEach((listener) => listener(this));
+    Array.from(set).forEach((listener) => listener(this));
   }
 }

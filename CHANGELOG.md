@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Shared transport lifecycle** - `acquireSharedTransport` now returns a reference-counted lease and is safe under concurrent acquisition, unmount-before-ready and worklet load failures:
+  - Concurrent acquisitions share a single worklet instance per `AudioContext` and all receive the same transport/bus.
+  - Failed worklet loads are no longer cached; the next acquisition retries.
+  - The shared instance is disposed only when the last reference is released, and a later acquisition rebuilds a fresh instance.
+  - `TransportBus` is inert after `dispose()`: no `start`/`stop`/`tempo`/`seek`/`tick` is forwarded to cleared listeners, and subscribing after teardown does nothing.
+  - `Clock` releases only its own audio edges on unmount and returns its reference if it unmounts while loading.
+
 ## [0.1.13] - 2026-02-15
 
 ### Added

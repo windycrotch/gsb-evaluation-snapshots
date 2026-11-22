@@ -17,6 +17,12 @@ export { WorkletTransport } from './transportWorklet';
 export type { WorkletTransportOptions, TransportTick } from './transportWorklet';
 export { TransportBus } from './transportBus';
 export type { TransportBusEvent, TransportBusTick } from './transportBus';
+export {
+  acquireSharedTransport,
+  releaseSharedTransport,
+  getSharedTransportRefCount,
+} from './transportRegistry';
+export type { SharedTransportEntry, SharedTransportLease } from './transportRegistry';
 export { Scheduler } from './scheduler';
 export type { Schedulable, SchedulerOptions } from './scheduler';
 export { PhaseSequencer } from './sequencer';

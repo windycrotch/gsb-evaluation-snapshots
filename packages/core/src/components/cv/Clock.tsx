@@ -3,6 +3,7 @@ import { useAudioContext } from '../../context/AudioContext';
 import { ModStreamRef } from '../../types/ModStream';
 import { useControlledState } from '../../hooks/useControlledState';
 import { acquireSharedTransport, releaseSharedTransport } from '../../transportRegistry';
+import type { SharedTransportLease } from '../../transportRegistry';
 import { WorkletTransport } from '../../transportWorklet';
 import { TransportBus } from '../../transportBus';
 
@@ -60,6 +61,7 @@ export const Clock = React.forwardRef<ClockHandle, ClockProps>(({
   const transportRef = useRef<WorkletTransport | null>(null);
   const transportBusRef = useRef<TransportBus | null>(null);
   const workletNodeRef = useRef<AudioWorkletNode | null>(null);
+  const leaseRef = useRef<SharedTransportLease | null>(null);
 
   // Create clock output once
   useEffect(() => {
@@ -112,8 +114,15 @@ export const Clock = React.forwardRef<ClockHandle, ClockProps>(({
     }
 
     let cancelled = false;
-    acquireSharedTransport(audioContext).then(({ transport, bus }) => {
-      if (cancelled) return;
+    acquireSharedTransport(audioContext).then((lease) => {
+      if (cancelled) {
+        // Unmounted while loading: give the reference straight back so the
+        // shared instance is not pinned forever.
+        releaseSharedTransport(audioContext, lease);
+        return;
+      }
+      leaseRef.current = lease;
+      const { transport, bus } = lease;
       transportRef.current = transport;
       transportBusRef.current = bus;
       const node = transport.getNode();
@@ -139,18 +148,28 @@ export const Clock = React.forwardRef<ClockHandle, ClockProps>(({
       workletNodeRef.current = node;
       setIsWorkletReady(true);
     }).catch((err) => {
+      if (cancelled) return;
       console.error('Failed to load transport worklet', err);
     });
 
     return () => {
       cancelled = true;
+      const node = workletNodeRef.current;
+      if (node) {
+        // Only tear down this clock's own edges into the shared worklet node:
+        // other clocks still routed through it must keep working.
+        try { node.disconnect(clockGain); } catch (e) {}
+        if (startGainRef.current) {
+          try { node.disconnect(startGainRef.current); } catch (e) {}
+        }
+        if (stopGainRef.current) {
+          try { node.disconnect(stopGainRef.current); } catch (e) {}
+        }
+        workletNodeRef.current = null;
+      }
       clockGain.disconnect();
       output.current = null;
       clockGainRef.current = null;
-      if (workletNodeRef.current) {
-        try { workletNodeRef.current.disconnect(); } catch (e) {}
-        workletNodeRef.current = null;
-      }
       if (startGainRef.current) {
         startGainRef.current.disconnect();
         startGainRef.current = null;
@@ -165,8 +184,9 @@ export const Clock = React.forwardRef<ClockHandle, ClockProps>(({
       if (stopOutput) {
         stopOutput.current = null;
       }
-      if (audioContext) {
-        releaseSharedTransport(audioContext);
+      if (leaseRef.current) {
+        releaseSharedTransport(audioContext, leaseRef.current);
+        leaseRef.current = null;
       }
       transportRef.current = null;
       transportBusRef.current = null;

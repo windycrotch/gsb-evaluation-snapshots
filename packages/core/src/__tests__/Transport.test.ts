@@ -799,6 +799,33 @@ describe('WorkletTransport', () => {
     expect(true).toBe(true);
   });
 
+  it('should stay silent after dispose', async () => {
+    const context = createMockAudioContext();
+    const transport = await WorkletTransport.create(context);
+
+    const tickListener = jest.fn();
+    const eventListener = jest.fn();
+    transport.onTick(tickListener);
+    transport.on('start', eventListener);
+
+    transport.dispose();
+
+    expect(transport.isDisposed).toBe(true);
+    expect(transport.getNode()).toBeNull();
+
+    // Neither events nor worklet messages may reach cleared listeners.
+    transport.start();
+    expect(tickListener).not.toHaveBeenCalled();
+    expect(eventListener).not.toHaveBeenCalled();
+
+    // Subscribing after dispose is inert.
+    const lateListener = jest.fn();
+    transport.onTick(lateListener);
+    transport.on('start', lateListener);
+    transport.start();
+    expect(lateListener).not.toHaveBeenCalled();
+  });
+
   it('should throw when AudioWorklet is not supported', async () => {
     const context = {
       currentTime: 0,
@@ -980,5 +1007,61 @@ describe('TransportBus', () => {
     bus.dispose(); // Should not throw
 
     expect(true).toBe(true);
+  });
+
+  it('should stay silent for manual ticks after dispose', () => {
+    const context = createMockAudioContext(5);
+    const transport = new Transport(context, { bpm: 120 });
+    const bus = new TransportBus(transport);
+
+    const listener = jest.fn();
+    bus.on('tick', listener);
+    bus.dispose();
+
+    bus.emitTick(5);
+
+    expect(listener).not.toHaveBeenCalled();
+    expect(bus.isDisposed).toBe(true);
+  });
+
+  it('should not deliver anything to subscribers added after dispose', () => {
+    const context = createMockAudioContext();
+    const transport = new Transport(context);
+    const bus = new TransportBus(transport);
+
+    bus.dispose();
+
+    const onStart = jest.fn();
+    const onTick = jest.fn();
+    const unsubscribeStart = bus.on('start', onStart);
+    bus.on('tick', onTick);
+
+    transport.start();
+    bus.emitTick();
+
+    expect(onStart).not.toHaveBeenCalled();
+    expect(onTick).not.toHaveBeenCalled();
+    expect(() => unsubscribeStart()).not.toThrow();
+  });
+
+  it('should not call a listener that is unsubscribed mid-dispatch', () => {
+    const context = createMockAudioContext();
+    const transport = new Transport(context);
+    const bus = new TransportBus(transport);
+
+    const second = jest.fn();
+    let unsubscribeSecond: () => void = () => {};
+    bus.on('start', () => unsubscribeSecond());
+    unsubscribeSecond = bus.on('start', second);
+
+    transport.start();
+
+    expect(second).not.toHaveBeenCalled();
+
+    // The listener that stayed subscribed still fired its own invocation.
+    const stillSubscribed = jest.fn();
+    bus.on('stop', stillSubscribed);
+    transport.stop();
+    expect(stillSubscribed).toHaveBeenCalledTimes(1);
   });
 });
