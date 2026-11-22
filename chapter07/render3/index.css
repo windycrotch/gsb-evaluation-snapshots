@@ -26,3 +26,17 @@ label,
 button {
   width: 120px;
 }
+
+.status {
+  width: 120px;
+  min-height: 48px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #555;
+  word-break: break-all;
+}
+
+.status.error {
+  color: #c00;
+  font-weight: bold;
+}
