@@ -158,7 +158,11 @@ export class Skeleton {
       }
     }
     for (const c of this.constraints) {
+      const wasActive = c.active;
       c.active = c.sourceActive() && (!c.data.skinRequired || (this.skin !== null && this.skin.constraints.includes(c.data.index)));
+      // a physics constraint the skin switches off or on starts from rest: it neither keeps simulating while hidden nor
+      // resumes with the velocity (and the clock) it had when it was hidden
+      if (c.kind === 'physics' && c.active !== wasActive) c.reset();
       if (c.active) c.sort(this);
     }
     for (const bone of bones) this.sortBone(bone);
