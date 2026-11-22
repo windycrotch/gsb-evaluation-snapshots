@@ -6,11 +6,12 @@
     <title>Japanese Garden</title>
   </head>
   <body>
-    <div class="loading-overlay">
+    <div class="loading-overlay" id="loading-overlay" data-state="loading">
       <svg
         class="koi-loading"
         xmlns="http://www.w3.org/2000/svg"
         viewBox="0 0 67.4 86.7"
+        aria-hidden="true"
       >
         <defs />
         <defs>
@@ -34,6 +35,16 @@
           </g>
         </g>
       </svg>
+      <p class="loading-overlay__text" id="loading-overlay-text">
+        正在加载锦鲤池…
+      </p>
+    </div>
+    <div class="load-error" id="load-error" role="alert" hidden>
+      <h2 class="load-error__title" id="load-error-title">部分资源加载失败</h2>
+      <p class="load-error__message" id="load-error-message"></p>
+      <button class="load-error__retry" id="load-retry" type="button">
+        重试
+      </button>
     </div>
     <canvas class="webgl"></canvas>
   </body>
