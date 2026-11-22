@@ -118,6 +118,7 @@
     "scripts": {
         "dev": "vite --config ./scripts/build/vite.config.js",
         "debug": "vite --debug --config ./scripts/build/vite.config.js",
+        "test": "node --test \"test/**/*.test.js\"",
         "clean": "node -e \"if (require('fs').existsSync('./dist')) require('fs').rmSync('./dist', { recursive: true, force: true })\"",
         "build": "npm run clean && npm run build:headless && npm run build:basic && npm run build:default && npm run build:secure && npm run build:dev",
         "build:headless": "vite build --mode headless:mjs --config ./scripts/build/vite.config.js && vite build --mode headless:iife --config ./scripts/build/vite.config.js",

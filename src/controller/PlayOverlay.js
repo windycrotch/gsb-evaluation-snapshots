@@ -3,19 +3,19 @@ import DomSmith from '../../lib/dom/DomSmith.js';
 /**
  * The PlayOverlay component displays a large play button centered in the viewport, allowing the user to toggle media playback.
  * It dynamically hides or shows itself in response to player events and can optionally dim the background when paused.
- * The overlay can also be shown only once after media load, based on configuration.
+ * The overlay can be shown only once after media load, based on configuration.
  * @exports module:src/controller/PlayOverlay
  * @requires lib/dom/DomSmith
  * @author   Frank Kudermann - alphanull
- * @version  1.1.0
+ * @version  1.2.0
  * @license  MIT
  */
 export default class PlayOverlay {
 
     /**
-     * Holds the instance configuration for this component.
+     * Holds the instance configuration.
      * @type     {Object}
-     * @property {boolean} [dimmer=false]    If enabled, dims the viewport background when media is paused.
+     * @property {boolean} [dimmer=false]    If enabled, dims the viewport background when paused.
      * @property {boolean} [showOnce=false]  If enabled, shows the overlay only once after the media has loaded.
      */
     #config = {
@@ -34,6 +34,32 @@ export default class PlayOverlay {
      * @type {number[]}
      */
     #subscriptions;
+
+    /**
+     * Token of the permanent subscription to engine switch requests.
+     * @type {number}
+     */
+    #engineSetSub;
+
+    /**
+     * Token of the subscription to failed engine switches.
+     * @type {number}
+     */
+    #engineFailedSub;
+
+    /**
+     * Whether the capability-bound subscriptions are currently active. Guarantees that re-entering the same
+     * capability state does not accumulate subscriptions.
+     * @type {boolean}
+     */
+    #capabilitySubsActive = false;
+
+    /**
+     * Set to `true` once {@link module:src/controller/PlayOverlay#destroy} ran, so late (async) events become no-ops
+     * instead of touching detached DOM.
+     * @type {boolean}
+     */
+    #destroyed = false;
 
     /**
      * Reference to the DomSmith Instance for the UI element.
@@ -84,7 +110,9 @@ export default class PlayOverlay {
         if (this.#config.dimmer) domConfig._nodes.push({ className: 'vip-play-overlay-dimmer' });
 
         this.#overlay = new DomSmith(domConfig, parent.getElement());
-        this.#player.subscribe('player/engine/set', this.#onEngineSet);
+
+        this.#engineSetSub = this.#player.subscribe('player/engine/set', this.#onEngineSet);
+        this.#engineFailedSub = this.#player.subscribe('player/engine/switchfailed', this.#onEngineSwitchFailed);
 
     }
 
@@ -93,6 +121,8 @@ export default class PlayOverlay {
      * @listens module:src/core/Media#media/ready
      */
     #onMediaReady = () => {
+
+        if (this.#destroyed) return;
 
         this.#isDisabled = false;
 
@@ -106,7 +136,7 @@ export default class PlayOverlay {
      */
     #togglePlay = () => {
 
-        if (this.#isDisabled) return;
+        if (this.#destroyed || this.#isDisabled) return;
 
         if (this.#player.getState('media.paused')) this.#player.media.play();
         else this.#player.media.pause();
@@ -119,7 +149,7 @@ export default class PlayOverlay {
      */
     #onPlay = () => {
 
-        if (this.#isDisabled) return;
+        if (this.#destroyed || this.#isDisabled) return;
 
         if (this.#config.showOnce) this.#isDisabled = true;
         this.#overlay.wrapper.classList.add('is-hidden');
@@ -132,14 +162,15 @@ export default class PlayOverlay {
      */
     #onPause = () => {
 
-        if (this.#isDisabled) return;
+        if (this.#destroyed || this.#isDisabled) return;
 
         this.#overlay.wrapper.classList.remove('is-hidden');
 
     };
 
     /**
-     * Invoked when the engine is switched.
+     * Invoked when an engine switch is requested. Manages the capability-bound subscriptions as paired
+     * add/remove operations, so repeated switches never accumulate subscriptions.
      * @param {Object} data          The event data.
      * @param {Object} data.from     The previous engine.
      * @param {Object} data.to       The new engine.
@@ -147,32 +178,102 @@ export default class PlayOverlay {
      * @listens module:src/core/Player#player/engine/set
      */
     #onEngineSet = ({ from, to, options }) => {
+
+        if (this.#destroyed) return;
+
         if (!from.capabilities.play && to.capabilities.play) {
-            if (options.resume) this.#enable(); else {
+            if (options.resume) {
+                this.#enable();
+            } else {
                 this.#overlay.wrapper.style.display = '';
-                this.#subscriptions = [
-                    ['media/ready', this.#onMediaReady],
-                    ['media/play', this.#onPlay],
-                    ['media/pause', this.#onPause],
-                    ['media/canplay', this.#enable],
-                    ['media/error', this.#disable],
-                    ['data/nomedia', this.#disable]
-                ].map(([event, handler]) => this.#player.subscribe(event, handler));
+                this.#addCapabilitySubscriptions();
             }
         }
+
         if (from.capabilities.play && !to.capabilities.play) {
-            if (options.suspend) this.#disable(); else {
+            if (options.suspend) {
+                this.#disable();
+            } else {
                 this.#overlay.wrapper.style.display = 'none';
-                this.#player.unsubscribe(this.#subscriptions);
+                this.#removeCapabilitySubscriptions();
             }
         }
+
     };
+
+    /**
+     * Invoked when an engine switch failed and the player rolled back to the previously active engine.
+     * Reconciles the overlay with the engine that is actually current.
+     * @param {Object} data       The event data.
+     * @param {Object} data.from  The engine that remained active after rollback.
+     * @listens module:src/core/Player#player/engine/switchfailed
+     */
+    #onEngineSwitchFailed = ({ from }) => {
+
+        if (this.#destroyed) return;
+
+        if (from.capabilities.play) {
+
+            this.#overlay.wrapper.style.display = '';
+            this.#addCapabilitySubscriptions();
+
+            if (this.#player.getState('media.paused') === false) this.#onPlay();
+            else this.#onPause();
+
+            this.#enable();
+
+        } else {
+
+            this.#overlay.wrapper.style.display = 'none';
+            this.#removeCapabilitySubscriptions();
+            this.#disable();
+
+        }
+
+    };
+
+    /**
+     * Adds the capability-bound subscriptions once. Is idempotent: calling it while the subscriptions are
+     * already active is a no-op, so re-entering the same capability state cannot stack duplicates.
+     */
+    #addCapabilitySubscriptions() {
+
+        if (this.#capabilitySubsActive || this.#destroyed) return;
+
+        this.#subscriptions = [
+            ['media/ready', this.#onMediaReady],
+            ['media/play', this.#onPlay],
+            ['media/pause', this.#onPause],
+            ['media/canplay', this.#enable],
+            ['media/error', this.#disable],
+            ['data/nomedia', this.#disable]
+        ].map(([event, handler]) => this.#player.subscribe(event, handler));
+
+        this.#capabilitySubsActive = true;
+
+    }
+
+    /**
+     * Removes the capability-bound subscriptions added by {@link module:src/controller/PlayOverlay#addCapabilitySubscriptions}.
+     * Is idempotent and safe to call when no subscriptions are active.
+     */
+    #removeCapabilitySubscriptions() {
+
+        if (!this.#capabilitySubsActive) return;
+
+        this.#player.unsubscribe(this.#subscriptions);
+        this.#subscriptions = null;
+        this.#capabilitySubsActive = false;
+
+    }
 
     /**
      * This method enables the play button.
      * @listens module:src/core/Media#media/canplay
      */
     #enable = () => {
+
+        if (this.#destroyed) return;
 
         if (this.#isDisabled && this.#config.showOnce) return;
 
@@ -189,6 +290,8 @@ export default class PlayOverlay {
      */
     #disable = () => {
 
+        if (this.#destroyed) return;
+
         this.#isDisabled = true;
         if (this.#overlay.button) this.#overlay.button.disabled = true;
         this.#overlay.wrapper.classList.add('is-disabled');
@@ -200,9 +303,13 @@ export default class PlayOverlay {
      */
     destroy() {
 
+        if (this.#destroyed) return;
+        this.#destroyed = true;
+
+        this.#removeCapabilitySubscriptions();
+        this.#player.unsubscribe(this.#engineSetSub);
+        this.#player.unsubscribe(this.#engineFailedSub);
         this.#overlay.destroy();
-        this.#player.unsubscribe(this.#subscriptions);
-        this.#player.unsubscribe('player/engine/set', this.#onEngineSet);
         this.#player = this.#overlay = null;
 
     }

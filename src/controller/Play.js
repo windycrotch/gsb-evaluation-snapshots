@@ -7,7 +7,7 @@ import DomSmith from '../../lib/dom/DomSmith.js';
  * @exports module:src/controller/Play
  * @requires lib/dom/DomSmith
  * @author   Frank Kudermann - alphanull
- * @version  1.1.0
+ * @version  1.2.0
  * @license  MIT
  */
 export default class Play {
@@ -23,6 +23,32 @@ export default class Play {
      * @type {number[]}
      */
     #subscriptions;
+
+    /**
+     * Token of the permanent subscription to engine switch requests.
+     * @type {number}
+     */
+    #engineSetSub;
+
+    /**
+     * Token of the subscription to failed engine switches.
+     * @type {number}
+     */
+    #engineFailedSub;
+
+    /**
+     * Whether the capability-bound subscriptions are currently active. Guarantees that re-entering the same
+     * capability state does not accumulate subscriptions.
+     * @type {boolean}
+     */
+    #capabilitySubsActive = false;
+
+    /**
+     * Set to `true` once {@link module:src/controller/Play#destroy} ran, so late (async) events become no-ops
+     * instead of touching detached DOM.
+     * @type {boolean}
+     */
+    #destroyed = false;
 
     /**
      * Reference to the DomSmith instance of the play button.
@@ -56,7 +82,8 @@ export default class Play {
             $tooltip: { player, text: () => this.#player.getState('media.paused') ? playText : pauseText }
         }, parent.getElement('left'));
 
-        this.#player.subscribe('player/engine/set', this.#onEngineSet);
+        this.#engineSetSub = this.#player.subscribe('player/engine/set', this.#onEngineSet);
+        this.#engineFailedSub = this.#player.subscribe('player/engine/switchfailed', this.#onEngineSwitchFailed);
 
     }
 
@@ -65,6 +92,8 @@ export default class Play {
      * @listens module:src/core/Data#data/ready
      */
     #onDataReady = () => {
+
+        if (this.#destroyed) return;
 
         this.#enable();
         if (this.#player.getState('media.paused') === false) this.#onPlay();
@@ -77,6 +106,8 @@ export default class Play {
      */
     #togglePlay = () => {
 
+        if (this.#destroyed) return;
+
         if (this.#player.getState('media.paused')) this.#player.media.play();
         else this.#player.media.pause();
 
@@ -87,6 +118,8 @@ export default class Play {
      * @listens module:src/core/Media#media/play
      */
     #onPlay = () => {
+
+        if (this.#destroyed) return;
 
         this.#dom.playButton.classList.remove('play');
         this.#dom.playButton.classList.add('pause');
@@ -101,6 +134,8 @@ export default class Play {
      */
     #onPause = () => {
 
+        if (this.#destroyed) return;
+
         this.#dom.playButton.classList.add('play');
         this.#dom.playButton.classList.remove('pause');
         this.#dom.playButton.setAttribute('aria-pressed', 'false');
@@ -109,7 +144,10 @@ export default class Play {
     };
 
     /**
-     * Invoked when the engine is switched.
+     * Invoked when an engine switch is requested. Manages the capability-bound subscriptions as paired
+     * add/remove operations: entering a playback-capable engine adds them exactly once, leaving it removes
+     * them exactly once, so repeated switches (including re-entering the same capability state) never
+     * accumulate subscriptions.
      * @param {Object} data          The event data.
      * @param {Object} data.from     The previous engine.
      * @param {Object} data.to       The new engine.
@@ -118,28 +156,100 @@ export default class Play {
      */
     #onEngineSet = ({ from, to, options }) => {
 
+        if (this.#destroyed) return;
+
         if (!from.capabilities.play && to.capabilities.play) {
-            if (options.resume) this.#enable(); else {
+
+            if (options.resume) {
+                this.#enable();
+            } else {
                 this.#dom.playButton.style.display = '';
-                this.#subscriptions = [
-                    ['data/ready', this.#onDataReady],
-                    ['media/pause', this.#onPause],
-                    ['media/play', this.#onPlay],
-                    ['data/nomedia', this.#disable],
-                    ['media/error', this.#disable],
-                    ['media/canplay', this.#enable]
-                ].map(([event, handler]) => this.#player.subscribe(event, handler));
+                this.#addCapabilitySubscriptions();
             }
+
         }
 
         if (from.capabilities.play && !to.capabilities.play) {
-            if (options.suspend) this.#disable(); else {
+
+            if (options.suspend) {
+                this.#disable();
+            } else {
                 this.#dom.playButton.style.display = 'none';
-                this.#player.unsubscribe(this.#subscriptions);
+                this.#removeCapabilitySubscriptions();
             }
+
         }
 
     };
+
+    /**
+     * Invoked when an engine switch failed and the player rolled back to the previously active engine.
+     * Reconciles the button with the engine that is actually current instead of leaving it in the
+     * intermediate state produced by the failed `player/engine/set`.
+     * @param {Object} data       The event data.
+     * @param {Object} data.from  The engine that remained active after rollback.
+     * @listens module:src/core/Player#player/engine/switchfailed
+     */
+    #onEngineSwitchFailed = ({ from }) => {
+
+        if (this.#destroyed) return;
+
+        if (from.capabilities.play) {
+
+            // rolled back onto a playback-capable engine: make sure the button is visible, has exactly one
+            // set of capability subscriptions and reflects the actual paused/playing state again
+            this.#dom.playButton.style.display = '';
+            this.#addCapabilitySubscriptions();
+
+            if (this.#player.getState('media.paused') === false) this.#onPlay();
+            else this.#onPause();
+
+            this.#enable();
+
+        } else {
+
+            this.#dom.playButton.style.display = 'none';
+            this.#removeCapabilitySubscriptions();
+            this.#disable();
+
+        }
+
+    };
+
+    /**
+     * Adds the capability-bound subscriptions once. Is idempotent: calling it while the subscriptions are
+     * already active is a no-op, so re-entering the same capability state cannot stack duplicates.
+     */
+    #addCapabilitySubscriptions() {
+
+        if (this.#capabilitySubsActive || this.#destroyed) return;
+
+        this.#subscriptions = [
+            ['data/ready', this.#onDataReady],
+            ['media/pause', this.#onPause],
+            ['media/play', this.#onPlay],
+            ['data/nomedia', this.#disable],
+            ['media/error', this.#disable],
+            ['media/canplay', this.#enable]
+        ].map(([event, handler]) => this.#player.subscribe(event, handler));
+
+        this.#capabilitySubsActive = true;
+
+    }
+
+    /**
+     * Removes the capability-bound subscriptions added by {@link module:src/controller/Play#addCapabilitySubscriptions}.
+     * Is idempotent and safe to call when no subscriptions are active.
+     */
+    #removeCapabilitySubscriptions() {
+
+        if (!this.#capabilitySubsActive) return;
+
+        this.#player.unsubscribe(this.#subscriptions);
+        this.#subscriptions = null;
+        this.#capabilitySubsActive = false;
+
+    }
 
     /**
      * Enables the play button functionality. This method listens to canplay events in order to restore a usable state again
@@ -147,6 +257,8 @@ export default class Play {
      * @listens module:src/core/Media#media/canplay
      */
     #enable = () => {
+
+        if (this.#destroyed) return;
 
         this.#dom.playButton.disabled = false;
 
@@ -159,6 +271,8 @@ export default class Play {
      */
     #disable = () => {
 
+        if (this.#destroyed) return;
+
         this.#dom.playButton.disabled = true;
 
     };
@@ -168,9 +282,13 @@ export default class Play {
      */
     destroy() {
 
+        if (this.#destroyed) return;
+        this.#destroyed = true;
+
+        this.#removeCapabilitySubscriptions();
+        this.#player.unsubscribe(this.#engineSetSub);
+        this.#player.unsubscribe(this.#engineFailedSub);
         this.#dom.destroy();
-        this.#player.unsubscribe(this.#subscriptions);
-        this.#player.unsubscribe('player/engine/set', this.#onEngineSet);
         this.#player = this.#dom = null;
 
     }

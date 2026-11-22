@@ -94,6 +94,26 @@ export default class Player {
     #currentEngine;
 
     /**
+     * Promise chain serializing engine switches, so that switch requests take effect in the order they were initiated.
+     * A later switch can never be overwritten by an earlier switch that happens to settle afterwards.
+     * @type {Promise}
+     */
+    #engineSwitchQueue = Promise.resolve();
+
+    /**
+     * Monotonic id of the latest engine switch request. Used to detect stale requests after the player was destroyed.
+     * @type {number}
+     */
+    #engineSwitchId = 0;
+
+    /**
+     * Whether this player instance has been destroyed. Any in-flight engine switch must stop at the next continuation point
+     * and must neither publish events nor touch the DOM once this is `true`.
+     * @type {boolean}
+     */
+    #destroyed = false;
+
+    /**
      * Intersection Observer instance.
      * @type {IntersectionObserver}
      */
@@ -363,18 +383,42 @@ export default class Player {
     }
 
     /**
+     * Marks an already registered engine as the current one without running a switch (no events, no
+     * enable/disable hooks). Intended for bootstrapping an initial engine and for testing the switch
+     * machinery from a defined starting point.
+     * @param  {string} engineId  The id of a previously {@link module:src/core/Player#addEngine added} engine.
+     * @param  {symbol} [apiKey]  Token needed to grant access in secure mode.
+     * @throws {Error}            If apiKey does not match in secure mode or the engine does not exist.
+     */
+    seedEngine(engineId, apiKey) {
+
+        if (this.#apiKey && this.#apiKey !== apiKey) throw new Error('[Visionplayer] Secure mode: API access denied.');
+        if (!this.#engines.has(engineId)) throw new Error(`[VisionPlayer] Engine ${engineId} does not exist.`);
+        this.#currentEngine = engineId;
+
+    }
+
+    /**
      * Sets the current engine, disabling the old engine.
+     *
+     * Switch requests are serialized and applied in the order they were initiated: each request is enqueued behind the
+     * previous one, so a slow earlier switch can never overwrite a later switch that settles sooner. If enabling the
+     * target engine fails (or it turns out to be unplayable), the previous engine is re-enabled and remains the current
+     * engine, and a `player/engine/switchfailed` event is published. After {@link module:src/core/Player#destroy},
+     * any in-flight switch stops silently without publishing further events or modifying the DOM.
      * @param  {string}  newEngine        The id of the engine to set.
      * @param  {Object}  [options]        The options for the engine.
      * @param  {boolean} options.suspend  If `true`, the current engine will be suspended.
      * @param  {boolean} options.resume   If `true`, the new engine will be resumed.
      * @param  {Object}  options.params   Additional parameters for engine switching.
      * @param  {symbol}  [apiKey]         Token needed to grant access in secure mode.
-     * @throws {Error}                    If apiKey does not match in secure mode.
-     * @throws {Error}                    If engine does not exist.
-     * @fires module:src/core/Player#engine/set
+     * @throws  {Error}                    If apiKey does not match in secure mode.
+     * @throws  {Error}                    If engine does not exist.
+     * @fires   module:src/core/Player#player/engine/set
+     * @fires   module:src/core/Player#player/engine/switched
+     * @fires   module:src/core/Player#player/engine/switchfailed
      */
-    async setEngine(newEngine, options = { suspend: false, resume: false, params: {} }, apiKey) {
+    setEngine(newEngine, options = { suspend: false, resume: false, params: {} }, apiKey) {
 
         if (this.#apiKey) {
             const lastArg = arguments[arguments.length - 1], // eslint-disable-line prefer-rest-params
@@ -384,11 +428,42 @@ export default class Player {
 
         if (!this.#engines.has(newEngine)) throw new Error(`[VisionPlayer] Engine ${newEngine} does not exist.`);
 
-        if (this.#currentEngine === newEngine) return;
+        // Enqueue behind any pending switch so requests always become effective in initiation order.
+        const requestId = this.#engineSwitchId += 1,
+              request = this.#engineSwitchQueue.then(() => this.#performEngineSwitch(requestId, newEngine, options));
+
+        // keep the chain alive even if a previous switch rejected, and expose the outcome to the caller
+        this.#engineSwitchQueue = request.then(() => {}, () => {});
+
+        return request;
+
+    }
+
+    /**
+     * Performs a single, serialized engine switch. Only ever invoked through the queue created by
+     * {@link module:src/core/Player#setEngine}.
+     * @private
+     * @param   {number}  requestId  The sequential id assigned when the request was initiated.
+     * @param   {string}  newEngine  The id of the engine to switch to.
+     * @param   {Object}  options    The switch options forwarded to the engine hooks.
+     * @returns {Promise<string>}    Resolves with the id of the engine that is current after the switch.
+     * @fires   module:src/core/Player#player/engine/set
+     * @fires   module:src/core/Player#player/engine/switched
+     * @fires   module:src/core/Player#player/engine/switchfailed
+     */
+    async #performEngineSwitch(requestId, newEngine, options) {
+
+        // the player was destroyed while this request was waiting in the queue
+        if (this.#destroyed) return this.#currentEngine;
+
+        // another (later) request already handled this engine, or the player is gone: nothing to do
+        if (this.#currentEngine === newEngine) return this.#currentEngine;
 
         const oldEngine = this.#currentEngine,
-              oldCapabilities = this.#engines.get(oldEngine)?.capabilities ?? {},
-              newCapabilities = this.#engines.get(newEngine)?.capabilities ?? {};
+              oldEntry = this.#engines.get(oldEngine),
+              newEntry = this.#engines.get(newEngine),
+              oldCapabilities = oldEntry?.capabilities ?? {},
+              newCapabilities = newEntry?.capabilities ?? {};
 
         this.publish('player/engine/set', {
             from: { id: oldEngine, capabilities: oldCapabilities },
@@ -396,17 +471,83 @@ export default class Player {
             options
         }, { async: false }, this.#apiKey);
 
-        await this.#engines.get(oldEngine)?.engine.disable(options);
+        try {
 
-        this.#currentEngine = newEngine;
+            await oldEntry?.engine.disable(options);
 
-        await this.#engines.get(newEngine).engine.enable(options);
+            // destroyed while disabling the old engine: do not touch any state or publish anything
+            if (this.#destroyed) return oldEngine;
 
-        this.publish('player/engine/switched', {
-            from: { id: oldEngine, capabilities: oldCapabilities },
-            to: { id: newEngine, capabilities: newCapabilities },
-            options
-        }, { async: false }, this.#apiKey);
+            this.#currentEngine = newEngine;
+
+            await newEntry.engine.enable(options);
+
+            // destroyed while enabling the new engine: do not touch any state or publish anything
+            if (this.#destroyed) return oldEngine;
+
+            this.publish('player/engine/switched', {
+                from: { id: oldEngine, capabilities: oldCapabilities },
+                to: { id: newEngine, capabilities: newCapabilities },
+                options
+            }, { async: false }, this.#apiKey);
+
+            return newEngine;
+
+        } catch (error) {
+
+            // The target engine could not be enabled (or disabling failed). Restore the previous engine so that
+            // the actual playable engine and the internal current-engine reference never diverge.
+            await this.#rollbackEngineSwitch(requestId, { oldEngine, oldEntry, newEngine, newEntry, oldCapabilities, newCapabilities, options, error });
+            throw error;
+
+        }
+
+    }
+
+    /**
+     * Restores the previously active engine after a failed switch and notifies subscribers so that control components
+     * can reconcile their UI with the engine that is actually current. If the player was destroyed meanwhile, all
+     * reconciliation is skipped.
+     * @private
+     * @param   {number} requestId  The sequential id of the failed request.
+     * @param   {Object} context    The switch context captured before the failure.
+     * @returns {Promise<void>}
+     * @fires   module:src/core/Player#player/engine/switchfailed
+     */
+    async #rollbackEngineSwitch(requestId, context) {
+
+        if (this.#destroyed) return;
+
+        const { oldEngine, oldEntry, newEngine, newEntry, oldCapabilities, newCapabilities, options, error } = context,
+              payload = extra => ({
+                  requestId,
+                  from: { id: oldEngine, capabilities: oldCapabilities },
+                  to: { id: newEngine, capabilities: newCapabilities },
+                  options,
+                  error,
+                  ...extra
+              });
+
+        let rollbackError;
+
+        // best-effort shutdown of the half-enabled target engine
+        await newEntry?.engine.disable(options).catch(() => {});
+        if (this.#destroyed) return;
+
+        if (oldEntry) {
+            try {
+                await oldEntry.engine.enable(options);
+            } catch (e) {
+                rollbackError = e;
+            }
+            if (this.#destroyed) return;
+        }
+
+        // Whether or not re-enabling succeeded, the reference must point at the engine that is actually
+        // supposed to run - the new one never became playable.
+        this.#currentEngine = oldEngine;
+
+        this.publish('player/engine/switchfailed', payload(rollbackError ? { rollbackError } : {}), { async: false }, this.#apiKey);
 
     }
 
@@ -715,6 +856,10 @@ export default class Player {
      * This method removes all component, as well as the player root element.
      */
     destroy() {
+
+        // Mark the instance as dead first, so any in-flight engine switch stops at its next continuation
+        // point and neither publishes events nor touches the DOM anymore.
+        this.#destroyed = true;
 
         if (this.#config.player.initOnIntersection) this.#intersectionObserver.disconnect();
         if (this.#config.player.initOnIdle) {
@@ -1093,6 +1238,22 @@ export default class Player {
  * @param {boolean} data.options.suspend    If `true`, the old engine was suspended.
  * @param {boolean} data.options.resume     If `true`, the new engine will be resumed.
  * @param {Object}  data.options.params     Additional parameters for engine switching.
+ */
+
+/**
+ * Fired when an engine switch failed and the player has rolled back to the previously active engine.
+ * The current engine therefore still equals `data.from.id` and control components should reconcile their
+ * state with that engine instead of remaining in an intermediate state.
+ * @event  module:src/core/Player#player/engine/switchfailed
+ * @param {Object}  data                     The data for the event.
+ * @param {number}  data.requestId           Sequential id of the failed switch request.
+ * @param {string}  data.from.id             The id of the engine that remained active after rollback.
+ * @param {Object}  data.from.capabilities   The capabilities of that engine.
+ * @param {string}  data.to.id               The id of the engine that failed to enable.
+ * @param {Object}  data.to.capabilities     The capabilities of that engine.
+ * @param {Object}  data.options             The options for the engine switch.
+ * @param {Error}   data.error               The error that caused the switch to fail.
+ * @param {Error}   [data.rollbackError]     Present if re-enabling the previous engine also failed.
  */
 
 /**
