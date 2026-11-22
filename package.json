@@ -1,0 +1,12 @@
+{
+  "name": "music-visualizer",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Music visualizer driven by the Web Audio API and THREE.js",
+  "scripts": {
+    "test": "node --test test/visualizer.test.js"
+  },
+  "devDependencies": {
+    "playwright-core": "1.49.1"
+  }
+}

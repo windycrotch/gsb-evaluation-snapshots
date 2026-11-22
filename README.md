@@ -11,6 +11,20 @@ User's can either upload a song or choose one that has been uploaded by other us
 
 ### Technical Details
 The core of this project was built using THREE.js in order to render the visualizers in canvas. When a user uploads a song to visual it also gets stored in Google Firebase so that the song can be reused by other people. This is also useful for people that do not want to upload a song. Web Audio Api analyzes the song data so that it could be visualized by THREE.js.
+
+### Playback Sessions
+Every "start playing this song" action — a library selection or a local upload — goes through one `startPlaybackSession()` path. Starting a session first disposes the previous one completely: it cancels the animation frame, disconnects the `MediaElementSource` and `AnalyserNode`, pauses and unloads the old `<audio>` element, releases the blob URL, disposes scene geometry/materials, loses the WebGL context, removes the canvas and destroys the dat.GUI instance. A fresh analyser, renderer, canvas, GUI and animation loop are then built from scratch, so exactly one session drives the screen at a time and a superseded loop can never touch the scene again.
+
+The Firebase upload happens alongside the local playback session and never blocks or resets it. If the upload fails, the track still plays locally and the failure is announced both inline in the library panel and in a status toast, leaving the page ready for another selection or upload.
+
+### Tests
+The end-to-end checks run in headless Chromium through Playwright and are fully offline: the Firebase SDK is replaced by a controllable stub, and audio is generated locally as WAV tones whose spectra identify which track is actually driving the analyser.
+
+```
+npm install
+npx playwright-core install chromium
+npm test
+```
   
 ### Sample Code
 This sample code was how I generated the random floating shapes around the scene.

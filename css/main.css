@@ -137,6 +137,38 @@ button:focus-visible {
     font-size: 0.875rem;
 }
 
+#upload-status,
+#status-toast {
+    margin: 0;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 0.875rem;
+}
+
+#upload-status[data-kind="error"],
+#status-toast[data-kind="error"] {
+    border-color: #c2606a;
+    background: #3a1f24;
+    color: #ffd7dc;
+}
+
+#upload-status[data-kind="success"],
+#status-toast[data-kind="success"] {
+    border-color: #4f7c5b;
+    background: #1d3223;
+    color: #d3f3dc;
+}
+
+#status-toast {
+    position: absolute;
+    z-index: 3;
+    /* Sits just above the player panel, which is 44px of controls plus padding. */
+    inset: auto var(--right) calc(var(--bottom) + 112px) auto;
+    max-width: min(24rem, calc(100% - var(--left) - var(--right)));
+    background: var(--panel);
+}
+
 #audio-disclaimer strong {
     display: block;
     margin-bottom: 2px;

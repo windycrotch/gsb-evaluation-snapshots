@@ -10,16 +10,24 @@
     <body>
         <script src="https://www.gstatic.com/firebasejs/4.3.1/firebase.js"></script>
         <script>
-        // Initialize Firebase
-        var config = {
-            apiKey: "AIzaSyABAEIKB88h6gU1NOBNk3SGhOztgCH6bUw",
-            authDomain: "kantelabs-threejs.firebaseapp.com",
-            databaseURL: "https://kantelabs-threejs.firebaseio.com",
-            projectId: "kantelabs-threejs",
-            storageBucket: "gs://kantelabs-threejs.appspot.com/",
-            messagingSenderId: "972862435246"
-        };
-        firebase.initializeApp(config);
+        // Initialize Firebase. The app stays usable without the SDK (library
+        // and uploads are simply unavailable), so a CDN failure must not stop
+        // the page from loading.
+        if (typeof firebase !== 'undefined') {
+            var config = {
+                apiKey: "AIzaSyABAEIKB88h6gU1NOBNk3SGhOztgCH6bUw",
+                authDomain: "kantelabs-threejs.firebaseapp.com",
+                databaseURL: "https://kantelabs-threejs.firebaseio.com",
+                projectId: "kantelabs-threejs",
+                storageBucket: "gs://kantelabs-threejs.appspot.com/",
+                messagingSenderId: "972862435246"
+            };
+            try {
+                firebase.initializeApp(config);
+            } catch (error) {
+                console.error('Firebase could not be initialized.', error);
+            }
+        }
         </script>
         <div class="toolbar" role="group" aria-label="Visualizer controls">
             <button type="button" id="library-toggle" aria-controls="past-songs" aria-expanded="false">Tracks</button>
@@ -37,6 +45,7 @@
                 <strong>User-Provided Audio</strong>
                 Audio is provided by users. We do not supply or control the music played here.
             </p>
+            <p id="upload-status" role="status" aria-live="polite" hidden></p>
             <div class="library-search">
                 <span class="search-icon" aria-hidden="true"></span>
                 <input type="search" id="song-search" placeholder="Search songs..." aria-label="Search songs" aria-controls="prevSongs">
@@ -48,6 +57,8 @@
         </dialog>
 
         <section id="camera-settings" class="panel settings" aria-label="Camera settings" hidden></section>
+
+        <p id="status-toast" role="status" aria-live="polite" hidden></p>
 
         <section class="panel player" aria-label="Audio player">
             <div id="track-title" title="Smooth Operator" aria-live="polite">Smooth Operator</div>
