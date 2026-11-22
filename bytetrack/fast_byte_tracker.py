@@ -36,9 +36,14 @@ class FastSTrack(BaseTrack):
         self.tracklet_len = 0
 
     # -- 状态推进 ----------------------------------------------------------
-    def activate(self, kalman_filter, frame_id):
+    def activate(self, kalman_filter, frame_id, id_counter=None):
+        """激活一条新轨迹。
+
+        id_counter 为实现了 ``next_id()`` 的对象时从该实例取号（多路同进程互不
+        串号）；为 None 时回退到类级全局计数器，保持历史调用兼容。
+        """
         self.kalman_filter = kalman_filter
-        self.track_id = self.next_id()
+        self.track_id = id_counter.next_id() if id_counter is not None else self.next_id()
         self.mean, self.covariance = kalman_filter.initiate(self.tlwh_to_xyah(self._tlwh))
         self.tracklet_len = 0
         self.state = TrackState.Tracked
@@ -136,6 +141,27 @@ class FastSTrack(BaseTrack):
         return "OT_{}_({}-{})".format(self.track_id, self.start_frame, self.end_frame)
 
 
+class _IdCounter(object):
+    """跟踪器实例私有的轨迹 ID 计数器。
+
+    生产环境每条 Pipeline 跑在独立进程里，类级 ``BaseTrack._count`` 天然隔离；
+    但同进程多跟踪器（测试、多路合并推理、单元测试桩）会共用全局计数器导致编号
+    串号。实例计数器让每个 FastByteTracker 都从 1 开始独立编号。
+    """
+
+    __slots__ = ("_count",)
+
+    def __init__(self):
+        self._count = 0
+
+    def next_id(self):
+        self._count += 1
+        return self._count
+
+    def reset(self):
+        self._count = 0
+
+
 class FastByteTracker(object):
     def __init__(
         self,
@@ -144,6 +170,7 @@ class FastByteTracker(object):
         track_buffer=30,
         match_thresh=0.8,
         mot20=False,
+        removed_buffer=256,
     ):
         self.tracked_stracks = []
         self.lost_stracks = []
@@ -158,15 +185,38 @@ class FastByteTracker(object):
         self.buffer_size = int(frame_rate / 30.0 * track_buffer)
         self.max_time_lost = self.buffer_size
         self.kalman_filter = KalmanFilterFast()
-        self.removed_buffer = 1000
+        # removed_stracks 仅用于调试/统计，不参与匹配；封顶防止长时间运行无界增长
+        self.removed_buffer = removed_buffer
+        # 实例私有 ID 计数器：多路同进程互不串号，重连/续轨时不重置
+        self.id_counter = _IdCounter()
 
     def reset(self):
+        """彻底清空跟踪状态（仅用于全新流；重连续轨请用 on_stream_resume）。"""
         self.tracked_stracks = []
         self.lost_stracks = []
         self.removed_stracks = []
         self.frame_id = 0
         self.kalman_filter = KalmanFilterFast()
-        self.reset_id()
+        self.id_counter.reset()
+
+    def on_stream_resume(self):
+        """解码器重连成功后的续轨钩子。
+
+        与 :meth:`reset` 的关键区别：
+
+        * **不重置** ``id_counter``：后续新轨迹延续已有编号，不会从 1 重新分配；
+        * **不清空** ``lost_stracks`` / ``removed_stracks``：历史轨迹仍可被 IoU
+          匹配捞回；
+        * 把当前在跑的轨迹标记为 Lost：断流期间没有检测帧推进，下一帧检测到达时
+          走 refind 路径重新关联（ByteTrack 原生的 lost→tracked 匹配）。
+        """
+        for track in self.tracked_stracks:
+            if track.state == TrackState.Tracked:
+                track.mark_lost()
+                self.lost_stracks.append(track)
+        self.tracked_stracks = []
+        # frame_id 不回退：超时判定（frame_id - end_frame）以实际处理帧为准，
+        # 断流期间没有 update() 调用，不会误判超时。
 
     # ------------------------------------------------------------------
     def update(self, output_results, img_info=None, img_size=None):
@@ -332,7 +382,7 @@ class FastByteTracker(object):
             track = det_remain[i]
             if track.score < self.det_thresh:
                 continue
-            track.activate(self.kalman_filter, self.frame_id)
+            track.activate(self.kalman_filter, self.frame_id, id_counter=self.id_counter)
             activated_starcks.append(track)
 
         # ---- Step 5：清理超时的 lost -------------------------------------
@@ -349,8 +399,12 @@ class FastByteTracker(object):
         self.lost_stracks.extend(lost_stracks)
         self.lost_stracks = sub_stracks(self.lost_stracks, self.removed_stracks)
         self.removed_stracks.extend(removed_stracks)
+        # 双保险，保证 removed_stracks 在任意输入序列下都有界：
+        # 1) 正常路径下超时轨迹已在 Step 5 被摘除，列表只保留近期 removed；
+        # 2) 极端情况（大量未确认轨迹被瞬时清理）超出容量时丢弃最旧条目，
+        #    避免长时间运行后轨迹表/removed_stracks 无界膨胀。
         if len(self.removed_stracks) > self.removed_buffer:
-            self.removed_stracks = self.removed_stracks[-self.removed_buffer:]
+            del self.removed_stracks[: len(self.removed_stracks) - self.removed_buffer]
         self.tracked_stracks, self.lost_stracks = remove_duplicate_stracks(
             self.tracked_stracks, self.lost_stracks
         )

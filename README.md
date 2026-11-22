@@ -125,6 +125,26 @@ python main.py
 
 建议通过 AI 理解整体架构思路，并结合自身业务进行定制化实现
 
+### 5. 本地测试（无需摄像头 / GPU）
+
+解码—跟踪链路在断流重连、PTS 对齐、续轨、长时运行有界性上的协同逻辑提供了
+纯 Python 参考实现（`streaming/`）与桩解码器，可在普通开发机上跑完整测试：
+
+```bash
+pip install lap
+python -I -m pytest tests/ -q
+```
+
+测试覆盖：正常帧内容与 pts、断流重连后 pts 单调且轨迹编号延续、连续异常帧
+触发重拉时的状态重置、多路并发互不串扰、数千帧长时运行轨迹表有界。
+桩与生产 NVDEC/FFmpeg 链路的差异见 [`tests/README.md`](./tests/README.md)。
+
+**重连续轨约定**：`Decoder.consume_reconnect()` 是重连成功的边沿接口，
+`main.process_one_frame` 在取帧后消费它并调用 `tracker.on_stream_resume()`——
+跟踪器保留 ID 计数器与 lost 轨迹（走原生 lost→tracked 重新关联），而不是
+`reset()` 全部重新分配。解码器输出帧在尺寸不变时复用同一块显存，调用方不得
+跨帧持有旧帧，需要保留时显式 `.cpu()` / `.clone()`。
+
 ## Benchmark
 
 测试日期: 2026-01-25

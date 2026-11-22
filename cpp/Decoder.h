@@ -41,6 +41,9 @@ public:
     int                              get_width() const { return width; }
     int                              get_height() const { return height; }
     double                           get_fps() const { return fps; }
+    int                              get_reconnect_count() const { return reconnect_count; }
+    // 读取并清除"自上次查询以来发生过重连"标志，供 Python 协调层通知跟踪器续轨
+    bool                             consume_reconnect();
 
 private:
     void   init_ffmpeg(const std::string &filename);
@@ -79,12 +82,14 @@ private:
     int         decoder_threads     = 2;
     int         surfaces            = 2;
     std::string hwaccel             = "cuda";
-    int         reconnect_attempts  = 0;
+    int         reconnect_attempts  = 0;   // 当前这一轮断流内的失败尝试次数
+    int         reconnect_count     = 0;   // 生命周期内成功重连总次数（单调递增）
+    bool        reconnect_pending   = false;  // 重连成功但尚未被 consume_reconnect 取走
     bool        is_streaming_source = false;
     int         bad_frame_streak    = 0;
     double      last_input_pts      = -1.0;
     double      last_output_pts     = -1.0;
-    double      nominal_frame_delta = 0.0;
+    double      nominal_frame_delta = 0.0;  // 标称帧间隔（常量，不随帧内容漂移）
     double      pts_offset          = 0.0;
 
     // NPP 流上下文：构造时初始化一次，每帧只更新 hStream

@@ -59,7 +59,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("next_frame", &Decoder::next_frame, py::call_guard<py::gil_scoped_release>())
         .def("get_width", &Decoder::get_width)
         .def("get_height", &Decoder::get_height)
-        .def("get_fps", &Decoder::get_fps);
+        .def("get_fps", &Decoder::get_fps)
+        .def("get_reconnect_count", &Decoder::get_reconnect_count)
+        .def("consume_reconnect", &Decoder::consume_reconnect);
 
     py::class_<Encoder>(m, "Encoder")
         .def(py::init([](const std::string& output_url, int width, int height, std::string codec, int bitrate,

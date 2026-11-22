@@ -9,6 +9,9 @@ class TrackState(object):
 
 
 class BaseTrack(object):
+    # 类级计数器仅用于向后兼容（历史代码/单实例场景）。多 Pipeline 同进程运行时
+    # 各跟踪器应通过自己的 id 计数器实例分配 ID，避免轨迹编号跨流串号，
+    # 详见 FastByteTracker 的 id_counter 与 FastSTrack.activate。
     _count = 0
 
     track_id = 0

@@ -269,13 +269,21 @@ bool Decoder::try_reconnect() {
         finished          = false;
         output_this_frame = true;
         bad_frame_streak  = 0;
+        // 只重置源时间戳基准；last_output_pts 保留，输出时间轴不倒退、不跳变。
+        // 与 streaming/pts_align.py 的 PtsAligner.on_reconnect() 语义一致。
         last_input_pts    = -1.0;
+        pts_offset        = 0.0;
         if (nominal_frame_delta <= 0.0 && fps > 0.0) {
             nominal_frame_delta = 1.0 / fps;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(reconnect_delay_ms));
         try {
             init_ffmpeg(source_url);
+            // 重连成功：累计计数并置位边沿标志，供 Python 协调层通知跟踪器续轨
+            reconnect_count += 1;
+            reconnect_pending = true;
+            // 新一轮断流的失败计数清零
+            reconnect_attempts = 0;
             // std::cerr << "[Decoder] 重连成功: " << source_url << std::endl;
             return true;
         } catch (const std::exception& e) {
@@ -287,8 +295,21 @@ bool Decoder::try_reconnect() {
     return false;
 }
 
+bool Decoder::consume_reconnect() {
+    bool pending = reconnect_pending;
+    reconnect_pending = false;
+    return pending;
+}
+
 double Decoder::align_pts(double pts) {
-    double expected = nominal_frame_delta > 0.0 ? nominal_frame_delta : (fps > 0.0 ? 1.0 / fps : 0.04);
+    // 与 streaming/pts_align.py 的 PtsAligner.align() 保持同一语义。
+    // 标称帧间隔是常量：只取帧率的倒数，不再用 EMA 跟随帧内容平滑
+    // （旧实现 0.98*old+0.02*clamped 会在长时间运行后把标称间隔带偏，
+    //  且 EMA 状态在重连后残留）。
+    const double expected =
+        nominal_frame_delta > 0.0 ? nominal_frame_delta : (fps > 0.0 ? 1.0 / fps : 0.04);
+
+    // 情况 1：源没有时间戳，按标称间隔补点
     if (pts < 0.0) {
         if (last_output_pts < 0.0) {
             last_output_pts = 0.0;
@@ -297,6 +318,9 @@ double Decoder::align_pts(double pts) {
         }
         return last_output_pts;
     }
+
+    // 情况 2：新序列首帧（启动或重连后）。只锚定输出轴，不使用源绝对值，
+    // 因此源 pts 从 0 重新开始也不会产生回退。
     if (last_input_pts < 0.0) {
         last_input_pts = pts;
         if (last_output_pts < 0.0) {
@@ -307,22 +331,24 @@ double Decoder::align_pts(double pts) {
         pts_offset = last_output_pts - pts;
         return last_output_pts;
     }
+
+    // 情况 3：常规帧，只依赖相邻 delta —— 天然免疫源时间戳整体回跳
     double raw_delta = pts - last_input_pts;
+    last_input_pts   = pts;
     if (raw_delta <= 0.0) {
+        // 回退/重复帧：钳回标称间隔，保证严格递增
         raw_delta = expected;
     }
     double tol       = max_delay_ms > 0 ? (max_delay_ms / 1000.0) : (expected * 2.0);
     double min_delta = expected - tol;
     if (min_delta < 0.0) min_delta = 0.0;
     double max_delta = expected + tol;
-    double clamped   = raw_delta;
     if (raw_delta < min_delta || raw_delta > max_delta) {
-        clamped = expected;
+        // 网络抖动/丢包导致的异常间隔：钳回标称间隔，避免输出大跳
+        raw_delta = expected;
     }
-    nominal_frame_delta  = expected * 0.98 + clamped * 0.02;
-    last_input_pts       = pts;
-    last_output_pts     += clamped;
-    pts_offset           = last_output_pts - pts;
+    last_output_pts += raw_delta;
+    pts_offset       = last_output_pts - pts;
     return last_output_pts;
 }
 

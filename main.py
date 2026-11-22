@@ -18,6 +18,48 @@ from cpp import Decoder, Encoder
 from yolo26.det import YOLO26DetTRT
 
 
+def process_one_frame(decoder, tracker, model_det, encoder, draw=True):
+    """单帧处理：解码 → (重连协同) → 检测 → 跟踪 → 绘制 → 编码。
+
+    抽成模块级函数后，整条链路可用 stub decoder/tracker 在无 GPU 环境下单测
+    （见 tests/test_pipeline_integration.py）。
+
+    显存所有权约定：``decoder.next_frame()`` 在尺寸不变时复用同一块显存，返回的
+    tensor 在下一次取帧时被覆盖。本函数在同一轮调用内完成检测/绘制/编码，不跨帧
+    持有帧 tensor；``.cpu().numpy()`` 产生独立的宿主内存副本，绘制结果不会回写
+    解码器缓冲。
+    """
+    frame, pts = decoder.next_frame()
+
+    # 重连协同：解码器重建成功后，让跟踪器进入续轨状态而不是 reset——
+    # 保留 track_id 计数器与 lost 轨迹，下一帧检测走 lost→tracked 重新关联。
+    if hasattr(decoder, "consume_reconnect") and decoder.consume_reconnect():
+        tracker.on_stream_resume()
+
+    det_results = model_det(frame)  # (N, 6): x1,y1,x2,y2,score,cls
+
+    det_results = det_results.cpu().numpy()
+    tracker_results = tracker.update(det_results)  # (N, 7): x1,y1,x2,y2,score,cls,track_id
+
+    if draw:
+        # .cpu() 即一次显式拷贝：annotated_frame 与解码器复用缓冲是两块内存，
+        # 下一次 next_frame() 覆盖显存不会影响本帧绘制内容。
+        annotated_frame = frame.cpu().numpy()
+
+        for x1, y1, x2, y2, score, cls_id, track_id in tracker_results:
+            osd.draw_bbox(
+                annotated_frame,
+                (int(x1), int(y1)),
+                (int(x2), int(y2)),
+                color=(64, 64, 255),
+                label=f"#{int(track_id)} {int(cls_id)}",
+            )
+
+        encoder.encode(torch.from_numpy(annotated_frame), pts)
+
+    return pts, tracker_results
+
+
 class Pipeline(mp.Process):
     def __init__(self, gpu, input_url, output_url, engine_path):
         super().__init__()
@@ -80,69 +122,33 @@ class Pipeline(mp.Process):
 
         frame_count = 0
         sum_wait = 0
-        sum_det = 0
-        sum_track = 0
-        sum_encode = 0
+        sum_cost = 0
 
         while 1:
             t0 = time.time()
 
-            # 解码
-            # pts 为帧时间戳
+            # 解码 / 重连协同 / 检测 / 跟踪 / 绘制 / 编码统一在辅助函数内完成
             try:
-                frame, pts = decoder.next_frame()
+                pts, _tracker_results = process_one_frame(
+                    decoder, tracker, model_det, encoder
+                )
             except Exception as e:
                 print(f"{self.input_url} 读取结束: {e}")
                 break
 
             frame_count += 1
-
             t1 = time.time()
 
-            # 推理
-            det_results = model_det(frame)  # (N, 6): x1,y1,x2,y2,score,cls
-
-            t2 = time.time()
-
-            # 跟踪
-            det_results = det_results.cpu().numpy()
-            tracker_results = tracker.update(det_results)  # (N, 7): x1,y1,x2,y2,score,cls,track_id
-
-            t3 = time.time()
-
-            # 绘制
-            annotated_frame = frame.cpu().numpy()
-
-            for x1, y1, x2, y2, score, cls_id, track_id in tracker_results:
-                osd.draw_bbox(
-                    annotated_frame,
-                    (int(x1), int(y1)),
-                    (int(x2), int(y2)),
-                    color=(64, 64, 255),
-                    label=f"#{int(track_id)} {int(cls_id)}",
-                )
-
-            encoder.encode(torch.from_numpy(annotated_frame), pts)
-
-            t4 = time.time()
-
             sum_wait += t1 - t0
-            sum_det += t2 - t1
-            sum_track += t3 - t2
-            sum_encode += t4 - t3
+            sum_cost += t1 - t0
 
             if frame_count == 1000:
                 print(
                     f"[{time.strftime('%m/%d/%Y-%H:%M:%S', time.localtime())}] {self.input_url}, "
-                    f"Det: {sum_det:.2f}ms, "
-                    f"Track: {sum_track:.2f}ms, "
-                    f"Encode: {sum_encode:.2f}ms, "
-                    f"Wait: {sum_wait:.2f}ms "
+                    f"Per-frame wall: {sum_cost:.2f}ms "
                 )
                 frame_count = 0
-                sum_det = 0
-                sum_track = 0
-                sum_encode = 0
+                sum_cost = 0
                 sum_wait = 0
 
         # 编码结束
