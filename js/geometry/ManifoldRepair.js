@@ -1,6 +1,71 @@
 import * as THREE from 'three';
 import { MeshData } from '../core/MeshData.js';
 
+/**
+ * Inspect a MeshData for the defects repairMeshData can fix.
+ * Pure: never mutates the input. Counts are derived from the faces
+ * themselves (not the edge map) so broken imports are detected reliably.
+ */
+export function analyzeMeshData(meshData) {
+  const analysis = {
+    vertexCount: meshData?.vertices?.size ?? 0,
+    faceCount: meshData?.faces?.size ?? 0,
+    boundaryEdges: 0,
+    nonManifoldEdges: 0,
+    duplicateFaces: 0,
+    degenerateFaces: 0,
+    needsRepair: false,
+  };
+  if (!meshData?.faces) return analysis;
+
+  const edgeCount = new Map();
+  const faceKeys = new Set();
+
+  for (const face of meshData.faces.values()) {
+    const ids = face.vertexIds;
+
+    if (!ids || ids.length < 3 || new Set(ids).size !== ids.length) {
+      analysis.degenerateFaces++;
+      continue;
+    }
+
+    const key = [...ids].sort((a, b) => a - b).join('_');
+    if (faceKeys.has(key)) analysis.duplicateFaces++;
+    faceKeys.add(key);
+
+    const n = ids.length;
+    for (let i = 0; i < n; i++) {
+      const a = ids[i], b = ids[(i + 1) % n];
+      const eKey = a < b ? `${a},${b}` : `${b},${a}`;
+      edgeCount.set(eKey, (edgeCount.get(eKey) ?? 0) + 1);
+    }
+  }
+
+  for (const count of edgeCount.values()) {
+    if (count === 1) analysis.boundaryEdges++;
+    else if (count > 2) analysis.nonManifoldEdges++;
+  }
+
+  analysis.needsRepair =
+    analysis.boundaryEdges > 0 ||
+    analysis.nonManifoldEdges > 0 ||
+    analysis.duplicateFaces > 0 ||
+    analysis.degenerateFaces > 0;
+
+  return analysis;
+}
+
+/**
+ * Repair a MeshData: weld vertices, drop degenerate/duplicate faces, resolve
+ * non-manifold edges/vertices, make winding consistent (anchored to the input
+ * orientation so surviving faces are never globally flipped) and fill holes.
+ *
+ * Pure and atomic: the input meshData is never mutated; the returned MeshData
+ * is a brand new, fully consistent object. Surviving original faces keep their
+ * original ids; new hole-fill faces get stable ids above every original id, so
+ * they can never collide with an existing face. If this function throws, the
+ * caller's mesh is untouched.
+ */
 export function repairMeshData(meshData, options = {}) {
   const opts = {
     weldEpsilon: 1e-6,
@@ -11,12 +76,18 @@ export function repairMeshData(meshData, options = {}) {
   };
 
   const report = {
+    inputVertexCount: meshData.vertices.size,
+    inputFaceCount: meshData.faces.size,
     weldedVerts: 0,
     removedFaces: 0,
     splitVerts: 0,
     flippedFaces: 0,
     filledHoles: 0,
     skippedHoles: 0,
+    addedFaces: 0,
+    removedUnusedVerts: 0,
+    outputVertexCount: 0,
+    outputFaceCount: 0,
     warnings: [],
   };
 
@@ -29,8 +100,18 @@ export function repairMeshData(meshData, options = {}) {
     verts.push({ x: v.position.x, y: v.position.y, z: v.position.z });
   }
   for (const [faceId, face] of meshData.faces) {
-    faces.push({ id: faceId, vids: face.vertexIds.map(id => vidToIdx.get(id)) });
+    const idxs = face.vertexIds.map(id => vidToIdx.get(id));
+    if (idxs.some(i => i === undefined)) {
+      report.warnings.push(`Dropped face ${faceId} referencing missing vertices`);
+      continue;
+    }
+    faces.push({ id: faceId, vids: idxs });
   }
+
+  // Original per-face normals, used to anchor winding so repair never
+  // globally flips the orientation of the input surface.
+  const origNormals = new Map();
+  for (const f of faces) origNormals.set(f.id, faceNormal(verts, f.vids));
 
   // Weld
   const remap = weldVertices(verts, opts.weldEpsilon);
@@ -38,21 +119,17 @@ export function repairMeshData(meshData, options = {}) {
   faces = faces.map(f => ({ id: f.id, vids: f.vids.map(i => remap[i]) }));
 
   // Degenerate / duplicate faces
-  const beforeDedup = faces.length;
   faces = removeDegenerateFaces(faces);
   faces = removeDuplicateFaces(faces);
-  report.removedFaces += beforeDedup - faces.length;
 
   // Non-manifold edges
-  const beforeNME = faces.length;
   faces = resolveNonManifoldEdges(faces, report);
-  report.removedFaces += beforeNME - faces.length;
 
   // Non-manifold vertices
   ({ verts, faces } = resolveNonManifoldVertices(verts, faces, report));
 
-  // Winding
-  if (opts.fixWinding) faces = fixWindingConsistency(verts, faces, report);
+  // Winding (anchored to the input orientation)
+  if (opts.fixWinding) faces = fixWindingConsistency(verts, faces, report, origNormals);
 
   // Hole fill
   if (opts.fillHoles) faces = fillHoles(verts, faces, opts.maxHoleFillEdges, report);
@@ -64,37 +141,73 @@ export function repairMeshData(meshData, options = {}) {
   for (const idx of usedSet) { compact.set(idx, finalVerts.length); finalVerts.push(verts[idx]); }
   faces = faces.map(f => ({ id: f.id, vids: f.vids.map(i => compact.get(i)) }));
 
+  report.removedUnusedVerts = verts.length - finalVerts.length;
+
   const result = new MeshData();
-  const vertObjs = finalVerts.map(v => 
+  const vertObjs = finalVerts.map(v =>
     result.addVertex(new THREE.Vector3(v.x, v.y, v.z))
   );
-  for (const f of faces) result.addFace(f.vids.map(i => vertObjs[i]));
 
-  // Determine safe IDs for brand new "repair" faces to avoid collisions
+  // Stable face ids: surviving original faces keep their original ids; brand
+  // new repair faces get ids above every id the input ever used (including
+  // faces removed during repair) so they can never collide with an original
+  // face. Faces are created exactly once, with their final id, so edge/vertex
+  // faceIds and the faceKeyMap never reference a deleted id.
   let maxOriginalId = -1;
-  for (const f of faces) {
-    if (f.id !== -1 && f.id > maxOriginalId) maxOriginalId = f.id;
+  for (const id of meshData.faces.keys()) {
+    if (Number.isInteger(id) && id > maxOriginalId) maxOriginalId = id;
   }
-
   let nextRepairId = maxOriginalId + 1;
 
+  let survivedOriginals = 0;
+
   for (const f of faces) {
-    const newFace = result.addFace(f.vids.map(i => vertObjs[i]));
-    
-    result.faces.delete(newFace.id);
-    
-    if (f.id !== -1 && f.id !== undefined) {
-      newFace.id = f.id;
-    } else {
-      newFace.id = nextRepairId++;
-      newFace.isRepairFace = true;
+    const isOriginal = Number.isInteger(f.id) && f.id >= 0;
+    const desiredId = isOriginal ? f.id : nextRepairId;
+    const newFace = addFaceWithId(result, f.vids.map(i => vertObjs[i]), desiredId);
+
+    if (newFace.id !== desiredId) {
+      // addFace deduplicated against an identical existing face
+      report.warnings.push(`Dropped duplicate face introduced during repair (id ${desiredId})`);
+      continue;
     }
-    
-    result.faces.set(newFace.id, newFace);
+
+    if (isOriginal) {
+      survivedOriginals++;
+    } else {
+      nextRepairId++;
+      newFace.isRepairFace = true;
+      report.addedFaces++;
+    }
   }
+
+  // Future faces added by later edits must not collide with preserved ids.
+  result.syncIdCounters();
+
+  // Preserve UVs of surviving original faces.
+  if (meshData.uvs) {
+    for (const [faceId, uv] of meshData.uvs) {
+      if (result.faces.has(faceId)) result.uvs.set(faceId, uv);
+    }
+  }
+
+  // Reconcile report counts with the actual mesh changes.
+  report.removedFaces = report.inputFaceCount - survivedOriginals;
+  report.outputVertexCount = result.vertices.size;
+  report.outputFaceCount = result.faces.size;
 
   result.repairReport = report;
   return result;
+}
+
+// Add a face with a specific id by steering the id counter, so all adjacency
+// bookkeeping (edge/vertex faceIds, faceKeyMap) is built with the final id.
+function addFaceWithId(meshData, vertices, id) {
+  const savedNext = meshData.nextFaceId;
+  meshData.nextFaceId = id;
+  const face = meshData.addFace(vertices);
+  meshData.nextFaceId = Math.max(savedNext, id + 1);
+  return face;
 }
 
 function weldVertices(verts, epsilon) {
@@ -278,7 +391,7 @@ function shareEdgeThroughVert(vi, fiA, fiB, faces) {
   return false;
 }
 
-function fixWindingConsistency(verts, faces, report) {
+function fixWindingConsistency(verts, faces, report, origNormals = null) {
   const edgeAdj = new Map();
   for (let fi = 0; fi < faces.length; fi++) {
     const vids = faces[fi].vids, n = vids.length;
@@ -320,17 +433,36 @@ function fixWindingConsistency(verts, faces, report) {
       }
     }
 
-    const meshCentroid = componentCentroid(verts, faces, componentFaces);
+    // Decide the component's global orientation by anchoring to the input
+    // normals: the assignment that keeps the majority of original faces
+    // pointing their original way wins, so repair never globally flips the
+    // surface. Fall back to the outward-from-centroid heuristic only when
+    // the component has no original faces to anchor to.
     let score = 0;
-    for (const fi of componentFaces) {
-      const n = faceNormal(verts, faces[fi].vids);
-      const fc = faceCentroid(verts, faces[fi].vids);
-      const toFace = new THREE.Vector3(
-        fc.x - meshCentroid.x,
-        fc.y - meshCentroid.y,
-        fc.z - meshCentroid.z,
-      );
-      score += (toFlip.has(fi) ? -1 : 1) * n.dot(toFace);
+    let anchored = 0;
+
+    if (origNormals) {
+      for (const fi of componentFaces) {
+        const orig = origNormals.get(faces[fi].id);
+        if (!orig) continue;
+        const n = faceNormal(verts, faces[fi].vids);
+        score += (toFlip.has(fi) ? -1 : 1) * n.dot(orig);
+        anchored++;
+      }
+    }
+
+    if (anchored === 0) {
+      const meshCentroid = componentCentroid(verts, faces, componentFaces);
+      for (const fi of componentFaces) {
+        const n = faceNormal(verts, faces[fi].vids);
+        const fc = faceCentroid(verts, faces[fi].vids);
+        const toFace = new THREE.Vector3(
+          fc.x - meshCentroid.x,
+          fc.y - meshCentroid.y,
+          fc.z - meshCentroid.z,
+        );
+        score += (toFlip.has(fi) ? -1 : 1) * n.dot(toFace);
+      }
     }
 
     if (score < 0) {

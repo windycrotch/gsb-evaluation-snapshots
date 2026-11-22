@@ -44,6 +44,7 @@ import { CommandRegistry } from './agent/CommandRegistry.js';
 import { registerAgentCommands } from './agent/AgentCommands.js';
 import { AgentBridge } from './agent/mcp/AgentBridge.js';
 import MirrorManager from './core/MirrorManager.js';
+import { RepairOps } from './operations/RepairOps.js';
 
 export default class Editor {
   constructor() {
@@ -69,6 +70,7 @@ export default class Editor {
       originFocused: new Signal(),
       vertexFocused: new Signal(),
       objectChanged: new Signal(),
+      meshRepaired: new Signal(),
       objectDeleted: new Signal(),
       objectDuplicated: new Signal(),
       objectJoined: new Signal(),
@@ -190,6 +192,7 @@ export default class Editor {
     this.editActions = new EditActions(this);
     this.objectActions = new ObjectActions(this);
     this.uvActions = new UVActions(this);
+    this.repairOps = new RepairOps(this);
     this.modeManager = new ModeManager(this);
 
     // UI

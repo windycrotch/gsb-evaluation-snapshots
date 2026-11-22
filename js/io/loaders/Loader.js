@@ -74,6 +74,15 @@ export class Loader {
     }
 
     this.editor.execute(new AddObjectCommand(this.editor, finalObject));
+
+    // Imported meshes with holes, duplicate faces or non-manifold edges get
+    // one undoable repair each; clean meshes are left untouched.
+    for (const mesh of meshes) {
+      const result = this.editor.repairOps?.repairObject(mesh);
+      if (result?.repaired) {
+        console.log(`Repaired mesh "${mesh.name}" on import:`, result.report);
+      }
+    }
   }
 
   createMesh({ name, meshData, shading, angle, sharps }, file, reservedNames) {

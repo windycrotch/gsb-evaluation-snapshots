@@ -1,0 +1,11 @@
+{
+  "name": "kokraf",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/"
+  },
+  "devDependencies": {
+    "three": "0.176.0"
+  }
+}

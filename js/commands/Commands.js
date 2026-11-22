@@ -54,6 +54,7 @@ import { SetMirrorCommand } from './SetMirrorCommand.js';
 import { SetSelectionCommand } from './SetSelectionCommand.js';
 import { SetEditSelectionCommand } from './SetEditSelectionCommand.js';
 import { SetSharpCommand } from './SetSharpCommand.js';
+import { RepairMeshCommand } from './RepairMeshCommand.js';
 
 export const commands = new Map([
   [SetPositionCommand.type, SetPositionCommand],
@@ -112,4 +113,5 @@ export const commands = new Map([
   [SetSelectionCommand.type, SetSelectionCommand],
   [SetEditSelectionCommand.type, SetEditSelectionCommand],
   [SetSharpCommand.type, SetSharpCommand],
+  [RepairMeshCommand.type, RepairMeshCommand],
 ]);
