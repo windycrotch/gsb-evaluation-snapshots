@@ -49,17 +49,10 @@ export function getCDNUrl(): string {
 }
 
 /**
- * Cache of preloaded sound blobs to avoid HTML5 audio pool exhaustion
+ * Cache of preloaded sound blobs to avoid HTML5 audio pool exhaustion.
+ * Rejected promises are removed so a later play can retry instead of replaying the failure.
  */
 const soundBlobCache: Record<string, Promise<Blob>> = {};
-
-// TODO: turn "subscriptions" into a list of ids for better lock tracking
-export type HowlEntry = { instance: Howl; subscriptions: number };
-
-/**
- * Cache of created Howl instances (only created when actually played)
- */
-const howlInstanceCache: Record<string, HowlEntry> = {};
 
 /**
  * Which player a sound uses. Sounds play through an <audio> element (Howler's html5 mode), except
@@ -70,36 +63,271 @@ export interface PlayerOptions {
   loop?: boolean;
 }
 
-const cacheKey = (name: SoundName, { loop = false }: PlayerOptions = {}) => (loop ? `${name}\u0000loop` : name);
+const cacheKey = (name: SoundName, { loop = false }: PlayerOptions = {}) => (loop ? `${name}loop` : name);
+
+/**
+ * One created Howl instance plus the bookkeeping that keeps it alive.
+ *
+ * Every entry belongs to a `generation` of its cache key. When a sound pack changes a sound's
+ * URL, the generation advances: the old entry keeps playing until its last reference is
+ * released, while every new claim builds a fresh entry from the new URL.
+ */
+export type HowlEntry = {
+  instance: Howl;
+  /** Number of outstanding references (one per claim) */
+  subscriptions: number;
+  /** Cache key this entry was created for */
+  key: string;
+  /** Generation of the cache key this entry belongs to */
+  generation: number;
+  /** Object URL backing the Howl's src, revoked when the entry is destroyed */
+  objectUrl?: string;
+  /** Resolves once the Howl reports `loaded`; rejects on a load error */
+  ready: Promise<void>;
+  /** True after a load error or once the entry has been evicted */
+  failed: boolean;
+};
+
+/**
+ * A shared player handed out by {@link claimPlayer}. `release` gives back exactly one reference;
+ * `isCurrent` tells whether a pack update has made this player stale (new plays create a new one).
+ */
+export interface SoundPlayer {
+  howl: Howl;
+  /** Resolves once the underlying Howl has loaded, rejects when loading fails */
+  ready: Promise<void>;
+  /** Release this caller's reference. Safe to call multiple times. */
+  release: () => void;
+  /** Whether this is still the newest player for its sound (false after a pack update) */
+  isCurrent: () => boolean;
+}
+
+/** All live entries, keyed by `<cacheKey>#g<generation>` */
+const howlEntries: Record<string, HowlEntry> = {};
+/** The newest entry id for each cache key */
+const currentEntryByKey: Record<string, string> = {};
+/** In-flight claims for a cache key, shared by concurrent callers */
+const pendingClaims: Record<string, Promise<HowlEntry>> = {};
+/** Monotonic generation counter per cache key */
+const generationByKey: Record<string, number> = {};
+
+const entryId = (key: string, generation: number): string => `${key}#g${generation}`;
 
 /**
  * Make a sound loader function that first tries local files then falls back to CDN
  */
 export function makeRemoteSound(name: SoundName, options?: PlayerOptions): () => Promise<HowlEntry> {
-  return async () => {
-    // First fetch the blob data if not already in cache
-    if (!soundBlobCache[name]) {
-      soundBlobCache[name] = fetchSoundBlob(name);
-    }
+  return () => claimEntry(name, options);
+}
 
-    // Create or return the Howl instance
-    return createOrGetHowlInstance(name, options);
+/**
+ * Fetch the blob for a sound, caching the in-flight promise. A rejected fetch is removed from the
+ * cache immediately so the next attempt retries rather than inheriting the failure.
+ */
+function fetchAndCacheBlob(name: SoundName): Promise<Blob> {
+  const cached = soundBlobCache[name];
+  if (cached) return cached;
+
+  const promise = fetchSoundBlob(name).catch((error) => {
+    if (soundBlobCache[name] === promise) delete soundBlobCache[name];
+    throw error;
+  });
+  soundBlobCache[name] = promise;
+  return promise;
+}
+
+/**
+ * Fetch the blob for a build targeting a specific generation. After a pack update the blob cache
+ * holds the previous URL's data, so a non-initial generation bypasses the cache and fetches the
+ * current URL directly, repopulating the cache for the next ordinary claim.
+ */
+async function fetchBlobForGeneration(name: SoundName, generation: number): Promise<Blob> {
+  if (generation === 0) return fetchAndCacheBlob(name);
+
+  const blob = await fetchSoundBlob(name);
+  soundBlobCache[name] = Promise.resolve(blob);
+  return blob;
+}
+
+/**
+ * Claim a shared player for a sound. Concurrent claims for the same sound reuse one Howl instance;
+ * each returned player carries its own reference, released via `player.release()`.
+ */
+export async function claimPlayer(name: SoundName, options?: PlayerOptions): Promise<SoundPlayer> {
+  const key = cacheKey(name, options);
+  // Every claim counts as one reference, including concurrent ones sharing an in-flight build
+  const entry = await claimEntry(name, options);
+  entry.subscriptions += 1;
+  let released = false;
+
+  return {
+    howl: entry.instance,
+    ready: entry.ready,
+    release: () => {
+      if (released) return;
+      released = true;
+      releaseEntry(key, entry.generation);
+    },
+    isCurrent: () => currentEntryByKey[key] === entryId(key, entry.generation),
   };
 }
 
-export async function claimSound(name: SoundName, options?: PlayerOptions): Promise<Howl> {
-  const entry = await makeRemoteSound(name, options)();
-  entry.subscriptions += 1;
+/**
+ * Build (or reuse) the current entry for a cache key. In-flight builds are shared so concurrent
+ * callers never construct duplicate Howls.
+ */
+async function claimEntry(name: SoundName, options?: PlayerOptions): Promise<HowlEntry> {
+  const key = cacheKey(name, options);
 
+  const currentId = currentEntryByKey[key];
+  const current = currentId ? howlEntries[currentId] : undefined;
+  if (current && !current.failed) return current;
+
+  const pending = pendingClaims[key];
+  if (pending) return pending;
+
+  const promise = buildEntry(name, key, options).finally(() => {
+    if (pendingClaims[key] === promise) delete pendingClaims[key];
+  });
+  // Swallow the shared promise's rejection so callers that lose the race don't create an
+  // unhandled-rejection crash; each caller still receives the rejection through its own await.
+  promise.catch(() => { /* retried by the next claim */ });
+  pendingClaims[key] = promise;
+  return promise;
+}
+
+/**
+ * Construct an entry for the cache key's generation at call time. If a pack update advances the
+ * generation while the blob is in flight, the stale object URL is discarded and the build restarts
+ * for the newest generation, looping until a build completes in its own generation.
+ */
+async function buildEntry(name: SoundName, key: string, options?: PlayerOptions): Promise<HowlEntry> {
+  // Retry loop: each pass targets the generation observed when that pass started.
+  for (;;) {
+    const targetGeneration = generationByKey[key] ?? 0;
+    const blob = await fetchBlobForGeneration(name, targetGeneration);
+    const objectUrl = URL.createObjectURL(blob);
+
+    // A pack update may have advanced the key while the blob was loading.
+    if ((generationByKey[key] ?? 0) !== targetGeneration) {
+      URL.revokeObjectURL(objectUrl);
+      continue; // rebuild against the newer generation; pendingClaims still owns this promise
+    }
+
+    let resolveReady!: () => void;
+    let rejectReady!: (error: Error) => void;
+    const ready = new Promise<void>((resolve, reject) => {
+      resolveReady = resolve;
+      rejectReady = reject;
+    });
+
+    const howl = new Howl({
+      src: [objectUrl],
+      format: ["mp3"],
+      // <audio> streams and keeps memory low; Web Audio (for loops) decodes the whole sound, so it can
+      // repeat it without a gap
+      html5: !options?.loop,
+    });
+
+    const entry: HowlEntry = {
+      instance: howl,
+      subscriptions: 0,
+      key,
+      generation: targetGeneration,
+      objectUrl,
+      ready,
+      failed: false,
+    };
+    // Howler invokes these asynchronously once the underlying load settles. Register both before
+    // the entry is published so no outcome can be missed.
+    howl.on("load", () => resolveReady());
+    howl.on("loaderror", (_id, error) => {
+      if (entry.failed) return;
+      entry.failed = true;
+      rejectReady(
+        new Error(`Failed to load sound "${name}": ${typeof error === "string" ? error : "decode error"}`)
+      );
+      // A poisoned Howl must not stay cached: evict it so the next play retries from scratch.
+      evictEntry(entry);
+    });
+    // Don't let an unawaited ready rejection crash the process (callers await it via play/claim)
+    entry.ready.catch(() => { /* surfaced through play()/player.ready */ });
+
+    // Re-check the fence after the synchronous Howl construction
+    if ((generationByKey[key] ?? 0) !== targetGeneration) {
+      URL.revokeObjectURL(objectUrl);
+      howl.unload();
+      continue; // a newer generation won the race; build that one next
+    }
+
+    const id = entryId(key, targetGeneration);
+    howlEntries[id] = entry;
+    currentEntryByKey[key] = id;
+    return entry;
+  }
+}
+
+/** Drop one reference from the entry of a given generation, destroying it when it was the last. */
+function releaseEntry(key: string, generation: number): void {
+  const entry = howlEntries[entryId(key, generation)];
+  if (!entry) return;
+
+  if (entry.subscriptions > 0) entry.subscriptions -= 1;
+  if (entry.subscriptions === 0) destroyEntry(entry);
+}
+
+/**
+ * Unload an entry and revoke its object URL, but only when nobody holds a reference and nothing is
+ * playing (e.g. an old-generation player finishing its tail is kept until the next release).
+ */
+function destroyEntry(entry: HowlEntry): void {
+  if (entry.subscriptions > 0 || entry.instance.playing()) return;
+
+  const id = entryId(entry.key, entry.generation);
+  if (howlEntries[id] !== entry) return;
+
+  if (entry.objectUrl) URL.revokeObjectURL(entry.objectUrl);
+  entry.objectUrl = undefined;
+  entry.instance.unload();
+  delete howlEntries[id];
+  if (currentEntryByKey[entry.key] === id) delete currentEntryByKey[entry.key];
+}
+
+/** Unconditionally remove a dead entry (load error), regardless of outstanding references. */
+function evictEntry(entry: HowlEntry): void {
+  const id = entryId(entry.key, entry.generation);
+  if (howlEntries[id] !== entry) return;
+
+  if (entry.objectUrl) URL.revokeObjectURL(entry.objectUrl);
+  entry.objectUrl = undefined;
+  entry.instance.unload();
+  delete howlEntries[id];
+  if (currentEntryByKey[entry.key] === id) delete currentEntryByKey[entry.key];
+}
+
+/**
+ * Legacy single-entry API: claim a Howl and increment its reference count.
+ * Prefer {@link claimPlayer} in new code.
+ */
+export async function claimSound(name: SoundName, options?: PlayerOptions): Promise<Howl> {
+  const entry = await claimEntry(name, options);
+  entry.subscriptions += 1;
   return entry.instance;
 }
 
+/**
+ * Legacy reference-count API keyed by sound name. Releases one reference from the *current*
+ * generation. Callers holding an old-generation player (created before a pack update) should use
+ * the `release` handle from {@link claimPlayer} instead.
+ */
 export function freeSound(name: SoundName, options?: PlayerOptions) {
   const key = cacheKey(name, options);
-  const entry = howlInstanceCache[key];
-  if (entry && entry.subscriptions > 0) entry.subscriptions -= 1;
+  const id = currentEntryByKey[key];
+  const entry = id ? howlEntries[id] : undefined;
+  if (!entry) return null;
 
-  cleanupUnusedSound(key);
+  if (entry.subscriptions > 0) entry.subscriptions -= 1;
+  if (entry.subscriptions === 0) destroyEntry(entry);
 
   return null;
 }
@@ -147,13 +375,23 @@ export async function fetchSoundBlob(name: SoundName): Promise<Blob> {
 
 /**
  * Register a sound pack so its sounds can be played by name, e.g. `useSound("my-ui-pack/save")`.
- * Registering the same pack again is a no-op; registering a changed pack updates its sounds.
+ * Registering the same pack again is a no-op; registering a changed pack advances the affected
+ * sounds' generations: currently playing players keep their old URLs until released, and the next
+ * play loads the new URL.
  */
 export function registerSounds(pack: SoundPack, options?: RegisterSoundsOptions): void {
   for (const name of addPack(pack, options)) {
-    // Drop stale data for sounds whose URL changed
+    // Drop stale blob data for sounds whose URL changed
     delete soundBlobCache[name];
-    cleanupUnusedSound(name);
+
+    // Advance both player kinds (once / loop). Old entries stay in howlEntries until their last
+    // reference is released; nothing currently playing is destroyed here. In-flight builds are
+    // left in pendingClaims: they fence themselves against the new generation after their blob
+    // resolves and retry, so deleting the slot would only orphan their awaiters.
+    for (const key of [cacheKey(name), cacheKey(name, { loop: true })]) {
+      generationByKey[key] = (generationByKey[key] ?? 0) + 1;
+      delete currentEntryByKey[key];
+    }
   }
 }
 
@@ -166,89 +404,55 @@ export function resolveSoundUrl(name: SoundName): string {
 }
 
 /**
- * Creates a Howl instance from a cached blob or fetches it if needed
- */
-async function createOrGetHowlInstance(name: SoundName, options?: PlayerOptions): Promise<HowlEntry> {
-  const key = cacheKey(name, options);
-  // Return existing instance if available
-  if (howlInstanceCache[key]) {
-    return howlInstanceCache[key];
-  }
-
-  // Fetch the blob if not already in progress
-  if (!soundBlobCache[name]) {
-    soundBlobCache[name] = fetchSoundBlob(name);
-  }
-
-  // Wait for the blob to be fetched
-  const blob = await soundBlobCache[name];
-
-  // Create object URL from blob
-  const objectUrl = URL.createObjectURL(blob);
-
-  // Another call may have created it while the blob was loading
-  if (howlInstanceCache[key]) {
-    URL.revokeObjectURL(objectUrl);
-    return howlInstanceCache[key];
-  }
-
-  // Create new Howl instance
-  const howl = new Howl({
-    src: [objectUrl],
-    format: ["mp3"],
-    // <audio> streams and keeps memory low; Web Audio (for loops) decodes the whole sound, so it can
-    // repeat it without a gap
-    html5: !options?.loop,
-    onload: () => {
-      // Store object URL reference to revoke later
-      (howl as any)._objectUrl = objectUrl;
-    },
-  });
-
-  // Store in cache
-  howlInstanceCache[key] = { instance: howl, subscriptions: 0 };
-
-  return howlInstanceCache[key];
-}
-
-/**
  * Preload multiple sounds by fetching their data without creating Howl instances
  */
 export function preloadSounds(names: SoundName[]): Promise<void[]> {
   return Promise.all(
     names.map(async (name) => {
-      if (!soundBlobCache[name]) {
-        soundBlobCache[name] = fetchSoundBlob(name);
-      }
       // Just ensure the blob is fetched but don't create Howl instance yet
-      await soundBlobCache[name];
+      await fetchAndCacheBlob(name);
     })
   );
 }
 
 /**
- * Play a sound by name
+ * Play a sound by name. The returned promise resolves when the sound finishes naturally or is
+ * stopped/unloaded while playing, and rejects if the sound fails to load.
  */
 export async function playSound(name: SoundName, options?: SoundOptions): Promise<void> {
   if (!isSoundEnabled()) return;
 
-  const player = options?.loop ? { loop: true } : undefined;
-  const sound = await claimSound(name, player);
-  let freed = false;
+  const playerOptions = options?.loop ? { loop: true } : undefined;
+  const player = await claimPlayer(name, playerOptions);
 
-  if (options) {
-    if (options.volume !== undefined) sound.volume(options.volume);
-    if (options.rate !== undefined) sound.rate(options.rate);
-    if (options.loop !== undefined) sound.loop(options.loop);
+  try {
+    const sound = player.howl;
+    await player.ready;
+
+    if (options) {
+      if (options.volume !== undefined) sound.volume(options.volume);
+      if (options.rate !== undefined) sound.rate(options.rate);
+      if (options.loop !== undefined) sound.loop(options.loop);
+    }
+
+    if (options?.loop) {
+      sound.play();
+      return;
+    }
+
+    await new Promise<void>((resolve) => {
+      const done = () => {
+        sound.off("end", done);
+        sound.off("stop", done);
+        resolve();
+      };
+      sound.on("end", done);
+      sound.on("stop", done);
+      sound.play();
+    });
+  } finally {
+    player.release();
   }
-
-  sound.on("end", () => {
-    if (freed || options?.loop) return;
-    freeSound(name, player);
-    freed = true;
-  });
-
-  sound.play();
 }
 
 /**
@@ -267,7 +471,9 @@ export function setSoundEnabled(enabled: boolean): void {
   soundEnabledGlobal = enabled;
 
   // Store in localStorage for persistence
-  if (typeof localStorage !== "undefined") localStorage.setItem("react-sounds-enabled", enabled ? "true" : "false");
+  if (typeof localStorage !== "undefined") {
+    localStorage.setItem("react-sounds-enabled", enabled ? "true" : "false");
+  }
 
   soundStateListeners.forEach((listener) => listener(enabled));
 }
@@ -331,13 +537,11 @@ export async function getLocalSoundPath(name: SoundName): Promise<string | null>
  * Call this when running into memory constraints
  */
 export function cleanupUnusedSound(name: string): void {
-  const entry = howlInstanceCache[name];
-  if (!entry || entry.instance.playing() || entry.subscriptions > 0) return;
-
-  const { instance } = entry;
-  if ((instance as any)._objectUrl) URL.revokeObjectURL((instance as any)._objectUrl);
-  instance.unload();
-  delete howlInstanceCache[name];
+  for (const id of Object.keys(howlEntries)) {
+    const entry = howlEntries[id];
+    if (entry.key !== name || entry.subscriptions > 0 || entry.instance.playing()) continue;
+    destroyEntry(entry);
+  }
 }
 
 /**
@@ -422,7 +626,10 @@ export function __resetForTesting(): void {
   soundStateListeners.length = 0;
   audioUnlockInitialized = false;
   for (const key of Object.keys(soundBlobCache)) delete soundBlobCache[key];
-  for (const key of Object.keys(howlInstanceCache)) delete howlInstanceCache[key];
+  for (const key of Object.keys(howlEntries)) delete howlEntries[key];
+  for (const key of Object.keys(currentEntryByKey)) delete currentEntryByKey[key];
+  for (const key of Object.keys(pendingClaims)) delete pendingClaims[key];
+  for (const key of Object.keys(generationByKey)) delete generationByKey[key];
   __resetPacksForTesting();
 }
 

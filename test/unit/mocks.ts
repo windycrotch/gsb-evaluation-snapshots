@@ -9,14 +9,31 @@ export function createMockHowl() {
     rate: vi.fn(),
     loop: vi.fn(),
     on: vi.fn(),
+    off: vi.fn(),
+    once: vi.fn(),
+    state: vi.fn().mockReturnValue('loaded'),
     playing: vi.fn().mockReturnValue(false),
     unload: vi.fn(),
+  };
+}
+
+/**
+ * Build a SoundPlayer-shaped mock around a mock Howl.
+ * `release` is a fresh vi.fn per player so reference counting can be asserted.
+ */
+export function createMockPlayer(howl = createMockHowl()) {
+  return {
+    howl,
+    ready: Promise.resolve(),
+    release: vi.fn(),
+    isCurrent: vi.fn().mockReturnValue(true),
   };
 }
 
 export function createRuntimeMock(overrides?: Record<string, unknown>) {
   return {
     claimSound: vi.fn().mockResolvedValue(createMockHowl()),
+    claimPlayer: vi.fn().mockImplementation(async () => createMockPlayer()),
     freeSound: vi.fn().mockReturnValue(null),
     isSoundEnabled: vi.fn().mockReturnValue(true),
     preloadSounds: vi.fn().mockResolvedValue([]),

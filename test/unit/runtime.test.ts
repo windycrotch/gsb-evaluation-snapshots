@@ -3,9 +3,14 @@ import { vi, describe, it, expect, beforeEach } from 'vitest';
 vi.mock('howler', async () => {
   const { createMockHowl } = await import('./mocks');
   return {
-    Howl: vi.fn().mockImplementation(function () {
-      return createMockHowl();
-    }),
+    Howl: vi
+      .fn()
+      .mockImplementation(function (options?: { onload?: () => void; onloaderror?: (id: unknown, error: unknown) => void }) {
+        const howl = createMockHowl();
+        // Simulate the browser finishing the (blob) load on the next microtask, like real Howler
+        if (options?.onload) queueMicrotask(() => options.onload());
+        return howl;
+      }),
     Howler: { ctx: { state: 'running' }, noAudio: false },
   };
 });

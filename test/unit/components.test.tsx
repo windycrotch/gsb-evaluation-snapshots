@@ -1,7 +1,7 @@
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import React from 'react';
 import { render, fireEvent, renderHook, act } from '@testing-library/react';
-import { createMockHowl } from './mocks';
+import { createMockHowl, createMockPlayer } from './mocks';
 
 vi.mock('../../src/runtime', async () => {
   const { createRuntimeMock } = await import('./mocks');
@@ -10,7 +10,7 @@ vi.mock('../../src/runtime', async () => {
 
 import { SoundProvider, SoundButton, Sound } from '../../src/components';
 import { useSoundEnabled } from '../../src/hooks';
-import { claimSound, isSoundEnabled, preloadSounds, playSound } from '../../src/runtime';
+import { claimPlayer, isSoundEnabled, preloadSounds, playSound } from '../../src/runtime';
 
 let mockHowl: ReturnType<typeof createMockHowl>;
 
@@ -18,7 +18,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockHowl = createMockHowl();
   vi.mocked(isSoundEnabled).mockReturnValue(true);
-  vi.mocked(claimSound).mockResolvedValue(mockHowl);
+  vi.mocked(claimPlayer).mockResolvedValue(createMockPlayer(mockHowl));
 });
 
 describe('SoundProvider', () => {
@@ -78,7 +78,7 @@ describe('SoundButton', () => {
       fireEvent.click(button);
     });
     await vi.waitFor(() => {
-      expect(claimSound).toHaveBeenCalledWith('ui/toggle_on');
+      expect(claimPlayer).toHaveBeenCalledWith('ui/toggle_on', undefined);
     });
   });
 
@@ -95,7 +95,7 @@ describe('SoundButton', () => {
 
     expect(onClick).toHaveBeenCalledTimes(1);
     await vi.waitFor(() => {
-      expect(claimSound).toHaveBeenCalledWith('ui/toggle_on');
+      expect(claimPlayer).toHaveBeenCalledWith('ui/toggle_on', undefined);
     });
   });
 });
@@ -121,13 +121,13 @@ describe('Sound', () => {
       queueMicrotask(() => endCallbacks.forEach((cb) => cb(1)));
       return 1;
     });
-    vi.mocked(claimSound).mockResolvedValue(autoEndHowl);
+    vi.mocked(claimPlayer).mockResolvedValue(createMockPlayer(autoEndHowl));
 
     await act(async () => {
       render(<Sound name="ui/toggle_on" trigger="mount" />);
     });
 
-    expect(claimSound).toHaveBeenCalledWith('ui/toggle_on');
+    expect(claimPlayer).toHaveBeenCalledWith('ui/toggle_on', undefined);
     expect(autoEndHowl.play).toHaveBeenCalled();
   });
 
