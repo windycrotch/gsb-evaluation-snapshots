@@ -22,7 +22,7 @@ SUITES = {
     "unit_follow_list": "定时跟进:关注列表增删 / 去重 / 持久化",
     "unit_features": "新功能:去重 / MIME / robots / 重试 / failures.json / 渲染冒烟",
     "unit_netsuite": "网络层:代理池 / Cookie 注入 / 平台适配器 / mkv 上限 / stats",
-    "unit_hls": "HLS m3u8 分片下载:变体选择 / 并发合并 / BYTERANGE / 失败路径",
+    "unit_hls": "HLS m3u8 分片下载:变体选择 / 并发合并 / BYTERANGE / 断点续传 / 失败路径",
     "unit_fallback": "Scrapling 第三层兜底接线(mock)",
     "unit_cookie_render": "渲染登录态注入:cookies.txt -> add_cookies / 头兜底",
     "unit_llm": "LLM 规则生成器:样例提取 / 提示 / 假 LLM 全流程 / 正则校验 / 合并",
