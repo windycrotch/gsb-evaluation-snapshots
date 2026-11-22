@@ -76,6 +76,35 @@ type RawResult = {
 // project is null when the editor is on the blank /editor page (no project open)
 type Capabilities = { protocolVersion?: number; methods?: Set<string>; project?: number | null };
 
+/**
+ * One in-flight request. Ownership is recorded three ways so a frame can only
+ * ever resolve the exact call it answers:
+ *
+ * - `socket`: the peer the request was written to. Another connected page
+ *   guessing the id cannot answer it.
+ * - `generation`: the editor-connection generation at send time. A late frame
+ *   from a previous editor connection can never match a request issued after
+ *   the reconnect, even if its id collides.
+ * - `isRuntime`/`name`: let lifecycle events (runtime detach, handoff) fail the
+ *   right subset of calls with an actionable message.
+ */
+type Pending = {
+    socket: WebSocket;
+    generation: number;
+    isRuntime: boolean;
+    name: string;
+    timer: ReturnType<typeof setTimeout>;
+    resolve: (res: RawResult) => void;
+    reject: (err: Error) => void;
+};
+
+export type WSSOptions = {
+    // override the 60s in-flight timeout (mainly for tests); MCP_CALL_TIMEOUT_MS also works
+    callTimeoutMs?: number;
+    // override the standby rebind interval (mainly for tests)
+    bindRetryDelayMs?: number;
+};
+
 class WSS {
     private _server!: WebSocketServer;
 
@@ -87,8 +116,8 @@ class WSS {
     // the launch page the editor relays for; set by its announce frame, null when it detaches
     private _runtime: Capabilities | undefined;
 
-    // keyed by request id; only the socket the request went to may answer it
-    private _callbacks = new Map<number, { socket: WebSocket; cb: (res: RawResult) => void }>();
+    // keyed by request id; only the socket AND generation the request went out on may answer it
+    private _callbacks = new Map<number, Pending>();
 
     private _id = 0;
 
@@ -102,8 +131,15 @@ class WSS {
 
     private _bindTimer: ReturnType<typeof setTimeout> | null = null;
 
-    constructor(port: number) {
+    private _callTimeout: number;
+
+    private _bindRetryDelay: number;
+
+    constructor(port: number, options: WSSOptions = {}) {
         this._port = port;
+        const envTimeout = Number.parseInt(process.env.MCP_CALL_TIMEOUT_MS ?? '', 10);
+        this._callTimeout = options.callTimeoutMs ?? (Number.isFinite(envTimeout) ? envTimeout : DEFAULT_TIMEOUT);
+        this._bindRetryDelay = options.bindRetryDelayMs ?? BIND_RETRY_DELAY;
         this._bind();
     }
 
@@ -143,12 +179,73 @@ class WSS {
                 if (this._bindTimer) {
                     clearTimeout(this._bindTimer);
                 }
-                this._bindTimer = setTimeout(() => this._bind(), BIND_RETRY_DELAY);
+                this._bindTimer = setTimeout(() => this._bind(), this._bindRetryDelay);
             } else {
                 console.error('[WSS] Server error', err);
             }
         });
         this._attachConnectionHandler(server);
+    }
+
+    /**
+     * Reject every pending request matching `predicate`, clearing its timeout
+     * first so nothing rejects twice. This is the single place in-flight calls
+     * get torn down, so every lifecycle transition (handoff, editor reload,
+     * runtime detach, shutdown) ends calls immediately instead of leaving them
+     * to rot until the 60s timeout.
+     *
+     * @param predicate - Which pending calls to fail.
+     * @param message - The error, or a factory building one per call.
+     */
+    private _failWhere(predicate: (entry: Pending) => boolean, message: string | ((entry: Pending) => string)) {
+        for (const [id, entry] of this._callbacks) {
+            if (!predicate(entry)) {
+                continue;
+            }
+            clearTimeout(entry.timer);
+            this._callbacks.delete(id);
+            entry.reject(new Error(typeof message === 'function' ? message(entry) : message));
+        }
+    }
+
+    /**
+     * Fail every in-flight request at once.
+     *
+     * @param message - The error to reject each call with.
+     */
+    private _failAll(message: string) {
+        this._failWhere(() => true, message);
+    }
+
+    /**
+     * Install `ws` as the editor-slot holder. A different socket taking the slot
+     * means the previous editor connection is dead (reload/reconnect): every
+     * request riding the old socket is unanswerable from now on, so fail it
+     * immediately with a reconnect-specific error and bump the generation.
+     * Re-registration on the *same* live socket only refreshes capabilities and
+     * leaves in-flight calls untouched.
+     *
+     * @param ws - The socket taking the editor slot.
+     */
+    private _takeEditorSlot(ws: WebSocket) {
+        const previous = this._editor;
+        if (previous === ws) {
+            this._startPing();
+            return;
+        }
+        this._editor = ws;
+        this._editorGeneration++;
+        if (previous) {
+            const generation = this._editorGeneration;
+            this._failWhere(
+                entry => entry.socket === previous,
+                entry => `The editor reconnected (generation ${generation}) while '${entry.name}' was in flight; the stale request was aborted and cannot receive a result. Reconnect/refresh confirmed, then retry the call.`
+            );
+
+            // the relay lives in the editor page; a reloaded editor re-announces
+            this._runtime = undefined;
+        }
+        this._startPing();
     }
 
     private _attachConnectionHandler(server: WebSocketServer) {
@@ -160,9 +257,7 @@ class WSS {
             // browsers always send an Origin, so only local processes arrive without one
             const local = !req.headers.origin;
             if (!this._editor) {
-                this._editor = ws;
-                this._editorGeneration++;
-                this._startPing();
+                this._takeEditorSlot(ws);
             }
             console.error('[WSS] Peer connected (assumed editor; awaiting registration)');
             ws.on('message', (data) => {
@@ -185,32 +280,55 @@ class WSS {
                         return;
                     }
                     if (msg.register === 'editor') {
-                        this._editor = ws;
+                        this._takeEditorSlot(ws);
                         this._editorCaps = {
                             protocolVersion: Number.isInteger(msg.protocolVersion) ? msg.protocolVersion : undefined,
                             methods: Array.isArray(msg.methods) ? new Set(msg.methods.filter((name: unknown) => typeof name === 'string')) : undefined,
                             project: Number.isInteger(msg.project) || msg.project === null ? msg.project : undefined
                         };
-                        this._editorGeneration++;
-                        this._startPing();
                         console.error('[WSS] Registered editor');
                         return;
                     }
 
                     // the launch page the editor relays for, or null once its window is gone
                     if ('runtime' in msg && this._editor === ws) {
-                        this._runtime = msg.runtime ? {
-                            protocolVersion: Number.isInteger(msg.runtime.protocolVersion) ? msg.runtime.protocolVersion : undefined,
-                            methods: Array.isArray(msg.runtime.methods) ? new Set(msg.runtime.methods.filter((name: unknown) => typeof name === 'string')) : undefined
-                        } : undefined;
+                        if (msg.runtime) {
+                            this._runtime = {
+                                protocolVersion: Number.isInteger(msg.runtime.protocolVersion) ? msg.runtime.protocolVersion : undefined,
+                                methods: Array.isArray(msg.runtime.methods) ? new Set(msg.runtime.methods.filter((name: unknown) => typeof name === 'string')) : undefined
+                            };
+                        } else {
+                            this._runtime = undefined;
+
+                            // the launch window is gone: a relayed runtime call can never get
+                            // an answer, so end in-flight ones now with the launch_start hint
+                            // rather than hanging until the generic timeout.
+                            this._failWhere(
+                                entry => entry.isRuntime,
+                                `No running instance connected. Call launch_start first; the editor relays to the launched page automatically. ${LAUNCH_HINT}`
+                            );
+                        }
                         console.error(`[WSS] Runtime relay ${msg.runtime ? 'attached' : 'detached'}`);
                         return;
                     }
                     const { id, res } = msg;
+                    if (!Number.isInteger(id)) {
+                        return;
+                    }
                     const pending = this._callbacks.get(id);
-                    if (pending?.socket === ws) {
-                        pending.cb(res);
+
+                    // ownership gate: only the exact socket AND editor generation the request
+                    // went out on may answer it. Late frames from a replaced editor connection,
+                    // forged ids from another page, and answers to already-timed-out calls
+                    // (entry deleted) are all ignored here.
+                    if (
+                        pending &&
+                        pending.socket === ws &&
+                        pending.generation === this._editorGeneration
+                    ) {
+                        clearTimeout(pending.timer);
                         this._callbacks.delete(id);
+                        pending.resolve(res);
                     }
                 } catch (e) {
                     console.error('[WSS]', e);
@@ -218,6 +336,13 @@ class WSS {
             });
             ws.on('close', () => {
                 if (this._editor === ws) {
+
+                    // every call riding this socket has lost its only route to a peer;
+                    // reject them now instead of waiting out the full request timeout.
+                    this._failWhere(
+                        entry => entry.socket === ws,
+                        entry => `The editor disconnected while '${entry.name}' was in flight, so its result can no longer arrive. Reconnect the editor (press CONNECT) and retry the call.`
+                    );
                     this._editor = undefined;
                     this._editorCaps = undefined;
 
@@ -275,6 +400,11 @@ class WSS {
             this._pingInterval = null;
         }
 
+        // nothing riding this instance can be answered after the handoff: end every
+        // in-flight call with an explicit handoff error immediately, not at timeout,
+        // and never let a frame delivered to the new owner resolve one of our calls.
+        this._failAll(`This MCP server handed port ${this._port} to a newer MCP server instance, so the in-flight request was aborted. Retry the call (the active instance now handles it), or reconnect this client to take the port back.`);
+
         // drop the editor so it reconnects to the new owner
         try {
             this._editor?.close();
@@ -288,7 +418,18 @@ class WSS {
         if (this._bindTimer) {
             clearTimeout(this._bindTimer);
         }
-        this._bindTimer = setTimeout(() => this._bind(), BIND_RETRY_DELAY);
+        this._bindTimer = setTimeout(() => this._bind(), this._bindRetryDelay);
+    }
+
+    /**
+     * Whether an editor peer currently holds the editor slot with an open socket.
+     * Unlike {@link hasRuntime}, this does not require a registration frame to
+     * have been processed.
+     *
+     * @returns True while an editor socket is connected.
+     */
+    isEditorConnected(): boolean {
+        return !!this._editor && this._editor.readyState === WebSocket.OPEN;
     }
 
     /**
@@ -366,7 +507,6 @@ class WSS {
         const isRuntime = name.startsWith('runtime:');
         const socket = this._editor;
         return new Promise<RawResult>((resolve, reject) => {
-            const id = this._id++;
             if (isRuntime && !this.hasRuntime()) {
                 reject(new Error(`No running instance connected. Call launch_start first; the editor relays to the launched page automatically. ${LAUNCH_HINT}`));
                 return;
@@ -400,16 +540,23 @@ class WSS {
                 reject(new Error(`${peer} does not support '${name}'. Reload it with a compatible build and reconnect.`));
                 return;
             }
+            const id = this._id++;
+
+            // pin the call to the connection that exists right now; a reconnect bumps this
+            // and fails/replaces the call before any late frame can impersonate its answer
+            const generation = this._editorGeneration;
             const timer = setTimeout(() => {
                 this._callbacks.delete(id);
-                reject(new Error(`Timed out after ${DEFAULT_TIMEOUT}ms waiting for the ${isRuntime ? 'runtime' : 'editor'} to handle '${name}'. It may be busy or disconnected; verify the connection and retry, or split the request into smaller calls.`));
-            }, DEFAULT_TIMEOUT);
+                reject(new Error(`Timed out after ${this._callTimeout}ms waiting for the ${isRuntime ? 'runtime' : 'editor'} to handle '${name}'. It may be busy or disconnected; verify the connection and retry, or split the request into smaller calls.`));
+            }, this._callTimeout);
             this._callbacks.set(id, {
                 socket,
-                cb: (res: RawResult) => {
-                    clearTimeout(timer);
-                    resolve(res);
-                }
+                generation,
+                isRuntime,
+                name,
+                timer,
+                resolve,
+                reject
             });
             try {
                 socket.send(JSON.stringify({ id, name, args }));
@@ -542,11 +689,18 @@ class WSS {
             this._bindTimer = null;
         }
         this._listening = false;
-        this._editor?.close(1000, 'FORCE');
+
+        // abort in-flight calls rather than leaving their timers running against a closed server
+        this._failAll('This MCP server is shutting down, so the in-flight request was aborted.');
+        try {
+            this._editor?.close(1000, 'FORCE');
+        } catch { /* already closing */ }
         this._editor = undefined;
         this._editorCaps = undefined;
         this._runtime = undefined;
-        this._server.close();
+        try {
+            this._server.close();
+        } catch { /* already closing */ }
         console.error('[WSS] Closed');
     }
 }
