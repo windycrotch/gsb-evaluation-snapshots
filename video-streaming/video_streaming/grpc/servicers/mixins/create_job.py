@@ -20,7 +20,7 @@ from video_streaming.grpc.protos import streaming_pb2
 from video_streaming.workflows.service import get_workflow_repository
 from video_streaming.workflows.operations import OperationKind
 from video_streaming.grpc.authentication import get_request_principal
-from video_streaming.security import require_scope
+from video_streaming.security import AuthorizationError, require_scope
 
 
 class CreateJobMixin(object):
@@ -319,7 +319,12 @@ class CreateJobMixin(object):
 
     def _create_job(self, request, context):
         principal = get_request_principal()
-        require_scope(principal, "video.jobs:create")
+        try:
+            require_scope(principal, "video.jobs:create")
+        except AuthorizationError:
+            # Authentication already ran; a missing scope or expired token is
+            # reported exactly like an inaccessible resource.
+            raise exceptions.ResourceNotFoundOrDeniedException(context=context)
         request_id: str = str(uuid.uuid4())
         logger.info(
             "Accepted video job",
@@ -591,38 +596,52 @@ class CreateJobMixin(object):
         ).hexdigest()
         client_idempotency_key = request.idempotency_key.strip()
         durable_idempotency_key = client_idempotency_key or request_id
-        persisted_request_id, is_new_job = (
-            get_workflow_repository().create_job(
-                job_id=request_id,
-                idempotency_key=durable_idempotency_key,
-                request_hash=request_hash,
-                reference_id=request.reference_id,
-                workflow_name="video.vod",
-                stage_specs=stage_specs,
-                owner_principal=principal,
-                metadata={
-                    "reference_id": request.reference_id,
-                    "output_count": len(stage_specs),
-                    # Persist non-secret result metadata so the status API can
-                    # reconstruct durable job/output state after Redis expires.
-                    "result_details": {
+        try:
+            persisted_request_id, is_new_job = (
+                get_workflow_repository().create_job(
+                    job_id=request_id,
+                    idempotency_key=durable_idempotency_key,
+                    request_hash=request_hash,
+                    reference_id=request.reference_id,
+                    workflow_name="video.vod",
+                    stage_specs=stage_specs,
+                    owner_principal=principal,
+                    metadata={
                         "reference_id": request.reference_id,
-                        "total_checks": len(first_level) + len(second_level),
-                        "total_inputs": len(third_level),
-                        "total_outputs": (
-                            len(no_watermarked_tasks) + len(watermarked_tasks)
-                        ),
-                        "total_playlists": len(request.playlists),
-                        "total_thumbnails": len(request.thumbnails),
-                        "watermarked_outputs_ids": list(watermarked_outputs_ids),
-                        "watermarked_playlists_ids": list(watermarked_playlists_ids),
-                        "watermarked_thumbnails_ids": list(watermarked_thumbnails_ids),
-                        "no_watermarked_playlists_ids": list(no_watermarked_playlists_ids),
-                        "no_watermarked_thumbnails_ids": list(no_watermarked_thumbnails_ids),
+                        "output_count": len(stage_specs),
+                        # Persist non-secret result metadata so the status API
+                        # can reconstruct durable job/output state after Redis
+                        # expires.
+                        "result_details": {
+                            "reference_id": request.reference_id,
+                            "total_checks": (
+                                len(first_level) + len(second_level)
+                            ),
+                            "total_inputs": len(third_level),
+                            "total_outputs": (
+                                len(no_watermarked_tasks)
+                                + len(watermarked_tasks)
+                            ),
+                            "total_playlists": len(request.playlists),
+                            "total_thumbnails": len(request.thumbnails),
+                            "watermarked_outputs_ids": list(
+                                watermarked_outputs_ids),
+                            "watermarked_playlists_ids": list(
+                                watermarked_playlists_ids),
+                            "watermarked_thumbnails_ids": list(
+                                watermarked_thumbnails_ids),
+                            "no_watermarked_playlists_ids": list(
+                                no_watermarked_playlists_ids),
+                            "no_watermarked_thumbnails_ids": list(
+                                no_watermarked_thumbnails_ids),
+                        },
                     },
-                },
+                )
             )
-        )
+        except AuthorizationError:
+            # A token that expired during processing, or an idempotency key
+            # owned by another tenant, gets the same non-enumerating denial.
+            raise exceptions.ResourceNotFoundOrDeniedException(context=context)
         if not is_new_job:
             return self._job_response(persisted_request_id)
 

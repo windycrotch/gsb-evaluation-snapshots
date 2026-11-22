@@ -23,13 +23,34 @@ issuer, and subject; cross-owner replay is denied with a non-enumerating
 message. The repository also exposes `authorize_job_access` as the shared
 resource boundary for Job-scoped operations.
 
+## gRPC enforcement
+
+The bearer interceptor authenticates every non-health RPC and attaches the
+principal for the duration of the call. The gRPC adapter
+(`grpc/servicers/mixins/job_authorization.py`) then:
+
+1. requires a live principal and the operation's scope **before** resolving
+   the durable repository, so an unauthenticated or expired caller never
+   touches storage;
+2. delegates the tenant/issuer/subject ownership check to the repository;
+3. maps every `AuthorizationError` — missing, legacy-unowned or cross-tenant —
+   to one `NOT_FOUND` response with the single message
+   `Resource not found or access denied`, so callers cannot enumerate
+   resources.
+
+Because expiry is re-evaluated inside the authorization check, a token that
+expires while a request is being processed is denied at the next authorization
+point instead of inheriting the verdict reached when the call was admitted.
+
 ## Rollout boundary
 
-This increment does **not** authenticate JWTs, attach principals to gRPC
-contexts, or force the existing legacy CreateJob RPC to provide a principal.
-That wiring must land before authenticated production traffic is enabled.
-Until then, callers omitting `owner_principal` create explicitly unowned
-compatibility records. Do not treat this compatibility mode as tenant-safe.
+The gRPC identity chain above is implemented and covered by tests. It does
+**not** by itself complete production rollout to external traffic: deployment
+configuration (issuer, audience, claim mapping, key rotation, TLS), a bounded
+policy for legacy-unowned Jobs, and shared application-service authorization
+for future non-gRPC adapters remain outstanding. Callers that bypass the
+authenticated adapter can still create explicitly unowned compatibility
+records; do not treat that path as tenant-safe.
 
 No automatic legacy ownership migration is permitted. Any administrative
 reconciliation must be explicit, audited, and separately authorized.

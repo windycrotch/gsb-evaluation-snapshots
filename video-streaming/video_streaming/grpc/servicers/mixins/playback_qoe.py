@@ -11,7 +11,7 @@ from video_streaming.grpc.servicers.mixins.job_authorization import (
 
 class PlaybackQoEMixin:
 
-    def start_playback_session(self, request, context):
+    def _start_playback_session(self, request, context):
         repository = require_job_access(
             request.tracking_id, "video.playback:write", context
         )
@@ -32,7 +32,7 @@ class PlaybackQoEMixin:
             manifest_artifact_id=result["manifest_artifact_id"],
         )
 
-    def record_playback_event(self, request, context):
+    def _record_playback_event(self, request, context):
         repository = require_playback_session_access(
             request.session_id, "video.playback:write", context
         )
@@ -82,7 +82,7 @@ class PlaybackQoEMixin:
             ended=result["status"] == "ENDED",
         )
 
-    def get_playback_qoe_report(self, request, context):
+    def _get_playback_qoe_report(self, request, context):
         repository = require_job_access(
             request.tracking_id, "video.qoe:read", context
         )

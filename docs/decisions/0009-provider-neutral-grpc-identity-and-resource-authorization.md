@@ -90,6 +90,28 @@ ADR 0008 secret resolution remains disabled until its own encryption, scoped
 authorization and legacy webhook migration gates pass. Webhook SSRF hardening
 and the plaintext Redis callback migration remain separate open risks.
 
+### Implementation note (2026-11-23)
+
+The identity chain is hardened and test-covered without changing the rollout
+gates above:
+
+- Rejection of missing, duplicate, non-Bearer, malformed and expired
+  credentials consistently returns `UNAUTHENTICATED` and never invokes a
+  business handler; `Check`/`Watch` remain public.
+- The request principal is held in a per-context stack. Interleaved RPCs on
+  one thread and concurrent RPCs on several threads each observe only their
+  own identity, and a streaming response clears its identity when the
+  iterator completes, is closed, or is abandoned and collected.
+- The gRPC adapter checks liveness and the required scope before resolving the
+  repository, then maps every Job/playback `AuthorizationError` — missing,
+  legacy-unowned and cross-tenant — to a single `NOT_FOUND` with the message
+  `Resource not found or access denied`. The playback-QoE RPCs use the same
+  guard and the same non-enumerating response.
+
+These guarantees are exercised by `tests/test_grpc_authentication.py`,
+`tests/test_grpc_job_authorization.py` and
+`tests/test_grpc_authorization_end_to_end.py`.
+
 Do not interpret this partial implementation as proof of production readiness
 or as completion of Issue #73.
 

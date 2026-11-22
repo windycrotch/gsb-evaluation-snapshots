@@ -2,11 +2,23 @@
 
 import math
 import re
-import resource
+
+try:
+    import resource
+except ImportError:  # pragma: no cover - non-POSIX development host
+    # Child CPU accounting is POSIX-only. Keep the module importable so that
+    # non-worker code paths (for example the gRPC job authorization adapter)
+    # can load on any platform; the measurement itself fails loudly rather
+    # than reporting a fabricated zero.
+    resource = None
 
 
 def capture_child_cpu_seconds():
     """Snapshot process-child CPU time; Celery prefork workers isolate tasks."""
+    if resource is None:  # pragma: no cover - non-POSIX development host
+        raise RuntimeError(
+            "Child CPU accounting requires the POSIX resource module"
+        )
     usage = resource.getrusage(resource.RUSAGE_CHILDREN)
     return float(usage.ru_utime + usage.ru_stime)
 

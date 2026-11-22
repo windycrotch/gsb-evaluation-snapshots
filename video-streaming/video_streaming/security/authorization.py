@@ -7,7 +7,11 @@ class AuthorizationError(PermissionError):
     """Raised when a principal is not allowed to perform an operation."""
 
 
-_DENIED_MESSAGE = "Resource not found or access denied"
+# One non-enumerating denial shared by missing, legacy-unowned and
+# cross-tenant resources. Callers must never distinguish these cases.
+RESOURCE_DENIED_MESSAGE = "Resource not found or access denied"
+
+_DENIED_MESSAGE = RESOURCE_DENIED_MESSAGE
 
 
 def require_scope(principal, required_scope, now=None):

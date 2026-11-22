@@ -2,6 +2,7 @@ import grpc
 
 from video_streaming.core.constants import ErrorMessages, ErrorCodes
 from video_streaming.core.exceptions import GrpcBaseException
+from video_streaming.security.authorization import RESOURCE_DENIED_MESSAGE
 
 
 __all__ = [
@@ -64,7 +65,11 @@ class NoWatermarkToUseException(GrpcBaseException):
 
 
 class ResourceNotFoundOrDeniedException(GrpcBaseException):
-    """Non-enumerating authorization denial for tenant-scoped resources."""
+    """Non-enumerating authorization denial for tenant-scoped resources.
+
+    Missing, legacy-unowned and cross-tenant resources deliberately share one
+    status and one message so callers cannot learn whether a resource exists.
+    """
 
     status_code = grpc.StatusCode.NOT_FOUND
-    message = "Resource not found"
+    message = RESOURCE_DENIED_MESSAGE
