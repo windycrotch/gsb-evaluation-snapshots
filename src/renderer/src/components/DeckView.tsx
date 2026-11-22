@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { engine } from '../audio/engine'
 import {
   beatLoop,
+  cancelTrackSeparation,
   cuePress,
   loadTrackToDeck,
   cyclePitchRange,
@@ -256,9 +257,13 @@ export function DeckView({ deckIndex }: { deckIndex: number }) {
                   ⟳ STEMS READY — LOAD THEM
                 </button>
               ) : track.separating ? (
-                <span className="stems-hint separating" title={track.stemStatus}>
-                  Separating stems… {track.stemStatus}
-                </span>
+                <button
+                  className="stems-hint separating"
+                  title={`${track.stemStatus} — click to cancel`}
+                  onClick={() => void cancelTrackSeparation(track.id)}
+                >
+                  Separating stems… {track.stemStatus} (cancel)
+                </button>
               ) : (
                 <button
                   className="toggle"

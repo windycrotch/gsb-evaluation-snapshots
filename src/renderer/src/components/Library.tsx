@@ -4,6 +4,7 @@ import {
   addRecordingToLibrary,
   addTracksFromDialog,
   addYoutubeTrack,
+  cancelTrackSeparation,
   createFolder,
   deleteFolder,
   loadTrackToDeck,
@@ -350,10 +351,14 @@ function TrackTable() {
               {track.stems ? (
                 <span className="stems-badge">✓ ready</span>
               ) : track.separating ? (
-                <span className="stems-badge working" title={track.stemStatus}>
+                <button
+                  className="stems-badge working"
+                  title={`${track.stemStatus} — click to cancel`}
+                  onClick={() => void cancelTrackSeparation(track.id)}
+                >
                   splitting {track.stemStatus.match(/(\d{1,3})(?:\.\d+)?%/)?.[1] ?? '…'}
-                  {track.stemStatus.match(/(\d{1,3})(?:\.\d+)?%/) ? '%' : ''}
-                </span>
+                  {track.stemStatus.match(/(\d{1,3})(?:\.\d+)?%/) ? '%' : ''} ✕
+                </button>
               ) : (
                 <button
                   className="mini-btn"

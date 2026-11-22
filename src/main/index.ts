@@ -10,7 +10,14 @@ import {
 } from 'electron'
 import { promises as fs, existsSync } from 'fs'
 import path from 'path'
-import { findSeparatorBin, getCachedStems, separateStems, STEM_MODELS } from './stems'
+import {
+  cancelAllSeparations,
+  cancelSeparation,
+  findSeparatorBin,
+  getCachedStems,
+  separateStems,
+  STEM_MODELS
+} from './stems'
 import { subprocessEnv } from './env'
 import { checkYoutube, downloadYoutubeAudio, findFfmpeg } from './youtube'
 import { execFile } from 'child_process'
@@ -89,6 +96,10 @@ function registerIpc(): void {
       }
     })
   )
+
+  ipcMain.handle('stems:cancel', (_event, trackPath: string, model: string) => {
+    cancelSeparation(trackPath, model)
+  })
 
   ipcMain.handle('youtube:check', () => checkYoutube())
 
@@ -223,6 +234,9 @@ app.whenReady().then(() => {
   mainWindow = createWindow()
   mainWindow.on('closed', () => {
     mainWindow = null
+    // Kills in-flight separators and clears their temp dirs so waiters
+    // settle instead of hanging on a window that no longer exists.
+    cancelAllSeparations()
   })
 
   session.defaultSession.setDisplayMediaRequestHandler(async (_request, callback) => {

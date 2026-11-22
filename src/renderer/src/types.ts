@@ -19,6 +19,7 @@ export interface StemDeckApi {
   checkStemEngine(): Promise<{ available: boolean; bin: string | null }>
   getCachedStems(trackPath: string, model: string): Promise<StemPaths | null>
   separateStems(trackPath: string, model: string): Promise<StemPaths>
+  cancelSeparation(trackPath: string, model: string): Promise<void>
   onStemProgress(callback: (event: StemProgressEvent) => void): () => void
   saveRecording(data: ArrayBuffer): Promise<string | null>
   saveReel(data: ArrayBuffer): Promise<string | null>

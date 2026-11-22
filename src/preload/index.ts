@@ -25,6 +25,8 @@ const api = {
     ipcRenderer.invoke('stems:cached', trackPath, model),
   separateStems: (trackPath: string, model: string): Promise<StemPaths> =>
     ipcRenderer.invoke('stems:separate', trackPath, model),
+  cancelSeparation: (trackPath: string, model: string): Promise<void> =>
+    ipcRenderer.invoke('stems:cancel', trackPath, model),
   onStemProgress: (callback: (event: StemProgressEvent) => void): (() => void) => {
     const listener = (_e: Electron.IpcRendererEvent, payload: StemProgressEvent): void =>
       callback(payload)

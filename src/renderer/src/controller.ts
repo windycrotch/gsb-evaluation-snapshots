@@ -838,8 +838,23 @@ export async function separateTrack(trackId: string): Promise<void> {
     showToast(`Stems ready for ${track.name}`)
   } catch (err) {
     updateTrack(trackId, { separating: false, stemStatus: '' })
-    showToast(`Separation failed: ${(err as Error).message}`)
+    // Cancellation is a deliberate user action, not a failure to report.
+    if (!/cancelled/i.test((err as Error).message)) {
+      showToast(`Separation failed: ${(err as Error).message}`)
+    }
   }
+}
+
+/** Abort a running (or dequeue a waiting) separation for a track. The main
+ *  process kills the separator and cleans up, so a later split starts fresh. */
+export async function cancelTrackSeparation(trackId: string): Promise<void> {
+  const queuedAt = stemQueue.indexOf(trackId)
+  if (queuedAt >= 0) stemQueue.splice(queuedAt, 1)
+  const { library, selectedModel } = useStore.getState()
+  const track = library.find((t) => t.id === trackId)
+  if (!track || !track.separating) return
+  updateTrack(trackId, { separating: false, stemStatus: '' })
+  await window.stemdeck.cancelSeparation(track.path, selectedModel)
 }
 
 // ---------- Mixer ----------
