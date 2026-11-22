@@ -7,7 +7,9 @@ import type { EqualizerStatus, Preset } from 'types/equalizer.types';
 class Equalizer {
   private static _instance: Equalizer;
   private audioCtx: AudioContext;
-  private audioCtxStatus: EqualizerStatus;
+  private audioCtxStatus: EqualizerStatus = 'IDEAL';
+  private audioSource: MediaElementAudioSourceNode | null = null;
+  private isInitialized = false;
   private eqFilterBands: BiquadFilterNode[];
   private bassBoostFilter: BiquadFilterNode;
   private compressor: DynamicsCompressorNode;
@@ -35,18 +37,21 @@ class Equalizer {
    */
   private initializeAudioContext() {
     const audioContextOptions = { latencyHint: 'playback' };
+    const WebkitAudioContext =
+      typeof window !== 'undefined' ? (window as any).webkitAudioContext : undefined;
     if (typeof AudioContext !== 'undefined') {
       this.audioCtx = new AudioContext(audioContextOptions as AudioContextOptions);
-    } else if (typeof (window as any).webkitAudioContext !== 'undefined') {
-      this.audioCtx = new (window as any).webkitAudioContext(audioContextOptions);
+    } else if (typeof WebkitAudioContext !== 'undefined') {
+      this.audioCtx = new WebkitAudioContext(audioContextOptions);
     } else {
       console.error('Web Audio API is not supported in this browser.');
+      this.audioCtxStatus = 'FAILED';
+      return;
     }
 
-    this.audioCtxStatus = 'ACTIVE';
     this.init();
 
-    if (this.audioCtx.state === 'suspended') {
+    if (this.audioCtx?.state === 'suspended') {
       this.addResumeListener();
     }
   }
@@ -70,11 +75,32 @@ class Equalizer {
 
   /**
    * Initializes the equalizer by setting up the audio source and filter bands.
+   * Idempotent: once ACTIVE, repeated calls (e.g. on every play or track
+   * change) do not create new contexts, sources or node connections.
+   * Retryable: after a FAILED attempt the graph is re-wired on the next call,
+   * reusing the media element source (which can only be created once per
+   * element) and detaching any partially connected nodes first.
    */
   init() {
+    if (!this.audioCtx) {
+      this.audioCtxStatus = 'FAILED';
+      return;
+    }
+    if (this.isInitialized && this.audioCtxStatus === 'ACTIVE') {
+      return;
+    }
     try {
       const audioInstance = AudioX.getAudioInstance();
-      const audioSource = this.audioCtx.createMediaElementSource(audioInstance);
+      if (!this.audioSource) {
+        this.audioSource = this.audioCtx.createMediaElementSource(audioInstance);
+      } else {
+        // re-wiring after a partial failure: drop stale connections first
+        try {
+          this.audioSource.disconnect();
+        } catch (_e) {
+          // no existing connections, nothing to detach
+        }
+      }
 
       const equalizerBands = bands.map((band) => {
         const filter = this.audioCtx.createBiquadFilter();
@@ -100,7 +126,7 @@ class Equalizer {
       this.bassBoostFilter.gain.value = 0;
 
       // Connect the nodes
-      audioSource.connect(equalizerBands[0]);
+      this.audioSource.connect(equalizerBands[0]);
       for (let i = 0; i < equalizerBands.length - 1; i++) {
         equalizerBands[i].connect(equalizerBands[i + 1]);
       }
@@ -109,10 +135,12 @@ class Equalizer {
       this.compressor.connect(this.audioCtx.destination);
 
       this.audioCtxStatus = 'ACTIVE';
+      this.isInitialized = true;
       this.eqFilterBands = equalizerBands;
     } catch (error) {
       console.error('Equalizer initialization failed:', error);
       this.audioCtxStatus = 'FAILED';
+      this.isInitialized = false;
     }
   }
 
@@ -153,6 +181,10 @@ class Equalizer {
    * @returns {EqualizerStatus} The current status of the AudioContext.
    */
   status() {
+    if (!this.audioCtx) {
+      this.audioCtxStatus = 'FAILED';
+      return this.audioCtxStatus;
+    }
     if (this.audioCtx.state === 'suspended') {
       this.audioCtx.resume();
     }
@@ -164,7 +196,11 @@ class Equalizer {
    * @param {number[]} gains - The gain values for each band.
    */
   setCustomEQ(gains: number[]) {
-    if (isValidArray(gains) && gains.length === this.eqFilterBands.length) {
+    if (
+      isValidArray(gains) &&
+      isValidArray(this.eqFilterBands) &&
+      gains.length === this.eqFilterBands.length
+    ) {
       const currentTime = this.audioCtx.currentTime;
       for (let index = 0; index < this.eqFilterBands.length; index++) {
         const band = this.eqFilterBands[index];
@@ -181,6 +217,9 @@ class Equalizer {
    * @param {number} gain - The gain value for bass boost.
    */
   setBassBoost(enable: boolean, gain = 6) {
+    if (!this.bassBoostFilter || !this.audioCtx) {
+      return;
+    }
     const currentTime = this.audioCtx.currentTime;
     if (enable) {
       this.bassBoostFilter.gain.setTargetAtTime(gain, currentTime, 0.05);
@@ -216,11 +255,14 @@ class Equalizer {
    * Resets the equalizer to flat response.
    */
   reset() {
+    if (!this.audioCtx || !isValidArray(this.eqFilterBands)) {
+      return;
+    }
     const currentTime = this.audioCtx.currentTime;
     for (const band of this.eqFilterBands) {
       band.gain.setTargetAtTime(0, currentTime, 0.05);
     }
-    this.bassBoostFilter.gain.setTargetAtTime(0, currentTime, 0.05);
+    this.bassBoostFilter?.gain.setTargetAtTime(0, currentTime, 0.05);
   }
 }
 

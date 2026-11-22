@@ -102,15 +102,33 @@ const loadScript = (url: string, onLoad: () => void, name: string): Promise<void
   });
 };
 
-const handleQueuePlayback = () => {
-  const audio = new AudioX();
+/**
+ * Guard that tells whether a queue session (identified by its id) is still the
+ * active one. Listeners captured by older sessions must become no-ops.
+ */
+export type QueueSessionGuard = (sessionId: number) => boolean;
+
+/**
+ * Wires the "track ended -> play next in queue" behaviour for a single queue
+ * session. Returns an unsubscribe function; the listener also self-invalidates
+ * when the session it belongs to is no longer active, so stale listeners from
+ * previous sessions can never trigger playNext again.
+ */
+const handleQueuePlayback = (
+  audio: AudioX,
+  sessionId: number,
+  isSessionActive: QueueSessionGuard,
+): (() => void) => {
   let hasEnded = false;
 
   const audioStateListener = (state: AudioState) => {
+    if (!isSessionActive(sessionId)) {
+      return;
+    }
     if (state.playbackState === 'ended' && !hasEnded) {
-      const queue = audio.getQueue();
       hasEnded = true;
-      if (queue && isValidArray(queue) && hasEnded) {
+      const queue = audio.getQueue();
+      if (queue && isValidArray(queue)) {
         audio.playNext();
       }
     }
@@ -119,7 +137,7 @@ const handleQueuePlayback = () => {
     }
   };
 
-  listen('AUDIO_STATE', audioStateListener);
+  return listen('AUDIO_STATE', audioStateListener);
 };
 
 const getBufferedDuration = (audioInstance: HTMLAudioElement) => {
@@ -145,27 +163,47 @@ const shuffle = <T>(array: T[]): T[] => {
   return shuffledArray;
 };
 
-const handleLoopPlayback = (loopMode: LoopMode) => {
-  const audio = new AudioX();
+/**
+ * Applies a loop mode for the current queue session.
+ * - SINGLE / OFF only toggle the audio element's loop flag and return undefined.
+ * - QUEUE registers a session-scoped listener that replays the *current* queue
+ *   (read at fire time, not captured at registration) once it ends, and returns
+ *   an unsubscribe function. The listener self-invalidates when its session is
+ *   over, so switching modes, clearing the queue or destroying the player
+ *   guarantees old listeners never replay the first track again.
+ */
+const handleLoopPlayback = (
+  loopMode: LoopMode,
+  audio: AudioX,
+  sessionId: number,
+  isSessionActive: QueueSessionGuard,
+): (() => void) | undefined => {
   const audioInstance = AudioX.getAudioInstance();
 
-  if (loopMode === 'OFF') {
-    audioInstance.loop = false;
-  }
   if (loopMode === 'SINGLE') {
     audioInstance.loop = true;
+    return undefined;
   }
+
+  // OFF and QUEUE both disable single-track looping on the element
+  audioInstance.loop = false;
+
   if (loopMode === 'QUEUE') {
-    const queue = audio.getQueue();
-    // switching off single
-    handleLoopPlayback('OFF');
-    console.log('LOOP_MODE', loopMode);
-    listen('AUDIO_STATE', (audioState: AudioState) => {
-      if (audioState.playbackState === 'queueended' && isValidArray(queue)) {
-        audio.addMediaAndPlay(queue[0]);
+    const queueEndedListener = (audioState: AudioState) => {
+      if (!isSessionActive(sessionId)) {
+        return;
       }
-    });
+      if (audioState.playbackState === 'queueended') {
+        const queue = audio.getQueue();
+        if (queue && isValidArray(queue)) {
+          audio.addMediaAndPlay(queue[0]);
+        }
+      }
+    };
+    return listen('AUDIO_STATE', queueEndedListener);
   }
+
+  return undefined;
 };
 
 const diffChecker = (d1: any, d2: any): boolean => {

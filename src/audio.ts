@@ -9,16 +9,14 @@ import {
   handleQueuePlayback,
   isValidArray,
   isValidFunction,
-  isValidObject,
 } from 'helpers/common';
-import { getLatestState, listen, notify } from 'helpers/notifier';
-import { shuffleQueue } from 'helpers/shuffleHelper';
+import { listen, notify } from 'helpers/notifier';
+import { shuffleQueue, unshuffleQueue } from 'helpers/shuffleHelper';
 
 import { attachMediaSessionHandlers, updateMetaData } from 'mediasession/mediasessionHandler';
 import { READY_STATE } from 'states/audioState';
 import type {
   AudioInit,
-  AudioState,
   LoopMode,
   MediaTrack,
   PlaybackRate,
@@ -34,6 +32,7 @@ class AudioX {
   private static _instance: AudioX;
   private _queue: MediaTrack[];
   private _currentQueueIndex = 0;
+  private _currentTrack: MediaTrack | undefined;
   private _fetchFn: (mediaTrack: MediaTrack) => Promise<void>;
   private eqStatus: EqualizerStatus = 'IDEAL';
   private isEqEnabled = false;
@@ -42,6 +41,16 @@ class AudioX {
   private originalQueue: MediaTrack[] = [];
   private isShuffled = false;
   private loopMode: LoopMode = 'OFF';
+  /**
+   * A queue session is the single source of truth for queue, current index and
+   * every listener that reacts to queue lifecycle events (track ended ->
+   * playNext, queue ended -> loop replay). Bumping the id invalidates every
+   * listener registered by previous sessions.
+   */
+  private _queueSessionId = 0;
+  private _sessionCleanups: Array<() => void> = [];
+  private _loopCleanup: (() => void) | undefined;
+  private _eventListenersAttached = false;
 
   constructor() {
     if (AudioX._instance) {
@@ -58,6 +67,81 @@ class AudioX {
     AudioX._instance = this;
     this._audio = new Audio();
     audioInstance = this._audio;
+  }
+
+  /** Guard passed to session listeners: is the given session still the active one? */
+  private _isQueueSessionActive = (sessionId: number) => sessionId === this._queueSessionId;
+
+  /**
+   * Ends the current queue session: invalidates and unsubscribes every
+   * session-scoped listener (queue-end auto advance, queue loop replay).
+   */
+  private _endQueueSession() {
+    this._queueSessionId += 1;
+    const cleanups = this._sessionCleanups.splice(0);
+    for (const cleanup of cleanups) {
+      try {
+        cleanup();
+      } catch (_e) {
+        // an already-removed listener must never break session teardown
+      }
+    }
+    this._loopCleanup = undefined;
+  }
+
+  /**
+   * Registers the queue-loop listener for the active session, making sure any
+   * previously registered one is removed first (loop replay stays idempotent).
+   */
+  private _attachQueueLoopListener() {
+    this._loopCleanup?.();
+    const cleanup = handleLoopPlayback(
+      'QUEUE',
+      this,
+      this._queueSessionId,
+      this._isQueueSessionActive,
+    );
+    this._loopCleanup = cleanup;
+    if (cleanup) {
+      this._sessionCleanups.push(cleanup);
+    }
+  }
+
+  /**
+   * The single commit point for queue mutations: every change of the queue and
+   * the current index (addQueue, toggleShuffle) goes through here so both are
+   * always updated together, a fresh queue session is started and exactly one
+   * set of session listeners is attached for it.
+   */
+  private _commitQueue(queue: MediaTrack[], currentTrackId = this._currentTrack?.id) {
+    this._endQueueSession();
+    this._queue = queue;
+    const currentIndex = currentTrackId
+      ? queue.findIndex((track) => track.id === currentTrackId)
+      : -1;
+    // keep the current track at a playable position; fall back to queue start
+    this._currentQueueIndex = currentIndex > -1 ? currentIndex : 0;
+    this._sessionCleanups.push(
+      handleQueuePlayback(this, this._queueSessionId, this._isQueueSessionActive),
+    );
+    // re-arm queue looping for the new session if it was active
+    if (this.loopMode === 'QUEUE') {
+      this._attachQueueLoopListener();
+    }
+  }
+
+  /** Resets queue / shuffle / loop state and listeners to a clean baseline. */
+  private _resetToBaseline() {
+    this._endQueueSession();
+    this._queue = [];
+    this._currentQueueIndex = 0;
+    this._currentTrack = undefined;
+    this.originalQueue = [];
+    this.isShuffled = false;
+    this.loopMode = 'OFF';
+    if (audioInstance) {
+      audioInstance.loop = false;
+    }
   }
 
   /**
@@ -102,7 +186,10 @@ class AudioX {
     this.isPlayLogEnabled = enablePlayLog;
     this.isEqEnabled = enableEQ;
 
-    if (customEventListeners !== null) {
+    if (this._eventListenersAttached) {
+      // re-init after reset/destroy must not stack duplicate element listeners
+      console.warn('AudioX event listeners are already attached, skipping re-attachment');
+    } else if (customEventListeners !== null) {
       if (useDefaultEventListeners) {
         console.warn(
           `useDefaultEventListeners is set to true at init, are you trying to use the default event listeners?
@@ -110,8 +197,10 @@ class AudioX {
         );
       }
       attachEventListeners(customEventListeners, false);
+      this._eventListenersAttached = true;
     } else {
       attachEventListeners(BASE_EVENT_CALLBACK_MAP, enablePlayLog);
+      this._eventListenersAttached = true;
     }
 
     if (showNotificationActions) {
@@ -141,6 +230,8 @@ class AudioX {
         this._currentQueueIndex = index;
       }
     }
+    // the queue session itself is the source of truth for the current track
+    this._currentTrack = mediaTrack;
 
     const mediaType = mediaTrack.source.includes('.m3u8') ? 'HLS' : 'DEFAULT';
 
@@ -174,15 +265,28 @@ class AudioX {
     audioInstance.load();
   }
 
+  /**
+   * Attaches the equalizer to the playback chain.
+   * Idempotent: repeated calls (multiple play() / track changes) neither create
+   * a new AudioContext nor re-connect nodes once the equalizer is ACTIVE.
+   * A failed attempt is remembered as 'FAILED' and retried on the next call,
+   * while playback itself is never interrupted by an equalizer failure.
+   */
   attachEq() {
-    if (this.eqStatus === 'IDEAL') {
-      try {
-        const eq = new Equalizer();
-        this.eqStatus = eq.status();
-        this.eqInstance = eq;
-      } catch (_e) {
-        console.log('failed to enable equalizer');
+    if (this.eqStatus === 'ACTIVE' && this.eqInstance) {
+      return;
+    }
+    try {
+      // the Equalizer singleton returns the existing instance if present
+      const eq = new Equalizer();
+      if (eq.status() === 'FAILED') {
+        eq.init(); // retry wiring the node graph after a previous failure
       }
+      this.eqInstance = eq;
+      this.eqStatus = eq.status();
+    } catch (_e) {
+      this.eqStatus = 'FAILED';
+      console.log('failed to enable equalizer, playback continues without it');
     }
   }
 
@@ -230,10 +334,8 @@ class AudioX {
         this.addMedia(currentTrack).then(() => {
           if (audioInstance.HAVE_ENOUGH_DATA === READY_STATE.HAVE_ENOUGH_DATA) {
             setTimeout(async () => {
+              // play() attaches the equalizer when enabled (idempotently)
               await this.play();
-              if (this.isEqEnabled) {
-                this.attachEq();
-              }
             }, 950);
           }
         });
@@ -260,6 +362,8 @@ class AudioX {
 
   /**
    * @method reset :  This stops the playback and resets all the state of the audio
+   * including the queue session, so a subsequent init + play starts from a
+   * clean baseline with no leftover listeners.
    */
   async reset() {
     if (audioInstance) {
@@ -267,6 +371,7 @@ class AudioX {
       audioInstance.src = '';
       audioInstance.srcObject = null;
     }
+    this._resetToBaseline();
   }
 
   /**
@@ -334,7 +439,7 @@ class AudioX {
   }
 
   setPreset(id: keyof Preset) {
-    if (this.isEqEnabled) {
+    if (this.isEqEnabled && this.eqStatus === 'ACTIVE' && this.eqInstance) {
       this.eqInstance.setPreset(id);
     } else {
       console.error('Equalizer not initialized, please set enableEq at init');
@@ -342,7 +447,7 @@ class AudioX {
   }
 
   setCustomEQ(gains: number[]) {
-    if (this.isEqEnabled) {
+    if (this.isEqEnabled && this.eqStatus === 'ACTIVE' && this.eqInstance) {
       this.eqInstance.setCustomEQ(gains);
     } else {
       console.error('Equalizer not initialized, please set enableEq at init');
@@ -350,39 +455,41 @@ class AudioX {
   }
 
   setBassBoost(enabled: boolean, boost: number) {
-    if (this.isEqEnabled) {
+    if (this.isEqEnabled && this.eqStatus === 'ACTIVE' && this.eqInstance) {
       this.eqInstance.setBassBoost(enabled, boost);
     } else {
       console.error('Equalizer not initialized, please set enableEq at init');
     }
   }
 
-  addQueue(queue: MediaTrack[], playbackType: QueuePlaybackType) {
-    this.clearQueue();
-    const audioState = getLatestState('AUDIO_X_STATE') as AudioState;
+  addQueue(queue: MediaTrack[], playbackType: QueuePlaybackType = 'DEFAULT') {
     const playerQueue = isValidArray(queue) ? queue.slice() : [];
-    const currentTrack = isValidObject(audioState.currentTrack)
-      ? audioState.currentTrack
-      : undefined;
+    const currentTrackId = this._currentTrack?.id;
 
+    let finalQueue: MediaTrack[];
     switch (playbackType) {
-      case 'DEFAULT':
-        this._queue = playerQueue;
-        break;
       case 'REVERSE':
-        this._queue = playerQueue.reverse();
+        finalQueue = [...playerQueue].reverse();
+        this.isShuffled = false;
+        this.originalQueue = [];
         break;
       case 'SHUFFLE': {
-        const newQueue = shuffleQueue(playerQueue, currentTrack?.id);
-        this.addQueue(newQueue, 'DEFAULT');
+        // keep the original order so a later unshuffle can restore it
+        this.originalQueue = [...playerQueue];
         this.isShuffled = true;
+        finalQueue = shuffleQueue(playerQueue, currentTrackId);
         break;
       }
       default:
-        this._queue = playerQueue;
+        finalQueue = playerQueue;
+        this.isShuffled = false;
+        this.originalQueue = [];
         break;
     }
-    handleQueuePlayback();
+
+    // single commit point: queue + current index + session listeners
+    this._commitQueue(finalQueue, currentTrackId);
+
     /* Attaching MediaSession Handler again as this will make sure that
      the next and previous button show up in notification */
     if (this.showNotificationsActions) {
@@ -393,9 +500,11 @@ class AudioX {
   playNext() {
     const index = this._currentQueueIndex + 1;
     if (this?._queue?.length > index) {
+      // commit the index synchronously so rapid consecutive track changes
+      // always advance from the latest committed position
+      this._currentQueueIndex = index;
       const nextTrack = this._queue[index];
       this.addMediaAndPlay(nextTrack, this._fetchFn);
-      this._currentQueueIndex = index;
     } else {
       // stop the audio and end trigger queue ended
       this.stop();
@@ -409,19 +518,22 @@ class AudioX {
     const index = this?._currentQueueIndex - 1;
 
     if (index >= 0) {
+      this._currentQueueIndex = index;
       const previousTrack = this?._queue[index];
       this.addMediaAndPlay(previousTrack, this._fetchFn);
-      this._currentQueueIndex = index;
     } else {
       console.log('At the beginning of the queue');
     }
   }
 
   clearQueue() {
-    if (this._queue && isValidArray(this._queue)) {
-      this._queue = [];
-      this._currentQueueIndex = 0;
-    }
+    // ending the session first guarantees stale queue/loop listeners can
+    // never fire against the cleared queue
+    this._endQueueSession();
+    this._queue = [];
+    this._currentQueueIndex = 0;
+    this.originalQueue = [];
+    this.isShuffled = false;
   }
 
   addToQueue(mediaTracks: MediaTrack | MediaTrack[]) {
@@ -435,40 +547,42 @@ class AudioX {
   }
 
   toggleShuffle() {
-    // isShuffled is false initially
-    const audioState = getLatestState('AUDIO_X_STATE') as AudioState;
-    const currentQueue = this._queue ?? this.getQueue();
-    this.clearQueue(); // clearing Queue to check if it still stays
-    const currentTrack = isValidObject(audioState.currentTrack)
-      ? audioState.currentTrack
-      : undefined;
+    const currentQueue = this.getQueue();
+    if (!isValidArray(currentQueue)) {
+      return;
+    }
+    const currentTrackId = this._currentTrack?.id;
+
     if (!this.isShuffled) {
       this.originalQueue = [...currentQueue];
-      const newQueue = shuffleQueue(currentQueue, currentTrack?.id);
-      this.addQueue(newQueue, 'DEFAULT');
+      const shuffledQueue = shuffleQueue(currentQueue, currentTrackId);
       this.isShuffled = true;
+      // same commit point as addQueue: queue + index + session stay consistent
+      this._commitQueue(shuffledQueue, currentTrackId);
     } else {
-      if (!this.isShuffled || !this.originalQueue.length) return;
-      this.addQueue(this.originalQueue, 'DEFAULT');
+      if (!isValidArray(this.originalQueue)) {
+        return;
+      }
+      const restoredQueue = unshuffleQueue(this.originalQueue);
       this.isShuffled = false;
+      // restores original order and re-anchors the index on the current track
+      this._commitQueue(restoredQueue, currentTrackId);
     }
   }
 
   loop(loopMode: LoopMode) {
-    this.loopMode = loopMode;
-    switch (loopMode) {
-      case 'SINGLE':
-        handleLoopPlayback(loopMode);
-        break;
-      case 'QUEUE':
-        handleLoopPlayback(loopMode);
-        break;
-      case 'OFF':
-        handleLoopPlayback(loopMode);
-        break;
-      default:
-        handleLoopPlayback('OFF');
-        break;
+    const mode: LoopMode =
+      loopMode === 'SINGLE' || loopMode === 'QUEUE' || loopMode === 'OFF' ? loopMode : 'OFF';
+    this.loopMode = mode;
+
+    // invalidate the previous queue-loop listener before applying the new mode
+    this._loopCleanup?.();
+    this._loopCleanup = undefined;
+
+    if (mode === 'QUEUE') {
+      this._attachQueueLoopListener();
+    } else {
+      handleLoopPlayback(mode, this, this._queueSessionId, this._isQueueSessionActive);
     }
   }
 
@@ -482,13 +596,24 @@ class AudioX {
 
   removeFromQueue(mediaTrack: MediaTrack) {
     if (this._queue && isValidArray(this._queue)) {
-      const queue = this._queue.filter((track: MediaTrack) => track.id === mediaTrack.id);
-      this._queue = queue;
+      this._queue = this._queue.filter((track: MediaTrack) => track.id !== mediaTrack.id);
+      // keep the current index at a playable position inside the shrunk queue
+      if (this._currentQueueIndex >= this._queue.length) {
+        this._currentQueueIndex = Math.max(0, this._queue.length - 1);
+      }
     }
   }
 
   getQueue() {
     return this._queue && isValidArray(this._queue) ? this._queue : [];
+  }
+
+  getCurrentQueueIndex() {
+    return this._currentQueueIndex;
+  }
+
+  getCurrentTrack() {
+    return this._currentTrack;
   }
 
   get id() {
