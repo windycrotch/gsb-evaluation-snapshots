@@ -189,6 +189,7 @@ drivers are built on top of it:
 | `node tools/talkfuzz.js` | Visits all 224 maps, talks to every NPC and reads every sign (1,000+ conversations), playing out any battles. |
 | `node tools/fuzzbattle.js` | Random battles with random species, levels and movesets; reports exceptions and stuck battles. |
 | `node tools/pvpfuzz.js` | Two copies of the game fight random link battles through their picks alone; every turn must match in both. |
+| `node tools/pvpscenarios.js` | Link battles that end badly: forfeits, connections dropped mid-replacement, both sides fainting at once, engine exceptions. Both games must always settle on a clear, consistent result. `node tools/pvpscenarios.js fuzz [n]` adds random forfeit/disconnect injection. |
 | `node -r ./tools/pathaudit.js tools/stepfuzz.js` | Fires every step/enter script on every walkable cell under random story states; flags anyone walking through a wall. |
 | `node tools/warpcheck.js` | Walks the warp graph and checks every exit leads back where it came from. |
 | `node tools/rendermap.js <Map> out.png` | Renders a whole map. `monsheet.js`, `vfxsheet.js` and `charsheet.js` do the same for Pokémon, move animations and characters. |

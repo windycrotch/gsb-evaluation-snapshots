@@ -199,8 +199,10 @@
     G.engine.push(sc);
     for (let i = 0; i < 10; i++) { G.fadeLevel = 1 - i / 10; yield; } G.fadeLevel = 0;
     let result;
+    // a crashed battle must not hand anyone a win: in a link battle both games run the same code, so both would
+    // "win" the same broken turn - settle those as a draw instead (the other game learns it via the 'end' relay)
     try { result = yield* b.run(sc); }
-    catch (e) { console.error(e); result = 'win'; }
+    catch (e) { console.error(e); result = opts.pvp ? 'draw' : 'win'; }
     if (G.glitch) G.glitch.afterBattle(b, opts); // the last enemy's stats stay in RAM (src/game/glitches.js)
     // pay day
     if (b.payDay && (result === 'win' || result === 'caught')) { G.state.money += b.payDay; yield* sc.msg(G.state.name + ' picked up $' + b.payDay + '!'); }
