@@ -8,5 +8,6 @@ export class Rectifier extends Module {
     for (let i = 0; i < 128; i++) {
       out[i] = Math.abs(input[i]);
     }
+    this.sanitizeOutputs();
   }
 }

@@ -37,6 +37,15 @@ export class Delay extends Module {
     this.mix = params.mix !== undefined ? params.mix : 0.4;
   }
 
+  override adoptState(previous: Module): void {
+    if (!(previous instanceof Delay)) return;
+    // Keep the delay line's tail and write position so a structural reload
+    // does not truncate reverb/feedback tails or cause a discontinuity.
+    const copyLength = Math.min(this.buffer.length, previous.buffer.length);
+    this.buffer.set(previous.buffer.subarray(0, copyLength));
+    this.writeIndex = previous.writeIndex % this.maxSamples;
+  }
+
   process(): void {
     const input = this.inputs.in || new Float32Array(128);
     const out = this.outputs.out;
@@ -63,13 +72,17 @@ export class Delay extends Module {
       let readIndex = this.writeIndex - delaySamples;
       if (readIndex < 0) readIndex += this.maxSamples;
 
-      const delayed = this.buffer[readIndex];
+      const delayed = Number.isFinite(this.buffer[readIndex]) ? this.buffer[readIndex] : 0;
       const dry = input[i];
       out[i] = dry * (1 - mix) + delayed * mix;
-      this.buffer[this.writeIndex] = dry + delayed * feedback;
+      const written = dry + delayed * feedback;
+      // Never let a non-finite sample into the ring: it would ring on forever.
+      this.buffer[this.writeIndex] = Number.isFinite(written) ? written : 0;
 
       this.writeIndex += 1;
       if (this.writeIndex >= this.maxSamples) this.writeIndex = 0;
     }
+
+    this.sanitizeOutputs();
   }
 }

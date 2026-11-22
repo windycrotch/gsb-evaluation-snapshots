@@ -41,5 +41,6 @@ export class OutputModule extends Module {
         out[i] = input[i];
       }
     }
+    this.sanitizeOutputs();
   }
 }

@@ -37,5 +37,6 @@ export class Pan extends Module {
       outL[i] = input[i] * leftGain;
       outR[i] = input[i] * rightGain;
     }
+    this.sanitizeOutputs();
   }
 }

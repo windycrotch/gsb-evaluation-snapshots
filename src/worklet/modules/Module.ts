@@ -39,6 +39,30 @@ export abstract class Module {
 
   protected applyParams(): void {}
 
+  /**
+   * Called by the processor when a structural reload creates a fresh module
+   * with the same id and kind as one that already existed. Subclasses with
+   * internal DSP state (oscillator phase, delay line, integrator...) copy
+   * that state across, so a graph rebuild does not click, mute or reset
+   * feedback-loop dynamics. Parameter-only edits never rebuild at all and
+   * therefore never reach this path.
+   */
+  adoptState(_previous: Module): void {}
+
+  /**
+   * Replace any non-finite output sample with silence. A NaN or Infinity
+   * injected into a feedback loop would otherwise circulate forever and
+   * make every downstream module blow up as well.
+   */
+  protected sanitizeOutputs(): void {
+    for (const port of Object.keys(this.outputs)) {
+      const buffer = this.outputs[port];
+      for (let i = 0; i < buffer.length; i++) {
+        if (!Number.isFinite(buffer[i])) buffer[i] = 0;
+      }
+    }
+  }
+
   getScratchBuffer(): Float32Array {
     if (!this.scratchBuffers.has('temp')) {
       this.scratchBuffers.set('temp', new Float32Array(128));

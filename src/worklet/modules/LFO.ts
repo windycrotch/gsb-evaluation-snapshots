@@ -27,6 +27,12 @@ export class LFO extends Module {
     this.shape = (params.shape as 'sine' | 'tri' | 'saw' | 'square') || 'sine';
   }
 
+  override adoptState(previous: Module): void {
+    if (previous instanceof LFO && Number.isFinite(previous.phase)) {
+      this.phase = previous.phase;
+    }
+  }
+
   process(): void {
     const out = this.outputs.out;
     const rate = this.inputs.rate || new Float32Array(128);
@@ -66,5 +72,8 @@ export class LFO extends Module {
       this.phase += Math.max(0.001, frequency) / sr;
       while (this.phase >= 1) this.phase -= 1;
     }
+
+    // Keep NaN/Infinity out of feedback loops patched into this LFO.
+    this.sanitizeOutputs();
   }
 }

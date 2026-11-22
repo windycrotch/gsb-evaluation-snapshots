@@ -16,5 +16,6 @@ export class VCA extends Module {
       const gainCv = hasCv ? cv[i] : 5;
       out[i] = audioIn[i] * (gainCv / 5);
     }
+    this.sanitizeOutputs();
   }
 }

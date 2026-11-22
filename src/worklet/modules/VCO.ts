@@ -30,6 +30,12 @@ export class VCO extends Module {
     this.shape = (params.vcoShape as 'sine' | 'tri' | 'saw' | 'square') || 'saw';
   }
 
+  override adoptState(previous: Module): void {
+    if (previous instanceof VCO && Number.isFinite(previous.phase)) {
+      this.phase = previous.phase;
+    }
+  }
+
   process(): void {
     const out = this.outputs.out;
     const pitch = this.inputs.pitch || new Float32Array(128);
@@ -73,5 +79,8 @@ export class VCO extends Module {
       while (this.phase >= 1) this.phase -= 1;
       while (this.phase < 0) this.phase += 1;
     }
+
+    // Keep NaN/Infinity out of feedback loops patched into this oscillator.
+    this.sanitizeOutputs();
   }
 }

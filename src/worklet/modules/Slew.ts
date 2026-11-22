@@ -27,6 +27,13 @@ export class Slew extends Module {
     this.fallTime = params.fallTime !== undefined ? Math.max(0.001, params.fallTime) : 0.5;
   }
 
+  override adoptState(previous: Module): void {
+    if (previous instanceof Slew && Number.isFinite(previous.value)) {
+      this.value = previous.value;
+      this.rising = previous.rising;
+    }
+  }
+
   process(): void {
     const out = this.outputs.out;
     const input = this.inputs.in;
@@ -75,5 +82,7 @@ export class Slew extends Module {
       this.value = isNaN(this.value) ? 0 : Math.max(0, Math.min(10, this.value));
       out[i] = this.value;
     }
+
+    this.sanitizeOutputs();
   }
 }

@@ -32,5 +32,6 @@ export class Atten extends Module {
     for (let i = 0; i < 128; i++) {
       out[i] = input[i] * this.gain + this.offset;
     }
+    this.sanitizeOutputs();
   }
 }

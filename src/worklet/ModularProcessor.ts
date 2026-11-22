@@ -11,6 +11,12 @@ import { Rectifier } from './modules/Rectifier';
 import { Atten } from './modules/Atten';
 import { OutputModule } from './modules/OutputModule';
 
+interface BuiltGraph {
+  modules: Map<string, Module>;
+  sortedModules: Module[];
+  outputModule: OutputModule | null;
+}
+
 export class ModularProcessor extends AudioWorkletProcessor {
   private modules: Map<string, Module>;
   private sortedModules: Module[];
@@ -35,34 +41,61 @@ export class ModularProcessor extends AudioWorkletProcessor {
       return;
     }
     if (msg.type === 'loadGraph') {
+      const revision = msg.revision;
       try {
         this.loadGraph(msg.graph);
-        this.port.postMessage({ type: 'graphLoaded', success: true });
+        this.port.postMessage({ type: 'graphLoaded', success: true, revision });
       } catch (err) {
+        // The previous, still-working graph stays live: loadGraph swaps state
+        // atomically and only after the new graph has been fully validated.
         this.port.postMessage({
           type: 'error',
           message: err instanceof Error ? err.message : 'Unknown error',
+          revision,
         });
       }
     }
   }
 
+  /**
+   * Replaces the running graph. The whole new graph is constructed and
+   * validated off-stage first; only once every module and connection checks
+   * out do we swap the live references. A failure therefore leaves the last
+   * good graph sounding instead of muting the processor into an empty state.
+   */
   loadGraph(graph: Graph): void {
-    this.modules.clear();
-    this.sortedModules = [];
-    this.outputModule = null;
+    const built = this.buildGraph(graph);
 
-    for (const modDef of graph.modules) {
-      const module = this.createModule(modDef);
-      this.modules.set(modDef.id, module);
-
-      if (modDef.kind === 'OUTPUT') {
-        this.outputModule = module as OutputModule;
+    // Carry internal DSP state (phases, delay lines, integrators) from the
+    // outgoing graph to same-id/same-kind modules before the swap, so a
+    // structural reload does not reset feedback-loop dynamics.
+    for (const [id, nextModule] of built.modules) {
+      const previous = this.modules.get(id);
+      if (previous && previous.kind === nextModule.kind) {
+        nextModule.adoptState(previous);
       }
     }
 
-    const connections = graph.connections || [];
-    this.rebuild(connections);
+    this.modules = built.modules;
+    this.sortedModules = built.sortedModules;
+    this.outputModule = built.outputModule;
+  }
+
+  /** Builds and validates a graph without touching the currently running one. */
+  private buildGraph(graph: Graph): BuiltGraph {
+    const modules = new Map<string, Module>();
+    let outputModule: OutputModule | null = null;
+
+    for (const modDef of graph.modules) {
+      const module = this.createModule(modDef);
+      modules.set(modDef.id, module);
+      if (modDef.kind === 'OUTPUT') {
+        outputModule = module as OutputModule;
+      }
+    }
+
+    const sortedModules = this.rebuild(modules, graph.connections || []);
+    return { modules, sortedModules, outputModule };
   }
 
   createModule(def: ModuleDefinition): Module {
@@ -89,12 +122,17 @@ export class ModularProcessor extends AudioWorkletProcessor {
     return new ModuleClass(def.id, def.kind, def.params || {});
   }
 
-  rebuild(connections: Connection[]): void {
+  /**
+   * Wires the given fresh modules and returns them in processing order.
+   * Throws on any dangling module or unknown port, so callers never end up
+   * with a half-wired graph.
+   */
+  rebuild(modules: Map<string, Module>, connections: Connection[]): Module[] {
     const inDegree = new Map<string, number>();
     const adjacency = new Map<string, string[]>();
 
     // Initialize all modules
-    for (const [id, module] of this.modules) {
+    for (const [id, module] of modules) {
       inDegree.set(id, 0);
       adjacency.set(id, []);
 
@@ -116,11 +154,24 @@ export class ModularProcessor extends AudioWorkletProcessor {
 
     // Process connections
     for (const conn of connections) {
-      const fromModule = this.modules.get(conn.from.id);
-      const toModule = this.modules.get(conn.to.id);
+      const fromModule = modules.get(conn.from.id);
+      const toModule = modules.get(conn.to.id);
 
       if (!fromModule || !toModule) {
-        throw new Error(`Invalid connection: ${conn.from.id} -> ${conn.to.id}`);
+        throw new Error(
+          `Invalid connection: ${conn.from.id}.${conn.from.port} -> ${conn.to.id}.${conn.to.port} (module not found)`
+        );
+      }
+
+      if (!this.getOutputPorts(fromModule.kind).includes(conn.from.port)) {
+        throw new Error(
+          `Invalid connection: module ${conn.from.id} has no output port "${conn.from.port}"`
+        );
+      }
+      if (!this.getInputPorts(toModule.kind).includes(conn.to.port)) {
+        throw new Error(
+          `Invalid connection: module ${conn.to.id} has no input port "${conn.to.port}"`
+        );
       }
 
       // Track dependency for topological sort
@@ -165,14 +216,14 @@ export class ModularProcessor extends AudioWorkletProcessor {
     // Any modules not in sorted are part of cycles - process them after sorted ones
     // Feedback connections naturally have a 1-block delay (~2.7ms at 48kHz)
     const unsorted: string[] = [];
-    for (const [id] of this.modules) {
+    for (const [id] of modules) {
       if (!sorted.includes(id)) {
         unsorted.push(id);
       }
     }
 
-    // Store sorted module references (acyclic first, then cycles)
-    this.sortedModules = [...sorted, ...unsorted].map((id) => this.modules.get(id)!);
+    // Return sorted module references (acyclic first, then cycles)
+    return [...sorted, ...unsorted].map((id) => modules.get(id)!);
   }
 
   getInputPorts(kind: string): string[] {

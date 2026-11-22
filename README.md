@@ -88,14 +88,22 @@ The UI is a plain model–view–controller split; the DOM is never the source o
   - `useAudioEngine.ts`: AudioWorklet lifecycle. Adding/removing modules or
     cables reloads the engine graph; parameter edits are diffed into `setParam`
     messages; moving nodes never touches it.
+  - `src/engine/EngineSync.ts`: the protocol between the two. Every reload
+    carries a monotonic revision; parameter edits made while a reload is in
+    flight are reconciled to the canvas values on its acknowledgment, and a
+    failed reload leaves the previous good graph playing with a visible error.
 - **View** — `src/components/`
   - `board/Board.tsx`, `DraggableNode.tsx`, `Edge.tsx`, `SelectionBox.tsx`: the
     SpaceNotes canvas, adapted to port-to-port cables.
   - `ModuleCard.tsx`, `board/Port.tsx`, `Scope.tsx`: a module node with ports,
     sliders and a live oscilloscope.
 - **Engine** — `src/worklet/`: `ModularProcessor` runs every module's DSP in one
-  AudioWorklet, with a `setParam` message that lets modules re-read params in
-  place via `applyParams`.
+    AudioWorklet, with a `setParam` message that lets modules re-read params in
+    place via `applyParams`. Graph reloads are built and validated off-stage and
+    swapped in atomically, so an invalid patch can never mute the running one;
+    modules carry their internal state (oscillator phase, delay line, slew
+    integrator) across reloads by id, and every output is sanitized so NaN can
+    not circulate through a feedback loop.
 
 ## Scripts
 
@@ -104,8 +112,14 @@ npm run dev         # dev server
 npm run build       # type-check + production build (dist/)
 npm run preview     # serve dist/
 npm run lint        # eslint
-npm run type-check  # app + worklet type-check
+npm run type-check  # app + worklet + tests type-check
+npm test            # node:test verification suite (no browser needed)
 ```
+
+The test suite (`tests/`) bundles with esbuild and runs under Node's built-in
+test runner. It covers normal reloads, parameter/reload interleaving and
+reconciliation, recovery after a failed (dangling-cable) reload, feedback-loop
+finite-ness and state preservation, and stop/restart graph freshness.
 
 ## Deploying
 
