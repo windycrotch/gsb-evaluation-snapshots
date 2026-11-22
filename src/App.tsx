@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
 import { Viewport } from './components/Viewport';
 import { Sidebar } from './components/Sidebar';
@@ -10,6 +10,8 @@ import { Download, Save, Play, Square, Menu, X, PanelRightOpen, FolderOpen, Tras
 import { Options } from './components/Options';
 import { createEmptyScene, createProjectSnapshot, useEditorStore } from './store/editorStore';
 import type { ExportFormat } from './services/sceneExporter';
+import { exportScene, isExportAbortError } from './services/sceneExporter';
+import { ExportValidationError } from './services/exportValidation';
 import { deleteProject, getProjects, saveProject, updateProject, type ProjectData } from './services/database';
 import { toast } from 'react-hot-toast';
 import { readEditor } from './services/sceneStorage';
@@ -23,6 +25,7 @@ function App() {
   const [saving, setSaving] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [exportFormat, setExportFormat] = useState<ExportFormat>('html');
+  const exportRequestId = useRef(0);
   const [restoring, setRestoring] = useState(true);
   const [optionsOpen, setOptionsOpen] = useState(false);
   const { sceneObjects, isPlaying, startPlay, stopPlay } = useEditorStore();
@@ -65,19 +68,29 @@ function App() {
   }, [isPlaying]);
 
   const handleExport = async () => {
-    if (exporting) return;
+    // A newer click (e.g. switching format and exporting again) supersedes the
+    // in-flight run; the exporter aborts the old one before it can download.
+    const requestId = ++exportRequestId.current;
     flushSync(() => setExporting(true));
     try {
       const { sceneObjects: currentObjects, sceneOptions, assets } = useEditorStore.getState();
       const snapshot = { ...createProjectSnapshot(currentObjects, sceneOptions), assets: structuredClone(assets) };
-      const { exportScene } = await import('./services/sceneExporter');
       await exportScene(snapshot, exportFormat);
-      toast.success('Scene exported successfully!');
+      if (requestId === exportRequestId.current) toast.success('Scene exported successfully!');
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Failed to export scene');
+      // Superseded/unloaded exports are normal control flow, not user-facing errors.
+      if (isExportAbortError(error)) return;
       console.error('Export error:', error);
+      if (error instanceof ExportValidationError) {
+        toast(error.message, {
+          duration: 8000,
+          style: { whiteSpace: 'pre-line', textAlign: 'left', maxWidth: '32rem' }
+        });
+      } else {
+        toast.error(error instanceof Error ? error.message : 'Failed to export scene');
+      }
     } finally {
-      setExporting(false);
+      if (requestId === exportRequestId.current) setExporting(false);
     }
   };
 
@@ -309,7 +322,6 @@ function App() {
                   aria-label="Export format"
                   title="Export format"
                   value={exportFormat}
-                  disabled={exporting}
                   onChange={event => setExportFormat(event.target.value as ExportFormat)}
                   className="min-w-0 max-w-24 bg-gray-700 text-white rounded px-1 text-xs"
                 >
@@ -319,8 +331,8 @@ function App() {
                 </select>
                 <button
                   onClick={handleExport}
-                  disabled={exporting}
-                  className="flex items-center gap-1 lg:gap-2 bg-slate-600 text-white px-2 lg:px-4 py-2 rounded hover:bg-slate-700 transition-colors text-xs lg:text-sm"
+                  aria-busy={exporting}
+                  className={`flex items-center gap-1 lg:gap-2 bg-slate-600 text-white px-2 lg:px-4 py-2 rounded hover:bg-slate-700 transition-colors text-xs lg:text-sm ${exporting ? 'opacity-60' : ''}`}
                   title="Export"
                   aria-label="Export"
                 >

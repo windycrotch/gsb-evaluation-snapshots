@@ -786,19 +786,19 @@ test('a play notification does not block exporting', async ({ page }) => {
   expect(await download).toBeTruthy();
 });
 
-test('export prevents duplicate requests and recovers after an error', async ({ page }) => {
+test('export recovers cleanly after a download failure', async ({ page }) => {
   await page.addInitScript(() => {
+    // The archive is fully built in memory; only the final object-URL step fails.
     URL.createObjectURL = () => {
-      const button = document.querySelector<HTMLButtonElement>('button[aria-label="Export"]');
-      document.body.dataset.exportWasDisabled = String(button?.disabled);
       throw new Error('Simulated export failure');
     };
   });
   await page.goto('/');
   await page.getByRole('button', { name: 'Export', exact: true }).click();
   await expect(page.getByText('Simulated export failure')).toBeVisible();
-  await expect(page.locator('body')).toHaveAttribute('data-export-was-disabled', 'true');
+  // The failed run must not leave the button stuck in its busy state.
   await expect(page.getByRole('button', { name: 'Export', exact: true })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Export', exact: true })).toHaveAttribute('aria-busy', 'false');
 });
 
 test('web scenes with a character retain movement instructions', async ({ page }, testInfo) => {

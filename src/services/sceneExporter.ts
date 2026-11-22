@@ -37,30 +37,112 @@ import sdfBidiLicense from '../../node_modules/bidi-js/LICENSE.txt?raw';
 import sdfTextLicense from '../../node_modules/troika-three-text/LICENSE?raw';
 import { packageExportAssets } from './exportAssets';
 import { isSupportedSdfText } from './sceneObjects';
+import { ExportValidationError, validateProjectForExport } from './exportValidation';
 
 export type ExportFormat = 'html' | 'react' | 'wordpress';
 
-export const exportScene = async (snapshot: StoredScene, format: ExportFormat = 'html') => {
+export interface ExportResult {
+  fileName: string;
+  blob: Blob;
+}
+
+/** Raised when an export is superseded by a newer one or abandoned on page unload. */
+export class ExportAbortedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ExportAbortedError';
+  }
+}
+
+export function isExportAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'ExportAbortedError';
+}
+
+interface ActiveExport {
+  generation: number;
+  controller: AbortController;
+  abortError: ExportAbortedError | null;
+}
+
+let exportGeneration = 0;
+const activeExports = new Set<ActiveExport>();
+let unloadHandlerBound = false;
+
+function releaseAllExports() {
+  for (const job of activeExports) {
+    if (!job.controller.signal.aborted) {
+      job.abortError = new ExportAbortedError('The page was unloaded before the export finished.');
+      job.controller.abort();
+    }
+  }
+  activeExports.clear();
+  unloadHandlerBound = false;
+  window.removeEventListener('pagehide', releaseAllExports);
+  window.removeEventListener('beforeunload', releaseAllExports);
+}
+
+function bindUnloadHandler() {
+  if (unloadHandlerBound) return;
+  unloadHandlerBound = true;
+  // pagehide covers unload/navigation; beforeunload backs it up in embedded webviews.
+  window.addEventListener('pagehide', releaseAllExports);
+  window.addEventListener('beforeunload', releaseAllExports);
+}
+
+/** Trigger the browser download and release the temporary object URL straight away. */
+function downloadBlob(blob: Blob, fileName: string): void {
+  const objectUrl = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = objectUrl;
+  anchor.download = fileName;
+  document.body.appendChild(anchor);
+  anchor.click();
+  document.body.removeChild(anchor);
+  URL.revokeObjectURL(objectUrl);
+}
+
+/**
+ * Export a whole multi-scene project.
+ *
+ * Every invocation works on its own JSZip instance. A newer request supersedes an
+ * in-flight one: the older run is aborted before it can trigger a download, so two
+ * quick exports can never mix contents or compete for the download. Validation runs
+ * before any packaging, and the archive is only downloaded after it has been fully
+ * built, which means any failure leaves no partial archive, object URL or download.
+ */
+export const exportScene = async (snapshot: StoredScene, format: ExportFormat = 'html'): Promise<ExportResult> => {
+  const validationIssues = validateProjectForExport(snapshot);
+  if (validationIssues.length) throw new ExportValidationError(validationIssues);
+
+  bindUnloadHandler();
+  const generation = ++exportGeneration;
+  for (const previous of activeExports) {
+    previous.abortError = new ExportAbortedError('A newer export request replaced this one.');
+    previous.controller.abort();
+  }
+  const job: ActiveExport = { generation, controller: new AbortController(), abortError: null };
+  activeExports.add(job);
+  const ensureActive = () => {
+    if (job.controller.signal.aborted) {
+      throw job.abortError ?? new ExportAbortedError('The export was cancelled.');
+    }
+  };
+
+  try {
   const zip = new JSZip();
   const sceneZip = format === 'html' ? zip : zip.folder(format === 'react' ? 'public/scene' : 'three-scene-export/scene');
   if (!sceneZip) throw new Error('Could not create the export folder.');
+  ensureActive();
   const projectData = {
     version: "1.0",
     lastModified: new Date().toISOString(),
     ...await packageExportAssets(snapshot, sceneZip)
   };
+  ensureActive();
   const scenes = [
     { id: projectData.activeSceneId!, objects: projectData.objects, sceneOptions: projectData.sceneOptions },
     ...(projectData.otherScenes ?? [])
   ];
-  for (const scene of scenes) {
-    if (scene.objects.some(obj => obj.type === 'model' && !obj.properties.modelData)) {
-      throw new Error(`${scene.sceneOptions.name}: a model is missing its original GLB data. Please import it again.`);
-    }
-    if (scene.sceneOptions.activeCameraId && !scene.objects.some(obj => obj.id === scene.sceneOptions.activeCameraId && obj.type === 'camera')) {
-      throw new Error(`${scene.sceneOptions.name}: selected play camera is unavailable; choose another camera.`);
-    }
-  }
   const pages = Object.fromEntries(scenes.map((scene, index) => [scene.id, index === 0 ? 'index.html' : `scene-${index}.html`]));
   sceneZip.file('scene.json', JSON.stringify(projectData, null, 2));
   sceneZip.file('vendor/three.min.js', threeSource);
@@ -89,12 +171,14 @@ export const exportScene = async (snapshot: StoredScene, format: ExportFormat = 
       const response = await fetch(url);
       if (!response.ok) throw new Error(`Could not load bundled font: ${name} (HTTP ${response.status})`);
       sceneZip.file(`vendor/${name}`, await response.arrayBuffer());
+      ensureActive();
     }
   }
   if (scenes.some(scene => scene.sceneOptions.enableJQuery)) sceneZip.file('jquery.min.js', jquerySource);
   if (scenes.some(scene => scene.objects.some(obj => obj.properties.web?.kind === 'lottie' && obj.properties.web.lottieData))) {
     const { default: lottieSource } = await import('lottie-web/build/player/lottie.min.js?raw');
     sceneZip.file('lottie.min.js', lottieSource);
+    ensureActive();
   }
 
   for (const [index, entry] of scenes.entries()) {
@@ -779,13 +863,16 @@ add_shortcode('three_scene', function () {
     zip.file('three-scene-export/README.txt', 'Install and activate this ZIP as a WordPress plugin, then add [three_scene] to a page. Three.js and GLTFLoader are included locally, with CDN fallback.');
   }
 
+  // The archive is built in memory before any download exists: a failure here
+  // rejects cleanly and leaves no downloadable partial archive behind.
   const content = await zip.generateAsync({ type: 'blob' });
-  const url = URL.createObjectURL(content);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = (projectData.sceneOptions.name || 'scene') + (format === 'html' ? '-export.zip' : `-${format}.zip`);
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  ensureActive();
+  const fileName = (projectData.sceneOptions.name || 'scene') + (format === 'html' ? '-export.zip' : `-${format}.zip`);
+  // Only the newest in-flight export may trigger a download.
+  if (generation !== exportGeneration) throw new ExportAbortedError('A newer export request replaced this one.');
+  downloadBlob(content, fileName);
+  return { fileName, blob: content };
+  } finally {
+    activeExports.delete(job);
+  }
 };
