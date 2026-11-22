@@ -13,6 +13,7 @@ export type AnalyticsEvent =
   | 'onPromptShown'
   | 'onInteractionSelected'
   | 'onBranchJump'
+  | 'onSegmentError'
   | 'onSessionEnd';
 
 export type AnalyticsPayload = {

@@ -75,8 +75,13 @@ export class CueHandler {
 
   /**
    * Destroys the CueHandler instance.
+   * Removes the timeupdate listener so no cue can fire again on this
+   * video element, and clears all registered state.
    */
   public destroy() {
+    this.stop();
+    this.callback = undefined;
+    this.cues = [];
     this.triggered.clear();
   }
 }

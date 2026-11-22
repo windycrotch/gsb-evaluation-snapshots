@@ -23,6 +23,8 @@ export class InteractionManager {
   private interactionStore: Map<number, Cue>;
   private i18n: I18n;
   private decisionAdapter: DecisionAdapter;
+  /** Cue ids that already produced a valid response in this session. */
+  private respondedCueIds: Set<string> = new Set();
 
   private interactionRenderers = {
     choice: this.renderChoiceInteraction.bind(this) as (
@@ -238,6 +240,12 @@ export class InteractionManager {
 
     if (!this.onResponseCallback) return;
 
+    // One interaction point accepts exactly one valid response per session:
+    // rapid double-clicks or a re-triggered cue must not produce a second
+    // decision, branch jump, or completion event.
+    if (this.respondedCueIds.has(cue.id)) return;
+    this.respondedCueIds.add(cue.id);
+
     const decision: Decision = {
       cueId: cue.id,
       choice: response,
@@ -261,5 +269,6 @@ export class InteractionManager {
     this.onResponseCallback = undefined;
     this.clearInteractions();
     this.interactionStore.clear();
+    this.respondedCueIds.clear();
   }
 }

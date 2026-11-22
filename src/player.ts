@@ -40,6 +40,32 @@ export class IVLabsPlayer {
   private videoContainer: HTMLElement;
   private subtitlesElement?: HTMLTrackElement;
 
+  /** Set once destroy() runs; every async/late callback checks this first. */
+  private destroyed = false;
+  /** Interaction points that already produced a valid response this session. */
+  private completedInteractionIds: Set<string> = new Set();
+
+  private handleVideoPlay = () => {
+    this.analytics.track('VIDEO_STARTED', {
+      event: 'VIDEO_STARTED',
+      timestamp: Date.now(),
+    });
+  };
+
+  private handleVideoPause = () => {
+    this.analytics.track('VIDEO_PAUSED', {
+      event: 'VIDEO_PAUSED',
+      timestamp: Date.now(),
+    });
+  };
+
+  private handleVideoEnded = () => {
+    this.analytics.track('VIDEO_ENDED', {
+      event: 'VIDEO_ENDED',
+      timestamp: Date.now(),
+    });
+  };
+
   constructor(target: string, config: PlayerConfig) {
     const targetElement = document.getElementById(target);
     if (!targetElement) throw new Error(`Target container with ID "${target}" not found.`);
@@ -89,13 +115,28 @@ export class IVLabsPlayer {
     }
     this.analytics = new Analytics();
     this.stateMachine = new StateMachine(config.initialState || 'idle');
+    this.registerStateTransitions();
     this.interactionManager = new InteractionManager(
       this.videoContainer,
       this.i18n,
       this.decisionAdapter,
     );
     this.cueHandler = new CueHandler(this.videoElement);
-    this.segmentManager = new SegmentManager(this.videoElement);
+    this.segmentManager = new SegmentManager(this.videoElement, {
+      onSegmentError: (segmentUrl: string, error: unknown) => {
+        if (this.destroyed) return;
+        // Converge back to the playing state and report a distinguishable failure.
+        this.stateMachine.transitionTo('playing');
+        this.analytics.track('onSegmentError', {
+          event: 'onSegmentError',
+          data: {
+            segmentUrl,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          timestamp: Date.now(),
+        });
+      },
+    });
     if (!config.subtitlesUrl) {
       this.start(config.cues);
     }
@@ -110,10 +151,35 @@ export class IVLabsPlayer {
   }
 
   /**
+   * Registers the state transitions used by an interaction session so the
+   * player state is always convergent: idle/playing -> waitingForInteraction
+   * -> playing (or error), and back to playing after a segment failure.
+   */
+  private registerStateTransitions(): void {
+    const transitions: Array<[PlayerState, PlayerState]> = [
+      ['idle', 'playing'],
+      ['idle', 'waitingForInteraction'],
+      ['playing', 'playing'],
+      ['playing', 'waitingForInteraction'],
+      ['playing', 'ended'],
+      ['playing', 'error'],
+      ['waitingForInteraction', 'playing'],
+      ['waitingForInteraction', 'error'],
+      ['error', 'playing'],
+      ['ended', 'playing'],
+    ];
+    for (const [from, to] of transitions) {
+      this.stateMachine.addTransition({ from, to });
+    }
+  }
+
+  /**
    * Binds event listeners for cue handling, interaction response, and analytics.
    */
   private bindEvents(): void {
     this.cueHandler.onCue((cue: CuePoint) => {
+      if (this.destroyed) return;
+
       this.analytics.track('onCueEnter', {
         event: 'onCueEnter',
         cueId: cue.id,
@@ -135,6 +201,11 @@ export class IVLabsPlayer {
     });
     //eslint-disable-next-line @typescript-eslint/no-explicit-any
     this.interactionManager.onResponse((response: any, cue: CuePoint) => {
+      if (this.destroyed) return;
+      // A cue that already produced a valid response must not jump or complete twice.
+      if (this.completedInteractionIds.has(cue.id)) return;
+      this.completedInteractionIds.add(cue.id);
+
       this.analytics.track('onInteractionSelected', {
         event: 'onInteractionSelected',
         cueId: cue.id,
@@ -165,26 +236,9 @@ export class IVLabsPlayer {
       });
     });
 
-    this.videoElement.addEventListener('play', () => {
-      this.analytics.track('VIDEO_STARTED', {
-        event: 'VIDEO_STARTED',
-        timestamp: Date.now(),
-      });
-    });
-
-    this.videoElement.addEventListener('pause', () => {
-      this.analytics.track('VIDEO_PAUSED', {
-        event: 'VIDEO_PAUSED',
-        timestamp: Date.now(),
-      });
-    });
-
-    this.videoElement.addEventListener('ended', () => {
-      this.analytics.track('VIDEO_ENDED', {
-        event: 'VIDEO_ENDED',
-        timestamp: Date.now(),
-      });
-    });
+    this.videoElement.addEventListener('play', this.handleVideoPlay);
+    this.videoElement.addEventListener('pause', this.handleVideoPause);
+    this.videoElement.addEventListener('ended', this.handleVideoEnded);
   }
 
   /** Loads cue points into the player. */
@@ -269,9 +323,15 @@ export class IVLabsPlayer {
 
   /** Cleans up the player, removes listeners and resets state. */
   public destroy(): void {
+    if (this.destroyed) return;
+    this.destroyed = true;
     console.log('IVLabsPlayer destroy() called.');
     this.cueHandler.destroy();
     this.interactionManager.destroy();
+    this.segmentManager.destroy();
+    this.videoElement.removeEventListener('play', this.handleVideoPlay);
+    this.videoElement.removeEventListener('pause', this.handleVideoPause);
+    this.videoElement.removeEventListener('ended', this.handleVideoEnded);
     this.analytics.track('onSessionEnd', {
       event: 'onSessionEnd',
       timestamp: Date.now(),
