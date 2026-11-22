@@ -604,9 +604,13 @@ export class Enemy {
   }
 
   dispose() {
+    if (this._disposed) return;         // idempotent: director teardown and cull may both call
+    this._disposed = true;
     if (this.coreLight) this.coreLight.dispose?.();
-    this.env.scene.remove(this.model.root);
-    this.model.mixer.stopAllAction();
+    if (this.model) {
+      this.env.scene.remove(this.model.root);
+      this.model.mixer.stopAllAction();
+    }
     World.remove(this.e);
   }
 }

@@ -22,6 +22,11 @@ export class DebugOverlay {
       // `drop` is the one alarming number: >0 means demand exceeded the top rung and a
       // CONTRIBUTING light was discarded, i.e. a visible quality loss. It should read 0.
       ['lights', 'lights'], ['drop', 'lights dropped'],
+      // Hitstop freeze budget (core/clock.js). `duty` is the frozen share in the trailing
+      // window; it must stay at or under `cap` (7% by default). `clipped` is the freeze
+      // time the budget SHORTENED away rather than silently dropping — the observable
+      // proof that group hits degrade gracefully instead of stalling the frame.
+      ['hsDuty', 'hitstop %'], ['hsClip', 'hitstop clipped'],
     ]) {
       const r = el('div', 'd-row', this.box);
       el('span', 'd-k', r).textContent = label;
@@ -73,6 +78,18 @@ export class DebugOverlay {
       set('drop', lc.droppedInFrustum > 0 ? `${lc.droppedInFrustum} THIS FRAME` : '0');
       const dCls = lc.droppedInFrustum > 0 ? ' bad' : '';
       if (this.rows.drop.className !== 'd-v' + dCls) this.rows.drop.className = 'd-v' + dCls;
+    }
+
+    // Hitstop budget: live frozen share (trailing window) vs the cap, and the clipped ms.
+    const clock = World.clock;
+    if (clock && typeof clock.hitstopInfo === 'function') {
+      const h = clock.hitstopInfo();
+      const pct = (h.duty * 100);
+      const capPct = h.maxDuty * 100;
+      set('hsDuty', `${pct.toFixed(1)}% / ${capPct.toFixed(0)}%${h.frozen ? ' ❄' : ''}`);
+      const hCls = pct > capPct + 0.05 ? ' bad' : '';
+      if (this.rows.hsDuty.className !== 'd-v' + hCls) this.rows.hsDuty.className = 'd-v' + hCls;
+      set('hsClip', `${h.clippedMs.toFixed(0)}ms (${h.grants}/${h.requests})`);
     }
 
     this._acc = 0; this._frames = 0; this._ftSum = 0; this._ftPeak = 0;

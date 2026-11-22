@@ -134,6 +134,24 @@ export const CFG = {
     //   - even correct, 62 ms x 8 hits/second is half a second of freeze per second of
     //     combat. 28 ms reads as a punch and leaves the fight responsive.
     hitStopMs: 28,          // ms of near-freeze on a normal impact — real time, not sim
+    // FREEZE BUDGET — the real-time ceiling on hitstop, enforced by core/clock.js.
+    //
+    // A LONG-RUN average is not enough: group damage arrives in clumps (one AoE hits 8
+    // targets, a projectile detonates, a brute answers within 100 ms), and the previous
+    // leaky bucket let a full burst plus a second's refill put ~145 ms of freeze inside
+    // one second — 14.5% against the 7% the same config claimed. The clock now caps the
+    // frozen share of ANY `windowSec`-length real interval at `maxDuty`, which by
+    // construction bounds every longer span too (any span splits into windowSec chunks).
+    //
+    //   maxDuty 0.07 x windowSec 1.0 = 70 ms of freeze in any one second. That equals the
+    //   single-hit ceiling (HITSTOP_MAX 70 ms in combat.js), so an isolated crit slam is
+    //   never clipped, while sustained group hits can only shorten later grants — never
+    //   drop them — and the clipped millimetres are counted and shown on F3.
+    hitstop: {
+      maxDuty: 0.07,        // <= 7% of real time frozen in ANY windowSec-length window
+      windowSec: 1.0,       // s — the sliding window the cap is applied over
+      minGrantMs: 6,        // below one frame a freeze cannot be seen; skip + record it
+    },
   },
   // maxActive 90 -> 30. MEASURED under live combat, which no previous round had done:
   //     11 live hostiles -> 14.4 fps      30 live hostiles -> 7.1 fps

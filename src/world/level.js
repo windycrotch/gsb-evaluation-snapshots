@@ -290,8 +290,17 @@ class Kit {
 export default {
   name: 'level',
   init({ scene }) {
+    this._scene = scene;
+    // Build the world for a given CFG.world.seed. Split out of init so a REBUILD can
+    // run the exact same construction and emit a second LEVEL_READY: every listener in
+    // the tree already handles that event idempotently (player recentres, AI re-arms,
+    // combat clears cooldowns/wind-ups, the clock resets its freeze budget), so a rebuild
+    // is a genuinely clean new run rather than a half-reset.
+    this._build(scene, (CFG.world && CFG.world.seed) || 1337);
+  },
+
+  _build(scene, seed) {
     const t0 = performance.now();
-    const seed = (CFG.world && CFG.world.seed) || 1337;
     const layout = generateDungeon(seed, { wallHeight: 5.5 });
     const rng = new RNG(seed ^ 0x51ed);
 
@@ -345,6 +354,38 @@ export default {
     console.info(`[level] ruined cathedral built in ${ms}ms — ${built.length} draw meshes, ${layout.rooms.length} rooms, seed ${seed}`);
     bus.emit(EV.LEVEL_READY, { level: World.level });
   },
+
+  /**
+   * Tear down the current level's geometry and build a fresh one from `seed`, then emit
+   * LEVEL_READY. This is the acceptance hook for "a rebuilt level inherits no freeze,
+   * cooldown or queued attack from the last one": one call returns every declarative
+   * listener to its clean initial state (see clock.js and combat.js LEVEL_READY handlers).
+   */
+  rebuild(seed) {
+    const scene = this._scene || World.scene; if (!scene) return null;
+    this._disposeGeometry(scene);
+    const useSeed = seed == null ? (((World.level && World.level.seed) ?? 1337) | 0) : (seed | 0);
+    // Also drop the entities that belonged to the old layout so they cannot outlive it.
+    for (let i = World.entities.length - 1; i >= 0; i--) {
+      const e = World.entities[i];
+      if (e.kind !== 'player') World.remove(e);
+    }
+    this._build(scene, useSeed);
+    return World.level;
+  },
+
+  _disposeGeometry(scene) {
+    const lvl = World.level;
+    const meshes = (lvl && lvl._meshes) || [];
+    for (const m of meshes) {
+      scene.remove(m);
+      if (m.geometry) m.geometry.dispose();
+      // Instance geometries are shared with the source builders; disposal is guarded
+      // because some are cached and reused across rebuilds.
+    }
+    if (lvl && lvl._terrain && lvl._terrain.dispose) lvl._terrain.dispose();
+  },
+
   dispose() {
     if (World.level && World.level._terrain) World.level._terrain.dispose();
   },
@@ -549,7 +590,6 @@ function rebuildFloorStone(bond = FLOOR_BOND, seed = null, tune = V2_TUNE) {
   return { bond, seed: useSeed, tris, tune };
 }
 if (typeof window !== 'undefined') window.__rebuildFloors = rebuildFloorStone;
-
 // ---------------------------------------------------------------------------
 // Walls — the wall body buried into the ground, an irregular jagged merlon
 // crown for high-frequency silhouette, and an occasional buttress.

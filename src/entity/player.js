@@ -35,7 +35,7 @@ function approach(a, b, step) { const d = b - a; return Math.abs(d) <= step ? b 
 const S = {
   p: null, rig: null, anim: null, cape: null, sash: null,
   facing: 0, turnRate: 0, speed: 0, accelMag: 0,
-  rollT: 0, rollCd: 0, attackNext: 1, gcd: 0, castPending: null,
+  rollT: 0, rollCd: 0, attackNext: 1,
 };
 
 export default {
@@ -113,8 +113,8 @@ export default {
     World.time = t;
 
     // ---- cooldown timers ----
+    // (Attack/skill cooldowns live in combat.js, on the REAL clock — see canCast below.)
     if (S.rollCd > 0) S.rollCd -= dt;
-    if (S.gcd > 0) S.gcd -= dt;
 
     // ---- gather latched input intents (set in frame(), consumed here) ----
     const intent = this._intent || (this._intent = { roll: false, attack: false, skill: null });
@@ -139,15 +139,23 @@ export default {
     }
 
     // ---- ATTACK / SKILL (only when idle-able) ----
+    // Readiness is asked of combat BEFORE the wind-up animation starts, so a press that
+    // cannot be honoured (global cooldown still running, per-skill cooldown, not enough
+    // mana) never plays a cast. This is a SILENT pre-check (feedback:false): holding a
+    // key must not spam toasts. Combat re-validates at the STRIKE frame, is the only place
+    // a resource is spent, and is the only place denial feedback is emitted — so the two
+    // agree and a doomed press costs nothing. The local sim-time gate that used to live
+    // here froze with hitstop and left the bar reading ready while presses did nothing;
+    // querying combat keeps both on the same real-time clock.
     if (p.alive && !busy && S.rollT <= 0) {
-      if (intent.skill && S.gcd <= 0) {
+      const combat = World.combat;
+      const canCast = (ref) => (combat && typeof combat.canCast === 'function' ? combat.canCast(ref, false) : true);
+      if (intent.skill && canCast(intent.skill)) {
         const skill = intent.skill;
-        S.gcd = CFG.combat.globalCooldown;
         S.anim.play('cast', () => emitCast(p, skill, aimYaw));
         S.facing = aimYaw;
-      } else if ((intent.attack || Input.lmb) && S.gcd <= 0) {
+      } else if ((intent.attack || Input.lmb) && canCast('lmb')) {
         const which = S.attackNext; S.attackNext = which === 1 ? 2 : 1;
-        S.gcd = CFG.combat.globalCooldown;
         S.anim.play(which === 1 ? 'attack1' : 'attack2', () => emitCast(p, 'lmb', aimYaw));
         S.facing = aimYaw;
       }

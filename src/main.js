@@ -65,6 +65,10 @@ engine.boot().then(() => {
   // measured a 30.7 ms worst frame afterwards, with zero frames over 50 ms.
   const pw = World.lightCull?.prewarm?.();
   if (pw) console.info(`[lightcull] prewarmed rungs ${pw.rungs.join('/')} in ${pw.ms}ms (${pw.programs} programs)`);
+  // Runtime rebuild hook for the browser check ("重开或关卡重建后…不得残留"): re-runs the
+  // level generator and re-emits LEVEL_READY, which every subsystem treats as a fresh
+  // run (freeze budget, cooldowns, queued attacks all reset). Optional seed argument.
+  window.__rebuildLevel = (seed) => level.rebuild(seed);
   window.__EXILIUM_READY = true;
   setTimeout(() => {
     boot.classList.add('done');

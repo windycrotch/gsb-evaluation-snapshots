@@ -46,6 +46,12 @@ export class Director {
   }
 
   setup(level) {
+    // Re-entrant: a level rebuild calls setup() again. Clear anything that belonged to
+    // the previous layout BEFORE arming against the new one, so no telegraph, delayed
+    // eruption or wave phase survives the transition (requirement: a rebuilt level must
+    // not inherit a queued attack). Enemy controllers are torn down so their meshes and
+    // brain timers do not float over the new geometry.
+    this._teardown();
     const spawns = (level?.spawns && level.spawns.length) ? level.spawns : this._fallbackSpawns(level);
     // spawns[0] anchors the arena/boss (per LevelForge contract)
     const arenaPos = spawns[0].clone();
@@ -66,7 +72,29 @@ export class Director {
     this.arena = { pos: arenaPos, radius: arenaR };
     this.spawnAnchors = spawns.slice(1);
     if (!this.spawnAnchors.length) this.spawnAnchors = this._fallbackSpawns(level).slice(1);
+    // A rebuilt level restarts wave pacing at zero, not wherever the previous run was.
+    this.wave = 0; this.spawnTimer = 2.0; this.cullTimer = 0;
     this.ready = true;
+  }
+
+  // Drop every controller, pending-add and delayed strike from the previous layout.
+  _teardown() {
+    for (const en of this.enemies) { try { en.dispose?.(); } catch (_) { /* already gone */ } }
+    this.enemies.length = 0;
+    this.delayed.length = 0;
+    this.pendingAdds.length = 0;
+    this.bossSpawned = false; this.bossDefeated = false; this.runOver = false; this.boss = null;
+    if (World.boss) World.boss = null;
+    if (this.env.telegraph && this.env.telegraph.active) {
+      // Return every live telegraph decal to the pool (it is the source of the ground
+      // ring that would otherwise hang over the old arena after a rebuild).
+      const t = this.env.telegraph;
+      for (let i = t.active.length - 1; i >= 0; i--) {
+        const d = t.active[i];
+        d.g.visible = false; d.ringMat.opacity = d.fillMat.opacity = 0;
+        t.active.splice(i, 1); t.free.push(d);
+      }
+    }
   }
 
   _fallbackSpawns(level) {

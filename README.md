@@ -157,6 +157,8 @@ a real GPU spreads across hundreds of cores.
 - **`CAPTURE_PROTOCOL.md`** — the six conditions that make two frame measurements comparable.
 - **`POE2_RUBRIC.md`** — the numeric targets.
 - **`NEXT_ROUND_ITEM_1.md`** — the highest-value open defect, diagnosed down to the line of code.
+- **`HITSTOP_CAST_FINDINGS.md`** — real-time freeze budget under group damage + cast/cooldown
+  consistency. Reproduce with `npm test` (node) and `node tools/live/final.mjs` (live browser).
 
 ## Licence
 

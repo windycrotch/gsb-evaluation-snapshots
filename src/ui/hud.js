@@ -8,9 +8,7 @@
 import './hud.css';
 import { CFG } from '../core/config.js';
 import { World } from '../core/world.js';
-import { bus, EV } from '../core/events.js';
 import { el, svg, installTextures } from './theme.js';
-import { skillIndexFrom } from './skills.js';
 import { Orb } from './orbs.js';
 import { SkillBar } from './skillbar.js';
 import { XpBar } from './xpbar.js';
@@ -96,11 +94,11 @@ export default {
 
     widgets = [skillbar, xpbar, dmg, minimap, bossbar, toasts, inventory, debug, fpsmeter, objective];
 
-    // authoritative cast → drive cooldown/mana (skillbar disables its fallback)
-    bus.on(EV.PLAYER_CAST, (d) => {
-      const idx = skillIndexFrom(d && (d.skill ?? d));
-      if (idx >= 0) skillbar.onCast(idx);
-    });
+    // The skill bar reconciles itself against World.combat (real-second deadlines) and
+    // flashes on combat's committed-cast event. HUD does NOT touch mana or cooldowns on
+    // EV.PLAYER_CAST: that fires on the wind-up frame, before combat accepts the strike,
+    // and the old handler spent mana for casts combat would reject — the "bar lit up, I
+    // pressed, nothing happened" bug.
 
     // cursor + tooltip follow the pointer; inventory hover drives item tooltips
     addEventListener('pointermove', (e) => {

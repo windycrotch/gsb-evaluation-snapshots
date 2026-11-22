@@ -21,6 +21,8 @@ import { SKILLS, KEY_TO_SKILL, resolveSkill, TYPE_COLOR, BLOOD_COLOR } from './s
 
 // EnemyAI requests enemy hits through this bus string (agreed contract).
 const EV_ENEMY_ATTACK = 'combat:enemyAttack';
+// Emitted after a player cast is accepted and paid for; the HUD's skill bar flashes on it.
+const EV_CAST_COMMITTED = 'combat:castCommitted';
 
 // Impact tuning (config only exposes hitStopMs/critMultiplier; the rest live here).
 //
@@ -549,31 +551,103 @@ function executeSkill(skill, source, origin, dir) {
 }
 
 // ---- cast validation (cost / cooldown / GCD) --------------------------------
-const cd = Object.create(null);   // skillId -> readyAt
-let gcdUntil = 0;
+//
+// COOLDOWNS ADVANCE IN REAL TIME, NOT SIM TIME. Hitstop scales simulation to 14% and
+// barely advances `World.time`, so a sim-time cooldown would freeze along with the
+// picture: the bar would sit at "2.4s ready" for the whole freeze and the first press
+// after it would be swallowed. Deadlines are held on the same real clock as the freeze
+// budget, so a second of wall time buys a second of cooldown no matter how much of it
+// was frozen. (Requirement: remaining time must not go negative or wedge.)
+//
+// CASTS ARE ATOMIC. Validation, mana spend, cooldown write and execution all happen in
+// one call with no observable state change on any failure path. The old code deducted
+// mana and wrote cooldowns BEFORE executeSkill, and the HUD separately deducted mana on
+// every PLAYER_CAST it saw — so a cast combat rejected (a hair of GCD left, mana already
+// reserved) still emptied the orb and started a HUD sweep: "the bar lit up, I pressed,
+// and nothing happened." Now a rejected cast costs nothing and moves nothing.
+const cd = Object.create(null);   // skillId -> readyAt, in REAL seconds
+let gcdUntil = 0;                 // REAL seconds
+const nowReal = () => (World.clock && typeof World.clock.now === 'function'
+  ? World.clock.now() : performance.now() / 1000);
+
+/** Why `ref` cannot be cast right now: 'none'|'dead'|'gcd'|'cooldown'|'mana'. */
+function blockReason(skill) {
+  const p = World.player;
+  if (!skill) return 'none';
+  if (!p || !p.alive) return 'dead';
+  const t = nowReal();
+  if (t < gcdUntil) return 'gcd';
+  if (t < (cd[skill.id] || 0)) return 'cooldown';
+  if ((p.mana || 0) < (skill.cost || 0)) return 'mana';
+  return null;
+}
+
+// Feedback for a denied request — shared by the player's pre-cast gate and the
+// strike-time commit so both report identically and neither spends a resource.
+function denyFeedback(skill, why) {
+  if (why === 'mana') {
+    bus.emit(EV.UI_TOAST, { text: 'Not enough mana', tier: 'warn' });
+    bus.emit(EV.SFX_PLAY, { id: 'fizzle' });
+  }
+}
+
+/**
+ * Ask whether a cast would be accepted, without spending anything. Player locomotion
+ * calls this BEFORE starting the cast animation so a doomed press never plays a wind-up.
+ * Emits the same denial feedback a real attempt would.
+ */
+function canCast(ref, { feedback = true } = {}) {
+  const skill = resolveSkill(ref);
+  const why = blockReason(skill);
+  if (why) { if (feedback) denyFeedback(skill, why); return false; }
+  return true;
+}
 
 function tryCast(ref, origin, dir) {
   const skill = resolveSkill(ref);
+  const why = blockReason(skill);
+  if (why) { denyFeedback(skill, why); return false; }
+
   const p = World.player;
-  if (!skill || !p || !p.alive) return false;
-  const now = World.time;
-  if (now < gcdUntil) return false;                       // global cooldown
-  if (now < (cd[skill.id] || 0)) return false;            // per-skill cooldown
-  if ((p.mana || 0) < (skill.cost || 0)) {                // mana gate
-    bus.emit(EV.UI_TOAST, { text: 'Not enough mana', tier: 'warn' });
-    bus.emit(EV.SFX_PLAY, { id: 'fizzle' });
-    return false;
-  }
-  p.mana -= skill.cost || 0;
-  gcdUntil = now + CFG.combat.globalCooldown;
-  if (skill.cooldown) cd[skill.id] = now + skill.cooldown;
+  const t = nowReal();
 
   // origin/dir defensive defaults (CharacterRig sends fresh clones, but guard anyway)
   _v2.copy(origin || p.pos);
   const d = dir ? _v.copy(dir) : _v.set(Math.sin(p.facing || 0), 0, Math.cos(p.facing || 0));
   d.y = 0; if (d.lengthSq() < 1e-6) d.set(0, 0, 1); d.normalize();
-  executeSkill(skill, p, _v2, d);
+
+  // EXECUTE FIRST, then commit the cost. If executeSkill throws, the catch leaves the
+  // mana and both cooldowns untouched — a failed cast is free, exactly as required.
+  // (Projectiles only spawn here; their damage resolves on later fixed steps, so there
+  // is no window where the effect exists but the cost has not been recorded.)
+  try {
+    executeSkill(skill, p, _v2, d);
+  } catch (err) {
+    console.error('[combat] cast failed, resources not spent:', err);
+    return false;
+  }
+  p.mana -= skill.cost || 0;
+  gcdUntil = t + CFG.combat.globalCooldown;
+  if (skill.cooldown) cd[skill.id] = t + skill.cooldown;
+  // Definitive "this cast happened and was paid for" signal for the HUD. Emitted only
+  // after the cost and cooldowns are written, so the bar can flash with confidence and
+  // never celebrates a press that a later frame rejects.
+  bus.emit(EV_CAST_COMMITTED, { id: skill.id, key: skill.key, cost: skill.cost || 0, manaAfter: p.mana });
   return true;
+}
+
+// Clear every timed combat structure — cooldowns, the GCD, telegraph wind-ups, held
+// channels, ground fields and live projectiles. Called on LEVEL_READY so a rebuilt level
+// (or a re-entered run) inherits no cooldown debt and, critically, no queued attack from
+// the previous layout that would resolve against geometry or entities that no longer exist.
+function resetCastState() {
+  gcdUntil = 0;
+  for (const k in cd) delete cd[k];
+  pending.length = 0;
+  channels.length = 0;
+  fields.length = 0;
+  _agg = false; _aggHitstop = 0; _aggShake = 0;
+  if (projectiles) projectiles.clear();
 }
 
 // ---- enemy attacks (EnemyAI requests via 'combat:enemyAttack') ---------------
@@ -663,17 +737,24 @@ function exposeCombat() {
   World.combat = {
     bar,
     globalCooldown: CFG.combat.globalCooldown,
-    gcd() { const r = gcdUntil - World.time; return { remain: Math.max(0, r), frac: Math.max(0, Math.min(1, r / CFG.combat.globalCooldown)) }; },
+    // All cooldown reads are REAL seconds so the HUD sweep advances through a freeze
+    // and never reads negative after one.
+    gcd() {
+      const r = gcdUntil - nowReal();
+      return { remain: Math.max(0, r), frac: Math.max(0, Math.min(1, r / CFG.combat.globalCooldown)) };
+    },
     cooldown(id) {
       const s = SKILLS[id]; const dur = s ? s.cooldown : 0;
-      const r = (cd[id] || 0) - World.time;
+      const r = (cd[id] || 0) - nowReal();
       return { remain: Math.max(0, r), dur, frac: dur > 0 ? Math.max(0, Math.min(1, r / dur)) : 0 };
     },
     ready(id) {
       const s = SKILLS[id]; if (!s) return false;
-      const p = World.player;
-      return World.time >= gcdUntil && World.time >= (cd[id] || 0) && (p ? (p.mana || 0) >= (s.cost || 0) : false);
+      return blockReason(s) === null;
     },
+    /** Why a cast is blocked right now: null when ready. */
+    blocked(id) { return blockReason(SKILLS[id]); },
+    canCast: (ref) => canCast(ref, { feedback: false }),
     cast: (ref) => tryCast(ref, World.player && World.player.pos, null),   // HUD/testing entry
   };
 }
@@ -702,6 +783,9 @@ export default {
 
     bus.on(EV.PLAYER_CAST, ({ skill, origin, dir }) => tryCast(skill, origin, dir));
     bus.on(EV_ENEMY_ATTACK, onEnemyAttack);
+    // A rebuilt level is a clean run: drop cooldowns, wind-ups, channels, fields and
+    // in-flight projectiles so nothing queued against the old layout can land.
+    bus.on(EV.LEVEL_READY, resetCastState);
   },
 
   fixed(dt) {

@@ -159,14 +159,21 @@ export default {
     this.env = { scene, telegraph: this.telegraph };
     this.director = new Director(this.env);
 
-    // once the level exists, build the nav grid and arm the director
+    // once the level exists, build the nav grid and arm the director.
+    //
+    // ALWAYS subscribe to LEVEL_READY — level.js runs before ai.js, so `World.level` is
+    // already set on the first pass and the old `if (World.level) ... else bus.on(...)`
+    // registered NO listener at all. A rebuilt level therefore kept the AI armed against
+    // the previous layout's nav grid and spawn anchors. Arm immediately for the current
+    // level AND re-arm on every subsequent LEVEL_READY (setup()/_teardown() are re-entrant).
     const arm = (level) => {
+      if (!level) return;
       World.nav = new Nav(level);
       this.director.setup(level);
       this.enabled = true;
     };
+    bus.on(EV.LEVEL_READY, ({ level }) => arm(level || World.level));
     if (World.level) arm(World.level);
-    else bus.on(EV.LEVEL_READY, ({ level }) => arm(level || World.level));
 
     // XP on death (loot rolls its own drop; we award XP once — guarded by _xpAwarded)
     bus.on(EV.ENTITY_DIED, ({ entity }) => {

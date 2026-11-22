@@ -2,16 +2,31 @@
 // (SVG clock-wipe, not an opacity fade), mana-cost tinting, insufficient-mana /
 // locked states, and keybind labels.
 //
-// Cast reconciliation: EV.PLAYER_CAST is authoritative when combat is wired —
-// the first cast observed flips `castWired` and permanently disables the local
-// input-press fallback, so exactly ONE path starts each cooldown / mana spend.
-// Until then (combat/player stubbed) the input-press path drives feedback.
+// THE BAR MIRRORS COMBAT; IT DOES NOT DECIDE ANYTHING.
+//
+// Earlier versions kept their own cooldown timers and subtracted mana on every
+// EV.PLAYER_CAST they observed. Both were wrong once combat became authoritative:
+//   - the local timers ran on frame dt, which hitstop scales, so a sweep could crawl
+//     through a freeze while the real cooldown had already elapsed (or the reverse);
+//   - and a cast combat REJECTED (a sliver of global cooldown left, mana short) still
+//     emitted EV.PLAYER_CAST on its wind-up, so the bar flashed and could spend mana
+//     for an action that never happened — "the bar lit up, I pressed, and nothing".
+// The bar now reads `World.combat` (real-second deadlines on the same clock the freeze
+// budget uses) and the player's authoritative mana. It flashes only when combat reports
+// a COMMITTED cast ('combat:castCommitted'), i.e. after cost and cooldown were written.
+// Nothing is ever spent here. Until combat exists (boot, or a stubbed build) the
+// input-press path drives local feedback only, exactly as before.
 import { Input } from '../core/input.js';
+import { World } from '../core/world.js';
+import { bus } from '../core/events.js';
 import { PAL, el, svg, drawIcon } from './theme.js';
 import { SKILLS } from './skills.js';
 
 const DPR = Math.min(window.devicePixelRatio || 1, 2);
 const R = 75; // wedge radius in a 0..100 viewBox (over-covers the square corners)
+
+// Emitted by combat.js the moment a cast is accepted (cost + cooldowns written).
+const EV_CAST_COMMITTED = 'combat:castCommitted';
 
 function wedgePath(frac) {
   if (frac <= 0) return '';
@@ -25,6 +40,14 @@ function wedgePath(frac) {
   return `M50 50 L${x0.toFixed(2)} ${y0.toFixed(2)} A${R} ${R} 0 ${large} 1 ${x1.toFixed(2)} ${y1.toFixed(2)} Z`;
 }
 
+// HUD slot name -> the combat skill id it represents (they differ: the bar calls slot
+// 'q' "Firestorm" while combat's id is 'fireball'). Bridged by key, which both tables
+// share. `lmb` maps to Cleave.
+const KEY_TO_ID = {
+  lmb: 'cleave', q: 'fireball', f: 'stormLance', e: 'groundSlam', r: 'voidBeam',
+  '1': 'frostNova', '2': 'causticField', '3': 'blink', '4': 'hexSeeker',
+};
+
 export class SkillBar {
   constructor(root, vitals) {
     this.vitals = vitals;
@@ -32,6 +55,14 @@ export class SkillBar {
     this.bar = el('div', 'forged', root);
     this.bar.id = 'skillbar';
     this.slots = SKILLS.map((def) => this._buildSlot(def));
+    this._byId = new Map();
+    for (const s of this.slots) if (s.id) this._byId.set(s.id, s);
+    // Combat tells us the definitive moment a cast is paid for and scheduled.
+    this._offCommitted = bus.on(EV_CAST_COMMITTED, (p) => {
+      this.castWired = true;
+      const s = p && this._byId.get(p.id);
+      if (s) this._flashAccepted(s);
+    });
   }
 
   _buildSlot(def) {
@@ -51,54 +82,60 @@ export class SkillBar {
     if (def.mana > 0) { const m = el('div', 'mana-cost', box); m.textContent = def.mana; }
     const key = el('div', 'key', box); key.textContent = def.label;
 
-    return { def, box, wedge, hand, flash, cdText, cd: 0, flashT: 0, cooling: false, noMana: false, _secs: null };
+    // `localCd` is used ONLY before combat is wired (boot / stubbed build).
+    return { def, box, wedge, hand, flash, cdText, localCd: 0, flashT: 0, cooling: false, noMana: false, _secs: null, id: KEY_TO_ID[def.key] };
   }
 
-  _startCooldown(s, color) {
-    s.cd = s.def.cd; s.flashT = 0.16;
-    s.flash.style.background = `radial-gradient(circle,${color},transparent 70%)`;
-  }
-
-  // local input attempt (only when combat isn't emitting PLAYER_CAST)
+  // local input attempt — feedback only, used when combat is not present at all
   _tryCast(s) {
-    if (s.cd > 0.02) return;
+    if (s.localCd > 0.02) return;
     if (this.vitals.mana < s.def.mana) {
       s.flashT = 0.18;
       s.flash.style.background = 'radial-gradient(circle,rgba(255,90,78,.6),transparent 70%)';
       return;
     }
-    this.vitals.mana = Math.max(0, this.vitals.mana - s.def.mana);
-    this._startCooldown(s, s.def.color);
+    s.localCd = s.def.cd; s.flashT = 0.16;
+    s.flash.style.background = `radial-gradient(circle,${s.def.color},transparent 70%)`;
   }
 
-  // authoritative cast from EV.PLAYER_CAST
-  onCast(idx) {
-    this.castWired = true;
-    const s = this.slots[idx]; if (!s || s.cd > 0.02) return;
-    this.vitals.mana = Math.max(0, this.vitals.mana - s.def.mana);
-    this._startCooldown(s, s.def.color);
+  _flashAccepted(s) {
+    s.flashT = 0.16;
+    s.flash.style.background = `radial-gradient(circle,${s.def.color},transparent 70%)`;
   }
 
   frame(dt) {
     const v = this.vitals;
+    const combat = World.combat || null;
+    if (combat) this.castWired = true;
+
     for (const s of this.slots) {
-      if (!this.castWired) {
-        const pressed = s.def.slot === 'lmb' ? Input.lmbEdge : Input.pressed(s.def.key);
-        if (pressed) this._tryCast(s);
+      let cpu = 0, frac = 0;
+
+      if (combat && typeof combat.cooldown === 'function' && s.id) {
+        // AUTHORITATIVE: real-second deadline; advances through a freeze and clamps at 0.
+        const cd = combat.cooldown(s.id);
+        frac = cd.frac; cpu = cd.remain;
+      } else {
+        // Fallback: local sweep on frame dt (combat absent).
+        if (!this.castWired) {
+          const pressed = s.def.slot === 'lmb' ? Input.lmbEdge : Input.pressed(s.def.key);
+          if (pressed) this._tryCast(s);
+        }
+        if (s.localCd > 0) { s.localCd -= dt; if (s.localCd < 0) s.localCd = 0; }
+        cpu = s.localCd; frac = s.def.cd > 0 ? cpu / s.def.cd : 0;
       }
 
-      if (s.cd > 0) {
-        s.cd -= dt; if (s.cd < 0) s.cd = 0;
-        const frac = s.def.cd > 0 ? s.cd / s.def.cd : 0;
+      if (cpu > 0.001 && frac > 0) {
         if (!s.cooling) { s.cooling = true; s.box.classList.add('cooling'); s.hand.style.opacity = '0.8'; }
         s.wedge.setAttribute('d', wedgePath(frac));
-        const secs = s.cd >= 1 ? String(Math.ceil(s.cd)) : s.cd.toFixed(1);
+        const secs = cpu >= 1 ? String(Math.ceil(cpu)) : cpu.toFixed(1);
         if (secs !== s._secs) { s.cdText.textContent = secs; s._secs = secs; }
         const ang = (-90 + (1 - frac) * 360) * Math.PI / 180;
         s.hand.setAttribute('x2', (50 + R * Math.cos(ang)).toFixed(1));
         s.hand.setAttribute('y2', (50 + R * Math.sin(ang)).toFixed(1));
       } else if (s.cooling) {
-        s.cooling = false; s.box.classList.remove('cooling');
+        s.cooling = false;
+        s.box.classList.remove('cooling');
         s.wedge.setAttribute('d', ''); s.hand.style.opacity = '0'; s._secs = null;
       }
 
