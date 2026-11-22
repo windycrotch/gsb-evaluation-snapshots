@@ -34,6 +34,39 @@ type ParsedFont = {
 type FillRule = "evenodd" | "nonzero";
 type ClipRegion = { lines: Line[]; rule: FillRule };
 
+/** A snapshot of every piece of drawing state pushed by save() and popped by restore(). */
+type SavedState = {
+  _clip: ClipRegion[] | null;
+  _fillColor: number | FillStyleObject;
+  _strokeColor: number | FillStyleObject;
+  _fillStyle_text: string;
+  _strokeStyle_text: string;
+  _lineWidth: number;
+  _globalAlpha: number;
+  _font: Font;
+  _compositeOp: CompositeOperation;
+  textAlign: TextAlign;
+  textBaseline: TextBaseline;
+  imageSmoothingEnabled: boolean;
+  imageSmoothingQuality: string;
+  lineCap: string;
+  lineJoin: string;
+  miterLimit: number;
+  direction: string;
+  filter: string;
+  fontKerning: string;
+  fontStretch: string;
+  fontVariantCaps: string;
+  letterSpacing: string;
+  lineDashOffset: number;
+  textRendering: string;
+  wordSpacing: string;
+  shadowBlur: number;
+  shadowColor: string;
+  shadowOffsetX: number;
+  shadowOffsetY: number;
+};
+
 /** A non-color fill or stroke style. */
 type FillStyleObject = G.CanvasGradient | CanvasPattern;
 
@@ -158,7 +191,7 @@ export class Context {
   private pathstart?: Point;
   private debug?: boolean;
   private _transform: Transform;
-  private states: any[];
+  private states: SavedState[];
 
   /** Creates a new pure image Context */
   constructor(
@@ -201,6 +234,7 @@ export class Context {
     this.shadowOffsetX = 0;
     this.shadowOffsetY = 0;
     this.globalCompositeOperation = "source-over";
+    this._layer = null;
     this._clip = null;
     this._fillStyle_text = "#000000";
     this._strokeStyle_text = "#000000";
@@ -431,7 +465,7 @@ export class Context {
    * @see https://developer.mozilla.org/en-US/docs/Web/API/CanvasRenderingContext2D/save
    */
   save() {
-    this.states.push({
+    const state: SavedState = {
       _clip: this._clip,
       _fillColor: this._fillColor,
       _strokeColor: this._strokeColor,
@@ -440,18 +474,30 @@ export class Context {
       _lineWidth: this._lineWidth,
       _globalAlpha: this._globalAlpha,
       _font: { ...this._font },
+      _compositeOp: this._compositeOp,
       textAlign: this.textAlign,
       textBaseline: this.textBaseline,
       imageSmoothingEnabled: this.imageSmoothingEnabled,
+      imageSmoothingQuality: this.imageSmoothingQuality,
       lineCap: this.lineCap,
       lineJoin: this.lineJoin,
       miterLimit: this.miterLimit,
+      direction: this.direction,
+      filter: this.filter,
+      fontKerning: this.fontKerning,
+      fontStretch: this.fontStretch,
+      fontVariantCaps: this.fontVariantCaps,
+      letterSpacing: this.letterSpacing,
+      lineDashOffset: this.lineDashOffset,
+      textRendering: this.textRendering,
+      wordSpacing: this.wordSpacing,
       shadowBlur: this.shadowBlur,
       shadowColor: this.shadowColor,
       shadowOffsetX: this.shadowOffsetX,
       shadowOffsetY: this.shadowOffsetY,
-      globalCompositeOperation: this.globalCompositeOperation,
-    });
+    };
+    this.states.push(state);
+    // the transform keeps its own stack; one entry per save() keeps the two in lockstep
     this._transform.save();
   }
 
@@ -554,11 +600,12 @@ export class Context {
    * @memberof Context
    */
   restore(): void {
+    // with no saved state restore() must leave every piece of state untouched,
+    // including the transform; both stacks are pushed together by save()
+    if (this.states.length === 0) return;
+    const state = this.states.pop() as SavedState;
     this._transform.restore();
-    let state = this.states.pop();
-    if (state) {
-      Object.assign(this, state);
-    }
+    Object.assign(this, state);
   }
 
   /**
