@@ -7,7 +7,7 @@ import {Songs} from './songs';
 
 export const Sounds = new Mongo.Collection('sounds');
 
-if (!Meteor.isServer) return false
+if (Meteor.isServer) {
 
 Meteor.publish('sounds', () => Sounds.find())
 
@@ -22,7 +22,9 @@ Meteor.methods({
       'selected': false,
       'muted': false,
       'code': code,
-      'createdAt': new Date()
+      'version': 0,
+      'createdAt': new Date(),
+      'updatedAt': new Date()
     });
   },
   'sounds.remove'(soundId) {
@@ -42,7 +44,9 @@ Meteor.methods({
       'selected': sound.selected,
       'muted': sound.muted,
       'code': sound.code,
-      'createdAt': new Date()
+      'version': 0,
+      'createdAt': new Date(),
+      'updatedAt': new Date()
     });
   },
   //
@@ -57,11 +61,14 @@ Meteor.methods({
   'sounds.toggleMute'(soundId) {
     check(soundId, String);
     let sound = Sounds.findOne(soundId)
-    Sounds.update(soundId, { $set: { muted: !sound.muted } })
+    // bump a version so every player can tell the order of mute operations
+    Sounds.update(soundId, { $set: { muted: !sound.muted, updatedAt: new Date() }, $inc: { version: 1 } })
   },
   'sounds.updateCode'(soundId, code) {
     check(soundId, String);
-    Sounds.update(soundId, { $set: { code: code } })
+    // bump a version so a stale save (rapid saves, other window) never
+    // overwrites a newer result on the players
+    Sounds.update(soundId, { $set: { code: code, updatedAt: new Date() }, $inc: { version: 1 } })
   },
   'sounds.updateName'(soundId, name) {
     check(soundId, String);
@@ -72,3 +79,4 @@ Meteor.methods({
     Sounds.update(soundId, { $set: { tags: tags } })
   }
 });
+}

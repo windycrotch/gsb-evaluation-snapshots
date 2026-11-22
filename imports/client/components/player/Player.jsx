@@ -12,6 +12,7 @@ import styled from 'styled-components';
 import { updateSound, removeSound } from './sounds';
 import { soundsWatcher } from './soundsWatcher';
 import { observeTones } from './tones';
+import { resetSoundLifecycle, killPlayerTasks, markSoundApplied } from './lifecycle';
 
 export default class Player extends React.Component {
 
@@ -26,6 +27,9 @@ export default class Player extends React.Component {
     // clean all the meteor collection replication of the window.tones object
     Meteor.call('tones.removeAll')
 
+    // fresh lifecycle state (versions, tombstones) for this player session
+    resetSoundLifecycle()
+
     Tone.Transport.start('+0.1')
     Tone.Transport.loopEnd = '2m'
     Tone.Transport.loop = true
@@ -33,7 +37,8 @@ export default class Player extends React.Component {
 
     Tone.context.latencyHint = "interactive"
 
-    observeTones()
+    // keep the observe handle so it can be stopped on unmount
+    this.tonesObserver = observeTones()
   }
 
   // initializeSounds
@@ -53,11 +58,22 @@ export default class Player extends React.Component {
       deleted: s => {
         removeSound(s)
       },
-      nothing: (s, p) => console.log('nothing', p)
+      // no audible change (e.g. only the save version moved): still note the
+      // newest version seen so a stale snapshot arriving later is recognized
+      nothing: (s, p) => markSoundApplied(s)
     })
   }
 
   componentWillUnmount () {
+    // stop listening to mixer write-backs
+    if (this.tonesObserver) {
+      this.tonesObserver.stop()
+      this.tonesObserver = null
+    }
+    // invalidate and drop every scheduled start/stop/cleanup task so
+    // nothing fires after the player is gone
+    killPlayerTasks()
+    Tone.Transport.cancel(0)
     Tone.Transport.stop()
   }
 

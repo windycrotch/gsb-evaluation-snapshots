@@ -1,0 +1,25 @@
+{
+  "name": "player-lifecycle-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test --test-force-exit --import ./runtime/register.mjs",
+    "baseline": "node baseline/compare.mjs"
+  },
+  "dependencies": {
+    "esbuild": "^0.28.2",
+    "esprima": "^4.0.0",
+    "lodash": "^4.17.4",
+    "lodash-es": "^4.17.21",
+    "mingo": "6.7.2",
+    "node-web-audio-api": "^2.2.0",
+    "react": "^16.14.0",
+    "react-dom": "^16.14.0",
+    "react-hammerjs": "^1.0.1",
+    "react-meteor-data": "^0.2.10",
+    "react-test-renderer": "^16.14.0",
+    "styled-components": "^2.2.3",
+    "teoria": "^2.5.0",
+    "tone": "0.11.11"
+  }
+}

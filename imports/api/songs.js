@@ -7,7 +7,7 @@ import {Sounds} from './sounds';
 
 export const Songs = new Mongo.Collection('songs');
 
-if (!Meteor.isServer) return false
+if (Meteor.isServer) {
 
 Meteor.publish('songs', () => Songs.find())
 
@@ -62,3 +62,4 @@ Meteor.methods({
     })
   }
 });
+}

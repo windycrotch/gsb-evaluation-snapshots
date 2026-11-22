@@ -7,6 +7,8 @@ import styled from 'styled-components';
 import { Meteor } from 'meteor/meteor'
 import esprima from 'esprima'
 
+import { Tones } from '/imports/api/tones';
+
 import Knob from './knob/Knob';
 import { updateParamsInCode } from '../code/updateParamsInCode';
 
@@ -16,6 +18,10 @@ export default class MixTable extends React.Component {
   }
 
   changeValue = (tone, i, value) => {
+
+    // the tone record is gone (sound deleted): drop the write-back instead
+    // of writing parameters onto a residual or recreated record
+    if (!Tones.findOne(tone._id)) return false
 
     let nameProp = tone.options.vars[i][0]
     if (isNumber(tone.options.vars[i][1].persistedValue)) tone.options.vars[i][1].persistedValue = value
