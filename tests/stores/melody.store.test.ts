@@ -145,6 +145,7 @@ describe('useMelodyStore', () => {
 
   it('replaces only the Arp Studio work range and restores it with undo and redo', async () => {
     const index = vi.spyOn(trainedModelService, 'loadTrainedModelIndex').mockResolvedValue(null)
+    const loadModel = vi.spyOn(trainedModelService, 'loadTrainedModel').mockResolvedValue(null)
     try {
       const project = useProjectStore()
       project.setWorkRange({ startStep: 4, endStep: 12 })
@@ -175,11 +176,13 @@ describe('useMelodyStore', () => {
       expect(melody.notes).toEqual(generated)
     } finally {
       index.mockRestore()
+      loadModel.mockRestore()
     }
   })
 
   it('starts Arp Studio in Auto; only Shuffle rolls the displayed seed and Apply keeps it', async () => {
     const index = vi.spyOn(trainedModelService, 'loadTrainedModelIndex').mockResolvedValue(null)
+    const loadModel = vi.spyOn(trainedModelService, 'loadTrainedModel').mockResolvedValue(null)
     const nextSeed = vi.spyOn(arpSeedHelpers, 'nextArpSeed').mockReturnValueOnce(101).mockReturnValueOnce(202)
     try {
       const melody = useMelodyStore()
@@ -200,12 +203,14 @@ describe('useMelodyStore', () => {
       expect(nextSeed).toHaveBeenCalledTimes(2)
     } finally {
       index.mockRestore()
+      loadModel.mockRestore()
       nextSeed.mockRestore()
     }
   })
 
   it('reproduces Arp Studio notes with a manually entered or locked seed and resumes Auto when unlocked', async () => {
     const index = vi.spyOn(trainedModelService, 'loadTrainedModelIndex').mockResolvedValue(null)
+    const loadModel = vi.spyOn(trainedModelService, 'loadTrainedModel').mockResolvedValue(null)
     const nextSeed = vi.spyOn(arpSeedHelpers, 'nextArpSeed').mockReturnValue(9876)
     try {
       const melody = useMelodyStore()
@@ -224,6 +229,7 @@ describe('useMelodyStore', () => {
       expect(nextSeed).toHaveBeenCalledOnce()
     } finally {
       index.mockRestore()
+      loadModel.mockRestore()
       nextSeed.mockRestore()
     }
   })

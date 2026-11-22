@@ -1,11 +1,13 @@
-import type { Ref } from 'vue'
+import { computed, type Ref } from 'vue'
 import { generateMelody } from '../core/generator/melody.generator'
 import { createRng } from '../core/generator/rng'
 import { getRhythmPresetById, pickRandomRhythmPresetId } from '../core/rhythm/presets'
 import type { GeneratorParams } from '../core/schemas/generator.schema'
 import type { AppNote } from '../core/schemas/note.schema'
+import type { TrainedRole } from '../core/schemas/trained-markov.schema'
 import type { TakeScope } from '../core/takes/scope'
 import { loadTrainedModel } from '../services/trained-model-service'
+import { useTrainedModelStatus } from './useTrainedModelStatus'
 import { useHarmonyStore } from '../stores/harmony.store'
 import { useProjectStore } from '../stores/project.store'
 import { useRhythmStore } from '../stores/rhythm.store'
@@ -17,6 +19,25 @@ export function useMelodyGeneration(
   setRhythmPreset: (id: string) => void,
   replaceNotesInScope: (notes: AppNote[], scope: TakeScope) => void
 ) {
+  // The role is resolved again inside generate() after a possible random-preset
+  // roll; this mirrors the same rule so the status badge tracks the role the
+  // next generation will actually request.
+  const trainedRole = computed<TrainedRole>(() => {
+    const preset = getRhythmPresetById(generatorParams.value.rhythmPresetId)
+    return preset?.category === 'bass' ? 'bass' : 'melody'
+  })
+
+  const melodyStatusApi = useTrainedModelStatus('melody')
+  const bassStatusApi = useTrainedModelStatus('bass')
+
+  const trainedModelStatus = computed(() =>
+    trainedRole.value === 'bass' ? bassStatusApi.status.value : melodyStatusApi.status.value
+  )
+
+  async function retryTrainedModel() {
+    return trainedRole.value === 'bass' ? bassStatusApi.retry() : melodyStatusApi.retry()
+  }
+
   async function generate(): Promise<void> {
     if (isGenerating.value) return
     const rhythmStore = useRhythmStore()
@@ -44,7 +65,10 @@ export function useMelodyGeneration(
       const project = projectStore.toConfig()
       const rhythmPreset = generator.rhythmMode === 'preset' ? getRhythmPresetById(generator.rhythmPresetId) : undefined
       const customPattern = generator.rhythmMode === 'custom' ? rhythmStore.pattern : undefined
-      const trainedModel = await loadTrainedModel(rhythmPreset?.category === 'bass' ? 'bass' : 'melody')
+      const role: TrainedRole = rhythmPreset?.category === 'bass' ? 'bass' : 'melody'
+      // Failures are not cached, so every (re)generation retries a failed load;
+      // a healthy model resolves immediately from the service cache.
+      const trainedModel = await loadTrainedModel(role)
 
       const generated = generateMelody({
         project,
@@ -83,5 +107,5 @@ export function useMelodyGeneration(
     }
   }
 
-  return { generate }
+  return { generate, trainedRole, trainedModelStatus, retryTrainedModel }
 }

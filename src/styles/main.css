@@ -16,6 +16,7 @@
   --color-daw-chord: #9b6bff; /* Chords / Harmony Track */
   --color-daw-pulse: #2fd9b9; /* Rhythm / Velocity Lane */
   --color-daw-danger: #ef7d86; /* Destructive actions / Errors */
+  --color-daw-warning: #e5b567; /* Recoverable fallback / degraded state */
 
   --font-ui: 'Geist', 'Inter', system-ui, sans-serif;
   --font-mono: 'Geist Mono', 'JetBrains Mono', ui-monospace, monospace;

@@ -428,7 +428,12 @@ export const useMelodyStore = defineStore('melody', () => {
     }
   }
 
-  const { generate } = useMelodyGeneration(generatorParams, isGenerating, setRhythmPreset, replaceNotesInScope)
+  const { generate, trainedRole, trainedModelStatus, retryTrainedModel } = useMelodyGeneration(
+    generatorParams,
+    isGenerating,
+    setRhythmPreset,
+    replaceNotesInScope
+  )
   const arp = useArpGeneration(generatorParams, isGenerating, setGeneratorParams, replaceNotesInScope, () =>
     arpAudition.stopArpAudition()
   )
@@ -450,6 +455,9 @@ export const useMelodyStore = defineStore('melody', () => {
     canUndo,
     canRedo,
     generate,
+    trainedRole,
+    trainedModelStatus,
+    retryTrainedModel,
     ...arp,
     ...arpAudition,
     addNote,

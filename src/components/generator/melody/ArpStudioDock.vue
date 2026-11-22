@@ -34,6 +34,12 @@
         </p>
       </div>
       <div class="flex shrink-0 items-center gap-2">
+        <TrainedModelStatusBadge
+          role="arp"
+          :status="melodyStore.arpModelStatus"
+          :message="melodyStore.arpStatusMessage"
+          @retry="void melodyStore.retryArpModel()"
+        />
         <ArpStudioActions />
         <DawIconButton
           :icon="X"
@@ -63,6 +69,7 @@
   import { onBeforeUnmount, useTemplateRef, watch } from 'vue'
   import { ArrowUpDown, X } from '@lucide/vue'
   import DawIconButton from '@/components/common/DawIconButton.vue'
+  import TrainedModelStatusBadge from '@/components/generator/TrainedModelStatusBadge.vue'
   import { DEFAULT_UI_DIMENSIONS } from '@/config/ui-defaults'
   import { useStudioDockSize } from '@/composables/useStudioDockSize'
   import DawResizeHandle from '@/components/common/DawResizeHandle.vue'

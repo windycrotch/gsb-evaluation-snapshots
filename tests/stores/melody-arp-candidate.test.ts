@@ -1,7 +1,11 @@
 import { createPinia, setActivePinia } from 'pinia'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as arpeggioGenerator from '../../src/core/generator/arpeggio.generator'
-import type { TrainedMarkovArtifact, TrainedModelIndexEntry } from '../../src/core/schemas/trained-markov.schema'
+import type {
+  TrainedMarkovArtifact,
+  TrainedModelIndex,
+  TrainedModelIndexEntry
+} from '../../src/core/schemas/trained-markov.schema'
 import * as trainedModelService from '../../src/services/trained-model-service'
 import { useAudioStore } from '../../src/stores/audio.store'
 import { useHarmonyStore } from '../../src/stores/harmony.store'
@@ -13,7 +17,26 @@ import { arpTestModel } from '../helpers/arp-model'
 const modelEntry = { id: arpTestModel.id, role: 'arp' } as TrainedModelIndexEntry
 
 function useFallbackModel() {
-  return vi.spyOn(trainedModelService, 'loadTrainedModelIndex').mockResolvedValue(null)
+  vi.spyOn(trainedModelService, 'loadTrainedModelIndex').mockResolvedValue(null)
+  return vi.spyOn(trainedModelService, 'loadTrainedModel').mockResolvedValue(null)
+}
+
+function arpIndex(): TrainedModelIndex {
+  return {
+    artifactVersion: 1,
+    kind: 'melodymate-markov-index',
+    models: [
+      {
+        file: 'melodymate-markov-arp-default.json',
+        id: arpTestModel.id,
+        role: 'arp',
+        style: arpTestModel.style,
+        sha256: '0'.repeat(64),
+        maxOrder: arpTestModel.maxOrder,
+        stats: arpTestModel.stats
+      }
+    ]
+  }
 }
 
 function setup() {
@@ -351,5 +374,128 @@ describe('Arp Studio candidate', () => {
 
       expect(start).not.toHaveBeenCalled()
     })
+  })
+})
+
+describe('Arp Studio model failure recovery and concurrency', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.restoreAllMocks()
+    trainedModelService.setTrainedModelLoadersForTesting(null)
+  })
+
+  afterEach(() => {
+    trainedModelService.setTrainedModelLoadersForTesting(null)
+  })
+
+  it('shows the fallback state after a failure and recovers to the trained model on retry', async () => {
+    const loadIndex = vi
+      .spyOn(trainedModelService, 'loadTrainedModelIndex')
+      .mockResolvedValueOnce(null)
+      .mockResolvedValue(arpIndex())
+    const loadModel = vi
+      .spyOn(trainedModelService, 'loadTrainedModel')
+      .mockResolvedValueOnce(null)
+      .mockResolvedValue(arpTestModel)
+    const { melody } = setup()
+
+    await melody.loadArpModels()
+    expect(melody.arpModelStatus).toBe('fallback')
+    expect(melody.arpStatusMessage).toMatch(/fallback/i)
+    expect(melody.syncArpCandidate()!.modelId).toBeNull()
+
+    const recovered = await melody.retryArpModel()
+    expect(recovered).toBe(arpTestModel)
+    // loadArpModels is safe to call repeatedly and now reflects the recovery.
+    await melody.loadArpModels()
+    expect(melody.arpModelStatus).toBe('available')
+    expect(melody.arpStatusMessage).toBe('')
+    expect(loadIndex).toHaveBeenCalled()
+    expect(loadModel).toHaveBeenCalled()
+    expect(melody.syncArpCandidate()!.modelId).toBe(arpTestModel.id)
+  })
+
+  it('retries automatically when applying after a fallback, without needing a page refresh', async () => {
+    const loadModel = vi
+      .spyOn(trainedModelService, 'loadTrainedModel')
+      .mockResolvedValueOnce(null)
+      .mockResolvedValue(arpTestModel)
+    vi.spyOn(trainedModelService, 'loadTrainedModelIndex').mockResolvedValueOnce(null).mockResolvedValue(arpIndex())
+    const generate = vi.spyOn(arpeggioGenerator, 'generateArpeggio')
+    const { melody } = setup()
+
+    await melody.loadArpModels()
+    expect(melody.arpModelStatus).toBe('fallback')
+
+    const applied = await melody.applyArp()
+    expect(applied).toBe(true)
+    expect(melody.arpModelStatus).toBe('available')
+    // The fallback attempt and the apply-driven retry both reached the service.
+    expect(loadModel).toHaveBeenCalledTimes(2)
+    // First apply generated from the fallback; the recovery drives the final trained take.
+    expect(generate.mock.calls.at(-1)![0].trainedModel).toBe(arpTestModel)
+  })
+
+  it('de-duplicates concurrent load requests so the underlying loader runs once', async () => {
+    let resolveIndex!: (index: unknown) => void
+    let resolveArtifact!: (model: unknown) => void
+    const indexLoader = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          resolveIndex = resolve
+        })
+    )
+    const artifactLoader = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          resolveArtifact = resolve
+        })
+    )
+    trainedModelService.setTrainedModelLoadersForTesting({
+      'index.json': indexLoader,
+      'melodymate-markov-arp-default.json': artifactLoader
+    })
+    const { melody } = setup()
+
+    const pending = [melody.retryArpModel(), melody.retryArpModel(), melody.retryArpModel()]
+    expect(melody.arpModelStatus).toBe('loading')
+    await Promise.resolve()
+    resolveIndex(arpIndex())
+    // Flush the fully promise-based chain (no timers): index resolution →
+    // continuation → artifact loader invocation.
+    for (let i = 0; i < 10; i += 1) {
+      await Promise.resolve()
+    }
+    expect(indexLoader).toHaveBeenCalledTimes(1)
+    expect(artifactLoader).toHaveBeenCalledTimes(1)
+    resolveArtifact(arpTestModel)
+    const results = await Promise.all(pending)
+
+    expect(artifactLoader).toHaveBeenCalledTimes(1)
+    expect(results.every((model) => model === results[0])).toBe(true)
+    expect(results[0]?.id).toBe(arpTestModel.id)
+    expect(melody.arpModelStatus).toBe('available')
+  })
+
+  it('keeps the arp fallback isolated from the melody role fallback in the same session', async () => {
+    // The index is invalid: every role falls back, but each tracks its own state.
+    trainedModelService.setTrainedModelLoadersForTesting({
+      'index.json': async () => ({ kind: 'invalid-schema' })
+    })
+    const { melody } = setup()
+
+    await melody.loadArpModels()
+    expect(melody.arpModelStatus).toBe('fallback')
+
+    // Melody generation fails independently but must not flip the ARP view model.
+    await melody.generate()
+    expect(melody.arpModelStatus).toBe('fallback')
+    expect(melody.trainedModelStatus.status).toBe('fallback')
+    expect(melody.trainedModelStatus.reason).toBe('index-invalid')
+    expect(melody.notes.length).toBeGreaterThan(0)
+
+    // ARP state remains a distinct record from the melody role's state.
+    expect(trainedModelService.getTrainedModelStatus('arp').status).toBe('fallback')
+    expect(trainedModelService.getTrainedModelStatus('melody').status).toBe('fallback')
   })
 })

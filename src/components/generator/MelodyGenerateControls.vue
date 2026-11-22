@@ -28,6 +28,14 @@
       aria-label="Surprise me"
       @click="void surpriseMe()"
     />
+    <TrainedModelStatusBadge
+      class="ml-1 hidden sm:flex"
+      :role="melodyStore.trainedRole"
+      :status="melodyStore.trainedModelStatus.status"
+      :message="melodyStore.trainedModelStatus.message"
+      compact
+      @retry="void melodyStore.retryTrainedModel()"
+    />
   </div>
 </template>
 
@@ -35,6 +43,7 @@
   import { computed } from 'vue'
   import { Dice5, Loader2, Wand2 } from '@lucide/vue'
   import DawButton from '@/components/common/DawButton.vue'
+  import TrainedModelStatusBadge from '@/components/generator/TrainedModelStatusBadge.vue'
   import { useSurpriseGeneration } from '@/composables/useSurpriseGeneration'
   import { useMelodyStore } from '@/stores/melody.store'
   import { useProjectStore } from '@/stores/project.store'

@@ -10,9 +10,14 @@ import { canCycleArpInversions } from '../core/generator/arp-inversion'
 import { DEFAULT_ARP_VARIATION_SEED } from '../config/defaults'
 import type { GeneratorParams } from '../core/schemas/generator.schema'
 import type { AppNote } from '../core/schemas/note.schema'
-import type { TrainedMarkovArtifact, TrainedModelIndexEntry } from '../core/schemas/trained-markov.schema'
+import type {
+  TrainedMarkovArtifact,
+  TrainedModelIndex,
+  TrainedModelIndexEntry
+} from '../core/schemas/trained-markov.schema'
 import type { TakeScope } from '../core/takes/scope'
 import { loadTrainedModel, loadTrainedModelIndex } from '../services/trained-model-service'
+import { useTrainedModelStatus } from './useTrainedModelStatus'
 import { useHarmonyStore } from '../stores/harmony.store'
 import { useProjectStore } from '../stores/project.store'
 import { useTakesStore } from '../stores/takes.store'
@@ -20,6 +25,8 @@ import { nextArpSeed } from './arpSeed'
 
 export type ArpModelStatus = 'loading' | 'available' | 'fallback' | 'error'
 export type ArpCandidateState = 'empty' | 'loading' | 'ready' | 'stale'
+
+const ARP_FALLBACK_MESSAGE = 'Model unavailable; using deterministic chord sequence fallback'
 
 export function useArpGeneration(
   generatorParams: Ref<GeneratorParams>,
@@ -35,9 +42,13 @@ export function useArpGeneration(
   const arpCandidate = shallowRef<ArpCandidate | null>(null)
   const arpVariationSeed = ref(DEFAULT_ARP_VARIATION_SEED)
   const arpVariationMessage = ref('')
-  let indexLoaded = false
-  let loadRevision = 0
   let candidateRevision = 0
+  // In-flight latch: concurrent calls (dock open + apply + retries) share one
+  // load and observe one consistent outcome instead of racing each other.
+  let pendingArpLoad: Promise<TrainedMarkovArtifact | null> | null = null
+
+  // Single source of truth for the arp role's observable service state.
+  const { status: arpServiceStatus } = useTrainedModelStatus('arp')
 
   const activeModel = computed(() => (arpModelStatus.value === 'available' ? arpArtifact.value : null))
 
@@ -77,49 +88,81 @@ export function useArpGeneration(
     return arpCandidate.value.signature === arpInputsKey.value ? 'ready' : 'stale'
   })
 
-  async function loadArpModel(): Promise<TrainedMarkovArtifact | null> {
-    const revision = ++loadRevision
-    arpModelStatus.value = 'loading'
-    arpStatusMessage.value = 'Loading arpeggio model'
-    try {
-      const model = await loadTrainedModel('arp')
-      if (revision === loadRevision) {
-        arpArtifact.value = model
-        arpModelStatus.value = model ? 'available' : 'fallback'
-        arpStatusMessage.value = model ? '' : 'Using deterministic chord sequence fallback'
-      }
-      return model
-    } catch {
-      if (revision === loadRevision) {
+  /**
+   * Mirrors the framework-agnostic service status into the local ARP view
+   * model. A concrete resolved artifact always wins (the service functions may
+   * be stubbed in tests, in which case the observable snapshot lags behind);
+   * otherwise the service's own observable status drives the view.
+   */
+  function syncModelFromService(index: TrainedModelIndex | null, model: TrainedMarkovArtifact | null): void {
+    arpModel.value = index?.models.find((entry) => entry.role === 'arp') ?? null
+    if (model) {
+      arpArtifact.value = model
+      arpModelStatus.value = 'available'
+      arpStatusMessage.value = ''
+      return
+    }
+    const snapshot = arpServiceStatus.value
+    switch (snapshot.status) {
+      case 'loading':
+        arpModelStatus.value = 'loading'
+        arpStatusMessage.value = 'Loading arpeggio model'
+        break
+      case 'available':
+        // The observable service holds an artifact even though this call
+        // resolved without one (e.g. a stale stub); treat it as unavailable.
         arpArtifact.value = null
-        arpModelStatus.value = 'error'
-        arpStatusMessage.value = 'Model unavailable; using deterministic chord sequence fallback'
-      }
-      return null
+        arpModelStatus.value = 'fallback'
+        arpStatusMessage.value = ARP_FALLBACK_MESSAGE
+        break
+      case 'idle':
+      case 'fallback':
+        arpArtifact.value = null
+        arpModelStatus.value = 'fallback'
+        arpStatusMessage.value = ARP_FALLBACK_MESSAGE
+        break
     }
   }
 
-  async function loadArpModels(): Promise<void> {
-    if (indexLoaded) return
+  /**
+   * Loads the arp model. The service de-duplicates concurrent requests and
+   * never caches failures, so calling this again after a fallback genuinely
+   * retries the underlying import; a healthy model resolves from cache. An
+   * in-flight call is shared with every concurrent caller.
+   */
+  function loadArpModel(): Promise<TrainedMarkovArtifact | null> {
+    if (pendingArpLoad) return pendingArpLoad
+
+    // Flip to loading synchronously so candidate building blocks immediately,
+    // even when the service functions are stubbed in tests.
+    arpArtifact.value = null
     arpModelStatus.value = 'loading'
     arpStatusMessage.value = 'Loading arpeggio model'
-    try {
-      const index = await loadTrainedModelIndex()
-      arpModel.value = index?.models.find((entry) => entry.role === 'arp') ?? null
-      indexLoaded = true
-      if (!arpModel.value) {
+
+    pendingArpLoad = (async () => {
+      try {
+        const [index, model] = await Promise.all([loadTrainedModelIndex(), loadTrainedModel('arp')])
+        syncModelFromService(index, model)
+        return model
+      } catch {
+        // Defensive: the service normally resolves failures to null, but an
+        // unexpected rejection must still leave an explicit, visible fallback.
         arpArtifact.value = null
-        arpModelStatus.value = 'fallback'
-        arpStatusMessage.value = 'No trained arp model; using deterministic chord sequence fallback'
-        return
+        arpModelStatus.value = 'error'
+        arpStatusMessage.value = ARP_FALLBACK_MESSAGE
+        return null
+      } finally {
+        // Release the latch once settled. A failure stays retryable: the next
+        // call starts a fresh load rather than reusing a resolved fallback.
+        pendingArpLoad = null
       }
-      await loadArpModel()
-    } catch {
-      indexLoaded = true
-      arpArtifact.value = null
-      arpModelStatus.value = 'error'
-      arpStatusMessage.value = 'Model index unavailable; using deterministic chord sequence fallback'
-    }
+    })()
+    return pendingArpLoad
+  }
+
+  /** Kept as the dock-open entry point; safe to call repeatedly. */
+  async function loadArpModels(): Promise<void> {
+    await loadArpModel()
   }
 
   function buildCandidate(): ArpCandidate {
@@ -198,7 +241,11 @@ export function useArpGeneration(
     if (isGenerating.value) return false
     isGenerating.value = true
     try {
-      if (!indexLoaded) await loadArpModels()
+      // Retry transparently whenever no trained model is healthy; the service
+      // short-circuits immediately when one is already available.
+      if (arpModelStatus.value !== 'available') {
+        await loadArpModel()
+      }
       const candidate = syncArpCandidate()
       if (!candidate) return false
       const projectStore = useProjectStore()
@@ -240,6 +287,7 @@ export function useArpGeneration(
     syncArpCandidate,
     discardArpCandidate,
     loadArpModels,
+    retryArpModel: loadArpModel,
     arpModel,
     arpModelStatus,
     arpStatusMessage,
