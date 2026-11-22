@@ -4,61 +4,71 @@ import { readFileSync } from 'fs';
 import { platform } from 'os';
 
 /**
- * @name recursiveChunk
- * @type {string}
- * 
- * @description Shader chunk path
- * that caused a recursion error
+ * @function
+ * @name warn
+ * @description Emits a plugin warning via `process.emitWarning` and, when
+ * installed, forwards the same data to the internal test hook. The hook is an
+ * injection point used by the local unit tests to attribute warnings to the
+ * exact transform that emits them, since `process` `warning` events are
+ * dispatched asynchronously and cannot reliably be tied to a call site.
+ *
+ * @param {string} message Warning message
+ * @param {Record<string, string>} options Warning options (`code`, `detail`)
  */
-let recursiveChunk = '';
+function warn (message, options) {
+  emitWarning(message, options);
+  globalThis.__VITE_PLUGIN_GLSL_WARNING__?.({ message, ...options });
+}
 
 /**
- * @const
- * @name allChunks
- * @type {readonly Set<string>}
- * 
- * @description List of all shader chunks,
- * it's used to track included files
+ * @typedef {Object} ChunkState
+ * @description Per-transform tracking state. Every `loadShader` invocation
+ * creates its own instance so that concurrent transforms (e.g. several shader
+ * files saved at once during a dev-server hot update) can never overwrite
+ * each other's recursion markers, imported sets or warning attributions.
+ *
+ * @property {string}               recursiveChunk    Shader chunk path that caused a recursion error
+ * @property {Set<string>}          allChunks         List of all shader chunks, used to track included files
+ * @property {Map<string, string[]>} dependentChunks  Map of shaders that import other chunks:
+ *  - Key: shader path that uses other chunks as dependencies
+ *  - Value: list of chunk paths included within the shader
+ * @property {Map<string, string[]>} duplicatedChunks Map of duplicated shader imports, used by warning messages
  */
-const allChunks = new Set();
-
-/**
- * @const
- * @name dependentChunks
- * @type {readonly Map<string, string[]>}
- * 
- * @description Map of shaders that import other chunks, it's
- * used to track included files in order to avoid recursion
- * - Key: shader path that uses other chunks as dependencies
- * - Value: list of chunk paths included within the shader
- */
-const dependentChunks = new Map();
-
-/**
- * @const
- * @name duplicatedChunks
- * @type {readonly Map<string, string[]>}
- * 
- * @description Map of duplicated shader
- * imports, used by warning messages
- */
-const duplicatedChunks = new Map();
 
 /**
  * @function
- * @name resetSavedChunks
+ * @name createChunkState
+ * @description Creates an independent set of tracking collections
+ * for a single `loadShader` transform invocation
+ *
+ * @returns {ChunkState} Fresh, empty per-transform tracking state
+ */
+function createChunkState () {
+  return {
+    recursiveChunk: '',
+    allChunks: new Set(),
+    dependentChunks: new Map(),
+    duplicatedChunks: new Map()
+  };
+}
+
+/**
+ * @function
+ * @name resetChunkState
  * @description Clears all lists of saved chunks
  * and resets "recursiveChunk" path to empty
- * 
+ *
+ * @param {ChunkState} state Per-transform tracking state
+ *
  * @returns {string} Copy of "recursiveChunk" path
  */
-function resetSavedChunks () {
-  const chunk = recursiveChunk;
-  duplicatedChunks.clear();
-  dependentChunks.clear();
+function resetChunkState (state) {
+  const chunk = state.recursiveChunk;
+  state.duplicatedChunks.clear();
+  state.dependentChunks.clear();
 
-  recursiveChunk = '';
-  allChunks.clear();
+  state.recursiveChunk = '';
+  state.allChunks.clear();
   return chunk;
 }
 
@@ -67,11 +77,13 @@ function resetSavedChunks () {
  * @name getRecursionCaller
  * @description Gets last chunk that caused a
  * recursion error from the "dependentChunks" list
- * 
+ *
+ * @param {ChunkState} state Per-transform tracking state
+ *
  * @returns {string} Chunk path that started a recursion
  */
-function getRecursionCaller () {
-  const dependencies = [...dependentChunks.keys()];
+function getRecursionCaller (state) {
+  const dependencies = [...state.dependentChunks.keys()];
   return dependencies[dependencies.length - 1];
 }
 
@@ -80,21 +92,22 @@ function getRecursionCaller () {
  * @name checkDuplicatedImports
  * @description Checks if shader chunk was already included
  * and adds it to the "duplicatedChunks" list if yes
- * 
- * @param {string} path Shader's absolute path
- * 
+ *
+ * @param {string}     path  Shader's absolute path
+ * @param {ChunkState} state Per-transform tracking state
+ *
  * @throws {Warning} If shader chunk was already included
  */
-function checkDuplicatedImports (path) {
-  const caller = getRecursionCaller();
+function checkDuplicatedImports (path, state) {
+  const caller = getRecursionCaller(state);
 
-  const chunks = duplicatedChunks.get(caller) ?? [];
+  const chunks = state.duplicatedChunks.get(caller) ?? [];
   if (chunks.includes(path)) return;
 
   chunks.push(path);
-  duplicatedChunks.set(caller, chunks);
+  state.duplicatedChunks.set(caller, chunks);
 
-  emitWarning(`'${path}' was included multiple times.`, {
+  warn(`'${path}' was included multiple times.`, {
     code: 'vite-plugin-glsl',
     detail: 'Please avoid multiple imports of the same chunk in order to avoid' +
     ` recursions and optimize your shader length.\nDuplicated import found in file '${caller}'.`
@@ -109,11 +122,11 @@ function checkDuplicatedImports (path) {
  * Triple-slash comments are meant to be preserved,
  * but to avoid errors, they will be removed anyway
  * when containing import keywords or block comments
- * 
+ *
  * @param {string}  source  Shader's source code
  * @param {RegExp}  pattern RegExp to import chunks
  * @param {boolean} triple  Remove triple slash comments
- * 
+ *
  * @returns {string} Shader's source code without comments
  */
 function removeSourceComments (source, pattern, triple = false) {
@@ -157,7 +170,7 @@ function removeSourceComments (source, pattern, triple = false) {
       const comment = startBlock === -1 && '/*' || '*/';
       const missing = startBlock === -1 && 'open' || 'clos';
 
-      emitWarning(`Block comment was not ${missing}ed.`, {
+      warn(`Block comment was not ${missing}ed.`, {
         code: 'vite-plugin-glsl',
         detail: `Cannot find the corresponding ${missing}ing comment (${comment}) to the one in the` +
         ` chunk below.\nMake sure it's present and not commented out by a line comment:\n\n${chunk}`
@@ -176,22 +189,23 @@ function removeSourceComments (source, pattern, triple = false) {
  * @description Checks if shader dependencies
  * have caused a recursion error or warning
  * ignoring duplicate chunks if required
- * 
- * @param {string}  path    Shader's absolute path
- * @param {string}  lowPath Shader's lowercase path
- * @param {boolean} warn    Check already included chunks
- * @param {boolean} ignore  Ignore already included chunks
- * 
+ *
+ * @param {string}     path    Shader's absolute path
+ * @param {string}     lowPath Shader's lowercase path
+ * @param {boolean}    warn    Check already included chunks
+ * @param {boolean}    ignore  Ignore already included chunks
+ * @param {ChunkState} state   Per-transform tracking state
+ *
  * @returns {boolean | null} Import recursion has occurred
  * or chunk was ignored because of `ignore` argument
  */
-function checkRecursiveImports (path, lowPath, warn, ignore) {
-  if (allChunks.has(lowPath)) {
+function checkRecursiveImports (path, lowPath, warn, ignore, state) {
+  if (state.allChunks.has(lowPath)) {
     if (ignore) return null;
-    warn && checkDuplicatedImports(path);
+    warn && checkDuplicatedImports(path, state);
   }
 
-  return checkIncludedDependencies(path, path);
+  return checkIncludedDependencies(path, path, state);
 }
 
 /**
@@ -199,23 +213,24 @@ function checkRecursiveImports (path, lowPath, warn, ignore) {
  * @name checkIncludedDependencies
  * @description Checks if included
  * chunks caused a recursion error
- * 
- * @param {string} path Current chunk absolute path
- * @param {string} root Main shader path that imports chunks
- * 
+ *
+ * @param {string}     path  Current chunk absolute path
+ * @param {string}     root  Main shader path that imports chunks
+ * @param {ChunkState} state Per-transform tracking state
+ *
  * @returns {boolean} Included chunk started a recursion
  */
-function checkIncludedDependencies (path, root) {
-  const dependencies = dependentChunks.get(path);
+function checkIncludedDependencies (path, root, state) {
+  const dependencies = state.dependentChunks.get(path);
   let recursiveDependency = false;
 
   if (dependencies?.includes(root)) {
-    recursiveChunk = root;
+    state.recursiveChunk = root;
     return true;
   }
 
   dependencies?.forEach(dependency => recursiveDependency ||=
-    checkIncludedDependencies(dependency, root)
+    checkIncludedDependencies(dependency, root, state)
   );
 
   return recursiveDependency;
@@ -226,10 +241,10 @@ function checkIncludedDependencies (path, root) {
  * @name minifyShader
  * @description Minifies shader source code by
  * removing unnecessary whitespace and empty lines
- * 
+ *
  * @param {string}  shader  Shader code with included chunks
  * @param {boolean} newLine Flag to require a new line for the code
- * 
+ *
  * @returns {string} Minified shader's source code
  */
 export function minifyShader (shader, newLine = false) {
@@ -267,17 +282,18 @@ export function minifyShader (shader, newLine = false) {
  * @name loadChunks
  * @description Includes shader's dependencies
  * and removes comments from the source code
- * 
- * @param {string}  source  Shader's source code
- * @param {string}  path    Shader's absolute path
- * @param {RegExp}  pattern RegExp to import chunks
- * @param {Options} options Shader loading config object
- * 
+ *
+ * @param {string}     source  Shader's source code
+ * @param {string}     path    Shader's absolute path
+ * @param {RegExp}     pattern RegExp to import chunks
+ * @param {Options}    options Shader loading config object
+ * @param {ChunkState} state   Per-transform tracking state
+ *
  * @throws {Error} If shader chunks started a recursion loop
- * 
+ *
  * @returns {string} Shader's source code without external chunks
  */
-function loadChunks (source, path, pattern, options) {
+function loadChunks (source, path, pattern, options, state) {
   const unixPath = path.split(sep).join(posix.sep);
 
   const chunkPath = platform() === 'win32' &&
@@ -286,18 +302,19 @@ function loadChunks (source, path, pattern, options) {
   const recursion = checkRecursiveImports(
     unixPath, chunkPath,
     options.warnDuplicatedImports,
-    options.removeDuplicatedImports
+    options.removeDuplicatedImports,
+    state
   );
 
-  if (recursion) return recursiveChunk;
+  if (recursion) return state.recursiveChunk;
   else if (recursion === null) return '';
 
   source = removeSourceComments(source, pattern);
   let directory = dirname(unixPath);
-  allChunks.add(chunkPath);
+  state.allChunks.add(chunkPath);
 
   if (pattern.test(source)) {
-    dependentChunks.set(unixPath, []);
+    state.dependentChunks.set(unixPath, []);
     const currentDirectory = directory;
     const ext = options.defaultExtension;
 
@@ -321,18 +338,18 @@ function loadChunks (source, path, pattern, options) {
       if (!extname(shader)) shader = `${shader}.${ext}`;
 
       const shaderPath = shader.split(sep).join(posix.sep);
-      dependentChunks.get(unixPath)?.push(shaderPath);
+      state.dependentChunks.get(unixPath)?.push(shaderPath);
 
       return loadChunks(
         readFileSync(shader, 'utf8'),
-        shader, pattern, options
+        shader, pattern, options, state
       );
     });
   }
 
-  if (recursiveChunk) {
-    const caller = getRecursionCaller();
-    const recursiveChunk = resetSavedChunks();
+  if (state.recursiveChunk) {
+    const caller = getRecursionCaller(state);
+    const recursiveChunk = resetChunkState(state);
 
     throw new Error(
       `Recursion detected when importing "${recursiveChunk}" in "${caller}".`
@@ -347,14 +364,14 @@ function loadChunks (source, path, pattern, options) {
  * @name loadShader
  * @description Iterates through all external chunks, includes them
  * into the shader's source code and optionally minifies the output
- * 
+ *
  * @typedef {import('./types').LoadingOptions} Options
  * @typedef {import('./types').LoadingOutput} Output
- * 
+ *
  * @param {string}  source  Shader's source code
  * @param {string}  shader  Shader's absolute path
  * @param {Options} options Configuration object to define:
- * 
+ *
  *  - Shader suffix to use when no extension is specified
  *  - Warn if the same chunk was imported multiple times
  *  - Automatically remove an already imported chunk
@@ -362,7 +379,7 @@ function loadChunks (source, path, pattern, options) {
  *  - Keywords used to import shader chunks
  *  - Directory for root imports
  *  - Minify output shader code
- * 
+ *
  * @returns {Promise<Output>} Loaded, parsed (and minified)
  * shader output and Map of shaders that import other chunks
  */
@@ -371,9 +388,12 @@ export default async function (source, shader, options) {
     options.importKeywords.join('|')
   })(\s+([^\s<>]+));?`, 'gi');
 
-  resetSavedChunks();
+  // Tracking state is created per invocation instead of being shared at the
+  // module level, so concurrent transforms never see each other's chunks and
+  // a failed transform can't leave residue for the next one.
+  const state = createChunkState();
 
-  let outputShader = loadChunks(source, shader, pattern, options);
+  let outputShader = loadChunks(source, shader, pattern, options, state);
 
   options.minify && (outputShader = minifyShader(
     removeSourceComments(outputShader, pattern, true))
@@ -381,5 +401,5 @@ export default async function (source, shader, options) {
 
   outputShader = await options.onComplete?.(outputShader, shader) ?? outputShader;
 
-  return { dependentChunks, outputShader };
+  return { dependentChunks: state.dependentChunks, outputShader };
 }

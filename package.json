@@ -60,7 +60,8 @@
     "webgpu-shaders"
   ],
   "scripts": {
-    "test": "vite"
+    "test": "vite",
+    "test:node": "node --test \"test/node/*.test.js\""
   },
   "peerDependencies": {
     "vite": ">= 3.x",
