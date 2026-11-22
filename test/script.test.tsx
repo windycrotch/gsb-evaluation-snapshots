@@ -245,4 +245,109 @@ describe('IFrame API script loading', () => {
 		await tick();
 		expect(getScriptTag()!.src).toBe(src);
 	});
+
+	it('script loads but does not expose the API: counts as a failed attempt', async () => {
+		const onJSLoadError = vi.fn();
+		render(<KinescopePlayer videoId="v1" onJSLoadError={onJSLoadError} />);
+		await tick();
+		const tag = getScriptTag()!;
+
+		/* `load` without `window.Kinescope.IframePlayer`: the attempt is not a success */
+		await act(async () => {
+			tag.dispatchEvent(new Event('load'));
+		});
+		await tick(DEFAULT_RETRY_DELAY);
+		expect(onJSLoadError).not.toHaveBeenCalled();
+		expect(getScriptTag()).not.toBe(tag);
+		expect(getScriptTag()).not.toBeNull();
+
+		/* two more attempts, the last failure is reported */
+		await failScript();
+		await tick(DEFAULT_RETRY_DELAY);
+		await failScript();
+		await tick();
+		expect(onJSLoadError).toHaveBeenCalledTimes(1);
+		expect(onJSLoadError.mock.calls[0][0]).toBeInstanceOf(Event);
+		expect(getScriptTag()).toBeNull();
+	});
+
+	it('every waiter unmounts during the retries: the failure is silent', async () => {
+		const onJSLoadError = vi.fn();
+		const onInit = vi.fn();
+		const {unmount} = render(
+			<KinescopePlayer videoId="v1" onJSLoadError={onJSLoadError} onInit={onInit} />,
+		);
+		await tick();
+		await failScript();
+		unmount();
+		await tick(DEFAULT_RETRY_DELAY);
+		await failScript();
+		await tick(DEFAULT_RETRY_DELAY);
+		await failScript();
+		await tick();
+		expect(onJSLoadError).not.toHaveBeenCalled();
+		expect(onInit).not.toHaveBeenCalled();
+	});
+
+	it('a player mounted during the retry delay joins the same load', async () => {
+		const onInit1 = vi.fn();
+		const onInit2 = vi.fn();
+		const onJSLoadError = vi.fn();
+		render(<KinescopePlayer videoId="v1" onInit={onInit1} onJSLoadError={onJSLoadError} />);
+		await tick();
+		await failScript();
+		await tick(DEFAULT_RETRY_DELAY / 2);
+		render(<KinescopePlayer videoId="v2" onInit={onInit2} onJSLoadError={onJSLoadError} />);
+		await tick(DEFAULT_RETRY_DELAY);
+		expect(scriptTags()).toHaveLength(1);
+
+		const api = await loadScript();
+		expect(api.create).toHaveBeenCalledTimes(2);
+		api.pending.forEach(p => p.resolve());
+		await tick();
+		expect(onInit1).toHaveBeenCalledTimes(1);
+		expect(onInit2).toHaveBeenCalledTimes(1);
+		expect(onJSLoadError).not.toHaveBeenCalled();
+	});
+
+	it('a waiter that unmounts does not stop the others from creating their players', async () => {
+		const onInit1 = vi.fn();
+		const onInit2 = vi.fn();
+		const first = render(<KinescopePlayer videoId="v1" onInit={onInit1} />);
+		render(<KinescopePlayer videoId="v2" onInit={onInit2} />);
+		await tick();
+		first.unmount();
+
+		const api = await loadScript();
+		expect(api.create).toHaveBeenCalledTimes(1);
+		api.pending[0].resolve();
+		await tick();
+		expect(onInit1).not.toHaveBeenCalled();
+		expect(onInit2).toHaveBeenCalledTimes(1);
+	});
+
+	it('onJSLoad that throws does not prevent another waiter from creating its player', async () => {
+		const reportError = vi.spyOn(globalThis, 'reportError').mockImplementation(() => {});
+		const onInit2 = vi.fn();
+		render(
+			<>
+				<KinescopePlayer
+					videoId="v1"
+					onJSLoad={() => {
+						throw new Error('consumer bug');
+					}}
+				/>
+				<KinescopePlayer videoId="v2" onInit={onInit2} />
+			</>,
+		);
+		await tick();
+
+		const api = await loadScript();
+		expect(api.create).toHaveBeenCalledTimes(2);
+		api.pending.forEach(p => p.resolve());
+		await tick();
+		expect(onInit2).toHaveBeenCalledTimes(1);
+		expect(reportError).toHaveBeenCalled();
+		reportError.mockRestore();
+	});
 });
