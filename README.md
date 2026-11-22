@@ -184,6 +184,17 @@ simple-player {
 }
 ```
 
+## Testing
+
+The component is covered by Vitest + happy-dom tests that drive the real
+`<simple-player>` custom element through its public API (setting `src`,
+clicking play, scrubbing the progress bar, and triggering media `error`),
+including concurrent source-switch/retry/scrub timing and recovery paths.
+
+```bash
+npm test
+```
+
 ## AI Skill
 
 The package includes a plain Markdown skill that any AI tool can read.

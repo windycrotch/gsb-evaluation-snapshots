@@ -36,6 +36,8 @@
     "prebuild:site": "npm install --prefix site --package-lock=false",
     "build:site": "vite build --config vite.site.config.ts",
     "dev": "vite dev dev --config vite.config.ts --host 127.0.0.1 --port 5174",
+    "test": "vitest run --config vitest.test.config.ts",
+    "test:watch": "vitest --config vitest.test.config.ts",
     "predemo": "npm install --prefix site --package-lock=false",
     "demo": "vite --config vite.site.config.ts --host 127.0.0.1"
   },
@@ -50,7 +52,9 @@
     "access": "public"
   },
   "devDependencies": {
+    "happy-dom": "^15.11.7",
     "typescript": "^5.8.3",
-    "vite": "^6.3.5"
+    "vite": "^6.3.5",
+    "vitest": "^3.2.7"
   }
 }

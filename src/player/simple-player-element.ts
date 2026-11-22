@@ -61,6 +61,9 @@ export class SimplePlayer extends HTMLElement {
   #optimisticPlaybackState: PlaybackState = null;
   #videoLoadAttempt = 0;
   #videoRetryTimer = 0;
+  #sourceGeneration = 0;
+  #loadEpoch = 0;
+  #hasVideoLoadFailed = false;
   #controlsHideTimer = 0;
   #loadingStateTimer = 0;
   #initialProgressSettleTimer = 0;
@@ -352,6 +355,14 @@ export class SimplePlayer extends HTMLElement {
     this.#clearControlsCollision();
     this.#isProgressHoverPreviewing = false;
     this.#player.classList.remove('is-progress-hovering');
+    this.#releaseScrubPointer(this.#activeScrubPointerId);
+    this.#activeScrubPointerId = null;
+    this.#isTrackingScrub = false;
+    this.#isScrubbing = false;
+    this.#isCommittedScrubPending = false;
+    this.#committedScrubWasPlaying = false;
+    this.#hasScrubReturnMarker = false;
+    this.#player.classList.remove('is-scrubbing', 'has-return-marker');
     this.#isVolumeScrubbing = false;
     this.#isVolumeHovering = false;
     this.#isSpeedScrubbing = false;
@@ -1147,15 +1158,20 @@ export class SimplePlayer extends HTMLElement {
     const source = this.#video.dataset.src || this.src;
     if (!source) return;
 
+    const sourceGeneration = this.#sourceGeneration;
+    const loadEpoch = ++this.#loadEpoch;
     this.#clearVideoRetryTimer();
     this.#clearFirstFrameFallbackTimer();
     this.#videoLoadAttempt += 1;
     this.#videoSourceLoaded = true;
+    this.#hasVideoLoadFailed = false;
     this.#hasDecodedFirstFrame = false;
     this.#hasPresentedFirstFrame = false;
     this.#firstFrameRequestPending = false;
     this.#firstFramePresentationPending = false;
     this.#firstFrameRequestToken += 1;
+    this.#clearPausedVisualProgress();
+    this.#pauseFrozenProgressPercent = null;
     this.#player.classList.remove('has-visible-frame');
     this.#syncAutoplayState();
     this.#video.src = source;
@@ -1164,6 +1180,13 @@ export class SimplePlayer extends HTMLElement {
 
     if (this.#video.autoplay && this.#video.muted) {
       await this.#video.play().catch(() => undefined);
+      if (sourceGeneration !== this.#sourceGeneration || loadEpoch !== this.#loadEpoch) return;
+      // happy-dom and some browsers resolve play() without a separate event
+      // reaching our listener; reconcile the icon so it never disagrees with
+      // the real media element after an autoplay hydration.
+      this.#optimisticPlaybackState = null;
+      this.#syncVideoState();
+      this.#syncMediaSessionPlaybackState();
     }
   }
 
@@ -1225,8 +1248,11 @@ export class SimplePlayer extends HTMLElement {
       return;
     }
 
+    const sourceGeneration = this.#sourceGeneration;
+    const loadEpoch = this.#loadEpoch;
     this.#loadingStateTimer = window.setTimeout(() => {
       this.#loadingStateTimer = 0;
+      if (sourceGeneration !== this.#sourceGeneration || loadEpoch !== this.#loadEpoch) return;
       if (!this.#hasPresentedFirstFrame || (!this.#isLoopBoundaryBlip() && !this.#hasBufferedAhead())) {
         this.#isPlaybackBuffering = true;
         this.#player.classList.add('is-loading');
@@ -1272,11 +1298,41 @@ export class SimplePlayer extends HTMLElement {
     return this.#isTrackingScrub || this.#isScrubbing || this.#isCommittedScrubPending;
   }
 
-  #retryVideoLoad() {
-    if (this.#videoLoadAttempt >= this.#maxVideoLoadAttempts || this.#videoRetryTimer) return;
+  #resetFailureStateForManualRecovery() {
+    this.#clearVideoRetryTimer();
+    this.#clearFirstFrameFallbackTimer();
+    this.#hasVideoLoadFailed = false;
+    this.#videoLoadAttempt = 0;
+    this.#videoSourceLoaded = false;
+    this.#hasDecodedFirstFrame = false;
+    this.#hasPresentedFirstFrame = false;
+    this.#firstFrameRequestPending = false;
+    this.#firstFramePresentationPending = false;
+    this.#firstFrameRequestToken += 1;
+    this.#isPlaybackBuffering = true;
+    this.#optimisticPlaybackState = null;
+    this.#video.dataset.src = this.src;
+    this.#video.removeAttribute('src');
+    this.#video.preload = 'none';
+    this.#video.load();
+    this.#setVideoLoading(true, true);
+    this.#syncVideoState();
+  }
 
+  #retryVideoLoad() {
+    if (this.#hasVideoLoadFailed) return;
+    if (this.#videoLoadAttempt >= this.#maxVideoLoadAttempts || this.#videoRetryTimer) {
+      this.#hasVideoLoadFailed = this.#videoLoadAttempt >= this.#maxVideoLoadAttempts;
+      return;
+    }
+
+    const sourceGeneration = this.#sourceGeneration;
+    const loadEpoch = this.#loadEpoch;
     this.#videoRetryTimer = window.setTimeout(() => {
       this.#videoRetryTimer = 0;
+      // A src switch invalidates every retry queued by the previous source.
+      if (sourceGeneration !== this.#sourceGeneration || loadEpoch !== this.#loadEpoch) return;
+
       this.#clearFirstFrameFallbackTimer();
       this.#videoSourceLoaded = false;
       this.#hasDecodedFirstFrame = false;
@@ -1308,6 +1364,7 @@ export class SimplePlayer extends HTMLElement {
 
   #commitVideoReady() {
     this.#clearVideoRetryTimer();
+    this.#hasVideoLoadFailed = false;
     const isFirstReady = !this.#player.classList.contains('has-loaded-once');
 
     if (isFirstReady) this.#queueInitialProgressSettle();
@@ -1331,8 +1388,14 @@ export class SimplePlayer extends HTMLElement {
 
     this.#firstFrameRequestPending = true;
     const requestToken = this.#firstFrameRequestToken;
+    const sourceGeneration = this.#sourceGeneration;
+    const loadEpoch = this.#loadEpoch;
+    const isCurrentLoad = () =>
+      requestToken === this.#firstFrameRequestToken &&
+      sourceGeneration === this.#sourceGeneration &&
+      loadEpoch === this.#loadEpoch;
     const confirmFirstFrame = () => {
-      if (requestToken !== this.#firstFrameRequestToken) return;
+      if (!isCurrentLoad()) return;
 
       this.#clearFirstFrameFallbackTimer();
       this.#firstFrameRequestPending = false;
@@ -1348,7 +1411,7 @@ export class SimplePlayer extends HTMLElement {
         this.#firstFramePresentationPending = true;
         window.requestAnimationFrame(() => {
           window.requestAnimationFrame(() => {
-            if (requestToken !== this.#firstFrameRequestToken) return;
+            if (!isCurrentLoad()) return;
 
             this.#firstFramePresentationPending = false;
             this.#hasPresentedFirstFrame = true;
@@ -1450,7 +1513,7 @@ export class SimplePlayer extends HTMLElement {
   }
 
   #getVisualProgressTime() {
-    if (!Number.isFinite(this.#video.duration) || this.#video.duration <= 0) return this.#video.currentTime || 0;
+    if (!this.#hasUsableMediaDuration()) return this.#visualProgressTime || 0;
     if (this.#isScrubPreviewLocked()) return this.#scrubTargetTime;
     if (this.#pausedVisualProgressTime !== null) return this.#pausedVisualProgressTime;
     if (!this.#isVideoAdvancing()) return this.#video.currentTime || 0;
@@ -1504,7 +1567,7 @@ export class SimplePlayer extends HTMLElement {
   }
 
   #getProgressPercentFromTime(time: number) {
-    if (!Number.isFinite(this.#video.duration) || this.#video.duration <= 0) return 0;
+    if (!this.#hasUsableMediaDuration()) return 0;
 
     return Math.min(1, Math.max(0, time / this.#video.duration));
   }
@@ -1563,8 +1626,21 @@ export class SimplePlayer extends HTMLElement {
     this.#syncTrayTimeWidth();
   }
 
+  #hasUsableMediaDuration() {
+    // After a src switch the media element keeps reporting the previous
+    // resource's duration/currentTime until the new metadata arrives. Treat the
+    // stale values as unusable while no source for this lifecycle is loaded.
+    return (
+      this.#videoSourceLoaded &&
+      !this.#video.error &&
+      this.#video.readyState >= HTMLMediaElement.HAVE_METADATA &&
+      Number.isFinite(this.#video.duration) &&
+      this.#video.duration > 0
+    );
+  }
+
   #updateProgress(time = this.#getVisualProgressTime()) {
-    const hasDuration = Number.isFinite(this.#video.duration) && this.#video.duration > 0;
+    const hasDuration = this.#hasUsableMediaDuration();
     if (hasDuration && this.#pauseFrozenProgressPercent !== null) {
       const frozenTime = this.#pauseFrozenProgressPercent * this.#video.duration;
       this.#lastRenderedProgressTime = frozenTime;
@@ -1663,10 +1739,17 @@ export class SimplePlayer extends HTMLElement {
     this.#stopProgressLoop();
     this.#syncVisualProgressClock();
 
+    const sourceGeneration = this.#sourceGeneration;
     const tick = () => {
+      if (sourceGeneration !== this.#sourceGeneration) {
+        this.#progressFrame = 0;
+        return;
+      }
       this.#updateProgress(this.#getVisualProgressTime());
       if (this.#isVideoAdvancing()) {
         this.#progressFrame = window.requestAnimationFrame(tick);
+      } else {
+        this.#progressFrame = 0;
       }
     };
 
@@ -2039,6 +2122,7 @@ export class SimplePlayer extends HTMLElement {
       return;
     }
 
+    const clickGeneration = this.#sourceGeneration;
     this.#claimMediaSession();
     const shouldPlay = this.#optimisticPlaybackState
       ? this.#optimisticPlaybackState !== 'playing'
@@ -2054,7 +2138,14 @@ export class SimplePlayer extends HTMLElement {
 
     if (shouldPlay) {
       this.#clearPausedVisualProgress();
+      if (this.#video.error || this.#hasVideoLoadFailed) {
+        // Retries are exhausted: a manual play starts a fresh load cycle.
+        this.#resetFailureStateForManualRecovery();
+      }
       await this.#hydrateVideoSource();
+      // A src switch during hydration supersedes this click: never start the
+      // new source playing from a stale, pre-switch play request.
+      if (clickGeneration !== this.#sourceGeneration) return;
       await this.#video.play().catch(() => {
         this.#optimisticPlaybackState = null;
       });
@@ -2062,6 +2153,10 @@ export class SimplePlayer extends HTMLElement {
       this.#freezeRenderedProgressForPause();
       this.#video.pause();
     }
+
+    // A src switch during the async work owns the UI now; do not let this
+    // click's reconciliation overwrite the new source's paused/loading state.
+    if (clickGeneration !== this.#sourceGeneration) return;
 
     this.#syncVideoState();
     this.#scheduleTouchControlsHide();
@@ -2755,6 +2850,9 @@ export class SimplePlayer extends HTMLElement {
   };
 
   #handleWindowBlur = () => {
+    this.#clearOverlayPointerDownEligibility();
+    this.#clearScrubLongPressTimer();
+    this.#clearControlsHideTimer();
     this.#finishVolumeScrub(this.#activeVolumePointerId);
     this.#finishSpeedScrub(this.#activeSpeedPointerId);
     this.#cancelScrub(this.#activeScrubPointerId);
@@ -2830,6 +2928,8 @@ export class SimplePlayer extends HTMLElement {
   };
 
   #handleVideoError = () => {
+    if (!this.#videoSourceLoaded) return;
+
     this.#optimisticPlaybackState = null;
     this.#hasDecodedFirstFrame = false;
     this.#hasPresentedFirstFrame = false;
@@ -2862,24 +2962,63 @@ export class SimplePlayer extends HTMLElement {
     if (!this.#video) return;
     this.#observer?.disconnect();
     this.#observer = null;
+
+    // Every generation bump invalidates timers, rAF callbacks and queued
+    // retries that were bound to the previous source lifecycle.
+    this.#sourceGeneration += 1;
+    this.#loadEpoch += 1;
+    this.#firstFrameRequestToken += 1;
+
     this.#clearVideoRetryTimer();
+    this.#clearLoadingStateTimer();
+    this.#clearFirstFrameFallbackTimer();
     this.#clearInitialProgressSettleTimer();
+    this.#clearScrubLongPressTimer();
+    this.#stopProgressLoop();
+
     this.#videoSourceLoaded = false;
     this.#videoLoadAttempt = 0;
+    this.#hasVideoLoadFailed = false;
     this.#hasDecodedFirstFrame = false;
     this.#hasPresentedFirstFrame = false;
     this.#firstFrameRequestPending = false;
     this.#firstFramePresentationPending = false;
-    this.#firstFrameRequestToken += 1;
     this.#hasInitialProgressSettled = false;
+    this.#initialProgressEstimateUnlockAt = 0;
     this.#lastRenderedProgressTime = 0;
+    this.#visualProgressTime = 0;
+    this.#visualProgressUpdatedAt = performance.now();
+    this.#isPlaybackBuffering = true;
     this.#clearPausedVisualProgress();
+    this.#pauseFrozenProgressPercent = null;
+
+    // Release any pointer interaction that was in flight when the src changed.
+    this.#releaseScrubPointer(this.#activeScrubPointerId);
+    this.#releaseVolumePointer(this.#activeVolumePointerId);
+    this.#releaseSpeedPointer(this.#activeSpeedPointerId);
+    this.#activeScrubPointerId = null;
+    this.#activeVolumePointerId = null;
+    this.#activeSpeedPointerId = null;
+    this.#isTrackingScrub = false;
+    this.#isScrubbing = false;
+    this.#isCommittedScrubPending = false;
+    this.#committedScrubWasPlaying = false;
+    this.#clearProgressHoverPreview();
+    this.#clearControlsCollision();
+    this.#player.classList.remove('is-scrubbing', 'is-progress-hovering');
+    this.#hasScrubReturnMarker = false;
+    this.#player.classList.remove('has-return-marker');
+
     this.#hasAudioTrack = false;
     this.#hasCheckedAudioTrack = false;
     this.#syncOptionalControls();
     this.#clearVolumeInteractionState();
-    this.#isCommittedScrubPending = false;
-    this.#committedScrubWasPlaying = false;
+    this.#isVolumeScrubbing = false;
+    this.#isVolumeHovering = false;
+    this.#isSpeedScrubbing = false;
+    this.#isSpeedHovering = false;
+    this.#closeSpeedPopover();
+
     this.#optimisticPlaybackState = null;
     this.#player.classList.remove('has-loaded-once', 'has-visible-frame', 'is-progress-settling');
     this.#video.dataset.src = this.src;
@@ -2890,7 +3029,9 @@ export class SimplePlayer extends HTMLElement {
     this.#video.load();
     this.#setProgressVisual(0);
     this.#syncAudioControlState();
-    this.#syncVideoLoading();
+    // A switched source has no frame yet; show its loading mask immediately
+    // rather than waiting for the debounced buffering heuristic.
+    this.#setVideoLoading(true, true);
     this.#syncVideoState();
   }
 }
