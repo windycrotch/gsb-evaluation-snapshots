@@ -952,6 +952,33 @@ class MeshKitSettings(bpy.types.PropertyGroup):
 		soft_min=0.0,
 		soft_max=0.001,
 		precision=6)
+
+	# Batch conversion session state (stored on the scene, so it rolls back with undo)
+	uv_mesh_session_status: bpy.props.EnumProperty(
+		name="Session Status",
+		description="State of the most recent UV to Mesh batch conversion session",
+		items=[
+			('IDLE', "Idle", "No batch conversion has run yet, or the last one was undone"),
+			('RUNNING', "Running", "A batch conversion is currently in progress"),
+			('DONE', "Done", "The last batch conversion completed (with or without failures)"),
+			],
+		default='IDLE')
+	uv_mesh_session_uv_map: bpy.props.StringProperty(
+		name="Session UV Map",
+		description="UV map used by the most recent UV to Mesh session",
+		default="")
+	uv_mesh_session_sources: bpy.props.StringProperty(
+		name="Session Sources",
+		description="JSON list of source object names that participated in the most recent UV to Mesh session",
+		default="")
+	uv_mesh_session_created: bpy.props.StringProperty(
+		name="Session Created",
+		description="JSON list of new object names successfully created by the most recent UV to Mesh session",
+		default="")
+	uv_mesh_session_failed: bpy.props.StringProperty(
+		name="Session Failed",
+		description="JSON list of object names that failed conversion in the most recent UV to Mesh session",
+		default="")
 	
 	
 	
