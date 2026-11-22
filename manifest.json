@@ -4,8 +4,8 @@
   "sourceOwner": "469877839",
   "owner": "windycrotch",
   "repository": "gsb-evaluation-snapshots",
-  "taskCount": 410,
-  "snapshotCount": 820,
+  "taskCount": 411,
+  "snapshotCount": 822,
   "groups": {
     "38bd5d6e-d416-43db-baae-7adfd41acc6d": 89,
     "c3688ee4-1e6b-4f08-8b48-726d33b41638": 78,
@@ -13,7 +13,7 @@
     "legacy-git404": 35,
     "4489125f-e516-4834-b9ab-adeee09f23e8": 64,
     "93655e49-7ea3-4c66-bac7-b63a8b92de52": 60,
-    "90bb2174-905f-4034-a438-4341691eb7d2": 9
+    "90bb2174-905f-4034-a438-4341691eb7d2": 10
   },
   "entries": [
     {
@@ -6414,6 +6414,21 @@
       "migratedFrom": "local-batch-90bb2174-905f-4034-a438-4341691eb7d2"
     },
     {
+      "uid": "32115",
+      "taskId": "b335899b-5124-47c6-b819-bd6a73c2e9ff",
+      "batchId": "90bb2174-905f-4034-a438-4341691eb7d2",
+      "recordId": null,
+      "sessionId": "4106b52c-9f99-430d-b455-8089970f64df",
+      "promptHash": "2127e6ea786e84436f1fbcd07e4e984fd76e0db5e415df7b94138ce002104d39",
+      "baselineSha": "eb1918ecfab3560b9cda6fb01ab03155443d1e36",
+      "artifactSha": "e8fa9a25e52504bc2e39f1614000cb2878239482",
+      "baselineRef": "gsb/20261122c/32115/b335899b5124/baseline",
+      "artifactRef": "gsb/20261122c/32115/b335899b5124/artifact",
+      "initialUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/eb1918ecfab3560b9cda6fb01ab03155443d1e36",
+      "productUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/e8fa9a25e52504bc2e39f1614000cb2878239482",
+      "migratedFrom": "local-batch-90bb2174-905f-4034-a438-4341691eb7d2"
+    },
+    {
       "uid": "32116",
       "taskId": "3e439959-0032-4749-a48f-bc6627ccea42",
       "batchId": "90bb2174-905f-4034-a438-4341691eb7d2",
@@ -6444,13 +6459,13 @@
       "migratedFrom": "local-batch-90bb2174-905f-4034-a438-4341691eb7d2"
     }
   ],
-  "updatedAt": "2026-11-22T04:25:30.184Z",
+  "updatedAt": "2026-11-22T04:38:13.623Z",
   "addendum": {
     "reason": "git-address-404",
     "pushedCount": 35
   },
   "completedBatch": {
-    "batchPrefix": "20261122b",
-    "added": 6
+    "batchPrefix": "20261122c",
+    "added": 1
   }
 }
