@@ -245,3 +245,15 @@ renderer.loadTexture(url).then((texture) => {
   fs.writeFileSync('./snapshot/snap-meshjs2.png', canvas.toBuffer());
 });
 ```
+## Requirements
+
+Prebuilt binaries of `gl` (headless-gl) and `canvas` are published for Node.js 18/20/22 on Windows, macOS and Linux. On Node.js versions without a prebuilt binary, the native addons must be compiled from source (requires a C++ toolchain).
+
+## Tests
+
+```bash
+npm install --legacy-peer-deps
+npm test
+```
+
+The automated tests in `test/spec/` cover canvas resizing after a WebGL context exists, pixel readback consistency across `toBuffer` / `toDataURL` / `createPNGStream` / `__ctx__`, recovery from failed readbacks, and the `mockDOM` path. The scripts directly under `test/` are rendering demos that write snapshots into `snapshot/`.
