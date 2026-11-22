@@ -15,8 +15,10 @@ const STREAMS = [
 ] as const;
 
 // Reads the response whole, reporting progress. Chunks are gathered rather than written into a
-// buffer of the declared length, which is the compressed length when the server encodes it.
-const readBytes = async (response: Response, progressCallback: (progress: number) => void) => {
+// buffer of the declared length, which is the compressed length when the server encodes it. An
+// aborted signal cancels the read, so a destroyed viewer does not keep downloading; the caller's
+// abort check then throws before the partial bytes are touched.
+const readBytes = async (response: Response, progressCallback: (progress: number) => void, signal?: AbortSignal) => {
     if (!response.ok) {
         throw new Error(`gsaf: ${response.status} ${response.statusText} fetching ${response.url}`);
     }
@@ -27,12 +29,18 @@ const readBytes = async (response: Response, progressCallback: (progress: number
     const chunks: Uint8Array[] = [];
     let received = 0;
     const reader = response.body.getReader();
-    for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        chunks.push(value);
-        received += value.length;
-        progressCallback(Math.trunc(Math.min(1, received / length) * 100));
+    const cancel = () => reader.cancel();
+    signal?.addEventListener('abort', cancel, { once: true });
+    try {
+        for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            chunks.push(value);
+            received += value.length;
+            progressCallback(Math.trunc(Math.min(1, received / length) * 100));
+        }
+    } finally {
+        signal?.removeEventListener('abort', cancel);
     }
     const bytes = new Uint8Array(received);
     let offset = 0;
@@ -48,8 +56,9 @@ const readBytes = async (response: Response, progressCallback: (progress: number
  * {@link paused} stops its clock, {@link seek} moves it and {@link time} is where it is. Each
  * update decodes the frame due at that time, in a worker, so a slow decode skips frames rather
  * than slowing playback; the decoder continues forward from the frame it holds and replays from
- * the last keyframe to go back. Destroying {@link entity} stops it and releases the worker and
- * the container.
+ * the last keyframe to go back. A frame a seek overtook while it decoded is dropped rather than
+ * shown, so the screen never lands behind the playhead. Destroying {@link entity} stops it and
+ * releases the worker and the container.
  */
 class GsafPlayer {
     /** The gsplat entity, showing the frame at {@link time}. */
@@ -86,6 +95,10 @@ class GsafPlayer {
 
     // seeks waiting for their frame
     private waiters: { resolve: () => void; reject: (err: Error) => void }[] = [];
+
+    // bumped by every seek, so a decode started before the latest seek can be told from one
+    // started after it
+    private seekStamp = 0;
 
     // a decode that failed, after which the player shows its last frame and every seek fails
     private failure: Error | null = null;
@@ -132,15 +145,17 @@ class GsafPlayer {
      * Moves the playhead, wrapping it into the sequence.
      *
      * @param time - The time in seconds.
-     * @returns Resolves once the frame at that time is on screen, or the player is destroyed;
+     * @returns Resolves once the frame due at the playhead is on screen — a seek another seek
+     * overtakes settles when the last one's frame lands — or once the player is destroyed;
      * rejects once a decode has failed.
      */
     seek(time: number) {
         if (this.failure) return Promise.reject(this.failure);
-        if (!this.animated) return Promise.resolve();
+        if (this.destroyed || !this.animated) return Promise.resolve();
         // a time already in range is kept exactly, so it lands on the frame it names
         const wrapped = time % this.duration;
         this._time = wrapped < 0 ? wrapped + this.duration : wrapped;
+        this.seekStamp++;
         const landed = new Promise<void>((resolve, reject) => this.waiters.push({ resolve, reject }));
         this.pump();
         return landed;
@@ -155,25 +170,36 @@ class GsafPlayer {
         }
     }
 
+    // the frame due at the playhead; a frame's own start time can land a rounding error short of it
+    private dueFrame() {
+        return Math.min(this.frameCount - 1, Math.floor(this._time * this.fps + 1e-6));
+    }
+
     // decode the frame due now, unless it is on screen or a decode is already in flight
     private pump() {
         if (this.destroyed || this.failure || !this.buffers) return;
-        // a frame's own start time can land a rounding error short of it
-        const due = Math.min(this.frameCount - 1, Math.floor(this._time * this.fps + 1e-6));
+        const due = this.dueFrame();
         if (due === this.shown) {
             this.settle();
             return;
         }
         const buffers = this.buffers;
         this.buffers = null;
+        const stamp = this.seekStamp;
         this.decoder.decode(due, buffers).then(
             (frame) => {
-                // the worker is terminated with the entity, so this only runs while alive
-                uploadFrame(this.app, this.entity.gsplat.resource as GSplatContainer, frame);
-                // the engine re-copies a resource into its work buffer only when its allocation
-                // changes, and a frame keeps the container's, so ask for the copy
-                this.entity.gsplat.workBufferUpdate = WORKBUFFER_UPDATE_ONCE;
-                this.shown = frame.index;
+                // a result arriving after destroy must not touch the GPU
+                if (this.destroyed) return;
+                // a frame a seek overtook while it decoded is stale: the decoder needed it to
+                // reach the frames after it, but uploading it would show a frame the timeline
+                // has already left, so only the frame still due lands on screen
+                if (stamp === this.seekStamp || frame.index === this.dueFrame()) {
+                    uploadFrame(this.app, this.entity.gsplat.resource as GSplatContainer, frame);
+                    // the engine re-copies a resource into its work buffer only when its
+                    // allocation changes, and a frame keeps the container's, so ask for the copy
+                    this.entity.gsplat.workBufferUpdate = WORKBUFFER_UPDATE_ONCE;
+                    this.shown = frame.index;
+                }
                 this.buffers = frame;
                 this.pump();
             },
@@ -227,7 +253,7 @@ const loadGsaf = async (
     wasm.catch(() => {
         // reported by the await below, once the download is done
     });
-    const bytes = await readBytes(await response, progressCallback);
+    const bytes = await readBytes(await response, progressCallback, signal);
     if (signal.aborted) throw fail();
     const compiledWasm = await wasm;
     if (signal.aborted) throw fail();
