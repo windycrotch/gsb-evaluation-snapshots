@@ -9,6 +9,12 @@
 // addModule, registerProcessor, AudioWorkletProcessor and its port, AudioWorkletNode with its port and parameters. What
 // it costs is the ScriptProcessorNode's latency (two blocks of BLOCK frames) and that a processor shares the game's
 // thread, which is where a single-threaded web export's audio is mixed anyway.
+//
+// Two of the audio thread's guarantees are kept even though nothing here is threaded. Each module's script has a scope
+// of its own, so a second addModule cannot read or overwrite variables a first one left (in an AudioWorkletGlobalScope
+// two modules share only the scope's own names); and a module's registrations land in the registry in one step after
+// its script has run, so a script that throws registers nothing. A node's port is a channel: it closes, once, when the
+// processor ends -- process() returning false, process() throwing -- or when the node is disconnected.
 
 import { readScript } from "./worker.js";
 import DOMException from "./dom-exception.js";
@@ -60,9 +66,11 @@ class WorkletPort {
   constructor() {
     this._peer = null;
     this._listeners = [];
+    this._closeListeners = [];
     this._closed = false;
     this.onmessage = null;
     this.onmessageerror = null;
+    this.onclose = null;
   }
 
   /// Delivered to the other end on a later microtask, as a copy: after the caller's own code has run, before the next
@@ -71,7 +79,9 @@ class WorkletPort {
     const peer = this._peer;
     if (this._closed || peer === null || peer._closed) return;
     const data = cloneMessage(message);
-    queueMicrotask(() => peer._deliver(data));
+    queueMicrotask(() => {
+      if (!peer._closed) peer._deliver(data);
+    });
   }
 
   _deliver(data) {
@@ -88,19 +98,44 @@ class WorkletPort {
   }
 
   addEventListener(type, listener) {
-    if (type === "message" && typeof listener === "function" && !this._listeners.includes(listener)) this._listeners.push(listener);
+    if (typeof listener !== "function") return;
+    const listeners = type === "message" ? this._listeners : type === "close" ? this._closeListeners : null;
+    if (listeners !== null && !listeners.includes(listener)) listeners.push(listener);
   }
 
   removeEventListener(type, listener) {
-    if (type !== "message") return;
-    const at = this._listeners.indexOf(listener);
-    if (at !== -1) this._listeners.splice(at, 1);
+    const listeners = type === "message" ? this._listeners : type === "close" ? this._closeListeners : null;
+    if (listeners === null) return;
+    const at = listeners.indexOf(listener);
+    if (at !== -1) listeners.splice(at, 1);
   }
 
   start() {}
 
+  /// Closes the channel: this end stops delivering and receiving, the peer is told it was closed, and both ends get a
+  /// `close` event. Closing twice is a no-op, so every lifecycle path that ends a node can call it without
+  /// coordinating.
   close() {
+    if (this._closed) return;
     this._closed = true;
+    const peer = this._peer;
+    // Both ends are shut before either is told: a close handler cannot get one more message out through the pair.
+    const peerWasOpen = peer !== null && !peer._closed;
+    if (peerWasOpen) peer._closed = true;
+    this._notifyClosed();
+    if (peerWasOpen) peer._notifyClosed();
+  }
+
+  _notifyClosed() {
+    const event = { type: "close", target: this, currentTarget: this };
+    for (const handler of [this.onclose, ...this._closeListeners]) {
+      if (typeof handler !== "function") continue;
+      try {
+        handler.call(this, event);
+      } catch (error) {
+        console.error("[migo-web-adapter] an AudioWorklet close handler threw:", error);
+      }
+    }
   }
 }
 
@@ -180,37 +215,105 @@ class AudioWorklet {
   constructor(context) {
     this._context = context;
     this._processors = new Map();
-    const worklet = this;
-    // AudioWorkletGlobalScope: what a processor script sees before the game's globals.
-    this._scope = {
+    // AudioWorkletGlobalScope's own values -- the ones a processor script reads before the game's globals. They are
+    // shared by every module on this context, as the audio thread's globals are; a module's own variables are not.
+    this._globals = {
       AudioWorkletProcessor,
-      registerProcessor(name, processor) {
-        name = String(name);
-        if (name === "") throw new DOMException("a processor needs a name", "NotSupportedError");
-        if (worklet._processors.has(name)) throw new DOMException(`a processor "${name}" is already registered`, "NotSupportedError");
-        if (typeof processor !== "function" || !(processor.prototype instanceof AudioWorkletProcessor || processor === AudioWorkletProcessor)) {
-          throw new TypeError("registerProcessor takes a class extending AudioWorkletProcessor");
-        }
-        const descriptors = processor.parameterDescriptors;
-        worklet._processors.set(name, { processor, descriptors: Array.isArray(descriptors) ? descriptors : [] });
-      },
       sampleRate: context.sampleRate,
       currentFrame: 0,
       currentTime: 0,
     };
   }
 
-  /// Evaluates the processor script at `url` (a path in the game's package, a blob: or data: URL) in the worklet's
-  /// scope. Rejects with what stopped it.
+  /// The lexical scope one module's script runs in. A `with` block whose target answers every name sends every free
+  /// read and write through this object: a script's undeclared variables (`leaked = 1`, the sloppy-mode way a processor
+  /// script would create a global) live in `locals`, so the next module on the same context cannot see them -- in an
+  /// AudioWorkletGlobalScope each module gets its own. Names this module does not define fall through to the worklet's
+  /// globals and then to the game's, which is how `console`, `Float32Array` and `setTimeout` remain reachable.
+  _moduleScope(staging) {
+    const worklet = this;
+    const locals = Object.create(null);
+    // A module registers while its script runs, into `staging`, so that its registrations commit together. A call
+    // after the script returned (a processor registering another processor from process(), say) has no module to
+    // belong to: it goes straight into the context's registry. A script that failed leaves its scope dead instead:
+    // a registration held over from a failed module must not slip in after its rollback.
+    let open = true;
+    let dead = false;
+    function registerProcessor(name, processor) {
+      if (dead) throw new DOMException("this module's script failed; its registrations were rolled back", "InvalidStateError");
+      name = String(name);
+      if (name === "") throw new DOMException("a processor needs a name", "NotSupportedError");
+      if (staging.has(name) || worklet._processors.has(name)) {
+        throw new DOMException(`a processor "${name}" is already registered`, "NotSupportedError");
+      }
+      if (typeof processor !== "function" || !(processor.prototype instanceof AudioWorkletProcessor || processor === AudioWorkletProcessor)) {
+        throw new TypeError("registerProcessor takes a class extending AudioWorkletProcessor");
+      }
+      const descriptors = processor.parameterDescriptors;
+      const definition = { processor, descriptors: Array.isArray(descriptors) ? descriptors : [] };
+      if (open) staging.set(name, definition);
+      else worklet._processors.set(name, definition);
+    }
+    return {
+      proxy: new Proxy(Object.create(null), {
+        has(_target, key) {
+          return key !== Symbol.unscopables;
+        },
+        get(_target, key) {
+          if (key === Symbol.unscopables) return undefined;
+          if (key === "registerProcessor") return registerProcessor;
+          if (Object.prototype.hasOwnProperty.call(locals, key)) return locals[key];
+          if (Object.prototype.hasOwnProperty.call(worklet._globals, key)) return worklet._globals[key];
+          return globalThis[key];
+        },
+        set(_target, key, value) {
+          locals[key] = value;
+          return true;
+        },
+        deleteProperty(_target, key) {
+          delete locals[key];
+          return true;
+        },
+      }),
+      close() { open = false; },
+      fail() { open = false; dead = true; },
+    };
+  }
+
+  /// Evaluates the processor script at `url` (a path in the game's package, a blob: or data: URL) in a scope of its
+  /// own. Rejects with what stopped it.
+  ///
+  /// The script's registrations are collected in `staging` and enter the context's registry only once the whole script
+  /// has run: a script that throws part-way leaves no processor behind, and a registry read during an evaluation (a
+  /// second addModule from the same task, a node constructed from a getter) never sees a half-loaded module.
   addModule(url) {
+    let source;
     try {
-      const source = readScript(url);
-      const run = new Function("__migoWorkletScope", "with (__migoWorkletScope) {\n" + source + "\n}");
-      run.call(this._scope, this._scope);
-      return Promise.resolve();
+      source = readScript(url);
     } catch (error) {
       return Promise.reject(error);
     }
+    const staging = new Map();
+    const scope = this._moduleScope(staging);
+    try {
+      const run = new Function("__migoWorkletScope", "with (__migoWorkletScope) {\n" + source + "\n}");
+      run.call(scope.proxy, scope.proxy);
+    } catch (error) {
+      // `staging` is dropped: every processor this script registered is rolled back with it.
+      scope.fail();
+      return Promise.reject(error);
+    }
+    scope.close();
+    // Commit as one step: a name another module took while this one ran (a re-entrant addModule) rejects the whole
+    // module rather than leaving it partly applied.
+    for (const name of staging.keys()) {
+      if (this._processors.has(name)) {
+        scope.fail();
+        return Promise.reject(new DOMException(`a processor "${name}" is already registered`, "NotSupportedError"));
+      }
+    }
+    for (const [name, definition] of staging) this._processors.set(name, definition);
+    return Promise.resolve();
   }
 }
 
@@ -231,11 +334,20 @@ const nodeState = new WeakMap();
 // with nothing connected gets an input of none.
 const fed = new WeakSet();
 
+/// Ends a node's processor: process() is not called again, and its port -- both ends -- stops delivering and tells the
+/// far end it closed. Every way a node's life ends goes through here (process() returning false, process() throwing,
+/// the node disconnecting), so it is idempotent: the first call ends it, later ones do nothing.
+function stopNode(state) {
+  if (!state.active) return;
+  state.active = false;
+  state.port.close();
+}
+
 function runBlock(node, event) {
   const state = nodeState.get(node);
   if (!state || !state.active) return;
   const { worklet, processor, parameters, inputChannels, outputChannels } = state;
-  const scope = worklet._scope;
+  const scope = worklet._globals;
   const rate = scope.sampleRate;
   const inputData = [];
   for (let c = 0; c < inputChannels; c++) inputData.push(event.inputBuffer.getChannelData(c));
@@ -255,7 +367,7 @@ function runBlock(node, event) {
     try {
       keepGoing = processor.process(inputs, outputs, values);
     } catch (error) {
-      state.active = false;
+      stopNode(state);
       console.error("[migo-web-adapter] AudioWorkletProcessor.process threw:", error);
       const handler = node.onprocessorerror;
       if (typeof handler === "function") {
@@ -268,7 +380,7 @@ function runBlock(node, event) {
       return;
     }
     if (!keepGoing) {
-      state.active = false;
+      stopNode(state);
       return;
     }
   }
@@ -330,6 +442,9 @@ export function installAudioWorklet(global) {
     for (const descriptor of definition.descriptors) {
       parameters.set(descriptor.name, new WorkletParam(descriptor, initial[descriptor.name]));
     }
+    // Save and restore rather than clear: a processor's constructor may construct another AudioWorkletNode (on this
+    // context or another), and the outer construction must find its own port waiting when the inner one returns.
+    const outerPort = constructingPort;
     constructingPort = processorPort;
     let processor;
     try {
@@ -340,8 +455,12 @@ export function installAudioWorklet(global) {
         parameterData: initial,
         processorOptions: cloneMessage(options.processorOptions),
       });
+    } catch (error) {
+      // A processor that cannot be constructed leaves no channel behind: neither end may keep delivering.
+      nodePort.close();
+      throw error;
     } finally {
-      constructingPort = null;
+      constructingPort = outerPort;
     }
     nodeState.set(node, {
       worklet, processor, parameters, inputChannels, outputChannels, numberOfInputs, numberOfOutputs,
@@ -356,6 +475,7 @@ export function installAudioWorklet(global) {
     keepAlive.connect(context.destination);
     return node;
   }
+  const baseDisconnect = ScriptProcessorNode.prototype.disconnect || (AudioNode && AudioNode.prototype.disconnect);
   AudioWorkletNode.prototype = Object.create(ScriptProcessorNode.prototype, {
     constructor: { value: AudioWorkletNode, writable: true, configurable: true },
     port: { get() { return nodeState.get(this)?.port; }, enumerable: true, configurable: true },
@@ -364,6 +484,17 @@ export function installAudioWorklet(global) {
       get() { return nodeState.get(this)?.onprocessorerror ?? null; },
       set(handler) { const state = nodeState.get(this); if (state) state.onprocessorerror = typeof handler === "function" ? handler : null; },
       enumerable: true,
+      configurable: true,
+    },
+    // A node taken out of the graph is done: its processor stops and its port closes, as in a browser where the node
+    // and its processor are torn down together.
+    disconnect: {
+      value: function (...args) {
+        const state = nodeState.get(this);
+        if (state) stopNode(state);
+        if (typeof baseDisconnect === "function") return baseDisconnect.apply(this, args);
+      },
+      writable: true,
       configurable: true,
     },
   });

@@ -148,7 +148,139 @@ assert.throws(() => new AudioWorkletNode(ctx, "tone", { numberOfInputs: 0, numbe
 files.set("worklets/dup.js", 'registerProcessor("tone", class extends AudioWorkletProcessor {})');
 await assert.rejects(ctx.audioWorklet.addModule("worklets/dup.js"), { name: "NotSupportedError" }, "a name is registered once");
 
-// 8. Installing twice changes nothing; a runtime without ScriptProcessorNode gets no worklet.
+// 8. Each addModule's script has a scope of its own: no global variable carries state from one module to the next,
+//    while a registered processor is still usable by a node on the same context.
+files.set("worklets/first.js", `
+  sharedState = "left by first";
+  var moduleVar = "first-var";
+  function moduleFn() { return "first-fn"; }
+  class First extends AudioWorkletProcessor {
+    process() { globalThis.__first = [sharedState, moduleVar, moduleFn()]; return true; }
+  }
+  registerProcessor("first", First);
+`);
+await ctx.audioWorklet.addModule("worklets/first.js");
+files.set("worklets/second.js", `
+  registerProcessor("second", class extends AudioWorkletProcessor {
+    process() {
+      globalThis.__second = [
+        typeof sharedState,
+        typeof moduleVar,
+        typeof moduleFn,
+        typeof registerProcessor,
+        typeof sampleRate,
+      ];
+      return true;
+    }
+  });
+`);
+await ctx.audioWorklet.addModule("worklets/second.js");
+block(new AudioWorkletNode(ctx, "first"), 0);
+block(new AudioWorkletNode(ctx, "second"), 0);
+assert.deepEqual(globalThis.__first, ["left by first", "first-var", "first-fn"], "a module's own globals are visible to it");
+assert.deepEqual(globalThis.__second, ["undefined", "undefined", "undefined", "function", "number"],
+  "a later module does not see an earlier module's variables, but does see the worklet's own names");
+assert.equal("sharedState" in globalThis, false, "an implicitly declared variable does not leak onto the game's globals");
+
+// 9. A module that throws part-way registers nothing: every processor it registered is rolled back with it.
+files.set("worklets/partial.js", `
+  registerProcessor("halfA", class extends AudioWorkletProcessor {});
+  registerProcessor("halfB", class extends AudioWorkletProcessor {});
+  throw new Error("module failed half-way");
+`);
+await assert.rejects(ctx.audioWorklet.addModule("worklets/partial.js"), /half-way/);
+assert.throws(() => new AudioWorkletNode(ctx, "halfA"), { name: "InvalidStateError" }, "no processor from the failed module");
+assert.throws(() => new AudioWorkletNode(ctx, "halfB"), { name: "InvalidStateError" }, "no processor from the failed module");
+files.set("worklets/reuse-name.js", 'registerProcessor("halfA", class extends AudioWorkletProcessor { process() { return true; } })');
+await ctx.audioWorklet.addModule("worklets/reuse-name.js");
+assert.ok(new AudioWorkletNode(ctx, "halfA"), "a rolled-back name can be registered by a later module");
+
+// 10. Concurrent addModule calls on one context: no module's registrations are visible while its script is still
+//     running, and a module that collides with one that committed first is rolled back whole.
+files.set("worklets/inner.js", `
+  // Runs while the outer module is mid-script: the outer module's first registration must not be visible here.
+  globalThis.__innerSawOuter = typeof outerFirst;
+  registerProcessor("inner", class extends AudioWorkletProcessor { process() { return true; } });
+`);
+files.set("worklets/outer.js", `
+  registerProcessor("outerFirst", class extends AudioWorkletProcessor { process() { return true; } });
+  globalThis.__reenter();
+  registerProcessor("outerSecond", class extends AudioWorkletProcessor { process() { return true; } });
+`);
+files.set("worklets/other.js", `registerProcessor("other", class extends AudioWorkletProcessor { process() { return true; } })`);
+globalThis.__reenter = () => ctx.audioWorklet.addModule("worklets/inner.js");
+// Two calls kicked off before either settles: the outer one re-enters addModule for the inner one at its midpoint,
+// and a second module loads alongside.
+const outer = ctx.audioWorklet.addModule("worklets/outer.js");
+const parallel = ctx.audioWorklet.addModule("worklets/other.js");
+assert.equal(globalThis.__innerSawOuter, "undefined", "a mid-script module shows no half registration");
+await outer;
+await parallel;
+assert.ok(new AudioWorkletNode(ctx, "outerFirst") && new AudioWorkletNode(ctx, "outerSecond"), "the outer module committed whole");
+assert.ok(new AudioWorkletNode(ctx, "inner") && new AudioWorkletNode(ctx, "other"), "the concurrent modules registered");
+// A collision between two modules' names rejects the later whole module: neither of its names lands.
+files.set("worklets/collide.js", `
+  registerProcessor("collide", class extends AudioWorkletProcessor { process() { return true; } });
+  registerProcessor("outerFirst", class extends AudioWorkletProcessor { process() { return true; } });
+`);
+await assert.rejects(ctx.audioWorklet.addModule("worklets/collide.js"), { name: "NotSupportedError" });
+assert.throws(() => new AudioWorkletNode(ctx, "collide"), { name: "InvalidStateError" }, "the colliding module rolled back whole");
+
+// 11. A node that stops -- process() returns false, process() throws, or it is disconnected -- closes its port: no
+//     more messages cross, both ends get a close event, and closing again changes nothing.
+function closeable(name, stopOn) {
+  files.set(`worklets/${name}.js`, `
+    registerProcessor("${name}", class extends AudioWorkletProcessor {
+      constructor() {
+        super();
+        this.port.onclose = () => { globalThis.__${name}Closes = (globalThis.__${name}Closes || 0) + 1; };
+      }
+      process() {
+        this.port.postMessage({ tick: true });
+        ${stopOn}
+      }
+    });
+  `);
+  return ctx.audioWorklet.addModule(`worklets/${name}.js`);
+}
+await closeable("stopper", "return false;");
+await closeable("thrower", "throw new Error('boom2');");
+await closeable("disconnector", "return true;");
+
+for (const [name, stop] of [
+  ["stopper", (n) => block(n, 0)],
+  ["thrower", (n) => { const log = console.error; console.error = () => {}; block(n, 0); console.error = log; }],
+  ["disconnector", (n) => n.disconnect()],
+]) {
+  const n = new AudioWorkletNode(ctx, name);
+  const port = n.port;
+  let closes = 0;
+  port.addEventListener("close", () => { closes++; });
+  const messages = [];
+  port.addEventListener("message", (event) => messages.push(event.data));
+  stop(n);
+  await settle();
+  const delivered = messages.length;
+  port.postMessage({ after: true });
+  await settle();
+  assert.equal(messages.length, delivered, `${name}: nothing delivered after the node stopped`);
+  assert.equal(closes, 1, `${name}: the node's port reports one close`);
+  assert.equal(globalThis[`__${name}Closes`], 1, `${name}: the processor's port reports the close too`);
+  port.close();
+  assert.equal(closes, 1, `${name}: a repeated close is idempotent`);
+  assert.equal(globalThis[`__${name}Closes`], 1, `${name}: the far end is not told twice`);
+}
+
+// 12. A processor that throws in its constructor does not leave a live channel behind, and the node is not created.
+files.set("worklets/badctor.js", `
+  registerProcessor("badctor", class extends AudioWorkletProcessor {
+    constructor() { super(); throw new Error("ctor failed"); }
+  });
+`);
+await ctx.audioWorklet.addModule("worklets/badctor.js");
+assert.throws(() => new AudioWorkletNode(ctx, "badctor"), /ctor failed/);
+
+// 13. Installing twice changes nothing; a runtime without ScriptProcessorNode gets no worklet.
 assert.deepEqual(installAudioWorklet(fake), {});
 assert.deepEqual(installAudioWorklet({ AudioContext: class {} }), {});
 
