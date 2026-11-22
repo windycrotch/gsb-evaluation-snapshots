@@ -48,9 +48,28 @@
 		&::before { content: "downloading..." }
 		[ data-loaded ] &::before { content: "[ click to start ]" }
 		[ data-starting ] &::before { content: "starting..." }
+		[ data-error ] &::before { content: "[ retry ]" }
 	}
 	[ data-alert ] {
 		display: none;
+	}
+	&[ data-error ] [ data-alert=error ] {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+		max-width: 480px;
+		text-align: center;
+		color: #fa8;
+
+		b {
+			align-self: center;
+			margin: 0;
+			font-weight: normal;
+			font-family: var( --gsui-font-monospace );
+			color: #f66;
+
+			&::before { content: none; }
+		}
 	}
 }
 @keyframes splashScreen-textAnim {
