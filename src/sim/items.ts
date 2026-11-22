@@ -176,6 +176,16 @@ export class ItemField {
     this.rockets.length = 0;
   }
 
+  /**
+   * Headless verification hook: how much of the field is currently live.
+   * A clean race teardown must report all zeros.
+   */
+  get debugCounts(): { peels: number; rockets: number; inactiveBoxes: number } {
+    let inactive = 0;
+    for (const b of this.boxes) if (!b.active) inactive++;
+    return { peels: this.peels.length, rockets: this.rockets.length, inactiveBoxes: inactive };
+  }
+
   /** Trailing cars get better rolls, which keeps the field bunched up. */
   private rollItem(standingsPos: number): Exclude<ItemKind, null> {
     const behind = standingsPos > 4;

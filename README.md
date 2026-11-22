@@ -247,13 +247,14 @@ than crawling at one frame per second.
 
 ## Verification
 
-This project ships with three verification layers. All of them run the *real*
+This project ships with several verification layers. All of them run the *real*
 shipped code, not a re-implementation.
 
 ```bash
 npm run typecheck      # tsc --noEmit, strict
 npm run verify         # circuit geometry
 npm run verify:race    # headless full-race simulation
+npm run verify:lifecycle # headless pause/quit/restart lifecycle regression
 npm run verify:pages   # boots the build from a GitHub Pages style subpath
 npm run verify:mobile  # emulated phone: multi-touch, menus, touch targets
 npm run playtest       # real browser, real Chrome (after npm run build)
@@ -274,6 +275,21 @@ power-up field, and asserts that a full three-lap race is completable: every
 car takes the flag, nobody goes off, lap times are plausible and consistent,
 the field finishes together, the ramp is actually jumped, attract mode is
 stable, and restarting reproduces the grid.
+
+### `npm run verify:lifecycle` — race lifecycle regression
+
+Drives the same `RaceDirector` API the browser entries call (start, pause,
+resume, quit, restart) through the orders players actually produce, and
+asserts the lifecycle stays self-consistent: a normal finish pops the results
+board exactly once; pausing mid-countdown freezes the numerals instead of
+skipping them; pausing mid-race freezes the clock; quitting to the menu
+leaves no laps, checkpoints, finish flags, pending results delay, live items
+or input edges behind; a restart begins from a clean grid with position, best
+lap and progress reset; rivals finishing never opens the results board while
+the player is still racing; and hammering pause/resume around the flag can
+neither classify twice nor run the results delay negative. A seeded chaos
+walk fires random menu actions for 20,000 frames while checking the state
+invariants every single frame.
 
 ### `npm run verify:pages` — deployment check
 

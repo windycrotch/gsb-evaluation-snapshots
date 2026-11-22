@@ -200,6 +200,22 @@ async function boot(): Promise<void> {
   env.menu = menu;
   director.items.setAiUsePolicy((car) => !car.isPlayer || env.autopilot);
 
+  /**
+   * The one pause transition. The Escape key, the touch pause button and the
+   * pause menu all funnel through here, so they can never disagree about
+   * which state the race is in. The director itself remembers whether it was
+   * racing or counting down and resumes to exactly that phase.
+   */
+  const togglePause = (): void => {
+    if (director.state === 'race' || director.state === 'countdown') {
+      director.pause();
+      menu.showScreen('pause');
+    } else if (director.state === 'paused') {
+      director.resume();
+      menu.showScreen('none');
+    }
+  };
+
   // ---- input --------------------------------------------------------------
   const keys: Record<string, boolean> = {};
   const INPUT_KEYS = new Set([
@@ -213,15 +229,7 @@ async function boot(): Promise<void> {
       if (INPUT_KEYS.has(e.code)) e.preventDefault();
       if (e.repeat) return;
       keys[e.code] = true;
-      if (e.code === 'Escape') {
-        if (director.state === 'race' || director.state === 'countdown') {
-          director.pause();
-          menu.showScreen('pause');
-        } else if (director.state === 'paused') {
-          director.resume();
-          menu.showScreen('none');
-        }
-      }
+      if (e.code === 'Escape') togglePause();
       if (e.code === 'KeyR' && director.state === 'race') director.resetPlayer();
     },
     { passive: false },
@@ -258,15 +266,7 @@ async function boot(): Promise<void> {
   // controls are held, which is why the same code path works for mouse, pen
   // and finger.
   const touch = createTouchControls({
-    onPause: () => {
-      if (director.state === 'race' || director.state === 'countdown') {
-        director.pause();
-        menu.showScreen('pause');
-      } else if (director.state === 'paused') {
-        director.resume();
-        menu.showScreen('none');
-      }
-    },
+    onPause: togglePause,
   });
 
   // Portrait phones get a nudge rather than a blocker; the game still runs.

@@ -85,13 +85,19 @@ export class RaceDirector {
   playerInput: DriveInput = { ...NEUTRAL_INPUT };
 
   countdownT = 0;
+  /**
+   * Seconds left before the results board appears once the player has taken
+   * the flag. Public so headless lifecycle tests can assert it never goes
+   * negative; only ever read while state === 'race'.
+   */
+  finishDelay = 0;
   private prevCountdown = 0;
   private acc = 0;
   private standingsT = 0;
   private wrongWayT = 0;
   private noticeT = 0;
-  private finishDelay = 0;
   private usedItemPrev = false;
+  private wasBoosting = false;
   private events: RaceEvents = {};
 
   /**
@@ -163,6 +169,9 @@ export class RaceDirector {
       this.cars.push(sim);
     }
     this.player = this.cars[0];
+    // Keep the standings pointing at THIS pack: after a quit-to-menu the old
+    // race order would otherwise reference cars that no longer exist.
+    this.recomputeOrder();
   }
 
   private spawnRaceGrid(): void {
@@ -194,17 +203,34 @@ export class RaceDirector {
     this.env.audio.ensure();
     this.env.audio.duck(false);
     this.spawnRaceGrid();
-    this.items.reset();
+    this.resetRaceState();
     this.state = 'countdown';
     this.countdownT = 3.9;
     this.prevCountdown = 4;
+    this.events.onStateChange?.(this.state);
+  }
+
+  /**
+   * Zero every per-race leftover: lap/checkpoint/finish bookkeeping, the
+   * results delay, live items and the use-item input edge.
+   *
+   * Shared by startRace (fresh grid) and quitToMenu (race torn down), so
+   * neither path can leak state into whatever happens next. It deliberately
+   * does NOT touch countdownT (startRace arms it afterwards) or the cars' arc
+   * positions (the spawner owns those).
+   */
+  private resetRaceState(): void {
+    this.items.reset();
     this.clock = 0;
     this.acc = 0;
-    this.bestLap = null;
-    this.finishDelay = 0;
+    this.standingsT = 0;
     this.wrongWayT = 0;
     this.noticeT = 0;
+    this.finishDelay = 0;
+    this.bestLap = null;
     this.usedItemPrev = false;
+    this.wasBoosting = false;
+    this.playerInput = { ...NEUTRAL_INPUT };
     for (const c of this.cars) {
       c.lap = 0;
       c.lapTimes = [];
@@ -221,7 +247,6 @@ export class RaceDirector {
       c.stuckTimer = 0;
     }
     this.recomputeOrder();
-    this.events.onStateChange?.(this.state);
   }
 
   pause(): void {
@@ -245,6 +270,12 @@ export class RaceDirector {
     this.state = 'attract';
     this.env.audio.duck(true);
     this.spawnAttractPack();
+    // Tear down the race that was just left: no lap counters, finish flags,
+    // pending results delay, live hazards or input edges may survive into the
+    // menu, and the standings must point at the NEW pack, not the removed one.
+    this.resetRaceState();
+    this.countdownT = 0;
+    this.prevCountdown = 0;
     this.events.onCountdown?.(null);
     this.events.onStateChange?.(this.state);
   }
@@ -378,13 +409,13 @@ export class RaceDirector {
     this.wasBoosting = this.player.boosting;
 
     if (this.player.finished && this.classifyOnPlayerFinish) {
-      this.finishDelay -= dt;
+      // Clamp at zero: pausing and resuming around the flag must never let
+      // the delay run negative or fire the classification twice.
+      this.finishDelay = Math.max(0, this.finishDelay - dt);
       if (this.finishDelay <= 0) this.showResults();
     }
     void pos;
   }
-
-  private wasBoosting = false;
 
   private physicsSubstep(dt: number): void {
     this.updateCatchUp();
@@ -589,6 +620,10 @@ export class RaceDirector {
   }
 
   private showResults(): void {
+    // The flag falls exactly once per race, and only for a player who has
+    // genuinely completed the full distance. Rivals finishing early can
+    // never trigger this on their own.
+    if (this.state === 'results' || !this.player.finished) return;
     this.state = 'results';
     this.recomputeOrder();
     const leaderT = this.order[0].finishTime || this.clock;
@@ -615,7 +650,10 @@ export class RaceDirector {
   }
 
   get raceProgress(): number {
-    return clamp01((this.player.totalDist + this.env.track.length) / (this.env.track.length * LAPS));
+    // The grid sits just behind the start line (totalDist < 0), so a fresh
+    // race reads 0 and the flag reads ~1. No +L offset: that would start the
+    // bar a third full before a wheel has turned.
+    return clamp01(this.player.totalDist / (this.env.track.length * LAPS));
   }
 
   hudStandings(): StandingRow[] {
