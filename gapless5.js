@@ -61,6 +61,14 @@ function Gapless5Source(parentPlayer, parentLog, inAudioPath) {
   let endpos = 0;
   let queuedState = Gapless5State.None;
   let state = Gapless5State.None;
+  // Bumped whenever a load is superseded (unload, removal, replacement).
+  // In-flight load callbacks capture the generation they started with and
+  // are ignored once it changes, so a late completion can't resurrect a
+  // track that has been unloaded or dropped from the playlist.
+  let loadGeneration = 0;
+  // Same idea for play() promises: a pending resume/play resolution must not
+  // start audio after the source has been stopped or unloaded.
+  let playAttempt = 0;
   let seekablePercent = 0;
   let endedCallback = null;
   let volume = 1; // source-specific volume (for cross-fading)
@@ -119,11 +127,47 @@ function Gapless5Source(parentPlayer, parentLog, inAudioPath) {
 
   this.getState = () => state;
 
+  // True if this source currently holds any load state (audio fetched,
+  // decoding, or retained for playback), regardless of whether it is playing.
+  // Mirrors the old `getState() !== None` check used by updateLoading.
+  this.isLoaded = () => (state !== Gapless5State.None) || (request !== null) ||
+    (audio !== null) || (buffer !== null);
+
   this.unload = (isError) => {
-    this.stop();
+    // Only report an unload when the source actually held load state; a
+    // no-op unload (e.g. clearing never-loaded tracks) must not fire onunload.
+    const hadState = (state !== Gapless5State.None && state !== Gapless5State.Error) ||
+      (request !== null) || (audio !== null) || (buffer !== null);
+    // Invalidate any in-flight load/play completions before tearing down, so
+    // a late callback can't resurrect this source or stomp on a newer load.
+    loadGeneration = loadGeneration + 1;
+    playAttempt = playAttempt + 1;
+    if (endedCallback) {
+      window.clearTimeout(endedCallback);
+      endedCallback = null;
+    }
+    if (audio) {
+      audio.pause();
+      // Drop the element's media resource so it stops buffering/decoding and
+      // releases memory; late events from it are ignored via generation.
+      if (audio.removeAttribute) {
+        audio.removeAttribute('src');
+      }
+      audio.src = '';
+      if (audio.load) {
+        audio.load();
+      }
+    }
+    if (source) {
+      source.stop(0);
+      source.disconnect();
+    }
+    queuedState = Gapless5State.None;
     setState(isError ? Gapless5State.Error : Gapless5State.None);
-    if (request) {
-      request.abort();
+    const pendingRequest = request;
+    request = null;
+    if (pendingRequest) {
+      pendingRequest.abort();
     }
     audio = null;
     source = null;
@@ -135,7 +179,9 @@ function Gapless5Source(parentPlayer, parentLog, inAudioPath) {
       gainNode.disconnect();
       gainNode = null;
     }
-    player.onunload(this.audioPath);
+    if (hadState) {
+      player.onunload(this.audioPath);
+    }
   };
 
   const onEnded = () => {
@@ -166,8 +212,10 @@ function Gapless5Source(parentPlayer, parentLog, inAudioPath) {
 
   const isErrorStatus = (status) => status / 100 >= 4;
 
-  const onLoadedWebAudio = (inBuffer) => {
-    if (!request) {
+  const onLoadedWebAudio = (inBuffer, generation) => {
+    if (!request || generation !== loadGeneration || state === Gapless5State.None) {
+      // Load was superseded (unload/removal/replacement) while decoding —
+      // drop the late buffer instead of reviving this source.
       return;
     }
     request = null;
@@ -195,12 +243,19 @@ function Gapless5Source(parentPlayer, parentLog, inAudioPath) {
     player.uiDirty = true;
   };
 
-  const onLoadedHTML5Metadata = () => {
+  const onLoadedHTML5Metadata = (generation) => {
+    if (!audio || generation !== loadGeneration) {
+      // Element detached by unload()/replacement — ignore late metadata.
+      return;
+    }
     endpos = audio.duration * 1000;
   };
 
-  const onLoadedHTML5Audio = () => {
-    if (state !== Gapless5State.Loading) {
+  const onLoadedHTML5Audio = (generation) => {
+    if (state !== Gapless5State.Loading || generation !== loadGeneration) {
+      // Stale 'canplaythrough' from an unloaded/replaced source: this must
+      // not flip the source back to a playable state or fire onload. The
+      // element itself was already paused by unload()/stop().
       return;
     }
     state = Gapless5State.Stop;
@@ -217,6 +272,13 @@ function Gapless5Source(parentPlayer, parentLog, inAudioPath) {
   };
 
   this.stop = (resetPosition = false) => {
+    // Clear any pending end/fade timer even when there is no WebAudio node
+    // (HTML5-only playback schedules one too), so a stale timer can't fire
+    // after the user stopped.
+    if (endedCallback) {
+      window.clearTimeout(endedCallback);
+      endedCallback = null;
+    }
     if (state === Gapless5State.None) {
       return;
     }
@@ -226,12 +288,25 @@ function Gapless5Source(parentPlayer, parentLog, inAudioPath) {
       audio.pause();
     }
     if (source) {
-      if (endedCallback) {
-        window.clearTimeout(endedCallback);
-        endedCallback = null;
-      }
       source.stop(0);
       source.disconnect();
+      source = null;
+    }
+
+    // Cancel any queued or in-flight play resolution so it can't start later.
+    playAttempt = playAttempt + 1;
+
+    if (state === Gapless5State.Loading) {
+      // A load is still in flight. Don't fake a Stop state (that would make
+      // the eventual load look already-finished and swallow future onload):
+      // just cancel the pending play request and let the load complete.
+      queuedState = Gapless5State.None;
+      if (resetPosition) {
+        position = 0;
+        this.setCrossfade(0, 0, false);
+      }
+      player.uiDirty = true;
+      return;
     }
 
     setState(Gapless5State.Stop);
@@ -268,6 +343,11 @@ function Gapless5Source(parentPlayer, parentLog, inAudioPath) {
     if (this.inPlayState(true)) {
       return;
     }
+    // Each play attempt gets its own ticket; stop()/unload() bump the counter
+    // so a promise that resolves after the user stopped us is discarded
+    // instead of starting audio behind the user's back.
+    playAttempt = playAttempt + 1;
+    const attempt = playAttempt;
     position = Math.max(position, 0);
     if (!Number.isFinite(position) || position >= this.getLength()) {
       position = 0;
@@ -277,7 +357,7 @@ function Gapless5Source(parentPlayer, parentLog, inAudioPath) {
     if (buffer !== null) {
       setState(Gapless5State.Starting);
       player.context.resume().then(() => {
-        if (state === Gapless5State.Starting) {
+        if (state === Gapless5State.Starting && attempt === playAttempt) {
           gainNode.gain.value = this.getVolume();
 
           if (source) {
@@ -315,11 +395,10 @@ function Gapless5Source(parentPlayer, parentLog, inAudioPath) {
           if (audio) {
             audio.pause();
           }
-        } else if (source) {
-          // in case stop was requested while awaiting promise
-          source.stop();
-          source.disconnect();
         }
+        // A stale attempt needs no cleanup here: stop()/unload() already
+        // tore down whatever this attempt could have created, and any
+        // 'source' present now belongs to a newer attempt.
       });
     } else if (audio !== null) {
       const offsetSec = position / 1000;
@@ -330,14 +409,14 @@ function Gapless5Source(parentPlayer, parentLog, inAudioPath) {
 
       setState(Gapless5State.Starting);
       audio.play().then(() => {
-        if (state === Gapless5State.Starting) {
+        if (state === Gapless5State.Starting && attempt === playAttempt) {
           log.debug(`Playing HTML5 Audio${looped ? ' (looped)' : ''}: ${this.audioPath} at ${offsetSec.toFixed(2)} sec`);
           setState(Gapless5State.Play);
           if (!webAudioSwitched) {
             player.onplay(this.audioPath);
           }
           setEndedCallbackTime(audio.duration - offsetSec);
-        } else if (audio) {
+        } else if (audio && attempt !== playAttempt) {
           // in case stop was requested while awaiting promise
           audio.pause();
         }
@@ -459,21 +538,30 @@ function Gapless5Source(parentPlayer, parentLog, inAudioPath) {
     const { audioPath } = this;
     player.onloadstart(audioPath);
     state = Gapless5State.Loading;
+    // Capture the generation this load belongs to. unload() bumps it, so any
+    // completion arriving after the track leaves the load window is dropped.
+    const generation = loadGeneration;
     if (player.useWebAudio) {
       const onLoadWebAudio = (data) => {
+        if (generation !== loadGeneration) {
+          return;
+        }
         if (data) {
           player.context.decodeAudioData(data).then(
             (incomingBuffer) => {
-              onLoadedWebAudio(incomingBuffer);
+              onLoadedWebAudio(incomingBuffer, generation);
             }
           );
         }
       };
       if (audioPath.startsWith('blob:')) {
         fetchBlob(audioPath, (blob) => {
+          if (generation !== loadGeneration) {
+            return;
+          }
           request = new FileReader();
           request.onload = () => {
-            if (request) {
+            if (request && generation === loadGeneration) {
               onLoadWebAudio(request.result);
             }
           };
@@ -487,17 +575,17 @@ function Gapless5Source(parentPlayer, parentLog, inAudioPath) {
         request.open('get', audioPath, true);
         request.responseType = 'arraybuffer';
         request.onload = () => {
-          if (request) {
+          if (request && generation === loadGeneration) {
             onLoadWebAudio(request.response);
           }
         };
         request.onerror = () => {
-          if (request) {
+          if (request && generation === loadGeneration) {
             onError('Failed to load audio track');
           }
         };
         request.onloadend = () => {
-          if (request && isErrorStatus(request.status)) {
+          if (request && generation === loadGeneration && isErrorStatus(request.status)) {
             onError('Failed to load audio track');
           }
         };
@@ -512,15 +600,26 @@ function Gapless5Source(parentPlayer, parentLog, inAudioPath) {
         audioObj.preservesPitch = false;
         audioObj.mozPreservesPitch = false;
         audioObj.webkitPreservesPitch = false;
-        audioObj.addEventListener('loadedmetadata', onLoadedHTML5Metadata, false);
-        audioObj.addEventListener('canplaythrough', onLoadedHTML5Audio, false);
-        audioObj.addEventListener('error', onError, false);
+        audioObj.addEventListener('loadedmetadata', () => {
+          onLoadedHTML5Metadata(generation);
+        }, false);
+        audioObj.addEventListener('canplaythrough', () => {
+          onLoadedHTML5Audio(generation);
+        }, false);
+        audioObj.addEventListener('error', (event) => {
+          if (generation === loadGeneration) {
+            onError(event);
+          }
+        }, false);
         // TODO: switch to audio.networkState, now that it's universally supported
         return audioObj;
       };
       if (audioPath.startsWith('blob:')) {
         // TODO: blob as srcObject is not supported on all browsers
         fetchBlob(audioPath, (blob) => {
+          if (generation !== loadGeneration) {
+            return;
+          }
           audio = getHtml5Audio();
           audio.srcObject = blob;
           audio.load();
@@ -567,11 +666,11 @@ function Gapless5FileList(parentPlayer, parentLog, inShuffle, inLoadLimit = -1, 
   };
 
   this.currentSource = () => {
-    if (this.numTracks() === 0) {
+    if (this.numTracks() === 0 || this.trackNumber < 0) {
       return null;
     }
     const { source } = this.getSourceIndexed(this.trackNumber);
-    return source;
+    return source || null;
   };
 
   this.isLastTrack = (index) => (index === this.sources.length - 1) && !player.loop && (player.queuedTrack === null);
@@ -698,11 +797,16 @@ function Gapless5FileList(parentPlayer, parentLog, inShuffle, inLoadLimit = -1, 
     for (let i = 0; i < this.sources.length; i++) {
       this.sources[i].unload(); // also calls stop
     }
-    if (flushList) {
-      this.shuffledIndices = [];
-      this.setStartingTrack(-1);
-    }
     this.sources = [];
+    this.trackNumber = -1;
+    // An empty list has no valid ordering, so always drop stale shuffle state
+    // (a later addTrack must never see indices pointing at removed sources).
+    this.shuffledIndices = [];
+    if (flushList) {
+      this.setStartingTrack(-1);
+      this.shuffleRequest = null;
+      this.shuffleMode = false;
+    }
   };
 
   this.setPlaybackRate = (rate) => {
@@ -759,20 +863,45 @@ function Gapless5FileList(parentPlayer, parentLog, inShuffle, inLoadLimit = -1, 
   // inclusive start, exclusive end
   const generateIntRange = (first, last) => Array.from({ length: (1 + last - first) }, (_v, k) => k + first);
 
-  // returns set of actual indices (not shuffled)
+  // Returns the set of ACTUAL source indices inside the load window. The
+  // window is computed in PLAY order (so it always contains the tracks that
+  // will actually play next, even when shuffled) and then mapped to actual
+  // indices for the load/unload pass.
   this.loadableTracks = () => {
     if (this.loadLimit === -1) {
       return new Set(generateIntRange(0, this.sources.length));
     }
-    // loadable tracks are a range where size=loadLimit, centered around current track
-    const startTrack = Math.round(Math.max(0, this.trackNumber - ((this.loadLimit - 1) / 2)));
-    const endTrack = Math.round(Math.min(this.sources.length, this.trackNumber + (this.loadLimit / 2)));
-    const loadableIndices = new Set(generateIntRange(startTrack, endTrack));
+    const numTracks = this.sources.length;
+    const loadableIndices = new Set();
+    if (numTracks === 0) {
+      return loadableIndices;
+    }
+    // A range of exactly loadLimit play positions (or the whole list if
+    // smaller), centered on the current one and biased forward so the
+    // upcoming tracks gapless playback needs stay in memory.
+    const limit = Math.max(1, Math.min(this.loadLimit, numTracks));
+    const half = (limit - 1) / 2;
+    let startPlay = Math.round(this.trackNumber - half);
+    startPlay = Math.max(0, Math.min(startPlay, numTracks - limit));
+    for (let i = startPlay; i < startPlay + limit; i++) {
+      loadableIndices.add(this.getSourceIndexed(i).index);
+    }
+    // Tracks that are queued or cross-fading must stay loaded even when they
+    // sit outside the window. Both are stored as play-order references.
+    const addByPlayIndex = (playIndex) => {
+      if (!Number.isInteger(playIndex)) {
+        return;
+      }
+      const { index } = this.getSourceIndexed(playIndex);
+      if (index >= 0 && index < numTracks) {
+        loadableIndices.add(index);
+      }
+    };
     if (player.queuedTrack !== null) {
-      loadableIndices.add(this.indexFromTrack(player.queuedTrack));
+      addByPlayIndex(this.indexFromTrack(player.queuedTrack));
     }
     if (player.fadingTrack !== null) {
-      loadableIndices.add(this.indexFromTrack(player.fadingTrack));
+      addByPlayIndex(player.fadingTrack);
     }
     log.debug(`Loadable indices: ${JSON.stringify([ ...loadableIndices ])}`);
     return loadableIndices;
@@ -781,39 +910,58 @@ function Gapless5FileList(parentPlayer, parentLog, inShuffle, inLoadLimit = -1, 
   this.updateLoading = () => {
     const loadableSet = this.loadableTracks();
 
-    // make sure to load current track before surrounding tracks
-    const curSourceIndex = this.getPlaylistIndex(this.trackNumber);
-    const curSource = this.sources[curSourceIndex];
-    if (loadableSet.has(curSourceIndex) && (curSource.getState() === Gapless5State.None)) {
-      log.debug(`Loading track ${curSourceIndex}: ${curSource.audioPath}`);
+    // Make sure to load the current track before surrounding tracks, then
+    // reconcile every source against the window. The reconcile pass must run
+    // even when the current track was just queued, otherwise tracks that
+    // dropped out of the window while switching would never be unloaded.
+    const curSource = this.currentSource();
+    if (curSource && loadableSet.has(this.getSourceIndexed(this.trackNumber).index) &&
+        (curSource.getState() === Gapless5State.None)) {
+      log.debug(`Loading current track ${curSource.audioPath}`);
       curSource.load();
-    } else {
-      for (const [ index, source ] of this.sources.entries()) {
-        const playlistIndex = this.getPlaylistIndex(index);
-        const shouldLoad = loadableSet.has(playlistIndex);
-        const hasLoaded = source.getState() !== Gapless5State.None;
-        if (shouldLoad !== hasLoaded) {
-          if (shouldLoad) {
-            log.debug(`Loading track ${playlistIndex}: ${source.audioPath}`);
-            source.load();
-          } else {
-            source.unload();
-            log.debug(`Unloaded track ${playlistIndex}: ${source.audioPath}`);
-          }
+    }
+    for (const [ actualIndex, source ] of this.sources.entries()) {
+      const shouldLoad = loadableSet.has(actualIndex);
+      const hasLoaded = source.getState() !== Gapless5State.None;
+      if (shouldLoad !== hasLoaded) {
+        if (shouldLoad) {
+          log.debug(`Loading track ${actualIndex}: ${source.audioPath}`);
+          source.load();
+        } else {
+          source.unload();
+          log.debug(`Unloaded track ${actualIndex}: ${source.audioPath}`);
         }
       }
     }
   };
 
   // Add a new song into the FileList object.
+  // `index` is a play-order index (same space as trackNumber / getIndex()).
   this.add = (index, audioPath) => {
     const source = new Gapless5Source(player, log, audioPath);
-    this.sources.splice(index, 0, source);
+    if (this.shuffleMode) {
+      // Actual storage order is independent of play order under shuffle:
+      // append the source and give it a slot in the shuffled play order.
+      this.sources.push(source);
+      const actualIndex = this.sources.length - 1;
+      const playPos = Math.max(0, Math.min(index, this.shuffledIndices.length));
+      this.shuffledIndices.splice(playPos, 0, actualIndex);
+    } else {
+      const actualIndex = Math.max(0, Math.min(index, this.sources.length));
+      this.sources.splice(actualIndex, 0, source);
+      // Keep shuffledIndices a permutation of the actual indices: everything
+      // at/after the insertion point shifts up by one.
+      for (let i = 0; i < this.shuffledIndices.length; i++) {
+        if (this.shuffledIndices[i] >= actualIndex) {
+          this.shuffledIndices[i] = this.shuffledIndices[i] + 1;
+        }
+      }
+      const playPos = Math.floor(Math.random() * (this.shuffledIndices.length + 1));
+      this.shuffledIndices.splice(playPos, 0, actualIndex);
+    }
 
-    // insert new index in random position
-    this.shuffledIndices.splice(Math.floor(Math.random() * this.numTracks()), 0, this.numTracks() - 1);
-
-    // Shift trackNumber if the insert file is earlier in the list
+    // Shift trackNumber if the inserted play position is at or before it
+    // (also when the list was empty: the new track becomes current).
     if (index <= this.trackNumber || this.trackNumber === -1) {
       this.trackNumber = this.trackNumber + 1;
       if (this.trackNumber > 0) {
@@ -824,11 +972,26 @@ function Gapless5FileList(parentPlayer, parentLog, inShuffle, inLoadLimit = -1, 
   };
 
   // Remove a song from the FileList object.
-  this.remove = (index) => {
-    this.sources.splice(index, 1);
-    this.shuffledIndices.splice(this.shuffledIndices.indexOf(index), 1);
+  // `playIndex` is a play-order index (same space as trackNumber / getIndex()).
+  this.remove = (playIndex) => {
+    const { index: actualIndex } = this.getSourceIndexed(playIndex);
+    const [ removedSource ] = this.sources.splice(actualIndex, 1);
+    const removedPath = removedSource ? removedSource.audioPath : null;
+    // Fully release the removed source: abort any in-flight request and clear
+    // its state, so a late load callback can't revive it and it stops holding
+    // memory or a playing audio node.
+    if (removedSource) {
+      removedSource.unload();
+    }
+
+    // Keep shuffledIndices a permutation of the surviving actual indices,
+    // preserving the relative play order of everything that remains.
+    const shufflePos = this.shuffledIndices.indexOf(actualIndex);
+    if (shufflePos >= 0) {
+      this.shuffledIndices.splice(shufflePos, 1);
+    }
     for (let i = 0; i < this.shuffledIndices.length; i++) {
-      if (this.shuffledIndices[i] >= index) {
+      if (this.shuffledIndices[i] > actualIndex) {
         this.shuffledIndices[i] = this.shuffledIndices[i] - 1;
       }
     }
@@ -836,12 +999,13 @@ function Gapless5FileList(parentPlayer, parentLog, inShuffle, inLoadLimit = -1, 
     const newLength = this.numTracks();
     if (newLength === 0) {
       this.trackNumber = -1;
-    } else if (index < this.trackNumber) {
-      // Removed a track before the current one — current shifts left.
+    } else if (playIndex < this.trackNumber) {
+      // Removed a track before the current one in play order — current
+      // shifts left.
       this.trackNumber = this.trackNumber - 1;
       log.debug(`Decrementing track number to ${this.trackNumber}`);
-    } else if (index === this.trackNumber && this.trackNumber >= newLength) {
-      // Removed the current track AND it was the last in the list —
+    } else if (playIndex === this.trackNumber && this.trackNumber >= newLength) {
+      // Removed the current track AND it was last in play order —
       // clamp to the new last track.
       this.trackNumber = newLength - 1;
       log.debug(`Clamping track number to ${this.trackNumber}`);
@@ -850,6 +1014,24 @@ function Gapless5FileList(parentPlayer, parentLog, inShuffle, inLoadLimit = -1, 
     // into the removed slot (auto-advance when removing current), or
     // we removed a track after current (current still points at the
     // same source).
+
+    // Player-held play-order references (queued / crossfading track) shift
+    // when an earlier track is removed, and must be dropped when the track
+    // they point at is the one removed.
+    const shiftPlayRef = (ref) => {
+      if (ref === null) {
+        return null;
+      }
+      if (typeof ref === 'string') {
+        return ref === removedPath ? null : ref;
+      }
+      if (ref === playIndex) {
+        return null;
+      }
+      return ref > playIndex ? ref - 1 : ref;
+    };
+    this.fadingTrack = shiftPlayRef(this.fadingTrack);
+    this.queuedTrack = shiftPlayRef(this.queuedTrack);
 
     if (this.isShuffled() && !player.canShuffle()) {
       this.setShuffle(false);
@@ -861,12 +1043,33 @@ function Gapless5FileList(parentPlayer, parentLog, inShuffle, inLoadLimit = -1, 
     }
   };
 
+  // Replace the track at a play-order index without disturbing the position
+  // of any other track: swap the source in place, then release the old one.
+  this.replace = (playIndex, audioPath) => {
+    const { index: actualIndex } = this.getSourceIndexed(playIndex);
+    const oldSource = this.sources[actualIndex];
+    if (!oldSource) {
+      return;
+    }
+    const newSource = new Gapless5Source(player, log, audioPath);
+    this.sources[actualIndex] = newSource;
+    oldSource.unload();
+    this.updateLoading();
+  };
+
   // process inputs from constructor
   if (inTracks.length > 0) {
     for (let i = 0; i < inTracks.length; i++) {
       this.sources.push(new Gapless5Source(player, log, inTracks[i]));
-      this.shuffledIndices.splice(Math.floor(Math.random() * this.numTracks()), 0, this.numTracks() - 1);
     }
+    // Pre-generate a shuffled play order (as before); it is only visible once
+    // shuffle mode is active, but keeping it ready avoids a second shuffle.
+    const indices = Array.from(Array(this.sources.length).keys());
+    for (let n = 0; n < indices.length - 1; n++) {
+      const k = n + Math.floor(Math.random() * (indices.length - n));
+      [ indices[k], indices[n] ] = [ indices[n], indices[k] ];
+    }
+    this.shuffledIndices = indices;
     this.setStartingTrack(inStartingTrack);
     this.updateLoading();
   }
@@ -945,8 +1148,16 @@ function Gapless5(options = {}, deprecated = {}) { // eslint-disable-line no-unu
   this.loop = options.loop || false;
   this.singleMode = options.singleMode || false;
   this.exclusive = options.exclusive || false;
+
+  /** @type {string | number | null} */
   this.queuedTrack = null;
+
+  /** @type {number | null} */
   this.fadingTrack = null;
+
+  // Pending crossfade fade-out timer; cleared on stop/play/teardown so a
+  // stale fade can't stop a track after the user restarted playback.
+  this.fadingCallback = null;
   this.volume = options.volume !== undefined ? options.volume : 1.0;
   this.crossfade = options.crossfade || 0;
   this.crossfadeShape = options.crossfadeShape || CrossfadeShape.None;
@@ -1097,6 +1308,9 @@ function Gapless5(options = {}, deprecated = {}) { // eslint-disable-line no-unu
     // FileList object must be initiated
     if (this.playlist !== null) {
       const { trackNumber } = this.playlist;
+      if (trackNumber < 0 || trackNumber >= this.playlist.numTracks()) {
+        return -1;
+      }
       return sourceIndex ? this.playlist.getSourceIndexed(trackNumber).index : trackNumber;
     }
     return -1;
@@ -1282,6 +1496,10 @@ function Gapless5(options = {}, deprecated = {}) { // eslint-disable-line no-unu
           }
         } else {
           const tryStopFadingTrack = () => {
+            if (this.fadingCallback !== null) {
+              window.clearTimeout(this.fadingCallback);
+              this.fadingCallback = null;
+            }
             const fadingSource = getFadingSource();
             if (fadingSource) {
               fadingSource.stop(true);
@@ -1289,7 +1507,11 @@ function Gapless5(options = {}, deprecated = {}) { // eslint-disable-line no-unu
             this.fadingTrack = null;
           };
           this.fadingTrack = this.getIndex();
-          window.setTimeout(() => {
+          if (this.fadingCallback !== null) {
+            window.clearTimeout(this.fadingCallback);
+          }
+          this.fadingCallback = window.setTimeout(() => {
+            this.fadingCallback = null;
             tryStopFadingTrack();
           }, this.crossfade);
           this.next(null, true, true);
@@ -1303,6 +1525,21 @@ function Gapless5(options = {}, deprecated = {}) { // eslint-disable-line no-unu
     }
     if (finishedAll) {
       this.onfinishedall();
+    }
+  };
+
+  // Cancel a pending crossfade fade-out timer and drop the fading track.
+  const clearFadingTrack = () => {
+    if (this.fadingCallback !== null) {
+      window.clearTimeout(this.fadingCallback);
+      this.fadingCallback = null;
+    }
+    if (this.fadingTrack !== null) {
+      const fadingSource = getFadingSource();
+      if (fadingSource) {
+        fadingSource.stop(true);
+      }
+      this.fadingTrack = null;
     }
   };
 
@@ -1326,8 +1563,9 @@ function Gapless5(options = {}, deprecated = {}) { // eslint-disable-line no-unu
    * @param {string} audioPath - path to audio file(s) or blob URL(s)
    */
   this.addTrack = (audioPath) => {
-    const nextTrack = this.playlist.numTracks();
-    this.playlist.add(nextTrack, audioPath);
+    // In play order the new track always lands last, regardless of shuffle.
+    const nextPlayIndex = this.playlist.numTracks();
+    this.playlist.add(nextPlayIndex, audioPath);
     this.uiDirty = true;
   };
 
@@ -1338,10 +1576,14 @@ function Gapless5(options = {}, deprecated = {}) { // eslint-disable-line no-unu
   this.insertTrack = (point, audioPath) => {
     const numTracks = this.totalTracks();
     const safePoint = Math.min(Math.max(point, 0), numTracks);
-    if (safePoint === numTracks) {
-      this.addTrack(audioPath);
-    } else {
-      this.playlist.add(safePoint, audioPath);
+    this.playlist.add(safePoint, audioPath);
+    // Keep crossfade/queue references pointing at the same tracks, whose
+    // play-order indices shifted by one at/after the insertion point.
+    if (this.fadingTrack !== null && this.fadingTrack >= safePoint) {
+      this.fadingTrack = this.fadingTrack + 1;
+    }
+    if (typeof this.queuedTrack === 'number' && this.queuedTrack >= safePoint) {
+      this.queuedTrack = this.queuedTrack + 1;
     }
     this.uiDirty = true;
   };
@@ -1381,13 +1623,12 @@ function Gapless5(options = {}, deprecated = {}) { // eslint-disable-line no-unu
     const deletedPath = curSource.audioPath;
     let wasPlaying = false;
 
-    if (curSource.state === Gapless5State.Loading) {
-      curSource.unload();
-    } else if (curSource.inPlayState(true)) {
+    if (curSource.isPlayActive(true)) {
       wasPlaying = true;
-      curSource.stop();
     }
-
+    // playlist.remove() handles all post-removal bookkeeping (including
+    // queued/fading references) and unloads the source: it aborts any
+    // in-flight request, stops playback, and fires onunload exactly once.
     this.playlist.remove(point);
 
     // playlist.remove() already advanced trackNumber to the track that
@@ -1424,11 +1665,47 @@ function Gapless5(options = {}, deprecated = {}) { // eslint-disable-line no-unu
    * @param {string} audioPath - path to audio file(s) or blob URL(s)
    */
   this.replaceTrack = (point, audioPath) => {
-    this.removeTrack(point);
-    this.insertTrack(point, audioPath);
+    const playIndex = this.playlist.indexFromTrack(point);
+    if (!isValidIndex(playIndex)) {
+      log.warn(`Cannot replace missing track: ${point}`);
+      return;
+    }
+    const deletedPlaying = playIndex === this.playlist.trackNumber;
+    const { source: curSource } = this.playlist.getSourceIndexed(playIndex);
+    const wasPlaying = curSource ? curSource.isPlayActive(true) : false;
+    const wasQueued = this.queuedTrack !== null &&
+      this.playlist.indexFromTrack(this.queuedTrack) === playIndex;
+
+    // Swapping in place keeps the track at the same play position and aborts
+    // the old source's in-flight load, so no stray onload arrives later.
+    this.playlist.replace(playIndex, audioPath);
+
+    if (this.fadingTrack === playIndex) {
+      // The crossfading-out track no longer exists; don't later stop whatever
+      // source now occupies that slot.
+      this.fadingTrack = null;
+    }
+
+    if (deletedPlaying) {
+      // Keeping the replaced track current is intentional: the user replaced
+      // "this" track. Notify listeners and resume if it was playing.
+      const newSource = this.currentSource();
+      this.onnext(curSource ? curSource.audioPath : '', newSource ? newSource.audioPath : '');
+      if (wasPlaying) {
+        this.play();
+      }
+    }
+    if (wasQueued) {
+      // Point the queued reference at the new path of the same slot.
+      this.queuedTrack = audioPath;
+      this.playlist.updateLoading();
+    }
+    this.uiDirty = true;
   };
 
   this.removeAllTracks = (flushPlaylist = true) => {
+    clearFadingTrack();
+    this.queuedTrack = null;
     this.playlist.removeAllTracks(flushPlaylist);
     this.uiDirty = true;
   };
@@ -1595,6 +1872,9 @@ function Gapless5(options = {}, deprecated = {}) { // eslint-disable-line no-unu
     if (!source) {
       return;
     }
+    // Any stale crossfade fade-out from a previous track must not be allowed
+    // to stop this (re)started playback.
+    clearFadingTrack();
     this.playlist.setCrossfade(0, this.crossfade);
     source.play();
     if (this.exclusive && window.gapless5Players) {
@@ -1635,6 +1915,7 @@ function Gapless5(options = {}, deprecated = {}) { // eslint-disable-line no-unu
   this.stop = () => {
     const source = this.currentSource();
     const lastPosition = source ? source.getPosition() : 0;
+    clearFadingTrack();
     this.playlist.stopAllTracks(true);
     if (source) {
       if (lastPosition > 0) {

@@ -61,8 +61,11 @@ export class Gapless5 {
     loop: any;
     singleMode: any;
     exclusive: any;
-    queuedTrack: string | number;
-    fadingTrack: number;
+    /** @type {string | number | null} */
+    queuedTrack: string | number | null;
+    /** @type {number | null} */
+    fadingTrack: number | null;
+    fadingCallback: any;
     volume: any;
     crossfade: any;
     crossfadeShape: any;
@@ -322,7 +325,10 @@ declare class Gapless5FileList {
     loadableTracks: () => Set<any>;
     updateLoading: () => void;
     add: (index: any, audioPath: any) => void;
-    remove: (index: any) => void;
+    remove: (playIndex: any) => void;
+    fadingTrack: any;
+    queuedTrack: any;
+    replace: (playIndex: any, audioPath: any) => void;
 }
 declare function Gapless5Source(parentPlayer: any, parentLog: any, inAudioPath: any): void;
 declare class Gapless5Source {
@@ -333,6 +339,7 @@ declare class Gapless5Source {
     calcFadeAmount: (percent: any) => number;
     getVolume: () => number;
     getState: () => number;
+    isLoaded: () => boolean;
     unload: (isError: any) => void;
     stop: (resetPosition?: boolean) => void;
     inPlayState: (checkStarting: any) => boolean;

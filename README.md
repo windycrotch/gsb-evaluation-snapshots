@@ -171,6 +171,8 @@ These can be passed into a `Gapless5` constructor, or (with the exception of `tr
 - **loadLimit**
   - default = no limit
   - limits how many tracks can be loaded at once.  If you have a large playlist, set to a low number (like 2-5) to save on memory
+  - the window follows play order (shuffled order, when shuffle is on), so the tracks that will play next stay loaded
+  - tracks that leave the window are fully released and fire `onunload`; tracks that re-enter it are loaded again and fire `onloadstart`/`onload`
   - caveat: you will hear gaps/loading delays if you skip tracks quickly enough or jump to arbitrary tracks
   - see NOTE below
 - **volume**
@@ -222,6 +224,7 @@ You can call these functions on `Gapless5` objects.
   - `audioPath`: same as in addTrack
 - **replaceTrack(index, audioPath)**
   - replaces track at location `index`
+  - the replacement takes over the same playlist slot: the current track stays current, and any in-flight load for the old track is aborted (so no stray `onload` arrives)
   - `audioPath`: same as in addTrack
 - **gotoTrack(indexOrPath)**
   - jumps to specified track
@@ -230,6 +233,8 @@ You can call these functions on `Gapless5` objects.
   - similar to `gotoPath`, but waits for current track to finish first
 - **removeTrack(indexOrPath)**
   - removes specified track from playlist
+  - if it is the current track, the next track becomes current; the index, `getTrack()` and `getTracks()` stay consistent with each other
+  - the removed track is unloaded immediately (an in-flight load is aborted) and fires `onunload`
   - `indexOrPath` can be the numerical index, or audio path
 - **setPosition(position)**
   - updates the current position (in milliseconds)
