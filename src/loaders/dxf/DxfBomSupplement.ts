@@ -53,9 +53,19 @@ const MAX_XDATA_GROUPS_PER_ENTITY = 256;
 const MAX_XDATA_ENTRIES_PER_ENTITY = 20_000;
 const MAX_XRECORD_VALUES = 100_000;
 
+export interface DxfEntityAppearance {
+  handle?: string;
+  locator: DxfEntityLocator;
+  /** Signed ACI from group 62 when the source record declares it. */
+  colorIndex?: number;
+  /** Explicit true color from group 420 when the source record declares it. */
+  trueColor?: number;
+}
+
 export interface DxfBomSupplement {
   layers: CadLayer[];
   attributes: DxfAttributeAttachment[];
+  entityAppearances: DxfEntityAppearance[];
   xdataByHandle: Map<string, CadXData[]>;
   xdataByLocator: DxfLocatedXData[];
   tables: Array<{ blockName?: string; locator?: DxfEntityLocator; entity: CadEntity }>;
@@ -78,6 +88,7 @@ export function parseDxfBomSupplement(text: string): DxfBomSupplement {
   const records = splitDxfRecords(parseDxfPairs(text, warnings), warnings);
   const attributes: DxfAttributeAttachment[] = [];
   const layers: CadLayer[] = [];
+  const entityAppearances: DxfEntityAppearance[] = [];
   const xdataByHandle = new Map<string, CadXData[]>();
   const xdataByLocator: DxfLocatedXData[] = [];
   const tables: Array<{ blockName?: string; locator?: DxfEntityLocator; entity: CadEntity }> = [];
@@ -127,6 +138,13 @@ export function parseDxfBomSupplement(text: string): DxfBomSupplement {
       if (record.type === 'ACAD_TABLE' || record.type === 'TABLE') {
         tables.push({ blockName: record.blockName, locator, entity: parseLegacyTable(record, xdata) });
       }
+
+      // Group 62/420 are the authoritative entity colors. dxf-parser rewrites
+      // both into a single ambiguous numeric `color`, so keep the raw groups.
+      if (locator) {
+        const appearance = readEntityAppearance(record.pairs);
+        if (appearance) entityAppearances.push({ handle, locator, ...appearance });
+      }
       continue;
     }
 
@@ -154,7 +172,7 @@ export function parseDxfBomSupplement(text: string): DxfBomSupplement {
   }
 
   resolveXRecordNames(dictionaries, xrecords);
-  return { layers, attributes, xdataByHandle, xdataByLocator, tables, dictionaries, xrecords, dataLinks, dataTables, warnings };
+  return { layers, attributes, entityAppearances, xdataByHandle, xdataByLocator, tables, dictionaries, xrecords, dataLinks, dataTables, warnings };
 }
 
 export function applyDxfBomSupplement(document: CadDocument, supplement: DxfBomSupplement): void {
@@ -188,6 +206,23 @@ export function applyDxfBomSupplement(document: CadDocument, supplement: DxfBomS
     if (entity) entity.xdata = groups;
     else if (handle && entitiesByHandle.has(canonicalHandle(handle))) continue;
     else document.warnings.push(`DXF XDATA on ${handle ? `${locator.type} ${handle}` : `handleless ${locator.type} #${locator.ordinal + 1}`} could not be matched to a normalized entity.`);
+  }
+
+  for (const appearance of supplement.entityAppearances) {
+    const entity = (appearance.handle ? entitiesByHandle.get(canonicalHandle(appearance.handle)) : undefined)
+      ?? entitiesByLocator.get(locatorKey(appearance.locator));
+    if (!entity) continue;
+    if (appearance.colorIndex !== undefined) entity.colorIndex = appearance.colorIndex;
+    if (appearance.trueColor !== undefined) {
+      entity.trueColor = appearance.trueColor;
+    } else if (typeof entity.trueColor === 'number') {
+      // dxf-parser rewrites ACI group 62 into a 24-bit RGB `color` which the
+      // normalizer cannot tell apart from an explicit true color. The source
+      // record carries no 420 group, so the value is derived: drop it to keep
+      // ACI semantics (notably ACI 7's foreground-dependent rendering) and to
+      // match the fallback parser, which only reads real 420 groups.
+      delete entity.trueColor;
+    }
   }
 
   for (const { blockName, locator, entity } of supplement.tables) {
@@ -311,9 +346,21 @@ function splitDxfRecords(pairs: DxfPair[], warnings: string[]): DxfRecord[] {
   return records;
 }
 
+/**
+ * Reads the authoritative entity color groups (62 ACI, 420 true color) that
+ * dxf-parser merges into one ambiguous numeric `color` property.
+ */
+function readEntityAppearance(pairs: DxfPair[]): { colorIndex?: number; trueColor?: number } | undefined {
+  const aci = readNumber(pairs, 62);
+  const trueColor = readNumber(pairs, 420);
+  const colorIndex = aci !== undefined && Number.isInteger(aci) && Math.abs(aci) <= 256 ? aci : undefined;
+  const explicitTrueColor = trueColor !== undefined && Number.isInteger(trueColor) && trueColor >= 0 && trueColor <= 0xffffff ? trueColor : undefined;
+  if (colorIndex === undefined && explicitTrueColor === undefined) return undefined;
+  return { colorIndex, trueColor: explicitTrueColor };
+}
+
 /** Keep LAYER flags and appearance that dxf-parser does not expose. */
-function parseLayer(record: DxfRecord): CadLayer | undefined {
-  const name = readString(record.pairs, 2);
+function parseLayer(record: DxfRecord): CadLayer | undefined {  const name = readString(record.pairs, 2);
   if (!name) return undefined;
   const layer: CadLayer = { name };
   const flags = readNumber(record.pairs, 70);

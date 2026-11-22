@@ -12,7 +12,7 @@ DWG loader 被隔离在 `DwgLoader` 后面，因此后续可以替换成其他 p
 
 ## DXF
 
-DXF 由 `DxfLoader` 处理：优先使用 `dxf-parser`，失败时使用内置 fallback 解析常见 DXF `ENTITIES`。额外的有界元数据扫描会恢复 `dxf-parser` 跳过的记录，并按 section、block 与实体顺序关联没有 handle 的 R12 `ATTRIB`/XDATA。文本解码会识别显式 `dxfEncoding`、BOM 和 `$DWGCODEPAGE`，再进入 legacy 候选 fallback。
+DXF 由 `DxfLoader` 处理：优先使用 `dxf-parser`，失败时使用内置 fallback 解析常见 DXF `ENTITIES`。额外的有界元数据扫描会恢复 `dxf-parser` 跳过的记录，并按 section、block 与实体顺序关联没有 handle 的 R12 `ATTRIB`/XDATA。文本解码会识别显式 `dxfEncoding`、BOM 和 `$DWGCODEPAGE`，再进入 legacy 候选 fallback。当声明的代码页与实际字节不符（解码出现 U+FFFD）时，加载器会回退到 UTF-8 或最佳 legacy 候选并追加可读警告；实体 62/420 组码由元数据补扫校正，保证真彩色优先与 ACI 语义一致。详见 [DXF 加载一致性](dxf-loading.zh-CN.md)。
 
 支持预览：
 

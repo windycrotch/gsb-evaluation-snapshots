@@ -21,7 +21,7 @@ export type { CadShxGlyph, CadShxGlyphResolver } from './core/shx.js';
 export { normalizeDwgDatabase } from './loaders/dwg/DwgParser.js';
 export { detectCadFormat, readInputBytes } from './core/format.js';
 export { isCadNativeRenderableLoader } from './core/types.js';
-export { applyByBlockColorInheritance, applyCadColorPolicy, colorFromAci, colorFromTrueColor, resolveCadColor, resolveFillColor } from './core/color.js';
+export { applyByBlockColorInheritance, applyCadColorPolicy, colorFromAci, colorFromTrueColor, layerVisible, resolveCadColor, resolveFillColor } from './core/color.js';
 export type { CadColorContrastMode, ColorResolveOptions } from './core/color.js';
 
 export type {

@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- DXF encoding recovery: when the declared `$DWGCODEPAGE` decodes with U+FFFD replacement characters, recover via UTF-8 or the best-scoring legacy candidate and record a readable warning instead of silently returning mojibake; unreliable guesses also warn.
+- DXF entity colors: re-apply the authoritative 62/420 groups from the source records so explicit true color wins over ACI on both parser paths, and ACI-only entities no longer gain a derived pseudo true color (ACI 7 stays foreground-dependent). Turned-off layers keep their entities' true-color data while staying listed in the layer table.
+- Export `layerVisible` for consumers that need the same layer-visibility rule as the renderers.
+
+### Validation
+
+- Add `test/dxf-load-consistency.test.mjs` with locally constructed DXF samples covering encoding fallback, turned-off layers, true-color priority, primary/fallback parser parity, and repeat/concurrent/retry load isolation. See `docs/dxf-loading.en.md` / `docs/dxf-loading.zh-CN.md`.
+
 ## 0.8.4 (candidate, not published)
 
 ### Fixed

@@ -12,7 +12,7 @@ SHX shapes in complex linetypes do not embed their outlines in the DWG. Referenc
 
 ## DXF
 
-DXF is handled by `DxfLoader` with `dxf-parser` first and a built-in fallback parser for common DXF `ENTITIES`. A bounded metadata pass restores records that `dxf-parser` skips and associates handleless R12 `ATTRIB`/XDATA by section, block and entity order. Text decoding is codepage-aware: `DxfLoader` honors an explicit `dxfEncoding`, BOMs and `$DWGCODEPAGE` values before falling back to legacy candidates.
+DXF is handled by `DxfLoader` with `dxf-parser` first and a built-in fallback parser for common DXF `ENTITIES`. A bounded metadata pass restores records that `dxf-parser` skips and associates handleless R12 `ATTRIB`/XDATA by section, block and entity order. Text decoding is codepage-aware: `DxfLoader` honors an explicit `dxfEncoding`, BOMs and `$DWGCODEPAGE` values before falling back to legacy candidates. When the declared codepage does not match the bytes (U+FFFD replacements), the loader recovers via UTF-8 or the best legacy candidate and records a readable warning; raw 62/420 groups are re-applied by the metadata pass so true-color priority and ACI semantics stay consistent. See [DXF load consistency](dxf-loading.en.md).
 
 Supported preview entities include:
 

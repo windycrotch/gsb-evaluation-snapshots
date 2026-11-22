@@ -23,8 +23,8 @@ export class DxfLoader implements CadLoader {
     const mergedOptions = { ...this.defaults, ...options };
     const started = performance.now();
     const bytes = await readInputBytes(input);
-    const text = decodeDxfText(bytes, mergedOptions.dxfEncoding);
     const warnings: string[] = [];
+    const text = decodeDxfText(bytes, mergedOptions.dxfEncoding, warnings);
     let parsed: unknown;
     try {
       parsed = await parseWithDxfParser(text);
@@ -231,9 +231,39 @@ function normalizeAngle(value: unknown): number | undefined {
   return Math.abs(n) > Math.PI * 2 + 1e-6 ? degreesToRadians(n) : n;
 }
 
-export function decodeDxfText(bytes: Uint8Array, preferredEncoding?: string): string {
+interface DxfDecode {
+  text: string;
+  encoding: string;
+  /** U+FFFD count: byte sequences the encoding could not represent. */
+  replacements: number;
+  /** C0/C1 control characters: suspicious in DXF text outside \t \r \n. */
+  controls: number;
+  /** False when the runtime does not know the encoding label at all. */
+  supported: boolean;
+}
+
+/**
+ * Decodes DXF bytes to text. Encoding decision order:
+ * explicit override → BOM → valid UTF-8 (modern versions or UTF-8 codepage) →
+ * declared $DWGCODEPAGE → best-scoring legacy guess.
+ *
+ * When the declared codepage decodes with U+FFFD replacement characters the
+ * declaration does not match the actual bytes; the loader then recovers via
+ * UTF-8 or the best legacy candidate and records a readable warning instead of
+ * silently returning mojibake. All candidate encodings are ASCII-compatible,
+ * so DXF structure (group codes, section names) stays parseable either way.
+ */
+export function decodeDxfText(bytes: Uint8Array, preferredEncoding?: string, warnings?: string[]): string {
   const explicitEncoding = normalizeDxfEncoding(preferredEncoding);
-  if (explicitEncoding) return decodeBytes(bytes, explicitEncoding);
+  if (explicitEncoding) {
+    const explicit = decodeDxfBytes(bytes, explicitEncoding);
+    if (!explicit.supported) {
+      warnings?.push(`DXF encoding "${preferredEncoding}" is not supported by this runtime; decoded as UTF-8 instead.`);
+    } else if (explicit.replacements > 0) {
+      warnings?.push(`DXF decoded with explicit encoding "${explicitEncoding}" contains ${explicit.replacements} replacement character(s) (U+FFFD); the file bytes do not match this encoding.`);
+    }
+    return explicit.text;
+  }
 
   const bomEncoding = detectBomEncoding(bytes);
   if (bomEncoding) return decodeBytes(bytes, bomEncoding);
@@ -242,7 +272,8 @@ export function decodeDxfText(bytes: Uint8Array, preferredEncoding?: string): st
   // instead of treating every U+FFFD in the decoded drawing as an error.
   let utf8: string | undefined;
   try { utf8 = new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch { /* Legacy codepage below. */ }
-  const declaredEncoding = normalizeDxfEncoding(detectDxfCodePage(bytes));
+  const declaredCodePage = detectDxfCodePage(bytes);
+  const declaredEncoding = normalizeDxfEncoding(declaredCodePage);
 
   // DXF R2007 (AC1021) and later store text as UTF-8 by specification, but
   // many exporters keep a stale legacy $DWGCODEPAGE in the header. Valid
@@ -253,10 +284,36 @@ export function decodeDxfText(bytes: Uint8Array, preferredEncoding?: string): st
     return utf8;
   }
 
-  if (declaredEncoding) return decodeBytes(bytes, declaredEncoding);
+  if (declaredEncoding) {
+    const declared = decodeDxfBytes(bytes, declaredEncoding);
+    if (declared.supported && declared.replacements === 0) return declared.text;
+    if (!declared.supported) {
+      warnings?.push(`DXF $DWGCODEPAGE ${declaredCodePage ?? declaredEncoding} is not a supported encoding; decoded as ${utf8 !== undefined ? 'UTF-8' : 'a guessed legacy encoding'} instead.`);
+      return utf8 ?? chooseBestLegacyDxfDecode(bytes).text;
+    }
+    // The declared codepage produced replacement characters, so it does not
+    // match the actual bytes. Recover with UTF-8 or a legacy candidate rather
+    // than silently returning mojibake.
+    if (utf8 !== undefined) {
+      warnings?.push(`DXF $DWGCODEPAGE ${declaredCodePage} (${declaredEncoding}) did not match the file bytes (${declared.replacements} replacement character(s)); decoded as UTF-8 instead.`);
+      return utf8;
+    }
+    const best = chooseBestLegacyDxfDecode(bytes);
+    if (best.replacements < declared.replacements && best.controls === 0) {
+      warnings?.push(`DXF $DWGCODEPAGE ${declaredCodePage} (${declaredEncoding}) did not match the file bytes; decoded as ${best.encoding} instead.`);
+      return best.text;
+    }
+    warnings?.push(`DXF text could not be decoded reliably: $DWGCODEPAGE ${declaredCodePage} (${declaredEncoding}) leaves ${declared.replacements} replacement character(s) (U+FFFD). Text may be corrupted.`);
+    return declared.text;
+  }
+
   if (utf8 !== undefined) return utf8;
 
-  return chooseBestLegacyDxfDecode(bytes);
+  const best = chooseBestLegacyDxfDecode(bytes);
+  if (best.replacements > 0 || best.controls > 0) {
+    warnings?.push(`DXF declares no $DWGCODEPAGE and its encoding could not be determined reliably; decoded as ${best.encoding} with ${best.replacements} replacement character(s) (U+FFFD). Text may be corrupted.`);
+  }
+  return best.text;
 }
 
 const DXF_CODEPAGE_ENCODING: Record<string, string> = {
@@ -372,19 +429,36 @@ function decodeBytes(bytes: Uint8Array, encoding: string): string {
   }
 }
 
-function chooseBestLegacyDxfDecode(bytes: Uint8Array): string {
+function decodeDxfBytes(bytes: Uint8Array, encoding: string): DxfDecode {
+  try {
+    const text = new TextDecoder(encoding, { fatal: false }).decode(bytes);
+    return { text, encoding, ...countDxfDecodeFlaws(text), supported: true };
+  } catch {
+    const text = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+    return { text, encoding: 'utf-8', ...countDxfDecodeFlaws(text), supported: false };
+  }
+}
+
+function countDxfDecodeFlaws(text: string): { replacements: number; controls: number } {
+  return {
+    replacements: countMatches(text, /\uFFFD/g),
+    controls: countMatches(text, /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g)
+  };
+}
+
+function chooseBestLegacyDxfDecode(bytes: Uint8Array): DxfDecode {
   const candidates = ['windows-1252', 'gb18030', 'big5', 'shift_jis', 'euc-kr', 'iso-8859-1'];
-  let bestText = '';
+  let best: DxfDecode | undefined;
   let bestScore = Number.POSITIVE_INFINITY;
   for (const encoding of candidates) {
-    const text = decodeBytes(bytes, encoding);
-    const score = scoreDxfDecode(text, encoding);
+    const decode = decodeDxfBytes(bytes, encoding);
+    const score = scoreDxfDecode(decode.text, encoding);
     if (score < bestScore) {
       bestScore = score;
-      bestText = text;
+      best = decode;
     }
   }
-  return bestText || decodeBytes(bytes, 'utf-8');
+  return best ?? decodeDxfBytes(bytes, 'utf-8');
 }
 
 function scoreDxfDecode(text: string, encoding: string): number {
