@@ -226,6 +226,58 @@ test("GTVBAONode releases depth kernels on depth-mode changes and disposal", () 
   assert.equal(liveKernels.size, 0);
 });
 
+test("GTVBAONode tracks temporal accumulators and resets them on each variant notification", () => {
+  const node = createTestGtvbaoNode();
+  const resets: string[] = [];
+  const temporalA = { reset: () => resets.push("a") };
+  const temporalB = { reset: () => resets.push("b") };
+  const internals = node as unknown as {
+    _temporalNodes: Set<{ reset(): void }>;
+    registerTemporalNode(value: { reset(): void }): void;
+    unregisterTemporalNode(value: { reset(): void }): void;
+    resetTemporalHistory(): void;
+  };
+
+  internals.registerTemporalNode(temporalA);
+  internals.registerTemporalNode(temporalB);
+  assert.equal(internals._temporalNodes.size, 2);
+
+  node.stepCount.value = 12;
+  assert.deepEqual(resets, ["a", "b"], "the variant change resets every registered history");
+
+  node.batchVariantChanges(() => {
+    node.stepCount.value = 10;
+    node.usePerspectiveCorrectSlice.value = false;
+  });
+  assert.equal(resets.length, 4, "a batched change still resets each history exactly once");
+
+  internals.unregisterTemporalNode(temporalB);
+  internals.resetTemporalHistory();
+  assert.deepEqual(resets.slice(4), ["a"]);
+
+  node.dispose();
+  assert.equal(internals._temporalNodes.size, 0);
+});
+
+test("GTVBAONode.dispose is idempotent", () => {
+  const node = createTestGtvbaoNode();
+  assert.doesNotThrow(() => {
+    node.dispose();
+    node.dispose();
+  });
+});
+
+test("GTVBAONode does not re-register temporal nodes after disposal", () => {
+  const node = createTestGtvbaoNode();
+  const internals = node as unknown as {
+    _temporalNodes: Set<unknown>;
+    registerTemporalNode(value: unknown): void;
+  };
+  node.dispose();
+  internals.registerTemporalNode({ reset() {} });
+  assert.equal(internals._temporalNodes.size, 0);
+});
+
 function createTestGtvbaoNode() {
   return new GTVBAONode(uniform(1) as never, null, new PerspectiveCamera());
 }

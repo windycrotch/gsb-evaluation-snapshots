@@ -196,6 +196,69 @@ test("GTVBAOTemporalNode reprojects the previous view space into the current one
   rig.dispose();
 });
 
+test("GTVBAOTemporalNode registers with the AO node and is reset by its variant changes", () => {
+  const rig = createRig();
+  const registry = () => (rig.aoNode as unknown as { _temporalNodes: Set<unknown> })._temporalNodes;
+  try {
+    assert.ok(registry().has(rig.node), "the constructor registers the accumulator");
+
+    (rig.internals as unknown as { _historyValid: { value: number } })._historyValid.value = 1;
+    rig.aoNode.stepCount.value = 10;
+    assert.equal(rig.internals._historyValid.value, 0, "an AO variant change drops the history");
+
+    (rig.internals as unknown as { _historyValid: { value: number } })._historyValid.value = 1;
+    rig.aoNode.batchVariantChanges(() => {
+      rig.aoNode.stepCount.value = 11;
+      rig.aoNode.usePerspectiveCorrectSlice.value = false;
+    });
+    assert.equal(rig.internals._historyValid.value, 0, "a batched variant change drops the history once");
+
+    rig.node.dispose();
+    assert.equal(registry().has(rig.node), false, "dispose unregisters the accumulator");
+  } finally {
+    rig.dispose();
+  }
+});
+
+test("GTVBAOTemporalNode.dispose is idempotent", () => {
+  const rig = createRig();
+  const registry = () => (rig.aoNode as unknown as { _temporalNodes: Set<unknown> })._temporalNodes;
+  try {
+    rig.node.dispose();
+    assert.doesNotThrow(() => rig.node.dispose());
+    assert.equal(registry().size, 0);
+  } finally {
+    rig.aoNode.dispose();
+  }
+});
+
+test("GTVBAOTemporalNode reset() does not change its target sizes", () => {
+  const rig = createRig({ width: 8, height: 4 });
+  const { renderer } = createRecordingRenderer(() => rig.internals._historyValid.value);
+  try {
+    update(rig.node, 0, renderer);
+    assert.deepEqual(
+      [rig.internals._resolveRenderTarget.width, rig.internals._resolveRenderTarget.height],
+      [8, 4]
+    );
+    (rig.internals as unknown as { _historyValid: { value: number } })._historyValid.value = 1;
+
+    rig.node.reset();
+
+    assert.equal(rig.internals._historyValid.value, 0);
+    assert.deepEqual(
+      [rig.internals._resolveRenderTarget.width, rig.internals._resolveRenderTarget.height],
+      [8, 4]
+    );
+    assert.deepEqual(
+      [rig.internals._historyRenderTarget.width, rig.internals._historyRenderTarget.height],
+      [8, 4]
+    );
+  } finally {
+    rig.dispose();
+  }
+});
+
 function update(node: GTVBAOTemporalNode, frameId: number, renderer: unknown) {
   (node as unknown as { updateBefore(frame: unknown): void }).updateBefore({ frameId, renderer });
 }

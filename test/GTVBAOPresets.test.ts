@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { PerspectiveCamera } from "three";
-import { uniform } from "three/tsl";
+import { DataTexture, PerspectiveCamera, RedFormat, FloatType } from "three";
+import { texture, uniform } from "three/tsl";
 import { test } from "vitest";
 import GTVBAONode from "../src/GTVBAONode.js";
 import type GTVBAODenoiseNode from "../src/GTVBAODenoiseNode.js";
+import { gtvbaoTemporal } from "../src/GTVBAOTemporalNode.js";
 import {
   DEFAULT_GTVBAO_PRESET,
   GTVBAO_PRESETS,
@@ -109,4 +110,118 @@ test("applyGtvbaoPreset applies a preset with one variant rebuild", () => {
   assert.throws(() => applyGtvbaoPreset(node, "Ultra" as never), /Unknown GTVBAO preset/);
 
   node.dispose();
+});
+
+function createPresetTemporalRig() {
+  const dataTexture = (w: number, h: number) => new DataTexture(new Float32Array(w * h), w, h, RedFormat, FloatType);
+  const aoTexture = dataTexture(8, 4);
+  const depthTexture = dataTexture(8, 4);
+  const velocityTexture = dataTexture(8, 4);
+  const camera = new PerspectiveCamera(55, 2, 0.1, 100);
+  const aoNode = new GTVBAONode(texture(depthTexture), null, camera);
+  const temporalNode = gtvbaoTemporal(texture(aoTexture), texture(velocityTexture), aoNode);
+  const historyValid = () => (temporalNode as unknown as { _historyValid: { value: number } })._historyValid.value;
+  return {
+    aoNode,
+    temporalNode,
+    historyValid,
+    dispose() {
+      temporalNode.dispose();
+      aoNode.dispose();
+      for (const value of [aoTexture, depthTexture, velocityTexture]) value.dispose();
+    },
+  };
+}
+
+test("applyGtvbaoPreset drops temporal history once per switch, even at unchanged resolution", () => {
+  const rig = createPresetTemporalRig();
+  try {
+    assert.equal(rig.historyValid(), 0);
+
+    // Simulate an accumulated frame.
+    (rig.temporalNode as unknown as { _historyValid: { value: number } })._historyValid.value = 1;
+    assert.equal(rig.historyValid(), 1);
+
+    // High and Balanced differ in every shader input but the frame is never
+    // rendered here, so the AO render target keeps its 1x1 default size: the
+    // reset must come from the preset, not from a size change.
+    applyGtvbaoPreset(rig.aoNode, "High");
+    assert.equal(rig.historyValid(), 0, "the first preset switch invalidates the history");
+
+    rig.temporalNode.reset();
+    (rig.temporalNode as unknown as { _historyValid: { value: number } })._historyValid.value = 1;
+    applyGtvbaoPreset(rig.aoNode, "Balanced");
+    assert.equal(rig.historyValid(), 0, "the next preset switch invalidates again");
+
+    // Applying an identical preset changes no variant value, so nothing is
+    // notified and a valid history must survive.
+    rig.temporalNode.reset();
+    (rig.temporalNode as unknown as { _historyValid: { value: number } })._historyValid.value = 1;
+    applyGtvbaoPreset(rig.aoNode, { ...GTVBAO_PRESETS.Balanced });
+    assert.equal(rig.historyValid(), 1);
+  } finally {
+    rig.dispose();
+  }
+});
+
+test("applyGtvbaoPreset notifies each registered temporal node exactly once through the batched switch", () => {
+  const rig = createPresetTemporalRig();
+  let resets = 0;
+  const originalReset = rig.temporalNode.reset.bind(rig.temporalNode);
+  rig.temporalNode.reset = () => {
+    resets += 1;
+    originalReset();
+  };
+  try {
+    applyGtvbaoPreset(rig.aoNode, "Low");
+    assert.equal(resets, 1, "one batched preset switch resets the history once");
+    applyGtvbaoPreset(rig.aoNode, "High");
+    assert.equal(resets, 2);
+  } finally {
+    rig.dispose();
+  }
+});
+
+test("a disposed AO node unregisters temporal nodes and a disposed temporal node stops receiving resets", () => {
+  const rig = createPresetTemporalRig();
+  const registered = () => (rig.aoNode as unknown as { _temporalNodes: Set<unknown> })._temporalNodes.size;
+  try {
+    assert.equal(registered(), 1);
+    rig.temporalNode.dispose();
+    rig.temporalNode.dispose();
+    assert.equal(registered(), 0, "repeated temporal dispose() is safe and unregisters once");
+    rig.aoNode.dispose();
+    rig.aoNode.dispose();
+  } finally {
+    // Already disposed above; the rig's own cleanup must not throw either.
+    assert.doesNotThrow(() => rig.dispose());
+  }
+});
+
+test("camera reset() only clears temporal history and leaves resolution and preset inputs alone", () => {
+  const rig = createPresetTemporalRig();
+  try {
+    applyGtvbaoPreset(rig.aoNode, "High");
+    const internals = rig.aoNode as unknown as {
+      _aoRenderTarget: { width: number; height: number };
+      _lastSize: { aoWidth: number; aoHeight: number };
+      resolutionScale: number;
+    };
+    rig.aoNode.setSize(64, 32);
+    const targetBefore = [internals._aoRenderTarget.width, internals._aoRenderTarget.height];
+    const lastBefore = { ...internals._lastSize };
+    (rig.temporalNode as unknown as { _historyValid: { value: number } })._historyValid.value = 1;
+
+    rig.temporalNode.reset();
+
+    assert.equal(rig.historyValid(), 0);
+    assert.equal(internals.resolutionScale, 1);
+    assert.deepEqual(
+      [internals._aoRenderTarget.width, internals._aoRenderTarget.height],
+      targetBefore
+    );
+    assert.deepEqual(internals._lastSize, lastBefore);
+  } finally {
+    rig.dispose();
+  }
 });

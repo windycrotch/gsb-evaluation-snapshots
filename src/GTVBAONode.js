@@ -82,6 +82,11 @@ class GTVBAONode extends GTVBAONodeBase {
 		this._variantBatchDepth = 0;
 		this._batchedVariantNotify = false;
 		this._batchedVariantRebuild = false;
+		// Temporal accumulators reading this node's AO. A preset or any shader
+		// variant change alters the AO distribution (or its resolution), so their
+		// histories must be discarded with the same single variant notification.
+		this._temporalNodes = new Set();
+		this._disposed = false;
 		this._resolution = uniform( new Vector2() );
 		this._halfProjScale = uniform( 1 );
 		this._temporalDirection = uniform( 0 );
@@ -141,7 +146,23 @@ class GTVBAONode extends GTVBAONodeBase {
 			this.needsUpdate = true;
 			this._refreshMaterialFragmentNode();
 		}
+		// The new variant produces a different AO signal (or a differently sized
+		// one): discard every accumulator's history so the next frame restarts
+		// from current-frame AO instead of reprojecting stale content.
+		this.resetTemporalHistory();
 		if ( this._onVariantChange !== null ) this._onVariantChange();
+	}
+	/** Registers a temporal accumulator whose history depends on this node's AO. */
+	registerTemporalNode( temporalNode ) {
+		if ( this._disposed ) return;
+		this._temporalNodes.add( temporalNode );
+	}
+	unregisterTemporalNode( temporalNode ) {
+		this._temporalNodes.delete( temporalNode );
+	}
+	/** Drops the history of every registered temporal accumulator. */
+	resetTemporalHistory() {
+		for ( const temporalNode of this._temporalNodes ) temporalNode.reset();
 	}
 	_refreshMaterialFragmentNode() {
 		if ( this._fragmentContext === null ) {
@@ -265,6 +286,9 @@ class GTVBAONode extends GTVBAONodeBase {
 		return this._textureNode;
 	}
 	dispose() {
+		if ( this._disposed ) return;
+		this._disposed = true;
+		this._temporalNodes.clear();
 		this._depthPrefilter.dispose();
 		this._aoRenderTarget.dispose();
 		this._debugRenderTarget.dispose();

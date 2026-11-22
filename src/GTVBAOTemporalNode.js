@@ -89,11 +89,17 @@ class GTVBAOTemporalNode extends GTVBAONodeBase {
 		this._fragmentContext = null;
 		this._fragmentInputs = null;
 		this._logarithmicDepthBuffer = false;
+		this._disposed = false;
+		// Preset and variant changes must drop this history even when the AO
+		// resolution does not change; the AO node notifies every registered node.
+		aoNode.registerTemporalNode( this );
 	}
 	getTextureNode() {
 		return this._textureNode;
 	}
 	// Call after a camera cut or re-entering the output graph after a long absence.
+	// reset() only invalidates the temporal history: it never changes the
+	// resolution, targets or the active preset.
 	reset() {
 		this._historyValid.value = 0;
 	}
@@ -128,6 +134,9 @@ class GTVBAOTemporalNode extends GTVBAONodeBase {
 		this._historyValid.value = 1;
 	}
 	dispose() {
+		if ( this._disposed ) return;
+		this._disposed = true;
+		this.aoNode.unregisterTemporalNode( this );
 		this._resolveRenderTarget.dispose();
 		this._historyRenderTarget.dispose();
 		this._material.dispose();

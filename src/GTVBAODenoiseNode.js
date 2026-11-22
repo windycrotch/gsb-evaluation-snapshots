@@ -85,10 +85,12 @@ class GTVBAODenoiseNode extends GTVBAONodeBase {
 		this._material.name = GTVBAO_PASS_NAMES.denoise;
 		this._textureNode = passTexture( this, this._denoiseRenderTarget.texture );
 		this._lastSize = { width: 0, height: 0 };
+		this._fragmentSize = null;
 		this._fragmentContext = null;
 		this._fragmentInputs = null;
 		this._logarithmicDepthBuffer = false;
 		this._fragmentLinearDepthNode = null;
+		this._disposed = false;
 	}
 	get normalEncoding() {
 		return this._normalEncoding;
@@ -105,6 +107,15 @@ class GTVBAODenoiseNode extends GTVBAONodeBase {
 			this._lastSize.height = height;
 			this._resolution.value.set( width, height );
 			this._denoiseRenderTarget.setSize( width, height );
+			// The fragment bakes the AO source's texel layout (neighborhood
+			// offsets, depth-to-AO texel mapping); a source resize after the
+			// fragment was built must rebuild it even when every other input is
+			// identical. The first observation only sizes the target for an
+			// upcoming setup()/build.
+			if ( this._fragmentContext !== null && this._fragmentSize !== null &&
+				( this._fragmentSize.width !== width || this._fragmentSize.height !== height ) ) {
+				this._refreshMaterialFragmentNode( true );
+			}
 		}
 		const { renderer } = frame;
 		_rendererState = RendererUtils.resetRendererState( renderer, _rendererState );
@@ -115,6 +126,8 @@ class GTVBAODenoiseNode extends GTVBAONodeBase {
 		RendererUtils.restoreRendererState( renderer, _rendererState );
 	}
 	dispose() {
+		if ( this._disposed ) return;
+		this._disposed = true;
 		this._defaultNoiseTexture?.dispose();
 		this._denoiseRenderTarget.dispose();
 		this._material.dispose();
@@ -145,7 +158,7 @@ class GTVBAODenoiseNode extends GTVBAONodeBase {
 			? this.linearDepthSource.getDepthMipNodes()[ 0 ]
 			: null;
 	}
-	_refreshMaterialFragmentNode() {
+	_refreshMaterialFragmentNode( force = false ) {
 		const noiseNode = this._getNoiseNode();
 		const linearDepthNode = this._getLinearDepthNode();
 		const inputs = [
@@ -160,11 +173,17 @@ class GTVBAODenoiseNode extends GTVBAONodeBase {
 		];
 		// setup runs for every consumer material build, so unchanged denoiser inputs
 		// must keep the compiled material instead of recompiling for each consumer.
-		if ( this._fragmentInputs !== null && inputs.every( ( input, index ) => input === this._fragmentInputs[ index ] ) ) return;
+		// `force` covers an AO source resize, which keeps every input object the same.
+		if ( force === false && this._fragmentInputs !== null && inputs.every( ( input, index ) => input === this._fragmentInputs[ index ] ) ) return;
 		this._fragmentInputs = inputs;
 		this._fragmentLinearDepthNode = linearDepthNode;
 		this._material.fragmentNode = this._createFragmentNode();
 		this._material.needsUpdate = true;
+		const sourceMap = this.textureNode.value;
+		this._fragmentSize = {
+			width: Math.max( 1, sourceMap.image.width ),
+			height: Math.max( 1, sourceMap.image.height )
+		};
 	}
 	_createFragmentNode() {
 		const uvNode = uv();

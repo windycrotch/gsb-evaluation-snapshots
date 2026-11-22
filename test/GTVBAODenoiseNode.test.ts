@@ -148,6 +148,98 @@ test("GTVBAODenoiseNode disposes the default noise texture it generated", () => 
   assert.equal(disposeEvents, 1);
 });
 
+test("GTVBAODenoiseNode rebuilds its fragment after the AO source changes size", () => {
+  const source = createTextureNode();
+  const node = createDenoiseNodeFrom(source);
+  const material = (node as unknown as {
+    _material: { version: number };
+    _denoiseRenderTarget: { width: number; height: number };
+  })._material;
+  const target = (node as unknown as { _denoiseRenderTarget: { width: number; height: number } })._denoiseRenderTarget;
+  const renderer = createFakeRenderer();
+  const builder = {
+    getSharedContext: () => ({}),
+    renderer: { logarithmicDepthBuffer: false },
+  };
+
+  node.setup(builder as never);
+  const builtVersion = material.version;
+
+  // First observation (1x1 source) only sizes the target; the fragment was
+  // already built for it in setup().
+  updateDenoiseNode(node, { frameId: 1, renderer });
+  assert.equal(material.version, builtVersion);
+  assert.deepEqual([target.width, target.height], [1, 1]);
+
+  // A real resize rebuilds the fragment and resizes the target once.
+  setSourceSize(source, 20, 12);
+  updateDenoiseNode(node, { frameId: 2, renderer });
+  assert.equal(material.version, builtVersion + 1);
+  assert.deepEqual([target.width, target.height], [20, 12]);
+
+  // The same size must neither reallocate nor rebuild.
+  updateDenoiseNode(node, { frameId: 3, renderer });
+  assert.equal(material.version, builtVersion + 1);
+  assert.deepEqual([target.width, target.height], [20, 12]);
+
+  node.dispose();
+});
+
+test("GTVBAODenoiseNode keeps the first fragment when the source is sized before setup", () => {
+  const source = createTextureNode();
+  setSourceSize(source, 16, 8);
+  const node = createDenoiseNodeFrom(source);
+  const material = (node as unknown as { _material: { version: number } })._material;
+  const target = (node as unknown as { _denoiseRenderTarget: { width: number; height: number } })._denoiseRenderTarget;
+  const renderer = createFakeRenderer();
+  const builder = {
+    getSharedContext: () => ({}),
+    renderer: { logarithmicDepthBuffer: false },
+  };
+
+  node.setup(builder as never);
+  const builtVersion = material.version;
+
+  updateDenoiseNode(node, { frameId: 1, renderer });
+  assert.equal(material.version, builtVersion, "the initial sizing must not force a rebuild");
+  assert.deepEqual([target.width, target.height], [16, 8]);
+
+  node.dispose();
+});
+
+test("GTVBAODenoiseNode.dispose is idempotent and keeps the noise texture owned by the caller", () => {
+  const node = createDenoiseNode();
+  node.setup(createFakeBuilder() as never);
+  const userNoise = createTextureNode();
+  let userDisposeCount = 0;
+  userNoise.value.dispose = () => {
+    userDisposeCount += 1;
+  };
+  node.noiseNode = userNoise;
+
+  assert.doesNotThrow(() => {
+    node.dispose();
+    node.dispose();
+  });
+  assert.equal(node.noiseNode, userNoise);
+  assert.equal(userDisposeCount, 0);
+});
+
+function setSourceSize(source: SampleableTextureNode, width: number, height: number) {
+  const image = (source as unknown as { value: { image: { width: number; height: number } } }).value.image;
+  image.width = width;
+  image.height = height;
+}
+
+function createDenoiseNodeFrom(source: ReturnType<typeof createTextureNode>) {
+  return new GTVBAODenoiseNode(
+    source,
+    uniform(1) as never,
+    null,
+    new PerspectiveCamera()
+  );
+}
+
 function createFakeBuilder() {
   return {
     getSharedContext: () => ({}),
