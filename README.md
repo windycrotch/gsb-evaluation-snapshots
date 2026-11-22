@@ -151,18 +151,68 @@ demo and yandex modes identically.
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET  | `/api/status` | current mode + account |
+| GET  | `/api/status` | current mode, account, session `generation`, `currentTrackId` |
+| POST | `/api/session/track` | announce the current track (starts a new session generation) |
 | POST | `/api/token` | validate + store an OAuth token |
 | GET  | `/api/search?q=` | search tracks |
 | GET  | `/api/stream/:id` | audio bytes (HTTP Range) |
-| GET  | `/api/wave?after=` | next My Wave batch |
-| POST | `/api/wave/feedback` | report a wave playback event |
+| GET  | `/api/wave?after=` | next My Wave batch (echoes the session generation) |
+| POST | `/api/wave/feedback` | report a wave playback event (409 when stale) |
 | GET  | `/api/playlists` | list playlists |
 | GET  | `/api/playlists/:id/tracks` | tracks in a playlist |
 | POST | `/api/playlists/create` | create a playlist |
 | POST | `/api/playlists/:id/add` | add tracks to a playlist |
 | GET  | `/api/liked-ids` | liked track ids |
 | POST | `/api/like` | like / unlike a track |
+
+### Playback session & generation
+
+The server tracks one **observable playback session**: `mode` (`demo`/`yandex`),
+`account`, `currentTrackId`, and a monotonically increasing **`generation`**.
+`/api/status` exposes all four (the original `mode`/`account` fields are
+unchanged; `generation`/`currentTrackId` are additive).
+
+Every asynchronous result is stamped with the generation it started under and
+**discarded if the generation moved on**, so a slow operation can never rewrite
+a newer session:
+
+- **Token validation** — each `POST /api/token` supersedes any earlier one.
+  If an older validation resolves after a newer submission committed, it is
+  discarded and answered `409`; `currentTrackId` and the account are untouched.
+  An invalid/expired token returns `401` and leaves the current mode and track
+  exactly as they were (failure never switches modes).
+- **Stream resolution** — `/api/stream/:id` caps its guard before resolving the
+  upstream URL; if the user skipped (or connected) meanwhile, the resolved
+  stream is dropped (`409`) instead of proxied. A plain HTTP client that only
+  fetches streams still advances `currentTrackId`; once the app announces a
+  track (`POST /api/session/track`), a late Range request for the old track no
+  longer moves the session back.
+- **Wave feedback** — carries the session `generation`; feedback for a session
+  that has moved on is rejected with `409` (never silently `204`), so a late
+  `trackFinished`/`skip` for the previous track cannot seed the current
+  "Моя волна" queue.
+- **Client disconnect** — when a proxied stream's client goes away (seek, next
+  track, tab close), the upstream socket is destroyed immediately, including
+  mid-connect and mid-redirect. Leaked upstream connections used to fill an
+  audio host's per-client limit and stall later `/api/stream` requests.
+
+Demo tracks stream from memory in **every** mode, so a playlist built in demo
+mode keeps playing after you connect a real account.
+
+### Tests
+
+```bash
+npm run test:acceptance -w server   # session + stream proxy acceptance suite
+```
+
+The suite boots the real server against a **local fake Yandex upstream**
+(`server/test/fake-upstream.mjs`) and covers normal switching, token-failure
+fallback, concurrent token submissions, concurrent streams + disconnects,
+stale-feedback rejection, demo-track continued playback across the mode switch,
+and unchanged `/api/stream` Range semantics. The fake upstream is a test double:
+a green run proves the server's session and connection-lifecycle logic, **not**
+that the real Yandex flow works — that still needs a real token and a manual
+smoke test.
 
 See `docs/yandex-api.md` for the probed Yandex endpoints and the streaming
 signature flow.
@@ -233,4 +283,5 @@ GitHub Pages demo contains only in-browser synthesized audio.
 - `npm run image:build` — build the container image + a Synology-importable tar (`dist/ya-namp.tar`)
 - `npm run build:binary` — build a self-contained SEA executable (`dist/ya-namp/…`)
 - `npm run typecheck` — typecheck both workspaces
+- `npm run test:acceptance -w server` — session + stream proxy acceptance tests (fake upstream)
 - `npm run set-token` — write a Yandex token to `.env`

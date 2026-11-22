@@ -9,10 +9,17 @@
  * invalid token yields 403 HTML via fetch but a normal 401 JSON via node:https.
  */
 import { createHash } from 'node:crypto';
+import http from 'node:http';
 import https from 'node:https';
 import type { PlaylistSummary, Track } from '@shared';
 
-const API_BASE = 'https://api.music.yandex.net';
+const DEFAULT_API_BASE = 'https://api.music.yandex.net';
+/**
+ * Base URL for the JSON API. Overridable so a local fake upstream can exercise
+ * token validation / stream resolution / concurrency without real credentials
+ * (see server/test). Production always resolves to the real Yandex host.
+ */
+const API_BASE = (process.env.YANDEX_API_BASE?.trim() || DEFAULT_API_BASE).replace(/\/+$/, '');
 const SIGN_SALT = 'XGRlBW9FXlekgbPrRHuSiA';
 
 /** Error carrying the HTTP status the API layer should respond with. */
@@ -41,20 +48,44 @@ interface HttpResult {
   body: string;
 }
 
+/**
+ * The right HTTP(S) transport for a URL. Production is always https; the
+ * local fake upstream (YANDEX_API_BASE / a host carrying an explicit scheme)
+ * is plain http, which keeps the test double cheap.
+ */
+export function transportFor(url: string): typeof https {
+  return url.startsWith('http:') ? (http as unknown as typeof https) : https;
+}
+
 /** Minimal node:https request that buffers a (text) response. */
 function httpsRequest(
   url: string,
-  opts: { method?: string; headers?: Record<string, string>; body?: string } = {},
+  opts: {
+    method?: string;
+    headers?: Record<string, string>;
+    body?: string;
+    signal?: AbortSignal;
+  } = {},
 ): Promise<HttpResult> {
-  const { method = 'GET', headers = {}, body } = opts;
+  const { method = 'GET', headers = {}, body, signal } = opts;
   return new Promise((resolve, reject) => {
-    const req = https.request(url, { method, headers }, (res) => {
+    if (signal?.aborted) {
+      reject(new UpstreamError(499, 'request aborted'));
+      return;
+    }
+    const req = transportFor(url).request(url, { method, headers }, (res) => {
       const chunks: Buffer[] = [];
       res.on('data', (c: Buffer) => chunks.push(c));
       res.on('end', () =>
         resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf8') }),
       );
+      res.on('error', reject);
     });
+    const onAbort = (): void => {
+      req.destroy(new UpstreamError(499, 'request aborted'));
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+    req.on('close', () => signal?.removeEventListener('abort', onAbort));
     req.on('error', reject);
     req.setTimeout(20_000, () => req.destroy(new Error('request timed out')));
     if (body !== undefined) req.write(body);
@@ -198,13 +229,19 @@ function xmlTag(xml: string, tag: string): string | null {
  * 2. GET its downloadInfoUrl → XML with host/path/ts/s.
  * 3. sign = md5(SALT + path.slice(1) + s); url = https://host/get-mp3/sign/ts+path
  */
-export async function resolveStreamUrl(token: string, id: string): Promise<string> {
+export async function resolveStreamUrl(
+  token: string,
+  id: string,
+  signal?: AbortSignal,
+): Promise<string> {
   let res: HttpResult;
   try {
     res = await httpsRequest(`${API_BASE}/tracks/${encodeURIComponent(id)}/download-info`, {
       headers: authHeaders(token),
+      signal,
     });
   } catch (err) {
+    if (signal?.aborted) throw new UpstreamError(499, 'Stream resolution aborted');
     throw new UpstreamError(502, `Could not reach Yandex Music: ${errorMessage(err)}`);
   }
   if (res.status === 401 || res.status === 403) {
@@ -232,8 +269,12 @@ export async function resolveStreamUrl(token: string, id: string): Promise<strin
 
   let infoRes: HttpResult;
   try {
-    infoRes = await httpsRequest(best.downloadInfoUrl as string, { headers: authHeaders(token) });
+    infoRes = await httpsRequest(best.downloadInfoUrl as string, {
+      headers: authHeaders(token),
+      signal,
+    });
   } catch (err) {
+    if (signal?.aborted) throw new UpstreamError(499, 'Stream resolution aborted');
     throw new UpstreamError(502, `Could not fetch download info: ${errorMessage(err)}`);
   }
   if (infoRes.status < 200 || infoRes.status >= 300) {
@@ -248,7 +289,10 @@ export async function resolveStreamUrl(token: string, id: string): Promise<strin
     throw new UpstreamError(502, 'Malformed download-info XML from Yandex');
   }
   const sign = createHash('md5').update(SIGN_SALT + path.slice(1) + s).digest('hex');
-  return `https://${host}/get-mp3/${sign}/${ts}${path}`;
+  // `host` is a bare Yandex CDN hostname in production; the local fake spreads
+  // an explicit http:// scheme so the test path stays on plain HTTP.
+  const hostPart = /^https?:\/\//.test(host) ? host : `https://${host}`;
+  return `${hostPart}/get-mp3/${sign}/${ts}${path}`;
 }
 
 /**

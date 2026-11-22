@@ -5,9 +5,10 @@
  * Errors are never swallowed: every failure surfaces in the status line
  * (playlist footer) and/or the LCD marquee.
  */
-import type { StatusResponse } from '@shared';
+import type { PlaybackSnapshot } from '@shared';
 import {
   addToPlaylist,
+  announceTrack,
   createPlaylist,
   errorMessage,
   getBitrate,
@@ -16,6 +17,7 @@ import {
   getPlaylistTracks,
   getStatus,
   getWave,
+  HttpError,
   searchTracks,
   sendWaveFeedback,
   setLike,
@@ -108,6 +110,18 @@ export function initUI(player: Player): void {
   let waveSessionId: string | null = null;
   let wavePrefetching = false;
   let yandexMode = false;
+
+  // Server playback-session generation (see shared/types.ts PlaybackSnapshot).
+  // Every async result the server returns is stamped with the generation it
+  // belongs to; feedback for a session that has moved on is rejected with 409.
+  let sessionGeneration = 0;
+  /**
+   * Track announcements are coalesced and sent one at a time: rapid skips must
+   * not let an older "now playing A" land after a newer "now playing B".
+   */
+  let announcePendingId: string | null = null;
+  let announcedId: string | null = null;
+  let announceLoop: Promise<void> | null = null;
 
   // ---------------------------------------------------------------- status
   function setStatus(text: string, kind: 'info' | 'error' = 'info'): void {
@@ -292,7 +306,8 @@ export function initUI(player: Player): void {
   });
 
   // ------------------------------------------------------------ mode / token
-  function applyStatus(status: StatusResponse): void {
+  function applyStatus(status: PlaybackSnapshot): void {
+    sessionGeneration = status.generation;
     yandexMode = status.mode === 'yandex';
     if (yandexMode) {
       modeLed.className = 'led yandex';
@@ -361,17 +376,29 @@ export function initUI(player: Player): void {
     connectBtn.textContent = '...';
     try {
       const res = await submitToken(token);
-      applyStatus({ mode: 'yandex', account: res.account });
       tokenInput.value = '';
       void populatePlaylists(); // refresh the picker with the connected user's playlists
       void refreshLikedIds(); // load the like state for the heart button
       setStatus(`connected to yandex as ${res.account.login} — search to load tracks`, 'info');
       setMarquee(`CONNECTED AS ${res.account.login} - SEARCH TO LOAD TRACKS`);
     } catch (err) {
-      setStatus(`token rejected: ${errorMessage(err)}`, 'error');
+      if (err instanceof HttpError && err.status === 409) {
+        // A newer token submission won; its own connect() reports the result.
+        setStatus('a newer token submission replaced this one', 'info');
+      } else {
+        setStatus(`token rejected: ${errorMessage(err)}`, 'error');
+      }
     } finally {
       connectBtn.disabled = false;
       connectBtn.textContent = oldLabel;
+      // The server owns session ordering: on success it already committed this
+      // submission, and on 409/failure the newest submission (possibly another
+      // in-flight one) is authoritative. Resync rather than trusting our copy.
+      try {
+        applyStatus(await getStatus());
+      } catch {
+        // Offline — keep the last known status.
+      }
     }
   }
   connectBtn.addEventListener('click', () => void connect());
@@ -811,12 +838,84 @@ export function initUI(player: Player): void {
   function waveFeedback(event: 'trackStarted' | 'trackFinished' | 'skip'): void {
     const track = player.currentTrack;
     if (!track) return;
-    void sendWaveFeedback({
+    void reportWaveFeedback(event, track.id);
+  }
+
+  /**
+   * Adopts a server generation. Generations only ever increase within a server
+   * process, so taking the max keeps us from regressing when an older async
+   * result (a wave batch) lands after a newer track announcement.
+   */
+  function adoptGeneration(generation: number): void {
+    if (generation > sessionGeneration) sessionGeneration = generation;
+  }
+
+  async function reportWaveFeedback(
+    event: 'trackStarted' | 'trackFinished' | 'skip',
+    trackId: string,
+  ): Promise<void> {
+    // A "trackStarted" fires in the same tick as the track change, while the
+    // "now playing" announcement may still be in flight. Wait for it so the
+    // feedback carries the generation the server assigned to this track;
+    // otherwise the server correctly rejects a pre-announcement generation.
+    const inFlight = announceLoop;
+    if (inFlight) await inFlight.catch(() => undefined);
+    // If the listener moved on while we waited (rapid skip), this event is for
+    // a track that is no longer current — drop it instead of misattributing.
+    if (player.currentTrack?.id !== trackId) return;
+    const status = await sendWaveFeedback({
       sessionId: waveSessionId,
-      trackId: track.id,
+      trackId,
       event,
+      generation: sessionGeneration,
       totalPlayedSeconds: Math.floor(player.audio.currentTime),
     });
+    // 409: the event belongs to a session the server has already moved past
+    // (typically a "skip" fired just before the track change landed). This is
+    // expected during fast skipping, so it is logged rather than shown — the
+    // resync keeps the queue's next events accepted.
+    if (status === 409) {
+      console.info('[ya-namp] wave feedback dropped — the playback session moved on');
+      await resyncSession();
+    }
+  }
+
+  /**
+   * Announces "this track is now playing" to the server, coalescing bursts:
+   * while one announcement is in flight, only the most recent track is kept,
+   * so a fast A→B→C skip sends A then C (never a stale B after C).
+   */
+  function announceCurrentTrack(trackId: string): void {
+    announcePendingId = trackId;
+    if (announceLoop) return;
+    announceLoop = (async () => {
+      try {
+        while (announcePendingId !== null && announcePendingId !== announcedId) {
+          const id = announcePendingId;
+          try {
+            const snap = await announceTrack(id);
+            announcedId = id;
+            adoptGeneration(snap.generation);
+          } catch (err) {
+            // Non-fatal: the server's stream request also adopts the track.
+            console.warn('[ya-namp] track announce failed:', errorMessage(err));
+            announcedId = id; // don't retry in a tight loop
+          }
+        }
+      } finally {
+        announceLoop = null;
+      }
+    })();
+  }
+
+  /** Re-reads the authoritative session (after a 409 or a reconnect). */
+  async function resyncSession(): Promise<void> {
+    try {
+      const snap = await getStatus();
+      adoptGeneration(snap.generation);
+    } catch {
+      // Offline — keep the last known generation.
+    }
   }
 
   async function startWave(autoplay = true): Promise<void> {
@@ -831,6 +930,7 @@ export function initUI(player: Player): void {
         return;
       }
       waveSessionId = res.sessionId;
+      adoptGeneration(res.generation);
       setWaveActive(true);
       player.setPlaylist(res.tracks);
       renderPlaylist();
@@ -849,7 +949,7 @@ export function initUI(player: Player): void {
   }
 
   /** Keep the wave queue at least WAVE_RUNWAY tracks ahead — makes it infinite. */
-  async function prefetchWaveIfNeeded(): Promise<void> {
+  async function prefetchWaveIfNeeded(retried = false): Promise<void> {
     if (!waveActive || wavePrefetching) return;
     const ahead = player.tracks.length - player.currentIndex - 1;
     if (ahead >= WAVE_RUNWAY) return; // enough runway queued
@@ -861,11 +961,23 @@ export function initUI(player: Player): void {
       const existing = new Set(player.tracks.map((p) => p.id));
       const fresh = yandexMode ? res.tracks.filter((t) => !existing.has(t.id)) : res.tracks;
       if (res.sessionId) waveSessionId = res.sessionId;
+      adoptGeneration(res.generation);
       if (fresh.length > 0) {
         player.appendTracks(fresh);
         renderPlaylist();
       }
     } catch (err) {
+      if (err instanceof HttpError && err.status === 409) {
+        // The session moved on while the batch was loading. Resync and retry
+        // exactly once; a second 409 means playback is still moving, and the
+        // next track change will trigger another prefetch anyway.
+        await resyncSession();
+        if (!retried) {
+          wavePrefetching = false;
+          await prefetchWaveIfNeeded(true);
+        }
+        return;
+      }
       // Non-fatal: the current queue keeps playing; surface it quietly.
       setStatus(`could not extend the wave: ${errorMessage(err)}`, 'error');
     } finally {
@@ -944,6 +1056,9 @@ export function initUI(player: Player): void {
     renderLikeButton();
     updateMediaSession(track);
     if (pipWindow) pipWindow.document.title = `${track.artist} - ${track.title} · ya-namp`;
+    // Tell the server this is the current track: a new track starts a new
+    // session generation, which is what makes the previous track's feedback stale.
+    announceCurrentTrack(track.id);
     if (waveActive) {
       waveFeedback('trackStarted');
       void prefetchWaveIfNeeded();

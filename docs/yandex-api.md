@@ -77,12 +77,28 @@ The dashboard `GET /rotor/stations/dashboard` works anonymously (station list on
 
 ## Our server contract (what the client sees) — see `shared/types.ts`
 ```
-GET  /api/status                 → StatusResponse
-POST /api/token   {token}        → TokenResponse | 401 ApiError
+GET  /api/status                 → StatusResponse   (mode, account, generation, currentTrackId)
+POST /api/session/track {id}     → StatusResponse   (announce current track → new generation)
+POST /api/token   {token}        → TokenResponse | 401 | 409 | 502 ApiError
 GET  /api/search?q=<text>        → SearchResponse   (demo: all demo tracks when q empty)
 GET  /api/stream/:id             → audio/mpeg bytes, Accept-Ranges: bytes
 GET  /api/wave?after=<trackId>   → WaveResponse     (My Wave next batch; demo: simulated)
-POST /api/wave/feedback {..}     → 204              (rotor feedback; no-op in demo)
+POST /api/wave/feedback {..}     → 204 | 409        (rotor feedback; stale generation → 409)
 GET  /api/playlists              → PlaylistsResponse (user's playlists; demo: from catalog)
 GET  /api/playlists/:id/tracks   → PlaylistTracksResponse
 ```
+
+### Session generation
+Every async result is stamped with the playback-session `generation` it started
+under and is discarded if the session moved on:
+- `/api/token`: a newer submission supersedes an older one; a superseded result
+  (success *or* failure) is answered `409` and never mutates the session.
+- `/api/stream/:id`: if the session changed while the signed URL was resolving,
+  the stream is dropped (`409`) instead of proxied; a client disconnect destroys
+  the upstream socket immediately.
+- `/api/wave/feedback`: `generation` must equal the current session's, else
+  `409` — a late event from the previous track cannot reach the rotor.
+
+Server-side tests use a local fake upstream (`server/test/fake-upstream.mjs`,
+selected with `YANDEX_API_BASE`) to exercise these paths without credentials.
+That is a test double, not a substitute for a real-token smoke test.

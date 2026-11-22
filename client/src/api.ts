@@ -36,6 +36,16 @@ export function errorMessage(err: unknown): string {
   return String(err);
 }
 
+/** An HTTP failure with its status code, so callers can special-case 409. */
+export class HttpError extends Error {
+  readonly status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = 'HttpError';
+    this.status = status;
+  }
+}
+
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   let res: Response;
   try {
@@ -55,15 +65,29 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
       // Error body was not JSON — keep the HTTP status message, but log why.
       console.warn(`[api] non-JSON error body from ${url}:`, parseErr);
     }
-    throw new Error(message);
+    throw new HttpError(res.status, message);
   }
   return (await res.json()) as T;
 }
 
-/** GET /api/status → { mode, account } */
+/** GET /api/status → { mode, account, generation, currentTrackId } */
 export function getStatus(): Promise<StatusResponse> {
   if (import.meta.env.VITE_STATIC) return demo.getStatus();
   return requestJson<StatusResponse>('/api/status');
+}
+
+/**
+ * POST /api/session/track { trackId } → the updated session snapshot.
+ * The authoritative "the current track is now X" signal: it starts a new
+ * server session generation, so any feedback for the previous track is stale.
+ */
+export function announceTrack(trackId: string): Promise<StatusResponse> {
+  if (import.meta.env.VITE_STATIC) return demo.announceTrack(trackId);
+  return requestJson<StatusResponse>('/api/session/track', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ trackId }),
+  });
 }
 
 /** POST /api/token { token } → { ok: true, account } (throws with server `error` on 401). */
@@ -158,18 +182,23 @@ export function getWave(after?: string): Promise<WaveResponse> {
 }
 
 /**
- * POST /api/wave/feedback — best-effort rotor feedback (204, no body).
- * Never throws: a missed feedback ping must not disrupt playback.
+ * POST /api/wave/feedback — best-effort rotor feedback.
+ *
+ * Resolves with the HTTP status instead of throwing: the caller must not let a
+ * missed ping disturb playback, but a 409 (feedback for an outdated session)
+ * is actionable — the caller should resync /api/status and drop the stale queue.
  */
-export async function sendWaveFeedback(body: WaveFeedbackRequest): Promise<void> {
-  if (import.meta.env.VITE_STATIC) return; // demo: no rotor to report to — no-op
+export async function sendWaveFeedback(body: WaveFeedbackRequest): Promise<number> {
+  if (import.meta.env.VITE_STATIC) return 204; // demo: no rotor to report to — no-op
   try {
-    await fetch('/api/wave/feedback', {
+    const res = await fetch('/api/wave/feedback', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
+    return res.status;
   } catch (err) {
     console.warn('[api] wave feedback failed:', errorMessage(err));
+    return 0;
   }
 }

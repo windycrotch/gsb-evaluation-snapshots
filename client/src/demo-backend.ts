@@ -484,9 +484,27 @@ function getObjectUrl(id: string): string {
 // Demo equivalents of the /api endpoints (same contract as server/src/index.ts)
 // ---------------------------------------------------------------------------
 
+/** The static demo build's local session generation counter. */
+let demoGeneration = 1;
+let demoCurrentTrackId: string | null = null;
+
 /** GET /api/status → always demo, no account. */
 export function getStatus(): Promise<StatusResponse> {
-  return Promise.resolve({ mode: 'demo', account: null });
+  return Promise.resolve({
+    mode: 'demo',
+    account: null,
+    generation: demoGeneration,
+    currentTrackId: demoCurrentTrackId,
+  });
+}
+
+/** POST /api/session/track → bump the local generation on a track change. */
+export function announceTrack(trackId: string): Promise<StatusResponse> {
+  if (trackId !== demoCurrentTrackId) {
+    demoCurrentTrackId = trackId;
+    demoGeneration += 1;
+  }
+  return getStatus();
 }
 
 /** POST /api/token → rejected: there is no server to talk to Yandex. */
@@ -540,5 +558,9 @@ export function addToPlaylist(_id: string, _trackIds: string[]): Promise<Playlis
 
 /** GET /api/wave → a simulated, effectively-infinite wave from the catalog. */
 export function getWave(after?: string): Promise<WaveResponse> {
-  return Promise.resolve({ tracks: simulatedWave(after), sessionId: 'demo-wave' });
+  return Promise.resolve({
+    tracks: simulatedWave(after),
+    sessionId: 'demo-wave',
+    generation: demoGeneration,
+  });
 }

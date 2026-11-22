@@ -20,20 +20,40 @@ export interface Track {
 
 export type ServerMode = 'demo' | 'yandex';
 
-/** GET /api/status → 200 */
-export interface StatusResponse {
+/**
+ * The observable playback session: what the server currently believes is
+ * playing, and the generation stamp that guards every async result.
+ *
+ * `generation` increases whenever the session changes (a token is accepted, or
+ * a different track starts streaming). Async work captures the generation
+ * before it awaits upstream I/O and is discarded if the generation moved on —
+ * a slow token validation or a late wave-feedback ping can never rewrite a
+ * newer session.
+ */
+export interface PlaybackSnapshot {
   mode: ServerMode;
   /** Present only in yandex mode. */
   account: { login: string } | null;
+  /** Monotonic session generation; 0 until the first session transition. */
+  generation: number;
+  /** Id of the track the client last requested a stream for, or null. */
+  currentTrackId: string | null;
 }
 
-/** POST /api/token  body: TokenRequest → 200 TokenResponse | 401 ApiError */
+/** GET /api/status → 200 */
+export interface StatusResponse extends PlaybackSnapshot {}
+
+/** POST /api/token  body: TokenRequest → 200 TokenResponse | 401/409/502 ApiError.
+ *  A 409 means a newer token submission superseded this one; the result of the
+ *  older submission was discarded, exactly like any other stale async result. */
 export interface TokenRequest {
   token: string;
 }
 export interface TokenResponse {
   ok: true;
   account: { login: string };
+  /** Generation of the newly committed session. */
+  generation: number;
 }
 
 /** GET /api/search?q=<text> → 200. Empty/missing q: demo mode returns all
@@ -48,18 +68,25 @@ export interface SearchResponse {
  *    the id of the last track the user reached so the model advances the wave.
  *  - demo mode: returns a simulated wave drawn from the demo catalog so the
  *    feature is usable without credentials.
- *  `sessionId` is echoed back so the client/server can attach rotor feedback. */
+ *  `sessionId` is echoed back so the client/server can attach rotor feedback.
+ *  `generation` is the session generation the batch belongs to; attach it to
+ *  the feedback requests you later send for these tracks. */
 export interface WaveResponse {
   tracks: Track[];
   sessionId: string | null;
+  generation: number;
 }
 
-/** POST /api/wave/feedback body: WaveFeedbackRequest → 204 (best-effort).
- *  Reports playback events so the AI wave adapts. No-op in demo mode. */
+/** POST /api/wave/feedback body: WaveFeedbackRequest → 204, or 409 when the
+ *  request belongs to an outdated session. Reports playback events so the AI
+ *  wave adapts. No-op in demo mode (still generation-checked). */
 export interface WaveFeedbackRequest {
   sessionId: string | null;
   trackId: string;
   event: 'trackStarted' | 'trackFinished' | 'skip';
+  /** Generation from /api/status or the /api/wave batch. Feedback carrying a
+   *  generation other than the current session's is rejected with 409. */
+  generation: number;
   /** Seconds into the track when the event fired (for finished/skip). */
   totalPlayedSeconds?: number;
 }
