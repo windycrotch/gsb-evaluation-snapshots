@@ -3,6 +3,7 @@ import { ExportOptions } from "./ExportOptions";
 import { exportProgressView, type ExportProgressState } from "../exportProgress";
 import { exportFailureMessage } from "../exportFailure";
 import type { OverlayDoc } from "../overlay/types";
+import { lintErrors, type LintIssue } from "../overlay/lint";
 import "./video-export.css";
 
 type Job = {
@@ -46,6 +47,8 @@ interface Props {
   onTimelineExport: () => void;
   onFps: (rate: number) => void;
   onConfigure: () => void;
+  /** 导出前的检查结论(和导入、单卡编辑同源)。有 error 就不许开始导出。 */
+  lintIssues?: LintIssue[];
 }
 function stored(key: string) {
   try {
@@ -211,6 +214,18 @@ export function VideoExport(props: Props) {
   }
   async function submit() {
     if (folderBusy || pending.current) return;
+    // 兜底:入口按钮已经拦过一次,但弹窗可能开着的时候编排变了(撤销/快捷键删除),
+    // 而这一份导出的正是库里当时那份 doc。有必修错误就一个字节都别渲染。
+    if (!props.library) {
+      const errors = lintErrors(props.lintIssues ?? []);
+      if (errors.length) {
+        setError(
+          `还有 ${errors.length} 个必修问题,先回编辑台修好再导出:\n` +
+            errors.map((e) => `· [${e.rule}] ${e.message}`).join("\n"),
+        );
+        return;
+      }
+    }
     setError("");
     setFolderBusy(true);
     try {
@@ -355,6 +370,20 @@ export function VideoExport(props: Props) {
               浏览文件夹…
             </button>
             {error && <p role="alert">{error}</p>}
+            {/* 只有告警时允许导出,但清单要一直留在弹窗里 —— 关掉它就等于把提醒吞了 */}
+            {!props.library && (props.lintIssues?.length ?? 0) > 0 && (
+              <div className="export-lint" role="status">
+                <b>导出前检查 · {props.lintIssues!.length} 条建议</b>
+                <ul>
+                  {props.lintIssues!.map((i, idx) => (
+                    <li key={idx} className={`lint-${i.level}`}>
+                      {i.level === "error" ? "❌" : "⚠️"} [{i.rule}] {i.message}
+                    </li>
+                  ))}
+                </ul>
+                <span>告警不影响导出;要改就回编辑台,或在卡片上「忽略」该规则。</span>
+              </div>
+            )}
             <footer>
               <button className="tb-btn" type="button" disabled={folderBusy} onClick={props.close}>
                 取消

@@ -24,19 +24,15 @@ import {
 } from "./components/TopBar";
 import { parseOverlay, type OverlayCard, type OverlayDoc } from "./overlay/types";
 import { parseSrt, type SrtLine } from "./overlay/srt";
-import { lintOverlay, mergeLintConfig, type LintConfig, type LintIssue } from "./overlay/lint";
+import {
+  lintDropped,
+  lintErrors,
+  lintIssueKey,
+  lintParsedOverlay,
+  type LintIssue,
+} from "./overlay/lint";
+import { LINT_CFG } from "./overlay/lintConfig";
 import { uploadErrText } from "./uploadErr";
-import lintDefaults from "../lint-rules.default.json";
-
-// 个人阈值(lint-rules.local.json,gitignore):存在就叠加覆盖公共默认
-const lintLocalModules = import.meta.glob("../lint-rules.local.json", { eager: true }) as Record<
-  string,
-  { default: Partial<LintConfig> }
->;
-const LINT_CFG = mergeLintConfig(
-  lintDefaults as Partial<LintConfig>,
-  Object.values(lintLocalModules)[0]?.default,
-);
 import "./effects/hud/hud.css";
 import "./App.css";
 
@@ -94,9 +90,22 @@ export default function App() {
   // ---- 学习闭环:记住本次导入的「AI 初选」,导出时连同终选一起落盘 ----
   const originRef = useRef<OverlayDoc | null>(null);
 
-  // ---- 检查器:导入 JSON 时自动跑,只提醒不阻断;忽略标记写进卡片随 JSON 持久化 ----
-  const [lintIssues, setLintIssues] = useState<LintIssue[]>([]);
+  // ---- 检查器 ----
+  // 结论不存 state,而是从「当前编排 + 视频时长 + 忽略标记」当场推出来:
+  // 改内容/改时间/改忽略,结论必然跟着变。也因此不存在「先发出的旧检查后到、
+  // 把新结论盖回去」这种情况 —— 连续快速修改时,显示的永远是对最后一次的检查。
   const [lintCollapsed, setLintCollapsed] = useState(false);
+  /** 用户点 ✕ 收起整个浮窗;下一次导入/载入示例时重新弹出 */
+  const [lintClosed, setLintClosed] = useState(false);
+  /** 没有卡可挂的告警(如 quiet-gap)的「本次不再显示」 */
+  const [lintDismissed, setLintDismissed] = useState<string[]>([]);
+  /** 导入阶段的结构性错误(解析失败/时间非法/id 重复):文件没进编辑台,只能单独记 */
+  const [importErrors, setImportErrors] = useState<LintIssue[]>([]);
+  /** 上次导入被跳过的卡型(认不出):不是编排的一部分,单独记着提醒 */
+  const [droppedIssues, setDroppedIssues] = useState<LintIssue[]>([]);
+  /** 导出前预检:挂在这里,既给导出弹窗看,也给「被拦下」的面板看 */
+  const [exportLint, setExportLint] = useState<LintIssue[]>([]);
+  const [exportBlocked, setExportBlocked] = useState(false);
 
   // ---- 字幕稿(SRT):点句跳转 / 标记覆盖情况 ----
   const [srt, setSrt] = useState<SrtLine[] | null>(null);
@@ -323,6 +332,26 @@ export default function App() {
     return Math.max(cardsEnd, videoDur);
   }, [overlay, videoDur]);
 
+  /**
+   * 编辑台里显示的检查结论 —— 从当前状态直接推出来,不存副本。
+   *
+   * 视频时长只取 videoDur(导入的那条视频),不取上面那个含卡片时长的 duration:
+   * 拿卡片自己的 end 当时长去查 over-duration,这张卡永远超不过自己,规则等于没有。
+   * 没视频时不查越界,和 CLI 不传 --duration 时一致 —— 也就不会凭空多出结论。
+   */
+  const lintIssues = useMemo<LintIssue[]>(() => {
+    const live = overlay
+      ? lintParsedOverlay({ doc: overlay }, LINT_CFG, { duration: videoDur || undefined })
+      : [];
+    return [...importErrors, ...droppedIssues, ...live].filter(
+      (i) => !lintDismissed.includes(lintIssueKey(i)),
+    );
+  }, [overlay, videoDur, importErrors, droppedIssues, lintDismissed]);
+
+  // 「导出被拦下」只在当前确实还有必修错误时才算数:用户改完/忽略掉之后,
+  // 标题要退回头条体检,而不是继续喊「被拦下」—— 结论必须和画面一致。
+  const exportBlocking = exportBlocked && lintErrors(lintIssues).length > 0;
+
   // 编排体检:密度(张/分钟)+ 同屏峰值,顶栏一眼看节奏够不够紧
   const overlayStats = useMemo(() => {
     if (!overlay || overlay.cards.length === 0) return null;
@@ -503,11 +532,26 @@ export default function App() {
       } else raw = await file.text();
       if (request !== projectEpoch.current) return;
       const result = parseOverlay(raw);
-      if (!result.doc) throw Error(result.error);
+      if (!result.doc) {
+        // 解析失败/卡时间非法/id 重复:文件进不了编辑台,但结论必须看得见,
+        // 而且要指明是哪条规则、哪张卡 —— 只弹一句「打开工程失败」等于什么都没说。
+        setImportErrors(lintParsedOverlay(result, LINT_CFG));
+        setDroppedIssues([]);
+        setLintClosed(false);
+        setLintCollapsed(false);
+        return;
+      }
+      setImportErrors([]);
       result.doc.projectName ||= file.name.replace(/(?:\.overlay)?\.json$|\.overlaypack$/i,'');
       if (overlay || srt?.length || videoUrl) setPendingImport(result);
       else applyImported(result,false);
-    } catch(e) { alert('打开工程失败：' + String(e)); }
+    } catch(e) {
+      const message = '打开工程失败：' + String(e);
+      setImportErrors([{ level: "error", rule: "parse", message }]);
+      setDroppedIssues([]);
+      setLintClosed(false);
+      setLintCollapsed(false);
+    }
   };
   const applyImported = (result: ReturnType<typeof parseOverlay>, keepMedia: boolean) => {
     const {doc,dropped} = result;
@@ -527,25 +571,28 @@ export default function App() {
     setTab("edit");
     seek(0);
     setPlaying(false);
-    // 自动体检:只提醒不阻断导入。
-    // 认不出的卡已经被跳过了,在这儿补一条 error —— 跳过必须看得见,
+    // 认不出的卡已经被跳过了,单独记一条 warn —— 跳过必须看得见,
     // 否则用户只会觉得「导进来好像少了点东西」却说不上少了什么。
-    setLintIssues([
-      ...(dropped ?? []).map((d) => ({
-        level: "error" as const,
-        rule: "unknown-kind",
-        message: `跳过了 ${d.n} 张「${d.kind}」——  认不出这种卡,其余卡已正常导入。注意:再导出 JSON 时这几张不会带回去,原文件留好`,
-      })),
-      ...lintOverlay(doc, LINT_CFG, { duration: durRef.current || undefined }),
-    ]);
+    // 用 warn 而不是 error:这些卡不在编排里,改不了,拦导出只会把人困死。
+    setImportErrors([]);
+    setDroppedIssues(lintDropped(dropped));
+    setExportLint([]);
+    setExportBlocked(false);
+    setLintDismissed([]);
+    setLintClosed(false);
     setLintCollapsed(false);
   };
 
   /** 检查面板「忽略」:有卡的问题把规则写进那张卡(用户主动决定,随 JSON 保存);
    *  没卡的问题(如 quiet-gap)只从本次列表移除 */
   const handleLintIgnore = (issue: LintIssue) => {
+    if (issue.rule === "unknown-kind") {
+      // 跳过的是文件里的卡,编排里没有对应的卡可写 lintOff,只能本次收起提醒
+      setDroppedIssues((arr) => arr.filter((x) => x !== issue));
+      return;
+    }
     if (!issue.cardId || !overlay) {
-      setLintIssues((arr) => arr.filter((x) => x !== issue));
+      setLintDismissed((arr) => [...arr, lintIssueKey(issue)]);
       return;
     }
     const next: OverlayDoc = {
@@ -560,7 +607,6 @@ export default function App() {
     };
     pushHistory(true);
     setOverlay(next);
-    setLintIssues(lintOverlay(next, LINT_CFG, { duration: durRef.current || undefined }));
   };
 
   /** 检查面板「定位」:有卡选中那张卡并跳到进场时刻;只有时间点(空白段)就直接跳时间 */
@@ -586,9 +632,13 @@ export default function App() {
         fetch("/demo/demo.srt").then((r) => r.text()),
       ]);
       if (request !== projectEpoch.current) return;
-      const { doc, error, dropped } = parseOverlay(jsonText);
+      const result = parseOverlay(jsonText);
+      const { doc, error, dropped } = result;
       if (error || !doc) {
-        alert(`❌ 示例载入失败:${error}`);
+        setImportErrors(lintParsedOverlay(result, LINT_CFG));
+        setDroppedIssues([]);
+        setLintClosed(false);
+        setLintCollapsed(false);
         return;
       }
       // 内置示例理论上不该有认不出的卡。
@@ -608,10 +658,20 @@ export default function App() {
       setTab("edit");
       seek(0);
       setPlaying(false);
-      setLintIssues(lintOverlay(doc, LINT_CFG, { duration: durRef.current || undefined }));
+      setImportErrors([]);
+      setDroppedIssues(lintDropped(dropped));
+      setExportLint([]);
+      setExportBlocked(false);
+      setLintDismissed([]);
+      setLintClosed(false);
       setLintCollapsed(false);
     } catch (e) {
-      alert(`❌ 示例载入失败:${e}`);
+      setImportErrors([
+        { level: "error", rule: "parse", message: `示例载入失败:${String(e)}` },
+      ]);
+      setDroppedIssues([]);
+      setLintClosed(false);
+      setLintCollapsed(false);
     }
   };
 
@@ -695,6 +755,11 @@ export default function App() {
     setPlaying(false);
     setSelCardId(null);
     seek(0);
+    setImportErrors([]);
+    setDroppedIssues([]);
+    setExportLint([]);
+    setExportBlocked(false);
+    setLintDismissed([]);
   };
 
   loadDemoRef.current = handleLoadDemo;
@@ -884,12 +949,34 @@ export default function App() {
     // 新卡在轨道上直接看得见,不用换页确认。
   };
 
+  /**
+   * 导出前再查一次(和导入同一个检查器、同一份阈值)。
+   *
+   * 结论当场算、当场写进 exportLint:用户改完参数马上点导出,看到的一定是
+   * 最新一次修改的结果。阻断性错误拦在弹窗之前,指明哪张卡哪条规则;
+   * 只有告警则照常放行,但把清单留在界面上,不悄悄吞掉。
+   */
+  const runExportLint = (): boolean => {
+    if (tab !== "edit" || !overlay) return true;
+    const issues = lintParsedOverlay({ doc: overlay }, LINT_CFG, {
+      duration: videoDur || undefined,
+    }).filter((i) => !lintDismissed.includes(lintIssueKey(i)));
+    setExportLint(issues);
+    const errors = lintErrors(issues);
+    setExportBlocked(errors.length > 0);
+    setLintClosed(false);
+    setLintCollapsed(false);
+    return errors.length === 0;
+  };
+
   const handleExport = () => {
     if (exporting) return;
     if (tab === "edit" && !overlay?.cards.length) {
       alert("请先打开编排或添加卡片");
       return;
     }
+    // 库模式导出的是单卡快照,和整份编排的检查无关,不做预检
+    if (!runExportLint()) return;
     setExportDialog(true);
   };
   const recordTimelineExport = () => {
@@ -980,6 +1067,49 @@ export default function App() {
     inEdit && selCard ? EFFECTS.find((e) => e.id === selCard.kind) : effect;
   const panelParams = inEdit && selCard ? selCard.params : params;
   const panelOnChange = inEdit && selCard ? handleCardParamChange : handleParamChange;
+
+  /**
+   * 单卡面板里的「忽略规则」开关:直接改选中卡的 lintOff。
+   * 勾上 = 把规则写进这张卡;取消 = 从数组里删掉 —— 清空最后一个,告警必须回来。
+   * 和检查面板的「忽略」写的是同一个字段,所以导入、单卡编辑、导出三处结论一致。
+   */
+  const toggleCardLintOff = (rule: string, on: boolean) => {
+    if (!overlay || !selCard) return;
+    pushHistory(true);
+    setOverlay({
+      ...overlay,
+      cards: overlay.cards.map((c) => {
+        if (c.id !== selCard.id) return c;
+        if (on) {
+          if (c.lintOff === true) return c;
+          const off = Array.from(new Set([...(Array.isArray(c.lintOff) ? c.lintOff : []), rule]));
+          return { ...c, lintOff: off };
+        }
+        if (c.lintOff === true) return { ...c, lintOff: undefined };
+        if (!Array.isArray(c.lintOff)) return c;
+        const off = c.lintOff.filter((r) => r !== rule);
+        return { ...c, lintOff: off.length ? off : undefined };
+      }),
+    });
+  };
+  /**
+   * 选中卡当前命中的规则名(整份编排一起查,只留锚在这张卡上的)+ 已写入忽略的。
+   * 面板里做成可勾选清单:勾上即写 lintOff,取消即删 —— 和检查面板「忽略」同一个字段。
+   */
+  const cardRules: string[] = selCard
+    ? Array.from(
+        new Set([
+          ...lintParsedOverlay(
+            { doc: overlay ?? { version: 1, cards: [selCard] } },
+            LINT_CFG,
+            { duration: videoDur || undefined },
+          )
+            .filter((i) => i.cardId === selCard.id)
+            .map((i) => i.rule),
+          ...(Array.isArray(selCard.lintOff) ? selCard.lintOff : []),
+        ]),
+      )
+    : [];
 
   return (
     <div
@@ -1211,6 +1341,8 @@ export default function App() {
         globalBreath={overlay?.breath === true}
         addAt={curT}
         addSec={addSecFor(selectedId)}
+        lintOffRules={cardRules}
+        onToggleLintOff={toggleCardLintOff}
       />
       </div>
 
@@ -1231,17 +1363,20 @@ export default function App() {
           onBusy={setExporting}
           onTimelineExport={recordTimelineExport}
           onConfigure={handleExport}
+          lintIssues={exportLint}
           onFps={(rate) => setOverlay((o) => o && (o.exportFps ?? 29.97) !== rate ? { ...o, exportFps: rate } : o)}
         />
       </Suspense>
 
-      {/* 检查器浮窗(左下角):导入 JSON 自动体检的结果,只提醒不阻断 */}
-      {lintIssues.length > 0 && (
+      {/* 检查器浮窗(左下角):导入、单卡编辑、导出前共用同一套结论。
+          有必修错误时不会自动消失 —— 必须能一路看到修好为止。 */}
+      {(lintIssues.length > 0 || exportBlocking) && !lintClosed && (
         <LintPanel
           issues={lintIssues}
           collapsed={lintCollapsed}
+          blocked={exportBlocking}
           onToggle={() => setLintCollapsed((v) => !v)}
-          onClose={() => setLintIssues([])}
+          onClose={() => setLintClosed(true)}
           onLocate={handleLintLocate}
           onIgnore={handleLintIgnore}
         />
@@ -1253,6 +1388,7 @@ export default function App() {
 function LintPanel({
   issues,
   collapsed,
+  blocked,
   onToggle,
   onClose,
   onLocate,
@@ -1260,6 +1396,8 @@ function LintPanel({
 }: {
   issues: LintIssue[];
   collapsed: boolean;
+  /** true = 上一次导出被这批必修错误拦下了 */
+  blocked?: boolean;
   onToggle: () => void;
   onClose: () => void;
   onLocate: (i: LintIssue) => void;
@@ -1267,10 +1405,11 @@ function LintPanel({
 }) {
   const errors = issues.filter((i) => i.level === "error").length;
   return (
-    <div className="lint-panel">
+    <div className={`lint-panel${blocked ? " lint-panel--blocked" : ""}`}>
       <div className="lint-head" onClick={onToggle}>
         <span>
-          🔍 体检:{errors > 0 && <b className="lint-err-count">{errors} 个必修</b>}
+          {blocked ? "⛔ 导出被拦下:" : "🔍 体检:"}
+          {errors > 0 && <b className="lint-err-count">{errors} 个必修</b>}
           {errors > 0 && issues.length > errors && " · "}
           {issues.length > errors && `${issues.length - errors} 个建议`}
         </span>

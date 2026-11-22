@@ -8,7 +8,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { lintOverlayText, type LintConfig } from "../src/overlay/lint";
+import { lintOverlayText, mergeLintConfig } from "../src/overlay/lint";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -22,21 +22,23 @@ if (!file) {
   process.exit(2);
 }
 
-function readJson(p: string): Partial<LintConfig> | null {
+/** 读阈值配置。文件缺失/写坏都退回 undefined,由 mergeLintConfig 回落默认 ——
+ *  个人配置坏了只丢坏字段,公共默认照常生效,检查不会整体失效。 */
+function readJson(p: string): unknown {
   try {
     return JSON.parse(fs.readFileSync(p, "utf8"));
   } catch {
-    return null;
+    return undefined;
   }
 }
 
-const config = {
-  ...readJson(path.join(ROOT, "lint-rules.default.json")),
-  ...readJson(path.join(ROOT, "lint-rules.local.json")),
-};
+const config = [
+  readJson(path.join(ROOT, "lint-rules.default.json")),
+  readJson(path.join(ROOT, "lint-rules.local.json")),
+];
 
 const text = fs.readFileSync(path.resolve(file), "utf8");
-const { doc, issues } = lintOverlayText(text, config, { duration });
+const { doc, issues } = lintOverlayText(text, mergeLintConfig(...config), { duration });
 
 const errors = issues.filter((i) => i.level === "error");
 const warns = issues.filter((i) => i.level === "warn");
@@ -48,7 +50,7 @@ if (!issues.length) {
   for (const i of errors) console.log(`  ❌ [${i.rule}] ${i.message}`);
   for (const i of warns) console.log(`  ⚠️  [${i.rule}] ${i.message}`);
   console.log(
-    `\n共 ${errors.length} 个 error(必须修)、${warns.length} 个 warn(人判优先;确认没问题就在那张卡加 "lintOff": ["规则名"])\n`,
+    `\n共 ${errors.length} 个 error(必须修,导出会被拦下)、${warns.length} 个 warn(人判优先;确认没问题就在那张卡加 "lintOff": ["规则名"])\n`,
   );
 }
 

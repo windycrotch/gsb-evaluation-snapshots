@@ -1378,6 +1378,44 @@ input[type="range"]::-moz-range-thumb {
 .lint-item.lint-error {
   background: rgba(255, 96, 80, 0.12);
 }
+.lint-panel--blocked {
+  border-color: rgba(255, 96, 80, 0.55);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(255, 96, 80, 0.35);
+}
+/* 忽略清单:单卡参数面板里的一小组勾选 */
+.pp-lint-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.pp-lint-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  padding: 3px 4px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.pp-lint-row:hover {
+  background: var(--fill-subtle);
+}
+.pp-lint-row.is-on .pp-lint-name {
+  color: var(--ink-muted);
+  text-decoration: line-through;
+}
+.pp-lint-row input {
+  flex: 0 0 auto;
+  accent-color: var(--accent);
+}
+.pp-lint-name {
+  flex: 1;
+  min-width: 0;
+}
+.pp-lint-row code {
+  font-size: 10px;
+  color: var(--ink-muted);
+}
 .lint-msg {
   flex: 1;
 }

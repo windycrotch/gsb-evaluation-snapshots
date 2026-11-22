@@ -68,6 +68,13 @@ export interface OverlayDoc {
   cards: OverlayCard[];
 }
 
+/** 导入期的结构性错误:和体检共用同一套「规则名 + 哪张卡」的表述 */
+export interface OverlayParseIssue {
+  rule: string;
+  cardId?: string;
+  message: string;
+}
+
 /**
  * 校验 + 规范化:补默认参数、按 start 排序。
  *
@@ -81,6 +88,8 @@ export interface OverlayDoc {
 export function parseOverlay(raw: unknown): {
   doc?: OverlayDoc;
   error?: string;
+  /** 阻断性错误的结构化版本(rule + 卡 id),导入失败时一次列全 */
+  errors?: OverlayParseIssue[];
   /** 被跳过的卡:kind = 认不出的类型,n = 这份编排里有几张 */
   dropped?: { kind: string; n: number }[];
 } {
@@ -91,27 +100,34 @@ export function parseOverlay(raw: unknown): {
          previewVideo: parsed.overlay.previewVideo ?? parsed.videoUrl,
          reviewOrigin: parsed.overlay.reviewOrigin ?? parsed.origin}
       : parsed;
-    if (!o || !Array.isArray(o.cards)) return { error: "缺少 cards 数组" };
-    if (o.cards.length > 10_000) return {error: '工程超过 10,000 张卡，请拆分后打开'};
+    if (!o || !Array.isArray(o.cards)) return { error: "缺少 cards 数组", errors: [{ rule: "parse", message: "缺少 cards 数组" }] };
+    if (o.cards.length > 10_000) return {error: '工程超过 10,000 张卡，请拆分后打开', errors: [{rule: 'parse', message: '工程超过 10,000 张卡，请拆分后打开'}]};
     if (o.srt != null && (!Array.isArray(o.srt) || o.srt.length > 10_000 || o.srt.some((line: SrtLine) =>
       !line || typeof line.text !== 'string' || !Number.isFinite(line.start) || !Number.isFinite(line.end)
-      || line.start < 0 || line.end < line.start))) return {error: '工程中的字幕文字或时间无效'};
+      || line.start < 0 || line.end < line.start))) return {error: '工程中的字幕文字或时间无效', errors: [{rule: 'parse', message: '工程中的字幕文字或时间无效'}]};
     const ids = new Set<string>();
     const cards: OverlayCard[] = [];
     const dropCount = new Map<string, number>();
     for (let i = 0; i < o.cards.length; i++) {
       const c = o.cards[i];
-      if (!c || typeof c !== 'object' || Array.isArray(c)) return {error: `第 ${i + 1} 张卡片数据无效`};
+      if (!c || typeof c !== 'object' || Array.isArray(c))
+        return {error: `第 ${i + 1} 张卡片数据无效`, errors: [{rule: 'parse', message: `第 ${i + 1} 张卡片数据无效`}]};
       const def = EFFECTS.find((e) => e.id === c.kind);
       if (!def) {
         const k = String(c?.kind ?? "(没写 kind)");
         dropCount.set(k, (dropCount.get(k) ?? 0) + 1);
         continue;
       }
-      if (!Number.isFinite(c.start) || !Number.isFinite(c.end) || c.end <= c.start)
-        return { error: `第 ${i + 1} 张卡片时间非法: start=${c.start} end=${c.end}` };
-      const id = String(c.id ?? `card-${i + 1}`);
-      if (ids.has(id)) return { error: `卡片 id 重复: "${id}"` };
+      const rawId = String(c.id ?? `card-${i + 1}`);
+      if (!Number.isFinite(c.start) || !Number.isFinite(c.end) || c.end <= c.start) {
+        const message = `第 ${i + 1} 张卡片「${rawId}」(${c.kind}) 时间非法:start=${c.start} end=${c.end}`;
+        return { error: message, errors: [{ rule: 'invalid-time', cardId: rawId, message }] };
+      }
+      const id = rawId;
+      if (ids.has(id)) {
+        const message = `卡片 id 重复:「${id}」(第 ${i + 1} 张)`;
+        return { error: message, errors: [{ rule: 'duplicate-id', cardId: id, message }] };
+      }
       ids.add(id);
       // 特效默认值垫底,JSON 里的参数覆盖
       const params = { ...def.defaults, ...(c.params ?? {}) };
@@ -127,12 +143,13 @@ export function parseOverlay(raw: unknown): {
     if (o.layerOrder !== "manual") cards.sort((a, b) => a.start - b.start);
     // 一张都不认识:多半不是「少几张卡」,而是拿错了文件或者版本对不上。
     // 这种情况给整份错误比给一份空编排有用 —— 空编排会让人以为文件是空的。
-    if (!cards.length && dropCount.size)
+    if (!cards.length && dropCount.size) {
+      const kinds = [...dropCount.keys()].slice(0, 3).join("、") + (dropCount.size > 3 ? " 等" : "");
       return {
-        error: `这份编排里的 ${o.cards.length} 张卡都不认识(${[...dropCount.keys()]
-          .slice(0, 3)
-          .join("、")}${dropCount.size > 3 ? " 等" : ""})`,
+        error: `这份编排里的 ${o.cards.length} 张卡都不认识(${kinds})`,
+        errors: [{ rule: "unknown-kind", message: `这份编排里的 ${o.cards.length} 张卡都不认识(${kinds})` }],
       };
+    }
     const dropped = [...dropCount].map(([kind, n]) => ({ kind, n }));
     const theme = o.theme === "light" ? "light" : o.theme === "dark" ? "dark" : undefined;
     return {
@@ -161,6 +178,7 @@ export function parseOverlay(raw: unknown): {
       },
     };
   } catch (e) {
-    return { error: `JSON 解析失败: ${e}` };
+    const message = `JSON 解析失败: ${e}`;
+    return { error: message, errors: [{ rule: "parse", message }] };
   }
 }

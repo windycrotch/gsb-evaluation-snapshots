@@ -34,7 +34,24 @@ interface ParamsPanelProps {
   addSec?: number;
   /** 整片呼吸感(doc.breath):单卡「呼吸感」开关没设时跟随它 */
   globalBreath?: boolean;
+  /** 选中卡命中的检查规则名(含已忽略的):做成可勾选清单 */
+  lintOffRules?: string[];
+  /** 勾选/取消某条规则的忽略标记(写进这张卡的 lintOff) */
+  onToggleLintOff?: (rule: string, on: boolean) => void;
 }
+
+/** 规则名的中文说明 —— 忽略清单里只说英文 rule 名,用户不知道自己在关掉什么 */
+const RULE_LABEL: Record<string, string> = {
+  "placeholder-text": "占位/示例文案没换",
+  "over-duration": "卡片超出视频时长",
+  "missing-cam": "运镜卡没接到口播视频",
+  "short-dwell": "卡片驻留过短(快闪)",
+  "scale-tier": "卡片大小不在约定档位",
+  "decimal-percent": "文案含精确小数百分比",
+  "stack-overlap": "同屏同落位会叠在一起",
+  "quiet-gap": "中间长时间没有新动作",
+  "caption-track": "字幕卡可能与烧录字幕重复",
+};
 
 /** 落点文案用的 m:ss.s */
 function fmt(t: number) {
@@ -401,6 +418,8 @@ export function ParamsPanel({
   addAt = 0,
   addSec = 5,
   globalBreath = false,
+  lintOffRules = [],
+  onToggleLintOff,
 }: ParamsPanelProps) {
   // 「更换特效」搜索词(卡片越来越多,先搜再换)
   const [kindQuery, setKindQuery] = useState("");
@@ -668,6 +687,45 @@ export function ParamsPanel({
               </div>
               <div className="demo-src">
                 这一刻同屏 {layer.total} 张,它排第 {layer.index} 层(第 {layer.total} 层在最上面)
+              </div>
+            </div>
+          </section>
+        )}
+
+        {/* 检查忽略:这一张卡上「我知道,我就要这样」的记录。
+            写的就是卡片 JSON 里的 lintOff —— 随编排保存、以后每次体检都生效,
+            和左下角体检浮窗的「忽略」是同一个字段,所以三处结论一致。
+            取消勾选 = 从清单里删掉;清空最后一个,对应告警立刻回来。 */}
+        {card && onToggleLintOff && lintOffRules.length > 0 && (
+          <section className="pp-sec">
+            <div className="pp-sec-head">
+              <span>检查 · 忽略规则</span>
+              <i>LINT</i>
+            </div>
+            <div className="ctrl">
+              <div className="pp-lint-list">
+                {lintOffRules.map((rule) => {
+                  const on =
+                    card.lintOff === true ||
+                    (Array.isArray(card.lintOff) && card.lintOff.includes(rule));
+                  return (
+                    <label key={rule} className={`pp-lint-row${on ? " is-on" : ""}`}>
+                      <input
+                        type="checkbox"
+                        checked={on}
+                        disabled={card.lintOff === true}
+                        onChange={(e) => onToggleLintOff(rule, e.target.checked)}
+                      />
+                      <span className="pp-lint-name">{RULE_LABEL[rule] ?? rule}</span>
+                      <code>{rule}</code>
+                    </label>
+                  );
+                })}
+              </div>
+              <div className="demo-src">
+                {card.lintOff === true
+                  ? "整卡免检(lintOff: true)—— 点上面对应的勾可恢复单条规则"
+                  : "勾上 = 这张卡不再报该规则;取消 = 恢复提醒"}
               </div>
             </div>
           </section>

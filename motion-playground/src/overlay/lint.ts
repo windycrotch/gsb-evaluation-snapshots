@@ -48,9 +48,45 @@ export const LINT_DEFAULTS: LintConfig = {
   warnDecimalPercent: true,
 };
 
-export function mergeLintConfig(...parts: (Partial<LintConfig> | null | undefined)[]): LintConfig {
+/**
+ * 只收类型正确的字段。
+ *
+ * 个人配置是人手改的,写坏一个字段(比如 "minDwell": "2s")时,整份检查不能跟着失效:
+ * 以前的写法是整包 Object.assign,一个字符串就能让 `end - start < minDwell` 永远为假,
+ * 规则静默失灵 —— 用户看到的是一份「没问题」的报告,比报错更危险。
+ * 现在坏字段直接丢掉、回落到公共默认,其余字段照常生效。
+ */
+export function sanitizeLintConfig(input: unknown): Partial<LintConfig> {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return {};
+  const src = input as Record<string, unknown>;
+  const out: Partial<LintConfig> = {};
+  const num = (v: unknown, min = 0) =>
+    typeof v === "number" && Number.isFinite(v) && v >= min ? v : undefined;
+  const minDwell = num(src.minDwell);
+  if (minDwell !== undefined) out.minDwell = minDwell;
+  const minOffsetGap = num(src.minOffsetGap);
+  if (minOffsetGap !== undefined) out.minOffsetGap = minOffsetGap;
+  const maxQuietGap = num(src.maxQuietGap);
+  if (maxQuietGap !== undefined) out.maxQuietGap = maxQuietGap;
+  const scaleTolerance = num(src.scaleTolerance);
+  if (scaleTolerance !== undefined) out.scaleTolerance = scaleTolerance;
+  if (Array.isArray(src.scaleTiers)) {
+    out.scaleTiers = src.scaleTiers.filter(
+      (t): t is number => typeof t === "number" && Number.isFinite(t),
+    );
+  }
+  if (Array.isArray(src.dwellExemptKinds)) {
+    // 数组里混了非字符串:丢掉坏项比整条作废更接近用户的本意
+    out.dwellExemptKinds = src.dwellExemptKinds.filter((k): k is string => typeof k === "string");
+  }
+  if (typeof src.warnCaptionTrack === "boolean") out.warnCaptionTrack = src.warnCaptionTrack;
+  if (typeof src.warnDecimalPercent === "boolean") out.warnDecimalPercent = src.warnDecimalPercent;
+  return out;
+}
+
+export function mergeLintConfig(...parts: unknown[]): LintConfig {
   const out = { ...LINT_DEFAULTS };
-  for (const p of parts) if (p) Object.assign(out, p);
+  for (const p of parts) Object.assign(out, sanitizeLintConfig(p));
   return out;
 }
 
@@ -297,10 +333,60 @@ export function lintOverlayText(
   text: string,
   config?: Partial<LintConfig> | null,
   opts?: { duration?: number },
-): { doc?: OverlayDoc; issues: LintIssue[] } {
-  const { doc, error } = parseOverlay(text);
-  if (error || !doc) {
-    return { issues: [{ level: "error", rule: "parse", message: error ?? "解析失败" }] };
+): { doc?: OverlayDoc; dropped?: { kind: string; n: number }[]; issues: LintIssue[] } {
+  const parsed = parseOverlay(text);
+  return {
+    doc: parsed.doc,
+    dropped: parsed.dropped,
+    issues: lintParsedOverlay(parsed, config, opts),
+  };
+}
+
+/**
+ * 已解析结果 → 检查结论。导入/取回/载入示例/导出前都走这一条,
+ * 保证四个入口对同一份编排说同一套话。
+ *
+ * - 解析类问题(JSON 坏、卡时间非法、id 重复)转成 error,带 rule 与卡 id;
+ * - 认不出的卡已经被 parseOverlay 跳过:这里补一条 warn(不能算 error,
+ *   否则用户永远无法导出 —— 那些卡根本不在编排里,改不了)。
+ */
+export function lintParsedOverlay(
+  parsed: ReturnType<typeof parseOverlay>,
+  config?: Partial<LintConfig> | null,
+  opts?: { duration?: number },
+): LintIssue[] {
+  if (!parsed.doc) {
+    const errors = parsed.errors?.length
+      ? parsed.errors
+      : [{ rule: "parse", message: parsed.error ?? "解析失败" }];
+    return errors.map((e) => ({
+      level: "error" as const,
+      rule: e.rule,
+      cardId: e.cardId,
+      message: e.message,
+    }));
   }
-  return { doc, issues: lintOverlay(doc, config, opts) };
+  return [
+    ...lintDropped(parsed.dropped),
+    ...lintOverlay(parsed.doc, config, opts),
+  ];
+}
+
+/** 被跳过的卡型 → 一条可展示的 warn(不算 error:这些卡不在编排里,改不了) */
+export function lintDropped(dropped?: { kind: string; n: number }[]): LintIssue[] {
+  return (dropped ?? []).map((d) => ({
+    level: "warn" as const,
+    rule: "unknown-kind",
+    message: `跳过了 ${d.n} 张「${d.kind}」—— 认不出这种卡,其余卡已正常导入。注意:再导出 JSON 时这几张不会带回去,原文件留好`,
+  }));
+}
+
+/** 一条问题在整个编辑会话里的稳定标识(用在「本次不再显示」上) */
+export function lintIssueKey(i: LintIssue): string {
+  return [i.level, i.rule, i.cardId ?? "", i.at == null ? "" : i.at.toFixed(2), i.message].join("|");
+}
+
+/** 阻断性问题:有它就拦住导出 */
+export function lintErrors(issues: LintIssue[]): LintIssue[] {
+  return issues.filter((i) => i.level === "error");
 }
