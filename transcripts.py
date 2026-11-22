@@ -6,11 +6,17 @@ import threading
 import unicodedata
 import uuid
 
+def identity(name,st,language):
+    return hashlib.sha256(f'{name}:{st.st_size}:{st.st_mtime_ns}:{language}'.encode()).hexdigest()
+
 def cached_source(data,path,language=None):
-    st=path.stat();key=hashlib.sha256(f'{path.stem}:{st.st_size}:{st.st_mtime_ns}:{language}'.encode()).hexdigest()
+    """Words of the saved full-source transcript, only when the record's identity matches this exact source file."""
+    key=identity(path.stem,path.stat(),language)
     cache=data/'transcripts'/(key+'.json')
-    if cache.exists():return json.loads(cache.read_text(encoding='utf-8')).get('words')
-    return None
+    if not cache.exists():return None
+    record=json.loads(cache.read_text(encoding='utf-8'))
+    if record.get('source_id')!=path.stem or record.get('language')!=language:return None
+    return record.get('words')
 
 def search(words,query='',limit=100,offset=0):
     """Phrase search across word/cue boundaries, with real source timestamps."""
@@ -42,7 +48,7 @@ def attach(app,data,state,probe,transcribe):
         if not name.isalnum() or not (data/(name+'.mp4')).exists():raise HTTPException(400,'Load a source video first.')
         path=data/(name+'.mp4');duration=float(probe(path)['duration']);language=body.get('language') or None
         if language not in (None,'hi','hinglish','en'):raise HTTPException(400,'Choose a supported transcript language.')
-        st=path.stat();key=hashlib.sha256(f'{name}:{st.st_size}:{st.st_mtime_ns}:{language}'.encode()).hexdigest()
+        st=path.stat();key=identity(name,st,language)
         return name,path,duration,language,key
     def write(key,record):
         temp=folder/(key+'.tmp');temp.write_text(json.dumps(record,ensure_ascii=False),encoding='utf-8');temp.replace(folder/(key+'.json'))
@@ -53,7 +59,7 @@ def attach(app,data,state,probe,transcribe):
         record=json.loads(p.read_text(encoding='utf-8'))
         src=data/(record['source_id']+'.mp4')
         if not src.exists():raise HTTPException(409,'The original source was removed.')
-        st=src.stat();current=hashlib.sha256(f"{record['source_id']}:{st.st_size}:{st.st_mtime_ns}:{record.get('language')}".encode()).hexdigest()
+        st=src.stat();current=identity(record['source_id'],st,record.get('language'))
         if current!=key:raise HTTPException(409,'The source was replaced. Load its new transcript.')
         return record
     @app.post('/transcripts/import')
@@ -100,7 +106,14 @@ def attach(app,data,state,probe,transcribe):
                     except Exception:words=None
                 if words is None:words=transcribe(path,0,duration,data,lambda message:state[job].update(message=message),language)['words']
                 record={'key':key,'source_id':name,'duration':duration,'language':language,'words':words,'origin':origin}
-                with lock:write(key,record)
+                with lock:
+                    # The source must still be the one this job claimed: if it was replaced (or removed) while
+                    # transcribing, these words must never become a hittable cache or a done result for it.
+                    if not path.exists() or identity(name,path.stat(),language)!=key:
+                        state[job]={'status':'error','error':'The source was replaced while transcribing. Load the transcript again.'};return
+                    # A record claimed meanwhile (e.g. an import of the same source) wins over this job's result.
+                    if (folder/(key+'.json')).exists():record=json.loads((folder/(key+'.json')).read_text(encoding='utf-8'))
+                    else:write(key,record)
                 state[job]={'status':'done','transcript':record}
             except Exception as error:state[job]={'status':'error','error':str(error)[-500:]}
             finally:
