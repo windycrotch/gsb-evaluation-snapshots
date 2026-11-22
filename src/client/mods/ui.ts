@@ -5,7 +5,7 @@ import { memTree, treeFromEntries, treeToZip, zipTreeFromBytes, type Tree } from
 import { planInstall } from '../../mods/pack.ts';
 import { ARCHIVE_ACCEPT, ArchiveError, readArchive } from './archive.ts';
 import { errors, onErrors } from './api.ts';
-import { SAFE_MODE, engine, profile, records } from './runtime.ts';
+import { SAFE_MODE, engine, profile, records, requestModReload } from './runtime.ts';
 import {
     DEFAULT_PROFILE, createProfile, deleteBackup, deleteProfile, exportSaves, listBackups, listMods, listProfiles, makeBackup, putMod,
     putSupport, removeMod, restoreInto, saveProfile, setActiveProfile, type Backup, type Profile,
@@ -59,7 +59,7 @@ export function installModUi() {
     body = el('div', { id: 'omm-body' });
     panel = el('div', { id: 'omm-panel' },
         el('header', {}, el('h2', {}, 'Mods & profiles'),
-            el('button', { id: 'omm-reload', class: 'primary', textContent: 'Apply & reload', style: 'display:none', onclick: () => location.reload() }),
+            el('button', { id: 'omm-reload', class: 'primary', textContent: 'Apply & reload', style: 'display:none', onclick: () => applyModsNow() }),
             el('button', { textContent: '✕', title: 'Close (F8)', onclick: () => toggle(false) })),
         body);
     toast = el('div', { id: 'omm-toast' });
@@ -101,8 +101,29 @@ function say(text: string, ...actions: [string, () => void][]) {
 
 function markDirty() {
     document.getElementById('omm-reload')!.style.display = '';
-    say('Changes apply after a reload.', ['Reload now', () => location.reload()]);
+    say('Changes apply after a reload.', ['Reload now', () => applyModsNow()]);
     void render();
+}
+
+// ---------------------------------------------------------------- in-page reload
+let pendingReloads = 0;
+
+/**
+ * Switch the running session to the new configuration without reloading the page.
+ * Clicks while a reload is still running are queued; the newest configuration wins.
+ */
+function applyModsNow() {
+    const btn = document.getElementById('omm-reload') as HTMLButtonElement | null;
+    pendingReloads++;
+    if (btn) btn.textContent = 'Applying…'; // stays clickable: another click queues another reload
+    say('Applying mod changes…');
+    void requestModReload().then(() => {
+        if (--pendingReloads) return; // a newer reload is still running; it finishes the job
+        if (btn) { btn.textContent = 'Apply & reload'; btn.style.display = 'none'; }
+        say('Mod changes applied.');
+        refreshTab();
+        void render();
+    });
 }
 
 // ---------------------------------------------------------------- install
@@ -343,6 +364,20 @@ async function render() {
         const auto = !!profile?.devAuto && rec.origin === 'server';
         const on = !!profile && (profile.enabled.includes(rec.key) || auto);
         const bad = !!m && m.errors.length > 0;
+        // load order = the order of the profile's enabled list; later mods win file conflicts
+        const move = async (dir: -1 | 1) => {
+            if (!profile) return;
+            const list = [...profile.enabled];
+            const i = list.indexOf(rec.key), j = i + dir;
+            if (i < 0 || j < 0 || j >= list.length) return;
+            [list[i], list[j]] = [list[j]!, list[i]!];
+            profile.enabled = list;
+            await saveProfile(profile); markDirty();
+        };
+        const orderBtns = (on && !auto && profile) ? [
+            el('button', { textContent: '↑', title: 'Load earlier', disabled: profile.enabled.indexOf(rec.key) <= 0, onclick: () => void move(-1) }),
+            el('button', { textContent: '↓', title: 'Load later (wins conflicts)', disabled: profile.enabled.indexOf(rec.key) < 0 || profile.enabled.indexOf(rec.key) >= profile.enabled.length - 1, onclick: () => void move(1) }),
+        ] : [];
         const toggleBtn = el('button', { textContent: on ? 'Disable' : 'Enable', disabled: auto, onclick: async () => {
             if (!profile) return;
             if (!on && profile.id === DEFAULT_PROFILE && !confirm('This is your Original game profile. Enabling a mod here changes how your existing saves behave. A new profile is safer.\n\nEnable anyway? (A backup is taken first.)')) return;
@@ -352,7 +387,8 @@ async function render() {
         } });
         const row = el('div', { class: 'omm-row' },
             el('div', { class: 'grow' }, el('div', { class: 'omm-name' }, m?.name ?? rec.label), el('div', { class: 'omm-meta' },
-                m ? `${m.id} · v${m.version}${m.author ? ' · ' + m.author : ''} · ${m.format === 'oneloader' ? 'OneLoader mod' : 'native'}${rec.origin === 'server' ? ' · dev folder' : ''}` : `${rec.label} (not enabled in this profile)`)),
+                m ? `${m.id} · v${m.version}${m.author ? ' · ' + m.author : ''} · ${m.format === 'oneloader' ? 'OneLoader mod' : 'native'}${rec.origin === 'server' ? ' · dev folder' : ''}${on && profile && profile.enabled.includes(rec.key) ? ` · loads #${profile.enabled.indexOf(rec.key) + 1}` : ''}` : `${rec.label} (not enabled in this profile)`)),
+            ...orderBtns,
             ...(bad ? [] : [toggleBtn]),
             ...(rec.origin === 'browser' ? [el('button', { textContent: 'Delete', title: 'Remove from the library (all profiles)', onclick: async () => {
                 if (!confirm(`Delete "${rec.label}" from the library? Every profile using it loses it. Saves are not touched.`)) return;

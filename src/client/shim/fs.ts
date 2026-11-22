@@ -43,7 +43,8 @@ export interface ModLayer {
 }
 let modLayer: ModLayer | null = null;
 const modded = new Map<string, Uint8Array | null>();
-export function setModLayer(layer: ModLayer | null) { modLayer = layer; modded.clear(); }
+// A new layer (mod reload) invalidates resolved mod bytes AND directory listings, which captured mod-added names.
+export function setModLayer(layer: ModLayer | null) { modLayer = layer; modded.clear(); lsCache.clear(); }
 const withAdded = (names: string[] | null, dir: string): string[] | null => {
     const extra = modLayer?.added(dir) ?? [];
     return names || extra.length ? [...new Set([...(names ?? []), ...extra])] : null;

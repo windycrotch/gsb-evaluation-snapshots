@@ -10,6 +10,10 @@ Mods never touch your game folder. They are layered on top of it in the browser,
    - **Add to this profile**: turns it on here. In the *Original game* profile this asks first and takes a backup.
 3. The page reloads and the mod is active. Press **F8** any time to manage things.
 
+**Applying changes.** Enabling, disabling or reordering mods in the panel is applied with **Apply & reload** — a full session switch inside the running page, not a browser reload: the old mods' data patches, replaced images/audio, script hooks and plugin-list changes are removed, and the new configuration takes effect in one step. If part of the new configuration fails (an unreadable mod, a missing asset key), that mod is disabled with the reason shown in the panel and everything else keeps working; a hard failure leaves the previous setup running untouched.
+
+**Load order.** The ↑/↓ buttons on each enabled mod set where it loads. When two mods replace the same file, the one *later* in the order wins (a warning is logged — prefer a patch if you want both). Load order is per profile.
+
 **Profiles** (like Minecraft launcher profiles). *Original game* holds the saves you had before mods existed. Each other profile has its own save storage and its own list of enabled mods; the mod library is shared. Switching profiles never overwrites anything: the profile you leave gets an automatic backup first. `?profile=<id>` in the address opens one directly.
 
 **Backups.** Automatic before switching or deleting a profile, and before enabling a mod in the original one. You can also back up manually, download saves as a `.zip`, and import them. The last 5 per profile are kept. Backups live in your browser's storage, so *Download saves* is the way to keep a copy outside it.

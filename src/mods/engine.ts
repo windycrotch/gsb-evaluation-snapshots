@@ -19,6 +19,8 @@ export interface ModSource {
     origin?: string;
     /** user switched it off */
     disabled?: boolean;
+    /** the user's chosen load order (position in the profile); breaks priority ties, later wins conflicts */
+    orderHint?: number;
 }
 
 export interface LoadedMod extends ModDef {
@@ -27,6 +29,8 @@ export interface LoadedMod extends ModDef {
     /** disabled by the user, not because of an error */
     userDisabled: boolean;
     order: number;
+    /** where the user placed it; breaks priority ties before id */
+    orderHint: number;
     tree: Tree;
 }
 
@@ -78,7 +82,7 @@ export class ModEngine {
         for (const src of sources) {
             try {
                 const def = loadMod(src.tree, src.label);
-                found.push({ ...def, origin: src.origin ?? src.label, enabled: !src.disabled, userDisabled: !!src.disabled, order: 0, tree: src.tree });
+                found.push({ ...def, origin: src.origin ?? src.label, enabled: !src.disabled, userDisabled: !!src.disabled, order: 0, orderHint: src.orderHint ?? 0, tree: src.tree });
             } catch (e) {
                 this.log('error', `cannot read mod "${src.label}": ${(e as Error).message}`, { mod: src.label });
             }
@@ -90,18 +94,32 @@ export class ModEngine {
         }
         this.order(found);
         this.checkCompatibility(found);
-        // compatibility can disable mods after ordering; keep order numbers dense
-        found.filter(m => m.enabled).sort((a, b) => a.order - b.order).forEach((m, i) => (m.order = i));
         this.mods = found;
+        this.reindex();
+        const on = this.mods.filter(m => m.enabled);
+        this.log('info', `${on.length} mod(s) active${on.length ? ': ' + on.map(m => `${m.id}@${m.version}`).join(', ') : ''}; ${this.mods.length - on.length} disabled`);
+        this.detectConflicts();
+    }
+
+    /** Rebuild the edit tables and dense load order from the current enabled set. */
+    private reindex() {
+        this.edits.clear(); this.cache.clear();
+        this.mods.filter(m => m.enabled).sort((a, b) => a.order - b.order).forEach((m, i) => (m.order = i));
         for (const m of this.activeMods()) {
             for (const edit of m.edits) {
                 const k = edit.target.toLowerCase();
                 (this.edits.get(k) ?? this.edits.set(k, []).get(k)!).push({ mod: m, edit });
             }
         }
-        const on = this.mods.filter(m => m.enabled);
-        this.log('info', `${on.length} mod(s) active${on.length ? ': ' + on.map(m => `${m.id}@${m.version}`).join(', ') : ''}; ${this.mods.length - on.length} disabled`);
-        this.detectConflicts();
+    }
+
+    /** Turn a mod off after loading (e.g. its assets cannot be encoded), with the reason recorded. */
+    disableMod(id: string, reason: string) {
+        const m = this.mods.find(x => x.id === id && x.enabled);
+        if (!m) return;
+        m.enabled = false;
+        this.log('error', reason, { mod: id });
+        this.reindex();
     }
 
     /** Dependencies first, then `loadAfter`, otherwise by priority (lower first) and id. Missing deps / cycles disable the mod with a clear reason. */
@@ -120,7 +138,7 @@ export class ModEngine {
                 }
             }
         }
-        const active = mods.filter(m => m.enabled).sort((a, b) => a.priority - b.priority || a.id.localeCompare(b.id));
+        const active = mods.filter(m => m.enabled).sort((a, b) => a.priority - b.priority || a.orderHint - b.orderHint || a.id.localeCompare(b.id));
         const done = new Set<string>(), visiting = new Set<string>(), out: LoadedMod[] = [];
         const visit = (m: LoadedMod) => {
             if (done.has(m.id)) return;

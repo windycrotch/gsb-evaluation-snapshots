@@ -2,7 +2,7 @@
 // (Encrypted data/plugins are handled inside the page by the fs shim, which holds the game key.)
 import { ModEngine } from './mods/engine.ts';
 import { zipTreeFromBytes } from './mods/vfs.ts';
-import { enabledKeys, getActiveProfile, getMeta, listMods, readGenerated } from './client/mods/store.ts';
+import { getActiveProfile, getMeta, listMods, planLoad, readGenerated } from './client/mods/store.ts';
 
 // The DOM lib is on for the page code, so worker globals are typed loosely here.
 const sw = self as any;
@@ -14,11 +14,11 @@ function build(safe = false): Promise<ModEngine> {
         const e = new ModEngine();
         if (safe) return e; // ?mods=0: serve everything vanilla
         const recs = (await listMods()).sort((a, b) => a.key.localeCompare(b.key));
-        const on = enabledKeys(await getActiveProfile(), recs); // only the active profile's mods
+        const plan = planLoad(await getActiveProfile(), recs); // only the active profile's mods, in its load order
         // the page worked out the asset key (it holds the game key) and the patched images; we only serve them
         const hexKey = await getMeta<string>('assetKey');
         if (hexKey) e.assetKey = Uint8Array.from(hexKey.match(/../g) ?? [], h => parseInt(h, 16));
-        e.load(recs.map(r => ({ label: r.label, tree: zipTreeFromBytes(r.zip, r.stamp), origin: r.key, disabled: !on.has(r.key) })));
+        e.load(plan.map(({ rec, disabled, orderHint }) => ({ label: rec.label, tree: zipTreeFromBytes(rec.zip, rec.stamp), origin: rec.key, disabled, orderHint })));
         for (const [path, bytes] of Object.entries(await readGenerated())) e.setGenerated(path, bytes);
         return e;
     })();

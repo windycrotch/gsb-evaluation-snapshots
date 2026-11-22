@@ -5,12 +5,35 @@
 import type { LoadedMod } from '../../mods/engine.ts';
 import { applyPluginParameters, type ModLoaderShim } from './compat.ts';
 
-interface Entry { name: string; status: boolean; description: string; parameters: Record<string, unknown>; _w?: number }
+export interface Entry { name: string; status: boolean; description: string; parameters: Record<string, unknown>; _w?: number }
 const lower = (s: string) => s.toLowerCase();
 const modded = (name: string, weight?: number): Entry => ({ name, status: true, description: 'Modded plugin', parameters: {}, ...(weight === undefined ? {} : { _w: weight }) });
 
+// What the last patch did, so a reload can undo it exactly: plugins we inserted come back out and parameter
+// objects we patched are restored before the new pass runs — nothing stacks, nothing duplicates.
+const inserted = new Set<string>();
+const origParams = new Map<string, Record<string, unknown>>();
+const cloneParams = (p: Record<string, unknown>) => JSON.parse(JSON.stringify(p ?? {})) as Record<string, unknown>;
+
+/** Undo a previous patchPluginList: remove the plugins it added and restore the parameters it changed. */
+export function unpatchPluginList(plugins: Entry[]): void {
+    if (inserted.size) {
+        for (let i = plugins.length - 1; i >= 0; i--) if (inserted.has(lower(plugins[i]!.name))) plugins.splice(i, 1);
+        inserted.clear();
+    }
+    for (const [name, params] of origParams) {
+        const p = plugins.find(x => lower(x.name) === name);
+        if (p) p.parameters = cloneParams(params);
+    }
+    origParams.clear();
+}
+
+/** Test hook: forget what was patched without a plugin list to undo it on. */
+export function resetPluginListState(): void { inserted.clear(); origParams.clear(); }
+
 /** Mutates the game's `$plugins` array in place. Call after `pre-plugins` scripts and before PluginManager.setup. */
 export function patchPluginList(plugins: Entry[], mods: LoadedMod[], shim: ModLoaderShim): { added: string[] } {
+    unpatchPluginList(plugins); // a reload re-runs this on the same list: start from the pre-mod state
     const gameSupplied = plugins.map(p => lower(p.name)); // after scripts: a script may already have inserted a plugin itself
     const added: string[] = [];
 
@@ -27,6 +50,7 @@ export function patchPluginList(plugins: Entry[], mods: LoadedMod[], shim: ModLo
         if (at >= injections.length) at = injections.length - 1;
         injections[at]!.push(modded(name, rule.weight ?? 0));
         added.push(name);
+        inserted.add(name);
     }
     for (let i = injections.length - 1; i >= 0; i--) {
         if (!injections[i]!.length) continue;
@@ -43,9 +67,15 @@ export function patchPluginList(plugins: Entry[], mods: LoadedMod[], shim: ModLo
         const w = rule.weight ?? 0;
         (w < 0 ? neg : w > 0 ? pos : mid).push(modded(name, w));
         added.push(name);
+        inserted.add(name);
     }
     plugins.push(...pos.sort((a, b) => b._w! - a._w!), ...mid, ...neg.sort((a, b) => b._w! - a._w!));
 
+    // snapshot the parameters we are about to patch, so the next reload can restore them first
+    for (const m of mods) for (const name of Object.keys(m.pluginParameters)) {
+        const p = plugins.find(x => lower(x.name) === lower(name));
+        if (p) origParams.set(lower(name), cloneParams(p.parameters));
+    }
     applyPluginParameters(mods, plugins);
     return { added };
 }

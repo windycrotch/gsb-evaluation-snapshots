@@ -156,6 +156,17 @@ export function enabledKeys(p: Profile, mods: ModRecord[]): Set<string> {
     return on;
 }
 
+export interface LoadPlan { rec: ModRecord; disabled: boolean; orderHint: number }
+/**
+ * What a session loads: every installed mod with its on/off state and where the player's order puts it.
+ * The profile's `enabled` list is the load order; anything else (dev-folder mods) goes after, in library order.
+ */
+export function planLoad(p: Profile, mods: ModRecord[]): LoadPlan[] {
+    const on = enabledKeys(p, mods);
+    const orderOf = new Map(p.enabled.map((k, i) => [k, i]));
+    return mods.map((rec, i) => ({ rec, disabled: !on.has(rec.key), orderHint: orderOf.get(rec.key) ?? p.enabled.length + i }));
+}
+
 export async function createProfile(name: string, opts: { copySavesFrom?: string; enabled?: string[] } = {}): Promise<Profile> {
     const id = Math.random().toString(36).slice(2, 10);
     const p: Profile = { id, name: name.trim() || 'New profile', created: Date.now(), enabled: opts.enabled ?? [], devAuto: false, fsDb: 'omori-fs:' + id };

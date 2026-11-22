@@ -1,4 +1,4 @@
-import { isLoaded, portValue, register, type Choice } from '../settings/registry.ts';
+import { isLoaded, portValue, register, unregisterOwner, type Choice } from '../settings/registry.ts';
 
 // window.OmoriMod: the API mod scripts program against, plus error capture that blames the right mod.
 // Everything a mod does through this API is wrapped so one broken mod logs an error instead of killing the game.
@@ -19,7 +19,14 @@ export const setCurrent = (c: typeof current) => { current = c; };
 const events = new Map<string, Set<{ fn: Listener; mod: string }>>();
 const commands = new Map<string, { fn: (args: string[], interp: any) => void; mod: string }>();
 let commandsInstalled = false;
+let commandsTarget: any = null;
+let origPluginCommand: unknown;
 const hookErrors = new WeakMap<object, number>();
+
+// Everything one mod session installed, so a reload can undo it all before the next session's scripts run:
+// hooks restore their originals, event/command tables are dropped, mod-owned settings leave the registry.
+const sessionCleanups: (() => void)[] = [];
+const sessionOwners = new Set<string>();
 
 /** Which mod does this stack trace / file name belong to? */
 export const blame = (text?: string): string | null => MOD_URL.exec(text ?? '')?.[1] ?? null;
@@ -55,15 +62,29 @@ function installCommands() {
     const GI = (globalThis as any).Game_Interpreter;
     if (!GI) return;
     commandsInstalled = true;
-    const orig = GI.prototype.pluginCommand;
+    commandsTarget = GI;
+    origPluginCommand = GI.prototype.pluginCommand;
     GI.prototype.pluginCommand = function (this: any, command: string, args: string[]) {
         const c = commands.get(String(command).toLowerCase());
         if (c) {
             try { c.fn(args, this); } catch (e) { report(c.mod, e, `plugin command "${command}"`); }
             return;
         }
-        return orig?.call(this, command, args);
+        return (origPluginCommand as any)?.call(this, command, args);
     };
+}
+
+/** Undo everything the current mod session installed. Run before a reloaded session's scripts start. */
+export function resetModSession() {
+    for (const fn of sessionCleanups.splice(0)) { try { fn(); } catch (e) { report('(mods)', e, 'could not undo a mod hook'); } }
+    events.clear();
+    commands.clear();
+    if (commandsInstalled) {
+        if (commandsTarget) commandsTarget.prototype.pluginCommand = origPluginCommand;
+        commandsInstalled = false; commandsTarget = null; origPluginCommand = undefined;
+    }
+    for (const owner of [...sessionOwners]) unregisterOwner(owner);
+    sessionOwners.clear();
 }
 
 function hook(target: any, method: string, fn: (orig: (...a: any[]) => any, ...args: any[]) => any, mod: string) {
@@ -86,7 +107,9 @@ function hook(target: any, method: string, fn: (orig: (...a: any[]) => any, ...a
         }
     };
     target[method] = wrapper;
-    return () => { if (target[method] === wrapper) target[method] = orig; };
+    const unhook = () => { if (target[method] === wrapper) target[method] = orig; };
+    sessionCleanups.push(unhook);
+    return unhook;
 }
 
 type SettingDef =
@@ -125,6 +148,7 @@ function scoped(mod: string): ScopedApi {
         safe(fn, ctx) { try { return fn(); } catch (e) { report(mod, e, ctx); return undefined; } },
         settings: {
             add(def: SettingDef) {
+                sessionOwners.add(mod);
                 if (def.type === 'action') {
                     const run = () => { try { def.run(); } catch (e) { report(mod, e, `action "${def.id}"`); } };
                     register({ id: `${mod}.${def.id}`, tab: 'mods' as const, group: mod, label: def.label, help: def.help, control: { type: 'action', button: def.button, run }, owner: mod });
@@ -159,16 +183,19 @@ export const OmoriMod = {
 };
 
 /** Game-level events mods can subscribe to with scope().on(...). Installed once the game's plugins have loaded. */
+const emitWrappers = new WeakSet<object>();
 export function installGameEvents() {
     const g = globalThis as any;
     const wrap = (target: any, method: string, event: string, pick: (...a: any[]) => unknown[]) => {
-        if (typeof target?.[method] !== 'function') return;
-        const orig = target[method];
-        target[method] = function (this: any, ...a: any[]) {
+        const orig = target?.[method];
+        if (typeof orig !== 'function' || emitWrappers.has(orig)) return; // wrapping twice would double-fire
+        const wrapper = function (this: any, ...a: any[]) {
             const r = orig.apply(this, a);
             emit(event, ...pick.apply(this, a as any));
             return r;
         };
+        emitWrappers.add(wrapper);
+        target[method] = wrapper;
     };
     wrap(g.SceneManager, 'goto', 'scene:goto', (cls: any) => [cls?.name]);
     wrap(g.Game_Map?.prototype, 'setup', 'map:setup', (id: number) => [id]);

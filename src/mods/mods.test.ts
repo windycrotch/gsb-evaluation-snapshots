@@ -115,6 +115,61 @@ describe('engine', () => {
         expect(x.hasEdits('img/a.txt')).toBe(false);
     });
 
+    test('load order follows the user’s order hint; the later replacement wins', () => {
+        const x = mk();
+        const src = (id: string, text: string, orderHint: number) => ({ label: id, tree: modTree(id, { 'files/img/a.txt': text }), orderHint });
+        x.load([src('a-mod', 'one', 2), src('b-mod', 'two', 1)]);
+        expect(x.activeMods().map(m => m.id)).toEqual(['b-mod', 'a-mod']);
+        expect(td.decode(x.resolve('img/a.txt', () => null)!)).toBe('one'); // a-mod loads later, so it wins
+        expect(x.diagnostics.some(d => d.level === 'warn' && /last one wins/.test(d.message))).toBe(true);
+        // the player swaps the order and the session reloads: the other mod now wins
+        x.load([src('a-mod', 'one', 1), src('b-mod', 'two', 2)]);
+        expect(td.decode(x.resolve('img/a.txt', () => null)!)).toBe('two');
+    });
+
+    test('reloading clears edits, resolved-file caches and diagnostics of the previous session', () => {
+        const x = mk();
+        const base = x.encrypt(te.encode('[]'));
+        x.load([
+            { label: 'bad', tree: modTree('bad-mod', { 'patches/data/T.json.patch.json': '[{"op":"remove","path":"/9"}]' }) },
+            { label: 'a', tree: modTree('a-mod', { 'files/img/a.txt': 'one' }) },
+        ]);
+        x.resolve('data/T.KEL', () => base); // logs an error against bad-mod
+        expect(x.diagnostics.some(d => d.mod === 'bad-mod')).toBe(true);
+        expect(td.decode(x.resolve('img/a.txt', () => null)!)).toBe('one');
+        // reload with bad-mod disabled and a-mod's file changed
+        x.load([{ label: 'a', tree: modTree('a-mod', { 'files/img/a.txt': 'two' }) }]);
+        expect(x.hasEdits('data/T.KEL')).toBe(false); // disabled mod's patch is gone
+        expect(x.diagnostics.every(d => d.mod !== 'bad-mod')).toBe(true); // stale diagnostics are gone
+        expect(td.decode(x.resolve('img/a.txt', () => null)!)).toBe('two'); // no stale cached bytes
+    });
+
+    test('disableMod removes a mod’s edits after loading and keeps the rest dense and working', () => {
+        const x = mk();
+        x.load([
+            { label: 'a', tree: modTree('a-mod', { 'files/img/a.txt': 'one' }) },
+            { label: 'b', tree: modTree('b-mod', { 'files/img/b.txt': 'two' }) },
+            { label: 'c', tree: modTree('c-mod', { 'files/img/c.txt': 'three' }) },
+        ]);
+        x.disableMod('b-mod', 'test reason');
+        expect(x.hasEdits('img/b.txt')).toBe(false);
+        expect(x.activeMods().map(m => [m.id, m.order])).toEqual([['a-mod', 0], ['c-mod', 1]]);
+        expect(td.decode(x.resolve('img/c.txt', () => null)!)).toBe('three');
+        expect(x.diagnostics.some(d => d.level === 'error' && d.mod === 'b-mod' && /test reason/.test(d.message))).toBe(true);
+    });
+
+    test('a mod with a broken manifest is disabled with the reason recorded; the rest still load', () => {
+        const x = mk();
+        x.load([
+            { label: 'broken', tree: tree({ 'mod.json': '{ not json', 'files/img/a.txt': 'x' }) },
+            { label: 'a', tree: modTree('a-mod', { 'files/img/a.txt': 'one' }) },
+        ]);
+        const broken = x.mods.find(m => m.origin === 'broken')!;
+        expect(broken.enabled).toBe(false);
+        expect(x.diagnostics.some(d => d.level === 'error' && /not valid JSON/.test(d.message))).toBe(true);
+        expect(td.decode(x.resolve('img/a.txt', () => null)!)).toBe('one');
+    });
+
     test('zip round trip strips a wrapping folder', () => {
         const t = zipTreeFromBytes(treeToZip(tree({ 'wrap/mod.json': '{}', 'wrap/files/a.txt': 'x' })));
         expect([...t.files].sort()).toEqual(['files/a.txt', 'mod.json']);

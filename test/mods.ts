@@ -48,6 +48,25 @@ const oneloader = zip('ol-mod', {
 });
 const invalid = zip('invalid-mod', { 'mod.json': '{ not json' });
 
+// ---- in-page reload fixtures: two mods replacing the same icon (load order decides), each with a script
+// that counts how often it ran and how often its event handler fired; one mod that adds a game plugin.
+const PNG2 = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII='), c => c.charCodeAt(0));
+const sessionMod = (id: string, png: Uint8Array) => zip(id, {
+    'mod.json': JSON.stringify({ id, name: id, version: '1' }),
+    'files/icon/icon.png': png,
+    'scripts/main.js': `(() => {
+        const m = OmoriMod.scope(${JSON.stringify(id)});
+        window[${JSON.stringify('__runs_' + id)}] = (window[${JSON.stringify('__runs_' + id)}] ?? 0) + 1;
+        m.on('t:ping', () => { window[${JSON.stringify('__pings_' + id)}] = (window[${JSON.stringify('__pings_' + id)}] ?? 0) + 1; });
+    })();`,
+});
+const sessionA = sessionMod('session-a', PNG);
+const sessionB = sessionMod('session-b', PNG2);
+const pluginMod = zip('plugin-mod', {
+    'mod.json': JSON.stringify({ manifestVersion: 1, id: 'plugin-mod', name: 'Plugin Mod', version: '1', files: { plugins: ['plugins/ToyPlugin.js'] } }),
+    'plugins/ToyPlugin.js': '/* a mod-added plugin: only its presence in $plugins is tested */',
+});
+
 // ---- other archive formats, built with real tools (7-Zip, tar). The mods sit inside a wrapper folder, as downloads often do.
 const SEVENZ = 'C:/Program Files/7-Zip/7z.exe';
 const makeDir = (root: string, files: Record<string, string>) => {
@@ -187,6 +206,56 @@ try {
     await sleep(500);
     await load(page);
     check(await page.evaluate(() => $dataItems[2].name) === 'COLD STEAK', 'a mod disabled in the profile no longer applies');
+
+    // ---- 7. in-page reload: enable, reorder, disable and rapid repeats without a page reload
+    await install(page, sessionA, sessionB, pluginMod);
+    await page.evaluate(() => ([...document.querySelectorAll('#omm-toast button')].find(b => b.textContent === 'Add to this profile') as HTMLElement).click());
+    await sleep(400);
+    // the "Apply & reload" button applies in-page; wait for its toast (cleared first, so we see the new one)
+    const applyInPage = async () => {
+        await page.evaluate(() => {
+            const t = document.getElementById('omm-toast')!;
+            t.classList.remove('show'); t.textContent = '';
+            (document.getElementById('omm-reload') as HTMLButtonElement).click();
+        });
+        await page.waitForFunction(() => document.getElementById('omm-toast')!.textContent!.includes('Mod changes applied'), { timeout: 60000 });
+    };
+    const iconLen = () => page.evaluate(async () => (await (await fetch('/icon/icon.png', { cache: 'no-store' })).arrayBuffer()).byteLength);
+    const ping = () => page.evaluate(() => { (globalThis as any).OmoriMod.emit('t:ping'); return { a: (window as any)['__pings_session-a'] ?? 0, b: (window as any)['__pings_session-b'] ?? 0 } });
+    await page.evaluate(() => { (window as any).__mark = 42; });
+
+    await applyInPage();
+    check(await page.evaluate(() => (window as any).__mark) === 42, 'in-page reload: the page did not navigate');
+    check(await iconLen() === PNG2.length, `both mods enabled: the later one (session-b) serves the icon (${PNG2.length} bytes)`);
+    const p1 = await ping();
+    check(p1.a === 1 && p1.b === 1, `both mods' scripts subscribed exactly once (${JSON.stringify(p1)})`);
+    check(await page.evaluate(() => (globalThis as any).$plugins.filter((p: any) => p.name.toLowerCase() === 'toyplugin').length) === 1, 'mod-added plugin appears in $plugins exactly once');
+
+    // reorder: move session-b above session-a -> session-a now wins the icon
+    await page.keyboard.press('F8'); await sleep(300);
+    await page.evaluate(() => { for (const c of document.querySelectorAll('#omm-panel .omm-mod')) if (c.textContent!.includes('session-b')) ([...c.querySelectorAll('button')].find(b => b.textContent === '↑') as HTMLElement).click(); });
+    await sleep(300);
+    await applyInPage();
+    check(await iconLen() === PNG.length, 'after moving session-b up, session-a (now later) serves the icon');
+
+    // rapid repeat: three applies in a burst — the final state must be consistent and hooks must not stack
+    await page.evaluate(() => { for (let i = 0; i < 3; i++) (document.getElementById('omm-reload') as HTMLButtonElement).click(); });
+    await page.waitForFunction(() => document.getElementById('omm-toast')!.textContent!.includes('Mod changes applied'), { timeout: 60000 });
+    await sleep(500);
+    const p2 = await ping();
+    check(p2.a === 2 && p2.b === 2, `repeated reloads did not stack event subscriptions (${JSON.stringify(p2)})`);
+    check(await page.evaluate(() => (globalThis as any).$plugins.filter((p: any) => p.name.toLowerCase() === 'toyplugin').length) === 1, 'repeated reloads did not duplicate the mod plugin');
+    check(await iconLen() === PNG.length, 'repeated reloads settled on the last requested configuration');
+
+    // disable session-b in-page: its icon and its event subscription are gone
+    await page.keyboard.press('F8'); await sleep(300);
+    await page.evaluate(() => { for (const c of document.querySelectorAll('#omm-panel .omm-mod')) if (c.textContent!.includes('session-b')) ([...c.querySelectorAll('button')].find(b => b.textContent === 'Disable') as HTMLElement).click(); });
+    await sleep(300);
+    await applyInPage();
+    const p3 = await ping();
+    check(p3.a === 3 && p3.b === 2, `a disabled mod no longer responds to game events (${JSON.stringify(p3)})`);
+    check(await iconLen() === PNG.length, 'a disabled mod’s asset replacement is gone (session-a still applies)');
+    check(await page.evaluate(() => (globalThis as any).OmoriMod.mods.find((m: any) => m.id === 'session-b').enabled) === false, 'the disabled mod shows as disabled in the runtime mod list');
 
     check(pageErrors.filter(m => !/boom|null/.test(m)).length === 0, `no unexpected page errors ${JSON.stringify(pageErrors.slice(0, 3))}`);
     await page.screenshot({ path: 'test/out/mods-panel.png' });
