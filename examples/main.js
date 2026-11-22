@@ -174,7 +174,7 @@ function select() {
 let streamPending = [];
 function pumpStreaming() {
   if (!STREAM) return;
-  streamPending.push(...updateStreaming(assets));
+  streamPending = updateStreaming(assets); // in-flight loads are re-reported each frame; no accumulation
 }
 const residentMB = () => assets.reduce((x, a) => x + a.residentBytes, 0) / 1048576, fullMB = () => assets.reduce((x, a) => x + a.fullBytes, 0) / 1048576;
 // ---- occlusion (?occ=1): render into a target with a depth texture, reduce depth to a 64x36

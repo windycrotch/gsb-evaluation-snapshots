@@ -34,14 +34,24 @@ export interface ClodAsset {
   fullBytes: number;
   /** Streaming assets only. */
   stream?: true;
-  loadTo?(level: number): Promise<void>;
-  loading?: Promise<void> | null;
+  /**
+   * Fetch geometry down to `level`. At most one load is in flight per asset; calls made while one
+   * is flying are merged into it. Resolves true once `level` (or finer) is resident, false on
+   * failure (see `lastError`; nothing is committed) or when the asset was disposed mid-flight.
+   */
+  loadTo?(level: number): Promise<boolean>;
+  loading?: Promise<boolean> | null;
+  /** Last streaming failure, if any. `loadedLevel`/`residentBytes` are never touched by failures. */
+  lastError?: unknown;
+  disposed?: boolean;
+  /** Drop in-flight results and release resident geometry; the asset becomes inert. */
+  dispose?(): void;
   [key: string]: unknown;
 }
 
 export function loadClod(base: string, name: string): Promise<ClodAsset>;
-export function loadClodStream(base: string, name: string, options?: { rootBytes?: number; delayMs?: number } | number): Promise<ClodAsset>;
-export function updateStreaming(assets: ClodAsset[]): Promise<void>[];
+export function loadClodStream(base: string, name: string, options?: { rootBytes?: number; delayMs?: number; fetch?: typeof fetch } | number): Promise<ClodAsset>;
+export function updateStreaming(assets: ClodAsset[]): Promise<boolean>[];
 export function loadClodMaterial(base: string, asset: ClodAsset, params?: MeshStandardMaterialParameters): MeshStandardMaterial;
 
 export class ClodBatch extends Mesh {

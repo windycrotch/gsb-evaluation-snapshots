@@ -63,17 +63,29 @@ function finishHierarchy(a) {
 // Streaming loader. The hierarchy (errors, spheres, group membership) is always resident; geometry is
 // fetched as a growing prefix of the file with HTTP Range requests: "everything down to level L".
 // This is level granularity per asset, far coarser than Nanite's 128 KB pages of cluster groups.
-// options: { rootBytes = 96 KB: geometry loaded up front, delayMs = 0: artificial latency per request, for testing }
+// options: { rootBytes = 96 KB: geometry loaded up front, delayMs = 0: artificial latency per request,
+//          fetch: custom fetch implementation (testing / custom transports) }
+//
+// Concurrency contract (all state below lives in this closure, never shared between assets):
+//  - at most one load is in flight per asset (a.loading !== null). Requests made while one is
+//    flying are merged into a pending level (finest wins) instead of stacking up, and the load
+//    chains straight to it when it commits - a fast camera dive does not queue one fetch per level.
+//  - vEnd/iEnd, a.loadedLevel, a.residentBytes and a.geometry change only in the commit of a
+//    successful load, atomically, and only if the asset was not dispose()d while the fetch was
+//    flying (generation check). A failed load leaves all of them untouched, clears a.loading so
+//    the next loadTo()/updateStreaming() retries, and resolves false instead of rejecting.
 export async function loadClodStream(base, name, options = {}) {
-  const { rootBytes = 96 * 1024, delayMs = 0 } = typeof options === 'number' ? { rootBytes: options } : options;
+  const { rootBytes = 96 * 1024, delayMs = 0, fetch: fetchImpl } = typeof options === 'number' ? { rootBytes: options } : options;
   base = String(base).replace(/\/$/, '');
-  const meta = await (await get(base + '/' + name + '.json')).json();
+  const fetcher = fetchImpl || ((u, init) => fetch(u, init));
+  const getS = async (u, init) => { const r = await fetcher(u, init); if (!r.ok) throw new Error(`${u}: HTTP ${r.status}`); return r; };
+  const meta = await (await getS(base + '/' + name + '.json')).json();
   const url = base + '/' + name + '.bin';
   const T = { Float32Array, Int8Array, Uint32Array, Int32Array };
   const range = async (k, from, to) => { // elements [from, to) of section k
     const s = meta.sections[k], C = T[s.type], b = C.BYTES_PER_ELEMENT;
     if (delayMs) await new Promise((res) => setTimeout(res, delayMs));
-    const r = await get(url, { headers: { Range: 'bytes=' + (s.offset + from * b) + '-' + (s.offset + to * b - 1) } });
+    const r = await getS(url, { headers: { Range: 'bytes=' + (s.offset + from * b) + '-' + (s.offset + to * b - 1) } });
     if (r.status !== 206) throw new Error(url + ': the server ignored the HTTP Range request, which streaming needs');
     return new C(await r.arrayBuffer());
   };
@@ -89,49 +101,95 @@ export async function loadClodStream(base, name, options = {}) {
   a.pos = new Float32Array(0); a.nrm = new Int8Array(0); a.uv = new Float32Array(0); a.idx = new Uint32Array(0);
   let vEnd = 0, iEnd = 0;
   const grow = (old, add) => { const n = new old.constructor(old.length + add.length); n.set(old); n.set(add, old.length); return n; };
-  a.loading = null; a.requests = 0;
-  // fetch geometry down to `level` and swap in a bigger geometry
+  let generation = 0, pendingLevel = null;
+  a.loading = null; a.requests = 0; a.lastError = null; a.disposed = false;
+  const rangeFor = (level) => LR.find((l) => l.level === level) || LR[LR.length - 1];
+  // swap in the bigger geometry. Runs only on the success path with a matching generation, so a
+  // late completion can never overwrite a newer scene, and only the previous geometry of THIS
+  // asset is disposed - after every live batch has been re-pointed at the new one.
+  const commit = (r, p, n, u, i) => {
+    a.pos = grow(a.pos, p); a.nrm = grow(a.nrm, n); a.uv = grow(a.uv, u); a.idx = grow(a.idx, i);
+    vEnd = r.vertexEnd; iEnd = r.indexEnd;
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(a.pos, 3));
+    geo.setAttribute('normal', new THREE.BufferAttribute(a.nrm, 4, true));
+    geo.setAttribute('uv', new THREE.BufferAttribute(a.uv, 2));
+    geo.setIndex(new THREE.BufferAttribute(a.idx, 1));
+    geo.boundingSphere = a.sphere;
+    const old = a.geometry; a.geometry = geo;
+    for (const b of a.batches) b.geometry = geo;
+    if (old) old.dispose();
+    a.loadedLevel = r.level; a.residentBytes = r.bytes;
+  };
+  // fetch geometry down to `level` and swap in a bigger geometry. Resolves true once `level` (or
+  // finer) is resident, false when the load failed (a.lastError has the reason) or the asset was
+  // disposed mid-flight. Never rejects, so frame loops can await it without a try/catch.
   a.loadTo = (level) => {
-    if (a.loading) return a.loading;
-    const r = LR.find((l) => l.level === level) || LR[LR.length - 1];
-    if (r.vertexEnd <= vEnd && r.indexEnd <= iEnd) { a.loadedLevel = Math.min(a.loadedLevel, r.level); return Promise.resolve(); }
+    if (a.disposed) return Promise.resolve(false);
+    const r = rangeFor(level);
+    if (r.vertexEnd <= vEnd && r.indexEnd <= iEnd) { // already resident (levels can share a prefix)
+      if (r.level < a.loadedLevel) a.loadedLevel = r.level;
+      return Promise.resolve(true);
+    }
+    if (a.loading) { // merge, don't stack: remember the finest level asked for during the flight
+      if (pendingLevel === null || r.level < pendingLevel) pendingLevel = r.level;
+      return a.loading;
+    }
+    const gen = generation;
     a.loading = (async () => {
-      const [p, n, u, i] = await Promise.all([range('positions', vEnd * 3, r.vertexEnd * 3), range('normals', vEnd * 4, r.vertexEnd * 4), range('uvs', vEnd * 2, r.vertexEnd * 2), range('indices', iEnd, r.indexEnd)]);
-      a.requests += 4;
-      a.pos = grow(a.pos, p); a.nrm = grow(a.nrm, n); a.uv = grow(a.uv, u); a.idx = grow(a.idx, i);
-      vEnd = r.vertexEnd; iEnd = r.indexEnd;
-      const geo = new THREE.BufferGeometry();
-      geo.setAttribute('position', new THREE.BufferAttribute(a.pos, 3));
-      geo.setAttribute('normal', new THREE.BufferAttribute(a.nrm, 4, true));
-      geo.setAttribute('uv', new THREE.BufferAttribute(a.uv, 2));
-      geo.setIndex(new THREE.BufferAttribute(a.idx, 1));
-      geo.boundingSphere = a.sphere;
-      const old = a.geometry; a.geometry = geo;
-      for (const b of a.batches) b.geometry = geo;
-      if (old) old.dispose();
-      a.loadedLevel = r.level; a.residentBytes = r.bytes; a.loading = null;
+      let target = r;
+      for (;;) {
+        try {
+          a.requests += 4;
+          const [p, n, u, i] = await Promise.all([range('positions', vEnd * 3, target.vertexEnd * 3), range('normals', vEnd * 4, target.vertexEnd * 4), range('uvs', vEnd * 2, target.vertexEnd * 2), range('indices', iEnd, target.indexEnd)]);
+          if (gen !== generation) return false; // disposed while flying: drop the result, touch nothing
+          commit(target, p, n, u, i);
+        } catch (err) {
+          if (gen !== generation) return false;
+          // failure: loadedLevel/residentBytes/geometry keep describing what is actually resident.
+          a.lastError = err; pendingLevel = null; a.loading = null;
+          if (a.wantLevel === 255) a.wantLevel = target.level; // re-arm so the next updateStreaming retries
+          return false;
+        }
+        const pl = pendingLevel; pendingLevel = null;
+        if (pl === null || pl >= a.loadedLevel) { a.loading = null; return true; }
+        target = rangeFor(pl);
+        if (target.vertexEnd <= vEnd && target.indexEnd <= iEnd) { a.loading = null; return true; }
+      }
     })();
     return a.loading;
+  };
+  // tear the streaming state down: in-flight requests are allowed to finish but their results are
+  // dropped (generation bump), and the resident geometry is released. After dispose() the asset
+  // is inert: loadTo() resolves false and updateStreaming() skips it.
+  a.dispose = () => {
+    if (a.disposed) return;
+    a.disposed = true; generation++; pendingLevel = null; a.loading = null;
+    const g = a.geometry; a.geometry = null;
+    if (g) g.dispose();
   };
   // root "page": as many top levels as fit in rootBytes, but always every cluster of the virtual root group
   let rootLevel = LR[0].level;
   for (const l of LR) if (l.bytes <= rootBytes) rootLevel = l.level;
   rootLevel = Math.min(rootLevel, a.minMemberLevel[0]);
   a.loadedLevel = 255;
-  await a.loadTo(rootLevel);
+  if (!await a.loadTo(rootLevel)) throw a.lastError || new Error(url + ': failed to load the root level');
   a.rootLevel = rootLevel;
   return a;
 }
 
 /**
  * Call once per frame after ClodSelector.select() for assets from loadClodStream: starts a fetch for
- * every asset whose last selection wanted finer levels than are loaded. Returns the pending promises.
+ * every asset whose last selection wanted finer levels than are loaded. If a load is already in
+ * flight the request is merged into it (the in-flight promise is returned, no second fetch). The
+ * returned promises resolve true on success and false on failure; failures are retried by the next
+ * call as long as the selection keeps asking for the missing level.
  */
 export function updateStreaming(assets) {
   const pending = [];
   for (const a of assets) {
-    if (!a.stream) continue;
-    if (a.wantLevel < a.loadedLevel && !a.loading) pending.push(a.loadTo(a.wantLevel));
+    if (!a.stream || a.disposed) continue;
+    if (a.wantLevel < a.loadedLevel) pending.push(a.loadTo(a.wantLevel));
     a.wantLevel = 255;
   }
   return pending;

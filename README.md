@@ -142,11 +142,13 @@ Controls: drag to look, WASD and Q/E to fly, shift to go faster. The panel switc
 **`loadClod(base, name)`** → `Promise<asset>`
 Fetches `<base>/<name>.json` and `<base>/<name>.bin` whole. The asset holds `meta` (the JSON), `geometry` (a `BufferGeometry` with every level in it; do not draw it directly), `sphere` (bounding sphere in model space) and the hierarchy arrays.
 
-**`loadClodStream(base, name, { rootBytes = 96 * 1024, delayMs = 0 })`** → `Promise<asset>`
-Loads the hierarchy and the coarsest levels that fit in `rootBytes`, and fetches finer levels later with Range requests. Use with `updateStreaming`. Useful fields: `loadedLevel` (0 means everything is loaded), `residentBytes`, `fullBytes`. Streaming assets cannot be used with `DiscreteLodSet`.
+**`loadClodStream(base, name, { rootBytes = 96 * 1024, delayMs = 0, fetch })`** → `Promise<asset>`
+Loads the hierarchy and the coarsest levels that fit in `rootBytes`, and fetches finer levels later with Range requests. Use with `updateStreaming`. Useful fields: `loadedLevel` (0 means everything is loaded), `residentBytes`, `fullBytes`. Streaming assets cannot be used with `DiscreteLodSet`. `fetch` overrides `globalThis.fetch` (testing, custom transports). `asset.dispose()` drops in-flight results and releases the resident geometry.
 
-**`updateStreaming(assets)`** → `Promise[]`
-Call once per frame after `select()`. Starts a fetch for each streaming asset whose last selection wanted finer levels than it has.
+At most one load is in flight per asset: requests made while one is flying are merged into it (finest level wins) instead of stacking up. A failed load (network error, or a server that ignores `Range`) commits nothing — `loadedLevel`/`residentBytes` keep describing what is actually resident — and is retried by the next `updateStreaming` call. `asset.loadTo(level)` resolves `true` when the level is resident and `false` on failure; it never rejects.
+
+**`updateStreaming(assets)`** → `Promise<boolean>[]`
+Call once per frame after `select()`. Starts a fetch for each streaming asset whose last selection wanted finer levels than it has, or merges with the fetch already in flight.
 
 **`loadClodMaterial(base, asset, params?)`** → `MeshStandardMaterial`
 Convenience: wires up the base colour, normal and occlusion/roughness/metal textures and the material factors that the preprocessor copied out of the GLB. `params` overrides anything.
