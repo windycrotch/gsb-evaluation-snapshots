@@ -108,8 +108,29 @@ $('airportBtn').onclick = () => { $('airportList').hidden = !$('airportList').hi
 $('planeGrid').innerHTML = Object.values(AIRCRAFT).map((a) => `<button data-id="${a.id}">${a.name}<span>${a.power || a.role || ''}</span></button>`).join('');
 $('planeBtn').onclick = () => { $('planeList').hidden = !$('planeList').hidden; $('airportList').hidden = true; };
 $('planeGrid').onclick = (e) => { const b = e.target.closest('button'); if (b) { $('planeList').hidden = true; setAircraft(b.dataset.id); } };
-$('faults').innerHTML = Object.entries(FAILURES).map(([k, f]) => `<button data-f="${k}">${f.name}</button>`).join('') + '<button data-f="fix">Fix everything</button>';
-$('faults').onclick = (e) => { const b = e.target.closest('button'); if (!b) return; if (b.dataset.f === 'fix') { systems.repair(); toast('All faults cleared', '', 1.4); } else { systems.fail(b.dataset.f); toast(FAILURES[b.dataset.f].name, '', 1.6); } };
+// the faults panel shows the live fault table: active faults are lit, clicking one
+// repairs just it, and random failures (same table, so no duplicates) can be armed here
+const RANDOM_RATES = [[0, 'off'], [1, 'realistic'], [60, 'frequent']];
+$('faults').innerHTML = Object.entries(FAILURES).map(([k, f]) => `<button data-f="${k}">${f.name}</button>`).join('')
+  + '<button data-f="rand"></button><button data-f="fix">Fix everything</button>';
+function drawFaults() {
+  for (const b of $('faults').querySelectorAll('button[data-f]')) {
+    const k = b.dataset.f;
+    if (k === 'rand') { const i = Math.max(0, RANDOM_RATES.findIndex(([r]) => r === systems.randomRate)); b.textContent = `Random failures: ${RANDOM_RATES[i][1]}`; }
+    else if (k !== 'fix') b.classList.toggle('on', !!systems.failed[k]);
+  }
+}
+drawFaults();
+setInterval(() => { if (!$('faults').hidden) drawFaults(); }, 500);   // random faults can arrive while the panel is open
+$('faults').onclick = (e) => {
+  const b = e.target.closest('button'); if (!b) return;
+  const k = b.dataset.f;
+  if (k === 'fix') { systems.repair(); toast('All faults cleared', '', 1.4); }
+  else if (k === 'rand') { const i = Math.max(0, RANDOM_RATES.findIndex(([r]) => r === systems.randomRate)); systems.randomRate = RANDOM_RATES[(i + 1) % RANDOM_RATES.length][0]; }
+  else if (systems.failed[k]) { systems.repair(k); toast(`${FAILURES[k].name} repaired`, '', 1.4); }
+  else systems.fail(k);                                    // the event queue announces it, same as a random one
+  drawFaults();
+};
 $('airportGrid').onclick = (e) => { const b = e.target.closest('button'); if (b) { $('airportList').hidden = true; setAirport(b.dataset.id); } };
 $('icao').addEventListener('keydown', async (e) => {
   if (e.key !== 'Enter') return;
@@ -541,7 +562,10 @@ function frame(now) {
       oat: o.oat, lwc: clouds.liquidAt(fm.pos[1], fm.pos[0], o.alt), precip: o.alt < S.weather.clouds.low.top ? S.weather.precip : 0,
       humidity: THREE.MathUtils.clamp(1 - (S.weather.tempC - S.weather.dewC) / 18, 0.2, 1), lat: S.airport.lat, variation: nav.out.variation || 0,
     });
-    for (const ev of systems.events.splice(0)) if (ev === 'seized') toast('Engine seized', '', 3);   // never leave the pilot staring at a broken state
+    for (const ev of systems.events.splice(0)) {   // never leave the pilot staring at a broken state
+      if (ev === 'seized') toast('Engine seized', '', 3);
+      else if (FAILURES[ev]) toast(FAILURES[ev].name, 'Fault', 2.2);
+    }
     if (fm.crashed && !wasCrashed) { ap.on = false; toast(fm.crashed, 'R to restart', 1e6); sound.touch(1); }
     if (fm.touchdowns !== S.lastTouch) {
       S.lastTouch = fm.touchdowns;

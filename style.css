@@ -87,5 +87,7 @@ body.record #credit a { pointer-events: none; }
 #faults { position: fixed; right: clamp(18px, 2.4vw, 36px); bottom: 58px; z-index: 5; padding: 14px 18px; background: rgba(10, 12, 15, 0.82); backdrop-filter: blur(18px); border: 1px solid var(--line); display: grid; gap: 2px; }
 #faults button { text-align: left; padding: 5px 0; font-size: 13px; font-weight: 600; color: var(--dim); }
 #faults button:hover { color: var(--accent); }
+#faults button.on { color: var(--accent); }
+#faults button.on::before { content: '\25CF\00A0 '; font-size: 8px; vertical-align: 2px; }
 #faults button:last-child { margin-top: 6px; color: var(--ink); }
 body.record #menu, body.record #hud, body.record #toast, body.record #keysBtn, body.record #faultsBtn, body.record #keys, body.record #faults, body.record #credit, body.record #load { opacity: 0 !important; pointer-events: none; }

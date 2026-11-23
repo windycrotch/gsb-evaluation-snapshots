@@ -52,8 +52,31 @@ export class Systems {
     Object.assign(fm.fx, { ice: 0, power: 1, cut: false, rough: 0, starter: true, flapPower: true, flapFrozen: false, trimOffset: 0 });
   }
 
-  fail(name) { if (FAILURES[name] && !this.failed[name]) { this.failed[name] = true; this.events.push(name); } }
-  repair() { this.failed = {}; this.oilLeft = 1; this.seized = false; this.fm.fx.trimOffset = 0; this.trapPitot = this.trapStatic = null; }
+  // A fault's life: injected (by hand or by luck), it degrades things until repaired.
+  // Manual and random injection share this one table, so a fault can never be active
+  // twice, and re-injecting an active fault is a no-op: it must not reset the damage
+  // done so far. Returns true only when the fault was newly injected.
+  fail(name, src = 'manual') {
+    if (!FAILURES[name] || this.failed[name]) return false;
+    this.failed[name] = { src, at: this.fm.time || 0 };
+    this.events.push(name);
+    return true;
+  }
+  // repair('pitot') clears one fault, repair() clears them all. The residual
+  // instrument errors (trapped pressure, toppled gyros, runaway trim) are not
+  // zeroed here: update() converges them back to the truth over a few seconds,
+  // the way the real hardware settles. What a repair must clear for good is the
+  // damage that would otherwise persist — an empty sump, a seized engine.
+  repair(name) {
+    if (name) { if (!this.failed[name]) return false; delete this.failed[name]; this.clearFaultState(name); return true; }
+    const had = Object.keys(this.failed).length > 0;
+    this.failed = {};
+    this.clearFaultState();
+    return had;
+  }
+  clearFaultState(name) {
+    if (!name || name === 'oil') { this.oilLeft = 1; this.seized = false; this.seizeT = 0; }
+  }
   // align the heading gyro with the compass, as a pilot does every quarter of an hour
   syncHeading() { this.hdgErr = wrap(this.compass - (this.fm.out.heading - this.variation)); }
 
@@ -63,9 +86,10 @@ export class Systems {
     const fm = this.fm, o = fm.out, fx = fm.fx, sw = this.sw, F = this.failed, eng = fm.def.engine;
     this.variation = (wx.variation || 0) * D2R;
 
-    // ---- random failures
+    // ---- random failures: same table as manual injection, so the two never
+    // duplicate or overwrite each other
     if (this.randomRate > 0 && !o.onGround) {
-      for (const k in FAILURES) if (!F[k] && Math.random() < this.randomRate * dt / (FAILURES[k].mtbf * 3600)) this.fail(k);
+      for (const k in FAILURES) if (!F[k] && Math.random() < this.randomRate * dt / (FAILURES[k].mtbf * 3600)) this.fail(k, 'random');
     }
 
     // ---- fuel: two tanks and a selector
@@ -90,10 +114,18 @@ export class Systems {
     if (wet > 0.05 && band > 0 && !(sw.pitotHeat && this.powered)) this.pitotIce = Math.min(1.2, this.pitotIce + wet * band * dt / 60);
     else this.pitotIce = Math.max(0, this.pitotIce - dt * (sw.pitotHeat && this.powered ? 0.05 : wx.oat > 1 ? 0.02 : 0));
     const pitotBlocked = F.pitot || this.pitotIce >= 1;
-    if (pitotBlocked && !this.trapPitot) this.trapPitot = o.staticP + o.dynP;       // ram inlet and drain both sealed: the pressure is trapped
-    if (!pitotBlocked) this.trapPitot = null;
-    if (F.static && !this.trapStatic) this.trapStatic = { p: o.staticP, alt: o.altInd };
-    if (!F.static) this.trapStatic = null;
+    const ram = o.staticP + o.dynP;
+    if (pitotBlocked) { if (this.trapPitot === null) this.trapPitot = ram; }   // ram inlet and drain both sealed: the pressure is trapped
+    else if (this.trapPitot !== null) {                                        // blockage cleared: the trapped air leaks away over a few seconds
+      this.trapPitot += (ram - this.trapPitot) * Math.min(1, dt / 4);
+      if (Math.abs(ram - this.trapPitot) < 2) this.trapPitot = null;
+    }
+    if (F.static) { if (!this.trapStatic) this.trapStatic = { p: o.staticP, alt: o.altInd }; }
+    else if (this.trapStatic) {                                                // port cleared: the gauges settle back onto the real static pressure
+      this.trapStatic.p += (o.staticP - this.trapStatic.p) * Math.min(1, dt / 4);
+      this.trapStatic.alt += (o.altInd - this.trapStatic.alt) * Math.min(1, dt / 4);
+      if (Math.abs(o.staticP - this.trapStatic.p) < 2 && Math.abs(o.altInd - this.trapStatic.alt) < 0.5) this.trapStatic = null;
+    }
 
     // ---- carburettor ice (carburetted engines only): worst in mild, humid air at low power
     let power = 1, rough = 0;
@@ -140,6 +172,7 @@ export class Systems {
     fx.starter = this.powered; fx.flapPower = this.powered; fx.flapFrozen = !!F.flaps;
     // ---- trim runaway: the electric trim drives nose-up until someone pulls the breaker (repair)
     if (F.trim && this.powered) fx.trimOffset = Math.min(0.7, fx.trimOffset + dt * 0.035);
+    else if (fx.trimOffset) fx.trimOffset -= Math.sign(fx.trimOffset) * Math.min(Math.abs(fx.trimOffset), dt * 0.1);   // the pilot re-trims once it stops
 
     // ---- vacuum pump and the gyros it spins
     const pump = !F.vacuum && fm.rpm > 250 ? clamp((fm.rpm - 250) / 1100, 0, 1) * 5.2 : 0;
