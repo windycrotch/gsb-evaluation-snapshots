@@ -341,7 +341,13 @@ export class UpscalerCore<THandle = GPUTexture> {
         this._deviceLost = false;
         const generation = this._generation;
         void device.lost.then(() => {
-            if (generation === this._generation) this._deviceLost = true;
+            if (generation !== this._generation) return;
+            this._deviceLost = true;
+            // Nothing in flight will ever land: drop the split-frame marker
+            // and the pending compiles so no residue of the lost device's
+            // last frame survives into a later configure().
+            this._guidesPending = false;
+            this._requests.clear();
         });
         this._constants = new ConstantsBuffer(device);
         if (this._gpuTiming) this._timer = new GpuTimer(device);
@@ -609,6 +615,9 @@ export class UpscalerCore<THandle = GPUTexture> {
      * True while a split frame is in flight — {@link dispatchGuides} has run
      * this frame and {@link dispatchUpscale} hasn't yet. Lets a driver decide
      * between finishing the split frame and the monolithic {@link dispatch}.
+     * A frame left pending is retired — this returns `false` again — by the
+     * next {@link beginFrame}, or by `configure()`, `resetHistory()`,
+     * `dispose()`, or device loss.
      */
     get guidesPending(): boolean {
         return this._guidesPending;
@@ -649,8 +658,13 @@ export class UpscalerCore<THandle = GPUTexture> {
         }
     }
 
-    /** Drops all temporal history on the next dispatch (camera cut etc.). */
+    /**
+     * Drops all temporal history on the next dispatch (camera cut etc.). A
+     * split frame in flight is dropped with it: its late stage must not run
+     * against reset state, so the next frame starts from clean history.
+     */
     resetHistory(): void {
+        this._abortSplitFrame();
         this._pendingReset = true;
         this._jitter.reset();
     }
@@ -664,13 +678,28 @@ export class UpscalerCore<THandle = GPUTexture> {
      * paths, or when jitter is disabled (see the `jitter` config flag — the
      * temporal path still reprojects and accumulates, it just doesn't add the
      * sub-pixel offset).
+     *
+     * This call is also the frame boundary that retires a split frame whose
+     * {@link dispatchUpscale} never came (a dropped frame): the half-finished
+     * frame is discarded and history resets, so its stale guides can't leak
+     * into this one.
      * @returns This frame's jitter (the {@link jitter} object), or `null` when
      * there is nothing to apply
      */
     beginFrame(): JitterOffset | null {
+        if (this._guidesPending) this._abortSplitFrame();
         if (!this._jittering) return null;
         this._jitter.advance();
         return this.jitter;
+    }
+
+    // A split frame whose dispatchUpscale() never came is discarded, not
+    // completed: the early stage's products describe a frame that never
+    // accumulated, so the pending marker is dropped and the next frame
+    // reprojects from a reset history instead of across the gap.
+    private _abortSplitFrame(): void {
+        this._guidesPending = false;
+        this._pendingReset = true;
     }
 
     /**
@@ -766,6 +795,10 @@ export class UpscalerCore<THandle = GPUTexture> {
      * final color afterwards, then finish with {@link dispatchUpscale}. On
      * the `guides` path this is the whole frame. Queue ordering makes the
      * outputs visible to any work submitted afterwards — no explicit sync.
+     * A split frame left unfinished is discarded (with a history reset) by
+     * the next {@link beginFrame}, `configure()`, or `resetHistory()` —
+     * while it is in flight, {@link dispatch} and a second `dispatchGuides`
+     * throw rather than mix the two frame forms.
      * @param inputs - Depth + velocity (+ optional reset/deltaTime)
      * @param camera - This frame's camera facts
      */
@@ -901,6 +934,7 @@ export class UpscalerCore<THandle = GPUTexture> {
         this._destroyTextures();
         this._constants?.dispose();
         this._reprojectBuffer?.destroy();
+        this._reprojectBuffer = null;
         this._timer?.dispose();
         this._timer = null;
         this._initialized = false;
@@ -1602,6 +1636,7 @@ export class UpscalerCore<THandle = GPUTexture> {
             history: null,
         };
         this._guides = null;
+        // A split frame in flight dies with its working set.
         this._guidesPending = false;
         this._history = null;
         this._locks = null;

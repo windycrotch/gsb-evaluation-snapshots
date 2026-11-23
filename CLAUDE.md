@@ -400,6 +400,13 @@ composite.
   replacing the map. (5) Frame-end bookkeeping (index flips, `_frameIndex`,
   `_pendingReset`) happens exactly once per frame: in `dispatch()`, in
   `dispatchUpscale()`, or — guides path only — in `dispatchGuides()`.
+  (6) A split frame abandoned before `dispatchUpscale()` is retired, not
+  completed: `beginFrame()` (the frame boundary), `configure()`,
+  `resetHistory()`, `dispose()` and device loss all clear `_guidesPending`,
+  and the abort also sets `_pendingReset` so the next frame reprojects from a
+  reset history instead of across the gap. While a split frame is in flight,
+  `dispatch()` and a second `dispatchGuides()` throw — non-destructively, so
+  the frame can still be finished with `dispatchUpscale()`.
   `examples/12-temporal-guides` is the live reference + headless-verification
   target (it exposes `window.__guidesExample` — including `MomentsPass` and
   `THREE` — for the CDP harness). **TSL surface (M4):**

@@ -212,7 +212,11 @@ whatever samples the output.
   motion → the early guides), and `dispatchUpscale` / `encodeUpscale` finishes with
   color. Effects that want the guides run in between. With the `encode` forms,
   submit the guides encoder before calling `encodeUpscale`, for the same
-  constants-buffer reason.
+  constants-buffer reason. While a split frame is in flight (`guidesPending`),
+  `dispatch()` and a second `dispatchGuides()` throw. A split frame you never
+  finish is discarded — with a history reset — by the next `beginFrame()`, or by
+  `configure()` / `resetHistory()` / `dispose()`; it never carries over into the
+  next frame.
 - **Engines with an open render pass.** The core encodes compute passes, so an
   engine that keeps a render pass open across its frame (Babylon, for one) must
   close it before handing over its encoder, or dispatch on its own encoder after
