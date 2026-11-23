@@ -68,6 +68,7 @@ const Bitcrusher = ({ bits = 4, normfreq = 0.1 }: Props) => {
 
     return () => {
       if (nodeRef.current) removeAudioNode("bitcrusher");
+      nodeRef.current?.dispose();
       nodeRef.current?.node.disconnect();
     };
   }, [audioCtx, createNode, removeAudioNode]);
@@ -114,30 +115,40 @@ export const items = [
 
 ```tsx
 const bitcrusher = await createBitcrusherNode(context, 4, 0.1);
-const bitcrusherNode = bitcrusher.node;
 
-const setBits = (newBits: number) => {
-  bitcrusherNode.port.postMessage({ type: "set-bits", data: newBits });
-};
-
-// Set the bits inside worklet anytime you need
-setBits(4);
+// Updates the live Rust module without rebuilding it.
+// The last legal value wins; illegal values (0, negative, non-integers) are
+// rejected and reported instead of silently ignored.
+bitcrusher.setBits(8);
 ```
 
 ### Norm Freq
 
 ```tsx
 const bitcrusher = await createBitcrusherNode(context, 4, 0.1);
-const bitcrusherNode = bitcrusher.node;
 
-const setNormfreq = (newFreq: number) => {
-  if (!nodeRef) return;
-  nodeRef.port.postMessage({ type: "set-normfreq", data: newFreq });
-};
-
-// Set the norm freq inside worklet anytime you need
-setNormfreq(1);
+// Applies to the next render block.
+bitcrusher.setNormfreq(1);
 ```
+
+### Handling rejected parameters
+
+```tsx
+const bitcrusher = await createBitcrusherNode(context, 4, 0.1, {
+  onParameterError: ({ parameter, value, message }) => {
+    // e.g. "Invalid bits: expected an integer between 1 and 32, received 0"
+    console.warn(message);
+  },
+});
+
+// This is rejected: the previous bit depth keeps playing.
+bitcrusher.setBits(0);
+```
+
+Calling a setter before the WASM module finished compiling is safe: the value
+is queued and applied once initialization completes. Call `dispose()` (or
+`node.disconnect()`) when you are done so the worklet releases its module and
+message port.
 
 ## Video Example
 

@@ -20,6 +20,8 @@
     "build": "tsc && vite build",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "format": "prettier --write src/**/*.{css,js,tsx,json}",
+    "test": "node --test \"tests/*.test.ts\"",
+    "test:wasm": "node ../../scripts/build-test-wasm.mjs && node --test \"tests/*.test.ts\"",
     "preview": "vite preview",
     "commit": "npx cz"
   },

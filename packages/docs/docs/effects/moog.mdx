@@ -67,6 +67,7 @@ const Moog = ({ resonance = 4, cutoff = 0.1 }: Props) => {
 
     return () => {
       if (nodeRef.current) removeAudioNode("moog");
+      nodeRef.current?.dispose();
       nodeRef.current?.node.disconnect();
     };
   }, [audioCtx, createNode, removeAudioNode]);
@@ -113,26 +114,35 @@ export const items = [
 
 ```tsx
 const moog = await createMoogNode(context);
-const moogNode = moog.node;
 
-const setResonance = (resonance: number) => {
-  moogNode.port.postMessage({ type: "set-resonance", data: resonance });
-};
-
-// Set the bits inside worklet anytime you need
-setResonance(1);
+// Updates the live Rust module. The four-pole filter state is preserved, so
+// there is no click when the value changes.
+moog.setResonance(1);
 ```
 
 ### Cutoff
 
 ```tsx
 const moog = await createMoogNode(context);
-const moogNode = moog.node;
 
-const setCutoff = (cutoff: number) => {
-  moogNode.port.postMessage({ type: "set-cutoff", data: cutoff });
-};
-
-// Set the bits inside worklet anytime you need
-setCutoff(1);
+// 0 to 1. Applies to the next render block without rebuilding the filter.
+moog.setCutoff(1);
 ```
+
+### Handling rejected parameters
+
+```tsx
+const moog = await createMoogNode(context, 0.065, 3.5, {
+  onParameterError: ({ parameter, value, message }) => {
+    // e.g. "Invalid cutoff: expected a number between 0 and 1, received 1.4"
+    console.warn(message);
+  },
+});
+
+// Rejected: the filter keeps running with the previous cutoff.
+moog.setCutoff(1.4);
+```
+
+Setters can be called before the WASM module is ready: values are queued and
+applied when initialization finishes. Call `dispose()` (or `node.disconnect()`)
+to release the worklet's module and port when the node is no longer needed.

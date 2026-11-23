@@ -3,7 +3,7 @@ import type {
   AudioWorkletEventMessage,
   AudioWorkletInitWasmEvent,
 } from "./types";
-import { initWasm } from "./utils";
+import { createWasmLoader } from "./utils";
 
 export interface PinkNoiseEventInitModule
   extends AudioWorkletEventMessage<PinkNoiseOptions> {
@@ -19,6 +19,8 @@ class PinkNoiseWorklet extends AudioWorkletProcessor {
   worklet: PinkNoiseModule | null = null;
   bufferSize = 4096;
 
+  private readonly loadWasm = createWasmLoader(init, this.port);
+
   constructor() {
     super();
 
@@ -27,9 +29,12 @@ class PinkNoiseWorklet extends AudioWorkletProcessor {
 
   onmessage = (event: AudioWorkletInitWasmEvent | PinkNoiseEventInitModule) => {
     // Handle loading WASM module
-    initWasm(event as AudioWorkletInitWasmEvent, init, this.port);
+    this.loadWasm.handle(event as AudioWorkletInitWasmEvent);
 
     if (event.type === "init-module") {
+      // Re-initialising would throw away the generator's position, so only
+      // build the module the first time (or after a failed attempt).
+      if (this.worklet) return;
       const { bufferSize = 4096 } = event.data;
       this.worklet = PinkNoiseModule.new(bufferSize);
     }

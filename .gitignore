@@ -26,3 +26,9 @@ dist-ssr
 # Rust specific
 modules/*/target
 modules/target
+
+# Generated WASM fixtures for the integration tests
+packages/clawdio/tests/fixtures/wasm/
+
+# Generated Rust/WASM build output (workspace packages)
+modules/*/pkg

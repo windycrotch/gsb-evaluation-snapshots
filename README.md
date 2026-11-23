@@ -106,6 +106,32 @@ Then you can create a Rust WASM module that handles processing:
 1. Build WASM modules: `yarn build:modules`.
 1. Build the library code: `yarn build`
 
+### Testing
+
+- `yarn test` — unit/integration tests for the worklet logic (Node's built-in
+  test runner, no browser needed).
+- `yarn test:wasm` — builds the Rust modules to WASM first, then runs the same
+  tests *including* the suite that drives the real `setBits` / `setCutoff` /
+  `setResonance` exports. Requires Rust, the `wasm32-unknown-unknown` target and
+  `wasm-bindgen-cli` 0.2.100 (`cargo install wasm-bindgen-cli --version 0.2.100`).
+- `cargo test -p clawdio-bitcrusher -p clawdio-moog` (from `modules/`) — Rust
+  tests for parameter validation and per-sample state continuity.
+
+#### Live parameter updates
+
+Each effect worklet keeps **one** Rust module for its whole lifetime so the
+per-sample state (bitcrusher phaser, Moog's four filter poles) never resets.
+Parameter messages are validated and applied in place:
+
+- Updates that arrive before `init-module` are queued and replayed once the
+  module is constructed, so dragging a slider during startup is not lost.
+- Illegal values (e.g. `bits = 0`, `cutoff > 1`, `NaN`) are rejected, the last
+  legal value keeps playing, and the worklet posts a
+  `{ type: "parameter-error", data: { parameter, value, message } }` message.
+- Call `dispose()` on the returned node (or `node.disconnect()`) when done: the
+  worklet frees its WASM module and closes its port. `pagehide`/`beforeunload`
+  also trigger this automatically.
+
 ### Release
 
 1. Increment version in `package.json` of your module (aka `clawdio`, or a Rust module)
