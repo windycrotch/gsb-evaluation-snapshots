@@ -121,6 +121,10 @@ export class App {
         this.nodes = [];
         this.connections = [];
         this.audioCtx = null;
+        // Promise guard so concurrent startAudio() calls share a single AudioContext.
+        this._audioStartPromise = null;
+        // Monotonic token so only the most recent graph load is allowed to apply.
+        this._graphLoadToken = 0;
         this.lastAudioSourceNode = null;
         this.activeSourceForLoad = null;
         this.selectedNodes = new Set();
@@ -277,35 +281,51 @@ export class App {
             }
             return;
         }
-        this.audioCtx = new (window.AudioContext || window.webkitAudioContext)(
-            { latencyHint: 0.01 }
-        );
-
-        console.log('Base Latency: ' + this.audioCtx.baseLatency);
-        console.log('Output Latency: ' + this.audioCtx.outputLatency);
-
-        AudioUtils.init(this.audioCtx);
-        if (SampleHoldNodeUI.shouldUseWorklet(this.audioCtx)) {
-            try {
-                await SampleHoldNodeUI.ensureWorklet(this.audioCtx);
-            } catch (err) {
-                console.error('Sample & Hold worklet preload failed', err);
-            }
+        // Concurrent callers while the first start is still in flight share its
+        // promise instead of constructing a second AudioContext.
+        if (this._audioStartPromise) {
+            return this._audioStartPromise;
         }
-        if (AllpassNodeUI.shouldUseWorklet(this.audioCtx)) {
-            try {
-                await AllpassNodeUI.ensureWorklet(this.audioCtx);
-            } catch (err) {
-                console.error('Allpass worklet preload failed', err);
+        const startPromise = (async () => {
+            this.audioCtx = new (window.AudioContext || window.webkitAudioContext)(
+                { latencyHint: 0.01 }
+            );
+
+            console.log('Base Latency: ' + this.audioCtx.baseLatency);
+            console.log('Output Latency: ' + this.audioCtx.outputLatency);
+
+            AudioUtils.init(this.audioCtx);
+            if (SampleHoldNodeUI.shouldUseWorklet(this.audioCtx)) {
+                try {
+                    await SampleHoldNodeUI.ensureWorklet(this.audioCtx);
+                } catch (err) {
+                    console.error('Sample & Hold worklet preload failed', err);
+                }
             }
+            if (AllpassNodeUI.shouldUseWorklet(this.audioCtx)) {
+                try {
+                    await AllpassNodeUI.ensureWorklet(this.audioCtx);
+                } catch (err) {
+                    console.error('Allpass worklet preload failed', err);
+                }
+            }
+            this.nodes.forEach(n => n.initAudio(this.audioCtx));
+        })();
+        this._audioStartPromise = startPromise;
+        try {
+            await startPromise;
+        } catch (err) {
+            // Startup failed before the context became usable; allow a retry.
+            if (this._audioStartPromise === startPromise) {
+                this._audioStartPromise = null;
+                this.audioCtx = null;
+            }
+            throw err;
         }
-        this.nodes.forEach(n => n.initAudio(this.audioCtx));
     }
 
     reset() {
-        if (this.connections.length > 0) {
-            this.connections.forEach(c => this.disconnect(c));
-        }
+        this._clearGraph();
         this.clearSelection();
         this.draggingSelection = null;
         this.draggingAnchor = null;
@@ -315,14 +335,6 @@ export class App {
         this.panStart = null;
         this.panStartOffset = null;
         this.canvas.style.cursor = 'default';
-        this.connections = [];
-        this.nodes.forEach(n => {
-            if (this.dynamicNodes.has(n)) this.unregisterDynamicNode(n);
-            if (typeof n.onRemoved === 'function') n.onRemoved();
-        });
-        this.dynamicNodes.clear();
-        this.nodes = [];
-        this.activeSourceForLoad = null;
         const width = this.displayWidth || window.innerWidth;
         const height = this.displayHeight || window.innerHeight;
         this.addNode('output', width - 200, height / 2 - 50);
@@ -331,24 +343,34 @@ export class App {
     }
 
     async loadPreset(name) {
-        if (!name) return;
+        if (!name) return false;
+        const presetId = name.trim();
+        if (!presetId) return false;
+        // Any load that is still in flight from an earlier request is now stale.
+        const token = ++this._graphLoadToken;
         // Auto-start audio on preset load
         if (!this.audioStarted) {
             this.audioStarted = true;
-            await this.startAudio();
         }
-        const presetId = name.trim();
-        if (!presetId) return;
         try {
+            await this.startAudio();
             const response = await fetch(`presets/${encodeURIComponent(presetId)}.json`, { cache: 'no-cache' });
             if (!response.ok) {
                 throw new Error(`HTTP ${response.status}`);
             }
             const data = await response.json();
-            await this.loadGraphFromData(data);
+            if (token !== this._graphLoadToken) {
+                // A newer load was requested while this one was in flight; its
+                // result must not overwrite the newer graph.
+                return false;
+            }
+            return await this.loadGraphFromData(data, token);
         } catch (err) {
-            console.error(`Failed to load preset "${presetId}"`, err);
-            alert(`Unable to load preset: ${presetId}`);
+            if (token === this._graphLoadToken) {
+                console.error(`Failed to load preset "${presetId}"`, err);
+                alert(`Unable to load preset: ${presetId}`);
+            }
+            return false;
         }
     }
 
@@ -480,20 +502,76 @@ export class App {
 
     /* SAVE / LOAD SYSTEM */
 
-    async loadGraphFromData(data) {
-        if (!data) return;
-
-        await this.startAudio();
-
-        this.connections.forEach(c => this.disconnect(c));
+    // Disconnect everything and remove all nodes. Tolerant of partially
+    // initialized nodes so it can also clean up after a failed graph build.
+    _clearGraph() {
+        this.connections.forEach(c => {
+            try {
+                this.disconnect(c);
+            } catch (e) { }
+        });
         this.connections = [];
         this.nodes.forEach(n => {
-            if (this.dynamicNodes.has(n)) this.unregisterDynamicNode(n);
-            if (typeof n.onRemoved === 'function') n.onRemoved();
+            try {
+                if (this.dynamicNodes.has(n)) this.unregisterDynamicNode(n);
+                if (typeof n.onRemoved === 'function') n.onRemoved();
+            } catch (e) { }
         });
         this.dynamicNodes.clear();
         this.nodes = [];
         this.activeSourceForLoad = null;
+    }
+
+    // Serializable snapshot of the current graph (same shape as preset files).
+    captureGraphState() {
+        return {
+            nodes: this.nodes.map(n => n.getSnapshot()),
+            connections: this.connections.map(c => ({
+                fromNodeId: c.fromNode.id,
+                fromPort: c.fromPort,
+                toNodeId: c.toNode.id,
+                toPort: c.toPort,
+                kind: c.kind,
+                paramIndex: c.paramIndex,
+                mode: c.mode
+            }))
+        };
+    }
+
+    async loadGraphFromData(data, token) {
+        // Loads that don't pass a token (e.g. the file picker) count as the
+        // newest request and supersede any preset load still in flight.
+        if (typeof token !== 'number') token = ++this._graphLoadToken;
+
+        // Validate before touching the canvas so unparseable content never
+        // leaves the graph in a half-cleared state.
+        if (!data || typeof data !== 'object' || Array.isArray(data) || !Array.isArray(data.nodes)) {
+            throw new Error('Invalid graph data: expected an object with a nodes array');
+        }
+        if (data.connections !== undefined && !Array.isArray(data.connections)) {
+            throw new Error('Invalid graph data: connections must be an array');
+        }
+
+        await this.startAudio();
+        if (token !== this._graphLoadToken) return false;
+
+        const snapshot = this.captureGraphState();
+        try {
+            this._applyGraphData(data);
+        } catch (err) {
+            // Roll back to the exact graph that was visible before this load.
+            try {
+                this._applyGraphData(snapshot);
+            } catch (rollbackErr) {
+                console.error('Failed to restore previous graph after load error', rollbackErr);
+            }
+            throw err;
+        }
+        return true;
+    }
+
+    _applyGraphData(data) {
+        this._clearGraph();
         this.clearSelection();
         this.draggingSelection = null;
         this.draggingAnchor = null;
@@ -553,18 +631,7 @@ export class App {
     }
 
     saveGraph() {
-        const data = {
-            nodes: this.nodes.map(n => n.getSnapshot()),
-            connections: this.connections.map(c => ({
-                fromNodeId: c.fromNode.id,
-                fromPort: c.fromPort,
-                toNodeId: c.toNode.id,
-                toPort: c.toPort,
-                kind: c.kind,
-                paramIndex: c.paramIndex,
-                mode: c.mode
-            }))
-        };
+        const data = this.captureGraphState();
         const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
@@ -680,6 +747,25 @@ export class App {
             }
             return true;
         });
+
+        // Defensively clear any lingering modulation registrations that point
+        // at the deleted node, so it can no longer take part in parameter
+        // evaluation even if connection bookkeeping missed an entry.
+        this.nodes.forEach(n => {
+            if (n === node) return;
+            if (Array.isArray(n.paramModulators)) {
+                n.paramModulators.forEach((list, idx) => {
+                    if (Array.isArray(list) && list.some(entry => entry && entry.node === node)) {
+                        n.removeParamModulator(idx, node);
+                        n.updateParam(idx);
+                    }
+                });
+            }
+            if (Array.isArray(n.subscribers)) {
+                n.subscribers = n.subscribers.filter(s => s && s.node !== node);
+            }
+        });
+
         this.nodes = this.nodes.filter(n => n !== node);
         console.log(`Deleted node ID: ${node.id}`);
     }
@@ -752,8 +838,10 @@ export class App {
             return;
         }
 
-        const src = conn.fromNode.outputs[conn.fromPort].node;
-        const dest = conn.toNode.inputs[conn.toPort].node;
+        const outPort = conn.fromNode.outputs && conn.fromNode.outputs[conn.fromPort];
+        const inPort = conn.toNode.inputs && conn.toNode.inputs[conn.toPort];
+        const src = outPort && outPort.node;
+        const dest = inPort && inPort.node;
         if (src && dest) {
             try {
                 src.disconnect(dest);
