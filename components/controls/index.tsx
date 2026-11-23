@@ -4,7 +4,7 @@ import { Select } from '@base-ui/react/select'
 import { useRef } from 'react'
 import { RgbColorPicker } from 'react-colorful'
 import DarkroomLogo from '@/components/ui/darkroom.svg'
-import { configSchema, DITHER_MODES, type RGB, useStore } from '@/lib/store'
+import { DITHER_MODES, parseConfig, type RGB, useStore } from '@/lib/store'
 import { ColorField } from './color-field'
 import { SliderField } from './slider-field'
 
@@ -28,7 +28,6 @@ export function Controls() {
   const recording = useStore((state) => state.recording)
 
   const setConfig = useStore((state) => state.setConfig)
-  const loadConfig = useStore((state) => state.loadConfig)
   const resetConfig = useStore((state) => state.resetConfig)
   const setFile = useStore((state) => state.setFile)
 
@@ -58,12 +57,23 @@ export function Controls() {
     if (!selected) return
     const reader = new FileReader()
     reader.onload = () => {
+      // An invalid file must be rejected wholesale: never touch the store,
+      // so the current picture/matrix stays exactly as it was.
+      let parsed: unknown
       try {
-        const parsed = configSchema.parse(JSON.parse(String(reader.result)))
-        loadConfig(parsed)
+        parsed = JSON.parse(String(reader.result))
       } catch (error) {
         console.error('Invalid config file', error)
+        return
       }
+
+      const config = parseConfig(parsed)
+      if (!config) {
+        console.error('Invalid config file: schema validation failed')
+        return
+      }
+
+      useStore.getState().loadConfig(config)
     }
     reader.readAsText(selected)
     event.target.value = ''

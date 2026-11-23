@@ -35,6 +35,16 @@ export const configSchema = z.object({
 export type RGB = z.infer<typeof colorSchema>
 export type DitheringConfig = z.infer<typeof configSchema>
 
+/**
+ * Parses an imported/unknown config value. Returns `null` instead of throwing
+ * when the payload is malformed JSON or fails schema validation, so an invalid
+ * import can never partially/fully overwrite the live view state.
+ */
+export function parseConfig(value: unknown): DitheringConfig | null {
+  const result = configSchema.safeParse(value)
+  return result.success ? result.data : null
+}
+
 export const DEFAULT_CONFIG: DitheringConfig = {
   gammaCorrection: 1,
   granularity: 1,

@@ -7,6 +7,7 @@ import { Image } from '../image'
 import { Model } from '../model'
 import type { MediaHandle } from '../textured-plane'
 import { Video } from '../video'
+import { createCaptureController } from './capture-controller'
 
 const PLACEHOLDER = '/placeholder/3.jpg'
 
@@ -37,59 +38,48 @@ export function Content() {
   const setSize = useThree((state) => state.setSize)
 
   const assetRef = useRef<MediaHandle>(null)
-  const recorderRef = useRef<MediaRecorder | null>(null)
+  const mountedRef = useRef(true)
+  const sizeRef = useRef(size)
+  sizeRef.current = size
+
+  // The capture controller holds all recorder/stream/export state. It is a
+  // plain object (no side effects on creation), so it is safe to build lazily
+  // and reuse for the component's whole lifetime.
+  const controllerRef = useRef<ReturnType<
+    typeof createCaptureController
+  > | null>(null)
+  if (!controllerRef.current) {
+    controllerRef.current = createCaptureController({
+      canvas: gl.domElement,
+      getSize: () => sizeRef.current,
+      setSize,
+      getAssetSize: () => assetRef.current?.size,
+      onRecordingChange: setRecording,
+      isMounted: () => mountedRef.current,
+    })
+  }
 
   useEffect(() => {
-    const exportImage = () => {
-      const previous = { width: size.width, height: size.height }
-      const width = assetRef.current?.size.width || previous.width
-      const height = assetRef.current?.size.height || previous.height
+    mountedRef.current = true
+    const controller = controllerRef.current
+    if (!controller) return
 
-      setSize(width, height)
+    // Stable wrappers: the DOM panel calls these via the store, and they
+    // always delegate to the live controller regardless of re-renders.
+    registerActions({
+      exportImage: () => controller.exportImage(),
+      startRecording: () => controller.startRecording(),
+      stopRecording: () => controller.stopRecording(),
+    })
 
-      setTimeout(() => {
-        requestAnimationFrame(() => {
-          const link = document.createElement('a')
-          link.download = 'dithering.png'
-          link.href = gl.domElement.toDataURL()
-          link.click()
-          requestAnimationFrame(() => setSize(previous.width, previous.height))
-        })
-      }, 100)
+    return () => {
+      mountedRef.current = false
+      // Stop any active MediaRecorder, release capture tracks and revoke
+      // the pending download object URL.
+      controller.dispose()
+      if (useStore.getState().recording) setRecording(false)
     }
-
-    const startRecording = () => {
-      const stream = gl.domElement.captureStream(60)
-      const recorder = new MediaRecorder(stream, {
-        mimeType: 'video/webm;codecs=vp8',
-      })
-      recorderRef.current = recorder
-
-      let chunks: Blob[] = []
-      recorder.addEventListener('dataavailable', (event) => {
-        chunks.push(event.data)
-      })
-      recorder.addEventListener('stop', () => {
-        const blob = new Blob(chunks, { type: 'video/webm' })
-        chunks = []
-        const link = document.createElement('a')
-        link.download = 'dithering.webm'
-        link.href = URL.createObjectURL(blob)
-        link.click()
-      })
-
-      recorder.start()
-      setRecording(true)
-    }
-
-    const stopRecording = () => {
-      recorderRef.current?.stop()
-      recorderRef.current = null
-      setRecording(false)
-    }
-
-    registerActions({ exportImage, startRecording, stopRecording })
-  }, [gl, size.width, size.height, setSize, registerActions, setRecording])
+  }, [registerActions, setRecording])
 
   return (
     <>

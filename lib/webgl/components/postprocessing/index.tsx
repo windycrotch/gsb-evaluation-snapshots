@@ -4,7 +4,6 @@ import { useFrame, useThree } from '@react-three/fiber'
 import { EffectComposer, EffectPass, RenderPass } from 'postprocessing'
 import { useEffect, useMemo } from 'react'
 import { HalfFloatType } from 'three'
-import { useWindowSize } from '@/hooks'
 import { useDitheringEffect } from './effects/dithering'
 
 export function PostProcessing() {
@@ -12,6 +11,11 @@ export function PostProcessing() {
   const scene = useThree((state) => state.scene)
   const camera = useThree((state) => state.camera)
   const dpr = useThree((state) => state.viewport.dpr)
+  // The source of truth for the drawing buffer size — updated by R3F itself,
+  // including the temporary resize performed during PNG export. Tracking this
+  // (instead of the window size) keeps the composer's buffers in sync even when
+  // the canvas and the window have different dimensions.
+  const size = useThree((state) => state.size)
 
   const isWebgl2 = gl.capabilities.isWebGL2
   const maxSamples = gl.capabilities.maxSamples
@@ -42,15 +46,19 @@ export function PostProcessing() {
     composer.addPass(ditheringPass)
 
     return () => {
+      // Release every GPU resource this pipeline owns when the canvas
+      // unmounts: composer frame buffers, pass materials, and effect shaders.
       composer.removePass(renderPass)
       composer.removePass(ditheringPass)
+      renderPass.dispose()
+      ditheringPass.dispose()
+      composer.dispose()
     }
   }, [composer, renderPass, ditheringPass])
 
-  const { width, height } = useWindowSize()
   useEffect(() => {
-    if (width && height) composer.setSize(width, height)
-  }, [composer, width, height])
+    if (size.width && size.height) composer.setSize(size.width, size.height)
+  }, [composer, size.width, size.height])
 
   useFrame((_, deltaTime) => {
     composer.render(deltaTime)

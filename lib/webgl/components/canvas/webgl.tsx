@@ -18,6 +18,10 @@ export function WebGLCanvas() {
           alpha: true,
           stencil: false,
           depth: false,
+          // PNG export reads pixels via canvas.toDataURL(); without this the
+          // drawing buffer may be cleared before the read and produce a blank
+          // image. The perf cost is negligible for this workload.
+          preserveDrawingBuffer: true,
         }}
         dpr={[1, 2]}
         orthographic

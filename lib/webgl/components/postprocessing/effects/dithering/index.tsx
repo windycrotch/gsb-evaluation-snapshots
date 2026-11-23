@@ -1,15 +1,18 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
-import { CanvasTexture, Color, NearestFilter, Vector2 } from 'three'
+import { Color } from 'three'
 import { useStore } from '@/lib/store'
-import { ORDERED_DITHERERS } from '@/webgl/utils/ordered-ditherers'
 import { DitheringEffect } from './effect'
+import { createMatrixTextureManager } from './matrix-texture'
 
 /**
- * Owns a single DitheringEffect instance and keeps its uniforms in sync with the
- * zustand store (driven by the DOM control panel). Replaces the old tweakpane
- * bindings entirely.
+ * Owns a single DitheringEffect instance and keeps its uniforms in sync with
+ * the zustand store (driven by the DOM control panel).
+ *
+ * Matrix-texture ownership is delegated to {@link createMatrixTextureManager},
+ * which guarantees each mode switch disposes the previous GPU texture before
+ * binding the new one (and that RANDOM releases the last ordered matrix).
  */
 export function useDitheringEffect() {
   const [effect] = useState(() => new DitheringEffect())
@@ -39,39 +42,11 @@ export function useDitheringEffect() {
   }, [effect, color])
 
   useEffect(() => {
-    if (mode === 'RANDOM') {
-      effect.random = true
-      return
-    }
-    effect.random = false
-
-    const ditherer = ORDERED_DITHERERS[mode]
-
-    const buffer = document.createElement('canvas')
-    buffer.width = ditherer.x
-    buffer.height = ditherer.y
-    const context = buffer.getContext('2d')
-    if (!context) return
-
-    const image = context.createImageData(ditherer.x, ditherer.y)
-    const buffer32 = new Uint32Array(image.data.buffer)
-    for (let i = 0; i < buffer32.length; i++) {
-      const value = (ditherer.matrix[i] ?? 0) / ditherer.max
-      const channel = Math.floor(value * 255)
-      buffer32[i] = (255 << 24) | (channel << 16) | (channel << 8) | channel
-    }
-    context.putImageData(image, 0, 0)
-
-    const texture = new CanvasTexture(buffer)
-    texture.minFilter = NearestFilter
-    texture.magFilter = NearestFilter
-    texture.flipY = false
-    effect.matrixTexture = texture
-    effect.matrixTextureSize = new Vector2(ditherer.x, ditherer.y)
-
-    return () => {
-      texture.dispose()
-    }
+    const manager = createMatrixTextureManager(effect)
+    manager.setMode(mode)
+    // Unmount (or an effect re-run, which cannot happen with these deps) frees
+    // the matrix texture currently on the GPU.
+    return () => manager.dispose()
   }, [effect, mode])
 
   return effect
