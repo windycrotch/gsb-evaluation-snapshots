@@ -24,12 +24,6 @@ class VTTNodeList extends HTMLElement {
     }
 }
 
-class VTTVoiceElement extends HTMLElement {
-    constructor() {
-        super();
-    }
-}
-
 class VTTCueBackgroundBox extends HTMLElement {
     constructor() {
         super();
@@ -43,7 +37,9 @@ class VTTRegionElement extends HTMLElement {
 }
 
 window.customElements.define('vtt-cue-root', VTTNodeList);
-window.customElements.define('v', VTTVoiceElement);
+// XXX: 'v' is not a valid custom element name (it contains no hyphen), so voice
+// spans cannot be upgraded; they still render as inline elements via the
+// shadow stylesheet in TextTrackContainer.
 window.customElements.define('vtt-cue-bgbox', VTTCueBackgroundBox);
 window.customElements.define('vtt-region', VTTRegionElement);
 

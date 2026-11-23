@@ -209,6 +209,10 @@ export default function WebVTTParseCueText(input: string, language?: string) {
                     {
                         // Attach a WebVTT Voice Object, and set its value to the token’s annotation string, or the empty string if there is no annotation string.
                         const node = new WebVTTVoice(token.classList, languageStack[languageStack.length - 1], token.annotation ?? "");
+                        // 4. Append the newly created node object to current.
+                        node.attachTo(current);
+                        // 5. Let current be the newly created node object.
+                        current = node;
                     }
                     break;
                     case 'lang':

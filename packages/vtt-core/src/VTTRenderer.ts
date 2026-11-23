@@ -5,7 +5,7 @@ import VTTRegion from "./VTTRegion";
 
 // custom elements
 import './renderer/TextTrackContainer';
-import './renderer/TextTrackContainer';
+import './renderer/Cues';
 
 const uiContainers = new Map<HTMLVideoElement, HTMLDivElement>();
 const didShowUI = new Set<HTMLVideoElement>();
