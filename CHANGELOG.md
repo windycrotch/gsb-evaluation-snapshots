@@ -2,6 +2,13 @@
 
 Changes are listed by release, newest first. The sections dated before 0.1.0 record what was built on the way to the first release.
 
+## Unreleased
+
+### Added
+
+- A cached scene or transition part now notices the local files its page loaded changing: a shared script, a stylesheet, a font, a picture, a clip, or for a transition the two scene pages it shows. Before reusing a part, motlab hashes every file the page loaded when that part was rendered, and renders the part again if any has changed; a scene that does not load the changed file still hits the cache. The list comes from the network requests Chrome made for the page (`Network.enable` over the DevTools protocol, `src/deps.js`), so it needs no parser and sees a `<script src>`, an `@font-face`, a fetched JSON, and a module a transition layer imports alike. A file that failed to load, or lies outside the project folder, stops the render with an error that names the part and the file instead of reusing the old frames. `test/cache.test.js` covers the file-to-dependency mapping, a changed shared script, a missing one (with a real render), and the per-part key; `docs/projects.md` and `docs/rendering.md` describe the new key.
+- In a parallel render, a part that fails is retried one at a time as before, but now a part that fails alone stops the render with an error that names that scene or transition and its file, and no output is written; the parts that already passed their check stay in the cache for the next run. Before, the error did not say which part failed. A cancelled render removes its `.part` and its temp folder and leaves the cached parts alone, and a render that stops part way no longer prunes the cache: only a finished render removes the keys it did not use. `test/cache.test.js` renders four parts three at a time with a part that only fails while the others do, checks the fallback to one at a time, checks that a part that fails next to nothing names itself and makes no output, aborts a render and checks there is no residue and that the finished part stays, and checks that a failed render keeps every part it had while a later finished one prunes only the old keys.
+
 ## 0.4.0 (2026-11-21)
 
 ### Added

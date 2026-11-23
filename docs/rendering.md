@@ -13,7 +13,9 @@ How `motlab render`, `motlab video` and Export turn scene pages into an MP4, how
 
 A project (`motlab render`, Export) runs these steps once for each scene and transition, three at a time after the first scene by default (`--parallel`, or the number picked in the Export menu), and joins the parts with one more `-c copy` pass ([Rendering a project](projects.md#rendering-a-project)).
 
-Temporary files go to the system temp folder and are removed afterwards. The output is written as `.part` and renamed at the end.
+Each part is cached by a key over the motlab version, the render settings (scale, fps, qp, codec) and every local file the page loaded, which `src/deps.js` takes from the network requests Chrome made for that page while it rendered (`Network.enable` on the DevTools session). A part is reused only when each of those files still hashes to what it did, so editing a shared script or a font re-renders the parts that load it and leaves the others. A dependency that fails to load, or lies outside the served folder, stops the render with the part and the file named.
+
+Temporary files go to the system temp folder and are removed afterwards. The output is written as `.part` and renamed at the end. A cancelled render removes the `.part` and the temp folder and leaves the parts already written to the cache; a finished render is the only one that prunes the cache keys it did not use.
 
 The code is plain JavaScript ESM with JSDoc and no TypeScript. Half of it runs inside Chrome and is served straight from disk, so TypeScript would mean two languages or a build step. CDP uses Node's built-in `WebSocket`.
 

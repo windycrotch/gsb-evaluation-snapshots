@@ -133,6 +133,24 @@ export async function attachPage(chrome) {
   const send = (method, params) => chrome.send(method, params, sessionId);
 
   const errors = [], emitHandlers = [];
+  // Every request the page (and its iframes) made, for the dependency list of a cached part (deps.js): a response's
+  // status, or the error it failed with. A request still in flight at the end has neither.
+  const requests = new Map();
+  chrome.on('Network.requestWillBeSent', (p, sid) => {
+    if (sid !== sessionId) return;
+    requests.set(p.requestId, { url: p.request.url, method: p.request.method, status: 0 });
+  });
+  chrome.on('Network.responseReceived', (p, sid) => {
+    if (sid !== sessionId) return;
+    const r = requests.get(p.requestId) || { url: p.response.url, method: 'GET' };
+    r.status = p.response.status; requests.set(p.requestId, r);
+  });
+  // A seek cancels a paused video's range requests on purpose, so a cancelled request is not an error by itself.
+  chrome.on('Network.loadingFailed', (p, sid) => {
+    if (sid !== sessionId) return;
+    const r = requests.get(p.requestId); if (!r) return;
+    r.error = p.errorText; r.canceled = p.canceled;
+  });
   // A SyntaxError's description names no file, so the file and line are added from the exception details.
   const where = d => d.url ? ` (${decodeURIComponent(new URL(d.url).pathname)}:${d.lineNumber + 1}:${d.columnNumber + 1})` : '';
   chrome.on('Runtime.exceptionThrown', (p, sid) => {
@@ -146,11 +164,14 @@ export async function attachPage(chrome) {
     for (const fn of emitHandlers) fn(msg);
   });
   await send('Page.enable'); await send('Runtime.enable'); await send('Runtime.addBinding', { name: '__motlabEmit' });
+  // Only for the dependency list (deps.js). If it cannot be turned on the page still renders, but a part whose
+  // dependencies cannot be seen must not be cached as if they were unchanged (render.js says so).
+  const network = await send('Network.enable').then(() => true, () => false);
 
   const evaluate = async expression => {
     const r = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
     if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description || r.exceptionDetails.text || 'page error');
     return r.result.value;
   };
-  return { send, evaluate, errors, onEmit: fn => emitHandlers.push(fn), navigate: url => send('Page.navigate', { url }) };
+  return { send, evaluate, errors, requests: () => [...requests.values()], network, onEmit: fn => emitHandlers.push(fn), navigate: url => send('Page.navigate', { url }) };
 }

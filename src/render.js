@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { attachPage, findChrome, launchChrome } from './chrome.js';
 import { frameCount, splitFrames } from './codecs.js';
+import { loadedFiles } from './deps.js';
 import { hasMediabunny } from './doctor.js';
 import { finalize, probeVideo } from './ffmpeg.js';
 import { label, rate, selectEncoder } from './probe.js';
@@ -43,7 +44,13 @@ async function openPage({ server, chromePath, url, scale, query }) {
       if (state === 'ok') break;
       const now = Date.now(), errs = page.errors.length ? ` Page errors: ${page.errors.slice(0, 3).join(' | ')}` : '';
       if (state === 'complete' && !loadedAt) loadedAt = now;
-      if (now - t0 > 60000 || (loadedAt && now - loadedAt > 8000) || (errs && now - t0 > 5000)) throw new Error(`the page did not expose window.renderAt and window.ready.${errs}`);
+      if (now - t0 > 60000 || (loadedAt && now - loadedAt > 8000) || (errs && now - t0 > 5000)) {
+        // A shared script that 404s leaves the page with no renderAt and says nothing in its own errors, so the
+        // file that failed to load is named here.
+        const bad = (page.requests?.() || []).filter(r => (r.status >= 400 || (r.error && !r.canceled && !/ERR_ABORTED/.test(r.error))) && !r.url.startsWith('data:'));
+        const failed = bad.length ? ` Files that did not load: ${bad.slice(0, 3).map(r => `${decodeURIComponent(new URL(r.url).pathname)}${r.status ? ` (HTTP ${r.status})` : ` (${r.error})`}`).join(', ')}.` : '';
+        throw new Error(`the page did not expose window.renderAt and window.ready.${errs}${failed}`);
+      }
       await sleep(50);
     }
     // ready has no time limit (a heavy page can take long), but a page whose ready never resolves should not wait in silence
@@ -136,13 +143,20 @@ export async function renderVideo(o) {
       res = await attempt('raw');
     }
     if (o.progress !== false && process.stdout.isTTY) process.stdout.write('\r');
+    // What the page loaded, for the cache key of a project part (deps.js). A resource that did not load stops the
+    // render here, before the output is renamed into place or cached as if it were whole. Only a project part asks
+    // for this; a plain `motlab video` renders as it always did.
+    if (o.collectDeps === true && !pages.every(p => p.network))
+      throw new Error(`${o.depWhere || url}: the files this part loads could not be seen (Chrome would not enable network events), so it cannot be cached safely`);
+    const deps = o.collectDeps !== true ? undefined
+      : loadedFiles({ requests: pages.flatMap(p => p.requests?.() || []), origin: server.origin, base: server.base, root, where: o.depWhere || url });
     rmSync(out, { force: true }); renameSync(part, out);
 
     const v = await probeVideo(out), wantDur = frames / fps;
     const muxLabel = `${res.mux === 'raw' ? 'raw bitstream' : 'Mediabunny in the page'}, then ffmpeg -c copy${ranges.length > 1 ? ` (concat of ${ranges.length} parts)` : ''}${o.audio ? ' with audio' : ''}`;
     const summary = { out, frames: v.frames, expectedFrames: frames, pageFrames, duration: v.duration, width, height, fps, gpu: info.gpu.renderer, encoder: label(enc), codec: enc.codec, hw: enc.hw,
       rate: rate(enc), mux: muxLabel, fullRange: res.fullRange, workers: ranges.length, encodeSeconds: res.encodeMs / 1000, totalSeconds: (Date.now() - started) / 1000, size: v.size,
-      color: { range: v.color_range, space: v.color_space, transfer: v.color_transfer, primaries: v.color_primaries } };
+      color: { range: v.color_range, space: v.color_space, transfer: v.color_transfer, primaries: v.color_primaries }, deps };
     log(`Mux: ${muxLabel}`);
     log(`Colour tags: ${v.color_space || 'none'} / ${v.color_range || 'none'} (primaries ${v.color_primaries || 'none'}, transfer ${v.color_transfer || 'none'})`);
     if (v.frames !== frames || Math.abs(v.duration - wantDur) > 0.5 / fps) throw new Error(`output check failed: ${v.frames} frames, ${v.duration} s; expected ${frames} frames, ${wantDur} s (${out})`);

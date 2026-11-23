@@ -50,7 +50,7 @@ When the page throws while loading, the error names the file, line and column, f
 | `--bitrate` | Use variable bitrate at this many Mbit/s instead of constant QP |
 | `--mux` | `auto`, `mediabunny` or `raw`. Auto tries the in-page MP4 muxer, then a raw bitstream wrapped by ffmpeg |
 | `--reprobe` | Time the encoders again instead of using the saved timings |
-| `--only` | Re-render only these scenes (1-based, comma separated), for example `--only 3` or `--only 3,5`, and reuse the cached parts of the rest. The transitions touching a re-rendered scene are re-rendered too. The cache holds the last render's parts, so pass the same `--scale` as that render. Only for `render`, see [Rendering a project](projects.md#rendering-a-project) |
+| `--only` | Re-render only these scenes (1-based, comma separated), for example `--only 3` or `--only 3,5`, and reuse the cached parts of the rest. The transitions touching a re-rendered scene are re-rendered too, as is any part whose page loaded a file that has changed since it was rendered. The cache holds the last render's parts, so pass the same `--scale` as that render. Only for `render`, see [Rendering a project](projects.md#rendering-a-project) |
 | `--parallel` | How many scenes and transitions `render` renders at once, each in its own Chrome. Default 3, or fewer on a machine with under 12 CPU threads or 3 GB of free memory. 1 renders them one after another. See [Rendering a project](projects.md#rendering-a-project) |
 | `--root` | Folder to serve. Default is the nearest folder above the page with a `project.json`, else the page's folder |
 | `--chrome` | Path to Chrome. Default: found automatically, or the `CHROME` environment variable |
