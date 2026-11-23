@@ -18,7 +18,7 @@ export default class RIIRFilter extends RConnectableNode {
         feedforward: this.props.feedforward
       });
 
-      this.context.nodes.set(this.props.identifier, this.node);
+      this.registerNode();
     }
 
     this.updateParams = this.updateParams.bind(this);

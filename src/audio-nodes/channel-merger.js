@@ -13,7 +13,7 @@ export default class RChannelMerger extends RConnectableNode {
 
     if (!this.node) {
       this.node = this.context.audio.createChannelMerger(this.props.channelCount);
-      this.context.nodes.set(this.props.identifier, this.node);
+      this.registerNode();
     }
 
     this.updateParams = this.updateParams.bind(this);

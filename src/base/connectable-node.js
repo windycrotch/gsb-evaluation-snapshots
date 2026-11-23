@@ -1,4 +1,3 @@
-import React from 'react';
 import RAudioNode from './audio-node.js';
 
 /**
@@ -8,21 +7,28 @@ import RAudioNode from './audio-node.js';
  */
 export default class RConnectableNode extends RAudioNode {
   componentWillUnmount() {
-    super.componentWillUnmount();
-
+    // disconnect every parent feeding this node before removing the registry
+    // entry in super.componentWillUnmount()
     if (this.props.parent) {
+      const registry = this.context.nodes;
       const parents = this.props.parent();
 
-      this.flattenPointers(parents).forEach((parentIdentifier, parentIndex) => {
-        const parent = this.context.nodes.get(parentIdentifier);
-        if (!parent) return;
+      this.flattenPointers(parents).forEach(parentPointer => {
+        if (parentPointer === undefined || parentPointer === null) return;
 
-        try {
-          parent.disconnect(this.node);
-        } catch (e) {
-          console.warn(e); // eslint-disable-line no-console
+        // the pointer is either a still-unregistered Symbol or a concrete node;
+        // disconnectFrom tolerates both and never throws on missing connections
+        if (typeof parentPointer === 'symbol') {
+          registry.pending = registry.pending.filter(entry =>
+            !(entry.toKey === parentPointer && entry.source === this.node));
+          const parentNode = registry.get(parentPointer);
+          if (parentNode) registry.disconnectFrom(parentNode, this.node);
+        } else {
+          registry.disconnectFrom(parentPointer, this.node);
         }
       });
     }
+
+    super.componentWillUnmount();
   }
 }

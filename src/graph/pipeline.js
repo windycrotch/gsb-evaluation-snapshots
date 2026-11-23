@@ -29,7 +29,15 @@ export default class RPipeline extends RComponent {
 
     if (pointer instanceof Array) {
       // it could also happen that the pointer leads to an AudioNode reference (esp. if it's an AudioContextDestination)
-      resolved = pointer.map(identifier => this.context.nodes.get(identifier) || identifier);
+      resolved = pointer.map(identifier => {
+        const registered = this.context.nodes.get(identifier);
+        // an unregistered identifier stays a Symbol so the caller can defer
+        // the connection until the target registers
+        return registered === undefined ? identifier : registered;
+      });
+    } else if (typeof pointer === 'symbol') {
+      const registered = this.context.nodes.get(pointer);
+      if (registered !== undefined) resolved = registered;
     }
 
     return resolved;
@@ -58,10 +66,10 @@ export default class RPipeline extends RComponent {
       if (childIndex === currentIndex + 1 || !childrenArray[childIndex]) {
         destinationFunction = () => this.props.destination();
       } else {
-        destinationFunction = () => this.resolvePointer(this.context.nodes.get(childrenArray[childIndex].identifier));
+        destinationFunction = () => this.resolvePointer(childrenArray[childIndex].identifier);
       }
     } else {
-      destinationFunction = () => this.resolvePointer(this.context.nodes.get(childrenArray[currentIndex + 1].identifier));
+      destinationFunction = () => this.resolvePointer(childrenArray[currentIndex + 1].identifier);
     }
 
     return destinationFunction;

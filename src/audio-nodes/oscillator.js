@@ -31,7 +31,7 @@ export default class ROscillator extends RScheduledSource {
         this.node.setPeriodicWave(this.props.periodicWave);
       }
 
-      this.context.nodes.set(this.props.identifier, this.node);
+      this.registerNode();
     }
 
     this.updateParams = this.updateParams.bind(this);

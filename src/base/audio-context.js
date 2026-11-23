@@ -1,6 +1,7 @@
 import React from 'react';
 import PropTypes from 'prop-types';
 import RComponent from './component.js';
+import AudioNodeRegistry from './node-registry.js';
 
 window.AudioContext = window.AudioContext || window.webkitAudioContext || null;
 if (!window.AudioContext) {
@@ -17,9 +18,10 @@ if (!window.AudioContext) {
 export default class RAudioContext extends React.Component {
   constructor(props) {
     super(props);
-    // repository of all nodes in the graph
-    // keyed by Symbols
-    this.nodes = new Map();
+    // repository of all nodes in the graph, keyed by Symbols.
+    // The registry also owns connection/lifecycle bookkeeping (pending
+    // connections, inbound links, identifier replacement, unmount cleanup).
+    this.nodes = new AudioNodeRegistry();
 
     this._context = new AudioContext(props.options);
 
@@ -31,7 +33,7 @@ export default class RAudioContext extends React.Component {
   }
 
   componentWillMount() {
-    this._context.resume();
+    if (this._context.resume) this._context.resume();
   }
 
   getChildContext() {
@@ -43,7 +45,8 @@ export default class RAudioContext extends React.Component {
   }
 
   componentWillUnmount() {
-    this._context.suspend();
+    if (this._context.suspend) this._context.suspend();
+    this.nodes.clear();
   }
 
   render() {

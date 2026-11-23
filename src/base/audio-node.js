@@ -1,5 +1,6 @@
 import React from 'react';
 import RComponent from './component.js';
+import AudioNodeRegistry from './node-registry.js';
 
 /**
  * Any RComponent that corresponds to an AudioNode is a RAudioNode
@@ -15,15 +16,20 @@ export default class RAudioNode extends RComponent {
     this.params = {};
     this.connectToAllDestinations = this.connectToAllDestinations.bind(this);
     this.setParam = this.setParam.bind(this);
+    // identifiers previously held by this component (identifier changes)
+    this._previousIdentifiers = [];
   }
 
-  // recursively builds up a list of nodes pointed to by IDs or lists of IDs
+  // recursively builds up a list of nodes pointed to by IDs or lists of IDs.
+  // missing targets stay as their Symbol so the registry can defer connecting
+  // until they register, instead of silently dropping the connection.
   flattenPointers(destinations, flattened = []) {
     for (let element of destinations) {
       if (Array.isArray(element)) {
         this.flattenPointers(element, flattened);
       } else if (typeof element === 'symbol') {
-        flattened.push(this.context.nodes.get(element));
+        const registered = this.context.nodes.get(element);
+        flattened.push(registered === undefined ? element : registered);
       } else {
         flattened.push(element);
       }
@@ -50,13 +56,19 @@ export default class RAudioNode extends RComponent {
 
   /**
    * Connects the given AudioNode to this RAudioNode's destinations.
-   * Abstracts away this operation as it's used in multiple lifecycle stages.
+   *
+   * Destinations that are still unregistered Symbols are handed to the
+   * registry as pending connections and are automatically fulfilled when the
+   * target registers, so a node can never permanently lose a connection to a
+   * sibling that registers later in the same render pass.
    *
    * @param      {function} destinationFunction The function that will return the destinations
    * @param      {AudioNode}  webAudioNode  The web audio node
    */
   connectToAllDestinations(destinationFunction, webAudioNode) {
-    webAudioNode.disconnect();
+    const registry = this.context.nodes;
+    registry.safeDisconnect(webAudioNode);
+    registry.dropSource(webAudioNode);
 
     if (destinationFunction && !this.props.disconnected) {
       let destinations = destinationFunction();
@@ -64,15 +76,21 @@ export default class RAudioNode extends RComponent {
       if (!(destinations instanceof Array)) destinations = [ destinations ];
 
       this.flattenPointers(destinations).forEach((destination, di) => {
-        if (destination) {
-          const connectArgs = this.getConnectionArguments(
-            destination,
-            di,
-            this.props.connectToParam,
-            this.props.connectFromChannel,
-            this.props.connectToChannel);
+        if (destination === undefined || destination === null) return;
 
-          webAudioNode.connect(...connectArgs);
+        const connectArgs = this.getConnectionArguments(
+          destination,
+          di,
+          this.props.connectToParam,
+          this.props.connectFromChannel,
+          this.props.connectToChannel);
+
+        if (typeof destination === 'symbol') {
+          // target not registered yet: skip now, the registry reconnects
+          // automatically as soon as the target registers
+          registry.requestConnect(webAudioNode, destination, connectArgs, this.props.identifier);
+        } else {
+          registry.connectToNode(webAudioNode, destination, connectArgs, this.props.identifier);
         }
       });
     }
@@ -82,29 +100,49 @@ export default class RAudioNode extends RComponent {
     super.componentWillMount();
   }
 
+  /**
+   * Registers the current internal AudioNode under the component's identifier.
+   * Always go through this (or the registry directly) rather than `nodes.set`,
+   * so that instance replacement (source nodes re-created after `ended`)
+   * refreshes the registry and every inbound connection atomically.
+   */
+  registerNode() {
+    this.context.nodes.register(this.props.identifier, this.node);
+  }
+
   componentWillReceiveProps(nextProps) {
     this.updateParams(nextProps);
   }
 
   componentWillUpdate(nextProps, nextState) {
-    // update the node's record in the node registry
+    // move the registry entry (and all pending/inbound bookkeeping) to the
+    // new identifier. The old key is always removed, even across rapid
+    // successive identifier changes, so only the newest key survives.
     if (this.props.identifier !== nextProps.identifier) {
-      this.context.nodes.delete(this.props.identifier);
-      this.context.nodes.set(nextProps.identifier, this.node);
+      this.context.nodes.replaceKey(this.props.identifier, nextProps.identifier, this.node);
+      this._previousIdentifiers.push(this.props.identifier);
     }
   }
 
   // we use DidUpdate to connect to new destinations,
   // because WillUpdate might get called before the new destinations are ready
   componentDidUpdate(prevProps, prevState) {
-    if (prevProps.destination !== this.props.destination) {
+    if (prevProps.destination !== this.props.destination ||
+        prevProps.identifier !== this.props.identifier) {
       this.connectToAllDestinations(this.props.destination, this.node);
     }
   }
 
   componentWillUnmount() {
-    this.node.disconnect();
-    this.context.nodes.delete(this.props.identifier);
+    const registry = this.context.nodes;
+
+    registry.safeDisconnect(this.node);
+    // only remove the key if it still points at this component's instance:
+    // a re-instantiated or re-identified node must not be clobbered by cleanup
+    registry.unregister(this.props.identifier, this.node);
+    this._previousIdentifiers.forEach(oldKey => registry.unregister(oldKey));
+    this._previousIdentifiers.length = 0;
+    registry.dropSource(this.node);
   }
 
   resolveTransitionProps(props, propName) {
@@ -199,3 +237,5 @@ export default class RAudioNode extends RComponent {
     return null;
   }
 }
+
+export { AudioNodeRegistry };

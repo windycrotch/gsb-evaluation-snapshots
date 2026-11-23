@@ -27,7 +27,7 @@ export default class RChannelSplitter extends RConnectableNode {
 
     if (!this.node) {
       this.node = this.context.audio.createChannelSplitter(this.props.channelCount);
-      this.context.nodes.set(this.props.identifier, this.node);
+      this.registerNode();
     }
 
     this.updateParams = this.updateParams.bind(this);

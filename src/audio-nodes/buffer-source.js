@@ -19,22 +19,29 @@ export default class RBufferSource extends RScheduledSource {
   }
 
   instantiateNode() {
+    // after `ended` the source must be replaced: drop the stopped instance so
+    // a fresh one is created and re-registered (inbound connections are then
+    // replayed by the registry onto the new node)
+    if (this.node && this.playbackScheduled === false) {
+      this.node = null;
+    }
+
     if (!this.node) {
       this.node = this.context.audio.createBufferSource();
       this.node.addEventListener('ended', this.onEnded);
 
-      this.context.nodes.set(this.props.identifier, this.node);
+      this.registerNode();
     }
 
     this.updateParams = this.updateParams.bind(this);
     this.updateParams(this.props);
   }
 
-  // we need to make a new AudioBufferSourceNode after playback ends
+  // we need to make a new AudioBufferSourceNode after playback ends.
+  // RScheduledSource.onEnded already reinstantiates and reconnects, so here we
+  // only forward the DOM event to the consumer.
   onEnded(e) {
     super.onEnded(e);
-    this.instantiateNode();
-    this.connectToAllDestinations(this.props.destination, this.node);
     if (this.props.onEnded) this.props.onEnded(e);
   }
 

@@ -1,4 +1,3 @@
-import React from 'react';
 import RAudioNode from './audio-node.js';
 
 /**
@@ -17,9 +16,19 @@ export default class RScheduledSource extends RAudioNode {
   }
 
   onEnded() {
+    // an `ended` event can be delivered after the component has unmounted;
+    // rebuilding a node then would resurrect a registry entry, so ignore it
+    if (this._unmounted) return;
+
     this.playbackScheduled = false;
-    // Web Audio will remove the node from the graph after stopping, so reinstantiate it
+    // Web Audio will remove the node from the graph after stopping, so
+    // reinstantiate it. instantiateNode() re-registers the fresh instance
+    // under the same identifier, which makes the registry:
+    //   1. disconnect every upstream from the stopped node, and
+    //   2. replay all inbound connections onto the new instance.
     this.instantiateNode();
+    // re-establish this node's own outbound connections to its destinations;
+    // destinations that are not registered yet become pending connections.
     this.connectToAllDestinations(this.props.destination, this.node);
   }
 
@@ -63,5 +72,10 @@ export default class RScheduledSource extends RAudioNode {
         this.shouldStartWithPropsChange(prevProps, this.props)) {
       this.schedule();
     }
+  }
+
+  componentWillUnmount() {
+    this._unmounted = true;
+    super.componentWillUnmount();
   }
 }

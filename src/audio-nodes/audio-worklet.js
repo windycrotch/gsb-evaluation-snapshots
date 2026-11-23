@@ -14,7 +14,7 @@ export default class RAudioWorklet extends RConnectableNode {
 
     if (!this.node) {
       this.node = new AudioWorkletNode(this.context.audio, this.props.worklet);
-      this.context.nodes.set(this.props.identifier, this.node);
+      this.registerNode();
     }
 
     this.updateParams = this.updateParams.bind(this);

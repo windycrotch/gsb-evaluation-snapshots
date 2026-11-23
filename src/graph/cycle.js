@@ -17,15 +17,19 @@ export default class RCycle extends RComponent {
 
   componentWillMount() {
     super.componentWillMount();
-    this.context.nodes.set(this.props.identifier, this.inputs);
+    this.context.nodes.register(this.props.identifier, this.inputs);
   }
 
   componentWillUpdate(nextProps, nextState) {
-    // update the node's record in the node registry
+    // move the registry record to the new identifier; the old key is always
+    // removed so rapid identifier changes leave only the newest one
     if (this.props.identifier !== nextProps.identifier) {
-      this.context.nodes.delete(this.props.identifier);
-      this.context.nodes.set(nextProps.identifier, this.inputs);
+      this.context.nodes.replaceKey(this.props.identifier, nextProps.identifier, this.inputs);
     }
+  }
+
+  componentWillUnmount() {
+    this.context.nodes.unregister(this.props.identifier, this.inputs);
   }
 
   render() {

@@ -14,7 +14,7 @@ export default class RMediaStreamSource extends RAudioNode {
 
   createNode() {
     this.node = this.context.audio.createMediaStreamSource(this.props.stream);
-    this.context.nodes.set(this.props.identifier, this.node);
+    this.registerNode();
   }
 
   componentWillMount() {
