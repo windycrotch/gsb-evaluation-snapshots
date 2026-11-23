@@ -72,11 +72,13 @@ The 4-per-texel packing matches all other data textures: data point `i` within a
 
 ## Dynamic Tile Structure
 
-Tile count and sizes can change between renders (e.g. when new tiled data arrives over the network). The framework rebuilds selection tiles automatically in two places:
+Tile count and sizes can change between renders (e.g. when new tiled data arrives over the network, or an `update()` rebuilds layers against data of a different length). The framework rebuilds selection tiles automatically in three places:
 
-1. **Every render frame** — after the tile loop computes `layer._tileSizes`, it checks whether `selCol._tiles` matches. If not, `selCol._rebuild(layer._tileSizes)` destroys the old FBOs and allocates new ones. `_rebuild` calls `selCol._onClear`, which `Selection` registers to null `_arrays` and notify subscribers.
+1. **Every render frame** — after the tile loop computes `layer._tileSizes`, it checks whether `selCol._tiles` matches. If not, `selCol._rebuild(layer._tileSizes)` destroys the old FBOs and allocates new ones. `_rebuild` fires the column's clear listeners, so every `Selection` mirror for that shared column nulls its `_arrays` and notifies subscribers rather than serving a stale selection.
 
 2. **Every lasso** — `SelectionPipeline.runLasso()` performs the same check before its GPU passes, in case tile count changed since the last render frame.
+
+3. **After every `update()` rebuild** — `Plot._initialize()` finishes by reconciling each `Selection` it has handed out: it re-attaches the mirror to the (possibly new) shared column via `_watchColumn()` and drops a cached selection whose per-tile shape no longer matches the rebuilt layer via `_reconcileShape()` (clearing it and notifying). `Selection.arrays` also runs the same shape check on read, so a stale mirror can never be observed. A rebuild whose tile sizes are unchanged keeps the live selection intact.
 
 ---
 
@@ -91,7 +93,7 @@ Each `SelectionColumn` tile stores 4 values per texel (RGBA), matching the packi
 After `SelectionPipeline.runLasso()` completes, `Plot.selectLasso()` calls `selection._readbackAndNotify()` on each affected `Selection` object:
 
 1. **GPU readback** — reads each tile's FBO into a `Float32Array` trimmed to `tile.n`, storing the result as `_arrays: Float32Array[]` (one per tile). If no points are selected, the column is cleared and `_arrays` is set to `null`.
-2. **`_onClear` registration** — `_readbackAndNotify` registers a callback on `selCol._onClear` so that any future tile rebuild (e.g. new data mid-session) automatically nulls `_arrays` and notifies subscribers.
+2. **Clear-listener registration** — `_readbackAndNotify` registers a callback via `selCol.addClearListener()` so that any future tile rebuild (a shape change, e.g. new data mid-session) nulls `_arrays` and notifies subscribers. Because a column is shared across consumer plots, this is a listener set, not a single slot: every plot's `Selection` mirror hears the rebuild and drops its own stale arrays.
 3. **`selCol._onWrite` fires** — because the `SelectionColumn` is shared (same (dataRef, name) pair → same column instance), writing it via `upload()` or `clear()` calls `selCol._onWrite()`, which `SelectionRegistry` has wired to call `scheduleRender()` on **every consumer plot**. This means all plots that reference this column re-render without explicit cross-plot wiring.
 4. **`selection._notify()`** — fires all registered subscribers with the `Selection` as argument.
 5. **Linked plot update** (if `linkSelections` was called) — the subscriber calls `otherSelection.applyFrom(selection)`, which syncs tile structure, uploads `_arrays` to per-tile GPU textures, schedules re-render, and notifies its own subscribers.
@@ -105,7 +107,7 @@ selectLasso()
        └─ col.activate() / col.clear()
        │    └─ col._onWrite() → SelectionRegistry callback
        │         └─ for each consumer plot: plot.scheduleRender()   ← all sharing plots re-render
-       └─ col._onClear = () => { _arrays=null; notify }
+       └─ col.addClearListener(() => { _arrays=null; notify })
        └─ _notify() → subscribers
             └─ otherSelection.applyFrom(selection)   [if linkSelections used]
                  └─ selCol._rebuild() if tile structure differs

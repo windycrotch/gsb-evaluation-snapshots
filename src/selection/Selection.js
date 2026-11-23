@@ -15,6 +15,7 @@ export class Selection extends ColumnData {
     this._arrays = null   // Float32Array[] — one per tile, values 0 or 1; null when inactive
     this._listeners   = new Set()
     this._propagating = false
+    this._clearHandle = null   // SelectionColumn.addClearListener handle for the live column
   }
 
   // ─── ColumnData interface ────────────────────────────────────────────────────
@@ -44,7 +45,26 @@ export class Selection extends ColumnData {
   // One Float32Array per tile (values 0 or 1). Mirrors toTexture() for CPU access.
   // Returns null when no lasso has been drawn or no points are selected.
   // arrays[t][i] == 1 means local point i within tile t is selected.
-  get arrays() { return this._arrays }
+  //
+  // Read through _reconcileShape so a stale mirror can never be handed out: if the layer
+  // has been rebuilt with a different per-tile shape since the arrays were read, the old
+  // selection is dropped (and subscribers told) before this returns.
+  get arrays() {
+    this._reconcileShape()
+    return this._arrays
+  }
+
+  // Drop the cached selection when it no longer matches the live column's tile layout.
+  // Returns true when a stale selection was cleared.
+  _reconcileShape() {
+    const col = this._column
+    if (!col || !this._arrays) return false
+    const sizes = col.tileSizes
+    if (arraysEqual(this._arrays.map(a => a.length), sizes)) return false
+    this._arrays = null
+    this._notify()
+    return true
+  }
 
   clear() {
     const col = this._column
@@ -60,14 +80,13 @@ export class Selection extends ColumnData {
     const otherCol = otherSel._column
     if (!col || !otherCol) return
 
-    col._onClear = () => { this._arrays = null; this._notify() }
+    this._watchColumn()
 
+    // Rebuild silently: this call uploads fresh arrays and notifies once itself below,
+    // so the clear listener must not fire a redundant "selection cleared" in between.
     const otherSizes = otherCol._tiles.map(t => t.n)
     if (!arraysEqual(col._tiles.map(t => t.n), otherSizes)) {
-      const saved   = col._onClear
-      col._onClear  = null
-      col._rebuild(otherSizes)
-      col._onClear  = saved
+      col._rebuild(otherSizes, { silent: true })
     }
 
     if (!arrays || !arrays.some(a => a.some(v => v > 0.5))) {
@@ -96,13 +115,34 @@ export class Selection extends ColumnData {
     return globalSelectionRegistry.get(dataRef, this._name, this._plot)
   }
 
+  // Subscribe this Selection to its shared column's rebuild events (idempotent). Any
+  // consumer plot of the same (dataRef, name) hears the rebuild, so when the column is
+  // reallocated for a changed data shape every mirror drops its stale arrays and notifies.
+  _watchColumn() {
+    const col = this._column
+    if (!col) return
+    if (this._clearHandle?.column === col) return
+    this._clearHandle?.remove()
+    this._clearHandle = { column: col, ...col.addClearListener(() => this._onColumnCleared()) }
+  }
+
+  // The column under this selection was rebuilt with a new tile shape (e.g. layers were
+  // rebuilt against data of a different length). The cached CPU mirror describes the old
+  // shape, so null it and tell subscribers instead of serving the old arrays.
+  _onColumnCleared() {
+    if (!this._arrays) return
+    this._arrays = null
+    this._plot.scheduleRender()
+    this._notify()
+  }
+
   _readbackAndNotify() {
     const col = this._column
     if (!col) return
 
-    col._onClear = () => { this._arrays = null; this._notify() }
+    this._watchColumn()
 
-    // Read each tile's FBO; keep as separate Float32Array per tile (values 0 or 1).
+    // Read each tile's FBO into a fresh Float32Array, one per tile.
     const arrays = col._tiles.map(tile => {
       const raw = new Float32Array(tile.texW * tile.texH * 4)
       this._plot.regl({ framebuffer: tile.fbo })(() => {

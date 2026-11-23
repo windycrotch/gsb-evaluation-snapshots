@@ -19,7 +19,7 @@ export class SelectionColumn extends ColumnData {
     super()
     this._regl         = regl
     this._active       = false
-    this._onClear      = null
+    this._clearListeners = new Set()   // fired when the tile structure is rebuilt under them
     this._onWrite      = null   // called after upload() or clear() increments writeVersion
     this.writeVersion  = 0      // incremented on every write; consumers track their last-read version
     this._tiles        = tileSizes.map(n => makeTile(regl, n))
@@ -31,13 +31,34 @@ export class SelectionColumn extends ColumnData {
   get domain()       { return [0, 1] }
   get quantityKind() { return null }
 
+  // Per-tile point counts. A Selection holds its mirror arrays in the same layout, so a
+  // mismatch means the cached selection describes a different data shape.
+  get tileSizes() { return this._tiles.map(t => t.n) }
+
+  // Listen for a tile-structure rebuild. Every consumer (each plot's Selection wrapper
+  // for this shared column) must hear it, so this is a set, not the single `_onClear`
+  // slot the old design had. Returns { remove }.
+  addClearListener(fn) {
+    this._clearListeners.add(fn)
+    return { remove: () => this._clearListeners.delete(fn) }
+  }
+
+  _fireClear() {
+    for (const fn of this._clearListeners) {
+      try { fn() } catch (e) { console.error('[gladly] SelectionColumn clear listener failed:', e) }
+    }
+  }
+
   // Destroy current tiles and allocate fresh ones with new sizes.
-  // Fires _onClear so Selection can null its cached CPU data and notify subscribers.
-  _rebuild(tileSizes) {
+  // Fires the clear listeners so every Selection holding CPU mirror data can null it and
+  // notify subscribers, rather than keep presenting the old selection as current.
+  // `silent` skips the notification for a caller that will write fresh data right after
+  // (Selection.applyFrom rebuilds, uploads, then notifies once itself).
+  _rebuild(tileSizes, { silent = false } = {}) {
     for (const tile of this._tiles) tile.fbo.destroy()
     this._tiles  = tileSizes.map(n => makeTile(this._regl, n))
     this._active = false
-    this._onClear?.()
+    if (!silent) this._fireClear()
   }
 
   // Zero all tile textures and mark inactive. Caller handles any notification.

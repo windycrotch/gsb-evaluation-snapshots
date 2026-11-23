@@ -101,6 +101,31 @@ export class AxisRegistry {
     this.height = height
     this._entries  = new Map()  // qk → entry
     this._slotToQk = new Map()  // slotId → qk
+    // A fresh registry starts unresolved: its scales still hold d3's placeholder
+    // domains. Plot._initialize() calls markReady() only after the layer-derived
+    // domains have been applied, so a value read before that is never real data.
+    this._ready = false
+  }
+
+  // True once the plot that owns this registry has finished applying layer-derived
+  // domains to it. Gestures (zoom / pan / typed limits) must not read a scale from a
+  // registry that is not ready — it would be a placeholder range.
+  isReady() { return this._ready }
+  markReady() { this._ready = true }
+
+  // True when the shared domain for `qk` is authoritative — its value came from real
+  // data, an explicit override, or an external source (a colour/filter axis mirrors its
+  // owner's range) — not from a scale's arbitrary d3 placeholder. Checked alongside
+  // isReady() before a gesture may read/write a scale.
+  isDomainReady(qk) {
+    if (!this._ready) return false
+    const entry = this._entries.get(qk)
+    if (!entry) return false
+    if (entry.domain != null) return true
+    // A colour or filter axis is fed by its owning plot (e.g. a colorbar's spatial axis
+    // mirrors the target's colour range); its registry domain can legitimately be null
+    // until the first sync, so it is still a trustworthy source rather than a placeholder.
+    return entry.hasColor || entry.hasFilter
   }
 
   _ensureEntry(qk) {

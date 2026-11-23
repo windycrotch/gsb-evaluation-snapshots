@@ -324,7 +324,7 @@ Gladly supports interactive zoom and pan out of the box:
 
 A zoomed or panned range is written into `axes` (as `min` and `max`) and is returned by `getConfig()`.
 
-While `update()` is still building a plot, wheel, drag, touch and axis-limit input on that plot is ignored, since its axes do not have their ranges yet. A range that a linked axis sets on it meanwhile is kept when the update finishes.
+While `update()` is still building a plot, wheel, drag, touch and axis-limit input on that plot is ignored, since its axes do not have their ranges yet — this also stops such a gesture from writing a placeholder range into a linked axis. A range that a *linked* axis sets on this plot meanwhile is kept when the update finishes. If `update()` fails, the plot is restored to the config, axis locks, axis options and colourbar state it had before the call, and no `'axisoptions'` event is emitted for the config that was rolled back. When two `update()` calls overlap, the last one wins and the earlier one emits nothing of its own.
 
 ---
 

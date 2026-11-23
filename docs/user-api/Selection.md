@@ -38,6 +38,8 @@ A `Float32Array[]` with one array per data tile: each element is `1` if selected
 
 For single-tile layers, `selection.arrays` has length 1. For tiled layers, `selection.arrays[t][i]` is `1` when local point `i` within tile `t` is selected. This matches the tile/index pair returned by `plot.pick()`.
 
+If a layer is rebuilt with a different per-column length (e.g. `update()` swaps in data with a different number of points), the cached selection no longer describes the current data: it is cleared to `null` and subscribers are notified, rather than the old arrays being served against the new shape.
+
 ```js
 plot.selections['brush1'].subscribe(sel => {
   const arrays = sel.arrays   // Float32Array[] | null

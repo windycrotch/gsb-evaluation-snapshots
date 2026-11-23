@@ -249,6 +249,7 @@ export class Plot extends GlBase {
     getMasterCanvas().register(this)
 
     this.currentConfig = null
+    this._appliedConfig = null   // config of the last committed rebuild; the 'axisoptions' baseline
     this._lastRawDataArg = undefined
     this.layers = []
     this.axisRegistry = null
@@ -273,7 +274,10 @@ export class Plot extends GlBase {
     this._blockedLag = 0
     this._lastRenderEnd = performance.now()
     this._is3D = false
-    this._readyEpoch = -1   // the _initEpoch of the last update() that finished; see _isReady()
+    // _initEpoch is bumped by every update() (and rollback rebuild). _readyEpoch is the
+    // epoch whose rebuild reached the end, so _readyEpoch === _initEpoch means "the most
+    // recent update() finished successfully". See _isReady().
+    this._readyEpoch = -1
     this._camera = null
     this._tickLabelAtlas = null
 
@@ -341,7 +345,7 @@ export class Plot extends GlBase {
       this._lastRawDataArg = data
     }
 
-    if (!this.currentConfig || !this._rawData) return
+    if (!this.currentConfig || !this._rawData) return null
 
     const width = this.container.clientWidth
     const height = this.container.clientHeight
@@ -354,9 +358,19 @@ export class Plot extends GlBase {
     this.plotHeight = Math.max(1, plotHeight)
 
     this._warnedMissingDomains = false
-    await this._initialize()
-    this._selectionPipeline?.resize(Math.max(1, width), Math.max(1, height))
+    const outcome = await this._initialize()
+    // A newer update() began while this one was waiting on a layer: it owns the state,
+    // so leave it entirely alone rather than half-applying this config on top of it.
+    if (outcome?.superseded) return outcome
+    if (this._selectionPipeline) {
+      this._selectionPipeline.resize(Math.max(1, width), Math.max(1, height))
+    }
     this._syncFloats()
+    // This rebuild committed: it is now the baseline the next 'axisoptions' diffs against.
+    // Set here (not only in update()) so the PlotGroup / rollback paths, which call
+    // _applyUpdate directly, keep the baseline and the live config in step.
+    this._appliedConfig = this.currentConfig
+    return outcome
   }
 
   _validateLinks() {
@@ -386,26 +400,63 @@ export class Plot extends GlBase {
       }
     }
 
+    // Snapshot everything this update() may touch, so a failed apply can be undone
+    // exactly — including the axis locks and colours an emitted 'axisoptions' would
+    // otherwise advertise. `config`/`_rawData` are snapshotted even when the caller
+    // passes them, since _initialize() rewrites currentConfig.axes in place.
+    const before = {
+      config:  this.currentConfig,
+      rawData: this._rawData,
+      lastRawDataArg: this._lastRawDataArg,
+    }
+
     if (data !== undefined) this._lastRawDataArg = data
 
-    const previousConfig = this.currentConfig
-    const previousRawData = this._rawData
+    // Baseline for the 'axisoptions' diff: the config of the last committed rebuild.
+    const baseline = this._appliedConfig
+
+    let outcome
     try {
-      await this._applyUpdate({ config, data })
+      outcome = await this._applyUpdate({ config, data })
       this._validateLinks()
       this._group?._updateAutoLinks()
     } catch (error) {
-      this.currentConfig = previousConfig
-      this._rawData = previousRawData
+      await this._rollbackUpdate(before)
       throw error
     }
+
+    // A newer update() superseded this one mid-flight. That newer call owns the state and
+    // the events, so this call is a no-op: no partial state, no stale 'axisoptions'.
+    if (outcome?.superseded) return
+
     // Emit 'axisoptions' for each axis-part key the new config changed — keyed by what
     // changed, not by who changed it (the menu is just one caller of update()). The lock
     // key is emitted here too for a config-path change; setAxisLocked() emits its own,
-    // and never calls update(), so the two paths never double-fire.
+    // and never calls update(), so the two paths never double-fire. The diff is against
+    // the last *committed* config, not this call's snapshot, so a superseded or failed
+    // update leaves the baseline intact and no value is announced before it sticks.
+    // (_applyUpdate has already advanced _appliedConfig to this outcome's config.)
+    const appliedConfig = outcome?.config ?? this.currentConfig
     if (config !== undefined) {
-      this._emitAxisOptionsDiff(previousConfig?.axes ?? {}, config.axes ?? {})
-      this._emitColorbarsDiff(previousConfig?.colorbars ?? [], config.colorbars ?? [])
+      this._emitAxisOptionsDiff(baseline?.axes ?? {}, appliedConfig?.axes ?? {})
+      this._emitColorbarsDiff(baseline?.colorbars ?? [], appliedConfig?.colorbars ?? [])
+    }
+  }
+
+  // Restore the pre-update() snapshot after a failed apply, then rebuild from it so the
+  // axis domains, lock flags, floats and colourbars all match what was in place before.
+  // The rebuild is best-effort: if it too fails, the snapshot is still restored so
+  // getConfig()/isAxisLocked() at least report the last good config. The committed
+  // baseline (_appliedConfig) is untouched, so no 'axisoptions' fires for the rollback.
+  async _rollbackUpdate(before) {
+    this.currentConfig     = before.config
+    this._rawData          = before.rawData
+    this._lastRawDataArg   = before.lastRawDataArg
+    if (!this.currentConfig || !this._rawData) return
+    try {
+      await this._applyUpdate({})
+    } catch (e) {
+      console.error('[gladly] update() rollback failed to rebuild:', e)
     }
   }
 
@@ -543,9 +594,9 @@ export class Plot extends GlBase {
     this._rebuildColorscaleTexture()
 
     await this._processTransforms(transforms, epoch)
-    if (this._initEpoch !== epoch) return
+    if (this._initEpoch !== epoch) return { superseded: true }
     await this._processLayers(layers, this.currentData, epoch)
-    if (this._initEpoch !== epoch) return
+    if (this._initEpoch !== epoch) return { superseded: true }
 
     // Read the axes from the live config, not the one this update started with: a linked
     // axis that zoomed meanwhile has written its new range there (setAxisDomain).
@@ -615,7 +666,26 @@ export class Plot extends GlBase {
     }
 
     this._readyEpoch = epoch
+    // Only now do the scales hold layer- or override-derived domains; every gesture
+    // path checks isReady()/isDomainReady() before reading a scale (see _isReady()).
+    this.axisRegistry.markReady()
+    // The layers (and so the selection columns sizings) were just rebuilt. Re-attach
+    // every Selection this plot has handed out to its (possibly new) shared column and
+    // drop any cached selection whose per-tile shape no longer matches — clearing it and
+    // telling subscribers now, rather than serving the old arrays against new data.
+    this._reconcileSelections()
     this.scheduleRender()
+    return { superseded: false, config: this.currentConfig }
+  }
+
+  // Re-watch and shape-check every Selection this plot has exposed. Called after a
+  // rebuild; a no-op for selections whose tile layout is unchanged, so an unrelated
+  // config update keeps a live selection intact.
+  _reconcileSelections() {
+    for (const selection of this._selectionCache.values()) {
+      selection._watchColumn()
+      selection._reconcileShape()
+    }
   }
 
   // True once the latest update() has finished building this plot's axes and layers.
@@ -623,7 +693,24 @@ export class Plot extends GlBase {
   // ([0, 1], or [1, 10] on a log scale), so zoom and pan must not read them: the
   // result would reach every linked axis.
   _isReady() {
-    return this._readyEpoch === this._initEpoch
+    return this._readyEpoch === this._initEpoch &&
+      this.axisRegistry != null && this.axisRegistry.isReady()
+  }
+
+  // A gesture may write an axis domain only when this plot is ready and the target axis
+  // has a real (data- or override-derived) domain. Gestures go through this one
+  // predicate so zoom, pan, typed limits, lasso and link pushes all share the same
+  // notion of "the axes are trustworthy right now".
+  //
+  // `axisId` is a spatial slot for gestures; for a link push it may instead be a
+  // quantity kind standing for a colour/filter axis, whose domain lives on the QK entry.
+  _canWriteAxisDomain(axisId) {
+    if (!this._isReady()) return false
+    const qk = Object.prototype.hasOwnProperty.call(AXIS_GEOMETRY, axisId)
+      ? this.axisRegistry.getQkForSlot(axisId)
+      : axisId
+    if (qk == null) return false
+    return this.axisRegistry.isDomainReady(qk)
   }
 
   _rebuildColorscaleTexture() {
@@ -1002,7 +1089,13 @@ export class Plot extends GlBase {
   // Writes `locked` into axes.<slot> — set on the slot when turning on; cleared on the
   // slot and every same-QK sibling of this plot when turning off — then renders again
   // without update() (no layer rebuild). Touches only this plot's config.
+  //
+  // Refused while an update() is in flight: that rebuild is reading currentConfig and
+  // about to replace the axes, so a lock written now would be applied against a shape
+  // the rebuild discards — and the 'axisoptions' it emits would describe a lock the
+  // rebuild's config no longer carries. No event is emitted in that case either.
   setAxisLocked(slot, on) {
+    if (!this._isReady()) return
     const config = this.currentConfig ?? {}
     const axes = { ...(config.axes ?? {}) }
     const clear = (s) => {
@@ -1020,14 +1113,21 @@ export class Plot extends GlBase {
       }
     }
     this.currentConfig = { ...config, axes }
+    // A lock is a committed config change with no rebuild, so advance the baseline too:
+    // this lock was just announced, and a later update()'s diff must not re-emit it as a
+    // change from the pre-lock state.
+    if (this._appliedConfig) {
+      this._appliedConfig = { ...this._appliedConfig, axes: { ...(this._appliedConfig.axes ?? {}), ...axes } }
+    }
     this.scheduleRender()
     this._emitAxisOptions({ type: 'axisoptions', axis: slot, key: 'locked', value: !!on })
   }
 
   // Reset the 2D spatial axes to their data range. Color/filter axes and locked axes
-  // are left alone; a 3D plot does nothing (reset stays 2D-only).
+  // are left alone; a 3D plot does nothing (reset stays 2D-only). Also a no-op mid-
+  // rebuild, when the data extents it would reset to are not yet in the registry.
   resetAxes() {
-    if (this._is3D || !this.axisRegistry) return
+    if (this._is3D || !this.axisRegistry || !this._isReady()) return
     for (const axisId of AXES_2D) {
       if (!this.axisRegistry.getScale(axisId)) continue
       if (this.isAxisLocked(axisId)) continue
@@ -1606,6 +1706,11 @@ export class Plot extends GlBase {
 
   async selectLasso(vertices) {
     if (!this.regl || !this.layers.length || !this._lastRawDataArg) return
+    // A lasso run converts pixels through the axis scales and writes per-tile selection
+    // data. Mid-rebuild those scales are placeholders and the layers/tiles are about to
+    // be replaced, so a run now would select against the wrong geometry and be wiped.
+    // Drop it, like a zoom gesture, rather than producing a selection nobody asked for.
+    if (!this._isReady()) return
 
     const selectionColumns = new Map()
     for (let i = 0; i < this.layers.length; i++) {
@@ -1615,6 +1720,16 @@ export class Plot extends GlBase {
       }
     }
     if (selectionColumns.size === 0) return
+
+    // Drop any cached selection whose tile layout no longer matches the layers we are
+    // about to select against, so subscribers see the clear before the fresh result.
+    const seen = new Set()
+    for (const layer of this.layers) {
+      if (!layer.selectionName || !layer.selectionColumn) continue
+      if (seen.has(layer.selectionName)) continue
+      seen.add(layer.selectionName)
+      this._getSelection(layer.selectionName)._reconcileShape()
+    }
 
     if (!this._selectionPipeline) {
       this._selectionPipeline = new SelectionPipeline(this.regl, this)

@@ -92,6 +92,12 @@ export class Axis {
   // setDomain(null) — or an absent domain — resets this axis to its data range,
   // resolved to concrete numbers here (never the marker), so listeners and linked axes
   // receive this axis's resolved range rather than re-resolving against their own data.
+  //
+  // Note: this is also the entry point for a link push from another plot (sourcePlot
+  // set). Such a push is honoured even while this plot is rebuilding — it writes the
+  // live currentConfig.axes, which _initialize() then re-applies as an override, so the
+  // pushed range survives the rebuild. Only the *gesture* that originates a change is
+  // gated on readiness (see Plot._canWriteAxisDomain); a received push is not.
   setDomain(domain, { sourcePlot = null } = {}) {
     if (this._propagating) return
     if (domain == null) {

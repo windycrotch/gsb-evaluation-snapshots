@@ -236,6 +236,12 @@ export class ZoomController {
     // Right-press → 'contextmenu': the region the press was on, carried to the event on
     // the matching mouseup if the press stayed still and gladly did not otherwise use it.
     let rightPressRegion = null
+    // A gesture that starts while the plot is rebuilding, or that would read a scale
+    // still holding d3's placeholder range, is dropped whole: it records no start
+    // domain and writes nothing, so it can never seed a linked axis with a fake range.
+    // Every 2D domain write (pan, wheel zoom, pinch zoom) checks this one predicate, so
+    // they all share the same rule about when the axes are trustworthy.
+    const canWrite = (axisId) => plot._canWriteAxisDomain?.(axisId) === true
     const onMouseMove = (e) => {
       const _t0 = performance.now()
       const mx = e.clientX - dragRect.left
@@ -247,6 +253,15 @@ export class ZoomController {
       }
 
       if (isRotating) {
+        // Rotation needs the camera the rebuild is about to replace, so a rotation that
+        // began mid-update is abandoned rather than applied to a stale camera.
+        if (!plot._isReady()) {
+          isRotating = false
+          lastMouse  = null
+          window.removeEventListener('mousemove', onMouseMove)
+          window.removeEventListener('mouseup',   onMouseUp)
+          return
+        }
         const [lx, ly] = lastMouse
         const dx = mx - lx
         const dy = my - ly
@@ -275,6 +290,7 @@ export class ZoomController {
         const startDomain = startDomains[axisId]
         if (!startDomain) continue
         if (!plot.axisRegistry.getScale(axisId)) continue
+        if (!canWrite(axisId)) continue          // rebuild in flight / placeholder range
         if (plot.isAxisLocked(axisId)) continue   // locked axis stays put; free axes still pan
 
         const { dir } = AXIS_GEOMETRY[axisId]
@@ -297,7 +313,9 @@ export class ZoomController {
 
     const onMouseUp = (e) => {
       // A plain click on an axis title band toggles that axis's lock (no update()).
-      if (clickButton === 0 && !clickMoved && clickTitleAxis && plot.setAxisLocked) {
+      // The lock is config state, not a scale read, but it is still an interaction that
+      // would be undone by a rebuild in flight — drop it while the plot is not ready.
+      if (clickButton === 0 && !clickMoved && clickTitleAxis && plot.setAxisLocked && plot._isReady()) {
         plot.setAxisLocked(clickTitleAxis, !plot.isAxisLocked(clickTitleAxis))
       }
       // A right press+release that did not move and that gladly did not otherwise use
@@ -370,8 +388,14 @@ export class ZoomController {
       startWorld   = this._unproject(mx, my)
       startDomains = {}
       for (const axisId of region.axes) {
+        if (!canWrite(axisId)) continue   // do not snapshot a placeholder range
         const scale = plot.axisRegistry.getScale(axisId)
         if (scale) startDomains[axisId] = scale.domain().slice()
+      }
+      if (Object.keys(startDomains).length === 0) {   // nothing pannable — abandon whole
+        isDragging = false
+        dragRegion = null
+        return
       }
       window.addEventListener('mousemove', onMouseMove)
       window.addEventListener('mouseup',   onMouseUp)
@@ -403,14 +427,16 @@ export class ZoomController {
       if (!plot._isReady()) return
       const region = this._getRegion(mx, my)
       if (!region) return
-      touchDragging   = true
       touchDragRegion = region
       touchStartWorld = this._unproject(mx, my)
       touchStartDomains = {}
       for (const axisId of region.axes) {
+        if (!canWrite(axisId)) continue   // do not snapshot a placeholder range
         const scale = plot.axisRegistry.getScale(axisId)
         if (scale) touchStartDomains[axisId] = scale.domain().slice()
       }
+      if (Object.keys(touchStartDomains).length === 0) { touchDragRegion = null; return }
+      touchDragging = true
     }
 
     canvas.addEventListener('touchstart', (e) => {
@@ -479,6 +505,7 @@ export class ZoomController {
           const startDomain = touchStartDomains[axisId]
           if (!startDomain) continue
           if (!plot.axisRegistry.getScale(axisId)) continue
+          if (!canWrite(axisId)) continue
           if (plot.isAxisLocked(axisId)) continue
           const { dir } = AXIS_GEOMETRY[axisId]
           const dirIdx  = dir === 'x' ? 0 : dir === 'y' ? 1 : 2
@@ -503,6 +530,7 @@ export class ZoomController {
         for (const axisId of touchZoomRegion.axes) {
           const scale = plot.axisRegistry.getScale(axisId)
           if (!scale) continue
+          if (!canWrite(axisId)) continue
           if (plot.isAxisLocked(axisId)) continue
           const { dir } = AXIS_GEOMETRY[axisId]
           const dirIdx   = dir === 'x' ? 0 : dir === 'y' ? 1 : 2
@@ -558,7 +586,8 @@ export class ZoomController {
     canvas.addEventListener('wheel', (e) => {
       e.preventDefault()
       // Mid-update the axes hold placeholder ranges; zooming from them would push those
-      // ranges to every linked axis (see Plot._isReady()).
+      // ranges to every linked axis (see Plot._canWriteAxisDomain). A wheel that arrives
+      // while a rebuild is in flight is ignored entirely — no domain write, no link push.
       if (!plot.axisRegistry || !plot._isReady()) return
 
       const rect   = canvas.getBoundingClientRect()
@@ -573,6 +602,7 @@ export class ZoomController {
       for (const axisId of region.axes) {
         const scale = plot.axisRegistry.getScale(axisId)
         if (!scale) continue
+        if (!canWrite(axisId)) continue
         if (plot.isAxisLocked(axisId)) continue
 
         const { dir } = AXIS_GEOMETRY[axisId]

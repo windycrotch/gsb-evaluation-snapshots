@@ -178,6 +178,14 @@ export class AxisLimitEditor {
     const plot = this._plot
     const domain = plot.getAxisDomain(axisId)
     if (!domain) return true
+    // Typed limits are a gesture like zoom/pan: they read the axis's range and push the
+    // result to linked axes, so they are refused while the plot is rebuilding or the
+    // axis still holds a placeholder range. The field stays open so the user can retry.
+    if (!plot._canWriteAxisDomain?.(axisId)) {
+      box.style.borderColor = "#d00"
+      box.title = "Axis is not ready"
+      return false
+    }
     const i = end === "min" ? 0 : 1
     const result = parseAxisLimit(input.value, domain[1 - i], plot.axisRegistry.isLogScale(axisId))
     if (result.error) {

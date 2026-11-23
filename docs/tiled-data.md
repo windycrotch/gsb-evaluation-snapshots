@@ -139,8 +139,8 @@ The framework handles this in two places:
 1. **Render loop** — after computing `layer._tileSizes` each frame, the tile
    loop checks whether `selCol._tiles` matches.  If not, it calls
    `selCol._rebuild(layer._tileSizes)`, which destroys the old FBOs, allocates
-   fresh ones, and fires `selCol._onClear` so `Selection` can null its cached
-   CPU data and notify subscribers.
+   fresh ones, and fires the column's clear listeners so every `Selection` mirror
+   can null its cached CPU data and notify subscribers.
 
 2. **Lasso time** — `SelectionPipeline.runLasso()` performs the same check
    immediately before the GPU passes, in case tile count changed since the
