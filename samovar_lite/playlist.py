@@ -27,35 +27,86 @@ from .widgets import IconButton
 
 PATH_ROLE = Qt.UserRole
 DURATION_ROLE = Qt.UserRole + 1
+TOKEN_ROLE = Qt.UserRole + 2
 ROW_H = 22
 HEADER_H = 26
 FOOTER_H = 27
 
 
 class _DurationProber(threading.Thread):
-    """Fills in durations with ffprobe in the background (skipped when ffprobe is missing)."""
+    """Fills in durations with ffprobe in the background (skipped when ffprobe is missing).
+
+    Jobs are (token, path) pairs; the token lets the panel match a result to the exact row
+    that asked for it, so a result that arrives after its row was removed is dropped instead
+    of landing on an unrelated entry.
+    """
 
     def __init__(self, callback):
         super().__init__(daemon=True)
         self.jobs: queue.Queue = queue.Queue()
         self.callback = callback
         self.ffprobe = shutil.which("ffprobe")
+        self._stop_event = threading.Event()
+        self._process = None
+        self._process_lock = threading.Lock()
 
     def run(self):
-        while True:
-            path = self.jobs.get()
-            if path is None:
-                return
+        while not self._stop_event.is_set():
             try:
-                out = subprocess.run(
-                    [self.ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", path],
-                    capture_output=True,
-                    text=True,
-                    timeout=15,
-                ).stdout.strip()
-                self.callback(path, float(out))
+                job = self.jobs.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if job is None or self._stop_event.is_set():
+                return
+            token, path = job
+            try:
+                duration = self._probe(path)
             except Exception:
                 continue
+            if self._stop_event.is_set():
+                return
+            self.callback(token, path, duration)
+
+    def _probe(self, path: str) -> float:
+        process = subprocess.Popen(
+            [self.ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        with self._process_lock:
+            self._process = process
+            stopping = self._stop_event.is_set()
+        if stopping:
+            process.kill()
+        try:
+            out, _ = process.communicate(timeout=15)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate()
+            raise
+        finally:
+            with self._process_lock:
+                self._process = None
+        return float(out.strip())
+
+    def stop(self, timeout: float = 5.0):
+        """End the thread promptly: drop queued jobs, kill a probe in flight, then join."""
+        self._stop_event.set()
+        try:
+            while True:
+                self.jobs.get_nowait()
+        except queue.Empty:
+            pass
+        with self._process_lock:
+            process = self._process
+        if process is not None and process.poll() is None:
+            try:
+                process.kill()
+            except OSError:
+                pass
+        if self.is_alive():
+            self.join(timeout)
 
 
 class _Delegate(QStyledItemDelegate):
@@ -174,11 +225,13 @@ class PlaylistPanel(QWidget):
     repeatClicked = Signal()
     shuffleClicked = Signal()
     changed = Signal()
-    _durationReady = Signal(str, float)
+    _durationReady = Signal(int, str, float)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.current_item: QListWidgetItem | None = None
+        self._token_seq = 0
+        self._closed = False
         self.view = _List(self)
         self.view.setItemDelegate(_Delegate(self))
         self.view.setFrameShape(QListWidget.NoFrame)
@@ -272,9 +325,11 @@ class PlaylistPanel(QWidget):
     def _make_item(self, path: str) -> QListWidgetItem:
         item = QListWidgetItem(title_of(path))
         item.setData(PATH_ROLE, path)
+        self._token_seq += 1
+        item.setData(TOKEN_ROLE, self._token_seq)
         item.setToolTip(path)
         if self._prober.ffprobe and not is_url(path):
-            self._prober.jobs.put(path)
+            self._prober.jobs.put((self._token_seq, path))
         return item
 
     def set_items(self, paths: list[str]):
@@ -297,16 +352,32 @@ class PlaylistPanel(QWidget):
             self.view.scrollToItem(self.current_item)
         self.view.viewport().update()
 
-    def _set_duration(self, path: str, duration: float):
+    def _set_duration(self, token: int, path: str, duration: float):
+        """Apply a background probe result to the exact row that requested it.
+
+        Rows carry the token their probe job was queued with; a result whose token no
+        longer exists (row removed, list cleared or replaced) is dropped, so a late
+        ffprobe answer can never land on a different entry that happens to share the path.
+        """
+        if self._closed:
+            return
         for i in range(self.view.count()):
             item = self.view.item(i)
-            if item.data(PATH_ROLE) == path and not item.data(DURATION_ROLE):
-                item.setData(DURATION_ROLE, duration)
+            if item.data(TOKEN_ROLE) == token and item.data(PATH_ROLE) == path:
+                if not item.data(DURATION_ROLE):
+                    item.setData(DURATION_ROLE, duration)
+                break
         self.update()
 
     def set_duration(self, path: str, duration: float):
-        if duration:
-            self._set_duration(path, float(duration))
+        """Fill every row playing `path` from an authoritative source (the engine itself)."""
+        if not duration:
+            return
+        for i in range(self.view.count()):
+            item = self.view.item(i)
+            if item.data(PATH_ROLE) == path and not item.data(DURATION_ROLE):
+                item.setData(DURATION_ROLE, float(duration))
+        self.update()
 
     def remove_selected(self):
         for item in self.view.selectedItems():
@@ -322,9 +393,14 @@ class PlaylistPanel(QWidget):
 
     def sort_by(self, key: str):
         entries = [
-            (self.view.item(i).data(PATH_ROLE), self.view.item(i).data(DURATION_ROLE)) for i in range(self.view.count())
+            (
+                self.view.item(i).data(PATH_ROLE),
+                self.view.item(i).data(DURATION_ROLE),
+                self.view.item(i).data(TOKEN_ROLE),
+            )
+            for i in range(self.view.count())
         ]
-        current = self.current_item.data(PATH_ROLE) if self.current_item is not None else None
+        current = self.current_item.data(TOKEN_ROLE) if self.current_item is not None else None
         if key == "name":
             entries.sort(key=lambda e: natural_key(title_of(e[0])))
         elif key == "path":
@@ -337,14 +413,15 @@ class PlaylistPanel(QWidget):
             random.shuffle(entries)
         self.view.clear()
         self.current_item = None
-        for path, duration in entries:
+        for path, duration, token in entries:
             item = QListWidgetItem(title_of(path))
             item.setData(PATH_ROLE, path)
+            item.setData(TOKEN_ROLE, token)
             item.setToolTip(path)
             if duration:
                 item.setData(DURATION_ROLE, duration)
             self.view.addItem(item)
-            if path == current and self.current_item is None:
+            if token == current and self.current_item is None:
                 self.current_item = item
         self._refresh()
 
@@ -477,5 +554,12 @@ class PlaylistPanel(QWidget):
             QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.dirname(path)))
 
     def shutdown(self):
-        if self._prober.is_alive():
-            self._prober.jobs.put(None)
+        """Stop the prober and make sure no probe result reaches the panel afterwards."""
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._durationReady.disconnect(self._set_duration)
+        except (TypeError, RuntimeError):
+            pass
+        self._prober.stop()

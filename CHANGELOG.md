@@ -6,6 +6,18 @@ All notable changes to Samovar Lite are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Playlist duration probing is now row-accurate: each entry queues its own ffprobe job, so
+  duplicate paths each get a duration, results that arrive after a row was removed or the list
+  was cleared are dropped instead of landing on a different entry, and clearing then
+  re-importing the same files probes them again.
+- Sorting or shuffling the playlist keeps the current-item marker on the same entry and no
+  longer loses durations that were still being probed.
+- Closing the window now stops the ffprobe worker thread deterministically (queued jobs are
+  dropped, a probe in flight is killed, the thread is joined) and disconnects its signal, so
+  no callback can reach the playlist after shutdown.
+
 ## [1.0.0] - 2026-10-09
 
 First public release.
