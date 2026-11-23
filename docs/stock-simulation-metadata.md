@@ -44,7 +44,7 @@ T3 M6
 - These are the stock's bounding box **in the same coordinates as the G-code moves**. If Z0 is the stock top, then `ZMAX=0` and `ZMIN` is minus the thickness. If Z0 is the spoilboard, then `ZMIN=0`.
 - All six values are required, and each max must be greater than its min. Otherwise the line is ignored and a warning is logged to the browser console.
 - If the post shifts or offsets coordinates on output (a work offset option, for example), apply the same shift to these bounds.
-- With a `Stock` line, a `G38.2`/`G38.3` straight down in Z is simulated: it stops on the stock as cut so far, or on a touch plate of thickness `P` lying on it, and with `P` the work Z is set so the contact point reads `P`, as FluidNC does. Without one, probes are drawn to their programmed end.
+- With a `Stock` line, a `G38.2`/`G38.3` straight down in Z is simulated: it stops on the stock as cut so far — every earlier cutting move, arc segments included — or on a touch plate of thickness `P` lying on it, and with `P` the work Z is set so the contact point reads `P`, as FluidNC does. The probe and the 3D view share one surface (the same grid and interpolated heights), so the contact height matches the machined surface that's drawn. Probing never changes the surface. Without a `Stock` line, probes are drawn to their programmed end.
 - This describes the stock before **any** cutting. If the job is split into several files that build on each other, list the earlier ones with `PriorJob` (below), and give every file in the chain the same `Stock` line.
 - Use the program's output units.
 

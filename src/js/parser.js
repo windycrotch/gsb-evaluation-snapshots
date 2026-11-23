@@ -44,7 +44,7 @@ class GCodeParser {
         this.toolNumber = null; // Last T word, as written (segment.tool is a display index)
 
         // Stock simulation metadata from header comments (see parseSimComment)
-        this.simMeta = { units: null, stock: null, tools: new Map(), priorJobs: [] };
+        this.simMeta = { units: null, stock: null, tools: new Map(), priorJobs: [], sizeUnits: null };
 
         // What a controller UI would show as the job runs, in order: { index, lineNum, kind,
         // text }. index is the number of segments before it (it happens once those are done).
@@ -476,12 +476,22 @@ class GCodeParser {
     }
 
     /**
-     * Switch units (G20/G21). The machine doesn't move, so the current position, the work
-     * offsets and G92 are carried over into the new units, and so is the modal feed rate
-     * (a speed: FluidNC/Grbl keep it in mm/min). Segments stay in the units of their move.
+     * Switch units (G20/G21). The machine doesn't move, so everything already recorded is
+     * carried over into the new units: the current position, the work offsets, G92, the
+     * modal feed rate, the segments parsed so far (with their probe plates and feed rates),
+     * the bounds and the stock/tool metadata. Without this, a probe after a units word
+     * would look for the surface at numbers in the wrong unit, and the simulation would
+     * stack inch and millimetre moves in one frame. The probe model is rebuilt, as its
+     * cached surface is in the old units.
+     *
+     * Header sizes (Stock/ToolDef) are in the file's units, which is normally the G20/G21
+     * that opens the program. They're kept in their declared units until the first move
+     * shows the working units (see adoptSimUnits), so a units word before any move doesn't
+     * scale them twice.
      */
     setUnits(units) {
         if (units === this.units) return;
+        const oldUnits = this.units;
         const k = units === 'inches' ? 1 / 25.4 : 25.4;
         // New objects: segments may still hold the old position
         const scale = (p) => p && { x: p.x * k, y: p.y * k, z: p.z * k };
@@ -490,7 +500,52 @@ class GCodeParser {
         this.g92Saved = scale(this.g92Saved);
         this.wcsOffsets = this.wcsOffsets.map(scale);
         this.feedRate *= k;
+
+        // Everything already parsed is in the old units, including the header sizes once
+        // the first move adopted them (sizeUnits). A units word before any move leaves the
+        // header alone: nothing has been recorded in the old units yet.
+        if (this.simMeta.sizeUnits === oldUnits) {
+            for (const seg of this.segments) {
+                seg.start = scale(seg.start);
+                seg.end = scale(seg.end);
+                if (seg.feedRate > 0) seg.feedRate *= k;
+                if (seg.probe) {
+                    seg.probe = {
+                        surface: seg.probe.surface * k,
+                        plate: seg.probe.plate * k
+                    };
+                }
+            }
+            const b = this.bounds;
+            if (b.minX <= b.maxX) {
+                b.minX *= k; b.maxX *= k;
+                b.minY *= k; b.maxY *= k;
+                b.minZ *= k; b.maxZ *= k;
+            }
+            this.scaleSimMeta(k, units);
+            this.simMeta.sizeUnits = units;
+        }
+
         this.units = units;
+        // The probe's cached heightmap is in the old units: build it again on the next probe
+        this.probeModel = undefined;
+    }
+
+    /**
+     * Convert the stock bounds and tool sizes in simMeta by `k` and note their units, so
+     * the surface keeps its physical place
+     */
+    scaleSimMeta(k, units) {
+        const stock = this.simMeta.stock;
+        if (stock) {
+            for (const key of ['xmin', 'xmax', 'ymin', 'ymax', 'zmin', 'zmax']) stock[key] *= k;
+        }
+        for (const tool of this.simMeta.tools.values()) {
+            for (const key of ['diameter', 'tip', 'cornerRadius', 'fluteLength', 'overallLength']) {
+                if (typeof tool[key] === 'number') tool[key] *= k;
+            }
+        }
+        this.simMeta.units = units;
     }
 
     /**
@@ -585,6 +640,11 @@ class GCodeParser {
      * With a P word, FluidNC then sets the active coordinate system so that the contact
      * point reads as P on that axis (no retract). Other probes, or without a known stock,
      * are drawn to their programmed end, as where they touch isn't known.
+     *
+     * The surface probed against is the one the stock simulation carves (StockProbe, same
+     * grid), built from every move parsed so far, arcs included. Probing only reads it: the
+     * probe move is type 'probe', which the simulator never carves, so two probes at the
+     * same place touch the same height, and a failed probe leaves the surface as it was.
      */
     probeMove(words, sub, lineNum) {
         const target = this.extractTarget(words);
@@ -597,7 +657,9 @@ class GCodeParser {
 
         const contact = model.contactZ(this.segments, start.x, start.y, this.currentToolNumber(), plate);
         if (contact < target.z) {
-            // Nothing to touch before the end of the move
+            // Nothing to touch before the end of the move: draw it to the programmed end,
+            // report the fail (G38.2) and change nothing else, so the surface and the next
+            // probe are as if this one never happened
             this.linearMove(words, 'probe', lineNum);
             if (sub === 2) this.addEvent('alarm', 'ALARM: Probe fail: no contact (G38.2)', lineNum);
             return true;
@@ -620,13 +682,18 @@ class GCodeParser {
         });
         this.position = { x: start.x, y: start.y, z: contact };
         this.updateBounds(this.position);
+
+        if (pWord) {
+            // FluidNC's P: set the active system so the contact point reads P, leaving G92
+            // alone, i.e. the whole offset becomes contact - P (see workOffset)
+            this.wcsOffsets[this.wcs].z = contact - this.g92.z - plate;
+        }
+        // Reported in the coordinate system now in force, so it matches the probed height
+        // the simulation shows; after a P probe that reading is P itself
         const offset = this.workOffset();
         const fmt = (v) => v.toFixed(3);
         let text = `Probe contact at X${fmt(start.x - offset.x)} Y${fmt(start.y - offset.y)} Z${fmt(contact - offset.z)}`;
-        if (pWord) {
-            this.wcsOffsets[this.wcs].z = contact - plate;
-            text += `; offset applied, Z is now ${fmt(plate)}`;
-        }
+        if (pWord) text += `; offset applied, Z is now ${fmt(plate)}`;
         this.addEvent('probe', text, lineNum);
         return true;
     }
@@ -636,6 +703,9 @@ class GCodeParser {
      */
     getProbeModel() {
         if (this.probeModel === undefined) {
+            // Put the header sizes in the working units first (a probe may come before any
+            // move, but a units word before it still sets them)
+            this.adoptSimUnits();
             this.probeModel = this.simMeta.stock && typeof StockProbe !== 'undefined'
                 ? new StockProbe(this.simMeta.stock, this.simMeta.tools)
                 : null;
@@ -933,7 +1003,24 @@ class GCodeParser {
      * Add segment to list
      */
     addSegment(segment) {
+        this.adoptSimUnits();
         this.segments.push(segment);
+    }
+
+    /**
+     * Header sizes are in the program's units, which is the G20/G21 that applies to the
+     * moves. The header comments come before any unit word, so the units in force at the
+     * first move are taken as the header's, unless CNCSIM declares them; the sizes are
+     * converted once into that frame so the probe model and the simulation agree.
+     */
+    adoptSimUnits() {
+        const meta = this.simMeta;
+        if (meta.sizeUnits !== null) return;
+        meta.sizeUnits = this.units;
+        const declared = meta.units;
+        if (declared && declared !== this.units) {
+            this.scaleSimMeta(declared === 'mm' ? 1 / 25.4 : 25.4, this.units);
+        }
     }
 
     /**

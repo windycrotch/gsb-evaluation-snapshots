@@ -2464,22 +2464,13 @@ class Controller {
 
     /**
      * Grid size for Auto detail: cells about 1/8 of the smallest cutting feature (a tapered
-     * ball's tip, half a V-bit, else the diameter), from 1 to 6 million cells
+     * ball's tip, half a V-bit, else the diameter), from 1 to 6 million cells. Shared with
+     * the probe model (stockSimCells), so a probe touches the surface the 3D view draws.
      */
     autoStockCells(cfg) {
-        const s = cfg.stock;
-        const area = (s.xmax - s.xmin) * (s.ymax - s.ymin);
-        let feature = Infinity;
-        for (const def of cfg.tools.values()) {
-            if (!(def.diameter > 0)) continue;
-            let size = def.diameter;
-            if (def.shape === 'taperball' && def.tip > 0) size = Math.min(def.diameter, def.tip);
-            else if (def.shape === 'vbit' || def.shape === 'chamfer' || def.shape === 'roundover') size = def.diameter / 2;
-            feature = Math.min(feature, size);
-        }
-        if (!isFinite(feature)) return 1e6;
-        const cell = feature / 8;
-        return Math.max(1e6, Math.min(6e6, area / (cell * cell)));
+        return typeof stockSimCells === 'function'
+            ? stockSimCells(cfg.stock, cfg.tools)
+            : 1e6;
     }
 
     /**

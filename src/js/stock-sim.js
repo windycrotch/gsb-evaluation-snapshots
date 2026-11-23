@@ -24,6 +24,29 @@ function compileStockTool(def) {
     return tool;
 }
 
+/**
+ * Grid cell count for a stock and its tool definitions (raw ToolDef objects): cells about
+ * 1/8 of the smallest cutting feature (a tapered ball's tip, half a V-bit, else the
+ * diameter), from 1 to 6 million. The stock simulation and probing both use this, so a
+ * probe meets exactly the surface the 3D view carves.
+ */
+function stockSimCells(stock, toolDefs) {
+    const area = (stock.xmax - stock.xmin) * (stock.ymax - stock.ymin);
+    let feature = Infinity;
+    if (toolDefs) {
+        for (const def of toolDefs.values()) {
+            if (!def || !(def.diameter > 0)) continue;
+            let size = def.diameter;
+            if (def.shape === 'taperball' && def.tip > 0) size = Math.min(def.diameter, def.tip);
+            else if (def.shape === 'vbit' || def.shape === 'chamfer' || def.shape === 'roundover') size = def.diameter / 2;
+            feature = Math.min(feature, size);
+        }
+    }
+    if (!isFinite(feature)) return 1e6;
+    const cell = feature / 8;
+    return Math.max(1e6, Math.min(6e6, area / (cell * cell)));
+}
+
 function compileStockToolProfile(def) {
     if (!def || !(def.diameter > 0)) return null;
     const r = def.diameter / 2;
@@ -301,9 +324,10 @@ class StockSimulator {
 
         let s = seg.start;
         const e = seg.end;
-        // A probe stops on contact somewhere along its move, but is drawn to its programmed
-        // end, so the move after it (usually a retract) doesn't really start there
-        if (prev && prev.type === 'probe' && s.z < e.z) s = { x: s.x, y: s.y, z: e.z };
+        // The move after a probe is usually its retract, straight up from where the tip
+        // touched. Moving up never removes material (the tip is highest at the end), so
+        // skip it: otherwise the retract can shave material beside the probe hole.
+        if (prev && prev.type === 'probe' && s.z < e.z) return false;
         if (Math.min(s.z, e.z) >= this.stock.zmax) return false; // entirely above the stock
 
         return this.sweep(s.x, s.y, s.z, e.x, e.y, e.z, tool);
@@ -385,52 +409,161 @@ class StockSimulator {
 }
 
 /**
- * Where a probe stops on the stock, for simulating G38.x Z probes while parsing: the stock
- * is carved by the moves parsed so far (segments grows as the parser adds to it).
+ * Where a probe stops on the stock, for simulating G38.x Z probes while parsing.
+ *
+ * The probe and the 3D view must agree exactly: the probe has to stop on the very surface
+ * the view draws. Rather than carve a second full grid at parse time (millions of cells,
+ * far too slow to do synchronously), this evaluates the heightmap *sparsely*: it uses the
+ * same grid (stockSimCells), the same carving rules as StockSimulator.carveOne/sweep (same
+ * move order, the same ramp piece-splitting, the same float32 bottom and -1e-6 threshold)
+ * and the same mesh interpolation the renderer uses (each cell split along its a-d
+ * diagonal, see StockMeshRenderer.tileShape). Only the few vertices the probe needs are
+ * computed, so the result equals the drawn surface at a fraction of the cost.
+ *
+ * Probing only reads the surface: the probe move itself is never carved, so two probes at
+ * the same place touch the same height and a failed probe leaves the surface untouched.
  */
 class StockProbe {
     constructor(stock, tools) {
-        this.sim = new StockSimulator(stock, tools, { maxCells: 250000, snapshots: false });
-        this.segments = null;
+        this.stock = stock;
+        this.tools = StockSimulator.compileTools(tools);
+        this.defaultTool = this.tools.values().next().value || null;
+        // Same grid geometry the display's StockSimulator builds (stockSimCells)
+        const width = stock.xmax - stock.xmin;
+        const length = stock.ymax - stock.ymin;
+        const maxCells = stockSimCells(stock, tools);
+        const cell = Math.sqrt(width * length / maxCells);
+        this.nx = Math.max(1, Math.floor(width / cell));
+        this.ny = Math.max(1, Math.floor(length / cell));
+        this.dx = width / this.nx;
+        this.dy = length / this.ny;
+        this.bottom = Math.fround(stock.zmin);
+        // Candidate segments for the current probe XY (see contactZ)
+        this.candidates = null;
     }
 
     /**
-     * Tool tip height where a probe straight down at (x, y) stops: on a touch plate of
-     * thickness `plate` lying on the stock (resting on the highest point under the tool),
-     * or with plate 0 on the stock itself, touching it with the tool's own shape. Off the
+     * Tool tip height where a probe straight down at (x, y) stops.
+     *
+     * Without a plate the tip lands on the drawn surface at (x, y) (surfaceZ, interpolated
+     * exactly like the mesh), so the probe ends on the visible machined surface rather than
+     * a grid corner. With a touch plate of thickness `plate`, the rigid plate rests on the
+     * highest point under the tool (surfaceTop) and the tip meets its top face. Off the
      * stock it's the table, taken as the stock bottom.
      */
     contactZ(segments, x, y, toolNumber, plate = 0) {
-        const sim = this.sim;
-        if (this.segments !== segments) {
-            sim.setSegments(segments);
-            this.segments = segments;
+        // Only moves whose swept tool could reach a sampled vertex (within the probe tool's
+        // radius plus a cell diagonal of the probe XY) matter; the rest left those heights
+        // at the stock top, so filter them out once
+        const tool = this.tools.get(toolNumber) || this.defaultTool;
+        const reach = (tool ? tool.radius : 0) + Math.hypot(this.dx, this.dy);
+        this.candidates = [];
+        for (let i = 0; i < segments.length; i++) {
+            const seg = segments[i];
+            if (seg.type === 'probe') continue;
+            const prev = segments[i - 1];
+            if (prev && prev.type === 'probe' && seg.start.z < seg.end.z) continue; // a retract
+            const r = (this.tools.get(seg.toolNumber) || this.defaultTool);
+            if (!r) continue;
+            const rr = r.radius + reach;
+            const minX = Math.min(seg.start.x, seg.end.x) - rr, maxX = Math.max(seg.start.x, seg.end.x) + rr;
+            const minY = Math.min(seg.start.y, seg.end.y) - rr, maxY = Math.max(seg.start.y, seg.end.y) + rr;
+            if (x < minX || x > maxX || y < minY || y > maxY) continue;
+            if (Math.min(seg.start.z, seg.end.z) >= this.stock.zmax) continue;
+            this.candidates.push(seg);
         }
-        sim.advanceTo(segments.length);
+        const cache = new Map();
+        this.vertexCache = cache;
+        if (!(plate > 0)) return this.surfaceZ(x, y);
+        return this.surfaceTop(x, y, tool ? tool.radius : 0) + plate;
+    }
 
-        const tool = sim.tools.get(toolNumber) || sim.defaultTool;
-        const r = tool ? tool.radius : 0;
-        const S = sim.stock;
-        const i0 = Math.max(0, Math.ceil((x - r - S.xmin) / sim.dx));
-        const i1 = Math.min(sim.nx, Math.floor((x + r - S.xmin) / sim.dx));
-        const j0 = Math.max(0, Math.ceil((y - r - S.ymin) / sim.dy));
-        const j1 = Math.min(sim.ny, Math.floor((y + r - S.ymin) / sim.dy));
+    /**
+     * Carved height at grid vertex (i, j) after the candidate moves, mirroring
+     * StockSimulator.carveOne + sweep + sweepPiece for a single vertex. float32 result.
+     */
+    vertexZ(i, j) {
+        const key = i * (this.ny + 1) + j;
+        let z = this.vertexCache.get(key);
+        if (z !== undefined) return z;
+        const S = this.stock, dx = this.dx, dy = this.dy;
+        const x0 = S.xmin + i * dx, y0 = S.ymin + j * dy;
+        const bottom = this.bottom;
+        z = Math.fround(S.zmax);
+        for (const seg of this.candidates) {
+            const tool = this.tools.get(seg.toolNumber) || this.defaultTool;
+            const ax0 = seg.start.x, ay0 = seg.start.y, az0 = seg.start.z;
+            const lx = seg.end.x - ax0, ly = seg.end.y - ay0, lz = seg.end.z - az0;
+            const lengthXY = Math.hypot(lx, ly);
+            const step = Math.min(dx, dy);
+            const pieces = Math.abs(lz) > 1e-9 && lengthXY > step
+                ? Math.min(Math.ceil(lengthXY / step), 100000)
+                : 1;
+            const r = tool.radius, r2 = r * r, flat = tool.flat, profile = tool.profile;
+            for (let p = 0; p < pieces; p++) {
+                const t0 = p / pieces, t1 = (p + 1) / pieces;
+                const ax = ax0 + lx * t0, ay = ay0 + ly * t0, az = az0 + lz * t0;
+                const bx = ax0 + lx * t1, by = ay0 + ly * t1, bz = az0 + lz * t1;
+                const ux = bx - ax, uy = by - ay, len2 = ux * ux + uy * uy;
+                const hasLength = len2 > 1e-18, zLow = Math.min(az, bz);
+                const px = x0 - ax, py = y0 - ay;
+                let t = hasLength ? (px * ux + py * uy) / len2 : 0;
+                if (t < 0) t = 0; else if (t > 1) t = 1;
+                const qx = px - t * ux, qy = py - t * uy;
+                const d2 = qx * qx + qy * qy;
+                if (d2 > r2) continue;
+                let zz = hasLength ? az + (bz - az) * t : zLow;
+                if (!flat) zz += profile(Math.sqrt(d2));
+                if (zz < bottom) zz = bottom;
+                if (zz < z - 1e-6) z = Math.fround(zz);
+            }
+        }
+        this.vertexCache.set(key, z);
+        return z;
+    }
+
+    /**
+     * Height of the drawn surface at (x, y), interpolated across the same triangles the
+     * mesh renderer draws (each cell split along its a-d diagonal), matching
+     * StockSimulator.surfaceZ. Off the stock it's the stock bottom.
+     */
+    surfaceZ(x, y) {
+        const S = this.stock;
+        if (!(x >= S.xmin && x <= S.xmax && y >= S.ymin && y <= S.ymax)) return S.zmin;
+        const gx = Math.min(Math.max((x - S.xmin) / this.dx, 0), this.nx);
+        const gy = Math.min(Math.max((y - S.ymin) / this.dy, 0), this.ny);
+        const i = Math.min(Math.floor(gx), Math.max(0, this.nx - 1));
+        const j = Math.min(Math.floor(gy), Math.max(0, this.ny - 1));
+        const fx = gx - i, fy = gy - j;
+        const a = this.vertexZ(i, j), b = this.vertexZ(i + 1, j);
+        const c = this.vertexZ(i, j + 1), d = this.vertexZ(i + 1, j + 1);
+        return fx >= fy
+            ? a + fx * (b - a) + fy * (d - b)
+            : a + fy * (c - a) + fx * (d - c);
+    }
+
+    /**
+     * Highest drawn grid vertex under a tool of `radius` centred at (x, y), for a touch
+     * plate lying on the stock: its top rests on the highest point under the tool
+     */
+    surfaceTop(x, y, radius) {
+        const S = this.stock;
+        const r = Math.max(radius, Math.min(this.dx, this.dy));
+        const i0 = Math.max(0, Math.ceil((x - r - S.xmin) / this.dx));
+        const i1 = Math.min(this.nx, Math.floor((x + r - S.xmin) / this.dx));
+        const j0 = Math.max(0, Math.ceil((y - r - S.ymin) / this.dy));
+        const j1 = Math.min(this.ny, Math.floor((y + r - S.ymin) / this.dy));
         let top = -Infinity;
         for (let j = j0; j <= j1; j++) {
             for (let i = i0; i <= i1; i++) {
-                const d = Math.hypot(S.xmin + i * sim.dx - x, S.ymin + j * sim.dy - y);
+                const d = Math.hypot(S.xmin + i * this.dx - x, S.ymin + j * this.dy - y);
                 if (d > r) continue;
-                const h = sim.heights[j * sim.vx + i];
-                const z = plate > 0 || !tool ? h : h - tool.profile(d);
+                const z = this.vertexZ(i, j);
                 if (z > top) top = z;
             }
         }
-        if (top === -Infinity) {
-            // Narrower than a cell: the nearest grid point, if it's on the stock
-            const i = Math.round((x - S.xmin) / sim.dx), j = Math.round((y - S.ymin) / sim.dy);
-            top = i >= 0 && i <= sim.nx && j >= 0 && j <= sim.ny ? sim.heights[j * sim.vx + i] : S.zmin;
-        }
-        return top + plate;
+        if (top === -Infinity) return this.surfaceZ(x, y);
+        return top;
     }
 }
 
@@ -1198,5 +1331,5 @@ function guessStockToolFromName(name, units = 'mm') {
 
 // Node (tests) - in the browser these are plain globals
 if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { StockSimulator, StockProbe, compileStockTool, guessStockToolFromName, STOCK_TOOL_SHAPES };
+    module.exports = { StockSimulator, StockProbe, stockSimCells, compileStockTool, guessStockToolFromName, STOCK_TOOL_SHAPES };
 }
