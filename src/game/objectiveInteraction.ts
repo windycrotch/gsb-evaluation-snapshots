@@ -2,6 +2,14 @@ import type {Actor,GameSnapshot,ObjectiveSite} from './types';
 import {wallDistance} from './collision';
 export const PLANT_SECONDS=3,BOMB_SECONDS=40,DEFUSE_SECONDS=10,KIT_DEFUSE_SECONDS=5;
 export const RESCUE_ROUND_SECONDS=180,DEMOLITION_ROUND_SECONDS=120;
+/** A briefly interrupted defuser (stepping, dodging, pushed off the bomb) keeps
+ * the assignment for this long before another CT may take over. */
+export const DEFUSE_HANDOFF_GRACE=.9;
+/** In range but unable to accumulate progress for this long counts as stalled. */
+export const DEFUSE_STALL_SECONDS=1.6;
+/** An assigned defuser that never converges on the bomb within this window is
+ * replaced by another reachable CT. */
+export const DEFUSE_HANDOFF_TIMEOUT=6;
 type Point={x:number;y?:number;z:number};
 export function objectiveReachable(a:Point,b:Point,radius:number,height=1.5):boolean{
  const dx=b.x-a.x,dz=b.z-a.z,dy=(b.y??0)-(a.y??0),distance=Math.hypot(dx,dz);

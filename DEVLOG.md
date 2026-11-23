@@ -98,3 +98,13 @@ Combat now uses only a quiet wind loop, with no city or tension bed. Menu music 
 Raising every footstep made several moving actors blend into a loud, unrealistic wash. The revised mix uses a shorter, footstep-specific distance curve and a 16 m cutoff. Cover and crouching reduce gain, while at most three audible footstep sources overlap; stronger incoming steps replace the weakest. Each actor has at most one active step. A low-pass filter softens gravel hiss and a short fade limits each tail to 200 ms. Bot cadence starts at different phases instead of all actors stepping together. These changes retain the existing synthesized samples, rather than claiming new real-world recordings.
 
 The full local project passes 70 tests; the source-only core suite passes 56. Browser combat starts without captured console errors. Listening on physical mobile hardware remains necessary, and deployment of the audio updates is pending.
+
+## Defuse handoff: one owner at a time
+
+A planted C4 with several CT bots exposed two failure modes. If the one bot selected to defuse died or was driven off the bomb, the rest kept guarding until the fuse ran out. If two bots stood on the bomb, the progress owner flipped between them each tick and the ten-second timer restarted repeatedly, so nobody finished.
+
+The fix separates *assignment* from *progress*. `bomb.defuseAssigneeId` names the single CT bot tasked with reaching and defusing; `bomb.defuserId` still names whoever is actually accumulating progress this tick. The simulation commits the assignee, hands the task to another living CT only when the current one dies, is knocked out of reach after arriving, or fails to make progress for a bounded window, and always restarts progress at zero on a change. Because a briefly interrupted defuser keeps its lease for a short grace, a step-and-return never creates two defusers or a jumping progress bar. A human actively holding defuse outranks the bots.
+
+The guards were tightened at the same time. Cover occupancy now ignores dead/inactive allies, a squad's covering-fire anchor excludes reloading, low-health, inactive, knife-only or out-of-ammo shooters, and CT guards take offset ring posts around the bomb instead of stacking on it (which also freed the defuser's interaction tile). An occupied cover point falls back to another reachable point that still blocks the threat line.
+
+The core suite covers the firefight baseline, defuser death handoff, brief leave-and-return, two simultaneous candidates, guard covering fire, support-anchor filtering and occupied-cover selection, all at 30/60/120 Hz. It also checks that a clean defuse takes the same wall-clock time across tick rates.

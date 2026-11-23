@@ -2,7 +2,7 @@ import {prepareBountyRound} from './bountyRounds';
 import {rayActorHit,hitRegionDamage,actorHitHeight} from './hitRegions';
 import type {HitRegion} from './types';
 import {playerMovementSpeed,WALK_SPEED} from './playerMovement';
-import {objectiveInteraction,objectiveReachable,insideBombSite,PLANT_SECONDS,BOMB_SECONDS,DEFUSE_SECONDS,KIT_DEFUSE_SECONDS,RESCUE_ROUND_SECONDS,DEMOLITION_ROUND_SECONDS} from './objectiveInteraction';
+import {objectiveInteraction,objectiveReachable,insideBombSite,PLANT_SECONDS,BOMB_SECONDS,DEFUSE_SECONDS,KIT_DEFUSE_SECONDS,RESCUE_ROUND_SECONDS,DEMOLITION_ROUND_SECONDS,DEFUSE_STALL_SECONDS,DEFUSE_HANDOFF_GRACE,DEFUSE_HANDOFF_TIMEOUT} from './objectiveInteraction';
 import {modeForMap,restrictedWeapon,isTeamDeathmatch,hasRespawns,hasUnlimitedReserve,allowsPickups,allowsWeapon,areEnemies,RACE_LADDER,RACE_KILLS_PER_STAGE,createDefense,defenseWave,DEFENSE_WAVE_SECONDS,type PlayableMode,type DefenseUpgrade} from './offlineModes';
 import {AimAssist} from './aimAssist';
 import {DEFAULT_BOT_COUNTS,MAX_TEAM_SIZE,validBotCounts} from './botRoster';
@@ -15,7 +15,7 @@ import {findPath,lineClear,walkSegmentClear,moveBody,rayBox,wallDistance} from '
 import {DEFAULT_SETTINGS,EMPTY_INPUT,WEAPON_KINDS,type Actor,type GameEvent,type GameSnapshot,type Gun,type PlayerInput,type Settings,type Team,type WeaponKind,type ObjectiveSite,type GameMode} from './types';
 import {avoidActors,type Avoidance} from './botAvoidance';
 import {advanceBotMotion,turnBot,type BotMotion} from './botMotion';
-import {botObjective,findBotCover,findBotAngle,findBotAdvance,patrolPoint,friendlyBlocksShot,tacticalLineClear,findDefenseFireLane,DEFENSE_CHASE_RADIUS,type TacticalPoint,type CoverPoint} from './botTactics';
+import {botObjective,findBotCover,findBotAngle,findBotAdvance,patrolPoint,friendlyBlocksShot,tacticalLineClear,findDefenseFireLane,orderedDefuseCandidates,canReachPoint,DEFENSE_CHASE_RADIUS,type TacticalPoint,type CoverPoint} from './botTactics';
 import {squadOrder,chooseCombatAction,preferredRange,type SquadRole,type CombatAction} from './botCombat';
 import {sampleBlast,sampleBombBlast} from './blast';
 import {advanceGrenade} from './grenades';
@@ -65,6 +65,10 @@ export class Simulation {
  private readonly touchAssist=new AimAssist();
  private meleePending=new Map<number,{at:number;startedAt:number;attack:MeleeAttack}>();
  private queuedStab:{actor:Actor;shotTime:number}|null=null;
+ private defuseFailingSince=0;
+ private defuseNoProgressSince=0;
+ private defuseProgressAt:{x:number;z:number}|null=null;
+ private defuseReached=false;
   constructor(seed=20260915,settings:Settings={...DEFAULT_SETTINGS}){
   this.rngState=seed>>>0;const actors=this.makeActors();
   this.state={phase:'menu',paused:false,time:0,round:1,roundTime:15,blueScore:0,redScore:0,winner:null,actors,pickups:createMapPickups(),grenades:[],player:actors[0],spectating:null,settings,feed:[],hitMarker:0,damageAngle:0,totalKills:0,totalDeaths:0,mode:modeForMap('deathmatch'),bomb:{status:'carried',carrierId:0,x:0,z:0,site:null,timer:40,progress:0,defuserId:null},sites:[]};
@@ -75,7 +79,7 @@ export class Simulation {
  private makeActors(defense=false):Actor[]{const teammates=defense?2:this.teammateBots,enemies=defense?10:this.enemyBots;return Array.from({length:1+teammates+enemies},(_,id)=>{const blueCount=1+teammates,team=id<blueCount?'blue':'red',faction=id<blueCount?'ct':'t',slot=team==='blue'?id:id-blueCount;const p=(team==='blue'?BLUE_SPAWNS:RED_SPAWNS)[slot];const weapon='rifle';const actor={id,name:id===0?'你':`${team==='blue'?'队友':'对手'} ${team==='blue'?slot:slot+1}`,team,faction,player:id===0,x:p.x,z:p.z,y:p.y??0,groundY:p.y??0,yaw:p.yaw??(team==='blue'?0:Math.PI),pitch:0,health:100,armor:0,money:STARTING_MONEY,crouched:false,moving:false,weapon,inventory:['rifle','pistol','knife'],guns:Object.fromEntries(WEAPON_KINDS.map(kind=>[kind,this.gun(kind)])) as Record<WeaponKind,Gun>,grenades:0,throwTime:-10,kills:0,deaths:0,shotTime:-10,hurtTime:-10,spread:0,hasBomb:false,defuseKit:false} as Actor;return actor;});}
  refreshMap(){if(this.state.phase!=='menu')return;this.state.mode=modeForMap(this.preferredMode);this.state.rescue=undefined;this.state.roundReason=undefined;this.state.sites=[];this.state.actors=this.makeActors();this.state.player=this.state.actors[0];this.state.spectating=null;this.state.grenades=[];this.state.pickups=allowsPickups(this.state.mode)?createMapPickups():[];for(const a of this.state.actors)this.equipRestricted(a);this.teamReports.clear();}
  start(mode:GameMode=modeForMap(this.state.mode)){this.supplyAt=20;this.state.mode=mode;this.state.race=undefined;this.state.defense=undefined;this.state.sites=this.state.mode==='demolition'?(getActiveMap().bombSites??OBJECTIVE_SITES):[];this.state.blueScore=0;this.state.redScore=0;this.state.round=1;this.state.totalKills=0;this.state.totalDeaths=0;this.state.feed=[];this.state.time=0;this.events=[];this.resetRound();}
- resetRound(allBots=false){this.queuedStab=null;this.interactionActors.clear();this.hostageActors.clear();this.state.roundReason=undefined;this.touchAssist.reset();this.meleePending.clear();this.pickupInteractHeld=false;this.nextPickupId=1000;this.teamReports.clear();this.footTimer=0;this.botFootTimers.forEach((_,id)=>{this.botFootTimers[id]=.07+id*.063;});const s=this.state;const previous=s.actors;const stats=s.actors.map(a=>({kills:a.kills,deaths:a.deaths,money:a.money}));s.actors=this.makeActors(s.mode==='defense');s.grenades=[];s.pickups=createMapPickups();s.actors.forEach((a,i)=>{if(s.round>1)Object.assign(a,stats[i]);resetEconomy(a,a.money);a.spawnedAt=s.time;a.respawnAt=0;a.spawnProtectionUntil=0;});const carrier=s.actors.find(a=>a.faction==='t');if(carrier&&s.mode==='demolition')carrier.hasBomb=true;s.player=s.actors[0];s.spectating=null;s.phase='playing';s.roundTime=isTeamDeathmatch(s.mode)?0:s.mode==='hostageRescue'?RESCUE_ROUND_SECONDS:s.mode==='demolition'?DEMOLITION_ROUND_SECONDS:105;s.paused=false;s.winner=null;s.hitMarker=0;s.bomb={status:'carried',carrierId:carrier?.id??3,x:0,z:0,site:null,y:0,timer:BOMB_SECONDS,progress:0,defuserId:null,planterId:null,plantProgress:0,plantSite:null};s.rescue=s.mode==='hostageRescue'?{hostages:(getActiveMap().hostageSpawns??[]).map(h=>({...h})),zones:(getActiveMap().rescueZones??[]).map(z=>({...z})),rescued:0,total:getActiveMap().hostageSpawns?.length??0}:undefined;this.brains=s.actors.map(a=>this.newBrain(a));this.events.push({type:'round'});this.setupOfflineMode(previous,allBots);for(const a of s.actors)resetWeaponSwitch(a);}
+ resetRound(allBots=false){this.queuedStab=null;this.interactionActors.clear();this.hostageActors.clear();this.state.roundReason=undefined;this.touchAssist.reset();this.meleePending.clear();this.pickupInteractHeld=false;this.nextPickupId=1000;this.teamReports.clear();this.footTimer=0;this.defuseFailingSince=0;this.defuseNoProgressSince=0;this.defuseProgressAt=null;this.defuseReached=false;this.botFootTimers.forEach((_,id)=>{this.botFootTimers[id]=.07+id*.063;});const s=this.state;const previous=s.actors;const stats=s.actors.map(a=>({kills:a.kills,deaths:a.deaths,money:a.money}));s.actors=this.makeActors(s.mode==='defense');s.grenades=[];s.pickups=createMapPickups();s.actors.forEach((a,i)=>{if(s.round>1)Object.assign(a,stats[i]);resetEconomy(a,a.money);a.spawnedAt=s.time;a.respawnAt=0;a.spawnProtectionUntil=0;});const carrier=s.actors.find(a=>a.faction==='t');if(carrier&&s.mode==='demolition')carrier.hasBomb=true;s.player=s.actors[0];s.spectating=null;s.phase='playing';s.roundTime=isTeamDeathmatch(s.mode)?0:s.mode==='hostageRescue'?RESCUE_ROUND_SECONDS:s.mode==='demolition'?DEMOLITION_ROUND_SECONDS:105;s.paused=false;s.winner=null;s.hitMarker=0;s.bomb={status:'carried',carrierId:carrier?.id??3,x:0,z:0,site:null,y:0,timer:BOMB_SECONDS,progress:0,defuserId:null,defuseAssigneeId:null,planterId:null,plantProgress:0,plantSite:null};s.rescue=s.mode==='hostageRescue'?{hostages:(getActiveMap().hostageSpawns??[]).map(h=>({...h})),zones:(getActiveMap().rescueZones??[]).map(z=>({...z})),rescued:0,total:getActiveMap().hostageSpawns?.length??0}:undefined;this.brains=s.actors.map(a=>this.newBrain(a));this.events.push({type:'round'});this.setupOfflineMode(previous,allBots);for(const a of s.actors)resetWeaponSwitch(a);}
  private setupOfflineMode(previous:readonly Actor[],allBots=false){
   const s=this.state;
   if(s.mode==='bounty'){
@@ -239,7 +243,7 @@ export class Simulation {
    else this.botFootTimers[a.id]=.07+a.id*.031;
   }
   this.separateActors();
-  this.updateMelee();this.updateBomb(dt);this.updateGrenades(dt);this.updateRescue(dt);
+  this.updateMelee();this.updateBomb(dt,allBots);this.updateGrenades(dt);this.updateRescue(dt);
   if(player.health<=0){s.spectating=s.mode==='armsRace'?null:s.actors.find(a=>a.team==='blue'&&a.health>0)||null;}
   if(s.mode==='defense')this.updateDefense(dt);
   else if(s.mode==='bounty')this.checkBounty();
@@ -279,7 +283,7 @@ export class Simulation {
   }
   this.interactionActors.add(a.id);return true;
  }
- private updateBomb(dt:number){
+ private updateBomb(dt:number,allBots=false){
   const s=this.state,b=s.bomb;if(s.mode!=='demolition')return;
   if(b.status==='carried'){
    const carrier=s.actors.find(a=>a.id===b.carrierId);
@@ -299,21 +303,80 @@ export class Simulation {
    if(pickup){pickup.hasBomb=true;b.status='carried';b.carrierId=pickup.id;this.events.push({type:'bombPickup',actorId:pickup.id,x:b.x,y:b.y,z:b.z});}
   }
   if(b.status!=='planted')return;
-  const candidates=s.actors.filter(a=>a.faction==='ct'&&a.health>0&&this.interactionActors.has(a.id)&&!a.moving&&!isAirborne(a)&&s.time-a.shotTime>dt*.9&&objectiveReachable(a,b,2.4));
-  const defuser=candidates.find(a=>a.id===b.defuserId)??candidates[0];
-  if(!defuser){b.defuserId=null;b.progress=0;}
-  else{
-   if(b.defuserId!==defuser.id){b.defuserId=defuser.id;b.progress=0;this.events.push({type:'defuseStart',actorId:defuser.id,x:b.x,y:b.y,z:b.z});}
-   const seconds=defuser.defuseKit?KIT_DEFUSE_SECONDS:DEFUSE_SECONDS,remaining=(1-b.progress)*seconds;
-   if(remaining<=dt+1e-8&&remaining<b.timer-1e-8){b.progress=1;b.status='defused';b.defuserId=null;this.events.push({type:'defuseComplete',actorId:defuser.id,site:b.site??undefined});return;}
-   b.progress=Math.min(1,b.progress+Math.min(dt,b.timer)/seconds);
-  }
+  this.updateDefuse(dt,allBots);
   const before=b.timer;b.timer=b.timer-dt<=1e-8?0:b.timer-dt;
   if(Math.ceil(b.timer)!==Math.ceil(before))this.events.push({type:'bombTick',x:b.x,y:(b.y??0)+.12,z:b.z});
   if(b.timer<=0){
-   b.status='exploded';b.defuserId=null;const origin={x:b.x,y:(b.y??0)+.12,z:b.z};this.events.push({type:'bombExplode',...origin,site:b.site??undefined});
+   b.status='exploded';b.defuserId=null;b.defuseAssigneeId=null;const origin={x:b.x,y:(b.y??0)+.12,z:b.z};this.events.push({type:'bombExplode',...origin,site:b.site??undefined});
    for(const target of s.actors){if(target.health<=0)continue;const blast=sampleBombBlast(origin,target);if(blast.damage>0)this.damage(target,target,blast.damage,false,undefined,origin,'bomb');}
   }
+ }
+ /** A real walk/path from a CT's feet to the bomb, accepting the last metre of
+  * an authored route. Used only when committing or rotating the assignment. */
+ private canReachBomb(a:Actor,x:number,z:number,y:number):boolean {
+  return canReachPoint(a,x,z,y);
+ }
+ /** Single effective defuser. The committed assignee keeps the task while it is
+  * alive, can still reach the bomb and is either progressing toward it or
+  * accumulating progress; death, being knocked out of reach after arriving, or
+  * a prolonged stall hands the task to another living CT that can path to the
+  * bomb. Progress always restarts at zero on a change, and only one actor can
+  * own bomb.defuserId in a tick. A human actively holding defuse owns it. */
+ private updateDefuse(dt:number,allBots=false){
+  const s=this.state,b=s.bomb;
+  const living=(id:number|null|undefined):Actor|null=>{
+   const a=id==null?null:s.actors.find(v=>v.id===id)??null;
+   return a&&a.faction==='ct'&&a.health>0&&a.active!==false?a:null;
+  };
+  const inReach=(a:Actor)=>objectiveReachable(a,b,2.4);
+  const active=(a:Actor)=>inReach(a)&&this.interactionActors.has(a.id)&&!a.moving&&!isAirborne(a)&&s.time-a.shotTime>dt*.9;
+  let assignee=living(b.defuseAssigneeId);
+  let failedId:number|null=null;
+  // A human actively holding defuse owns the task outright (unless every actor
+  // is being run as a bot, which is how automated fixtures drive the player).
+  const human=allBots?null:s.actors.find(a=>a.player&&active(a))??null;
+  if(human){
+   // A human holding defuse is the single effective defuser; bots fall back to
+   // guard duties because bomb.defuserId now names the human.
+   b.defuseAssigneeId=null;
+  }else if(assignee){
+   if(active(assignee)){
+    // Progressing on the bomb: clear every failure timer and extend the lease.
+    this.defuseFailingSince=0;this.defuseNoProgressSince=s.time;this.defuseProgressAt={x:assignee.x,z:assignee.z};this.defuseReached=true;
+   }else{
+    // Any real travel (even around cover away from the bomb) keeps the
+    // assignment alive, so a bot that is calmly routing to the bomb is never
+    // rotated mid-route.
+    if(!this.defuseProgressAt||Math.hypot(assignee.x-this.defuseProgressAt.x,assignee.z-this.defuseProgressAt.z)>.5){
+     this.defuseProgressAt={x:assignee.x,z:assignee.z};this.defuseNoProgressSince=s.time;
+    }
+    if(!this.defuseFailingSince)this.defuseFailingSince=s.time;
+    // In range but never accumulating (moving, dodging): short grace, then hand
+    // off. Knocked out of reach after having reached the bomb: same short grace.
+    const stalled=inReach(assignee)&&s.time-this.defuseFailingSince>=DEFUSE_STALL_SECONDS;
+    const knockedAway=this.defuseReached&&!inReach(assignee)&&s.time-this.defuseFailingSince>=DEFUSE_HANDOFF_GRACE;
+    // No travel at all for the whole timeout: genuinely stuck or dead-ended.
+    const stuck=s.time-this.defuseNoProgressSince>=DEFUSE_HANDOFF_TIMEOUT;
+    if(stalled||knockedAway||stuck){failedId=assignee.id;assignee=null;b.defuseAssigneeId=null;b.defuserId=null;this.defuseFailingSince=0;}
+   }
+  }
+  if(!human&&!assignee){
+   // Prefer a bot that can actually path to the bomb and is not the assignee
+   // that just failed; fall back to the failed one only if nobody else
+   // qualifies. Players are never auto-assigned (a human reclaims the task by
+   // holding defuse), except in all-bot fixtures where every slot is a bot.
+   const pool=orderedDefuseCandidates(s,allBots).filter(a=>(allBots||!a.player)&&a.active!==false&&this.canReachBomb(a,b.x,b.z,b.y??0));
+   const choice=pool.find(a=>a.id!==failedId)??pool[0]??null;
+   if(choice){assignee=choice;b.defuseAssigneeId=choice.id;this.defuseProgressAt={x:choice.x,z:choice.z};this.defuseNoProgressSince=s.time;this.defuseFailingSince=0;this.defuseReached=false;}
+  }
+  // The one actor allowed to accumulate progress this tick.
+  let owner:Actor|null=human;
+  if(!owner&&assignee&&active(assignee))owner=assignee;
+  if(!owner){b.defuserId=null;b.progress=0;return;}
+  if(b.defuserId!==owner.id){b.defuserId=owner.id;b.progress=0;this.events.push({type:'defuseStart',actorId:owner.id,x:b.x,y:b.y,z:b.z});}
+  const seconds=owner.defuseKit?KIT_DEFUSE_SECONDS:DEFUSE_SECONDS,remaining=(1-b.progress)*seconds;
+  if(remaining<=dt+1e-8&&remaining<b.timer-1e-8){b.progress=1;b.status='defused';b.defuserId=null;b.defuseAssigneeId=null;this.events.push({type:'defuseComplete',actorId:owner.id,site:b.site??undefined});return;}
+  b.progress=Math.min(1,b.progress+Math.min(dt,b.timer)/seconds);
  }
  private updateRescue(dt:number){
   const s=this.state,rescue=s.rescue,geometry=getActiveMap().geometry;if(s.mode!=='hostageRescue'||!rescue||!geometry)return;
@@ -604,7 +667,9 @@ export class Simulation {
   }
   const threatened=visible??(baseAlarm?null:b.memory);
   const tacticalAllies=s.mode==='armsRace'?[]:s.actors;
-  const urgent=objective.role==='defuse'&&s.bomb.timer<14||objective.role==='escort'||recall;
+  // The single defuse assignee treats reaching the bomb as the mission even
+  // while a contact is visible: a round is lost if nobody closes on the C4.
+  const urgent=objective.role==='defuse'||objective.role==='escort'||recall;
   const allyReloading=s.mode!=='armsRace'&&!!threatened&&s.actors.some(f=>f!==a&&f.team===a.team&&f.health>0&&Math.hypot(f.x-a.x,f.z-a.z)<12&&Math.abs((f.y??0)-(a.y??0))<2&&f.guns[f.weapon].reloadLeft>0);
   const wantsReload=!visible&&gun.reloadLeft===0&&gun.reserve>0&&gun.ammo<Math.max(2,Math.ceil(WEAPONS[a.weapon].magazine*.28))&&!(gun.ammo>=3&&allyReloading);
   b.exposedFor=visible&&!b.cover?b.exposedFor+dt:Math.max(0,b.exposedFor-dt*2);

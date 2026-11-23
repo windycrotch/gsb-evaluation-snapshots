@@ -9,19 +9,26 @@ export const preferredRange=(weapon:WeaponKind)=>({knife:1.2,shotgun:5,smg:8,pis
 
 /** Squad knowledge consists only of allies' state and an observed contact.
  * A human only supplies covering fire when actually shooting. A reloading,
- * wounded or disengaged teammate is never counted as an active fire base. */
+ * wounded, inactive or disengaged teammate is never counted as an active fire
+ * base; a knife-only or out-of-ammo shooter cannot anchor covering fire. */
 export function squadOrder(actor:Actor,members:SquadMember[],contact:TacticalPoint,now:number,mode:GameMode,allBots=false):SquadOrder {
  const solo:SquadOrder={role:'solo',side:actor.id%2?1:-1,covered:false,supportId:null};
  if(mode==='armsRace')return solo;
- const nearby=members.filter(({actor:a})=>a.team===actor.team&&a.health>0&&Math.abs((a.y??0)-(actor.y??0))<4&&Math.hypot(a.x-contact.x,a.z-contact.z)<32&&Math.hypot(a.x-actor.x,a.z-actor.z)<18);
+ const nearby=members.filter(({actor:a})=>a.team===actor.team&&a.health>0&&a.active!==false&&Math.abs((a.y??0)-(actor.y??0))<4&&Math.hypot(a.x-contact.x,a.z-contact.z)<32&&Math.hypot(a.x-actor.x,a.z-actor.z)<18);
  if(nearby.length<2)return solo;
- const ready=nearby.filter(({actor:a,seeing})=>seeing&&a.health>=40&&a.weapon!=='knife'&&a.guns[a.weapon].reloadLeft===0&&a.guns[a.weapon].ammo>=3&&(allBots||!a.player||now-a.shotTime<.65));
+ const ready=nearby.filter(({actor:a,seeing})=>seeing
+  &&a.health>=40
+  &&a.weapon!=='knife'
+  &&a.guns[a.weapon].reloadLeft===0
+  &&a.guns[a.weapon].ammo>=3
+  &&(!a.weaponSwitch||a.weaponSwitch.phase==='ready')
+  &&(allBots||!a.player||now-a.shotTime<.65));
  // Stable ID ordering avoids frame-to-frame distance ties; snipers provide overwatch.
  ready.sort((p,q)=>(q.actor.weapon==='sniper'?1:0)-(p.actor.weapon==='sniper'?1:0)||p.actor.id-q.actor.id);
  const anchor=ready[0]?.actor;
  if(!anchor)return solo;
  if(anchor.id===actor.id)return {role:'support',side:solo.side,covered:false,supportId:anchor.id};
- const movers=nearby.filter(m=>m.actor.id!==anchor.id&&(allBots||!m.actor.player)).sort((p,q)=>p.actor.id-q.actor.id);
+ const movers=nearby.filter(m=>m.actor.id!==anchor.id&&m.actor.health>0&&(allBots||!m.actor.player)).sort((p,q)=>p.actor.id-q.actor.id);
  const slot=movers.findIndex(m=>m.actor.id===actor.id);
  return {role:slot%3===0?'assault':'flank',side:slot%2?1:-1,covered:true,supportId:anchor.id};
 }

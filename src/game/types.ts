@@ -15,7 +15,7 @@ export type Phase = 'menu' | 'intermission' | 'prep' | 'playing' | 'planted' | '
 export type Faction = 'ct' | 't';
 export type BombStatus = 'carried' | 'dropped' | 'planted' | 'defused' | 'exploded';
 export interface ObjectiveSite { id:'A'|'B'; x:number; y?:number; z:number; radius:number; bounds?:{minX:number;maxX:number;minY:number;maxY:number;minZ:number;maxZ:number}; }
-export interface BombState { status:BombStatus; carrierId:number|null; x:number; y?:number; z:number; site:'A'|'B'|null; timer:number; progress:number; defuserId:number|null; planterId?:number|null; plantProgress?:number; plantSite?:'A'|'B'|null; }
+export interface BombState { status:BombStatus; carrierId:number|null; x:number; y?:number; z:number; site:'A'|'B'|null; timer:number; progress:number; defuserId:number|null; /** The CT bot assigned to approach and complete the defuse. Bot AI reads this slot so only one bot owns the task; the effective progress owner remains defuserId. */ defuseAssigneeId?:number|null; planterId?:number|null; plantProgress?:number; plantSite?:'A'|'B'|null; }
 export interface HostageState {id:number;x:number;y:number;z:number;yaw:number;status:'waiting'|'following'|'rescued';leaderId:number|null;moving:boolean;crouched:boolean;}
 export interface RescueZone {id:string;x:number;y:number;z:number;radius:number;}
 export interface RescueState {hostages:HostageState[];zones:RescueZone[];rescued:number;total:number;}

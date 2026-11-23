@@ -43,8 +43,13 @@ export function concealedAt(point:TacticalPoint,threat:TacticalPoint,crouch=fals
  const height=crouch?1.15:1.72;
  return [-.24,0,.24].every(offset=>!tacticalLineClear(threat,{...point,x:point.x+dz/d*offset,z:point.z-dx/d*offset},1.62,height));
 }
+/** A living ally standing on a point makes it unavailable as cover or a firing
+ * slot. Dead/inactive teammates never reserve anything. */
+export function allyOccupies(actor:Actor,p:TacticalPoint,allies:Actor[],radius=1.15):boolean {
+ return allies.some(a=>a!==actor&&a.team===actor.team&&a.health>0&&a.active!==false&&Math.abs((a.y??0)-(p.y??0))<1.8&&Math.hypot(a.x-p.x,a.z-p.z)<radius);
+}
 function occupied(actor:Actor,p:TacticalPoint,allies:Actor[],reserved:TacticalPoint[]):boolean {
- return allies.some(a=>a!==actor&&a.team===actor.team&&a.health>0&&Math.abs((a.y??0)-(p.y??0))<1.8&&Math.hypot(a.x-p.x,a.z-p.z)<1.15)
+ return allyOccupies(actor,p,allies)
   ||reserved.some(q=>Math.abs((q.y??0)-(p.y??0))<1.8&&Math.hypot(q.x-p.x,q.z-p.z)<1.4);
 }
 function validPoint(p:TacticalPoint):boolean {
@@ -187,6 +192,54 @@ function objectiveFloor(point:Point):Point{
  }
  if(objectivePoints.size>256)objectivePoints.clear();objectivePoints.set(key,best);return best;
 }
+/** True when an actor has a real walking route to a point on the bomb's floor
+ * (direct segment or an authored/arena path ending within reach). */
+export function canReachPoint(actor:Actor,x:number,z:number,y:number):boolean {
+ if(Math.abs((actor.y??0)-y)>1.8)return false;
+ if(walkSegmentClear(actor.x,actor.z,x,z,.4,actor.y??0,y))return true;
+ const path=findPath(actor.x,actor.z,x,z,actor.y??0,y),end=path.at(-1);
+ return !!end&&Math.hypot(end.x-x,end.z-z)<=1.4&&Math.abs((end.y??0)-y)<.8;
+}
+/** True when a CT can actually walk to the bomb. Used when choosing the single
+ * defuse assignee, not per frame. */
+export function canReachBomb(actor:Actor,state:GameSnapshot):boolean {
+ return canReachPoint(actor,state.bomb.x,state.bomb.z,state.bomb.y??0);
+}
+/** Deterministic single-defuser order: the committed owner first, then living
+ * CTs by distance (a defuse kit effectively shortens the trip), id tiebreak.
+ * Filtering mirrors the interaction rules so a human who is actively defusing
+ * is included while idle humans are not hijacked by bots. */
+export function orderedDefuseCandidates(state:GameSnapshot,includePlayer=false):Actor[] {
+ const bomb=state.bomb;
+ const eligible=(a:Actor)=>a.faction==='ct'&&a.health>0&&a.active!==false&&(includePlayer||!a.player||a.id===bomb.defuserId);
+ const distance=(a:Actor)=>Math.hypot(a.x-bomb.x,a.z-bomb.z)-(a.defuseKit?3:0);
+ return state.actors.filter(eligible).sort((a,b)=>
+  (a.id===bomb.defuserId?0:1)-(b.id===bomb.defuserId?0:1)||distance(a)-distance(b)||a.id-b.id);
+}
+/** The single CT the squad expects to defuse. Preference order: the actor
+ * already accumulating progress (bomb.defuserId, which may be a human), the
+ * committed assignee slot, then the deterministic distance/id order. This never
+ * pathfinds, so it is safe to call per bot per frame, and it always names at
+ * most one actor so the other CTs fall back to guard duties. */
+export function defuseAssignee(state:GameSnapshot,includePlayer=false):Actor|null {
+ const candidates=orderedDefuseCandidates(state,includePlayer);
+ return candidates.find(a=>a.id===state.bomb.defuserId)??candidates.find(a=>a.id===state.bomb.defuseAssigneeId)??candidates[0]??null;
+}
+/** A guard's post next to a planted bomb: an offset ring position that is
+ * walkable, on the bomb's floor and not on top of the defuser. Scans a bounded
+ * set of candidate angles so the squad spreads out instead of stacking. */
+export function defuseGuardPost(state:GameSnapshot,slot:number,count:number):TacticalPoint {
+ const bomb=state.bomb,geometry=getActiveMap().geometry,base=(slot/Math.max(1,count))*Math.PI*2+state.round*.7;
+ for(const radius of [3.4,4.0,2.8])for(const offset of [0,.5,-.5,1,-1,2,-2,Math.PI]){
+  const angle=base+offset,point={x:bomb.x+Math.cos(angle)*radius,z:bomb.z+Math.sin(angle)*radius,y:bomb.y??0};
+  if(geometry){
+   const ground=geometry.ground(point.x,point.z,(bomb.y??0)+1.2);
+   if(ground===null||Math.abs(ground-(bomb.y??0))>1.2)continue;point.y=ground;
+  }else if(blocked(point.x,point.z,.45,undefined,point.y))continue;
+  if(walkSegmentClear(bomb.x,bomb.z,point.x,point.z,.4,bomb.y??0,point.y))return objectiveFloor(point);
+ }
+ return objectiveFloor({x:bomb.x,z:bomb.z+3.4,y:bomb.y??0});
+}
 /** 拆弹手只有一个；其他 CT 保护拆弹位置，T 守点，不依赖敌人的隐藏坐标。 */
 export function botObjective(actor:Actor,state:GameSnapshot,includePlayer=false,patrolStep=0):{point:Point;role:'defuse'|'guard'|'plant'|'recover'|'patrol'|'rescue'|'escort'}{
  if(state.mode==='defense'&&state.defense){
@@ -216,13 +269,16 @@ export function botObjective(actor:Actor,state:GameSnapshot,includePlayer=false,
   const lanes=[-18,0,18],cycle=Math.floor(state.time/10);
   return {point:{x:lanes[(actor.id+state.round+cycle)%3],z:(cycle%2===0?1:-1)*(actor.team==='blue'?-14:14)},role:'patrol'};
  }
- const bomb=state.bomb,allies=state.actors.filter(a=>a.team===actor.team&&a.health>0);
+ const bomb=state.bomb,allies=state.actors.filter(a=>a.team===actor.team&&a.health>0&&a.active!==false);
  if(bomb.status==='planted'){
+  const defuser=actor.faction==='ct'?defuseAssignee(state,includePlayer):null;
+  if(defuser?.id===actor.id)return {point:bomb,role:'defuse'};
   if(actor.faction==='ct'){
-   const candidates=allies.filter(a=>includePlayer||!a.player||a.id===bomb.defuserId);
-   const defuser=candidates.find(a=>a.id===bomb.defuserId)??candidates.sort((a,b)=>
-    (Math.hypot(a.x-bomb.x,a.z-bomb.z)-(a.defuseKit?3:0))-(Math.hypot(b.x-bomb.x,b.z-bomb.z)-(b.defuseKit?3:0))||a.id-b.id)[0];
-   if(defuser?.id===actor.id)return {point:bomb,role:'defuse'};
+   // 炸弹位置由规则公开；警戒点分散在拆弹者周围，避免所有人挤到炸弹上，
+   // 也避免站在拆弹手身上挡住拆弹交互（占用同一格时拆弹手会失去进度）。
+   const guards=allies.filter(a=>a.id!==defuser?.id);
+   const slot=Math.max(0,guards.findIndex(a=>a.id===actor.id));
+   return {point:defuseGuardPost(state,slot,Math.max(1,guards.length)),role:'guard'};
   }
   // 炸弹位置由规则公开；警戒点分散，避免所有人挤到炸弹上。
   const slot=allies.findIndex(a=>a.id===actor.id),angle=(slot/Math.max(3,allies.length))*Math.PI*2,radius=3+slot%2;
