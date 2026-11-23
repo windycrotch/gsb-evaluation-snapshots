@@ -9,7 +9,7 @@
 import { describe, it, expect } from 'vitest';
 import { createHash } from 'node:crypto';
 import { accept, encode, decode, close, OP } from '../../server/ws.mjs';
-import { Rooms, parseJoin, normaliseCode, makeCode, tag, ALPHABET, CODE_LENGTH, MAX_PLAYERS } from '../../server/relay.mjs';
+import { Rooms, parseJoin, normaliseCode, makeCode, makeKey, tag, ALPHABET, CODE_LENGTH, KEY_LENGTH, MAX_PLAYERS, REJOIN_MS } from '../../server/relay.mjs';
 
 /** A client frame, masked as the standard requires of one. */
 function clientFrame(opcode: number, payload: Buffer | string, fin = true, mask = [0x37, 0xFA, 0x21, 0x3D]): Buffer {
@@ -149,6 +149,13 @@ describe('the first message', () => {
     expect(parseJoin('{"join":"bcdf"}')).toEqual({ code: 'BCDF' });
   });
 
+  it('carries a rejoin key when one is offered', () => {
+    expect(parseJoin('{"join":"bcdf","key":"KQQK"}')).toEqual({ code: 'BCDF', key: 'KQQK' });
+    expect(parseJoin('{"join":null,"key":"KQQK"}')).toEqual({ create: true });   // a new room owes nobody a seat
+    expect(parseJoin('{"join":"bcdf","key":42}').error).toMatch(/key/);
+    expect(parseJoin('{"join":"bcdf","key":""}').error).toMatch(/key/);
+  });
+
   it('refuses everything else, and says which kind of wrong it is', () => {
     expect(parseJoin('not json').error).toMatch(/JSON/);
     expect(parseJoin('{"hello":1}').error).toMatch(/join/);
@@ -223,5 +230,141 @@ describe('forwarding', () => {
   it('puts the sender on the front and leaves the rest alone', () => {
     const out = tag(2, Buffer.from([9, 8, 7]));
     expect([...out]).toEqual([2, 9, 8, 7]);
+  });
+});
+
+describe('rejoin keys', () => {
+  it('are made from the same unpronounceable alphabet as the codes', () => {
+    for (let i = 0; i < 50; i++) {
+      const k = makeKey();
+      expect(k).toHaveLength(KEY_LENGTH);
+      for (const ch of k) expect(ALPHABET).toContain(ch);
+    }
+  });
+});
+
+describe('rejoining a room', () => {
+  it('keeps a disconnected member’s seat and gives it back to the same key', () => {
+    const r = new Rooms();
+    const code = r.create()!;
+    expect(r.join(code, 'a', 'key-a')).toEqual({ slot: 0, peers: [] });
+    expect(r.join(code, 'b', 'key-b')).toEqual({ slot: 1, peers: [0] });
+    r.leave(code, 1);                                   // b's connection dropped
+    expect(r.others(code, 0)).toEqual([]);              // nobody to forward to while b is away
+    expect(r.join(code, 'b again', 'key-b')).toEqual({ slot: 1, peers: [0], back: true });
+    expect(r.others(code, 0)).toEqual(['b again']);     // and the wire is to the new connection
+  });
+
+  it('lets a live seat be taken over by its own key, and says what was replaced', () => {
+    // The usual case: the old socket is a half-open ghost the server simply has not heard die yet.
+    // toRefuse: the room must not wait for it before letting the real player back in.
+    const r = new Rooms();
+    const code = r.create()!;
+    r.join(code, 'ghost', 'k');
+    r.join(code, 'other', 'o');
+    expect(r.join(code, 'real', 'k')).toEqual({ slot: 0, peers: [1], back: true, replaced: 'ghost' });
+    expect(r.others(code, 1)).toEqual(['real']);
+  });
+
+  it('treats a key it does not know as somebody new', () => {
+    const r = new Rooms();
+    const code = r.create()!;
+    r.join(code, 'a', 'key-a');
+    expect(r.join(code, 'b', 'stranger')).toEqual({ slot: 1, peers: [0] });
+  });
+
+  it('counts a reserved seat towards the room being full', () => {
+    const r = new Rooms();
+    const code = r.create()!;
+    for (let i = 0; i < MAX_PLAYERS; i++) r.join(code, i, `k${i}`);
+    r.leave(code, 2);                                   // gone, but the seat is held
+    expect(r.join(code, 'newcomer')).toEqual({ error: 'that room is full' });
+    expect(r.join(code, 'two is back', 'k2')).toEqual({ slot: 2, peers: [0, 1, 3], back: true });
+  });
+
+  it('keeps slots and placeholders straight through a tangle of joins and leaves', () => {
+    const r = new Rooms();
+    const code = r.create()!;
+    r.join(code, 'a', 'ka');                            // 0
+    r.join(code, 'b', 'kb');                            // 1
+    r.join(code, 'c');                                  // 2, no key: no seat kept for them
+    r.leave(code, 1);                                   // b gone, seat held
+    r.leave(code, 2);                                   // c gone, forgotten at once
+    expect(r.join(code, 'd')).toEqual({ slot: 2, peers: [0] });        // c's old seat, not b's
+    expect(r.join(code, 'b back', 'kb')).toEqual({ slot: 1, peers: [0, 2], back: true });
+    expect(r.others(code, 0)).toEqual(['b back', 'd']);
+  });
+
+  it('gives the seat away once the grace has run out', () => {
+    let clock = 0;
+    const r = new Rooms(500, () => clock);
+    const code = r.create()!;
+    r.join(code, 'a', 'key-a');
+    r.join(code, 'b', 'key-b');
+    r.leave(code, 1);
+    clock += REJOIN_MS + 1;
+    r.sweep();
+    // The same key now arrives as a stranger: the placeholder is gone, and with it the reservation.
+    expect(r.join(code, 'b late', 'key-b')).toEqual({ slot: 1, peers: [0] });
+  });
+
+  it('reclaims the room once its last reserved seat has expired', () => {
+    let clock = 0;
+    const r = new Rooms(500, () => clock);
+    const code = r.create()!;
+    r.join(code, 'a', 'key-a');
+    r.join(code, 'b', 'key-b');
+    r.leave(code, 0);
+    r.leave(code, 1);
+    expect(r.size(code)).toBe(2);                       // two placeholders, holding the room open
+    clock += REJOIN_MS + 1;
+    r.sweep();
+    expect(r.size(code)).toBe(0);
+    expect(r.join(code, 'anybody', 'key-a')).toEqual({ error: 'no such room' });
+  });
+});
+
+describe('race generations', () => {
+  it('stops sending a member packets from races they have moved on from', () => {
+    const r = new Rooms();
+    const code = r.create()!;
+    r.join(code, 'a');
+    r.join(code, 'b');
+    r.join(code, 'c');
+    // Nobody has said anything yet: everything is for everybody.
+    expect(r.others(code, 0, 0)).toEqual(['b', 'c']);
+    r.others(code, 0, 1);                                   // a's packets say a is in race 1 now
+    expect(r.others(code, 1, 0)).toEqual(['c']);            // race 0 still reaches c, who is still there
+    expect(r.others(code, 1, 1)).toEqual(['a', 'c']);       // race 1 reaches both
+    r.others(code, 1, 1);                                   // b moves on too
+    expect(r.others(code, 2, 0)).toEqual([]);               // c's straggler is for nobody any more
+    expect(r.others(code, 2, 1)).toEqual(['a', 'b']);
+  });
+
+  it('forgets the evening when nobody connected is left, so the next one starts at race 0', () => {
+    const r = new Rooms();
+    const code = r.create()!;
+    r.join(code, 'a', 'ka');
+    r.join(code, 'b', 'kb');
+    r.others(code, 0, 3);                                   // both deep into the playlist
+    r.others(code, 1, 3);
+    r.leave(code, 0);
+    r.leave(code, 1);                                       // everybody reloaded at once
+    r.join(code, 'a again', 'ka');
+    r.join(code, 'b again', 'kb');
+    expect(r.others(code, 0, 0)).toEqual(['b again']);      // race 0 flows again
+  });
+
+  it('keeps the race number of a seat whose owner is only briefly gone', () => {
+    const r = new Rooms();
+    const code = r.create()!;
+    r.join(code, 'a', 'ka');
+    r.join(code, 'b', 'kb');
+    r.others(code, 0, 2);                                   // a is in race 2
+    r.others(code, 1, 2);                                   // and so is b
+    r.leave(code, 1);                                       // b drops; a is still connected
+    r.join(code, 'b back', 'kb');
+    expect(r.others(code, 1, 0)).toEqual([]);               // a race-0 straggler is still not for a
+    expect(r.others(code, 1, 2)).toEqual(['a']);
   });
 });

@@ -4,13 +4,20 @@
  *   GET /api/relay   with an Upgrade: websocket header
  *
  * A client's first message is `{"join":"BCDF"}` to enter a room, or `{"join":null}` to make one. The reply
- * is `{"room":"BCDF","slot":0,"peers":[1]}`. After that every message is passed to the other members of the
- * room with the sender's slot on the front, and nothing is ever inspected.
+ * is `{"room":"BCDF","slot":0,"peers":[1],"key":"…"}`. After that every message is passed to the other
+ * members of the room with the sender's slot on the front, and almost nothing is ever inspected.
  *
  * Keeping it ignorant is deliberate. A relay that understood the game would need to be kept in step with
  * the game, would have opinions about who is allowed to be where, and would be a third machine able to
  * disagree with the two that matter. This one forwards bytes, and the only thing it can get wrong is who
- * it forwards them to.
+ * it forwards them to. Two small exceptions, both about time rather than about the game:
+ *
+ *   - the key in the join reply is how a dropped connection gets its own seat back: `{"join":"BCDF",
+ *     "key":"…"}` rejoins the same slot instead of taking a new one, and the room hears `left` and then
+ *     `joined` as it happens. A seat is held for REJOIN_MS after its connection drops, not for ever.
+ *   - input and hash packets carry the race's generation in their second byte, and a packet from a race
+ *     that is over is dropped rather than delivered into the one that has started. The clients check
+ *     the same byte themselves; the relay doing it too keeps stale traffic off everybody else's wire.
  *
  * Configuration, all optional:
  *   SM_RELAY_PORT    port to listen on                     (default 8788)
@@ -29,6 +36,15 @@ export const MAX_PLAYERS = 4;
 /** A room nobody has spoken in for this long is gone. */
 export const IDLE_MS = 20 * 60 * 1000;
 /**
+ * How long a disconnected member's slot is kept for them. A phone that lost the lift's wifi for ten
+ * seconds should come back to the same car in the same race; a tab that was closed should not hold a
+ * seat for ever. Two minutes is far longer than any honest gap and far shorter than the room's own
+ * idle timeout, so a room whose people have all gone is reclaimed well before the sweep would take it.
+ */
+export const REJOIN_MS = 2 * 60 * 1000;
+/** The rejoin key is a room code's worth of letters, four times over. */
+export const KEY_LENGTH = 16;
+/**
  * How often to ping a quiet connection. Two people sitting in a lobby say nothing to each other, and
  * Cloudflare drops a WebSocket that has been silent for about a hundred seconds, so without this the room
  * dies while they are still reading the code out loud. Browsers answer a ping by themselves.
@@ -40,6 +56,16 @@ const MAX_ROOMS_DEFAULT = 500;
 export function makeCode(rand = (n) => randomInt(n)) {
   let s = '';
   for (let i = 0; i < CODE_LENGTH; i++) s += ALPHABET[rand(ALPHABET.length)];
+  return s;
+}
+
+/**
+ * The secret a reconnecting client proves itself with. Made by the server, kept by the client, and
+ * never said out loud: anybody who has it is allowed to sit in that seat, which is the whole mechanism.
+ */
+export function makeKey(rand = (n) => randomInt(n)) {
+  let s = '';
+  for (let i = 0; i < KEY_LENGTH; i++) s += ALPHABET[rand(ALPHABET.length)];
   return s;
 }
 
@@ -55,6 +81,11 @@ export function normaliseCode(input) {
 /**
  * The rooms, with no sockets in sight. A member is any object at all; the server puts its connection in
  * there, a test puts a plain array. That is what makes the joining and leaving rules testable.
+ *
+ * A member who joined with a key is not deleted when their connection drops: the slot is kept, marked
+ * gone, for REJOIN_MS, so the same key can come back and sit in it again. The rest of the room hears
+ * about the going and the coming back as they happen, and a slot that is only reserved still counts
+ * towards the room being full — four cars is four cars, whether or not one of them is briefly quiet.
  */
 export class Rooms {
   constructor(max = MAX_ROOMS_DEFAULT, now = () => Date.now()) {
@@ -73,49 +104,119 @@ export class Rooms {
     return code;
   }
 
+  /** The slots of everybody actually connected, except one: what a join reply calls `peers`. */
+  present(room, except) {
+    return [...room.members.entries()].filter(([s, m]) => s !== except && !m.gone).map(([s]) => s);
+  }
+
   /**
    * Puts a member in a room. Returns `{ slot, peers }`, or `{ error }` saying which of the three things
    * went wrong, because "could not join" on its own sends people to look in the wrong place.
+   *
+   * Given a `key` the room already knows, this is a rejoin instead: the member gets their old slot back
+   * (`back: true`), still on the race generation their packets were at when they left, and — when the
+   * old connection is somehow still standing, as a half-open socket likes to be — `replaced` holds it
+   * so the caller can put it down. An unknown key is simply somebody new, who keeps the key they
+   * arrived with.
    */
-  join(code, member) {
+  join(code, member, key) {
     this.sweep();
     const room = this.rooms.get(code);
     if (!room) return { error: 'no such room' };
+    if (key !== undefined) {
+      for (const [slot, m] of room.members) {
+        if (m.key !== key) continue;
+        const replaced = m.gone ? undefined : m.conn;
+        m.conn = member;
+        m.gone = false;
+        m.goneAt = undefined;
+        room.at = this.now();
+        return { slot, peers: this.present(room, slot), back: true, replaced };
+      }
+    }
     if (room.members.size >= MAX_PLAYERS) return { error: 'that room is full' };
     let slot = 0;
     while (room.members.has(slot)) slot++;
-    room.members.set(slot, member);
+    room.members.set(slot, { key, conn: member, gone: false, gen: 0 });
     room.at = this.now();
-    return { slot, peers: [...room.members.keys()].filter(s => s !== slot) };
+    return { slot, peers: this.present(room, slot) };
   }
 
+  /**
+   * A connection went away. A keyed member leaves their seat reserved rather than empty: the room says
+   * they left, and if they are back inside the grace nobody ever has to know why. An unkeyed one is
+   * simply forgotten, and the room with nobody in it at all is gone. When nobody connected is left at
+   * all, the evening's race counter is forgotten too: whatever happens next starts from race 0 again,
+   * so a room full of reloaded pages is not still filtering packets by a race that ended yesterday.
+   */
   leave(code, slot) {
     const room = this.rooms.get(code);
     if (!room) return;
-    room.members.delete(slot);
-    if (room.members.size === 0) this.rooms.delete(code);
+    const m = room.members.get(slot);
+    if (!m) return;
+    if (m.key !== undefined) {
+      m.conn = undefined;
+      m.gone = true;
+      m.goneAt = this.now();
+    } else {
+      room.members.delete(slot);
+    }
+    if (room.members.size === 0) { this.rooms.delete(code); return; }
+    if ([...room.members.values()].every(x => x.gone)) {
+      for (const x of room.members.values()) x.gen = 0;
+    }
   }
 
-  /** Everybody in the room except one slot: the list a message gets forwarded to. */
-  others(code, slot) {
+  /**
+   * Everybody connected in the room except one slot: the list a message gets forwarded to.
+   *
+   * Given a `gen` — the race number an input or hash packet carries — the list is also how the relay
+   * learns who has moved on: the sender's race is noted, and the packet goes only to members whose own
+   * race is no newer. A straggler from a finished race is never delivered into the next one, while a
+   * player still finishing the previous race keeps getting its packets for exactly as long as anyone
+   * else is still there too. The clients check the same byte themselves; this keeps stale traffic off
+   * the wires of everybody who has already moved on.
+   */
+  others(code, slot, gen) {
     const room = this.rooms.get(code);
     if (!room) return [];
     room.at = this.now();
-    return [...room.members.entries()].filter(([s]) => s !== slot).map(([, m]) => m);
+    if (gen !== undefined) {
+      const from = room.members.get(slot);
+      if (from && gen > from.gen) from.gen = gen;
+    }
+    return [...room.members.entries()]
+      .filter(([s, m]) => s !== slot && !m.gone && (gen === undefined || m.gen <= gen))
+      .map(([, m]) => m.conn);
   }
 
   size(code) { return this.rooms.get(code)?.members.size ?? 0; }
 
-  /** Drops rooms nobody has used for a while, so a forgotten tab does not hold a code for ever. */
+  /**
+   * Drops rooms nobody has used for a while, so a forgotten tab does not hold a code for ever, and
+   * drops the reserved seats whose grace has run out — which is also how a room whose members all
+   * disconnected is reclaimed: once the last placeholder goes, there is nobody left to keep it for.
+   */
   sweep() {
     const cutoff = this.now() - IDLE_MS;
-    for (const [code, room] of this.rooms) if (room.at < cutoff) this.rooms.delete(code);
+    const keep = this.now() - REJOIN_MS;
+    for (const [code, room] of this.rooms) {
+      if (room.at < cutoff) { this.rooms.delete(code); continue; }
+      let dropped = false;
+      for (const [slot, m] of room.members) {
+        if (m.gone && m.goneAt !== undefined && m.goneAt < keep) { room.members.delete(slot); dropped = true; }
+      }
+      // A room the sweep itself just emptied is reclaimed; a room that simply has not been joined yet
+      // is left for the idle timeout, as it always was.
+      if (dropped && room.members.size === 0) this.rooms.delete(code);
+    }
   }
 }
 
 /**
  * The first message. Returns `{ create: true }`, `{ code }`, or `{ error }`. Anything else a client sends
- * before it has joined is refused rather than guessed at.
+ * before it has joined is refused rather than guessed at. A `key` alongside the code asks for the seat
+ * that key was given last time, instead of whichever happens to be free.
  */
 export function parseJoin(text) {
   let body;
@@ -124,9 +225,13 @@ export function parseJoin(text) {
   // array slips past the guard and comes back complaining about the room code instead.
   if (typeof body !== 'object' || body === null || Array.isArray(body)) return { error: 'expected a join' };
   if (!('join' in body)) return { error: 'expected a join' };
+  const key = 'key' in body ? body.key : undefined;
+  if (key !== undefined && (typeof key !== 'string' || key.length === 0 || key.length > 64)) {
+    return { error: 'a rejoin key is a short string' };
+  }
   if (body.join === null || body.join === undefined) return { create: true };
   const code = normaliseCode(body.join);
-  return code ? { code } : { error: 'a room code is four letters' };
+  return code ? { code, key } : { error: 'a room code is four letters' };
 }
 
 /** A forwarded message: the sender's slot, then whatever they sent, untouched. */
@@ -214,17 +319,33 @@ export function start(port = PORT) {
           if (want.error) { send(OP.TEXT, JSON.stringify({ error: want.error })); continue; }
           const code = want.create ? rooms.create() : want.code;
           if (!code) { send(OP.TEXT, JSON.stringify({ error: 'no room for another room' })); continue; }
-          const got = rooms.join(code, client);
+          // A rejoining client arrives with the key it was given last time; a new one is given one now,
+          // so that its next visit — after a tunnel, a lift, a laptop lid — can find its own seat again.
+          const key = want.key ?? makeKey();
+          const got = rooms.join(code, client, key);
           if (got.error) { send(OP.TEXT, JSON.stringify({ error: got.error })); continue; }
           client.code = code; client.slot = got.slot;
-          send(OP.TEXT, JSON.stringify({ room: code, slot: got.slot, peers: got.peers }));
-          for (const m of rooms.others(code, got.slot)) m.send(OP.TEXT, JSON.stringify({ joined: got.slot }));
+          if (got.replaced) {
+            // The old connection was still standing when its replacement arrived. It must not get a
+            // say in the room any more: forgetting its code means its own goodbye, when it comes,
+            // touches nothing.
+            got.replaced.code = undefined;
+            got.replaced.socket.destroy();
+          }
+          send(OP.TEXT, JSON.stringify({ room: code, slot: got.slot, peers: got.peers, key, back: got.back === true }));
+          const news = got.back ? { joined: got.slot, back: true } : { joined: got.slot };
+          for (const m of rooms.others(code, got.slot)) m.send(OP.TEXT, JSON.stringify(news));
           continue;
         }
 
-        // Joined: forward, and do not look inside.
+        // Joined: forward, and do not look inside — with one exception. The first two bytes of an
+        // input or hash packet (src/net/packet.ts) are its kind and its race generation, and the
+        // generation decides who the packet is still worth anything to. Everything else, including
+        // the lobby's SAY, goes to everybody, untouched.
+        const kind = payload[0];
+        const gen = (kind === 1 || kind === 2) && payload.length >= 2 ? payload[1] : undefined;
         const out = tag(client.slot, payload);
-        for (const m of rooms.others(client.code, client.slot)) m.send(opcode, out);
+        for (const m of rooms.others(client.code, client.slot, gen)) m.send(opcode, out);
       }
     });
 

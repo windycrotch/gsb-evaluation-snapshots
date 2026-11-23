@@ -339,7 +339,9 @@ function runLeg(wire: NetTransport, files: RaceFiles, deal: Deal, mine: number, 
   /**
    * Somebody who has gone still has a car on the track, and the race cannot go on until every step of
    * theirs is accounted for. Their last byte is repeated for them, which is what their absence would have
-   * been predicted as anyway, and the car carries on as they left it.
+   * been predicted as anyway, and the car carries on as they left it. If they make it back — the relay
+   * holds their seat for a while — they come out of the set and their real bytes take over again; the
+   * steps they missed were guessed, and the rollback puts right what the guesses got wrong.
    */
   const left = new Set<number>();
 
@@ -347,11 +349,11 @@ function runLeg(wire: NetTransport, files: RaceFiles, deal: Deal, mine: number, 
     // The lobby's handlers stay underneath and are put back at the finish. A machine that got to the end
     // first is already talking about the next leg while this one is still racing, and those messages have
     // to reach the lobby or the playlist stops dead between two races.
-    const wasPacket = wire.onPacket, wasLeave = wire.onLeave;
+    const wasPacket = wire.onPacket, wasLeave = wire.onLeave, wasJoin = wire.onJoin;
     let stop = (): void => { /* replaced once the clocks below exist */ };
     const finish = (r: Result | undefined): void => {
       stop();
-      wire.onPacket = wasPacket; wire.onLeave = wasLeave;
+      wire.onPacket = wasPacket; wire.onLeave = wasLeave; wire.onJoin = wasJoin;
       peer.sim.onRender = undefined;
       done(r);
     };
@@ -359,6 +361,10 @@ function runLeg(wire: NetTransport, files: RaceFiles, deal: Deal, mine: number, 
       wasLeave?.(slot);
       if (slot < deal.humans) left.add(slot);
       if (left.size >= deal.humans - 1) gone = true;
+    };
+    wire.onJoin = slot => {
+      wasJoin?.(slot);
+      if (slot < deal.humans) left.delete(slot);   // back in their old seat: their bytes are their own again
     };
     wire.onPacket = (from, data) => {
       wasPacket?.(from, data);
@@ -439,10 +445,14 @@ function runLeg(wire: NetTransport, files: RaceFiles, deal: Deal, mine: number, 
           + ` · ${ahead} ahead on guesses · ${fps} fps`
           + ` · rollbacks ${peer.rollbacks} (${rate}/s) · states compared ${checks}`
           + (left.size > 0 ? ` · ${left.size} gone` : '')
+          + (peer.lost > 0 ? ` · ${peer.lost} correction${peer.lost === 1 ? '' : 's'} past the window` : '')
           + (desync >= 0 ? ` · DESYNC at step ${desync}` : '');
         say(line);
         overlay.textContent = line;              // and inside the stage, where full screen can see it
-      } else if (desync >= 0) {
+      } else if (desync >= 0 || peer.lost > 0) {
+        // A hash mismatch says the machines disagree; a lost correction says they can never agree again,
+        // because the step that would have put it right has fallen out of the rollback window. Either
+        // way, carrying on quietly would be two people finishing two different races.
         say('the machines have fallen out of step with each other. Reload and start again.');
       } else if (left.size > 0) {
         say(`${left.size === 1 ? 'a player' : `${left.size} players`} left; their cars carry on as they left them.`);
@@ -564,9 +574,16 @@ async function main(): Promise<void> {
 
   const enter = async (want?: string): Promise<void> => {
     say('connecting…');
+    // The key the relay gave this machine last time it was in that room, so a reconnect — a tunnel, a
+    // laptop lid, a reload — asks for the same seat back instead of arriving as a stranger. Storage can
+    // be refused (private windows, policy); the race works without it, it just cannot be rejoined.
+    const kept = (room: string): string | undefined => {
+      try { return sessionStorage.getItem(`relay-key:${room}`) ?? undefined; } catch { return undefined; }
+    };
     let wire: Relay;
-    try { wire = await Relay.join(want); }
+    try { wire = await Relay.join(want, undefined, want ? kept(want) : undefined); }
     catch (e) { say(await whyNot(e)); return; }
+    try { sessionStorage.setItem(`relay-key:${wire.room}`, wire.key); } catch { /* no storage: no rejoin */ }
 
     $('#choices').hidden = true;
     roomCode = wire.room;
@@ -614,6 +631,7 @@ async function main(): Promise<void> {
 
     wire.onJoin = room;
     wire.onLeave = () => { room(); if (!started) say('somebody left the room'); };
+    wire.onReconnect = () => { room(); say('back online.'); };
     wire.onError = why => { say(why); };
     room();
 

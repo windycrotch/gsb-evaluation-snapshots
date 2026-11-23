@@ -72,4 +72,88 @@ describe('the relay client', () => {
     expect(b.open).toBe(true);                   // b is still in its room, waiting for somebody else
     b.close();
   });
+
+  it('gives the seat back to whoever brings the key', async () => {
+    const a = await Relay.join(undefined, url);
+    const b = await Relay.join(a.room, url);
+    await settle();
+    expect(b.key).toMatch(/^[BCDFGHJKLMNPRSTVWXZ]{16}$/);
+    const left: number[] = [];
+    const joined: number[] = [];
+    a.onLeave = s => left.push(s);
+    a.onJoin = s => joined.push(s);
+    b.close();
+    await settle();
+    const b2 = await Relay.join(a.room, url, b.key);
+    await settle();
+    expect(b2.slot).toBe(b.slot);                // the same seat, not whichever was free
+    expect(b2.key).toBe(b.key);
+    expect(left).toEqual([1]);                   // a heard the going...
+    expect(joined).toEqual([1]);                 // ...and the coming back
+    a.close();
+    b2.close();
+  });
+
+  it('remakes a dropped connection itself, in the same seat of the same room', async () => {
+    const a = await Relay.join(undefined, url);
+    const b = await Relay.join(a.room, url);
+    await settle();
+    a.reconnectDelay = () => 30;                 // no real backoff in a test
+    let reconnected = 0;
+    a.onReconnect = () => reconnected++;
+    const left: number[] = [];
+    const joined: number[] = [];
+    b.onLeave = s => left.push(s);
+    b.onJoin = s => joined.push(s);
+
+    // The socket goes without close() being called: what a tunnel looks like.
+    (a as unknown as { ws: WebSocket }).ws.close();
+    const until = Date.now() + 5000;
+    while (!a.open && Date.now() < until) await new Promise(r => setTimeout(r, 25));
+
+    expect(a.open).toBe(true);
+    expect(reconnected).toBe(1);
+    expect(a.slot).toBe(0);                      // still the same car
+    expect(left).toEqual([0]);                   // b heard a go...
+    expect(joined).toEqual([0]);                 // ...and heard it come back
+    expect(b.peers).toEqual([0]);
+
+    const got: number[][] = [];
+    b.onPacket = (from, data) => got.push([from, ...data]);
+    a.send(encodeInput(0, 41, [0x20]));
+    await settle();
+    expect(got).toEqual([[0, 1, 0, 41, 0, 0, 0, 1, 0x20]]);
+    a.close();
+    b.close();
+  });
+
+  it('opens the room again for the key while the grace lasts, and not for a stranger', async () => {
+    const a = await Relay.join(undefined, url);
+    await settle();
+    const room = a.room;
+    a.close();                                   // the only member: a placeholder holds the seat for now
+    await settle();
+    const back = await Relay.join(room, url, a.key);
+    expect(back.slot).toBe(0);                   // the key still opens the room
+    back.close();
+    await expect(Relay.join('ZZZZ', url, a.key)).rejects.toThrow('no such room');
+  });
+
+  it('gives up out loud when the relay itself is gone', async () => {
+    const own = start(0);
+    const p = await new Promise<number>(res => {
+      own.on('listening', () => res((own.address() as { port: number }).port));
+    });
+    const a = await Relay.join(undefined, `ws://127.0.0.1:${p}/api/relay`);
+    a.reconnectDelay = () => 20;
+    a.maxRetries = 3;
+    const errors: string[] = [];
+    a.onError = why => errors.push(why);
+    own.close();                                 // nothing to reconnect to any more
+    (a as unknown as { ws: WebSocket }).ws.close();
+    const until = Date.now() + 5000;
+    while (errors.length === 0 && Date.now() < until) await new Promise(r => setTimeout(r, 25));
+    expect(errors).toEqual(['the connection to the relay was lost and could not be remade.']);
+    expect(a.open).toBe(false);
+  });
 });

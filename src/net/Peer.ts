@@ -53,6 +53,15 @@ export class Peer {
   /** Counters worth watching: how often we were wrong, and how far back we had to go. */
   rollbacks = 0;
   resimulated = 0;
+  /**
+   * Corrections that arrived too late to put right: the step they belonged to had already fallen out of
+   * the rollback window, so the race as run and the race as it should have been can never meet again.
+   * Zero is the only healthy value, which is what makes it worth counting — a page can say the machines
+   * have fallen out of step instead of quietly finishing two different races.
+   */
+  lost = 0;
+  /** The first step that could not be corrected, or -1 while everything still can be. */
+  lostAt = -1;
 
   constructor(race: Race, readonly cars: number, stepsPerFrame?: number, readonly window = DEFAULT_WINDOW) {
     this.tracks = Array.from({ length: cars }, () => new Track());
@@ -99,7 +108,9 @@ export class Peer {
     const from = this.dirty;
     const cp = this.at(from);
     this.dirty = Infinity;
-    if (!cp) return;                       // older than the window: nothing to be done but carry on
+    // Older than the window: there is nothing to rewind to, and pretending otherwise is how two machines
+    // finish different races while both look fine. Count it, remember where, and let the page say so.
+    if (!cp) { this.lost++; if (this.lostAt < 0) this.lostAt = from; return; }
     this.sim.load(cp);
     // Everything kept from here on describes a future that is not going to happen. Drop it, or a later
     // rollback finds one of these and rewinds into a state that was never real.

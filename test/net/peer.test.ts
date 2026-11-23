@@ -139,6 +139,29 @@ describe('predicting what somebody else pressed', () => {
     expect(t.at(4)).toBe(0x60);
     expect(t.known).toBe(4);
   });
+
+  it('takes no notice of a byte it already has, however often it arrives', () => {
+    // Every packet repeats the last few steps, so the same byte for the same step is the common case,
+    // not an anomaly — and it must not start a rollback.
+    const t = new Track();
+    t.set(0, 0x20);
+    t.set(1, 0xA0);
+    expect(t.set(1, 0xA0)).toBeUndefined();             // the same packet again
+    expect(t.set(0, 0x20)).toBeUndefined();             // the tail of it, repeated
+    expect(t.known).toBe(1);
+  });
+
+  it('applies a late packet by step number, not by when it turned up', () => {
+    // After a reconnect the sender's redundancy covers the gap twice over: the bytes that were missed
+    // arrive again, interleaved with newer ones, and only a genuine contradiction may cost a rollback.
+    const t = new Track();
+    const packet = [0x20, 0x60, 0xA0];
+    packet.forEach((b, i) => t.set(2 + i, b));
+    expect(t.known).toBe(4);
+    packet.forEach((b, i) => expect(t.set(2 + i, b)).toBeUndefined());   // the replay changes nothing
+    expect(t.at(3)).toBe(0x60);
+    expect(t.set(3, 0x61)).toBe(3);                     // but a different byte for that step still bites
+  });
 });
 
 describe.skipIf(!have)('two machines over a wire', () => {
@@ -185,5 +208,25 @@ describe.skipIf(!have)('two machines over a wire', () => {
     // and again. If this ever blows up, the window or the prediction is wrong, not the machine.
     const [a] = play(800, 4);
     expect(a.resimulated).toBeLessThan(800 * 3);
+  });
+
+  it('say so when a correction arrives too late to put right', () => {
+    // A window shorter than the wire's delay means corrections arrive for steps whose checkpoints are
+    // already gone. That race cannot be recovered, and the peer must say so rather than carry on:
+    // `lost` is the number a page watches to call the machines out of step.
+    const [a, b] = play(200, 6, undefined, 2);
+    expect(a.lost + b.lost).toBeGreaterThan(0);
+    const hurt = a.lost > 0 ? a : b;
+    expect(hurt.lostAt).toBeGreaterThanOrEqual(0);
+    expect(hurt.lostAt).toBeLessThan(200);
+  });
+
+  it('lose nothing when the gap fits inside the window', () => {
+    // The same late corrections with a window deep enough to hold them: every one is put right and the
+    // counter never moves, which is what the window is for.
+    const [a, b] = play(400, 6, undefined, 12);
+    expect(a.lost).toBe(0);
+    expect(b.lost).toBe(0);
+    expect(a.hash()).toBe(b.hash());
   });
 });
