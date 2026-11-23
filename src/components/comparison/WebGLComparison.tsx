@@ -17,7 +17,7 @@ import { getComparisonModeInfo } from '../../lib/webgl/comparison-shaders'
 import { useOptimizedClipSync } from '../../hooks/useOptimizedVideoSync'
 import { computeMetricsFromWebGLCanvas } from '../../lib/webgl/metricsComputation'
 import { BarChart3, Ruler, FlipHorizontal, ZoomIn, ZoomOut, RotateCcw, Crosshair, Camera, Copy, Scan, X, LineChart, FileText, Palette, AlertTriangle, Activity, Image, Video } from 'lucide-react'
-import type { ROIRect } from '../../types'
+import type { ROIRect, WebGLComparisonMode, MediaFile } from '../../types'
 import { TemporalDiffGraph } from './TemporalDiffGraph'
 import { WebGLSplitView, SplitViewToggle } from './WebGLSplitView'
 import { WebGLPresetsPanel, PresetsToggle } from './WebGLPresetsPanel'
@@ -37,6 +37,13 @@ export function WebGLComparison() {
   const animationRef = useRef<number>(0)
   const metricsTimerRef = useRef<number>(0)
   const lastMetricsTimeRef = useRef<number>(0)
+  // Latest media/readiness values for the metrics loop, so the loop never
+  // reads stale closures and never needs to restart on every render.
+  const metricsSourceRef = useRef<{
+    stableMediaA: MediaFile | null
+    stableMediaB: MediaFile | null
+    imagesLoaded: { a: boolean; b: boolean }
+  }>({ stableMediaA: null, stableMediaB: null, imagesLoaded: { a: false, b: false } })
 
   const [mousePos, setMousePos] = useState({ x: 0.5, y: 0.5 })
   const [screenMousePos, setScreenMousePos] = useState({ x: 0, y: 0 })
@@ -44,6 +51,13 @@ export function WebGLComparison() {
   const [imagesLoaded, setImagesLoaded] = useState({ a: false, b: false })
   const [isDragging, setIsDragging] = useState(false)
   const [dragStart, setDragStart] = useState({ x: 0, y: 0 })
+
+  // Renderer lifecycle: the renderer's effective mode is the single source of
+  // truth for what the canvas draws AND what the metrics are tagged with.
+  const [rendererStatus, setRendererStatus] = useState<'initializing' | 'ready' | 'failed'>('initializing')
+  const [rendererInitAttempt, setRendererInitAttempt] = useState(0)
+  const [effectiveMode, setEffectiveMode] = useState<WebGLComparisonMode | null>(null)
+  const [modeError, setModeError] = useState<string | null>(null)
   const [cursorPixelInfo, setCursorPixelInfo] = useState<{
     a: { r: number; g: number; b: number } | null;
     b: { r: number; g: number; b: number } | null;
@@ -103,6 +117,22 @@ export function WebGLComparison() {
   const currentUploadTarget = useRef<{ track: 'a' | 'b' } | null>(null)
   const { currentTime } = usePlaybackStore()
 
+  // The mode the canvas is ACTUALLY rendering — single source of truth for
+  // both the canvas and the metrics overlay. Falls back to the requested
+  // mode only while the renderer is still initializing.
+  const displayedMode = effectiveMode ?? webglComparisonSettings.mode
+  const displayedModeInfo = getComparisonModeInfo(displayedMode)
+  const modeMismatch = rendererStatus === 'ready' && effectiveMode !== null && effectiveMode !== webglComparisonSettings.mode
+
+  // Metrics are only current when their provenance (effective mode + A/B
+  // orientation) matches what the canvas is showing right now. Stale
+  // metrics from a previous mode/flip state are never displayed.
+  const metricsAreCurrent = !!webglAnalysisMetrics
+    && effectiveMode !== null
+    && webglAnalysisMetrics.mode === effectiveMode
+    && webglAnalysisMetrics.flipped === webglComparisonSettings.flipAB
+  const currentMetrics = metricsAreCurrent ? webglAnalysisMetrics : null
+
   // Get active media from tracks
   const trackA = tracks.find(t => t.type === 'a')
   const trackB = tracks.find(t => t.type === 'b')
@@ -130,6 +160,7 @@ export function WebGLComparison() {
   // Only use media that is ready (has URL) and is image or video type
   const stableMediaA = rawMediaA?.type === 'video' || rawMediaA?.type === 'image' ? (rawMediaA.url ? rawMediaA : null) : null
   const stableMediaB = rawMediaB?.type === 'video' || rawMediaB?.type === 'image' ? (rawMediaB.url ? rawMediaB : null) : null
+  const hasMedia = !!(stableMediaA || stableMediaB)
 
   // WEBGL-008: A/B Flip - only affects which source maps to which WebGL texture
   // Video elements keep stable src, we just swap which ref maps to which texture
@@ -184,8 +215,9 @@ export function WebGLComparison() {
     }
   }, [stableMediaA?.url, stableMediaB?.url, stableMediaA?.type, stableMediaB?.type])
 
-  // Initialize renderer
+  // Initialize renderer (re-runs when media first appears or on manual retry)
   useEffect(() => {
+    if (!hasMedia) return
     if (!canvasRef.current || !containerRef.current) return
 
     // Check WebGL support
@@ -198,6 +230,9 @@ export function WebGLComparison() {
     const canvas = canvasRef.current
     let isCleanedUp = false
     let retryCount = 0
+    let retryTimeout: ReturnType<typeof setTimeout> | undefined
+
+    setRendererStatus('initializing')
 
     // Function to initialize renderer with proper dimensions
     const initRenderer = () => {
@@ -210,7 +245,7 @@ export function WebGLComparison() {
       // If container has no dimensions, try again (max 10 retries)
       if ((width <= 0 || height <= 0) && retryCount < 10) {
         retryCount++
-        setTimeout(initRenderer, 100)
+        retryTimeout = setTimeout(initRenderer, 100)
         return
       }
 
@@ -222,10 +257,33 @@ export function WebGLComparison() {
       canvas.height = height
 
       const renderer = new WebGLComparisonRenderer(canvas)
+
+      // Initialization can fail (no GL context, buffer/texture creation
+      // failure). Detect it and surface a recoverable error state instead
+      // of leaving a blank canvas.
+      if (!renderer.isReady()) {
+        console.error('[WebGL Component] Renderer initialization failed:', renderer.getLastError())
+        renderer.dispose()
+        rendererRef.current = null
+        if (!isCleanedUp) {
+          setRendererStatus('failed')
+          setEffectiveMode(null)
+        }
+        return
+      }
+
       rendererRef.current = renderer
 
-      // Set the mode from store
-      renderer.setMode(webglComparisonSettings.mode)
+      // Set the mode from the store (read fresh to avoid stale closure)
+      const requestedMode = useProjectStore.getState().webglComparisonSettings.mode
+      renderer.setMode(requestedMode)
+
+      if (!isCleanedUp) {
+        // The renderer's effective mode is the single source of truth
+        setEffectiveMode(renderer.getEffectiveMode())
+        setModeError(renderer.getLastError())
+        setRendererStatus('ready')
+      }
     }
 
     // Wait a frame to ensure container is laid out
@@ -234,23 +292,28 @@ export function WebGLComparison() {
     return () => {
       isCleanedUp = true
       clearTimeout(timeoutId)
+      if (retryTimeout) clearTimeout(retryTimeout)
       if (rendererRef.current) {
         rendererRef.current.dispose()
         rendererRef.current = null
       }
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []) // Intentionally empty - mode changes handled by separate effect
+  }, [rendererInitAttempt, hasMedia])
 
-  // Update mode when settings change
+  // Update mode when settings change — canvas and metrics both derive from
+  // the renderer's effective mode, synced here after every setMode call.
   useEffect(() => {
-    if (rendererRef.current) {
-      rendererRef.current.setMode(webglComparisonSettings.mode)
-    }
-  }, [webglComparisonSettings.mode])
+    const renderer = rendererRef.current
+    if (!renderer || rendererStatus !== 'ready') return
+
+    renderer.setMode(webglComparisonSettings.mode)
+    setEffectiveMode(renderer.getEffectiveMode())
+    setModeError(renderer.getLastError())
+  }, [webglComparisonSettings.mode, rendererStatus])
 
   // Handle resize
   useEffect(() => {
+    if (!hasMedia) return
     const container = containerRef.current
     const canvas = canvasRef.current
     if (!container || !canvas) return
@@ -283,12 +346,12 @@ export function WebGLComparison() {
 
     resizeObserver.observe(container)
     return () => resizeObserver.disconnect()
-  }, [])
+  }, [hasMedia])
 
   // Render function - uses stable media sources, flipAB only swaps texture assignment
   const render = useCallback(() => {
     const renderer = rendererRef.current
-    if (!renderer) {
+    if (!renderer || !renderer.isReady()) {
       animationRef.current = requestAnimationFrame(render)
       return
     }
@@ -387,13 +450,28 @@ export function WebGLComparison() {
   }, [render])
 
   // WEBGL-001: Compute metrics periodically (every 500ms)
-  // Uses stable media sources and respects flipAB for correct A/B mapping
+  // The loop is driven by the renderer's EFFECTIVE mode (same source as the
+  // canvas) and tags every result with the mode + flip orientation it was
+  // computed under, so stale metrics are never presented as current.
+  // Closing the overlay or unmounting cancels the loop and blocks any
+  // further state writes; reopening starts a fresh loop.
   useEffect(() => {
-    if (!webglComparisonSettings.showMetricsOverlay) {
+    // Keep the latest source values visible to the loop without restarting it
+    metricsSourceRef.current = { stableMediaA, stableMediaB, imagesLoaded }
+  })
+
+  useEffect(() => {
+    if (!webglComparisonSettings.showMetricsOverlay || rendererStatus !== 'ready') {
       return
     }
 
+    let cancelled = false
+    // Compute immediately for the new effect instance (mode/overlay change)
+    lastMetricsTimeRef.current = 0
+
     const computeMetrics = () => {
+      if (cancelled) return
+
       const now = Date.now()
       // Only compute every 500ms to avoid performance issues
       if (now - lastMetricsTimeRef.current < 500) {
@@ -402,21 +480,32 @@ export function WebGLComparison() {
       }
       lastMetricsTimeRef.current = now
 
-      // Get current flipAB state
-      const flipAB = useProjectStore.getState().webglComparisonSettings.flipAB
+      const renderer = rendererRef.current
+      if (!renderer || !renderer.isReady()) {
+        metricsTimerRef.current = requestAnimationFrame(computeMetrics)
+        return
+      }
+
+      // Read all settings fresh from the store to avoid stale closures
+      const settings = useProjectStore.getState().webglComparisonSettings
+      const flipAB = settings.flipAB
+      // The mode these metrics will belong to — the mode the canvas renders
+      const modeAtCompute = renderer.getEffectiveMode()
+
+      const { stableMediaA: mediaStateA, stableMediaB: mediaStateB, imagesLoaded: imgLoaded } = metricsSourceRef.current
 
       // Get source elements - respect flipAB for correct A/B mapping
       let sourceA: HTMLVideoElement | HTMLImageElement | null = null
       let sourceB: HTMLVideoElement | HTMLImageElement | null = null
 
-      const mediaForA = flipAB ? stableMediaB : stableMediaA
-      const mediaForB = flipAB ? stableMediaA : stableMediaB
+      const mediaForA = flipAB ? mediaStateB : mediaStateA
+      const mediaForB = flipAB ? mediaStateA : mediaStateB
       const videoRefA = flipAB ? videoBRef : videoARef
       const videoRefB = flipAB ? videoARef : videoBRef
       const imgRefA = flipAB ? imgBRef : imgARef
       const imgRefB = flipAB ? imgARef : imgBRef
-      const imgLoadedA = flipAB ? imagesLoaded.b : imagesLoaded.a
-      const imgLoadedB = flipAB ? imagesLoaded.a : imagesLoaded.b
+      const imgLoadedA = flipAB ? imgLoaded.b : imgLoaded.a
+      const imgLoadedB = flipAB ? imgLoaded.a : imgLoaded.b
 
       if (mediaForA?.type === 'video' && videoRefA.current && videoRefA.current.readyState >= 2) {
         sourceA = videoRefA.current
@@ -430,33 +519,39 @@ export function WebGLComparison() {
         sourceB = imgRefB.current
       }
 
-      if (sourceA && sourceB && rendererRef.current) {
-        const gl = (rendererRef.current as unknown as { gl: WebGLRenderingContext | null }).gl
-        if (gl) {
-          const metrics = computeMetricsFromWebGLCanvas(
-            gl,
-            canvasRef.current?.width || 640,
-            canvasRef.current?.height || 480,
-            sourceA,
-            sourceB,
-            Math.round(webglComparisonSettings.threshold * 255),
-            webglComparisonSettings.roi // WEBGL-004: Pass ROI for localized metrics
-          )
-          setWebGLAnalysisMetrics(metrics)
+      const gl = renderer.getGL()
+      if (sourceA && sourceB && gl) {
+        const metrics = computeMetricsFromWebGLCanvas(
+          gl,
+          canvasRef.current?.width || 640,
+          canvasRef.current?.height || 480,
+          sourceA,
+          sourceB,
+          Math.round(settings.threshold * 255),
+          settings.roi // WEBGL-004: Pass ROI for localized metrics
+        )
+        // Never write state after the loop was cancelled (overlay closed,
+        // mode changed, or component unmounted)
+        if (!cancelled) {
+          setWebGLAnalysisMetrics({ ...metrics, mode: modeAtCompute ?? undefined, flipped: flipAB })
         }
       }
 
-      metricsTimerRef.current = requestAnimationFrame(computeMetrics)
+      if (!cancelled) {
+        metricsTimerRef.current = requestAnimationFrame(computeMetrics)
+      }
     }
 
     metricsTimerRef.current = requestAnimationFrame(computeMetrics)
 
     return () => {
+      cancelled = true
       if (metricsTimerRef.current) {
         cancelAnimationFrame(metricsTimerRef.current)
+        metricsTimerRef.current = 0
       }
     }
-  }, [webglComparisonSettings.showMetricsOverlay, webglComparisonSettings.threshold, webglComparisonSettings.roi, stableMediaA, stableMediaB, imagesLoaded, setWebGLAnalysisMetrics])
+  }, [webglComparisonSettings.showMetricsOverlay, rendererStatus, effectiveMode, setWebGLAnalysisMetrics])
 
   // Handle mouse move for interactive modes
   const handleMouseMove = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
@@ -621,8 +716,8 @@ export function WebGLComparison() {
     // Draw the WebGL canvas
     ctx.drawImage(canvasRef.current, 0, 0, width, height)
 
-    // Get mode info for label
-    const currentModeInfo = getComparisonModeInfo(webglComparisonSettings.mode)
+    // Get mode info for label — use the mode the canvas actually renders
+    const currentModeInfo = displayedModeInfo
 
     // Draw mode indicator
     ctx.fillStyle = 'rgba(0, 0, 0, 0.7)'
@@ -631,10 +726,10 @@ export function WebGLComparison() {
     ctx.font = `${14 * scale}px system-ui`
     ctx.fillText('Mode: ', 24 * scale, 36 * scale)
     ctx.fillStyle = '#cddc39'
-    ctx.fillText(currentModeInfo?.label || webglComparisonSettings.mode, 70 * scale, 36 * scale)
+    ctx.fillText(currentModeInfo?.label || displayedMode, 70 * scale, 36 * scale)
 
-    // Draw metrics if visible
-    if (webglComparisonSettings.showMetricsOverlay && webglAnalysisMetrics) {
+    // Draw metrics if visible — only metrics matching the current mode/flip
+    if (webglComparisonSettings.showMetricsOverlay && currentMetrics) {
       const metricsX = width - 200 * scale
       ctx.fillStyle = 'rgba(0, 0, 0, 0.8)'
       ctx.fillRect(metricsX, 16 * scale, 180 * scale, 140 * scale)
@@ -645,11 +740,11 @@ export function WebGLComparison() {
 
       ctx.font = `${12 * scale}px monospace`
       const metrics = [
-        { label: 'SSIM:', value: webglAnalysisMetrics.ssim.toFixed(4) },
-        { label: 'Delta E:', value: webglAnalysisMetrics.deltaE.toFixed(2) },
-        { label: 'Diff Pixels:', value: `${webglAnalysisMetrics.diffPixelPercent.toFixed(1)}%` },
-        { label: 'Peak Diff:', value: webglAnalysisMetrics.peakDifference.toFixed(0) },
-        { label: 'Mean Diff:', value: webglAnalysisMetrics.meanDifference.toFixed(1) }
+        { label: 'SSIM:', value: currentMetrics.ssim.toFixed(4) },
+        { label: 'Delta E:', value: currentMetrics.deltaE.toFixed(2) },
+        { label: 'Diff Pixels:', value: `${currentMetrics.diffPixelPercent.toFixed(1)}%` },
+        { label: 'Peak Diff:', value: currentMetrics.peakDifference.toFixed(0) },
+        { label: 'Mean Diff:', value: currentMetrics.meanDifference.toFixed(1) }
       ]
 
       metrics.forEach((m, i) => {
@@ -683,18 +778,18 @@ export function WebGLComparison() {
       }
     } else {
       const link = document.createElement('a')
-      link.download = `dualview-analysis-${webglComparisonSettings.mode}-${Date.now()}.png`
+      link.download = `dualview-analysis-${displayedMode}-${Date.now()}.png`
       link.href = exportCanvas.toDataURL('image/png')
       link.click()
     }
-  }, [webglComparisonSettings, webglAnalysisMetrics])
+  }, [webglComparisonSettings, currentMetrics, displayedMode, displayedModeInfo])
 
   // WEBGL-010: Export PDF Analysis Report
   const exportPDFReport = useCallback(async () => {
     if (!canvasRef.current) return
 
-    // Get mode info for the report
-    const currentModeInfo = getComparisonModeInfo(webglComparisonSettings.mode)
+    // Get mode info for the report — the mode the canvas actually renders
+    const currentModeInfo = displayedModeInfo
 
     // Capture screenshot for the PDF
     const screenshotBlob = await captureCanvasScreenshot(canvasRef.current, 'png')
@@ -716,7 +811,7 @@ export function WebGLComparison() {
       includeSettings: true,
       screenshotBlob,
       comparisonMode: 'webgl-compare',
-      webglMode: currentModeInfo?.label || webglComparisonSettings.mode,
+      webglMode: currentModeInfo?.label || displayedMode,
       threshold: webglComparisonSettings.threshold,
       mediaA: mediaA ? {
         name: mediaA.name,
@@ -730,21 +825,21 @@ export function WebGLComparison() {
         size: formatSize(mediaB.file?.size),
         dimensions: mediaB.width && mediaB.height ? `${mediaB.width}×${mediaB.height}` : undefined
       } : undefined,
-      webglMetrics: webglAnalysisMetrics ? {
-        ssim: webglAnalysisMetrics.ssim,
-        deltaE: webglAnalysisMetrics.deltaE,
-        diffPixelPercent: webglAnalysisMetrics.diffPixelPercent,
-        peakDifference: webglAnalysisMetrics.peakDifference,
-        meanDifference: webglAnalysisMetrics.meanDifference,
-        passPixelCount: webglAnalysisMetrics.passPixelCount,
-        failPixelCount: webglAnalysisMetrics.failPixelCount,
-        totalPixelCount: webglAnalysisMetrics.totalPixelCount
+      webglMetrics: currentMetrics ? {
+        ssim: currentMetrics.ssim,
+        deltaE: currentMetrics.deltaE,
+        diffPixelPercent: currentMetrics.diffPixelPercent,
+        peakDifference: currentMetrics.peakDifference,
+        meanDifference: currentMetrics.meanDifference,
+        passPixelCount: currentMetrics.passPixelCount,
+        failPixelCount: currentMetrics.failPixelCount,
+        totalPixelCount: currentMetrics.totalPixelCount
       } : undefined
     })
 
     // Download
     downloadBlob(pdfBlob, `dualview-analysis-report-${Date.now()}.pdf`)
-  }, [webglComparisonSettings, webglAnalysisMetrics, mediaA, mediaB])
+  }, [webglComparisonSettings, currentMetrics, displayedMode, displayedModeInfo, mediaA, mediaB])
 
   // Handle image load
   const handleImageALoad = useCallback(() => {
@@ -956,62 +1051,96 @@ export function WebGLComparison() {
         }}
       />
 
-      {/* Mode indicator */}
+      {/* Renderer initialization failure — visible, recoverable via retry */}
+      {rendererStatus === 'failed' && (
+        <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/85">
+          <div className="text-center p-8 max-w-sm">
+            <AlertTriangle className="w-10 h-10 text-red-400 mx-auto mb-4" />
+            <h3 className="text-lg font-bold text-white mb-2">Renderer Initialization Failed</h3>
+            <p className="text-gray-400 text-sm mb-1">
+              The WebGL renderer could not be initialized, so the comparison canvas cannot be drawn.
+            </p>
+            <p className="text-gray-500 text-xs mb-4">
+              This is often temporary (GPU resource exhaustion or a lost context). Retrying usually recovers.
+            </p>
+            <button
+              onClick={() => setRendererInitAttempt(attempt => attempt + 1)}
+              className="px-4 py-2 bg-[#ff5722] text-white rounded hover:bg-[#ff6a3c] transition-colors text-sm font-medium"
+            >
+              Retry Renderer Initialization
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Mode indicator — shows the mode the canvas is ACTUALLY rendering */}
       <div className="absolute top-4 left-4 bg-black/70 px-3 py-1.5 rounded text-sm">
         <span className="text-gray-400">Mode:</span>
-        <span className="text-[#cddc39] ml-2 font-medium">{modeInfo?.label || webglComparisonSettings.mode}</span>
+        <span className="text-[#cddc39] ml-2 font-medium">{displayedModeInfo?.label || displayedMode}</span>
         {webglComparisonSettings.flipAB && (
           <span className="text-orange-400 ml-2">(A/B Flipped)</span>
         )}
+        {modeMismatch && (
+          <span className="text-amber-400 ml-2" title={modeError || undefined}>
+            ⚠ Requested mode unavailable — showing {displayedModeInfo?.label || displayedMode}
+          </span>
+        )}
       </div>
 
-      {/* WEBGL-001: Metrics Overlay */}
-      {webglComparisonSettings.showMetricsOverlay && webglAnalysisMetrics && (
+      {/* WEBGL-001: Metrics Overlay — only shows metrics whose provenance
+          (effective mode + A/B orientation) matches the current canvas */}
+      {webglComparisonSettings.showMetricsOverlay && (
         <div className="absolute top-4 right-4 bg-black/80 px-4 py-3 rounded text-sm font-mono">
           <div className="text-gray-300 font-semibold mb-2 text-xs uppercase tracking-wider">Analysis Metrics</div>
+          {currentMetrics ? (
           <div className="space-y-1">
             <div className="flex justify-between gap-4">
               <span className="text-gray-400">SSIM:</span>
-              <span className={`font-medium ${webglAnalysisMetrics.ssim > 0.95 ? 'text-green-400' : webglAnalysisMetrics.ssim > 0.8 ? 'text-yellow-400' : 'text-red-400'}`}>
-                {webglAnalysisMetrics.ssim.toFixed(4)}
+              <span className={`font-medium ${currentMetrics.ssim > 0.95 ? 'text-green-400' : currentMetrics.ssim > 0.8 ? 'text-yellow-400' : 'text-red-400'}`}>
+                {currentMetrics.ssim.toFixed(4)}
               </span>
             </div>
             <div className="flex justify-between gap-4">
               <span className="text-gray-400">Delta E:</span>
-              <span className={`font-medium ${webglAnalysisMetrics.deltaE < 1 ? 'text-green-400' : webglAnalysisMetrics.deltaE < 5 ? 'text-yellow-400' : 'text-red-400'}`}>
-                {webglAnalysisMetrics.deltaE.toFixed(2)}
+              <span className={`font-medium ${currentMetrics.deltaE < 1 ? 'text-green-400' : currentMetrics.deltaE < 5 ? 'text-yellow-400' : 'text-red-400'}`}>
+                {currentMetrics.deltaE.toFixed(2)}
               </span>
             </div>
             <div className="flex justify-between gap-4">
               <span className="text-gray-400">Diff Pixels:</span>
-              <span className={`font-medium ${webglAnalysisMetrics.diffPixelPercent < 1 ? 'text-green-400' : webglAnalysisMetrics.diffPixelPercent < 10 ? 'text-yellow-400' : 'text-red-400'}`}>
-                {webglAnalysisMetrics.diffPixelPercent.toFixed(1)}%
+              <span className={`font-medium ${currentMetrics.diffPixelPercent < 1 ? 'text-green-400' : currentMetrics.diffPixelPercent < 10 ? 'text-yellow-400' : 'text-red-400'}`}>
+                {currentMetrics.diffPixelPercent.toFixed(1)}%
               </span>
             </div>
             <div className="flex justify-between gap-4">
               <span className="text-gray-400">Peak Diff:</span>
-              <span className="text-gray-200 font-medium">{webglAnalysisMetrics.peakDifference.toFixed(0)}</span>
+              <span className="text-gray-200 font-medium">{currentMetrics.peakDifference.toFixed(0)}</span>
             </div>
             <div className="flex justify-between gap-4">
               <span className="text-gray-400">Mean Diff:</span>
-              <span className="text-gray-200 font-medium">{webglAnalysisMetrics.meanDifference.toFixed(1)}</span>
+              <span className="text-gray-200 font-medium">{currentMetrics.meanDifference.toFixed(1)}</span>
             </div>
             {/* WEBGL-006: Threshold Pass/Fail Stats */}
             <div className="border-t border-gray-600 mt-2 pt-2">
               <div className="flex justify-between gap-4">
                 <span className="text-gray-400">Pass:</span>
                 <span className="text-green-400 font-medium">
-                  {webglAnalysisMetrics.passPixelCount.toLocaleString()} ({((webglAnalysisMetrics.passPixelCount / webglAnalysisMetrics.totalPixelCount) * 100).toFixed(1)}%)
+                  {currentMetrics.passPixelCount.toLocaleString()} ({((currentMetrics.passPixelCount / currentMetrics.totalPixelCount) * 100).toFixed(1)}%)
                 </span>
               </div>
               <div className="flex justify-between gap-4">
                 <span className="text-gray-400">Fail:</span>
                 <span className="text-red-400 font-medium">
-                  {webglAnalysisMetrics.failPixelCount.toLocaleString()} ({((webglAnalysisMetrics.failPixelCount / webglAnalysisMetrics.totalPixelCount) * 100).toFixed(1)}%)
+                  {currentMetrics.failPixelCount.toLocaleString()} ({((currentMetrics.failPixelCount / currentMetrics.totalPixelCount) * 100).toFixed(1)}%)
                 </span>
               </div>
             </div>
           </div>
+          ) : (
+          <div className="text-gray-500 text-xs py-2">
+            Computing metrics for current mode…
+          </div>
+          )}
         </div>
       )}
 

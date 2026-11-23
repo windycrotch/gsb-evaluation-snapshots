@@ -28,6 +28,8 @@ export class WebGLComparisonRenderer {
   private programs: Map<string, WebGLProgram> = new Map()
   private currentProgram: WebGLProgram | null = null
   private currentMode: WebGLComparisonMode | null = null
+  private ready: boolean = false
+  private lastError: string | null = null
 
   private textureA: WebGLTexture | null = null
   private textureB: WebGLTexture | null = null
@@ -56,6 +58,7 @@ export class WebGLComparisonRenderer {
 
     if (!gl) {
       console.error('[WebGL] WebGL not supported')
+      this.lastError = 'Failed to create WebGL rendering context'
       return
     }
 
@@ -88,6 +91,38 @@ export class WebGLComparisonRenderer {
     // Create geometry buffers
     this.createBuffers()
     console.log('[WebGL] Buffers created')
+
+    this.ready = true
+  }
+
+  /**
+   * Whether the renderer was successfully initialized and can render
+   */
+  isReady(): boolean {
+    return this.ready && this.gl !== null
+  }
+
+  /**
+   * The mode the canvas is actually rendering with.
+   * This is the single source of truth for "current effective render mode" —
+   * it may differ from the requested mode if shader compilation failed.
+   */
+  getEffectiveMode(): WebGLComparisonMode | null {
+    return this.currentMode
+  }
+
+  /**
+   * Last initialization/compilation error, if any (null when healthy)
+   */
+  getLastError(): string | null {
+    return this.lastError
+  }
+
+  /**
+   * Access the underlying GL context (null when not initialized)
+   */
+  getGL(): WebGLRenderingContext | null {
+    return this.gl
   }
 
   private createTexture(): WebGLTexture | null {
@@ -197,13 +232,19 @@ export class WebGLComparisonRenderer {
   }
 
   /**
-   * Set the comparison mode (compiles shader if needed)
+   * Set the comparison mode (compiles shader if needed).
+   * Returns true only if the requested mode is now the effective mode.
+   * On failure the renderer falls back to 'diff-debug' (if possible) and
+   * records the reason in lastError — callers must surface this to the user
+   * via getEffectiveMode()/getLastError() instead of assuming success.
    */
   setMode(mode: WebGLComparisonMode): boolean {
     console.log('[WebGL] setMode called with:', mode)
+    this.lastError = null
 
     if (!this.gl) {
       console.error('[WebGL] setMode: No GL context')
+      this.lastError = 'No WebGL context available'
       return false
     }
 
@@ -226,6 +267,7 @@ export class WebGLComparisonRenderer {
     const shader = getComparisonShader(mode)
     if (!shader) {
       console.error(`[WebGL] Unknown comparison mode: ${mode}`)
+      this.lastError = `Unknown comparison mode: ${mode}`
       return false
     }
     console.log('[WebGL] Got shader for mode:', mode, 'fragment length:', shader.fragment.length)
@@ -234,7 +276,8 @@ export class WebGLComparisonRenderer {
     const newProgram = this.createProgram(COMPARISON_VERTEX_SHADER, shader.fragment)
     if (!newProgram) {
       console.error(`[WebGL] Failed to compile shader for ${mode}`)
-      // Try fallback to simplest shader
+      // Fall back to the simplest shader so the canvas is not blank, but
+      // report the failure — the requested mode is NOT in effect.
       const debugShader = getComparisonShader('diff-debug')
       if (debugShader) {
         console.log('[WebGL] Trying fallback to diff-debug')
@@ -243,10 +286,12 @@ export class WebGLComparisonRenderer {
           this.programs.set('diff-debug', fallbackProgram)
           this.currentProgram = fallbackProgram
           this.currentMode = 'diff-debug'
-          console.log('[WebGL] Fallback to diff-debug succeeded')
-          return true
+          this.lastError = `Failed to compile shader for mode "${mode}"; fell back to "diff-debug"`
+          console.warn('[WebGL]', this.lastError)
+          return false
         }
       }
+      this.lastError = `Failed to compile shader for mode "${mode}"`
       return false
     }
 
@@ -289,13 +334,12 @@ export class WebGLComparisonRenderer {
       return
     }
 
-    // Try to set a default mode if none is set
+    // A mode must have been explicitly set via setMode() — never silently
+    // substitute a different mode here, or the canvas would diverge from
+    // what the UI reports as the current mode.
     if (!this.currentProgram) {
-      console.log('[WebGL] render: No program, trying to set diff-debug')
-      if (!this.setMode('diff-debug')) {
-        console.error('[WebGL] Cannot render - no program available')
-        return
-      }
+      if (this.renderCount < 5) console.error('[WebGL] render: No program set — call setMode() first')
+      return
     }
 
     // Store program in local const for TypeScript
@@ -482,6 +526,7 @@ export class WebGLComparisonRenderer {
    * Clean up resources
    */
   dispose(): void {
+    this.ready = false
     const gl = this.gl
     if (!gl) return
 

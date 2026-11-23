@@ -171,6 +171,11 @@ export interface WebGLAnalysisMetrics {
   passPixelCount: number     // Number of pixels passing threshold
   failPixelCount: number     // Number of pixels failing threshold
   totalPixelCount: number    // Total sampled pixels
+  // Provenance: the effective render mode and A/B orientation in effect when
+  // these metrics were computed. Consumers must only display metrics whose
+  // provenance matches the current canvas state (never show stale values).
+  mode?: WebGLComparisonMode
+  flipped?: boolean
 }
 
 export type BlendMode = 'difference' | 'overlay' | 'multiply' | 'screen'
