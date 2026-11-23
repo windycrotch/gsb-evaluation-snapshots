@@ -4,8 +4,8 @@
   "sourceOwner": "469877839",
   "owner": "windycrotch",
   "repository": "gsb-evaluation-snapshots",
-  "taskCount": 451,
-  "snapshotCount": 902,
+  "taskCount": 475,
+  "snapshotCount": 950,
   "groups": {
     "38bd5d6e-d416-43db-baae-7adfd41acc6d": 89,
     "c3688ee4-1e6b-4f08-8b48-726d33b41638": 78,
@@ -13,7 +13,7 @@
     "legacy-git404": 35,
     "4489125f-e516-4834-b9ab-adeee09f23e8": 64,
     "93655e49-7ea3-4c66-bac7-b63a8b92de52": 60,
-    "90bb2174-905f-4034-a438-4341691eb7d2": 50
+    "90bb2174-905f-4034-a438-4341691eb7d2": 74
   },
   "entries": [
     {
@@ -6309,6 +6309,21 @@
       "migratedFrom": "local-batch-4489125f-e516-4834-b9ab-adeee09f23e8"
     },
     {
+      "uid": "29168",
+      "taskId": "12808d1b-9f70-464d-a608-99b708337b91",
+      "batchId": "90bb2174-905f-4034-a438-4341691eb7d2",
+      "recordId": null,
+      "sessionId": "9fd276d3-1d9b-43a7-97d6-77edb49a49fc",
+      "promptHash": "e0ac4fd766f2e9828d51af0d35e518582c7c6e6de402bf68a10964883ddb39f5",
+      "baselineSha": "2048156ab3ed0ba5ebb7db27e5747c715e9a99f5",
+      "artifactSha": "bf45afc29dc99703886501ec0586cacc8798e929",
+      "baselineRef": "gsb/20261122k/29168/12808d1b9f70/baseline",
+      "artifactRef": "gsb/20261122k/29168/12808d1b9f70/artifact",
+      "initialUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/2048156ab3ed0ba5ebb7db27e5747c715e9a99f5",
+      "productUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/bf45afc29dc99703886501ec0586cacc8798e929",
+      "migratedFrom": "local-batch-90bb2174-905f-4034-a438-4341691eb7d2"
+    },
+    {
       "uid": "29169",
       "taskId": "22fe1271-d02c-4edc-bba2-6954ce181ace",
       "batchId": "90bb2174-905f-4034-a438-4341691eb7d2",
@@ -6321,6 +6336,21 @@
       "artifactRef": "gsb/20261122b/29169/22fe1271d02c/artifact",
       "initialUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/6079e6df7ba63448483cf87bd8b6d555e6e90ae2",
       "productUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/260afe1db59e825b837dd06ac7a7d91939071361",
+      "migratedFrom": "local-batch-90bb2174-905f-4034-a438-4341691eb7d2"
+    },
+    {
+      "uid": "29170",
+      "taskId": "1ff7b718-1b52-4b8f-bf5e-1cca07ac7361",
+      "batchId": "90bb2174-905f-4034-a438-4341691eb7d2",
+      "recordId": null,
+      "sessionId": "0d3d336a-17fb-4b45-aa65-fafe7268428b",
+      "promptHash": "24c5a34e1cdc56d68f465dab23e2d56b2e60484859e20c01f0490676ef2f3538",
+      "baselineSha": "25478ae58f25969762f57029108ceeebd9606e5a",
+      "artifactSha": "fd6a53778f951b179ea5d96ec6e24387b29cfa74",
+      "baselineRef": "gsb/20261122k/29170/1ff7b7181b52/baseline",
+      "artifactRef": "gsb/20261122k/29170/1ff7b7181b52/artifact",
+      "initialUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/25478ae58f25969762f57029108ceeebd9606e5a",
+      "productUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/fd6a53778f951b179ea5d96ec6e24387b29cfa74",
       "migratedFrom": "local-batch-90bb2174-905f-4034-a438-4341691eb7d2"
     },
     {
@@ -6354,6 +6384,21 @@
       "migratedFrom": "local-batch-90bb2174-905f-4034-a438-4341691eb7d2"
     },
     {
+      "uid": "29173",
+      "taskId": "068036c2-3159-429e-adab-21859ed25a25",
+      "batchId": "90bb2174-905f-4034-a438-4341691eb7d2",
+      "recordId": null,
+      "sessionId": "bec88a14-f56f-48fe-8935-6414869171ed",
+      "promptHash": "c2eac362b5bf0e7c6913cd9c2adfa98d56ba63e9ba012f2a003551c45c396e16",
+      "baselineSha": "eb77688b7396cd84ddfe1eb5262492ba6511d100",
+      "artifactSha": "fdf13a99e44329cc433547afef917703c3ae6f4d",
+      "baselineRef": "gsb/20261122k/29173/068036c23159/baseline",
+      "artifactRef": "gsb/20261122k/29173/068036c23159/artifact",
+      "initialUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/eb77688b7396cd84ddfe1eb5262492ba6511d100",
+      "productUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/fdf13a99e44329cc433547afef917703c3ae6f4d",
+      "migratedFrom": "local-batch-90bb2174-905f-4034-a438-4341691eb7d2"
+    },
+    {
       "uid": "29174",
       "taskId": "0bedd7b4-6c36-4640-bb9a-cf7d0cd29382",
       "batchId": "90bb2174-905f-4034-a438-4341691eb7d2",
@@ -6366,6 +6411,21 @@
       "artifactRef": "gsb/20261122e/29174/0bedd7b46c36/artifact",
       "initialUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/23d1e495cad76c4c39a8719fdc1963044ce846fd",
       "productUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/3f52bb7df0891793fa50e11a9cb739d671cf3149",
+      "migratedFrom": "local-batch-90bb2174-905f-4034-a438-4341691eb7d2"
+    },
+    {
+      "uid": "29175",
+      "taskId": "c82bad17-54a7-4419-8c9e-bbcc25ecddbe",
+      "batchId": "90bb2174-905f-4034-a438-4341691eb7d2",
+      "recordId": null,
+      "sessionId": "b87c9361-9abb-4dd0-9eab-3c5b0b086bdf",
+      "promptHash": "203738e241b0d7620df869d1d591ace9cc13e8837fa280fe2c51bfc95fb310bb",
+      "baselineSha": "242358f12b5c1ae8962e8f057aed9ce5e569ddba",
+      "artifactSha": "9aa653549d7a5ff81249b0bd41beeeaf17bc6bb9",
+      "baselineRef": "gsb/20261122k/29175/c82bad1754a7/baseline",
+      "artifactRef": "gsb/20261122k/29175/c82bad1754a7/artifact",
+      "initialUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/242358f12b5c1ae8962e8f057aed9ce5e569ddba",
+      "productUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/9aa653549d7a5ff81249b0bd41beeeaf17bc6bb9",
       "migratedFrom": "local-batch-90bb2174-905f-4034-a438-4341691eb7d2"
     },
     {
@@ -6489,6 +6549,81 @@
       "migratedFrom": "local-batch-90bb2174-905f-4034-a438-4341691eb7d2"
     },
     {
+      "uid": "32053",
+      "taskId": "11fb4e18-2372-48f4-85be-861b05a3bc97",
+      "batchId": "90bb2174-905f-4034-a438-4341691eb7d2",
+      "recordId": null,
+      "sessionId": "068ab828-ea58-4ce5-ad85-3ed87f93ed07",
+      "promptHash": "3fddd54738a828a476e1505a48f8b386e814e7c49eacbd34a375360b6f071d1e",
+      "baselineSha": "9eefa747db483fa9dbcae79ac157fa62427e89a3",
+      "artifactSha": "5eb4562bf277b0346e480157e37bbf0080acb159",
+      "baselineRef": "gsb/20261122k/32053/11fb4e182372/baseline",
+      "artifactRef": "gsb/20261122k/32053/11fb4e182372/artifact",
+      "initialUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/9eefa747db483fa9dbcae79ac157fa62427e89a3",
+      "productUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/5eb4562bf277b0346e480157e37bbf0080acb159",
+      "migratedFrom": "local-batch-90bb2174-905f-4034-a438-4341691eb7d2"
+    },
+    {
+      "uid": "32055",
+      "taskId": "22dadaff-6641-481a-be59-89565d563f21",
+      "batchId": "90bb2174-905f-4034-a438-4341691eb7d2",
+      "recordId": null,
+      "sessionId": "50c865af-8a75-432c-9cfc-ac531da94fc3",
+      "promptHash": "6236f6a9d1040fc0f73432e5496397c120c99990da33b53bc20b0a57e56205df",
+      "baselineSha": "542fbb2e6b0f566bfec254f31a0cbb43c096eee2",
+      "artifactSha": "9666b45808785f0f9f4c90bd977738c314c18a7b",
+      "baselineRef": "gsb/20261122k/32055/22dadaff6641/baseline",
+      "artifactRef": "gsb/20261122k/32055/22dadaff6641/artifact",
+      "initialUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/542fbb2e6b0f566bfec254f31a0cbb43c096eee2",
+      "productUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/9666b45808785f0f9f4c90bd977738c314c18a7b",
+      "migratedFrom": "local-batch-90bb2174-905f-4034-a438-4341691eb7d2"
+    },
+    {
+      "uid": "32056",
+      "taskId": "5413cd53-1497-48f4-bc2e-9a2a9d398ba9",
+      "batchId": "90bb2174-905f-4034-a438-4341691eb7d2",
+      "recordId": null,
+      "sessionId": "349a979a-9a64-461b-81a8-6d25baff09d6",
+      "promptHash": "5fefdd4cd33a9a22f6c4bea2168aab14f8fca9d76aa59a3a4c81bb79a72a8aa9",
+      "baselineSha": "55cce4017c7f58014a978d460e7617b6ff517f16",
+      "artifactSha": "deac940a1f98980314710b9fd6fba08c1f61dbff",
+      "baselineRef": "gsb/20261122k/32056/5413cd531497/baseline",
+      "artifactRef": "gsb/20261122k/32056/5413cd531497/artifact",
+      "initialUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/55cce4017c7f58014a978d460e7617b6ff517f16",
+      "productUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/deac940a1f98980314710b9fd6fba08c1f61dbff",
+      "migratedFrom": "local-batch-90bb2174-905f-4034-a438-4341691eb7d2"
+    },
+    {
+      "uid": "32060",
+      "taskId": "915a76a5-9134-4261-ba65-52f1f9e20c3f",
+      "batchId": "90bb2174-905f-4034-a438-4341691eb7d2",
+      "recordId": null,
+      "sessionId": "9957adb6-07da-4744-8b2e-e77f63702e91",
+      "promptHash": "d7c96a861ad15a046e28b7e51efd58fffbeae47aa56bcbb7a814c3c7d12fcbf6",
+      "baselineSha": "3af2c4bf1ef3fa617bcd908a396207d0cdc95dea",
+      "artifactSha": "af98fe672ed61226cc01033ecb653ba84f85ca9b",
+      "baselineRef": "gsb/20261122k/32060/915a76a59134/baseline",
+      "artifactRef": "gsb/20261122k/32060/915a76a59134/artifact",
+      "initialUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/3af2c4bf1ef3fa617bcd908a396207d0cdc95dea",
+      "productUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/af98fe672ed61226cc01033ecb653ba84f85ca9b",
+      "migratedFrom": "local-batch-90bb2174-905f-4034-a438-4341691eb7d2"
+    },
+    {
+      "uid": "32061",
+      "taskId": "caaa8abd-3be7-47d7-8024-4edd48c98634",
+      "batchId": "90bb2174-905f-4034-a438-4341691eb7d2",
+      "recordId": null,
+      "sessionId": "d1927dab-f704-4deb-acc4-82a128f66da4",
+      "promptHash": "b166247d7ff6bf40cb95898ea5e03e7a719c8108cb81d3988ac076a57f3f83f5",
+      "baselineSha": "ffde55f0ae56e83270c27ee12d328eccc6a6a72e",
+      "artifactSha": "53b347253b706314c1b46cd07f6da61dab42e21f",
+      "baselineRef": "gsb/20261122k/32061/caaa8abd3be7/baseline",
+      "artifactRef": "gsb/20261122k/32061/caaa8abd3be7/artifact",
+      "initialUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/ffde55f0ae56e83270c27ee12d328eccc6a6a72e",
+      "productUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/53b347253b706314c1b46cd07f6da61dab42e21f",
+      "migratedFrom": "local-batch-90bb2174-905f-4034-a438-4341691eb7d2"
+    },
+    {
       "uid": "32064",
       "taskId": "a7da2a16-4a95-4c1e-96f2-0a5d2e4a3555",
       "batchId": "90bb2174-905f-4034-a438-4341691eb7d2",
@@ -6519,6 +6654,21 @@
       "migratedFrom": "local-batch-90bb2174-905f-4034-a438-4341691eb7d2"
     },
     {
+      "uid": "32067",
+      "taskId": "2fb33fed-823c-4baf-b4be-d465757faf4f",
+      "batchId": "90bb2174-905f-4034-a438-4341691eb7d2",
+      "recordId": null,
+      "sessionId": "b3416296-92fb-4224-b55a-31aa6e56240b",
+      "promptHash": "1bbbf900d111bbc22c63a690e3c3d4d2de147b852dec2703013ad7fc60554c49",
+      "baselineSha": "99309ac71acdf2868937b29a06b6ce08d98f24a2",
+      "artifactSha": "abe71866574d0b07b650695d79bfe7e3e0fc25bd",
+      "baselineRef": "gsb/20261122k/32067/2fb33fed823c/baseline",
+      "artifactRef": "gsb/20261122k/32067/2fb33fed823c/artifact",
+      "initialUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/99309ac71acdf2868937b29a06b6ce08d98f24a2",
+      "productUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/abe71866574d0b07b650695d79bfe7e3e0fc25bd",
+      "migratedFrom": "local-batch-90bb2174-905f-4034-a438-4341691eb7d2"
+    },
+    {
       "uid": "32068",
       "taskId": "cf7ee907-32a5-4ffb-883b-dcf5a9175ad4",
       "batchId": "90bb2174-905f-4034-a438-4341691eb7d2",
@@ -6534,6 +6684,21 @@
       "migratedFrom": "local-batch-90bb2174-905f-4034-a438-4341691eb7d2"
     },
     {
+      "uid": "32069",
+      "taskId": "5713a197-f7ab-4ad3-9721-421647bae41d",
+      "batchId": "90bb2174-905f-4034-a438-4341691eb7d2",
+      "recordId": null,
+      "sessionId": "dac40200-7b75-4fbc-be49-29d7e9cfcb76",
+      "promptHash": "cb90af77115d28776bc9ba593ef1454e434048aabbaf6f1332ed54414eb5124e",
+      "baselineSha": "3e09d5778bd5d1ede4c940dc76684bd7cfeab1d9",
+      "artifactSha": "3a99b01de2d659ed365e66c8975ddc3d11e08e8b",
+      "baselineRef": "gsb/20261122k/32069/5713a197f7ab/baseline",
+      "artifactRef": "gsb/20261122k/32069/5713a197f7ab/artifact",
+      "initialUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/3e09d5778bd5d1ede4c940dc76684bd7cfeab1d9",
+      "productUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/3a99b01de2d659ed365e66c8975ddc3d11e08e8b",
+      "migratedFrom": "local-batch-90bb2174-905f-4034-a438-4341691eb7d2"
+    },
+    {
       "uid": "32072",
       "taskId": "1761e8d2-0a8b-48af-aa2d-c52c124c05d1",
       "batchId": "90bb2174-905f-4034-a438-4341691eb7d2",
@@ -6546,6 +6711,21 @@
       "artifactRef": "gsb/20261122f/32072/1761e8d20a8b/artifact",
       "initialUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/c5281a4cf605b07bfc5195c89d3558e4bbc9b4a7",
       "productUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/7f1fa04c000e2d6164b432f73f1f4fb2a4fdc36c",
+      "migratedFrom": "local-batch-90bb2174-905f-4034-a438-4341691eb7d2"
+    },
+    {
+      "uid": "32073",
+      "taskId": "3c8b3653-92ca-4cc5-855c-c56f1d219b21",
+      "batchId": "90bb2174-905f-4034-a438-4341691eb7d2",
+      "recordId": null,
+      "sessionId": "c9975ec0-3c6e-41a7-a2ae-9ef3d797927c",
+      "promptHash": "468e2328f87fe8aea4f3655c503fa2011aa146e0f8fe8506784684f34e885c04",
+      "baselineSha": "a31f3975bfd4ce0470da4beedc213225b99fc096",
+      "artifactSha": "1b0622e2527129d4c13661366069334c93ede678",
+      "baselineRef": "gsb/20261122k/32073/3c8b365392ca/baseline",
+      "artifactRef": "gsb/20261122k/32073/3c8b365392ca/artifact",
+      "initialUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/a31f3975bfd4ce0470da4beedc213225b99fc096",
+      "productUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/1b0622e2527129d4c13661366069334c93ede678",
       "migratedFrom": "local-batch-90bb2174-905f-4034-a438-4341691eb7d2"
     },
     {
@@ -6606,6 +6786,21 @@
       "artifactRef": "gsb/20261122i/32083/93d2c0b07a12/artifact",
       "initialUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/af673671db6b61aa8578aa41232d843cd2fb8d57",
       "productUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/ceeac9d4e9fd87b95c583f1f186cd0f0ed32094b",
+      "migratedFrom": "local-batch-90bb2174-905f-4034-a438-4341691eb7d2"
+    },
+    {
+      "uid": "32084",
+      "taskId": "ffa0b3af-848a-4911-ae07-1ea37cc00f8c",
+      "batchId": "90bb2174-905f-4034-a438-4341691eb7d2",
+      "recordId": null,
+      "sessionId": "e42020e2-17a6-4817-b7cd-90d855a5091e",
+      "promptHash": "de2baec1a19e20f5bf2590c5002f2f1fea5eebe00bc383cd1c23a5a0b1c21b43",
+      "baselineSha": "ee00b169810648916078f1e8c3f1aaa48cf36efb",
+      "artifactSha": "fcf6946cf5c4a675beec632e9c1a780d4e3c5b00",
+      "baselineRef": "gsb/20261122k/32084/ffa0b3af848a/baseline",
+      "artifactRef": "gsb/20261122k/32084/ffa0b3af848a/artifact",
+      "initialUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/ee00b169810648916078f1e8c3f1aaa48cf36efb",
+      "productUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/fcf6946cf5c4a675beec632e9c1a780d4e3c5b00",
       "migratedFrom": "local-batch-90bb2174-905f-4034-a438-4341691eb7d2"
     },
     {
@@ -6714,6 +6909,21 @@
       "migratedFrom": "local-batch-90bb2174-905f-4034-a438-4341691eb7d2"
     },
     {
+      "uid": "32093",
+      "taskId": "db15685a-ad49-4fa8-902d-651e26dc341e",
+      "batchId": "90bb2174-905f-4034-a438-4341691eb7d2",
+      "recordId": null,
+      "sessionId": "03c045dd-18b5-4af3-a9c0-dbef10802b6b",
+      "promptHash": "183cdfcbbd273c394475fb5b8d8438390f240c221f85b70087913f220a61d77c",
+      "baselineSha": "a6ce051e8bcea94fe7388e73a4a7d2801693066e",
+      "artifactSha": "424b9e9e65c15a60fc647505ffef09f19b29f84a",
+      "baselineRef": "gsb/20261122k/32093/db15685aad49/baseline",
+      "artifactRef": "gsb/20261122k/32093/db15685aad49/artifact",
+      "initialUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/a6ce051e8bcea94fe7388e73a4a7d2801693066e",
+      "productUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/424b9e9e65c15a60fc647505ffef09f19b29f84a",
+      "migratedFrom": "local-batch-90bb2174-905f-4034-a438-4341691eb7d2"
+    },
+    {
       "uid": "32094",
       "taskId": "22d2ebca-07f5-416c-b2c6-cf88aaa20735",
       "batchId": "90bb2174-905f-4034-a438-4341691eb7d2",
@@ -6756,6 +6966,36 @@
       "artifactRef": "gsb/20261122i/32096/ae883d25fef3/artifact",
       "initialUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/10117682152e206818f1585a92105dd3f7947581",
       "productUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/f05569fea562c2fb052bce62855a68932e496a60",
+      "migratedFrom": "local-batch-90bb2174-905f-4034-a438-4341691eb7d2"
+    },
+    {
+      "uid": "32098",
+      "taskId": "ce55041e-1ad3-4ebc-a450-e9858b1a4861",
+      "batchId": "90bb2174-905f-4034-a438-4341691eb7d2",
+      "recordId": null,
+      "sessionId": "e2211b15-9189-45a5-a020-946b3b0656a8",
+      "promptHash": "23d0a4ba5716f99b570d75b516b335db656c8a88374ecd5fa394af0cd140ee0f",
+      "baselineSha": "d8927cc7d7dfeff43e6bf5301171191c58f7cc8e",
+      "artifactSha": "b38511998a7bea60ff6768df3e238443f7825bc7",
+      "baselineRef": "gsb/20261122k/32098/ce55041e1ad3/baseline",
+      "artifactRef": "gsb/20261122k/32098/ce55041e1ad3/artifact",
+      "initialUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/d8927cc7d7dfeff43e6bf5301171191c58f7cc8e",
+      "productUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/b38511998a7bea60ff6768df3e238443f7825bc7",
+      "migratedFrom": "local-batch-90bb2174-905f-4034-a438-4341691eb7d2"
+    },
+    {
+      "uid": "32099",
+      "taskId": "bc5ce87f-8b60-4135-8952-5ab5fb3b94d8",
+      "batchId": "90bb2174-905f-4034-a438-4341691eb7d2",
+      "recordId": null,
+      "sessionId": "8be617e9-bbe1-4d8a-8fef-7041fa2b5590",
+      "promptHash": "29a9023ccb39183744450d58cf4f98da2d774ec68f39441d0fae7c9dd5bbd92c",
+      "baselineSha": "9eb45929cfecf1c7b5341ffc40febb2ab89e63e1",
+      "artifactSha": "3626cd8560059663641de24d62f9326321cb2f91",
+      "baselineRef": "gsb/20261122k/32099/bc5ce87f8b60/baseline",
+      "artifactRef": "gsb/20261122k/32099/bc5ce87f8b60/artifact",
+      "initialUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/9eb45929cfecf1c7b5341ffc40febb2ab89e63e1",
+      "productUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/3626cd8560059663641de24d62f9326321cb2f91",
       "migratedFrom": "local-batch-90bb2174-905f-4034-a438-4341691eb7d2"
     },
     {
@@ -6939,6 +7179,66 @@
       "migratedFrom": "local-batch-90bb2174-905f-4034-a438-4341691eb7d2"
     },
     {
+      "uid": "32124",
+      "taskId": "940d4a28-df54-4569-86e0-0224c73b809e",
+      "batchId": "90bb2174-905f-4034-a438-4341691eb7d2",
+      "recordId": null,
+      "sessionId": "858ca7c5-b17f-440f-b714-75fe9e3198b1",
+      "promptHash": "45d6e2d9d441966949ff69bd9410e1aab4ac5bfbced083fef24956a069186a94",
+      "baselineSha": "a785af52ac89a46f4590d2316b2132b06aa92d8a",
+      "artifactSha": "af9dbadf86a36941402f3c99bfe57d4e432a31cd",
+      "baselineRef": "gsb/20261122k/32124/940d4a28df54/baseline",
+      "artifactRef": "gsb/20261122k/32124/940d4a28df54/artifact",
+      "initialUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/a785af52ac89a46f4590d2316b2132b06aa92d8a",
+      "productUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/af9dbadf86a36941402f3c99bfe57d4e432a31cd",
+      "migratedFrom": "local-batch-90bb2174-905f-4034-a438-4341691eb7d2"
+    },
+    {
+      "uid": "32125",
+      "taskId": "b3c5d69b-1905-4026-a485-e36017e5213b",
+      "batchId": "90bb2174-905f-4034-a438-4341691eb7d2",
+      "recordId": null,
+      "sessionId": "a0d05783-ba27-43f7-b762-5f4a59143592",
+      "promptHash": "5c7adead7c140e3a54685964ebc0c13ce0cc8721e3b8dda8a4f0891af318ec67",
+      "baselineSha": "8a831175025fde55d02e1134dc73f7708f3bcdb8",
+      "artifactSha": "067185c99d8c3d9ea3225ebf21df247b58e270bc",
+      "baselineRef": "gsb/20261122k/32125/b3c5d69b1905/baseline",
+      "artifactRef": "gsb/20261122k/32125/b3c5d69b1905/artifact",
+      "initialUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/8a831175025fde55d02e1134dc73f7708f3bcdb8",
+      "productUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/067185c99d8c3d9ea3225ebf21df247b58e270bc",
+      "migratedFrom": "local-batch-90bb2174-905f-4034-a438-4341691eb7d2"
+    },
+    {
+      "uid": "32126",
+      "taskId": "ea4094c1-c4ed-4cff-b34f-82d1e38fe666",
+      "batchId": "90bb2174-905f-4034-a438-4341691eb7d2",
+      "recordId": null,
+      "sessionId": "01466ce3-c354-4e80-83b4-cae5d2789438",
+      "promptHash": "f3db9e038ad73ca52e55eef42823b4b2b1b5061d931182f8c8ce67f1123b9e4d",
+      "baselineSha": "53e310e7107db275ed6943d7ca700411fb48741e",
+      "artifactSha": "6e6ad69d960131acc575dd54d5cda86ded32fc9e",
+      "baselineRef": "gsb/20261122k/32126/ea4094c1c4ed/baseline",
+      "artifactRef": "gsb/20261122k/32126/ea4094c1c4ed/artifact",
+      "initialUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/53e310e7107db275ed6943d7ca700411fb48741e",
+      "productUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/6e6ad69d960131acc575dd54d5cda86ded32fc9e",
+      "migratedFrom": "local-batch-90bb2174-905f-4034-a438-4341691eb7d2"
+    },
+    {
+      "uid": "32128",
+      "taskId": "d275e41e-9e59-4290-b2a5-4156cdfaff62",
+      "batchId": "90bb2174-905f-4034-a438-4341691eb7d2",
+      "recordId": null,
+      "sessionId": "0fb5e1c2-c8c0-4e8d-9fe9-89350ff9846f",
+      "promptHash": "29d606ccbd5e01da7f985c9dfac66232d6f4de49896bea460606eb7065b767e7",
+      "baselineSha": "76f8894ef24fb0711fa2f02861c058315faaca6b",
+      "artifactSha": "93267a9be0bb0166275dc2569aa4b7839cf6d72e",
+      "baselineRef": "gsb/20261122k/32128/d275e41e9e59/baseline",
+      "artifactRef": "gsb/20261122k/32128/d275e41e9e59/artifact",
+      "initialUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/76f8894ef24fb0711fa2f02861c058315faaca6b",
+      "productUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/93267a9be0bb0166275dc2569aa4b7839cf6d72e",
+      "migratedFrom": "local-batch-90bb2174-905f-4034-a438-4341691eb7d2"
+    },
+    {
       "uid": "32132",
       "taskId": "94bfac0f-5552-49f5-b596-3456b1ef1102",
       "batchId": "90bb2174-905f-4034-a438-4341691eb7d2",
@@ -6951,6 +7251,21 @@
       "artifactRef": "gsb/20261122i/32132/94bfac0f5552/artifact",
       "initialUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/4d5a443cbc13090a64752bb9f1738229dabbf550",
       "productUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/39803bcbd28813768f65350537e0970851314385",
+      "migratedFrom": "local-batch-90bb2174-905f-4034-a438-4341691eb7d2"
+    },
+    {
+      "uid": "32134",
+      "taskId": "ad0f0b57-222a-4c05-9043-73a01a517716",
+      "batchId": "90bb2174-905f-4034-a438-4341691eb7d2",
+      "recordId": null,
+      "sessionId": "39b385fb-04df-45fd-959a-8f40bf450f39",
+      "promptHash": "c427838a329573d67c79443aa2b595c5848c6496311ac1f75c198655c7783aab",
+      "baselineSha": "7e3ca4bb05dcdfd245785df405f66b7b489b319c",
+      "artifactSha": "84afc9708a3036f7a6ea3307181766afabbbccb1",
+      "baselineRef": "gsb/20261122k/32134/ad0f0b57222a/baseline",
+      "artifactRef": "gsb/20261122k/32134/ad0f0b57222a/artifact",
+      "initialUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/7e3ca4bb05dcdfd245785df405f66b7b489b319c",
+      "productUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/84afc9708a3036f7a6ea3307181766afabbbccb1",
       "migratedFrom": "local-batch-90bb2174-905f-4034-a438-4341691eb7d2"
     },
     {
@@ -6999,6 +7314,21 @@
       "migratedFrom": "local-batch-90bb2174-905f-4034-a438-4341691eb7d2"
     },
     {
+      "uid": "32143",
+      "taskId": "10592cd5-3c89-42f4-a5c8-6864c24920fc",
+      "batchId": "90bb2174-905f-4034-a438-4341691eb7d2",
+      "recordId": null,
+      "sessionId": "88c6307c-809f-4ba2-a3e3-dc44e2302417",
+      "promptHash": "9bae9d6ebbeeb12686d443a19b929594479e34dc933b9a2e9c499ec8d220ab03",
+      "baselineSha": "29ac108c4e734246107df63b987822b6e0416b97",
+      "artifactSha": "ee7fa63db029204c116f9f1dfaed95bc3dfc0f65",
+      "baselineRef": "gsb/20261122k/32143/10592cd53c89/baseline",
+      "artifactRef": "gsb/20261122k/32143/10592cd53c89/artifact",
+      "initialUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/29ac108c4e734246107df63b987822b6e0416b97",
+      "productUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/ee7fa63db029204c116f9f1dfaed95bc3dfc0f65",
+      "migratedFrom": "local-batch-90bb2174-905f-4034-a438-4341691eb7d2"
+    },
+    {
       "uid": "32144",
       "taskId": "8947bbe4-50b5-459a-8639-aeb6256b7b51",
       "batchId": "90bb2174-905f-4034-a438-4341691eb7d2",
@@ -7029,6 +7359,21 @@
       "migratedFrom": "local-batch-90bb2174-905f-4034-a438-4341691eb7d2"
     },
     {
+      "uid": "32147",
+      "taskId": "83a02330-0fb1-494a-9e7d-49909765e0d2",
+      "batchId": "90bb2174-905f-4034-a438-4341691eb7d2",
+      "recordId": null,
+      "sessionId": "f7b6b530-7853-4738-8e24-4c0329040eb8",
+      "promptHash": "65aa891cc355a42e2d9a44267b81debecd5a5213b61f64a6423608420557947c",
+      "baselineSha": "88c7cb6706a22fc77d6b0cd032fe43ce41488ac4",
+      "artifactSha": "7174f53b59609eab50ac0a4bc6426d2f380bd56c",
+      "baselineRef": "gsb/20261122k/32147/83a023300fb1/baseline",
+      "artifactRef": "gsb/20261122k/32147/83a023300fb1/artifact",
+      "initialUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/88c7cb6706a22fc77d6b0cd032fe43ce41488ac4",
+      "productUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/7174f53b59609eab50ac0a4bc6426d2f380bd56c",
+      "migratedFrom": "local-batch-90bb2174-905f-4034-a438-4341691eb7d2"
+    },
+    {
       "uid": "32148",
       "taskId": "bbc33e92-f936-47f8-bfd8-96ebfa0434f8",
       "batchId": "90bb2174-905f-4034-a438-4341691eb7d2",
@@ -7041,6 +7386,21 @@
       "artifactRef": "gsb/20261122i/32148/bbc33e92f936/artifact",
       "initialUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/938a3e843c2293a0294e9e922e3f7d4ef7329533",
       "productUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/f1e09945283500ed0eec2412ce50b69a906c60c0",
+      "migratedFrom": "local-batch-90bb2174-905f-4034-a438-4341691eb7d2"
+    },
+    {
+      "uid": "32149",
+      "taskId": "8758277f-68ae-4630-a3f9-70f782517fbc",
+      "batchId": "90bb2174-905f-4034-a438-4341691eb7d2",
+      "recordId": null,
+      "sessionId": "e3ff7b02-ef4d-4906-8867-21384596e880",
+      "promptHash": "445749d8277aa23f15f8fa5a823a785fc43c777c0cd12972f71abc86d0c7ebce",
+      "baselineSha": "e3a1a68b9be93a285aa7ed7059f85671e60717ad",
+      "artifactSha": "2a643ae1340440f4c40872f9cd5aa9e4f9a3254e",
+      "baselineRef": "gsb/20261122k/32149/8758277f68ae/baseline",
+      "artifactRef": "gsb/20261122k/32149/8758277f68ae/artifact",
+      "initialUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/e3a1a68b9be93a285aa7ed7059f85671e60717ad",
+      "productUrl": "https://github.com/windycrotch/gsb-evaluation-snapshots/commit/2a643ae1340440f4c40872f9cd5aa9e4f9a3254e",
       "migratedFrom": "local-batch-90bb2174-905f-4034-a438-4341691eb7d2"
     },
     {
@@ -7059,13 +7419,13 @@
       "migratedFrom": "local-batch-90bb2174-905f-4034-a438-4341691eb7d2"
     }
   ],
-  "updatedAt": "2026-11-23T01:48:58.217Z",
+  "updatedAt": "2026-11-23T06:33:50.592Z",
   "addendum": {
     "reason": "git-address-404",
     "pushedCount": 35
   },
   "completedBatch": {
-    "batchPrefix": "20261122i",
-    "added": 25
+    "batchPrefix": "20261122k",
+    "added": 24
   }
 }
