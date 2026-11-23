@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { Matrix, TextureSource } from "../src/backend.js";
 import { Draw } from "../src/draw.js";
 import { blur, filter } from "../src/filters.js";
+import { Layer } from "../src/layer.js";
 import { mesh } from "../src/mesh.js";
 import { Shader } from "../src/shader.js";
 import { ring, roundRect } from "../src/shapes.js";
@@ -12,7 +13,7 @@ import { WebGL2Backend } from "../src/webgl2.js";
  * A recording stand-in for WebGL2: every method is logged, `create*` returns a fresh tagged object and
  * `delete*` marks it deleted, so tests can check uploads, batching and that nothing leaks.
  */
-function fakeGL() {
+function fakeGL(options: { compileOk?: (src: string) => boolean } = {}) {
   const calls: { name: string; args: unknown[] }[] = [];
   const created: { kind: string; deleted: boolean }[] = [];
   const listeners = new Map<string, (e: Event) => void>();
@@ -21,16 +22,21 @@ function fakeGL() {
     removeEventListener: (type: string) => listeners.delete(type),
   };
   const shaderSources: string[] = [];
+  const compiled = new Map<unknown, string>();
   const target: Record<string | symbol, unknown> = {
     canvas,
     drawingBufferWidth: 100,
     drawingBufferHeight: 50,
-    getShaderParameter: () => true,
+    getShaderParameter: (s: unknown) => (options.compileOk ? options.compileOk(compiled.get(s) ?? "") : true),
+    getShaderInfoLog: () => "ERROR: 0:3: 'nope' : no matching overloaded function found",
     getProgramParameter: () => true,
     checkFramebufferStatus: () => "FRAMEBUFFER_COMPLETE",
     getParameter: (p: unknown) => (p === "MAX_TEXTURE_SIZE" ? 16384 : undefined),
     getUniformLocation: () => ({}),
-    shaderSource: (_s: unknown, src: string) => shaderSources.push(src),
+    shaderSource: (s: unknown, src: string) => {
+      shaderSources.push(src);
+      compiled.set(s, src);
+    },
   };
   const gl = new Proxy(target, {
     get(t, key) {
@@ -512,6 +518,259 @@ describe("WebGL2Backend", () => {
       draw.dispose();
       // Objects from before the loss died with that context; everything made since is freed.
       expect(created.slice(restoredFrom).filter((o) => !o.deleted)).toEqual([]);
+    });
+  });
+
+  describe("context loss and restore", () => {
+    /** A frame drawn with the full spread of entry points, so a lost-context guard is exercised on each. */
+    const busy = (draw: Draw, layer: Layer, shader: Shader) => {
+      draw.rect(0, 0, 4, 4, "#fff");
+      draw.sprite(image(), 10, 10);
+      draw.sprites(image(), new Float32Array([1, 2, 3, 4]), 2);
+      draw.sprites(image(), new Float32Array([1, 2, 3, 4]), 2, {}, { scale: new Float32Array([1, 2]) });
+      roundRect(draw, 0, 0, 20, 20, 4, "#e23");
+      ring(draw, 10, 10, 5, 1, "#ffd36b");
+      mesh(draw, { image: image(), x: 0, y: 0, w: 16, h: 16 }, [0, 0, 10, 0, 0, 10], [0, 0, 10, 0, 0, 10]);
+      draw.replay(layer);
+      draw.clip(0, 0, 10, 10, () => draw.rect(0, 0, 1, 1, "#f00"));
+      draw.into(draw.createTarget(8, 8), () => draw.rect(0, 0, 1, 1, "#0f0"));
+      draw.withShader(shader, () => draw.sprite(image(), 5, 5));
+    };
+
+    it("writes no GPU state, and submits no draw call, from any entry point while lost", () => {
+      const { gl, calls, fire } = fakeGL();
+      const draw = new Draw(new WebGL2Backend(gl), false);
+      const layer = draw.record((d) => d.sprite(image(), 1, 1));
+      const shader = draw.createShader("vec4 effect(vec4 color, vec2 uv) { return source(uv) * color; }");
+      draw.begin("#000", 100, 50, 1);
+      busy(draw, layer, shader);
+      draw.end();
+      fire("webglcontextlost");
+      expect(draw.contextLost).toBe(true);
+      const from = calls.length;
+      // Every entry point in turn: none may reach GL.
+      busy(draw, layer, shader);
+      draw.begin("#000", 100, 50, 1);
+      draw.blend("add");
+      draw.invalidate(image());
+      draw.end();
+      const made = calls.slice(from).filter((c) => !["isContextLost"].includes(c.name));
+      // Nothing that writes or submits: no draw, no buffer upload, no program/state change, no texture work.
+      const writes = made.filter((c) =>
+        /^(drawArrays|drawArraysInstanced|drawElements|bufferData|bufferSubData|texImage2D|texSubImage2D|useProgram|bindTexture|bindFramebuffer|bindVertexArray|uniform|clear|scissor|viewport|enable|disable|activeTexture|bindSampler|create)/.test(
+          c.name,
+        ),
+      );
+      expect(writes).toEqual([]);
+    });
+
+    it("starts the first batch after restore clean, with no leftover counts or unit bindings", () => {
+      // The first frame drawn after a restore must put the same instance data in the buffer as a brand-new renderer
+      // drawing that same frame, with its units bound from 0 again rather than from where the old batch left off.
+      const firstFrame = (draw: Draw) => {
+        draw.begin("#000", 100, 50, 1);
+        draw.rect(3, 4, 5, 6, "#fff");
+        draw.sprite(image(), 10, 10);
+        draw.end();
+      };
+      const capture = () => {
+        const { gl, calls } = fakeGL();
+        const draw = new Draw(new WebGL2Backend(gl), false);
+        // Count only the frame's GPU calls, not the constructor's setup (its white texture upload), which the
+        // restored renderer does during the restore instead.
+        calls.length = 0;
+        firstFrame(draw);
+        const sub = calls.findLast((c) => c.name === "bufferSubData") as { args: unknown[] } | undefined;
+        const bound = calls.filter((c) => c.name === "bindTexture").map((c) => c.args[0]);
+        return { instance: sub ? Array.from((sub.args[2] as Float32Array).subarray(0, 28)) : [], bound };
+      };
+      const fresh = capture();
+      // A renderer that, mid-frame, had queued instances and filled texture units when the context was lost:
+      // none of that queued batch may survive into the restored context or the first frame after it.
+      const { gl, calls, fire } = fakeGL();
+      const draw = new Draw(new WebGL2Backend(gl), false);
+      draw.begin("#000", 100, 50, 1);
+      for (let i = 0; i < 4; i++) draw.sprite(image(), i, i, { rotation: 0.5 });
+      // Lost with the batch still pending, before end() flushed it.
+      fire("webglcontextlost");
+      fire("webglcontextrestored");
+      calls.length = 0;
+      firstFrame(draw);
+      const sub = calls.findLast((c) => c.name === "bufferSubData") as { args: unknown[] } | undefined;
+      const restored = {
+        instance: sub ? Array.from((sub.args[2] as Float32Array).subarray(0, 28)) : [],
+        bound: calls.filter((c) => c.name === "bindTexture").map((c) => c.args[0]),
+      };
+      expect(restored.instance).toEqual(fresh.instance);
+      // Units are rebound starting from 0, exactly as a fresh renderer binds them.
+      expect(restored.bound).toEqual(fresh.bound);
+    });
+
+    it("drops a pending shape batch so it never flushes into the restored context", () => {
+      // Shapes queued but not flushed when the context is lost must not reach the rebuilt shape program: the
+      // first frame after restore should submit exactly what a fresh renderer drawing it submits.
+      const firstFrame = (draw: Draw) => {
+        draw.begin("#000", 100, 50, 1);
+        draw.rect(0, 0, 4, 4, "#fff");
+        draw.end();
+      };
+      const captureShapeDraw = () => {
+        const { gl, calls } = fakeGL();
+        const draw = new Draw(new WebGL2Backend(gl), false);
+        calls.length = 0;
+        firstFrame(draw);
+        return {
+          elements: calls.filter((c) => c.name === "drawElements").length,
+          instances: calls.filter((c) => c.name === "drawArraysInstanced").length,
+        };
+      };
+      const fresh = captureShapeDraw();
+
+      const { gl, calls, fire } = fakeGL();
+      const draw = new Draw(new WebGL2Backend(gl), false);
+      draw.begin("#000", 100, 50, 1);
+      // A rectangle of shapes left pending (not flushed) when the context dies mid-frame.
+      roundRect(draw, 0, 0, 20, 20, 4, "#e23");
+      fire("webglcontextlost");
+      fire("webglcontextrestored");
+      calls.length = 0;
+      firstFrame(draw);
+      expect({
+        elements: calls.filter((c) => c.name === "drawElements").length,
+        instances: calls.filter((c) => c.name === "drawArraysInstanced").length,
+      }).toEqual(fresh);
+    });
+
+    it("re-asks the host for borrowed textures after restore instead of reusing dead WebGLTextures", () => {
+      // A shared-style backend: borrow() is the host's answer, asked when a source is first used.
+      const { gl, fire } = fakeGL();
+      let borrowed = 0;
+      class Borrowing extends WebGL2Backend {
+        protected override borrow() {
+          borrowed++;
+          return {
+            texture: { kind: "hostTexture", id: borrowed } as unknown as WebGLTexture,
+            width: 16,
+            height: 16,
+            flipY: false,
+          };
+        }
+      }
+      const be = new Borrowing(gl);
+      const img = image();
+      be.begin(0x000000ff, 100, 50, 1);
+      be.quad(M, img, 0, 0, 16, 16, 0xffffffff, 0, false);
+      be.end();
+      // A second frame reuses the cached host texture: the host isn't asked again.
+      be.begin(0x000000ff, 100, 50, 1);
+      be.quad(M, img, 0, 0, 16, 16, 0xffffffff, 0, false);
+      be.end();
+      expect(borrowed).toBe(1);
+      fire("webglcontextlost");
+      fire("webglcontextrestored");
+      be.begin(0x000000ff, 100, 50, 1);
+      be.quad(M, img, 0, 0, 16, 16, 0xffffffff, 0, false);
+      be.end();
+      // The texture from before the loss was discarded; the host was asked again for the same source.
+      expect(borrowed).toBe(2);
+    });
+
+    it("doesn't keep a texture lent during loss: the source uploads afresh after restore", () => {
+      const { gl, calls, fire } = fakeGL();
+      const be = new WebGL2Backend(gl);
+      const key = image();
+      be.begin(0x000000ff, 100, 50, 1);
+      be.end();
+      fire("webglcontextlost");
+      // A lend while lost hands over a WebGLTexture from the dead context; it must never be sampled after restore.
+      be.lend(key, { kind: "lent" } as unknown as WebGLTexture, 16, 16);
+      fire("webglcontextrestored");
+      const from = calls.length;
+      be.begin(0x000000ff, 100, 50, 1);
+      be.quad(M, key, 0, 0, 16, 16, 0xffffffff, 0, false);
+      be.end();
+      // The dead texture is gone, so this source uploads its pixels rather than sampling it.
+      expect(calls.slice(from).some((c) => c.name === "texImage2D" && c.args[5] === key)).toBe(true);
+    });
+
+    it("brings a render target back blank and recreates its framebuffer when drawn into again", () => {
+      const { gl, fire, count } = fakeGL();
+      const draw = new Draw(new WebGL2Backend(gl), false);
+      draw.begin("#000", 100, 50, 1);
+      const t = draw.createTarget(8, 8);
+      draw.into(t, () => draw.rect(0, 0, 4, 4, "#fff"));
+      draw.end();
+      fire("webglcontextlost");
+      fire("webglcontextrestored");
+      const before = count("createFramebuffer");
+      draw.begin("#000", 100, 50, 1);
+      // Drawing into it after the restore makes a fresh, blank framebuffer (a clear at creation) and draws fine.
+      draw.into(t, () => draw.rect(0, 0, 4, 4, "#f00"));
+      draw.end();
+      expect(count("createFramebuffer")).toBe(before + 1);
+      expect(count("drawArraysInstanced")).toBeGreaterThan(0);
+    });
+
+    it("refuses to dispose a target while drawing into it, even just after a restore", () => {
+      const { gl, fire } = fakeGL();
+      const draw = new Draw(new WebGL2Backend(gl), false);
+      draw.begin("#000", 100, 50, 1);
+      const t = draw.createTarget(8, 8);
+      draw.into(t, () => {});
+      fire("webglcontextlost");
+      fire("webglcontextrestored");
+      draw.begin("#000", 100, 50, 1);
+      expect(() => draw.into(t, () => draw.disposeTarget(t))).toThrow(/while drawing into it/);
+      draw.end();
+    });
+
+    it("dispose() while lost deletes nothing, since every object already died with the context", () => {
+      const { gl, created, fire } = fakeGL();
+      const be = new WebGL2Backend(gl);
+      be.begin(0x000000ff, 100, 50, 1);
+      be.quad(M, image(), 0, 0, 16, 16, 0xffffffff, 0, true);
+      be.end();
+      fire("webglcontextlost");
+      // Everything still alive at the loss is already gone with the context: dispose must not delete it again.
+      const aliveAtLoss = created.filter((o) => !o.deleted);
+      expect(aliveAtLoss.length).toBeGreaterThan(0);
+      be.dispose();
+      expect(aliveAtLoss.filter((o) => o.deleted)).toEqual([]);
+    });
+
+    it("dispose() twice is harmless and deletes each object once", () => {
+      const { gl, calls } = fakeGL();
+      const be = new WebGL2Backend(gl);
+      be.begin(0x000000ff, 100, 50, 1);
+      be.quad(M, image(), 0, 0, 16, 16, 0xffffffff, 0, false);
+      be.end();
+      be.dispose();
+      const deletes = calls.filter((c) => c.name.startsWith("delete")).length;
+      expect(deletes).toBeGreaterThan(0);
+      // A second dispose must reach no GL calls: the objects are already freed, and deleting a dead object again
+      // is an error on a real context.
+      const from = calls.length;
+      be.dispose();
+      expect(calls.slice(from).filter((c) => c.name.startsWith("delete"))).toEqual([]);
+    });
+
+    it("recompiles a custom shader on first use after restore, and reports a compile failure readably", () => {
+      // Compiles until a flag flips: the same source can then fail to compile after the restore.
+      let compile = true;
+      const { gl, fire } = fakeGL({ compileOk: () => compile });
+      const draw = new Draw(new WebGL2Backend(gl), false);
+      const shader = draw.createShader("vec4 effect(vec4 color, vec2 uv) { return source(uv) * color; }");
+      draw.begin("#000", 100, 50, 1);
+      draw.withShader(shader, () => draw.sprite(image(), 10, 10));
+      draw.end();
+      fire("webglcontextlost");
+      fire("webglcontextrestored");
+      compile = false;
+      draw.begin("#000", 100, 50, 1);
+      // First use after restore recompiles; a failure throws the readable error and leaves the renderer usable.
+      expect(() => draw.withShader(shader, () => draw.sprite(image(), 10, 10))).toThrow(/compile/);
+      draw.sprite(image(), 20, 20);
+      expect(() => draw.end()).not.toThrow();
     });
   });
 });

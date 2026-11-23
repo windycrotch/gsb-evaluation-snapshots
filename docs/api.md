@@ -238,4 +238,4 @@ console.log(gpu.ms); // e.g. 1.5, or undefined
 
 - spryte never owns your images. Textures are cached per image object and dropped by `invalidate(image)` or `dispose()`.
 - Text textures are owned by the text cache and evicted automatically.
-- After a WebGL context loss, drawing is skipped. On restore, GPU objects are recreated and images re-upload on first use. You don't need to do anything.
+- After a WebGL context loss, drawing is skipped. On restore, GPU objects are recreated and images (and borrowed host textures) are made again on first use, so the first frame after the loss draws from clean state. You don't need to do anything.

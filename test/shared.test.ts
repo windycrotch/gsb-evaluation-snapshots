@@ -184,6 +184,53 @@ describe("createSharedRenderer", () => {
     shared.draw.end();
   });
 
+  it("drops a batch queued before a between-frames loss, so the first frame after restore starts clean", () => {
+    const { gl, named, listeners, state } = hostGL();
+    const shared = createSharedRenderer(gl);
+    const fire = (name: string) => (listeners.get(name) as (e: object) => void)({ preventDefault: () => {} });
+    shared.draw.begin(null, 100, 50, 1);
+    // Queued but not flushed when the context is lost between frames.
+    shared.draw.rect(0, 0, 4, 4, "#fff");
+    fire("webglcontextlost");
+    state.lost = true;
+    expect(shared.draw.contextLost).toBe(true);
+    // The queued batch dies with the context: the first frame after restore submits only its own draws.
+    state.lost = false;
+    fire("webglcontextrestored");
+    shared.draw.begin(null, 100, 50, 1);
+    const from = named("drawArraysInstanced").length;
+    shared.draw.rect(0, 0, 2, 2, "#fff");
+    shared.draw.end();
+    expect(named("drawArraysInstanced").length - from).toBe(1);
+    expect(named("drawArraysInstanced").at(-1)?.args).toEqual(["TRIANGLE_STRIP", 0, 4, 1]);
+  });
+
+  it("re-asks the host's borrow callback after a restore instead of reusing dead host textures", () => {
+    const { gl, listeners, state } = hostGL();
+    let borrowed = 0;
+    const shared = createSharedRenderer(gl, {
+      borrow: () => {
+        borrowed++;
+        return { texture: { kind: "hostTexture", id: borrowed } as unknown as WebGLTexture, width: 16, height: 16, flipY: false };
+      },
+    });
+    const fire = (name: string) => (listeners.get(name) as (e: object) => void)({ preventDefault: () => {} });
+    // A plain Draw asks borrow at begin (a fresh frame forgets borrowed textures each time), so this exercises the
+    // shared backend's own restore path: after a loss, the cached answer must not survive.
+    shared.draw.begin(null, 100, 50, 1);
+    shared.draw.sprite(image, 10, 10);
+    shared.draw.end();
+    fire("webglcontextlost");
+    state.lost = true;
+    fire("webglcontextrestored");
+    state.lost = false;
+    const before = borrowed;
+    shared.draw.begin(null, 100, 50, 1);
+    shared.draw.sprite(image, 10, 10);
+    shared.draw.end();
+    expect(borrowed).toBeGreaterThan(before);
+  });
+
   it("is a plain Draw otherwise: quads batch and draw", () => {
     const { gl, named } = hostGL();
     const shared = createSharedRenderer(gl, { smooth: false });

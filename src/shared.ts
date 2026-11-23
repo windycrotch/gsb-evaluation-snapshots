@@ -70,7 +70,9 @@ class SharedBackend extends WebGL2Backend {
   // Passive listeners: the host owns the events (its preventDefault lets the browser restore) and its own
   // rebuild. spryte only notes them, since a loss and restore can both happen between two frames.
   private readonly noteLost = () => {
-    this.lost = true;
+    // The host owns preventDefault and its own rebuild; spryte just drops what the dead context held, so no
+    // queued batch or cached texture survives into the restored one. The rebuild itself waits for begin().
+    this.markLost();
   };
   private readonly noteRestored = () => {
     this.restored = true;
@@ -102,7 +104,7 @@ class SharedBackend extends WebGL2Backend {
   override begin(clear: number | null, width: number, height: number): void {
     const gl = this.gl;
     if (gl.isContextLost()) {
-      this.lost = true;
+      this.markLost();
       return;
     }
     if (this.lost || this.restored) {

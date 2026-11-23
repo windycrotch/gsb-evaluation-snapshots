@@ -384,32 +384,88 @@ export class WebGL2Backend implements Backend {
   private viewH = 1;
   /** True between webglcontextlost and webglcontextrestored: drawing is skipped. */
   protected lost = false;
+  /** `dispose()` runs once: a second call must not delete objects it already freed. */
+  private disposed = false;
   protected readonly onLost = (e: Event) => {
     // preventDefault tells the browser we will handle restoration.
     e.preventDefault();
-    this.lost = true;
-    this.armed = false;
+    this.markLost();
   };
   protected readonly onRestored = () => {
-    // Every GPU object died with the context. Sources are still in memory, so textures re-upload lazily.
-    // Render targets come back blank. Custom shaders recompile on next use.
-    const shader = this.shader;
+    // A full state switch: every GPU object died with the context, and the next batch must start clean.
+    // Sources are still in memory, so textures re-upload lazily; borrow is asked again on first use; render
+    // targets come back blank and are recreated when next drawn into; custom shaders recompile on first use.
+    this.forgetGpuState();
+    this.resetBatch();
+    this.setup();
+    this.lost = false;
+  };
+
+  /**
+   * Enter the lost state: nothing queued before the loss may reach the dead context or the restored one. GPU
+   * objects can't be deleted (they're already gone), so the caches holding them are dropped, not freed. Safe to
+   * call repeatedly: the shared backend re-checks at every `begin()`, and a further loss adds nothing to reset.
+   */
+  protected markLost(): void {
+    if (this.lost) return;
+    this.lost = true;
+    this.resetBatch();
+    this.forgetGpuState();
+  }
+
+  /** Drop every cache that points at GPU objects, which die with the context (or are about to be rebuilt). */
+  private forgetGpuState(): void {
+    this.textures.clear();
+    this.targets.clear();
     this.customs.clear();
     this.eachCustoms.clear();
     this.layers = new WeakMap();
-    this.textures.clear();
-    this.targets.clear();
     this.target = null;
+    // A shader active at the loss gets a fresh program on its next setShader(): drop the hook that would flush
+    // through this (dead or rebuilt) context, and forget it so the same Shader isn't mistaken for compiled.
+    if (this.shader) this.shader.onChange = undefined;
+    this.shader = null;
+  }
+
+  /**
+   * Start a batch from scratch: no queued instances, no texture units assigned, no fast-path memory of the last
+   * texture, no armed state or remembered batch transform, no pending shapes. Called on loss and on restore, so
+   * neither the restored context nor the first frame after it sees counts or unit bindings from before the loss.
+   */
+  protected resetBatch(): void {
+    this.count = 0;
+    // Nothing queued for the dead context counts, and begin() (skipped while lost) won't have reset it.
+    this.submitted = 0;
+    this.unitCount = 0;
+    this.lastUnit = 0;
+    this.lastSmooth = false;
     this.lastSrc = null;
     this.last = undefined;
-    this.count = 0;
-    this.unitCount = 0;
     this.sprites = false;
     this.armed = false;
-    this.setup();
-    this.lost = false;
-    if (shader) this.setShader(shader);
-  };
+    this.bver = -1;
+    const units = this.units;
+    const smooth = this.unitSmooth;
+    const info = this.unitInfo;
+    const src = this.unitSrc;
+    for (let i = 0; i < UNITS; i++) {
+      units[i] = null;
+      smooth[i] = false;
+      info[i] = undefined;
+      src[i] = null;
+    }
+    const bm = this.bm;
+    bm[0] = 1;
+    bm[1] = 0;
+    bm[2] = 0;
+    bm[3] = 1;
+    bm[4] = 0;
+    bm[5] = 0;
+    if (this.shapes) {
+      this.shapes.count = 0;
+      this.shapes.icount = 0;
+    }
+  }
   private readonly units: (WebGLTexture | null)[] = new Array(UNITS).fill(null);
   private readonly unitSmooth: boolean[] = new Array(UNITS).fill(false);
   private unitCount = 0;
@@ -596,6 +652,9 @@ export class WebGL2Backend implements Backend {
     f32[f + 8] = (sx + sw) * t.iw;
     f32[f + 9] = t.v0 + (sy + sh) * t.ih;
     f32[f + 10] = flash;
+    // a_2.w is read only by sprites (frame height), but write it anyway: the CPU instance buffer survives a
+    // context loss, and a slot reused after the restore must hold the same bytes a fresh renderer would write.
+    f32[f + 11] = 0;
     f32[f + 12] = unit;
     // Bytes in memory must read R, G, B, A; Uint32 is little-endian.
     this.u32[f + 13] = color === 0xffffffff ? color : bytes(color);
@@ -603,6 +662,7 @@ export class WebGL2Backend implements Backend {
   }
 
   sprite(ver: number, m: Matrix, fr: Frame, x: number, y: number, o: SpriteDrawOptions, color: number, smooth: boolean): void {
+    if (this.lost) return;
     const origin = o.origin;
     const ox = origin ? origin[0] : 0.5;
     const oy = origin ? origin[1] : 0.5;
@@ -1100,6 +1160,7 @@ export class WebGL2Backend implements Backend {
 
   end(): void {
     this.flush();
+    if (this.lost) return;
     this.gl.disable(this.gl.SCISSOR_TEST);
   }
 
@@ -1108,6 +1169,8 @@ export class WebGL2Backend implements Backend {
   }
 
   lend(key: TextureSource, tex: WebGLTexture, w: number, h: number): void {
+    // A lend during loss holds a texture from the dead context: it must be borrowed again after restore.
+    if (this.lost) return;
     const cached = this.textures.get(key);
     if (cached?.tex === tex && cached.iw === 1 / w && cached.ih === 1 / h) return;
     this.textures.set(key, { tex, iw: 1 / w, ih: 1 / h, v0: 0, borrowed: true });
@@ -1115,6 +1178,8 @@ export class WebGL2Backend implements Backend {
   }
 
   update(dst: TextureSource, x: number, y: number, from: HTMLCanvasElement | OffscreenCanvas, w: number, h: number): void {
+    // Nothing uploads while lost: the texture would be made on a dead context.
+    if (this.lost) return;
     // Not uploaded yet: its first use uploads the whole image, which already has this region.
     const cached = this.textures.get(dst);
     // A borrowed texture's contents are the host's to update.
@@ -1136,16 +1201,24 @@ export class WebGL2Backend implements Backend {
     const cached = this.textures.get(src);
     if (!cached) return;
     this.flush();
-    if (!cached.borrowed) this.gl.deleteTexture(cached.tex);
+    // While lost the texture is already gone: don't delete it again, just forget it so the next use re-uploads.
+    if (!this.lost && !cached.borrowed) this.gl.deleteTexture(cached.tex);
     this.textures.delete(src);
-    if (this.lastSrc === src) this.lastSrc = null;
+    if (this.lastSrc === src) {
+      this.lastSrc = null;
+      this.last = undefined;
+    }
   }
 
   /** Release every GPU object this backend created, so renderers can be created and destroyed repeatedly. */
   dispose(): void {
+    // Disposing twice must not delete objects already freed (or invalidated by a context loss).
+    if (this.disposed) return;
+    this.disposed = true;
     const gl = this.gl;
     gl.canvas.removeEventListener("webglcontextlost", this.onLost);
     gl.canvas.removeEventListener("webglcontextrestored", this.onRestored);
+    // While lost, every GPU object is already dead: deleting it again is at best a no-op, at worst an error.
     if (!this.lost) {
       for (const { tex, borrowed } of this.textures.values()) if (!borrowed) gl.deleteTexture(tex);
       gl.deleteTexture(this.white.tex);
@@ -1176,18 +1249,20 @@ export class WebGL2Backend implements Backend {
     this.targets.clear();
     this.customs.clear();
     this.eachCustoms.clear();
-    this.lastSrc = null;
-    this.last = undefined;
+    this.resetBatch();
+    this.target = null;
   }
 
   setShader(shader: Shader | null): void {
     if (shader === this.shader) return;
+    // Nothing compiles or binds while lost. A shader set now is not remembered either: its next use after the
+    // restore compiles it against the rebuilt context.
+    if (this.lost) return;
     this.flush();
     // Compile before changing any state: a shader that fails to compile throws and leaves the renderer as it was.
-    const next = this.lost ? null : shader ? this.custom(shader) : this.main;
+    const next = shader ? this.custom(shader) : this.main;
     if (this.shader) this.shader.onChange = undefined;
     this.shader = shader;
-    if (!next) return;
     this.active = next;
     this.gl.useProgram(next.program);
     // Uniform changes flush the batch drawn with the old values first.
@@ -1195,10 +1270,9 @@ export class WebGL2Backend implements Backend {
   }
 
   setTarget(target: RenderTarget | null, clear: number | null, width: number, height: number): void {
-    if (this.lost) {
-      this.target = target;
-      return;
-    }
+    // While lost, record nothing: there is no live framebuffer to bind, and remembering a target would pin it
+    // against disposeTarget() until the next restore clears the reference.
+    if (this.lost) return;
     this.flush();
     const gl = this.gl;
     if (target) {

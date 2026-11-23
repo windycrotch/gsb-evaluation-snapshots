@@ -1,5 +1,11 @@
 # spryte
 
+## 0.12.4
+
+### Patch Changes
+
+- WebGL2 context loss and restore are now a full state switch. While the context is lost, every drawing entry point (`quad`, `sprite`, `quads`, `copies`, `path`, `mesh`, `replay`, `setTarget`, `setClip`, `setShader`, `begin`, `end`, `lend`, `update`, `invalidate`) writes and submits nothing to the dead context. On restore the first batch starts clean: instance counts, texture units, the last-texture fast path, the armed flag and remembered batch transform, and any pending shapes are all reset, instead of carrying pre-loss counts and unit bindings into the new context. Borrowed textures (and `lend`ed ones) are asked of the host again rather than reusing a `WebGLTexture` that died with the context. Render targets come back blank, recreate their framebuffer on next use, and still can't be disposed while drawn into. Custom shaders recompile on first use after the restore, a compile failure throwing a readable error while leaving the renderer usable. `dispose()` while lost no longer deletes already-dead objects, and `dispose()` twice is a no-op the second time.
+
 ## 0.12.3
 
 ### Patch Changes
