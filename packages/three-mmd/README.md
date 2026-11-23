@@ -63,6 +63,22 @@ Animations passed to `add` are created and played by the manager. The mixer and
 actions remain internal, so callers only need to register objects and call
 `update()`.
 
+Each `update()` runs the registered assets in a fixed order: audio, then every
+MMD model (mixer, IK property tracks, physics), then the camera. Models are
+updated independently, so when several models loop on the same frame only the
+ones whose own skeletal track wrapped reset their physics. Passing
+`{ physics: false }` skips both the physics reset and the physics step for that
+frame.
+
+When `duration` is configured, the audio clock wraps at that global loop point.
+A single `delta` larger than one loop is accumulated in one step: the audio is
+stopped once at the cut and restarted once the wrapped time reaches
+`delayTime` again.
+
+`remove(mmd)` stops driving that model immediately and restores the IK switches
+that its animation owned to the values captured when it was added. `dispose()`
+releases every registered object, so a later `add()` starts from a clean state.
+
 ## Physics plugins
 
 Physics is provided by separate packages. Register one plugin before loading

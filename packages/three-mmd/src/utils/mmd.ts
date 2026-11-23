@@ -92,6 +92,8 @@ export class MMD {
   private readonly ikBoneIndicesByName = new Map<string, number>()
   private ikRotations: Quaternion[]
   private readonly normalizedIkBoneIndicesByName = new Map<string, number>()
+  /** Whether the mixer advanced just before this frame wrapped a skeletal clip. */
+  private skeletalAnimationLooped = false
 
   constructor(pmx: PmxObject, mesh: SkinnedMesh) {
     this.pmx = pmx
@@ -198,10 +200,41 @@ export class MMD {
    * animation pose. Call beforeUpdate() before advancing an external mixer.
    */
   public update(delta: number, options: MMDUpdateOptions = {}) {
-    this.beforePhysics(options)
-    if (options.physics !== false)
-      this.physics?.update(delta)
-    this.afterPhysics(options)
+    this.runPhysicsStages(delta, options)
+  }
+
+  /** Captures the IK switch state of every IK definition, to restore it later. */
+  public captureIKStates() {
+    const states = new Map<number, boolean>()
+    this.pmx.bones.forEach((bone, boneIndex) => {
+      if (bone.ik !== undefined)
+        states.set(boneIndex, this.ikSolver.isEnabled(boneIndex))
+    })
+    return states
+  }
+
+  /**
+   * Releases the IK switches owned by animation and restores them to the given
+   * snapshot (or to the value they had when animation took control).
+   */
+  public releaseAnimationControls(ikStates?: ReadonlyMap<number, boolean>) {
+    const controlled = new Set([
+      ...this.animationControlledIKBones.keys(),
+      ...this.currentAnimationIKStates.keys(),
+    ])
+
+    for (const boneIndex of controlled) {
+      const restored = ikStates?.get(boneIndex) ?? this.animationControlledIKBones.get(boneIndex)
+      if (restored === undefined)
+        continue
+
+      if (this.ikSolver.isEnabled(boneIndex) !== restored)
+        this.ikSolver.setEnabled(boneIndex, restored)
+    }
+
+    this.animationControlledIKBones.clear()
+    this.currentAnimationIKStates.clear()
+    this.currentAnimationIKWeights.clear()
   }
 
   public updateAnimation(mixer?: AnimationMixer) {
@@ -268,9 +301,60 @@ export class MMD {
     options: MMDUpdateOptions = {},
   ) {
     this.beforeUpdate()
-    mixer.update(delta)
+    const skeletalAnimationLooped = this.advanceMixer(delta, mixer)
     this.updateAnimation(mixer)
+    this.skeletalAnimationLooped = skeletalAnimationLooped
     this.update(delta, options)
+  }
+
+  /**
+   * Advances the mixer and reports whether any skeletal clip wrapped.
+   *
+   * A loop only counts when the wrapped action still drives bones: morph-only
+   * or property-only clips must not reset rigid bodies.
+   */
+  private advanceMixer(delta: number, mixer: AnimationMixer) {
+    let skeletalAnimationLooped = false
+    const onLoop = (event: { action: AnimationAction }) => {
+      if (skeletalAnimationLooped)
+        return
+
+      const clip = event.action.getClip()
+      if (clip.tracks.some(track => track.name.startsWith('.bones')))
+        skeletalAnimationLooped = true
+    }
+
+    mixer.addEventListener('loop', onLoop)
+    try {
+      mixer.update(delta)
+    }
+    finally {
+      mixer.removeEventListener('loop', onLoop)
+    }
+
+    return skeletalAnimationLooped
+  }
+
+  /**
+   * Runs the pose/physics stages for one frame.
+   *
+   * A skeletal loop observed by the preceding mixer advance resets rigid body
+   * state after the animation pose is applied and before physics integration.
+   * Physics is neither reset nor updated while `options.physics` is `false`;
+   * the loop signal is still consumed so it cannot leak into a later frame.
+   */
+  private runPhysicsStages(delta: number, options: MMDUpdateOptions) {
+    const skeletalAnimationLooped = this.skeletalAnimationLooped
+    this.skeletalAnimationLooped = false
+
+    const physicsEnabled = options.physics !== false
+
+    this.beforePhysics(options)
+    if (physicsEnabled && skeletalAnimationLooped)
+      this.physics?.reset?.()
+    if (physicsEnabled)
+      this.physics?.update(delta)
+    this.afterPhysics(options)
   }
 
   /** Projects the animated rotation of fixed-axis bones, before append transforms and IK build on it. */

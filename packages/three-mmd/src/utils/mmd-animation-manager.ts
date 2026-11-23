@@ -14,6 +14,15 @@ export interface MMDAnimationOptions {
   animation?: AnimationClip | AnimationClip[]
 }
 
+interface ModelEntry {
+  /**
+   * The IK switch state captured before the manager took control, so removing
+   * the model can hand every animation-controlled switch back untouched.
+   */
+  readonly ikStates: ReadonlyMap<number, boolean>
+  readonly mixer: AnimationMixer
+}
+
 const playAnimation = (
   mixer: AnimationMixer,
   animation?: AnimationClip | AnimationClip[],
@@ -33,7 +42,16 @@ const playAnimation = (
   })
 }
 
-/** Coordinates MMD, camera, and audio animation on a single render-loop update. */
+const wrapTime = (time: number, duration: number) => ((time % duration) + duration) % duration
+
+/**
+ * Coordinates MMD, camera, and audio animation on a single render-loop update.
+ *
+ * One `update()` owns the whole frame in a fixed order: audio, then each MMD
+ * model (mixer, skeletal loop detection, IK property tracks, physics reset and
+ * step), then the camera. Keep it as the only update call for registered
+ * assets.
+ */
 export class MMDAnimationManager {
   private audio?: Audio
   private audioDelay = 0
@@ -47,7 +65,7 @@ export class MMDAnimationManager {
   private cameraMixer?: AnimationMixer
   private cameraTarget?: Object3D
   private readonly duration?: number
-  private readonly models = new Map<MMD, AnimationMixer>()
+  private readonly models = new Map<MMD, ModelEntry>()
 
   public constructor(options: { duration?: number } = {}) {
     if (options.duration != null && (!Number.isFinite(options.duration) || options.duration <= 0))
@@ -71,7 +89,10 @@ export class MMDAnimationManager {
       const mixer = new AnimationMixer(object.mesh)
       const { animation } = mmdOptions
 
-      this.models.set(object, mixer)
+      this.models.set(object, {
+        ikStates: object.captureIKStates(),
+        mixer,
+      })
       playAnimation(mixer, animation, this.duration)
       return this
     }
@@ -113,7 +134,7 @@ export class MMDAnimationManager {
   }
 
   public dispose() {
-    for (const mmd of this.models.keys())
+    for (const mmd of [...this.models.keys()])
       this.remove(mmd)
 
     if (this.camera !== undefined)
@@ -125,13 +146,13 @@ export class MMDAnimationManager {
 
   public remove(object: Audio | Camera | MMD): this {
     if (object instanceof MMD) {
-      const mixer = this.models.get(object)
-      if (mixer == null)
+      const entry = this.models.get(object)
+      if (entry == null)
         return this
 
-      mixer.stopAllAction()
-      object.updateAnimation()
-      mixer.uncacheRoot(object.mesh)
+      entry.mixer.stopAllAction()
+      object.releaseAnimationControls(entry.ikStates)
+      entry.mixer.uncacheRoot(object.mesh)
       this.models.delete(object)
       return this
     }
@@ -174,8 +195,9 @@ export class MMDAnimationManager {
   public update(delta: number, options?: MMDUpdateOptions): this {
     this.updateAudio(delta)
 
-    for (const [mmd, mixer] of this.models)
-      this.updateMMD(mmd, mixer, delta, options)
+    // Removing a model during iteration must not skip the remaining ones.
+    for (const [mmd, entry] of [...this.models])
+      mmd.updateWithMixer(delta, entry.mixer, options)
 
     if (this.camera != null && this.cameraMixer != null && this.cameraTarget != null) {
       this.cameraMixer.update(delta)
@@ -189,67 +211,59 @@ export class MMDAnimationManager {
     return this
   }
 
+  /**
+   * Advances the global animation clock and keeps the audio in sync with it.
+   *
+   * The clock wraps at `duration`, so a single `delta` larger than one loop is
+   * accumulated in one step: the audio is stopped at most once for the loop
+   * cut and restarted at most once once the loop reaches `delayTime` again.
+   */
   private updateAudio(delta: number) {
-    if (this.audio == null)
+    const audio = this.audio
+    if (audio == null)
       return
 
-    this.audioElapsed += delta
+    let crossedLoopBoundary = false
 
     if (this.duration != null) {
-      while (this.audioElapsed >= this.duration) {
-        this.audioElapsed -= this.duration
-        if (this.audio.isPlaying)
-          this.audio.stop()
-        this.audioStarted = false
-        this.audioStartedByManager = false
-      }
+      const accumulated = this.audioElapsed + delta
+      crossedLoopBoundary = delta > 0 && accumulated >= this.duration
+      this.audioElapsed = wrapTime(accumulated, this.duration)
+    }
+    else {
+      this.audioElapsed += delta
+    }
+
+    if (crossedLoopBoundary) {
+      if (audio.isPlaying)
+        audio.stop()
+      this.audioStarted = false
+      this.audioStartedByManager = false
     }
 
     const audioEnd = this.audioDuration == null
       ? Number.POSITIVE_INFINITY
       : this.audioDelay + this.audioDuration
+    const inPlayWindow = this.audioElapsed >= this.audioDelay && this.audioElapsed <= audioEnd
 
-    if (!this.audioStarted && this.audioElapsed >= this.audioDelay && this.audioElapsed <= audioEnd) {
-      this.audioStarted = true
-      if (!this.audio.isPlaying) {
-        this.audio.play()
-        this.audioStartedByManager = true
+    if (inPlayWindow) {
+      if (!this.audioStarted) {
+        this.audioStarted = true
+        if (!audio.isPlaying) {
+          audio.play()
+          this.audioStartedByManager = true
+        }
       }
-    }
-  }
-
-  private updateMMD(
-    mmd: MMD,
-    mixer: AnimationMixer,
-    delta: number,
-    options?: MMDUpdateOptions,
-  ) {
-    let skeletalAnimationLooped = false
-    const onLoop = (event: { action: { getClip: () => AnimationClip } }) => {
-      if (!event.action.getClip().tracks.some(track => track.name.startsWith('.bones'))) {
-        return
-      }
-
-      skeletalAnimationLooped = true
+      return
     }
 
-    mmd.beforeUpdate()
-    mixer.addEventListener('loop', onLoop)
-    try {
-      mixer.update(delta)
+    // Leaving the play window (backwards scrub, or the buffer ended before the
+    // loop point) releases the manager-owned playback for the next loop.
+    if (this.audioStartedByManager) {
+      if (audio.isPlaying)
+        audio.stop()
+      this.audioStarted = false
+      this.audioStartedByManager = false
     }
-    finally {
-      mixer.removeEventListener('loop', onLoop)
-    }
-
-    mmd.updateAnimation(mixer)
-    mmd.beforePhysics(options)
-
-    if (skeletalAnimationLooped)
-      mmd.physics?.reset?.()
-
-    if (options?.physics !== false)
-      mmd.physics?.update(delta)
-    mmd.afterPhysics(options)
   }
 }

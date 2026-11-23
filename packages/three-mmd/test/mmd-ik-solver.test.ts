@@ -786,10 +786,11 @@ describe('mmdIKSolver', () => {
     const { mesh } = createMesh(specs)
     const mmd = new MMD(createPmx(specs), mesh)
     const calls: string[] = []
-    // eslint-disable-next-line @masknet/type-no-force-cast-via-top-type
-    const mixer = {
-      update: vi.fn(() => calls.push('mixer')),
-    } as unknown as AnimationMixer
+    const mixer = new AnimationMixer(mesh)
+    vi.spyOn(mixer, 'update').mockImplementation(() => {
+      calls.push('mixer')
+      return mixer
+    })
     const options = { grant: true, ik: false, physics: false }
 
     vi.spyOn(mmd, 'beforeUpdate').mockImplementation(() => calls.push('beforeUpdate'))
