@@ -175,7 +175,8 @@ export function setupDataManager(events: Events) {
         // 小场景下载完成后按分块
         if (smallSceneActivePoints) return smallSceneActivePoints;
 
-        if (splatModel?.status === ModelStatus.FetchDone || splatModel?.status === ModelStatus.FetchAborted) {
+        // 小场景下载完成（含达到 fetchLimit 的主动中止）且确实有数据时才分块
+        if ((splatModel?.status === ModelStatus.FetchDone || splatModel?.status === ModelStatus.FetchAborted) && splatModel.dataSplatCount) {
             const obj = {};
             const xyzs: Float32Array = texture0.xyz;
             for (let i = 0, count = xyzs.length / 3, x = 0, y = 0, z = 0, key = ''; i < count; i++) {
@@ -458,6 +459,8 @@ export function setupDataManager(events: Events) {
                 const max = new Vector3(splatModel.header.MaxX, splatModel.header.MaxY, splatModel.header.MaxZ);
                 fire(SplatUpdateBoundBox, min.x, min.y, min.z, max.x, max.y, max.z, splatModel.meta.showBoundBox);
             } else if (downloadDone) {
+                // 用户取消后数据已丢弃（包围盒为 Infinity），不得上屏
+                if (!Number.isFinite(splatModel.minX) || !splatModel.dataSplatCount) return;
                 initBoundBox = true;
                 const min = new Vector3(splatModel.minX, splatModel.minY, splatModel.minZ);
                 const max = new Vector3(splatModel.maxX, splatModel.maxY, splatModel.maxZ);

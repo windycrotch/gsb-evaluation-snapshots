@@ -82,6 +82,22 @@ export class SplatModel {
     /** Abort controller for fetch cancellation */
     public abortController: AbortController;
 
+    /**
+     * Monotonic id of the currently running load session.
+     * Every call to a loader opens a new session; late chunks of an old session
+     * carry a smaller id and must never be written into the current session.
+     */
+    public loadSessionId: number = 0;
+
+    /**
+     * Why the current/last fetch was aborted.
+     * Distinguishes an active stop at fetchLimit (data is kept, status becomes FetchDone)
+     * from a user cancellation (data is discarded, status becomes FetchAborted).
+     */
+    public abortReason: FetchAbortReason = FetchAbortReason.None;
+    /** True while the running session has already reached fetchLimit */
+    public fetchLimitReached: boolean = false;
+
     /** Header info for .spx format */
     public header: SpxHeader = null;
 
@@ -149,6 +165,17 @@ export class SplatModel {
         }
         that.abortController = new AbortController(); // TODO
     }
+
+    /**
+     * User-initiated cancellation of the running fetch.
+     * Unlike hitting fetchLimit, an explicit cancel discards the partial data
+     * and the load ends in ModelStatus.FetchAborted.
+     */
+    public cancelLoad(): void {
+        this.abortReason = FetchAbortReason.UserCancel;
+        this.fetchLimitReached = false;
+        this.abortController?.abort();
+    }
 }
 
 /**
@@ -159,12 +186,30 @@ export enum ModelStatus {
     FetchReady = 0,
     /** In progress */
     Fetching,
-    /** Completed successfully */
+    /**
+     * Completed successfully. This also covers an active stop at fetchLimit:
+     * the parsed subset is kept and considered a finished (partial) load.
+     */
     FetchDone,
-    /** Interrupted during request */
+    /**
+     * Interrupted by an explicit user cancellation.
+     * Partial data is discarded; a subsequent load starts from a clean state.
+     */
     FetchAborted,
     /** Request failed */
     FetchFailed,
     /** Invalid model format or data */
     Invalid,
+}
+
+/**
+ * Why a fetch was aborted
+ */
+export enum FetchAbortReason {
+    /** Not aborted */
+    None = 0,
+    /** Stopped on purpose because fetchLimit points were parsed; keep data and finish */
+    FetchLimit,
+    /** Cancelled by the user; discard partial data and mark FetchAborted */
+    UserCancel,
 }

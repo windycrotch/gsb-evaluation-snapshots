@@ -1,32 +1,31 @@
 // ==============================================
 // Copyright (c) 2025 reall3d.com, MIT license
 // ==============================================
-import { Vector3 } from 'three';
 import { clipUint8, encodeSplatSH } from '../../utils/CommonUtils';
 import { MaxProcessCnt, SH_C0, SpxBlockFormatSH1, SpxBlockFormatSH2, SpxBlockFormatSH3 } from '../../utils/GlobalConstants';
 import { ModelStatus, SplatModel } from '../ModelData';
 import { parseSplatToTexdata, parseSpxBlockData } from '../wasm/WasmParser';
+import { LoadSession, writeSplatData } from './LoadSession';
 
 /**
  * PLY加载器（注：仅支持3DGS标准格式的PLY）
  */
 export async function loadPly(model: SplatModel) {
+    // 每次加载都开启新会话：清空计数/SH/包围盒，安装新的 AbortController
+    const session = LoadSession.start(model);
+
     try {
-        model.status = ModelStatus.Fetching;
         const signal: AbortSignal = model.abortController.signal;
         const cache = model.opts.fetchReload ? 'reload' : 'default';
         const req = await fetch(model.opts.url, { mode: 'cors', credentials: 'omit', cache, signal });
         if (req.status != 200) {
             console.warn(`fetch error: ${req.status}`);
-            model.status === ModelStatus.Fetching && (model.status = ModelStatus.FetchFailed);
+            session.isCurrent() && session.finish(ModelStatus.FetchFailed);
             return;
         }
         const reader = req.body.getReader();
         const contentLength = parseInt(req.headers.get('content-length') || '0');
         model.fileSize = contentLength;
-        model.downloadSize = 0;
-        model.downloadSplatCount = 0;
-        model.watermarkData = new Uint8Array(0);
 
         let perValue = new Uint8Array(256);
         let perByteLen: number = 0;
@@ -35,6 +34,9 @@ export async function loadPly(model: SplatModel) {
         let header: any;
 
         while (true) {
+            // 重复加载已开启新会话、或本会话已结束：停止读取，丢弃后续分片
+            if (!session.isCurrent()) return;
+
             let { done, value } = await reader.read();
             if (done) break;
 
@@ -79,26 +81,43 @@ export async function loadPly(model: SplatModel) {
                 perByteLen += value.byteLength;
             } else {
                 // 解析并设定数据
-                perByteLen = await parsePlyAndSetSplatData(header, model, perByteLen, perValue, value);
+                perByteLen = await parsePlyAndSetSplatData(session, header, perByteLen, perValue, value);
+                if (!session.isCurrent()) return; // 旧会话迟到分片不得写入新会话
                 perByteLen && perValue.set(value.subarray(value.byteLength - perByteLen), 0);
             }
 
-            // 超过限制时终止下载
-            model.downloadSplatCount >= model.fetchLimit && model.abortController.abort();
+            // 达到下载限制时主动中止（保留已解析数据，标记为完成）
+            if (model.downloadSplatCount >= model.fetchLimit) {
+                session.stopAtFetchLimit();
+                break;
+            }
         }
+
+        if (model.isPointCloudPly) {
+            // 点云 PLY 走外部点云渲染管线，本加载器主动中止且不产生高斯数据
+            session.isCurrent() && session.finish(ModelStatus.FetchDone);
+            return;
+        }
+
+        // 自然读毕：正常完成
+        session.isCurrent() && session.finish(ModelStatus.FetchDone);
     } catch (e) {
-        if (e.name === 'AbortError') {
+        if (e?.name === 'AbortError') {
             console.log('Fetch Abort', model.opts.url);
-            model.status === ModelStatus.Fetching && (model.status = ModelStatus.FetchAborted);
         } else {
             console.error(e);
-            model.status === ModelStatus.Fetching && (model.status = ModelStatus.FetchFailed);
         }
-    } finally {
-        model.status === ModelStatus.Fetching && (model.status = ModelStatus.FetchDone);
+        // fetchLimit 主动中止 -> FetchDone（保留子集）；用户取消 -> FetchAborted（丢弃）；其余 -> FetchFailed
+        session.resolveTerminalStatus(e);
     }
 
-    async function parsePlyAndSetSplatData(header: any, model: SplatModel, perByteLen: number, perValue: Uint8Array, newValue: Uint8Array): Promise<number> {
+    async function parsePlyAndSetSplatData(
+        session: LoadSession,
+        header: any,
+        perByteLen: number,
+        perValue: Uint8Array,
+        newValue: Uint8Array,
+    ): Promise<number> {
         return new Promise(async resolve => {
             let cntSplat = ((perByteLen + newValue.byteLength) / model.rowLength) | 0;
             let leave: number = (perByteLen + newValue.byteLength) % model.rowLength;
@@ -118,16 +137,30 @@ export async function loadPly(model: SplatModel) {
             }
 
             const fnParsePly = async () => {
+                // 会话已切换（重复加载/取消/失败重试）：丢弃本分片
+                if (!session.isCurrent()) {
+                    resolve(leave);
+                    return;
+                }
+
                 if (cntSplat > MaxProcessCnt) {
-                    const data: Uint8Array = await parsePlyToTexdata(header, value, MaxProcessCnt);
-                    setSplatData(model, data);
+                    const data: Uint8Array = await parsePlyToTexdata(session, header, value, MaxProcessCnt);
+                    if (!session.isCurrent()) {
+                        resolve(leave);
+                        return;
+                    }
+                    writeSplatData(model, data);
                     model.downloadSplatCount += MaxProcessCnt;
                     cntSplat -= MaxProcessCnt;
                     value = value.slice(MaxProcessCnt * model.rowLength);
                     setTimeout(fnParsePly);
                 } else {
-                    const data: Uint8Array = await parsePlyToTexdata(header, value, cntSplat);
-                    setSplatData(model, data);
+                    const data: Uint8Array = await parsePlyToTexdata(session, header, value, cntSplat);
+                    if (!session.isCurrent()) {
+                        resolve(leave);
+                        return;
+                    }
+                    writeSplatData(model, data);
                     model.downloadSplatCount += cntSplat;
                     resolve(leave);
                 }
@@ -137,7 +170,7 @@ export async function loadPly(model: SplatModel) {
         });
     }
 
-    async function parsePlyToTexdata(header: any, value: Uint8Array, cntSplat: number): Promise<Uint8Array> {
+    async function parsePlyToTexdata(session: LoadSession, header: any, value: Uint8Array, cntSplat: number): Promise<Uint8Array> {
         const splatData = new Uint8Array(cntSplat * 32);
         const f32sValue = new Float32Array(value.buffer);
         const f32sData = new Float32Array(splatData.buffer);
@@ -164,6 +197,7 @@ export async function loadPly(model: SplatModel) {
             splatData[i * 32 + 31] = clipUint8((r3 / qlen) * 128.0 + 128.0);
         }
 
+        // SH 数据同样按会话隔离：旧会话的异步 SH 解析结果不得 push 进新会话
         if (header.shDegree == 3) {
             const shDim = 15;
             const sh2 = new Uint8Array(cntSplat * 24 + 8);
@@ -192,9 +226,9 @@ export async function loadPly(model: SplatModel) {
                 }
             }
             const sh2Block = await parseSpxBlockData(sh2);
-            model.sh12Data.push(sh2Block.datas);
+            if (session.isCurrent()) model.sh12Data.push(sh2Block.datas);
             const sh3Block = await parseSpxBlockData(sh3);
-            model.sh3Data.push(sh3Block.datas);
+            if (session.isCurrent()) model.sh3Data.push(sh3Block.datas);
         } else if (header.shDegree == 2) {
             const shDim = 8;
             const sh2 = new Uint8Array(cntSplat * 24 + 8);
@@ -211,7 +245,7 @@ export async function loadPly(model: SplatModel) {
                 }
             }
             const sh2Block = await parseSpxBlockData(sh2);
-            model.sh12Data.push(sh2Block.datas);
+            if (session.isCurrent()) model.sh12Data.push(sh2Block.datas);
         } else if (header.shDegree == 1) {
             const shDim = 3;
             const sh2 = new Uint8Array(cntSplat * 9 + 8);
@@ -228,7 +262,7 @@ export async function loadPly(model: SplatModel) {
                 }
             }
             const sh2Block = await parseSpxBlockData(sh2);
-            model.sh12Data.push(sh2Block.datas);
+            if (session.isCurrent()) model.sh12Data.push(sh2Block.datas);
         }
 
         return await parseSplatToTexdata(splatData, cntSplat);
@@ -293,36 +327,4 @@ export async function loadPly(model: SplatModel) {
         }
         return { headerLength: header_end_index + header_end.length, offsets, rowLength: row_offset, vertexCount, shDegree };
     }
-}
-
-function setSplatData(model: SplatModel, data: Uint8Array) {
-    let dataCnt = data.byteLength / 32;
-    const maxSplatDataCnt = Math.min(model.fetchLimit, model.modelSplatCount);
-    if (model.dataSplatCount + dataCnt > maxSplatDataCnt) {
-        dataCnt = maxSplatDataCnt - model.dataSplatCount; // 丢弃超出限制的部分
-        model.splatData.set(data.subarray(0, dataCnt * 32), model.dataSplatCount * 32);
-    } else {
-        model.splatData.set(data, model.dataSplatCount * 32);
-    }
-
-    const f32s: Float32Array = new Float32Array(data.buffer);
-    for (let i = 0, x = 0, y = 0, z = 0; i < dataCnt; i++) {
-        x = f32s[i * 8];
-        y = f32s[i * 8 + 1];
-        z = f32s[i * 8 + 2];
-        model.minX = Math.min(model.minX, x);
-        model.maxX = Math.max(model.maxX, x);
-        model.minY = Math.min(model.minY, y);
-        model.maxY = Math.max(model.maxY, y);
-        model.minZ = Math.min(model.minZ, z);
-        model.maxZ = Math.max(model.maxZ, z);
-    }
-
-    model.dataSplatCount += dataCnt;
-
-    const topY = 0;
-    model.currentRadius = Math.sqrt(model.maxX * model.maxX + topY * topY + model.maxZ * model.maxZ);
-    model.aabbCenter = new Vector3((model.minX + model.maxX) / 2, (model.minY + model.maxY) / 2, (model.minZ + model.maxZ) / 2);
-    model.maxRadius = 0.5 * Math.sqrt(Math.pow(model.maxX - model.minX, 2) + Math.pow(model.maxY - model.minY, 2) + Math.pow(model.maxZ - model.minZ, 2));
-    model.metaMatrix && model.aabbCenter.applyMatrix4(model.metaMatrix);
 }

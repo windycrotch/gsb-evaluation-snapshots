@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <title>PLY / SPLAT loader lifecycle demo</title>
+        <meta charset="utf-8" />
+        <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+        <style>
+            body {
+                font-family: ui-monospace, Menlo, Consolas, monospace;
+                background: #111418;
+                color: #d7e0ea;
+                margin: 0;
+                padding: 20px;
+            }
+            h1 { font-size: 18px; }
+            h2 { font-size: 14px; margin: 18px 0 6px; color: #8fd3ff; }
+            .row { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+            button {
+                background: #1f2a36;
+                color: #d7e0ea;
+                border: 1px solid #35506b;
+                border-radius: 6px;
+                padding: 8px 12px;
+                cursor: pointer;
+                font-family: inherit;
+            }
+            button:hover { border-color: #66b2ff; }
+            button:disabled { opacity: 0.4; cursor: not-allowed; }
+            select, input { background: #1f2a36; color: #d7e0ea; border: 1px solid #35506b; border-radius: 6px; padding: 6px; }
+            .panel {
+                background: #0c1116;
+                border: 1px solid #243444;
+                border-radius: 8px;
+                padding: 14px;
+                margin-top: 14px;
+                white-space: pre;
+                font-size: 12.5px;
+                line-height: 1.55;
+                min-height: 260px;
+            }
+            .tag { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 11px; }
+            .FetchDone { background: #14401f; color: #6ee7a0; }
+            .Fetching { background: #3a3410; color: #ffd76a; }
+            .FetchAborted { background: #4a2330; color: #ff9db4; }
+            .FetchFailed { background: #4a2323; color: #ff9d9d; }
+            .Invalid { background: #3d2c4a; color: #d3a7ff; }
+            .FetchReady { background: #26323d; color: #9fb4c8; }
+            .muted { color: #7d8da0; }
+        </style>
+    </head>
+    <body>
+        <h1>PLY / SPLAT loader — start · chunk parse · fetchLimit stop · user cancel · failure · retry · interleaving</h1>
+
+        <div class="row">
+            <label>Format
+                <select id="fmt">
+                    <option value="splat">.splat</option>
+                    <option value="ply">.ply</option>
+                </select>
+            </label>
+            <label>Total points <input id="total" type="number" value="200" min="1" style="width: 90px" /></label>
+            <label>fetchLimit <input id="limit" type="number" value="60" min="1" style="width: 90px" /></label>
+        </div>
+
+        <h2>Single-session lifecycle</h2>
+        <div class="row">
+            <button id="btn-normal">1. Normal load (limit &ge; total)</button>
+            <button id="btn-limit">2. Load until fetchLimit, then stop</button>
+            <button id="btn-cancel">3. Start load…</button>
+            <button id="btn-do-cancel" disabled>…cancel mid-flight</button>
+            <button id="btn-retry-cancel">4. Retry after cancel</button>
+            <button id="btn-fail">5. Fail (HTTP 500)</button>
+            <button id="btn-retry-fail">6. Retry after failure</button>
+        </div>
+
+        <h2>Two interleaved sessions (same model re-triggered while the first is streaming)</h2>
+        <div class="row">
+            <button id="btn-interleave">Start session 1, then immediately start session 2</button>
+            <button id="btn-repeat">Load the same model twice (no double counting)</button>
+        </div>
+
+        <div class="panel" id="panel"></div>
+
+        <script type="module">
+            import { SplatModel, ModelStatus, FetchAbortReason } from '../src/reall3d/modeldata/ModelData';
+            import { loadSplat } from '../src/reall3d/modeldata/loaders/SplatLoader';
+            import { loadPly } from '../src/reall3d/modeldata/loaders/PlyLoader';
+            import { buildSplatFile, buildPlyFile, DemoFetchServer } from './loader-lifecycle-data';
+
+            const URL = 'demo://model';
+            const server = new DemoFetchServer();
+            server.install();
+
+            let model = null;
+            let pollTimer = null;
+
+            const $ = id => document.getElementById(id);
+            const panel = $('panel');
+
+            function statusName(s) {
+                return Object.keys(ModelStatus).find(k => ModelStatus[k] === s) || String(s);
+            }
+            function reasonName(r) {
+                return Object.keys(FetchAbortReason).find(k => FetchAbortReason[k] === r) || String(r);
+            }
+            function fmt(v) {
+                return Number.isFinite(v) ? Number(v).toFixed(2) : String(v);
+            }
+
+            function snapshot() {
+                if (!model) return '(no model yet)';
+                const m = model;
+                return [
+                    `status          : ${statusName(m.status)}  <span class="tag ${statusName(m.status)}">${statusName(m.status)}</span>`,
+                    `loadSessionId   : ${m.loadSessionId}`,
+                    `abortReason     : ${reasonName(m.abortReason)}   fetchLimitReached: ${m.fetchLimitReached}`,
+                    `fetchLimit      : ${m.fetchLimit}`,
+                    `modelSplatCount : ${m.modelSplatCount}`,
+                    `downloadSplatCnt: ${m.downloadSplatCount}`,
+                    `dataSplatCount  : ${m.dataSplatCount}   (splatData bytes: ${m.splatData ? m.splatData.byteLength : 'null'})`,
+                    `sh12 blocks     : ${m.sh12Data.length}   sh3 blocks: ${m.sh3Data.length}`,
+                    `bounding box    : min(${fmt(m.minX)}, ${fmt(m.minY)}, ${fmt(m.minZ)})`,
+                    `                    max(${fmt(m.maxX)}, ${fmt(m.maxY)}, ${m.maxZ === -Infinity ? '-Infinity' : fmt(m.maxZ)})`,
+                    `aabbCenter      : ${m.aabbCenter ? `(${fmt(m.aabbCenter.x)}, ${fmt(m.aabbCenter.y)}, ${fmt(m.aabbCenter.z)})` : 'null'}`,
+                    `maxRadius       : ${fmt(m.maxRadius)}`,
+                ].join('\n');
+            }
+
+            function render() {
+                panel.innerHTML = snapshot();
+            }
+            function startPolling() {
+                clearInterval(pollTimer);
+                pollTimer = setInterval(render, 100);
+            }
+            function stopPollingSoon() {
+                setTimeout(() => clearInterval(pollTimer), 1500);
+            }
+
+            function buildBytes() {
+                const fmt = $('fmt').value;
+                const total = Math.max(1, parseInt($('total').value, 10) || 1);
+                return fmt === 'splat' ? buildSplatFile(total) : buildPlyFile(total);
+            }
+            function registerRoute(limit, failStatus) {
+                const fmt = $('fmt').value;
+                // small chunks + 30ms server delay -> multiple read() slices, cancellable mid-flight
+                server.register(URL, buildBytes(), fmt === 'splat' ? 64 : 136, failStatus);
+            }
+            function newModel(limit) {
+                model = new SplatModel({ url: URL, format: $('fmt').value });
+                model.fetchLimit = limit;
+                startPolling();
+                return model;
+            }
+            function loader(m) {
+                return $('fmt').value === 'splat' ? loadSplat(m) : loadPly(m);
+            }
+
+            // 1. normal load
+            $('btn-normal').onclick = async () => {
+                const total = parseInt($('total').value, 10) || 1;
+                registerRoute(total);
+                const m = newModel(total); // limit >= total -> full load
+                await loader(m);
+                render();
+                stopPollingSoon();
+            };
+
+            // 2. fetchLimit active stop
+            $('btn-limit').onclick = async () => {
+                const limit = Math.max(1, parseInt($('limit').value, 10) || 1);
+                registerRoute(limit);
+                const m = newModel(limit);
+                await loader(m);
+                render();
+                stopPollingSoon();
+            };
+
+            // 3 + cancel button
+            let cancelModel = null;
+            $('btn-cancel').onclick = () => {
+                const limit = Math.max(1, parseInt($('limit').value, 10) || 1);
+                registerRoute(limit);
+                cancelModel = newModel(1000000); // high limit so it would keep streaming
+                loader(cancelModel);
+                $('btn-do-cancel').disabled = false;
+            };
+            $('btn-do-cancel').onclick = async () => {
+                $('btn-do-cancel').disabled = true;
+                cancelModel?.cancelLoad();
+                await new Promise(r => setTimeout(r, 300));
+                render();
+                stopPollingSoon();
+            };
+
+            // 4. retry after cancel (same model instance)
+            $('btn-retry-cancel').onclick = async () => {
+                if (!cancelModel) return alert('Run step 3 (and cancel) first.');
+                registerRoute(parseInt($('limit').value, 10) || 1);
+                startPolling();
+                await loader(cancelModel);
+                render();
+                stopPollingSoon();
+            };
+
+            // 5. failure
+            $('btn-fail').onclick = async () => {
+                registerRoute(1, 500);
+                const m = newModel(1000);
+                await loader(m);
+                render();
+                stopPollingSoon();
+            };
+
+            // 6. retry after failure (same model instance)
+            $('btn-retry-fail').onclick = async () => {
+                if (!model || model.status !== ModelStatus.FetchFailed) return alert('Run step 5 first.');
+                registerRoute(parseInt($('total').value, 10) || 1);
+                startPolling();
+                await loader(model);
+                render();
+                stopPollingSoon();
+            };
+
+            // interleaved sessions
+            $('btn-interleave').onclick = async () => {
+                registerRoute(1000);
+                const m = newModel(1000000);
+                const first = loader(m); // session 1 starts streaming
+                await new Promise(r => setTimeout(r, 120));
+                registerRoute(1000); // re-register fresh body for session 2
+                const second = loader(m); // session 2 supersedes session 1
+                await first;
+                await second;
+                render();
+                stopPollingSoon();
+            };
+
+            // repeated load, no double counting
+            $('btn-repeat').onclick = async () => {
+                const total = parseInt($('total').value, 10) || 1;
+                registerRoute(total);
+                let m = newModel(total);
+                await loader(m);
+                registerRoute(total);
+                await loader(m);
+                render();
+                stopPollingSoon();
+            };
+
+            render();
+        </script>
+    </body>
+</html>

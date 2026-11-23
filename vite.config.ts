@@ -44,6 +44,7 @@ export default defineConfig({
             input: {
                 viewer: './viewer.html',
                 main: './index.html',
+                loaderLifecycle: './demo/loader-lifecycle.html',
             },
             output: {
                 manualChunks: {

@@ -1,22 +1,24 @@
 // ==============================================
 // Copyright (c) 2025 reall3d.com, MIT license
 // ==============================================
-import { Vector3 } from 'three';
 import { MaxProcessCnt } from '../../utils/GlobalConstants';
 import { ModelStatus, SplatModel } from '../ModelData';
 import { parseSplatToTexdata } from '../wasm/WasmParser';
+import { LoadSession, writeSplatData } from './LoadSession';
 
 export async function loadSplat(model: SplatModel) {
+    // Each invocation starts a fresh session: counters, SH data and the
+    // bounding box are reset, and a new AbortController is installed.
+    const session = LoadSession.start(model);
     let bytesRead = 0;
 
     try {
-        model.status = ModelStatus.Fetching;
         const signal: AbortSignal = model.abortController.signal;
         const cache = model.opts.fetchReload ? 'reload' : 'default';
         const req = await fetch(model.opts.url, { mode: 'cors', credentials: 'omit', cache, signal });
         if (req.status != 200) {
             console.warn(`fetch error: ${req.status}`);
-            model.status === ModelStatus.Fetching && (model.status = ModelStatus.FetchFailed);
+            session.isCurrent() && session.finish(ModelStatus.FetchFailed);
             return;
         }
         const reader = req.body.getReader();
@@ -26,7 +28,7 @@ export async function loadSplat(model: SplatModel) {
         const maxVertexCount = (contentLength / model.rowLength) | 0;
         if (maxVertexCount < 1) {
             console.warn('data empty', model.opts.url);
-            model.status === ModelStatus.Fetching && (model.status = ModelStatus.Invalid);
+            session.isCurrent() && session.finish(ModelStatus.Invalid);
             return;
         }
 
@@ -40,6 +42,9 @@ export async function loadSplat(model: SplatModel) {
         let perByteLen: number = 0;
 
         while (true) {
+            // A newer session (reload) or terminal state means this loop is stale.
+            if (!session.isCurrent()) return;
+
             let { done, value } = await reader.read();
             if (done) break;
 
@@ -52,26 +57,35 @@ export async function loadSplat(model: SplatModel) {
                 model.downloadSize = bytesRead;
             } else {
                 // 解析并设定数据
-                perByteLen = await parseSplatAndSetSplatData(model, perByteLen, perValue, value);
+                perByteLen = await parseSplatAndSetSplatData(session, perByteLen, perValue, value);
+                if (!session.isCurrent()) return; // 旧会话的迟到分片不得写入新会话
                 perByteLen && perValue.set(value.subarray(value.byteLength - perByteLen), 0);
             }
 
-            // 超过限制时终止下载
-            model.downloadSplatCount >= model.fetchLimit && model.abortController.abort();
+            // 达到下载限制时主动中止（保留已解析数据，标记为完成）
+            if (model.downloadSplatCount >= model.fetchLimit) {
+                session.stopAtFetchLimit();
+                break;
+            }
         }
+
+        // 自然读毕且未被中止：正常完成
+        session.isCurrent() && session.finish(ModelStatus.FetchDone);
     } catch (e) {
-        if (e.name === 'AbortError') {
+        if (e?.name === 'AbortError') {
             console.log('Fetch Abort', model.opts.url);
-            model.status === ModelStatus.Fetching && (model.status = ModelStatus.FetchAborted);
         } else {
             console.error(e);
-            model.status === ModelStatus.Fetching && (model.status = ModelStatus.FetchFailed);
         }
-    } finally {
-        model.status === ModelStatus.Fetching && (model.status = ModelStatus.FetchDone);
+        session.resolveTerminalStatus(e);
     }
 
-    async function parseSplatAndSetSplatData(model: SplatModel, perByteLen: number, perValue: Uint8Array, newValue: Uint8Array): Promise<number> {
+    async function parseSplatAndSetSplatData(
+        session: LoadSession,
+        perByteLen: number,
+        perValue: Uint8Array,
+        newValue: Uint8Array,
+    ): Promise<number> {
         return new Promise(async resolve => {
             let cntSplat = ((perByteLen + newValue.byteLength) / model.rowLength) | 0;
             let leave: number = (perByteLen + newValue.byteLength) % model.rowLength;
@@ -91,9 +105,19 @@ export async function loadSplat(model: SplatModel) {
             }
 
             const fnParseSplat = async () => {
+                // 会话已切换（重复加载/取消）：丢弃本分片，绝不再触碰 model 数据
+                if (!session.isCurrent()) {
+                    resolve(leave);
+                    return;
+                }
+
                 if (cntSplat > MaxProcessCnt) {
                     const data: Uint8Array = await parseSplatToTexdata(value, MaxProcessCnt);
-                    setSplatData(model, data);
+                    if (!session.isCurrent()) {
+                        resolve(leave);
+                        return;
+                    }
+                    writeSplatData(model, data);
                     model.downloadSplatCount += MaxProcessCnt;
                     bytesRead += MaxProcessCnt * model.rowLength;
                     model.downloadSize = bytesRead;
@@ -103,7 +127,11 @@ export async function loadSplat(model: SplatModel) {
                     setTimeout(fnParseSplat);
                 } else {
                     const data: Uint8Array = await parseSplatToTexdata(value, cntSplat);
-                    setSplatData(model, data);
+                    if (!session.isCurrent()) {
+                        resolve(leave);
+                        return;
+                    }
+                    writeSplatData(model, data);
                     model.downloadSplatCount += cntSplat;
                     bytesRead += cntSplat * model.rowLength;
                     model.downloadSize = bytesRead;
@@ -115,35 +143,4 @@ export async function loadSplat(model: SplatModel) {
             await fnParseSplat();
         });
     }
-}
-
-function setSplatData(model: SplatModel, data: Uint8Array) {
-    let dataCnt = data.byteLength / 32;
-    const maxSplatDataCnt = Math.min(model.fetchLimit, model.modelSplatCount);
-    if (model.dataSplatCount + dataCnt > maxSplatDataCnt) {
-        dataCnt = maxSplatDataCnt - model.dataSplatCount; // 丢弃超出限制的部分
-        model.splatData.set(data.subarray(0, dataCnt * 32), model.dataSplatCount * 32);
-    } else {
-        model.splatData.set(data, model.dataSplatCount * 32);
-    }
-
-    const f32s: Float32Array = new Float32Array(data.buffer);
-    for (let i = 0, x = 0, y = 0, z = 0; i < dataCnt; i++) {
-        x = f32s[i * 8];
-        y = f32s[i * 8 + 1];
-        z = f32s[i * 8 + 2];
-        model.minX = Math.min(model.minX, x);
-        model.maxX = Math.max(model.maxX, x);
-        model.minY = Math.min(model.minY, y);
-        model.maxY = Math.max(model.maxY, y);
-        model.minZ = Math.min(model.minZ, z);
-        model.maxZ = Math.max(model.maxZ, z);
-    }
-    model.dataSplatCount += dataCnt;
-
-    const topY = model.header?.MinTopY || 0;
-    model.currentRadius = Math.sqrt(model.maxX * model.maxX + topY * topY + model.maxZ * model.maxZ);
-    model.aabbCenter = new Vector3((model.minX + model.maxX) / 2, (model.minY + model.maxY) / 2, (model.minZ + model.maxZ) / 2);
-    model.maxRadius = 0.5 * Math.sqrt(Math.pow(model.maxX - model.minX, 2) + Math.pow(model.maxY - model.minY, 2) + Math.pow(model.maxZ - model.minZ, 2));
-    model.metaMatrix && model.aabbCenter.applyMatrix4(model.metaMatrix);
 }
