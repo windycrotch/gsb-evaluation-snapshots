@@ -22,24 +22,27 @@ window.HTMLMediaElement.prototype.pause=function(){this.__pauses=(this.__pauses|
 window.HTMLMediaElement.prototype.load=function(){};
 const originalTimer=window.setTimeout.bind(window);
 window.setTimeout=(fn,delay,...rest)=>originalTimer(fn,delay===1000?1:delay,...rest);
+let tabHidden=false;
+Object.defineProperty(window.document,'hidden',{configurable:true,get:()=>tabHidden});
+Object.defineProperty(window.document,'visibilityState',{configurable:true,get:()=>tabHidden?'hidden':'visible'});
 const {mountTranscriptEditor,readEditDocument,editedPosition,candidateDocument,findTranscriptMatches}=await import('data:text/javascript;base64,' + Buffer.from(moduleCode).toString('base64'));
 const segments=[{id:4,start:0,end:4,text:'First sentence'},{id:9,start:4,end:8,text:'Second sentence'}];
 const initial={version:1,source_duration:8,ranges:segments.map((s,i)=>({id:'r'+i,clip_id:s.id,start:s.start,end:s.end,group_id:'g'+i}))};
 const transcript=[{id:100,start:0,end:4,text:'Hello um world',words:[{word:'Hello',start:0,end:1},{word:'um',start:1,end:1.5},{word:'world',start:2,end:4}]},{id:200,start:4,end:8,text:'Second sentence'}];
 const candidates=[{id:'candidate-x',title:'<img src=x onerror=alert(1)>',text:'Selected statement',reason:'Local suggestion',start:3,end:6,ranges:[{start:3,end:6,transcript_id:200}],scoring_source:'local_heuristic'}];
-let store={}, requests=[],patches=[],busy=[],opened=0,mode='complete',cancelled=false,lateResolve;
+let store={}, requests=[],patches=[],busy=[],opened=0,mode='complete',cancelled=false,cancelDelay=0,lateResolve;
 const response=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{'Content-Type':'application/json'}});
 globalThis.fetch=async (url,options={})=>{
  const path=new URL(url,'http://localhost').pathname.replace('/api/projects/one/api','');
  const data=options.body?JSON.parse(options.body):undefined; requests.push({path,data});
- if(path==='/editor') { if(mode==='late') return new Promise(resolve=>lateResolve=()=>resolve(response({document:initial,captions:transcript,transcript}))); return response({document:initial,captions:transcript,transcript}); }
+ if(path==='/editor') { if(mode==='late') return new Promise(resolve=>lateResolve=()=>resolve(response({document:initial,captions:transcript,transcript}))); if(mode==='load-error') return response({message:'The saved edit could not be loaded.'},500); return response({document:initial,captions:transcript,transcript,exports:[{output_file:'/final/stale-render.mp4',size:2048}]}); }
  if(path==='/edit-preview') {try {const out=execFileSync(process.env.PYTHON || 'python3',['-c','import json,sys;from edit_model import apply_edit;x=json.load(sys.stdin);print(json.dumps({"document":apply_edit(x["document"],x["action"])}))'],{input:JSON.stringify(data),encoding:'utf8',cwd:root});return new Response(out,{status:200});}catch(error){return response({message:'Invalid edit operation'},400);}}
  if(path==='/candidates') return response({task_id:'candidates'});
  if(path==='/processing-status/candidates') return response({status:'complete',candidates});
  if(path==='/cleanup') return response({suggestions:[{id:'filler',type:'filler',start:1,end:1.5,text:'um',reason:'Review in context'}]});
  if(path==='/render') return response({task_id:'render'});
  if(path==='/cancel/render') {cancelled=true;return response({status:'ok'});}
- if(path==='/processing-status/render') return response(mode==='error'?{status:'error',message:'Render test failed'}:mode==='cancel'&&!cancelled?{status:'processing',message:'Waiting'}:cancelled?{status:'cancelled'}:{status:'complete',output_file:'/api/projects/one/final/reel.mp4',outputs:[{output_file:'/api/projects/one/final/reel.mp4'}]});
+ if(path==='/processing-status/render') return response(mode==='error'?{status:'error',message:'Render test failed'}:mode==='cancel'&&(!cancelled||cancelDelay-->0)?{status:'processing',message:'Waiting'}:cancelled?{status:'cancelled'}:{status:'complete',output_file:'/api/projects/one/final/reel.mp4',outputs:[{output_file:'/api/projects/one/final/reel.mp4'}]});
  if(path==='/edited-subtitles')return new Response('WEBVTT\n\n00:00.000 --> 00:01.000\nHello\n');
  throw new Error('Unexpected '+path);
 };
@@ -52,6 +55,7 @@ const choose=(selector,index=0)=>{const n=document.querySelectorAll(selector)[in
 const mount=(overrides={})=>mountTranscriptEditor({container:document.getElementById('root'),projectId:'one',sourceUrl:'/api/projects/one/api/source/aa',segments,get state(){return store;},onChange:patch=>{store={...store,...patch};patches.push(patch);},onBusy:value=>busy.push(value),onOpen:()=>opened++,...overrides});
 let dispose=mount(); click('Open transcript editor');await until(()=>document.querySelector('.te-status').textContent.startsWith('Ready'));
 assert.equal(opened,1);assert.equal(document.querySelectorAll('.te-range').length,2);
+assert.equal(document.querySelectorAll('.te-downloads a').length,0,'Exports from earlier sessions are never listed as downloads');
 choose('.te-range-title input');click('Remove selected');await until(()=>document.querySelectorAll('.te-range').length===1);assert.equal(store.edit_document.ranges[0].clip_id,9);
 click('Undo');assert.equal(store.edit_document.ranges.length,2);click('Redo');assert.equal(store.edit_document.ranges.length,1);click('Undo');
 click('Select all');click('Remove selected');await until(()=>store.edit_document.ranges.length===0);assert.match(document.querySelector('.te-empty').textContent,/empty/);click('Undo');assert.equal(store.edit_document.ranges.length,2);
@@ -66,8 +70,19 @@ click('Play edit');assert.equal(document.querySelector('.te-video-frame video').
 change(document.querySelector('.te-settings select'),'9:16');assert.equal(store.export_settings.aspect_ratio,'9:16');
 const burn=document.querySelector('.te-settings input[type=checkbox]');burn.checked=true;burn.dispatchEvent(new Event('change'));assert.equal(store.export_settings.burn_captions,true);
 click('Export edited reel');await until(()=>document.querySelector('.te-downloads a'));assert.equal(document.querySelectorAll('.te-downloads a').length,1);assert.equal(requests.find(r=>r.path==='/render').data.settings.aspect_ratio,'9:16');
-mode='error';click('Export edited reel');await until(()=>document.querySelector('.te-status').textContent==='Render test failed');assert.equal(busy.at(-1),false);
-mode='cancel';click('Export edited reel');await until(()=>!document.querySelector('.te-status-bar button:last-child').hidden);click('Cancel task');await until(()=>document.querySelector('.te-status').textContent.startsWith('Task cancelled'));assert.equal(busy.at(-1),false);
+const editBeforeFailure=JSON.stringify(store.edit_document);
+mode='error';click('Export edited reel');await until(()=>document.querySelector('.te-status').textContent==='Render test failed');
+assert.equal(busy.at(-1),false);
+assert.equal(document.querySelector('.te-status').classList.contains('te-error'),true);
+assert.equal(JSON.stringify(store.edit_document),editBeforeFailure,'A failed render keeps the existing edit');
+assert.equal(document.querySelectorAll('.te-downloads a').length,0,'A failed render leaves no download links');
+mode='complete';click('Export edited reel');await until(()=>document.querySelectorAll('.te-downloads a').length===1);
+assert.equal(document.querySelector('.te-status').classList.contains('te-error'),false,'A successful retry clears the old error');
+assert.ok(document.querySelector('.te-downloads a').href.endsWith('/api/projects/one/final/reel.mp4'),'Download links point at this render output');
+mode='cancel';cancelled=false;click('Export edited reel');await until(()=>!document.querySelector('.te-status-bar button:last-child').hidden);
+assert.equal(document.querySelectorAll('.te-downloads a').length,0,'Starting a new render clears previous links until it succeeds');
+click('Cancel task');await until(()=>document.querySelector('.te-status').textContent.startsWith('Task cancelled'));assert.equal(busy.at(-1),false);
+assert.equal(document.querySelectorAll('.te-downloads a').length,0,'A cancelled export never becomes a download');
 click('Close editor');assert.equal(document.querySelector('dialog').open,false);click('Open transcript editor');assert.equal(opened,2);assert.equal(requests.filter(r=>r.path==='/editor').length,1);
 dispose();assert.equal(document.querySelectorAll('.te-dialog,.te-launcher').length,0);
 mode='late';store={};dispose=mount();click('Open transcript editor');await until(()=>!!lateResolve);const n=patches.length;dispose();lateResolve();await flush();assert.equal(patches.length,n);assert.equal(document.querySelectorAll('.te-dialog').length,0);
@@ -142,13 +157,28 @@ tab('Sequence');click('Move down');await until(()=>store.edit_document.ranges[0]
 click('Select all');tab('Captions');assert.equal(key(dialog,'Delete').defaultPrevented,false);tab('Sequence');assert.equal(key(document.querySelector('.te-range-title input'),'Delete').defaultPrevented,true,'Selection checkboxes permit edit shortcuts');await until(()=>store.edit_document.ranges.length===0);
 assert.equal(key(dialog,'z',{metaKey:true}).defaultPrevented,true);assert.equal(store.edit_document.ranges.length,2);key(dialog,'Z',{ctrlKey:true,shiftKey:true});assert.equal(store.edit_document.ranges.length,0);key(dialog,'z',{ctrlKey:true});key(dialog,'y',{ctrlKey:true});assert.equal(store.edit_document.ranges.length,0);key(dialog,'z',{ctrlKey:true});
 
-mode='cancel';cancelled=false;click('Export edited reel');await until(()=>!document.querySelector('.te-status-bar button:last-child').hidden);
+mode='cancel';cancelled=false;cancelDelay=0;click('Export edited reel');await until(()=>!document.querySelector('.te-status-bar button:last-child').hidden);
 assert.equal(preset('shorts').disabled,true);assert.equal(document.querySelector('input[type=search]').disabled,true);assert.equal(document.querySelector('[aria-label="Seek edited sequence"]').disabled,true);
 const busyPlays=video.__plays||0,busyWrites=patches.length;
 for(const name of ['k','l','Delete','/','?'])assert.equal(key(dialog,name).defaultPrevented,false);
 preset('shorts').click();assert.equal(patches.length,busyWrites);assert.equal(video.__plays||0,busyPlays);
-const editorLoads=requests.filter(r=>r.path==='/editor').length;click('Close editor');assert.equal(key(dialog,'k').defaultPrevented,false);click('Open transcript editor');assert.equal(requests.filter(r=>r.path==='/editor').length,editorLoads);assert.equal(preset('shorts').disabled,true);click('Cancel task');await until(()=>document.querySelector('.te-status').textContent.startsWith('Task cancelled'));
-assert.equal(preset('shorts').disabled,false);mode='complete';
+cancelDelay=2;click('Cancel task');
+assert.equal(document.querySelector('.te-status-bar button:last-child').disabled,true,'Cancel stays disabled while the task stops');
+assert.equal(preset('shorts').disabled,true,'The next operation waits until the task has stopped');
+await until(()=>document.querySelector('.te-status').textContent.startsWith('Task cancelled'));
+assert.equal(busy.at(-1),false);assert.equal(preset('shorts').disabled,false);
+mode='cancel';cancelled=false;cancelDelay=0;click('Export edited reel');await until(()=>!document.querySelector('.te-status-bar button:last-child').hidden);
+const pollsBeforeClose=requests.filter(r=>r.path==='/processing-status/render').length;
+click('Close editor');
+await until(()=>busy.at(-1)===false);
+assert.equal(cancelled,true,'Closing the editor requests cancellation of the active task');
+await flush();await flush();
+assert.equal(requests.filter(r=>r.path==='/processing-status/render').length,pollsBeforeClose,'Closing the editor stops status polling');
+assert.equal(document.querySelectorAll('.te-downloads a').length,0,'An unfinished export never becomes a download');
+const editorLoads=requests.filter(r=>r.path==='/editor').length;
+assert.equal(key(dialog,'k').defaultPrevented,false);
+click('Open transcript editor');assert.equal(requests.filter(r=>r.path==='/editor').length,editorLoads);assert.equal(preset('shorts').disabled,false,'The reopened editor is not stuck busy');
+mode='complete';
 playMode='late';key(dialog,'k');assert.ok(resolvePlay);click('Close editor');resolvePlay();await flush();assert.equal(video.paused,true,'A late play resolution cannot restart a closed preview');
 const closedPlays=video.__plays;assert.equal(key(dialog,'k').defaultPrevented,false);assert.equal(video.__plays,closedPlays);
 click('Open transcript editor');playMode='immediate';key(dialog,'k');assert.equal(video.__plays,closedPlays+1,'Close/reopen does not duplicate shortcut listeners');key(dialog,'k');
@@ -158,4 +188,40 @@ transcript.push({id:300,start:0,end:1,text:'<img src=x onerror=alert(1)> and <im
 playMode='immediate';store={};dispose=mount({sourceUrl:null});click('Open transcript editor');await until(()=>document.querySelector('.te-status').textContent.startsWith('Ready'));dialog=document.querySelector('dialog');tab('Transcript');search('second');assert.equal(count(),'1 of 1 matching passage');assert.equal(document.querySelector('.te-passage-controls input').value,'4');assert.equal(key(dialog,'k').defaultPrevented,false);
 search('<img');assert.equal(count(),'1 of 1 matching passage');assert.equal(document.querySelectorAll('.te-search-highlight').length,2);assert.equal(document.querySelectorAll('.te-transcript-cue img').length,0,'Highlighting never inserts transcript HTML');search('[');assert.equal(count(),'No matching passages.');dispose();transcript.pop();
 console.log('PASS: editor productivity: literal search, match navigation/seek, removed passages, safe highlighting, undoable/persisted presets, caption draft preservation, keyboard focus isolation, busy/closed/disposed lifecycle, repeated actions, deferred media, source-less editing.');
+
+// Preview playback always follows the latest operation; background tabs and
+// closing the editor cannot advance the preview or mutate the interface.
+tabHidden=false;store={};mode='complete';cancelled=false;cancelDelay=0;playMode='immediate';
+dispose=mount();click('Open transcript editor');await until(()=>document.querySelector('.te-status').textContent.startsWith('Ready'));
+dialog=document.querySelector('dialog');video=document.querySelector('video');
+const fire=(node,name)=>node.dispatchEvent(new Event(name));
+click('Play edit');assert.equal(video.paused,false);assert.equal(video.currentTime,0);
+video.currentTime=3.99;fire(video,'timeupdate');assert.equal(video.currentTime,4,'Crossing a cut seeks to the next clip');
+video.currentTime=7.99;fire(video,'timeupdate');assert.equal(video.currentTime,7.99,'A stale position cannot skip a clip while a seek is in flight');
+assert.equal(video.paused,false,'A stale position cannot end playback early');
+fire(video,'seeked');assert.equal(video.paused,true,'The landed seek resumes boundary checks');assert.equal(video.currentTime,8);
+video.currentTime=3;fire(video,'timeupdate');assert.equal(video.currentTime,3);assert.equal(video.paused,true,'Paused playback never advances');
+key(dialog,'l');key(dialog,'l');key(dialog,'j');assert.equal(video.currentTime,3,'Rapid seeks settle on the last operation');
+key(dialog,'k');assert.equal(video.paused,false);key(dialog,'k');assert.equal(video.paused,true);
+click('Play edit');assert.equal(video.currentTime,0);assert.equal(video.paused,false);
+tabHidden=true;document.dispatchEvent(new Event('visibilitychange'));
+assert.equal(video.paused,true,'Hiding the tab pauses the preview');
+mode='cancel';cancelled=false;click('Export edited reel');await until(()=>!document.querySelector('.te-status-bar button:last-child').hidden);
+const hiddenPolls=requests.filter(r=>r.path==='/processing-status/render').length;
+await flush();await flush();
+assert.equal(requests.filter(r=>r.path==='/processing-status/render').length,hiddenPolls,'A hidden tab suspends status polling');
+tabHidden=false;document.dispatchEvent(new Event('visibilitychange'));
+await until(()=>requests.filter(r=>r.path==='/processing-status/render').length>hiddenPolls);
+click('Cancel task');await until(()=>document.querySelector('.te-status').textContent.startsWith('Task cancelled'));
+click('Close editor');dispose();
+mode='load-error';store={};dispose=mount();click('Open transcript editor');
+await until(()=>document.querySelector('.te-status').classList.contains('te-error'));
+const retry=[...document.querySelectorAll('button')].find(b=>b.textContent==='Retry loading');
+assert.equal(retry.hidden,false,'A failed load offers a retry');
+mode='complete';retry.click();
+await until(()=>document.querySelector('.te-status').textContent.startsWith('Ready'));
+assert.equal(document.querySelector('.te-status').classList.contains('te-error'),false,'A successful retry clears the old error');
+assert.equal(document.querySelectorAll('.te-range').length,2);assert.equal(retry.hidden,true);
+click('Close editor');dispose();
+console.log('PASS: playback lifecycle: cut boundaries await landed seeks, paused/hidden/closed states cannot advance or mutate the preview, rapid operations settle on the last one, load failure retries, polling suspends while hidden.');
 dom.window.close();

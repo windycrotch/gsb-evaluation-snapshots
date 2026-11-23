@@ -143,6 +143,9 @@ export function mountTranscriptEditor(options: TranscriptEditorOptions): () => v
   const selected = new Set<string>(), selectedCandidates = new Set<string>();
   const undo: Snapshot[] = [], redo: Snapshot[] = [];
   let previewRanges: { start: number; end: number }[] = [], previewIndex = 0, animation = 0, playbackEpoch = 0, playbackRequested = false;
+  // seekPending blocks clip-boundary advancement until the last issued seek
+  // actually lands; otherwise a stale currentTime skips reordered clips.
+  let seekPending = false, editorSession = 0, cancelling = false;
   let passageAnchor: { start: number; end: number } | null = null;
   let searchMatches: number[] = [], activeMatch = -1;
   const transcriptCards: HTMLElement[] = [];
@@ -190,7 +193,7 @@ export function mountTranscriptEditor(options: TranscriptEditorOptions): () => v
     undoButton.disabled = !loaded || busy || !undo.length;
     redoButton.disabled = !loaded || busy || !redo.length;
     closeButton.disabled = false; launch.disabled = false;
-    cancelButton.hidden = !activeTask; cancelButton.disabled = !activeTask;
+    cancelButton.hidden = !activeTask; cancelButton.disabled = !activeTask || cancelling;
     retryButton.hidden = loaded || loading;
     retryButton.disabled = loading;
     dialog.setAttribute('aria-busy', String(busy));
@@ -213,7 +216,10 @@ export function mountTranscriptEditor(options: TranscriptEditorOptions): () => v
   async function run(action: () => Promise<void>) {
     if (busy || disposed) return;
     flushCaptionDrafts(); setBusy(true);
-    try { await action(); } catch (error) { if (!disposed) status(error instanceof Error ? error.message : 'Something went wrong. Your existing edit is unchanged.', true); }
+    try { await action(); } catch (error) {
+      const aborted = error instanceof DOMException && error.name === 'AbortError';
+      if (!disposed && !aborted) status(error instanceof Error ? error.message : 'Something went wrong. Your existing edit is unchanged.', true);
+    }
     finally { if (!disposed) setBusy(false); }
   }
   const snapshot = (): Snapshot => clone({ document: editDocument, captions, settings, candidates });
@@ -225,9 +231,15 @@ export function mountTranscriptEditor(options: TranscriptEditorOptions): () => v
     await run(async () => { const data = await json('/edit-preview', { document: editDocument, action }); if (disposed) return; commit(readEditDocument(data.document), message); });
   }
   function pause() { playbackEpoch++; playbackRequested = false; video.pause(); window.cancelAnimationFrame(animation); animation = 0; }
+  /** Seek the source, remembering the in-flight seek so boundary logic waits for it. */
+  function seekSource(position: number) {
+    if (video.currentTime === position) return;
+    seekPending = true;
+    video.currentTime = position;
+  }
   function resetPreview() {
-    pause(); previewRanges = clone(editDocument.ranges); previewIndex = 0;
-    if (options.sourceUrl && previewRanges.length) video.currentTime = previewRanges[0].start;
+    pause(); previewRanges = clone(editDocument.ranges); previewIndex = 0; seekPending = false;
+    if (options.sourceUrl && previewRanges.length) seekSource(previewRanges[0].start);
   }
   function requestPlayback() {
     const epoch = ++playbackEpoch;
@@ -241,7 +253,7 @@ export function mountTranscriptEditor(options: TranscriptEditorOptions): () => v
     if (!options.sourceUrl || !ranges.length) { status('Original source playback is unavailable.', true); return; }
     previewRanges = clone(ranges);
     const point = editedPosition(previewRanges, position)!;
-    previewIndex = point.index; video.currentTime = point.sourceTime;
+    previewIndex = point.index; seekSource(point.sourceTime);
     requestPlayback();
   }
   function previewPosition() {
@@ -256,21 +268,23 @@ export function mountTranscriptEditor(options: TranscriptEditorOptions): () => v
   function seekPreview(delta: number) {
     const point = editedPosition(previewRanges, previewPosition() + delta);
     if (!point || !options.sourceUrl) return;
-    previewIndex = point.index; video.currentTime = point.sourceTime; syncPlayback();
+    previewIndex = point.index; seekSource(point.sourceTime); syncPlayback();
   }
   function syncPlayback() {
     window.cancelAnimationFrame(animation); animation = 0;
     const range = previewRanges[previewIndex];
-    if (range && !video.paused && video.currentTime >= range.end - 0.015) {
-      if (previewIndex + 1 < previewRanges.length) { previewIndex++; video.currentTime = previewRanges[previewIndex].start; }
-      else { pause(); video.currentTime = range.end; }
+    // Never advance on a stale position: a seek that has not landed yet (or is
+    // still being decoded) must not skip clips, especially reordered ones.
+    if (range && !video.paused && !seekPending && !video.seeking && video.currentTime >= range.end - 0.015) {
+      if (previewIndex + 1 < previewRanges.length) { previewIndex++; seekSource(previewRanges[previewIndex].start); }
+      else { pause(); seekSource(range.end); }
     }
     const elapsed = previewPosition();
     seek.max = String(Math.max(0.001, total(previewRanges))); seek.value = String(elapsed);
     clock.textContent = `Edit ${time(elapsed)} / ${time(total(previewRanges))} · Source ${time(video.currentTime)}`;
     captionPreview.textContent = captions.filter(cue => cue.start <= video.currentTime && cue.end > video.currentTime).map(cue => cue.text).filter(Boolean).join('\n');
     captionPreview.hidden = !settings.burn_captions || !captionPreview.textContent;
-    if (!video.paused && !disposed) animation = window.requestAnimationFrame(syncPlayback);
+    if (!video.paused && !disposed && dialog.open) animation = window.requestAnimationFrame(syncPlayback);
   }
 
   const launcher = el('div', 'te-launcher');
@@ -289,10 +303,13 @@ export function mountTranscriptEditor(options: TranscriptEditorOptions): () => v
   const statusNode = el('p', 'te-status', 'Open the editor to load your source transcript.'); statusNode.setAttribute('role', 'status'); statusNode.setAttribute('aria-live', 'polite');
   const retryButton = button('Retry loading', () => load()); retryButton.hidden = true;
   const cancelButton = button('Cancel task', async () => {
-    if (!activeTask) return;
-    cancelButton.disabled = true;
-    try { await json(`/cancel/${encodeURIComponent(activeTask)}`, {}); status('Cancellation requested. Waiting for the task to stop…'); }
-    catch (error) { status(error instanceof Error ? error.message : 'Cancellation failed.', true); cancelButton.disabled = false; }
+    if (!activeTask || cancelling) return;
+    // Keep the interface busy until the worker reports a terminal state; only
+    // then is the next operation allowed to start.
+    cancelling = true; refreshControls();
+    try { await json(`/cancel/${encodeURIComponent(activeTask)}`, {}); if (!disposed) status('Cancellation requested. Waiting for the task to stop…'); }
+    catch (error) { cancelling = false; if (!disposed) status(error instanceof Error ? error.message : 'Cancellation failed.', true); }
+    if (!disposed) refreshControls();
   }); cancelButton.hidden = true;
   statusBar.append(statusNode, retryButton, cancelButton);
   const shortcutHelp = el('details', 'te-shortcuts');
@@ -319,13 +336,18 @@ export function mountTranscriptEditor(options: TranscriptEditorOptions): () => v
   listen(video, 'play', () => { if (!playbackRequested || disposed || !dialog.open || busy) { pause(); return; } window.cancelAnimationFrame(animation); syncPlayback(); });
   listen(video, 'pause', () => { playbackRequested = false; window.cancelAnimationFrame(animation); animation = 0; });
   listen(video, 'ended', () => {
-    if (disposed || !dialog.open || busy) return;
-    if (previewIndex + 1 < previewRanges.length) { previewIndex++; video.currentTime = previewRanges[previewIndex].start; requestPlayback(); }
+    if (disposed || !dialog.open || busy || seekPending) return;
+    if (previewIndex + 1 < previewRanges.length) { previewIndex++; seekSource(previewRanges[previewIndex].start); requestPlayback(); }
     else syncPlayback();
   });
-  listen(video, 'seeked', () => { if (video.paused) syncPlayback(); });
+  listen(video, 'seeked', () => { seekPending = false; syncPlayback(); });
+  // timeupdate keeps cut boundaries and the clock honest in background tabs,
+  // where requestAnimationFrame is suspended but playback continues.
+  listen(video, 'timeupdate', () => { if (!video.paused && !disposed && dialog.open) syncPlayback(); });
   listen(video, 'error', () => status('The source video could not load. Editing remains available; check that the recording still exists.', true));
-  listen(seek, 'input', () => { const point = editedPosition(previewRanges, Number(seek.value)); if (point) { previewIndex = point.index; video.currentTime = point.sourceTime; } });
+  listen(seek, 'input', () => { const point = editedPosition(previewRanges, Number(seek.value)); if (point) { previewIndex = point.index; seekSource(point.sourceTime); } });
+  // A hidden tab must not keep advancing the preview or mutating the interface.
+  listen(document, 'visibilitychange', () => { if (document.hidden) pause(); });
 
   const presetBox = el('section', 'te-presets'); presetBox.setAttribute('aria-label', 'Export presets');
   presetBox.append(el('h3', '', 'Export presets'), el('p', 'te-muted', 'One click sets framing and captions. Review the crop, fine-tune below, then export. Undo restores your previous settings.'));
@@ -384,7 +406,18 @@ export function mountTranscriptEditor(options: TranscriptEditorOptions): () => v
   workspace.append(tabs, ...panels.values()); activate('Sequence');
   body.append(preview, workspace);
   dialog.append(header, statusBar, shortcutHelp, body); container.append(launcher, dialog);
-  listen(dialog, 'close', () => { pause(); if (loaded && !busy) flushCaptionDrafts(); });
+  listen(dialog, 'close', () => {
+    // Closing ends the editing session: playback stops, polling stops, and the
+    // server-side task is asked to cancel so no late export or status update
+    // can touch the interface afterwards.
+    editorSession++;
+    pause();
+    if (activeTask) {
+      void json(`/cancel/${encodeURIComponent(activeTask)}`, {}).catch(() => { /* The worker may already be gone. */ });
+      status('Closing cancelled the running task. Your edit is unchanged.');
+    }
+    if (loaded && !busy) flushCaptionDrafts();
+  });
   listen(dialog, 'keydown', event => {
     const key = event as KeyboardEvent;
     if (key.defaultPrevented || key.isComposing || key.repeat || disposed || !dialog.open || !loaded || busy) return;
@@ -536,7 +569,7 @@ export function mountTranscriptEditor(options: TranscriptEditorOptions): () => v
     const index = searchMatches[activeMatch], cue = transcript[index];
     if (!cue) return;
     pause(); choosePassage(cue, false);
-    if (options.sourceUrl) { previewRanges = [{ start: cue.start, end: cue.end }]; previewIndex = 0; video.currentTime = cue.start; syncPlayback(); }
+    if (options.sourceUrl) { previewRanges = [{ start: cue.start, end: cue.end }]; previewIndex = 0; seekSource(cue.start); syncPlayback(); }
     transcriptCards[index]?.scrollIntoView?.({ block: 'nearest' });
   }
   function updateSearch(reset = false, seekToMatch = false) {
@@ -649,31 +682,52 @@ export function mountTranscriptEditor(options: TranscriptEditorOptions): () => v
         return { ...cue, words };
       });
       loaded = true; previewRanges = clone(editDocument.ranges); if (options.sourceUrl) video.src = options.sourceUrl;
-      if (Array.isArray(data.exports)) data.exports.forEach((output, index) => { if (record(output)) outputLink(output.output_file, `Previous export ${index + 1}${finite(output.size) ? ` · ${(output.size / 1024 / 1024).toFixed(1)} MB` : ''}`); });
       render(); status('Ready. Source media and the original transcript stay unchanged.');
     } catch (error) { if (!disposed) status(error instanceof Error ? error.message : 'Could not load the editor. Retry when the server is ready.', true); }
     finally { loading = false; if (!disposed) setBusy(false); }
   }
   listen(video, 'loadedmetadata', renderSettings);
   async function wait(milliseconds: number) { await new Promise<void>((resolve, reject) => { const timer = window.setTimeout(() => { signal.removeEventListener('abort', abort); resolve(); }, milliseconds); const abort = () => { window.clearTimeout(timer); reject(new DOMException('Aborted', 'AbortError')); }; signal.addEventListener('abort', abort, { once: true }); }); }
+  /** Resolve once the tab is visible again; a hidden tab suspends polling. */
+  async function awaitVisible() {
+    if (!document.hidden) return;
+    await new Promise<void>(resolve => {
+      const done = () => { document.removeEventListener('visibilitychange', visible); signal.removeEventListener('abort', done); resolve(); };
+      const visible = () => { if (!document.hidden) done(); };
+      document.addEventListener('visibilitychange', visible);
+      signal.addEventListener('abort', done, { once: true });
+    });
+  }
   async function task(path: string, payload: unknown): Promise<Record<string, unknown>> {
     const started = await json(path, payload);
     if (typeof started.task_id !== 'string') return started;
-    activeTask = started.task_id; refreshControls();
+    activeTask = started.task_id; cancelling = false; refreshControls();
+    // The poll loop belongs to this editing session; closing the dialog ends it.
+    const taskSession = editorSession;
     let failures = 0;
     try {
-      while (!disposed) {
+      while (!disposed && editorSession === taskSession) {
         await wait(failures ? Math.min(10000, failures * 2000) : 1000);
+        await awaitVisible();
+        if (disposed || editorSession !== taskSession) break;
         let data: Record<string, unknown>;
         try { data = await json(`/processing-status/${encodeURIComponent(activeTask)}`); failures = 0; }
-        catch (error) { if (disposed || record(error) && (error.status === 404 || error.status === 403)) throw error; failures++; status('Task status temporarily unavailable. Reconnecting… The task may still be running.', true); continue; }
+        catch (error) {
+          if (disposed || editorSession !== taskSession) throw new DOMException('Aborted', 'AbortError');
+          if (record(error) && (error.status === 404 || error.status === 403)) {
+            // A vanished task after a cancellation request means it has stopped.
+            if (cancelling && error.status === 404) throw new Error('Task cancelled. Your edit is unchanged.');
+            throw error;
+          }
+          failures++; status('Task status temporarily unavailable. Reconnecting… The task may still be running.', true); continue;
+        }
         if (['complete', 'completed', 'done'].includes(String(data.status))) return record(data.result) ? { ...data, ...data.result } : data;
         if (['cancelled', 'canceled'].includes(String(data.status))) throw new Error('Task cancelled. Your edit is unchanged.');
         if (data.status === 'error' || data.status === 'failed') throw new Error(String(data.message ?? 'The task failed. Your edit is unchanged.'));
         status(`${typeof data.message === 'string' ? data.message : 'Working…'}${finite(data.progress) ? ` (${Math.round(data.progress)}%)` : ''}`);
       }
       throw new DOMException('Aborted', 'AbortError');
-    } finally { activeTask = ''; if (!disposed) refreshControls(); }
+    } finally { activeTask = ''; cancelling = false; if (!disposed) refreshControls(); }
   }
   async function generateCandidates() {
     await run(async () => {
@@ -691,10 +745,12 @@ export function mountTranscriptEditor(options: TranscriptEditorOptions): () => v
     if (typeof path !== 'string') return false;
     let url: URL; try { url = new URL(path, window.location.origin); } catch { return false; }
     if (url.origin !== window.location.origin || !(url.pathname.startsWith(`${prefix}/final/`) || url.pathname.startsWith('/final/'))) return false;
-    const link = el('a', 'download-link', label); link.href = url.href; link.download = ''; downloads.append(link); return true;
+    const link = el('a', 'download-link', label); link.href = url.href; link.download = ''; link.dataset.render = 'video'; downloads.append(link); return true;
   }
   async function renderExport(individual: boolean) {
     await run(async () => {
+      // Download links may only ever point at this render's successful outputs.
+      downloads.querySelectorAll('a[data-render]').forEach(link => link.remove());
       status(individual ? 'Rendering individual edited clips…' : 'Rendering the edited reel…');
       const result = await task('/render', { document: editDocument, captions, settings, individual }); if (disposed) return;
       let count = 0;

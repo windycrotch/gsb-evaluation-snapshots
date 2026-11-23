@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -128,6 +129,48 @@ class EditorAPI(unittest.TestCase):
         self.assertEqual(list(Path(self.paths['HIGHLIGHTS_DIR']).glob('*.mp4')), [])
         self.assertIsNone(self.backend._workspace_owner)
         self.assertEqual(self.post('candidates', {'instructions': 123}).status_code, 400)
+        self.assertIsNone(self.backend._workspace_owner)
+
+    def test_editor_lists_only_successful_render_exports(self):
+        highlights = Path(self.paths['HIGHLIGHTS_DIR'])
+        jobs = Path(self.paths['MANIFEST_DIR']) / 'jobs'
+        jobs.mkdir(parents=True, exist_ok=True)
+
+        def job(task, status):
+            (jobs / f'{task}.json').write_text(json.dumps(
+                {'task_id': task, 'project_id': self.project['id'], 'server_instance': 'fixture', 'result': {'status': status}}))
+
+        done, failed, orphan = 'render_' + 'a' * 32, 'render_' + 'b' * 32, 'render_' + 'c' * 32
+        for name in (f'{done}_1.mp4', f'{failed}_1.mp4', f'{orphan}_1.mp4', '0.mp4'):
+            (highlights / name).write_bytes(b'fixture')
+        job(done, 'complete')
+        job(failed, 'error')
+        exports = self.client.get(self.prefix + '/api/editor').json['exports']
+        # Only the completed render is downloadable: failed, orphaned and
+        # imported source clips never appear as exports.
+        self.assertEqual([row['output_file'] for row in exports], [f'{self.prefix}/final/{done}_1.mp4'])
+
+    def test_cancelled_render_publishes_no_download(self):
+        started = threading.Event()
+        release = threading.Event()
+
+        def export(source, ranges, output, **kwargs):
+            started.set()
+            self.assertTrue(release.wait(15))
+            Path(output).write_bytes(b'partial fixture')
+            raise RuntimeError('Export cancelled.')
+
+        with patch('editor_api.export_source_ranges', side_effect=export):
+            response = self.post('render', {'document': self.document(), 'captions': []})
+            self.assertEqual(response.status_code, 200, response.json)
+            task = response.json['task_id']
+            self.assertTrue(started.wait(15))
+            self.assertEqual(self.post('cancel/' + task, {}).status_code, 200)
+            release.set()
+            result = self.wait(task)
+        self.assertEqual(result['status'], 'cancelled')
+        self.assertEqual(list(Path(self.paths['HIGHLIGHTS_DIR']).glob('*.mp4')), [])
+        self.assertEqual(self.client.get(self.prefix + '/api/editor').json['exports'], [])
         self.assertIsNone(self.backend._workspace_owner)
 
     @unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'), 'ffmpeg is required')

@@ -6,6 +6,7 @@ JSON, avoiding server-side edits racing the user's draft in another window.
 """
 import json
 from pathlib import Path
+import re
 import threading
 from uuid import uuid4
 from flask import jsonify, request, Response
@@ -49,6 +50,15 @@ def register_editor_api(app, backend):
     def document_from(data, manifest, current):
         return validate_edits(data.get('document', current), manifest['segments'])
 
+    def finished_export(name):
+        """Only a render job that reached a terminal success may appear as a
+        download. Partial, cancelled, crashed or foreign files stay hidden."""
+        match = re.fullmatch(r'(render_[a-f0-9]{32})_\d+\.mp4', name)
+        if not match:
+            return False
+        job = b['read_persisted_job'](match.group(1))
+        return isinstance(job, dict) and job.get('status') == 'complete'
+
     @app.route('/api/editor')
     def editor_state():
         try:
@@ -60,7 +70,7 @@ def register_editor_api(app, backend):
                 source = None
             exports = [dict(output_file='/final/' + output.name, size=output.stat().st_size)
                        for output in sorted(Path(p['HIGHLIGHTS_DIR']).glob('*.mp4'), key=lambda output: output.stat().st_mtime, reverse=True)
-                       if output.is_file() and not output.is_symlink()]
+                       if output.is_file() and not output.is_symlink() and finished_export(output.name)]
             return jsonify(document=document, captions=captions, transcript=transcript, source=source, exports=exports,
                            settings=state.get('export_settings', {}), candidates=state.get('candidates', []))
         except (OSError, ValueError, KeyError, TypeError) as error:
