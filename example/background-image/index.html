@@ -1,0 +1,123 @@
+<head>
+  <style>
+    body { margin: 0; font: 12px sans-serif; }
+    #controls { position: fixed; top: 0; left: 0; z-index: 10; background: rgba(0,0,0,.7); color: #eee; padding: 8px; display: flex; flex-direction: column; gap: 6px; }
+    #controls label, #controls button, #controls select { font-size: 12px; }
+    #myscene { position: absolute; inset: 0; }
+    #log { position: fixed; bottom: 0; right: 0; z-index: 10; max-height: 30vh; width: 380px; overflow: auto; background: rgba(0,0,0,.75); color: #9f9; padding: 6px; white-space: pre-wrap; }
+  </style>
+
+  <script type="importmap">{ "imports": {
+    "three": "https://esm.sh/three@0.187.0"
+  }}</script>
+  <script type="module">
+    import * as THREE from 'three';
+    window.THREE = THREE;
+  </script>
+
+  <script src="//cdn.jsdelivr.net/npm/three-render-objects" defer></script>
+<!--  <script src="../../dist/three-render-objects.js" defer></script>-->
+</head>
+
+<body>
+  <div id="myscene"></div>
+
+  <div id="controls">
+    <label>
+      Background image:
+      <select id="bg">
+        <option value="">(none)</option>
+        <option value="https://picsum.photos/id/1043/1600/900">mountains (slow-ish)</option>
+        <option value="https://picsum.photos/id/1015/1600/900">river</option>
+        <option value="https://picsum.photos/id/1016/1600/900">canyon</option>
+        <option value="https://example.invalid/missing.jpg">broken url (fails)</option>
+      </select>
+    </label>
+    <label>
+      <input type="checkbox" id="wait" checked> waitForLoadComplete
+    </label>
+    <button id="fit">zoomToFit (600ms)</button>
+    <button id="fitNow">zoomToFit (immediate)</button>
+    <button id="spin">camera orbit (slow, interruptible)</button>
+    <button id="destroy">_destructor</button>
+    <button id="reload">reload page</button>
+  </div>
+
+  <div id="log"></div>
+
+  <script type="module">
+    import * as THREE from 'three';
+
+    const logEl = document.getElementById('log');
+    const log = msg => { logEl.textContent += `${(performance.now() / 1000).toFixed(2)}s  ${msg}\n`; logEl.scrollTop = logEl.scrollHeight; };
+
+    // Gen random positioned objects
+    const N = 300;
+    const COORD_RANGE = 300;
+
+    const objs = [...Array(N)].map(() => new THREE.Mesh(
+      new THREE.SphereGeometry(12, 16, 16),
+      new THREE.MeshNormalMaterial({ wireframe: true })
+    ));
+
+    objs.forEach(obj => {
+      ['x', 'y', 'z'].forEach(dim => obj.position[dim] = Math.random() * COORD_RANGE * 2 - COORD_RANGE);
+    });
+
+    let ObjRender;
+
+    const build = () => {
+      ObjRender = new ThreeRenderObjects(
+        document.getElementById('myscene'),
+        {
+          controlType: 'trackball',
+          waitForLoadComplete: document.getElementById('wait').checked
+        }
+      )
+        .objects(objs)
+        .onBackgroundImageLoaded(() => log('onBackgroundImageLoaded fired'));
+    };
+
+    build();
+
+    (function animate() {
+      ObjRender.tick(); // render it
+      requestAnimationFrame(animate);
+    })(); // IIFE
+
+    document.getElementById('bg').addEventListener('change', ev => {
+      log(`backgroundImageUrl -> ${ev.target.value || '(none)'}`);
+      ObjRender.backgroundImageUrl(ev.target.value || null);
+    });
+
+    document.getElementById('fit').addEventListener('click', () => {
+      log('zoomToFit(600ms)');
+      ObjRender.zoomToFit(600);
+    });
+
+    document.getElementById('fitNow').addEventListener('click', () => {
+      log('zoomToFit(0ms)');
+      ObjRender.zoomToFit();
+    });
+
+    document.getElementById('spin').addEventListener('click', () => {
+      log('cameraPosition orbit start (4000ms) — click again to interrupt');
+      const angle = Math.random() * Math.PI * 2;
+      const r = 1200;
+      ObjRender.cameraPosition(
+        { x: Math.cos(angle) * r, y: 600, z: Math.sin(angle) * r },
+        { x: 0, y: 0, z: 0 },
+        4000
+      );
+    });
+
+    document.getElementById('destroy').addEventListener('click', () => {
+      log('_destructor()');
+      ObjRender._destructor();
+    });
+
+    document.getElementById('reload').addEventListener('click', () => location.reload());
+
+    log('ready — switch the background image rapidly while moving the camera to exercise the fixes');
+  </script>
+</body>

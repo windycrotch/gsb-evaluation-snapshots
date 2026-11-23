@@ -43,7 +43,8 @@
   "scripts": {
     "build": "rimraf dist && rollup -c",
     "dev": "rollup -w -c rollup.config.dev.js",
-    "prepare": "npm run build"
+    "prepare": "npm run build",
+    "test": "node --test \"test/*.test.mjs\""
   },
   "dependencies": {
     "@tweenjs/tween.js": "18 - 25",
@@ -64,6 +65,7 @@
     "@rollup/plugin-terser": "^1.0.2",
     "@types/react": "^19.3.0",
     "@typescript/typescript6": "^6.0.2",
+    "jsdom": "^31.0.1",
     "postcss": "^8.5.32",
     "rimraf": "^6.1.4",
     "rollup": "^4.68.0",

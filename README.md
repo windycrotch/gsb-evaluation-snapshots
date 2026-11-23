@@ -59,8 +59,8 @@ new ThreeRenderObjects(<domElement>, { configOptions })
 | <b>viewOffset</b>([<i>[number, number]</i>]) | Getter/setter for the canvas center offset (`x`, `y`). | `[0, 0]` |
 | <b>skyRadius</b>([<i>number</i>]) | Radius of the sphere that bounds the scene, in GL units. | 50000 |
 | <b>backgroundColor</b>([<i>str</i>]) | Getter/setter for the canvas background color. | `#000011` |
-| <b>backgroundImageUrl</b>([<i>url</i>]) | Getter/setter for the URL of the image to be used as scene background. If no image is provided, the background color is shown instead. | `null` |
-| <b>onBackgroundImageLoaded</b>([<i>fn</i>]) | Callback function triggered when the background image has finished loading asynchronously and is rendered on the scene. ||
+| <b>backgroundImageUrl</b>([<i>url</i>]) | Getter/setter for the URL of the image to be used as scene background. If no image is provided, the background color is shown instead. When the URL is changed, the previous image's texture is released immediately. If several URLs are set in quick succession, only the last one takes effect; superseded requests are discarded (they never replace the image nor fire the load callback). | `null` |
+| <b>onBackgroundImageLoaded</b>([<i>fn</i>]) | Callback function triggered when the background image has finished loading asynchronously and is rendered on the scene. Fires at most once per accepted URL: setting a newer URL (or clearing it) before the callback runs discards the pending callback. ||
 | <b>showNavInfo</b>([<i>boolean</i>]) | Getter/setter for whether to show the navigation controls footer info. | `true` |
 
 ### Render control
@@ -68,7 +68,7 @@ new ThreeRenderObjects(<domElement>, { configOptions })
 | Method | Description | Default |
 | --- | --- | :--: |
 | <b>tick</b>() | Re-render all the objects on the canvas. Essentially this method should be called at every frame, and can be used to control the animation ticks. ||
-| <b>cameraPosition</b>([<i>{x,y,z}</i>], [<i>lookAt</i>], [<i>ms</i>]) | Getter/setter for the camera position, in terms of `x`, `y`, `z` coordinates. Each of the coordinates is optional, allowing for motion in just some dimensions. The optional second argument can be used to define the direction that the camera should aim at, in terms of an `{x,y,z}` point in the 3D space at the distance of `1000` away from the camera. The 3rd optional argument defines the duration of the transition (in <i>ms</i>) to animate the camera motion. A value of `0` (default) moves the camera immediately to the final position. | By default the camera will face the center of the graph at a `z` distance of `1000`. |
+| <b>cameraPosition</b>([<i>{x,y,z}</i>], [<i>lookAt</i>], [<i>ms</i>]) | Getter/setter for the camera position, in terms of `x`, `y`, `z` coordinates. Each of the coordinates is optional, allowing for motion in just some dimensions. The optional second argument can be used to define the direction that the camera should aim at, in terms of an `{x,y,z}` point in the 3D space at the distance of `1000` away from the camera. The 3rd optional argument defines the duration of the transition (in <i>ms</i>) to animate the camera motion. A value of `0` (default) moves the camera immediately to the final position. If a camera animation is already running, it is stopped in place (the camera continues from wherever it currently is) and only the new call determines the final position. | By default the camera will face the center of the graph at a `z` distance of `1000`. |
 | <b>zoomToFit</b>([<i>ms</i>], [<i>px</i>], [<i>objFilterFn</i>], [<i>preserveLookDirection</i>]) | Automatically moves the camera so that all of the objects in the scene become visible within its field of view. If no objects are found no action is taken. It accepts four optional arguments: the first defines the duration of the transition (in ms) to animate the camera motion (default: 0ms). The second argument is the amount of padding (in px) between the edge of the canvas and the outermost object position (default: 10px). The third argument specifies a custom object filter: `obj => <boolean>`, which should return a truthy value if the object is to be included. This can be useful for focusing on a portion of the scene. The fourth defines if the current looking direction should be preserved, thus performing simply a zoom in/out, or if the camera is allowed to rotate in order to center the objects in the scene (default). | `(0, 10, obj => true, false)` |
 | <b>fitToBbox</b>(<i>bbox</i>, [<i>ms</i>], [<i>px</i>], [<i>preserveLookDirection</i>]) | Automatically moves the camera to fit the specified bounding box within its field of view. The bounding box should follow the syntax `{ x: [<num>, <num>], y: [<num>, <num>], z: [<num>, <num>] }`. If no bounding box is specified no action is taken. It accepts three optional arguments: the first defines the duration of the transition (in ms) to animate the camera motion (default: 0ms). The second argument is the amount of padding (in px) between the edge of the canvas and the outermost object position (default: 10px). The third defines if the current looking direction should be preserved, thus performing simply a zoom in/out, or if the camera is allowed to rotate in order to center the view on the bounding box (default). | `(0, 10, false)` |
 | <b>postProcessingComposer</b>() | Access the [post-processing composer](https://threejs.org/docs/#examples/en/postprocessing/EffectComposer). Use this to add post-processing [rendering effects](https://github.com/mrdoob/three.js/tree/dev/examples/jsm/postprocessing) to the scene. By default the composer has a single pass ([RenderPass](https://github.com/mrdoob/three.js/blob/dev/examples/jsm/postprocessing/RenderPass.js)) that directly renders the scene without any effects. || 
@@ -103,6 +103,26 @@ new ThreeRenderObjects(<domElement>, { configOptions })
 | <b>getScreenCoords</b>(<i>x</i>, <i>y</i>, <i>z</i>) | Utility method to translate 3D coordinates to the viewport domain. Given a set of `x`,`y`,`z` coordinates, returns the current equivalent `{x, y}` in viewport coordinates. |
 | <b>getSceneCoords</b>(<i>x</i>, <i>y</i>, <i>distance</i>) | Utility method to translate viewport distance coordinates to the scene 3D domain. Given a set of `x`,`y` viewport coordinates and distance from the camera, returns the current equivalent `{x, y, z}` in 3D scene coordinates. If no distance is provided, defaults to `0`. |
 | <b>intersectingObjects</b>(<i>x</i>, <i>y</i>) | Utility method to retrieve the list of objects under the line of sight of the given viewport coordinates. Returns an array of [intersectObject](https://threejs.org/docs/#api/en/core/Raycaster.intersectObject), sorted by distance (from closest to farthest). |
+
+## Testing
+
+The background-image and camera-control concurrency behaviour is covered by a local test suite
+that runs the component under Node with [jsdom](https://github.com/jsdom/jsdom) (a stubbed
+WebGL renderer and a controllable fake image loader make the async timing deterministic):
+
+```shell
+npm install
+npm test
+```
+
+The suite covers the successful load path, load failure and clearing, rapid consecutive URL
+switches with out-of-order responses, camera animations interrupted by `cameraPosition` /
+`fitToBbox` / `zoomToFit`, teardown cleanup, and the `waitForLoadComplete` first-frame baseline.
+`test/baseline-comparison.test.mjs` additionally runs the pre-change implementation as a fixture
+to prove the tests actually detect the fixed bugs.
+
+An interactive browser demo is available at [`example/background-image`](example/background-image/index.html):
+switch the background image rapidly while moving the camera to observe the corrected behaviour.
 
 [npm-img]: https://img.shields.io/npm/v/three-render-objects
 [npm-url]: https://npmjs.org/package/three-render-objects

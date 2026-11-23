@@ -66,13 +66,126 @@ import Tooltip from 'float-tooltip';
 
 import { emptyObject } from './three-gc.js';
 
+const CAMERA_TWEEN_KEYS = ['povPosTween', 'povTgtTween'];
+
+// Stops and detaches any in-flight camera animations, leaving the camera at its current
+// (possibly mid-animation) position. Used whenever a newer camera command supersedes them.
+const stopCameraTweens = state => {
+  CAMERA_TWEEN_KEYS.forEach(key => {
+    const tween = state[key];
+    if (tween) {
+      tween.stop();
+      state.tweenGroup.remove(tween);
+      state[key] = undefined;
+    }
+  });
+};
+
+// Invalidates any in-flight background image load and drops its pending load callback.
+const cancelBackgroundImageRequest = state => {
+  state.bgImageRequestId++;
+
+  if (state.bgImageCallbackTimer !== undefined) {
+    clearTimeout(state.bgImageCallbackTimer);
+    state.bgImageCallbackTimer = undefined;
+  }
+};
+
+// Releases the currently applied background texture and hides the sky sphere, so no stale
+// image can linger after switching or clearing the background image url.
+const releaseBackgroundImage = state => {
+  const texture = state.bgImageTexture;
+
+  if (state.bgImageMaterial) {
+    state.bgImageMaterial.map = null;
+    state.bgImageMaterial.needsUpdate = true;
+  }
+
+  state.bgImageTexture = undefined;
+  texture?.dispose();
+
+  if (state.skysphere) {
+    state.skysphere.visible = false;
+  }
+};
+
+// Marks the (initial) asynchronous loading stage as done and reveals the scene.
+const finishLoad = state => {
+  state.loadComplete = state.scene.visible = true;
+};
+
+// Applies the current backgroundImageUrl, discarding any previous request so that only the
+// latest url can take effect. Runs within the scene's update cycle, keeping the background
+// image state consistent with the camera and the rest of the render state.
+const applyBackgroundImage = state => {
+  const url = state.backgroundImageUrl;
+
+  // Invalidate any previous in-flight load and drop its deferred onBackgroundImageLoaded callback
+  cancelBackgroundImageRequest(state);
+
+  // A switch or a clear must never leave the previous texture behind
+  releaseBackgroundImage(state);
+
+  if (!url) {
+    // Clearing the url should never keep the scene hidden forever
+    finishLoad(state);
+    return;
+  }
+
+  const requestId = state.bgImageRequestId;
+
+  new three.TextureLoader().load(
+    url,
+    texture => {
+      if (state.destroyed || requestId !== state.bgImageRequestId) {
+        // Superseded by a newer url or destroyed: drop the stale texture instead of applying it
+        texture.dispose();
+        return;
+      }
+
+      texture.colorSpace = three.SRGBColorSpace;
+
+      state.bgImageTexture = texture;
+      state.bgImageMaterial.map = texture;
+      state.bgImageMaterial.needsUpdate = true;
+      state.skysphere.visible = true;
+
+      // triggered when background image finishes loading (async to allow 1 frame to load texture)
+      const onLoaded = state.onBackgroundImageLoaded;
+      if (onLoaded) {
+        state.bgImageCallbackTimer = setTimeout(() => {
+          state.bgImageCallbackTimer = undefined;
+          if (state.destroyed || requestId !== state.bgImageRequestId) return;
+          onLoaded();
+        });
+      }
+
+      finishLoad(state);
+    },
+    undefined,
+    () => {
+      // Load failed: discard the request and make sure the scene is not left hidden forever
+      if (state.destroyed || requestId !== state.bgImageRequestId) return;
+
+      releaseBackgroundImage(state);
+      finishLoad(state);
+    }
+  );
+};
+
 export default Kapsule({
   props: {
     width: { default: window.innerWidth, onChange(width, state, prevWidth) { isNaN(width) && (state.width = prevWidth) } },
     height: { default: window.innerHeight, onChange(height, state, prevHeight) { isNaN(height) && (state.height = prevHeight) } },
     viewOffset: { default: [0, 0] },
     backgroundColor: { default: '#000011' },
-    backgroundImageUrl: {},
+    backgroundImageUrl: {
+      onChange(_, state) {
+        // Invalidate any in-flight load (and its deferred callback) as soon as a new url is
+        // requested, so a slower earlier request can never win against the latest one.
+        cancelBackgroundImageRequest(state);
+      }
+    },
     onBackgroundImageLoaded: {},
     showNavInfo: { default: true },
     skyRadius: { default: 50000 },
@@ -102,7 +215,7 @@ export default Kapsule({
 
   methods: {
     tick: function(state) {
-      if (state.initialised) {
+      if (state.initialised && !state.destroyed) {
         state.controls.enabled && state.controls.update?.(Math.min(1, state.timer.update().getDelta())); // timedelta is required for fly controls
 
         state.postProcessingComposer
@@ -147,13 +260,13 @@ export default Kapsule({
       const camera = state.camera;
 
       // Setter
-      if (position && state.initialised) {
+      if (position && state.initialised && !state.destroyed) {
         const finalPos = position;
         const finalLookAt = lookAt || {x: 0, y: 0, z: 0};
 
-        // cancel any ongoing pov animation
-        state.povPosTween?.end();
-        state.povTgtTween?.end();
+        // cancel any ongoing pov animation, without snapping the camera to its destination.
+        // The last call wins: older animations must not continue or re-apply their target.
+        stopCameraTweens(state);
 
         if (!transitionDuration) { // no animation
           setCameraPos(finalPos);
@@ -168,7 +281,7 @@ export default Kapsule({
               .easing(Easing.Quadratic.Out)
               .onUpdate(setCameraPos)
               .onComplete(function() {
-                state.povPosTween = undefined;
+                if (state.povPosTween === this) state.povPosTween = undefined;
                 state.tweenGroup.remove(this);
               })
               .start()
@@ -181,7 +294,7 @@ export default Kapsule({
               .easing(Easing.Quadratic.Out)
               .onUpdate(setLookAt)
               .onComplete(function() {
-                state.povTgtTween = undefined;
+                if (state.povTgtTween === this) state.povTgtTween = undefined;
                 state.tweenGroup.remove(this);
               })
               .start()
@@ -226,7 +339,7 @@ export default Kapsule({
     fitToBbox: function (state, bbox, transitionDuration = 0, padding = 10, preserveLookDirection = false) {
       const camera = state.camera;
 
-      if (bbox) {
+      if (bbox && !state.destroyed) {
         camera.updateMatrixWorld();
         const camRight = new three.Vector3();
         const camUp = new three.Vector3();
@@ -328,6 +441,16 @@ export default Kapsule({
     postProcessingComposer: state => state.postProcessingComposer,
     controls: state => state.controls,
     _destructor: function(state) {
+      state.destroyed = true;
+
+      // Stop any camera animation and prevent its callbacks from firing post-teardown
+      stopCameraTweens(state);
+      state.tweenGroup.removeAll();
+
+      // Invalidate in-flight background image loads and pending deferred callbacks
+      cancelBackgroundImageRequest(state);
+      releaseBackgroundImage(state);
+
       emptyObject(state.scene);
       state.controls?.dispose();
       state.renderer?.dispose();
@@ -340,7 +463,14 @@ export default Kapsule({
     camera: new three.PerspectiveCamera(),
     timer: new three.Timer(),
     tweenGroup: new TweenGroup(),
-    lastRaycasterCheck: 0
+    lastRaycasterCheck: 0,
+
+    // Background image request bookkeeping. A monotonically increasing id tags each load so
+    // that stale (superseded) loads can be recognised and discarded.
+    bgImageRequestId: 0,
+    bgImageTexture: undefined,
+    bgImageCallbackTimer: undefined,
+    destroyed: false
   }),
 
   init(domNode, state, {
@@ -414,6 +544,7 @@ export default Kapsule({
       }
 
       requestAnimationFrame(() => { // trigger click events asynchronously, to allow hoverObj to be set (on frame)
+        if (state.destroyed) return; // don't fire callbacks after teardown
         if (ev.button === 0) { // left-click
           state.onClick(state.hoverObj || null, ev, state.intersection) // trigger background clicks with null
         }
@@ -489,6 +620,7 @@ export default Kapsule({
 
     // add sky
     state.scene.add(state.skysphere = new three.Mesh());
+    state.skysphere.material = state.bgImageMaterial = new three.MeshBasicMaterial({ side: three.BackSide });
     state.skysphere.visible = false;
     state.loadComplete = state.scene.visible = !waitForLoadComplete;
 
@@ -496,6 +628,8 @@ export default Kapsule({
   },
 
   update(state, changedProps) {
+    if (state.destroyed) return; // no state changes or renders after teardown
+
     // resize canvas
     if (state.width && state.height && (changedProps.hasOwnProperty('width') || changedProps.hasOwnProperty('height'))) {
       const w = state.width;
@@ -536,23 +670,7 @@ export default Kapsule({
     }
 
     if (changedProps.hasOwnProperty('backgroundImageUrl')) {
-      if (!state.backgroundImageUrl) {
-        state.skysphere.visible = false;
-        state.skysphere.material.map = null;
-
-        !state.loadComplete && finishLoad();
-      } else {
-        new three.TextureLoader().load(state.backgroundImageUrl, texture => {
-          texture.colorSpace = three.SRGBColorSpace;
-          state.skysphere.material = new three.MeshBasicMaterial({ map: texture, side: three.BackSide });
-          state.skysphere.visible = true;
-
-          // triggered when background image finishes loading (asynchronously to allow 1 frame to load texture)
-          state.onBackgroundImageLoaded && setTimeout(state.onBackgroundImageLoaded);
-
-          !state.loadComplete && finishLoad();
-        });
-      }
+      applyBackgroundImage(state);
     }
 
     changedProps.hasOwnProperty('showNavInfo') && (state.navInfo.style.display = state.showNavInfo ? null : 'none');
@@ -565,12 +683,6 @@ export default Kapsule({
     if (changedProps.hasOwnProperty('objects')) {
       (changedProps.objects || []).forEach(obj => state.scene.remove(obj)); // Clear the place
       state.objects.forEach(obj => state.scene.add(obj)); // Add to scene
-    }
-
-    //
-
-    function finishLoad() {
-      state.loadComplete = state.scene.visible = true;
     }
   }
 });
