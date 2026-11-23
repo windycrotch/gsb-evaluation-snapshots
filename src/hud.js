@@ -47,7 +47,7 @@ export function showScreen(name) {
   if (menu) menu.focus(0);
   activeMenu = menu || null;
 }
-export function hideScreens() { for (const s of SCREENS) EL[s].classList.remove('on'); activeMenu = null; }
+export function hideScreens() { for (const s of SCREENS) EL[s].classList.remove('on'); activeMenu = null; menuStack.length = 0; }
 export function hudVisible(on) { EL.hud.classList.toggle('on', on); if (!on) { ctx.clearRect(0, 0, EL.hudc.width, EL.hudc.height); } EL.touch.classList.toggle('on', on && Input.touchEnabled); }
 
 // ============================================================ Menus
@@ -376,10 +376,12 @@ function project(p, out) {
 
 export function updateHUD(dt, rdt) {
   const run = G.run;
+  // Everything timed by the mission (radio typing, on-screen tips, banners) advances in gameplay time so it
+  // freezes together with the simulation during a pause/hit-stop and continues from the same point after.
   updateRadio(dt);
-  if (tipT > 0) { tipT -= rdt; if (tipT <= 0) EL.tip.classList.remove('on'); }
-  if (bannerT > 0) { bannerT -= rdt; if (bannerT <= 0) EL.banner.classList.remove('on'); }
-  else if (tipWait && (tipWait.gap -= rdt) <= 0) { showTip(tipWait.html, tipWait.dur); tipWait = null; }
+  if (tipT > 0) { tipT -= dt; if (tipT <= 0) EL.tip.classList.remove('on'); }
+  if (bannerT > 0) { bannerT -= dt; if (bannerT <= 0) EL.banner.classList.remove('on'); }
+  else if (tipWait && (tipWait.gap -= dt) <= 0) { showTip(tipWait.html, tipWait.dur); tipWait = null; }
   if (!run || !EL.hud.classList.contains('on')) return;
   // gauges
   const sh = Math.round(run.shield * 10) / 10;
@@ -476,7 +478,7 @@ function drawCanvas(dt, rdt) {
   ctx.textAlign = 'center';
   for (let i = floats.length - 1; i >= 0; i--) {
     const f = floats[i];
-    f.t += rdt;
+    f.t += dt;
     if (f.t > 1.1) { floats.splice(i, 1); continue; }
     project(f.pos, pA);
     if (pA.z > 1) continue;

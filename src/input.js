@@ -56,7 +56,17 @@ export const Input = {
     if (down) { if (!held.has(code)) justDown.add(code); held.add(code); anyPress = true; this.device = 'touch'; }
     else { if (held.has(code)) justUp.add(code); held.delete(code); }
   },
-  clearAll() { held.clear(); justDown.clear(); justUp.clear(); touchX = touchY = 0; },
+  // Drop every physical and derived state. Called on pause and before a restart so a key that was held
+  // when the timeline froze cannot read as held/pressed on the first frame after it resumes (and cannot
+  // navigate the pause menu through mUp/mDown while frozen).
+  clearAll() {
+    held.clear(); justDown.clear(); justUp.clear(); touchX = touchY = 0;
+    for (const a of Object.keys(actionHeld)) {
+      actionHeld[a] = false; actionPressed[a] = false; actionReleased[a] = false;
+      actionPrevHeld[a] = false; actionDouble[a] = false;
+    }
+    Input.x = 0; Input.y = 0;
+  },
 };
 
 function isTypingTarget(t) {

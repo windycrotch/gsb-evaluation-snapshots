@@ -526,7 +526,7 @@ export class Gashadokuro {
     emit('bossDying');
   }
   dying(dt) {
-    this.deathT -= G.rdt;
+    this.deathT -= dt;
     if (this.deathT <= 0 && this.deathIdx <= this.deathList.length) {
       this.deathT = 0.14;
       const M = this.root.matrixWorld;
@@ -550,7 +550,7 @@ export class Gashadokuro {
       this.deathIdx++;
     }
     if (this.deathIdx > this.deathList.length) {
-      this.deadT += G.rdt;
+      this.deadT += dt;
       for (const p of this.pieces) if (p.mode === 'free' && this.deadT > 0.6) p.mesh.visible = Math.random() < 1 - this.deadT * 0.3;
       if (this.deadT > 2.2 && !this.reported) { this.reported = true; for (const p of this.pieces) p.mesh.visible = false; emit('bossDefeated'); }
     }

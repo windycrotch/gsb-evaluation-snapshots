@@ -193,3 +193,4 @@ export function updateTimers() {
   }
 }
 export function clearTimers() { timers.length = 0; }
+export function timerCount() { return timers.length; }

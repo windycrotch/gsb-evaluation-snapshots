@@ -2,7 +2,7 @@
 import * as THREE from 'three';
 import {
   G, loadSettings, saveSettings, newRun, updateTimers, clearTimers, on, emit, clamp, lerp, damp,
-  easeInOutCubic, easeOutCubic, rand, after, mulberry32,
+  easeInOutCubic, easeOutCubic, rand, after, mulberry32, timerCount,
 } from './core.js';
 import { initInput, updateInput, endInputFrame, Input } from './input.js';
 import { initRenderer, createSky, createLights, makeTextures, renderFrame, updatePost, updateLights, POST, applyQuality, ATMO, GFX } from './gfx.js';
@@ -35,6 +35,12 @@ const _v = new THREE.Vector3(), _v2 = new THREE.Vector3(), _p = new THREE.Vector
 let ship = null;
 const S = { t: 0, phase: '', fadeTo: null };   // per-state scratch
 let CUR = null;                                // the stage definition being played (the title flies over the first one)
+
+// Pause ownership. A manual pause (Esc / pause button / touch) and an automatic one (window blur / hidden tab)
+// share the same frozen timeline, but neither may overwrite or unpause the other. Only `resume` from the
+// matching or a more privileged path clears it.
+const PAUSE_REASON = { NONE: 0, MANUAL: 1, AUTO: 2 };
+let pauseReason = PAUSE_REASON.NONE;
 
 // Load a stage: its world (course, terrain, palettes), its script and its boss.
 function useStage(def) {
@@ -100,10 +106,24 @@ async function boot() {
     G, BOSS, WING, ship, emit, Input, POST, GFX, THREE,
     __jump: (d) => { G.run = G.run || newRun(); hideScreens(); setupStage(d, false); },
     __start: () => startMission(),
-    CAMP, progress,
+    CAMP, progress, MENU_CB,
+    // Pause/focus surface for the regression tests: the reason codes, the same entry points the listeners and
+    // menus use, plus read-only probes for the state the tests assert on.
+    __PAUSE_REASON: PAUSE_REASON,
+    __pauseReason: () => pauseReason,
+    __manualPause: () => pause(PAUSE_REASON.MANUAL),
+    __manualResume: () => resume(PAUSE_REASON.MANUAL),
+    __autoPause: () => autoPause(true),
+    __canAutoPause: () => canAutoPause(),
+    __startIntro: (d = 0) => { G.run = G.run || newRun(); hideScreens(); setupStage(d, true); },
+    __timerCount: timerCount,
+    __warnLoop: () => !!G.warnLoop,
+    __bossActive: () => !!BOSS.inst?.active,
+    __pauseScreenOn: () => document.getElementById('pause').classList.contains('on'),
+    __fxCount: () => ({ add: FX.add.n, smoke: FX.smoke.n, debris: FX.debris.items.length }),
+    __key: (code, down) => window.dispatchEvent(new KeyboardEvent(down ? 'keydown' : 'keyup', { code })),
     __step: (n = 1, dt = 1 / 60) => { for (let i = 0; i < n; i++) frame(dt); return { state: G.state, d: Math.round(G.rail.d), hits: G.run.hits, shield: G.run.shield }; },
     enemies, WSTATE, ebullets, explode,
-    __key: (code, down) => window.dispatchEvent(new KeyboardEvent(down ? 'keydown' : 'keyup', { code })),
     // Regression helpers: a seeded Math.random makes a __bot run repeatable, __snap/__fp summarise game state and the world.
     __seed: (s) => { const r0 = mulberry32(s); window.__rc = 0; Math.random = () => { window.__rc++; return r0(); }; },
     __snap: () => {
@@ -166,7 +186,8 @@ async function boot() {
   });
 }
 
-// Pause automatically when the page loses focus mid-mission.
+// Pause automatically when the page loses focus mid-mission, but only while the player is actually flying:
+// not on the title/briefing/results screens, not during the opening intro cutscene or a mission transition.
 // (Dev builds: `window.__manual = true` hands every frame to __step/__bot, for repeatable test runs.
 //  `?manual&seed=N` in the URL turns that on from the first frame and seeds Math.random before boot.)
 const manual = () => __DEV__ && window.__manual;
@@ -175,8 +196,21 @@ if (__DEV__) {
   if (q.has('manual')) window.__manual = true;
   if (q.has('seed')) { const r0 = mulberry32(+q.get('seed') || 1); window.__rc = 0; Math.random = () => { window.__rc++; return r0(); }; }
 }
-window.addEventListener('blur', () => { if (G.state === 'play' && !S.intro && !manual()) pause(); });
-document.addEventListener('visibilitychange', () => { if (document.hidden && G.state === 'play' && !S.intro && !manual()) pause(); });
+// True only while the player owns a flying, non-cinematic mission (the intro cutscene and mission
+// transitions are cinematics, not playable states).
+const inPlayable = () => (G.state === 'play' || G.state === 'dead') && !S.intro && !S.transition && !S.respawning;
+const canAutoPause = () => !manual() && inPlayable();
+// Returns true when it actually froze the timeline.
+function autoPause(force = false) {
+  // Never stack a second pause on top of one that is already in effect (manual or a previous auto pause).
+  if (pauseReason !== PAUSE_REASON.NONE || G.paused) return false;
+  if (manual() && !force) return false;
+  if (!inPlayable()) return false;
+  pause(PAUSE_REASON.AUTO);
+  return true;
+}
+window.addEventListener('blur', () => autoPause());
+document.addEventListener('visibilitychange', () => { if (document.hidden) autoPause(); });
 
 // Unlock audio on any genuine user gesture. (Test runs stay silent: sound effects are throttled in real time.)
 for (const ev of ['keydown', 'pointerdown', 'touchstart', 'mousedown']) window.addEventListener(ev, () => { if (!manual()) AudioSys.init(); }, { passive: true });
@@ -276,27 +310,48 @@ function wireEvents() {
   };
   MENU_CB.select = () => openSelectScreen();
   MENU_CB.chars = () => openChars((id) => { S.focus = id; }, () => { S.focus = null; closeScreens(); showTitleMenu('main', 'chars'); });
-  MENU_CB.resume = () => resume();
-  MENU_CB.retry = () => { resume(); hideScreens(); respawn(true); };
-  MENU_CB.quit = () => { resume(); hideScreens(); enterTitle(false); };
+  MENU_CB.resume = () => resume(PAUSE_REASON.MANUAL);
+  // Retry restarts from the checkpoint: the shared teardown in setupStage() reclaims the previous attempt,
+  // so there is no need to resume() first (and resuming would briefly un-freeze the dying attempt).
+  MENU_CB.retry = () => { hideScreens(); respawn(true); };
+  MENU_CB.quit = () => { hideScreens(); enterTitle(false); };
   MENU_CB.continue = () => { G.run.score = 0; G.run.lives = 3; G.run.continues++; G.run.hits = 0; hideScreens(); respawn(true); };
   MENU_CB.again = () => startMission();
   MENU_CB.next = () => afterResults();
   MENU_CB.toSelect = () => { hideScreens(); enterTitle(false); openSelectScreen(); };
-  MENU_CB.pause = () => pause();
+  MENU_CB.pause = () => pause(PAUSE_REASON.MANUAL);
   MENU_CB.quality = (q) => applyQuality(q);
 }
 
 // ============================================================ States
+// Tear down every piece of per-attempt state: actors, projectiles, effects, scheduled callbacks, the boss,
+// the warning-siren loop, HUD decorations and any pause owner. Shared by mission start, checkpoint retry,
+// death respawn, game-over continue and quit-to-title — so no attempt can inherit the previous one's state.
+function resetPlayState() {
+  G.paused = false;
+  pauseReason = PAUSE_REASON.NONE;
+  AudioSys.setPaused(false);   // a retry/quit may start from the pause menu, where the mixer was ducked
+  G.slowMo = 1;
+  G.hitStop = 0;
+  G.shake = 0;
+  lowShieldT = 0;
+  clearTimers();
+  clearEnemies(); clearWeapons(); clearFX(); clearRadio(); clearMarkers(); clearFlybys();
+  resetCharge();
+  if (BOSS.inst.active) BOSS.inst.stop();
+  bossBar(false); warning(false); hideBanner(); clearTip();
+  if (G.warnLoop) { G.warnLoop.stop(0.2); G.warnLoop = null; }
+  S.intro = null;
+  S.bossCine = null;
+  S.deadT = 0;
+  S.deadHandled = false;
+  S.respawning = false;
+  Input.clearAll();
+}
+
 function enterTitle(first) {
   G.state = 'title';
-  G.paused = false;
-  G.slowMo = 1;
-  clearTimers();
-  clearEnemies(); clearWeapons(); clearFX(); clearRadio(); clearMarkers();
-  if (BOSS.inst.active) BOSS.inst.stop();
-  bossBar(false); warning(false); hideBanner();
-  if (G.warnLoop) { G.warnLoop.stop(0.2); G.warnLoop = null; }
+  resetPlayState();
   hudVisible(false);
   G.run = newRun(G.settings.difficulty);
   if (CUR !== STAGES[0]) useStage(STAGES[0]);
@@ -317,7 +372,6 @@ function enterTitle(first) {
   S.t = 0;
   S.focus = null;
   closeScreens();
-  clearFlybys();
   refreshTitleInfo();
   showScreen('title');
   titleReset();
@@ -432,15 +486,9 @@ function warmStage() {
 
 // Prepare the world for play starting at distance d
 function setupStage(d, intro) {
-  hideScreens(); closeScreens(); clearFlybys();
+  hideScreens(); closeScreens();
   G.state = 'play';
-  G.paused = false;
-  G.slowMo = 1;
-  clearTimers();
-  clearEnemies(); clearWeapons(); clearFX(); clearRadio(); clearMarkers();
-  if (BOSS.inst.active) BOSS.inst.stop();
-  bossBar(false); warning(false); hideBanner(); clearTip();
-  if (G.warnLoop) { G.warnLoop.stop(0.2); G.warnLoop = null; }
+  resetPlayState();            // freezes and reclaims the previous attempt before the new one is built
   G.rail.d = d;
   G.rail.speed = 100;
   resetTerrain();
@@ -471,6 +519,15 @@ function setupStage(d, intro) {
 }
 
 function respawn(fromMenu) {
+  // Freeze the attempt immediately, then fade. The shared teardown in setupStage() does the actual clearing,
+  // but freezing first means the dying attempt's enemies, bullets, timers and boss stop advancing under the
+  // fade-out instead of continuing to run (and to drain lives) behind the black screen. The freeze applies in
+  // every state a respawn starts from (play / dead / gameover), so the rule is the same everywhere.
+  S.respawning = true;                 // ignore pause/resume input until setupStage() takes over
+  G.paused = true;
+  pauseReason = PAUSE_REASON.NONE;     // transient freeze, not an owned pause: no pause menu is shown
+  AudioSys.setPaused(true);
+  Input.clearAll();
   const cp = G.run.checkpoint;
   const d = cp === 0 ? 0 : Math.max(0, cp - 150);
   const run = G.run;
@@ -480,20 +537,29 @@ function respawn(fromMenu) {
   fadeTo(1, fromMenu ? 0.35 : 0.6, () => setupStage(d, false));
 }
 
-function pause() {
+// The single pause entry point. Nothing else touches G.paused: the reason guard is what keeps a manual
+// pause and an auto pause from stacking menus or un-pausing each other.
+function pause(reason = PAUSE_REASON.MANUAL) {
+  if (S.respawning) return;               // the retry/respawn fade is already freezing the attempt
   if (G.state !== 'play' && G.state !== 'dead') return;
   if (G.paused) return;
+  pauseReason = reason;
   G.paused = true;
   showScreen('pause');
   AudioSys.sfx('pause');
   AudioSys.setPaused(true);
+  Input.clearAll();        // a key held across the freeze must not come back, or drive the pause menu
 }
-function resume() {
+function resume(reason = pauseReason) {
   if (!G.paused) return;
+  if (S.respawning) return;                // the fade owns the state until setupStage() takes over
+  // An explicit/manual resume can clear any pause; an automatic one only clears its own.
+  if (reason === PAUSE_REASON.AUTO && pauseReason !== PAUSE_REASON.AUTO) return;
+  pauseReason = PAUSE_REASON.NONE;
   G.paused = false;
   hideScreens();
   AudioSys.setPaused(false);
-  Input.clearAll();
+  Input.clearAll();        // nothing pressed while frozen may read as held on the first resumed frame
 }
 
 function gameOver() {
@@ -717,9 +783,10 @@ function frame(rdt) {
   updateInput(rdt);
   beginFXFrame();
 
-  // time scaling (pause, hit-stop, slow motion)
+  // Time scaling (pause, hit-stop, slow motion). Every gameplay clock below is derived from dt, so dt === 0
+  // freezes the rail, level script, scheduled callbacks, boss, enemies and enemy bullets in one place.
   let ts = G.paused ? 0 : 1;
-  if (G.hitStop > 0) { G.hitStop -= rdt; ts *= 0.15; }
+  if (G.hitStop > 0 && ts > 0) { G.hitStop = Math.max(0, G.hitStop - rdt); ts *= 0.15; }
   ts *= G.slowMo;
   const dt = rdt * ts;
   G.dt = dt;
@@ -795,12 +862,15 @@ function attract(rdt) {
 
 function updatePlay(dt, rdt) {
   const run = G.run;
-  // pause toggle
+  // While the retry/death-respawn fade is running the attempt is frozen and input is inert: a stray Esc or
+  // confirm must not open the pause menu over the black screen.
+  if (S.respawning) { renderPausedHUD(rdt); return; }
+  // pause toggle. Esc/P toggles; while paused the same key (or BACK) leaves a sub-menu first, then resumes.
   if (Input.pressed('pause')) {
-    if (G.paused) { if (!menuBack()) resume(); }
-    else pause();
+    if (G.paused) { if (!menuBack()) resume(PAUSE_REASON.MANUAL); }
+    else pause(PAUSE_REASON.MANUAL);
   } else if (G.paused) {
-    if (Input.pressed('back') && !Input.pressed('pause')) { if (!menuBack()) resume(); }
+    if (Input.pressed('back') && !Input.pressed('pause')) { if (!menuBack()) resume(PAUSE_REASON.MANUAL); }
     else updateMenus();
   }
   if (G.paused) { renderPausedHUD(rdt); return; }
@@ -825,9 +895,9 @@ function updatePlay(dt, rdt) {
   }
   // boss HP
   if (BOSS.inst.active) setBossHP(BOSS.inst.hp / BOSS.inst.maxHp);
-  // death flow
+  // death flow (scaled time, so a pause during the death throes freezes it too)
   if (G.state === 'dead') {
-    S.deadT += rdt;
+    S.deadT += dt;
     if (S.deadT > 2.0 && !S.deadHandled) {
       S.deadHandled = true;
       run.deaths++;
@@ -838,7 +908,8 @@ function updatePlay(dt, rdt) {
 }
 
 function renderPausedHUD(rdt) {
-  // keep the HUD alive (radio typing freezes, flare, etc.) — nothing to simulate
+  // Keep the rendered frame alive while frozen (camera sway, flare, etc.) but simulate nothing: every
+  // gameplay clock — rail, script, timers, boss, enemies, bullets — is driven by dt, which is zero.
   updateCamera(0, ship);
 }
 

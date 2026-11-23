@@ -608,14 +608,15 @@ export function updateCamera(dt, ship) {
     cam.rotateZ(CAM.roll);
     CAM.fov = damp(CAM.fov, 62 + ship.boostAmt * 14 - ship.brakeAmt * 7, 4, dt);
   }
-  // shake
+  // shake: the offset still applies while frozen (no visual pop on pause) but it only decays in scaled time,
+  // so it cannot burn itself out behind a pause menu.
   if (G.shake > 0.001) {
     const s = G.shake * G.shake;
     const t = G.clock * 38;
     cam.position.x += (Math.sin(t * 1.13) + Math.sin(t * 2.71) * 0.5) * s * 1.4;
     cam.position.y += (Math.sin(t * 1.37 + 1.2) + Math.sin(t * 3.1) * 0.5) * s * 1.1;
     cam.rotateZ((Math.sin(t * 0.93) * 0.04) * s);
-    G.shake = Math.max(0, G.shake - G.rdt * 1.6);
+    if (dt > 0) G.shake = Math.max(0, G.shake - dt * 1.6);
   }
   // Portrait screens: widen the vertical FOV so the horizontal view stays usable (~45° minimum).
   const minV = 2 * Math.atan(Math.tan(22.5 * Math.PI / 180) / cam.aspect) * 180 / Math.PI;

@@ -359,7 +359,7 @@ export class Boss {
       }
       case 'dying': {
         tv = this.hv - dt * 8; ts = this.hs + dt * 10; tu = this.hu; this.jawTarget = 1; faceK = 0.5;
-        this.deathT -= G.rdt;
+        this.deathT -= dt;
         if (this.deathT <= 0 && this.deathIdx >= -1) {
           this.deathT = 0.13;
           if (this.deathIdx >= 0) {
@@ -380,7 +380,7 @@ export class Boss {
           }
           this.deathIdx--;
         }
-        if (this.deathIdx < -1) { this.deadT = (this.deadT || 0) + G.rdt; if (this.deadT > 2.2 && !this.reported) { this.reported = true; emit('bossDefeated'); } }
+        if (this.deathIdx < -1) { this.deadT = (this.deadT || 0) + dt; if (this.deadT > 2.2 && !this.reported) { this.reported = true; emit('bossDefeated'); } }
         break;
       }
     }
